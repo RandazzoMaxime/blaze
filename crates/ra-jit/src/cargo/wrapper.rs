@@ -293,6 +293,8 @@ impl Unit {
             std::process::exit(super::FAILED);
         }
         let binary = &checkout.programs[at].binary;
+        // Cargo starts the program with no word to the daemon, which may still be writing it.
+        let _unwritten = crate::splice::unwritten(binary);
         let record = self.as_record(0, Vec::new(), None);
         let linked = record.outputs().into_iter().next().ok_or("rustc names no executable")?;
         place(binary, &linked).map_err(|it| format!("installing {}: {it}", linked.display()))?;
