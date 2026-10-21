@@ -51,7 +51,7 @@ All of these are rustc's, written from `compiler/rustc_borrowck` at the pinned n
   signature's universal regions and implied bounds (normalized parameters and the impl
   header included, for associated consts too), where clauses (elaborated through
   supertraits), type tests, and lifetimes written in `let` annotations (`let _: T = value`
-  of any value included), casts, turbofishes and struct literal paths. A function item, closure or safe function pointer cast to a
+  of any value included), casts, turbofishes and struct literal and variant paths. A function item, closure or safe function pointer cast to a
   function pointer is a subtype of it by signature. A where clause `for<'a> T: 'a` is
   `T: 'static`, and a type parameter that fails it is rustc's codeless "does not live long
   enough".
@@ -81,6 +81,10 @@ All of these are rustc's, written from `compiler/rustc_borrowck` at the pinned n
   so the error is the creator's, as in rustc. So is a `T: 'a` the closure cannot prove: the
   creator proves `T` outlives each of its regions that outlive `'a`, and an error is
   reported where the closure needed it.
+- Where errors are: at the expression rustc points to. A borrow `format_args!` (so
+  `println!`, `format!`, `write!`) makes of an argument has no syntax of its own, so its
+  errors are at the argument, or for a variable the template names (`"{x}"`) at the
+  template.
 
 ## How it is tested
 
@@ -101,8 +105,8 @@ With no borrow checker, the 245 units rustc accepts would pass. Now:
 
 | Mode | In scope | Pass | rustc accepts, ra-jit too | rustc rejects, same errors |
 |---|---|---|---|---|
-| Polonius | 1579 | 1131 (71.6%) | 245 of 245 | 886 of 1334 |
-| NLL | 1577 | 1123 (71.2%) | 226 of 226 | 897 of 1351 |
+| Polonius | 1579 | 1157 (73.3%) | 245 of 245 | 912 of 1334 |
+| NLL | 1577 | 1150 (72.9%) | 226 of 226 | 924 of 1351 |
 
 463 units are out of scope; 344 of them need a nightly feature. CI runs the scoring on Linux
 and fails below a floor a few units under the count there.
@@ -115,8 +119,8 @@ just, axum, nushell, delta, eza, tokei and starship it finds nothing, nor on the
 ## What is left
 
 Every failing unit is one where rustc gives an error ra-jit does not, or gives it on another
-line or with another code. By what is wrong, most first: 68 "lifetime may not live long
-enough" not reported, 38 E0597 not reported, 19 E0310, 18 E0381, 17 E0309, 8 E0700, then a
+line or with another code. By what is wrong, most first: 65 "lifetime may not live long
+enough" not reported, 35 E0597 not reported, 19 E0310, 17 E0309, 12 E0381, 8 E0700, then a
 long tail. The causes, grouped:
 
 - **Higher-ranked regions and placeholders** (`for<'a>` bounds, closures with higher-ranked
