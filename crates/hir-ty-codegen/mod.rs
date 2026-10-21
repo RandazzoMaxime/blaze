@@ -1459,6 +1459,11 @@ const LARGE: usize = 50_000;
 /// which a function this large, a `main` or a big `match` run once, rarely pays for.
 const SINGLE_PASS: usize = 20_000;
 
+/// The most cases of a `match` lowered as a chain of comparisons for LLVM to make a `switch`
+/// of; a larger one, which a function Cranelift compiles after all would test one case at a
+/// time, keeps `Switch`'s tree.
+const CHAINED: usize = 256;
+
 /// A relocation of a function that Cranelift has no kind for, which the object is given
 /// once Cranelift has written it: see [`Code::elf_types`].
 struct ElfReloc {
@@ -9978,10 +9983,6 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
                 };
                 let scalar = self.scalar_of(ty)?;
                 let otherwise = self.blocks[targets.otherwise()];
-                let mut switch = Switch::new();
-                for (case, target) in targets.iter() {
-                    switch.set_entry(case, self.blocks[target]);
-                }
                 // A discriminant is an `i128` to MIR and a small number: with the high half
                 // told to be zero first, the rest is a switch on a register.
                 let small = targets.iter().all(|(case, _)| case <= i64::MAX as u128);
@@ -10021,7 +10022,26 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
                 } else {
                     self.builder.ins().load(scalar.ty, MEM, addr, 0)
                 };
-                switch.emit(&mut self.builder, value, otherwise);
+                let ty = self.builder.func.dfg.value_type(value);
+                if backend::optimizing() && ty != types::I128 && targets.iter().count() <= CHAINED {
+                    // LLVM folds a chain of comparisons of one value into a `switch`, whose
+                    // jump tables, bit tests and lookup tables it picks itself; the tree of
+                    // ranges `Switch` builds it keeps as it is.
+                    for (case, target) in targets.iter() {
+                        let case = self.builder.ins().iconst(ty, case as i64);
+                        let hit = self.builder.ins().icmp(IntCC::Equal, value, case);
+                        let next = self.builder.create_block();
+                        self.builder.ins().brif(hit, self.blocks[target], &[], next, &[]);
+                        self.builder.switch_to_block(next);
+                    }
+                    self.builder.ins().jump(otherwise, &[]);
+                } else {
+                    let mut switch = Switch::new();
+                    for (case, target) in targets.iter() {
+                        switch.set_entry(case, self.blocks[target]);
+                    }
+                    switch.emit(&mut self.builder, value, otherwise);
+                }
             }
             TerminatorKind::Return => {
                 if let Some(state) = &self.suspended {
