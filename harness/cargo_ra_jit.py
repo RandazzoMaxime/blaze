@@ -786,8 +786,9 @@ def manners(work, ws, env, here, check, edit):
         wait_warm(here, ws)
         open(file, "a").write(USE_AFTER_MOVE)
         _, wrong = here.cargo("run")
-        # ra-jit has no borrow checker and runs no rustc: the daemon builds it.
-        check(f"a use after a move in {name} is the daemon's to build on a warm `cargo ra-jit run`", how_built(wrong.stderr) == "daemon", f"exit {wrong.returncode}, {how_built(wrong.stderr)}")
+        # The daemon refuses an edit its borrow checker finds wrong, as one with a type error,
+        # and cargo's rustc says what is.
+        check(f"a use after a move in {name} is refused by the daemon and is rustc's error on a warm `cargo ra-jit run`", wrong.returncode == 101 and how_built(wrong.stderr) != "daemon" and "E0382" in wrong.stderr, f"exit {wrong.returncode}, {how_built(wrong.stderr)}")
         _, checked = here.cargo("check")
         check(f"and `cargo ra-jit check` of it", checked.returncode == 101 and "E0382" in checked.stderr, f"exit {checked.returncode}")
         open(file, "w").write(kept)
