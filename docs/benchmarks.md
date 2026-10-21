@@ -84,9 +84,12 @@ builds it in a few minutes on the same machine. Its build needs `nix develop .#b
 ## Tiers
 
 Each project is measured with each code producer ra-jit has: Cranelift (the default, in the
-README) and LLVM (`RA_JIT_BACKEND=llvm RA_JIT_OPT=2 RA_JIT_EMIT=fast`). The binary is built once
-with `--features llvm` and the backend is chosen by environment, so a new tier is one more entry
-in `BACKENDS` in `harness/bench.py`; the report makes a table for every backend in the result.
+README) and LLVM (`RA_JIT_BACKEND=llvm RA_JIT_OPT=2 RA_JIT_EMIT=fast`). Cranelift is measured
+with ra-jit as it is installed and released, without the `llvm` feature (`RA_JIT_BIN`), and LLVM
+with a build that has it (`RA_JIT_LLVM_BIN`): a binary that links libLLVM loads it each time it
+starts, about 6 ms on the benchmark machine, and every `cargo ra-jit` starts it once. A new tier
+is one more entry in `BACKENDS` in `harness/bench.py`; the report makes a table for every
+backend in the result.
 
 ## The fastest setups
 
@@ -158,7 +161,10 @@ The CI machine is a dedicated AWS instance used for nothing else, registered as 
 GitHub Actions runner with the labels `self-hosted, linux, x64, bench-x86`. It runs as user
 `andrew` from `~/actions-runner` under a user systemd unit (`ra-jit-bench-runner.service`,
 lingering, so it starts at boot); `harness/benchrunner.sh` sets all of that up, and its `.env`
-names the machine for the results. The instance meant for it is `dev-aws-bench-x86`
+names the machine for the results. Once it is registered, set the repository variable that turns
+the workflow's job on (`gh variable set BENCH_RUNNER -R indexable-inc/ra-jit -b true`); until
+then every run of the workflow is skipped rather than left waiting for a runner that is not
+there. The instance meant for it is `dev-aws-bench-x86`
 (i-01666717f0de39201, us-west-2a, on demand, ttl a year, tagged `ix-dev-purpose=ra-jit-bench`):
 16 AMD EPYC 9R45 (Zen 5) cores, one thread per core, NixOS. It was launched as a c8a.4xlarge
 (32 GiB), but nushell's daemon alone holds 15 GB, so it should be resized to m8a.4xlarge (the
@@ -221,7 +227,8 @@ On Linux x86-64 with Nix (or with Rust 1.99.0, rust-src, LLVM 20 and Python 3 in
 
 ```
 nix develop .#bench
-cargo build -p ra-jit --release --features llvm
+cargo build -p ra-jit --release
+CARGO_TARGET_DIR=target-llvm cargo build -p ra-jit --release --features llvm
 python3 harness/bench.py ripgrep fd --runs 5 --out /tmp/bench.json   # any of the projects
 python3 harness/benchreport.py /tmp/bench.json --check               # what would change
 ```

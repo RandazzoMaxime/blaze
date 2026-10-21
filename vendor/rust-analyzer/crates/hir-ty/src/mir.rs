@@ -31,6 +31,9 @@ use crate::{
     },
 };
 
+// The borrow checker, in the repository this one is a submodule of.
+#[path = "../../../../../crates/hir-ty-borrowck/mod.rs"]
+pub mod borrowck;
 // rustd's code generator, in the repository this one is a submodule of.
 #[path = "../../../../../crates/hir-ty-codegen/mod.rs"]
 pub mod codegen;
@@ -38,14 +41,16 @@ mod eval;
 mod held;
 mod lower;
 mod monomorphization;
+mod optimize;
+mod pretty;
 mod transform;
 mod type_name;
 
-pub use held::{HeldLocals, YieldPoint};
 pub use eval::{
     Evaluator, IsSigned, MirEvalError, VTableMap, interpret_mir, pad16,
     render_const_using_debug_impl,
 };
+pub use held::{HeldLocals, YieldPoint};
 pub use lower::{
     MirLowerError, is_by_move_coroutine, lower_body_to_mir, lower_to_mir_with_store,
     mir_body_for_closure_query, mir_body_for_coroutine_by_move_query, mir_body_for_coroutine_query,
@@ -56,6 +61,12 @@ pub use monomorphization::{
     monomorphized_mir_body_for_coroutine_query, monomorphized_mir_body_query,
     monomorphized_promoted_mir_body_query,
 };
+pub use optimize::{
+    MirOptLevel, monomorphized_optimized_mir_body_for_closure_query,
+    monomorphized_optimized_mir_body_query, optimized_mir_body_for_closure_query,
+    optimized_mir_body_query, passes_not_ported, set_interpreter_mir_opt_level,
+};
+pub use pretty::{closure_path_suffix, impl_written_at, print_mir_body};
 pub use transform::{
     monomorphized_runtime_mir_body_for_closure_query,
     monomorphized_runtime_mir_body_for_coroutine_by_move_query,
@@ -1216,9 +1227,7 @@ impl Rvalue {
             | Rvalue::Len(_)
             | Rvalue::Discriminant(_)
             | Rvalue::CopyForDeref(_) => (),
-            Rvalue::ThreadLocalRef(n) | Rvalue::AddressOf(n) | Rvalue::NullaryOp(n) => {
-                match *n {}
-            }
+            Rvalue::ThreadLocalRef(n) | Rvalue::AddressOf(n) | Rvalue::NullaryOp(n) => match *n {},
         }
     }
 
@@ -1235,9 +1244,7 @@ impl Rvalue {
             | Rvalue::Len(_)
             | Rvalue::Discriminant(_)
             | Rvalue::CopyForDeref(_) => (),
-            Rvalue::ThreadLocalRef(n) | Rvalue::AddressOf(n) | Rvalue::NullaryOp(n) => {
-                match *n {}
-            }
+            Rvalue::ThreadLocalRef(n) | Rvalue::AddressOf(n) | Rvalue::NullaryOp(n) => match *n {},
         }
     }
 }

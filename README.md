@@ -14,7 +14,7 @@ nix run github:indexable-inc/ra-jit
 
 That opens a Game of Life window you can edit while it runs (live on macOS Apple silicon).
 
-![Editing the running Game of Life: rule, colours and speed change live](docs/demo.webp)
+![Editing the running Game of Life: rule, colours and speed change live](docs/demo.avif)
 
 <p align="center">
   <a href="https://ra-jit.ix.dev/updates?src=readme">
@@ -64,6 +64,10 @@ Edit, then build, on real projects at pinned commits. Each cell is incremental `
 Measured by hand with `harness/bench.py`; the `bench-readme` workflow re-runs it on the dedicated benchmark machine. Cold builds, the spread of every number, the LLVM tier and how fast the built programs run: [docs/benchmarks.md](docs/benchmarks.md) ([raw JSON](docs/benchmarks/linux-x86_64.json)).
 <!-- bench:end -->
 
+<!-- runbench:start -->
+How fast the programs run, ra-jit's LLVM build against `cargo build --release`: not published yet. On macOS arm64, where it was last tried (2026-10-20), a program whose every crate ra-jit compiles does nothing when run, so its output differs from cargo's and `benchreport.py` refuses the run. The `bench-readme` workflow fills this table from `bench.py --runtime` on the Linux x86-64 benchmark machine once every program says what cargo's says.
+<!-- runbench:end -->
+
 Not measured yet: workspaces of a million lines or more, and test suites
 ([#benchmarks](https://github.com/indexable-inc/ra-jit/issues?q=label%3Abenchmarks)).
 
@@ -106,10 +110,15 @@ loop {
 }
 ```
 
+### Cached functions
+
+`#[ra_jit::cache]` on a pure function keeps its results across runs, until an edit changes
+the code it reaches ([docs/fn-cache.md](docs/fn-cache.md)).
+
 ## What to know
 
 - Live edits work on macOS Apple silicon only. Elsewhere you still get fast builds.
-- No borrow checker: keep running `cargo check`.
+- The borrow checker is partial and does not stop a build yet: keep running `cargo check`.
 - Rust 1.99.0 only.
 - Changing a struct the program is using asks for a restart.
 

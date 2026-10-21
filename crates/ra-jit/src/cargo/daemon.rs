@@ -402,10 +402,8 @@ impl Worker {
     }
 
     /// Waits for the process to listen, then has it build every program of `checkout` once.
-    /// `started_on` is whether the worker was started on the checkout's first program, which
-    /// is then built already.
-    fn warm(&self, checkout: &Checkout, started_on: bool) {
-        let warmth = match self.warmed(checkout, started_on) {
+    fn warm(&self, checkout: &Checkout) {
+        let warmth = match self.warmed(checkout) {
             Ok(()) => Warmth::Ready,
             Err(why) => Warmth::Failed(format!("{why:#}"), SystemTime::now()),
         };
@@ -420,11 +418,13 @@ impl Worker {
         lock(&self.checkouts).values().any(|it| matches!(it.warmth, Warmth::Loading(_)))
     }
 
-    fn warmed(&self, checkout: &Checkout, started_on: bool) -> anyhow::Result<()> {
+    fn warmed(&self, checkout: &Checkout) -> anyhow::Result<()> {
         self.connected()?;
         // A source written since cargo built is the daemon's like any edit: it compiles
-        // every function and static of the workspace from what it reads.
-        for plan in checkout.programs.iter().skip(usize::from(started_on)) {
+        // every function and static of the workspace from what it reads. The program the
+        // worker was started on is built already, and is asked for too: what the worker then
+        // compiles again by itself, for the first edit to be a patch, is part of warming up.
+        for plan in &checkout.programs {
             self.ask(checkout, plan)?.map_err(anyhow::Error::msg)?;
         }
         Ok(())
@@ -494,7 +494,8 @@ impl Worker {
                         let start = Instant::now();
                         let asked = self.ask(checkout, plan);
                         let level = Some(crate::trace::ASKED);
-                        let span = crate::trace::span("daemon↔worker", level, start, Instant::now());
+                        let span =
+                            crate::trace::span("daemon↔worker", level, start, Instant::now());
                         lock(&spans).push(span);
                         asked
                     })
@@ -504,7 +505,9 @@ impl Worker {
             asking.into_iter().map(|it| it.join().unwrap_or_else(|_| panicked())).collect()
         });
         match asked.into_iter().collect::<anyhow::Result<Vec<_>>>() {
-            Ok(programs) => Reply::Synced { programs, spans: spans.into_inner().unwrap_or_default() },
+            Ok(programs) => {
+                Reply::Synced { programs, spans: spans.into_inner().unwrap_or_default() }
+            }
             // The worker is gone or stuck, which says nothing of the checkout: the next
             // build that has nothing to compile has it loaded again.
             Err(why) => {
@@ -919,7 +922,7 @@ impl Daemon {
                     };
                     checkouts.insert(checkout.key.clone(), loading);
                     let worker = worker.clone();
-                    std::thread::spawn(move || worker.warm(&checkout, false));
+                    std::thread::spawn(move || worker.warm(&checkout));
                     return Ok(());
                 }
             }
@@ -937,7 +940,7 @@ impl Daemon {
             worker.project.display()
         );
         workers.insert(id, worker.clone());
-        std::thread::spawn(move || worker.warm(&checkout, true));
+        std::thread::spawn(move || worker.warm(&checkout));
         Ok(())
     }
 

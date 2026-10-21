@@ -1,6 +1,6 @@
 //! This module generates a polymorphic MIR from a hir body
 
-use std::{iter, mem};
+use std::{borrow::Cow, iter, mem};
 
 use arrayvec::ArrayVec;
 use base_db::Crate;
@@ -36,7 +36,7 @@ use crate::{
     db::{GeneralConstId, HirDatabase, InternedClosure, InternedClosureId, InternedCoroutineId},
     generics::generics,
     infer::{
-        CaptureSourceStack, CapturedPlace, UpvarCapture,
+        AllowTwoPhase, AutoBorrowMutability, CaptureSourceStack, CapturedPlace, UpvarCapture,
         cast::CastTy,
         closure::analysis::expr_use_visitor::{
             Place as HirPlace, PlaceBase as HirPlaceBase, ProjectionKind as HirProjectionKind,
@@ -81,6 +81,30 @@ struct DropScope {
     /// Whether this scope only holds the temporaries of a `let` initializer. The bindings the
     /// `let` declares outlive it.
     temporaries: bool,
+    /// While the tail of a block before the 2024 edition is lowered: how many locals the block
+    /// had declared before it. What the tail declares that is not an operand outlives the
+    /// block's locals (`outlive_block`), also when the tail panics or leaves early.
+    tail: Option<usize>,
+    /// The blocks where leaving early (`break`, `continue`, `return`, a future dropped at an
+    /// `await`) dropped this scope's locals. Those drops are written at the end of the scope
+    /// once it is popped, as rustc writes every drop it schedules.
+    exits: Vec<BasicBlockId>,
+}
+
+impl DropScope {
+    /// The locals in the order they were declared, which is the reverse of the order they are
+    /// dropped in. The temporaries of a tail before the 2024 edition come before the block's
+    /// locals, as `outlive_block` leaves them once the tail is lowered.
+    fn in_order(&self, operands: &FxHashSet<LocalId>) -> Cow<'_, [LocalId]> {
+        match self.tail {
+            Some(declared) if declared < self.locals.len() => {
+                let (operands, temporaries): (Vec<LocalId>, Vec<LocalId>) =
+                    self.locals[declared..].iter().partition(|it| operands.contains(it));
+                Cow::Owned([temporaries, self.locals[..declared].to_vec(), operands].concat())
+            }
+            _ => Cow::Borrowed(&self.locals),
+        }
+    }
 }
 
 struct MirLowerCtx<'a, 'db> {
@@ -344,10 +368,14 @@ impl<'a, 'db> MirLowerCtx<'a, 'db> {
         let Some((p, current)) = self.lower_expr_to_fresh_place(expr_id, current)? else {
             return Ok(None);
         };
-        Ok(Some((
-            Operand { kind: OperandKind::Copy(p.store()), span: Some(expr_id.into()) },
-            current,
-        )))
+        // rustc moves out of a temporary, as it reads it once. Only a `Copy` one here: what
+        // a temporary with drop glue moves out of is how drops are elaborated.
+        let kind = if self.is_copy(self.result.locals[p.local].ty.as_ref()) {
+            OperandKind::Move(p.store())
+        } else {
+            OperandKind::Copy(p.store())
+        };
+        Ok(Some((Operand { kind, span: Some(expr_id.into()) }, current)))
     }
 
     /// The value of an expression in a place nothing else can write to. A place expression is
@@ -405,15 +433,18 @@ impl<'a, 'db> MirLowerCtx<'a, 'db> {
                     );
                     Ok(Some(current))
                 }
-                Adjust::Borrow(AutoBorrow::Ref(m)) => self.lower_expr_to_place_with_borrow_adjust(
-                    expr_id,
-                    place,
-                    current,
-                    rest,
-                    (*m).into(),
-                ),
+                Adjust::Borrow(AutoBorrow::Ref(m)) => {
+                    let bk = match m {
+                        AutoBorrowMutability::Mut { allow_two_phase_borrow: AllowTwoPhase::Yes } => {
+                            BorrowKind::Mut { kind: super::MutBorrowKind::TwoPhasedBorrow }
+                        }
+                        _ => BorrowKind::from_rustc_mutability((*m).into()),
+                    };
+                    self.lower_expr_to_place_with_borrow_adjust(expr_id, place, current, rest, bk)
+                }
                 Adjust::Borrow(AutoBorrow::RawPtr(m)) => {
-                    self.lower_expr_to_place_with_borrow_adjust(expr_id, place, current, rest, *m)
+                    let bk = BorrowKind::from_rustc_mutability(*m);
+                    self.lower_expr_to_place_with_borrow_adjust(expr_id, place, current, rest, bk)
                 }
                 Adjust::Pointer(cast) => {
                     let Some((p, current)) =
@@ -444,7 +475,7 @@ impl<'a, 'db> MirLowerCtx<'a, 'db> {
         place: Place<'db>,
         current: BasicBlockId,
         rest: &[Adjustment],
-        m: Mutability,
+        bk: BorrowKind,
     ) -> Result<'db, Option<BasicBlockId>> {
         let locals = self.result.locals.len();
         let Some((p, current)) =
@@ -453,7 +484,7 @@ impl<'a, 'db> MirLowerCtx<'a, 'db> {
             return Ok(None);
         };
         // `CONST.len()` borrows a promoted constant just as `(&CONST).len()` does.
-        if m.is_not()
+        if bk == BorrowKind::Shared
             && rest.is_empty()
             && p.local.into_raw().into_u32() as usize >= locals
             && p.projection.as_slice().is_empty()
@@ -461,7 +492,6 @@ impl<'a, 'db> MirLowerCtx<'a, 'db> {
         {
             self.result.promoted_locals.push((p.local, expr_id));
         }
-        let bk = BorrowKind::from_rustc_mutability(m);
         self.push_assignment(current, place, Rvalue::Ref(bk, p.store()), expr_id.into());
         Ok(Some(current))
     }
@@ -782,6 +812,9 @@ impl<'a, 'db> MirLowerCtx<'a, 'db> {
                 let branches = match self.store[*condition] {
                     Expr::Let { pat, expr } => {
                         Some(self.lower_if_let(*condition, pat, expr, current)?)
+                    }
+                    Expr::BinaryOp { .. } if self.has_let(*condition) => {
+                        Some(self.lower_let_chain(*condition, current)?)
                     }
                     _ => None,
                 };
@@ -2166,6 +2199,60 @@ impl<'a, 'db> MirLowerCtx<'a, 'db> {
         Ok(Some((matched, unmatched.unwrap_or_else(|| self.new_basic_block()))))
     }
 
+    /// Lowers a condition that binds names, `a && let P = e && ..`, to the blocks where it
+    /// holds and where it does not, as rustc's `then_else_break`: each operand branches on its
+    /// own, so what a `let` binds is initialized where the condition holds.
+    fn lower_let_chain(
+        &mut self,
+        condition: ExprId,
+        current: BasicBlockId,
+    ) -> Result<'db, Option<(BasicBlockId, BasicBlockId)>> {
+        match self.store[condition] {
+            Expr::Let { pat, expr } => self.lower_if_let(condition, pat, expr, current),
+            Expr::BinaryOp {
+                lhs,
+                rhs,
+                op: Some(hir_def::hir::BinaryOp::LogicOp(syntax::ast::LogicOp::And)),
+            } => {
+                let Some((holds, fails)) = self.lower_let_chain(lhs, current)? else {
+                    return Ok(None);
+                };
+                let (holds, also_fails) = match self.lower_let_chain(rhs, holds)? {
+                    Some((holds, fails)) => (holds, Some(fails)),
+                    None => (self.new_basic_block(), None),
+                };
+                let Some(also_fails) = also_fails else { return Ok(Some((holds, fails))) };
+                let joined = self.new_basic_block();
+                self.set_goto(fails, joined, condition.into());
+                self.set_goto(also_fails, joined, condition.into());
+                Ok(Some((holds, joined)))
+            }
+            _ => {
+                // The operand's temporaries are dropped before the next one runs.
+                let ty = Ty::new_bool(self.interner());
+                let result: Place<'db> = self.temp(ty, current, MirSpan::Unknown)?.into();
+                let scope = self.push_drop_scope();
+                let Some(end) = self.lower_expr_to_place(condition, result, current)? else {
+                    scope.pop_assume_dropped(self);
+                    return Ok(None);
+                };
+                let end = scope.pop_and_drop(self, end, condition.into());
+                let discr =
+                    Operand { kind: OperandKind::Copy(result.store()), span: Some(condition.into()) };
+                let (holds, fails) = (self.new_basic_block(), self.new_basic_block());
+                self.set_terminator(
+                    end,
+                    TerminatorKind::SwitchInt {
+                        discr,
+                        targets: SwitchTargets::static_if(1, holds, fails),
+                    },
+                    condition.into(),
+                );
+                Ok(Some((holds, fails)))
+            }
+        }
+    }
+
     /// Hands what the innermost scope has declared to the scope around it. Before the 2024
     /// edition the temporaries of what an `if let` matches on live as long as those of the
     /// expression the `if` is in, and only what the pattern binds ends with the branch.
@@ -2512,17 +2599,21 @@ impl<'a, 'db> MirLowerCtx<'a, 'db> {
 
     /// The unwind drop tree's way out from where lowering is: every scope's drops.
     fn unwind_here(&mut self) -> Option<BasicBlockId> {
-        let in_scope: Vec<LocalId> =
-            self.drop_scopes.iter().flat_map(|it| it.locals.iter().copied()).collect();
+        let in_scope = self.in_scope();
         self.unwind_through(&in_scope, None)
+    }
+
+    /// What every scope has declared, outermost first, in the order it was declared.
+    fn in_scope(&self) -> Vec<LocalId> {
+        let operands = &self.operand_locals;
+        self.drop_scopes.iter().flat_map(|it| it.in_order(operands).into_owned()).collect()
     }
 
     /// The way out of a drop of `locals[at]` of a scope that drops `locals`: what is declared
     /// before it, then, in a coroutine, its own storage.
     fn unwind_from_drop(&mut self, locals: &[LocalId], at: usize) -> Option<BasicBlockId> {
         let local = locals[at];
-        let mut in_scope: Vec<LocalId> =
-            self.drop_scopes.iter().flat_map(|it| it.locals.iter().copied()).collect();
+        let mut in_scope = self.in_scope();
         match in_scope.iter().position(|&it| it == local) {
             Some(position) => in_scope.truncate(position),
             None => in_scope.extend_from_slice(&locals[..at]),
@@ -3041,6 +3132,11 @@ impl<'a, 'db> MirLowerCtx<'a, 'db> {
                 self.ends_temporaries.insert(tail);
             }
             let declared = self.drop_scopes.last().map_or(0, |it| it.locals.len());
+            if !edition.at_least_2024()
+                && let Some(scope) = self.drop_scopes.last_mut()
+            {
+                scope.tail = Some(declared);
+            }
             let Some(c) = self.lower_expr_to_place(tail, place, current)? else {
                 scope.pop_assume_dropped(self);
                 return Ok(None);
@@ -3060,6 +3156,7 @@ impl<'a, 'db> MirLowerCtx<'a, 'db> {
     /// are dropped before the locals of the block.
     fn outlive_block(&mut self, declared: usize) {
         let Some((scope, outer)) = self.drop_scopes.split_last_mut() else { return };
+        scope.tail = None;
         if declared > scope.locals.len() {
             return;
         }
@@ -3090,8 +3187,12 @@ impl<'a, 'db> MirLowerCtx<'a, 'db> {
         };
         let extended = block.locals.split_off(declared.min(block.locals.len()));
         let held = [
-            DropScope { locals: extended, temporaries: true },
-            DropScope { locals: std::mem::take(&mut temporaries.locals), temporaries: true },
+            DropScope { locals: extended, temporaries: true, ..Default::default() },
+            DropScope {
+                locals: std::mem::take(&mut temporaries.locals),
+                temporaries: true,
+                ..Default::default()
+            },
         ];
         for scope in held.iter().rev() {
             self.emit_drop_and_storage_dead_for_scope(scope, &mut else_block, span);
@@ -3373,7 +3474,7 @@ impl<'a, 'db> MirLowerCtx<'a, 'db> {
         self.set_terminator(
             current,
             TerminatorKind::SwitchInt {
-                discr: Operand { kind: OperandKind::Copy(discriminant.store()), span: None },
+                discr: Operand { kind: OperandKind::Move(discriminant.store()), span: None },
                 targets: SwitchTargets::static_if(0, ready, pending),
             },
             span,
@@ -3422,10 +3523,32 @@ impl<'a, 'db> MirLowerCtx<'a, 'db> {
         mut current: BasicBlockId,
         span: MirSpan,
     ) -> BasicBlockId {
-        for scope in self.drop_scopes[scope_index..].to_vec().iter().rev() {
-            self.emit_drop_and_storage_dead_for_scope(scope, &mut current, span);
+        for index in (scope_index..self.drop_scopes.len()).rev() {
+            let scope = self.drop_scopes[index].clone();
+            let written = self.emit_drop_and_storage_dead_for_scope(&scope, &mut current, span);
+            self.drop_scopes[index].exits.extend(written);
         }
         current
+    }
+
+    /// Writes the drops that left `scope` early at its `end`.
+    fn exits_end_at(&mut self, scope: &DropScope, end: MirSpan) {
+        for &block in &scope.exits {
+            let block = &mut self.result.basic_blocks[block];
+            for statement in &mut block.statements {
+                if let StatementKind::StorageDead(local) = statement.kind
+                    && scope.locals.contains(&local)
+                {
+                    statement.span = end;
+                }
+            }
+            if let Some(Terminator { span, kind: TerminatorKind::Drop { place, .. } }) =
+                &mut block.terminator
+                && scope.locals.contains(&place.local)
+            {
+                *span = end;
+            }
+        }
     }
 
     /// The way out of a match arm whose guard was false. What the guard bound is dropped, and
@@ -3441,7 +3564,7 @@ impl<'a, 'db> MirLowerCtx<'a, 'db> {
         if let Some(arm) = self.drop_scopes.last() {
             let by_guard = DropScope {
                 locals: arm.locals.get(bound_by_pattern..).unwrap_or_default().to_vec(),
-                temporaries: false,
+                ..Default::default()
             };
             self.emit_drop_and_storage_dead_for_scope(&by_guard, &mut current, span);
         }
@@ -3469,6 +3592,14 @@ impl<'a, 'db> MirLowerCtx<'a, 'db> {
             temporaries.pop_assume_dropped(self);
             return Ok(None);
         };
+        // The arm switches on the guard's value after its temporaries are gone, so the
+        // value outlives them.
+        if let OperandKind::Copy(place) | OperandKind::Move(place) = &discr.kind
+            && place.projection.as_slice().is_empty()
+        {
+            let local = place.local;
+            self.drop_scopes.last_mut().unwrap().locals.retain(|&it| it != local);
+        }
         let current = temporaries.pop_and_drop(self, current, guard.into());
         Ok(Some((discr, current)))
     }
@@ -3493,6 +3624,7 @@ impl<'a, 'db> MirLowerCtx<'a, 'db> {
     ) -> BasicBlockId {
         let scope = self.drop_scopes.pop().unwrap();
         self.result.scope_ends.extend(scope.locals.iter().rev());
+        self.exits_end_at(&scope, span.end());
         self.emit_drop_and_storage_dead_for_scope(&scope, &mut current, span.end());
         current
     }
@@ -3549,11 +3681,14 @@ impl<'a, 'db> MirLowerCtx<'a, 'db> {
         scope: &DropScope,
         current: &mut Idx<BasicBlock>,
         span: MirSpan,
-    ) {
-        for (at, &l) in scope.locals.iter().enumerate().rev() {
+    ) -> Vec<BasicBlockId> {
+        let locals = scope.in_order(&self.operand_locals).into_owned();
+        let mut written = vec![*current];
+        for (at, &l) in locals.iter().enumerate().rev() {
             if !self.is_copy(self.result.locals[l].ty.as_ref()) {
-                let unwind = self.unwind_from_drop(&scope.locals, at);
+                let unwind = self.unwind_from_drop(&locals, at);
                 let prev = std::mem::replace(current, self.new_basic_block());
+                written.push(*current);
                 self.set_terminator(
                     prev,
                     TerminatorKind::Drop {
@@ -3566,6 +3701,7 @@ impl<'a, 'db> MirLowerCtx<'a, 'db> {
             }
             self.push_statement(*current, StatementKind::StorageDead(l).with_span(span));
         }
+        written
     }
 }
 

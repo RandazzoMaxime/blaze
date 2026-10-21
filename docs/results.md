@@ -546,6 +546,134 @@ Commands, on the host. A loop waited for a quiet host and ran this for each proj
         --work ~/rajit-warm/work-<side>
     python3 harness/realbench.py --table ~/rajit-warm/work-<side>/realbench.json
 
+### Edits on macOS, where the time goes (2026-10-20)
+
+Measured on an M5 Max (18 cores, macOS 27), shared with other builds, so single runs spread
+widely; the tables are medians of runs 2 to 6 of `cargo ra-jit build` after realbench's
+edits, each step from the client's `RA_JIT_TRACE` breakdown. Before is 1dbad5b048, from
+before the merges of `fn-incremental` and `tiers-speed`. After is the header pad (d611d65b66,
+since merged with the fix of #13, which keeps the size beside the executable and adds a quarter
+rather than a half: the same links once it is in place) and then the signature hashes
+(f79b93069d) on that same code; the last column is from 12
+edits of each kind taken in turn with 12 of before.
+
+| nushell 0.108.0 | before | header pad | and signature hashes | where the time went, at the end (ms) |
+|---|---:|---:|---:|---|
+| edit: main | 878 ms | 276 ms | 265 ms (before: 897) | check 135 to 168, outside the client 32 to 35, link 21 to 31, apply 9, build-rest 6 |
+| edit: lib | 693 ms | 166 ms | 155 ms (before: 747) | link 38 to 42, outside the client 27 to 33, check 27 to 35, apply 12 to 15, refuse 5 to 7 |
+| nothing changed | 35 ms | 52 ms | | outside the client 42 (noise: there is no link either way) |
+
+Before, link was 686 and 576 ms of them: every splice was refused with "the header has no
+room for the unwind table" (nushell's `__unwind_info` is 3.2 MiB, every Apple link left
+1 MiB) and the program was linked in full. Spliced, a link is place 5 to 8 ms, copy 0.2,
+overwrite 1.5 (14 to 25 on the library edit, which redirects 189 functions), sign 20 to 23,
+append 4 and rename 1 to 3 (`splice-us`). Signing now reuses the hash of each page that the
+last splice appended the same: 4.5 to 6 ms. ripgrep's table fits in 1 MiB: its links were
+spliced before (8 ms).
+
+Inside check, nushell's edit of `main` (the detail spans of the trace): type inference of
+`main` 42 ms, its MIR 3.5, translation to Cranelift IR 14.5, Cranelift 7.3, one after
+another on one thread. Inside apply: the outline of the edited file, 5 to 13 ms (listing the
+crate's functions by file 2.5 to 3, lowering the file's bodies 2 to 6, the file's types 0.6
+for `src/main.rs` and 4.3 for `value/mod.rs`).
+
+ripgrep 15.1.0, before: edit of main 250 ms, of which "worker wait" is 143: the daemon runs
+the build scripts again through `cargo check --compile-time-deps`, since ripgrep's `build.rs`
+names no file to watch except on Windows, and cargo reruns such a script for any change to
+its package. The client has by then run the script itself and compared what it printed and
+wrote with cargo's last run.
+
+What is left, by the milliseconds of the Linux numbers above (nushell main 305 ms, ripgrep
+main 107 ms):
+
+1. Type inference of the edited function: about 100 ms of nushell's edit of `main` on Linux,
+   42 on macOS. The trait solver's cache starts empty in every revision; keeping it across
+   revisions is work in rust-analyzer. Lowering only the edited body (`fn-incremental`,
+   merged since these were measured) leaves inference of the edited function as it is.
+2. The daemon's second run of the build scripts on ripgrep-like projects: 38 ms of 107 on
+   Linux. The client already reran the scripts and found them the same as cargo's last run;
+   if it sends a digest of what cargo's last run printed and wrote, and the daemon compares
+   that with what it loaded, the daemon's run is needed only when they differ. Running the
+   daemon's check beside the build instead was tried and dropped: it hides only the build's
+   20 to 30 ms, and a script that writes generated code into `OUT_DIR` races the read of it.
+3. Translation and Cranelift of the edited function: 36 and 47 ms on Linux, 14.5 and 7.3 on
+   macOS. Cranelift is 6.4 times slower on the Linux host where inference is about 2.4 times:
+   worth a profile there.
+4. Outside the client, 27 ms: rustup's proxy (15 to 20 ms here) and cargo starting. Not
+   ra-jit's code; running the toolchain's cargo directly saves the proxy.
+5. The outline in apply, 5 to 13 ms: the functions of a crate by file are listed again on
+   every edit, which an edit to bodies alone cannot change (2.5 to 3 ms).
+6. refuse, 4 to 9 ms: the list of tests is read again from every function's attributes after
+   each build, which an edit to bodies alone cannot change.
+7. The macOS splice writes all 57 MB it appends though most is as the last splice wrote it
+   (append 4 ms), and placing the patch takes 5 to 8.
+
+### Warm edits on Linux x86-64: where the time goes, and build scripts (2026-10-20)
+
+On dev-aws-11, the machine of the README's run (AWS c8a.metal-24xl, AMD EPYC 9R45, the run
+pinned to cores 0-15), with `harness/bench.py` in `nix develop .#bench`, Cranelift, 5 runs.
+Before is main cc22006337, after is c8f58ac7d9 (the two commits on build scripts); both are
+built as released, without the `llvm` feature. Median ms; the multiplier is cargo's time of the
+same run over ra-jit's.
+
+| Project | Edit | cargo | before | after |
+|---|---|---:|---:|---:|
+| ripgrep 15.1.0 | a function | 453 | 76 (5.9x) | 50 (9.1x) |
+| | a widely used function | 724 | 36 (20x) | 37 (20x) |
+| | a signature | 562 | 70 (8.0x) | 68 (8.3x) |
+| | nothing | 386 | 18 (21x) | 19 (20x) |
+| fd 10.3.0 | a function | 434 | 88 (5.0x) | 43 (10x) |
+| | a widely used function | 400 | 74 (5.4x) | 32 (13x) |
+| | a signature | 638 | 119 (5.3x) | 71 (9.0x) |
+| hyperfine 1.19.0 | a function | 318 | 81 (3.9x) | 34 (9.4x) |
+| | a widely used function | 350 | 81 (4.3x) | 34 (10x) |
+| | a signature | 355 | 119 (3.0x) | 71 (5.0x) |
+| nushell 0.108.0 | a function | 1436 | 258 (5.7x) | 261 (5.5x) |
+| | a widely used function | 4805 | 227 (21x) | 231 (21x) |
+| | a signature | 4848 | 308 (16x) | 308 (16x) |
+
+bat, just and axum have no build script that runs again for these edits, and moved by 1 ms or
+less. Every program said what cargo's said, in both runs.
+
+Where the time of one edit went before, from `RA_JIT_TRACE` (the median of 5 to 7):
+
+| | ripgrep, a function (70 ms) | nushell, a function (252 ms) |
+|---|---:|---:|
+| cargo starting and handing over to `cargo-ra-jit` and `ra-jit` | 14 | 20 |
+| the worker waiting for `cargo check --compile-time-deps` | 26 | 1 |
+| type-checking, MIR, translating and Cranelift of the edited function | 18 | 149 |
+| rust-analyzer taking the change | 4 | 20 |
+| object, debug info, and what is reached from the function | 5 | 15 |
+| the splice into the executable | 0.3 | 1.9 |
+| the rest of client, daemon and worker | 2 | 46 |
+
+- Cargo's part is the same on both sides: Nix's `cargo` is a bash wrapper (1.3 ms), and cargo
+  takes about 8 ms before it runs an external subcommand (`cargo --version` takes 1.5 ms), part
+  of it reading the 470 KB certificate bundle. `cargo-ra-jit` takes 0.4 ms and `ra-jit` 0.9 ms to
+  start.
+- The splice keeps the executable of the last link and appends the edit, so linking is not
+  on the way: 0.3 to 2 ms, also for nushell's 1.1 GB executable. A full link happens on the
+  first edit after the daemon loads (14 s for nushell, which writes a 457 MB object); bench.py
+  keeps it out of the medians.
+- The kernel has 8.6% of the processor time of nushell's edit, spread over page faults and
+  `stat`; nothing on Linux's side of it is worth more than a millisecond.
+- A binary built with `--features llvm` loads libLLVM (198 MB) each time it starts: `ra-jit
+  --version` takes 7.8 ms against 1.4 ms, mostly the dynamic loader binding and relocating it.
+  The README's run until now used that binary for the Cranelift column; it now uses the build
+  as released (nothing changed in ripgrep: 28 ms with the feature, 19 ms without).
+
+What changed: ripgrep's, fd's and hyperfine's build scripts name no `rerun-if-changed`, so the
+worker ran every build script of the workspace through cargo before each edit of their
+package. It now runs the one script as cargo ran it and compares it with what it loaded, and
+not at all when `cargo ra-jit` just did; cargo runs them when the script is older than its
+source, read a variable while compiled that cargo does not set, or printed or wrote something
+else (CHANGELOG, commits 20708cd2da and c8f58ac7d9).
+
+Commands: for each side, `RA_JIT_BIN=<side>/ra-jit taskset -c 0-15 python3 harness/bench.py
+<projects> --backend cranelift --runs 5`; the after run measured both tiers (with
+`RA_JIT_LLVM_BIN` a build with the feature) and is the README's.
+
+||||||| cc22006337
 ## Disagreements
 
 Where reports disagree, this file follows the later one.

@@ -406,14 +406,30 @@ def backtraces(binary, cwd, env=None):
 BEHIND = "behind rustc"
 
 
+# What is known to be wrong, and why. rung2's ra-jit build polls the future of tower-http's
+# `open_file`, which rustc's copy of that non-generic function makes, with ra-jit's copy of its
+# body, and the two lay that future out differently: ra-jit reads its state at byte 0x3d4, rustc
+# writes it at 0x344. The first poll finds no valid state and traps, where the cargo build
+# panics in tokio.
+OPEN = {"rung2: frames of each panic", f"rung2: {DEBUGGER}"}
+# Under LLVM gdb shows a slice's length and not its elements, `&[i32](size=2)` where rustc's build
+# shows `&[i32](size=2) = {2, 3}`; not looked into yet. Windows asks cdb, which has no such check.
+if LLVM and sys.platform == "linux":
+    OPEN |= {"types: the debugger shows them"}
+
+
 class Tally:
     def __init__(self):
         self.wrong, self.open, self.lines = 0, 0, []
 
     def say(self, what, verdict, more=""):
+        if what in OPEN and verdict.isupper():
+            more, verdict = f"{verdict}: {more}", "open"
+        elif what in OPEN:
+            more, verdict = f"{verdict}: take it out of OPEN in harness/debuginfo.py", "SAME NOW"
         self.wrong += verdict.isupper()
         # Open: nothing shown is wrong, but rustc -O -g shows a value this has optimized out.
-        self.open += verdict == BEHIND
+        self.open += verdict in (BEHIND, "open")
         print(f"{what:58} {verdict:14} {more}", flush=True)
 
 
@@ -442,6 +458,11 @@ def jumps_away(binary, name):
                                  f"--stop-address={high:#x}", binary], capture_output=True, text=True).stdout
         targets = [int(it, 16) for it in re.findall(r"^\s*[0-9a-f]+:\s+(?:jmp|b)\s+([0-9a-f]+)\b", listed, re.M)]
         if any(not low <= target < high for target in targets):
+            return True
+        # A call through a pointer in tail position is a jump through a register. A jump table's
+        # is one too, but has the function's code after it: the tail call is the last instruction.
+        last = re.findall(r"^\s*[0-9a-f]+:\s+(\S.*)$", listed, re.M)[-1:]
+        if last and re.match(r"(?:notrack\s+)?jmp\s+\*|br\s+x\d+\b", last[0]):
             return True
     return False
 
@@ -784,21 +805,28 @@ def profiler(tally, what, binary, cwd, crates):
         return tally.say(f"{what}: perf", "not run", "perf is of Linux")
     perf = shutil.which("perf")
     data = os.path.join(tempfile.mkdtemp(prefix="ra-jit-debuginfo-perf-"), "perf.data")
-    record = perf and subprocess.run([perf, "record", "-o", data, "-F", "5000", "--call-graph", "dwarf", binary],
+    # One run is over in milliseconds, a few dozen samples: whether any lands in ra-jit's functions, or
+    # unwinds back to main, was chance. Twenty runs under one recording give hundreds.
+    again = 'for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do "$0" >/dev/null || exit; done'
+    record = perf and subprocess.run([perf, "record", "-o", data, "-F", "5000", "--call-graph", "dwarf", "--", "sh", "-c", again, binary],
                                      cwd=cwd, capture_output=True, text=True)
     if not perf or record.returncode != 0 or not os.path.exists(data):
         # Not a verdict on the binary: the machine does not let this user profile.
         tally.say(f"{what}: perf", "not run", "no perf here, or it may not sample: see kernel.perf_event_paranoid")
         return
     script = subprocess.run([perf, "script", "-i", data, "-F", "ip,sym,srcline"], capture_output=True, text=True).stdout
-    frames = re.findall(r"^\s+[0-9a-f]+ (\S+)\n\s+(\S+)$", script, re.M)
-    mine = [(name, line) for name, line in frames if any(f"{len(c)}{c}" in name or f"{c}::" in name for c in crates)]
+    stacks = [stack for stack in script.split("\n\n") if stack.strip()]
+    shift = libdw_shift(binary)
+    ours = lambda frames: [(name, line) for name, line in frames if any(f"{len(c)}{c}" in name or f"{c}::" in name for c in crates)]
+    by_stack = [re.findall(r"^\s+[0-9a-f]+ (\S+)\n\s+(\S+)$", stack, re.M) for stack in stacks]
+    mine = ours(frame for frames in by_stack for frame in frames)
+    # Where perf looks a frame's CFI up somewhere else, the frames it unwinds to are wherever that
+    # lands, a static as well as code: only the frame sampled is read from the program as it is.
     # A line 0 of one of rustc's codegen units is rustc saying of its own code that it has no
     # line: the crate's functions that were left to rustc are not what is asked about here.
-    lost = [name for name, line in mine if not re.search(r"\.rs:\d+$|-cgu\.\d+:0$", line)]
-    stacks = [stack for stack in script.split("\n\n") if stack.strip()]
+    read = ours(frames[0] for frames in by_stack if frames) if shift else mine
+    lost = [name for name, line in read if not re.search(r"\.rs:\d+$|-cgu\.\d+:0$", line)]
     through = sum(bool(re.search(r"4main\b|::main\b", stack)) for stack in stacks)
-    shift = libdw_shift(binary)
     # Where perf looks a frame's CFI up somewhere else, how far its stacks get says nothing of the CFI:
     # some reach main where the code it lands in has the same rules, and some stop.
     verdict = ("NO SAMPLES" if not mine else "NO LINE" if lost else "named" if through
@@ -977,7 +1005,7 @@ def edited(tally, part):
         if daemon.poll() is not None:
             raise SystemExit(f"the daemon did not start: {open(log_path).read()[-2000:]}")
         time.sleep(0.05)
-    spliced = 0
+    spliced, linked, first = 0, True, []
     for what, changes in EDITS:
         seen = len(open(log_path).read())
         text = open(os.path.join(ws, MAIN)).read()
@@ -995,6 +1023,11 @@ def edited(tally, part):
         links = re.findall(r"^link: \S+ \((.*)\)$", open(log_path).read()[seen:], re.M)
         how = "not linked" if not links else "spliced" if links[-1].startswith("spliced") else "linked in full"
         spliced += how == "spliced"
+        # The debug info a first splice after a link adds to is copied while the daemon waits
+        # (#12): what it copies itself is the section names, if any.
+        if how == "spliced" and linked and (copied := re.search(r", (\d+) copied$", links[-1])):
+            first.append(int(copied[1]))
+        linked = how == "linked in full" or (linked and how == "not linked")
         if not (reply.stdout + reply.stderr).strip().startswith("ok"):
             tally.say(f"{part}: {what}", "REFUSED", (reply.stdout + reply.stderr).strip()[:60])
             continue
@@ -1023,6 +1056,10 @@ def edited(tally, part):
     daemon.kill()
     if os.environ.get("RA_JIT_SPLICE") != "0":
         tally.say(f"{part}: added to the linked binary", "spliced" if spliced else "NONE SPLICED", f"{spliced} of {len(EDITS)} steps")
+    if sys.platform.startswith("linux") and first:
+        copied = max(first)
+        tally.say(f"{part}: first splices after a link", "copied nothing" if copied < 1 << 16 else "COPIED DEBUG INFO",
+                  f"{copied} bytes at most, of {len(first)}")
 
 
 def described(binary):

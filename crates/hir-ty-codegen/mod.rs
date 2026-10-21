@@ -82,9 +82,9 @@ use self::fragment::{
 use self::unwind::{FunctionUnwind, UnwindContext};
 use self::vtable::{Slot, Upcast, VtableLayout};
 use super::{
-    AggregateKind, AssertKind, BasicBlockId, BinOp, CastKind, LocalId, MirBody, MirPhase, MirSpan,
-    Operand, OperandKind, PlaceTy, ProjectionElem, Rvalue, StatementKind, StoredPlace,
-    TerminatorKind, UnOp, eval::interpret_mir, lower::is_builtin_index,
+    AggregateKind, AssertKind, BasicBlockId, BinOp, CastKind, LocalId, MirBody, MirOptLevel,
+    MirPhase, MirSpan, Operand, OperandKind, PlaceTy, ProjectionElem, Rvalue, StatementKind,
+    StoredPlace, TerminatorKind, UnOp, eval::interpret_mir, lower::is_builtin_index,
     monomorphization::monomorphized, monomorphized_promoted_mir_body_query, return_slot,
 };
 
@@ -96,6 +96,7 @@ mod cached;
 mod debuginfo;
 pub use debuginfo::Sidecar;
 mod float_pair;
+mod fncache;
 mod fragment;
 #[cfg(test)]
 mod fuzz;
@@ -537,15 +538,29 @@ impl CodegenUnit {
             if stale.is_empty() {
                 stale.push(base.stale(db, 0, 1));
             }
-            let patch =
-                base.patch(db, symbols, roots, &on_demand, denied, known, own_statics, stale);
-            let patch = match patch {
-                Ok(Ok(patch)) => Some(patch),
-                Ok(Err(why)) => {
-                    declined = Some(why);
-                    None
+            let patch = loop {
+                let patch = base.patch(
+                    db,
+                    symbols,
+                    roots,
+                    &on_demand,
+                    denied,
+                    known,
+                    own_statics.clone(),
+                    stale.clone(),
+                );
+                let why = match patch {
+                    Ok(Ok(patch)) => break Some(patch),
+                    Ok(Err(why)) => Some(why),
+                    Err(_) => None,
+                };
+                // Code compiled at a higher level that a patch can't hold goes, not the
+                // program the patch is for.
+                let told = why.unwrap_or("it could not be compiled");
+                if !known.tiers.refuse(&format!("no patch can hold its code: {told}")) {
+                    declined = why;
+                    break None;
                 }
-                Err(_) => None,
             };
             if let Some(patch) = patch {
                 backend::Tally::global().report();
@@ -1001,6 +1016,13 @@ impl Rejections {
                 })
             }
         }
+    }
+
+    /// Makes the next build compile the code of the checkout that the last one took from the
+    /// store, which no patch can replace: built while nothing waits, the first edit after it
+    /// is a patch. Whether the next build has that to do and no edit had asked for it.
+    pub fn dehydrate(&mut self) -> bool {
+        self.base.as_mut().is_some_and(|it| it.dehydrate())
     }
 
     /// Makes the next build a full one. A patch looks at everything the last build compiled,
@@ -2004,6 +2026,46 @@ impl Variadic {
     }
 }
 
+/// The MIR optimization level the environment asks for with `RA_JIT_MIR_OPT`: 0, the default,
+/// compiles the runtime body; 1 and 2 that body after rustc's MIR passes at its
+/// `-Zmir-opt-level` 1 and 2 (`crate::mir::MirOptLevel`).
+pub fn mir_opt_level() -> MirOptLevel {
+    static LEVEL: LazyLock<MirOptLevel> = LazyLock::new(|| {
+        let Some(asked) = std::env::var_os(MIR_OPT) else { return MirOptLevel::Off };
+        let level =
+            asked.to_str().and_then(|it| it.parse().ok()).and_then(MirOptLevel::from_number);
+        level.unwrap_or_else(|| {
+            eprintln!("ra-jit: {MIR_OPT}={}: expected 0, 1 or 2; using 0", asked.display());
+            MirOptLevel::Off
+        })
+    });
+    *LEVEL
+}
+
+pub const MIR_OPT: &str = "RA_JIT_MIR_OPT";
+
+/// The body the code generator compiles of `def`: the runtime body, optimized at
+/// [`mir_opt_level`].
+fn compiled_mir_body<'db>(
+    db: &'db dyn HirDatabase,
+    def: InferBodyId<'db>,
+) -> std::result::Result<&'db MirBody<'db>, crate::mir::MirLowerError<'db>> {
+    match mir_opt_level() {
+        MirOptLevel::Off => db.runtime_mir_body(def),
+        level => db.optimized_mir_body(def, level),
+    }
+}
+
+fn compiled_mir_body_for_closure<'db>(
+    db: &'db dyn HirDatabase,
+    closure: InternedClosureId<'db>,
+) -> std::result::Result<&'db MirBody<'db>, crate::mir::MirLowerError<'db>> {
+    match mir_opt_level() {
+        MirOptLevel::Off => db.runtime_mir_body_for_closure(closure),
+        level => db.optimized_mir_body_for_closure(closure, level),
+    }
+}
+
 /// The body of an instance that is not a shim, with the instance's types in place of the
 /// generic parameters. The database does not keep it unless `RA_JIT_LEAN=0`: nothing but
 /// compiling the instance reads it, and what was compiled is kept.
@@ -2019,13 +2081,16 @@ fn instance_body<'db>(
     let filled = |body, args: &StoredGenericArgs, env: &StoredParamEnvAndCrate| {
         tally.step(Step::Monomorphize, || monomorphized(db, body, args, env).map(Cow::Owned))
     };
+    // The database keeps a monomorphized body of the runtime body only.
+    let lean = *LEAN || mir_opt_level() != MirOptLevel::Off;
     let body = match instance.def {
-        InstanceDef::Fn(func) if *LEAN => tally
-            .step(Step::Mir, || db.runtime_mir_body(func.into()))
+        InstanceDef::Fn(func) if lean => tally
+            .step(Step::Mir, || compiled_mir_body(db, func.into()))
             .and_then(|it| filled(it, &args, &env)),
-        InstanceDef::Closure(id) if *LEAN => db
-            .runtime_mir_body_for_closure(InternedClosureId::from_id(id))
-            .and_then(|it| filled(it, &args, &env)),
+        InstanceDef::Closure(id) if lean => {
+            compiled_mir_body_for_closure(db, InternedClosureId::from_id(id))
+                .and_then(|it| filled(it, &args, &env))
+        }
         InstanceDef::Coroutine(id) if *LEAN => db
             .runtime_mir_body_for_coroutine(InternedCoroutineId::from_id(id))
             .and_then(|it| filled(it, &args, &env)),
@@ -3671,7 +3736,7 @@ fn root_body<'db>(
     let owner: InferBodyId<'db> = func.into();
     let tally = backend::Tally::global();
     tally.step(Step::Infer, || _ = InferenceResult::of(db, DefWithBodyId::from(func)));
-    let body = tally.step(Step::Mir, || db.runtime_mir_body(owner));
+    let body = tally.step(Step::Mir, || compiled_mir_body(db, owner));
     let body = body.map_err(|e| CodegenError::Frontend(format!("mir: {e:?}")))?;
     let krate = owner.module(db).krate(db);
     // Not the function's own bounds: with nothing generic they are bounds on concrete
@@ -3687,8 +3752,9 @@ fn root_body<'db>(
     let body = if opaque {
         let args = GenericArgs::new_from_slice(&[]).store();
         tally
-            .step(Step::Monomorphize, || {
-                db.monomorphized_runtime_mir_body(owner, args, env.store())
+            .step(Step::Monomorphize, || match mir_opt_level() {
+                MirOptLevel::Off => db.monomorphized_runtime_mir_body(owner, args, env.store()),
+                level => db.monomorphized_optimized_mir_body(owner, level, args, env.store()),
             })
             .map_err(|e| CodegenError::Frontend(format!("mir: {e:?}")))?
     } else {
@@ -9963,6 +10029,10 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
             }
         };
         let db = self.cg.db;
+        if fncache::is_code(db, func) {
+            self.cache_code(generic_args, dst)?;
+            return self.finish_call(destination, target);
+        }
         let lang_items = self.interner.lang_items();
         if fn_trait_methods(lang_items).iter().any(|family| family.contains(&Some(func))) {
             self.call_fn_trait(func, generic_args, args, dst, dst_ty.ty)?;
@@ -11269,10 +11339,12 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
             _ => Region::new_erased(interner),
         });
         let instance = Instance { def, args: args.store(), checked: self.cg.checked };
-        if let Some((body, never)) = tier::seen_body(db, &instance, &self.env.store(), tracked)
-            && body.func.signature == *sig
-        {
-            self.cg.declare_seen(id, &body, never);
+        if let Some((body, never)) = tier::seen_body(db, &instance, &self.env.store(), tracked) {
+            if body.func.signature == *sig {
+                self.cg.declare_seen(id, &body, never);
+            } else if std::env::var_os("RA_JIT_DUMP_TIER").is_some() {
+                eprintln!("tier: signature differs: {} vs {}", body.func.signature, sig);
+            }
         }
     }
 

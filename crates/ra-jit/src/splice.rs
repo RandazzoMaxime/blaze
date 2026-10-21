@@ -92,6 +92,8 @@ pub(crate) struct Baseline {
     left: Left,
     /// What the file was when we last left it: someone else may have written it since.
     stamp: Stamp,
+    /// What the last splice of a Mach-O executable appended, with the hashes of its pages.
+    appended: Option<macho::Appended>,
 }
 
 /// What a splice appended that the next may find where it is.
@@ -145,6 +147,9 @@ enum Executable {
 pub(crate) struct Spliced {
     pub(crate) redirected: usize,
     pub(crate) appended: usize,
+    /// What it copied of the executable to further on: what a debugger reads, which the
+    /// first splice after a link finds copied already.
+    pub(crate) copied: u64,
 }
 
 impl Baseline {
@@ -174,14 +179,23 @@ impl Baseline {
                 .collect();
             (image, baked)
         };
+        drop(bytes);
+        let (left, stamp) = match &image {
+            Executable::Elf(image) => {
+                let moved = laid_out(&path, image).unwrap_or_default();
+                (Left { appended: None, moved }, Stamp::of(&File::open(&path)?)?)
+            }
+            _ => (Left::default(), stamp),
+        };
         Ok(Baseline {
             path,
             image: Arc::new(image),
             baked,
             undo: Vec::new(),
             originals: FxHashMap::default(),
-            left: Left::default(),
+            left,
             stamp,
+            appended: None,
         })
     }
 
@@ -197,6 +211,7 @@ impl Baseline {
             originals: self.originals.clone(),
             left: Left::default(),
             stamp: self.stamp.clone(),
+            appended: None,
         }
     }
 
@@ -217,6 +232,7 @@ impl Baseline {
     /// and what is known of it as they were.
     pub(crate) fn splice(&mut self, patch: &[u8], give_up: &AtomicBool) -> anyhow::Result<Spliced> {
         self.read_again_if_signed()?;
+        let start = std::time::Instant::now();
         let (addition, len) = match &*self.image {
             Executable::Elf(image) => {
                 let patch = Patch::read(patch, image)?;
@@ -235,10 +251,13 @@ impl Baseline {
                 return Ok(spliced);
             }
             Executable::MachO(image) => {
-                let Baseline { path, baked, undo, originals, stamp, .. } = self;
-                return macho::splice(image, path, baked, undo, originals, stamp, patch, give_up);
+                let Baseline { path, baked, undo, originals, stamp, appended, .. } = self;
+                return macho::splice(
+                    image, path, baked, undo, originals, stamp, appended, patch, give_up,
+                );
             }
         };
+        let placed = start.elapsed();
 
         let file = OpenOptions::new().read(true).write(true).open(&self.path)?;
         ensure!(Stamp::of(&file)? == self.stamp, "the executable was written by someone else");
@@ -249,19 +268,23 @@ impl Baseline {
         let left = std::mem::take(&mut self.left);
         left.append(&file, addition.offset, &addition.appended)?;
         write_all_at(&file, &addition.headers, addition.headers_offset)?;
+        let appended_at = start.elapsed();
         let mut end = (addition.offset + addition.appended.len() as u64)
             .max(addition.headers_offset + addition.headers.len() as u64);
         // A run the last splice copied stays where it is while nothing else is written there,
         // also when this one has no use for it: the next may.
         let mut moved = left.moved;
         moved.retain(|it| it.to >= end);
+        let mut copied = 0;
         for run in addition.described.moved {
             if !moved.contains(&run) {
                 moved.retain(|it| it.to + it.len <= run.to || run.to + run.len <= it.to);
                 copy_within(&file, &run)?;
+                copied += run.len;
                 moved.push(run);
             }
         }
+        let copied_at = start.elapsed();
         for (offset, bytes) in &addition.described.written {
             write_all_at(&file, bytes, *offset)?;
             let written = *offset + bytes.len() as u64;
@@ -269,7 +292,13 @@ impl Baseline {
             end = end.max(written);
         }
         end = moved.iter().map(|it| it.to + it.len).fold(end, u64::max);
-        file.set_len(end.max(len))?;
+        // A file is not cut short behind what a splice wrote: XFS takes a truncation, also to
+        // the size the file has, as a reason to write out every page of it not yet written when
+        // it is closed, 100 ms of nushell's after a link. Nothing reads what is past `end`.
+        if file.metadata()?.len() < end.max(len) {
+            file.set_len(end.max(len))?;
+        }
+        let written_at = start.elapsed();
         for (offset, bytes) in &addition.overwritten {
             let mut old = vec![0; bytes.len()];
             read_exact_at(&file, &mut old, *offset)?;
@@ -277,9 +306,23 @@ impl Baseline {
             write_all_at(&file, bytes, *offset)?;
         }
         self.stamp = Stamp::of(&file)?;
+        let redirected_at = start.elapsed();
+        drop(file);
+        if std::env::var_os("RA_JIT_STATS").is_some() {
+            let us = |it: std::time::Duration| it.as_micros();
+            eprintln!(
+                "splice-us: place={} append={} copy={} write={} redirect={} close={}",
+                us(placed),
+                us(appended_at - placed),
+                us(copied_at - appended_at),
+                us(written_at - copied_at),
+                us(redirected_at - written_at),
+                us(start.elapsed() - redirected_at)
+            );
+        }
         let appended = addition.appended.len();
         self.left = Left { appended: Some((addition.offset, addition.appended)), moved };
-        Ok(Spliced { redirected: addition.redirected, appended })
+        Ok(Spliced { redirected: addition.redirected, appended, copied })
     }
 
     /// `patch` laid out at `base` of a program that runs the executable as the linker wrote
@@ -296,6 +339,26 @@ impl Baseline {
         let uuid = macho::uuid(image).context("the executable has no UUID")?;
         let (code, moved) = macho::live(image, &self.baked, &self.originals, patch, base)?;
         Ok((uuid, code, moved))
+    }
+
+    /// Whether a patch can call the C symbol `name`, as far as the executable says: an
+    /// executable other than Mach-O is not asked.
+    pub(crate) fn can_call(&self, name: &str) -> bool {
+        match &*self.image {
+            Executable::MachO(image) => image.can_call(name),
+            _ => true,
+        }
+    }
+
+    /// A symbol the patch `object` refers to that the executable does not give it, as far as
+    /// the executable says: an executable other than Mach-O is not asked.
+    pub(crate) fn missing_in(&self, object: &[u8]) -> Option<String> {
+        let Executable::MachO(image) = &*self.image else { return None };
+        let file = object::File::parse(object).ok()?;
+        file.symbols().filter(|it| it.is_undefined()).find_map(|it| {
+            let name = it.name_bytes().ok()?;
+            (!image.gives(name)).then(|| String::from_utf8_lossy(name).into_owned())
+        })
     }
 
     /// The `LC_UUID` of the executable, when it is one that has it.
@@ -354,6 +417,24 @@ impl Baseline {
     }
 }
 
+/// The `-headerpad` to link the executable at `path` with again for an edit to be spliced into
+/// it, when the room its header has is too little: only Apple's linker leaves no more than it
+/// is told to. `None` for an executable that has the room, or needs none.
+pub(crate) fn headerpad_short(path: &Path) -> anyhow::Result<Option<u64>> {
+    use std::io::Read as _;
+    const HEADER: usize = size_of::<object::macho::MachHeader64<object::LittleEndian>>();
+    let mut file = File::open(path)?;
+    let mut commands = vec![0; HEADER];
+    let magic = object::macho::MH_MAGIC_64.to_le_bytes();
+    if file.read_exact(&mut commands).is_err() || commands[..4] != magic {
+        return Ok(None);
+    }
+    let len = u32::from_le_bytes(commands[20..24].try_into()?) as usize;
+    commands.resize(HEADER + len, 0);
+    file.read_exact(&mut commands[HEADER..])?;
+    macho::headerpad_short(&commands)
+}
+
 /// Why a splice stopped half way: a newer edit wants the executable.
 #[derive(Debug)]
 pub(crate) struct GaveUp;
@@ -394,8 +475,32 @@ fn read_exact_at(mut file: &File, bytes: &mut [u8], offset: u64) -> std::io::Res
     file.read_exact(bytes)
 }
 
+/// Copies what a debugger reads of the executable at `path` to where its splices write it,
+/// while the daemon waits for the first edit: the splices find it there. Nothing is copied
+/// of a program that runs, which the kernel lets nothing write and which is linked again.
+fn laid_out(path: &Path, image: &Image) -> std::io::Result<Vec<debug::Moved>> {
+    let start = std::time::Instant::now();
+    let moved = image.described.laid_out(image.tail());
+    if moved.is_empty() {
+        return Ok(moved);
+    }
+    let file = OpenOptions::new().read(true).write(true).open(path)?;
+    for run in &moved {
+        copy_within(&file, run)?;
+    }
+    if std::env::var_os("RA_JIT_STATS").is_some() {
+        let bytes: u64 = moved.iter().map(|it| it.len).sum();
+        eprintln!("laid out: {bytes} bytes of debug info in {:.1?}", start.elapsed());
+    }
+    Ok(moved)
+}
+
 /// Writes a run of the file again behind where it is.
 fn copy_within(file: &File, moved: &debug::Moved) -> std::io::Result<()> {
+    #[cfg(target_os = "linux")]
+    if copy_in_kernel(file, moved).is_ok() {
+        return Ok(());
+    }
     let mut buffer = vec![0; moved.len.min(1 << 20) as usize];
     let mut done = 0;
     while done < moved.len {
@@ -403,6 +508,34 @@ fn copy_within(file: &File, moved: &debug::Moved) -> std::io::Result<()> {
         read_exact_at(file, part, moved.from + done)?;
         write_all_at(file, part, moved.to + done)?;
         done += part.len() as u64;
+    }
+    Ok(())
+}
+
+/// Has the kernel copy the run. A filesystem that shares blocks between files (XFS, Btrfs)
+/// shares the run's whole blocks rather than copy them: the run is written as far into a
+/// block as it was, and the blocks are asked for apart from the part blocks at either end.
+#[cfg(target_os = "linux")]
+fn copy_in_kernel(file: &File, moved: &debug::Moved) -> std::io::Result<()> {
+    use std::os::fd::AsRawFd as _;
+    let (start, end) = (moved.from, moved.from + moved.len);
+    let whole = start.next_multiple_of(debug::BLOCK).min(end);
+    let wholes = (end / debug::BLOCK * debug::BLOCK).max(whole);
+    for (mut from, part_end) in [(start, whole), (whole, wholes), (wholes, end)] {
+        while from < part_end {
+            let mut source = i64::try_from(from).map_err(std::io::Error::other)?;
+            let mut target =
+                i64::try_from(moved.to + (from - start)).map_err(std::io::Error::other)?;
+            let len = usize::try_from(part_end - from).unwrap_or(usize::MAX).min(1 << 30);
+            let fd = file.as_raw_fd();
+            // SAFETY: both offsets are the kernel's to read and advance, and the descriptor is open.
+            let copied = unsafe { libc::copy_file_range(fd, &mut source, fd, &mut target, len, 0) };
+            match copied {
+                ..0 => return Err(std::io::Error::last_os_error()),
+                0 => return Err(std::io::ErrorKind::UnexpectedEof.into()),
+                copied => from += copied as u64,
+            }
+        }
     }
     Ok(())
 }
@@ -842,6 +975,18 @@ impl Image {
     fn page(&self) -> u64 {
         let e = Endianness::Little;
         self.segments_of(elf::PT_LOAD).map(|it| it.p_align(e)).max().unwrap_or(1).max(1)
+    }
+
+    /// Where a splice writes what a debugger reads, whatever the patch: behind what a splice
+    /// adds of any usual size. The file has nothing in between.
+    fn tail(&self) -> u64 {
+        const ROOM: u64 = 64 << 20;
+        let page = self.page();
+        let (offset, _) =
+            self.behind(self.len.next_multiple_of(page), self.end().next_multiple_of(page));
+        let tables =
+            self.unwind.len_with(0) + self.relocations.as_ref().map_or(0, |it| it.len_with(0));
+        offset + tables as u64 + ROOM
     }
 }
 
@@ -1657,7 +1802,7 @@ impl<'a> Patch<'a> {
         let described = self.describe(
             &image.described,
             machine,
-            headers_offset + headers.len() as u64,
+            (headers_offset + headers.len() as u64).max(image.tail()),
             |target, added| address(target, added, false),
         )?;
         let mut header = image.header;

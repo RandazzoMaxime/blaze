@@ -49,8 +49,8 @@ to stable; those are marked where they are used.
    AArch64, where a branch reaches only 128 MB. Not every edit can be spliced: about 60 of
    the 71 steps are, and the rest link in full by design (an executable somebody else
    wrote, a static that grew, a running executable, and similar).
-4. [platforms.md](platforms.md), Windows: 71 of 71 with 61 spliced and 10 full links,
-   and the harness fails on Windows if the count is not 61.
+4. [platforms.md](platforms.md), Windows: 71 of 71 with 60 spliced, 10 full links and
+   1 step with nothing edited, and the harness fails on Windows if the count is not 60.
 5. [platforms.md](platforms.md), macOS: `splices.py` 71 of 71. Executables with chained
    fixups are declined and linked in full; that was measured with
    `MACOSX_DEPLOYMENT_TARGET=13.0`. rustc's default target of 11.0 splices.
@@ -94,6 +94,21 @@ Neither backend inlines one function into another in a build, so LLVM at `-O2` i
 comparable to a release build. LLVM gives a function it has no lowering for to Cranelift. One
 LLVM bug is worked around by turning off a vectoriser pass (finding 6 in FUZZ.md).
 
+## MIR optimizations
+
+`RA_JIT_MIR_OPT=1` runs the passes rustc runs on a debug build's MIR before code is generated
+from it, `RA_JIT_MIR_OPT=2` the ones it runs above `-Copt-level=0` that are ported; 0, the
+default, runs none ([mir-passes.md](../vendor/rust-analyzer/docs/mir-passes.md#optimizations),
+[research/mir-gap.md](research/mir-gap.md)). Coroutine bodies are never optimized.
+
+| | 0 | 1 | 2 |
+|---|---|---|---|
+| `difftest.py corpus --mixed 8` | yes | yes | yes |
+| `difftest.py mixfutures --mixed 16 --layouts` | yes | yes | yes |
+| `growth.py`, `movedlines.py` | yes | yes | yes |
+| The interpreter's tests give the same result | yes | yes | yes |
+| Identical to rustc's MIR, corpus `cases` | 4.0% (against rustc's level 1) | 21.5% | 14.5% |
+
 ## Tiers
 
 A program that takes edits with `ra-jit-live` has its hot functions compiled again while it
@@ -108,8 +123,9 @@ default there, off with `RA_JIT_TIER=off`.
 | Levels 2 and 3, output identical to cargo's | yes, `harness/tiers.py` (local) | no |
 | An edit demotes a tiered function in the same build | yes, `harness/tiers.py` (local) | no |
 | An edit does not wait for a compile at a higher level | yes (local, with LLVM's part stretched to a second) | no |
+| Code no patch can hold stays out, the program is not started over | yes (local, 12 runs of the Life benchmark under one daemon, [tiers.md](tiers.md#code-no-patch-can-hold)) | no |
 | `RA_JIT_TIER=off` changes nothing | yes, `harness/tiers.py` (local) | does not apply |
-| Within 10% of a release build | no: 68% of it on the Life benchmark, and 79% of a release build that checks overflow as the dev profile does, which is as far as the tiered code may go | no |
+| Within 10% of a release build | within 6% of a release build that checks overflow as the dev profile does, which is as far as the tiered code may go, and 88% of release, on the Life benchmark under load | no |
 
 ## Debug info
 
@@ -176,10 +192,12 @@ miscompiles in the order temporaries are dropped. Twenty are fixed or worked aro
 is the first row above. Nearly every full-size run found something, so expect that more
 exist.
 
-ra-jit has no borrow checker and no diagnostics. The daemon refuses source in which
-rust-analyzer finds an error (a type mismatch, an unresolved name, a missing field), and
-under `cargo ra-jit` cargo then runs and rustc reports it. An error rust-analyzer does not
-find is not refused. Borrow-check errors are the main case: with a warm daemon,
+The daemon refuses source in which rust-analyzer finds an error (a type mismatch, an
+unresolved name, a missing field), and under `cargo ra-jit` cargo then runs and rustc
+reports it. An error rust-analyzer does not find is not refused. Borrow-check errors are the
+main case: ra-jit has a borrow checker ([borrowck.md](borrowck.md)) that gives rustc's
+verdict on 65% of rustc's borrow-check tests and finds nothing in six of seven real projects,
+but the daemon does not refuse a build for its errors yet. With a warm daemon,
 `cargo ra-jit run` built and ran a program that uses a `String` after moving it, which rustc
 rejects with E0382 (checked by hand at f191c6e42a). Run `cargo ra-jit check` or
 `cargo check` to get rustc's verdict.

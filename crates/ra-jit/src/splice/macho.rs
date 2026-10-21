@@ -103,6 +103,8 @@ pub(super) struct Image {
     /// Where the first section starts in the file: the load commands end before it.
     room: usize,
     segments: Vec<Segment>,
+    /// How many sections the segments have.
+    sectioned: usize,
     /// Where `commands` has what refers into `__LINKEDIT`.
     at: Commands,
     symbols: FxHashMap<Box<[u8]>, Named>,
@@ -143,6 +145,9 @@ struct Commands {
 struct Table {
     /// Where `commands` has its header.
     header: usize,
+    /// Its number among the sections, from 0, and that of the first of its segment.
+    nth: usize,
+    first: usize,
     address: u64,
     bytes: Vec<u8>,
 }
@@ -246,17 +251,20 @@ impl Signature {
     }
 
     /// The signature of `file`, whose first `kept` bytes are what the linker wrote but for
-    /// `dirty`, and `added` after them.
+    /// `dirty`, and `added` after them, and the hashes of the pages of `added`. A page that
+    /// the last splice appended at the same place as it is now has the hash it had then.
     fn of(
         &self,
         file: &File,
         kept: u64,
         dirty: &[(u64, Vec<u8>)],
         added: &[u8],
+        last: Option<&Appended>,
         give_up: &AtomicBool,
-    ) -> anyhow::Result<Vec<u8>> {
+    ) -> anyhow::Result<(Vec<u8>, Vec<u8>)> {
         let limit = kept + added.len() as u64;
         let page_len = self.page;
+        let last = last.filter(|it| it.offset == kept && it.page == page_len);
         ensure!(kept as usize % page_len == 0, "a splice behind a page the signature hashes");
         let kept = kept as usize / page_len;
         let mut hashes =
@@ -275,7 +283,7 @@ impl Signature {
         }
         // Every page appended, tens of megabytes for a large debug build: without the
         // processor's SHA-256 instructions the pages are hashed on several threads.
-        let pages: Vec<&[u8]> = added.chunks(page_len).collect();
+        let pages: Vec<(usize, &[u8])> = added.chunks(page_len).enumerate().collect();
         let threads = match super::sha256::fast() {
             true => 1,
             false => std::thread::available_parallelism().map_or(1, |it| it.get()).min(8),
@@ -286,11 +294,14 @@ impl Signature {
                 .map(|pages| {
                     scope.spawn(move || -> Result<Vec<u8>, super::GaveUp> {
                         let mut hashes = Vec::with_capacity(pages.len() * Self::HASH);
-                        for (index, page) in pages.iter().enumerate() {
+                        for (index, &(nth, page)) in pages.iter().enumerate() {
                             if index % 256 == 0 {
                                 super::go_on(give_up)?;
                             }
-                            hashes.extend_from_slice(&super::sha256::digest(page));
+                            match last.and_then(|it| it.hash_of(nth, page)) {
+                                Some(hash) => hashes.extend_from_slice(hash),
+                                None => hashes.extend_from_slice(&super::sha256::digest(page)),
+                            }
                         }
                         Ok(hashes)
                     })
@@ -298,9 +309,11 @@ impl Signature {
                 .collect();
             parts.into_iter().map(|it| it.join().expect("hashing pages panicked")).collect()
         });
+        let appended_from = hashes.len();
         for part in parts {
             hashes.extend_from_slice(&part?);
         }
+        let appended = hashes[appended_from..].to_vec();
 
         let mut directory = self.directory.clone();
         let length = u32::try_from(directory.len() + hashes.len())?;
@@ -331,7 +344,26 @@ impl Signature {
             signature.extend_from_slice(blob);
         }
         signature.resize(len, 0);
-        Ok(signature)
+        Ok((signature, appended))
+    }
+}
+
+/// What a splice appended behind what the linker wrote, and the hashes of its pages: most of
+/// it is `__LINKEDIT` as the linker wrote it, which the next splice appends again.
+pub(super) struct Appended {
+    offset: u64,
+    page: usize,
+    bytes: Vec<u8>,
+    hashes: Vec<u8>,
+}
+
+impl Appended {
+    /// The hash of page `nth` of what is appended now, when it was appended last as it is.
+    fn hash_of(&self, nth: usize, page: &[u8]) -> Option<&[u8]> {
+        let at = nth * self.page;
+        let was = self.bytes.get(at..(at + self.page).min(self.bytes.len()))?;
+        let hash = self.hashes.get(nth * Signature::HASH..(nth + 1) * Signature::HASH)?;
+        (was == page).then_some(hash)
     }
 }
 
@@ -410,6 +442,22 @@ impl Rebases {
 }
 
 impl Image {
+    /// Whether a patch can call the C symbol `name`: the executable defines it, or has the
+    /// address slot of the library's that defines it, as a patch reaches what it calls.
+    pub(super) fn can_call(&self, name: &str) -> bool {
+        self.gives(format!("_{name}").as_bytes())
+    }
+
+    /// Whether a patch that refers to the symbol `name`, as its object names it, is given
+    /// what it names.
+    pub(super) fn gives(&self, name: &[u8]) -> bool {
+        match self.symbols.get(name) {
+            Some(Named::One(defined)) => defined.kind != SymbolKind::Tls,
+            Some(Named::Many) => false,
+            None => self.imports.get(name).is_some_and(|it| it.slot.is_some()),
+        }
+    }
+
     pub(super) fn read(bytes: &[u8]) -> anyhow::Result<Image> {
         ensure!(
             u32_at(bytes, 0)? == macho::MH_MAGIC_64 && u32_at(bytes, 4)? == macho::CPU_TYPE_ARM64,
@@ -441,6 +489,7 @@ impl Image {
                         file_size: u64_at(commands, command + 48)?,
                         writable: u32_at(commands, command + 60)? & macho::VM_PROT_WRITE != 0,
                     };
+                    let first = sections.len();
                     for nth in 0..u32_at(commands, command + 64)? as usize {
                         let header = command + SEGMENT + nth * SECTION;
                         let (address, len) =
@@ -458,7 +507,7 @@ impl Image {
                         if let Some(table) = table {
                             let content = bytes.get(offset..offset + len as usize);
                             let bytes = content.context("the file ends early")?.to_vec();
-                            *table = Table { header, address, bytes };
+                            *table = Table { header, nth: first + nth, first, address, bytes };
                         }
                         let indirect = u32_at(commands, header + 68)?;
                         let stub = u32_at(commands, header + 72)?;
@@ -608,6 +657,7 @@ impl Image {
             commands: commands.to_vec(),
             room,
             segments,
+            sectioned: sections.len(),
             at,
             symbols,
             imports,
@@ -840,6 +890,45 @@ fn frames_in_front(
     );
     let unwind = image.address_of(at as u64)?;
     Ok(Some((vec![(image.offset_of(start)?, block), (at as u64, table)], [unwind, start])))
+}
+
+/// Lists `__unwind_info` first of its segment's sections once it is in the room the header
+/// leaves ([`frames_in_front`]): a segment lists its sections in the order of their
+/// addresses, which dyld checks (`dyld_info` says "start address overlaps previous
+/// section"). The symbols name their section by its number, so those in the sections it
+/// passes are numbered again, in the symbol table of `linkedit`, which starts at `offset`
+/// of the file.
+fn unwind_first(
+    image: &Image,
+    commands: &mut [u8],
+    linkedit: &mut [u8],
+    offset: u64,
+) -> anyhow::Result<()> {
+    let Table { header, nth, first, .. } = image.unwind;
+    let start = header - (nth - first) * SECTION;
+    commands[start..header + SECTION].rotate_right(SECTION);
+
+    let (lowest, moved) = (u8::try_from(first + 1)?, u8::try_from(nth + 1)?);
+    let mut command = HEADER;
+    for _ in 0..u32_at(commands, 16)? {
+        if u32_at(commands, command)? == macho::LC_SYMTAB {
+            let table = (u64::from(u32_at(commands, command + 8)?))
+                .checked_sub(offset)
+                .context("a symbol table in front of `__LINKEDIT`")?;
+            for nth in 0..u32_at(commands, command + 12)? as usize {
+                let entry = table as usize + nth * NLIST + 5;
+                let section = linkedit.get_mut(entry).context("symbols past the end")?;
+                *section = match *section {
+                    it if it == moved => lowest,
+                    it if (lowest..moved).contains(&it) => it + 1,
+                    it => it,
+                };
+            }
+            return Ok(());
+        }
+        command += u32_at(commands, command + 4)? as usize;
+    }
+    bail!("no symbol table")
 }
 
 /// The unwinder's table (`__unwind_info`) for frames `by` bytes further from where
@@ -1302,7 +1391,7 @@ impl<'a> Patch<'a> {
         let text = (base, data_at);
         let data = (base + data_at, linkedit_at - data_at);
         let layout = Layout { text, data, rebases, renamed };
-        let (mut commands, linkedit) = layout.linked(image, offset + linkedit_at)?;
+        let (mut commands, mut linkedit) = layout.linked(image, offset + linkedit_at)?;
         ensure!(
             commands.len() <= image.room,
             "the header has no room for two more segments: link with -Wl,-headerpad,{:#x}",
@@ -1330,6 +1419,7 @@ impl<'a> Patch<'a> {
                         u32::try_from(image.offset_of(start)?)?,
                     );
                 }
+                unwind_first(image, &mut commands, &mut linkedit, offset + linkedit_at)?;
                 tables = written;
             }
         }
@@ -1629,33 +1719,46 @@ impl Layout {
         let address = self.data.0 + self.data.1;
         let mut commands = image.commands.clone();
 
-        // The segments, of no sections: dyld looks for the unwinder's tables only in
-        // `__TEXT`.
+        // The segments, of one section each, as long as it: `dyld_info` stops at a fixup in
+        // no section. The patch's frames are not one of them, for dyld looks for the
+        // unwinder's tables only in `__TEXT`.
         let mut added = Vec::new();
-        let segment = |name: &[u8], (address, len): (u64, u64), protection: u32| {
-            let mut command = vec![0; SEGMENT];
-            put32(&mut command, 0, macho::LC_SEGMENT_64);
-            put32(&mut command, 4, SEGMENT as u32);
-            command[8..8 + name.len()].copy_from_slice(name);
-            for (at, field) in
-                [address, len, address - old.address + old.offset, len].into_iter().enumerate()
-            {
-                put64(&mut command, 24 + at * 8, field);
-            }
-            put32(&mut command, 56, protection);
-            put32(&mut command, 60, protection);
-            command
-        };
+        let segment =
+            |name: &[u8], (address, len): (u64, u64), protection: u32, section: (&[u8], u32)| {
+                let mut command = vec![0; SEGMENT + SECTION];
+                put32(&mut command, 0, macho::LC_SEGMENT_64);
+                put32(&mut command, 4, (SEGMENT + SECTION) as u32);
+                command[8..8 + name.len()].copy_from_slice(name);
+                let offset = address - old.address + old.offset;
+                for (at, field) in [address, len, offset, len].into_iter().enumerate() {
+                    put64(&mut command, 24 + at * 8, field);
+                }
+                put32(&mut command, 56, protection);
+                put32(&mut command, 60, protection);
+                put32(&mut command, 64, 1);
+                let (sectname, flags) = section;
+                let header = &mut command[SEGMENT..];
+                header[..sectname.len()].copy_from_slice(sectname);
+                header[16..16 + name.len()].copy_from_slice(name);
+                put64(header, 32, address);
+                put64(header, 40, len);
+                put32(header, 48, u32::try_from(offset)?);
+                put32(header, 52, PAGE.trailing_zeros());
+                put32(header, 64, flags);
+                anyhow::Ok(command)
+            };
         added.extend(segment(
             b"__RA_JIT_TEXT",
             self.text,
             macho::VM_PROT_READ | macho::VM_PROT_EXECUTE,
-        ));
+            (b"__text", macho::S_ATTR_PURE_INSTRUCTIONS | macho::S_ATTR_SOME_INSTRUCTIONS),
+        )?);
         added.extend(segment(
             b"__RA_JIT_DATA",
             self.data,
             macho::VM_PROT_READ | macho::VM_PROT_WRITE,
-        ));
+            (b"__data", macho::S_REGULAR),
+        )?);
 
         // `__LINKEDIT`: the fixups are written again, and what is behind them moves by as
         // much as they grew.
@@ -1677,8 +1780,17 @@ impl Layout {
             at if at < rebases + len => at - old.offset + offset,
             at => at - old.offset + offset + stream.len() as u64 - len,
         };
+        // The new code is in the section of the first new segment, which comes in front of
+        // `__LINKEDIT`, of none.
+        let text = u8::try_from(image.sectioned + 1)
+            .ok()
+            .filter(|_| u32_at(&image.commands, image.at.linkedit + 64).ok() == Some(0));
         for (entry, address) in &self.renamed {
-            put64(&mut linkedit, (moved(*entry) - offset) as usize + 8, *address);
+            let entry = (moved(*entry) - offset) as usize;
+            put64(&mut linkedit, entry + 8, *address);
+            if let Some(text) = text {
+                linkedit[entry + 5] = text;
+            }
         }
         // The signature is looked for right behind the strings, which end the rest, at the
         // next multiple of sixteen: what filled up to the old one is not kept.
@@ -1757,6 +1869,47 @@ pub(super) fn uuid(image: &Image) -> Option<[u8; 16]> {
     uuid_of(&image.commands)
 }
 
+/// The `-headerpad` the executable that starts with `commands`, its header and load commands,
+/// is to be linked with for a splice to have room in it, when the room it has is less: room
+/// for the two segments a splice adds, of a section each, and for the unwind table, which
+/// moves there (see [`frames_in_front`]), and a quarter more for the program to grow before
+/// it is short again. `None` for one that has the room, and for one that is not an AArch64
+/// executable with an unwind table.
+pub(super) fn headerpad_short(commands: &[u8]) -> anyhow::Result<Option<u64>> {
+    let executable = u32_at(commands, 0)? == macho::MH_MAGIC_64
+        && u32_at(commands, 4)? == macho::CPU_TYPE_ARM64
+        && u32_at(commands, 12)? == macho::MH_EXECUTE;
+    if !executable {
+        return Ok(None);
+    }
+    let len = HEADER + u32_at(commands, 20)? as usize;
+    let commands = commands.get(..len).context("the file ends early")?;
+    let (mut room, mut unwind) = (usize::MAX, None);
+    let mut command = HEADER;
+    for _ in 0..u32_at(commands, 16)? {
+        if u32_at(commands, command)? == macho::LC_SEGMENT_64 {
+            for nth in 0..u32_at(commands, command + 64)? as usize {
+                let header = command + SEGMENT + nth * SECTION;
+                let size = u64_at(commands, header + 40)? as usize;
+                let offset = u32_at(commands, header + 48)? as usize;
+                if offset != 0 && size != 0 {
+                    room = room.min(offset);
+                }
+                if commands.get(header..header + 16) == Some(b"__unwind_info\0\0\0") {
+                    unwind = Some(size);
+                }
+            }
+        }
+        command += u32_at(commands, command + 4)? as usize;
+    }
+    let Some(unwind) = unwind else { return Ok(None) };
+    let needed = (len + 2 * (SEGMENT + SECTION)).next_multiple_of(16) + unwind;
+    if needed <= room {
+        return Ok(None);
+    }
+    Ok(Some((needed + needed / 4 - len).next_multiple_of(PAGE as usize) as u64))
+}
+
 /// The `LC_UUID` among the load commands `commands` start with.
 fn uuid_of(commands: &[u8]) -> Option<[u8; 16]> {
     let count = u32_at(commands, 16).ok()?;
@@ -1795,6 +1948,7 @@ pub(super) fn splice(
     undo: &mut Vec<(u64, Vec<u8>)>,
     originals: &mut FxHashMap<u64, Vec<u8>>,
     stamp: &mut Stamp,
+    last: &mut Option<Appended>,
     patch: &[u8],
     give_up: &AtomicBool,
 ) -> anyhow::Result<Spliced> {
@@ -1824,6 +1978,7 @@ pub(super) fn splice(
     // What is undone of the last splice is the copy's: the executable keeps it until the
     // rename, and a splice given up on leaves it as it was.
     let undone = undo.clone();
+    let mut fresh = None;
     let written = (|| -> anyhow::Result<Stamp> {
         super::go_on(give_up)?;
         let file = OpenOptions::new().read(true).write(true).open(&copy)?;
@@ -1849,8 +2004,15 @@ pub(super) fn splice(
             super::write_all_at(&file, bytes, *offset)?;
         }
         step("overwrite", &mut from);
-        let signature =
-            image.signature.of(&file, addition.offset, &dirty, &addition.appended, give_up)?;
+        let (signature, hashes) = image.signature.of(
+            &file,
+            addition.offset,
+            &dirty,
+            &addition.appended,
+            last.as_ref(),
+            give_up,
+        )?;
+        fresh = Some(hashes);
         step("sign", &mut from);
         // In parts, to give up between them.
         for (index, part) in addition.appended.chunks(1 << 20).enumerate() {
@@ -1873,6 +2035,62 @@ pub(super) fn splice(
         _ = std::fs::remove_file(&copy);
         *undo = undone;
     }
+    let spliced =
+        Spliced { redirected: addition.redirected, appended: addition.appended.len(), copied: 0 };
+    if let Some(hashes) = fresh {
+        let (offset, page, bytes) = (addition.offset, image.signature.page, addition.appended);
+        *last = Some(Appended { offset, page, bytes, hashes });
+    }
     *stamp = written?;
-    Ok(Spliced { redirected: addition.redirected, appended: addition.appended.len() })
+    Ok(spliced)
+}
+
+#[cfg(test)]
+mod tests {
+    use object::macho;
+
+    use super::{HEADER, PAGE, SECTION, SEGMENT, headerpad_short, put32, put64};
+
+    /// The header and load commands of an executable of one segment, whose code starts
+    /// `room` bytes into the file and whose unwind table is `unwind` bytes.
+    fn commands(room: u32, unwind: u64) -> Vec<u8> {
+        let len = SEGMENT + 2 * SECTION;
+        let mut bytes = vec![0; HEADER + len];
+        put32(&mut bytes, 0, macho::MH_MAGIC_64);
+        put32(&mut bytes, 4, macho::CPU_TYPE_ARM64);
+        put32(&mut bytes, 12, macho::MH_EXECUTE);
+        put32(&mut bytes, 16, 1);
+        put32(&mut bytes, 20, len as u32);
+        put32(&mut bytes, HEADER, macho::LC_SEGMENT_64);
+        put32(&mut bytes, HEADER + 4, len as u32);
+        bytes[HEADER + 8..HEADER + 14].copy_from_slice(b"__TEXT");
+        put32(&mut bytes, HEADER + 64, 2);
+        let sections = [(&b"__text"[..], 0x1000, room), (b"__unwind_info", unwind, room + 0x1000)];
+        for (nth, (name, size, offset)) in sections.into_iter().enumerate() {
+            let at = HEADER + SEGMENT + nth * SECTION;
+            bytes[at..at + name.len()].copy_from_slice(name);
+            put64(&mut bytes, at + 40, size);
+            put32(&mut bytes, at + 48, offset);
+        }
+        bytes
+    }
+
+    #[test]
+    fn room_for_the_unwind_table() {
+        let len = (HEADER + SEGMENT + 2 * SECTION) as u64;
+        let added = 2 * (SEGMENT + SECTION) as u64;
+        let needed = |unwind: u64| (len + added).next_multiple_of(16) + unwind;
+        assert_eq!(headerpad_short(&commands(0x10_0000, 0x1000)).unwrap(), None);
+        assert_eq!(headerpad_short(&commands(needed(0x1000) as u32, 0x1000)).unwrap(), None);
+        // The table of a GUI app of 570 crates, in what Apple's linker leaves by default.
+        let unwind = 3_231_816;
+        let pad = headerpad_short(&commands(0x10_0000, unwind)).unwrap().unwrap();
+        assert!(len + pad >= needed(unwind) + needed(unwind) / 4);
+        assert!(pad.is_multiple_of(PAGE) && len + pad < needed(unwind) * 2);
+        let pad = headerpad_short(&commands(needed(0x1000) as u32 - 1, 0x1000)).unwrap();
+        assert!(pad.is_some());
+        let mut library = commands(0x100, 0x1000);
+        put32(&mut library, 12, macho::MH_DYLIB);
+        assert_eq!(headerpad_short(&library).unwrap(), None);
+    }
 }
