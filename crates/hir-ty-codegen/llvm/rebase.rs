@@ -15,8 +15,8 @@ use inkwell::{
         LLVMOpcode,
         core::{
             LLVMAddIncoming, LLVMBuildGEP2, LLVMBuildPhi, LLVMBuildPtrToInt, LLVMBuildSelect,
-            LLVMConstNull, LLVMCountIncoming, LLVMCreateBuilderInContext, LLVMDisposeBuilder,
-            LLVMGetConstOpcode, LLVMGetFirstBasicBlock, LLVMGetFirstFunction,
+            LLVMConstGEP2, LLVMConstNull, LLVMCountIncoming, LLVMCreateBuilderInContext,
+            LLVMDisposeBuilder, LLVMGetConstOpcode, LLVMGetFirstBasicBlock, LLVMGetFirstFunction,
             LLVMGetFirstInstruction, LLVMGetIncomingBlock, LLVMGetIncomingValue,
             LLVMGetInstructionOpcode, LLVMGetInstructionParent, LLVMGetIsDisjoint,
             LLVMGetModuleContext, LLVMGetNextBasicBlock, LLVMGetNextFunction,
@@ -196,7 +196,7 @@ impl Web {
                     Node::Address(address)
                 }
                 LLVMOpcode::LLVMPHI => Node::Phi,
-                LLVMOpcode::LLVMSelect => Node::Select,
+                LLVMOpcode::LLVMSelect if !LLVMIsAInstruction(value).is_null() => Node::Select,
                 LLVMOpcode::LLVMAdd => Self::sum(value)?,
                 LLVMOpcode::LLVMOr
                     if !LLVMIsAInstruction(value).is_null() && LLVMGetIsDisjoint(value) != 0 =>
@@ -293,6 +293,10 @@ impl Web {
                             pointers[&otherwise],
                             c"".as_ptr(),
                         )
+                    }
+                    // A constant's sum is of constants, and is in no block to build before.
+                    Node::Sum { based, mut offset } if LLVMIsAInstruction(value).is_null() => {
+                        LLVMConstGEP2(byte, pointers[&based], &mut offset, 1)
                     }
                     Node::Sum { based, mut offset } => {
                         LLVMPositionBuilderBefore(builder, value);
