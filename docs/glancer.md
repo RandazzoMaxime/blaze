@@ -162,9 +162,18 @@ domain. Seeing the sub-requests needs a hook in load-cargo's `Expander`
 (`vendor/rust-analyzer/crates/load-cargo/src/lib.rs`, around line 703): a new module file
 in load-cargo declared with one line, which counts the callback's requests per expansion.
 
-**Payoff.** Unmeasured. bevy's 14.4 s load is where it should show (derive-heavy); step 0
-times expansions to say how much of a load they are before this is built. A warm start
-saves the expansion and the server round trip; a cold start gains nothing.
+**Payoff, measured (2026-10-21, dev-aws-7, 16 cores, `cargo ra-jit build` cold then warm on
+one store).** Expansion is a small part of a load. nushell's cold start expands 1677 macros
+in 3.20 s (summed over threads; 1520 derives take 2.95 s) of a 14.3 s load; helix's 1476 in
+3.40 s. On the warm start 1583 (nushell) and 1455 (helix) come from the store in about 0.6 s,
+plus 0.4 to 0.5 s to key them, and the expansions left are function-like macros, which are
+not kept by default. Resolve goes from 5.0 to 3.9 s on nushell and from 5.5 to 4.1 s on helix;
+time to ready from 33.6 to 32.3 s and from 139.4 to 138.2 s. ripgrep expands no proc macro.
+Peak memory, the daemon's memory once ready and the store's size do not change (store +0.01 GB).
+
+Build scripts need no cache of their own: a warm start does not run them. The daemon reads
+their results from the messages of cargo's own build, which cargo's fingerprints keep fresh
+(helix: the command returns in 0.5 s and the workspace loads in 0.6 s).
 
 **Risks.** A macro that is impure without asking the server (reads a file through
 `std::fs`, `env!` at expansion time) gives a stale expansion: the opt-out, and a check mode

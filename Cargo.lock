@@ -3198,6 +3198,7 @@ dependencies = [
  "pdb",
  "project-model",
  "pulldown-cmark",
+ "ra-jit-expand",
  "ra-jit-live",
  "ra-jit-store",
  "rustc-demangle",
@@ -3250,6 +3251,23 @@ dependencies = [
 [[package]]
 name = "ra-jit-cache-macros"
 version = "0.1.0"
+
+[[package]]
+name = "ra-jit-expand"
+version = "0.1.0"
+dependencies = [
+ "base-db",
+ "hir-expand",
+ "load-cargo",
+ "paths",
+ "postcard",
+ "proc-macro-api",
+ "ra-jit-store",
+ "rustc-hash 2.1.2",
+ "sha2 0.10.9",
+ "span",
+ "tt",
+]
 
 [[package]]
 name = "ra-jit-fuzz"
