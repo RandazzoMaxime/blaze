@@ -1007,15 +1007,20 @@ impl<'a, 'db> Checker<'a, '_, 'db> {
                     continue;
                 }
                 if reported.insert((test.ty, test.span)) {
-                    let code = match kind {
-                        UniversalKind::Static => "E0310",
-                        UniversalKind::Named => "E0309",
-                        _ => "E0311",
+                    let (code, message) = match kind {
+                        _ if test.forall => ("", "the parameter type does not live long enough"),
+                        UniversalKind::Static => {
+                            ("E0310", "the parameter type may not live long enough")
+                        }
+                        UniversalKind::Named => {
+                            ("E0309", "the parameter type may not live long enough")
+                        }
+                        _ => ("E0311", "the parameter type may not live long enough"),
                     };
                     self.errors.push(Some(BorrowckDiagnostic {
                         code,
                         span: test.span,
-                        message: "the parameter type may not live long enough".to_owned(),
+                        message: message.to_owned(),
                         at_signature: false,
                     }));
                 }
