@@ -49,8 +49,12 @@ All of these are rustc's, written from `compiler/rustc_borrowck` at the pinned n
 - Region inference: liveness of locals (drops kept live only back to where the local may be
   initialized), outlives constraints from every statement, call, cast and aggregate, the
   signature's universal regions and implied bounds (normalized parameters and the impl
-  header included), where clauses (elaborated through supertraits), type tests, and
-  lifetimes written in `let` annotations, casts, turbofishes and struct literal paths.
+  header included, for associated consts too), where clauses (elaborated through
+  supertraits), type tests, and lifetimes written in `let` annotations, casts, turbofishes
+  and struct literal paths. A function item, closure or safe function pointer cast to a
+  function pointer is a subtype of it by signature. A where clause `for<'a> T: 'a` is
+  `T: 'static`, and a type parameter that fails it is rustc's codeless "does not live long
+  enough".
 - Errors on universal regions: "lifetime may not live long enough", E0521, E0309, E0310,
   E0311, with rustc's object lifetime defaults (`&'a dyn Trait` is `dyn Trait + 'a`, a trait
   bounded by `'static` makes its objects `'static`, elsewhere in a body the lifetime is
@@ -93,12 +97,12 @@ counted reason, when it cannot say anything about the borrow checker: it needs a
 feature, an auxiliary crate or another file, a `-Z` flag other than Polonius, or rustc
 stops before borrow checking.
 
-With no borrow checker, the 245 units rustc accepts would pass. On branch borrowck-3:
+With no borrow checker, the 245 units rustc accepts would pass. Now:
 
 | Mode | In scope | Pass | rustc accepts, ra-jit too | rustc rejects, same errors |
 |---|---|---|---|---|
-| Polonius | 1578 | 1120 (71.0%) | 245 of 245 | 875 of 1333 |
-| NLL | 1576 | 1112 (70.6%) | 226 of 226 | 886 of 1350 |
+| Polonius | 1579 | 1126 (71.3%) | 245 of 245 | 881 of 1334 |
+| NLL | 1577 | 1118 (70.9%) | 226 of 226 | 892 of 1351 |
 
 463 units are out of scope; 344 of them need a nightly feature. CI runs the scoring on Linux
 and fails below a floor a few units under the count there.
@@ -111,12 +115,13 @@ just, axum, nushell, delta, eza, tokei and starship it finds nothing, nor on the
 ## What is left
 
 Every failing unit is one where rustc gives an error ra-jit does not, or gives it on another
-line or with another code. By what is wrong, most first: 73 "lifetime may not live long
-enough" not reported, 38 E0597 not reported, 20 E0310, 18 E0381, 17 E0309, 8 E0700, then a
+line or with another code. By what is wrong, most first: 68 "lifetime may not live long
+enough" not reported, 38 E0597 not reported, 19 E0310, 18 E0381, 17 E0309, 8 E0700, then a
 long tail. The causes, grouped:
 
 - **Higher-ranked regions and placeholders** (`for<'a>` bounds, closures with higher-ranked
-  signatures): rustc checks them with placeholders in universes; ra-jit does not yet.
+  signatures): rustc checks them with placeholders in universes; ra-jit does not yet, and
+  leaves out what a `for<'a>` lifetime is related to, apart from `for<'a> T: 'a`.
 - **Well-formedness of items** (most of what is left of E0309 and E0310): rustc checks that
   the types in a struct, enum, impl or where clause outlive what they borrow for before it
   checks any body; ra-jit checks bodies only. A projection's `<T as Trait>::Assoc: 'a` is not
