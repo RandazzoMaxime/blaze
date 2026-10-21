@@ -61,6 +61,11 @@ All of these are rustc's, written from `compiler/rustc_borrowck` at the pinned n
 - `impl Trait` captures: a return-position `impl Trait` keeps alive and relates only the
   lifetimes it captures, those listed in `use<..>` or, before edition 2024 outside traits and
   `async fn`, those its bounds name; its type parameters are always captured.
+- `impl Trait`'s hidden type: each of its regions must be `'static` or one of the lifetimes
+  the `impl Trait` captures (rustc's member constraints), else E0700 at the signature; and it
+  must outlive what the bounds say (`impl Copy + 'a`). rustc picks the captured lifetime a
+  region becomes and checks the body with that choice; ra-jit only tests that one exists, so
+  it reports E0700 where rustc does and leaves the errors that choice causes unreported.
 - Closures: captures, E0373, `FnMut` escapes, E0596 and E0594 through captures. A closure's
   body has two kinds of universal region, as rustc's: its own (the late-bound lifetimes of
   its signature, `for<'a> FnOnce(&'a T)`, and the borrow of its environment) and its
@@ -92,8 +97,8 @@ With no borrow checker, the 245 units rustc accepts would pass. On branch borrow
 
 | Mode | In scope | Pass | rustc accepts, ra-jit too | rustc rejects, same errors |
 |---|---|---|---|---|
-| Polonius | 1578 | 1106 (70.1%) | 245 of 245 | 861 of 1333 |
-| NLL | 1576 | 1098 (69.7%) | 226 of 226 | 872 of 1350 |
+| Polonius | 1578 | 1120 (71.0%) | 245 of 245 | 875 of 1333 |
+| NLL | 1576 | 1112 (70.6%) | 226 of 226 | 886 of 1350 |
 
 463 units are out of scope; 344 of them need a nightly feature. CI runs the scoring on Linux
 and fails below a floor a few units under the count there.
@@ -106,9 +111,9 @@ just, axum, nushell, delta, eza, tokei and starship it finds nothing, nor on the
 ## What is left
 
 Every failing unit is one where rustc gives an error ra-jit does not, or gives it on another
-line or with another code. By what is wrong, most first, on branch borrowck-3: 73 "lifetime
-may not live long enough" not reported, 38 E0597 not reported, 20 E0310, 20 E0700, 18 E0381,
-17 E0309, then a long tail. The causes, grouped:
+line or with another code. By what is wrong, most first: 73 "lifetime may not live long
+enough" not reported, 38 E0597 not reported, 20 E0310, 18 E0381, 17 E0309, 8 E0700, then a
+long tail. The causes, grouped:
 
 - **Higher-ranked regions and placeholders** (`for<'a>` bounds, closures with higher-ranked
   signatures): rustc checks them with placeholders in universes; ra-jit does not yet.
@@ -119,7 +124,9 @@ may not live long enough" not reported, 38 E0597 not reported, 20 E0310, 20 E070
 - **Written closure parameter types**: `|x: &'x u32|` gives `x` the creator's `'x` in rustc,
   the closure's own lifetime in ra-jit, so an error the annotation causes is reported where
   `x` is used instead of at the parameter.
-- **Member constraints of `impl Trait`** (E0700, not reported yet).
+- **Member constraints of `impl Trait`**: the choice rustc makes is not applied, and a
+  projection bound that names a lifetime (`impl Iterator<Item = Box<dyn Foo>>`) leaves them
+  out.
 - **Trait selection's region obligations**: an impl's `T: 'static` proven at an unsizing
   cast, or the region constraints of an impl a method resolves to.
 - **Differences in rust-analyzer's MIR lowering** (below).
