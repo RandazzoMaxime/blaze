@@ -322,6 +322,10 @@ impl Worker {
             args.push(flag.into());
             args.push(path.into());
         }
+        if let Some(rustcs) = &first.rustc_binary {
+            args.push("--rustc-binary".into());
+            args.push(rustcs.into());
+        }
         // In a file: a program of many crates has more of them than fit the command line
         // of a process on Windows.
         let symbols = dir.join("symbols");

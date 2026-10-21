@@ -23,6 +23,9 @@ os.environ.setdefault("RUSTUP_TOOLCHAIN", open(os.path.join(os.path.dirname(os.p
 os.environ.setdefault("RUSTFLAGS", "-C link-dead-code")
 # Incremental caches of a sweep over many crates fill the disk.
 os.environ.setdefault("CARGO_INCREMENTAL", "0")
+# Set, not unset: cargo's `[env]` (as in ~/.cargo/config.toml) fills in only what is not already
+# set, so an unset RUST_BACKTRACE would take its value and panics would print differently.
+os.environ["RUST_BACKTRACE"] = "0"
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 # A sweep runs against a copy, so rebuilding ra-jit meanwhile does not change it under the sweep.

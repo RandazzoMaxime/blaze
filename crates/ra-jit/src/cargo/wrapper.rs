@@ -39,7 +39,7 @@ pub(crate) const DRIVEN: &str = "RA_JIT_CARGO_DRIVES";
 /// crates that are the daemon's to compile, as a list of paths.
 pub(crate) const STAGED: &str = "RA_JIT_STAGED_CRATES";
 /// The file in the record of a unit that says rustc built what stands in for the crate.
-const STANDS_IN: &str = "stands-in";
+pub(crate) const STANDS_IN: &str = "stands-in";
 
 /// What the variables that name the programs of a build start with.
 const PROGRAM_OF: &str = "CARGO_BIN_EXE_";
@@ -101,6 +101,11 @@ pub(crate) fn command(mut args: impl Iterator<Item = OsString>) -> anyhow::Resul
     if unit.linked {
         std::fs::create_dir_all(&copies)?;
         compiler.arg(format!("--print=link-args={}", line.display())).arg("-Csave-temps");
+        if unit.for_apple() {
+            for arg in super::plan::rustc_link_args() {
+                compiler.arg(format!("-Clink-arg={arg}"));
+            }
+        }
     }
     let status =
         compiler.status().with_context(|| format!("running {}", Path::new(&rustc).display()))?;
@@ -318,6 +323,16 @@ impl Unit {
         let mut command = Command::new(rustc);
         command.args(args).stdin(Stdio::null());
         std::thread::spawn(move || command.output())
+    }
+
+    /// Whether rustc compiles the crate for an Apple platform, whose linker is told how much
+    /// room to leave after the load commands.
+    fn for_apple(&self) -> bool {
+        let at = self.args.iter().position(|it| it == "--target");
+        let target = at.and_then(|at| self.args.get(at + 1)).map(String::as_str);
+        let target =
+            target.or_else(|| self.args.iter().find_map(|it| it.strip_prefix("--target=")));
+        target.map_or(cfg!(target_vendor = "apple"), |it| it.contains("-apple-"))
     }
 
     /// Whether the crate is one the first build of the workspace leaves to the daemon.

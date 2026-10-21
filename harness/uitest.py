@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Runs rustc's own run-pass tests through the differential harness.
 
-usage: uitest.py <rust checkout> [--filter <substring>] [--limit N] [--jobs N] [--work dir]
-                 [--json out.json] [--rerun out.json] [--fresh]
+usage: uitest.py <rust checkout> [--filter <substring>] [--tests list.txt] [--limit N] [--jobs N]
+                 [--work dir] [--json out.json] [--rerun out.json] [--fresh]
 
 Every `tests/ui` file marked `//@ run-pass` is accounted for: it is either run, once per
 revision, or left out with a reason that is counted. A test that is run becomes a package
@@ -689,6 +689,7 @@ def main():
     ap.add_argument("--limit", type=int)
     ap.add_argument("--jobs", type=int, default=max(1, (os.cpu_count() or 2) // 2), help="workspaces at a time")
     ap.add_argument("--rerun", help="only the tests that failed in this earlier --json output")
+    ap.add_argument("--tests", help="only the tests this file names, one per line (as ui-pinned.txt)")
     ap.add_argument("--work", default=os.path.expanduser("~/ra-jit-ui"), help="where the workspaces and results go")
     ap.add_argument("--fresh", action="store_true", help="forget the results kept under --work")
     ap.add_argument("--json")
@@ -699,6 +700,12 @@ def main():
     if a.rerun:
         again = {r["test"] for r in json.load(open(a.rerun)) if r["outcome"] not in ("match", "excluded")}
         units, excluded = [u for u in units if u.test in again], []
+    if a.tests:
+        named = {line.split("#")[0].strip() for line in open(a.tests)} - {""}
+        missing = named - {u.test for u in units} - {r["test"] for r in excluded}
+        if missing:
+            sys.exit(f"{a.tests} names tests that are not in the checkout: {sorted(missing)}")
+        units, excluded = [u for u in units if u.test in named], [r for r in excluded if r["test"] in named]
     units = units[:a.limit]
     if a.fresh:
         shutil.rmtree(f"{a.work}/results", ignore_errors=True)

@@ -22,7 +22,9 @@ NIGHTLY_ENV = {"RUSTC_BOOTSTRAP": "1", "CARGO_UNSTABLE_CHECKSUM_FRESHNESS": "fal
 # What is reduced and not fixed: these are expected to differ, and are told apart when they do.
 OPEN = {"assert_message", "raw_write_then_match", "future_unwind_flags", "fragment_edition_through_macro", "assert_long_expression"}
 # Frames that are larger than rustc's, where a program counts on rustc's: the answer is right and the room is not.
-OPEN |= {"frame_of_array"}
+# Cranelift's keep three arrays where rustc's keep two; LLVM's keep one.
+if os.environ.get("RA_JIT_BACKEND", "cranelift") == "cranelift":
+    OPEN |= {"frame_of_array"}
 # What is reduced and not fixed either, where ra-jit says so: a function of these is left to rustc.
 LEFT = {"caller_in_constant", "empty_array_by_impl", "macro_reads_its_spelling", "fragment_ends_statement"}
 # Crates reduced and not fixed, where ra-jit says so: a function of these is left to rustc.

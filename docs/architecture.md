@@ -242,6 +242,36 @@ The daemon assumes the source it loads is the source rustc compiled. The client 
 time just before cargo starts. When a worker has loaded, the daemon checks that no source
 file rustc read is newer than that, and discards the worker if one is.
 
+### The first edits patch what rustc linked
+
+The daemon is ready once it has loaded the workspace and read the symbols of the executable
+rustc linked; it compiles nothing of its own first ([#11](https://github.com/indexable-inc/ra-jit/issues/11)).
+The first edits are patches of that executable (`patch::Base::of_rustc`), spliced into it as
+later edits are spliced into the daemon's own links. To link a body against code it did not
+compile, the resolver also uses rustc's private local symbols (`symbols::Linked`), which it
+stops using once a build is in full. On macOS the wrapper links those executables with
+`-Wl,-headerpad,0x400000` and `-Wl,-bind_at_load`, so a splice has room for its load commands
+and the unwind table of a program of some four hundred thousand functions, and every import
+is bound at start; the daemon's own links leave both out of rustc's line
+(`cargo::plan::rustc_link_args`). While cargo builds, the spare worker compiles ahead on a
+quarter of the cores, the rest being cargo's, and on all of them once cargo is done.
+
+A patch over rustc has no marks of before to compare with, so the daemon takes them just in
+time: before an edit's text reaches the database, `home` notes the functions written in the
+file, their closures and the statics they declare, under rustc's symbols. An `async` block
+has no mark; the hash of its function's text and place stands in. A file not noted before
+it changed, an edit that is more than function bodies, an edit of a generic, `#[inline]` or
+default trait function (rustc copies those into their callers, and the outline's copied
+fingerprint tells), a changed static, and `include!`d or asset files take a build in full,
+and the build log says which (`no patch: ...`). So does a patch the splice can't place: one
+that calls a libc function the executable does not import, uses a thread-local, or has
+frames that do not fit a small executable's unwind table on macOS.
+
+Once nothing waits for a second, the daemon builds its own base in full in the background,
+from the store as far as it can; an edit that comes meanwhile interrupts it and is a patch
+of rustc's executable. `RA_JIT_RUSTC_BASE=0` makes the first build the daemon's own, as
+before. `harness/rustcbase.py` checks every kind of edit against cargo.
+
 An alternative wrapper exists in `stub.rs` (`RA_JIT_WRAPS_RUSTC`), where rustc compiles only
 a stub for each workspace crate and all code is ra-jit's. It makes the first build faster,
 but a function ra-jit refuses then has no rustc copy to fall back on, so it is used by

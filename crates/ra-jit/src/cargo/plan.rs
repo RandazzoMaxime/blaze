@@ -25,6 +25,12 @@ const NO_FIXUP_CHAINS: &str = "-Wl,-no_fixup_chains";
 /// [`headerpad_file`].
 const HEADERPAD: u64 = 0x100000;
 
+/// The same for rustc's links of a program, which nothing links again with more: the first
+/// edits are spliced into them. Room for the unwind table of a program of some four hundred
+/// thousand functions, as nushell is twice over; one of more is built in full for its first
+/// edit. The room is zeros the program never touches: it costs its size on disk.
+const RUSTC_HEADERPAD: u64 = 0x400000;
+
 /// How the room is asked for.
 const HEADERPAD_FLAG: &str = "-Wl,-headerpad,";
 
@@ -63,6 +69,9 @@ pub(crate) struct Plan {
     pub(crate) patch: PathBuf,
     /// The executable the daemon links and splices.
     pub(crate) binary: PathBuf,
+    /// The executable rustc linked, which the daemon's first edits are patches of.
+    #[serde(default)]
+    pub(crate) rustc_binary: Option<PathBuf>,
     /// The command that links `binary`, for a shell.
     pub(crate) link_cmd: String,
     pub(crate) symbol_files: Vec<PathBuf>,
@@ -112,11 +121,13 @@ impl Plan {
             let why = "the link line is not one of a linker driven by `cc` or of `link.exe`";
             return Ok(Err(why.to_owned()));
         };
+        let mut patched_as_built = !unit_test && !unit.is_test() && calls_by_symbol(unit);
         let mut plan = Plan {
             crates: vec![unit.source.clone()],
             object: dir.join("ra-jit.o"),
             patch: dir.join("patch.o"),
             binary: dir.join("bin"),
+            rustc_binary: None,
             link_cmd: String::new(),
             symbol_files: Vec::new(),
             unit_test,
@@ -147,6 +158,7 @@ impl Plan {
             if member.is_none() {
                 continue;
             }
+            patched_as_built &= calls_by_symbol(owner);
             // With `cfg(test)` the daemon has it on every crate of the workspace, and rustc
             // built the libraries of a unit test without it.
             if unit_test {
@@ -156,6 +168,7 @@ impl Plan {
             }
         }
         plan.symbol_files = link.rustc_files();
+        plan.rustc_binary = link.output().filter(|_| patched_as_built).map(PathBuf::from);
         std::fs::create_dir_all(dir)?;
         link.give_way(&plan.copies)?;
         let apple = link.flavor == Flavor::Apple;
@@ -184,6 +197,14 @@ fn entitlements(source: &Path) -> Option<PathBuf> {
     let file =
         manifest.get("package")?.get("metadata")?.get("ra-jit")?.get("entitlements")?.as_str()?;
     Some(package.join(file))
+}
+
+/// Whether rustc compiled `unit` with one copy of each function that is not generic or
+/// `#[inline]`, which every call goes to: no inlining, and nothing made private to an object.
+fn calls_by_symbol(unit: &Record) -> bool {
+    unit.codegen("opt-level").unwrap_or("0") == "0"
+        && unit.codegen("incremental").is_some()
+        && !unit.stands_in()
 }
 
 /// Why the tests of `unit` are only right as rustc built them, if they are. rustc's
@@ -295,7 +316,7 @@ impl LinkLine {
             .filter_map(|it| it.split_once('='))
             .map(|(name, value)| (name.to_owned(), value.to_owned()))
             .collect();
-        let args: Vec<String> = words[first + 1..]
+        let mut args: Vec<String> = words[first + 1..]
             .iter()
             // rustc's object of the names the program has to keep stays while it is there:
             // `-Csave-temps` keeps rustc's directory.
@@ -303,6 +324,14 @@ impl LinkLine {
             .cloned()
             .collect();
         let flavor = Flavor::of(&args)?;
+        if flavor == Flavor::Apple {
+            // The wrapper's come after what cargo asked.
+            for added in rustc_link_args() {
+                if let Some(at) = args.iter().rposition(|it| *it == added) {
+                    args.remove(at);
+                }
+            }
+        }
         let (without, linker) = (without.to_vec(), words[first].clone());
         Some(LinkLine { without, env, linker, args, flavor })
     }
@@ -514,6 +543,19 @@ pub(crate) fn headerpad_of(binary: &Path) -> Option<u64> {
     headerpad_in(std::fs::read_to_string(headerpad_file(binary)).ok()?.trim())
 }
 
+/// What rustc's link of a program for Apple is told besides what cargo asked, for the
+/// daemon's first edits to be spliced into it: the room after the load commands, an address
+/// slot of each function of another library (which ld64 makes of each lazy one when
+/// everything is bound at load), and fixups in tables. The daemon's own links leave these out
+/// of the line.
+pub(crate) fn rustc_link_args() -> [String; 3] {
+    [
+        format!("{HEADERPAD_FLAG}{RUSTC_HEADERPAD:#x}"),
+        "-Wl,-bind_at_load".to_owned(),
+        NO_FIXUP_CHAINS.to_owned(),
+    ]
+}
+
 pub(crate) fn write_headerpad(binary: &Path, pad: u64) -> std::io::Result<()> {
     std::fs::write(headerpad_file(binary), format!("{HEADERPAD_FLAG}{pad:#x}\n"))
 }
@@ -670,7 +712,13 @@ mod tests {
         };
         assert_eq!(pad(&line("")), Some(HEADERPAD));
         std::fs::remove_file(headerpad_file(&binary)).unwrap();
-        assert_eq!(pad(&line(r#""-Wl,-headerpad,0x400000""#)), Some(0x400000));
+        assert_eq!(pad(&line(r#""-Wl,-headerpad,0x800000""#)), Some(0x800000));
+        std::fs::remove_file(headerpad_file(&binary)).unwrap();
+        // What the wrapper added to rustc's link is not the daemon's to ask for.
+        let wrapper = rustc_link_args().map(|it| format!("{it:?}")).join(" ");
+        assert_eq!(pad(&line(&format!(r#""-Wl,-headerpad,0x100" {wrapper}"#))), Some(0x100));
+        let args = std::fs::read_to_string(&response).unwrap();
+        assert!(!args.contains("bind_at_load") && !args.contains("0x400000"), "{args}");
         std::fs::remove_file(headerpad_file(&binary)).unwrap();
         // Hexadecimal, as ld64 reads it, with or without `0x`; the last one is the one.
         assert_eq!(pad(&line(r#""-Wl,-headerpad,10" "-Wl,-headerpad,200""#)), Some(0x200));
@@ -706,6 +754,7 @@ mod tests {
             object: PathBuf::from("P:/ra-jit.o"),
             patch: PathBuf::from("P:/patch.o"),
             binary: PathBuf::from("P:/bin"),
+            rustc_binary: None,
             link_cmd: String::new(),
             symbol_files: Vec::new(),
             unit_test: false,
@@ -754,6 +803,7 @@ mod tests {
             object: PathBuf::from("/p/ra-jit.o"),
             patch: PathBuf::from("/p/patch.o"),
             binary: PathBuf::from("/p/bin"),
+            rustc_binary: None,
             link_cmd: String::new(),
             symbol_files: Vec::new(),
             unit_test: false,

@@ -196,6 +196,64 @@ fn names_of_object(data: &[u8], names: &mut Vec<Named>) {
     }
 }
 
+pub(crate) fn hashed(symbol: &str) -> u64 {
+    use std::hash::BuildHasher;
+    rustc_hash::FxBuildHasher.hash_one(symbol)
+}
+
+/// The symbols of an executable rustc linked, which a patch is spliced into.
+pub(crate) struct Linked {
+    /// What it defines or takes from a library, [`hashed`].
+    names: FxHashSet<u64>,
+    /// Its functions and statics of symbols private to the object they were in, by their
+    /// paths, with their addresses: none for a path that two have, or a symbol that two
+    /// copies have, which a patch would replace one of.
+    private: FxHashMap<String, Option<(String, u64)>>,
+}
+
+impl Linked {
+    pub(crate) fn read(path: &Path) -> anyhow::Result<Linked> {
+        let data = std::fs::read(path).with_context(|| format!("reading {}", path.display()))?;
+        let object = object::File::parse(&*data)?;
+        let mut linked = Linked { names: FxHashSet::default(), private: FxHashMap::default() };
+        for symbol in object.symbols().chain(object.dynamic_symbols()) {
+            let Ok(name) = symbol.name() else { continue };
+            let name = match object.format() {
+                object::BinaryFormat::MachO => name.strip_prefix('_').unwrap_or(name),
+                _ => name,
+            };
+            linked.names.insert(hashed(name));
+            let private = symbol.is_local()
+                && matches!(symbol.kind(), SymbolKind::Text | SymbolKind::Data)
+                && symbol.section_index().is_some();
+            if !private || !name.starts_with("_R") {
+                continue;
+            }
+            let Some((_, path)) = Named::new(name, true).demangled else { continue };
+            let address = symbol.address();
+            linked
+                .private
+                .entry(path)
+                .and_modify(|it| {
+                    if it.as_ref().is_none_or(|it| it.0 != name || it.1 != address) {
+                        *it = None;
+                    }
+                })
+                .or_insert_with(|| Some((name.to_owned(), address)));
+        }
+        Ok(linked)
+    }
+
+    pub(crate) fn has(&self, symbol: &str) -> bool {
+        self.names.contains(&hashed(symbol))
+    }
+
+    /// The one private symbol of the function or static at `path`.
+    pub(crate) fn private(&self, path: &str) -> Option<&str> {
+        self.private.get(path)?.as_ref().map(|it| &*it.0)
+    }
+}
+
 impl SymbolTable {
     /// `root` is what the paths in cargo's dep-info files are relative to.
     pub(crate) fn load(files: &[PathBuf], root: &Path) -> anyhow::Result<SymbolTable> {
@@ -295,8 +353,7 @@ impl SymbolTable {
     }
 
     fn hashed(symbol: &str) -> u64 {
-        use std::hash::BuildHasher;
-        rustc_hash::FxBuildHasher.hash_one(symbol)
+        hashed(symbol)
     }
 
     /// Whether the function at `path` is defined under a symbol private to its object.
@@ -383,6 +440,11 @@ impl SymbolTable {
     /// then not what it would build now.
     pub(crate) fn written_since_built(&self) -> Option<&Path> {
         self.all_written_since_built().next()
+    }
+
+    /// Every file rustc read of the crates it built, as their dep-info files list them.
+    pub(crate) fn sources(&self) -> impl Iterator<Item = &Path> {
+        self.built_from.iter().flat_map(|(_, sources)| sources.iter().map(|it| &*it.path))
     }
 
     /// Every source that was written after rustc built the crate it is of.
