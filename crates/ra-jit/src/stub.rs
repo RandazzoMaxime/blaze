@@ -302,7 +302,9 @@ fn blanked(text: &str, strings: bool) -> String {
             blank(at..end);
             at = end;
         } else if rest[0] == b'r'
-            && (at == 0 || !ident(at - 1) || matches!(bytes[at - 1], b'b' | b'c') && (at < 2 || !ident(at - 2)))
+            && (at == 0
+                || !ident(at - 1)
+                || matches!(bytes[at - 1], b'b' | b'c') && (at < 2 || !ident(at - 2)))
             && let hashes = rest[1..].iter().take_while(|&&it| it == b'#').count()
             && rest.get(1 + hashes) == Some(&b'"')
         {

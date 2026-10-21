@@ -2154,10 +2154,18 @@ fn workspace_at(
             scripts =
                 Some(WorkspaceBuildScripts::of_messages(cargo, lines.iter().map(String::as_str)));
         }
+        let target = plan.target_profile();
         for package in packages {
-            let Some(built) = plan.package(&cargo[package].id.repr) else { continue };
+            let built = plan.package(&cargo[package].id.repr);
+            // `cargo metadata` has one graph for the host and the target, so a package built
+            // only for a build script or proc macro, or not at all, can still be a dependency
+            // of one of the program's: as such it is built as they are.
+            let profile = built.filter(|it| it.for_target).map(|it| &it.profile).or(target);
+            if let Some(profile) = profile {
+                cargo.set_profile_cfg(package, profile.cfg());
+            }
+            let Some(built) = built else { continue };
             cargo.set_active_features(package, built.features.iter().cloned().collect());
-            cargo.set_profile_cfg(package, built.profile.cfg());
             cargo.set_primary(package, built.primary);
         }
     }
