@@ -22,7 +22,7 @@ use rustc_type_ir::{
 
 use hir_ty::{
     GenericPredicates, InferBodyId,
-    db::GeneralConstId,
+    db::{GeneralConstId, InternedClosureId},
     mir::{
         AggregateKind, BorrowKind, CastKind, LocalId, MirBody, MirSpan, Operand, OperandKind,
         PlaceElem, PlaceTy, ProjectionElem, Rvalue, StatementKind, TerminatorKind,
@@ -61,6 +61,8 @@ pub(super) struct Outlives {
     pub(super) location: Option<Location>,
     pub(super) category: Category,
     pub(super) span: MirSpan,
+    /// A closure's requirement, proven where the closure is made.
+    pub(super) from_closure: bool,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -79,6 +81,17 @@ pub(super) enum UniversalKind {
     /// rustc's `UniversalRegions` calls external. The closure's own, the late-bound lifetimes
     /// of its signature and the borrow of its environment, are `AnonParam`.
     Creator,
+}
+
+/// What a closure needs of its creator's regions that it cannot prove itself, as rustc's
+/// `ClosureOutlivesRequirement`: that the region at position `longer` among the regions of
+/// the closure's type outlives the one at `shorter`, or `'static` for `None`.
+#[derive(Clone, Copy, Debug)]
+pub(super) struct Requirement {
+    pub(super) longer: usize,
+    pub(super) shorter: Option<usize>,
+    pub(super) category: Category,
+    pub(super) span: MirSpan,
 }
 
 /// That the type parameter `ty` must outlive `lower`, as rustc's `TypeTest`.
@@ -110,6 +123,9 @@ pub(super) struct Regions<'db> {
     pub(super) is_impl_item: bool,
     /// In a closure called by reference, the universal region of that reference.
     pub(super) closure_env: Option<usize>,
+    /// In a closure, the position among the regions of its type of each of its creator's
+    /// universal regions, by universal region.
+    pub(super) creator_positions: FxHashMap<usize, usize>,
 }
 
 impl<'db> Regions<'db> {
@@ -165,6 +181,114 @@ fn projections<'db>(ty: Ty<'db>) -> Vec<(hir_ty::next_solver::SolverDefId<'db>, 
     find.0
 }
 
+/// Which arguments of the `impl Trait` `def`, of `len` of them, its hidden type may name: the
+/// others are bivariant in rustc's `variances_of` the opaque type, and its liveness skips
+/// them. Every one, unless `use<..>` lists them; before edition 2024, outside a trait and its
+/// impls and outside an `async fn`, the type parameters and the lifetimes its bounds name.
+/// `None` where this does not work it out, which counts every argument captured.
+pub(super) fn opaque_captures(
+    db: &dyn hir_ty::db::HirDatabase,
+    def: hir_ty::next_solver::SolverDefId<'_>,
+    len: usize,
+) -> Option<Vec<bool>> {
+    use hir_def::{
+        GenericParamId,
+        hir::{
+            generics::GenericParamDataRef,
+            type_ref::{LifetimeRef, TypeBound, TypeRef, UseArgRef},
+        },
+    };
+    use rustc_type_ir::Interner as _;
+    let hir_ty::next_solver::SolverDefId::InternedOpaqueTyId(opaque) = def else { return None };
+    let hir_ty::ImplTraitId::ReturnTypeImplTrait(function, index) = opaque.loc(db) else {
+        return None;
+    };
+    let params: Vec<_> = hir_ty::generics::generics(db, function.into()).iter(true).collect();
+    if params.len() != len {
+        return None;
+    }
+    let is_lifetime = |id: &GenericParamId| matches!(id, GenericParamId::LifetimeParamId(_));
+    let signature = FunctionSignature::of(db, function);
+    let written = signature.ret_type.and_then(|ret| match &signature.store[ret] {
+        TypeRef::ImplTrait(bounds) if index.into_raw().into_u32() == 0 => Some(bounds),
+        _ => None,
+    });
+    let listed = written.and_then(|bounds| {
+        bounds.iter().find_map(|bound| match bound {
+            TypeBound::Use(args) => Some(args),
+            _ => None,
+        })
+    });
+    if let Some(listed) = listed {
+        return Some(
+            params
+                .iter()
+                .map(|(id, data)| {
+                    let (
+                        GenericParamId::LifetimeParamId(param),
+                        GenericParamDataRef::LifetimeParamData(data),
+                    ) = (id, data)
+                    else {
+                        return true;
+                    };
+                    listed.iter().any(|arg| match arg {
+                        UseArgRef::Lifetime(it) => match &signature.store[*it] {
+                            LifetimeRef::Named(name) => *name == data.name,
+                            LifetimeRef::Param(it) => it == param,
+                            _ => false,
+                        },
+                        UseArgRef::Name(_) => false,
+                    })
+                })
+                .collect(),
+        );
+    }
+    let in_trait = match function.lookup(db).container {
+        ItemContainerId::TraitId(_) => true,
+        ItemContainerId::ImplId(it) => db.impl_trait(it).is_some(),
+        _ => false,
+    };
+    let edition = hir_def::HasModule::krate(&function, db).data(db).edition;
+    if edition.at_least_2024() || in_trait || signature.is_async() {
+        return None;
+    }
+    let mut named = FxHashSet::default();
+    let mut unknown = false;
+    let interner = hir_ty::next_solver::DbInterner::new_no_crate(db);
+    let mut without_self = hir_ty::next_solver::util::BottomUpFolder {
+        interner,
+        ty_op: |ty: Ty<'_>| match ty.kind() {
+            TyKind::Alias(alias) if alias.kind.def_id() == def => Ty::new_unit(interner),
+            _ => ty,
+        },
+        lt_op: |region| region,
+        ct_op: |ct| ct,
+    };
+    for clause in interner.item_bounds(def).skip_binder() {
+        let clause = rustc_type_ir::TypeFoldable::fold_with(clause, &mut without_self);
+        rustc_type_ir::fold_regions(interner, clause, |region, _| {
+            match region.kind() {
+                RegionKind::ReEarlyParam(it) => {
+                    named.insert(it.index as usize);
+                }
+                RegionKind::ReStatic | RegionKind::ReBound(..) => (),
+                _ => unknown = true,
+            }
+            region
+        });
+    }
+    if unknown {
+        return None;
+    }
+    Some(
+        params
+            .iter()
+            .enumerate()
+            .map(|(index, (id, _))| !is_lifetime(id) || named.contains(&index))
+            .collect(),
+    )
+}
+
 /// Whether `ty` has an `impl Trait` in it.
 fn has_opaque(ty: Ty<'_>) -> bool {
     struct Find;
@@ -195,7 +319,12 @@ pub(super) fn regions_of(ty: Ty<'_>, out: &mut Vec<Rv>) {
     rustc_type_ir::TypeVisitable::visit_with(&ty, &mut Collect(out));
 }
 
-pub(super) fn build<'db>(ctx: &Ctx<'_, 'db>, body: &MirBody<'db>, cfg: &Cfg) -> Regions<'db> {
+pub(super) fn build<'db>(
+    ctx: &Ctx<'_, 'db>,
+    body: &MirBody<'db>,
+    cfg: &Cfg,
+    requirements: &FxHashMap<InternedClosureId<'db>, (usize, Vec<Requirement>)>,
+) -> Regions<'db> {
     let mut builder = Builder {
         ctx,
         body,
@@ -213,7 +342,9 @@ pub(super) fn build<'db>(ctx: &Ctx<'_, 'db>, body: &MirBody<'db>, cfg: &Cfg) -> 
             check_universals: ctx.closure_local.is_none(),
             is_impl_item: false,
             closure_env: None,
+            creator_positions: FxHashMap::default(),
         },
+        requirements,
         early: FxHashMap::default(),
         late: FxHashMap::default(),
         impl_self: None,
@@ -243,6 +374,9 @@ struct Builder<'c, 'a, 'db> {
     ctx: &'c Ctx<'a, 'db>,
     body: &'c MirBody<'db>,
     regions: Regions<'db>,
+    /// What each closure checked so far needs of the body that creates it, with how many
+    /// regions the closure's type has.
+    requirements: &'c FxHashMap<InternedClosureId<'db>, (usize, Vec<Requirement>)>,
     /// The universal region of each lifetime parameter, by its index.
     early: FxHashMap<u32, Region<'db>>,
     /// The universal region of each of the signature's late-bound lifetimes.
@@ -554,8 +688,23 @@ impl<'db> Builder<'_, '_, 'db> {
         let interner = self.interner();
         let args = rustc_type_ir::fold_regions(interner, args, |region, _| match region.kind() {
             RegionKind::ReBound(..) => region,
-            _ => self.new_universal(UniversalKind::Creator),
+            _ => {
+                let region = self.new_universal(UniversalKind::Creator);
+                let position = self.regions.creator_positions.len();
+                self.regions.creator_positions.insert(self.regions.universals.len() - 1, position);
+                region
+            }
         });
+        // The closure's type starts with its enclosing item's generic arguments, which rustc
+        // makes the item's own parameters where the closure is made.
+        for (index, arg) in args.as_closure().parent_args().iter().enumerate() {
+            if let GenericArgKind::Lifetime(region) = arg.kind()
+                && let Some(rv) = rv_of(region)
+            {
+                self.early.insert(index as u32, region);
+                self.regions.early.insert(index as u32, rv);
+            }
+        }
         let mut closure = Ty::new_closure(interner, def, args);
         if let Some(mutability) = by_ref {
             let region = self.new_universal(UniversalKind::AnonParam);
@@ -986,7 +1135,53 @@ impl<'db> Builder<'_, '_, 'db> {
                 location,
                 category: at.category,
                 span: at.span,
+                from_closure: false,
             });
+        }
+    }
+
+    /// rustc's `prove_closure_bounds` where the closure `ty` is made: its enclosing item's
+    /// arguments are this body's parameters, and what the closure needs of this body's
+    /// regions holds, blamed on what in the closure needs it.
+    fn closure_requirements(
+        &mut self,
+        closure: InternedClosureId<'db>,
+        ty: Ty<'db>,
+        span: MirSpan,
+    ) {
+        let TyKind::Closure(_, args) = ty.kind() else { return };
+        let at = At { category: Category::Boring, span };
+        for (index, arg) in args.as_closure().parent_args().iter().enumerate() {
+            if let GenericArgKind::Lifetime(region) = arg.kind() {
+                let own = self.early_region(index as u32);
+                self.relate_regions(region, own, Variance::Invariant, at);
+            }
+        }
+        let Some((count, requirements)) = self.requirements.get(&closure) else { return };
+        let mut regions = Vec::new();
+        regions_of(ty, &mut regions);
+        if regions.len() != *count {
+            return;
+        }
+        for requirement in requirements {
+            let Some(&sup) = regions.get(requirement.longer) else { continue };
+            let sub = match requirement.shorter {
+                Some(it) => match regions.get(it) {
+                    Some(&it) => it,
+                    None => continue,
+                },
+                None => self.regions.static_rv,
+            };
+            if sup != sub {
+                self.regions.outlives.push(Outlives {
+                    sup,
+                    sub,
+                    location: self.location,
+                    category: requirement.category,
+                    span: requirement.span,
+                    from_closure: true,
+                });
+            }
         }
     }
 
@@ -1063,7 +1258,20 @@ impl<'db> Builder<'_, '_, 'db> {
                 }
             }
             (TyKind::Alias(x), TyKind::Alias(y)) if x.kind == y.kind => {
-                self.relate_args(x.args, y.args, None, Variance::Invariant, at)
+                let variances = match x.kind {
+                    rustc_type_ir::AliasTyKind::Opaque { .. } => {
+                        opaque_captures(self.ctx.db, x.kind.def_id(), x.args.len()).map(|it| {
+                            it.into_iter()
+                                .map(|captured| match captured {
+                                    true => Variance::Invariant,
+                                    false => Variance::Bivariant,
+                                })
+                                .collect::<Vec<_>>()
+                        })
+                    }
+                    _ => None,
+                };
+                self.relate_args(x.args, y.args, variances.as_deref(), Variance::Invariant, at)
             }
             (TyKind::Closure(_, aa), TyKind::Closure(_, ab))
             | (TyKind::FnDef(_, aa), TyKind::FnDef(_, ab)) => {
@@ -1390,19 +1598,20 @@ impl<'db> Builder<'_, '_, 'db> {
             }
             Rvalue::Aggregate(AggregateKind::Closure(ty), operands) => {
                 let ty = self.renumber(ty.as_ref());
-                if let TyKind::Closure(_, args) = ty.kind() {
+                if let TyKind::Closure(def, args) = ty.kind() {
                     let upvars = args.as_closure().tupled_upvars_ty();
                     if let TyKind::Tuple(upvars) = upvars.kind() {
                         for (upvar, operand) in upvars.iter().zip(operands.iter()) {
                             if let Some(it) = self.operand_ty(operand) {
                                 let at = At {
-                                    category: Category::Usage,
+                                    category: Category::Boring,
                                     span: operand.span().unwrap_or(span),
                                 };
                                 self.relate(it, upvar, Variance::Covariant, at);
                             }
                         }
                     }
+                    self.closure_requirements(def.0, ty, span);
                 }
                 Some(ty)
             }
@@ -2021,9 +2230,23 @@ pub(super) fn constraint_path(
 
 /// The constraint an error about `path` points at, as rustc's `best_blame_constraint`.
 pub(super) fn blame(path: &[Outlives]) -> Option<Outlives> {
-    let best = path.iter().map(|it| it.category).min()?;
+    // rustc's `best_blame_constraint` from a free region: the most interesting constraint,
+    // and of equally interesting ones the closest to the region outlived.
+    let interest = |it: &Outlives| match it.category {
+        Category::Return => 0,
+        Category::TypeAnnotation
+        | Category::Cast
+        | Category::CallArgument
+        | Category::Assignment
+        | Category::Usage => 2,
+        Category::Predicate => 4,
+        Category::Boring => 5,
+        Category::Internal => 7,
+    };
+    let best = path.iter().map(interest).min()?;
     path.iter()
-        .find(|it| it.category == best && it.span != MirSpan::Unknown)
-        .or_else(|| path.iter().find(|it| it.category == best))
+        .rev()
+        .find(|it| interest(it) == best && it.span != MirSpan::Unknown)
+        .or_else(|| path.iter().rev().find(|it| interest(it) == best))
         .copied()
 }

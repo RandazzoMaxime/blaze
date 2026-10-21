@@ -113,10 +113,20 @@ pub fn borrowck<'db>(db: &'db dyn HirDatabase, def: DefWithBodyId) -> BorrowckRe
             }
         }
     }
-    for (body, closure) in bodies {
+    // A closure after the closures in it and before the body that makes it, which proves what
+    // the closure needs of it.
+    let mut requirements = FxHashMap::default();
+    let mut diagnostics = Vec::new();
+    for (body, closure) in bodies.into_iter().rev() {
         let ctx = Ctx::new(db, owner, store, infer, body, closure, mode);
-        check::check(&ctx, body, &mut result.diagnostics);
+        let mut found = Vec::new();
+        let needs = check::check(&ctx, body, &requirements, &mut found);
+        diagnostics.push(found);
+        if let Some(closure) = closure {
+            requirements.insert(closure, needs);
+        }
     }
+    result.diagnostics.extend(diagnostics.into_iter().rev().flatten());
     result
 }
 
