@@ -21,8 +21,9 @@ All notable changes to ra-jit are written here. The format follows
 - The README has a table of how fast programs ra-jit builds with LLVM run against
   `cargo build --release`, written by `bench.py --runtime` and `benchreport.py` and kept current
   by the `bench-readme` workflow on the Linux benchmark machine. A run in which any program's
-  output differs from cargo's is never published; none is yet, since on macOS a program ra-jit
-  builds every crate of, with its own `main`, does not run (docs/research/mir-gap.md).
+  output differs from cargo's is never published. The first, on Linux x86-64, has every
+  program's output the same as cargo's; on macOS arm64, ripgrep, fd, bat and jsonrt do not
+  build whole yet (NEON intrinsics ra-jit does not have).
 - [docs/research/](docs/research/README.md): what 2026's Rust compiler work means for ra-jit,
   and the MIR gap with rustc with the production gaps ranked; rustc's pass sources in
   [docs/upstream/rustc-mir-transform/](docs/upstream/rustc-mir-transform/SOURCE.md).
@@ -55,6 +56,11 @@ All notable changes to ra-jit are written here. The format follows
 - `harness/tierbench.py`, the benchmark table of docs/tiers.md; `--together` runs the builds
   of a round at once, so that a loaded machine slows them alike.
 - `RA_JIT_DUMP_LLVM=after` prints the LLVM IR as the passes left it.
+- `RA_JIT_INLINE=all`: a program built whole with LLVM at `-O2` or `-O3` has what it calls in
+  every crate built into it or shown to LLVM, the standard library's generic and `#[inline]`
+  functions as rustc does across crates. On Linux x86-64 it takes the geometric mean of the
+  14 runtime benchmarks from 3.92x the time of `cargo build --release` to 1.20x at `-O3`
+  and 1.21x at `-O2` ([README](README.md#how-fast)).
 
 ### Changed
 
@@ -68,8 +74,21 @@ All notable changes to ra-jit are written here. The format follows
   rust-analyzer release into `vendor/rust-analyzer` in one command, with conflicts left in
   the tree as `git merge` leaves them; before, that took a clone of the fork and a pull.
 
+- Code ra-jit gives LLVM is faster: SIMD intrinsics on 128-bit lanes of integers (add,
+  subtract, bitwise, saturating, compare, `simd_bitmask`) are vector instructions instead of a
+  loop over lanes, and LLVM's own; a slot whose address is rounded up to an alignment above 16
+  (`__m256i`) is an alloca of that alignment, which LLVM can take apart; `memcpy`, `memmove`
+  and `memset` are LLVM's intrinsics rather than calls it knows nothing of, so a copy of a
+  known size is a few loads and stores.
+
 ### Fixed
 
+- fd, tokei and eza build whole and run as cargo's builds do: a crate rustc built nothing
+  of keeps its `static`s ra-jit's own (fd's `INIT`); a package built only for a build script
+  or a proc macro, which `cargo metadata`'s single graph can still show as a dependency of
+  the program's, checks overflow as the program does, so rust-analyzer's view of it no
+  longer mixes two profiles; and `runbench.py` turns the release profile's `lto` off for the
+  whole build, which needs rustc's libraries. bat and nushell do not link yet.
 - A program ra-jit builds whole, with its own `main` (`runbench.py`'s builds), ran: on macOS
   the code-free stand-in rustc builds for the program had a weak `main` of its own, and
   ra-jit's object was weakened too, so the linker kept the stand-in's and the program

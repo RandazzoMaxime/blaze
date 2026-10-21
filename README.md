@@ -61,7 +61,27 @@ Measured by hand with `harness/bench.py`; the `bench-readme` workflow re-runs it
 <!-- bench:end -->
 
 <!-- runbench:start -->
-How fast the programs run, ra-jit's LLVM build against `cargo build --release`: not published yet. On macOS arm64, where it was last tried (2026-10-20), a program whose every crate ra-jit compiles does nothing when run, so its output differs from cargo's and `benchreport.py` refuses the run. The `bench-readme` workflow fills this table from `bench.py --runtime` on the Linux x86-64 benchmark machine once every program says what cargo's says.
+How fast the programs run, built whole by ra-jit with LLVM (every crate of the program compiled by ra-jit, with its own `main`), each time ÷ the time of `cargo build --release`. Lower is faster; 1.00x is as fast as release. Every program's exit status and output were the same as the release build's; a run in which any differed is never published. Linux x86-64: AWS c6i.16xlarge (Intel Xeon Platinum 8375C, 64 vCPUs, 123 GiB), NixOS 26.05, Linux 6.18, rustc 1.99.0, ra-jit `f3eeb5295e` on branch `whole-program-main`, 2026-10-21. Median of 5 runs, the builds taking turns (numeric: 15).
+
+| Benchmark | `cargo build --release` | release with overflow checks | ra-jit `-O3` | ra-jit `-O2`, across crates | ra-jit `-O3`, across crates |
+|---|---:|---:|---:|---:|---:|
+| sieve | 0.068 s | 0.99x | 5.32x | 0.96x | **0.97x** |
+| collatz | 0.135 s | 1.94x | 1.03x | 1.02x | **1.02x** |
+| fnv | 0.077 s | 1.00x | 2.71x | 1.00x | **1.00x** |
+| qsort | 0.279 s | 1.03x | 2.10x | 1.11x | **1.11x** |
+| matmul | 0.034 s | 1.00x | 10x | 1.15x | **1.15x** |
+| nbody | 0.028 s | 1.00x | 15x | 1.42x | **1.41x** |
+| mandelbrot | 0.348 s | 1.01x | 1.02x | 1.00x | **1.00x** |
+| words | 0.065 s | 1.06x | 6.98x | 1.64x | **1.62x** |
+| numeric (rayon) | 0.035 s | 0.97x | 3.64x | 1.04x | **1.00x** |
+| jsonrt (serde_json, simd-json) | 1.448 s | 1.06x | 3.94x | 1.57x | **1.58x** |
+| ripgrep 15.1.0 | 0.055 s | 1.08x | 7.87x | 1.32x | **1.33x** |
+| fd 10.3.0 | 0.017 s | 1.01x | 4.72x | 1.40x | **1.37x** |
+| tokei | 0.107 s | 0.98x | 6.13x | 1.40x | **1.30x** |
+| eza | 0.354 s | 1.06x | 1.85x | 1.19x | **1.17x** |
+| **Geometric mean** | | 1.07x | 3.92x | 1.21x | **1.20x** |
+
+*Across crates* is `RA_JIT_INLINE=all`: what a function calls in any crate is built into it or shown to LLVM, the standard library's generic and `#[inline]` functions as rustc does. *Release with overflow checks* is `cargo build --release` with `-C overflow-checks=on -C debug-assertions=on`. The kernels (sieve to words) are `harness/corpus/kernels`; ripgrep counts `\w+ing\b` in its vendored dependencies, fd lists the `.rs` files of its own, tokei and eza walk theirs. Not built yet, so not in the table: bat (rust-analyzer's types for bincode's enum deserializer have an error, so two functions are not compiled and the link fails) and nushell (some functions are not compiled, among them ones behind `#[target_feature]`, so the link fails; at `-O3` across crates LLVM's instruction combining also gives up on one function). Measured with `harness/runbench.py`; raw numbers in [docs/benchmarks/runtime-whole-program-linux-x86_64.json](docs/benchmarks/runtime-whole-program-linux-x86_64.json).
 <!-- runbench:end -->
 
 Not measured yet: workspaces of a million lines or more, and test suites
