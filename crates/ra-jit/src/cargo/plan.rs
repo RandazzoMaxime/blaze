@@ -528,11 +528,16 @@ pub(crate) fn headerpad_of(binary: &Path) -> Option<u64> {
 }
 
 /// What rustc's link of a program for Apple is told besides what cargo asked, for the
-/// daemon's first edits to be spliced into it: the room after the load commands, and an
-/// address slot of each function of another library (which ld64 makes of each lazy one when
-/// everything is bound at load). The daemon's own links leave these out of the line.
-pub(crate) fn rustc_link_args() -> [String; 2] {
-    [format!("{HEADERPAD_FLAG}{RUSTC_HEADERPAD:#x}"), "-Wl,-bind_at_load".to_owned()]
+/// daemon's first edits to be spliced into it: the room after the load commands, an address
+/// slot of each function of another library (which ld64 makes of each lazy one when
+/// everything is bound at load), and fixups in tables. The daemon's own links leave these out
+/// of the line.
+pub(crate) fn rustc_link_args() -> [String; 3] {
+    [
+        format!("{HEADERPAD_FLAG}{RUSTC_HEADERPAD:#x}"),
+        "-Wl,-bind_at_load".to_owned(),
+        NO_FIXUP_CHAINS.to_owned(),
+    ]
 }
 
 pub(crate) fn write_headerpad(binary: &Path, pad: u64) -> std::io::Result<()> {
