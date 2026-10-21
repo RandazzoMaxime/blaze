@@ -264,4 +264,7 @@ machine and commits the README's numbers to main. It runs only while the reposit
 `fork-sync.yaml` on pushes to main that touch what they cover, `fuzz.yaml` nightly, and
 `live-*.yaml` on their own branches. None of them is part of `ci`. `site.yaml` deploys the
 site, and `release.yaml` builds releases from tags, each target through
-`.github/scripts/build_release.py` (the `dist` profile with PGO, [reports/RELEASE-BUILD.md](reports/RELEASE-BUILD.md)).
+`.github/scripts/build_release.py` (the `dist` profile with PGO, [reports/RELEASE-BUILD.md](reports/RELEASE-BUILD.md)),
+the recipe the flake's `dist` runs too. `pgo.yaml` trains the profiles it uses, by hand and on
+pushes to main that change Cargo.lock, a manifest or the toolchain, and pins them in
+`pgo/profiles.json`.

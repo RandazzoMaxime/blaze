@@ -185,6 +185,27 @@ did about it in one line.
 When you report what you did, separate what you ran from what you inferred. The reports
 under `docs/reports/` do this and it is the reason they can be used.
 
+## The build that ships
+
+`cargo build --release` is the build to work with: the harnesses, the gate and CI use it, and
+it rebuilds quickly after a change. What users get is one other build: the `dist` profile
+(thin LTO) optimized with the PGO profile `pgo/profiles.json` pins, built by
+`.github/scripts/build_release.py`. The release workflow runs that script, and the flake's
+`dist` runs it inside its derivation with the same profile fetched by its sha256.
+`cargo install --profile dist` builds the same profile without PGO (README).
+[reports/RELEASE-BUILD.md](reports/RELEASE-BUILD.md) has the numbers.
+
+The PGO profiles are trained by the `pgo` workflow, one per target on the runner its release
+is built on; it uploads them to the `pgo-profiles` release and commits their names and hashes
+to `pgo/profiles.json`. It runs by itself when Cargo.lock, a manifest or `harness/toolchain`
+changes on main: a profile finds each function by its symbol, which carries a hash of the
+whole graph of crates, so after such a change the old one finds almost nothing (the build
+warns, and a release refuses). A profile trained on older code of the same crates still
+applies to every function that has not changed since, and `build_release.py` ends by saying
+how many have: 24 after a one-line edit, about 1,600 for code 23 commits and 6,700 lines older
+(of the 187,000 functions a profile has). Run the workflow by hand when that count passes a
+few thousand and before a release after large changes to the daemon.
+
 ## Credit
 
 A commit or pull request that carries someone else's idea, diagnosis, workaround or patch
