@@ -4602,8 +4602,9 @@ impl Builds {
                 program.wrote = None;
             }
             if own_base {
-                // Nobody asked for it, and it is built again once nobody asks for anything.
-                program.unbuilt.stale = !patches_rustcs;
+                // Nobody asked for it, and it is built again once nobody asks for anything. An
+                // edit that came as it started is still to be built.
+                program.unbuilt.stale = !patches_rustcs || !program.unbuilt.edited.is_empty();
                 return Ok(());
             }
             program.interrupted += 1;
