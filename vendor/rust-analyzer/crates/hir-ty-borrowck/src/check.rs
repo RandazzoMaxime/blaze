@@ -45,6 +45,10 @@ pub(super) fn check<'db>(
     let live = liveness::region_liveness(ctx, body, &cfg, &moves, &regions, count);
     let live_loans_input = (ctx.mode == Mode::Polonius).then(|| live.clone());
     let values = regions::infer(&regions, count, cfg.points, live);
+    // rustc's member constraints: a region of a returned `impl Trait`'s hidden type that can
+    // be none of the lifetimes it captures is an error, reported only when the body has no
+    // other region error.
+    let unnamed = member_choices(&regions, &values, count).iter().any(|(_, it)| it.is_none());
     let unique = |assigned: LocalId, local: LocalId, projection: &[PlaceElem]| {
         capture_temps.contains_key(&assigned)
             && is_immutable_root(ctx, PlaceRef { local, projection })
@@ -129,10 +133,74 @@ pub(super) fn check<'db>(
         }
     }
     checker.report_move_errors();
+    let before = checker.errors.len();
     checker.report_region_errors();
+    if unnamed && checker.errors.len() == before {
+        checker.errors.push(Some(BorrowckDiagnostic {
+            code: "E0700",
+            span: MirSpan::Unknown,
+            message:
+                "hidden type for `impl Trait` captures lifetime that does not appear in bounds"
+                    .to_owned(),
+            at_signature: true,
+        }));
+    }
     out.extend(checker.errors.into_iter().flatten());
     out.extend(checker.move_reported.into_values().map(|(_, _, error)| error));
     (regions.creator_positions.len(), checker.requirements)
+}
+
+/// rustc's `apply_member_constraint` for each region of a returned `impl Trait`'s hidden type:
+/// the smallest of the choices that outlives what the region holds and is outlived by what
+/// outlives it, of those comparable to all the others; `None` when there is none, and the
+/// hidden type names a lifetime the `impl Trait` does not capture.
+fn member_choices(
+    regions: &regions::Regions<'_>,
+    values: &regions::RegionValues,
+    count: usize,
+) -> Vec<(regions::Rv, Option<regions::Rv>)> {
+    let fn_body = regions.universals[1].0;
+    let mut outlived_by: Vec<Vec<regions::Rv>> = vec![Vec::new(); count];
+    for constraint in &regions.outlives {
+        if constraint.sup < count && constraint.sub < count {
+            outlived_by[constraint.sub].push(constraint.sup);
+        }
+    }
+    let choices: Vec<usize> =
+        regions.choices.iter().filter_map(|&it| regions.universal(it)).collect();
+    let mut chosen = Vec::new();
+    for &member in &regions.members {
+        let lower: Vec<usize> = values.universals_of(member).filter(|&it| it != 1).collect();
+        // A region of the signature written into the hidden type is that region on both sides.
+        let mut upper: Vec<usize> = regions.universal(member).into_iter().collect();
+        let mut seen = FxHashSet::default();
+        let mut stack = vec![member];
+        while let Some(at) = stack.pop() {
+            for &sup in &outlived_by[at] {
+                if seen.insert(sup) {
+                    if sup != fn_body
+                        && let Some(universal) = regions.universal(sup)
+                    {
+                        upper.push(universal);
+                    }
+                    stack.push(sup);
+                }
+            }
+        }
+        let fits: Vec<usize> = choices
+            .iter()
+            .copied()
+            .filter(|&choice| lower.iter().all(|&it| regions.knows(choice, it)))
+            .filter(|&choice| upper.iter().all(|&it| regions.knows(it, choice)))
+            .collect();
+        let ordered = fits
+            .iter()
+            .copied()
+            .filter(|&a| fits.iter().all(|&b| regions.knows(a, b) || regions.knows(b, a)));
+        let min = ordered.reduce(|a, b| if regions.knows(a, b) { b } else { a });
+        chosen.push((member, min.map(|it| regions.universals[it].0)));
+    }
+    chosen
 }
 
 fn union_literals(ctx: &Ctx<'_, '_>) -> FxHashSet<ExprId> {
@@ -304,7 +372,7 @@ struct Checker<'a, 'b, 'db> {
 
 impl<'a, 'db> Checker<'a, '_, 'db> {
     fn report(&mut self, code: &'static str, span: MirSpan, message: String) {
-        self.errors.push(Some(BorrowckDiagnostic { code, span, message }));
+        self.errors.push(Some(BorrowckDiagnostic { code, span, message, at_signature: false }));
     }
 
     fn is_union_literal(&self, place: PlaceRef<'_>, span: MirSpan) -> bool {
@@ -948,6 +1016,7 @@ impl<'a, 'db> Checker<'a, '_, 'db> {
                         code,
                         span: test.span,
                         message: "the parameter type may not live long enough".to_owned(),
+                        at_signature: false,
                     }));
                 }
                 break;
@@ -1458,7 +1527,7 @@ impl<'a, 'db> Checker<'a, '_, 'db> {
         let name = self.quoted(used, "value");
         let what = if partially { "partially moved value" } else { "moved value" };
         let message = format!("{} of {what}: {name}", action.noun());
-        let diagnostic = BorrowckDiagnostic { code: "E0382", span, message };
+        let diagnostic = BorrowckDiagnostic { code: "E0382", span, message, at_signature: false };
         self.move_reported.insert(move_outs, (used.key(), location, diagnostic));
     }
 

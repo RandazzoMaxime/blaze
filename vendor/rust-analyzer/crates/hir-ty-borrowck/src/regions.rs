@@ -128,6 +128,11 @@ pub(super) struct Regions<'db> {
     /// In a closure, the position among the regions of its type of each of its creator's
     /// universal regions, by universal region.
     pub(super) creator_positions: FxHashMap<usize, usize>,
+    /// The regions of a returned `impl Trait`'s hidden type, each of which must be one of
+    /// `choices`, `'static` and the lifetimes the `impl Trait` captures: rustc's member
+    /// constraints. Empty when what it captures is not known exactly.
+    pub(super) members: Vec<Rv>,
+    pub(super) choices: Vec<Rv>,
 }
 
 impl<'db> Regions<'db> {
@@ -221,39 +226,6 @@ pub(super) fn opaque_captures(
             _ => None,
         })
     });
-    if let Some(listed) = listed {
-        return Some(
-            params
-                .iter()
-                .map(|(id, data)| {
-                    let (
-                        GenericParamId::LifetimeParamId(param),
-                        GenericParamDataRef::LifetimeParamData(data),
-                    ) = (id, data)
-                    else {
-                        return true;
-                    };
-                    listed.iter().any(|arg| match arg {
-                        UseArgRef::Lifetime(it) => match &signature.store[*it] {
-                            LifetimeRef::Named(name) => *name == data.name,
-                            LifetimeRef::Param(it) => it == param,
-                            _ => false,
-                        },
-                        UseArgRef::Name(_) => false,
-                    })
-                })
-                .collect(),
-        );
-    }
-    let in_trait = match function.lookup(db).container {
-        ItemContainerId::TraitId(_) => true,
-        ItemContainerId::ImplId(it) => db.impl_trait(it).is_some(),
-        _ => false,
-    };
-    let edition = hir_def::HasModule::krate(&function, db).data(db).edition;
-    if edition.at_least_2024() || in_trait || signature.is_async() {
-        return None;
-    }
     let mut named = FxHashSet::default();
     let mut unknown = false;
     let interner = hir_ty::next_solver::DbInterner::new_no_crate(db);
@@ -279,7 +251,43 @@ pub(super) fn opaque_captures(
             region
         });
     }
+    if let Some(listed) = listed {
+        let captured = params
+            .iter()
+            .map(|(id, data)| {
+                let (
+                    GenericParamId::LifetimeParamId(param),
+                    GenericParamDataRef::LifetimeParamData(data),
+                ) = (id, data)
+                else {
+                    return true;
+                };
+                listed.iter().any(|arg| match arg {
+                    UseArgRef::Lifetime(it) => match &signature.store[*it] {
+                        LifetimeRef::Named(name) => *name == data.name,
+                        LifetimeRef::Param(it) => it == param,
+                        _ => false,
+                    },
+                    UseArgRef::Name(_) => false,
+                })
+            })
+            .collect::<Vec<_>>();
+        // A lifetime the bounds name and `use<..>` leaves out is an error before borrow
+        // checking.
+        let bounds_listed =
+            named.iter().all(|&index| captured.get(index).copied().unwrap_or(false));
+        return (!unknown && bounds_listed).then_some(captured);
+    }
     if unknown {
+        return None;
+    }
+    let in_trait = match function.lookup(db).container {
+        ItemContainerId::TraitId(_) => true,
+        ItemContainerId::ImplId(it) => db.impl_trait(it).is_some(),
+        _ => false,
+    };
+    let edition = hir_def::HasModule::krate(&function, db).data(db).edition;
+    if edition.at_least_2024() || in_trait || signature.is_async() {
         return None;
     }
     Some(
@@ -306,6 +314,62 @@ fn has_opaque(ty: Ty<'_>) -> bool {
         }
     }
     rustc_type_ir::TypeVisitable::visit_with(&ty, &mut Find).is_break()
+}
+
+/// The regions of a hidden type that rustc's `CollectMemberConstraintsVisitor` gives member
+/// constraints: not those of a closure's parent arguments, nor an `impl Trait`'s arguments
+/// it does not capture.
+fn member_regions<'db>(
+    db: &dyn hir_ty::db::HirDatabase,
+    ty: Ty<'db>,
+    aliases: bool,
+    out: &mut Vec<Rv>,
+) {
+    struct Collect<'o, 'd> {
+        db: &'d dyn hir_ty::db::HirDatabase,
+        aliases: bool,
+        out: &'o mut Vec<Rv>,
+    }
+    impl Collect<'_, '_> {
+        fn args<'db>(&mut self, args: GenericArgs<'db>, skip: usize) {
+            for arg in args.iter().skip(skip) {
+                rustc_type_ir::TypeVisitable::visit_with(&arg, self);
+            }
+        }
+    }
+    impl<'db> rustc_type_ir::TypeVisitor<hir_ty::next_solver::DbInterner<'db>> for Collect<'_, '_> {
+        type Result = ();
+        fn visit_region(&mut self, region: Region<'db>) {
+            if let Some(rv) = rv_of(region) {
+                self.out.push(rv);
+            }
+        }
+        fn visit_ty(&mut self, ty: Ty<'db>) {
+            match ty.kind() {
+                TyKind::Closure(_, args) => self.args(args, args.as_closure().parent_args().len()),
+                TyKind::Coroutine(_, args) => {
+                    self.args(args, args.as_coroutine().parent_args().len())
+                }
+                TyKind::CoroutineClosure(_, args) => {
+                    self.args(args, args.as_coroutine_closure().parent_args().len())
+                }
+                TyKind::Alias(_) if !self.aliases => (),
+                TyKind::Alias(alias)
+                    if let rustc_type_ir::AliasTyKind::Opaque { .. } = alias.kind
+                        && let Some(captured) =
+                            opaque_captures(self.db, alias.kind.def_id(), alias.args.len()) =>
+                {
+                    for (arg, captured) in alias.args.iter().zip(captured) {
+                        if captured {
+                            rustc_type_ir::TypeVisitable::visit_with(&arg, self);
+                        }
+                    }
+                }
+                _ => rustc_type_ir::TypeSuperVisitable::super_visit_with(&ty, self),
+            }
+        }
+    }
+    rustc_type_ir::TypeVisitable::visit_with(&ty, &mut Collect { db, aliases, out });
 }
 
 pub(super) fn regions_of(ty: Ty<'_>, out: &mut Vec<Rv>) {
@@ -345,6 +409,8 @@ pub(super) fn build<'db>(
             is_impl_item: false,
             closure_env: None,
             creator_positions: FxHashMap::default(),
+            members: Vec::new(),
+            choices: Vec::new(),
         },
         requirements,
         early: FxHashMap::default(),
@@ -645,6 +711,87 @@ impl<'db> Builder<'_, '_, 'db> {
                 })
             });
             local_tys[return_local.into_raw().into_u32() as usize] = Some(ty);
+            if opaque
+                && !hidden_static
+                && let Some((_, output)) = &signature
+                && let TyKind::Alias(alias) = output.kind()
+                && let rustc_type_ir::AliasTyKind::Opaque { .. } = alias.kind
+                && let Some(captured) =
+                    opaque_captures(self.ctx.db, alias.kind.def_id(), alias.args.len())
+            {
+                let mut choices = vec![self.regions.static_rv];
+                let mut known = true;
+                for (arg, captured) in alias.args.iter().zip(captured) {
+                    if let GenericArgKind::Lifetime(region) = arg.kind()
+                        && captured
+                    {
+                        match self
+                            .signature_region(region, rustc_type_ir::INNERMOST)
+                            .and_then(rv_of)
+                        {
+                            Some(rv) => choices.push(rv),
+                            None => known = false,
+                        }
+                    }
+                }
+                // What the bounds say the `impl Trait` outlives its hidden type must: rustc
+                // proves them of it. A projection bound that names a lifetime constrains it in
+                // ways not followed here, so its member constraints are left out.
+                let mut outlived = Vec::new();
+                let bounds =
+                    rustc_type_ir::Interner::item_bounds(self.interner(), alias.kind.def_id());
+                for clause in bounds.iter_instantiated(self.interner(), alias.args.as_slice()) {
+                    match clause.kind().skip_binder() {
+                        ClauseKind::TypeOutlives(OutlivesPredicate(bounded, region))
+                            if let TyKind::Alias(bounded) = bounded.kind()
+                                && bounded.kind.def_id() == alias.kind.def_id() =>
+                        {
+                            // Under the clause's own binder, the signature's is one further out.
+                            let binder = rustc_type_ir::INNERMOST.shifted_in(1);
+                            match self.signature_region(region, binder).and_then(rv_of) {
+                                Some(rv) => outlived.push(rv),
+                                None => known = false,
+                            }
+                        }
+                        ClauseKind::Projection(projection)
+                            if rustc_type_ir::TypeVisitableExt::has_free_regions(
+                                &projection.term,
+                            ) =>
+                        {
+                            known = false;
+                        }
+                        _ => (),
+                    }
+                }
+                let mut members = Vec::new();
+                member_regions(self.ctx.db, ty, true, &mut members);
+                members.retain(|&it| it != self.regions.static_rv);
+                members.sort_unstable();
+                members.dedup();
+                // An alias's own bounds may already say it outlives them, so the regions within
+                // one are left to the member constraints.
+                let mut bounded = Vec::new();
+                member_regions(self.ctx.db, ty, false, &mut bounded);
+                bounded.retain(|&it| it != self.regions.static_rv);
+                bounded.sort_unstable();
+                bounded.dedup();
+                for &member in &bounded {
+                    for &sub in &outlived {
+                        self.regions.outlives.push(Outlives {
+                            sup: member,
+                            sub,
+                            location: None,
+                            category: Category::Boring,
+                            span: MirSpan::Unknown,
+                            from_closure: false,
+                        });
+                    }
+                }
+                if known {
+                    self.regions.members = members;
+                    self.regions.choices = choices;
+                }
+            }
             if let InferBodyId::DefWithBodyId(DefWithBodyId::FunctionId(function)) = owner {
                 self.regions.is_impl_item =
                     matches!(function.lookup(self.ctx.db).container, ItemContainerId::ImplId(_));
