@@ -11,6 +11,7 @@
 use hir_def::{
     AdtId, CallableDefId, DefWithBodyId, GenericDefId, ItemContainerId, Lookup as _,
     hir::{Pat, Statement},
+    resolver::HasResolver as _,
     signatures::FunctionSignature,
 };
 use rustc_hash::{FxHashMap, FxHashSet};
@@ -21,11 +22,12 @@ use rustc_type_ir::{
 
 use hir_ty::{
     GenericPredicates, InferBodyId,
+    db::GeneralConstId,
     mir::{
         AggregateKind, BorrowKind, CastKind, LocalId, MirBody, MirSpan, Operand, OperandKind,
         PlaceElem, PlaceTy, ProjectionElem, Rvalue, StatementKind, TerminatorKind,
     },
-    next_solver::{GenericArgKind, GenericArgs, Region, Ty, TyKind},
+    next_solver::{ConstKind, GenericArgKind, GenericArgs, Region, Ty, TyKind},
 };
 
 use super::{
@@ -1149,11 +1151,86 @@ impl<'db> Builder<'_, '_, 'db> {
                 }
             }
             _ => {
-                if let Some(ty) = self.rvalue_ty(rvalue, span) {
+                let constant = match rvalue {
+                    Rvalue::Use(operand) => self.constant_ty(operand, span),
+                    _ => None,
+                };
+                if let Some(ty) = constant.or_else(|| self.rvalue_ty(rvalue, span)) {
                     self.relate(ty, dest, Variance::Covariant, at);
                 }
             }
         }
+    }
+
+    /// The type of a named constant as rustc's type check gives it: its generic arguments
+    /// renumbered, or kept as written where its path spells them out (rustc's user type
+    /// annotation), with its where clauses proven; for a constant of an inherent impl named
+    /// through a written self type, `<Foo<'a>>::C`, that type equal to the impl's.
+    fn constant_ty(&mut self, operand: &Operand, span: MirSpan) -> Option<Ty<'db>> {
+        let OperandKind::Constant { konst, .. } = &operand.kind else { return None };
+        let ConstKind::Unevaluated(unevaluated) = konst.as_ref().kind() else { return None };
+        let GeneralConstId::ConstId(id) = unevaluated.def.0 else { return None };
+        let span = operand.span().unwrap_or(span);
+        let path = match span {
+            MirSpan::ExprId(expr) => match &self.ctx.store[expr] {
+                hir_def::hir::Expr::Path(path) => Some(path),
+                _ => None,
+            },
+            _ => None,
+        };
+        let args = match path {
+            Some(path) if spells_generics(path) => self.written(unevaluated.args),
+            _ => self.renumber(unevaluated.args),
+        };
+        let db = self.ctx.db;
+        let ty = self
+            .declared(db.value_ty(id.into())?.instantiate(self.interner(), args).skip_norm_wip());
+        self.predicates(id.into(), args, At { category: Category::Predicate, span }, true);
+        if let Some(anchor) = path.and_then(|it| it.type_anchor())
+            && let ItemContainerId::ImplId(impl_) = id.lookup(db).container
+        {
+            let written = self.written(self.lower_written(anchor, span));
+            let self_ty = self.declared(
+                db.impl_self_ty(impl_).instantiate(self.interner(), args).skip_norm_wip(),
+            );
+            let at = At { category: Category::TypeAnnotation, span };
+            self.relate(self_ty, written, Variance::Invariant, at);
+        }
+        Some(ty)
+    }
+
+    /// A declared type instantiated with region variables: its `'static` the static region,
+    /// any other region it names a fresh variable.
+    fn declared(&self, ty: Ty<'db>) -> Ty<'db> {
+        rustc_type_ir::fold_regions(self.interner(), ty, |region, _| match region.kind() {
+            RegionKind::ReVar(_) | RegionKind::ReBound(..) => region,
+            RegionKind::ReStatic => self.static_region(),
+            _ => self.fresh(),
+        })
+    }
+
+    /// A type written in the body, lowered as inference lowers it, its lifetimes the
+    /// signature's where it names them.
+    fn lower_written(&self, type_ref: hir_def::type_ref::TypeRefId, span: MirSpan) -> Ty<'db> {
+        let db = self.ctx.db;
+        let store_owner = self.ctx.owner.expression_store_owner(db);
+        let mut resolver = store_owner.resolver(db);
+        let _guard = match span {
+            MirSpan::ExprId(expr) => Some(resolver.update_to_inner_scope(db, store_owner, expr)),
+            _ => None,
+        };
+        let generics = std::cell::OnceCell::new();
+        hir_ty::TyLoweringContext::new(
+            db,
+            &resolver,
+            hir_def::expr_store::ExpressionStore::of(db, store_owner),
+            store_owner,
+            self.ctx.owner.generic_def(db),
+            &generics,
+            hir_ty::LifetimeElisionKind::Infer,
+            hir_ty::LifetimeLoweringMode::LateParam,
+        )
+        .lower_ty(type_ref)
     }
 
     fn rvalue_ty(&mut self, rvalue: &Rvalue, span: MirSpan) -> Option<Ty<'db>> {
@@ -1324,8 +1401,10 @@ impl<'db> Builder<'_, '_, 'db> {
     fn terminator(&mut self, kind: &TerminatorKind, span: MirSpan) {
         match kind {
             TerminatorKind::Call { func, args, destination, .. } => {
-                let Some(func_ty) =
-                    self.written_callee(func, span).or_else(|| self.operand_ty(func))
+                let Some(func_ty) = self
+                    .written_callee(func, span)
+                    .or_else(|| self.constant_ty(func, span))
+                    .or_else(|| self.operand_ty(func))
                 else {
                     return;
                 };

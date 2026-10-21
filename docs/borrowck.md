@@ -74,12 +74,12 @@ counted reason, when it cannot say anything about the borrow checker: it needs a
 feature, an auxiliary crate or another file, a `-Z` flag other than Polonius, or rustc
 stops before borrow checking.
 
-With no borrow checker, the 245 units rustc accepts would pass. At cdbb699582:
+With no borrow checker, the 245 units rustc accepts would pass. On branch borrowck-3:
 
 | Mode | In scope | Pass | rustc accepts, ra-jit too | rustc rejects, same errors |
 |---|---|---|---|---|
-| Polonius | 1578 | 1055 (66.9%) | 245 of 245 | 810 of 1333 |
-| NLL | 1576 | 1051 (66.7%) | 226 of 226 | 825 of 1350 |
+| Polonius | 1578 | 1067 (67.6%) | 245 of 245 | 822 of 1333 |
+| NLL | 1576 | 1059 (67.2%) | 226 of 226 | 833 of 1350 |
 
 463 units are out of scope; 344 of them need a nightly feature. CI runs the scoring on Linux
 and fails below a floor a few units under the count there.
@@ -127,7 +127,10 @@ missed rather than errors made up:
 
 - Temporaries of a block's tail expression in edition 2021 are dropped at a different point.
 - Comparisons against constant patterns take their operands by value.
-- Unwind paths are not all lowered, so a few errors that only happen on unwind are missed.
+- Unwind paths are not lowered. rustc's MIR gives every call and drop a cleanup path ending
+  at `resume`, where any borrow still live that outlives the function's own regions is an
+  error (E0597 for `let x = ...; let r: &'a _ = &x; f();`). ra-jit checks that at each call,
+  drop and assert as if the path were there; it would be exact if the lowering added them.
 
 ## What it costs
 

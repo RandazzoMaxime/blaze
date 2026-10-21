@@ -123,6 +123,7 @@ pub fn borrowck<'db>(db: &'db dyn HirDatabase, def: DefWithBodyId) -> BorrowckRe
 /// What the checks ask of the types and the source of a body.
 pub(crate) struct Ctx<'a, 'db> {
     pub(crate) db: &'db dyn HirDatabase,
+    pub(crate) owner: InferBodyId<'db>,
     pub(crate) infcx: InferCtxt<'db>,
     pub(crate) env: ParamEnv<'db>,
     #[allow(dead_code)]
@@ -197,6 +198,7 @@ impl<'a, 'db> Ctx<'a, 'db> {
         }
         Ctx {
             db,
+            owner,
             infcx,
             env,
             krate,

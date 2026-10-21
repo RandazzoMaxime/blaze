@@ -436,6 +436,36 @@ impl<'a, 'db> Checker<'a, '_, 'db> {
             | TerminatorKind::FalseEdge { .. }
             | TerminatorKind::FalseUnwind { .. } => (),
         }
+        if matches!(
+            kind,
+            TerminatorKind::Call { .. }
+                | TerminatorKind::Drop { .. }
+                | TerminatorKind::DropAndReplace { .. }
+                | TerminatorKind::Assert { .. }
+        ) {
+            self.check_for_invalidation_at_unwind();
+        }
+    }
+
+    /// rustc's `check_for_invalidation_at_exit` at the `resume` its unwind paths end in, which
+    /// rust-analyzer's MIR does not have: a terminator that may unwind takes there every loan
+    /// in scope, and those whose region outlives a universal one are still in scope at the
+    /// `resume`, so each of them is reported, not only the first a `StorageDead` meets.
+    fn check_for_invalidation_at_unwind(&mut self) {
+        let in_scope: Vec<usize> = self.in_scope.iter().collect();
+        for id in in_scope {
+            let loan = &self.loans.loans[id];
+            if loan.projection.contains(&ProjectionElem::Deref) {
+                continue;
+            }
+            let outlives_universal = self
+                .values
+                .universals_of(loan.region)
+                .any(|it| self.regions.universals[it].1 != UniversalKind::FnBody);
+            if outlives_universal {
+                self.report_does_not_live_long_enough(id);
+            }
+        }
     }
 
     fn mutate_destination(&mut self, location: Location, place: PlaceRef<'_>, span: MirSpan) {
