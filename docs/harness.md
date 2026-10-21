@@ -273,7 +273,9 @@ machine and commits the README's numbers to main. It runs only while the reposit
 `BENCH_RUNNER` is `true` ([benchmarks.md](benchmarks.md)). `bench.yaml` (compile times) and
 `claims.yaml` (rustc's `tests/ui`) run on pull requests and pushes too, `nix-live.yaml` and
 `fork-sync.yaml` on pushes to main that touch what they cover, `fuzz.yaml` nightly, and
-`live-*.yaml` on their own branches. None of them is part of `ci`. `site.yaml` deploys the
+`live-*.yaml` on their own branches. None of them is part of `ci`; on a pull request claims
+runs only its first 150 tests, so the few that once differed from rustc
+(`harness/ui-pinned.txt`, `uitest.py --tests`) run in ra-jit.yaml's `borrowck` job, which is. `site.yaml` deploys the
 site, and `release.yaml` builds releases from tags, each target through
 `.github/scripts/build_release.py` (the `dist` profile with PGO, [reports/RELEASE-BUILD.md](reports/RELEASE-BUILD.md)),
 the recipe the flake's `dist` runs too. `pgo.yaml` trains the profiles it uses, by hand and on
