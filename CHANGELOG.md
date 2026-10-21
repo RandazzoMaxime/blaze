@@ -142,6 +142,12 @@ All notable changes to ra-jit are written here. The format follows
 
 ### Changed
 
+- On macOS a patch whose unwind frames are larger than the program's unwind table is spliced
+  rather than linked in full: both of the unwinder's tables move into the room the link leaves
+  after its load commands, the program's frames where the table has them and the patch's
+  behind. ripgrep's first edit (244 KB of frames, a table of 218 KB) is a patch there too
+  (`harness/rustcbase.py`'s `moved-panic` and `cached-reached`).
+
 - After a fresh build through cargo the daemon is ready for edits once it has loaded the
   workspace and read the symbols of the executable rustc linked, instead of after building
   every program once more itself ([#11](https://github.com/indexable-inc/ra-jit/issues/11)):
@@ -179,9 +185,7 @@ All notable changes to ra-jit are written here. The format follows
   before it is ready. The first edit reads the edited file's functions on every core. An edit
   of a generic, `#[inline]` or default trait function, or one that moves such a function's
   lines, is now a patch too when every copy rustc made of it is found in the executable: the
-  patch replaces the copies, and ripgrep's first edit is a patch on Linux (on macOS its
-  frames are more than the room of rustc's unwind table, 244 KB in 218 KB, and it is built
-  in full, as the log says). Thread-locals of a patch
+  patch replaces the copies, and ripgrep's first edit is a patch. Thread-locals of a patch
   over rustc's executable are reached as rustc's code reaches them (on Linux x86-64 the
   general-dynamic sequence becomes local-exec, on macOS through the variable's descriptor).
   On Linux x86-64 (16 vCPUs, 8 cores), interleaved runs from an empty store, command and

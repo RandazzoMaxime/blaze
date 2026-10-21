@@ -137,8 +137,9 @@ What is specific to the port:
   copy that replaces the executable by rename. dyld on macOS 15.4 to 15.7 finds
   `__unwind_info` and `__eh_frame` only in the segment named `__TEXT`, so `__unwind_info`
   moves into the header's spare room and the patch's frames take its place in front of the
-  program's; a patch whose frames are larger than the program's unwind table is linked in
-  full. The room for two more load commands and the table comes from `-Wl,-headerpad`,
+  program's. When the patch's frames are larger than the program's unwind table, both tables
+  move into that room, the program's frames where the table has them and the patch's behind;
+  only a patch whose frames don't fit there either is linked in full. The room for two more load commands and the table comes from `-Wl,-headerpad`,
   which `cargo ra-jit` gives the link in a file of its own beside the executable
   (`bin.headerpad`), last on the line: 1 MiB, or what the line asks for. The table grows
   with the program (3 MB for a GUI app of 570 crates), so after each full link the daemon

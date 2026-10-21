@@ -21,8 +21,11 @@
 //! into the room the header leaves, and the patch's frames take its place, so `__eh_frame`
 //! starts with them and no section overlaps another, which `strip` would refuse; the table
 //! is told the program's frames are that much further from where the section starts, which
-//! its 24-bit offsets can't say past 16 MB. Either way the table has nothing for the patch's
-//! functions, which are past its last entry, so the unwinder looks for them in `__eh_frame`.
+//! its 24-bit offsets can't say past 16 MB. When the patch's frames are larger than the table,
+//! both tables move into the header's room: the table as it is, and `__eh_frame` with the
+//! program's frames where the table has them and the patch's behind. Each way the table has
+//! nothing for the patch's functions, which are past its last entry, so the unwinder looks
+//! for them in `__eh_frame`.
 //!
 //! The kernel remembers the signature of a file it has run, so the executable is not
 //! written where it is: a copy is, which the file system makes without copying where it
@@ -917,7 +920,7 @@ fn frames_behind(
 /// front of the program's: `__unwind_info` moves into the room the header leaves, from `at`
 /// of the file, and the frames go where it was. Gives what that writes where in the file
 /// and where the two sections then start, `__unwind_info` first; or nothing when the patch
-/// has no frames.
+/// has no frames or they are larger than the table.
 fn frames_in_front(
     image: &Image,
     ours: &[u8],
@@ -926,12 +929,9 @@ fn frames_in_front(
 ) -> anyhow::Result<Option<(Vec<(u64, Vec<u8>)>, [u64; 2])>> {
     // Its length, then laid out where it goes.
     let Some(len) = frames_moved(ours, from, from)?.map(|it| it.len()) else { return Ok(None) };
-    ensure!(image.in_front != 0, "something is between `__unwind_info` and `__eh_frame`");
-    ensure!(
-        len as u64 <= image.in_front,
-        "the patch's frames are larger than the program's unwind table: {len} bytes after {}",
-        image.in_front
-    );
+    if len as u64 > image.in_front {
+        return Ok(None);
+    }
     let start = image.frames.address - len as u64;
     let block = frames_moved(ours, from, start)?.context("frames that went away")?;
     let padded = block.len();
@@ -946,23 +946,62 @@ fn frames_in_front(
     Ok(Some((vec![(image.offset_of(start)?, block), (at as u64, table)], [unwind, start])))
 }
 
-/// Lists `__unwind_info` first of its segment's sections once it is in the room the header
-/// leaves ([`frames_in_front`]): a segment lists its sections in the order of their
-/// addresses, which dyld checks (`dyld_info` says "start address overlaps previous
-/// section"). The symbols name their section by its number, so those in the sections it
-/// passes are numbered again, in the symbol table of `linkedit`, which starts at `offset`
-/// of the file.
-fn unwind_first(
+/// The tables of the unwinder once both are in the room the header leaves, from `at` of the
+/// file, for patch frames of any size that fits there: `__unwind_info` as it is, then
+/// `__eh_frame` with the program's frames at the offsets the table has for them and the
+/// patch's behind, where the unwinder finds them as it does behind the program's
+/// ([`frames_behind`]). Gives what that writes where in the file, where the two sections
+/// then start, `__unwind_info` first, and the size of `__eh_frame`; or nothing when the
+/// patch has no frames.
+fn frames_in_header(
+    image: &Image,
+    ours: &[u8],
+    from: u64,
+    at: usize,
+) -> anyhow::Result<Option<(Vec<(u64, Vec<u8>)>, [u64; 2], u64)>> {
+    ensure!(
+        image.frames.nth == image.unwind.nth + 1,
+        "a section between `__unwind_info` and `__eh_frame`"
+    );
+    let frames_at = (at + image.unwind.bytes.len()).next_multiple_of(8);
+    let start = image.address_of(frames_at as u64)?;
+    let theirs = frames_moved(&image.frames.bytes, image.frames.address, start)?
+        .context("the program has no frames")?;
+    let behind = start + theirs.len() as u64;
+    let Some(block) = frames_moved(ours, from, behind)? else { return Ok(None) };
+    let end = frames_at + theirs.len() + block.len();
+    ensure!(
+        end <= image.room,
+        "the header has no room for the unwind tables: link with -Wl,-headerpad,{:#x}",
+        end.next_multiple_of(0x1000)
+    );
+    let unwind = image.address_of(at as u64)?;
+    let size = (theirs.len() + block.len()) as u64;
+    let written =
+        vec![(at as u64, image.unwind.bytes.clone()), (frames_at as u64, [theirs, block].concat())];
+    Ok(Some((written, [unwind, start], size)))
+}
+
+/// Lists `__unwind_info` and the `count - 1` sections behind it first of their segment's
+/// sections once they are in the room the header leaves ([`frames_in_front`],
+/// [`frames_in_header`]): a segment lists its sections in the order of their addresses,
+/// which dyld checks (`dyld_info` says "start address overlaps previous section"). The
+/// symbols name their section by its number, so those of the sections moved and passed are
+/// numbered again, in the symbol table of `linkedit`, which starts at `offset` of the file.
+fn tables_first(
     image: &Image,
     commands: &mut [u8],
     linkedit: &mut [u8],
     offset: u64,
+    count: usize,
 ) -> anyhow::Result<()> {
     let Table { header, nth, first, .. } = image.unwind;
     let start = header - (nth - first) * SECTION;
-    commands[start..header + SECTION].rotate_right(SECTION);
+    commands[start..header + count * SECTION].rotate_right(count * SECTION);
 
-    let (lowest, moved) = (u8::try_from(first + 1)?, u8::try_from(nth + 1)?);
+    let lowest = u8::try_from(first + 1)?;
+    let (moved, past) = (u8::try_from(nth + 1)?, u8::try_from(nth + 1 + count)?);
+    let passed = u8::try_from(count)?;
     let mut command = HEADER;
     for _ in 0..u32_at(commands, 16)? {
         if u32_at(commands, command)? == macho::LC_SYMTAB {
@@ -973,8 +1012,8 @@ fn unwind_first(
                 let entry = table as usize + nth * NLIST + 5;
                 let section = linkedit.get_mut(entry).context("symbols past the end")?;
                 *section = match *section {
-                    it if it == moved => lowest,
-                    it if (lowest..moved).contains(&it) => it + 1,
+                    it if (moved..past).contains(&it) => lowest + (it - moved),
+                    it if (lowest..moved).contains(&it) => it + passed,
                     it => it,
                 };
             }
@@ -1456,22 +1495,30 @@ impl<'a> Patch<'a> {
             (commands.len() - image.commands.len()).next_multiple_of(0x100)
         );
 
-        // The patch's frames, in front of the program's where its unwind table was, which
-        // moves into the room the header leaves.
+        // The patch's frames: behind the program's when `__TEXT` has room there, in front of
+        // them where the unwind table was, which moves into the room the header leaves, and
+        // else behind them with both tables in that room.
         let mut tables = Vec::new();
         if let Some(index) = self.frames {
             let (at, len) = (placed[&index], self.file.section_by_index(index)?.size());
             let ours = &appended[at as usize..(at + len) as usize];
             let front = commands.len().next_multiple_of(16);
-            if let Some((start, block, size)) =
+            let unwind = image.unwind.bytes.len() as u64;
+            let moved = if let Some((start, block, size)) =
                 frames_behind(&image.frames, image.behind, ours, base + at)?
             {
                 put64(&mut commands, image.frames.header + 40, size);
                 tables = vec![(image.offset_of(start)?, block)];
+                None
             } else if let Some((written, starts)) = frames_in_front(image, ours, base + at, front)?
             {
                 let end = image.frames.address + image.frames.bytes.len() as u64;
-                let sizes = [image.unwind.bytes.len() as u64, end - starts[1]];
+                Some((written, starts, [unwind, end - starts[1]], 1))
+            } else {
+                frames_in_header(image, ours, base + at, front)?
+                    .map(|(written, starts, size)| (written, starts, [unwind, size], 2))
+            };
+            if let Some((written, starts, sizes, count)) = moved {
                 for ((table, start), size) in
                     [&image.unwind, &image.frames].into_iter().zip(starts).zip(sizes)
                 {
@@ -1483,7 +1530,7 @@ impl<'a> Patch<'a> {
                         u32::try_from(image.offset_of(start)?)?,
                     );
                 }
-                unwind_first(image, &mut commands, &mut linkedit, offset + linkedit_at)?;
+                tables_first(image, &mut commands, &mut linkedit, offset + linkedit_at, count)?;
                 tables = written;
             }
         }
