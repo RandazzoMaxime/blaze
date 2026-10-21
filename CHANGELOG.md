@@ -205,6 +205,14 @@ All notable changes to ra-jit are written here. The format follows
 
 ### Fixed
 
+- Large workspaces are ready in a fraction of the time and memory
+  ([#29](https://github.com/indexable-inc/ra-jit/issues/29)): a closure's type holds its inner
+  closure twice, so the store's name for a type of nested closures doubled with each level
+  (one of helix's was 665 MB). A type is now spelled once per daemon, and one spelled longer
+  than 1 KB is named by the SHA-256 of its spelling; shorter names, and the store entries
+  under them, are unchanged. helix is ready in 109 s at 18.4 GB of memory instead of 631 s at
+  100.7 GB, its store is 1.6 GB instead of 14 GB, and its first `cargo ra-jit run` takes
+  46.9 s instead of 640.8 s (`harness/deepnames.py`).
 - `harness/apps.py`'s perf stage ends with its timings again: since the rename from rustd it
   stored ra-jit's as `ra-jit_s` and printed `ra_jit_s`, a `KeyError` after every workload.
   wasmrun builds wasmtime 36.0.19 (was 25.0.3, which Dependabot's alerts name); its workload
@@ -239,6 +247,9 @@ All notable changes to ra-jit are written here. The format follows
 - `harness/debuginfo.py`'s perf check takes a sample in a naked function without a line as
   rustc has it (its body is assembly, which rustc gives no line either), not as lost debug
   info: one of the corpus's on Linux arm64 failed it now and then.
+- `breakers.py`'s `frame_of_tables` and `frame_of_results` ask whether ra-jit's frames fit
+  where rustc's do, not whether they are as large: a whole program's build with LLVM makes
+  them smaller than rustc's, which each case's crate has room for too, and they differed.
 - `cargo_ra_jit.py` says what a client that failed or hung said, and what it was doing,
   rather than ending on a timeout with nothing.
 - A workspace the daemon loads after a change whose build scripts did not all run is not

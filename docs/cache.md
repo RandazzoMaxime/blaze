@@ -18,6 +18,9 @@ loads a workspace.
 A function's key is a SHA-256 over the backend and optimisation level, the target triple,
 whether the build has debug info and overflow checks, and the function's stable name. The
 stable name holds the function's path, its generic arguments spelled out, and its crate. A
+type whose spelling would be longer than 1 KB is written as the SHA-256 of that spelling
+instead: a closure that wraps closures holds each of their types twice, so written out in
+full its name doubles with each level (helix's parser combinators made one of 665 MB). A
 dependency is named by rustc's stable crate id (name, version, and the metadata cargo
 passes). A crate of your checkout is named by a hash of its source, so two checkouts with
 the same source share entries wherever they are on disk. An edit gives new names to
