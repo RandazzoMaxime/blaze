@@ -23,7 +23,9 @@ Every edit is made and taken back `--runs` times, or once when the daemon turned
 cargo built it; the time of each is the median, and every sample of both sides is kept. None of
 them changes what the program does: after the first of each kind the program is run and has
 to say what cargo's says; one that does not, or a test that ends otherwise under `cargo ra-jit
-test`, is written down in `wrong`, and the run ends with exit code 3 after writing the result.
+test`, is written down in `wrong`. A build that fails ends its project (what was measured is
+kept, with the error in `failed`) and the run goes on. Either way the run ends with exit code 3
+after writing the result.
 The result also names the commit of ra-jit, the date and the machine
 (`RA_JIT_BENCH_MACHINE` names it, for example the instance type); `benchreport.py` turns it
 into the README's table and docs/benchmarks.md.
@@ -431,6 +433,15 @@ def store_mb(path):
     return round(total / 1e6)
 
 
+class Failed(Exception):
+    """A build of a project failed: the project ends there, the run goes on."""
+
+
+# The phases measured so far and the daemon's side, by (project, backend): what is kept of a
+# project that failed.
+SO_FAR = {}
+
+
 def measure(name, spec, backend, runs, work, reference_dir, cold_runs=1, setup_names=(), tests=False):
     """Runs every phase of one project under one backend. The result is the phases by name."""
     ra_jit = ra_jit_of(backend)
@@ -447,6 +458,7 @@ def measure(name, spec, backend, runs, work, reference_dir, cold_runs=1, setup_n
         theirs.env["CARGO_TARGET_DIR"] = os.path.join(reference_dir, f"target-ref-{name}-{backend}")
     setups = [Setup(s, ws, theirs.env, reference_dir or ws) for s in setup_names]
     phases, wrong = {}, []
+    SO_FAR[name, backend] = (phases, wrong, ours)
     build, run = spec.get("build", []), spec.get("run")
     subprocess.run(["cargo", "fetch"], cwd=ws, env=env, capture_output=True)
 
@@ -458,7 +470,7 @@ def measure(name, spec, backend, runs, work, reference_dir, cold_runs=1, setup_n
         (took, mine), (reference, other) = ours.cargo("build", *build), theirs.cargo("build", *build)
         for side, ran in (("ra-jit", mine), ("cargo", other)):
             if ran.returncode != 0:
-                raise SystemExit(f"{name} {backend}: the {side} build failed:\n{ran.stderr[-3000:]}")
+                raise Failed(f"{name} {backend}: the {side} build failed:\n{ran.stderr[-3000:]}")
         built = how_built(mine.stderr)
         if built != "daemon":
             # A build cargo did has the daemon load again; the next one is not timed against that.
@@ -484,10 +496,10 @@ def measure(name, spec, backend, runs, work, reference_dir, cold_runs=1, setup_n
         """`cargo ra-jit build` from nothing on `side`, and the wait until its daemon is ready."""
         took, mine = side.cargo("build", *build)
         if mine.returncode != 0:
-            raise SystemExit(f"{name} {backend}: the first `cargo ra-jit build` ({label}) failed:\n{mine.stderr[-3000:]}")
+            raise Failed(f"{name} {backend}: the first `cargo ra-jit build` ({label}) failed:\n{mine.stderr[-3000:]}")
         warm, states = wait_warm(side, side.ws)
         if states != ["ready"]:
-            raise SystemExit(f"{name} {backend}: the daemon did not get ready ({label}): {states}\n{mine.stderr[-3000:]}")
+            raise Failed(f"{name} {backend}: the daemon did not get ready ({label}): {states}\n{mine.stderr[-3000:]}")
         return took, warm, mine
 
     # Each cold run starts from nothing: no target directories, an empty store and a daemon of
@@ -505,7 +517,7 @@ def measure(name, spec, backend, runs, work, reference_dir, cold_runs=1, setup_n
         said, built, peak = daemon.said(), how_built(mine.stderr), daemon.peak_mb()
         reference, other = theirs.cargo("build", *build)
         if other.returncode != 0:
-            raise SystemExit(f"{name} {backend}: the cargo build failed:\n{other.stderr[-3000:]}")
+            raise Failed(f"{name} {backend}: the cargo build failed:\n{other.stderr[-3000:]}")
         for setup in setups:
             setup.clean()
         setup_cold = others()
@@ -649,7 +661,7 @@ def runtime(name, spec, theirs, ws, build, runs, wrong):
     spec = spec["runtime"]
     _, released = theirs.cargo("build", "--release", *build)
     if released.returncode != 0:
-        raise SystemExit(f"{name}: the cargo release build failed:\n{released.stderr[-3000:]}")
+        raise Failed(f"{name}: the cargo release build failed:\n{released.stderr[-3000:]}")
     target = theirs.env["CARGO_TARGET_DIR"]
     programs = {"ra-jit": os.path.join(ws, "target/debug", spec["bin"]), "cargo debug": os.path.join(target, "debug", spec["bin"]),
                 "cargo release": os.path.join(target, "release", spec["bin"])}
@@ -785,8 +797,14 @@ def main():
             # The other setups and the test suites are cargo's and the same for every backend: once.
             first = backend == backends[0]
             setups = setup_names if first and (not setups_on or name in setups_on) else []
-            result["results"][f"{name}/{backend}"] = measured = measure(name, PROJECTS[name], backend, runs, work, reference_dir,
-                                                                        cold_runs, setups, tests and first)
+            try:
+                measured = measure(name, PROJECTS[name], backend, runs, work, reference_dir, cold_runs, setups, tests and first)
+            except Failed as failed:
+                phases, wrong, ours = SO_FAR[name, backend]
+                ours.cargo("stop")
+                print(f"  FAILED {failed}", flush=True)
+                measured = dict(phases=phases, wrong=wrong, failed=str(failed), tag=PROJECTS[name]["tag"], rev=PROJECTS[name]["rev"])
+            result["results"][f"{name}/{backend}"] = measured
             for line in measured["wrong"]:
                 print(f"  WRONG {line}", flush=True)
             json.dump(result, open(out, "w"), indent=1)
@@ -796,9 +814,10 @@ def main():
                         if re.search(rf"(^|-){re.escape(name)}-{backend}(-|$)", entry):
                             shutil.rmtree(os.path.join(at, entry), ignore_errors=True)
     wrong = [f"{key}: {line}" for key, measured in result["results"].items() for line in measured["wrong"]]
-    print(f"wrote {out}; wrong: {len(wrong)}")
-    # Not 1, which is also what an exception ends with: the run is whole and says what was wrong.
-    sys.exit(3 if wrong else 0)
+    failed = [key for key, measured in result["results"].items() if measured.get("failed")]
+    print(f"wrote {out}; wrong: {len(wrong)}; failed: {', '.join(failed) or 'none'}")
+    # Not 1, which is also what an exception ends with: the run is whole and says what went wrong.
+    sys.exit(3 if wrong or failed else 0)
 
 
 if __name__ == "__main__":

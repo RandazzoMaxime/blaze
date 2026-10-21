@@ -90,6 +90,18 @@ def project_name(key, measured):
     return f"{key.split('/')[0]} {tag.lstrip('v').removeprefix('axum-v')}".strip()
 
 
+def failure(key, measured):
+    """What failed and where, in the project's own paths: a line for under the tables."""
+    said = [line for line in measured["failed"].splitlines()[1:] if line.strip()] or measured["failed"].splitlines()
+    said = re.sub(r"/\S*?/[\w.-]+-(cranelift|llvm)/(target/\S*?: )?", "", said[-1].removeprefix("error: "))
+    return f"{project_name(key, measured)}: the build failed after the steps shown, {said[:300]}"
+
+
+def failures(result, keys):
+    failed = [failure(k, result["results"][k]) for k in keys if result["results"][k].get("failed")]
+    return ["", *(f"- {line}" for line in failed)] if failed else []
+
+
 def cargo_built(phase):
     return phase is not None and phase.get("built") != "daemon"
 
@@ -141,6 +153,7 @@ def readme_section(result):
                 mark, fell_back = " (c)", True
             cells.append(f"{seconds(phase['cargo_s'])} → **{seconds(phase['wall_s'])}**{mark} ({speedup(phase['cargo_s'], phase['wall_s'])})")
         lines.append(f"| {project_name(key, measured)} | " + " | ".join(cells) + " |")
+    lines += failures(result, keys)
     lines.append("")
     if fell_back:
         lines.append("(c): the daemon handed this edit to cargo (a fallback, so about cargo's time).")
@@ -181,6 +194,7 @@ def doc_section(result):
                 lines.append(f"| {project_name(key, measured)} | {EDITS[label]} | {seconds(phase['cargo_s'])} | {seconds(phase['wall_s'])} | "
                              f"{speedup(phase['cargo_s'], phase['wall_s'])} | {spread(phase.get('cargo_samples_s'))} | {spread(phase.get('samples_s'))} | "
                              f"{phase['built'][:80]} | {phase.get('link') or ''} |")
+        lines += failures(result, keys)
         cold_runs = result.get("cold_runs", 1)
         lines += ["", f"#### Cold, {BACKEND_NAMES[backend]}", "",
                   "From an empty target directory, crates already downloaded, " + ("one run." if cold_runs == 1 else
