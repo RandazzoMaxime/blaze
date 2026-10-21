@@ -64,7 +64,7 @@ every edit of it builds, but it is not measured yet: ra-jit's daemon does not fi
 On a c8i.16xlarge (2026-10-21, ra-jit `2b2f2dcd5b`) the daemon loaded the workspace (20 s),
 its 1,756,350 symbols (26 s) and resolved the crates (25 s), then went from 20 GB to more
 than 111 GB in 40 seconds and was stopped at a 112 GB limit before it was ready; cargo alone
-builds it in a few minutes on the same machine.
+builds it in a few minutes on the same machine. Its build needs `nix develop .#bench-zed`.
 
 `cargo` 0.92.0 is in `PROJECTS` too but not in the CI run (it doubles the run's length).
 
@@ -245,7 +245,39 @@ and 30 GB of disk.
 - Cold for `cargo ra-jit build` is cargo's own build (the daemon is not loaded yet), so it matches
   plain cargo; the daemon then loads the workspace in the background ("Daemon ready after").
 - The C compiler comes from Nix (gcc 16) with the wrapper's hardening turned off, as a
-  distribution's gcc behaves; it is the same for both sides.
+  distribution's gcc behaves; it is the same for both sides. Nix's linker wrapper runs
+  `realpath` for each library directory of the shell on every link cargo makes (ra-jit's links
+  do not go through it), so the bench shell holds only what the measured projects need, 72
+  directories (a link through `cc` costs 0.23 s); zed's libraries are in `nix develop
+  .#bench-zed`. With them in the bench shell (282 directories) every cargo link cost 0.85 s, which
+  made cargo and subsecond look 0.6 s slower. A result records the count (`library_dirs`).
+
+## What the 2026-10-21 run found
+
+ra-jit loses or fails on these, measured on dev-aws-7 (16 cores of a c7i.16xlarge):
+
+- **Doctests.** Without `-q`, `cargo ra-jit test` builds the doctests of every library itself, in
+  a process that loads the workspace each time (about 2 s per library), on every run: ripgrep's
+  suite takes 27.8 s with nothing changed against 4.3 s under `cargo test`, nushell's 12.4 s
+  against 2.5 s. With `-q` cargo hands the doctests to rustdoc and ripgrep's run takes 4.9 s
+  against 4.1 s. fd, hyperfine and just, whose libraries have few or no doctests, are faster than
+  cargo after an edit and the same with nothing changed. In ripgrep, nushell and axum the edited
+  library is one whose unit tests the daemon leaves to rustc, so that edit is cargo's build.
+- **axum's `example-testing`.** The test binary the daemon builds crashes (SIGSEGV) in
+  `the_real_deal`, which serves axum on a TCP socket and calls it with hyper's client: tokio's
+  `Registration::readiness` reads a null `Arc<ScheduledIo>` from `TcpListener::accept`. Five of
+  the six tests pass; cargo's binary passes all six. Seen on Linux and on macOS.
+- **bevy's breakout.** The daemon cannot type `(apply_velocity, move_paddle,
+  check_for_collisions).chain()` (the method comes from impls bevy generates for tuples of
+  systems), and `cargo ra-jit build` fails at the first edit instead of handing the build to
+  cargo. Cold and no-op are measured; the edits are not.
+- **helix.** After a 31 s cold build (the same as cargo's) the daemon takes 638 s to be ready and
+  holds 98 GB; with the test targets loaded too it was killed for memory on a 123 GB machine.
+  nushell, a larger workspace, is ready 33 s after its build, at 16 GB.
+- **zed** (1.7M lines, 1,291 crates) does not fit: the daemon needs more than 111 GB.
+- **Cold.** `cargo ra-jit build` from nothing is cargo's build plus the start of the daemon:
+  6.29 s against 5.56 s on ripgrep, and the daemon is ready 6.2 s later.
+- **No-op** on ripgrep: 33 ms against cargo's 30 ms.
 
 ## Earlier one-off measurements
 

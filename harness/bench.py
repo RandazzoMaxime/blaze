@@ -713,6 +713,9 @@ def machine():
         llvm=first_line("llvm-config", "--version"),
         incremental=os.environ.get("CARGO_INCREMENTAL", "profile default (on for dev)"),
         wrapper=None, linker="the toolchain's default (cc)",
+        # Nix's linker wrapper runs `realpath` for each of these on every link cargo makes (not
+        # on ra-jit's): runs are comparable only with the same count.
+        library_dirs=sum(arg.startswith("-L") for arg in os.environ.get("NIX_LDFLAGS", "").split()) or None,
     )
 
 

@@ -31,8 +31,9 @@ All notable changes to ra-jit are written here. The format follows
   run `--cold-runs` times against fresh cargo, each with an empty store, and as many times
   in a second checkout with the store the first filled, the store's size is kept, and `--tests`
   runs each project's test suite under `cargo ra-jit test` and `cargo test` and fails on any
-  test that ends differently. A run with anything wrong still writes its result and ends with
-  exit code 3; `benchreport.py` publishes a test suite that ended differently in the tests
+  test that ends differently. A project whose build fails keeps what it measured, with the
+  error, and the run goes on to the next. A run with anything wrong or failed still writes its
+  result and ends with exit code 3; `benchreport.py` publishes a test suite that ended differently in the tests
   table (a program that prints something else is still refused), and the workflow commits the
   numbers, then fails.
 - `bench.py --setups` builds every step again with the fastest ways to build Rust there
