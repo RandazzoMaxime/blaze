@@ -46,7 +46,12 @@ All notable changes to ra-jit are written here. The format follows
   Measured on a MacBook (`docs/benchmarks/hotpatch/macbook.json`): subsecond 346 ms
   median, `cargo ra-jit build` with a restart 469 ms, `cargo build` with a restart 520 ms; a
   live patch through `cargo ra-jit build` 12.5 ms and through the editor's socket 4.0 ms
-  (`docs/benchmarks/live/macbook-probe-cargo.json`).
+  (`docs/benchmarks/live/macbook-probe-cargo.json`). On Linux, 16 cores of a c7i.16xlarge
+  (`docs/benchmarks/hotpatch/linux-x86_64.json`): subsecond 289 ms, `cargo ra-jit build`
+  with a restart 40 ms, `cargo build` with a restart 361 ms. On ripgrep's cold build mold,
+  wild, `-Zthreads=8` and cg_clif together are fastest (3.25 s against cargo's 5.56 s), and
+  every edit there and on nushell builds faster under ra-jit than under any of them, `cargo
+  check` included; with nothing changed, on ripgrep, cargo with mold is faster (28 ms against 33).
 - Benchmark history and regression alerts
   ([#10](https://github.com/indexable-inc/ra-jit/issues/10)): `harness/benchhistory.py`
   appends each run's medians to `docs/benchmarks/history/*.jsonl` and checks the last against
