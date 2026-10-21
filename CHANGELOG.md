@@ -8,6 +8,17 @@ All notable changes to ra-jit are written here. The format follows
 
 ### Added
 
+- `RA_JIT_MEMORY` reports after every request a worker answers too (`request-N`), and on
+  macOS its resident figure is the physical footprint rather than 0. A `heap-profile` build
+  writes where it was loaded beside each heap profile, which `harness/heapfold.py` needs to
+  name the stacks on macOS, and `harness/heap.py` gives the bytes to the salsa query whose
+  value or record holds them. What they found
+  ([#39](https://github.com/indexable-inc/ra-jit/issues/39),
+  [docs/research/daemon-memory.md](docs/research/daemon-memory.md)): nushell's worker holds
+  10.0 GB live once ready, 2.7 GB of it what a debugger is told of types; ripgrep's 1.6 GB;
+  and the spare worker the daemon starts after the first build holds 940 MB more on ripgrep.
+  salsa's `lru` cannot evict `infer` or MIR (they have cycle handling), and on `described`
+  it freed 206 MB of ripgrep's live heap and none of its footprint, so no eviction is on.
 - `#[ra_jit::cache]` ([#17](https://github.com/indexable-inc/ra-jit/issues/17)): the
   `ra-jit-cache` crate's attribute keeps what a pure function returns, in memory and under
   `target/ra-jit/fn-cache`, by its arguments and a hash of the code ra-jit compiled for it and

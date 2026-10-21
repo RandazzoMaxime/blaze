@@ -4579,13 +4579,14 @@ impl Builds {
     }
 
     /// Queues a request, or takes back the program of a build that is over and answers its
-    /// clients. Those of a build that was interrupted ask again, ahead of the others.
-    fn take(&mut self, event: Event, programs: &mut [Program]) -> anyhow::Result<()> {
+    /// clients, which is when it returns true. Those of a build that was interrupted ask again,
+    /// ahead of the others.
+    fn take(&mut self, event: Event, programs: &mut [Program]) -> anyhow::Result<bool> {
         self.stuck = false;
         let (at, program, answer) = match event {
             Event::Asked(asked) => {
                 self.waiting.push_back(asked);
-                return Ok(());
+                return Ok(false);
             }
             Event::Edited(edited) => {
                 if let Some(older) = self.edits.iter_mut().find(|it| it.path == edited.path) {
@@ -4594,27 +4595,27 @@ impl Builds {
                 } else {
                     self.edits.push(edited);
                 }
-                return Ok(());
+                return Ok(false);
             }
             Event::Built(at, program, answer) => (at, program, answer),
             Event::Unlinked(at) => {
                 programs[at].unbuilt.stale = true;
                 programs[at].wrote = None;
                 programs[at].known.forget_rustc();
-                return Ok(());
+                return Ok(false);
             }
             Event::Tier(ask) => {
                 self.tier_asks.push(ask);
-                return Ok(());
+                return Ok(false);
             }
             Event::Tiered(at, tiered) => {
                 self.tiered.push((at, tiered));
                 self.install_tiered(programs);
-                return Ok(());
+                return Ok(false);
             }
         };
         let Some(Running { clients, own_base, .. }) = self.running.remove(&at) else {
-            return Ok(());
+            return Ok(false);
         };
         programs[at] = *program;
         let program = &mut programs[at];
@@ -4640,11 +4641,11 @@ impl Builds {
                 // Nobody asked for it, and it is built again once nobody asks for anything. An
                 // edit that came as it started is still to be built.
                 program.unbuilt.stale = !patches_rustcs || !program.unbuilt.edited.is_empty();
-                return Ok(());
+                return Ok(false);
             }
             program.interrupted += 1;
             clients.into_iter().rev().for_each(|it| self.waiting.push_front(it));
-            return Ok(());
+            return Ok(false);
         };
         (program.interrupted, program.moved) = (0, false);
         let answer = answer?;
@@ -4658,7 +4659,7 @@ impl Builds {
                 Err(why) => writeln!(&client, "error: {}", why.replace('\n', " ")),
             };
         }
-        Ok(())
+        Ok(true)
     }
 
     /// Leaves no build under way, for the database to be written to: a write stops every
@@ -5973,7 +5974,11 @@ fn run_holding(
                 let (mut own_base, mut interrupt) = (None, false);
                 match wants_base {
                     Some(at) if idle => match builds.events.recv_timeout(OWN_BASE_AFTER) {
-                        Ok(event) => builds.take(event, &mut programs)?,
+                        Ok(event) => {
+                            if builds.take(event, &mut programs)? {
+                                memory::served(&mut db)?;
+                            }
+                        }
                         Err(std::sync::mpsc::RecvTimeoutError::Timeout) => own_base = Some(at),
                         Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
                             bail!("nothing takes requests any more")
@@ -5981,7 +5986,9 @@ fn run_holding(
                     },
                     _ if builds.stuck || idle => {
                         let event = builds.events.recv()?;
-                        builds.take(event, &mut programs)?;
+                        if builds.take(event, &mut programs)? {
+                            memory::served(&mut db)?;
+                        }
                     }
                     _ => {}
                 }
@@ -5989,7 +5996,9 @@ fn run_holding(
                     // Asked again after each: a checkout that joins takes long enough for the
                     // requests sent with its own to arrive.
                     while let Ok(event) = builds.events.try_recv() {
-                        builds.take(event, &mut programs)?;
+                        if builds.take(event, &mut programs)? {
+                            memory::served(&mut db)?;
+                        }
                     }
                     let Some((request, target, stream)) = builds.waiting.pop_front() else {
                         break;
@@ -6850,6 +6859,7 @@ fn run_holding(
             });
             links.insert(out, linked);
         }
+        memory::served(&mut db)?;
     }
 }
 
