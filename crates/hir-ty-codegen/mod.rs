@@ -527,6 +527,7 @@ impl CodegenUnit {
             let start = stdx::time::Instant::now();
             let own_statics = OwnStatics::new(
                 db,
+                symbols,
                 all().map(|root| root.krate(db)).collect(),
                 known.theirs.clone(),
                 known.unknown.clone(),
@@ -594,6 +595,7 @@ impl CodegenUnit {
         tiers.clear();
         let mut own_statics = OwnStatics::new(
             db,
+            symbols,
             all().map(|root| root.krate(db)).collect(),
             std::mem::take(theirs),
             std::mem::take(unknown),
@@ -859,11 +861,14 @@ struct OwnStatics {
     /// any static of the crate but the ones declared in the body of another function.
     // FIXME: a closure that such a function hands out can refer to the statics of its body.
     unknown: FxHashSet<Crate>,
+    /// The crates of the program rustc built nothing of, whose statics have no copy but ours.
+    unbuilt: FxHashSet<Crate>,
 }
 
 impl OwnStatics {
     fn new(
         db: &dyn HirDatabase,
+        symbols: &dyn SymbolResolver,
         crates: FxHashSet<Crate>,
         theirs: FxHashSet<StaticId>,
         unknown: FxHashSet<Crate>,
@@ -898,11 +903,15 @@ impl OwnStatics {
             false
         };
         let shared = crates.iter().copied().filter(is_shared).collect();
-        OwnStatics { crates, shared, theirs, unknown }
+        let unbuilt = program.iter().copied().filter(|&krate| !symbols.rustc_built(krate)).collect();
+        OwnStatics { crates, shared, theirs, unknown, unbuilt }
     }
 
     fn owns(&self, db: &dyn HirDatabase, id: StaticId) -> bool {
         let module = id.module(db);
+        if self.unbuilt.contains(&module.krate(db)) {
+            return true;
+        }
         self.crates.contains(&module.krate(db))
             && !self.theirs.contains(&id)
             && (module.is_block_module(db) || !self.unknown.contains(&module.krate(db)))
@@ -1626,7 +1635,7 @@ fn rows_of(db: &dyn HirDatabase, compiled: &CompiledFunction) -> Vec<Row> {
 #[salsa::tracked(returns(ref))]
 fn compiled_root<'db>(db: &'db dyn HirDatabase, func: FunctionId) -> Result<CompiledFunction> {
     let _span = tracing::info_span!(target: "ra_jit", "compiled_root").entered();
-    tier::plain(|| root_code(db, func, false)).map(Produced::code)
+    tier::for_build(|| root_code(db, func, false)).map(Produced::code)
 }
 
 /// The code of a non-generic function: Cranelift's, or, for a compile at a level above 1
@@ -1697,7 +1706,7 @@ fn compiled_instance<'db>(
     env: StoredParamEnvAndCrate,
 ) -> Result<CompiledFunction> {
     let _span = tracing::info_span!(target: "ra_jit", "compiled_instance").entered();
-    tier::plain(|| instance_code(db, instance, env, false)).map(Produced::code)
+    tier::for_build(|| instance_code(db, instance, env, false)).map(Produced::code)
 }
 
 /// The code of an instance: Cranelift's, or, for a compile at a level above 1 (`tier`), its
@@ -10049,6 +10058,18 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
                 values.push((self.builder.ins().iadd_imm(tuple_addr, offset), ty));
             }
             self.call_direct(runtime, runtime_args, &values, dst, dst_ty.ty)?;
+            return self.finish_call(destination, target);
+        }
+        // Each is `ub_checks() && ..`, and `ub_checks()` is false here: the check that asks is
+        // then a branch on a constant, which `tier::fold_known_branches` takes out.
+        if func.krate(db).data(db).origin.is_lang()
+            && matches!(
+                FunctionSignature::of(db, func).name.as_str(),
+                "check_language_ub" | "check_library_ub"
+            )
+        {
+            let value = self.builder.ins().iconst(types::I8, 0);
+            self.builder.ins().store(MEM, value, dst, 0);
             return self.finish_call(destination, target);
         }
         if FunctionSignature::is_intrinsic(db, func) {
