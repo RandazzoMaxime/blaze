@@ -4,7 +4,7 @@
 use la_arena::RawIdx;
 use smallvec::SmallVec;
 
-use crate::mir::{BasicBlockId, MirBody, TerminatorKind};
+use hir_ty::mir::{BasicBlockId, MirBody, TerminatorKind};
 
 /// A statement of a block, or its terminator when `statement` is the number of statements.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, PartialOrd, Ord)]

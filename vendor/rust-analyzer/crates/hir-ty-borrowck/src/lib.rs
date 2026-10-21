@@ -5,6 +5,9 @@
 //! only the bodies it changes. What it reports carries rustc's error codes and the span rustc
 //! points at; `docs/borrowck.md` in the repository describes what is checked and how.
 
+extern crate ra_ap_rustc_ast_ir as rustc_ast_ir;
+extern crate ra_ap_rustc_type_ir as rustc_type_ir;
+
 mod bitset;
 mod cfg;
 mod check;
@@ -26,7 +29,7 @@ use hir_def::{
 use rustc_hash::FxHashMap;
 use salsa::SalsaValue;
 
-use crate::{
+use hir_ty::{
     InferBodyId, InferenceResult,
     closure_analysis::CapturedPlace,
     db::{HirDatabase, InternedClosureId},
@@ -36,7 +39,9 @@ use crate::{
     },
 };
 
-use super::{LocalId, MirBody, MirSpan, Operand, OperandKind, PlaceElem, PlaceTy, StoredPlace};
+use hir_ty::mir::{
+    LocalId, MirBody, MirSpan, Operand, OperandKind, PlaceElem, PlaceTy, StoredPlace,
+};
 
 /// Which of rustc's borrow checkers to match: the one stable Rust has, or the location
 /// sensitive one nightly Rust has by default (`-Zpolonius=next`), which accepts more.
@@ -116,37 +121,37 @@ pub fn borrowck<'db>(db: &'db dyn HirDatabase, def: DefWithBodyId) -> BorrowckRe
 }
 
 /// What the checks ask of the types and the source of a body.
-pub(super) struct Ctx<'a, 'db> {
-    pub(super) db: &'db dyn HirDatabase,
-    pub(super) infcx: InferCtxt<'db>,
-    pub(super) env: ParamEnv<'db>,
+pub(crate) struct Ctx<'a, 'db> {
+    pub(crate) db: &'db dyn HirDatabase,
+    pub(crate) infcx: InferCtxt<'db>,
+    pub(crate) env: ParamEnv<'db>,
     #[allow(dead_code)]
-    pub(super) krate: Crate,
-    pub(super) store: &'a ExpressionStore,
+    pub(crate) krate: Crate,
+    pub(crate) store: &'a ExpressionStore,
     #[allow(dead_code)]
-    pub(super) infer: &'a InferenceResult<'db>,
+    pub(crate) infer: &'a InferenceResult<'db>,
     #[allow(dead_code)]
-    pub(super) mode: Mode,
+    pub(crate) mode: Mode,
     /// The user variable each local is, if it is one.
-    pub(super) bindings: FxHashMap<LocalId, BindingId>,
+    pub(crate) bindings: FxHashMap<LocalId, BindingId>,
     /// In the body of a closure, its captures, by field of the closure.
-    pub(super) upvars: Vec<Upvar>,
+    pub(crate) upvars: Vec<Upvar>,
     /// In the body of a closure, how it is called.
-    pub(super) closure_kind: Option<rustc_type_ir::ClosureKind>,
-    pub(super) closure_local: Option<LocalId>,
+    pub(crate) closure_kind: Option<rustc_type_ir::ClosureKind>,
+    pub(crate) closure_local: Option<LocalId>,
 }
 
 /// A capture of a closure, in its body.
-pub(super) struct Upvar {
-    pub(super) binding: BindingId,
+pub(crate) struct Upvar {
+    pub(crate) binding: BindingId,
     /// The local lowering copies the capture into.
-    pub(super) local: LocalId,
-    pub(super) by_ref: bool,
-    pub(super) mutable: bool,
+    pub(crate) local: LocalId,
+    pub(crate) by_ref: bool,
+    pub(crate) mutable: bool,
     /// The captured place is behind a reference.
-    pub(super) behind_deref: bool,
+    pub(crate) behind_deref: bool,
     #[allow(dead_code)]
-    pub(super) place: CapturedPlace,
+    pub(crate) place: CapturedPlace,
 }
 
 impl<'a, 'db> Ctx<'a, 'db> {
@@ -183,7 +188,7 @@ impl<'a, 'db> Ctx<'a, 'db> {
                         by_ref: capture.is_by_ref(),
                         mutable: capture.mutability == rustc_ast_ir::Mutability::Mut,
                         behind_deref: capture.place.projections.iter().any(|it| {
-                            matches!(it.kind, crate::closure_analysis::ProjectionKind::Deref)
+                            matches!(it.kind, hir_ty::closure_analysis::ProjectionKind::Deref)
                         }),
                         place: capture.clone(),
                     });
@@ -205,7 +210,7 @@ impl<'a, 'db> Ctx<'a, 'db> {
         }
     }
 
-    pub(super) fn place_ty(
+    pub(crate) fn place_ty(
         &self,
         body: &MirBody<'db>,
         local: LocalId,
@@ -218,28 +223,28 @@ impl<'a, 'db> Ctx<'a, 'db> {
         )
     }
 
-    pub(super) fn project(&self, ty: PlaceTy<'db>, elem: &PlaceElem) -> PlaceTy<'db> {
+    pub(crate) fn project(&self, ty: PlaceTy<'db>, elem: &PlaceElem) -> PlaceTy<'db> {
         ty.projection_ty(&self.infcx, elem, self.env)
     }
 
     /// Whether a value of `ty` neither needs dropping nor has interior mutability, which a
     /// constant must to be promoted.
-    pub(super) fn is_plain(&self, ty: Ty<'db>) -> bool {
-        crate::drop::has_drop_glue(&self.infcx, ty, self.env) == crate::drop::DropGlue::None
-            && crate::drop::is_freeze(self.db, self.infcx.interner, ty)
+    pub(crate) fn is_plain(&self, ty: Ty<'db>) -> bool {
+        hir_ty::drop::has_drop_glue(&self.infcx, ty, self.env) == hir_ty::drop::DropGlue::None
+            && hir_ty::drop::is_freeze(self.db, self.infcx.interner, ty)
     }
 
-    pub(super) fn has_destructor(&self, adt: hir_def::AdtId) -> bool {
-        crate::drop::destructor(self.db, adt).is_some()
+    pub(crate) fn has_destructor(&self, adt: hir_def::AdtId) -> bool {
+        hir_ty::drop::destructor(self.db, adt).is_some()
     }
 
-    pub(super) fn is_copy(&self, ty: Ty<'db>) -> bool {
+    pub(crate) fn is_copy(&self, ty: Ty<'db>) -> bool {
         self.infcx.type_is_copy_modulo_regions(self.env, ty)
     }
 
     /// The place `operand` moves out of. Lowering says a value a closure captures by value is
     /// moved even when its type is `Copy`.
-    pub(super) fn moved_place<'o>(
+    pub(crate) fn moved_place<'o>(
         &self,
         body: &MirBody<'db>,
         operand: &'o Operand,
@@ -250,7 +255,7 @@ impl<'a, 'db> Ctx<'a, 'db> {
     }
 
     /// Whether `local` is a variable declared without `mut`, which can only be assigned once.
-    pub(super) fn is_immutable(&self, local: LocalId) -> bool {
+    pub(crate) fn is_immutable(&self, local: LocalId) -> bool {
         if self.upvars.iter().any(|it| it.local == local) {
             return false;
         }
@@ -260,7 +265,7 @@ impl<'a, 'db> Ctx<'a, 'db> {
         }
     }
 
-    pub(super) fn upvar_of_local(&self, local: LocalId) -> Option<usize> {
+    pub(crate) fn upvar_of_local(&self, local: LocalId) -> Option<usize> {
         self.upvars.iter().position(|it| it.local == local)
     }
 }
@@ -271,18 +276,23 @@ fn closure_kind_of(
 ) -> Option<rustc_type_ir::ClosureKind> {
     use rustc_type_ir::inherent::{GenericArgs as _, IntoKind};
     match infer.expr_ty(expr).kind() {
-        crate::next_solver::TyKind::Closure(_, args) => Some(args.as_closure().kind()),
-        crate::next_solver::TyKind::CoroutineClosure(_, args) => {
+        hir_ty::next_solver::TyKind::Closure(_, args) => Some(args.as_closure().kind()),
+        hir_ty::next_solver::TyKind::CoroutineClosure(_, args) => {
             Some(args.as_coroutine_closure().kind())
         }
         _ => None,
     }
 }
 
+/// The local a body returns in, as `hir_ty::mir`'s own private `return_slot`.
+pub(crate) fn return_slot() -> LocalId {
+    LocalId::from_raw(la_arena::RawIdx::from(0))
+}
+
 /// Whether `rvalue` compares, which takes its operands by reference whatever their type:
 /// rust-analyzer lowers a constant pattern of a type that is not `Copy` to `==` on the value.
-pub(super) fn compares(rvalue: &crate::mir::Rvalue) -> bool {
-    use crate::mir::{BinOp, Rvalue};
+pub(crate) fn compares(rvalue: &hir_ty::mir::Rvalue) -> bool {
+    use hir_ty::mir::{BinOp, Rvalue};
     match rvalue {
         Rvalue::BinaryOp(op, ..) | Rvalue::CheckedBinaryOp(op, ..) => {
             matches!(op, BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge)

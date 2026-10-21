@@ -8,7 +8,7 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use rustc_type_ir::{Variance, inherent::IntoKind};
 use smallvec::SmallVec;
 
-use crate::{
+use hir_ty::{
     mir::MirBody,
     next_solver::{GenericArgKind, GenericArgs, Region, Ty, TyKind},
 };

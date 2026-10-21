@@ -12,7 +12,7 @@ use rustc_hash::FxHashMap;
 use rustc_type_ir::inherent::IntoKind;
 use smallvec::SmallVec;
 
-use crate::{
+use hir_ty::{
     consteval::try_const_usize,
     mir::{
         AsmOperand, LocalId, MirBody, PlaceElem, PlaceTy, ProjectionElem, StatementKind,
