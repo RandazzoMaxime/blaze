@@ -77,6 +77,7 @@ def ahead(link, objects, ra_jit):
     for i, copy in zip(theirs, copies):
         link[i] = copy
     # A splice adds two segments to the header, and the unwind table behind it, which the
-    # linker leaves no room for.
-    link[first:first] = [*objects, "-Wl,-headerpad,0x100000"]
+    # linker leaves no room for. It reads and writes the loader's fixups as tables, which
+    # the linker gives as chains for a deployment target of macOS 12 or later.
+    link[first:first] = [*objects, "-Wl,-headerpad,0x100000", "-Wl,-no_fixup_chains"]
     return link
