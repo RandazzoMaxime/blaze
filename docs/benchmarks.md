@@ -299,7 +299,15 @@ machine has. ra-jit loses or fails on these:
 - **zed** (1.7M lines, 1,291 crates) does not fit: the daemon needs more than 111 GB.
 - **Cold.** `cargo ra-jit build` from nothing is cargo's build plus the start of the daemon:
   6.29 s against 5.56 s on ripgrep, and the daemon is ready 6.2 s later.
-- **No-op** on ripgrep: 33 ms against cargo's 30 ms.
+- **No-op** on ripgrep: 33 ms against cargo's 30 ms. This run's Cranelift column used the
+  binary built with the `llvm` feature, which spends about 6 ms loading libLLVM at every start;
+  the bench now measures that column with ra-jit as released (19 ms on ripgrep in
+  [results.md](results.md#warm-edits-on-linux-x86-64-where-the-time-goes-and-build-scripts-2026-10-20)).
+
+Two commits after `2b2f2dcd5b` (`20708cd2da`, `c8f58ac7d9`) stop the daemon from running build
+scripts again that cargo just ran, which roughly halves the edits of fd and hyperfine (fd's
+function edit 88 to 43 ms on another machine, same page). The next run of the workflow
+measures them here.
 
 ## Earlier one-off measurements
 
