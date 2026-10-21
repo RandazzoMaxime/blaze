@@ -8,6 +8,10 @@ All notable changes to ra-jit are written here. The format follows
 
 ### Added
 
+- `benchreport.py --name NAME` stores a project measured on its own in
+  `docs/benchmarks/NAME-<os>-<arch>.json` (`runtime-NAME-…` for the runtime) and writes it
+  between `<!-- bench-NAME:start -->`/`<!-- runbench-NAME:start -->` and their ends in the
+  README. The table says the platform it was measured on.
 - `bench.py bun` times the edits on bun (body, signature, leaf, generic, new function) in a copy
   of the tree `bunprep.py` prepares, under bun's pinned nightly; bun is measured only when
   named.
