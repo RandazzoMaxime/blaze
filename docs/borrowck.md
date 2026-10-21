@@ -7,20 +7,22 @@ rustc's verdict on 67% of rustc's own borrow-check tests today, and on every one
 accepts; how they are scored and what is left is below.
 
 It runs as part of rust-analyzer's diagnostics, so the daemon computes it for every edited
-file, and `ra-jit borrowck` prints what it finds. By default the daemon still builds code it
-finds borrow-check errors in: keep running `cargo check` for rustc's verdict, or turn the
-refusal on (below).
+file, and `ra-jit borrowck` prints what it finds. The daemon refuses an edit it finds a
+borrow-check error in (below), but the checker still misses about a third of the errors
+rustc gives, so `cargo check` stays the final word.
 
 ## Refusing builds
 
-`RA_JIT_BORROWCK_REFUSE=1` in the daemon's environment makes an edit with a borrow-check
-error fail its build, with the file, line and error, as an edit with a type error does. It
-is off by default. The case for turning it on by default: the checker reports nothing on
-any test rustc accepts, nor on ripgrep, fd, bat, hyperfine, just, axum or nushell, so a
-refused build is one rustc would refuse too, and code with a borrow-check error is not run
-from memory. The case against, for now: it misses a third of the errors rustc gives (it
-accepts code rustc rejects, listed below), so `cargo check` is still needed, and a false
-error in code not measured yet would stop a build that rustc allows.
+An edit with a borrow-check error fails its build, with the file, line and error, as an edit
+with a type error does; under `cargo ra-jit`, cargo then runs and rustc reports it.
+`RA_JIT_BORROWCK_REFUSE=0` in the daemon's environment turns this off.
+
+This is safe because the checker reports nothing on any test rustc accepts, nor on ripgrep,
+fd, bat, hyperfine, just, axum or nushell: a refused build is one rustc refuses too. A
+borrow-check error ra-jit reports where rustc reports none is a bug; `RA_JIT_BORROWCK_REFUSE=0`
+works around it until it is fixed. What it does not do: it misses about a third of the
+errors rustc gives (it accepts code rustc rejects, listed below), so code with such an error
+still builds and runs from memory.
 
 ## Modes
 

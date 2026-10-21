@@ -3423,7 +3423,7 @@ const SURE: &[&str] = &[
     "unresolved-macro-call",
 ];
 
-/// The borrow checker's errors, which fail a build only with `RA_JIT_BORROWCK_REFUSE=1`:
+/// The borrow checker's errors, which fail a build unless `RA_JIT_BORROWCK_REFUSE=0`:
 /// `borrowck` is rustc's errors without a code, as "lifetime may not live long enough".
 const BORROWCK: &[&str] = &[
     "E0309", "E0310", "E0311", "E0373", "E0381", "E0382", "E0384", "E0499", "E0500", "E0501",
@@ -3439,7 +3439,7 @@ const SAID: usize = 8;
 fn broken_in(db: &RootDatabase, edited: &[vfs::FileId], watched: &Sources) -> Option<String> {
     let threads = std::thread::available_parallelism().map_or(1, |it| it.get());
     let config = ide_diagnostics::DiagnosticsConfig::test_sample();
-    let refuse_borrowck = std::env::var_os("RA_JIT_BORROWCK_REFUSE").is_some_and(|it| it == "1");
+    let refuse_borrowck = std::env::var_os("RA_JIT_BORROWCK_REFUSE").is_none_or(|it| it != "0");
     let mut found: Vec<_> = std::thread::scope(|scope| {
         let checks: Vec<_> = (0..threads.min(edited.len()))
             .map(|part| {

@@ -72,8 +72,9 @@ All notable changes to ra-jit are written here. The format follows
   rustc accepts, scored by `harness/borrowck_ui.py`, and finds nothing in ripgrep, fd, bat,
   hyperfine, just, axum and nushell. Its errors are rust-analyzer diagnostics and
   `ra-jit borrowck` prints them ([docs/borrowck.md](docs/borrowck.md)).
-- `RA_JIT_BORROWCK_REFUSE=1` makes the daemon refuse to build an edit with a borrow-check
-  error, as it does one with a type error. Off by default.
+- The daemon refuses to build an edit with a borrow-check error, as it does one with a type
+  error; `RA_JIT_BORROWCK_REFUSE=0` turns that off. The checker still misses about a third
+  of rustc's borrow-check errors, so `cargo check` stays the final word.
 - `ra-jit borrowck`: the borrow-check errors of single files, or of a cargo workspace with
   `--project`.
 

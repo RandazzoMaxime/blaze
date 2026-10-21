@@ -114,7 +114,8 @@ the code it reaches ([docs/fn-cache.md](docs/fn-cache.md)).
 ## What to know
 
 - Live edits work on macOS Apple silicon only. Elsewhere you still get fast builds.
-- The borrow checker is partial and does not stop a build yet: keep running `cargo check`.
+- An edit with a borrow-check error is refused, but the borrow checker still misses about a
+  third of rustc's errors: `cargo check` stays the final word.
 - Rust 1.99.0 only.
 - Changing a struct the program is using asks for a restart.
 
