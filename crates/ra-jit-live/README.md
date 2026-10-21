@@ -25,5 +25,5 @@ compiles the functions they are found in again with LLVM, swapping them in as pa
 edit. `ra_jit_live::tiers()` says which functions are hot and at which level, for the program to
 show. `RA_JIT_TIER=off` in the program's environment turns it off.
 
-macOS on Apple silicon only, for now; elsewhere `Live::start` says so and you still get
+macOS on Apple silicon and Linux x86-64; elsewhere `Live::start` says so and you still get
 ra-jit's fast builds. MIT or Apache-2.0.

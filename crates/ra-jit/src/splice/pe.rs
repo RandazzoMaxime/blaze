@@ -764,6 +764,9 @@ impl<'a> Patch<'a> {
             overwritten,
             redirected,
             described: Default::default(),
+            live_data_at: 0,
+            live_frames: (0, 0),
+            live_pointers: Vec::new(),
         })
     }
 
