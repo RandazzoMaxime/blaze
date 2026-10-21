@@ -120,9 +120,19 @@ to the program running the new code. It is a small program on purpose: subsecond
 program to call through `subsecond::call` and to keep running, which a command-line tool like
 ripgrep does not. The restart flows stop the program before building, as `cargo watch` does.
 
-On a MacBook Pro (M5 Max, 18 cores, on AC, other work running: a load of 7 to 28), 30 edits each,
-milliseconds from the save to the new code running
-([raw JSON](benchmarks/hotpatch/macbook.json)):
+On Linux (dev-aws-7, 16 cores of a c7i.16xlarge, the bench shell), 30 edits each, milliseconds
+from the save to the new code running ([raw JSON](benchmarks/hotpatch/linux-x86_64.json)):
+
+| Tool | median | p90 | min | max | of which the build |
+|---|---:|---:|---:|---:|---:|
+| subsecond (`dx serve --hotpatch`), patched, 0 restarts | 289 | 463 | 283 | 535 | |
+| `cargo ra-jit build`, then a restart (all 30 built by the daemon and spliced) | **40** | 72 | 39 | 78 | 39 |
+| `cargo build`, then a restart | 361 | 413 | 353 | 427 | 360 |
+
+On a program this small, starting it again is nearly free, so ra-jit's build plus a restart
+beats subsecond's patch of the running program; a program with state to rebuild after a
+restart would lose that. On a MacBook Pro (M5 Max, 18 cores, on AC, other work running: a load
+of 7 to 28), the same 30 edits each ([raw JSON](benchmarks/hotpatch/macbook.json)):
 
 | Tool | median | p90 | min | max | of which the build |
 |---|---:|---:|---:|---:|---:|

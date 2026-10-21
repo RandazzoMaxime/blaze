@@ -210,7 +210,9 @@ def doc_section(result):
             if cold:
                 ready = lambda total, samples: seconds(total) + (f" ({spread(samples)})" if samples and len(samples) > 1 else "")
                 store = f"{measured['store_mb']:,} MB" if measured.get("store_mb") is not None else "-"
-                lines.append(f"| {project_name(key, measured)} | {ready(cold['cargo_s'], cold.get('cargo_samples_s'))} | "
+                runs = measured.get("cold_runs", cold_runs)
+                name = project_name(key, measured) + ("" if runs == cold_runs else " (one run)" if runs == 1 else f" ({runs} runs)")
+                lines.append(f"| {name} | {ready(cold['cargo_s'], cold.get('cargo_samples_s'))} | "
                              f"{ready(cold.get('build_s'), cold.get('build_samples_s'))} | {ready(cold.get('wall_s'), cold.get('samples_s'))} | "
                              f"{ready(cold.get('warm_store_s'), cold.get('warm_store_samples_s'))} | "
                              f"{cold.get('compiled', 0):,} | {cold.get('rss_mb', 0):,} MB | {store} |")

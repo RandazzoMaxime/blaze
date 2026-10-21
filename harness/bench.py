@@ -596,7 +596,8 @@ def measure(name, spec, backend, runs, work, reference_dir, cold_runs=1, setup_n
         phases["cold"].update(warm_store_build_s=round(statistics.median(b for b, _ in warm_store), 3),
                               warm_store_s=round(statistics.median(b + w for b, w in warm_store), 3),
                               warm_store_samples_s=[round(b + w, 3) for b, w in warm_store])
-    result = dict(phases=phases, wrong=wrong, tag=spec["tag"], rev=spec["rev"], store_mb=store_mb(ours.env["RA_JIT_CACHE"]))
+    result = dict(phases=phases, wrong=wrong, tag=spec["tag"], rev=spec["rev"], store_mb=store_mb(ours.env["RA_JIT_CACHE"]),
+                  cold_runs=cold_runs)
     if "runtime" in spec:
         result["runtime"] = runtime(name, spec, theirs, ws, build, max(runs, 10), wrong)
     return result
@@ -806,7 +807,8 @@ def main():
                 phases, wrong, ours = SO_FAR[name, backend]
                 ours.cargo("stop")
                 print(f"  FAILED {failed}", flush=True)
-                measured = dict(phases=phases, wrong=wrong, failed=str(failed), tag=PROJECTS[name]["tag"], rev=PROJECTS[name]["rev"])
+                measured = dict(phases=phases, wrong=wrong, failed=str(failed), tag=PROJECTS[name]["tag"], rev=PROJECTS[name]["rev"],
+                                cold_runs=cold_runs)
             result["results"][f"{name}/{backend}"] = measured
             for line in measured["wrong"]:
                 print(f"  WRONG {line}", flush=True)
