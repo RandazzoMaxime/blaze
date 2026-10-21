@@ -213,6 +213,10 @@ All notable changes to ra-jit are written here. The format follows
   under them, are unchanged. helix is ready in 109 s at 18.4 GB of memory instead of 631 s at
   100.7 GB, its store is 1.6 GB instead of 14 GB, and its first `cargo ra-jit run` takes
   46.9 s instead of 640.8 s (`harness/deepnames.py`).
+- `apps.py`'s and `runbench.py`'s whole-program build of a program whose C calls its Rust
+  by an unmangled name (a `#[no_mangle]` function) goes on when cargo's link of the stand-ins
+  fails for want of those functions: what is taken from it is the link line, and ra-jit's
+  objects define them. It ended at "cargo failed" (bun; `nativecalls` in `apps.json`).
 - What stands in for a crate in cargo's build (the source with no code that cargo links when
   ra-jit compiles the crate: `apps.py`'s and `runbench.py`'s whole-program builds, and the
   crates the daemon builds while cargo builds the rest) builds with a nightly cargo that names

@@ -757,6 +757,22 @@
    "\\(\\d+\\) panicked"
   ]
  },
+ "nativecalls": {
+  "source": "nativecalls",
+  "package": "nativecalls",
+  "runs": [
+   [],
+   [
+    "10"
+   ],
+   [
+    "100000"
+   ]
+  ],
+  "bench": [
+   "200000000"
+  ]
+ },
  "jsonrt": {
   "source": "jsonrt",
   "package": "jsonrt",
