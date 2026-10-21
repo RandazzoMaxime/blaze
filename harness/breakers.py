@@ -3,7 +3,8 @@
 
 usage: breakers.py [case ...]
 
-The crates in CRATES are run through cratetest.py: what broke was in their tests.
+The crates in CRATES are run through cratetest.py: what broke was in their tests. Those in
+NIGHTLY_CRATES too, with RUSTC_BOOTSTRAP=1 for the nightly feature each uses.
 Prints "N of N right" and exits non-zero when a case differs.
 """
 import os, subprocess, sys
@@ -13,6 +14,8 @@ sys.path.insert(0, HERE)
 from difftest import Fixture, RUNNER
 
 CRATES = ["devdep", "blanket", "edition2015", "fragment", "procmacro"]
+# Crates that use a nightly feature, built by the pinned compiler with RUSTC_BOOTSTRAP=1.
+NIGHTLY_CRATES = ["allocated"]
 # What is reduced and not fixed: these are expected to differ, and are told apart when they do.
 OPEN = {"assert_message", "raw_write_then_match", "future_unwind_flags", "fragment_edition_through_macro", "assert_long_expression"}
 # Frames that are larger than rustc's, where a program counts on rustc's: the answer is right and the room is not.
@@ -55,9 +58,10 @@ def main():
             print(f"    ra-jit: status {got[0]} {ours[at:at + 300]} {' '.join(tail)[:200]}")
     if not sys.argv[1:]:
         # What breaks in a crate's tests and not in a program: each a crate for cratetest.py.
-        for crate in CRATES:
+        for crate in CRATES + NIGHTLY_CRATES:
+            env = dict(os.environ, RUSTC_BOOTSTRAP="1") if crate in NIGHTLY_CRATES else None
             run = subprocess.run([sys.executable, os.path.join(HERE, "cratetest.py"), os.path.join(HERE, "breakers", crate)],
-                                 capture_output=True, text=True)
+                                 capture_output=True, text=True, env=env)
             same = run.returncode == 0 and "skipped" not in run.stdout
             wrong += not same
             names.append(crate)

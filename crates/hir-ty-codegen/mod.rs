@@ -6008,6 +6008,21 @@ fn simd_chunks(lane: Type, count: u64) -> Option<(Type, i32)> {
 impl<'cx, 'db> FunctionCx<'cx, 'db> {
     /// Whether pointers to `ty` carry metadata: slices, `str`, trait objects and structs
     /// ending in one.
+    /// Where the `Box` of type `boxed` at `addr` points, and the pointee's metadata when it is
+    /// unsized. Beside an allocator that has a size, the pointer is a field anywhere in it.
+    fn box_pointer(
+        &mut self,
+        addr: Value,
+        boxed: Ty<'db>,
+        pointee: Ty<'db>,
+    ) -> Result<(Value, Option<Value>)> {
+        let at = self.layout(boxed)?.fields.offset(0).bytes() as i32;
+        let meta = self
+            .is_unsized(pointee)
+            .then(|| self.builder.ins().load(ptr(), MEM, addr, at + meta_at()));
+        Ok((self.builder.ins().load(ptr(), MEM, addr, at), meta))
+    }
+
     fn is_unsized(&self, ty: Ty<'db>) -> bool {
         match ty.kind() {
             TyKind::Slice(_) | TyKind::Str | TyKind::Dynamic(..) => true,
@@ -7740,9 +7755,16 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
                         addr = self.builder.ins().load(ptr(), MEM, addr, 0);
                         meta = None;
                     }
-                    BackendRepr::ScalarPair { .. } => {
+                    BackendRepr::ScalarPair { .. }
+                        if !matches!(prev.ty.kind(), TyKind::Adt(def, _) if def.is_box()) =>
+                    {
                         meta = Some(self.builder.ins().load(ptr(), MEM, addr, meta_at()));
                         addr = self.builder.ins().load(ptr(), MEM, addr, 0);
+                    }
+                    BackendRepr::ScalarPair { .. } | BackendRepr::Memory { .. }
+                        if matches!(prev.ty.kind(), TyKind::Adt(def, _) if def.is_box()) =>
+                    {
+                        (addr, meta) = self.box_pointer(addr, prev.ty, ty.ty)?;
                     }
                     _ => unsupported!("deref of {:?}", prev.ty),
                 },
@@ -13502,10 +13524,7 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
                 if adt_def.is_box() {
                     // The compiler drops the pointee; `Box`'s `Drop` impl only frees the memory.
                     let pointee = subst.type_at(0);
-                    let pointer = self.builder.ins().load(ptr(), MEM, addr, 0);
-                    let pointee_meta = self
-                        .is_unsized(pointee)
-                        .then(|| self.builder.ins().load(ptr(), MEM, addr, meta_at()));
+                    let (pointer, pointee_meta) = self.box_pointer(addr, ty, pointee)?;
                     // The memory is freed even if dropping what it holds unwinds.
                     self.guarded(
                         |this| this.drop_value(pointer, pointee_meta, pointee),

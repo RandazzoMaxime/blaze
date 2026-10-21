@@ -228,6 +228,10 @@ All notable changes to ra-jit are written here. The format follows
   under them, are unchanged. helix is ready in 109 s at 18.4 GB of memory instead of 631 s at
   100.7 GB, its store is 1.6 GB instead of 14 GB, and its first `cargo ra-jit run` takes
   46.9 s instead of 640.8 s (`harness/deepnames.py`).
+- A `Box` beside an allocator that has a size (`Box<[T], &Arena>`, as bun's arenas) is
+  dereferenced and dropped through its pointer wherever its layout put it: a deref of one was
+  left to rustc, and its drop read the pointer from the start of the `Box`. `breakers.py`
+  runs the crates of `NIGHTLY_CRATES` with RUSTC_BOOTSTRAP=1 (`allocated`, `allocator_api`).
 - `simd_reduce_max` and `simd_reduce_min` of integer lanes are compiled (AArch64's `vmaxvq_u8`
   and the other `vmaxv`/`vminv`, AVX-512's `_mm512_reduce_max_*`): a function that reached
   them was left to rustc (bun's ASCII checks; `simd_reduce_max` breaker).
