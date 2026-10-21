@@ -17,6 +17,9 @@ CRATES = ["devdep", "blanket", "edition2015", "fragment", "procmacro"]
 OPEN = {"assert_message", "raw_write_then_match", "future_unwind_flags", "fragment_edition_through_macro", "assert_long_expression"}
 # Frames that are larger than rustc's, where a program counts on rustc's: the answer is right and the room is not.
 OPEN |= {"frame_of_array"}
+# Windows LLVM now matches rustc for this case; Linux keeps the known frame-size difference.
+if sys.platform == "win32" and os.environ.get("RA_JIT_BACKEND") == "llvm":
+    OPEN.discard("frame_of_array")
 # What is reduced and not fixed either, where ra-jit says so: a function of these is left to rustc.
 LEFT = {"caller_in_constant", "empty_array_by_impl", "macro_reads_its_spelling", "fragment_ends_statement"}
 # Crates reduced and not fixed, where ra-jit says so: a function of these is left to rustc.
