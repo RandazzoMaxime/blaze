@@ -119,9 +119,9 @@ All notable changes to ra-jit are written here. The format follows
 - A borrow checker, the crate `hir-ty-borrowck` in the rust-analyzer subtree, written to give
   rustc's verdict: Polonius alpha by default as nightly rustc does, NLL with
   `RA_JIT_BORROWCK=nll`. It gives rustc's errors on
-  1055 of 1578 of rustc's own borrow-check tests that it can run, and none on any of the 245
+  1131 of 1579 of rustc's own borrow-check tests that it can run, and none on any of the 245
   rustc accepts, scored by `harness/borrowck_ui.py`, and finds nothing in ripgrep, fd, bat,
-  hyperfine, just, axum and nushell. Its errors are rust-analyzer diagnostics and
+  hyperfine, just, axum, nushell, delta, eza, tokei and starship. Its errors are rust-analyzer diagnostics and
   `ra-jit borrowck` prints them ([docs/borrowck.md](docs/borrowck.md)).
 - The daemon refuses to build an edit with a borrow-check error, as it does one with a type
   error; `RA_JIT_BORROWCK_REFUSE=0` turns that off. The checker still misses about a third
@@ -236,6 +236,14 @@ All notable changes to ra-jit are written here. The format follows
 
 ### Fixed
 
+- Large workspaces are ready in a fraction of the time and memory
+  ([#29](https://github.com/indexable-inc/ra-jit/issues/29)): a closure's type holds its inner
+  closure twice, so the store's name for a type of nested closures doubled with each level
+  (one of helix's was 665 MB). A type is now spelled once per daemon, and one spelled longer
+  than 1 KB is named by the SHA-256 of its spelling; shorter names, and the store entries
+  under them, are unchanged. helix is ready in 109 s at 18.4 GB of memory instead of 631 s at
+  100.7 GB, its store is 1.6 GB instead of 14 GB, and its first `cargo ra-jit run` takes
+  46.9 s instead of 640.8 s (`harness/deepnames.py`).
 - `harness/apps.py`'s perf stage ends with its timings again: since the rename from rustd it
   stored ra-jit's as `ra-jit_s` and printed `ra_jit_s`, a `KeyError` after every workload.
   wasmrun builds wasmtime 36.0.19 (was 25.0.3, which Dependabot's alerts name); its workload
@@ -251,6 +259,12 @@ All notable changes to ra-jit are written here. The format follows
   place as a clone, as cargo does: a program started from a hard link just made can be
   killed as it starts ([rust-lang/cargo#7821](https://github.com/rust-lang/cargo/issues/7821)).
   `cargo_ra_jit.py`'s 16 clients on 4 worktrees run 8 rounds of edits, all by the daemon.
+- On Linux a program `cargo ra-jit` started just after a full link failed now and then with
+  "could not execute" (exit 1; another row of `cargo_ra_jit.py`'s flags each run): the daemon
+  writes what a debugger reads of a new executable in place while it waits for the next edit,
+  and the kernel refuses to start a file open for writing ("text file busy"). The daemon now
+  writes an executable in place under an exclusive lock on it, and a client starts a program
+  under a shared one.
 - A program or test `cargo ra-jit` starts itself has what the `[env]` of cargo's
   configuration sets, as under `cargo run` and `cargo test`: the nearest `.cargo/config.toml`
   (or `config`) says a variable, then `$CARGO_HOME`'s, with `force` and `relative`.
@@ -258,6 +272,17 @@ All notable changes to ra-jit are written here. The format follows
   `cargo build` inside and the one that starts `other` take turns, since cargo removes and
   copies each program again there on every build and the second sometimes found none (plain
   cargo failed it as often as ra-jit).
+- `harness/ui-known.txt` names the 15 tests of rustc's tests/ui run-pass that differ on the
+  whole suite, each with why (11 assert a bug of rustc's, 4 are ra-jit's to do), so the
+  `claims` gate says only what is new; a line can name the backends it is known on.
+- `harness/debuginfo.py`'s perf check takes a sample in a naked function without a line as
+  rustc has it (its body is assembly, which rustc gives no line either), not as lost debug
+  info: one of the corpus's on Linux arm64 failed it now and then.
+- `breakers.py`'s `frame_of_tables` and `frame_of_results` ask whether ra-jit's frames fit
+  where rustc's do, not whether they are as large: a whole program's build with LLVM makes
+  them smaller than rustc's, which each case's crate has room for too, and they differed.
+- `cargo_ra_jit.py` says what a client that failed or hung said, and what it was doing,
+  rather than ending on a timeout with nothing.
 - A workspace the daemon loads after a change whose build scripts did not all run is not
   loaded: the crates of a script that failed were read without its `OUT_DIR`, so thiserror's
   `include!` went missing, every derived `Error` was unimplemented and `?` resolved to the

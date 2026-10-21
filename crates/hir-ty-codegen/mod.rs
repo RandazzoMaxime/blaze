@@ -535,22 +535,44 @@ impl CodegenUnit {
         denied: &FxHashSet<FunctionId>,
         known: &mut Rejections,
     ) -> Result<CodegenUnit> {
+        let unit =
+            CodegenUnit::compile_or_hold(db, symbols, roots, denied, known, &|| false, false)?;
+        Ok(unit.expect("a build that is never held makes a unit"))
+    }
+
+    /// As [`CodegenUnit::compile`], but an edit that can't be a patch is built whole only if
+    /// `hold` says not to hold it. `None` when it is held: nothing is built, and the next edit
+    /// is still a patch of the last full build. A text that does not compile is held, so that
+    /// the build of the next one that does is not of what this one made of the program.
+    ///
+    /// With `undoable`, a full build that replaces another keeps what it replaced until
+    /// [`Rejections::keep_built`] or [`Rejections::undo_built`]: a build the daemon refuses
+    /// once it is made is undone, and the next edit is a patch of the build before it.
+    pub fn compile_or_hold(
+        db: &dyn HirDatabase,
+        symbols: &dyn SymbolResolver,
+        roots: Roots<'_>,
+        denied: &FxHashSet<FunctionId>,
+        known: &mut Rejections,
+        hold: &dyn Fn() -> bool,
+        undoable: bool,
+    ) -> Result<Option<CodegenUnit>> {
         let on_demand: FxHashSet<FunctionId> = roots.on_demand.iter().copied().collect();
         let all = || roots.entries.iter().chain(roots.on_demand).copied();
         // Code of the checkout comes from the store in the first build alone: what a patch is
         // of has to be compiled here, to tell what an edit changes. The build that makes a base
         // while edits are patches of rustc's executable is that first build too.
         let hydrate = known.base.is_none() && !known.full;
-        let base = match known.base.take() {
+        let mut replaced = match known.base.take() {
             Some(base) => Some(base),
             None if !known.full => known.rustc.take(),
             None => None,
         };
-        let over_rustc = base.as_ref().is_some_and(|it| it.rustc);
-        let forgot = known.forgot_rustc.take().filter(|_| base.is_none());
+        let over_rustc = replaced.as_ref().is_some_and(|it| it.rustc);
+        let forgot = known.forgot_rustc.take().filter(|_| replaced.is_none());
         let mut declined =
-            base.as_ref().filter(|it| it.rustc).and_then(|it| it.why_outdated()).or(forgot);
-        if let Some(base) = base.filter(|it| !it.outdated()) {
+            replaced.as_ref().filter(|it| it.rustc).and_then(|it| it.why_outdated()).or(forgot);
+        if let Some(base) = replaced.take_if(|it| !it.outdated()) {
             let start = stdx::time::Instant::now();
             // Every static is rustc's, which rustc's code reads.
             let own_statics = match base.rustc {
@@ -614,12 +636,26 @@ impl CodegenUnit {
                     skipped: base.skipped.clone(),
                     instances: base.instances.len(),
                 };
-                match base.rustc {
-                    true => known.rustc = Some(base),
-                    false => known.base = Some(base),
-                }
-                return Ok(unit);
+                known.put_base(base);
+                return Ok(Some(unit));
             }
+            replaced = Some(base);
+        }
+        if let Some(base) = replaced.take_if(|_| hold()) {
+            known.stats = BuildStats {
+                bodies: base.bodies,
+                reused: base.bodies,
+                declined,
+                ..BuildStats::default()
+            };
+            known.put_base(base);
+            return Ok(None);
+        }
+        known.undo = None;
+        if let Some(base) = replaced.filter(|_| undoable) {
+            let mut kept = known.clone();
+            kept.put_base(base);
+            known.undo = Some(Box::new(kept));
         }
         if over_rustc {
             symbols.in_full();
@@ -645,9 +681,15 @@ impl CodegenUnit {
             frozen: _,
             used_by_rustc: _,
             tiers,
+            undo,
         } = known;
-        // A full build is linked again, and the program that runs it starts at level 1.
-        tiers.clear();
+        // A full build is linked again, and the program that runs it starts at level 1: once
+        // it is kept, when it can be undone.
+        if undo.is_some() {
+            tiers.stop_trials();
+        } else {
+            tiers.clear();
+        }
         if roots.start.is_some() {
             backend::set_whole_program();
         }
@@ -891,14 +933,14 @@ impl CodegenUnit {
                 backend::Tally::global().report();
                 (*theirs, *unknown) = (own_statics.theirs, own_statics.unknown);
                 let patch = if patching { Some(patch::empty_object()?) } else { None };
-                return Ok(CodegenUnit {
+                return Ok(Some(CodegenUnit {
                     object: Some(object),
                     patch,
                     apart,
                     compiled,
                     skipped,
                     instances,
-                });
+                }));
             }
             let first = failed.first().map_or("", |it| it.1.why.as_str());
             start_over(&format!("{} instances did not compile, the first: {first}", failed.len()));
@@ -1050,9 +1092,29 @@ pub struct Rejections {
     pub stats: BuildStats,
     /// The functions at a level above 1, which a patch has at that level.
     pub tiers: tier::Tiers,
+    /// What the last full build replaced, while it can still be undone.
+    undo: Option<Box<Rejections>>,
 }
 
 impl Rejections {
+    /// Keeps the last full build: the next edit is a patch of it.
+    pub fn keep_built(&mut self) {
+        if self.undo.take().is_some() {
+            self.tiers.clear();
+        }
+    }
+
+    /// Puts back what the last full build replaced, when it was built undoably and replaced
+    /// a build: the next edit is a patch of that one, as if the full build had not been made.
+    /// Whether there was one to put back.
+    pub fn undo_built(&mut self) -> bool {
+        let Some(kept) = self.undo.take() else { return false };
+        let (counted, stats) = (self.counted, self.stats);
+        *self = *kept;
+        (self.counted, self.stats) = (counted, stats);
+        true
+    }
+
     fn compiled_since_last_build(&mut self) -> usize {
         let total = COMPILED.load(std::sync::atomic::Ordering::Relaxed);
         total - std::mem::replace(&mut self.counted, total)
@@ -1106,6 +1168,14 @@ impl Rejections {
 
     pub fn put_rustc(&mut self, rustc: Option<RustcBase>) {
         self.rustc = rustc.map(|it| it.0);
+    }
+
+    /// Puts a base taken out for a build back where it was: what rustc linked or ours.
+    fn put_base(&mut self, base: patch::Base) {
+        match base.rustc {
+            true => self.rustc = Some(base),
+            false => self.base = Some(base),
+        }
     }
 
     /// Stops patching what rustc linked: the executable is no longer the one it linked.

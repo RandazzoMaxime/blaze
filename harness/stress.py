@@ -7,9 +7,12 @@ Copies harness/stress (three crates) to a scratch directory, starts the daemon o
 applies STEPS in order. The edits stay: each step builds on the ones before. After each, `ra-jit
 sync` is asked for a build, the program is run, and `cargo build` of the same source is run and its
 program's output compared. A step marked broken is one cargo rejects: the daemon has to say
-so and survive it. Writes STRESS.md.
+so and survive it, and the first step after it that cargo builds has to be a patch: the text
+refused leaves the build the next edit is a patch of as it was (issue #31). Writes STRESS.md,
+and exits 1 when a step is wrong.
 """
 import json, os, re, shlex, shutil, subprocess, sys, tempfile, time
+import socket as unix
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 os.environ.setdefault("RUSTUP_TOOLCHAIN", open(os.path.join(HERE, "toolchain")).read().strip())
@@ -39,6 +42,17 @@ def delete(path):
 
 def step(name, *ops, broken=False):
     return (name, ops, broken)
+
+
+def ask_edit(at, path, text):
+    """An `edit` request, as an editor sends one on each keystroke: the file's whole text, built
+    with no look at the disk. The daemon's answer."""
+    escape = lambda s: s.replace("\\", "\\\\").replace("\n", "\\n").replace("\t", "\\t").replace("\r", "\\r")
+    with unix.socket(unix.AF_UNIX) as s:
+        s.settimeout(120)
+        s.connect(at)
+        s.sendall(f"edit\t{escape(path)}\t{escape(text)}\n\n".encode())
+        return s.makefile().readline().strip()
 
 
 PROBE = '    report::line("guarded", guarded());\n'
@@ -195,6 +209,7 @@ STEPS = [
     step("mended: the import removed", sub(MAIN, "\nuse smid::text::nothing_here;\n", "")),
     step("whole file rewritten in another order", "reorder"),
     step("large generated function added", "bulk"),
+    step("an editor's edit while another client's build runs", "meanwhile"),
     step("everything back to the first source", "reset"),
     step("and forward again to the last source", "replay"),
 ]
@@ -265,13 +280,37 @@ def main():
 
     daemon = start()
     first_state, rows, restarts = files(), [], 0
+    after_refused = False
     for index, (name, ops, broken) in enumerate(STEPS):
         if only and not re.search(only, name):
             continue
+        mended, after_refused = after_refused and not broken, broken
+        meanwhile = None
         time.sleep(0.05)
         if ops and isinstance(ops[0], str):
             ops = ops[0]
-        if ops == "reset":
+        if ops == "meanwhile":
+            # A build for one client (`cargo ra-jit build`, after a program was told to restart)
+            # and an editor's edits come together: the edit waits for the build, and is not told
+            # that no program is built (issue #32).
+            path = os.path.join(ws, BASE)
+            text = open(path).read()
+            assert "wrapping_mul(3)" in text, name
+            text = text.replace("wrapping_mul(3)", "wrapping_mul(7)", 1)
+            open(path, "w").write(text)
+            text = text.replace("wrapping_mul(7)", "wrapping_mul(9)", 1)
+            if hasattr(unix, "AF_UNIX"):
+                seen = len(open(log_path).read())
+                other = subprocess.Popen([RA_JIT, "sync", socket], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                began = time.time()
+                while not re.search(r"^request: sync[^\n]*\n(?:.*\n)*?change: ", open(log_path).read()[seen:], re.M):
+                    assert time.time() - began < 60, f"{name}: the daemon did not take the build"
+                    time.sleep(0.002)
+                time.sleep(0.005)
+                meanwhile = ask_edit(socket, path, text)
+                other.wait(timeout=120)
+            open(path, "w").write(text)
+        elif ops == "reset":
             last_state = files()
             put(first_state)
         elif ops == "replay":
@@ -323,7 +362,11 @@ def main():
             verdict = "REFUSED: " + reply[:120].replace("|", "/").replace("\n", " ")
         else:
             ours, theirs = run(binary), run(built(reference, "sapp"))
-            if ours == theirs:
+            if ours == theirs and mended and kind != "patch" and not os.environ.get("RA_JIT_PATCH_FIRST"):
+                verdict = "WRONG: not a patch, as if the refused text had been built"
+            elif ours == theirs and meanwhile is not None and not meanwhile.startswith("ok"):
+                verdict = "WRONG: the edit sent meanwhile was answered " + meanwhile[:100]
+            elif ours == theirs:
                 verdict = "same"
             else:
                 a, b = ours.splitlines(), theirs.splitlines()
@@ -349,6 +392,7 @@ def main():
         for index, name, kind, took, verdict in rows:
             md.write(f"| {index} | {name} | {kind} | {took:.0f} | {verdict} |\n")
     print(f"{good} of {len(rows)} right, {restarts} restarts; log {log_path}; source {ws}")
+    sys.exit(0 if good == len(rows) else 1)
 
 
 main()
