@@ -138,9 +138,27 @@ jobs:
           git checkout -q FETCH_HEAD
       - run: python3 harness/borrowck_ui.py "$RUNNER_TEMP/rust" --bin target/release/ra-jit --jobs 4 --mode both --min-pass 1052
 
+  # vendor/rust-analyzer as the fork has it, built and tested outside this repository, so that
+  # the subtree cannot come to depend on crates/ (docs/architecture-split.md, step 5).
+  fork:
+    name: fork alone
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/toolchain
+      - run: cp -r vendor/rust-analyzer "$RUNNER_TEMP/rust-analyzer"
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ${{ runner.temp }}/rust-analyzer
+      - working-directory: ${{ runner.temp }}/rust-analyzer
+        run: cargo test -p hir-ty -p hir-ty-borrowck && cargo check -p hir
+
   ci:
     name: ci
-    needs: [changes, fmt, linux-x64, linux-arm64, macos, windows, borrowck]
+    needs: [changes, fmt, linux-x64, linux-arm64, macos, windows, borrowck, fork]
     if: always()
     runs-on: ubuntu-24.04
     timeout-minutes: 5
