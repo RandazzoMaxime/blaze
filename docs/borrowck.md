@@ -159,6 +159,9 @@ changes to rust-analyzer were needed, each made as rustc does it:
   than what it points to.
 - A `let`'s fake read of its value is at the pattern (rustc's `FakeReadCause::ForLet`), not
   the enclosing block, which is where the borrow checker finds the place `let _: T` ascribes.
+- A function item or a tuple struct's or variant's constructor written as a value
+  (`let f = foo::<T>;`) is assigned to where it goes, though zero sized, so a closure that
+  captures `f` or a method that takes it by value does not read it uninitialized (E0381).
 
 These are differences still open, each the cause of some failures, all of them errors
 missed rather than errors made up:
