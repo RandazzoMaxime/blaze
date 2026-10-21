@@ -3463,6 +3463,31 @@ struct Sources {
     paths: FxHashMap<vfs::FileId, PathBuf>,
 }
 
+/// Why the daemon did not build a program.
+enum Refused {
+    /// The source has an error: the build fails, as rustc's would.
+    Error(String),
+    /// The source is one ra-jit does not build as it is: cargo builds it.
+    Cargos(String),
+}
+
+impl Refused {
+    /// The line that tells a client.
+    fn reply(&self) -> String {
+        match self {
+            Refused::Error(why) => format!("error: {}", why.replace('\n', " ")),
+            Refused::Cargos(why) => format!("cargo: {}", why.replace('\n', " ")),
+        }
+    }
+}
+
+impl std::fmt::Display for Refused {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let (Refused::Error(why) | Refused::Cargos(why)) = self;
+        f.write_str(why)
+    }
+}
+
 /// Why the source as it is can't be built by the daemon, when it can't: a file that does
 /// not parse, then the errors found in the edited files, then a function left uncompiled.
 fn refusal(
@@ -3470,21 +3495,26 @@ fn refusal(
     sources: &[vfs::FileId],
     watched: &Sources,
     broken: Option<String>,
-    out_of_date: Option<(FunctionId, String)>,
-) -> Option<String> {
+    out_of_date: Option<hir_ty_codegen::OutOfDate>,
+) -> Option<Refused> {
     if let Some(unparsed) = unparsed(db, sources, watched) {
-        return Some(unparsed);
+        return Some(Refused::Error(unparsed));
     }
-    if broken.is_some() {
-        return broken;
+    if let Some(broken) = broken {
+        return Some(Refused::Error(broken));
     }
-    let (func, why) = out_of_date?;
+    let hir_ty_codegen::OutOfDate { func, why, left_from_the_start } = out_of_date?;
     let name = hir::Function::from(func).name(db).display(db, syntax::Edition::CURRENT).to_string();
-    // What the frontend turns down is as a rule code that does not compile.
-    if why.starts_with("frontend:") {
-        return Some(format!("`{name}` has an error ra-jit cannot say more of: {why}"));
+    // What the frontend turns down is as a rule code that does not compile, unless it turned
+    // the function down when rustc compiled it.
+    if why.starts_with("frontend:") && !left_from_the_start {
+        return Some(Refused::Error(format!(
+            "`{name}` has an error ra-jit cannot say more of: {why}"
+        )));
     }
-    Some(format!("`{name}` is not compiled by ra-jit: {why}"))
+    Some(Refused::Cargos(format!(
+        "`{name}` is not compiled by ra-jit and rustc's copy is from before the edit: {why}"
+    )))
 }
 
 /// The first error of the first of `sources` that does not parse, where it is.
@@ -4191,7 +4221,7 @@ enum Event {
     Edited(Edited),
     /// The build of a program is over, with what to tell its clients: nothing when a change
     /// to the source interrupted it.
-    Built(usize, Box<Program>, Option<anyhow::Result<Result<String, String>>>),
+    Built(usize, Box<Program>, Option<anyhow::Result<Result<String, Refused>>>),
     /// The link of a program's last build failed, after the build was over.
     Unlinked(usize),
     /// The tier watcher asks for functions of a running program at a higher level.
@@ -4368,7 +4398,7 @@ impl Builds {
             // A client that hangs up before the answer is not the daemon's problem.
             let _ = match &answer {
                 Ok(built) => writeln!(&client, "ok {built}"),
-                Err(why) => writeln!(&client, "error: {}", why.replace('\n', " ")),
+                Err(why) => writeln!(&client, "{}", why.reply()),
             };
         }
         Ok(())
@@ -5384,7 +5414,7 @@ fn run_holding(
         let broken = broken_in(&db, &edited, &sources);
         let why = hir::attach_db(&db, || refusal(&db, &edited, &sources, broken, None));
         if let Some(why) = why {
-            bail!(why);
+            bail!("{why}");
         }
     }
     let mut cold = build_unheld(&db, &table, &args, &mut known, &listed)?;
@@ -6292,7 +6322,7 @@ fn run_holding(
                     .collect();
                 builds.into_iter().map(|(at, build)| (at, build.join())).collect::<Vec<_>>()
             });
-            let answers: Vec<(usize, anyhow::Result<Result<String, String>>)> = answers
+            let answers: Vec<(usize, anyhow::Result<Result<String, Refused>>)> = answers
                 .into_iter()
                 .map(|(at, answer)| match answer {
                     Ok(answer) => (at, answer),
@@ -6357,7 +6387,7 @@ fn run_holding(
                     continue;
                 }
                 Some(Ok(built)) => writeln!(client, "ok {built}"),
-                Some(Err(why)) => writeln!(client, "error: {}", why.replace('\n', " ")),
+                Some(Err(why)) => writeln!(client, "{}", why.reply()),
                 None => writeln!(client, "ok unchanged"),
             };
         }
@@ -6530,7 +6560,7 @@ impl Program {
     /// Takes a build that panicked as the build's error, not the worker's: the clients are
     /// told why, the worker stays, and the next build is a whole one, since what the build
     /// left of the patch base and of the executable may be half written.
-    fn panicked(&mut self, panic: &(dyn std::any::Any + Send)) -> Result<String, String> {
+    fn panicked(&mut self, panic: &(dyn std::any::Any + Send)) -> Result<String, Refused> {
         let patching = self.known.patching;
         self.known = Rejections::default();
         self.known.patching = patching;
@@ -6538,7 +6568,7 @@ impl Program {
         (self.wrote, self.whole) = (None, None);
         let why = format!("a build of {} panicked: {}", self.args.krate, panic_message(panic));
         eprintln!("{why}");
-        Err(why)
+        Err(Refused::Error(why))
     }
 
     /// Notes the crates rustc did not compile from the files this program is of, when it joins
@@ -6710,7 +6740,7 @@ impl Program {
         wanted: Option<&Outputs>,
         link_it: bool,
         defer: bool,
-    ) -> anyhow::Result<Result<String, String>> {
+    ) -> anyhow::Result<Result<String, Refused>> {
         // The crates left to rustc are as edited when a client has named what it built since.
         let named_anew = std::mem::take(&mut self.unbuilt.named_anew);
         let unnamed = if named_anew { None } else { self.widen(db) };
@@ -6763,7 +6793,7 @@ impl Program {
         let hold = || unparsed(db, &edited, paths).is_some() || broken.is_some();
         let held = |known: &Rejections| {
             let why = refusal(db, &edited, paths, broken.clone(), None);
-            let why = why.unwrap_or_else(|| "the source does not compile".to_owned());
+            let why = why.unwrap_or_else(|| Refused::Error("the source does not compile".to_owned()));
             eprintln!(
                 "edit (apply {apply:.1?}): not built: no patch, and the source does not compile; \
                  the next edit is a patch of the last build"
@@ -6809,10 +6839,11 @@ impl Program {
         let out_of_date = hir::attach_db(db, || known.out_of_date(db));
         let dated = start.elapsed();
         let mut failed = unnamed
+            .map(Refused::Error)
             .or_else(|| refusal(db, &edited, paths, broken, out_of_date))
-            .or_else(|| warm.unset.clone());
+            .or_else(|| warm.unset.clone().map(Refused::Error));
         let refused = start.elapsed();
-        failed = failed.or_else(|| stale_copies(db, table, args));
+        failed = failed.or_else(|| stale_copies(db, table, args).map(Refused::Error));
         let copies = start.elapsed();
         let now = hir::attach_db(db, || Tests::of(db, listed, args, tests_now));
         if std::env::var_os("RA_JIT_STATS").is_some() {
@@ -6826,7 +6857,7 @@ impl Program {
             );
         }
         match tests {
-            Some(first) => failed = failed.or_else(|| first.changed(&now)),
+            Some(first) => failed = failed.or_else(|| first.changed(&now).map(Refused::Error)),
             // The first build of the program is of the source rustc built it from.
             None if failed.is_none() => *tests = Some(now),
             None => {}
@@ -6850,7 +6881,7 @@ impl Program {
             let (splice, patch) = (args.splice.as_deref(), args.patch.as_deref());
             let cmd = args.link_cmd.as_deref().filter(|_| failed.is_none() && link_it);
             let unlinked = link(cmd, splice, patch, &args.out, patched, defer).err();
-            failed = failed.or(unlinked.map(|it| it.to_string()));
+            failed = failed.or(unlinked.map(|it| Refused::Error(it.to_string())));
         }
         if let Some(why) = &failed {
             eprintln!("refused: {why}");

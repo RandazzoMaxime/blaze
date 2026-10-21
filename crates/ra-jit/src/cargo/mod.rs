@@ -22,7 +22,7 @@ use anyhow::Context as _;
 
 use cli::{Asked, Invocation, Subcommand};
 use client::Start;
-use daemon::{Checkout, Reply, Request};
+use daemon::{Checkout, NotBuilt, Reply, Request};
 use state::{Built, Counts, Held, Staged, State};
 
 /// `ra-jit cargo ...`: runs the command and ends with the status cargo would end with.
@@ -280,7 +280,8 @@ fn first_by_daemon(mut state: State) -> Result<(State, Held), String> {
     if let Some((program, why)) = state.left_to_cargo().next() {
         return Err(format!("`{}`: {why}", program.name));
     }
-    let answers = state.checkouts.iter().map(built).collect::<Result<Vec<_>, _>>()?;
+    let answers = state.checkouts.iter().map(built).collect::<Result<Vec<_>, _>>();
+    let answers = answers.map_err(NotBuilt::why)?;
     let held = state.hold();
     let cargos = state.settle(&answers, &held)?;
     if let Some((_, why)) = cargos.first() {
@@ -316,8 +317,11 @@ fn by_daemon(mut state: State) -> Result<(State, Held), Left> {
         return Err(Left::ToCargo(Box::new(state), reason));
     }
     note("client checks", CLIENT, checking);
-    let answers =
-        state.checkouts.iter().map(built).collect::<Result<Vec<_>, _>>().map_err(Left::Failed)?;
+    let answers = match state.checkouts.iter().map(built).collect::<Result<Vec<_>, _>>() {
+        Ok(answers) => answers,
+        Err(NotBuilt::Cargos(why)) => return Err(Left::ToCargo(Box::new(state), why)),
+        Err(NotBuilt::Failed(why)) => return Err(Left::Failed(why)),
+    };
     let settling = Instant::now();
     let held = state.hold();
     let cargos = state.settle(&answers, &held).map_err(Left::Failed)?;
@@ -329,13 +333,13 @@ fn by_daemon(mut state: State) -> Result<(State, Held), Left> {
 
 /// Has the daemon build the programs of `checkout`, loading it first when it has not.
 /// `Err` is why a program is not built.
-pub(super) fn built(checkout: &Checkout) -> Result<Vec<Result<(), String>>, String> {
+pub(super) fn built(checkout: &Checkout) -> Result<Vec<Result<(), String>>, NotBuilt> {
     if checkout.programs.is_empty() {
         return Ok(Vec::new());
     }
     let asking_at = Instant::now();
     let reply = client::ask(Request::Build(asking(checkout)), Start::IfMissing)
-        .map_err(|it| format!("{it:#}"))?;
+        .map_err(|it| NotBuilt::Failed(format!("{it:#}")))?;
     crate::trace::note("client↔daemon", crate::trace::CLIENT, asking_at);
     let programs = match reply {
         Some(Reply::Synced { programs, spans }) => {
@@ -345,14 +349,18 @@ pub(super) fn built(checkout: &Checkout) -> Result<Vec<Result<(), String>>, Stri
             }
             programs
         }
-        None => return Err(client::why_none()),
-        Some(Reply::Cold { reason }) => return Err(reason),
-        Some(other) => return Err(format!("the daemon answered {other:?}")),
+        None => return Err(NotBuilt::Failed(client::why_none())),
+        Some(Reply::Cold { reason }) => return Err(NotBuilt::Failed(reason)),
+        Some(other) => return Err(NotBuilt::Failed(format!("the daemon answered {other:?}"))),
     };
     std::iter::zip(&checkout.programs, programs)
         .map(|(program, built)| match built {
             Ok(_) => Ok(Ok(())),
-            Err(why) => Err(format!("ra-jit did not build {}: {why}", program.binary.display())),
+            Err(NotBuilt::Failed(why)) => Err(NotBuilt::Failed(format!(
+                "ra-jit did not build {}: {why}",
+                program.binary.display()
+            ))),
+            Err(cargos) => Err(cargos),
         })
         .collect()
 }

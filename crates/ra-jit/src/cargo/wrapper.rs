@@ -18,7 +18,9 @@ use anyhow::Context as _;
 
 use super::{
     ancestor::Cargo,
-    cli, daemon, say, script,
+    cli,
+    daemon::{self, NotBuilt},
+    say, script,
     state::{State, place},
     switch::Enabled,
     units::{Copied, Record, stamp_now},
@@ -273,15 +275,21 @@ impl Unit {
         let (checkout, at) = state.asked_for(dir)?;
         let deps = self.dep_info(rustc);
         let answer = super::built(checkout).and_then(|programs| {
-            programs.get(at).cloned().unwrap_or(Err("the daemon said nothing of it".to_owned()))
+            let said = programs.get(at).cloned();
+            said.unwrap_or(Err("the daemon said nothing of it".to_owned()))
+                .map_err(NotBuilt::Failed)
         });
         let read = deps.join().map_err(|_| "rustc did not run".to_owned());
         let read = read?.map_err(|it| format!("rustc did not run: {it}"))?;
-        // What the daemon was asked for and did not build fails the build: rustc is not
-        // given it instead.
-        if let Err(why) = answer {
-            say::error(&why);
-            std::process::exit(super::FAILED);
+        // What the daemon was asked for and did not build fails the build, unless it is
+        // source ra-jit does not build: rustc builds that.
+        match answer {
+            Ok(()) => {}
+            Err(NotBuilt::Cargos(why)) => return Err(why),
+            Err(NotBuilt::Failed(why)) => {
+                say::error(&why);
+                std::process::exit(super::FAILED);
+            }
         }
         if !read.status.success() {
             let _ = std::io::stderr().write_all(&read.stderr);

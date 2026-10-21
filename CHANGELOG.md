@@ -270,6 +270,13 @@ All notable changes to ra-jit are written here. The format follows
   installs ra-jit and the programs it runs; the flake had no package of that name.
 - A release's archive and the flake's build have `ra-jit-rustc-first`, which `cargo ra-jit`
   runs in the first build of a workspace; they had only ra-jit, cargo-ra-jit and ra-jit-rustc.
+- An edit that could change a function ra-jit left to rustc from the start, such as an item
+  added elsewhere in its crate, is built by cargo, as docs/cargo.md says. It failed the
+  build: when the function was one the frontend turned down, ra-jit took that for an error
+  of the source ("has an error ra-jit cannot say more of"), and every build after it failed
+  too until cargo built once. A function the frontend turns down only after an edit is still
+  reported as an error. Found building bun; `soakrows.py`'s "an item added beside a function
+  left to rustc" fails without this.
 - A worker that loaded its workspace beside cargo's first build
   ([#11](https://github.com/indexable-inc/ra-jit/issues/11)) ends when its daemon does, as
   every other worker does: once told what cargo built, it waited for a lock on its standard

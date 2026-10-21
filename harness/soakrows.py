@@ -720,6 +720,47 @@ mod clock_tests {
     row.both("edited again, tests", command="test", args=args)
 
 
+def show_in_main(row, shown):
+    main = row.path("app/src/main.rs")
+    in_place(main, open(main).read().replace("fn main() {\n", "fn main() {\n" + shown, 1))
+
+
+def beside_one_left(row):
+    """A function left to rustc from the first build, `seven` (for the constant
+    `breakers.py caller_in_constant` is about): an item added to another file of its crate
+    could change what rustc's copy of it would be, so cargo builds, where the build failed
+    ("has an error ra-jit cannot say more of"); a body edited there does not, and the daemon
+    builds."""
+    in_place(row.path("core/src/later.rs"), "pub fn eight() -> u64 {\n    8\n}\n")
+    with open(row.path("core/src/lib.rs"), "a") as lib:
+        lib.write("""
+pub fn seven() -> u64 {
+    const CALLER: &std::panic::Location<'static> = std::panic::Location::caller();
+    6 + u64::from(CALLER.line() > 0)
+}
+
+pub mod later;
+""")
+    show_in_main(row, '    println!("seven {} eight {}", soak_core::seven(), soak_core::later::eight());\n')
+    row.both("cold", want="seven 7 eight 8")
+    row.warm()
+    row.both("warm", want="seven 7 eight 8")
+    logs = glob.glob(os.path.join(row.home, "**", "log"), recursive=True)
+    said = "".join(open(log, errors="replace").read() for log in logs)
+    if not re.search(r"left to rustc: soak_core::seven: ", said):
+        raise Wrong("`seven` is not left to rustc: the row needs another function that is")
+    later = row.path("core/src/later.rs")
+    in_place(later, open(later).read() + "\npub fn nine() -> u64 {\n    9\n}\n")
+    how, _ = row.both("an item added to another file of the crate", want="seven 7 eight 8")
+    if not how.startswith("cargo"):
+        raise Wrong(f"the build after an item was added was not cargo's: {how}")
+    row.warm()
+    in_place(later, open(later).read().replace("    8\n", "    80\n"))
+    how, _ = row.both("a body edited in that file", want="seven 7 eight 80")
+    if how != "daemon":
+        raise Wrong(f"the build after a body was edited was not the daemon's: {how}")
+
+
 TOOLCHAIN = open(os.path.join(HERE, "toolchain")).read().strip()
 
 ROWS = {
@@ -745,6 +786,7 @@ ROWS = {
     "tests of a proc macro": (proc_macro_tests, {}),
     "a function that is another under test": (another_under_test, {}),
     "functions rustc keeps to an object": (kept_to_an_object, {"CARGO_INCREMENTAL": "0"}),
+    "an item added beside a function left to rustc": (beside_one_left, {}),
 }
 
 

@@ -120,7 +120,7 @@ mod target;
 pub use target::{Arch, Calls, ObjectFormat, Target, UnwindFormat, VariableArguments};
 pub mod tier;
 
-pub use patch::{Stale, StaleSteps};
+pub use patch::{OutOfDate, Stale, StaleSteps};
 /// For `crates/ra-jit-bench` alone.
 #[doc(hidden)]
 pub mod bench {
@@ -1160,7 +1160,7 @@ impl Rejections {
     /// A function the last build left to rustc that is not what rustc compiled, and why it was
     /// left. rustc's copies are those of the build the daemon started from: the first call, to
     /// be made after that build, notes what they are copies of.
-    pub fn out_of_date(&mut self, db: &dyn HirDatabase) -> Option<(FunctionId, String)> {
+    pub fn out_of_date(&mut self, db: &dyn HirDatabase) -> Option<OutOfDate> {
         self.frozen.out_of_date(db, self.base.as_ref()?)
     }
 

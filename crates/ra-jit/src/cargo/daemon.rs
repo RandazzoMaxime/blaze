@@ -98,7 +98,7 @@ pub(crate) enum Reply {
     /// What the worker said of each program, in the order asked: its `ok` line, or why it
     /// did not build it.
     Synced {
-        programs: Vec<Result<String, String>>,
+        programs: Vec<Result<String, NotBuilt>>,
         /// The daemon's steps, for the client's trace. The worker's are in its `ok` lines.
         #[serde(default)]
         spans: Vec<crate::trace::Span>,
@@ -106,6 +106,30 @@ pub(crate) enum Reply {
     Warming,
     Status(Status),
     Stopping,
+}
+
+/// Why the worker did not build a program.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub(crate) enum NotBuilt {
+    /// The source has an error, or the daemon failed: the build fails.
+    Failed(String),
+    /// ra-jit does not build the source as it is, and cargo does.
+    Cargos(String),
+}
+
+impl NotBuilt {
+    pub(crate) fn why(self) -> String {
+        let (NotBuilt::Failed(why) | NotBuilt::Cargos(why)) = self;
+        why
+    }
+
+    /// What the worker's reply other than `ok` says.
+    fn of(reply: &str) -> NotBuilt {
+        match reply.strip_prefix("cargo: ") {
+            Some(why) => NotBuilt::Cargos(why.to_owned()),
+            None => NotBuilt::Failed(reply.strip_prefix("error: ").unwrap_or(reply).to_owned()),
+        }
+    }
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -425,7 +449,7 @@ impl Worker {
         // worker was started on is built already, and is asked for too: what the worker then
         // compiles again by itself, for the first edit to be a patch, is part of warming up.
         for plan in &checkout.programs {
-            self.ask(checkout, plan)?.map_err(anyhow::Error::msg)?;
+            self.ask(checkout, plan)?.map_err(|it| anyhow::Error::msg(it.why()))?;
         }
         Ok(())
     }
@@ -451,7 +475,7 @@ impl Worker {
 
     /// Asks the process for `plan` of `checkout`. The outer error is the worker's failing,
     /// the inner one its answer that it does not build this.
-    fn ask(&self, checkout: &Checkout, plan: &Plan) -> anyhow::Result<Result<String, String>> {
+    fn ask(&self, checkout: &Checkout, plan: &Plan) -> anyhow::Result<Result<String, NotBuilt>> {
         let failed = || match self.ended_within(EXITING) {
             Some(how) => {
                 self.note_end();
@@ -473,11 +497,10 @@ impl Worker {
         let mut reply = String::new();
         BufReader::new(stream).read_line(&mut reply).with_context(failed)?;
         let reply = reply.trim_end();
-        match reply.strip_prefix("error: ") {
+        match reply {
             _ if reply.is_empty() => Err(anyhow::anyhow!(failed())),
             _ if reply.starts_with("ok") => Ok(Ok(reply.to_owned())),
-            Some(why) => Ok(Err(why.to_owned())),
-            None => Ok(Err(reply.to_owned())),
+            _ => Ok(Err(NotBuilt::of(reply))),
         }
     }
 
@@ -485,7 +508,7 @@ impl Worker {
     /// requests that wait for it together.
     fn sync(&self, checkout: &Checkout) -> Reply {
         let spans = Mutex::new(Vec::new());
-        let asked: Vec<anyhow::Result<Result<String, String>>> = std::thread::scope(|scope| {
+        let asked: Vec<anyhow::Result<Result<String, NotBuilt>>> = std::thread::scope(|scope| {
             let asking: Vec<_> = checkout
                 .programs
                 .iter()
