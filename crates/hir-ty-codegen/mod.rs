@@ -11391,9 +11391,9 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
             _ => Region::new_erased(interner),
         });
         let instance = Instance { def, args: args.store(), checked: self.cg.checked };
-        if let Some((body, never)) = tier::seen_body(db, &instance, &self.env.store(), tracked) {
+        if let Some((body, hint)) = tier::seen_body(db, &instance, &self.env.store(), tracked) {
             if body.func.signature == *sig {
-                self.cg.declare_seen(id, &body, never);
+                self.cg.declare_seen(id, &body, hint);
             } else if std::env::var_os("RA_JIT_DUMP_TIER").is_some() {
                 eprintln!("tier: signature differs: {} vs {}", body.func.signature, sig);
             }

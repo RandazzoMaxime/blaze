@@ -278,8 +278,17 @@ pub(super) struct Seen {
     pub(super) id: FuncId,
     pub(super) func: ir::Function,
     pub(super) pointees: Vec<(u32, Pointee)>,
-    /// It is `#[inline(never)]`.
-    pub(super) never: bool,
+    pub(super) hint: Hint,
+}
+
+/// What a function's `#[inline]` asks of LLVM where its body is shown, as rustc asks it:
+/// `inlinehint`, `alwaysinline` or `noinline`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Hint {
+    None,
+    Inline,
+    Always,
+    Never,
 }
 
 /// The namespace of the names of callees that are built into their callers. No relocation
@@ -714,7 +723,7 @@ impl<'db> Recorder<'db> {
                     id,
                     func,
                     pointees: seen.pointees.clone(),
-                    never: seen.never,
+                    hint: seen.hint,
                 });
             }
         }
@@ -744,12 +753,12 @@ impl<'db> Recorder<'db> {
     }
 
     /// Shows LLVM `body` as what the requested function `id` does: see [`Seen`].
-    pub(super) fn declare_seen(&mut self, id: FuncId, body: &Inlinable, never: bool) {
+    pub(super) fn declare_seen(&mut self, id: FuncId, body: &Inlinable, hint: Hint) {
         if self.seen.iter().any(|it| it.id == id) {
             return;
         }
         let func = self.moved(body);
-        self.seen.push(Seen { id, func, pointees: body.pointees.clone(), never });
+        self.seen.push(Seen { id, func, pointees: body.pointees.clone(), hint });
     }
 
     pub(super) fn declare_data_in_func(

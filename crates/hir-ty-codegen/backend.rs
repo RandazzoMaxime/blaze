@@ -52,6 +52,14 @@ pub(super) fn whole_program() -> bool {
     WHOLE_PROGRAM.load(Ordering::Relaxed)
 }
 
+/// Whether compiles go to LLVM at `-O2` or above.
+pub(super) fn optimizing() -> bool {
+    matches!(
+        Backend::from_env(),
+        Ok(Backend::Llvm(Optimization { passes: Passes::Default | Passes::Aggressive, .. }))
+    )
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Backend {
     Cranelift,
