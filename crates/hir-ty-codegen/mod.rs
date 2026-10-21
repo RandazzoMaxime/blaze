@@ -12464,6 +12464,72 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
         Ok(())
     }
 
+    /// NEON's operations on pairs of lanes of integers and its table lookup, lane by lane, as
+    /// `name` says after `aarch64.neon.`: `umaxp.v16i8` is the larger of each pair of `a`'s
+    /// lanes then of `b`'s, `tbl1.v16i8` the bytes of a table its indices name. False for
+    /// another.
+    fn neon_lanes(&mut self, name: &str, args: &[Operand], dst: Value) -> Result<bool> {
+        let mut parts = name.split('.');
+        let op = parts.next().unwrap_or_default();
+        let parts: Vec<&str> = parts.collect();
+        let Some((lanes, ty)) = parts.last().and_then(|it| {
+            let (lanes, bits) = it.strip_prefix('v')?.split_once('i')?;
+            Some((lanes.parse::<i32>().ok()?, Type::int(bits.parse().ok()?)?))
+        }) else {
+            return Ok(false);
+        };
+        let width = ty.bytes() as i32;
+        let combine = |b: &mut FunctionBuilder, l: Value, r: Value| match &op[..op.len() - 1] {
+            "umax" => b.ins().umax(l, r),
+            "smax" => b.ins().smax(l, r),
+            "umin" => b.ins().umin(l, r),
+            "smin" => b.ins().smin(l, r),
+            _ => b.ins().iadd(l, r),
+        };
+        match (op, args) {
+            ("umaxp" | "smaxp" | "uminp" | "sminp" | "addp", [a, b]) => {
+                let (a, _) = self.operand(a)?;
+                let (b, _) = self.operand(b)?;
+                let half = lanes / 2;
+                let values: Vec<Value> = (0..lanes)
+                    .map(|lane| {
+                        let from = if lane < half { a } else { b };
+                        let at = (lane % half) * 2 * width;
+                        let l = self.builder.ins().load(ty, MEM, from, at);
+                        let r = self.builder.ins().load(ty, MEM, from, at + width);
+                        combine(&mut self.builder, l, r)
+                    })
+                    .collect();
+                for (lane, value) in values.into_iter().enumerate() {
+                    self.builder.ins().store(MEM, value, dst, lane as i32 * width);
+                }
+            }
+            ("tbl1", [table, indices]) if ty == types::I8 => {
+                let (table, _) = self.operand(table)?;
+                let (indices, _) = self.operand(indices)?;
+                // A lane is the table's byte its index names, or 0 past the table's 16.
+                let values: Vec<Value> = (0..lanes)
+                    .map(|lane| {
+                        let index = self.builder.ins().load(types::I8, MEM, indices, lane);
+                        let slot = self.builder.ins().band_imm(index, 0x0f);
+                        let slot = self.builder.ins().uextend(ptr(), slot);
+                        let addr = self.builder.ins().iadd(table, slot);
+                        let found = self.builder.ins().load(types::I8, MEM, addr, 0);
+                        let zero = self.builder.ins().iconst(types::I8, 0);
+                        let past =
+                            self.builder.ins().icmp_imm(IntCC::UnsignedGreaterThan, index, 15);
+                        self.builder.ins().select(past, zero, found)
+                    })
+                    .collect();
+                for (lane, value) in values.into_iter().enumerate() {
+                    self.builder.ins().store(MEM, value, dst, lane as i32);
+                }
+            }
+            _ => return Ok(false),
+        }
+        Ok(true)
+    }
+
     /// A function `core::arch` declares as `llvm.{name}`: something LLVM implements, with no
     /// body anywhere.
     fn llvm_intrinsic(
@@ -12473,6 +12539,11 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
         dst: Value,
         dst_ty: Ty<'db>,
     ) -> Result<()> {
+        if let Some(neon) = name.strip_prefix("aarch64.neon.")
+            && self.neon_lanes(neon, args, dst)?
+        {
+            return Ok(());
+        }
         match (name, args) {
             ("x86.sse3.ldu.dq" | "x86.avx.ldu.dq.256", [ptr]) => {
                 let (ptr, _) = self.load_scalar(ptr)?;

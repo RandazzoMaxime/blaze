@@ -4606,6 +4606,28 @@ pub mod simd_aarch64 {
             )
         }
     }
+    /// Pairs of lanes, the larger, the smaller or the sum, of the first vector then of the
+    /// second, and a table lookup of eight lanes.
+    pub fn pairs(
+        v: uint8x16_t,
+        w: uint8x16_t,
+    ) -> (Bytes, Bytes, [i16; 8], [u32; 4], [u8; 8], [u8; 8]) {
+        unsafe {
+            let (s, t) = (vreinterpretq_s16_u8(v), vreinterpretq_s16_u8(w));
+            let (x, y) = (vreinterpretq_u32_u8(w), vreinterpretq_u32_u8(v));
+            (
+                bytes(vpmaxq_u8(v, w)),
+                bytes(vreinterpretq_u8_s8(vpminq_s8(
+                    vreinterpretq_s8_u8(w),
+                    vreinterpretq_s8_u8(v),
+                ))),
+                core::mem::transmute(vpmaxq_s16(s, t)),
+                core::mem::transmute(vpminq_u32(x, y)),
+                core::mem::transmute(vpadd_u8(vget_low_u8(w), vget_high_u8(v))),
+                core::mem::transmute(vqtbl1_u8(v, vget_low_u8(w))),
+            )
+        }
+    }
     pub fn across(v: uint8x16_t) -> (u8, u8, u8, u16, u32, u8) {
         unsafe {
             (
@@ -4683,6 +4705,7 @@ pub mod simd_aarch64 {
             group(b"AbA\xffcdA\x80")
         );
         out += &format!(" {:?} {:?}", select(v, w), wide(v, w));
+        out += &format!(" {:?}", pairs(v, w));
         if std::arch::is_aarch64_feature_detected!("neon") {
             out += " neon";
         }
