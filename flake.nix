@@ -22,6 +22,47 @@
         rust = pkgs.rust-bin.stable."1.99.0".default.override {
           extensions = [ "rust-src" ];
         };
+        # The nightly of the setups bench.py compares with (`--setups`, docs/benchmarks.md):
+        # rustc_codegen_cranelift ships only with nightlies.
+        nightly = pkgs.rust-bin.nightly."2026-10-09".default.override {
+          extensions = [ "rust-src" "rustc-codegen-cranelift-preview" ];
+        };
+        # What harness/bench.py runs in on the benchmark machine (docs/benchmarks.md): the
+        # pinned toolchain, LLVM 20 for `--features llvm`, and the C side the projects' build
+        # scripts use. Nothing here wraps rustc (no sccache) or replaces the default linker:
+        # mold and wild are on PATH for the setups that ask for them with `-fuse-ld`. Every
+        # library directory here costs every link a `realpath` in Nix's linker wrapper, which
+        # cargo pays and ra-jit does not: what only one project needs goes in a shell of its own.
+        bench = {
+          packages = [
+            rust
+            pkgs.python3
+            pkgs.git
+            pkgs.pkg-config
+            pkgs.openssl
+            pkgs.llvmPackages_20.llvm.dev
+            pkgs.libffi
+            pkgs.libxml2
+            pkgs.zlib
+            pkgs.ncurses
+          ] ++ pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [
+            # bevy's audio, input and windowing crates link these.
+            pkgs.alsa-lib
+            pkgs.udev
+            pkgs.wayland
+            pkgs.libxkbcommon
+            pkgs.mold
+            pkgs.wild
+          ] ++ [
+            # dx, for harness/hotpatch.py's subsecond (Dioxus hot-patching).
+            pkgs.dioxus-cli
+          ];
+          RA_JIT_NIGHTLY = "${nightly}";
+          LLVM_SYS_201_PREFIX = "${pkgs.llvmPackages_20.llvm.dev}";
+          # A C compiler as a distribution ships it: the wrapper's _FORTIFY_SOURCE warns at the
+          # -O0 of a debug build, which fails configure probes (jemalloc's, in fd).
+          hardeningDisable = [ "all" ];
+        };
         rustPlatform = pkgs.makeRustPlatform {
           cargo = rust;
           rustc = rust;
@@ -120,26 +161,43 @@
         devShells.default = pkgs.mkShell {
           packages = [ rust pkgs.python3 ];
         };
-        # What harness/bench.py runs in on the benchmark machine (docs/benchmarks.md): the
-        # pinned toolchain, LLVM 20 for `--features llvm`, and the C side the projects' build
-        # scripts use. Nothing here wraps rustc (no sccache) or replaces the linker (no mold).
-        devShells.bench = pkgs.mkShell {
-          packages = [
-            rust
-            pkgs.python3
-            pkgs.git
-            pkgs.pkg-config
-            pkgs.openssl
-            pkgs.llvmPackages_20.llvm.dev
-            pkgs.libffi
-            pkgs.libxml2
-            pkgs.zlib
-            pkgs.ncurses
+        devShells.bench = pkgs.mkShell bench;
+        # The bench shell and what zed's build needs besides (its own nix/build.nix lists the
+        # same): `nix develop .#bench-zed`.
+        devShells.bench-zed = pkgs.mkShell (bench // {
+          packages = bench.packages ++ [ pkgs.cmake pkgs.protobuf ] ++ pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [
+            pkgs.curl
+            pkgs.fontconfig
+            pkgs.freetype
+            pkgs.libgit2
+            pkgs.sqlite
+            pkgs.zstd
+            pkgs.glib
+            pkgs.libva
+            pkgs.vulkan-loader
+            pkgs.libglvnd
+            pkgs.libx11
+            pkgs.libxcb
+            pkgs.libdrm
+            pkgs.libgbm
+            pkgs.libxcomposite
+            pkgs.libxdamage
+            pkgs.libxext
+            pkgs.libxfixes
+            pkgs.libxrandr
           ];
-          LLVM_SYS_201_PREFIX = "${pkgs.llvmPackages_20.llvm.dev}";
-          # A C compiler as a distribution ships it: the wrapper's _FORTIFY_SOURCE warns at the
-          # -O0 of a debug build, which fails configure probes (jemalloc's, in fd).
-          hardeningDisable = [ "all" ];
-        };
+          PROTOC = "${pkgs.protobuf}/bin/protoc";
+        } // pkgs.lib.optionalAttrs pkgs.stdenv.hostPlatform.isLinux {
+          # zed's build script looks for glib's headers under /usr/include.
+          CXXFLAGS = "-I${pkgs.glib.dev}/include/glib-2.0 -I${pkgs.glib.out}/lib/glib-2.0/include";
+          ZSTD_SYS_USE_PKG_CONFIG = "1";
+        } // pkgs.lib.optionalAttrs (system == "x86_64-linux") {
+          # The WebRTC zed links statically, the build its build script would download into
+          # every cold target directory.
+          LK_CUSTOM_WEBRTC = pkgs.fetchzip {
+            url = "https://github.com/zed-industries/livekit-rust-sdks/releases/download/webrtc-0001d84-4/webrtc-linux-x64-release.zip";
+            sha256 = "0hlv1p6fi1lgfdyq8q49gghbqbqnq50icrw7i25g2qwqmpf2jyi7";
+          };
+        });
       });
 }
