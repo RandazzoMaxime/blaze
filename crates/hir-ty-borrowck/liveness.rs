@@ -566,7 +566,7 @@ fn alias_bound<'db>(
         else {
             continue;
         };
-        if erase(bounded) != erased {
+        if erase(bounded) != erased && normalize_erased(ctx, erase(bounded)) != Some(erased) {
             continue;
         }
         let bound = match region.kind() {
@@ -583,4 +583,24 @@ fn alias_bound<'db>(
         }
     }
     found
+}
+
+/// `ty`, its regions all `'static`, normalized as far as the solver goes: rustc normalizes the
+/// outlives clauses of the parameter environment before alias liveness matches them.
+fn normalize_erased<'db>(ctx: &Ctx<'_, 'db>, ty: Ty<'db>) -> Option<Ty<'db>> {
+    use crate::next_solver::{infer::traits::ObligationCause, obligation_ctxt::ObligationCtxt};
+    if !rustc_type_ir::TypeVisitableExt::has_aliases(&ty) {
+        return None;
+    }
+    let infcx = &ctx.infcx;
+    infcx.probe(|_| {
+        let ocx = ObligationCtxt::new(infcx);
+        let normalized = ocx.deeply_normalize(&ObligationCause::dummy(), ctx.env, ty).ok()?;
+        let interner = infcx.interner;
+        Some(rustc_type_ir::fold_regions(
+            interner,
+            infcx.resolve_vars_if_possible(normalized),
+            |_, _| Region::new_static(interner),
+        ))
+    })
 }
