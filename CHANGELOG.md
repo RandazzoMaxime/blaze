@@ -181,6 +181,10 @@ All notable changes to ra-jit are written here. The format follows
 
 ### Fixed
 
+- `harness/apps.py`'s perf stage ends with its timings again: since the rename from rustd it
+  stored ra-jit's as `ra-jit_s` and printed `ra_jit_s`, a `KeyError` after every workload.
+  wasmrun builds wasmtime 36.0.19 (was 25.0.3, which Dependabot's alerts name); its workload
+  is the same as rustc's on both.
 - `cargo ra-jit run` from many clients of one checkout at once starts each client's program,
   on macOS too. A package with a `default-run` (or one program of several) went to plain
   `cargo run`, which on macOS removes and copies again the program cargo has under
