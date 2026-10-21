@@ -22,7 +22,7 @@ daemon, `RAJITLV1` followed by the encoding in `crates/ra-jit-live/src/format.rs
 a datagram socket the program listens on, which the daemon sends a byte once it renamed a new
 `patch` into place (the program also looks at `patch` every 30 ms, for a daemon that could not
 wake it). The directory is keyed by the UUID because the daemon's path for the executable and
-the program's (cargo's hard link in `target/debug`) differ.
+the program's (cargo's hard link in `target/debug`, a clone on macOS) differ.
 
 ## Edits from an editor
 

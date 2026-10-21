@@ -128,6 +128,24 @@ All notable changes to ra-jit are written here. The format follows
 
 ### Fixed
 
+- `cargo ra-jit run` from many clients of one checkout at once starts each client's program,
+  on macOS too. A package with a `default-run` (or one program of several) went to plain
+  `cargo run`, which on macOS removes and copies again the program cargo has under
+  `target/debug` before it starts it, so a client that started it meanwhile found no file
+  ("No such file or directory") or hung before its first instruction; and rustc built the
+  edit again. ra-jit now runs the `default-run` itself, holds cargo's lock on the build
+  directory from putting the daemon's programs in place until they have started (a `cargo
+  test` executable too), takes it to give cargo back its own, and on macOS puts a program in
+  place as a clone, as cargo does: a program started from a hard link just made can be
+  killed as it starts ([rust-lang/cargo#7821](https://github.com/rust-lang/cargo/issues/7821)).
+  `cargo_ra_jit.py`'s 16 clients on 4 worktrees run 8 rounds of edits, all by the daemon.
+- A program or test `cargo ra-jit` starts itself has what the `[env]` of cargo's
+  configuration sets, as under `cargo run` and `cargo test`: the nearest `.cargo/config.toml`
+  (or `config`) says a variable, then `$CARGO_HOME`'s, with `force` and `relative`.
+- `cargo_ra_jit.py`'s life workspace no longer races with itself on macOS: the test that runs
+  `cargo build` inside and the one that starts `other` take turns, since cargo removes and
+  copies each program again there on every build and the second sometimes found none (plain
+  cargo failed it as often as ra-jit).
 - A worker that loaded its workspace beside cargo's first build
   ([#11](https://github.com/indexable-inc/ra-jit/issues/11)) ends when its daemon does, as
   every other worker does: once told what cargo built, it waited for a lock on its standard
