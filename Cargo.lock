@@ -1651,6 +1651,7 @@ dependencies = [
  "hir-expand",
  "hir-ide",
  "hir-ty-borrowck",
+ "hir-ty-wfcheck",
  "intern",
  "itertools",
  "la-arena",
@@ -1867,6 +1868,17 @@ dependencies = [
  "tracing",
  "triomphe",
  "wasm-encoder",
+]
+
+[[package]]
+name = "hir-ty-wfcheck"
+version = "0.0.0"
+dependencies = [
+ "hir-def",
+ "hir-ty",
+ "ra-ap-rustc_type_ir",
+ "rustc-hash 2.1.2",
+ "salsa",
 ]
 
 [[package]]
