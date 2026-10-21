@@ -94,7 +94,11 @@ def failure(key, measured):
     """What failed and where, in the project's own paths: a line for under the tables."""
     said = [line for line in measured["failed"].splitlines()[1:] if line.strip()] or measured["failed"].splitlines()
     said = re.sub(r"/\S*?/[\w.-]+-(cranelift|llvm)/(target/\S*?: )?", "", said[-1].removeprefix("error: "))
-    return f"{project_name(key, measured)}: the build failed after the steps shown, {said[:300]}"
+    said = said.removeprefix("ra-jit did not build ")
+    if len(said) > 140:
+        said = said[:140].rsplit(" ", 1)[0]
+        said += "`" * (said.count("`") % 2) + " …"
+    return f"{project_name(key, measured)}: only the steps shown are measured, then the build failed: {said}"
 
 
 def failures(result, keys):
@@ -272,6 +276,13 @@ def setups_table(result, keys, backend):
     return lines
 
 
+def said_otherwise(difference):
+    """How a test suite ended otherwise under ra-jit, for a table cell."""
+    if found := re.fullmatch(r"(-?\d+) for (-?\d+)", difference or ""):
+        return f"`cargo ra-jit test` exited {found[1]}, `cargo test` {found[2]}"
+    return (difference or "").replace("|", "\\|")[:120]
+
+
 def tests_table(result, keys, backend):
     keys = [k for k in keys if result["results"][k]["phases"].get("test")]
     if not keys:
@@ -288,7 +299,7 @@ def tests_table(result, keys, backend):
         if "edit_s" not in test:
             continue
         lines.append(f"| {project_name(key, result['results'][key])} | `cargo {' '.join(test['command'])}` | {test['tests']:,} | "
-                     f"{'yes' if test['same'] else 'no: ' + (test.get('difference') or '')[:120]} | `{test['edited']}` | "
+                     f"{'yes' if test['same'] else 'no: ' + said_otherwise(test.get('difference'))} | `{test['edited']}` | "
                      f"{seconds(test['edit_cargo_s'])} | {seconds(test['edit_s'])} | {speedup(test['edit_cargo_s'], test['edit_s'])} | {test['built'][:60]} | "
                      f"{seconds(test['cargo_s'])} | {seconds(test['wall_s'])} | {', '.join(seconds(s) for s in test['first_s'])} |")
     return lines

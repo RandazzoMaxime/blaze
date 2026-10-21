@@ -45,17 +45,21 @@ Live edit to running code, Game of Life demo (median of 20 edits, one 96-core Li
 | One function, 300 new functions added | 282 ms | 60 ms | 4.7x |
 
 <!-- bench:start -->
-Edit, then build, on real projects at pinned commits. Each cell is incremental `cargo build` → `cargo ra-jit build`, both warm, same linker, median of 5 edits. Linux x86-64, AWS c8a.metal-24xl, bare metal, pinned with taskset (AMD EPYC 9R45, 16 of its 96 cores, 188 GiB), ra-jit [`6a7d245e47`](https://github.com/indexable-inc/ra-jit/commit/6a7d245e47830f26475e98db6e01905f117a2971) on 2026-10-20.
+Edit, then build, on real projects at pinned commits. Each cell is incremental `cargo build` → `cargo ra-jit build`, both warm, same linker, median of 5 edits. Linux x86-64, AWS c7i.16xlarge (dev-aws-7), pinned to 16 cores with taskset (Intel(R) Xeon(R) Platinum 8488C, 16 of its 64 cores, 124 GiB), ra-jit [`2b2f2dcd5b`](https://github.com/indexable-inc/ra-jit/commit/2b2f2dcd5bc4d7132fe62bf36669a34c657dafe7) on 2026-10-20.
 
 | Project | Edit a function | Edit a widely used function | Change a signature | Nothing changed |
 |---|---:|---:|---:|---:|
-| ripgrep 15.1.0 | 447 ms → **90 ms** (5.0x) | 713 ms → **50 ms** (14x) | 556 ms → **86 ms** (6.5x) | 382 ms → **28 ms** (14x) |
-| fd 10.3.0 | 433 ms → **99 ms** (4.4x) | 403 ms → **86 ms** (4.7x) | 651 ms → **122 ms** (5.3x) | 381 ms → **31 ms** (12x) |
-| bat 0.26.0 | 428 ms → **60 ms** (7.1x) | 667 ms → **54 ms** (12x) | 951 ms → **67 ms** (14x) | 58 ms → **26 ms** (2.2x) |
-| hyperfine 1.19.0 | 315 ms → **92 ms** (3.4x) | 349 ms → **98 ms** (3.6x) | 352 ms → **140 ms** (2.5x) | 298 ms → **30 ms** (9.9x) |
-| just 1.43.0 | 656 ms → **48 ms** (14x) | 687 ms → **52 ms** (13x) | 664 ms → **76 ms** (8.7x) | 41 ms → **24 ms** (1.7x) |
-| axum 0.8.6 | 350 ms → **57 ms** (6.1x) | 798 ms → **52 ms** (15x) |  | 71 ms → **26 ms** (2.7x) |
-| nushell 0.108.0 | 1.44 s → **325 ms** (4.4x) | 4.75 s → **221 ms** (22x) | 4.84 s → **288 ms** (17x) | 179 ms → **43 ms** (4.2x) |
+| ripgrep 15.1.0 | 655 ms → **104 ms** (6.3x) | 1.00 s → **62 ms** (16x) | 809 ms → **90 ms** (9.0x) | 30 ms → **33 ms** (0.9x) |
+| fd 10.3.0 | 649 ms → **115 ms** (5.6x) | 600 ms → **103 ms** (5.8x) | 652 ms → **129 ms** (5.1x) | 43 ms → **35 ms** (1.2x) |
+| bat 0.26.0 | 650 ms → **69 ms** (9.4x) | 936 ms → **58 ms** (16x) | 900 ms → **64 ms** (14x) | 81 ms → **32 ms** (2.5x) |
+| hyperfine 1.19.0 | 528 ms → **117 ms** (4.5x) | 569 ms → **117 ms** (4.9x) | 583 ms → **162 ms** (3.6x) | 56 ms → **32 ms** (1.8x) |
+| just 1.43.0 | 899 ms → **58 ms** (16x) | 926 ms → **58 ms** (16x) | 900 ms → **93 ms** (9.7x) | 54 ms → **30 ms** (1.8x) |
+| axum 0.8.6 | 559 ms → **69 ms** (8.1x) | 1.11 s → **63 ms** (18x) |  | 102 ms → **34 ms** (3.0x) |
+| nushell 0.108.0 | 1.62 s → **279 ms** (5.8x) | 5.78 s → **271 ms** (21x) | 5.82 s → **336 ms** (17x) | 240 ms → **38 ms** (6.3x) |
+| helix 25.07.1 | 2.80 s → **231 ms** (12x) | 4.16 s → **86 ms** (48x) | 3.56 s → **354 ms** (10x) | 114 ms → **34 ms** (3.4x) |
+| bevy 0.20.0 |  |  |  | 264 ms → **41 ms** (6.4x) |
+
+- bevy 0.20.0: only the steps shown are measured, then the build failed: examples/showcase/breakout.rs:67:18: no method `chain` on type `(fn apply_velocity(Query<'_, '_, (&mut Transform, &Velocity), ()>, Res<'_,` …
 
 Measured by hand with `harness/bench.py`; the `bench-readme` workflow re-runs it on the dedicated benchmark machine. Cold builds, the spread of every number, the LLVM tier and how fast the built programs run: [docs/benchmarks.md](docs/benchmarks.md) ([raw JSON](docs/benchmarks/linux-x86_64.json)).
 <!-- bench:end -->
