@@ -314,11 +314,18 @@ has each run, its load and the crates compiled). The load makes wall time noisy;
 | `crates/hir-ty-borrowck/check.rs` (still a `hir-ty` module in both) | 132, 181; 377, 380 | 133, 130; 329, 330 | 7 → 8 (`hir-ty-codegen` joins) |
 | `crates/ra-jit/src/main.rs` | 47, 22; 91, 86 | 51, 37; 88, 90 | 1 → 1 |
 
+After steps 3 and 4 (`after-step3` in the file, at a lower load, 26 to 42):
+
+| Edit in | Wall, CPU (s) | Crates compiled |
+|---|---|---|
+| `crates/ra-jit-store/src/lib.rs` | 45, 52; 138, 145 | 3 (`ra-jit-store`, `hir-ty-codegen`, `ra-jit`) |
+| `vendor/rust-analyzer/crates/hir-ty-borrowck/src/check.rs` | 30, 55; 148, 153 | 6 (`hir-ty-borrowck`, `hir`, `ide-db`, `load-cargo`, `ide-diagnostics`, `ra-jit`) |
+
 So a code generator edit costs 2.5 times less CPU (366 to 146 s) and about 1.7 times less
-wall time under this load; the floor is `ra-jit` itself, about 88 s of CPU. A borrow checker
-edit then still rebuilt `hir-ty`, and the code generator on top; step 4 has since made it a
-crate under `hir`, so it no longer rebuilds `hir-ty`, `hir-ide` or the code generator
-(unverified: not timed after step 4).
+wall time under this load, and a borrow checker edit, now a crate under `hir`, 2.5 times less
+(379 to 150 s): neither rebuilds `hir-ty` and `hir-ide` any more. The floor is `ra-jit`
+itself, about 88 s of CPU. A store edit still rebuilds the code generator, which uses it;
+what step 3 bought is that the store's tests and benchmark no longer build a compiler.
 
 ## 4. Migration plan
 
@@ -385,7 +392,6 @@ import are left out):
 
 - The list of private items in 1.2 is from a text search; steps 2 and 4 compiled the real
   lists, which are in their rows of section 4.
-- The rebuild time of a borrow checker edit after step 4 (3.3).
 - Upstream's plan for the rest of the `hir-ty` split (the Zulip thread) was not readable
   without a login.
 - Whether upstream would take groups A to E is a judgment; nobody upstream was asked.
