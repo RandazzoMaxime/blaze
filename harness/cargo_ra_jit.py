@@ -744,6 +744,15 @@ def daemon(work):
     edit(ws, "six")
     _, again = here.cargo("run")
     check("the build after that starts a daemon again and succeeds", again.returncode == 0 and "hello world" in again.stdout and status()[0] not in (None, pid))
+
+    # What the daemon does not build, cargo does: an error is rustc's, and code rust-analyzer
+    # turns down wrongly is built all the same.
+    main = os.path.join(ws, "app/src/main.rs")
+    kept = open(main).read()
+    open(main, "a").write("\nfn broken() -> u32 { \"text\" }\n")
+    _, broken = here.cargo("build")
+    check("an edit the daemon turns down goes to cargo, with rustc's error", broken.returncode == 101 and how_built(broken.stderr).startswith("cargo") and "error[E0308]" in broken.stderr, f"exit {broken.returncode}, {how_built(broken.stderr)[:80]}")
+    open(main, "w").write(kept)
     here.cargo("stop")
     manners(work, ws, env, here, check, edit)
     abuse(work, ws, tree, env, check, status, alive)
@@ -1249,7 +1258,8 @@ def plain(work):
     kept = open(broken).read()
     open(broken, "a").write("\nfn broken() -> u32 { \"text\" }\n")
     mine = here.cargo("build")[1]
-    check("a build that does not compile fails with cargo's status", mine.returncode == 101, f"exit {mine.returncode}")
+    # What the daemon does not build, rustc does: the error is rustc's.
+    check("a build that does not compile fails with rustc's error and cargo's status", mine.returncode == 101 and "error[E0308]" in mine.stderr, f"exit {mine.returncode}")
     open(broken, "w").write(kept)
     mine, how, wrong = same("run", "mended")
     check("and the build after it is mended is right", mine.returncode == 0 and not wrong, f"{how[:90]}; {wrong or 'same as cargo'}")
