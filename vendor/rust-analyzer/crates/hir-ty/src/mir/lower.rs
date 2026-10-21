@@ -107,6 +107,13 @@ impl DropScope {
     }
 }
 
+/// A binding of a guarded match arm that is moved into once its guard holds.
+struct GuardedMove<'db> {
+    local: LocalId,
+    place: Place<'db>,
+    span: MirSpan,
+}
+
 struct MirLowerCtx<'a, 'db> {
     result: MirBody<'db>,
     owner: InferBodyId<'db>,
@@ -150,9 +157,13 @@ struct MirLowerCtx<'a, 'db> {
     /// The alternative to match for an or-pattern, while an arm is lowered once per
     /// combination of alternatives.
     or_choices: FxHashMap<PatId, usize>,
-    /// While the pattern of a match arm that has a guard is lowered: what it binds by value, and
-    /// the place each came out of.
-    guarded_moves: Option<Vec<(LocalId, Place<'db>)>>,
+    /// While the pattern of a match arm that has a guard is lowered: what it binds by value of a
+    /// type that is not `Copy`, which is bound only once the guard holds. The guard reads each
+    /// through a shared reference to the place it comes out of (`guard_refs`), as rustc lowers
+    /// it, so a guard that reads the value matched on does not read a moved value.
+    guarded_moves: Option<Vec<GuardedMove<'db>>>,
+    /// The reference a guard reads each binding of `guarded_moves` through.
+    guard_refs: FxHashMap<BindingId, LocalId>,
     /// Whether each type asked about is `Copy`. Every statement that may panic asks of every
     /// local in scope, which in a long body is the most of lowering it.
     copy: FxHashMap<Ty<'db>, bool>,
@@ -327,6 +338,7 @@ impl<'a, 'db> MirLowerCtx<'a, 'db> {
             arm_unreached: false,
             or_choices: FxHashMap::default(),
             guarded_moves: None,
+            guard_refs: FxHashMap::default(),
             copy: FxHashMap::default(),
             env,
             infcx,
@@ -435,9 +447,9 @@ impl<'a, 'db> MirLowerCtx<'a, 'db> {
                 }
                 Adjust::Borrow(AutoBorrow::Ref(m)) => {
                     let bk = match m {
-                        AutoBorrowMutability::Mut { allow_two_phase_borrow: AllowTwoPhase::Yes } => {
-                            BorrowKind::Mut { kind: super::MutBorrowKind::TwoPhasedBorrow }
-                        }
+                        AutoBorrowMutability::Mut {
+                            allow_two_phase_borrow: AllowTwoPhase::Yes,
+                        } => BorrowKind::Mut { kind: super::MutBorrowKind::TwoPhasedBorrow },
                         _ => BorrowKind::from_rustc_mutability((*m).into()),
                     };
                     self.lower_expr_to_place_with_borrow_adjust(expr_id, place, current, rest, bk)
@@ -1075,22 +1087,22 @@ impl<'a, 'db> MirLowerCtx<'a, 'db> {
                             let (then, otherwise) = matched?;
                             let otherwise = otherwise.unwrap_or_else(|| self.new_basic_block());
                             let bound = self.drop_scopes.last().map_or(0, |it| it.locals.len());
-                            if let Some((discr, c)) = self.lower_guard(guard, then)? {
+                            let guarded = self.lower_guard(guard, then);
+                            self.guard_refs.clear();
+                            if let Some((discr, c)) = guarded? {
+                                let held = self.new_basic_block();
                                 let failed = self.new_basic_block();
                                 self.set_terminator(
                                     c,
                                     TerminatorKind::SwitchInt {
                                         discr,
-                                        targets: SwitchTargets::static_if(1, body, failed),
+                                        targets: SwitchTargets::static_if(1, held, failed),
                                     },
                                     expr_id.into(),
                                 );
-                                let failed = self.guard_failed(
-                                    failed,
-                                    bound,
-                                    moves.unwrap_or_default(),
-                                    guard.into(),
-                                );
+                                self.guard_held(held, moves.unwrap_or_default());
+                                self.set_goto(held, body, expr_id.into());
+                                let failed = self.guard_failed(failed, bound, guard.into());
                                 self.set_goto(failed, otherwise, expr_id.into());
                             }
                             current = otherwise;
@@ -1116,7 +1128,9 @@ impl<'a, 'db> MirLowerCtx<'a, 'db> {
                         let next = self.new_basic_block();
                         let o = *otherwise.get_or_insert_with(|| self.new_basic_block());
                         let bound = self.drop_scopes.last().map_or(0, |it| it.locals.len());
-                        if let Some((discr, c)) = self.lower_guard(guard, then)? {
+                        let guarded = self.lower_guard(guard, then);
+                        self.guard_refs.clear();
+                        if let Some((discr, c)) = guarded? {
                             let failed = self.new_basic_block();
                             self.set_terminator(
                                 c,
@@ -1126,12 +1140,8 @@ impl<'a, 'db> MirLowerCtx<'a, 'db> {
                                 },
                                 expr_id.into(),
                             );
-                            let failed = self.guard_failed(
-                                failed,
-                                bound,
-                                moves.unwrap_or_default(),
-                                guard.into(),
-                            );
+                            self.guard_held(next, moves.unwrap_or_default());
+                            let failed = self.guard_failed(failed, bound, guard.into());
                             self.set_goto(failed, o, expr_id.into());
                         }
                         next
@@ -1759,11 +1769,18 @@ impl<'a, 'db> MirLowerCtx<'a, 'db> {
                     else {
                         not_supported!("non-local capture");
                     };
+                    // A binding a guard reads through a reference is captured through it.
+                    let (local, deref) = match this.guard_refs.get(&local) {
+                        Some(&reference) => (reference, Some(ProjectionElem::Deref)),
+                        None => (this.binding_local(local)?, None),
+                    };
                     Ok(StoredPlace {
-                        local: this.binding_local(local)?,
-                        projection: Projection::new_from_iter(convert_closure_capture_projections(
-                            self.db, place,
-                        ))
+                        local,
+                        projection: Projection::new_from_iter(
+                            deref
+                                .into_iter()
+                                .chain(convert_closure_capture_projections(self.db, place)),
+                        )
                         .store(),
                     })
                 };
@@ -2237,8 +2254,10 @@ impl<'a, 'db> MirLowerCtx<'a, 'db> {
                     return Ok(None);
                 };
                 let end = scope.pop_and_drop(self, end, condition.into());
-                let discr =
-                    Operand { kind: OperandKind::Copy(result.store()), span: Some(condition.into()) };
+                let discr = Operand {
+                    kind: OperandKind::Copy(result.store()),
+                    span: Some(condition.into()),
+                };
                 let (holds, fails) = (self.new_basic_block(), self.new_basic_block());
                 self.set_terminator(
                     end,
@@ -3558,7 +3577,6 @@ impl<'a, 'db> MirLowerCtx<'a, 'db> {
         &mut self,
         mut current: BasicBlockId,
         bound_by_pattern: usize,
-        moves: Vec<(LocalId, Place<'db>)>,
         span: MirSpan,
     ) -> BasicBlockId {
         if let Some(arm) = self.drop_scopes.last() {
@@ -3568,11 +3586,15 @@ impl<'a, 'db> MirLowerCtx<'a, 'db> {
             };
             self.emit_drop_and_storage_dead_for_scope(&by_guard, &mut current, span);
         }
-        for (local, from) in moves.into_iter().rev() {
-            let value = Operand { kind: OperandKind::Move(Place::from(local).store()), span: None };
-            self.push_assignment(current, from, value.into(), span);
-        }
         current
+    }
+
+    /// Where the guard of an arm held: what the arm binds by value is moved into its bindings.
+    fn guard_held(&mut self, current: BasicBlockId, moves: Vec<GuardedMove<'db>>) {
+        for GuardedMove { local, place, span } in moves {
+            let mode = crate::BindingMode(crate::ByRef::No, rustc_ast_ir::Mutability::Not);
+            self.push_match_assignment(current, local, mode, place, span);
+        }
     }
 
     /// Lowers the guard of a match arm.
