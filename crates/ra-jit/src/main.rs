@@ -2763,7 +2763,7 @@ fn build(
     if let Some(object) = &mut unit.object {
         // A patch defines again what the object does, and the linker of Mach-O takes two
         // definitions of a name only when one of them gives way.
-        weaken::definitions(object);
+        weaken::ours(object);
         // The files a debugger is sent to are there before the object that sends it.
         for file in &unit.apart {
             replace(Path::new(&file.name), &file.bytes)?;

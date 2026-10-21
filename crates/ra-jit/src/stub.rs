@@ -94,7 +94,7 @@ fn stand_in(args: &[OsString]) -> Option<(usize, String)> {
     }
     let source = (0..args.len())
         .find(|&at| args[at].ends_with(".rs") && !(at > 0 && VALUED.contains(&args[at - 1])))?;
-    Some((source, text_of(&args, program)))
+    Some((source, text_of(&args, program, Path::new(args[source]))))
 }
 
 /// Whether rustc is asked for a program and nothing else. `None` when it is asked for
@@ -108,12 +108,96 @@ pub(crate) fn is_program<S: AsRef<str>>(args: &[S]) -> Option<bool> {
     }
 }
 
+/// A `#[global_allocator]` that calls the functions rust-analyzer's expansion of the crate's
+/// own defines, which ra-jit compiles: rustc's allocator shim calls the allocator of the stand-in.
+/// `{cfg}` is the `#[cfg]`s of the crate's, `{n}` tells one from another.
+const FORWARDING_ALLOCATOR: &str = r#"{cfg}
+mod __ra_jit_global_allocator_{n} {
+    extern crate core;
+    use core::alloc::{GlobalAlloc, Layout};
+    struct Allocator;
+    unsafe extern "C" {
+        fn __ra_jit_global_alloc(size: usize, align: usize) -> *mut u8;
+        fn __ra_jit_global_dealloc(ptr: *mut u8, size: usize, align: usize);
+        fn __ra_jit_global_realloc(ptr: *mut u8, size: usize, align: usize, new_size: usize) -> *mut u8;
+        fn __ra_jit_global_alloc_zeroed(size: usize, align: usize) -> *mut u8;
+    }
+    unsafe impl GlobalAlloc for Allocator {
+        unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+            unsafe { __ra_jit_global_alloc(layout.size(), layout.align()) }
+        }
+        unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+            unsafe { __ra_jit_global_dealloc(ptr, layout.size(), layout.align()) }
+        }
+        unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
+            unsafe { __ra_jit_global_realloc(ptr, layout.size(), layout.align(), new_size) }
+        }
+        unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
+            unsafe { __ra_jit_global_alloc_zeroed(layout.size(), layout.align()) }
+        }
+    }
+    #[global_allocator]
+    static ALLOCATOR: Allocator = Allocator;
+{weak}}
+"#;
+
+/// The functions of ra-jit's that the forwarding allocator calls.
+pub(crate) const ALLOCATOR_FUNCTIONS: &[&str] = &[
+    "__ra_jit_global_alloc",
+    "__ra_jit_global_dealloc",
+    "__ra_jit_global_realloc",
+    "__ra_jit_global_alloc_zeroed",
+];
+
+/// Weak definitions of `names` for cargo's link of the stand-in to find, as [`WEAK_MAIN`];
+/// these trap, as ra-jit's are the ones that run.
+fn weak_traps(names: &[&str]) -> String {
+    let asm = |apple: bool, trap: Option<&str>| {
+        let mut lines = Vec::new();
+        for name in names {
+            if apple {
+                lines.extend([
+                    format!(".globl _{name}"),
+                    format!(".weak_definition _{name}"),
+                    format!("_{name}:"),
+                ]);
+            } else {
+                lines.extend([format!(".weak {name}"), format!("{name}:")]);
+            }
+        }
+        lines.extend(trap.map(str::to_owned));
+        let lines: Vec<String> = lines.iter().map(|it| format!("{it:?}")).collect();
+        format!("core::arch::global_asm!({});\n", lines.join(", "))
+    };
+    let mut text = String::new();
+    for (apple, vendor) in
+        [(true, "target_vendor = \"apple\""), (false, "not(target_vendor = \"apple\")")]
+    {
+        for (arch, trap) in
+            [("target_arch = \"aarch64\"", "brk #1"), ("target_arch = \"x86_64\"", "ud2")]
+        {
+            text.push_str(&format!(
+                "    #[cfg(all({vendor}, {arch}))]\n    {}",
+                asm(apple, Some(trap))
+            ));
+        }
+        let other = "not(any(target_arch = \"aarch64\", target_arch = \"x86_64\"))";
+        text.push_str(&format!("    #[cfg(all({vendor}, {other}))]\n    {}", asm(apple, None)));
+    }
+    text
+}
+
 /// The source that stands in for the crate rustc is given `args` for: it names the
-/// libraries the crate is linked against and has no code.
-pub(crate) fn text_of<S: AsRef<str>>(args: &[S], program: bool) -> String {
+/// libraries the crate is linked against and has no code, but for a `#[global_allocator]` of
+/// the crate's `source`, which has to be one of the stand-in's for rustc to call it.
+pub(crate) fn text_of<S: AsRef<str>>(args: &[S], program: bool, source: &Path) -> String {
     let mut text = String::from("#![allow(warnings)]\n");
     if program {
         text.push_str("#![no_main]\n");
+    }
+    for (n, cfg) in global_allocators(source).iter().enumerate() {
+        let forwarding = FORWARDING_ALLOCATOR.replace("{cfg}", cfg).replace("{n}", &n.to_string());
+        text.push_str(&forwarding.replace("{weak}", &weak_traps(ALLOCATOR_FUNCTIONS)));
     }
     for pair in args.windows(2).filter(|it| it[0].as_ref() == "--extern") {
         let Some((name, path)) = pair[1].as_ref().split_once('=') else { continue };
@@ -129,7 +213,202 @@ pub(crate) fn text_of<S: AsRef<str>>(args: &[S], program: bool) -> String {
     text
 }
 
+/// The `#[cfg]`s of each `#[global_allocator]` in the files of the crate whose root is `root`,
+/// found through its `mod name;` items. Read as text, not parsed: a `#[path]`, a module
+/// written by a macro, a `#[cfg]` of the module the static is in and `cfg_attr` aren't seen.
+fn global_allocators(root: &Path) -> Vec<String> {
+    let mut found = Vec::new();
+    let mut files = vec![(root.to_path_buf(), true)];
+    let mut seen = std::collections::HashSet::new();
+    while let Some((file, owns_dir)) = files.pop() {
+        if !seen.insert(file.clone()) || seen.len() > 10_000 {
+            continue;
+        }
+        let Ok(text) = std::fs::read_to_string(&file) else { continue };
+        let text = without_comments(&text);
+        let mut at = 0;
+        while let Some(found_at) = text[at..].find("#[global_allocator]") {
+            let start = at + found_at;
+            found.push(cfgs_around(&text, start, start + "#[global_allocator]".len()));
+            at = start + 1;
+        }
+        // A module of `a.rs` is in `a/`, one of `main.rs`, `lib.rs` or `mod.rs` beside it.
+        let Some(parent) = file.parent() else { continue };
+        let dir = if owns_dir {
+            parent.to_path_buf()
+        } else {
+            parent.join(file.file_stem().unwrap_or_default())
+        };
+        for name in out_of_line_modules(&text) {
+            let flat = dir.join(format!("{name}.rs"));
+            let nested = dir.join(&name).join("mod.rs");
+            if flat.exists() {
+                files.push((flat, false));
+            } else if nested.exists() {
+                files.push((nested, true));
+            }
+        }
+    }
+    found
+}
+
+/// The text with its line and block comments blanked out, at the same offsets. A string
+/// with `//` or `/*` in it is blanked from there as well, which no attribute minds.
+fn without_comments(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while !rest.is_empty() {
+        let line = rest.find("//");
+        let block = rest.find("/*");
+        let (at, end) = match (line, block) {
+            (Some(l), b) if b.is_none_or(|b| l < b) => {
+                (l, rest[l..].find('\n').map_or(rest.len(), |e| l + e))
+            }
+            (_, Some(b)) => (b, rest[b..].find("*/").map_or(rest.len(), |e| b + e + 2)),
+            _ => (rest.len(), rest.len()),
+        };
+        out.push_str(&rest[..at]);
+        out.extend(rest[at..end].chars().map(|it| if it == '\n' { '\n' } else { ' ' }));
+        rest = &rest[end..];
+    }
+    out
+}
+
+/// The `#[cfg(..)]` attributes next to the one at `start..end`: those before it back to the
+/// end of the previous item, and those after it up to the item.
+fn cfgs_around(text: &str, start: usize, end: usize) -> String {
+    let mut cfgs = Vec::new();
+    let mut before = text[..start].trim_end();
+    while before.ends_with(']') {
+        let Some(open) = matching_open(before) else { break };
+        let attribute = &before[open..];
+        let Some(prefix) = before[..open].strip_suffix('#') else { break };
+        cfgs.push(attribute);
+        before = prefix.trim_end();
+    }
+    cfgs.reverse();
+    let mut after = text[end..].trim_start();
+    while let Some(attribute) = after.strip_prefix('#') {
+        let Some(len) = matching_close(attribute) else { break };
+        cfgs.push(&attribute[..len]);
+        after = attribute[len..].trim_start();
+    }
+    let cfg =
+        |it: &&str| it.strip_prefix('[').is_some_and(|it| it.trim_start().starts_with("cfg("));
+    cfgs.into_iter().filter(cfg).map(|it| format!("#{it}\n")).collect()
+}
+
+/// Where the `[` is that the `]` ending `text` closes.
+fn matching_open(text: &str) -> Option<usize> {
+    let mut depth = 0usize;
+    for (at, it) in text.char_indices().rev() {
+        match it {
+            ']' => depth += 1,
+            '[' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(at);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// The length of the `[..]` that `text` starts with.
+fn matching_close(text: &str) -> Option<usize> {
+    if !text.starts_with('[') {
+        return None;
+    }
+    let mut depth = 0usize;
+    for (at, it) in text.char_indices() {
+        match it {
+            '[' => depth += 1,
+            ']' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(at + 1);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// The names of the `mod name;` items of a file.
+fn out_of_line_modules(text: &str) -> Vec<String> {
+    let mut names = Vec::new();
+    let mut from = 0;
+    for (at, end) in text.match_indices([';', '{', '}']) {
+        let statement = &text[from..at];
+        from = at + 1;
+        let words: Vec<&str> = statement.split_whitespace().collect();
+        if end == ";"
+            && let [.., "mod", name] = words[..]
+            && name.chars().all(|it| it.is_alphanumeric() || it == '_')
+        {
+            names.push(name.to_owned());
+        }
+    }
+    names
+}
+
 fn valued_in<'a>(args: &[&'a str], flag: &str) -> Option<&'a str> {
     let at = args.iter().position(|&it| it == flag)?;
     args.get(at + 1).copied()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn scratch(name: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("ra-jit-stub-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn allocators_with_their_cfgs_through_modules() {
+        let dir = scratch("modules");
+        let file = |path: &str, text: &str| {
+            let path = dir.join(path);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, text).unwrap();
+        };
+        file(
+            "src/main.rs",
+            "mod alloc;\nmod inline { fn f() {} }\n// #[global_allocator]\nfn main() {}\n",
+        );
+        file(
+            "src/alloc.rs",
+            "mod deeper;\n#[cfg(all(\n    not(windows),\n    feature = \"jemalloc\"\n))]\n#[global_allocator]\n\
+             #[allow(unused)]\nstatic A: J = J;\n",
+        );
+        file("src/alloc/deeper.rs", "#[global_allocator]\npub static B: S = S;\n");
+        file("src/inline.rs", "#[global_allocator]\nstatic C: S = S;\n");
+        let mut found = global_allocators(&dir.join("src/main.rs"));
+        found.sort();
+        assert_eq!(found, ["", "#[cfg(all(\n    not(windows),\n    feature = \"jemalloc\"\n))]\n"]);
+    }
+
+    #[test]
+    fn a_stand_in_forwards_to_ra_jits_allocator() {
+        let dir = scratch("forwards");
+        let main = dir.join("main.rs");
+        std::fs::write(
+            &main,
+            "#[cfg(unix)]\n#[global_allocator]\nstatic A: S = S;\nfn main() {}\n",
+        )
+        .unwrap();
+        let text = text_of(&["--crate-type", "bin"], true, &main);
+        assert!(text.contains("#[cfg(unix)]\n\nmod __ra_jit_global_allocator_0 {"), "{text}");
+        assert!(
+            text.contains("__ra_jit_global_realloc(ptr, layout.size(), layout.align(), new_size)")
+        );
+        assert!(!text_of(&["--crate-type", "bin"], true, &dir.join("none.rs")).contains("mod "));
+    }
 }
