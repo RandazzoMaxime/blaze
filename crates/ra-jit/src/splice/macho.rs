@@ -609,6 +609,10 @@ impl Image {
             let &(start, len, flags, ..) =
                 section.and_then(|it| sections.get(it)).context("a symbol in no section")?;
             let kind = match flags & macho::SECTION_TYPE {
+                // What code reaches a thread-local by: the address of a function that gives
+                // its address, called with that of the descriptor. The descriptor itself is
+                // data like any other.
+                macho::S_THREAD_LOCAL_VARIABLES => SymbolKind::Data,
                 macho::S_THREAD_LOCAL_REGULAR..=macho::S_THREAD_LOCAL_INIT_FUNCTION_POINTERS => {
                     SymbolKind::Tls
                 }
@@ -1343,15 +1347,19 @@ impl<'a> Patch<'a> {
                 (macho::ARM64_RELOC_BRANCH26, true, 2) => Fixup::Branch,
                 (macho::ARM64_RELOC_PAGE21, true, 2) => Fixup::Page,
                 (macho::ARM64_RELOC_PAGEOFF12, false, 2) => Fixup::Offset,
-                (macho::ARM64_RELOC_GOT_LOAD_PAGE21, true, 2) => Fixup::SlotPage,
-                (macho::ARM64_RELOC_GOT_LOAD_PAGEOFF12, false, 2) => Fixup::SlotOffset,
-                (macho::ARM64_RELOC_POINTER_TO_GOT, true, 2) => Fixup::SlotDistance,
+                // A thread-local's descriptor is reached through a slot, as what another
+                // library defines is.
                 (
-                    macho::ARM64_RELOC_TLVP_LOAD_PAGE21 | macho::ARM64_RELOC_TLVP_LOAD_PAGEOFF12,
-                    ..,
-                ) => {
-                    bail!("code that uses a thread-local")
-                }
+                    macho::ARM64_RELOC_GOT_LOAD_PAGE21 | macho::ARM64_RELOC_TLVP_LOAD_PAGE21,
+                    true,
+                    2,
+                ) => Fixup::SlotPage,
+                (
+                    macho::ARM64_RELOC_GOT_LOAD_PAGEOFF12 | macho::ARM64_RELOC_TLVP_LOAD_PAGEOFF12,
+                    false,
+                    2,
+                ) => Fixup::SlotOffset,
+                (macho::ARM64_RELOC_POINTER_TO_GOT, true, 2) => Fixup::SlotDistance,
                 (other, ..) => bail!("a relocation of type {other}, which only the linker handles"),
             };
             found.push(Relocation { at, fixup, symbol, addend: relocation.addend() });
