@@ -135,9 +135,11 @@ What is specific to the port:
   more into that file and links once again; the links after start from it. A link line
   given to the daemon by hand keeps the headerpad it has, and without enough the splice
   declines. The file does not grow from splice to splice.
-- Executables with chained fixups are declined and linked in full. That was measured with
-  `MACOSX_DEPLOYMENT_TARGET=13.0`; rustc's default deployment target of 11.0 produces dyld
-  info and splices.
+- The splice reads and writes the loader's fixups as dyld info, the tables rustc's default
+  deployment target of 11.0 gets. For a target of 12 or later (nix's shell sets 14.0) Apple's
+  linker writes them as chains instead, so the daemon's link line has `-Wl,-no_fixup_chains`.
+  An executable linked with chained fixups anyway, by a line given to the daemon by hand, is
+  declined and linked in full.
 - The calling convention is Apple's variant of AAPCS64, including its rule that variadic
   arguments always go on the stack.
 

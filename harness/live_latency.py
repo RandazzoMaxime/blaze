@@ -100,7 +100,7 @@ from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from live_e2e import ROOT, HERE, StepError, build, daemon_home, pump, show_daemon_log, wait_for
+from live_e2e import ROOT, HERE, StepError, build, daemon_home, pump, serving, show_daemon_log, wait_for
 
 EDITS = int(os.environ.get("LATENCY_EDITS", "10"))
 KEYS = int(os.environ.get("LATENCY_KEYS", "20"))
@@ -1052,12 +1052,7 @@ async def main(program_name: str, modes: list[str]) -> None:
         env.pop("CARGO_INCREMENTAL", None)
 
         await build("first build", program.project, env)
-        for _ in range(120):
-            if "[ra-jit]" in await build("wait for the daemon", program.project, env):
-                break
-            await asyncio.sleep(0.5)
-        else:
-            raise StepError("wait for the daemon: no build said `[ra-jit]` in 120 tries")
+        await serving(program.project, env)
         program.source.write_text(program.edited(program.source.read_text(), program.value, program.value + 1))
         program.value += 1
         await build("edit before start", program.project, env)

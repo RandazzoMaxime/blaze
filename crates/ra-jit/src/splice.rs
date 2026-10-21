@@ -288,8 +288,9 @@ impl Baseline {
         };
         let placed = start.elapsed();
 
-        let file = OpenOptions::new().read(true).write(true).open(&self.path)?;
-        ensure!(Stamp::of(&file)? == self.stamp, "the executable was written by someone else");
+        let writing = Writing::open(&self.path)?;
+        let file = &writing.file;
+        ensure!(Stamp::of(file)? == self.stamp, "the executable was written by someone else");
         for (offset, bytes) in self.undo.drain(..).rev() {
             write_all_at(&file, &bytes, offset)?;
         }
@@ -336,7 +337,7 @@ impl Baseline {
         }
         self.stamp = Stamp::of(&file)?;
         let redirected_at = start.elapsed();
-        drop(file);
+        drop(writing);
         if std::env::var_os("RA_JIT_STATS").is_some() {
             let us = |it: std::time::Duration| it.as_micros();
             eprintln!(
@@ -513,15 +514,36 @@ fn laid_out(path: &Path, image: &Image) -> std::io::Result<Vec<debug::Moved>> {
     if moved.is_empty() {
         return Ok(moved);
     }
-    let file = OpenOptions::new().read(true).write(true).open(path)?;
+    let writing = Writing::open(path)?;
     for run in &moved {
-        copy_within(&file, run)?;
+        copy_within(&writing.file, run)?;
     }
     if std::env::var_os("RA_JIT_STATS").is_some() {
         let bytes: u64 = moved.iter().map(|it| it.len).sum();
         eprintln!("laid out: {bytes} bytes of debug info in {:.1?}", start.elapsed());
     }
     Ok(moved)
+}
+
+/// An executable open to be written in place, on Unix under an exclusive lock on it taken first:
+/// on Linux a program started while its file is open for writing is refused ("text file
+/// busy"), and a client starts one under a shared lock (`cargo::run`). The file is closed
+/// before the lock is let go.
+struct Writing {
+    file: File,
+    _lock: File,
+}
+
+impl Writing {
+    fn open(path: &Path) -> std::io::Result<Writing> {
+        let lock = File::open(path)?;
+        // On Windows a lock keeps out this process's own writes too, and a program that runs
+        // is moved aside there rather than refused.
+        #[cfg(unix)]
+        lock.lock()?;
+        let file = OpenOptions::new().read(true).write(true).open(path)?;
+        Ok(Writing { file, _lock: lock })
+    }
 }
 
 /// Writes a run of the file again behind where it is.
@@ -1961,7 +1983,41 @@ fn relative(to: u64, from: u64) -> anyhow::Result<i32> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Field, Machine};
+    use super::{Field, Machine, Writing};
+
+    /// A client starts the program the daemon writes in place once the daemon is through,
+    /// not while the file is open for writing, which on Linux is "text file busy".
+    #[cfg(unix)]
+    #[test]
+    fn a_program_written_in_place_starts_after_the_write() {
+        // `true` from PATH (NixOS has no /usr/bin/true), under its own name: a coreutils of
+        // one binary is the program its name says.
+        let path = std::env::var_os("PATH").unwrap_or_default();
+        let found =
+            std::env::split_paths(&path).map(|dir| dir.join("true")).find(|it| it.is_file());
+        let dir = std::env::temp_dir().join(format!("ra-jit-writing-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let program = dir.join("true");
+        std::fs::copy(found.expect("a `true` on PATH"), &program).unwrap();
+        // A copy out of the Nix store is read-only, as the store is.
+        let writable = std::os::unix::fs::PermissionsExt::from_mode(0o755);
+        std::fs::set_permissions(&program, writable).unwrap();
+        let writing = Writing::open(&program).unwrap();
+        let client = std::thread::spawn({
+            let program = program.clone();
+            move || {
+                let started = crate::cargo::run::started(&mut std::process::Command::new(program));
+                (std::time::Instant::now(), started.and_then(|mut it| it.wait()))
+            }
+        });
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        let written = std::time::Instant::now();
+        drop(writing);
+        let (started, ended) = client.join().unwrap();
+        std::fs::remove_dir_all(&dir).unwrap();
+        assert!(started > written, "started while the file was open for writing");
+        assert!(ended.unwrap().success());
+    }
 
     fn words(code: &[u8]) -> Vec<u32> {
         code.chunks(4).map(|it| u32::from_le_bytes(it.try_into().unwrap())).collect()

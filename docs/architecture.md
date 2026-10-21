@@ -186,7 +186,7 @@ Each object format has its own implementation:
 | Format | File | Notes |
 |---|---|---|
 | ELF | `splice.rs`, `splice/debug.rs` | New segments for read-only data, code and data, new program headers, the unwinder's search table extended. Debug sections are rewritten so a debugger sees the new code. |
-| Mach-O arm64 | `splice/macho.rs` | The patch goes where `__LINKEDIT` was, `__LINKEDIT` is written again behind it, and the file is re-signed. Executables with chained fixups are declined. |
+| Mach-O arm64 | `splice/macho.rs` | The patch goes where `__LINKEDIT` was, `__LINKEDIT` is written again behind it, and the file is re-signed. Executables with chained fixups are declined, so the daemon's link asks for dyld info (`-no_fixup_chains`). |
 | PE x86-64 | `splice/pe.rs` | New sections behind the linker's last, `.pdata` extended for the unwinder. |
 | wasm | `splice/wasm.rs` | Nothing jumps: the module is written again with the new function bodies under the same indices. |
 
