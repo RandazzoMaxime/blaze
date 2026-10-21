@@ -213,6 +213,12 @@ All notable changes to ra-jit are written here. The format follows
   under them, are unchanged. helix is ready in 109 s at 18.4 GB of memory instead of 631 s at
   100.7 GB, its store is 1.6 GB instead of 14 GB, and its first `cargo ra-jit run` takes
   46.9 s instead of 640.8 s (`harness/deepnames.py`).
+- A `macro_rules!` that a macro of another crate defines (`dep::define_log!(log)`, as bun's
+  `bun_core::define_scoped_log!` at the top of a file) is in the textual scope of the modules
+  after it, as in rustc. rust-analyzer expanded a call by a path only after the file's modules
+  were collected, so their calls of the macro were missing expressions and their functions were
+  left to rustc (`IncompleteExpr`); in bun one such function in `bun_runtime` sent every
+  signature edit of the crate to cargo (`harness/breakers`, `macro_defined_by_foreign_macro`).
 - `harness/apps.py`'s perf stage ends with its timings again: since the rename from rustd it
   stored ra-jit's as `ra-jit_s` and printed `ra_jit_s`, a `KeyError` after every workload.
   wasmrun builds wasmtime 36.0.19 (was 25.0.3, which Dependabot's alerts name); its workload

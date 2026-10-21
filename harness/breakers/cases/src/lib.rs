@@ -93,6 +93,7 @@ cases![
     nested_binder_type_id,
     if_let_outlives,
     foreign_of_dependency,
+    macro_defined_by_foreign_macro,
     repeat_moved,
     raw_write_then_match,
     guard_let_drops,
