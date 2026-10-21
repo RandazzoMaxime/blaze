@@ -210,7 +210,7 @@ PROJECTS = {
         ),
         test=["-p", "util"],
     ),
-    # 1.25M lines of Rust in 105 crates, with the C and C++ of a JavaScript runtime (bun's port
+    # 1.25M lines of Rust in 103 crates, with the C and C++ of a JavaScript runtime (bun's port
     # from Zig, docs/research/bun.md). Its own build makes the C and C++ once per revision
     # (bunprep.py), and its pinned nightly builds the Rust. Measured only when named.
     "bun": dict(

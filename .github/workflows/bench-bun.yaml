@@ -1,4 +1,4 @@
-# bun (oven-sh/bun 1.4.3, its Rust port: 1.25M lines in 105 crates) built through ra-jit on the
+# bun (oven-sh/bun 1.4.3, its Rust port: 1.25M lines in 103 crates) built through ra-jit on the
 # dedicated benchmark machine, nightly: the edits of harness/bench.py and the runtime of
 # harness/runbench.py, into the README's bun section (docs/research/bun.md says what it is).
 # Too slow for every push: bun's own build of its C and C++ (once per revision, kept in
