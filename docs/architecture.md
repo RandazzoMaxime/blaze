@@ -192,8 +192,8 @@ Each object format has its own implementation:
 
 ## The disk store
 
-`store.rs` is a content-addressed key-value store of compiled functions, independent of
-Rust: a key is a hash of what the value was made from. It is used when `RA_JIT_CACHE` names
+`crates/ra-jit-store` is a content-addressed key-value store of compiled functions,
+independent of Rust: a key is a hash of what the value was made from. It is used when `RA_JIT_CACHE` names
 a directory. `stable.rs` gives function instances names that are the same in every run on
 the same sources, and `cached.rs` keeps entries under them: a function of a crate that no
 edit reaches, as it was stitched into an object. A build that finds an entry for an

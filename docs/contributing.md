@@ -19,7 +19,9 @@ you send them, including fixes you find here and want to upstream.
 
     crates/ra-jit/             the daemon, the cargo drop-in, the splice, the remote
     crates/ra-jit/src/bin/     cargo-ra-jit
-    crates/hir-ty-codegen/    the code generator: MIR to Cranelift IR, the producers, the store
+    crates/hir-ty-codegen/    the code generator: MIR to Cranelift IR, the producers
+    crates/ra-jit-store/      the disk store of compiled code, which knows nothing about Rust
+    crates/ra-jit-fuzz/       made-up and damaged inputs for the tests of what reads the store
     crates/ra-jit-wasm/        experiment: the compiler running in a web page (not in the workspace)
     harness/                  the test harnesses and their fixtures
     demo/                     small projects the harnesses and the scoreboard build

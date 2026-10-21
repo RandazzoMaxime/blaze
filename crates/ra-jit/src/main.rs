@@ -5136,7 +5136,7 @@ fn run_holding(
     let start = Instant::now();
     let cargo_config = cargo_config(&args);
     let selection = args.selection.clone();
-    hir_ty_codegen::identify_ahead();
+    ra_jit_store::identify_ahead();
     let projects: Vec<&Path> =
         std::iter::once(&args.project).chain(&args.also).map(PathBuf::as_path).collect();
     let beside = |said: &Arc<Said>| Beside {
@@ -5163,7 +5163,7 @@ fn run_holding(
     // is not the daemon's.
     let library = ahead.then(|| built_library(&vfs, emits.triple()));
     match toolchain_identity(&vfs, library.as_ref().unwrap_or(&args.symbol_files)) {
-        Some(toolchain) => hir_ty_codegen::compiles_against(&toolchain),
+        Some(toolchain) => ra_jit_store::compiles_against(&toolchain),
         None => eprintln!("store: the toolchain of the library cannot be told from another"),
     }
     let built = follow_cargo(&mut db, &mut vfs, &mut checkouts, &args, &listed)?;
@@ -5263,7 +5263,7 @@ fn run_holding(
         report(&built);
         doctest::document(&mut db, krate);
         let code = doctest::run(&db, asked, krate, &args.out, emits.triple())?;
-        hir_ty_codegen::settled();
+        ra_jit_store::settled();
         std::process::exit(code);
     }
     if let Some(stale) = stale_copies(&db, &table, &args) {
@@ -5314,7 +5314,7 @@ fn run_holding(
     // build that is not a daemon's has nothing to wait for but this.
     match shared {
         Some(shared) if args.socket.is_none() && !args.watch => {
-            hir_ty_codegen::settled();
+            ra_jit_store::settled();
             shared.push()
         }
         Some(shared) => shared.keep(),
@@ -5344,7 +5344,7 @@ fn run_holding(
         },
         None if args.watch => None,
         None => {
-            hir_ty_codegen::settled();
+            ra_jit_store::settled();
             // The process is ending: what these hold is not freed one allocation at a time.
             std::mem::forget((db, table, known, cold, as_compiled));
             return Ok(());
