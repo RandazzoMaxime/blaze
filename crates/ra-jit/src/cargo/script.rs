@@ -128,6 +128,24 @@ fn become_it(script: &mut Command) -> anyhow::Result<()> {
     std::process::exit(script.status()?.code().unwrap_or(1))
 }
 
+/// The file cargo kept what the script that wrote `out_dir` printed in, beside it: `output`
+/// in cargo's first layout of its build directory, `run/stdout` in the second
+/// (`build/<package>/<hash>/out`, the default of nightly cargo since 2026).
+pub(crate) fn printed(out_dir: &Path) -> Option<PathBuf> {
+    let run_dir = out_dir.parent()?;
+    let second = run_dir.join("run").join("stdout");
+    Some(if second.exists() { second } else { run_dir.join("output") })
+}
+
+/// Whether `path` can be in a script's `OUT_DIR`: below `build/<unit>/out` in cargo's first
+/// layout or `build/<package>/<hash>/out` in its second, where the objects of a library are
+/// too.
+pub(crate) fn in_out_dir(path: &Path) -> bool {
+    let names: Vec<&str> = path.components().filter_map(|c| c.as_os_str().to_str()).collect();
+    names.windows(3).any(|it| it[0] == "build" && it[2] == "out")
+        || names.windows(4).any(|it| it[0] == "build" && it[3] == "out")
+}
+
 /// Whether a script can be run again as cargo ran it into `out_dir`.
 pub(crate) fn can_rerun(out_dir: &Path) -> bool {
     out_dir.parent().is_some_and(|it| it.join(RAN).exists())
@@ -227,7 +245,7 @@ pub(crate) fn checked_after(out_dir: &Path, newest: SystemTime) -> bool {
 /// Whether the run of a script that wrote `out_dir` printed and wrote what the run that wrote
 /// `other` did, but for the name of its directory.
 pub(crate) fn same_run(out_dir: &Path, other: &Path) -> bool {
-    let printed = |dir: &Path| std::fs::read(dir.parent()?.join("output")).ok();
+    let printed = |dir: &Path| std::fs::read(printed(dir)?).ok();
     let (Some(ours), Some(theirs)) = (printed(out_dir), printed(other)) else { return false };
     let (Some(named), Some(names)) = (other.to_str(), out_dir.to_str()) else { return false };
     String::from_utf8_lossy(&ours).replace(names, named).as_bytes() == theirs
@@ -244,7 +262,11 @@ pub(crate) fn rerun_matches(out_dir: &Path, other: &Path) -> Result<(), String> 
         std::fs::read(dir.join(name)).map_err(|it| format!("{name}: {it}"))
     };
     let ran: Ran = serde_json::from_slice(&read(run_dir, RAN)?).map_err(|it| it.to_string())?;
-    let printed = read(other_dir, "output")?;
+    let printed = printed(other).ok_or("a build script without a directory")?;
+    let printed = std::fs::read(&printed).map_err(|it| {
+        let name = printed.strip_prefix(other_dir).unwrap_or(&printed);
+        format!("{}: {it}", name.display())
+    })?;
     let again_dir = run_dir.join(format!("ra-jit-out-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&again_dir);
     std::fs::create_dir(&again_dir).map_err(|it| it.to_string())?;
@@ -416,6 +438,26 @@ mod tests {
         assert!(compiled_from_what_is_there(&out_dir, workspace));
         compiled(&out_dir, "build.rs\n\n# env-dep:CARGO_PKG_VERSION=2.0.0");
         assert!(!compiled_from_what_is_there(&out_dir, workspace));
+    }
+
+    /// cargo's second layout of its build directory keeps what a script printed in
+    /// `run/stdout`, not in `output`.
+    #[test]
+    fn a_run_in_the_second_layout_is_read_from_run_stdout() {
+        let out_dir = ran("second", "fn made() {}");
+        let run_dir = out_dir.parent().unwrap();
+        std::fs::create_dir(run_dir.join("run")).unwrap();
+        std::fs::rename(run_dir.join("output"), run_dir.join("run/stdout")).unwrap();
+        std::fs::write(out_dir.join("made.rs"), "fn made() {}").unwrap();
+        assert_eq!(printed(&out_dir), Some(run_dir.join("run/stdout")));
+        assert_eq!(rerun_is_same(&out_dir), Ok(()));
+        let other = ran("second-other", "fn made() {}");
+        std::fs::write(other.join("made.rs"), "fn made() {}").unwrap();
+        assert_eq!(rerun_matches(&out_dir, &other), Ok(()));
+        assert!(same_run(&out_dir, &other));
+        assert!(in_out_dir(Path::new("/t/debug/build/app/0123/out/made.rs")));
+        assert!(in_out_dir(Path::new("/t/debug/build/app-0123/out/made.rs")));
+        assert!(!in_out_dir(Path::new("/t/debug/deps/app-0123.d")));
     }
 
     #[test]

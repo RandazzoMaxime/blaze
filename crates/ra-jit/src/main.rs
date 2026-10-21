@@ -2199,24 +2199,72 @@ fn seed_own_target(target: &Path) {
         return;
     }
     let seeding = target.join(format!("rust-analyzer.{}", std::process::id()));
+    // cargo's first layout has `.fingerprint`, `build` and `deps` in a profile's directory;
+    // its second has every unit in `build/<package>/<hash>`, with `fingerprint`, `out` and a
+    // build script's `run` in it.
+    let second = |profile: &Path| profile.join("build").is_dir() && !profile.join("deps").exists();
     let profiles = |dir: &Path| -> Vec<PathBuf> {
         let dirs = std::fs::read_dir(dir).into_iter().flatten().flatten().map(|it| it.path());
-        dirs.filter(|it| it.join(".fingerprint").is_dir()).collect()
+        dirs.filter(|it| it.join(".fingerprint").is_dir() || second(it)).collect()
     };
     let mut found = profiles(target);
     for triple in std::fs::read_dir(target).into_iter().flatten().flatten() {
         found.extend(profiles(&triple.path()));
     }
+    let entries = |dir: &Path| -> Vec<std::fs::DirEntry> {
+        std::fs::read_dir(dir).into_iter().flatten().flatten().collect()
+    };
     for profile in found {
         let Ok(within) = profile.strip_prefix(target) else { continue };
         let to = seeding.join(within);
         // A fingerprint says its artifact is whole, so the fingerprints are read before the
         // artifacts are: cargo may be building here.
-        _ = copy_tree(&profile.join(".fingerprint"), &to.join(".fingerprint"), false);
-        // A build script writes to its directory in place; rustc and the linker replace
-        // what they write, as cargo's own links out of `deps` rely on.
-        _ = copy_tree(&profile.join("build"), &to.join("build"), false);
-        _ = copy_tree(&profile.join("deps"), &to.join("deps"), true);
+        if !second(&profile) {
+            _ = copy_tree(&profile.join(".fingerprint"), &to.join(".fingerprint"), false);
+            // A build script writes to its directory in place; rustc and the linker replace
+            // what they write, as cargo's own links out of `deps` rely on.
+            _ = copy_tree(&profile.join("build"), &to.join("build"), false);
+            _ = copy_tree(&profile.join("deps"), &to.join("deps"), true);
+            continue;
+        }
+        let units: Vec<PathBuf> = entries(&profile.join("build"))
+            .iter()
+            .flat_map(|package| entries(&package.path()))
+            .map(|unit| unit.path())
+            .collect();
+        for unit in &units {
+            let Ok(unit_within) = unit.strip_prefix(&profile) else { continue };
+            _ = copy_tree(
+                &unit.join("fingerprint"),
+                &to.join(unit_within).join("fingerprint"),
+                false,
+            );
+        }
+        for unit in &units {
+            let Ok(unit_within) = unit.strip_prefix(&profile) else { continue };
+            for entry in entries(unit) {
+                let name = entry.file_name();
+                if name == "fingerprint" {
+                    continue;
+                }
+                let to = to.join(unit_within).join(&name);
+                match entry.file_type().is_ok_and(|it| it.is_dir()) {
+                    // A script's `out` and `run` are written in place; a library's `out` is
+                    // what rustc replaces, which can be linked to.
+                    true => {
+                        _ = copy_tree(
+                            &entry.path(),
+                            &to,
+                            name == "out" && !unit.join("run").exists(),
+                        )
+                    }
+                    false => {
+                        _ = to.parent().map(std::fs::create_dir_all);
+                        _ = std::fs::copy(entry.path(), to);
+                    }
+                }
+            }
+        }
     }
     if std::fs::rename(&seeding, &own).is_err() {
         _ = std::fs::remove_dir_all(&seeding);
@@ -3586,7 +3634,7 @@ impl WatchedFile {
     /// file is looked at on every edit, so one too many is time on every keystroke.
     fn immutable(path: &Path) -> bool {
         let names: Vec<&str> = path.components().filter_map(|c| c.as_os_str().to_str()).collect();
-        let of_script = names.windows(3).any(|it| it[0] == "build" && it[2] == "out");
+        let of_script = cargo::script::in_out_dir(path);
         path.starts_with("/nix/store")
             || names.iter().any(|&it| matches!(it, "rustlib" | "registry"))
             || names.contains(&"target") && !of_script

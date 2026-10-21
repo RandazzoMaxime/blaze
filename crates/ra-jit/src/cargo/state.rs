@@ -1240,7 +1240,7 @@ fn reached_from<'a>(mut found: Vec<&'a Record>, used: &'a [Record]) -> Vec<&'a R
 fn rerun_guards(package: &Package, script: &BuildScript) -> Vec<Guard> {
     let dir = package_dir(package);
     let what = format!("the build script of `{}` reruns for", package.name);
-    let said = script.out_dir.parent().map(|it| it.join("output"));
+    let said = script::printed(script.out_dir.as_std_path());
     let said = said.and_then(|it| std::fs::read_to_string(it).ok()).unwrap_or_default();
     let directive = |line: &str, name: &str| {
         let rest = line.strip_prefix("cargo::").or_else(|| line.strip_prefix("cargo:"))?;

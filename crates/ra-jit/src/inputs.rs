@@ -111,16 +111,23 @@ impl Script {
         if crate::cargo::script::can_rerun(&self.out_dir) {
             return Some(self.out_dir.clone());
         }
+        // `build/<package>-<hash>/out` in cargo's first layout, `build/<package>/<hash>/out`
+        // in its second.
         let prefix = format!("{}-", self.package);
-        let runs = self.builds.iter().filter_map(|it| std::fs::read_dir(it).ok()).flatten();
-        let runs = runs
+        let first = self.builds.iter().filter_map(|it| std::fs::read_dir(it).ok()).flatten();
+        let first = first
             .flatten()
-            .filter(|it| it.file_name().to_str().is_some_and(|it| it.starts_with(&prefix)));
-        let runs = runs.map(|it| it.path().join("out"));
+            .filter(|it| it.file_name().to_str().is_some_and(|it| it.starts_with(&prefix)))
+            .map(|it| it.path());
+        let second =
+            self.builds.iter().filter_map(|it| std::fs::read_dir(it.join(&self.package)).ok());
+        let second = second.flatten().flatten().map(|it| it.path());
+        let runs = first.chain(second).map(|it| it.join("out"));
         let runs =
             runs.filter(|it| crate::cargo::script::ran_in(it).is_some_and(|it| it == self.root));
         runs.max_by_key(|it| {
-            std::fs::metadata(it.with_file_name("output")).and_then(|it| it.modified()).ok()
+            let printed = crate::cargo::script::printed(it);
+            printed.and_then(|it| std::fs::metadata(it).and_then(|it| it.modified()).ok())
         })
     }
 
@@ -320,7 +327,7 @@ impl Said {
     /// Reads what the script that wrote to `out_dir` printed: cargo keeps it next to it.
     fn read(out_dir: &Path) -> Said {
         let mut said = Said::default();
-        let output = out_dir.parent().map(|it| it.join("output"));
+        let output = crate::cargo::script::printed(out_dir);
         let Some(Ok(output)) = output.map(std::fs::read_to_string) else { return said };
         for line in output.lines() {
             let Some(line) = line.strip_prefix("cargo:") else { continue };
