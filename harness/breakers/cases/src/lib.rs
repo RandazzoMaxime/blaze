@@ -29,6 +29,7 @@ cases![
     prefetch,
     simd_reduce,
     simd_reduce_max,
+    promoted_index_of_casts,
     simd_lanes,
     simd_packs,
     sha_ni,

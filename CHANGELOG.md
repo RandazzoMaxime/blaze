@@ -226,6 +226,10 @@ All notable changes to ra-jit are written here. The format follows
 
 ### Fixed
 
+- A borrowed constant with a cast in it, `&[b"node" as &[u8]][..]` returned for `'static`, is
+  promoted as rustc promotes it, where it was built on the stack and the reference outlived
+  it: every cast is promotable but of a pointer to an integer. bun's `new Bun.Transpiler()`
+  crashed on it (breakers, `promoted_index_of_casts`).
 - Large workspaces are ready in a fraction of the time and memory
   ([#29](https://github.com/indexable-inc/ra-jit/issues/29)): a closure's type holds its inner
   closure twice, so the store's name for a type of nested closures doubled with each level
