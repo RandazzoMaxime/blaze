@@ -20,7 +20,7 @@ CRATES = ["devdep", "blanket", "edition2015", "fragment", "procmacro"]
 NIGHTLY_CRATES = ["allocated"]
 NIGHTLY_ENV = {"RUSTC_BOOTSTRAP": "1", "CARGO_UNSTABLE_CHECKSUM_FRESHNESS": "false"}
 # What is reduced and not fixed: these are expected to differ, and are told apart when they do.
-OPEN = {"assert_message", "raw_write_then_match", "future_unwind_flags", "fragment_edition_through_macro", "assert_long_expression"}
+OPEN = {"assert_message", "future_unwind_flags", "fragment_edition_through_macro", "assert_long_expression"}
 # Frames that are larger than rustc's, where a program counts on rustc's: the answer is right and the room is not.
 # Cranelift's keep three arrays where rustc's keep two; LLVM's keep one.
 if os.environ.get("RA_JIT_BACKEND", "cranelift") == "cranelift":

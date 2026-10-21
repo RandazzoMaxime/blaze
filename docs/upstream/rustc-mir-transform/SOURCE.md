@@ -7,6 +7,14 @@ Fetched 2026-10-20 from `https://raw.githubusercontent.com/rust-lang/rust/<rev>/
   `session-excerpt.rs`: three functions cut from `compiler/rustc_session/src/session.rs`
   (`emit_lifetime_markers`, `mir_opt_level`, `ub_checks`).
 - `master/`: `main` on the same day (19833af722), `lib.rs` and `tail_copy_to_move.rs` only.
+- Added 2026-10-21 at the same 1.99.0 rev, for drop elaboration
+  (`vendor/rust-analyzer/crates/hir-ty/src/mir/transform/{elaborate_drops,move_paths}.rs`):
+  `1.99.0/elaborate_drops.rs` and `1.99.0/elaborate_drop.rs` (the pass and the drop ladders it
+  builds, `compiler/rustc_mir_transform/src/`), and under `1.99.0/dataflow/`, from
+  `compiler/rustc_mir_dataflow/src/`: `initialized.rs` (`impls/initialized.rs`, the maybe-init
+  and maybe-uninit analyses with their switch-edge and dead-unwind rules),
+  `drop_flag_effects.rs`, `move_paths_builder.rs` (`move_paths/builder.rs`) and
+  `move_paths_mod.rs` (`move_paths/mod.rs`).
 
 What `1.99.0/` holds: `lib.rs` (the pipeline, `run_optimization_passes`), `pass_manager.rs`
 (how a pass is turned on, validated and dumped) and the source of every pass ra-jit ports
