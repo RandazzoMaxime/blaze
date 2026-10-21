@@ -148,6 +148,7 @@ async def main() -> None:
             if probe.returncode == 0:
                 raise StepError("patched panic: the process exited successfully")
             print("live unwind: panic crossed patched answer frame")
+
         pumper.cancel()
     finally:
         if probe is not None and probe.returncode is None:

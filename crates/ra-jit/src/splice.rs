@@ -1555,6 +1555,23 @@ impl<'a> Patch<'a> {
             });
         }
         let redirected = writes.len() as u64;
+        for old in self.in_place.values().flatten() {
+            let offset = image.offset_of(old.old.address)?;
+            let bytes = addition
+                .overwritten
+                .iter()
+                .find(|(at, _)| *at == offset)
+                .map(|(_, bytes)| bytes.clone())
+                .context("the static write is missing")?;
+            let after = image.rebases.partition_point(|it| *it < old.old.address);
+            let pointers = image.rebases[after..]
+                .iter()
+                .take_while(|it| **it < old.old.address + bytes.len() as u64)
+                .map(|it| it - old.old.address)
+                .collect();
+            writes.push(ra_jit_live::format::Write { address: old.old.address, bytes, pointers });
+        }
+        let statics = writes.len() as u64 - redirected;
         let written: FxHashSet<u64> = writes.iter().map(|it| it.address).collect();
         for (&address, bytes) in originals {
             if !written.contains(&address) {
@@ -1573,7 +1590,7 @@ impl<'a> Patch<'a> {
             pointers: addition.live_pointers,
             writes,
             redirected,
-            statics: 0,
+            statics,
         };
         Ok((code, moved))
     }
