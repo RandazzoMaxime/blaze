@@ -137,6 +137,15 @@ jobs:
           git fetch -q --depth 1 --filter=blob:none origin a30aa9064df6a504b6a323c6884a2f4cfbfff666
           git checkout -q FETCH_HEAD
       - run: python3 harness/borrowck_ui.py "$RUNNER_TEMP/rust" --bin target/release/ra-jit --jobs 4 --mode both --min-pass 1154
+      # The few run-pass tests of rustc's that the nightly claims run once caught ra-jit failing,
+      # on every pull request (harness/ui-pinned.txt), from the tests of the pinned toolchain.
+      - name: pinned run-pass tests
+        run: |
+          dirs=$(sed 's/#.*//' harness/ui-pinned.txt | xargs -n1 dirname | sed 's|^|tests/ui/|' | sort -u)
+          git clone -q --depth 1 --branch 1.99.0 --filter=blob:none --sparse https://github.com/rust-lang/rust "$RUNNER_TEMP/rust-1.99"
+          git -C "$RUNNER_TEMP/rust-1.99" sparse-checkout set tests/auxiliary $dirs
+          cd harness
+          RA_JIT_BIN="$GITHUB_WORKSPACE/target/release/ra-jit" python3 uitest.py "$RUNNER_TEMP/rust-1.99" --tests ui-pinned.txt --jobs 4 --work "$RUNNER_TEMP/ui"
 
   # vendor/rust-analyzer as the fork has it, built and tested outside this repository, so that
   # the subtree cannot come to depend on crates/ (docs/architecture-split.md, step 5).

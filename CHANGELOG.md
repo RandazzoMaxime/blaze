@@ -205,6 +205,14 @@ All notable changes to ra-jit are written here. The format follows
 
 ### Fixed
 
+- A `match` arm's guard with `let` (`if let` guards and their chains) dropped what it bound
+  and its temporaries at the end of the guard, before the arm ran, in editions before 2024;
+  rustc keeps them until the arm ends or the next arm is tried
+  ([#46](https://github.com/indexable-inc/ra-jit/issues/46)). The four rustc tests that
+  caught it run on every pull request now (`harness/ui-pinned.txt`).
+- The harnesses set `RUST_BACKTRACE=0` for what they run rather than unsetting it: cargo's
+  `[env]` (as in `~/.cargo/config.toml`) fills in only what is unset, and a backtrace changed
+  what a panicking program printed.
 - Large workspaces are ready in a fraction of the time and memory
   ([#29](https://github.com/indexable-inc/ra-jit/issues/29)): a closure's type holds its inner
   closure twice, so the store's name for a type of nested closures doubled with each level
