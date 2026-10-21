@@ -32,7 +32,7 @@ use syntax::ast::HasVisibility;
 use rustc_hash::FxHashSet;
 
 use super::SymbolResolver;
-use crate::{
+use hir_ty::{
     InferBodyId,
     consteval::try_const_usize,
     db::{HirDatabase, InternedClosure},
@@ -174,7 +174,7 @@ impl<'a, 'db> TypeIdHasher<'a, 'db> {
     /// What a block is written in, told apart from the other blocks of it by where it is.
     fn block(&mut self, block: hir_def::BlockIdLt<'db>) -> Option<Fingerprint> {
         let db = self.db;
-        let (owner, _) = crate::mir::type_name::block_owner(db, block)?;
+        let (owner, _) = hir_ty::mir::type_name::block_owner(db, block)?;
         let (container, name, place) = match owner {
             DefWithBodyId::FunctionId(it) => {
                 (it.lookup(db).container, FunctionSignature::of(db, it).name.clone(), 0)
@@ -316,10 +316,10 @@ impl<'a, 'db> TypeIdHasher<'a, 'db> {
         name: &hir_expand::name::Name,
     ) -> Option<Fingerprint> {
         let db = self.db;
-        let (owner, _) = crate::mir::type_name::block_owner(db, block)?;
+        let (owner, _) = hir_ty::mir::type_name::block_owner(db, block)?;
         let DefWithBodyId::FunctionId(around) = owner else { return None };
         // One written in a closure is a child of the closure.
-        if !crate::mir::type_name::is_outside_closures(db, owner, block) {
+        if !hir_ty::mir::type_name::is_outside_closures(db, owner, block) {
             return None;
         }
         let named_so = hir_def::expr_store::Body::of(db, owner)
@@ -501,7 +501,7 @@ impl<'a, 'db> TypeIdHasher<'a, 'db> {
                 self.closure(hasher, id.0.loc(self.db))?;
                 // The future of an `async` closure is another type when it owns what the
                 // closure captured.
-                let by_move = crate::mir::is_by_move_coroutine(self.db, id.0, args.as_coroutine());
+                let by_move = hir_ty::mir::is_by_move_coroutine(self.db, id.0, args.as_coroutine());
                 hasher.write_u8(by_move.into());
                 let parent = GenericArgs::new_from_slice(args.as_coroutine().parent_args());
                 self.args(parent)?.hash(hasher);

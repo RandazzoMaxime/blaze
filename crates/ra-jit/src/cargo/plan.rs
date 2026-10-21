@@ -13,6 +13,11 @@ use crate::weaken;
 /// What an ELF linker is told so that the first definition of a name is the one that stays.
 const FIRST_DEFINITION_STAYS: &str = "-Wl,--allow-multiple-definition";
 
+/// What Apple's linker is told so that the loader finds what it fixes up in tables, as the
+/// splice reads and writes them, and not in chains through the pointers themselves. The
+/// linker makes chains for a deployment target of macOS 12 or later, as nix's shell sets.
+const NO_FIXUP_CHAINS: &str = "-Wl,-no_fixup_chains";
+
 /// The room Apple's linker is told to leave after the load commands when nothing says more,
 /// so that a splice has room there for its two segments and for the unwind table, which
 /// makes way for the patch's frames in `__TEXT`: that of a program of some hundred thousand
@@ -365,8 +370,16 @@ impl LinkLine {
         binary: &Path,
         response: &Path,
     ) -> anyhow::Result<String> {
-        let flag = (self.flavor != Flavor::Apple).then(|| FIRST_DEFINITION_STAYS.to_owned());
-        self.args.splice(first..first, ours.into_iter().chain(flag));
+        let flag = match self.flavor {
+            Flavor::Apple => NO_FIXUP_CHAINS,
+            _ => FIRST_DEFINITION_STAYS,
+        };
+        // A patch calls the instances of the base object by name, also one the base's own code
+        // no longer reaches, which `-dead_strip` would have taken out of the executable.
+        if self.flavor == Flavor::Apple {
+            self.args.retain(|it| it != "-Wl,-dead_strip" && it != "-dead_strip");
+        }
+        self.args.splice(first..first, ours.into_iter().chain([flag.to_owned()]));
         let output =
             self.args.iter().position(|it| it == "-o").context("the link names no output")?;
         *self.args.get_mut(output + 1).context("the link names no output")? =
@@ -605,6 +618,7 @@ mod tests {
             args,
             [
                 "/p/ra-jit.o",
+                NO_FIXUP_CHAINS,
                 &weak.display().to_string(),
                 "/t/libstd-3.rlib",
                 "-arch",
@@ -639,6 +653,21 @@ mod tests {
         write_headerpad(&binary, 0x8000).unwrap();
         assert_eq!(pad(&line(r#""-Wl,-headerpad,0x0""#)), Some(0x8000));
         assert_eq!(pad(&line("")), Some(HEADERPAD));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// A patch calls the base object's instances by name, also one the base's own code no
+    /// longer reaches, so an Apple link strips nothing.
+    #[test]
+    fn apple_links_keep_what_a_patch_may_call() {
+        let dir = std::env::temp_dir().join(format!("ra-jit-plan-strip-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let (response, binary) = (dir.join("link.args"), dir.join("bin"));
+        let line =
+            r#""cc" "/t/a.1.rcgu.o" "-arch" "arm64" "-Wl,-dead_strip" "-dead_strip" "-o" "/t/a-1""#;
+        LinkLine::parse(line).unwrap().command(&[], &binary, &response).unwrap();
+        let args = std::fs::read_to_string(&response).unwrap();
+        assert!(!args.contains("dead_strip"), "{args}");
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

@@ -1311,25 +1311,40 @@ impl<'a, 'db> DiagnosticsCollector<'a, 'db> {
         body: &Body,
         source_map: &hir_def::expr_store::BodySourceMap,
     ) {
-        use hir_ide::mir::{MirSpan, borrowck};
-        let result = borrowck::borrowck(self.db, def);
+        use hir_ide::mir::MirSpan;
+        let result = hir_ty_borrowck::borrowck(self.db, def);
         let node_of = |span: MirSpan| -> Option<InFile<SyntaxNodePtr>> {
             let source = match span {
-                MirSpan::ExprId(expr) | MirSpan::ExprEnd(expr) => source_map.expr_syntax(expr).ok()?,
+                MirSpan::ExprId(expr) | MirSpan::ExprEnd(expr) => {
+                    source_map.expr_syntax(expr).ok()?
+                }
                 MirSpan::PatId(pat) => source_map.pat_syntax(pat).ok()?,
                 MirSpan::BindingId(binding) => {
                     let pat = *source_map.patterns_for_binding(binding).first()?;
                     source_map.pat_syntax(pat).ok()?
                 }
                 MirSpan::SelfParam => {
-                    return source_map.self_param_syntax().map(|it| it.map(|it| it.syntax_node_ptr()));
+                    return source_map
+                        .self_param_syntax()
+                        .map(|it| it.map(|it| it.syntax_node_ptr()));
                 }
                 MirSpan::Unknown => source_map.expr_syntax(body.root_expr()).ok()?,
             };
             Some(source.map(|it| it.syntax_node_ptr()))
         };
+        // rustc's span of a function's signature starts at `fn`, the line of its name.
+        let signature = || -> Option<InFile<SyntaxNodePtr>> {
+            let DefWithBodyId::FunctionId(function) = def else { return None };
+            let source = hir_def::src::HasSource::source(function.lookup(self.db), self.db);
+            let name = source.value.name()?;
+            Some(InFile::new(source.file_id, SyntaxNodePtr::new(syntax::AstNode::syntax(&name))))
+        };
         for diagnostic in &result.diagnostics {
-            let Some(node) = node_of(diagnostic.span) else { continue };
+            let node = match diagnostic.at_signature {
+                true => signature().or_else(|| node_of(diagnostic.span)),
+                false => node_of(diagnostic.span),
+            };
+            let Some(node) = node else { continue };
             self.acc.push(
                 BorrowckError {
                     node,

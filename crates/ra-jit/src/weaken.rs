@@ -79,20 +79,60 @@ fn weaken(data: &mut [u8]) {
 
 /// Makes the definitions of a Mach-O object weak; an object of another format stays as it is.
 pub(crate) fn definitions(data: &mut [u8]) {
-    let Some(symbols) = symbol_table(data) else { return };
-    let Some(data) = data.get_mut(symbols) else { return };
-    let Ok(symbols) = pod::slice_from_all_bytes_mut::<Nlist64<LE>>(data) else { return };
+    weaken_but(data, |_| false);
+}
+
+/// As [`definitions`], for an object of ra-jit's. Of a program's whole, with a C `main` of
+/// ra-jit's, that `main` and the functions a stand-in's allocator calls stay as they are: the
+/// stand-ins rustc built have weak ones for cargo's link of them, and of two weak ones Apple's
+/// linker may keep the stand-in's, which would start the program at whatever is laid out
+/// after its `main`. A patch has no `main`, and gives way to the object it patches.
+pub(crate) fn ours(data: &mut [u8]) {
+    let has_main = defined(data).iter().any(|it| it == b"_main");
+    weaken_but(data, |name| {
+        let name = name.strip_prefix(b"_").unwrap_or(name);
+        has_main
+            && (name == b"main"
+                || crate::stub::ALLOCATOR_FUNCTIONS.iter().any(|it| it.as_bytes() == name))
+    });
+}
+
+/// The names an object defines and other objects can see.
+fn defined(data: &[u8]) -> Vec<Vec<u8>> {
+    let mut data = data.to_vec();
+    let mut names = Vec::new();
+    weaken_but(&mut data, |name| {
+        names.push(name.to_vec());
+        true
+    });
+    names
+}
+
+fn weaken_but(data: &mut [u8], mut keep: impl FnMut(&[u8]) -> bool) {
+    let Some((symbols, strings)) = symbol_table(data) else { return };
+    let (Some(names), Some(_)) = (data.get(strings.clone()), data.get(symbols.clone())) else {
+        return;
+    };
+    let names = names.to_vec();
+    let Ok(symbols) = pod::slice_from_all_bytes_mut::<Nlist64<LE>>(&mut data[symbols]) else {
+        return;
+    };
     for symbol in symbols {
         let defined = symbol.n_type & (N_STAB | N_TYPE) == N_SECT;
-        if defined && symbol.n_type & N_EXT != 0 {
+        if !defined || symbol.n_type & N_EXT == 0 {
+            continue;
+        }
+        let name = names.get(symbol.n_strx.get(LE) as usize..).unwrap_or_default();
+        let name = name.split(|&it| it == 0).next().unwrap_or_default();
+        if !keep(name) {
             symbol.n_type |= N_PEXT;
             symbol.n_desc.set(LE, symbol.n_desc(LE) | N_WEAK_DEF);
         }
     }
 }
 
-/// Where in a 64-bit Mach-O object its symbols are.
-fn symbol_table(data: &[u8]) -> Option<Range<usize>> {
+/// Where in a 64-bit Mach-O object its symbols are, and their names.
+fn symbol_table(data: &[u8]) -> Option<(Range<usize>, Range<usize>)> {
     let header = MachHeader64::<LE>::parse(data, 0).ok()?;
     let mut commands = header.load_commands(LE, data, 0).ok()?;
     while let Ok(Some(command)) = commands.next() {
@@ -102,7 +142,9 @@ fn symbol_table(data: &[u8]) -> Option<Range<usize>> {
         let symtab = command.symtab().ok()??;
         let start = symtab.symoff.get(LE) as usize;
         let len = symtab.nsyms.get(LE) as usize * size_of::<Nlist64<LE>>();
-        return Some(start..start + len);
+        let strings = symtab.stroff.get(LE) as usize;
+        let strings = strings..strings + symtab.strsize.get(LE) as usize;
+        return Some((start..start + len, strings));
     }
     None
 }

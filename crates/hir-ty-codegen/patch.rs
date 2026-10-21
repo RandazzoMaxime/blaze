@@ -18,7 +18,7 @@ use rustc_hash::{FxBuildHasher, FxHashMap, FxHashSet};
 
 type FxIndexMap<K, V> = indexmap::IndexMap<K, V, FxBuildHasher>;
 
-use crate::{db::HirDatabase, traits::StoredParamEnvAndCrate};
+use hir_ty::{db::HirDatabase, traits::StoredParamEnvAndCrate};
 
 use super::{
     CodegenError, Instance, InstanceDef, ObjectCodegen, OwnStatics, Phases, Rejections, Result,
@@ -235,7 +235,7 @@ impl Left {
 /// The functions left to rustc as rustc compiled them: its copies are not built again while
 /// the daemon runs, so one is only good for as long as its function is what it was then.
 #[derive(Clone, Default)]
-pub(in crate::mir) struct Frozen {
+pub(crate) struct Frozen {
     left: Option<FxHashMap<FunctionId, Left>>,
     /// The crates that have seen an edit since.
     edited: FxHashSet<Crate>,
@@ -248,20 +248,20 @@ pub(in crate::mir) struct Frozen {
 }
 
 impl Frozen {
-    pub(in crate::mir) fn distrust(&mut self, crates: impl IntoIterator<Item = Crate>) {
+    pub(crate) fn distrust(&mut self, crates: impl IntoIterator<Item = Crate>) {
         self.distrusted.extend(crates);
     }
 
-    pub(in crate::mir) fn edit_bodies(&mut self, file: FileId) {
+    pub(crate) fn edit_bodies(&mut self, file: FileId) {
         self.edited_bodies.insert(file);
     }
 
-    pub(in crate::mir) fn edit(&mut self, crates: impl IntoIterator<Item = Crate>) {
+    pub(crate) fn edit(&mut self, crates: impl IntoIterator<Item = Crate>) {
         self.edited.extend(crates);
     }
 
     /// A function of `base` that rustc's copy is no longer right for, and why.
-    pub(in crate::mir) fn out_of_date(
+    pub(crate) fn out_of_date(
         &mut self,
         db: &dyn HirDatabase,
         base: &Base,

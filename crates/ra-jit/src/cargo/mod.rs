@@ -23,7 +23,7 @@ use anyhow::Context as _;
 use cli::{Asked, Invocation, Subcommand};
 use client::Start;
 use daemon::{Checkout, Reply, Request};
-use state::{Built, Counts, Staged, State};
+use state::{Built, Counts, Held, Staged, State};
 
 /// `ra-jit cargo ...`: runs the command and ends with the status cargo would end with.
 pub(crate) fn command(args: impl Iterator<Item = String>) -> anyhow::Result<()> {
@@ -152,10 +152,12 @@ fn build(asked: &Invocation) -> anyhow::Result<i32> {
     let read = State::read(&key);
     note("client read state", CLIENT, started);
     let mut served = false;
+    let mut held = None;
     let state = match read.map(|state| by_daemon(state)) {
-        Ok(Ok(state)) => {
+        Ok(Ok((state, settled))) => {
             finished(&state);
             served = true;
+            held = Some(settled);
             state
         }
         Ok(Err(Left::Failed(why))) => {
@@ -176,8 +178,9 @@ fn build(asked: &Invocation) -> anyhow::Result<i32> {
                 say::fallback(why, "building with cargo");
             }
             match staged(asked, &cwd, &key)? {
-                Ok(state) => {
+                Ok((state, settled)) => {
                     finished(&state);
+                    held = Some(settled);
                     state
                 }
                 Err(NotStaged::Failed(code)) => return Ok(code),
@@ -203,7 +206,7 @@ fn build(asked: &Invocation) -> anyhow::Result<i32> {
         note("client write state", CLIENT, writing);
         crate::trace::finish();
     }
-    after_build(asked, &state, &cwd)
+    after_build(asked, &state, &cwd, held)
 }
 
 /// The status of a build that failed, as cargo's of one rustc turned down.
@@ -224,7 +227,11 @@ enum NotStaged {
 /// The first build of a workspace: cargo has rustc build what the workspace depends on
 /// and check the crates of the workspace, and the daemon compiles those. Every program is
 /// the daemon's: cargo linked only what stands in for it.
-fn staged(asked: &Invocation, cwd: &Path, key: &str) -> anyhow::Result<Result<State, NotStaged>> {
+fn staged(
+    asked: &Invocation,
+    cwd: &Path,
+    key: &str,
+) -> anyhow::Result<Result<(State, Held), NotStaged>> {
     let on = std::env::var_os(STAGED).is_some_and(|it| it != "0");
     let crates = match Staged::of(asked) {
         Ok(Ok(crates)) => crates,
@@ -261,12 +268,12 @@ fn daemons(
     cwd: &Path,
     key: &str,
     built: Built,
-) -> anyhow::Result<Result<State, String>> {
+) -> anyhow::Result<Result<(State, Held), String>> {
     let state = State::after(asked, cwd, key, built, Counts::default())?;
     Ok(first_by_daemon(state))
 }
 
-fn first_by_daemon(mut state: State) -> Result<State, String> {
+fn first_by_daemon(mut state: State) -> Result<(State, Held), String> {
     if let Some(why) = &state.refusal {
         return Err(why.clone());
     }
@@ -274,7 +281,8 @@ fn first_by_daemon(mut state: State) -> Result<State, String> {
         return Err(format!("`{}`: {why}", program.name));
     }
     let answers = state.checkouts.iter().map(built).collect::<Result<Vec<_>, _>>()?;
-    let cargos = state.settle(&answers)?;
+    let held = state.hold();
+    let cargos = state.settle(&answers, &held)?;
     if let Some((_, why)) = cargos.first() {
         return Err(why.clone());
     }
@@ -282,7 +290,7 @@ fn first_by_daemon(mut state: State) -> Result<State, String> {
     // is unchanged: the daemon's is.
     state.keep_daemons().map_err(|why| format!("{why:#}"))?;
     state.counts.served += 1;
-    Ok(state)
+    Ok((state, held))
 }
 
 /// The variable that has the first build of a workspace be the daemon's too.
@@ -300,7 +308,7 @@ enum Left {
 /// Has the daemon bring the programs of `state` up to date and puts them where cargo has
 /// them. Rustc sees none of it: the daemon builds what rust-analyzer passes, which has no
 /// borrow checker and few of rustc's lints.
-fn by_daemon(mut state: State) -> Result<State, Left> {
+fn by_daemon(mut state: State) -> Result<(State, Held), Left> {
     use crate::trace::{CLIENT, note};
     let checking = Instant::now();
     let cargos = state.refusal.clone().or_else(|| state.broken_guard());
@@ -311,11 +319,12 @@ fn by_daemon(mut state: State) -> Result<State, Left> {
     let answers =
         state.checkouts.iter().map(built).collect::<Result<Vec<_>, _>>().map_err(Left::Failed)?;
     let settling = Instant::now();
-    let cargos = state.settle(&answers).map_err(Left::Failed)?;
+    let held = state.hold();
+    let cargos = state.settle(&answers, &held).map_err(Left::Failed)?;
     note("client settle", CLIENT, settling);
     let served = cargos.len() < state.programs.len() || state.programs.is_empty();
     state.counts.served += u64::from(served);
-    Ok(state)
+    Ok((state, held))
 }
 
 /// Has the daemon build the programs of `checkout`, loading it first when it has not.
@@ -424,11 +433,17 @@ fn loaded_by_cargo(
     Ok(Ok(state))
 }
 
-/// What the subcommand does once the programs are built.
-fn after_build(asked: &Invocation, state: &State, cwd: &Path) -> anyhow::Result<i32> {
+/// What the subcommand does once the programs are built. `held` are the locks the build
+/// put its programs in place under, when it did.
+fn after_build(
+    asked: &Invocation,
+    state: &State,
+    cwd: &Path,
+    held: Option<Held>,
+) -> anyhow::Result<i32> {
     match asked.subcommand {
         Subcommand::Build => Ok(0),
-        Subcommand::Run => match run::program(asked, state, cwd)? {
+        Subcommand::Run => match run::program(asked, state, cwd, held)? {
             Some(code) => Ok(code),
             // Cargo says which programs there are to pick from.
             None => {
@@ -437,7 +452,7 @@ fn after_build(asked: &Invocation, state: &State, cwd: &Path) -> anyhow::Result<
         },
         Subcommand::Test if asked.flags.no_run => Ok(0),
         Subcommand::Test => {
-            let code = run::tests(asked, state, cwd)?;
+            let code = run::tests(asked, state, cwd, held)?;
             let stopped = code != 0 && !asked.flags.no_fail_fast;
             // Cargo 1.99 runs no doc tests when tests are picked by target or by name.
             let picked = asked.flags.selects_targets || !asked.positional.is_empty();

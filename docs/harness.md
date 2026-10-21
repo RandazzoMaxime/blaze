@@ -82,6 +82,7 @@ with reasons. The daemon's log says `backend: llvm -O2 fast emit` when LLVM is i
 | `cratesweep.sh`, `vendor.sh`, `sweepreport.py` | `cratetest.py` over a list of crates.io releases, and a summary |
 | `bintest.py <name>` | A real program from `breakers/bins.json`: the same command lines given to cargo's binary and ra-jit's |
 | `alone.py` | A program whose workspace crates rustc compiles nothing of, so no refused function can hide behind rustc's copy |
+| `wholeprogram.py` | Programs ra-jit builds whole, with its own `main` (as `runbench.py` builds them): one on the default allocator, one with a `#[global_allocator]` of its own, one with a library's, one whose allocator is under a `#[cfg]` that is false. Each has to print and exit as cargo's build does; `--release` builds both in the release profile |
 | `backends.py` | One program compiled by each code producer: counts, time per function, and what LLVM left to Cranelift |
 | `borrowck_ui.py <rust checkout>` | The borrow checker ([borrowck.md](borrowck.md)) against rustc's borrow-check UI tests: each unit passes when ra-jit reports the errors (code and line) the pinned nightly rustc reports, under Polonius and NLL. `--min-pass N` fails below N Polonius passes |
 | `scoreboard.py` | Runs the targets in `targets.json` and fails when behaviour differs or coverage drops below the committed `scoreboard.json` |
@@ -91,7 +92,7 @@ with reasons. The daemon's log says `backend: llvm -O2 fast emit` when LLVM is i
 
 | Script | What it checks |
 |---|---|
-| `stress.py` | 99 edits of the kinds people make (bodies, signatures, new items, moved lines, broken code, reverts) applied in order to a three-crate workspace under one warm daemon, each compared with `cargo build` of the same source |
+| `stress.py` | 100 edits of the kinds people make (bodies, signatures, new items, moved lines, broken code, reverts, an editor's edit while another client's build runs) applied in order to a three-crate workspace under one warm daemon, each compared with `cargo build` of the same source. The first edit cargo builds after broken code has to be a patch of the build before it ([#31](https://github.com/indexable-inc/ra-jit/issues/31)), and the edit sent during a build has to be taken ([#32](https://github.com/indexable-inc/ra-jit/issues/32)); it exits 1 when a step is wrong |
 | `programs.py` | Two programs of one workspace built by one daemon |
 | `worktrees.py` | Several checkouts of one workspace built by one daemon, edited independently |
 | `includes.py` | Edits to a file only `include!` names |
@@ -104,9 +105,10 @@ with reasons. The daemon's log says `backend: llvm -O2 fast emit` when LLVM is i
 | `cargo_ra_jit.py` | `cargo ra-jit` against plain cargo on seven real projects, 22 flag combinations, and 11 daemon lifecycle checks. Needs the network and about 20 minutes; not in CI |
 | `debuginfo.py` | Backtraces, `llvm-dwarfdump --verify`, gdb stopping and stepping, locals |
 | `live_e2e.py` | Edits of a running program that links `ra-jit-live`, each applied as a patch. Linux x86-64 and macOS AArch64 |
+| `live_latency.py` | Edit-to-running time of live edits on `harness/live`, `demo/life`, `harness/live-bevy` and `harness/live-egui`: isolated edits, bursts of valid keystrokes, real typing replayed key by key (most texts in between do not compile; a program told to restart is started again), and a session's restarts against `cargo run`. Writes p50 to p99 and every sample, with the machine and its battery, to `LATENCY_JSON`. Measures; checks nothing; macOS on AArch64 ([live.md](live.md#latency-under-typing)) |
 | `fncache.py` | `#[ra_jit::cache]` ([fn-cache.md](fn-cache.md)): a cold run computes and a warm one finds the result on disk; comment, format, moved-line and unrelated edits keep it, an edit of a function it reaches through another drops it; generic instances are kept apart; impure functions are refused saying where; a restarted daemon finds the same results; cargo's build caches nothing. `--live`: a live edit computes again and drops the old results, macOS on AArch64 |
 | `spaces.py` | A two-crate workspace under a directory whose name has spaces, `$$`, `#` and quotes, built and edited with `cargo ra-jit build`; every edit has to be applied by the daemon against rustc's symbols ([#14](https://github.com/indexable-inc/ra-jit/issues/14)) |
-| `headerpad.py` | A program whose unwind table does not fit the room its link leaves after the load commands: the first link is done again with room, the edits after it are spliced, and a restarted daemon starts from the room kept beside the executable ([#13](https://github.com/indexable-inc/ra-jit/issues/13)). macOS on AArch64 |
+| `headerpad.py` | A program whose unwind table does not fit the room its link leaves after the load commands: the first link is done again with room, the edits after it are spliced, and a restarted daemon starts from the room kept beside the executable ([#13](https://github.com/indexable-inc/ra-jit/issues/13)). It is built for macOS 14, as nix's shell builds, which Apple's linker gives chained fixups unless told not to ([#30](https://github.com/indexable-inc/ra-jit/issues/30)). macOS on AArch64 |
 | `tiers.py` | Tiers ([tiers.md](tiers.md)): `demo/lifebench` running under the daemon reaches levels 2 and 3 with output identical to cargo's, an edit of a tiered function demotes it and is applied at once, and `RA_JIT_TIER=off` changes nothing. macOS on AArch64 with `--features llvm`; it exits 0 elsewhere |
 | `tierbench.py` | The benchmark table of [tiers.md](tiers.md): `demo/lifebench` at level 1, 2 and 3 under a daemon and as cargo builds it (release, and `-O3` with the dev profile's checks), in interleaved rounds, the steady rate of each; `--together` runs a round's builds at once, for a loaded machine. Measures; checks nothing; not in CI |
 
@@ -119,21 +121,42 @@ with reasons. The daemon's log says `backend: llvm -O2 fast emit` when LLVM is i
 | `storecorrupts.py` | Packs damaged on disk, and stores of other formats |
 | `storefull.py` | A store on a disk with no room |
 | `storeshared.py` | Several daemons and `ra-jit cache` commands on one store at once |
+| `deepnames.py` | Closures nested 20 deep keep the store under 64 MB, and a second daemon finds their entries again: a type spelled out longer than 1 KB is named by its hash (issue #29) |
 | `remote.py`, `s3fake.py` | A store shared by two machines through an S3 service, with the transfer broken, objects spoiled and manifests forged |
 | `deps.py` | cargo's builds of registry crates pushed and pulled. Builds offline from cargo's registry cache, so it does not run on a clean CI machine |
 
 ### Timing
 
 `bench.py`, `editloop.py`, `edittimes.py`, `scaling.py`, `dxedits.py`, `linkbench.py`,
-`shapes.py`, `heap.py`, `fnincr.py` and `realbench.py` measure and do not gate. `fnincr.py` counts
+`shapes.py`, `heap.py`, `fnincr.py`, `realbench.py` and `live_latency.py` measure and do not gate. `fnincr.py` counts
 the queries an edit inside one function of a big file runs (the file comes from `genbig.py`),
 against the same functions in many small files ([reports/INCREMENTAL.md](reports/INCREMENTAL.md)). `realbench.py` times
 `cargo ra-jit build` against `cargo build` on ripgrep, just and nushell (cold, no-op and
 three kinds of edit); the numbers are in [results.md](results.md#11-real-projects). Their docstrings say how to run them.
-`bench.py` on real projects, with `benchreport.py`, is also what writes the README's build table:
-[benchmarks.md](benchmarks.md). `bench.py --runtime` runs `runbench.py`, which times programs
-ra-jit builds whole with LLVM against `cargo build --release`, and `benchreport.py` writes that
-result to the README's runtime table, refusing it when any program's output differs from cargo's.
+`bench.py` on real projects, with `benchreport.py`, is also what writes the README's build
+table: [benchmarks.md](benchmarks.md). Besides the edits `bench.py` times repeated cold builds
+against fresh cargo with an empty and with a warm store (`--cold-runs`), the same steps under
+the fastest cargo setups (`--setups`: mold, wild, `-Zthreads=8`, cg_clif and `cargo check`) and
+the test suites under both (`--tests`). `bench.py --runtime` runs `runbench.py`, which times
+programs ra-jit builds whole with LLVM against `cargo build --release`, and `benchreport.py`
+writes that result to the README's runtime table, refusing it when any program's output differs
+from cargo's. `abbench.py` runs two or more builds of ra-jit against each other on `bench.py`'s
+edits, in interleaved rounds: an edit's wall time, the daemon's own time and (macOS) its
+workers' cycles, the cold start, and the workers' peak memory. It is how the release build's
+profile was chosen ([reports/RELEASE-BUILD.md](reports/RELEASE-BUILD.md)), and with `--train` it
+is the training of its PGO. `hotpatch.py` times an edit of a running program under Dioxus's
+subsecond against `cargo ra-jit build` and `cargo build` with a restart; its program is
+`harness/hotpatch`. `benchhistory.py` appends a run to `docs/benchmarks/history/` (what the
+site's /bench page charts) and, with `check`, fails when a median moved past its noise band.
+`live_latency.py` times live edits on macOS on AArch64, per keystroke under typing (`replay`,
+`burst`) as well as one edit at a time (`socket`, or `cargo` through `cargo ra-jit build`), and
+the restarts of a session against `cargo run` (`restart`); its JSON goes to `benchhistory.py
+live`, and the numbers measured on a MacBook are in [live.md](live.md#latency-under-typing).
+`nix develop .#bench` has everything `bench.py` and `hotpatch.py` need (the nightly, mold, wild,
+`dx`, bevy's libraries; zed's are in `.#bench-zed`, since every library directory slows each
+link cargo makes), and `live_latency.py` runs under it as under rustup's 1.99.0. Under another
+toolchain the daemon builds nothing, and the harness stops at once with what `cargo ra-jit`
+says of it.
 
 ## The fuzzer
 
@@ -243,4 +266,8 @@ machine and commits the README's numbers to main. It runs only while the reposit
 `claims.yaml` (rustc's `tests/ui`) run on pull requests and pushes too, `nix-live.yaml` and
 `fork-sync.yaml` on pushes to main that touch what they cover, `fuzz.yaml` nightly, and
 `live-*.yaml` on their own branches. None of them is part of `ci`. `site.yaml` deploys the
-site, and `release.yaml` builds releases from tags.
+site, and `release.yaml` builds releases from tags, each target through
+`.github/scripts/build_release.py` (the `dist` profile with PGO, [reports/RELEASE-BUILD.md](reports/RELEASE-BUILD.md)),
+the recipe the flake's `dist` runs too. `pgo.yaml` trains the profiles it uses, by hand and on
+pushes to main that change Cargo.lock, a manifest or the toolchain, and pins them in
+`pgo/profiles.json`.

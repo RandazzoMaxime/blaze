@@ -21,7 +21,7 @@ use object::{
 use rustc_hash::FxHashMap;
 
 use super::{OWN, Symbol, Unhandled};
-use crate::mir::codegen::{
+use crate::{
     ConstBlob,
     debuginfo::{LineRow, SlotPlaces, VariablePlace},
     fragment::{Code, Wants},
@@ -243,7 +243,7 @@ impl<'data> Emitted<'data> {
     /// there may be, and answers how long it is then: what LLVM makes of an empty body is a
     /// `ret` alone.
     fn lengthen(code: &mut Vec<u8>) -> Result<u32, Unhandled> {
-        let target = crate::mir::codegen::Target::selected()
+        let target = crate::Target::selected()
             .map_err(|_| Unhandled::Shape("a target that is not known"))?;
         if let Some((shortest, filler)) = target.arch.shortest_function()
             && code.len() < shortest
@@ -653,8 +653,8 @@ impl<'data> Emitted<'data> {
             let cie = fde.cie();
             let entry_rules = Self::rules(cie.instructions(&eh_frame, &bases), cie)?;
             let arch = match self.file.architecture() {
-                Architecture::Aarch64 => crate::mir::codegen::Arch::Aarch64,
-                _ => crate::mir::codegen::Arch::X86_64,
+                Architecture::Aarch64 => crate::Arch::Aarch64,
+                _ => crate::Arch::X86_64,
             };
             if !entry_rules
                 .iter()

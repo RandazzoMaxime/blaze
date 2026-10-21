@@ -72,7 +72,7 @@ jobs:
         with:
           components: rustfmt
       # The code that is ra-jit's own: vendor/ is the forks' code, formatted by their rules.
-      - run: cargo fmt -p ra-jit -p ra-jit-live -- --check
+      - run: cargo fmt -p ra-jit -p ra-jit-live -p hir-ty-codegen -p ra-jit-store -p ra-jit-fuzz -- --check
 
   linux-x64:
     name: linux x64
@@ -136,11 +136,29 @@ jobs:
           git sparse-checkout set tests/ui
           git fetch -q --depth 1 --filter=blob:none origin a30aa9064df6a504b6a323c6884a2f4cfbfff666
           git checkout -q FETCH_HEAD
-      - run: python3 harness/borrowck_ui.py "$RUNNER_TEMP/rust" --bin target/release/ra-jit --jobs 4 --mode both --min-pass 1030
+      - run: python3 harness/borrowck_ui.py "$RUNNER_TEMP/rust" --bin target/release/ra-jit --jobs 4 --mode both --min-pass 1117
+
+  # vendor/rust-analyzer as the fork has it, built and tested outside this repository, so that
+  # the subtree cannot come to depend on crates/ (docs/architecture-split.md, step 5).
+  fork:
+    name: fork alone
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/toolchain
+      - run: cp -r vendor/rust-analyzer "$RUNNER_TEMP/rust-analyzer"
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ${{ runner.temp }}/rust-analyzer
+      - working-directory: ${{ runner.temp }}/rust-analyzer
+        run: cargo test -p hir-ty -p hir-ty-borrowck && cargo check -p hir
 
   ci:
     name: ci
-    needs: [changes, fmt, linux-x64, linux-arm64, macos, windows, borrowck]
+    needs: [changes, fmt, linux-x64, linux-arm64, macos, windows, borrowck, fork]
     if: always()
     runs-on: ubuntu-24.04
     timeout-minutes: 5

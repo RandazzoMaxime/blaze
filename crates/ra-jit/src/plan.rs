@@ -91,6 +91,8 @@ pub(crate) struct Built {
     pub(crate) profile: Profile,
     /// Whether the package is one cargo was asked to build, not one those depend on.
     pub(crate) primary: bool,
+    /// Whether the package is built into the program, not only for what runs while building.
+    pub(crate) for_target: bool,
 }
 
 /// What a build is for and who asks for it.
@@ -506,6 +508,11 @@ impl Plan {
     pub(crate) fn package(&self, id: &str) -> Option<&Built> {
         self.packages.get(&package_named(id))
     }
+
+    /// The profile of the packages cargo was asked to build, for the target.
+    pub(crate) fn target_profile(&self) -> Option<&Profile> {
+        self.packages.values().find(|it| it.primary && it.for_target).map(|it| &it.profile)
+    }
 }
 
 /// The one name of a package for the two ways cargo spells its id: `source#name@version`,
@@ -612,10 +619,11 @@ impl UnitGraph {
             self.roots.iter().filter_map(|&it| Some(self.units.get(it)?.pkg_id.as_str())).collect();
         let packages = best
             .into_iter()
-            .map(|(id, (_, unit))| {
+            .map(|(id, (index, unit))| {
                 let features = unit.features.iter().cloned().collect();
                 let (profile, primary) = (unit.profile.with(flags), roots.contains(id));
-                (package_named(id), Built { features, profile, primary })
+                let for_target = for_target.contains(&index);
+                (package_named(id), Built { features, profile, primary, for_target })
             })
             .collect();
         Ok(Plan { packages, lto })

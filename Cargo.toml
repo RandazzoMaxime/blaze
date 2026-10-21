@@ -1,6 +1,6 @@
 [workspace]
-members = ["crates/ra-jit", "crates/ra-jit-live", "crates/ra-jit-bench", "crates/ra-jit-cache", "crates/ra-jit-cache-macros"]
-# `ra-jit-wasm` turns on a feature of `hir-ty` that swaps the code generator's output, which
+members = ["crates/ra-jit", "crates/hir-ty-codegen", "crates/ra-jit-store", "crates/ra-jit-fuzz", "crates/ra-jit-live", "crates/ra-jit-bench", "crates/ra-jit-cache", "crates/ra-jit-cache-macros"]
+# `ra-jit-wasm` turns on a feature of `hir-ty-codegen` that swaps the code generator's output, which
 # must not be unified into a build of the native crates.
 exclude = ["crates/ra-jit-wasm", "demo", "harness"]
 resolver = "2"
@@ -40,6 +40,14 @@ debug = 0
 inherits = "release"
 debug = 2
 
+# The binaries a release ships, built with PGO by .github/scripts/build_release.py
+# (docs/reports/RELEASE-BUILD.md). Thin LTO takes 4-5% off an edit's work in the daemon but
+# makes a rebuild of ra-jit after a one-line change 2.5 times longer, so `release`, which the
+# harnesses and CI build after every change, goes without.
+[profile.dist]
+inherits = "release"
+lto = "thin"
+
 [patch.'crates-io']
 # rustc's layout code, from the tag of the stable in `harness/toolchain`.
 ra-ap-rustc_abi = { path = "vendor/rustc_abi" }
@@ -63,6 +71,10 @@ hir = { path = "vendor/rust-analyzer/crates/hir", version = "0.0.0" }
 hir-def = { path = "vendor/rust-analyzer/crates/hir-def", version = "0.0.0" }
 hir-expand = { path = "vendor/rust-analyzer/crates/hir-expand", version = "0.0.0" }
 hir-ty = { path = "vendor/rust-analyzer/crates/hir-ty", version = "0.0.0" }
+hir-ty-borrowck = { path = "vendor/rust-analyzer/crates/hir-ty-borrowck", version = "0.0.0" }
+hir-ty-codegen = { path = "crates/hir-ty-codegen" }
+ra-jit-store = { path = "crates/ra-jit-store" }
+ra-jit-fuzz = { path = "crates/ra-jit-fuzz" }
 hir-ide = { path = "vendor/rust-analyzer/crates/hir-ide", version = "0.0.0" }
 ide = { path = "vendor/rust-analyzer/crates/ide", version = "0.0.0" }
 ide-assists = { path = "vendor/rust-analyzer/crates/ide-assists", version = "0.0.0" }
