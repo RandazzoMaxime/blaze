@@ -22,7 +22,9 @@ that is given, which lets the two be on different disks):
 Every edit is made and taken back `--runs` times, or once when the daemon turned it down and
 cargo built it; the time of each is the median, and every sample of both sides is kept. None of
 them changes what the program does: after the first of each kind the program is run and has
-to say what cargo's says. The result also names the commit of ra-jit, the date and the machine
+to say what cargo's says; one that does not, or a test that ends otherwise under `cargo ra-jit
+test`, is written down in `wrong`, and the run ends with exit code 3 after writing the result.
+The result also names the commit of ra-jit, the date and the machine
 (`RA_JIT_BENCH_MACHINE` names it, for example the instance type); `benchreport.py` turns it
 into the README's table and docs/benchmarks.md.
 
@@ -795,7 +797,8 @@ def main():
                             shutil.rmtree(os.path.join(at, entry), ignore_errors=True)
     wrong = [f"{key}: {line}" for key, measured in result["results"].items() for line in measured["wrong"]]
     print(f"wrote {out}; wrong: {len(wrong)}")
-    sys.exit(1 if wrong else 0)
+    # Not 1, which is also what an exception ends with: the run is whole and says what was wrong.
+    sys.exit(3 if wrong else 0)
 
 
 if __name__ == "__main__":

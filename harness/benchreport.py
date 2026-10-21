@@ -16,7 +16,9 @@ written. More than noise is any of:
     README names is never more than a day behind main
   - `--force`
 A result in which a program said something else than cargo's (`wrong`) is refused: exit 2,
-nothing written. `--check` writes nothing and exits 1 when it would have written.
+nothing written. A test suite that ended otherwise under `cargo ra-jit test` is not refused: the
+tests table says how, and the workflow fails after writing. `--check` writes nothing and exits 1
+when it would have written.
 
 The last line says `changed` or `unchanged`, and so does `changed=true|false` in
 $GITHUB_OUTPUT when that is set.
@@ -333,9 +335,12 @@ def main():
         raise SystemExit(__doc__)
     result = json.load(open(paths[0]))
     wrong = [f"{key}: {line}" for key, measured in result["results"].items() for line in measured.get("wrong", [])]
-    if wrong:
-        print("refused: a program did not say what cargo's said\n" + "\n".join(wrong))
+    tests = [line for line in wrong if line.split(": ", 1)[1].startswith("tests (")]
+    if programs := [line for line in wrong if line not in tests]:
+        print("refused: a program did not say what cargo's said\n" + "\n".join(programs))
         sys.exit(2)
+    if tests:
+        print("written with tests that ended otherwise than under cargo (shown in the table):\n" + "\n".join(tests))
     stored = json.load(open(stored_path)) if os.path.exists(stored_path) else None
     why = (["--force"] if force else []) + differences(stored, result, noise, max_age)
     changed = bool(why)

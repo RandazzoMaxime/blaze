@@ -62,6 +62,7 @@ jobs:
           mkdir -p "$BENCH_HOME"
           CARGO_TARGET_DIR="$BENCH_HOME/target" nix develop .#bench -c cargo build -p ra-jit --release --features llvm
       - name: Bench
+        id: bench
         run: |
           export RA_JIT_BIN="$BENCH_HOME/target/release/ra-jit" RA_JIT_LLVM_BIN="$BENCH_HOME/target/release/ra-jit"
           export RA_JIT_PROJECTS="$BENCH_HOME/projects"
@@ -70,7 +71,8 @@ jobs:
           [ "$FULL" = true ] && full=(--setups all --setups-on "ripgrep,nushell" --tests)
           nix develop .#bench -c env -u CARGO_INCREMENTAL -u RUSTC_WRAPPER python3 harness/bench.py \
             ripgrep fd bat hyperfine just axum nushell helix bevy --runs 5 --cold-runs 5 "${full[@]}" \
-            --work "$BENCH_HOME/work" --reference "$BENCH_HOME/reference" --out "$RUNNER_TEMP/bench.json"
+            --work "$BENCH_HOME/work" --reference "$BENCH_HOME/reference" --out "$RUNNER_TEMP/bench.json" \
+            || { status=$?; [ "$status" = 3 ] || exit "$status"; echo "wrong=true" >> "$GITHUB_OUTPUT"; }
       - uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -123,4 +125,9 @@ jobs:
               --body-file "$RUNNER_TEMP/regressions.md"
           fi
           echo "::error::a benchmark regressed beyond its noise band: see the run summary"
+          exit 1
+      - name: Fail on a wrong result
+        if: steps.bench.outputs.wrong == 'true'
+        run: |
+          echo "::error::under ra-jit a program or a test suite ended otherwise than under cargo: see the Bench step and the tests table"
           exit 1
