@@ -222,6 +222,11 @@ PROJECTS = {
             leaf=body("src/bun_core/string/StringBuilder.rs", "pub fn append(&mut self, slice: &[u8]) -> &[u8] {"),
             generic=body("src/collections/multi_array_list.rs", "pub(crate) fn push(&mut self, elem: T) -> Result<(), AllocError> {"),
         ),
+        # bun's transpiler on five of its own TypeScript files, as runbench.py's `bun`.
+        runtime=dict(bin="bun", args=["-e", "const t = new Bun.Transpiler({ loader: 'ts', minifyWhitespace: true }); "
+                                      "const fs = require('fs'); const sources = ['http2', 'net', '_http_server', 'fs', 'child_process']"
+                                      ".map(n => fs.readFileSync('src/js/node/' + n + '.ts', 'utf8')); let n = 0; "
+                                      "for (let i = 0; i < 20; i++) for (const s of sources) n += t.transformSync(s).length; console.log(n)"]),
     ),
     # A game: built, not run (it opens a window). Its own code is small; the engine is ~400 crates.
     "bevy": dict(
