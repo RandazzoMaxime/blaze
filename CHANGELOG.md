@@ -175,7 +175,9 @@ All notable changes to ra-jit are written here. The format follows
   before it is ready. The first edit reads the edited file's functions on every core. An edit
   of a generic, `#[inline]` or default trait function, or one that moves such a function's
   lines, is now a patch too when every copy rustc made of it is found in the executable: the
-  patch replaces the copies, and ripgrep's first edit is a patch. Thread-locals of a patch
+  patch replaces the copies, and ripgrep's first edit is a patch on Linux (on macOS its
+  frames are more than the room of rustc's unwind table, 244 KB in 218 KB, and it is built
+  in full, as the log says). Thread-locals of a patch
   over rustc's executable are reached as rustc's code reaches them (on Linux x86-64 the
   general-dynamic sequence becomes local-exec, on macOS through the variable's descriptor).
   On Linux x86-64 (16 vCPUs, 8 cores), interleaved runs from an empty store, command and
