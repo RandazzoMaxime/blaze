@@ -103,13 +103,26 @@ second parent is a squashed commit of upstream's tree with `git subtree`'s
 `git-subtree-split` line; when main gets the merge, `push` makes upstream's commit a parent
 of the fork's commit, so the fork's history records the upstream merge too.
 
-A change to rust-analyzer should be something rust-analyzer could take: a bug fix in MIR
-lowering or inference, a missing piece of the language, an accessor ra-jit needs. Where
-rust-analyzer's MIR differs from rustc's, the fix goes in the fork's lowering or in a pass of
-its runtime MIR queries, and the code generator relies on it: codegen does not compensate.
-Code that is only ra-jit's belongs in `crates/hir-ty-codegen` or `crates/ra-jit`, where a
-change is one ordinary commit. Fixes that are simply rust-analyzer bugs should be sent upstream, under
-their rules.
+### Where new code goes
+
+New code that is the language's semantics goes in `vendor/rust-analyzer`: building MIR and
+the passes over it, borrow checking, const evaluation, layout, and the hashes that say what a
+function's code is made from, as salsa queries. These are what rustc keeps in `rustc_middle`,
+`rustc_mir_transform` and `rustc_borrowck`; rust-analyzer could take them, and a query lives
+with the database it reads. Where rust-analyzer's MIR differs from rustc's, the fix goes in
+the fork's lowering or in a pass of its runtime MIR queries, and the code generator relies on
+it: codegen does not compensate.
+
+Inside `vendor/rust-analyzer`, prefer a new crate under `crates/` (or, where the code needs
+private items of `hir-ty`, a new module file declared with one line) over edits spread through
+upstream's files. Every changed line of an upstream file is a line an upstream merge can
+conflict on; a new file conflicts with nothing. Fixes that are simply rust-analyzer bugs are
+the exception, and should be sent upstream, under their rules.
+
+ra-jit's machinery stays in `crates/`: the code generator's backends, object and debug-info
+writing, the splice, the daemon and its socket, the cargo drop-in, the store and the remote,
+tiers and sampling, the live runtime, and the harnesses. A change there is one ordinary
+commit.
 
 ### Moving to a newer rust-analyzer
 
