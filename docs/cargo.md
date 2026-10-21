@@ -193,6 +193,7 @@ build a command line is, so changing one starts from a cargo build again.
 | `RA_JIT_EMIT` | LLVM instruction selection: `optimized` or `fast` | `optimized`; `fast` at level 0 |
 | `RA_JIT_INLINE` | `all`: with LLVM at level 2 or 3, a program built whole (`runbench.py`'s builds) has the functions it calls in any crate built into it or shown to LLVM, as a release build does; the standard library's only when they are generic or `#[inline]`, as rustc does across crates. `0` builds nothing in | functions of the same crate |
 | `RA_JIT_SPLICE` | `0` links in full after every edit instead of splicing | splice |
+| `RA_JIT_OTHER_TOOLCHAIN` | `1` builds with a rustc other than 1.99.0 instead of going to cargo, for a project pinned to a nightly near it ([support.md](support.md#toolchain)) | not set |
 
 These are read by the daemon when it starts, from the environment of whichever command
 started it. To change one, run `cargo ra-jit stop` first.

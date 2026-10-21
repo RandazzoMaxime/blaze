@@ -989,6 +989,10 @@ fn project(asked: &Invocation, cwd: &Path, metadata: &Metadata) -> Result<PathBu
 /// Why the toolchain cargo builds with is not one ra-jit compiles for, when it is not: it
 /// is another release than the one ra-jit has the layouts of, or the source of its standard
 /// library, which the daemon compiles from, is not installed.
+///
+/// `RA_JIT_OTHER_TOOLCHAIN=1` takes another release anyway, for a project pinned to a
+/// toolchain near ours (a nightly of the next release): the layouts, symbol names, ABI and
+/// `TypeId`s are still 1.99.0's, and nothing checks that the other rustc agrees with them.
 fn other_toolchain() -> Option<String> {
     let rustc = rustc_path();
     let said = |flag: &str| {
@@ -998,8 +1002,11 @@ fn other_toolchain() -> Option<String> {
     let version = said("--version")?;
     let version = version.split_whitespace().nth(1).unwrap_or_default();
     let ours = TOOLCHAIN.trim();
-    if version != ours {
-        return Some(format!("rustc {version} is not the {ours} this ra-jit compiles for"));
+    if version != ours && !other_toolchain_allowed() {
+        return Some(format!(
+            "rustc {version} is not the {ours} this ra-jit compiles for \
+             (RA_JIT_OTHER_TOOLCHAIN=1 builds with it anyway)"
+        ));
     }
     let library = Path::new(&said("--print=sysroot")?).join("lib/rustlib/src/rust/library");
     (!library.exists()).then(|| {
@@ -1007,6 +1014,10 @@ fn other_toolchain() -> Option<String> {
          `rustup component add rust-src` installs it"
             .to_owned()
     })
+}
+
+fn other_toolchain_allowed() -> bool {
+    std::env::var_os("RA_JIT_OTHER_TOOLCHAIN").is_some_and(|it| it == "1")
 }
 
 /// What the checkouts of one repository share: the repository's own directory, which is
