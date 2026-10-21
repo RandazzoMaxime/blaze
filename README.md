@@ -45,6 +45,8 @@ Live edit to running code, Game of Life demo (median of 20 edits, one 96-core Li
 | One function, 300 new functions added | 282 ms | 60 ms | 4.7x |
 
 <!-- bench:start -->
+<picture><source media="(prefers-color-scheme: dark)" srcset="docs/benchmarks/charts/edits-dark.svg"><img alt="How many times faster an edit builds under ra-jit than under cargo: ripgrep 15.1.0 11×, fd 10.3.0 5.6×, bat 0.26.0 14×, hyperfine 1.19.0 4.4×, just 1.43.0 16×, axum 0.8.6 8.1×, nushell 0.108.0 19×, helix 25.07.1 12×" src="docs/benchmarks/charts/edits-light.svg" width="760"></picture>
+
 Edit, then build, on real projects at pinned commits. Each cell is incremental `cargo build` → `cargo ra-jit build`, both warm, same linker, median of 5 edits. Linux x86-64, AWS c7i.16xlarge (dev-aws-7), pinned to 16 cores with taskset (Intel(R) Xeon(R) Platinum 8488C, 16 of its 64 cores, 124 GiB), ra-jit [`2b2f2dcd5b`](https://github.com/indexable-inc/ra-jit/commit/2b2f2dcd5bc4d7132fe62bf36669a34c657dafe7) on 2026-10-20.
 
 | Project | Edit a function | Edit a widely used function | Change a signature | Nothing changed |
@@ -64,7 +66,21 @@ Edit, then build, on real projects at pinned commits. Each cell is incremental `
 Measured by hand with `harness/bench.py`; the `bench-readme` workflow re-runs it on the dedicated benchmark machine. The ra-jit measured is `cargo build --release`; the binaries a release ships are the `dist` profile with PGO, which start and edit faster ([how](https://github.com/indexable-inc/ra-jit/blob/main/docs/reports/RELEASE-BUILD.md)). Cold builds, the spread of every number, the LLVM tier and how fast the built programs run: [docs/benchmarks.md](docs/benchmarks.md) ([raw JSON](docs/benchmarks/linux-x86_64.json)).
 <!-- bench:end -->
 
+<!-- benchmem:start -->
+<picture><source media="(prefers-color-scheme: dark)" srcset="docs/benchmarks/charts/memory-dark.svg"><img alt="Peak memory while an edit to one function builds, cargo and ra-jit: ripgrep 15.1.0 235 MB for cargo, 2.9 GB for ra-jit, fd 10.3.0 212 MB for cargo, 2.6 GB for ra-jit, nushell 0.108.0 1.1 GB for cargo, 12.5 GB for ra-jit" src="docs/benchmarks/charts/memory-light.svg" width="760"></picture>
+
+Memory and disk, Cranelift. Peak: the most every process doing the work held at once, cargo → ra-jit. For ra-jit that is the daemon, its workers and what they run, and `cargo ra-jit build` with any cargo it ran; for plain cargo, cargo itself, rustc, build scripts and the linker. On disk: cargo's target directory → ra-jit's target directory, store and home. macOS arm64, MacBook Pro (Mac17,6), macOS 27.0.1, with other work running (Apple M5 Max, 18 cores, 128 GiB), ra-jit [`84760c3f51`](https://github.com/indexable-inc/ra-jit/commit/84760c3f517a76f6e8a3aa41ccd81fc3f26b87c7) on 2026-10-21, load average 48.0 when it started; how it is measured: [docs/benchmarks.md](docs/benchmarks.md#memory-and-disk).
+
+| Project | Edit a function, peak | Daemon between edits | Cold until ready, peak | On disk |
+|---|---:|---:|---:|---:|
+| ripgrep 15.1.0 | 235 MB → **2.9 GB** | 2.2 GB ready, 2.8 GB after 39 builds | 541 MB → **2.4 GB** | 416 MB → 598 MB |
+| fd 10.3.0 | 212 MB → **2.6 GB** | 1.8 GB ready, 2.6 GB after 33 builds | 897 MB → **1.9 GB** | 355 MB → 460 MB |
+| nushell 0.108.0 | 1.1 GB → **12.5 GB** | 11.5 GB ready, 12.5 GB after 39 builds | 2.4 GB → **16.1 GB** | 5.3 GB → 6.9 GB |
+<!-- benchmem:end -->
+
 <!-- runbench:start -->
+<picture><source media="(prefers-color-scheme: dark)" srcset="docs/benchmarks/charts/runtime-dark.svg"><img alt="Time of each benchmark, ra-jit's build ÷ cargo build --release: sieve 0.97×, collatz 1.02×, fnv 1.00×, qsort 1.11×, matmul 1.15×, nbody 1.41×, mandelbrot 1.00×, words 1.62×, numeric 1.00×, jsonrt 1.58×, ripgrep 1.33×, fd 1.37×, tokei 1.30×, eza 1.17×" src="docs/benchmarks/charts/runtime-light.svg" width="760"></picture>
+
 How fast the programs run, built whole by ra-jit with LLVM (every crate of the program compiled by ra-jit, with its own `main`), each time ÷ the time of `cargo build --release`. Lower is faster; 1.00x is as fast as release. Every program's exit status and output were the same as the release build's; a run in which any differed is never published. Linux x86-64: AWS c6i.16xlarge (Intel Xeon Platinum 8375C, 64 vCPUs, 123 GiB), NixOS 26.05, Linux 6.18, rustc 1.99.0, ra-jit `f3eeb5295e` on branch `whole-program-main`, 2026-10-21. Median of 5 runs, the builds taking turns (numeric: 15).
 
 | Benchmark | `cargo build --release` | release with overflow checks | ra-jit `-O3` | ra-jit `-O2`, across crates | ra-jit `-O3`, across crates |

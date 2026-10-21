@@ -148,6 +148,14 @@ is the training of its PGO. `hotpatch.py` times an edit of a running program und
 subsecond against `cargo ra-jit build` and `cargo build` with a restart; its program is
 `harness/hotpatch`. `benchhistory.py` appends a run to `docs/benchmarks/history/` (what the
 site's /bench page charts) and, with `check`, fails when a median moved past its noise band.
+`memory.py` is how every harness measures memory: `memory.run` runs a command and returns its
+time with the exact peak of its largest process (`wait4`) and the peak of its whole tree
+(sampled), `memory.Sampler` follows a long-lived process such as the daemon with its workers,
+and `memory.in_child` measures a function that runs commands itself
+([benchmarks.md](benchmarks.md#memory-and-disk)); a harness that reports memory uses it rather
+than a way of its own. `benchcharts.py` draws the README's charts (SVG, a light and a dark
+version) from the same results `benchreport.py` writes the tables from; `benchreport.py`
+regenerates them whenever it writes a table, and `benchreport.py --charts` on its own.
 `live_latency.py` times live edits on macOS on AArch64, per keystroke under typing (`replay`,
 `burst`) as well as one edit at a time (`socket`, or `cargo` through `cargo ra-jit build`), and
 the restarts of a session against `cargo run` (`restart`); its JSON goes to `benchhistory.py
