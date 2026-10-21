@@ -77,6 +77,37 @@ All notable changes to ra-jit are written here. The format follows
 
 ### Changed
 
+- After a fresh build through cargo the daemon is ready for edits once it has loaded the
+  workspace and read the symbols of the executable rustc linked, instead of after building
+  every program once more itself ([#11](https://github.com/indexable-inc/ra-jit/issues/11)):
+  the first edits are patches spliced into rustc's executable, and the daemon builds its own
+  base in the background once nothing has waited for a second. On Linux x86-64 (16 cores),
+  ready after a cold build from an empty store: just 10.4 to 8.9 s, ripgrep 7.8 to 6.6 s,
+  nushell 58.8 to 47.0 s, against 7.4, 5.0 and 35.1 s for plain `cargo build`; from a filled
+  store 10.7 to 8.7 s, 8.2 to 6.6 s and 64.1 to 46.3 s. That is 0.25 to 0.5 s after the
+  command returns on just and ripgrep, and 3 to 4 s on nushell, which reads the symbols of
+  233 000 functions. On macOS, nushell 43 to 36 s against 25 s for cargo. The command itself
+  is as slow as before: the spare worker that loads the workspace beside cargo still costs
+  1.0 s on just, 1.3 s on ripgrep and 8 to 9 s on nushell.
+  The first edit over rustc's executable is slower than over the daemon's own build, since
+  it reads the edited file's functions and resolves its names for the first time: just 0.08
+  to 0.4 s, nushell 0.3–0.45 to 1.6–1.9 s. An edit that is more than function bodies, of a
+  generic, `#[inline]` or default trait function or one that moves such a function's lines
+  (rustc copies those into their callers, line numbers and all), of a static, or of a file
+  whose functions were not read before is built in full, and the log says why
+  (`no patch: ...`): ripgrep's `main` sits above a generic function, so its first edit takes
+  1.4 to 1.7 s.
+  The own base is done some 2.5 s after ready on just and ripgrep and 11 s on nushell.
+  `RA_JIT_RUSTC_BASE=0` keeps the old behaviour. On macOS rustc's link of a program is given
+  `-Wl,-headerpad,0x400000` and `-Wl,-bind_at_load`, which the daemon's own links leave out.
+  `harness/rustcbase.py` checks every kind of first edit against cargo, and
+  `harness/coldprof.py --max-wait S` fails when the daemon is ready more than S seconds after
+  the command.
+- While cargo builds, the spare worker compiles ahead on a quarter of the cores instead of
+  all of them, and on all of them once cargo is done: on nushell, Linux, the command and
+  readiness 0.7 to 3.8 s sooner in interleaved runs, with the first edit as fast; on just and
+  ripgrep the same within the noise. Compiling nothing ahead saves another 1.5 s on nushell
+  but doubles the first edit, which then lowers what it reaches itself.
 - An edit in a package whose build script cargo runs again for it (one that names no
   `rerun-if-changed`, as ripgrep's, fd's and hyperfine's) no longer waits for a
   `cargo check` that runs every build script of the workspace: the daemon runs that one

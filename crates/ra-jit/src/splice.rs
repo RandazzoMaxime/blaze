@@ -65,7 +65,22 @@ impl Linked {
     /// rest of the link line. The patch is read here and now: the next edit writes another.
     pub(crate) fn read(binary: PathBuf, patch: &Path, object: &Path) -> Linked {
         let (patch, object) = (std::fs::read(patch), object.to_owned());
-        Linked(std::thread::spawn(move || Baseline::read(binary, &patch?, &object)))
+        Linked(std::thread::spawn(move || Baseline::read(binary, &patch?, &object, false)))
+    }
+
+    /// As [`Linked::read`], of what rustc linked, which `binary` is another name of: it is
+    /// made a copy of its own first, for a splice to write. One the daemon linked is refused:
+    /// cargo's place for the program has the daemon's once it served one.
+    pub(crate) fn read_rustcs(binary: PathBuf, patch: &Path, object: &Path) -> Linked {
+        let (patch, object) = (std::fs::read(patch), object.to_owned());
+        Linked(std::thread::spawn(move || {
+            let mut copy = binary.clone().into_os_string();
+            copy.push(".copy");
+            std::fs::copy(&binary, &copy)?;
+            // Whoever takes the file meanwhile takes either, which are the same.
+            std::fs::rename(&copy, &binary)?;
+            Baseline::read(binary, &patch?, &object, true)
+        }))
     }
 
     pub(crate) fn baseline(self) -> anyhow::Result<Baseline> {
@@ -154,12 +169,26 @@ pub(crate) struct Spliced {
 
 impl Baseline {
     /// Reads the executable at `path`, which was linked with `patch` ahead of `object`.
-    fn read(path: PathBuf, patch: &[u8], object: &Path) -> anyhow::Result<Baseline> {
+    fn read(path: PathBuf, patch: &[u8], object: &Path, rustcs: bool) -> anyhow::Result<Baseline> {
         let file = File::open(&path)?;
         let stamp = Stamp::of(&file)?;
         // SAFETY: the daemon is the one that has the link write the file, and it does not
         // start another while this reads.
         let bytes = unsafe { memmap2::Mmap::map(&file)? };
+        if rustcs {
+            let image = object::File::parse(&*bytes)?;
+            ensure!(
+                matches!(image.format(), object::BinaryFormat::Elf | object::BinaryFormat::MachO),
+                "only an ELF or Mach-O executable of rustc's is patched as it is"
+            );
+            // A Rust symbol has no `-` in it, and every object the daemon writes defines some
+            // with one.
+            let ours = |name: &[u8]| name.windows(6).any(|it| it == b"ra-jit");
+            ensure!(
+                !image.symbols().any(|it| it.name_bytes().is_ok_and(ours)),
+                "the executable where cargo has the program is one the daemon linked"
+            );
+        }
         let (image, baked) = if bytes.starts_with(b"\0asm") {
             (Executable::Wasm(wasm::Module::read(bytes.to_vec())?), wasm::defined(patch)?)
         } else {

@@ -106,7 +106,8 @@ with reasons. The daemon's log says `backend: llvm -O2 fast emit` when LLVM is i
 | `live_e2e.py` | Edits of a running program that links `ra-jit-live`, each applied as a patch. macOS on AArch64 |
 | `fncache.py` | `#[ra_jit::cache]` ([fn-cache.md](fn-cache.md)): a cold run computes and a warm one finds the result on disk; comment, format, moved-line and unrelated edits keep it, an edit of a function it reaches through another drops it; generic instances are kept apart; impure functions are refused saying where; a restarted daemon finds the same results; cargo's build caches nothing. `--live`: a live edit computes again and drops the old results, macOS on AArch64 |
 | `spaces.py` | A two-crate workspace under a directory whose name has spaces, `$$`, `#` and quotes, built and edited with `cargo ra-jit build`; every edit has to be applied by the daemon against rustc's symbols ([#14](https://github.com/indexable-inc/ra-jit/issues/14)) |
-| `headerpad.py` | A program whose unwind table does not fit the room its link leaves after the load commands: the first link is done again with room, the edits after it are spliced, and a restarted daemon starts from the room kept beside the executable ([#13](https://github.com/indexable-inc/ra-jit/issues/13)). macOS on AArch64 |
+| `rustcbase.py` | The first edits after a cold `cargo ra-jit build`, spliced into the executable rustc linked ([#11](https://github.com/indexable-inc/ra-jit/issues/11)), against plain cargo: bodies, closures, a dependency crate, function-local statics, two edits in a row, and a `#[ra_jit::cache]` function and what it reaches have to be patches; generic, `#[inline]` and default trait functions, statics, new items, `async`, `impl Trait` and `include_str!` edits have to be built in full and say why; and the daemon's own base, built while nothing waits, takes the edits after it. Every edit's output and exit status against cargo's, macOS and Linux |
+| `headerpad.py` | A program whose unwind table does not fit the room its link leaves after the load commands: the first link is done again with room, the edits after it are spliced, and a restarted daemon starts from the room kept beside the executable ([#13](https://github.com/indexable-inc/ra-jit/issues/13)). The daemon's own links, with `RA_JIT_RUSTC_BASE=0`. macOS on AArch64 |
 | `tiers.py` | Tiers ([tiers.md](tiers.md)): `demo/lifebench` running under the daemon reaches levels 2 and 3 with output identical to cargo's, an edit of a tiered function demotes it and is applied at once, and `RA_JIT_TIER=off` changes nothing. macOS on AArch64 with `--features llvm`; it exits 0 elsewhere |
 | `tierbench.py` | The benchmark table of [tiers.md](tiers.md): `demo/lifebench` at level 1, 2 and 3 under a daemon and as cargo builds it (release, and `-O3` with the dev profile's checks), in interleaved rounds, the steady rate of each; `--together` runs a round's builds at once, for a loaded machine. Measures; checks nothing; not in CI |
 
@@ -129,7 +130,12 @@ with reasons. The daemon's log says `backend: llvm -O2 fast emit` when LLVM is i
 the queries an edit inside one function of a big file runs (the file comes from `genbig.py`),
 against the same functions in many small files ([reports/INCREMENTAL.md](reports/INCREMENTAL.md)). `realbench.py` times
 `cargo ra-jit build` against `cargo build` on ripgrep, just and nushell (cold, no-op and
-three kinds of edit); the numbers are in [results.md](results.md#11-real-projects). Their docstrings say how to run them.
+three kinds of edit); the numbers are in [results.md](results.md#11-real-projects). `coldprof.py`
+times a cold `cargo ra-jit build` of a real project until the daemon is ready and its first
+edit, from an empty or a filled store, with every line the daemon logged and the cores busy
+along the way: the readiness check of [#11](https://github.com/indexable-inc/ra-jit/issues/11),
+whose numbers are in [cargo.md](cargo.md#what-a-build-does). With `--max-wait S` it fails when
+the daemon was ready more than S seconds after the command returned. Their docstrings say how to run them.
 `bench.py` on real projects, with `benchreport.py`, is also what writes the README's build table:
 [benchmarks.md](benchmarks.md). `bench.py --runtime` runs `runbench.py`, which times programs
 ra-jit builds whole with LLVM against `cargo build --release`, and `benchreport.py` writes that
