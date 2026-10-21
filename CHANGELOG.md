@@ -103,11 +103,26 @@ All notable changes to ra-jit are written here. The format follows
   `harness/rustcbase.py` checks every kind of first edit against cargo, and
   `harness/coldprof.py --max-wait S` fails when the daemon is ready more than S seconds after
   the command.
-- While cargo builds, the spare worker compiles ahead on a quarter of the cores instead of
-  all of them, and on all of them once cargo is done: on nushell, Linux, the command and
-  readiness 0.7 to 3.8 s sooner in interleaved runs, with the first edit as fast; on just and
-  ripgrep the same within the noise. Compiling nothing ahead saves another 1.5 s on nushell
-  but doubles the first edit, which then lowers what it reaches itself.
+- `cargo ra-jit build` from cold is closer to cargo's, and readiness follows it sooner
+  ([#11](https://github.com/indexable-inc/ra-jit/issues/11)). The daemon tells the spare
+  worker what cargo built from a thread of its own and the spare reads its input from the
+  start: before, a spare still loading the standard library let the pipe fill, which held up
+  the daemon and with it cargo, whose output went unread. While cargo builds, the spare
+  resolves the standard library and compiles the functions of each crate cargo is done with on
+  a quarter of the cores, leaving the generic instances they reach to the edits, reads the
+  symbols of each library as cargo writes it, and once cargo is done compiles nothing more
+  before it is ready. The first edit reads the edited file's functions on every core. An edit
+  of a generic, `#[inline]` or default trait function, or one that moves such a function's
+  lines, is now a patch too when every copy rustc made of it is found in the executable: the
+  patch replaces the copies, and ripgrep's first edit is a patch. Thread-locals of a patch
+  over rustc's executable are reached as rustc's code reaches them (on Linux x86-64 the
+  general-dynamic sequence becomes local-exec, on macOS through the variable's descriptor).
+  On Linux x86-64 (16 vCPUs, 8 cores), interleaved runs from an empty store, command and
+  ready: just 8.5 to 8.2 s and 9.0 to 8.6 s, ripgrep 6.6 to 5.7 s and 6.9 to 5.9 s, nushell
+  43.5 to 37.6 s and 46.7 to 39.2 s, against 7.6, 5.4 and 35.7 s for plain `cargo build`. The
+  first edit: just 0.36 to 0.5 s, ripgrep 1.7 s built in full to 1.5 s patched, nushell 2.0 s
+  as before. The command's remaining cost is the spare's own: what it resolves of the
+  standard library and the workspace takes cores from cargo (docs/cargo.md).
 - An edit in a package whose build script cargo runs again for it (one that names no
   `rerun-if-changed`, as ripgrep's, fd's and hyperfine's) no longer waits for a
   `cargo check` that runs every build script of the workspace: the daemon runs that one

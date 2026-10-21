@@ -932,6 +932,15 @@ impl SymbolResolver for Resolver<'_> {
         self.named.lock().unwrap_or_else(|e| e.into_inner()).clear();
     }
 
+    fn rustc_instances(&self, func: FunctionId) -> Option<Vec<(String, String)>> {
+        let path = self.path(func)?;
+        // The crates that share a name are told apart by ids that demangled paths leave out.
+        if path.contains('[') {
+            return None;
+        }
+        self.rustcs()?.instances_of(&path)
+    }
+
     fn closure(&self, owner: FunctionId, expr: hir_def::hir::ExprId) -> Option<String> {
         let source_map = &Body::with_source_map(self.db, owner.into()).1;
         let written = source_map.expr_syntax(expr).ok()?;
@@ -1151,7 +1160,10 @@ impl SymbolResolver for Resolver<'_> {
     }
 
     fn path(&self, path: &str) -> Option<String> {
-        self.table.get(path).map(str::to_owned)
+        // A patch of rustc's executable can call what is private to an object of it too, as
+        // the copies rustc made of a generic function of another crate are.
+        let private = || self.rustcs()?.private(path);
+        self.table.get(path).or_else(private).map(str::to_owned)
     }
 
     fn item(&self, item: ModuleDefId) -> Option<String> {
@@ -2337,7 +2349,7 @@ fn report_sharing(db: &RootDatabase) {
     );
 }
 
-fn resolve_crates(db: &RootDatabase, args: &Args) -> anyhow::Result<usize> {
+fn resolve_crates(db: &RootDatabase, args: &Args, threads: usize) -> anyhow::Result<usize> {
     let mut seen = FxHashSet::default();
     let mut crates = Vec::new();
     for name in args.crates() {
@@ -2346,7 +2358,7 @@ fn resolve_crates(db: &RootDatabase, args: &Args) -> anyhow::Result<usize> {
             crates.extend(krate.transitive_deps(db).into_iter().filter(|&dep| seen.insert(dep)));
         }
     }
-    resolve_all(db, &crates);
+    resolve_all(db, &crates, threads);
     Ok(crates.len())
 }
 
@@ -2369,13 +2381,12 @@ fn resolve_names(db: &RootDatabase, crates: &[ide_db::base_db::Crate]) {
     });
 }
 
-/// Resolves the names and finds the impls of `crates`, on every core.
-fn resolve_all(db: &RootDatabase, crates: &[ide_db::base_db::Crate]) {
+/// Resolves the names and finds the impls of `crates`, on `threads`.
+fn resolve_all(db: &RootDatabase, crates: &[ide_db::base_db::Crate], threads: usize) {
     // A crate comes after its dependencies in the list: a thread that starts on one whose
     // dependencies are not resolved resolves them itself, one after the other.
     let next = std::sync::atomic::AtomicUsize::new(0);
     let helping = std::sync::atomic::AtomicUsize::new(0);
-    let threads = std::thread::available_parallelism().map_or(1, |it| it.get());
     std::thread::scope(|scope| {
         for _ in 0..threads {
             let db = db.clone();
@@ -2706,6 +2717,25 @@ fn home_in_rustcs(
                 Some((file, functions, declared.statics))
             })
             .collect();
+        let homing = |file: vfs::FileId| programs.iter().any(|it| it.known.homes_file(file));
+        let written: Vec<FunctionId> = found
+            .iter()
+            .filter(|(file, ..)| homing(*file))
+            .flat_map(|(_, functions, _)| functions.iter().copied())
+            .collect();
+        let next = std::sync::atomic::AtomicUsize::new(0);
+        std::thread::scope(|scope| {
+            for _ in 0..cores().min(written.len()) {
+                let (db, written, next) = (db.clone(), &written, &next);
+                scope.spawn(move || {
+                    hir::attach_db(&db, || {
+                        while let Some(&func) = written.get(next.fetch_add(1, Ordering::Relaxed)) {
+                            hir_ty::mir::codegen::compile_written(&db, func);
+                        }
+                    })
+                });
+            }
+        });
         let contents = content::Contents::default();
         for program in programs.iter_mut().filter(|it| it.known.homes()) {
             let Program { args, table, known, .. } = program;
@@ -4701,11 +4731,40 @@ fn requested(stream: UnixStream) -> Option<Event> {
 /// Ends the process when its standard input ends: the daemon that started this worker holds
 /// the other end for as long as it lives, however it dies.
 fn end_with_input() {
-    let mut held = [0u8; 64];
-    while std::io::Read::read(&mut std::io::stdin(), &mut held).is_ok_and(|read| read > 0) {}
+    while input_line().is_some() {}
     // The executables on disk get the last edits before the worker goes.
     splicer::flush();
     std::process::exit(0);
+}
+
+/// The lines of the standard input, read on a thread of their own from the first use on. The
+/// daemon writes what cargo says to a spare worker as cargo says it, and waits while the
+/// pipe is full: cargo then waits for the daemon.
+static INPUT: std::sync::LazyLock<Mutex<std::sync::mpsc::Receiver<String>>> =
+    std::sync::LazyLock::new(|| {
+        let (line, lines) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let mut input = std::io::stdin().lock();
+            loop {
+                let mut text = Vec::new();
+                match std::io::BufRead::read_until(&mut input, b'\n', &mut text) {
+                    Ok(len) if len > 0 => {
+                        let text = String::from_utf8(text)
+                            .unwrap_or_else(|it| String::from_utf8_lossy(it.as_bytes()).into());
+                        if line.send(text).is_err() {
+                            break;
+                        }
+                    }
+                    _ => break,
+                }
+            }
+        });
+        Mutex::new(lines)
+    });
+
+/// The next line of the standard input, `None` once it has ended.
+fn input_line() -> Option<String> {
+    INPUT.lock().unwrap_or_else(|e| e.into_inner()).recv().ok()
 }
 
 const HELP: &str = "\
@@ -4819,12 +4878,14 @@ fn main() -> anyhow::Result<()> {
 }
 
 /// Compiles the crates `args` names on `threads` threads until `done`: the symbols a build
-/// waits for are not needed for it.
+/// waits for are not needed for it. With `follow` the generic instances their functions
+/// reach are compiled too.
 fn lower_until(
     db: &RootDatabase,
     args: &Args,
     listed: &Listed,
     threads: usize,
+    follow: bool,
     done: &(dyn Fn() -> bool + Sync),
 ) -> anyhow::Result<()> {
     if done() {
@@ -4848,7 +4909,10 @@ fn lower_until(
         }
     }
     let count = functions.len();
-    let unnamed = hir_ty::mir::codegen::Unnamed::new(functions);
+    let unnamed = match follow {
+        true => hir_ty::mir::codegen::Unnamed::new(functions),
+        false => hir_ty::mir::codegen::Unnamed::alone(functions),
+    };
     std::thread::scope(|scope| {
         for _ in 0..threads {
             let (db, unnamed) = (db.clone(), &unnamed);
@@ -4885,6 +4949,12 @@ fn lower_until(
 
 fn cores() -> usize {
     std::thread::available_parallelism().map_or(1, |it| it.get())
+}
+
+/// The threads that work beside a build of cargo's: a quarter of the cores, the rest being
+/// cargo's.
+fn beside_cargo() -> usize {
+    (cores() / 4).max(1)
 }
 
 /// How cargo is asked about the workspace of `args`.
@@ -4977,7 +5047,8 @@ impl Held {
         checkouts.load_config = load_config();
         let all: Vec<ide_db::base_db::Crate> =
             Crate::all(&db).into_iter().map(Into::into).collect();
-        resolve_all(&db, &all);
+        // The spare starts with the daemon, which the first build starts as cargo does.
+        resolve_all(&db, &all, beside_cargo());
         eprintln!("spare: {} crates in {:.1?}", all.len(), start.elapsed());
         Ok(Held { db, vfs, checkouts })
     }
@@ -5078,16 +5149,17 @@ impl Said {
                 read.more.notify_all();
             };
             loop {
-                // Not `stdin().lines()`: that holds the standard input's lock for the whole loop,
-                // and `end_with_input` below waits for it.
-                let mut text = String::new();
-                let got = std::io::stdin().read_line(&mut text);
-                let line = got
-                    .ok()
-                    .filter(|&len| len > 0)
-                    .and_then(|_| serde_json::from_str::<Line>(&text).ok());
+                let line = input_line().and_then(|text| serde_json::from_str::<Line>(&text).ok());
                 match line {
-                    Some(Line::Said { said: line }) => tell(&|it| it.said.push(line.clone())),
+                    // A library is read for its symbols, and is nothing the workspace is
+                    // loaded from.
+                    Some(Line::Said { said: line }) => match libraries_in(&line) {
+                        Some(files) => files
+                            .into_iter()
+                            .map(|it| cargo::Record::kept_copy(&it).unwrap_or(it))
+                            .for_each(symbols::read_ahead),
+                        None => tell(&|it| it.said.push(line.clone())),
+                    },
                     Some(Line::Whole(told)) => {
                         tell(&|it| it.ended = true);
                         _ = built.send(Args::parse(told.args.into_iter()));
@@ -5150,6 +5222,27 @@ impl Awaited {
             _ => None,
         }
     }
+}
+
+/// The libraries cargo says it built in `line`, when it is of a crate that is not a proc
+/// macro.
+fn libraries_in(line: &str) -> Option<Vec<PathBuf>> {
+    #[derive(serde::Deserialize)]
+    struct Message {
+        reason: String,
+        target: Target,
+        filenames: Vec<PathBuf>,
+    }
+    #[derive(serde::Deserialize)]
+    struct Target {
+        kind: Vec<String>,
+    }
+    let message: Message = serde_json::from_str(line).ok()?;
+    let proc_macro = message.target.kind.iter().any(|it| it == "proc-macro");
+    (message.reason == "compiler-artifact" && !proc_macro).then(|| {
+        let rlib = |it: &PathBuf| it.extension().is_some_and(|it| it == "rlib");
+        message.filenames.into_iter().filter(rlib).collect()
+    })
 }
 
 /// A checkout that is loaded while cargo builds it. What its build scripts say and where
@@ -5250,9 +5343,11 @@ impl Beside {
     }
 }
 
-/// Compiles the crates of the checkout loaded beside cargo's build that cargo has said
-/// everything of, and takes in what cargo says next, until it has said all of it. The crates
-/// of the packages cargo builds are what it comes back with, by the file each starts from.
+/// Compiles the functions of the crates of the checkout loaded beside cargo's build that
+/// cargo has said everything of, and takes in what cargo says next, until its build is over.
+/// The crates of the packages cargo builds are what it comes back with, by the file each
+/// starts from. The generic instances those functions reach are left to the edits: on a
+/// quarter of the cores they made cargo's build of nushell a twentieth slower.
 fn follow_cargo(
     db: &mut RootDatabase,
     vfs: &mut Vfs,
@@ -5262,13 +5357,14 @@ fn follow_cargo(
 ) -> anyhow::Result<Option<FxHashSet<PathBuf>>> {
     let Some(mut beside) = checkouts.beside.take() else { return Ok(None) };
     let mut ready = FxHashSet::default();
+    let mut all_applied = false;
     loop {
         let (lines, ended) = beside.said.so_far();
         let workspace = &checkouts.loaded.workspaces()[beside.at];
         let ProjectWorkspaceKind::Cargo { cargo, .. } = &workspace.kind else { return Ok(None) };
         let (now, all) = beside.ready(cargo, &lines);
         let all = all || ended;
-        if lines.len() > beside.applied && (all || now != ready) {
+        if lines.len() > beside.applied && (now != ready || all && !all_applied) {
             let scripts =
                 WorkspaceBuildScripts::of_messages(cargo, lines.iter().map(String::as_str));
             let mut workspace = workspace.clone();
@@ -5277,17 +5373,20 @@ fn follow_cargo(
             let Checkouts { loaded, cargo_config, load_config, .. } = checkouts;
             loaded.add(Vec::new(), &cargo_config.extra_env, load_config, vfs, db)?;
             beside.applied = lines.len();
+            all_applied = all;
         }
-        if all {
-            // With all of it said, every crate of the build is ready.
+        if ended {
             let workspace = &checkouts.loaded.workspaces()[beside.at];
             let ProjectWorkspaceKind::Cargo { cargo, .. } = &workspace.kind else {
                 return Ok(None);
             };
             return Ok(Some(beside.built_roots(cargo)));
         }
+        // With all of it said, cargo still compiles and links the last crates: the cores
+        // are cargo's until its build is over.
         ready = now;
-        // Whether cargo has said what makes another crate ready, asked once a line.
+        // Whether cargo has said what makes another crate ready, or that its build is over,
+        // asked once a line.
         let seen = Mutex::new((lines.len(), false));
         let more = || {
             let mut seen = seen.lock().unwrap_or_else(|e| e.into_inner());
@@ -5314,12 +5413,8 @@ fn follow_cargo(
                 debug,
                 ..args.clone()
             };
-            // Every core resolves the names; one would, were it left to the compiling.
-            resolve_crates(db, &of_ready)?;
-            // A quarter of the cores, the rest being cargo's: on all of them the compile made
-            // cargo's build of nushell a seventh slower, and on a quarter it keeps most of
-            // what the first edit gains from it.
-            lower_until(db, &of_ready, listed, (cores() / 4).max(1), &more)?;
+            resolve_crates(db, &of_ready, beside_cargo())?;
+            lower_until(db, &of_ready, listed, beside_cargo(), false, &more)?;
         }
         while !more() {
             let seen = seen.lock().unwrap_or_else(|e| e.into_inner()).0;
@@ -5331,11 +5426,10 @@ fn follow_cargo(
 /// Loads the library of the toolchain, waits to be told a build, and runs as the worker of
 /// it. The process ends when its input does without a build.
 fn spare(dir: &Path) -> anyhow::Result<()> {
+    // A build may start while the library loads, and its lines are read as they come.
+    std::sync::LazyLock::force(&INPUT);
     let held = Held::load(dir).inspect_err(|why| eprintln!("spare: nothing held: {why:#}")).ok();
-    let mut line = String::new();
-    if std::io::stdin().read_line(&mut line)? == 0 {
-        return Ok(());
-    }
+    let Some(line) = input_line() else { return Ok(()) };
     let told: Told = serde_json::from_str(&line).context("what the spare worker is told")?;
     for (name, value) in &told.env {
         // SAFETY: the threads that loaded the library have ended, and the ones that remain
@@ -5439,15 +5533,16 @@ fn run_holding(
     };
     let listed = Arc::new(Listed::default());
     ide_db::base_db::set_process_env(&mut db, process::own());
-    // What is compiled while cargo builds is stored too, so the store is told the toolchain
-    // first. A build told ahead of cargo's links the library of the toolchain that was loaded, or
-    // is not the daemon's.
+    // What is compiled ahead is stored too, so the store is told the toolchain first. A build
+    // told ahead of cargo's links the library of the toolchain that was loaded, or is not the
+    // daemon's.
     let library = ahead.then(|| built_library(&vfs, emits.triple()));
     match toolchain_identity(&vfs, library.as_ref().unwrap_or(&args.symbol_files)) {
         Some(toolchain) => hir_ty::mir::codegen::compiles_against(&toolchain),
         None => eprintln!("store: the toolchain of the library cannot be told from another"),
     }
     let built = follow_cargo(&mut db, &mut vfs, &mut checkouts, &args, &listed)?;
+    let beside = built.is_some();
     let Parts { root, base, members, debug } = checkouts.parts(&args.project)?;
     (args.checkout, args.base, args.members, args.debug) = (root, base, members, debug);
     // The names are resolved before cargo says which program it built: those of the crates
@@ -5481,11 +5576,11 @@ fn run_holding(
     if checkouts.lto(&args.project)? {
         linked_from_libraries(&db, &args)?;
     }
-    let mut resolved = resolve_crates(&db, &args)?;
+    let mut resolved = resolve_crates(&db, &args, cores())?;
     // Resolving the names finds the files `include!` names that were not loaded. With those
     // in, there may be more.
     while WatchedFile::include_sources(&mut files, &mut tree, &mut db) != Loaded::Nothing {
-        resolved = resolve_crates(&db, &args)?;
+        resolved = resolve_crates(&db, &args, cores())?;
     }
     eprintln!("resolve: {resolved} crates in {:.1?}", start.elapsed());
     memory::checkpoint("resolve");
@@ -5494,7 +5589,7 @@ fn run_holding(
         let start = Instant::now();
         let Parts { root: checkout, base, members, debug } = checkouts.parts(also)?;
         let of_it = Args { checkout, base, members, debug, ..args.clone() };
-        let resolved = resolve_crates(&db, &of_it)?;
+        let resolved = resolve_crates(&db, &of_it, cores())?;
         eprintln!("resolve {}: {resolved} crates in {:.1?}", also.display(), start.elapsed());
     }
     if !args.also.is_empty() {
@@ -5515,7 +5610,11 @@ fn run_holding(
     let mut known = Rejections::default();
     known.patching = args.patch.is_some();
     let mut outlines = outline::Outlines::default();
-    lower_until(&db, &args, &listed, cores(), &|| table.is_finished())?;
+    // Beside cargo the symbols were read as cargo wrote them, and are there a moment after
+    // the names are resolved: a compile started now would hold up readiness past that.
+    if !beside {
+        lower_until(&db, &args, &listed, cores(), true, &|| table.is_finished())?;
+    }
     let (table, whole) =
         table.join().map_err(|_| anyhow::anyhow!("loading the symbols panicked"))??;
     if let Some(whole) = whole {
@@ -6435,10 +6534,14 @@ fn run_holding(
         let before_outlines = start.elapsed();
         let sources = outlines.after_edit(&db, &listed, sources);
         let outlined = start.elapsed();
-        for outline::Changed { file, bodies_only, copied } in sources {
-            if copied {
+        for outline::Changed { file, bodies_only, copied, generics } in sources {
+            if copied || !generics.is_empty() {
                 let why = "an edit of a generic, inline or default trait function, which rustc copies into its callers";
-                programs.iter_mut().for_each(|it| it.known.forget_rustc_for(why));
+                let unknown = |it: &Program| copied || !it.known.copies_homed(file, &generics);
+                programs
+                    .iter_mut()
+                    .filter(|it| unknown(it))
+                    .for_each(|it| it.known.forget_rustc_for(why));
             }
             if bodies_only {
                 if std::env::var_os("RA_JIT_STATS").is_some() {

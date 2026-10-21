@@ -264,6 +264,12 @@ pub trait SymbolResolver {
     fn linked(&self, _symbol: &str) -> bool {
         true
     }
+    /// The copies the executable a patch goes into has of the instances of `func`, a generic
+    /// function of a module, each by its path as [`Spelling::instance_path`] writes it with
+    /// rustc's symbol of it. `None` when that can't be told of each, as of one copied twice.
+    fn rustc_instances(&self, _func: FunctionId) -> Option<Vec<(String, String)>> {
+        None
+    }
     /// rustc's symbol of the closure at `expr` in the body of `owner`, which is not generic.
     fn closure(&self, _owner: FunctionId, _expr: hir_def::hir::ExprId) -> Option<String> {
         None
@@ -1120,6 +1126,17 @@ impl Rejections {
         }
     }
 
+    /// Whether the patches of what rustc linked replace each of rustc's copies of the generic
+    /// functions of the modules of `file` named `names`, which [`Self::home`] took in.
+    pub fn copies_homed(&self, file: base_db::FileId, names: &[String]) -> bool {
+        self.base.is_none() && self.rustc.as_ref().is_some_and(|it| it.copies_homed(file, names))
+    }
+
+    /// Whether [`Self::home`] has to note `file` yet.
+    pub fn homes_file(&self, file: base_db::FileId) -> bool {
+        self.homes() && self.rustc.as_ref().is_some_and(|it| !it.homed(file))
+    }
+
     /// Whether a patch of what rustc linked has to know `file` before it changes.
     pub fn homes(&self) -> bool {
         self.base.is_none() && self.rustc.as_ref().is_some_and(|it| !it.outdated())
@@ -1350,6 +1367,180 @@ enum Callee<'db> {
     Instance(InstanceDef, GenericArgs<'db>),
     /// With how many of the arguments are for named parameters, when the rest are for `...`.
     Pointer(Value, ExternAbi, Option<usize>),
+}
+
+/// How rustc's demangled symbols spell the types and instances of the program.
+struct Spelling<'a, 'db> {
+    db: &'db dyn HirDatabase,
+    symbols: &'a dyn SymbolResolver,
+}
+
+impl<'db> Spelling<'_, 'db> {
+    /// A generic function with its arguments as it reads in a demangled rustc symbol:
+    /// `<Vec<u8> as Clone>::clone`, `<Option<u8>>::map::<u8, F>`, `core::mem::swap::<u8>`.
+    fn instance_path(&self, func: FunctionId, args: GenericArgs<'db>) -> Option<String> {
+        let db = self.db;
+        let signature = FunctionSignature::of(db, func);
+        // The future of an `async fn` is laid out differently by the two compilers.
+        if signature.is_async() {
+            return None;
+        }
+        let name = signature.name.as_str();
+        let interner = DbInterner::new_no_crate(db);
+        let types = |args: &[crate::next_solver::GenericArg<'db>]| {
+            args.iter()
+                .filter(|it| it.region().is_none())
+                .map(|it| self.symbol_arg(*it))
+                .collect::<Option<Vec<_>>>()
+        };
+        let parent = crate::generics::generics(db, func.into()).len_parent();
+        let (parent, own) = args.as_slice().split_at_checked(parent)?;
+        let mut path = match func.lookup(db).container {
+            ItemContainerId::ModuleId(_) => self.symbols.item(func.into())?,
+            ItemContainerId::TraitId(trait_) => {
+                let (self_ty, rest) = parent.split_first()?;
+                let mut path = format!(
+                    "<{} as {}",
+                    self.symbol_type(self_ty.ty()?)?,
+                    self.symbols.item(trait_.into())?
+                );
+                let rest = types(rest)?;
+                if !rest.is_empty() {
+                    path.push_str(&format!("<{}>", rest.join(", ")));
+                }
+                format!("{path}>::{name}")
+            }
+            ItemContainerId::ImplId(impl_) => {
+                let parent_args = GenericArgs::new_from_slice(parent);
+                let self_ty =
+                    db.impl_self_ty(impl_).instantiate(interner, parent_args).skip_norm_wip();
+                let self_ty = self.symbol_type(self_ty)?;
+                match db.impl_trait(impl_) {
+                    None => format!("<{self_ty}>::{name}"),
+                    Some(trait_ref) => {
+                        let trait_ref =
+                            trait_ref.instantiate(interner, parent_args).skip_norm_wip();
+                        let mut path = format!(
+                            "<{self_ty} as {}",
+                            self.symbols.item(trait_ref.def_id.0.into())?
+                        );
+                        let rest = types(&trait_ref.args.as_slice()[1..])?;
+                        if !rest.is_empty() {
+                            path.push_str(&format!("<{}>", rest.join(", ")));
+                        }
+                        format!("{path}>::{name}")
+                    }
+                }
+            }
+            ItemContainerId::ExternBlockId(_) => return None,
+        };
+        let own = types(own)?;
+        if !own.is_empty() {
+            path.push_str(&format!("::<{}>", own.join(", ")));
+        }
+        Some(path)
+    }
+
+    /// A type or a `usize` an instance is instantiated with, as rustc's symbols spell it.
+    fn symbol_arg(&self, arg: crate::next_solver::GenericArg<'db>) -> Option<String> {
+        match (arg.ty(), arg.konst()) {
+            (Some(ty), _) => self.symbol_type(ty),
+            (None, Some(len)) => Some(try_const_usize(self.db, len)?.to_string()),
+            (None, None) => None,
+        }
+    }
+
+    /// A type as it reads in a demangled rustc symbol. `None` for the types whose spelling
+    /// there this does not know: closures, `dyn`, function pointers, anything with a lifetime
+    /// argument.
+    fn symbol_type(&self, ty: Ty<'db>) -> Option<String> {
+        use std::fmt::Write;
+        let db = self.db;
+        let list = |tys: &mut dyn Iterator<Item = Ty<'db>>| {
+            tys.map(|it| self.symbol_type(it)).collect::<Option<Vec<_>>>().map(|it| it.join(", "))
+        };
+        Some(match ty.kind() {
+            TyKind::Bool => "bool".to_owned(),
+            TyKind::Char => "char".to_owned(),
+            TyKind::Str => "str".to_owned(),
+            TyKind::Never => "!".to_owned(),
+            TyKind::Int(it) => it.name_str().to_owned(),
+            TyKind::Uint(it) => it.name_str().to_owned(),
+            TyKind::Float(it) => it.name_str().to_owned(),
+            TyKind::Ref(_, pointee, Mutability::Not) => format!("&{}", self.symbol_type(pointee)?),
+            TyKind::Ref(_, pointee, Mutability::Mut) => {
+                format!("&mut {}", self.symbol_type(pointee)?)
+            }
+            TyKind::RawPtr(pointee, Mutability::Not) => {
+                format!("*const {}", self.symbol_type(pointee)?)
+            }
+            TyKind::RawPtr(pointee, Mutability::Mut) => {
+                format!("*mut {}", self.symbol_type(pointee)?)
+            }
+            TyKind::Slice(element) => format!("[{}]", self.symbol_type(element)?),
+            TyKind::Array(element, len) => {
+                format!("[{}; {}]", self.symbol_type(element)?, try_const_usize(db, len)?)
+            }
+            TyKind::Tuple(tys) if tys.len() == 1 => format!("({},)", list(&mut tys.iter())?),
+            TyKind::Tuple(tys) => format!("({})", list(&mut tys.iter())?),
+            TyKind::Adt(adt, args) => {
+                let mut path = self.symbols.item(adt.def_id().into())?;
+                let interner = DbInterner::new_no_crate(db);
+                let defaults = db.generic_defaults(adt.def_id().into());
+                let mut args = args.as_slice();
+                // rustc leaves out the arguments that say what the default says.
+                while let Some((last, rest)) = args.split_last()
+                    && let Some(default) = defaults.get(rest.len())
+                    && default.instantiate(interner, rest).skip_norm_wip() == *last
+                {
+                    args = rest;
+                }
+                let args = args.iter().filter(|it| it.region().is_none());
+                let args = args.map(|it| self.symbol_arg(*it)).collect::<Option<Vec<_>>>()?;
+                if !args.is_empty() {
+                    write!(path, "<{}>", args.join(", ")).ok()?;
+                }
+                path
+            }
+            TyKind::FnPtr(..) => {
+                let sig = ty.fn_sig(DbInterner::new_no_crate(db)).no_bound_vars()?;
+                if sig.abi() != ExternAbi::Rust
+                    || sig.c_variadic()
+                    || sig.safety() != crate::next_solver::abi::Safety::Safe
+                {
+                    return None;
+                }
+                let mut path = format!("fn({})", list(&mut sig.inputs().iter().copied())?);
+                if !sig.output().is_unit() {
+                    write!(path, " -> {}", self.symbol_type(sig.output())?).ok()?;
+                }
+                path
+            }
+            TyKind::Dynamic(bounds, _) => {
+                let principal = bounds.principal()?.no_bound_vars()?;
+                let mut path = format!("dyn {}", self.symbols.item(principal.def_id.0.into())?);
+                let args = principal.args.iter().filter(|it| it.region().is_none());
+                let mut args = args.map(|it| self.symbol_arg(it)).collect::<Option<Vec<_>>>()?;
+                for bound in bounds.projection_bounds() {
+                    let bound = bound.no_bound_vars()?;
+                    let crate::next_solver::TermId::TypeAliasId(alias) = bound.def_id.0 else {
+                        return None;
+                    };
+                    let name = hir_def::signatures::TypeAliasSignature::of(db, alias).name.clone();
+                    let ty = rustc_type_ir::inherent::Term::as_type(&bound.term)?;
+                    args.push(format!("{} = {}", name.as_str(), self.symbol_type(ty)?));
+                }
+                if !args.is_empty() {
+                    write!(path, "<{}>", args.join(", ")).ok()?;
+                }
+                for auto in bounds.auto_traits() {
+                    write!(path, " + {}", self.symbols.item(auto.0.into())?).ok()?;
+                }
+                path
+            }
+            _ => return None,
+        })
+    }
 }
 
 /// Stitches compiled functions into one object: gives every function and data object they
@@ -1731,6 +1922,8 @@ fn static_serial(db: &dyn HirDatabase, id: StaticId) -> u128 {
 pub struct Unnamed {
     state: std::sync::Mutex<UnnamedState>,
     told: ToldTypes,
+    /// The generic instances the functions reach are compiled too.
+    follow: bool,
 }
 
 /// The types [`compile_unnamed`] told of, for the build that comes next.
@@ -1751,12 +1944,29 @@ impl Unnamed {
         let state = UnnamedState { roots, ..Default::default() };
         let told = ToldTypes::default();
         *TOLD_UNNAMED.lock().unwrap_or_else(|e| e.into_inner()) = Some(told.clone());
-        Unnamed { state: std::sync::Mutex::new(state), told }
+        Unnamed { state: std::sync::Mutex::new(state), told, follow: true }
+    }
+
+    /// The functions alone, without the instances they reach: what an edit's first look at
+    /// the functions of its file compiles.
+    pub fn alone(roots: Vec<FunctionId>) -> Unnamed {
+        Unnamed { follow: false, ..Unnamed::new(roots) }
     }
 
     /// How many functions and instances were compiled.
     pub fn compiled(&self) -> usize {
         self.state.lock().unwrap_or_else(|e| e.into_inner()).compiled
+    }
+}
+
+/// Compiles a function written in a file [`Rejections::home`] notes next, which compiles them
+/// one after another, so that threads share that work. One rustc copies into its callers,
+/// which `home` passes over, is not compiled.
+pub fn compile_written(db: &dyn HirDatabase, func: FunctionId) {
+    if !patch::copied_by_rustc(db, func) {
+        let compile = || compiled_root(db, func).is_ok();
+        // One that panics does again as `home` compiles it, which says so.
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(compile));
     }
 }
 
@@ -1801,7 +2011,8 @@ pub fn compile_unnamed(db: &dyn HirDatabase, unnamed: &Unnamed, done: &dyn Fn() 
         if let Ok(Some(compiled)) = compiled {
             unnamed.told.ahead(db, compiled);
         }
-        for request in compiled.iter().flatten().flat_map(|it| &it.requests.funcs) {
+        let followed = compiled.iter().flatten().filter(|_| unnamed.follow);
+        for request in followed.flat_map(|it| &it.requests.funcs) {
             let FuncTarget::Instance(callee, asked) = &request.target else { continue };
             let named = matches!(callee.def, InstanceDef::Fn(_))
                 && callee.args.as_ref().iter().all(|it| it.region().is_some());
@@ -5811,69 +6022,12 @@ impl<'a, 'db> ObjectCodegen<'a, 'db> {
         self.define_shim(id, &mut ctx).ok()
     }
 
-    /// A generic function with its arguments as it reads in a demangled rustc symbol:
-    /// `<Vec<u8> as Clone>::clone`, `<Option<u8>>::map::<u8, F>`, `core::mem::swap::<u8>`.
+    fn spelling(&self) -> Spelling<'_, 'db> {
+        Spelling { db: self.db, symbols: self.symbols }
+    }
+
     fn instance_path(&self, func: FunctionId, args: GenericArgs<'db>) -> Option<String> {
-        let db = self.db;
-        let signature = FunctionSignature::of(db, func);
-        // The future of an `async fn` is laid out differently by the two compilers.
-        if signature.is_async() {
-            return None;
-        }
-        let name = signature.name.as_str();
-        let interner = DbInterner::new_no_crate(db);
-        let types = |args: &[crate::next_solver::GenericArg<'db>]| {
-            args.iter()
-                .filter(|it| it.region().is_none())
-                .map(|it| self.symbol_arg(*it))
-                .collect::<Option<Vec<_>>>()
-        };
-        let parent = crate::generics::generics(db, func.into()).len_parent();
-        let (parent, own) = args.as_slice().split_at_checked(parent)?;
-        let mut path = match func.lookup(db).container {
-            ItemContainerId::ModuleId(_) => self.symbols.item(func.into())?,
-            ItemContainerId::TraitId(trait_) => {
-                let (self_ty, rest) = parent.split_first()?;
-                let mut path = format!(
-                    "<{} as {}",
-                    self.symbol_type(self_ty.ty()?)?,
-                    self.symbols.item(trait_.into())?
-                );
-                let rest = types(rest)?;
-                if !rest.is_empty() {
-                    path.push_str(&format!("<{}>", rest.join(", ")));
-                }
-                format!("{path}>::{name}")
-            }
-            ItemContainerId::ImplId(impl_) => {
-                let parent_args = GenericArgs::new_from_slice(parent);
-                let self_ty =
-                    db.impl_self_ty(impl_).instantiate(interner, parent_args).skip_norm_wip();
-                let self_ty = self.symbol_type(self_ty)?;
-                match db.impl_trait(impl_) {
-                    None => format!("<{self_ty}>::{name}"),
-                    Some(trait_ref) => {
-                        let trait_ref =
-                            trait_ref.instantiate(interner, parent_args).skip_norm_wip();
-                        let mut path = format!(
-                            "<{self_ty} as {}",
-                            self.symbols.item(trait_ref.def_id.0.into())?
-                        );
-                        let rest = types(&trait_ref.args.as_slice()[1..])?;
-                        if !rest.is_empty() {
-                            path.push_str(&format!("<{}>", rest.join(", ")));
-                        }
-                        format!("{path}>::{name}")
-                    }
-                }
-            }
-            ItemContainerId::ExternBlockId(_) => return None,
-        };
-        let own = types(own)?;
-        if !own.is_empty() {
-            path.push_str(&format!("::<{}>", own.join(", ")));
-        }
-        Some(path)
+        self.spelling().instance_path(func, args)
     }
 
     /// A `TypeId::of::<T>` that returns `hash`, the two words of which are its value.
@@ -5953,105 +6107,8 @@ impl<'a, 'db> ObjectCodegen<'a, 'db> {
         args.as_slice().first()?.ty()
     }
 
-    /// A type as it reads in a demangled rustc symbol. `None` for the types whose spelling
-    /// there this does not know: closures, `dyn`, function pointers, anything with a lifetime
-    /// argument.
-    /// A type or a `usize` an instance is instantiated with, as rustc's symbols spell it.
-    fn symbol_arg(&self, arg: crate::next_solver::GenericArg<'db>) -> Option<String> {
-        match (arg.ty(), arg.konst()) {
-            (Some(ty), _) => self.symbol_type(ty),
-            (None, Some(len)) => Some(try_const_usize(self.db, len)?.to_string()),
-            (None, None) => None,
-        }
-    }
-
     fn symbol_type(&self, ty: Ty<'db>) -> Option<String> {
-        use std::fmt::Write;
-        let db = self.db;
-        let list = |tys: &mut dyn Iterator<Item = Ty<'db>>| {
-            tys.map(|it| self.symbol_type(it)).collect::<Option<Vec<_>>>().map(|it| it.join(", "))
-        };
-        Some(match ty.kind() {
-            TyKind::Bool => "bool".to_owned(),
-            TyKind::Char => "char".to_owned(),
-            TyKind::Str => "str".to_owned(),
-            TyKind::Never => "!".to_owned(),
-            TyKind::Int(it) => it.name_str().to_owned(),
-            TyKind::Uint(it) => it.name_str().to_owned(),
-            TyKind::Float(it) => it.name_str().to_owned(),
-            TyKind::Ref(_, pointee, Mutability::Not) => format!("&{}", self.symbol_type(pointee)?),
-            TyKind::Ref(_, pointee, Mutability::Mut) => {
-                format!("&mut {}", self.symbol_type(pointee)?)
-            }
-            TyKind::RawPtr(pointee, Mutability::Not) => {
-                format!("*const {}", self.symbol_type(pointee)?)
-            }
-            TyKind::RawPtr(pointee, Mutability::Mut) => {
-                format!("*mut {}", self.symbol_type(pointee)?)
-            }
-            TyKind::Slice(element) => format!("[{}]", self.symbol_type(element)?),
-            TyKind::Array(element, len) => {
-                format!("[{}; {}]", self.symbol_type(element)?, try_const_usize(db, len)?)
-            }
-            TyKind::Tuple(tys) if tys.len() == 1 => format!("({},)", list(&mut tys.iter())?),
-            TyKind::Tuple(tys) => format!("({})", list(&mut tys.iter())?),
-            TyKind::Adt(adt, args) => {
-                let mut path = self.symbols.item(adt.def_id().into())?;
-                let interner = DbInterner::new_no_crate(db);
-                let defaults = db.generic_defaults(adt.def_id().into());
-                let mut args = args.as_slice();
-                // rustc leaves out the arguments that say what the default says.
-                while let Some((last, rest)) = args.split_last()
-                    && let Some(default) = defaults.get(rest.len())
-                    && default.instantiate(interner, rest).skip_norm_wip() == *last
-                {
-                    args = rest;
-                }
-                let args = args.iter().filter(|it| it.region().is_none());
-                let args = args.map(|it| self.symbol_arg(*it)).collect::<Option<Vec<_>>>()?;
-                if !args.is_empty() {
-                    write!(path, "<{}>", args.join(", ")).ok()?;
-                }
-                path
-            }
-            TyKind::FnPtr(..) => {
-                let sig = ty.fn_sig(DbInterner::new_no_crate(db)).no_bound_vars()?;
-                if sig.abi() != ExternAbi::Rust
-                    || sig.c_variadic()
-                    || sig.safety() != crate::next_solver::abi::Safety::Safe
-                {
-                    return None;
-                }
-                let mut path = format!("fn({})", list(&mut sig.inputs().iter().copied())?);
-                if !sig.output().is_unit() {
-                    write!(path, " -> {}", self.symbol_type(sig.output())?).ok()?;
-                }
-                path
-            }
-            TyKind::Dynamic(bounds, _) => {
-                let principal = bounds.principal()?.no_bound_vars()?;
-                let mut path = format!("dyn {}", self.symbols.item(principal.def_id.0.into())?);
-                let args = principal.args.iter().filter(|it| it.region().is_none());
-                let mut args = args.map(|it| self.symbol_arg(it)).collect::<Option<Vec<_>>>()?;
-                for bound in bounds.projection_bounds() {
-                    let bound = bound.no_bound_vars()?;
-                    let crate::next_solver::TermId::TypeAliasId(alias) = bound.def_id.0 else {
-                        return None;
-                    };
-                    let name = hir_def::signatures::TypeAliasSignature::of(db, alias).name.clone();
-                    let ty = rustc_type_ir::inherent::Term::as_type(&bound.term)?;
-                    args.push(format!("{} = {}", name.as_str(), self.symbol_type(ty)?));
-                }
-                if !args.is_empty() {
-                    write!(path, "<{}>", args.join(", ")).ok()?;
-                }
-                for auto in bounds.auto_traits() {
-                    write!(path, " + {}", self.symbols.item(auto.0.into())?).ok()?;
-                }
-                path
-            }
-            _ => return None,
-        })
+        self.spelling().symbol_type(ty)
     }
 
     /// rustc's own `<dyn Any>::is::<T>` or `downcast_ref::<T>`, when `func` is such a method

@@ -447,7 +447,8 @@ impl Unit {
         // The executable is the daemon's to link; of the outputs it reads the libraries.
         let libraries =
             record.outputs().into_iter().filter(|it| it.extension().is_some_and(|it| it == "rlib"));
-        let mut originals: Vec<PathBuf> = libraries.filter(|it| it.exists()).collect();
+        let mut originals: Vec<(PathBuf, bool)> =
+            libraries.filter(|it| it.exists()).map(|it| (it, false)).collect();
         if let Some(line) = &link_line {
             let line = std::fs::read_to_string(line)
                 .with_context(|| format!("rustc wrote no link line to {}", line.display()))?;
@@ -456,15 +457,23 @@ impl Unit {
                 .into_iter()
                 .filter(|it| it.ends_with(".rcgu.o") || super::plan::is_symbols(it))
                 .map(PathBuf::from);
-            originals.extend(objects.filter(|it| it.exists()));
+            // The objects are rustc's to delete once it has linked, and kept for the daemon
+            // alone: they are moved rather than copied, as copying those of a large program
+            // holds up the build. On Apple's systems the program's debug info stays in them,
+            // where a debugger looks for it.
+            let moved = !self.for_apple();
+            originals.extend(objects.filter(|it| it.exists()).map(|it| (it, moved)));
         }
         std::fs::create_dir_all(to)?;
         let mut copies = Vec::new();
-        for original in originals {
+        for (original, moved) in originals {
             let name = original.file_name().context("an output without a name")?;
             let copy = to.join(name);
-            std::fs::copy(&original, &copy)
-                .with_context(|| format!("copying {}", original.display()))?;
+            // Another file system takes a copy.
+            if !(moved && std::fs::rename(&original, &copy).is_ok()) {
+                std::fs::copy(&original, &copy)
+                    .with_context(|| format!("copying {}", original.display()))?;
+            }
             copies.push(Copied { original, copy });
         }
         // The daemon tells which crate a file of rustc's is by the dep-info next to it, of

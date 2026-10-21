@@ -645,6 +645,7 @@ impl Machine {
                 elf::R_X86_64_GOTPCREL | elf::R_X86_64_GOTPCRELX | elf::R_X86_64_REX_GOTPCRELX => {
                     (Fixup::ThroughSlot, Field::Distance)
                 }
+                elf::R_X86_64_TLSGD => (Fixup::ThreadLocal, Field::Distance),
                 other => bail!("a relocation of type {other}, which only the linker handles"),
             },
             Machine::Aarch64 => match r_type {
@@ -881,7 +882,8 @@ impl Image {
         let (table, _) = (file.section_by_name(".symtab").and_then(|it| it.file_range()))
             .context("the executable has no symbol table")?;
         for symbol in file.symbols() {
-            if !symbol.is_definition() || symbol.section_index().is_none() {
+            let defines = symbol.is_definition() || symbol.kind() == SymbolKind::Tls;
+            if !defines || symbol.section_index().is_none() {
                 continue;
             }
             let name = symbol.name_bytes()?;
@@ -954,6 +956,19 @@ impl Image {
             }
         }
         Ok(false)
+    }
+
+    /// How far the thread-local `offset` into the executable's block of them is from the
+    /// thread pointer: on x86-64 the block ends where the pointer is, at a multiple of what
+    /// it is aligned to.
+    fn thread_offset(&self, offset: u64) -> anyhow::Result<i32> {
+        let e = Endianness::Little;
+        ensure!(self.machine == Machine::X86_64, "a thread-local of an AArch64 executable");
+        let block = self.segments_of(elf::PT_TLS).next().context("no block of thread-locals")?;
+        let (start, size) = (block.p_vaddr(e), block.p_memsz(e));
+        let align = block.p_align(e).max(1);
+        let below = size + (start.wrapping_neg().wrapping_sub(size) & (align - 1));
+        i32::try_from(offset as i64 - below as i64).context("a block of thread-locals of 2 GB")
     }
 
     fn segments_of(&self, kind: u32) -> impl Iterator<Item = &elf::ProgramHeader64<Endianness>> {
@@ -1276,6 +1291,8 @@ enum Target {
     Theirs(u64),
     /// In another library: the loader writes its address to the slot.
     Import(u64),
+    /// A thread-local of the executable, this far from the thread pointer.
+    ThreadLocal(i32),
 }
 
 struct Replaced<'a> {
@@ -1310,6 +1327,9 @@ enum Fixup {
     Relative,
     /// Where a slot that holds the address is from the code.
     ThroughSlot,
+    /// The address of a thread-local, as `__tls_get_addr` gives it: the code that calls it
+    /// is written over with code that adds to the thread pointer.
+    ThreadLocal,
 }
 
 impl Fixup {
@@ -1318,6 +1338,34 @@ impl Fixup {
             bail!("a relocation that is not ELF's")
         };
         machine.fixup(r_type)
+    }
+
+    /// Where the field of a call to `__tls_get_addr` is in a section, for each thread-local
+    /// it reaches: the call goes, with the code that makes it.
+    fn thread_calls(
+        relocations: impl Iterator<Item = (u64, object::Relocation)>,
+        machine: Machine,
+    ) -> anyhow::Result<FxHashSet<u64>> {
+        let mut calls = FxHashSet::default();
+        for (at, relocation) in relocations {
+            if let (Fixup::ThreadLocal, _) = Fixup::of(&relocation, machine)? {
+                calls.insert(at + 8);
+            }
+        }
+        Ok(calls)
+    }
+
+    /// The code `__tls_get_addr` is called by for an `R_X86_64_TLSGD`, whose field is the
+    /// 4 bytes after `GENERAL.0`: `data16 lea sym@tlsgd(%rip), %rdi`, then
+    /// `data16 data16 rex.W call __tls_get_addr`.
+    const GENERAL: ([u8; 4], [u8; 4]) = ([0x66, 0x48, 0x8d, 0x3d], [0x66, 0x66, 0x48, 0xe8]);
+
+    /// What is written over `GENERAL` for a thread-local `offset` from the thread pointer:
+    /// `mov %fs:0, %rax`, then `lea offset(%rax), %rax`.
+    fn local(offset: i32) -> [u8; 16] {
+        let mut code = [0x64, 0x48, 0x8b, 0x04, 0x25, 0, 0, 0, 0, 0x48, 0x8d, 0x80, 0, 0, 0, 0];
+        code[12..].copy_from_slice(&offset.to_le_bytes());
+        code
     }
 }
 
@@ -1419,10 +1467,16 @@ impl<'a> Patch<'a> {
         }
         let (mut slots, mut stubs) = (FxHashSet::default(), FxHashSet::default());
         for section in patch.file.sections().filter(|it| loaded.contains(&it.index())) {
-            for (_, relocation) in section.relocations() {
+            let calls = Fixup::thread_calls(section.relocations(), image.machine)?;
+            for (at, relocation) in section.relocations() {
                 let RelocationTarget::Symbol(index) = relocation.target() else {
                     bail!("a relocation against no symbol")
                 };
+                if calls.contains(&at) {
+                    let called = patch.file.symbol_by_index(index)?.name_bytes()?;
+                    ensure!(called == b"__tls_get_addr", "a thread-local reached another way");
+                    continue;
+                }
                 let target = match patch.targets.get(&index) {
                     Some(target) => *target,
                     None => {
@@ -1432,6 +1486,12 @@ impl<'a> Patch<'a> {
                     }
                 };
                 match (Fixup::of(&relocation, image.machine)?, target) {
+                    ((Fixup::ThreadLocal, _), Target::ThreadLocal(_)) => {
+                        ensure!(relocation.addend() == -4, "a thread-local reached another way");
+                    }
+                    ((Fixup::ThreadLocal, _), _) | (_, Target::ThreadLocal(_)) => {
+                        bail!("a thread-local reached another way")
+                    }
                     ((Fixup::Absolute, _), Target::Import(_)) => {
                         bail!("data that stores the address of an import")
                     }
@@ -1499,8 +1559,8 @@ impl<'a> Patch<'a> {
         let shown = || String::from_utf8_lossy(name);
         ensure!(symbol.is_undefined(), "{} is neither defined nor undefined", shown());
         match image.symbols.get(name) {
-            Some(Named::One(Defined { kind: SymbolKind::Tls, .. })) => {
-                bail!("{} is thread-local", shown())
+            Some(Named::One(Defined { kind: SymbolKind::Tls, address, .. })) => {
+                Ok(Target::ThreadLocal(image.thread_offset(*address)?))
             }
             Some(Named::One(defined)) => Ok(Target::Theirs(defined.address)),
             Some(Named::Many) => bail!("{} names several things in the executable", shown()),
@@ -1618,6 +1678,7 @@ impl<'a> Patch<'a> {
                 Target::Section(section) => (section, 0),
                 Target::Theirs(address) => return Ok(address.wrapping_add_signed(added)),
                 Target::Import(slot) => return Ok(slot.wrapping_add_signed(added)),
+                Target::ThreadLocal(_) => bail!("the address of a thread-local"),
             };
             let in_place = self.in_place.get(&section).map_or(&[][..], |it| it);
             let found = match target {
@@ -1681,8 +1742,12 @@ impl<'a> Patch<'a> {
                     None => vec![0; it.size as usize],
                 })
                 .collect();
+            let calls = Fixup::thread_calls(section.relocations(), machine)?;
             for (at, relocation) in section.relocations() {
                 let RelocationTarget::Symbol(index) = relocation.target() else { continue };
+                if calls.contains(&at) {
+                    continue;
+                }
                 let target = self.targets[&index];
                 if let Some(which) = in_place.iter().position(|it| it.holds(at)) {
                     let within = (at - in_place[which].offset) as usize;
@@ -1700,6 +1765,21 @@ impl<'a> Patch<'a> {
                 let place = base + start + at;
                 let (fixup, field) = Fixup::of(&relocation, machine)?;
                 let to = match (fixup, target) {
+                    (Fixup::ThreadLocal, Target::ThreadLocal(offset)) => {
+                        let code = (place - base - 4) as usize;
+                        let code = appended.get_mut(code..code + 16);
+                        let code = code.context("a relocation past its section")?;
+                        let (lea, call) = Fixup::GENERAL;
+                        ensure!(
+                            code[..4] == lea && code[8..12] == call,
+                            "a thread-local reached by code of another shape"
+                        );
+                        code.copy_from_slice(&Fixup::local(offset));
+                        continue;
+                    }
+                    (Fixup::ThreadLocal, _) | (_, Target::ThreadLocal(_)) => {
+                        bail!("a thread-local reached another way")
+                    }
                     (Fixup::Absolute, _) => {
                         let value = address(target, relocation.addend(), true)?;
                         store(&mut appended, place, value);
@@ -1742,7 +1822,7 @@ impl<'a> Patch<'a> {
             let code = match self.targets[&index] {
                 Target::Import(slot) => machine.stub_through(slot, stub)?,
                 Target::Theirs(address) => machine.far_jump(address, stub)?,
-                Target::Ours(..) | Target::Section(_) => continue,
+                Target::Ours(..) | Target::Section(_) | Target::ThreadLocal(_) => continue,
             };
             appended[(stub - base) as usize..][..stub_len].copy_from_slice(&code);
         }
