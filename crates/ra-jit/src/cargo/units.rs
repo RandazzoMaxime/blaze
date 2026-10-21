@@ -135,6 +135,12 @@ impl Record {
         self.args.iter().any(|it| it == "--test")
     }
 
+    /// Whether what rustc built of the crate has no code: the daemon compiles all of it.
+    pub(crate) fn stands_in(&self) -> bool {
+        let dir = self.out_dir().map(|it| Record::dir_for(&it).join(&self.id));
+        dir.is_none_or(|it| it.join(super::wrapper::STANDS_IN).exists())
+    }
+
     fn crate_types(&self) -> Vec<&str> {
         self.values("--crate-type").collect()
     }
