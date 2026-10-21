@@ -435,13 +435,35 @@ pub(super) fn hot_body(
     limit: usize,
     tracked: bool,
 ) -> Option<std::rc::Rc<super::fragment::Inlinable>> {
-    let body = body(db, instance, env, tracked)?;
+    let before = tally();
+    let Some(body) = body(db, instance, env, tracked) else {
+        untally(before);
+        return None;
+    };
     if size(&body.func) > limit {
+        untally(before);
         refused(db, instance, &format!("too large ({} instructions)", size(&body.func)));
         return None;
     }
     spend(instance, env, &body);
     Some(body)
+}
+
+/// What the compile under way has built in and shown so far.
+fn tally() -> Option<(usize, usize)> {
+    INLINING.with(|it| it.borrow().as_ref().map(|it| (it.spent, it.seen)))
+}
+
+/// Takes back what building a body counted of the bodies it built in and showed, when the
+/// body is not used: else a body too large to build in, at the head of a long chain, uses
+/// up the share of its call, and is then not shown either (`vec![false; n]`'s
+/// `SpecFromElem::from_elem`, whose length LLVM then does not know).
+fn untally(before: Option<(usize, usize)>) {
+    INLINING.with(|it| {
+        if let (Some(it), Some((spent, seen))) = (it.borrow_mut().as_mut(), before) {
+            (it.spent, it.seen) = (spent, seen);
+        }
+    });
 }
 
 /// The body of a callee that the compile under way calls rather than builds in, for LLVM to
@@ -503,8 +525,13 @@ pub(super) fn seen_body(
     if hint == super::fragment::Hint::Never && !hot {
         return None;
     }
-    let body = body(db, instance, env, tracked)?;
+    let before = tally();
+    let Some(body) = body(db, instance, env, tracked) else {
+        untally(before);
+        return None;
+    };
     if size(&body.func) > limit {
+        untally(before);
         refused(db, instance, &format!("not shown: {} instructions", size(&body.func)));
         return None;
     }
