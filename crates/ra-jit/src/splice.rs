@@ -1104,6 +1104,21 @@ impl LoadRelocations {
         self.table.len() + added * Self::ENTRY
     }
 
+    fn rebases(&self, relative: u32) -> Vec<u64> {
+        let e = Endianness::Little;
+        let Ok((entries, _)) = object::slice_from_bytes::<elf::Rela64<Endianness>>(
+            &self.table,
+            self.table.len() / Self::ENTRY,
+        ) else {
+            return Vec::new();
+        };
+        entries
+            .iter()
+            .filter(|it| it.r_info.get(e) == u64::from(relative))
+            .map(|it| it.r_offset.get(e))
+            .collect()
+    }
+
     /// Makes the entries of `table` for the addresses that `statics` stored those for what
     /// they store now, which `restored` has by where. An address no longer stored has its
     /// entry fix up `spare` instead; the entries a new one needs are handed back.
@@ -1575,6 +1590,11 @@ impl<'a> Patch<'a> {
             });
         }
         let redirected = writes.len() as u64;
+        let rebases = image
+            .relocations
+            .as_ref()
+            .map(|it| it.rebases(image.machine.relative()))
+            .unwrap_or_default();
         for old in self.in_place.values().flatten() {
             let offset = image.offset_of(old.old.address)?;
             let bytes = addition
@@ -1583,8 +1603,8 @@ impl<'a> Patch<'a> {
                 .find(|(at, _)| *at == offset)
                 .map(|(_, bytes)| bytes.clone())
                 .context("the static write is missing")?;
-            let after = image.rebases.partition_point(|it| *it < old.old.address);
-            let pointers = image.rebases[after..]
+            let after = rebases.partition_point(|it| *it < old.old.address);
+            let pointers = rebases[after..]
                 .iter()
                 .take_while(|it| **it < old.old.address + bytes.len() as u64)
                 .map(|it| it - old.old.address)
