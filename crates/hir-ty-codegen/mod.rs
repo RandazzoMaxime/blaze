@@ -608,6 +608,9 @@ impl CodegenUnit {
         } = known;
         // A full build is linked again, and the program that runs it starts at level 1.
         tiers.clear();
+        if roots.start.is_some() {
+            backend::set_whole_program();
+        }
         let mut own_statics = OwnStatics::new(
             db,
             symbols,
