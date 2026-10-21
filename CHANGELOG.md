@@ -181,6 +181,10 @@ All notable changes to ra-jit are written here. The format follows
 
 ### Fixed
 
+- `harness/apps.py`'s perf stage ends with its timings again: since the rename from rustd it
+  stored ra-jit's as `ra-jit_s` and printed `ra_jit_s`, a `KeyError` after every workload.
+  wasmrun builds wasmtime 36.0.19 (was 25.0.3, which Dependabot's alerts name); its workload
+  is the same as rustc's on both.
 - `bench.py` without `--reference` built plain cargo into `target-ref` inside the checkout,
   which cargo takes for a source of the package: ripgrep's, fd's and hyperfine's build scripts
   name no `rerun-if-changed`, so cargo ran them again and built the package again at every
