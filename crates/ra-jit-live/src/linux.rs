@@ -15,6 +15,7 @@ use crate::{
 };
 
 unsafe extern "C" {
+    fn __register_frame(frame: *const u8);
     fn mmap(
         addr: *mut c_void,
         len: usize,
@@ -199,8 +200,7 @@ impl Live {
         {
             return Err(format!("making patch data writable: {}", std::io::Error::last_os_error()));
         }
-        // Linux's unwinder can discover the mapped frame data through the registered FDEs;
-        // defer registration until the patch path has a validated frame table.
+        register_frames(memory, code.frames)?;
 
         let kept: std::collections::HashSet<u64> =
             code.writes.iter().map(|it| it.address).collect();
@@ -524,4 +524,34 @@ fn protection_at(address: u64) -> Result<i32, String> {
         }
     }
     Err(format!("nothing is mapped at {address:#x}"))
+}
+
+fn register_frames(text: &[u8], (start, len): (u64, u64)) -> Result<(), String> {
+    if len == 0 {
+        return Ok(());
+    }
+    let section = text
+        .get(start as usize..(start + len) as usize)
+        .ok_or("unwind tables past the end of the patch")?;
+    let mut at = 0;
+    while at + 8 <= section.len() {
+        let length =
+            u32::from_le_bytes(section[at..at + 4].try_into().map_err(|_| "short unwind length")?)
+                as usize;
+        if length == 0 || length == u32::MAX as usize {
+            break;
+        }
+        let end = at.checked_add(4 + length).ok_or("unwind entry overflows")?;
+        if end > section.len() {
+            return Err("unwind entry ends past the patch".to_owned());
+        }
+        let common = u32::from_le_bytes(
+            section[at + 4..at + 8].try_into().map_err(|_| "short unwind entry")?,
+        );
+        if common != 0 {
+            unsafe { __register_frame(section[at..].as_ptr()) };
+        }
+        at = end;
+    }
+    Ok(())
 }

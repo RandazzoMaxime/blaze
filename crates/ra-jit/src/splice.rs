@@ -1874,6 +1874,15 @@ impl<'a> Patch<'a> {
         header.e_phnum.set(e, u16::try_from(segments.len())?);
         overwritten.push((0, object::bytes_of(&header).to_vec()));
 
+        let live_frames = self.sections[Segment::Read as usize]
+            .iter()
+            .find_map(|&index| {
+                let section = self.file.section_by_index(index).ok()?;
+                (section.name_bytes().ok()? == b".eh_frame")
+                    .then(|| (placed[&index], section.size()))
+            })
+            .unwrap_or((0, 0));
+
         Ok(Addition {
             offset,
             appended,
@@ -1883,7 +1892,7 @@ impl<'a> Patch<'a> {
             redirected,
             described,
             live_data_at: extents[Segment::Data as usize].0,
-            live_frames: (unwind_at, unwind.len() as u64),
+            live_frames,
             live_pointers: fixed.iter().map(|it| it.r_offset.get(e).saturating_sub(base)).collect(),
         })
     }

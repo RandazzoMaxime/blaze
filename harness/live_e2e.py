@@ -90,7 +90,12 @@ async def main() -> None:
         shutil.copytree(HERE / "live", work / "harness" / "live", ignore=shutil.ignore_patterns("target"))
         project = work / "harness" / "live"
         source = project / "src" / "main.rs"
-        env = dict(os.environ, PATH=f"{bin_dir}{os.pathsep}{os.environ['PATH']}", CARGO_TARGET_DIR=str(work / "target"))
+        env = dict(
+            os.environ,
+            PATH=f"{bin_dir}{os.pathsep}{os.environ['PATH']}",
+            CARGO_TARGET_DIR=str(work / "target"),
+            RUST_BACKTRACE="full",
+        )
         env.pop("CARGO_INCREMENTAL", None)
 
         await build("first build", project, env)
@@ -130,6 +135,19 @@ async def main() -> None:
             await wait_for(f"new code of edit {new - 2} runs", lines, f"answer {new}", log, since)
         chain = " -> ".join(str(it) for it in range(1, 3 + LIVE_EDITS))
         print(f"live edits: answer {chain} in a running program, each applied by ra-jit-live")
+
+        if os.environ.get("LIVE_PANIC") == "1":
+            text = source.read_text()
+            needle = "fn answer() -> u64 {\n    4\n}"
+            if needle not in text:
+                raise StepError(f"panic edit: `{needle}` is not in {source}")
+            source.write_text(text.replace(needle, 'fn answer() -> u64 {\n    panic!("live panic")\n}'))
+            await build("panic edit while running", project, env)
+            await wait_for("patched panic", lines, "panicked at", log)
+            await probe.wait()
+            if probe.returncode == 0:
+                raise StepError("patched panic: the process exited successfully")
+            print("live unwind: panic crossed patched answer frame")
         pumper.cancel()
     finally:
         if probe is not None and probe.returncode is None:
