@@ -32,7 +32,7 @@ use hir_def::{
     AssocItemId, FunctionId, HasModule as _, ItemContainerId, Lookup, ModuleDefId, StaticId,
     signatures::FunctionSignature,
 };
-use hir_ty::mir::codegen::{
+use hir_ty_codegen::{
     CodegenError, CodegenUnit, Rejections, Roots, SymbolResolver, exported_symbol,
 };
 use ide_db::{
@@ -143,6 +143,8 @@ impl Default for Compiler {
     fn default() -> Self {
         // The bodies of derived methods are compiled like any other.
         hir_def::nameres::EXPAND_BUILTIN_DERIVES.store(true, std::sync::atomic::Ordering::Relaxed);
+        // MIR is lowered for the target's address size, which is said when it is selected.
+        hir_ty_codegen::Target::current();
         Compiler {
             db: RootDatabase::new(None),
             files: FxHashMap::default(),

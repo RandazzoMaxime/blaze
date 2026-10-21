@@ -6,7 +6,7 @@ use std::{
     sync::{Mutex, OnceLock},
 };
 
-use hir_ty::mir::codegen::{CARGO_HOME, ContentId, LibrarySources, moved};
+use hir_ty_codegen::{CARGO_HOME, ContentId, LibrarySources, moved};
 use ide_db::{
     RootDatabase,
     base_db::{Crate, SourceDatabase as _},

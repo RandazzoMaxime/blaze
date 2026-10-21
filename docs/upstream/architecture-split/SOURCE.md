@@ -45,3 +45,4 @@ the upstream commit the 2026-10-20 merge took.
 | `vendor-numstat.txt` | `git diff --numstat 0b21bd6596 <main>:vendor/rust-analyzer` |
 | `vendor-new-files.txt` | the same with `--diff-filter=A --name-only` |
 | `upstream-churn.txt` | for each file of `vendor-numstat.txt` that upstream has: `git rev-list --count --no-merges --since=2026-04-21 <upstream master> -- <file>`, then ra-jit's added and removed lines |
+| `rebuild-times.txt` | on the M5 Max (18 cores) under the load of other lanes (the load averages are in each line): for each file, twice, append a comment line, `/usr/bin/time -p cargo build --release -p ra-jit` with Rust 1.99.0, restore the file, rebuild. `cpu` is user plus system seconds, `crates` the ones cargo compiled. `before` is `main` at `5f26408566`; `after` is the `codegen-crate` branch before it was rebased over step 4, so the borrow checker was still a module of `hir-ty` in both |

@@ -8,7 +8,7 @@ use std::path::PathBuf;
 
 use hir::{AsAssocItem, AssocItemContainer, Crate, Module, ModuleDef};
 use hir_def::{FunctionId, ItemContainerId, Lookup, ModuleDefId, StaticId};
-use hir_ty::mir::codegen::{SymbolResolver, exported_symbol, link_name};
+use hir_ty_codegen::{SymbolResolver, exported_symbol, link_name};
 use ide_db::{RootDatabase, base_db::SourceDatabase as _};
 use syntax::{AstNode, SyntaxNode, ast, ast::HasName, match_ast};
 use vfs::FileId;
