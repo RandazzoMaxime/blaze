@@ -34,12 +34,77 @@ Each edit is made and taken back `--runs` times (5 in CI). The README shows the 
 edits; this page also shows the fastest and slowest run of each side, and the raw JSON keeps
 every sample, the time of taking each edit back, who built each step (the daemon, or cargo and
 why), whether the daemon spliced the change into the program or linked it again, how many
-functions it compiled, the daemon's peak memory and the daemon's own timeline of each build.
+functions it compiled, the memory of both sides (below) and the daemon's own timeline of each
+build.
 Cold is `--cold-runs` runs of each (5 in CI), each with a new target directory, home and store;
 the store size after it is kept too.
 
 An edit the daemon hands to cargo (a fallback: ra-jit always builds what cargo would) is measured
 once, marked `(c)` in the README, and shows about cargo's time.
+
+## Memory and disk
+
+Every build in the table is also measured for memory, on both sides, and so is the disk each
+side leaves behind. The README shows a summary under the time table; this page has all of it.
+
+| Number | ra-jit | cargo |
+|---|---|---|
+| Peak, each phase and edit | the most `cargo ra-jit build`, the daemon and every process under either held at once: cargo when the client hands it the build, its rustc, build scripts and linker, the daemon's workers and what they run | the most `cargo build`, rustc, build scripts and the linker held at once |
+| Largest process | the peak of the largest of those processes on its own | the same |
+| Daemon between edits | what the daemon and its workers hold once it is ready, after nothing changed, after each kind of edit and at the end of the run, with the number of builds so far: memory that grows with every edit shows here | |
+| On disk | the target directory, the store and ra-jit's home | the target directory |
+| Cold, warm store | the peak, and what the daemon holds once ready | |
+| Runtime | the peak of the program ra-jit linked while it runs | the peak of cargo's debug and release programs |
+
+`harness/runbench.py` (runtime parity) adds the peak of each program while it runs, the size of
+each binary, and the peak of each build: `cargo build --release` against ra-jit's whole-program
+LLVM build.
+
+**How.** One helper, `harness/memory.py`, measures all of it, and every harness that reports
+memory uses it. It combines two readings:
+
+- **The exact peak of one process.** When the harness waits for a command (`wait4`), the
+  kernel reports the largest resident size any single process of what it waited for reached
+  (`ru_maxrss`; KiB on Linux, bytes on macOS). This is exact, but it is one process: cargo's 16
+  rustc at once count as the largest of them.
+- **The sum over a tree, sampled.** A thread reads what every process under the command, and
+  under the daemon, holds every 10 ms (`RA_JIT_MEMORY_INTERVAL`) and keeps the largest sum. On
+  Linux that is the resident size, from `/proc/PID/statm`, with the children of each thread in
+  `/proc/PID/task/*/children`. On macOS it is the physical footprint, from
+  `proc_pid_rusage`, with `proc_listchildpids`: what Activity Monitor shows, the memory a
+  process owns, still counted when macOS has compressed it or swapped it out. Resident size
+  would not do on a Mac: when memory is short macOS compresses the pages of a process that is
+  idle, and the daemon between two edits read 119 MB on nushell on a Mac whose memory was full,
+  where it held 7 GB a minute before. The kernel also keeps each process's peak footprint,
+  which the sampler reads as the largest of that process. Each process it saw stays watched,
+  so the daemon, which the first build starts and which then outlives it, is followed with its
+  workers.
+
+The peak reported is the sum, and never less than the peak of the largest process. What the
+daemon holds between edits is one reading of its tree when it is idle.
+
+**Error.** The sum can miss a rise shorter than 10 ms and a process that lives less than
+10 ms (a short `cc` or build script): it reads low by at most what such a process held. On
+Linux it can also read high: a page of a shared library that several processes have mapped
+counts once in each (resident size, not proportional size). That is mostly libLLVM and
+`librustc_driver`, so it inflates cargo's peak with many rustc at once more than ra-jit's,
+whose daemon is one process with a few workers; proportional size costs a walk of every
+mapping per reading. The footprint macOS counts leaves those pages out. A Linux number and a
+macOS number are therefore not the same count; within one machine both sides are.
+
+**Cost.** The sampling thread wakes every 10 ms and reads a few dozen small files or calls;
+while it runs, Python switches threads every 0.1 ms instead of 5 ms, so the end of a timed
+command is seen within that. On the Mac a no-op build timed the same with and without it
+(within noise).
+
+**Disk** is counted as `du` counts it: the blocks each file uses, a file with several hard
+links once.
+
+<!-- benchmem:start -->
+<!-- benchmem:end -->
+
+The history (`rss_mb`) still has the daemon's workers' high-water marks summed, as before; the
+history's memory alerts check the new numbers too (below).
 
 ## Projects
 
@@ -209,7 +274,9 @@ starts the site's deploy after it commits.
 same machine with the same cores. A number regressed when it is above that median by more than
 its noise band and by more than a floor: the band is 10% or three times the spread the history
 shows (1.4826 times the median absolute deviation), whichever is larger, and the floors are
-50 ms for times, 100 MB for memory and 50 MB for the store. A step the daemon built that cargo
+50 ms for times, 100 MB for memory and 50 MB for the store and disk. Memory checked is
+ra-jit's: its peak in each phase, what the daemon holds after each phase, once ready and at the
+end of the run, and its disk; cargo's memory is charted, not checked. A step the daemon built that cargo
 builds now is a regression whatever its time. On a regression the workflow opens an issue
 labelled `bench-regression` with a table of what moved (or comments on the one already open),
 writes the table to the run's summary and fails.
@@ -456,7 +523,7 @@ The same steps, each built after plain cargo by the fastest ways to build Rust t
 
 #### How fast the program runs, Cranelift
 
-The same command run by the program ra-jit linked and by cargo's debug and release builds, in turn. Median, then fastest and slowest.
+The same command run by the program ra-jit linked and by cargo's debug and release builds, in turn. Median, then fastest and slowest; where measured, then the program's peak resident memory while it ran (median of the runs, as the kernel kept it) and the size of the program.
 
 | Project | Command | ra-jit | cargo debug | cargo release |
 |---|---|---:|---:|---:|
@@ -527,7 +594,7 @@ From an empty target directory, crates already downloaded, median of 5 runs, eac
 
 #### How fast the program runs, LLVM
 
-The same command run by the program ra-jit linked and by cargo's debug and release builds, in turn. Median, then fastest and slowest.
+The same command run by the program ra-jit linked and by cargo's debug and release builds, in turn. Median, then fastest and slowest; where measured, then the program's peak resident memory while it ran (median of the runs, as the kernel kept it) and the size of the program.
 
 | Project | Command | ra-jit | cargo debug | cargo release |
 |---|---|---:|---:|---:|

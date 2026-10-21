@@ -1,0 +1,28 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="760" height="184" viewBox="0 0 760 184" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans', Helvetica, Arial, sans-serif" role="img" aria-label="Memory while an edit builds">
+<title>Memory while an edit builds</title>
+<text x="12" y="22" font-size="15" font-weight="600" fill="#ebeae6">Memory while an edit builds</text>
+<text x="12" y="41" font-size="12" fill="#929190">The most every process doing the work held at once. ra-jit's includes the daemon, which keeps the workspace loaded. macOS</text>
+<text x="12" y="58" font-size="12" fill="#929190">arm64, MacBook Pro (smoke), ra-jit 84760c3f51, 2026-10-21.</text>
+<rect x="12" y="69" width="10" height="10" rx="2" fill="#ebeae6"/>
+<text x="28" y="78" font-size="12" fill="#ebeae6">ra-jit: daemon, workers, command</text>
+<rect x="242.48" y="69" width="10" height="10" rx="2" fill="#6f6e6c"/>
+<text x="258.48" y="78" font-size="12" fill="#ebeae6">cargo: cargo, rustc, linker</text>
+<line x1="108.5" y1="96" x2="108.5" y2="140" stroke="#28282a"/>
+<text x="108.5" y="156" font-size="11" text-anchor="middle" fill="#929190">200 MB</text>
+<line x1="244.7" y1="96" x2="244.7" y2="140" stroke="#28282a"/>
+<text x="244.7" y="156" font-size="11" text-anchor="middle" fill="#929190">500 MB</text>
+<line x1="347.7" y1="96" x2="347.7" y2="140" stroke="#28282a"/>
+<text x="347.7" y="156" font-size="11" text-anchor="middle" fill="#929190">1 GB</text>
+<line x1="450.8" y1="96" x2="450.8" y2="140" stroke="#28282a"/>
+<text x="450.8" y="156" font-size="11" text-anchor="middle" fill="#929190">2 GB</text>
+<line x1="587.0" y1="96" x2="587.0" y2="140" stroke="#28282a"/>
+<text x="587.0" y="156" font-size="11" text-anchor="middle" fill="#929190">5 GB</text>
+<line x1="690.0" y1="96" x2="690.0" y2="140" stroke="#28282a"/>
+<text x="690.0" y="156" font-size="11" text-anchor="middle" fill="#929190">10 GB</text>
+<text x="399.2" y="174" font-size="12" text-anchor="middle" fill="#929190">peak resident memory (log scale)</text>
+<text x="96.5" y="125.5" font-size="12.5" text-anchor="end" fill="#ebeae6">ripgrep 15.1.0</text>
+<rect x="108.5" y="108.0" width="418.5" height="12" rx="2" fill="#ebeae6"/>
+<text x="533.0" y="118.0" font-size="11.5" text-anchor="start" fill="#ebeae6" font-variant-numeric="tabular-nums">3.3 GB</text>
+<rect x="108.5" y="122.0" width="93.4" height="12" rx="2" fill="#6f6e6c"/>
+<text x="207.9" y="132.0" font-size="11.5" text-anchor="start" fill="#ebeae6" font-variant-numeric="tabular-nums">375 MB</text>
+</svg>

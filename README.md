@@ -45,6 +45,8 @@ Live edit to running code, Game of Life demo (median of 20 edits, one 96-core Li
 | One function, 300 new functions added | 282 ms | 60 ms | 4.7x |
 
 <!-- bench:start -->
+<picture><source media="(prefers-color-scheme: dark)" srcset="docs/benchmarks/charts/edits-dark.svg"><img alt="How many times faster an edit builds under ra-jit than under cargo: ripgrep 15.1.0 11×, fd 10.3.0 5.6×, bat 0.26.0 14×, hyperfine 1.19.0 4.4×, just 1.43.0 16×, axum 0.8.6 8.1×, nushell 0.108.0 19×, helix 25.07.1 12×" src="docs/benchmarks/charts/edits-light.svg" width="760"></picture>
+
 Edit, then build, on real projects at pinned commits. Each cell is incremental `cargo build` → `cargo ra-jit build`, both warm, same linker, median of 5 edits. Linux x86-64, AWS c7i.16xlarge (dev-aws-7), pinned to 16 cores with taskset (Intel(R) Xeon(R) Platinum 8488C, 16 of its 64 cores, 124 GiB), ra-jit [`2b2f2dcd5b`](https://github.com/indexable-inc/ra-jit/commit/2b2f2dcd5bc4d7132fe62bf36669a34c657dafe7) on 2026-10-20.
 
 | Project | Edit a function | Edit a widely used function | Change a signature | Nothing changed |
@@ -64,7 +66,12 @@ Edit, then build, on real projects at pinned commits. Each cell is incremental `
 Measured by hand with `harness/bench.py`; the `bench-readme` workflow re-runs it on the dedicated benchmark machine. The ra-jit measured is `cargo build --release`; the binaries a release ships are the `dist` profile with PGO, which start and edit faster ([how](https://github.com/indexable-inc/ra-jit/blob/main/docs/reports/RELEASE-BUILD.md)). Cold builds, the spread of every number, the LLVM tier and how fast the built programs run: [docs/benchmarks.md](docs/benchmarks.md) ([raw JSON](docs/benchmarks/linux-x86_64.json)).
 <!-- bench:end -->
 
+<!-- benchmem:start -->
+<!-- benchmem:end -->
+
 <!-- runbench:start -->
+<picture><source media="(prefers-color-scheme: dark)" srcset="docs/benchmarks/charts/runtime-dark.svg"><img alt="Time of each benchmark, ra-jit's build ÷ cargo build --release: sieve 0.97×, collatz 1.02×, fnv 1.00×, qsort 1.11×, matmul 1.15×, nbody 1.41×, mandelbrot 1.00×, words 1.62×, numeric 1.00×, jsonrt 1.58×, ripgrep 1.33×, fd 1.37×, tokei 1.30×, eza 1.17×" src="docs/benchmarks/charts/runtime-light.svg" width="760"></picture>
+
 How fast the programs run, built whole by ra-jit with LLVM (every crate of the program compiled by ra-jit, with its own `main`), each time ÷ the time of `cargo build --release`. Lower is faster; 1.00x is as fast as release. Every program's exit status and output were the same as the release build's; a run in which any differed is never published. Linux x86-64: AWS c6i.16xlarge (Intel Xeon Platinum 8375C, 64 vCPUs, 123 GiB), NixOS 26.05, Linux 6.18, rustc 1.99.0, ra-jit `f3eeb5295e` on branch `whole-program-main`, 2026-10-21. Median of 5 runs, the builds taking turns (numeric: 15).
 
 | Benchmark | `cargo build --release` | release with overflow checks | ra-jit `-O3` | ra-jit `-O2`, across crates | ra-jit `-O3`, across crates |
