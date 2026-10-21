@@ -93,7 +93,10 @@ All of these are rustc's, written from `compiler/rustc_borrowck` at the pinned n
   `struct Bar<T: 'static>` in a field needs `T: 'static` written (E0310). A trait impl's
   associated types must be well-formed given the impl's where clauses and what its header's
   types imply (E0309), and the impl must satisfy the trait's outlives bounds, as
-  `trait Foo: 'static` (E0310). As rustc, an item that also needs a lifetime to outlive one
+  `trait Foo: 'static` (E0310); a generic associated type is checked with its own where
+  clauses, not the trait's. The where clauses of an ADT, impl, trait or function must be
+  well-formed given its bounds and what its signature's and impl header's types imply
+  (`fn foo<'a, L: X<&'a Nested<K>>>()` needs `K: 'a`). As rustc, an item that also needs a lifetime to outlive one
   it does not (E0491) gets only that error, which ra-jit does not report yet.
 - E0621 ("explicit lifetime required") where rustc gives it: not in a trait impl's method,
   nor for an anonymous lifetime of `self` or of the return type.
@@ -121,8 +124,8 @@ With no borrow checker, the 245 units rustc accepts would pass. Now:
 
 | Mode | In scope | Pass | rustc accepts, ra-jit too | rustc rejects, same errors |
 |---|---|---|---|---|
-| Polonius | 1579 | 1200 (76.0%) | 245 of 245 | 955 of 1334 |
-| NLL | 1577 | 1193 (75.6%) | 226 of 226 | 967 of 1351 |
+| Polonius | 1579 | 1204 (76.2%) | 245 of 245 | 959 of 1334 |
+| NLL | 1577 | 1197 (75.9%) | 226 of 226 | 971 of 1351 |
 
 463 units are out of scope; 344 of them need a nightly feature. CI runs the scoring on Linux
 and fails below a floor a few units under the count there.
@@ -136,15 +139,15 @@ just, axum, nushell, delta, eza, tokei and starship it finds nothing, nor on the
 
 Every failing unit is one where rustc gives an error ra-jit does not, or gives it on another
 line or with another code. By what is wrong, most first: 61 "lifetime may not live long
-enough" not reported, 36 E0597 not reported, 15 E0309, 13 E0310, 7 E0700, then a long tail. The causes, grouped:
+enough" not reported, 36 E0597 not reported, 13 E0310, 11 E0309, 7 E0700, then a long tail. The causes, grouped:
 
 - **Higher-ranked regions and placeholders** (`for<'a>` bounds, closures with higher-ranked
   signatures): rustc checks them with placeholders in universes; ra-jit does not yet, and
   leaves out what a `for<'a>` lifetime is related to, apart from `for<'a> T: 'a`.
-- **Well-formedness of items** (most of what is left of E0309 and E0310): where clauses
-  (`L: X<&'a Nested<K>>` needs `K: 'a`), what an impl's trait bounds need of the regions
-  (`T: Dummy<'a>` proven by an impl that needs `T: 'a`), generic associated types, and a
-  projection's `<T as Trait>::Assoc: 'a` are not checked yet.
+- **Well-formedness of items** (most of what is left of E0309 and E0310): what proving a
+  trait bound needs of the regions (`<T as Dummy<'a>>::Out` in a field, proven by an impl
+  that needs `T: 'a`), a projection's `<T as Trait>::Assoc: 'a`, and items whose signature
+  or impl header has an associated type (what normalizing it implies) are not checked yet.
 - **Written closure parameter types**: `|x: &'x u32|` gives `x` the creator's `'x` in rustc,
   the closure's own lifetime in ra-jit, so an error the annotation causes is reported where
   `x` is used instead of at the parameter.
