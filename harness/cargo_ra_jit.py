@@ -39,7 +39,7 @@ Writes CARGO-RA_JIT.md and cargo_ra_jit.json next to this file, or CARGO-RA_JIT-
 cargo_ra_jit_llvm.json under `RA_JIT_BACKEND=llvm`. A run of some projects replaces their rows
 and keeps the others. `--small` is the three projects of the CI job.
 """
-import collections, json, os, re, shutil, signal, subprocess, sys, tempfile, time, urllib.request
+import collections, glob, json, os, re, shutil, signal, subprocess, sys, tempfile, time, urllib.request
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
@@ -745,7 +745,78 @@ def daemon(work):
     here.cargo("stop")
     manners(work, ws, env, here, check, edit)
     abuse(work, ws, tree, env, check, status, alive)
+    in_place(work, check)
     return checks
+
+
+def in_place(work, check):
+    """On Linux the daemon writes a program it linked in full in place after it answered: the
+    debug info, to where the splices write it. A program started while its file is open for
+    writing is refused ("text file busy"), so whatever is given the program waits for the
+    write. The daemon holds each write here for RA_JIT_LAYOUT_PAUSE_MS (and says "laid out:
+    paused", then "written") while a client is given the program each way a user is."""
+    if not sys.platform.startswith("linux"):
+        return
+    env = dict(base_env(os.path.join(work, "home-in-place")), RA_JIT_LAYOUT_PAUSE_MS="3000")
+    home = os.path.join(work, "in-place-cargo-home")
+    os.makedirs(home)
+    downloads(home)
+    plain_env = dict(env, CARGO_HOME=home)
+    subprocess.run([RA_JIT, "enable"], env=plain_env, check=True, capture_output=True)
+
+    def writes():
+        """How many writes in place began and how many are over, in every worker's log."""
+        logs = glob.glob(os.path.join(env["RA_JIT_HOME"], "*", "*", "log"))
+        said = "".join(open(log, errors="replace").read() for log in logs)
+        return said.count("laid out: paused"), said.count("laid out: written")
+
+    def still():
+        """Waits until no write is under way: what the daemon does after a client has the program."""
+        began = time.time()
+        while writes()[0] != writes()[1] and time.time() - began < 60:
+            time.sleep(0.1)
+
+    def started(name, side, ran):
+        """Has the daemon link the program of a checkout it has loaded in full, for an edit
+        that adds a thread local, which a splice leaves to the linker, and `ran` be given it.
+        The result is how the program ran, who built it, and the writes under way when the
+        client had it."""
+        for file, text in FLAG_WORKSPACE.items():
+            os.makedirs(os.path.dirname(os.path.join(side.ws, file)), exist_ok=True)
+            open(os.path.join(side.ws, file), "w").write(text)
+        side.cargo("build")
+        wait_warm(side, side.ws)
+        still()
+        side.how_built("")
+        before = writes()[0]
+        main = os.path.join(side.ws, "app/src/main.rs")
+        rewrite(main, 'println!("{:?}", sum.ok());', 'println!("{:?} {}", sum.ok(), IN_PLACE.with(|it| it.get()));')
+        open(main, "a").write("\nthread_local! {\n    static IN_PLACE: std::cell::Cell<u32> = const { std::cell::Cell::new(1) };\n}\n")
+        out, how, under_way = ran(side)
+        written = writes()[0] - before
+        still()
+        held = out.returncode == 0 and how == "daemon" and written > 0 and not under_way
+        check(f"{name}, while the daemon writes it in place, starts", held,
+              f"{how[:90]}; {written} written in place, {under_way} under way when the client had it; exit {out.returncode}; {out.stderr.strip()[-300:]!r}")
+
+    def by_path(side):
+        _, built = side.cargo("build")
+        paused, written = writes()
+        try:
+            ran = subprocess.run([os.path.join(side.ws, "target/debug/app" + EXE), "in-place"], capture_output=True, text=True, timeout=60)
+        except OSError as refused:
+            ran = subprocess.CompletedProcess([], 126, "", f"could not start it: {refused}")
+        return (ran if built.returncode == 0 else built), side.how_built(built.stderr), paused - written
+
+    def by_run(side):
+        _, ran = side.cargo("run", "in-place")
+        return ran, side.how_built(ran.stderr), 0
+
+    started("the program by its path after `cargo ra-jit build`", Side(os.path.join(work, "in-place-build"), env, True), by_path)
+    started("the program by its path after plain `cargo build` once `ra-jit enable` was run", Side(os.path.join(work, "in-place-plain"), plain_env, "plain"), by_path)
+    started("`cargo ra-jit run`", Side(os.path.join(work, "in-place-run"), env, True), by_run)
+    subprocess.run([RA_JIT, "disable"], env=plain_env, capture_output=True)
+    subprocess.run([RA_JIT, "stop"], env=env, capture_output=True)
 
 
 USE_AFTER_MOVE = """
