@@ -1650,6 +1650,7 @@ dependencies = [
  "hir-def",
  "hir-expand",
  "hir-ide",
+ "hir-ty-borrowck",
  "intern",
  "itertools",
  "la-arena",
@@ -1825,6 +1826,21 @@ dependencies = [
  "unicode-width",
  "wasm-encoder",
  "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "hir-ty-borrowck"
+version = "0.0.0"
+dependencies = [
+ "base-db",
+ "hir-def",
+ "hir-ty",
+ "la-arena",
+ "ra-ap-rustc_ast_ir",
+ "ra-ap-rustc_type_ir",
+ "rustc-hash 2.1.2",
+ "salsa",
+ "smallvec",
 ]
 
 [[package]]

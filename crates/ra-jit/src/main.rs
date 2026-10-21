@@ -2271,6 +2271,12 @@ fn workspace_at(
             seed_own_target(cargo.target_directory().as_ref());
         }
         let build_scripts = workspace.run_build_scripts(cargo_config, &|_| {})?;
+        // A crate whose script did not run is read without what it writes: thiserror's
+        // `include!` of its `OUT_DIR` then leaves every derived `Error` unimplemented, and a
+        // daemon that loaded that builds wrongly for as long as it runs.
+        if let Some(error) = build_scripts.error() {
+            anyhow::bail!("a build script failed: {}", error.trim().replace('\n', " "));
+        }
         workspace.set_build_scripts(build_scripts);
     }
     Ok((workspace, debug))
@@ -3669,6 +3675,14 @@ const SURE: &[&str] = &[
     "unresolved-macro-call",
 ];
 
+/// The borrow checker's errors, which fail a build unless `RA_JIT_BORROWCK_REFUSE=0`:
+/// `borrowck` is rustc's errors without a code, as "lifetime may not live long enough".
+const BORROWCK: &[&str] = &[
+    "E0309", "E0310", "E0311", "E0373", "E0381", "E0382", "E0384", "E0499", "E0500", "E0501",
+    "E0502", "E0503", "E0505", "E0506", "E0507", "E0508", "E0509", "E0515", "E0521", "E0524",
+    "E0594", "E0596", "E0597", "E0621", "E0716", "borrowck",
+];
+
 /// How many errors a failed build says.
 const SAID: usize = 8;
 
@@ -3677,6 +3691,7 @@ const SAID: usize = 8;
 fn broken_in(db: &RootDatabase, edited: &[vfs::FileId], watched: &Sources) -> Option<String> {
     let threads = std::thread::available_parallelism().map_or(1, |it| it.get());
     let config = ide_diagnostics::DiagnosticsConfig::test_sample();
+    let refuse_borrowck = std::env::var_os("RA_JIT_BORROWCK_REFUSE").is_none_or(|it| it != "0");
     let mut found: Vec<_> = std::thread::scope(|scope| {
         let checks: Vec<_> = (0..threads.min(edited.len()))
             .map(|part| {
@@ -3694,8 +3709,10 @@ fn broken_in(db: &RootDatabase, edited: &[vfs::FileId], watched: &Sources) -> Op
                                 )
                             })
                             .filter(|it| {
+                                let code = it.code.as_str();
                                 it.severity == ide_db::Severity::Error
-                                    && SURE.contains(&it.code.as_str())
+                                    && (SURE.contains(&code)
+                                        || refuse_borrowck && BORROWCK.contains(&code))
                             })
                             .map(|it| (it.range, it.code.as_str(), it.message))
                             .collect::<Vec<_>>()

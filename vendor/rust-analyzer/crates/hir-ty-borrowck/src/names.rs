@@ -3,7 +3,7 @@
 use hir_def::VariantId;
 use rustc_type_ir::inherent::IntoKind;
 
-use crate::{
+use hir_ty::{
     mir::{LocalId, MirBody, PlaceElem, PlaceTy, ProjectionElem},
     next_solver::TyKind,
 };
