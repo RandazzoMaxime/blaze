@@ -347,6 +347,12 @@ quoted.
 
 ## 11. Real projects
 
+The newest measurement is in [benchmarks.md](benchmarks.md): `harness/bench.py` on ten
+projects (ripgrep to bevy, and zed), cold builds with an empty and a warm store, six kinds of
+edit, the test suites, the fastest cargo setups (mold, wild, `-Zthreads=8`, cg_clif, `cargo
+check`) and subsecond's hot-patching, every sample kept, and the history the site charts at
+/bench. What follows is the first run, with `harness/realbench.py`.
+
 `cargo ra-jit build` against `cargo build` on three real projects, each at a pinned tag
 (issue #7). Harness: `harness/realbench.py`. ra-jit at 6a7d245e47 (main), Cranelift backend,
 release build. Measured on 2026-10-20. Seconds, wall clock of the command; median of 5
@@ -627,7 +633,11 @@ same run over ra-jit's.
 | | a signature | 4848 | 308 (16x) | 308 (16x) |
 
 bat, just and axum have no build script that runs again for these edits, and moved by 1 ms or
-less. Every program said what cargo's said, in both runs.
+less. cargo's column has a bench bug in it: its target directory was inside the checkout, which
+cargo takes for a source of the package, so ripgrep's, fd's and hyperfine's build scripts (no
+`rerun-if-changed`) ran again at every build of cargo's. "Nothing" is 30 ms for cargo on
+ripgrep with the target directory outside it, not 386; an edit of another crate of these
+workspaces had the same run of the script added to cargo's time (CHANGELOG, Fixed). Every program said what cargo's said, in both runs.
 
 Where the time of one edit went before, from `RA_JIT_TRACE` (the median of 5 to 7):
 
