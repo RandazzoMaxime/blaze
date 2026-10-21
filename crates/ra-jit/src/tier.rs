@@ -1,6 +1,6 @@
 //! Tiering: a program that takes edits with `ra-jit-live` is sampled while it runs, and the
 //! functions it spends its time in are compiled again with LLVM and swapped in as a patch,
-//! without a restart (issue #6). See `hir_ty::mir::codegen::tier` for the levels and
+//! without a restart (issue #6). See `hir_ty_codegen::tier` for the levels and
 //! `docs/tiers.md` for the whole of it.
 //!
 //! A thread of the worker ([`watch`]) asks each program whose executable the worker linked to
@@ -20,7 +20,7 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
-use hir_ty::mir::codegen::tier::{Branches, Level};
+use hir_ty_codegen::tier::{Branches, Level};
 use ra_jit_live::format::{self, Profile, Sample, TierEvent, TierFunction, Tiers};
 use rustc_hash::{FxHashMap, FxHashSet};
 
@@ -433,7 +433,7 @@ impl Watched {
             let function = self.functions.entry(start).or_default();
             // What hands out the counters is called by the code that counts, and is
             // ra-jit-live's.
-            if symbol.ends_with(hir_ty::mir::codegen::tier::COUNTERS) {
+            if symbol.ends_with(hir_ty_codegen::tier::COUNTERS) {
                 function.theirs = true;
                 function.stuck = Some("ra-jit-live's, which counts for level 2".to_owned());
             }

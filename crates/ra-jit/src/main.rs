@@ -56,7 +56,7 @@ use hir_def::{
     AssocItemId, DefWithBodyId, FunctionId, ItemContainerId, Lookup, ModuleDefId, StaticId,
     expr_store::Body, item_scope::ItemScope,
 };
-use hir_ty::mir::codegen::{
+use hir_ty_codegen::{
     Backend, CodegenError, CodegenUnit, ContentId, ParallelWork, Rejections, Roots, SymbolResolver,
     exported_symbol, tier as codegen_tier,
 };
@@ -421,7 +421,7 @@ impl Resolver<'_> {
         if hir_def::HasModule::module(&func, self.db).block(self.db).is_none() {
             return Some(format!("ra-jit.{id:x}.{path}"));
         }
-        let place = hir_ty::mir::codegen::block_place(self.db, self, func)?;
+        let place = hir_ty_codegen::block_place(self.db, self, func)?;
         Some(format!("ra-jit.{id:x}.{path}.{:x}", short_hash(&place)))
     }
 
@@ -917,7 +917,7 @@ impl SymbolResolver for Resolver<'_> {
         self.contents.cargo_home(self.db)
     }
 
-    fn library_sources(&self) -> Option<hir_ty::mir::codegen::LibrarySources> {
+    fn library_sources(&self) -> Option<hir_ty_codegen::LibrarySources> {
         self.contents.library_sources(self.db)
     }
 
@@ -2155,10 +2155,18 @@ fn workspace_at(
             scripts =
                 Some(WorkspaceBuildScripts::of_messages(cargo, lines.iter().map(String::as_str)));
         }
+        let target = plan.target_profile();
         for package in packages {
-            let Some(built) = plan.package(&cargo[package].id.repr) else { continue };
+            let built = plan.package(&cargo[package].id.repr);
+            // `cargo metadata` has one graph for the host and the target, so a package built
+            // only for a build script or proc macro, or not at all, can still be a dependency
+            // of one of the program's: as such it is built as they are.
+            let profile = built.filter(|it| it.for_target).map(|it| &it.profile).or(target);
+            if let Some(profile) = profile {
+                cargo.set_profile_cfg(package, profile.cfg());
+            }
+            let Some(built) = built else { continue };
             cargo.set_active_features(package, built.features.iter().cloned().collect());
-            cargo.set_profile_cfg(package, built.profile.cfg());
             cargo.set_primary(package, built.primary);
         }
     }
@@ -2171,6 +2179,12 @@ fn workspace_at(
             seed_own_target(cargo.target_directory().as_ref());
         }
         let build_scripts = workspace.run_build_scripts(cargo_config, &|_| {})?;
+        // A crate whose script did not run is read without what it writes: thiserror's
+        // `include!` of its `OUT_DIR` then leaves every derived `Error` unimplemented, and a
+        // daemon that loaded that builds wrongly for as long as it runs.
+        if let Some(error) = build_scripts.error() {
+            anyhow::bail!("a build script failed: {}", error.trim().replace('\n', " "));
+        }
         workspace.set_build_scripts(build_scripts);
     }
     Ok((workspace, debug))
@@ -2617,7 +2631,7 @@ struct Build {
     /// How long finding the roots, checking what is cached and compiling took, in that order.
     steps: [Duration; 3],
     /// Within the checking, the longest a thread took over each kind of cached thing.
-    looked: hir_ty::mir::codegen::StaleSteps,
+    looked: hir_ty_codegen::StaleSteps,
     /// Why rustc does not compile what was built, when `env!` asks for a variable nobody set.
     unset: Option<String>,
 }
@@ -2656,7 +2670,7 @@ fn build(
     let debug = args.debug;
     let apart = (debug.kept != plan::Kept::Linked).then(|| args.out.clone());
     let named = (root.clone(), base.clone());
-    hir_ty::mir::codegen::name_sources(move |db, file| {
+    hir_ty_codegen::name_sources(move |db, file| {
         source_path(db, &named.0, named.1.as_deref(), file)
     });
     let resolver = Resolver {
@@ -2769,7 +2783,7 @@ fn build(
     if let Some(object) = &mut unit.object {
         // A patch defines again what the object does, and the linker of Mach-O takes two
         // definitions of a name only when one of them gives way.
-        weaken::definitions(object);
+        weaken::ours(object);
         // The files a debugger is sent to are there before the object that sends it.
         for file in &unit.apart {
             replace(Path::new(&file.name), &file.bytes)?;
@@ -4559,13 +4573,13 @@ fn lower_until(
         }
     }
     let count = functions.len();
-    let unnamed = hir_ty::mir::codegen::Unnamed::new(functions);
+    let unnamed = hir_ty_codegen::Unnamed::new(functions);
     let threads = std::thread::available_parallelism().map_or(1, |it| it.get());
     std::thread::scope(|scope| {
         for _ in 0..threads {
             let (db, unnamed) = (db.clone(), &unnamed);
             scope.spawn(move || {
-                hir::attach_db(&db, || hir_ty::mir::codegen::compile_unnamed(&db, unnamed, done))
+                hir::attach_db(&db, || hir_ty_codegen::compile_unnamed(&db, unnamed, done))
             });
         }
     });
@@ -4588,7 +4602,7 @@ fn lower_until(
         });
     };
     if !done() {
-        hir_ty::mir::codegen::lower_declared(db, &crates, &lower);
+        hir_ty_codegen::lower_declared(db, &crates, &lower);
     }
     let compiled = unnamed.compiled();
     eprintln!("compiled ahead: {compiled} from {count} functions in {:.1?}", start.elapsed());
@@ -5079,8 +5093,8 @@ fn run_holding(
             std::env::var("CARGO_BUILD_TARGET").ok().filter(|it| !it.is_empty());
     }
     let emits = match &args.selection.target {
-        Some(triple) => hir_ty::mir::codegen::Target::select(triple),
-        None => hir_ty::mir::codegen::Target::selected(),
+        Some(triple) => hir_ty_codegen::Target::select(triple),
+        None => hir_ty_codegen::Target::selected(),
     };
     let emits = emits.map_err(anyhow::Error::msg)?;
     if args.selection.target.is_some() {
@@ -5122,7 +5136,7 @@ fn run_holding(
     let start = Instant::now();
     let cargo_config = cargo_config(&args);
     let selection = args.selection.clone();
-    hir_ty::mir::codegen::identify_ahead();
+    hir_ty_codegen::identify_ahead();
     let projects: Vec<&Path> =
         std::iter::once(&args.project).chain(&args.also).map(PathBuf::as_path).collect();
     let beside = |said: &Arc<Said>| Beside {
@@ -5149,7 +5163,7 @@ fn run_holding(
     // is not the daemon's.
     let library = ahead.then(|| built_library(&vfs, emits.triple()));
     match toolchain_identity(&vfs, library.as_ref().unwrap_or(&args.symbol_files)) {
-        Some(toolchain) => hir_ty::mir::codegen::compiles_against(&toolchain),
+        Some(toolchain) => hir_ty_codegen::compiles_against(&toolchain),
         None => eprintln!("store: the toolchain of the library cannot be told from another"),
     }
     let built = follow_cargo(&mut db, &mut vfs, &mut checkouts, &args, &listed)?;
@@ -5249,7 +5263,7 @@ fn run_holding(
         report(&built);
         doctest::document(&mut db, krate);
         let code = doctest::run(&db, asked, krate, &args.out, emits.triple())?;
-        hir_ty::mir::codegen::settled();
+        hir_ty_codegen::settled();
         std::process::exit(code);
     }
     if let Some(stale) = stale_copies(&db, &table, &args) {
@@ -5300,7 +5314,7 @@ fn run_holding(
     // build that is not a daemon's has nothing to wait for but this.
     match shared {
         Some(shared) if args.socket.is_none() && !args.watch => {
-            hir_ty::mir::codegen::settled();
+            hir_ty_codegen::settled();
             shared.push()
         }
         Some(shared) => shared.keep(),
@@ -5330,7 +5344,7 @@ fn run_holding(
         },
         None if args.watch => None,
         None => {
-            hir_ty::mir::codegen::settled();
+            hir_ty_codegen::settled();
             // The process is ending: what these hold is not freed one allocation at a time.
             std::mem::forget((db, table, known, cold, as_compiled));
             return Ok(());
@@ -6815,7 +6829,7 @@ fn abs(path: &Path) -> anyhow::Result<VfsPath> {
     Ok(VfsPath::from(AbsPathBuf::assert_utf8(dunce::canonicalize(path)?)))
 }
 
-fn report_stats(stats: &hir_ty::mir::codegen::BuildStats) {
+fn report_stats(stats: &hir_ty_codegen::BuildStats) {
     if stats.bodies == 0 {
         return;
     }

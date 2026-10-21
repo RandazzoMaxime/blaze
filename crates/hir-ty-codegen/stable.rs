@@ -21,7 +21,7 @@ use span::ErasedFileAstId;
 use base_db::Crate;
 
 use super::{Instance, InstanceDef, SymbolResolver};
-use crate::{
+use hir_ty::{
     ImplTraitId, InferBodyId,
     consteval::try_const_usize,
     db::{HirDatabase, InternedClosure, InternedClosureId, InternedCoroutineId},

@@ -33,10 +33,10 @@ you send them, including fixes you find here and want to upstream.
     vendor/subtree.py         moves vendor/ changes to the forks, and the forks and upstream into vendor/
     vendor/source.rev         the commit of the old development branch this tree last took from
 
-`crates/hir-ty-codegen` is not a crate. It is the module `hir_ty::mir::codegen`, which uses
-private items of `hir-ty`. It is kept outside `vendor/` because all of it is ra-jit's:
-`mir.rs` in the fork declares the module with a `#[path]` that points back here. So
-the fork builds only as part of this repository.
+`crates/hir-ty-codegen` is the code generator, a crate of its own over `hir-ty`'s MIR: what
+it uses of `hir-ty` is public there. Its root is `mod.rs`, the file it was compiled from when
+it was a module of `hir-ty`. Nothing in `vendor/` depends on anything in `crates/`, so the
+fork builds alone ([architecture-split.md](architecture-split.md)).
 
 ## rust-analyzer
 
@@ -184,6 +184,27 @@ did about it in one line.
 
 When you report what you did, separate what you ran from what you inferred. The reports
 under `docs/reports/` do this and it is the reason they can be used.
+
+## The build that ships
+
+`cargo build --release` is the build to work with: the harnesses, the gate and CI use it, and
+it rebuilds quickly after a change. What users get is one other build: the `dist` profile
+(thin LTO) optimized with the PGO profile `pgo/profiles.json` pins, built by
+`.github/scripts/build_release.py`. The release workflow runs that script, and the flake's
+`dist` runs it inside its derivation with the same profile fetched by its sha256.
+`cargo install --profile dist` builds the same profile without PGO (README).
+[reports/RELEASE-BUILD.md](reports/RELEASE-BUILD.md) has the numbers.
+
+The PGO profiles are trained by the `pgo` workflow, one per target on the runner its release
+is built on; it uploads them to the `pgo-profiles` release and commits their names and hashes
+to `pgo/profiles.json`. It runs by itself when Cargo.lock, a manifest or `harness/toolchain`
+changes on main: a profile finds each function by its symbol, which carries a hash of the
+whole graph of crates, so after such a change the old one finds almost nothing (the build
+warns, and a release refuses). A profile trained on older code of the same crates still
+applies to every function that has not changed since, and `build_release.py` ends by saying
+how many have: 24 after a one-line edit, about 1,600 for code 23 commits and 6,700 lines older
+(of the 187,000 functions a profile has). Run the workflow by hand when that count passes a
+few thousand and before a release after large changes to the daemon.
 
 ## Credit
 

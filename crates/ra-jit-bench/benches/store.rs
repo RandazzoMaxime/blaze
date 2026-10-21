@@ -6,9 +6,7 @@
 
 use std::hint::black_box;
 
-use hir_ty::mir::codegen::bench::{
-    Salted, SealedStore, check_pack, encode_record, entry_key, key_of,
-};
+use hir_ty_codegen::bench::{Salted, SealedStore, check_pack, encode_record, entry_key, key_of};
 use tango_bench::{IntoBenchmarks, benchmark_fn, tango_benchmarks};
 
 /// A name as long as a mangled generic function's.

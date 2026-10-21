@@ -581,7 +581,7 @@ pub(crate) fn find_matching_impl<'db>(
 /// Named is by the identifiers of `krate`'s files, which is more than rustc resolves (a local
 /// of the same name does) and less where a macro of another crate alone names the dependency.
 #[salsa::tracked(returns(deref))]
-pub(crate) fn loaded_crates(db: &dyn HirDatabase, krate: Crate) -> Box<[Crate]> {
+pub fn loaded_crates(db: &dyn HirDatabase, krate: Crate) -> Box<[Crate]> {
     let _p = tracing::info_span!("loaded_crates").entered();
     let data = krate.data(db);
     let mut unnamed: Vec<_> = data

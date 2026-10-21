@@ -384,7 +384,7 @@ fn wrapper_installed() -> bool {
 
 /// Why ra-jit does not build for `triple`, when it does not.
 fn unsupported_target(triple: &str) -> Option<String> {
-    use hir_ty::mir::codegen::{ObjectFormat, Target};
+    use hir_ty_codegen::{ObjectFormat, Target};
     match Target::select(triple) {
         Ok(target) if matches!(target.object_format, ObjectFormat::Elf | ObjectFormat::MachO) => {
             None

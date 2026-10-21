@@ -338,7 +338,7 @@ impl Unit {
         let stem =
             format!("{}{}", self.crate_name, extra.codegen("extra-filename").unwrap_or_default());
         let source = copies.join(format!("{stem}.ra-jit.rs"));
-        std::fs::write(&source, crate::stub::text_of(&self.args, program))?;
+        std::fs::write(&source, crate::stub::text_of(&self.args, program, &self.source))?;
 
         let mut stand_in = Command::new(rustc);
         let mut args = self.args.iter().peekable();
