@@ -2634,6 +2634,21 @@ struct Build {
     looked: hir_ty_codegen::StaleSteps,
     /// Why rustc does not compile what was built, when `env!` asks for a variable nobody set.
     unset: Option<String>,
+    /// The files of a full build made for an edit, in the order they are written: they stand
+    /// for the program once the build is kept ([`Build::keep`]), and one that is undone leaves
+    /// those of the build before.
+    unwritten: Vec<(PathBuf, Vec<u8>)>,
+}
+
+impl Build {
+    /// Writes the files of the build: what was built is the program from now on.
+    fn keep(&mut self, known: &mut Rejections) -> anyhow::Result<()> {
+        known.keep_built();
+        for (path, bytes) in std::mem::take(&mut self.unwritten) {
+            replace(&path, &bytes)?;
+        }
+        Ok(())
+    }
 }
 
 thread_local! {
@@ -2657,13 +2672,30 @@ impl Drop for Probing {
     }
 }
 
-fn build(
+/// [`build`] of a build that is never held.
+fn build_unheld(
     db: &RootDatabase,
     table: &SymbolTable,
     args: &Args,
     known: &mut Rejections,
     listed: &Listed,
 ) -> anyhow::Result<Build> {
+    let built = build(db, table, args, known, listed, None)?;
+    Ok(built.expect("a build that is never held is made"))
+}
+
+/// Builds the program, as a patch of the last full build where it can be. With `hold`, the
+/// build is of an edit: where it can't be a patch and `hold` says to hold it, nothing is built
+/// (`None`, see [`CodegenUnit::compile_or_hold`]), and a full build is undoable, its files
+/// left to [`Build::keep`].
+fn build(
+    db: &RootDatabase,
+    table: &SymbolTable,
+    args: &Args,
+    known: &mut Rejections,
+    listed: &Listed,
+    hold: Option<&dyn Fn() -> bool>,
+) -> anyhow::Result<Option<Build>> {
     let start = Instant::now();
     let contents = &content::Contents::default();
     let (root, base) = (args.checkout.clone(), args.base.clone());
@@ -2767,9 +2799,13 @@ fn build(
     let looked = known.stale_steps();
     let revalidate = start.elapsed();
     // Salsa attaches the database for the duration of the closure; the solver needs it.
-    let mut unit =
-        hir::attach_db(db, || CodegenUnit::compile(hir_db, &resolver, roots, &denied, known))
-            .map_err(anyhow::Error::msg)?;
+    let undoable = hold.is_some();
+    let hold = hold.unwrap_or(&|| false);
+    let unit = hir::attach_db(db, || {
+        CodegenUnit::compile_or_hold(hir_db, &resolver, roots, &denied, known, hold, undoable)
+    })
+    .map_err(anyhow::Error::msg)?;
+    let Some(mut unit) = unit else { return Ok(None) };
     let name = |func| resolver.path(func).unwrap_or_else(|| "<assoc fn>".to_owned());
     let codegen = start.elapsed();
     if std::env::var_os("RA_JIT_STATS").is_some() {
@@ -2780,20 +2816,21 @@ fn build(
         );
     }
     let start = Instant::now();
-    if let Some(object) = &mut unit.object {
+    let mut unwritten = Vec::new();
+    if let Some(mut object) = unit.object.take() {
         // A patch defines again what the object does, and the linker of Mach-O takes two
         // definitions of a name only when one of them gives way.
-        weaken::ours(object);
+        weaken::ours(&mut object);
         // The files a debugger is sent to are there before the object that sends it.
-        for file in &unit.apart {
-            replace(Path::new(&file.name), &file.bytes)?;
+        for file in std::mem::take(&mut unit.apart) {
+            unwritten.push((PathBuf::from(file.name), file.bytes));
         }
-        replace(&args.out, object)?;
+        unwritten.push((args.out.clone(), object));
     }
-    if let (Some(path), Some(patch)) = (&args.patch, &unit.patch) {
-        replace(path, patch)?;
+    if let (Some(path), Some(patch)) = (&args.patch, unit.patch.take()) {
+        unwritten.push((path.clone(), patch));
     }
-    let build = Build {
+    let mut build = Build {
         compiled: unit.compiled.len(),
         skipped: unit
             .skipped
@@ -2806,7 +2843,12 @@ fn build(
         steps: [setup, revalidate - setup, codegen - revalidate],
         looked,
         unset: unset_in(db, &local),
+        unwritten,
     };
+    // A patch is of the last full build and replaces nothing the next edit is built from.
+    if !undoable || known.stats.patched.is_some() {
+        build.keep(known)?;
+    }
     if let Some(path) = &args.report {
         let compiled: Vec<String> = unit.compiled.iter().map(|&(func, _)| name(func)).collect();
         build.write_report(path, &compiled)?;
@@ -2825,7 +2867,7 @@ fn build(
         }
         std::fs::write(dir.join("index.tsv"), index)?;
     }
-    Ok(build)
+    Ok(Some(build))
 }
 
 impl Build {
@@ -3382,6 +3424,23 @@ fn refusal(
     broken: Option<String>,
     out_of_date: Option<(FunctionId, String)>,
 ) -> Option<String> {
+    if let Some(unparsed) = unparsed(db, sources, watched) {
+        return Some(unparsed);
+    }
+    if broken.is_some() {
+        return broken;
+    }
+    let (func, why) = out_of_date?;
+    let name = hir::Function::from(func).name(db).display(db, syntax::Edition::CURRENT).to_string();
+    // What the frontend turns down is as a rule code that does not compile.
+    if why.starts_with("frontend:") {
+        return Some(format!("`{name}` has an error ra-jit cannot say more of: {why}"));
+    }
+    Some(format!("`{name}` is not compiled by ra-jit: {why}"))
+}
+
+/// The first error of the first of `sources` that does not parse, where it is.
+fn unparsed(db: &RootDatabase, sources: &[vfs::FileId], watched: &Sources) -> Option<String> {
     let Sources { paths } = watched;
     for &file in sources {
         let path = paths.get(&file);
@@ -3404,16 +3463,7 @@ fn refusal(
             return Some(format!("{path}:{}: {error}", line + 1));
         }
     }
-    if broken.is_some() {
-        return broken;
-    }
-    let (func, why) = out_of_date?;
-    let name = hir::Function::from(func).name(db).display(db, syntax::Edition::CURRENT).to_string();
-    // What the frontend turns down is as a rule code that does not compile.
-    if why.starts_with("frontend:") {
-        return Some(format!("`{name}` has an error ra-jit cannot say more of: {why}"));
-    }
-    Some(format!("`{name}` is not compiled by ra-jit: {why}"))
+    None
 }
 
 /// The errors rust-analyzer is as sure of as rustc is: a wrong one fails a build that is
@@ -3655,7 +3705,7 @@ fn build_batch(db: &RootDatabase, args: Args) -> anyhow::Result<()> {
             members: args.members.clone(),
         };
         let built = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            build(db, table, &args, &mut Rejections::default(), &mut Listed::default())
+            build_unheld(db, table, &args, &mut Rejections::default(), &mut Listed::default())
         }));
         let error = match built {
             Ok(Ok(_)) => continue,
@@ -5258,7 +5308,7 @@ fn run_holding(
     if let Some(asked) = doc {
         let krate = *crates_named(&db, &args.krate, &args)?.first().context("no such crate")?;
         known.used_by_rustc = true;
-        let built = build(&db, &table, &args, &mut known, &listed)?;
+        let built = build_unheld(&db, &table, &args, &mut known, &listed)?;
         eprint!("doctests: ");
         report(&built);
         doctest::document(&mut db, krate);
@@ -5289,11 +5339,11 @@ fn run_holding(
             bail!(why);
         }
     }
-    let mut cold = build(&db, &table, &args, &mut known, &listed)?;
+    let mut cold = build_unheld(&db, &table, &args, &mut known, &listed)?;
     // An `include!` in a body is first seen when the body is compiled.
     if WatchedFile::include_sources(&mut files, &mut tree, &mut db) {
         known.touch(&db, None);
-        cold = build(&db, &table, &args, &mut known, &listed)?;
+        cold = build_unheld(&db, &table, &args, &mut known, &listed)?;
     }
     if let Some(unset) = &cold.unset {
         bail!("{unset}");
@@ -5810,8 +5860,11 @@ fn run_holding(
                         let _ = writeln!(&edited.client, "error: {shown} is read from elsewhere");
                         continue;
                     }
+                    // One being built stands in as unbuilt meanwhile: the edit waits for it.
                     let owners: Vec<usize> = (0..programs.len())
-                        .filter(|&at| programs[at].wrote.is_some())
+                        .filter(|&at| {
+                            programs[at].wrote.is_some() || builds.running.contains_key(&at)
+                        })
                         .filter(|&at| programs[at].args.owns(&db, id, &path))
                         .collect();
                     if owners.is_empty() {
@@ -6634,7 +6687,10 @@ impl Program {
         edited.retain(|file| paths.paths.get(file).is_none_or(|it| args.owns(db, *file, it)));
         // Neither is what no crate that is built reads: an example, or a test.
         edited.retain(|&file| listed.sees(db, file));
-        // The check of the edited files does not wait for the build: it reads other things.
+        // The check of the edited files does not wait for the build: it reads other things. A
+        // build that can't be a patch waits for it, and a text that does not compile is not
+        // built whole: what it would make of the program is not what runs, and the next edit
+        // that compiles is to be a patch of what does.
         let (warm, broken) = std::thread::scope(|scope| {
             let check = {
                 let (db, edited) = (db.clone(), &edited);
@@ -6647,10 +6703,29 @@ impl Program {
                     broken
                 })
             };
-            let warm = build(db, table, args, known, listed);
-            (warm, check.join().ok().flatten())
+            let (check, checked) = (std::sync::Mutex::new(Some(check)), std::sync::OnceLock::new());
+            let broken = || {
+                let joined = || lock(&check).take().and_then(|it| it.join().ok()).flatten();
+                checked.get_or_init(joined).clone()
+            };
+            let hold = || unparsed(db, &edited, paths).is_some() || broken().is_some();
+            let warm = build(db, table, args, known, listed, Some(&hold));
+            (warm, broken())
         });
-        let mut warm = warm?;
+        let hold = || unparsed(db, &edited, paths).is_some() || broken.is_some();
+        let held = |known: &Rejections| {
+            let why = refusal(db, &edited, paths, broken.clone(), None);
+            let why = why.unwrap_or_else(|| "the source does not compile".to_owned());
+            eprintln!(
+                "edit (apply {apply:.1?}): not built: no patch, and the source does not compile; \
+                 the next edit is a patch of the last build"
+            );
+            report_stats(&known.stats);
+            eprintln!("refused: {why}");
+            eprintln!("edit-to-binary: {:.1?}", start.elapsed());
+            why
+        };
+        let Some(mut warm) = warm? else { return Ok(Err(held(known))) };
         // Code compiled at a higher level can call what rustc built into its callers and left
         // no symbol of. The executable can't take a patch with it, and a full link would start
         // the program over, so the code goes instead; of several functions installed
@@ -6671,11 +6746,12 @@ impl Program {
             if !again {
                 break;
             }
-            warm = build(db, table, args, known, listed)?;
+            match build(db, table, args, known, listed, Some(&hold))? {
+                Some(again) => warm = again,
+                None => return Ok(Err(held(known))),
+            }
         }
-        if known.stats.patched.is_none() {
-            *whole = Some(args.out.clone());
-        }
+        let full = known.stats.patched.is_none();
         *wrote = Some(args.out.clone());
         let built = start.elapsed();
         eprint!("edit (apply {apply:.1?}): ");
@@ -6708,8 +6784,21 @@ impl Program {
             None => {}
         }
         let checked = start.elapsed();
-        if failed.is_none() || known.stats.patched.is_none() {
-            let patched = known.stats.patched.is_some();
+        // A full build that is refused is undone, when there is a build before it: that one
+        // stays the program, and what the next edit is a patch of.
+        let undone = failed.is_some() && known.undo_built();
+        if undone {
+            eprintln!(
+                "undone: the build is refused, and the next edit is a patch of the one before"
+            );
+        } else {
+            warm.keep(known)?;
+            if full {
+                *whole = Some(args.out.clone());
+            }
+        }
+        if failed.is_none() || full && !undone {
+            let patched = !full;
             let (splice, patch) = (args.splice.as_deref(), args.patch.as_deref());
             let cmd = args.link_cmd.as_deref().filter(|_| failed.is_none() && link_it);
             let unlinked = link(cmd, splice, patch, &args.out, patched, defer).err();

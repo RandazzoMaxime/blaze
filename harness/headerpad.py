@@ -14,6 +14,10 @@ edited a few times. The first link has to be done again with the room the table 
 every edit after the first one (which writes the whole object again) has to be spliced, and
 print what the source says.
 
+It is built for macOS 14, as nix's shell builds, for which Apple's linker writes the loader's
+fixups as chains unless the daemon's link line says otherwise; a splice declines those
+(issue #30).
+
 Python 3, stdlib only.
 """
 import glob
@@ -74,7 +78,8 @@ def main():
     for path, text in FILES.items():
         os.makedirs(os.path.dirname(os.path.join(ws, path)), exist_ok=True)
         open(os.path.join(ws, path), "w").write(text)
-    env = dict(os.environ, PATH=f"{bin_dir}{os.pathsep}{os.environ['PATH']}", RA_JIT_HOME=home)
+    env = dict(os.environ, PATH=f"{bin_dir}{os.pathsep}{os.environ['PATH']}", RA_JIT_HOME=home,
+               MACOSX_DEPLOYMENT_TARGET="14.0")
     for name in ("CARGO_TARGET_DIR", "CARGO_INCREMENTAL", "RUSTFLAGS", "CARGO_ENCODED_RUSTFLAGS"):
         env.pop(name, None)
     program, source = os.path.join(ws, "target", "debug", "spad"), os.path.join(ws, "src", "main.rs")
