@@ -12,7 +12,7 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use sha2::{Digest, Sha256};
 
 use super::{SymbolResolver, crate_checks_overflow};
-use crate::db::HirDatabase;
+use hir_ty::db::HirDatabase;
 
 /// The crates of a program that differ in `-C overflow-checks`.
 pub(super) struct Mixed {

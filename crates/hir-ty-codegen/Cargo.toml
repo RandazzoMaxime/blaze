@@ -1,0 +1,77 @@
+[package]
+name = "hir-ty-codegen"
+description = "ra-jit's code generator: rust-analyzer's MIR to machine code through Cranelift, LLVM or wasm"
+publish = false
+
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+
+[lib]
+# The files predate the crate: its root is the module file it was compiled from in hir-ty.
+path = "mod.rs"
+doctest = false
+
+[dependencies]
+either.workspace = true
+indexmap.workspace = true
+la-arena.workspace = true
+postcard.workspace = true
+rustc-hash.workspace = true
+salsa.workspace = true
+serde.workspace = true
+serde_derive.workspace = true
+tracing.workspace = true
+triomphe.workspace = true
+rustc-demangle = "0.1.28"
+rustc-stable-hash = "0.1.2"
+
+ra-ap-rustc_abi.workspace = true
+ra-ap-rustc_ast_ir.workspace = true
+ra-ap-rustc_index.workspace = true
+ra-ap-rustc_type_ir.workspace = true
+
+base-db.workspace = true
+cfg.workspace = true
+hir-def.workspace = true
+hir-expand.workspace = true
+hir-ty.workspace = true
+intern.workspace = true
+span.workspace = true
+stdx.workspace = true
+syntax.workspace = true
+
+cranelift-codegen = { version = "0.136", features = ["incremental-cache", "x86", "arm64"] }
+cranelift-frontend = "0.136"
+cranelift-module = { version = "0.136", features = ["enable-serde"] }
+cranelift-object = "0.136"
+target-lexicon = "0.13"
+object = { version = "0.37", default-features = false, features = ["read", "std", "elf", "macho", "coff"] }
+wasm-encoder = { version = "0.244", default-features = false, features = ["std"] }
+sha2 = "0.10"
+crc32fast = "1"
+memmap2 = "0.9"
+# The LLVM backend. Needs LLVM 20 at build time: set `LLVM_SYS_201_PREFIX` to its prefix.
+inkwell = { version = "0.9.0", default-features = false, features = ["llvm20-1-prefer-dynamic", "target-x86", "target-aarch64"], optional = true }
+
+[target.'cfg(unix)'.dependencies]
+libc.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Security_Authorization",
+    "Win32_System_Threading",
+] }
+
+[features]
+llvm = ["dep:inkwell"]
+# The compiler as a WebAssembly module itself: see `crates/ra-jit-wasm`.
+wasm = []
+
+[lints]
+workspace = true

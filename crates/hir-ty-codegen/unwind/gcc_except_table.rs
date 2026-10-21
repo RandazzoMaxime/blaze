@@ -5,14 +5,14 @@ use cranelift_codegen::gimli;
 use cranelift_codegen::gimli::write::{Address, Writer};
 use cranelift_codegen::gimli::{DW_EH_PE_omit, DW_EH_PE_uleb128, Encoding, LittleEndian};
 
-pub(in crate::mir::codegen) struct GccExceptTable {
-    pub(in crate::mir::codegen) call_sites: CallSiteTable,
-    pub(in crate::mir::codegen) actions: ActionTable,
-    pub(in crate::mir::codegen) type_info: TypeInfoTable,
+pub(crate) struct GccExceptTable {
+    pub(crate) call_sites: CallSiteTable,
+    pub(crate) actions: ActionTable,
+    pub(crate) type_info: TypeInfoTable,
 }
 
 impl GccExceptTable {
-    pub(in crate::mir::codegen) fn write<W: Writer>(
+    pub(crate) fn write<W: Writer>(
         &self,
         w: &mut W,
         encoding: Encoding,
@@ -93,7 +93,7 @@ impl GccExceptTable {
     }
 }
 
-pub(in crate::mir::codegen) struct CallSiteTable(pub(in crate::mir::codegen) Vec<CallSite>);
+pub(crate) struct CallSiteTable(pub(crate) Vec<CallSite>);
 
 impl CallSiteTable {
     fn encoded_size(&self) -> u64 {
@@ -118,11 +118,11 @@ impl CallSiteTable {
     }
 }
 
-pub(in crate::mir::codegen) struct CallSite {
-    pub(in crate::mir::codegen) start: u64,
-    pub(in crate::mir::codegen) length: u64,
-    pub(in crate::mir::codegen) landing_pad: u64,
-    pub(in crate::mir::codegen) action_entry: Option<ActionOffset>,
+pub(crate) struct CallSite {
+    pub(crate) start: u64,
+    pub(crate) length: u64,
+    pub(crate) landing_pad: u64,
+    pub(crate) action_entry: Option<ActionOffset>,
 }
 
 impl CallSite {
@@ -144,17 +144,17 @@ impl CallSite {
     }
 }
 
-pub(in crate::mir::codegen) struct ActionTable {
+pub(crate) struct ActionTable {
     actions: Vec<Action>,
     encoded_length: u64,
 }
 
 impl ActionTable {
-    pub(in crate::mir::codegen) fn new() -> ActionTable {
+    pub(crate) fn new() -> ActionTable {
         ActionTable { actions: vec![], encoded_length: 0 }
     }
 
-    pub(in crate::mir::codegen) fn add(&mut self, action: Action) -> ActionOffset {
+    pub(crate) fn add(&mut self, action: Action) -> ActionOffset {
         let id = ActionOffset(self.encoded_length);
         self.encoded_length += action.encoded_size(self.encoded_length);
         self.actions.push(action);
@@ -178,11 +178,11 @@ impl ActionTable {
 }
 
 #[derive(Copy, Clone)]
-pub(in crate::mir::codegen) struct ActionOffset(u64);
+pub(crate) struct ActionOffset(u64);
 
-pub(in crate::mir::codegen) struct Action {
-    pub(in crate::mir::codegen) kind: ActionKind,
-    pub(in crate::mir::codegen) next_action: Option<ActionOffset>,
+pub(crate) struct Action {
+    pub(crate) kind: ActionKind,
+    pub(crate) next_action: Option<ActionOffset>,
 }
 
 impl Action {
@@ -212,21 +212,21 @@ impl Action {
 }
 
 #[derive(Copy, Clone)]
-pub(in crate::mir::codegen) enum ActionKind {
+pub(crate) enum ActionKind {
     Catch(TypeInfoId),
 }
 
-pub(in crate::mir::codegen) struct TypeInfoTable {
+pub(crate) struct TypeInfoTable {
     ttype_encoding: gimli::DwEhPe,
     type_info: Vec<Address>,
 }
 
 impl TypeInfoTable {
-    pub(in crate::mir::codegen) fn new(ttype_encoding: gimli::DwEhPe) -> TypeInfoTable {
+    pub(crate) fn new(ttype_encoding: gimli::DwEhPe) -> TypeInfoTable {
         TypeInfoTable { ttype_encoding, type_info: vec![] }
     }
 
-    pub(in crate::mir::codegen) fn add(&mut self, type_info: Address) -> TypeInfoId {
+    pub(crate) fn add(&mut self, type_info: Address) -> TypeInfoId {
         let id = TypeInfoId(self.type_info.len() as u64);
         self.type_info.push(type_info);
         id
@@ -248,7 +248,7 @@ impl TypeInfoTable {
 }
 
 #[derive(Copy, Clone)]
-pub(in crate::mir::codegen) struct TypeInfoId(u64);
+pub(crate) struct TypeInfoId(u64);
 
 struct LenWriter(usize);
 
