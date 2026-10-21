@@ -29,6 +29,17 @@ round:
 - C-variadic calls and definitions have one model with three conventions: System V,
   Windows, and Apple.
 
+The daemon's full link keeps the code nothing in the executable reaches, on every platform:
+rustc's line has the linker take it out (`--gc-sections` for ELF, `-dead_strip` for Apple's
+linker, `/OPT:REF` for `link.exe`, which becomes `/OPT:NOREF`), and a later patch may call
+it, for example an instance of a generic function from another crate for a type an edit
+starts using. A splice that does not find what the patch calls declines it ("... is not in
+the executable") and the edit is linked in full. `unreached.py` tests this on Linux and
+macOS; on Linux at 3a844b09d5, before the rule covered more than macOS, it was 1 of 3. On
+Windows only the link line is tested, by a unit test in `cargo/plan.rs`. rustc's own link,
+which the first edits after a cold build are spliced into, still takes the code out, and
+those edits are linked in full ([#52](https://github.com/indexable-inc/ra-jit/issues/52)).
+
 On every platform the gate in CI is the corpus with layouts, programs, stress, breakers,
 unwinds, splices, asmedits, includes, worktrees, keys, storekills, storecorrupts and
 storeshared, under Cranelift and under LLVM at `-O2` with fast instruction selection.
