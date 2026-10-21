@@ -1,28 +1,42 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="760" height="184" viewBox="0 0 760 184" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans', Helvetica, Arial, sans-serif" role="img" aria-label="Memory while an edit builds">
-<title>Memory while an edit builds</title>
-<text x="12" y="22" font-size="15" font-weight="600" fill="#1f1f20">Memory while an edit builds</text>
+<svg xmlns="http://www.w3.org/2000/svg" width="760" height="260" viewBox="0 0 760 260" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans', Helvetica, Arial, sans-serif" role="img" aria-label="Memory while an edit to one function builds">
+<title>Memory while an edit to one function builds</title>
+<text x="12" y="22" font-size="15" font-weight="600" fill="#1f1f20">Memory while an edit to one function builds</text>
 <text x="12" y="41" font-size="12" fill="#6b6a68">The most every process doing the work held at once. ra-jit's includes the daemon, which keeps the workspace loaded. macOS</text>
-<text x="12" y="58" font-size="12" fill="#6b6a68">arm64, MacBook Pro (smoke), ra-jit 84760c3f51, 2026-10-21.</text>
+<text x="12" y="58" font-size="12" fill="#6b6a68">arm64, MacBook Pro (Mac17,6), macOS 27.0.1, with other work running, ra-jit 84760c3f51, 2026-10-21.</text>
 <rect x="12" y="69" width="10" height="10" rx="2" fill="#1f1f20"/>
 <text x="28" y="78" font-size="12" fill="#1f1f20">ra-jit: daemon, workers, command</text>
 <rect x="242.48" y="69" width="10" height="10" rx="2" fill="#a3a29f"/>
 <text x="258.48" y="78" font-size="12" fill="#1f1f20">cargo: cargo, rustc, linker</text>
-<line x1="108.5" y1="96" x2="108.5" y2="140" stroke="#e4e3df"/>
-<text x="108.5" y="156" font-size="11" text-anchor="middle" fill="#6b6a68">200 MB</text>
-<line x1="244.7" y1="96" x2="244.7" y2="140" stroke="#e4e3df"/>
-<text x="244.7" y="156" font-size="11" text-anchor="middle" fill="#6b6a68">500 MB</text>
-<line x1="347.7" y1="96" x2="347.7" y2="140" stroke="#e4e3df"/>
-<text x="347.7" y="156" font-size="11" text-anchor="middle" fill="#6b6a68">1 GB</text>
-<line x1="450.8" y1="96" x2="450.8" y2="140" stroke="#e4e3df"/>
-<text x="450.8" y="156" font-size="11" text-anchor="middle" fill="#6b6a68">2 GB</text>
-<line x1="587.0" y1="96" x2="587.0" y2="140" stroke="#e4e3df"/>
-<text x="587.0" y="156" font-size="11" text-anchor="middle" fill="#6b6a68">5 GB</text>
-<line x1="690.0" y1="96" x2="690.0" y2="140" stroke="#e4e3df"/>
-<text x="690.0" y="156" font-size="11" text-anchor="middle" fill="#6b6a68">10 GB</text>
-<text x="399.2" y="174" font-size="12" text-anchor="middle" fill="#6b6a68">peak resident memory (log scale)</text>
-<text x="96.5" y="125.5" font-size="12.5" text-anchor="end" fill="#1f1f20">ripgrep 15.1.0</text>
-<rect x="108.5" y="108.0" width="418.5" height="12" rx="2" fill="#1f1f20"/>
-<text x="533.0" y="118.0" font-size="11.5" text-anchor="start" fill="#1f1f20" font-variant-numeric="tabular-nums">3.3 GB</text>
-<rect x="108.5" y="122.0" width="93.4" height="12" rx="2" fill="#a3a29f"/>
-<text x="207.9" y="132.0" font-size="11.5" text-anchor="start" fill="#1f1f20" font-variant-numeric="tabular-nums">375 MB</text>
+<line x1="115.8" y1="96" x2="115.8" y2="216" stroke="#e4e3df"/>
+<text x="115.8" y="232" font-size="11" text-anchor="middle" fill="#6b6a68">100 MB</text>
+<line x1="190.9" y1="96" x2="190.9" y2="216" stroke="#e4e3df"/>
+<text x="190.9" y="232" font-size="11" text-anchor="middle" fill="#6b6a68">200 MB</text>
+<line x1="290.2" y1="96" x2="290.2" y2="216" stroke="#e4e3df"/>
+<text x="290.2" y="232" font-size="11" text-anchor="middle" fill="#6b6a68">500 MB</text>
+<line x1="365.3" y1="96" x2="365.3" y2="216" stroke="#e4e3df"/>
+<text x="365.3" y="232" font-size="11" text-anchor="middle" fill="#6b6a68">1 GB</text>
+<line x1="440.4" y1="96" x2="440.4" y2="216" stroke="#e4e3df"/>
+<text x="440.4" y="232" font-size="11" text-anchor="middle" fill="#6b6a68">2 GB</text>
+<line x1="539.7" y1="96" x2="539.7" y2="216" stroke="#e4e3df"/>
+<text x="539.7" y="232" font-size="11" text-anchor="middle" fill="#6b6a68">5 GB</text>
+<line x1="614.9" y1="96" x2="614.9" y2="216" stroke="#e4e3df"/>
+<text x="614.9" y="232" font-size="11" text-anchor="middle" fill="#6b6a68">10 GB</text>
+<line x1="690.0" y1="96" x2="690.0" y2="216" stroke="#e4e3df"/>
+<text x="690.0" y="232" font-size="11" text-anchor="middle" fill="#6b6a68">20 GB</text>
+<text x="402.9" y="250" font-size="12" text-anchor="middle" fill="#6b6a68">peak memory of every process at once (log scale)</text>
+<text x="103.8" y="125.5" font-size="12.5" text-anchor="end" fill="#1f1f20">ripgrep 15.1.0</text>
+<rect x="115.8" y="108.0" width="363.5" height="12" rx="2" fill="#1f1f20"/>
+<text x="485.2" y="118.0" font-size="11.5" text-anchor="start" fill="#1f1f20" font-variant-numeric="tabular-nums">2.9 GB</text>
+<rect x="115.8" y="122.0" width="92.6" height="12" rx="2" fill="#a3a29f"/>
+<text x="214.4" y="132.0" font-size="11.5" text-anchor="start" fill="#1f1f20" font-variant-numeric="tabular-nums">235 MB</text>
+<text x="103.8" y="163.5" font-size="12.5" text-anchor="end" fill="#1f1f20">fd 10.3.0</text>
+<rect x="115.8" y="146.0" width="352.8" height="12" rx="2" fill="#1f1f20"/>
+<text x="474.5" y="156.0" font-size="11.5" text-anchor="start" fill="#1f1f20" font-variant-numeric="tabular-nums">2.6 GB</text>
+<rect x="115.8" y="160.0" width="81.4" height="12" rx="2" fill="#a3a29f"/>
+<text x="203.2" y="170.0" font-size="11.5" text-anchor="start" fill="#1f1f20" font-variant-numeric="tabular-nums">212 MB</text>
+<text x="103.8" y="201.5" font-size="12.5" text-anchor="end" fill="#1f1f20">nushell 0.108.0</text>
+<rect x="115.8" y="184.0" width="523.2" height="12" rx="2" fill="#1f1f20"/>
+<text x="644.9" y="194.0" font-size="11.5" text-anchor="start" fill="#1f1f20" font-variant-numeric="tabular-nums">12.5 GB</text>
+<rect x="115.8" y="198.0" width="255.4" height="12" rx="2" fill="#a3a29f"/>
+<text x="377.1" y="208.0" font-size="11.5" text-anchor="start" fill="#1f1f20" font-variant-numeric="tabular-nums">1.1 GB</text>
 </svg>

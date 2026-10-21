@@ -67,6 +67,15 @@ Measured by hand with `harness/bench.py`; the `bench-readme` workflow re-runs it
 <!-- bench:end -->
 
 <!-- benchmem:start -->
+<picture><source media="(prefers-color-scheme: dark)" srcset="docs/benchmarks/charts/memory-dark.svg"><img alt="Peak memory while an edit to one function builds, cargo and ra-jit: ripgrep 15.1.0 235 MB for cargo, 2.9 GB for ra-jit, fd 10.3.0 212 MB for cargo, 2.6 GB for ra-jit, nushell 0.108.0 1.1 GB for cargo, 12.5 GB for ra-jit" src="docs/benchmarks/charts/memory-light.svg" width="760"></picture>
+
+Memory and disk, Cranelift. Peak: the most every process doing the work held at once, cargo → ra-jit. For ra-jit that is the daemon, its workers and what they run, and `cargo ra-jit build` with any cargo it ran; for plain cargo, cargo itself, rustc, build scripts and the linker. On disk: cargo's target directory → ra-jit's target directory, store and home. macOS arm64, MacBook Pro (Mac17,6), macOS 27.0.1, with other work running (Apple M5 Max, 18 cores, 128 GiB), ra-jit [`84760c3f51`](https://github.com/indexable-inc/ra-jit/commit/84760c3f517a76f6e8a3aa41ccd81fc3f26b87c7) on 2026-10-21, load average 48.0 when it started; how it is measured: [docs/benchmarks.md](docs/benchmarks.md#memory-and-disk).
+
+| Project | Edit a function, peak | Daemon between edits | Cold until ready, peak | On disk |
+|---|---:|---:|---:|---:|
+| ripgrep 15.1.0 | 235 MB → **2.9 GB** | 2.2 GB ready, 2.8 GB after 39 builds | 541 MB → **2.4 GB** | 416 MB → 598 MB |
+| fd 10.3.0 | 212 MB → **2.6 GB** | 1.8 GB ready, 2.6 GB after 33 builds | 897 MB → **1.9 GB** | 355 MB → 460 MB |
+| nushell 0.108.0 | 1.1 GB → **12.5 GB** | 11.5 GB ready, 12.5 GB after 39 builds | 2.4 GB → **16.1 GB** | 5.3 GB → 6.9 GB |
 <!-- benchmem:end -->
 
 <!-- runbench:start -->

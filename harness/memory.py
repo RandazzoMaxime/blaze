@@ -22,7 +22,9 @@ What a process holds: on Linux its resident set (VmRSS, `/proc/PID/statm`), the 
 Activity Monitor shows: the memory it owns, counted when macOS has compressed or swapped it
 out too, which it does to an idle daemon's pages when memory is short, and without the pages of
 shared libraries every rustc maps; the kernel keeps each process's peak of it, which the
-sampler reads as that process's largest. Python 3 standard library only.
+sampler reads as that process's largest (for a process that was already running when the
+sampler started, such as a daemon, only a peak above the one it had then). Python 3 standard
+library only.
 """
 import ctypes, os, platform, resource, subprocess, sys, tempfile, threading, time
 
@@ -115,6 +117,9 @@ class Sampler:
     def __init__(self, interval=INTERVAL):
         self.interval, self.roots, self.most, self.uncounted = interval, set(), {}, set()
         self.peak_kb, self.samples, self._stop, self._thread = 0, 0, threading.Event(), None
+        # The kernel's peak of each process there at the first sample: one from before the
+        # sampler started counts only once it is passed.
+        self.before = {}
         self._lock = threading.Lock()
 
     def add(self, *pids, itself=True):
@@ -144,7 +149,10 @@ class Sampler:
             self.roots.difference_update(gone)
             self.roots.update(held)
             for pid, kb in high.items():
-                self.most[pid] = max(self.most.get(pid, 0), kb)
+                if not self.samples:
+                    self.before[pid] = kb
+                counted = kb if kb > self.before.get(pid, 0) else held[pid]
+                self.most[pid] = max(self.most.get(pid, 0), counted)
             self.peak_kb = max(self.peak_kb, sum(held.values()))
             self.samples += 1
         return sum(held.values())

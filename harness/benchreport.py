@@ -208,12 +208,14 @@ def memory_readme(result):
     keys = [k for k in ordered(result, backend) if any(p.get("memory") for p in result["results"][k]["phases"].values())]
     summary = memory_chart(result, backend)
     commit = result.get("commit")
-    lines = [MEM_START, benchcharts.picture("memory", f"Peak memory while an edit builds, cargo and ra-jit: {summary}"), "",
+    lines = [MEM_START, benchcharts.picture("memory", f"Peak memory while an edit to one function builds, cargo and ra-jit: {summary}"), "",
              f"Memory and disk, {BACKEND_NAMES[backend]}. Peak: the most every process doing the work held at once, cargo → "
              f"ra-jit. For ra-jit that is the daemon, its workers and what they run, and `cargo ra-jit build` with any cargo it "
-             f"ran; for cargo, cargo, rustc, build scripts and the linker. On disk: cargo's target directory → ra-jit's target "
+             f"ran; for plain cargo, cargo itself, rustc, build scripts and the linker. On disk: cargo's target directory → ra-jit's target "
              f"directory, store and home. {platform(result)}, {machine_line(result)}, ra-jit [`{short(commit)}`]({REPO}/commit/{commit}) "
-             f"on {result['date'][:10]}; how it is measured: [docs/benchmarks.md](docs/benchmarks.md#memory-and-disk).", "",
+             f"on {result['date'][:10]}"
+             + (f", load average {result['host']['load'].split(', ')[0]} when it started" if (result.get("host") or {}).get("load") else "")
+             + "; how it is measured: [docs/benchmarks.md](docs/benchmarks.md#memory-and-disk).", "",
              "| Project | Edit a function, peak | Daemon between edits | Cold until ready, peak | On disk |",
              "|---|---:|---:|---:|---:|"]
     for key in keys:
@@ -223,7 +225,7 @@ def memory_readme(result):
         cold = (phases.get("cold") or {}).get("memory")
         pair = lambda m: f"{megabytes(m['cargo']['peak_mb'])} → **{megabytes(m['ra-jit']['peak_mb'])}**" if m else ""
         resident = measured.get("resident") or {}
-        held = (f"{megabytes(resident['ready_mb'])}, {megabytes(resident['end_mb'])} after {resident['builds']} builds"
+        held = (f"{megabytes(resident['ready_mb'])} ready, {megabytes(resident['end_mb'])} after {resident['builds']} builds"
                 if resident.get("end_mb") is not None else megabytes(resident.get("ready_mb")) if resident else "")
         disk = measured.get("disk_mb") or {}
         ours = sum(disk.get(k) or 0 for k in ("target", "store", "home"))
@@ -243,9 +245,10 @@ def memory_tables(result, keys, backend):
     lines = ["", f"#### Memory and disk, {BACKEND_NAMES[backend]}", "",
              "Peak: the most every process doing the work held at once, sampled every 10 ms and never below the largest "
              "process, median of the runs. Largest process: the peak of the one process that held the most, as the kernel "
-             "kept it (`wait4`) for the command's tree and as sampled for the daemon's. ra-jit is the daemon, its workers and "
-             "what they run, and the `cargo ra-jit build` with any cargo it ran; cargo is cargo, rustc, build scripts and the "
-             "linker. Daemon after: what the daemon and its workers hold once the step is over ([how](#memory-and-disk)).", "",
+             "kept it: `wait4`'s for the command's tree, and each process's peak sampled (on macOS the kernel's peak footprint "
+             "of each, counting for the daemon only a peak it passed during the step). ra-jit is the daemon, its workers and "
+             "what they run, and the `cargo ra-jit build` with any cargo it ran; cargo is cargo itself, rustc, build scripts "
+             "and the linker. Daemon after: what the daemon and its workers hold once the step is over ([how](#memory-and-disk)).", "",
              "| Project | Step | cargo, peak | ra-jit, peak | cargo, largest process | ra-jit, largest process | Daemon after |",
              "|---|---|---:|---:|---:|---:|---:|"]
     for key in keys:

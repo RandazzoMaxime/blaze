@@ -187,9 +187,9 @@ def memory(rows, where):
         return None
     lo, hi = bounds([v for _, a, b in rows for v in (a, b)], pad=1.6)
     bars = [(p, False, [("ours", b, None, None, gigabytes(b)), ("other", a, None, None, gigabytes(a))]) for p, a, b in rows]
-    write("memory", chart("Memory while an edit builds",
+    write("memory", chart("Memory while an edit to one function builds",
                           f"The most every process doing the work held at once. ra-jit's includes the daemon, which keeps the workspace loaded. {where}",
-                          bars, "peak resident memory (log scale)", lo, hi, lambda v: gigabytes(v).replace(".0 ", " "),
+                          bars, "peak memory of every process at once (log scale)", lo, hi, lambda v: gigabytes(v).replace(".0 ", " "),
                           legend=[("ra-jit: daemon, workers, command", "ours"), ("cargo: cargo, rustc, linker", "other")]))
     return ", ".join(f"{p} {gigabytes(a)} for cargo, {gigabytes(b)} for ra-jit" for p, a, b in rows)
 

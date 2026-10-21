@@ -94,17 +94,72 @@ macOS number are therefore not the same count; within one machine both sides are
 
 **Cost.** The sampling thread wakes every 10 ms and reads a few dozen small files or calls;
 while it runs, Python switches threads every 0.1 ms instead of 5 ms, so the end of a timed
-command is seen within that. On the Mac a no-op build timed the same with and without it
-(within noise).
+command is seen within that. On the Mac below, a no-op `cargo build` of ra-jit itself took a
+median 322 ms without it and 319 ms with it (30 runs each, taking turns): no cost the noise
+shows. Two runs of the Mac's measurement below gave the same peaks within 1%.
 
 **Disk** is counted as `du` counts it: the blocks each file uses, a file with several hard
 links once.
 
-<!-- benchmem:start -->
-<!-- benchmem:end -->
-
 The history (`rss_mb`) still has the daemon's workers' high-water marks summed, as before; the
 history's memory alerts check the new numbers too (below).
+
+<!-- benchmem:start -->
+### Memory, macOS arm64, MacBook Pro (Mac17,6), macOS 27.0.1, with other work running
+
+ra-jit [`84760c3f51`](https://github.com/indexable-inc/ra-jit/commit/84760c3f517a76f6e8a3aa41ccd81fc3f26b87c7), 2026-10-21T21:03:27Z, Rust 1.99.0, 3 runs of each edit, 1 cold. Measured by hand with `harness/bench.py`, published with `benchreport.py --memory`; raw: [benchmarks/memory-macos-arm64.json](benchmarks/memory-macos-arm64.json). Its times are in the raw file too; the build table above is the benchmark machine's.
+
+| Machine | |
+|---|---|
+| Name | MacBook Pro (Mac17,6), macOS 27.0.1, with other work running |
+| CPU | Apple M5 Max |
+| Cores | 18 |
+| Memory (GiB) | 128 |
+| OS | macOS |
+| Kernel | 27.0.0 |
+| rustc | rustc 1.99.0 (b940084d7 2026-09-28) |
+| Linker | - |
+| Load average at the start | 48.0, 46.1, 48.4 |
+
+#### Memory and disk, Cranelift
+
+Peak: the most every process doing the work held at once, sampled every 10 ms and never below the largest process, median of the runs. Largest process: the peak of the one process that held the most, as the kernel kept it: `wait4`'s for the command's tree, and each process's peak sampled (on macOS the kernel's peak footprint of each, counting for the daemon only a peak it passed during the step). ra-jit is the daemon, its workers and what they run, and the `cargo ra-jit build` with any cargo it ran; cargo is cargo itself, rustc, build scripts and the linker. Daemon after: what the daemon and its workers hold once the step is over ([how](#memory-and-disk)).
+
+| Project | Step | cargo, peak | ra-jit, peak | cargo, largest process | ra-jit, largest process | Daemon after |
+|---|---|---:|---:|---:|---:|---:|
+| ripgrep 15.1.0 | Cold, until the daemon is ready | 541 MB | 2.4 GB | 356 MB | 2.2 GB | 2.2 GB |
+| ripgrep 15.1.0 | Edit a function | 235 MB | 2.9 GB | 235 MB | 1.9 GB | 2.9 GB |
+| ripgrep 15.1.0 | Edit a widely used function | 243 MB | 2.9 GB | 243 MB | 1.9 GB | 2.8 GB |
+| ripgrep 15.1.0 | Change a signature | 235 MB | 2.9 GB | 235 MB | 1.9 GB | 2.8 GB |
+| ripgrep 15.1.0 | Edit a generic function | 237 MB | 2.9 GB | 237 MB | 1.9 GB | 2.8 GB |
+| ripgrep 15.1.0 | Add a function | 234 MB | 2.9 GB | 234 MB | 1.9 GB | 2.8 GB |
+| ripgrep 15.1.0 | Add a struct field | 286 MB | 2.9 GB | 286 MB | 1.9 GB | 2.8 GB |
+| ripgrep 15.1.0 | Nothing changed | 40 MB | 2.8 GB | 40 MB | 1.9 GB | 2.8 GB |
+| fd 10.3.0 | Cold, until the daemon is ready | 897 MB | 1.9 GB | 389 MB | 1.8 GB | 1.8 GB |
+| fd 10.3.0 | Edit a function | 212 MB | 2.6 GB | 212 MB | 1.6 GB | 2.6 GB |
+| fd 10.3.0 | Edit a widely used function | 199 MB | 2.6 GB | 192 MB | 1.6 GB | 2.6 GB |
+| fd 10.3.0 | Change a signature | 226 MB | 2.6 GB | 226 MB | 1.6 GB | 2.6 GB |
+| fd 10.3.0 | Add a function | 211 MB | 2.6 GB | 211 MB | 1.6 GB | 2.6 GB |
+| fd 10.3.0 | Add a struct field | 258 MB | 2.6 GB | 258 MB | 1.6 GB | 2.6 GB |
+| fd 10.3.0 | Nothing changed | 48 MB | 2.5 GB | 48 MB | 1.6 GB | 2.5 GB |
+| nushell 0.108.0 | Cold, until the daemon is ready | 2.4 GB | 16.1 GB | 1.1 GB | 15.3 GB | 11.5 GB |
+| nushell 0.108.0 | Edit a function | 1.1 GB | 12.5 GB | 1.1 GB | 11.5 GB | 12.5 GB |
+| nushell 0.108.0 | Edit a widely used function | 1.1 GB | 12.5 GB | 1.1 GB | 11.5 GB | 12.5 GB |
+| nushell 0.108.0 | Change a signature | 1.1 GB | 12.5 GB | 1.1 GB | 11.5 GB | 12.5 GB |
+| nushell 0.108.0 | Edit a generic function | 1.1 GB | 13.2 GB | 1.1 GB | 11.3 GB | 12.2 GB |
+| nushell 0.108.0 | Add a function | 1.1 GB | 12.5 GB | 1.1 GB | 11.5 GB | 12.5 GB |
+| nushell 0.108.0 | Add a struct field | 1.1 GB | 13.3 GB | 1.1 GB | 11.4 GB | 12.2 GB |
+| nushell 0.108.0 | Nothing changed | 156 MB | 12.1 GB | 156 MB | 11.2 GB | 12.1 GB |
+
+The daemon between builds, and what each side keeps on disk once the edits are done (as `du` counts it). After the first build: once the step after the cold build (nothing changed) is done; growth is from then to the end, over every edit made and taken back. Warm store: the cold start of another checkout with the store the first one filled.
+
+| Project | Daemon ready | After the first build | At the end | Growth | Warm store: peak, ready | cargo target | ra-jit target | Store | Home |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| ripgrep 15.1.0 | 2.2 GB | 2.8 GB | 2.8 GB after 39 builds | +23 MB | 2.3 GB, 2.0 GB | 416 MB | 526 MB | 72 MB | 0 MB |
+| fd 10.3.0 | 1.8 GB | 2.5 GB | 2.6 GB after 33 builds | +50 MB | 1.9 GB, 1.6 GB | 355 MB | 427 MB | 33 MB | 0 MB |
+| nushell 0.108.0 | 11.5 GB | 12.1 GB | 12.5 GB after 39 builds | +367 MB | 16.5 GB, 11.7 GB | 5.3 GB | 5.8 GB | 1.1 GB | 1 MB |
+
+<!-- benchmem:end -->
 
 ## Projects
 
@@ -307,7 +362,11 @@ all --setups-on ripgrep,nushell` adds the setups above, `--tests` the test suite
 (default `~/ra-jit-projects`). The whole CI set (seven projects, both tiers, five runs) took 38
 minutes on 16 Zen 5 cores, plus the build of ra-jit. It needs about 20 GB of memory (nushell)
 and 30 GB of disk.
-`python3 harness/bench.py --compare OLD.json NEW.json` lists what got slower.
+`python3 harness/bench.py --compare OLD.json NEW.json` lists what got slower or holds more
+memory. On macOS give `--work` a short directory (`--work /tmp/bench`): the daemon's socket
+path has to fit in 104 bytes, which a work directory under `$TMPDIR` does not leave room for.
+`python3 harness/benchreport.py RESULT --memory` publishes a run's memory alone (the README's
+memory table and the section under "Memory and disk"), as the Mac's below was.
 
 ## Caveats
 
