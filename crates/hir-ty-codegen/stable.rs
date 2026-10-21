@@ -37,6 +37,14 @@ const CHECKED: &str = " checked";
 /// Before what stands for a crate from outside the checkout that rustc has no id for.
 const OF_LIBRARY: char = '^';
 
+/// Before the hash that stands for a type written longer than [`SPELLED`]: a closure that
+/// wraps closures has a type that holds each of theirs, and written out in full its name
+/// doubles with each level.
+const HASHED: char = '$';
+
+/// The longest a type is written out in a name.
+const SPELLED: usize = 1024;
+
 enum Declared {
     Function(FunctionId),
     Static(StaticId),
@@ -135,6 +143,11 @@ pub(super) struct StableNames<'a, 'db> {
     /// The crates by what a name starts with, and what the ones asked about declare.
     crates: RefCell<Option<FxHashMap<String, Vec<Crate>>>>,
     listed: RefCell<FxHashMap<String, Listed>>,
+    /// How each crate and each type is written, or why it has no name.
+    crate_names: RefCell<FxHashMap<Crate, Result<Box<str>, &'static str>>>,
+    tys: RefCell<FxHashMap<Ty<'db>, Result<Box<str>, &'static str>>>,
+    /// Why the last name that could not be written could not.
+    missed: std::cell::Cell<&'static str>,
     /// How often each thing kept an instance from having a name.
     pub(super) misses: RefCell<FxHashMap<&'static str, usize>>,
 }
@@ -156,6 +169,9 @@ impl<'a, 'db> StableNames<'a, 'db> {
             files: RefCell::default(),
             crates: RefCell::default(),
             listed: RefCell::default(),
+            crate_names: RefCell::default(),
+            tys: RefCell::default(),
+            missed: std::cell::Cell::new(""),
             misses: RefCell::default(),
         }
     }
@@ -322,7 +338,39 @@ impl<'a, 'db> StableNames<'a, 'db> {
 
     fn miss<T>(&self, why: &'static str) -> Option<T> {
         *self.misses.borrow_mut().entry(why).or_default() += 1;
+        self.missed.set(why);
         None
+    }
+
+    /// Writes what `spell` writes of `of`, once for each `of`: the second time a type is asked
+    /// for, the first answer is copied, and its miss counted again.
+    fn memo<K: std::hash::Hash + Eq + Copy>(
+        &self,
+        out: &mut String,
+        memo: &RefCell<FxHashMap<K, Result<Box<str>, &'static str>>>,
+        of: K,
+        spell: impl FnOnce(&mut String) -> Option<()>,
+    ) -> Option<()> {
+        if let Some(known) = memo.borrow().get(&of) {
+            return match known {
+                Ok(it) => {
+                    out.push_str(it);
+                    Some(())
+                }
+                Err(why) => self.miss(why),
+            };
+        }
+        let mut spelled = String::new();
+        let found = match spell(&mut spelled) {
+            Some(()) => Ok(spelled.into_boxed_str()),
+            None => Err(self.missed.get()),
+        };
+        if let Ok(it) = &found {
+            out.push_str(it);
+        }
+        let named = found.as_ref().ok().map(|_| ());
+        memo.borrow_mut().insert(of, found);
+        named
     }
 
     /// An item by where it is written: names do not tell two `impl`s apart.
@@ -338,6 +386,10 @@ impl<'a, 'db> StableNames<'a, 'db> {
     }
 
     fn crate_(&self, out: &mut String, krate: Crate) -> Option<()> {
+        self.memo(out, &self.crate_names, krate, |out| self.spell_crate(out, krate))
+    }
+
+    fn spell_crate(&self, out: &mut String, krate: Crate) -> Option<()> {
         // The source of a crate of the workspace changes too, built by the daemon or not.
         if self.owned.contains(&krate) || krate.data(self.db).origin.is_local() {
             if !self.by_content {
@@ -483,7 +535,19 @@ impl<'a, 'db> StableNames<'a, 'db> {
         Some(())
     }
 
+    /// A type written out, or the hash of that when it is longer than [`SPELLED`]: what holds
+    /// a type of the checkout says so in its hash too, for [`Self::of_checkout`].
     fn ty(&self, out: &mut String, ty: Ty<'db>) -> Option<()> {
+        self.memo(out, &self.tys, ty, |out| {
+            self.spell_ty(out, ty)?;
+            if out.len() > SPELLED {
+                *out = hashed(out);
+            }
+            Some(())
+        })
+    }
+
+    fn spell_ty(&self, out: &mut String, ty: Ty<'db>) -> Option<()> {
         let db = self.db;
         match ty.kind() {
             TyKind::Bool => out.push_str("bool"),
@@ -687,6 +751,21 @@ fn file_name(
         },
     }
     Some(())
+}
+
+fn hashed(spelled: &str) -> String {
+    use sha2::{Digest, Sha256};
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut out = String::with_capacity(66);
+    out.push(HASHED);
+    if spelled.contains(OF_CHECKOUT) {
+        out.push(OF_CHECKOUT);
+    }
+    for byte in Sha256::digest(spelled.as_bytes()) {
+        out.push(HEX[usize::from(byte >> 4)] as char);
+        out.push(HEX[usize::from(byte & 15)] as char);
+    }
+    out
 }
 
 /// Where a function inside a block is written, which its path does not say: two blocks of
