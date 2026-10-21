@@ -496,7 +496,7 @@ fn laid_out(path: &Path, image: &Image) -> std::io::Result<Vec<debug::Moved>> {
     Ok(moved)
 }
 
-/// An executable open to be written in place, under an exclusive lock on it taken first:
+/// An executable open to be written in place, on Unix under an exclusive lock on it taken first:
 /// on Linux a program started while its file is open for writing is refused ("text file
 /// busy"), and a client starts one under a shared lock (`cargo::run`). The file is closed
 /// before the lock is let go.
@@ -508,6 +508,9 @@ struct Writing {
 impl Writing {
     fn open(path: &Path) -> std::io::Result<Writing> {
         let lock = File::open(path)?;
+        // On Windows a lock keeps out this process's own writes too, and a program that runs
+        // is moved aside there rather than refused.
+        #[cfg(unix)]
         lock.lock()?;
         let file = OpenOptions::new().read(true).write(true).open(path)?;
         Ok(Writing { file, _lock: lock })
