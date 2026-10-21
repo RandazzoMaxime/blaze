@@ -20,7 +20,7 @@ use std::{
 
 use anyhow::{Context, bail};
 use ed25519_dalek::{Signature, Signer, SigningKey, VerifyingKey};
-use hir_ty::mir::codegen::write_file_whole;
+use hir_ty_codegen::write_file_whole;
 use sha2::{Digest as _, Sha256};
 
 /// The word the last line of a signed list starts with.

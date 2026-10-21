@@ -6,8 +6,8 @@ publish = false
 edition = "2024"
 license = "MIT OR Apache-2.0"
 
-# A workspace of its own: the `wasm` feature of `hir-ty` swaps what the code generator
-# emits, and in the main workspace cargo would turn it on for native `ra-jit` as well.
+# A workspace of its own: the `wasm` feature of `hir-ty-codegen` swaps what it emits, and in
+# the main workspace cargo would turn it on for native `ra-jit` as well.
 [workspace]
 
 [lib]
@@ -21,7 +21,8 @@ triomphe = { version = "0.1.14", default-features = false, features = ["std"] }
 
 hir = { path = "../../vendor/rust-analyzer/crates/hir", version = "0.0.0" }
 hir-def = { path = "../../vendor/rust-analyzer/crates/hir-def", version = "0.0.0" }
-hir-ty = { path = "../../vendor/rust-analyzer/crates/hir-ty", version = "0.0.0", features = ["wasm"] }
+hir-ty = { path = "../../vendor/rust-analyzer/crates/hir-ty", version = "0.0.0" }
+hir-ty-codegen = { path = "../hir-ty-codegen", features = ["wasm"] }
 ide-db = { path = "../../vendor/rust-analyzer/crates/ide-db", version = "0.0.0" }
 vfs = { path = "../../vendor/rust-analyzer/crates/vfs", version = "0.0.0" }
 cfg = { path = "../../vendor/rust-analyzer/crates/cfg", version = "0.0.0", features = ["tt", "syntax"] }

@@ -134,7 +134,115 @@ What it took:
   (rust-lang/rust#163640): the C code (mimalloc, ring) is built with
   `-fno-profile-generate`/`-fno-profile-use`. GCC on Linux accepts the same flags.
 
-The nix flake and `cargo install` build `release` and get neither thin LTO nor PGO.
+Superseded on 2026-10-21 by the next section: the training moved to its own workflow, and the
+release workflow builds once, with a pinned profile.
+
+## One build from every way in
+
+Branch `one-build`, from main at 22b1267233, 2026-10-21. Until then the flake and
+`cargo install` built `release`, without thin LTO or PGO. Now:
+
+| way in | builds |
+|---|---|
+| a release's binaries | `build_release.py --target T --strict`: `dist` with the profile `pgo/profiles.json` pins for T |
+| `nix run`, `nix profile install`, `nix build .#daemon` (and `.#dist`, `.#ra-jit`, the demo) | the same script inside the derivation, the same profile fetched by its sha256 |
+| from a checkout | the same script |
+| `cargo install --locked --profile dist ra-jit` | `dist` without PGO |
+
+**One profile for every build.** A build has to be reproducible from the commit alone, so the
+profile can no longer be trained inside the release job: the `pgo` workflow trains it, one
+per target on the runner that target's release is built on, uploads it to the `pgo-profiles`
+release under a name that carries its sha256, and commits that name and hash to
+`pgo/profiles.json`. `build_release.py` downloads the pinned file and refuses any other; the
+flake fetches it with `fetchurl` and the same hash (a nix build has no network) and passes it
+to the same script, which checks it again.
+
+**Why not commit the profiles.** One is 56 MB on macOS and 67 MB on Linux (5 MB with zstd
+-19, 13 MB with gzip), and a retrain replaces all three: in the repository that is 15 to 200 MB
+of history per retrain, kept forever. As release assets they cost the repository a few lines
+of JSON.
+
+**A profile finds a function by its symbol.** Read on Linux x86-64 with `nm` and
+`llvm-profdata show --all-functions`: every symbol of a Rust crate carries the crate's hash
+(`Cscx9Nkki9Or4_6ra_jit`), and cargo derives that hash from the whole graph of the build:
+each crate's name, version, source and features, the profile, the toolchain, and a wrapper of
+rustc around the workspace's crates (not RUSTFLAGS, and not the absolute path: the runner's
+build and the dev host's have the same hashes). A build whose graph differs finds next to
+nothing in the profile, and LLVM says nothing about a function it cannot find. Found by
+comparing the binaries' symbols, crate by crate:
+
+- The first nix build matched the profile in the 211 registry crates and in none of the 27
+  of the workspace and the vendored rust-analyzer. nixpkgs builds through cargo-auditable,
+  which cargo runs as `RUSTC_WORKSPACE_WRAPPER`, and cargo hashes that wrapper into every
+  local crate (read from `cargo build -v` in and out of the sandbox: the command lines differ
+  in the wrapper, the linker and the `-C metadata` values; the unit graphs are the same). The
+  flake's `dist` now sets `auditable = false`, and the script clears `RUSTC_WRAPPER` and
+  `RUSTC_WORKSPACE_WRAPPER`, which `ra-jit enable` would otherwise have set for anyone
+  building from a checkout.
+- `cargo install` from a checkout gets other hashes again, with or without `--target`, and
+  one from crates.io builds other packages altogether (`ra-jit-hir` for `hir`, the registry
+  for the path), so no profile trained from the repository applies to it. Handing it the
+  profile (`--config build.rustflags=['-Cprofile-use=…']`, which it does pass to rustc) builds
+  a ra-jit whose workspace crates have hashes the profile does not have, and LLVM warns of
+  nothing.
+- Any change to Cargo.lock, a manifest or the toolchain changes the hash of every crate above
+  it, the workspace's included.
+
+So each pin records the hash its profile has for ra-jit (`crate`), the script reads the
+hash of the ra-jit it built from the binary's symbols and warns when they differ, a release
+(`--strict`) refuses to be built that way, and the `pgo` workflow runs by itself on a push to
+main that touches Cargo.lock, a manifest or `harness/toolchain`.
+
+**Older code of the same crates.** LLVM matches a function by symbol and by a hash of its
+control flow, uses the counts where both match and leaves the rest as if there were no
+profile, warning "function control flow change detected (hash mismatch)". `build_release.py`
+counts those warnings (rustc gives them for the crates cargo does not cap, the workspace's and
+the vendored rust-analyzer's, also when cargo replays them for a crate already built) and ends
+with the number. On Linux x86-64 with the profile trained at 22b1267233: 0 at that commit, 24
+after a one-line edit to `main.rs`, 1,622 at d906695d51, 23 commits and 6,700 lines older; the
+profile has about 187,000 functions.
+
+**`cargo install` and PGO.** Cargo reads profiles from the root manifest only, and an
+installed crate is its own root, so the published `ra-jit` manifest now carries `release` and
+`dist` (`publish_crates.py`) and `--profile dist` works from crates.io. Compiler flags are
+another matter: `[profile.*] rustflags` is the unstable `profile-rustflags` feature (stable
+cargo 1.99.0 refuses the manifest: "requires a nightly version of Cargo"), a build script's
+`cargo::rustc-flags` accepts only `-l` and `-L`, and a crate's own `.cargo/config.toml` is not
+read when it is installed. The person installing could pass the flag, but not a profile that
+fits (above). So the install is `dist` without PGO, which on Linux (run E above) starts 10%
+slower and edits 3% slower than the release's binaries, and the README says so.
+
+**`release` stays as it is.** The harnesses, the gate and CI build `release` after every
+change, and `cargo install --profile dist` reaches the shipped profile without making
+`release` slower to rebuild (18 s against 46 s after a one-line change), so nothing that
+works on ra-jit pays for thin LTO, and nothing that ships goes without it.
+
+**Not byte for byte.** The recipe, the Rust toolchain, the crates and the profile are the
+same; the C compiler and the linker are not (Ubuntu 22.04's on the runner, nixpkgs' in the
+flake), so the C code (mimalloc, ring) and the layout differ.
+
+**Found on the way.** The release workflow of the previous section installed the toolchain
+without `rust-src`, so the training daemon would have refused every project and the first
+tagged release would have failed; the `pgo` workflow installs it. The README's `nix profile
+install github:indexable-inc/ra-jit#ra-jit` named a package the flake did not have;
+`packages.ra-jit` is now the daemon. And the archive and the flake's `dist` copied three named
+binaries, missing `ra-jit-rustc-first`, which `cargo ra-jit` runs in a workspace's first build;
+`build_release.py --out` copies every binary cargo reports for ra-jit, so neither keeps a list.
+
+**Verified** (2026-10-21, `RUST_BACKTRACE` unset). The profiles pinned were trained by the
+`pgo` workflow (run 39640967658, from a throwaway branch: a dispatch needs the workflow on
+main) at code identical to 22b1267233. Linux x86-64 (dev-aws-5): `build_release.py --strict`
+downloads the pinned profile, checks it and builds; `nix build .#dist .#daemon` builds the
+same in 82 s, with the same crate hashes and the same number of symbols of ra-jit (11,236),
+of `hir_ty` (25,845) and of `serde_json` (1,357), and 7 KB less code; both have all four
+binaries. Under the nix-built ra-jit, `difftest.py corpus --layouts --mixed 8` matches;
+`cargo test --release -p ra-jit` passes (117). With `RUSTC_WORKSPACE_WRAPPER` set the script
+builds the same crates. macOS AArch64: `build_release.py --strict` builds (392 s on the loaded
+Mac) and the corpus with `--mixed 8` matches under its binary; `nix build .#dist .#daemon`
+builds with the same crate hashes and all four binaries (1,208 s). `cargo install
+--profile dist --path crates/ra-jit` builds and installs all four binaries (Linux). Not run:
+the release and pgo workflows on main (the pin job's push to main is untested), Linux AArch64
+beyond the training, the LLVM backend.
 
 ## Rejected
 

@@ -27,14 +27,16 @@ you send them, including fixes you find here and want to upstream.
     docs/reports/             working reports, one per piece of work, as written at the time
     SECURITY.md               what to know before sharing a store, and how to report a problem
     vendor/rust-analyzer/     rust-analyzer with ra-jit's changes, a git subtree
+    vendor/rust-analyzer/crates/hir-ty-borrowck/
+                              the borrow checker, a crate next to hir-ty (borrowck.md)
     vendor/rustc_abi/         rustc's layout crate, copied from the 1.99.0 tag, a git subtree
     vendor/subtree.py         moves vendor/ changes to the forks, and the forks and upstream into vendor/
     vendor/source.rev         the commit of the old development branch this tree last took from
 
-`crates/hir-ty-codegen` is not a crate. It is the module `hir_ty::mir::codegen`, which uses
-private items of `hir-ty`. It is kept outside `vendor/` because all of it is ra-jit's:
-`mir.rs` in the fork declares the module with a `#[path]` that points back here. So
-the fork builds only as part of this repository.
+`crates/hir-ty-codegen` is the code generator, a crate of its own over `hir-ty`'s MIR: what
+it uses of `hir-ty` is public there. Its root is `mod.rs`, the file it was compiled from when
+it was a module of `hir-ty`. Nothing in `vendor/` depends on anything in `crates/`, so the
+fork builds alone ([architecture-split.md](architecture-split.md)).
 
 ## rust-analyzer
 
@@ -103,13 +105,26 @@ second parent is a squashed commit of upstream's tree with `git subtree`'s
 `git-subtree-split` line; when main gets the merge, `push` makes upstream's commit a parent
 of the fork's commit, so the fork's history records the upstream merge too.
 
-A change to rust-analyzer should be something rust-analyzer could take: a bug fix in MIR
-lowering or inference, a missing piece of the language, an accessor ra-jit needs. Where
-rust-analyzer's MIR differs from rustc's, the fix goes in the fork's lowering or in a pass of
-its runtime MIR queries, and the code generator relies on it: codegen does not compensate.
-Code that is only ra-jit's belongs in `crates/hir-ty-codegen` or `crates/ra-jit`, where a
-change is one ordinary commit. Fixes that are simply rust-analyzer bugs should be sent upstream, under
-their rules.
+### Where new code goes
+
+New code that is the language's semantics goes in `vendor/rust-analyzer`: building MIR and
+the passes over it, borrow checking, const evaluation, layout, and the hashes that say what a
+function's code is made from, as salsa queries. These are what rustc keeps in `rustc_middle`,
+`rustc_mir_transform` and `rustc_borrowck`; rust-analyzer could take them, and a query lives
+with the database it reads. Where rust-analyzer's MIR differs from rustc's, the fix goes in
+the fork's lowering or in a pass of its runtime MIR queries, and the code generator relies on
+it: codegen does not compensate.
+
+Inside `vendor/rust-analyzer`, prefer a new crate under `crates/` (or, where the code needs
+private items of `hir-ty`, a new module file declared with one line) over edits spread through
+upstream's files. Every changed line of an upstream file is a line an upstream merge can
+conflict on; a new file conflicts with nothing. Fixes that are simply rust-analyzer bugs are
+the exception, and should be sent upstream, under their rules.
+
+ra-jit's machinery stays in `crates/`: the code generator's backends, object and debug-info
+writing, the splice, the daemon and its socket, the cargo drop-in, the store and the remote,
+tiers and sampling, the live runtime, and the harnesses. A change there is one ordinary
+commit.
 
 ### Moving to a newer rust-analyzer
 
@@ -169,6 +184,27 @@ did about it in one line.
 
 When you report what you did, separate what you ran from what you inferred. The reports
 under `docs/reports/` do this and it is the reason they can be used.
+
+## The build that ships
+
+`cargo build --release` is the build to work with: the harnesses, the gate and CI use it, and
+it rebuilds quickly after a change. What users get is one other build: the `dist` profile
+(thin LTO) optimized with the PGO profile `pgo/profiles.json` pins, built by
+`.github/scripts/build_release.py`. The release workflow runs that script, and the flake's
+`dist` runs it inside its derivation with the same profile fetched by its sha256.
+`cargo install --profile dist` builds the same profile without PGO (README).
+[reports/RELEASE-BUILD.md](reports/RELEASE-BUILD.md) has the numbers.
+
+The PGO profiles are trained by the `pgo` workflow, one per target on the runner its release
+is built on; it uploads them to the `pgo-profiles` release and commits their names and hashes
+to `pgo/profiles.json`. It runs by itself when Cargo.lock, a manifest or `harness/toolchain`
+changes on main: a profile finds each function by its symbol, which carries a hash of the
+whole graph of crates, so after such a change the old one finds almost nothing (the build
+warns, and a release refuses). A profile trained on older code of the same crates still
+applies to every function that has not changed since, and `build_release.py` ends by saying
+how many have: 24 after a one-line edit, about 1,600 for code 23 commits and 6,700 lines older
+(of the 187,000 functions a profile has). Run the workflow by hand when that count passes a
+few thousand and before a release after large changes to the daemon.
 
 ## Credit
 

@@ -12,7 +12,7 @@ use rustc_hash::FxHashMap;
 use rustc_type_ir::inherent::IntoKind;
 use smallvec::SmallVec;
 
-use crate::{
+use hir_ty::{
     consteval::try_const_usize,
     mir::{
         AsmOperand, LocalId, MirBody, PlaceElem, PlaceTy, ProjectionElem, StatementKind,
@@ -202,7 +202,11 @@ impl MoveData {
                 let path = self.child(
                     array,
                     place.local,
-                    ProjectionElem::ConstantIndex { offset, from_end: false },
+                    ProjectionElem::ConstantIndex {
+                        offset,
+                        min_length: offset + 1,
+                        from_end: false,
+                    },
                 );
                 self.record_move(path, location);
             }
@@ -387,11 +391,15 @@ impl<'db> Ctx<'_, 'db> {
                 _ => Some(*elem),
             },
             ProjectionElem::Index(_) | ProjectionElem::Subslice { .. } => None,
-            &ProjectionElem::ConstantIndex { offset, from_end } => match ty.ty.kind() {
+            &ProjectionElem::ConstantIndex { offset, from_end, .. } => match ty.ty.kind() {
                 TyKind::Array(_, len) => {
                     let len = try_const_usize(self.db, len)? as u64;
                     let offset = if from_end { len.checked_sub(offset)? } else { offset };
-                    Some(ProjectionElem::ConstantIndex { offset, from_end: false })
+                    Some(ProjectionElem::ConstantIndex {
+                        offset,
+                        min_length: offset + 1,
+                        from_end: false,
+                    })
                 }
                 _ => None,
             },

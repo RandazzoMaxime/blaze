@@ -170,6 +170,7 @@ fn check_project(project: &str) -> anyhow::Result<()> {
 /// Prints the MIR of each function named `name` at the top of `file`, and of its closures, to
 /// stderr: `RA_JIT_BORROWCK_MIR`, for working on the checker.
 fn dump_mir(db: &RootDatabase, file: vfs::FileId, name: &str) {
+    use hir_ty::db::HirDatabase as _;
     hir::attach_db(db, || {
         let sema = hir::Semantics::new(db);
         let Some(module) = sema.file_to_module_def(file) else { return };
@@ -177,7 +178,11 @@ fn dump_mir(db: &RootDatabase, file: vfs::FileId, name: &str) {
             if let hir::ModuleDef::Function(function) = def
                 && function.name(db).as_str() == name
             {
-                eprintln!("{}", hir::DefWithBody::from(function).debug_mir(db));
+                let Ok(id) = hir_def::FunctionId::try_from(function) else { continue };
+                match db.mir_body(hir_ty::InferBodyId::DefWithBodyId(id.into())) {
+                    Ok(body) => eprintln!("{}", hir_ty::mir::print_mir_body(db, body, name)),
+                    Err(err) => eprintln!("{name}: {err:?}"),
+                }
             }
         }
     })

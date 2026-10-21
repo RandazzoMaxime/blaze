@@ -1,14 +1,29 @@
 # The borrow checker
 
-ra-jit has its own borrow checker, `crates/hir-ty-borrowck`. It checks the MIR rust-analyzer
+ra-jit has its own borrow checker, the crate `hir-ty-borrowck` in the rust-analyzer subtree
+(`vendor/rust-analyzer/crates/hir-ty-borrowck`, next to `hir-ty`). It checks the MIR rust-analyzer
 lowers, the same MIR the code generator compiles, and it is meant to give exactly rustc's
 verdict: the same errors, on the same lines, and none where rustc gives none. It gives
-rustc's verdict on 65% of rustc's own borrow-check tests today; how they are scored and
-what is left is below.
+rustc's verdict on 67% of rustc's own borrow-check tests today, and on every one rustc
+accepts; how they are scored and what is left is below.
 
 It runs as part of rust-analyzer's diagnostics, so the daemon computes it for every edited
-file, and `ra-jit borrowck` prints what it finds. The daemon does not yet refuse a build for
-its errors: keep running `cargo check` for rustc's verdict.
+file, and `ra-jit borrowck` prints what it finds. The daemon refuses an edit it finds a
+borrow-check error in (below), but the checker still misses about a third of the errors
+rustc gives, so `cargo check` stays the final word.
+
+## Refusing builds
+
+An edit with a borrow-check error fails its build, with the file, line and error, as an edit
+with a type error does; under `cargo ra-jit`, cargo then runs and rustc reports it.
+`RA_JIT_BORROWCK_REFUSE=0` in the daemon's environment turns this off.
+
+This is safe because the checker reports nothing on any test rustc accepts, nor on ripgrep,
+fd, bat, hyperfine, just, axum or nushell: a refused build is one rustc refuses too. A
+borrow-check error ra-jit reports where rustc reports none is a bug; `RA_JIT_BORROWCK_REFUSE=0`
+works around it until it is fixed. What it does not do: it misses about a third of the
+errors rustc gives (it accepts code rustc rejects, listed below), so code with such an error
+still builds and runs from memory.
 
 ## Modes
 
@@ -59,25 +74,26 @@ counted reason, when it cannot say anything about the borrow checker: it needs a
 feature, an auxiliary crate or another file, a `-Z` flag other than Polonius, or rustc
 stops before borrow checking.
 
-With no borrow checker, the 245 units rustc accepts would pass. At 8d1f6cf4df:
+With no borrow checker, the 245 units rustc accepts would pass. At cdbb699582:
 
 | Mode | In scope | Pass | rustc accepts, ra-jit too | rustc rejects, same errors |
 |---|---|---|---|---|
-| Polonius | 1578 | 1033 (65.5%) | 235 of 245 | 798 of 1333 |
-| NLL | 1576 | 1030 (65.4%) | 217 of 226 | 813 of 1350 |
+| Polonius | 1578 | 1055 (66.9%) | 245 of 245 | 810 of 1333 |
+| NLL | 1576 | 1051 (66.7%) | 226 of 226 | 825 of 1350 |
 
-463 units are out of scope; 344 of them need a nightly feature.
+463 units are out of scope; 344 of them need a nightly feature. CI runs the scoring on Linux
+and fails below a floor a few units under the count there.
 
 The other check is that it finds nothing in code rustc accepts.
 `ra-jit borrowck --project DIR` checks a cargo workspace; on ripgrep, fd, bat, hyperfine,
-just and axum it finds nothing, and on nushell three errors, each a rust-analyzer lowering
-difference listed below.
+just, axum and nushell it finds nothing.
 
 ## What is left
 
-The failing units by what is wrong, most first, at 8d1f6cf4df: 95 "lifetime may not live
-long enough" not reported, 42 E0597 not reported, 24 E0310, 20 E0700, 18 E0381, 17 E0309,
-16 E0521, then a long tail. The causes, grouped:
+Every failing unit is one where rustc gives an error ra-jit does not, or gives it on another
+line or with another code. By what is wrong, most first, at cdbb699582: 95 "lifetime may not
+live long enough" not reported, 42 E0597 not reported, 24 E0310, 20 E0700, 18 E0381, 17
+E0309, 16 E0521, then a long tail. The causes, grouped:
 
 - **Higher-ranked regions and placeholders** (`for<'a>` bounds, closures with higher-ranked
   signatures): rustc checks them with placeholders in universes; ra-jit does not yet.
@@ -91,19 +107,24 @@ long enough" not reported, 42 E0597 not reported, 24 E0310, 20 E0700, 18 E0381, 
 
 ## What depends on rust-analyzer's MIR lowering
 
-The borrow checker reads `hir-ty`'s MIR, so some verdicts depend on how that lowers. Two
-changes to lowering were needed and are made in `vendor/rust-analyzer/crates/hir-ty/src/mir/lower.rs`:
+The borrow checker reads `hir-ty`'s MIR, so some verdicts depend on how that lowers. These
+changes to rust-analyzer were needed, each made as rustc does it:
 
 - Two-phase borrows for autoref method receivers (`vec.push(vec.len())`).
-- `if let ... && ...` chains branch directly, as rustc lowers them, instead of through a
-  boolean temporary.
+- `if let ... && ...` chains branch directly instead of through a boolean temporary.
+- A match guard reads what its arm binds by value through a reference, and the arm moves
+  it in only once the guard holds.
+- Slice pattern indices carry the pattern's minimum length (`ConstantIndex::min_length`).
+- Promotion: a division by a constant other than 0 (and -1 for a signed dividend that may be
+  the minimum), and `&mut []`.
+- Coercion (`hir-ty/src/infer/coerce.rs`): `&T` to `&T` reborrows. rust-analyzer gives elided
+  lifetimes in signatures an error region, so two unrelated ones compared equal and the
+  reborrow was skipped as a no-op; a closure then captured the reference variable rather
+  than what it points to.
 
-These are differences still open, each the cause of some failures:
+These are differences still open, each the cause of some failures, all of them errors
+missed rather than errors made up:
 
-- Match guards: rustc binds by reference while the guard runs and moves only in the arm;
-  rust-analyzer binds by value first, so a guard that reads what the arm moves is reported
-  (two of nushell's three errors).
-- Closure captures through a reference are truncated differently from rustc (the third).
 - Temporaries of a block's tail expression in edition 2021 are dropped at a different point.
 - Comparisons against constant patterns take their operands by value.
 - Unwind paths are not all lowered, so a few errors that only happen on unwind are missed.

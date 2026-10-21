@@ -12,3 +12,7 @@ back them is under [docs/upstream/](../upstream/), each with a `SOURCE.md`. Sear
 - [borrowck.md](borrowck.md): rustc's NLL borrow checker and Polonius (the nightly-default
   alpha, the legacy datalog analysis, stabilization status, the UI tests that tell them apart),
   rust-analyzer's removed borrowck, and what ra-jit builds. 2026-10-20.
+- [../architecture-split.md](../architecture-split.md): what of ra-jit belongs in the
+  rust-analyzer subtree and what in `crates/`; ra-jit's changes to rust-analyzer by purpose,
+  upstream's churn on the files they touch, rustc's crate split, and a migration plan.
+  2026-10-21.

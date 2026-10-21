@@ -332,7 +332,7 @@ def workload(fx, spec, debug, result):
 def perf(fx, spec, debug, release, result):
     """`bench` timed, or `load` put on the server, with each of the three programs."""
     row = {"debug_size": os.path.getsize(debug), "release_size": os.path.getsize(release)}
-    for key, binary in (("ra-jit", fx.binary), ("debug", debug), ("release", release)):
+    for key, binary in (("ra_jit", fx.binary), ("debug", debug), ("release", release)):
         with Served(fx, binary) as served:
             if "load" in spec:
                 row.update({f"{key}_{k}": v for k, v in served.load(spec["load"]).items()})

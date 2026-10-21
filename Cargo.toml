@@ -1,6 +1,6 @@
 [workspace]
-members = ["crates/ra-jit", "crates/ra-jit-live", "crates/ra-jit-bench", "crates/ra-jit-cache", "crates/ra-jit-cache-macros"]
-# `ra-jit-wasm` turns on a feature of `hir-ty` that swaps the code generator's output, which
+members = ["crates/ra-jit", "crates/hir-ty-codegen", "crates/ra-jit-live", "crates/ra-jit-bench", "crates/ra-jit-cache", "crates/ra-jit-cache-macros"]
+# `ra-jit-wasm` turns on a feature of `hir-ty-codegen` that swaps the code generator's output, which
 # must not be unified into a build of the native crates.
 exclude = ["crates/ra-jit-wasm", "demo", "harness"]
 resolver = "2"
@@ -71,6 +71,8 @@ hir = { path = "vendor/rust-analyzer/crates/hir", version = "0.0.0" }
 hir-def = { path = "vendor/rust-analyzer/crates/hir-def", version = "0.0.0" }
 hir-expand = { path = "vendor/rust-analyzer/crates/hir-expand", version = "0.0.0" }
 hir-ty = { path = "vendor/rust-analyzer/crates/hir-ty", version = "0.0.0" }
+hir-ty-borrowck = { path = "vendor/rust-analyzer/crates/hir-ty-borrowck", version = "0.0.0" }
+hir-ty-codegen = { path = "crates/hir-ty-codegen" }
 hir-ide = { path = "vendor/rust-analyzer/crates/hir-ide", version = "0.0.0" }
 ide = { path = "vendor/rust-analyzer/crates/ide", version = "0.0.0" }
 ide-assists = { path = "vendor/rust-analyzer/crates/ide-assists", version = "0.0.0" }

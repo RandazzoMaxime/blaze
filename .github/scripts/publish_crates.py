@@ -10,9 +10,10 @@ rustc's rustc_abi (vendor/rustc_abi), which crates.io does not have in this form
 ra-jit's dependency closure is published as `ra-jit-<name>` at the workspace version, without
 touching vendor/: every crate is copied into a staging workspace and its manifest is
 rewritten there (name, version, metadata, path dependencies pinned with `=<version>` and
-renamed with `package = ...`, so `use hir::...` still compiles). Dev-dependencies, tests and
-benches are left out. Two files outside a crate are copied into it: hir-ty's code generator
-(crates/hir-ty-codegen) and ra-jit's pinned toolchain (harness/toolchain).
+renamed with `package = ...`, so `use hir::...` still compiles). A crate of ra-jit's own whose
+name does not start with `ra-jit` (hir-ty-codegen) is published as `ra-jit-<name>` the same way.
+Dev-dependencies, tests and benches are left out. One file outside a crate is copied into it:
+ra-jit's pinned toolchain (harness/toolchain).
 
 Idempotent: a version already on crates.io is skipped, so a run that stopped can be run again.
 Publishing goes in dependency order and waits out crates.io's rate limit on new crates (a burst,
@@ -72,15 +73,6 @@ class Extra:
 
 
 EXTRAS: dict[str, list[Extra]] = {
-    "hir-ty": [
-        Extra(
-            "crates/hir-ty-codegen",
-            "codegen",
-            "src/mir.rs",
-            '#[path = "../../../../../crates/hir-ty-codegen/mod.rs"]',
-            '#[path = "../codegen/mod.rs"]',
-        )
-    ],
     "ra-jit": [
         Extra(
             "harness/toolchain",
@@ -216,7 +208,7 @@ class Repo:
             if fork:
                 name, version = "ra-jit-" + orig.removeprefix("ra-ap-"), self.version
             else:
-                name = orig
+                name = orig if orig.startswith("ra-jit") else "ra-jit-" + orig
                 version = package["version"]
                 if isinstance(version, dict):
                     version = self.version
@@ -400,6 +392,7 @@ def staged_manifest(c: Crate, by_dir: dict[Path, Crate], stage: Path) -> dict[st
         package["license"] = "MIT OR Apache-2.0"
         for key in ("homepage", "documentation", "keywords", "categories"):
             package.pop(key, None)
+    if c.name != c.orig:
         # Its crate name stays the original one, which is what the code that uses it says.
         lib = m.setdefault("lib", {})
         lib.setdefault("name", c.orig.replace("-", "_"))
@@ -442,6 +435,14 @@ def staged_manifest(c: Crate, by_dir: dict[Path, Crate], stage: Path) -> dict[st
     return m
 
 
+def shipped_profiles() -> dict[str, Any]:
+    """The profiles `cargo install` builds ra-jit with. Cargo reads profiles only from the root
+    manifest, and an installed crate is its own root, so ra-jit's carries them: `--profile dist`
+    is the build a release ships (docs/reports/RELEASE-BUILD.md), short of its PGO."""
+    profiles = load(ROOT / "Cargo.toml")["profile"]
+    return {name: profiles[name] for name in ("release", "dist")}
+
+
 def staged_workspace(crates: list[Crate], by_dir: dict[Path, Crate]) -> dict[str, Any]:
     ws = REPO.workspace
     deps: dict[str, Any] = {}
@@ -469,7 +470,8 @@ def staged_workspace(crates: list[Crate], by_dir: dict[Path, Crate]) -> dict[str
             "package": package,
             "dependencies": deps,
             "lints": ws.get("lints", {}),
-        }
+        },
+        "profile": shipped_profiles(),
     }
 
 
@@ -505,6 +507,7 @@ def stage(dest: Path) -> list[Crate]:
         m = staged_manifest(c, by_dir, dest)
         if c.orig == "ra-jit":
             m["package"]["readme"] = "README.md"
+            m["profile"] = shipped_profiles()
         (out / "Cargo.toml").write_text(toml_dump(m))
     (dest / "Cargo.toml").write_text(toml_dump(staged_workspace(crates, by_dir)))
     shutil.copy2(ROOT / "Cargo.lock", dest / "Cargo.lock")

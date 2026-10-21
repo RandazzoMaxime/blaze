@@ -8,7 +8,7 @@ use rustc_type_ir::{
     inherent::{Clause as _, IntoKind as _},
 };
 
-use crate::{
+use hir_ty::{
     dyn_compatibility::generics_require_sized_self,
     next_solver::{DbInterner, Region, TraitRef},
 };

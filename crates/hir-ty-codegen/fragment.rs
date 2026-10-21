@@ -22,7 +22,7 @@ use hir_def::{
 use rustc_hash::FxHashMap;
 use rustc_type_ir::inherent::IntoKind;
 
-use crate::{
+use hir_ty::{
     ParamEnvAndCrate,
     db::HirDatabase,
     mir::MirSpan,
@@ -729,12 +729,7 @@ impl<'db> Recorder<'db> {
             let id = funcs[seen.id.as_u32() as usize];
             if !self.seen.iter().any(|it| it.id == id) {
                 let func = rename(&seen.func);
-                self.seen.push(Seen {
-                    id,
-                    func,
-                    pointees: seen.pointees.clone(),
-                    hint: seen.hint,
-                });
+                self.seen.push(Seen { id, func, pointees: seen.pointees.clone(), hint: seen.hint });
             }
         }
         rename(&body.func)
