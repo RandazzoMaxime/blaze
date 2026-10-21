@@ -811,6 +811,12 @@ def naked_functions(root):
     return names
 
 
+def data_symbols(binary):
+    """The mangled names of the data `binary` defines, not its code."""
+    listed = subprocess.run(["nm", "--defined-only", binary], capture_output=True, text=True).stdout
+    return [parts[2] for parts in map(str.split, listed.splitlines()) if len(parts) == 3 and parts[1] in "bBdDrRvV"]
+
+
 def profiler(tally, what, binary, cwd, crates):
     """Whether perf, unwinding by `.eh_frame`, names the functions of `crates` and their lines."""
     if WINDOWS:
@@ -837,10 +843,12 @@ def profiler(tally, what, binary, cwd, crates):
     # A line 0 of one of rustc's codegen units is rustc saying of its own code that it has no
     # line: the crate's functions that were left to rustc are not what is asked about here.
     read = ours(frames[0] for frames in by_stack if frames) if shift else mine
-    # A naked function is its assembly alone, which rustc gives no line either (nor a subprogram).
-    naked = naked_functions(cwd)
+    # A naked function is its assembly alone, which rustc gives no line either (nor a subprogram),
+    # and a frame unwound to a static is no function: what has no line there is no line lost.
+    naked, data = naked_functions(cwd), data_symbols(binary)
     lost = [name for name, line in read
-            if not re.search(r"\.rs:\d+$|-cgu\.\d+:0$", line) and name.rsplit("::", 1)[-1] not in naked]
+            if not re.search(r"\.rs:\d+$|-cgu\.\d+:0$", line) and name.rsplit("::", 1)[-1] not in naked
+            and not any("".join(f"{len(it)}{it}" for it in name.split("::")) in symbol for symbol in data)]
     through = sum(bool(re.search(r"4main\b|::main\b", stack)) for stack in stacks)
     # Where perf looks a frame's CFI up somewhere else, how far its stacks get says nothing of the CFI:
     # some reach main where the code it lands in has the same rules, and some stop.
