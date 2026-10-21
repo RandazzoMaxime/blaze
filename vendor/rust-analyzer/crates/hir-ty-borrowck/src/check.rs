@@ -32,9 +32,9 @@ use super::{
 pub(super) fn check<'db>(
     ctx: &Ctx<'_, 'db>,
     body: &MirBody<'db>,
-    requirements: &FxHashMap<InternedClosureId<'db>, (usize, Vec<regions::Requirement>)>,
+    requirements: &FxHashMap<InternedClosureId<'db>, (usize, Vec<regions::Requirement<'db>>)>,
     out: &mut Vec<BorrowckDiagnostic>,
-) -> (usize, Vec<regions::Requirement>) {
+) -> (usize, Vec<regions::Requirement<'db>>) {
     let cfg = Cfg::new(body);
     let moves = MoveData::gather(ctx, body, &cfg);
     let flow = InitFlow::compute(body, &cfg, &moves);
@@ -299,7 +299,7 @@ struct Checker<'a, 'b, 'db> {
     /// literal where rustc assigns the whole of it (it matters for a union).
     union_literals: FxHashSet<ExprId>,
     /// In a closure, what it needs of its creator's regions.
-    requirements: Vec<regions::Requirement>,
+    requirements: Vec<regions::Requirement<'db>>,
 }
 
 impl<'a, 'db> Checker<'a, '_, 'db> {
@@ -902,10 +902,6 @@ impl<'a, 'db> Checker<'a, '_, 'db> {
             };
             self.report(code, span, message);
         }
-        // A closure's type tests are its creator's to prove too.
-        if in_closure {
-            return;
-        }
         let mut reported = FxHashSet::default();
         for test in &self.regions.type_tests {
             if self.type_test_holds(test.ty, test.lower) {
@@ -916,6 +912,30 @@ impl<'a, 'db> Checker<'a, '_, 'db> {
                 if kind == UniversalKind::FnBody
                     || self.regions.type_outlives_known(test.ty, universal)
                 {
+                    continue;
+                }
+                // rustc's `try_promote_type_test`: in a closure, the type parameter must
+                // outlive each of its creator's regions that outlive this one, which the
+                // creator proves.
+                if in_closure {
+                    if !rustc_type_ir::TypeVisitableExt::has_free_regions(&test.ty) {
+                        for upper in self.non_local_upper_bounds(universal) {
+                            let shorter = match universals[upper].1 {
+                                UniversalKind::Static => None,
+                                _ => match self.regions.creator_positions.get(&upper) {
+                                    Some(&it) => Some(it),
+                                    None => continue,
+                                },
+                            };
+                            self.requirements.push(regions::Requirement {
+                                subject: Some(test.ty),
+                                longer: 0,
+                                shorter,
+                                category: Category::Boring,
+                                span: test.span,
+                            });
+                        }
+                    }
                     continue;
                 }
                 if reported.insert((test.ty, test.span)) {
@@ -973,22 +993,7 @@ impl<'a, 'db> Checker<'a, '_, 'db> {
                 universals[shorter].0,
             );
             let Some(blamed) = regions::blame(&path) else { continue };
-            let shorter_plus: Vec<usize> = if non_local(shorter) {
-                vec![shorter]
-            } else {
-                let upper: Vec<usize> = (0..universals.len())
-                    .filter(|&it| non_local(it) && knows(it, shorter))
-                    .collect();
-                upper
-                    .iter()
-                    .copied()
-                    .filter(|&it| {
-                        !upper
-                            .iter()
-                            .any(|&other| other != it && knows(it, other) && !knows(other, it))
-                    })
-                    .collect()
-            };
+            let shorter_plus = self.non_local_upper_bounds(shorter);
             for &minus in &longer_minus {
                 if universals[minus].1 == UniversalKind::Static {
                     continue;
@@ -1006,6 +1011,7 @@ impl<'a, 'db> Checker<'a, '_, 'db> {
                         },
                     };
                     self.requirements.push(regions::Requirement {
+                        subject: None,
                         longer,
                         shorter,
                         category: blamed.category,
@@ -1015,6 +1021,30 @@ impl<'a, 'db> Checker<'a, '_, 'db> {
             }
         }
         true
+    }
+
+    /// rustc's `non_local_upper_bounds`: `universal` if it is the creator's, else the smallest
+    /// of the creator's regions known to outlive it (`'static` at least).
+    fn non_local_upper_bounds(&self, universal: usize) -> Vec<usize> {
+        let known = self.regions;
+        let universals = &known.universals;
+        let non_local =
+            |it: usize| matches!(universals[it].1, UniversalKind::Creator | UniversalKind::Static);
+        if non_local(universal) {
+            return vec![universal];
+        }
+        let upper: Vec<usize> = (0..universals.len())
+            .filter(|&it| non_local(it) && known.knows(it, universal))
+            .collect();
+        upper
+            .iter()
+            .copied()
+            .filter(|&it| {
+                !upper
+                    .iter()
+                    .any(|&other| other != it && known.knows(it, other) && !known.knows(other, it))
+            })
+            .collect()
     }
 
     /// The expression a block's value comes from, where rustc points at a returned value.

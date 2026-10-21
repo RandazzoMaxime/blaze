@@ -85,9 +85,11 @@ pub(super) enum UniversalKind {
 
 /// What a closure needs of its creator's regions that it cannot prove itself, as rustc's
 /// `ClosureOutlivesRequirement`: that the region at position `longer` among the regions of
-/// the closure's type outlives the one at `shorter`, or `'static` for `None`.
+/// the closure's type outlives the one at `shorter`, or `'static` for `None`. With a `subject`,
+/// that type parameter outlives it instead, a type test the creator proves.
 #[derive(Clone, Copy, Debug)]
-pub(super) struct Requirement {
+pub(super) struct Requirement<'db> {
+    pub(super) subject: Option<Ty<'db>>,
     pub(super) longer: usize,
     pub(super) shorter: Option<usize>,
     pub(super) category: Category,
@@ -323,7 +325,7 @@ pub(super) fn build<'db>(
     ctx: &Ctx<'_, 'db>,
     body: &MirBody<'db>,
     cfg: &Cfg,
-    requirements: &FxHashMap<InternedClosureId<'db>, (usize, Vec<Requirement>)>,
+    requirements: &FxHashMap<InternedClosureId<'db>, (usize, Vec<Requirement<'db>>)>,
 ) -> Regions<'db> {
     let mut builder = Builder {
         ctx,
@@ -376,7 +378,7 @@ struct Builder<'c, 'a, 'db> {
     regions: Regions<'db>,
     /// What each closure checked so far needs of the body that creates it, with how many
     /// regions the closure's type has.
-    requirements: &'c FxHashMap<InternedClosureId<'db>, (usize, Vec<Requirement>)>,
+    requirements: &'c FxHashMap<InternedClosureId<'db>, (usize, Vec<Requirement<'db>>)>,
     /// The universal region of each lifetime parameter, by its index.
     early: FxHashMap<u32, Region<'db>>,
     /// The universal region of each of the signature's late-bound lifetimes.
@@ -1164,7 +1166,6 @@ impl<'db> Builder<'_, '_, 'db> {
             return;
         }
         for requirement in requirements {
-            let Some(&sup) = regions.get(requirement.longer) else { continue };
             let sub = match requirement.shorter {
                 Some(it) => match regions.get(it) {
                     Some(&it) => it,
@@ -1172,6 +1173,11 @@ impl<'db> Builder<'_, '_, 'db> {
                 },
                 None => self.regions.static_rv,
             };
+            if let Some(ty) = requirement.subject {
+                self.regions.type_tests.push(TypeTest { ty, lower: sub, span: requirement.span });
+                continue;
+            }
+            let Some(&sup) = regions.get(requirement.longer) else { continue };
             if sup != sub {
                 self.regions.outlives.push(Outlives {
                     sup,

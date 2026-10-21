@@ -69,7 +69,9 @@ All of these are rustc's, written from `compiler/rustc_borrowck` at the pinned n
   (`with(|x| x)` returning the borrow it was given), named E0521 or a `FnMut` escape as
   rustc names it. What a closure needs of its creator's regions is a requirement the creator
   proves where it makes the closure (closures are checked before the bodies that make them),
-  so the error is the creator's, as in rustc.
+  so the error is the creator's, as in rustc. So is a `T: 'a` the closure cannot prove: the
+  creator proves `T` outlives each of its regions that outlive `'a`, and an error is
+  reported where the closure needed it.
 
 ## How it is tested
 
@@ -90,8 +92,8 @@ With no borrow checker, the 245 units rustc accepts would pass. On branch borrow
 
 | Mode | In scope | Pass | rustc accepts, ra-jit too | rustc rejects, same errors |
 |---|---|---|---|---|
-| Polonius | 1578 | 1102 (69.8%) | 245 of 245 | 857 of 1333 |
-| NLL | 1576 | 1094 (69.4%) | 226 of 226 | 868 of 1350 |
+| Polonius | 1578 | 1106 (70.1%) | 245 of 245 | 861 of 1333 |
+| NLL | 1576 | 1098 (69.7%) | 226 of 226 | 872 of 1350 |
 
 463 units are out of scope; 344 of them need a nightly feature. CI runs the scoring on Linux
 and fails below a floor a few units under the count there.
@@ -105,14 +107,15 @@ just, axum, nushell, delta, eza, tokei and starship it finds nothing, nor on the
 
 Every failing unit is one where rustc gives an error ra-jit does not, or gives it on another
 line or with another code. By what is wrong, most first, on branch borrowck-3: 73 "lifetime
-may not live long enough" not reported, 38 E0597 not reported, 24 E0310, 20 E0700, 18 E0381,
+may not live long enough" not reported, 38 E0597 not reported, 20 E0310, 20 E0700, 18 E0381,
 17 E0309, then a long tail. The causes, grouped:
 
 - **Higher-ranked regions and placeholders** (`for<'a>` bounds, closures with higher-ranked
   signatures): rustc checks them with placeholders in universes; ra-jit does not yet.
-- **Closure type tests propagated to the creator**: rustc proves a closure body's `T: 'a`
-  tests in the function that creates it (E0309, E0310); ra-jit propagates the closure's
-  region requirements but drops its type tests, so it misses those errors.
+- **Well-formedness of items** (most of what is left of E0309 and E0310): rustc checks that
+  the types in a struct, enum, impl or where clause outlive what they borrow for before it
+  checks any body; ra-jit checks bodies only. A projection's `<T as Trait>::Assoc: 'a` is not
+  tested yet either.
 - **Written closure parameter types**: `|x: &'x u32|` gives `x` the creator's `'x` in rustc,
   the closure's own lifetime in ra-jit, so an error the annotation causes is reported where
   `x` is used instead of at the parameter.
