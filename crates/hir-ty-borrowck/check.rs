@@ -776,8 +776,11 @@ impl<'a, 'db> Checker<'a, '_, 'db> {
                         return;
                     }
                     (None, Category::Return) => {
-                        let span =
-                            if blamed.span == MirSpan::Unknown { loan.span } else { blamed.span };
+                        let span = if blamed.span == MirSpan::Unknown {
+                            loan.span
+                        } else {
+                            self.tail(blamed.span)
+                        };
                         let message = match self.describe(place) {
                             Some(_) if place.projection.is_empty() => {
                                 "cannot return reference to local variable".to_owned()

@@ -7979,7 +7979,7 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
                     addr = self.element(addr, prev.ty, index)?;
                     meta = None;
                 }
-                ProjectionElem::ConstantIndex { offset, from_end } => {
+                ProjectionElem::ConstantIndex { offset, from_end, .. } => {
                     let index = if *from_end {
                         let len = self.len(prev.ty, meta)?;
                         self.builder.ins().iadd_imm(len, -(*offset as i64))

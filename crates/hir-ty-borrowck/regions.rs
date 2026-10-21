@@ -209,6 +209,7 @@ pub(super) fn build<'db>(ctx: &Ctx<'_, 'db>, body: &MirBody<'db>, cfg: &Cfg) -> 
         early: FxHashMap::default(),
         late: FxHashMap::default(),
         impl_self: None,
+        returns_opaque: false,
         location: None,
     };
     builder.universal_regions();
@@ -241,6 +242,9 @@ struct Builder<'c, 'a, 'db> {
     /// The self type of the impl the body is in, as rust-analyzer gives it with `'_` an error,
     /// and with universal regions there: rustc's anonymous lifetime parameters of the impl.
     impl_self: Option<(Ty<'db>, Ty<'db>)>,
+    /// The return type is an `impl Trait`, so the return slot has the type it hides, which
+    /// implies nothing to the body.
+    returns_opaque: bool,
     location: Option<Location>,
 }
 
@@ -389,6 +393,19 @@ impl<'db> Builder<'_, '_, 'db> {
                             output = rustc_type_ir::TypeFoldable::fold_with(output, &mut folder);
                         }
                     }
+                    // Each elided input lifetime is its own region before `&dyn Trait` copies
+                    // it into the object's default, so that the two are the same one.
+                    for input in &mut inputs {
+                        *input =
+                            rustc_type_ir::fold_regions(self.interner(), *input, |region, _| {
+                                match region.kind() {
+                                    RegionKind::ReError(_) => {
+                                        self.new_universal(UniversalKind::AnonParam)
+                                    }
+                                    _ => region,
+                                }
+                            });
+                    }
                     let mut defaults = ObjectDefaults {
                         db: self.ctx.db,
                         interner: self.interner(),
@@ -447,6 +464,7 @@ impl<'db> Builder<'_, '_, 'db> {
             // A returned `impl Trait` is checked as the type it hides; its lifetimes are
             // `'static` when nothing it could capture is, and left free otherwise.
             let opaque = signature.as_ref().is_some_and(|(_, output)| has_opaque(*output));
+            self.returns_opaque = opaque;
             let ty = match &signature {
                 Some((_, output)) if !opaque => *output,
                 _ => body.locals[return_local].ty.as_ref(),
@@ -654,7 +672,7 @@ impl<'db> Builder<'_, '_, 'db> {
             .body
             .param_locals
             .iter()
-            .chain([&crate::mir::return_slot()])
+            .chain((!self.returns_opaque).then_some(&crate::mir::return_slot()))
             .map(|&it| self.regions.local_tys[it.into_raw().into_u32() as usize])
             .collect();
         let mut signature = signature;
@@ -764,9 +782,13 @@ impl<'db> Builder<'_, '_, 'db> {
         match ty.kind() {
             TyKind::Ref(region, inner, _) => {
                 if let Some(shorter) = rv_of(region) {
+                    let referent = match inner.kind() {
+                        TyKind::Alias(_) => self.normalize(inner).unwrap_or(inner),
+                        _ => inner,
+                    };
                     let mut components = Vec::new();
                     let mut params = Vec::new();
-                    outlives_components(inner, &mut components, &mut params);
+                    outlives_components(referent, &mut components, &mut params);
                     pairs.extend(components.into_iter().map(|longer| (longer, shorter)));
                     self.regions.type_bounds.extend(params.into_iter().map(|it| (it, shorter)));
                 }
@@ -784,6 +806,28 @@ impl<'db> Builder<'_, '_, 'db> {
                     for (_, field) in self.ctx.db.field_types(variant).iter() {
                         let field = field.ty().instantiate(self.interner(), args).skip_norm_wip();
                         self.implied_bounds(field, pairs, seen, depth + 1);
+                    }
+                }
+                // And the bounds the type declares, which its well-formedness needs.
+                let clauses: Vec<_> = GenericPredicates::query_all(self.ctx.db, adt.into())
+                    .iter_instantiated(self.interner(), args.as_slice())
+                    .map(|it| it.skip_norm_wip())
+                    .collect();
+                for clause in clauses {
+                    match clause.kind().skip_binder() {
+                        ClauseKind::RegionOutlives(OutlivesPredicate(longer, shorter)) => {
+                            if let (Some(longer), Some(shorter)) =
+                                (self.region_rv(longer), self.region_rv(shorter))
+                            {
+                                pairs.push((longer, shorter));
+                            }
+                        }
+                        ClauseKind::TypeOutlives(OutlivesPredicate(ty, region)) => {
+                            if let Some(region) = self.region_rv(region) {
+                                self.regions.type_bounds.push((ty, region));
+                            }
+                        }
+                        _ => (),
                     }
                 }
             }
@@ -1301,16 +1345,18 @@ impl<'db> Builder<'_, '_, 'db> {
                             sig,
                         );
                         self.callee_predicates(def, fn_args, span);
-                        let self_param = match def {
+                        let (self_param, keep_static) = match def {
                             CallableDefId::FunctionId(it) => {
-                                FunctionSignature::of(self.ctx.db, it).has_self_param()
+                                let written = FunctionSignature::of(self.ctx.db, it);
+                                (written.has_self_param(), writes_static_object(&written.store))
                             }
-                            _ => false,
+                            _ => (false, true),
                         };
                         let (inputs, output) = self.elide(
                             sig.inputs().iter().copied().collect(),
                             sig.output(),
                             self_param,
+                            keep_static,
                         );
                         // The where clauses of the associated types in the signature hold
                         // for it to be well-formed.
@@ -1366,21 +1412,25 @@ impl<'db> Builder<'_, '_, 'db> {
     /// A callee's signature with the lifetimes it elides, which RA leaves as errors, made
     /// region variables by the elision rules: each elided input lifetime its own, an elided
     /// output lifetime that of `self` when `self` is a reference, else that of the only
-    /// lifetime of the inputs.
+    /// lifetime of the inputs. The default lifetime of a trait object is not one of them.
     fn elide(
         &self,
         inputs: Vec<Ty<'db>>,
         output: Ty<'db>,
         self_param: bool,
+        keep_static: bool,
     ) -> (Vec<Ty<'db>>, Ty<'db>) {
         let interner = self.interner();
+        let mut defaults = ObjectDefaults { db: self.ctx.db, interner, keep_static, erase: false };
         let inputs: Vec<Ty<'db>> = inputs
             .into_iter()
             .map(|ty| {
-                rustc_type_ir::fold_regions(interner, ty, |region, _| match region.kind() {
-                    RegionKind::ReError(_) => self.fresh(),
-                    _ => region,
-                })
+                let ty =
+                    rustc_type_ir::fold_regions(interner, ty, |region, _| match region.kind() {
+                        RegionKind::ReError(_) => self.fresh(),
+                        _ => region,
+                    });
+                rustc_type_ir::TypeFoldable::fold_with(ty, &mut defaults)
             })
             .collect();
         let self_region = match inputs.first().map(|it| it.kind()) {
@@ -1388,25 +1438,28 @@ impl<'db> Builder<'_, '_, 'db> {
             _ => None,
         };
         let elided = self_region.or_else(|| {
-            let mut found = None;
-            let mut count = 0;
+            let mut distinct = Vec::new();
             for ty in &inputs {
                 rustc_type_ir::fold_regions(interner, *ty, |region, _| {
-                    if !matches!(region.kind(), RegionKind::ReBound(..)) {
-                        count += 1;
-                        found = Some(region);
+                    if !matches!(region.kind(), RegionKind::ReBound(..))
+                        && !distinct.contains(&region)
+                    {
+                        distinct.push(region);
                     }
                     region
                 });
             }
-            if count == 1 { found } else { None }
+            match distinct.as_slice() {
+                [only] => Some(*only),
+                _ => None,
+            }
         });
         let output =
             rustc_type_ir::fold_regions(interner, output, |region, _| match region.kind() {
                 RegionKind::ReError(_) => elided.unwrap_or_else(|| self.fresh()),
                 _ => region,
             });
-        (inputs, output)
+        (inputs, rustc_type_ir::TypeFoldable::fold_with(output, &mut defaults))
     }
 
     /// The where clauses of what a call calls, which the caller must prove.

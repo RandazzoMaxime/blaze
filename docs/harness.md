@@ -105,6 +105,7 @@ with reasons. The daemon's log says `backend: llvm -O2 fast emit` when LLVM is i
 | `cargo_ra_jit.py` | `cargo ra-jit` against plain cargo on seven real projects, 22 flag combinations, and 11 daemon lifecycle checks. Needs the network and about 20 minutes; not in CI |
 | `debuginfo.py` | Backtraces, `llvm-dwarfdump --verify`, gdb stopping and stepping, locals |
 | `live_e2e.py` | Edits of a running program that links `ra-jit-live`, each applied as a patch. macOS on AArch64 |
+| `live_latency.py` | Edit-to-running time of live edits on `harness/live`, `demo/life`, `harness/live-bevy` and `harness/live-egui`: isolated edits, bursts of valid keystrokes, real typing replayed key by key (most texts in between do not compile; a program told to restart is started again), and a session's restarts against `cargo run`. Writes p50 to p99 and every sample, with the machine and its battery, to `LATENCY_JSON`. Measures; checks nothing; macOS on AArch64 ([live.md](live.md#latency-under-typing)) |
 | `fncache.py` | `#[ra_jit::cache]` ([fn-cache.md](fn-cache.md)): a cold run computes and a warm one finds the result on disk; comment, format, moved-line and unrelated edits keep it, an edit of a function it reaches through another drops it; generic instances are kept apart; impure functions are refused saying where; a restarted daemon finds the same results; cargo's build caches nothing. `--live`: a live edit computes again and drops the old results, macOS on AArch64 |
 | `spaces.py` | A two-crate workspace under a directory whose name has spaces, `$$`, `#` and quotes, built and edited with `cargo ra-jit build`; every edit has to be applied by the daemon against rustc's symbols ([#14](https://github.com/indexable-inc/ra-jit/issues/14)) |
 | `headerpad.py` | A program whose unwind table does not fit the room its link leaves after the load commands: the first link is done again with room, the edits after it are spliced, and a restarted daemon starts from the room kept beside the executable ([#13](https://github.com/indexable-inc/ra-jit/issues/13)). macOS on AArch64 |
@@ -126,19 +127,34 @@ with reasons. The daemon's log says `backend: llvm -O2 fast emit` when LLVM is i
 ### Timing
 
 `bench.py`, `editloop.py`, `edittimes.py`, `scaling.py`, `dxedits.py`, `linkbench.py`,
-`shapes.py`, `heap.py`, `fnincr.py` and `realbench.py` measure and do not gate. `fnincr.py` counts
+`shapes.py`, `heap.py`, `fnincr.py`, `realbench.py` and `live_latency.py` measure and do not gate. `fnincr.py` counts
 the queries an edit inside one function of a big file runs (the file comes from `genbig.py`),
 against the same functions in many small files ([reports/INCREMENTAL.md](reports/INCREMENTAL.md)). `realbench.py` times
 `cargo ra-jit build` against `cargo build` on ripgrep, just and nushell (cold, no-op and
 three kinds of edit); the numbers are in [results.md](results.md#11-real-projects). Their docstrings say how to run them.
-`bench.py` on real projects, with `benchreport.py`, is also what writes the README's build table:
-[benchmarks.md](benchmarks.md). `bench.py --runtime` runs `runbench.py`, which times programs
-ra-jit builds whole with LLVM against `cargo build --release`, and `benchreport.py` writes that
-result to the README's runtime table, refusing it when any program's output differs from cargo's.
-`abbench.py` runs two or more builds of ra-jit against each other on `bench.py`'s edits, in
-interleaved rounds: an edit's wall time, the daemon's own time and (macOS) its workers' cycles,
-the cold start, and the workers' peak memory. It is how the release build's profile was chosen
-([reports/RELEASE-BUILD.md](reports/RELEASE-BUILD.md)), and with `--train` it is the training of its PGO.
+`bench.py` on real projects, with `benchreport.py`, is also what writes the README's build
+table: [benchmarks.md](benchmarks.md). Besides the edits `bench.py` times repeated cold builds
+against fresh cargo with an empty and with a warm store (`--cold-runs`), the same steps under
+the fastest cargo setups (`--setups`: mold, wild, `-Zthreads=8`, cg_clif and `cargo check`) and
+the test suites under both (`--tests`). `bench.py --runtime` runs `runbench.py`, which times
+programs ra-jit builds whole with LLVM against `cargo build --release`, and `benchreport.py`
+writes that result to the README's runtime table, refusing it when any program's output differs
+from cargo's. `abbench.py` runs two or more builds of ra-jit against each other on `bench.py`'s
+edits, in interleaved rounds: an edit's wall time, the daemon's own time and (macOS) its
+workers' cycles, the cold start, and the workers' peak memory. It is how the release build's
+profile was chosen ([reports/RELEASE-BUILD.md](reports/RELEASE-BUILD.md)), and with `--train` it
+is the training of its PGO. `hotpatch.py` times an edit of a running program under Dioxus's
+subsecond against `cargo ra-jit build` and `cargo build` with a restart; its program is
+`harness/hotpatch`. `benchhistory.py` appends a run to `docs/benchmarks/history/` (what the
+site's /bench page charts) and, with `check`, fails when a median moved past its noise band.
+`live_latency.py` times live edits on macOS on AArch64, per keystroke under typing (`replay`,
+`burst`) as well as one edit at a time (`socket`, or `cargo` through `cargo ra-jit build`), and
+the restarts of a session against `cargo run` (`restart`); its JSON goes to `benchhistory.py
+live`, and the numbers measured on a MacBook are in [live.md](live.md#latency-under-typing).
+`nix develop .#bench` has everything `bench.py` and `hotpatch.py` need (the nightly, mold, wild,
+`dx`, bevy's libraries; zed's are in `.#bench-zed`, since every library directory slows each
+link cargo makes); run `live_latency.py` with rustup's 1.99.0 instead, as the workflow does:
+under the shell's toolchain the daemon links the running program again instead of patching it.
 
 ## The fuzzer
 
