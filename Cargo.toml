@@ -71,6 +71,7 @@ hir = { path = "vendor/rust-analyzer/crates/hir", version = "0.0.0" }
 hir-def = { path = "vendor/rust-analyzer/crates/hir-def", version = "0.0.0" }
 hir-expand = { path = "vendor/rust-analyzer/crates/hir-expand", version = "0.0.0" }
 hir-ty = { path = "vendor/rust-analyzer/crates/hir-ty", version = "0.0.0" }
+hir-ty-borrowck = { path = "vendor/rust-analyzer/crates/hir-ty-borrowck", version = "0.0.0" }
 hir-ide = { path = "vendor/rust-analyzer/crates/hir-ide", version = "0.0.0" }
 ide = { path = "vendor/rust-analyzer/crates/ide", version = "0.0.0" }
 ide-assists = { path = "vendor/rust-analyzer/crates/ide-assists", version = "0.0.0" }

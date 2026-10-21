@@ -7,7 +7,7 @@ use hir_def::hir::{BindingId, ExprId, Pat, Statement};
 use rustc_hash::{FxHashMap, FxHashSet};
 use rustc_type_ir::inherent::IntoKind;
 
-use crate::{
+use hir_ty::{
     mir::{
         AsmOperand, BorrowKind, LocalId, MirBody, MirSpan, MutBorrowKind, Operand, OperandKind,
         PlaceElem, ProjectionElem, Rvalue, StatementKind, StoredPlace, TerminatorKind,
@@ -92,7 +92,7 @@ pub(super) fn check<'db>(
         move_errors: Vec::new(),
         scrutinees: None,
         capture_temps,
-        assigned_local: crate::mir::return_slot(),
+        assigned_local: super::return_slot(),
         regions: &regions,
         region_count: count,
         values: &values,
@@ -481,7 +481,7 @@ impl<'a, 'db> Checker<'a, '_, 'db> {
             }
             _ if super::compares(rvalue) => rvalue.for_each_operand(&mut |operand| {
                 if let OperandKind::Copy(place) | OperandKind::Move(place) = &operand.kind {
-                    let span = operand.span.unwrap_or(span);
+                    let span = operand.span().unwrap_or(span);
                     let place = PlaceRef::of(place);
                     self.access_place(
                         location,
@@ -500,7 +500,7 @@ impl<'a, 'db> Checker<'a, '_, 'db> {
     }
 
     fn consume_operand(&mut self, location: Location, operand: &Operand, span: MirSpan) {
-        let span = operand.span.unwrap_or(span);
+        let span = operand.span().unwrap_or(span);
         match &operand.kind {
             OperandKind::Copy(place) | OperandKind::Move(place)
                 if self.ctx.moved_place(self.body, operand).is_none() =>
@@ -1205,7 +1205,7 @@ impl<'a, 'db> Checker<'a, '_, 'db> {
     }
 
     fn check_movable_place(&mut self, location: Location, place: PlaceRef<'_>, span: MirSpan) {
-        let mut ty = crate::mir::PlaceTy::from_ty(self.body.locals[place.local].ty.as_ref());
+        let mut ty = hir_ty::mir::PlaceTy::from_ty(self.body.locals[place.local].ty.as_ref());
         if ty.ty.references_non_lt_error() {
             return;
         }
@@ -1493,7 +1493,7 @@ fn capture_temps(body: &MirBody<'_>) -> FxHashMap<LocalId, MirSpan> {
         for statement in &block.statements {
             if let StatementKind::Assign(
                 _,
-                Rvalue::Aggregate(crate::mir::AggregateKind::Closure(_), operands),
+                Rvalue::Aggregate(hir_ty::mir::AggregateKind::Closure(_), operands),
             ) = &statement.kind
             {
                 for operand in operands.iter() {
