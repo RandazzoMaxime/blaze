@@ -196,6 +196,35 @@ All notable changes to ra-jit are written here. The format follows
 
 ### Fixed
 
+- `harness/apps.py`'s perf stage ends with its timings again: since the rename from rustd it
+  stored ra-jit's as `ra-jit_s` and printed `ra_jit_s`, a `KeyError` after every workload.
+  wasmrun builds wasmtime 36.0.19 (was 25.0.3, which Dependabot's alerts name); its workload
+  is the same as rustc's on both.
+- `cargo ra-jit run` from many clients of one checkout at once starts each client's program,
+  on macOS too. A package with a `default-run` (or one program of several) went to plain
+  `cargo run`, which on macOS removes and copies again the program cargo has under
+  `target/debug` before it starts it, so a client that started it meanwhile found no file
+  ("No such file or directory") or hung before its first instruction; and rustc built the
+  edit again. ra-jit now runs the `default-run` itself, holds cargo's lock on the build
+  directory from putting the daemon's programs in place until they have started (a `cargo
+  test` executable too), takes it to give cargo back its own, and on macOS puts a program in
+  place as a clone, as cargo does: a program started from a hard link just made can be
+  killed as it starts ([rust-lang/cargo#7821](https://github.com/rust-lang/cargo/issues/7821)).
+  `cargo_ra_jit.py`'s 16 clients on 4 worktrees run 8 rounds of edits, all by the daemon.
+- A program or test `cargo ra-jit` starts itself has what the `[env]` of cargo's
+  configuration sets, as under `cargo run` and `cargo test`: the nearest `.cargo/config.toml`
+  (or `config`) says a variable, then `$CARGO_HOME`'s, with `force` and `relative`.
+- `cargo_ra_jit.py`'s life workspace no longer races with itself on macOS: the test that runs
+  `cargo build` inside and the one that starts `other` take turns, since cargo removes and
+  copies each program again there on every build and the second sometimes found none (plain
+  cargo failed it as often as ra-jit).
+- A workspace the daemon loads after a change whose build scripts did not all run is not
+  loaded: the crates of a script that failed were read without its `OUT_DIR`, so thiserror's
+  `include!` went missing, every derived `Error` was unimplemented and `?` resolved to the
+  body-less `FromResidual::from_residual` for the rest of the daemon's life (what hyperfine's
+  edits under plain cargo met now and then on Linux before the edit stopped running every
+  script through cargo). It says which script failed instead, as an edit that runs the
+  scripts again already did.
 - `bench.py` without `--reference` built plain cargo into `target-ref` inside the checkout,
   which cargo takes for a source of the package: ripgrep's, fd's and hyperfine's build scripts
   name no `rerun-if-changed`, so cargo ran them again and built the package again at every

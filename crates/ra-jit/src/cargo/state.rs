@@ -58,6 +58,18 @@ pub(crate) struct State {
     /// Whether a library that was built has doc tests.
     pub(crate) doc_tests: bool,
     pub(crate) counts: Counts,
+    /// The `[env]` of cargo's configuration, which cargo sets for what it runs.
+    #[serde(default)]
+    pub(crate) configured: Vec<Configured>,
+}
+
+/// A variable of the `[env]` tables of cargo's configuration. Cargo sets it for a program it
+/// runs where the environment has none, or always when it is `force`d.
+#[derive(Serialize, Deserialize, Clone)]
+pub(crate) struct Configured {
+    pub(crate) name: String,
+    pub(crate) value: String,
+    pub(crate) force: bool,
 }
 
 /// How many builds the daemon served and how many went to cargo, by the reason.
@@ -86,7 +98,8 @@ pub(crate) struct Program {
     /// them again, under whoever is running the program.
     #[serde(default)]
     names: Vec<PathBuf>,
-    /// A hard link to the executable rustc linked, to give cargo back before it builds.
+    /// A hard link to the executable rustc linked (a clone on macOS), to give cargo back
+    /// before it builds.
     cargos: PathBuf,
     /// The directory of the record of the unit rustc linked it from, when it is known.
     #[serde(default)]
@@ -100,6 +113,10 @@ pub(crate) struct Program {
     inputs: Vec<PathBuf>,
     /// What cargo sets for the program when it runs it.
     pub(crate) env: Vec<(String, String)>,
+    /// Whether it is its package's `default-run`: what `cargo run` runs when it names no
+    /// program.
+    #[serde(default)]
+    pub(crate) default_run: bool,
 }
 
 #[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
@@ -526,13 +543,16 @@ impl State {
         let kept = State::kept_path(key).ok().and_then(|it| std::fs::read(it).ok());
         let kept: Vec<(PathBuf, PathBuf)> =
             kept.and_then(|it| serde_json::from_slice(&it).ok()).unwrap_or_default();
+        let _held = build_locks(kept.iter().map(|(executable, _)| &**executable));
         for (executable, cargos) in kept {
             // Whatever goes wrong here, cargo finds a file that is not its own or none,
             // and builds the program again.
-            let _ = match same_file::is_same_file(&cargos, &executable) {
-                Ok(true) => Ok(()),
-                Ok(false) => place(&cargos, &executable),
-                Err(_) => std::fs::remove_file(&executable),
+            let _ = if is_placed(&cargos, &executable) {
+                Ok(())
+            } else if cargos.is_file() {
+                place(&cargos, &executable)
+            } else {
+                std::fs::remove_file(&executable)
             };
         }
     }
@@ -541,12 +561,12 @@ impl State {
     /// and cargo's own of one it did not, which is the program while none of its source is
     /// written. `answers` is what the daemon said of each program of each checkout. `Ok`
     /// are the programs that stay cargo's and why; `Err` is why cargo builds, when a
-    /// program the daemon did not build has new source.
+    /// program the daemon did not build has new source. Under `held`, which is this build's.
     pub(crate) fn settle(
         &self,
         answers: &[Vec<Result<(), String>>],
+        _held: &Held,
     ) -> Result<Vec<(&Program, String)>, String> {
-        let _held = build_locks(self.programs.iter().map(|it| &*it.executable));
         let mut cargos = Vec::new();
         for program in &self.programs {
             let answer = match program.asked_as {
@@ -591,10 +611,18 @@ impl State {
     pub(crate) fn keep_daemons(&self) -> anyhow::Result<()> {
         for program in &self.programs {
             let Some((checkout, at)) = program.asked_as else { continue };
-            let _ = std::fs::remove_file(&program.cargos);
-            std::fs::copy(&self.checkouts[checkout].programs[at].binary, &program.cargos)?;
+            let mut new = program.cargos.as_os_str().to_owned();
+            new.push(format!(".{}.new", std::process::id()));
+            std::fs::copy(&self.checkouts[checkout].programs[at].binary, &new)?;
+            std::fs::rename(&new, &program.cargos)?;
         }
         Ok(())
+    }
+
+    /// Cargo's locks on the build directories of the programs, held until the programs this
+    /// command runs have started.
+    pub(crate) fn hold(&self) -> Held {
+        Held { _locks: build_locks(self.programs.iter().map(|it| &*it.executable)) }
     }
 
     /// The programs cargo built that the daemon is never asked for, and why.
@@ -635,6 +663,7 @@ impl State {
             refusal: None,
             doc_tests: false,
             counts,
+            configured: configured_env(cwd),
         };
         let project = match project(asked, cwd, &metadata) {
             Ok(project) => dunce::canonicalize(&project).unwrap_or(project),
@@ -715,7 +744,10 @@ impl State {
                 .flat_map(|it| it.inputs().files)
                 .filter(|it| !it.starts_with(metadata.target_directory.as_std_path()))
                 .collect();
+            let default_run =
+                kind == Kind::Bin && !test && package.default_run.as_ref() == Some(&name);
             state.programs.push(Program {
+                default_run,
                 name,
                 kind,
                 package: package.name.to_string(),
@@ -792,7 +824,10 @@ impl Program {
 /// program in `deps` under its other name again, removing the file there first when the
 /// two are not one file, and while a program is installed under its names one by one they
 /// are not: a `cargo run` of another client of the checkout that found that moment would
-/// find no program. A directory cargo keeps no lock in, on NFS, has none to hold.
+/// find no program. So does a program started while a cargo writes it, and one started
+/// after another client gave cargo its own back is not this build's: a client holds the
+/// locks from putting its programs in place until they have started. A directory cargo
+/// keeps no lock in, on NFS, has none to hold.
 fn build_locks<'a>(executables: impl Iterator<Item = &'a Path>) -> Vec<std::fs::File> {
     // `debug/app`, `debug/examples/app` and `debug/deps/app-…` are all of `debug`.
     let lock_of = |executable: &Path| {
@@ -814,12 +849,31 @@ fn build_locks<'a>(executables: impl Iterator<Item = &'a Path>) -> Vec<std::fs::
     locks.into_iter().filter_map(held).collect()
 }
 
+/// Cargo's locks on build directories, held while this is.
+pub(crate) struct Held {
+    _locks: Vec<std::fs::File>,
+}
+
 /// Has `to` be the file `from` is, when it is not.
 fn install(from: &Path, to: &Path) -> Result<(), String> {
-    if same_file::is_same_file(from, to).unwrap_or(false) {
+    if is_placed(from, to) {
         return Ok(());
     }
     place(from, to).map_err(|it| format!("installing {}: {it}", to.display()))
+}
+
+/// Whether `to` is what `place` made of `from`: the file itself, or on macOS its copy, which
+/// has its length and the time it was last written.
+fn is_placed(from: &Path, to: &Path) -> bool {
+    if same_file::is_same_file(from, to).unwrap_or(false) {
+        return true;
+    }
+    let (Ok(from), Ok(to)) = (from.metadata(), to.metadata()) else { return false };
+    let written = |it: &std::fs::Metadata| it.modified().ok();
+    cfg!(target_os = "macos")
+        && from.len() == to.len()
+        && written(&from).is_some()
+        && written(&from) == written(&to)
 }
 
 /// The package of what a debugger reads of the executable at `binary`, linked from `object`
@@ -834,13 +888,15 @@ fn packed(binary: &Path, object: &Path, rustcs: &Path) -> Result<PathBuf, String
 }
 
 /// Has `to` be the file `from` is, under a second name: what was at `to` stays as it is
-/// for whoever runs it.
+/// for whoever runs it. On macOS a copy, which is a clone and as quick: there a program
+/// started from a hard link just made can be killed as it starts, which is why cargo
+/// copies there too (rust-lang/cargo#7821).
 pub(crate) fn place(from: &Path, to: &Path) -> std::io::Result<()> {
     let mut new = to.as_os_str().to_owned();
     new.push(format!(".{}.new", std::process::id()));
     let _ = std::fs::remove_file(&new);
-    if std::fs::hard_link(from, &new).is_err() {
-        // Another filesystem.
+    // Or another filesystem.
+    if cfg!(target_os = "macos") || std::fs::hard_link(from, &new).is_err() {
         std::fs::copy(from, &new)?;
     }
     std::fs::rename(&new, to)
@@ -1045,6 +1101,52 @@ fn run_env(package: &Package, scripts: &[BuildScript]) -> Vec<(String, String)> 
     env
 }
 
+/// The `[env]` of cargo's configuration as cargo reads it in `cwd`: from the `.cargo`
+/// directory of each directory up from it, the nearest first, then from cargo's home. Of two
+/// files in one directory cargo reads `config`, not `config.toml`. A `relative` value is a
+/// path from the directory its `.cargo` is in.
+fn configured_env(cwd: &Path) -> Vec<Configured> {
+    let in_dir = |dir: &Path| {
+        ["config", "config.toml"].map(|it| dir.join(it)).into_iter().find(|it| it.is_file())
+    };
+    let mut files: Vec<PathBuf> =
+        cwd.ancestors().filter_map(|it| in_dir(&it.join(".cargo"))).collect();
+    let home = switch::cargo_home().and_then(|it| in_dir(&it));
+    if let Some(home) = home
+        && !files.iter().any(|it| same_file::is_same_file(it, &home).unwrap_or(false))
+    {
+        files.push(home);
+    }
+    let mut env: Vec<Configured> = Vec::new();
+    for file in files {
+        let text = std::fs::read_to_string(&file).unwrap_or_default();
+        let Ok(table) = text.parse::<toml::Table>() else { continue };
+        let Some(toml::Value::Table(variables)) = table.get("env") else { continue };
+        let base = file.parent().and_then(Path::parent).unwrap_or(Path::new(""));
+        for (name, it) in variables {
+            if env.iter().any(|known| known.name == *name) {
+                continue;
+            }
+            let flag = |table: &toml::Table, name: &str| {
+                table.get(name).and_then(toml::Value::as_bool).unwrap_or(false)
+            };
+            let (value, force, relative) = match it {
+                toml::Value::String(value) => (value.clone(), false, false),
+                toml::Value::Table(it) => {
+                    let Some(value) = it.get("value").and_then(toml::Value::as_str) else {
+                        continue;
+                    };
+                    (value.to_owned(), flag(it, "force"), flag(it, "relative"))
+                }
+                _ => continue,
+            };
+            let value = if relative { base.join(value).display().to_string() } else { value };
+            env.push(Configured { name: name.clone(), value, force });
+        }
+    }
+    env
+}
+
 /// Everything a change to which makes the next build cargo's.
 fn guards(
     cwd: &Path,
@@ -1180,5 +1282,26 @@ mod tests {
         assert_eq!(dirs("/t/debug/deps/unit-0123"), expected);
         assert_eq!(dirs("/t/debug/app"), expected);
         assert_eq!(dirs("/t/debug/examples/one"), expected);
+    }
+
+    #[test]
+    fn the_nearest_configuration_says_a_variable() {
+        let top = std::env::temp_dir().join(format!("ra-jit-configured-{}", std::process::id()));
+        let inner = top.join("ws/app");
+        std::fs::create_dir_all(inner.join(".cargo")).unwrap();
+        std::fs::create_dir_all(top.join(".cargo")).unwrap();
+        std::fs::write(
+            top.join(".cargo/config.toml"),
+            "[env]\nNEAR = \"far\"\nFAR = { value = \"data\", relative = true, force = true }\n",
+        )
+        .unwrap();
+        std::fs::write(inner.join(".cargo/config.toml"), "[env]\nNEAR = \"near\"\n").unwrap();
+        let configured = configured_env(&inner);
+        let said = |name: &str| configured.iter().find(|it| it.name == name).cloned();
+        let near = said("NEAR").unwrap();
+        assert_eq!((near.value.as_str(), near.force), ("near", false));
+        let far = said("FAR").unwrap();
+        assert_eq!((PathBuf::from(far.value), far.force), (top.join("data"), true));
+        std::fs::remove_dir_all(&top).unwrap();
     }
 }
