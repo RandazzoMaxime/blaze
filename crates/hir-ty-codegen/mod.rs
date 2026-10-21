@@ -3376,11 +3376,27 @@ fn inline(ctx: &mut cranelift_codegen::Context, inlined: &[ir::Function]) -> Res
     // names, which among the caller's is another symbol's.
     let ends = bodies.put.iter().skip(1).map(|it| it.insts).chain([ctx.func.dfg.num_insts()]);
     for (put, end) in bodies.put.iter().zip(ends) {
-        // What a body is built to is of the statement that called it.
-        for inst in put.insts..end {
-            ctx.func.set_srcloc(ir::Inst::from_u32(inst as u32), put.statement);
-        }
         let body = &inlined[put.body];
+        // Cranelift makes the instructions of a body it inlines in the order it visits the
+        // body's, and gives them no source location: an `offset`'s mark goes by that order,
+        // where every instruction is the one it is made from (a return becomes a jump).
+        let order: Vec<ir::Inst> = cranelift_codegen::traversals::Dfs::new()
+            .pre_order_iter(body)
+            .flat_map(|block| body.layout.block_insts(block))
+            .collect();
+        let made = |at: usize| ir::Inst::from_u32((put.insts + at) as u32);
+        let in_order = order.len() <= end - put.insts
+            && order.iter().enumerate().all(|(at, &it)| {
+                let from = body.dfg.insts[it].opcode();
+                from.is_return() || ctx.func.dfg.insts[made(at)].opcode() == from
+            });
+        // What a body is built to is of the statement that called it.
+        for at in 0..end - put.insts {
+            let from = order.get(at).filter(|_| in_order);
+            let marked = from.is_some_and(|&it| unwind::seh::is_in_bounds(body.srcloc(it)));
+            let loc = if marked { unwind::seh::in_bounds(put.statement) } else { put.statement };
+            ctx.func.set_srcloc(made(at), loc);
+        }
         for (global, data) in body.global_values.iter() {
             let ir::GlobalValueData::Symbol { name: ir::ExternalName::User(name), .. } = data
             else {
@@ -11813,6 +11829,11 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
                 let (count, _) = self.load_scalar(count)?;
                 let bytes = self.builder.ins().imul_imm(count, size);
                 let value = self.builder.ins().iadd(ptr, bytes);
+                if name == "offset" {
+                    let inst = self.builder.func.dfg.value_def(value).unwrap_inst();
+                    let loc = unwind::seh::in_bounds(self.builder.func.srcloc(inst));
+                    self.builder.func.set_srcloc(inst, loc);
+                }
                 self.builder.ins().store(MEM, value, dst, 0);
             }
             ("ptr_mask", [ptr, mask]) => {

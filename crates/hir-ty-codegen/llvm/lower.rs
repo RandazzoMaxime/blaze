@@ -1616,6 +1616,15 @@ impl<'ctx, 'f> Lowering<'ctx, 'f> {
             self.set(inst, Operand::Vector(value));
             return Ok(());
         }
+        // An `offset` is of an address, whether or not it was loaded as an integer.
+        if opcode == Opcode::Iadd && unwind::seh::is_in_bounds(self.func.srcloc(inst)) {
+            let (base, by) = (self.pointer(l)?, self.int(r)?);
+            // SAFETY: `offset` stays within what `base` points into.
+            let address =
+                unsafe { b.build_in_bounds_gep(self.context.i8_type(), base, &[by], "")? };
+            self.set(inst, Operand::Pointer(address));
+            return Ok(());
+        }
         // An offset address is still an address of the same thing.
         match (opcode, self.operand(l), self.operand(r)) {
             (Opcode::Iadd, Operand::Pointer(base), Operand::Int(by))
