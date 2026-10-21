@@ -10,7 +10,7 @@ use hir_def::{
 use rustc_hash::{FxHashMap, FxHashSet};
 use rustc_type_ir::inherent::IntoKind;
 
-use crate::{
+use hir_ty::{
     InferBodyId,
     mir::{
         BorrowKind, LocalId, MirBody, MirSpan, MutBorrowKind, OperandKind, PlaceElem,
@@ -119,7 +119,7 @@ fn is_unit_value(ctx: &Ctx<'_, '_>, expr: hir_def::hir::ExprId) -> bool {
     matches!(ctx.store[expr], Expr::Path(_))
         && ctx.infer.variant_resolution_for_expr(expr).is_some()
         && matches!(ctx.infer.expr_ty(expr).kind(),
-            TyKind::Adt(def, _) if crate::drop::destructor(ctx.db, def.def_id()).is_none())
+            TyKind::Adt(def, _) if hir_ty::drop::destructor(ctx.db, def.def_id()).is_none())
 }
 
 /// The locals a `static` is read through.
@@ -409,7 +409,7 @@ impl Loans {
                 }
                 StatementKind::InlineAsm(asm) => {
                     for operand in &asm.operands {
-                        if let crate::mir::AsmOperand::Reg { output: Some(output), .. } = operand {
+                        if let hir_ty::mir::AsmOperand::Reg { output: Some(output), .. } = operand {
                             self.kill_on_place(
                                 ctx,
                                 body,
@@ -528,7 +528,7 @@ pub(super) fn places_conflict<'db>(
 
 fn projection_conflict<'db>(
     ctx: &Ctx<'_, 'db>,
-    base: crate::mir::PlaceTy<'_>,
+    base: hir_ty::mir::PlaceTy<'_>,
     borrow: PlaceElem,
     access: PlaceElem,
     bias: Bias,
@@ -614,9 +614,11 @@ fn projection_conflict<'db>(
     }
 }
 
-fn array_len(ctx: &Ctx<'_, '_>, base: crate::mir::PlaceTy<'_>) -> Option<u64> {
+fn array_len(ctx: &Ctx<'_, '_>, base: hir_ty::mir::PlaceTy<'_>) -> Option<u64> {
     match base.ty.kind() {
-        TyKind::Array(_, len) => crate::consteval::try_const_usize(ctx.db, len).map(|it| it as u64),
+        TyKind::Array(_, len) => {
+            hir_ty::consteval::try_const_usize(ctx.db, len).map(|it| it as u64)
+        }
         _ => None,
     }
 }

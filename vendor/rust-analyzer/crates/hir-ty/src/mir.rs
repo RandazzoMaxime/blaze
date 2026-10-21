@@ -31,9 +31,6 @@ use crate::{
     },
 };
 
-// The borrow checker, in the repository this one is a submodule of.
-#[path = "../../../../../crates/hir-ty-borrowck/mod.rs"]
-pub mod borrowck;
 // rustd's code generator, in the repository this one is a submodule of.
 #[path = "../../../../../crates/hir-ty-codegen/mod.rs"]
 pub mod codegen;
@@ -168,6 +165,11 @@ impl<'db> Operand {
         let interner = DbInterner::new_no_crate(db);
         let ty = Ty::new_fn_def(interner, CallableDefId::FunctionId(func_id).into(), generic_args);
         Operand::from_bytes(Box::default(), ty)
+    }
+
+    /// The expression the operand was written as, where lowering kept one.
+    pub fn span(&self) -> Option<MirSpan> {
+        self.span
     }
 }
 
@@ -442,7 +444,7 @@ impl AssertKind {
         }
     }
 
-    pub(crate) fn for_each_operand(&self, f: &mut impl FnMut(&Operand)) {
+    pub fn for_each_operand(&self, f: &mut impl FnMut(&Operand)) {
         match self {
             AssertKind::BoundsCheck { len, index } => {
                 f(len);
@@ -1195,7 +1197,7 @@ impl StatementKind {
         }
     }
 
-    pub(crate) fn for_each_operand(&self, f: &mut impl FnMut(&Operand)) {
+    pub fn for_each_operand(&self, f: &mut impl FnMut(&Operand)) {
         match self {
             StatementKind::Assign(_, rvalue) => rvalue.for_each_operand(f),
             StatementKind::InlineAsm(asm) => {
@@ -1234,7 +1236,7 @@ impl Rvalue {
         }
     }
 
-    pub(crate) fn for_each_operand(&self, f: &mut impl FnMut(&Operand)) {
+    pub fn for_each_operand(&self, f: &mut impl FnMut(&Operand)) {
         match self {
             Rvalue::Use(it) | Rvalue::Repeat(it, _) | Rvalue::Cast(_, it, _) => f(it),
             Rvalue::UnaryOp(_, it) => f(it),
@@ -1278,7 +1280,7 @@ impl TerminatorKind {
         }
     }
 
-    pub(crate) fn for_each_operand(&self, f: &mut impl FnMut(&Operand)) {
+    pub fn for_each_operand(&self, f: &mut impl FnMut(&Operand)) {
         match self {
             TerminatorKind::SwitchInt { discr: it, .. }
             | TerminatorKind::Yield { value: it, .. }
