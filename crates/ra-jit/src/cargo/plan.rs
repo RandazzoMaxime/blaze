@@ -34,6 +34,17 @@ const RUSTC_HEADERPAD: u64 = 0x400000;
 /// How the room is asked for.
 const HEADERPAD_FLAG: &str = "-Wl,-headerpad,";
 
+/// What a driver of the `cc` kind is told to take out code nothing reaches with, alone or
+/// passed to the linker: `--gc-sections` of an ELF linker, `-dead_strip` of Apple's.
+const STRIPS_UNREACHED: [&str; 2] = ["--gc-sections", "-dead_strip"];
+
+/// How a driver of the `cc` kind passes the linker arguments, separated by commas.
+const TO_THE_LINKER: &str = "-Wl,";
+
+/// How `link.exe` is told what to take out, in options separated by commas: `REF` takes out
+/// code nothing reaches, `NOREF` keeps it.
+const OPT: &str = "/OPT:";
+
 /// The same for `link.exe`, which warns of every name it does so for unless told not to.
 const FIRST_DEFINITION_STAYS_MSVC: [&str; 2] = ["/FORCE:MULTIPLE", "/IGNORE:4006"];
 
@@ -396,6 +407,7 @@ impl LinkLine {
         if self.flavor == Flavor::Msvc {
             self.args.retain(|it| !it.eq_ignore_ascii_case(WARNINGS_FAIL));
         }
+        self.keep_unreached();
         let first = self
             .args
             .iter()
@@ -405,6 +417,37 @@ impl LinkLine {
         match self.flavor {
             Flavor::Cc | Flavor::Apple => self.command_of_cc(ours, first, binary, response),
             Flavor::Msvc => self.command_of_msvc(ours, first, binary, response),
+        }
+    }
+
+    /// Has the linker keep the code nothing in the executable reaches, which rustc's line
+    /// has it take out. A patch calls the code of the executable by name, also code the
+    /// executable's own did not reach when it was linked (an instance of a generic function
+    /// for a type first used in an edit, a function its callers no longer call), and a
+    /// splice declines a patch that calls what is not there, so the edit is linked in full.
+    fn keep_unreached(&mut self) {
+        match self.flavor {
+            Flavor::Cc | Flavor::Apple => self.args.retain_mut(|arg| {
+                if STRIPS_UNREACHED.contains(&arg.as_str()) {
+                    return false;
+                }
+                let Some(passed) = arg.strip_prefix(TO_THE_LINKER) else { return true };
+                let kept: Vec<&str> =
+                    passed.split(',').filter(|it| !STRIPS_UNREACHED.contains(it)).collect();
+                let any = !kept.is_empty();
+                *arg = format!("{TO_THE_LINKER}{}", kept.join(","));
+                any
+            }),
+            Flavor::Msvc => {
+                for arg in &mut self.args {
+                    let named = arg.get(..OPT.len()).filter(|it| it.eq_ignore_ascii_case(OPT));
+                    let Some(options) = named.map(|_| &arg[OPT.len()..]) else { continue };
+                    let options: Vec<&str> = (options.split(','))
+                        .map(|it| if it.eq_ignore_ascii_case("REF") { "NOREF" } else { it })
+                        .collect();
+                    *arg = format!("{OPT}{}", options.join(","));
+                }
+            }
         }
     }
 
@@ -419,11 +462,6 @@ impl LinkLine {
             Flavor::Apple => NO_FIXUP_CHAINS,
             _ => FIRST_DEFINITION_STAYS,
         };
-        // A patch calls the instances of the base object by name, also one the base's own code
-        // no longer reaches, which `-dead_strip` would have taken out of the executable.
-        if self.flavor == Flavor::Apple {
-            self.args.retain(|it| it != "-Wl,-dead_strip" && it != "-dead_strip");
-        }
         self.args.splice(first..first, ours.into_iter().chain([flag.to_owned()]));
         let output =
             self.args.iter().position(|it| it == "-o").context("the link names no output")?;
@@ -730,17 +768,33 @@ mod tests {
     }
 
     /// A patch calls the base object's instances by name, also one the base's own code no
-    /// longer reaches, so an Apple link strips nothing.
+    /// longer reaches, so no link takes out what nothing reaches: not Apple's, an ELF
+    /// linker's or `link.exe`.
     #[test]
-    fn apple_links_keep_what_a_patch_may_call() {
+    fn links_keep_what_a_patch_may_call() {
         let dir = std::env::temp_dir().join(format!("ra-jit-plan-strip-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let (response, binary) = (dir.join("link.args"), dir.join("bin"));
-        let line =
-            r#""cc" "/t/a.1.rcgu.o" "-arch" "arm64" "-Wl,-dead_strip" "-dead_strip" "-o" "/t/a-1""#;
-        LinkLine::parse(line).unwrap().command(&[], &binary, &response).unwrap();
-        let args = std::fs::read_to_string(&response).unwrap();
-        assert!(!args.contains("dead_strip"), "{args}");
+        let args = |line: &str| {
+            LinkLine::parse(line).unwrap().command(&[], &binary, &response).unwrap();
+            let args = std::fs::read_to_string(&response).unwrap();
+            args.lines().flat_map(|it| shlex::split(it).unwrap()).collect::<Vec<_>>()
+        };
+        let apple = args(
+            r#""cc" "/t/a.1.rcgu.o" "-arch" "arm64" "-Wl,-dead_strip" "-dead_strip" "-o" "/t/a-1""#,
+        );
+        assert!(!apple.iter().any(|it| it.contains("dead_strip")), "{apple:?}");
+        let elf = args(
+            r#""cc" "/t/a.1.rcgu.o" "-Wl,--as-needed" "-Wl,--gc-sections" "-Wl,-O1,--gc-sections,-z,now" "-o" "/t/a-1""#,
+        );
+        let expected = [FIRST_DEFINITION_STAYS, "-Wl,--as-needed", "-Wl,-O1,-z,now"];
+        assert_eq!(elf.iter().filter(|it| it.starts_with("-Wl,")).collect::<Vec<_>>(), expected);
+        let msvc = r#""link.exe" "/NOLOGO" "C:\\t\\a.1.rcgu.o" "/OPT:REF,NOICF" "/opt:ref" "/OUT:C:\\t\\a.exe""#;
+        LinkLine::parse(msvc).unwrap().command(&[], &binary, &response).unwrap();
+        let msvc = std::fs::read_to_string(&response).unwrap();
+        let opt: Vec<&str> =
+            msvc.lines().filter(|it| it.to_ascii_uppercase().contains("/OPT:")).collect();
+        assert_eq!(opt, [r#""/OPT:NOREF,NOICF""#, r#""/OPT:NOREF""#]);
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

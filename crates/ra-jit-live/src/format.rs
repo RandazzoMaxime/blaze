@@ -30,8 +30,14 @@ pub const WAKE: &str = "wake";
 
 /// The directory that holds one for each executable that runs.
 pub fn root() -> Option<PathBuf> {
-    let home = std::env::var_os("HOME").filter(|it| !it.is_empty())?;
-    Some(Path::new(&home).join(".cache/ra-jit/live"))
+    let set = |name| std::env::var_os(name).filter(|it| !it.is_empty());
+    let home = match (set("RA_JIT_HOME"), set("XDG_RUNTIME_DIR"), set("HOME")) {
+        (Some(home), _, _) => PathBuf::from(home),
+        (None, Some(runtime), _) => Path::new(&runtime).join("ra-jit"),
+        (None, None, Some(home)) => Path::new(&home).join(".cache/ra-jit"),
+        (None, None, None) => return None,
+    };
+    Some(home.join("live"))
 }
 
 /// The directory that the edits of the executable with `uuid` go through. It is named

@@ -66,14 +66,11 @@ fn ended(command: &mut Command, held: Option<Held>, state: &State) -> std::io::R
     started?.wait()
 }
 
-/// Starts `command` once the daemon is not writing its program. The daemon writes a program
-/// it linked in place, on Linux also after it answered, under an exclusive lock on the file
-/// (`splice::Writing`): one started while the file is open for writing is refused ("text
-/// file busy").
+/// Starts `command` once the daemon is not writing its program (`splice::unwritten`): one
+/// started while the file is open for writing is refused ("text file busy").
 pub(crate) fn started(command: &mut Command) -> std::io::Result<std::process::Child> {
     #[cfg(unix)]
-    let _unwritten =
-        std::fs::File::open(command.get_program()).and_then(|it| it.lock_shared().map(|()| it));
+    let _unwritten = crate::splice::unwritten(command.get_program().as_ref());
     command.spawn()
 }
 

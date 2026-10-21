@@ -467,6 +467,7 @@ impl<'a, 'db> Checker<'a, '_, 'db> {
     }
 
     fn terminator(&mut self, location: Location, kind: &TerminatorKind, span: MirSpan) {
+        self.assigned_local = super::return_slot();
         match kind {
             TerminatorKind::SwitchInt { discr, .. } => self.consume_operand(location, discr, span),
             TerminatorKind::Drop { place, .. } => {
@@ -954,6 +955,11 @@ impl<'a, 'db> Checker<'a, '_, 'db> {
             } else if !self.regions.is_impl_item
                 && !in_closure
                 && (named_anon(kind, shorter_kind) || named_anon(shorter_kind, kind))
+                && !self.regions.unsuggested.contains(&if kind == UniversalKind::AnonParam {
+                    longer
+                } else {
+                    shorter
+                })
             {
                 ("E0621", "explicit lifetime required in the type of a parameter".to_owned())
             } else if blamed.category == Category::CallArgument
@@ -1367,6 +1373,17 @@ impl<'a, 'db> Checker<'a, '_, 'db> {
         place: PlaceRef<'_>,
         span: MirSpan,
     ) {
+        // rustc reads an array before it indexes it (`FakeRead(ForIndex)`, where it knows the
+        // length), which lowering leaves out: assigning to `a[i]` uses `a`.
+        for (len, elem) in place.projection.iter().enumerate() {
+            if let ProjectionElem::Index(_) = elem
+                && let base = place.base(len)
+                && let TyKind::Array(..) =
+                    self.ctx.place_ty(self.body, base.local, base.projection).ty.kind()
+            {
+                self.check_if_full_path_is_moved(location, InitAction::Use, base, span);
+            }
+        }
         for len in (0..place.projection.len()).rev() {
             let base = place.base(len);
             match place.projection[len] {
@@ -1516,6 +1533,22 @@ impl<'a, 'db> Checker<'a, '_, 'db> {
                 }
                 _ => format!("{} binding {name} isn't initialized", action.as_general_verb()),
             };
+            // A capture is used where the closure is made, which rustc points at.
+            let made = self.body.basic_blocks[location.block]
+                .statements
+                .get(location.statement)
+                .filter(|it| {
+                    matches!(
+                        it.kind,
+                        StatementKind::Assign(
+                            _,
+                            Rvalue::Aggregate(hir_ty::mir::AggregateKind::Closure(_), _)
+                        )
+                    )
+                })
+                .map(|it| it.span);
+            let span =
+                self.capture_temps.get(&self.assigned_local).copied().or(made).unwrap_or(span);
             self.report("E0381", span, message);
             return;
         }

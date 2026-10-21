@@ -82,9 +82,13 @@ All of these are rustc's, written from `compiler/rustc_borrowck` at the pinned n
   creator proves `T` outlives each of its regions that outlive `'a`, and an error is
   reported where the closure needed it.
 - `async` blocks and `async fn` bodies: checked as rustc checks a coroutine, as a closure
-  of the body that makes it, for moves, initialization and loans across `.await`. Their
-  regions are not yet related to the creator's, so a lifetime error in one (an `async fn`
-  returning a borrow of another parameter than `self`) is not reported.
+  of the body that makes it, for moves, initialization and loans across `.await`. Every
+  region of the future's type is its creator's, and an `async fn` relates the future's
+  output to its declared return type with lifetime elision applied (the lifetime of the
+  one `&Self` in `self: Box<&Self>` or `Pin<&mut Self>` too), as rustc proves the
+  `Future<Output = ..>` bound of the `impl Future` it returns.
+- E0621 ("explicit lifetime required") where rustc gives it: not in a trait impl's method,
+  nor for an anonymous lifetime of `self` or of the return type.
 - Where errors are: at the expression rustc points to. A borrow `format_args!` (so
   `println!`, `format!`, `write!`) makes of an argument has no syntax of its own, so its
   errors are at the argument, or for a variable the template names (`"{x}"`) at the
@@ -109,8 +113,8 @@ With no borrow checker, the 245 units rustc accepts would pass. Now:
 
 | Mode | In scope | Pass | rustc accepts, ra-jit too | rustc rejects, same errors |
 |---|---|---|---|---|
-| Polonius | 1579 | 1172 (74.2%) | 245 of 245 | 927 of 1334 |
-| NLL | 1577 | 1165 (73.9%) | 226 of 226 | 939 of 1351 |
+| Polonius | 1579 | 1191 (75.4%) | 245 of 245 | 946 of 1334 |
+| NLL | 1577 | 1184 (75.1%) | 226 of 226 | 958 of 1351 |
 
 463 units are out of scope; 344 of them need a nightly feature. CI runs the scoring on Linux
 and fails below a floor a few units under the count there.
@@ -123,7 +127,7 @@ just, axum, nushell, delta, eza, tokei and starship it finds nothing, nor on the
 ## What is left
 
 Every failing unit is one where rustc gives an error ra-jit does not, or gives it on another
-line or with another code. By what is wrong, most first: 67 "lifetime may not live long
+line or with another code. By what is wrong, most first: 61 "lifetime may not live long
 enough" not reported, 36 E0597 not reported, 19 E0310, 17 E0309, 7 E0700, then a long tail. The causes, grouped:
 
 - **Higher-ranked regions and placeholders** (`for<'a>` bounds, closures with higher-ranked
@@ -139,6 +143,13 @@ enough" not reported, 36 E0597 not reported, 19 E0310, 17 E0309, 7 E0700, then a
 - **Member constraints of `impl Trait`**: the choice rustc makes is not applied, and a
   projection bound that names a lifetime (`impl Iterator<Item = Box<dyn Foo>>`) leaves them
   out.
+- **Match fake edges**: rustc's MIR gives each arm, guard and or-pattern alternative an
+  imaginary edge from the one before, so borrowck cannot tell an arm is unreachable or a
+  guard always runs. rust-analyzer lowers arms one after the other and none after an
+  irrefutable one, so a move in an arm that never runs is not seen (`nll/match-cfg-fake-edges.rs`).
+- **Captures of an empty `match`**: rustc's capture analysis has a closure that matches
+  on `x` with no arms read `x`; rust-analyzer's captures nothing there, so the E0381 of an
+  uninitialized `x` is missed.
 - **Trait selection's region obligations**: an impl's `T: 'static` proven at an unsizing
   cast, or the region constraints of an impl a method resolves to.
 - **Differences in rust-analyzer's MIR lowering** (below).

@@ -98,13 +98,14 @@ with reasons. The daemon's log says `backend: llvm -O2 fast emit` when LLVM is i
 | `includes.py` | Edits to a file only `include!` names |
 | `splices.py` | Edits that are hard on the splice: thread-locals, statics, vtables, function pointers, closures, panics, foreign calls. Counts how each step was linked |
 | `farsplices.py` | Splices into a binary whose code is further from its end than an AArch64 branch reaches |
+| `unreached.py` | Edits under `cargo ra-jit` that call instances of another crate's generic function the executable did not reach when it was linked: each is spliced, not linked in full. The daemon's own links, with `RA_JIT_RUSTC_BASE=0`. Linux and macOS; on Windows `cargo ra-jit` hands builds to cargo |
 | `agents.py` | Random edits of the kind coding agents make, on a real workspace |
 | `invalidation.py` | How much the database redoes after different kinds of edit |
 | `movedlines.py` | A panic reports its new line after lines are added above its function (seven ways to panic, each against cargo), and moving a function compiles nothing |
 | `buildmodel.py` | One small cargo project per feature of cargo's build model, under both backends, with steps that change one input at a time |
 | `cargo_ra_jit.py` | `cargo ra-jit` against plain cargo on seven real projects, 22 flag combinations, and 11 daemon lifecycle checks. Needs the network and about 20 minutes; not in CI |
 | `debuginfo.py` | Backtraces, `llvm-dwarfdump --verify`, gdb stopping and stepping, locals |
-| `live_e2e.py` | Edits of a running program that links `ra-jit-live`, each applied as a patch. macOS on AArch64 |
+| `live_e2e.py` | Edits of a running program that links `ra-jit-live`, each applied as a patch. Linux x86-64 and macOS AArch64 |
 | `live_latency.py` | Edit-to-running time of live edits on `harness/live`, `demo/life`, `harness/live-bevy` and `harness/live-egui`: isolated edits, bursts of valid keystrokes, real typing replayed key by key (most texts in between do not compile; a program told to restart is started again), and a session's restarts against `cargo run`. Writes p50 to p99 and every sample, with the machine and its battery, to `LATENCY_JSON`. Measures; checks nothing; macOS on AArch64 ([live.md](live.md#latency-under-typing)) |
 | `fncache.py` | `#[ra_jit::cache]` ([fn-cache.md](fn-cache.md)): a cold run computes and a warm one finds the result on disk; comment, format, moved-line and unrelated edits keep it, an edit of a function it reaches through another drops it; generic instances are kept apart; impure functions are refused saying where; a restarted daemon finds the same results; cargo's build caches nothing. `--live`: a live edit computes again and drops the old results, macOS on AArch64 |
 | `spaces.py` | A two-crate workspace under a directory whose name has spaces, `$$`, `#` and quotes, built and edited with `cargo ra-jit build`; every edit has to be applied by the daemon against rustc's symbols ([#14](https://github.com/indexable-inc/ra-jit/issues/14)) |

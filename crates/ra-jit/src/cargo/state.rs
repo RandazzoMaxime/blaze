@@ -581,6 +581,9 @@ impl State {
                 (Ok(()), Some((checkout, at))) => &self.checkouts[checkout].programs[at].binary,
                 _ => &program.cargos,
             };
+            // On Linux cargo's program is the daemon's file, which whatever starts it next
+            // starts with no word to the daemon, which may still be writing it.
+            let _unwritten = answer.is_ok().then(|| crate::splice::unwritten(from));
             let package = match (&answer, program.asked_as) {
                 (Ok(()), Some((checkout, at))) => {
                     let plan = &self.checkouts[checkout].programs[at];
