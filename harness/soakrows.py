@@ -761,6 +761,29 @@ pub mod later;
         raise Wrong(f"the build after a body was edited was not the daemon's: {how}")
 
 
+def outside_its_package(row):
+    """A module whose file is outside its package (`#[path = "../../shared/outside.rs"]`), as
+    bun's runtime has: the file is in no package's directory, so it was not loaded, the
+    function that calls into it was left to rustc, and an edit to the file was not seen: the
+    program the daemon built ran it as it was."""
+    os.makedirs(row.path("shared"), exist_ok=True)
+    outside = row.path("shared/outside.rs")
+    in_place(outside, "pub fn seven() -> u64 {\n    7\n}\n")
+    with open(row.path("core/src/lib.rs"), "a") as lib:
+        lib.write('\n#[path = "../../shared/outside.rs"]\nmod outside;\n\npub fn seven() -> u64 {\n    outside::seven()\n}\n')
+    show_in_main(row, '    println!("seven {}", soak_core::seven());\n')
+    row.both("cold", want="seven 7")
+    row.warm()
+    row.both("warm", want="seven 7")
+    in_place(outside, open(outside).read().replace("    7\n", "    70\n"))
+    how, _ = row.both("a body edited in the file", want="seven 70")
+    if how != "daemon":
+        raise Wrong(f"the build after a body was edited was not the daemon's: {how}")
+    in_place(outside, open(outside).read() + "\npub fn eight() -> u64 {\n    8\n}\n")
+    in_place(outside, open(outside).read().replace("    70\n", "    eight() * 10\n"))
+    row.both("an item added there and called", want="seven 80")
+
+
 TOOLCHAIN = open(os.path.join(HERE, "toolchain")).read().strip()
 
 ROWS = {
@@ -787,6 +810,7 @@ ROWS = {
     "a function that is another under test": (another_under_test, {}),
     "functions rustc keeps to an object": (kept_to_an_object, {"CARGO_INCREMENTAL": "0"}),
     "an item added beside a function left to rustc": (beside_one_left, {}),
+    "a module file outside its package": (outside_its_package, {}),
 }
 
 

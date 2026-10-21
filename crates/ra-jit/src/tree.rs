@@ -149,16 +149,17 @@ impl Tree {
         moved
     }
 
-    /// Puts the files an `include!` named that were not loaded, as they are not source by
-    /// their extension, in the source root of the file that includes them, with their text.
-    /// Whether [`Tree::included`] has files to add.
+    /// Puts the files an `include!` or a module declaration named that were not loaded, as
+    /// they are not source by their extension or are outside their package (a `#[path]`),
+    /// in the source root of the file that names them, with their text.
+    /// Whether [`Tree::included`] has files to add: a file that is not on disk, as that of a
+    /// module still to be written, is none.
     pub(crate) fn includes_more(&self, db: &RootDatabase) -> bool {
         db.included_sources().into_iter().any(|(path, root)| {
             let source_root = db.source_root(root).source_root(db);
-            !self
-                .vfs
-                .file_id(&VfsPath::from(path))
-                .is_some_and(|(file, _)| source_root.path_for_file(&file).is_some())
+            let known = self.vfs.file_id(&VfsPath::from(path.clone()));
+            !known.is_some_and(|(file, _)| source_root.path_for_file(&file).is_some())
+                && db.on_disk(path.as_ref()).is_file()
         })
     }
 

@@ -270,6 +270,14 @@ All notable changes to ra-jit are written here. The format follows
   installs ra-jit and the programs it runs; the flake had no package of that name.
 - A release's archive and the flake's build have `ra-jit-rustc-first`, which `cargo ra-jit`
   runs in the first build of a workspace; they had only ra-jit, cargo-ra-jit and ra-jit-rustc.
+- A module whose file is outside its package, by `#[path = "../../shared/outside.rs"]` as
+  bun's runtime has, is compiled by ra-jit and its edits are built. The file was in no
+  package's directory and so not loaded: the functions that called into it were left to
+  rustc, an edit to it was not seen and the program kept running the old code, and in a
+  binary crate the daemon could not load the workspace ("unresolved module ... [E0583]").
+  The file is now put in the source root of the one that declares it, as a file an
+  `include!` names is. `soakrows.py`'s "a module file outside its package" fails without
+  this.
 - An edit that could change a function ra-jit left to rustc from the start, such as an item
   added elsewhere in its crate, is built by cargo, as docs/cargo.md says. It failed the
   build: when the function was one the frontend turned down, ra-jit took that for an error
