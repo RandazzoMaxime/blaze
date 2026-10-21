@@ -566,65 +566,57 @@ fn projection_conflict<'db>(
             ProjectionElem::Index(..),
         ) => unknown,
         (
-            ProjectionElem::ConstantIndex { offset: a, from_end: fa },
-            ProjectionElem::ConstantIndex { offset: b, from_end: fb },
+            ProjectionElem::ConstantIndex { offset: a, min_length: la, from_end: fa },
+            ProjectionElem::ConstantIndex { offset: b, min_length: lb, from_end: fb },
         ) => {
             if fa == fb {
                 if a == b { Overlap::EqualOrDisjoint } else { Overlap::Disjoint }
+            } else if let Some(len) = array_len(ctx, base) {
+                let (a, b) = (if fa { len - a } else { a }, if fb { len - b } else { b });
+                if a == b { Overlap::EqualOrDisjoint } else { Overlap::Disjoint }
             } else {
-                let len = match base.ty.kind() {
-                    TyKind::Array(_, len) => {
-                        crate::consteval::try_const_usize(ctx.db, len).map(|it| it as u64)
-                    }
-                    _ => None,
-                };
-                match len {
-                    Some(len) => {
-                        let (a, b) = (if fa { len - a } else { a }, if fb { len - b } else { b });
-                        if a == b { Overlap::EqualOrDisjoint } else { Overlap::Disjoint }
-                    }
-                    None => Overlap::EqualOrDisjoint,
+                // Both patterns matched, so the slice has at least the longer minimum; an offset
+                // from the end is then at least `min_length - offset` from the start.
+                let (from_begin, from_end) = if fa { (b, a) } else { (a, b) };
+                if from_begin >= la.max(lb) - from_end {
+                    Overlap::EqualOrDisjoint
+                } else {
+                    Overlap::Disjoint
                 }
             }
         }
         (
-            ProjectionElem::ConstantIndex { offset, from_end: false },
+            ProjectionElem::ConstantIndex { offset, from_end, .. },
             ProjectionElem::Subslice { from, to },
         )
         | (
             ProjectionElem::Subslice { from, to },
-            ProjectionElem::ConstantIndex { offset, from_end: false },
+            ProjectionElem::ConstantIndex { offset, from_end, .. },
         ) => {
-            let len = match base.ty.kind() {
-                TyKind::Array(_, len) => {
-                    crate::consteval::try_const_usize(ctx.db, len).map(|it| it as u64)
+            let overlaps = match (array_len(ctx, base), from_end) {
+                (Some(len), _) => {
+                    let index = if from_end { len.wrapping_sub(offset) } else { offset };
+                    index >= from && index < len.saturating_sub(to)
                 }
-                _ => None,
+                (None, false) => offset >= from,
+                (None, true) => offset > to,
             };
-            let end = len.map(|len| len.saturating_sub(to));
-            if offset >= from && end.is_none_or(|end| offset < end) {
-                Overlap::EqualOrDisjoint
-            } else {
-                Overlap::Disjoint
-            }
+            if overlaps { Overlap::EqualOrDisjoint } else { Overlap::Disjoint }
         }
         (
-            ProjectionElem::ConstantIndex { offset, from_end: true },
-            ProjectionElem::Subslice { to, .. },
-        )
-        | (
-            ProjectionElem::Subslice { to, .. },
-            ProjectionElem::ConstantIndex { offset, from_end: true },
-        ) => {
-            if offset > to {
-                Overlap::EqualOrDisjoint
-            } else {
-                Overlap::Disjoint
-            }
-        }
-        (ProjectionElem::Subslice { .. }, ProjectionElem::Subslice { .. }) => {
-            Overlap::EqualOrDisjoint
-        }
+            ProjectionElem::Subslice { from: fa, to: ta },
+            ProjectionElem::Subslice { from: fb, to: tb },
+        ) => match array_len(ctx, base) {
+            Some(len) if fa.max(fb) >= len.saturating_sub(ta.max(tb)) => Overlap::Disjoint,
+            _ => Overlap::EqualOrDisjoint,
+        },
         _ => Overlap::Arbitrary,
+    }
+}
+
+fn array_len(ctx: &Ctx<'_, '_>, base: crate::mir::PlaceTy<'_>) -> Option<u64> {
+    match base.ty.kind() {
+        TyKind::Array(_, len) => crate::consteval::try_const_usize(ctx.db, len).map(|it| it as u64),
+        _ => None,
     }
 }

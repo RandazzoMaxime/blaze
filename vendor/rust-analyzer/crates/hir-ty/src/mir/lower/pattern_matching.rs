@@ -394,6 +394,7 @@ impl<'db> MirLowerCtx<'_, 'db> {
                 for (i, &pat) in prefix.iter().enumerate() {
                     let next_place = cond_place.project(ProjectionElem::ConstantIndex {
                         offset: i as u64,
+                        min_length: (prefix.len() + suffix.len()) as u64,
                         from_end: false,
                     });
                     (current, current_else) =
@@ -421,6 +422,7 @@ impl<'db> MirLowerCtx<'_, 'db> {
                     // Offset 1 from the end is the last element, as in rustc's MIR.
                     let next_place = cond_place.project(ProjectionElem::ConstantIndex {
                         offset: (suffix.len() - i) as u64,
+                        min_length: (prefix.len() + suffix.len()) as u64,
                         from_end: true,
                     });
                     (current, current_else) =
