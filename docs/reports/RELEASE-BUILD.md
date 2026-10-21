@@ -165,9 +165,9 @@ of JSON.
 **A profile finds a function by its symbol.** Read on Linux x86-64 with `nm` and
 `llvm-profdata show --all-functions`: every symbol of a Rust crate carries the crate's hash
 (`Cscx9Nkki9Or4_6ra_jit`), and cargo derives that hash from the whole graph of the build:
-each crate's name, version, source and features, the profile, the toolchain, and a wrapper of
-rustc around the workspace's crates (not RUSTFLAGS, and not the absolute path: the runner's
-build and the dev host's have the same hashes). A build whose graph differs finds next to
+each crate's name, version, source and features, the profile (incremental or not included),
+the toolchain, and a wrapper of rustc around the workspace's crates (not RUSTFLAGS, and not
+the absolute path: the runner's build and the dev host's have the same hashes). A build whose graph differs finds next to
 nothing in the profile, and LLVM says nothing about a function it cannot find. Found by
 comparing the binaries' symbols, crate by crate:
 
@@ -179,6 +179,10 @@ comparing the binaries' symbols, crate by crate:
   flake's `dist` now sets `auditable = false`, and the script clears `RUSTC_WRAPPER` and
   `RUSTC_WORKSPACE_WRAPPER`, which `ra-jit enable` would otherwise have set for anyone
   building from a checkout.
+- The dev host's shell sets `CARGO_INCREMENTAL=1`, which turns incremental on for the
+  workspace's crates and changes their hashes: run from that shell, the build at 9c15d7035b
+  (the first pin the workflow committed to main) was refused by `--strict`, and passed with
+  the variable unset. The script sets `CARGO_INCREMENTAL=0`, `dist`'s own setting.
 - `cargo install` from a checkout gets other hashes again, with or without `--target`, and
   one from crates.io builds other packages altogether (`ra-jit-hir` for `hir`, the registry
   for the path), so no profile trained from the repository applies to it. Handing it the
