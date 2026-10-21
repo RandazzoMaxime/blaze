@@ -1884,7 +1884,8 @@ mod tests {
         // `true` from PATH (NixOS has no /usr/bin/true), under its own name: a coreutils of
         // one binary is the program its name says.
         let path = std::env::var_os("PATH").unwrap_or_default();
-        let found = std::env::split_paths(&path).map(|dir| dir.join("true")).find(|it| it.is_file());
+        let found =
+            std::env::split_paths(&path).map(|dir| dir.join("true")).find(|it| it.is_file());
         let dir = std::env::temp_dir().join(format!("ra-jit-writing-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let program = dir.join("true");

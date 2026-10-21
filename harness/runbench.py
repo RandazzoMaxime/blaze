@@ -24,6 +24,11 @@ NAME is `kernels` (harness/corpus/kernels, a benchmark per kernel) or an entry o
 apps/apps.json with a `bench` (checked out as apps.py does, under APPS_DIR). Default: kernels,
 numeric, jsonrt, ripgrep, fd, bat.
 
+Memory is kept beside the times (memory.py, docs/benchmarks.md "Memory and disk"): each run's
+peak resident memory as the kernel kept it (`wait4`), the size of each program, and what each
+build held: `build_largest_mb`, the largest one process (rustc, ra-jit, the linker), exact, and
+`build_peak_mb`, the most the build's processes held at once, sampled.
+
 The ratio is ra-jit's time over release's (1.00 is as fast, 1.10 is 10% slower), with the
 geometric mean over the benchmarks. RA_JIT_BIN names the ra-jit used; it needs `--features
 llvm`. Python 3.11+, stdlib only.
@@ -32,7 +37,7 @@ import argparse, json, math, os, shlex, shutil, statistics, subprocess, sys, tim
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
-import apps  # noqa: E402
+import apps, memory  # noqa: E402
 
 KERNELS = ["sieve", "collatz", "fnv", "qsort", "matmul", "nbody", "mandelbrot", "words"]
 DEFAULT = ["kernels", "numeric", "jsonrt", "ripgrep", "fd", "bat"]
@@ -74,14 +79,16 @@ def cargo_release(ws, spec, label, rustflags):
     env = {**os.environ, "CARGO_TARGET_DIR": target, "RUSTFLAGS": f"--cap-lints allow {rustflags}".strip()}
     for var in OWN_VARS[:-3]:
         env.pop(var, None)
-    began = time.monotonic()
-    apps.sh(["cargo", "build", "--release", "-p", spec["package"], *spec.get("cargo_args", [])], ws, env)
-    return os.path.join(target, "release", spec.get("bin", spec["package"])), time.monotonic() - began
+    argv = ["cargo", "build", "--release", "-p", spec["package"], *spec.get("cargo_args", [])]
+    took, ran, used = memory.run(argv, ws, env)
+    if ran.returncode != 0:
+        raise SystemExit(f"`{shlex.join(argv)}` failed:\n{(ran.stdout + ran.stderr)[-3000:]}")
+    return os.path.join(target, "release", spec.get("bin", spec["package"])), took, used
 
 
 def ra_jit_release(ws, spec, label, extra):
     """ra-jit's program of every crate, with the release profile. Returns (binary, seconds,
-    summary)."""
+    summary, fixture)."""
     saved = {var: os.environ.get(var) for var in OWN_VARS}
     try:
         for var in OWN_VARS:
@@ -100,6 +107,13 @@ def ra_jit_release(ws, spec, label, extra):
                 os.environ.pop(var, None)
             else:
                 os.environ[var] = value
+
+
+def ra_jit_measured(ws, spec, label, extra):
+    """`ra_jit_release` in a process of its own, so that the memory of what it ran (cargo with
+    ra-jit's stand-ins, ra-jit, the linker) is its alone: (binary, seconds, summary, memory)."""
+    (binary, secs, summary), used = memory.in_child(lambda: ra_jit_release(ws, spec, label, extra)[:3])
+    return binary, secs, summary, used
 
 
 class Runner:
@@ -121,10 +135,13 @@ class Runner:
         return ran.returncode, clean(ran.stdout), clean(ran.stderr) if self.spec.get("compare_stderr") else b""
 
     def seconds(self, binary, argv):
+        """The seconds of one run, and the peak resident memory of the program (its tree's
+        largest process, as the kernel kept it)."""
         began = time.monotonic()
-        subprocess.run([self.argv0, *argv], executable=binary, cwd=self.ws, env=self.env,
-                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, stdin=subprocess.DEVNULL)
-        return time.monotonic() - began
+        child = subprocess.Popen([self.argv0, *argv], executable=binary, cwd=self.ws, env=self.env,
+                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, stdin=subprocess.DEVNULL)
+        largest = memory.waited(child)
+        return time.monotonic() - began, largest
 
 
 def geomean(values):
@@ -160,18 +177,21 @@ def main():
         for build in builds:
             try:
                 if build == "release":
-                    programs[build], secs = cargo_release(ws, spec, build, "")
+                    programs[build], secs, used = cargo_release(ws, spec, build, "")
                     info[build] = {"build_s": round(secs, 1)}
                 elif build == "checked":
-                    programs[build], secs = cargo_release(
+                    programs[build], secs, used = cargo_release(
                         ws, spec, build, "-C overflow-checks=on -C debug-assertions=on")
                     info[build] = {"build_s": round(secs, 1)}
                 else:
                     extra = {} if build == "ra-jit" else variants[build]
-                    binary, secs, summary, _ = ra_jit_release(ws, spec, build, extra)
+                    binary, secs, summary, used = ra_jit_measured(ws, spec, build, extra)
                     programs[build] = binary
                     info[build] = {"build_s": round(secs, 1), "compiled": summary["compiled"],
                                    "left": summary["left"], "reasons": summary["reasons"]}
+                # What building it held (memory.py), and what it built.
+                info[build].update(build_peak_mb=used["peak_mb"], build_largest_mb=used["largest_mb"],
+                                   size_mb=round(os.path.getsize(programs[build]) / 1e6, 2))
                 print(f"  built {build} in {info[build]['build_s']} s"
                       + (f": {info[build]['compiled']} functions by ra-jit, {info[build]['left']} left"
                          if "compiled" in info[build] else ""), flush=True)
@@ -192,19 +212,23 @@ def main():
                     info[build].setdefault("differs", []).append(bench)
                     continue
                 timed.append(build)
-            times = {build: [] for build in timed}
+            times, held = {build: [] for build in timed}, {build: [] for build in timed}
             for round_ in range(a.rounds):
                 # Each round starts with another build, so what the machine does meanwhile
                 # falls on all of them alike.
                 order = timed[round_ % len(timed):] + timed[: round_ % len(timed)]
                 for build in order:
-                    times[build].append(runner.seconds(programs[build], argv))
+                    took, largest = runner.seconds(programs[build], argv)
+                    times[build].append(took)
+                    held[build].append(largest)
             medians = {build: statistics.median(ts) for build, ts in times.items()}
             base = medians["release"]
             row = {build: {"median_s": round(m, 4), "ratio": round(m / base, 3),
-                           "runs": [round(t, 4) for t in times[build]]} for build, m in medians.items()}
+                           "runs": [round(t, 4) for t in times[build]],
+                           "peak_mb": round(statistics.median(held[build])), "peak_max_mb": max(held[build])}
+                   for build, m in medians.items()}
             benches[bench] = row
-            print(f"  {bench}: " + ", ".join(f"{b} {row[b]['median_s']:.3f}s ({row[b]['ratio']:.2f})"
+            print(f"  {bench}: " + ", ".join(f"{b} {row[b]['median_s']:.3f}s ({row[b]['ratio']:.2f}) {row[b]['peak_mb']} MB"
                                              for b in timed), flush=True)
         results["programs"][name] = {"builds": info, "benches": benches}
         if a.json:
