@@ -65,7 +65,9 @@ impl Linked {
     /// rest of the link line. The patch is read here and now: the next edit writes another.
     pub(crate) fn read(binary: PathBuf, patch: &Path, object: &Path) -> Linked {
         let (patch, object) = (std::fs::read(patch), object.to_owned());
-        Linked(std::thread::spawn(move || Baseline::read(binary, &patch?, &object, false)))
+        // Taken before the daemon answers: whoever is given the program waits for the write.
+        let lock = Writing::ahead(&binary);
+        Linked(std::thread::spawn(move || Baseline::read(binary, &patch?, &object, false, lock)))
     }
 
     /// As [`Linked::read`], of what rustc linked, which `binary` is another name of: it is
@@ -77,9 +79,11 @@ impl Linked {
             let mut copy = binary.clone().into_os_string();
             copy.push(".copy");
             std::fs::copy(&binary, &copy)?;
-            // Whoever takes the file meanwhile takes either, which are the same.
+            // Whoever takes the file meanwhile takes either, which are the same, and waits for
+            // the write of the copy.
+            let lock = Writing::ahead(copy.as_ref());
             std::fs::rename(&copy, &binary)?;
-            Baseline::read(binary, &patch?, &object, true)
+            Baseline::read(binary, &patch?, &object, true, lock)
         }))
     }
 
@@ -168,8 +172,15 @@ pub(crate) struct Spliced {
 }
 
 impl Baseline {
-    /// Reads the executable at `path`, which was linked with `patch` ahead of `object`.
-    fn read(path: PathBuf, patch: &[u8], object: &Path, rustcs: bool) -> anyhow::Result<Baseline> {
+    /// Reads the executable at `path`, which was linked with `patch` ahead of `object`, and
+    /// writes it in place under `lock` ([`Writing::ahead`]).
+    fn read(
+        path: PathBuf,
+        patch: &[u8],
+        object: &Path,
+        rustcs: bool,
+        lock: Option<File>,
+    ) -> anyhow::Result<Baseline> {
         let file = File::open(&path)?;
         let stamp = Stamp::of(&file)?;
         // SAFETY: the daemon is the one that has the link write the file, and it does not
@@ -211,7 +222,7 @@ impl Baseline {
         drop(bytes);
         let (left, stamp) = match &image {
             Executable::Elf(image) => {
-                let moved = laid_out(&path, image).unwrap_or_default();
+                let moved = laid_out(&path, image, lock).unwrap_or_default();
                 (Left { appended: None, moved }, Stamp::of(&File::open(&path)?)?)
             }
             _ => (Left::default(), stamp),
@@ -508,15 +519,22 @@ fn read_exact_at(mut file: &File, bytes: &mut [u8], offset: u64) -> std::io::Res
 /// Copies what a debugger reads of the executable at `path` to where its splices write it,
 /// while the daemon waits for the first edit: the splices find it there. Nothing is copied
 /// of a program that runs, which the kernel lets nothing write and which is linked again.
-fn laid_out(path: &Path, image: &Image) -> std::io::Result<Vec<debug::Moved>> {
+fn laid_out(path: &Path, image: &Image, lock: Option<File>) -> std::io::Result<Vec<debug::Moved>> {
     let start = std::time::Instant::now();
     let moved = image.described.laid_out(image.tail());
     if moved.is_empty() {
         return Ok(moved);
     }
-    let writing = Writing::open(path)?;
+    let writing = match lock {
+        Some(lock) => Writing::under(lock, path)?,
+        None => Writing::open(path)?,
+    };
+    let paused = pause_mid_write();
     for run in &moved {
         copy_within(&writing.file, run)?;
+    }
+    if paused {
+        eprintln!("laid out: written");
     }
     if std::env::var_os("RA_JIT_STATS").is_some() {
         let bytes: u64 = moved.iter().map(|it| it.len).sum();
@@ -525,10 +543,22 @@ fn laid_out(path: &Path, image: &Image) -> std::io::Result<Vec<debug::Moved>> {
     Ok(moved)
 }
 
+/// Waits for `RA_JIT_LAYOUT_PAUSE_MS` with the executable open for writing, and says so, as
+/// `laid_out` says when the write is over: `harness/cargo_ra_jit.py` has a client be given
+/// the program meanwhile, every way a user is given one.
+fn pause_mid_write() -> bool {
+    let pause = std::env::var("RA_JIT_LAYOUT_PAUSE_MS").ok().and_then(|it| it.parse().ok());
+    if let Some(pause) = pause {
+        eprintln!("laid out: paused");
+        std::thread::sleep(std::time::Duration::from_millis(pause));
+    }
+    pause.is_some()
+}
+
 /// An executable open to be written in place, on Unix under an exclusive lock on it taken first:
 /// on Linux a program started while its file is open for writing is refused ("text file
-/// busy"), and a client starts one under a shared lock (`cargo::run`). The file is closed
-/// before the lock is let go.
+/// busy"), and whatever is given the program waits for the lock ([`unwritten`]). The file is
+/// closed before the lock is let go.
 struct Writing {
     file: File,
     _lock: File,
@@ -536,13 +566,56 @@ struct Writing {
 
 impl Writing {
     fn open(path: &Path) -> std::io::Result<Writing> {
+        Writing::under(Writing::lock(path)?, path)
+    }
+
+    /// The lock on the executable a link just wrote at `path`, taken before the daemon answers
+    /// for it, of an ELF file: the one written in place after the answer ([`laid_out`]).
+    fn ahead(path: &Path) -> Option<File> {
+        use std::io::Read as _;
+        let mut magic = [0; 4];
+        let file = File::open(path).ok()?;
+        (&file).read_exact(&mut magic).ok()?;
+        if magic != *b"\x7fELF" {
+            return None;
+        }
+        drop(file);
+        Writing::lock(path).ok()
+    }
+
+    fn lock(path: &Path) -> std::io::Result<File> {
         let lock = File::open(path)?;
         // On Windows a lock keeps out this process's own writes too, and a program that runs
         // is moved aside there rather than refused.
         #[cfg(unix)]
         lock.lock()?;
+        Ok(lock)
+    }
+
+    fn under(lock: File, path: &Path) -> std::io::Result<Writing> {
         let file = OpenOptions::new().read(true).write(true).open(path)?;
         Ok(Writing { file, _lock: lock })
+    }
+}
+
+/// Waits until the daemon is through writing the executable at `path` in place: one it
+/// linked, which it writes after it answered. On Unix the file returned keeps it from writing
+/// again until it is dropped, so a program started meanwhile is not refused.
+pub(crate) fn unwritten(path: &Path) -> std::io::Result<File> {
+    loop {
+        let file = File::open(path)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt as _;
+            file.lock_shared()?;
+            // A copy the daemon is to write may have been put in its place meanwhile
+            // (`Linked::read_rustcs`), under the lock of its own.
+            let (locked, now) = (file.metadata()?, std::fs::metadata(path)?);
+            if (locked.dev(), locked.ino()) != (now.dev(), now.ino()) {
+                continue;
+            }
+        }
+        return Ok(file);
     }
 }
 
