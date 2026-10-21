@@ -62,10 +62,12 @@ All notable changes to ra-jit are written here. The format follows
 - `RA_JIT_DUMP_LLVM=after` prints the LLVM IR as the passes left it.
 - A borrow checker, `crates/hir-ty-borrowck`, written to give rustc's verdict: Polonius alpha
   by default as nightly rustc does, NLL with `RA_JIT_BORROWCK=nll`. It gives rustc's errors on
-  1033 of 1578 of rustc's own borrow-check tests that it can run (245 with none), scored by
-  `harness/borrowck_ui.py`, and finds nothing in ripgrep, fd, bat, hyperfine, just and axum.
-  Its errors are rust-analyzer diagnostics and `ra-jit borrowck` prints them; the daemon
-  does not refuse a build for them yet ([docs/borrowck.md](docs/borrowck.md)).
+  1055 of 1578 of rustc's own borrow-check tests that it can run, and none on any of the 245
+  rustc accepts, scored by `harness/borrowck_ui.py`, and finds nothing in ripgrep, fd, bat,
+  hyperfine, just, axum and nushell. Its errors are rust-analyzer diagnostics and
+  `ra-jit borrowck` prints them ([docs/borrowck.md](docs/borrowck.md)).
+- `RA_JIT_BORROWCK_REFUSE=1` makes the daemon refuse to build an edit with a borrow-check
+  error, as it does one with a type error. Off by default.
 - `ra-jit borrowck`: the borrow-check errors of single files, or of a cargo workspace with
   `--project`.
 
@@ -107,6 +109,8 @@ All notable changes to ra-jit are written here. The format follows
 
 ### Fixed
 
+- `&(1 / 2)`, a division by a constant, and `&mut []` are promoted to constants as rustc
+  promotes them, so a reference to one lives as long as the program.
 - Before the 2024 edition, a panic in a block's tail drops the tail's temporaries after the
   block's locals, as rustc does; ra-jit dropped them first, so a `Drop` that printed or
   locked saw the other order (`breakers.py unwind_tail_after_local`).
