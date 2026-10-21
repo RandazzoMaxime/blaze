@@ -67,6 +67,14 @@ All notable changes to ra-jit are written here. The format follows
 
 ### Fixed
 
+- A program ra-jit builds whole, with its own `main` (`runbench.py`'s builds), ran: on macOS
+  the code-free stand-in rustc builds for the program had a weak `main` of its own, and
+  ra-jit's object was weakened too, so the linker kept the stand-in's and the program
+  exited 0 at once, printing nothing. ra-jit's `main` now stays strong. On macOS and Linux
+  a `#[global_allocator]` was ignored in such a program, as the stand-ins declare none and
+  rustc's allocator shim went to the default allocator; a stand-in now declares one that
+  forwards to functions rust-analyzer's expansion of the attribute defines
+  (`wholeprogram.py`).
 - Before the 2024 edition, a panic in a block's tail drops the tail's temporaries after the
   block's locals, as rustc does; ra-jit dropped them first, so a `Drop` that printed or
   locked saw the other order (`breakers.py unwind_tail_after_local`).

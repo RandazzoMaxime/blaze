@@ -35,7 +35,7 @@ def check(ws, case, release):
         fx.ra_jit_build()
     except SystemExit as failed:
         return f"  ra-jit's build failed: {str(failed)[-800:]}"
-    program, _ = apps.reference(ws, spec, "release" if release else "debug")
+    program, _ = apps.reference(ws, {"package": case}, "release" if release else "debug")
     theirs, ours = fx.behaviour(program), fx.behaviour(fx.binary)
     if theirs == ours:
         return None

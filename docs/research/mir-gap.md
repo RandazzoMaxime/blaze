@@ -122,6 +122,13 @@ Ranked by how likely each is to hurt a real app, then by cost. "Fixed" is in thi
    LLVM alike; `cargo ra-jit build`, `difftest.py` and `backends.py` keep rustc's `main` and are
    not affected; `runbench.py` builds this way. Linux not checked.
    It is why the README's runtime table has no macOS numbers.
+   **Fixed on `whole-program-main`** (2026-10-20, read): the stand-in rustc builds for the
+   program defines a weak, code-free `_main`, and ra-jit's object was weakened as a patch is,
+   so ld64 was free to keep the stand-in's; ra-jit's `_main` now stays strong
+   (`weaken::ours`). The same builds also ignored a `#[global_allocator]` on macOS and on
+   x86-64 Linux (read, `wholeprogram.py` against unmodified main on both): stand-ins declare
+   none, so rustc's shim forwarded to `__rdl_alloc`. Linux's `main` was right, as ELF objects
+   are not weakened.
 1. **Debug-build UB checks** (medium). A program that dereferences a misaligned or null raw
    pointer, or transmutes an invalid enum value, panics under rustc's debug build and carries on
    under ra-jit (read, as above). Port `CheckAlignment`, `CheckNull` and `CheckEnums`, with
