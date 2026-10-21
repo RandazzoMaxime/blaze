@@ -195,12 +195,11 @@ exist.
 The daemon refuses source in which rust-analyzer finds an error (a type mismatch, an
 unresolved name, a missing field), and under `cargo ra-jit` cargo then runs and rustc
 reports it. An error rust-analyzer does not find is not refused. Borrow-check errors are the
-main case: ra-jit has a borrow checker ([borrowck.md](borrowck.md)) that gives rustc's
-verdict on 65% of rustc's borrow-check tests and finds nothing in six of seven real projects,
-but the daemon does not refuse a build for its errors yet. With a warm daemon,
-`cargo ra-jit run` built and ran a program that uses a `String` after moving it, which rustc
-rejects with E0382 (checked by hand at f191c6e42a). Run `cargo ra-jit check` or
-`cargo check` to get rustc's verdict.
+main case: ra-jit's borrow checker ([borrowck.md](borrowck.md)) refuses what it finds, and it
+finds nothing rustc accepts in rustc's tests or in seven real projects, but it misses about a
+third of the errors rustc gives (67% of rustc's borrow-check tests get rustc's verdict), and
+an edit with one it misses builds and runs. Run `cargo ra-jit check` or `cargo check` to get
+rustc's verdict. `RA_JIT_BORROWCK_REFUSE=0` stops the daemon refusing borrow-check errors.
 
 ## Cargo's build model
 

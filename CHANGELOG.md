@@ -55,6 +55,44 @@ All notable changes to ra-jit are written here. The format follows
   [docs/benchmarks.md](docs/benchmarks.md) from the result; the `bench-readme` workflow runs
   them on a dedicated Linux x86-64 machine after pushes to main and nightly, and commits the
   numbers to main when they moved beyond noise.
+- `harness/bench.py` measures what [#7](https://github.com/indexable-inc/ra-jit/issues/7)
+  asks of real projects: helix, a bevy example and zed (1.7M lines) join the seven, every project gets two more
+  edits (a new function, a struct field set wherever the struct is built), the cold build is
+  run `--cold-runs` times against fresh cargo, each with an empty store, and as many times
+  in a second checkout with the store the first filled, the store's size is kept, and `--tests`
+  runs each project's test suite under `cargo ra-jit test` and `cargo test` and fails on any
+  test that ends differently. A project whose build fails keeps what it measured, with the
+  error, and the run goes on to the next. A run with anything wrong or failed still writes its
+  result and ends with exit code 3; `benchreport.py` publishes a test suite that ended differently in the tests
+  table (a program that prints something else is still refused), and the workflow commits the
+  numbers, then fails.
+- `bench.py --setups` builds every step again with the fastest ways to build Rust there
+  already are ([#8](https://github.com/indexable-inc/ra-jit/issues/8)): mold, wild,
+  `-Zthreads=8`, rustc_codegen_cranelift on a pinned nightly, all three at once, and
+  `cargo check`, each into its own target directory; `harness/hotpatch.py` times an edit of
+  a running program under Dioxus's subsecond (`dx serve --hotpatch`) against `cargo ra-jit
+  build` and `cargo build` with a restart, stopping the program before the build as `cargo
+  watch` does. The bench shell has mold, wild, `dx` and the nightly, on Linux and on macOS.
+  Measured on a MacBook (`docs/benchmarks/hotpatch/macbook.json`): subsecond 346 ms
+  median, `cargo ra-jit build` with a restart 469 ms, `cargo build` with a restart 520 ms; a
+  live patch through `cargo ra-jit build` 12.5 ms and through the editor's socket 4.0 ms
+  (`docs/benchmarks/live/macbook-probe-cargo.json`). On Linux, 16 cores of a c7i.16xlarge
+  (`docs/benchmarks/hotpatch/linux-x86_64.json`): subsecond 289 ms, `cargo ra-jit build`
+  with a restart 40 ms, `cargo build` with a restart 361 ms. On ripgrep's cold build mold,
+  wild, `-Zthreads=8` and cg_clif together are fastest (3.25 s against cargo's 5.56 s), and
+  every edit there and on nushell builds faster under ra-jit than under any of them, `cargo
+  check` included; with nothing changed, on ripgrep, cargo with mold is faster (28 ms against 33).
+- Benchmark history and regression alerts
+  ([#10](https://github.com/indexable-inc/ra-jit/issues/10)): `harness/benchhistory.py`
+  appends each run's medians to `docs/benchmarks/history/*.jsonl` and checks the last against
+  the runs before it on the same machine; the `bench-readme` workflow commits the history on
+  every run, starts the site's deploy, and on a regression past the noise band opens (or
+  comments on) an issue labelled `bench-regression` and fails. The live-edit latency workflow
+  runs every night on main on a macOS arm64 runner and does the same with its history.
+- [ra-jit.ix.dev/bench](https://ra-jit.ix.dev/bench): the benchmark history over commits, from
+  `docs/benchmarks/history`: the latest run's table per project, and charts of each edit,
+  the cold build, the daemon's peak memory, the store size and live edit-to-running latency
+  ([#10](https://github.com/indexable-inc/ra-jit/issues/10)).
 - LLVM is given what rustc gives it: reference parameters marked `noalias`, `readonly`,
   `dereferenceable`, `align`, `nonnull` and `noundef` as rustc marks them, addresses as
   pointers rather than integers, branches threaded before `-O3`, unsigned overflow checked as
@@ -66,12 +104,27 @@ All notable changes to ra-jit are written here. The format follows
 - `harness/tierbench.py`, the benchmark table of docs/tiers.md; `--together` runs the builds
   of a round at once, so that a loaded machine slows them alike.
 - `RA_JIT_DUMP_LLVM=after` prints the LLVM IR as the passes left it.
-- A borrow checker, `crates/hir-ty-borrowck`, written to give rustc's verdict: Polonius alpha
-  by default as nightly rustc does, NLL with `RA_JIT_BORROWCK=nll`. It gives rustc's errors on
-  1033 of 1578 of rustc's own borrow-check tests that it can run (245 with none), scored by
-  `harness/borrowck_ui.py`, and finds nothing in ripgrep, fd, bat, hyperfine, just and axum.
-  Its errors are rust-analyzer diagnostics and `ra-jit borrowck` prints them; the daemon
-  does not refuse a build for them yet ([docs/borrowck.md](docs/borrowck.md)).
+- Live-edit latency under real typing ([#9](https://github.com/indexable-inc/ra-jit/issues/9)):
+  `harness/live_latency.py replay` types scripted edits one key at a time at 30 to 100 ms a
+  key, with pauses at word ends, typos and backspaces, sends the whole file on each key as an
+  editor does, and times every key whose text compiles to the program running it, by patch or
+  by a restart as a launcher would do one; it counts the keys that do not compile, the
+  superseded edits and the restarts. `restart` times a session's struct changes against
+  `cargo run`. Every table has p95 and p99, and `LATENCY_JSON` carries the machine, its
+  battery, the commit and the run, which `benchhistory.py live` reads. `harness/live-bevy`
+  (bevy 0.20, generic systems) and `harness/live-egui` (egui 0.37, generic widgets) are real
+  programs that take edits. Measured on a MacBook Pro in
+  [docs/live.md](docs/live.md#latency-under-typing).
+- A borrow checker, the crate `hir-ty-borrowck` in the rust-analyzer subtree, written to give
+  rustc's verdict: Polonius alpha by default as nightly rustc does, NLL with
+  `RA_JIT_BORROWCK=nll`. It gives rustc's errors on
+  1055 of 1578 of rustc's own borrow-check tests that it can run, and none on any of the 245
+  rustc accepts, scored by `harness/borrowck_ui.py`, and finds nothing in ripgrep, fd, bat,
+  hyperfine, just, axum and nushell. Its errors are rust-analyzer diagnostics and
+  `ra-jit borrowck` prints them ([docs/borrowck.md](docs/borrowck.md)).
+- The daemon refuses to build an edit with a borrow-check error, as it does one with a type
+  error; `RA_JIT_BORROWCK_REFUSE=0` turns that off. The checker still misses about a third
+  of rustc's borrow-check errors, so `cargo check` stays the final word.
 - `ra-jit borrowck`: the borrow-check errors of single files, or of a cargo workspace with
   `--project`.
 
@@ -153,6 +206,12 @@ All notable changes to ra-jit are written here. The format follows
   edits under plain cargo met now and then on Linux before the edit stopped running every
   script through cargo). It says which script failed instead, as an edit that runs the
   scripts again already did.
+- `bench.py` without `--reference` built plain cargo into `target-ref` inside the checkout,
+  which cargo takes for a source of the package: ripgrep's, fd's and hyperfine's build scripts
+  name no `rerun-if-changed`, so cargo ran them again and built the package again at every
+  build, and "nothing changed" took cargo 300 to 390 ms instead of 30 to 60. The README run of
+  2026-10-20 at `c8f58ac7d9` had it; cargo's target directories are now outside the checkout
+  (`WORK/reference` by default).
 - A worker that loaded its workspace beside cargo's first build
   ([#11](https://github.com/indexable-inc/ra-jit/issues/11)) ends when its daemon does, as
   every other worker does: once told what cargo built, it waited for a lock on its standard
@@ -160,6 +219,8 @@ All notable changes to ra-jit are written here. The format follows
   holding its memory (2 GB on fd) and its socket, and the next daemon's first build fell
   back to cargo ("another daemon serves"). `cargo_ra_jit.py`'s "workers of the killed
   daemon are gone" fails without this.
+- `&(1 / 2)`, a division by a constant, and `&mut []` are promoted to constants as rustc
+  promotes them, so a reference to one lives as long as the program.
 - Before the 2024 edition, a panic in a block's tail drops the tail's temporaries after the
   block's locals, as rustc does; ra-jit dropped them first, so a `Drop` that printed or
   locked saw the other order (`breakers.py unwind_tail_after_local`).
