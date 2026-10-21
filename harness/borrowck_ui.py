@@ -302,7 +302,7 @@ def ra_jit_run(binary, units, mode, jobs, work):
         files[copy] = unit.label
         by_edition[unit.edition].append(copy)
     env = dict(os.environ, RA_JIT_BORROWCK=mode)
-    env.pop("RUST_BACKTRACE", None)
+    env["RUST_BACKTRACE"] = "0"
     results = {}
 
     def run(edition, chunk):

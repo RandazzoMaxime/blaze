@@ -149,7 +149,9 @@ changes to rust-analyzer were needed, each made as rustc does it:
 - `if let ... && ...` chains branch directly instead of through a boolean temporary.
 - A match guard reads what its arm binds by value through a reference, and the arm moves
   it in only once the guard holds. A guard with `let` (`if let` guards and chains) branches
-  on each operand as `if` does, so what its `let` binds is initialized where it holds.
+  on each operand as `if` does, so what its `let` binds is initialized where it holds. Its
+  temporaries stay the arm's in every edition, as rustc keeps them (dropped when the arm ends
+  or before the next arm is tried), where an `if let` before 2024 keeps them to its statement.
 - Slice pattern indices carry the pattern's minimum length (`ConstantIndex::min_length`).
 - Promotion: a division by a constant other than 0 (and -1 for a signed dividend that may be
   the minimum), and `&mut []`.
