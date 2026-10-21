@@ -39,9 +39,9 @@ use std::{
 
 use anyhow::{Context, bail};
 use futures_util::{StreamExt, stream};
-use hir_ty::mir::codegen::{
-    STORE_FORMAT, StoreDir, limit_from_env, name_file_whole, pack_format, pack_keys, parse_size,
-    write_file_whole,
+use ra_jit_store::{
+    FORMAT as STORE_FORMAT, StoreDir, limit_from_env, name_file_whole, pack_format, pack_keys,
+    parse_size, write_file_whole,
 };
 use rustc_hash::FxHashMap;
 use tokio::{io::AsyncSeekExt, runtime::Runtime};
@@ -1152,7 +1152,7 @@ impl Shared {
             self.pull_as_set().await
         });
         let asked = self.asked.clone();
-        hir_ty::mir::codegen::fetch_missing_with(Box::new(move |key| asked.fetch(key)));
+        ra_jit_store::fetch_missing_with(Box::new(move |key| asked.fetch(key)));
         self.report(done, start);
     }
 

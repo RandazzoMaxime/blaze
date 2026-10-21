@@ -695,6 +695,7 @@ dependencies = [
  "hir-def",
  "hir-expand",
  "hir-ide",
+ "hir-ty-borrowck",
  "intern",
  "itertools",
  "la-arena",
@@ -809,11 +810,6 @@ dependencies = [
  "bitflags",
  "cfg",
  "cov-mark",
- "cranelift-codegen",
- "cranelift-frontend",
- "cranelift-module",
- "cranelift-object",
- "crc32fast",
  "either",
  "ena",
  "hir-def",
@@ -822,40 +818,85 @@ dependencies = [
  "intern",
  "itertools",
  "la-arena",
- "libc",
  "macros",
- "memmap2",
- "object 0.37.3",
  "oorandom",
  "petgraph",
- "postcard",
  "ra-ap-rustc_abi",
  "ra-ap-rustc_ast_ir",
  "ra-ap-rustc_index",
  "ra-ap-rustc_next_trait_solver",
  "ra-ap-rustc_type_ir",
- "rustc-demangle",
  "rustc-hash 2.1.2",
- "rustc-stable-hash",
  "rustc_apfloat",
  "salsa",
  "serde",
  "serde_derive",
- "sha2",
  "smallvec",
  "span",
  "stacker",
  "stdx",
  "syntax",
- "target-lexicon",
  "thin-vec",
  "tracing",
  "tracing-subscriber",
  "tracing-tree",
  "triomphe",
  "unicode-width",
+]
+
+[[package]]
+name = "hir-ty-borrowck"
+version = "0.0.0"
+dependencies = [
+ "base-db",
+ "hir-def",
+ "hir-ty",
+ "la-arena",
+ "ra-ap-rustc_ast_ir",
+ "ra-ap-rustc_type_ir",
+ "rustc-hash 2.1.2",
+ "salsa",
+ "smallvec",
+]
+
+[[package]]
+name = "hir-ty-codegen"
+version = "0.1.0"
+dependencies = [
+ "base-db",
+ "cfg",
+ "cranelift-codegen",
+ "cranelift-frontend",
+ "cranelift-module",
+ "cranelift-object",
+ "either",
+ "hir-def",
+ "hir-expand",
+ "hir-ty",
+ "indexmap",
+ "intern",
+ "la-arena",
+ "object 0.37.3",
+ "postcard",
+ "ra-ap-rustc_abi",
+ "ra-ap-rustc_ast_ir",
+ "ra-ap-rustc_index",
+ "ra-ap-rustc_type_ir",
+ "ra-jit-store",
+ "rustc-demangle",
+ "rustc-hash 2.1.2",
+ "rustc-stable-hash",
+ "salsa",
+ "serde",
+ "serde_derive",
+ "sha2",
+ "span",
+ "stdx",
+ "syntax",
+ "target-lexicon",
+ "tracing",
+ "triomphe",
  "wasm-encoder",
- "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -1564,6 +1605,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "ra-jit-store"
+version = "0.1.0"
+dependencies = [
+ "crc32fast",
+ "libc",
+ "memmap2",
+ "rustc-hash 2.1.2",
+ "sha2",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
 name = "ra-jit-wasm"
 version = "0.1.0"
 dependencies = [
@@ -1575,6 +1628,7 @@ dependencies = [
  "hir-def",
  "hir-expand",
  "hir-ty",
+ "hir-ty-codegen",
  "ide-db",
  "intern",
  "load-cargo",

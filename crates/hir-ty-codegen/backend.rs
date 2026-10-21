@@ -10,7 +10,7 @@ use std::{
     fmt,
     sync::{
         Mutex, OnceLock,
-        atomic::{AtomicU64, AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
     },
     time::Duration,
 };
@@ -36,6 +36,21 @@ const SELECTION: &str = "RA_JIT_EMIT";
 /// is still compiled by LLVM as a tier, which does not come through here.
 #[cfg(feature = "llvm")]
 const LLVM_LIMIT: usize = 10_000;
+
+/// Whether the build under way is of a whole program: one rustc built nothing of, whose
+/// `main` ra-jit writes. Its object is linked once and runs as it is, never edited nor
+/// compiled again as a tier, so LLVM is given every body, as large and with what handlers
+/// it has (see [`Backend::emit`]).
+static WHOLE_PROGRAM: AtomicBool = AtomicBool::new(false);
+
+/// Says the build under way is of a whole program.
+pub(super) fn set_whole_program() {
+    WHOLE_PROGRAM.store(true, Ordering::Relaxed);
+}
+
+pub(super) fn whole_program() -> bool {
+    WHOLE_PROGRAM.load(Ordering::Relaxed)
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Backend {
@@ -122,14 +137,15 @@ impl Backend {
         match Self::from_env().map_err(CodegenError::Backend)? {
             Backend::Cranelift => {}
             #[cfg(feature = "llvm")]
-            Backend::Llvm(_) if context.func.dfg.num_insts() > LLVM_LIMIT => {
+            Backend::Llvm(_) if !whole_program() && context.func.dfg.num_insts() > LLVM_LIMIT => {
                 tally.fell_back(Duration::ZERO, "a body larger than LLVM is given in a build");
             }
             // A handler of several, or one that takes more than the exception, costs LLVM a
             // landing pad for each call: a generic edit of nushell waited on 177 such bodies,
-            // 17 ms each in LLVM. A tier, which does not come through here, lowers them.
+            // 17 ms each in LLVM. A tier, which does not come through here, lowers them, as
+            // does the build of a whole program, which nothing edits.
             #[cfg(feature = "llvm")]
-            Backend::Llvm(_) if !super::llvm::plain_handlers(&context.func) => {
+            Backend::Llvm(_) if !whole_program() && !super::llvm::plain_handlers(&context.func) => {
                 tally.fell_back(Duration::ZERO, "a handler LLVM lowers only for a tier");
             }
             #[cfg(feature = "llvm")]
@@ -191,7 +207,9 @@ impl Backend {
         };
         let named: Vec<_> = recorder.named_slots().collect();
         let recorder = &mut recorder.wants;
-        let Some((store, key)) = Store::global().zip(StoredCode::key(
+        // The key is of the function's own IR, which the bodies LLVM is shown are not part of.
+        let store = Store::global().filter(|_| recorder.seen.is_empty());
+        let Some((store, key)) = store.zip(StoredCode::key(
             optimization,
             func,
             named.iter().copied(),

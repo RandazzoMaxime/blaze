@@ -104,7 +104,10 @@ impl Target {
     /// Names the target of this process. It is said once, before anything is compiled.
     pub fn select(triple: &str) -> Result<&'static Target, String> {
         let target = Target::parse(triple)?;
-        let selected = SELECTED.get_or_init(|| target);
+        let selected = SELECTED.get_or_init(|| {
+            hir_ty::mir::target::select_word(target.word());
+            target
+        });
         if selected.triple == triple {
             Ok(selected)
         } else {

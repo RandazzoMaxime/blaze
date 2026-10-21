@@ -2,9 +2,9 @@
 
 This is a map of the code for someone who wants to read or change it. Paths are those of the
 published tree: `crates/ra-jit` is the daemon, `crates/hir-ty-codegen` is the code generator
-(it is compiled as the module `hir_ty::mir::codegen` of ra-jit's rust-analyzer branch, see
-[contributing.md](contributing.md)), and `vendor/rust-analyzer` is the front end, with the
-borrow checker as its crate `hir-ty-borrowck` ([borrowck.md](borrowck.md)).
+(a crate over `hir-ty`'s MIR, see [contributing.md](contributing.md)), and
+`vendor/rust-analyzer` is the front end, with the borrow checker as its crate `hir-ty-borrowck`
+([borrowck.md](borrowck.md)).
 
 ## The idea
 
@@ -192,8 +192,8 @@ Each object format has its own implementation:
 
 ## The disk store
 
-`store.rs` is a content-addressed key-value store of compiled functions, independent of
-Rust: a key is a hash of what the value was made from. It is used when `RA_JIT_CACHE` names
+`crates/ra-jit-store` is a content-addressed key-value store of compiled functions,
+independent of Rust: a key is a hash of what the value was made from. It is used when `RA_JIT_CACHE` names
 a directory. `stable.rs` gives function instances names that are the same in every run on
 the same sources, and `cached.rs` keeps entries under them: a function of a crate that no
 edit reaches, as it was stitched into an object. A build that finds an entry for an

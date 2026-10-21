@@ -12,7 +12,8 @@ rust-version.workspace = true
 [dependencies]
 
 [dev-dependencies]
-hir-ty.workspace = true
+hir-ty-codegen.workspace = true
+ra-jit-store.workspace = true
 tango-bench = "0.9"
 
 [[bench]]

@@ -18,7 +18,7 @@ use rustc_hash::{FxBuildHasher, FxHashMap, FxHashSet};
 
 type FxIndexMap<K, V> = indexmap::IndexMap<K, V, FxBuildHasher>;
 
-use crate::{db::HirDatabase, traits::StoredParamEnvAndCrate};
+use hir_ty::{db::HirDatabase, traits::StoredParamEnvAndCrate};
 
 use super::{
     CodegenError, Instance, InstanceDef, ObjectCodegen, OwnStatics, Phases, Rejections, Result,
@@ -115,14 +115,14 @@ fn probe<T>(query: impl FnOnce() -> T) -> Option<T> {
 /// Whether `root` has a type or constant to be given, of its own or of its `impl` or trait
 /// (`Self` of a trait's method).
 fn copied_by_rustc(db: &dyn HirDatabase, root: FunctionId) -> bool {
-    let generics = crate::generics::generics(db, root.into());
-    generics.iter_owners().any(|it| it.iter_type_or_consts().next().is_some())
+    let generics = hir_ty::generics::generics(db, root.into());
+    generics.iter(false).any(|(id, _)| !matches!(id, hir_def::GenericParamId::LifetimeParamId(_)))
 }
 
 /// What a closure of the body of `root`, which is not generic, is compiled in.
 fn closure_env(db: &dyn HirDatabase, root: FunctionId) -> StoredParamEnvAndCrate {
-    let param_env = crate::next_solver::ParamEnv::empty();
-    crate::traits::ParamEnvAndCrate { param_env, krate: root.krate(db) }.store()
+    let param_env = hir_ty::next_solver::ParamEnv::empty();
+    hir_ty::traits::ParamEnvAndCrate { param_env, krate: root.krate(db) }.store()
 }
 
 fn closure_mark(
@@ -259,7 +259,7 @@ impl Left {
 /// The functions left to rustc as rustc compiled them: its copies are not built again while
 /// the daemon runs, so one is only good for as long as its function is what it was then.
 #[derive(Clone, Default)]
-pub(in crate::mir) struct Frozen {
+pub(crate) struct Frozen {
     left: Option<FxHashMap<FunctionId, Left>>,
     /// The crates that have seen an edit since.
     edited: FxHashSet<Crate>,
@@ -272,20 +272,20 @@ pub(in crate::mir) struct Frozen {
 }
 
 impl Frozen {
-    pub(in crate::mir) fn distrust(&mut self, crates: impl IntoIterator<Item = Crate>) {
+    pub(crate) fn distrust(&mut self, crates: impl IntoIterator<Item = Crate>) {
         self.distrusted.extend(crates);
     }
 
-    pub(in crate::mir) fn edit_bodies(&mut self, file: FileId) {
+    pub(crate) fn edit_bodies(&mut self, file: FileId) {
         self.edited_bodies.insert(file);
     }
 
-    pub(in crate::mir) fn edit(&mut self, crates: impl IntoIterator<Item = Crate>) {
+    pub(crate) fn edit(&mut self, crates: impl IntoIterator<Item = Crate>) {
         self.edited.extend(crates);
     }
 
     /// A function of `base` that rustc's copy is no longer right for, and why.
-    pub(in crate::mir) fn out_of_date(
+    pub(crate) fn out_of_date(
         &mut self,
         db: &dyn HirDatabase,
         base: &Base,

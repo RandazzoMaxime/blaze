@@ -53,9 +53,10 @@ pub(super) fn plain_handlers(func: &ir::Function) -> bool {
         let mut items = table.items();
         match (items.next(), items.next()) {
             (Some(ir::ExceptionTableItem::Tag(_, handler)), None) => {
-                matches!(handler.args(&dfg.value_lists).collect::<Vec<_>>()[..], [
-                    ir::BlockArg::TryCallExn(0)
-                ])
+                matches!(
+                    handler.args(&dfg.value_lists).collect::<Vec<_>>()[..],
+                    [ir::BlockArg::TryCallExn(0)]
+                )
             }
             _ => false,
         }

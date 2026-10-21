@@ -13,16 +13,23 @@ it is under [macOS arm64](#macos-arm64). The design notes it was written from ar
 
 `cargo ra-jit` is cargo's way of running a program called `cargo-ra-jit` on your `PATH`. That
 program is built with ra-jit and runs the `ra-jit` executable in the same directory, so the two
-have to be installed side by side, with `ra-jit-rustc`. `cargo install` does that:
+have to be installed side by side, with `ra-jit-rustc` and `ra-jit-rustc-first`. `cargo
+install` does that:
 
-    cargo +1.99.0 install --locked ra-jit
+    cargo +1.99.0 install --locked --profile dist ra-jit
+
+`dist` is the profile a release is built with, less the PGO a release adds (README). From a
+checkout, the release's own recipe builds all of it, with the profile
+[pgo/profiles.json](../pgo/profiles.json) pins:
+
+    python3 .github/scripts/build_release.py --target $(rustc +1.99.0 -vV | sed -n 's/^host: //p') --out shipped
+    cp shipped/* ~/.cargo/bin/
 
 That build has the Cranelift backend only. The LLVM one (`RA_JIT_BACKEND=llvm`) is
-`--features llvm`, and needs LLVM 20 with `LLVM_SYS_201_PREFIX` set to its prefix. From a
-checkout:
-
-    cargo +1.99.0 build -p ra-jit --release
-    cp target/release/{ra-jit,cargo-ra-jit,ra-jit-rustc} ~/.cargo/bin/
+`--features llvm` on either command, and needs LLVM 20 with `LLVM_SYS_201_PREFIX` set to its
+prefix; with it the crates are not the ones the profile was trained on, and the script says
+so. `cargo build -p ra-jit --release` is the quicker build the harnesses and CI use while
+working on ra-jit; it is not what ships.
 
 The project you build must use Rust 1.99.0, the toolchain ra-jit is pinned to. Use a
 `rust-toolchain.toml`, `rustup override set 1.99.0`, or `RUSTUP_TOOLCHAIN=1.99.0`.
@@ -201,6 +208,7 @@ build a command line is, so changing one starts from a cargo build again.
 | `RA_JIT_BACKEND` | `cranelift` or `llvm`. `llvm` needs a ra-jit built with `--features llvm` | `cranelift` |
 | `RA_JIT_OPT` | LLVM optimisation level, 0 to 3. Functions are still compiled one at a time | 2 |
 | `RA_JIT_EMIT` | LLVM instruction selection: `optimized` or `fast` | `optimized`; `fast` at level 0 |
+| `RA_JIT_INLINE` | `all`: with LLVM at level 2 or 3, a program built whole (`runbench.py`'s builds) has the functions it calls in any crate built into it or shown to LLVM, as a release build does; the standard library's only when they are generic or `#[inline]`, as rustc does across crates. `0` builds nothing in | functions of the same crate |
 | `RA_JIT_SPLICE` | `0` links in full after every edit instead of splicing | splice |
 
 These are read by the daemon when it starts, from the environment of whichever command

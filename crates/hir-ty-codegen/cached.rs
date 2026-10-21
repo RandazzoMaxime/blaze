@@ -828,6 +828,7 @@ mod tests {
         isa::CallConv,
     };
     use cranelift_module::{DataId, FuncId};
+    use ra_jit_fuzz as fuzz;
 
     use super::{
         super::{
@@ -836,7 +837,6 @@ mod tests {
                 Aggregate, DebugContext, DebugType, Field, Place, Scope, VariableDebug,
                 VariablePlace,
             },
-            fuzz,
         },
         *,
     };
@@ -1132,7 +1132,7 @@ mod tests {
                 .unwrap(),
         ];
         let (mut read, mut refused) = (0, 0);
-        for bytes in fuzz::inputs("entry", seeds) {
+        for bytes in fuzz::inputs(concat!(env!("CARGO_MANIFEST_DIR"), "/corpus/entry"), seeds) {
             let (largest, entry) = fuzz::largest_allocation(|| Entry::decode(&bytes));
             assert!(largest <= fuzz::allowed(bytes.len()), "{largest} bytes for {}", bytes.len());
             match entry {
@@ -1182,7 +1182,8 @@ mod tests {
         let left = LlvmEntry::LeftToCranelift("opcode `iadd`".to_owned());
         let seeds = vec![code.encode().unwrap(), left.encode().unwrap()];
         let (mut read, mut refused) = (0, 0);
-        for bytes in fuzz::inputs("stored-code", seeds) {
+        for bytes in fuzz::inputs(concat!(env!("CARGO_MANIFEST_DIR"), "/corpus/stored-code"), seeds)
+        {
             let (largest, stored) = fuzz::largest_allocation(|| LlvmEntry::decode(&bytes));
             assert!(largest <= fuzz::allowed(bytes.len()), "{largest} bytes for {}", bytes.len());
             match stored {

@@ -82,10 +82,12 @@ jobs:
         run: |
           nix run .#ra-jit -- --help
           nix run .#ra-jit -- --version || true
-      - name: the three binaries run each other from next to themselves
+      - name: the binaries run each other from next to themselves
         run: |
-          out=$(nix build --no-link --print-out-paths .#daemon-units)
-          for bin in ra-jit cargo-ra-jit ra-jit-rustc; do test -x "$out/bin/$bin"; done
+          for attr in daemon daemon-units; do
+            out=$(nix build --no-link --print-out-paths .#$attr)
+            for bin in ra-jit cargo-ra-jit ra-jit-rustc ra-jit-rustc-first; do test -x "$out/bin/$bin"; done
+          done
 
   nix-darwin:
     name: nix build (aarch64-darwin)
