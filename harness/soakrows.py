@@ -18,6 +18,8 @@ from cargo_ra_jit import HERE, RA_JIT, Side, base_env, difference, how_built, pr
 
 GIT = ["git", "-c", "user.name=ra-jit", "-c", "user.email=ra-jit@localhost", "-c", "advice.detachedHead=false"]
 OTHER_TOOLCHAIN = "1.94.0"
+# The nightly CI installs for borrowck_ui.py.
+NIGHTLY = "nightly-2026-10-09"
 MARK = re.compile(r"pub fn mark\(\) -> u64 \{ \d+ \}")
 
 
@@ -460,6 +462,24 @@ def toolchains_in_turn(row):
         wait_warm(Side(row.ws, row.env, True), row.ws)
 
 
+def pinned_to_a_nightly(row):
+    """A project pinned to a nightly of the next release, built anyway
+    (`RA_JIT_OTHER_TOOLCHAIN=1`), as bun is: nightly cargo passes every crate
+    `-Z embed-metadata=no` and writes its build directory in its second layout, where the
+    build script's output is. Each sent the build to cargo."""
+    if shutil.which("rustup"):
+        subprocess.run(["rustup", "toolchain", "install", NIGHTLY, "--profile", "minimal", "-c", "rust-src"],
+                       check=True, capture_output=True)
+    says_its_rustc(row)
+    row.env.update(RUSTUP_TOOLCHAIN=NIGHTLY, RA_JIT_OTHER_TOOLCHAIN="1")
+    row.warm()
+    row.both("warm", want="-nightly")
+    row.edit()
+    how, _ = row.both("a body edited", want=f"mark {row.mark}")
+    if how != "daemon":
+        raise Wrong(f"the build after a body was edited was not the daemon's: {how}")
+
+
 def another_build(source, bin):
     """A ra-jit that is another build: the same program with bytes after its end."""
     for name in ("ra-jit", "cargo-ra-jit"):
@@ -811,6 +831,7 @@ ROWS = {
     "functions rustc keeps to an object": (kept_to_an_object, {"CARGO_INCREMENTAL": "0"}),
     "an item added beside a function left to rustc": (beside_one_left, {}),
     "a module file outside its package": (outside_its_package, {}),
+    "a project pinned to a nightly": (pinned_to_a_nightly, {}),
 }
 
 

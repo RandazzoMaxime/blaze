@@ -8,6 +8,12 @@ All notable changes to ra-jit are written here. The format follows
 
 ### Added
 
+- `RA_JIT_OTHER_TOOLCHAIN=1` has `cargo ra-jit` build with a rustc other than 1.99.0, for a
+  project pinned to a nightly of the next release that 1.99.0 can't build (bun's
+  `nightly-2026-09-15`). Without it such a build goes to cargo, as before, and says why. The
+  builds of a nightly cargo are the daemon's: `-Z embed-metadata=no`, which it passes every
+  crate, no longer sends them to cargo, and build scripts' output and the seeded target are
+  found in its second build-directory layout (`soakrows.py`, "a project pinned to a nightly").
 - The `bench-bun` workflow measures bun nightly on the benchmark machine (edits and runtime,
   into the README's bun section), in `nix develop .#bench-bun`: bun's nightly and what its own
   build of its C and C++ needs. Too slow for every push.
@@ -18,7 +24,7 @@ All notable changes to ra-jit are written here. The format follows
 - `bench.py bun` times the edits on bun (body, signature, leaf, generic, new function) in a copy
   of the tree `bunprep.py` prepares, under bun's pinned nightly; bun is measured only when
   named.
-- bun (its Rust port, 1.4.3: 1.25M lines in 105 crates, with a JavaScript runtime's C and C++)
+- bun (its Rust port, 1.4.3: 1.25M lines in 103 crates, with a JavaScript runtime's C and C++)
   in `apps.json`, so `apps.py bun` and `runbench.py bun` build it whole-program and compare
   its runs with cargo's. An entry's `prepare` names a module of the harness that makes what
   the program's own build makes before cargo: `bunprep.py` runs bun's build of its C and C++
