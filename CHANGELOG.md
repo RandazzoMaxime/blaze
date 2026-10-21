@@ -205,6 +205,14 @@ All notable changes to ra-jit are written here. The format follows
 
 ### Fixed
 
+- Large workspaces are ready in a fraction of the time and memory
+  ([#29](https://github.com/indexable-inc/ra-jit/issues/29)): a closure's type holds its inner
+  closure twice, so the store's name for a type of nested closures doubled with each level
+  (one of helix's was 665 MB). A type is now spelled once per daemon, and one spelled longer
+  than 1 KB is named by the SHA-256 of its spelling; shorter names, and the store entries
+  under them, are unchanged. helix is ready in 109 s at 18.4 GB of memory instead of 631 s at
+  100.7 GB, its store is 1.6 GB instead of 14 GB, and its first `cargo ra-jit run` takes
+  46.9 s instead of 640.8 s (`harness/deepnames.py`).
 - `harness/apps.py`'s perf stage ends with its timings again: since the rename from rustd it
   stored ra-jit's as `ra-jit_s` and printed `ra_jit_s`, a `KeyError` after every workload.
   wasmrun builds wasmtime 36.0.19 (was 25.0.3, which Dependabot's alerts name); its workload
