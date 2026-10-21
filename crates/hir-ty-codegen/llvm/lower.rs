@@ -8,8 +8,8 @@
 
 use cranelift_codegen::ir::{
     self, ArgumentExtension, ArgumentPurpose, AtomicRmwOp, Block, BlockArg, BlockCall,
-    ExceptionTableItem, ExternalName, GlobalValueData, Inst, InstructionData, Opcode, Signature,
-    Type, Value,
+    ExceptionTableItem, ExternalName, GlobalValueData, Inst, InstructionData, LibCall, Opcode,
+    Signature, Type, Value,
     condcodes::{FloatCC, IntCC},
     types,
 };
@@ -54,6 +54,16 @@ enum Operand<'ctx> {
     Pointer(PointerValue<'ctx>),
     Float(FloatValue<'ctx>),
     Vector(VectorValue<'ctx>),
+}
+
+/// The library function a call is of, when it is one that copies or fills memory.
+fn memory_call(name: &ExternalName) -> Option<LibCall> {
+    match name {
+        ExternalName::LibCall(libcall @ (LibCall::Memcpy | LibCall::Memmove | LibCall::Memset)) => {
+            Some(*libcall)
+        }
+        _ => None,
+    }
 }
 
 impl<'ctx> From<BasicValueEnum<'ctx>> for Operand<'ctx> {
@@ -120,6 +130,52 @@ pub(super) struct Lowering<'ctx, 'f> {
     pointerish: FxHashSet<Value>,
     /// The functions called whose bodies LLVM is shown, by their place among the requests.
     shown: &'f FxHashMap<u32, FunctionValue<'ctx>>,
+    /// The addresses rounded up in slots aligned beyond what Cranelift aligns: see
+    /// [`realigned`].
+    realigned: FxHashMap<Inst, (ir::StackSlot, u32)>,
+}
+
+/// Each `(address + align - 1) & -align` of a stack slot, with the slot and the alignment:
+/// Cranelift aligns a frame by 16 bytes, so a slot that needs more is larger by as much and
+/// the address rounded up. LLVM aligns an alloca by any power of two, and the rounded address
+/// is then the alloca's, which LLVM can follow where it can't through the arithmetic.
+fn realigned(func: &ir::Function) -> FxHashMap<Inst, (ir::StackSlot, u32)> {
+    let dfg = &func.dfg;
+    let made = |value: Value| match dfg.value_def(dfg.resolve_aliases(value)) {
+        ir::ValueDef::Result(inst, _) => Some(dfg.insts[inst]),
+        _ => None,
+    };
+    let constant = |value: Value| match made(value)? {
+        InstructionData::UnaryImm { opcode: Opcode::Iconst, imm, .. } => Some(imm.bits()),
+        _ => None,
+    };
+    let mut found = FxHashMap::default();
+    for block in func.layout.blocks() {
+        for inst in func.layout.block_insts(block) {
+            let InstructionData::Binary { opcode: Opcode::Band, args: [bumped, mask] } =
+                dfg.insts[inst]
+            else {
+                continue;
+            };
+            let Some(align) = constant(mask).map(i64::wrapping_neg) else { continue };
+            if align <= 16 || align > 1 << 16 || align.count_ones() != 1 {
+                continue;
+            }
+            let Some(InstructionData::Binary { opcode: Opcode::Iadd, args: [base, by] }) =
+                made(bumped)
+            else {
+                continue;
+            };
+            let Some(InstructionData::StackAddr { stack_slot, offset, .. }) = made(base) else {
+                continue;
+            };
+            let room = func.sized_stack_slots[stack_slot].size;
+            if constant(by) == Some(align - 1) && i32::from(offset) == 0 && room >= align as u32 {
+                found.insert(inst, (stack_slot, align as u32));
+            }
+        }
+    }
+    found
 }
 
 /// Tells LLVM that `function` was entered `count` times while code of it counted.
@@ -528,6 +584,7 @@ impl<'ctx, 'f> Lowering<'ctx, 'f> {
             addresses,
             pointer_params: FxHashMap::default(),
             pointerish,
+            realigned: realigned(func),
             shown,
         };
         lowering.pointer_params = lowering.pointer_params(&lowering.pointerish);
@@ -606,7 +663,8 @@ impl<'ctx, 'f> Lowering<'ctx, 'f> {
         for (slot, data) in self.func.sized_stack_slots.iter() {
             let ty = self.context.i8_type().array_type(data.size);
             let alloca = self.builder.build_alloca(ty, "")?;
-            let align = 1u32 << data.align_shift;
+            let rounded = self.realigned.values().filter(|it| it.0 == slot).map(|it| it.1);
+            let align = rounded.fold(1u32 << data.align_shift, u32::max);
             alloca
                 .as_instruction()
                 .expect("an alloca")
@@ -1061,6 +1119,14 @@ impl<'ctx, 'f> Lowering<'ctx, 'f> {
             InstructionData::Binary { args: [l, r], .. } => self.binary(inst, opcode, l, r)?,
             InstructionData::IntCompare { args: [l, r], cond, .. } => {
                 let predicate = Self::int_predicate(cond);
+                if let (Operand::Vector(l), Operand::Vector(r)) = (self.operand(l), self.operand(r))
+                {
+                    // A lane that holds is all ones, as in Cranelift.
+                    let holds = self.builder.build_int_compare(predicate, l, r, "")?;
+                    let mask = self.builder.build_int_s_extend(holds, l.get_type(), "")?;
+                    self.set(inst, Operand::Vector(mask));
+                    return Ok(());
+                }
                 // Two addresses are compared as pointers: as integers they would have
                 // escaped.
                 let compared = match (self.operand(l), self.operand(r)) {
@@ -1135,6 +1201,13 @@ impl<'ctx, 'f> Lowering<'ctx, 'f> {
                 self.set(inst, Operand::Pointer(callee.as_global_value().as_pointer_value()));
             }
             InstructionData::Call { func_ref, .. } => {
+                if let Some(libcall) = memory_call(&dfg.ext_funcs[func_ref].name) {
+                    let to = self.memory(libcall, dfg.inst_args(inst))?;
+                    if !dfg.inst_results(inst).is_empty() {
+                        self.set(inst, Operand::Pointer(to));
+                    }
+                    return Ok(());
+                }
                 let callee = self.callee(func_ref)?;
                 let sig = &dfg.signatures[dfg.ext_funcs[func_ref].signature];
                 let ty = callee.get_type();
@@ -1168,6 +1241,11 @@ impl<'ctx, 'f> Lowering<'ctx, 'f> {
                 self.finish_call(call, sig, dfg.inst_results(inst))?;
             }
             InstructionData::TryCall { func_ref, exception, .. } => {
+                if let Some(libcall) = memory_call(&dfg.ext_funcs[func_ref].name) {
+                    let to = self.memory(libcall, dfg.inst_args(inst))?;
+                    let from = self.builder.get_insert_block().expect("a block being filled");
+                    return self.returned_to(exception, &[to.into()], from);
+                }
                 let callee = self.callee(func_ref)?;
                 let (normal, pad) = self.exception_edges(exception)?;
                 let sig = &dfg.signatures[dfg.ext_funcs[func_ref].signature];
@@ -1408,6 +1486,17 @@ impl<'ctx, 'f> Lowering<'ctx, 'f> {
                 let args = [int.into(), zero_is_poison.into()];
                 self.intrinsic(name, &[int.get_type().into()], &args)?.into()
             }
+            Opcode::VhighBits => {
+                let Operand::Vector(vector) = self.operand(arg) else {
+                    return Err(Unhandled::Type(self.func.dfg.value_type(arg)));
+                };
+                let zero = vector.get_type().const_zero();
+                let negative = b.build_int_compare(IntPredicate::SLT, vector, zero, "")?;
+                let lanes = Self::int_of_width(self.context, vector.get_type().get_size())?;
+                let bits = b.build_bit_cast(negative, lanes, "")?.into_int_value();
+                let to = self.int_ty(result_ty())?;
+                Operand::Int(b.build_int_cast_sign_flag(bits, to, false, "")?)
+            }
             Opcode::Popcnt => Operand::Int(self.int_intrinsic("llvm.ctpop", &[self.int(arg)?])?),
             Opcode::Bitrev => {
                 Operand::Int(self.int_intrinsic("llvm.bitreverse", &[self.int(arg)?])?)
@@ -1478,6 +1567,10 @@ impl<'ctx, 'f> Lowering<'ctx, 'f> {
     }
 
     fn binary(&mut self, inst: Inst, opcode: Opcode, l: Value, r: Value) -> Lowered<()> {
+        if let Some(&(slot, _)) = self.realigned.get(&inst) {
+            self.set(inst, Operand::Pointer(self.slots[&slot]));
+            return Ok(());
+        }
         let b = &self.builder;
         if self.func.dfg.value_type(l).is_float() {
             let (l, r) = (self.float(l)?, self.float(r)?);
@@ -1492,6 +1585,26 @@ impl<'ctx, 'f> Lowering<'ctx, 'f> {
                 _ => return Err(Unhandled::Opcode(opcode)),
             };
             self.set(inst, Operand::Float(value));
+            return Ok(());
+        }
+        if let (Operand::Vector(l), Operand::Vector(r)) = (self.operand(l), self.operand(r)) {
+            let saturating = |name: &str| -> Lowered<VectorValue<'ctx>> {
+                let args = [l.into(), r.into()];
+                Ok(self.intrinsic(name, &[l.get_type().into()], &args)?.into_vector_value())
+            };
+            let value = match opcode {
+                Opcode::Iadd => b.build_int_add(l, r, "")?,
+                Opcode::Isub => b.build_int_sub(l, r, "")?,
+                Opcode::Band => b.build_and(l, r, "")?,
+                Opcode::Bor => b.build_or(l, r, "")?,
+                Opcode::Bxor => b.build_xor(l, r, "")?,
+                Opcode::UaddSat => saturating("llvm.uadd.sat")?,
+                Opcode::SaddSat => saturating("llvm.sadd.sat")?,
+                Opcode::UsubSat => saturating("llvm.usub.sat")?,
+                Opcode::SsubSat => saturating("llvm.ssub.sat")?,
+                _ => return Err(Unhandled::Opcode(opcode)),
+            };
+            self.set(inst, Operand::Vector(value));
             return Ok(());
         }
         // An offset address is still an address of the same thing.
@@ -1706,6 +1819,25 @@ impl<'ctx, 'f> Lowering<'ctx, 'f> {
         };
         let stored = self.builder.build_store(address, value)?;
         Self::set_access_alignment(stored, aligned)
+    }
+
+    /// A library call that copies or fills memory, as LLVM's intrinsic: a call LLVM knows
+    /// nothing of, of a size it does know, is not written as the loads and stores it is.
+    fn memory(&mut self, libcall: LibCall, args: &[Value]) -> Lowered<PointerValue<'ctx>> {
+        let &[to, from, size] = args else {
+            return Err(Unhandled::Shape("a memory call without three arguments"));
+        };
+        let (to, size) = (self.pointer(to)?, self.int(size)?);
+        match libcall {
+            LibCall::Memcpy => self.builder.build_memcpy(to, 1, self.pointer(from)?, 1, size)?,
+            LibCall::Memmove => self.builder.build_memmove(to, 1, self.pointer(from)?, 1, size)?,
+            _ => {
+                let byte = self.context.i8_type();
+                let byte = self.builder.build_int_truncate(self.int(from)?, byte, "")?;
+                self.builder.build_memset(to, 1, byte, size)?
+            }
+        };
+        Ok(to)
     }
 
     /// What a function or data object is called in the module: a request by the name it is
@@ -2131,9 +2263,19 @@ impl<'ctx, 'f> Lowering<'ctx, 'f> {
         table: ir::ExceptionTable,
         normal: BasicBlock<'ctx>,
     ) -> Lowered<()> {
-        let dfg = &self.func.dfg;
         self.builder.position_at_end(normal);
         let returned = self.returned(call, sig)?;
+        self.returned_to(table, &returned, normal)
+    }
+
+    /// Goes on, from `from`, where a call with `table` returns to, with what it returned.
+    fn returned_to(
+        &mut self,
+        table: ir::ExceptionTable,
+        returned: &[BasicValueEnum<'ctx>],
+        from: BasicBlock<'ctx>,
+    ) -> Lowered<()> {
+        let dfg = &self.func.dfg;
         let destination = dfg.exception_tables[table].normal_return();
         let target = destination.block(&dfg.value_lists);
         let phis = self.phis.get(&target).map_or(&[][..], Vec::as_slice);
@@ -2145,7 +2287,7 @@ impl<'ctx, 'f> Lowering<'ctx, 'f> {
                     return Err(Unhandled::Shape("an exception where a call returns"));
                 }
             };
-            phi.add_incoming(&[(&value, normal)]);
+            phi.add_incoming(&[(&value, from)]);
         }
         self.builder.build_unconditional_branch(self.blocks[&target])?;
         Ok(())

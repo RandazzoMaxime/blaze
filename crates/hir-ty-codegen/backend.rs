@@ -191,7 +191,9 @@ impl Backend {
         };
         let named: Vec<_> = recorder.named_slots().collect();
         let recorder = &mut recorder.wants;
-        let Some((store, key)) = Store::global().zip(StoredCode::key(
+        // The key is of the function's own IR, which the bodies LLVM is shown are not part of.
+        let store = Store::global().filter(|_| recorder.seen.is_empty());
+        let Some((store, key)) = store.zip(StoredCode::key(
             optimization,
             func,
             named.iter().copied(),

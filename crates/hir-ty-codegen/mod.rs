@@ -528,6 +528,7 @@ impl CodegenUnit {
             let start = stdx::time::Instant::now();
             let own_statics = OwnStatics::new(
                 db,
+                symbols,
                 all().map(|root| root.krate(db)).collect(),
                 known.theirs.clone(),
                 known.unknown.clone(),
@@ -609,6 +610,7 @@ impl CodegenUnit {
         tiers.clear();
         let mut own_statics = OwnStatics::new(
             db,
+            symbols,
             all().map(|root| root.krate(db)).collect(),
             std::mem::take(theirs),
             std::mem::take(unknown),
@@ -874,11 +876,14 @@ struct OwnStatics {
     /// any static of the crate but the ones declared in the body of another function.
     // FIXME: a closure that such a function hands out can refer to the statics of its body.
     unknown: FxHashSet<Crate>,
+    /// The crates of the program rustc built nothing of, whose statics have no copy but ours.
+    unbuilt: FxHashSet<Crate>,
 }
 
 impl OwnStatics {
     fn new(
         db: &dyn HirDatabase,
+        symbols: &dyn SymbolResolver,
         crates: FxHashSet<Crate>,
         theirs: FxHashSet<StaticId>,
         unknown: FxHashSet<Crate>,
@@ -887,7 +892,7 @@ impl OwnStatics {
         // With on-demand roots the build is of a program whose `main` is in `crates`, and only
         // what that depends on is linked. Without, anything may be linked on top.
         let program: FxHashSet<Crate> = if is_program {
-            crates.iter().flat_map(|krate| krate.transitive_deps(db)).collect()
+            linked_crates(db, crates.iter().copied())
         } else {
             base_db::all_crates(db).iter().copied().collect()
         };
@@ -913,11 +918,16 @@ impl OwnStatics {
             false
         };
         let shared = crates.iter().copied().filter(is_shared).collect();
-        OwnStatics { crates, shared, theirs, unknown }
+        let unbuilt =
+            program.iter().copied().filter(|&krate| !symbols.rustc_built(krate)).collect();
+        OwnStatics { crates, shared, theirs, unknown, unbuilt }
     }
 
     fn owns(&self, db: &dyn HirDatabase, id: StaticId) -> bool {
         let module = id.module(db);
+        if self.unbuilt.contains(&module.krate(db)) {
+            return true;
+        }
         self.crates.contains(&module.krate(db))
             && !self.theirs.contains(&id)
             && (module.is_block_module(db) || !self.unknown.contains(&module.krate(db)))
@@ -1648,7 +1658,7 @@ fn rows_of(db: &dyn HirDatabase, compiled: &CompiledFunction) -> Vec<Row> {
 #[salsa::tracked(returns(ref))]
 fn compiled_root<'db>(db: &'db dyn HirDatabase, func: FunctionId) -> Result<CompiledFunction> {
     let _span = tracing::info_span!(target: "ra_jit", "compiled_root").entered();
-    tier::plain(|| root_code(db, func, false)).map(Produced::code)
+    tier::for_build(|| root_code(db, func, false)).map(Produced::code)
 }
 
 /// The code of a non-generic function: Cranelift's, or, for a compile at a level above 1
@@ -1670,6 +1680,23 @@ fn root_code(db: &dyn HirDatabase, func: FunctionId, tier: bool) -> Result<Produ
         fx.args = Some(args);
         fx.codegen()
     })
+}
+
+/// The crates of a program of `crates`: what they depend on, but not through a proc macro,
+/// which is a library of the compiler's.
+fn linked_crates(
+    db: &dyn HirDatabase,
+    crates: impl IntoIterator<Item = Crate>,
+) -> FxHashSet<Crate> {
+    let mut linked = FxHashSet::default();
+    let mut stack: Vec<Crate> = crates.into_iter().collect();
+    while let Some(krate) = stack.pop() {
+        if linked.insert(krate) {
+            let deps = krate.data(db).dependencies.iter().map(|it| it.crate_id);
+            stack.extend(deps.filter(|it| !it.data(db).target_kind.is_proc_macro()));
+        }
+    }
+    linked
 }
 
 /// Whether the crate is built with `-C overflow-checks`, when cargo builds it. The standard
@@ -1719,7 +1746,7 @@ fn compiled_instance<'db>(
     env: StoredParamEnvAndCrate,
 ) -> Result<CompiledFunction> {
     let _span = tracing::info_span!(target: "ra_jit", "compiled_instance").entered();
-    tier::plain(|| instance_code(db, instance, env, false)).map(Produced::code)
+    tier::for_build(|| instance_code(db, instance, env, false)).map(Produced::code)
 }
 
 /// The code of an instance: Cranelift's, or, for a compile at a level above 1 (`tier`), its
@@ -6157,6 +6184,16 @@ fn returned_local(body: &MirBody<'_>) -> LocalId {
 /// Field accesses can be unaligned (packed structs, chunked copies).
 const MEM: MemFlagsData = MemFlagsData::new().with_notrap();
 
+/// The vector of 16 bytes a SIMD operation on `count` integer lanes of `lane` is done in, and
+/// how many of them there are: one Cranelift and LLVM both have for every target.
+fn simd_chunks(lane: Type, count: u64) -> Option<(Type, i32)> {
+    let bytes = u64::from(lane.bytes()) * count;
+    if !lane.is_int() || lane.bits() > 64 || bytes == 0 || bytes % 16 != 0 {
+        return None;
+    }
+    Some((lane.by(16 / lane.bytes())?, i32::try_from(bytes / 16).ok()?))
+}
+
 impl<'cx, 'db> FunctionCx<'cx, 'db> {
     /// Whether pointers to `ty` carry metadata: slices, `str`, trait objects and structs
     /// ending in one.
@@ -10077,6 +10114,18 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
             self.call_direct(runtime, runtime_args, &values, dst, dst_ty.ty)?;
             return self.finish_call(destination, target);
         }
+        // Each is `ub_checks() && ..`, and `ub_checks()` is false here: the check that asks is
+        // then a branch on a constant, which `tier::fold_known_branches` takes out.
+        if func.krate(db).data(db).origin.is_lang()
+            && matches!(
+                FunctionSignature::of(db, func).name.as_str(),
+                "check_language_ub" | "check_library_ub"
+            )
+        {
+            let value = self.builder.ins().iconst(types::I8, 0);
+            self.builder.ins().store(MEM, value, dst, 0);
+            return self.finish_call(destination, target);
+        }
         if FunctionSignature::is_intrinsic(db, func) {
             match self.intrinsic(func, generic_args, args, dst, dst_ty.ty)? {
                 Intrinsic::Inline => return self.finish_call(destination, target),
@@ -12021,6 +12070,47 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
                 if name == "simd_div" {
                     unsupported!("`simd_div` of integers");
                 }
+                // What x86's baseline, SSE2, has an instruction for.
+                let chunks = simd_chunks(lane.ty, count).filter(|_| {
+                    out.ty == lane.ty
+                        && match (name, signed) {
+                            ("simd_and" | "simd_or" | "simd_xor" | "simd_add" | "simd_sub", _) => {
+                                true
+                            }
+                            ("simd_eq" | "simd_ne", _) | ("simd_lt" | "simd_gt", true) => {
+                                lane.ty.bits() <= 32
+                            }
+                            ("simd_saturating_add" | "simd_saturating_sub", _) => {
+                                lane.ty.bits() <= 16
+                            }
+                            _ => false,
+                        }
+                });
+                if let Some((vector, chunks)) = chunks {
+                    for chunk in 0..chunks {
+                        let offset = chunk * 16;
+                        let a = self.builder.ins().load(vector, MEM, l, offset);
+                        let b = self.builder.ins().load(vector, MEM, r, offset);
+                        let ins = self.builder.ins();
+                        let value = match (name, signed) {
+                            ("simd_eq", _) => ins.icmp(IntCC::Equal, a, b),
+                            ("simd_ne", _) => ins.icmp(IntCC::NotEqual, a, b),
+                            ("simd_lt", _) => ins.icmp(IntCC::SignedLessThan, a, b),
+                            ("simd_gt", _) => ins.icmp(IntCC::SignedGreaterThan, a, b),
+                            ("simd_and", _) => ins.band(a, b),
+                            ("simd_or", _) => ins.bor(a, b),
+                            ("simd_xor", _) => ins.bxor(a, b),
+                            ("simd_add", _) => ins.iadd(a, b),
+                            ("simd_sub", _) => ins.isub(a, b),
+                            ("simd_saturating_add", true) => ins.sadd_sat(a, b),
+                            ("simd_saturating_add", false) => ins.uadd_sat(a, b),
+                            ("simd_saturating_sub", true) => ins.ssub_sat(a, b),
+                            _ => ins.usub_sat(a, b),
+                        };
+                        self.builder.ins().store(MEM, value, dst, offset);
+                    }
+                    return Ok(Intrinsic::Inline);
+                }
                 for i in 0..count {
                     let offset = (i * lane.ty.bytes() as u64) as i32;
                     let a = self.builder.ins().load(lane.ty, MEM, l, offset);
@@ -12173,7 +12263,18 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
                 }
                 // Bit `i` of the result is the top bit of lane `i`.
                 let mut bits = self.builder.ins().iconst(types::I64, 0);
-                for i in 0..count {
+                let chunks = simd_chunks(lane.ty, count).filter(|_| lane.ty.bits() != 16);
+                for chunk in 0..chunks.map_or(0, |it| it.1) {
+                    let vector = chunks.expect("chunks").0;
+                    let value = self.builder.ins().load(vector, MEM, src, chunk * 16);
+                    let top = self.builder.ins().vhigh_bits(types::I64, value);
+                    let top = self
+                        .builder
+                        .ins()
+                        .ishl_imm(top, i64::from(chunk) * i64::from(vector.lane_count()));
+                    bits = self.builder.ins().bor(bits, top);
+                }
+                for i in (0..count).filter(|_| chunks.is_none()) {
                     let offset = (i * lane.ty.bytes() as u64) as i32;
                     let value = self.builder.ins().load(lane.ty, MEM, src, offset);
                     let top = self.builder.ins().ushr_imm(value, lane.ty.bits() as i64 - 1);

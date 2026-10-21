@@ -184,6 +184,7 @@ build a command line is, so changing one starts from a cargo build again.
 | `RA_JIT_BACKEND` | `cranelift` or `llvm`. `llvm` needs a ra-jit built with `--features llvm` | `cranelift` |
 | `RA_JIT_OPT` | LLVM optimisation level, 0 to 3. Functions are still compiled one at a time | 2 |
 | `RA_JIT_EMIT` | LLVM instruction selection: `optimized` or `fast` | `optimized`; `fast` at level 0 |
+| `RA_JIT_INLINE` | `all`: with LLVM at level 2 or 3, a program built whole (`runbench.py`'s builds) has the functions it calls in any crate built into it or shown to LLVM, as a release build does; the standard library's only when they are generic or `#[inline]`, as rustc does across crates. `0` builds nothing in | functions of the same crate |
 | `RA_JIT_SPLICE` | `0` links in full after every edit instead of splicing | splice |
 
 These are read by the daemon when it starts, from the environment of whichever command
