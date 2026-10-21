@@ -115,8 +115,9 @@ All notable changes to ra-jit are written here. The format follows
   (bevy 0.20, generic systems) and `harness/live-egui` (egui 0.37, generic widgets) are real
   programs that take edits. Measured on a MacBook Pro in
   [docs/live.md](docs/live.md#latency-under-typing).
-- A borrow checker, `crates/hir-ty-borrowck`, written to give rustc's verdict: Polonius alpha
-  by default as nightly rustc does, NLL with `RA_JIT_BORROWCK=nll`. It gives rustc's errors on
+- A borrow checker, the crate `hir-ty-borrowck` in the rust-analyzer subtree, written to give
+  rustc's verdict: Polonius alpha by default as nightly rustc does, NLL with
+  `RA_JIT_BORROWCK=nll`. It gives rustc's errors on
   1055 of 1578 of rustc's own borrow-check tests that it can run, and none on any of the 245
   rustc accepts, scored by `harness/borrowck_ui.py`, and finds nothing in ripgrep, fd, bat,
   hyperfine, just, axum and nushell. Its errors are rust-analyzer diagnostics and
