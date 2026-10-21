@@ -45,6 +45,8 @@ pub(crate) struct SymbolTable {
     /// The crates that made a copy of an instance of a function, by the function's name
     /// alone: what there is to go by for an instance whose types cannot be spelled.
     makers: FxHashMap<String, FxHashSet<u64>>,
+    /// Each file a crate starts at as [`SymbolTable::real`] names it.
+    real: Mutex<FxHashMap<PathBuf, PathBuf>>,
 }
 
 struct NestedSymbol {
@@ -395,7 +397,7 @@ impl SymbolTable {
                 table.add_name(name, &mut symbols);
             }
             if let Some((name, sources)) = crate_sources(file, root) {
-                owners.push((name, sources[0].clone(), first..symbols.len()));
+                owners.push((name, table.real(&sources[0]), first..symbols.len()));
                 let sources = sources.into_iter().map(Source::new).collect();
                 table.built_from.push((file.clone(), sources));
             }
@@ -532,7 +534,7 @@ impl SymbolTable {
     /// another crate has the name too.
     pub(crate) fn crate_path(&self, name: &str, root: &Path) -> Option<String> {
         match self.crates.get(name) {
-            Some(None) => Some(format!("{name}[{:x}]", self.by_root.get(root)?)),
+            Some(None) => Some(format!("{name}[{:x}]", self.by_root.get(&self.real(root))?)),
             _ => Some(name.to_owned()),
         }
     }
@@ -569,7 +571,17 @@ impl SymbolTable {
     /// Whether the crate named `name` whose source starts at `root` is one of the link. A
     /// bench may be named as the library, start where a test does, and be another program.
     pub(crate) fn links(&self, name: &str, root: &Path) -> bool {
-        self.linked.contains(&(name.to_owned(), root.to_owned()))
+        self.linked.contains(&(name.to_owned(), self.real(root)))
+    }
+
+    /// The file at `path` as the filesystem names it, through no link. Cargo names a file of a
+    /// crate outside the workspace by the path it was given (`--manifest-path /tmp/..`), the
+    /// daemon its checkout by where it is (`/private/tmp/..` on macOS), and either names the
+    /// one crate.
+    fn real(&self, path: &Path) -> PathBuf {
+        let mut known = lock(&self.real);
+        let real = || std::fs::canonicalize(path).unwrap_or_else(|_| path.to_owned());
+        known.entry(path.to_owned()).or_insert_with(real).clone()
     }
 
     /// A source that was written after rustc built the crate it is of: what rustc built is
@@ -619,7 +631,7 @@ impl SymbolTable {
     pub(crate) fn stable_crate_id(&self, name: &str, root: &Path) -> Option<u64> {
         match *self.crates.get(name)? {
             Some(id) => Some(id),
-            None => self.by_root.get(root).copied(),
+            None => self.by_root.get(&self.real(root)).copied(),
         }
     }
 
