@@ -908,12 +908,34 @@ impl<'db> Builder<'_, '_, 'db> {
             self.well_formed(ty, at, 0);
             if let Pat::Wild = self.ctx.store[pat]
                 && let Some(initializer) = initializer
-                && let Some(local) = self.path_local(initializer)
             {
-                let value = self.regions.local_tys[local.into_raw().into_u32() as usize];
-                self.relate(value, ty, Variance::Covariant, at);
+                let value = match self.path_local(initializer) {
+                    Some(local) => {
+                        Some(self.regions.local_tys[local.into_raw().into_u32() as usize])
+                    }
+                    None => self
+                        .ascribed_place(pat)
+                        .map(|(local, projection)| self.place_ty(local, &projection).ty),
+                };
+                if let Some(value) = value {
+                    self.relate(value, ty, Variance::Covariant, at);
+                }
             }
         }
+    }
+
+    /// The place the `let` of the pattern `pat` reads its value from: the fake read lowered at
+    /// the pattern.
+    fn ascribed_place(&self, pat: hir_def::hir::PatId) -> Option<(LocalId, Vec<PlaceElem>)> {
+        self.body.basic_blocks.iter().find_map(|(_, block)| {
+            block.statements.iter().find_map(|statement| match &statement.kind {
+                StatementKind::FakeRead(place) if statement.span == MirSpan::PatId(pat) => {
+                    let place = place.as_ref();
+                    Some((place.local, place.projection.as_slice().to_vec()))
+                }
+                _ => None,
+            })
+        })
     }
 
     /// The local of the variable `expr` names, if it is a path to one of this body's.
