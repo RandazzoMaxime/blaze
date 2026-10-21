@@ -38,9 +38,7 @@ pub(super) fn inputs(target: &str, seeds: Vec<Vec<u8>>) -> impl Iterator<Item = 
 /// The files of `corpus/TARGET`, each the hexadecimal of an input. Space in them is for
 /// the reader.
 fn corpus(target: &str) -> Vec<Vec<u8>> {
-    let dir = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../../../crates/hir-ty-codegen/corpus")
-        .join(target);
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("corpus").join(target);
     let mut files: Vec<_> = std::fs::read_dir(&dir)
         .unwrap_or_else(|e| panic!("{}: {e}", dir.display()))
         .map(|it| it.unwrap().path())

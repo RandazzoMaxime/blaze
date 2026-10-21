@@ -38,7 +38,7 @@ use inkwell::{
 use rustc_hash::{FxHashMap, FxHashSet};
 
 use super::{OWN, Unhandled};
-use crate::mir::codegen::{
+use crate::{
     ObjectFormat,
     fragment::Pointee,
     unwind::{self, seh::ARRIVAL},
@@ -119,7 +119,7 @@ pub(super) struct Lowering<'ctx, 'f> {
     /// What the line table LLVM writes is told through, where one is read back.
     marks: Option<Marks<'ctx>>,
     /// How often each branch went each way while code of the function ran.
-    weights: Option<&'f crate::mir::codegen::tier::Weights>,
+    weights: Option<&'f crate::tier::Weights>,
     /// The values that are addresses, which are pointers in LLVM: see [`addresses`].
     addresses: FxHashSet<Value>,
     /// The parameters of each callee, by its name, that are pointers: see
@@ -198,7 +198,7 @@ pub(super) struct Defined<'f> {
     pub(super) pointees: &'f [(u32, Pointee)],
     /// The slots of locals with a name, whose places are told.
     pub(super) named: &'f [ir::StackSlot],
-    pub(super) weights: Option<&'f crate::mir::codegen::tier::Weights>,
+    pub(super) weights: Option<&'f crate::tier::Weights>,
     /// Its line table and variables are told: it is the function being compiled.
     pub(super) marked: bool,
 }
@@ -525,7 +525,7 @@ impl<'ctx, 'f> Lowering<'ctx, 'f> {
         Self::mark_signature(context, &func.signature, Side::Callee, |loc, attribute| {
             function.add_attribute(loc, attribute)
         });
-        let target = crate::mir::codegen::Target::selected().map_err(Unhandled::Llvm)?;
+        let target = crate::Target::selected().map_err(Unhandled::Llvm)?;
         let probe = target.stack_probe().map(|probe| ("probe-stack", probe));
         for (name, value) in [("target-cpu", target.cpu())].into_iter().chain(probe) {
             let attribute = context.create_string_attribute(name, value);
@@ -557,7 +557,7 @@ impl<'ctx, 'f> Lowering<'ctx, 'f> {
             pointers.iter().filter_map(|&at| params.get(at as usize).copied()).collect()
         });
         let pointerish = pointerish(func, &flow, &addresses, &pointer_values);
-        let target = crate::mir::codegen::Target::selected().map_err(Unhandled::Llvm)?;
+        let target = crate::Target::selected().map_err(Unhandled::Llvm)?;
         let mut lowering = Lowering {
             context,
             module,
@@ -796,9 +796,8 @@ impl<'ctx, 'f> Lowering<'ctx, 'f> {
         // pass it in memory instead; what is left is a signature with a parameter put in
         // front of them, as a vtable's receiver.
         if sig.call_conv == CallConv::SystemV
-            && crate::mir::codegen::Target::current().arch
-                == crate::mir::codegen::target::Arch::X86_64
-            && crate::mir::codegen::lone_register_i128(&sig.params).is_some()
+            && crate::Target::current().arch == crate::target::Arch::X86_64
+            && crate::lone_register_i128(&sig.params).is_some()
         {
             return Err(Unhandled::Shape("a 128-bit integer that finds one register left"));
         }
@@ -826,8 +825,7 @@ impl<'ctx, 'f> Lowering<'ctx, 'f> {
             }
             // AArch64 has eight registers of each kind for what comes back, and LLVM gives
             // the fields of a struct the next of its kind in order, as Cranelift does values.
-            many if crate::mir::codegen::Target::current().arch
-                == crate::mir::codegen::target::Arch::Aarch64
+            many if crate::Target::current().arch == crate::target::Arch::Aarch64
                 && many.len() <= 8 =>
             {
                 let fields = many
@@ -1378,11 +1376,9 @@ impl<'ctx, 'f> Lowering<'ctx, 'f> {
                 Opcode::Nop => {}
                 // Where the exception arrives in a register, the frame pointer is read for
                 // what the caller left above the frame, so it is the one of LLVM's frame.
-                Opcode::GetFramePointer
-                    if crate::mir::codegen::Target::current().exception_in_register() =>
-                {
-                    use crate::mir::codegen::target::{Arch, ObjectFormat};
-                    let target = crate::mir::codegen::Target::current();
+                Opcode::GetFramePointer if crate::Target::current().exception_in_register() => {
+                    use crate::target::{Arch, ObjectFormat};
+                    let target = crate::Target::current();
                     let pointer = self.context.ptr_type(AddressSpace::default());
                     let frame = if (target.arch, target.object_format)
                         == (Arch::Aarch64, ObjectFormat::Elf)
@@ -1408,8 +1404,7 @@ impl<'ctx, 'f> Lowering<'ctx, 'f> {
                 // that takes `...`, to find the arguments on the stack: Cranelift's frame
                 // is what says where they are from it.
                 Opcode::GetFramePointer => {
-                    let target =
-                        crate::mir::codegen::Target::selected().map_err(Unhandled::Llvm)?;
+                    let target = crate::Target::selected().map_err(Unhandled::Llvm)?;
                     if target.exception_in_register() {
                         return Err(Unhandled::Shape("the frame pointer"));
                     }

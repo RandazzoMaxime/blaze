@@ -22,7 +22,7 @@ use hir_def::{
 use rustc_hash::FxHashMap;
 use rustc_type_ir::inherent::IntoKind;
 
-use crate::{
+use hir_ty::{
     ParamEnvAndCrate,
     db::HirDatabase,
     mir::MirSpan,

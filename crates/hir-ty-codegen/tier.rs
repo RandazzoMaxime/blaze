@@ -30,7 +30,7 @@ use cranelift_codegen::ir::{self, InstBuilder, Opcode, types};
 use hir_def::{FunctionId, HasModule, attrs::AttrFlags};
 use rustc_hash::{FxHashMap, FxHashSet};
 
-use crate::{db::HirDatabase, next_solver::StoredGenericArgs, traits::StoredParamEnvAndCrate};
+use hir_ty::{db::HirDatabase, next_solver::StoredGenericArgs, traits::StoredParamEnvAndCrate};
 
 use super::{
     CodegenError, Instance, InstanceDef, Result,

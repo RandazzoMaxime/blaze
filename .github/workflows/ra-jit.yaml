@@ -72,7 +72,7 @@ jobs:
         with:
           components: rustfmt
       # The code that is ra-jit's own: vendor/ is the forks' code, formatted by their rules.
-      - run: cargo fmt -p ra-jit -p ra-jit-live -- --check
+      - run: cargo fmt -p ra-jit -p ra-jit-live -p hir-ty-codegen -- --check
 
   linux-x64:
     name: linux x64

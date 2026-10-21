@@ -14,7 +14,7 @@ def short(name):
     return name.replace("<", "").replace(">", "")
 OWN = [("symbol table", "SymbolTable"), ("vfs / file loading", "vfs::"), ("vfs / file loading", "load_cargo"),
        ("project model", "project_model"), ("object emission", "cranelift_object"), ("object emission", "object::write"),
-       ("codegen driver (outside queries)", "hir_ty::mir::codegen"), ("ra-jit main (other)", "ra_jit::")]
+       ("codegen driver (outside queries)", "hir_ty_codegen::"), ("ra-jit main (other)", "ra_jit::")]
 def bucket(stack):
     frames = stack.split(";")
     for frame in reversed(frames):

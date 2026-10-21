@@ -11,11 +11,11 @@ use hir_def::{CallableDefId, DefWithBodyId, FunctionId, HasModule, Lookup};
 use rustc_hash::{FxHashMap, FxHashSet};
 use rustc_type_ir::{
     TypeSuperVisitable, TypeVisitable, TypeVisitor,
-    inherent::{BoundExistentialPredicates as _, IntoKind},
+    inherent::{BoundExistentialPredicates as _, IntoKind, ParamEnv as _, SliceLike as _},
 };
 use salsa::plumbing::FromId as _;
 
-use crate::{
+use hir_ty::{
     InferBodyId,
     db::{HirDatabase, InternedClosureId, InternedCoroutineId},
     method_resolution::loaded_crates,
@@ -184,7 +184,9 @@ impl Homes {
         instance: &Instance,
         asked: &StoredParamEnvAndCrate,
     ) -> StoredParamEnvAndCrate {
-        if std::env::var_os("RA_JIT_NO_HOME").is_some() || !asked.param_env(db).clauses.is_empty() {
+        if std::env::var_os("RA_JIT_NO_HOME").is_some()
+            || !asked.param_env(db).caller_bounds().is_empty()
+        {
             return asked.clone();
         }
         let mentions = Mentions::of(db, instance);
