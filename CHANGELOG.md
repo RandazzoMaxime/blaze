@@ -147,14 +147,23 @@ All notable changes to ra-jit are written here. The format follows
   `cargo ra-jit` ran again for the same build, with nothing it reads written since, is not
   run a second time. On Linux x86-64 an edit of ripgrep's `search` goes from 72 to 48 ms,
   fd's `run` from 78 to 42 ms and hyperfine's `run` from 80 to 35 ms.
-- Release binaries are built with thin LTO (the new `dist` profile) and optimized with a
-  profile of ra-jit's own work (PGO), trained on edits of fd, bat, just and hyperfine, by
-  `.github/scripts/build_release.py`, which the release workflow now runs for every target.
-  Against the plain `release` build, on Linux: the cold start 14% shorter on nushell and on
-  ripgrep, an edit of a function 8% shorter on nushell, the same peak memory. mimalloc v3
-  stays the allocator: jemalloc, mimalloc v2 and snmalloc start colder and edit no faster
-  (an edit spends 1.8% of its time allocating, 73% revalidating salsa's memos). `release`
-  itself is unchanged, so rebuilding ra-jit after a change takes as long as before
+- ra-jit is built one way, whether downloaded or built by nix: the new `dist` profile (thin
+  LTO), optimized with a profile of ra-jit's own work (PGO) trained on edits of fd, bat, just
+  and hyperfine. `.github/scripts/build_release.py` is the recipe; the release workflow runs it
+  for every target and the flake's `daemon` (so `nix run`, `nix profile install` and the demo)
+  runs it inside its derivation. The profiles are trained by the new `pgo` workflow, which
+  runs again whenever Cargo.lock, a manifest or the toolchain changes, and pinned by sha256 in
+  `pgo/profiles.json`, so every build uses the same file; the build says how much of the code
+  changed since its profile was trained, and a release refuses a profile of other crates.
+  `cargo install --locked --profile dist ra-jit` builds the same profile without PGO, which
+  starts about 10% and edits about 3% slower than a release's binaries: cargo takes no compiler
+  flags from a crate, and crates.io's crates are not the ones a profile can be trained on.
+  Against the plain `release` build, on Linux: the
+  cold start 14% shorter on nushell and on ripgrep, an edit of a function 8% shorter on
+  nushell, the same peak memory. mimalloc v3 stays the allocator: jemalloc, mimalloc v2 and
+  snmalloc start colder and edit no faster (an edit spends 1.8% of its time allocating, 73%
+  revalidating salsa's memos). `release` itself is unchanged and stays the build to work with,
+  so rebuilding ra-jit after a change takes as long as before
   ([docs/reports/RELEASE-BUILD.md](docs/reports/RELEASE-BUILD.md)).
 - Under `RA_JIT_BACKEND=llvm`, a body of more than 10 000 Cranelift instructions is compiled
   by Cranelift. Since LLVM lowers a handler that takes more than the exception (tiers), it
@@ -231,6 +240,10 @@ All notable changes to ra-jit are written here. The format follows
   build, and "nothing changed" took cargo 300 to 390 ms instead of 30 to 60. The README run of
   2026-10-20 at `c8f58ac7d9` had it; cargo's target directories are now outside the checkout
   (`WORK/reference` by default).
+- `nix profile install github:indexable-inc/ra-jit#ra-jit`, as the README says to run it,
+  installs ra-jit and the programs it runs; the flake had no package of that name.
+- A release's archive and the flake's build have `ra-jit-rustc-first`, which `cargo ra-jit`
+  runs in the first build of a workspace; they had only ra-jit, cargo-ra-jit and ra-jit-rustc.
 - A worker that loaded its workspace beside cargo's first build
   ([#11](https://github.com/indexable-inc/ra-jit/issues/11)) ends when its daemon does, as
   every other worker does: once told what cargo built, it waited for a lock on its standard
