@@ -311,6 +311,12 @@ struct Inlining {
         (InstanceDef, StoredGenericArgs, bool),
         Option<std::rc::Rc<super::fragment::Inlinable>>,
     >,
+    /// The size of a body that was built and then found too large, which a build of it with
+    /// more room only adds to: it is not built again for a call that allows no more. A body
+    /// built while its callees found no room is not kept in [`Inlining::built`], and what it
+    /// counted is given back ([`untally`]), so each call would build it again, and each of
+    /// its callees, at every depth.
+    oversized: FxHashMap<(InstanceDef, StoredGenericArgs, bool), usize>,
 }
 
 thread_local! {
@@ -342,6 +348,7 @@ pub(super) fn for_build<T>(work: impl FnOnce() -> T) -> T {
         spent: 0,
         seen: 0,
         built: FxHashMap::default(),
+        oversized: FxHashMap::default(),
     });
     let held = INLINING.with(|it| std::mem::replace(&mut *it.borrow_mut(), fresh));
     let out = work();
@@ -435,6 +442,10 @@ pub(super) fn hot_body(
     limit: usize,
     tracked: bool,
 ) -> Option<std::rc::Rc<super::fragment::Inlinable>> {
+    if let Some(known) = oversized(instance, tracked, limit) {
+        refused(db, instance, &format!("too large ({known} instructions)"));
+        return None;
+    }
     let before = tally();
     let Some(body) = body(db, instance, env, tracked) else {
         untally(before);
@@ -442,11 +453,28 @@ pub(super) fn hot_body(
     };
     if size(&body.func) > limit {
         untally(before);
+        oversize(instance, tracked, size(&body.func));
         refused(db, instance, &format!("too large ({} instructions)", size(&body.func)));
         return None;
     }
     spend(instance, env, &body);
     Some(body)
+}
+
+/// How large a build of `instance` was found, if that is more than `limit`.
+fn oversized(instance: &Instance, tracked: bool, limit: usize) -> Option<usize> {
+    let key = (instance.def, instance.args.clone(), tracked);
+    INLINING.with(|it| it.borrow().as_ref()?.oversized.get(&key).copied().filter(|&it| it > limit))
+}
+
+fn oversize(instance: &Instance, tracked: bool, size: usize) {
+    let key = (instance.def, instance.args.clone(), tracked);
+    INLINING.with(|it| {
+        if let Some(it) = it.borrow_mut().as_mut() {
+            let known = it.oversized.entry(key).or_default();
+            *known = (*known).max(size);
+        }
+    });
 }
 
 /// What the compile under way has built in and shown so far.
@@ -525,6 +553,10 @@ pub(super) fn seen_body(
     if hint == super::fragment::Hint::Never && !hot {
         return None;
     }
+    if let Some(known) = oversized(instance, tracked, limit) {
+        refused(db, instance, &format!("not shown: {known} instructions"));
+        return None;
+    }
     let before = tally();
     let Some(body) = body(db, instance, env, tracked) else {
         untally(before);
@@ -532,6 +564,7 @@ pub(super) fn seen_body(
     };
     if size(&body.func) > limit {
         untally(before);
+        oversize(instance, tracked, size(&body.func));
         refused(db, instance, &format!("not shown: {} instructions", size(&body.func)));
         return None;
     }
@@ -788,6 +821,7 @@ pub fn prepare(db: &dyn HirDatabase, asked: &Asked) -> std::result::Result<Prepa
         spent: 0,
         seen: 0,
         built: FxHashMap::default(),
+        oversized: FxHashMap::default(),
     };
     for node in &asked.hot {
         match &node.0 {
