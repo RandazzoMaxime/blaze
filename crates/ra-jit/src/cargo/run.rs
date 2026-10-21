@@ -61,9 +61,20 @@ fn configured(command: &mut Command, state: &State) {
 /// writes them again, and one started then is not there.
 fn ended(command: &mut Command, held: Option<Held>, state: &State) -> std::io::Result<ExitStatus> {
     let held = held.unwrap_or_else(|| state.hold());
-    let started = command.spawn();
+    let started = started(command);
     drop(held);
     started?.wait()
+}
+
+/// Starts `command` once the daemon is not writing its program. The daemon writes a program
+/// it linked in place, on Linux also after it answered, under an exclusive lock on the file
+/// (`splice::Writing`): one started while the file is open for writing is refused ("text
+/// file busy").
+pub(crate) fn started(command: &mut Command) -> std::io::Result<std::process::Child> {
+    #[cfg(unix)]
+    let _unwritten =
+        std::fs::File::open(command.get_program()).and_then(|it| it.lock_shared().map(|()| it));
+    command.spawn()
 }
 
 /// Runs the test executables one after another, each in the directory of its package, and

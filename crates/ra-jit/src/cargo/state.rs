@@ -831,7 +831,7 @@ impl Program {
 fn build_locks<'a>(executables: impl Iterator<Item = &'a Path>) -> Vec<std::fs::File> {
     // `debug/app`, `debug/examples/app` and `debug/deps/app-…` are all of `debug`.
     let lock_of = |executable: &Path| {
-        let mut above = executable.ancestors().skip(1).take(2);
+        let above = executable.ancestors().skip(1).take(2);
         above.map(|dir| dir.join(".cargo-lock")).find(|it| it.is_file())
     };
     let mut locks: Vec<PathBuf> = executables.filter_map(lock_of).collect();

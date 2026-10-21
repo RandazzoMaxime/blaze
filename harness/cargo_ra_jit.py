@@ -617,6 +617,8 @@ def flags(work):
             (_, mine), (_, other) = ours.cargo(command, *args, env=extra), theirs.cargo(command, *args, env=extra)
             read = test_results if command == "test" else program_output
             differs = difference(read(mine), read(other))
+            if differs and mine.returncode != other.returncode:
+                differs += f"; {mine.stderr.strip()[-600:]!r}"
             shown = " ".join([*(f"{k}={v}" for k, v in extra.items()), "cargo ra-jit", command, *args])
             rows.append((label, shown, how_built(mine.stderr), mine.returncode, differs or "same"))
             if differs and (label, shown) in FLAGS_OPEN:
@@ -821,6 +823,19 @@ def greets(out, greeting):
     return out.splitlines()[:1] == [greeting]
 
 
+def finished(client, timeout):
+    """What `client` said and its exit code, or, if it has not ended in `timeout` seconds,
+    what it and the processes under it were doing, as said by `ps`, and exit code `None`."""
+    try:
+        return client.communicate(timeout=timeout), client.returncode
+    except subprocess.TimeoutExpired:
+        listed = subprocess.run(["ps", "-axo", "pgid=,pid=,ppid=,stat=,etime=,command="], capture_output=True, text=True).stdout
+        doing = "\n".join(line for line in listed.splitlines() if line.split()[:1] == [str(client.pid)])
+        kill_all(client)
+        out, err = client.communicate()
+        return (out, f"{err}\n[still running after {timeout}s]\n{doing}"), None
+
+
 def abuse(work, ws, tree, env, check, status, alive):
     """The daemon under what it is not asked for politely: many clients at once, a client
     and a daemon killed while a build is asked for, and a client that is another user."""
@@ -847,10 +862,10 @@ def abuse(work, ws, tree, env, check, status, alive):
         for n, root in enumerate(trees):
             rewrite(os.path.join(root, "util/src/lib.rs"), f'format!("{greeting(n, r - 1)} {{name}}")', f'format!("{greeting(n, r)} {{name}}")')
         clients = [(n, spawn(root, "run", f"c{i}")) for i in range(4) for n, root in enumerate(trees)]
-        ended = [(n, i // 4, client.communicate(timeout=300), client.returncode) for i, (n, client) in enumerate(clients)]
+        ended = [(n, i // 4, *finished(client, 300)) for i, (n, client) in enumerate(clients)]
         cargos = lambda err: re.search(r"^\s*Finished `\w+` profile \[(?!ra-jit)", err, re.M)
         served += sum(how_built(err) == "daemon" and not cargos(err) for _, _, (_, err), _ in ended)
-        wrong += [f"; round {r} tree{n} c{i}: exit {code}, {out[-80:]!r} {err[-200:]!r}" for n, i, (out, err), code in ended if code != 0 or not greets(out, f"{greeting(n, r)} c{i}")]
+        wrong += [f"; round {r} tree{n} c{i}: exit {code}, {out[-80:]!r} {err[-200 if code is not None else -2000:]!r}" for n, i, (out, err), code in ended if code != 0 or not greets(out, f"{greeting(n, r)} c{i}")]
     check(f"16 clients at once on 4 worktrees each run their own tree's program, {rounds} times over", not wrong and served == 16 * rounds and status()[0] == pid and status()[1] == workers, f"{16 * rounds - len(wrong)} of {16 * rounds} right, {served} by the daemon alone, {len(workers)} worker" + "".join(wrong))
 
     # A worker that is stopped holds the build a client asks for until it is continued.
@@ -1174,10 +1189,18 @@ def plain(work):
         rewrite(os.path.join(root, "util/src/lib.rs"), 'format!("hello {name}")', f'format!("tree{n} {{name}}")')
     here.how_built("")
     spawn = lambda root, *args: subprocess.Popen(["cargo", *args], cwd=root, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, stdin=subprocess.DEVNULL, start_new_session=True)
-    clients = [(n, i, spawn(root, "run", f"c{i}")) for i in range(4) for n, root in enumerate(trees) if n]
-    ended = [(n, i, client.communicate(timeout=600), client.returncode) for n, i, client in clients]
+    # Builds, and each tree's program started once they are done: cargo starts what `cargo run`
+    # built after letting go of its lock, and on macOS removes and copies the program again on
+    # every build, also of a fresh one, so one started by another `cargo run` of the tree
+    # meanwhile hangs before its first instruction or is not there, with no ra-jit in the build.
+    clients = [(n, i, spawn(root, "build")) for i in range(4) for n, root in enumerate(trees) if n]
+    built = [(n, i, *finished(client, 600)) for n, i, client in clients]
+    ran = lambda n, i: subprocess.run([os.path.join(trees[n], "target/debug/app" + EXE), f"c{i}"], capture_output=True, text=True, timeout=60)
+    ended = [(n, i, (out, err), code) if code != 0 else (n, i, ((it := ran(n, i)).stdout, it.stderr), it.returncode)
+             for n, i, (out, err), code in built]
     right = [code == 0 and greets(out[0], f"tree{n} c{i}") for n, i, out, code in ended]
-    check("12 plain cargo builds at once on 3 worktrees each run their own tree's program", all(right) and status()[0] == pid, f"{sum(right)} of 12 right; {here.how_built('')[:80]}")
+    said = "".join(f"; tree{n} c{i}: exit {code}, {out[-80:]!r} {err[-600 if code is not None else -2000:]!r}" for (n, i, (out, err), code), ok in zip(ended, right) if not ok)
+    check("12 plain cargo builds at once on 3 worktrees each run their own tree's program", all(right) and status()[0] == pid, f"{sum(right)} of 12 right; {here.how_built('')[:80]}{said}")
 
     for side in sides:
         wait_warm(side, side.ws)
