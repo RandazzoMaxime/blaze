@@ -12165,6 +12165,44 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
                 }
                 self.builder.ins().store(MEM, acc, dst, 0);
             }
+            ("simd_reduce_max" | "simd_reduce_min", [arg]) => {
+                let (src, ty) = self.operand(arg)?;
+                let (lane, count) = self.simd_lanes(ty)?;
+                if lane.ty.is_float() {
+                    unsupported!("`{name}` of floats");
+                }
+                let mut acc = self.builder.ins().load(lane.ty, MEM, src, 0);
+                for i in 1..count {
+                    let offset = (i * lane.ty.bytes() as u64) as i32;
+                    let value = self.builder.ins().load(lane.ty, MEM, src, offset);
+                    acc = match (name == "simd_reduce_max", lane.signed) {
+                        (true, true) => self.builder.ins().smax(acc, value),
+                        (true, false) => self.builder.ins().umax(acc, value),
+                        (false, true) => self.builder.ins().smin(acc, value),
+                        (false, false) => self.builder.ins().umin(acc, value),
+                    };
+                }
+                self.builder.ins().store(MEM, acc, dst, 0);
+            }
+            ("simd_ctpop", [arg]) => {
+                let (src, ty) = self.operand(arg)?;
+                let (lane, count) = self.simd_lanes(ty)?;
+                let values: Vec<Value> = (0..count)
+                    .map(|i| {
+                        let offset = (i * lane.ty.bytes() as u64) as i32;
+                        let value = self.builder.ins().load(lane.ty, MEM, src, offset);
+                        self.builder.ins().popcnt(value)
+                    })
+                    .collect();
+                for (i, value) in values.into_iter().enumerate() {
+                    self.builder.ins().store(
+                        MEM,
+                        value,
+                        dst,
+                        (i as u64 * lane.ty.bytes() as u64) as i32,
+                    );
+                }
+            }
             ("simd_reduce_all" | "simd_reduce_any", [arg]) => {
                 let (src, ty) = self.operand(arg)?;
                 let (lane, count) = self.simd_lanes(ty)?;
@@ -12504,10 +12542,66 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
                     self.builder.ins().store(MEM, value, dst, lane as i32 * width);
                 }
             }
-            ("tbl1", [table, indices]) if ty == types::I8 => {
+            ("sqdmulh", [a, b]) if ty.bits() <= 32 => {
+                let (a, _) = self.operand(a)?;
+                let (b, _) = self.operand(b)?;
+                let wide = ty.double_width().expect("a lane of at most 32 bits");
+                let bits = i64::from(ty.bits());
+                // The high half of twice the product, which is past the lane's range only for
+                // the least by itself: that is the most.
+                let values: Vec<Value> = (0..lanes)
+                    .map(|lane| {
+                        let l = self.builder.ins().load(ty, MEM, a, lane * width);
+                        let r = self.builder.ins().load(ty, MEM, b, lane * width);
+                        let l = self.builder.ins().sextend(wide, l);
+                        let r = self.builder.ins().sextend(wide, r);
+                        let product = self.builder.ins().imul(l, r);
+                        let high = self.builder.ins().sshr_imm(product, bits - 1);
+                        let most = self.builder.ins().iconst(wide, (1 << (bits - 1)) - 1);
+                        let high = self.builder.ins().smin(high, most);
+                        self.builder.ins().ireduce(ty, high)
+                    })
+                    .collect();
+                for (lane, value) in values.into_iter().enumerate() {
+                    self.builder.ins().store(MEM, value, dst, lane as i32 * width);
+                }
+            }
+            ("uaddlp" | "saddlp", [a]) if ty.bits() <= 32 => {
+                let (a, _) = self.operand(a)?;
+                let wide = ty.double_width().expect("a lane of at most 32 bits");
+                // Each lane twice as wide is the sum of a pair of `a`'s.
+                let values: Vec<Value> = (0..lanes / 2)
+                    .map(|pair| {
+                        let l = self.builder.ins().load(ty, MEM, a, pair * 2 * width);
+                        let r = self.builder.ins().load(ty, MEM, a, pair * 2 * width + width);
+                        let (l, r) = if op == "saddlp" {
+                            (
+                                self.builder.ins().sextend(wide, l),
+                                self.builder.ins().sextend(wide, r),
+                            )
+                        } else {
+                            (
+                                self.builder.ins().uextend(wide, l),
+                                self.builder.ins().uextend(wide, r),
+                            )
+                        };
+                        self.builder.ins().iadd(l, r)
+                    })
+                    .collect();
+                for (pair, value) in values.into_iter().enumerate() {
+                    self.builder.ins().store(MEM, value, dst, pair as i32 * 2 * width);
+                }
+            }
+            ("tbl1" | "tbx1", [.., table, indices]) if ty == types::I8 => {
+                let kept = match args {
+                    [kept, _, _] if op == "tbx1" => Some(self.operand(kept)?.0),
+                    [_, _] if op == "tbl1" => None,
+                    _ => return Ok(false),
+                };
                 let (table, _) = self.operand(table)?;
                 let (indices, _) = self.operand(indices)?;
-                // A lane is the table's byte its index names, or 0 past the table's 16.
+                // A lane is the table's byte its index names; past the table's 16, 0 or (for
+                // `tbx1`) the lane of `kept`.
                 let values: Vec<Value> = (0..lanes)
                     .map(|lane| {
                         let index = self.builder.ins().load(types::I8, MEM, indices, lane);
@@ -12515,10 +12609,13 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
                         let slot = self.builder.ins().uextend(ptr(), slot);
                         let addr = self.builder.ins().iadd(table, slot);
                         let found = self.builder.ins().load(types::I8, MEM, addr, 0);
-                        let zero = self.builder.ins().iconst(types::I8, 0);
+                        let outside = match kept {
+                            Some(kept) => self.builder.ins().load(types::I8, MEM, kept, lane),
+                            None => self.builder.ins().iconst(types::I8, 0),
+                        };
                         let past =
                             self.builder.ins().icmp_imm(IntCC::UnsignedGreaterThan, index, 15);
-                        self.builder.ins().select(past, zero, found)
+                        self.builder.ins().select(past, outside, found)
                     })
                     .collect();
                 for (lane, value) in values.into_iter().enumerate() {
@@ -12687,6 +12784,22 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
                 let callee = self.cg.assembly(asm::xgetbv(), &sig);
                 let callee = self.cg.declare_func_in_func(callee, self.builder.func);
                 let call = self.builder.ins().call(callee, &[register]);
+                let value = self.builder.inst_results(call)[0];
+                self.builder.ins().store(MEM, value, dst, 0);
+            }
+            (
+                "aarch64.crc32b" | "aarch64.crc32h" | "aarch64.crc32w" | "aarch64.crc32x"
+                | "aarch64.crc32cb" | "aarch64.crc32ch" | "aarch64.crc32cw" | "aarch64.crc32cx",
+                [crc, data],
+            ) => {
+                let (crc, _) = self.load_scalar(crc)?;
+                let (data, scalar) = self.load_scalar(data)?;
+                let mut sig = self.cg.make_signature();
+                sig.params.extend([AbiParam::new(types::I32), AbiParam::new(scalar.ty)]);
+                sig.returns.push(AbiParam::new(types::I32));
+                let callee = self.cg.assembly(asm::crc32(&name["aarch64.".len()..]), &sig);
+                let callee = self.cg.declare_func_in_func(callee, self.builder.func);
+                let call = self.builder.ins().call(callee, &[crc, data]);
                 let value = self.builder.inst_results(call)[0];
                 self.builder.ins().store(MEM, value, dst, 0);
             }

@@ -4691,6 +4691,31 @@ pub mod simd_aarch64 {
             )
         }
     }
+    /// CRC-32 of each width by both polynomials, and twice the products' high halves, the
+    /// least by itself among them.
+    pub fn checksums(v: uint8x16_t, w: uint8x16_t) -> ([u32; 8], [i16; 8], [i32; 4]) {
+        unsafe {
+            let x = vgetq_lane_u64::<0>(vreinterpretq_u64_u8(v));
+            let crc = vgetq_lane_u32::<1>(vreinterpretq_u32_u8(w));
+            let s = vsetq_lane_s16::<0>(i16::MIN, vreinterpretq_s16_u8(v));
+            let t = vsetq_lane_s16::<0>(i16::MIN, vreinterpretq_s16_u8(w));
+            let (a, b) = (vreinterpretq_s32_u8(v), vreinterpretq_s32_u8(w));
+            (
+                [
+                    __crc32b(crc, x as u8),
+                    __crc32h(crc, x as u16),
+                    __crc32w(crc, x as u32),
+                    __crc32d(crc, x),
+                    __crc32cb(crc, x as u8),
+                    __crc32ch(crc, x as u16),
+                    __crc32cw(crc, x as u32),
+                    __crc32cd(crc, x),
+                ],
+                core::mem::transmute(vqdmulhq_s16(s, t)),
+                core::mem::transmute(vqdmulhq_s32(a, b)),
+            )
+        }
+    }
     pub fn run() -> String {
         let first: Bytes = [16, 15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1];
         let second: Bytes = [6, 15, 4, 3, 2, 11, 1, 9, 248, 7, 6, 5, 14, 3, 0, 255];
@@ -4705,7 +4730,7 @@ pub mod simd_aarch64 {
             group(b"AbA\xffcdA\x80")
         );
         out += &format!(" {:?} {:?}", select(v, w), wide(v, w));
-        out += &format!(" {:?}", pairs(v, w));
+        out += &format!(" {:?} {:?}", pairs(v, w), checksums(v, w));
         if std::arch::is_aarch64_feature_detected!("neon") {
             out += " neon";
         }
