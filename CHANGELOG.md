@@ -213,6 +213,11 @@ All notable changes to ra-jit are written here. The format follows
   under them, are unchanged. helix is ready in 109 s at 18.4 GB of memory instead of 631 s at
   100.7 GB, its store is 1.6 GB instead of 14 GB, and its first `cargo ra-jit run` takes
   46.9 s instead of 640.8 s (`harness/deepnames.py`).
+- What stands in for a crate in cargo's build (the source with no code that cargo links when
+  ra-jit compiles the crate: `apps.py`'s and `runbench.py`'s whole-program builds, and the
+  crates the daemon builds while cargo builds the rest) builds with a nightly cargo that names
+  each dependency twice, its `.rlib` and its `.rmeta`. It had an `extern crate` for each
+  (`E0259`, bun 1.4.3 on `nightly-2026-09-15`).
 - A `macro_rules!` that a macro of another crate defines (`dep::define_log!(log)`, as bun's
   `bun_core::define_scoped_log!` at the top of a file) is in the textual scope of the modules
   after it, as in rustc. rust-analyzer expanded a call by a path only after the file's modules

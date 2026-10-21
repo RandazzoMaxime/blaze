@@ -202,11 +202,14 @@ pub(crate) fn text_of<S: AsRef<str>>(args: &[S], program: bool, source: &Path) -
         let forwarding = FORWARDING_ALLOCATOR.replace("{cfg}", cfg).replace("{n}", &n.to_string());
         text.push_str(&forwarding.replace("{weak}", &weak_traps(ALLOCATOR_FUNCTIONS)));
     }
+    // Cargo can name a crate more than once (nightly's names its `.rlib` and its `.rmeta`),
+    // and a second `extern crate` of a name is an error.
+    let mut named = std::collections::HashSet::new();
     for pair in args.windows(2).filter(|it| it[0].as_ref() == "--extern") {
         let Some((name, path)) = pair[1].as_ref().split_once('=') else { continue };
         let name = name.rsplit_once(':').map_or(name, |it| it.1);
         // A proc macro is not linked into the program.
-        if path.ends_with(".rlib") || path.ends_with(".rmeta") {
+        if (path.ends_with(".rlib") || path.ends_with(".rmeta")) && named.insert(name) {
             text.push_str(&format!("extern crate {name};\n"));
         }
     }
@@ -505,6 +508,27 @@ mod tests {
         let text = "é \"// '\" 'é' x";
         assert_eq!(blanked(text, false), text);
         assert_eq!(blanked(text, true), "é \"    \" '  ' x");
+    }
+
+    #[test]
+    fn a_crate_named_twice_is_one_extern_crate() {
+        let dir = scratch("named-twice");
+        let args = [
+            "--crate-type",
+            "bin",
+            "--extern",
+            "dep=/t/out/libdep-1.rlib",
+            "--extern",
+            "dep=/t/out/libdep-1.rmeta",
+            "--extern",
+            "noprelude:other=/t/out/libother-2.rlib",
+            "--extern",
+            "derive=/t/out/libderive-3.dylib",
+        ];
+        let text = text_of(&args, true, &dir.join("main.rs"));
+        assert_eq!(text.matches("extern crate dep;").count(), 1, "{text}");
+        assert_eq!(text.matches("extern crate other;").count(), 1, "{text}");
+        assert!(!text.contains("extern crate derive;"), "{text}");
     }
 
     #[test]
