@@ -108,6 +108,9 @@ pub(crate) fn is_program<S: AsRef<str>>(args: &[S]) -> Option<bool> {
     }
 }
 
+/// How a module of [`FORWARDING_ALLOCATOR`] starts.
+const FORWARDING_MODULE: &str = "mod __ra_jit_global_allocator_";
+
 /// A `#[global_allocator]` that calls the functions rust-analyzer's expansion of the crate's
 /// own defines, which ra-jit compiles: rustc's allocator shim calls the allocator of the stand-in.
 /// `{cfg}` is the `#[cfg]`s of the crate's, `{n}` tells one from another.
@@ -214,23 +217,28 @@ pub(crate) fn text_of<S: AsRef<str>>(args: &[S], program: bool, source: &Path) -
 }
 
 /// The `#[cfg]`s of each `#[global_allocator]` in the files of the crate whose root is `root`,
-/// found through its `mod name;` items. Read as text, not parsed: a `#[path]`, a module
-/// written by a macro, a `#[cfg]` of the module the static is in and `cfg_attr` aren't seen.
+/// found through its `mod name;` items, with those of the modules it is in. Read as text, not
+/// parsed: a `#[path]`, a module written by a macro, the `#[cfg]` of an inline module and
+/// `cfg_attr` aren't seen.
 fn global_allocators(root: &Path) -> Vec<String> {
     let mut found = Vec::new();
-    let mut files = vec![(root.to_path_buf(), true)];
+    let mut files = vec![(root.to_path_buf(), true, String::new())];
     let mut seen = std::collections::HashSet::new();
-    while let Some((file, owns_dir)) = files.pop() {
+    while let Some((file, owns_dir, outer)) = files.pop() {
         if !seen.insert(file.clone()) || seen.len() > 10_000 {
             continue;
         }
         let Ok(text) = std::fs::read_to_string(&file) else { continue };
-        let text = without_comments(&text);
-        let mut at = 0;
-        while let Some(found_at) = text[at..].find("#[global_allocator]") {
-            let start = at + found_at;
-            found.push(cfgs_around(&text, start, start + "#[global_allocator]".len()));
-            at = start + 1;
+        let kept = blanked(&text, false);
+        let code = blanked(&text, true);
+        // A stand-in, which a second wrapper is given in place of the source, has the `#[cfg]`s
+        // on the module the allocator is in.
+        let marker = match code.contains(FORWARDING_MODULE) {
+            true => FORWARDING_MODULE,
+            false => "#[global_allocator]",
+        };
+        for (start, _) in code.match_indices(marker) {
+            found.push(format!("{outer}{}", cfgs_around(&kept, start, start + marker.len())));
         }
         // A module of `a.rs` is in `a/`, one of `main.rs`, `lib.rs` or `mod.rs` beside it.
         let Some(parent) = file.parent() else { continue };
@@ -239,39 +247,106 @@ fn global_allocators(root: &Path) -> Vec<String> {
         } else {
             parent.join(file.file_stem().unwrap_or_default())
         };
-        for name in out_of_line_modules(&text) {
+        for (name, statement) in out_of_line_modules(&code) {
+            let outer = format!("{outer}{}", leading_cfgs(&kept[statement]));
             let flat = dir.join(format!("{name}.rs"));
             let nested = dir.join(&name).join("mod.rs");
             if flat.exists() {
-                files.push((flat, false));
+                files.push((flat, false, outer));
             } else if nested.exists() {
-                files.push((nested, true));
+                files.push((nested, true, outer));
             }
         }
     }
     found
 }
 
-/// The text with its line and block comments blanked out, at the same offsets. A string
-/// with `//` or `/*` in it is blanked from there as well, which no attribute minds.
-fn without_comments(text: &str) -> String {
-    let mut out = String::with_capacity(text.len());
-    let mut rest = text;
-    while !rest.is_empty() {
-        let line = rest.find("//");
-        let block = rest.find("/*");
-        let (at, end) = match (line, block) {
-            (Some(l), b) if b.is_none_or(|b| l < b) => {
-                (l, rest[l..].find('\n').map_or(rest.len(), |e| l + e))
+/// The text with its comments blanked out, at the same offsets, and with `strings` the
+/// insides of its string and character literals as well.
+fn blanked(text: &str, strings: bool) -> String {
+    let bytes = text.as_bytes();
+    let mut out = bytes.to_vec();
+    let mut blank = |range: std::ops::Range<usize>| {
+        for it in &mut out[range] {
+            if *it != b'\n' {
+                *it = b' ';
             }
-            (_, Some(b)) => (b, rest[b..].find("*/").map_or(rest.len(), |e| b + e + 2)),
-            _ => (rest.len(), rest.len()),
-        };
-        out.push_str(&rest[..at]);
-        out.extend(rest[at..end].chars().map(|it| if it == '\n' { '\n' } else { ' ' }));
-        rest = &rest[end..];
+        }
+    };
+    let ident = |at: usize| bytes[at].is_ascii_alphanumeric() || bytes[at] == b'_';
+    let find = |from: usize, what: &[u8]| {
+        let rest = bytes.get(from..).unwrap_or_default();
+        rest.windows(what.len()).position(|it| it == what).map_or(bytes.len(), |it| from + it)
+    };
+    let mut at = 0;
+    while at < bytes.len() {
+        let rest = &bytes[at..];
+        if rest.starts_with(b"//") {
+            let end = find(at, b"\n");
+            blank(at..end);
+            at = end;
+        } else if rest.starts_with(b"/*") {
+            let (mut depth, mut end) = (0usize, at);
+            while end < bytes.len() {
+                if bytes[end..].starts_with(b"/*") {
+                    (depth, end) = (depth + 1, end + 2);
+                } else if bytes[end..].starts_with(b"*/") {
+                    (depth, end) = (depth - 1, end + 2);
+                    if depth == 0 {
+                        break;
+                    }
+                } else {
+                    end += 1;
+                }
+            }
+            blank(at..end);
+            at = end;
+        } else if rest[0] == b'r'
+            && (at == 0 || !ident(at - 1) || matches!(bytes[at - 1], b'b' | b'c') && (at < 2 || !ident(at - 2)))
+            && let hashes = rest[1..].iter().take_while(|&&it| it == b'#').count()
+            && rest.get(1 + hashes) == Some(&b'"')
+        {
+            let open = at + 2 + hashes;
+            let close = find(open, &[b"\"".as_slice(), &vec![b'#'; hashes]].concat());
+            if strings {
+                blank(open..close);
+            }
+            at = (close + 1 + hashes).min(bytes.len());
+        } else if rest[0] == b'"' {
+            let mut end = at + 1;
+            while end < bytes.len() && bytes[end] != b'"' {
+                end += if bytes[end] == b'\\' { 2 } else { 1 };
+            }
+            let end = end.min(bytes.len());
+            if strings {
+                blank(at + 1..end);
+            }
+            at = end + 1;
+        } else if rest[0] == b'\'' {
+            // A character, or the lifetime or label that starts the same.
+            let inside = match rest.get(1) {
+                Some(b'\\') => Some(find(at + 3, b"'")),
+                Some(_) => text[at + 1..]
+                    .chars()
+                    .next()
+                    .map(|it| at + 1 + it.len_utf8())
+                    .filter(|&end| bytes.get(end) == Some(&b'\'')),
+                None => None,
+            };
+            match inside {
+                Some(end) => {
+                    if strings {
+                        blank(at + 1..end);
+                    }
+                    at = end + 1;
+                }
+                None => at += 1,
+            }
+        } else {
+            at += 1;
+        }
     }
-    out
+    String::from_utf8(out).expect("whole characters are blanked")
 }
 
 /// The `#[cfg(..)]` attributes next to the one at `start..end`: those before it back to the
@@ -337,22 +412,36 @@ fn matching_close(text: &str) -> Option<usize> {
     None
 }
 
-/// The names of the `mod name;` items of a file.
-fn out_of_line_modules(text: &str) -> Vec<String> {
+/// The names of the `mod name;` items of a file, each with where its statement is.
+fn out_of_line_modules(text: &str) -> Vec<(String, std::ops::Range<usize>)> {
     let mut names = Vec::new();
     let mut from = 0;
     for (at, end) in text.match_indices([';', '{', '}']) {
-        let statement = &text[from..at];
+        let statement = from..at;
         from = at + 1;
-        let words: Vec<&str> = statement.split_whitespace().collect();
+        let words: Vec<&str> = text[statement.clone()].split_whitespace().collect();
         if end == ";"
             && let [.., "mod", name] = words[..]
             && name.chars().all(|it| it.is_alphanumeric() || it == '_')
         {
-            names.push(name.to_owned());
+            names.push((name.to_owned(), statement));
         }
     }
     names
+}
+
+/// The `#[cfg(..)]` attributes that `statement` starts with.
+fn leading_cfgs(statement: &str) -> String {
+    let mut cfgs = String::new();
+    let mut rest = statement.trim_start();
+    while let Some(attribute) = rest.strip_prefix('#') {
+        let Some(len) = matching_close(attribute) else { break };
+        if attribute[1..].trim_start().starts_with("cfg(") {
+            cfgs += &format!("#{}\n", &attribute[..len]);
+        }
+        rest = attribute[len..].trim_start();
+    }
+    cfgs
 }
 
 fn valued_in<'a>(args: &[&'a str], flag: &str) -> Option<&'a str> {
@@ -396,6 +485,27 @@ mod tests {
     }
 
     #[test]
+    fn allocators_not_in_strings_and_under_the_cfgs_of_their_modules() {
+        let dir = scratch("strings");
+        let file = |path: &str, text: &str| std::fs::write(dir.join(path), text).unwrap();
+        file(
+            "lib.rs",
+            "#![doc = \"backed by a pool rather than `#[global_allocator]` // or /*\"]\n\
+             const A: &str = r##\"a \"#[global_allocator]\" b\"##;\nconst B: char = '\"';\n\
+             fn f<'a>(_: &'a str) -> char { '\\'' }\n/* /* */ #[global_allocator] */\n\
+             #[cfg(feature = \"jemalloc\")]\n#[allow(unused)] mod alloc;\n",
+        );
+        file("alloc.rs", "#[cfg(not(windows))]\n#[global_allocator]\nstatic A: J = J;\n");
+        assert_eq!(
+            global_allocators(&dir.join("lib.rs")),
+            ["#[cfg(feature = \"jemalloc\")]\n#[cfg(not(windows))]\n"]
+        );
+        let text = "é \"// '\" 'é' x";
+        assert_eq!(blanked(text, false), text);
+        assert_eq!(blanked(text, true), "é \"    \" '  ' x");
+    }
+
+    #[test]
     fn a_stand_in_forwards_to_ra_jits_allocator() {
         let dir = scratch("forwards");
         let main = dir.join("main.rs");
@@ -410,5 +520,9 @@ mod tests {
             text.contains("__ra_jit_global_realloc(ptr, layout.size(), layout.align(), new_size)")
         );
         assert!(!text_of(&["--crate-type", "bin"], true, &dir.join("none.rs")).contains("mod "));
+        // A second wrapper is given the stand-in as the source.
+        let stand_in = dir.join("main.ra-jit.rs");
+        std::fs::write(&stand_in, &text).unwrap();
+        assert_eq!(text_of(&["--crate-type", "bin"], true, &stand_in), text);
     }
 }

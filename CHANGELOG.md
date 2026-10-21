@@ -73,8 +73,9 @@ All notable changes to ra-jit are written here. The format follows
   exited 0 at once, printing nothing. ra-jit's `main` now stays strong. On macOS and Linux
   a `#[global_allocator]` was ignored in such a program, as the stand-ins declare none and
   rustc's allocator shim went to the default allocator; a stand-in now declares one that
-  forwards to functions rust-analyzer's expansion of the attribute defines
-  (`wholeprogram.py`).
+  forwards to functions rust-analyzer's expansion of the attribute defines, under the
+  `#[cfg]`s of the static and of the modules it is in, and not for one in a string, as
+  heapless's docs have (`wholeprogram.py`).
 - Before the 2024 edition, a panic in a block's tail drops the tail's temporaries after the
   block's locals, as rustc does; ra-jit dropped them first, so a `Drop` that printed or
   locked saw the other order (`breakers.py unwind_tail_after_local`).
