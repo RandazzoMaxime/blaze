@@ -196,8 +196,22 @@ numbers, and only for what they show.
 **Where.** `lru = N` on the three queries is an attribute in upstream files; ra-jit's
 monomorphized MIR is ra-jit's own query.
 
-**Payoff.** Unmeasured until step 0; helix's 18.4 GB and nushell's 15.8 GB are the
-numbers to move. The bound is what infer and MIR hold of those, which step 0 reports.
+**Payoff, measured (2026-10-21, dev-aws-7, 16 cores, `harness/heap.py` on jemalloc
+profiles).** Inference and MIR hold little of the peak; debug information holds most of it.
+At helix's high-water mark (an interval dump, 15.4 GB live of a 17.9 GB peak) `mir_body` holds
+0.5 GB, `compiled_instance` and `compiled_root` 1.0 GB, `inlinable` 0.15 GB, while the
+`described` query holds 5.8 GB, most of it copies of the type tables each memo makes
+(`Arc<[DebugType]>` and `Vec<Field>` cloned), and the DWARF writer's names (`Dwarf::named`)
+3.0 GB: together 62% of the peak. Once the build is over helix holds 6.4 GB live (`described`
+2.1 GB, item trees 1.3 GB, ra-jit's own structures 1.2 GB) and nushell 5.6 GB (`described`
+1.0 GB, ra-jit's own 1.1 GB, `mir_body` 0.5 GB, item trees 0.4 GB). With `RA_JIT_DEBUGINFO=0`,
+helix's warm start peaks at 8.6 GB instead of 17.0 GB and holds 5.9 GB once ready instead of
+11.9 GB; nushell's 10.5 and 7.2 GB instead of 14.0 and 10.3 GB; the stores are 0.25 and
+0.31 GB instead of 1.70 and 0.91 GB. Line tables alone (`lines`) leave what is held once
+ready where it was. So the first target is debug information: one copy of a type's
+description shared by the memos that reach it, and the writer's names interned, before an
+LRU on infer and MIR. About 5 GB of what the daemon holds once ready is the allocator's and
+not live (helix 11.7 GB resident against 6.4 GB live, nushell 10.2 against 5.6 GB).
 
 **Risks.** An edit that reaches many bodies recomputes their MIR: the edit harnesses
 (`editbench.py`, `movedlines.py`, `storefirst.py`) and edit-to-binary times are the check.
@@ -266,6 +280,16 @@ that shares dependencies: the load and resolve of dependencies (bevy 14.4 s + 12
 nushell 7.2 s + 5.0 s, helix 7.1 s + 5.6 s, less the workspace's own share), and the
 inference and MIR of dependency instances. Memory: salsa memos of dependencies become pages
 of a mapped file, which the kernel can drop.
+
+Measured with step 0 (2026-10-21, dev-aws-7, 16 cores): a warm start loads the workspace in
+0.6 s (helix) and 1.2 s (nushell) and resolves in 5.5 s and 5.0 s, of 146 s and 34 s to
+ready. The rest goes to compiling with every function found in the store (nushell 14 s) and to
+compiling the checkout again so the first edit can be patched (nushell 9 s, helix 47 s), which
+is item 2's. Of what is live once a build is over, the dependency front end (item trees,
+def maps, impl headers, salsa inputs) is about 1.8 GB on helix and 1.1 GB on nushell, against
+2.1 GB and 1.0 GB of debug-info descriptions (item 5). So 1b's first family is the item
+tree, the largest single front-end query on both (helix 1.3 GB, nushell 0.4 GB), and the time
+1a and 1b can save on a warm start is about 5 s.
 
 **Risks.** It is the largest change here and touches the most upstream behaviour. The
 differential checker, kept as a mode, is the guard: a frozen value that differs from the
@@ -381,5 +405,3 @@ stops.
 - bevy and ripgrep with step 1; zed's own base past the memory bound (#55).
 - Whether `instance_path` and `home::Mentions`, which also walk types without a memo,
   grow the same way on other workspaces; on helix they were under 3% of the sample.
-- How much of a load proc-macro expansion is (step 0).
-- What share of RSS infer and MIR hold (step 0).
