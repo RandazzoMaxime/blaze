@@ -51,6 +51,11 @@ const TARGET_SELECTION: &[&str] = &[
     "--all-targets",
 ];
 
+/// The flags that pick targets cargo builds with the dev-dependencies: examples, tests and
+/// benches.
+const DEV_TARGETS: &[&str] =
+    &["--examples", "--example", "--tests", "--test", "--benches", "--bench", "--all-targets"];
+
 /// The flags of `cargo test` that are about running and not about building.
 const RUNNING: &[&str] = &["--no-run", "--no-fail-fast"];
 
@@ -175,6 +180,8 @@ pub(crate) struct Flags {
     pub(crate) doc: bool,
     /// Whether a flag picks targets, so that `cargo test` runs no doc tests.
     pub(crate) selects_targets: bool,
+    /// Whether a flag picks a target that has the dev-dependencies.
+    pub(crate) dev_targets: bool,
 }
 
 impl Asked {
@@ -326,7 +333,7 @@ impl Invocation {
             packages: self.flags.packages.clone(),
             workspace: self.flags.workspace,
             target: self.target(),
-            dev_deps: self.subcommand == Subcommand::Test,
+            dev_deps: self.subcommand == Subcommand::Test || self.flags.dev_targets,
             config: self.flags.config.clone(),
         }
     }
@@ -342,6 +349,7 @@ impl Flags {
     fn read(&mut self, flag: &str, value: Option<&str>) {
         let owned = || value.map(str::to_owned);
         self.selects_targets |= TARGET_SELECTION.contains(&flag);
+        self.dev_targets |= DEV_TARGETS.contains(&flag);
         match flag {
             "--manifest-path" => self.manifest_path = value.map(PathBuf::from),
             "-p" | "--package" => self.packages.extend(owned()),
