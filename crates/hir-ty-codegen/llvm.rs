@@ -100,6 +100,7 @@ pub(super) fn emit(
         module.set_data_layout(&machine.get_target_data().get_data_layout());
         let constants: FxHashMap<u32, &[u8]> = recorder.constants().collect();
         let statics: FxHashSet<u32> = recorder.statics().collect();
+        let resume = recorder.resume();
         let shown = tally.time(Phase::Lower, || {
             let own = Defined {
                 name: if wrapped { INNER } else { OWN },
@@ -148,14 +149,16 @@ pub(super) fn emit(
             for (it, defined) in std::iter::zip(&seen, &shown) {
                 let Some(&function) = by_id.get(&it.id.as_u32()) else { continue };
                 let defined = Lowering::define(
-                    context, &module, function, defined, &constants, &statics, &declared,
+                    context, &module, function, defined, &constants, &statics, resume, &declared,
                 );
                 if defined.is_err() {
                     by_id.remove(&it.id.as_u32());
                     unshow(&module, &FxHashMap::from_iter([(it.id.as_u32(), function)]));
                 }
             }
-            Lowering::define(context, &module, function, &own, &constants, &statics, &by_id)?;
+            Lowering::define(
+                context, &module, function, &own, &constants, &statics, resume, &by_id,
+            )?;
             if wrapped {
                 wrap(context, &module, function, weights)?;
             }

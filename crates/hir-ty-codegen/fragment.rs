@@ -375,6 +375,16 @@ impl Wants {
         })
     }
 
+    /// The number of the function asked for that goes on unwinding, `_Unwind_Resume`.
+    #[cfg(feature = "llvm")]
+    pub(super) fn resume(&self) -> Option<u32> {
+        let mut funcs = self.requests.funcs.iter();
+        let resume = funcs.position(
+            |it| matches!(&it.target, FuncTarget::Symbol(name) if name == "_Unwind_Resume"),
+        );
+        resume.map(|it| it as u32)
+    }
+
     #[cfg(feature = "llvm")]
     pub(super) fn mark(&self) -> Mark {
         Mark { funcs: self.requests.funcs.len(), datas: self.requests.datas.len() }

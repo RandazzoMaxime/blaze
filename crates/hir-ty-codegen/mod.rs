@@ -7678,6 +7678,9 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
         // Only blocks that can run are compiled: `if cfg!(miri) { .. }` calls functions that do
         // not exist.
         let mut reachable = rustc_hash::FxHashSet::default();
+        let off = self.checks_off(body);
+        let resumes_only =
+            if frame.is_some() { FxHashSet::default() } else { Self::resumes_only(body) };
         // Switches on a value known now, and the one way they go.
         let mut decided = FxHashMap::default();
         let mut worklist = vec![body.start_block];
@@ -7687,7 +7690,7 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
             }
             match body.basic_blocks[id].terminator.as_ref().map(|it| &it.kind) {
                 Some(TerminatorKind::SwitchInt { discr, targets }) => {
-                    match self.switch_bits(&body.basic_blocks[id], discr) {
+                    match self.switch_bits(&body.basic_blocks[id], discr, &off) {
                         Some(bits) => {
                             let target = targets.target_for_value(bits);
                             decided.insert(id, target);
@@ -7712,7 +7715,8 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
                 _ => (),
             }
             let block = &body.basic_blocks[id];
-            worklist.extend(block.terminator.as_ref().and_then(|it| it.kind.unwind()));
+            let unwind = block.terminator.as_ref().and_then(|it| it.kind.unwind());
+            worklist.extend(unwind.filter(|it| !resumes_only.contains(it)));
         }
         let state = frame.as_ref().map(|(frame, ..)| frame.state()).map(|it| in_frame(self, it));
         match (frame, state) {
@@ -7758,7 +7762,7 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
                 unsupported!("block without terminator");
             };
             self.at(terminator.span);
-            self.unwind_to = terminator.kind.unwind();
+            self.unwind_to = terminator.kind.unwind().filter(|it| !resumes_only.contains(it));
             let target = match &terminator.kind {
                 // A promoted call already holds its value, and that value is read-only.
                 TerminatorKind::Call { destination, target: Some(target), .. }
@@ -7807,7 +7811,12 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
     /// The value `block` switches on, when it is a constant: a literal, or an associated
     /// constant such as `T::IS_ZST` that the block has just read. rustc does not compile the
     /// arms such a switch never takes either, and they may not even type check for this `T`.
-    fn switch_bits(&mut self, block: &crate::mir::BasicBlock, discr: &Operand) -> Option<u128> {
+    fn switch_bits(
+        &mut self,
+        block: &crate::mir::BasicBlock,
+        discr: &Operand,
+        off: &FxHashSet<LocalId>,
+    ) -> Option<u128> {
         if let Some(bits) = self.const_bits(discr) {
             return Some(bits);
         }
@@ -7816,6 +7825,9 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
         };
         if !place.projection.as_slice().is_empty() {
             return None;
+        }
+        if off.contains(&place.local) {
+            return Some(0);
         }
         let assigned = block.statements.iter().rev().find_map(|it| match &it.kind {
             StatementKind::Assign(to, rvalue) => Some((to, rvalue)),
@@ -7832,6 +7844,80 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
         let ConstKind::Unevaluated(unevaluated) = konst.as_ref().kind() else { return None };
         let allocation = self.eval_const(unevaluated).ok()?;
         Some(*allocation.memory.first()? as u128)
+    }
+
+    /// The locals of `body` that only a call of a check that is off here assigns, once:
+    /// `ub_checks()` and the like are false, and what they guard is not compiled, nor asks
+    /// for the bodies of what it calls (`precondition_check`, the panics), which would else
+    /// use up what a compile may build in before the code that runs is reached.
+    fn checks_off(&mut self, body: &MirBody<'db>) -> FxHashSet<LocalId> {
+        let db = self.cg.db;
+        let mut assigned: FxHashMap<LocalId, usize> = FxHashMap::default();
+        let mut borrowed = FxHashSet::default();
+        let mut off = FxHashSet::default();
+        for (_, block) in body.basic_blocks.iter() {
+            for statement in &block.statements {
+                if let StatementKind::Assign(place, rvalue) = &statement.kind {
+                    *assigned.entry(place.local).or_default() += 1;
+                    if let Rvalue::Ref(_, place) = rvalue {
+                        borrowed.insert(place.local);
+                    }
+                }
+            }
+            let Some(TerminatorKind::Call { func, destination, .. }) =
+                block.terminator.as_ref().map(|it| &it.kind)
+            else {
+                continue;
+            };
+            *assigned.entry(destination.local).or_default() += 1;
+            let Ok(ty) = self.operand_ty(func) else { continue };
+            let TyKind::FnDef(def, _) = ty.kind() else { continue };
+            let CallableDefId::FunctionId(callee) = def.0 else { continue };
+            let check = callee.krate(db).data(db).origin.is_lang()
+                && matches!(
+                    FunctionSignature::of(db, callee).name.as_str(),
+                    "ub_checks" | "contract_checks" | "check_language_ub" | "check_library_ub"
+                );
+            if check && destination.projection.as_slice().is_empty() {
+                off.insert(destination.local);
+            }
+        }
+        off.retain(|local| assigned.get(local) == Some(&1) && !borrowed.contains(local));
+        off
+    }
+
+    /// The cleanup blocks of `body` that do nothing but go on unwinding, which a call that
+    /// unwinds to one needs no landing pad for, as rustc's `RemoveNoopLandingPads` has it: a
+    /// pad costs a call that LLVM does not know resumes, and that LLVM counts against
+    /// building the function into its callers.
+    fn resumes_only(body: &MirBody<'db>) -> FxHashSet<BasicBlockId> {
+        let mut found = FxHashSet::default();
+        loop {
+            let before = found.len();
+            for (id, block) in body.basic_blocks.iter() {
+                let idle = block.is_cleanup
+                    && block.statements.iter().all(|it| {
+                        matches!(
+                            it.kind,
+                            StatementKind::StorageLive(_)
+                                | StatementKind::StorageDead(_)
+                                | StatementKind::FakeRead(_)
+                                | StatementKind::Nop
+                        )
+                    });
+                let resumes = match block.terminator.as_ref().map(|it| &it.kind) {
+                    Some(TerminatorKind::UnwindResume) => true,
+                    Some(TerminatorKind::Goto { target }) => found.contains(target),
+                    _ => false,
+                };
+                if idle && resumes {
+                    found.insert(id);
+                }
+            }
+            if found.len() == before {
+                return found;
+            }
+        }
     }
 
     fn place(&mut self, place: &StoredPlace) -> Result<(Value, PlaceTy<'db>)> {
