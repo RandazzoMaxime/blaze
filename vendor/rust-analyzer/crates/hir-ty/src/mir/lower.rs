@@ -3104,7 +3104,9 @@ impl<'a, 'db> MirLowerCtx<'a, 'db> {
                             return Ok(None);
                         };
                         current = c;
-                        self.push_fake_read(current, init_place, span);
+                        // rustc's `FakeReadCause::ForLet`, at the pattern, where the borrow
+                        // checker finds the place a `let _: T` ascribes.
+                        self.push_fake_read(current, init_place, MirSpan::PatId(*pat));
                         // Using the initializer for the resolver scope is good enough for us, as it cannot create new declarations
                         // and has all declarations of the `let`.
                         let resolver_guard = self.resolver.update_to_inner_scope(

@@ -50,8 +50,8 @@ All of these are rustc's, written from `compiler/rustc_borrowck` at the pinned n
   initialized), outlives constraints from every statement, call, cast and aggregate, the
   signature's universal regions and implied bounds (normalized parameters and the impl
   header included, for associated consts too), where clauses (elaborated through
-  supertraits), type tests, and lifetimes written in `let` annotations, casts, turbofishes
-  and struct literal paths. A function item, closure or safe function pointer cast to a
+  supertraits), type tests, and lifetimes written in `let` annotations (`let _: T = value`
+  of any value included), casts, turbofishes and struct literal paths. A function item, closure or safe function pointer cast to a
   function pointer is a subtype of it by signature. A where clause `for<'a> T: 'a` is
   `T: 'static`, and a type parameter that fails it is rustc's codeless "does not live long
   enough".
@@ -101,8 +101,8 @@ With no borrow checker, the 245 units rustc accepts would pass. Now:
 
 | Mode | In scope | Pass | rustc accepts, ra-jit too | rustc rejects, same errors |
 |---|---|---|---|---|
-| Polonius | 1579 | 1126 (71.3%) | 245 of 245 | 881 of 1334 |
-| NLL | 1577 | 1118 (70.9%) | 226 of 226 | 892 of 1351 |
+| Polonius | 1579 | 1131 (71.6%) | 245 of 245 | 886 of 1334 |
+| NLL | 1577 | 1123 (71.2%) | 226 of 226 | 897 of 1351 |
 
 463 units are out of scope; 344 of them need a nightly feature. CI runs the scoring on Linux
 and fails below a floor a few units under the count there.
@@ -153,6 +153,8 @@ changes to rust-analyzer were needed, each made as rustc does it:
   lifetimes in signatures an error region, so two unrelated ones compared equal and the
   reborrow was skipped as a no-op; a closure then captured the reference variable rather
   than what it points to.
+- A `let`'s fake read of its value is at the pattern (rustc's `FakeReadCause::ForLet`), not
+  the enclosing block, which is where the borrow checker finds the place `let _: T` ascribes.
 
 These are differences still open, each the cause of some failures, all of them errors
 missed rather than errors made up:
