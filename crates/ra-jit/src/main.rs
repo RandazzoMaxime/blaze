@@ -2171,6 +2171,12 @@ fn workspace_at(
             seed_own_target(cargo.target_directory().as_ref());
         }
         let build_scripts = workspace.run_build_scripts(cargo_config, &|_| {})?;
+        // A crate whose script did not run is read without what it writes: thiserror's
+        // `include!` of its `OUT_DIR` then leaves every derived `Error` unimplemented, and a
+        // daemon that loaded that builds wrongly for as long as it runs.
+        if let Some(error) = build_scripts.error() {
+            anyhow::bail!("a build script failed: {}", error.trim().replace('\n', " "));
+        }
         workspace.set_build_scripts(build_scripts);
     }
     Ok((workspace, debug))

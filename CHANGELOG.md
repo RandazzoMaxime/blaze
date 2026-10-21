@@ -146,6 +146,13 @@ All notable changes to ra-jit are written here. The format follows
   `cargo build` inside and the one that starts `other` take turns, since cargo removes and
   copies each program again there on every build and the second sometimes found none (plain
   cargo failed it as often as ra-jit).
+- A workspace the daemon loads after a change whose build scripts did not all run is not
+  loaded: the crates of a script that failed were read without its `OUT_DIR`, so thiserror's
+  `include!` went missing, every derived `Error` was unimplemented and `?` resolved to the
+  body-less `FromResidual::from_residual` for the rest of the daemon's life (what hyperfine's
+  edits under plain cargo met now and then on Linux before the edit stopped running every
+  script through cargo). It says which script failed instead, as an edit that runs the
+  scripts again already did.
 - A worker that loaded its workspace beside cargo's first build
   ([#11](https://github.com/indexable-inc/ra-jit/issues/11)) ends when its daemon does, as
   every other worker does: once told what cargo built, it waited for a lock on its standard
