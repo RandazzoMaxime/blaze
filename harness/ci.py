@@ -31,6 +31,7 @@ HARNESSES = [
     ("core", ["unwinds.py"], {}, EVERYWHERE),
     ("core", ["growth.py"], {}, on(backend="cranelift")),
     ("core", ["splices.py"], {}, EVERYWHERE),
+    ("core", ["live_e2e.py"], {}, on("linux-x86_64")),
     # A branch reaches 128 MB on AArch64, and the splice has to get past that. Mach-O is not spliced.
     ("core", ["farsplices.py"], {"RA_JIT_SPLICE": "1"}, on("linux-aarch64")),
     ("core", ["asmedits.py"], {}, EVERYWHERE),

@@ -333,18 +333,36 @@ impl Baseline {
         patch: &[u8],
         base: u64,
     ) -> anyhow::Result<([u8; 16], ra_jit_live::format::Code, Vec<(u64, u64)>)> {
-        let Executable::MachO(image) = &*self.image else {
-            bail!("edits are applied to a running program on macOS only")
-        };
-        let uuid = macho::uuid(image).context("the executable has no UUID")?;
-        let (code, moved) = macho::live(image, &self.baked, &self.originals, patch, base)?;
-        Ok((uuid, code, moved))
+        match &*self.image {
+            Executable::MachO(image) => {
+                let uuid = macho::uuid(image).context("the executable has no UUID")?;
+                let (code, moved) = macho::live(image, &self.baked, &self.originals, patch, base)?;
+                Ok((uuid, code, moved))
+            }
+            Executable::Elf(image) => {
+                ensure!(image.machine == Machine::X86_64, "live edits support Linux x86-64 only");
+                let uuid = image.id.context("the executable has no GNU build ID")?;
+                let patch = Patch::read(patch, image)?;
+                ensure!(
+                    self.baked
+                        .iter()
+                        .all(|it| patch.replaced.iter().any(|replaced| replaced.name == &**it)),
+                    "a function the executable was linked with a patch of is as it first was"
+                );
+                let (code, moved) = patch.place_live_simple(image, &self.originals, base)?;
+                Ok((uuid, code, moved))
+            }
+            _ => bail!(
+                "edits are applied to running programs on macOS AArch64 and Linux x86-64 only"
+            ),
+        }
     }
 
     /// The `LC_UUID` of the executable, when it is one that has it.
     pub(crate) fn uuid(&self) -> Option<[u8; 16]> {
         match &*self.image {
             Executable::MachO(image) => macho::uuid(image),
+            Executable::Elf(image) => image.id,
             _ => None,
         }
     }
@@ -756,6 +774,7 @@ impl Field {
 /// What a splice has to know of the executable. Nothing of the file is read again.
 struct Image {
     len: u64,
+    id: Option<[u8; 16]>,
     machine: Machine,
     header: elf::FileHeader64<Endianness>,
     segments: Vec<elf::ProgramHeader64<Endianness>>,
@@ -865,6 +884,7 @@ impl Image {
 
         let mut image = Image {
             len: bytes.len() as u64,
+            id: file.build_id().ok().flatten().map(binary_id),
             machine,
             header,
             segments,
@@ -1501,12 +1521,72 @@ impl<'a> Patch<'a> {
 
     /// Lays the patch out behind the executable and gives everything in it its address.
     fn place(&self, image: &Image) -> anyhow::Result<Addition> {
+        self.place_at(image, None)
+    }
+
+    fn place_live_simple(
+        &self,
+        image: &Image,
+        originals: &FxHashMap<u64, Vec<u8>>,
+        base: u64,
+    ) -> anyhow::Result<(ra_jit_live::format::Code, Vec<(u64, u64)>)> {
+        let addition = self.place_at(image, Some(base))?;
+        let mut all = addition.appended;
+        let data_at = addition.live_data_at as usize;
+        let data = all.split_off(data_at);
+        let mut text = all;
+        text.resize(text.len().next_multiple_of(image.page() as usize), 0);
+        let mut writes = Vec::new();
+        let mut moved = Vec::new();
+        for replaced in &self.replaced {
+            let Some(old) = replaced.old.filter(|it| it.kind == SymbolKind::Text) else { continue };
+            let offset = image.offset_of(old.address)?;
+            let bytes = addition
+                .overwritten
+                .iter()
+                .find(|(at, _)| *at == offset)
+                .map(|(_, bytes)| bytes.clone())
+                .context("the function jump is missing")?;
+            moved.push((base, old.address));
+            writes.push(ra_jit_live::format::Write {
+                address: old.address,
+                bytes,
+                pointers: Vec::new(),
+            });
+        }
+        let redirected = writes.len() as u64;
+        let written: FxHashSet<u64> = writes.iter().map(|it| it.address).collect();
+        for (&address, bytes) in originals {
+            if !written.contains(&address) {
+                writes.push(ra_jit_live::format::Write {
+                    address,
+                    bytes: bytes.clone(),
+                    pointers: Vec::new(),
+                });
+            }
+        }
+        let code = ra_jit_live::format::Code {
+            base,
+            text,
+            data,
+            frames: addition.live_frames,
+            pointers: addition.live_pointers,
+            writes,
+            redirected,
+            statics: 0,
+        };
+        Ok((code, moved))
+    }
+
+    fn place_at(&self, image: &Image, live_base: Option<u64>) -> anyhow::Result<Addition> {
         let e = Endianness::Little;
         let page = image.page();
         let machine = image.machine;
         let (stub_len, stub_align) = machine.stub();
-        let (offset, base) =
-            image.behind(image.len.next_multiple_of(page), image.end().next_multiple_of(page));
+        let (offset, base) = live_base.map_or_else(
+            || image.behind(image.len.next_multiple_of(page), image.end().next_multiple_of(page)),
+            |base| (0, base),
+        );
         let relocations = image.relocations.as_ref().filter(|_| image.pie);
         ensure!(!image.pie || relocations.is_some(), "an executable the loader fixes nothing in");
         let fixed_up = if image.pie { self.stored + self.slots.len() } else { 0 };
@@ -1802,6 +1882,9 @@ impl<'a> Patch<'a> {
             overwritten,
             redirected,
             described,
+            live_data_at: extents[Segment::Data as usize].0,
+            live_frames: (unwind_at, unwind.len() as u64),
+            live_pointers: fixed.iter().map(|it| it.r_offset.get(e).saturating_sub(base)).collect(),
         })
     }
 }
@@ -1819,6 +1902,9 @@ struct Addition {
     redirected: usize,
     /// What a debugger reads of it, behind the headers.
     described: debug::Tail,
+    live_data_at: u64,
+    live_frames: (u64, u64),
+    live_pointers: Vec<u64>,
 }
 
 fn read_i32(bytes: &[u8]) -> i32 {
@@ -1828,6 +1914,13 @@ fn read_i32(bytes: &[u8]) -> i32 {
 /// The distance from `from` to `to`, where the code has four bytes for it.
 fn relative(to: u64, from: u64) -> anyhow::Result<i32> {
     i32::try_from(to.wrapping_sub(from) as i64).context("the program is too large")
+}
+
+fn binary_id(build_id: &[u8]) -> [u8; 16] {
+    let mut id = [0; 16];
+    let len = build_id.len().min(id.len());
+    id[..len].copy_from_slice(&build_id[..len]);
+    id
 }
 
 #[cfg(test)]
