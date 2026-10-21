@@ -50,6 +50,26 @@ async def build(step: str, cwd: Path, env: dict[str, str]) -> str:
     return text
 
 
+# What `cargo ra-jit` says when the toolchain is one the daemon never compiles for, which no
+# wait changes: another release than ra-jit's, or one without the standard library's source.
+OTHER_TOOLCHAIN = ("this ra-jit compiles for", "rust-src")
+
+
+async def serving(project: Path, env: dict[str, str]) -> None:
+    """Builds until the daemon serves one. Until the daemon has loaded the workspace a build is
+    cargo's, which `cargo ra-jit` says why of; one it served says `[ra-jit]`."""
+    why = []
+    for _ in range(120):
+        said = await build("wait for the daemon", project, env)
+        if "[ra-jit]" in said:
+            return
+        why = [it for it in said.splitlines() if "ra-jit:" in it] or why
+        if any(reason in line for line in why for reason in OTHER_TOOLCHAIN):
+            raise StepError("wait for the daemon: the daemon builds nothing with this toolchain:\n  " + "\n  ".join(why))
+        await asyncio.sleep(0.5)
+    raise StepError("wait for the daemon: no build said `[ra-jit]` in 120 tries; the last said:\n  " + "\n  ".join(why))
+
+
 def edit(source: Path, old: int, new: int) -> None:
     text = source.read_text()
     needle = f"fn answer() -> u64 {{\n    {old}\n}}"
@@ -94,13 +114,7 @@ async def main() -> None:
         env.pop("CARGO_INCREMENTAL", None)
 
         await build("first build", project, env)
-        # Until the daemon has loaded the workspace a build is cargo's; one it served says `[ra-jit]`.
-        for attempt in range(120):
-            if "[ra-jit]" in await build("wait for the daemon", project, env):
-                break
-            await asyncio.sleep(0.5)
-        else:
-            raise StepError("wait for the daemon: no build said `[ra-jit]` in 120 tries")
+        await serving(project, env)
         print("daemon is serving builds")
 
         edit(source, 1, 2)
