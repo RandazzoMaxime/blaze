@@ -706,7 +706,7 @@ impl<'a, 'db> MirLowerCtx<'a, 'db> {
                                 return Ok(Some(current));
                             }
                             CandidateId::FunctionId(_) => {
-                                // FnDefs are zero sized, no action is needed.
+                                self.push_fn_item(current, place, expr_id);
                                 return Ok(Some(current));
                             }
                         }
@@ -767,8 +767,10 @@ impl<'a, 'db> MirLowerCtx<'a, 'db> {
                                 Box::new([]),
                                 expr_id.into(),
                             )?;
+                        } else {
+                            // A tuple variant's constructor, a function item.
+                            self.push_fn_item(current, place, expr_id);
                         }
-                        // Otherwise its a tuple like enum, treated like a zero sized function, so no action is needed
                         Ok(Some(current))
                     }
                     ValueNs::GenericParam(p) => {
@@ -794,8 +796,9 @@ impl<'a, 'db> MirLowerCtx<'a, 'db> {
                         Ok(Some(current))
                     }
                     ValueNs::FunctionId(_) | ValueNs::StructId(_) | ValueNs::ImplSelf(_) => {
-                        // A zero sized function needs no action, but a unit struct is a value
-                        // that has come to exist, and may have to be dropped.
+                        // A unit struct is a value that has come to exist, and may have to be
+                        // dropped.
+                        self.push_fn_item(current, place, expr_id);
                         if let TyKind::Adt(adt, subst) = self.infer.expr_ty(expr_id).kind()
                             && let AdtId::StructId(id) = adt.def_id()
                         {
@@ -2742,6 +2745,15 @@ impl<'a, 'db> MirLowerCtx<'a, 'db> {
         });
         self.unwind_resume = Some(resume);
         resume
+    }
+
+    /// A function item, or a tuple struct's or variant's constructor, written as a value: zero
+    /// sized, but assigned as rustc does, so that the borrow checker sees it initialized.
+    fn push_fn_item(&mut self, block: BasicBlockId, place: Place<'db>, expr: ExprId) {
+        let ty = self.expr_ty_without_adjust(expr);
+        if let TyKind::FnDef(..) = ty.kind() {
+            self.push_assignment(block, place, Operand::const_zst(ty).into(), expr.into());
+        }
     }
 
     fn push_fake_read(&mut self, block: BasicBlockId, p: Place<'db>, span: MirSpan) {
