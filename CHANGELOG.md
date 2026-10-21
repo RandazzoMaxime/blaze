@@ -228,6 +228,9 @@ All notable changes to ra-jit are written here. The format follows
   under them, are unchanged. helix is ready in 109 s at 18.4 GB of memory instead of 631 s at
   100.7 GB, its store is 1.6 GB instead of 14 GB, and its first `cargo ra-jit run` takes
   46.9 s instead of 640.8 s (`harness/deepnames.py`).
+- `simd_reduce_max` and `simd_reduce_min` of integer lanes are compiled (AArch64's `vmaxvq_u8`
+  and the other `vmaxv`/`vminv`, AVX-512's `_mm512_reduce_max_*`): a function that reached
+  them was left to rustc (bun's ASCII checks; `simd_reduce_max` breaker).
 - `RA_JIT_OPT=3`'s last instruction combining no longer aborts the process when one run of it
   leaves something to combine ("Instruction Combining … did not reach a fixpoint after 1
   iterations", bun's whole-program build on AArch64): the default pipelines never ask LLVM to

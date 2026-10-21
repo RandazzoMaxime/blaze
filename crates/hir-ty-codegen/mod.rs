@@ -12119,6 +12119,26 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
                 }
                 self.builder.ins().store(MEM, acc, dst, 0);
             }
+            // Of floats these ignore a NaN lane, as `maxnum` does, which `fmax` does not.
+            ("simd_reduce_max" | "simd_reduce_min", [arg]) => {
+                let (src, ty) = self.operand(arg)?;
+                let (lane, count) = self.simd_lanes(ty)?;
+                if lane.ty.is_float() {
+                    unsupported!("`{name}` of floats");
+                }
+                let mut acc = self.builder.ins().load(lane.ty, MEM, src, 0);
+                for i in 1..count {
+                    let offset = (i * lane.ty.bytes() as u64) as i32;
+                    let value = self.builder.ins().load(lane.ty, MEM, src, offset);
+                    acc = match (name == "simd_reduce_max", lane.signed) {
+                        (true, true) => self.builder.ins().smax(acc, value),
+                        (true, false) => self.builder.ins().umax(acc, value),
+                        (false, true) => self.builder.ins().smin(acc, value),
+                        (false, false) => self.builder.ins().umin(acc, value),
+                    };
+                }
+                self.builder.ins().store(MEM, acc, dst, 0);
+            }
             ("simd_reduce_all" | "simd_reduce_any", [arg]) => {
                 let (src, ty) = self.operand(arg)?;
                 let (lane, count) = self.simd_lanes(ty)?;

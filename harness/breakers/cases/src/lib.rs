@@ -28,6 +28,7 @@ cases![
     xgetbv,
     prefetch,
     simd_reduce,
+    simd_reduce_max,
     simd_lanes,
     simd_packs,
     sha_ni,
