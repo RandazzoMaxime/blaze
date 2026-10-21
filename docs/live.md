@@ -189,13 +189,19 @@ ms to its first answer (it reserves its patch room and reads its executable firs
 
 **What fails under typing.**
 
-- After a key that does not compile, the next one that does is not patched: the worker says
-  `no patch: an instance of the base gained or lost code of its own` (or `an instance that did
-  not compile is another now`), links the whole executable again (60 to 240 ms) and answers
-  `ok object=`. The running program takes no patch after that (the next ones are for the new
-  executable: 69 on probe, 260 on life, 28 on egui), so nearly every key is run by a restart:
-  168 of 173 on probe and all 84 on egui. The p50 of replay is the restart plus the wait for a
-  text that compiles; p99 is the longest stretch of typing that does not.
+- After a key that does not compile, the next one that does was not patched in these
+  measurements: the text that did not compile was built whole, the executable linked again
+  and the running program told to restart, and the next key was a patch of that build, so
+  nearly every key was run by a restart: 168 of 173 on probe and all 84 on egui
+  ([#31](https://github.com/indexable-inc/ra-jit/issues/31)). Now a text that does not
+  compile is not built whole, and a whole build refused once it is made is undone, so the
+  next key that compiles is a patch of the last build that did. One replay pass of each,
+  before (`5f26408566`) and after, on 2026-10-21 on the same MacBook under other agents'
+  load: probe 2 of 29 compiling keys run by a patch before and 29 of 29 after, p50 964 to
+  19.8 ms, p95 2,260 to 58.2; egui 0 of 14 and 14 of 14, p50 6,508 to 41.7, p95 10,758 to
+  84.8; life's keys run by a patch 46 to 50 of some 74, p50 504 to 39.2, p95 1,875 to 393.
+  life's other keys are restarts the worker asks for (``the edit changes `struct Life`, which
+  the running program may have values of``), before as after.
 - The program is not always told. The daemon relinks its own copy of the executable; the copy
   in `target/debug`, whose `LC_UUID` `ra-jit-live` watches, changes only with a build through
   cargo. probe's program said `restart needed` for 36 of 82 relinks; the harness restarts on
@@ -207,9 +213,12 @@ ms to its first answer (it reserves its patch room and reads its executable firs
   `cargo ra-jit build` itself fail with the same error, so the program cannot be started again
   through ra-jit at all; the session stops there, and plain cargo builds the same source in 1.3
   to 2.0 s.
-- `error: no program built has <file>` answers 22 keys on probe and 15 on egui, right after a
-  relink, while the restart's `cargo ra-jit build` and the next edits arrive together; the
-  next edit is built again. Why the daemon drops the program then is not known yet.
+- `error: no program built has <file>` answered 22 keys on probe and 15 on egui, right after a
+  relink, while the restart's `cargo ra-jit build` and the next edits arrived together
+  ([#32](https://github.com/indexable-inc/ra-jit/issues/32)). The program was being built
+  for that build, in the background, and an edit asked meanwhile saw it as never built; now
+  it waits for that build. The passes above went from 4 such answers on probe and 1 on egui
+  to none.
 - life has errors ra-jit has no diagnostic for (`` `step` has an error ra-jit cannot say more
   of: frontend: mir: IncompleteExpr``, `UnresolvedName`): the text does not compile, and the
   answer has no line to show.
