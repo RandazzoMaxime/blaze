@@ -33,10 +33,10 @@ you send them, including fixes you find here and want to upstream.
     vendor/subtree.py         moves vendor/ changes to the forks, and the forks and upstream into vendor/
     vendor/source.rev         the commit of the old development branch this tree last took from
 
-`crates/hir-ty-codegen` is not a crate. It is the module `hir_ty::mir::codegen`, which uses
-private items of `hir-ty`. It is kept outside `vendor/` because all of it is ra-jit's:
-`mir.rs` in the fork declares the module with a `#[path]` that points back here. So
-the fork builds only as part of this repository.
+`crates/hir-ty-codegen` is the code generator, a crate of its own over `hir-ty`'s MIR: what
+it uses of `hir-ty` is public there. Its root is `mod.rs`, the file it was compiled from when
+it was a module of `hir-ty`. Nothing in `vendor/` depends on anything in `crates/`, so the
+fork builds alone ([architecture-split.md](architecture-split.md)).
 
 ## rust-analyzer
 

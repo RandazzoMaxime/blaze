@@ -1813,6 +1813,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "hir-ty-borrowck"
+version = "0.0.0"
+dependencies = [
+ "base-db",
+ "hir-def",
+ "hir-ty",
+ "la-arena",
+ "ra-ap-rustc_ast_ir",
+ "ra-ap-rustc_type_ir",
+ "rustc-hash 2.1.2",
+ "salsa",
+ "smallvec",
+]
+
+[[package]]
 name = "hir-ty-codegen"
 version = "0.1.0"
 dependencies = [
@@ -1854,21 +1869,6 @@ dependencies = [
  "triomphe",
  "wasm-encoder",
  "windows-sys 0.61.2",
-]
-
-[[package]]
-name = "hir-ty-borrowck"
-version = "0.0.0"
-dependencies = [
- "base-db",
- "hir-def",
- "hir-ty",
- "la-arena",
- "ra-ap-rustc_ast_ir",
- "ra-ap-rustc_type_ir",
- "rustc-hash 2.1.2",
- "salsa",
- "smallvec",
 ]
 
 [[package]]
