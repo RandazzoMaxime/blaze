@@ -10,10 +10,24 @@ export type Phase = {
 	cargo_max_s?: number;
 	warm_store_s?: number;
 	rss_mb?: number;
+	/** The most every process doing the work held at once (harness/memory.py): ra-jit's, and cargo's. */
+	mem_mb?: number;
+	cargo_mem_mb?: number;
+	/** What the daemon held once the phase was over. */
+	resident_mb?: number;
 	built?: string;
 	setups?: Record<string, number>;
 };
-export type Entry = { tag?: string; store_mb?: number; phases: Record<string, Phase> };
+export type Entry = {
+	tag?: string;
+	store_mb?: number;
+	resident_ready_mb?: number;
+	resident_end_mb?: number;
+	builds?: number;
+	disk_mb?: number;
+	cargo_disk_mb?: number;
+	phases: Record<string, Phase>;
+};
 export type Run = {
 	date: string;
 	commit?: string;
@@ -34,9 +48,23 @@ export type PhaseHistory = {
 	cargoMax: Column;
 	/** Cold only: until ready in another checkout, with the store the first one filled. */
 	warmStore: Column;
+	mem: Column;
+	cargoMem: Column;
+	resident: Column;
 };
 /** The history of one `project/backend` on one machine. */
-export type ProjectHistory = { tag?: string; memory: Column; store: Column; phases: Record<string, PhaseHistory> };
+export type ProjectHistory = {
+	tag?: string;
+	memory: Column;
+	store: Column;
+	/** The daemon once ready, and after the run's edits. */
+	residentReady: Column;
+	residentEnd: Column;
+	/** On disk: ra-jit's target directory, store and home; cargo's target directory. */
+	disk: Column;
+	cargoDisk: Column;
+	phases: Record<string, PhaseHistory>;
+};
 export type Point = { date: string; commit?: string; runUrl?: string };
 export type BuildMachine = { machine: string; runs: Point[]; keys: string[]; results: Record<string, ProjectHistory> };
 export type LiveMachine = {
@@ -55,7 +83,10 @@ export type History = {
 };
 
 const MAX_RUNS = 120;
-const PHASE_NUMBERS = ['wall_s', 'cargo_s', 'min_s', 'max_s', 'cargo_min_s', 'cargo_max_s', 'warm_store_s', 'rss_mb'] as const;
+const PHASE_NUMBERS = [
+	'wall_s', 'cargo_s', 'min_s', 'max_s', 'cargo_min_s', 'cargo_max_s', 'warm_store_s', 'rss_mb', 'mem_mb', 'cargo_mem_mb', 'resident_mb',
+] as const;
+const ENTRY_NUMBERS = ['store_mb', 'resident_ready_mb', 'resident_end_mb', 'builds', 'disk_mb', 'cargo_disk_mb'] as const;
 
 // The README's order of projects (harness/benchreport.py PROJECTS) and of backends.
 const PROJECTS = ['ripgrep', 'fd', 'bat', 'hyperfine', 'just', 'axum', 'nushell', 'cargo'];
@@ -115,8 +146,12 @@ function entry(value: unknown): Entry | null {
 		}
 		phases[label] = phase;
 	}
-	const store = num(value.store_mb);
-	return { tag: str(value.tag), ...(store !== undefined && { store_mb: store }), phases };
+	const e: Entry = { tag: str(value.tag), phases };
+	for (const field of ENTRY_NUMBERS) {
+		const v = num(value[field]);
+		if (v !== undefined) e[field] = v;
+	}
+	return e;
 }
 
 function column(values: (number | undefined)[]): Column {
@@ -180,6 +215,9 @@ export function parseHistory(files: string[]): History {
 					cargoMin: at('cargo_min_s'),
 					cargoMax: at('cargo_max_s'),
 					warmStore: at('warm_store_s'),
+					mem: at('mem_mb'),
+					cargoMem: at('cargo_mem_mb'),
+					resident: at('resident_mb'),
 				};
 			}
 			const memory = entries.map((e) => {
@@ -190,6 +228,10 @@ export function parseHistory(files: string[]): History {
 				tag: entries.findLast((e) => e?.tag)?.tag,
 				memory: column(memory),
 				store: column(entries.map((e) => e?.store_mb)),
+				residentReady: column(entries.map((e) => e?.resident_ready_mb)),
+				residentEnd: column(entries.map((e) => e?.resident_end_mb)),
+				disk: column(entries.map((e) => e?.disk_mb)),
+				cargoDisk: column(entries.map((e) => e?.cargo_disk_mb)),
 				phases,
 			};
 		}

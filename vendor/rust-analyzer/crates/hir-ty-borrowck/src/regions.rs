@@ -101,6 +101,8 @@ pub(super) struct TypeTest<'db> {
     pub(super) ty: Ty<'db>,
     pub(super) lower: Rv,
     pub(super) span: MirSpan,
+    /// From a `for<'a> T: 'a` bound, which rustc reports without a code.
+    pub(super) forall: bool,
 }
 
 pub(super) struct Regions<'db> {
@@ -906,12 +908,34 @@ impl<'db> Builder<'_, '_, 'db> {
             self.well_formed(ty, at, 0);
             if let Pat::Wild = self.ctx.store[pat]
                 && let Some(initializer) = initializer
-                && let Some(local) = self.path_local(initializer)
             {
-                let value = self.regions.local_tys[local.into_raw().into_u32() as usize];
-                self.relate(value, ty, Variance::Covariant, at);
+                let value = match self.path_local(initializer) {
+                    Some(local) => {
+                        Some(self.regions.local_tys[local.into_raw().into_u32() as usize])
+                    }
+                    None => self
+                        .ascribed_place(pat)
+                        .map(|(local, projection)| self.place_ty(local, &projection).ty),
+                };
+                if let Some(value) = value {
+                    self.relate(value, ty, Variance::Covariant, at);
+                }
             }
         }
+    }
+
+    /// The place the `let` of the pattern `pat` reads its value from: the fake read lowered at
+    /// the pattern.
+    fn ascribed_place(&self, pat: hir_def::hir::PatId) -> Option<(LocalId, Vec<PlaceElem>)> {
+        self.body.basic_blocks.iter().find_map(|(_, block)| {
+            block.statements.iter().find_map(|statement| match &statement.kind {
+                StatementKind::FakeRead(place) if statement.span == MirSpan::PatId(pat) => {
+                    let place = place.as_ref();
+                    Some((place.local, place.projection.as_slice().to_vec()))
+                }
+                _ => None,
+            })
+        })
     }
 
     /// The local of the variable `expr` names, if it is a path to one of this body's.
@@ -1106,14 +1130,19 @@ impl<'db> Builder<'_, '_, 'db> {
     /// The self type and trait arguments of the impl a method is in, whose well-formedness the
     /// method assumes as it does its parameters'.
     fn impl_header_types(&mut self) -> Vec<Ty<'db>> {
-        let InferBodyId::DefWithBodyId(DefWithBodyId::FunctionId(function)) = self.body.owner
-        else {
-            return Vec::new();
-        };
         if self.ctx.closure_local.is_some() {
             return Vec::new();
         }
-        let ItemContainerId::ImplId(impl_) = function.lookup(self.ctx.db).container else {
+        let container = match self.body.owner {
+            InferBodyId::DefWithBodyId(DefWithBodyId::FunctionId(it)) => {
+                it.lookup(self.ctx.db).container
+            }
+            InferBodyId::DefWithBodyId(DefWithBodyId::ConstId(it)) => {
+                it.lookup(self.ctx.db).container
+            }
+            _ => return Vec::new(),
+        };
+        let ItemContainerId::ImplId(impl_) = container else {
             return Vec::new();
         };
         let db = self.ctx.db;
@@ -1321,7 +1350,12 @@ impl<'db> Builder<'_, '_, 'db> {
                 None => self.regions.static_rv,
             };
             if let Some(ty) = requirement.subject {
-                self.regions.type_tests.push(TypeTest { ty, lower: sub, span: requirement.span });
+                self.regions.type_tests.push(TypeTest {
+                    ty,
+                    lower: sub,
+                    span: requirement.span,
+                    forall: false,
+                });
                 continue;
             }
             let Some(&sup) = regions.get(requirement.longer) else { continue };
@@ -1467,7 +1501,12 @@ impl<'db> Builder<'_, '_, 'db> {
             self.outlives(longer, region, at);
         }
         for param in params {
-            self.regions.type_tests.push(TypeTest { ty: param, lower: region, span: at.span });
+            self.regions.type_tests.push(TypeTest {
+                ty: param,
+                lower: region,
+                span: at.span,
+                forall: false,
+            });
         }
     }
 
@@ -1694,9 +1733,46 @@ impl<'db> Builder<'_, '_, 'db> {
             }
             Rvalue::Cast(kind, operand, target) => {
                 let target = self.renumber(target.as_ref());
-                let source = self.operand_ty(operand)?;
+                let source = match kind {
+                    CastKind::PointerCoercion(hir_ty::PointerCast::ReifyFnPointer) => {
+                        self.written_callee(operand, span).or_else(|| self.operand_ty(operand))?
+                    }
+                    _ => self.operand_ty(operand)?,
+                };
                 let at = At { category: Category::Cast, span };
                 match kind {
+                    // rustc's casts between function types: what is cast is a subtype of the
+                    // function pointer it becomes, by signature.
+                    CastKind::PointerCoercion(hir_ty::PointerCast::UnsafeFnPointer) => {
+                        self.relate(source, target, Variance::Covariant, at)
+                    }
+                    CastKind::PointerCoercion(hir_ty::PointerCast::ReifyFnPointer) => {
+                        if let TyKind::FnDef(def, args) = source.kind() {
+                            let sig = self
+                                .ctx
+                                .db
+                                .callable_item_signature(def.0)
+                                .instantiate(self.interner(), args)
+                                .skip_norm_wip();
+                            let source = Ty::new_fn_ptr(self.interner(), sig);
+                            self.relate(source, target, Variance::Covariant, at);
+                        }
+                    }
+                    CastKind::PointerCoercion(hir_ty::PointerCast::ClosureFnPointer(_)) => {
+                        if let TyKind::Closure(_, args) = source.kind()
+                            && let TyKind::FnPtr(to, _) = target.kind()
+                            && let sig = args.as_closure().sig().skip_binder()
+                            && let &[tupled] = sig.inputs().as_slice()
+                            && let TyKind::Tuple(inputs) = tupled.kind()
+                            && let Some((&output, to_inputs)) =
+                                to.skip_binder().inputs_and_output.as_slice().split_last()
+                        {
+                            for (input, &to) in inputs.iter().zip(to_inputs) {
+                                self.relate(input, to, Variance::Contravariant, at);
+                            }
+                            self.relate(sig.output(), output, Variance::Covariant, at);
+                        }
+                    }
                     CastKind::PointerCoercion(hir_ty::PointerCast::Unsize) => {
                         self.unsize(source, target, at)
                     }
@@ -1712,10 +1788,18 @@ impl<'db> Builder<'_, '_, 'db> {
                 Some(target)
             }
             Rvalue::Aggregate(AggregateKind::Adt(variant, args), operands) => {
+                let store = self.ctx.store;
+                let spelled = |expr| match &store[expr] {
+                    hir_def::hir::Expr::RecordLit { path, .. } | hir_def::hir::Expr::Path(path) => {
+                        spells_generics(path)
+                    }
+                    _ => false,
+                };
                 let args = match span {
                     MirSpan::ExprId(expr)
-                        if matches!(&self.ctx.store[expr],
-                            hir_def::hir::Expr::RecordLit { path, .. } if spells_generics(path)) =>
+                        if spelled(expr)
+                            || matches!(store[expr],
+                                hir_def::hir::Expr::Call { callee, .. } if spelled(callee)) =>
                     {
                         self.written(args.as_ref())
                     }
@@ -2008,21 +2092,43 @@ impl<'db> Builder<'_, '_, 'db> {
             .iter_instantiated(self.interner(), args.as_slice())
             .map(|it| it.skip_norm_wip())
             .collect();
+        // Outliving every `'a` of the clause's own `for<'a>` is outliving `'static`.
+        let forall = |region: Region<'db>| match region.kind() {
+            RegionKind::ReBound(rustc_type_ir::BoundVarIndexKind::Bound(binder), _) => {
+                binder == rustc_type_ir::INNERMOST
+            }
+            _ => false,
+        };
         for clause in clauses {
             match clause.kind().skip_binder() {
                 ClauseKind::RegionOutlives(OutlivesPredicate(longer, shorter)) => {
+                    let shorter = match forall(shorter) {
+                        true => self.static_region(),
+                        false => shorter,
+                    };
                     if let (Some(longer), Some(shorter)) =
                         (self.region_rv(longer), self.region_rv(shorter))
                     {
                         self.outlives(longer, shorter, at);
                     }
                 }
-                ClauseKind::TypeOutlives(OutlivesPredicate(ty, region)) if type_outlives => {
+                ClauseKind::TypeOutlives(OutlivesPredicate(ty, region))
+                    if type_outlives
+                        && !rustc_type_ir::TypeVisitableExt::has_escaping_bound_vars(&ty) =>
+                {
+                    let original = region;
                     let region = match region.kind() {
                         RegionKind::ReStatic => self.static_region(),
+                        _ if forall(region) => self.static_region(),
                         _ => region,
                     };
+                    let tests = self.regions.type_tests.len();
                     self.type_outlives(ty, region, at);
+                    if forall(original) {
+                        for test in &mut self.regions.type_tests[tests..] {
+                            test.forall = true;
+                        }
+                    }
                 }
                 ClauseKind::Trait(predicate) if type_outlives => {
                     let trait_ref = predicate.trait_ref;

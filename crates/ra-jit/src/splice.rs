@@ -514,7 +514,7 @@ fn laid_out(path: &Path, image: &Image) -> std::io::Result<Vec<debug::Moved>> {
     Ok(moved)
 }
 
-/// An executable open to be written in place, under an exclusive lock on it taken first:
+/// An executable open to be written in place, on Unix under an exclusive lock on it taken first:
 /// on Linux a program started while its file is open for writing is refused ("text file
 /// busy"), and a client starts one under a shared lock (`cargo::run`). The file is closed
 /// before the lock is let go.
@@ -526,6 +526,9 @@ struct Writing {
 impl Writing {
     fn open(path: &Path) -> std::io::Result<Writing> {
         let lock = File::open(path)?;
+        // On Windows a lock keeps out this process's own writes too, and a program that runs
+        // is moved aside there rather than refused.
+        #[cfg(unix)]
         lock.lock()?;
         let file = OpenOptions::new().read(true).write(true).open(path)?;
         Ok(Writing { file, _lock: lock })
@@ -2017,8 +2020,18 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn a_program_written_in_place_starts_after_the_write() {
-        let program = std::env::temp_dir().join(format!("ra-jit-writing-{}", std::process::id()));
-        std::fs::copy("/usr/bin/true", &program).unwrap();
+        // `true` from PATH (NixOS has no /usr/bin/true), under its own name: a coreutils of
+        // one binary is the program its name says.
+        let path = std::env::var_os("PATH").unwrap_or_default();
+        let found =
+            std::env::split_paths(&path).map(|dir| dir.join("true")).find(|it| it.is_file());
+        let dir = std::env::temp_dir().join(format!("ra-jit-writing-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let program = dir.join("true");
+        std::fs::copy(found.expect("a `true` on PATH"), &program).unwrap();
+        // A copy out of the Nix store is read-only, as the store is.
+        let writable = std::os::unix::fs::PermissionsExt::from_mode(0o755);
+        std::fs::set_permissions(&program, writable).unwrap();
         let writing = Writing::open(&program).unwrap();
         let client = std::thread::spawn({
             let program = program.clone();
@@ -2031,7 +2044,7 @@ mod tests {
         let written = std::time::Instant::now();
         drop(writing);
         let (started, ended) = client.join().unwrap();
-        std::fs::remove_file(&program).unwrap();
+        std::fs::remove_dir_all(&dir).unwrap();
         assert!(started > written, "started while the file was open for writing");
         assert!(ended.unwrap().success());
     }
