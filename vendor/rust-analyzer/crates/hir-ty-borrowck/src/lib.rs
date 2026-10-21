@@ -69,6 +69,9 @@ pub struct BorrowckDiagnostic {
     pub code: &'static str,
     pub span: MirSpan,
     pub message: String,
+    /// Reported at the function's signature rather than at `span`, as rustc reports an
+    /// `impl Trait`'s hidden type.
+    pub at_signature: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default, SalsaValue)]
