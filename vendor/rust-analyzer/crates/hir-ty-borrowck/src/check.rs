@@ -8,6 +8,7 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use rustc_type_ir::inherent::IntoKind;
 
 use hir_ty::{
+    db::InternedClosureId,
     mir::{
         AsmOperand, BorrowKind, LocalId, MirBody, MirSpan, MutBorrowKind, Operand, OperandKind,
         PlaceElem, ProjectionElem, Rvalue, StatementKind, StoredPlace, TerminatorKind,
@@ -26,17 +27,20 @@ use super::{
     regions::{self, Category, RegionValues, Regions, UniversalKind},
 };
 
+/// Checks `body`, given what the closures it makes need of it; in a closure, returns what it
+/// needs of its creator, with how many regions its type has.
 pub(super) fn check<'db>(
     ctx: &Ctx<'_, 'db>,
     body: &MirBody<'db>,
+    requirements: &FxHashMap<InternedClosureId<'db>, (usize, Vec<regions::Requirement>)>,
     out: &mut Vec<BorrowckDiagnostic>,
-) {
+) -> (usize, Vec<regions::Requirement>) {
     let cfg = Cfg::new(body);
     let moves = MoveData::gather(ctx, body, &cfg);
     let flow = InitFlow::compute(body, &cfg, &moves);
     let dominators = Dominators::new(&cfg);
     let capture_temps = capture_temps(body);
-    let regions = regions::build(ctx, body, &cfg);
+    let regions = regions::build(ctx, body, &cfg, requirements);
     let count = ctx.infcx.num_region_vars();
     let live = liveness::region_liveness(ctx, body, &cfg, &moves, &regions, count);
     let live_loans_input = (ctx.mode == Mode::Polonius).then(|| live.clone());
@@ -102,6 +106,7 @@ pub(super) fn check<'db>(
         reservation_reported: FxHashSet::default(),
         static_muts: static_muts(ctx, body),
         union_literals: union_literals(ctx),
+        requirements: Vec::new(),
     };
     for &block in &cfg.order {
         checker.uninit = flow.uninit_entry[index(block)].clone();
@@ -127,6 +132,7 @@ pub(super) fn check<'db>(
     checker.report_region_errors();
     out.extend(checker.errors.into_iter().flatten());
     out.extend(checker.move_reported.into_values().map(|(_, _, error)| error));
+    (regions.creator_positions.len(), checker.requirements)
 }
 
 fn union_literals(ctx: &Ctx<'_, '_>) -> FxHashSet<ExprId> {
@@ -292,6 +298,8 @@ struct Checker<'a, 'b, 'db> {
     /// Record literals and the values of their fields, whose lowering assigns a field of the
     /// literal where rustc assigns the whole of it (it matters for a union).
     union_literals: FxHashSet<ExprId>,
+    /// In a closure, what it needs of its creator's regions.
+    requirements: Vec<regions::Requirement>,
 }
 
 impl<'a, 'db> Checker<'a, '_, 'db> {
@@ -435,6 +443,36 @@ impl<'a, 'db> Checker<'a, '_, 'db> {
             | TerminatorKind::CoroutineDrop
             | TerminatorKind::FalseEdge { .. }
             | TerminatorKind::FalseUnwind { .. } => (),
+        }
+        if matches!(
+            kind,
+            TerminatorKind::Call { .. }
+                | TerminatorKind::Drop { .. }
+                | TerminatorKind::DropAndReplace { .. }
+                | TerminatorKind::Assert { .. }
+        ) {
+            self.check_for_invalidation_at_unwind();
+        }
+    }
+
+    /// rustc's `check_for_invalidation_at_exit` at the `resume` its unwind paths end in, which
+    /// rust-analyzer's MIR does not have: a terminator that may unwind takes there every loan
+    /// in scope, and those whose region outlives a universal one are still in scope at the
+    /// `resume`, so each of them is reported, not only the first a `StorageDead` meets.
+    fn check_for_invalidation_at_unwind(&mut self) {
+        let in_scope: Vec<usize> = self.in_scope.iter().collect();
+        for id in in_scope {
+            let loan = &self.loans.loans[id];
+            if loan.projection.contains(&ProjectionElem::Deref) {
+                continue;
+            }
+            let outlives_universal = self
+                .values
+                .universals_of(loan.region)
+                .any(|it| self.regions.universals[it].1 != UniversalKind::FnBody);
+            if outlives_universal {
+                self.report_does_not_live_long_enough(id);
+            }
         }
     }
 
@@ -766,7 +804,9 @@ impl<'a, 'db> Checker<'a, '_, 'db> {
                 regions::constraint_path(self.regions, self.region_count, loan.region, target);
             if let Some(blamed) = regions::blame(&path) {
                 match (capture, blamed.category) {
-                    (Some(closure), Category::Return | Category::CallArgument) => {
+                    (Some(closure), Category::Return | Category::CallArgument)
+                        if !blamed.from_closure =>
+                    {
                         let what = self.quoted(place, "value");
                         self.report(
                             "E0373",
@@ -775,7 +815,7 @@ impl<'a, 'db> Checker<'a, '_, 'db> {
                         );
                         return;
                     }
-                    (None, Category::Return) => {
+                    (None, Category::Return) if !blamed.from_closure => {
                         let span = if blamed.span == MirSpan::Unknown {
                             loan.span
                         } else {
@@ -812,8 +852,12 @@ impl<'a, 'db> Checker<'a, '_, 'db> {
             return;
         }
         let universals = &self.regions.universals;
+        let in_closure = self.ctx.closure_local.is_some();
         for (longer, &(longer_rv, kind)) in universals.iter().enumerate() {
             if matches!(kind, UniversalKind::Static | UniversalKind::FnBody) {
+                continue;
+            }
+            if in_closure && self.propagate(longer) {
                 continue;
             }
             let shorter =
@@ -826,7 +870,22 @@ impl<'a, 'db> Checker<'a, '_, 'db> {
             let named_anon = |a: UniversalKind, b: UniversalKind| {
                 a == UniversalKind::Named && b == UniversalKind::AnonParam
             };
-            let (code, message) = if !self.regions.is_impl_item
+            // In a closure, rustc's `report_region_error` names what of the closure's own goes
+            // to its creator by how it gets there.
+            let escapes = in_closure
+                && matches!(shorter_kind, UniversalKind::Creator | UniversalKind::Static);
+            let (code, message) = if escapes
+                && blamed.category == Category::Return
+                && self.regions.closure_env == Some(longer)
+                && self.ctx.closure_kind == Some(rustc_type_ir::ClosureKind::FnMut)
+            {
+                ("", "captured variable cannot escape `FnMut` closure body".to_owned())
+            } else if escapes
+                && matches!(blamed.category, Category::Assignment | Category::CallArgument)
+            {
+                ("E0521", "borrowed data escapes outside of closure".to_owned())
+            } else if !self.regions.is_impl_item
+                && !in_closure
                 && (named_anon(kind, shorter_kind) || named_anon(shorter_kind, kind))
             {
                 ("E0621", "explicit lifetime required in the type of a parameter".to_owned())
@@ -842,6 +901,10 @@ impl<'a, 'db> Checker<'a, '_, 'db> {
                 _ => blamed.span,
             };
             self.report(code, span, message);
+        }
+        // A closure's type tests are its creator's to prove too.
+        if in_closure {
+            return;
         }
         let mut reported = FxHashSet::default();
         for test in &self.regions.type_tests {
@@ -870,6 +933,88 @@ impl<'a, 'db> Checker<'a, '_, 'db> {
                 break;
             }
         }
+    }
+
+    /// rustc's `try_propagate_universal_region_error`, for every universal region `longer`
+    /// is made to outlive that it is not known to: what a closure needs of a region that
+    /// outlives one of its creator's becomes a requirement on the creator's regions, from the
+    /// largest of them `longer` outlives to the smallest that outlive the shorter one. `false`
+    /// when `longer` outlives none of the creator's, which is an error in the closure.
+    fn propagate(&mut self, longer: usize) -> bool {
+        let known = self.regions;
+        let universals = &known.universals;
+        let non_local =
+            |it: usize| matches!(universals[it].1, UniversalKind::Creator | UniversalKind::Static);
+        let knows = |a: usize, b: usize| known.knows(a, b);
+        let longer_minus: Vec<usize> = if non_local(longer) {
+            vec![longer]
+        } else {
+            let lower: Vec<usize> =
+                (0..universals.len()).filter(|&it| non_local(it) && knows(longer, it)).collect();
+            lower
+                .iter()
+                .copied()
+                .filter(|&it| {
+                    !lower.iter().any(|&other| other != it && knows(other, it) && !knows(it, other))
+                })
+                .collect()
+        };
+        if longer_minus.is_empty() {
+            return false;
+        }
+        let longer_rv = universals[longer].0;
+        let failing: Vec<usize> =
+            self.values.universals_of(longer_rv).filter(|&it| !knows(longer, it)).collect();
+        for shorter in failing {
+            let path = regions::constraint_path(
+                known,
+                self.region_count,
+                longer_rv,
+                universals[shorter].0,
+            );
+            let Some(blamed) = regions::blame(&path) else { continue };
+            let shorter_plus: Vec<usize> = if non_local(shorter) {
+                vec![shorter]
+            } else {
+                let upper: Vec<usize> = (0..universals.len())
+                    .filter(|&it| non_local(it) && knows(it, shorter))
+                    .collect();
+                upper
+                    .iter()
+                    .copied()
+                    .filter(|&it| {
+                        !upper
+                            .iter()
+                            .any(|&other| other != it && knows(it, other) && !knows(other, it))
+                    })
+                    .collect()
+            };
+            for &minus in &longer_minus {
+                if universals[minus].1 == UniversalKind::Static {
+                    continue;
+                }
+                let outlived: Vec<usize> =
+                    shorter_plus.iter().copied().filter(|&it| knows(minus, it)).collect();
+                let chosen = if outlived.is_empty() { &shorter_plus } else { &outlived };
+                let Some(&longer) = known.creator_positions.get(&minus) else { continue };
+                for &plus in chosen {
+                    let shorter = match universals[plus].1 {
+                        UniversalKind::Static => None,
+                        _ => match known.creator_positions.get(&plus) {
+                            Some(&it) => Some(it),
+                            None => continue,
+                        },
+                    };
+                    self.requirements.push(regions::Requirement {
+                        longer,
+                        shorter,
+                        category: blamed.category,
+                        span: blamed.span,
+                    });
+                }
+            }
+        }
+        true
     }
 
     /// The expression a block's value comes from, where rustc points at a returned value.
