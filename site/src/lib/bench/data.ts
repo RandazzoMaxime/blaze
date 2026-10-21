@@ -8,6 +8,7 @@ export type Phase = {
 	max_s?: number;
 	cargo_min_s?: number;
 	cargo_max_s?: number;
+	warm_store_s?: number;
 	rss_mb?: number;
 	built?: string;
 	setups?: Record<string, number>;
@@ -24,7 +25,16 @@ export type Run = {
 };
 /** One number per run, oldest first; `null` where the run did not measure it, and empty when none did. */
 export type Column = (number | null)[];
-export type PhaseHistory = { wall: Column; cargo: Column; min: Column; max: Column; cargoMin: Column; cargoMax: Column };
+export type PhaseHistory = {
+	wall: Column;
+	cargo: Column;
+	min: Column;
+	max: Column;
+	cargoMin: Column;
+	cargoMax: Column;
+	/** Cold only: until ready in another checkout, with the store the first one filled. */
+	warmStore: Column;
+};
 /** The history of one `project/backend` on one machine. */
 export type ProjectHistory = { tag?: string; memory: Column; store: Column; phases: Record<string, PhaseHistory> };
 export type Point = { date: string; commit?: string; runUrl?: string };
@@ -45,7 +55,7 @@ export type History = {
 };
 
 const MAX_RUNS = 120;
-const PHASE_NUMBERS = ['wall_s', 'cargo_s', 'min_s', 'max_s', 'cargo_min_s', 'cargo_max_s', 'rss_mb'] as const;
+const PHASE_NUMBERS = ['wall_s', 'cargo_s', 'min_s', 'max_s', 'cargo_min_s', 'cargo_max_s', 'warm_store_s', 'rss_mb'] as const;
 
 // The README's order of projects (harness/benchreport.py PROJECTS) and of backends.
 const PROJECTS = ['ripgrep', 'fd', 'bat', 'hyperfine', 'just', 'axum', 'nushell', 'cargo'];
@@ -169,6 +179,7 @@ export function parseHistory(files: string[]): History {
 					max: at('max_s'),
 					cargoMin: at('cargo_min_s'),
 					cargoMax: at('cargo_max_s'),
+					warmStore: at('warm_store_s'),
 				};
 			}
 			const memory = entries.map((e) => {

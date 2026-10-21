@@ -217,6 +217,9 @@
 				title="Cold build: cargo, and ra-jit until ready"
 				series={[
 					{ label: 'ra-jit', tone: 'ours', values: cold?.wall ?? [] },
+					...(cold?.warmStore.some((v) => v !== null)
+						? [{ label: 'ra-jit, warm store', tone: 'ours' as const, dashed: true, values: cold.warmStore }]
+						: []),
 					{ label: 'cargo', tone: 'other', values: cold?.cargo ?? [] },
 				]}
 				{runs} {active} onactive={(i) => (activeWanted = i)} scale="linear" format={seconds} tick={secondsTick}
