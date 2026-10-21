@@ -27,6 +27,8 @@ you send them, including fixes you find here and want to upstream.
     docs/reports/             working reports, one per piece of work, as written at the time
     SECURITY.md               what to know before sharing a store, and how to report a problem
     vendor/rust-analyzer/     rust-analyzer with ra-jit's changes, a git subtree
+    vendor/rust-analyzer/crates/hir-ty-borrowck/
+                              the borrow checker, a crate next to hir-ty (borrowck.md)
     vendor/rustc_abi/         rustc's layout crate, copied from the 1.99.0 tag, a git subtree
     vendor/subtree.py         moves vendor/ changes to the forks, and the forks and upstream into vendor/
     vendor/source.rev         the commit of the old development branch this tree last took from
