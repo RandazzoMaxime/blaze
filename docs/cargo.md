@@ -96,8 +96,9 @@ another, so a core cargo leaves idle is still not free. With `RA_JIT_SPARE=0` th
 within a few percent of cargo's, and the daemon is ready later, as it loads the workspace only
 then: 11.8 s for just, 8.2 s for ripgrep and 46.7 s for nushell. ripgrep's first edit, in
 `main`, moves the lines of a generic function below it, which rustc copied into its callers:
-the patch replaces those copies too. On macOS that patch's frames are more than the room of
-the unwind table of rustc's link (244 KB in 218 KB), and the edit is built in full.
+the patch replaces those copies too. On macOS that patch's frames (244 KB) are more than the
+unwind table of rustc's link (218 KB) they would take the place of, so the splice moves both
+tables into the room the link leaves after its load commands, and the edit is a patch there too.
 
 ## When cargo builds instead
 

@@ -275,7 +275,7 @@ noted before it changed, an edit that is more than function bodies, an edit of a
 in (the outline's copied fingerprint tells), a changed static, and `include!`d or asset
 files take a build in full, and the build log says which (`no patch: ...`). So does a patch
 the splice can't place: one that calls a libc function the executable does not import, or
-has frames that do not fit a small executable's unwind table on macOS. A thread-local of
+has frames that do not fit the header's room on macOS, with the program's own beside them. A thread-local of
 the executable is reached as rustc's code reaches it: on Linux x86-64 the general-dynamic
 sequence is rewritten to the executable's local one (an offset from `%fs`), on macOS through
 the descriptor's slot.

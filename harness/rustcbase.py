@@ -181,9 +181,10 @@ SCENARIOS = {
     "body": ([[edit(M, "    x * 3\n", "    x * 4\n")]], ["patch"], 0, {}),
     "second": ([[edit(M, "    x * 3\n", "    x * 4\n")],
                 [edit(M, "    x * 4\n", "    x * 5\n"), edit(M, "x + 10", "x + 20")]], ["patch", "patch"], 0, {}),
-    # Moves every function below: their frames are more than the room this small executable's
-    # unwind table leaves on macOS (a real program's is far larger), and it is built in full.
-    "moved-panic": ([[edit(M, "    x * 3\n", "    let y = x * 3;\n    y + 1\n")]], [None], 0, {}),
+    # Moves every function below: on macOS their frames are more than this small executable's
+    # unwind table, so both tables move into the header's room, and the panic unwinds through
+    # the patch's frames there.
+    "moved-panic": ([[edit(M, "    x * 3\n", "    let y = x * 3;\n    y + 1\n")]], ["patch"], 0, {}),
     "closure": ([[edit(M, "x + 10", "x + 11")]], ["patch"], 0, {}),
     # A new item is more than bodies: rustc's copies of what sees the file may differ.
     "new-fn": ([[edit(M, "    x * 3\n}\n", "    helper(x) * 3\n}\n\nfn helper(x: u64) -> u64 {\n    x + 2\n}\n")]],
@@ -217,10 +218,10 @@ CACHED_SCENARIOS = {
     "cached-then-reached": ([[edit(M, "    acc + 1\n", "    acc + 2\n")],
                              [edit(M, "rotate_left(17)", "rotate_left(19)")],
                              [edit(M, "rotate_left(19)", "rotate_left(17)")]], ["full", "patch", "patch"], 0, {}),
-    # Rustc's copy of the cached function calls the patched one. The patch's frames can be more
-    # than this small executable's unwind table leaves on macOS.
+    # Rustc's copy of the cached function calls the patched one. On macOS the patch's frames
+    # are more than this small executable's unwind table.
     "cached-reached": ([[edit(M, "    7\n", "    8\n")],
-                        [edit(M, "rotate_left(17)", "rotate_left(19)")]], ["patch", None], 0, {}),
+                        [edit(M, "rotate_left(17)", "rotate_left(19)")]], ["patch", "patch"], 0, {}),
 }
 SCENARIOS.update(CACHED_SCENARIOS)
 
