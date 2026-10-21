@@ -8,6 +8,9 @@ All notable changes to ra-jit are written here. The format follows
 
 ### Added
 
+- The `bench-bun` workflow measures bun nightly on the benchmark machine (edits and runtime,
+  into the README's bun section), in `nix develop .#bench-bun`: bun's nightly and what its own
+  build of its C and C++ needs. Too slow for every push.
 - `benchreport.py --name NAME` stores a project measured on its own in
   `docs/benchmarks/NAME-<os>-<arch>.json` (`runtime-NAME-…` for the runtime) and writes it
   between `<!-- bench-NAME:start -->`/`<!-- runbench-NAME:start -->` and their ends in the
