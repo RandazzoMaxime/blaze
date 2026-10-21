@@ -39,7 +39,16 @@
 		).sort(ranked(SETUP_ORDER)),
 	);
 
-	type Row = { label: string; cargo?: number; ours?: number; fallback: boolean; setups: Record<string, number>; fastest?: number };
+	type Row = {
+		label: string;
+		cargo?: number;
+		ours?: number;
+		cargoMem?: number;
+		oursMem?: number;
+		fallback: boolean;
+		setups: Record<string, number>;
+		fastest?: number;
+	};
 	function table(entry: Entry) {
 		const phases = Object.keys(entry.phases).sort(ranked(EDIT_ORDER));
 		const setups = unique(phases.flatMap((p) => Object.keys(entry.phases[p].setups ?? {}))).sort(ranked(SETUP_ORDER));
@@ -51,12 +60,15 @@
 				label: EDITS[p] ?? p,
 				cargo: ph.cargo_s,
 				ours: ph.wall_s,
+				cargoMem: ph.cargo_mem_mb,
+				oursMem: ph.mem_mb,
 				fallback: p !== 'cold' && !!ph.built && ph.built !== 'daemon',
 				setups: ph.setups ?? {},
 				fastest: known.length ? Math.min(...known) : undefined,
 			};
 		});
-		return { setups, rows };
+		const memory = rows.some((r) => r.oursMem !== undefined || r.cargoMem !== undefined);
+		return { setups, rows, memory };
 	}
 	/** The fastest way cargo built it, of plain cargo and the setups (not check, which builds no program). */
 	const fastestCargo = (row: Row) => {
@@ -99,6 +111,20 @@
 			}),
 	);
 	let editDomain = $derived(logDomain(editCharts.flatMap((c) => c.series.flatMap((s) => [...s.values, ...(s.lo ?? []), ...(s.hi ?? [])]))));
+	let memoryCharts = $derived(
+		Object.keys(history?.phases ?? {})
+			.sort(ranked(EDIT_ORDER))
+			.filter((p) => history!.phases[p].mem.length || history!.phases[p].cargoMem.length)
+			.map((p) => {
+				const ph = history!.phases[p];
+				const series: Series[] = [
+					{ label: 'ra-jit', tone: 'ours', values: ph.mem },
+					{ label: 'cargo', tone: 'other', values: ph.cargoMem },
+				];
+				return { phase: p, title: EDITS[p] ?? p, series };
+			}),
+	);
+	let memoryDomain = $derived(logDomain(memoryCharts.flatMap((c) => c.series.flatMap((s) => s.values))));
 	let cold = $derived(history?.phases.cold);
 
 	// History of live edits.
@@ -156,6 +182,7 @@
 							<th class="num">cargo</th>
 							<th class="num">ra-jit</th>
 							<th class="num">Faster</th>
+							{#if t.memory}<th class="num"><abbr title="The most every process doing the work held at once">cargo memory</abbr></th><th class="num"><abbr title="The daemon, its workers and the command, at their peak">ra-jit memory</abbr></th>{/if}
 							{#each t.setups as s (s)}<th class="num"><abbr title={SETUPS[s]?.[1] ?? s}>{SETUPS[s]?.[0] ?? s}</abbr></th>{/each}
 							{#if t.setups.length}<th class="num">vs fastest cargo</th>{/if}
 						</tr>
@@ -169,6 +196,7 @@
 									{seconds(row.ours)}{#if row.fallback}<abbr class="mark" title="The daemon handed this edit to cargo">&nbsp;(c)</abbr>{/if}
 								</td>
 								<td class="num ratio">{speedup(row.cargo, row.ours)}</td>
+								{#if t.memory}<td class="num">{megabytes(row.cargoMem)}</td><td class="num">{megabytes(row.oursMem)}</td>{/if}
 								{#each t.setups as s (s)}
 									<td class="num" class:best={s !== 'check' && row.setups[s] === row.fastest}>{seconds(row.setups[s])}</td>
 								{/each}
@@ -211,6 +239,19 @@
 			{/each}
 		</div>
 
+		{#if memoryCharts.length}
+			<h3>{projectName(project, history?.tag)}: memory while it builds</h3>
+			<p class="dim note">
+				The most every process doing the work held at once: for ra-jit the daemon, its workers and the command; for plain
+				cargo, cargo itself, rustc and the linker (<a href="{REPO}/blob/main/docs/benchmarks.md#memory-and-disk">how</a>). Log scale.
+			</p>
+			<div class="grid">
+				{#each memoryCharts as c (c.phase)}
+					<Chart title={c.title} series={c.series} {runs} {active} onactive={(i) => (activeWanted = i)} format={megabytes} tick={megabytesTick} domain={memoryDomain} />
+				{/each}
+			</div>
+		{/if}
+
 		<h3>Cold build, memory and store</h3>
 		<div class="grid">
 			<Chart
@@ -223,6 +264,24 @@
 					{ label: 'cargo', tone: 'other', values: cold?.cargo ?? [] },
 				]}
 				{runs} {active} onactive={(i) => (activeWanted = i)} scale="linear" format={seconds} tick={secondsTick}
+			/>
+			<Chart
+				title="Daemon between edits"
+				series={[
+					{ label: 'after the edits', tone: 'ours', values: history?.residentEnd ?? [] },
+					{ label: 'once ready', tone: 'other', dashed: true, values: history?.residentReady ?? [] },
+				]}
+				{runs} {active} onactive={(i) => (activeWanted = i)} scale="linear" format={megabytes} tick={megabytesTick}
+				empty="Not measured in these runs yet."
+			/>
+			<Chart
+				title="On disk"
+				series={[
+					{ label: 'ra-jit: target, store, home', tone: 'ours', values: history?.disk ?? [] },
+					{ label: 'cargo: target', tone: 'other', values: history?.cargoDisk ?? [] },
+				]}
+				{runs} {active} onactive={(i) => (activeWanted = i)} scale="linear" format={megabytes} tick={megabytesTick}
+				empty="Not measured in these runs yet."
 			/>
 			<Chart
 				title="Daemon peak memory"

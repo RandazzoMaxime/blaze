@@ -36,11 +36,15 @@ The result also names the commit of ra-jit, the date and the machine
 into the README's table and docs/benchmarks.md.
 
 For every phase the result has the wall time of the command, cargo's time for the same
-step, the most memory the daemon's workers have held so far, who built it (the daemon, or
+step, the memory of both sides (`memory`: the most every process doing the work held at once,
+and the largest of them; harness/memory.py, docs/benchmarks.md "Memory and disk"), the most
+the daemon's workers have held so far (`rss_mb`), who built it (the daemon, or
 cargo and why), whether the daemon added the change to the linked program or linked again
 (and why), how many functions it compiled, and what it timed itself: the steps of the build
 one after another, what its threads spent on each step of compiling, and why a build started
-over when it did.
+over when it did. The result also has what the daemon held once ready and after each phase
+(`resident`), and what each side has on disk at the end (`disk_mb`); the runtime phase has each
+program's peak and size.
 
 `--compare` reads two results and exits 1 when a phase of the second is slower or larger
 than in the first by more than the threshold, was built by cargo where the daemon built it,
@@ -50,7 +54,7 @@ The ra-jit of a backend is `RA_JIT_BIN` (cranelift) or `RA_JIT_LLVM_BIN` (llvm).
 """
 import glob, json, os, platform, re, shutil, statistics, subprocess, sys, tempfile, time
 
-import cargo_ra_jit
+import cargo_ra_jit, memory
 from cargo_ra_jit import HERE, ROOT, TOOLCHAIN, Side, difference, fetch, how_built, program_output, test_results, timed, wait_warm
 
 LET = "\n    let _bench_edit = 1u32;"
@@ -292,14 +296,28 @@ class Daemon:
     """The daemon's workers for one checkout: their memory and what they logged."""
 
     def __init__(self, side):
-        self.side, self.read, self.peak = side, {}, 0
+        self.side, self.read, self.peak, self.sampled = side, {}, 0, 0
+
+    def pid(self):
+        _, status = self.side.cargo("status")
+        found = re.search(r"^daemon: pid (\d+)", status.stdout, re.M)
+        return int(found[1]) if found else None
+
+    def resident_mb(self):
+        """What the daemon and every process below it (its workers) hold now."""
+        pid = self.pid()
+        return memory.resident_mb([pid]) if pid else 0
 
     def workers(self):
         _, status = self.side.cargo("status")
         return [(int(pid), log) for pid, log in re.findall(r"worker: pid (\d+), .*, log (.*)$", status.stdout, re.M)]
 
     def peak_mb(self):
-        """The most memory the workers have held at once so far, summed over those there are."""
+        """The most memory the workers have held at once so far, summed over those there are:
+        their VmHWM, or where there is none (macOS) the sampled peak of the daemon's tree."""
+        if not os.path.isdir("/proc/self"):
+            self.peak = max(self.peak, self.sampled)
+            return self.peak
         total = 0
         for pid, _ in self.workers():
             try:
@@ -320,6 +338,40 @@ class Daemon:
             time.sleep(0.02)
         self.read.update((log, len(whole)) for log, whole in logs.items())
         return text
+
+
+def metered(side, args, daemon=None, sampler=None, command="build"):
+    """`cargo [ra-jit] COMMAND ARGS` on `side`, timed, and the memory of what did the work
+    (memory.py): the command's tree (cargo, rustc, build scripts, the linker) and, given the
+    `daemon`, the daemon's (its workers and what they run). `peak_mb` is the most all of them
+    held at once, `largest_mb` the largest one process held."""
+    own = sampler is None
+    sampler = sampler or memory.Sampler()
+    if daemon:
+        sampler.add(daemon.pid())
+    if own:
+        sampler.start()
+    took, ran, used = memory.run(side.argv(command, *args), side.ws, side.env, 7200, sampler=sampler)
+    if own:
+        sampler.stop()
+    used = dict(peak_mb=max(sampler.peak_mb, used["largest_mb"]), largest_mb=max(used["largest_mb"], sampler.largest_mb))
+    if daemon:
+        daemon.sampled = max(daemon.sampled, used["peak_mb"])
+    return took, ran, used
+
+
+def memory_phase(rows, resident=None):
+    """The memory of a phase from its runs, each a pair of what `metered` said of ra-jit and of
+    cargo: the median and the most of the peak of each side, and the median of its largest process.
+    `resident` is what the daemon held once the phase was over."""
+    def side(used):
+        peaks = [u["peak_mb"] for u in used]
+        return dict(peak_mb=round(statistics.median(peaks)), peak_max_mb=max(peaks),
+                    largest_mb=round(statistics.median(u["largest_mb"] for u in used)))
+    result = {"ra-jit": side([r[0] for r in rows]), "cargo": side([r[1] for r in rows])}
+    if resident is not None:
+        result["ra-jit"]["resident_mb"] = resident
+    return result
 
 
 def link_kind(text):
@@ -427,6 +479,15 @@ def setup_times(setups, samples):
     return result
 
 
+def disk(ws, ours, theirs):
+    """What each side has on disk, in megabytes as `du` counts them (memory.disk_mb): ra-jit's
+    target directory (cargo's own build, which `cargo ra-jit build` starts with, and the
+    daemon's programs), its store and its home (workers' files, logs), and cargo's target
+    directory."""
+    return {"target": memory.disk_mb(os.path.join(ws, "target")), "store": memory.disk_mb(ours.env["RA_JIT_CACHE"]),
+            "home": memory.disk_mb(ours.env["RA_JIT_HOME"]), "cargo target": memory.disk_mb(theirs.env["CARGO_TARGET_DIR"])}
+
+
 def store_mb(path):
     total = 0
     for root, _, files in os.walk(path):
@@ -472,7 +533,8 @@ def measure(name, spec, backend, runs, work, reference_dir, cold_runs=1, setup_n
         return {setup.name: setup.build(build) for setup in setups}
 
     def both():
-        (took, mine), (reference, other) = ours.cargo("build", *build), theirs.cargo("build", *build)
+        (took, mine, used), (reference, other, cargo_used) = metered(ours, build, daemon), metered(theirs, build)
+        builds[0] += 1
         for side, ran in (("ra-jit", mine), ("cargo", other)):
             if ran.returncode != 0:
                 raise Failed(f"{name} {backend}: the {side} build failed:\n{ran.stderr[-3000:]}")
@@ -480,7 +542,7 @@ def measure(name, spec, backend, runs, work, reference_dir, cold_runs=1, setup_n
         if built != "daemon":
             # A build cargo did has the daemon load again; the next one is not timed against that.
             wait_warm(ours, ws)
-        return took, reference, built, others()
+        return took, reference, built, others(), used, cargo_used
 
     def runs_right(label):
         if run is None:
@@ -491,26 +553,35 @@ def measure(name, spec, backend, runs, work, reference_dir, cold_runs=1, setup_n
 
     def report(label, phase):
         phases[label] = phase
-        print(f"  {label:10} ra-jit {phase['wall_s']:8.3f}s  cargo {phase['cargo_s']:8.3f}s  rss {phase['rss_mb']:6} MB  "
+        held = phase.get("memory") or {}
+        mem = (f"peak ra-jit {held['ra-jit']['peak_mb']:6} MB  cargo {held['cargo']['peak_mb']:6} MB  " +
+               (f"daemon {held['ra-jit']['resident_mb']:6} MB  " if "resident_mb" in held["ra-jit"] else "")) if held else ""
+        print(f"  {label:10} ra-jit {phase['wall_s']:8.3f}s  cargo {phase['cargo_s']:8.3f}s  {mem}"
               f"{phase['built'][:60]}  {phase.get('link') or ''}", flush=True)
         if phase.get("setups"):
             print("             " + "  ".join(f"{s} {t['median_s']:.3f}s" if t.get("median_s") is not None else f"{s} failed"
                                        for s, t in phase["setups"].items()), flush=True)
 
-    def cold_ra_jit(side, label):
-        """`cargo ra-jit build` from nothing on `side`, and the wait until its daemon is ready."""
-        took, mine = side.cargo("build", *build)
-        if mine.returncode != 0:
-            raise Failed(f"{name} {backend}: the first `cargo ra-jit build` ({label}) failed:\n{mine.stderr[-3000:]}")
-        warm, states = wait_warm(side, side.ws)
+    def cold_ra_jit(side, label, watched):
+        """`cargo ra-jit build` from nothing on `side`, and the wait until its daemon is ready;
+        with the memory of both, until ready (the daemon is the command's child when it starts,
+        so the sampler finds it), and what the daemon holds once ready."""
+        with memory.Sampler() as sampler:
+            took, mine, used = metered(side, build, sampler=sampler)
+            if mine.returncode != 0:
+                raise Failed(f"{name} {backend}: the first `cargo ra-jit build` ({label}) failed:\n{mine.stderr[-3000:]}")
+            warm, states = wait_warm(side, side.ws)
         if states != ["ready"]:
             raise Failed(f"{name} {backend}: the daemon did not get ready ({label}): {states}\n{mine.stderr[-3000:]}")
-        return took, warm, mine
+        used = dict(peak_mb=max(sampler.peak_mb, used["largest_mb"]), largest_mb=max(used["largest_mb"], sampler.largest_mb),
+                    resident_mb=watched.resident_mb())
+        watched.sampled = max(watched.sampled, used["peak_mb"])
+        return took, warm, mine, used
 
     # Each cold run starts from nothing: no target directories, an empty store and a daemon of
     # its own. The builds take turns, never at once: they would share the cores (a daemon that
     # is ready is idle). The last one's daemon is the one the edits are measured with.
-    colds = []
+    colds, builds = [], [0]
     for turn in range(cold_runs):
         ours.cargo("stop")
         store = os.path.join(work, f"store-{name}-{backend}-{turn}")
@@ -518,21 +589,24 @@ def measure(name, spec, backend, runs, work, reference_dir, cold_runs=1, setup_n
             shutil.rmtree(path, ignore_errors=True)
         ours.env.update(RA_JIT_HOME=home(turn), RA_JIT_CACHE=store)
         daemon = Daemon(ours)
-        took, warm, mine = cold_ra_jit(ours, "empty store")
+        took, warm, mine, used = cold_ra_jit(ours, "empty store", daemon)
         said, built, peak = daemon.said(), how_built(mine.stderr), daemon.peak_mb()
-        reference, other = theirs.cargo("build", *build)
+        reference, other, cargo_used = metered(theirs, build)
         if other.returncode != 0:
             raise Failed(f"{name} {backend}: the cargo build failed:\n{other.stderr[-3000:]}")
         for setup in setups:
             setup.clean()
         setup_cold = others()
-        colds.append(dict(build_s=took, warm_s=warm, cargo_s=reference, setups=setup_cold))
+        colds.append(dict(build_s=took, warm_s=warm, cargo_s=reference, setups=setup_cold, used=used, cargo_used=cargo_used))
         print(f"  cold {turn + 1}/{cold_runs}  ra-jit {took:.2f}s + ready {warm:.2f}s  cargo {reference:.2f}s  "
               + "  ".join(f"{s} {t:.2f}s" for s, t in setup_cold.items() if t), flush=True)
         if turn + 1 < cold_runs:
             ours.cargo("stop")
             shutil.rmtree(home(turn), ignore_errors=True)
     daemon.said()
+    ready_mb = round(statistics.median(c["used"]["resident_mb"] for c in colds))
+    resident = dict(ready_mb=ready_mb, after=[])
+    cold_disk = disk(ws, ours, theirs)
     expected = program_output(theirs.cargo("run", *build, "--", *run)[1]) if run is not None else None
     med = lambda key: round(statistics.median(c[key] for c in colds), 3)
     report("cold", dict(wall_s=round(statistics.median(c["build_s"] + c["warm_s"] for c in colds), 3), cargo_s=med("cargo_s"),
@@ -540,11 +614,14 @@ def measure(name, spec, backend, runs, work, reference_dir, cold_runs=1, setup_n
                         samples_s=[round(c["build_s"] + c["warm_s"], 3) for c in colds], cargo_samples_s=[round(c["cargo_s"], 3) for c in colds],
                         build_samples_s=[round(c["build_s"], 3) for c in colds],
                         setups=setup_times(setups, [c["setups"] for c in colds]),
-                        compiled=compiled(said), steps_s=cold_steps(said), threads_s=thread_steps(said), started_over=rounds(said)))
+                        compiled=compiled(said), steps_s=cold_steps(said), threads_s=thread_steps(said), started_over=rounds(said),
+                        memory=memory_phase([(c["used"], c["cargo_used"]) for c in colds], ready_mb), disk_mb=cold_disk))
 
     samples = [both() for _ in range(max(runs, 3))]
     said = daemon.said()
-    report("no-op", dict(wall_s=round(statistics.median(s[0] for s in samples), 3), cargo_s=round(statistics.median(s[1] for s in samples), 3),
+    held = daemon.resident_mb()
+    resident["after"].append(dict(phase="no-op", builds=builds[0], mb=held))
+    report("no-op", dict(memory=memory_phase([(s[4], s[5]) for s in samples], held), wall_s=round(statistics.median(s[0] for s in samples), 3), cargo_s=round(statistics.median(s[1] for s in samples), 3),
                          rss_mb=daemon.peak_mb(), built=samples[-1][2], compiled=compiled(said),
                          samples_s=[round(s[0], 3) for s in samples], cargo_samples_s=[round(s[1], 3) for s in samples],
                          setups=setup_times(setups, [s[3] for s in samples])))
@@ -554,15 +631,15 @@ def measure(name, spec, backend, runs, work, reference_dir, cold_runs=1, setup_n
         made, back = [], []
         for turn in range(runs):
             places = write_edit(ws, changes, False)
-            took, reference, built, theirs_too = both()
+            took, reference, built, theirs_too, used, cargo_used = both()
             said = daemon.said(1 if built == "daemon" else 0)
             made.append(dict(wall_s=took, cargo_s=reference, built=built, link=link_kind(said), compiled=compiled(said), steps_ms=daemon_steps(said),
-                             threads_s=thread_steps(said), started_over=rounds(said), setups=theirs_too))
+                             threads_s=thread_steps(said), started_over=rounds(said), setups=theirs_too, used=used, cargo_used=cargo_used))
             if turn == 0:
                 runs_right(kind)
                 daemon.said()
             write_edit(ws, changes, True)
-            took, reference, built, _ = both()
+            took, reference, built, *_ = both()
             said = daemon.said(1 if built == "daemon" else 0)
             back.append(dict(wall_s=took, cargo_s=reference, built=built, link=link_kind(said), compiled=compiled(said)))
             # An edit the daemon turned down is one finding, not a time to take a median of,
@@ -572,13 +649,17 @@ def measure(name, spec, backend, runs, work, reference_dir, cold_runs=1, setup_n
         # The slowest of them is the one to look at; the median is the one to compare.
         slowest = max(made, key=lambda s: s["wall_s"])
         median = lambda rows, key: round(statistics.median(r[key] for r in rows), 3)
-        report(kind, dict(wall_s=median(made, "wall_s"), cargo_s=median(made, "cargo_s"), rss_mb=daemon.peak_mb(),
+        held = daemon.resident_mb()
+        resident["after"].append(dict(phase=kind, builds=builds[0], mb=held))
+        report(kind, dict(memory=memory_phase([(s["used"], s["cargo_used"]) for s in made], held), wall_s=median(made, "wall_s"), cargo_s=median(made, "cargo_s"), rss_mb=daemon.peak_mb(),
                           built=slowest["built"], link=slowest["link"], compiled=max(s["compiled"] for s in made), places=places,
                           steps_ms=slowest["steps_ms"], threads_s=slowest["threads_s"], started_over=slowest["started_over"], slowest_s=round(slowest["wall_s"], 3),
                           back_s=median(back, "wall_s"), back_cargo_s=median(back, "cargo_s"),
                           back_link=max(back, key=lambda s: s["wall_s"])["link"],
                           samples_s=[round(s["wall_s"], 3) for s in made], cargo_samples_s=[round(s["cargo_s"], 3) for s in made],
                           setups=setup_times(setups, [s["setups"] for s in made])))
+    resident.update(end_mb=resident["after"][-1]["mb"], builds=builds[0])
+    end_disk = disk(ws, ours, theirs)
     if tests and "test" in spec:
         phases["test"] = test_suite(name, spec, ours, theirs, ws, wrong)
     ours.cargo("stop")
@@ -591,18 +672,21 @@ def measure(name, spec, backend, runs, work, reference_dir, cold_runs=1, setup_n
         other_ws = ws + "-b"
         shutil.copytree(ws, other_ws, symlinks=True, ignore=shutil.ignore_patterns("target", "target-ref", "target-*"))
         second = Side(other_ws, dict(ours.env, RA_JIT_HOME=home(f"{turn}b")), True)
-        took_b, warm_b, _ = cold_ra_jit(second, "store filled by another checkout")
+        took_b, warm_b, _, used_b = cold_ra_jit(second, "store filled by another checkout", Daemon(second))
         second.cargo("stop")
         shutil.rmtree(other_ws, ignore_errors=True)
         shutil.rmtree(home(f"{turn}b"), ignore_errors=True)
-        warm_store.append((took_b, warm_b))
-        print(f"  warm store {turn + 1}/{cold_runs}  ra-jit {took_b:.2f}s + ready {warm_b:.2f}s", flush=True)
+        warm_store.append((took_b, warm_b, used_b))
+        print(f"  warm store {turn + 1}/{cold_runs}  ra-jit {took_b:.2f}s + ready {warm_b:.2f}s  peak {used_b['peak_mb']} MB  "
+              f"daemon {used_b['resident_mb']} MB", flush=True)
     if warm_store:
-        phases["cold"].update(warm_store_build_s=round(statistics.median(b for b, _ in warm_store), 3),
-                              warm_store_s=round(statistics.median(b + w for b, w in warm_store), 3),
-                              warm_store_samples_s=[round(b + w, 3) for b, w in warm_store])
+        phases["cold"].update(warm_store_build_s=round(statistics.median(b for b, _, _ in warm_store), 3),
+                              warm_store_s=round(statistics.median(b + w for b, w, _ in warm_store), 3),
+                              warm_store_samples_s=[round(b + w, 3) for b, w, _ in warm_store],
+                              warm_store_memory=dict(peak_mb=round(statistics.median(u["peak_mb"] for _, _, u in warm_store)),
+                                                     resident_mb=round(statistics.median(u["resident_mb"] for _, _, u in warm_store))))
     result = dict(phases=phases, wrong=wrong, tag=spec["tag"], rev=spec["rev"], store_mb=store_mb(ours.env["RA_JIT_CACHE"]),
-                  cold_runs=cold_runs)
+                  cold_runs=cold_runs, resident=resident, disk_mb=end_disk)
     if "runtime" in spec:
         result["runtime"] = runtime(name, spec, theirs, ws, build, max(runs, 10), wrong)
     return result
@@ -672,23 +756,25 @@ def runtime(name, spec, theirs, ws, build, runs, wrong):
     programs = {"ra-jit": os.path.join(ws, "target/debug", spec["bin"]), "cargo debug": os.path.join(target, "debug", spec["bin"]),
                 "cargo release": os.path.join(target, "release", spec["bin"])}
     args = [a.replace("{library}", library()) for a in spec["args"]]
-    times, outputs = {label: [] for label in programs}, {}
+    times, outputs, held = {label: [] for label in programs}, {}, {label: [] for label in programs}
     for turn in range(runs + 2):
         for label, program in programs.items():
-            began = time.perf_counter()
-            ran = subprocess.run([program, *args], cwd=ws, capture_output=True)
-            took = time.perf_counter() - began
+            took, ran, used = memory.run([program, *args], cwd=ws, text=False)
             outputs.setdefault(label, (ran.returncode, ran.stdout))
             if turn >= 2:
                 times[label].append(took)
+                held[label].append(used["largest_mb"])
     for label, said in outputs.items():
         if said[0] != 0:
             wrong.append(f"runtime: {label} exited with {said[0]}")
         elif said != outputs["cargo debug"]:
             wrong.append(f"runtime: the program ra-jit linked ({label}) says something else than cargo's")
-    result = {label: dict(median_s=round(statistics.median(t), 4), min_s=round(min(t), 4), max_s=round(max(t), 4), runs=len(t))
+    # The programs are one process each (ripgrep's threads are its own): its peak is the kernel's.
+    result = {label: dict(median_s=round(statistics.median(t), 4), min_s=round(min(t), 4), max_s=round(max(t), 4), runs=len(t),
+                          peak_mb=round(statistics.median(held[label])), peak_max_mb=max(held[label]),
+                          size_mb=round(os.path.getsize(programs[label]) / 1e6, 1))
               for label, t in times.items()}
-    print("  runtime    " + "  ".join(f"{label} {r['median_s']:.3f}s" for label, r in result.items()), flush=True)
+    print("  runtime    " + "  ".join(f"{label} {r['median_s']:.3f}s {r['peak_mb']} MB" for label, r in result.items()), flush=True)
     return dict(command=[spec["bin"], *spec["args"]], **result)
 
 
@@ -719,6 +805,8 @@ def machine():
         # Named by whoever runs it (the workflow names the instance type).
         name=os.environ.get("RA_JIT_BENCH_MACHINE"),
         cpu=cpu, cores=cores, machine_cores=os.cpu_count(),
+        # What else the machine was running: 1, 5 and 15 minute averages when the run started.
+        load=", ".join(f"{v:.1f}" for v in os.getloadavg()),
         memory_gib=round(int(memory) / 1024 / 1024) if memory else None,
         os=platform.system(), arch=platform.machine(), kernel=platform.release(),
         rustc=first_line("rustc", "-V"), cc=first_line("cc", "--version"), ld=first_line("ld", "--version"),
@@ -758,6 +846,10 @@ def compare(baseline, result, threshold):
                 before, after = old.get(field), new.get(field)
                 if before is not None and after is not None and after > before * (1 + threshold / 100) and after - before > floor:
                     worse.append(f"{key} {label}: {field} {before}{unit} -> {after}{unit} (+{100 * (after - before) / max(before, 1e-9):.0f}%)")
+            for side in ("ra-jit", "cargo"):
+                before, after = ((p.get("memory") or {}).get(side, {}).get("peak_mb") for p in (old, new))
+                if before is not None and after is not None and after > before * (1 + threshold / 100) and after - before > 100:
+                    worse.append(f"{key} {label}: {side} peak memory {before} MB -> {after} MB (+{100 * (after - before) / max(before, 1):.0f}%)")
             if old["built"] == "daemon" and new["built"] != "daemon":
                 worse.append(f"{key} {label}: built by {new['built']}, was the daemon")
             if old.get("link") == "spliced" and new.get("link") != "spliced":

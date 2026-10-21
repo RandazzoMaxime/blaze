@@ -119,7 +119,7 @@ All notable changes to ra-jit are written here. The format follows
 - A borrow checker, the crate `hir-ty-borrowck` in the rust-analyzer subtree, written to give
   rustc's verdict: Polonius alpha by default as nightly rustc does, NLL with
   `RA_JIT_BORROWCK=nll`. It gives rustc's errors on
-  1131 of 1579 of rustc's own borrow-check tests that it can run, and none on any of the 245
+  1157 of 1579 of rustc's own borrow-check tests that it can run, and none on any of the 245
   rustc accepts, scored by `harness/borrowck_ui.py`, and finds nothing in ripgrep, fd, bat,
   hyperfine, just, axum, nushell, delta, eza, tokei and starship. Its errors are rust-analyzer diagnostics and
   `ra-jit borrowck` prints them ([docs/borrowck.md](docs/borrowck.md)).
@@ -236,6 +236,14 @@ All notable changes to ra-jit are written here. The format follows
 
 ### Fixed
 
+- A `match` arm's guard with `let` (`if let` guards and their chains) dropped what it bound
+  and its temporaries at the end of the guard, before the arm ran, in editions before 2024;
+  rustc keeps them until the arm ends or the next arm is tried
+  ([#46](https://github.com/indexable-inc/ra-jit/issues/46)). The four rustc tests that
+  caught it run on every pull request now (`harness/ui-pinned.txt`).
+- The harnesses set `RUST_BACKTRACE=0` for what they run rather than unsetting it: cargo's
+  `[env]` (as in `~/.cargo/config.toml`) fills in only what is unset, and a backtrace changed
+  what a panicking program printed.
 - Large workspaces are ready in a fraction of the time and memory
   ([#29](https://github.com/indexable-inc/ra-jit/issues/29)): a closure's type holds its inner
   closure twice, so the store's name for a type of nested closures doubled with each level
@@ -277,10 +285,13 @@ All notable changes to ra-jit are written here. The format follows
   `claims` gate says only what is new; a line can name the backends it is known on.
 - `harness/debuginfo.py`'s perf check takes a sample in a naked function without a line as
   rustc has it (its body is assembly, which rustc gives no line either), not as lost debug
-  info: one of the corpus's on Linux arm64 failed it now and then.
-- `breakers.py`'s `frame_of_tables` and `frame_of_results` ask whether ra-jit's frames fit
-  where rustc's do, not whether they are as large: a whole program's build with LLVM makes
-  them smaller than rustc's, which each case's crate has room for too, and they differed.
+  info: one of the corpus's on Linux arm64 failed it now and then. Nor is a frame perf unwound
+  to a static (`nm` says which symbols are data), which once failed it on Linux x86-64.
+- `breakers.py`'s `frame_of_tables`, `frame_of_results` and `frame_of_array` ask whether
+  ra-jit's frames fit where rustc's do, not whether they are as large: a whole program's
+  build with LLVM makes them smaller than rustc's, which each case's crate has room for too,
+  and they differed. `frame_of_array` is open on Cranelift alone, whose frames keep three
+  arrays where rustc's keep two.
 - `cargo_ra_jit.py` says what a client that failed or hung said, and what it was doing,
   rather than ending on a timeout with nothing.
 - A workspace the daemon loads after a change whose build scripts did not all run is not

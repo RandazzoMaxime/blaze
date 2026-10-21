@@ -26,7 +26,7 @@ import argparse, json, os, re, shlex, shutil, socket, subprocess, sys, time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
-import difftest, linkline
+import difftest, linkline, memory
 from difftest import Fixture, RA_JIT, bucket, host, sysroot_rlibs
 
 APPS_DIR = os.environ.get("APPS_DIR") or os.path.join(HERE, "vendor", "apps")
@@ -134,7 +134,7 @@ class App(Fixture):
             child = subprocess.Popen(argv, stdout=subprocess.DEVNULL, stderr=err,
                                      env={**os.environ, "RUST_BACKTRACE": "1"})
             _, status, usage = os.wait4(child.pid, 0)
-        self.ra_jit_secs, self.ra_jit_kb = time.monotonic() - began, usage.ru_maxrss
+        self.ra_jit_secs, self.ra_jit_mb = time.monotonic() - began, memory.maxrss_mb(usage)
         if status != 0:
             raise SystemExit(f"ra-jit crashed:\n{open(log).read()[-3000:]}")
         self.reports = {crate: [l.rstrip("\n").split("\t") for l in open(report)]}
@@ -199,7 +199,7 @@ def build(ws, spec, result, alone):
         reasons(result[key])
         return None
     result[key] = {**fx.summary(), "cargo_s": round(fx.cargo_secs, 1), "ra_jit_s": round(fx.ra_jit_secs, 1),
-                   "link_s": round(fx.link_secs, 1), "peak_mb": fx.ra_jit_kb // 1024,
+                   "link_s": round(fx.link_secs, 1), "peak_mb": fx.ra_jit_mb,
                    "size": os.path.getsize(fx.binary), "work": fx.work}
     row = result[key]
     print(f"{key}: {row['compiled']} functions from ra-jit over {row['crates']} crates, {row['left']} left; "
