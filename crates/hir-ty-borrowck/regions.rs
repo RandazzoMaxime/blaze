@@ -782,9 +782,13 @@ impl<'db> Builder<'_, '_, 'db> {
         match ty.kind() {
             TyKind::Ref(region, inner, _) => {
                 if let Some(shorter) = rv_of(region) {
+                    let referent = match inner.kind() {
+                        TyKind::Alias(_) => self.normalize(inner).unwrap_or(inner),
+                        _ => inner,
+                    };
                     let mut components = Vec::new();
                     let mut params = Vec::new();
-                    outlives_components(inner, &mut components, &mut params);
+                    outlives_components(referent, &mut components, &mut params);
                     pairs.extend(components.into_iter().map(|longer| (longer, shorter)));
                     self.regions.type_bounds.extend(params.into_iter().map(|it| (it, shorter)));
                 }

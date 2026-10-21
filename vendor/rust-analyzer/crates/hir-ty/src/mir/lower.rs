@@ -1453,7 +1453,8 @@ impl<'a, 'db> MirLowerCtx<'a, 'db> {
                 let Some((p, current)) = self.lower_expr_as_place(current, *expr, true)? else {
                     return Ok(None);
                 };
-                if mutability.is_shared()
+                // A mutable borrow is promoted only of an empty array, as rustc's `&mut []`.
+                if (mutability.is_shared() || self.is_empty_array(*expr))
                     && p.local.into_raw().into_u32() as usize >= locals
                     // Behind a deref the local is a pointer, an overloaded index's result say,
                     // and not the value.
@@ -2560,7 +2561,7 @@ impl<'a, 'db> MirLowerCtx<'a, 'db> {
                 makes_value && args.clone().iter().all(|&it| self.is_promotable(it))
             }
             &Expr::Ref { expr, mutability, .. } => {
-                mutability.is_shared() && self.is_promotable(expr)
+                (mutability.is_shared() || self.is_empty_array(expr)) && self.is_promotable(expr)
             }
             &Expr::UnaryOp {
                 expr,
@@ -2574,11 +2575,12 @@ impl<'a, 'db> MirLowerCtx<'a, 'db> {
                 is_fn_address
                     || scalar(self, expr) && scalar(self, inner) && self.is_promotable(inner)
             }
-            // Division is left out: it is only promoted when the divisor is known not to be 0.
             &Expr::BinaryOp { lhs, rhs, op: Some(op) } => {
                 let promoted = match op {
-                    BinaryOp::ArithOp(ArithOp::Div | ArithOp::Rem)
-                    | BinaryOp::Assignment { .. } => false,
+                    BinaryOp::ArithOp(ArithOp::Div | ArithOp::Rem) => {
+                        self.division_promotable(lhs, rhs)
+                    }
+                    BinaryOp::Assignment { .. } => false,
                     BinaryOp::ArithOp(_) | BinaryOp::CmpOp(_) | BinaryOp::LogicOp(_) => true,
                 };
                 promoted
@@ -2588,6 +2590,43 @@ impl<'a, 'db> MirLowerCtx<'a, 'db> {
                     && self.is_promotable(rhs)
             }
             _ => false,
+        }
+    }
+
+    fn is_empty_array(&self, expr: ExprId) -> bool {
+        match self.expr_ty_without_adjust(expr).kind() {
+            TyKind::Array(_, len) => crate::consteval::try_const_usize(self.db, len) == Some(0),
+            _ => false,
+        }
+    }
+
+    /// rustc's promotion of an integer division or remainder: the divisor is a constant other
+    /// than 0, and for a signed one other than -1 unless the dividend is a constant other than
+    /// the type's minimum. A `const { .. }` block is not evaluated to tell.
+    fn division_promotable(&self, lhs: ExprId, rhs: ExprId) -> bool {
+        let (signed, bits) = match self.expr_ty_without_adjust(lhs).kind() {
+            TyKind::Int(it) => (true, it.bit_width()),
+            TyKind::Uint(it) => (false, it.bit_width()),
+            _ => return true,
+        };
+        let literal = |expr: ExprId| match &self.store[expr] {
+            &Expr::Literal(Literal::Int(it, _)) => Some(it),
+            &Expr::Literal(Literal::Uint(it, _)) => i128::try_from(it).ok(),
+            &Expr::UnaryOp { expr, op: hir_def::hir::UnaryOp::Neg } => match self.store[expr] {
+                Expr::Literal(Literal::Int(it, _)) => Some(-it),
+                Expr::Literal(Literal::Uint(it, _)) => i128::try_from(it).ok().map(|it| -it),
+                _ => None,
+            },
+            _ => None,
+        };
+        match literal(rhs) {
+            None | Some(0) => false,
+            Some(-1) if signed => {
+                let bits = bits.unwrap_or(64);
+                let min = -(1i128 << (bits - 1));
+                literal(lhs).is_some_and(|it| it != min)
+            }
+            Some(_) => true,
         }
     }
 
