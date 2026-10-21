@@ -1,7 +1,8 @@
 # What goes in the rust-analyzer subtree, and what stays in crates/
 
 Date: 2026-10-21. A design and a plan, being carried out: steps 0 (the rebuild times, 3.3), 2
-(the code generator a crate) and 4 (the borrow checker into the subtree) are done, see their
+(the code generator a crate), 3 (the store a crate) and 4 (the borrow checker into the
+subtree) are done, see their
 rows in section 4. The rest of this text describes the tree before them. Read against ra-jit `main` at
 `22b1267233`, the fork `indexable-inc/rust-analyzer` `ra-jit` at `c0dabc5588`, and upstream
 `rust-lang/rust-analyzer` `master` at `ea09c7b724`. The fork last met upstream at
@@ -313,11 +314,18 @@ has each run, its load and the crates compiled). The load makes wall time noisy;
 | `crates/hir-ty-borrowck/check.rs` (still a `hir-ty` module in both) | 132, 181; 377, 380 | 133, 130; 329, 330 | 7 → 8 (`hir-ty-codegen` joins) |
 | `crates/ra-jit/src/main.rs` | 47, 22; 91, 86 | 51, 37; 88, 90 | 1 → 1 |
 
+After steps 3 and 4 (`after-step3` in the file, at a lower load, 26 to 42):
+
+| Edit in | Wall, CPU (s) | Crates compiled |
+|---|---|---|
+| `crates/ra-jit-store/src/lib.rs` | 45, 52; 138, 145 | 3 (`ra-jit-store`, `hir-ty-codegen`, `ra-jit`) |
+| `vendor/rust-analyzer/crates/hir-ty-borrowck/src/check.rs` | 30, 55; 148, 153 | 6 (`hir-ty-borrowck`, `hir`, `ide-db`, `load-cargo`, `ide-diagnostics`, `ra-jit`) |
+
 So a code generator edit costs 2.5 times less CPU (366 to 146 s) and about 1.7 times less
-wall time under this load; the floor is `ra-jit` itself, about 88 s of CPU. A borrow checker
-edit then still rebuilt `hir-ty`, and the code generator on top; step 4 has since made it a
-crate under `hir`, so it no longer rebuilds `hir-ty`, `hir-ide` or the code generator
-(unverified: not timed after step 4).
+wall time under this load, and a borrow checker edit, now a crate under `hir`, 2.5 times less
+(379 to 150 s): neither rebuilds `hir-ty` and `hir-ide` any more. The floor is `ra-jit`
+itself, about 88 s of CPU. A store edit still rebuilds the code generator, which uses it;
+what step 3 bought is that the store's tests and benchmark no longer build a compiler.
 
 ## 4. Migration plan
 
@@ -338,7 +346,7 @@ known tests, the corpus under Cranelift and LLVM (with `--layouts`), `mixfutures
 | 0 | Measure: on the dev host, time `cargo build --release -p ra-jit` after a one-line change in `crates/hir-ty-codegen/mod.rs`, in `crates/hir-ty-borrowck/check.rs` and in `crates/ra-jit/src/main.rs`; write the numbers into this document. Done, with `store.rs` too, before and after step 2: 3.3 | none | done |
 | 1 | **Rule and docs.** Done: the AGENTS.md rule and the "Where new code goes" section of contributing.md are on `main` (`1c8d34b056`) | none | done |
 | 2 | **Codegen becomes a crate.** Done on `codegen-crate`, 2026-10-21, in two commits (no file moved, so no rename commit). The compile found what the text search in 1.2 missed, in the other direction too: `hir-ty` itself called into the code generator, its interpreter and MIR lowering asking `Target::current().word()`, `body_checks_overflow` and `placed` (where `line!()`, `column!()` and `file!()` are as written). Those semantics moved into three new fork-owned files of `hir-ty`: `mir/target.rs` (the target's word size, which the code generator's `Target::select` sets), `mir/overflow.rs` and `mir/location.rs` (about 270 lines out of codegen's `mod.rs`). Made `pub` in fork-owned code: `is_builtin_index`, `monomorphized`, the `type_name` module and its functions, `loaded_crates`, `MemoryMap::{static_at, memory_at, align_at}`. Four upstream lines changed one word each: `Generics::{iter_self, len_parent}`, `layout::struct_tail_erasing_lifetimes`, `StoredPlace::walk_places`. As step 4 did, `return_slot` is copied, `Operand::span()` used, and `ParamEnv`'s private `clauses` read through `caller_bounds()`. `hir-ty/Cargo.toml`'s diff against upstream went from 36 added lines to 5 (`unicode-width`, now `location.rs`'s, `cfg` and `stacker`). The crate's root `mod.rs` aliases `ra_ap_rustc_*` to the names `hir-ty` gives them; `publish_crates.py` stages it as `ra-jit-hir-ty-codegen` (any crate of `crates/` not named `ra-jit*` gets the prefix); `ra-jit-wasm` turns on `hir-ty-codegen/wasm` and selects its target before lowering MIR; `harness/unittests.py` and CI's fmt run `-p hir-ty-codegen` (45 of its 52 tests on macOS; the rest need LLVM, Windows or Linux); `nix/units.nix` has no special case left | rebuild times again (3.3); `cargo build --release -p ra-jit --features llvm`; `ra-jit-wasm` builds | done |
-| 3 | **Store becomes a crate.** Commit 1: `git mv` `store.rs`, `store/`, and the corpus seeds under `corpus/` that are the store's into `crates/ra-jit-store/src`. Commit 2: `Cargo.toml`, imports; `remote*`, `ra-jit-bench` depend on it, not on `hir-ty` | `cargo test --release -p ra-jit-store`; `remote.py`; the store bench; `fuzz/fuzz.py smoke` | half a day |
+| 3 | **Store becomes a crate.** Done on `store-crate`, 2026-10-21: commit 1 the `git mv` alone of `store.rs` (now `crates/ra-jit-store/src/lib.rs`), `store/acl.rs`, `store/bench.rs` and the corpora `pack` and `name`, and of `fuzz.rs`, the inputs and counting allocator the store's and codegen's reader tests share, as `crates/ra-jit-fuzz` (a dev-dependency only, since it sets the global allocator); commit 2 the manifests and imports. What stays in the code generator is what knows about code: the stored entry (`cached.rs`), Cranelift's incremental cache over the store, and the entry key the store bench uses (`hir_ty_codegen::bench::entry_key`). `crc32fast`, `memmap2`, `libc` and `windows-sys` moved with it. `ra-jit`'s remote, signing, keeper and daemon, and `ra-jit-bench`, import `ra_jit_store`; the store's tests run as `-p ra-jit-store` without building a compiler | `cargo test --release -p ra-jit-store`; `remote.py`; the store bench builds | done |
 | 4 | **Borrowck into the subtree.** Done on `borrowck-3`, 2026-10-21, as the plan said: commit 1 the `git mv` alone (100% similar), commit 2 the crate. What the compile needed of `hir-ty` was smaller than 1.2's text search (read: the compile errors): the four `for_each_operand` methods (fork-owned) made `pub`; `Operand` gained a `span()` accessor instead of widening upstream's private field; `return_slot` copied into the crate; `GenericPredicates` was already public at the crate root; `transform::move_paths` was not needed. `hir` depends on the crate and calls `hir_ty_borrowck::borrowck`. `nix/units.nix` lost the borrowck half of its special case (the code generator half goes with step 2), `nix/units/daemon.json` regenerated (one package added), `harness/unittests.py` runs `-p hir-ty-borrowck` (it has no unit tests; its tests are `borrowck_ui.py`), `publish_crates.py` stages it as `ra-jit-hir-ty-borrowck` unchanged (before, the published `hir-ty` lacked the checker's files). The fork still cannot build alone until step 2 removes the `#[path] codegen` line, so step 5 waits for step 2 too | `borrowck_ui.py` scores unchanged in both modes; `ra-jit borrowck --project` on ripgrep, fd, bat, hyperfine, just, axum and nushell finds nothing; the corpus, `mixfutures`, `hir-ide`'s 18 known failures, `cargo test --release -p ra-jit` | done |
 | 5 | **Fork check.** After step 4's push, `fork sync` has sent the new crate to the fork; build the fork alone in CI (a job that clones `indexable-inc/rust-analyzer` `ra-jit` and runs `cargo test -p hir-ty -p hir-ty-borrowck`), so the fork cannot quietly start depending on ra-jit again | the job passes | 2 hours |
 | 6 | **Shrink the edit surface (ongoing).** Send group F upstream in small pull requests, parser and `macro_rules!` first, each with the rustc source it follows (upstream's AI rule); when one merges, the next `vendor/subtree.py upstream` takes upstream's version. Move group G's additions to new files where they are additive (`Files`'s view, include and env fields behind one field of a type defined in a new `base-db` module). Watch upstream's `hir-ty` split and put new MIR code where upstream's plan will put MIR | each pull request under upstream's CI; the gate here when each comes back through a merge | a day per batch, spread out |
@@ -384,7 +392,6 @@ import are left out):
 
 - The list of private items in 1.2 is from a text search; steps 2 and 4 compiled the real
   lists, which are in their rows of section 4.
-- The rebuild time of a borrow checker edit after step 4 (3.3).
 - Upstream's plan for the rest of the `hir-ty` split (the Zulip thread) was not readable
   without a login.
 - Whether upstream would take groups A to E is a judgment; nobody upstream was asked.

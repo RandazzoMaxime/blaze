@@ -104,8 +104,6 @@ pub use debuginfo::Sidecar;
 mod float_pair;
 mod fncache;
 mod fragment;
-#[cfg(test)]
-mod fuzz;
 mod home;
 pub use home::body_file;
 #[cfg(feature = "llvm")]
@@ -116,8 +114,8 @@ use self::places::{row_location, source_location};
 mod promote;
 mod settled;
 mod stable;
+use ra_jit_store as store;
 pub use stable::{block_place, lower_declared};
-mod store;
 mod target;
 pub use target::{Arch, Calls, ObjectFormat, Target, UnwindFormat, VariableArguments};
 pub mod tier;
@@ -125,13 +123,14 @@ pub mod tier;
 pub use patch::{Stale, StaleSteps};
 /// For `crates/ra-jit-bench` alone.
 #[doc(hidden)]
-pub use store::bench;
-pub use store::{
-    Collected, FORMAT as STORE_FORMAT, FetchMissing, Stats, StoreDir, Verified, compiles_against,
-    fetch_missing_with, identify_ahead, is_off as store_is_off, is_pack, limit_from_env,
-    name_file_whole, pack_format, pack_keys, pack_name, parse_size, seal_open, settled,
-    write_file_whole,
-};
+pub mod bench {
+    use ra_jit_store::KEY;
+
+    /// The key of the entry for `name`, as a build asks for it.
+    pub fn entry_key(name: &str, debug: bool, program: &[u8; KEY]) -> Option<[u8; KEY]> {
+        super::cached::Entry::key(name, debug, Some(program))
+    }
+}
 mod type_id;
 mod unwind;
 mod vtable;
@@ -3395,6 +3394,22 @@ fn inline(ctx: &mut cranelift_codegen::Context, inlined: &[ir::Function]) -> Res
     Ok(())
 }
 
+/// The store as Cranelift asks for it: one of these per function compiled.
+struct IncrementalCache(&'static store::Store);
+
+impl cranelift_codegen::incremental_cache::CacheKvStore for IncrementalCache {
+    fn get(&self, key: &[u8]) -> Option<Cow<'_, [u8]>> {
+        let key = <&[u8; store::KEY]>::try_from(key).ok()?;
+        self.0.lookup(key).map(Cow::Owned)
+    }
+
+    fn insert(&mut self, key: &[u8], val: Vec<u8>) {
+        if let Ok(key) = <&[u8; store::KEY]>::try_from(key) {
+            self.0.insert(key, &val);
+        }
+    }
+}
+
 /// Runs Cranelift on a finished function. Cranelift panics on IR it has no lowering for
 /// (i128 corners, for one); that must cost us one function, not the process.
 fn emit(ctx: &mut cranelift_codegen::Context) -> Result<Code> {
@@ -3416,7 +3431,7 @@ fn emit(ctx: &mut cranelift_codegen::Context) -> Result<Code> {
     let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         match store::Store::global() {
             Some(store) => ctx
-                .compile_with_cache(isa, &mut store::Lookup(store), &mut Default::default())
+                .compile_with_cache(isa, &mut IncrementalCache(store), &mut Default::default())
                 .map(drop),
             None => ctx.compile(isa, &mut Default::default()).map(drop),
         }

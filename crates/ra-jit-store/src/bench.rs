@@ -9,11 +9,6 @@ use std::{
 
 use super::{Identity, KEY, Pack, StoreDir, Tuning, record};
 
-/// The key of the entry for `name`, as a build asks for it.
-pub fn entry_key(name: &str, debug: bool, program: &[u8; KEY]) -> Option<[u8; KEY]> {
-    super::super::cached::Entry::key(name, debug, Some(program))
-}
-
 /// A key as the store has it on disk: the entry's key under the identity of the build.
 pub struct Salted(Identity);
 
