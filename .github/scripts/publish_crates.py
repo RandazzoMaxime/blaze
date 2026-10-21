@@ -442,6 +442,14 @@ def staged_manifest(c: Crate, by_dir: dict[Path, Crate], stage: Path) -> dict[st
     return m
 
 
+def shipped_profiles() -> dict[str, Any]:
+    """The profiles `cargo install` builds ra-jit with. Cargo reads profiles only from the root
+    manifest, and an installed crate is its own root, so ra-jit's carries them: `--profile dist`
+    is the build a release ships (docs/reports/RELEASE-BUILD.md), short of its PGO."""
+    profiles = load(ROOT / "Cargo.toml")["profile"]
+    return {name: profiles[name] for name in ("release", "dist")}
+
+
 def staged_workspace(crates: list[Crate], by_dir: dict[Path, Crate]) -> dict[str, Any]:
     ws = REPO.workspace
     deps: dict[str, Any] = {}
@@ -469,7 +477,8 @@ def staged_workspace(crates: list[Crate], by_dir: dict[Path, Crate]) -> dict[str
             "package": package,
             "dependencies": deps,
             "lints": ws.get("lints", {}),
-        }
+        },
+        "profile": shipped_profiles(),
     }
 
 
@@ -505,6 +514,7 @@ def stage(dest: Path) -> list[Crate]:
         m = staged_manifest(c, by_dir, dest)
         if c.orig == "ra-jit":
             m["package"]["readme"] = "README.md"
+            m["profile"] = shipped_profiles()
         (out / "Cargo.toml").write_text(toml_dump(m))
     (dest / "Cargo.toml").write_text(toml_dump(staged_workspace(crates, by_dir)))
     shutil.copy2(ROOT / "Cargo.lock", dest / "Cargo.lock")

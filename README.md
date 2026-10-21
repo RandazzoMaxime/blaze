@@ -73,10 +73,18 @@ Not measured yet: workspaces of a million lines or more, and test suites
 nix run github:indexable-inc/ra-jit#ra-jit -- build
 ```
 
-No nix? `cargo +1.99.0 install --locked ra-jit`, or put the binaries from a
-[release](https://github.com/indexable-inc/ra-jit/releases) on your PATH. Then use Rust
-1.99.0 with its source:
+No nix? Put the binaries from a [release](https://github.com/indexable-inc/ra-jit/releases)
+on your PATH, or build them with `cargo +1.99.0 install --locked --profile dist ra-jit`. Then
+use Rust 1.99.0 with its source:
 `rustup toolchain install 1.99.0 -c rust-src && rustup override set 1.99.0`.
+
+A release's binaries and nix build the same ra-jit: the `dist` profile (thin LTO), optimized
+with the profile of its own work that [pgo/profiles.json](pgo/profiles.json) pins
+([how](docs/reports/RELEASE-BUILD.md)). `cargo install` builds `dist` without that last step,
+which on Linux starts about 10% slower and edits about 3% slower than a release's binaries:
+cargo takes no compiler flags from a crate, and the crates it builds from crates.io are not
+the ones the profile was made of, so none could be handed to it either. (`--profile dist`
+comes with the first release after 0.1.0.)
 
 ### Use it as your normal `cargo build`
 

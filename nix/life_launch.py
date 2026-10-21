@@ -5,7 +5,7 @@ Started by the `ra-jit-life` wrapper in flake.nix, which passes everything in RA
 
   SOURCE       store path holding demo/life and crates/ra-jit-live
   VENDOR       vendored crates.io sources for demo/life's Cargo.lock
-  DAEMON_BINS  bin/ of ra-jit, cargo-ra-jit and ra-jit-rustc (built per cargo unit)
+  DAEMON_BINS  bin/ of ra-jit and the programs it runs (the flake's `dist`)
   PREBUILT     the demo built per cargo unit, run where live edits are not supported
   PATH, LIBS   toolchain (and linker) on PATH, and the GUI libraries to dlopen
 
