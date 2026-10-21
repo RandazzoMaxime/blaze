@@ -4,7 +4,7 @@ ra-jit has its own borrow checker, the crate `hir-ty-borrowck` in the rust-analy
 (`vendor/rust-analyzer/crates/hir-ty-borrowck`, next to `hir-ty`). It checks the MIR rust-analyzer
 lowers, the same MIR the code generator compiles, and it is meant to give exactly rustc's
 verdict: the same errors, on the same lines, and none where rustc gives none. It gives
-rustc's verdict on 67% of rustc's own borrow-check tests today, and on every one rustc
+rustc's verdict on 69% of rustc's own borrow-check tests today, and on every one rustc
 accepts; how they are scored and what is left is below.
 
 It runs as part of rust-analyzer's diagnostics, so the daemon computes it for every edited
@@ -57,7 +57,13 @@ All of these are rustc's, written from `compiler/rustc_borrowck` at the pinned n
   inferred).
 - Loans that outlive their storage: E0597, E0515, E0716, and promoted constants and
   extended temporaries of `const` and `static` items as `'static`.
-- Closures: captures, E0373, `FnMut` escapes, E0596 and E0594 through captures.
+- Closures: captures, E0373, `FnMut` escapes, E0596 and E0594 through captures. A closure's
+  body has two kinds of universal region, as rustc's: its own (the late-bound lifetimes of
+  its signature, `for<'a> FnOnce(&'a T)`, and the borrow of its environment) and its
+  creator's (every other region of its type, and the enclosing item's lifetime parameters).
+  One of its own made to outlive what it is not known to is an error in the closure
+  (`with(|x| x)` returning the borrow it was given), named E0521 or a `FnMut` escape as
+  rustc names it.
 
 ## How it is tested
 
@@ -78,8 +84,8 @@ With no borrow checker, the 245 units rustc accepts would pass. On branch borrow
 
 | Mode | In scope | Pass | rustc accepts, ra-jit too | rustc rejects, same errors |
 |---|---|---|---|---|
-| Polonius | 1578 | 1067 (67.6%) | 245 of 245 | 822 of 1333 |
-| NLL | 1576 | 1059 (67.2%) | 226 of 226 | 833 of 1350 |
+| Polonius | 1578 | 1087 (68.9%) | 245 of 245 | 842 of 1333 |
+| NLL | 1576 | 1079 (68.5%) | 226 of 226 | 853 of 1350 |
 
 463 units are out of scope; 344 of them need a nightly feature. CI runs the scoring on Linux
 and fails below a floor a few units under the count there.
@@ -91,14 +97,18 @@ just, axum and nushell it finds nothing.
 ## What is left
 
 Every failing unit is one where rustc gives an error ra-jit does not, or gives it on another
-line or with another code. By what is wrong, most first, at cdbb699582: 95 "lifetime may not
-live long enough" not reported, 42 E0597 not reported, 24 E0310, 20 E0700, 18 E0381, 17
-E0309, 16 E0521, then a long tail. The causes, grouped:
+line or with another code. By what is wrong, most first, on branch borrowck-3: 77 "lifetime
+may not live long enough" not reported, 40 E0597 not reported, 24 E0310, 20 E0700, 18 E0381,
+17 E0309, then a long tail. The causes, grouped:
 
 - **Higher-ranked regions and placeholders** (`for<'a>` bounds, closures with higher-ranked
   signatures): rustc checks them with placeholders in universes; ra-jit does not yet.
 - **Closure requirements propagated to the creator**: rustc proves what a closure body needs
-  of its captures' regions in the function that creates it.
+  of its creator's regions, and its type tests, in the function that creates it; ra-jit
+  drops them, so it misses those errors.
+- **Written closure parameter types**: `|x: &'x u32|` gives `x` the creator's `'x` in rustc,
+  the closure's own lifetime in ra-jit, so an error the annotation causes is reported where
+  `x` is used instead of at the parameter.
 - **Member constraints of `impl Trait`** (E0700, not reported yet) and opaque types'
   captured lifetimes.
 - **Trait selection's region obligations**: an impl's `T: 'static` proven at an unsizing

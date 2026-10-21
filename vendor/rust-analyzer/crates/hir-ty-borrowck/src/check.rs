@@ -842,8 +842,26 @@ impl<'a, 'db> Checker<'a, '_, 'db> {
             return;
         }
         let universals = &self.regions.universals;
+        let in_closure = self.ctx.closure_local.is_some();
         for (longer, &(longer_rv, kind)) in universals.iter().enumerate() {
             if matches!(kind, UniversalKind::Static | UniversalKind::FnBody) {
+                continue;
+            }
+            // rustc's `try_propagate_universal_region_error`: what a closure needs of a region
+            // that outlives one of its creator's is for the creator to prove; only a region of
+            // the closure's own outliving none of them is an error in the closure.
+            // TODO: prove those requirements in the creator, as rustc's closure requirements.
+            if in_closure
+                && (kind == UniversalKind::Creator
+                    || (0..universals.len()).any(|it| {
+                        it != longer
+                            && matches!(
+                                universals[it].1,
+                                UniversalKind::Creator | UniversalKind::Static
+                            )
+                            && self.regions.knows(longer, it)
+                    }))
+            {
                 continue;
             }
             let shorter =
@@ -856,7 +874,22 @@ impl<'a, 'db> Checker<'a, '_, 'db> {
             let named_anon = |a: UniversalKind, b: UniversalKind| {
                 a == UniversalKind::Named && b == UniversalKind::AnonParam
             };
-            let (code, message) = if !self.regions.is_impl_item
+            // In a closure, rustc's `report_region_error` names what of the closure's own goes
+            // to its creator by how it gets there.
+            let escapes = in_closure
+                && matches!(shorter_kind, UniversalKind::Creator | UniversalKind::Static);
+            let (code, message) = if escapes
+                && blamed.category == Category::Return
+                && self.regions.closure_env == Some(longer)
+                && self.ctx.closure_kind == Some(rustc_type_ir::ClosureKind::FnMut)
+            {
+                ("", "captured variable cannot escape `FnMut` closure body".to_owned())
+            } else if escapes
+                && matches!(blamed.category, Category::Assignment | Category::CallArgument)
+            {
+                ("E0521", "borrowed data escapes outside of closure".to_owned())
+            } else if !self.regions.is_impl_item
+                && !in_closure
                 && (named_anon(kind, shorter_kind) || named_anon(shorter_kind, kind))
             {
                 ("E0621", "explicit lifetime required in the type of a parameter".to_owned())
@@ -872,6 +905,10 @@ impl<'a, 'db> Checker<'a, '_, 'db> {
                 _ => blamed.span,
             };
             self.report(code, span, message);
+        }
+        // A closure's type tests are its creator's to prove too.
+        if in_closure {
+            return;
         }
         let mut reported = FxHashSet::default();
         for test in &self.regions.type_tests {

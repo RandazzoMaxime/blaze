@@ -75,6 +75,10 @@ pub(super) enum UniversalKind {
     /// Any other region of the signature, as an elided lifetime of the return type that
     /// elision gives no lifetime to.
     Anon,
+    /// In a closure, a region of the closure's type: one of the body that creates it, which
+    /// rustc's `UniversalRegions` calls external. The closure's own, the late-bound lifetimes
+    /// of its signature and the borrow of its environment, are `AnonParam`.
+    Creator,
 }
 
 /// That the type parameter `ty` must outlive `lower`, as rustc's `TypeTest`.
@@ -100,10 +104,12 @@ pub(super) struct Regions<'db> {
     pub(super) loan_regions: FxHashMap<Location, Rv>,
     pub(super) outlives: Vec<Outlives>,
     pub(super) type_tests: Vec<TypeTest<'db>>,
-    /// Whether universal regions are checked against each other: not in a closure, whose
-    /// regions rustc relates to its parent's, which this does not do yet.
+    /// Whether universal regions are checked against each other: not in a closure whose
+    /// signature could not be split into its own regions and its creator's.
     pub(super) check_universals: bool,
     pub(super) is_impl_item: bool,
+    /// In a closure called by reference, the universal region of that reference.
+    pub(super) closure_env: Option<usize>,
 }
 
 impl<'db> Regions<'db> {
@@ -206,6 +212,7 @@ pub(super) fn build<'db>(ctx: &Ctx<'_, 'db>, body: &MirBody<'db>, cfg: &Cfg) -> 
             type_tests: Vec::new(),
             check_universals: ctx.closure_local.is_none(),
             is_impl_item: false,
+            closure_env: None,
         },
         early: FxHashMap::default(),
         late: FxHashMap::default(),
@@ -295,7 +302,12 @@ impl<'db> Builder<'_, '_, 'db> {
         if let Some(&it) = self.early.get(&index) {
             return it;
         }
-        let region = self.new_universal(UniversalKind::Named);
+        // A closure's enclosing item's lifetime parameters are its creator's.
+        let kind = match self.ctx.closure_local {
+            Some(_) => UniversalKind::Creator,
+            None => UniversalKind::Named,
+        };
+        let region = self.new_universal(kind);
         self.early.insert(index, region);
         self.regions.early.insert(index, rv_of(region).unwrap());
         region
@@ -352,6 +364,9 @@ impl<'db> Builder<'_, '_, 'db> {
         let return_local = super::return_slot();
         let owner = body.owner;
         if self.ctx.closure_local.is_some() {
+            self.regions.check_universals = self.closure_signature(&mut local_tys);
+        }
+        if self.ctx.closure_local.is_some() && !self.regions.check_universals {
             for &local in body.param_locals.iter().chain([&return_local]) {
                 let ty = body.locals[local].ty.as_ref();
                 let ty = rustc_type_ir::fold_regions(self.interner(), ty, |region, _| match region
@@ -362,7 +377,7 @@ impl<'db> Builder<'_, '_, 'db> {
                 });
                 local_tys[local.into_raw().into_u32() as usize] = Some(ty);
             }
-        } else {
+        } else if self.ctx.closure_local.is_none() {
             // The declared signature, as the parameters' local types have their lifetimes
             // erased.
             let signature = match owner {
@@ -515,6 +530,61 @@ impl<'db> Builder<'_, '_, 'db> {
             });
         }
         self.regions.local_tys = local_tys.into_iter().map(|it| it.unwrap()).collect();
+    }
+
+    /// A closure's parameters, return slot and environment typed as rustc's `UniversalRegions`
+    /// types them: each region of the closure's type a universal region of its creator's, and
+    /// the late-bound lifetimes of its signature and the borrow of its environment its own.
+    /// `false`, with nothing set, when the closure's type does not have the shape for it.
+    fn closure_signature(&mut self, local_tys: &mut [Option<Ty<'db>>]) -> bool {
+        let body = self.body;
+        let Some((&env_local, params)) = body.param_locals.split_first() else { return false };
+        let env = body.locals[env_local].ty.as_ref();
+        let (closure, by_ref) = match env.kind() {
+            TyKind::Ref(_, inner, mutability) => (inner, Some(mutability)),
+            _ => (env, None),
+        };
+        let TyKind::Closure(def, args) = closure.kind() else { return false };
+        let sig = args.as_closure().sig();
+        let &[tupled] = sig.skip_binder().inputs().as_slice() else { return false };
+        let TyKind::Tuple(inputs) = tupled.kind() else { return false };
+        if inputs.len() != params.len() {
+            return false;
+        }
+        let interner = self.interner();
+        let args = rustc_type_ir::fold_regions(interner, args, |region, _| match region.kind() {
+            RegionKind::ReBound(..) => region,
+            _ => self.new_universal(UniversalKind::Creator),
+        });
+        let mut closure = Ty::new_closure(interner, def, args);
+        if let Some(mutability) = by_ref {
+            let region = self.new_universal(UniversalKind::AnonParam);
+            self.regions.closure_env = Some(self.regions.universals.len() - 1);
+            closure = Ty::new_ref(interner, region, closure, mutability);
+        }
+        let mut late = FxHashMap::default();
+        let sig = rustc_type_ir::fold_regions(
+            interner,
+            args.as_closure().sig().skip_binder(),
+            |region, depth| match region.kind() {
+                RegionKind::ReBound(rustc_type_ir::BoundVarIndexKind::Bound(debruijn), bound)
+                    if debruijn == depth =>
+                {
+                    *late
+                        .entry(bound.var.as_u32())
+                        .or_insert_with(|| self.new_universal(UniversalKind::AnonParam))
+                }
+                _ => region,
+            },
+        );
+        let &[tupled] = sig.inputs().as_slice() else { return false };
+        let TyKind::Tuple(inputs) = tupled.kind() else { return false };
+        local_tys[env_local.into_raw().into_u32() as usize] = Some(closure);
+        for (&local, ty) in params.iter().zip(inputs.iter()) {
+            local_tys[local.into_raw().into_u32() as usize] = Some(ty);
+        }
+        local_tys[super::return_slot().into_raw().into_u32() as usize] = Some(sig.output());
+        true
     }
 
     /// What a `let` with a type written out requires, as rustc's user type annotations: that
@@ -824,8 +894,14 @@ impl<'db> Builder<'_, '_, 'db> {
                             }
                         }
                         ClauseKind::TypeOutlives(OutlivesPredicate(ty, region)) => {
-                            if let Some(region) = self.region_rv(region) {
-                                self.regions.type_bounds.push((ty, region));
+                            if let Some(shorter) = self.region_rv(region) {
+                                let mut components = Vec::new();
+                                let mut params = Vec::new();
+                                outlives_components(ty, &mut components, &mut params);
+                                pairs.extend(components.into_iter().map(|it| (it, shorter)));
+                                self.regions
+                                    .type_bounds
+                                    .extend(params.into_iter().chain([ty]).map(|it| (it, shorter)));
                             }
                         }
                         _ => (),
@@ -1459,12 +1535,16 @@ impl<'db> Builder<'_, '_, 'db> {
                     }
                     _ => return,
                 };
+                // rustc builds a struct or a variant with a constructor's arguments as an
+                // aggregate, whose fields are `Boring` to blame.
+                let constructor = matches!(
+                    func_ty.kind(),
+                    TyKind::FnDef(def, _) if !matches!(def.0, CallableDefId::FunctionId(_))
+                );
+                let category = if constructor { Category::Boring } else { Category::CallArgument };
                 for (arg, input) in args.iter().zip(inputs) {
                     if let Some(ty) = self.operand_ty(arg) {
-                        let at = At {
-                            category: Category::CallArgument,
-                            span: arg.span().unwrap_or(span),
-                        };
+                        let at = At { category, span: arg.span().unwrap_or(span) };
                         self.relate(ty, input, Variance::Covariant, at);
                     }
                 }
