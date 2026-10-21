@@ -271,6 +271,14 @@ def how_built(lines):
     return "patch" if links and "(spliced:" in links[-1] else "full"
 
 
+def own_base_between(lines):
+    """Whether the edit interrupted the daemon's own base, the one build here nobody asked
+    for, as it can when the reference build between two edits leaves the daemon idle for its
+    second. The edit is then a patch of rustc's executable or, when the base was linked over
+    it, in full: either is right, and the output is still compared."""
+    return any(it.startswith("interrupted:") for it in lines)
+
+
 def main():
     work = os.path.realpath(opt("--work", "/tmp/rustcbase"))
     names = sys.argv[1:] or list(SCENARIOS)
@@ -334,7 +342,9 @@ def main():
                 theirs = outputs(os.path.join(reference, "debug", "app"), ws)
                 how = how_built(lines)
                 same = ours == theirs
-                print(f"  edit {step}: {took:.2f}s {how} (wanted {want or 'either'}) same={same}", flush=True)
+                between = name not in ("own-base", "interrupt") and own_base_between(lines)
+                wanted = "either, the own base came between" if between else want or "either"
+                print(f"  edit {step}: {took:.2f}s {how} (wanted {wanted}) same={same}", flush=True)
                 notable = [it for it in lines if re.search(
                     r"rustc|declin|no patch|built in full|spliced|not kept|nobody asks|outdated|interrupt", it)]
                 for it in notable[:12]:
@@ -342,7 +352,7 @@ def main():
                 if not same:
                     failed.append(f"{name} edit {step}: output differs")
                     print(f"    ra-jit: {ours}\n    cargo:  {theirs}", flush=True)
-                if want and how != want:
+                if want and how != want and not between:
                     failed.append(f"{name} edit {step}: {how}, not {want}")
                     for it in lines[-60:]:
                         print(f"      | {it[:240]}", flush=True)
