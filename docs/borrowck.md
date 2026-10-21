@@ -113,8 +113,8 @@ With no borrow checker, the 245 units rustc accepts would pass. Now:
 
 | Mode | In scope | Pass | rustc accepts, ra-jit too | rustc rejects, same errors |
 |---|---|---|---|---|
-| Polonius | 1579 | 1188 (75.2%) | 245 of 245 | 943 of 1334 |
-| NLL | 1577 | 1181 (74.9%) | 226 of 226 | 955 of 1351 |
+| Polonius | 1579 | 1191 (75.4%) | 245 of 245 | 946 of 1334 |
+| NLL | 1577 | 1184 (75.1%) | 226 of 226 | 958 of 1351 |
 
 463 units are out of scope; 344 of them need a nightly feature. CI runs the scoring on Linux
 and fails below a floor a few units under the count there.
@@ -143,6 +143,13 @@ enough" not reported, 36 E0597 not reported, 19 E0310, 17 E0309, 7 E0700, then a
 - **Member constraints of `impl Trait`**: the choice rustc makes is not applied, and a
   projection bound that names a lifetime (`impl Iterator<Item = Box<dyn Foo>>`) leaves them
   out.
+- **Match fake edges**: rustc's MIR gives each arm, guard and or-pattern alternative an
+  imaginary edge from the one before, so borrowck cannot tell an arm is unreachable or a
+  guard always runs. rust-analyzer lowers arms one after the other and none after an
+  irrefutable one, so a move in an arm that never runs is not seen (`nll/match-cfg-fake-edges.rs`).
+- **Captures of an empty `match`**: rustc's capture analysis has a closure that matches
+  on `x` with no arms read `x`; rust-analyzer's captures nothing there, so the E0381 of an
+  uninitialized `x` is missed.
 - **Trait selection's region obligations**: an impl's `T: 'static` proven at an unsizing
   cast, or the region constraints of an impl a method resolves to.
 - **Differences in rust-analyzer's MIR lowering** (below).
