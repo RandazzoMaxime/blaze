@@ -799,6 +799,18 @@ def libdw_shift(binary):
     return next(((vaddr & -page) - (offset & -page) - first for flags, offset, vaddr in loads if flags & 1), 0)
 
 
+def naked_functions(root):
+    """The names of the `#[unsafe(naked)]` functions of the sources under `root`."""
+    names = set()
+    for directory, subdirectories, files in os.walk(root):
+        subdirectories[:] = [it for it in subdirectories if it != "target"]
+        for file in files:
+            if file.endswith(".rs"):
+                text = open(os.path.join(directory, file), encoding="utf-8", errors="replace").read()
+                names.update(re.findall(r"#\[unsafe\(naked\)\]\s*(?:#\[[^\]]*\]\s*)*(?:pub(?:\([^)]*\))?\s+)?(?:unsafe\s+)?extern\s+\"[^\"]*\"\s+fn\s+(\w+)", text))
+    return names
+
+
 def profiler(tally, what, binary, cwd, crates):
     """Whether perf, unwinding by `.eh_frame`, names the functions of `crates` and their lines."""
     if WINDOWS:
@@ -825,7 +837,10 @@ def profiler(tally, what, binary, cwd, crates):
     # A line 0 of one of rustc's codegen units is rustc saying of its own code that it has no
     # line: the crate's functions that were left to rustc are not what is asked about here.
     read = ours(frames[0] for frames in by_stack if frames) if shift else mine
-    lost = [name for name, line in read if not re.search(r"\.rs:\d+$|-cgu\.\d+:0$", line)]
+    # A naked function is its assembly alone, which rustc gives no line either (nor a subprogram).
+    naked = naked_functions(cwd)
+    lost = [name for name, line in read
+            if not re.search(r"\.rs:\d+$|-cgu\.\d+:0$", line) and name.rsplit("::", 1)[-1] not in naked]
     through = sum(bool(re.search(r"4main\b|::main\b", stack)) for stack in stacks)
     # Where perf looks a frame's CFI up somewhere else, how far its stacks get says nothing of the CFI:
     # some reach main where the code it lands in has the same rules, and some stop.

@@ -196,6 +196,12 @@ All notable changes to ra-jit are written here. The format follows
   place as a clone, as cargo does: a program started from a hard link just made can be
   killed as it starts ([rust-lang/cargo#7821](https://github.com/rust-lang/cargo/issues/7821)).
   `cargo_ra_jit.py`'s 16 clients on 4 worktrees run 8 rounds of edits, all by the daemon.
+- On Linux a program `cargo ra-jit` started just after a full link failed now and then with
+  "could not execute" (exit 1; another row of `cargo_ra_jit.py`'s flags each run): the daemon
+  writes what a debugger reads of a new executable in place while it waits for the next edit,
+  and the kernel refuses to start a file open for writing ("text file busy"). The daemon now
+  writes an executable in place under an exclusive lock on it, and a client starts a program
+  under a shared one.
 - A program or test `cargo ra-jit` starts itself has what the `[env]` of cargo's
   configuration sets, as under `cargo run` and `cargo test`: the nearest `.cargo/config.toml`
   (or `config`) says a variable, then `$CARGO_HOME`'s, with `force` and `relative`.
@@ -203,6 +209,14 @@ All notable changes to ra-jit are written here. The format follows
   `cargo build` inside and the one that starts `other` take turns, since cargo removes and
   copies each program again there on every build and the second sometimes found none (plain
   cargo failed it as often as ra-jit).
+- `harness/ui-known.txt` names the 15 tests of rustc's tests/ui run-pass that differ on the
+  whole suite, each with why (11 assert a bug of rustc's, 4 are ra-jit's to do), so the
+  `claims` gate says only what is new; a line can name the backends it is known on.
+- `harness/debuginfo.py`'s perf check takes a sample in a naked function without a line as
+  rustc has it (its body is assembly, which rustc gives no line either), not as lost debug
+  info: one of the corpus's on Linux arm64 failed it now and then.
+- `cargo_ra_jit.py` says what a client that failed or hung said, and what it was doing,
+  rather than ending on a timeout with nothing.
 - A workspace the daemon loads after a change whose build scripts did not all run is not
   loaded: the crates of a script that failed were read without its `OUT_DIR`, so thiserror's
   `include!` went missing, every derived `Error` was unimplemented and `?` resolved to the
