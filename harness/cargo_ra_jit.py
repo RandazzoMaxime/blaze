@@ -599,6 +599,10 @@ FLAG_CASES = [
     ("test", ["--no-run"], {}),
     ("test", ["--doc"], {}),
     ("test", ["--doc", "--features", "loud", "-p", "util"], {}),
+    # Flags of how the results are shown are the harness's: ra-jit runs the doctests all the
+    # same, and shows them as libtest does.
+    ("test", ["--doc", "-q"], {}),
+    ("test", ["--doc", "--", "--format=terse", "--color", "never"], {}),
     ("test", [], {"CARGO_INCREMENTAL": "0"}),
 ]
 
@@ -624,6 +628,13 @@ def flags(work):
             (_, mine), (_, other) = ours.cargo(command, *args, env=extra), theirs.cargo(command, *args, env=extra)
             read = test_results if command == "test" else program_output
             differs = difference(read(mine), read(other))
+            if "--doc" in args:
+                left = re.search(r"ra-jit: the doctests are left to rustdoc: (.*)", mine.stderr)
+                # A panic message has the id of the thread, and where the terse progress
+                # (` 1/2`) and blank lines fall depends on which test finished first.
+                text = lambda ran: re.sub(r"finished in [0-9.]+s", "", re.sub(r"' \(\d+\) panicked", "' panicked", ran.stdout))
+                said = lambda ran: sorted(line for line in re.sub(r" \d+/\d+$", "", text(ran), flags=re.M).splitlines() if line)
+                differs = differs or (left and f"left to rustdoc: {left[1]}") or difference(said(mine), said(other))
             if differs and mine.returncode != other.returncode:
                 differs += f"; {mine.stderr.strip()[-600:]!r}"
             shown = " ".join([*(f"{k}={v}" for k, v in extra.items()), "cargo ra-jit", command, *args])
