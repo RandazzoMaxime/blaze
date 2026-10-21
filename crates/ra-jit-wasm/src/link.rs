@@ -11,7 +11,7 @@ use std::{
     hash::{Hash, Hasher},
 };
 
-use hir_ty::mir::codegen::wasm::{INDEX_LEN, WasmFunction, WasmSignature, WasmType};
+use hir_ty_codegen::wasm::{INDEX_LEN, WasmFunction, WasmSignature, WasmType};
 use object::{Object, ObjectSection, ObjectSymbol, RelocationTarget, SectionKind, SymbolKind};
 use rustc_hash::{FxHashMap, FxHashSet, FxHasher};
 use wasm_encoder::{

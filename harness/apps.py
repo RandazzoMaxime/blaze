@@ -102,15 +102,19 @@ class App(Fixture):
 
     def rustc_build(self):
         """Cargo's build, with ra-jit in rustc's place for every crate when the program is
-        ra-jit's alone: a dependency is not of the workspace to cargo."""
+        ra-jit's alone: a dependency is not of the workspace to cargo. Without `lto`, which
+        links one object of what the stand-ins use in place of the libraries, the standard
+        library's among them, that ra-jit's object calls into."""
+        own = {"RUSTC_WRAPPER": RA_JIT, "CARGO_PROFILE_RELEASE_LTO": "off", "CARGO_PROFILE_DEV_LTO": "off"}
         if self.alone:
-            os.environ.update(RUSTC_WRAPPER=RA_JIT)
+            os.environ.update(own)
         try:
             began = time.monotonic()
             super().rustc_build()
             self.cargo_secs = time.monotonic() - began
         finally:
-            os.environ.pop("RUSTC_WRAPPER", None)
+            for var in own if self.alone else ():
+                os.environ.pop(var, None)
         linked = {os.path.basename(r)[3:].rsplit("-", 1)[0] for r in self.rlibs
                   if r.endswith(".rlib") and "/rustlib/" not in r}
         program = os.path.basename(self.reference).rsplit("-", 1)[0].replace("-", "_")

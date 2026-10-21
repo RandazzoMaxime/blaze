@@ -42,7 +42,7 @@ The names are `ra_jit_live::format::LEVELS`, which the daemon's events and the w
    level 0 and is not asked for again.
 4. **The worker compiles them beside its builds** (`compile_tiered` in `main.rs`) on a
    thread of its own: it builds the IR of each with a copy of the database
-   (`hir_ty::mir::codegen::tier::prepare`), lets go of the database, and only then runs LLVM
+   (`hir_ty_codegen::tier::prepare`), lets go of the database, and only then runs LLVM
    (`Prepared::finish`), so a change to the source never waits for LLVM. It keeps the code
    with the program (`Rejections::tiers`), and builds a patch as an edit's is built. A
    tiered function differs from the last full build, so the patch has it at its level; it

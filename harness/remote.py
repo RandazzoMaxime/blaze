@@ -48,7 +48,7 @@ def digest(data):
 
 
 def pack_of(records):
-    """A pack with these `(key, value)` records, as store.rs lays one out."""
+    """A pack with these `(key, value)` records, as crates/ra-jit-store lays one out."""
     out = bytearray(MAGIC)
     for key, value in records:
         size = len(value).to_bytes(4, "little")

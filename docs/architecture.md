@@ -2,9 +2,9 @@
 
 This is a map of the code for someone who wants to read or change it. Paths are those of the
 published tree: `crates/ra-jit` is the daemon, `crates/hir-ty-codegen` is the code generator
-(it is compiled as the module `hir_ty::mir::codegen` of ra-jit's rust-analyzer branch, see
-[contributing.md](contributing.md)), and `vendor/rust-analyzer` is the front end, with the
-borrow checker as its crate `hir-ty-borrowck` ([borrowck.md](borrowck.md)).
+(a crate over `hir-ty`'s MIR, see [contributing.md](contributing.md)), and
+`vendor/rust-analyzer` is the front end, with the borrow checker as its crate `hir-ty-borrowck`
+([borrowck.md](borrowck.md)).
 
 ## The idea
 
@@ -186,14 +186,14 @@ Each object format has its own implementation:
 | Format | File | Notes |
 |---|---|---|
 | ELF | `splice.rs`, `splice/debug.rs` | New segments for read-only data, code and data, new program headers, the unwinder's search table extended. Debug sections are rewritten so a debugger sees the new code. |
-| Mach-O arm64 | `splice/macho.rs` | The patch goes where `__LINKEDIT` was, `__LINKEDIT` is written again behind it, and the file is re-signed. Executables with chained fixups are declined. |
+| Mach-O arm64 | `splice/macho.rs` | The patch goes where `__LINKEDIT` was, `__LINKEDIT` is written again behind it, and the file is re-signed. Executables with chained fixups are declined, so the daemon's link asks for dyld info (`-no_fixup_chains`). |
 | PE x86-64 | `splice/pe.rs` | New sections behind the linker's last, `.pdata` extended for the unwinder. |
 | wasm | `splice/wasm.rs` | Nothing jumps: the module is written again with the new function bodies under the same indices. |
 
 ## The disk store
 
-`store.rs` is a content-addressed key-value store of compiled functions, independent of
-Rust: a key is a hash of what the value was made from. It is used when `RA_JIT_CACHE` names
+`crates/ra-jit-store` is a content-addressed key-value store of compiled functions,
+independent of Rust: a key is a hash of what the value was made from. It is used when `RA_JIT_CACHE` names
 a directory. `stable.rs` gives function instances names that are the same in every run on
 the same sources, and `cached.rs` keeps entries under them: a function of a crate that no
 edit reaches, as it was stitched into an object. A build that finds an entry for an

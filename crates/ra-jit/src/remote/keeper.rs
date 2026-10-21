@@ -167,7 +167,7 @@ impl Shared {
         }
         self.remote.traffic.try_again();
         let start = Instant::now();
-        if tokio::task::spawn_blocking(hir_ty::mir::codegen::seal_open).await.is_err() {
+        if tokio::task::spawn_blocking(ra_jit_store::seal_open).await.is_err() {
             eprintln!("remote: sealing the open pack panicked");
         }
         let ours = self.asked.saw(self.manifest_now().await);

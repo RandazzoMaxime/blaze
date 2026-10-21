@@ -32,8 +32,9 @@ All notable changes to ra-jit are written here. The format follows
 - The README has a table of how fast programs ra-jit builds with LLVM run against
   `cargo build --release`, written by `bench.py --runtime` and `benchreport.py` and kept current
   by the `bench-readme` workflow on the Linux benchmark machine. A run in which any program's
-  output differs from cargo's is never published; none is yet, since on macOS a program ra-jit
-  builds every crate of, with its own `main`, does not run (docs/research/mir-gap.md).
+  output differs from cargo's is never published. The first, on Linux x86-64, has every
+  program's output the same as cargo's; on macOS arm64, ripgrep, fd, bat and jsonrt do not
+  build whole yet (NEON intrinsics ra-jit does not have).
 - [docs/research/](docs/research/README.md): what 2026's Rust compiler work means for ra-jit,
   and the MIR gap with rustc with the production gaps ranked; rustc's pass sources in
   [docs/upstream/rustc-mir-transform/](docs/upstream/rustc-mir-transform/SOURCE.md).
@@ -127,6 +128,13 @@ All notable changes to ra-jit are written here. The format follows
   of rustc's borrow-check errors, so `cargo check` stays the final word.
 - `ra-jit borrowck`: the borrow-check errors of single files, or of a cargo workspace with
   `--project`.
+- `RA_JIT_INLINE=all`, off by default: a program built whole with LLVM at `-O2` or `-O3`
+  has what it calls in every crate built into it or shown to LLVM, the standard library's generic and `#[inline]`
+  functions as rustc does across crates. On Linux x86-64 it takes the geometric mean of the
+  14 runtime benchmarks from 3.92x the time of `cargo build --release` to 1.20x at `-O3`
+  and 1.21x at `-O2` ([README](README.md#how-fast)). Without it, `-O2` and `-O3` build in
+  only what the function's own crate defines (commit 99cbb902ad says otherwise: the levels
+  alone do not turn it on).
 
 ### Changed
 
@@ -139,14 +147,23 @@ All notable changes to ra-jit are written here. The format follows
   `cargo ra-jit` ran again for the same build, with nothing it reads written since, is not
   run a second time. On Linux x86-64 an edit of ripgrep's `search` goes from 72 to 48 ms,
   fd's `run` from 78 to 42 ms and hyperfine's `run` from 80 to 35 ms.
-- Release binaries are built with thin LTO (the new `dist` profile) and optimized with a
-  profile of ra-jit's own work (PGO), trained on edits of fd, bat, just and hyperfine, by
-  `.github/scripts/build_release.py`, which the release workflow now runs for every target.
-  Against the plain `release` build, on Linux: the cold start 14% shorter on nushell and on
-  ripgrep, an edit of a function 8% shorter on nushell, the same peak memory. mimalloc v3
-  stays the allocator: jemalloc, mimalloc v2 and snmalloc start colder and edit no faster
-  (an edit spends 1.8% of its time allocating, 73% revalidating salsa's memos). `release`
-  itself is unchanged, so rebuilding ra-jit after a change takes as long as before
+- ra-jit is built one way, whether downloaded or built by nix: the new `dist` profile (thin
+  LTO), optimized with a profile of ra-jit's own work (PGO) trained on edits of fd, bat, just
+  and hyperfine. `.github/scripts/build_release.py` is the recipe; the release workflow runs it
+  for every target and the flake's `daemon` (so `nix run`, `nix profile install` and the demo)
+  runs it inside its derivation. The profiles are trained by the new `pgo` workflow, which
+  runs again whenever Cargo.lock, a manifest or the toolchain changes, and pinned by sha256 in
+  `pgo/profiles.json`, so every build uses the same file; the build says how much of the code
+  changed since its profile was trained, and a release refuses a profile of other crates.
+  `cargo install --locked --profile dist ra-jit` builds the same profile without PGO, which
+  starts about 10% and edits about 3% slower than a release's binaries: cargo takes no compiler
+  flags from a crate, and crates.io's crates are not the ones a profile can be trained on.
+  Against the plain `release` build, on Linux: the
+  cold start 14% shorter on nushell and on ripgrep, an edit of a function 8% shorter on
+  nushell, the same peak memory. mimalloc v3 stays the allocator: jemalloc, mimalloc v2 and
+  snmalloc start colder and edit no faster (an edit spends 1.8% of its time allocating, 73%
+  revalidating salsa's memos). `release` itself is unchanged and stays the build to work with,
+  so rebuilding ra-jit after a change takes as long as before
   ([docs/reports/RELEASE-BUILD.md](docs/reports/RELEASE-BUILD.md)).
 - Under `RA_JIT_BACKEND=llvm`, a body of more than 10 000 Cranelift instructions is compiled
   by Cranelift. Since LLVM lowers a handler that takes more than the exception (tiers), it
@@ -178,6 +195,13 @@ All notable changes to ra-jit are written here. The format follows
   (rust-analyzer's had: "warm edits" never reached it). `upstream` merges an upstream
   rust-analyzer release into `vendor/rust-analyzer` in one command, with conflicts left in
   the tree as `git merge` leaves them; before, that took a clone of the fork and a pull.
+
+- Code ra-jit gives LLVM is faster: SIMD intrinsics on 128-bit lanes of integers (add,
+  subtract, bitwise, saturating, compare, `simd_bitmask`) are vector instructions instead of a
+  loop over lanes, and LLVM's own; a slot whose address is rounded up to an alignment above 16
+  (`__m256i`) is an alloca of that alignment, which LLVM can take apart; `memcpy`, `memmove`
+  and `memset` are LLVM's intrinsics rather than calls it knows nothing of, so a copy of a
+  known size is a few loads and stores.
 
 ### Fixed
 
@@ -230,6 +254,10 @@ All notable changes to ra-jit are written here. The format follows
   build, and "nothing changed" took cargo 300 to 390 ms instead of 30 to 60. The README run of
   2026-10-20 at `c8f58ac7d9` had it; cargo's target directories are now outside the checkout
   (`WORK/reference` by default).
+- `nix profile install github:indexable-inc/ra-jit#ra-jit`, as the README says to run it,
+  installs ra-jit and the programs it runs; the flake had no package of that name.
+- A release's archive and the flake's build have `ra-jit-rustc-first`, which `cargo ra-jit`
+  runs in the first build of a workspace; they had only ra-jit, cargo-ra-jit and ra-jit-rustc.
 - A worker that loaded its workspace beside cargo's first build
   ([#11](https://github.com/indexable-inc/ra-jit/issues/11)) ends when its daemon does, as
   every other worker does: once told what cargo built, it waited for a lock on its standard
@@ -237,6 +265,21 @@ All notable changes to ra-jit are written here. The format follows
   holding its memory (2 GB on fd) and its socket, and the next daemon's first build fell
   back to cargo ("another daemon serves"). `cargo_ra_jit.py`'s "workers of the killed
   daemon are gone" fails without this.
+- fd, tokei and eza build whole and run as cargo's builds do: a crate rustc built nothing
+  of keeps its `static`s ra-jit's own (fd's `INIT`); a package built only for a build script
+  or a proc macro, which `cargo metadata`'s single graph can still show as a dependency of
+  the program's, checks overflow as the program does, so rust-analyzer's view of it no
+  longer mixes two profiles; and `runbench.py` turns the release profile's `lto` off for the
+  whole build, which needs rustc's libraries. bat and nushell do not link yet.
+- A program ra-jit builds whole, with its own `main` (`runbench.py`'s builds), ran: on macOS
+  the code-free stand-in rustc builds for the program had a weak `main` of its own, and
+  ra-jit's object was weakened too, so the linker kept the stand-in's and the program
+  exited 0 at once, printing nothing. ra-jit's `main` now stays strong. On macOS and Linux
+  a `#[global_allocator]` was ignored in such a program, as the stand-ins declare none and
+  rustc's allocator shim went to the default allocator; a stand-in now declares one that
+  forwards to functions rust-analyzer's expansion of the attribute defines, under the
+  `#[cfg]`s of the static and of the modules it is in, and not for one in a string, as
+  heapless's docs have (`wholeprogram.py`).
 - `&(1 / 2)`, a division by a constant, and `&mut []` are promoted to constants as rustc
   promotes them, so a reference to one lives as long as the program.
 - Before the 2024 edition, a panic in a block's tail drops the tail's temporaries after the
@@ -292,6 +335,14 @@ All notable changes to ra-jit are written here. The format follows
 - On macOS a spliced executable lists its sections in the order of their addresses, and
   each segment a splice adds has a section, as `dyld_info` requires: it read none of the
   spliced executables on macOS 27 (`harness/splices.py`: 11 of 71 right, now 71).
+- Tiered code that calls what the executable has no symbol of (`memcmp` where rustc's code
+  calls `bcmp`, a `pthread_` function only rustc's inlined code reached) no longer has the
+  program linked in full and started over at level 1, after which every later patch of it
+  was linked in full too: that function stays where it was, and says why
+  ([docs/tiers.md](docs/tiers.md), "Code no patch can hold").
+- The thread that compiles at a higher level has a stack of 64 MiB, and the bodies a body
+  built in shows are ten deep at most: a deep chain of them overflowed the 2 MiB default and
+  took the worker down.
 - Tiered code that calls what the executable has no symbol of (`memcmp` where rustc's code
   calls `bcmp`, a `pthread_` function only rustc's inlined code reached) no longer has the
   program linked in full and started over at level 1, after which every later patch of it

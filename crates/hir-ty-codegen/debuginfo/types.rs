@@ -23,7 +23,7 @@ use rustc_type_ir::{
 
 use super::super::vtable::{HEADER, VtableLayout};
 use super::{Aggregate, DebugType, Field, Tag, TypeIndex, TypeSet, Variant};
-use crate::{
+use hir_ty::{
     InferenceResult, ParamEnvAndCrate,
     closure_analysis::ProjectionKind,
     consteval::try_const_usize,
@@ -498,7 +498,7 @@ impl<'db> Types<'db> {
     fn coroutine(
         &mut self,
         of: Aggregate,
-        id: crate::next_solver::CoroutineIdWrapper<'db>,
+        id: hir_ty::next_solver::CoroutineIdWrapper<'db>,
         args: GenericArgs<'db>,
         layout: &Layout,
         pointers: u32,

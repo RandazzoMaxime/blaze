@@ -12,7 +12,7 @@ use std::{
 
 use anyhow::{Context, bail};
 use aws_sdk_s3::primitives::ByteStream;
-use hir_ty::mir::codegen::name_file_whole;
+use ra_jit_store::name_file_whole;
 use sha2::{Digest as _, Sha256};
 use tokio::{
     fs::File,

@@ -1,9 +1,10 @@
 //! Bytes nobody vouches for, for the tests of what reads the store: a pack, an entry and
 //! LLVM's code are read from files and from other machines.
 //!
-//! [`inputs`] gives the files of `corpus/TARGET`, the seeds a test builds, and changes of
+//! [`inputs`] gives the files of a corpus directory, the seeds a test builds, and changes of
 //! both, the same ones in every run. [`largest_allocation`] tells how much memory a read
-//! asked for at once, so that a length in the bytes is seen not to be believed.
+//! asked for at once, so that a length in the bytes is seen not to be believed. A test binary
+//! that links this crate allocates through its counting allocator: it is for tests alone.
 
 use std::{
     alloc::{GlobalAlloc, Layout, System},
@@ -17,12 +18,14 @@ const RUNS: usize = 20_000;
 /// Bytes that are a length, a tag or an index somewhere, at their edges.
 const EDGES: [u8; 8] = [0, 1, 2, 0x7f, 0x80, 0xfe, 0xff, 0x40];
 
-/// The inputs for `target`: its corpus, `seeds`, and changes of them.
-pub(super) fn inputs(target: &str, seeds: Vec<Vec<u8>>) -> impl Iterator<Item = Vec<u8>> {
-    let mut known = corpus(target);
+/// The inputs for the corpus in `dir`: its files, `seeds`, and changes of them.
+pub fn inputs(dir: impl AsRef<Path>, seeds: Vec<Vec<u8>>) -> impl Iterator<Item = Vec<u8>> {
+    let dir = dir.as_ref();
+    let target = dir.file_name().map_or(0, |it| it.len());
+    let mut known = corpus(dir);
     known.extend(seeds);
     let runs = std::env::var("RA_JIT_FUZZ_RUNS").ok().and_then(|it| it.parse().ok());
-    let mut random = Random(0x9e37_79b9_7f4a_7c15 ^ target.len() as u64);
+    let mut random = Random(0x9e37_79b9_7f4a_7c15 ^ target as u64);
     let changed: Vec<Vec<u8>> = (0..runs.unwrap_or(RUNS))
         .map(|run| {
             let mut bytes = known[run % known.len()].clone();
@@ -35,13 +38,9 @@ pub(super) fn inputs(target: &str, seeds: Vec<Vec<u8>>) -> impl Iterator<Item = 
     known.into_iter().chain(changed)
 }
 
-/// The files of `corpus/TARGET`, each the hexadecimal of an input. Space in them is for
-/// the reader.
-fn corpus(target: &str) -> Vec<Vec<u8>> {
-    let dir = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../../../crates/hir-ty-codegen/corpus")
-        .join(target);
-    let mut files: Vec<_> = std::fs::read_dir(&dir)
+/// The files of `dir`, each the hexadecimal of an input. Space in them is for the reader.
+fn corpus(dir: &Path) -> Vec<Vec<u8>> {
+    let mut files: Vec<_> = std::fs::read_dir(dir)
         .unwrap_or_else(|e| panic!("{}: {e}", dir.display()))
         .map(|it| it.unwrap().path())
         .collect();
@@ -141,7 +140,7 @@ impl Counting {
 static COUNTING: Counting = Counting;
 
 /// The most bytes `read` asked for at once, and what it returned.
-pub(super) fn largest_allocation<T>(read: impl FnOnce() -> T) -> (usize, T) {
+pub fn largest_allocation<T>(read: impl FnOnce() -> T) -> (usize, T) {
     LARGEST.set(0);
     let read = read();
     (LARGEST.get(), read)
@@ -149,6 +148,6 @@ pub(super) fn largest_allocation<T>(read: impl FnOnce() -> T) -> (usize, T) {
 
 /// The most a read of `len` bytes may ask for at once: serde makes room for at most a
 /// megabyte of what a length promises before the bytes are there.
-pub(super) fn allowed(len: usize) -> usize {
+pub fn allowed(len: usize) -> usize {
     (1 << 20) + 64 * len
 }

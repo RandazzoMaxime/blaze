@@ -51,9 +51,10 @@ to stable; those are marked where they are used.
    wrote, a static that grew, a running executable, and similar).
 4. [platforms.md](platforms.md), Windows: 71 of 71 with 60 spliced, 10 full links and
    1 step with nothing edited, and the harness fails on Windows if the count is not 60.
-5. [platforms.md](platforms.md), macOS: `splices.py` 71 of 71. Executables with chained
-   fixups are declined and linked in full; that was measured with
-   `MACOSX_DEPLOYMENT_TARGET=13.0`. rustc's default target of 11.0 splices.
+5. [platforms.md](platforms.md), macOS: `splices.py` 71 of 71. The daemon links with
+   `-no_fixup_chains`, so a deployment target of 12 or later splices as 11.0 does
+   (`headerpad.py` builds for 14.0); an executable linked with chained fixups by a line of
+   one's own is declined and linked in full.
 6. [reports/DEBUGINFO.md](reports/DEBUGINFO.md) for x86-64 and PLAT-ABI2 for native
    AArch64: `debuginfo.py` passes under both backends. See "Debug info" below for what that
    covers.
