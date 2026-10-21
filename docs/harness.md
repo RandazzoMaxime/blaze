@@ -154,6 +154,14 @@ is the training of its PGO. `hotpatch.py` times an edit of a running program und
 subsecond against `cargo ra-jit build` and `cargo build` with a restart; its program is
 `harness/hotpatch`. `benchhistory.py` appends a run to `docs/benchmarks/history/` (what the
 site's /bench page charts) and, with `check`, fails when a median moved past its noise band.
+`memory.py` is how every harness measures memory: `memory.run` runs a command and returns its
+time with the exact peak of its largest process (`wait4`) and the peak of its whole tree
+(sampled), `memory.Sampler` follows a long-lived process such as the daemon with its workers,
+and `memory.in_child` measures a function that runs commands itself
+([benchmarks.md](benchmarks.md#memory-and-disk)); a harness that reports memory uses it rather
+than a way of its own. `benchcharts.py` draws the README's charts (SVG, a light and a dark
+version) from the same results `benchreport.py` writes the tables from; `benchreport.py`
+regenerates them whenever it writes a table, and `benchreport.py --charts` on its own.
 `live_latency.py` times live edits on macOS on AArch64, per keystroke under typing (`replay`,
 `burst`) as well as one edit at a time (`socket`, or `cargo` through `cargo ra-jit build`), and
 the restarts of a session against `cargo run` (`restart`); its JSON goes to `benchhistory.py
@@ -271,7 +279,9 @@ machine and commits the README's numbers to main. It runs only while the reposit
 `BENCH_RUNNER` is `true` ([benchmarks.md](benchmarks.md)). `bench.yaml` (compile times) and
 `claims.yaml` (rustc's `tests/ui`) run on pull requests and pushes too, `nix-live.yaml` and
 `fork-sync.yaml` on pushes to main that touch what they cover, `fuzz.yaml` nightly, and
-`live-*.yaml` on their own branches. None of them is part of `ci`. `site.yaml` deploys the
+`live-*.yaml` on their own branches. None of them is part of `ci`; on a pull request claims
+runs only its first 150 tests, so the few that once differed from rustc
+(`harness/ui-pinned.txt`, `uitest.py --tests`) run in ra-jit.yaml's `borrowck` job, which is. `site.yaml` deploys the
 site, and `release.yaml` builds releases from tags, each target through
 `.github/scripts/build_release.py` (the `dist` profile with PGO, [reports/RELEASE-BUILD.md](reports/RELEASE-BUILD.md)),
 the recipe the flake's `dist` runs too. `pgo.yaml` trains the profiles it uses, by hand and on

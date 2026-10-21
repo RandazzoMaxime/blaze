@@ -830,7 +830,9 @@ def profiler(tally, what, binary, cwd, crates):
     stacks = [stack for stack in script.split("\n\n") if stack.strip()]
     shift = libdw_shift(binary)
     ours = lambda frames: [(name, line) for name, line in frames if any(f"{len(c)}{c}" in name or f"{c}::" in name for c in crates)]
-    by_stack = [re.findall(r"^\s+[0-9a-f]+ (\S+)\n\s+(\S+)$", stack, re.M) for stack in stacks]
+    # A frame's name may have spaces (`<T as Trait>::f`), and a function inlined at an address has
+    # its frame there first, its line marked "(inlined)".
+    by_stack = [re.findall(r"^\s+[0-9a-f]+ (.+)\n\s+(\S+)(?: \(inlined\))?$", stack, re.M) for stack in stacks]
     mine = ours(frame for frames in by_stack for frame in frames)
     # Where perf looks a frame's CFI up somewhere else, the frames it unwinds to are wherever that
     # lands, a static as well as code: only the frame sampled is read from the program as it is.

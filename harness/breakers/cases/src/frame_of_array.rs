@@ -41,9 +41,11 @@ fn of_a_call(depth: usize, above: usize) -> usize {
     frame
 }
 
-/// How many arrays of 50k fit in one frame of `recurse`, in one of `through_closure` with the
-/// frame of its closure, and in one of `of_a_call`: curve25519-dalek's tests keep five tables
-/// that calls return, of 950k together, on a stack of 2MB.
-pub fn run() -> (usize, usize, usize) {
-    (recurse(1, 0) / 50000, through_closure(1, 0) / 50000, of_a_call(1, 0) / 50000)
+/// Whether as few arrays of 50k fit in one frame of `recurse`, in one of `through_closure` with
+/// the frame of its closure, and in one of `of_a_call` as in rustc's, 2, 2 and 1: a smaller
+/// frame fits too. curve25519-dalek's tests keep five tables that calls return, of 950k
+/// together, on a stack of 2MB.
+pub fn run() -> (bool, bool, bool) {
+    let arrays = |frame: usize| frame / 50000;
+    (arrays(recurse(1, 0)) <= 2, arrays(through_closure(1, 0)) <= 2, arrays(of_a_call(1, 0)) <= 1)
 }

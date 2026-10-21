@@ -174,6 +174,9 @@ def base_env(home):
     # The store is on by default, in the user's cache directory: a run has one of its own.
     env["RA_JIT_CACHE"] = os.path.join(home, "store")
     env["PATH"] = os.path.dirname(RA_JIT) + os.pathsep + env["PATH"]
+    # Set, not unset: cargo's `[env]` (as in ~/.cargo/config.toml) fills in only what is not already
+    # set, so an unset RUST_BACKTRACE would take its value and panics would print differently.
+    env["RUST_BACKTRACE"] = "0"
     for name in ("RUSTFLAGS", "CARGO_TARGET_DIR", "RUSTC_WORKSPACE_WRAPPER", "CARGO_BUILD_TARGET"):
         env.pop(name, None)
     return env
