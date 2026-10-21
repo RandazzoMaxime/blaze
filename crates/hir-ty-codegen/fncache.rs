@@ -33,8 +33,9 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use rustc_type_ir::inherent::{GenericArgs as _, IntoKind};
 use salsa::plumbing::{AsId, FromId};
 
-use crate::{
-    CallableDefId, InferBodyId,
+use hir_def::CallableDefId;
+use hir_ty::{
+    InferBodyId,
     db::{HirDatabase, InternedClosureId, InternedCoroutineId},
     mir::{
         CastKind, MirBody, MirSpan, Operand, OperandKind, ProjectionElem, Rvalue, StatementKind,
@@ -150,7 +151,7 @@ pub(super) fn cache_code(
         .hash(&mut hasher);
     closure.checked.hash(&mut hasher);
     for arg in closure.args.as_ref().iter() {
-        arg.ty().and_then(|ty| crate::mir::type_name::rustc_type_name(db, ty)).hash(&mut hasher);
+        arg.ty().and_then(|ty| hir_ty::mir::type_name::rustc_type_name(db, ty)).hash(&mut hasher);
     }
     for segment in &walk.segments {
         segment.hash(&mut hasher);
@@ -171,7 +172,7 @@ pub(super) fn cached_name(db: &dyn HirDatabase, closure: &Instance) -> String {
 }
 
 fn function_name(db: &dyn HirDatabase, func: FunctionId, args: GenericArgs<'_>) -> String {
-    crate::mir::type_name::rustc_function_name(db, func, args.as_slice())
+    hir_ty::mir::type_name::rustc_function_name(db, func, args.as_slice())
         .unwrap_or_else(|| FunctionSignature::of(db, func).name.as_str().to_owned())
 }
 
@@ -436,7 +437,7 @@ impl<'db> Walk<'db> {
                 DataRequest::Blob { blob, identity } => (0u8, blob, identity).hash(hasher),
                 DataRequest::Vtable { ty, trait_ref, blob } => {
                     1u8.hash(hasher);
-                    crate::mir::type_name::rustc_type_name(db, ty.as_ref()).hash(hasher);
+                    hir_ty::mir::type_name::rustc_type_name(db, ty.as_ref()).hash(hasher);
                     trait_ref
                         .as_ref()
                         .map(|(id, args)| {
@@ -446,7 +447,7 @@ impl<'db> Walk<'db> {
                                 .iter()
                                 .map(|it| {
                                     it.ty().and_then(|ty| {
-                                        crate::mir::type_name::rustc_type_name(db, ty)
+                                        hir_ty::mir::type_name::rustc_type_name(db, ty)
                                     })
                                 })
                                 .collect();
@@ -717,7 +718,7 @@ fn describe(db: &dyn HirDatabase, node: &Node) -> String {
                 }
                 InstanceDef::DropGlue => {
                     let ty = args.as_slice().first().and_then(|it| it.ty());
-                    let ty = ty.and_then(|ty| crate::mir::type_name::rustc_type_name(db, ty));
+                    let ty = ty.and_then(|ty| hir_ty::mir::type_name::rustc_type_name(db, ty));
                     format!("the drop of `{}`", ty.unwrap_or_default())
                 }
                 _ => "a shim".to_owned(),
@@ -760,7 +761,7 @@ fn operands(rvalue: &Rvalue) -> Vec<&Operand> {
 /// The first use of a raw pointer in `body` that makes what it gives depend on more than
 /// its arguments: a dereference, or an address taken as a number.
 fn raw_use(body: &MirBody<'_>) -> Option<(&'static str, MirSpan)> {
-    let raw = |place: &crate::mir::StoredPlace| {
+    let raw = |place: &hir_ty::mir::StoredPlace| {
         matches!(place.projection.as_slice().first(), Some(ProjectionElem::Deref))
             && matches!(body.locals[place.local].ty.as_ref().kind(), TyKind::RawPtr(..))
     };
@@ -807,7 +808,7 @@ fn arguments_trouble(
     for ty in types.params.iter().skip(1) {
         let ty = ty.as_ref();
         if let Some(why) = trouble(db, interner, ty, false, &mut seen) {
-            let name = crate::mir::type_name::rustc_type_name(db, ty).unwrap_or_default();
+            let name = hir_ty::mir::type_name::rustc_type_name(db, ty).unwrap_or_default();
             return Some(format!("an argument of type `{name}` {why}"));
         }
     }

@@ -628,7 +628,7 @@ impl Listed {
                         }
                         let mut by_file: FxHashMap<_, Vec<_>> = FxHashMap::default();
                         for func in crate::functions_of_modules(db, krate.into()) {
-                            let file = hir_ty::mir::codegen::body_file(db, func.into());
+                            let file = hir_ty_codegen::body_file(db, func.into());
                             by_file.entry(file).or_default().push(func);
                         }
                         Some(by_file)

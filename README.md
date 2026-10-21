@@ -45,23 +45,47 @@ Live edit to running code, Game of Life demo (median of 20 edits, one 96-core Li
 | One function, 300 new functions added | 282 ms | 60 ms | 4.7x |
 
 <!-- bench:start -->
-Edit, then build, on real projects at pinned commits. Each cell is incremental `cargo build` → `cargo ra-jit build`, both warm, same linker, median of 5 edits. Linux x86-64, AWS c8a.metal-24xl, bare metal, pinned with taskset (AMD EPYC 9R45, 16 of its 96 cores, 188 GiB), ra-jit [`c8f58ac7d9`](https://github.com/indexable-inc/ra-jit/commit/c8f58ac7d9fb8c970b36f57f39ed34332b03bcef) on 2026-10-20.
+Edit, then build, on real projects at pinned commits. Each cell is incremental `cargo build` → `cargo ra-jit build`, both warm, same linker, median of 5 edits. Linux x86-64, AWS c7i.16xlarge (dev-aws-7), pinned to 16 cores with taskset (Intel(R) Xeon(R) Platinum 8488C, 16 of its 64 cores, 124 GiB), ra-jit [`2b2f2dcd5b`](https://github.com/indexable-inc/ra-jit/commit/2b2f2dcd5bc4d7132fe62bf36669a34c657dafe7) on 2026-10-20.
 
 | Project | Edit a function | Edit a widely used function | Change a signature | Nothing changed |
 |---|---:|---:|---:|---:|
-| ripgrep 15.1.0 | 453 ms → **50 ms** (9.1x) | 724 ms → **37 ms** (20x) | 562 ms → **68 ms** (8.3x) | 386 ms → **19 ms** (20x) |
-| fd 10.3.0 | 434 ms → **43 ms** (10x) | 400 ms → **32 ms** (12x) | 638 ms → **71 ms** (9.0x) | 385 ms → **22 ms** (18x) |
-| bat 0.26.0 | 435 ms → **45 ms** (9.7x) | 678 ms → **45 ms** (15x) | 948 ms → **53 ms** (18x) | 58 ms → **16 ms** (3.6x) |
-| hyperfine 1.19.0 | 318 ms → **34 ms** (9.4x) | 350 ms → **34 ms** (10x) | 355 ms → **71 ms** (5.0x) | 300 ms → **21 ms** (14x) |
-| just 1.43.0 | 662 ms → **38 ms** (17x) | 700 ms → **37 ms** (19x) | 677 ms → **62 ms** (11x) | 40 ms → **14 ms** (2.9x) |
-| axum 0.8.6 | 350 ms → **50 ms** (7.0x) | 814 ms → **43 ms** (19x) |  | 71 ms → **16 ms** (4.4x) |
-| nushell 0.108.0 | 1.44 s → **261 ms** (5.5x) | 4.80 s → **231 ms** (21x) | 4.85 s → **308 ms** (16x) | 178 ms → **26 ms** (6.8x) |
+| ripgrep 15.1.0 | 655 ms → **104 ms** (6.3x) | 1.00 s → **62 ms** (16x) | 809 ms → **90 ms** (9.0x) | 30 ms → **33 ms** (0.9x) |
+| fd 10.3.0 | 649 ms → **115 ms** (5.6x) | 600 ms → **103 ms** (5.8x) | 652 ms → **129 ms** (5.1x) | 43 ms → **35 ms** (1.2x) |
+| bat 0.26.0 | 650 ms → **69 ms** (9.4x) | 936 ms → **58 ms** (16x) | 900 ms → **64 ms** (14x) | 81 ms → **32 ms** (2.5x) |
+| hyperfine 1.19.0 | 528 ms → **117 ms** (4.5x) | 569 ms → **117 ms** (4.9x) | 583 ms → **162 ms** (3.6x) | 56 ms → **32 ms** (1.8x) |
+| just 1.43.0 | 899 ms → **58 ms** (16x) | 926 ms → **58 ms** (16x) | 900 ms → **93 ms** (9.7x) | 54 ms → **30 ms** (1.8x) |
+| axum 0.8.6 | 559 ms → **69 ms** (8.1x) | 1.11 s → **63 ms** (18x) |  | 102 ms → **34 ms** (3.0x) |
+| nushell 0.108.0 | 1.62 s → **279 ms** (5.8x) | 5.78 s → **271 ms** (21x) | 5.82 s → **336 ms** (17x) | 240 ms → **38 ms** (6.3x) |
+| helix 25.07.1 | 2.80 s → **231 ms** (12x) | 4.16 s → **86 ms** (48x) | 3.56 s → **354 ms** (10x) | 114 ms → **34 ms** (3.4x) |
+| bevy 0.20.0 |  |  |  | 264 ms → **41 ms** (6.4x) |
+
+- bevy 0.20.0: only the steps shown are measured, then the build failed: examples/showcase/breakout.rs:67:18: no method `chain` on type `(fn apply_velocity(Query<'_, '_, (&mut Transform, &Velocity), ()>, Res<'_,` …
 
 Measured by hand with `harness/bench.py`; the `bench-readme` workflow re-runs it on the dedicated benchmark machine. The ra-jit measured is `cargo build --release`; the binaries a release ships are the `dist` profile with PGO, which start and edit faster ([how](https://github.com/indexable-inc/ra-jit/blob/main/docs/reports/RELEASE-BUILD.md)). Cold builds, the spread of every number, the LLVM tier and how fast the built programs run: [docs/benchmarks.md](docs/benchmarks.md) ([raw JSON](docs/benchmarks/linux-x86_64.json)).
 <!-- bench:end -->
 
 <!-- runbench:start -->
-How fast the programs run, ra-jit's LLVM build against `cargo build --release`: not published yet. On macOS arm64, where it was last tried (2026-10-20), a program whose every crate ra-jit compiles does nothing when run, so its output differs from cargo's and `benchreport.py` refuses the run. The `bench-readme` workflow fills this table from `bench.py --runtime` on the Linux x86-64 benchmark machine once every program says what cargo's says.
+How fast the programs run, built whole by ra-jit with LLVM (every crate of the program compiled by ra-jit, with its own `main`), each time ÷ the time of `cargo build --release`. Lower is faster; 1.00x is as fast as release. Every program's exit status and output were the same as the release build's; a run in which any differed is never published. Linux x86-64: AWS c6i.16xlarge (Intel Xeon Platinum 8375C, 64 vCPUs, 123 GiB), NixOS 26.05, Linux 6.18, rustc 1.99.0, ra-jit `f3eeb5295e` on branch `whole-program-main`, 2026-10-21. Median of 5 runs, the builds taking turns (numeric: 15).
+
+| Benchmark | `cargo build --release` | release with overflow checks | ra-jit `-O3` | ra-jit `-O2`, across crates | ra-jit `-O3`, across crates |
+|---|---:|---:|---:|---:|---:|
+| sieve | 0.068 s | 0.99x | 5.32x | 0.96x | **0.97x** |
+| collatz | 0.135 s | 1.94x | 1.03x | 1.02x | **1.02x** |
+| fnv | 0.077 s | 1.00x | 2.71x | 1.00x | **1.00x** |
+| qsort | 0.279 s | 1.03x | 2.10x | 1.11x | **1.11x** |
+| matmul | 0.034 s | 1.00x | 10x | 1.15x | **1.15x** |
+| nbody | 0.028 s | 1.00x | 15x | 1.42x | **1.41x** |
+| mandelbrot | 0.348 s | 1.01x | 1.02x | 1.00x | **1.00x** |
+| words | 0.065 s | 1.06x | 6.98x | 1.64x | **1.62x** |
+| numeric (rayon) | 0.035 s | 0.97x | 3.64x | 1.04x | **1.00x** |
+| jsonrt (serde_json, simd-json) | 1.448 s | 1.06x | 3.94x | 1.57x | **1.58x** |
+| ripgrep 15.1.0 | 0.055 s | 1.08x | 7.87x | 1.32x | **1.33x** |
+| fd 10.3.0 | 0.017 s | 1.01x | 4.72x | 1.40x | **1.37x** |
+| tokei | 0.107 s | 0.98x | 6.13x | 1.40x | **1.30x** |
+| eza | 0.354 s | 1.06x | 1.85x | 1.19x | **1.17x** |
+| **Geometric mean** | | 1.07x | 3.92x | 1.21x | **1.20x** |
+
+*Across crates* is `RA_JIT_INLINE=all`: what a function calls in any crate is built into it or shown to LLVM, the standard library's generic and `#[inline]` functions as rustc does. *Release with overflow checks* is `cargo build --release` with `-C overflow-checks=on -C debug-assertions=on`. The kernels (sieve to words) are `harness/corpus/kernels`; ripgrep counts `\w+ing\b` in its vendored dependencies, fd lists the `.rs` files of its own, tokei and eza walk theirs. Not built yet, so not in the table: bat (rust-analyzer's types for bincode's enum deserializer have an error, so two functions are not compiled and the link fails) and nushell (some functions are not compiled, among them ones behind `#[target_feature]`, so the link fails; at `-O3` across crates LLVM's instruction combining also gives up on one function). Measured with `harness/runbench.py`; raw numbers in [docs/benchmarks/runtime-whole-program-linux-x86_64.json](docs/benchmarks/runtime-whole-program-linux-x86_64.json).
 <!-- runbench:end -->
 
 Not measured yet: workspaces of a million lines or more, and test suites
@@ -73,10 +97,18 @@ Not measured yet: workspaces of a million lines or more, and test suites
 nix run github:indexable-inc/ra-jit#ra-jit -- build
 ```
 
-No nix? `cargo +1.99.0 install --locked ra-jit`, or put the binaries from a
-[release](https://github.com/indexable-inc/ra-jit/releases) on your PATH. Then use Rust
-1.99.0 with its source:
+No nix? Put the binaries from a [release](https://github.com/indexable-inc/ra-jit/releases)
+on your PATH, or build them with `cargo +1.99.0 install --locked --profile dist ra-jit`. Then
+use Rust 1.99.0 with its source:
 `rustup toolchain install 1.99.0 -c rust-src && rustup override set 1.99.0`.
+
+A release's binaries and nix build the same ra-jit: the `dist` profile (thin LTO), optimized
+with the profile of its own work that [pgo/profiles.json](pgo/profiles.json) pins
+([how](docs/reports/RELEASE-BUILD.md)). `cargo install` builds `dist` without that last step,
+which on Linux starts about 10% slower and edits about 3% slower than a release's binaries:
+cargo takes no compiler flags from a crate, and the crates it builds from crates.io are not
+the ones the profile was made of, so none could be handed to it either. (`--profile dist`
+comes with the first release after 0.1.0.)
 
 ### Use it as your normal `cargo build`
 
@@ -114,7 +146,8 @@ the code it reaches ([docs/fn-cache.md](docs/fn-cache.md)).
 ## What to know
 
 - Live edits work on macOS Apple silicon only. Elsewhere you still get fast builds.
-- The borrow checker is partial and does not stop a build yet: keep running `cargo check`.
+- An edit with a borrow-check error is refused, but the borrow checker still misses about a
+  third of rustc's errors: `cargo check` stays the final word.
 - Rust 1.99.0 only.
 - Changing a struct the program is using asks for a restart.
 

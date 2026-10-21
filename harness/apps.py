@@ -102,15 +102,19 @@ class App(Fixture):
 
     def rustc_build(self):
         """Cargo's build, with ra-jit in rustc's place for every crate when the program is
-        ra-jit's alone: a dependency is not of the workspace to cargo."""
+        ra-jit's alone: a dependency is not of the workspace to cargo. Without `lto`, which
+        links one object of what the stand-ins use in place of the libraries, the standard
+        library's among them, that ra-jit's object calls into."""
+        own = {"RUSTC_WRAPPER": RA_JIT, "CARGO_PROFILE_RELEASE_LTO": "off", "CARGO_PROFILE_DEV_LTO": "off"}
         if self.alone:
-            os.environ.update(RUSTC_WRAPPER=RA_JIT)
+            os.environ.update(own)
         try:
             began = time.monotonic()
             super().rustc_build()
             self.cargo_secs = time.monotonic() - began
         finally:
-            os.environ.pop("RUSTC_WRAPPER", None)
+            for var in own if self.alone else ():
+                os.environ.pop(var, None)
         linked = {os.path.basename(r)[3:].rsplit("-", 1)[0] for r in self.rlibs
                   if r.endswith(".rlib") and "/rustlib/" not in r}
         program = os.path.basename(self.reference).rsplit("-", 1)[0].replace("-", "_")
@@ -328,7 +332,7 @@ def workload(fx, spec, debug, result):
 def perf(fx, spec, debug, release, result):
     """`bench` timed, or `load` put on the server, with each of the three programs."""
     row = {"debug_size": os.path.getsize(debug), "release_size": os.path.getsize(release)}
-    for key, binary in (("ra-jit", fx.binary), ("debug", debug), ("release", release)):
+    for key, binary in (("ra_jit", fx.binary), ("debug", debug), ("release", release)):
         with Served(fx, binary) as served:
             if "load" in spec:
                 row.update({f"{key}_{k}": v for k, v in served.load(spec["load"]).items()})

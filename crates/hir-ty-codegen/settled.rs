@@ -12,7 +12,7 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use sha2::{Digest, Sha256};
 
 use super::{SymbolResolver, crate_checks_overflow};
-use crate::db::HirDatabase;
+use hir_ty::db::HirDatabase;
 
 /// The crates of a program that differ in `-C overflow-checks`.
 pub(super) struct Mixed {
@@ -39,8 +39,7 @@ impl Mixed {
         symbols: &dyn SymbolResolver,
         built: &FxHashSet<Crate>,
     ) -> Option<Mixed> {
-        let program: FxHashSet<Crate> =
-            built.iter().flat_map(|krate| krate.transitive_deps(db)).collect();
+        let program = super::linked_crates(db, built.iter().copied());
         let crates: Vec<(Crate, bool)> = program
             .iter()
             .filter_map(|&krate| Some((krate, crate_checks_overflow(db, krate)?)))

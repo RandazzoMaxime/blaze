@@ -536,7 +536,7 @@ FLAG_WORKSPACE = {
     "app/src/main.rs": '#![allow(unexpected_cfgs)]\n\nfn main() {\n    let name = std::env::args().nth(1).unwrap_or("world".to_string());\n    println!("{}", util::greeting(&name));\n    println!("{} {} {}", cfg!(debug_assertions), cfg!(extra), cfg!(target_feature = "avx2"));\n    let sum = std::panic::catch_unwind(|| name.len() as u8 + 251);\n    println!("{:?}", sum.ok());\n    if name == "fail" {\n        std::process::exit(3);\n    }\n}\n\n#[cfg(test)]\nmod tests {\n    #[test]\n    fn in_the_program() {\n        assert_eq!(util::greeting("x").len(), 7);\n    }\n}\n',
     "app/src/bin/other.rs": 'fn main() {\n    println!("other: {}", util::greeting("other"));\n}\n',
     "app/examples/demo.rs": 'fn main() {\n    println!("demo: {}", util::greeting("demo"));\n}\n',
-    "app/tests/it.rs": '#[test]\nfn greets_it() {\n    assert_eq!(util::greeting("it").to_lowercase(), "hello it");\n}\n\n#[test]\nfn fails_when_asked() {\n    assert!(std::env::var("FLAGS_FAIL").is_err());\n}\n\n// A cargo run by a test has the units of the build: the program stays the file it was.\n#[test]\nfn a_cargo_inside_leaves_the_program() {\n    use std::os::unix::fs::MetadataExt;\n    let program = env!("CARGO_BIN_EXE_app");\n    let before = std::fs::metadata(program).unwrap().ino();\n    let cargo = std::env::var("CARGO").unwrap_or("cargo".to_string());\n    let built = std::process::Command::new(cargo).args(["build", "-q", "-p", "app"]).status().unwrap();\n    assert!(built.success());\n    assert_eq!(before, std::fs::metadata(program).unwrap().ino());\n}\n\n// What cargo tells a test of the places of the build is what the daemon tells it.\n#[test]\nfn the_places_of_the_build_are_cargos() {\n    assert!(std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).is_dir());\n    let ran = std::process::Command::new(env!("CARGO_BIN_EXE_other")).output().unwrap();\n    assert_eq!(String::from_utf8_lossy(&ran.stdout).lines().count(), 1);\n}\n',
+    "app/tests/it.rs": '#[test]\nfn greets_it() {\n    assert_eq!(util::greeting("it").to_lowercase(), "hello it");\n}\n\n#[test]\nfn fails_when_asked() {\n    assert!(std::env::var("FLAGS_FAIL").is_err());\n}\n\n// A cargo inside writes the programs again, and on macOS it removes each and copies it back: a\n// test starting one meanwhile finds none.\nstatic BUILDING: std::sync::Mutex<()> = std::sync::Mutex::new(());\n\n// A cargo run by a test has the units of the build: the program stays the file it was.\n#[test]\nfn a_cargo_inside_leaves_the_program() {\n    use std::os::unix::fs::MetadataExt;\n    let _building = BUILDING.lock().unwrap_or_else(|it| it.into_inner());\n    let program = env!("CARGO_BIN_EXE_app");\n    let before = std::fs::metadata(program).unwrap().ino();\n    let cargo = std::env::var("CARGO").unwrap_or("cargo".to_string());\n    let built = std::process::Command::new(cargo).args(["build", "-q", "-p", "app"]).status().unwrap();\n    assert!(built.success());\n    assert_eq!(before, std::fs::metadata(program).unwrap().ino());\n}\n\n// What cargo tells a test of the places of the build is what the daemon tells it.\n#[test]\nfn the_places_of_the_build_are_cargos() {\n    assert!(std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).is_dir());\n    let _building = BUILDING.lock().unwrap_or_else(|it| it.into_inner());\n    let ran = std::process::Command::new(env!("CARGO_BIN_EXE_other")).output().unwrap();\n    assert_eq!(String::from_utf8_lossy(&ran.stdout).lines().count(), 1);\n}\n',
 }
 
 # What the edit round adds to the program: library code that rustc's build before the edit has
@@ -786,8 +786,9 @@ def manners(work, ws, env, here, check, edit):
         wait_warm(here, ws)
         open(file, "a").write(USE_AFTER_MOVE)
         _, wrong = here.cargo("run")
-        # ra-jit has no borrow checker and runs no rustc: the daemon builds it.
-        check(f"a use after a move in {name} is the daemon's to build on a warm `cargo ra-jit run`", how_built(wrong.stderr) == "daemon", f"exit {wrong.returncode}, {how_built(wrong.stderr)}")
+        # The daemon refuses an edit its borrow checker finds wrong, as one with a type error,
+        # and cargo's rustc says what is.
+        check(f"a use after a move in {name} is refused by the daemon and is rustc's error on a warm `cargo ra-jit run`", wrong.returncode == 101 and how_built(wrong.stderr) != "daemon" and "E0382" in wrong.stderr, f"exit {wrong.returncode}, {how_built(wrong.stderr)}")
         _, checked = here.cargo("check")
         check(f"and `cargo ra-jit check` of it", checked.returncode == 101 and "E0382" in checked.stderr, f"exit {checked.returncode}")
         open(file, "w").write(kept)
@@ -835,14 +836,22 @@ def abuse(work, ws, tree, env, check, status, alive):
     for side in sides:
         wait_warm(side, side.ws)
     pid, workers, _ = status()
-    for n, root in enumerate(trees):
-        rewrite(os.path.join(root, "util/src/lib.rs"), 'format!("hello {name}")', f'format!("tree{n} {{name}}")')
     spawn = lambda root, *args: subprocess.Popen(["cargo", "ra-jit", *args], cwd=root, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, stdin=subprocess.DEVNULL, start_new_session=True)
-    clients = [(n, spawn(root, "run", f"c{i}")) for i in range(4) for n, root in enumerate(trees)]
-    ended = [(n, i // 4, client.communicate(timeout=600), client.returncode) for i, (n, client) in enumerate(clients)]
-    right = [code == 0 and greets(out[0], f"tree{n} c{i}") for n, i, out, code in ended]
-    by_daemon = sum(how_built(out[1]) == "daemon" for _, _, out, _ in ended)
-    check("16 clients at once on 4 worktrees each run their own tree's program", all(right) and status()[0] == pid and status()[1] == workers, f"{sum(right)} of 16 right, {by_daemon} built by the daemon, {len(workers)} worker" + "".join(f"; tree{n} c{i}: exit {code}, {out[0][-80:]!r} {out[1][-200:]!r}" for (n, i, out, code), ok in zip(ended, right) if not ok))
+    # Round after round, as a client's program is started while the others put theirs in
+    # place, which on macOS lost one program in a few hundred. `app` is its package's
+    # `default-run`: the program is ra-jit's to start, not cargo's.
+    rounds = 8
+    greeting = lambda n, r: "hello" if r < 0 else f"tree{n}" if r == rounds - 1 else f"tree{n}-{r}"
+    wrong, served = [], 0
+    for r in range(rounds):
+        for n, root in enumerate(trees):
+            rewrite(os.path.join(root, "util/src/lib.rs"), f'format!("{greeting(n, r - 1)} {{name}}")', f'format!("{greeting(n, r)} {{name}}")')
+        clients = [(n, spawn(root, "run", f"c{i}")) for i in range(4) for n, root in enumerate(trees)]
+        ended = [(n, i // 4, client.communicate(timeout=300), client.returncode) for i, (n, client) in enumerate(clients)]
+        cargos = lambda err: re.search(r"^\s*Finished `\w+` profile \[(?!ra-jit)", err, re.M)
+        served += sum(how_built(err) == "daemon" and not cargos(err) for _, _, (_, err), _ in ended)
+        wrong += [f"; round {r} tree{n} c{i}: exit {code}, {out[-80:]!r} {err[-200:]!r}" for n, i, (out, err), code in ended if code != 0 or not greets(out, f"{greeting(n, r)} c{i}")]
+    check(f"16 clients at once on 4 worktrees each run their own tree's program, {rounds} times over", not wrong and served == 16 * rounds and status()[0] == pid and status()[1] == workers, f"{16 * rounds - len(wrong)} of {16 * rounds} right, {served} by the daemon alone, {len(workers)} worker" + "".join(wrong))
 
     # A worker that is stopped holds the build a client asks for until it is continued.
     edit = lambda text: open(os.path.join(ws, "app/src/main.rs"), "a").write(f"\n// {text}\n")

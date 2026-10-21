@@ -27,10 +27,10 @@ use std::{
 };
 
 use cranelift_codegen::ir::{self, InstBuilder, Opcode, types};
-use hir_def::{FunctionId, attrs::AttrFlags};
+use hir_def::{FunctionId, HasModule, attrs::AttrFlags};
 use rustc_hash::{FxHashMap, FxHashSet};
 
-use crate::{db::HirDatabase, next_solver::StoredGenericArgs, traits::StoredParamEnvAndCrate};
+use hir_ty::{db::HirDatabase, next_solver::StoredGenericArgs, traits::StoredParamEnvAndCrate};
 
 use super::{
     CodegenError, Instance, InstanceDef, Result,
@@ -51,6 +51,16 @@ const SMALL_INSTRUCTIONS: usize = 600;
 const SEEN_INSTRUCTIONS: usize = 2000;
 const BUDGET: usize = 40_000;
 const SEEN_BUDGET: usize = 10_000;
+/// How many instructions a body a build's compile builds in may have ([`for_build`]): what
+/// is larger is shown to LLVM, whose own measure of each call decides, so that what a
+/// function calls first does not use up [`BUDGET`] before its loops are reached.
+const BUILT_IN: usize = 120;
+/// How many instructions the bodies a build's compile builds in and shows LLVM may add up to
+/// for each call of the function itself, with all they call in turn, and for the whole
+/// function. It shows them at any depth: the callees of a body it built in too. Each call has
+/// its own share, so that what the function calls first does not leave its loops nothing.
+const CALL_BUDGET: usize = 8_000;
+const WHOLE_BUDGET: usize = 120_000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Level {
@@ -278,6 +288,14 @@ struct Inlining {
     /// caller's to say, which the last build may have settled otherwise.
     instances: FxHashSet<(InstanceDef, StoredGenericArgs)>,
     inlined: Vec<(Instance, StoredParamEnvAndCrate)>,
+    /// Of a build's compile ([`for_build`]) rather than of one at a level above 1.
+    whole: bool,
+    /// What [`Inlining::spent`] and [`Inlining::seen`] added up to when the call of the
+    /// function itself that is being built in or shown was reached.
+    base: usize,
+    /// How often a body was not built in or shown for want of room: a body built meanwhile
+    /// is not kept for the next call of it, which may have room.
+    starved: usize,
     depth: u32,
     /// How many instructions were built in so far, and shown to LLVM in bodies of their own.
     spent: usize,
@@ -302,6 +320,45 @@ pub(super) fn plain<T>(work: impl FnOnce() -> T) -> T {
     out
 }
 
+/// As [`plain`], for the compile of a function of a build. With `RA_JIT_INLINE=all` and LLVM
+/// at `-O2` or above, `work` builds in and shows LLVM what the function calls of any crate,
+/// as a compile at a level above 1 does with no function hot: what it builds in then depends
+/// on the database alone.
+pub(super) fn for_build<T>(work: impl FnOnce() -> T) -> T {
+    let fresh = across().then(|| Inlining {
+        roots: FxHashSet::default(),
+        instances: FxHashSet::default(),
+        inlined: Vec::new(),
+        whole: true,
+        base: 0,
+        starved: 0,
+        depth: 0,
+        spent: 0,
+        seen: 0,
+        built: FxHashMap::default(),
+    });
+    let held = INLINING.with(|it| std::mem::replace(&mut *it.borrow_mut(), fresh));
+    let out = work();
+    INLINING.with(|it| *it.borrow_mut() = held);
+    out
+}
+
+/// Whether a build's compiles build in what they call across crates (`RA_JIT_INLINE=all`).
+/// The daemon's builds do not: an entry of the store is keyed by its own function alone.
+fn across() -> bool {
+    static ACROSS: std::sync::LazyLock<bool> = std::sync::LazyLock::new(|| {
+        std::env::var_os("RA_JIT_INLINE").is_some_and(|it| it == "all")
+            && matches!(
+                super::backend::Backend::from_env(),
+                Ok(super::backend::Backend::Llvm(super::backend::Optimization {
+                    passes: super::backend::Passes::Default | super::backend::Passes::Aggressive,
+                    ..
+                }))
+            )
+    });
+    *ACROSS
+}
+
 /// How large a body of `instance` the compile under way may build into its caller, if it may
 /// build it in at all: a hot one up to [`HOT_INSTRUCTIONS`], any other up to
 /// [`SMALL_INSTRUCTIONS`], as rustc builds in what is small. The body is then built with
@@ -313,9 +370,11 @@ pub(super) fn inline_limit(db: &dyn HirDatabase, instance: &Instance) -> Option<
         _ => return None,
     };
     INLINING.with(|it| {
-        let it = it.borrow();
-        let inlining = it.as_ref()?;
-        if inlining.depth >= DEPTH || inlining.spent >= BUDGET {
+        let mut it = it.borrow_mut();
+        let inlining = it.as_mut()?;
+        let spent = if inlining.whole { !inlining.has_room() } else { inlining.spent >= BUDGET };
+        if inlining.depth >= DEPTH || spent {
+            inlining.starved += usize::from(inlining.whole);
             return None;
         }
         if func
@@ -323,11 +382,37 @@ pub(super) fn inline_limit(db: &dyn HirDatabase, instance: &Instance) -> Option<
         {
             return None;
         }
-        Some(if inlining.is_hot(instance) { HOT_INSTRUCTIONS } else { SMALL_INSTRUCTIONS })
+        if inlining.whole && !shared(db, instance) {
+            return None;
+        }
+        Some(if inlining.whole {
+            BUILT_IN
+        } else if inlining.is_hot(instance) {
+            HOT_INSTRUCTIONS
+        } else {
+            SMALL_INSTRUCTIONS
+        })
     })
 }
 
+/// Whether a build may build `instance` in, or show it to LLVM: one of the standard library
+/// only if it is generic or `#[inline]`, as rustc does across crates. The library keeps what
+/// the rest of its functions refer to to itself (the `static`s of `std::rt`), and has them
+/// compiled already.
+fn shared(db: &dyn HirDatabase, instance: &Instance) -> bool {
+    let InstanceDef::Fn(func) = instance.def else { return true };
+    !func.krate(db).data(db).origin.is_lang()
+        || AttrFlags::query(db, func.into()).contains(AttrFlags::IS_INLINE)
+        || instance.args.as_ref().iter().any(|it| it.region().is_none())
+}
+
 impl Inlining {
+    /// Whether a build's compile may build in or show more, at this depth.
+    fn has_room(&self) -> bool {
+        let used = self.spent + self.seen;
+        used < WHOLE_BUDGET && (self.depth == 0 || used - self.base < CALL_BUDGET)
+    }
+
     fn is_hot(&self, instance: &Instance) -> bool {
         self.instances.contains(&(instance.def, instance.args.clone()))
             || matches!(instance.def, InstanceDef::Fn(func)
@@ -347,8 +432,8 @@ pub(super) fn hot_body(
     tracked: bool,
 ) -> Option<std::rc::Rc<super::fragment::Inlinable>> {
     let body = body(db, instance, env, tracked)?;
-    if body.func.dfg.num_insts() > limit {
-        refused(db, instance, "too large");
+    if size(&body.func) > limit {
+        refused(db, instance, &format!("too large ({} instructions)", size(&body.func)));
         return None;
     }
     spend(instance, env, &body);
@@ -374,9 +459,17 @@ pub(super) fn seen_body(
     // Bodies built in show theirs too: one call left opaque, such as a drop on the unwind path,
     // has LLVM take every pointer passed to it as escaped and load it again after each store.
     let (hot, room) = INLINING.with(|it| {
-        let it = it.borrow();
-        let inlining = it.as_ref()?;
-        Some((inlining.is_hot(instance), inlining.depth < DEPTH && inlining.seen < SEEN_BUDGET))
+        let mut it = it.borrow_mut();
+        let inlining = it.as_mut()?;
+        let room = match inlining.whole {
+            true => {
+                let room = inlining.depth < DEPTH && inlining.has_room();
+                inlining.starved += usize::from(!room);
+                shared(db, instance) && room
+            }
+            false => inlining.depth < DEPTH && inlining.seen < SEEN_BUDGET,
+        };
+        Some((inlining.is_hot(instance), room))
     })?;
     if !room {
         refused(db, instance, "not shown: budget");
@@ -389,14 +482,13 @@ pub(super) fn seen_body(
         return None;
     }
     let body = body(db, instance, env, tracked)?;
-    if body.func.dfg.num_insts() > limit {
-        let size = body.func.dfg.num_insts();
-        refused(db, instance, &format!("not shown: {size} instructions"));
+    if size(&body.func) > limit {
+        refused(db, instance, &format!("not shown: {} instructions", size(&body.func)));
         return None;
     }
     INLINING.with(|it| {
         if let Some(it) = it.borrow_mut().as_mut() {
-            it.seen += body.func.dfg.num_insts();
+            it.seen += size(&body.func);
             if !it.inlined.iter().any(|(known, _)| known == instance) {
                 it.inlined.push((instance.clone(), env.clone()));
             }
@@ -417,14 +509,88 @@ fn body(
     match known {
         Some(body) => body,
         None => {
+            // A body that calls itself, while it is built, is not built in again.
+            let starved = INLINING.with(|it| {
+                let mut it = it.borrow_mut();
+                let it = it.as_mut()?;
+                it.built.insert(key.clone(), None);
+                Some(it.starved)
+            });
             let body = build_body(db, instance, env, tracked).map(std::rc::Rc::new);
             INLINING.with(|it| {
                 if let Some(it) = it.borrow_mut().as_mut() {
-                    it.built.insert(key, body.clone());
+                    if Some(it.starved) == starved {
+                        it.built.insert(key, body.clone());
+                    } else {
+                        it.built.remove(&key);
+                    }
                 }
             });
             body
         }
+    }
+}
+
+/// How many instructions `func` has: those of its blocks, not those a pass took out.
+fn size(func: &ir::Function) -> usize {
+    func.layout.blocks().map(|block| func.layout.block_insts(block).count()).sum()
+}
+
+/// Has each two-way branch on a constant go where the constant sends it, and drops the blocks
+/// no path reaches then: the checks `ub_checks()` turns off would else be built into every
+/// caller of a body that has one, and counted.
+fn fold_known_branches(
+    ctx: &mut cranelift_codegen::Context,
+    isa: &dyn cranelift_codegen::isa::TargetIsa,
+) {
+    let func = &mut ctx.func;
+    let mut folded = false;
+    let blocks: Vec<ir::Block> = func.layout.blocks().collect();
+    for block in blocks {
+        let Some(inst) = func.layout.last_inst(block) else { continue };
+        let ir::InstructionData::Brif { arg, blocks: [then, otherwise], .. } = func.dfg.insts[inst]
+        else {
+            continue;
+        };
+        let Some(known) = known_value(func, arg) else { continue };
+        let taken = if known != 0 { then } else { otherwise };
+        let pool = &func.dfg.value_lists;
+        let (to, args) = (taken.block(pool), taken.args(pool).collect::<Vec<_>>());
+        func.replace(inst).jump(to, &args);
+        folded = true;
+    }
+    if folded {
+        ctx.flowgraph();
+        // Only a verifier enabled by the flags can fail it, on IR it took apart.
+        _ = ctx.eliminate_unreachable_code(isa);
+    }
+}
+
+/// The value of `value`, where it is a constant through extensions and comparisons with one.
+fn known_value(func: &ir::Function, value: ir::Value) -> Option<i64> {
+    use cranelift_codegen::ir::{InstructionData, condcodes::IntCC};
+    let inst = func.dfg.value_def(value).inst()?;
+    match func.dfg.insts[inst] {
+        InstructionData::UnaryImm { opcode: Opcode::Iconst, imm } => {
+            let bits = func.dfg.value_type(value).bits();
+            let imm = imm.bits();
+            Some(if bits >= 64 { imm } else { imm & ((1i64 << bits) - 1) })
+        }
+        InstructionData::Unary { opcode: Opcode::Uextend | Opcode::Ireduce, arg } => {
+            let bits = func.dfg.value_type(value).bits();
+            let known = known_value(func, arg)?;
+            Some(if bits >= 64 { known } else { known & ((1i64 << bits) - 1) })
+        }
+        InstructionData::IntCompare { opcode: Opcode::Icmp, cond, args: [l, r] } => {
+            let (l, r) = (known_value(func, l)?, known_value(func, r)?);
+            let holds = match cond {
+                IntCC::Equal => l == r,
+                IntCC::NotEqual => l != r,
+                _ => return None,
+            };
+            Some(i64::from(holds))
+        }
+        _ => None,
     }
 }
 
@@ -433,7 +599,7 @@ fn body(
 fn spend(instance: &Instance, env: &StoredParamEnvAndCrate, body: &super::fragment::Inlinable) {
     INLINING.with(|it| {
         if let Some(it) = it.borrow_mut().as_mut() {
-            it.spent += body.func.dfg.num_insts();
+            it.spent += size(&body.func);
             if !it.inlined.iter().any(|(known, _)| known == instance) {
                 it.inlined.push((instance.clone(), env.clone()));
             }
@@ -481,7 +647,14 @@ fn build_body(
             }
         },
     };
-    INLINING.with(|it| it.borrow_mut().as_mut().map(|it| it.depth += 1));
+    INLINING.with(|it| {
+        if let Some(it) = it.borrow_mut().as_mut() {
+            if it.depth == 0 {
+                it.base = it.spent + it.seen;
+            }
+            it.depth += 1;
+        }
+    });
     let built = (|| {
         let mut cg = Recorder::new(
             db,
@@ -511,6 +684,7 @@ fn build_body(
         super::inline(&mut ctx, &cg.inlined).map_err(|e| refused(&e.to_string())).ok()?;
         // Its size is measured with its locals out of the frame, as the caller has them.
         super::promote::promote(&mut ctx.func, cg.named_slots());
+        fold_known_branches(&mut ctx, cg.isa);
         let pointees = std::mem::take(&mut cg.pointees);
         let seen = std::mem::take(&mut cg.seen);
         let inlinable = super::fragment::Inlinable::of(ctx.func, cg.finish().0, pointees, seen);
@@ -558,6 +732,9 @@ pub fn prepare(db: &dyn HirDatabase, asked: &Asked) -> std::result::Result<Prepa
         roots: FxHashSet::default(),
         instances: FxHashSet::default(),
         inlined: Vec::new(),
+        whole: false,
+        base: 0,
+        starved: 0,
         depth: 0,
         spent: 0,
         seen: 0,
