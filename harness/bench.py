@@ -11,9 +11,10 @@ its programs (NAME..., its defaults without), `--runs` rounds each (default 5), 
 result with the machine, the commit and the date, for benchreport.py's runtime table.
 
 Each project is one pinned checkout (cloned into `RA_JIT_PROJECTS` as cargo_ra_jit.py does, and
-copied; the clone is never written to). Under each backend, with a store, a daemon and a home
-of its own, and plain cargo building the same source into a target directory of its own outside the
-checkout (under `--reference`, which lets the two be on different disks, or `WORK/reference`):
+copied; the clone is never written to). A project with `prepare` (bun) is copied from the tree
+that module's `prepare` makes beside the clone, and is measured only when named. Under each
+backend, with a store, a daemon and a home of its own, and plain cargo building the same source
+into a target directory of its own outside the checkout (under `--reference`, which lets the two be on different disks, or `WORK/reference`):
   cold       `cargo ra-jit build` from nothing, then the wait until the daemon has the
              workspace loaded and its first build linked
   no-op      `cargo ra-jit build` with nothing changed
@@ -52,7 +53,7 @@ was linked again where it was added, or is missing. Differences under 50 ms are 
 
 The ra-jit of a backend is `RA_JIT_BIN` (cranelift) or `RA_JIT_LLVM_BIN` (llvm).
 """
-import glob, json, os, platform, re, shutil, statistics, subprocess, sys, tempfile, time
+import glob, importlib, json, os, platform, re, shutil, statistics, subprocess, sys, tempfile, time
 
 import cargo_ra_jit, memory
 from cargo_ra_jit import HERE, ROOT, TOOLCHAIN, Side, difference, fetch, how_built, program_output, test_results, timed, wait_warm
@@ -208,6 +209,19 @@ PROJECTS = {
                          [("crates/project/src/lsp_store.rs", "let context = language::PromptResponseContext {")]),
         ),
         test=["-p", "util"],
+    ),
+    # 1.25M lines of Rust in 105 crates, with the C and C++ of a JavaScript runtime (bun's port
+    # from Zig, docs/research/bun.md). Its own build makes the C and C++ once per revision
+    # (bunprep.py), and its pinned nightly builds the Rust. Measured only when named.
+    "bun": dict(
+        repo="oven-sh/bun", tag="bun-v1.4.3", rev="c6da4a4d3010e5553438c60f6bd76d981976867c",
+        prepare="bunprep", build=["-p", "bun-exe"], run=["--revision"],
+        edits=dict(
+            body=body("src/runtime/cli/mod.rs", "pub(crate) fn print_revision_and_exit() -> ! {"),
+            signature=parameter("src/runtime/cli/multi_run.rs", "is_done", "bool", "src/runtime/cli/multi_run.rs"),
+            leaf=body("src/bun_core/string/StringBuilder.rs", "pub fn append(&mut self, slice: &[u8]) -> &[u8] {"),
+            generic=body("src/collections/multi_array_list.rs", "pub(crate) fn push(&mut self, elem: T) -> Result<(), AllocError> {"),
+        ),
     ),
     # A game: built, not run (it opens a window). Its own code is small; the engine is ~400 crates.
     "bevy": dict(
@@ -512,9 +526,16 @@ def measure(name, spec, backend, runs, work, reference_dir, cold_runs=1, setup_n
     """Runs every phase of one project under one backend. The result is the phases by name."""
     ra_jit = ra_jit_of(backend)
     ws = os.path.realpath(os.path.join(work, f"{name}-{backend}"))
-    shutil.copytree(fetch(name, spec), ws, symlinks=True, ignore=shutil.ignore_patterns("target", "target-ref", ".git"))
+    source, prepared = fetch(name, spec), {}
+    if "prepare" in spec:
+        # A tree with what the project's own build makes before cargo, and what every build of
+        # it needs: its builds read that from the tree, so its `build` is not copied.
+        source, prepared = importlib.import_module(spec["prepare"]).prepare(source)
+    left_out = lambda at, names: [n for n in names if n in ("target", "target-ref", ".git")
+                                  or ("prepare" in spec and n == "build" and os.path.samefile(at, source))]
+    shutil.copytree(source, ws, symlinks=True, ignore=left_out)
     home = lambda label: os.path.join(work, f"home-{name}-{backend}-{label}")
-    env = dict(cargo_ra_jit.base_env(home(0)), **spec.get("env", {}))
+    env = dict(cargo_ra_jit.base_env(home(0)), **spec.get("env", {}), **prepared)
     env["PATH"] = os.path.dirname(ra_jit) + os.pathsep + env["PATH"]
     env.update(BACKENDS[backend], RA_JIT_STATS="1")
     # Neither side gets a compiler cache: a cold build is a cold build.
@@ -687,6 +708,9 @@ def measure(name, spec, backend, runs, work, reference_dir, cold_runs=1, setup_n
                                                      resident_mb=round(statistics.median(u["resident_mb"] for _, _, u in warm_store))))
     result = dict(phases=phases, wrong=wrong, tag=spec["tag"], rev=spec["rev"], store_mb=store_mb(ours.env["RA_JIT_CACHE"]),
                   cold_runs=cold_runs, resident=resident, disk_mb=end_disk)
+    if "RUSTUP_TOOLCHAIN" in prepared:
+        # The project's own toolchain, not the one ra-jit is pinned to.
+        result["toolchain"] = prepared["RUSTUP_TOOLCHAIN"]
     if "runtime" in spec:
         result["runtime"] = runtime(name, spec, theirs, ws, build, max(runs, 10), wrong)
     return result
@@ -911,7 +935,7 @@ def main():
     if unknown:
         raise SystemExit(f"no setup {unknown}: the setups are {', '.join(SETUPS)}")
     keep, tests = "--keep" in argv, "--tests" in argv
-    names = [a for a in argv if not a.startswith("--")] or list(PROJECTS)
+    names = [a for a in argv if not a.startswith("--")] or [n for n, spec in PROJECTS.items() if "prepare" not in spec]
     os.makedirs(work, exist_ok=True)
     os.makedirs(reference_dir, exist_ok=True)
     result = dict(toolchain=TOOLCHAIN, machine=platform.machine(), cores=os.cpu_count(), runs=runs, cold_runs=cold_runs,

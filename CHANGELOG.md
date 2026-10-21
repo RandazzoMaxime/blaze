@@ -8,6 +8,9 @@ All notable changes to ra-jit are written here. The format follows
 
 ### Added
 
+- `bench.py bun` times the edits on bun (body, signature, leaf, generic, new function) in a copy
+  of the tree `bunprep.py` prepares, under bun's pinned nightly; bun is measured only when
+  named.
 - bun (its Rust port, 1.4.3: 1.25M lines in 105 crates, with a JavaScript runtime's C and C++)
   in `apps.json`, so `apps.py bun` and `runbench.py bun` build it whole-program and compare
   its runs with cargo's. An entry's `prepare` names a module of the harness that makes what
