@@ -71,11 +71,13 @@ were stable names: 665,474,913 bytes for one `helix-parsec` closure, and the lar
    compiles every dependency; ra-jit analyses dependencies only as far as the instances it
    compiles (generic or inlinable functions homed there, `home.rs`), but rust-analyzer loads
    and resolves every crate first.
-2. **The workspace's own state.** Nothing persisted. A spare worker preloads the sysroot,
-   and the "beside" mode compiles ahead while cargo runs (#11). The cold-start-2 lane
-   ("persist the analysed workspace") is the owner of this; it has uncommitted work in
-   `crates/hir-ty-codegen/mod.rs`, `patch.rs`, `crates/ra-jit/src/main.rs`, `outline.rs`
-   and `symbols.rs`, and no persistence commits yet.
+2. **The workspace's own state.** Nothing persisted. While cargo builds, a spare worker
+   loads and resolves the sysroot and the workspace and compiles the functions of each crate
+   cargo is done with on a quarter of the cores (#11). The cold-start-2 branch made that
+   lighter and built no persistence: what is left of the command's cost, 5 to 7% over
+   cargo's on just, ripgrep and nushell, is the spare resolving the sysroot and the
+   workspace beside cargo, which is this item's to remove (and item 1's for the sysroot),
+   through the one id serialization both need, not a mechanism of its own.
 3. **Proc macros and build scripts.** Build scripts: `seed_own_target` copies cargo's target
    directory and commits `20708cd2da` and `c8f58ac7d9` stop re-running scripts cargo already
    ran, so this half is mostly done. Proc macros: one proc-macro server process
