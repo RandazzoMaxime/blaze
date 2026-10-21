@@ -32,6 +32,7 @@ HARNESSES = [
     ("core", ["growth.py"], {}, on(backend="cranelift")),
     ("core", ["wholeprogram.py"], {}, on("linux", "macos")),
     ("core", ["splices.py"], {}, EVERYWHERE),
+    ("core", ["live_e2e.py"], {}, on("linux-x86_64")),
     # Apple's linker leaves no more room than it is told, and gives a newer macOS chained fixups.
     ("core", ["headerpad.py"], {}, on("macos")),
     # A branch reaches 128 MB on AArch64, and the splice has to get past that. Mach-O is not spliced.
