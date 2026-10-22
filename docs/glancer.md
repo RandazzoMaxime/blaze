@@ -52,7 +52,31 @@ translate 76.1 s, describe 6.2 s, store write 1.3 s (on main: store read 28.1 s,
 From the committed benchmarks ([`docs/benchmarks/linux-x86_64.json`](https://github.com/indexable-inc/ra-jit/blob/b3e953eb13e8e4476a4673ab1c7dfbdff61880c6/docs/benchmarks/linux-x86_64.json), `2b2f2dcd5b`, same
 machine type): ripgrep ready 12.5 s at 2.6 GB, load 0.9 s, resolve 0.5 s; bevy ready
 115.8 s at 8.5 GB, load 14.4 s, resolve 12.6 s; nushell load 7.2 s, resolve 5.0 s; helix load
-7.1 s, resolve 5.6 s. zed did not fit in 111 GB (#29); it has not been measured with step 1.
+7.1 s, resolve 5.6 s. zed did not fit in 111 GB (#29).
+
+**After cold-start-2 (2026-10-21, dev-aws-11, 187 GB, 16 cores, same harness).** cargo
+is answered from what rustc linked, and the program edits patch (the own base) is built in
+the background once nothing has asked for a second:
+
+| | `cargo ra-jit build` returned | ready | RSS at ready | own base done | own base peak |
+|---|---:|---:|---:|---:|---:|
+| helix | 27.3 s | 29.4 s | 4.7 GB | 108.4 s | 19.1 GB (13.6 GB after) |
+| zed v1.24.4 | 160.3 s | 214 s | 14.6 GB | given up at 48.1 GB | 49.8 GB, flat after |
+
+- helix's own base is step 3's restart round now: its first round (39.1 s) is thrown away on
+  `__RUST_STD_INTERNAL_VAL`, in the background. It does not loop, and memory does not grow
+  without bound; the 55 GB seen before was a binary from before step 1.
+- zed's own base restarted once a second (2131 interruptions in 40 minutes, flat at
+  16.2 GB): `livekit_api`, an optional dependency a dev-dependency's feature turns on, includes
+  a file under an `OUT_DIR` no build script wrote, and an include that could not be read was
+  counted as one still to load before every turn. Fixed on `include-loop`
+  (`harness/rustcbase.py`'s `unbuilt-member`).
+- With the loop gone, zed's own base grows about 1.2 GB/s and passed 150 GB in two minutes. A
+  heap profile at 73.6 GB live: `described` (debuginfo types) 51.2 GB, 69.6%; `infer`, MIR
+  and `compiled_instance` each under 1 GB. That is #55's, and item 5's `described` sharing.
+- The safety valve until then: a worker gives an own base up once it holds a quarter of the
+  machine's memory (`RA_JIT_OWN_BASE_MEMORY`), and edits patch rustc's executable. It is not
+  #39's result dropping: nothing is freed (salsa keeps the memos, #57), the build just stops.
 
 How helix was found: during its compile step the worker ran on one core at 40 to 100 GB.
 A `perf` sample of it was 14% `memmove`, 13% SHA-256, 11% `core::fmt::write`, 7% hex
@@ -290,7 +314,7 @@ and cold-start time and RSS on helix and nushell before and after.
 
 ## Not checked
 
-- zed, bevy and ripgrep with step 1.
+- bevy and ripgrep with step 1; zed's own base past the memory bound (#55).
 - Whether `instance_path` and `home::Mentions`, which also walk types without a memo,
   grow the same way on other workspaces; on helix they were under 3% of the sample.
 - How much of a load proc-macro expansion is (step 0).

@@ -346,6 +346,18 @@ All notable changes to ra-jit are written here. The format follows
   the same way (#65).
 - A daemon's socket is free as soon as the daemon lets go of it, also while another thread of
   the process starts a program, which shares the lock's file until it runs (#58).
+- The daemon's own base, built once nothing is asked after a cold build, started over every
+  second and was never done when a crate it loads includes a file that is not there: zed's
+  `livekit_api` reads `OUT_DIR`, which only a dev-dependency's feature brings into the
+  daemon's crates, and whose build script cargo never ran. A file an `include!`,
+  `include_str!` or `include_bytes!` names and that cannot be read is now read again once it
+  is there, rather than taken for one still to load before each request
+  (`harness/rustcbase.py`'s `unbuilt-member`). And since a base nobody waits for must not
+  take the machine, a worker that holds more than a quarter of its memory while it builds one
+  gives it up and says so; edits go on patching rustc's executable (`RA_JIT_OWN_BASE_MEMORY`,
+  `own-base-budget`). zed's base, which the loop had hidden, passes it: 51 GB of 74 GB live are
+  debuginfo types
+  ([#55](https://github.com/indexable-inc/ra-jit/issues/55)).
 - bat builds whole: an `impl` inside a function body of a dependency (bincode's `EnumAccess`
   for `&mut Deserializer`, inside `deserialize_enum`) was not found, as rust-analyzer only
   looked into the bodies of workspace crates; a dependency's file is now lexed for an `impl`
