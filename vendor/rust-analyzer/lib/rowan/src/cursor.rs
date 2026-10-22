@@ -601,15 +601,7 @@ impl SyntaxNode {
 
     pub fn first_child(&self) -> Option<SyntaxNode> {
         if let Ref::Flat(root, at) = self.0 {
-            let tree = &flat(&root).tree;
-            let mut child = tree.first_child_or_token(at);
-            while let Some(it) = child {
-                if !tree.is_token(it) {
-                    return Some(SyntaxNode(flat_ref(root, it)));
-                }
-                child = tree.next_sibling_or_token(it);
-            }
-            return None;
+            return flat(&root).tree.first_child(at).map(|it| SyntaxNode(flat_ref(root, it)));
         }
         self.green_ref().children().raw.enumerate().find_map(|(index, child)| {
             child.as_ref().into_node().map(|green| {
@@ -670,15 +662,7 @@ impl SyntaxNode {
 
     pub fn next_sibling(&self) -> Option<SyntaxNode> {
         if let Ref::Flat(root, at) = self.0 {
-            let tree = &flat(&root).tree;
-            let mut sibling = tree.next_sibling_or_token(at);
-            while let Some(it) = sibling {
-                if !tree.is_token(it) {
-                    return Some(SyntaxNode(flat_ref(root, it)));
-                }
-                sibling = tree.next_sibling_or_token(it);
-            }
-            return None;
+            return flat(&root).tree.next_sibling(at).map(|it| SyntaxNode(flat_ref(root, it)));
         }
         data(self.green_ptr()).next_sibling()
     }

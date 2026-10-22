@@ -16,7 +16,8 @@ const NO_PARENT: u32 = !TOKEN;
 #[derive(Clone, PartialEq, Eq, Hash)]
 pub struct FlatTree {
     text: Box<str>,
-    kinds: Box<[SyntaxKind]>,
+    /// The kinds' numbers: a slice of `u16` hashes in one write.
+    kinds: Box<[u16]>,
     starts: Box<[u32]>,
     ends: Box<[u32]>,
     /// The parent's number, with [`TOKEN`] set for a token.
@@ -52,13 +53,13 @@ impl FlatTree {
     /// The bytes the tree holds besides itself.
     pub fn heap_size(&self) -> usize {
         self.text.len()
-            + self.kinds.len() * std::mem::size_of::<SyntaxKind>()
+            + self.kinds.len() * 2
             + (self.starts.len() + self.ends.len() + self.parents.len()) * 4
     }
 
     #[inline]
     pub(crate) fn kind(&self, at: u32) -> SyntaxKind {
-        self.kinds[at as usize]
+        SyntaxKind(self.kinds[at as usize])
     }
 
     #[inline]
@@ -142,23 +143,63 @@ impl FlatTree {
         index
     }
 
-    /// The child or token of `at` that holds `range`, as rowan's green nodes find it.
-    pub(crate) fn child_at_range(&self, at: u32, range: TextRange) -> Option<u32> {
-        let mut last_less = None;
-        let mut first = None;
-        let mut child = self.first_child_or_token(at);
-        while let Some(it) = child {
-            first.get_or_insert(it);
-            match self.range(it).ordering(range) {
-                std::cmp::Ordering::Less => last_less = Some(it),
-                std::cmp::Ordering::Equal => {
-                    return self.range(it).contains_range(range).then_some(it);
-                }
-                std::cmp::Ordering::Greater => break,
+    /// The first child node of `at` from `from` on, `from` being `at`'s child or its end.
+    #[inline]
+    fn node_from(&self, at: u32, mut from: u32) -> Option<u32> {
+        let end = self.end(at);
+        while from < end {
+            if self.parents[from as usize] & TOKEN == 0 {
+                return Some(from);
             }
-            child = self.next_sibling_or_token(it);
+            from = self.end(from);
         }
-        last_less.or(first).filter(|&it| self.range(it).contains_range(range))
+        None
+    }
+
+    #[inline]
+    pub(crate) fn first_child(&self, at: u32) -> Option<u32> {
+        self.node_from(at, at + 1)
+    }
+
+    #[inline]
+    pub(crate) fn next_sibling(&self, at: u32) -> Option<u32> {
+        self.node_from(self.parent(at)?, self.end(at))
+    }
+
+    /// The child or token of `at` that holds `range`, as rowan's green nodes find it with a
+    /// binary search of the children: the one that holds `range` and overlaps it, else the
+    /// last that ends at or before its start, else the first.
+    pub(crate) fn child_at_range(&self, at: u32, range: TextRange) -> Option<u32> {
+        let first = self.first_child_or_token(at)?;
+        let (lo, hi) = (at as usize + 1, self.end(at) as usize);
+        let start = u32::from(range.start());
+        let contains = |it: u32| self.range(it).contains_range(range);
+        if !range.is_empty() {
+            // Elements are in preorder, so the last to start at or before `start` is in the
+            // only child that can hold a range that is not empty.
+            let n = self.starts[lo..hi].partition_point(|&it| it <= start);
+            if n == 0 {
+                return None;
+            }
+            let child = self.child_containing(at, (lo + n - 1) as u32);
+            return contains(child).then_some(child);
+        }
+        let n = self.starts[lo..hi].partition_point(|&it| it < start);
+        let mut last_less = None;
+        if n > 0 {
+            let child = self.child_containing(at, (lo + n - 1) as u32);
+            if u32::from(self.range(child).end()) > start {
+                return Some(child);
+            }
+            last_less = Some(child);
+        }
+        // Empty children at `start` end at or before it too.
+        let mut next = last_less.map_or(Some(first), |it| self.next_sibling_or_token(it));
+        while let Some(it) = next.filter(|&it| self.range(it) == range) {
+            last_less = Some(it);
+            next = self.next_sibling_or_token(it);
+        }
+        last_less.or(Some(first)).filter(|&it| contains(it))
     }
 
     /// The subtree of node `at`, as a tree of its own.
@@ -205,7 +246,7 @@ impl FlatTree {
 #[derive(Default, Debug)]
 pub struct FlatTreeBuilder {
     text: String,
-    kinds: Vec<SyntaxKind>,
+    kinds: Vec<u16>,
     starts: Vec<u32>,
     ends: Vec<u32>,
     parents: Vec<u32>,
@@ -234,7 +275,7 @@ impl FlatTreeBuilder {
     fn push(&mut self, kind: SyntaxKind, flag: u32) -> u32 {
         let at = self.kinds.len() as u32;
         assert!(at < NO_PARENT, "a tree of more than 2^31 elements");
-        self.kinds.push(kind);
+        self.kinds.push(kind.0);
         self.starts.push(self.text.len() as u32);
         self.ends.push(at + 1);
         self.parents.push(self.open.last().copied().unwrap_or(NO_PARENT) | flag);
