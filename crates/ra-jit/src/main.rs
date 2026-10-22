@@ -1525,6 +1525,13 @@ fn crates_named(db: &RootDatabase, krate: &str, args: &Args) -> anyhow::Result<V
     if found.iter().any(of_checkout) {
         found.retain(of_checkout);
     }
+    // The standard library vendors private copies of crates (foldhash, libc, hashbrown) that
+    // are libstd's, built by rustc, and in rust-analyzer's graph of it one may be a crate rustc
+    // does not build at all: std's foldhash, which hashbrown has without its default hasher.
+    let of_program = |krate: &Crate| !krate.origin(db).is_lang();
+    if found.iter().any(of_program) {
+        found.retain(of_program);
+    }
     anyhow::ensure!(!found.is_empty(), "crate {krate} not found in workspace");
     Ok(found)
 }

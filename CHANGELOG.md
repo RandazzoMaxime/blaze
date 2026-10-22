@@ -357,6 +357,11 @@ All notable changes to ra-jit are written here. The format follows
 
 ### Fixed
 
+- `--crate NAME` names no crate of the standard library's when a crate of the program has the
+  name. std vendors foldhash 0.2.0, libc and hashbrown, and its foldhash, which rustc does not
+  build (hashbrown has it only with its default hasher), sees no `core` in rust-analyzer's
+  graph: bun's whole-program build compiled it beside bun's two foldhash, and its 27 functions
+  that did not lower were counted as left to rustc. `harness/bun-repros/std_copies` checks it.
 - A dependency's impl that a macro writes in a function body is found: dtoa's `write` calls
   `dtoa!`, which calls `diyfp!`, which writes `impl DiyFp` there, and `normalize_boundary`
   went unresolved because no `impl` is in `write`'s own text. A dependency's function is now

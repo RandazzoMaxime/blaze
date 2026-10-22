@@ -11,6 +11,7 @@ import json
 import os
 import re
 import shutil
+import subprocess
 import sys
 import tempfile
 
@@ -51,6 +52,14 @@ CASES = {
         "expected": "compiled",
         "reasons": (),
     },
+    # Read with `ra-jit mir`, which lowers every crate `--crate` names.
+    "std_copies": {
+        "package": "runner",
+        "crate": "foldhash",
+        "expected": "compiled",
+        "reasons": (),
+        "mir": True,
+    },
 }
 
 
@@ -73,9 +82,31 @@ def rows_for(fx):
     ]
 
 
+def run_mir_case(name, case, workspace, json_path):
+    """Every function of the crates `--crate` names lowers to MIR."""
+    run = subprocess.run([RA_JIT, "mir", workspace, "--crate", case["crate"]], capture_output=True, text=True)
+    if run.returncode != 0:
+        raise SystemExit(f"{name}: ra-jit mir failed:\n{run.stderr[-2000:]}")
+    reasons = re.findall(r"^// ra-jit: no MIR: (.*)$", run.stdout, re.M)
+    lowered = len(re.findall(r"^fn ", run.stdout, re.M))
+    print(f"{name}: {lowered} lowered, {len(reasons)} refused")
+    for reason in sorted(set(reasons)):
+        print(f"  {reason}")
+    if case["expected"] == "compiled" and reasons:
+        raise SystemExit(f"{name}: expected every function to lower, {len(reasons)} did not")
+    result = {"case": name, "state": "refused" if reasons else "compiled", "compiled": lowered,
+              "refused": len(reasons), "reasons": reasons, "match": True}
+    if json_path:
+        with open(json_path, "w") as out:
+            json.dump(result, out, indent=1)
+    return result
+
+
 def run_case(name, root, json_path=None):
     case = CASES[name]
     workspace = os.path.join(root, name)
+    if case.get("mir"):
+        return run_mir_case(name, case, workspace, json_path)
     target = tempfile.mkdtemp(prefix=f"ra-jit-bun-{name}-")
     os.environ["CARGO_TARGET_DIR"] = target
     fx = Fixture(workspace, [case["crate"]], ["-p", case["package"]])
