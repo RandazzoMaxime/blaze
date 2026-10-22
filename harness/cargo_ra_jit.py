@@ -415,6 +415,8 @@ def checking(root):
 def wait_warm(side, root):
     """Waits until the daemon has every build of `root` loaded or has given up on one. The
     result is the seconds it took and how each ended."""
+    # The daemon names a checkout by its real path: on macOS /tmp and /var are links.
+    root = os.path.realpath(root)
     began = time.time()
     side.settled()
     while time.time() - began < WARMUP_SECS:
@@ -746,7 +748,43 @@ def daemon(work):
     manners(work, ws, env, here, check, edit)
     abuse(work, ws, tree, env, check, status, alive)
     in_place(work, check)
+    through_link(work, check)
     return checks
+
+
+THROUGH_LINK = {
+    "dep/Cargo.toml": '[package]\nname = "dep"\nversion = "0.1.0"\nedition = "2021"\n',
+    "dep/src/lib.rs": "use std::sync::atomic::{AtomicUsize, Ordering};\n\npub fn bump() -> usize {\n    static N: AtomicUsize = AtomicUsize::new(0);\n    N.fetch_add(1, Ordering::Relaxed)\n}\n\npub fn twice() -> (usize, usize) {\n    (bump(), bump())\n}\n",
+    "ws/Cargo.toml": '[package]\nname = "app"\nversion = "0.1.0"\nedition = "2021"\n\n[dependencies]\ndep = { path = "../dep" }\n',
+    "ws/src/main.rs": 'fn main() {\n    println!("{:?}", (dep::bump(), dep::twice(), dep::bump()));\n}\n',
+}
+
+
+def through_link(work, check):
+    """A workspace that `--manifest-path` names through a symbolic link, as macOS's /tmp is
+    one to /private/tmp, with a path dependency outside it: cargo names the dependency's
+    files through the link, the daemon its checkout by where it is. An edit is the daemon's,
+    against what rustc built of the dependency (its static is counted by both)."""
+    real = os.path.join(work, "through-link")
+    for file, text in THROUGH_LINK.items():
+        os.makedirs(os.path.dirname(os.path.join(real, file)), exist_ok=True)
+        open(os.path.join(real, file), "w").write(text)
+    link = real + "-link"
+    os.symlink(real, link)
+    manifest = ["--manifest-path", os.path.join(link, "ws", "Cargo.toml")]
+    env = base_env(os.path.join(work, "home-through-link"))
+    ours, theirs = Side(work, env, True), Side(work, env, False)
+    ours.cargo("build", *manifest)
+    began = time.time()
+    while ": ready" not in ours.cargo("status", *manifest)[1].stdout and time.time() - began < WARMUP_SECS:
+        time.sleep(0.25)
+    rewrite(os.path.join(real, "ws/src/main.rs"), 'println!("{:?}"', 'println!("edited {:?}"')
+    (_, mine), (_, other) = ours.cargo("run", *manifest), theirs.cargo("run", *manifest)
+    wrong = difference(program_output(mine), program_output(other))
+    how = how_built(mine.stderr)
+    check("an edit of a workspace named through a link, with a path dependency outside it, is the daemon's and right",
+          mine.returncode == 0 and how == "daemon" and not wrong, f"{how[:90]}; {wrong or 'same as cargo'}; {mine.stderr.strip()[-300:]!r}")
+    ours.cargo("stop", *manifest)
 
 
 def in_place(work, check):

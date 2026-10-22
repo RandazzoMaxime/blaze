@@ -254,7 +254,7 @@ impl Asked {
         let line = dir.join("link.line");
         let line = std::fs::read_to_string(&line)
             .with_context(|| format!("reading {}", line.display()))?;
-        Ok(LinkLine::parse(&line))
+        Ok(LinkLine::parse(&line).map(LinkLine::present))
     }
 
     /// The path of `file` as rustdoc shows it: from the directory it runs in.

@@ -2093,6 +2093,16 @@ fn pause_mid_reload() {
     }
 }
 
+/// Waits for `RA_JIT_LOAD_PAUSE_MS` where the workspace's files are read and their timestamps
+/// not taken yet, and says so: what `harness/loadedits.py` writes a file at.
+fn pause_after_load() {
+    let pause = std::env::var("RA_JIT_LOAD_PAUSE_MS").ok().and_then(|it| it.parse().ok());
+    if let Some(pause) = pause {
+        eprintln!("load: paused");
+        std::thread::sleep(Duration::from_millis(pause));
+    }
+}
+
 /// The directory cargo put the executables of the build in: the one its `deps`, where the
 /// libraries of the build are, is in.
 fn executables_of(symbol_files: &[PathBuf]) -> Option<AbsPathBuf> {
@@ -3971,12 +3981,26 @@ impl WatchedFile {
 
     /// The files of the VFS that are text. One that is not UTF-8 can only be named by an
     /// `include_bytes!`, and is watched as [`Watched::Included`] once it is.
-    fn sources(vfs: &Vfs, db: &RootDatabase) -> Vec<WatchedFile> {
+    ///
+    /// They were read from `read_from` on, and a file written since may have been read before
+    /// the write and have its timestamp taken after it: one whose text is not the database's
+    /// is taken for a changed one, or every build after would be of the text before the write.
+    fn sources(vfs: &Vfs, db: &RootDatabase, read_from: SystemTime) -> Vec<WatchedFile> {
+        // A timestamp can be before the clock's time of the write: some file systems keep
+        // whole or even seconds, and Linux takes it from a clock that ticks every few
+        // milliseconds.
+        let since = read_from.checked_sub(Duration::from_secs(2)).unwrap_or(SystemTime::UNIX_EPOCH);
         vfs.iter()
             .filter(|&(id, _)| db.has_file_text(id))
             .filter_map(|(id, path)| {
                 let path: &Path = path.as_path()?.as_ref();
-                WatchedFile::new(Watched::Source(id), path, path)
+                let mut watched = WatchedFile::new(Watched::Source(id), path, path)?;
+                if watched.mtime >= since
+                    && source_on_disk(path).is_ok_and(|text| *text != **db.file_text(id).text(db))
+                {
+                    watched.mtime = SystemTime::UNIX_EPOCH;
+                }
+                Some(watched)
             })
             .collect()
     }
@@ -4825,13 +4849,20 @@ fn join(
     tree: &mut tree::Tree,
     files: &mut Vec<WatchedFile>,
 ) -> anyhow::Result<()> {
+    let read_from = SystemTime::now();
     checkouts.add(&[project], db, tree.vfs())?;
-    watch_loaded(db, tree, files);
+    watch_loaded(db, tree, files, read_from);
     Ok(())
 }
 
-/// Watches the source files that were loaded since the last were.
-fn watch_loaded(db: &mut RootDatabase, tree: &mut tree::Tree, files: &mut Vec<WatchedFile>) {
+/// Watches the source files that were loaded since the last were, which were read from
+/// `read_from` on.
+fn watch_loaded(
+    db: &mut RootDatabase,
+    tree: &mut tree::Tree,
+    files: &mut Vec<WatchedFile>,
+    read_from: SystemTime,
+) {
     let watched: FxHashSet<vfs::FileId> = files
         .iter()
         .filter_map(|it| match it.file {
@@ -4839,7 +4870,7 @@ fn watch_loaded(db: &mut RootDatabase, tree: &mut tree::Tree, files: &mut Vec<Wa
             Watched::Included(_) => None,
         })
         .collect();
-    let new: Vec<WatchedFile> = WatchedFile::sources(tree.vfs(), db)
+    let new: Vec<WatchedFile> = WatchedFile::sources(tree.vfs(), db, read_from)
         .into_iter()
         .filter(|it| !matches!(it.file, Watched::Source(id) if watched.contains(&id)))
         .collect();
@@ -5681,6 +5712,7 @@ fn run_holding(
         built: FxHashSet::default(),
         applied: 0,
     };
+    let read_from = SystemTime::now();
     let held = held.and_then(|mut held| {
         held.checkouts.beside = said.as_ref().map(beside);
         held.with(&projects, &cargo_config, &selection)
@@ -5722,7 +5754,8 @@ fn run_holding(
         return build_batch(&db, args);
     }
 
-    let mut files = WatchedFile::sources(&vfs, &db);
+    pause_after_load();
+    let mut files = WatchedFile::sources(&vfs, &db, read_from);
     let sources: Vec<_> = files
         .iter()
         .filter_map(|it| match it.file {
@@ -6108,9 +6141,10 @@ fn run_holding(
                             builds.settle(&mut db, &mut programs)?;
                             let start = Instant::now();
                             let before = CratesAsLoaded::of(&db);
+                            let read_from = SystemTime::now();
                             let reloaded =
                                 checkouts.reload(&stale, &stream.env, &mut db, tree.vfs());
-                            watch_loaded(&mut db, &mut tree, &mut files);
+                            watch_loaded(&mut db, &mut tree, &mut files, read_from);
                             let new = before.changed(&db);
                             eprintln!(
                                 "reload: {} crates are others in {:.1?}",
@@ -6479,8 +6513,9 @@ fn run_holding(
                 let differences = checkouts.differences()?;
                 if !differences.is_empty() {
                     builds.settle(&mut db, &mut programs)?;
+                    let read_from = SystemTime::now();
                     checkouts.share(&mut db, tree.vfs(), differences)?;
-                    watch_loaded(&mut db, &mut tree, &mut files);
+                    watch_loaded(&mut db, &mut tree, &mut files, read_from);
                     for program in &mut programs {
                         let Parts { base, members, .. } = checkouts.parts(&program.args.project)?;
                         program.moved |= program.args.members != members;
@@ -7108,7 +7143,8 @@ impl Program {
                     let text = db.file_text(id).text(db);
                     as_compiled.get(inside).is_some_and(|was| **was == **text)
                 }
-                None => file.mtime <= built?,
+                // No timestamp is a file taken for a changed one, which rustc did not read.
+                None => file.mtime != SystemTime::UNIX_EPOCH && file.mtime <= built?,
             })
         };
         let other: Vec<_> = files
@@ -7307,7 +7343,8 @@ impl Program {
         let hold = || unparsed(db, &edited, paths).is_some() || broken.is_some();
         let held = |known: &Rejections| {
             let why = refusal(db, &edited, paths, broken.clone(), None);
-            let why = why.unwrap_or_else(|| Refused::Error("the source does not compile".to_owned()));
+            let why =
+                why.unwrap_or_else(|| Refused::Error("the source does not compile".to_owned()));
             eprintln!(
                 "edit (apply {apply:.1?}): not built: no patch, and the source does not compile; \
                  the next edit is a patch of the last build"
@@ -7569,6 +7606,36 @@ mod tests {
             "ld: cannot find -lmissing | collect2: error: ld returned 1"
         );
         assert_eq!(last_lines("", 2), "");
+    }
+
+    #[test]
+    fn a_file_written_after_it_was_loaded_is_taken_for_a_changed_one() {
+        let dir = std::env::temp_dir().join(format!("ra-jit-loaded-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let read_from = SystemTime::now();
+        let (mut db, mut vfs) = (RootDatabase::new(None), vfs::Vfs::default());
+        let (mut change, mut root) =
+            (ChangeWithProcMacros::default(), vfs::file_set::FileSet::default());
+        for name in ["same.rs", "written.rs"] {
+            let path = dir.join(name);
+            std::fs::write(&path, "fn f() {}\n").unwrap();
+            let at = vfs::VfsPath::from(AbsPathBuf::assert_utf8(path));
+            vfs.set_file_contents(at.clone(), Some(b"fn f() {}\n".to_vec()));
+            let id = vfs.file_id(&at).unwrap().0;
+            root.insert(id, at);
+            change.change_file(id, Some("fn f() {}\n".to_owned()));
+        }
+        change.set_roots(vec![ide_db::base_db::SourceRoot::new_local(root)]);
+        db.apply_change(change);
+        std::fs::write(dir.join("written.rs"), "fn f() { g() }\n").unwrap();
+        let files = WatchedFile::sources(&vfs, &db, read_from);
+        let changed = |name: &str| {
+            let file = files.iter().find(|it| it.path.ends_with(name)).unwrap();
+            file.mtime == SystemTime::UNIX_EPOCH
+        };
+        assert!(!changed("same.rs"));
+        assert!(changed("written.rs"));
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

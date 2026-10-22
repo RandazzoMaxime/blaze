@@ -149,8 +149,11 @@ impl Plan {
                 .flatten(),
             stamp: unit.stamp,
         };
-        // rustc's directory goes when the target directory is cleaned; the copy stays.
-        link.args.retain(|it| !is_symbols(it) || unit.copy_of(Path::new(it)).is_some());
+        // rustc's object of the names the program keeps is moved to its copy, which stays when
+        // the target directory is cleaned. GNU ld takes the panic runtime by it.
+        link.args.retain(|it| {
+            !is_symbols(it) || unit.copy_of(Path::new(it)).is_some() || Path::new(it).exists()
+        });
         for arg in &mut link.args {
             let path = PathBuf::from(&*arg);
             let member = member_that_wrote(records, &path);
@@ -327,13 +330,7 @@ impl LinkLine {
             .filter_map(|it| it.split_once('='))
             .map(|(name, value)| (name.to_owned(), value.to_owned()))
             .collect();
-        let mut args: Vec<String> = words[first + 1..]
-            .iter()
-            // rustc's object of the names the program has to keep stays while it is there:
-            // `-Csave-temps` keeps rustc's directory.
-            .filter(|it| !is_symbols(it) || Path::new(it).exists())
-            .cloned()
-            .collect();
+        let mut args: Vec<String> = words[first + 1..].to_vec();
         let flavor = Flavor::of(&args)?;
         if flavor == Flavor::Apple {
             // The wrapper's come after what cargo asked.
@@ -360,6 +357,13 @@ impl LinkLine {
             }
         }
         Ok(())
+    }
+
+    /// The line without rustc's object of the names the program keeps once it is gone:
+    /// `-Csave-temps` keeps rustc's directory, and nothing else does.
+    pub(crate) fn present(mut self) -> LinkLine {
+        self.args.retain(|it| !is_symbols(it) || Path::new(it).exists());
+        self
     }
 
     /// The executable the line links.
@@ -607,6 +611,7 @@ fn headerpad_in(arg: &str) -> Option<u64> {
 
 #[cfg(test)]
 mod tests {
+    use super::super::units::Copied;
     use super::*;
 
     const LINE: &str = r#"LC_ALL="C" PATH="/t/bin:/usr/bin" "cc" "-m64" "/t/deps/rustc1/symbols.o" "/t/deps/a.1.rcgu.o" "-Wl,-Bstatic" "/t/deps/libb-2.rlib" "-o" "/t/deps/a-1" "-pie""#;
@@ -622,11 +627,34 @@ mod tests {
             ]
         );
         assert_eq!(link.linker, "cc");
-        assert_eq!(link.args[..2], ["-m64", "/t/deps/a.1.rcgu.o"]);
+        assert_eq!(link.args[..3], ["-m64", "/t/deps/rustc1/symbols.o", "/t/deps/a.1.rcgu.o"]);
         assert_eq!(
             link.rustc_files(),
             ["/t/deps/a.1.rcgu.o", "/t/deps/libb-2.rlib"].map(PathBuf::from)
         );
+        assert_eq!(link.present().args[..2], ["-m64", "/t/deps/a.1.rcgu.o"]);
+    }
+
+    /// The wrapper moves rustc's object of the names the program keeps out of rustc's
+    /// directory, and the daemon links its copy: without it GNU ld does not take the panic
+    /// runtime, which comes before the standard library that calls it.
+    #[test]
+    fn the_names_a_program_keeps_are_linked_from_their_copy() {
+        let dir = std::env::temp_dir().join(format!("ra-jit-plan-symbols-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let (line, copy) = (dir.join("link.line"), dir.join("symbols.o"));
+        std::fs::write(&line, LINE).unwrap();
+        std::fs::write(&copy, b"").unwrap();
+        let mut program = unit(&["--crate-type", "bin"]);
+        program.link_line = Some(line);
+        program.copies =
+            vec![Copied { original: "/t/deps/rustc1/symbols.o".into(), copy: copy.clone() }];
+        let plan = Plan::of(&program, &[], &dir, false).unwrap().unwrap();
+        let args = std::fs::read_to_string(dir.join("link.args")).unwrap();
+        let args: Vec<String> = args.lines().flat_map(|it| shlex::split(it).unwrap()).collect();
+        assert!(args.contains(&copy.display().to_string()), "{args:?}");
+        assert!(plan.copies.contains(&copy));
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     fn unit(args: &[&str]) -> Record {
@@ -818,7 +846,7 @@ mod tests {
             package: None,
         };
         let response = dir.join("link.args");
-        let link = LinkLine::parse(LINE).unwrap();
+        let link = LinkLine::parse(LINE).unwrap().present();
         assert_eq!(link.flavor, Flavor::Msvc);
         let command = link.command(&[&plan.patch, &plan.object], &plan.binary, &response).unwrap();
         assert_eq!(command, format!(r#""C:\v c\link.exe" "@{}""#, response.display()));
@@ -869,6 +897,7 @@ mod tests {
         let response = dir.join("link.args");
         let command = LinkLine::parse(LINE)
             .unwrap()
+            .present()
             .command(&[&plan.patch, &plan.object], &plan.binary, &response)
             .unwrap();
         let response_arg = format!("@{}", response.display());

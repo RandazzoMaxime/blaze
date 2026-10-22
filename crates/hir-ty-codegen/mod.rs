@@ -8173,14 +8173,12 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
                         addr = self.builder.ins().load(ptr(), MEM, addr, 0);
                         meta = None;
                     }
-                    BackendRepr::ScalarPair { .. }
-                        if !matches!(prev.ty.kind(), TyKind::Adt(def, _) if def.is_box()) =>
+                    BackendRepr::ScalarPair { .. } if !matches!(prev.ty.kind(), TyKind::Adt(def, _) if def.is_box()) =>
                     {
                         meta = Some(self.builder.ins().load(ptr(), MEM, addr, meta_at()));
                         addr = self.builder.ins().load(ptr(), MEM, addr, 0);
                     }
-                    BackendRepr::ScalarPair { .. } | BackendRepr::Memory { .. }
-                        if matches!(prev.ty.kind(), TyKind::Adt(def, _) if def.is_box()) =>
+                    BackendRepr::ScalarPair { .. } | BackendRepr::Memory { .. } if matches!(prev.ty.kind(), TyKind::Adt(def, _) if def.is_box()) =>
                     {
                         (addr, meta) = self.box_pointer(addr, prev.ty, ty.ty)?;
                     }
