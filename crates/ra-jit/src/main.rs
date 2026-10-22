@@ -45,7 +45,7 @@ use std::{
     process::Command,
     sync::{
         Arc, Mutex,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
     },
     time::{Duration, Instant, SystemTime},
 };
@@ -4533,7 +4533,7 @@ fn compile_tiered(
         tier::done(&binary, Vec::new(), counters);
         return;
     }
-    let db = db.clone();
+    let (db, tiering) = (db.clone(), Tiering::start());
     let asked_of = binary.clone();
     // Each body built in or shown is built inside the one that calls it, up to ten deep, with
     // the frames of a whole function's build each; a thread's default 2 MiB does not hold that.
@@ -4553,7 +4553,7 @@ fn compile_tiered(
                 (symbol, asked.node, asked.level, prepared, start.elapsed())
             })
             .collect();
-        drop(db);
+        drop((db, tiering));
         let (mut code, mut done) = (Vec::new(), Vec::new());
         for (symbol, node, level, prepared, with_db) in prepared {
             let room = ra_jit_live::format::COUNTERS as u32;
@@ -4600,6 +4600,34 @@ fn compile_tiered(
     if let Err(why) = spawned {
         eprintln!("tier: no thread to compile on: {why}");
         tier::done(&asked_of, Vec::new(), counters);
+    }
+}
+
+/// A compile at a higher level that holds the database, which [`let_go`] waits to have none.
+struct Tiering;
+
+static TIERING: AtomicUsize = AtomicUsize::new(0);
+
+impl Tiering {
+    fn start() -> Self {
+        TIERING.fetch_add(1, Ordering::Relaxed);
+        Tiering
+    }
+}
+
+impl Drop for Tiering {
+    fn drop(&mut self) {
+        TIERING.fetch_sub(1, Ordering::Relaxed);
+    }
+}
+
+/// Lets go now of what the queries with an `lru` keep past it, the trees parsed and the bodies
+/// lowered for the builds that are over, which would otherwise wait for the next edit. Only
+/// when nothing else holds the database: this cancels what does.
+fn let_go(db: &mut RootDatabase, builds: &Builds) {
+    use ide_db::base_db::salsa::Database;
+    if builds.running.is_empty() && TIERING.load(Ordering::Relaxed) == 0 {
+        db.trigger_lru_eviction();
     }
 }
 
@@ -6183,6 +6211,7 @@ fn run_holding(
                     Some(at) if idle => match builds.events.recv_timeout(OWN_BASE_AFTER) {
                         Ok(event) => {
                             if builds.take(event, &mut programs)? {
+                                let_go(&mut db, &builds);
                                 memory::served(&mut db)?;
                             }
                         }
@@ -6194,6 +6223,7 @@ fn run_holding(
                     _ if builds.stuck || idle => {
                         let event = builds.events.recv()?;
                         if builds.take(event, &mut programs)? {
+                            let_go(&mut db, &builds);
                             memory::served(&mut db)?;
                         }
                     }
@@ -6207,6 +6237,7 @@ fn run_holding(
                     // requests sent with its own to arrive.
                     while let Ok(event) = builds.events.try_recv() {
                         if builds.take(event, &mut programs)? {
+                            let_go(&mut db, &builds);
                             memory::served(&mut db)?;
                         }
                     }
@@ -7092,6 +7123,7 @@ fn run_holding(
             });
             links.insert(out, linked);
         }
+        let_go(&mut db, &builds);
         memory::served(&mut db)?;
     }
 }

@@ -12,8 +12,16 @@ cargo's processes. `--edit` then adds a statement after ANCHOR in FILE and times
 `--max-wait` makes it a check: it exits 1 when the daemon was ready more than S seconds
 after the command returned (a fraction of a second on just and ripgrep, some 3 s on nushell,
 where reading the program's symbols waits for cargo's last file).
+`--until TEXT` waits, once ready, until a line the daemon or a worker logs has TEXT in it (the
+build the daemon makes of its own after a cold start that patches what rustc linked:
+`memory after request-1` with `RA_JIT_MEMORY` set), before `--after` and `--edit`.
+`--memory` also follows what the command and the daemon it starts hold (harness/memory.py):
+the most they held at once until ready, the largest process's peak, and what the largest
+process (the worker of the project) holds once ready.
 """
 import os, re, subprocess, sys, threading, time
+
+import memory
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 TOOLCHAIN = open(os.path.join(HERE, "toolchain")).read().strip()
@@ -108,12 +116,13 @@ def main():
     threads = [threading.Thread(target=follow, daemon=True), threading.Thread(target=sample, daemon=True)]
     for t in threads:
         t.start()
-    run = subprocess.run(["cargo", "ra-jit", "build"], cwd=project, env=env, capture_output=True, text=True)
+    sampler = memory.Sampler(0.05).start() if "--memory" in sys.argv else None
+    _, run, _ = memory.run(["cargo", "ra-jit", "build"], cwd=project, env=env, sampler=sampler or memory.Sampler())
     note(f"=== command returned ({run.returncode})")
     if run.returncode:
         print(run.stderr[-2000:])
     built = time.monotonic() - began
-    while True:
+    while run.returncode == 0:
         out = subprocess.run(["cargo", "ra-jit", "status"], cwd=project, env=env, capture_output=True, text=True).stdout
         states = re.findall(rf"^    {re.escape(project)}: (.*)$", out, re.M)
         if states and not any(s.startswith("loading") for s in states):
@@ -121,7 +130,18 @@ def main():
             break
         time.sleep(0.05)
     ready = time.monotonic() - began
+    if opt("--until") and run.returncode == 0:
+        while not done.is_set() and not any(opt("--until") in what for _, what in list(events)):
+            time.sleep(0.1)
+        note(f"=== logged {opt('--until')!r}")
     time.sleep(after)
+    held = None
+    if sampler:
+        sampler.sample()
+        alive = {p for root in list(sampler.roots) for p in memory.tree(root)}
+        held = max((memory.held_kb(p) or (0, 0))[0] for p in alive | {0}) // 1024
+        note(f"=== memory: peak {sampler.peak_mb} MB at once, largest process {sampler.largest_mb} MB, "
+             f"the largest holds {held} MB now")
     edit = None
     if opt("--edit"):
         file, anchor = opt("--edit").split(":", 1)
@@ -139,6 +159,8 @@ def main():
             open(path, "w").write(pristine)
     time.sleep(0.3)
     done.set()
+    if sampler:
+        sampler.stop()
     subprocess.run(["cargo", "ra-jit", "stop"], cwd=project, env=env, capture_output=True)
     quiet = None
     for at, what in sorted(events, key=lambda e: e[0]):
@@ -150,7 +172,8 @@ def main():
         print(f"{at:8.2f}  {what}")
     busy = sum(others) / max(1, len(others))
     print(f"\nbuild {built:.2f}s  ready {ready:.2f}s" + (f"  first edit {edit:.2f}s" if edit is not None else "")
-          + f"  others {busy:.2f} cores")
+          + f"  others {busy:.2f} cores"
+          + (f"  peak {sampler.peak_mb} MB  largest {sampler.largest_mb} MB  ready {held} MB" if sampler else ""))
     most = opt("--max-wait")
     if most is not None and run.returncode:
         sys.exit(1)
