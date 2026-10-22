@@ -303,7 +303,8 @@ What the numbers say:
 - **On bevy every edit went to cargo.** The first edit could not be spliced into rustc's
   executable ("the program is too large", [#79](https://github.com/indexable-inc/ra-jit/issues/79)),
   so the daemon built the whole program, which took about 8 minutes and then panicked in
-  rust-analyzer ("inference vars shouldn't exist out of inference"); cargo then built the edit.
+  rust-analyzer ("inference vars shouldn't exist out of inference",
+  [#96](https://github.com/indexable-inc/ra-jit/issues/96)); cargo then built the edit.
   Every later edit, the error and its mending included, found the daemon unable to load the
   workspace for the same panic, waited about 8 minutes, and went to cargo again. Those are bugs of their own; for this document they show how much of a build
   can end up rustc's without anyone seeing it.
