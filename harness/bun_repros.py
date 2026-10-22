@@ -41,7 +41,11 @@ CASES = {
         "package": "runner",
         "crate": "type_info",
         "expected": "refused",
-        "reasons": (re.compile(r"type_id_fields"), re.compile(r"type_id_variants")),
+        "reasons": (
+            re.compile(r"type_id_fields"),
+            re.compile(r"type_id_variants"),
+            re.compile(r"UnresolvedMethod\(\"fields\"\)"),
+        ),
     },
 }
 
@@ -57,7 +61,12 @@ def check_toolchain():
 
 
 def rows_for(fx):
-    return [row for rows in fx.reports.values() for row in rows if row[0] in ("compiled", "skipped")]
+    return [
+        row
+        for rows in fx.reports.values()
+        for row in rows
+        if row[0] == "compiled" or (row[0] == "skipped" and "no rustc symbol for function" not in row[2])
+    ]
 
 
 def run_case(name, root, json_path=None):
