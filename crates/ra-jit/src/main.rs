@@ -4772,7 +4772,6 @@ impl Builds {
         let program = &mut programs[at];
         let Some(answer) = answer else {
             eprintln!("interrupted: {}", program.args.krate);
-            let patching = program.known.patching;
             // The executable is still what rustc linked, which edits go on patching.
             let binary = program.args.splice.as_deref();
             let rustcs = program
@@ -4780,8 +4779,7 @@ impl Builds {
                 .take_rustc()
                 .filter(|_| binary.is_some_and(|it| lock(&RUSTC_LINKED).contains(it)));
             let patches_rustcs = rustcs.is_some();
-            program.known = Rejections::default();
-            program.known.patching = patching;
+            program.known.start_again();
             program.known.put_rustc(rustcs);
             program.whole = None;
             if !patches_rustcs {
@@ -7155,9 +7153,7 @@ impl Program {
     /// told why, the worker stays, and the next build is a whole one, since what the build
     /// left of the patch base and of the executable may be half written.
     fn panicked(&mut self, panic: &(dyn std::any::Any + Send)) -> Result<String, Refused> {
-        let patching = self.known.patching;
-        self.known = Rejections::default();
-        self.known.patching = patching;
+        self.known.start_again();
         self.unbuilt.stale = true;
         (self.wrote, self.whole) = (None, None);
         let why = format!("a build of {} panicked: {}", self.args.krate, panic_message(panic));
@@ -7219,13 +7215,14 @@ impl Program {
         let Parts { root, base, members, debug } = parts;
         (self.args.checkout, self.args.base) = (root, base);
         (self.args.members, self.args.debug) = (members, debug);
-        let patching = self.known.patching;
-        self.known = Rejections::default();
-        self.known.patching = patching;
         (self.whole, self.moved) = (None, true);
         self.unbuilt.stale = true;
         match linked {
+            // rustc has built the checkout since: its copies are new ones.
             Some(linked) => {
+                let patching = self.known.patching;
+                self.known = Rejections::default();
+                self.known.patching = patching;
                 self.args.symbol_files = linked.symbol_files.clone();
                 if linked.link_cmd.is_some() {
                     self.args.link_cmd = linked.link_cmd.clone();
@@ -7236,7 +7233,10 @@ impl Program {
                 self.unbuilt.named_anew = true;
                 self.args.widened.clear();
             }
-            None => self.known.distrust(db, new),
+            None => {
+                self.known.start_again();
+                self.known.distrust(db, new);
+            }
         }
         Ok(())
     }

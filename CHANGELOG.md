@@ -327,6 +327,10 @@ All notable changes to ra-jit are written here. The format follows
 
 ### Fixed
 
+- A checkout that an edit broke could be answered ok, linked with rustc's copy of the function
+  from before the edit: a program whose build was interrupted, or panicked, or whose checkout
+  was loaded again with the same link, forgot what rustc's copies are copies of, and its next
+  build took the source as it was then for what rustc compiled. It keeps that now (#71).
 - An edit of code two programs share ran wrong with the LLVM backend when the daemon compiled a
   program's `main` itself (on macOS and Windows, whose temporary paths go through a link): it
   took that build for one of a whole program and inlined across crates, and a caller holding

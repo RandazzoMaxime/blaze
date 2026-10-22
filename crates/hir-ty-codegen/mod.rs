@@ -1172,6 +1172,16 @@ impl Rejections {
         self.rustc = rustc.map(|it| it.0);
     }
 
+    /// Forgets what the builds found, for a program that is built as if never built: after a
+    /// build that was interrupted or panicked, or once its checkout is loaded again. What
+    /// rustc's copies are copies of is kept, since they are not built again: the first build
+    /// takes the source as it is then for what rustc compiled, which after an edit it is not.
+    pub fn start_again(&mut self) {
+        let Rejections { patching, used_by_rustc, .. } = *self;
+        let frozen = std::mem::take(&mut self.frozen);
+        *self = Rejections { patching, used_by_rustc, frozen, ..Rejections::default() };
+    }
+
     /// Puts a base taken out for a build back where it was: what rustc linked or ours.
     fn put_base(&mut self, base: patch::Base) {
         match base.rustc {
