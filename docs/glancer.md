@@ -387,7 +387,7 @@ stops.
 | Work | Issue | Lane |
 |---|---|---|
 | The restart round (step 3) | #37 | glancer, done as part of no-rustc step E (#85): the instance compiles, nothing is kept or forwarded to rustc |
-| Proc-macro expansion cache (item 3) | #38 | glancer, merging |
+| Proc-macro expansion cache (item 3) | #38 | glancer, merged ([#110](https://github.com/indexable-inc/ra-jit/pull/110)) |
 | `described` copies whole type closures (item 5) | #55 | share-types, dev-aws-6 |
 | The spare worker's memory (item 5) | #56 | spare, its own AWS host |
 | salsa eviction of queries with cycle handling (item 5) | #57 | spare, after #56 |
