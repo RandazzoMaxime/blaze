@@ -422,6 +422,15 @@ away) are compiled, along with their callers, instead of being kept as rejection
 are forwarded to rustc's copies. Done when helix's own base builds in one round with none of them
 left to rustc, and `harness/norustc/left.py` counts no more functions left to rustc than before.
 
+Owner of bun's classes: the `bun-e` lane (2026-10-22). It compiles what bun leaves to rustc
+today: `adt_const_params` constants, `core::mem::type_info`, inherent associated types,
+`lol_html`'s macros, `core`'s methods in `no_std` crates and the rest of #35's table, plus what
+bun's whole-program report finds after them. Each class lands with its `bun_repros.py` fixture
+(#75) expecting `compiled`. Done when bun's whole-program report (`runbench.py bun`) leaves no
+function to rustc but those step G removes ("no rustc symbol"). On Linux x86-64 it leaves none
+(2026-10-22, `857eab0e9b`: 68,315 functions compiled, the program links and each of
+`apps.json`'s runs matches cargo's); macOS arm64 is to be run again.
+
 **F. The standard library compiled by ra-jit.** ([#86](https://github.com/indexable-inc/ra-jit/issues/86)) `core`, `alloc`, `std`, `compiler_builtins`
 (with its intrinsics and `#[naked]` functions), `panic_unwind`, `panic_abort`, `unwind`,
 `proc_macro`, `test` and their dependencies, from `rust-src`, with std's own build script and
@@ -513,9 +522,11 @@ Lanes whose work makes a rustc path do more, to redirect:
 - **The fallback to cargo** (#27, closed): "fails instead of going to cargo" was fixed by going to
   cargo. Step D reverses it; the resolution bug behind it (`.chain()` on a tuple of systems) is an
   E or D bug to fix in ra-jit.
-- **bun-edits**: patches rustc's executable for const-generic statics so that functions left to
-  rustc keep working. Its correctness fix (cfcb0c879b) is fine; the rest builds on functions left
-  to rustc, which step E removes.
+- **bun-edits**: patched rustc's executable for const-generic statics so that functions left to
+  rustc keep working. Redirected on 2026-10-22 as `bun-e`: the static naming, the exposure of
+  rustc's local statics and the holding of functions left to rustc through edits were dropped;
+  its two correctness fixes (no stale copy of an instance, no static counted twice) stay, and
+  the lane owns bun's part of step E (above).
 - **kept-rejections** ([#37](https://github.com/indexable-inc/ra-jit/issues/37)): sends callers
   to rustc's copies of rejected code. Redirected to compiling them (E), owned by the glancer
   lane; the kept rejections are not merged.

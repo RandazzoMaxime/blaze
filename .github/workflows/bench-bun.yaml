@@ -71,7 +71,7 @@ jobs:
       - name: Bench
         id: bench
         run: |
-          export RA_JIT_BIN="$BENCH_HOME/target/release/ra-jit" RA_JIT_PROJECTS="$BENCH_HOME/projects"
+          export RA_JIT_BIN="$BENCH_HOME/target/release/ra-jit" RA_JIT_LLVM_BIN="$BENCH_HOME/target-llvm/release/ra-jit" RA_JIT_PROJECTS="$BENCH_HOME/projects"
           work=${BENCH_WORK:+$BENCH_WORK-bun}
           work=${work:-$BENCH_HOME/work-bun}
           rm -rf "$work" "$BENCH_HOME/reference-bun"
