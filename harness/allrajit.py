@@ -146,7 +146,8 @@ def main():
         expected = {}
         for name, _, runs in PROGRAMS:
             root = roots[name]
-            run(["cargo", "build", "-q"], root, f"cargo build of {name}")
+            target = os.path.join(root, "target")
+            run(["cargo", "build", "-q", "--target-dir", target], root, f"cargo build of {name}")
             binary = os.path.join(root, "target/debug", name)
             expected[name] = [outcome(binary, args, root) for args in runs]
         lines = []
