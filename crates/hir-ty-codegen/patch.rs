@@ -295,11 +295,7 @@ impl Frozen {
     }
 
     /// A function of `base` that rustc's copy is no longer right for, and why.
-    pub(crate) fn out_of_date(
-        &mut self,
-        db: &dyn HirDatabase,
-        base: &Base,
-    ) -> Option<OutOfDate> {
+    pub(crate) fn out_of_date(&mut self, db: &dyn HirDatabase, base: &Base) -> Option<OutOfDate> {
         let now = || {
             let theirs = base.skipped.iter().filter(|it| !it.1.no_symbol());
             theirs.map(|(root, why)| (*root, why))

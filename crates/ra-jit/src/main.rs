@@ -7307,7 +7307,8 @@ impl Program {
         let hold = || unparsed(db, &edited, paths).is_some() || broken.is_some();
         let held = |known: &Rejections| {
             let why = refusal(db, &edited, paths, broken.clone(), None);
-            let why = why.unwrap_or_else(|| Refused::Error("the source does not compile".to_owned()));
+            let why =
+                why.unwrap_or_else(|| Refused::Error("the source does not compile".to_owned()));
             eprintln!(
                 "edit (apply {apply:.1?}): not built: no patch, and the source does not compile; \
                  the next edit is a patch of the last build"
