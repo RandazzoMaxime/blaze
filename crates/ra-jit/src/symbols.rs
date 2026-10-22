@@ -86,8 +86,7 @@ struct Source {
 
 impl Source {
     fn new(path: PathBuf) -> Source {
-        let names: Vec<&str> = path.components().filter_map(|c| c.as_os_str().to_str()).collect();
-        let of_script = names.windows(3).any(|it| it[0] == "build" && it[2] == "out");
+        let of_script = crate::cargo::script::in_out_dir(&path);
         let generated = of_script.then(|| content(&path)).flatten();
         Source { path, generated }
     }

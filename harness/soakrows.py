@@ -18,6 +18,8 @@ from cargo_ra_jit import HERE, RA_JIT, Side, base_env, difference, how_built, pr
 
 GIT = ["git", "-c", "user.name=ra-jit", "-c", "user.email=ra-jit@localhost", "-c", "advice.detachedHead=false"]
 OTHER_TOOLCHAIN = "1.94.0"
+# The nightly CI installs for borrowck_ui.py.
+NIGHTLY = "nightly-2026-10-09"
 MARK = re.compile(r"pub fn mark\(\) -> u64 \{ \d+ \}")
 
 
@@ -460,6 +462,24 @@ def toolchains_in_turn(row):
         wait_warm(Side(row.ws, row.env, True), row.ws)
 
 
+def pinned_to_a_nightly(row):
+    """A project pinned to a nightly of the next release, built anyway
+    (`RA_JIT_OTHER_TOOLCHAIN=1`), as bun is: nightly cargo passes every crate
+    `-Z embed-metadata=no` and writes its build directory in its second layout, where the
+    build script's output is. Each sent the build to cargo."""
+    if shutil.which("rustup"):
+        subprocess.run(["rustup", "toolchain", "install", NIGHTLY, "--profile", "minimal", "-c", "rust-src"],
+                       check=True, capture_output=True)
+    says_its_rustc(row)
+    row.env.update(RUSTUP_TOOLCHAIN=NIGHTLY, RA_JIT_OTHER_TOOLCHAIN="1")
+    row.warm()
+    row.both("warm", want="-nightly")
+    row.edit()
+    how, _ = row.both("a body edited", want=f"mark {row.mark}")
+    if how != "daemon":
+        raise Wrong(f"the build after a body was edited was not the daemon's: {how}")
+
+
 def another_build(source, bin):
     """A ra-jit that is another build: the same program with bytes after its end."""
     for name in ("ra-jit", "cargo-ra-jit"):
@@ -720,6 +740,72 @@ mod clock_tests {
     row.both("edited again, tests", command="test", args=args)
 
 
+def show_in_main(row, shown):
+    main = row.path("app/src/main.rs")
+    in_place(main, open(main).read().replace("fn main() {\n", "fn main() {\n" + shown, 1))
+
+
+def beside_one_left(row):
+    """A function left to rustc from the first build, `seven` (for the constant
+    `breakers.py caller_in_constant` is about): an item added to another file of its crate
+    could change what rustc's copy of it would be, and the build failed ("has an error ra-jit
+    cannot say more of"). It and a body edited after it are built, each by the daemon or by
+    cargo: which depends on whether rustc's copy is from before the crate's last edit. `seven`
+    is said to be left to rustc once an edit has compiled its crate: a daemon that starts from
+    rustc's build compiles nothing at first."""
+    in_place(row.path("core/src/later.rs"), "pub fn eight() -> u64 {\n    8\n}\n")
+    with open(row.path("core/src/lib.rs"), "a") as lib:
+        lib.write("""
+pub fn seven() -> u64 {
+    const CALLER: &std::panic::Location<'static> = std::panic::Location::caller();
+    6 + u64::from(CALLER.line() > 0)
+}
+
+pub mod later;
+""")
+    show_in_main(row, '    println!("seven {} eight {}", soak_core::seven(), soak_core::later::eight());\n')
+    row.both("cold", want="seven 7 eight 8")
+    row.warm()
+    row.both("warm", want="seven 7 eight 8")
+    later = row.path("core/src/later.rs")
+    in_place(later, open(later).read() + "\npub fn nine() -> u64 {\n    9\n}\n")
+    how, _ = row.both("an item added to another file of the crate", want="seven 7 eight 8")
+    if how != "daemon" and not how.startswith("cargo"):
+        raise Wrong(f"the build after an item was added was neither the daemon's nor cargo's: {how}")
+    row.warm()
+    in_place(later, open(later).read().replace("    8\n", "    80\n"))
+    how, _ = row.both("a body edited in that file", want="seven 7 eight 80")
+    if how != "daemon" and not how.startswith("cargo"):
+        raise Wrong(f"the build after a body was edited was neither the daemon's nor cargo's: {how}")
+    logs = glob.glob(os.path.join(row.home, "**", "log"), recursive=True)
+    said = "".join(open(log, errors="replace").read() for log in logs)
+    if not re.search(r"left to rustc: soak_core::seven: ", said):
+        raise Wrong("`seven` is not left to rustc: the row needs another function that is")
+
+
+def outside_its_package(row):
+    """A module whose file is outside its package (`#[path = "../../shared/outside.rs"]`), as
+    bun's runtime has: the file is in no package's directory, so it was not loaded, the
+    function that calls into it was left to rustc, and an edit to the file was not seen: the
+    program the daemon built ran it as it was."""
+    os.makedirs(row.path("shared"), exist_ok=True)
+    outside = row.path("shared/outside.rs")
+    in_place(outside, "pub fn seven() -> u64 {\n    7\n}\n")
+    with open(row.path("core/src/lib.rs"), "a") as lib:
+        lib.write('\n#[path = "../../shared/outside.rs"]\nmod outside;\n\npub fn seven() -> u64 {\n    outside::seven()\n}\n')
+    show_in_main(row, '    println!("seven {}", soak_core::seven());\n')
+    row.both("cold", want="seven 7")
+    row.warm()
+    row.both("warm", want="seven 7")
+    in_place(outside, open(outside).read().replace("    7\n", "    70\n"))
+    how, _ = row.both("a body edited in the file", want="seven 70")
+    if how != "daemon":
+        raise Wrong(f"the build after a body was edited was not the daemon's: {how}")
+    in_place(outside, open(outside).read() + "\npub fn eight() -> u64 {\n    8\n}\n")
+    in_place(outside, open(outside).read().replace("    70\n", "    eight() * 10\n"))
+    row.both("an item added there and called", want="seven 80")
+
+
 TOOLCHAIN = open(os.path.join(HERE, "toolchain")).read().strip()
 
 ROWS = {
@@ -745,6 +831,9 @@ ROWS = {
     "tests of a proc macro": (proc_macro_tests, {}),
     "a function that is another under test": (another_under_test, {}),
     "functions rustc keeps to an object": (kept_to_an_object, {"CARGO_INCREMENTAL": "0"}),
+    "an item added beside a function left to rustc": (beside_one_left, {}),
+    "a module file outside its package": (outside_its_package, {}),
+    "a project pinned to a nightly": (pinned_to_a_nightly, {}),
 }
 
 

@@ -256,6 +256,16 @@ impl Left {
     }
 }
 
+/// A function left to rustc whose copy is no longer right for it.
+pub struct OutOfDate {
+    pub func: FunctionId,
+    /// Why ra-jit leaves it to rustc.
+    pub why: String,
+    /// Whether it was left to rustc in the build the daemon started from, when rustc compiled
+    /// it from source that built: the reason is then ra-jit's, not an error of the source.
+    pub left_from_the_start: bool,
+}
+
 /// The functions left to rustc as rustc compiled them: its copies are not built again while
 /// the daemon runs, so one is only good for as long as its function is what it was then.
 #[derive(Clone, Default)]
@@ -289,15 +299,18 @@ impl Frozen {
         &mut self,
         db: &dyn HirDatabase,
         base: &Base,
-    ) -> Option<(FunctionId, String)> {
+    ) -> Option<OutOfDate> {
         let now = || {
             let theirs = base.skipped.iter().filter(|it| !it.1.no_symbol());
             theirs.map(|(root, why)| (*root, why))
         };
         let distrusted = |root: FunctionId| self.distrusted.contains(&root.krate(db));
         let Some(left) = &self.left else {
-            let other =
-                now().find(|it| distrusted(it.0)).map(|(root, why)| (root, why.to_string()));
+            let other = now().find(|it| distrusted(it.0)).map(|(func, why)| OutOfDate {
+                func,
+                why: why.to_string(),
+                left_from_the_start: true,
+            });
             self.left = Some(now().map(|(root, _)| (root, Left::of(db, root))).collect());
             return other;
         };
@@ -312,7 +325,11 @@ impl Frozen {
                 Some(was) => probe(|| Left::of(db, root)).as_ref() == Some(was),
                 None => false,
             };
-            (!fresh).then(|| (root, why.to_string()))
+            (!fresh).then(|| OutOfDate {
+                func: root,
+                why: why.to_string(),
+                left_from_the_start: left.contains_key(&root),
+            })
         })
     }
 }

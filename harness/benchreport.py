@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """benchreport.py: the README's build table and docs/benchmarks.md, from a result of bench.py.
 
-    benchreport.py RESULT [--stored FILE] [--noise PERCENT] [--max-age HOURS] [--force] [--check]
+    benchreport.py RESULT [--name NAME] [--stored FILE] [--noise PERCENT] [--max-age HOURS] [--force] [--check]
 
 RESULT is what `bench.py --out` wrote. It is compared with the stored result (`--stored`,
 default docs/benchmarks/linux-x86_64.json). When the two differ by more than noise, the stored
@@ -22,6 +22,10 @@ geometric mean. It is stored in docs/benchmarks/runtime-<os>-<arch>.json (`--sto
 otherwise), and differs when a median of any build moved by more than noise, a benchmark is new
 or gone, or the stored run is older than `--max-age`. A build that failed, or whose program did
 not do what the release build's did, has the whole result refused.
+`--name NAME` is a project measured on its own (bun, by the bench-bun workflow): its results are
+stored in docs/benchmarks/NAME-<os>-<arch>.json and runtime-NAME-<os>-<arch>.json, and written
+between `<!-- bench-NAME:start -->` and `<!-- bench-NAME:end -->` (`runbench-NAME` for the
+runtime) in README.md; docs/benchmarks.md and the charts are left as they are.
 A result in which a program said something else than cargo's (`wrong`) is refused: exit 2,
 nothing written. A test suite that ended otherwise under `cargo ra-jit test` is not refused: the
 tests table says how, and the workflow fails after writing. `--check` writes nothing and exits 1
@@ -148,14 +152,14 @@ def machine_line(result):
     return f"{host.get('name') or 'one machine'} ({', '.join(details)})"
 
 
-def provenance(result, which=True):
+def provenance(result, which=True, workflow="bench-readme"):
     """Who ran it: the CI run, or a person with the same harness; with `which`, which build of
     ra-jit it timed."""
     built = (f" The ra-jit measured is `cargo build --release`; the binaries a release ships are the `dist` "
              f"profile with PGO, which start and edit faster ([how]({REPO}/blob/main/docs/reports/RELEASE-BUILD.md)).") if which else ""
     if result.get("run_url"):
         return f"Measured by [CI]({result['run_url']}) on the dedicated benchmark machine, which re-runs it after pushes to main." + built
-    return "Measured by hand with `harness/bench.py`; the `bench-readme` workflow re-runs it on the dedicated benchmark machine." + built
+    return f"Measured by hand with `harness/bench.py`; the `{workflow}` workflow re-runs it on the dedicated benchmark machine." + built
 
 
 def megabytes(mb):
@@ -279,16 +283,17 @@ def memory_tables(result, keys, backend):
     return lines
 
 
-def readme_section(result):
+def readme_section(result, start=START, end=END, raw="docs/benchmarks/linux-x86_64.json", workflow="bench-readme"):
     backend = "cranelift"
     keys = ordered(result, backend)
     commit = result.get("commit")
-    summary = edits_chart(result, backend)
+    summary = edits_chart(result, backend) if start == START else None
+    measured_on = platform(result) if (result.get("host") or {}).get("os") else "Linux x86-64"
     lines = [
-        START,
+        start,
         *([benchcharts.picture("edits", f"How many times faster an edit builds under ra-jit than under cargo: {summary}"), ""] if summary else []),
         f"Edit, then build, on real projects at pinned commits. Each cell is incremental `cargo build` → "
-        f"`cargo ra-jit build`, both warm, same linker, median of {result['runs']} edits. Linux x86-64, "
+        f"`cargo ra-jit build`, both warm, same linker, median of {result['runs']} edits. {measured_on}, "
         f"{machine_line(result)}, ra-jit [`{short(commit)}`]({REPO}/commit/{commit}) on {result['date'][:10]}.",
         "",
         "| Project | " + " | ".join(EDITS[p] for p in README_PHASES) + " |",
@@ -313,9 +318,12 @@ def readme_section(result):
     if fell_back:
         lines.append("(c): the daemon handed this edit to cargo (a fallback, so about cargo's time).")
         lines.append("")
-    lines.append(provenance(result) + " Cold builds, the spread of every number, the LLVM tier and how fast the "
-                 "built programs run: [docs/benchmarks.md](docs/benchmarks.md) ([raw JSON](docs/benchmarks/linux-x86_64.json)).")
-    lines.append(END)
+    if raw.endswith("/linux-x86_64.json"):
+        lines.append(provenance(result) + " Cold builds, the spread of every number, the LLVM tier and how fast the "
+                     f"built programs run: [docs/benchmarks.md](docs/benchmarks.md) ([raw JSON]({raw})).")
+    else:
+        lines.append(provenance(result, workflow=workflow) + f" Every number, its samples and what the daemon did: [raw JSON]({raw}).")
+    lines.append(end)
     return "\n".join(lines)
 
 
@@ -502,12 +510,12 @@ def runtime_chart(measured, where_text):
     return benchcharts.runtime(ratios(build), mean(ratios(build)), named, where_text)
 
 
-def runtime_section(result):
+def runtime_section(result, start=RUN_START, end=RUN_END, workflow="bench-readme"):
     """The README's table of how fast what ra-jit's LLVM builds runs, against cargo's release build."""
     measured, commit = result["runbench"], result.get("commit")
     builds = measured["builds"]
     checked = "checked" in builds
-    summary = runtime_chart(measured, where(result))
+    summary = runtime_chart(measured, where(result)) if start == RUN_START else None
     rows, rounds, sized = [], None, []
     mem = lambda row, b: megabytes(row[b]["peak_mb"]) if row.get(b, {}).get("peak_mb") is not None else "-"
     for name, program in measured["programs"].items():
@@ -523,7 +531,7 @@ def runtime_section(result):
                          f"{megabytes(info['release'].get('build_largest_mb'))} → {megabytes(info['ra-jit'].get('build_largest_mb'))} |")
     geomean = measured.get("geomean") or {}
     lines = [
-        RUN_START,
+        start,
         *([benchcharts.picture("runtime", f"Time of each benchmark, ra-jit's build ÷ cargo build --release: {summary}"), ""] if summary else []),
         f"How fast the programs run. Each program is built by `cargo build --release` and by ra-jit with LLVM at "
         f"`-O3`, every crate of it compiled by ra-jit, with the release profile; each benchmark is then run "
@@ -545,8 +553,8 @@ def runtime_section(result):
                   "| Program | Size | Build, peak | Build, largest process |", "|---|---:|---:|---:|", *sized]
     lines += ["", "Release with dev checks: `cargo build --release` with `-C overflow-checks=on -C debug-assertions=on`. "
               + (provenance(result, which=False).replace("`harness/bench.py`", "`harness/bench.py --runtime`") if result.get("run_url") else
-                 "Measured by hand with `harness/bench.py --runtime` (harness/runbench.py); the `bench-readme` workflow "
-                 "re-runs it on the dedicated benchmark machine."), RUN_END]
+                 f"Measured by hand with `harness/bench.py --runtime` (harness/runbench.py); the `{workflow}` workflow "
+                 "re-runs it on the dedicated benchmark machine."), end]
     return "\n".join(lines)
 
 
@@ -674,6 +682,7 @@ def options(argv, name, default=None):
 def main():
     argv = sys.argv[1:]
     stored_arg = options(argv, "--stored")
+    name = options(argv, "--name")
     noise = float(options(argv, "--noise", "10"))
     max_age = float(options(argv, "--max-age", "24"))
     force, check, memory_only = "--force" in argv, "--check" in argv, "--memory" in argv
@@ -687,8 +696,13 @@ def main():
     runtime = "runbench" in result
     if memory_only and (runtime or not has_memory(result)):
         raise SystemExit(f"{paths[0]}: --memory takes a result of bench.py that measured memory")
-    if runtime:
-        stored_path = stored_arg or os.path.join(ROOT, f"docs/benchmarks/runtime-{platform(result).replace(' ', '-').lower()}.json")
+    os_arch = platform(result).replace(" ", "-").lower()
+    if name:
+        stored_path = stored_arg or os.path.join(ROOT, f"docs/benchmarks/{'runtime-' if runtime else ''}{name}-{os_arch}.json")
+        wrong = (runtime_wrong(result) if result["runbench"] else ["runbench.py wrote nothing"]) if runtime else \
+            [f"{key}: {line}" for key, measured in result["results"].items() for line in measured.get("wrong", [])]
+    elif runtime:
+        stored_path = stored_arg or os.path.join(ROOT, f"docs/benchmarks/runtime-{os_arch}.json")
         wrong = runtime_wrong(result) if result["runbench"] else ["runbench.py wrote nothing"]
     elif memory_only:
         stored_path = stored_arg or memory_stored(result)
@@ -710,7 +724,13 @@ def main():
         os.makedirs(os.path.dirname(stored_path), exist_ok=True)
         if os.path.abspath(paths[0]) != os.path.abspath(stored_path):
             shutil.copyfile(paths[0], stored_path)
-        if runtime:
+        if name:
+            marks = (f"<!-- {'runbench' if runtime else 'bench'}-{name}:start -->", f"<!-- {'runbench' if runtime else 'bench'}-{name}:end -->")
+            raw = os.path.relpath(stored_path, ROOT)
+            section = runtime_section(result, *marks, workflow=f"bench-{name}") if runtime else \
+                readme_section(result, *marks, raw=raw, workflow=f"bench-{name}")
+            splice(README, section, *marks)
+        elif runtime:
             splice(README, runtime_section(result), RUN_START, RUN_END)
         elif memory_only:
             splice(README, memory_readme(result), MEM_START, MEM_END)

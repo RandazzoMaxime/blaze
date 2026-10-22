@@ -194,6 +194,39 @@
           packages = [ rust pkgs.python3 ];
         };
         devShells.bench = pkgs.mkShell bench;
+        # What harness/bench.py and runbench.py measure bun in (bunprep.py, docs/research/bun.md):
+        # bun's pinned nightly in place of 1.99.0 (rust-src, which ra-jit reads `core` from), and
+        # what bun's own build of its C and C++ needs, as its flake.nix has it: LLVM 23 as the
+        # C and C++ compiler, cmake, ninja, go, a bun to run its build scripts, and on Linux lld.
+        # ra-jit itself is built in the bench shell.
+        devShells.bench-bun = (pkgs.mkShell.override { stdenv = pkgs.llvmPackages_23.stdenv; }) {
+          packages = [
+            (pkgs.rust-bin.nightly."2026-09-15".default.override { extensions = [ "rust-src" ]; })
+            pkgs.python3
+            pkgs.git
+            pkgs.curl
+            pkgs.unzip
+            pkgs.xz
+            pkgs.pkg-config
+            pkgs.cmake
+            pkgs.ninja
+            pkgs.go
+            pkgs.bun
+            pkgs.perl
+            pkgs.ruby
+            pkgs.libtool
+            pkgs.llvmPackages_23.clang
+            pkgs.llvmPackages_23.llvm
+            pkgs.llvmPackages_23.lld
+          ];
+          hardeningDisable = [ "all" ];
+          shellHook = ''
+            export CC=${pkgs.llvmPackages_23.clang}/bin/clang CXX=${pkgs.llvmPackages_23.clang}/bin/clang++
+            export AR=${pkgs.llvmPackages_23.llvm}/bin/llvm-ar RANLIB=${pkgs.llvmPackages_23.llvm}/bin/llvm-ranlib
+          '' + pkgs.lib.optionalString pkgs.stdenv.hostPlatform.isLinux ''
+            export NIX_CFLAGS_LINK="''${NIX_CFLAGS_LINK:+$NIX_CFLAGS_LINK }-fuse-ld=lld"
+          '';
+        };
         # The bench shell and what zed's build needs besides (its own nix/build.nix lists the
         # same): `nix develop .#bench-zed`.
         devShells.bench-zed = pkgs.mkShell (bench // {

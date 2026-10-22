@@ -8,6 +8,27 @@ All notable changes to ra-jit are written here. The format follows
 
 ### Added
 
+- `RA_JIT_OTHER_TOOLCHAIN=1` has `cargo ra-jit` build with a rustc other than 1.99.0, for a
+  project pinned to a nightly of the next release that 1.99.0 can't build (bun's
+  `nightly-2026-09-15`). Without it such a build goes to cargo, as before, and says why. The
+  builds of a nightly cargo are the daemon's: `-Z embed-metadata=no`, which it passes every
+  crate, no longer sends them to cargo, and build scripts' output and the seeded target are
+  found in its second build-directory layout (`soakrows.py`, "a project pinned to a nightly").
+- The `bench-bun` workflow measures bun nightly on the benchmark machine (edits and runtime,
+  into the README's bun section), in `nix develop .#bench-bun`: bun's nightly and what its own
+  build of its C and C++ needs. Too slow for every push.
+- `benchreport.py --name NAME` stores a project measured on its own in
+  `docs/benchmarks/NAME-<os>-<arch>.json` (`runtime-NAME-…` for the runtime) and writes it
+  between `<!-- bench-NAME:start -->`/`<!-- runbench-NAME:start -->` and their ends in the
+  README. The table says the platform it was measured on.
+- `bench.py bun` times the edits on bun (body, signature, leaf, generic, new function) in a copy
+  of the tree `bunprep.py` prepares, under bun's pinned nightly; bun is measured only when
+  named.
+- bun (its Rust port, 1.4.3: 1.25M lines in 103 crates, with a JavaScript runtime's C and C++)
+  in `apps.json`, so `apps.py bun` and `runbench.py bun` build it whole-program and compare
+  its runs with cargo's. An entry's `prepare` names a module of the harness that makes what
+  the program's own build makes before cargo: `bunprep.py` runs bun's build of its C and C++
+  once per revision and adds a member, `bun-exe`, that rustc links with them.
 - `RA_JIT_MEMORY` reports after every request a worker answers too (`request-N`), and on
   macOS its resident figure is the physical footprint rather than 0. A `heap-profile` build
   writes where it was loaded beside each heap profile, which `harness/heapfold.py` needs to
@@ -272,6 +293,10 @@ All notable changes to ra-jit are written here. The format follows
 
 ### Fixed
 
+- A borrowed constant with a cast in it, `&[b"node" as &[u8]][..]` returned for `'static`, is
+  promoted as rustc promotes it, where it was built on the stack and the reference outlived
+  it: every cast is promotable but of a pointer to an integer. bun's `new Bun.Transpiler()`
+  crashed on it (breakers, `promoted_index_of_casts`).
 - A `match` arm's guard with `let` (`if let` guards and their chains) dropped what it bound
   and its temporaries at the end of the guard, before the arm ran, in editions before 2024;
   rustc keeps them until the arm ends or the next arm is tried
@@ -288,6 +313,32 @@ All notable changes to ra-jit are written here. The format follows
   under them, are unchanged. helix is ready in 109 s at 18.4 GB of memory instead of 631 s at
   100.7 GB, its store is 1.6 GB instead of 14 GB, and its first `cargo ra-jit run` takes
   46.9 s instead of 640.8 s (`harness/deepnames.py`).
+- A `Box` beside an allocator that has a size (`Box<[T], &Arena>`, as bun's arenas) is
+  dereferenced and dropped through its pointer wherever its layout put it: a deref of one was
+  left to rustc, and its drop read the pointer from the start of the `Box`. `breakers.py`
+  runs the crates of `NIGHTLY_CRATES` with RUSTC_BOOTSTRAP=1 (`allocated`, `allocator_api`).
+- `simd_reduce_max` and `simd_reduce_min` of integer lanes are compiled (AArch64's `vmaxvq_u8`
+  and the other `vmaxv`/`vminv`, AVX-512's `_mm512_reduce_max_*`): a function that reached
+  them was left to rustc (bun's ASCII checks; `simd_reduce_max` breaker).
+- `RA_JIT_OPT=3`'s last instruction combining no longer aborts the process when one run of it
+  leaves something to combine ("Instruction Combining … did not reach a fixpoint after 1
+  iterations", bun's whole-program build on AArch64): the default pipelines never ask LLVM to
+  check that, and a pass named in a pipeline did.
+- `apps.py`'s and `runbench.py`'s whole-program build of a program whose C calls its Rust
+  by an unmangled name (a `#[no_mangle]` function) goes on when cargo's link of the stand-ins
+  fails for want of those functions: what is taken from it is the link line, and ra-jit's
+  objects define them. It ended at "cargo failed" (bun; `nativecalls` in `apps.json`).
+- What stands in for a crate in cargo's build (the source with no code that cargo links when
+  ra-jit compiles the crate: `apps.py`'s and `runbench.py`'s whole-program builds, and the
+  crates the daemon builds while cargo builds the rest) builds with a nightly cargo that names
+  each dependency twice, its `.rlib` and its `.rmeta`. It had an `extern crate` for each
+  (`E0259`, bun 1.4.3 on `nightly-2026-09-15`).
+- A `macro_rules!` that a macro of another crate defines (`dep::define_log!(log)`, as bun's
+  `bun_core::define_scoped_log!` at the top of a file) is in the textual scope of the modules
+  after it, as in rustc. rust-analyzer expanded a call by a path only after the file's modules
+  were collected, so their calls of the macro were missing expressions and their functions were
+  left to rustc (`IncompleteExpr`); in bun one such function in `bun_runtime` sent every
+  signature edit of the crate to cargo (`harness/breakers`, `macro_defined_by_foreign_macro`).
 - `harness/apps.py`'s perf stage ends with its timings again: since the rename from rustd it
   stored ra-jit's as `ra-jit_s` and printed `ra_jit_s`, a `KeyError` after every workload.
   wasmrun builds wasmtime 36.0.19 (was 25.0.3, which Dependabot's alerts name); its workload
@@ -350,6 +401,21 @@ All notable changes to ra-jit are written here. The format follows
   installs ra-jit and the programs it runs; the flake had no package of that name.
 - A release's archive and the flake's build have `ra-jit-rustc-first`, which `cargo ra-jit`
   runs in the first build of a workspace; they had only ra-jit, cargo-ra-jit and ra-jit-rustc.
+- A module whose file is outside its package, by `#[path = "../../shared/outside.rs"]` as
+  bun's runtime has, is compiled by ra-jit and its edits are built. The file was in no
+  package's directory and so not loaded: the functions that called into it were left to
+  rustc, an edit to it was not seen and the program kept running the old code, and in a
+  binary crate the daemon could not load the workspace ("unresolved module ... [E0583]").
+  The file is now put in the source root of the one that declares it, as a file an
+  `include!` names is. `soakrows.py`'s "a module file outside its package" fails without
+  this.
+- An edit that could change a function ra-jit left to rustc from the start, such as an item
+  added elsewhere in its crate, is built by cargo, as docs/cargo.md says. It failed the
+  build: when the function was one the frontend turned down, ra-jit took that for an error
+  of the source ("has an error ra-jit cannot say more of"), and every build after it failed
+  too until cargo built once. A function the frontend turns down only after an edit is still
+  reported as an error. Found building bun; `soakrows.py`'s "an item added beside a function
+  left to rustc" fails without this.
 - A worker that loaded its workspace beside cargo's first build
   ([#11](https://github.com/indexable-inc/ra-jit/issues/11)) ends when its daemon does, as
   every other worker does: once told what cargo built, it waited for a lock on its standard
