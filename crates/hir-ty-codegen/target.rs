@@ -40,8 +40,9 @@ impl Arch {
         match self {
             // `jmp rel32`, filled up with `int3`.
             Arch::X86_64 => Some((5, 0xcc)),
-            // An instruction is as long as `b`.
-            Arch::Aarch64 => None,
+            // `adrp x16`, `add x16` and `br x16`, as `b` reaches only 128 MB, filled up with
+            // `udf #0`.
+            Arch::Aarch64 => Some((12, 0)),
             // A function of a module is replaced by its slot in the table, not by a jump.
             Arch::Wasm32 => None,
         }
