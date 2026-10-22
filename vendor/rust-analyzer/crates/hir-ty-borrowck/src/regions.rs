@@ -1945,12 +1945,25 @@ impl<'db> Builder<'_, '_, 'db> {
                 self.relate_regions(ra, rb, variance, at);
                 for (x, y) in pa.iter().zip(pb.iter()) {
                     let (x, y) = (x.skip_binder(), y.skip_binder());
-                    if let (
-                        rustc_type_ir::ExistentialPredicate::Trait(x),
-                        rustc_type_ir::ExistentialPredicate::Trait(y),
-                    ) = (x, y)
-                    {
-                        self.relate_args(x.args, y.args, None, Variance::Invariant, at);
+                    match (x, y) {
+                        (
+                            rustc_type_ir::ExistentialPredicate::Trait(x),
+                            rustc_type_ir::ExistentialPredicate::Trait(y),
+                        ) => self.relate_args(x.args, y.args, None, Variance::Invariant, at),
+                        // `dyn Foo<Bar = &'a u32>`: the binding is invariant.
+                        (
+                            rustc_type_ir::ExistentialPredicate::Projection(x),
+                            rustc_type_ir::ExistentialPredicate::Projection(y),
+                        ) if x.def_id == y.def_id => {
+                            self.relate_args(x.args, y.args, None, Variance::Invariant, at);
+                            if let (Some(x), Some(y)) = (
+                                rustc_type_ir::inherent::Term::as_type(&x.term),
+                                rustc_type_ir::inherent::Term::as_type(&y.term),
+                            ) {
+                                self.relate(x, y, Variance::Invariant, at);
+                            }
+                        }
+                        _ => (),
                     }
                 }
             }
