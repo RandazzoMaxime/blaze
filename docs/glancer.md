@@ -27,8 +27,9 @@ of the same result exists.
 - Order: measure memory per query first (step 0), bounded names (done), proc-macro
   expansion cache (item 3), memo eviction (item 5's quick part), frozen dependency artifacts
   (item 1) in stages each guarded by a differential check, then the workspace's own state
-  (item 2, with the cold-start-2 lane). The flat syntax tree (item 4) and stripping the LSP
-  parts (item 6) wait for numbers that say they matter.
+  (item 2, with the cold-start-2 lane). The flat syntax tree (item 4) has its own lane
+  (#42); stripping the LSP parts (item 6) waits for numbers that say it matters. Who has
+  what is under "Working with the other lanes".
 
 ## What was measured
 
@@ -52,7 +53,31 @@ translate 76.1 s, describe 6.2 s, store write 1.3 s (on main: store read 28.1 s,
 From the committed benchmarks ([`docs/benchmarks/linux-x86_64.json`](https://github.com/indexable-inc/ra-jit/blob/b3e953eb13e8e4476a4673ab1c7dfbdff61880c6/docs/benchmarks/linux-x86_64.json), `2b2f2dcd5b`, same
 machine type): ripgrep ready 12.5 s at 2.6 GB, load 0.9 s, resolve 0.5 s; bevy ready
 115.8 s at 8.5 GB, load 14.4 s, resolve 12.6 s; nushell load 7.2 s, resolve 5.0 s; helix load
-7.1 s, resolve 5.6 s. zed did not fit in 111 GB (#29); it has not been measured with step 1.
+7.1 s, resolve 5.6 s. zed did not fit in 111 GB (#29).
+
+**After cold-start-2 (2026-10-21, dev-aws-11, 187 GB, 16 cores, same harness).** cargo
+is answered from what rustc linked, and the program edits patch (the own base) is built in
+the background once nothing has asked for a second:
+
+| | `cargo ra-jit build` returned | ready | RSS at ready | own base done | own base peak |
+|---|---:|---:|---:|---:|---:|
+| helix | 27.3 s | 29.4 s | 4.7 GB | 108.4 s | 19.1 GB (13.6 GB after) |
+| zed v1.24.4 | 160.3 s | 214 s | 14.6 GB | given up at 48.1 GB | 49.8 GB, flat after |
+
+- helix's own base is step 3's restart round now: its first round (39.1 s) is thrown away on
+  `__RUST_STD_INTERNAL_VAL`, in the background. It does not loop, and memory does not grow
+  without bound; the 55 GB seen before was a binary from before step 1.
+- zed's own base restarted once a second (2131 interruptions in 40 minutes, flat at
+  16.2 GB): `livekit_api`, an optional dependency a dev-dependency's feature turns on, includes
+  a file under an `OUT_DIR` no build script wrote, and an include that could not be read was
+  counted as one still to load before every turn. Fixed on `include-loop`
+  (`harness/rustcbase.py`'s `unbuilt-member`).
+- With the loop gone, zed's own base grows about 1.2 GB/s and passed 150 GB in two minutes. A
+  heap profile at 73.6 GB live: `described` (debuginfo types) 51.2 GB, 69.6%; `infer`, MIR
+  and `compiled_instance` each under 1 GB. That is #55's, and item 5's `described` sharing.
+- The safety valve until then: a worker gives an own base up once it holds a quarter of the
+  machine's memory (`RA_JIT_OWN_BASE_MEMORY`), and edits patch rustc's executable. It is not
+  #39's result dropping: nothing is freed (salsa keeps the memos, #57), the build just stops.
 
 How helix was found: during its compile step the worker ran on one core at 40 to 100 GB.
 A `perf` sample of it was 14% `memmove`, 13% SHA-256, 11% `core::fmt::write`, 7% hex
@@ -244,7 +269,8 @@ crate graph.
 
 ### Item 4: a flat syntax tree for files nobody edits
 
-Deferred. Retained syntax is already bounded by the parse LRU; what a flat tree saves is
+Taken up on 2026-10-22 by its own lane (#42); what follows is why it had been deferred,
+which that lane measures against. Retained syntax is already bounded by the parse LRU; what a flat tree saves is
 the transient cost of parsing and the allocations rowan makes, and step 0 has to show that
 those are a large share of load before this is worth rewriting the parser's output and
 every `ItemTree` lowering. Item 1 would remove most dependency parsing anyway.
@@ -275,10 +301,41 @@ and cold-start time and RSS on helix and nushell before and after.
 5. Memo eviction (item 5), sized by step 0.
 6. Item 1a, then 1b family by family, then 1c.
 7. The warm-start manifest (item 2), then salsa state with cold-start-2.
-8. zed measured again; items 4 and 6 if the numbers say so.
+8. zed measured again (its ready path fits since cold-start-2; its own base waits on #55);
+   item 6 if the numbers say so. Item 4 has its own lane (#42).
 
 ## Working with the other lanes
 
+Who has what, as of 2026-10-22. Each lane keeps its line here current when it merges or
+stops.
+
+| Work | Issue | Lane |
+|---|---|---|
+| The restart round (step 3) | #37 | glancer, gated on dev-aws-7, merging |
+| Proc-macro expansion cache (item 3) | #38 | glancer, gated on dev-aws-7, merging after #37 |
+| `described` copies whole type closures (item 5) | #55 | share-types, dev-aws-6 |
+| The spare worker's memory (item 5) | #56 | spare, its own AWS host |
+| salsa eviction of queries with cycle handling (item 5) | #57 | spare, after #56 |
+| Frozen dependency artifacts (item 1) | #40 | glancer, after #38 |
+| The workspace's own state (item 2) | #41 | glancer, after #40's 1a |
+| A flat syntax tree (item 4) | #42 | flat-syntax, no longer deferred |
+| ra-jit never runs rustc | | no-rustc, planning; its steps go in `docs/no-rustc.md` |
+
+- **no-rustc.** Andrew's rule is that ra-jit must never run rustc. Since cold-start (#11)
+  the time to ready is what rustc linked. The background own base, and #37's forwarding of
+  callers to rustc's copies, build on that, so the warm start is cheap today because rustc
+  built the program. Without rustc the daemon's own build is the ready path again. That
+  makes items 1 and 2 (#40, #41) the warm start's path once more, as they were planned
+  before #11: they skip the analysis of what is unchanged on the daemon's own build.
+  `docs/no-rustc.md` will say in which order rustc goes. Items 1 and 2 are designed not to need rustc's
+  output, and a step here that adds a new dependency on it says so in this table.
+- **flat-syntax (#42)** and item 1 both change what dependency files cost. A frozen crate
+  (1b) no longer parses for its item tree, and a flat tree makes the parses that remain
+  cheaper. Both measure with step 0's tooling (`harness/heap.py`, `RA_JIT_MEMORY`), and
+  each says in its item here which share of load and resolve it took, so the other doesn't
+  count it again.
+- **share-types (#55)** and **spare (#56, #57)** both report the ready heap and the edit
+  peak with `harness/memory.py`, and write item 5's numbers here when they merge.
 - **cold-start-2** owns persisting the analysed workspace. Item 2's manifest is about
   compiled names and sits next to the store; salsa state is theirs. Both need a serialization
   layer for ids that survive a process: whoever lands first puts it where the other can use
@@ -290,7 +347,7 @@ and cold-start time and RSS on helix and nushell before and after.
 
 ## Not checked
 
-- zed, bevy and ripgrep with step 1.
+- bevy and ripgrep with step 1; zed's own base past the memory bound (#55).
 - Whether `instance_path` and `home::Mentions`, which also walk types without a memo,
   grow the same way on other workspaces; on helix they were under 3% of the sample.
 - How much of a load proc-macro expansion is (step 0).

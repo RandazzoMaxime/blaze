@@ -86,4 +86,5 @@ def main():
                 print(f"  {works(out)}")
 
 
-main()
+if __name__ == "__main__":
+    main()

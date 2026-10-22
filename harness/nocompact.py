@@ -43,10 +43,12 @@ fn answer() -> u32 {
     1
 }
 
-/// Whether the unwinder has a frame for the code at `at` of the executable as linked.
+/// Whether the unwinder has a frame for the function at `at` of the executable as linked. It is
+/// asked one instruction in: macOS 15's `_Unwind_Find_FDE` looks up the byte before the pc it is
+/// given, as for a return address, which for a function's first byte is the code before it.
 fn has_frame(at: &str) -> bool {
     let at = usize::from_str_radix(at.trim_start_matches("0x"), 16).unwrap();
-    let pc = at.wrapping_add(unsafe { _dyld_get_image_vmaddr_slide(0) } as usize);
+    let pc = at.wrapping_add(unsafe { _dyld_get_image_vmaddr_slide(0) } as usize) + 4;
     let mut bases = [0; 3];
     !unsafe { _Unwind_Find_FDE(pc as *const c_void, &mut bases) }.is_null()
 }

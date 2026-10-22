@@ -20,7 +20,7 @@ os.environ.setdefault("RUSTUP_TOOLCHAIN", open(os.path.join(HERE, "toolchain")).
 os.environ["RA_JIT_STATS"] = "1"
 import linkline
 from difftest import Fixture, RA_JIT, sysroot_rlibs
-from bench import millis
+from editbench import millis
 
 V = os.path.join(HERE, "vendor")
 A, S = os.path.join(V, "regex-automata/src"), os.path.join(V, "regex-syntax/src")

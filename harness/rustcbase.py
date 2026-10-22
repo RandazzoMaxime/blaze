@@ -274,6 +274,33 @@ GENERIC_SCENARIOS = {
 }
 SCENARIOS.update(GENERIC_SCENARIOS)
 
+# An optional dependency only a dev-dependency's feature turns on, which cargo does not build for
+# the program and the daemon loads, as `cargo metadata` has the features of every target (zed's
+# `livekit_api`, through `livekit_client/test-support`). Its build script fails, as one needing
+# a tool that is not there does: what it includes from `OUT_DIR` is never there, and the
+# daemon's own base is to be built anyway.
+UNBUILT_FILES = {
+    **FILES,
+    "Cargo.toml": '[workspace]\nmembers = ["app", "dep"]\ndefault-members = ["app"]\nresolver = "3"\n',
+    "app/Cargo.toml": FILES["app/Cargo.toml"] + '\n[dev-dependencies]\ndep = { path = "../dep", features = ["extra"] }\n',
+    "dep/Cargo.toml": FILES["dep/Cargo.toml"]
+    + '\n[features]\nextra = ["dep:unbuilt"]\n\n[dependencies]\nunbuilt = { path = "../unbuilt", optional = true }\n',
+    "unbuilt/Cargo.toml": '[package]\nname = "unbuilt"\nversion = "0.1.0"\nedition = "2024"\n',
+    "unbuilt/build.rs": 'fn main() {\n    panic!("protoc is not there");\n}\n',
+    "unbuilt/src/lib.rs": 'include!(concat!(env!("OUT_DIR"), "/made.rs"));\n\n'
+                          'pub static BLOB: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/blob.bin"));\n',
+}
+UNBUILT_SCENARIOS = {
+    "unbuilt-member": ([[edit(M, "    x * 3\n", "    x * 4\n")]], ["patch"], 8, {}),
+}
+SCENARIOS.update(UNBUILT_SCENARIOS)
+# The own base holds more than the memory it may, so it is given up once and not started again,
+# and the edit patches what rustc linked.
+SCENARIOS["own-base-budget"] = ([[edit(M, "    x * 3\n", "    x * 4\n")]], ["patch"], 8, {"RA_JIT_OWN_BASE_MEMORY": "1"})
+
+# How the daemon's own base is to go before the first edit, in the scenarios that say.
+OWN_BASE = {"unbuilt-member": "built", "own-base-budget": "given up"}
+
 
 def opt(name, default=None):
     if name in sys.argv:
@@ -353,6 +380,8 @@ def main():
             files = CACHED_FILES
         elif name in GENERIC_SCENARIOS:
             files = GENERIC_FILES
+        elif name in UNBUILT_SCENARIOS:
+            files = UNBUILT_FILES
         write_workspace(ws, files)
         home, target, store = (os.path.join(work, it) for it in ("home", "target", "store"))
         for path in (home, target, store, fn_cache):
@@ -376,6 +405,19 @@ def main():
         rustcs = any("the first edits patch what rustc linked" in it for it in logs(home))
         print(f"{name}: build {built:.2f}s ready {ready:.2f}s ({'rustc base' if rustcs else 'own base'})", flush=True)
         time.sleep(wait)
+        if name in OWN_BASE:
+            lines = logs(home)
+            started = [at for at, it in enumerate(lines) if "while nobody asks" in it]
+            linked = bool(started) and any(it.startswith("link: ") for it in lines[started[-1]:])
+            interrupted = sum(it.startswith("interrupted:") for it in lines)
+            given_up = sum("for edits to patch any more" in it for it in lines)
+            print(f"  own base: started {len(started)} times, interrupted {interrupted}, given up {given_up}, "
+                  f"{'linked' if linked else 'not linked'}", flush=True)
+            went = {(1, True, 0, 0): "built", (1, False, 1, 1): "given up"}.get(
+                (len(started), linked, interrupted, given_up), "neither")
+            if went != OWN_BASE[name]:
+                failed.append(f"{name}: the own base was {went}, not {OWN_BASE[name]} ({len(started)} starts, "
+                              f"{interrupted} interrupted, {given_up} given up)")
         try:
             for step, (replacements, want) in enumerate(zip(edits, expected), 1):
                 for file, old, new in replacements:

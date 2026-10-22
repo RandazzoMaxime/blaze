@@ -167,4 +167,5 @@ def main():
         daemon.kill()
 
 
-main()
+if __name__ == "__main__":
+    main()

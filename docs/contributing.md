@@ -128,6 +128,13 @@ writing, the splice, the daemon and its socket, the cargo drop-in, the store and
 tiers and sampling, the live runtime, and the harnesses. A change there is one ordinary
 commit.
 
+New code never adds a path to rustc ([no-rustc.md](no-rustc.md)). ra-jit compiles
+everything itself, so a change does not start rustc, rustdoc or a cargo that compiles, does not
+read `RUSTC` or `RUSTDOC`, does not add a reason for a build to go to cargo or a kind of function
+to leave to rustc, and does not use rustc's rlibs, objects, symbols or link line for anything
+new. Where a feature needs what rustc does, the change builds that piece in ra-jit, or waits for
+it. The paths that remain may be fixed where they are wrong, and are otherwise only removed.
+
 ### Moving to a newer rust-analyzer
 
 1. On a branch, `vendor/subtree.py upstream rust-analyzer` and resolve the conflicts.
@@ -157,7 +164,8 @@ suites through `uitest.py` and `libsuite.py` again.
 ## Rules for code
 
 1. **rustc is the reference.** If ra-jit's program behaves differently from rustc's, ra-jit
-   is wrong, even where rustc's behaviour looks like an accident.
+   is wrong, even where rustc's behaviour looks like an accident. The harnesses run rustc to
+   compare with; ra-jit itself never does ([no-rustc.md](no-rustc.md)).
 2. **Never guess.** Input the code generator has no explicit lowering for is refused with a
    reason (`CodegenError`), not lowered on a best-effort basis. A refusal is visible and
    counted. A wrong guess is a miscompile nobody sees.

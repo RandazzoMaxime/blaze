@@ -4104,13 +4104,18 @@ impl WatchedFile {
             .collect();
         let mut changed = false;
         for path in new {
-            let on_disk = db.on_disk(path.as_ref());
-            if let Some(file) =
-                WatchedFile::new(Watched::Included(path.clone()), path.as_ref(), &on_disk)
-            {
-                files.push(file);
-                changed |= db.reload_included_file(&path);
+            if WatchedFile::immutable(path.as_ref()) {
+                continue;
             }
+            // One that is not there is watched for when it is, as a new file is.
+            let on_disk = db.on_disk(path.as_ref());
+            let mtime = std::fs::metadata(&on_disk).and_then(|it| it.modified());
+            files.push(WatchedFile {
+                file: Watched::Included(path.clone()),
+                path: AsRef::<Path>::as_ref(&path).to_owned(),
+                mtime: mtime.unwrap_or(SystemTime::UNIX_EPOCH),
+            });
+            changed |= db.reload_included_file(&path);
         }
         changed
     }
@@ -4610,6 +4615,8 @@ enum Event {
     /// Those functions are compiled, for the program at the index: what to patch it with,
     /// and what to tell the watcher.
     Tiered(usize, Tiered),
+    /// The daemon's own base of the program at the index holds more memory than it may.
+    OverBudget(usize),
 }
 
 /// The functions of a program compiled at a higher level, for its next patch.
@@ -4658,6 +4665,20 @@ struct Running {
 /// for edits that patch what rustc linked.
 const OWN_BASE_AFTER: Duration = Duration::from_secs(1);
 
+/// Bytes the daemon may hold while it builds a base of its own, which no edit waits for:
+/// what `RA_JIT_OWN_BASE_MEMORY` says (a size, or `off` for no bound), else a quarter of the
+/// machine's memory. What the build computed stays, so the bound is on what the daemon keeps
+/// after it.
+fn own_base_budget() -> Option<u64> {
+    match std::env::var("RA_JIT_OWN_BASE_MEMORY") {
+        Ok(it) if it == "off" => None,
+        it => it
+            .ok()
+            .and_then(|it| ra_jit_store::parse_size(&it))
+            .or_else(|| memory::of_the_machine().map(|it| it / 4)),
+    }
+}
+
 /// The builds under way and the requests that wait for them. A build reads the database on
 /// threads of its own, so requests for other programs are not kept waiting by it.
 struct Builds {
@@ -4679,6 +4700,10 @@ struct Builds {
     /// a higher level, or to compile what their last build took of the checkout from the
     /// store, which the first edit would otherwise wait for.
     unasked: Vec<usize>,
+    /// The programs whose own base holds more memory than it may, to be interrupted.
+    over_budget: Vec<usize>,
+    /// The programs whose own base is not built again: one held more memory than it may.
+    given_up: FxHashSet<usize>,
 }
 
 impl Builds {
@@ -4764,6 +4789,12 @@ impl Builds {
                 self.install_tiered(programs);
                 return Ok(false);
             }
+            Event::OverBudget(at) => {
+                if self.running.get(&at).is_some_and(|it| it.own_base) {
+                    self.over_budget.push(at);
+                }
+                return Ok(false);
+            }
         };
         let Some(Running { clients, own_base, .. }) = self.running.remove(&at) else {
             return Ok(false);
@@ -4787,8 +4818,12 @@ impl Builds {
                 program.wrote = None;
             }
             if own_base {
-                // Nobody asked for it, and it is built again once nobody asks for anything. An
-                // edit that came as it started is still to be built.
+                // Nobody asked for it, and it is built again once nobody asks for anything,
+                // unless it held more memory than it may. An edit that came as it started is
+                // still to be built.
+                if let Some(over) = self.over_budget.iter().position(|&it| it == at) {
+                    self.given_up.insert(self.over_budget.swap_remove(over));
+                }
                 program.unbuilt.stale = !patches_rustcs || !program.unbuilt.edited.is_empty();
                 return Ok(false);
             }
@@ -4797,6 +4832,7 @@ impl Builds {
             return Ok(false);
         };
         (program.interrupted, program.moved) = (0, false);
+        self.over_budget.retain(|&it| it != at);
         let answer = answer?;
         if answer.is_ok() && program.dehydrate() && !self.unasked.contains(&at) {
             self.unasked.push(at);
@@ -6064,6 +6100,8 @@ fn run_holding(
         tier_asks: Vec::new(),
         tiered: Vec::new(),
         unasked: Vec::new(),
+        over_budget: Vec::new(),
+        given_up: FxHashSet::default(),
     };
     if programs[0].dehydrate() {
         builds.unasked.push(0);
@@ -6121,6 +6159,7 @@ fn run_holding(
                         (0..programs.len()).find(|&at| {
                             let program = &programs[at];
                             !builds.running.contains_key(&at)
+                                && !builds.given_up.contains(&at)
                                 && !program.unbuilt.stale
                                 && program.known.wants_base()
                         })
@@ -6146,6 +6185,9 @@ fn run_holding(
                         }
                     }
                     _ => {}
+                }
+                if !builds.over_budget.is_empty() {
+                    builds.settle(&mut db, &mut programs)?;
                 }
                 loop {
                     // Asked again after each: a checkout that joins takes long enough for the
@@ -6858,10 +6900,32 @@ fn run_holding(
                 let (db, listed, paths, sender) =
                     (db.clone(), listed.clone(), paths.clone(), sender.clone());
                 let wanted = outputs.remove(&at);
+                let done = Arc::new(AtomicBool::new(false));
+                if own_base && let Some(budget) = own_base_budget() {
+                    let (done, sender) = (done.clone(), sender.clone());
+                    let krate = program.args.krate.clone();
+                    std::thread::spawn(move || {
+                        while !done.load(Ordering::SeqCst) {
+                            if let Some(held) =
+                                memory::held_by(std::process::id()).filter(|&it| it > budget)
+                            {
+                                eprintln!(
+                                    "not compiling the program for edits to patch any more: it holds {} MB, more than the {} MB it may (RA_JIT_OWN_BASE_MEMORY), and edits go on patching what rustc linked: {krate}",
+                                    held >> 20,
+                                    budget >> 20
+                                );
+                                let _ = sender.send(Event::OverBudget(at));
+                                return;
+                            }
+                            std::thread::sleep(Duration::from_millis(100));
+                        }
+                    });
+                }
                 std::thread::spawn(move || {
                     let answer = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                         program.sync(&db, &listed, &paths, &edit, wanted.as_ref(), link, defer)
                     }));
+                    done.store(true, Ordering::SeqCst);
                     // The write that interrupts waits for this.
                     drop(db);
                     let answer = match answer {

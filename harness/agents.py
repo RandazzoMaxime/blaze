@@ -422,4 +422,5 @@ def main():
     print(f"{summary}; log {log_path}; source {ws}")
 
 
-main()
+if __name__ == "__main__":
+    main()
