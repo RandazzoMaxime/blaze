@@ -215,9 +215,10 @@ where
         span: I::Span,
         stalled_on: Option<GoalStalledOn<I>>,
     ) -> Result<GoalEvaluation<I>, NoSolution> {
-        let result = EvalCtxt::enter_root(self, self.cx().recursion_limit(), span, |ecx| {
+        let mut result = EvalCtxt::enter_root(self, self.cx().recursion_limit(), span, |ecx| {
             ecx.evaluate_goal(GoalSource::Misc, goal, stalled_on)
         });
+        maybe_evaluate_root_goal_with_higher_recursion_limit(self, goal, span, &mut result);
 
         match result {
             Ok(i) => Ok(i),
@@ -270,7 +271,91 @@ where
         goal: Goal<I, I::Predicate>,
         span: I::Span,
     ) -> (Result<NestedNormalizationGoals<I>, NoSolution>, inspect::GoalEvaluation<I>) {
-        evaluate_root_goal_for_proof_tree(self, goal, span)
+        let mut result =
+            evaluate_root_goal_for_proof_tree(self, goal, span, self.cx().recursion_limit());
+        maybe_evaluate_root_goal_for_proof_tree_with_higher_recursion_limit(
+            self,
+            goal,
+            span,
+            &mut result,
+        );
+        result
+    }
+}
+
+/// The old solver doesn't check depth requirement when looking up cache while the next solver
+/// does so. Thus the next solver is more prone to overflow. To mitigate breakages, we re-evaluate
+/// the overflowed goal with doubled recursion limit. rustc does too, and warns when that is what
+/// proves the goal.
+///
+/// Backported from ra-ap-rustc_next_trait_solver 0.178, see rust-lang/rust#159228.
+fn maybe_evaluate_root_goal_with_higher_recursion_limit<D, I>(
+    delegate: &D,
+    goal: Goal<I, I::Predicate>,
+    span: I::Span,
+    initial_result: &mut Result<GoalEvaluation<I>, NoSolutionOrRerunNonErased>,
+) where
+    D: SolverDelegate<Interner = I>,
+    I: Interner,
+{
+    match initial_result {
+        Err(_) => return,
+        Ok(goal_evaluation) if !goal_evaluation.certainty.is_overflow() => return,
+        Ok(_) => {}
+    }
+
+    let rerun_result = delegate.commit_if_ok(|| {
+        let rerun_result =
+            EvalCtxt::enter_root(delegate, delegate.cx().recursion_limit() * 2, span, |ecx| {
+                ecx.evaluate_goal(GoalSource::Misc, goal, None)
+            });
+
+        if rerun_result.as_ref().is_ok_and(|evaluation| evaluation.certainty.is_overflow()) {
+            Err(())
+        } else {
+            Ok(rerun_result)
+        }
+    });
+    if let Ok(rerun_result) = rerun_result {
+        *initial_result = rerun_result;
+    }
+}
+
+/// [`maybe_evaluate_root_goal_with_higher_recursion_limit`] for a proof tree.
+fn maybe_evaluate_root_goal_for_proof_tree_with_higher_recursion_limit<D, I>(
+    delegate: &D,
+    goal: Goal<I, I::Predicate>,
+    span: I::Span,
+    initial_result: &mut (
+        Result<NestedNormalizationGoals<I>, NoSolution>,
+        inspect::GoalEvaluation<I>,
+    ),
+) where
+    D: SolverDelegate<Interner = I>,
+    I: Interner,
+{
+    match initial_result.1.result {
+        Err(_) => return,
+        Ok(response) if !response.value.certainty.is_overflow() => return,
+        Ok(_) => {}
+    }
+
+    let rerun_result = delegate.commit_if_ok(|| {
+        let (new_result, new_goal_evaluation) = evaluate_root_goal_for_proof_tree(
+            delegate,
+            goal,
+            span,
+            delegate.cx().recursion_limit() * 2,
+        );
+
+        if new_goal_evaluation.result.is_ok_and(|response| response.value.certainty.is_overflow()) {
+            Err(())
+        } else {
+            Ok((new_result, new_goal_evaluation))
+        }
+    });
+    if let Ok(rerun_result) = rerun_result {
+        *initial_result = rerun_result;
     }
 }
 
@@ -1814,11 +1899,12 @@ pub fn evaluate_root_goal_for_proof_tree_raw_provider<
 >(
     cx: I,
     canonical_goal: CanonicalInput<I>,
+    root_depth: usize,
 ) -> (QueryResult<I>, I::Probe) {
     let mut inspect = inspect::ProofTreeBuilder::new();
     let (canonical_result, accessed_opaques) = SearchGraph::<D>::evaluate_root_goal_for_proof_tree(
         cx,
-        cx.recursion_limit(),
+        root_depth,
         canonical_goal,
         &mut inspect,
     );
@@ -1836,6 +1922,7 @@ pub(super) fn evaluate_root_goal_for_proof_tree<D: SolverDelegate<Interner = I>,
     delegate: &D,
     goal: Goal<I, I::Predicate>,
     origin_span: I::Span,
+    root_depth: usize,
 ) -> (Result<NestedNormalizationGoals<I>, NoSolution>, inspect::GoalEvaluation<I>) {
     let opaque_types = delegate.clone_opaque_types_lookup_table();
     let (goal, opaque_types) = eager_resolve_vars(delegate, (goal, opaque_types));
@@ -1845,7 +1932,7 @@ pub(super) fn evaluate_root_goal_for_proof_tree<D: SolverDelegate<Interner = I>,
         canonicalize_goal(delegate, goal, &opaque_types, typing_mode.into());
 
     let (canonical_result, final_revision) =
-        delegate.cx().evaluate_root_goal_for_proof_tree_raw(canonical_goal);
+        delegate.cx().evaluate_root_goal_for_proof_tree_raw(canonical_goal, root_depth);
 
     let proof_tree = inspect::GoalEvaluation {
         uncanonicalized_goal: goal,

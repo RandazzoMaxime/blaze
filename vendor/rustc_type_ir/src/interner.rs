@@ -467,6 +467,7 @@ pub trait Interner:
     fn evaluate_root_goal_for_proof_tree_raw(
         self,
         canonical_goal: CanonicalInput<Self>,
+        root_depth: usize,
     ) -> (QueryResult<Self>, Self::Probe);
 
     fn item_name(self, item_index: Self::DefId) -> Self::Symbol;

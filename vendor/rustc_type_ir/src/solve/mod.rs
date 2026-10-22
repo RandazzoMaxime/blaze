@@ -802,6 +802,13 @@ impl Certainty {
         }
     }
 
+    pub fn is_overflow(&self) -> bool {
+        match self {
+            Certainty::Maybe(MaybeInfo { cause: MaybeCause::Overflow { .. }, .. }) => true,
+            _ => false,
+        }
+    }
+
     pub const fn overflow(suggest_increasing_limit: bool) -> Certainty {
         Certainty::Maybe(MaybeInfo {
             cause: MaybeCause::Overflow { suggest_increasing_limit, keep_constraints: false },

@@ -181,4 +181,5 @@ cases![
     moved_bits_unread,
     const_location,
     provided_method_static,
+    deep_send_shared,
 ];
