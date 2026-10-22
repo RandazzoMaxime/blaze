@@ -923,6 +923,10 @@ impl SymbolResolver for Resolver<'_> {
         self.debug.level == plan::Level::Full
     }
 
+    fn keeps_frame_pointers(&self) -> bool {
+        self.debug.frame_pointers
+    }
+
     fn debug_apart(&self) -> Option<String> {
         self.apart.as_ref().map(|it| it.to_string_lossy().into_owned())
     }

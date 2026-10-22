@@ -84,6 +84,16 @@ CASES = {
         "expected": "compiled",
         "reasons": (),
     },
+    "frame_pointers": {
+        "package": "runner",
+        "crate": "runner",
+        # bun's own build keeps frame pointers; LLVM, unlike Cranelift, otherwise gives the
+        # register to values.
+        "rustflags": "-C link-dead-code -Cforce-frame-pointers=yes",
+        "env": {"RA_JIT_BACKEND": "llvm"},
+        "expected": "compiled",
+        "reasons": (),
+    },
     "macro_impls": {
         "package": "runner",
         "crate": "dtoa",
@@ -147,16 +157,19 @@ def run_case(name, root, json_path=None):
         return run_mir_case(name, case, workspace, json_path)
     target = tempfile.mkdtemp(prefix=f"ra-jit-bun-{name}-")
     os.environ["CARGO_TARGET_DIR"] = target
-    rustflags = os.environ.get("RUSTFLAGS")
+    env = dict(case.get("env", {}))
     if "rustflags" in case:
-        os.environ["RUSTFLAGS"] = case["rustflags"]
+        env["RUSTFLAGS"] = case["rustflags"]
+    saved = {key: os.environ.get(key) for key in env}
+    os.environ.update(env)
     try:
         return build_case(name, case, workspace, json_path)
     finally:
-        if rustflags is None:
-            os.environ.pop("RUSTFLAGS", None)
-        else:
-            os.environ["RUSTFLAGS"] = rustflags
+        for key, value in saved.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
 
 
 def build_case(name, case, workspace, json_path):

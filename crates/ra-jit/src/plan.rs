@@ -182,14 +182,22 @@ enum Stripped {
 pub(crate) struct Described {
     pub(crate) level: Level,
     pub(crate) kept: Kept,
+    /// Whether every function keeps its frame pointer (`-C force-frame-pointers`), for a
+    /// profiler or the program's own backtraces to walk the frames by.
+    pub(crate) frame_pointers: bool,
 }
 
 impl Described {
-    pub(crate) const NOTHING: Described = Described { level: Level::Nothing, kept: Kept::Linked };
+    pub(crate) const NOTHING: Described =
+        Described { level: Level::Nothing, kept: Kept::Linked, frame_pointers: false };
 
     /// The most either tells, kept the furthest from the program either keeps it.
     fn or(self, other: Described) -> Described {
-        Described { level: self.level.max(other.level), kept: self.kept.max(other.kept) }
+        Described {
+            level: self.level.max(other.level),
+            kept: self.kept.max(other.kept),
+            frame_pointers: self.frame_pointers || other.frame_pointers,
+        }
     }
 }
 
@@ -296,7 +304,7 @@ impl Profile {
                 anyhow::bail!("`split-debuginfo = \"{split}\"`: ra-jit does not know the setting")
             }
         };
-        Ok(Described { level, kept })
+        Ok(Described { level, kept, frame_pointers: false })
     }
 
     /// Whether rustc compiles the whole program again when it links it.
@@ -335,6 +343,7 @@ struct Flags {
     debuginfo: Option<DebugLevel>,
     split_debuginfo: Option<String>,
     strip: Option<String>,
+    frame_pointers: bool,
 }
 
 impl Flags {
@@ -408,6 +417,10 @@ impl Flags {
                 }
                 "split-debuginfo" => flags.split_debuginfo = Some(value.to_owned()),
                 "strip" => flags.strip = Some(value.to_owned()),
+                // `always` and `non-leaf` keep them too, `non-leaf` in more functions than asked.
+                "force-frame-pointers" => {
+                    flags.frame_pointers = on.unwrap_or(matches!(value, "always" | "non-leaf"));
+                }
                 _ => {}
             }
         }
@@ -450,6 +463,7 @@ impl Words {
 pub(crate) struct Plan {
     packages: FxHashMap<String, Built>,
     lto: bool,
+    frame_pointers: bool,
 }
 
 /// What a plan says of a program as a whole.
@@ -501,7 +515,8 @@ impl Plan {
 
     /// What the plan says of the programs cargo was asked to build.
     pub(crate) fn whole(&self) -> anyhow::Result<Whole> {
-        Ok(Whole { debug: self.described()?, lto: self.lto })
+        let debug = Described { frame_pointers: self.frame_pointers, ..self.described()? };
+        Ok(Whole { debug, lto: self.lto })
     }
 
     /// How the package cargo calls `id` is built, when the build has it.
@@ -626,6 +641,22 @@ impl UnitGraph {
                 (package_named(id), Built { features, profile, primary, for_target })
             })
             .collect();
-        Ok(Plan { packages, lto })
+        Ok(Plan { packages, lto, frame_pointers: flags.frame_pointers })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Flags;
+
+    #[test]
+    fn force_frame_pointers_is_read_in_each_spelling() {
+        let kept = |flags: &str| Flags::parse(flags.split_whitespace()).frame_pointers;
+        assert!(kept("-Cforce-frame-pointers=yes"));
+        assert!(kept("--cap-lints allow -C force-frame-pointers"));
+        assert!(kept("-C force_frame_pointers=always"));
+        assert!(kept("-Cforce-frame-pointers=non-leaf"));
+        assert!(!kept("-Cforce-frame-pointers=yes -Cforce-frame-pointers=no"));
+        assert!(!kept("-C link-dead-code"));
     }
 }

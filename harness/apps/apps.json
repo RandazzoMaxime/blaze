@@ -1798,6 +1798,7 @@
   "prepare": "bunprep",
   "package": "bun-exe",
   "bin": "bun",
+  "rustflags": "-Cforce-frame-pointers=yes",
   "runs": [
    [
     "--version"

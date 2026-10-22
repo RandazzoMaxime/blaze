@@ -357,6 +357,11 @@ All notable changes to ra-jit are written here. The format follows
 
 ### Fixed
 
+- `-C force-frame-pointers` in a build's flags keeps frame pointers in ra-jit's code too: LLVM
+  gave the register to values, so code that walks frames by it read garbage. bun, built with
+  every function ra-jit's, faulted in `bun_core::return_address` on its first `-e`; it now
+  gives cargo's output on each of its runs. `harness/apps/apps.json` gives bun its own build's
+  `-Cforce-frame-pointers=yes`. `harness/bun-repros/frame_pointers`.
 - On ELF, a build that no edits follow puts each function and datum of its object in a
   section of its own, as rustc does, so the link takes out what nothing reaches. A program
   whose `main` is the C runtime's has every function compiled, and bun's link was missing

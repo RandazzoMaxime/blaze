@@ -260,6 +260,11 @@ pub trait SymbolResolver {
     fn describes_variables(&self) -> bool {
         true
     }
+    /// Whether every function keeps its frame pointer, as `-C force-frame-pointers` has it:
+    /// code that walks its own frames (bun's backtraces) reads them.
+    fn keeps_frame_pointers(&self) -> bool {
+        false
+    }
     /// Whether the program's rustc build has the symbol, defined or referred to.
     fn defines(&self, _symbol: &str) -> bool {
         false
@@ -563,6 +568,7 @@ impl CodegenUnit {
         hold: &dyn Fn() -> bool,
         undoable: bool,
     ) -> Result<Option<CodegenUnit>> {
+        backend::keep_frame_pointers(symbols.keeps_frame_pointers());
         let on_demand: FxHashSet<FunctionId> = roots.on_demand.iter().copied().collect();
         let all = || roots.entries.iter().chain(roots.on_demand).copied();
         // Code of the checkout comes from the store in the first build alone: what a patch is
@@ -4000,11 +4006,12 @@ fn emit(ctx: &mut cranelift_codegen::Context) -> Result<Code> {
     let mut isa = &**if large { target_for_large()? } else { target()? };
     let func = &ctx.func;
     if !isa.flags().preserve_frame_pointers()
-        && func.layout.entry_block().is_some_and(|entry| {
-            func.layout
-                .block_insts(entry)
-                .any(|inst| func.dfg.insts[inst].opcode() == ir::Opcode::GetFramePointer)
-        })
+        && (backend::frame_pointers()
+            || func.layout.entry_block().is_some_and(|entry| {
+                func.layout
+                    .block_insts(entry)
+                    .any(|inst| func.dfg.insts[inst].opcode() == ir::Opcode::GetFramePointer)
+            }))
     {
         isa = &**target_with_frame_pointer()?;
     }
