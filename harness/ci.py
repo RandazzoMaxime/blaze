@@ -50,6 +50,8 @@ HARNESSES = [
     ("core", ["farsplices.py"], {"RA_JIT_SPLICE": "1"}, on("linux-aarch64"), 1),
     # A file 2.3 GB past what it loads, as bevy's debug builds are; about 9 GB of disk at once.
     ("core", ["farfile.py"], {}, on("linux"), None),
+    # 220 MB of code, 16 MB of frames and, on Linux, 4.2 GB of DWARF: no size is a full link.
+    ("core", ["bigbinary.py"], {}, on("linux", "macos"), None),
     # `cargo ra-jit` hands Windows builds to cargo, so there the daemon links nothing to test.
     ("core", ["unreached.py"], {}, on("linux", "macos"), 1),
     ("core", ["loadedits.py"], {}, on("linux", "macos"), 2),

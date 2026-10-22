@@ -28,6 +28,8 @@
 //! The patch holds everything that differs from the object the executable was linked from, so
 //! each splice starts from the executable as the linker left it: the last one is undone
 //! first. Anything the splice has no answer for is an error, and the caller links in full.
+//! No size is such an error: what is sized for what, and the rules for a change to it, are in
+//! docs/architecture.md ("No size is a reason to link in full").
 //!
 //! That is the splice of an ELF executable. A wasm module is written again instead, with
 //! the patch's functions in place of its own: see [`wasm`].
@@ -2180,12 +2182,19 @@ impl<'a> Patch<'a> {
         segments.push(header);
         let headers = object::bytes_of_slice(&segments).to_vec();
         let headers_offset = offset + headers_at;
-        let described = self.describe(
-            &image.described,
-            machine,
-            (headers_offset + headers.len() as u64).max(image.tail()),
-            |target, added| address(target, added, false),
-        )?;
+        // What a debugger reads is no reason to link in full: without it the patch's code has
+        // no lines, and the program's are where they were.
+        let described = self
+            .describe(
+                &image.described,
+                machine,
+                (headers_offset + headers.len() as u64).max(image.tail()),
+                |target, added| address(target, added, false),
+            )
+            .unwrap_or_else(|why| {
+                eprintln!("splice: the patch's code has no lines for a debugger: {why:#}");
+                debug::Tail::default()
+            });
         let mut header = image.header;
         if let Some((at, count)) = described.headers {
             header.e_shoff.set(e, at);

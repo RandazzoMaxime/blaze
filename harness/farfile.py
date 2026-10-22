@@ -19,9 +19,10 @@ FAR = 2300 << 20
 AARCH64 = (TARGET or host()).startswith("aarch64")
 
 
-def far_object(path, size):
-    """A relocatable object with one section of `size` zeros that is not loaded, written sparse."""
-    names = b"\0.ra_jit_far\0.shstrtab\0"
+def far_object(path, size, name=b".ra_jit_far"):
+    """A relocatable object with one section `name` of `size` zeros that is not loaded, written
+    sparse."""
+    names = b"\0" + name + b"\0.shstrtab\0"
     machine = 183 if AARCH64 else 62
     names_at, data_at = 64, 4096
     headers_at = data_at + size
@@ -33,7 +34,7 @@ def far_object(path, size):
         f.seek(names_at)
         f.write(names)
         f.seek(headers_at)
-        f.write(bytes(64) + section(1, 1, data_at, size, 1) + section(13, 3, names_at, len(names), 1))
+        f.write(bytes(64) + section(1, 1, data_at, size, 1) + section(len(name) + 2, 3, names_at, len(names), 1))
 
 
 MAIN = "src/main.rs"
