@@ -1,14 +1,22 @@
 #!/usr/bin/env python3
-"""Live edits end to end (macOS on AArch64): edit a function of a running program, and the
-running program must run the new code, applied by ra-jit-live from the daemon's patch.
+"""Live edits end to end (macOS on AArch64, Linux on x86-64): edit a function of a running
+program, and the running program must run the new code, applied by ra-jit-live from the
+daemon's patch.
 
 usage: live_e2e.py          (RA_JIT_BIN names the ra-jit built; cargo-ra-jit and ra-jit-rustc
                              are found next to it)
 
 A copy of harness/live (a program that polls ra-jit-live and prints `answer()`) is built by the
 daemon until the daemon serves the build, edited once (the first edit after a daemon starts
-writes the whole object again), started, and edited again LIVE_EDITS times (default 5). Each edit has to arrive as a
-patch the program applies: `outcome: edit N applied` and the new answer on its output.
+writes the whole object again), started, and edited again LIVE_EDITS times (default 5). Each
+edit has to arrive as a patch the program applies: `outcome: edit N applied` and the new answer
+on its output. Then, while it runs:
+  other     a second copy, a program of its own, is built, edited twice and started: its
+            executable has its last edit, which a program that runs elsewhere changes nothing of
+  restart   the first program is stopped and started again from its executable, which has
+            the last edit
+  panic     an edit has the answer panic, and the panic unwinds through the patched code: the
+            program says where it panicked and exits with a failure
 
 Python 3.13, stdlib only. Every step has a timeout; a failure names the step.
 """
@@ -101,15 +109,45 @@ async def pump(stream: asyncio.StreamReader, lines: asyncio.Queue[str]) -> None:
         await lines.put(line.decode(errors="replace").rstrip())
 
 
+class Running:
+    """A program started from its executable, with what it said so far."""
+
+    def __init__(self, proc: asyncio.subprocess.Process):
+        self.proc = proc
+        self.lines: asyncio.Queue[str] = asyncio.Queue()
+        self.log: list[str] = []
+        self.pumper = asyncio.create_task(pump(proc.stdout, self.lines))
+
+    async def wait_for(self, step: str, wanted: str, since: int | None = None) -> str:
+        return await wait_for(step, self.lines, wanted, self.log, since)
+
+    async def stop(self) -> None:
+        if self.proc.returncode is None:
+            self.proc.terminate()
+            await self.proc.wait()
+        self.pumper.cancel()
+
+
+async def start(executable: Path, cwd: Path, env: dict[str, str], step: str, answer: int) -> Running:
+    proc = await asyncio.create_subprocess_exec(
+        str(executable), cwd=cwd, env=env, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT,
+    )
+    running = Running(proc)
+    await running.wait_for(f"{step}: program start", "ready")
+    await running.wait_for(f"{step}: the program runs the last edit", f"answer {answer}")
+    return running
+
+
 async def main() -> None:
     bin_dir = Path(os.environ["RA_JIT_BIN"]).resolve().parent
     work = Path(tempfile.mkdtemp(prefix="ra-jit-live-e2e-"))
-    probe = None
+    started: list[Running] = []
     try:
         shutil.copytree(ROOT / "crates" / "ra-jit-live", work / "crates" / "ra-jit-live")
         shutil.copytree(HERE / "live", work / "harness" / "live", ignore=shutil.ignore_patterns("target"))
         project = work / "harness" / "live"
         source = project / "src" / "main.rs"
+        executable = work / "target" / "debug" / "liveprobe"
         env = dict(
             os.environ,
             PATH=f"{bin_dir}{os.pathsep}{os.environ['PATH']}",
@@ -124,50 +162,65 @@ async def main() -> None:
 
         edit(source, 1, 2)
         await build("edit before start", project, env)
-        probe = await asyncio.create_subprocess_exec(
-            str(work / "target" / "debug" / "liveprobe"), cwd=project, env=env,
-            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT,
-        )
-        lines: asyncio.Queue[str] = asyncio.Queue()
-        pumper = asyncio.create_task(pump(probe.stdout, lines))
-        log: list[str] = []
-        await wait_for("program start", lines, "ready", log)
-        await wait_for("program runs the edited source", lines, "answer 2", log)
+        probe = await start(executable, project, env, "first start", 2)
+        started.append(probe)
         print("program started with answer 2")
 
         # Edit after edit, as the demo's editor does: each has to arrive as a patch the running
         # program applies, none may link the program again.
-        for new in range(3, 3 + LIVE_EDITS):
+        last = 2 + LIVE_EDITS
+        for new in range(3, last + 1):
             edit(source, new - 1, new)
-            since = len(log)
+            since = len(probe.log)
             out = await build(f"edit {new - 2} while running", project, env)
             print("build:", out.strip().splitlines()[-1] if out.strip() else "")
-            applied = await wait_for(f"patch {new - 2} applied", lines, "outcome:", log)
+            applied = await probe.wait_for(f"patch {new - 2} applied", "outcome:")
             print(applied)
             if "applied" not in applied:
                 raise StepError(f"patch {new - 2} applied: the program did not take the patch: {applied}")
-            await wait_for(f"new code of edit {new - 2} runs", lines, f"answer {new}", log, since)
-        chain = " -> ".join(str(it) for it in range(1, 3 + LIVE_EDITS))
+            await probe.wait_for(f"new code of edit {new - 2} runs", f"answer {new}", since)
+        chain = " -> ".join(str(it) for it in range(1, last + 1))
         print(f"live edits: answer {chain} in a running program, each applied by ra-jit-live")
 
-        if os.environ.get("LIVE_PANIC") == "1":
-            text = source.read_text()
-            needle = "fn answer() -> u64 {\n    4\n}"
-            if needle not in text:
-                raise StepError(f"panic edit: `{needle}` is not in {source}")
-            source.write_text(text.replace(needle, 'fn answer() -> u64 {\n    panic!("live panic")\n}'))
-            await build("panic edit while running", project, env)
-            await wait_for("patched panic", lines, "panicked at", log)
-            await probe.wait()
-            if probe.returncode == 0:
-                raise StepError("patched panic: the process exited successfully")
-            print("live unwind: panic crossed patched answer frame")
+        # Another program, built and edited while this one runs, has its edits on disk.
+        shutil.copytree(HERE / "live", work / "harness" / "other", ignore=shutil.ignore_patterns("target"))
+        other = work / "harness" / "other"
+        other_env = dict(env, CARGO_TARGET_DIR=str(work / "target-other"))
+        await build("other: first build", other, other_env)
+        await serving(other, other_env)
+        edit(other / "src" / "main.rs", 1, 10)
+        await build("other: edit", other, other_env)
+        edit(other / "src" / "main.rs", 10, 11)
+        await build("other: second edit", other, other_env)
+        started.append(await start(work / "target-other" / "debug" / "liveprobe", other, other_env, "other", 11))
+        await started.pop().stop()
+        print("another program built while this one runs has its last edit")
 
-        pumper.cancel()
+        # The executable is for the next start, and has every edit the program took.
+        await probe.stop()
+        await build("restart: build", project, env)
+        probe = await start(executable, project, env, "restart", last)
+        started.append(probe)
+        print(f"program started again with answer {last}")
+
+        text = source.read_text()
+        needle = f"fn answer() -> u64 {{\n    {last}\n}}"
+        if needle not in text:
+            raise StepError(f"panic edit: `{needle}` is not in {source}")
+        source.write_text(text.replace(needle, 'fn answer() -> u64 {\n    panic!("live panic")\n}'))
+        await build("panic edit while running", project, env)
+        await probe.wait_for("patched panic", "panicked at")
+        try:
+            async with asyncio.timeout(APPLY_TIMEOUT):
+                await probe.proc.wait()
+        except TimeoutError:
+            raise StepError(f"patched panic: the program still runs {APPLY_TIMEOUT}s after it panicked") from None
+        if probe.proc.returncode == 0:
+            raise StepError("patched panic: the process exited successfully")
+        print("live unwind: the panic unwound through the patched answer")
     finally:
-        if probe is not None and probe.returncode is None:
-            probe.terminate()
-            await probe.wait()
+        for running in started:
+            await running.stop()
         shutil.rmtree(work, ignore_errors=True)
 
 

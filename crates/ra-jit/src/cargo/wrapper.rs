@@ -106,6 +106,9 @@ pub(crate) fn command(mut args: impl Iterator<Item = OsString>) -> anyhow::Resul
                 compiler.arg(format!("-Clink-arg={arg}"));
             }
         }
+        if unit.for_linux() {
+            compiler.arg(format!("-Clink-arg={}", super::plan::BUILD_ID));
+        }
     }
     let status =
         compiler.status().with_context(|| format!("running {}", Path::new(&rustc).display()))?;
@@ -320,14 +323,44 @@ impl Unit {
         std::thread::spawn(move || command.output())
     }
 
+    /// The target rustc is told to compile the crate for, when another than the host.
+    fn target(&self) -> Option<&str> {
+        let at = self.args.iter().position(|it| it == "--target");
+        let target = at.and_then(|at| self.args.get(at + 1)).map(String::as_str);
+        target.or_else(|| self.args.iter().find_map(|it| it.strip_prefix("--target=")))
+    }
+
     /// Whether rustc compiles the crate for an Apple platform, whose linker is told how much
     /// room to leave after the load commands.
     fn for_apple(&self) -> bool {
-        let at = self.args.iter().position(|it| it == "--target");
-        let target = at.and_then(|at| self.args.get(at + 1)).map(String::as_str);
-        let target =
-            target.or_else(|| self.args.iter().find_map(|it| it.strip_prefix("--target=")));
-        target.map_or(cfg!(target_vendor = "apple"), |it| it.contains("-apple-"))
+        self.target().map_or(cfg!(target_vendor = "apple"), |it| it.contains("-apple-"))
+    }
+
+    /// Whether rustc compiles the crate for Linux and links it through a C compiler, which is
+    /// told to have the linker give the program a build ID ([`super::plan::BUILD_ID`]). A
+    /// linker run itself takes no `-Wl,`.
+    fn for_linux(&self) -> bool {
+        let codegen = |name: &str| {
+            let flag = format!("{name}=");
+            let mut args = self.args.iter();
+            let mut found = None;
+            while let Some(arg) = args.next() {
+                let value = match arg.strip_prefix("-C") {
+                    Some("") => args.next().and_then(|it| it.strip_prefix(&flag)),
+                    Some(rest) => rest.strip_prefix(&flag),
+                    None => None,
+                };
+                found = value.or(found);
+            }
+            found
+        };
+        // `ld`, `ld.lld`, `x86_64-linux-gnu-ld`, `rust-lld`, `mold`.
+        let by_itself = codegen("linker").is_some_and(|it| {
+            let name = Path::new(it).file_stem().and_then(|it| it.to_str()).unwrap_or(it);
+            ["ld", "lld", "mold"].iter().any(|ld| name == *ld || name.ends_with(&format!("-{ld}")))
+        });
+        let by_itself = by_itself || codegen("linker-flavor").is_some_and(|it| !it.contains("cc"));
+        self.target().map_or(cfg!(target_os = "linux"), |it| it.contains("-linux-")) && !by_itself
     }
 
     /// Whether the crate is one the first build of the workspace leaves to the daemon.
@@ -374,6 +407,9 @@ impl Unit {
         }
         if program {
             stand_in.arg(format!("--print=link-args={}", line.display())).arg("-Csave-temps");
+            if self.for_linux() {
+                stand_in.arg(format!("-Clink-arg={}", super::plan::BUILD_ID));
+            }
         }
         let built = stand_in.stdin(Stdio::null()).output().context("running rustc")?;
         anyhow::ensure!(
