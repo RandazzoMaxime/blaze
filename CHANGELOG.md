@@ -155,7 +155,7 @@ All notable changes to ra-jit are written here. The format follows
 - A borrow checker, the crate `hir-ty-borrowck` in the rust-analyzer subtree, written to give
   rustc's verdict: Polonius alpha by default as nightly rustc does, NLL with
   `RA_JIT_BORROWCK=nll`. It gives rustc's errors on
-  1337 of 1579 of rustc's own borrow-check tests that it can run, and none on any of the 245
+  1363 of 1579 of rustc's own borrow-check tests that it can run, and none on any of the 245
   rustc accepts, scored by `harness/borrowck_ui.py`, and finds nothing in ripgrep, fd, bat,
   hyperfine, just, axum, nushell, delta, eza, tokei and starship. Its errors are rust-analyzer diagnostics and
   `ra-jit borrowck` prints them ([docs/borrowck.md](docs/borrowck.md)).
@@ -187,6 +187,14 @@ All notable changes to ra-jit are written here. The format follows
 
 ### Changed
 
+- With LLVM at `-O3` the bodies of the functions a function calls are built into it before
+  the default pipeline, and the branches on what they return threaded and the values
+  numbered again, as is done for what Cranelift builds in: a loop over `i + 1..n` inside one
+  over `0..n` counted with `phi + 1` before, which alias analysis can't see past. On
+  Graviton4 (Linux aarch64) nbody runs at 1.28 times cargo's release build instead of 1.97,
+  and words at 1.27 instead of 1.36; on Linux x86-64 (c8a.metal) words at 1.28 instead of
+  1.37. Whole-program builds take 1-4% longer. x86-64's nbody is still 1.27: LLVM 20 weighs
+  the five-body nest above its full-unroll threshold, and rustc's LLVM 23 below it.
 - On macOS a patch whose unwind frames are larger than the program's unwind table is spliced
   rather than linked in full: both of the unwinder's tables move into the room the link leaves
   after its load commands, the program's frames where the table has them and the patch's
@@ -324,6 +332,10 @@ All notable changes to ra-jit are written here. The format follows
   compiled, lane by lane or as one instruction. On a MacBook Pro (Apple M5 Max, macOS 27.0.1),
   median of three runs: ripgrep 1.15x, fd 1.01x, bat 1.16x and jsonrt 1.26x of release's
   time, every output the same as release's.
+- x86-64's `simd_select_bitmask` (AVX-512's masked blends), `simd_fma`, the AVX-512 two-table
+  permutes (`vpermi2var` of bytes, words, dwords and qwords), SSE4.1's `phminposuw` and
+  `vzeroupper` are compiled, lane by lane, which nushell's dependencies reach for
+  (corpus `simd_x86`).
 
 ### Fixed
 

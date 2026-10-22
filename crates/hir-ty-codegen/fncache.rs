@@ -42,7 +42,7 @@ use hir_ty::{
         CastKind, MirBody, MirSpan, Operand, OperandKind, ProjectionElem, Rvalue, StatementKind,
         TerminatorKind,
     },
-    next_solver::{DbInterner, GenericArgs, Region, Ty, TyKind},
+    next_solver::{DbInterner, GenericArgs, Ty, TyKind},
     traits::StoredParamEnvAndCrate,
 };
 
@@ -954,11 +954,7 @@ impl<'db> FunctionCx<'_, 'db> {
             return Err(CodegenError::Unsupported(format!("`{CODE}` of `{ty:?}`")));
         };
         let parent = GenericArgs::new_from_slice(args.as_closure().parent_args());
-        let parent =
-            rustc_type_ir::fold_regions(self.interner, parent, |region, _| match region.kind() {
-                rustc_type_ir::RegionKind::ReBound(..) => region,
-                _ => Region::new_erased(self.interner),
-            });
+        let parent = super::erase_regions(self.interner, parent);
         let closure = Instance {
             def: InstanceDef::Closure(id.0.as_id()),
             args: parent.store(),

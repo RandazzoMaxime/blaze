@@ -4554,6 +4554,30 @@ pub mod simd_x86 {
         (core::mem::transmute(p), core::mem::transmute(_mm256_alignr_epi8(v, p, 15)), core::mem::transmute(_mm256_shuffle_epi8(v, w)),
          _mm256_movemask_epi8(_mm256_cmpeq_epi8(v, w)), _mm256_extract_epi64(v, 2), core::mem::transmute(_mm256_and_si256(_mm256_srli_epi16(v, 4), _mm256_set1_epi8(0xF))))
     } }
+    #[target_feature(enable = "sse4.1")]
+    pub unsafe fn minpos(v: __m128i, w: __m128i) -> ([u16; 8], [u16; 8]) { unsafe { (core::mem::transmute(_mm_minpos_epu16(v)), core::mem::transmute(_mm_minpos_epu16(w))) } }
+    #[target_feature(enable = "fma")]
+    pub unsafe fn fused(a: [f32; 4], b: [f64; 2]) -> ([f32; 4], [f64; 2]) { unsafe {
+        let (x, y) = (_mm_loadu_ps(a.as_ptr()), _mm_loadu_pd(b.as_ptr()));
+        (core::mem::transmute(_mm_fmadd_ps(x, x, _mm_set1_ps(0.1))), core::mem::transmute(_mm_fmsub_pd(y, _mm_set1_pd(3.0), y)))
+    } }
+    #[target_feature(enable = "avx")]
+    pub unsafe fn upper_cleared(v: __m256i) -> [u8; 32] { unsafe { _mm256_zeroupper(); core::mem::transmute(v) } }
+    #[target_feature(enable = "avx512f")]
+    pub unsafe fn blend(a: __m512i, b: __m512i) -> ([i32; 16], [i64; 8]) { unsafe {
+        (core::mem::transmute(_mm512_mask_blend_epi32(0b1010_0110_0001_1101, a, b)), core::mem::transmute(_mm512_mask_blend_epi64(0b1100_0101, a, b)))
+    } }
+    #[target_feature(enable = "avx512bw")]
+    pub unsafe fn permute16(a: __m512i, b: __m512i) -> [u16; 32] { unsafe {
+        let indices = _mm512_set_epi16(63, 0, 31, 32, 1, 33, 62, 2, 5, 40, 7, 9, 44, 46, 48, 50, 3, 35, 63, 30, 29, 60, 61, 4, 8, 16, 24, 32, 40, 48, 56, 127);
+        core::mem::transmute(_mm512_permutex2var_epi16(a, indices, b))
+    } }
+    #[target_feature(enable = "avx512vbmi")]
+    pub unsafe fn permute8(a: __m512i, b: __m512i) -> [u8; 64] { unsafe {
+        let mut indices = [0u8; 64];
+        for (i, index) in indices.iter_mut().enumerate() { *index = (i as u8).wrapping_mul(37).wrapping_add(11); }
+        core::mem::transmute(_mm512_permutex2var_epi8(a, core::mem::transmute(indices), b))
+    } }
     pub fn run() -> String {
         let mut out = String::new();
         let v = unsafe { _mm_set_epi8(1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16) };
@@ -4563,6 +4587,17 @@ pub mod simd_x86 {
         if is_x86_feature_detected!("avx2") { unsafe {
             let a = _mm256_set_m128i(v, w); let b = _mm256_set_m128i(w, _mm_set1_epi8(9));
             out += &format!(" {:?}", wide(a, b)); } }
+        if is_x86_feature_detected!("sse4.1") { out += &format!(" {:?}", unsafe { minpos(v, _mm_set1_epi16(-3)) }); }
+        if is_x86_feature_detected!("fma") { out += &format!(" {:?}", unsafe { fused([1.5, -2.25, 1e-8, 3.0e30], [0.1, -7.5]) }); }
+        if is_x86_feature_detected!("avx") { out += &format!(" {:?}", unsafe { upper_cleared(_mm256_set_m128i(v, w)) }); }
+        let mut bytes = [0u8; 64];
+        for (i, byte) in bytes.iter_mut().enumerate() { *byte = (i as u8).wrapping_mul(7) ^ 0x5a; }
+        let a: __m512i = unsafe { core::mem::transmute(bytes) };
+        bytes.reverse();
+        let b: __m512i = unsafe { core::mem::transmute(bytes) };
+        if is_x86_feature_detected!("avx512f") { out += &format!(" {:?}", unsafe { blend(a, b) }); }
+        if is_x86_feature_detected!("avx512bw") { out += &format!(" {:?}", unsafe { permute16(a, b) }); }
+        if is_x86_feature_detected!("avx512vbmi") { out += &format!(" {:?}", unsafe { permute8(a, b) }); }
         out
     }
 }
@@ -7069,5 +7104,111 @@ pub mod const_fn_promoted {
 
     pub fn run() -> usize {
         MIGRATIONS.all.iter().filter(|it| it.down.is_some()).count() + MIGRATIONS.all[1].name.len()
+    }
+}
+
+/// A `match` used as a statement whose arms borrow a temporary: the temporary is dropped where
+/// its arm ends, and nothing reads the borrow after.
+pub mod statement_borrows_temporary {
+    pub fn run(flag: bool, value: &Option<String>) -> usize {
+        match value {
+            None => &String::new(),
+            Some(it) => it,
+        };
+        match (value, flag) {
+            (None, _) => &value.clone().unwrap_or_default(),
+            (&Some(ref it), _) => it,
+        };
+        value.as_ref().map_or(0, String::len)
+    }
+}
+
+/// Temporaries borrowed by a tuple struct's or variant's constructor arguments in a `let`
+/// live as long as the variable (Rust 1.89), not through a constructor held in a variable.
+pub mod constructor_extends_temporaries {
+    use std::cell::RefCell;
+
+    pub struct Loud<'a>(pub u8, pub &'a RefCell<Vec<u8>>);
+
+    impl Drop for Loud<'_> {
+        fn drop(&mut self) {
+            self.1.borrow_mut().push(self.0);
+        }
+    }
+
+    pub struct Pair<'a, 'b>(pub &'a Loud<'b>, pub u8);
+
+    pub fn run() -> Vec<u8> {
+        let log = RefCell::new(Vec::new());
+        {
+            let a = Some(&Loud(1, &log));
+            let b = Pair(&Loud(2, &log), 3);
+            let some = Some;
+            let c = some(Loud(4, &log).0);
+            log.borrow_mut().push(10 + a.map_or(0, |it| it.0) + b.0.0 + b.1 + c.unwrap_or(0));
+        }
+        log.into_inner()
+    }
+}
+
+/// What a signature's associated type is, related to the type it normalizes to: an impl's
+/// elided lifetimes in `Self::Target`, and an alias that writes one elided lifetime twice.
+pub mod associated_type_returns {
+    use std::marker::PhantomData;
+    use std::ops::{Deref, DerefMut};
+
+    pub struct Path<'a> {
+        pub parts: Vec<&'a str>,
+    }
+
+    pub struct Scope<'whole, 'part> {
+        inner: &'whole mut Path<'part>,
+    }
+
+    impl<'a> Deref for Scope<'_, 'a> {
+        type Target = Path<'a>;
+        fn deref(&self) -> &Self::Target {
+            self.inner
+        }
+    }
+
+    impl DerefMut for Scope<'_, '_> {
+        fn deref_mut(&mut self) -> &mut Self::Target {
+            self.inner
+        }
+    }
+
+    #[derive(Clone, Copy)]
+    pub struct Pair<'a, 'b: 'a> {
+        marker: PhantomData<&'a &'b ()>,
+        pub value: Option<&'b u32>,
+    }
+
+    pub type Same<'a> = Pair<'a, 'a>;
+
+    impl<'a, 'b> Deref for Pair<'a, 'b> {
+        type Target = Option<&'b u32>;
+        fn deref(&self) -> &Option<&'b u32> {
+            &self.value
+        }
+    }
+
+    pub fn value(pair: Same) -> Option<&u32> {
+        *pair
+    }
+
+    pub fn run(words: &[String]) -> usize {
+        let mut path = Path { parts: Vec::new() };
+        let mut scope = Scope { inner: &mut path };
+        for word in words {
+            scope.parts.push(word);
+        }
+        let mut total = 0;
+        for part in &mut scope.parts {
+            total += part.len();
+        }
+        let four = 4;
+        let pair: Same = Pair { marker: PhantomData, value: Some(&four) };
+        total + value(pair).copied().unwrap_or(0) as usize
     }
 }
