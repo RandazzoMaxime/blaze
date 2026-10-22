@@ -42,7 +42,7 @@ use triomphe::Arc;
 use crate::{
     CallableDefId, ComplexMemoryMap, InferBodyId, InferenceResult, MemoryMap, ParamEnvAndCrate,
     consteval::{self, ConstEvalError, try_const_usize},
-    db::{GeneralConstId, HirDatabase, InternedClosureId},
+    db::{AnonConstId, GeneralConstId, HirDatabase, InternedClosureId},
     infer::PointerCast,
     layout::{Layout, LayoutError, RustcEnumVariantIdx, RustcFieldIdx},
     method_resolution::{is_dyn_method, lookup_impl_const},
@@ -2204,6 +2204,11 @@ impl<'db> Evaluator<'db> {
                     id = GeneralConstId::ConstId(c);
                     subst = s;
                 }
+                if let GeneralConstId::AnonConstId(konst) = id
+                    && konst.is_inline_const(self.db)
+                {
+                    return self.inline_const_in_heap(konst, subst, locals);
+                }
                 let allocation = match id {
                     GeneralConstId::ConstId(const_id) => {
                         self.db.const_eval(const_id, subst, Some(self.param_env)).map_err(|e| {
@@ -2229,6 +2234,33 @@ impl<'db> Evaluator<'db> {
             }
             _ => not_supported!("evaluating unknown const"),
         }
+    }
+
+    /// A `const { .. }` block met while evaluating is run by this evaluation, as one lowered in
+    /// place was: the `TypeId`s it makes and compares are this evaluation's (`type_info::of`).
+    fn inline_const_in_heap(
+        &mut self,
+        konst: AnonConstId<'db>,
+        subst: GenericArgs<'db>,
+        locals: &Locals<'db>,
+    ) -> Result<'db, Interval> {
+        let body = super::optimize::interpreted_body(
+            self.db,
+            konst.into(),
+            subst.store(),
+            self.param_env.store(),
+        )
+        .map_err(|e| {
+            let name = GeneralConstId::AnonConstId(konst).name(self.db);
+            MirEvalError::ConstEvalError(name, Box::new(ConstEvalError::MirLowerError(e)))
+        })?;
+        let result = self.interpret_mir(body, iter::empty())?;
+        let ty = body.locals[return_slot()].ty.as_ref();
+        let align = self.size_align_of(ty, locals)?.map_or(1, |it| it.1);
+        let addr = self.heap_allocate(result.size, align)?;
+        let interval = Interval::new(addr, result.size);
+        interval.write_from_interval(self, result)?;
+        Ok(interval)
     }
 
     fn allocate_allocation_in_heap(

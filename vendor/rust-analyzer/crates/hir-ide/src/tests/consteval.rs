@@ -2664,6 +2664,33 @@ fn const_impl_assoc() {
 }
 
 #[test]
+fn inline_const_of_a_generic_function() {
+    check_number(
+        r#"
+//- minicore: sized
+struct Wide<T>(T);
+impl<T> Wide<T> {
+    const N: usize = 3;
+}
+fn sized<T>(extra: usize) -> usize {
+    let block = const {
+        let mut total = 0;
+        let mut i = 0;
+        while i < Wide::<T>::N {
+            total += i + 1;
+            i += 1;
+        }
+        total
+    };
+    block * extra
+}
+const GOAL: usize = sized::<u8>(2) + sized::<u32>(10);
+"#,
+        12 + 60,
+    );
+}
+
+#[test]
 fn adt_const_params() {
     check_number(
         r#"

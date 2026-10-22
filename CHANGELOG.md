@@ -407,6 +407,15 @@ All notable changes to ra-jit are written here. The format follows
 - fd built with inlining across crates crashed the LLVM backend on Linux and macOS: an address
   rebuilt as a `getelementptr` may be a sum that is a constant (a global's address plus an
   offset), which is in no block, and LLVM read freed memory when the builder was put before it.
+- A `const { .. }` block in a function is a constant evaluated for each instance of the
+  function, as rustc's inline consts are, and no longer code the function runs: what only
+  compile time may run in one (`#[rustc_comptime]`, `type_info`'s `field`, bun's
+  `MultiArrayList::check`) was refused with "intrinsic `type_id_field_representing_type`",
+  and every function reaching it with it (591 of bun's 680 refusals on Linux). A block met
+  while evaluating a constant runs in that evaluation, so its `TypeId`s compare. `n += i` on an
+  integer variable whose operator was not looked up while its type was unknown is lowered as
+  the built-in it is, where it was "adjustment of binary op was missing" (`bun_repros.py`
+  `type_info`).
 - A constant of a struct, enum, tuple or array type given as a const generic argument
   (`adt_const_params`: `check::<{ Requirement::Within { low: 3, high: 9 } }>`,
   `filtered::<{ Filter { mask: 0xf0, strict: true } }>`) compiles and evaluates, and
