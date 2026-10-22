@@ -4,7 +4,7 @@ ra-jit has its own borrow checker, the crate `hir-ty-borrowck` in the rust-analy
 (`vendor/rust-analyzer/crates/hir-ty-borrowck`, next to `hir-ty`). It checks the MIR rust-analyzer
 lowers, the same MIR the code generator compiles, and it is meant to give exactly rustc's
 verdict: the same errors, on the same lines, and none where rustc gives none. It gives
-rustc's verdict on 86% of rustc's own borrow-check tests today, and on every one rustc
+rustc's verdict on 87% of rustc's own borrow-check tests today, and on every one rustc
 accepts; how they are scored and what is left is below.
 
 It runs as part of rust-analyzer's diagnostics, so the daemon computes it for every edited
@@ -74,6 +74,14 @@ All of these are rustc's, written from `compiler/rustc_borrowck` at the pinned n
   `<&'a mut Vec<T> as IntoIterator>::IntoIter` is. A parameter that elides one lifetime has
   it once however often its type does (`s: S2` with `type S2<'a> = S<'a, 'a>`), and
   `Self::Target` in an impl for `S<'_, '_>` has the impl's lifetimes.
+- Raw pointers: a reference coerced to one relates what it points to, raw and function
+  pointers compare when they have a common supertype, an array's pointer cast to its
+  element's relates the element, and a cast between pointers to trait objects keeps the
+  principal trait's arguments and may only shorten the object's lifetime. A static is read
+  through a reference to its type with every lifetime `'static`, mutable for a `static mut`
+  (rustc's `*mut T`), so `BAR = &n` and `FOO(&n)` are E0597. `Fn::call` through a `dyn Fn`
+  matches its tupled signature to the arguments one by one. E0521 in a function needs the
+  escaping lifetime in a parameter's type, else it is "lifetime may not live long enough".
 - Well-formedness in bodies: a called function's signature as written, before its associated
   types are normalized, and its generic arguments are well-formed at the call (`&'a &'b ()`
   that `'b: 'a`); so is a function item's signature where it becomes a function pointer, with
@@ -184,8 +192,8 @@ With no borrow checker, the 245 units rustc accepts would pass. Now:
 
 | Mode | In scope | Pass | rustc accepts, ra-jit too | rustc rejects, same errors |
 |---|---|---|---|---|
-| Polonius | 1579 | 1363 (86.3%) | 245 of 245 | 1118 of 1334 |
-| NLL | 1577 | 1358 (86.1%) | 226 of 226 | 1132 of 1351 |
+| Polonius | 1579 | 1373 (87.0%) | 245 of 245 | 1128 of 1334 |
+| NLL | 1577 | 1368 (86.7%) | 226 of 226 | 1142 of 1351 |
 
 463 units are out of scope; 344 of them need a nightly feature. CI runs the scoring on Linux
 and fails below a floor a few units under the count there.
@@ -198,10 +206,10 @@ just, axum, nushell, delta, eza, tokei and starship it finds nothing, nor on the
 ## What is left
 
 Every failing unit is one where rustc gives an error ra-jit does not, or gives it on another
-line or with another code. By what is wrong, most first: 35 "lifetime may not live long
-enough" not reported, 21 E0597 and 20 E0310 not reported, 15 with only an error rustc does
-not give, 12 E0309 not reported, 10 "lifetime may not live long enough" on another line and
-10 E0521 not reported, then a long tail. The causes, grouped:
+line or with another code. By what is wrong, most first: 29 "lifetime may not live long
+enough", 21 E0310 and 19 E0597 not reported, 15 with only an error rustc does not give, 11
+E0309 not reported, 10 "lifetime may not live long enough" on another line and 10 E0521 not
+reported, then a long tail. The causes, grouped:
 
 - **Higher-ranked regions and placeholders** (`for<'a>` bounds, closures with higher-ranked
   signatures): rustc checks them with placeholders in universes; ra-jit does not yet, and
@@ -249,7 +257,9 @@ changes to rust-analyzer were needed, each made as rustc does it:
   reborrow was skipped as a no-op; a closure then captured the reference variable rather
   than what it points to.
 - A `let`'s fake read of its value is at the pattern (rustc's `FakeReadCause::ForLet`), not
-  the enclosing block, which is where the borrow checker finds the place `let _: T` ascribes.
+  the enclosing block, which is where the borrow checker finds the place `let _: T` ascribes;
+  `let x = e` has it too, before `e`'s temporaries are dropped, so what `x` borrows from a
+  `match` arm's bindings must outlive them.
 - A `let`'s temporaries borrowed in a tuple struct's or variant's constructor arguments
   (`let x = Some(&temp());`, `Self(&temp())`) live as long as the variable, as in rustc since
   1.89; through a constructor held in a variable they are still the statement's.

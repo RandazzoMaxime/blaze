@@ -7213,6 +7213,57 @@ pub mod associated_type_returns {
     }
 }
 
+/// Raw pointers related as rustc relates them: coerced from references, compared through a
+/// common supertype, an array's pointer cast to its element's, and a trait object's lifetime
+/// shortened.
+pub mod pointer_relations {
+    use std::fmt::Debug;
+
+    pub fn same<'a, 'b>(x: *const &'a i32, y: *const &'b i32) -> bool {
+        x == y
+    }
+
+    pub fn first<'a>(items: &[&'a i32; 3]) -> *const &'a i32 {
+        items as *const &i32
+    }
+
+    pub fn shorten<'a, 'b>(x: *const (dyn Debug + 'a)) -> *const (dyn Debug + 'b)
+    where
+        'a: 'b,
+    {
+        x as _
+    }
+
+    pub fn run(value: i32) -> String {
+        let x = &value;
+        let items = [x, x, x];
+        let pointer = first(&items);
+        let shown: &dyn Debug = &value;
+        let shortened = shorten(shown);
+        // SAFETY: both point into `items` and `value`, alive for the whole function.
+        let (first, shown) = unsafe { (**pointer, format!("{:?}", &*shortened)) };
+        format!("{} {} {}", same(pointer, pointer), first, shown)
+    }
+}
+
+/// Statics read and written with what lives as long as they do, and a `'static` function
+/// object called through a static.
+pub mod static_places {
+    static BASE: u8 = 40;
+    static mut LATEST: &u8 = &BASE;
+    static ADD: &(dyn Fn(&'static u8) -> u8 + Sync) = &|it| *it + 2;
+
+    pub fn run() -> u8 {
+        static TWO: u8 = 2;
+        // SAFETY: only this function touches `LATEST`, on one thread.
+        let latest = unsafe {
+            LATEST = &TWO;
+            *LATEST
+        };
+        ADD(&BASE) + latest
+    }
+}
+
 /// What bevy's `#[derive(QueryData)]` writes for a read-only query: a `release_state` under
 /// `where` clauses on the `ReadOnly` of each field's type, whose locals are of
 /// `<<F as QueryData>::ReadOnly as QueryData>::Item<'w, 'static>`. The solver can't decide
