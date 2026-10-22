@@ -37,6 +37,51 @@ const IDLE: Duration = Duration::from_secs(1800);
 /// How often the daemon looks for what is idle.
 const TICK: Duration = Duration::from_secs(1);
 
+/// The share of the machine's memory the workers may hold when `RA_JIT_MEMORY_MAX` does not
+/// say: one part in this many.
+const MEMORY_SHARE: u64 = 2;
+
+/// The most the workers may hold together, from `RA_JIT_MEMORY_MAX`: a size, or `off` for no
+/// limit. Half of the machine's memory when it does not say, and no limit where the system
+/// does not tell how much that is.
+fn memory_max() -> Result<Option<u64>, String> {
+    match std::env::var("RA_JIT_MEMORY_MAX") {
+        Err(_) => Ok(crate::memory::of_the_machine().map(|it| it / MEMORY_SHARE)),
+        Ok(text) if text == "off" => Ok(None),
+        Ok(text) => ra_jit_store::parse_size(&text)
+            .map(Some)
+            .ok_or_else(|| format!("RA_JIT_MEMORY_MAX=`{text}` is neither a size nor `off`")),
+    }
+}
+
+/// What a worker holds and how much it is in use.
+struct Held {
+    bytes: u64,
+    asked: Instant,
+    /// Answering a request or loading a checkout.
+    busy: bool,
+}
+
+/// The workers to stop for the rest to hold no more than `most`: the ones asked longest ago
+/// first. One that is busy is left, and so is the one asked last, which would only be
+/// started again.
+fn over(holding: &[(String, Held)], most: u64) -> Vec<String> {
+    let mut all: u64 = holding.iter().map(|it| it.1.bytes).sum();
+    let last = holding.iter().map(|it| it.1.asked).max();
+    let mut idle: Vec<&(String, Held)> =
+        holding.iter().filter(|it| !it.1.busy && Some(it.1.asked) != last).collect();
+    idle.sort_by_key(|it| it.1.asked);
+    let mut stopped = Vec::new();
+    for (id, held) in idle {
+        if all <= most {
+            break;
+        }
+        all -= held.bytes;
+        stopped.push(id.clone());
+    }
+    stopped
+}
+
 /// How often a worker that is loading is looked at.
 const POLL: Duration = Duration::from_millis(20);
 
@@ -137,6 +182,9 @@ pub(crate) struct Status {
     pub(crate) pid: u32,
     pub(crate) version: String,
     pub(crate) idle_secs: Option<u64>,
+    /// The most the workers may hold together, in bytes.
+    #[serde(default)]
+    pub(crate) memory_max: Option<u64>,
     pub(crate) workers: Vec<WorkerStatus>,
 }
 
@@ -145,6 +193,9 @@ pub(crate) struct WorkerStatus {
     pub(crate) pid: u32,
     pub(crate) project: PathBuf,
     pub(crate) log: PathBuf,
+    /// The bytes it holds, where the system tells.
+    #[serde(default)]
+    pub(crate) bytes: Option<u64>,
     /// Each checkout the worker holds and how warm it is.
     pub(crate) checkouts: Vec<(PathBuf, String)>,
 }
@@ -295,8 +346,27 @@ struct Worker {
     child: Mutex<Child>,
     checkouts: Mutex<FxHashMap<String, Loaded>>,
     asked: Mutex<Instant>,
+    /// The requests it is answering now.
+    answering: AtomicUsize,
     /// Whether the daemon's log says it ended: it says so once.
     noted: AtomicBool,
+}
+
+/// Counts a request among those a worker is answering for as long as it lives, also when the
+/// thread that asks unwinds.
+struct Answering<'a>(&'a AtomicUsize);
+
+impl<'a> Answering<'a> {
+    fn new(count: &'a AtomicUsize) -> Answering<'a> {
+        count.fetch_add(1, Relaxed);
+        Answering(count)
+    }
+}
+
+impl Drop for Answering<'_> {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Relaxed);
+    }
 }
 
 impl Worker {
@@ -373,6 +443,7 @@ impl Worker {
             child: Mutex::new(child),
             checkouts: Mutex::new(FxHashMap::from_iter([(checkout.key.clone(), loading)])),
             asked: Mutex::new(Instant::now()),
+            answering: AtomicUsize::new(0),
             noted: AtomicBool::new(false),
         })
     }
@@ -480,6 +551,7 @@ impl Worker {
     /// Asks the process for `plan` of `checkout`. The outer error is the worker's failing,
     /// the inner one its answer that it does not build this.
     fn ask(&self, checkout: &Checkout, plan: &Plan) -> anyhow::Result<Result<String, NotBuilt>> {
+        let _answering = Answering::new(&self.answering);
         let failed = || match self.ended_within(EXITING) {
             Some(how) => {
                 self.note_end();
@@ -549,12 +621,23 @@ impl Worker {
         lock(&self.checkouts).values().any(|it| matches!(it.warmth, Warmth::Loading(_)))
     }
 
+    /// What it holds now, and how much it is in use.
+    fn held(&self) -> Held {
+        Held {
+            bytes: crate::memory::held_by(lock(&self.child).id()).unwrap_or(0),
+            asked: *lock(&self.asked),
+            busy: self.answering.load(Relaxed) != 0 || self.loads(),
+        }
+    }
+
     fn status(&self) -> WorkerStatus {
         let checkouts = lock(&self.checkouts);
+        let pid = lock(&self.child).id();
         WorkerStatus {
-            pid: lock(&self.child).id(),
+            pid,
             project: self.project.clone(),
             log: self.log.clone(),
+            bytes: crate::memory::held_by(pid),
             checkouts: checkouts
                 .values()
                 .map(|it| (it.root.clone(), it.warmth.describe()))
@@ -644,6 +727,8 @@ struct Daemon {
     version: String,
     home: PathBuf,
     idle: Option<Duration>,
+    /// The most the workers may hold together, in bytes.
+    memory_max: Option<u64>,
     workers: Mutex<FxHashMap<String, Arc<Worker>>>,
     /// The worker the next workspace is loaded by. `RA_JIT_SPARE=0` has none.
     spare: Mutex<Option<Spare>>,
@@ -714,6 +799,7 @@ pub(crate) fn version() -> String {
 pub(crate) fn serve() -> anyhow::Result<()> {
     let home = home()?;
     private_dir(&home).with_context(|| format!("the daemon's directory {}", home.display()))?;
+    let memory_max = memory_max().map_err(anyhow::Error::msg)?;
     let socket = socket_in(&home);
     let served = match Served::bind(&socket) {
         Ok(served) => served,
@@ -733,6 +819,7 @@ pub(crate) fn serve() -> anyhow::Result<()> {
         version: version(),
         home,
         idle,
+        memory_max,
         workers: Mutex::default(),
         spare: Mutex::default(),
         ahead: Mutex::default(),
@@ -859,6 +946,7 @@ impl Daemon {
                 pid: std::process::id(),
                 version: self.version.clone(),
                 idle_secs: self.idle.map(|it| it.as_secs()),
+                memory_max: self.memory_max,
                 workers: lock(&self.workers).values().map(|it| it.status()).collect(),
             }),
             Request::Stop => Reply::Stopping,
@@ -971,8 +1059,8 @@ impl Daemon {
         Ok(())
     }
 
-    /// Stops the workers nobody has asked for the idle time, and the daemon when nobody has
-    /// asked it.
+    /// Stops the workers asked longest ago while together they hold more than they may, and
+    /// those nobody has asked for the idle time; and the daemon when nobody has asked it.
     fn reap(&self) {
         loop {
             std::thread::sleep(self.idle.map_or(TICK, |idle| idle.min(TICK)));
@@ -986,10 +1074,14 @@ impl Daemon {
             if !loading && lock(&self.ahead).is_empty() {
                 self.spare();
             }
-            let Some(idle) = self.idle else { continue };
             // A program that takes edits is being edited, however long since the last save:
             // a worker started again would link it again on the next one.
-            if crate::live::any_running() {
+            let live = crate::live::any_running();
+            if let Some(most) = self.memory_max.filter(|_| !live) {
+                self.fit(most);
+            }
+            let Some(idle) = self.idle else { continue };
+            if live {
                 *lock(&self.asked) = Instant::now();
                 for worker in lock(&self.workers).values() {
                     *lock(&worker.asked) = Instant::now();
@@ -1013,6 +1105,27 @@ impl Daemon {
                 }
                 keep
             });
+        }
+    }
+
+    /// Stops the workers asked longest ago until the rest hold no more than `most` bytes. The
+    /// next build of a workspace whose worker was stopped is cargo's while a worker loads it
+    /// again.
+    fn fit(&self, most: u64) {
+        let mut workers = lock(&self.workers);
+        let holding: Vec<(String, Held)> =
+            workers.iter().map(|(id, worker)| (id.clone(), worker.held())).collect();
+        let all: u64 = holding.iter().map(|it| it.1.bytes).sum();
+        for id in over(&holding, most) {
+            let Some(worker) = workers.remove(&id) else { continue };
+            eprintln!(
+                "worker {id} of {} stopped: the workers hold {} MB, over the {} MB of \
+                 RA_JIT_MEMORY_MAX, and it was asked longest ago",
+                worker.project.display(),
+                all >> 20,
+                most >> 20
+            );
+            worker.stop();
         }
     }
 
@@ -1132,4 +1245,30 @@ fn log_tail(log: &Path) -> String {
 /// statements here.
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_workers_asked_longest_ago_are_stopped_for_the_rest_to_fit() {
+        let now = Instant::now();
+        let held = |bytes: u64, ago: u64, busy: bool| Held {
+            bytes,
+            asked: now - Duration::from_secs(ago),
+            busy,
+        };
+        let holding = vec![
+            ("oldest".to_owned(), held(4, 30, false)),
+            ("old".to_owned(), held(4, 20, false)),
+            ("answering".to_owned(), held(4, 40, true)),
+            ("last".to_owned(), held(4, 0, false)),
+        ];
+        assert_eq!(over(&holding, 16), Vec::<String>::new());
+        assert_eq!(over(&holding, 12), ["oldest"]);
+        assert_eq!(over(&holding, 8), ["oldest", "old"]);
+        // The busy one and the one asked last stay, whatever they hold.
+        assert_eq!(over(&holding, 0), ["oldest", "old"]);
+    }
 }

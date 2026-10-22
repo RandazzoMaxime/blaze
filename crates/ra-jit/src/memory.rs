@@ -18,24 +18,58 @@ pub(crate) fn report_dir() -> Option<PathBuf> {
     std::env::var_os("RA_JIT_MEMORY").map(PathBuf::from)
 }
 
-/// Megabytes of memory the process has resident.
-#[cfg(not(target_os = "macos"))]
+/// Megabytes of memory the process holds, as [`held_by`] counts it.
 pub(crate) fn resident() -> Option<u64> {
-    let status = std::fs::read_to_string("/proc/self/status").ok()?;
-    let line = status.lines().find_map(|it| it.strip_prefix("VmRSS:"))?;
-    Some(line.trim().trim_end_matches("kB").trim().parse::<u64>().ok()? / 1024)
+    Some(held_by(std::process::id())? >> 20)
 }
 
-/// Megabytes of memory the process owns: its physical footprint, which is what Activity
-/// Monitor shows, and which still counts pages macOS has compressed.
+/// Bytes of memory a process holds: its resident set, where `/proc` says it.
+#[cfg(not(target_os = "macos"))]
+pub(crate) fn held_by(pid: u32) -> Option<u64> {
+    kilobytes(&std::fs::read_to_string(format!("/proc/{pid}/status")).ok()?, "VmRSS:")
+}
+
+/// Bytes of memory a process of this user owns: its physical footprint, which is what
+/// Activity Monitor shows, and which still counts pages macOS has compressed.
 #[cfg(target_os = "macos")]
-pub(crate) fn resident() -> Option<u64> {
+pub(crate) fn held_by(pid: u32) -> Option<u64> {
     let mut info = std::mem::MaybeUninit::<libc::rusage_info_v4>::zeroed();
+    let pid = libc::c_int::try_from(pid).ok()?;
     // SAFETY: `info` has room for the `RUSAGE_INFO_V4` record the call writes.
-    let pid = std::process::id() as libc::c_int;
     let ok = unsafe { libc::proc_pid_rusage(pid, libc::RUSAGE_INFO_V4, info.as_mut_ptr().cast()) };
     // SAFETY: the call wrote the record when it returned 0, and zeroes are a record too.
-    (ok == 0).then(|| unsafe { info.assume_init() }.ri_phys_footprint >> 20)
+    (ok == 0).then(|| unsafe { info.assume_init() }.ri_phys_footprint)
+}
+
+/// Bytes of memory the machine has, where the system says.
+#[cfg(not(target_os = "macos"))]
+pub(crate) fn of_the_machine() -> Option<u64> {
+    kilobytes(&std::fs::read_to_string("/proc/meminfo").ok()?, "MemTotal:")
+}
+
+/// Bytes of memory the machine has.
+#[cfg(target_os = "macos")]
+pub(crate) fn of_the_machine() -> Option<u64> {
+    let mut bytes: u64 = 0;
+    let mut size = size_of::<u64>();
+    // SAFETY: `hw.memsize` is a 64-bit integer, and `bytes` and `size` say where it goes.
+    let ok = unsafe {
+        libc::sysctlbyname(
+            c"hw.memsize".as_ptr(),
+            (&raw mut bytes).cast(),
+            &raw mut size,
+            std::ptr::null_mut(),
+            0,
+        )
+    };
+    (ok == 0 && bytes != 0).then_some(bytes)
+}
+
+/// The bytes a line of `/proc` such as `VmRSS:   1234 kB` says.
+#[cfg_attr(target_os = "macos", allow(dead_code))]
+fn kilobytes(text: &str, name: &str) -> Option<u64> {
+    let line = text.lines().find_map(|it| it.strip_prefix(name))?;
+    line.trim().trim_end_matches("kB").trim().parse::<u64>().ok()?.checked_mul(1024)
 }
 
 /// Bytes allocated and not freed, when the allocator counts them.
@@ -127,4 +161,26 @@ fn write_heap_profile(path: &Path) -> anyhow::Result<()> {
 #[cfg(not(feature = "heap-profile"))]
 fn write_heap_profile(_: &Path) -> anyhow::Result<()> {
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_line_of_proc_is_read_as_bytes() {
+        let status = "Name:\tra-jit\nVmRSS:\t    2048 kB\nThreads:\t4\n";
+        assert_eq!(kilobytes(status, "VmRSS:"), Some(2048 << 10));
+        assert_eq!(kilobytes(status, "VmSwap:"), None);
+        assert_eq!(kilobytes("VmRSS: many kB\n", "VmRSS:"), None);
+    }
+
+    #[test]
+    fn this_process_and_the_machine_hold_some() {
+        let held = held_by(std::process::id());
+        let machine = of_the_machine();
+        if cfg!(any(target_os = "linux", target_os = "macos")) {
+            assert!(held.is_some_and(|it| it > 0) && machine.is_some_and(|it| it > held.unwrap()));
+        }
+    }
 }

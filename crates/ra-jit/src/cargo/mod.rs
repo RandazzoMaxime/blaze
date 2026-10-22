@@ -484,15 +484,20 @@ fn status() -> anyhow::Result<i32> {
         Some(Reply::Status(daemon)) => {
             let idle =
                 daemon.idle_secs.map_or("never".to_owned(), |it| format!("after {it}s idle"));
+            let most = daemon.memory_max.map_or("no limit".to_owned(), |it| {
+                format!("workers hold at most {} MB", it >> 20)
+            });
             let _ = writeln!(
                 said,
-                "daemon: pid {}, version {}, exits {idle}",
+                "daemon: pid {}, version {}, exits {idle}, {most}",
                 daemon.pid, daemon.version
             );
             for worker in daemon.workers {
+                let holds =
+                    worker.bytes.map_or(String::new(), |it| format!("holds {} MB, ", it >> 20));
                 let _ = writeln!(
                     said,
-                    "  worker: pid {}, {}, log {}",
+                    "  worker: pid {}, {}, {holds}log {}",
                     worker.pid,
                     worker.project.display(),
                     worker.log.display()
