@@ -738,6 +738,7 @@ impl CodegenUnit {
             let mut next = 0;
             if let Some(main) = start {
                 cg.define_start(main)?;
+                cg.define_allocator_shim(main)?;
             }
             for &id in roots.kept {
                 cg.static_data(id)?;
@@ -4402,6 +4403,63 @@ impl<'a, 'db> ObjectCodegen<'a, 'db> {
         Ok(())
     }
 
+    /// What rustc's allocator shim puts in a program: the entries of the global allocator
+    /// that `alloc` calls by name, here going to std's defaults. Only when rustc built nothing
+    /// of the program's `alloc`; rustc's link of one it built has rustc's shim.
+    fn define_allocator_shim(&mut self, main: FunctionId) -> Result<()> {
+        let db = self.db;
+        let Some(boxed) = DbInterner::new_with(db, main.krate(db)).lang_items().OwnedBox else {
+            return Ok(());
+        };
+        if !self.own_statics.unbuilt.contains(&boxed.krate(db)) {
+            return Ok(());
+        }
+        let program = linked_crates(db, self.own_statics.crates.iter().copied());
+        if program.into_iter().any(|it| declares_global_allocator(db, it)) {
+            unsupported!("a `#[global_allocator]`, without rustc's shim for it");
+        }
+        let entries = [
+            ("__rust_alloc", "__rdl_alloc", 2, true),
+            ("__rust_dealloc", "__rdl_dealloc", 3, false),
+            ("__rust_realloc", "__rdl_realloc", 4, true),
+            ("__rust_alloc_zeroed", "__rdl_alloc_zeroed", 2, true),
+            ("__rust_alloc_error_handler", "__rdl_alloc_error_handler", 2, false),
+            ("__rust_no_alloc_shim_is_unstable_v2", "", 0, false),
+        ];
+        for (name, default, params, returns) in entries {
+            let mut sig = self.module.make_signature();
+            sig.params.extend((0..params).map(|_| AbiParam::new(ptr())));
+            sig.returns.extend(returns.then(|| AbiParam::new(ptr())));
+            let id = self
+                .module
+                .declare_function(name, Linkage::Export, &sig)
+                .map_err(|e| CodegenError::Backend(e.to_string()))?;
+            let target = (!default.is_empty()).then(|| self.import(default, &sig)).transpose()?;
+            let mut ctx = self.module.make_context();
+            ctx.func.signature = sig;
+            let mut builder_ctx = std::mem::take(&mut self.builder_ctx);
+            let mut builder = FunctionBuilder::new(&mut ctx.func, &mut builder_ctx);
+            let block = builder.create_block();
+            builder.append_block_params_for_function_params(block);
+            builder.switch_to_block(block);
+            let args = builder.block_params(block).to_vec();
+            let results = match target {
+                Some(target) => {
+                    let callee = self.module.declare_func_in_func(target, builder.func);
+                    let call = builder.ins().call(callee, &args);
+                    builder.inst_results(call).to_vec()
+                }
+                None => Vec::new(),
+            };
+            builder.ins().return_(&results);
+            builder.seal_all_blocks();
+            builder.finalize(self.module.isa().frontend_config());
+            self.builder_ctx = builder_ctx;
+            self.define_shim(id, &mut ctx)?;
+        }
+        Ok(())
+    }
+
     /// Puts the instances requested by calls in the object. Returns the ones that failed.
     fn define_instances(&mut self) -> Vec<(Instance, Rejected)> {
         let mut failed = Vec::new();
@@ -5344,54 +5402,6 @@ impl<'a, 'db> ObjectCodegen<'a, 'db> {
     }
 
     /// Compiles a function built here, whose IR names what it uses by the ids of the module.
-    /// What an allocator entry point `alloc` declares links to when rustc built none of it,
-    /// so wrote none of the functions that make them: std's defaults, and nothing for the
-    /// one that only tells rustc the program links them.
-    fn allocator_entry(&mut self, func: FunctionId, sig: &Signature) -> Result<Option<FuncId>> {
-        let Some(name) = link_name(self.db, func) else { return Ok(None) };
-        let default = match name.as_str() {
-            "__rust_alloc"
-            | "__rust_dealloc"
-            | "__rust_realloc"
-            | "__rust_alloc_zeroed"
-            | "__rust_alloc_error_handler" => name.replacen("__rust_", "__rdl_", 1),
-            "__rust_no_alloc_shim_is_unstable_v2" => return self.nothing(&name, sig).map(Some),
-            _ => return Ok(None),
-        };
-        let program = linked_crates(self.db, self.own_statics.crates.iter().copied());
-        if program.into_iter().any(|it| declares_global_allocator(self.db, it)) {
-            unsupported!("`{name}` of a `#[global_allocator]`, without rustc's shim for it");
-        }
-        self.import(&default, sig).map(Some)
-    }
-
-    /// A function of `sig` that does nothing, under `name`.
-    fn nothing(&mut self, name: &str, sig: &Signature) -> Result<FuncId> {
-        let symbol = format!("ra-jit::{name}");
-        if let Some(cranelift_module::FuncOrDataId::Func(id)) =
-            self.module.declarations().get_name(&symbol)
-        {
-            return Ok(id);
-        }
-        let id = self
-            .module
-            .declare_function(&symbol, Linkage::Local, sig)
-            .map_err(|e| CodegenError::Backend(e.to_string()))?;
-        let mut ctx = self.module.make_context();
-        ctx.func.signature = sig.clone();
-        let mut builder_ctx = std::mem::take(&mut self.builder_ctx);
-        let mut builder = FunctionBuilder::new(&mut ctx.func, &mut builder_ctx);
-        let block = builder.create_block();
-        builder.append_block_params_for_function_params(block);
-        builder.switch_to_block(block);
-        builder.ins().return_(&[]);
-        builder.seal_all_blocks();
-        builder.finalize(self.module.isa().frontend_config());
-        self.builder_ctx = builder_ctx;
-        self.define_shim(id, &mut ctx)?;
-        Ok(id)
-    }
-
     fn define_shim(&mut self, id: FuncId, ctx: &mut cranelift_codegen::Context) -> Result<()> {
         let mut code = emit(ctx)?;
         for reloc in &mut code.relocs {
@@ -5834,12 +5844,6 @@ impl<'a, 'db> ObjectCodegen<'a, 'db> {
             // under names in a crate of their own.
             if let Some(symbol) = self.symbols.path(&format!("__rustc::{name}")) {
                 return self.import(&symbol, sig);
-            }
-            if let InstanceDef::Fn(func) = def
-                && self.own_statics.unbuilt.contains(&func.krate(self.db))
-                && let Some(id) = self.allocator_entry(func, sig)?
-            {
-                return Ok(id);
             }
             // FIXME: this passes arguments the way Rust functions take them, which is only
             // what a foreign function expects for scalars and pointers.
