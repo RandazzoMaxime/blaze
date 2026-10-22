@@ -342,8 +342,26 @@ All notable changes to ra-jit are written here. The format follows
   permutes (`vpermi2var` of bytes, words, dwords and qwords), SSE4.1's `phminposuw` and
   `vzeroupper` are compiled, lane by lane, which nushell's dependencies reach for
   (corpus `simd_x86`).
+- AArch64's SHA-1, SHA-256, SHA-512 and AES instructions (`vsha256hq_u32`, `vsha512hq_u64`,
+  `vaeseq_u8` and the rest, as sha2 calls them) are compiled, each as a function of the one
+  instruction, and NEON's sums of every lane made wider (`vaddlvq_u8`) and doubled products
+  made wider (`vqdmull_s16`) lane by lane. `simd_reduce_add_ordered` and `_unordered` (and
+  `mul`) are compiled, which `vaddv_u8` and AVX-512's `_mm512_reduce_add_epi32` are, and
+  `simd_masked_load` and `simd_masked_store` (AVX-512's `_mm512_mask_loadu_epi8`, in fff_search
+  under nushell): a lane the mask leaves out is not read or written (corpus `crypto_lanes`).
 
 ### Fixed
+
+- A constant that read a static holding `&dyn` of another static failed to evaluate
+  (`InvalidVTableId`): the vtable was the id the static's own evaluation gave the type, which
+  meant nothing to the reading evaluation, and a static the reference pointed into was not
+  looked through for it. rustls's `ALL_CIPHER_SUITES` is one, which kept nushell from linking
+  (corpus `dyn_static_suites`).
+- A tuple struct with fields seen in other modules than the struct, both `pub(in path)` (ring's
+  `aes::Counter`, `pub(in super::super)` with a `pub(super)` field), had no constructor:
+  the least of those visibilities was folded from none, which is none. Its construction and
+  patterns were refused, and with them ring's AES-GCM under nushell (corpus
+  `narrow_constructors`).
 
 - On Linux AArch64, an `asm!` of an instruction that the function's `#[target_feature]`
   enables and the target's baseline lacks (zlib-rs's `crc32w`, in bat) was refused by the

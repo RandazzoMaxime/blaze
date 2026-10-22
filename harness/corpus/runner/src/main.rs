@@ -730,6 +730,8 @@ fn main() {
         cases::byte_compares::order(*b"abd", *b"abc", b"za", b"zy"),
         cases::byte_compares::order(*b"abc", *b"abc", b"zy", b"zy"),
     );
+    println!("crypto_lanes {}", cases::crypto_lanes::run());
+    case!(cases::dyn_static_suites::run(), cases::narrow_constructors::aead::run());
 }
 
 fn nest<T>(depth: u8, value: T) -> Option<Option<T>> {

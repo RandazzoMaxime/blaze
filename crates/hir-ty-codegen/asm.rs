@@ -152,6 +152,15 @@ pub(super) fn vector_instruction(instruction: &str, result: &str) -> String {
     )
 }
 
+/// The same for AArch64, with the instructions of `extension`: `v0` to `v2` are loaded from
+/// where the three arguments point, and `v0` is written where the third does.
+pub(super) fn neon_instruction(extension: &str, instruction: &str) -> String {
+    format!(
+        ".arch_extension {extension}\n.globl {SYMBOL}\n{SYMBOL}:\nldr q0, [x0]\nldr q1, [x1]\n\
+         ldr q2, [x2]\n{instruction}\nstr q0, [x2]\nret\n"
+    )
+}
+
 /// `sha1rnds4` does four rounds of SHA-1 on the vectors at its first two arguments. Which
 /// function the rounds use is part of the instruction, so there is one for each of the four:
 /// the byte at the third argument says which runs, and the result is written over it.

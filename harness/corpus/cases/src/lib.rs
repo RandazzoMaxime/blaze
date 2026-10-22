@@ -7178,3 +7178,176 @@ pub mod byte_compares {
         (a.cmp(&b), c[..2].cmp(&d[..2]), a == b, c[..1] == d[..1])
     }
 }
+
+/// Statics of `&dyn` of other statics, read by value in another static's, as rustls's cipher
+/// suites are: each was evaluated with vtables of its own.
+pub mod dyn_static_suites {
+    pub trait Named: Sync {
+        fn name(&self) -> String;
+    }
+    pub struct Hash(pub u32);
+    impl Named for Hash {
+        fn name(&self) -> String {
+            format!("sha{}", self.0)
+        }
+    }
+    pub struct Kdf(pub &'static dyn Named, pub &'static str);
+    impl Named for Kdf {
+        fn name(&self) -> String {
+            format!("{}({})", self.1, self.0.name())
+        }
+    }
+    pub struct Suite {
+        pub hash: &'static dyn Named,
+        pub kdf: &'static dyn Named,
+        pub id: u16,
+    }
+    #[derive(Clone, Copy)]
+    pub enum Supported {
+        Tls12(&'static Suite),
+        Tls13(&'static Suite),
+    }
+    pub static SHA256: Hash = Hash(256);
+    pub static SHA384: Hash = Hash(384);
+    static AES_128_INTERNAL: &Suite =
+        &Suite { hash: &SHA256, kdf: &Kdf(&SHA256, "hkdf"), id: 0x1301 };
+    pub static AES_128: Supported = Supported::Tls13(AES_128_INTERNAL);
+    pub static ECDHE: Supported =
+        Supported::Tls12(&Suite { hash: &SHA384, kdf: &Kdf(&SHA384, "prf"), id: 0xc030 });
+    pub static ALL: &[Supported] = &[AES_128, ECDHE];
+
+    pub fn run() -> Vec<String> {
+        ALL.iter()
+            .map(|suite| {
+                let (version, suite) = match suite {
+                    Supported::Tls12(it) => (12, it),
+                    Supported::Tls13(it) => (13, it),
+                };
+                format!("{version} {:#x} {} {}", suite.id, suite.hash.name(), suite.kdf.name())
+            })
+            .collect()
+    }
+}
+
+/// Tuple structs whose fields are seen in fewer modules than the struct, both `pub(in path)`
+/// (ring's `aes::Counter` and `gcm::Xi`), built and taken apart through a re-export: the
+/// constructor is seen where both are.
+pub mod narrow_constructors {
+    pub mod aead {
+        pub mod aes {
+            mod ffi {
+                pub(in super::super) struct Counter(pub(super) [u8; 4]);
+            }
+            pub(super) use ffi::Counter;
+
+            pub(super) fn first(iv: [u8; 4]) -> Counter {
+                let mut counter = Counter(iv);
+                counter.0[3] = counter.0[3].wrapping_add(1);
+                counter
+            }
+
+            pub(super) fn bytes(Counter(bytes): &Counter) -> [u8; 4] {
+                *bytes
+            }
+        }
+        pub mod gcm {
+            mod ffi {
+                pub(in super::super) struct Xi(pub(super) [u8; 4]);
+            }
+            pub(super) use ffi::Xi;
+            pub(super) mod fallback {
+                use super::Xi;
+
+                pub(in super::super) fn swapped(Xi(xi): &mut Xi) -> u32 {
+                    xi.reverse();
+                    u32::from_be_bytes(*xi)
+                }
+            }
+
+            pub(super) fn new(bytes: [u8; 4]) -> Xi {
+                Xi(bytes)
+            }
+        }
+
+        pub fn run() -> ([u8; 4], u32) {
+            let counter = aes::first([1, 2, 3, 255]);
+            let mut xi = gcm::new([9, 8, 7, 6]);
+            (aes::bytes(&counter), gcm::fallback::swapped(&mut xi))
+        }
+    }
+}
+
+/// AArch64's SHA and AES instructions, sums of every lane made wider and twice products made
+/// wider; AVX-512's loads and stores of the lanes a mask has, and sums of every lane.
+#[rustfmt::skip]
+pub mod crypto_lanes {
+    #[cfg(target_arch = "aarch64")]
+    use core::arch::aarch64::*;
+    #[cfg(target_arch = "x86_64")]
+    use core::arch::x86_64::*;
+
+    #[cfg(target_arch = "aarch64")]
+    #[target_feature(enable = "sha2")]
+    unsafe fn sha2(a: [u32; 4], b: [u32; 4], c: [u32; 4]) -> [[u32; 4]; 6] { unsafe {
+        let (a, b, c) = (vld1q_u32(a.as_ptr()), vld1q_u32(b.as_ptr()), vld1q_u32(c.as_ptr()));
+        [vsha256hq_u32(a, b, c), vsha256h2q_u32(a, b, c), vsha256su0q_u32(a, b), vsha256su1q_u32(a, b, c),
+         vsha1su0q_u32(a, b, c), vsha1su1q_u32(a, b)].map(|v| core::mem::transmute::<uint32x4_t, [u32; 4]>(v))
+    } }
+    #[cfg(target_arch = "aarch64")]
+    #[target_feature(enable = "sha3")]
+    unsafe fn sha3(a: [u64; 2], b: [u64; 2], c: [u64; 2]) -> [[u64; 2]; 4] { unsafe {
+        let (a, b, c) = (vld1q_u64(a.as_ptr()), vld1q_u64(b.as_ptr()), vld1q_u64(c.as_ptr()));
+        [vsha512hq_u64(a, b, c), vsha512h2q_u64(a, b, c), vsha512su0q_u64(a, b), vsha512su1q_u64(a, b, c)]
+            .map(|v| core::mem::transmute::<uint64x2_t, [u64; 2]>(v))
+    } }
+    #[cfg(target_arch = "aarch64")]
+    #[target_feature(enable = "aes")]
+    unsafe fn aes(a: [u8; 16], b: [u8; 16]) -> [[u8; 16]; 4] { unsafe {
+        let (a, b) = (vld1q_u8(a.as_ptr()), vld1q_u8(b.as_ptr()));
+        [vaeseq_u8(a, b), vaesdq_u8(a, b), vaesmcq_u8(a), vaesimcq_u8(b)]
+            .map(|v| core::mem::transmute::<uint8x16_t, [u8; 16]>(v))
+    } }
+    #[cfg(target_arch = "aarch64")]
+    fn lanes(a: [u8; 16], b: [u8; 16]) -> (u16, i16, u16, u8, [i32; 4], [i64; 2]) { unsafe {
+        let (v, w) = (vld1q_u8(a.as_ptr()), vld1q_u8(b.as_ptr()));
+        let (s, t) = (vreinterpretq_s16_u8(v), vsetq_lane_s16::<1>(i16::MIN, vreinterpretq_s16_u8(w)));
+        let s = vsetq_lane_s16::<1>(i16::MIN, s);
+        let (x, y) = (vreinterpretq_s32_u8(v), vsetq_lane_s32::<0>(i32::MIN, vreinterpretq_s32_u8(w)));
+        let x = vsetq_lane_s32::<0>(i32::MIN, x);
+        (vaddlvq_u8(v), vaddlvq_s8(vreinterpretq_s8_u8(w)), vaddlv_u8(vget_low_u8(w)), vaddv_u8(vget_high_u8(v)),
+         core::mem::transmute(vqdmull_s16(vget_low_s16(s), vget_low_s16(t))),
+         core::mem::transmute(vqdmull_s32(vget_low_s32(x), vget_low_s32(y))))
+    } }
+    #[cfg(target_arch = "x86_64")]
+    #[target_feature(enable = "avx512bw")]
+    unsafe fn masked(bytes: &[u8; 64], mask: u64) -> ([u8; 64], [u8; 64], i32, i64) { unsafe {
+        let loaded = _mm512_mask_loadu_epi8(_mm512_set1_epi8(-1), mask, bytes.as_ptr() as *const i8);
+        let mut stored = [7u8; 64];
+        _mm512_mask_storeu_epi8(stored.as_mut_ptr() as *mut i8, mask, loaded);
+        let sum = _mm512_reduce_add_epi32(loaded);
+        let product = _mm512_reduce_mul_epi64(_mm512_srli_epi64(loaded, 60));
+        (core::mem::transmute(loaded), stored, sum, product)
+    } }
+
+    pub fn run() -> String {
+        #[cfg_attr(not(any(target_arch = "aarch64", target_arch = "x86_64")), allow(unused_mut))]
+        let mut out = String::new();
+        #[cfg(target_arch = "aarch64")]
+        {
+            let a: [u8; 16] = core::array::from_fn(|i| (i as u8).wrapping_mul(29) ^ 0xa5);
+            let b: [u8; 16] = core::array::from_fn(|i| (i as u8).wrapping_mul(71).wrapping_add(3));
+            let words = |x: [u8; 16]| -> [u32; 4] { core::array::from_fn(|i| u32::from_le_bytes(x[i * 4..i * 4 + 4].try_into().unwrap())) };
+            let longs = |x: [u8; 16]| -> [u64; 2] { core::array::from_fn(|i| u64::from_le_bytes(x[i * 8..i * 8 + 8].try_into().unwrap())) };
+            out += &format!("{:?}", lanes(a, b));
+            if std::arch::is_aarch64_feature_detected!("sha2") { out += &format!(" {:?}", unsafe { sha2(words(a), words(b), words(a).map(|w| w.rotate_left(7))) }); }
+            if std::arch::is_aarch64_feature_detected!("sha3") { out += &format!(" {:?}", unsafe { sha3(longs(a), longs(b), longs(b).map(|w| w.rotate_left(13))) }); }
+            if std::arch::is_aarch64_feature_detected!("aes") { out += &format!(" {:?}", unsafe { aes(a, b) }); }
+        }
+        #[cfg(target_arch = "x86_64")]
+        if is_x86_feature_detected!("avx512bw") {
+            let bytes: [u8; 64] = core::array::from_fn(|i| (i as u8).wrapping_mul(37) ^ 0x3c);
+            out += &format!("{:?}", unsafe { masked(&bytes, 0xf0f0_1234_8000_ffa5) });
+        }
+        out
+    }
+}
