@@ -199,7 +199,8 @@ other.
   program behaves as cargo's (**read**, `bench.py`, 1 run). Values are evicted at the
   `synthetic_write` after the build: the reports count memos without values from `warm-up` on.
 - nushell, 1 run each: the daemon after edits 12.4 to 12.5 GB with `lru`, 12.9 GB on main;
-  edits body 0.73 s (0.41), signature 2.43 s (0.42), the others within 0.1 s (**read**). An
+  edits body 0.73 s (0.41), signature 2.43 s (0.42), the others within 0.1 s; a second run,
+  with the forced collect below, 0.78 and 2.32 s (**read**). An
   edit that re-executes an evicted memo cannot backdate it, so what depends on it runs again,
   down to the compiled code (**unverified** as the whole cause).
 - `lru` on `infer` and `runtime_mir_body` alone, so that `mir_body` stops the chain: 12.56 GB
