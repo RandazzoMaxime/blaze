@@ -21,8 +21,11 @@ How to build, test and change ra-jit, including the vendored rust-analyzer, is
 - **One worktree per lane, never `git stash`.** A uniquely named worktree with its own
   `CARGO_TARGET_DIR` or a shared sccache; the stash is shared by every worktree; harnesses run
   with `RUST_BACKTRACE=0`.
-- **Merge small and often** once the pull request's fast tier is green (about 10 minutes); the
-  full tier runs nightly or by hand: [docs/harness.md](docs/harness.md#ci).
+- **Land small and often, through the merge queue only.** After the local gate, run
+  `python3 .github/scripts/land.py "what the branch does"` in the lane's worktree: it opens the
+  pull request, queues it and waits until the fast tier (about 10 minutes) has passed on it
+  merged onto main and it is merged, or says why not. Never push to main or merge into it by
+  hand: [docs/contributing.md](docs/contributing.md#landing-a-change).
 - **Delete what a lane made when it is done:** its worktree, target directory and dev-host
   directories, and its merged branch.
 - **Credit people.** A commit or pull request built on someone's suggestion, diagnosis,
