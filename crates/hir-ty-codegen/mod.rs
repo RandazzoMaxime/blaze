@@ -4121,7 +4121,15 @@ impl<'a, 'db> ObjectCodegen<'a, 'db> {
         hydrate: bool,
     ) -> Result<Self> {
         let start = stdx::time::Instant::now();
-        let builder = ObjectBuilder::new(target()?.clone(), "ra-jit", default_libcall_names())?;
+        let isa = target()?.clone();
+        // A program's own link takes out what nothing reaches section by section, as of
+        // rustc's objects, and what only that refers to need be defined nowhere: bun's calls of
+        // Windows on Linux. The daemon's links keep everything for edits to be spliced into.
+        // Apple's linker takes out symbols, and has room for 255 sections.
+        let sections = !backend::edits_follow()
+            && isa.triple().binary_format == target_lexicon::BinaryFormat::Elf;
+        let mut builder = ObjectBuilder::new(isa, "ra-jit", default_libcall_names())?;
+        builder.per_function_section(sections).per_data_object_section(sections);
         let mut module = ObjectModule::new(builder);
         let unwind = UnwindContext::new(&mut module).map_err(CodegenError::Backend)?;
         let built = start.elapsed();

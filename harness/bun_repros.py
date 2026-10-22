@@ -67,6 +67,17 @@ CASES = {
         "expected": "compiled",
         "reasons": (),
     },
+    "unreached_externs": {
+        "package": "runner",
+        "crate": "runner,unreached_externs",
+        "alone": True,
+        "cargo_args": ["--release"],
+        # Without difftest's `-C link-dead-code`, as runbench builds bun: rustc's link takes
+        # out what nothing reaches, and so does the link of ra-jit's object.
+        "rustflags": "",
+        "expected": "compiled",
+        "reasons": (),
+    },
     "macro_fragments": {
         "package": "runner",
         "crate": "macro_fragments",
@@ -136,7 +147,20 @@ def run_case(name, root, json_path=None):
         return run_mir_case(name, case, workspace, json_path)
     target = tempfile.mkdtemp(prefix=f"ra-jit-bun-{name}-")
     os.environ["CARGO_TARGET_DIR"] = target
-    fx = Fixture(workspace, [case["crate"]], ["-p", case["package"]])
+    rustflags = os.environ.get("RUSTFLAGS")
+    if "rustflags" in case:
+        os.environ["RUSTFLAGS"] = case["rustflags"]
+    try:
+        return build_case(name, case, workspace, json_path)
+    finally:
+        if rustflags is None:
+            os.environ.pop("RUSTFLAGS", None)
+        else:
+            os.environ["RUSTFLAGS"] = rustflags
+
+
+def build_case(name, case, workspace, json_path):
+    fx = Fixture(workspace, [case["crate"]], ["-p", case["package"], *case.get("cargo_args", ())])
     fx.rustc_build()
     expected = fx.behaviour(fx.reference)
     if case.get("alone"):

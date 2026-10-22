@@ -357,6 +357,13 @@ All notable changes to ra-jit are written here. The format follows
 
 ### Fixed
 
+- On ELF, a build that no edits follow puts each function and datum of its object in a
+  section of its own, as rustc does, so the link takes out what nothing reaches. A program
+  whose `main` is the C runtime's has every function compiled, and bun's link was missing
+  what only such code calls and nothing defines on Linux: `GetLastError` of
+  `bun_windows_sys`, and `ShellInterpreter__getConstructor` of a binding bun's C++ leaves
+  out. The daemon's builds keep one section, as their links keep everything.
+  `harness/bun-repros/unreached_externs`.
 - A crate a build names after the program is one the program links, also when a binary of
   another package has its name: a build of bun with every crate ra-jit's took `--crate
   bun_sema` for the library and for `bun_sema_standalone`'s `bun-sema` too, whose code calls a
