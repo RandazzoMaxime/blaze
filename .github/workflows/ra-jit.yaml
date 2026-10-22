@@ -5,7 +5,8 @@
 #   fast tier: pull request, push to main, merge queue (about 10 minutes)
 #       fmt; on Linux x86-64, Linux AArch64 and macOS arm64 the unit tests, one build and the
 #       quick harnesses (harness/ci.py --parts fast); rustc's borrow-check tests with a floor
-#       under the passes and the pinned run-pass tests; vendor/rust-analyzer on its own
+#       under the passes; the pinned run-pass tests (Linux x86-64, macOS); vendor/rust-analyzer
+#       on its own
 #   full tier: nightly, by hand (an hour)
 #       all of that with every harness, Windows x86-64 too, `cargo ra-jit` on small projects
 #       (Linux x86-64, macOS) and the larger ones (AArch64), and the ripgrep bench. A failed
@@ -103,6 +104,7 @@ jobs:
       os: ubuntu-24.04
       tier: ${{ needs.changes.outputs.tier }}
       borrowck: true
+      pinned-ui: true
       cargo-ra-jit: ${{ needs.changes.outputs.tier == 'full' }}
       bench: ${{ needs.changes.outputs.tier == 'full' }}
 
@@ -126,6 +128,7 @@ jobs:
       platform: macos-arm64
       os: macos-15
       tier: ${{ needs.changes.outputs.tier }}
+      pinned-ui: true
       cargo-ra-jit: ${{ needs.changes.outputs.tier == 'full' }}
 
   # Its build alone takes longer than the whole fast tier.
