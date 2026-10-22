@@ -7071,3 +7071,19 @@ pub mod const_fn_promoted {
         MIGRATIONS.all.iter().filter(|it| it.down.is_some()).count() + MIGRATIONS.all[1].name.len()
     }
 }
+
+/// A `match` used as a statement whose arms borrow a temporary: the temporary is dropped where
+/// its arm ends, and nothing reads the borrow after.
+pub mod statement_borrows_temporary {
+    pub fn run(flag: bool, value: &Option<String>) -> usize {
+        match value {
+            None => &String::new(),
+            Some(it) => it,
+        };
+        match (value, flag) {
+            (None, _) => &value.clone().unwrap_or_default(),
+            (&Some(ref it), _) => it,
+        };
+        value.as_ref().map_or(0, String::len)
+    }
+}
