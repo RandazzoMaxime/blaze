@@ -4,12 +4,12 @@ ra-jit has its own borrow checker, the crate `hir-ty-borrowck` in the rust-analy
 (`vendor/rust-analyzer/crates/hir-ty-borrowck`, next to `hir-ty`). It checks the MIR rust-analyzer
 lowers, the same MIR the code generator compiles, and it is meant to give exactly rustc's
 verdict: the same errors, on the same lines, and none where rustc gives none. It gives
-rustc's verdict on 69% of rustc's own borrow-check tests today, and on every one rustc
+rustc's verdict on 83% of rustc's own borrow-check tests today, and on every one rustc
 accepts; how they are scored and what is left is below.
 
 It runs as part of rust-analyzer's diagnostics, so the daemon computes it for every edited
 file, and `ra-jit borrowck` prints what it finds. The daemon refuses an edit it finds a
-borrow-check error in (below), but the checker still misses about a third of the errors
+borrow-check error in (below), but the checker still misses about a sixth of the errors
 rustc gives, so `cargo check` stays the final word.
 
 ## Refusing builds
@@ -21,7 +21,7 @@ with a type error does; under `cargo ra-jit`, cargo then runs and rustc reports 
 This is safe because the checker reports nothing on any test rustc accepts, nor on ripgrep,
 fd, bat, hyperfine, just, axum or nushell: a refused build is one rustc refuses too. A
 borrow-check error ra-jit reports where rustc reports none is a bug; `RA_JIT_BORROWCK_REFUSE=0`
-works around it until it is fixed. What it does not do: it misses about a third of the
+works around it until it is fixed. What it does not do: it misses about a sixth of the
 errors rustc gives (it accepts code rustc rejects, listed below), so code with such an error
 still builds and runs from memory.
 
@@ -62,6 +62,9 @@ All of these are rustc's, written from `compiler/rustc_borrowck` at the pinned n
   (`impl Copy for Foo<'static>`); a loop's way back may unwind as rustc's `FalseUnwind`, so a
   borrow that must outlive the function is reported in a loop that never ends; and
   `dyn Any + 'r` in the signature implies `'r: 'static`, which `trait Any: 'static` requires.
+  The type an object binds an associated type to is invariant (`dyn Trait<Out = &'a u32>`),
+  and unsizing to `dyn Trait` proves the value's type implements `Trait`, with what its impl
+  needs of the regions.
 - Well-formedness in bodies: a called function's signature as written, before its associated
   types are normalized, and its generic arguments are well-formed at the call (`&'a &'b ()`
   that `'b: 'a`); so is a function item's signature where it becomes a function pointer, with
@@ -72,6 +75,8 @@ All of these are rustc's, written from `compiler/rustc_borrowck` at the pinned n
   hold for them, in code that is never reached too.
 - Promotion: a borrowed function item, and a named `const` whose type has no interior
   mutability whatever its drop (rustc asks whether the value needs dropping, not the type).
+  In a `const` or `static` item's value, a call of a `const fn` is promotable too
+  (`Migrations::new(&[Migration::new("a")])`), as it is in rustc's const contexts.
 - Region inference: liveness of locals (drops kept live only back to where the local may be
   initialized), outlives constraints from every statement, call, cast and aggregate, the
   signature's universal regions and implied bounds (normalized parameters and the impl
@@ -83,8 +88,10 @@ All of these are rustc's, written from `compiler/rustc_borrowck` at the pinned n
   `let (y, _): (&'static u32, u32)`), struct and variant patterns that spell out generic
   arguments (`let Foo::<'static> { .. } = foo`) and constant patterns (`<() as Foo<'static>>::C`,
   compared as `PartialEq` compares), casts, turbofishes (a method's own, `x.f::<&'a T>()`, too) and struct
-  literal and variant paths, in closures too. A function item called through a variable
-  (`let f = foo::<&'static u32>; f(&x)`) has the variable's type. A struct literal proves the struct's where clauses, an array
+  literal and variant paths, in closures too; `Self { .. }` and `Self(..)` in an impl have the
+  impl's self type. A function item called through a variable
+  (`let f = foo::<&'static u32>; f(&x)`) has the variable's type, and the variable is used
+  where it is called (a captured constructor too). A struct literal proves the struct's where clauses, an array
   repeat `[x; N]` of more than one copy proves `x`'s type `Copy`, and a path that names an
   associated item through a type (`Foo::f`, `<()>::f`, `T::f`, not `Default::default`) has its
   generic arguments and its impl's self type and trait arguments well-formed, as rustc's user
@@ -163,8 +170,8 @@ With no borrow checker, the 245 units rustc accepts would pass. Now:
 
 | Mode | In scope | Pass | rustc accepts, ra-jit too | rustc rejects, same errors |
 |---|---|---|---|---|
-| Polonius | 1579 | 1312 (83.1%) | 245 of 245 | 1067 of 1334 |
-| NLL | 1577 | 1304 (82.7%) | 226 of 226 | 1078 of 1351 |
+| Polonius | 1579 | 1317 (83.4%) | 245 of 245 | 1072 of 1334 |
+| NLL | 1577 | 1309 (83.0%) | 226 of 226 | 1083 of 1351 |
 
 463 units are out of scope; 344 of them need a nightly feature. CI runs the scoring on Linux
 and fails below a floor a few units under the count there.
@@ -177,10 +184,10 @@ just, axum, nushell, delta, eza, tokei and starship it finds nothing, nor on the
 ## What is left
 
 Every failing unit is one where rustc gives an error ra-jit does not, or gives it on another
-line or with another code. By what is wrong, most first: 32 "lifetime may not live long
-enough" not reported, 21 E0597 not reported, 19 "lifetime may not live long enough" on
-another line, 11 E0597 on another line, 10 each of E0309, E0310 and E0507 not reported, then
-a long tail. The causes, grouped:
+line or with another code. By what is wrong, most first: 30 "lifetime may not live long
+enough" not reported, 22 E0597 not reported, 16 "lifetime may not live long enough" on
+another line, 12 E0309, 11 each of E0310 and E0521 and 10 E0507 not reported, then a long
+tail. The causes, grouped:
 
 - **Higher-ranked regions and placeholders** (`for<'a>` bounds, closures with higher-ranked
   signatures): rustc checks them with placeholders in universes; ra-jit does not yet, and
