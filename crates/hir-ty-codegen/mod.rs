@@ -96,8 +96,8 @@ use hir_ty::mir::{
 
 mod asm;
 mod backend;
-pub use backend::Backend;
 use backend::Step;
+pub use backend::{Backend, builds_edits};
 mod cached;
 mod debuginfo;
 pub use debuginfo::Sidecar;
@@ -3737,6 +3737,15 @@ fn described<'db>(
     (source, Some((env.store(), variables)).filter(|it| !it.1.is_empty()))
 }
 
+/// Whether the crate has `panic = "abort"`. The standard library's crates are compiled
+/// before, for whichever the program has, and whatever of theirs is compiled again is in the
+/// program's crates.
+fn panics_abort(db: &dyn HirDatabase, krate: Crate) -> bool {
+    let abort =
+        cfg::CfgAtom::KeyValue { key: intern::sym::panic, value: intern::Symbol::intern("abort") };
+    !krate.data(db).origin.is_lang() && krate.cfg_options(db).check_atom(&abort)
+}
+
 fn build<'db>(
     cg: &mut Recorder<'db>,
     env: ParamEnvAndCrate<'db>,
@@ -3751,6 +3760,7 @@ fn build<'db>(
     // the one just below it is taken for none at all.
     ctx.func.params.ensure_base_srcloc(ir::SourceLoc::new(0));
     let mut builder_ctx = FunctionBuilderContext::new();
+    let aborts = panics_abort(cg.db, env.krate);
     let mut fx = FunctionCx {
         cg,
         body,
@@ -3770,6 +3780,7 @@ fn build<'db>(
         free_argument_slots: Vec::new(),
         given_away: None,
         in_cleanup: false,
+        aborts,
         guarded: false,
         ret_mode: PassMode::Ignore,
         tracked,
@@ -6270,6 +6281,9 @@ struct FunctionCx<'cx, 'db> {
     /// whole into it are. Nothing reads those again, so the callee can be handed them.
     given_away: Option<GivenAway>,
     in_cleanup: bool,
+    /// The crate it is compiled for has `panic = "abort"`: no call of it unwinds (rustc's
+    /// `fn_can_unwind`), and so none has a landing pad.
+    aborts: bool,
     /// Whether a call was made by [`Self::guarded_call`].
     guarded: bool,
     ret_mode: PassMode,
@@ -7900,7 +7914,7 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
             }
             let block = &body.basic_blocks[id];
             let unwind = block.terminator.as_ref().and_then(|it| it.kind.unwind());
-            worklist.extend(unwind.filter(|it| !resumes_only.contains(it)));
+            worklist.extend(unwind.filter(|it| !self.aborts && !resumes_only.contains(it)));
         }
         let state = frame.as_ref().map(|(frame, ..)| frame.state()).map(|it| in_frame(self, it));
         match (frame, state) {
@@ -7946,7 +7960,8 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
                 unsupported!("block without terminator");
             };
             self.at(terminator.span);
-            self.unwind_to = terminator.kind.unwind().filter(|it| !resumes_only.contains(it));
+            self.unwind_to =
+                terminator.kind.unwind().filter(|it| !self.aborts && !resumes_only.contains(it));
             let target = match &terminator.kind {
                 // A promoted call already holds its value, and that value is read-only.
                 TerminatorKind::Call { destination, target: Some(target), .. }
@@ -10336,6 +10351,7 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
             let pointer = self.builder.ins().load(ptr(), MEM, addr, 0);
             let values = self.operands(args)?;
             let sig = fn_ty.fn_sig(self.interner);
+            self.check_abort_unwinding(sig.abi())?;
             let named = sig.c_variadic().then(|| sig.inputs().skip_binder().len());
             self.emit_call(Callee::Pointer(pointer, sig.abi(), named), &values, dst, dst_ty.ty)?;
             return self.finish_call(destination, target);
@@ -10359,6 +10375,9 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
             }
         };
         let db = self.cg.db;
+        if let ItemContainerId::ExternBlockId(_) = func.lookup(db).container {
+            self.check_abort_unwinding(FunctionSignature::of(db, func).abi)?;
+        }
         if fncache::is_code(db, func) {
             self.cache_code(generic_args, dst)?;
             return self.finish_call(destination, target);
@@ -12828,6 +12847,13 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
                 let outcome = Type::int_with_byte_size(outcome as u16).ok_or_else(|| {
                     CodegenError::Unsupported(format!("`catch_unwind` giving {outcome} bytes"))
                 })?;
+                if self.aborts {
+                    // Nothing unwinds to be caught, as rustc has it.
+                    self.builder.ins().call_indirect(try_sig, try_fn, &[data]);
+                    let zero = self.builder.ins().iconst(outcome, 0);
+                    self.builder.ins().store(MEM, zero, dst, 0);
+                    return Ok(Intrinsic::Inline);
+                }
                 let returned = self.builder.create_block();
                 let caught = self.builder.create_block();
                 let done = self.builder.create_block();
@@ -13503,9 +13529,18 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
         self.builder.block_params(after).to_vec()
     }
 
+    /// Turns down a call that can unwind in code that cannot: rustc ends the program when
+    /// it does (`AbortUnwindingCalls`).
+    fn check_abort_unwinding(&self, abi: ExternAbi) -> Result<()> {
+        if self.aborts && abi.as_str().ends_with("-unwind") {
+            unsupported!("a call of an `extern \"{}\"` function with `panic = \"abort\"`", abi);
+        }
+        Ok(())
+    }
+
     /// The block that cleans up after a call that unwinds, if there is anything to clean up.
     fn landing_pad_for_call(&mut self) -> Option<ir::Block> {
-        if self.in_cleanup {
+        if self.in_cleanup || self.aborts {
             return None;
         }
         if self.inner_pad.is_some() {
@@ -13757,7 +13792,7 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
         body: impl FnOnce(&mut Self) -> Result<()>,
         cleanup: impl FnOnce(&mut Self) -> Result<()>,
     ) -> Result<()> {
-        if self.in_cleanup {
+        if self.in_cleanup || self.aborts {
             return body(self);
         }
         let outer = self.landing_pad_for_call();
@@ -14267,7 +14302,7 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
         count: usize,
         mut drop: impl FnMut(&mut Self, usize) -> Result<()>,
     ) -> Result<()> {
-        if self.in_cleanup || count < 2 {
+        if self.in_cleanup || self.aborts || count < 2 {
             return (0..count).try_for_each(|at| drop(self, at));
         }
         let outer = self.landing_pad_for_call();
@@ -14319,7 +14354,7 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
         let size = self.layout(element)?.size.bytes() as i64;
         let done = self.builder.create_block();
         let zero = self.builder.ins().iconst(ptr(), 0);
-        if self.in_cleanup {
+        if self.in_cleanup || self.aborts {
             self.drop_elements_from(addr, len, element, size, zero, None, done)?;
         } else {
             // If an element's drop unwinds, the ones after it are still dropped on the way out.

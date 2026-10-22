@@ -331,6 +331,12 @@ All notable changes to ra-jit are written here. The format follows
   from before the edit: a program whose build was interrupted, or panicked, or whose checkout
   was loaded again with the same link, forgot what rustc's copies are copies of, and its next
   build took the source as it was then for what rustc compiled. It keeps that now (#71).
+- An edit of code two programs share ran wrong with the LLVM backend when the daemon compiled a
+  program's `main` itself (on macOS and Windows, whose temporary paths go through a link): it
+  took that build for one of a whole program and inlined across crates, and a caller holding
+  the old body of an edited function was kept, as what is kept is compared by each function's
+  own code. A daemon or `--watch` no longer inlines across crates; `programs.py` with
+  `RA_JIT_ALONE=1` builds both programs that way in CI (#63).
 - Under plain cargo, a test that ran the workspace's program could find none: the build the
   daemon loads afterwards ran beside the tests, and linking the program into place again
   deletes it first. It now waits for the user's cargo to exit (#61).
