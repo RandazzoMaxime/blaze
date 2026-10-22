@@ -4,7 +4,7 @@ ra-jit has its own borrow checker, the crate `hir-ty-borrowck` in the rust-analy
 (`vendor/rust-analyzer/crates/hir-ty-borrowck`, next to `hir-ty`). It checks the MIR rust-analyzer
 lowers, the same MIR the code generator compiles, and it is meant to give exactly rustc's
 verdict: the same errors, on the same lines, and none where rustc gives none. It gives
-rustc's verdict on 89% of rustc's own borrow-check tests today, and on every one rustc
+rustc's verdict on 90% of rustc's own borrow-check tests today, and on every one rustc
 accepts; how they are scored and what is left is below.
 
 It runs as part of rust-analyzer's diagnostics, so the daemon computes it for every edited
@@ -47,7 +47,9 @@ All of these are rustc's, written from `compiler/rustc_borrowck` at the pinned n
   whose arms test the value reads what it matches first, so a value moved out whole is
   reported there. A `match` arm's guard sees the variables its pattern binds by reference, so
   it cannot move out of them (E0507), and casting an enum to an integer moves the enum
-  (`*e as usize` behind a reference is E0507).
+  (`*e as usize` behind a reference is E0507). A pattern's moves out of what it may not move
+  out of are one error at the value matched for each place they move out of, as rustc's
+  `MovesFromPlace`: `(D(s), &t)` is an E0509 and an E0507.
 - Unaligned references (E0793): a `&` or `&mut` of a field a `#[repr(packed)]` struct may
   leave less aligned than its type needs, as rustc's `check_packed_ref` (not `&raw`, nor
   behind a pointer; a field of a type parameter or of a `dyn` tail may be unaligned).
@@ -97,25 +99,36 @@ All of these are rustc's, written from `compiler/rustc_borrowck` at the pinned n
   In a `const` or `static` item's value, a call of a `const fn` is promotable too
   (`Migrations::new(&[Migration::new("a")])`), as it is in rustc's const contexts.
 - Region inference: liveness of locals (drops kept live only back to where the local may be
-  initialized), outlives constraints from every statement, call, cast and aggregate, the
+  initialized; what a drop uses as rustc's dropck: an associated type as what it normalizes
+  to, another alias what its bounds and captures leave, `for<'a> T: 'a` as `'static`, and
+  nothing of a `ManuallyDrop`), outlives constraints from every statement, call, cast and aggregate, the
   signature's universal regions and implied bounds (normalized parameters and the impl
   header included, for associated consts too; a projection implies what its arguments do as
-  well as what it normalizes to, `<&'a &'b () as Trait>::Type` that `'b: 'a`), where clauses (elaborated through
+  well as what it normalizes to, `<&'a &'b () as Trait>::Type` that `'b: 'a`, and its trait's
+  outlives where clauses, `<T as Trait<A>>::Assoc` that `A: 'static` where
+  `trait Trait<A: 'static>`), where clauses (elaborated through
   supertraits) and the region constraints of proving them with the trait solver (a where
   clause or impl that proves a bound relates its regions to the bound's, `&'max G: Get` proving
-  `&'min G: Get` makes them equal, and the impl's own `T: 'a` must hold), type tests, and lifetimes written in `let` annotations (`let _: T = value`
+  `&'min G: Get` makes them equal, and the impl's own `T: 'a` must hold), type tests (an
+  associated type `<T as Trait>::Assoc: 'a` as rustc's alias bound: what it normalizes to
+  outlives `'a`, or a where clause on the same projection with equal lifetimes or the trait's
+  bound says it does, or every argument outlives `'a`, with rustc's choice of which of these
+  relates regions and which is only checked; an `impl Trait` likewise, as the arguments it
+  captures; an `async` block as what it captures, as a closure), and lifetimes written in `let` annotations (`let _: T = value`
   of any value included, and of each variable a destructuring pattern binds, `y` in
   `let (y, _): (&'static u32, u32)`), struct and variant patterns that spell out generic
   arguments (`let Foo::<'static> { .. } = foo`) and constant patterns (`<() as Foo<'static>>::C`,
   compared as `PartialEq` compares), casts, turbofishes (a method's own, `x.f::<&'a T>()`, too) and struct
   literal and variant paths, in closures too; `Self { .. }` and `Self(..)` in an impl have the
-  impl's self type. A function item called through a variable
+  impl's self type, with its anonymous lifetimes (`impl Foo<'_>`) as the impl's own. A function item called through a variable
   (`let f = foo::<&'static u32>; f(&x)`, or through a reference, `let f = &foo::<..>`) has the
   variable's type, and the variable is used where it is called (a captured constructor too).
   A closure called through a variable takes its arguments as its signature says, whose
   lifetimes rustc infers once, in its type (`let f = |_| {}; f(&x)` in a loop needs `x` to
   live as long as `f`), unless it writes a parameter's or its return's type. `self` of a
-  method of `impl dyn Trait` is `dyn Trait + 'static`, as the impl's header defaults it. A struct literal proves the struct's where clauses, an array
+  method of `impl dyn Trait` is `dyn Trait + 'static`, as the impl's header defaults it. A struct literal proves the struct's where clauses, and
+  the generic arguments its path spells out are well-formed (`Outer::<T, Inner<T>> { .. }`
+  with `struct Inner<T: 'static>` needs `T: 'static`), an array
   repeat `[x; N]` of more than one copy proves `x`'s type `Copy`, and a path that names an
   associated item through a type (`Foo::f`, `<()>::f`, `T::f`, not `Default::default`) has its
   generic arguments and its impl's self type and trait arguments well-formed, as rustc's user
@@ -126,14 +139,17 @@ All of these are rustc's, written from `compiler/rustc_borrowck` at the pinned n
   `dyn Bar<'static, 'a>` with `trait Foo<'a>: Bar<'a, 'a>`) has the supertrait as the
   source's arguments instantiate it equal to the target's.
 - Errors on universal regions: "lifetime may not live long enough", E0521, E0309, E0310,
-  E0311, with rustc's object lifetime defaults (`&'a dyn Trait` is `dyn Trait + 'a`, a trait
+  E0311, with rustc's object lifetime defaults (`&'a dyn Trait` is `dyn Trait + 'a`, a
+  closure's parameter `|x: &dyn Trait|` too, a trait
   bounded by `'static` makes its objects `'static`, elsewhere in a body the lifetime is
   inferred). Of universal regions made to outlive each other, as rustc only the first made
   (a closure's creator's before its own) is checked against all it outlives, the others only
   against it, so the error is the one rustc reports.
 - Loans that outlive their storage: E0597, E0515, E0716, and promoted constants (calls of
   `#[rustc_promotable]` functions such as `size_of` included) and extended temporaries of
-  `const` and `static` items as `'static`. An expression statement's value is not read once
+  `const` and `static` items as `'static` (not a variable the value borrows, which is E0597
+  there, as rustc's `UseAsConst` rather than E0515). E0716 of what a pattern borrows
+  (`ref m` in a `match` on a temporary) is at the temporary, as rustc reports it. An expression statement's value is not read once
   its temporaries are dropped, so `&temp();` alone is no E0716, as in rustc.
 - `impl Trait` captures: a return-position `impl Trait` keeps alive and relates only the
   lifetimes it captures, those listed in `use<..>` or, before edition 2024 outside traits and
@@ -181,8 +197,9 @@ All of these are rustc's, written from `compiler/rustc_borrowck` at the pinned n
   the function knows (rustc's `check_opaque_meets_bounds`): `-> impl Sized + 'static` hiding
   a `T` is E0310 at the `impl Trait`. A closure or coroutine outlives as its captures do, and
   an `impl Trait` with no outlives bound as its arguments.
-- E0621 ("explicit lifetime required") where rustc gives it: not in a trait impl's method,
-  nor for an anonymous lifetime of `self` or of the return type.
+- E0621 ("explicit lifetime required") where rustc gives it: for an anonymous lifetime a
+  parameter's written type has, not in a trait impl's method, nor for one of `self`, of the
+  return type or of an impl's header.
 - Where errors are: at the expression rustc points to. A borrow `format_args!` (so
   `println!`, `format!`, `write!`) makes of an argument has no syntax of its own, so its
   errors are at the argument, or for a variable the template names (`"{x}"`) at the
@@ -207,8 +224,8 @@ With no borrow checker, the 245 units rustc accepts would pass. Now:
 
 | Mode | In scope | Pass | rustc accepts, ra-jit too | rustc rejects, same errors |
 |---|---|---|---|---|
-| Polonius | 1579 | 1400 (88.7%) | 245 of 245 | 1155 of 1334 |
-| NLL | 1577 | 1395 (88.5%) | 226 of 226 | 1169 of 1351 |
+| Polonius | 1579 | 1422 (90.1%) | 245 of 245 | 1177 of 1334 |
+| NLL | 1577 | 1418 (89.9%) | 226 of 226 | 1192 of 1351 |
 
 463 units are out of scope; 344 of them need a nightly feature. CI runs the scoring on Linux
 and fails below a floor a few units under the count there.
@@ -221,17 +238,18 @@ just, axum, nushell, delta, eza, tokei and starship it finds nothing, nor on the
 ## What is left
 
 Every failing unit is one where rustc gives an error ra-jit does not, or gives it on another
-line or with another code. By what is wrong, most first: 23 "lifetime may not live long
-enough" and 15 E0597 not reported, 11 E0309 and 10 E0310 not reported, 10 with only an error
-rustc does not give, 9 each of E0716 and E0521 not reported, 8 "lifetime may not live long
-enough" on another line, and 8 each of E0507 and E0700 not reported, then a long tail. The causes, grouped:
+line or with another code. By what is wrong, most first: 17 "lifetime may not live long
+enough" and 12 E0597 not reported, 10 with only an error rustc does not give, 9 "lifetime may
+not live long enough" on another line, 9 E0716 and 8 E0700 not reported, 7 each of E0507,
+E0521 and `FnMut` escapes, 6 each of E0510 and E0310, and 5 each of E0309, E0311 and
+higher-ranked errors not reported, then a long tail. The causes, grouped:
 
 - **Higher-ranked regions and placeholders** (`for<'a>` bounds, closures with higher-ranked
   signatures): rustc checks them with placeholders in universes; ra-jit does not yet, and
   leaves out what a `for<'a>` lifetime is related to, apart from `for<'a> T: 'a`.
 - **Well-formedness of items** (most of what is left of E0309 and E0310): what proving a
   trait bound needs of the regions (`<T as Dummy<'a>>::Out` in a field, proven by an impl
-  that needs `T: 'a`), a projection's `<T as Trait>::Assoc: 'a`, and items whose signature
+  that needs `T: 'a`), and items whose signature
   or impl header has an associated type (what normalizing it implies) are not checked yet.
 - **Member constraints of `impl Trait`**: the choice rustc makes is not applied, and a
   projection bound that names a lifetime (`impl Iterator<Item = Box<dyn Foo>>`) leaves them
@@ -296,6 +314,9 @@ missed rather than errors made up:
 
 - Temporaries of a block's tail expression in edition 2021 are dropped at a different point.
 - Comparisons against constant patterns take their operands by value.
+- A place expression as a statement (`S[0];`, `*s;`) is moved into a temporary in rustc, so
+  an unsized or borrowed one is E0161 or E0507 (`dst/dst-index-fail.rs`); rust-analyzer
+  does not read it.
 - An arm with a guard binds its by-reference bindings before the guard and the rest after,
   in rustc, so what it binds by value is dropped first; rust-analyzer binds them in the
   pattern's order (`dropck/eager-by-ref-binding-for-guards.rs`, where it reports two errors

@@ -92,6 +92,10 @@ jobs:
       GH_TOKEN: ${{ github.token }}
     steps:
       - uses: actions/checkout@v6
+        with:
+          # The ruleset on main refuses a push from the workflow's own token: this one is allowed
+          # past it (docs/harness.md, "CI").
+          token: ${{ secrets.RA_JIT_BOT_TOKEN || github.token }}
       - uses: actions/download-artifact@v4
         with:
           pattern: latency-*

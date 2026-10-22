@@ -7,7 +7,7 @@ baseline fails: ra-jit is to run no rustc, and a change may only lower the count
     norustc.py [--record] [--keep]
 
 The workspace, norustc/fixture, has a program with an `asm!` block, a library with unit tests,
-doctests and features the root package does not have, a proc macro, and a path dependency outside the workspace with a build script. It
+doctests and features, which the root package uses through another library, a proc macro, and a path dependency outside the workspace with a build script. It
 is built with a copy of the pinned toolchain whose rustc, rustdoc and cargo write a line for
 each run and then become the real tool, linked with rustup under a name of its own for the run.
 A scenario ends once no counted tool runs and the log has been still for a while, so what the
@@ -149,7 +149,9 @@ def apply(ws, edits):
 
 def main():
     record, keep = "--record" in sys.argv, "--keep" in sys.argv
-    work = tempfile.mkdtemp(prefix="ra-jit-norustc-")
+    # Under /tmp on macOS: the daemon's socket is in RA_JIT_HOME below, and under $TMPDIR
+    # (/var/folders/...) its path passes the 104 bytes macOS has for one.
+    work = tempfile.mkdtemp(prefix="ra-jit-norustc-", dir="/tmp" if sys.platform == "darwin" else None)
     log = os.path.join(work, "runs.log")
     open(log, "w").close()
     name = f"ra-jit-norustc-{os.getpid()}"

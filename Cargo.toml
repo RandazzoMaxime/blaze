@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/ra-jit", "crates/hir-ty-codegen", "crates/ra-jit-store", "crates/ra-jit-expand", "crates/ra-jit-fuzz", "crates/ra-jit-live", "crates/ra-jit-bench", "crates/ra-jit-cache", "crates/ra-jit-cache-macros"]
+members = ["crates/ra-jit", "crates/hir-ty-codegen", "crates/ra-jit-store", "crates/ra-jit-expand", "crates/ra-jit-fuzz", "crates/ra-jit-live", "crates/ra-jit-bench", "crates/ra-jit-cache", "crates/ra-jit-cache-macros", "vendor/rust-analyzer/lib/rowan"]
 # `ra-jit-wasm` turns on a feature of `hir-ty-codegen` that swaps the code generator's output, which
 # must not be unified into a build of the native crates.
 exclude = ["crates/ra-jit-wasm", "demo", "harness"]
@@ -51,7 +51,7 @@ lto = "thin"
 [patch.'crates-io']
 # rustc's layout code, from the tag of the stable in `harness/toolchain`.
 ra-ap-rustc_abi = { path = "vendor/rustc_abi" }
-# rowan = { path = "../rowan" }
+rowan = { path = "vendor/rust-analyzer/lib/rowan" }
 
 # line-index = { path = "lib/line-index" }
 # la-arena = { path = "lib/la-arena" }
