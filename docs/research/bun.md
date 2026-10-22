@@ -67,7 +67,8 @@ Filed, not fixed (read, the issues):
   here stay comparable.
 - [#34](https://github.com/indexable-inc/ra-jit/issues/34): `adt_const_params` constants and
   `type_info` in const eval. Functions that reach them are left to rustc: in the dev loop rustc's
-  copy is linked; whole-program, 1,211 functions are missing.
+  copy is linked; the whole-program report left 1,645 functions out, including 907 reaching
+  `type_info` and 304 reaching `adt_const_params`.
 - [#35](https://github.com/indexable-inc/ra-jit/issues/35): everything the whole-program build
   can't compile yet, by cause, of which #34 is most.
 - [#47](https://github.com/indexable-inc/ra-jit/issues/47): the cold build starts over once per
@@ -103,6 +104,11 @@ Median of three edits, warm, incremental `cargo build` → `cargo ra-jit build`:
   binary is the one bun's users of `Bun.Transpiler` would run (read, `bench.py` on the commit
   before it).
 - How fast ra-jit's whole-program LLVM build runs is not measured: it does not link (#35).
+
+The reduced nightly fixtures in `harness/bun-repros` keep these two refusals measurable without
+building Bun's native C and C++ dependencies. Run them with `python3 harness/bun_repros.py` after
+installing `nightly-2026-09-15`. The fixtures compare ra-jit's binary with cargo's binary and fail
+if the expected refusal reason disappears without changing the fixture's expectation.
 
 ## What is not known
 

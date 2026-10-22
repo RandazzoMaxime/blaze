@@ -38,6 +38,10 @@ on:
         description: harness/bench.py on ripgrep against the stored baseline (not required)
         type: boolean
         default: false
+      bun-e2e:
+        description: reduced Bun nightly blocker fixtures
+        type: boolean
+        default: false
 
 env:
   CARGO_INCREMENTAL: 0
@@ -198,6 +202,28 @@ jobs:
             [ -f "$report" ] && { echo "::group::$report"; head -c 20000 "$report"; echo; echo "::endgroup::"; }
           done
           true
+
+  bun-e2e:
+    name: Bun E2E fixtures
+    if: inputs.bun-e2e
+    needs: build
+    runs-on: ${{ inputs.os }}
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/toolchain
+        with:
+          nightly: nightly-2026-09-15
+      - uses: actions/download-artifact@v8
+        with:
+          name: ra-jit-${{ inputs.platform }}
+          path: target/release
+      - name: ra-jit
+        working-directory: target/release
+        run: |
+          tar -xf ra-jit.tar
+          echo "RA_JIT_BIN=$PWD/ra-jit" >> "$GITHUB_ENV"
+      - run: $PYTHON harness/bun_repros.py
 
   # The borrow checker against rustc's own borrow-check tests (docs/borrowck.md), at the
   # commit of the nightly whose verdicts they are scored by, with a floor under the passes.
