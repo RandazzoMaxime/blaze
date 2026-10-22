@@ -71,6 +71,7 @@ const BUILD_ENV: &[&str] = &[
     "RA_JIT_MIR_OPT",
     "RA_JIT_EMIT",
     "RA_JIT_SPLICE",
+    "RA_JIT_OTHER_TOOLCHAIN",
 ];
 
 /// The variables a worker is started with: the ones that pick its toolchain and its backend,

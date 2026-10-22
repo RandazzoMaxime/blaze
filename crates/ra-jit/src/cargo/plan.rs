@@ -252,13 +252,29 @@ fn unsupported(unit: &Record) -> Option<String> {
             return Some(format!("`{name}` is built with -C {flag}"));
         }
     }
-    if unit.args.iter().any(|it| it.starts_with("-Z")) {
-        return Some(format!("`{name}` is built with unstable flags"));
+    if let Some(flag) = unstable_flags(&unit.args).find(|it| !changes_nothing(it)) {
+        return Some(format!("`{name}` is built with the unstable flag -Z {flag}"));
     }
     if unit.is_test() {
         return harness_alone(unit);
     }
     None
+}
+
+/// The values of the `-Z` flags of a rustc command line, spelled `-Z name=value` or
+/// `-Zname=value`.
+fn unstable_flags(args: &[String]) -> impl Iterator<Item = &str> {
+    args.iter().enumerate().filter_map(|(at, arg)| match arg.strip_prefix("-Z")? {
+        "" => args.get(at + 1).map(String::as_str),
+        joined => Some(joined),
+    })
+}
+
+/// An unstable flag that changes nothing ra-jit compiles or links against. Cargo on a
+/// nightly toolchain passes `-Z embed-metadata=no` to every crate by itself: the metadata goes
+/// to the `.rmeta` file and not into the rlib, whose objects are the same.
+fn changes_nothing(flag: &str) -> bool {
+    flag.split('=').next() == Some("embed-metadata")
 }
 
 /// The line rustc ran the linker with: the variables it set, the driver, the arguments.
@@ -625,6 +641,15 @@ mod tests {
             link_line: None,
             env: Default::default(),
         }
+    }
+
+    #[test]
+    fn unstable_flags_that_change_nothing() {
+        assert_eq!(unsupported(&unit(&["-Z", "embed-metadata=no"])), None);
+        assert_eq!(unsupported(&unit(&["-Zembed-metadata=no"])), None);
+        let threads = unsupported(&unit(&["-Z", "embed-metadata=no", "-Z", "share-generics=y"]));
+        assert!(threads.is_some_and(|why| why.contains("-Z share-generics=y")));
+        assert!(unsupported(&unit(&["-Zlocation-detail=none"])).is_some());
     }
 
     #[test]
