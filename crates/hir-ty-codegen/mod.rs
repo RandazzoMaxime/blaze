@@ -6317,6 +6317,44 @@ struct SuspendedState {
     held: hir_ty::mir::HeldLocals,
 }
 
+/// `args` with every lifetime but a bound one erased: lifetimes change nothing about the
+/// code, and the ones a caller passes on are its own parameters, which mean nothing in the
+/// callee.
+///
+/// What was erased is kept per thread. The arguments of a closure hold the types of all it
+/// captured, and of the closures those hold: erased again at every call, they are interned
+/// again each time, and every thread of a build waits on the interner's locks.
+pub(crate) fn erase_regions<'db>(
+    interner: DbInterner<'db>,
+    args: GenericArgs<'db>,
+) -> GenericArgs<'db> {
+    use rustc_type_ir::TypeVisitableExt;
+    /// How many are kept before they are let go, as each keeps its types interned.
+    const KEPT: usize = 1 << 16;
+    thread_local! {
+        static ERASED: std::cell::RefCell<FxHashMap<StoredGenericArgs, StoredGenericArgs>> =
+            std::cell::RefCell::default();
+    }
+    if !args.has_free_regions() {
+        return args;
+    }
+    let key = args.store();
+    if let Some(known) = ERASED.with_borrow(|it| it.get(&key).map(|it| it.as_ref())) {
+        return known;
+    }
+    let erased = rustc_type_ir::fold_regions(interner, args, |region, _| match region.kind() {
+        rustc_type_ir::RegionKind::ReBound(..) => region,
+        _ => Region::new_erased(interner),
+    });
+    ERASED.with_borrow_mut(|it| {
+        if it.len() >= KEPT {
+            it.clear();
+        }
+        it.insert(key, erased.store());
+    });
+    erased
+}
+
 /// Whether calls to `func` pass a `&Location` after the declared arguments. A method of a trait
 /// impl inherits the attribute from the trait's declaration.
 fn track_caller(db: &dyn HirDatabase, func: FunctionId) -> bool {
@@ -11622,13 +11660,7 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
         if !*ENABLED || !self.cg.target.exception_in_register() || Target::current().is_wasm() {
             return None;
         }
-        let erased = |args: GenericArgs<'db>| {
-            let interner = DbInterner::new_with(db, self.env.krate);
-            rustc_type_ir::fold_regions(interner, args, |region, _| match region.kind() {
-                rustc_type_ir::RegionKind::ReBound(..) => region,
-                _ => Region::new_erased(interner),
-            })
-        };
+        let erased = |args| erase_regions(DbInterner::new_with(db, self.env.krate), args);
         // A closure is built in by a compile at a level above 1 alone.
         if let InstanceDef::Closure(_) = def {
             let instance = Instance { def, args: erased(args).store(), checked: self.cg.checked };
@@ -11699,11 +11731,7 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
             InstanceDef::Closure(_) | InstanceDef::DropGlue => false,
             _ => return,
         };
-        let interner = DbInterner::new_with(db, self.env.krate);
-        let args = rustc_type_ir::fold_regions(interner, args, |region, _| match region.kind() {
-            rustc_type_ir::RegionKind::ReBound(..) => region,
-            _ => Region::new_erased(interner),
-        });
+        let args = erase_regions(DbInterner::new_with(db, self.env.krate), args);
         let instance = Instance { def, args: args.store(), checked: self.cg.checked };
         if let Some((body, hint)) = tier::seen_body(db, &instance, &self.env.store(), tracked) {
             if body.func.signature == *sig {
@@ -12493,6 +12521,47 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
                     let b = self.builder.ins().load(lane.ty, MEM, on_false, offset);
                     let value = self.builder.ins().select(chosen, a, b);
                     self.builder.ins().store(MEM, value, dst, offset);
+                }
+            }
+            ("simd_select_bitmask", [mask, on_true, on_false]) => {
+                let (mask, _) = self.operand(mask)?;
+                let (on_true, _) = self.operand(on_true)?;
+                let (on_false, _) = self.operand(on_false)?;
+                let (lane, count) = self.simd_lanes(dst_ty)?;
+                // Lane i by bit i of the mask, an integer or bytes: its bytes in memory in order.
+                let lanes: Vec<Value> = (0..count)
+                    .map(|i| {
+                        let offset = (i * lane.ty.bytes() as u64) as i32;
+                        let byte = self.builder.ins().load(types::I8, MEM, mask, (i / 8) as i32);
+                        let bit = self.builder.ins().ushr_imm(byte, (i % 8) as i64);
+                        let bit = self.builder.ins().band_imm(bit, 1);
+                        let a = self.builder.ins().load(lane.ty, MEM, on_true, offset);
+                        let b = self.builder.ins().load(lane.ty, MEM, on_false, offset);
+                        self.builder.ins().select(bit, a, b)
+                    })
+                    .collect();
+                for (i, value) in lanes.into_iter().enumerate() {
+                    self.builder.ins().store(MEM, value, dst, i as i32 * lane.ty.bytes() as i32);
+                }
+            }
+            ("simd_fma" | "simd_relaxed_fma", [a, b, c]) => {
+                let (a, _) = self.operand(a)?;
+                let (b, _) = self.operand(b)?;
+                let (c, _) = self.operand(c)?;
+                let (lane, count) = self.simd_lanes(dst_ty)?;
+                if !lane.ty.is_float() {
+                    unsupported!("`{name}` of integers");
+                }
+                let lanes: Vec<Value> = (0..count)
+                    .map(|i| {
+                        let offset = (i * lane.ty.bytes() as u64) as i32;
+                        let [x, y, z] =
+                            [a, b, c].map(|v| self.builder.ins().load(lane.ty, MEM, v, offset));
+                        self.builder.ins().fma(x, y, z)
+                    })
+                    .collect();
+                for (i, value) in lanes.into_iter().enumerate() {
+                    self.builder.ins().store(MEM, value, dst, i as i32 * lane.ty.bytes() as i32);
                 }
             }
             ("simd_extract", [vector, index]) => {
@@ -13331,6 +13400,68 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
                     self.builder.ins().store(MEM, high, dst, lane + 8);
                 }
             }
+            (_, [a, indices, b]) if name.starts_with("x86.avx512.vpermi2var.") => {
+                let (a, ty) = self.operand(a)?;
+                let (indices, _) = self.operand(indices)?;
+                let (b, _) = self.operand(b)?;
+                let width: i64 = match name.split('.').nth(3) {
+                    Some("qi") => 1,
+                    Some("hi") => 2,
+                    Some("d" | "ps") => 4,
+                    Some("q" | "pd") => 8,
+                    _ => unsupported!("LLVM intrinsic `{name}`"),
+                };
+                let lanes = self.layout(ty)?.size.bytes() as i64 / width;
+                let int = Type::int(width as u16 * 8).expect("a lane of 1 to 8 bytes");
+                // Each lane is the one its index names of `a` then `b`, by its low bits.
+                let values: Vec<Value> = (0..lanes)
+                    .map(|lane| {
+                        let index =
+                            self.builder.ins().load(int, MEM, indices, (lane * width) as i32);
+                        let index = self.builder.ins().band_imm(index, 2 * lanes - 1);
+                        let index = if width < 8 {
+                            self.builder.ins().uextend(ptr(), index)
+                        } else {
+                            index
+                        };
+                        let second = self.builder.ins().icmp_imm(
+                            IntCC::UnsignedGreaterThanOrEqual,
+                            index,
+                            lanes,
+                        );
+                        let base = self.builder.ins().select(second, b, a);
+                        let slot = self.builder.ins().band_imm(index, lanes - 1);
+                        let offset = self.builder.ins().imul_imm(slot, width);
+                        let addr = self.builder.ins().iadd(base, offset);
+                        self.builder.ins().load(int, MEM, addr, 0)
+                    })
+                    .collect();
+                for (lane, value) in values.into_iter().enumerate() {
+                    self.builder.ins().store(MEM, value, dst, lane as i32 * width as i32);
+                }
+            }
+            ("x86.sse41.phminposuw", [words]) => {
+                let (words, _) = self.operand(words)?;
+                // The least of eight unsigned words, then the first lane that holds it, then zeros.
+                let mut least = self.builder.ins().load(types::I16, MEM, words, 0);
+                let mut at = self.builder.ins().iconst(types::I16, 0);
+                for lane in 1..8 {
+                    let word = self.builder.ins().load(types::I16, MEM, words, lane * 2);
+                    let less = self.builder.ins().icmp(IntCC::UnsignedLessThan, word, least);
+                    let index = self.builder.ins().iconst(types::I16, i64::from(lane));
+                    least = self.builder.ins().select(less, word, least);
+                    at = self.builder.ins().select(less, index, at);
+                }
+                let zero = self.builder.ins().iconst(types::I16, 0);
+                self.builder.ins().store(MEM, least, dst, 0);
+                self.builder.ins().store(MEM, at, dst, 2);
+                for lane in 2..8 {
+                    self.builder.ins().store(MEM, zero, dst, lane * 2);
+                }
+            }
+            // Clears the upper halves of the vector registers, in which no value is kept from
+            // one of ra-jit's instructions to the next.
+            ("x86.avx.vzeroupper", []) => {}
             // A hint to the cache, which the program behaves the same without.
             ("prefetch.p0", [_address, _write, _locality, _cache]) => {}
             _ => unsupported!("LLVM intrinsic `{name}`"),
@@ -14493,7 +14624,7 @@ fn register_locals(body: &MirBody<'_>, forwarded: &FxHashMap<LocalId, LocalId>) 
     let whole = |place: &StoredPlace| place.projection.as_slice().is_empty().then_some(place.local);
     // Every mention of the whole local, and the ones that are a value read or an assignment.
     let mut mentions: FxHashMap<LocalId, (usize, usize)> = FxHashMap::default();
-    body.clone().walk_places(|place| {
+    body.visit_places(|place| {
         if let Some(local) = whole(place) {
             mentions.entry(local).or_default().0 += 1;
         }
@@ -14604,7 +14735,7 @@ fn forwarded_temps(body: &MirBody<'_>) -> FxHashMap<LocalId, LocalId> {
     }
     // Written once and read once, and by nothing else: the binding is not what it is made of.
     let mut mentions: FxHashMap<LocalId, usize> = FxHashMap::default();
-    body.clone().walk_places(|place| *mentions.entry(place.local).or_default() += 1);
+    body.visit_places(|place| *mentions.entry(place.local).or_default() += 1);
     let fake_reads = |local: LocalId| {
         body.basic_blocks
             .iter()
