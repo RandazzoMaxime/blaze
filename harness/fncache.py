@@ -15,8 +15,8 @@ in memory, found on disk or computed, and each step says which it has to be:
 - a comment and a format edit in it, and an edit of a function it does not reach, keep it;
 - an edit to a function it reaches through another computes it again;
 - `width::<u8>` and `width::<u64>` are kept apart though their arguments are the same bytes;
-- `counted` and `noisy` are refused: a static that changes and printing, each said with
-  where it is written;
+- `counted`, `noisy` and `addressed` are refused: a static that changes, printing and an
+  address formatted (`{:p}`), the first two said with where they are written;
 - a daemon started again finds what the first kept: the hash is the same in every process;
 - cargo's own build runs every call, and prints the same.
 """
@@ -85,6 +85,12 @@ fn noisy(n: u64) -> u64 {
     n * 2
 }
 
+/// What it gives holds an address, another in every run.
+#[ra_jit::cache]
+fn addressed(n: u64) -> bool {
+    format!("{:p}", &n).len() > 2
+}
+
 #[inline(never)]
 fn unrelated() -> u64 {
     7
@@ -97,6 +103,7 @@ fn main() {
     println!("width {} {}", width::<u8>(5), width::<u64>(5));
     println!("counted {} {} {}", counted(1), counted(1), CALLS.load(Ordering::Relaxed));
     println!("noisy {} {}", noisy(3), noisy(3));
+    println!("addressed {} {}", addressed(4), addressed(4));
     println!("unrelated {}", unrelated());
 }
 """
@@ -124,6 +131,9 @@ GENERIC = {"width": 2}
 REFUSED = {
     "counted": re.compile(r"`fcache::counted` is not cached: it reads the static `fcache::CALLS`, which can change, at src/main\.rs:\d+:\d+"),
     "noisy": re.compile(r"`fcache::noisy` is not cached: it reaches `std::io::stdio::_print`.*, at src/main\.rs:\d+:\d+"),
+    # What `format_args!` is lowered to has no place in the source, so neither has the call.
+    "addressed": re.compile(r"`fcache::addressed` is not cached: it reaches .*, which calls `[^`]+`, which "
+                            r"(formats an address|gives an address as a number)(, at src/main\.rs:\d+:\d+)?$"),
 }
 
 
