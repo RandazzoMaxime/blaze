@@ -1180,8 +1180,14 @@ impl<'a, 'db> Checker<'a, '_, 'db> {
             Some(name) => {
                 self.report("E0597", loan.span, format!("`{name}` does not live long enough"))
             }
+            // At the temporary, as rustc's: a pattern's borrow, `match Some(s()) {
+            // Some(ref m) => .. }`, at `Some(s())`, not at `ref m`.
             None => {
-                self.report("E0716", loan.span, "temporary value dropped while borrowed".to_owned())
+                let span = match loan.span {
+                    MirSpan::ExprId(_) => loan.span,
+                    _ => temporary_span(self.body, loan.local).unwrap_or(loan.span),
+                };
+                self.report("E0716", span, "temporary value dropped while borrowed".to_owned())
             }
         }
     }
@@ -2138,11 +2144,13 @@ impl<'a, 'db> Checker<'a, '_, 'db> {
 
     fn report_move_errors(&mut self) {
         let errors = std::mem::take(&mut self.move_errors);
-        let mut reported_groups: FxHashSet<ExprId> = FxHashSet::default();
+        let mut reported_groups: FxHashSet<(ExprId, LocalId, Vec<PlaceElem>)> =
+            FxHashSet::default();
         for error in errors {
             let mut span = error.span;
             // A variable bound by a pattern is reported where the value matched on is, once
-            // for all the variables of the pattern.
+            // for the variables of the pattern that move out of the same place, as rustc's
+            // `MovesFromPlace` groups them: `(D(s), &t)` is two errors.
             let statement = self.body.basic_blocks[error.location.block]
                 .statements
                 .get(error.location.statement);
@@ -2157,7 +2165,14 @@ impl<'a, 'db> Checker<'a, '_, 'db> {
             {
                 match self.scrutinee_of(binding) {
                     Some(Some(scrutinee)) => {
-                        if !reported_groups.insert(scrutinee) {
+                        let len = match error.kind {
+                            MoveErrorKind::Borrowed(len)
+                            | MoveErrorKind::Destructor(len)
+                            | MoveErrorKind::SliceOrArray(len) => len,
+                            MoveErrorKind::Guard => 0,
+                        };
+                        let base = error.place.1[..len.min(error.place.1.len())].to_vec();
+                        if !reported_groups.insert((scrutinee, error.place.0, base)) {
                             continue;
                         }
                         span = MirSpan::ExprId(scrutinee);
@@ -2182,13 +2197,26 @@ impl<'a, 'db> Checker<'a, '_, 'db> {
         matches!(ty.kind(), TyKind::Slice(_) | TyKind::Array(..))
     }
 
+    /// A slice or array type as rustc writes it: `[A; 1]`, not the length's representation.
+    fn array_name(&self, ty: Ty<'_>) -> String {
+        match ty.kind() {
+            TyKind::Array(element, len) => {
+                match hir_ty::consteval::try_const_usize(self.ctx.db, len) {
+                    Some(len) => format!("[{element:?}; {len}]"),
+                    None => format!("[{element:?}; _]"),
+                }
+            }
+            _ => format!("{ty:?}"),
+        }
+    }
+
     fn move_error_message(&self, error: &MoveError) -> String {
         let place = PlaceRef { local: error.place.0, projection: &error.place.1 };
         match error.kind {
             MoveErrorKind::Borrowed(len) if self.is_slice_or_array(error, len + 1) => {
                 let ty = self.ctx.place_ty(self.body, place.local, &place.projection[..len + 1]).ty;
                 let kind = if matches!(ty.kind(), TyKind::Slice(_)) { "slice" } else { "array" };
-                format!("cannot move out of type `{ty:?}`, a non-copy {kind}")
+                format!("cannot move out of type `{}`, a non-copy {kind}", self.array_name(ty))
             }
             MoveErrorKind::Borrowed(len) => {
                 let base = place.base(len);
@@ -2215,7 +2243,7 @@ impl<'a, 'db> Checker<'a, '_, 'db> {
                 let base = place.base(len);
                 let ty = self.ctx.place_ty(self.body, base.local, base.projection).ty;
                 let kind = if matches!(ty.kind(), TyKind::Slice(_)) { "slice" } else { "array" };
-                format!("cannot move out of type `{ty:?}`, a non-copy {kind}")
+                format!("cannot move out of type `{}`, a non-copy {kind}", self.array_name(ty))
             }
         }
     }
@@ -2241,6 +2269,30 @@ fn capture_temps(body: &MirBody<'_>) -> FxHashMap<LocalId, MirSpan> {
         }
     }
     temps
+}
+
+/// Where the temporary `local` is made: the statement or call that assigns it.
+fn temporary_span(body: &MirBody<'_>, local: LocalId) -> Option<MirSpan> {
+    for (_, block) in body.basic_blocks.iter() {
+        for statement in &block.statements {
+            if let StatementKind::Assign(place, _) = &statement.kind
+                && place.local == local
+                && place.projection.as_slice().is_empty()
+                && statement.span != MirSpan::Unknown
+            {
+                return Some(statement.span);
+            }
+        }
+        if let Some(terminator) = &block.terminator
+            && let TerminatorKind::Call { destination, .. } = &terminator.kind
+            && destination.local == local
+            && destination.projection.as_slice().is_empty()
+            && terminator.span != MirSpan::Unknown
+        {
+            return Some(terminator.span);
+        }
+    }
+    None
 }
 
 fn static_muts(ctx: &Ctx<'_, '_>, body: &MirBody<'_>) -> FxHashSet<LocalId> {
