@@ -54,6 +54,9 @@ env:
   # vendor/, which are most of a build. The harnesses run without it, since cargo_ra_jit.py
   # tests a user's own wrapper.
   SCCACHE_GHA_ENABLED: "true"
+  # Main alone writes it, as with rust-cache: what a pull request or a merge-queue entry writes
+  # is kept for that ref alone, which nothing reads again, and it pushes main's out of the 10 GB.
+  SCCACHE_GHA_RW_MODE: ${{ github.ref == 'refs/heads/main' && 'READ_WRITE' || 'READ_ONLY' }}
 
 defaults:
   run:
@@ -148,14 +151,10 @@ jobs:
           # What `buildmodel.py` builds for besides the host.
           targets: ${{ matrix.part == 'buildmodel' && inputs.os == 'ubuntu-24.04' && 'aarch64-unknown-linux-gnu x86_64-unknown-linux-musl' || '' }}
       - name: Linux tools
-        if: runner.os == 'Linux'
-        run: |
-          case "$RA_JIT_PART" in
-            core|quick-1) sudo apt-get install -y valgrind gdb;;
-            buildmodel) [ "$(uname -m)" = x86_64 ] && sudo apt-get install -y gcc-aarch64-linux-gnu musl-tools qemu-user || true;;
-          esac
-        env:
-          RA_JIT_PART: ${{ matrix.part }}
+        if: runner.os == 'Linux' && (matrix.part == 'core' || matrix.part == 'quick-1' || (matrix.part == 'buildmodel' && runner.arch == 'X64'))
+        uses: ./.github/actions/apt
+        with:
+          packages: ${{ matrix.part == 'buildmodel' && 'gcc-aarch64-linux-gnu musl-tools qemu-user' || 'valgrind gdb' }}
       # `debuginfo.py` has perf unwind what ra-jit built, which it says it did not run where
       # there is no perf or the kernel does not let this user sample.
       - name: perf
@@ -253,7 +252,7 @@ jobs:
           git sparse-checkout set tests/ui
           git fetch -q --depth 1 --filter=blob:none origin a30aa9064df6a504b6a323c6884a2f4cfbfff666
           git checkout -q FETCH_HEAD
-      - run: python3 harness/borrowck_ui.py "$RUNNER_TEMP/rust" --bin target/release/ra-jit --jobs 4 --mode both --min-pass 1411
+      - run: python3 harness/borrowck_ui.py "$RUNNER_TEMP/rust" --bin target/release/ra-jit --jobs 4 --mode both --min-pass 1419
 
   # The few run-pass tests of rustc's that the nightly claims run, or a run on another
   # platform, once caught ra-jit failing (harness/ui-pinned.txt), from the tests of the pinned

@@ -4,10 +4,10 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-word = { path = "word" }
+lines = { path = "lines" }
 shout = { path = "shout" }
 outer = { path = "outer" }
 
 [workspace]
-members = ["word", "shout"]
+members = ["word", "lines", "shout"]
 exclude = ["outer"]

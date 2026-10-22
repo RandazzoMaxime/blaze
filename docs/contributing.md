@@ -145,7 +145,8 @@ it. The paths that remain may be fixed where they are wrong, and are otherwise o
    rust-analyzer changes inference, MIR lowering and layout queries, any of which can
    change generated code. The corpus with `--layouts`, `breakers.py` and
    `fuzz/fuzz.py smoke` are the ones that notice first.
-4. Merge into `main`. The `fork sync` workflow sends the merge to the fork.
+4. Land it on `main` through the merge queue ([Landing a change](#landing-a-change)). The
+   `fork sync` workflow sends the merge to the fork.
 
 This was done once, on 2026-10-20, for upstream `0b21bd6596`. The merge was clean; the one
 API change ra-jit had to follow was `CrateData::is_proc_macro` becoming `target_kind` (a
@@ -220,12 +221,29 @@ metadata and main with all the others, so:
   can take another lane's changes. Commit work in progress to the lane's branch.
 - **Run harnesses with `RUST_BACKTRACE=0`**, so a test that panics prints its message and
   not a backtrace into what the harness compares.
-- **Merge small and often**, once the pull request's fast tier is green. A lane that waits
-  hours for one large merge meets every other lane's changes at once. For anything the fast
-  tier does not cover, run the full tier on the branch first
+- **Land small and often, through the merge queue** ([below](#landing-a-change)). A lane that
+  waits hours for one large merge meets every other lane's changes at once. For anything the
+  fast tier does not cover, run the full tier on the branch first
   (`gh workflow run ra-jit.yaml --ref <branch> -f tier=full`).
 - **Clean up when done:** remove the worktree (`git worktree remove`), its target directory,
   and the lane's directories on the dev host; delete the merged branch.
+
+## Landing a change
+
+Main moves only through the merge queue: nobody pushes to it or merges into it by hand. Once the
+branch's work is committed and the local gate passed ([What a change needs](#what-a-change-needs)),
+run in the lane's worktree
+
+    python3 .github/scripts/land.py "what the branch does"
+
+It pushes the branch, opens its pull request ("Merge <branch>: what the branch does") and queues
+it. The queue merges it onto main and whatever is ahead of it, runs CI's fast tier on that
+(about ten minutes, [harness.md](harness.md#ci)) and merges it with a merge commit, as
+`git merge --no-ff` would. `land.py` waits for that and prints the commit, or says why the pull
+request left the queue; then fix the branch and run it again. A branch that conflicts with main
+gets `git merge origin/main` first. Once it has merged, GitHub deletes the branch on origin;
+remove the worktree and the local branch
+(`git worktree remove <dir> && git branch -D <branch>`).
 
 ## The build that ships
 

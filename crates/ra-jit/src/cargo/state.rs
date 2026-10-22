@@ -1037,7 +1037,7 @@ fn project(asked: &Invocation, cwd: &Path, metadata: &Metadata) -> Result<PathBu
 fn other_toolchain() -> Option<String> {
     let rustc = rustc_path();
     let said = |flag: &str| {
-        let output = Command::new(&rustc).arg(flag).output().ok()?;
+        let output = crate::answers::answer(Command::new(&rustc).arg(flag), &[]).ok()?;
         Some(String::from_utf8_lossy(&output.stdout).trim().to_owned())
     };
     let version = said("--version")?;
@@ -1094,7 +1094,8 @@ const LIBRARY_PATH: &str = if cfg!(windows) {
 /// dynamic library among them. `None` when rustc does not say.
 fn sysroot_libraries() -> Option<PathBuf> {
     let rustc = rustc_path();
-    let output = Command::new(rustc).arg("--print=target-libdir").output().ok()?;
+    let output =
+        crate::answers::answer(Command::new(rustc).arg("--print=target-libdir"), &[]).ok()?;
     let said = String::from_utf8_lossy(&output.stdout).trim().to_owned();
     (output.status.success() && !said.is_empty()).then(|| PathBuf::from(said))
 }
