@@ -7115,3 +7115,65 @@ pub mod constructor_extends_temporaries {
         log.into_inner()
     }
 }
+
+/// What a signature's associated type is, related to the type it normalizes to: an impl's
+/// elided lifetimes in `Self::Target`, and an alias that writes one elided lifetime twice.
+pub mod associated_type_returns {
+    use std::marker::PhantomData;
+    use std::ops::{Deref, DerefMut};
+
+    pub struct Path<'a> {
+        pub parts: Vec<&'a str>,
+    }
+
+    pub struct Scope<'whole, 'part> {
+        inner: &'whole mut Path<'part>,
+    }
+
+    impl<'a> Deref for Scope<'_, 'a> {
+        type Target = Path<'a>;
+        fn deref(&self) -> &Self::Target {
+            self.inner
+        }
+    }
+
+    impl DerefMut for Scope<'_, '_> {
+        fn deref_mut(&mut self) -> &mut Self::Target {
+            self.inner
+        }
+    }
+
+    #[derive(Clone, Copy)]
+    pub struct Pair<'a, 'b: 'a> {
+        marker: PhantomData<&'a &'b ()>,
+        pub value: Option<&'b u32>,
+    }
+
+    pub type Same<'a> = Pair<'a, 'a>;
+
+    impl<'a, 'b> Deref for Pair<'a, 'b> {
+        type Target = Option<&'b u32>;
+        fn deref(&self) -> &Option<&'b u32> {
+            &self.value
+        }
+    }
+
+    pub fn value(pair: Same) -> Option<&u32> {
+        *pair
+    }
+
+    pub fn run(words: &[String]) -> usize {
+        let mut path = Path { parts: Vec::new() };
+        let mut scope = Scope { inner: &mut path };
+        for word in words {
+            scope.parts.push(word);
+        }
+        let mut total = 0;
+        for part in &mut scope.parts {
+            total += part.len();
+        }
+        let four = 4;
+        let pair: Same = Pair { marker: PhantomData, value: Some(&four) };
+        total + value(pair).copied().unwrap_or(0) as usize
+    }
+}
