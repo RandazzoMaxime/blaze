@@ -248,11 +248,11 @@ For a CI failure, the last line of the harness step lists which scripts failed.
 each platform, each on a machine of its own kind.
 
 The **fast tier** runs on every pull request, every push to main and every entry of the merge
-queue, and takes about TIME_FAST minutes. On Linux x86-64, Linux AArch64 and macOS arm64 it:
+queue, and takes about ten minutes. On Linux x86-64, Linux AArch64 and macOS arm64 it:
 
 - builds ra-jit once, with the `llvm` feature, and hands the binary to its other jobs;
 - runs `harness/unittests.py`;
-- runs the parts of `ci.py --parts fast` (`quick-1` and `quick-2`, about four minutes each)
+- runs the parts of `ci.py --parts fast` (`quick-1` and `quick-2`, three to six minutes each)
   under each backend, as a job each;
 - on Linux x86-64, runs rustc's borrow-check tests with a floor under the passes, and the
   run-pass tests of `harness/ui-pinned.txt`, against that build.
@@ -280,7 +280,10 @@ wrapper, since `cargo_ra_jit.py` tests a user's own.
 
 `ci` is the job that says whether everything that ran passed, and it is the one check branch
 rules and the merge queue require. A job that is renamed or split does not change it.
-MEASURED
+Measured on 2026-10-22 ([#67](https://github.com/indexable-inc/ra-jit/pull/67)): the fast
+tier took 15.4 minutes with the sccache cache empty and 10.1 with it filled, where the macOS
+build (4 minutes) and then its harnesses (6) are the longest path. One tier that ran everything
+took 44 to 67 minutes before.
 
 The repository ruleset `main` (Settings, Rules) holds the default branch to three rules. A
 push to it needs `ci` to have passed on the commit pushed, the branch can't be deleted, and
