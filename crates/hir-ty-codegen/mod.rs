@@ -6317,6 +6317,44 @@ struct SuspendedState {
     held: hir_ty::mir::HeldLocals,
 }
 
+/// `args` with every lifetime but a bound one erased: lifetimes change nothing about the
+/// code, and the ones a caller passes on are its own parameters, which mean nothing in the
+/// callee.
+///
+/// What was erased is kept per thread. The arguments of a closure hold the types of all it
+/// captured, and of the closures those hold: erased again at every call, they are interned
+/// again each time, and every thread of a build waits on the interner's locks.
+pub(crate) fn erase_regions<'db>(
+    interner: DbInterner<'db>,
+    args: GenericArgs<'db>,
+) -> GenericArgs<'db> {
+    use rustc_type_ir::TypeVisitableExt;
+    /// How many are kept before they are let go, as each keeps its types interned.
+    const KEPT: usize = 1 << 16;
+    thread_local! {
+        static ERASED: std::cell::RefCell<FxHashMap<StoredGenericArgs, StoredGenericArgs>> =
+            std::cell::RefCell::default();
+    }
+    if !args.has_free_regions() {
+        return args;
+    }
+    let key = args.store();
+    if let Some(known) = ERASED.with_borrow(|it| it.get(&key).map(|it| it.as_ref())) {
+        return known;
+    }
+    let erased = rustc_type_ir::fold_regions(interner, args, |region, _| match region.kind() {
+        rustc_type_ir::RegionKind::ReBound(..) => region,
+        _ => Region::new_erased(interner),
+    });
+    ERASED.with_borrow_mut(|it| {
+        if it.len() >= KEPT {
+            it.clear();
+        }
+        it.insert(key, erased.store());
+    });
+    erased
+}
+
 /// Whether calls to `func` pass a `&Location` after the declared arguments. A method of a trait
 /// impl inherits the attribute from the trait's declaration.
 fn track_caller(db: &dyn HirDatabase, func: FunctionId) -> bool {
@@ -11622,13 +11660,7 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
         if !*ENABLED || !self.cg.target.exception_in_register() || Target::current().is_wasm() {
             return None;
         }
-        let erased = |args: GenericArgs<'db>| {
-            let interner = DbInterner::new_with(db, self.env.krate);
-            rustc_type_ir::fold_regions(interner, args, |region, _| match region.kind() {
-                rustc_type_ir::RegionKind::ReBound(..) => region,
-                _ => Region::new_erased(interner),
-            })
-        };
+        let erased = |args| erase_regions(DbInterner::new_with(db, self.env.krate), args);
         // A closure is built in by a compile at a level above 1 alone.
         if let InstanceDef::Closure(_) = def {
             let instance = Instance { def, args: erased(args).store(), checked: self.cg.checked };
@@ -11699,11 +11731,7 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
             InstanceDef::Closure(_) | InstanceDef::DropGlue => false,
             _ => return,
         };
-        let interner = DbInterner::new_with(db, self.env.krate);
-        let args = rustc_type_ir::fold_regions(interner, args, |region, _| match region.kind() {
-            rustc_type_ir::RegionKind::ReBound(..) => region,
-            _ => Region::new_erased(interner),
-        });
+        let args = erase_regions(DbInterner::new_with(db, self.env.krate), args);
         let instance = Instance { def, args: args.store(), checked: self.cg.checked };
         if let Some((body, hint)) = tier::seen_body(db, &instance, &self.env.store(), tracked) {
             if body.func.signature == *sig {
@@ -14596,7 +14624,7 @@ fn register_locals(body: &MirBody<'_>, forwarded: &FxHashMap<LocalId, LocalId>) 
     let whole = |place: &StoredPlace| place.projection.as_slice().is_empty().then_some(place.local);
     // Every mention of the whole local, and the ones that are a value read or an assignment.
     let mut mentions: FxHashMap<LocalId, (usize, usize)> = FxHashMap::default();
-    body.clone().walk_places(|place| {
+    body.visit_places(|place| {
         if let Some(local) = whole(place) {
             mentions.entry(local).or_default().0 += 1;
         }
@@ -14707,7 +14735,7 @@ fn forwarded_temps(body: &MirBody<'_>) -> FxHashMap<LocalId, LocalId> {
     }
     // Written once and read once, and by nothing else: the binding is not what it is made of.
     let mut mentions: FxHashMap<LocalId, usize> = FxHashMap::default();
-    body.clone().walk_places(|place| *mentions.entry(place.local).or_default() += 1);
+    body.visit_places(|place| *mentions.entry(place.local).or_default() += 1);
     let fake_reads = |local: LocalId| {
         body.basic_blocks
             .iter()
