@@ -97,7 +97,9 @@ All of these are rustc's, written from `compiler/rustc_borrowck` at the pinned n
   In a `const` or `static` item's value, a call of a `const fn` is promotable too
   (`Migrations::new(&[Migration::new("a")])`), as it is in rustc's const contexts.
 - Region inference: liveness of locals (drops kept live only back to where the local may be
-  initialized), outlives constraints from every statement, call, cast and aggregate, the
+  initialized; what a drop uses as rustc's dropck: an associated type as what it normalizes
+  to, another alias what its bounds and captures leave, `for<'a> T: 'a` as `'static`, and
+  nothing of a `ManuallyDrop`), outlives constraints from every statement, call, cast and aggregate, the
   signature's universal regions and implied bounds (normalized parameters and the impl
   header included, for associated consts too; a projection implies what its arguments do as
   well as what it normalizes to, `<&'a &'b () as Trait>::Type` that `'b: 'a`), where clauses (elaborated through
@@ -133,7 +135,8 @@ All of these are rustc's, written from `compiler/rustc_borrowck` at the pinned n
   against it, so the error is the one rustc reports.
 - Loans that outlive their storage: E0597, E0515, E0716, and promoted constants (calls of
   `#[rustc_promotable]` functions such as `size_of` included) and extended temporaries of
-  `const` and `static` items as `'static`. An expression statement's value is not read once
+  `const` and `static` items as `'static` (not a variable the value borrows, which is E0597
+  there, as rustc's `UseAsConst` rather than E0515). An expression statement's value is not read once
   its temporaries are dropped, so `&temp();` alone is no E0716, as in rustc.
 - `impl Trait` captures: a return-position `impl Trait` keeps alive and relates only the
   lifetimes it captures, those listed in `use<..>` or, before edition 2024 outside traits and
@@ -207,8 +210,8 @@ With no borrow checker, the 245 units rustc accepts would pass. Now:
 
 | Mode | In scope | Pass | rustc accepts, ra-jit too | rustc rejects, same errors |
 |---|---|---|---|---|
-| Polonius | 1579 | 1400 (88.7%) | 245 of 245 | 1155 of 1334 |
-| NLL | 1577 | 1395 (88.5%) | 226 of 226 | 1169 of 1351 |
+| Polonius | 1579 | 1405 (89.0%) | 245 of 245 | 1160 of 1334 |
+| NLL | 1577 | 1401 (88.8%) | 226 of 226 | 1175 of 1351 |
 
 463 units are out of scope; 344 of them need a nightly feature. CI runs the scoring on Linux
 and fails below a floor a few units under the count there.
@@ -222,9 +225,10 @@ just, axum, nushell, delta, eza, tokei and starship it finds nothing, nor on the
 
 Every failing unit is one where rustc gives an error ra-jit does not, or gives it on another
 line or with another code. By what is wrong, most first: 23 "lifetime may not live long
-enough" and 15 E0597 not reported, 11 E0309 and 10 E0310 not reported, 10 with only an error
-rustc does not give, 9 each of E0716 and E0521 not reported, 8 "lifetime may not live long
-enough" on another line, and 8 each of E0507 and E0700 not reported, then a long tail. The causes, grouped:
+enough" and 13 E0597 not reported, 11 "lifetime may not live long enough" on another line,
+11 E0310 and 10 E0309 not reported, 10 with only an error rustc does not give, 9 E0521 and
+8 E0507 not reported, and 7 each of E0716, E0700 and `FnMut` escapes not reported, then a
+long tail. The causes, grouped:
 
 - **Higher-ranked regions and placeholders** (`for<'a>` bounds, closures with higher-ranked
   signatures): rustc checks them with placeholders in universes; ra-jit does not yet, and

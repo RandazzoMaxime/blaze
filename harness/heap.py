@@ -11,7 +11,8 @@ of the memo, which stay when the value goes), an `interned` value, or a tracked 
 What no ingredient made goes to ra-jit's own structures by the function that allocated it.
 
 `--syntax` also says what of it is syntax: rowan's green nodes (the trees, which a memo of
-`parse` or anything holding a `GreenNode` keeps), its red nodes (cursors over a tree), the
+`parse` or anything holding a `GreenNode` keeps), its flat trees (the same, as arrays), its
+red nodes (cursors over a tree), the
 lexer's and parser's buffers, ast id maps and span maps, each by the ingredient that made it.
 """
 import collections, re, sys
@@ -25,7 +26,8 @@ OWN = [("symbol table", "SymbolTable"), ("vfs / file loading", "vfs::"), ("vfs /
        ("object emission", "cranelift_object"), ("object emission", "object::write"),
        ("codegen driver (outside queries)", "hir_ty_codegen::"), ("ra-jit main (other)", "ra_jit::")]
 # What of an allocation is syntax, by the innermost frame that says so.
-SYNTAX = [("green nodes", ("rowan::green", "rowan::arc", "GreenNodeBuilder", "SyntaxTreeBuilder")),
+SYNTAX = [("flat trees", ("rowan::flat", "FlatTree")),
+          ("green nodes", ("rowan::green", "rowan::arc", "GreenNodeBuilder", "SyntaxTreeBuilder")),
           ("red nodes", ("rowan::cursor", "rowan::api")),
           ("lexer and parser buffers", ("parser::", "LexedStr", "rustc_lexer")),
           ("ast id maps", ("AstIdMap",)),
