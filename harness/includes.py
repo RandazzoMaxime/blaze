@@ -80,6 +80,10 @@ def follow(files, steps):
         if daemon.poll() is not None:
             raise SystemExit(f"the daemon did not start: {log_path}")
         time.sleep(0.05)
+    # A daemon whose first build took code of the checkout from the store (RA_JIT_CACHE) builds
+    # again by itself before anything else (#12), and a request waits for that build: what it
+    # compiles is no step's.
+    subprocess.run([RA_JIT, "sync", socket, *ask], capture_output=True, text=True, timeout=120)
 
     def run(path):
         try:

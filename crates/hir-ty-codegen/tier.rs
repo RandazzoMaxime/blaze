@@ -61,6 +61,12 @@ const BUILT_IN: usize = 120;
 /// its own share, so that what the function calls first does not leave its loops nothing.
 const CALL_BUDGET: usize = 8_000;
 const WHOLE_BUDGET: usize = 120_000;
+/// How deep a build's compile builds in and shows bodies: an iterator's chain of adapters is
+/// that deep before its loop reaches `Vec::push` and what that calls (`from_iter`, `extend`,
+/// `for_each`, `fold`, two closures, `push`, `reserve`, `needs_to_grow`, `capacity`). At
+/// [`DEPTH`] the build of the kernels was refused 4323 bodies for their depth, and `words`
+/// took 1.43 times release's time rather than 1.36 (dev-aws-6, 2026-10-21).
+const BUILD_DEPTH: u32 = 16;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Level {
@@ -312,6 +318,12 @@ struct Inlining {
         (InstanceDef, StoredGenericArgs, bool),
         Option<std::rc::Rc<super::fragment::Inlinable>>,
     >,
+    /// The size of a body that was built and then found too large, which a build of it with
+    /// more room only adds to: it is not built again for a call that allows no more. A body
+    /// built while its callees found no room is not kept in [`Inlining::built`], and what it
+    /// counted is given back ([`untally`]), so each call would build it again, and each of
+    /// its callees, at every depth.
+    oversized: FxHashMap<(InstanceDef, StoredGenericArgs, bool), usize>,
 }
 
 thread_local! {
@@ -327,10 +339,10 @@ pub(super) fn plain<T>(work: impl FnOnce() -> T) -> T {
     out
 }
 
-/// As [`plain`], for the compile of a function of a build. With `RA_JIT_INLINE=all` and LLVM
-/// at `-O2` or above, `work` builds in and shows LLVM what the function calls of any crate,
-/// as a compile at a level above 1 does with no function hot: what it builds in then depends
-/// on the database alone.
+/// As [`plain`], for the compile of a function of a build. In a build of a whole program or
+/// with `RA_JIT_INLINE=all` (see [`across`]), and LLVM at `-O2` or above, `work` builds in
+/// and shows LLVM what the function calls of any crate, as a compile at a level above 1
+/// does with no function hot: what it builds in then depends on the database alone.
 pub(super) fn for_build<T>(work: impl FnOnce() -> T) -> T {
     let fresh = across().then(|| Inlining {
         roots: FxHashSet::default(),
@@ -343,6 +355,7 @@ pub(super) fn for_build<T>(work: impl FnOnce() -> T) -> T {
         spent: 0,
         seen: 0,
         built: FxHashMap::default(),
+        oversized: FxHashMap::default(),
     });
     let held = INLINING.with(|it| std::mem::replace(&mut *it.borrow_mut(), fresh));
     let out = work();
@@ -350,20 +363,18 @@ pub(super) fn for_build<T>(work: impl FnOnce() -> T) -> T {
     out
 }
 
-/// Whether a build's compiles build in what they call across crates (`RA_JIT_INLINE=all`).
+/// Whether a build's compiles build in what they call across crates: in a build of a whole
+/// program unless `RA_JIT_INLINE=crate` (or `0`, which builds nothing in), and in any build
+/// with `RA_JIT_INLINE=all`.
 /// The daemon's builds do not: an entry of the store is keyed by its own function alone.
 fn across() -> bool {
-    static ACROSS: std::sync::LazyLock<bool> = std::sync::LazyLock::new(|| {
-        std::env::var_os("RA_JIT_INLINE").is_some_and(|it| it == "all")
-            && matches!(
-                super::backend::Backend::from_env(),
-                Ok(super::backend::Backend::Llvm(super::backend::Optimization {
-                    passes: super::backend::Passes::Default | super::backend::Passes::Aggressive,
-                    ..
-                }))
-            )
-    });
-    *ACROSS
+    static ASKED: std::sync::LazyLock<Option<bool>> =
+        std::sync::LazyLock::new(|| match std::env::var("RA_JIT_INLINE").as_deref() {
+            Ok("all") => Some(true),
+            Ok("crate" | "0") => Some(false),
+            _ => None,
+        });
+    super::backend::optimizing() && ASKED.unwrap_or_else(super::backend::whole_program)
 }
 
 /// How large a body of `instance` the compile under way may build into its caller, if it may
@@ -380,7 +391,7 @@ pub(super) fn inline_limit(db: &dyn HirDatabase, instance: &Instance) -> Option<
         let mut it = it.borrow_mut();
         let inlining = it.as_mut()?;
         let spent = if inlining.whole { !inlining.has_room() } else { inlining.spent >= BUDGET };
-        if inlining.depth >= DEPTH || spent {
+        if inlining.depth >= if inlining.whole { BUILD_DEPTH } else { DEPTH } || spent {
             inlining.starved += usize::from(inlining.whole);
             return None;
         }
@@ -438,8 +449,18 @@ pub(super) fn hot_body(
     limit: usize,
     tracked: bool,
 ) -> Option<std::rc::Rc<super::fragment::Inlinable>> {
-    let body = body(db, instance, env, tracked)?;
+    if let Some(known) = oversized(instance, tracked, limit) {
+        refused(db, instance, &format!("too large ({known} instructions)"));
+        return None;
+    }
+    let before = tally();
+    let Some(body) = body(db, instance, env, tracked) else {
+        untally(before);
+        return None;
+    };
     if size(&body.func) > limit {
+        untally(before);
+        oversize(instance, tracked, size(&body.func));
         refused(db, instance, &format!("too large ({} instructions)", size(&body.func)));
         return None;
     }
@@ -447,17 +468,50 @@ pub(super) fn hot_body(
     Some(body)
 }
 
+/// How large a build of `instance` was found, if that is more than `limit`.
+fn oversized(instance: &Instance, tracked: bool, limit: usize) -> Option<usize> {
+    let key = (instance.def, instance.args.clone(), tracked);
+    INLINING.with(|it| it.borrow().as_ref()?.oversized.get(&key).copied().filter(|&it| it > limit))
+}
+
+fn oversize(instance: &Instance, tracked: bool, size: usize) {
+    let key = (instance.def, instance.args.clone(), tracked);
+    INLINING.with(|it| {
+        if let Some(it) = it.borrow_mut().as_mut() {
+            let known = it.oversized.entry(key).or_default();
+            *known = (*known).max(size);
+        }
+    });
+}
+
+/// What the compile under way has built in and shown so far.
+fn tally() -> Option<(usize, usize)> {
+    INLINING.with(|it| it.borrow().as_ref().map(|it| (it.spent, it.seen)))
+}
+
+/// Takes back what building a body counted of the bodies it built in and showed, when the
+/// body is not used: else a body too large to build in, at the head of a long chain, uses
+/// up the share of its call, and is then not shown either (`vec![false; n]`'s
+/// `SpecFromElem::from_elem`, whose length LLVM then does not know).
+fn untally(before: Option<(usize, usize)>) {
+    INLINING.with(|it| {
+        if let (Some(it), Some((spent, seen))) = (it.borrow_mut().as_mut(), before) {
+            (it.spent, it.seen) = (spent, seen);
+        }
+    });
+}
+
 /// The body of a callee that the compile under way calls rather than builds in, for LLVM to
 /// see what it does: one that is `#[inline(never)]` and hot, whose call LLVM keeps and knows
 /// then what it reads and writes, or one too large for [`inline_limit`], which LLVM builds in
-/// itself where its own measure, after optimization, finds it small enough. Whether it is
-/// `#[inline(never)]` comes with it.
+/// itself where its own measure, after optimization, finds it small enough. What its
+/// `#[inline]` asks comes with it.
 pub(super) fn seen_body(
     db: &dyn HirDatabase,
     instance: &Instance,
     env: &StoredParamEnvAndCrate,
     tracked: bool,
-) -> Option<(std::rc::Rc<super::fragment::Inlinable>, bool)> {
+) -> Option<(std::rc::Rc<super::fragment::Inlinable>, super::fragment::Hint)> {
     let func = match instance.def {
         InstanceDef::Fn(func) => Some(func),
         InstanceDef::Closure(_) | InstanceDef::DropGlue => None,
@@ -469,27 +523,55 @@ pub(super) fn seen_body(
         let mut it = it.borrow_mut();
         let inlining = it.as_mut()?;
         let room = match inlining.whole {
-            true => {
-                let room = inlining.depth < DEPTH && inlining.has_room();
-                inlining.starved += usize::from(!room);
-                shared(db, instance) && room
-            }
-            false => inlining.depth < DEPTH && inlining.seen < SEEN_BUDGET,
+            true if inlining.depth >= BUILD_DEPTH => Err("not shown: depth"),
+            true if !inlining.has_room() => Err("not shown: budget"),
+            true => Ok(shared(db, instance)),
+            false if inlining.depth >= DEPTH => Err("not shown: depth"),
+            false => Ok(inlining.seen < SEEN_BUDGET),
         };
+        if room.is_err() && inlining.whole {
+            inlining.starved += 1;
+        }
         Some((inlining.is_hot(instance), room))
     })?;
+    let room = match room {
+        Ok(room) => room,
+        Err(why) => {
+            refused(db, instance, why);
+            return None;
+        }
+    };
     if !room {
         refused(db, instance, "not shown: budget");
         return None;
     }
-    let never = func
-        .is_some_and(|func| AttrFlags::query(db, func.into()).contains(AttrFlags::INLINE_NEVER));
+    let flags = func.map(|func| AttrFlags::query(db, func.into()));
+    let has = |flag| flags.is_some_and(|it| it.contains(flag));
+    let hint = if has(AttrFlags::INLINE_NEVER) {
+        super::fragment::Hint::Never
+    } else if has(AttrFlags::INLINE_ALWAYS) {
+        super::fragment::Hint::Always
+    } else if has(AttrFlags::IS_INLINE) {
+        super::fragment::Hint::Inline
+    } else {
+        super::fragment::Hint::None
+    };
     let limit = if hot { HOT_INSTRUCTIONS } else { SEEN_INSTRUCTIONS };
-    if never && !hot {
+    if hint == super::fragment::Hint::Never && !hot {
         return None;
     }
-    let body = body(db, instance, env, tracked)?;
+    if let Some(known) = oversized(instance, tracked, limit) {
+        refused(db, instance, &format!("not shown: {known} instructions"));
+        return None;
+    }
+    let before = tally();
+    let Some(body) = body(db, instance, env, tracked) else {
+        untally(before);
+        return None;
+    };
     if size(&body.func) > limit {
+        untally(before);
+        oversize(instance, tracked, size(&body.func));
         refused(db, instance, &format!("not shown: {} instructions", size(&body.func)));
         return None;
     }
@@ -501,7 +583,7 @@ pub(super) fn seen_body(
             }
         }
     });
-    Some((body, never))
+    Some((body, hint))
 }
 
 /// The body of `instance`, built once per compile.
@@ -746,6 +828,7 @@ pub fn prepare(db: &dyn HirDatabase, asked: &Asked) -> std::result::Result<Prepa
         spent: 0,
         seen: 0,
         built: FxHashMap::default(),
+        oversized: FxHashMap::default(),
     };
     for node in &asked.hot {
         match &node.0 {

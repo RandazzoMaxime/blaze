@@ -278,8 +278,17 @@ pub(super) struct Seen {
     pub(super) id: FuncId,
     pub(super) func: ir::Function,
     pub(super) pointees: Vec<(u32, Pointee)>,
-    /// It is `#[inline(never)]`.
-    pub(super) never: bool,
+    pub(super) hint: Hint,
+}
+
+/// What a function's `#[inline]` asks of LLVM where its body is shown, as rustc asks it:
+/// `inlinehint`, `alwaysinline` or `noinline`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Hint {
+    None,
+    Inline,
+    Always,
+    Never,
 }
 
 /// The namespace of the names of callees that are built into their callers. No relocation
@@ -364,6 +373,16 @@ impl Wants {
         statics.filter_map(|(index, data)| {
             matches!(data, DataRequest::Static(_)).then_some(index as u32)
         })
+    }
+
+    /// The number of the function asked for that goes on unwinding, `_Unwind_Resume`.
+    #[cfg(feature = "llvm")]
+    pub(super) fn resume(&self) -> Option<u32> {
+        let mut funcs = self.requests.funcs.iter();
+        let resume = funcs.position(
+            |it| matches!(&it.target, FuncTarget::Symbol(name) if name == "_Unwind_Resume"),
+        );
+        resume.map(|it| it as u32)
     }
 
     #[cfg(feature = "llvm")]
@@ -710,12 +729,7 @@ impl<'db> Recorder<'db> {
             let id = funcs[seen.id.as_u32() as usize];
             if !self.seen.iter().any(|it| it.id == id) {
                 let func = rename(&seen.func);
-                self.seen.push(Seen {
-                    id,
-                    func,
-                    pointees: seen.pointees.clone(),
-                    never: seen.never,
-                });
+                self.seen.push(Seen { id, func, pointees: seen.pointees.clone(), hint: seen.hint });
             }
         }
         rename(&body.func)
@@ -744,12 +758,12 @@ impl<'db> Recorder<'db> {
     }
 
     /// Shows LLVM `body` as what the requested function `id` does: see [`Seen`].
-    pub(super) fn declare_seen(&mut self, id: FuncId, body: &Inlinable, never: bool) {
+    pub(super) fn declare_seen(&mut self, id: FuncId, body: &Inlinable, hint: Hint) {
         if self.seen.iter().any(|it| it.id == id) {
             return;
         }
         let func = self.moved(body);
-        self.seen.push(Seen { id, func, pointees: body.pointees.clone(), never });
+        self.seen.push(Seen { id, func, pointees: body.pointees.clone(), hint });
     }
 
     pub(super) fn declare_data_in_func(

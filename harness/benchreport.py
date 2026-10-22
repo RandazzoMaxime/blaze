@@ -522,11 +522,12 @@ def runtime_section(result, start=RUN_START, end=RUN_END, workflow="bench-readme
         for bench, row in program["benches"].items():
             rounds = len(row["release"]["runs"])
             rows.append(f"| {bench} | {seconds(row['release']['median_s'])} | **{seconds(row['ra-jit']['median_s'])}** | "
-                        f"{times(row['ra-jit']['ratio'])} |" + (f" {times(row['checked']['ratio'])} |" if checked else "") +
+                        f"{times(row['ra-jit']['ratio'])} |" + ((f" {times(row['checked']['ratio'])} |" if "checked" in row else " - |") if checked else "") +
                         f" {mem(row, 'release')} → {mem(row, 'ra-jit')} |")
         info = program["builds"]
         if info.get("release", {}).get("size_mb") is not None and info.get("ra-jit", {}).get("size_mb") is not None:
-            sized.append(f"| {name} | {info['release']['size_mb']} MB → {info['ra-jit']['size_mb']} MB | "
+            sized.append(f"| {name} | {seconds(info['release']['build_s'])} → {seconds(info['ra-jit']['build_s'])} | "
+                         f"{info['release']['size_mb']} MB → {info['ra-jit']['size_mb']} MB | "
                          f"{megabytes(info['release'].get('build_peak_mb'))} → {megabytes(info['ra-jit'].get('build_peak_mb'))} | "
                          f"{megabytes(info['release'].get('build_largest_mb'))} → {megabytes(info['ra-jit'].get('build_largest_mb'))} |")
     geomean = measured.get("geomean") or {}
@@ -548,9 +549,10 @@ def runtime_section(result, start=RUN_START, end=RUN_END, workflow="bench-readme
         lines.append(f"| **Geometric mean** | | | **{times(geomean['ra-jit'])}** |" +
                      (f" {times(geomean['checked'])} |" if checked and geomean.get("checked") else (" |" if checked else "")) + " |")
     if sized:
-        lines += ["", "What each program takes, release → ra-jit: its size, and its build's memory (the most the build's processes "
-                  "held at once, and the largest one process: rustc or ra-jit, or the linker).", "",
-                  "| Program | Size | Build, peak | Build, largest process |", "|---|---:|---:|---:|", *sized]
+        lines += ["", "What each program takes, release → ra-jit: its build from cold (for ra-jit, cargo running the build "
+                  "scripts and proc macros, ra-jit's compile of every crate and the link), its size, and its build's memory "
+                  "(the most the build's processes held at once, and the largest one process: rustc or ra-jit, or the linker).", "",
+                  "| Program | Build | Size | Build, peak | Build, largest process |", "|---|---:|---:|---:|---:|", *sized]
     lines += ["", "Release with dev checks: `cargo build --release` with `-C overflow-checks=on -C debug-assertions=on`. "
               + (provenance(result, which=False).replace("`harness/bench.py`", "`harness/bench.py --runtime`") if result.get("run_url") else
                  f"Measured by hand with `harness/bench.py --runtime` (harness/runbench.py); the `{workflow}` workflow "
