@@ -27,8 +27,9 @@ of the same result exists.
 - Order: measure memory per query first (step 0), bounded names (done), proc-macro
   expansion cache (item 3), memo eviction (item 5's quick part), frozen dependency artifacts
   (item 1) in stages each guarded by a differential check, then the workspace's own state
-  (item 2, with the cold-start-2 lane). The flat syntax tree (item 4) and stripping the LSP
-  parts (item 6) wait for numbers that say they matter.
+  (item 2, with the cold-start-2 lane). The flat syntax tree (item 4) has its own lane
+  (#42); stripping the LSP parts (item 6) waits for numbers that say it matters. Who has
+  what is under "Working with the other lanes".
 
 ## What was measured
 
@@ -268,7 +269,8 @@ crate graph.
 
 ### Item 4: a flat syntax tree for files nobody edits
 
-Deferred. Retained syntax is already bounded by the parse LRU; what a flat tree saves is
+Taken up on 2026-10-22 by its own lane (#42); what follows is why it had been deferred,
+which that lane measures against. Retained syntax is already bounded by the parse LRU; what a flat tree saves is
 the transient cost of parsing and the allocations rowan makes, and step 0 has to show that
 those are a large share of load before this is worth rewriting the parser's output and
 every `ItemTree` lowering. Item 1 would remove most dependency parsing anyway.
@@ -299,10 +301,41 @@ and cold-start time and RSS on helix and nushell before and after.
 5. Memo eviction (item 5), sized by step 0.
 6. Item 1a, then 1b family by family, then 1c.
 7. The warm-start manifest (item 2), then salsa state with cold-start-2.
-8. zed measured again; items 4 and 6 if the numbers say so.
+8. zed measured again (its ready path fits since cold-start-2; its own base waits on #55);
+   item 6 if the numbers say so. Item 4 has its own lane (#42).
 
 ## Working with the other lanes
 
+Who has what, as of 2026-10-22. Each lane keeps its line here current when it merges or
+stops.
+
+| Work | Issue | Lane |
+|---|---|---|
+| The restart round (step 3) | #37 | glancer, gated on dev-aws-7, merging |
+| Proc-macro expansion cache (item 3) | #38 | glancer, gated on dev-aws-7, merging after #37 |
+| `described` copies whole type closures (item 5) | #55 | share-types, dev-aws-6 |
+| The spare worker's memory (item 5) | #56 | spare, its own AWS host |
+| salsa eviction of queries with cycle handling (item 5) | #57 | spare, after #56 |
+| Frozen dependency artifacts (item 1) | #40 | glancer, after #38 |
+| The workspace's own state (item 2) | #41 | glancer, after #40's 1a |
+| A flat syntax tree (item 4) | #42 | flat-syntax, no longer deferred |
+| ra-jit never runs rustc | | no-rustc, planning; its steps go in `docs/no-rustc.md` |
+
+- **no-rustc.** Andrew's rule is that ra-jit must never run rustc. Since cold-start (#11)
+  the time to ready is what rustc linked. The background own base, and #37's forwarding of
+  callers to rustc's copies, build on that, so the warm start is cheap today because rustc
+  built the program. Without rustc the daemon's own build is the ready path again. That
+  makes items 1 and 2 (#40, #41) the warm start's path once more, as they were planned
+  before #11: they skip the analysis of what is unchanged on the daemon's own build.
+  `docs/no-rustc.md` will say in which order rustc goes. Items 1 and 2 are designed not to need rustc's
+  output, and a step here that adds a new dependency on it says so in this table.
+- **flat-syntax (#42)** and item 1 both change what dependency files cost. A frozen crate
+  (1b) no longer parses for its item tree, and a flat tree makes the parses that remain
+  cheaper. Both measure with step 0's tooling (`harness/heap.py`, `RA_JIT_MEMORY`), and
+  each says in its item here which share of load and resolve it took, so the other doesn't
+  count it again.
+- **share-types (#55)** and **spare (#56, #57)** both report the ready heap and the edit
+  peak with `harness/memory.py`, and write item 5's numbers here when they merge.
 - **cold-start-2** owns persisting the analysed workspace. Item 2's manifest is about
   compiled names and sits next to the store; salsa state is theirs. Both need a serialization
   layer for ids that survive a process: whoever lands first puts it where the other can use
