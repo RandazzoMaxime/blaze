@@ -407,6 +407,11 @@ All notable changes to ra-jit are written here. The format follows
 - fd built with inlining across crates crashed the LLVM backend on Linux and macOS: an address
   rebuilt as a `getelementptr` may be a sum that is a constant (a global's address plus an
   offset), which is in no block, and LLVM read freed memory when the builder was put before it.
+- A path through a type alias of an inherent impl (`ThreadPool::Worker::get(..)`, `Self::Slot`,
+  `Slots<u32>::Slot`, nightly's `inherent_associated_types`) is the alias's type: the
+  functions that name one had no type for it and were left to rustc, and rustc's copy of
+  bun's `run_nested_rename_task` sent every edit of its crate to cargo (`bun_repros.py`
+  `inherent_associated_types`).
 - A build in full no longer keeps rustc's copy of an instance that did not compile once an
   edit changed it, as `located::<u8>` of a generic function with a `Location::caller()`
   constant, which `main` calls: the program printed what it did before the edit. Such an edit

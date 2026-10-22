@@ -43,6 +43,12 @@ CASES = {
         "expected": "compiled",
         "reasons": (),
     },
+    "inherent_associated_types": {
+        "package": "runner",
+        "crate": "inherent_associated_types",
+        "expected": "compiled",
+        "reasons": (),
+    },
 }
 
 
