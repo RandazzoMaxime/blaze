@@ -2719,7 +2719,7 @@ impl<'db> Builder<'_, '_, 'db> {
                             let container = function.lookup(self.ctx.db).container;
                             self.path_well_formed(expr, container, fn_args, span);
                         }
-                        let (self_param, keep_static, returns_self) = match def {
+                        let (self_param, keep_static, returns_self, static_self) = match def {
                             CallableDefId::FunctionId(it) => {
                                 let written = FunctionSignature::of(self.ctx.db, it);
                                 let returns_self = written.ret_type.is_some_and(|it| {
@@ -2731,9 +2731,10 @@ impl<'db> Builder<'_, '_, 'db> {
                                     written.has_self_param(),
                                     writes_static_object(&written.store),
                                     returns_self,
+                                    written.has_self_param() && self.impl_of_static_object(it),
                                 )
                             }
-                            _ => (false, true, false),
+                            _ => (false, true, false, false),
                         };
                         let (inputs, output) = self.elide(
                             sig.inputs().iter().copied().collect(),
@@ -2741,6 +2742,7 @@ impl<'db> Builder<'_, '_, 'db> {
                             self_param,
                             keep_static,
                             returns_self,
+                            static_self,
                         );
                         // The signature as written is well-formed, `&'a &'b ()` that `'b: 'a`
                         // even where it normalizes to `()`; and the where clauses of its
@@ -2844,6 +2846,15 @@ impl<'db> Builder<'_, '_, 'db> {
         }
     }
 
+    /// Whether `function` is of an impl for a `dyn Trait + 'static`.
+    fn impl_of_static_object(&self, function: hir_def::FunctionId) -> bool {
+        let ItemContainerId::ImplId(impl_) = function.lookup(self.ctx.db).container else {
+            return false;
+        };
+        let ty = self.ctx.db.impl_self_ty(impl_).instantiate_identity().skip_norm_wip();
+        matches!(ty.kind(), TyKind::Dynamic(_, region) if matches!(region.kind(), RegionKind::ReStatic))
+    }
+
     /// Whether the closure `id` is of this body and writes no type of a parameter or of its
     /// return: the lifetimes rustc infers for its signature are in its type, the same for every
     /// call, where those a written `&T` elides are the call's own.
@@ -2861,6 +2872,8 @@ impl<'db> Builder<'_, '_, 'db> {
     /// region variables by the elision rules: each elided input lifetime its own, an elided
     /// output lifetime that of `self` when `self` is a reference, else that of the only
     /// lifetime of the inputs. The default lifetime of a trait object is not one of them.
+    /// `static_self`: `self` is of an impl for `dyn Trait`, whose lifetime the impl's header
+    /// defaults to `'static` (`impl dyn Trait { fn f(&self) }`), not the reference's.
     fn elide(
         &self,
         inputs: Vec<Ty<'db>>,
@@ -2868,17 +2881,22 @@ impl<'db> Builder<'_, '_, 'db> {
         self_param: bool,
         keep_static: bool,
         returns_self: bool,
+        static_self: bool,
     ) -> (Vec<Ty<'db>>, Ty<'db>) {
         let interner = self.interner();
         let mut defaults = ObjectDefaults { db: self.ctx.db, interner, keep_static, erase: false };
         let inputs: Vec<Ty<'db>> = inputs
             .into_iter()
-            .map(|ty| {
+            .enumerate()
+            .map(|(index, ty)| {
                 let ty =
                     rustc_type_ir::fold_regions(interner, ty, |region, _| match region.kind() {
                         RegionKind::ReError(_) => self.fresh(),
                         _ => region,
                     });
+                if static_self && index == 0 {
+                    return ty;
+                }
                 rustc_type_ir::TypeFoldable::fold_with(ty, &mut defaults)
             })
             .collect();
