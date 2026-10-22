@@ -319,7 +319,7 @@ stops.
 | Frozen dependency artifacts (item 1) | #40 | glancer, after #38 |
 | The workspace's own state (item 2) | #41 | glancer, after #40's 1a |
 | A flat syntax tree (item 4) | #42 | flat-syntax, no longer deferred |
-| ra-jit never runs rustc | | no-rustc, planning; its steps go in `docs/no-rustc.md` |
+| ra-jit never runs rustc | #81 to #93 | no-rustc; steps A to M of `docs/no-rustc.md`, A to C ready to assign |
 
 - **no-rustc.** Andrew's rule is that ra-jit must never run rustc. Since cold-start (#11)
   the time to ready is what rustc linked. The background own base, and #37's forwarding of
@@ -327,7 +327,7 @@ stops.
   built the program. Without rustc the daemon's own build is the ready path again. That
   makes items 1 and 2 (#40, #41) the warm start's path once more, as they were planned
   before #11: they skip the analysis of what is unchanged on the daemon's own build.
-  `docs/no-rustc.md` will say in which order rustc goes. Items 1 and 2 are designed not to need rustc's
+  `docs/no-rustc.md` says in which order rustc goes (its step K, #91, is the cold start). Items 1 and 2 are designed not to need rustc's
   output, and a step here that adds a new dependency on it says so in this table.
 - **flat-syntax (#42)** and item 1 both change what dependency files cost. A frozen crate
   (1b) no longer parses for its item tree, and a flat tree makes the parses that remain
