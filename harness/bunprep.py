@@ -169,8 +169,9 @@ def link_args(tree):
                 args += [flag, value]
         elif not any(re.fullmatch(pattern, flag) for pattern in DROPPED):
             args.append(flag)
-    # rustc links with -nodefaultlibs, so the C++ library clang++ would add is named.
-    args.append("-lc++" if darwin else "-lstdc++")
+    # rustc links with -nodefaultlibs, so the C++ library clang++ would add is named: on Linux
+    # the archive, as bun's `-static-libstdc++` has it, which no loader has to find.
+    args.append("-lc++" if darwin else "-l:libstdc++.a" if "-static-libstdc++" in flags else "-lstdc++")
     path = os.path.join(out, "ra-jit-link.args")
     open(path, "w").write("\n".join(args) + "\n")
     return path
