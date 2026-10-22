@@ -3392,12 +3392,7 @@ fn link(
                 // and is spliced once the edits stop (see `splicer`).
                 Ok(patch) if defer && baseline.uuid().is_some() => {
                     lock(&LINKED).insert(binary.to_owned(), Executable::Read(Box::new(baseline)));
-                    if cfg!(target_os = "linux") && live::any_running() {
-                        // Linux keeps the running inode executable. The next start gets a
-                        // fresh link after the process exits.
-                    } else {
-                        splicer::defer(binary, patch);
-                    }
+                    splicer::defer(binary, patch);
                     eprintln!(
                         "link: {:.1?} (the splice waits for the edits to stop)",
                         start.elapsed()
@@ -6803,7 +6798,7 @@ fn run_holding(
                 }
                 // The program is linked unless every client of it loads the patch.
                 let link = clients.iter().any(|it| it.0 != Request::Patch);
-                let defer = clients.iter().all(|it| it.0 == Request::Edit) || live::any_running();
+                let defer = clients.iter().all(|it| it.0 == Request::Edit);
                 let patches = program.known.patches() && !program.moved;
                 let own_base = program.known.builds_base();
                 let kept = !own_base && (patches || program.interrupted >= INTERRUPTIONS);
@@ -6855,9 +6850,8 @@ fn run_holding(
                             || clients.iter().any(|it| it.0 == at && it.1.0 != Request::Patch);
                         let link = link && !detached;
                         let mut theirs = clients.iter().filter(|it| it.0 == at).peekable();
-                        let defer = (theirs.peek().is_some()
-                            && theirs.all(|it| it.1.0 == Request::Edit))
-                            || live::any_running();
+                        let defer =
+                            theirs.peek().is_some() && theirs.all(|it| it.1.0 == Request::Edit);
                         let (db, listed, paths, edit) = (db.clone(), &*listed, &*paths, &edit);
                         let wanted = outputs.get(&at);
                         let build = scope.spawn(move || {
