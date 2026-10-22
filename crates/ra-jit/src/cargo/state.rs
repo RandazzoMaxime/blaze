@@ -540,6 +540,30 @@ impl State {
         })
     }
 
+    /// `said`, the errors the daemon found in the source, ended as cargo ends a build rustc
+    /// turned down: with the program the build is of.
+    pub(crate) fn turned_down(&self, said: &str) -> String {
+        let Some(program) = self.programs.iter().find(|it| it.asked_as.is_some()) else {
+            return said.to_owned();
+        };
+        let name = &program.name;
+        let target = match (program.kind, program.test) {
+            (Kind::Lib, false) => "lib".to_owned(),
+            (Kind::Lib, true) => "lib test".to_owned(),
+            (Kind::Bin, false) => format!("bin \"{name}\""),
+            (Kind::Bin, true) => format!("bin \"{name}\" test"),
+            (Kind::Example, _) => format!("example \"{name}\""),
+            (Kind::Test, _) => format!("test \"{name}\""),
+            (Kind::Bench, _) => format!("bench \"{name}\""),
+        };
+        let errors = match crate::errors::count(said) {
+            0 | 1 => "1 previous error".to_owned(),
+            n => format!("{n} previous errors"),
+        };
+        let package = &program.package;
+        format!("{said}\n\nerror: could not compile `{package}` ({target}) due to {errors}")
+    }
+
     /// Counts a build that went to cargo.
     pub(crate) fn count_cargo(&mut self, reason: &str) {
         *self.counts.cargo.entry(reason.to_owned()).or_default() += 1;
