@@ -163,7 +163,7 @@ With no borrow checker, the 245 units rustc accepts would pass. Now:
 
 | Mode | In scope | Pass | rustc accepts, ra-jit too | rustc rejects, same errors |
 |---|---|---|---|---|
-| Polonius | 1579 | 1311 (83.0%) | 245 of 245 | 1066 of 1334 |
+| Polonius | 1579 | 1312 (83.1%) | 245 of 245 | 1067 of 1334 |
 | NLL | 1577 | 1304 (82.7%) | 226 of 226 | 1078 of 1351 |
 
 463 units are out of scope; 344 of them need a nightly feature. CI runs the scoring on Linux
