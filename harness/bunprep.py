@@ -33,6 +33,7 @@ PROFILE = "release"
 # bunprep is built again, from its own build.
 MARKER = ".bunprep-built"
 SELF = hashlib.sha256(open(__file__, "rb").read()).hexdigest()[:16]
+FRAME_POINTERS = "[target.'cfg(all())']\nrustflags = [\"-C\", \"force-frame-pointers=yes\"]\n"
 
 # Flags of bun's link that are not kept, by why. Every other flag is: `--wrap`, the exported
 # symbols, the stack size and the libraries are what the program is.
@@ -200,6 +201,12 @@ def overlay(tree):
         cxx = re.search(r'\[target\.aarch64-apple-darwin\][^\n]*\nlinker = "([^"]+)"', open(os.path.join(tree, ".cargo/config.toml")).read())
         open(os.path.join(tree, ".cargo/config.toml"), "w").write(
             f'[target.aarch64-apple-darwin]\nlinker = "{cxx[1] if cxx else "clang++"}"\n')
+    # Bun's own build keeps frame pointers (scripts/build/rust.ts), and `bun_core::return_address`
+    # reads its caller's frame by them: on x86-64, where the register is otherwise one like the
+    # rest, a build without them faults there on the first `-e`. Joined with the target's own.
+    config = os.path.join(tree, ".cargo/config.toml")
+    if FRAME_POINTERS not in open(config).read():
+        open(config, "a").write("\n" + FRAME_POINTERS)
 
 
 def edit(path, old, new):
