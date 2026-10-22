@@ -405,7 +405,9 @@ today: `adt_const_params` constants, `core::mem::type_info`, inherent associated
 `lol_html`'s macros, `core`'s methods in `no_std` crates and the rest of #35's table, plus what
 bun's whole-program report finds after them. Each class lands with its `bun_repros.py` fixture
 (#75) expecting `compiled`. Done when bun's whole-program report (`runbench.py bun`) leaves no
-function to rustc but those step G removes ("no rustc symbol").
+function to rustc but those step G removes ("no rustc symbol"). On Linux x86-64 it leaves none
+(2026-10-22, `857eab0e9b`: 68,315 functions compiled, the program links and each of
+`apps.json`'s runs matches cargo's); macOS arm64 is to be run again.
 
 **F. The standard library compiled by ra-jit.** ([#86](https://github.com/indexable-inc/ra-jit/issues/86)) `core`, `alloc`, `std`, `compiler_builtins`
 (with its intrinsics and `#[naked]` functions), `panic_unwind`, `panic_abort`, `unwind`,
