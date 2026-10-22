@@ -822,6 +822,31 @@ impl<'db> Builder<'_, '_, 'db> {
             for rv in unsuggested {
                 self.regions.unsuggested.extend(self.regions.universal(rv));
             }
+            // Nor for an anonymous lifetime no parameter's written type has, the impl's in
+            // `impl MyStruct<'_>` or a C variadic's `ap: ...`: rustc's `find_param_with_region`
+            // finds no parameter.
+            let variadic = match owner {
+                InferBodyId::DefWithBodyId(DefWithBodyId::FunctionId(function)) => {
+                    FunctionSignature::of(self.ctx.db, function).is_varargs()
+                }
+                _ => false,
+            };
+            let written_params = body.param_locals.len().saturating_sub(usize::from(variadic));
+            let mut in_params = Vec::new();
+            for &local in body.param_locals.iter().take(written_params) {
+                if let Some(ty) = local_tys[local.into_raw().into_u32() as usize] {
+                    regions_of(ty, &mut in_params);
+                }
+            }
+            let in_params: FxHashSet<usize> =
+                in_params.into_iter().filter_map(|rv| self.regions.universal(rv)).collect();
+            for index in 0..self.regions.universals.len() {
+                if self.regions.universals[index].1 == UniversalKind::AnonParam
+                    && !in_params.contains(&index)
+                {
+                    self.regions.unsuggested.insert(index);
+                }
+            }
             if opaque
                 && !hidden_static
                 && let Some((_, output)) = &signature
@@ -2481,6 +2506,18 @@ impl<'db> Builder<'_, '_, 'db> {
         let TyKind::Adt(def, args) = ty.kind() else { return None };
         if def.def_id() != adt {
             return None;
+        }
+        // The impl's anonymous lifetimes (`impl MyStruct<'_>`) are universal regions.
+        if let Some((raw, named)) = self.impl_self
+            && raw == ty
+            && let TyKind::Adt(_, named) = named.kind()
+        {
+            return Some(rustc_type_ir::fold_regions(self.interner(), named, |region, depth| {
+                match region.kind() {
+                    RegionKind::ReVar(_) | RegionKind::ReBound(..) => region,
+                    _ => self.signature_region(region, depth).unwrap_or_else(|| self.fresh()),
+                }
+            }));
         }
         Some(self.written(args))
     }
