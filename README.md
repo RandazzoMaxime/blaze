@@ -79,30 +79,43 @@ Memory and disk, Cranelift. Peak: the most every process doing the work held at 
 <!-- benchmem:end -->
 
 <!-- runbench:start -->
-<picture><source media="(prefers-color-scheme: dark)" srcset="docs/benchmarks/charts/runtime-dark.svg"><img alt="Time of each benchmark, ra-jit's build ÷ cargo build --release: sieve 0.97×, collatz 1.02×, fnv 1.00×, qsort 1.11×, matmul 1.15×, nbody 1.41×, mandelbrot 1.00×, words 1.62×, numeric 1.00×, jsonrt 1.58×, ripgrep 1.33×, fd 1.37×, tokei 1.30×, eza 1.17×" src="docs/benchmarks/charts/runtime-light.svg" width="760"></picture>
+<picture><source media="(prefers-color-scheme: dark)" srcset="docs/benchmarks/charts/runtime-dark.svg"><img alt="Time of each benchmark, ra-jit's build ÷ cargo build --release: sieve 0.95×, collatz 1.02×, fnv 1.00×, qsort 1.04×, matmul 1.16×, nbody 1.41×, mandelbrot 1.00×, words 1.33×, numeric 1.83×, jsonrt 1.34×, ripgrep 1.15×, fd 1.26×, tokei 1.67×, eza 1.10×, bat 1.25×" src="docs/benchmarks/charts/runtime-light.svg" width="760"></picture>
 
-How fast the programs run, built whole by ra-jit with LLVM (every crate of the program compiled by ra-jit, with its own `main`), each time ÷ the time of `cargo build --release`. Lower is faster; 1.00x is as fast as release. Every program's exit status and output were the same as the release build's; a run in which any differed is never published. Linux x86-64: AWS c6i.16xlarge (Intel Xeon Platinum 8375C, 64 vCPUs, 123 GiB), NixOS 26.05, Linux 6.18, rustc 1.99.0, ra-jit `f3eeb5295e` on branch `whole-program-main`, 2026-10-21. Median of 5 runs, the builds taking turns (numeric: 15).
+How fast the programs run. Each program is built by `cargo build --release` and by ra-jit with LLVM at `-O3`, every crate of it compiled by ra-jit, with the release profile; each benchmark is then run 5 times, the builds taking turns, median. A run is published only when every program did what the release build's did. Linux x86-64, AWS c6i.16xlarge (dev-aws-6) (Intel(R) Xeon(R) Platinum 8375C CPU @ 2.90GHz, 64 cores, 124 GiB), ra-jit [`2302d0f50b`](https://github.com/indexable-inc/ra-jit/commit/2302d0f50b9a8f7d9002e706434011141a887b43) on 2026-10-22.
 
-| Benchmark | `cargo build --release` | release with overflow checks | ra-jit `-O3`, each crate alone | ra-jit `-O2` | ra-jit `-O3` |
+| Benchmark | `cargo build --release` | ra-jit, LLVM | ra-jit ÷ release | release with dev checks ÷ release | Peak memory, release → ra-jit |
 |---|---:|---:|---:|---:|---:|
-| sieve | 0.069 s | 1.00x | 4.35x | 0.93x | **0.97x** |
-| collatz | 0.135 s | 1.94x | 1.03x | 1.02x | **1.01x** |
-| fnv | 0.077 s | 1.00x | 2.74x | 1.00x | **1.00x** |
-| qsort | 0.279 s | 1.03x | 2.04x | 1.05x | **1.04x** |
-| matmul | 0.034 s | 1.00x | 9.62x | 1.14x | **1.15x** |
-| nbody | 0.028 s | 1.00x | 14x | 1.42x | **1.42x** |
-| mandelbrot | 0.348 s | 1.01x | 1.02x | 1.00x | **1.00x** |
-| words | 0.066 s | 1.06x | 6.63x | 1.31x | **1.31x** |
-| numeric (rayon) | 0.032 s | 1.16x | 3.89x | 1.09x | **1.04x** |
-| jsonrt (serde_json, simd-json) | 1.412 s | 1.06x | 3.81x | 1.34x | **1.34x** |
-| ripgrep 15.1.0 | 0.053 s | 1.09x | 8.25x | 1.16x | **1.16x** |
-| fd 10.3.0 | 0.017 s | 1.00x | 4.50x | 1.25x | **1.25x** |
-| tokei | 0.081 s | 1.10x | 8.31x | 1.62x | **1.53x** |
-| eza | 0.362 s | 0.95x | 1.76x | 1.09x | **1.05x** |
-| bat | 0.098 s |  |  |  | **1.24x** |
-| **Geometric mean** (without bat) | | 1.08x | 3.89x | 1.16x | **1.15x** |
+| sieve | 69 ms | **66 ms** | 0.95x | 1.00x | 19 MB → 19 MB |
+| collatz | 135 ms | **137 ms** | 1.02x | 1.94x | 19 MB → 19 MB |
+| fnv | 77 ms | **77 ms** | 1.00x | 1.00x | 19 MB → 19 MB |
+| qsort | 279 ms | **291 ms** | 1.04x | 1.03x | 19 MB → 19 MB |
+| matmul | 34 ms | **40 ms** | 1.16x | 1.00x | 19 MB → 19 MB |
+| nbody | 28 ms | **40 ms** | 1.41x | 1.00x | 19 MB → 19 MB |
+| mandelbrot | 348 ms | **349 ms** | 1.00x | 1.01x | 19 MB → 19 MB |
+| words | 66 ms | **87 ms** | 1.33x | 1.07x | 19 MB → 19 MB |
+| numeric | 31 ms | **57 ms** | 1.83x | 1.08x | 19 MB → 19 MB |
+| jsonrt | 1.42 s | **1.90 s** | 1.34x | 1.06x | 543 MB → 544 MB |
+| ripgrep | 54 ms | **62 ms** | 1.15x | 1.07x | 19 MB → 19 MB |
+| fd | 17 ms | **21 ms** | 1.26x | 1.01x | 19 MB → 19 MB |
+| tokei | 81 ms | **136 ms** | 1.67x | 1.17x | 54 MB → 54 MB |
+| eza | 352 ms | **387 ms** | 1.10x | 1.01x | 25 MB → 25 MB |
+| bat | 97 ms | **122 ms** | 1.25x | 1.05x | 25 MB → 25 MB |
+| **Geometric mean** | | | **1.21x** | 1.08x | |
 
-A program built whole has what its functions call in any crate built into them or shown to LLVM, the standard library's generic and `#[inline]` functions as rustc does across crates; *each crate alone* is `RA_JIT_INLINE=crate`, which keeps that to the function's own crate. Building across crates takes the programs other than the kernels 2.3 to 3.7 times as long: ripgrep 30.1 s against 8.5 s, tokei 35.9 s against 9.9 s. *Release with overflow checks* is `cargo build --release` with `-C overflow-checks=on -C debug-assertions=on`. The kernels (sieve to words) are `harness/corpus/kernels`; ripgrep counts `\w+ing\b` in its vendored dependencies, fd lists the `.rs` files of its own, tokei and eza walk theirs, bat prints three of its own files highlighted. Not built yet, so not in the table: nushell (some functions are not compiled: an `async` block whose layout rust-analyzer does not know, a constant of rustls that its evaluation fails on, and SIMD intrinsics ra-jit does not have, such as AVX-512's `simd_select_bitmask`). The geometric mean at `-O3` was 1.20x at ra-jit `f3eeb5295e`. On macOS arm64 (MacBook Pro, Apple M5 Max, macOS 27.0.1, median of 3) ripgrep, fd, bat and jsonrt build whole too, at 1.15x, 1.01x, 1.16x and 1.26x. Measured with `harness/runbench.py`; raw numbers in [docs/benchmarks/runtime-whole-program-linux-x86_64.json](docs/benchmarks/runtime-whole-program-linux-x86_64.json).
+What each program takes, release → ra-jit: its build from cold (for ra-jit, cargo running the build scripts and proc macros, ra-jit's compile of every crate and the link), its size, and its build's memory (the most the build's processes held at once, and the largest one process: rustc or ra-jit, or the linker).
+
+| Program | Build | Size | Build, peak | Build, largest process |
+|---|---:|---:|---:|---:|
+| kernels | 400 ms → 4.40 s | 0.5 MB → 1.53 MB | 172 MB → 1.9 GB | 144 MB → 1.9 GB |
+| numeric | 3.20 s → 9.20 s | 0.81 MB → 2.18 MB | 515 MB → 3.0 GB | 284 MB → 3.0 GB |
+| jsonrt | 6.10 s → 18.10 s | 1.07 MB → 2.81 MB | 1.8 GB → 4.4 GB | 411 MB → 4.4 GB |
+| ripgrep | 8.40 s → 31.70 s | 31.4 MB → 21.62 MB | 1.9 GB → 6.6 GB | 575 MB → 6.6 GB |
+| fd | 41.70 s → 64.90 s | 4.13 MB → 7.85 MB | 5.0 GB → 6.4 GB | 454 MB → 6.3 GB |
+| tokei | 13.20 s → 50.70 s | 5.51 MB → 12.54 MB | 4.5 GB → 7.6 GB | 841 MB → 7.5 GB |
+| eza | 34.60 s → 38.90 s | 2.64 MB → 6.92 MB | 4.4 GB → 6.9 GB | 463 MB → 6.9 GB |
+| bat | 53.30 s → 125.00 s | 7.55 MB → 14.64 MB | 5.9 GB → 9.3 GB | 688 MB → 9.3 GB |
+
+Release with dev checks: `cargo build --release` with `-C overflow-checks=on -C debug-assertions=on`. Measured by hand with `harness/bench.py --runtime` (harness/runbench.py); the `bench-readme` workflow re-runs it on the dedicated benchmark machine.
 <!-- runbench:end -->
 
 Not measured yet: workspaces of a million lines or more, and test suites

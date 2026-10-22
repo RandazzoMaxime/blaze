@@ -147,10 +147,16 @@ All notable changes to ra-jit are written here. The format follows
   `-O3`: it has what it calls in every crate built into it or shown to LLVM, the standard
   library's generic and `#[inline]` functions as rustc does across crates.
   `RA_JIT_INLINE=crate` keeps that to the function's own crate, `RA_JIT_INLINE=all` does it
-  in other builds too. On Linux x86-64 the geometric mean of the 14 runtime benchmarks is
-  1.15x the time of `cargo build --release` at `-O3` and 1.16x at `-O2`, against
-  3.89x with each crate alone ([README](README.md#how-fast)); the programs other than
-  the kernels take 2.3 to 3.7 times as long to build (ripgrep 30.1 s against 8.5 s). Commit 99cbb902ad's message
+  in other builds too. On Linux x86-64 (AWS c6i.16xlarge, at 13ee5a5339) the geometric mean
+  of 14 runtime benchmarks was 1.15x the time of `cargo build --release` at `-O3` and 1.16x
+  at `-O2`, against 3.89x with each crate alone; the programs other than the kernels took
+  2.3 to 3.7 times as long to build as with each crate alone (ripgrep 30.1 s against 8.5 s).
+  The README's table, measured at the merge into main, has 1.21x over 15 benchmarks
+  ([README](README.md#how-fast)): numeric's ra-jit build took 57 ms in three of its five
+  runs and 32 ms in the other two, where release's took 31 ms in all. A whole program's
+  build from cold against `cargo build --release`'s from cold: ripgrep 31.7 s against
+  8.4 s, tokei 50.7 s against 13.2 s, bat 125 s against 53.3 s, eza 38.9 s against 34.6 s.
+  Commit 99cbb902ad's message
   says the levels alone turned it on; until b460bbe327 they did not, and it took
   `RA_JIT_INLINE=all`.
 
@@ -286,7 +292,7 @@ All notable changes to ra-jit are written here. The format follows
   as an integer (from `ptrtoint`s, through adds, phis and selects) is rebuilt after the passes
   as pointers and `getelementptr`s on the pointers it came from, so that LLVM can follow what
   is stored and loaded through it: nbody's array of deltas leaves the stack. On Linux x86-64 the geometric mean at `-O3` goes
-  from 1.20x (ra-jit f3eeb5295e) to 1.15x of release's time ([README](README.md#how-fast)).
+  from 1.20x (ra-jit f3eeb5295e) to 1.15x of release's time at 13ee5a5339.
 - On macOS arm64, ripgrep, fd, bat and jsonrt build whole: NEON's pairwise maximum, minimum
   and add, its table lookups (`tbl1`, `tbx1`), `sqdmulh`, `uaddlp` and `saddlp`, the CRC-32
   instructions, and the generic `simd_reduce_max`, `simd_reduce_min` and `simd_ctpop` are
