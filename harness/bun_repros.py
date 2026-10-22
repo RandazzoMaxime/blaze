@@ -45,6 +45,12 @@ CASES = {
         "expected": "compiled",
         "reasons": (),
     },
+    "macro_impls": {
+        "package": "runner",
+        "crate": "dtoa",
+        "expected": "compiled",
+        "reasons": (),
+    },
 }
 
 

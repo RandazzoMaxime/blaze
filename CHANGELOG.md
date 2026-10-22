@@ -357,6 +357,12 @@ All notable changes to ra-jit are written here. The format follows
 
 ### Fixed
 
+- A dependency's impl that a macro writes in a function body is found: dtoa's `write` calls
+  `dtoa!`, which calls `diyfp!`, which writes `impl DiyFp` there, and `normalize_boundary`
+  went unresolved because no `impl` is in `write`'s own text. A dependency's function is now
+  looked into for impls when it calls a `macro_rules!` of its crate or of a dependency that
+  writes one, in its text or through another macro. The dtoa functions bun left to rustc
+  compile; `harness/bun-repros/macro_impls` builds dtoa.
 - On Linux AArch64, an `asm!` of an instruction that the function's `#[target_feature]`
   enables and the target's baseline lacks (zlib-rs's `crc32w`, in bat) was refused by the
   assembler: the block is assembled apart from its function, so it now starts with the

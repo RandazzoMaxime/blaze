@@ -2691,6 +2691,52 @@ const GOAL: usize = sized::<u8>(2) + sized::<u32>(10);
 }
 
 #[test]
+fn impl_of_a_macro_in_the_body_of_a_dependency() {
+    check_number(
+        r#"
+//- minicore: sized, tuple
+//- /dtoa/lib.rs crate:dtoa library
+#[macro_use]
+mod diyfp;
+macro_rules! dtoa {
+    (value: $v:expr, significand_type: $sigty:ty, $($param:ident: $value:expr,)*) => {
+        diyfp! { significand_type: $sigty, $($param: $value,)* };
+        let (plus, minus) = DiyFp::new($v, 0).boundaries();
+        plus.f * 10 + minus.f
+    };
+}
+pub trait Write { fn write(self) -> u32; }
+impl Write for u32 {
+    fn write(self) -> u32 {
+        dtoa! { value: self, significand_type: u32, factor: 3, }
+    }
+}
+//- /dtoa/diyfp.rs
+pub struct DiyFp<F, E> { pub f: F, pub e: E }
+impl<F, E> DiyFp<F, E> {
+    pub const fn new(f: F, e: E) -> Self { DiyFp { f, e } }
+}
+macro_rules! diyfp {
+    (significand_type: $sigty:ty, factor: $factor:expr,) => {
+        type DiyFp = diyfp::DiyFp<$sigty, i32>;
+        impl DiyFp {
+            const fn normalize(self) -> DiyFp { DiyFp::new(self.f * $factor, self.e) }
+            const fn boundaries(self) -> (DiyFp, DiyFp) {
+                let plus = DiyFp::new(self.f + 1, self.e - 1).normalize();
+                (plus, self)
+            }
+        }
+    };
+}
+//- /main.rs crate:main deps:dtoa
+use dtoa::Write;
+const GOAL: u32 = 4u32.write();
+"#,
+        154,
+    );
+}
+
+#[test]
 fn adt_const_params() {
     check_number(
         r#"
