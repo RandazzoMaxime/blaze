@@ -327,6 +327,10 @@ All notable changes to ra-jit are written here. The format follows
 
 ### Fixed
 
+- A checkout that an edit broke could be answered ok, linked with rustc's copy of the function
+  from before the edit: a program whose build was interrupted, or panicked, or whose checkout
+  was loaded again with the same link, forgot what rustc's copies are copies of, and its next
+  build took the source as it was then for what rustc compiled. It keeps that now (#71).
 - Under plain cargo, a test that ran the workspace's program could find none: the build the
   daemon loads afterwards ran beside the tests, and linking the program into place again
   deletes it first. It now waits for the user's cargo to exit (#61).
