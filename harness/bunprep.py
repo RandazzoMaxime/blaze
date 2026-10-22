@@ -24,12 +24,15 @@ ninja, go, a bun to run its scripts), as `nix develop .#bench-bun` has it, whose
 bun's pinned nightly. With rustup, that nightly is installed when it is missing.
 docs/research/bun.md says what was measured with it.
 """
-import os, re, shlex, shutil, subprocess, sys
+import hashlib, os, re, shlex, shutil, subprocess, sys
 
 # The checkout's rust-toolchain.toml.
 TOOLCHAIN = "nightly-2026-09-15"
 PROFILE = "release"
+# Holds the revision the tree was built at and this file's hash: a tree prepared by an older
+# bunprep is built again, from its own build.
 MARKER = ".bunprep-built"
+SELF = hashlib.sha256(open(__file__, "rb").read()).hexdigest()[:16]
 
 # Flags of bun's link that are not kept, by why. Every other flag is: `--wrap`, the exported
 # symbols, the stack size and the libraries are what the program is.
@@ -106,7 +109,9 @@ def build_dir(tree):
 
 
 def link_statement(ninja):
-    """The inputs and `ldflags` of the statement that links bun-profile in build.ninja."""
+    """The inputs and `ldflags` of the statement that links bun-profile in build.ninja, and the
+    objects it links lazily: on Linux every dependency's, in a response file that `lazy` names,
+    between `--start-lib` and `--end-lib`."""
     lines = open(ninja).read().replace("$\n", "").split("\n")
     at = next(i for i, line in enumerate(lines) if re.match(r"build bun-profile[ |:]", line))
     _, rest = lines[at].split(": ", 1)
@@ -115,22 +120,28 @@ def link_statement(ninja):
         if token in ("|", "||"):
             break
         inputs.append(token)
-    flags = ""
+    flags, lazy = "", []
     for line in lines[at + 1:]:
         if not line.startswith(" "):
             break
         if line.strip().startswith("ldflags = "):
             flags = line.strip().removeprefix("ldflags = ")
-    return inputs, shlex.split(flags)
+        if line.strip().startswith("lazy = "):
+            for flag in shlex.split(line.strip().removeprefix("lazy = ")):
+                rsp = flag.removeprefix("-Wl,@")
+                assert rsp != flag, f"bun-profile's lazy objects are not a response file: {flag}"
+                lazy += open(os.path.join(os.path.dirname(ninja), rsp)).read().split()
+    return inputs, shlex.split(flags), lazy
 
 
 def native_targets(tree):
     """What ninja builds for the measured builds: the native inputs of bun's link, the code its
     Rust includes (`rust-codegen-ready`) and the dependencies its Cargo.toml has under `vendor/`
     (`clone-<name>`). Not bun's own build of its Rust: that is what is measured."""
-    inputs, _ = link_statement(os.path.join(build_dir(tree), "build.ninja"))
+    inputs, _, lazy = link_statement(os.path.join(build_dir(tree), "build.ninja"))
     cloned = re.findall(r'path = "vendor/([^"/]+)"', open(os.path.join(tree, "Cargo.toml")).read())
-    return [*(path for path in inputs if not path.startswith("rust-target/")), "rust-codegen-ready",
+    return [*(path for path in inputs if not path.startswith("rust-target/")),
+            *(path for path in lazy if not path.startswith("-")), "rust-codegen-ready",
             *(f"clone-{name}" for name in cloned)]
 
 
@@ -138,13 +149,17 @@ def link_args(tree):
     """The native half of bun's link, one argument per line in build/release/ra-jit-link.args:
     every object and library but bun's own Rust (which `bun-exe` is), and the flags kept."""
     out = build_dir(tree)
-    inputs, flags = link_statement(os.path.join(out, "build.ninja"))
+    inputs, flags, lazy = link_statement(os.path.join(out, "build.ninja"))
     native = [os.path.join(out, path) for path in inputs if not path.startswith("rust-target/")]
     objects = [path for path in native if path.endswith(".o")]
     filelist = os.path.join(out, "ra-jit-link.objects")
     open(filelist, "w").write("\n".join(objects) + "\n")
     darwin = sys.platform == "darwin"
     args = [f"-Wl,-filelist,{filelist}"] if darwin else [f"@{filelist}"]
+    if lazy:
+        lazylist = os.path.join(out, "ra-jit-link.lazy")
+        open(lazylist, "w").write("\n".join(it if it.startswith("-") else os.path.join(out, it) for it in lazy) + "\n")
+        args.append(f"-Wl,@{lazylist}")
     args += [path for path in native if not path.endswith(".o")]
     kept = iter(flags)
     for flag in kept:
@@ -208,7 +223,7 @@ def head_of(tree):
 def native(tree, head):
     """Bun's own build of the tree, its link and the member `bun-exe`, once per revision."""
     marker = os.path.join(tree, MARKER)
-    if os.path.exists(marker) and open(marker).read().strip() == head:
+    if os.path.exists(marker) and open(marker).read().split() == [head, SELF]:
         return
     env = rust_env(os.environ)
     if sys.platform == "darwin" and not env.get("SDKROOT"):
@@ -238,7 +253,7 @@ def native(tree, head):
     # The lock file gets the new member, so that `--locked` builds take it.
     subprocess.run(["cargo", "metadata", "--format-version", "1"], cwd=tree, env=env, check=True,
                    stdout=subprocess.DEVNULL)
-    open(marker, "w").write(head + "\n")
+    open(marker, "w").write(f"{head} {SELF}\n")
 
 
 def prepare(checkout):
@@ -248,7 +263,7 @@ def prepare(checkout):
     tree = checkout.rstrip("/") + "-native"
     head = head_of(checkout)
     marker = os.path.join(tree, MARKER)
-    if not (os.path.exists(marker) and open(marker).read().strip() == head):
+    if not (os.path.exists(marker) and open(marker).read().split()[:1] == [head]):
         shutil.rmtree(tree, ignore_errors=True)
         shutil.copytree(checkout, tree, symlinks=True)
     native(tree, head)
