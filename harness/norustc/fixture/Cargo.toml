@@ -1,0 +1,13 @@
+[package]
+name = "tally"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+word = { path = "word" }
+shout = { path = "shout" }
+outer = { path = "outer" }
+
+[workspace]
+members = ["word", "shout"]
+exclude = ["outer"]

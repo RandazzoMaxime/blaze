@@ -138,7 +138,12 @@ with reasons. The daemon's log says `backend: llvm -O2 fast emit` when LLVM is i
 ### Timing
 
 `bench.py`, `editloop.py`, `edittimes.py`, `scaling.py`, `dxedits.py`, `linkbench.py`,
-`shapes.py`, `heap.py`, `heapfold.py`, `fnincr.py`, `realbench.py` and `live_latency.py` measure and do not gate.
+`shapes.py`, `heap.py`, `heapfold.py`, `fnincr.py`, `realbench.py`, `spare.py` and `live_latency.py` measure and do not gate.
+`spare.py` starts a daemon with a tiny project, then builds one of `bench.py`'s projects under it
+from an empty target directory and again once cargo has built it, each until the daemon is
+ready, for builds of ra-jit given as `--variant LABEL:BIN[:VAR=VALUE...]` in interleaved
+rounds: the second project's cold and warm start and what the daemon's processes hold before and
+after, which is how the spare worker's default was chosen ([cargo.md](cargo.md#what-a-build-does)).
 `heap.py` gives a heap profile's bytes to the salsa query whose value or record holds them, and to
 ra-jit's own structures; `heapfold.py` makes of a profile on macOS what `jeprof --collapsed` makes
 of it on Linux, for `heap.py` to read ([research/daemon-memory.md](research/daemon-memory.md)); `heap.py --syntax`

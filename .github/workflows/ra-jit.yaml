@@ -93,6 +93,8 @@ jobs:
           components: rustfmt
       # Some scripts ask rustc for the host when imported: after the toolchain is installed.
       - run: python3 harness/imports.py
+      # No new place in ra-jit's code starts rustc, rustdoc or cargo (docs/no-rustc.md).
+      - run: python3 harness/rustcsites.py
       # The code that is ra-jit's own: vendor/ is the forks' code, formatted by their rules.
       - run: cargo fmt -p ra-jit -p ra-jit-live -p hir-ty-codegen -p ra-jit-store -p ra-jit-fuzz -- --check
 

@@ -1,0 +1,9 @@
+[package]
+name = "word"
+version = "0.1.0"
+edition = "2021"
+
+# Features the root package has none of: the doctests are built with them.
+[features]
+default = ["split"]
+split = []
