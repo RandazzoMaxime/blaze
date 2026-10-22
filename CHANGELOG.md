@@ -8,6 +8,13 @@ All notable changes to ra-jit are written here. The format follows
 
 ### Added
 
+- Const eval answers nightly's reflection, `core::mem::type_info` (#34): a type's variants
+  and fields, a field's type, name and offset, a type's size, whether it is signed, an array's
+  length and element, what a pointer points to, a variant's name, as rustc does, and two of
+  its `TypeId`s compare. Bun's `MultiArrayList` asks it of every type it holds, which left 907
+  of bun's functions to rustc; `harness/bun-repros/type_info` asks what it does and now
+  compiles. A constant that holds a `TypeId` is still refused: the evaluator's ids are not
+  rustc's hashes.
 - The daemon's workers hold at most half of the machine's memory together, or what
   `RA_JIT_MEMORY_MAX` says (a size, or `off`). Over it, the worker asked longest ago is
   stopped; `cargo ra-jit status` shows the limit and what each worker holds. `docs/reports/SOAK.md`

@@ -227,9 +227,9 @@ pub struct Evaluator<'db> {
     cached_fn_mut_trait_func: Option<FunctionId>,
     cached_fn_once_trait_func: Option<FunctionId>,
     crate_id: Crate,
-    /// The types whose `TypeId` was asked for. An id here is the type's place in this list,
-    /// which says whether two are of one type and is not the hash compiled code has.
-    type_ids: Vec<Ty<'db>>,
+    /// What the `TypeId`s made so far stand for. An id here is its place in this list, which
+    /// says whether two are of one type and is not the hash compiled code has.
+    type_ids: Vec<TypeIdOf<'db>>,
     // FIXME: This is a workaround, see the comment on `interpret_mir`
     assert_placeholder_ty_is_unused: bool,
     /// A general limit on execution, to prevent non terminating programs from breaking r-a main process
@@ -239,6 +239,14 @@ pub struct Evaluator<'db> {
     /// Maximum count of bytes that heap and stack can grow
     memory_limit: usize,
     infcx: InferCtxt<'db>,
+}
+
+/// What a `TypeId` of the evaluation stands for: a type, or the type that stands for a field
+/// of one in reflection (`type_id_field_representing_type`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TypeIdOf<'db> {
+    Ty(Ty<'db>),
+    Field { base: Ty<'db>, variant: usize, field: usize },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -524,9 +532,11 @@ impl<'db> Evaluator<'db> {
     fn evaluate(&mut self, body: &'db MirBody<'db>, ty: Ty<'db>) -> Result<'db, Allocation<'db>> {
         let interval = self.interpret_mir(body, None.into_iter())?;
         // The ids made here are not rustc's hashes and mean nothing outside this evaluation,
-        // so only a constant that cannot carry one is answered: a `bool`, which is what
-        // comparing two gives, as `IS_UNIT` in core does.
-        if !self.type_ids.is_empty() && !matches!(ty.kind(), TyKind::Bool) {
+        // so only a constant that cannot carry one is answered: one of a type with no `TypeId`
+        // in it or behind its references. A `TypeId` is pointers to const eval, which cannot
+        // read them as integers, so no other value is computed from an id's bytes: comparing
+        // two (`IS_UNIT` in core) and reflection's counts, sizes and names are answered.
+        if !self.type_ids.is_empty() && !self.holds_no_type_id(ty, &mut FxHashSet::default()) {
             not_supported!("a constant computed from a `TypeId`");
         }
         let bytes = interval.get(self)?;
@@ -2507,6 +2517,51 @@ impl<'db> Evaluator<'db> {
                     self.db.field_types(variant).iter().all(|(_, field)| {
                         let field = field.ty().instantiate(self.interner(), subst).skip_norm_wip();
                         self.holds_no_pointer(field)
+                    })
+                })
+            }
+            _ => false,
+        }
+    }
+
+    /// Whether no value of the type has a `TypeId` in it or behind its references. A type
+    /// this cannot see through, as a raw pointer or a `dyn`, is taken to have one; one met
+    /// again in `seen`, through a reference to itself, adds nothing.
+    fn holds_no_type_id(&self, ty: Ty<'db>, seen: &mut FxHashSet<Ty<'db>>) -> bool {
+        if !seen.insert(ty) {
+            return true;
+        }
+        match ty.kind() {
+            TyKind::Bool
+            | TyKind::Char
+            | TyKind::Int(_)
+            | TyKind::Uint(_)
+            | TyKind::Float(_)
+            | TyKind::Str
+            | TyKind::Never => true,
+            TyKind::Array(inner, _)
+            | TyKind::Pat(inner, _)
+            | TyKind::Slice(inner)
+            | TyKind::Ref(_, inner, _) => self.holds_no_type_id(inner, seen),
+            TyKind::Tuple(fields) => fields.iter().all(|it| self.holds_no_type_id(it, seen)),
+            TyKind::Adt(adt, subst) => {
+                if self.lang_items().TypeId.is_some_and(|it| adt.def_id() == AdtId::StructId(it)) {
+                    return false;
+                }
+                let variants: Vec<VariantId> = match adt.def_id() {
+                    AdtId::StructId(it) => vec![it.into()],
+                    AdtId::UnionId(it) => vec![it.into()],
+                    AdtId::EnumId(it) => it
+                        .enum_variants(self.db)
+                        .variants
+                        .values()
+                        .map(|&(v, _)| v.into())
+                        .collect(),
+                };
+                variants.into_iter().all(|variant| {
+                    self.db.field_types(variant).iter().all(|(_, field)| {
+                        let field = field.ty().instantiate(self.interner(), subst).skip_norm_wip();
+                        self.holds_no_type_id(field, seen)
                     })
                 })
             }

@@ -596,6 +596,7 @@ define_symbols! {
     TryFrom,
     try_from,
     tuple_trait,
+    type_id,
     u128,
     u16,
     u32,

@@ -40,12 +40,8 @@ CASES = {
     "type_info": {
         "package": "runner",
         "crate": "type_info",
-        "expected": "refused",
-        "reasons": (
-            re.compile(r"type_id_fields"),
-            re.compile(r"type_id_variants"),
-            re.compile(r"UnresolvedMethod\(\"fields\"\)"),
-        ),
+        "expected": "compiled",
+        "reasons": (),
     },
 }
 
