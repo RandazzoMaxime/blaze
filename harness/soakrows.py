@@ -788,6 +788,60 @@ pub mod later;
         raise Wrong("`seven` is not left to rustc: the row needs another function that is")
 
 
+def through_a_blanket_impl(row):
+    """`layout::<Well>` reaches `Well::render` through `impl<T: RenderOnce> View for T`, both
+    returning `impl Value` (#25). ra-jit could not lay out the type, left `layout::<Well>` and
+    `main` to rustc without a word, and rustc's copies call rustc's `Well::render`: every edit
+    of it was "applied: 0 functions", and the program on disk ran the code from before."""
+    with open(row.path("app/src/main.rs"), "a") as main:
+        main.write("""
+trait Value {
+    fn get(self) -> u32;
+}
+
+impl Value for u32 {
+    fn get(self) -> u32 {
+        self
+    }
+}
+
+trait RenderOnce {
+    fn render(self) -> impl Value;
+}
+
+trait View {
+    fn render(self) -> impl Value;
+}
+
+impl<T: RenderOnce> View for T {
+    fn render(self) -> impl Value {
+        RenderOnce::render(self)
+    }
+}
+
+struct Well;
+
+impl RenderOnce for Well {
+    fn render(self) -> impl Value {
+        1
+    }
+}
+
+fn layout<V: View>(view: V) -> u32 {
+    view.render().get()
+}
+""")
+    show_in_main(row, '    println!("well {}", layout(Well));\n')
+    row.both("cold", want="well 1")
+    row.warm()
+    main = row.path("app/src/main.rs")
+    for before, after in [("1", "2"), ("2", "3")]:
+        in_place(main, open(main).read().replace(f"        {before}\n", f"        {after}\n"))
+        how, _ = row.both(f"`Well::render` edited to {after}", want=f"well {after}")
+        if how != "daemon":
+            raise Wrong(f"the build of `Well::render` edited to {after} was not the daemon's: {how}")
+
+
 def outside_its_package(row):
     """A module whose file is outside its package (`#[path = "../../shared/outside.rs"]`), as
     bun's runtime has: the file is in no package's directory, so it was not loaded, the
@@ -838,6 +892,7 @@ ROWS = {
     "functions rustc keeps to an object": (kept_to_an_object, {"CARGO_INCREMENTAL": "0"}),
     "an item added beside a function left to rustc": (beside_one_left, {}),
     "a module file outside its package": (outside_its_package, {}),
+    "an edit reached through a blanket impl": (through_a_blanket_impl, {}),
     "a project pinned to a nightly": (pinned_to_a_nightly, {}),
 }
 
