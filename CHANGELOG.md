@@ -352,6 +352,11 @@ All notable changes to ra-jit are written here. The format follows
 
 ### Fixed
 
+- A `#[global_allocator]` in an inline `#[cfg(test)] mod test { .. }` of a library (ureq's)
+  gave the library's stand-in an allocator outside the test build, whose functions nothing
+  defined: every allocation of the program reached the stand-in's trap, so nushell, which links
+  ureq, stopped at its first allocation. The `#[cfg]`s of the inline modules an allocator is in
+  are now the forwarding allocator's.
 - A constant that read a static holding `&dyn` of another static failed to evaluate
   (`InvalidVTableId`): the vtable was the id the static's own evaluation gave the type, which
   meant nothing to the reading evaluation, and a static the reference pointed into was not
