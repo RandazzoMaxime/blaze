@@ -406,12 +406,8 @@ def backtraces(binary, cwd, env=None):
 BEHIND = "behind rustc"
 
 
-# What is known to be wrong, and why. rung2's ra-jit build polls the future of tower-http's
-# `open_file`, which rustc's copy of that non-generic function makes, with ra-jit's copy of its
-# body, and the two lay that future out differently: ra-jit reads its state at byte 0x3d4, rustc
-# writes it at 0x344. The first poll finds no valid state and traps, where the cargo build
-# panics in tokio.
-OPEN = {"rung2: frames of each panic", f"rung2: {DEBUGGER}"}
+# What is known to be wrong, and why.
+OPEN = set()
 # Under LLVM gdb shows a slice's length and not its elements, `&[i32](size=2)` where rustc's build
 # shows `&[i32](size=2) = {2, 3}`; not looked into yet. Windows asks cdb, which has no such check.
 if LLVM and sys.platform == "linux":
