@@ -41,7 +41,16 @@ pub(crate) struct Served {
     listener: UnixListener,
     open: Arc<AtomicUsize>,
     most: usize,
-    _lock: File,
+    lock: File,
+}
+
+impl Drop for Served {
+    fn drop(&mut self) {
+        // A process another thread starts has the lock's file open too until it runs its
+        // program, and a lock taken with `flock` lasts until every copy is closed or one of them
+        // lets go: closing this copy alone could leave the socket taken for a moment.
+        let _ = self.lock.unlock();
+    }
 }
 
 /// One of the connections a socket serves at a time, until it is dropped.
@@ -91,7 +100,7 @@ impl Served {
         only_the_user_connects(&made)?;
         std::fs::rename(&made, socket)?;
         std::fs::remove_dir(&made_in)?;
-        Ok(Served { listener, open: Arc::default(), most: MOST_CONNECTIONS, _lock: lock })
+        Ok(Served { listener, open: Arc::default(), most: MOST_CONNECTIONS, lock })
     }
 
     /// The connections made to the socket, one after another, each with its place among
