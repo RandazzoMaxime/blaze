@@ -171,9 +171,12 @@ not kept by default. Resolve goes from 5.0 to 3.9 s on nushell and from 5.5 to 4
 time to ready from 33.6 to 32.3 s and from 139.4 to 138.2 s. ripgrep expands no proc macro.
 Peak memory, the daemon's memory once ready and the store's size do not change (store +0.01 GB).
 Since the daemon is ready once it has read what rustc linked (cold-start, #11), the same
-expansions are a larger share of a warm start (main d1598b5, two runs each): helix's resolve
-goes from 6.4 to 4.6 s and its time to ready from 10.3 to 8.4 s, nushell's from 6.1 to 4.7 s
-and from 10.8 to 9.2 s.
+expansions are a larger share of a warm start (main 494f0ee948, against a build that also had
+#37's first form, which only acts on the background base; dev-aws-7 with nothing else running, 16 cores, medians of four interleaved runs each): helix's resolve goes from 6.0 to
+4.3 s and its time to ready from 9.6 to 8.0 s, nushell's from 5.8 to 4.5 s and from 10.1 to
+8.8 s. Cold starts do not change (helix 35.5 and 35.2 s, nushell 36.8 and 36.7 s): the
+daemon is ready 1.7 to 3.7 s after cargo returns either way, and runs on a busy host that
+looked slower differed in cargo's own build time.
 
 Build scripts need no cache of their own: a warm start does not run them. The daemon reads
 their results from the messages of cargo's own build, which cargo's fingerprints keep fresh
@@ -294,7 +297,7 @@ def maps, impl headers, salsa inputs) is about 1.8 GB on helix and 1.1 GB on nus
 2.1 GB and 1.0 GB of debug-info descriptions (item 5). So 1b's first family is the item
 tree, the largest single front-end query on both (helix 1.3 GB, nushell 0.4 GB), and the time
 1a and 1b can save on a warm start is about 5 s. Since cold-start (#11) a warm start is ready
-in 8.4 s on helix and 9.2 s on nushell with item 3, of which resolving is 4.6 s and 4.7 s:
+in 8.0 s on helix and 8.8 s on nushell with item 3, of which resolving is 4.3 s and 4.5 s:
 what is left of the warm start is mostly this item's.
 
 **Risks.** It is the largest change here and touches the most upstream behaviour. The
