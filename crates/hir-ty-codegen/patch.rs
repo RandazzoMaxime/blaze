@@ -1788,6 +1788,16 @@ mod tests {
     use super::probe;
 
     #[test]
+    fn a_program_started_again_keeps_what_rustcs_copies_are_of() {
+        let file = base_db::FileId::from_raw(7);
+        let mut known = crate::Rejections { patching: true, full: true, ..Default::default() };
+        known.frozen.edit_bodies(file);
+        known.start_again();
+        assert!(known.patching && !known.full);
+        assert!(known.frozen.edited_bodies.contains(&file));
+    }
+
+    #[test]
     fn a_probe_that_is_interrupted_goes_on_unwinding_and_one_that_panics_finds_nothing() {
         let gone: Option<()> = probe(|| panic!("the base no longer has it"));
         assert_eq!(gone, None);
