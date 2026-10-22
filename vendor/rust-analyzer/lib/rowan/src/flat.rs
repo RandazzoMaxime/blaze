@@ -605,6 +605,8 @@ mod tests {
                 assert_eq!(hash(&twin), hash(f));
                 for node in [g, f] {
                     for kind in (0..5).chain(100..105).map(SyntaxKind) {
+                        let ancestor = node.ancestors().find(|it| it.kind() == kind);
+                        assert_eq!(node.ancestor_where(|it| it == kind), ancestor);
                         let child = node.children().find(|it| it.kind() == kind);
                         assert_eq!(node.child_where(|it| it == kind), child);
                         let token = node

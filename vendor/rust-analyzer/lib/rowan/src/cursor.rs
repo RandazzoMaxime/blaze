@@ -550,6 +550,22 @@ impl SyntaxNode {
         }
     }
 
+    /// The nearest of this node and its ancestors whose kind `pred` accepts.
+    #[inline]
+    pub fn ancestor_where(&self, mut pred: impl FnMut(SyntaxKind) -> bool) -> Option<SyntaxNode> {
+        match self.0 {
+            Ref::Flat(root, at) => {
+                let tree = &flat(&root).tree;
+                let mut it = at;
+                while !pred(tree.kind(it)) {
+                    it = tree.parent(it)?;
+                }
+                Some(SyntaxNode(flat_ref(root, it)))
+            }
+            Ref::Green(_) => self.ancestors().find(|it| pred(it.kind())),
+        }
+    }
+
     /// The first child token of `kind`.
     #[inline]
     pub fn child_token(&self, kind: SyntaxKind) -> Option<SyntaxToken> {

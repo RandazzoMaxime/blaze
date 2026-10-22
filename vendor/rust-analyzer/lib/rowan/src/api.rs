@@ -126,6 +126,11 @@ impl<L: Language> SyntaxNode<L> {
     pub fn child_where(&self, mut pred: impl FnMut(L::Kind) -> bool) -> Option<SyntaxNode<L>> {
         self.raw.child_where(|it| pred(L::kind_from_raw(it))).map(SyntaxNode::from)
     }
+    /// The nearest of this node and its ancestors whose kind `pred` accepts.
+    #[inline]
+    pub fn ancestor_where(&self, mut pred: impl FnMut(L::Kind) -> bool) -> Option<SyntaxNode<L>> {
+        self.raw.ancestor_where(|it| pred(L::kind_from_raw(it))).map(SyntaxNode::from)
+    }
     /// The first child token of `kind`.
     #[inline]
     pub fn child_token(&self, kind: L::Kind) -> Option<SyntaxToken<L>> {
