@@ -58,7 +58,7 @@ use hir_def::{
 };
 use hir_ty_codegen::{
     Backend, CodegenError, CodegenUnit, ContentId, ParallelWork, Rejections, Roots, SymbolResolver,
-    exported_symbol, tier as codegen_tier,
+    exported_static, exported_symbol, tier as codegen_tier,
 };
 use ide_db::{ChangeWithProcMacros, RootDatabase};
 use load_cargo::{LoadCargoConfig, ProcMacroServerChoice};
@@ -2608,6 +2608,7 @@ impl ListedCrate {
                 hir_def::attrs::AttrFlags::query(db, it.into())
                     .contains(hir_def::attrs::AttrFlags::USED)
                     || hir_def::attrs::AttrFlags::link_section(db, it.into()).is_some()
+                    || exported_static(db, it).is_some()
             })
             .collect();
         // A crate with `#![no_main]` has no `main` of Rust's: one it exports is the runtime's.

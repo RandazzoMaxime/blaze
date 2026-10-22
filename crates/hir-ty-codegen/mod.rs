@@ -3542,6 +3542,20 @@ pub fn exported_symbol(db: &dyn HirDatabase, func: FunctionId) -> Option<String>
         .then(|| FunctionSignature::of(db, func).name.as_str().to_owned())
 }
 
+/// The symbol a static of the program, not of an `extern` block, is exported under when an
+/// attribute names it: code of another language finds it by that name, whatever its
+/// visibility and whether or not Rust code uses it.
+pub fn exported_static(db: &dyn HirDatabase, id: StaticId) -> Option<intern::Symbol> {
+    let signature = StaticSignature::of(db, id);
+    if signature.flags.contains(StaticFlags::EXTERN) {
+        return None;
+    }
+    AttrFlags::export_name(db, id.into()).or_else(|| {
+        let unmangled = AttrFlags::query(db, id.into()).contains(AttrFlags::NO_MANGLE);
+        unmangled.then(|| signature.name.symbol().clone())
+    })
+}
+
 /// The symbol an item of an `extern` block links to.
 pub fn link_name(db: &dyn HirDatabase, func: FunctionId) -> Option<String> {
     let ItemContainerId::ExternBlockId(_) = func.lookup(db).container else {
@@ -5438,10 +5452,7 @@ impl<'a, 'db> ObjectCodegen<'a, 'db> {
         let db = self.db;
         let signature = StaticSignature::of(db, id);
         if !signature.flags.contains(StaticFlags::EXTERN) {
-            let exported = AttrFlags::export_name(db, id.into()).or_else(|| {
-                let unmangled = AttrFlags::query(db, id.into()).contains(AttrFlags::NO_MANGLE);
-                unmangled.then(|| signature.name.symbol().clone())
-            });
+            let exported = exported_static(db, id);
             return Ok(exported.filter(|name| self.symbols.defines(name.as_str())));
         }
         let name = AttrFlags::link_name(db, id.into());
@@ -5509,8 +5520,17 @@ impl<'a, 'db> ObjectCodegen<'a, 'db> {
         // Not shared with equal data: a static has an address of its own. Known before its
         // value is: what the value points to may point back at the static.
         let thread_local = is_thread_local(db, id);
+        let exported = exported_static(db, id).filter(|_| !self.patching);
         let data = if let Some(known) = again {
             self.module.declare_data(&known.symbol, Linkage::Hidden, compiled.writable, false)?
+        } else if let Some(name) = exported {
+            // Nothing rustc built defines it: what finds it by name finds ours.
+            self.module.declare_data(
+                name.as_str(),
+                Linkage::Export,
+                compiled.writable,
+                thread_local,
+            )?
         } else if self.patching || thread_local {
             // Nothing else defines the statics of a program compiled to WebAssembly, and
             // under its own name a static is the same one after a build in full.

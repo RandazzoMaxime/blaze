@@ -52,6 +52,14 @@ CASES = {
         "expected": "compiled",
         "reasons": (),
     },
+    # Every crate ra-jit's, as in bun's whole-program link: no rustc copy defines the statics.
+    "exported_statics": {
+        "package": "runner",
+        "crate": "runner,exported_statics",
+        "alone": True,
+        "expected": "compiled",
+        "reasons": (),
+    },
     "macro_fragments": {
         "package": "runner",
         "crate": "macro_fragments",
@@ -124,6 +132,9 @@ def run_case(name, root, json_path=None):
     fx = Fixture(workspace, [case["crate"]], ["-p", case["package"]])
     fx.rustc_build()
     expected = fx.behaviour(fx.reference)
+    if case.get("alone"):
+        fx.alone = True
+        fx.rustc_build()
     fx.ra_jit_build()
     actual = fx.behaviour(fx.binary)
     rows = rows_for(fx)

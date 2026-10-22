@@ -357,6 +357,12 @@ All notable changes to ra-jit are written here. The format follows
 
 ### Fixed
 
+- A `#[no_mangle]` or `#[export_name]` static of a program whose every crate is ra-jit's is
+  defined under that name, also when it is private and when no Rust code uses it. Our copy had
+  a name of its own, as rustc's was the one code of another language found, and one only that
+  code reads was not compiled at all: bun's link was missing `Bun__version`,
+  `Bun__Node__ZeroFillBuffers` and the other statics its C++ reads.
+  `harness/bun-repros/exported_statics`.
 - An `$n:expr` passed on to another macro is one operand there, as rustc has it: in
   `tags!(@count (0u8 + 1u8) + 1u8,)` the rule `(@ $n:expr,)` took `count (0u8 + 1u8)` for a
   call and matched, so bun's `task_tag::COUNT` expanded to nothing and `TaskTag::name`, the one
