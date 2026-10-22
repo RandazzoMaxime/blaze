@@ -738,6 +738,7 @@ fn main() {
     case!(cases::dyn_static_suites::run(), cases::narrow_constructors::aead::run());
     case!(cases::provided_futures::run(7));
     case!(cases::optional_repeats_per_field::run(5));
+    case!(cases::deep_send_cycle::run(3));
 }
 
 fn nest<T>(depth: u8, value: T) -> Option<Option<T>> {

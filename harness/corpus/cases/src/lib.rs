@@ -7765,3 +7765,66 @@ pub mod optional_repeats_per_field {
         (blob.tag(), blob.flags(), blob.0)
     }
 }
+
+/// Whether a type deep in a cycle of `Arc`s, `Weak`s and locks is `Send` takes as many nested
+/// goals as rustc's recursion limit allows once a `Vec`'s capacity, a constant, is evaluated on
+/// the way. The trait solver must not then prove the goals above it again, or it never meets the
+/// cycle and overflows into an ambiguity: bevy's `in_set` over wgpu's handles.
+pub mod deep_send_cycle {
+    use core::ops::{Deref, DerefMut};
+    use std::sync::{Arc, Mutex, RwLock, Weak};
+
+    pub struct Sent<T: Send>(pub T);
+
+    impl<T: Send> Deref for Sent<T> {
+        type Target = T;
+        fn deref(&self) -> &T {
+            &self.0
+        }
+    }
+
+    impl<T: Send> DerefMut for Sent<T> {
+        fn deref_mut(&mut self) -> &mut T {
+            &mut self.0
+        }
+    }
+
+    macro_rules! ring {
+        ($($name:ident => $next:ident, $later:ident),*) => {
+            $(
+                pub struct $name {
+                    pub next: Mutex<Option<Arc<$next>>>,
+                    pub first: Weak<Ring0>,
+                    pub all: RwLock<Vec<Arc<$later>>>,
+                }
+            )*
+        };
+    }
+
+    ring!(
+        Ring0 => Ring1, Ring2,
+        Ring1 => Ring2, Ring3,
+        Ring2 => Ring3, Ring4,
+        Ring3 => Ring4, Ring5,
+        Ring4 => Ring5, Ring6,
+        Ring5 => Ring6, Ring7,
+        Ring6 => Ring7, Ring8,
+        Ring7 => Ring8, Ring9,
+        Ring8 => Ring9, Ring10,
+        Ring9 => Ring10, Ring11,
+        Ring10 => Ring11, Ring12,
+        Ring11 => Ring12, Ring13,
+        Ring12 => Ring13, Ring14,
+        Ring13 => Ring14, Ring15,
+        Ring14 => Ring15, Ring0,
+        Ring15 => Ring0, Ring1
+    );
+
+    pub fn run(n: usize) -> (usize, usize) {
+        let ring =
+            || Ring0 { next: Mutex::new(None), first: Weak::new(), all: RwLock::new(Vec::new()) };
+        let mut sent = Sent((0..n).map(|_| ring()).collect::<Vec<_>>());
+        let taken = core::mem::take(&mut *sent);
+        (taken.len(), sent.len())
+    }
+}

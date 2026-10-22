@@ -1441,7 +1441,13 @@ where
         uv: ty::UnevaluatedConst<I>,
     ) -> Result<Option<I::Const>, RerunNonErased> {
         if self.typing_mode().is_erased_not_coherence() {
-            self.opaque_accesses.rerun_always(RerunReason::EvaluateConst)?;
+            // Backported from rust-lang/rust#161380.
+            let resolved = self.resolve_vars_if_possible(uv);
+            // FIXME: get rid of this once GCE is removed
+            let is_gce = self.cx().features().generic_const_exprs();
+            if resolved.has_opaque_types() || is_gce {
+                self.opaque_accesses.rerun_always(RerunReason::EvaluateConst)?;
+            }
         }
 
         Ok(self.delegate.evaluate_const(param_env, uv))
