@@ -253,19 +253,32 @@ stops using once a build is in full. On macOS the wrapper links those executable
 `-Wl,-headerpad,0x400000` and `-Wl,-bind_at_load`, so a splice has room for its load commands
 and the unwind table of a program of some four hundred thousand functions, and every import
 is bound at start; the daemon's own links leave both out of rustc's line
-(`cargo::plan::rustc_link_args`). While cargo builds, the spare worker compiles ahead on a
-quarter of the cores, the rest being cargo's, and on all of them once cargo is done.
+(`cargo::plan::rustc_link_args`). While cargo builds, the spare worker resolves the names
+of each crate cargo is done with and compiles its functions, without the generic instances
+they reach, on a quarter of the cores, the rest being cargo's. It reads the symbols of each
+library as cargo writes it (`symbols::read_ahead`), so that once cargo is done only the
+program's own are left to read. Every line of cargo's reaches it through the daemon as cargo
+says it, and the spare reads its input from its first moment: a full pipe would have cargo
+wait.
 
 A patch over rustc has no marks of before to compare with, so the daemon takes them just in
 time: before an edit's text reaches the database, `home` notes the functions written in the
 file, their closures and the statics they declare, under rustc's symbols. An `async` block
-has no mark; the hash of its function's text and place stands in. A file not noted before
-it changed, an edit that is more than function bodies, an edit of a generic, `#[inline]` or
-default trait function (rustc copies those into their callers, and the outline's copied
-fingerprint tells), a changed static, and `include!`d or asset files take a build in full,
-and the build log says which (`no patch: ...`). So does a patch the splice can't place: one
-that calls a libc function the executable does not import, uses a thread-local, or has
-frames that do not fit a small executable's unwind table on macOS.
+has no mark; the hash of its function's text and place stands in. rustc copies a generic
+function into the crates that call it, line numbers and all, so `home` also takes in the
+copies of the file's generic functions that its other functions reach and the executable
+has under their paths (`Base::home_copies`, `symbols::Linked::instances_of`): an edit that
+changes or moves the lines of such a function is a patch that replaces each of those copies
+under rustc's symbol, as long as the executable has no other copy of that name. A file not
+noted before it changed, an edit that is more than function bodies, an edit of an
+`#[inline]` or default trait function, or of a generic one with copies `home` did not take
+in (the outline's copied fingerprint tells), a changed static, and `include!`d or asset
+files take a build in full, and the build log says which (`no patch: ...`). So does a patch
+the splice can't place: one that calls a libc function the executable does not import, or
+has frames that do not fit the header's room on macOS, with the program's own beside them. A thread-local of
+the executable is reached as rustc's code reaches it: on Linux x86-64 the general-dynamic
+sequence is rewritten to the executable's local one (an offset from `%fs`), on macOS through
+the descriptor's slot.
 
 Once nothing waits for a second, the daemon builds its own base in full in the background,
 from the store as far as it can; an edit that comes meanwhile interrupts it and is a patch

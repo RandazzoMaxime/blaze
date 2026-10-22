@@ -67,6 +67,15 @@ impl Record {
         profile.join(RECORDS)
     }
 
+    /// The copy the record of the unit that wrote `library` (`lib<crate><extra>.rlib`, as
+    /// its unit is named) has of it, which is what the daemon reads in its place.
+    pub(crate) fn kept_copy(library: &Path) -> Option<PathBuf> {
+        let unit = library.file_stem()?.to_str()?.strip_prefix("lib")?;
+        let record = Record::dir_for(library.parent()?).join(unit).join("record.json");
+        let record: Record = serde_json::from_str(&std::fs::read_to_string(record).ok()?).ok()?;
+        record.copy_of(library).map(Path::to_owned)
+    }
+
     /// The record among `records` of the unit that wrote `artifact`.
     pub(crate) fn of_artifact<'a>(records: &'a [Record], artifact: &Path) -> Option<&'a Record> {
         records.iter().find(|record| record.wrote(artifact))
@@ -201,8 +210,14 @@ impl Record {
     /// The copy of `original`, when it is a file of this unit.
     pub(crate) fn copy_of(&self, original: &Path) -> Option<&Path> {
         let named = self.copies.iter().find(|it| it.original == original);
-        // A target directory reached through a link has two names for the file.
-        let same = |it: &&Copied| same_file::is_same_file(&it.original, original).unwrap_or(false);
+        // A target directory reached through a link has two names for the file, which may
+        // have been moved to its copy: its directory is still there.
+        let same = |it: &&Copied| {
+            let dirs = it.original.parent().zip(original.parent());
+            it.original.file_name() == original.file_name()
+                && dirs
+                    .is_some_and(|(it, other)| same_file::is_same_file(it, other).unwrap_or(false))
+        };
         named.or_else(|| self.copies.iter().find(same)).map(|it| &*it.copy)
     }
 }

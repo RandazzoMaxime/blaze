@@ -72,6 +72,7 @@ hir-def = { path = "vendor/rust-analyzer/crates/hir-def", version = "0.0.0" }
 hir-expand = { path = "vendor/rust-analyzer/crates/hir-expand", version = "0.0.0" }
 hir-ty = { path = "vendor/rust-analyzer/crates/hir-ty", version = "0.0.0" }
 hir-ty-borrowck = { path = "vendor/rust-analyzer/crates/hir-ty-borrowck", version = "0.0.0" }
+hir-ty-wfcheck = { path = "vendor/rust-analyzer/crates/hir-ty-wfcheck", version = "0.0.0" }
 hir-ty-codegen = { path = "crates/hir-ty-codegen" }
 ra-jit-store = { path = "crates/ra-jit-store" }
 ra-jit-fuzz = { path = "crates/ra-jit-fuzz" }

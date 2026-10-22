@@ -29,6 +29,17 @@ All notable changes to ra-jit are written here. The format follows
   its runs with cargo's. An entry's `prepare` names a module of the harness that makes what
   the program's own build makes before cargo: `bunprep.py` runs bun's build of its C and C++
   once per revision and adds a member, `bun-exe`, that rustc links with them.
+- `RA_JIT_MEMORY` reports after every request a worker answers too (`request-N`), and on
+  macOS its resident figure is the physical footprint rather than 0. A `heap-profile` build
+  writes where it was loaded beside each heap profile, which `harness/heapfold.py` needs to
+  name the stacks on macOS, and `harness/heap.py` gives the bytes to the salsa query whose
+  value or record holds them. What they found
+  ([#39](https://github.com/indexable-inc/ra-jit/issues/39),
+  [docs/research/daemon-memory.md](docs/research/daemon-memory.md)): nushell's worker holds
+  10.0 GB live once ready, 2.7 GB of it what a debugger is told of types; ripgrep's 1.6 GB;
+  and the spare worker the daemon starts after the first build holds 940 MB more on ripgrep.
+  salsa's `lru` cannot evict `infer` or MIR (they have cycle handling), and on `described`
+  it freed 206 MB of ripgrep's live heap and none of its footprint, so no eviction is on.
 - `#[ra_jit::cache]` ([#17](https://github.com/indexable-inc/ra-jit/issues/17)): the
   `ra-jit-cache` crate's attribute keeps what a pure function returns, in memory and under
   `target/ra-jit/fn-cache`, by its arguments and a hash of the code ra-jit compiled for it and
@@ -140,10 +151,14 @@ All notable changes to ra-jit are written here. The format follows
 - A borrow checker, the crate `hir-ty-borrowck` in the rust-analyzer subtree, written to give
   rustc's verdict: Polonius alpha by default as nightly rustc does, NLL with
   `RA_JIT_BORROWCK=nll`. It gives rustc's errors on
-  1191 of 1579 of rustc's own borrow-check tests that it can run, and none on any of the 245
+  1241 of 1579 of rustc's own borrow-check tests that it can run, and none on any of the 245
   rustc accepts, scored by `harness/borrowck_ui.py`, and finds nothing in ripgrep, fd, bat,
   hyperfine, just, axum, nushell, delta, eza, tokei and starship. Its errors are rust-analyzer diagnostics and
   `ra-jit borrowck` prints them ([docs/borrowck.md](docs/borrowck.md)).
+- Item well-formedness, the crate `hir-ty-wfcheck` next to the borrow checker: rustc's E0309
+  and E0310 outside function bodies, for struct, enum and union fields (`&'static T` without
+  `T: 'static`), a trait impl's associated types, an impl of a trait bounded by `'static`,
+  and the where clauses of ADTs, impls, traits and functions. Its errors are refused as the borrow checker's are.
 - The daemon refuses to build an edit with a borrow-check error, as it does one with a type
   error; `RA_JIT_BORROWCK_REFUSE=0` turns that off. The checker still misses about a third
   of rustc's borrow-check errors, so `cargo check` stays the final word.
@@ -158,6 +173,12 @@ All notable changes to ra-jit are written here. The format follows
   alone do not turn it on).
 
 ### Changed
+
+- On macOS a patch whose unwind frames are larger than the program's unwind table is spliced
+  rather than linked in full: both of the unwinder's tables move into the room the link leaves
+  after its load commands, the program's frames where the table has them and the patch's
+  behind. ripgrep's first edit (244 KB of frames, a table of 218 KB) is a patch there too
+  (`harness/rustcbase.py`'s `moved-panic` and `cached-reached`).
 
 - After a fresh build through cargo the daemon is ready for edits once it has loaded the
   workspace and read the symbols of the executable rustc linked, instead of after building
@@ -185,11 +206,26 @@ All notable changes to ra-jit are written here. The format follows
   `harness/rustcbase.py` checks every kind of first edit against cargo, and
   `harness/coldprof.py --max-wait S` fails when the daemon is ready more than S seconds after
   the command.
-- While cargo builds, the spare worker compiles ahead on a quarter of the cores instead of
-  all of them, and on all of them once cargo is done: on nushell, Linux, the command and
-  readiness 0.7 to 3.8 s sooner in interleaved runs, with the first edit as fast; on just and
-  ripgrep the same within the noise. Compiling nothing ahead saves another 1.5 s on nushell
-  but doubles the first edit, which then lowers what it reaches itself.
+- `cargo ra-jit build` from cold is closer to cargo's, and readiness follows it sooner
+  ([#11](https://github.com/indexable-inc/ra-jit/issues/11)). The daemon tells the spare
+  worker what cargo built from a thread of its own and the spare reads its input from the
+  start: before, a spare still loading the standard library let the pipe fill, which held up
+  the daemon and with it cargo, whose output went unread. While cargo builds, the spare
+  resolves the standard library and compiles the functions of each crate cargo is done with on
+  a quarter of the cores, leaving the generic instances they reach to the edits, reads the
+  symbols of each library as cargo writes it, and once cargo is done compiles nothing more
+  before it is ready. The first edit reads the edited file's functions on every core. An edit
+  of a generic, `#[inline]` or default trait function, or one that moves such a function's
+  lines, is now a patch too when every copy rustc made of it is found in the executable: the
+  patch replaces the copies, and ripgrep's first edit is a patch. Thread-locals of a patch
+  over rustc's executable are reached as rustc's code reaches them (on Linux x86-64 the
+  general-dynamic sequence becomes local-exec, on macOS through the variable's descriptor).
+  On Linux x86-64 (16 vCPUs, 8 cores), interleaved runs from an empty store, command and
+  ready: just 8.5 to 8.2 s and 9.0 to 8.6 s, ripgrep 6.6 to 5.7 s and 6.9 to 5.9 s, nushell
+  43.5 to 37.6 s and 46.7 to 39.2 s, against 7.6, 5.4 and 35.7 s for plain `cargo build`. The
+  first edit: just 0.36 to 0.5 s, ripgrep 1.7 s built in full to 1.5 s patched, nushell 2.0 s
+  as before. The command's remaining cost is the spare's own: what it resolves of the
+  standard library and the workspace takes cores from cargo (docs/cargo.md).
 - An edit in a package whose build script cargo runs again for it (one that names no
   `rerun-if-changed`, as ripgrep's, fd's and hyperfine's) no longer waits for a
   `cargo check` that runs every build script of the workspace: the daemon runs that one

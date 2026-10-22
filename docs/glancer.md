@@ -71,11 +71,13 @@ were stable names: 665,474,913 bytes for one `helix-parsec` closure, and the lar
    compiles every dependency; ra-jit analyses dependencies only as far as the instances it
    compiles (generic or inlinable functions homed there, `home.rs`), but rust-analyzer loads
    and resolves every crate first.
-2. **The workspace's own state.** Nothing persisted. A spare worker preloads the sysroot,
-   and the "beside" mode compiles ahead while cargo runs (#11). The cold-start-2 lane
-   ("persist the analysed workspace") is the owner of this; it has uncommitted work in
-   `crates/hir-ty-codegen/mod.rs`, `patch.rs`, `crates/ra-jit/src/main.rs`, `outline.rs`
-   and `symbols.rs`, and no persistence commits yet.
+2. **The workspace's own state.** Nothing persisted. While cargo builds, a spare worker
+   loads and resolves the sysroot and the workspace and compiles the functions of each crate
+   cargo is done with on a quarter of the cores (#11). The cold-start-2 branch made that
+   lighter and built no persistence: what is left of the command's cost, 5 to 7% over
+   cargo's on just, ripgrep and nushell, is the spare resolving the sysroot and the
+   workspace beside cargo, which is this item's to remove (and item 1's for the sysroot),
+   through the one id serialization both need, not a mechanism of its own.
 3. **Proc macros and build scripts.** Build scripts: `seed_own_target` copies cargo's target
    directory and commits `20708cd2da` and `c8f58ac7d9` stop re-running scripts cargo already
    ran, so this half is mostly done. Proc macros: one proc-macro server process
@@ -86,11 +88,13 @@ were stable names: 665,474,913 bytes for one `helix-parsec` closure, and the lar
 5. **Memory discipline.** No eviction of inference or MIR: `infer`, `mir_body` and
    ra-jit's monomorphized MIR have no `lru`, and ra-jit drops nothing. Measuring is there:
    with `RA_JIT_MEMORY=<dir>`, `crates/ra-jit/src/memory.rs` reports resident memory after
-   load, resolve, build and warm-up and writes a table of every salsa ingredient (count,
+   load, resolve, build, warm-up and each request answered (on macOS the physical footprint)
+   and writes a table of every salsa ingredient (count,
    bytes of fields and of salsa's records; heap bytes only where an ingredient declares
    `heap_size`, which no rust-analyzer query does). A build with the `heap-profile` feature
    allocates with jemalloc, reports live bytes, and with `_RJEM_MALLOC_CONF=prof:true`
-   writes a heap profile for `jeprof`. rust-analyzer's own per-query report
+   writes a heap profile for `jeprof` (on macOS for `harness/heapfold.py`, with `heap.py` to
+   give it to queries). rust-analyzer's own per-query report
    (`per_query_memory_usage` in `ide-db/src/apply_change.rs`) is commented out since its
    salsa migration.
 6. **LSP-shaped parts.** ra-jit has its own watcher (`inputs.rs` for the manifests and
@@ -161,6 +165,25 @@ numbers to move. The bound is what infer and MIR hold of those, which step 0 rep
 
 **Risks.** An edit that reaches many bodies recomputes their MIR: the edit harnesses
 (`editbench.py`, `movedlines.py`, `storefirst.py`) and edit-to-binary times are the check.
+
+**Measured (2026-10-21, #39).** The `lru` route does not work as designed, and nothing of it
+is merged ([research/daemon-memory.md](research/daemon-memory.md)):
+- salsa 0.28.5 takes an evicted memo of a query with cycle handling, which `infer` and every
+  MIR query have, for one a panic left, and throws. With `lru` on them nushell's worker died
+  in its cold build.
+- An `lru` evicts only when a revision begins, so a build's peak keeps everything.
+- `lru = 4096` on `described`, which has no cycle handling, lowered ripgrep's live heap once
+  ready from 1,622 to 1,416 MB, and its footprint not at all: what it frees stays with the
+  allocator.
+
+What holds the memory: on nushell's 10.0 GB live heap once ready, `described` (debuginfo
+types, each memo a whole copy of a type and everything it is made of) is 2.7 GB,
+`compiled_instance` 0.65 GB, `runtime_mir_body` 0.55 GB, the parse trees 0.8 GB, `mir_body`
+0.37 GB, `infer` 0.29 GB, salsa's records 1.5 GB in all. And about 0.6-0.9 GB of each
+project's figure in `bench.py` after the first request is not the project's: it is the spare
+worker the daemon starts for the next project (940 MB on ripgrep). Sharing what `described`
+keeps, the spare, and a patched salsa that can evict a query with cycle handling are the
+next steps, each its own issue.
 
 ### Item 1: frozen dependency artifacts
 

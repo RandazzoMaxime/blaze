@@ -317,8 +317,6 @@ fn digest_of(dir: &Path) -> Vec<u8> {
 
 #[cfg(all(test, unix))]
 mod tests {
-    use std::os::unix::fs::PermissionsExt as _;
-
     use super::*;
 
     /// A run directory as cargo and `ra-jit build-script` leave one, for a script that
@@ -332,8 +330,16 @@ mod tests {
         let real = run_dir.join("script");
         let lines =
             "#!/bin/sh\nprintf %s \"$WROTE\" > \"$OUT_DIR/made.rs\"\necho \"cargo:in=$OUT_DIR\"\n";
-        std::fs::write(&real, lines).unwrap();
-        std::fs::set_permissions(&real, std::fs::Permissions::from_mode(0o755)).unwrap();
+        // A process a test thread starts while this one has the script open to write holds it
+        // open too until that process execs, and the script is refused meanwhile ("text file
+        // busy"): another process writes it.
+        let written = Command::new("sh")
+            .args(["-c", "printf %s \"$1\" > \"$0\" && chmod 755 \"$0\""])
+            .arg(&real)
+            .arg(lines)
+            .status()
+            .unwrap();
+        assert!(written.success());
         let env = vec![
             ("OUT_DIR".to_owned(), out_dir.to_str().unwrap().to_owned()),
             ("WROTE".to_owned(), wrote.to_owned()),

@@ -50,8 +50,16 @@ All of these are rustc's, written from `compiler/rustc_borrowck` at the pinned n
   initialized), outlives constraints from every statement, call, cast and aggregate, the
   signature's universal regions and implied bounds (normalized parameters and the impl
   header included, for associated consts too), where clauses (elaborated through
-  supertraits), type tests, and lifetimes written in `let` annotations (`let _: T = value`
-  of any value included), casts, turbofishes and struct literal and variant paths. A function item, closure or safe function pointer cast to a
+  supertraits) and the region constraints of proving them with the trait solver (a where
+  clause or impl that proves a bound relates its regions to the bound's, `&'max G: Get` proving
+  `&'min G: Get` makes them equal, and the impl's own `T: 'a` must hold), type tests, and lifetimes written in `let` annotations (`let _: T = value`
+  of any value included), casts, turbofishes (a method's own, `x.f::<&'a T>()`, too) and struct
+  literal and variant paths, in closures too. A function item called through a variable
+  (`let f = foo::<&'static u32>; f(&x)`) has the variable's type. A struct literal proves the struct's where clauses, an array
+  repeat `[x; N]` of more than one copy proves `x`'s type `Copy`, and a path that names an
+  associated item through a type (`Foo::f`, `<()>::f`, `T::f`, not `Default::default`) has its
+  generic arguments and its impl's self type and trait arguments well-formed, as rustc's user
+  type annotation on it. A function item, closure or safe function pointer cast to a
   function pointer is a subtype of it by signature. A where clause `for<'a> T: 'a` is
   `T: 'static`, and a type parameter that fails it is rustc's codeless "does not live long
   enough".
@@ -73,7 +81,9 @@ All of these are rustc's, written from `compiler/rustc_borrowck` at the pinned n
 - Closures: captures, E0373, `FnMut` escapes, E0596 and E0594 through captures. A closure's
   body has two kinds of universal region, as rustc's: its own (the late-bound lifetimes of
   its signature, `for<'a> FnOnce(&'a T)`, and the borrow of its environment) and its
-  creator's (every other region of its type, and the enclosing item's lifetime parameters).
+  creator's (every other region of its type, and the enclosing item's lifetime parameters,
+  late-bound ones included, so `foo::<&'a u32>(&local)` in a closure needs `local` to outlive
+  the creator's `'a`).
   One of its own made to outlive what it is not known to is an error in the closure
   (`with(|x| x)` returning the borrow it was given), named E0521 or a `FnMut` escape as
   rustc names it. What a closure needs of its creator's regions is a requirement the creator
@@ -87,6 +97,17 @@ All of these are rustc's, written from `compiler/rustc_borrowck` at the pinned n
   output to its declared return type with lifetime elision applied (the lifetime of the
   one `&Self` in `self: Box<&Self>` or `Pin<&mut Self>` too), as rustc proves the
   `Future<Output = ..>` bound of the `impl Future` it returns.
+- Items, as rustc's `wfcheck` (the crate `hir-ty-wfcheck`, next to the checker): a struct's,
+  enum's or union's fields must be well-formed given its where clauses and what rustc infers
+  from the fields (every `T: 'a`, never `T: 'static`), so `&'static T` or `Bar<T>` with
+  `struct Bar<T: 'static>` in a field needs `T: 'static` written (E0310). A trait impl's
+  associated types must be well-formed given the impl's where clauses and what its header's
+  types imply (E0309), and the impl must satisfy the trait's outlives bounds, as
+  `trait Foo: 'static` (E0310); a generic associated type is checked with its own where
+  clauses, not the trait's. The where clauses of an ADT, impl, trait or function must be
+  well-formed given its bounds and what its signature's and impl header's types imply
+  (`fn foo<'a, L: X<&'a Nested<K>>>()` needs `K: 'a`). As rustc, an item that also needs a lifetime to outlive one
+  it does not (E0491) gets only that error, which ra-jit does not report yet.
 - E0621 ("explicit lifetime required") where rustc gives it: not in a trait impl's method,
   nor for an anonymous lifetime of `self` or of the return type.
 - Where errors are: at the expression rustc points to. A borrow `format_args!` (so
@@ -113,8 +134,8 @@ With no borrow checker, the 245 units rustc accepts would pass. Now:
 
 | Mode | In scope | Pass | rustc accepts, ra-jit too | rustc rejects, same errors |
 |---|---|---|---|---|
-| Polonius | 1579 | 1191 (75.4%) | 245 of 245 | 946 of 1334 |
-| NLL | 1577 | 1184 (75.1%) | 226 of 226 | 958 of 1351 |
+| Polonius | 1579 | 1241 (78.6%) | 245 of 245 | 996 of 1334 |
+| NLL | 1577 | 1234 (78.2%) | 226 of 226 | 1008 of 1351 |
 
 463 units are out of scope; 344 of them need a nightly feature. CI runs the scoring on Linux
 and fails below a floor a few units under the count there.
@@ -127,16 +148,16 @@ just, axum, nushell, delta, eza, tokei and starship it finds nothing, nor on the
 ## What is left
 
 Every failing unit is one where rustc gives an error ra-jit does not, or gives it on another
-line or with another code. By what is wrong, most first: 61 "lifetime may not live long
-enough" not reported, 36 E0597 not reported, 19 E0310, 17 E0309, 7 E0700, then a long tail. The causes, grouped:
+line or with another code. By what is wrong, most first: 44 "lifetime may not live long
+enough" not reported, 33 E0597 not reported, 13 E0310, 11 E0309, 7 E0700, then a long tail. The causes, grouped:
 
 - **Higher-ranked regions and placeholders** (`for<'a>` bounds, closures with higher-ranked
   signatures): rustc checks them with placeholders in universes; ra-jit does not yet, and
   leaves out what a `for<'a>` lifetime is related to, apart from `for<'a> T: 'a`.
-- **Well-formedness of items** (most of what is left of E0309 and E0310): rustc checks that
-  the types in a struct, enum, impl or where clause outlive what they borrow for before it
-  checks any body; ra-jit checks bodies only. A projection's `<T as Trait>::Assoc: 'a` is not
-  tested yet either.
+- **Well-formedness of items** (most of what is left of E0309 and E0310): what proving a
+  trait bound needs of the regions (`<T as Dummy<'a>>::Out` in a field, proven by an impl
+  that needs `T: 'a`), a projection's `<T as Trait>::Assoc: 'a`, and items whose signature
+  or impl header has an associated type (what normalizing it implies) are not checked yet.
 - **Written closure parameter types**: `|x: &'x u32|` gives `x` the creator's `'x` in rustc,
   the closure's own lifetime in ra-jit, so an error the annotation causes is reported where
   `x` is used instead of at the parameter.
@@ -151,7 +172,9 @@ enough" not reported, 36 E0597 not reported, 19 E0310, 17 E0309, 7 E0700, then a
   on `x` with no arms read `x`; rust-analyzer's captures nothing there, so the E0381 of an
   uninitialized `x` is missed.
 - **Trait selection's region obligations**: an impl's `T: 'static` proven at an unsizing
-  cast, or the region constraints of an impl a method resolves to.
+  cast. A bound on a closure's type is not proven through the solver: rust-analyzer gives a
+  closure one signature, `fn(&'1 T)` for one `'1`, where rustc's is `for<'a> fn(&'a T)`, so
+  proving it would tie every call's borrow to one region.
 - **Differences in rust-analyzer's MIR lowering** (below).
 
 ## What depends on rust-analyzer's MIR lowering
@@ -178,6 +201,10 @@ changes to rust-analyzer were needed, each made as rustc does it:
 - A function item or a tuple struct's or variant's constructor written as a value
   (`let f = foo::<T>;`) is assigned to where it goes, though zero sized, so a closure that
   captures `f` or a method that takes it by value does not read it uninitialized (E0381).
+- The trait solver (`hir-ty/src/next_solver/solver.rs`) answers with the region constraints
+  of what it proves, as rustc's does, for an interner made with `with_regions()`: the
+  borrow checker's. rust-analyzer's dropped them; type inference does not ask for them and
+  its answers are cached apart.
 
 These are differences still open, each the cause of some failures, all of them errors
 missed rather than errors made up:

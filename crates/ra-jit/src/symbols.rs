@@ -3,6 +3,7 @@
 use std::{
     hash::{DefaultHasher, Hash, Hasher},
     path::{Path, PathBuf},
+    sync::{Arc, Mutex},
     time::SystemTime,
 };
 
@@ -130,6 +131,59 @@ impl Named {
     }
 }
 
+/// What was read of a library before the table was asked for: with its length and when it
+/// was written, which a library written again since has others of.
+type ReadAhead = FxHashMap<PathBuf, ((u64, SystemTime), Vec<Named>)>;
+
+static READ_AHEAD: std::sync::LazyLock<Mutex<ReadAhead>> = std::sync::LazyLock::new(Mutex::default);
+
+/// Reads the symbols of a library cargo just built, while it builds the rest of what links
+/// with it, on a quarter of the cores: the others are cargo's.
+#[allow(dead_code)] // `ra-jit-wasm` builds this file too, and reads nothing ahead.
+pub(crate) fn read_ahead(file: PathBuf) {
+    static READERS: std::sync::LazyLock<Mutex<std::sync::mpsc::Sender<PathBuf>>> =
+        std::sync::LazyLock::new(|| {
+            let (send, receive) = std::sync::mpsc::channel::<PathBuf>();
+            let receive = Arc::new(Mutex::new(receive));
+            let cores = std::thread::available_parallelism().map_or(1, |it| it.get());
+            for _ in 0..cores.div_ceil(4) {
+                let receive = receive.clone();
+                std::thread::spawn(move || {
+                    loop {
+                        let file = receive.lock().unwrap_or_else(|e| e.into_inner()).recv();
+                        let Ok(file) = file else { return };
+                        let Some(stamp) = stamp_of(&file) else { continue };
+                        if let Ok(names) = names_of_file(&file) {
+                            lock(&READ_AHEAD).insert(file, (stamp, names));
+                        }
+                    }
+                });
+            }
+            Mutex::new(send)
+        });
+    let _ = lock(&READERS).send(file);
+}
+
+fn lock<T>(it: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    it.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+fn stamp_of(file: &Path) -> Option<(u64, SystemTime)> {
+    let meta = std::fs::metadata(file).ok()?;
+    Some((meta.len(), meta.modified().ok()?))
+}
+
+/// The symbols of `file` as they were read ahead, unless it was written again since.
+fn read_before(file: &Path) -> Option<Vec<Named>> {
+    let (stamp, names) = lock(&READ_AHEAD).remove(file)?;
+    let names = (stamp_of(file)? == stamp).then_some(names)?;
+    READ_BEFORE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    Some(names)
+}
+
+/// How many files the last table took as they were read ahead.
+static READ_BEFORE: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
 /// The symbols of each of `files`, which are objects or archives of them, read on every core.
 fn names_of(files: &[PathBuf]) -> Vec<anyhow::Result<Vec<Named>>> {
     let next = std::sync::atomic::AtomicUsize::new(0);
@@ -138,7 +192,7 @@ fn names_of(files: &[PathBuf]) -> Vec<anyhow::Result<Vec<Named>>> {
         loop {
             let at = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             let Some(file) = files.get(at) else { return read };
-            read.push((at, names_of_file(file)));
+            read.push((at, read_before(file).map_or_else(|| names_of_file(file), Ok)));
         }
     };
     let threads = std::thread::available_parallelism().map_or(1, |it| it.get()).min(files.len());
@@ -209,13 +263,20 @@ pub(crate) struct Linked {
     /// paths, with their addresses: none for a path that two have, or a symbol that two
     /// copies have, which a patch would replace one of.
     private: FxHashMap<String, Option<(String, u64)>>,
+    /// The symbol of each function rustc compiled from Rust (or C++), a line each:
+    /// demangled when asked, for a few.
+    functions: String,
 }
 
 impl Linked {
     pub(crate) fn read(path: &Path) -> anyhow::Result<Linked> {
         let data = std::fs::read(path).with_context(|| format!("reading {}", path.display()))?;
         let object = object::File::parse(&*data)?;
-        let mut linked = Linked { names: FxHashSet::default(), private: FxHashMap::default() };
+        let mut linked = Linked {
+            names: FxHashSet::default(),
+            private: FxHashMap::default(),
+            functions: String::new(),
+        };
         for symbol in object.symbols().chain(object.dynamic_symbols()) {
             let Ok(name) = symbol.name() else { continue };
             let name = match object.format() {
@@ -223,6 +284,13 @@ impl Linked {
                 _ => name,
             };
             linked.names.insert(hashed(name));
+            if (name.starts_with("_R") || name.starts_with("_ZN"))
+                && symbol.kind() == SymbolKind::Text
+                && symbol.section_index().is_some()
+            {
+                linked.functions.push_str(name);
+                linked.functions.push('\n');
+            }
             let private = symbol.is_local()
                 && matches!(symbol.kind(), SymbolKind::Text | SymbolKind::Data)
                 && symbol.section_index().is_some();
@@ -252,6 +320,58 @@ impl Linked {
     pub(crate) fn private(&self, path: &str) -> Option<&str> {
         self.private.get(path)?.as_ref().map(|it| &*it.0)
     }
+
+    /// The copies of the instances of the generic function at `path`, each by its path, as
+    /// `core::mem::swap::<u8>`, with its symbol. `None` when one is of more than an instance
+    /// (a closure in it, say), or two have one path.
+    pub(crate) fn instances_of(&self, path: &str) -> Option<Vec<(String, String)>> {
+        let name = path.rsplit("::").next().filter(|it| !it.is_empty() && it.is_ascii())?;
+        // How the v0 mangling writes a name, which the symbol of each copy has whole.
+        let separator =
+            if name.starts_with(|it: char| it.is_ascii_digit() || it == '_') { "_" } else { "" };
+        let written = format!("{}{separator}{name}", name.len());
+        let prefix = format!("{path}::<");
+        let mut found: FxHashMap<String, String> = FxHashMap::default();
+        for symbol in self.functions.lines().filter(|it| it.contains(&written)) {
+            let Some((_, demangled)) = Named::new(symbol, true).demangled else { continue };
+            // The legacy mangling leaves out the types of an instance.
+            if symbol.starts_with("_ZN")
+                && (demangled == path || demangled.starts_with(&format!("{path}::")))
+            {
+                return None;
+            }
+            let Some(args) = demangled.strip_prefix(&prefix) else { continue };
+            if !closes_at_end(args) {
+                return None;
+            }
+            if found.get(&demangled).is_some_and(|it| it != symbol) {
+                return None;
+            }
+            found.insert(demangled, symbol.to_owned());
+        }
+        Some(found.into_iter().collect())
+    }
+}
+
+/// Whether the arguments of an instance, as a demangled symbol has them after the `<` that
+/// opens them, are all that follows.
+fn closes_at_end(args: &str) -> bool {
+    let mut depth = 1;
+    let mut last = ' ';
+    for (at, it) in args.char_indices() {
+        match it {
+            '<' => depth += 1,
+            // The `->` of a function type.
+            '>' if last == '-' => {}
+            '>' => depth -= 1,
+            _ => {}
+        }
+        if depth == 0 {
+            return at + 1 == args.len();
+        }
+        last = it;
+    }
+    false
 }
 
 impl SymbolTable {
@@ -263,7 +383,13 @@ impl SymbolTable {
             SymbolTable { read: Some(SystemTime::now()), generation, ..SymbolTable::default() };
         let mut symbols = Vec::new();
         let mut owners = Vec::new();
-        for (file, names) in files.iter().zip(names_of(files)) {
+        let start = std::time::Instant::now();
+        READ_BEFORE.store(0, std::sync::atomic::Ordering::Relaxed);
+        let read = names_of(files);
+        // What was read ahead of files that are not of the link is not asked for again.
+        lock(&READ_AHEAD).clear();
+        let read_in = start.elapsed();
+        for (file, names) in files.iter().zip(read) {
             let first = symbols.len();
             for name in names? {
                 table.add_name(name, &mut symbols);
@@ -291,8 +417,18 @@ impl SymbolTable {
                 }
             }
         }
+        let added_in = start.elapsed() - read_in;
         table.place(unplaced);
         table.index(symbols);
+        if std::env::var_os("RA_JIT_STATS").is_some() {
+            let indexed_in = start.elapsed() - read_in - added_in;
+            let ahead = READ_BEFORE.load(std::sync::atomic::Ordering::Relaxed);
+            eprintln!(
+                "symbols: read {read_in:.1?} ({ahead} of {} files ahead), added {added_in:.1?}, \
+                 indexed {indexed_in:.1?}",
+                files.len()
+            );
+        }
         Ok(table)
     }
 

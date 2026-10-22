@@ -13,7 +13,7 @@ use std::{
 use base_db::{Crate, FileId};
 use cranelift_module::{Linkage, Module};
 use cranelift_object::{ObjectBuilder, ObjectModule};
-use hir_def::{FunctionId, HasModule, StaticId};
+use hir_def::{FunctionId, HasModule, Lookup, StaticId, signatures::FunctionSignature};
 use rustc_hash::{FxBuildHasher, FxHashMap, FxHashSet};
 
 type FxIndexMap<K, V> = indexmap::IndexMap<K, V, FxBuildHasher>;
@@ -114,7 +114,7 @@ fn probe<T>(query: impl FnOnce() -> T) -> Option<T> {
 
 /// Whether `root` has a type or constant to be given, of its own or of its `impl` or trait
 /// (`Self` of a trait's method).
-fn copied_by_rustc(db: &dyn HirDatabase, root: FunctionId) -> bool {
+pub(super) fn copied_by_rustc(db: &dyn HirDatabase, root: FunctionId) -> bool {
     let generics = hir_ty::generics::generics(db, root.into());
     generics.iter(false).any(|(id, _)| !matches!(id, hir_def::GenericParamId::LifetimeParamId(_)))
 }
@@ -388,6 +388,10 @@ pub(super) struct Base {
     unnamed: Vec<(FunctionId, Option<Mark>, FileId)>,
     /// The closures written in the functions of the `homed` files.
     closures: Vec<HomedClosures>,
+    /// The generic functions of the modules of each `homed` file by name, and whether each of
+    /// rustc's copies of those of the name is an instance of the base, which a patch replaces
+    /// under rustc's symbol.
+    copies_homed: FxHashMap<FileId, FxHashMap<String, bool>>,
 }
 
 /// The closures rustc compiled of the body of a function of a file an edit changes. rustc's
@@ -761,6 +765,7 @@ impl Base {
             homed: FxHashSet::default(),
             unnamed: Vec::new(),
             closures: Vec::new(),
+            copies_homed: FxHashMap::default(),
         })
     }
 
@@ -797,6 +802,7 @@ impl Base {
             homed: FxHashSet::default(),
             unnamed: Vec::new(),
             closures: Vec::new(),
+            copies_homed: FxHashMap::default(),
         }
     }
 
@@ -869,7 +875,124 @@ impl Base {
             };
             self.statics.insert(id, known);
         }
+        let homed = self.home_copies(db, symbols, functions);
+        self.copies_homed.insert(file, homed);
         self.homes = Homes::new(&self.compiled, &self.crates, &self.files, &self.instances);
+    }
+
+    /// Whether [`Self::home`] noted `file`.
+    pub(super) fn homed(&self, file: FileId) -> bool {
+        self.homed.contains(&file)
+    }
+
+    /// Whether [`Self::home`] took in each of rustc's copies of the generic functions of the
+    /// modules of `file` named `names`.
+    pub(super) fn copies_homed(&self, file: FileId, names: &[String]) -> bool {
+        let Some(homed) = self.copies_homed.get(&file) else { return false };
+        names.iter().all(|it| homed.get(it).copied().unwrap_or(false))
+    }
+
+    /// Takes in rustc's copies of the generic functions of a file's modules, `functions` being
+    /// what is written in it: the instances its other functions reach, and those reach in turn,
+    /// that rustc's executable has. A patch replaces one under rustc's symbol, as it does a
+    /// closure. Whether those are all the copies the executable has of the functions of each
+    /// name: rustc also copies one for a caller elsewhere, of which nothing here knows.
+    fn home_copies(
+        &mut self,
+        db: &dyn HirDatabase,
+        symbols: &dyn SymbolResolver,
+        functions: &[FunctionId],
+    ) -> FxHashMap<String, bool> {
+        let of_modules = |func: FunctionId| {
+            matches!(func.lookup(db).container, hir_def::ItemContainerId::ModuleId(_))
+        };
+        let generic: FxHashSet<FunctionId> = functions
+            .iter()
+            .copied()
+            .filter(|&it| copied_by_rustc(db, it) && of_modules(it))
+            .collect();
+        let mut homed: FxHashMap<String, bool> = FxHashMap::default();
+        if generic.is_empty() {
+            return homed;
+        }
+        // rustc's copies by their paths, with the function each is of.
+        let mut copies: FxHashMap<String, (FunctionId, String)> = FxHashMap::default();
+        let mut unknown: FxHashSet<FunctionId> = FxHashSet::default();
+        for &func in &generic {
+            let Some(found) = symbols.rustc_instances(func) else {
+                unknown.insert(func);
+                continue;
+            };
+            for (path, symbol) in found {
+                if let Some((other, _)) = copies.insert(path, (func, symbol)) {
+                    unknown.extend([func, other]);
+                }
+            }
+        }
+        let note = |requests: &Requests, queue: &mut Vec<(Instance, StoredParamEnvAndCrate)>| {
+            for request in &requests.funcs {
+                if let FuncTarget::Instance(instance, env) = &request.target
+                    && let InstanceDef::Fn(func) = instance.def
+                    && generic.contains(&func)
+                {
+                    queue.push((instance.clone(), env.clone()));
+                }
+            }
+        };
+        let mut queue = Vec::new();
+        for &root in functions.iter().filter(|&&it| !copied_by_rustc(db, it)) {
+            let Ok(compiled) = compiled_root(db, root) else { continue };
+            note(&compiled.requests, &mut queue);
+            let env = closure_env(db, root);
+            for (_, closure) in super::closures_of(db, root).into_iter().flatten() {
+                let Some((instance, _)) = closure else { continue };
+                let compiled = compiled_instance(db, instance, env.clone());
+                if let Ok(compiled) = compiled.as_ref() {
+                    note(&compiled.requests, &mut queue);
+                }
+            }
+        }
+        let mut found: FxIndexMap<Instance, StoredParamEnvAndCrate> = FxIndexMap::default();
+        while let Some((instance, env)) = queue.pop() {
+            if found.contains_key(&instance) {
+                continue;
+            }
+            if let Ok(compiled) = compiled_instance(db, instance.clone(), env.clone()).as_ref() {
+                note(&compiled.requests, &mut queue);
+            }
+            found.insert(instance, env);
+        }
+        let spelling = super::Spelling { db, symbols };
+        for (instance, env) in found {
+            let InstanceDef::Fn(func) = instance.def else { continue };
+            // One the executable has no copy of under its path is left to what calls it.
+            let Some(path) = spelling.instance_path(func, instance.args.as_ref()) else {
+                continue;
+            };
+            let Some((_, symbol)) = copies.remove(&path) else { continue };
+            let mark = closure_mark(db, &instance, &env, self.debug);
+            if mark.is_none() {
+                unknown.insert(func);
+                continue;
+            }
+            let files = body_files(db, &instance);
+            let known = BaseInstance {
+                env,
+                symbol,
+                mark,
+                forwarded: false,
+                files,
+                parents: Vec::new(),
+                theirs: false,
+            };
+            self.instances.entry(instance).or_insert(known);
+        }
+        unknown.extend(copies.into_values().map(|it| it.0));
+        for func in generic {
+            let name = FunctionSignature::of(db, func).name.as_str().to_owned();
+            *homed.entry(name).or_insert(true) &= !unknown.contains(&func);
+        }
+        homed
     }
 
     /// Takes in the closures rustc compiled of the body of `root`: those it has a symbol of
