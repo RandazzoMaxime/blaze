@@ -3092,7 +3092,8 @@ fn start_from_rustc(
     lock(&LINKED).insert(binary.to_owned(), Executable::Linked(linked));
     lock(&RUSTC_LINKED).insert(binary.to_owned());
     let (rustcs, by_symbol) = (rustcs.to_owned(), args.by_symbol.clone());
-    let names = std::thread::spawn(move || symbols::Linked::read(&rustcs, &by_symbol));
+    let shared = table.shared_names();
+    let names = std::thread::spawn(move || symbols::Linked::read(&rustcs, &by_symbol, &shared));
     lock(&RUSTC_SYMBOLS).insert(binary.to_owned(), LinkedNames::Reading(names));
     let mut watched: FxHashSet<PathBuf> = files.iter().map(|it| it.path.clone()).collect();
     let mut real_watched: Option<FxHashSet<PathBuf>> = None;

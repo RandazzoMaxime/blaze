@@ -341,6 +341,17 @@ LIB_SCENARIOS = {
                           ["patch"], 0, {}),
 }
 SCENARIOS.update(LIB_SCENARIOS)
+# The library of the package has the program's name, as most have: rustc's symbols of the two
+# tell them apart by their crate ids alone.
+SAME_NAME_FILES = {
+    **FILES,
+    "app/src/main.rs": MAIN.replace('println!("dep {}", dep::value(2));', 'println!("dep {}", app::base(dep::value(2)));'),
+    "app/src/lib.rs": LIB_FILES["app/src/lib.rs"],
+}
+SAME_NAME_SCENARIOS = {
+    "body-beside-its-library": ([[edit(M, "    x * 3\n", "    x * 4\n")]], ["patch"], 0, {}),
+}
+SCENARIOS.update(SAME_NAME_SCENARIOS)
 
 # How the daemon's own base is to go before the first edit, in the scenarios that say.
 OWN_BASE = {"unbuilt-member": "built", "own-base-budget": "given up"}
@@ -420,6 +431,8 @@ def main():
             files = UNBUILT_FILES
         elif name in LIB_SCENARIOS:
             files = LIB_FILES
+        elif name in SAME_NAME_SCENARIOS:
+            files = SAME_NAME_FILES
         write_workspace(ws, files)
         home, target, store = (os.path.join(work, it) for it in ("home", "target", "store"))
         for path in (home, target, store, fn_cache):
