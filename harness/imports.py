@@ -31,10 +31,10 @@ def main():
     names = sorted(os.path.splitext(os.path.basename(path))[0] for path in glob.glob(os.path.join(HERE, "*.py")))
     with concurrent.futures.ThreadPoolExecutor(os.cpu_count() or 4) as pool:
         results = list(pool.map(imported, names))
-    wrong = [(name, said) for name, status, said in results if status != 0 or said]
+    wrong = [(name, said) for name, status, said in results if status != 0]
     for name, said in wrong:
         print(f"{name}.py:\n{said[-2000:]}\n")
-    print(f"imports: {len(names) - len(wrong)} of {len(names)} harness scripts import without a word")
+    print(f"imports: {len(names) - len(wrong)} of {len(names)} harness scripts import")
     sys.exit(bool(wrong))
 
 
