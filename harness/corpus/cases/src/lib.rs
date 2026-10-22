@@ -7229,6 +7229,100 @@ pub mod dyn_static_suites {
     }
 }
 
+/// A future that a provided method of a trait returns as `impl Future`, from another method of
+/// the trait that returns one and that a blanket impl defines with an `async` block, held
+/// across an `.await` of an `async fn` and of an `async` block (rmcp's `ServiceExt::serve`).
+pub mod provided_futures {
+    use std::future::Future;
+    use std::pin::pin;
+    use std::task::{Context, Poll, Waker};
+
+    pub trait Role {
+        type Error: std::fmt::Debug;
+    }
+    pub struct Server;
+    impl Role for Server {
+        type Error = String;
+    }
+    pub trait Service<R: Role> {
+        fn id(&self) -> u32;
+    }
+    pub struct Running<R: Role, S: Service<R>> {
+        service: S,
+        role: std::marker::PhantomData<R>,
+        steps: u32,
+    }
+    impl<R: Role, S: Service<R>> Running<R, S> {
+        pub async fn waiting(self) -> Result<u32, R::Error> {
+            Ok(self.service.id() * 10 + self.steps)
+        }
+    }
+    pub trait IntoTransport<R, A> {
+        fn steps(self) -> u32;
+    }
+    impl<R: Role> IntoTransport<R, (u8, u16)> for (u8, u16) {
+        fn steps(self) -> u32 {
+            u32::from(self.0) + u32::from(self.1)
+        }
+    }
+    pub trait ServiceExt<R: Role>: Service<R> + Sized {
+        fn serve<T, A>(self, transport: T) -> impl Future<Output = Result<Running<R, Self>, R::Error>>
+        where
+            T: IntoTransport<R, A>,
+        {
+            Self::serve_with(self, transport, 1)
+        }
+        fn serve_with<T, A>(
+            self,
+            transport: T,
+            extra: u32,
+        ) -> impl Future<Output = Result<Running<R, Self>, R::Error>>
+        where
+            T: IntoTransport<R, A>;
+    }
+    impl<R: Role, S: Service<R>> ServiceExt<R> for S {
+        fn serve_with<T, A>(
+            self,
+            transport: T,
+            extra: u32,
+        ) -> impl Future<Output = Result<Running<R, Self>, R::Error>>
+        where
+            T: IntoTransport<R, A>,
+        {
+            let steps = transport.steps() + extra;
+            async move { Ok(Running { service: self, role: std::marker::PhantomData, steps }) }
+        }
+    }
+    pub struct Shell(pub u32);
+    impl Service<Server> for Shell {
+        fn id(&self) -> u32 {
+            self.0
+        }
+    }
+
+    async fn run_stdio(shell: Shell) -> Result<u32, String> {
+        let running = shell.serve((3u8, 4u16)).await?;
+        running.waiting().await
+    }
+
+    fn block_on<F: Future>(future: F) -> F::Output {
+        let mut future = pin!(future);
+        let mut cx = Context::from_waker(Waker::noop());
+        loop {
+            if let Poll::Ready(value) = future.as_mut().poll(&mut cx) {
+                return value;
+            }
+        }
+    }
+
+    pub fn run(id: u32) -> Result<u32, String> {
+        block_on(async {
+            let result = run_stdio(Shell(id)).await;
+            result.map(|it| it + 1)
+        })
+    }
+}
+
 /// Tuple structs whose fields are seen in fewer modules than the struct, both `pub(in path)`
 /// (ring's `aes::Counter` and `gcm::Xi`), built and taken apart through a re-export: the
 /// constructor is seen where both are.

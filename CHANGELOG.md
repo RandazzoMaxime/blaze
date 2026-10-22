@@ -362,6 +362,11 @@ All notable changes to ra-jit are written here. The format follows
   the least of those visibilities was folded from none, which is none. Its construction and
   patterns were refused, and with them ring's AES-GCM under nushell (corpus
   `narrow_constructors`).
+- An `async fn` or block that awaited the `impl Future` of a provided method of a trait,
+  which the impl leaves as the trait has it, had no layout: the trait's opaque type was left
+  for the solver, which reveals nothing of a trait's, and came out an error. It is the hidden
+  type of the trait's body now. rmcp's `ServiceExt::serve` is one, in nushell's MCP server
+  (corpus `provided_futures`).
 
 - On Linux AArch64, an `asm!` of an instruction that the function's `#[target_feature]`
   enables and the target's baseline lacks (zlib-rs's `crc32w`, in bat) was refused by the
