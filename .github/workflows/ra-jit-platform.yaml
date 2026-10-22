@@ -266,9 +266,23 @@ jobs:
         working-directory: target/release
       - name: cargo ra-jit against cargo
         working-directory: harness
+        # Under the job's limit, so that a run that hangs leaves time to keep what it logged.
+        timeout-minutes: 40
         run: |
           if [ "${{ matrix.group }}" = checks ]; then what=--only-checks; else what="--only-projects ${{ matrix.group }}"; fi
           RA_JIT_BIN="$GITHUB_WORKSPACE/target/release/ra-jit" env -u CARGO_INCREMENTAL $PYTHON cargo_ra_jit.py $what
+      - name: what was running, and the daemons' logs
+        if: failure()
+        run: ps -eo pid,ppid,etime,args > /tmp/ra-jit-cargo-processes.txt
+      - if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: cargo-ra-jit-logs-${{ inputs.platform }}-${{ matrix.backend }}-${{ strategy.job-index }}
+          path: |
+            /tmp/ra-jit-cargo-processes.txt
+            /tmp/ra-jit-cargo-*/home-*/*.log
+            /tmp/ra-jit-cargo-*/home-*/*/*/log
+          if-no-files-found: ignore
 
   # The larger projects as they are published, natively on AArch64: what the programs print and
   # what every test says has to be what cargo gives. The ten after these take more than a hosted
