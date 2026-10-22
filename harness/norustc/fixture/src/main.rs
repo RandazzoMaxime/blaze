@@ -14,7 +14,7 @@ fn twice(x: u64) -> u64 {
 }
 
 fn report(text: &str) -> String {
-    let words = word::count(text);
+    let words = lines::count(text);
     format!("{} words, level {}, {}", words, outer::LEVEL, twice(words as u64))
 }
 

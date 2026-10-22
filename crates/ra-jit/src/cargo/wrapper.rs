@@ -61,8 +61,15 @@ const CHECKS: &str = "ra-jit-check";
 
 /// Builds what cargo asked rustc for and ends as rustc would have.
 pub(crate) fn command(mut args: impl Iterator<Item = OsString>) -> anyhow::Result<()> {
-    let rustc = args.next().context("cargo names rustc first")?;
+    let mut rustc = args.next().context("cargo names rustc first")?;
+    // A cargo that asks through ra-jit as both wrappers names it twice.
+    if super::switch::is_wrapper(Path::new(&rustc)) {
+        rustc = args.next().context("cargo names rustc after the wrapper")?;
+    }
     let args: Vec<OsString> = args.collect();
+    if let Some(replied) = crate::answers::reply(&rustc, &args) {
+        std::process::exit(replied?);
+    }
     // The wrapper the user had for the workspace's crates still runs rustc.
     let mut compiler = match Enabled::read().and_then(|it| it.chained) {
         Some(chained) => {

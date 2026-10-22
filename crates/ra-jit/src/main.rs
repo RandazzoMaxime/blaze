@@ -3,6 +3,7 @@
 
 #![allow(clippy::print_stderr, reason = "a command line program: stderr is where it speaks")]
 
+mod answers;
 mod borrowck;
 mod cargo;
 mod content;
@@ -5262,6 +5263,7 @@ pub(crate) fn version() -> String {
 fn main() -> anyhow::Result<()> {
     trace::began();
     syntax::set_green_trees(std::env::var_os("RA_JIT_GREEN_TREES").is_some());
+    project_model::answer_toolchain_questions_with(answers::ask);
     let stands_in_for_rustc = std::env::var_os("RA_JIT_WRAPS_RUSTC").is_some();
     match std::env::args().nth(1).as_deref() {
         _ if stands_in_for_rustc => {}

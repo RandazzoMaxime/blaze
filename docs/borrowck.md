@@ -47,7 +47,9 @@ All of these are rustc's, written from `compiler/rustc_borrowck` at the pinned n
   whose arms test the value reads what it matches first, so a value moved out whole is
   reported there. A `match` arm's guard sees the variables its pattern binds by reference, so
   it cannot move out of them (E0507), and casting an enum to an integer moves the enum
-  (`*e as usize` behind a reference is E0507).
+  (`*e as usize` behind a reference is E0507). A pattern's moves out of what it may not move
+  out of are one error at the value matched for each place they move out of, as rustc's
+  `MovesFromPlace`: `(D(s), &t)` is an E0509 and an E0507.
 - Unaligned references (E0793): a `&` or `&mut` of a field a `#[repr(packed)]` struct may
   leave less aligned than its type needs, as rustc's `check_packed_ref` (not `&raw`, nor
   behind a pointer; a field of a type parameter or of a `dyn` tail may be unaligned).
@@ -111,7 +113,8 @@ All of these are rustc's, written from `compiler/rustc_borrowck` at the pinned n
   associated type `<T as Trait>::Assoc: 'a` as rustc's alias bound: what it normalizes to
   outlives `'a`, or a where clause on the same projection with equal lifetimes or the trait's
   bound says it does, or every argument outlives `'a`, with rustc's choice of which of these
-  relates regions and which is only checked), and lifetimes written in `let` annotations (`let _: T = value`
+  relates regions and which is only checked; an `impl Trait` likewise, as the arguments it
+  captures; an `async` block as what it captures, as a closure), and lifetimes written in `let` annotations (`let _: T = value`
   of any value included, and of each variable a destructuring pattern binds, `y` in
   `let (y, _): (&'static u32, u32)`), struct and variant patterns that spell out generic
   arguments (`let Foo::<'static> { .. } = foo`) and constant patterns (`<() as Foo<'static>>::C`,
@@ -123,7 +126,9 @@ All of these are rustc's, written from `compiler/rustc_borrowck` at the pinned n
   A closure called through a variable takes its arguments as its signature says, whose
   lifetimes rustc infers once, in its type (`let f = |_| {}; f(&x)` in a loop needs `x` to
   live as long as `f`), unless it writes a parameter's or its return's type. `self` of a
-  method of `impl dyn Trait` is `dyn Trait + 'static`, as the impl's header defaults it. A struct literal proves the struct's where clauses, an array
+  method of `impl dyn Trait` is `dyn Trait + 'static`, as the impl's header defaults it. A struct literal proves the struct's where clauses, and
+  the generic arguments its path spells out are well-formed (`Outer::<T, Inner<T>> { .. }`
+  with `struct Inner<T: 'static>` needs `T: 'static`), an array
   repeat `[x; N]` of more than one copy proves `x`'s type `Copy`, and a path that names an
   associated item through a type (`Foo::f`, `<()>::f`, `T::f`, not `Default::default`) has its
   generic arguments and its impl's self type and trait arguments well-formed, as rustc's user
@@ -134,7 +139,8 @@ All of these are rustc's, written from `compiler/rustc_borrowck` at the pinned n
   `dyn Bar<'static, 'a>` with `trait Foo<'a>: Bar<'a, 'a>`) has the supertrait as the
   source's arguments instantiate it equal to the target's.
 - Errors on universal regions: "lifetime may not live long enough", E0521, E0309, E0310,
-  E0311, with rustc's object lifetime defaults (`&'a dyn Trait` is `dyn Trait + 'a`, a trait
+  E0311, with rustc's object lifetime defaults (`&'a dyn Trait` is `dyn Trait + 'a`, a
+  closure's parameter `|x: &dyn Trait|` too, a trait
   bounded by `'static` makes its objects `'static`, elsewhere in a body the lifetime is
   inferred). Of universal regions made to outlive each other, as rustc only the first made
   (a closure's creator's before its own) is checked against all it outlives, the others only
@@ -142,7 +148,8 @@ All of these are rustc's, written from `compiler/rustc_borrowck` at the pinned n
 - Loans that outlive their storage: E0597, E0515, E0716, and promoted constants (calls of
   `#[rustc_promotable]` functions such as `size_of` included) and extended temporaries of
   `const` and `static` items as `'static` (not a variable the value borrows, which is E0597
-  there, as rustc's `UseAsConst` rather than E0515). An expression statement's value is not read once
+  there, as rustc's `UseAsConst` rather than E0515). E0716 of what a pattern borrows
+  (`ref m` in a `match` on a temporary) is at the temporary, as rustc reports it. An expression statement's value is not read once
   its temporaries are dropped, so `&temp();` alone is no E0716, as in rustc.
 - `impl Trait` captures: a return-position `impl Trait` keeps alive and relates only the
   lifetimes it captures, those listed in `use<..>` or, before edition 2024 outside traits and
@@ -217,8 +224,8 @@ With no borrow checker, the 245 units rustc accepts would pass. Now:
 
 | Mode | In scope | Pass | rustc accepts, ra-jit too | rustc rejects, same errors |
 |---|---|---|---|---|
-| Polonius | 1579 | 1414 (89.5%) | 245 of 245 | 1169 of 1334 |
-| NLL | 1577 | 1410 (89.4%) | 226 of 226 | 1184 of 1351 |
+| Polonius | 1579 | 1422 (90.1%) | 245 of 245 | 1177 of 1334 |
+| NLL | 1577 | 1418 (89.9%) | 226 of 226 | 1192 of 1351 |
 
 463 units are out of scope; 344 of them need a nightly feature. CI runs the scoring on Linux
 and fails below a floor a few units under the count there.
@@ -231,11 +238,11 @@ just, axum, nushell, delta, eza, tokei and starship it finds nothing, nor on the
 ## What is left
 
 Every failing unit is one where rustc gives an error ra-jit does not, or gives it on another
-line or with another code. By what is wrong, most first: 20 "lifetime may not live long
+line or with another code. By what is wrong, most first: 17 "lifetime may not live long
 enough" and 12 E0597 not reported, 10 with only an error rustc does not give, 9 "lifetime may
-not live long enough" on another line, 9 each of E0521 and E0310 not reported, 8 each of
-E0716, E0507 and E0700, 7 `FnMut` escapes and 6 each of E0309 and E0510 not reported, then a
-long tail. The causes, grouped:
+not live long enough" on another line, 9 E0716 and 8 E0700 not reported, 7 each of E0507,
+E0521 and `FnMut` escapes, 6 each of E0510 and E0310, and 5 each of E0309, E0311 and
+higher-ranked errors not reported, then a long tail. The causes, grouped:
 
 - **Higher-ranked regions and placeholders** (`for<'a>` bounds, closures with higher-ranked
   signatures): rustc checks them with placeholders in universes; ra-jit does not yet, and
@@ -307,6 +314,9 @@ missed rather than errors made up:
 
 - Temporaries of a block's tail expression in edition 2021 are dropped at a different point.
 - Comparisons against constant patterns take their operands by value.
+- A place expression as a statement (`S[0];`, `*s;`) is moved into a temporary in rustc, so
+  an unsized or borrowed one is E0161 or E0507 (`dst/dst-index-fail.rs`); rust-analyzer
+  does not read it.
 - An arm with a guard binds its by-reference bindings before the guard and the rest after,
   in rustc, so what it binds by value is dropped first; rust-analyzer binds them in the
   pattern's order (`dropck/eager-by-ref-binding-for-guards.rs`, where it reports two errors

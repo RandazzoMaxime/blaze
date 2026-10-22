@@ -118,6 +118,7 @@ impl Asked<'_> {
         let mut command = toolchain::command("cargo", dir, self.env);
         // The unit graph and `cargo config get` are not stable yet.
         command.env("RUSTC_BOOTSTRAP", "1").stdin(Stdio::null());
+        crate::answers::ready_cargo(&mut command);
         command
     }
 

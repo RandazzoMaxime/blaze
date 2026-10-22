@@ -265,8 +265,17 @@ For a CI failure, the last line of the harness step lists which scripts failed.
 `.github/workflows/ra-jit.yaml` runs in two tiers. It calls `ra-jit-platform.yaml` once for
 each platform, each on a machine of its own kind.
 
-The **fast tier** runs on every pull request, every push to main and every entry of the merge
-queue, and takes about ten minutes. On Linux x86-64, Linux AArch64 and macOS arm64 it:
+A change reaches main through the **merge queue** alone
+([contributing.md](contributing.md#landing-a-change)). The queue takes pull requests in order,
+merges each onto main and the entries ahead of it, runs the fast tier on that, and moves main to
+it once it passes; an entry that fails leaves the queue, and the ones behind it are tested again
+without it. So main is always a commit the fast tier passed on. A pull request's own run is
+`fmt` alone, which lets it join the queue within a minute: the queue tests it merged anyway, and
+testing it alone first would make every landing wait for the fast tier twice. For the fast tier
+on a branch before queueing it, `gh workflow run ra-jit.yaml --ref <branch> -f tier=fast`.
+
+The **fast tier** runs on every entry of the merge queue, every push to main and by hand, and
+takes about ten minutes. On Linux x86-64, Linux AArch64 and macOS arm64 it:
 
 - builds ra-jit once, with the `llvm` feature, and hands the binary to its other jobs;
 - runs `harness/unittests.py`;
@@ -297,22 +306,31 @@ minutes replaced each waiting run with the next, and 7 of 10 runs on main were c
 The build and the unit tests compile through sccache, which keeps rustc's output in the
 Actions cache; rust-cache keeps the dependencies from crates.io and leaves out the crates of
 this repository and `vendor/`, which are most of the build. The harnesses run without the
-wrapper, since `cargo_ra_jit.py` tests a user's own.
+wrapper, since `cargo_ra_jit.py` tests a user's own. Main alone writes either cache (sccache is
+read-only elsewhere, `SCCACHE_GHA_RW_MODE`): what a pull request or a queue entry wrote would
+be kept for its own ref, which nothing reads again, and would push main's entries out of the
+repository's 10 GB. The harness jobs' Ubuntu packages (valgrind and gdb) come through
+`.github/actions/apt`, which keeps them in the cache per runner image: the runners' mirror
+sometimes serves a few tens of kB/s, and installing them took 8 to 12 minutes in a cluster of
+runs.
 
 `ci` is the job that says whether everything that ran passed, and it is the one check branch
-rules and the merge queue require. A job that is renamed or split does not change it.
-Measured on 2026-10-22 ([#67](https://github.com/indexable-inc/ra-jit/pull/67)): the fast
-tier took 15.4 minutes with the sccache cache empty and 10.1 with it filled, where the macOS
-build (4 minutes) and then its harnesses (6) are the longest path. One tier that ran everything
-took 44 to 67 minutes before.
+rules and the merge queue require. A job that is renamed or split does not change it. Measured
+on 2026-10-22 ([reports/CI.md](reports/CI.md)): the fast tier took 13.3 minutes at the median
+and 20.4 at p90 on main, where the longest path is the macOS build (4 minutes) and then its
+slowest harness part (6), and the p90 is the package mirror. No job waits for a runner.
 
-The repository ruleset `main` (Settings, Rules) holds the default branch to three rules. A
-push to it needs `ci` to have passed on the commit pushed, the branch can't be deleted, and
-it can't be force-pushed. Repository admins bypass all three, so a merge pushed straight to
-main and a scrub of history still work for them. A ruleset can't exempt the token a workflow
-runs with, so the `bench-readme` commit to main is refused while the ruleset is active.
-`gh api repos/indexable-inc/ra-jit/rulesets` shows its state: `evaluate` only records what
-it would have refused (Insights, Rule insights), and `active` refuses it.
+The repository ruleset `main` (Settings, Rules) is active and holds the default branch to four
+rules: a change comes through the merge queue, a push needs `ci` to have passed on the commit
+pushed, the branch can't be deleted, and it can't be force-pushed. The queue merges with a
+merge commit, builds up to five entries at once, merges up to five together, needs every entry
+green, and counts an entry failed after 60 minutes without `ci`. Repository admins bypass the
+rules (`bypass_actors`), for repairs; work lands through the queue. A ruleset can't exempt the
+token a workflow runs with, so the workflows that commit to main (`pgo.yaml`'s pin,
+`bench-readme.yaml`, `bench-bun.yaml`, `live-latency.yaml`) check out with the secret
+`RA_JIT_BOT_TOKEN`, a token of an identity the ruleset lets past; without it their push is
+refused. `gh api repos/indexable-inc/ra-jit/rulesets/25516056` shows the rules, and Insights,
+Rule insights what they refused.
 
 What is known to be wrong is written down, says why, and does not fail the run. Once it comes
 out right, it fails the run until it is taken off the list:
