@@ -842,6 +842,55 @@ fn layout<V: View>(view: V) -> u32 {
             raise Wrong(f"the build of `Well::render` edited to {after} was not the daemon's: {how}")
 
 
+def reached_from_one_left(row):
+    """What rustc's copy of a function left to rustc calls is rustc's copy too where ra-jit's
+    can't take its place: a function private to rustc's object (`offset`, which only `seven`
+    calls) and a generic one (`scaled::<u8>`). An edit of either, or of `seven` before the
+    daemon had a build of its own, was not in the program the daemon built. Each is built by
+    the daemon or by cargo, and runs as cargo's build does. An item added to `main` first
+    has the daemon build in full, with `seven` left to rustc as rustc compiled it."""
+    with open(row.path("core/src/lib.rs"), "a") as lib:
+        lib.write("""
+pub fn seven() -> u64 {
+    const CALLER: &std::panic::Location<'static> = std::panic::Location::caller();
+    6 + u64::from(CALLER.line() > 0) + helpers::offset() + helpers::scaled(3u8)
+}
+
+mod helpers;
+""")
+    in_place(row.path("core/src/helpers.rs"), """pub(crate) fn offset() -> u64 {
+    0
+}
+
+pub(crate) fn scaled<T: Into<u64>>(x: T) -> u64 {
+    x.into() * 0
+}
+""")
+    show_in_main(row, '    println!("seven {}", soak_core::seven());\n')
+    row.both("cold", want="seven 7")
+    lib, helpers = row.path("core/src/lib.rs"), row.path("core/src/helpers.rs")
+    main = row.path("app/src/main.rs")
+    for label, file, before, after, want in [
+        ("`seven` edited", lib, "    6 + u64", "    16 + u64", "seven 17"),
+        ("an item added to `main`'s file", main, "fn main() {", "fn unused() {}\n\nfn main() {",
+         "seven 17"),
+        ("`offset`, which only `seven` calls, edited", helpers, "    0\n", "    100\n",
+         "seven 117"),
+        ("`scaled`, a generic `seven` calls, edited", helpers, "x.into() * 0", "x.into() * 1000",
+         "seven 3117"),
+    ]:
+        if not label.startswith("`offset`"):
+            row.warm()
+        in_place(file, open(file).read().replace(before, after, 1))
+        how, _ = row.both(label, want=want)
+        if how != "daemon" and not how.startswith("cargo"):
+            raise Wrong(f"{label}: the build was neither the daemon's nor cargo's: {how}")
+    logs = glob.glob(os.path.join(row.home, "**", "log"), recursive=True)
+    said = "".join(open(log, errors="replace").read() for log in logs)
+    if not re.search(r"left to rustc: soak_core::seven: ", said):
+        raise Wrong("`seven` is not left to rustc: the row needs another function that is")
+
+
 def outside_its_package(row):
     """A module whose file is outside its package (`#[path = "../../shared/outside.rs"]`), as
     bun's runtime has: the file is in no package's directory, so it was not loaded, the
@@ -893,6 +942,7 @@ ROWS = {
     "an item added beside a function left to rustc": (beside_one_left, {}),
     "a module file outside its package": (outside_its_package, {}),
     "an edit reached through a blanket impl": (through_a_blanket_impl, {}),
+    "an edit only a function left to rustc reaches": (reached_from_one_left, {}),
     "a project pinned to a nightly": (pinned_to_a_nightly, {}),
 }
 

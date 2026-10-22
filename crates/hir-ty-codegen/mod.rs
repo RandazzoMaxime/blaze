@@ -780,14 +780,10 @@ impl CodegenUnit {
                             Ok(symbol) => compiled.push((root, symbol)),
                             Err(e) => {
                                 // rustc's copy calls what ours would have.
-                                if !on_demand.is_empty()
-                                    && !e.no_symbol()
-                                    && !cg.want_reachable_from(root)
-                                {
-                                    let krate = root.krate(db);
-                                    let rest =
-                                        roots.on_demand.iter().filter(|it| it.krate(db) == krate);
-                                    cg.wanted.extend(rest);
+                                if !on_demand.is_empty() && !e.no_symbol() {
+                                    let unseen = cg.want_reachable_from(root);
+                                    let rest = roots.on_demand.iter();
+                                    cg.wanted.extend(rest.filter(|it| unseen.calls(it.krate(db))));
                                 }
                                 skipped.push((root, e));
                             }
@@ -2999,6 +2995,20 @@ struct TheirStatics {
     unknown: FxHashSet<Crate>,
 }
 
+/// The crates whose functions code that could not be compiled may call, which nothing then
+/// tells: rustc's copy of it calls rustc's copies of them, unless ours are compiled.
+#[derive(Default)]
+struct Unseen {
+    all: bool,
+    crates: FxHashSet<Crate>,
+}
+
+impl Unseen {
+    fn calls(&self, krate: Crate) -> bool {
+        self.all || self.crates.contains(&krate)
+    }
+}
+
 /// The instances the walk for [`TheirStatics`] went through. What it found stays as it is
 /// until the code of one of them, or of a static it found, changes.
 type Walked = Vec<(Instance, StoredParamEnvAndCrate)>;
@@ -4241,19 +4251,22 @@ impl<'a, 'db> ObjectCodegen<'a, 'db> {
     }
 
     /// Wants the functions that `func` and the instances it calls refer to, for when `func`
-    /// itself is left to rustc. `false` when the body can't be compiled to find them.
-    fn want_reachable_from(&mut self, func: FunctionId) -> bool {
+    /// itself is left to rustc, and says what of the code it reaches can't be compiled to find
+    /// them.
+    fn want_reachable_from(&mut self, func: FunctionId) -> Unseen {
         let db = self.db;
-        let Ok(compiled) = compiled_root(db, func).as_ref() else { return false };
-        self.want_requested(&compiled.requests);
-        true
+        let Ok(compiled) = compiled_root(db, func).as_ref() else {
+            return Unseen { all: false, crates: FxHashSet::from_iter([func.krate(db)]) };
+        };
+        self.want_requested(&compiled.requests)
     }
 
     /// Wants the functions the requests and the instances they name refer to, without putting
     /// any of it in the object.
-    fn want_requested(&mut self, requests: &'db Requests) {
+    fn want_requested(&mut self, requests: &'db Requests) -> Unseen {
         let db = self.db;
         let (mut seen, mut seen_statics) = (FxHashSet::default(), FxHashSet::default());
+        let mut unseen = Unseen::default();
         let mut stack = vec![requests];
         while let Some(requests) = stack.pop() {
             for request in &requests.funcs {
@@ -4261,10 +4274,13 @@ impl<'a, 'db> ObjectCodegen<'a, 'db> {
                 match instance.def {
                     InstanceDef::Fn(func) if instance.args.as_ref().is_empty() => self.want(func),
                     _ if !seen.insert(instance) => {}
-                    _ => {
-                        let compiled = compiled_instance(db, instance.clone(), env.clone());
-                        stack.extend(compiled.as_ref().ok().map(|it| &it.requests));
-                    }
+                    _ => match compiled_instance(db, instance.clone(), env.clone()) {
+                        Ok(compiled) => stack.push(&compiled.requests),
+                        Err(_) => match home::mentioned_crates(db, instance) {
+                            Some(crates) => unseen.crates.extend(crates),
+                            None => unseen.all = true,
+                        },
+                    },
                 }
             }
             for request in &requests.datas {
@@ -4276,6 +4292,7 @@ impl<'a, 'db> ObjectCodegen<'a, 'db> {
                 }
             }
         }
+        unseen
     }
 
     /// Puts a non-generic function in the object, exported under its rustc symbol name.
@@ -5435,7 +5452,9 @@ impl<'a, 'db> ObjectCodegen<'a, 'db> {
             if self.on_demand_crates.contains(&id.krate(db))
                 && let Ok(compiled) = compiled_static(db, id).as_ref()
             {
-                self.want_requested(&compiled.requests);
+                let unseen = self.want_requested(&compiled.requests);
+                let rest = self.on_demand.iter().filter(|it| unseen.calls(it.krate(db)));
+                self.wanted.extend(rest);
             }
             return Ok(data);
         }

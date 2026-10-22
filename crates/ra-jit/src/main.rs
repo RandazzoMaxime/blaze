@@ -3800,8 +3800,20 @@ fn refusal(
     if let Some(broken) = broken {
         return Some(Refused::Error(broken));
     }
-    let hir_ty_codegen::OutOfDate { func, why, left_from_the_start } = out_of_date?;
-    let name = hir::Function::from(func).name(db).display(db, syntax::Edition::CURRENT).to_string();
+    let hir_ty_codegen::OutOfDate { func, why, left_from_the_start, calls } = out_of_date?;
+    let named =
+        |func| hir::Function::from(func).name(db).display(db, syntax::Edition::CURRENT).to_string();
+    let name = named(func);
+    if let Some(calls) = calls {
+        let calls = match calls {
+            Some(it) => format!("calls rustc's copy of `{}`, which is", named(it)),
+            None => "may call code of rustc's that is".to_owned(),
+        };
+        return Some(Refused::Cargos(format!(
+            "`{name}` is not compiled by ra-jit, and rustc's copy of it {calls} from before the \
+             edit: {why}"
+        )));
+    }
     // What the frontend turns down is as a rule code that does not compile, unless it turned
     // the function down when rustc compiled it.
     if why.starts_with("frontend:") && !left_from_the_start {
