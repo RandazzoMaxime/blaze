@@ -1,15 +1,15 @@
 {
- "linux-x86_64 cranelift": {
+ "linux-aarch64 cranelift": {
   "check": {
-   "rustc": 7,
+   "rustc": 8,
    "rustdoc": 0
   },
   "cold build": {
-   "rustc": 76,
+   "rustc": 20,
    "rustdoc": 0
   },
   "doctests": {
-   "rustc": 26,
+   "rustc": 6,
    "rustdoc": 0
   },
   "edits": {
@@ -17,7 +17,73 @@
    "rustdoc": 0
   },
   "tests": {
-   "rustc": 93,
+   "rustc": 12,
+   "rustdoc": 0
+  }
+ },
+ "linux-aarch64 llvm": {
+  "check": {
+   "rustc": 8,
+   "rustdoc": 0
+  },
+  "cold build": {
+   "rustc": 19,
+   "rustdoc": 0
+  },
+  "doctests": {
+   "rustc": 6,
+   "rustdoc": 0
+  },
+  "edits": {
+   "rustc": 0,
+   "rustdoc": 0
+  },
+  "tests": {
+   "rustc": 12,
+   "rustdoc": 0
+  }
+ },
+ "linux-x86_64 cranelift": {
+  "check": {
+   "rustc": 8,
+   "rustdoc": 0
+  },
+  "cold build": {
+   "rustc": 20,
+   "rustdoc": 0
+  },
+  "doctests": {
+   "rustc": 6,
+   "rustdoc": 0
+  },
+  "edits": {
+   "rustc": 0,
+   "rustdoc": 0
+  },
+  "tests": {
+   "rustc": 12,
+   "rustdoc": 0
+  }
+ },
+ "linux-x86_64 llvm": {
+  "check": {
+   "rustc": 8,
+   "rustdoc": 0
+  },
+  "cold build": {
+   "rustc": 19,
+   "rustdoc": 0
+  },
+  "doctests": {
+   "rustc": 6,
+   "rustdoc": 0
+  },
+  "edits": {
+   "rustc": 0,
+   "rustdoc": 0
+  },
+  "tests": {
+   "rustc": 12,
    "rustdoc": 0
   }
  }
