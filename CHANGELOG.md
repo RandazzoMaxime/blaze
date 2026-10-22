@@ -332,6 +332,10 @@ All notable changes to ra-jit are written here. The format follows
   compiled, lane by lane or as one instruction. On a MacBook Pro (Apple M5 Max, macOS 27.0.1),
   median of three runs: ripgrep 1.15x, fd 1.01x, bat 1.16x and jsonrt 1.26x of release's
   time, every output the same as release's.
+- x86-64's `simd_select_bitmask` (AVX-512's masked blends), `simd_fma`, the AVX-512 two-table
+  permutes (`vpermi2var` of bytes, words, dwords and qwords), SSE4.1's `phminposuw` and
+  `vzeroupper` are compiled, lane by lane, which nushell's dependencies reach for
+  (corpus `simd_x86`).
 
 ### Fixed
 

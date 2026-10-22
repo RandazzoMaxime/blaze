@@ -20,13 +20,12 @@ use hir_def::{
     hir::{BindingId, ExprId},
 };
 use rustc_hash::FxHashMap;
-use rustc_type_ir::inherent::IntoKind;
 
 use hir_ty::{
     ParamEnvAndCrate,
     db::HirDatabase,
     mir::MirSpan,
-    next_solver::{DbInterner, GenericArgs, Region, StoredGenericArgs, StoredTy, Ty},
+    next_solver::{DbInterner, GenericArgs, StoredGenericArgs, StoredTy, Ty},
     traits::StoredParamEnvAndCrate,
 };
 
@@ -600,10 +599,7 @@ impl<'db> Recorder<'db> {
         // Lifetimes change nothing about the code, and the ones a caller passes on are its
         // own parameters, which mean nothing in the callee.
         let interner = DbInterner::new_with(self.db, env.krate);
-        let args = rustc_type_ir::fold_regions(interner, args, |region, _| match region.kind() {
-            rustc_type_ir::RegionKind::ReBound(..) => region,
-            _ => Region::new_erased(interner),
-        });
+        let args = super::erase_regions(interner, args);
         let instance = Instance { def, args: args.store(), checked: self.checked };
         Ok(self.func(FuncTarget::Instance(instance, env.store()), sig))
     }
