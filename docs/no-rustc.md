@@ -393,6 +393,13 @@ program rustc rejects runs, or one it accepts is refused.
 G lands, "no rustc symbol" cannot go; everything else can. Axionize's work on #34, #35 and #75
 is this step.
 
+The glancer lane owns the part of E that [#37](https://github.com/indexable-inc/ra-jit/issues/37)
+found. The instances an own base refuses for a writable static whose rustc symbol ra-jit does not
+find (helix's `__RUST_STD_INTERNAL_VAL`, a thread-local of std's, which throws a round of 29 s
+away) are compiled, along with their callers, instead of being kept as rejections whose callers
+are forwarded to rustc's copies. Done when helix's own base builds in one round with none of them
+left to rustc, and `harness/norustc/left.py` counts no more functions left to rustc than before.
+
 **F. The standard library compiled by ra-jit.** ([#86](https://github.com/indexable-inc/ra-jit/issues/86)) `core`, `alloc`, `std`, `compiler_builtins`
 (with its intrinsics and `#[naked]` functions), `panic_unwind`, `panic_abort`, `unwind`,
 `proc_macro`, `test` and their dependencies, from `rust-src`, with std's own build script and
@@ -487,7 +494,8 @@ Lanes whose work makes a rustc path do more, to redirect:
   rustc keep working. Its correctness fix (cfcb0c879b) is fine; the rest builds on functions left
   to rustc, which step E removes.
 - **kept-rejections** ([#37](https://github.com/indexable-inc/ra-jit/issues/37)): sends callers
-  to rustc's copies of rejected code. Redirect to compiling them (E).
+  to rustc's copies of rejected code. Redirected to compiling them (E), owned by the glancer
+  lane; the kept rejections are not merged.
 
 Aligned: Axionize's #34, #35 and #75 work (step E), the proc-macro expansion cache #38 (J),
 include-loop's own base (K), and glancer's #40 and #41 (the cold start).
