@@ -60,6 +60,13 @@ CASES = {
         "expected": "compiled",
         "reasons": (),
     },
+    "same_name": {
+        "package": "runner",
+        "crate": "runner,same_name",
+        "alone": True,
+        "expected": "compiled",
+        "reasons": (),
+    },
     "macro_fragments": {
         "package": "runner",
         "crate": "macro_fragments",

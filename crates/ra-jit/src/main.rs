@@ -1532,6 +1532,18 @@ fn crates_named(db: &RootDatabase, krate: &str, args: &Args) -> anyhow::Result<V
     if found.iter().any(of_program) {
         found.retain(of_program);
     }
+    // One of the crates after the first is one the first links: a binary of another package
+    // may have the name too, as bun's `bun-sema` has the library `bun_sema`'s.
+    if let Some(first) = args.crates().next().filter(|&it| it != krate) {
+        let program: FxHashSet<ide_db::base_db::Crate> = crates_named(db, first, args)?
+            .into_iter()
+            .flat_map(|it| ide_db::base_db::Crate::from(it).transitive_deps(db))
+            .collect();
+        let linked = |krate: &Crate| program.contains(&(*krate).into());
+        if found.iter().any(linked) {
+            found.retain(linked);
+        }
+    }
     anyhow::ensure!(!found.is_empty(), "crate {krate} not found in workspace");
     Ok(found)
 }

@@ -357,6 +357,11 @@ All notable changes to ra-jit are written here. The format follows
 
 ### Fixed
 
+- A crate a build names after the program is one the program links, also when a binary of
+  another package has its name: a build of bun with every crate ra-jit's took `--crate
+  bun_sema` for the library and for `bun_sema_standalone`'s `bun-sema` too, whose code calls a
+  library bun does not link, and the link failed on `bun_sema_standalone::parse`.
+  `harness/bun-repros/same_name`.
 - A `#[no_mangle]` or `#[export_name]` static of a program whose every crate is ra-jit's is
   defined under that name, also when it is private and when no Rust code uses it. Our copy had
   a name of its own, as rustc's was the one code of another language found, and one only that
