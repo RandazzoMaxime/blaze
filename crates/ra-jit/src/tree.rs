@@ -21,6 +21,14 @@ use vfs::{AbsPathBuf, FileId, Vfs, VfsPath, file_set::FileSet};
 pub(crate) struct Tree {
     vfs: Vfs,
     directories: FxHashMap<PathBuf, Directory>,
+    /// The files an `include!` named that could not be read, with their timestamp then (`None`
+    /// for one that was not there, as under an `OUT_DIR` no build script wrote): each is read
+    /// again once that changes, and until then is not one more to add.
+    unread: FxHashMap<AbsPathBuf, Option<SystemTime>>,
+}
+
+fn modified(path: &Path) -> Option<SystemTime> {
+    std::fs::metadata(path).and_then(|it| it.modified()).ok()
 }
 
 struct Directory {
@@ -38,7 +46,8 @@ pub(crate) struct Moved {
 
 impl Tree {
     pub(crate) fn new(db: &RootDatabase, vfs: Vfs, watched: &[(FileId, &Path)]) -> Tree {
-        let mut tree = Tree { vfs, directories: FxHashMap::default() };
+        let mut tree =
+            Tree { vfs, directories: FxHashMap::default(), unread: FxHashMap::default() };
         tree.watch(db, watched);
         tree
     }
@@ -155,10 +164,15 @@ impl Tree {
     pub(crate) fn includes_more(&self, db: &RootDatabase) -> bool {
         db.included_sources().into_iter().any(|(path, root)| {
             let source_root = db.source_root(root).source_root(db);
-            !self
+            let loaded = self
                 .vfs
-                .file_id(&VfsPath::from(path))
-                .is_some_and(|(file, _)| source_root.path_for_file(&file).is_some())
+                .file_id(&VfsPath::from(path.clone()))
+                .is_some_and(|(file, _)| source_root.path_for_file(&file).is_some());
+            !loaded
+                && self
+                    .unread
+                    .get(&path)
+                    .is_none_or(|&was| was != modified(&db.on_disk(path.as_ref())))
         })
     }
 
@@ -173,7 +187,12 @@ impl Tree {
             {
                 continue;
             }
-            let Ok(text) = std::fs::read_to_string(db.on_disk(path.as_ref())) else { continue };
+            let on_disk = db.on_disk(path.as_ref());
+            let Ok(text) = std::fs::read_to_string(&on_disk) else {
+                self.unread.insert(path, modified(&on_disk));
+                continue;
+            };
+            self.unread.remove(&path);
             self.vfs.set_file_contents(vfs_path.clone(), Some(text.clone().into_bytes()));
             let Some((file, _)) = self.vfs.file_id(&vfs_path) else { continue };
             let durability =

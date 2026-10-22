@@ -272,6 +272,13 @@ All notable changes to ra-jit are written here. The format follows
 
 ### Fixed
 
+- The daemon's own base, built once nothing is asked after a cold build, started over every
+  second and was never done when a crate it loads includes a file that is not there: zed's
+  `livekit_api` reads `OUT_DIR`, which only a dev-dependency's feature brings into the
+  daemon's crates, and whose build script cargo never ran. A file an `include!`,
+  `include_str!` or `include_bytes!` names and that cannot be read is now read again once it
+  is there, rather than taken for one still to load before each request
+  (`harness/rustcbase.py`'s `unbuilt-member`).
 - A `match` arm's guard with `let` (`if let` guards and their chains) dropped what it bound
   and its temporaries at the end of the guard, before the arm ran, in editions before 2024;
   rustc keeps them until the arm ends or the next arm is tried

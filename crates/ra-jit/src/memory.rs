@@ -38,6 +38,20 @@ pub(crate) fn resident() -> Option<u64> {
     (ok == 0).then(|| unsafe { info.assume_init() }.ri_phys_footprint >> 20)
 }
 
+/// Megabytes of memory the machine has.
+#[cfg(unix)]
+pub(crate) fn physical() -> Option<u64> {
+    // SAFETY: `sysconf` only reads the system's configuration.
+    let (pages, size) =
+        unsafe { (libc::sysconf(libc::_SC_PHYS_PAGES), libc::sysconf(libc::_SC_PAGESIZE)) };
+    (pages > 0 && size > 0).then(|| (pages as u64 * size as u64) >> 20)
+}
+
+#[cfg(not(unix))]
+pub(crate) fn physical() -> Option<u64> {
+    None
+}
+
 /// Bytes allocated and not freed, when the allocator counts them.
 pub(crate) fn live() -> Option<u64> {
     #[cfg(feature = "heap-profile")]
