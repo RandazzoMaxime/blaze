@@ -48,6 +48,8 @@ HARNESSES = [
     ("core", ["nocompact.py"], {}, on("macos"), 1),
     # A branch reaches 128 MB on AArch64, and the splice has to get past that. Mach-O is not spliced.
     ("core", ["farsplices.py"], {"RA_JIT_SPLICE": "1"}, on("linux-aarch64"), 1),
+    # A file 2.3 GB past what it loads, as bevy's debug builds are; about 9 GB of disk at once.
+    ("core", ["farfile.py"], {}, on("linux"), None),
     # `cargo ra-jit` hands Windows builds to cargo, so there the daemon links nothing to test.
     ("core", ["unreached.py"], {}, on("linux", "macos"), 1),
     ("core", ["loadedits.py"], {}, on("linux", "macos"), 2),
