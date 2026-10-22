@@ -45,8 +45,8 @@ static WHOLE_PROGRAM: AtomicBool = AtomicBool::new(false);
 
 /// Whether the process goes on to build edits of what it builds: a daemon's worker, or one
 /// that watches its files. What it compiles is kept by each function's own code alone (the
-/// store, and the build an edit is a patch of), so none of its builds is of a whole program,
-/// whose functions have what they call built into them.
+/// store, and the build an edit is a patch of), so none of its functions may have what it
+/// calls in another crate built into it (see `tier::across`).
 static BUILDS_EDITS: AtomicBool = AtomicBool::new(false);
 
 /// Says the process goes on to build edits of what it builds. Before its first build.
@@ -58,11 +58,9 @@ pub(super) fn edits_follow() -> bool {
     BUILDS_EDITS.load(Ordering::Relaxed)
 }
 
-/// Says the build under way is of a whole program, unless edits of it follow.
+/// Says the build under way is of a whole program.
 pub(super) fn set_whole_program() {
-    if !edits_follow() {
-        WHOLE_PROGRAM.store(true, Ordering::Relaxed);
-    }
+    WHOLE_PROGRAM.store(true, Ordering::Relaxed);
 }
 
 pub(super) fn whole_program() -> bool {
