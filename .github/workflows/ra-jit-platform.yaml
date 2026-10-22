@@ -19,7 +19,11 @@ on:
         type: string
         required: true
       borrowck:
-        description: rustc's borrow-check tests and the pinned run-pass tests, against this build
+        description: rustc's borrow-check tests, against this build
+        type: boolean
+        default: false
+      pinned-ui:
+        description: the run-pass tests of rustc's in harness/ui-pinned.txt, against this build
         type: boolean
         default: false
       cargo-ra-jit:
@@ -196,9 +200,7 @@ jobs:
           true
 
   # The borrow checker against rustc's own borrow-check tests (docs/borrowck.md), at the
-  # commit of the nightly whose verdicts they are scored by, with a floor under the passes; and
-  # the few run-pass tests of rustc's that the nightly claims run once caught ra-jit failing
-  # (harness/ui-pinned.txt), from the tests of the pinned toolchain.
+  # commit of the nightly whose verdicts they are scored by, with a floor under the passes.
   borrowck:
     name: borrowck
     if: inputs.borrowck
@@ -226,11 +228,35 @@ jobs:
           git fetch -q --depth 1 --filter=blob:none origin a30aa9064df6a504b6a323c6884a2f4cfbfff666
           git checkout -q FETCH_HEAD
       - run: python3 harness/borrowck_ui.py "$RUNNER_TEMP/rust" --bin target/release/ra-jit --jobs 4 --mode both --min-pass 1309
+
+  # The few run-pass tests of rustc's that the nightly claims run, or a run on another
+  # platform, once caught ra-jit failing (harness/ui-pinned.txt), from the tests of the pinned
+  # toolchain. Their workspaces are under a link, as they are under /tmp on macOS: rustc's
+  # dep-info names their files where they are, and ra-jit is given them through the link.
+  pinned-ui:
+    name: pinned run-pass tests
+    if: inputs.pinned-ui
+    needs: build
+    runs-on: ${{ inputs.os }}
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/toolchain
+        with:
+          llvm: run
+      - uses: actions/download-artifact@v8
+        with:
+          name: ra-jit-${{ inputs.platform }}
+          path: target/release
+      - run: tar -xf ra-jit.tar
+        working-directory: target/release
       - name: pinned run-pass tests
         run: |
           dirs=$(sed 's/#.*//' harness/ui-pinned.txt | xargs -n1 dirname | sed 's|^|tests/ui/|' | sort -u)
           git clone -q --depth 1 --branch 1.99.0 --filter=blob:none --sparse https://github.com/rust-lang/rust "$RUNNER_TEMP/rust-1.99"
           git -C "$RUNNER_TEMP/rust-1.99" sparse-checkout set tests/auxiliary $dirs
+          mkdir "$RUNNER_TEMP/ui-real"
+          ln -s "$RUNNER_TEMP/ui-real" "$RUNNER_TEMP/ui"
           cd harness
           RA_JIT_BIN="$GITHUB_WORKSPACE/target/release/ra-jit" python3 uitest.py "$RUNNER_TEMP/rust-1.99" --tests ui-pinned.txt --jobs 4 --work "$RUNNER_TEMP/ui"
 

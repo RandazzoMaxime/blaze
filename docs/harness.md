@@ -311,8 +311,8 @@ and live edits, 40 minutes; also on a change to the flake, `nix/` or the depende
 nightly and open an issue when they fail, like ra-jit.yaml's full tier. `fork-sync.yaml` runs
 on pushes to main that touch `vendor/`, `fuzz.yaml` nightly, and `live-*.yaml` on their own
 branches. None of them is part of `ci`; the few `tests/ui` programs that once differed from
-rustc (`harness/ui-pinned.txt`, `uitest.py --tests`) run in ra-jit.yaml's `borrowck` job,
-which is. `site.yaml` deploys the
+rustc (`harness/ui-pinned.txt`, `uitest.py --tests`) run in ra-jit.yaml's `pinned-ui` job,
+on Linux x86-64 and macOS, which is. `site.yaml` deploys the
 site, and `release.yaml` builds releases from tags, each target through
 `.github/scripts/build_release.py` (the `dist` profile with PGO, [reports/RELEASE-BUILD.md](reports/RELEASE-BUILD.md)),
 the recipe the flake's `dist` runs too. `pgo.yaml` trains the profiles it uses, by hand and on
