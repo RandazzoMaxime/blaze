@@ -1546,7 +1546,16 @@ impl<'a, 'db> Checker<'a, '_, 'db> {
         }
         let mut components = Vec::new();
         let mut params = Vec::new();
-        for arg in alias.args.iter() {
+        let captured = match alias.kind {
+            rustc_type_ir::AliasTyKind::Opaque { .. } => {
+                regions::opaque_captures(self.ctx.db, alias.kind.def_id(), alias.args.len())
+            }
+            _ => None,
+        };
+        for (index, arg) in alias.args.iter().enumerate() {
+            if captured.as_ref().is_some_and(|it| !it[index]) {
+                continue;
+            }
             match arg.kind() {
                 GenericArgKind::Lifetime(region) => components.extend(regions::rv_of(region)),
                 GenericArgKind::Type(it) => {

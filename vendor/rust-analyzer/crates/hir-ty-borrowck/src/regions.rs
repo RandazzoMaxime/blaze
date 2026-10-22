@@ -2292,7 +2292,9 @@ impl<'db> Builder<'_, '_, 'db> {
         {
             return;
         }
-        if let Some(normalized) = self.normalize(ty)
+        let opaque = matches!(alias.kind, rustc_type_ir::AliasTyKind::Opaque { .. });
+        if !opaque
+            && let Some(normalized) = self.normalize(ty)
             && !matches!(normalized.kind(), TyKind::Alias(_) | TyKind::Infer(_))
         {
             self.type_outlives_at(normalized, region, at, depth + 1);
@@ -2322,8 +2324,14 @@ impl<'db> Builder<'_, '_, 'db> {
             has_regions |= !matches!(region.kind(), RegionKind::ReBound(..));
             region
         });
-        if !in_env && from_trait.is_empty() && has_regions {
-            for arg in alias.args.iter() {
+        if !in_env && from_trait.is_empty() && (has_regions || opaque) {
+            let captured = opaque
+                .then(|| opaque_captures(self.ctx.db, alias.kind.def_id(), alias.args.len()))
+                .flatten();
+            for (index, arg) in alias.args.iter().enumerate() {
+                if captured.as_ref().is_some_and(|it| !it[index]) {
+                    continue;
+                }
                 match arg.kind() {
                     GenericArgKind::Lifetime(it) => {
                         if let Some(longer) = self.region_rv(it) {
@@ -3936,6 +3944,9 @@ pub(super) fn outlives_components<'db>(
         TyKind::Closure(_, args) => {
             outlives_components(args.as_closure().tupled_upvars_ty(), regions, params)
         }
+        TyKind::Coroutine(_, args) => {
+            outlives_components(args.as_coroutine().tupled_upvars_ty(), regions, params)
+        }
         TyKind::Tuple(tys) => {
             for it in tys.iter() {
                 outlives_components(it, regions, params);
@@ -3948,8 +3959,8 @@ pub(super) fn outlives_components<'db>(
     }
 }
 
-/// The associated types among what `outlives_components` splits `ty` into, which it leaves
-/// out.
+/// The associated and opaque types among what `outlives_components` splits `ty` into, which
+/// it leaves out.
 pub(super) fn alias_components<'db>(ty: Ty<'db>, out: &mut Vec<Ty<'db>>) {
     let args = |args: GenericArgs<'db>, out: &mut Vec<Ty<'db>>| {
         for it in args.types() {
@@ -3958,7 +3969,11 @@ pub(super) fn alias_components<'db>(ty: Ty<'db>, out: &mut Vec<Ty<'db>>) {
     };
     match ty.kind() {
         TyKind::Alias(alias)
-            if matches!(alias.kind, rustc_type_ir::AliasTyKind::Projection { .. }) =>
+            if matches!(
+                alias.kind,
+                rustc_type_ir::AliasTyKind::Projection { .. }
+                    | rustc_type_ir::AliasTyKind::Opaque { .. }
+            ) =>
         {
             out.push(ty)
         }
@@ -3975,6 +3990,7 @@ pub(super) fn alias_components<'db>(ty: Ty<'db>, out: &mut Vec<Ty<'db>>) {
         }
         TyKind::Adt(_, it) | TyKind::FnDef(_, it) => args(it, out),
         TyKind::Closure(_, it) => alias_components(it.as_closure().tupled_upvars_ty(), out),
+        TyKind::Coroutine(_, it) => alias_components(it.as_coroutine().tupled_upvars_ty(), out),
         TyKind::Tuple(tys) => {
             for it in tys.iter() {
                 alias_components(it, out);
