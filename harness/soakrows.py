@@ -748,9 +748,11 @@ def show_in_main(row, shown):
 def beside_one_left(row):
     """A function left to rustc from the first build, `seven` (for the constant
     `breakers.py caller_in_constant` is about): an item added to another file of its crate
-    could change what rustc's copy of it would be, so cargo builds, where the build failed
-    ("has an error ra-jit cannot say more of"); a body edited there does not, and the daemon
-    builds."""
+    could change what rustc's copy of it would be, and the build failed ("has an error ra-jit
+    cannot say more of"). It and a body edited after it are built, each by the daemon or by
+    cargo: which depends on whether rustc's copy is from before the crate's last edit. `seven`
+    is said to be left to rustc once an edit has compiled its crate: a daemon that starts from
+    rustc's build compiles nothing at first."""
     in_place(row.path("core/src/later.rs"), "pub fn eight() -> u64 {\n    8\n}\n")
     with open(row.path("core/src/lib.rs"), "a") as lib:
         lib.write("""
@@ -765,20 +767,20 @@ pub mod later;
     row.both("cold", want="seven 7 eight 8")
     row.warm()
     row.both("warm", want="seven 7 eight 8")
+    later = row.path("core/src/later.rs")
+    in_place(later, open(later).read() + "\npub fn nine() -> u64 {\n    9\n}\n")
+    how, _ = row.both("an item added to another file of the crate", want="seven 7 eight 8")
+    if how != "daemon" and not how.startswith("cargo"):
+        raise Wrong(f"the build after an item was added was neither the daemon's nor cargo's: {how}")
+    row.warm()
+    in_place(later, open(later).read().replace("    8\n", "    80\n"))
+    how, _ = row.both("a body edited in that file", want="seven 7 eight 80")
+    if how != "daemon" and not how.startswith("cargo"):
+        raise Wrong(f"the build after a body was edited was neither the daemon's nor cargo's: {how}")
     logs = glob.glob(os.path.join(row.home, "**", "log"), recursive=True)
     said = "".join(open(log, errors="replace").read() for log in logs)
     if not re.search(r"left to rustc: soak_core::seven: ", said):
         raise Wrong("`seven` is not left to rustc: the row needs another function that is")
-    later = row.path("core/src/later.rs")
-    in_place(later, open(later).read() + "\npub fn nine() -> u64 {\n    9\n}\n")
-    how, _ = row.both("an item added to another file of the crate", want="seven 7 eight 8")
-    if not how.startswith("cargo"):
-        raise Wrong(f"the build after an item was added was not cargo's: {how}")
-    row.warm()
-    in_place(later, open(later).read().replace("    8\n", "    80\n"))
-    how, _ = row.both("a body edited in that file", want="seven 7 eight 80")
-    if how != "daemon":
-        raise Wrong(f"the build after a body was edited was not the daemon's: {how}")
 
 
 def outside_its_package(row):
