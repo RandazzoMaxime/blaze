@@ -8,6 +8,10 @@ All notable changes to ra-jit are written here. The format follows
 
 ### Added
 
+- The daemon's workers hold at most half of the machine's memory together, or what
+  `RA_JIT_MEMORY_MAX` says (a size, or `off`). Over it, the worker asked longest ago is
+  stopped; `cargo ra-jit status` shows the limit and what each worker holds. `docs/reports/SOAK.md`
+  described the variable, but it was never brought over from the soak branch (#60).
 - `RA_JIT_OTHER_TOOLCHAIN=1` has `cargo ra-jit` build with a rustc other than 1.99.0, for a
   project pinned to a nightly of the next release that 1.99.0 can't build (bun's
   `nightly-2026-09-15`). Without it such a build goes to cargo, as before, and says why. The

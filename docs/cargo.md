@@ -172,13 +172,17 @@ two workers, because unit tests are built with `cfg(test)` and integration tests
 
 `cargo ra-jit status` shows the daemon, its workers and their log files:
 
-    daemon: pid 10969, version 0.0.0-3da7208-18df73efa25a74db, exits after 1800s idle
-      worker: pid 13169, /dev/shm/ripgrep/, log /home/user/.cache/ra-jit/workers/f30b80a4e02dffde/log
+    daemon: pid 10969, version 0.0.0-3da7208-18df73efa25a74db, exits after 1800s idle, workers hold at most 32768 MB
+      worker: pid 13169, /dev/shm/ripgrep/, holds 1312 MB, log /home/user/.cache/ra-jit/workers/f30b80a4e02dffde/log
         /dev/shm/ripgrep: ready
     /dev/shm/ripgrep (dev, 1f59ed7b049b7fa0): 3 builds by the daemon, 0 by cargo
 
 A worker for a large workspace holds a lot of memory: 1.3 GB for ripgrep and 9.4 GB for
-dioxus-cli at the end of the agent-style edit runs in [results.md](results.md).
+dioxus-cli at the end of the agent-style edit runs in [results.md](results.md). The workers
+together hold at most half of the machine's memory, or what `RA_JIT_MEMORY_MAX` says. Once a
+second, over that, the daemon stops the worker asked longest ago, and the next build of its
+workspace is cargo's while a worker loads it again. A worker that is answering or loading is
+never stopped, nor is the one asked last, nor any while a program takes live edits.
 
 A client and a daemon built from different sources do not talk to each other. A daemon that
 gets a build request from another version stops its workers and exits, and the client
@@ -224,7 +228,8 @@ started it. To change one, run `cargo ra-jit stop` first.
 |---|---|---|
 | `RA_JIT_HOME` | the daemon's directory (also read by every client) | see above |
 | `RA_JIT_IDLE_SECS` | seconds without a request before the daemon exits; 0 is never | 1800 |
-| `RA_JIT_OWN_BASE_MEMORY` | megabytes a worker may hold while it builds its own base in the background, past which it gives that base up and edits patch rustc's executable; `off` is no bound | a quarter of the machine's memory |
+| `RA_JIT_MEMORY_MAX` | the most the workers hold together, a size such as `6G`, or `off` | half the machine's memory |
+| `RA_JIT_OWN_BASE_MEMORY` | the most a worker may hold while it builds its own base in the background, a size such as `40G`, past which it gives that base up and edits patch rustc's executable; `off` is no bound | a quarter of the machine's memory |
 | `RA_JIT_CACHE` | directory of the disk store; without it nothing is kept on disk | not set |
 | `RA_JIT_REMOTE` and the other store variables | see [cache.md](cache.md) | not set |
 

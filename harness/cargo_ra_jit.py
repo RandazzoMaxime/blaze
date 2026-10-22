@@ -415,6 +415,8 @@ def checking(root):
 def wait_warm(side, root):
     """Waits until the daemon has every build of `root` loaded or has given up on one. The
     result is the seconds it took and how each ended."""
+    # The daemon names a checkout by its real path: on macOS /tmp and /var are links.
+    root = os.path.realpath(root)
     began = time.time()
     side.settled()
     while time.time() - began < WARMUP_SECS:

@@ -480,9 +480,14 @@ def pinned_to_a_nightly(row):
         raise Wrong(f"the build after a body was edited was not the daemon's: {how}")
 
 
+# The programs of one build, which run each other from next to themselves: with one missing,
+# `cargo ra-jit` is cargo's.
+PROGRAMS = ("ra-jit", "cargo-ra-jit", "ra-jit-rustc", "ra-jit-rustc-first")
+
+
 def another_build(source, bin):
     """A ra-jit that is another build: the same program with bytes after its end."""
-    for name in ("ra-jit", "cargo-ra-jit"):
+    for name in PROGRAMS:
         other = os.path.join(bin, name + ".new")
         shutil.copy(os.path.join(source, name), other)
         with open(other, "ab") as file:
@@ -494,7 +499,7 @@ def binary_replaced(row):
     source, bin, old = os.path.dirname(RA_JIT), os.path.join(row.dir, "bin"), os.path.join(row.dir, "bin-old")
     for dir in (bin, old):
         os.makedirs(dir)
-        for name in ("ra-jit", "cargo-ra-jit"):
+        for name in PROGRAMS:
             shutil.copy2(os.path.join(source, name), os.path.join(dir, name))
     path = row.env["PATH"]
     row.env["PATH"] = bin + os.pathsep + path
