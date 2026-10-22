@@ -108,8 +108,10 @@ were stable names: 665,474,913 bytes for one `helix-parsec` closure, and the lar
    ran, so this half is mostly done. Proc macros: one proc-macro server process
    (`proc_macro_processes: 1`), and no cache of expansions.
 4. **Syntax trees.** rowan everywhere. The parse query keeps at most 128 trees, macro
-   expansions 512 and 1,024, bodies 512 and 4,096 (salsa `lru` attributes in the subtree), so
-   retained syntax is bounded already; what a flat tree would save is transient.
+   expansions 512 and 1,024, bodies 512 and 4,096 (salsa `lru` attributes in the subtree),
+   but ra-jit's `body_syntax` held each anchor's green node, which kept whole files' trees
+   past that lru until #42's step (a)
+   ([flat-syntax.md](flat-syntax.md#step-a-no-tree-outlives-its-query)).
 5. **Memory discipline.** No eviction of inference or MIR: `infer`, `mir_body` and
    ra-jit's monomorphized MIR have no `lru`, and ra-jit drops nothing. Measuring is there:
    with `RA_JIT_MEMORY=<dir>`, `crates/ra-jit/src/memory.rs` reports resident memory after
@@ -269,11 +271,16 @@ crate graph.
 
 ### Item 4: a flat syntax tree for files nobody edits
 
-Taken up on 2026-10-22 by its own lane (#42); what follows is why it had been deferred,
-which that lane measures against. Retained syntax is already bounded by the parse LRU; what a flat tree saves is
-the transient cost of parsing and the allocations rowan makes, and step 0 has to show that
-those are a large share of load before this is worth rewriting the parser's output and
-every `ItemTree` lowering. Item 1 would remove most dependency parsing anyway.
+Its own lane (#42); the measurements and the design are in
+[flat-syntax.md](flat-syntax.md). On main after the first request, syntax was 12.7% of
+nushell's live heap (1,164 MB), 22% of ripgrep's (315 MB) and 8% of helix's (852 MB), most of
+it green trees of whole files that `body_syntax` kept past the parse lru. Step (a), merged,
+keeps an anchor's text and range instead and parses it again when asked: nushell's syntax
+falls to 676 MB and helix's to 436 MB, resident memory right after the first request is
+1.1 GB and 2.1 GB less, and ready time does not move. In cold time, building green trees and
+walking red ones are 16% of ripgrep's samples to the first request and 7% of nushell's; steps
+(b) and (c), a flat tree behind rowan's cursor so that no lowering code changes, go after
+that. Item 1 would remove most dependency parsing anyway; each says here which share it took.
 
 ### Item 6: no LSP-shaped guessing
 
@@ -318,7 +325,7 @@ stops.
 | salsa eviction of queries with cycle handling (item 5) | #57 | spare, after #56 |
 | Frozen dependency artifacts (item 1) | #40 | glancer, after #38 |
 | The workspace's own state (item 2) | #41 | glancer, after #40's 1a |
-| A flat syntax tree (item 4) | #42 | flat-syntax, no longer deferred |
+| A flat syntax tree (item 4) | #42 | flat-syntax: step (a) merged, the flat cursor (b, c) gating |
 | ra-jit never runs rustc | | no-rustc, planning; its steps go in `docs/no-rustc.md` |
 
 - **no-rustc.** Andrew's rule is that ra-jit must never run rustc. Since cold-start (#11)
