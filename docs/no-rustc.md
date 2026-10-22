@@ -153,7 +153,8 @@ These are the places ra-jit still runs rustc or relies on what it wrote, as of m
 - Every program is linked with rustc's link line, ahead of rustc's rlibs of the same crates,
   and against the standard library's rlibs from the sysroot.
 - A function ra-jit refuses is left to rustc's copy; when that copy is stale, or rust-analyzer
-  finds an error, or an input ra-jit does not model changed, the build goes to cargo.
+  finds an error (until D's first part), or an input ra-jit does not model changed, the build
+  goes to cargo.
 - rust-analyzer loads a workspace with `cargo metadata`, `cargo check --compile-time-deps` (which
   compiles the build scripts and proc macros with rustc and runs the scripts) and rustc's
   answers to `--print`; proc macros are rustc's libraries run by the toolchain's proc-macro
@@ -188,7 +189,7 @@ Paths are under `crates/`; line numbers are of 41e7906192.
 
 | Where | What it does | When |
 |---|---|---|
-| `ra-jit/src/cargo/mod.rs:305` `by_daemon`, `:300` `ToCargo`, `:395` `by_cargo` | sends the whole build to cargo | the source has an error; rustc's copy of a refused function is stale; a build script's or proc macro's source changed; a manifest changed; the daemon did not build a program |
+| `ra-jit/src/cargo/mod.rs:305` `by_daemon`, `:300` `ToCargo`, `:395` `by_cargo` | sends the whole build to cargo | the source has an error (until D's first part: now it fails the build with ra-jit's error); rustc's copy of a refused function is stale; a build script's or proc macro's source changed; a manifest changed; the daemon did not build a program |
 | `ra-jit/src/cargo/cli.rs:297` `only_cargo` | sends the command to cargo untouched | `--message-format`, `-Z`, `--exclude`, several targets, an unknown triple |
 | `ra-jit/src/cargo/mod.rs:139` `plain_cargo` | runs cargo with nothing of ra-jit's | `cargo ra-jit check` and subcommands ra-jit does not claim |
 
@@ -387,6 +388,27 @@ measurements of the UI suite are the bar, and the step lands in parts as they pa
 first, then lints). [#27](https://github.com/indexable-inc/ra-jit/issues/27) is reversed: an
 item ra-jit cannot resolve is an error to fix, not a reason to build with cargo. Risk: a
 program rustc rejects runs, or one it accepts is refused.
+
+Owner: the `no-rustc-d` lane (a Cursor agent, Andrew's), from 2026-10-22. The errors came
+first: an error rust-analyzer or the borrow checker finds in the edited files, a file that
+does not parse, and a function the frontend turns down as not compiling (an unresolved name,
+method or field, a type error, incomplete code) fail the build as ra-jit writes them, in
+rustc's form (`error[E0308]: ...`, ` --> file:line:col`, the line marked, then cargo's `could
+not compile` line), with status 101, under `cargo ra-jit` and under plain cargo after `ra-jit
+enable`. What stays with cargo for now: what the frontend turns down as unsupported
+(`NotSupported`, layouts, constants: step E), ra-jit's own failures (a build that panicked, a
+link that failed), an error in a file written before the worker loaded the workspace, and
+`cargo ra-jit check`. Counted on ripgrep with `harness/norustc` (dev-aws-3, 2026-10-22), the
+error step went from 6 rustc compiles in 0.9 s to none in 0.1 s. The first `test --no-run`
+after it compiled 5 workspace libraries more (50 compiles, not 45): the cargo build of the
+error had brought up to date the libraries an earlier edit had changed, which `cargo test`
+now builds instead. Over the whole run that is 200 compiles, not 201. On `harness/norustc.py`'s
+workspace (dev-aws-3, cranelift, two runs each) the edits went from 5 rustc runs to none, and
+the tests that follow from 48 or 49 to 52 for the same reason: 138 runs in all, not 139 or 140.
+`cargo ra-jit check`
+can't be an in-process load yet: on ripgrep, loading the workspace and the standard library
+and checking its 97 files took 6 to 8.5 s, against 2.3 s for a warm `cargo check`. It needs a
+loaded workspace the daemon keeps warm.
 
 **E. No function left to rustc.** ([#85](https://github.com/indexable-inc/ra-jit/issues/85)) The classes of #34 and #35 and the rest of
 [support.md](support.md#language) are compiled; a refusal fails the build with its reason. Until

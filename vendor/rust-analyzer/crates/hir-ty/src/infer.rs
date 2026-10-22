@@ -814,6 +814,10 @@ pub struct InferenceResult<'db> {
 
     pub coercion_casts: FxHashSet<ExprId>,
 
+    /// Closures typed without an expected signature, from what their parameters and return
+    /// type are written as: the lifetimes elided in a parameter's are the closure's own.
+    pub closures_without_expectation: FxHashSet<ExprId>,
+
     pub closures_data: FxHashMap<ExprId, ClosureData>,
 
     defined_anon_consts: ThinVec<AnonConstId<'db>>,
@@ -1151,6 +1155,7 @@ impl<'db> InferenceResult<'db> {
             binding_modes: Default::default(),
             expr_adjustments: Default::default(),
             coercion_casts: Default::default(),
+            closures_without_expectation: Default::default(),
             closures_data: Default::default(),
             defined_anon_consts: Default::default(),
         }
@@ -1505,6 +1510,7 @@ impl<'db> InferenceContext<'db> {
             binding_modes,
             skipped_ref_pats,
             coercion_casts,
+            closures_without_expectation,
             closures_data,
             nodes_with_type_mismatches,
             defined_anon_consts: _,
@@ -1533,6 +1539,7 @@ impl<'db> InferenceContext<'db> {
         merge_arena_maps(binding_modes, &other.binding_modes);
         merge_hash_set(skipped_ref_pats, &other.skipped_ref_pats);
         merge_hash_set(coercion_casts, &other.coercion_casts);
+        merge_hash_set(closures_without_expectation, &other.closures_without_expectation);
         merge_hash_maps(closures_data, &other.closures_data);
         if let Some(other_nodes_with_type_mismatches) = &other.nodes_with_type_mismatches {
             merge_hash_set(
@@ -1673,6 +1680,7 @@ impl<'db> InferenceContext<'db> {
             expr_adjustments,
             tuple_field_access_types,
             coercion_casts: _,
+            closures_without_expectation: _,
             diagnostics: result_diagnostics,
             nodes_with_type_mismatches,
             defined_anon_consts: result_defined_anon_consts,

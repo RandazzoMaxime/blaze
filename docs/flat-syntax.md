@@ -4,6 +4,7 @@
 [glancer.md](glancer.md#item-4-a-flat-syntax-tree-for-files-nobody-edits)). Measured on an
 ephemeral AWS host (64 vCPU, Linux, release builds with mimalloc; `heap-profile` builds with
 jemalloc for the heap profiles), ra-jit at `c43c6443bd` (main) and the `flat-syntax` branch,
+and for steps (b) and (c) main at `74fb27b7ed` (step (a) merged) and the `flat-cursor` branch on it,
 Cranelift, the `bench.py` projects ripgrep, nushell and helix, each a cold start then the
 first request. Each claim is **read** (measured, or read in a source), or **unverified**
 (our inference).
@@ -23,11 +24,16 @@ first request. Each claim is **read** (measured, or read in a source), or **unve
   ready and to the first answer does not move; parsing anchors again costs 1 to 2% more CPU
   (**read**).
 - The time syntax costs is CPU, not memory: building green trees and walking red ones are
-  16% of ripgrep's cold start to the first request and 7% of nushell's (**read**). A flat
-  tree (arrays in preorder) is built 5 times faster than rowan's from the same parser events
-  and walked 10 times faster (**read**, on 962 MB of Rust).
-- Steps (b) and (c), next: a fork of rowan whose cursor has a second, flat kind of tree, so
-  `syntax::ast` and all lowering are unchanged and the compiler path builds no green tree.
+  16% of ripgrep's cold start to the first request and 7% of nushell's on main, 19% and 9%
+  with (a), which parses anchors again (**read**).
+- Steps (b) and (c), merged: a fork of rowan whose cursor has a second, flat kind of tree
+  (arrays in preorder), so `syntax::ast` and all lowering are unchanged and the compiler path
+  builds no green tree. Building trees falls from 12.1% of ripgrep's cold-start CPU to 1.9%,
+  from 5.4% to 1.1% on nushell and from 2.2% to 0.4% on helix; walking them takes more, and
+  together they are a quarter to a third less CPU (19.4% to 14.7% on ripgrep) (**read**).
+- What that does to the daemon: the time to ready, the first answer and resident memory do
+  not move beyond the spread of two runs (ripgrep keeps 0.1 to 0.3 GB more that mimalloc has
+  not yet returned, and answers 0.2 s sooner) (**read**).
 
 ## What syntax holds (step 1, memory)
 
@@ -35,7 +41,7 @@ first request. Each claim is **read** (measured, or read in a source), or **unve
 nodes, red nodes, span maps, ast id maps, token trees or the lexer by the frames on its
 stack, and to the salsa ingredient that made it. After the first request (`request-1`):
 
-| project | live heap | syntax | green, files | green, expansions | span maps | ast id maps | token trees | lexer |
+| project | live heap | syntax | trees, files | trees, expansions | span maps | ast id maps | token trees | lexer |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|
 | ripgrep, main | 1,407 MB | 315 MB (22%) | 201 | 37 | 29 | 12 | 16 | 17 |
 | ripgrep, (a) | 1,276 MB | 210 MB (16%) | 92 | 42 | 16 | 18 | 20 | 21 |
@@ -43,17 +49,27 @@ stack, and to the salsa ingredient that made it. After the first request (`reque
 | nushell, (a) | 8,519 MB | 676 MB (8%) | 87 | 219 | 157 | 89 | 78 | 42 |
 | helix, main | 10,820 MB | 852 MB (8%) | 449 | 159 | 91 | 32 | 57 | 63 |
 | helix, (a) | 10,139 MB | 436 MB (4%) | 41 | 158 | 101 | 31 | 57 | 45 |
+| ripgrep, (c) | 1,229 MB | 136 MB (11%) | 27 | 37 | 19 | 13 | 16 | 25 |
+| nushell, (c) | 8,324 MB | 576 MB (7%) | 16 | 186 | 135 | 93 | 87 | 55 |
+| helix, (c) | 10,181 MB | 413 MB (4%) | 27 | 120 | 98 | 45 | 70 | 51 |
 
 All **read**; MB of sampled live bytes, scaled as jeprof scales them. The ripgrep (a) row
 is an earlier build of the branch, which differs only in hashing each anchor more than once.
 How much of the expansions' trees is live at the report moves by tens of MB between runs:
-it is what their lru of 512 holds when the report is taken. Red nodes are under 3 MB everywhere: rowan's cursors are
-transient. After warm-up, before the first request, nushell's syntax is 689 MB on main and
+it is what their lru of 512 holds when the report is taken (an earlier run of (c) on nushell
+held 3 MB of them, this one 186 MB). The (c) rows are flat trees (steps (b) and (c) below);
+the few MB of green nodes in them are parts of expansions that something asked a green tree
+of (**unverified**: the syntax editor builtin derives use). Red nodes are
+under 4 MB everywhere: rowan's cursors are transient. After warm-up, before the first request, nushell's syntax is 689 MB on main and
 419 MB with (a), helix's 434 and 176 MB. On helix 5.3 GB of the 10.8 GB is `described`
 ([#55](https://github.com/indexable-inc/ra-jit/issues/55)), not syntax.
 
 What is left after (a) is mostly macro expansions (`parse_macro_expansion`, lru 512, with
-their span maps) and ast id maps that `body_syntax` makes for an anchor parsed alone.
+their span maps) and ast id maps that `body_syntax` makes for an anchor parsed alone. With (c)
+the files' trees hold 16 to 27 MB against 41 to 92 MB with (a), but the benchmark under steps
+(b) and (c) finds a flat tree about as large as a green one, so that is **unverified** as a
+property of flat trees: which trees the lrus hold at the report differs between runs. What the
+expansions' trees hold is within that spread, and the rest of syntax is not trees.
 
 ## What syntax costs (step 1, time)
 
@@ -154,7 +170,7 @@ host's (main has the same five).
 
 **Representation.** Every node and token in preorder, as arrays: a kind (`u16`), a start
 (`u32`), the number after the subtree (`u32`) and the parent (`u32`, its top bit for a
-token). The end of an element is the start of the one after its subtree; a token's text is a
+token), 14 bytes an element. The end of an element is the start of the one after its subtree; a token's text is a
 slice of the tree's text, kept once. This is the layout of Carbon's parse tree and Zig's AST,
 and what Glancer keeps.
 
@@ -163,8 +179,8 @@ takes: an enter pushes a node and remembers it, an exit writes where its subtree
 token pushes a token. The parser does not change.
 
 **How lowering consumes it.** Unchanged. rowan 0.17's cursor is about 35 functions over
-`NodeData` (a green pointer, a parent, an offset). A fork in `vendor/rowan` (we pin every
-layer) gives the cursor a second kind of tree: a `SyntaxNode` that is a flat tree's root and an
+`NodeData` (a green pointer, a parent, an offset). A fork in `vendor/rust-analyzer/lib/rowan`
+(we pin every layer; inside the subtree so that the fork builds alone) gives the cursor a second kind of tree: a `SyntaxNode` that is a flat tree's root and an
 element's number, with nothing allocated per node, and moves that are arithmetic on the
 arrays. `syntax::ast`, `AstPtr`, ast id maps, item trees and body lowering compile and run as
 they are. A green tree of a part of a flat one is made only when something asks for it (the
@@ -173,26 +189,93 @@ it with the root. `Parse` holds a green tree or a flat one; parses make flat one
 `RA_JIT_GREEN_TREES=1` makes green ones, to compare. Steps (b) and (c) are the one change:
 with the cursor serving flat trees nothing in the compiler path makes a green tree.
 
-**Measured first** with a prototype (the flat tree alone, one thread, nushell's sources and
-the 1,384 crates in the host's cargo registry: 43,196 files, 962 MB, 465 million nodes and
-tokens):
+**What changed.** rowan 0.17.0 is vendored as published, then given `flat.rs` (the tree
+and its builder) and a cursor whose `Ref` is a green node's data or a flat root and a number.
+A flat node's first child and next sibling skip whole subtrees by their end; the child at a
+range is a binary search of the starts and a climb; `SyntaxNodePtr::to_node` (every
+diagnostic span and every lookup of an item by its ast id) is one binary search and one climb
+instead of a search at each level; the arrays are boxed at their size, since mimalloc keeps
+a block shrunk to more than half of it whole (`mi_realloc` in `libmimalloc-sys` 0.1.49, **read**)
+and a doubling vector boxed held up to twice its elements. `syntax`'s `Parse` holds a green
+tree or a flat one and its builder makes either; `body_syntax` hashes a flat tree's arrays and
+keeps an anchor's subtree as a tree of its own (`clone_subtree`). One test builds 2,000 random
+trees both ways and compares every function of the cursor on every element, every range for
+the child at a range and the covering element, and every pointer lookup.
 
-| | rowan | flat |
+**Measured, the trees alone** (`examples/trees.rs` in `syntax`, one thread, nushell's sources
+and the 1,384 crates in the host's cargo registry: 43,196 files, 962 MB, 465 million nodes and
+tokens, through the cursor as lowering uses it):
+
+| | green | flat |
 |---|---:|---:|
-| lex and parse to events | 20.2 s | 20.2 s |
-| build the tree from the events | 16.9 s | 3.2 s |
-| hold all the trees (10 bytes an element) | 6,518 MB | 4,435 MB |
-| walk every node and token (kind and range) | 15.0 s | 1.5 s |
+| lex, parse and build | 29.7 s | 24.1 s |
+| hold all the trees | 6,518 MB | 7,169 MB |
+| walk every node and token (kind and range) | 18.7 s | 13.1 s |
+| every node alone, as an ast id map does | 8.3 s | 5.2 s |
+| one node in 16 found again from its pointer | 6.8 s | 1.9 s |
 
-**Read** (the host ran other work, so times are within 20%). rowan's trees are smaller than
-their 16 bytes per child suggests because its node cache shares equal tokens and small nodes.
-With a parent for every element, which the cursor needs, the flat tree is 14 bytes an element
-and holds what rowan does: the win is time, not memory.
+**Read.** A parse with its tree takes 19% less time (most of it is lexing and parsing to
+events, which both share); walking through the cursor is 1.4 to 1.6 times faster and finding
+a node from its pointer 3.5 times. A prototype that walked the arrays without the cursor was
+10 times faster: the rest is the cursor's values and reference counts. With a parent for
+every element, which the cursor needs, a flat tree is 14 bytes an element and 10% larger here
+than rowan's, whose node cache shares equal tokens and small nodes.
+
+**Measured, the daemon.** On a cold start to the first request, by what the innermost frame
+of a kind does (`harness/cpufold.py`, perf runs of `heap-profile` builds):
+
+| work | ripgrep (a) | ripgrep (c) | nushell (a) | nushell (c) | helix (a) | helix (c) |
+|---|---:|---:|---:|---:|---:|---:|
+| samples | 8,482 | 8,060 | 64,592 | 52,422 | 106,101 | 99,935 |
+| building trees (green, flat) | 12.1% | 1.9% | 5.4% | 1.1% | 2.2% | 0.4% |
+| walking them (rowan's cursor) | 7.3% | 12.7% | 3.8% | 5.2% | 1.4% | 2.1% |
+| lexing and parsing to events | 6.5% | 7.4% | 3.7% | 3.6% | 1.3% | 1.4% |
+
+All **read**; the nushell (a) run had other work beside it, so its sample count is not
+comparable. Building trees all but goes; walking takes a larger share than rowan's cursor
+did, which the benchmark above does not show (**unverified** why; the daemon walks many trees
+on 64 threads at once, and a step reads three or four arrays. Elements as one array of
+16-byte structs, tried, were no faster on one thread and 12% larger, so they are not used). Together they fall from 19.4% to 14.7% of ripgrep's samples, from 9.2% to 6.3% of
+nushell's and from 3.6% to 2.5% of helix's.
+
+Ready time, the first answer and resident memory, main (with (a)) against (c), two quiet
+rounds each (`harness/coldprof.py`, release builds, seconds from the start of the cold start):
+
+| project | ready | first request answered | largest process at its peak | worker after the first request | a few seconds later |
+|---|---:|---:|---:|---:|---:|
+| ripgrep, main | 6.36 / 6.51 s | 9.26 / 9.37 s | 2,343 / 2,357 MB | 2,228 / 2,112 MB | 2,168 / 2,123 MB |
+| ripgrep, (c) | 6.29 / 6.32 s | 9.11 / 9.10 s | 2,441 / 2,407 MB | 2,318 / 2,386 MB | 2,315 / 2,393 MB |
+| nushell, main | 38.6 / 37.3 s | 56.3 / 55.3 s | 15,211 / 15,132 MB | 11,216 / 11,205 MB | 10,928 / 11,088 MB |
+| nushell, (c) | 37.3 / 37.8 s | 54.7 / 54.9 s | 14,928 / 14,870 MB | 11,149 / 11,194 MB | 11,243 / 11,258 MB |
+| helix, main | 38.2 / 36.9 s | 115.4 / 113.1 s | 17,606 / 17,592 MB | 12,195 / 12,183 MB | 12,285 / 12,266 MB |
+| helix, (c) | 36.3 / 38.6 s | 110.5 / 119.2 s | 17,794 / 17,573 MB | 12,208 / 12,207 MB | 12,281 / 12,291 MB |
+
+All **read**. Neither the time to ready nor the first answer moves beyond the spread of two
+runs; ripgrep's first answer came 0.15 to 0.3 s sooner in all four pairs of this round and an
+earlier one. Resident memory is the same on nushell and helix. On ripgrep it is 0.1 to
+0.3 GB more although the live heap is less: that is memory mimalloc has been given back and
+not yet returned to the system, because with `MIMALLOC_PURGE_DELAY=0` ripgrep settles at
+1,915 / 1,901 MB on main and 1,925 / 1,906 MB with (c) (**read**). So (c) saves CPU, not
+seconds (**unverified** why: the CPU it saves is spread over 64 threads, and what decides
+when the daemon is ready is elsewhere).
+
+**Gate.** Unit tests (ra-jit 139, hir-ty-codegen 13), hir-ide (its 18 known failures),
+corpus `--mixed 8` under Cranelift and LLVM (MATCH, 0 of 908 layouts differ), the corpus with
+`RA_CHECK_RELATIVE_BODIES=1 RA_JIT_CHECK_PLACES=1`, mixfutures `--mixed 16 --layouts` under
+both, growth, movedlines (6 of 6), borrowck_ui (Polonius 1,363 and NLL 1,358, as main), the
+pinned ui tests (15 of 15) and the ui run-pass tests against `ui-known.txt` (the host's five
+differences, as with (a)); and rust-analyzer's own tests of `parser` (333), `syntax` (56), `mbe` (7),
+`syntax-bridge` (9), `hir-expand` (33) and `hir-def` (518), which pass on main and with (c)
+alike (`hir-ty`'s tests are in hir-ide in this tree).
 
 **Risks.** Equality of parses (salsa backdates a reparse whose tree is equal) is by arrays and
-text instead of green pointers; the gate's edit harnesses (growth, movedlines) cover it.
+text instead of green pointers; the gate's edit harnesses (growth, movedlines) cover it. What
+asks a flat tree for a green one (`green()`, `replace_with`, the syntax editor) gets a green
+tree of that part, made then and kept with the root, so editing behaves as on a green tree
+(the test compares `replace_with` and `clone_subtree` on every node).
 
 ## Not checked
 
 - bun: not run.
-- The flat cursor's effect on the daemon: on its own branch until its gate and numbers are in.
+- Files being edited keep a flat tree too: the daemon has no editor's buffers, so nothing
+  in ra-jit tells an edited file from another. `RA_JIT_GREEN_TREES=1` makes every tree green.

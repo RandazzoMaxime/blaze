@@ -206,7 +206,10 @@ other.
 - `lru` on `infer` and `runtime_mir_body` alone, so that `mir_body` stops the chain: 12.56 GB
   after edits, body 0.52 s, signature 0.64 s (**read**, 1 run).
 - A forced `mi_collect(true)` after the warm-up and after each request, which reclaims the
-  segments of threads that ended: 1 to 8 ms, ripgrep's worker 2,150 MB against 2,185 on main
-  after the edits; nushell's daemon 12.85 GB after edits against 12.9 (**read**, 1 run each).
+  segments of threads that ended: 1 to 8 ms on ripgrep, 20 to 50 ms on nushell's 11 GB worker;
+  ripgrep's worker 2,150 MB against 2,185 on main after the edits; nushell's daemon 12.85 GB
+  after edits against 12.9 (**read**, 1 run each). With `lru` as well, the collect after
+  nushell's cold build took its worker from 14.06 to 12.03 GB, and the next ones 20 to 200 MB
+  each, ending near 10.9 GB (**read**, the worker's log, 1 run).
 - Nothing of it is merged. What is left to evict is bounded by those queries' values (about
   1.2 GB on nushell, above) and costs edits; `described` (#55) is twice that and keeps edits.

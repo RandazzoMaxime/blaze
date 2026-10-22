@@ -4,21 +4,25 @@ benchreport.py is the one caller: every time it writes a table into the README i
 chart of the same numbers next to it, so a chart is never older than its table. Each chart is
 two files, `NAME-light.svg` and `NAME-dark.svg` under docs/benchmarks/charts, which the README
 shows with `<picture>` by the reader's colour scheme. Hand-written SVG, standard library only:
-nothing to pin, and a change of numbers is a readable diff.
+nothing to pin, and a change of numbers is a readable diff. The two files of a chart differ only
+in their `<style>`, and the same numbers always give the same bytes.
 
   edits     how many times faster than incremental `cargo build` an edit builds, per project and
             platform: the median over the kinds of edit, the line from the slowest kind to the fastest
   memory    the most memory the work of an edit held at once, ra-jit (the daemon, its workers,
             the command), per project and platform, with cargo's (cargo, rustc, the linker) as
-            the notch in each bar
+            a tick across each bar
   runtime   how long the program ra-jit's LLVM built takes against `cargo build --release`'s,
             per benchmark and platform, and the geometric mean
 
-Each row has a bar per platform (benchplatforms.PLATFORMS, in that order, darkest first), and a
-platform with no numbers for the row says so in place of its bar. Each platform is its own
-machine, which the subtitle names: a bar is comparable with the bars of its own tone.
+Each row has a bar per platform (benchplatforms.PLATFORMS, in that order), and a platform with
+no numbers for the row says so in place of its bar. Each platform is its own machine, which the
+footer names: a bar is comparable with the bars of its own colour.
 
-The look is the /bench page's: greys only.
+The colours: a hue per platform, the same in every chart (blue, orange, teal: Okabe and Ito's
+palette, apart under the common colour blindnesses), each tuned for the page it is drawn on, and
+cargo always the neutral reference, the 1× line or the tick. The rest is GitHub's own greys, so
+a chart sits in the README like its tables do.
 """
 import math, os
 
@@ -27,14 +31,16 @@ from benchplatforms import NAMES
 HERE = os.path.dirname(os.path.abspath(__file__))
 CHARTS = os.path.join(os.path.dirname(HERE), "docs/benchmarks/charts")
 FONT = "-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans', Helvetica, Arial, sans-serif"
-# Ink by scheme: a tone per platform, text, quieter text, grid lines, and the page behind the
-# chart, GitHub's, for the notch in a bar (site/src/styles/tokens.css, and its grey ladder read
-# the other way for a light page).
+# By scheme: a colour per platform (in NAMES' order), text, quieter text, grid lines, the 1× line,
+# the band behind every other row, and cargo's tick. The greys are GitHub's (Primer's fg.default,
+# fg.muted, border.muted, canvas.subtle) for its light and dark pages.
 SCHEMES = {
-    "light": dict(tones=("#1f1f20", "#73726f", "#b4b3af"), ink="#1f1f20", dim="#6b6a68", grid="#e4e3df", rule="#b3b2af", page="#ffffff"),
-    "dark": dict(tones=("#ebeae6", "#a3a29f", "#5f5e5c"), ink="#ebeae6", dim="#929190", grid="#28282a", rule="#57575a", page="#0d1117"),
+    "light": dict(platforms=("#1f6fd0", "#d8700a", "#12a07a"), ink="#1f2328", dim="#59636e", grid="#e3e7eb",
+                  rule="#59636e", band="#f6f8fa", cargo="#1f2328"),
+    "dark": dict(platforms=("#5aa9f5", "#f0913a", "#34c69a"), ink="#f0f6fc", dim="#9198a1", grid="#262c36",
+                 rule="#9198a1", band="#151b23", cargo="#f0f6fc"),
 }
-WIDTH, ROW, BAR = 760, 24, 12
+WIDTH, PAD, BAR, GAP = 760, 16, 12, 3
 
 
 def esc(text):
@@ -58,6 +64,11 @@ def wrap(text, size, width):
     return lines + [line] if line else lines
 
 
+def n(v):
+    """A coordinate, to a tenth of a pixel."""
+    return f"{v:.1f}".removesuffix(".0")
+
+
 class Log:
     """A logarithmic axis from `lo` to `hi` onto pixels `x0` to `x1`."""
 
@@ -68,12 +79,17 @@ class Log:
         return self.x0 + (math.log10(v) - self.lo) / (self.hi - self.lo) * (self.x1 - self.x0)
 
 
-def ticks(lo, hi, steps=None):
+def steps(lo, hi):
+    """The round values of each decade a log axis from `lo` to `hi` has room to mark."""
+    return (1, 2, 5) if hi / lo >= 100 else (1, 1.5, 2, 3, 5, 7) if hi / lo >= 6 else (1, 1.25, 1.5, 2, 3, 4, 5, 7)
+
+
+def ticks(lo, hi, marks=None):
     """Round values between `lo` and `hi`, as many as a log axis has room for."""
-    steps = steps or ((1, 2, 5) if hi / lo >= 6 else (1, 1.25, 1.5, 2, 3, 4, 5, 7))
+    marks = marks or steps(lo, hi)
     found, decade = [], 10 ** math.floor(math.log10(lo))
     while decade <= hi:
-        found += [decade * s for s in steps if lo <= decade * s <= hi]
+        found += [round(decade * s, 12) for s in marks if lo <= decade * s <= hi]
         decade *= 10
     return found
 
@@ -85,85 +101,107 @@ def bounds(values, pad=1.25, floor=None):
     lo = min(lo, floor) if floor else lo
     if hi / lo < 10:
         return lo, hi
-    out = ticks(lo / 10, hi * 10)
+    out = ticks(lo / 10, hi * 10, steps(lo, hi))
     return max([t for t in out if t <= lo] or [lo]), min([t for t in out if t >= hi] or [hi])
 
 
-def chart(title, subtitle, rows, axis_label, lo, hi, tick_label, legend=(), reference=None, reference_label=None):
+def style(c):
+    platforms = "".join(f".p{i}{{fill:{v}}}.w{i}{{stroke:{v}}}" for i, v in enumerate(c["platforms"]))
+    return (f"<style>text{{font-family:{FONT};fill:{c['ink']}}}.d{{fill:{c['dim']}}}.b{{font-weight:600}}"
+            f".v{{font-variant-numeric:tabular-nums}}.g{{stroke:{c['grid']}}}.r{{stroke:{c['rule']};stroke-width:1.25}}"
+            f".z{{fill:{c['band']}}}.c{{fill:{c['cargo']}}}.o{{fill:none;stroke-width:1.25}}{platforms}</style>")
+
+
+def chart(title, subtitle, rows, lo, hi, tick_label, notes="", legend=(), cargo_key=None, reference=None,
+          reference_label=None, hints=None, axis_label=None):
     """A horizontal bar chart on a log axis. `rows` is a list of (label, bold, bars), each bar
-    (tone, value, low, high, text, notch): `tone` an index into a scheme's tones, a bar from the
-    axis's base to `value`, a line from `low` to `high` when given, a notch at `notch` when given,
-    and `text` after it; with `value` None, `text` alone, quieter, where the bar would start.
-    `legend` is (name, tone), a tone of "notch" for the notch's key. The result is the SVG for
-    each scheme."""
-    label_w = max(text_width(label, 12.5) for label, _, _ in rows) + 16
-    bars_per_row = max(len(bars) for _, _, bars in rows)
-    row_h = ROW if bars_per_row == 1 else ROW + (bars_per_row - 1) * (BAR + 2) + 6
-    lines = wrap(subtitle, 12, WIDTH - 24) if subtitle else []
-    legend_y = 44 + 17 * len(lines)
-    top = legend_y + (24 if legend else 4)
-    x0, x1 = 12 + label_w, WIDTH - 110
+    (platform, value, low, high, text, cargo): `platform` an index into NAMES, a bar from the axis's
+    base (`reference`, else `lo`) to `value`, a line from `low` to `high` when given, cargo's tick
+    at `cargo` when given, and `text` after it; with `value` None, an empty key and `text` where the
+    bar would start. `legend` is the platforms to name, `cargo_key` what to call the tick, `hints`
+    (left, right) what each side of `reference` means, `notes` the footer. The result is the SVG
+    for each scheme."""
+    label_w = max(text_width(label, 13) for label, _, _ in rows)
+    value_w = max(text_width(said, 12) for _, _, bars in rows for _, value, *_, said, _ in bars if value is not None)
+    x0, x1 = PAD + label_w + 16, WIDTH - PAD - value_w - 10
     scale = Log(lo, hi, x0, x1)
-    base = reference if reference else lo
-    height = top + len(rows) * row_h + 44
-    out = {}
-    for scheme, c in SCHEMES.items():
-        tone = c["tones"]
-        svg = [f'<svg xmlns="http://www.w3.org/2000/svg" width="{WIDTH}" height="{height}" viewBox="0 0 {WIDTH} {height}" '
-               f'font-family="{FONT}" role="img" aria-label="{esc(title)}">',
-               f'<title>{esc(title)}</title>',
-               f'<text x="12" y="22" font-size="15" font-weight="600" fill="{c["ink"]}">{esc(title)}</text>']
-        svg += [f'<text x="12" y="{41 + 17 * k}" font-size="12" fill="{c["dim"]}">{esc(line)}</text>' for k, line in enumerate(lines)]
-        at = 12
-        for name, t in legend:
-            if t == "notch":
-                svg.append(f'<rect x="{at}" y="{legend_y - 9}" width="18" height="10" rx="2" fill="{c["dim"]}"/>')
-                svg.append(f'<rect x="{at + 8}" y="{legend_y - 10}" width="2" height="12" fill="{c["page"]}"/>')
-                at += 8
-            else:
-                svg.append(f'<rect x="{at}" y="{legend_y - 9}" width="10" height="10" rx="2" fill="{tone[t]}"/>')
-            svg.append(f'<text x="{at + 16}" y="{legend_y}" font-size="12" fill="{c["ink"]}">{esc(name)}</text>')
-            at += 16 + text_width(name, 12) + 22
-        plot_top, plot_bottom = top - 6, top + len(rows) * row_h
-        for v in ticks(lo, hi):
-            x = scale(v)
-            svg.append(f'<line x1="{x:.1f}" y1="{plot_top}" x2="{x:.1f}" y2="{plot_bottom}" stroke="{c["grid"]}"/>')
-            svg.append(f'<text x="{x:.1f}" y="{plot_bottom + 16}" font-size="11" text-anchor="middle" fill="{c["dim"]}">{esc(tick_label(v))}</text>')
-        if reference:
-            x = scale(reference)
-            svg.append(f'<line x1="{x:.1f}" y1="{plot_top}" x2="{x:.1f}" y2="{plot_bottom}" stroke="{c["rule"]}" stroke-width="1.25"/>')
-            if reference_label:
-                svg.append(f'<text x="{x + 4:.1f}" y="{plot_top + 8}" font-size="11" fill="{c["dim"]}">{esc(reference_label)}</text>')
-        svg.append(f'<text x="{(x0 + x1) / 2:.1f}" y="{plot_bottom + 34}" font-size="12" text-anchor="middle" fill="{c["dim"]}">{esc(axis_label)}</text>')
-        for i, (label, bold, bars) in enumerate(rows):
-            y = top + i * row_h
-            if i and bars_per_row > 1:
-                svg.append(f'<line x1="12" y1="{y:.1f}" x2="{WIDTH - 12}" y2="{y:.1f}" stroke="{c["grid"]}"/>')
-            first = y + (row_h - len(bars) * BAR - (len(bars) - 1) * 2) / 2
-            weight = ' font-weight="600"' if bold else ""
-            svg.append(f'<text x="{label_w:.1f}" y="{y + row_h / 2 + 4.5:.1f}" font-size="12.5" text-anchor="end" fill="{c["ink"]}"{weight}>{esc(label)}</text>')
-            for j, (t, value, low, high, said, *notch) in enumerate(bars):
-                by = first + j * (BAR + 2)
-                if value is None:
-                    svg.append(f'<text x="{scale(base) + 4:.1f}" y="{by + BAR - 2:.1f}" font-size="11" fill="{c["dim"]}">{esc(said)}</text>')
-                    continue
-                a, b = sorted((scale(base), scale(min(max(value, lo), hi))))
-                svg.append(f'<rect x="{a:.1f}" y="{by:.1f}" width="{max(b - a, 1.5):.1f}" height="{BAR}" rx="2" fill="{tone[t]}"/>')
-                if notch and notch[0] is not None and lo < notch[0] < value:
-                    svg.append(f'<rect x="{scale(notch[0]) - 1:.1f}" y="{by - 1:.1f}" width="2" height="{BAR + 2}" fill="{c["page"]}"/>')
-                end = b if value >= base else a
-                if low is not None and high is not None:
-                    l, h = scale(max(low, lo)), scale(min(high, hi))
-                    mid = by + BAR / 2
-                    svg.append(f'<line x1="{l:.1f}" y1="{mid:.1f}" x2="{h:.1f}" y2="{mid:.1f}" stroke="{tone[t]}" stroke-width="1.25"/>')
-                    svg += [f'<line x1="{e:.1f}" y1="{mid - 4:.1f}" x2="{e:.1f}" y2="{mid + 4:.1f}" stroke="{tone[t]}" stroke-width="1.25"/>' for e in (l, h)]
-                    end = max(end, h) if value >= base else min(end, l)
-                anchor, tx = ("start", end + 6) if value >= base else ("end", end - 6)
-                svg.append(f'<text x="{tx:.1f}" y="{by + BAR - 2:.1f}" font-size="11.5" text-anchor="{anchor}" fill="{c["ink"]}"'
-                           f'{weight} font-variant-numeric="tabular-nums">{esc(said)}</text>')
-        svg.append("</svg>")
-        out[scheme] = "\n".join(svg) + "\n"
-    return out
+    base = reference or lo
+
+    body, y = [f'<text x="{PAD}" y="26" font-size="17" class="b">{esc(title)}</text>'], 26
+    for line in wrap(subtitle, 13, WIDTH - 2 * PAD):
+        y += 19
+        body.append(f'<text x="{PAD}" y="{y}" font-size="13" class="d">{esc(line)}</text>')
+    keys = [(name, f'<rect x="{{x}}" y="{{y}}" width="12" height="12" rx="3" class="p{NAMES.index(name)}"/>', 18) for name in legend]
+    if cargo_key:
+        keys.append((cargo_key, '<rect x="{x}" y="{tick_y}" width="2.5" height="16" class="c"/>', 10))
+    at, y = PAD, y + 22
+    for name, swatch, w in keys:
+        width = w + text_width(name, 12.5)
+        if at > PAD and at + width > WIDTH - PAD:
+            at, y = PAD, y + 22
+        body.append(swatch.format(x=at, y=y - 10, tick_y=y - 12))
+        body.append(f'<text x="{n(at + w)}" y="{y}" font-size="12.5">{esc(name)}</text>')
+        at += width + 22
+
+    top = y + (30 if reference_label else 16)
+    heights = [len(bars) * BAR + (len(bars) - 1) * GAP + 16 for _, _, bars in rows]
+    bottom = top + sum(heights)
+    grid, marks, labels = [], [], []
+    for v in ticks(lo, hi):
+        x = n(scale(v))
+        grid.append(f'<line x1="{x}" y1="{top}" x2="{x}" y2="{bottom}" class="g"/>')
+        labels.append(f'<text x="{x}" y="{bottom + 17}" font-size="11.5" text-anchor="middle" class="d v">{esc(tick_label(v))}</text>')
+    row_y = top
+    for i, ((label, bold, bars), h) in enumerate(zip(rows, heights)):
+        if i % 2:
+            grid.insert(0, f'<rect x="{PAD}" y="{row_y}" width="{WIDTH - 2 * PAD}" height="{h}" class="z"/>')
+        if bold and i:
+            grid.append(f'<line x1="{PAD}" y1="{row_y}" x2="{WIDTH - PAD}" y2="{row_y}" class="r"/>')
+        weight, strong = (" b", ' class="b"') if bold else ("", "")
+        labels.append(f'<text x="{n(x0 - 12)}" y="{n(row_y + h / 2 + 4.5)}" font-size="13" text-anchor="end"{strong}>{esc(label)}</text>')
+        by = row_y + 8
+        for platform, value, low, high, said, cargo in bars:
+            if value is None:
+                x = scale(base)
+                marks.append(f'<rect x="{n(x + 1)}" y="{n(by + 1.5)}" width="9" height="9" rx="2" class="o w{platform}"/>')
+                labels.append(f'<text x="{n(x + 16)}" y="{n(by + BAR - 2)}" font-size="11.5" class="d">{esc(said)}</text>')
+                by += BAR + GAP
+                continue
+            a, b = sorted((scale(base), scale(min(max(value, lo), hi))))
+            marks.append(f'<rect x="{n(a)}" y="{n(by)}" width="{n(max(b - a, 2))}" height="{BAR}" rx="2" class="p{platform}"/>')
+            right = value >= base
+            end = b if right else a
+            if low is not None and high is not None:
+                l, h_ = scale(max(low, lo)), scale(min(high, hi))
+                mid = n(by + BAR / 2)
+                marks.append(f'<path d="M{n(l)} {mid}H{n(h_)}M{n(l)} {n(by + 2)}v8M{n(h_)} {n(by + 2)}v8" class="o w{platform}"/>')
+                end = max(end, h_) if right else min(end, l)
+            if cargo is not None and lo < cargo < hi:
+                marks.append(f'<rect x="{n(scale(cargo) - 1.25)}" y="{n(by - 2)}" width="2.5" height="{BAR + 4}" class="c"/>')
+            anchor, tx = ("start", end + 6) if right else ("end", end - 6)
+            labels.append(f'<text x="{n(tx)}" y="{n(by + BAR - 2)}" font-size="12" text-anchor="{anchor}" class="v{weight}">{esc(said)}</text>')
+            by += BAR + GAP
+        row_y += h
+    if reference:
+        x = scale(reference)
+        marks.append(f'<line x1="{n(x)}" y1="{top - 8}" x2="{n(x)}" y2="{bottom}" class="r"/>')
+        if reference_label:
+            labels.append(f'<text x="{n(x)}" y="{top - 13}" font-size="11.5" text-anchor="middle" class="d">{esc(reference_label)}</text>')
+        if hints:
+            labels.append(f'<text x="{n(x - 8)}" y="{bottom + 37}" font-size="12" text-anchor="end" class="d">← {esc(hints[0])}</text>')
+            labels.append(f'<text x="{n(x + 8)}" y="{bottom + 37}" font-size="12" class="d">{esc(hints[1])} →</text>')
+    if axis_label:
+        labels.append(f'<text x="{n((x0 + x1) / 2)}" y="{bottom + 37}" font-size="12" text-anchor="middle" class="d">{esc(axis_label)}</text>')
+    y = bottom + 44
+    for line in wrap(notes, 11.5, WIDTH - 2 * PAD):
+        y += 17
+        labels.append(f'<text x="{PAD}" y="{y}" font-size="11.5" class="d">{esc(line)}</text>')
+    height = y + 14
+
+    shapes = "\n".join(body + grid + marks + labels)
+    return {scheme: (f'<svg xmlns="http://www.w3.org/2000/svg" width="{WIDTH}" height="{height}" viewBox="0 0 {WIDTH} {height}" '
+                     f'role="img" aria-label="{esc(title)}">\n<title>{esc(title)}</title>\n{style(c)}\n{shapes}\n</svg>\n')
+            for scheme, c in SCHEMES.items()}
 
 
 def write(name, svgs):
@@ -180,7 +218,7 @@ def picture(name, alt, prefix="docs/benchmarks/charts"):
 
 
 def times(v):
-    return f"{v:.0f}×" if v >= 10 else f"{v:.1f}×"
+    return f"{v:.0f}×" if v >= 9.95 else f"{v:.1f}×"
 
 
 def gigabytes(mb):
@@ -192,8 +230,12 @@ def median(values):
     return r[len(r) // 2] if len(r) % 2 else math.sqrt(r[len(r) // 2 - 1] * r[len(r) // 2])
 
 
-def platform_legend(measured):
-    return [(name, NAMES.index(name)) for name in NAMES if name in measured]
+def platforms(measured):
+    return [name for name in NAMES if name in measured]
+
+
+NOT_MEASURED = "not measured yet"
+MACHINES = "Each colour is a machine of its own: compare bars of one colour, not across colours."
 
 
 def edits(rows, where):
@@ -205,14 +247,15 @@ def edits(rows, where):
         return None
     measured = {k for _, by in rows for k in by}
     lo, hi = bounds([x for _, by in rows for r in by.values() for x in r], floor=1)
-    bars = [(p, False, [(NAMES.index(k), median(by[k]), by[k][0], by[k][-1], times(median(by[k]))) if k in by else
-                        (NAMES.index(k), None, None, None, f"{k}: not measured")
+    bars = [(p, False, [(NAMES.index(k), median(by[k]), by[k][0], by[k][-1], times(median(by[k])), None) if k in by else
+                        (NAMES.index(k), None, None, None, NOT_MEASURED, None)
                         for k in NAMES if k in measured]) for p, by in rows]
-    write("edits", chart("Edit, then build: how many times faster than cargo",
-                         f"Incremental cargo build against cargo ra-jit build, both warm, on each platform's own machine. The bar is "
-                         f"the median over the kinds of edit, the line spans the slowest to the fastest kind. {where}",
-                         bars, "times faster than incremental cargo build (log scale)", lo, hi, lambda v: f"{v:g}×",
-                         legend=platform_legend(measured)))
+    write("edits", chart("Edit, then build: how many times faster ra-jit is than cargo",
+                         "A small edit to a real project, then an incremental build: cargo build's time ÷ cargo ra-jit build's, "
+                         "both warm. The bar is the median over the kinds of edit, the thin line runs from the slowest kind "
+                         "to the fastest. Further right is better.",
+                         bars, lo, hi, lambda v: f"{v:g}×", notes=f"{MACHINES} {where}", legend=platforms(measured),
+                         reference=1.0, reference_label="as fast as cargo", hints=("ra-jit slower", "ra-jit faster")))
     return "; ".join(f"{p}: " + ", ".join(f"{k} {times(median(r))}" for k, r in by.items()) for p, by in rows)
 
 
@@ -224,14 +267,15 @@ def memory(rows, where):
         return None
     measured = {k for _, by in rows for k in by}
     lo, hi = bounds([v for _, by in rows for pair in by.values() for v in pair], pad=1.6)
-    bars = [(p, False, [(NAMES.index(k), by[k][1], None, None, f"{gigabytes(by[k][1])}, cargo {gigabytes(by[k][0])}", by[k][0]) if k in by else
-                        (NAMES.index(k), None, None, None, f"{k}: not measured")
+    bars = [(p, False, [(NAMES.index(k), by[k][1], None, None, f"{gigabytes(by[k][1])} · cargo {gigabytes(by[k][0])}", by[k][0])
+                        if k in by else (NAMES.index(k), None, None, None, NOT_MEASURED, None)
                         for k in NAMES if k in measured]) for p, by in rows]
     write("memory", chart("Memory while an edit to one function builds",
-                          f"The most every process doing the work held at once: the bar is ra-jit's, with the daemon, which keeps the "
-                          f"workspace loaded; the notch is cargo's (cargo, rustc, the linker). {where}",
-                          bars, "peak memory of every process at once (log scale)", lo, hi, lambda v: gigabytes(v).replace(".0 ", " "),
-                          legend=platform_legend(measured) + [("cargo's peak", "notch")]))
+                          "The most memory every process doing the work held at once. The bar is ra-jit's: its daemon, which "
+                          "keeps the project loaded between edits, its workers and the command. The tick is plain cargo's: "
+                          "cargo, rustc and the linker. Shorter is less memory.",
+                          bars, lo, hi, lambda v: gigabytes(v).replace(".0 ", " "), notes=f"{MACHINES} {where}",
+                          legend=platforms(measured), cargo_key="cargo's peak", axis_label="peak memory (log scale)"))
     return "; ".join(f"{p}: " + ", ".join(f"{k} {gigabytes(b)} for ra-jit, {gigabytes(a)} for cargo" for k, (a, b) in by.items())
                      for p, by in rows)
 
@@ -246,16 +290,17 @@ def runtime(rows, geomeans, where, rough=(), rough_note=""):
     measured = {k for _, by in rows for k in by}
     values = [v for _, by in rows for v in by.values()] + [v for v in geomeans.values() if v]
     lo, hi = bounds(values + [1.0], pad=1.3)
-    cells = lambda b, by: [(NAMES.index(k), by[k], None, None, ("≈" if (b, k) in rough else "") + f"{by[k]:.2f}×") if by.get(k) else
-                           (NAMES.index(k), None, None, None, f"{k}: not measured") for k in NAMES if k in measured]
+    cells = lambda b, by: [(NAMES.index(k), by[k], None, None, ("≈" if (b, k) in rough else "") + f"{by[k]:.2f}×", None) if by.get(k) else
+                           (NAMES.index(k), None, None, None, NOT_MEASURED, None) for k in NAMES if k in measured]
     bars = [(b, False, cells(b, by)) for b, by in rows]
     if any(geomeans.values()):
         bars.append(("Geometric mean", True, cells(None, geomeans)))
     marked = any(k in measured for _, k in rough)
-    write("runtime", chart("How fast the program ra-jit builds runs",
-                           f"Time of each benchmark with ra-jit's LLVM build ÷ its time with cargo build --release on the same "
-                           f"machine: 1× is as fast, to the right is slower. {where}" + (f" {rough_note}" if marked else ""),
-                           bars, "time ÷ cargo build --release (log scale)", lo, hi, lambda v: f"{v:g}×",
-                           reference=1.0, reference_label="as fast as release", legend=platform_legend(measured)))
+    write("runtime", chart("How fast the programs ra-jit builds run",
+                           "Each benchmark's time with ra-jit's LLVM build ÷ its time with cargo build --release, on the same "
+                           "machine. 1× is as fast as release; further left is faster.",
+                           bars, lo, hi, lambda v: f"{v:g}×", notes=f"{MACHINES} {where}" + (f" {rough_note}" if marked else ""),
+                           legend=platforms(measured), reference=1.0, reference_label="as fast as release",
+                           hints=("faster than release", "slower than release")))
     return "; ".join(f"{k} geometric mean {v:.2f}×" for k, v in geomeans.items() if v) or \
         "; ".join(f"{b}: " + ", ".join(f"{k} {v:.2f}×" for k, v in by.items()) for b, by in rows)

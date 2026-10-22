@@ -111,7 +111,8 @@ were stable names: 665,474,913 bytes for one `helix-parsec` closure, and the lar
    expansions 512 and 1,024, bodies 512 and 4,096 (salsa `lru` attributes in the subtree),
    but ra-jit's `body_syntax` held each anchor's green node, which kept whole files' trees
    past that lru until #42's step (a)
-   ([flat-syntax.md](flat-syntax.md#step-a-no-tree-outlives-its-query)).
+   ([flat-syntax.md](flat-syntax.md#step-a-no-tree-outlives-its-query)). Since #42's steps
+   (b) and (c) the compiler's parses make flat trees (arrays) behind rowan's cursor.
 5. **Memory discipline.** No eviction of inference or MIR: `infer`, `mir_body` and
    ra-jit's monomorphized MIR have no `lru`, and ra-jit drops nothing. Measuring is there:
    with `RA_JIT_MEMORY=<dir>`, `crates/ra-jit/src/memory.rs` reports resident memory after
@@ -293,9 +294,13 @@ it green trees of whole files that `body_syntax` kept past the parse lru. Step (
 keeps an anchor's text and range instead and parses it again when asked: nushell's syntax
 falls to 676 MB and helix's to 436 MB, resident memory right after the first request is
 1.1 GB and 2.1 GB less, and ready time does not move. In cold time, building green trees and
-walking red ones are 16% of ripgrep's samples to the first request and 7% of nushell's; steps
-(b) and (c), a flat tree behind rowan's cursor so that no lowering code changes, go after
-that. Item 1 would remove most dependency parsing anyway; each says here which share it took.
+walking red ones are 16% of ripgrep's samples to the first request and 7% of nushell's. Steps
+(b) and (c), merged, put a flat tree behind rowan's cursor so that no lowering code changes:
+building trees falls from 12.1% of ripgrep's cold-start CPU to 1.9% and from 5.4% to 1.1% on
+nushell, trees as a whole take a quarter to a third less CPU, and ready time and resident
+memory do not move. What is left of syntax is lexing and parsing to events (3.6% on nushell),
+token trees (4.0%) and walking (5.2%), and in memory macro expansions' trees and span maps.
+Item 1 would remove most dependency parsing anyway; each says here which share it took.
 
 ### Item 6: no LSP-shaped guessing
 
@@ -340,7 +345,7 @@ stops.
 | salsa eviction of queries with cycle handling (item 5) | #57 | spare, after #56 |
 | Frozen dependency artifacts (item 1) | #40 | glancer, after #38 |
 | The workspace's own state (item 2) | #41 | glancer, after #40's 1a |
-| A flat syntax tree (item 4) | #42 | flat-syntax: step (a) merged, the flat cursor (b, c) gating |
+| A flat syntax tree (item 4) | #42 | flat-syntax: done, steps (a), (b) and (c) merged |
 | ra-jit never runs rustc | #81 to #93 | no-rustc; steps A to M of `docs/no-rustc.md`, A to C ready to assign |
 
 - **no-rustc.** Andrew's rule is that ra-jit must never run rustc. Since cold-start (#11)
