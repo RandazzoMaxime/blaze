@@ -1,164 +1,129 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="760" height="685" viewBox="0 0 760 685" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans', Helvetica, Arial, sans-serif" role="img" aria-label="Edit, then build: how many times faster than cargo">
-<title>Edit, then build: how many times faster than cargo</title>
-<text x="12" y="22" font-size="15" font-weight="600" fill="#ebeae6">Edit, then build: how many times faster than cargo</text>
-<text x="12" y="41" font-size="12" fill="#929190">Incremental cargo build against cargo ra-jit build, both warm, on each platform's own machine. The bar is the median over the</text>
-<text x="12" y="58" font-size="12" fill="#929190">kinds of edit, the line spans the slowest to the fastest kind. macOS arm64: MacBook Pro, ra-jit 84760c3f51, 2026-10-21. Linux</text>
-<text x="12" y="75" font-size="12" fill="#929190">aarch64: AWS c8g.16xlarge, ra-jit 2cf189feb6, 2026-10-22. Linux x86-64: AWS c7a.48xlarge, ra-jit 2cf189feb6, 2026-10-22.</text>
-<rect x="12" y="86" width="10" height="10" rx="2" fill="#ebeae6"/>
-<text x="28" y="95" font-size="12" fill="#ebeae6">macOS arm64</text>
-<rect x="123.19999999999999" y="86" width="10" height="10" rx="2" fill="#a3a29f"/>
-<text x="139.2" y="95" font-size="12" fill="#ebeae6">Linux aarch64</text>
-<rect x="244.95999999999998" y="86" width="10" height="10" rx="2" fill="#5f5e5c"/>
-<text x="260.96" y="95" font-size="12" fill="#ebeae6">Linux x86-64</text>
-<line x1="123.0" y1="113" x2="123.0" y2="641" stroke="#28282a"/>
-<text x="123.0" y="657" font-size="11" text-anchor="middle" fill="#929190">0.1×</text>
-<line x1="171.1" y1="113" x2="171.1" y2="641" stroke="#28282a"/>
-<text x="171.1" y="657" font-size="11" text-anchor="middle" fill="#929190">0.2×</text>
-<line x1="234.6" y1="113" x2="234.6" y2="641" stroke="#28282a"/>
-<text x="234.6" y="657" font-size="11" text-anchor="middle" fill="#929190">0.5×</text>
-<line x1="282.6" y1="113" x2="282.6" y2="641" stroke="#28282a"/>
-<text x="282.6" y="657" font-size="11" text-anchor="middle" fill="#929190">1×</text>
-<line x1="330.7" y1="113" x2="330.7" y2="641" stroke="#28282a"/>
-<text x="330.7" y="657" font-size="11" text-anchor="middle" fill="#929190">2×</text>
-<line x1="394.2" y1="113" x2="394.2" y2="641" stroke="#28282a"/>
-<text x="394.2" y="657" font-size="11" text-anchor="middle" fill="#929190">5×</text>
-<line x1="442.3" y1="113" x2="442.3" y2="641" stroke="#28282a"/>
-<text x="442.3" y="657" font-size="11" text-anchor="middle" fill="#929190">10×</text>
-<line x1="490.4" y1="113" x2="490.4" y2="641" stroke="#28282a"/>
-<text x="490.4" y="657" font-size="11" text-anchor="middle" fill="#929190">20×</text>
-<line x1="553.9" y1="113" x2="553.9" y2="641" stroke="#28282a"/>
-<text x="553.9" y="657" font-size="11" text-anchor="middle" fill="#929190">50×</text>
-<line x1="601.9" y1="113" x2="601.9" y2="641" stroke="#28282a"/>
-<text x="601.9" y="657" font-size="11" text-anchor="middle" fill="#929190">100×</text>
-<line x1="650.0" y1="113" x2="650.0" y2="641" stroke="#28282a"/>
-<text x="650.0" y="657" font-size="11" text-anchor="middle" fill="#929190">200×</text>
-<text x="386.5" y="675" font-size="12" text-anchor="middle" fill="#929190">times faster than incremental cargo build (log scale)</text>
-<text x="111.0" y="152.5" font-size="12.5" text-anchor="end" fill="#ebeae6">ripgrep 15.1.0</text>
-<rect x="123.0" y="128.0" width="304.3" height="12" rx="2" fill="#ebeae6"/>
-<line x1="390.4" y1="134.0" x2="487.8" y2="134.0" stroke="#ebeae6" stroke-width="1.25"/>
-<line x1="390.4" y1="130.0" x2="390.4" y2="138.0" stroke="#ebeae6" stroke-width="1.25"/>
-<line x1="487.8" y1="130.0" x2="487.8" y2="138.0" stroke="#ebeae6" stroke-width="1.25"/>
-<text x="493.8" y="138.0" font-size="11.5" text-anchor="start" fill="#ebeae6" font-variant-numeric="tabular-nums">8.1×</text>
-<rect x="123.0" y="142.0" width="383.7" height="12" rx="2" fill="#a3a29f"/>
-<line x1="477.0" y1="148.0" x2="535.7" y2="148.0" stroke="#a3a29f" stroke-width="1.25"/>
-<line x1="477.0" y1="144.0" x2="477.0" y2="152.0" stroke="#a3a29f" stroke-width="1.25"/>
-<line x1="535.7" y1="144.0" x2="535.7" y2="152.0" stroke="#a3a29f" stroke-width="1.25"/>
-<text x="541.7" y="152.0" font-size="11.5" text-anchor="start" fill="#ebeae6" font-variant-numeric="tabular-nums">25×</text>
-<rect x="123.0" y="156.0" width="341.9" height="12" rx="2" fill="#5f5e5c"/>
-<line x1="441.2" y1="162.0" x2="496.2" y2="162.0" stroke="#5f5e5c" stroke-width="1.25"/>
-<line x1="441.2" y1="158.0" x2="441.2" y2="166.0" stroke="#5f5e5c" stroke-width="1.25"/>
-<line x1="496.2" y1="158.0" x2="496.2" y2="166.0" stroke="#5f5e5c" stroke-width="1.25"/>
-<text x="502.2" y="166.0" font-size="11.5" text-anchor="start" fill="#ebeae6" font-variant-numeric="tabular-nums">14×</text>
-<line x1="12" y1="177.0" x2="748" y2="177.0" stroke="#28282a"/>
-<text x="111.0" y="210.5" font-size="12.5" text-anchor="end" fill="#ebeae6">fd 10.3.0</text>
-<rect x="123.0" y="186.0" width="284.2" height="12" rx="2" fill="#ebeae6"/>
-<line x1="402.7" y1="192.0" x2="431.9" y2="192.0" stroke="#ebeae6" stroke-width="1.25"/>
-<line x1="402.7" y1="188.0" x2="402.7" y2="196.0" stroke="#ebeae6" stroke-width="1.25"/>
-<line x1="431.9" y1="188.0" x2="431.9" y2="196.0" stroke="#ebeae6" stroke-width="1.25"/>
-<text x="437.9" y="196.0" font-size="11.5" text-anchor="start" fill="#ebeae6" font-variant-numeric="tabular-nums">6.0×</text>
-<rect x="123.0" y="200.0" width="389.4" height="12" rx="2" fill="#a3a29f"/>
-<line x1="493.6" y1="206.0" x2="531.4" y2="206.0" stroke="#a3a29f" stroke-width="1.25"/>
-<line x1="493.6" y1="202.0" x2="493.6" y2="210.0" stroke="#a3a29f" stroke-width="1.25"/>
-<line x1="531.4" y1="202.0" x2="531.4" y2="210.0" stroke="#a3a29f" stroke-width="1.25"/>
-<text x="537.4" y="210.0" font-size="11.5" text-anchor="start" fill="#ebeae6" font-variant-numeric="tabular-nums">27×</text>
-<rect x="123.0" y="214.0" width="333.8" height="12" rx="2" fill="#5f5e5c"/>
-<line x1="442.2" y1="220.0" x2="473.7" y2="220.0" stroke="#5f5e5c" stroke-width="1.25"/>
-<line x1="442.2" y1="216.0" x2="442.2" y2="224.0" stroke="#5f5e5c" stroke-width="1.25"/>
-<line x1="473.7" y1="216.0" x2="473.7" y2="224.0" stroke="#5f5e5c" stroke-width="1.25"/>
-<text x="479.7" y="224.0" font-size="11.5" text-anchor="start" fill="#ebeae6" font-variant-numeric="tabular-nums">12×</text>
-<line x1="12" y1="235.0" x2="748" y2="235.0" stroke="#28282a"/>
-<text x="111.0" y="268.5" font-size="12.5" text-anchor="end" fill="#ebeae6">bat 0.26.0</text>
-<text x="127.0" y="254.0" font-size="11" fill="#929190">macOS arm64: not measured</text>
-<rect x="123.0" y="258.0" width="413.8" height="12" rx="2" fill="#a3a29f"/>
-<line x1="513.9" y1="264.0" x2="552.2" y2="264.0" stroke="#a3a29f" stroke-width="1.25"/>
-<line x1="513.9" y1="260.0" x2="513.9" y2="268.0" stroke="#a3a29f" stroke-width="1.25"/>
-<line x1="552.2" y1="260.0" x2="552.2" y2="268.0" stroke="#a3a29f" stroke-width="1.25"/>
-<text x="558.2" y="268.0" font-size="11.5" text-anchor="start" fill="#ebeae6" font-variant-numeric="tabular-nums">39×</text>
-<rect x="123.0" y="272.0" width="362.6" height="12" rx="2" fill="#5f5e5c"/>
-<line x1="450.3" y1="278.0" x2="498.0" y2="278.0" stroke="#5f5e5c" stroke-width="1.25"/>
-<line x1="450.3" y1="274.0" x2="450.3" y2="282.0" stroke="#5f5e5c" stroke-width="1.25"/>
-<line x1="498.0" y1="274.0" x2="498.0" y2="282.0" stroke="#5f5e5c" stroke-width="1.25"/>
-<text x="504.0" y="282.0" font-size="11.5" text-anchor="start" fill="#ebeae6" font-variant-numeric="tabular-nums">19×</text>
-<line x1="12" y1="293.0" x2="748" y2="293.0" stroke="#28282a"/>
-<text x="111.0" y="326.5" font-size="12.5" text-anchor="end" fill="#ebeae6">hyperfine 1.19.0</text>
-<text x="127.0" y="312.0" font-size="11" fill="#929190">macOS arm64: not measured</text>
-<rect x="123.0" y="316.0" width="362.7" height="12" rx="2" fill="#a3a29f"/>
-<line x1="436.4" y1="322.0" x2="491.0" y2="322.0" stroke="#a3a29f" stroke-width="1.25"/>
-<line x1="436.4" y1="318.0" x2="436.4" y2="326.0" stroke="#a3a29f" stroke-width="1.25"/>
-<line x1="491.0" y1="318.0" x2="491.0" y2="326.0" stroke="#a3a29f" stroke-width="1.25"/>
-<text x="497.0" y="326.0" font-size="11.5" text-anchor="start" fill="#ebeae6" font-variant-numeric="tabular-nums">19×</text>
-<rect x="123.0" y="330.0" width="332.8" height="12" rx="2" fill="#5f5e5c"/>
-<line x1="415.6" y1="336.0" x2="464.4" y2="336.0" stroke="#5f5e5c" stroke-width="1.25"/>
-<line x1="415.6" y1="332.0" x2="415.6" y2="340.0" stroke="#5f5e5c" stroke-width="1.25"/>
-<line x1="464.4" y1="332.0" x2="464.4" y2="340.0" stroke="#5f5e5c" stroke-width="1.25"/>
-<text x="470.4" y="340.0" font-size="11.5" text-anchor="start" fill="#ebeae6" font-variant-numeric="tabular-nums">12×</text>
-<line x1="12" y1="351.0" x2="748" y2="351.0" stroke="#28282a"/>
-<text x="111.0" y="384.5" font-size="12.5" text-anchor="end" fill="#ebeae6">just 1.43.0</text>
-<text x="127.0" y="370.0" font-size="11" fill="#929190">macOS arm64: not measured</text>
-<rect x="123.0" y="374.0" width="385.9" height="12" rx="2" fill="#a3a29f"/>
-<line x1="496.1" y1="380.0" x2="537.7" y2="380.0" stroke="#a3a29f" stroke-width="1.25"/>
-<line x1="496.1" y1="376.0" x2="496.1" y2="384.0" stroke="#a3a29f" stroke-width="1.25"/>
-<line x1="537.7" y1="376.0" x2="537.7" y2="384.0" stroke="#a3a29f" stroke-width="1.25"/>
-<text x="543.7" y="384.0" font-size="11.5" text-anchor="start" fill="#ebeae6" font-variant-numeric="tabular-nums">26×</text>
-<rect x="123.0" y="388.0" width="353.3" height="12" rx="2" fill="#5f5e5c"/>
-<line x1="458.5" y1="394.0" x2="492.1" y2="394.0" stroke="#5f5e5c" stroke-width="1.25"/>
-<line x1="458.5" y1="390.0" x2="458.5" y2="398.0" stroke="#5f5e5c" stroke-width="1.25"/>
-<line x1="492.1" y1="390.0" x2="492.1" y2="398.0" stroke="#5f5e5c" stroke-width="1.25"/>
-<text x="498.1" y="398.0" font-size="11.5" text-anchor="start" fill="#ebeae6" font-variant-numeric="tabular-nums">16×</text>
-<line x1="12" y1="409.0" x2="748" y2="409.0" stroke="#28282a"/>
-<text x="111.0" y="442.5" font-size="12.5" text-anchor="end" fill="#ebeae6">axum 0.8.6</text>
-<text x="127.0" y="428.0" font-size="11" fill="#929190">macOS arm64: not measured</text>
-<rect x="123.0" y="432.0" width="353.8" height="12" rx="2" fill="#a3a29f"/>
-<line x1="476.4" y1="438.0" x2="524.3" y2="438.0" stroke="#a3a29f" stroke-width="1.25"/>
-<line x1="476.4" y1="434.0" x2="476.4" y2="442.0" stroke="#a3a29f" stroke-width="1.25"/>
-<line x1="524.3" y1="434.0" x2="524.3" y2="442.0" stroke="#a3a29f" stroke-width="1.25"/>
-<text x="530.3" y="442.0" font-size="11.5" text-anchor="start" fill="#ebeae6" font-variant-numeric="tabular-nums">16×</text>
-<rect x="123.0" y="446.0" width="320.1" height="12" rx="2" fill="#5f5e5c"/>
-<line x1="442.1" y1="452.0" x2="499.8" y2="452.0" stroke="#5f5e5c" stroke-width="1.25"/>
-<line x1="442.1" y1="448.0" x2="442.1" y2="456.0" stroke="#5f5e5c" stroke-width="1.25"/>
-<line x1="499.8" y1="448.0" x2="499.8" y2="456.0" stroke="#5f5e5c" stroke-width="1.25"/>
-<text x="505.8" y="456.0" font-size="11.5" text-anchor="start" fill="#ebeae6" font-variant-numeric="tabular-nums">10×</text>
-<line x1="12" y1="467.0" x2="748" y2="467.0" stroke="#28282a"/>
-<text x="111.0" y="500.5" font-size="12.5" text-anchor="end" fill="#ebeae6">nushell 0.108.0</text>
-<rect x="123.0" y="476.0" width="319.3" height="12" rx="2" fill="#ebeae6"/>
-<line x1="378.6" y1="482.0" x2="478.8" y2="482.0" stroke="#ebeae6" stroke-width="1.25"/>
-<line x1="378.6" y1="478.0" x2="378.6" y2="486.0" stroke="#ebeae6" stroke-width="1.25"/>
-<line x1="478.8" y1="478.0" x2="478.8" y2="486.0" stroke="#ebeae6" stroke-width="1.25"/>
-<text x="484.8" y="486.0" font-size="11.5" text-anchor="start" fill="#ebeae6" font-variant-numeric="tabular-nums">10.0×</text>
-<rect x="123.0" y="490.0" width="415.0" height="12" rx="2" fill="#a3a29f"/>
-<line x1="505.4" y1="496.0" x2="572.5" y2="496.0" stroke="#a3a29f" stroke-width="1.25"/>
-<line x1="505.4" y1="492.0" x2="505.4" y2="500.0" stroke="#a3a29f" stroke-width="1.25"/>
-<line x1="572.5" y1="492.0" x2="572.5" y2="500.0" stroke="#a3a29f" stroke-width="1.25"/>
-<text x="578.5" y="500.0" font-size="11.5" text-anchor="start" fill="#ebeae6" font-variant-numeric="tabular-nums">40×</text>
-<rect x="123.0" y="504.0" width="368.4" height="12" rx="2" fill="#5f5e5c"/>
-<line x1="407.4" y1="510.0" x2="536.8" y2="510.0" stroke="#5f5e5c" stroke-width="1.25"/>
-<line x1="407.4" y1="506.0" x2="407.4" y2="514.0" stroke="#5f5e5c" stroke-width="1.25"/>
-<line x1="536.8" y1="506.0" x2="536.8" y2="514.0" stroke="#5f5e5c" stroke-width="1.25"/>
-<text x="542.8" y="514.0" font-size="11.5" text-anchor="start" fill="#ebeae6" font-variant-numeric="tabular-nums">20×</text>
-<line x1="12" y1="525.0" x2="748" y2="525.0" stroke="#28282a"/>
-<text x="111.0" y="558.5" font-size="12.5" text-anchor="end" fill="#ebeae6">helix 25.07.1</text>
-<text x="127.0" y="544.0" font-size="11" fill="#929190">macOS arm64: not measured</text>
-<rect x="123.0" y="548.0" width="434.1" height="12" rx="2" fill="#a3a29f"/>
-<line x1="524.0" y1="554.0" x2="597.8" y2="554.0" stroke="#a3a29f" stroke-width="1.25"/>
-<line x1="524.0" y1="550.0" x2="524.0" y2="558.0" stroke="#a3a29f" stroke-width="1.25"/>
-<line x1="597.8" y1="550.0" x2="597.8" y2="558.0" stroke="#a3a29f" stroke-width="1.25"/>
-<text x="603.8" y="558.0" font-size="11.5" text-anchor="start" fill="#ebeae6" font-variant-numeric="tabular-nums">52×</text>
-<rect x="123.0" y="562.0" width="390.6" height="12" rx="2" fill="#5f5e5c"/>
-<line x1="469.2" y1="568.0" x2="545.5" y2="568.0" stroke="#5f5e5c" stroke-width="1.25"/>
-<line x1="469.2" y1="564.0" x2="469.2" y2="572.0" stroke="#5f5e5c" stroke-width="1.25"/>
-<line x1="545.5" y1="564.0" x2="545.5" y2="572.0" stroke="#5f5e5c" stroke-width="1.25"/>
-<text x="551.5" y="572.0" font-size="11.5" text-anchor="start" fill="#ebeae6" font-variant-numeric="tabular-nums">28×</text>
-<line x1="12" y1="583.0" x2="748" y2="583.0" stroke="#28282a"/>
-<text x="111.0" y="616.5" font-size="12.5" text-anchor="end" fill="#ebeae6">bevy 0.20.0</text>
-<text x="127.0" y="602.0" font-size="11" fill="#929190">macOS arm64: not measured</text>
-<rect x="123.0" y="606.0" width="56.5" height="12" rx="2" fill="#a3a29f"/>
-<line x1="179.1" y1="612.0" x2="203.1" y2="612.0" stroke="#a3a29f" stroke-width="1.25"/>
-<line x1="179.1" y1="608.0" x2="179.1" y2="616.0" stroke="#a3a29f" stroke-width="1.25"/>
-<line x1="203.1" y1="608.0" x2="203.1" y2="616.0" stroke="#a3a29f" stroke-width="1.25"/>
-<text x="209.1" y="616.0" font-size="11.5" text-anchor="start" fill="#ebeae6" font-variant-numeric="tabular-nums">0.2×</text>
-<rect x="123.0" y="620.0" width="85.1" height="12" rx="2" fill="#5f5e5c"/>
-<line x1="206.8" y1="626.0" x2="293.7" y2="626.0" stroke="#5f5e5c" stroke-width="1.25"/>
-<line x1="206.8" y1="622.0" x2="206.8" y2="630.0" stroke="#5f5e5c" stroke-width="1.25"/>
-<line x1="293.7" y1="622.0" x2="293.7" y2="630.0" stroke="#5f5e5c" stroke-width="1.25"/>
-<text x="299.7" y="630.0" font-size="11.5" text-anchor="start" fill="#ebeae6" font-variant-numeric="tabular-nums">0.3×</text>
+<svg xmlns="http://www.w3.org/2000/svg" width="760" height="730" viewBox="0 0 760 730" role="img" aria-label="Edit, then build: how many times faster ra-jit is than cargo">
+<title>Edit, then build: how many times faster ra-jit is than cargo</title>
+<style>text{font-family:-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans', Helvetica, Arial, sans-serif;fill:#f0f6fc}.d{fill:#9198a1}.b{font-weight:600}.v{font-variant-numeric:tabular-nums}.g{stroke:#262c36}.r{stroke:#9198a1;stroke-width:1.25}.z{fill:#151b23}.c{fill:#f0f6fc}.o{fill:none;stroke-width:1.25}.p0{fill:#5aa9f5}.w0{stroke:#5aa9f5}.p1{fill:#f0913a}.w1{stroke:#f0913a}.p2{fill:#34c69a}.w2{stroke:#34c69a}</style>
+<text x="16" y="26" font-size="17" class="b">Edit, then build: how many times faster ra-jit is than cargo</text>
+<text x="16" y="45" font-size="13" class="d">A small edit to a real project, then an incremental build: cargo build's time ÷ cargo ra-jit build's, both warm. The bar</text>
+<text x="16" y="64" font-size="13" class="d">is the median over the kinds of edit, the thin line runs from the slowest kind to the fastest. Further right is better.</text>
+<rect x="16" y="76" width="12" height="12" rx="3" class="p0"/>
+<text x="34" y="86" font-size="12.5">macOS arm64</text>
+<rect x="132.25" y="76" width="12" height="12" rx="3" class="p1"/>
+<text x="150.2" y="86" font-size="12.5">Linux aarch64</text>
+<rect x="259.5" y="76" width="12" height="12" rx="3" class="p2"/>
+<text x="277.5" y="86" font-size="12.5">Linux x86-64</text>
+<rect x="16" y="522" width="728" height="58" class="z"/>
+<rect x="16" y="406" width="728" height="58" class="z"/>
+<rect x="16" y="290" width="728" height="58" class="z"/>
+<rect x="16" y="174" width="728" height="58" class="z"/>
+<line x1="130.8" y1="116" x2="130.8" y2="638" class="g"/>
+<line x1="183.6" y1="116" x2="183.6" y2="638" class="g"/>
+<line x1="253.3" y1="116" x2="253.3" y2="638" class="g"/>
+<line x1="306.1" y1="116" x2="306.1" y2="638" class="g"/>
+<line x1="358.9" y1="116" x2="358.9" y2="638" class="g"/>
+<line x1="428.7" y1="116" x2="428.7" y2="638" class="g"/>
+<line x1="481.4" y1="116" x2="481.4" y2="638" class="g"/>
+<line x1="534.2" y1="116" x2="534.2" y2="638" class="g"/>
+<line x1="604" y1="116" x2="604" y2="638" class="g"/>
+<line x1="656.7" y1="116" x2="656.7" y2="638" class="g"/>
+<line x1="709.5" y1="116" x2="709.5" y2="638" class="g"/>
+<rect x="306.1" y="124" width="158.9" height="12" rx="2" class="p0"/>
+<path d="M424.5 130H531.4M424.5 126v8M531.4 126v8" class="o w0"/>
+<rect x="306.1" y="139" width="246" height="12" rx="2" class="p1"/>
+<path d="M519.5 145H584M519.5 141v8M584 141v8" class="o w1"/>
+<rect x="306.1" y="154" width="200.1" height="12" rx="2" class="p2"/>
+<path d="M480.3 160H540.6M480.3 156v8M540.6 156v8" class="o w2"/>
+<rect x="306.1" y="182" width="136.8" height="12" rx="2" class="p0"/>
+<path d="M438 188H470M438 184v8M470 184v8" class="o w0"/>
+<rect x="306.1" y="197" width="252.3" height="12" rx="2" class="p1"/>
+<path d="M537.8 203H579.3M537.8 199v8M579.3 199v8" class="o w1"/>
+<rect x="306.1" y="212" width="191.2" height="12" rx="2" class="p2"/>
+<path d="M481.3 218H515.9M481.3 214v8M515.9 214v8" class="o w2"/>
+<rect x="307.1" y="241.5" width="9" height="9" rx="2" class="o w0"/>
+<rect x="306.1" y="255" width="279.1" height="12" rx="2" class="p1"/>
+<path d="M560 261H602.2M560 257v8M602.2 257v8" class="o w1"/>
+<rect x="306.1" y="270" width="222.9" height="12" rx="2" class="p2"/>
+<path d="M490.2 276H542.6M490.2 272v8M542.6 272v8" class="o w2"/>
+<rect x="307.1" y="299.5" width="9" height="9" rx="2" class="o w0"/>
+<rect x="306.1" y="313" width="223" height="12" rx="2" class="p1"/>
+<path d="M475 319H534.9M475 315v8M534.9 315v8" class="o w1"/>
+<rect x="306.1" y="328" width="190.2" height="12" rx="2" class="p2"/>
+<path d="M452.1 334H505.7M452.1 330v8M505.7 330v8" class="o w2"/>
+<rect x="307.1" y="357.5" width="9" height="9" rx="2" class="o w0"/>
+<rect x="306.1" y="371" width="248.5" height="12" rx="2" class="p1"/>
+<path d="M540.5 377H586.3M540.5 373v8M586.3 373v8" class="o w1"/>
+<rect x="306.1" y="386" width="212.7" height="12" rx="2" class="p2"/>
+<path d="M499.3 392H536.2M499.3 388v8M536.2 388v8" class="o w2"/>
+<rect x="307.1" y="415.5" width="9" height="9" rx="2" class="o w0"/>
+<rect x="306.1" y="429" width="213.2" height="12" rx="2" class="p1"/>
+<path d="M518.8 435H571.4M518.8 431v8M571.4 431v8" class="o w1"/>
+<rect x="306.1" y="444" width="176.2" height="12" rx="2" class="p2"/>
+<path d="M481.2 450H544.6M481.2 446v8M544.6 446v8" class="o w2"/>
+<rect x="306.1" y="472" width="175.3" height="12" rx="2" class="p0"/>
+<path d="M411.5 478H521.5M411.5 474v8M521.5 474v8" class="o w0"/>
+<rect x="306.1" y="487" width="280.4" height="12" rx="2" class="p1"/>
+<path d="M550.8 493H624.4M550.8 489v8M624.4 489v8" class="o w1"/>
+<rect x="306.1" y="502" width="229.3" height="12" rx="2" class="p2"/>
+<path d="M443.1 508H585.2M443.1 504v8M585.2 504v8" class="o w2"/>
+<rect x="307.1" y="531.5" width="9" height="9" rx="2" class="o w0"/>
+<rect x="306.1" y="545" width="301.3" height="12" rx="2" class="p1"/>
+<path d="M571.2 551H652.2M571.2 547v8M652.2 547v8" class="o w1"/>
+<rect x="306.1" y="560" width="253.6" height="12" rx="2" class="p2"/>
+<path d="M511 566H594.8M511 562v8M594.8 562v8" class="o w2"/>
+<rect x="307.1" y="589.5" width="9" height="9" rx="2" class="o w0"/>
+<rect x="192.8" y="603" width="113.3" height="12" rx="2" class="p1"/>
+<path d="M192.4 609H218.8M192.4 605v8M218.8 605v8" class="o w1"/>
+<rect x="224.3" y="618" width="81.8" height="12" rx="2" class="p2"/>
+<path d="M222.8 624H318.3M222.8 620v8M318.3 620v8" class="o w2"/>
+<line x1="306.1" y1="108" x2="306.1" y2="638" class="r"/>
+<text x="130.8" y="655" font-size="11.5" text-anchor="middle" class="d v">0.1×</text>
+<text x="183.6" y="655" font-size="11.5" text-anchor="middle" class="d v">0.2×</text>
+<text x="253.3" y="655" font-size="11.5" text-anchor="middle" class="d v">0.5×</text>
+<text x="306.1" y="655" font-size="11.5" text-anchor="middle" class="d v">1×</text>
+<text x="358.9" y="655" font-size="11.5" text-anchor="middle" class="d v">2×</text>
+<text x="428.7" y="655" font-size="11.5" text-anchor="middle" class="d v">5×</text>
+<text x="481.4" y="655" font-size="11.5" text-anchor="middle" class="d v">10×</text>
+<text x="534.2" y="655" font-size="11.5" text-anchor="middle" class="d v">20×</text>
+<text x="604" y="655" font-size="11.5" text-anchor="middle" class="d v">50×</text>
+<text x="656.7" y="655" font-size="11.5" text-anchor="middle" class="d v">100×</text>
+<text x="709.5" y="655" font-size="11.5" text-anchor="middle" class="d v">200×</text>
+<text x="118.8" y="149.5" font-size="13" text-anchor="end">ripgrep 15.1.0</text>
+<text x="537.4" y="134" font-size="12" text-anchor="start" class="v">8.1×</text>
+<text x="590" y="149" font-size="12" text-anchor="start" class="v">25×</text>
+<text x="546.6" y="164" font-size="12" text-anchor="start" class="v">14×</text>
+<text x="118.8" y="207.5" font-size="13" text-anchor="end">fd 10.3.0</text>
+<text x="476" y="192" font-size="12" text-anchor="start" class="v">6.0×</text>
+<text x="585.3" y="207" font-size="12" text-anchor="start" class="v">27×</text>
+<text x="521.9" y="222" font-size="12" text-anchor="start" class="v">12×</text>
+<text x="118.8" y="265.5" font-size="13" text-anchor="end">bat 0.26.0</text>
+<text x="322.1" y="250" font-size="11.5" class="d">not measured yet</text>
+<text x="608.2" y="265" font-size="12" text-anchor="start" class="v">39×</text>
+<text x="548.6" y="280" font-size="12" text-anchor="start" class="v">19×</text>
+<text x="118.8" y="323.5" font-size="13" text-anchor="end">hyperfine 1.19.0</text>
+<text x="322.1" y="308" font-size="11.5" class="d">not measured yet</text>
+<text x="540.9" y="323" font-size="12" text-anchor="start" class="v">19×</text>
+<text x="511.7" y="338" font-size="12" text-anchor="start" class="v">12×</text>
+<text x="118.8" y="381.5" font-size="13" text-anchor="end">just 1.43.0</text>
+<text x="322.1" y="366" font-size="11.5" class="d">not measured yet</text>
+<text x="592.3" y="381" font-size="12" text-anchor="start" class="v">26×</text>
+<text x="542.2" y="396" font-size="12" text-anchor="start" class="v">16×</text>
+<text x="118.8" y="439.5" font-size="13" text-anchor="end">axum 0.8.6</text>
+<text x="322.1" y="424" font-size="11.5" class="d">not measured yet</text>
+<text x="577.4" y="439" font-size="12" text-anchor="start" class="v">16×</text>
+<text x="550.6" y="454" font-size="12" text-anchor="start" class="v">10×</text>
+<text x="118.8" y="497.5" font-size="13" text-anchor="end">nushell 0.108.0</text>
+<text x="527.5" y="482" font-size="12" text-anchor="start" class="v">10×</text>
+<text x="630.4" y="497" font-size="12" text-anchor="start" class="v">40×</text>
+<text x="591.2" y="512" font-size="12" text-anchor="start" class="v">20×</text>
+<text x="118.8" y="555.5" font-size="13" text-anchor="end">helix 25.07.1</text>
+<text x="322.1" y="540" font-size="11.5" class="d">not measured yet</text>
+<text x="658.2" y="555" font-size="12" text-anchor="start" class="v">52×</text>
+<text x="600.8" y="570" font-size="12" text-anchor="start" class="v">28×</text>
+<text x="118.8" y="613.5" font-size="13" text-anchor="end">bevy 0.20.0</text>
+<text x="322.1" y="598" font-size="11.5" class="d">not measured yet</text>
+<text x="186.4" y="613" font-size="12" text-anchor="end" class="v">0.2×</text>
+<text x="216.8" y="628" font-size="12" text-anchor="end" class="v">0.3×</text>
+<text x="306.1" y="103" font-size="11.5" text-anchor="middle" class="d">as fast as cargo</text>
+<text x="298.1" y="675" font-size="12" text-anchor="end" class="d">← ra-jit slower</text>
+<text x="314.1" y="675" font-size="12" class="d">ra-jit faster →</text>
+<text x="16" y="699" font-size="11.5" class="d">Each colour is a machine of its own: compare bars of one colour, not across colours. macOS arm64: MacBook Pro, 2026-10-21.</text>
+<text x="16" y="716" font-size="11.5" class="d">Linux aarch64: AWS c8g.16xlarge, 2026-10-22. Linux x86-64: AWS c7a.48xlarge, 2026-10-22.</text>
 </svg>
