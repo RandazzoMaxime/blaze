@@ -2001,10 +2001,28 @@ impl<'db> Evaluator<'db> {
         })
     }
 
+    /// The values of `consts`, each in memory of its own.
+    fn allocate_valtrees(
+        &mut self,
+        consts: &[Const<'db>],
+        locals: &Locals<'db>,
+    ) -> Result<'db, Vec<IntervalOrOwned>> {
+        let mut values = Vec::with_capacity(consts.len());
+        for konst in consts {
+            let ConstKind::Value(value) = konst.kind() else {
+                not_supported!("an unevaluated constant in a constant");
+            };
+            let value = self.allocate_valtree_in_heap(value.ty, value.value, locals)?;
+            values.push(IntervalOrOwned::Borrowed(value));
+        }
+        Ok(values)
+    }
+
     fn allocate_valtree_in_heap(
         &mut self,
         ty: Ty<'db>,
         valtree: ValTree<'db>,
+        locals: &Locals<'db>,
     ) -> Result<'db, Interval> {
         match ty.kind() {
             TyKind::Bool => {
@@ -2087,7 +2105,7 @@ impl<'db> Evaluator<'db> {
                         .iter()
                         .map(|konst| match konst.kind() {
                             ConstKind::Value(value) => {
-                                self.allocate_valtree_in_heap(value.ty, value.value)
+                                self.allocate_valtree_in_heap(value.ty, value.value, locals)
                             }
                             _ => not_supported!("unsupported const"),
                         })
@@ -2109,16 +2127,45 @@ impl<'db> Evaluator<'db> {
                 }
                 TyKind::Dynamic(..) => not_supported!("`dyn Trait` consts not supported yet"),
                 _ => {
-                    let inner_addr = self.allocate_valtree_in_heap(inner_ty, valtree)?;
+                    let inner_addr = self.allocate_valtree_in_heap(inner_ty, valtree, locals)?;
                     let ref_addr = self.heap_allocate(self.ptr_size(), self.ptr_size())?;
                     self.write_memory(ref_addr, &inner_addr.addr.to_bytes())?;
                     Ok(Interval::new(ref_addr, self.ptr_size()))
                 }
             },
-            TyKind::Adt(_, _) | TyKind::Array(_, _) | TyKind::Tuple(_) => {
-                not_supported!(
-                    "ADTs, arrays and tuples are unsupported in consts currently (requires `adt_const_params`)"
-                )
+            TyKind::Adt(def, args) => {
+                // The fields in order, after the index of the variant of an enum.
+                let items = valtree.inner().to_branch();
+                let (variant, fields): (VariantId, _) = match def.def_id() {
+                    AdtId::StructId(id) => (id.into(), &items[..]),
+                    AdtId::UnionId(_) => not_supported!("a union constant"),
+                    AdtId::EnumId(id) => {
+                        let index = match items.first().map(|it| it.kind()) {
+                            Some(ConstKind::Value(it)) => it.value.inner().to_leaf().to_u32(),
+                            _ => not_supported!("an enum constant without its variant"),
+                        };
+                        let variants = &id.enum_variants(self.db).variants;
+                        let Some((_, &(variant, ..))) = variants.get_index(index as usize) else {
+                            not_supported!("an enum constant of a variant it does not have");
+                        };
+                        (variant.into(), &items[1..])
+                    }
+                };
+                let (size, layout, tag) = self.layout_of_variant(variant, args, locals)?;
+                let fields = self.allocate_valtrees(fields, locals)?;
+                let bytes = self.construct_with_layout(size, &layout, tag, fields.into_iter())?;
+                let addr = self.heap_allocate(size, layout.align.abi.bytes() as usize)?;
+                self.write_memory(addr, &bytes)?;
+                Ok(Interval::new(addr, size))
+            }
+            TyKind::Array(..) | TyKind::Tuple(_) => {
+                let layout = self.layout(ty)?;
+                let fields = self.allocate_valtrees(&valtree.inner().to_branch()[..], locals)?;
+                let size = layout.size.bytes_usize();
+                let bytes = self.construct_with_layout(size, &layout, None, fields.into_iter())?;
+                let addr = self.heap_allocate(size, layout.align.abi.bytes() as usize)?;
+                self.write_memory(addr, &bytes)?;
+                Ok(Interval::new(addr, size))
             }
             TyKind::Pat(_, _)
             | TyKind::Slice(_)
@@ -2148,7 +2195,7 @@ impl<'db> Evaluator<'db> {
         konst: Const<'db>,
     ) -> Result<'db, Interval> {
         match konst.kind() {
-            ConstKind::Value(value) => self.allocate_valtree_in_heap(value.ty, value.value),
+            ConstKind::Value(value) => self.allocate_valtree_in_heap(value.ty, value.value, locals),
             ConstKind::Unevaluated(UnevaluatedConst { def: const_id, args: subst }) => {
                 let mut id = const_id.0;
                 let mut subst = subst;

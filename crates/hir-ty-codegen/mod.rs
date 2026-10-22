@@ -8665,6 +8665,9 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
                 return Ok(ConstBlob { bytes, relocs: Vec::new(), fn_relocs: Vec::new(), align });
             }
             TyKind::Ref(_, pointee, _) => pointee,
+            TyKind::Adt(..) | TyKind::Tuple(_) | TyKind::Array(..) => {
+                return self.aggregate_valtree_blob(ty, valtree);
+            }
             _ => unsupported!("constant of type {ty:?}"),
         };
         let mut bytes = vec![0; layout.size.bytes_usize()];
@@ -8697,6 +8700,60 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
         };
         let target = self.cg.define_const(target)?;
         Ok(ConstBlob { bytes, relocs: vec![(0, target, 0)], fn_relocs: Vec::new(), align })
+    }
+
+    /// A struct, enum, tuple or array that a const generic argument is (`adt_const_params`):
+    /// const eval gives its fields in order, an enum's after the index of its variant.
+    fn aggregate_valtree_blob(&mut self, ty: Ty<'db>, valtree: ValTree<'db>) -> Result<ConstBlob> {
+        let layout = self.layout(ty)?;
+        let mut blob = ConstBlob {
+            bytes: vec![0; layout.size.bytes_usize()],
+            relocs: Vec::new(),
+            fn_relocs: Vec::new(),
+            align: layout.align.abi.bytes(),
+        };
+        let items = valtree.inner().to_branch();
+        let (shape, fields) = match ty.kind() {
+            TyKind::Adt(def, args) => match def.def_id() {
+                AdtId::StructId(id) => (self.variant_shape(id.into(), args)?, &items[..]),
+                AdtId::UnionId(_) => unsupported!("a union constant"),
+                AdtId::EnumId(id) => {
+                    let index = match items.first().map(|it| it.kind()) {
+                        Some(ConstKind::Value(it)) => it.value.inner().to_leaf().to_u32() as usize,
+                        _ => unsupported!("an enum constant without its variant"),
+                    };
+                    let variants = &id.enum_variants(self.cg.db).variants;
+                    if index >= variants.len() {
+                        unsupported!("an enum constant of variant {index} of {}", variants.len());
+                    }
+                    (self.variant_shape(variants[index].0.into(), args)?, &items[1..])
+                }
+            },
+            _ => (Some((layout.clone(), None)), &items[..]),
+        };
+        let Some((variant, tag)) = shape else {
+            unsupported!("a constant of a variant its type has no room for");
+        };
+        if let Some((offset, tag_ty, tag)) = tag {
+            let len = tag_ty.bytes() as usize;
+            blob.bytes[offset..offset + len].copy_from_slice(&tag.to_le_bytes()[..len]);
+        }
+        for (i, field) in fields.iter().enumerate() {
+            let ConstKind::Value(field) = field.kind() else {
+                unsupported!("an unevaluated constant in a constant");
+            };
+            let field = self.valtree_blob(field.ty, field.value)?;
+            let at = variant.fields.offset(i).bytes_usize();
+            let Some(place) = blob.bytes.get_mut(at..at + field.bytes.len()) else {
+                unsupported!("a field of a constant out of its bounds");
+            };
+            place.copy_from_slice(&field.bytes);
+            let at = at as u32;
+            blob.relocs
+                .extend(field.relocs.into_iter().map(|(it, data, add)| (it + at, data, add)));
+            blob.fn_relocs.extend(field.fn_relocs.into_iter().map(|(it, func)| (it + at, func)));
+        }
+        Ok(blob)
     }
 
     /// `in_static` says the value is a static's, where memory behind a mutable pointer can be
@@ -9653,6 +9710,22 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
         variant: VariantId,
         args: GenericArgs<'db>,
     ) -> Result<Option<Arc<Layout>>> {
+        let Some((layout, tag)) = self.variant_shape(variant, args)? else { return Ok(None) };
+        if let Some((offset, ty, tag)) = tag {
+            let value = self.iconst(ty, tag);
+            self.builder.ins().store(MEM, value, dst, offset as i32);
+        }
+        Ok(Some(layout))
+    }
+
+    /// Layout whose `fields` describe `variant`, and the tag of a variant of a multi-variant
+    /// enum that has one: where it goes, as what and its value. `None` for a variant the
+    /// layout has no room for.
+    fn variant_shape(
+        &mut self,
+        variant: VariantId,
+        args: GenericArgs<'db>,
+    ) -> Result<Option<(Arc<Layout>, Option<(usize, types::Type, u128)>)>> {
         let db = self.cg.db;
         let adt: AdtId = variant.adt_id(db);
         let layout = self.layout(Ty::new_adt(self.interner, adt, args))?;
@@ -9665,7 +9738,7 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
                     VariantId::EnumVariantId(variant) => variant.index(db) == index.0,
                     _ => true,
                 };
-                return Ok(inhabited.then_some(layout));
+                return Ok(inhabited.then_some((layout, None)));
             }
             Variants::Empty => return Ok(None),
         };
@@ -9674,7 +9747,7 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
         };
         let index = variant.index(db);
         let tag_ty = self.scalar(*tag)?.ty;
-        let offset = layout.fields.offset(tag_field.index()).bytes() as i32;
+        let offset = layout.fields.offset(tag_field.index()).bytes_usize();
         let tag_value = match tag_encoding {
             TagEncoding::Direct => {
                 let discr = db
@@ -9687,11 +9760,8 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
                 Some(((index - niche_variants.start.0) as u128).wrapping_add(*niche_start))
             }
         };
-        if let Some(tag_value) = tag_value {
-            let value = self.iconst(tag_ty, tag_value);
-            self.builder.ins().store(MEM, value, dst, offset);
-        }
-        Ok(Some(Arc::new(Layout::for_variant(&layout, RustcEnumVariantIdx(index)))))
+        let layout = Arc::new(Layout::for_variant(&layout, RustcEnumVariantIdx(index)));
+        Ok(Some((layout, tag_value.map(|it| (offset, tag_ty, it)))))
     }
 
     fn write_fields(&mut self, dst: Value, layout: &Layout, operands: &[Operand]) -> Result<()> {

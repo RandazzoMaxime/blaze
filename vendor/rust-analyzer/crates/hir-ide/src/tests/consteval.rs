@@ -2664,6 +2664,37 @@ fn const_impl_assoc() {
 }
 
 #[test]
+fn adt_const_params() {
+    check_number(
+        r#"
+//- minicore: const_param_ty
+#![feature(adt_const_params)]
+use core::marker::ConstParamTy;
+#[derive(PartialEq, Eq, ConstParamTy)]
+enum Requirement { Connected, Not(u8), Pair { a: u16, b: bool } }
+#[derive(PartialEq, Eq, ConstParamTy)]
+struct Point(u8, u32);
+const fn check<const R: Requirement>() -> u32 {
+    match R {
+        Requirement::Connected => 1,
+        Requirement::Not(x) => x as u32 * 10,
+        Requirement::Pair { a, b } => a as u32 * 100 + b as u32,
+    }
+}
+const fn sum<const P: Point, const T: (u8, [u16; 2])>() -> u32 {
+    let (a, [b, c]) = T;
+    P.0 as u32 + P.1 + a as u32 + b as u32 + c as u32
+}
+const GOAL: u32 = check::<{ Requirement::Connected }>()
+    + check::<{ Requirement::Not(3) }>()
+    + check::<{ Requirement::Pair { a: 4, b: true } }>()
+    + sum::<{ Point(1, 1000) }, { (2, [20, 300]) }>();
+"#,
+        1 + 30 + 401 + 1323,
+    );
+}
+
+#[test]
 fn const_generic_subst_fn() {
     check_number(
         r#"

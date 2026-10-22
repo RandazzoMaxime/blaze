@@ -30,12 +30,8 @@ CASES = {
     "adt_const_params": {
         "package": "runner",
         "crate": "adt_const_params",
-        "expected": "refused",
-        "reasons": (
-            re.compile(r"constant of type"),
-            re.compile(r"adt_const_params"),
-            re.compile(r"built-in macro.*not implemented"),
-        ),
+        "expected": "compiled",
+        "reasons": (),
     },
     "type_info": {
         "package": "runner",

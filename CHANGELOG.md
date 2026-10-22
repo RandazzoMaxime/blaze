@@ -407,6 +407,12 @@ All notable changes to ra-jit are written here. The format follows
 - fd built with inlining across crates crashed the LLVM backend on Linux and macOS: an address
   rebuilt as a `getelementptr` may be a sum that is a constant (a global's address plus an
   offset), which is in no block, and LLVM read freed memory when the builder was put before it.
+- A constant of a struct, enum, tuple or array type given as a const generic argument
+  (`adt_const_params`: `check::<{ Requirement::Within { low: 3, high: 9 } }>`,
+  `filtered::<{ Filter { mask: 0xf0, strict: true } }>`) compiles and evaluates, and
+  `#[derive(ConstParamTy)]` expands. Every function reaching one was refused ("constant of type
+  JSType", bun's `alloc`, `test_correct_state` and `completions`) (`bun_repros.py`
+  `adt_const_params`).
 - A path through a type alias of an inherent impl (`ThreadPool::Worker::get(..)`, `Self::Slot`,
   `Slots<u32>::Slot`, nightly's `inherent_associated_types`) is the alias's type: the
   functions that name one had no type for it and were left to rustc, and rustc's copy of

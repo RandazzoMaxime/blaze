@@ -483,6 +483,7 @@ define_symbols! {
     PartialOrd,
     CoercePointee,
     CoerceShared,
+    ConstParamTy,
     path,
     pattern_type,
     Pending,
