@@ -1056,10 +1056,36 @@ impl<'db> Builder<'_, '_, 'db> {
         local_tys[env_local.into_raw().into_u32() as usize] = Some(closure);
         for (index, (&local, ty)) in params.iter().zip(inputs.iter()).enumerate() {
             let ty = self.elided_own(index, ty).unwrap_or(ty);
+            let ty = self.written_object_default(index, ty).unwrap_or(ty);
             local_tys[local.into_raw().into_u32() as usize] = Some(ty);
         }
         local_tys[super::return_slot().into_raw().into_u32() as usize] = Some(sig.output());
         true
+    }
+
+    /// The closure's parameter `index` written `&dyn Trait`, as `&'r (dyn Trait + 'r)` with
+    /// its reference's lifetime, as rustc's object lifetime default, where inference gave the
+    /// object a region of its own.
+    fn written_object_default(&mut self, index: usize, ty: Ty<'db>) -> Option<Ty<'db>> {
+        let closure = self.ctx.closure_expr?;
+        let hir_def::hir::Expr::Closure { arg_types, .. } = &self.ctx.store[closure] else {
+            return None;
+        };
+        let written = self.lower_written((*arg_types.get(index)?)?, MirSpan::ExprId(closure));
+        let TyKind::Ref(_, written, _) = written.kind() else { return None };
+        let TyKind::Dynamic(_, object) = written.kind() else { return None };
+        if !matches!(object.kind(), RegionKind::ReStatic) || writes_static_object(self.ctx.store) {
+            return None;
+        }
+        let TyKind::Ref(region, inner, mutability) = ty.kind() else { return None };
+        let TyKind::Dynamic(predicates, _) = inner.kind() else { return None };
+        let interner = self.interner();
+        Some(Ty::new_ref(
+            interner,
+            region,
+            Ty::new_dynamic(interner, predicates, region),
+            mutability,
+        ))
     }
 
     /// The type of the closure's parameter `index`, where the closure is typed without an
@@ -2256,7 +2282,7 @@ impl<'db> Builder<'_, '_, 'db> {
     }
 
     fn type_outlives_at(&mut self, ty: Ty<'db>, region: Region<'db>, at: At, depth: usize) {
-        let Some(rv) = rv_of(region) else { return };
+        let Some(rv) = self.region_rv(region) else { return };
         let mut components = Vec::new();
         let mut params = Vec::new();
         outlives_components(ty, &mut components, &mut params);
@@ -2300,7 +2326,7 @@ impl<'db> Builder<'_, '_, 'db> {
             self.type_outlives_at(normalized, region, at, depth + 1);
             return;
         }
-        let Some(rv) = rv_of(region) else { return };
+        let Some(rv) = self.region_rv(region) else { return };
         let interner = self.interner();
         let erase = |ty: Ty<'db>| {
             rustc_type_ir::fold_regions(interner, ty, |_, _| Region::new_static(interner))

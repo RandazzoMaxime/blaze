@@ -1192,6 +1192,27 @@ impl<'a, 'db> Checker<'a, '_, 'db> {
         }
     }
 
+    /// What rustc's `def_descr` calls the function being checked.
+    fn owner_descr(&self) -> &'static str {
+        let hir_ty::InferBodyId::DefWithBodyId(hir_def::DefWithBodyId::FunctionId(function)) =
+            self.ctx.owner
+        else {
+            return "function";
+        };
+        match hir_def::Lookup::lookup(&function, self.ctx.db).container {
+            hir_def::ItemContainerId::ImplId(_) | hir_def::ItemContainerId::TraitId(_) => {
+                if hir_def::signatures::FunctionSignature::of(self.ctx.db, function)
+                    .has_self_param()
+                {
+                    "method"
+                } else {
+                    "associated function"
+                }
+            }
+            _ => "function",
+        }
+    }
+
     /// Whether the region `rv` is in the type of a parameter, which rustc's E0521 names as
     /// where the data comes from; not in `f: impl FnOnce(&'a T)`, whose type is a parameter.
     fn parameter_names(&self, rv: regions::Rv) -> bool {
@@ -1270,7 +1291,7 @@ impl<'a, 'db> Checker<'a, '_, 'db> {
                 && shorter_kind == UniversalKind::Static
                 && self.parameter_names(longer_rv)
             {
-                ("E0521", "borrowed data escapes outside of function".to_owned())
+                ("E0521", format!("borrowed data escapes outside of {}", self.owner_descr()))
             } else {
                 ("", "lifetime may not live long enough".to_owned())
             };
