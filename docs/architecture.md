@@ -307,7 +307,9 @@ changes or moves the lines of such a function is a patch that replaces each of t
 under rustc's symbol, as long as the executable has no other copy of that name. A function of
 the workspace that no function of the executable is named after (`has_no_function_named`)
 was not compiled or not linked, so nothing of rustc's calls it: the patch compiles it under a
-name of its own, and an edit of it, `#[inline]` or not, is a patch too. A file not
+name of its own, and an edit of it, `#[inline]` or not, is a patch too. Of a function rustc's
+symbols name no copy of, `home` keeps a mark, and one whose code is the same where it moved,
+as an unused derive below the edit, is no change. A file not
 noted before it changed, an edit that is more than function bodies, an edit of an
 `#[inline]` function the executable has a copy of, of a default trait function, or of a
 generic one with copies `home` did not take in (the outline's copied fingerprint tells), a

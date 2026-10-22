@@ -73,6 +73,12 @@ impl Mark {
         }
         Mark { lines: hasher.finish(), ..Mark::new(db, serial, &compiled.requests) }
     }
+
+    /// Whether the code is the same, wherever in the file it is: a copy of rustc's that no
+    /// patch reaches does what it did, and only a debugger is told the lines it was at.
+    fn same_code(self, other: Mark) -> bool {
+        Mark { lines: 0, ..self } == Mark { lines: 0, ..other }
+    }
 }
 
 /// Something in the base that an edit can change or take away.
@@ -1421,7 +1427,7 @@ impl Base {
                 Some(Mark::of_function(db, root_serial(db, *root), compiled, self.debug))
             });
             // One that did not compile then can't be told to be the same.
-            if was.is_none() || mark != Some(*was) {
+            if !was.zip(mark.flatten()).is_some_and(|(was, now)| was.same_code(now)) {
                 return stale.declined("a function that rustc's symbols name no copy of changed");
             }
         }
@@ -1447,7 +1453,7 @@ impl Base {
             let env = closure_env(db, homed.root);
             for (instance, was) in &homed.unnamed {
                 let mark = probe(|| closure_mark(db, instance, &env, self.debug));
-                if was.is_none() || mark != Some(*was) {
+                if !was.zip(mark.flatten()).is_some_and(|(was, now)| was.same_code(now)) {
                     return stale
                         .declined("a closure that rustc's symbols name no copy of changed");
                 }

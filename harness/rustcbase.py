@@ -87,6 +87,14 @@ fn work(x: u64) -> u64 {
     x * 3
 }
 
+// What it derives is never called: rustc's executable has no copy of it.
+#[allow(dead_code)]
+#[derive(Debug, Clone, PartialEq)]
+enum Side {
+    Left,
+    Right,
+}
+
 fn mapped(xs: &[u64]) -> Vec<u64> {
     xs.iter().map(|x| x + 10).collect()
 }
@@ -188,6 +196,8 @@ SCENARIOS = {
     # unwind table, so both tables move into the header's room, and the panic unwinds through
     # the patch's frames there.
     "moved-panic": ([[edit(M, "    x * 3\n", "    let y = x * 3;\n    y + 1\n")]], ["patch"], 0, {}),
+    # Moves `Side`'s derives, which rustc has no copy of, a line down and changes nothing else.
+    "moved-uncopied": ([[edit(M, "    x * 3\n", "    let y = x * 3;\n    y\n")]], ["patch"], 0, {}),
     "closure": ([[edit(M, "x + 10", "x + 11")]], ["patch"], 0, {}),
     # A new item is more than bodies: rustc's copies of what sees the file may differ.
     "new-fn": ([[edit(M, "    x * 3\n}\n", "    helper(x) * 3\n}\n\nfn helper(x: u64) -> u64 {\n    x + 2\n}\n")]],
