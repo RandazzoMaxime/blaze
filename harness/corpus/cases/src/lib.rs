@@ -6357,6 +6357,14 @@ pub mod inline_asm {
         3
     }
 
+    /// An instruction of an extension the target's baseline lacks, which the function enables.
+    #[target_feature(enable = "crc")]
+    unsafe fn crc(state: u32, word: u32) -> u32 {
+        let out: u32;
+        unsafe { asm!("crc32w {0:w}, {1:w}, {2:w}", lateout(reg) out, in(reg) state, in(reg) word) };
+        out
+    }
+
     pub fn run() -> impl std::fmt::Debug {
         (
             add(40, 2),
@@ -6369,6 +6377,7 @@ pub mod inline_asm {
             memory(&mut [10, 20, 0, 0]),
             thread_pointer(),
             stops(false),
+            unsafe { crc(!0, 0x6c6c_6568) },
         )
     }
 }

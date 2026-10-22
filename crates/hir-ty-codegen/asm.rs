@@ -55,6 +55,63 @@ pub(super) fn crc32(instruction: &str) -> String {
     format!(".arch_extension crc\n.globl {SYMBOL}\n{SYMBOL}:\n{instruction} w0, w0, {data}\nret\n")
 }
 
+/// The directives that have the assembler take the instructions of `features`, those a
+/// function's `#[target_feature]` enables, for assembly of its `asm!`: rustc gives LLVM the
+/// features with the function the `asm!` is in, and this assembly is assembled apart from
+/// it. Only AArch64's assembler refuses an instruction the target lacks (`crc32w` on
+/// `aarch64-unknown-linux-gnu`); a feature with no extension of its own is left out.
+pub(super) fn extensions<'a>(arch: Arch, features: impl IntoIterator<Item = &'a str>) -> String {
+    if arch != Arch::Aarch64 {
+        return String::new();
+    }
+    let mut names: Vec<&str> = features.into_iter().filter_map(aarch64_extension).collect();
+    names.sort_unstable();
+    names.dedup();
+    names.iter().map(|it| format!(".arch_extension {it}\n")).collect()
+}
+
+/// The name LLVM's AArch64 assembler gives the extension of a target feature as Rust names
+/// it, where the two differ.
+fn aarch64_extension(feature: &str) -> Option<&'static str> {
+    Some(match feature {
+        "neon" => "simd",
+        "fhm" => "fp16fml",
+        "rand" => "rng",
+        "mte" => "memtag",
+        "dpb" => "ccpp",
+        "dpb2" => "ccdp",
+        "paca" | "pacg" => "pauth",
+        "spe" => "profile",
+        "crc" => "crc",
+        "lse" => "lse",
+        "rdm" => "rdm",
+        "aes" => "aes",
+        "sha2" => "sha2",
+        "sha3" => "sha3",
+        "sm4" => "sm4",
+        "dotprod" => "dotprod",
+        "fp16" => "fp16",
+        "ras" => "ras",
+        "rcpc" => "rcpc",
+        "sb" => "sb",
+        "ssbs" => "ssbs",
+        "flagm" => "flagm",
+        "i8mm" => "i8mm",
+        "bf16" => "bf16",
+        "f32mm" => "f32mm",
+        "f64mm" => "f64mm",
+        "sve" => "sve",
+        "sve2" => "sve2",
+        "sve2-aes" => "sve2-aes",
+        "sve2-sm4" => "sve2-sm4",
+        "sve2-sha3" => "sve2-sha3",
+        "sve2-bitperm" => "sve2-bitperm",
+        "tme" => "tme",
+        "mops" => "mops",
+        _ => return None,
+    })
+}
+
 /// Returns its first float argument with the second left in the register it was passed in,
 /// which is where a pair of floats is returned.
 pub(super) fn join_floats() -> String {

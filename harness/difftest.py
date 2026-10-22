@@ -176,7 +176,10 @@ class Fixture:
             cwd=self.ws, capture_output=True, text=True, env=env)
         if out.returncode != 0 and not (self.alone and only_the_link_failed(out.stderr)):
             raise SystemExit(f"cargo failed:\n{out.stderr[-3000:]}")
-        self.link_args = [a for a in linker_line(out.stdout + out.stderr) if not a.endswith("symbols.o")]
+        # rustc's object of the names the program keeps is how GNU ld, reading each archive once,
+        # takes the panic runtime that comes before the standard library calling it.
+        self.link_args = [a for a in linker_line(out.stdout + out.stderr)
+                          if not a.endswith("symbols.o") or os.path.exists(a)]
         self.reference = linkline.output_of(self.link_args)
         # The target's own objects too: a crate ra_jit rebuilds may be the one being linked.
         self.rlibs = [a for a in self.link_args if a.endswith((".rlib", ".rcgu.o"))]
