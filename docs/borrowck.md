@@ -4,7 +4,7 @@ ra-jit has its own borrow checker, the crate `hir-ty-borrowck` in the rust-analy
 (`vendor/rust-analyzer/crates/hir-ty-borrowck`, next to `hir-ty`). It checks the MIR rust-analyzer
 lowers, the same MIR the code generator compiles, and it is meant to give exactly rustc's
 verdict: the same errors, on the same lines, and none where rustc gives none. It gives
-rustc's verdict on 83% of rustc's own borrow-check tests today, and on every one rustc
+rustc's verdict on 84% of rustc's own borrow-check tests today, and on every one rustc
 accepts; how they are scored and what is left is below.
 
 It runs as part of rust-analyzer's diagnostics, so the daemon computes it for every edited
@@ -45,7 +45,12 @@ All of these are rustc's, written from `compiler/rustc_borrowck` at the pinned n
 - Moves and initialization: moves out of places, partial moves, maybe-uninitialized reads,
   assignment to immutable locals (E0381, E0382, E0384, E0505, E0507, E0508, E0509). A `match`
   whose arms test the value reads what it matches first, so a value moved out whole is
-  reported there.
+  reported there. A `match` arm's guard sees the variables its pattern binds by reference, so
+  it cannot move out of them (E0507), and casting an enum to an integer moves the enum
+  (`*e as usize` behind a reference is E0507).
+- Unaligned references (E0793): a `&` or `&mut` of a field a `#[repr(packed)]` struct may
+  leave less aligned than its type needs, as rustc's `check_packed_ref` (not `&raw`, nor
+  behind a pointer; a field of a type parameter or of a `dyn` tail may be unaligned).
 - Conflicting borrows: shared, mutable, two-phase (`vec.push(vec.len())`), shallow borrows of
   match scrutinees, and fake reads (E0499, E0500, E0501, E0502, E0503, E0506, E0524). The drop
   of the old value before an assignment is the assignment's write, so assigning to a borrowed
@@ -170,8 +175,8 @@ With no borrow checker, the 245 units rustc accepts would pass. Now:
 
 | Mode | In scope | Pass | rustc accepts, ra-jit too | rustc rejects, same errors |
 |---|---|---|---|---|
-| Polonius | 1579 | 1317 (83.4%) | 245 of 245 | 1072 of 1334 |
-| NLL | 1577 | 1309 (83.0%) | 226 of 226 | 1083 of 1351 |
+| Polonius | 1579 | 1329 (84.2%) | 245 of 245 | 1084 of 1334 |
+| NLL | 1577 | 1321 (83.8%) | 226 of 226 | 1095 of 1351 |
 
 463 units are out of scope; 344 of them need a nightly feature. CI runs the scoring on Linux
 and fails below a floor a few units under the count there.
@@ -186,8 +191,7 @@ just, axum, nushell, delta, eza, tokei and starship it finds nothing, nor on the
 Every failing unit is one where rustc gives an error ra-jit does not, or gives it on another
 line or with another code. By what is wrong, most first: 30 "lifetime may not live long
 enough" not reported, 22 E0597 not reported, 16 "lifetime may not live long enough" on
-another line, 12 E0309, 11 each of E0310 and E0521 and 10 E0507 not reported, then a long
-tail. The causes, grouped:
+another line, 12 E0309 and 11 each of E0310 and E0521 not reported, then a long tail. The causes, grouped:
 
 - **Higher-ranked regions and placeholders** (`for<'a>` bounds, closures with higher-ranked
   signatures): rustc checks them with placeholders in universes; ra-jit does not yet, and

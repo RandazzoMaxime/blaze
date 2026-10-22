@@ -96,7 +96,7 @@ pub(crate) fn command(mut args: impl Iterator<Item = String>) -> anyhow::Result<
 const BORROWCK_CODES: &[&str] = &[
     "E0373", "E0381", "E0382", "E0384", "E0499", "E0500", "E0501", "E0502", "E0503", "E0505",
     "E0506", "E0507", "E0508", "E0509", "E0510", "E0515", "E0521", "E0524", "E0596", "E0597",
-    "E0621", "E0713", "E0716", "E0309", "E0310", "E0311", "borrowck",
+    "E0621", "E0713", "E0716", "E0793", "E0309", "E0310", "E0311", "borrowck",
 ];
 
 /// `ra-jit borrowck --project DIR`: the borrow checker's errors in the crates of the cargo
