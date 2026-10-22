@@ -63,6 +63,8 @@ Filed, not fixed (read, the issues):
 
 - [#33](https://github.com/indexable-inc/ra-jit/issues/33): an executable linked with
   `-no_compact_unwind` is linked in full at every edit on macOS. bunprep drops the flag.
+  Fixed since (2026-10-22, `harness/nocompact.py`); bunprep drops it still, so the numbers
+  here stay comparable.
 - [#34](https://github.com/indexable-inc/ra-jit/issues/34): `adt_const_params` constants and
   `type_info` in const eval. Functions that reach them are left to rustc: in the dev loop rustc's
   copy is linked; whole-program, 1,211 functions are missing.

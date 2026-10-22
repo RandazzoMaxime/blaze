@@ -25,7 +25,9 @@
 //! both tables move into the header's room: the table as it is, and `__eh_frame` with the
 //! program's frames where the table has them and the patch's behind. Each way the table has
 //! nothing for the patch's functions, which are past its last entry, so the unwinder looks
-//! for them in `__eh_frame`.
+//! for them in `__eh_frame`. A program linked with `-no_compact_unwind` has no table, and the
+//! unwinder looks for every function in `__eh_frame`: the patch's frames go behind the
+//! program's, or both move into the header's room.
 //!
 //! The kernel remembers the signature of a file it has run, so the executable is not
 //! written where it is: a copy is, which the file system makes without copying where it
@@ -551,16 +553,17 @@ impl Image {
             present.iter().all(|it| *it != 0),
             "an executable without symbols, fixups or a signature, or with segments behind `__LINKEDIT`"
         );
-        ensure!(
-            !unwind.bytes.is_empty() && !frames.bytes.is_empty(),
-            "the executable has no unwind tables"
-        );
+        // Without `__unwind_info` (`-no_compact_unwind`) the unwinder looks for every frame in
+        // `__eh_frame`, to its end.
+        ensure!(!frames.bytes.is_empty(), "the executable has no unwind tables");
         let (start, end) = (unwind.address, frames.address);
         let alone = (sections.iter()).all(|&(address, len, ..)| {
             len == 0 || address == start || !(start..end).contains(&address)
         });
         let in_front = match end.checked_sub(start) {
-            Some(gap) if alone && gap >= unwind.bytes.len() as u64 => gap,
+            Some(gap) if alone && !unwind.bytes.is_empty() && gap >= unwind.bytes.len() as u64 => {
+                gap
+            }
             _ => 0,
         };
         let frames_end = frames.address + frames.bytes.len() as u64;
@@ -960,7 +963,7 @@ fn frames_in_header(
     at: usize,
 ) -> anyhow::Result<Option<(Vec<(u64, Vec<u8>)>, [u64; 2], u64)>> {
     ensure!(
-        image.frames.nth == image.unwind.nth + 1,
+        image.unwind.bytes.is_empty() || image.frames.nth == image.unwind.nth + 1,
         "a section between `__unwind_info` and `__eh_frame`"
     );
     let frames_at = (at + image.unwind.bytes.len()).next_multiple_of(8);
@@ -982,20 +985,21 @@ fn frames_in_header(
     Ok(Some((written, [unwind, start], size)))
 }
 
-/// Lists `__unwind_info` and the `count - 1` sections behind it first of their segment's
-/// sections once they are in the room the header leaves ([`frames_in_front`],
-/// [`frames_in_header`]): a segment lists its sections in the order of their addresses,
-/// which dyld checks (`dyld_info` says "start address overlaps previous section"). The
-/// symbols name their section by its number, so those of the sections moved and passed are
-/// numbered again, in the symbol table of `linkedit`, which starts at `offset` of the file.
+/// Lists `table` (`__unwind_info`, or `__eh_frame` of a program without it) and the
+/// `count - 1` sections behind it first of their segment's sections once they are in the room
+/// the header leaves ([`frames_in_front`], [`frames_in_header`]): a segment lists its sections
+/// in the order of their addresses, which dyld checks (`dyld_info` says "start address
+/// overlaps previous section"). The symbols name their section by its number, so those of the
+/// sections moved and passed are numbered again, in the symbol table of `linkedit`, which
+/// starts at `offset` of the file.
 fn tables_first(
-    image: &Image,
+    table: &Table,
     commands: &mut [u8],
     linkedit: &mut [u8],
     offset: u64,
     count: usize,
 ) -> anyhow::Result<()> {
-    let Table { header, nth, first, .. } = image.unwind;
+    let Table { header, nth, first, .. } = *table;
     let start = header - (nth - first) * SECTION;
     commands[start..header + count * SECTION].rotate_right(count * SECTION);
 
@@ -1519,9 +1523,9 @@ impl<'a> Patch<'a> {
                     .map(|(written, starts, size)| (written, starts, [unwind, size], 2))
             };
             if let Some((written, starts, sizes, count)) = moved {
-                for ((table, start), size) in
-                    [&image.unwind, &image.frames].into_iter().zip(starts).zip(sizes)
-                {
+                let moved = [&image.unwind, &image.frames].into_iter().zip(starts).zip(sizes);
+                let has_table = !image.unwind.bytes.is_empty();
+                for ((table, start), size) in moved.skip(usize::from(!has_table)) {
                     put64(&mut commands, table.header + 32, start);
                     put64(&mut commands, table.header + 40, size);
                     put32(
@@ -1530,7 +1534,9 @@ impl<'a> Patch<'a> {
                         u32::try_from(image.offset_of(start)?)?,
                     );
                 }
-                tables_first(image, &mut commands, &mut linkedit, offset + linkedit_at, count)?;
+                let (first, count) =
+                    if has_table { (&image.unwind, count) } else { (&image.frames, 1) };
+                tables_first(first, &mut commands, &mut linkedit, offset + linkedit_at, count)?;
                 tables = written;
             }
         }
@@ -1983,9 +1989,10 @@ pub(super) fn uuid(image: &Image) -> Option<[u8; 16]> {
 /// The `-headerpad` the executable that starts with `commands`, its header and load commands,
 /// is to be linked with for a splice to have room in it, when the room it has is less: room
 /// for the two segments a splice adds, of a section each, and for the unwind table, which
-/// moves there (see [`frames_in_front`]), and a quarter more for the program to grow before
-/// it is short again. `None` for one that has the room, and for one that is not an AArch64
-/// executable with an unwind table.
+/// moves there (see [`frames_in_front`]), or for `__eh_frame` of a program without one, which
+/// does when the patch's frames don't fit behind it (see [`frames_in_header`]); and a quarter
+/// more for the program to grow before it is short again. `None` for one that has the room,
+/// and for one that is not an AArch64 executable with unwind tables.
 pub(super) fn headerpad_short(commands: &[u8]) -> anyhow::Result<Option<u64>> {
     let executable = u32_at(commands, 0)? == macho::MH_MAGIC_64
         && u32_at(commands, 4)? == macho::CPU_TYPE_ARM64
@@ -1995,7 +2002,7 @@ pub(super) fn headerpad_short(commands: &[u8]) -> anyhow::Result<Option<u64>> {
     }
     let len = HEADER + u32_at(commands, 20)? as usize;
     let commands = commands.get(..len).context("the file ends early")?;
-    let (mut room, mut unwind) = (usize::MAX, None);
+    let (mut room, mut unwind, mut frames) = (usize::MAX, None, None);
     let mut command = HEADER;
     for _ in 0..u32_at(commands, 16)? {
         if u32_at(commands, command)? == macho::LC_SEGMENT_64 {
@@ -2006,15 +2013,17 @@ pub(super) fn headerpad_short(commands: &[u8]) -> anyhow::Result<Option<u64>> {
                 if offset != 0 && size != 0 {
                     room = room.min(offset);
                 }
-                if commands.get(header..header + 16) == Some(b"__unwind_info\0\0\0") {
-                    unwind = Some(size);
+                match commands.get(header..header + 16) {
+                    Some(b"__unwind_info\0\0\0") => unwind = Some(size),
+                    Some(b"__eh_frame\0\0\0\0\0\0") => frames = Some(size),
+                    _ => {}
                 }
             }
         }
         command += u32_at(commands, command + 4)? as usize;
     }
-    let Some(unwind) = unwind else { return Ok(None) };
-    let needed = (len + 2 * (SEGMENT + SECTION)).next_multiple_of(16) + unwind;
+    let Some(moved) = unwind.or(frames) else { return Ok(None) };
+    let needed = (len + 2 * (SEGMENT + SECTION)).next_multiple_of(16) + moved;
     if needed <= room {
         return Ok(None);
     }
