@@ -265,6 +265,16 @@ impl FlatTree {
     }
 }
 
+/// The vector's elements in an allocation of their size: an allocator may keep a block that
+/// is shrunk to more than half of it whole (mimalloc does), so a vector grown by doubling
+/// and boxed holds up to twice what it needs.
+fn exact<T: Copy>(vec: Vec<T>) -> Box<[T]> {
+    match vec.capacity() == vec.len() {
+        true => vec.into_boxed_slice(),
+        false => vec.as_slice().into(),
+    }
+}
+
 /// Makes a [`FlatTree`] from the same calls as [`GreenNodeBuilder`].
 #[derive(Default, Debug)]
 pub struct FlatTreeBuilder {
@@ -283,8 +293,8 @@ impl FlatTreeBuilder {
 
     /// A builder for a text of about `len` bytes.
     pub fn with_capacity(len: usize) -> FlatTreeBuilder {
-        // About one element for every three bytes of Rust.
-        let elements = len / 3;
+        // About one element for every two bytes of Rust.
+        let elements = len / 2;
         FlatTreeBuilder {
             text: String::with_capacity(len),
             kinds: Vec::with_capacity(elements),
@@ -326,11 +336,14 @@ impl FlatTreeBuilder {
         assert!(self.open.is_empty() && !self.kinds.is_empty(), "the tree is not finished");
         assert!(self.text.len() < u32::MAX as usize, "a text of 4 GB or more");
         FlatTree {
-            text: self.text.into_boxed_str(),
-            kinds: self.kinds.into_boxed_slice(),
-            starts: self.starts.into_boxed_slice(),
-            ends: self.ends.into_boxed_slice(),
-            parents: self.parents.into_boxed_slice(),
+            text: match self.text.capacity() == self.text.len() {
+                true => self.text.into_boxed_str(),
+                false => self.text.as_str().into(),
+            },
+            kinds: exact(self.kinds),
+            starts: exact(self.starts),
+            ends: exact(self.ends),
+            parents: exact(self.parents),
         }
     }
 }
