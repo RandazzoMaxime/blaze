@@ -171,7 +171,12 @@ All of these are rustc's, written from `compiler/rustc_borrowck` at the pinned n
   `let f = |x: &i32| -> &i32 { x };` is an error.
   One of its own made to outlive what it is not known to is an error in the closure
   (`with(|x| x)` returning the borrow it was given), named E0521 or a `FnMut` escape as
-  rustc names it. What a closure needs of its creator's regions is a requirement the creator
+  rustc names it: E0521 only when a captured variable's or a parameter's type names one of
+  the two lifetimes, else "lifetime may not live long enough". A borrow through a variable
+  the closure captures by reference outlives the closure's borrow of its environment, so
+  returning `&mut *captured` from an `FnMut` closure is the escape rustc reports. A local
+  with a written type that a value outliving a universal lifetime is assigned to is blamed
+  as rustc blames a type annotation, not the assignment. What a closure needs of its creator's regions is a requirement the creator
   proves where it makes the closure (closures are checked before the bodies that make them),
   so the error is the creator's, as in rustc. So is a `T: 'a` the closure cannot prove: the
   creator proves `T` outlives each of its regions that outlive `'a`, and an error is
@@ -224,8 +229,8 @@ With no borrow checker, the 245 units rustc accepts would pass. Now:
 
 | Mode | In scope | Pass | rustc accepts, ra-jit too | rustc rejects, same errors |
 |---|---|---|---|---|
-| Polonius | 1579 | 1422 (90.1%) | 245 of 245 | 1177 of 1334 |
-| NLL | 1577 | 1418 (89.9%) | 226 of 226 | 1192 of 1351 |
+| Polonius | 1579 | 1429 (90.5%) | 245 of 245 | 1184 of 1334 |
+| NLL | 1577 | 1425 (90.4%) | 226 of 226 | 1199 of 1351 |
 
 463 units are out of scope; 344 of them need a nightly feature. CI runs the scoring on Linux
 and fails below a floor a few units under the count there.
@@ -238,11 +243,11 @@ just, axum, nushell, delta, eza, tokei and starship it finds nothing, nor on the
 ## What is left
 
 Every failing unit is one where rustc gives an error ra-jit does not, or gives it on another
-line or with another code. By what is wrong, most first: 17 "lifetime may not live long
+line or with another code. By what is wrong, most first: 16 "lifetime may not live long
 enough" and 12 E0597 not reported, 10 with only an error rustc does not give, 9 "lifetime may
-not live long enough" on another line, 9 E0716 and 8 E0700 not reported, 7 each of E0507,
-E0521 and `FnMut` escapes, 6 each of E0510 and E0310, and 5 each of E0309, E0311 and
-higher-ranked errors not reported, then a long tail. The causes, grouped:
+not live long enough" on another line, 8 each of E0716 and E0700, 7 each of E0507 and E0521,
+6 each of E0510 and E0310, and 5 each of E0309, E0311, E0382 and higher-ranked errors not
+reported, then a long tail. The causes, grouped:
 
 - **Higher-ranked regions and placeholders** (`for<'a>` bounds, closures with higher-ranked
   signatures): rustc checks them with placeholders in universes; ra-jit does not yet, and
