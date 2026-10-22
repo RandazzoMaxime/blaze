@@ -843,7 +843,9 @@ def profiler(tally, what, binary, cwd, crates):
     naked = naked_functions(cwd)
     lost = [name for name, line in read
             if not re.search(r"\.rs:\d+$|-cgu\.\d+:0$", line) and name.rsplit("::", 1)[-1] not in naked]
-    through = sum(bool(re.search(r"4main\b|::main\b", stack)) for stack in stacks)
+    # Where the program's `main` is inlined into the `main` that calls it, its frame is named
+    # `main` and its line is one of the program's; the shell's `main` has no such line.
+    through = sum(bool(re.search(r"4main\b|::main\b|^\s+[0-9a-f]+ main\n\s+\S+\.rs:\d+", stack, re.M)) for stack in stacks)
     # Where perf looks a frame's CFI up somewhere else, how far its stacks get says nothing of the CFI:
     # some reach main where the code it lands in has the same rules, and some stop.
     verdict = ("NO SAMPLES" if not mine else "NO LINE" if lost else "named" if through
