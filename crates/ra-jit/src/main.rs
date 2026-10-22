@@ -345,6 +345,9 @@ struct Resolver<'a> {
     /// The standard library ra-jit built before, when the program is linked with it instead
     /// of compiling its crates.
     prebuilt: Option<Arc<Prebuilt>>,
+    /// The crates of the workspace, which rustc compiled with a symbol for each function
+    /// when `linked` is there.
+    members: Arc<FxHashSet<ide_db::base_db::Crate>>,
 }
 
 /// The standard library ra-jit built before the program ([`std_unit`]).
@@ -461,6 +464,7 @@ impl<'a> Resolver<'a> {
             linked,
             in_full: Arc::default(),
             prebuilt,
+            members: args.members.clone(),
         }
     }
 
@@ -598,16 +602,23 @@ impl Resolver<'_> {
             return None;
         }
         if self.rustc_built(krate) {
-            return None;
+            if !self.rustc_has_none(func) {
+                return None;
+            }
+            return self.function_named_in(func, self.stable_crate_id(krate)?);
         }
         self.own_function_name(func)
     }
 
-    /// The name of a non-generic function of a crate rustc built nothing of: where it is,
-    /// and for one in a body where in the source that is.
+    /// The name of a non-generic function of a crate rustc built nothing of.
     fn own_function_name(&self, func: FunctionId) -> Option<String> {
         let krate = hir_def::HasModule::krate(&func, self.db);
-        let id = self.own_crate_id(krate)?;
+        self.function_named_in(func, self.own_crate_id(krate)?)
+    }
+
+    /// The name ra-jit gives a non-generic function of the crate `id` names: where it is, and
+    /// for one in a body where in the source that is.
+    fn function_named_in(&self, func: FunctionId, id: u64) -> Option<String> {
         let path = self.path(func)?;
         if hir_def::HasModule::module(&func, self.db).block(self.db).is_none() {
             return Some(format!("ra-jit.{id:x}.{path}"));
@@ -1025,6 +1036,7 @@ impl SymbolResolver for Resolver<'_> {
                 let (listed, named) = (self.listed, self.named.clone());
                 let (shared_paths, linked) = (self.shared_paths.clone(), self.linked.clone());
                 let (in_full, prebuilt) = (self.in_full.clone(), self.prebuilt.clone());
+                let members = self.members.clone();
                 scope.spawn(move || {
                     let resolver = Resolver {
                         db: &db,
@@ -1040,6 +1052,7 @@ impl SymbolResolver for Resolver<'_> {
                         linked,
                         in_full,
                         prebuilt,
+                        members,
                     };
                     hir::attach_db(&db, || {
                         loop {
@@ -1101,6 +1114,15 @@ impl SymbolResolver for Resolver<'_> {
         self.in_full.store(true, std::sync::atomic::Ordering::Relaxed);
         // Some were named after what only rustc's executable has.
         self.named.lock().unwrap_or_else(|e| e.into_inner()).clear();
+    }
+
+    /// Of a crate rustc compiled with a symbol for each function, one that no function of the
+    /// executable is named after was not compiled, or not linked: nothing there calls it.
+    fn rustc_has_none(&self, func: FunctionId) -> bool {
+        let name = hir::Function::from(func).name(self.db);
+        self.members.contains(&hir_def::HasModule::krate(&func, self.db))
+            && !self.is_generic(func)
+            && self.rustcs().is_some_and(|it| it.has_no_function_named(name.as_str()))
     }
 
     fn rustc_instances(&self, func: FunctionId) -> Option<Vec<(String, String)>> {
@@ -3154,6 +3176,31 @@ fn home_in_rustcs(
             }
         }
     });
+}
+
+/// Whether the executable `program`'s edits patch has no copy of the functions written in
+/// `file` with one of the `names`, which rustc would have copied into each crate that calls
+/// them.
+fn none_linked(
+    db: &RootDatabase,
+    listed: &Listed,
+    program: &Program,
+    file: vfs::FileId,
+    names: &[String],
+) -> bool {
+    hir::attach_db(db, || {
+        let Some(Some(functions)) = listed.in_files(db, &[file]).into_iter().next() else {
+            return false;
+        };
+        let contents = content::Contents::default();
+        let Program { args, table, known, .. } = program;
+        let resolver = Resolver::of(db, table, args, known, &contents, listed);
+        let named = |func: &FunctionId| {
+            let name = hir::Function::from(*func).name(db);
+            names.iter().any(|it| it.as_str() == name.as_str())
+        };
+        functions.iter().filter(|it| named(it)).all(|&func| resolver.rustc_has_none(func))
+    })
 }
 
 #[derive(Default)]
@@ -7482,10 +7529,15 @@ fn run_holding(
         let before_outlines = start.elapsed();
         let sources = outlines.after_edit(&db, &listed, sources);
         let outlined = start.elapsed();
-        for outline::Changed { file, bodies_only, copied, generics } in sources {
-            if copied || !generics.is_empty() {
+        for outline::Changed { file, bodies_only, copied, generics, inline } in sources {
+            if copied || !generics.is_empty() || !inline.is_empty() {
                 let why = "an edit of a generic, inline or default trait function, which rustc copies into its callers";
-                let unknown = |it: &Program| copied || !it.known.copies_homed(file, &generics);
+                let inline_unlinked = |program: &Program| {
+                    inline.is_empty() || none_linked(&db, &listed, program, file, &inline)
+                };
+                let unknown = |it: &Program| {
+                    copied || !it.known.copies_homed(file, &generics) || !inline_unlinked(it)
+                };
                 programs
                     .iter_mut()
                     .filter(|it| unknown(it))

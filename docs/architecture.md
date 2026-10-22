@@ -304,10 +304,14 @@ function into the crates that call it, line numbers and all, so `home` also take
 copies of the file's generic functions that its other functions reach and the executable
 has under their paths (`Base::home_copies`, `symbols::Linked::instances_of`): an edit that
 changes or moves the lines of such a function is a patch that replaces each of those copies
-under rustc's symbol, as long as the executable has no other copy of that name. A file not
+under rustc's symbol, as long as the executable has no other copy of that name. A function of
+the workspace that no function of the executable is named after (`has_no_function_named`)
+was not compiled or not linked, so nothing of rustc's calls it: the patch compiles it under a
+name of its own, and an edit of it, `#[inline]` or not, is a patch too. A file not
 noted before it changed, an edit that is more than function bodies, an edit of an
-`#[inline]` or default trait function, or of a generic one with copies `home` did not take
-in (the outline's copied fingerprint tells), a changed static, and `include!`d or asset
+`#[inline]` function the executable has a copy of, of a default trait function, or of a
+generic one with copies `home` did not take in (the outline's copied fingerprint tells), a
+changed static, and `include!`d or asset
 files take a build in full, and the build log says which (`no patch: ...`). So does a patch
 the splice can't place: one that calls a libc function the executable does not import, or
 has frames that do not fit the header's room on macOS, with the program's own beside them. A thread-local of

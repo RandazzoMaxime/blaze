@@ -268,6 +268,9 @@ pub(crate) struct Linked {
     /// The symbol of each function rustc compiled from Rust (or C++), a line each:
     /// demangled when asked, for a few.
     functions: String,
+    /// The symbols of the functions left out of the others, being private to an object
+    /// whose crate calls them its own way, a line each.
+    unkept: String,
 }
 
 impl Linked {
@@ -282,6 +285,7 @@ impl Linked {
             names: FxHashSet::default(),
             private: FxHashMap::default(),
             functions: String::new(),
+            unkept: String::new(),
         };
         for symbol in object.symbols().chain(object.dynamic_symbols()) {
             let Ok(name) = symbol.name() else { continue };
@@ -298,14 +302,18 @@ impl Linked {
                 && !hidden.contains(&symbol.index().0)
                 && !matches!(symbol.flags(), object::SymbolFlags::Elf { st_other, .. }
                     if st_other & 3 == object::elf::STV_HIDDEN);
+            let function = (name.starts_with("_R") || name.starts_with("_ZN"))
+                && symbol.kind() == SymbolKind::Text
+                && symbol.section_index().is_some();
             if internal && !own.contains(&hashed(name)) {
+                if function {
+                    linked.unkept.push_str(name);
+                    linked.unkept.push('\n');
+                }
                 continue;
             }
             linked.names.insert(hashed(name));
-            if (name.starts_with("_R") || name.starts_with("_ZN"))
-                && symbol.kind() == SymbolKind::Text
-                && symbol.section_index().is_some()
-            {
+            if function {
                 linked.functions.push_str(name);
                 linked.functions.push('\n');
             }
@@ -337,6 +345,23 @@ impl Linked {
     /// The one private symbol of the function or static at `path`.
     pub(crate) fn private(&self, path: &str) -> Option<&str> {
         self.private.get(path)?.as_ref().map(|it| &*it.0)
+    }
+
+    /// Whether no function in the executable has `name` anywhere in its symbol: it then has
+    /// no copy of a function of that name, nor of a closure or instance of one.
+    pub(crate) fn has_no_function_named(&self, name: &str) -> bool {
+        if name.is_empty() || !name.is_ascii() {
+            return false;
+        }
+        // Both manglings write a name after its length; v0 puts a `_` between them when the
+        // name starts with one or with a digit.
+        let written = [format!("{}{name}", name.len()), format!("{}_{name}", name.len())];
+        let has = |it: &String| {
+            let finder = memchr::memmem::Finder::new(it.as_bytes());
+            finder.find(self.functions.as_bytes()).is_some()
+                || finder.find(self.unkept.as_bytes()).is_some()
+        };
+        !written.iter().any(has)
     }
 
     /// The copies of the instances of the generic function at `path`, each by its path, as

@@ -129,10 +129,13 @@ FILES = {
     "app/src/main.rs": MAIN,
     "app/src/asset.txt": "one\n",
     "dep/Cargo.toml": '[package]\nname = "dep"\nversion = "0.1.0"\nedition = "2024"\n',
-    "dep/src/lib.rs": "pub fn value(x: u64) -> u64 {\n    x + 100\n}\n",
+    "dep/src/lib.rs": "pub fn value(x: u64) -> u64 {\n    x + 100\n}\n\n"
+                      "#[inline]\npub fn spare_inline(x: u64) -> u64 {\n    x + 7\n}\n\n"
+                      "#[allow(dead_code)]\nfn never_called(x: u64) -> u64 {\n    x + 8\n}\n",
 }
 
 M = "app/src/main.rs"
+D = "dep/src/lib.rs"
 
 # A program with a `#[ra_jit::cache]` function (docs/fn-cache.md): rustc's copy of it caches
 # nothing, ours does, and a patch of what it reaches must not find what the code before kept.
@@ -200,6 +203,12 @@ SCENARIOS = {
     "generic-moved": ([[edit(M, '        "world".to_owned()\n', '        let it = "world";\n        it.to_owned()\n')]],
                       ["full"], 0, {}),
     "inline": ([[edit(M, "    x + 1\n}\n\nfn counted", "    x + 2\n}\n\nfn counted")]], ["full"], 0, {}),
+    # Neither has a copy in rustc's executable, nothing there calls them: a patch has the one
+    # copy, which the second edit calls.
+    "inline-uncopied": ([[edit(D, "    x + 7\n", "    x + 70\n")],
+                         [edit(D, "    x + 100\n", "    spare_inline(x) + 100\n")]], ["patch", "patch"], 0, {}),
+    "uncompiled": ([[edit(D, "    x + 8\n", "    x + 80\n")],
+                    [edit(D, "    x + 100\n", "    never_called(x) + 100\n")]], ["patch", "patch"], 0, {}),
     "trait-default": ([[edit(M, '"hello {}"', '"hi {}"')]], ["full"], 0, {}),
     "counted-static": ([[edit(M, "AtomicU32::new(0);\n    CALLS", "AtomicU32::new(5);\n    CALLS")]], ["full"], 0, {}),
     "async": ([[edit(M, "    x * 2\n", "    x * 6\n")]], ["full"], 0, {}),

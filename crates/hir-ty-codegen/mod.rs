@@ -280,6 +280,11 @@ pub trait SymbolResolver {
     fn rustc_instances(&self, _func: FunctionId) -> Option<Vec<(String, String)>> {
         None
     }
+    /// Whether the executable a patch goes into has no copy of `func`, which is not generic:
+    /// the patch has the one there is.
+    fn rustc_has_none(&self, _func: FunctionId) -> bool {
+        false
+    }
     /// rustc's symbol of the closure at `expr` in the body of `owner`, which is not generic.
     fn closure(&self, _owner: FunctionId, _expr: hir_def::hir::ExprId) -> Option<String> {
         None

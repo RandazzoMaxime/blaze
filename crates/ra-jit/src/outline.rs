@@ -61,6 +61,9 @@ pub(crate) struct Changed {
     /// The names of the generic functions of the file's modules that are not as rustc
     /// compiled them, or not where: a patch replaces their copies when it knows each of them.
     pub(crate) generics: Vec<String>,
+    /// The names of the `#[inline]` functions that are not generic and are not as rustc
+    /// compiled them, or not where: a patch is right when the executable has no copy of them.
+    pub(crate) inline: Vec<String>,
 }
 
 impl Outlines {
@@ -118,21 +121,24 @@ impl Outlines {
             .map(|(file, now)| {
                 let was = self.files.insert(file, now);
                 let bodies_only = !off && now.is_some() && was == Some(now);
-                let (copied, generics) = match self.copied.get(&file) {
+                let (copied, generics, inline) = match self.copied.get(&file) {
                     Some(was) => {
                         let now = copied(db, file);
-                        let names = was.generics.keys().chain(now.generics.keys());
-                        let mut changed: Vec<String> = names
-                            .filter(|it| was.generics.get(*it) != now.generics.get(*it))
-                            .cloned()
-                            .collect();
-                        changed.sort_unstable();
-                        changed.dedup();
-                        (was.others != now.others, changed)
+                        let changed = |was: &FxHashMap<String, u64>, now: &FxHashMap<_, _>| {
+                            let mut changed: Vec<String> = (was.keys().chain(now.keys()))
+                                .filter(|it| was.get(*it) != now.get(*it))
+                                .cloned()
+                                .collect();
+                            changed.sort_unstable();
+                            changed.dedup();
+                            changed
+                        };
+                        let generics = changed(&was.generics, &now.generics);
+                        (was.others != now.others, generics, changed(&was.inline, &now.inline))
                     }
-                    None => (true, Vec::new()),
+                    None => (true, Vec::new(), Vec::new()),
                 };
-                Changed { file, bodies_only, copied, generics }
+                Changed { file, bodies_only, copied, generics, inline }
             })
             .collect();
         // An edit to more than bodies can change which functions there are, in any file, and
@@ -151,8 +157,11 @@ struct Copied {
     /// Generic functions of the file's modules, not `#[inline]`, by name: rustc's symbols
     /// name each copy by the types it is of.
     generics: FxHashMap<String, u64>,
+    /// `#[inline]` functions that are not generic, of the file's modules and their `impl`s,
+    /// by name: rustc copies one into each crate that calls it.
+    inline: FxHashMap<String, u64>,
     /// The rest: generic ones through their `impl` or trait, the default bodies of trait
-    /// methods, those declared in bodies, and `#[inline]` ones.
+    /// methods, those declared in bodies, and generic or `#[inline(always)]` `#[inline]` ones.
     others: u64,
 }
 
@@ -183,25 +192,53 @@ fn copied_in(tree: &SyntaxNode) -> Copied {
         });
         generic(func.generic_param_list()) || impl_trait_parameter || inline || around
     };
+    let inline = |func: &ast::Fn| {
+        func.attrs().any(|attr| attr.syntax().text().to_string().contains("inline"))
+    };
     let of_modules = |func: &ast::Fn| {
-        let inline = func.attrs().any(|attr| attr.syntax().text().to_string().contains("inline"));
         let in_modules = func.syntax().ancestors().skip(1).all(|it| {
             matches!(
                 it.kind(),
                 SyntaxKind::SOURCE_FILE | SyntaxKind::MODULE | SyntaxKind::ITEM_LIST
             )
         });
-        in_modules && !inline
+        in_modules && !inline(func)
+    };
+    // Not generic, and not `#[inline(always)]`, which LLVM puts into each caller at every
+    // level.
+    let inline_alone = |func: &ast::Fn| {
+        let generic = generic(func.generic_param_list())
+            || func.syntax().ancestors().skip(1).any(|it| {
+                ast::Trait::cast(it.clone()).is_some()
+                    || ast::Impl::cast(it).is_some_and(|it| generic(it.generic_param_list()))
+            })
+            || func.param_list().is_some_and(|it| {
+                it.syntax().descendants().any(|it| it.kind() == SyntaxKind::IMPL_TRAIT_TYPE)
+            });
+        let always = func.attrs().any(|attr| attr.syntax().text().to_string().contains("always"));
+        let of_items = func.syntax().ancestors().skip(1).all(|it| {
+            matches!(
+                it.kind(),
+                SyntaxKind::SOURCE_FILE
+                    | SyntaxKind::MODULE
+                    | SyntaxKind::ITEM_LIST
+                    | SyntaxKind::IMPL
+                    | SyntaxKind::ASSOC_ITEM_LIST
+            )
+        });
+        inline(func) && !generic && !always && of_items
     };
     let text = tree.text().to_string();
     let line_starts: Vec<usize> =
         std::iter::once(0).chain(text.match_indices('\n').map(|(at, _)| at + 1)).collect();
     let mut generics: FxHashMap<String, FxHasher> = FxHashMap::default();
+    let mut inlined: FxHashMap<String, FxHasher> = FxHashMap::default();
     let mut others = FxHasher::default();
     for func in tree.descendants().filter_map(ast::Fn::cast).filter(is_copied) {
         let name = func.name().map(|it| it.text().to_string());
         let hasher = match name {
             Some(name) if of_modules(&func) => generics.entry(name).or_default(),
+            Some(name) if inline_alone(&func) => inlined.entry(name).or_default(),
             _ => &mut others,
         };
         let start = usize::from(func.syntax().text_range().start());
@@ -210,7 +247,8 @@ fn copied_in(tree: &SyntaxNode) -> Copied {
         func.syntax().text().to_string().hash(hasher);
     }
     let generics = generics.into_iter().map(|(name, it)| (name, it.finish())).collect();
-    Copied { generics, others: others.finish() }
+    let inline = inlined.into_iter().map(|(name, it)| (name, it.finish())).collect();
+    Copied { generics, inline, others: others.finish() }
 }
 
 /// The [`outline`] of each file. A wide edit is of thousands of files: their bodies are
@@ -728,6 +766,45 @@ mod tests {
             (copies("fn f<T>() {}\nfn g<T>() {}"), copies("fn f<T>() { }\nfn g<T>() {}"));
         assert_ne!(before.generics["f"], after.generics["f"]);
         assert_eq!(before.generics["g"], after.generics["g"]);
+    }
+
+    #[test]
+    fn inline_functions_alone_are_told_apart() {
+        let others = |before: &str, after: &str| copies(before).others != copies(after).others;
+        let inline = |before: &str, after: &str| copies(before).inline != copies(after).inline;
+        for (before, after) in [
+            ("#[inline] fn f() { 1; }", "#[inline] fn f() { 2; }"),
+            ("impl S { #[inline] fn f(&self) { 1; } }", "impl S { #[inline] fn f(&self) { 2; } }"),
+            (
+                "impl T for S { #[inline] fn f(&self) { 1; } }",
+                "impl T for S { #[inline] fn f(&self) { 2; } }",
+            ),
+            ("mod m { #[inline] pub fn f() { 1; } }", "mod m { #[inline] pub fn f() { 2; } }"),
+        ] {
+            assert!(inline(before, after) && !others(before, after), "{before:?}");
+        }
+        for (before, after) in [
+            ("#[inline(always)] fn f() { 1; }", "#[inline(always)] fn f() { 2; }"),
+            ("#[inline] fn f<T>() { 1; }", "#[inline] fn f<T>() { 2; }"),
+            ("#[inline] fn f(x: impl Fn()) { 1; }", "#[inline] fn f(x: impl Fn()) { 2; }"),
+            (
+                "impl<T> S<T> { #[inline] fn f() { 1; } }",
+                "impl<T> S<T> { #[inline] fn f() { 2; } }",
+            ),
+            (
+                "trait T { #[inline] fn f(&self) { 1; } }",
+                "trait T { #[inline] fn f(&self) { 2; } }",
+            ),
+            ("fn g() { #[inline] fn f() { 1; } }", "fn g() { #[inline] fn f() { 2; } }"),
+        ] {
+            assert!(others(before, after) && !inline(before, after), "{before:?}");
+        }
+        let (before, after) = (
+            copies("#[inline] fn f() {}\n#[inline] fn g() {}"),
+            copies("#[inline] fn f() { }\n#[inline] fn g() {}"),
+        );
+        assert_ne!(before.inline["f"], after.inline["f"]);
+        assert_eq!(before.inline["g"], after.inline["g"]);
     }
 
     #[test]
