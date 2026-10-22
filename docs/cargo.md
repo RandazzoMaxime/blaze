@@ -303,7 +303,8 @@ The daemon, its loaded workspaces, the sharing between worktrees and the store a
 ones `cargo ra-jit` uses. The difference is where ra-jit sits. Cargo still plans the build and
 calls the wrapper once per crate; the daemon answers for programs and test executables, and
 workspace library crates are still compiled by rustc. A build with nothing to do costs what
-cargo's own no-op costs.
+cargo's own no-op costs. The daemon loads a build that rustc did once cargo exits: after
+`cargo test` has run the tests, after `cargo run` has run the program.
 
 When the daemon cannot serve a unit, rustc builds it and one line on stderr says why:
 

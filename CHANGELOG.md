@@ -327,6 +327,15 @@ All notable changes to ra-jit are written here. The format follows
 
 ### Fixed
 
+- Under plain cargo, a test that ran the workspace's program could find none: the build the
+  daemon loads afterwards ran beside the tests, and linking the program into place again
+  deletes it first. It now waits for the user's cargo to exit (#61).
+- `cargo ra-jit stop` returns once the daemon has exited, with its workers stopped and its log
+  written, rather than once its socket is gone; nothing starts a spare worker while the daemon
+  ends, where one could outlive it. A client that replaces a daemon of another version waits
+  the same way (#65).
+- A daemon's socket is free as soon as the daemon lets go of it, also while another thread of
+  the process starts a program, which shares the lock's file until it runs (#58).
 - bat builds whole: an `impl` inside a function body of a dependency (bincode's `EnumAccess`
   for `&mut Deserializer`, inside `deserialize_enum`) was not found, as rust-analyzer only
   looked into the bodies of workspace crates; a dependency's file is now lexed for an `impl`

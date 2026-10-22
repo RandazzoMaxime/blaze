@@ -41,7 +41,16 @@ pub(crate) struct Served {
     listener: UnixListener,
     open: Arc<AtomicUsize>,
     most: usize,
-    _lock: File,
+    lock: File,
+}
+
+impl Drop for Served {
+    fn drop(&mut self) {
+        // A process another thread starts has the lock's file open too until it runs its
+        // program, and a lock taken with `flock` lasts until every copy is closed or one of them
+        // lets go: closing this copy alone could leave the socket taken for a moment.
+        let _ = self.lock.unlock();
+    }
 }
 
 /// One of the connections a socket serves at a time, until it is dropped.
@@ -91,7 +100,7 @@ impl Served {
         only_the_user_connects(&made)?;
         std::fs::rename(&made, socket)?;
         std::fs::remove_dir(&made_in)?;
-        Ok(Served { listener, open: Arc::default(), most: MOST_CONNECTIONS, _lock: lock })
+        Ok(Served { listener, open: Arc::default(), most: MOST_CONNECTIONS, lock })
     }
 
     /// The connections made to the socket, one after another, each with its place among
@@ -579,5 +588,29 @@ mod tests {
         assert!(UnixStream::connect(&socket).is_ok());
         drop(second);
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// A socket let go of is free at once, also while another thread starts processes, each
+    /// of which has every open file of this one until it runs its program.
+    #[test]
+    fn a_socket_let_go_of_is_free_while_processes_start() {
+        let dir = scratch("lock-forks");
+        private_dir(&dir).unwrap();
+        let socket = dir.join("sock");
+        let done = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let starts = std::thread::spawn({
+            let done = done.clone();
+            move || {
+                while !done.load(Ordering::Relaxed) {
+                    let _ = std::process::Command::new("true").status();
+                }
+            }
+        });
+        // Each bind comes after the one before it was dropped.
+        let taken = (0..1000).filter(|_| Served::bind(&socket).is_err()).count();
+        done.store(true, Ordering::Relaxed);
+        starts.join().unwrap();
+        std::fs::remove_dir_all(&dir).unwrap();
+        assert_eq!(taken, 0, "the socket was still taken after it was let go of");
     }
 }
