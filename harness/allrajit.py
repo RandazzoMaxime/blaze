@@ -3,17 +3,21 @@
 
 Two programs, a hello and one that uses collections, `catch_unwind`, threads, channels,
 formatting, a file and an uncaught panic, are built by ra-jit with every crate its own,
-the standard library included, and linked by `cc`. Each is built two ways:
+the standard library included, and linked by `cc`. Each is built three ways:
 
   - whole: the program and the standard library in one build, one object;
   - over the unit: the standard library built once, alone, into an object of its own
-    (`std.o`), and each program built over it with `--prebuilt`.
+    (`std.o`), and each program built over it with `--prebuilt`;
+  - stored: each program built alone on a store that starts empty and a remote (a directory)
+    that does too. The first build compiles the standard library as a unit, keeps it in the
+    store and pushes it; the others take it from the store. Last, a build on a second store
+    that starts empty takes it from the remote.
 
 What each prints, and how it exits, has to be what cargo's build of the same source does,
 thread ids aside.
 
-    python3 allrajit.py            # both ways
-    python3 allrajit.py --unit     # over the unit only
+    python3 allrajit.py            # every way
+    python3 allrajit.py unit stored
 """
 import os, re, shutil, subprocess, sys, time
 
@@ -97,10 +101,10 @@ fn main() {
 PROGRAMS = [("hello", HELLO, [["a", "b"]]), ("rich", RICH, [[], ["fail"]])]
 
 
-def run(cmd, cwd, what):
+def run(cmd, cwd, what, env=None):
     start = time.monotonic()
     ran = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True,
-                         env={**os.environ, "RUST_BACKTRACE": "0"})
+                         env={**os.environ, "RUST_BACKTRACE": "0", **(env or {})})
     took = time.monotonic() - start
     if ran.returncode != 0:
         raise SystemExit(f"FAIL: {what} exited {ran.returncode}:\n{ran.stdout}{ran.stderr}")
@@ -125,16 +129,16 @@ def package(work, name, source):
     return root
 
 
-def ra_jit(root, crates, out, *extra):
+def ra_jit(root, crates, out, *extra, env=None):
     args = sum((["--crate", c] for c in crates), [])
-    return run([RA_JIT, root, *args, "--out", out, *extra], root, f"ra-jit {' '.join(crates[:1])}")
+    return run([RA_JIT, root, *args, "--out", out, *extra], root, f"ra-jit {' '.join(crates[:1])}", env)
 
 
 def main():
     if not sys.platform.startswith("linux"):
         print("not run: the link line here is Linux's (step G gives ra-jit its own)")
         return
-    ways = ["unit"] if "--unit" in sys.argv else ["whole", "unit"]
+    ways = [way for way in ["whole", "unit", "stored"] if way in sys.argv[1:] or len(sys.argv) == 1]
     work = scratch("ra-jit-allrajit-")
     passed = False
     try:
@@ -151,24 +155,46 @@ def main():
             unit = os.path.join(work, "std.o")
             _, took = ra_jit(roots["hello"], STD, unit)
             lines.append(f"the standard library alone: {took:.2f} s, {os.path.getsize(unit) >> 20} MB")
+        remote = {"RA_JIT_REMOTE": os.path.join(work, "remote"), "RA_JIT_PROJECT": "allrajit",
+                  "RA_JIT_REMOTE_UNSIGNED": "1"}
+        os.makedirs(remote["RA_JIT_REMOTE"])
+        stores = [{"RA_JIT_CACHE": os.path.join(work, "store"), **remote},
+                  {"RA_JIT_CACHE": os.path.join(work, "store2"), **remote}]
         for way in ways:
-            for name, _, runs in PROGRAMS:
+            # The first program again once the store has the library, and the second on
+            # another store.
+            programs = PROGRAMS + PROGRAMS[:1] + PROGRAMS[1:2] if way == "stored" else PROGRAMS
+            for at, (name, _, runs) in enumerate(programs):
                 root = roots[name]
                 obj = os.path.join(work, f"{name}-{way}.o")
                 binary = os.path.join(work, f"{name}-{way}")
+                how = ""
                 if way == "whole":
                     _, took = ra_jit(root, [name, *STD], obj)
                     objects = [obj]
-                else:
+                elif way == "unit":
                     _, took = ra_jit(root, [name], obj, "--prebuilt", unit)
                     objects = [obj, unit]
+                else:
+                    store = stores[at == len(programs) - 1]
+                    ran, took = ra_jit(root, [name], obj, env=store)
+                    objects = [obj, os.path.splitext(obj)[0] + ".std.o"]
+                    said = re.findall(r"^standard library: (.*)$", ran.stderr, re.M)
+                    stored = bool(said) and said[0].startswith("from the store")
+                    if not said or stored != (at > 0):
+                        raise SystemExit(f"FAIL: {name} ({way}, build {at + 1}) "
+                                         f"{'should have taken' if at else 'took'} the standard library "
+                                         f"from the store: {said}\n{ran.stderr}")
+                    how = (", the standard library from the remote" if store is stores[1]
+                           else ", the standard library from the store" if stored
+                           else ", the standard library compiled, stored and pushed")
                 _, linked = run(["cc", *objects, "-o", binary, *LIBS], root, f"the link of {name} ({way})")
                 for args, want in zip(runs, expected[name]):
                     got = outcome(binary, args, root)
                     if got != want:
                         raise SystemExit(f"FAIL: {name} {' '.join(args)} ({way}) differs from cargo's:\n"
                                          f"cargo:  {want}\nra-jit: {got}")
-                lines.append(f"{name} ({way}): built in {took:.2f} s, linked in {linked:.2f} s, "
+                lines.append(f"{name} ({way}): built in {took:.2f} s{how}, linked in {linked:.2f} s, "
                              f"{len(runs)} runs as cargo's")
         print("\n".join(lines))
         print(f"PASS: {len(PROGRAMS)} programs with nothing of rustc's, {' and '.join(ways)}")

@@ -3129,6 +3129,106 @@ impl Drop for Probing {
     }
 }
 
+/// The standard library of a build with nothing of rustc's, compiled before the program into
+/// an object of its own beside `--out` (docs/no-rustc.md, step F): the store's when it has the
+/// one of these crates, cfgs and target, otherwise built here and kept there. `None` when the
+/// build has something of rustc's, is given the library, or compiles it with the program.
+fn std_unit(
+    db: &RootDatabase,
+    table: &SymbolTable,
+    args: &Args,
+    listed: &Listed,
+) -> anyhow::Result<Option<PathBuf>> {
+    use sha2::{Digest, Sha256};
+    if !table.is_empty() || args.prebuilt.is_some() || args.patch.is_some() {
+        return Ok(None);
+    }
+    let mut program = Vec::new();
+    for named in args.crates() {
+        program.extend(crates_named(db, named, args)?);
+    }
+    let base = |it: &Crate| ide_db::base_db::Crate::from(*it);
+    if program.iter().any(|it| base(it).data(db).origin.is_lang()) {
+        return Ok(None);
+    }
+    // Every crate may name `test` and `proc_macro`; a program links them only as a test or
+    // a macro, which are not built so yet. The panic runtime is `panic_unwind`'s.
+    let linked = |it: &ide_db::base_db::Crate| {
+        use ide_db::base_db::LangCrateOrigin::{ProcMacro, Test};
+        let not_linked = ["panic_abort"];
+        match it.data(db).origin {
+            CrateOrigin::Lang(ProcMacro | Test) => false,
+            CrateOrigin::Lang(_) => Crate::from(*it)
+                .display_name(db)
+                .is_none_or(|name| !not_linked.contains(&name.crate_name().as_str())),
+            _ => false,
+        }
+    };
+    let mut lang = FxHashSet::default();
+    let mut next: Vec<ide_db::base_db::Crate> = program
+        .iter()
+        .flat_map(|it| base(it).data(db).dependencies.iter().map(|dep| dep.crate_id))
+        .collect();
+    while let Some(krate) = next.pop() {
+        if linked(&krate) && lang.insert(krate) {
+            next.extend(krate.data(db).dependencies.iter().map(|dep| dep.crate_id));
+        }
+    }
+    let named = |it: ide_db::base_db::Crate| {
+        Some((Crate::from(it).display_name(db)?.crate_name().as_str().to_owned(), it))
+    };
+    let mut unit: Vec<_> = lang.into_iter().filter_map(named).collect();
+    unit.sort_unstable();
+    // One that only renames another, as `rustc_std_workspace_core` does `core`, is not asked
+    // for by its name: it comes with the crates that use it.
+    unit.retain(|(name, _)| crates_named(db, name, args).is_ok());
+    let Some(((first, _), rest)) = unit.split_first() else { return Ok(None) };
+    let mut hasher = Sha256::new();
+    let mut field = |bytes: &[u8]| {
+        hasher.update((bytes.len() as u64).to_le_bytes());
+        hasher.update(bytes);
+    };
+    field(b"ra-jit standard library 1");
+    field(format!("{:?} {:?}", args.selection.target, args.debug).as_bytes());
+    for (name, krate) in &unit {
+        let mut cfgs: Vec<String> =
+            krate.cfg_options(db).into_iter().map(|it| it.to_string()).collect();
+        cfgs.sort_unstable();
+        field(name.as_bytes());
+        field(format!("{:?}", krate.data(db).edition).as_bytes());
+        field(cfgs.join("\n").as_bytes());
+    }
+    let key: [u8; 32] = hasher.finalize().into();
+    let path = args.out.with_extension("std.o");
+    let store = ra_jit_store::Store::global();
+    if let Some(bytes) = store.and_then(|it| it.get(&key)) {
+        std::fs::write(&path, bytes).with_context(|| format!("writing {}", path.display()))?;
+        eprintln!("standard library: from the store, {} crates", unit.len());
+        return Ok(Some(path));
+    }
+    let of_unit = Args {
+        krate: first.clone(),
+        batch: rest.iter().map(|it| it.0.clone()).collect(),
+        widened: Vec::new(),
+        out: path.clone(),
+        report: None,
+        ..args.clone()
+    };
+    let built = build_unheld(db, table, &of_unit, &mut Rejections::default(), listed)
+        .with_context(|| {
+            let names: Vec<&str> = unit.iter().map(|it| it.0.as_str()).collect();
+            format!("building the standard library ({})", names.join(", "))
+        })?;
+    eprint!("standard library: {} crates, ", unit.len());
+    report(&built);
+    if let Some(store) = store {
+        store.settled();
+        store.insert(&key, &std::fs::read(&path)?);
+        store.flush();
+    }
+    Ok(Some(path))
+}
+
 /// [`build`] of a build that is never held.
 fn build_unheld(
     db: &RootDatabase,
@@ -3159,7 +3259,7 @@ fn build(
     let hir_db: &dyn HirDatabase = db;
     let mut functions = Vec::new();
     let mut kept = Vec::new();
-    let mut every_static = Vec::new();
+    let mut every_static: Vec<StaticId> = Vec::new();
     // The `main` of the crate asked for: another program of the workspace among the crates
     // is only here for what this one uses of it.
     let mut main = None;
@@ -3183,11 +3283,13 @@ fn build(
     }
     // A library built before the programs that use it has every static a generic function
     // of it uses, for the instances they compile.
-    if main.is_none() && table.is_empty() {
-        let extern_ =
-            |id: &StaticId| matches!(id.lookup(db).container, ItemContainerId::ExternBlockId(_));
-        kept = every_static.into_iter().filter(|it| !extern_(it)).collect();
-    }
+    let offered: Vec<StaticId> = match main.is_none() && table.is_empty() {
+        true => every_static
+            .into_iter()
+            .filter(|id| !matches!(id.lookup(db).container, ItemContainerId::ExternBlockId(_)))
+            .collect(),
+        false => Vec::new(),
+    };
     let list = start.elapsed();
     // With a program to start from, only what it reaches is compiled, and what a runtime
     // looks up by name. Without one any function may be the one called.
@@ -3203,6 +3305,7 @@ fn build(
         on_demand: &on_demand,
         start: main.filter(|it| own(it).is_some()),
         kept: &kept,
+        offered: &offered,
     };
     let setup = start.elapsed();
     if std::env::var_os("RA_JIT_STATS").is_some() {
@@ -3306,7 +3409,13 @@ fn build(
         let mut index = String::new();
         for (i, &(func, _)) in unit.compiled.iter().enumerate() {
             let single = hir::attach_db(db, || {
-                let roots = Roots { entries: &[func], on_demand: &[], start: None, kept: &[] };
+                let roots = Roots {
+                    entries: &[func],
+                    on_demand: &[],
+                    start: None,
+                    kept: &[],
+                    offered: &[],
+                };
                 CodegenUnit::compile(hir_db, &resolver, roots, &Default::default(), known)
             })
             .map_err(anyhow::Error::msg)?;
@@ -6176,6 +6285,10 @@ fn run_holding(
             None
         }
         None => {
+            if let Some(unit) = std_unit(&db, &table, &args, &listed)? {
+                args.prebuilt = Some(unit);
+                known.not_counted();
+            }
             let mut cold = build_unheld(&db, &table, &args, &mut known, &listed)?;
             // An `include!` in a body is first seen when the body is compiled.
             if WatchedFile::include_sources(&mut files, &mut tree, &mut db) != Loaded::Nothing {

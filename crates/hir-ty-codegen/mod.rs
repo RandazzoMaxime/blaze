@@ -537,6 +537,10 @@ pub struct Roots<'a> {
     /// The statics a linker or a runtime finds though no code names them, in the crates
     /// rustc built nothing of: `#[used]` ones, and those put in a section by name.
     pub kept: &'a [StaticId],
+    /// Statics defined, where they can be, for objects built apart from this one: those of a
+    /// library built before the programs that use it. One that cannot be is left out, and a
+    /// function that uses it is refused.
+    pub offered: &'a [StaticId],
 }
 
 impl CodegenUnit {
@@ -752,6 +756,9 @@ impl CodegenUnit {
             }
             for &id in roots.kept {
                 cg.static_data(id)?;
+            }
+            for &id in roots.offered {
+                _ = cg.static_data(id);
             }
             loop {
                 // Every core compiles the roots found so far, before they are put in the
@@ -1136,6 +1143,12 @@ impl Rejections {
         *self = *kept;
         (self.counted, self.stats) = (counted, stats);
         true
+    }
+
+    /// Leaves what was compiled since the last build out of the next one's count: it was
+    /// another build's, made before it.
+    pub fn not_counted(&mut self) {
+        self.compiled_since_last_build();
     }
 
     fn compiled_since_last_build(&mut self) -> usize {

@@ -425,11 +425,18 @@ and uncaught, threads, channels and formatting, print what cargo's builds do. Th
 library also builds alone, once, into an object of its own (a unit: its functions and statics
 exported under ra-jit's names, a static in a generic function's body included), and a program
 builds over it with `--prebuilt std.o`, compiling only its own crates and the generic functions
-of the library it instantiates; `harness/allrajit.py` checks both ways against cargo. A function
+of the library it instantiates. A build with nothing of rustc's that names none of the
+library's crates does that by itself: it takes the unit from the store (`RA_JIT_CACHE`), which
+fetches it from the remote, keyed by the library's crates, their cfgs and editions, the target
+and the debug info asked for (the store adds ra-jit's build and the toolchain), or compiles it
+once and keeps it there, and writes it beside `--out` as `<out>.std.o`; `harness/allrajit.py`
+checks all three ways against cargo. A function
 ra-jit cannot compile (2,115 of the library's: 534 for f16 and f128, 222 intrinsics with no
 body, most of the rest `core::arch`'s SIMD) is, where something calls it, a hidden stand-in that says so when it runs; a program that calls
-one compiles its own copy and is told at its build. Not yet: the unit kept in the store and
-served by the remote, `__rust_probestack` (a naked function, C), `#[global_allocator]` (the
+one compiles its own copy and is told at its build. The unit is the program's dependencies of
+the library but `test`, `proc_macro` and `panic_abort`, which rust-analyzer's graph has every
+crate depend on; it also has `rand` and `foldhash`, which std's own workspace adds to its graph
+and which nothing compiled uses. Not yet: `__rust_probestack` (a naked function, C), `#[global_allocator]` (the
 `__rg_*` shim is not generated; the build refuses), the cfgs of `compiler_builtins`' and
 `libc`'s build scripts, choosing `panic_abort`, and a link line of ra-jit's own (`cc` with a
 fixed list of libraries today).
@@ -518,6 +525,9 @@ of hello by hand, agreeing within 0.05 s):
 | hello, with the standard library in the same build | 4.2 s, then 0.12 s to link |
 | hello over `std.o` | 3.04 to 3.09 s, 2.2 GB, then 0.37 s to link |
 | the program of collections, threads and panics over `std.o` | 3.22 s, then 0.37 s to link |
+| hello on an empty store and remote: the unit compiled, kept and pushed | 17.4 to 17.6 s |
+| the program of collections, threads and panics, the unit from the store | 3.30 to 3.34 s |
+| the same on a second empty store, the unit from the remote (a directory) | 3.34 s |
 
 Over the unit hello compiles 138 functions in 0.15 s; 2.5 s of its 3.1 s is resolving the
 library's 27 crates, which the program's types and calls are checked against, and 0.4 s is
