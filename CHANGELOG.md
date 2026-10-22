@@ -187,6 +187,17 @@ All notable changes to ra-jit are written here. The format follows
 
 ### Changed
 
+- The daemon no longer keeps a spare worker loaded for the next project
+  ([#56](https://github.com/indexable-inc/ra-jit/issues/56)). It starts one as it starts, for
+  the build that started it, and one each time a build of a new workspace begins, which loads
+  the workspace beside cargo as before; none waits once a workspace is loaded. On Linux x86-64
+  (16 cores, 3 runs), the daemon after the edits of `bench.py`: ripgrep 3.63 to 2.31 GB, fd
+  3.42 to 2.04 GB, nushell 12.70 to 11.36 GB, with the same edit times; an idle daemon 2.64
+  to 1.28 GB. A second project's cold start is as before (ripgrep 4.74 and 4.86 s, nushell 30.5
+  and 30.7 s); a warm one, which cargo had built, loads the library first: ripgrep 1.29 to
+  2.62 s, fd 2.19 to 3.48 s, nushell 8.62 to 9.51 s (`harness/spare.py`, 3 interleaved rounds).
+  `RA_JIT_SPARE=ready` keeps one loaded as before; `RA_JIT_SPARE=0` still starts none.
+
 - With LLVM at `-O3` the bodies of the functions a function calls are built into it before
   the default pipeline, and the branches on what they return threaded and the values
   numbered again, as is done for what Cranelift builds in: a loop over `i + 1..n` inside one

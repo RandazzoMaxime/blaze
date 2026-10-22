@@ -292,7 +292,9 @@ they reach, on a quarter of the cores, the rest being cargo's. It reads the symb
 library as cargo writes it (`symbols::read_ahead`), so that once cargo is done only the
 program's own are left to read. Every line of cargo's reaches it through the daemon as cargo
 says it, and the spare reads its input from its first moment: a full pipe would have cargo
-wait.
+wait. The daemon starts a spare as it starts and another as each build of a workspace it has
+no worker for begins (`Request::Ahead`); none is started to wait once a workspace is loaded,
+unless `RA_JIT_SPARE=ready` ([cargo.md](cargo.md#environment-variables)).
 
 A patch over rustc has no marks of before to compare with, so the daemon takes them just in
 time: before an edit's text reaches the database, `home` notes the functions written in the

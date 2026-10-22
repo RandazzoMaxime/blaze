@@ -101,6 +101,26 @@ the patch replaces those copies too. On macOS that patch's frames (244 KB) are m
 unwind table of rustc's link (218 KB) they would take the place of, so the splice moves both
 tables into the room the link leaves after its load commands, and the edit is a patch there too.
 
+A spare worker is started for a build: one as the daemon starts, for the build that started
+it, and one each time a build of a workspace the daemon has no worker for begins. Once a
+workspace is loaded, none waits for the next: a spare with the library loaded holds 1.3 GB.
+What that costs is the start of a second project whose program cargo has already built, as
+the spare loads the library then rather than before. `RA_JIT_SPARE=ready` keeps one loaded at
+all times, as the daemon did until October 2026. On Linux x86-64 (16 cores), a second project
+under a running daemon, medians of three interleaved rounds (`harness/spare.py`):
+
+| Project | Daemon, idle | Cold start | Warm start | Daemon after the warm start |
+|---|---|---|---|---|
+| ripgrep | 1,275 MB (2,635 with `ready`) | 4.86 s (4.74 s) | 2.62 s (1.29 s) | 3,652 MB (4,918 MB) |
+| fd | 1,267 MB (2,638) | 24.17 s (24.21 s) | 3.48 s (2.19 s) | 3,354 MB (4,543 MB) |
+| nushell | 1,282 MB (2,638) | 30.70 s (30.48 s) | 9.51 s (8.62 s) | 7,219 MB (8,699 MB) |
+
+The cold start is `cargo ra-jit build` from an empty target directory until the daemon is
+ready; the warm start is the same once cargo has built it, the daemon stopped and started
+again. With `RA_JIT_SPARE=0` the daemon holds the same as without the variable, a cold start
+waits for the workspace to load after cargo (7.14 s on ripgrep, 38.43 s on nushell), and a
+warm one is quicker (2.14 s, 6.83 s).
+
 ## When cargo builds instead
 
 ra-jit hands a build to cargo whenever it cannot be sure its own result would be what cargo's
@@ -233,6 +253,7 @@ started it. To change one, run `cargo ra-jit stop` first.
 | `RA_JIT_HOME` | the daemon's directory (also read by every client) | see above |
 | `RA_JIT_IDLE_SECS` | seconds without a request before the daemon exits; 0 is never | 1800 |
 | `RA_JIT_MEMORY_MAX` | the most the workers hold together, a size such as `6G`, or `off` | half the machine's memory |
+| `RA_JIT_SPARE` | `ready` keeps a spare worker with the library loaded at all times, for the next project; `0` starts none, and a workspace loads once cargo has built it | a spare for each build of a new workspace, as it begins |
 | `RA_JIT_OWN_BASE_MEMORY` | the most a worker may hold while it builds its own base in the background, a size such as `40G`, past which it gives that base up and edits patch rustc's executable; `off` is no bound | a quarter of the machine's memory |
 | `RA_JIT_CACHE` | directory of the disk store; without it nothing is kept on disk | not set |
 | `RA_JIT_REMOTE` and the other store variables | see [cache.md](cache.md) | not set |
