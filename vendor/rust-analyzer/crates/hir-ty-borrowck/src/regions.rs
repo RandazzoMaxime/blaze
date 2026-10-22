@@ -2658,6 +2658,13 @@ impl<'db> Builder<'_, '_, 'db> {
             TerminatorKind::Call { func, args, destination, .. } => {
                 // A function item called through a variable, `let f = foo::<'a>; f()`, which
                 // rust-analyzer lowers as a call of the constant, has the variable's type.
+                // Through a reference to it too (`let f = &foo::<'a>; f()`).
+                let peel = |mut ty: Ty<'db>| {
+                    while let TyKind::Ref(_, inner, _) = ty.kind() {
+                        ty = inner;
+                    }
+                    ty
+                };
                 let local = match (&func.kind, span) {
                     (
                         OperandKind::Constant { .. } | OperandKind::Allocation { .. },
@@ -2667,7 +2674,7 @@ impl<'db> Builder<'_, '_, 'db> {
                             .path_local(callee)
                             .filter(|&it| {
                                 matches!(
-                                    (self.regions.local_tys[it.into_raw().into_u32() as usize].kind(),
+                                    (peel(self.regions.local_tys[it.into_raw().into_u32() as usize]).kind(),
                                         self.operand_ty(func).map(|it| it.kind())),
                                     (TyKind::FnDef(a, _), Some(TyKind::FnDef(b, _))) if a == b
                                 )
@@ -2680,7 +2687,7 @@ impl<'db> Builder<'_, '_, 'db> {
                     self.regions.callee_reads.push((local, location));
                 }
                 let Some(func_ty) = local
-                    .map(|it| self.regions.local_tys[it.into_raw().into_u32() as usize])
+                    .map(|it| peel(self.regions.local_tys[it.into_raw().into_u32() as usize]))
                     .or_else(|| self.written_callee(func, span))
                     .or_else(|| self.constant_ty(func, span))
                     .or_else(|| self.operand_ty(func))
@@ -2776,6 +2783,46 @@ impl<'db> Builder<'_, '_, 'db> {
                         self.relate(ty, input, Variance::Covariant, at);
                     }
                 }
+                // A closure called through `Fn::call`, `FnMut::call_mut` or `FnOnce::call_once`,
+                // which lowering passes the arguments of one by one: proving it implements the
+                // trait equates the arguments with its signature's inputs, whose regions are in
+                // its type (`let f = |_| {}; f(&x)`).
+                let lang = self.interner().lang_items();
+                let calls = [lang.Fn_call, lang.FnMut_call_mut, lang.FnOnce_call_once];
+                if let TyKind::FnDef(def, _) = func_ty.kind()
+                    && let CallableDefId::FunctionId(function) = def.0
+                    && calls.contains(&Some(function))
+                    && let [receiver, given @ ..] = &args[..]
+                    && let Some(receiver) = self.operand_ty(receiver)
+                    && let TyKind::Closure(id, closure) = peel(receiver).kind()
+                    && self.infers_signature(id.0)
+                {
+                    let sig = self.ctx.infcx.instantiate_binder_with_fresh_vars(
+                        hir_ty::Span::Dummy,
+                        hir_ty::next_solver::infer::BoundRegionConversionTime::FnCall,
+                        closure.as_closure().sig(),
+                    );
+                    if let &[tupled] = sig.inputs().as_slice()
+                        && let TyKind::Tuple(inputs) = tupled.kind()
+                    {
+                        for (arg, input) in given.iter().zip(inputs.iter()) {
+                            if let Some(ty) = self.operand_ty(arg) {
+                                let at = At {
+                                    category: Category::CallArgument,
+                                    span: arg.span().unwrap_or(span),
+                                };
+                                self.relate(ty, input, Variance::Covariant, at);
+                            }
+                        }
+                    }
+                    let projection = destination.projection.as_slice();
+                    let dest = self.place_ty(destination.local, projection).ty;
+                    let at = At {
+                        category: self.category_of_assignment(destination.local, projection),
+                        span,
+                    };
+                    self.relate(sig.output(), dest, Variance::Covariant, at);
+                }
                 let projection = destination.projection.as_slice();
                 let dest = self.place_ty(destination.local, projection).ty;
                 let at = At {
@@ -2795,6 +2842,19 @@ impl<'db> Builder<'_, '_, 'db> {
             }
             _ => (),
         }
+    }
+
+    /// Whether the closure `id` is of this body and writes no type of a parameter or of its
+    /// return: the lifetimes rustc infers for its signature are in its type, the same for every
+    /// call, where those a written `&T` elides are the call's own.
+    fn infers_signature(&self, id: hir_ty::db::InternedClosureId<'db>) -> bool {
+        let loc = id.loc(self.ctx.db);
+        loc.owner == self.ctx.owner
+            && matches!(
+                &self.ctx.store[loc.expr],
+                hir_def::hir::Expr::Closure { arg_types, ret_type: None, .. }
+                    if arg_types.iter().all(Option::is_none)
+            )
     }
 
     /// A callee's signature with the lifetimes it elides, which RA leaves as errors, made
