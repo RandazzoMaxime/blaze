@@ -57,6 +57,8 @@ HARNESSES = [
     ("core", ["loadedits.py"], {}, on("linux", "macos"), 2),
     ("core", ["asmedits.py"], {}, EVERYWHERE, 1),
     ("core", ["includes.py"], {}, EVERYWHERE, 1),
+    # Each scenario runs rustc and rustdoc no more often than norustc/baseline.json says.
+    ("core", ["norustc.py"], {}, on("linux", "macos"), 2),
     ("core", ["worktrees.py"], {}, EVERYWHERE, 2),
     ("core", ["worktrees.py", "--join", "--together"], {}, on("macos"), 2),
     ("core", ["worktrees.py", "--overlay"], {}, on("macos"), 2),
