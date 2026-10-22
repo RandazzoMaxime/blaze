@@ -396,7 +396,14 @@ impl Resolver<'_> {
         let Some(assoc) = func.as_assoc_item(self.db) else {
             return self.item_path(func.module(self.db), name.as_str());
         };
-        let AssocItemContainer::Impl(imp) = assoc.container(self.db) else { return None };
+        // A method a trait provides is named after the trait, as what its body declares is.
+        let imp = match assoc.container(self.db) {
+            AssocItemContainer::Impl(imp) => imp,
+            AssocItemContainer::Trait(trait_) => {
+                let trait_ = self.item_path(trait_.module(self.db), trait_.name(self.db).as_str());
+                return Some(format!("{}::{}", trait_?, name.as_str()));
+            }
+        };
         let self_ty = self.type_path(&imp.self_ty(self.db))?;
         match imp.trait_(self.db) {
             Some(trait_) => {
@@ -483,14 +490,18 @@ impl Resolver<'_> {
         Some(format!("ra-jit.{id:x}.{path}.{:x}", short_hash(&place)))
     }
 
-    /// Whether the function, or the `impl` it is in, takes types or constants.
+    /// Whether the function, or the `impl` it is in, takes types or constants. A method a
+    /// trait provides takes `Self`.
     fn is_generic(&self, func: FunctionId) -> bool {
         let generic = |def: hir::GenericDef| !def.type_or_const_params(self.db).is_empty();
         if generic(hir::Function::from(func).into()) {
             return true;
         }
-        let ItemContainerId::ImplId(imp) = func.lookup(self.db).container else { return false };
-        generic(hir::Impl::from(imp).into())
+        match func.lookup(self.db).container {
+            ItemContainerId::ImplId(imp) => generic(hir::Impl::from(imp).into()),
+            ItemContainerId::TraitId(_) => true,
+            _ => false,
+        }
     }
 
     /// Whether another function written in a body of the crate has this one's path. rustc

@@ -153,7 +153,74 @@ pub fn make_block(tag: &'static str) -> impl Future<Output = String> {
     }
 }
 
+async fn number(n: u64) -> u64 {
+    pause().await;
+    n
+}
+
+/// The operands of a checked `+` wait for the next await.
+pub async fn sums(n: u64) -> u64 {
+    number(n).await + number(n + 1).await + number(n + 2).await + number(n + 3).await
+}
+
+async fn pair(n: u32) -> Result<(Loud, u32), String> {
+    pause().await;
+    if n == 0 { Err("no pair".to_owned()) } else { Ok((Loud("pair"), n)) }
+}
+
+/// A pattern is bound from a temporary the `?` of an await writes.
+pub async fn bound(n: u32) -> Result<u32, String> {
+    let (loud, m) = pair(n).await?;
+    pause().await;
+    drop(loud);
+    Ok(m + 1)
+}
+
+pub struct Wrapped(Loud, u32);
+
+fn wrap_part(n: u32) -> Result<Loud, String> {
+    if n == 0 { Err("no part".to_owned()) } else { Ok(Loud("part")) }
+}
+
+/// What `?` gives is kept over an await and then put in a tuple struct and an `Ok`.
+pub async fn constructed(n: u32) -> Result<Wrapped, String> {
+    let part = wrap_part(n)?;
+    pause().await;
+    Ok(Wrapped(part, n))
+}
+
+async fn attempt(n: u32) -> Result<Loud, String> {
+    pause().await;
+    if n % 2 == 0 { Ok(Loud("attempt")) } else { Err(format!("odd {n}")) }
+}
+
+async fn recover(e: String) {
+    pause().await;
+    log(format!("recovered {e}"));
+}
+
+/// Each arm moves its payload out of what the match waited for, and one arm awaits again.
+pub async fn retried(mut n: u32) -> &'static str {
+    loop {
+        match attempt(n).await {
+            Ok(loud) => return loud.0,
+            Err(e) => recover(e).await,
+        }
+        n += 1;
+    }
+}
+
 pub fn run() {
+    println!("{}", block_on(sums(1)));
+    println!("{:?}", block_on(bound(3)));
+    println!("{:?}", block_on(bound(0)));
+    println!("{:?}", block_on(constructed(2)).map(|it| it.1));
+    println!("{:?}", block_on(constructed(0)).map(|it| it.1));
+    println!("{}", block_on(retried(1)));
+    poll_then_drop(sums(2), 2);
+    poll_then_drop(bound(4), 2);
+    poll_then_drop(constructed(5), 1);
+    poll_then_drop(retried(3), 3);
     println!("{}", block_on(held("x".to_owned())));
     println!("{}", block_on(borrowed(5)));
     println!("{}", block_on(moved_on_one_path(true)));
@@ -174,6 +241,10 @@ pub fn run() {
         size_of_val(&moved_on_one_path(false)),
         size_of_val(&nested(0)),
         size_of_val(&make_block("size")),
+        size_of_val(&sums(0)),
+        size_of_val(&bound(0)),
+        size_of_val(&constructed(0)),
+        size_of_val(&retried(0)),
     ];
     println!("sizes {sizes:?}");
     for line in LOG.with(|it| std::mem::take(&mut *it.borrow_mut())) {

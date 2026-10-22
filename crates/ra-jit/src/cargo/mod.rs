@@ -138,7 +138,7 @@ fn plain_cargo(args: Vec<String>) -> anyhow::Result<i32> {
 
 /// Builds what `asked` names and then runs what the subcommand runs. Cargo builds what
 /// the daemon has not been given yet and what only cargo acts on (a manifest, a build
-/// script); a program the daemon was asked for and did not build fails the build.
+/// script), and so does it a program the daemon was asked for and did not build.
 fn build(asked: &Invocation) -> anyhow::Result<i32> {
     use crate::trace::{CLIENT, note};
     note("client start", CLIENT, crate::trace::began());
@@ -161,11 +161,7 @@ fn build(asked: &Invocation) -> anyhow::Result<i32> {
             held = Some(settled);
             state
         }
-        Ok(Err(Left::Failed(why))) => {
-            say::error(&why);
-            return Ok(FAILED);
-        }
-        Ok(Err(Left::ToCargo(state, reason))) => {
+        Ok(Err(ToCargo(state, reason))) => {
             say::fallback(&reason, "building with cargo");
             let mut counts = state.counts;
             *counts.cargo.entry(reason).or_default() += 1;
@@ -185,10 +181,6 @@ fn build(asked: &Invocation) -> anyhow::Result<i32> {
                     state
                 }
                 Err(NotStaged::Failed(code)) => return Ok(code),
-                Err(NotStaged::Daemons(why)) => {
-                    say::error(&why);
-                    return Ok(FAILED);
-                }
                 Err(NotStaged::Cargos(why, ahead)) => {
                     if let Some(why) = why {
                         say::fallback(&why, "building with cargo");
@@ -218,11 +210,10 @@ const FAILED: i32 = 101;
 enum NotStaged {
     /// Cargo failed, with this status: rustc turned the source down.
     Failed(i32),
-    /// Cargo builds all of it, which it has not begun to, and why when that is worth a line;
-    /// with what the daemon is told of the build so that it loads it while cargo builds.
+    /// Cargo builds all of it, and why when that is worth a line: it has not begun to, or it
+    /// built its part and the daemon did not build a program. With what the daemon is told
+    /// of the build so that it loads it while cargo builds.
     Cargos(Option<String>, Option<daemon::Ahead>),
-    /// Cargo built its part and the daemon did not build a program, and why.
-    Daemons(String),
 }
 
 /// The first build of a workspace: cargo has rustc build what the workspace depends on
@@ -253,7 +244,7 @@ fn staged(
     let state = match Built::staged(asked, &crates)? {
         Ok(built) => daemons(asked, cwd, key, built)
             .unwrap_or_else(|why| Err(format!("{why:#}")))
-            .map_err(NotStaged::Daemons),
+            .map_err(|why| NotStaged::Cargos(Some(why), None)),
         Err(code) => Err(NotStaged::Failed(code)),
     };
     if let (Err(_), Some(id)) = (&state, ahead) {
@@ -298,36 +289,36 @@ fn first_by_daemon(mut state: State) -> Result<(State, Held), String> {
 /// The variable that has the first build of a workspace be the daemon's too.
 const STAGED: &str = "RA_JIT_FIRST_BUILD";
 
-/// Why the daemon's programs are not the build.
-enum Left {
-    /// The build is cargo's, with the state so far and the reason: something cargo acts
-    /// on changed, or the build is one the daemon is never asked for.
-    ToCargo(Box<State>, String),
-    /// The daemon did not build a program, and why.
-    Failed(String),
-}
+/// The build is cargo's, with the state so far and the reason: something cargo acts on
+/// changed, the build is one the daemon is never asked for, or the daemon did not build a
+/// program whose source changed.
+struct ToCargo(Box<State>, String);
 
 /// Has the daemon bring the programs of `state` up to date and puts them where cargo has
 /// them. Rustc sees none of it: the daemon builds what rust-analyzer passes, which has no
 /// borrow checker and few of rustc's lints.
-fn by_daemon(mut state: State) -> Result<(State, Held), Left> {
+fn by_daemon(mut state: State) -> Result<(State, Held), ToCargo> {
     use crate::trace::{CLIENT, note};
     let checking = Instant::now();
     let cargos = state.refusal.clone().or_else(|| state.broken_guard());
     if let Some(reason) = cargos.or_else(|| state.stale_cargos()) {
-        return Err(Left::ToCargo(Box::new(state), reason));
+        return Err(ToCargo(Box::new(state), reason));
     }
     note("client checks", CLIENT, checking);
+    // What the daemon did not build, cargo does: an error is then rustc's, and code
+    // rust-analyzer turns down wrongly is built.
     let answers = match state.checkouts.iter().map(built).collect::<Result<Vec<_>, _>>() {
         Ok(answers) => answers,
-        Err(NotBuilt::Cargos(why)) => return Err(Left::ToCargo(Box::new(state), why)),
-        Err(NotBuilt::Failed(why)) => return Err(Left::Failed(why)),
+        Err(why) => return Err(ToCargo(Box::new(state), why.why())),
     };
     let settling = Instant::now();
     let held = state.hold();
-    let cargos = state.settle(&answers, &held).map_err(Left::Failed)?;
+    let cargos = match state.settle(&answers, &held) {
+        Ok(cargos) => cargos.len(),
+        Err(why) => return Err(ToCargo(Box::new(state), why)),
+    };
     note("client settle", CLIENT, settling);
-    let served = cargos.len() < state.programs.len() || state.programs.is_empty();
+    let served = cargos < state.programs.len() || state.programs.is_empty();
     state.counts.served += u64::from(served);
     Ok((state, held))
 }

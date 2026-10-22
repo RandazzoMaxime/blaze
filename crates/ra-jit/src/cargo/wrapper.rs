@@ -286,16 +286,9 @@ impl Unit {
         });
         let read = deps.join().map_err(|_| "rustc did not run".to_owned());
         let read = read?.map_err(|it| format!("rustc did not run: {it}"))?;
-        // What the daemon was asked for and did not build fails the build, unless it is
-        // source ra-jit does not build: rustc builds that.
-        match answer {
-            Ok(()) => {}
-            Err(NotBuilt::Cargos(why)) => return Err(why),
-            Err(NotBuilt::Failed(why)) => {
-                say::error(&why);
-                std::process::exit(super::FAILED);
-            }
-        }
+        // What the daemon did not build, rustc does: an error is then rustc's, and code
+        // rust-analyzer turns down wrongly is built.
+        answer.map_err(NotBuilt::why)?;
         if !read.status.success() {
             let _ = std::io::stderr().write_all(&read.stderr);
             std::process::exit(super::FAILED);
