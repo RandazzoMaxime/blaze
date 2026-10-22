@@ -88,11 +88,13 @@ were stable names: 665,474,913 bytes for one `helix-parsec` closure, and the lar
 5. **Memory discipline.** No eviction of inference or MIR: `infer`, `mir_body` and
    ra-jit's monomorphized MIR have no `lru`, and ra-jit drops nothing. Measuring is there:
    with `RA_JIT_MEMORY=<dir>`, `crates/ra-jit/src/memory.rs` reports resident memory after
-   load, resolve, build and warm-up and writes a table of every salsa ingredient (count,
+   load, resolve, build, warm-up and each request answered (on macOS the physical footprint)
+   and writes a table of every salsa ingredient (count,
    bytes of fields and of salsa's records; heap bytes only where an ingredient declares
    `heap_size`, which no rust-analyzer query does). A build with the `heap-profile` feature
    allocates with jemalloc, reports live bytes, and with `_RJEM_MALLOC_CONF=prof:true`
-   writes a heap profile for `jeprof`. rust-analyzer's own per-query report
+   writes a heap profile for `jeprof` (on macOS for `harness/heapfold.py`, with `heap.py` to
+   give it to queries). rust-analyzer's own per-query report
    (`per_query_memory_usage` in `ide-db/src/apply_change.rs`) is commented out since its
    salsa migration.
 6. **LSP-shaped parts.** ra-jit has its own watcher (`inputs.rs` for the manifests and
@@ -163,6 +165,25 @@ numbers to move. The bound is what infer and MIR hold of those, which step 0 rep
 
 **Risks.** An edit that reaches many bodies recomputes their MIR: the edit harnesses
 (`editbench.py`, `movedlines.py`, `storefirst.py`) and edit-to-binary times are the check.
+
+**Measured (2026-10-21, #39).** The `lru` route does not work as designed, and nothing of it
+is merged ([research/daemon-memory.md](research/daemon-memory.md)):
+- salsa 0.28.5 takes an evicted memo of a query with cycle handling, which `infer` and every
+  MIR query have, for one a panic left, and throws. With `lru` on them nushell's worker died
+  in its cold build.
+- An `lru` evicts only when a revision begins, so a build's peak keeps everything.
+- `lru = 4096` on `described`, which has no cycle handling, lowered ripgrep's live heap once
+  ready from 1,622 to 1,416 MB, and its footprint not at all: what it frees stays with the
+  allocator.
+
+What holds the memory: on nushell's 10.0 GB live heap once ready, `described` (debuginfo
+types, each memo a whole copy of a type and everything it is made of) is 2.7 GB,
+`compiled_instance` 0.65 GB, `runtime_mir_body` 0.55 GB, the parse trees 0.8 GB, `mir_body`
+0.37 GB, `infer` 0.29 GB, salsa's records 1.5 GB in all. And about 0.6-0.9 GB of each
+project's figure in `bench.py` after the first request is not the project's: it is the spare
+worker the daemon starts for the next project (940 MB on ripgrep). Sharing what `described`
+keeps, the spare, and a patched salsa that can evict a query with cycle handling are the
+next steps, each its own issue.
 
 ### Item 1: frozen dependency artifacts
 
