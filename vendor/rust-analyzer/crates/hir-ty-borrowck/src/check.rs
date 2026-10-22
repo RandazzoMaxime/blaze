@@ -437,6 +437,8 @@ enum MoveErrorKind {
     Destructor(usize),
     /// Out of an element of a slice or an array, at an index.
     SliceOrArray(usize),
+    /// Out of a variable in its `match` arm's guard.
+    Guard,
 }
 
 struct MoveError {
@@ -775,6 +777,12 @@ impl<'a, 'db> Checker<'a, '_, 'db> {
                         "reference to field of packed struct is unaligned".to_owned(),
                     );
                 }
+            }
+            Rvalue::Discriminant(place) if self.ctx.cast_moves(self.body, place, span) => {
+                let place = PlaceRef::of(place);
+                self.check_movable_place(location, place, span);
+                self.access_place(location, place, span, Access::Move, Allowed::Yes, Depth::Deep);
+                self.check_if_path_or_subpath_is_moved(location, InitAction::Use, place, span);
             }
             Rvalue::Len(place) | Rvalue::Discriminant(place) | Rvalue::CopyForDeref(place) => {
                 let place = PlaceRef::of(place);
@@ -1747,6 +1755,14 @@ impl<'a, 'db> Checker<'a, '_, 'db> {
         if ty.ty.references_non_lt_error() {
             return;
         }
+        if self.ctx.moves_out_of_guard(place.local, place.projection, span) {
+            let moved = self.ctx.place_ty(self.body, place.local, place.projection).ty;
+            if !moved.references_non_lt_error() && !self.ctx.is_copy(moved) {
+                let kind = MoveErrorKind::Guard;
+                self.move_errors.push(MoveError { place: place.key(), location, span, kind });
+            }
+            return;
+        }
         for (len, elem) in place.projection.iter().enumerate() {
             let kind = match (elem, ty.ty.kind()) {
                 (ProjectionElem::Deref, TyKind::Ref(..) | TyKind::RawPtr(..)) => {
@@ -1971,6 +1987,7 @@ impl<'a, 'db> Checker<'a, '_, 'db> {
                 .statements
                 .get(error.location.statement);
             if let Some(statement) = statement
+                && !matches!(error.kind, MoveErrorKind::Guard)
                 && let StatementKind::Assign(
                     target,
                     Rvalue::Use(Operand { kind: OperandKind::Move(_), .. }),
@@ -1992,7 +2009,7 @@ impl<'a, 'db> Checker<'a, '_, 'db> {
             let message = self.move_error_message(&error);
             let code = match error.kind {
                 MoveErrorKind::Borrowed(len) if self.is_slice_or_array(&error, len + 1) => "E0508",
-                MoveErrorKind::Borrowed(_) => "E0507",
+                MoveErrorKind::Borrowed(_) | MoveErrorKind::Guard => "E0507",
                 MoveErrorKind::SliceOrArray(_) => "E0508",
                 MoveErrorKind::Destructor(_) => "E0509",
             };
@@ -2030,6 +2047,9 @@ impl<'a, 'db> Checker<'a, '_, 'db> {
                 let base = place.base(len);
                 let ty = self.ctx.place_ty(self.body, base.local, base.projection).ty;
                 format!("cannot move out of type `{ty:?}`, which implements the `Drop` trait")
+            }
+            MoveErrorKind::Guard => {
+                format!("cannot move out of {} in pattern guard", self.quoted(place, "value"))
             }
             MoveErrorKind::SliceOrArray(len) => {
                 let base = place.base(len);
