@@ -187,6 +187,14 @@ All notable changes to ra-jit are written here. The format follows
 
 ### Changed
 
+- With LLVM at `-O3` the bodies of the functions a function calls are built into it before
+  the default pipeline, and the branches on what they return threaded and the values
+  numbered again, as is done for what Cranelift builds in: a loop over `i + 1..n` inside one
+  over `0..n` counted with `phi + 1` before, which alias analysis can't see past. On
+  Graviton4 (Linux aarch64) nbody runs at 1.28 times cargo's release build instead of 1.97,
+  and words at 1.27 instead of 1.36; on Linux x86-64 (c8a.metal) words at 1.28 instead of
+  1.37. Whole-program builds take 1-4% longer. x86-64's nbody is still 1.27: LLVM 20 weighs
+  the five-body nest above its full-unroll threshold, and rustc's LLVM 23 below it.
 - On macOS a patch whose unwind frames are larger than the program's unwind table is spliced
   rather than linked in full: both of the unwinder's tables move into the room the link leaves
   after its load commands, the program's frames where the table has them and the patch's

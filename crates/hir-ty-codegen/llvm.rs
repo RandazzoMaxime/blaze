@@ -339,6 +339,16 @@ impl Optimization {
     /// and a loop over a range counts with `i + (i < n)`, which LLVM can neither unroll nor
     /// prove an index of in bounds or free of overflow with. Threaded, it counts with `i + 1`.
     ///
+    /// At `-O3` the bodies LLVM is shown are then built in, and the same is done again to what
+    /// they joined, with values numbered once after it. A body LLVM builds in itself returns
+    /// through a join as well, and the default pipeline numbers values before it threads
+    /// branches: a range's start the loop over it advances to, `i + 1`, stays two values when
+    /// the body of the loop computes it too, until instruction combining makes the inner loop
+    /// of `for j in i + 1..n` count with `phi + 1`. An index scaled from that is not known
+    /// free of overflow, so alias analysis cannot tell `bodies[i].velocity` from
+    /// `bodies[j].mass`: every iteration reloads what it stored (nbody, 1.97 times
+    /// release on Graviton4, 1.28 with the bodies built in first).
+    ///
     /// At `-O3` what LLVM made redundant is then removed once more. A loop of a callee
     /// Cranelift built in is unrolled late in the pipeline, after LLVM's last numbering of
     /// values, while the copies are still joined by branches on constants: each copy keeps
@@ -352,8 +362,9 @@ impl Optimization {
             Passes::Less => Some("function(sroa,instsimplify,sroa),default<O1>"),
             Passes::Default => Some("function(sroa,instsimplify,sroa,jump-threading),default<O2>"),
             Passes::Aggressive => Some(
-                "function(sroa,instsimplify,sroa,jump-threading),default<O3>,\
-                 function(gvn,sccp,instcombine<no-verify-fixpoint>,simplifycfg)",
+                "function(sroa,instsimplify,sroa,jump-threading),\
+                 cgscc(inline,function(sroa,instsimplify,sroa,jump-threading,early-cse<memssa>)),\
+                 default<O3>,function(gvn,sccp,instcombine<no-verify-fixpoint>,simplifycfg)",
             ),
         }
     }
