@@ -194,6 +194,35 @@ Each object format has its own implementation:
 | PE x86-64 | `splice/pe.rs` | New sections behind the linker's last, `.pdata` extended for the unwinder. |
 | wasm | `splice/wasm.rs` | Nothing jumps: the module is written again with the new function bodies under the same indices. |
 
+### No size is a reason to link in full
+
+No size of the program, of a section of it or of the patch, and no number of edits, may make
+an edit link in full. A field the splice writes is either sized so that it always fits, or it
+has a layout to fall back on that does not need it. The only limits are the ones the linker
+has for the same program. The rules for a change to the splice:
+
+1. An `ensure!` on a distance or a size is a bug unless the linker would refuse the same
+   program: then say so where it is checked.
+2. A constant room (`Patch::ROOM`, the `ROOM` of `splice/debug.rs`, the 64 MB of
+   `Image::tail`) says where something goes first, so that the next splice finds it in the same
+   place. It never decides whether something fits: past it, what is behind moves.
+3. What a debugger reads is never a reason to link in full. When it can't be written, the
+   patch's code has no lines, and the program's are where they were.
+4. A new size limit, or a new layout for one, gets a step in `harness/bigbinary.py`, which runs
+   nightly on Linux and macOS.
+
+Each place, and how it is covered:
+
+| What | Fixed width | Covered by |
+|---|---|---|
+| Where the patch goes (ELF) | Every distance from the patch to the program is 4 bytes on x86-64 and AArch64 (calls, the unwind search table's entries, `adrp`) | The patch goes behind the loaded segments, as far into memory as into the file. When the file is longer than four bytes of distance reach (a debug build of bevy is 2 GB past its 200 MB of code), it goes right behind what is loaded instead (#79). |
+| The jump over a replaced function | x86-64 `jmp rel32`, 5 bytes. AArch64 `b`, 4 bytes, reaching 128 MB; beyond that `adrp`, `add`, `br`, 12 bytes | ra-jit makes no function shorter than the longest jump it may need: 5 bytes on x86-64, 12 on AArch64 (`Arch::shortest_function`). Mach-O measures a function to the next symbol, PE by its `.pdata`. A function of rustc's executable (the first edits) is as rustc made it. One shorter than the long jump is linked in full once, by ra-jit, and every edit after is spliced into that link. |
+| Calls out of the patch | AArch64 `bl`, 128 MB | A stub for each call out of reach. |
+| The unwinder's search table (ELF) | Entries of 4 bytes from the table | The table is in the patch, within the reach of the placement above. |
+| `__unwind_info` (Mach-O) | 24-bit offsets into `__eh_frame` | Three layouts: the patch's frames behind the program's, in front of them, or both tables in the room the header leaves. The last has no limit but that room, which each full link checks. It links again with room for both tables and a quarter more when the room is short, or the program has so many frames that none can go in front of them. |
+| Debug info (ELF) | DWARF's 4-byte offsets into a section, 4 GB | Rule 3. |
+| The program itself | x86-64 code and data within 2 GB, AArch64 within 4 GB (`adrp`); a Mach-O executable within 4 GB (its signature) | The linker's limits, which the program already fits. The patch is added within the same reach. |
+
 ## The disk store
 
 `crates/ra-jit-store` is a content-addressed key-value store of compiled functions,
@@ -286,7 +315,8 @@ the descriptor's slot.
 
 Once nothing waits for a second, the daemon builds its own base in full in the background,
 from the store as far as it can; an edit that comes meanwhile interrupts it and is a patch
-of rustc's executable. A worker that holds more than a quarter of the machine's memory while
+of rustc's executable, unless the base has begun to link: the edit then waits for that link
+and is a patch of the base, as a link once begun has replaced rustc's executable. A worker that holds more than a quarter of the machine's memory while
 it builds that base gives it up for good, logs so, and edits go on patching rustc's
 executable: what the build computed stays in the database, so the bound is on what the
 worker keeps (`RA_JIT_OWN_BASE_MEMORY`, a size such as `40G`, or `off`). The daemon's

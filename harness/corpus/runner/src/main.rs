@@ -726,6 +726,7 @@ fn main() {
     case!(cases::static_places::run());
     case!(cases::associated_type_returns::run(&["a".into(), "bcd".into()]));
     case!(cases::constructor_extends_temporaries::run(), cases::statement_borrows_temporary::run(true, &None));
+    case!(cases::undecided_alias_drop::run(3), cases::undecided_alias_drop::run(40));
 }
 
 fn nest<T>(depth: u8, value: T) -> Option<Option<T>> {

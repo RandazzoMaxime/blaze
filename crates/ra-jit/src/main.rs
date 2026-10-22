@@ -4681,6 +4681,39 @@ struct Edited {
 /// Set while the builds under way are told to stop for a change to the source.
 static INTERRUPTING: AtomicBool = AtomicBool::new(false);
 
+/// How many builds have begun to link. An interruption waits for them: a link is not stopped,
+/// and once it has begun the executable it writes is the program, which a build interrupted
+/// after it would leave the daemon without. The daemon's own base, once it links, has
+/// replaced the executable rustc linked.
+static LINKING: Mutex<usize> = Mutex::new(0);
+
+thread_local! {
+    /// Whether the build on this thread is one of [`LINKING`].
+    static LINKS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Called before a build links, which it does not once an interruption has begun: it then
+/// unwinds as an interrupted build does.
+fn begin_link() {
+    if LINKS.get() {
+        return;
+    }
+    let mut linking = lock(&LINKING);
+    if INTERRUPTING.load(Ordering::SeqCst) {
+        drop(linking);
+        std::panic::resume_unwind(Box::new(ide_db::base_db::salsa::Cancelled::PendingWrite));
+    }
+    *linking += 1;
+    LINKS.set(true);
+}
+
+/// After a build on this thread is over: it holds up no interruption.
+fn end_link() {
+    if LINKS.replace(false) {
+        *lock(&LINKING) -= 1;
+    }
+}
+
 /// Reading a loaded checkout from another place is long when the build takes more than this,
 /// or than `RA_JIT_SLOW_SWITCH_MS`.
 const SLOW_SWITCH: Duration = Duration::from_secs(2);
@@ -4896,10 +4929,19 @@ impl Builds {
             let event = self.events.recv()?;
             self.take(event, programs)?;
         }
-        if self.running.is_empty() {
-            return Ok(());
+        loop {
+            if self.running.is_empty() {
+                return Ok(());
+            }
+            let linking = lock(&LINKING);
+            if *linking == 0 {
+                INTERRUPTING.store(true, Ordering::SeqCst);
+                break;
+            }
+            drop(linking);
+            let event = self.events.recv()?;
+            self.take(event, programs)?;
         }
-        INTERRUPTING.store(true, Ordering::SeqCst);
         db.trigger_cancellation();
         while !self.running.is_empty() {
             let event = self.events.recv()?;
@@ -6977,6 +7019,7 @@ fn run_holding(
                         Ok(answer) => Some(answer),
                         Err(panic) => Some(Ok(program.panicked(&*panic))),
                     };
+                    end_link();
                     let _ = sender.send(Event::Built(at, program, answer));
                 });
             }
@@ -7001,7 +7044,12 @@ fn run_holding(
                         let (db, listed, paths, edit) = (db.clone(), &*listed, &*paths, &edit);
                         let wanted = outputs.get(&at);
                         let build = scope.spawn(move || {
-                            program.sync(&db, listed, paths, edit, wanted, link, defer)
+                            let answer =
+                                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                                    program.sync(&db, listed, paths, edit, wanted, link, defer)
+                                }));
+                            end_link();
+                            answer.unwrap_or_else(|panic| std::panic::resume_unwind(panic))
                         });
                         (at, build)
                     })
@@ -7586,6 +7634,7 @@ impl Program {
             let (splice, patch) = (args.splice.as_deref(), args.patch.as_deref());
             let cmd = args.link_cmd.as_deref().filter(|_| failed.is_none() && link_it);
             let over_rustc = known.stats.over_rustc;
+            begin_link();
             let unlinked = link(cmd, splice, patch, &args.out, patched, over_rustc, defer).err();
             if let Some(lost) = unlinked.as_ref().filter(|it| it.is::<RustcLinkedLost>()) {
                 eprintln!("{lost}: built in full");
