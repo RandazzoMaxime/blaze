@@ -41,8 +41,10 @@ DROPPED = [
     # Files bun's own link writes or reads: its map, its LTO object, its symbol order.
     r"-Wl,-map,.*", r"-Wl,-Map=.*", r"-Wl,-object_path_lto,.*", r"-Wl,-order_file,.*",
     r"-Wl,--symbol-ordering-file=.*", r"-Wl,--no-warn-symbol-ordering",
-    # What rustc says itself: the deployment target and SDK, position independence, dead code.
-    r"-mmacosx-version-min=.*", r"-fno-pic", r"-Wl,-no-pie", r"-dead_strip", r"-dead_strip_dylibs",
+    # What rustc says itself: the deployment target and SDK, dead code. Not that a Linux
+    # executable is not position independent (`-fno-pic -Wl,-no-pie`): bun's objects and the
+    # prebuilt WebKit are compiled for that, and lld cannot put them in a PIE.
+    r"-mmacosx-version-min=.*", r"-dead_strip", r"-dead_strip_dylibs",
     # LTO, which a dev build and `--lto=off` have none of; the linker bun's link chose.
     r"-flto.*", r"-Wl,--lto-.*", r"-Wl,-mllvm,.*", r"-Wl,-ld_new", r"-fuse-ld=.*",
     # A flag of the compiler, not of the link.
@@ -223,6 +225,11 @@ def native(tree, head):
             raise SystemExit(f"bun's own build failed (the log is {tree}/bunprep-build.log):\n"
                              + open(log.name).read()[-3000:])
 
+    if sys.platform != "darwin":
+        # A release build without LTO compresses its objects' debug sections with zstd, which
+        # nixpkgs' LLVM is built without ("cannot compress debug sections (zstd not enabled)");
+        # bun's ELF link compresses them with zlib, and so do its objects here.
+        edit(os.path.join(tree, "scripts/build/flags.ts"), 'flag: ["-g", "-gz=zstd"],', 'flag: ["-g", "-gz=zlib"],')
     run([bun, "scripts/build.ts", f"--profile={PROFILE}", "--lto=off", "--configure-only"])
     run(["ninja", "-C", build_dir(tree), *native_targets(tree)])
     log.close()
