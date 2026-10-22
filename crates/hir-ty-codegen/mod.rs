@@ -963,8 +963,8 @@ struct OwnStatics {
     shared: FxHashSet<Crate>,
     theirs: FxHashSet<StaticId>,
     /// Crates with a function left to rustc that refers to we don't know what. That can be
-    /// any static of the crate but the ones declared in the body of another function.
-    // FIXME: a closure that such a function hands out can refer to the statics of its body.
+    /// any static of the crate: one declared in the body of another function too, through
+    /// rustc's copy of that function, which it calls.
     unknown: FxHashSet<Crate>,
     /// The crates of the program rustc built nothing of, whose statics have no copy but ours.
     unbuilt: FxHashSet<Crate>,
@@ -1025,13 +1025,11 @@ impl OwnStatics {
     }
 
     fn owns(&self, db: &dyn HirDatabase, id: StaticId) -> bool {
-        let module = id.module(db);
-        if self.unbuilt.contains(&module.krate(db)) {
+        let krate = id.module(db).krate(db);
+        if self.unbuilt.contains(&krate) {
             return true;
         }
-        self.crates.contains(&module.krate(db))
-            && !self.theirs.contains(&id)
-            && (module.is_block_module(db) || !self.unknown.contains(&module.krate(db)))
+        self.crates.contains(&krate) && !self.theirs.contains(&id) && !self.unknown.contains(&krate)
     }
 
     /// Whether our copy of the static stands in for the one rustc exports. rustc's is what the

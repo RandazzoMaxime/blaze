@@ -914,6 +914,68 @@ pub fn located<T: Default + Into<u64>>() -> u64 {
         raise Wrong(f"the edit was neither the daemon's nor cargo's: {how}")
 
 
+def statics_one_unit_uses(row):
+    """Statics written by a function left to rustc (`left`, for the constant `breakers.py
+    caller_in_constant` is about) that only the functions of one codegen unit use, as bun's
+    `SHOULD_ABORT` and the `FLAG` of a method of `impl<const SSL: bool, ..> NewServer<SSL, ..>`
+    are: rustc makes them local to the unit. ra-jit can't walk `left`, so rustc's copy of it
+    may reach any static of its crate, also `FLAG` through rustc's copy of `flag`. The base the
+    daemon builds of its own after the first patch can't link to a local symbol: it took the
+    `FLAG` in a body as its own, apart from the one rustc's `left` counts with, and a patch of
+    that base printed what cargo's does not. The edits are of `main`'s crate: one of `left`'s
+    could change what rustc's copy of it would be, and goes to cargo."""
+    in_place(row.path("core/src/gate.rs"), """use std::sync::atomic::{AtomicU64, Ordering};
+
+pub struct Gate<const LOUD: bool>;
+
+impl<const LOUD: bool> Gate<LOUD> {
+    pub fn flag() -> &'static AtomicU64 {
+        static FLAG: AtomicU64 = AtomicU64::new(0);
+        &FLAG
+    }
+}
+
+pub fn left() -> u64 {
+    const CALLER: &std::panic::Location<'static> = std::panic::Location::caller();
+    Gate::<true>::flag().fetch_add(1, Ordering::Relaxed) + u64::from(CALLER.line() == 0)
+}
+""")
+    with open(row.path("core/src/lib.rs"), "a") as lib:
+        lib.write("""
+pub mod gate;
+
+pub fn shown() -> u64 {
+    gate::Gate::<true>::flag().fetch_add(1, std::sync::atomic::Ordering::Relaxed) * 10
+}
+""")
+    show_in_main(row, '    println!("left {} shown {} left {}", soak_core::gate::left(), soak_core::shown(), '
+                      'soak_core::gate::left());\n')
+    row.both("cold", want="left 0 shown 10 left 2")
+    row.warm()
+    row.both("warm", want="left 0 shown 10 left 2")
+    main = row.path("app/src/main.rs")
+    in_place(main, open(main).read().replace('"left {} shown', '"Left {} shown', 1))
+    row.both("main edited", want="Left 0 shown 10 left 2")
+    logs = lambda: "".join(open(it, errors="replace").read()
+                           for it in glob.glob(os.path.join(row.home, "**", "log"), recursive=True))
+    began = time.time()
+    while "compiling the program for edits to patch" not in logs() and time.time() - began < 120:
+        time.sleep(0.5)
+    based = logs().split("compiling the program for edits to patch", 1)
+    if len(based) < 2:
+        raise Wrong("the daemon built no base of its own after the first patch")
+    while "stats:" not in logs().split("compiling the program for edits to patch", 1)[1]:
+        if time.time() - began > 300:
+            raise Wrong("the daemon's own base did not finish")
+        time.sleep(0.5)
+    in_place(main, open(main).read().replace('"Left {} shown', '"LEFT {} shown', 1))
+    how, _ = row.both("main edited again, over the daemon's base", want="LEFT 0 shown 10 left 2")
+    if how != "daemon" and not how.startswith("cargo"):
+        raise Wrong(f"the edit over the daemon's base was neither the daemon's nor cargo's: {how}")
+    if not re.search(r"left to rustc: soak_core::gate::left: ", logs()):
+        raise Wrong("`left` is not left to rustc: the row needs another function that is")
+
+
 def outside_its_package(row):
     """A module whose file is outside its package (`#[path = "../../shared/outside.rs"]`), as
     bun's runtime has: the file is in no package's directory, so it was not loaded, the
@@ -964,6 +1026,7 @@ ROWS = {
     "functions rustc keeps to an object": (kept_to_an_object, {"CARGO_INCREMENTAL": "0"}),
     "an item added beside a function left to rustc": (beside_one_left, {}),
     "an instance rustc's copy stands in for, edited": (forwarded_edited, {}),
+    "statics one codegen unit uses": (statics_one_unit_uses, {}),
     "a module file outside its package": (outside_its_package, {}),
     "an edit reached through a blanket impl": (through_a_blanket_impl, {}),
     "an edit only a function left to rustc reaches": (reached_from_one_left, {}),

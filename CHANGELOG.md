@@ -405,6 +405,12 @@ All notable changes to ra-jit are written here. The format follows
   constant, which `main` calls: the program printed what it did before the edit. Such an edit
   goes to cargo, which names the function (`soakrows.py`, "an instance rustc's copy stands in
   for, edited").
+- A static declared in a function's body, as the `FLAG` of a method of bun's
+  `impl<const SSL: bool, ..> NewServer<SSL, ..>`, is rustc's in a crate with a function left
+  to rustc that reaches what ra-jit can't tell: rustc's copy of that function reaches the
+  static through rustc's copy of the other. A build in full had its own copy beside rustc's,
+  and the two counted apart, in the base the daemon builds after the first patch
+  (`soakrows.py`, "statics one codegen unit uses").
 - A borrowed constant with a cast in it, `&[b"node" as &[u8]][..]` returned for `'static`, is
   promoted as rustc promotes it, where it was built on the stack and the reference outlived
   it: every cast is promotable but of a pointer to an integer. bun's `new Bun.Transpiler()`
