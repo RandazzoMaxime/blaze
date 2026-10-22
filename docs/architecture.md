@@ -286,7 +286,8 @@ the descriptor's slot.
 
 Once nothing waits for a second, the daemon builds its own base in full in the background,
 from the store as far as it can; an edit that comes meanwhile interrupts it and is a patch
-of rustc's executable. A worker that holds more than a quarter of the machine's memory while
+of rustc's executable, unless the base has begun to link: the edit then waits for that link
+and is a patch of the base, as a link once begun has replaced rustc's executable. A worker that holds more than a quarter of the machine's memory while
 it builds that base gives it up for good, logs so, and edits go on patching rustc's
 executable: what the build computed stays in the database, so the bound is on what the
 worker keeps (`RA_JIT_OWN_BASE_MEMORY`, a size such as `40G`, or `off`). The daemon's

@@ -208,9 +208,12 @@ SCENARIOS = {
     "full-then-patch": ([[edit(M, "    x + 1\n}\n\nfn counted", "    x + 2\n}\n\nfn counted")],
                          [edit(M, "    x * 3\n", "    x * 4\n")]], ["full", "patch"], 0, {}),
     "own-base": ([[edit(M, "    x * 3\n", "    x * 4\n")]], ["patch"], 8, {}),
-    # A patch of rustc's executable when the edit interrupts the daemon's own base; in full when
-    # that base was linked as the edit came, which the edit made the daemon throw away.
-    "interrupt": ([[edit(M, "    x * 3\n", "    x * 4\n")]], [None], 1.3, {}),
+    # A patch of rustc's executable when the edit interrupts the daemon's own base, and of that
+    # base when it was linking as the edit came: the edit waits for the link, whose executable
+    # is then the program. The waits land the edit at points of the base's build.
+    "interrupt": ([[edit(M, "    x * 3\n", "    x * 4\n")]], ["patch"], 1.3, {}),
+    **{f"interrupt-{ms}": ([[edit(M, "    x * 3\n", "    x * 4\n")]], ["patch"], ms / 1000, {})
+       for ms in (1100, 1200, 1400, 1500, 1700)},
     "off": ([[edit(M, "    x * 3\n", "    x * 4\n")]], ["patch"], 0, {"RA_JIT_RUSTC_BASE": "0"}),
 }
 # Of CACHED_FILES. The attribute hands the body to a macro: an edit of it is more than bodies.
@@ -349,14 +352,6 @@ def how_built(lines):
     return "patch" if links and "(spliced:" in links[-1] else "full"
 
 
-def own_base_between(lines):
-    """Whether the edit interrupted the daemon's own base, the one build here nobody asked
-    for, as it can when the reference build between two edits leaves the daemon idle for its
-    second. The edit is then a patch of rustc's executable or, when the base was linked over
-    it, in full: either is right, and the output is still compared."""
-    return any(it.startswith("interrupted:") for it in lines)
-
-
 def main():
     work = os.path.realpath(opt("--work", "/tmp/rustcbase"))
     names = sys.argv[1:] or list(SCENARIOS)
@@ -440,9 +435,7 @@ def main():
                 theirs = outputs(os.path.join(reference, "debug", "app"), ws)
                 how = how_built(lines)
                 same = ours == theirs
-                between = name not in ("own-base", "interrupt") and own_base_between(lines)
-                wanted = "either, the own base came between" if between else want or "either"
-                print(f"  edit {step}: {took:.2f}s {how} (wanted {wanted}) same={same}", flush=True)
+                print(f"  edit {step}: {took:.2f}s {how} (wanted {want or 'either'}) same={same}", flush=True)
                 notable = [it for it in lines if re.search(
                     r"rustc|declin|no patch|built in full|spliced|not kept|nobody asks|outdated|interrupt", it)]
                 for it in notable[:12]:
@@ -450,7 +443,7 @@ def main():
                 if not same:
                     failed.append(f"{name} edit {step}: output differs")
                     print(f"    ra-jit: {ours}\n    cargo:  {theirs}", flush=True)
-                if want and how != want and not between:
+                if want and how != want:
                     failed.append(f"{name} edit {step}: {how}, not {want}")
                     for it in lines[-60:]:
                         print(f"      | {it[:240]}", flush=True)
