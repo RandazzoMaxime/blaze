@@ -220,9 +220,9 @@ pub(crate) fn text_of<S: AsRef<str>>(args: &[S], program: bool, source: &Path) -
 }
 
 /// The `#[cfg]`s of each `#[global_allocator]` in the files of the crate whose root is `root`,
-/// found through its `mod name;` items, with those of the modules it is in. Read as text, not
-/// parsed: a `#[path]`, a module written by a macro, the `#[cfg]` of an inline module and
-/// `cfg_attr` aren't seen.
+/// found through its `mod name;` items, with those of the modules it is in, inline or not. Read
+/// as text, not parsed: a `#[path]`, a module written by a macro, the files of a `mod name;` in
+/// an inline module and `cfg_attr` aren't seen.
 fn global_allocators(root: &Path) -> Vec<String> {
     let mut found = Vec::new();
     let mut files = vec![(root.to_path_buf(), true, String::new())];
@@ -241,7 +241,8 @@ fn global_allocators(root: &Path) -> Vec<String> {
             false => "#[global_allocator]",
         };
         for (start, _) in code.match_indices(marker) {
-            found.push(format!("{outer}{}", cfgs_around(&kept, start, start + marker.len())));
+            let around = cfgs_around(&kept, start, start + marker.len());
+            found.push(format!("{outer}{}{around}", enclosing_cfgs(&code, &kept, start)));
         }
         // A module of `a.rs` is in `a/`, one of `main.rs`, `lib.rs` or `mod.rs` beside it.
         let Some(parent) = file.parent() else { continue };
@@ -251,7 +252,8 @@ fn global_allocators(root: &Path) -> Vec<String> {
             parent.join(file.file_stem().unwrap_or_default())
         };
         for (name, statement) in out_of_line_modules(&code) {
-            let outer = format!("{outer}{}", leading_cfgs(&kept[statement]));
+            let enclosing = enclosing_cfgs(&code, &kept, statement.start);
+            let outer = format!("{outer}{enclosing}{}", leading_cfgs(&kept[statement]));
             let flat = dir.join(format!("{name}.rs"));
             let nested = dir.join(&name).join("mod.rs");
             if flat.exists() {
@@ -435,6 +437,29 @@ fn out_of_line_modules(text: &str) -> Vec<(String, std::ops::Range<usize>)> {
     names
 }
 
+/// The `#[cfg(..)]` attributes of the inline modules (`mod name { .. }`) that `at` is in,
+/// outermost first: a `#[cfg(test)] mod tests` can have an allocator of its own.
+fn enclosing_cfgs(code: &str, kept: &str, at: usize) -> String {
+    let mut open = Vec::new();
+    let mut from = 0;
+    for (brace, it) in code[..at].match_indices([';', '{', '}']) {
+        let statement = from..brace;
+        from = brace + 1;
+        match it {
+            "{" => {
+                let words: Vec<&str> = code[statement.clone()].split_whitespace().collect();
+                let module = matches!(words[..], [.., "mod", _]);
+                open.push(if module { leading_cfgs(&kept[statement]) } else { String::new() });
+            }
+            "}" => {
+                open.pop();
+            }
+            _ => {}
+        }
+    }
+    open.concat()
+}
+
 /// The `#[cfg(..)]` attributes that `statement` starts with.
 fn leading_cfgs(statement: &str) -> String {
     let mut cfgs = String::new();
@@ -487,6 +512,22 @@ mod tests {
         let mut found = global_allocators(&dir.join("src/main.rs"));
         found.sort();
         assert_eq!(found, ["", "#[cfg(all(\n    not(windows),\n    feature = \"jemalloc\"\n))]\n"]);
+    }
+
+    #[test]
+    fn allocators_under_the_cfgs_of_inline_modules() {
+        let dir = scratch("inline");
+        std::fs::write(
+            dir.join("lib.rs"),
+            "fn f() { let _ = '{'; }\n#[cfg(feature = \"a\")]\npub mod outer {\n    impl S { fn g() {} }\n\
+             \n    #[cfg(test)]\n    mod test {\n        use super::*;\n\n        #[global_allocator]\n\
+             \x20       static A: D = D;\n    }\n}\n#[global_allocator]\nstatic B: S = S;\n",
+        )
+        .unwrap();
+        assert_eq!(
+            global_allocators(&dir.join("lib.rs")),
+            ["#[cfg(feature = \"a\")]\n#[cfg(test)]\n", ""]
+        );
     }
 
     #[test]

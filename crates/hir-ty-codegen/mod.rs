@@ -6442,6 +6442,23 @@ fn return_slot() -> LocalId {
 /// Field accesses can be unaligned (packed structs, chunked copies).
 const MEM: MemFlagsData = MemFlagsData::new().with_notrap();
 
+/// The function of AArch64's crypto instruction `llvm.{name}` names, whose operands are in
+/// LLVM's order: the first is the one the instruction writes over.
+fn neon_crypto(name: &str) -> String {
+    let op = name.trim_start_matches("aarch64.crypto.");
+    let (extension, operands) = match op {
+        "aese" | "aesd" => ("aes", "v0.16b, v1.16b"),
+        "aesmc" | "aesimc" => ("aes", "v0.16b, v0.16b"),
+        "sha256h" | "sha256h2" => ("sha2", "q0, q1, v2.4s"),
+        "sha256su1" | "sha1su0" => ("sha2", "v0.4s, v1.4s, v2.4s"),
+        "sha256su0" | "sha1su1" => ("sha2", "v0.4s, v1.4s"),
+        "sha512h" | "sha512h2" => ("sha3", "q0, q1, v2.2d"),
+        "sha512su1" => ("sha3", "v0.2d, v1.2d, v2.2d"),
+        _ => ("sha3", "v0.2d, v1.2d"),
+    };
+    asm::neon_instruction(extension, &format!("{op} {operands}"))
+}
+
 /// The vector of 16 bytes a SIMD operation on `count` integer lanes of `lane` is done in, and
 /// how many of them there are: one Cranelift and LLVM both have for every target.
 fn simd_chunks(lane: Type, count: u64) -> Option<(Type, i32)> {
@@ -12860,6 +12877,72 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
                 self.builder.ins().store(MEM, acc, dst, 0);
             }
             (
+                "simd_reduce_add_ordered"
+                | "simd_reduce_mul_ordered"
+                | "simd_reduce_add_unordered"
+                | "simd_reduce_mul_unordered",
+                [arg, start @ ..],
+            ) if start.len() == name.ends_with("_ordered") as usize => {
+                let (src, ty) = self.operand(arg)?;
+                let (lane, count) = self.simd_lanes(ty)?;
+                let lane_at = |this: &mut Self, i: u64| {
+                    this.builder.ins().load(lane.ty, MEM, src, (i * lane.ty.bytes() as u64) as i32)
+                };
+                let (mut acc, first) = match start {
+                    [start] => (self.load_scalar(start)?.0, 0),
+                    _ => (lane_at(self, 0), 1),
+                };
+                let add = name.starts_with("simd_reduce_add");
+                for i in first..count {
+                    let value = lane_at(self, i);
+                    let ins = self.builder.ins();
+                    acc = match (add, lane.ty.is_float()) {
+                        (true, true) => ins.fadd(acc, value),
+                        (true, false) => ins.iadd(acc, value),
+                        (false, true) => ins.fmul(acc, value),
+                        (false, false) => ins.imul(acc, value),
+                    };
+                }
+                self.builder.ins().store(MEM, acc, dst, 0);
+            }
+            // Only the lanes a mask has are read or written: the others may be past the end of
+            // what the pointer may reach.
+            ("simd_masked_load", [mask, pointer, values])
+            | ("simd_masked_store", [mask, pointer, values]) => {
+                let (mask, mask_ty) = self.operand(mask)?;
+                let (pointer, _) = self.load_scalar(pointer)?;
+                let (values, ty) = self.operand(values)?;
+                let (mask_lane, count) = self.simd_lanes(mask_ty)?;
+                let (lane, _) = self.simd_lanes(ty)?;
+                let chosen: Vec<Value> = (0..count)
+                    .map(|i| {
+                        let offset = (i * mask_lane.ty.bytes() as u64) as i32;
+                        let chosen = self.builder.ins().load(mask_lane.ty, MEM, mask, offset);
+                        self.builder.ins().icmp_imm(IntCC::SignedLessThan, chosen, 0)
+                    })
+                    .collect();
+                let load = name == "simd_masked_load";
+                if load {
+                    let size = self.layout(ty)?.size;
+                    self.copy(dst, values, size);
+                }
+                for (i, chosen) in chosen.into_iter().enumerate() {
+                    let offset = i as i32 * lane.ty.bytes() as i32;
+                    let (on, next) = (self.builder.create_block(), self.builder.create_block());
+                    self.builder.ins().brif(chosen, on, &[], next, &[]);
+                    self.builder.switch_to_block(on);
+                    if load {
+                        let value = self.builder.ins().load(lane.ty, MEM, pointer, offset);
+                        self.builder.ins().store(MEM, value, dst, offset);
+                    } else {
+                        let value = self.builder.ins().load(lane.ty, MEM, values, offset);
+                        self.builder.ins().store(MEM, value, pointer, offset);
+                    }
+                    self.builder.ins().jump(next, &[]);
+                    self.builder.switch_to_block(next);
+                }
+            }
+            (
                 "fabs"
                 | "fabsf32"
                 | "fabsf64"
@@ -13238,6 +13321,61 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
                     self.builder.ins().store(MEM, value, dst, pair as i32 * 2 * width);
                 }
             }
+            ("uaddlv" | "saddlv" | "uaddv" | "saddv", [a]) => {
+                let Some(sum_ty) =
+                    parts.first().and_then(|it| Type::int(it.strip_prefix('i')?.parse().ok()?))
+                else {
+                    return Ok(false);
+                };
+                let (a, _) = self.operand(a)?;
+                // The sum of every lane, each as wide as the sum.
+                let mut sum = self.builder.ins().iconst(sum_ty, 0);
+                for lane in 0..lanes {
+                    let value = self.builder.ins().load(ty, MEM, a, lane * width);
+                    let value = if sum_ty.bits() < ty.bits() {
+                        self.builder.ins().ireduce(sum_ty, value)
+                    } else if sum_ty.bits() == ty.bits() {
+                        value
+                    } else if op.starts_with('s') {
+                        self.builder.ins().sextend(sum_ty, value)
+                    } else {
+                        self.builder.ins().uextend(sum_ty, value)
+                    };
+                    sum = self.builder.ins().iadd(sum, value);
+                }
+                self.builder.ins().store(MEM, sum, dst, 0);
+            }
+            ("sqdmull", [a, b]) if ty.bits() >= 32 => {
+                let (a, _) = self.operand(a)?;
+                let (b, _) = self.operand(b)?;
+                let narrow = ty.half_width().expect("a lane of at least 32 bits");
+                let least = -(1i64 << (narrow.bits() - 1));
+                // Twice the product, past the lane's range only for the least by itself: that
+                // is the most.
+                let values: Vec<Value> = (0..lanes)
+                    .map(|lane| {
+                        let at = lane * narrow.bytes() as i32;
+                        let l = self.builder.ins().load(narrow, MEM, a, at);
+                        let r = self.builder.ins().load(narrow, MEM, b, at);
+                        let l_least = self.builder.ins().icmp_imm(IntCC::Equal, l, least);
+                        let r_least = self.builder.ins().icmp_imm(IntCC::Equal, r, least);
+                        let both = self.builder.ins().band(l_least, r_least);
+                        let l = self.builder.ins().sextend(ty, l);
+                        let r = self.builder.ins().sextend(ty, r);
+                        let product = self.builder.ins().imul(l, r);
+                        let twice = self.builder.ins().ishl_imm(product, 1);
+                        let most = match ty.bits() {
+                            64 => i64::MAX,
+                            bits => (1i64 << (bits - 1)) - 1,
+                        };
+                        let most = self.builder.ins().iconst(ty, most);
+                        self.builder.ins().select(both, most, twice)
+                    })
+                    .collect();
+                for (lane, value) in values.into_iter().enumerate() {
+                    self.builder.ins().store(MEM, value, dst, lane as i32 * width);
+                }
+            }
             ("tbl1" | "tbx1", [.., table, indices]) if ty == types::I8 => {
                 let kept = match args {
                     [kept, _, _] if op == "tbx1" => Some(self.operand(kept)?.0),
@@ -13416,6 +13554,37 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
                 // The instruction takes its third vector in `xmm0`.
                 let rounds = "movdqa xmm3, xmm0\nmovdqa xmm0, xmm2\nsha256rnds2 xmm3, xmm1";
                 self.vector_assembly(asm::vector_instruction(rounds, "xmm3"), a, b, dst)?;
+            }
+            (
+                "aarch64.crypto.sha256su0"
+                | "aarch64.crypto.sha512su0"
+                | "aarch64.crypto.sha1su1"
+                | "aarch64.crypto.aese"
+                | "aarch64.crypto.aesd",
+                [a, b],
+            ) => {
+                let instruction = neon_crypto(name);
+                self.vector_assembly(instruction, a, b, dst)?;
+            }
+            ("aarch64.crypto.aesmc" | "aarch64.crypto.aesimc", [a]) => {
+                let instruction = neon_crypto(name);
+                self.vector_assembly(instruction, a, a, dst)?;
+            }
+            (
+                "aarch64.crypto.sha256h"
+                | "aarch64.crypto.sha256h2"
+                | "aarch64.crypto.sha256su1"
+                | "aarch64.crypto.sha512h"
+                | "aarch64.crypto.sha512h2"
+                | "aarch64.crypto.sha512su1"
+                | "aarch64.crypto.sha1su0",
+                [a, b, c],
+            ) => {
+                let (c, ty) = self.operand(c)?;
+                let size = self.layout(ty)?.size;
+                self.copy(dst, c, size);
+                let instruction = neon_crypto(name);
+                self.vector_assembly(instruction, a, b, dst)?;
             }
             ("x86.sha1rnds4", [a, b, function]) => {
                 let (function, _) = self.load_scalar(function)?;
