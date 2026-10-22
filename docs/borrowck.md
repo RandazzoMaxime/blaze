@@ -4,7 +4,7 @@ ra-jit has its own borrow checker, the crate `hir-ty-borrowck` in the rust-analy
 (`vendor/rust-analyzer/crates/hir-ty-borrowck`, next to `hir-ty`). It checks the MIR rust-analyzer
 lowers, the same MIR the code generator compiles, and it is meant to give exactly rustc's
 verdict: the same errors, on the same lines, and none where rustc gives none. It gives
-rustc's verdict on 88% of rustc's own borrow-check tests today, and on every one rustc
+rustc's verdict on 89% of rustc's own borrow-check tests today, and on every one rustc
 accepts; how they are scored and what is left is below.
 
 It runs as part of rust-analyzer's diagnostics, so the daemon computes it for every edited
@@ -89,9 +89,9 @@ All of these are rustc's, written from `compiler/rustc_borrowck` at the pinned n
   and return type, and an associated type `<T as Trait>::Ty` where `T` implements `Trait`
   (`impl Trait for &'static ()` makes `<&'a () as Trait>::Ty` need `'a: 'static`). The
   generic arguments a path spells out are well-formed, and a called function's where clauses
-  hold for them, in code that is never reached too. A constant named through a type that
-  spells out lifetimes, `A::<'a>::C` or `<A<'a>>::C`, has its impl's self type (or for a
-  trait's constant, `Self`) equal to `A<'a>`, in a range pattern's bounds too.
+  hold for them, in code that is never reached too. A constant or function named through a
+  type that spells out lifetimes, `A::<'a>::C` or `<A<'a>>::new`, has its impl's self type (or
+  for a trait's item, `Self`) equal to `A<'a>`, in a range pattern's bounds too.
 - Promotion: a borrowed function item, and a named `const` whose type has no interior
   mutability whatever its drop (rustc asks whether the value needs dropping, not the type).
   In a `const` or `static` item's value, a call of a `const fn` is promotable too
@@ -99,7 +99,8 @@ All of these are rustc's, written from `compiler/rustc_borrowck` at the pinned n
 - Region inference: liveness of locals (drops kept live only back to where the local may be
   initialized), outlives constraints from every statement, call, cast and aggregate, the
   signature's universal regions and implied bounds (normalized parameters and the impl
-  header included, for associated consts too), where clauses (elaborated through
+  header included, for associated consts too; a projection implies what its arguments do as
+  well as what it normalizes to, `<&'a &'b () as Trait>::Type` that `'b: 'a`), where clauses (elaborated through
   supertraits) and the region constraints of proving them with the trait solver (a where
   clause or impl that proves a bound relates its regions to the bound's, `&'max G: Get` proving
   `&'min G: Get` makes them equal, and the impl's own `T: 'a` must hold), type tests, and lifetimes written in `let` annotations (`let _: T = value`
@@ -121,7 +122,9 @@ All of these are rustc's, written from `compiler/rustc_borrowck` at the pinned n
   type annotation on it. A function item, closure or safe function pointer cast to a
   function pointer is a subtype of it by signature. A where clause `for<'a> T: 'a` is
   `T: 'static`, and a type parameter that fails it is rustc's codeless "does not live long
-  enough".
+  enough". A trait object cast to one of its supertraits' (`dyn Foo<'static>` to
+  `dyn Bar<'static, 'a>` with `trait Foo<'a>: Bar<'a, 'a>`) has the supertrait as the
+  source's arguments instantiate it equal to the target's.
 - Errors on universal regions: "lifetime may not live long enough", E0521, E0309, E0310,
   E0311, with rustc's object lifetime defaults (`&'a dyn Trait` is `dyn Trait + 'a`, a trait
   bounded by `'static` makes its objects `'static`, elsewhere in a body the lifetime is
@@ -204,8 +207,8 @@ With no borrow checker, the 245 units rustc accepts would pass. Now:
 
 | Mode | In scope | Pass | rustc accepts, ra-jit too | rustc rejects, same errors |
 |---|---|---|---|---|
-| Polonius | 1579 | 1392 (88.2%) | 245 of 245 | 1147 of 1334 |
-| NLL | 1577 | 1387 (88.0%) | 226 of 226 | 1161 of 1351 |
+| Polonius | 1579 | 1400 (88.7%) | 245 of 245 | 1155 of 1334 |
+| NLL | 1577 | 1395 (88.5%) | 226 of 226 | 1169 of 1351 |
 
 463 units are out of scope; 344 of them need a nightly feature. CI runs the scoring on Linux
 and fails below a floor a few units under the count there.
@@ -218,10 +221,10 @@ just, axum, nushell, delta, eza, tokei and starship it finds nothing, nor on the
 ## What is left
 
 Every failing unit is one where rustc gives an error ra-jit does not, or gives it on another
-line or with another code. By what is wrong, most first: 26 "lifetime may not live long
-enough" and 18 E0597 not reported, 15 with only an error rustc does not give, 11 E0309 and
-10 E0310 not reported, 8 "lifetime may not live long enough" on another line, and 8 each of
-E0716, E0507 and E0521 not reported, then a long tail. The causes, grouped:
+line or with another code. By what is wrong, most first: 23 "lifetime may not live long
+enough" and 15 E0597 not reported, 11 E0309 and 10 E0310 not reported, 10 with only an error
+rustc does not give, 9 each of E0716 and E0521 not reported, 8 "lifetime may not live long
+enough" on another line, and 8 each of E0507 and E0700 not reported, then a long tail. The causes, grouped:
 
 - **Higher-ranked regions and placeholders** (`for<'a>` bounds, closures with higher-ranked
   signatures): rustc checks them with placeholders in universes; ra-jit does not yet, and
@@ -277,6 +280,9 @@ changes to rust-analyzer were needed, each made as rustc does it:
   captures `f` or a method that takes it by value does not read it uninitialized (E0381).
 - A range pattern's bounds carry their expressions' spans, as other operands do, so a
   constant named there is found with the lifetimes its path writes.
+- A cast between raw pointers stays a cast where inference finds the types coerce, as rustc's
+  `check_cast` keeps it (rust-lang/rust#113257): the pointees may differ only in lifetimes,
+  which inference cannot tell apart, and a cast relates them only for trait objects.
 - Type inference records the closures it types without an expected signature
   (`InferenceResult::closures_without_expectation`), whose elided parameter lifetimes rustc
   binds in the closure's signature where rust-analyzer's signature has none.
@@ -290,6 +296,10 @@ missed rather than errors made up:
 
 - Temporaries of a block's tail expression in edition 2021 are dropped at a different point.
 - Comparisons against constant patterns take their operands by value.
+- An arm with a guard binds its by-reference bindings before the guard and the rest after,
+  in rustc, so what it binds by value is dropped first; rust-analyzer binds them in the
+  pattern's order (`dropck/eager-by-ref-binding-for-guards.rs`, where it reports two errors
+  rustc does not).
 - Unwind paths are not lowered. rustc's MIR gives every call and drop a cleanup path ending
   at `resume`, where any borrow still live that outlives the function's own regions is an
   error (E0597 for `let x = ...; let r: &'a _ = &x; f();`). ra-jit checks that at each call,

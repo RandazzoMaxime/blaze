@@ -263,11 +263,14 @@ a shell without the variable keeps no store, whatever later shells have set.
 
 ## Known problems
 
-- **The daemon builds programs rustc would reject.** It refuses source in which
-  rust-analyzer finds an error, and those builds go to cargo. It has no borrow checker, so
-  a borrow or move error is not found: with a warm daemon, `cargo ra-jit run` built and ran
-  a program that uses a value after moving it. Nothing is reported until cargo next builds
-  that crate. Run `cargo ra-jit check` when you want rustc's verdict.
+- **The daemon's verdict is the build's, and it is not yet all of rustc's.** An error that
+  rust-analyzer or ra-jit's borrow checker finds in the edited files fails the build, written
+  as rustc writes it, with cargo's status; no rustc runs to say it again
+  ([#84](https://github.com/indexable-inc/ra-jit/issues/84)). What they do not find is
+  built: rust-analyzer reports few of rustc's errors for certain, and the borrow checker
+  passes part of rustc's tests ([borrowck.md](borrowck.md)). Code rustc builds that ra-jit
+  takes for an error fails the build too; that is a ra-jit bug to report. `cargo ra-jit
+  check` is still `cargo check`.
 - Linux x86-64 and macOS arm64 have been run; on macOS only ripgrep, fd and hyperfine and
   the generated workspace of the harness. The code compiles for Windows, but every build
   there would go to cargo (the link step knows ELF and Mach-O), and the command has not

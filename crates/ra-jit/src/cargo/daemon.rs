@@ -179,7 +179,9 @@ pub(crate) enum Reply {
 /// Why the worker did not build a program.
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub(crate) enum NotBuilt {
-    /// The source has an error, or the daemon failed: the build fails.
+    /// The source has an error, as rustc writes it: the build fails with it.
+    Error(String),
+    /// The daemon failed.
     Failed(String),
     /// ra-jit does not build the source as it is, and cargo does.
     Cargos(String),
@@ -187,15 +189,18 @@ pub(crate) enum NotBuilt {
 
 impl NotBuilt {
     pub(crate) fn why(self) -> String {
-        let (NotBuilt::Failed(why) | NotBuilt::Cargos(why)) = self;
+        let (NotBuilt::Error(why) | NotBuilt::Failed(why) | NotBuilt::Cargos(why)) = self;
         why
     }
 
     /// What the worker's reply other than `ok` says.
     fn of(reply: &str) -> NotBuilt {
-        match reply.strip_prefix("cargo: ") {
-            Some(why) => NotBuilt::Cargos(why.to_owned()),
-            None => NotBuilt::Failed(reply.strip_prefix("error: ").unwrap_or(reply).to_owned()),
+        if let Some(why) = reply.strip_prefix("cargo: ") {
+            return NotBuilt::Cargos(why.to_owned());
+        }
+        match reply.strip_prefix("error: ") {
+            Some(said) => NotBuilt::Error(ra_jit_live::format::unescape(said)),
+            None => NotBuilt::Failed(reply.to_owned()),
         }
     }
 }
