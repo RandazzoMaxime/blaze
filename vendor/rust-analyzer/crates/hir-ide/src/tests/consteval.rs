@@ -2737,6 +2737,84 @@ const GOAL: u32 = 4u32.write();
 }
 
 #[test]
+fn macro_defined_by_cfg_if_in_a_macro_use_module() {
+    check_number(
+        r#"
+//- minicore: option, index, slice
+//- /cfg_if.rs crate:cfg_if
+#[macro_export]
+macro_rules! cfg_if {
+    (
+        if #[cfg( $($i_meta:tt)+ )] { $( $i_tokens:tt )* }
+        $( else if #[cfg( $($ei_meta:tt)+ )] { $( $ei_tokens:tt )* } )*
+        $( else { $( $e_tokens:tt )* } )?
+    ) => {
+        $crate::cfg_if! {
+            @__items () ;
+            (( $($i_meta)+ ) ( $( $i_tokens )* )),
+            $( (( $($ei_meta)+ ) ( $( $ei_tokens )* )), )*
+            $( (() ( $( $e_tokens )* )), )?
+        }
+    };
+    (@__items ( $( ($($_:tt)*) , )* ) ; ) => {};
+    (
+        @__items ( $( ($($no:tt)+) , )* ) ;
+        (( $( $($yes:tt)+ )? ) ( $( $tokens:tt )* )),
+        $( $rest:tt , )*
+    ) => {
+        #[cfg(all(
+            $( $($yes)+ , )?
+            not(any( $( $($no)+ ),* ))
+        ))]
+        $crate::cfg_if! { @__temp_group $( $tokens )* }
+        $crate::cfg_if! {
+            @__items ( $( ($($no)+) , )* $( ($($yes)+) , )? ) ;
+            $( $rest , )*
+        }
+    };
+    (@__temp_group $( $tokens:tt )* ) => {
+        $( $tokens )*
+    };
+}
+//- /main.rs crate:main deps:cfg_if
+#[macro_use]
+mod base {
+    #[macro_use]
+    mod debug_trace {
+        use cfg_if::cfg_if;
+        cfg_if! {
+            if #[cfg(feature = "debug_trace")] {
+                macro_rules! trace { ( @$ty:ident $($args:tt)* ) => { panic!() }; }
+            } else {
+                macro_rules! trace {
+                    ( @$ty:ident $($args:tt)* ) => {};
+                    ( @$ty:ident $($args:tt),* ) => {};
+                }
+            }
+        }
+    }
+}
+mod parser {
+    pub struct Cursor { pub next_pos: usize }
+    impl Cursor {
+        pub const fn consume_ch(&mut self, input: &[u8]) -> Option<u8> {
+            let ch = if self.next_pos < input.len() { Some(input[self.next_pos]) } else { None };
+            self.next_pos += 1;
+            trace!(@chars "consume", ch);
+            ch
+        }
+    }
+}
+const GOAL: u8 = {
+    let mut cursor = parser::Cursor { next_pos: 1 };
+    match cursor.consume_ch(b"xyz") { Some(ch) => ch, None => 0 }
+};
+"#,
+        b'y' as i128,
+    );
+}
+
+#[test]
 fn adt_const_params() {
     check_number(
         r#"

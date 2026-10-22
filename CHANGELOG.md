@@ -357,6 +357,13 @@ All notable changes to ra-jit are written here. The format follows
 
 ### Fixed
 
+- A `macro_rules!` that a macro of another crate defines, called by a name a `use` imports
+  (`use cfg_if::cfg_if; cfg_if! { .. macro_rules! trace { .. } }`), is in the textual scope of
+  what follows. The call waited for imports to be resolved, by when `#[macro_use]` had taken
+  the module's macros to its parent without it, and every `trace!` of lol_html's parser was a
+  missing expression: 43 of bun's functions (the `StateMachine` impls of `Lexer` and
+  `TagScanner`, `TransformStream::write`) were left to rustc. Such a call is now expanded where
+  it is written, as one by a path to the other crate was. `harness/bun-repros/cfg_if_macros`.
 - `--crate NAME` names no crate of the standard library's when a crate of the program has the
   name. std vendors foldhash 0.2.0, libc and hashbrown, and its foldhash, which rustc does not
   build (hashbrown has it only with its default hasher), sees no `core` in rust-analyzer's

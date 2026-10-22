@@ -46,6 +46,12 @@ CASES = {
         "expected": "compiled",
         "reasons": (),
     },
+    "cfg_if_macros": {
+        "package": "runner",
+        "crate": "cfg_if_macros",
+        "expected": "compiled",
+        "reasons": (),
+    },
     "macro_impls": {
         "package": "runner",
         "crate": "dtoa",
