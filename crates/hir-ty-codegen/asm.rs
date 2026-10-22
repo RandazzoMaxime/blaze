@@ -48,6 +48,13 @@ pub(super) fn isb() -> String {
     format!(".globl {SYMBOL}\n{SYMBOL}:\nisb\nret\n")
 }
 
+/// AArch64's CRC-32 of its second argument into the checksum of its first, as `instruction`
+/// (`crc32b` to `crc32cx`) says: the `x` ones read 64 bits.
+pub(super) fn crc32(instruction: &str) -> String {
+    let data = if instruction.ends_with('x') { "x1" } else { "w1" };
+    format!(".arch_extension crc\n.globl {SYMBOL}\n{SYMBOL}:\n{instruction} w0, w0, {data}\nret\n")
+}
+
 /// Returns its first float argument with the second left in the register it was passed in,
 /// which is where a pair of floats is returned.
 pub(super) fn join_floats() -> String {

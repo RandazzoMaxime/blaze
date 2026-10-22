@@ -1883,6 +1883,11 @@ const LARGE: usize = 50_000;
 /// which a function this large, a `main` or a big `match` run once, rarely pays for.
 const SINGLE_PASS: usize = 20_000;
 
+/// The most cases of a `match` lowered as a chain of comparisons for LLVM to make a `switch`
+/// of; a larger one, which a function Cranelift compiles after all would test one case at a
+/// time, keeps `Switch`'s tree.
+const CHAINED: usize = 256;
+
 /// A relocation of a function that Cranelift has no kind for, which the object is given
 /// once Cranelift has written it: see [`Code::elf_types`].
 struct ElfReloc {
@@ -3885,11 +3890,27 @@ fn inline(ctx: &mut cranelift_codegen::Context, inlined: &[ir::Function]) -> Res
     // names, which among the caller's is another symbol's.
     let ends = bodies.put.iter().skip(1).map(|it| it.insts).chain([ctx.func.dfg.num_insts()]);
     for (put, end) in bodies.put.iter().zip(ends) {
-        // What a body is built to is of the statement that called it.
-        for inst in put.insts..end {
-            ctx.func.set_srcloc(ir::Inst::from_u32(inst as u32), put.statement);
-        }
         let body = &inlined[put.body];
+        // Cranelift makes the instructions of a body it inlines in the order it visits the
+        // body's, and gives them no source location: an `offset`'s mark goes by that order,
+        // where every instruction is the one it is made from (a return becomes a jump).
+        let order: Vec<ir::Inst> = cranelift_codegen::traversals::Dfs::new()
+            .pre_order_iter(body)
+            .flat_map(|block| body.layout.block_insts(block))
+            .collect();
+        let made = |at: usize| ir::Inst::from_u32((put.insts + at) as u32);
+        let in_order = order.len() <= end - put.insts
+            && order.iter().enumerate().all(|(at, &it)| {
+                let from = body.dfg.insts[it].opcode();
+                from.is_return() || ctx.func.dfg.insts[made(at)].opcode() == from
+            });
+        // What a body is built to is of the statement that called it.
+        for at in 0..end - put.insts {
+            let from = order.get(at).filter(|_| in_order);
+            let marked = from.is_some_and(|&it| unwind::seh::is_in_bounds(body.srcloc(it)));
+            let loc = if marked { unwind::seh::in_bounds(put.statement) } else { put.statement };
+            ctx.func.set_srcloc(made(at), loc);
+        }
         for (global, data) in body.global_values.iter() {
             let ir::GlobalValueData::Symbol { name: ir::ExternalName::User(name), .. } = data
             else {
@@ -7812,6 +7833,9 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
         // Only blocks that can run are compiled: `if cfg!(miri) { .. }` calls functions that do
         // not exist.
         let mut reachable = rustc_hash::FxHashSet::default();
+        let off = self.checks_off(body);
+        let resumes_only =
+            if frame.is_some() { FxHashSet::default() } else { Self::resumes_only(body) };
         // Switches on a value known now, and the one way they go.
         let mut decided = FxHashMap::default();
         let mut worklist = vec![body.start_block];
@@ -7821,7 +7845,7 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
             }
             match body.basic_blocks[id].terminator.as_ref().map(|it| &it.kind) {
                 Some(TerminatorKind::SwitchInt { discr, targets }) => {
-                    match self.switch_bits(&body.basic_blocks[id], discr) {
+                    match self.switch_bits(&body.basic_blocks[id], discr, &off) {
                         Some(bits) => {
                             let target = targets.target_for_value(bits);
                             decided.insert(id, target);
@@ -7846,7 +7870,8 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
                 _ => (),
             }
             let block = &body.basic_blocks[id];
-            worklist.extend(block.terminator.as_ref().and_then(|it| it.kind.unwind()));
+            let unwind = block.terminator.as_ref().and_then(|it| it.kind.unwind());
+            worklist.extend(unwind.filter(|it| !resumes_only.contains(it)));
         }
         let state = frame.as_ref().map(|(frame, ..)| frame.state()).map(|it| in_frame(self, it));
         match (frame, state) {
@@ -7892,7 +7917,7 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
                 unsupported!("block without terminator");
             };
             self.at(terminator.span);
-            self.unwind_to = terminator.kind.unwind();
+            self.unwind_to = terminator.kind.unwind().filter(|it| !resumes_only.contains(it));
             let target = match &terminator.kind {
                 // A promoted call already holds its value, and that value is read-only.
                 TerminatorKind::Call { destination, target: Some(target), .. }
@@ -7941,7 +7966,12 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
     /// The value `block` switches on, when it is a constant: a literal, or an associated
     /// constant such as `T::IS_ZST` that the block has just read. rustc does not compile the
     /// arms such a switch never takes either, and they may not even type check for this `T`.
-    fn switch_bits(&mut self, block: &hir_ty::mir::BasicBlock, discr: &Operand) -> Option<u128> {
+    fn switch_bits(
+        &mut self,
+        block: &hir_ty::mir::BasicBlock,
+        discr: &Operand,
+        off: &FxHashSet<LocalId>,
+    ) -> Option<u128> {
         if let Some(bits) = self.const_bits(discr) {
             return Some(bits);
         }
@@ -7950,6 +7980,9 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
         };
         if !place.projection.as_slice().is_empty() {
             return None;
+        }
+        if off.contains(&place.local) {
+            return Some(0);
         }
         let assigned = block.statements.iter().rev().find_map(|it| match &it.kind {
             StatementKind::Assign(to, rvalue) => Some((to, rvalue)),
@@ -7966,6 +7999,80 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
         let ConstKind::Unevaluated(unevaluated) = konst.as_ref().kind() else { return None };
         let allocation = self.eval_const(unevaluated).ok()?;
         Some(*allocation.memory.first()? as u128)
+    }
+
+    /// The locals of `body` that only a call of a check that is off here assigns, once:
+    /// `ub_checks()` and the like are false, and what they guard is not compiled, nor asks
+    /// for the bodies of what it calls (`precondition_check`, the panics), which would else
+    /// use up what a compile may build in before the code that runs is reached.
+    fn checks_off(&mut self, body: &MirBody<'db>) -> FxHashSet<LocalId> {
+        let db = self.cg.db;
+        let mut assigned: FxHashMap<LocalId, usize> = FxHashMap::default();
+        let mut borrowed = FxHashSet::default();
+        let mut off = FxHashSet::default();
+        for (_, block) in body.basic_blocks.iter() {
+            for statement in &block.statements {
+                if let StatementKind::Assign(place, rvalue) = &statement.kind {
+                    *assigned.entry(place.local).or_default() += 1;
+                    if let Rvalue::Ref(_, place) = rvalue {
+                        borrowed.insert(place.local);
+                    }
+                }
+            }
+            let Some(TerminatorKind::Call { func, destination, .. }) =
+                block.terminator.as_ref().map(|it| &it.kind)
+            else {
+                continue;
+            };
+            *assigned.entry(destination.local).or_default() += 1;
+            let Ok(ty) = self.operand_ty(func) else { continue };
+            let TyKind::FnDef(def, _) = ty.kind() else { continue };
+            let CallableDefId::FunctionId(callee) = def.0 else { continue };
+            let check = callee.krate(db).data(db).origin.is_lang()
+                && matches!(
+                    FunctionSignature::of(db, callee).name.as_str(),
+                    "ub_checks" | "contract_checks" | "check_language_ub" | "check_library_ub"
+                );
+            if check && destination.projection.as_slice().is_empty() {
+                off.insert(destination.local);
+            }
+        }
+        off.retain(|local| assigned.get(local) == Some(&1) && !borrowed.contains(local));
+        off
+    }
+
+    /// The cleanup blocks of `body` that do nothing but go on unwinding, which a call that
+    /// unwinds to one needs no landing pad for, as rustc's `RemoveNoopLandingPads` has it: a
+    /// pad costs a call that LLVM does not know resumes, and that LLVM counts against
+    /// building the function into its callers.
+    fn resumes_only(body: &MirBody<'db>) -> FxHashSet<BasicBlockId> {
+        let mut found = FxHashSet::default();
+        loop {
+            let before = found.len();
+            for (id, block) in body.basic_blocks.iter() {
+                let idle = block.is_cleanup
+                    && block.statements.iter().all(|it| {
+                        matches!(
+                            it.kind,
+                            StatementKind::StorageLive(_)
+                                | StatementKind::StorageDead(_)
+                                | StatementKind::FakeRead(_)
+                                | StatementKind::Nop
+                        )
+                    });
+                let resumes = match block.terminator.as_ref().map(|it| &it.kind) {
+                    Some(TerminatorKind::UnwindResume) => true,
+                    Some(TerminatorKind::Goto { target }) => found.contains(target),
+                    _ => false,
+                };
+                if idle && resumes {
+                    found.insert(id);
+                }
+            }
+            if found.len() == before {
+                return found;
+            }
+        }
     }
 
     fn place(&mut self, place: &StoredPlace) -> Result<(Value, PlaceTy<'db>)> {
@@ -10033,10 +10140,6 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
                 };
                 let scalar = self.scalar_of(ty)?;
                 let otherwise = self.blocks[targets.otherwise()];
-                let mut switch = Switch::new();
-                for (case, target) in targets.iter() {
-                    switch.set_entry(case, self.blocks[target]);
-                }
                 // A discriminant is an `i128` to MIR and a small number: with the high half
                 // told to be zero first, the rest is a switch on a register.
                 let small = targets.iter().all(|(case, _)| case <= i64::MAX as u128);
@@ -10076,7 +10179,26 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
                 } else {
                     self.builder.ins().load(scalar.ty, MEM, addr, 0)
                 };
-                switch.emit(&mut self.builder, value, otherwise);
+                let ty = self.builder.func.dfg.value_type(value);
+                if backend::optimizing() && ty != types::I128 && targets.iter().count() <= CHAINED {
+                    // LLVM folds a chain of comparisons of one value into a `switch`, whose
+                    // jump tables, bit tests and lookup tables it picks itself; the tree of
+                    // ranges `Switch` builds it keeps as it is.
+                    for (case, target) in targets.iter() {
+                        let case = self.builder.ins().iconst(ty, case as i64);
+                        let hit = self.builder.ins().icmp(IntCC::Equal, value, case);
+                        let next = self.builder.create_block();
+                        self.builder.ins().brif(hit, self.blocks[target], &[], next, &[]);
+                        self.builder.switch_to_block(next);
+                    }
+                    self.builder.ins().jump(otherwise, &[]);
+                } else {
+                    let mut switch = Switch::new();
+                    for (case, target) in targets.iter() {
+                        switch.set_entry(case, self.blocks[target]);
+                    }
+                    switch.emit(&mut self.builder, value, otherwise);
+                }
             }
             TerminatorKind::Return => {
                 if let Some(state) = &self.suspended {
@@ -11532,9 +11654,9 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
             _ => Region::new_erased(interner),
         });
         let instance = Instance { def, args: args.store(), checked: self.cg.checked };
-        if let Some((body, never)) = tier::seen_body(db, &instance, &self.env.store(), tracked) {
+        if let Some((body, hint)) = tier::seen_body(db, &instance, &self.env.store(), tracked) {
             if body.func.signature == *sig {
-                self.cg.declare_seen(id, &body, never);
+                self.cg.declare_seen(id, &body, hint);
             } else if std::env::var_os("RA_JIT_DUMP_TIER").is_some() {
                 eprintln!("tier: signature differs: {} vs {}", body.func.signature, sig);
             }
@@ -12121,6 +12243,11 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
                 let (count, _) = self.load_scalar(count)?;
                 let bytes = self.builder.ins().imul_imm(count, size);
                 let value = self.builder.ins().iadd(ptr, bytes);
+                if name == "offset" {
+                    let inst = self.builder.func.dfg.value_def(value).unwrap_inst();
+                    let loc = unwind::seh::in_bounds(self.builder.func.srcloc(inst));
+                    self.builder.func.set_srcloc(inst, loc);
+                }
                 self.builder.ins().store(MEM, value, dst, 0);
             }
             ("ptr_mask", [ptr, mask]) => {
@@ -12472,6 +12599,25 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
                 }
                 self.builder.ins().store(MEM, acc, dst, 0);
             }
+            ("simd_ctpop", [arg]) => {
+                let (src, ty) = self.operand(arg)?;
+                let (lane, count) = self.simd_lanes(ty)?;
+                let values: Vec<Value> = (0..count)
+                    .map(|i| {
+                        let offset = (i * lane.ty.bytes() as u64) as i32;
+                        let value = self.builder.ins().load(lane.ty, MEM, src, offset);
+                        self.builder.ins().popcnt(value)
+                    })
+                    .collect();
+                for (i, value) in values.into_iter().enumerate() {
+                    self.builder.ins().store(
+                        MEM,
+                        value,
+                        dst,
+                        (i as u64 * lane.ty.bytes() as u64) as i32,
+                    );
+                }
+            }
             ("simd_reduce_all" | "simd_reduce_any", [arg]) => {
                 let (src, ty) = self.operand(arg)?;
                 let (lane, count) = self.simd_lanes(ty)?;
@@ -12771,6 +12917,131 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
         Ok(())
     }
 
+    /// NEON's operations on pairs of lanes of integers and its table lookup, lane by lane, as
+    /// `name` says after `aarch64.neon.`: `umaxp.v16i8` is the larger of each pair of `a`'s
+    /// lanes then of `b`'s, `tbl1.v16i8` the bytes of a table its indices name. False for
+    /// another.
+    fn neon_lanes(&mut self, name: &str, args: &[Operand], dst: Value) -> Result<bool> {
+        let mut parts = name.split('.');
+        let op = parts.next().unwrap_or_default();
+        let parts: Vec<&str> = parts.collect();
+        let Some((lanes, ty)) = parts.last().and_then(|it| {
+            let (lanes, bits) = it.strip_prefix('v')?.split_once('i')?;
+            Some((lanes.parse::<i32>().ok()?, Type::int(bits.parse().ok()?)?))
+        }) else {
+            return Ok(false);
+        };
+        let width = ty.bytes() as i32;
+        let combine = |b: &mut FunctionBuilder, l: Value, r: Value| match &op[..op.len() - 1] {
+            "umax" => b.ins().umax(l, r),
+            "smax" => b.ins().smax(l, r),
+            "umin" => b.ins().umin(l, r),
+            "smin" => b.ins().smin(l, r),
+            _ => b.ins().iadd(l, r),
+        };
+        match (op, args) {
+            ("umaxp" | "smaxp" | "uminp" | "sminp" | "addp", [a, b]) => {
+                let (a, _) = self.operand(a)?;
+                let (b, _) = self.operand(b)?;
+                let half = lanes / 2;
+                let values: Vec<Value> = (0..lanes)
+                    .map(|lane| {
+                        let from = if lane < half { a } else { b };
+                        let at = (lane % half) * 2 * width;
+                        let l = self.builder.ins().load(ty, MEM, from, at);
+                        let r = self.builder.ins().load(ty, MEM, from, at + width);
+                        combine(&mut self.builder, l, r)
+                    })
+                    .collect();
+                for (lane, value) in values.into_iter().enumerate() {
+                    self.builder.ins().store(MEM, value, dst, lane as i32 * width);
+                }
+            }
+            ("sqdmulh", [a, b]) if ty.bits() <= 32 => {
+                let (a, _) = self.operand(a)?;
+                let (b, _) = self.operand(b)?;
+                let wide = ty.double_width().expect("a lane of at most 32 bits");
+                let bits = i64::from(ty.bits());
+                // The high half of twice the product, which is past the lane's range only for
+                // the least by itself: that is the most.
+                let values: Vec<Value> = (0..lanes)
+                    .map(|lane| {
+                        let l = self.builder.ins().load(ty, MEM, a, lane * width);
+                        let r = self.builder.ins().load(ty, MEM, b, lane * width);
+                        let l = self.builder.ins().sextend(wide, l);
+                        let r = self.builder.ins().sextend(wide, r);
+                        let product = self.builder.ins().imul(l, r);
+                        let high = self.builder.ins().sshr_imm(product, bits - 1);
+                        let most = self.builder.ins().iconst(wide, (1 << (bits - 1)) - 1);
+                        let high = self.builder.ins().smin(high, most);
+                        self.builder.ins().ireduce(ty, high)
+                    })
+                    .collect();
+                for (lane, value) in values.into_iter().enumerate() {
+                    self.builder.ins().store(MEM, value, dst, lane as i32 * width);
+                }
+            }
+            ("uaddlp" | "saddlp", [a]) if ty.bits() <= 32 => {
+                let (a, _) = self.operand(a)?;
+                let wide = ty.double_width().expect("a lane of at most 32 bits");
+                // Each lane twice as wide is the sum of a pair of `a`'s.
+                let values: Vec<Value> = (0..lanes / 2)
+                    .map(|pair| {
+                        let l = self.builder.ins().load(ty, MEM, a, pair * 2 * width);
+                        let r = self.builder.ins().load(ty, MEM, a, pair * 2 * width + width);
+                        let (l, r) = if op == "saddlp" {
+                            (
+                                self.builder.ins().sextend(wide, l),
+                                self.builder.ins().sextend(wide, r),
+                            )
+                        } else {
+                            (
+                                self.builder.ins().uextend(wide, l),
+                                self.builder.ins().uextend(wide, r),
+                            )
+                        };
+                        self.builder.ins().iadd(l, r)
+                    })
+                    .collect();
+                for (pair, value) in values.into_iter().enumerate() {
+                    self.builder.ins().store(MEM, value, dst, pair as i32 * 2 * width);
+                }
+            }
+            ("tbl1" | "tbx1", [.., table, indices]) if ty == types::I8 => {
+                let kept = match args {
+                    [kept, _, _] if op == "tbx1" => Some(self.operand(kept)?.0),
+                    [_, _] if op == "tbl1" => None,
+                    _ => return Ok(false),
+                };
+                let (table, _) = self.operand(table)?;
+                let (indices, _) = self.operand(indices)?;
+                // A lane is the table's byte its index names; past the table's 16, 0 or (for
+                // `tbx1`) the lane of `kept`.
+                let values: Vec<Value> = (0..lanes)
+                    .map(|lane| {
+                        let index = self.builder.ins().load(types::I8, MEM, indices, lane);
+                        let slot = self.builder.ins().band_imm(index, 0x0f);
+                        let slot = self.builder.ins().uextend(ptr(), slot);
+                        let addr = self.builder.ins().iadd(table, slot);
+                        let found = self.builder.ins().load(types::I8, MEM, addr, 0);
+                        let outside = match kept {
+                            Some(kept) => self.builder.ins().load(types::I8, MEM, kept, lane),
+                            None => self.builder.ins().iconst(types::I8, 0),
+                        };
+                        let past =
+                            self.builder.ins().icmp_imm(IntCC::UnsignedGreaterThan, index, 15);
+                        self.builder.ins().select(past, outside, found)
+                    })
+                    .collect();
+                for (lane, value) in values.into_iter().enumerate() {
+                    self.builder.ins().store(MEM, value, dst, lane as i32);
+                }
+            }
+            _ => return Ok(false),
+        }
+        Ok(true)
+    }
+
     /// A function `core::arch` declares as `llvm.{name}`: something LLVM implements, with no
     /// body anywhere.
     fn llvm_intrinsic(
@@ -12780,6 +13051,11 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
         dst: Value,
         dst_ty: Ty<'db>,
     ) -> Result<()> {
+        if let Some(neon) = name.strip_prefix("aarch64.neon.")
+            && self.neon_lanes(neon, args, dst)?
+        {
+            return Ok(());
+        }
         match (name, args) {
             ("x86.sse3.ldu.dq" | "x86.avx.ldu.dq.256", [ptr]) => {
                 let (ptr, _) = self.load_scalar(ptr)?;
@@ -12923,6 +13199,22 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
                 let callee = self.cg.assembly(asm::xgetbv(), &sig);
                 let callee = self.cg.declare_func_in_func(callee, self.builder.func);
                 let call = self.builder.ins().call(callee, &[register]);
+                let value = self.builder.inst_results(call)[0];
+                self.builder.ins().store(MEM, value, dst, 0);
+            }
+            (
+                "aarch64.crc32b" | "aarch64.crc32h" | "aarch64.crc32w" | "aarch64.crc32x"
+                | "aarch64.crc32cb" | "aarch64.crc32ch" | "aarch64.crc32cw" | "aarch64.crc32cx",
+                [crc, data],
+            ) => {
+                let (crc, _) = self.load_scalar(crc)?;
+                let (data, scalar) = self.load_scalar(data)?;
+                let mut sig = self.cg.make_signature();
+                sig.params.extend([AbiParam::new(types::I32), AbiParam::new(scalar.ty)]);
+                sig.returns.push(AbiParam::new(types::I32));
+                let callee = self.cg.assembly(asm::crc32(&name["aarch64.".len()..]), &sig);
+                let callee = self.cg.declare_func_in_func(callee, self.builder.func);
+                let call = self.builder.ins().call(callee, &[crc, data]);
                 let value = self.builder.inst_results(call)[0];
                 self.builder.ins().store(MEM, value, dst, 0);
             }

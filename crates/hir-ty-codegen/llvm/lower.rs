@@ -111,6 +111,8 @@ pub(super) struct Lowering<'ctx, 'f> {
     constants: &'f FxHashMap<u32, &'f [u8]>,
     /// The numbers in the names of the data objects that are statics.
     statics: &'f FxHashSet<u32>,
+    /// The number in the name of `_Unwind_Resume`, whose calls are LLVM's `resume`.
+    resume: Option<u32>,
     pads: FxHashMap<Pad, BasicBlock<'ctx>>,
     /// The block the allocas are in.
     frame: Option<BasicBlock<'ctx>>,
@@ -546,6 +548,7 @@ impl<'ctx, 'f> Lowering<'ctx, 'f> {
         defined: &Defined<'f>,
         constants: &'f FxHashMap<u32, &'f [u8]>,
         statics: &'f FxHashSet<u32>,
+        resume: Option<u32>,
         shown: &'f FxHashMap<u32, FunctionValue<'ctx>>,
     ) -> Lowered<()> {
         let func = defined.func;
@@ -573,6 +576,7 @@ impl<'ctx, 'f> Lowering<'ctx, 'f> {
             globals: FxHashMap::default(),
             constants,
             statics,
+            resume,
             pads: FxHashMap::default(),
             frame: None,
             arrival: None,
@@ -1206,6 +1210,11 @@ impl<'ctx, 'f> Lowering<'ctx, 'f> {
                     }
                     return Ok(());
                 }
+                if let [exception] = *dfg.inst_args(inst)
+                    && self.resumes(func_ref)
+                {
+                    return self.resume(exception);
+                }
                 let callee = self.callee(func_ref)?;
                 let sig = &dfg.signatures[dfg.ext_funcs[func_ref].signature];
                 let ty = callee.get_type();
@@ -1243,6 +1252,11 @@ impl<'ctx, 'f> Lowering<'ctx, 'f> {
                     let to = self.memory(libcall, dfg.inst_args(inst))?;
                     let from = self.builder.get_insert_block().expect("a block being filled");
                     return self.returned_to(exception, &[to.into()], from);
+                }
+                if let [unwinding] = *dfg.inst_args(inst)
+                    && self.resumes(func_ref)
+                {
+                    return self.unwound_to(exception, unwinding);
                 }
                 let callee = self.callee(func_ref)?;
                 let (normal, pad) = self.exception_edges(exception)?;
@@ -1600,6 +1614,15 @@ impl<'ctx, 'f> Lowering<'ctx, 'f> {
                 _ => return Err(Unhandled::Opcode(opcode)),
             };
             self.set(inst, Operand::Vector(value));
+            return Ok(());
+        }
+        // An `offset` is of an address, whether or not it was loaded as an integer.
+        if opcode == Opcode::Iadd && unwind::seh::is_in_bounds(self.func.srcloc(inst)) {
+            let (base, by) = (self.pointer(l)?, self.int(r)?);
+            // SAFETY: `offset` stays within what `base` points into.
+            let address =
+                unsafe { b.build_in_bounds_gep(self.context.i8_type(), base, &[by], "")? };
+            self.set(inst, Operand::Pointer(address));
             return Ok(());
         }
         // An offset address is still an address of the same thing.
@@ -2174,6 +2197,62 @@ impl<'ctx, 'f> Lowering<'ctx, 'f> {
             }
         };
         Ok((self.context.append_basic_block(self.function, ""), pad))
+    }
+
+    fn resumes(&self, func_ref: ir::FuncRef) -> bool {
+        let name = self.external_name(&self.func.dfg.ext_funcs[func_ref].name);
+        let id = name.ok().and_then(|it| super::Symbol::parse(&it));
+        matches!(id, Some(super::Symbol::Func(id)) if Some(id) == self.resume)
+    }
+
+    /// Goes on unwinding with `exception`, as LLVM's `resume`, which LLVM knows: a landing
+    /// pad that does nothing else it drops, and a body built in at a call that unwinds to a
+    /// pad goes there instead. The selector is not looked at by `_Unwind_Resume`, which is
+    /// what `resume` becomes. What follows, a trap, is left in a block of its own.
+    fn resume(&mut self, exception: Value) -> Lowered<()> {
+        let context = self.context;
+        let pointer = context.ptr_type(AddressSpace::default());
+        self.personality(super::PERSONALITY);
+        let ty = context.struct_type(&[pointer.into(), context.i32_type().into()], false);
+        let exception = self.pointer(exception)?;
+        let value = self.builder.build_insert_value(ty.get_undef(), exception, 0, "")?;
+        let value =
+            self.builder.build_insert_value(value, context.i32_type().const_zero(), 1, "")?;
+        self.builder.build_resume(value.into_struct_value())?;
+        let after = context.append_basic_block(self.function, "");
+        self.builder.position_at_end(after);
+        Ok(())
+    }
+
+    /// Goes on unwinding with `exception` from a call that unwinds to the handlers of `table`,
+    /// which a body Cranelift built in at such a call has: straight to the first of them, as
+    /// LLVM does with a `resume` of a body it builds in.
+    fn unwound_to(&mut self, table: ir::ExceptionTable, exception: Value) -> Lowered<()> {
+        let dfg = &self.func.dfg;
+        let Some(handler) = dfg.exception_tables[table].items().find_map(|item| match item {
+            ExceptionTableItem::Tag(_, handler) => Some(handler),
+            _ => None,
+        }) else {
+            return Err(Unhandled::Shape("an exception table without a handler"));
+        };
+        let from = self.builder.get_insert_block().expect("a block being filled");
+        let exception = self.int(exception)?;
+        let target = handler.block(&dfg.value_lists);
+        let args: Vec<BlockArg> = handler.args(&dfg.value_lists).collect();
+        let phis = self.phis.get(&target).cloned().unwrap_or_default();
+        if phis.len() != args.len() {
+            return Err(Unhandled::Shape("a handler given other values than it takes"));
+        }
+        for (phi, arg) in std::iter::zip(&phis, args) {
+            let value: BasicValueEnum<'ctx> = match arg {
+                BlockArg::Value(value) => self.passed(*phi, value)?,
+                BlockArg::TryCallExn(0) => self.as_phi(*phi, exception.into())?,
+                _ => return Err(Unhandled::Shape("a handler that takes what a call returns")),
+            };
+            phi.add_incoming(&[(&value, from)]);
+        }
+        self.builder.build_unconditional_branch(self.blocks[&target])?;
+        Ok(())
     }
 
     /// A block every call with this handler unwinds to: takes the exception and goes on to
