@@ -41,6 +41,8 @@ HARNESSES = [
     ("core", ["live_e2e.py"], {}, on("linux-x86_64"), 1),
     # Apple's linker leaves no more room than it is told, and gives a newer macOS chained fixups.
     ("core", ["headerpad.py"], {}, on("macos"), 1),
+    # bun links with `-no_compact_unwind`, which leaves `__eh_frame` alone to the unwinder.
+    ("core", ["nocompact.py"], {}, on("macos"), 1),
     # A branch reaches 128 MB on AArch64, and the splice has to get past that. Mach-O is not spliced.
     ("core", ["farsplices.py"], {"RA_JIT_SPLICE": "1"}, on("linux-aarch64"), 1),
     # `cargo ra-jit` hands Windows builds to cargo, so there the daemon links nothing to test.
