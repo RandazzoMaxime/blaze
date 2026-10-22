@@ -357,7 +357,9 @@ and cold-start time and RSS on helix and nushell before and after.
    expansions counted and timed (the one new piece of code here).
 3. The restart round: helix's first round of 29 s is thrown away because one instance needs
    a writable static (`__RUST_STD_INTERNAL_VAL`, std's thread-local) without a rustc symbol.
-   Rejecting the instance's call chain without starting over saves it.
+   Compiling the instance saves it, which is no-rustc's step E (#85); keeping the
+   rejection so a later daemon forwards its callers to rustc's copies (#37's first form) is
+   not merged.
 4. Proc-macro expansion cache (item 3), with its check mode.
 5. Memo eviction (item 5), sized by step 0.
 6. Item 1a, then 1b family by family, then 1c.
@@ -372,8 +374,8 @@ stops.
 
 | Work | Issue | Lane |
 |---|---|---|
-| The restart round (step 3) | #37 | glancer, gated on dev-aws-7, merging |
-| Proc-macro expansion cache (item 3) | #38 | glancer, gated on dev-aws-7, merging after #37 |
+| The restart round (step 3) | #37 | glancer, redirected to no-rustc step E (#85): the instances are compiled, not left to rustc; kept rejections are not merged |
+| Proc-macro expansion cache (item 3) | #38 | glancer, merging |
 | `described` copies whole type closures (item 5) | #55 | share-types, dev-aws-6 |
 | The spare worker's memory (item 5) | #56 | spare, its own AWS host |
 | salsa eviction of queries with cycle handling (item 5) | #57 | spare, after #56 |
@@ -383,11 +385,15 @@ stops.
 | ra-jit never runs rustc | #81 to #93 | no-rustc; steps A to M of `docs/no-rustc.md`, A to C ready to assign |
 
 - **no-rustc.** Andrew's rule is that ra-jit must never run rustc. Since cold-start (#11)
-  the time to ready is what rustc linked. The background own base, and #37's forwarding of
-  callers to rustc's copies, build on that, so the warm start is cheap today because rustc
-  built the program. Without rustc the daemon's own build is the ready path again. That
-  makes items 1 and 2 (#40, #41) the warm start's path once more, as they were planned
-  before #11: they skip the analysis of what is unchanged on the daemon's own build.
+  the time to ready is what rustc linked, so the warm start is cheap today because rustc
+  built the program. Without rustc the daemon's own build is the ready path again, and the
+  cold start is the store and the remote serving what ra-jit built, the standard library
+  included (no-rustc's steps F, G and K, which the cold-start lane owns). That makes items
+  1 and 2 (#40, #41) the cold and warm start's path: a frozen dependency and an unchanged
+  checkout are linked from what ra-jit built and kept, without analysis. Item 3's keys
+  name the macro's library by its content, so they hold when ra-jit builds that library
+  (step J). #37 no longer keeps rejections to forward their callers to rustc's copies: the
+  restart round goes because the instances compile (step E).
   `docs/no-rustc.md` says in which order rustc goes (its step K, #91, is the cold start). Items 1 and 2 are designed not to need rustc's
   output, and a step here that adds a new dependency on it says so in this table.
 - **flat-syntax (#42)** and item 1 both change what dependency files cost. A frozen crate
