@@ -430,13 +430,17 @@ library's crates does that by itself: it takes the unit from the store (`RA_JIT_
 fetches it from the remote, keyed by the library's crates, their cfgs and editions, the target
 and the debug info asked for (the store adds ra-jit's build and the toolchain), or compiles it
 once and keeps it there, and writes it beside `--out` as `<out>.std.o`; `harness/allrajit.py`
-checks all three ways against cargo. A function
+checks all three ways against cargo. For G, such a build compiles every crate the program
+depends on as well, not only those it names, and links them with the unit: ripgrep (60 crates)
+builds, links and runs with nothing rustc built, and 19 of its commands (searches, `--json`,
+`-U`, `-P`, `--files`, errors, `--help`) print what cargo's build does, timings aside. A function
 ra-jit cannot compile (2,115 of the library's: 534 for f16 and f128, 222 intrinsics with no
 body, most of the rest `core::arch`'s SIMD) is, where something calls it, a hidden stand-in that says so when it runs; a program that calls
-one compiles its own copy and is told at its build. The unit is the program's dependencies of
-the library but `test`, `proc_macro` and `panic_abort`, which rust-analyzer's graph has every
-crate depend on; it also has `rand` and `foldhash`, which std's own workspace adds to its graph
-and which nothing compiled uses. Not yet: `__rust_probestack` (a naked function, C), `#[global_allocator]` (the
+one compiles its own copy and is told at its build. The unit is what the program takes of the
+library and everything that depends on, but `test`, `proc_macro` and `panic_abort`, which
+rust-analyzer's graph has every crate depend on: 21 crates, `rand` and `foldhash` among them,
+which std's own workspace adds to its graph and which nothing compiled uses. The library's
+build names only the library's crates, so the program's own `memchr` is not taken for std's. Not yet: `__rust_probestack` (a naked function, C), `#[global_allocator]` (the
 `__rg_*` shim is not generated; the build refuses), the cfgs of `compiler_builtins`' and
 `libc`'s build scripts, choosing `panic_abort`, and a link line of ra-jit's own (`cc` with a
 fixed list of libraries today).
@@ -536,7 +540,25 @@ not its resolving: that is what is left between ra-jit and cargo's 0.19 s, and a
 it once. The link is slower because `cc` reads the whole of `std.o`; G's link line can take
 what the program reaches.
 
-Not yet measured: a bench app's dependencies with every crate ra-jit's. The step K
+ripgrep with every crate ra-jit's (dev-aws-8, 2026-10-22, 96 cores, `cc` linking the
+program's object and the unit's):
+
+| Build of ripgrep | Wall time |
+|---|---|
+| `cargo build`, cold, rustc's prebuilt standard library | 5.53 to 5.58 s, 0.38 GB |
+| `cargo build` after touching `main.rs` | 0.53 s |
+| ra-jit, empty store and remote: the unit compiled, kept and pushed | 20.7 s, 6.4 GB, then 0.64 s to link |
+| ra-jit, warm store | 5.61 to 5.63 s, 4.5 GB, then 0.64 s to link |
+| ra-jit, a second empty store, the unit and functions from the remote (a directory) | 5.60 to 5.63 s, then 0.64 s to link |
+
+With a warm remote ripgrep is 6.25 s against cargo's 5.55: 13% over the K bar below. Of ra-jit's
+5.6 s, 2.8 s is resolving the 60 crates and 0.5 s loading the workspace; compiling the
+program's 4,755 functions and the 8,829 instances the store did not have is 2.1 s (the other
+24,434 come from the store). The empty store's 20.7 s is the unit's 14 s (7.3 s compiling,
+6.7 s emitting) and the program's 2.9 s on top of resolving. The executable is 67 MB against
+cargo's 53 MB: the link takes the whole unit.
+
+Not yet measured: the other bench apps with every crate ra-jit's. The step K
 bar: with a warm remote, `cargo ra-jit build` from nothing is no slower than cargo's cold build;
 with an empty store, it is measured and published beside cargo's, and the gap is an issue of its
 own. Until K lands, the rustc base stays as it is; it is not made faster or extended.
