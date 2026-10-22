@@ -427,6 +427,7 @@ impl Worker {
                 command.envs(&config.env).env(ENDS_WITH_INPUT, "1");
                 command.current_dir(&checkout.root);
                 command.stdin(Stdio::piped()).stdout(output.try_clone()?).stderr(output);
+                own_group(&mut command);
                 command.spawn().context("starting a worker")?
             }
         };
@@ -487,10 +488,7 @@ impl Worker {
     fn stop(&self) {
         // One that ended by itself says so before it goes.
         self.note_end();
-        let mut child = lock(&self.child);
-        // One that has exited already has nothing to kill.
-        let _ = child.kill();
-        let _ = child.wait();
+        kill(&mut lock(&self.child));
         let _ = std::fs::remove_file(&self.socket);
     }
 
@@ -668,6 +666,7 @@ impl Spare {
         let output =
             private_file(OpenOptions::new().write(true).create(true).truncate(true), &log)?;
         command.stdin(Stdio::piped()).stdout(output.try_clone()?).stderr(output);
+        own_group(&mut command);
         let child = command.spawn().context("starting a spare worker")?;
         Ok(Spare { child, log })
     }
@@ -716,10 +715,29 @@ impl Spare {
     }
 
     fn stop(&mut self) {
-        // One that has exited already has nothing to kill.
-        let _ = self.child.kill();
-        let _ = self.child.wait();
+        kill(&mut self.child);
     }
+}
+
+/// Has a worker start in a process group of its own, for `kill` to end what it started with
+/// it: the cargo it asks of a workspace, which would go on in the daemon's home.
+fn own_group(command: &mut Command) {
+    #[cfg(unix)]
+    std::os::unix::process::CommandExt::process_group(command, 0);
+    #[cfg(not(unix))]
+    let _ = command;
+}
+
+/// Ends a worker, and on Unix the processes it started.
+fn kill(child: &mut Child) {
+    // One that has exited already has nothing to kill, and its pid may be another's by now.
+    #[cfg(unix)]
+    if let (Ok(None), Ok(group)) = (child.try_wait(), libc::pid_t::try_from(child.id())) {
+        // SAFETY: it takes no pointer; the group is the worker's, which has not been waited for.
+        unsafe { libc::killpg(group, libc::SIGKILL) };
+    }
+    let _ = child.kill();
+    let _ = child.wait();
 }
 
 /// The daemon: its version, its workers, and when it was last asked.
@@ -1170,15 +1188,22 @@ impl Daemon {
         };
     }
 
-    /// Stops the workers and the daemon.
+    /// Stops the workers and the daemon. A client told it ends waits for its connection to
+    /// close, which it does when this process exits.
     fn end(&self) -> ! {
-        if let Some(spare) = lock(&self.spare).as_mut() {
+        // Held until the process exits, so that no other thread starts a worker or a spare once
+        // these are stopped: one started then would write in the home and outlive the daemon.
+        // In the order a worker that loads a workspace takes them.
+        let workers = lock(&self.workers);
+        let mut ahead = lock(&self.ahead);
+        let mut spare = lock(&self.spare);
+        if let Some(spare) = spare.as_mut() {
             spare.stop();
         }
-        for spare in lock(&self.ahead).values_mut() {
+        for spare in ahead.values_mut() {
             spare.stop();
         }
-        for worker in lock(&self.workers).values() {
+        for worker in workers.values() {
             worker.stop();
         }
         let _ = std::fs::remove_file(socket_in(&self.home));

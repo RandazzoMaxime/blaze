@@ -178,7 +178,8 @@ did about it in one line.
   generator feature, a breaker for a bug found in real code, a step in the relevant edit
   harness for a daemon bug. [harness.md](harness.md) says how to add each.
 - The gate, under Cranelift and under LLVM, on the platform you have. Say which platforms
-  you did not run. CI covers Linux x86-64, Linux AArch64, Windows and macOS.
+  you did not run. CI's fast tier covers Linux x86-64, Linux AArch64 and macOS on every
+  change; Windows and the slow harnesses run nightly ([harness.md](harness.md#ci)).
 - `cargo fmt --all -- --check` and
   `cargo test --release -p hir-ty -p hir-def -p parser -p syntax -p ra-jit`.
 - For anything that changes numbers in [results.md](results.md): the command, the commit
@@ -186,6 +187,35 @@ did about it in one line.
 
 When you report what you did, separate what you ran from what you inferred. The reports
 under `docs/reports/` do this and it is the reason they can be used.
+
+## Working in parallel
+
+Several lanes, people or agents, change ra-jit at once. A lane shares the Mac, `git`'s
+metadata and main with all the others, so:
+
+- **Heavy work runs on a dev host.** A release build of a branch, a harness sweep
+  (`cargo_ra_jit.py`, `buildmodel.py`, `keys.py`, the soak), a benchmark or anything longer
+  than a few minutes runs on an AWS dev host. Claim the host with a CLAIMED row in the host
+  ledger (`/Volumes/Projects/nix/scratch/memory/host-ledger.md`; hosts, ssh and the ledger's
+  rules are in the `fleet-ops` skill), work in a directory named for the lane, and add a
+  RELEASED row when done. Ask for a lease as long as the run (`dev-aws renew N <hours>`): an
+  expired lease stops the host mid-run.
+- **The Mac does quick checks only:** one harness, one unit test, `cargo check`, hot reload.
+  It is shared by every lane at once, and a lane that builds a full release there slows all
+  of them.
+- **One worktree per lane, named for it** (`ra-jit-<lane>-<date>`), with its own
+  `CARGO_TARGET_DIR` or a shared sccache. Two lanes building into one target directory wait on
+  each other's lock and overwrite each other's binaries.
+- **Never `git stash`.** The stash is one stack for every worktree of the repository, so a pop
+  can take another lane's changes. Commit work in progress to the lane's branch.
+- **Run harnesses with `RUST_BACKTRACE=0`**, so a test that panics prints its message and
+  not a backtrace into what the harness compares.
+- **Merge small and often**, once the pull request's fast tier is green. A lane that waits
+  hours for one large merge meets every other lane's changes at once. For anything the fast
+  tier does not cover, run the full tier on the branch first
+  (`gh workflow run ra-jit.yaml --ref <branch> -f tier=full`).
+- **Clean up when done:** remove the worktree (`git worktree remove`), its target directory,
+  and the lane's directories on the dev host; delete the merged branch.
 
 ## The build that ships
 

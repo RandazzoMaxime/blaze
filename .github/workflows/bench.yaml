@@ -13,10 +13,9 @@ on:
   workflow_dispatch:
 
 concurrency:
-  group: bench-${{ github.ref }}
-  # On main a run finishes and the newest push waits behind it (a pending run is replaced by a
-  # newer one): with several agents pushing, cancelling left main without a single finished run.
-  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+  # As ra-jit.yaml: a pull request's newer push cancels its run, every push to main finishes.
+  group: bench-${{ github.event_name }}-${{ github.event_name == 'pull_request' && github.ref || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
   CARGO_INCREMENTAL: 0

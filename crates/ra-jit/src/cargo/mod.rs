@@ -84,11 +84,16 @@ Any other command is cargo's own. CARGO.md is the guide.";
 pub(super) const SETTLE: &str = "settle";
 
 /// Has the daemon load the build `typed` is the cargo command of, which the cargo `cargo`
-/// is running: the build is asked of cargo again, which waits for that cargo to be done
-/// with the target directory, has nothing left to compile and says what it built. This
-/// process has that cargo's directory and environment. Nobody reads what it says but the
-/// log.
+/// is running: once that cargo has exited, the build is asked of cargo again, which has
+/// nothing left to compile and says what it built. This process has that cargo's directory
+/// and environment. Nobody reads what it says but the log.
 fn settle(cargo: u32, typed: &[String]) -> anyhow::Result<()> {
+    // Cargo lets go of the target directory once it has built, before it runs the tests or
+    // the program, and a build links each program into place again by deleting it first:
+    // one of the tests that starts it then finds none.
+    while crate::live::alive(cargo) {
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
     let settled = (|| {
         let asked = cli::of_cargo(typed).context("`settle` is told a build command")?;
         let cwd = std::env::current_dir()?;
