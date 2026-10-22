@@ -208,8 +208,10 @@ impl Asked {
         let Some(line) = self.link_line(&self.dir.join("probe"))? else {
             return Ok(Err("the link line is not one of an ELF linker driven by `cc`".to_owned()));
         };
+        // The package is where cargo runs the examples, not where it runs rustdoc: that is
+        // the workspace's root, whose package is another one or none.
         let mut args = vec![
-            cwd.display().to_string(),
+            cwd.join(&self.run_in).display().to_string(),
             "--crate".to_owned(),
             cwd.join(&self.source).display().to_string(),
             "--out".to_owned(),
@@ -217,8 +219,15 @@ impl Asked {
             "--dev-deps".to_owned(),
             "--no-default-features".to_owned(),
         ];
-        if !self.features.is_empty() {
-            args.extend(["--features".to_owned(), self.features.join(",")]);
+        // The build scripts run from the workspace's root, whose package does not have this
+        // one's features: named with their package, they are this one's from anywhere.
+        let package = std::env::var("CARGO_PKG_NAME").ok().filter(|it| !it.is_empty());
+        let features: Vec<String> = match &package {
+            Some(package) => self.features.iter().map(|it| format!("{package}/{it}")).collect(),
+            None => self.features.clone(),
+        };
+        if !features.is_empty() {
+            args.extend(["--features".to_owned(), features.join(",")]);
         }
         if let Some(target) = &self.target {
             args.extend(["--target".to_owned(), target.clone()]);
