@@ -114,7 +114,8 @@ All of these are rustc's, written from `compiler/rustc_borrowck` at the pinned n
   inferred).
 - Loans that outlive their storage: E0597, E0515, E0716, and promoted constants (calls of
   `#[rustc_promotable]` functions such as `size_of` included) and extended temporaries of
-  `const` and `static` items as `'static`.
+  `const` and `static` items as `'static`. An expression statement's value is not read once
+  its temporaries are dropped, so `&temp();` alone is no E0716, as in rustc.
 - `impl Trait` captures: a return-position `impl Trait` keeps alive and relates only the
   lifetimes it captures, those listed in `use<..>` or, before edition 2024 outside traits and
   `async fn`, those its bounds name; its type parameters are always captured.
@@ -179,8 +180,8 @@ With no borrow checker, the 245 units rustc accepts would pass. Now:
 
 | Mode | In scope | Pass | rustc accepts, ra-jit too | rustc rejects, same errors |
 |---|---|---|---|---|
-| Polonius | 1579 | 1337 (84.7%) | 245 of 245 | 1092 of 1334 |
-| NLL | 1577 | 1329 (84.3%) | 226 of 226 | 1103 of 1351 |
+| Polonius | 1579 | 1339 (84.8%) | 245 of 245 | 1094 of 1334 |
+| NLL | 1577 | 1331 (84.4%) | 226 of 226 | 1105 of 1351 |
 
 463 units are out of scope; 344 of them need a nightly feature. CI runs the scoring on Linux
 and fails below a floor a few units under the count there.
@@ -244,6 +245,9 @@ changes to rust-analyzer were needed, each made as rustc does it:
   than what it points to.
 - A `let`'s fake read of its value is at the pattern (rustc's `FakeReadCause::ForLet`), not
   the enclosing block, which is where the borrow checker finds the place `let _: T` ascribes.
+- A `let`'s temporaries borrowed in a tuple struct's or variant's constructor arguments
+  (`let x = Some(&temp());`, `Self(&temp())`) live as long as the variable, as in rustc since
+  1.89; through a constructor held in a variable they are still the statement's.
 - A function item or a tuple struct's or variant's constructor written as a value
   (`let f = foo::<T>;`) is assigned to where it goes, though zero sized, so a closure that
   captures `f` or a method that takes it by value does not read it uninitialized (E0381).
