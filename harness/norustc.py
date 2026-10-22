@@ -149,7 +149,9 @@ def apply(ws, edits):
 
 def main():
     record, keep = "--record" in sys.argv, "--keep" in sys.argv
-    work = tempfile.mkdtemp(prefix="ra-jit-norustc-")
+    # Under /tmp on macOS: the daemon's socket is in RA_JIT_HOME below, and under $TMPDIR
+    # (/var/folders/...) its path passes the 104 bytes macOS has for one.
+    work = tempfile.mkdtemp(prefix="ra-jit-norustc-", dir="/tmp" if sys.platform == "darwin" else None)
     log = os.path.join(work, "runs.log")
     open(log, "w").close()
     name = f"ra-jit-norustc-{os.getpid()}"
