@@ -4,6 +4,11 @@ How to build, test and change ra-jit, including the vendored rust-analyzer, is
 [docs/contributing.md](docs/contributing.md); what the harnesses check is
 [docs/harness.md](docs/harness.md).
 
+- **ra-jit never runs rustc.** ra-jit compiles everything itself: no function, crate,
+  standard library, build script, proc macro, check, test, doctest or link step is handed to
+  rustc, rustdoc or a cargo that runs them, and there is no "fall back to cargo" path. Each place
+  that still does is a bug with a `no-rustc` issue, to be removed, never extended or added to:
+  [docs/no-rustc.md](docs/no-rustc.md).
 - **Language semantics go in the rust-analyzer subtree.** MIR building and passes, borrow
   checking, const eval, layout and code-identity hashes as salsa queries (what rustc keeps in
   `rustc_middle`, `rustc_mir_transform`, `rustc_borrowck`) go in `vendor/rust-analyzer`, as a
