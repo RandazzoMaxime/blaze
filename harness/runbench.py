@@ -22,7 +22,7 @@ release's; a build that differs is reported and not timed.
 
 NAME is `kernels` (harness/corpus/kernels, a benchmark per kernel) or an entry of
 apps/apps.json with a `bench` (checked out as apps.py does, under APPS_DIR). Default: kernels,
-numeric, jsonrt, ripgrep, fd, bat.
+numeric, jsonrt, ripgrep, fd, tokei, eza, bat.
 
 Memory is kept beside the times (memory.py, docs/benchmarks.md "Memory and disk"): each run's
 peak resident memory as the kernel kept it (`wait4`), the size of each program, and what each
@@ -44,7 +44,7 @@ sys.path.insert(0, HERE)
 import apps, memory  # noqa: E402
 
 KERNELS = ["sieve", "collatz", "fnv", "qsort", "matmul", "nbody", "mandelbrot", "words"]
-DEFAULT = ["kernels", "numeric", "jsonrt", "ripgrep", "fd", "bat"]
+DEFAULT = ["kernels", "numeric", "jsonrt", "ripgrep", "fd", "tokei", "eza", "bat"]
 RA_JIT_ENV = {"RA_JIT_BACKEND": "llvm", "RA_JIT_OPT": "3"}
 # What a variant may not inherit from the shell: the build is said by its flags alone.
 OWN_VARS = ["RA_JIT_BACKEND", "RA_JIT_OPT", "RA_JIT_EMIT", "RA_JIT_MIR_OPT", "RA_JIT_INLINE",
