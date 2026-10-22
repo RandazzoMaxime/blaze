@@ -9074,14 +9074,19 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
             });
         }
         let arch = self.cg.target.arch;
+        let features = self.body.and_then(|it| it.owner.as_function());
+        let features = features.map(|func| AttrFlags::target_features(self.cg.db, func));
+        let extensions =
+            asm::extensions(arch, features.into_iter().flatten().map(|it| it.as_str()));
         if block.naked {
             let text = asm::naked(arch, &block.template, block.options, &operands)
                 .map_err(CodegenError::Unsupported)?;
-            self.cg.naked = Some((text, syms));
+            self.cg.naked = Some((extensions + &text, syms));
             return Ok(());
         }
-        let wrapper = asm::wrapper(&self.cg.target, &block.template, block.options, &operands)
+        let mut wrapper = asm::wrapper(&self.cg.target, &block.template, block.options, &operands)
             .map_err(CodegenError::Unsupported)?;
+        wrapper.text.insert_str(0, &extensions);
         let slot = self.builder.create_sized_stack_slot(StackSlotData::new(
             StackSlotKind::ExplicitSlot,
             wrapper.slot_size,
