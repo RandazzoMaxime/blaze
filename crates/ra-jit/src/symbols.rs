@@ -271,9 +271,13 @@ pub(crate) struct Linked {
 }
 
 impl Linked {
-    pub(crate) fn read(path: &Path) -> anyhow::Result<Linked> {
+    /// `by_symbol` are the objects and archives of the crates rustc compiled with a symbol for
+    /// each function, which every call goes to (`cargo::plan`'s `calls_by_symbol`).
+    pub(crate) fn read(path: &Path, by_symbol: &[PathBuf]) -> anyhow::Result<Linked> {
         let data = std::fs::read(path).with_context(|| format!("reading {}", path.display()))?;
         let object = object::File::parse(&*data)?;
+        let hidden = hidden_globals(&data);
+        let own = defined_in(by_symbol);
         let mut linked = Linked {
             names: FxHashSet::default(),
             private: FxHashMap::default(),
@@ -285,6 +289,18 @@ impl Linked {
                 object::BinaryFormat::MachO => name.strip_prefix('_').unwrap_or(name),
                 _ => name,
             };
+            // One the linker made local that was no global of its object, hidden or not, had
+            // internal linkage, and an optimized crate calls it its own way: LLVM passes a
+            // reference argument by value, drops one nothing reads, shrinks a static to a
+            // `bool`. A patch calls none of those, or what it prints is wrong (#52).
+            let internal = symbol.is_local()
+                && symbol.section_index().is_some()
+                && !hidden.contains(&symbol.index().0)
+                && !matches!(symbol.flags(), object::SymbolFlags::Elf { st_other, .. }
+                    if st_other & 3 == object::elf::STV_HIDDEN);
+            if internal && !own.contains(&hashed(name)) {
+                continue;
+            }
             linked.names.insert(hashed(name));
             if (name.starts_with("_R") || name.starts_with("_ZN"))
                 && symbol.kind() == SymbolKind::Text
@@ -374,6 +390,55 @@ fn closes_at_end(args: &str) -> bool {
         last = it;
     }
     false
+}
+
+/// The indices of the symbols of a Mach-O executable that were private externals, hidden
+/// globals of their objects the linker made local, which `object` reports as plain locals.
+fn hidden_globals(data: &[u8]) -> FxHashSet<usize> {
+    use object::macho::{N_EXT, N_PEXT};
+    use object::read::macho::{MachOFile64, Nlist};
+    let Ok(file) = MachOFile64::<object::Endianness>::parse(data) else {
+        return FxHashSet::default();
+    };
+    let table = file.macho_symbol_table();
+    (0..table.len())
+        .filter(|&index| {
+            table
+                .symbol(object::SymbolIndex(index))
+                .is_ok_and(|it| it.n_type() & (N_EXT | N_PEXT) == N_PEXT)
+        })
+        .collect()
+}
+
+/// What the objects in `files`, and in the archives among them, define, [`hashed`] as
+/// [`Linked`] names it.
+fn defined_in(files: &[PathBuf]) -> FxHashSet<u64> {
+    let mut defined = FxHashSet::default();
+    let mut add = |data: &[u8]| {
+        let Ok(object) = object::File::parse(data) else { return };
+        for symbol in object.symbols().filter(|it| it.section_index().is_some()) {
+            let Ok(name) = symbol.name() else { continue };
+            let name = match object.format() {
+                object::BinaryFormat::MachO => name.strip_prefix('_').unwrap_or(name),
+                _ => name,
+            };
+            defined.insert(hashed(name));
+        }
+    };
+    for file in files {
+        let Ok(data) = std::fs::read(file) else { continue };
+        match ArchiveFile::parse(&*data) {
+            Ok(archive) => {
+                for member in archive.members().flatten() {
+                    if let Ok(member) = member.data(&*data) {
+                        add(member);
+                    }
+                }
+            }
+            Err(_) => add(&data),
+        }
+    }
+    defined
 }
 
 impl SymbolTable {
@@ -1058,7 +1123,63 @@ mod tests {
         write::{Object, Symbol, SymbolSection},
     };
 
-    use super::{SymbolTable, V0, crate_sources, function_name, names_of_object};
+    use super::{Linked, SymbolTable, V0, crate_sources, function_name, names_of_object};
+
+    #[test]
+    fn a_patch_calls_no_function_an_optimized_object_kept_to_itself() {
+        let dir = std::env::temp_dir().join(format!("ra-jit-linked-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let write = |file: &str, symbols: &[(&str, SymbolScope, u8)]| {
+            let mut object =
+                Object::new(BinaryFormat::Elf, Architecture::X86_64, Endianness::Little);
+            let text = object.section_id(object::write::StandardSection::Text);
+            for &(name, scope, visibility) in symbols {
+                let value = object.append_section_data(text, &[0xc3], 1);
+                let bind = if scope == SymbolScope::Compilation {
+                    object::elf::STB_LOCAL
+                } else {
+                    object::elf::STB_GLOBAL
+                };
+                object.add_symbol(Symbol {
+                    name: name.as_bytes().to_vec(),
+                    value,
+                    size: 1,
+                    kind: SymbolKind::Text,
+                    scope,
+                    weak: false,
+                    section: SymbolSection::Section(text),
+                    flags: SymbolFlags::Elf {
+                        st_info: bind << 4 | object::elf::STT_FUNC,
+                        st_other: visibility,
+                    },
+                });
+            }
+            let path = dir.join(file);
+            std::fs::write(&path, object.write().unwrap()).unwrap();
+            path
+        };
+        let (local, default, hidden) =
+            (SymbolScope::Compilation, object::elf::STV_DEFAULT, object::elf::STV_HIDDEN);
+        // The program's crate calls by symbol; `dep` was optimized and kept `helper` to itself.
+        let own = write("app.o", &[("_RNvCs1234_3app6helper", local, default)]);
+        let linked = write(
+            "linked",
+            &[
+                ("exported", SymbolScope::Dynamic, default),
+                ("made_local", local, hidden),
+                ("_RNvCs1234_3app6helper", local, default),
+                ("_RNvCs5678_3dep6helper", local, default),
+            ],
+        );
+        let linked = Linked::read(&linked, &[own]).unwrap();
+        assert!(linked.has("exported"));
+        assert!(linked.has("made_local"));
+        assert!(linked.has("_RNvCs1234_3app6helper"));
+        assert_eq!(linked.private("app::helper"), Some("_RNvCs1234_3app6helper"));
+        assert!(!linked.has("_RNvCs5678_3dep6helper"));
+        assert_eq!(linked.private("dep::helper"), None);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 
     #[test]
     fn thin_lto_promoted_names_are_no_copies() {
