@@ -1041,7 +1041,10 @@ impl Image {
         let (table, _) = (file.section_by_name(".symtab").and_then(|it| it.file_range()))
             .context("the executable has no symbol table")?;
         for symbol in file.symbols() {
-            let defines = symbol.is_definition() || symbol.kind() == SymbolKind::Tls;
+            // A global label of assembly, of no type and no size, which `object` counts as
+            // no definition, is one to the linker.
+            let label = symbol.kind() == SymbolKind::Unknown && symbol.is_global();
+            let defines = symbol.is_definition() || label || symbol.kind() == SymbolKind::Tls;
             if !defines || symbol.section_index().is_none() {
                 continue;
             }
