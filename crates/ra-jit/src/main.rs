@@ -2295,6 +2295,16 @@ fn workspace_at(
     let root = AbsPathBuf::assert_utf8(std::env::current_dir()?.join(project));
     let manifest = ProjectManifest::discover_single(&root)?;
     let mut workspace = ProjectWorkspace::load(manifest.clone(), cargo_config, &|_| {})?;
+    // Without the standard library's source every call into it is unresolved, and each
+    // function making one would be refused for a reason that says nothing of the toolchain.
+    if workspace.sysroot.is_rust_lib_src_empty() {
+        let toolchain =
+            workspace.sysroot.root().map_or("the toolchain".to_owned(), |it| it.to_string());
+        anyhow::bail!(
+            "{toolchain} has no source of the standard library, which ra-jit compiles from: \
+             `rustup component add rust-src` installs it"
+        );
+    }
     let mut debug = plan::Whole { debug: plan::Described::NOTHING, lto: false };
     let mut scripts = None;
     if let ProjectWorkspaceKind::Cargo { cargo, .. } = &mut workspace.kind {
