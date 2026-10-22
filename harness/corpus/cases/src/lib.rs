@@ -7729,3 +7729,39 @@ pub mod crypto_lanes {
         out
     }
 }
+
+/// A `$(..)?` repeats as often as the variables in it do, also when they were matched outside
+/// it: a getter per field and a setter for the fields that name one, as bevy's
+/// `impl_atomic_pod!` makes them.
+pub mod optional_repeats_per_field {
+    macro_rules! accessors {
+        ($blob:ident $(, field($index:literal : $ty:ty, $getter:ident $(, $($setter:ident)?)?))*) => {
+            pub struct $blob(pub [u32; 3]);
+
+            impl $blob {
+                $(
+                    $(
+                        pub fn $getter(&self) -> $ty {
+                            self.0[$index] as $ty
+                        }
+
+                        $(
+                            pub fn $setter(&mut self, value: $ty) {
+                                self.0[$index] = value as u32;
+                            }
+                        )?
+                    )*
+                )?
+            }
+        };
+    }
+
+    accessors!(Blob, field(0: u32, tag, set_tag), field(1: u8, kind), field(2: u16, flags, set_flags));
+
+    pub fn run(n: u32) -> (u32, u16, [u32; 3]) {
+        let mut blob = Blob([n, 9, 0]);
+        blob.set_tag(n + 1);
+        blob.set_flags(n as u16 * 3);
+        (blob.tag(), blob.flags(), blob.0)
+    }
+}
