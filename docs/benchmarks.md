@@ -259,9 +259,12 @@ is not there, and the README keeps its last numbers, under their machine, date a
 Until the runners exist the numbers are measured by hand with the same harness, pinned to 16
 cores (`taskset -c 0-15`) so that cargo and the daemon have the 16 cores of the machines above:
 on 2026-10-22, Linux x86-64 on `dev-aws-8` (a c7a.48xlarge, AMD EPYC 9R14, idle and claimed for
-the run) and Linux aarch64 on a c8g.16xlarge (Graviton4) launched for it; macOS arm64 is the
-MacBook Pro (M5 Max) run of 2026-10-21, made while it was busy with other work (its load average
-is in the README), so its times are noisier than the others'. The first published run
+the run) and Linux aarch64 on a c8g.16xlarge (Graviton4, Neoverse-V2) launched for it. macOS
+arm64's edits are the MacBook Pro (M5 Max) run of 2026-10-21, made while it was busy with other
+work (its load average is in the README), so its times are noisier than the others'; its runtime
+is one run on GitHub's `macos-15` runner, a shared virtual M1 with 3 cores and 7 GiB, whose runs
+of a benchmark varied by up to 17× (eza, which reads the disk), so the README marks every
+benchmark whose runs varied by more than 1.5× with ≈. The first published run
 (2026-10-20) was on `dev-aws-11`, a bare-metal c8a.metal-24xl pinned the same way.
 
 ## When it runs and what it commits

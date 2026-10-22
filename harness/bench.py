@@ -825,6 +825,13 @@ def machine():
 
     memory = read("/proc/meminfo", r"^MemTotal:\s+(\d+) kB")
     cpu = read("/proc/cpuinfo", r"^model name\s*:\s*(.*)$")
+    if not cpu and platform.system() == "Linux":
+        # An Arm core's /proc/cpuinfo has no model name; lscpu names it from the part number.
+        try:
+            found = re.search(r"^Model name:\s*(.*)$", subprocess.run(["lscpu"], capture_output=True, text=True).stdout, re.M)
+            cpu = found[1].strip() if found else None
+        except OSError:
+            pass
     if platform.system() == "Darwin":
         cpu = first_line("sysctl", "-n", "machdep.cpu.brand_string")
         memory = str(int(first_line("sysctl", "-n", "hw.memsize") or 0) // 1024) or None
