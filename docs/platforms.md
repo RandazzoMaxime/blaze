@@ -29,6 +29,17 @@ round:
 - C-variadic calls and definitions have one model with three conventions: System V,
   Windows, and Apple.
 
+The daemon's full link keeps the code nothing in the executable reaches, on every platform:
+rustc's line has the linker take it out (`--gc-sections` for ELF, `-dead_strip` for Apple's
+linker, `/OPT:REF` for `link.exe`, which becomes `/OPT:NOREF`), and a later patch may call
+it, for example an instance of a generic function from another crate for a type an edit
+starts using. A splice that does not find what the patch calls declines it ("... is not in
+the executable") and the edit is linked in full. `unreached.py` tests this on Linux and
+macOS; on Linux at 3a844b09d5, before the rule covered more than macOS, it was 1 of 3. On
+Windows only the link line is tested, by a unit test in `cargo/plan.rs`. rustc's own link,
+which the first edits after a cold build are spliced into, still takes the code out, and
+those edits are linked in full ([#52](https://github.com/indexable-inc/ra-jit/issues/52)).
+
 On every platform the gate in CI is the corpus with layouts, programs, stress, breakers,
 unwinds, splices, asmedits, includes, worktrees, keys, storekills, storecorrupts and
 storeshared, under Cranelift and under LLVM at `-O2` with fast instruction selection.
@@ -126,8 +137,9 @@ What is specific to the port:
   copy that replaces the executable by rename. dyld on macOS 15.4 to 15.7 finds
   `__unwind_info` and `__eh_frame` only in the segment named `__TEXT`, so `__unwind_info`
   moves into the header's spare room and the patch's frames take its place in front of the
-  program's; a patch whose frames are larger than the program's unwind table is linked in
-  full. The room for two more load commands and the table comes from `-Wl,-headerpad`,
+  program's. When the patch's frames are larger than the program's unwind table, both tables
+  move into that room, the program's frames where the table has them and the patch's behind;
+  only a patch whose frames don't fit there either is linked in full. The room for two more load commands and the table comes from `-Wl,-headerpad`,
   which `cargo ra-jit` gives the link in a file of its own beside the executable
   (`bin.headerpad`), last on the line: 1 MiB, or what the line asks for. The table grows
   with the program (3 MB for a GUI app of 570 crates), so after each full link the daemon
@@ -135,9 +147,11 @@ What is specific to the port:
   more into that file and links once again; the links after start from it. A link line
   given to the daemon by hand keeps the headerpad it has, and without enough the splice
   declines. The file does not grow from splice to splice.
-- Executables with chained fixups are declined and linked in full. That was measured with
-  `MACOSX_DEPLOYMENT_TARGET=13.0`; rustc's default deployment target of 11.0 produces dyld
-  info and splices.
+- The splice reads and writes the loader's fixups as dyld info, the tables rustc's default
+  deployment target of 11.0 gets. For a target of 12 or later (nix's shell sets 14.0) Apple's
+  linker writes them as chains instead, so the daemon's link line has `-Wl,-no_fixup_chains`.
+  An executable linked with chained fixups anyway, by a line given to the daemon by hand, is
+  declined and linked in full.
 - The calling convention is Apple's variant of AAPCS64, including its rule that variadic
   arguments always go on the stack.
 

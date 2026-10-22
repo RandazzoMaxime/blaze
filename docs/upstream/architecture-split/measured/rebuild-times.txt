@@ -14,3 +14,7 @@ after | crates/ra-jit/src/main.rs | run 1 | real 51.42 | cpu 88.09 | load 54.60,
 after | crates/ra-jit/src/main.rs | run 2 | real 36.74 | cpu 89.50 | load 58.75, 60.68, 62.25 | ra-jit 
 after | crates/hir-ty-codegen/store.rs | run 1 | real 100.28 | cpu 146.33 | load 51.59, 58.67, 61.45 | hir-ty-codegen ra-jit 
 after | crates/hir-ty-codegen/store.rs | run 2 | real 102.86 | cpu 154.54 | load 51.59, 56.42, 60.25 | hir-ty-codegen ra-jit 
+after-step3 | crates/ra-jit-store/src/lib.rs | run 1 | real 45.41 | cpu 138.36 | load 33.27, 35.10, 42.49 | ra-jit-store hir-ty-codegen ra-jit 
+after-step3 | crates/ra-jit-store/src/lib.rs | run 2 | real 51.84 | cpu 145.20 | load 36.64, 35.49, 42.24 | ra-jit-store hir-ty-codegen ra-jit 
+after-step3 | vendor/rust-analyzer/crates/hir-ty-borrowck/src/check.rs | run 1 | real 30.13 | cpu 148.36 | load 33.11, 34.83, 41.58 | hir-ty-borrowck hir ide-db load-cargo ide-diagnostics ra-jit 
+after-step3 | vendor/rust-analyzer/crates/hir-ty-borrowck/src/check.rs | run 2 | real 55.01 | cpu 152.66 | load 26.10, 32.94, 40.66 | hir-ty-borrowck hir ide-db load-cargo ide-diagnostics ra-jit 

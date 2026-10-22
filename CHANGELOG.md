@@ -8,6 +8,17 @@ All notable changes to ra-jit are written here. The format follows
 
 ### Added
 
+- `RA_JIT_MEMORY` reports after every request a worker answers too (`request-N`), and on
+  macOS its resident figure is the physical footprint rather than 0. A `heap-profile` build
+  writes where it was loaded beside each heap profile, which `harness/heapfold.py` needs to
+  name the stacks on macOS, and `harness/heap.py` gives the bytes to the salsa query whose
+  value or record holds them. What they found
+  ([#39](https://github.com/indexable-inc/ra-jit/issues/39),
+  [docs/research/daemon-memory.md](docs/research/daemon-memory.md)): nushell's worker holds
+  10.0 GB live once ready, 2.7 GB of it what a debugger is told of types; ripgrep's 1.6 GB;
+  and the spare worker the daemon starts after the first build holds 940 MB more on ripgrep.
+  salsa's `lru` cannot evict `infer` or MIR (they have cycle handling), and on `described`
+  it freed 206 MB of ripgrep's live heap and none of its footprint, so no eviction is on.
 - `#[ra_jit::cache]` ([#17](https://github.com/indexable-inc/ra-jit/issues/17)): the
   `ra-jit-cache` crate's attribute keeps what a pure function returns, in memory and under
   `target/ra-jit/fn-cache`, by its arguments and a hash of the code ra-jit compiled for it and
@@ -119,10 +130,14 @@ All notable changes to ra-jit are written here. The format follows
 - A borrow checker, the crate `hir-ty-borrowck` in the rust-analyzer subtree, written to give
   rustc's verdict: Polonius alpha by default as nightly rustc does, NLL with
   `RA_JIT_BORROWCK=nll`. It gives rustc's errors on
-  1055 of 1578 of rustc's own borrow-check tests that it can run, and none on any of the 245
+  1241 of 1579 of rustc's own borrow-check tests that it can run, and none on any of the 245
   rustc accepts, scored by `harness/borrowck_ui.py`, and finds nothing in ripgrep, fd, bat,
-  hyperfine, just, axum and nushell. Its errors are rust-analyzer diagnostics and
+  hyperfine, just, axum, nushell, delta, eza, tokei and starship. Its errors are rust-analyzer diagnostics and
   `ra-jit borrowck` prints them ([docs/borrowck.md](docs/borrowck.md)).
+- Item well-formedness, the crate `hir-ty-wfcheck` next to the borrow checker: rustc's E0309
+  and E0310 outside function bodies, for struct, enum and union fields (`&'static T` without
+  `T: 'static`), a trait impl's associated types, an impl of a trait bounded by `'static`,
+  and the where clauses of ADTs, impls, traits and functions. Its errors are refused as the borrow checker's are.
 - The daemon refuses to build an edit with a borrow-check error, as it does one with a type
   error; `RA_JIT_BORROWCK_REFUSE=0` turns that off. The checker still misses about a third
   of rustc's borrow-check errors, so `cargo check` stays the final word.
@@ -141,6 +156,58 @@ All notable changes to ra-jit are written here. The format follows
 
 ### Changed
 
+- On macOS a patch whose unwind frames are larger than the program's unwind table is spliced
+  rather than linked in full: both of the unwinder's tables move into the room the link leaves
+  after its load commands, the program's frames where the table has them and the patch's
+  behind. ripgrep's first edit (244 KB of frames, a table of 218 KB) is a patch there too
+  (`harness/rustcbase.py`'s `moved-panic` and `cached-reached`).
+
+- After a fresh build through cargo the daemon is ready for edits once it has loaded the
+  workspace and read the symbols of the executable rustc linked, instead of after building
+  every program once more itself ([#11](https://github.com/indexable-inc/ra-jit/issues/11)):
+  the first edits are patches spliced into rustc's executable, and the daemon builds its own
+  base in the background once nothing has waited for a second. On Linux x86-64 (16 cores),
+  ready after a cold build from an empty store: just 10.4 to 8.9 s, ripgrep 7.8 to 6.6 s,
+  nushell 58.8 to 47.0 s, against 7.4, 5.0 and 35.1 s for plain `cargo build`; from a filled
+  store 10.7 to 8.7 s, 8.2 to 6.6 s and 64.1 to 46.3 s. That is 0.25 to 0.5 s after the
+  command returns on just and ripgrep, and 3 to 4 s on nushell, which reads the symbols of
+  233 000 functions. On macOS, nushell 43 to 36 s against 25 s for cargo. The command itself
+  is as slow as before: the spare worker that loads the workspace beside cargo still costs
+  1.0 s on just, 1.3 s on ripgrep and 8 to 9 s on nushell.
+  The first edit over rustc's executable is slower than over the daemon's own build, since
+  it reads the edited file's functions and resolves its names for the first time: just 0.08
+  to 0.4 s, nushell 0.3–0.45 to 1.6–1.9 s. An edit that is more than function bodies, of a
+  generic, `#[inline]` or default trait function or one that moves such a function's lines
+  (rustc copies those into their callers, line numbers and all), of a static, or of a file
+  whose functions were not read before is built in full, and the log says why
+  (`no patch: ...`): ripgrep's `main` sits above a generic function, so its first edit takes
+  1.4 to 1.7 s.
+  The own base is done some 2.5 s after ready on just and ripgrep and 11 s on nushell.
+  `RA_JIT_RUSTC_BASE=0` keeps the old behaviour. On macOS rustc's link of a program is given
+  `-Wl,-headerpad,0x400000` and `-Wl,-bind_at_load`, which the daemon's own links leave out.
+  `harness/rustcbase.py` checks every kind of first edit against cargo, and
+  `harness/coldprof.py --max-wait S` fails when the daemon is ready more than S seconds after
+  the command.
+- `cargo ra-jit build` from cold is closer to cargo's, and readiness follows it sooner
+  ([#11](https://github.com/indexable-inc/ra-jit/issues/11)). The daemon tells the spare
+  worker what cargo built from a thread of its own and the spare reads its input from the
+  start: before, a spare still loading the standard library let the pipe fill, which held up
+  the daemon and with it cargo, whose output went unread. While cargo builds, the spare
+  resolves the standard library and compiles the functions of each crate cargo is done with on
+  a quarter of the cores, leaving the generic instances they reach to the edits, reads the
+  symbols of each library as cargo writes it, and once cargo is done compiles nothing more
+  before it is ready. The first edit reads the edited file's functions on every core. An edit
+  of a generic, `#[inline]` or default trait function, or one that moves such a function's
+  lines, is now a patch too when every copy rustc made of it is found in the executable: the
+  patch replaces the copies, and ripgrep's first edit is a patch. Thread-locals of a patch
+  over rustc's executable are reached as rustc's code reaches them (on Linux x86-64 the
+  general-dynamic sequence becomes local-exec, on macOS through the variable's descriptor).
+  On Linux x86-64 (16 vCPUs, 8 cores), interleaved runs from an empty store, command and
+  ready: just 8.5 to 8.2 s and 9.0 to 8.6 s, ripgrep 6.6 to 5.7 s and 6.9 to 5.9 s, nushell
+  43.5 to 37.6 s and 46.7 to 39.2 s, against 7.6, 5.4 and 35.7 s for plain `cargo build`. The
+  first edit: just 0.36 to 0.5 s, ripgrep 1.7 s built in full to 1.5 s patched, nushell 2.0 s
+  as before. The command's remaining cost is the spare's own: what it resolves of the
+  standard library and the workspace takes cores from cargo (docs/cargo.md).
 - An edit in a package whose build script cargo runs again for it (one that names no
   `rerun-if-changed`, as ripgrep's, fd's and hyperfine's) no longer waits for a
   `cargo check` that runs every build script of the workspace: the daemon runs that one
@@ -242,7 +309,22 @@ All notable changes to ra-jit are written here. The format follows
 - fd built with inlining across crates crashed the LLVM backend on Linux and macOS: an address
   rebuilt as a `getelementptr` may be a sum that is a constant (a global's address plus an
   offset), which is in no block, and LLVM read freed memory when the builder was put before it.
-
+- A `match` arm's guard with `let` (`if let` guards and their chains) dropped what it bound
+  and its temporaries at the end of the guard, before the arm ran, in editions before 2024;
+  rustc keeps them until the arm ends or the next arm is tried
+  ([#46](https://github.com/indexable-inc/ra-jit/issues/46)). The four rustc tests that
+  caught it run on every pull request now (`harness/ui-pinned.txt`).
+- The harnesses set `RUST_BACKTRACE=0` for what they run rather than unsetting it: cargo's
+  `[env]` (as in `~/.cargo/config.toml`) fills in only what is unset, and a backtrace changed
+  what a panicking program printed.
+- Large workspaces are ready in a fraction of the time and memory
+  ([#29](https://github.com/indexable-inc/ra-jit/issues/29)): a closure's type holds its inner
+  closure twice, so the store's name for a type of nested closures doubled with each level
+  (one of helix's was 665 MB). A type is now spelled once per daemon, and one spelled longer
+  than 1 KB is named by the SHA-256 of its spelling; shorter names, and the store entries
+  under them, are unchanged. helix is ready in 109 s at 18.4 GB of memory instead of 631 s at
+  100.7 GB, its store is 1.6 GB instead of 14 GB, and its first `cargo ra-jit run` takes
+  46.9 s instead of 640.8 s (`harness/deepnames.py`).
 - `harness/apps.py`'s perf stage ends with its timings again: since the rename from rustd it
   stored ra-jit's as `ra-jit_s` and printed `ra_jit_s`, a `KeyError` after every workload.
   wasmrun builds wasmtime 36.0.19 (was 25.0.3, which Dependabot's alerts name); its workload
@@ -258,6 +340,12 @@ All notable changes to ra-jit are written here. The format follows
   place as a clone, as cargo does: a program started from a hard link just made can be
   killed as it starts ([rust-lang/cargo#7821](https://github.com/rust-lang/cargo/issues/7821)).
   `cargo_ra_jit.py`'s 16 clients on 4 worktrees run 8 rounds of edits, all by the daemon.
+- On Linux a program `cargo ra-jit` started just after a full link failed now and then with
+  "could not execute" (exit 1; another row of `cargo_ra_jit.py`'s flags each run): the daemon
+  writes what a debugger reads of a new executable in place while it waits for the next edit,
+  and the kernel refuses to start a file open for writing ("text file busy"). The daemon now
+  writes an executable in place under an exclusive lock on it, and a client starts a program
+  under a shared one.
 - A program or test `cargo ra-jit` starts itself has what the `[env]` of cargo's
   configuration sets, as under `cargo run` and `cargo test`: the nearest `.cargo/config.toml`
   (or `config`) says a variable, then `$CARGO_HOME`'s, with `force` and `relative`.
@@ -265,6 +353,23 @@ All notable changes to ra-jit are written here. The format follows
   `cargo build` inside and the one that starts `other` take turns, since cargo removes and
   copies each program again there on every build and the second sometimes found none (plain
   cargo failed it as often as ra-jit).
+- `harness/ui-known.txt` names the 15 tests of rustc's tests/ui run-pass that differ on the
+  whole suite, each with why (11 assert a bug of rustc's, 4 are ra-jit's to do), so the
+  `claims` gate says only what is new; a line can name the backends it is known on.
+- `harness/debuginfo.py`'s perf check takes a sample in a naked function without a line as
+  rustc has it (its body is assembly, which rustc gives no line either), not as lost debug
+  info: one of the corpus's on Linux arm64 failed it now and then. It reads every frame perf
+  prints, those of inlined functions and those whose names have spaces (`<T as Trait>::f`)
+  too: it skipped them, so where perf looks CFI up a page off the frame (both Linux runners)
+  the frame it took for the one sampled could be one unwound to anywhere, a static on Linux
+  x86-64 once. rustc's corpus binary has as many frames unwound to data there.
+- `breakers.py`'s `frame_of_tables`, `frame_of_results` and `frame_of_array` ask whether
+  ra-jit's frames fit where rustc's do, not whether they are as large: a whole program's
+  build with LLVM makes them smaller than rustc's, which each case's crate has room for too,
+  and they differed. `frame_of_array` is open on Cranelift alone, whose frames keep three
+  arrays where rustc's keep two.
+- `cargo_ra_jit.py` says what a client that failed or hung said, and what it was doing,
+  rather than ending on a timeout with nothing.
 - A workspace the daemon loads after a change whose build scripts did not all run is not
   loaded: the crates of a script that failed were read without its `OUT_DIR`, so thiserror's
   `include!` went missing, every derived `Error` was unimplemented and `?` resolved to the

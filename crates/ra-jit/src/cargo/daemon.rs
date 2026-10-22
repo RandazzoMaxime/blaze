@@ -298,6 +298,10 @@ impl Worker {
             args.push(flag.into());
             args.push(path.into());
         }
+        if let Some(rustcs) = &first.rustc_binary {
+            args.push("--rustc-binary".into());
+            args.push(rustcs.into());
+        }
         // In a file: a program of many crates has more of them than fit the command line
         // of a process on Windows.
         let symbols = dir.join("symbols");
@@ -644,7 +648,7 @@ pub(crate) fn home() -> anyhow::Result<PathBuf> {
 /// it is not in `XDG_RUNTIME_DIR`, which does not outlive the session.
 pub(crate) fn store() -> Option<PathBuf> {
     if let Some(named) = std::env::var_os("RA_JIT_CACHE") {
-        return (!hir_ty_codegen::store_is_off(&named)).then(|| PathBuf::from(named));
+        return (!ra_jit_store::is_off(&named)).then(|| PathBuf::from(named));
     }
     let caches = std::env::var_os("XDG_CACHE_HOME").filter(|it| !it.is_empty()).map(PathBuf::from);
     let home = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE"));

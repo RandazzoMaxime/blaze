@@ -706,7 +706,7 @@ impl<'a, 'db> MirLowerCtx<'a, 'db> {
                                 return Ok(Some(current));
                             }
                             CandidateId::FunctionId(_) => {
-                                // FnDefs are zero sized, no action is needed.
+                                self.push_fn_item(current, place, expr_id);
                                 return Ok(Some(current));
                             }
                         }
@@ -767,8 +767,10 @@ impl<'a, 'db> MirLowerCtx<'a, 'db> {
                                 Box::new([]),
                                 expr_id.into(),
                             )?;
+                        } else {
+                            // A tuple variant's constructor, a function item.
+                            self.push_fn_item(current, place, expr_id);
                         }
-                        // Otherwise its a tuple like enum, treated like a zero sized function, so no action is needed
                         Ok(Some(current))
                     }
                     ValueNs::GenericParam(p) => {
@@ -794,8 +796,9 @@ impl<'a, 'db> MirLowerCtx<'a, 'db> {
                         Ok(Some(current))
                     }
                     ValueNs::FunctionId(_) | ValueNs::StructId(_) | ValueNs::ImplSelf(_) => {
-                        // A zero sized function needs no action, but a unit struct is a value
-                        // that has come to exist, and may have to be dropped.
+                        // A unit struct is a value that has come to exist, and may have to be
+                        // dropped.
+                        self.push_fn_item(current, place, expr_id);
                         if let TyKind::Adt(adt, subst) = self.infer.expr_ty(expr_id).kind()
                             && let AdtId::StructId(id) = adt.def_id()
                         {
@@ -823,10 +826,10 @@ impl<'a, 'db> MirLowerCtx<'a, 'db> {
                 let bindings = self.has_let(*condition).then(|| self.push_drop_scope());
                 let branches = match self.store[*condition] {
                     Expr::Let { pat, expr } => {
-                        Some(self.lower_if_let(*condition, pat, expr, current)?)
+                        Some(self.lower_if_let(*condition, pat, expr, current, false)?)
                     }
                     Expr::BinaryOp { .. } if self.has_let(*condition) => {
-                        Some(self.lower_let_chain(*condition, current)?)
+                        Some(self.lower_let_chain(*condition, current, false)?)
                     }
                     _ => None,
                 };
@@ -1087,19 +1090,9 @@ impl<'a, 'db> MirLowerCtx<'a, 'db> {
                             let (then, otherwise) = matched?;
                             let otherwise = otherwise.unwrap_or_else(|| self.new_basic_block());
                             let bound = self.drop_scopes.last().map_or(0, |it| it.locals.len());
-                            let guarded = self.lower_guard(guard, then);
+                            let guarded = self.lower_guard(guard, then, expr_id.into());
                             self.guard_refs.clear();
-                            if let Some((discr, c)) = guarded? {
-                                let held = self.new_basic_block();
-                                let failed = self.new_basic_block();
-                                self.set_terminator(
-                                    c,
-                                    TerminatorKind::SwitchInt {
-                                        discr,
-                                        targets: SwitchTargets::static_if(1, held, failed),
-                                    },
-                                    expr_id.into(),
-                                );
+                            if let Some((held, failed)) = guarded? {
                                 self.guard_held(held, moves.unwrap_or_default());
                                 self.set_goto(held, body, expr_id.into());
                                 let failed = self.guard_failed(failed, bound, guard.into());
@@ -1128,19 +1121,11 @@ impl<'a, 'db> MirLowerCtx<'a, 'db> {
                         let next = self.new_basic_block();
                         let o = *otherwise.get_or_insert_with(|| self.new_basic_block());
                         let bound = self.drop_scopes.last().map_or(0, |it| it.locals.len());
-                        let guarded = self.lower_guard(guard, then);
+                        let guarded = self.lower_guard(guard, then, expr_id.into());
                         self.guard_refs.clear();
-                        if let Some((discr, c)) = guarded? {
-                            let failed = self.new_basic_block();
-                            self.set_terminator(
-                                c,
-                                TerminatorKind::SwitchInt {
-                                    discr,
-                                    targets: SwitchTargets::static_if(1, next, failed),
-                                },
-                                expr_id.into(),
-                            );
-                            self.guard_held(next, moves.unwrap_or_default());
+                        if let Some((held, failed)) = guarded? {
+                            self.guard_held(held, moves.unwrap_or_default());
+                            self.set_goto(held, next, expr_id.into());
                             let failed = self.guard_failed(failed, bound, guard.into());
                             self.set_goto(failed, o, expr_id.into());
                         }
@@ -2202,11 +2187,14 @@ impl<'a, 'db> MirLowerCtx<'a, 'db> {
         pat: PatId,
         scrutinee: ExprId,
         current: BasicBlockId,
+        guard: bool,
     ) -> Result<'db, Option<(BasicBlockId, BasicBlockId)>> {
         let Some((place, current)) = self.lower_expr_as_place(current, scrutinee, true)? else {
             return Ok(None);
         };
-        if !self.edition().at_least_2024() {
+        // A match guard's temporaries are the arm's in every edition, dropped where the arm
+        // ends or before the next arm is tried.
+        if !guard && !self.edition().at_least_2024() {
             self.outlive_innermost_scope();
         }
         self.push_fake_read(current, place, condition.into());
@@ -2219,23 +2207,25 @@ impl<'a, 'db> MirLowerCtx<'a, 'db> {
 
     /// Lowers a condition that binds names, `a && let P = e && ..`, to the blocks where it
     /// holds and where it does not, as rustc's `then_else_break`: each operand branches on its
-    /// own, so what a `let` binds is initialized where the condition holds.
+    /// own, so what a `let` binds is initialized where the condition holds. `guard` if it is
+    /// a match arm's guard.
     fn lower_let_chain(
         &mut self,
         condition: ExprId,
         current: BasicBlockId,
+        guard: bool,
     ) -> Result<'db, Option<(BasicBlockId, BasicBlockId)>> {
         match self.store[condition] {
-            Expr::Let { pat, expr } => self.lower_if_let(condition, pat, expr, current),
+            Expr::Let { pat, expr } => self.lower_if_let(condition, pat, expr, current, guard),
             Expr::BinaryOp {
                 lhs,
                 rhs,
                 op: Some(hir_def::hir::BinaryOp::LogicOp(syntax::ast::LogicOp::And)),
             } => {
-                let Some((holds, fails)) = self.lower_let_chain(lhs, current)? else {
+                let Some((holds, fails)) = self.lower_let_chain(lhs, current, guard)? else {
                     return Ok(None);
                 };
-                let (holds, also_fails) = match self.lower_let_chain(rhs, holds)? {
+                let (holds, also_fails) = match self.lower_let_chain(rhs, holds, guard)? {
                     Some((holds, fails)) => (holds, Some(fails)),
                     None => (self.new_basic_block(), None),
                 };
@@ -2762,6 +2752,15 @@ impl<'a, 'db> MirLowerCtx<'a, 'db> {
         resume
     }
 
+    /// A function item, or a tuple struct's or variant's constructor, written as a value: zero
+    /// sized, but assigned as rustc does, so that the borrow checker sees it initialized.
+    fn push_fn_item(&mut self, block: BasicBlockId, place: Place<'db>, expr: ExprId) {
+        let ty = self.expr_ty_without_adjust(expr);
+        if let TyKind::FnDef(..) = ty.kind() {
+            self.push_assignment(block, place, Operand::const_zst(ty).into(), expr.into());
+        }
+    }
+
     fn push_fake_read(&mut self, block: BasicBlockId, p: Place<'db>, span: MirSpan) {
         self.push_statement(block, StatementKind::FakeRead(p.store()).with_span(span));
     }
@@ -3122,7 +3121,9 @@ impl<'a, 'db> MirLowerCtx<'a, 'db> {
                             return Ok(None);
                         };
                         current = c;
-                        self.push_fake_read(current, init_place, span);
+                        // rustc's `FakeReadCause::ForLet`, at the pattern, where the borrow
+                        // checker finds the place a `let _: T` ascribes.
+                        self.push_fake_read(current, init_place, MirSpan::PatId(*pat));
                         // Using the initializer for the resolver scope is good enough for us, as it cannot create new declarations
                         // and has all declarations of the `let`.
                         let resolver_guard = self.resolver.update_to_inner_scope(
@@ -3636,16 +3637,19 @@ impl<'a, 'db> MirLowerCtx<'a, 'db> {
         }
     }
 
-    /// Lowers the guard of a match arm.
+    /// Lowers a match arm's guard to the blocks where it holds and where it fails, switching
+    /// with the span `span`.
     fn lower_guard(
         &mut self,
         guard: ExprId,
         current: BasicBlockId,
-    ) -> Result<'db, Option<(Operand, BasicBlockId)>> {
+        span: MirSpan,
+    ) -> Result<'db, Option<(BasicBlockId, BasicBlockId)>> {
         if self.has_let(guard) {
             // What a `let` binds lives to the end of the arm, and so do the temporaries of
-            // what it matched on.
-            return self.lower_expr_to_some_operand(guard, current);
+            // what it matched on. Each operand of a chain branches on its own, as in `if`, so
+            // what a `let` binds is initialized where the guard holds.
+            return self.lower_let_chain(guard, current, true);
         }
         let temporaries = self.push_drop_scope();
         self.drop_scopes.last_mut().unwrap().temporaries = true;
@@ -3662,7 +3666,13 @@ impl<'a, 'db> MirLowerCtx<'a, 'db> {
             self.drop_scopes.last_mut().unwrap().locals.retain(|&it| it != local);
         }
         let current = temporaries.pop_and_drop(self, current, guard.into());
-        Ok(Some((discr, current)))
+        let (held, failed) = (self.new_basic_block(), self.new_basic_block());
+        self.set_terminator(
+            current,
+            TerminatorKind::SwitchInt { discr, targets: SwitchTargets::static_if(1, held, failed) },
+            span,
+        );
+        Ok(Some((held, failed)))
     }
 
     fn push_drop_scope(&mut self) -> DropScopeToken {

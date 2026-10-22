@@ -61,9 +61,17 @@ fn configured(command: &mut Command, state: &State) {
 /// writes them again, and one started then is not there.
 fn ended(command: &mut Command, held: Option<Held>, state: &State) -> std::io::Result<ExitStatus> {
     let held = held.unwrap_or_else(|| state.hold());
-    let started = command.spawn();
+    let started = started(command);
     drop(held);
     started?.wait()
+}
+
+/// Starts `command` once the daemon is not writing its program (`splice::unwritten`): one
+/// started while the file is open for writing is refused ("text file busy").
+pub(crate) fn started(command: &mut Command) -> std::io::Result<std::process::Child> {
+    #[cfg(unix)]
+    let _unwritten = crate::splice::unwritten(command.get_program().as_ref());
+    command.spawn()
 }
 
 /// Runs the test executables one after another, each in the directory of its package, and

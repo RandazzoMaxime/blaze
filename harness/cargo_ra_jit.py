@@ -39,7 +39,7 @@ Writes CARGO-RA_JIT.md and cargo_ra_jit.json next to this file, or CARGO-RA_JIT-
 cargo_ra_jit_llvm.json under `RA_JIT_BACKEND=llvm`. A run of some projects replaces their rows
 and keeps the others. `--small` is the three projects of the CI job.
 """
-import collections, json, os, re, shutil, signal, subprocess, sys, tempfile, time, urllib.request
+import collections, glob, json, os, re, shutil, signal, subprocess, sys, tempfile, time, urllib.request
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
@@ -174,6 +174,9 @@ def base_env(home):
     # The store is on by default, in the user's cache directory: a run has one of its own.
     env["RA_JIT_CACHE"] = os.path.join(home, "store")
     env["PATH"] = os.path.dirname(RA_JIT) + os.pathsep + env["PATH"]
+    # Set, not unset: cargo's `[env]` (as in ~/.cargo/config.toml) fills in only what is not already
+    # set, so an unset RUST_BACKTRACE would take its value and panics would print differently.
+    env["RUST_BACKTRACE"] = "0"
     for name in ("RUSTFLAGS", "CARGO_TARGET_DIR", "RUSTC_WORKSPACE_WRAPPER", "CARGO_BUILD_TARGET"):
         env.pop(name, None)
     return env
@@ -617,6 +620,8 @@ def flags(work):
             (_, mine), (_, other) = ours.cargo(command, *args, env=extra), theirs.cargo(command, *args, env=extra)
             read = test_results if command == "test" else program_output
             differs = difference(read(mine), read(other))
+            if differs and mine.returncode != other.returncode:
+                differs += f"; {mine.stderr.strip()[-600:]!r}"
             shown = " ".join([*(f"{k}={v}" for k, v in extra.items()), "cargo ra-jit", command, *args])
             rows.append((label, shown, how_built(mine.stderr), mine.returncode, differs or "same"))
             if differs and (label, shown) in FLAGS_OPEN:
@@ -740,7 +745,78 @@ def daemon(work):
     here.cargo("stop")
     manners(work, ws, env, here, check, edit)
     abuse(work, ws, tree, env, check, status, alive)
+    in_place(work, check)
     return checks
+
+
+def in_place(work, check):
+    """On Linux the daemon writes a program it linked in full in place after it answered: the
+    debug info, to where the splices write it. A program started while its file is open for
+    writing is refused ("text file busy"), so whatever is given the program waits for the
+    write. The daemon holds each write here for RA_JIT_LAYOUT_PAUSE_MS (and says "laid out:
+    paused", then "written") while a client is given the program each way a user is."""
+    if not sys.platform.startswith("linux"):
+        return
+    env = dict(base_env(os.path.join(work, "home-in-place")), RA_JIT_LAYOUT_PAUSE_MS="3000")
+    home = os.path.join(work, "in-place-cargo-home")
+    os.makedirs(home)
+    downloads(home)
+    plain_env = dict(env, CARGO_HOME=home)
+    subprocess.run([RA_JIT, "enable"], env=plain_env, check=True, capture_output=True)
+
+    def writes():
+        """How many writes in place began and how many are over, in every worker's log."""
+        logs = glob.glob(os.path.join(env["RA_JIT_HOME"], "*", "*", "log"))
+        said = "".join(open(log, errors="replace").read() for log in logs)
+        return said.count("laid out: paused"), said.count("laid out: written")
+
+    def still():
+        """Waits until no write is under way: what the daemon does after a client has the program."""
+        began = time.time()
+        while writes()[0] != writes()[1] and time.time() - began < 60:
+            time.sleep(0.1)
+
+    def started(name, side, ran):
+        """Has the daemon link the program of a checkout it has loaded in full, for an edit
+        that adds a thread local, which a splice leaves to the linker, and `ran` be given it.
+        The result is how the program ran, who built it, and the writes under way when the
+        client had it."""
+        for file, text in FLAG_WORKSPACE.items():
+            os.makedirs(os.path.dirname(os.path.join(side.ws, file)), exist_ok=True)
+            open(os.path.join(side.ws, file), "w").write(text)
+        side.cargo("build")
+        wait_warm(side, side.ws)
+        still()
+        side.how_built("")
+        before = writes()[0]
+        main = os.path.join(side.ws, "app/src/main.rs")
+        rewrite(main, 'println!("{:?}", sum.ok());', 'println!("{:?} {}", sum.ok(), IN_PLACE.with(|it| it.get()));')
+        open(main, "a").write("\nthread_local! {\n    static IN_PLACE: std::cell::Cell<u32> = const { std::cell::Cell::new(1) };\n}\n")
+        out, how, under_way = ran(side)
+        written = writes()[0] - before
+        still()
+        held = out.returncode == 0 and how == "daemon" and written > 0 and not under_way
+        check(f"{name}, while the daemon writes it in place, starts", held,
+              f"{how[:90]}; {written} written in place, {under_way} under way when the client had it; exit {out.returncode}; {out.stderr.strip()[-300:]!r}")
+
+    def by_path(side):
+        _, built = side.cargo("build")
+        paused, written = writes()
+        try:
+            ran = subprocess.run([os.path.join(side.ws, "target/debug/app" + EXE), "in-place"], capture_output=True, text=True, timeout=60)
+        except OSError as refused:
+            ran = subprocess.CompletedProcess([], 126, "", f"could not start it: {refused}")
+        return (ran if built.returncode == 0 else built), side.how_built(built.stderr), paused - written
+
+    def by_run(side):
+        _, ran = side.cargo("run", "in-place")
+        return ran, side.how_built(ran.stderr), 0
+
+    started("the program by its path after `cargo ra-jit build`", Side(os.path.join(work, "in-place-build"), env, True), by_path)
+    started("the program by its path after plain `cargo build` once `ra-jit enable` was run", Side(os.path.join(work, "in-place-plain"), plain_env, "plain"), by_path)
+    started("`cargo ra-jit run`", Side(os.path.join(work, "in-place-run"), env, True), by_run)
+    subprocess.run([RA_JIT, "disable"], env=plain_env, capture_output=True)
+    subprocess.run([RA_JIT, "stop"], env=env, capture_output=True)
 
 
 USE_AFTER_MOVE = """
@@ -821,6 +897,19 @@ def greets(out, greeting):
     return out.splitlines()[:1] == [greeting]
 
 
+def finished(client, timeout):
+    """What `client` said and its exit code, or, if it has not ended in `timeout` seconds,
+    what it and the processes under it were doing, as said by `ps`, and exit code `None`."""
+    try:
+        return client.communicate(timeout=timeout), client.returncode
+    except subprocess.TimeoutExpired:
+        listed = subprocess.run(["ps", "-axo", "pgid=,pid=,ppid=,stat=,etime=,command="], capture_output=True, text=True).stdout
+        doing = "\n".join(line for line in listed.splitlines() if line.split()[:1] == [str(client.pid)])
+        kill_all(client)
+        out, err = client.communicate()
+        return (out, f"{err}\n[still running after {timeout}s]\n{doing}"), None
+
+
 def abuse(work, ws, tree, env, check, status, alive):
     """The daemon under what it is not asked for politely: many clients at once, a client
     and a daemon killed while a build is asked for, and a client that is another user."""
@@ -847,10 +936,10 @@ def abuse(work, ws, tree, env, check, status, alive):
         for n, root in enumerate(trees):
             rewrite(os.path.join(root, "util/src/lib.rs"), f'format!("{greeting(n, r - 1)} {{name}}")', f'format!("{greeting(n, r)} {{name}}")')
         clients = [(n, spawn(root, "run", f"c{i}")) for i in range(4) for n, root in enumerate(trees)]
-        ended = [(n, i // 4, client.communicate(timeout=300), client.returncode) for i, (n, client) in enumerate(clients)]
+        ended = [(n, i // 4, *finished(client, 300)) for i, (n, client) in enumerate(clients)]
         cargos = lambda err: re.search(r"^\s*Finished `\w+` profile \[(?!ra-jit)", err, re.M)
         served += sum(how_built(err) == "daemon" and not cargos(err) for _, _, (_, err), _ in ended)
-        wrong += [f"; round {r} tree{n} c{i}: exit {code}, {out[-80:]!r} {err[-200:]!r}" for n, i, (out, err), code in ended if code != 0 or not greets(out, f"{greeting(n, r)} c{i}")]
+        wrong += [f"; round {r} tree{n} c{i}: exit {code}, {out[-80:]!r} {err[-200 if code is not None else -2000:]!r}" for n, i, (out, err), code in ended if code != 0 or not greets(out, f"{greeting(n, r)} c{i}")]
     check(f"16 clients at once on 4 worktrees each run their own tree's program, {rounds} times over", not wrong and served == 16 * rounds and status()[0] == pid and status()[1] == workers, f"{16 * rounds - len(wrong)} of {16 * rounds} right, {served} by the daemon alone, {len(workers)} worker" + "".join(wrong))
 
     # A worker that is stopped holds the build a client asks for until it is continued.
@@ -1174,10 +1263,18 @@ def plain(work):
         rewrite(os.path.join(root, "util/src/lib.rs"), 'format!("hello {name}")', f'format!("tree{n} {{name}}")')
     here.how_built("")
     spawn = lambda root, *args: subprocess.Popen(["cargo", *args], cwd=root, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, stdin=subprocess.DEVNULL, start_new_session=True)
-    clients = [(n, i, spawn(root, "run", f"c{i}")) for i in range(4) for n, root in enumerate(trees) if n]
-    ended = [(n, i, client.communicate(timeout=600), client.returncode) for n, i, client in clients]
+    # Builds, and each tree's program started once they are done: cargo starts what `cargo run`
+    # built after letting go of its lock, and on macOS removes and copies the program again on
+    # every build, also of a fresh one, so one started by another `cargo run` of the tree
+    # meanwhile hangs before its first instruction or is not there, with no ra-jit in the build.
+    clients = [(n, i, spawn(root, "build")) for i in range(4) for n, root in enumerate(trees) if n]
+    built = [(n, i, *finished(client, 600)) for n, i, client in clients]
+    ran = lambda n, i: subprocess.run([os.path.join(trees[n], "target/debug/app" + EXE), f"c{i}"], capture_output=True, text=True, timeout=60)
+    ended = [(n, i, (out, err), code) if code != 0 else (n, i, ((it := ran(n, i)).stdout, it.stderr), it.returncode)
+             for n, i, (out, err), code in built]
     right = [code == 0 and greets(out[0], f"tree{n} c{i}") for n, i, out, code in ended]
-    check("12 plain cargo builds at once on 3 worktrees each run their own tree's program", all(right) and status()[0] == pid, f"{sum(right)} of 12 right; {here.how_built('')[:80]}")
+    said = "".join(f"; tree{n} c{i}: exit {code}, {out[-80:]!r} {err[-600 if code is not None else -2000:]!r}" for (n, i, (out, err), code), ok in zip(ended, right) if not ok)
+    check("12 plain cargo builds at once on 3 worktrees each run their own tree's program", all(right) and status()[0] == pid, f"{sum(right)} of 12 right; {here.how_built('')[:80]}{said}")
 
     for side in sides:
         wait_warm(side, side.ws)

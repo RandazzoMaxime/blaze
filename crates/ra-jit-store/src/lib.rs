@@ -34,7 +34,6 @@
 //! collection and a change of format, from running at once.
 
 use std::{
-    borrow::Cow,
     fs::{File, OpenOptions},
     io::{self, Write},
     ops::Range,
@@ -46,11 +45,10 @@ use std::{
     time::{Duration, SystemTime},
 };
 
-use cranelift_codegen::incremental_cache::CacheKvStore;
 use rustc_hash::{FxHashMap, FxHashSet};
 use sha2::{Digest, Sha256};
 
-pub(super) const KEY: usize = 32;
+pub const KEY: usize = 32;
 /// The format of the directory, of a pack and of a record. A change to any of them is
 /// another number here and another last byte of [`MAGIC`].
 pub const FORMAT: u32 = 2;
@@ -91,7 +89,7 @@ pub fn compiles_against(toolchain: &str) {
 }
 
 /// The toolchain [`compiles_against`] was told of.
-pub(super) fn toolchain() -> Option<&'static str> {
+pub fn toolchain() -> Option<&'static str> {
     TOOLCHAIN.get().map(String::as_str)
 }
 
@@ -871,7 +869,7 @@ pub fn write_file_whole(to: &Path, bytes: &[u8]) -> io::Result<()> {
     write_whole(to, bytes, false)
 }
 
-pub(super) struct Store {
+pub struct Store {
     dir: StoreDir,
     identity: Identity,
     tuning: Tuning,
@@ -982,7 +980,7 @@ pub fn is_off(value: &std::ffi::OsStr) -> bool {
 impl Store {
     /// The store of this process: the directory `RA_JIT_CACHE` names, when it names one. A
     /// directory that cannot be used is said once, and the process compiles without one.
-    pub(super) fn global() -> Option<&'static Store> {
+    pub fn global() -> Option<&'static Store> {
         static STORE: OnceLock<Option<Store>> = OnceLock::new();
         STORE
             .get_or_init(|| {
@@ -1045,7 +1043,7 @@ impl Store {
 
     /// Reads the sealed packs that were added to the directory since the last call, by this
     /// daemon or any other, and forgets the ones that were taken out of it.
-    pub(super) fn refresh(&self) {
+    pub fn refresh(&self) {
         let Ok(names) = self.dir.packs() else { return };
         let known: FxHashSet<String> = self.sealed().packs.keys().cloned().collect();
         let names: FxHashSet<String> = names.into_iter().collect();
@@ -1137,7 +1135,7 @@ impl Store {
 
     /// Runs `settle`, which ends a build's use of the store, beside what the build does
     /// next. One at a time: the one before is waited for.
-    pub(super) fn settle_with(&self, settle: impl FnOnce() + Send + 'static) {
+    pub fn settle_with(&self, settle: impl FnOnce() + Send + 'static) {
         self.settled();
         let Ok(mut settling) = self.settling.lock() else { return settle() };
         match std::thread::Builder::new().name("ra-jit store settle".to_owned()).spawn(settle) {
@@ -1147,7 +1145,7 @@ impl Store {
     }
 
     /// Waits for what [`Self::settle_with`] started.
-    pub(super) fn settled(&self) {
+    pub fn settled(&self) {
         let thread = self.settling.lock().ok().and_then(|mut it| it.take());
         if let Some(thread) = thread {
             _ = thread.join();
@@ -1157,7 +1155,7 @@ impl Store {
     /// Writes out what has been added, seals it when there is enough of it, and reads what
     /// other daemons sealed. What is not written by the time the daemon ends is compiled
     /// again by the next.
-    pub(super) fn flush(&self) {
+    pub fn flush(&self) {
         self.settle(self.tuning.seal_at);
     }
 
@@ -1206,12 +1204,12 @@ impl Store {
     }
 
     /// Whether a sealed pack has a value for the key.
-    pub(super) fn has(&self, key: &[u8; KEY]) -> bool {
+    pub fn has(&self, key: &[u8; KEY]) -> bool {
         self.place(&self.identity.key(key)).is_some()
     }
 
     /// The value of a key, if a sealed pack has it as it was written.
-    pub(super) fn get(&self, key: &[u8; KEY]) -> Option<Vec<u8>> {
+    pub fn get(&self, key: &[u8; KEY]) -> Option<Vec<u8>> {
         let key = self.identity.key(key);
         let place = self.place(&key)?;
         let mut value = vec![0; place.len as usize];
@@ -1236,7 +1234,7 @@ impl Store {
     }
 
     /// The code of a function by what it was compiled from, counted as found or not.
-    pub(super) fn lookup(&self, key: &[u8; KEY]) -> Option<Vec<u8>> {
+    pub fn lookup(&self, key: &[u8; KEY]) -> Option<Vec<u8>> {
         let found = self.get(key);
         let counted = if found.is_some() { &self.hits } else { &self.misses };
         counted.fetch_add(1, Ordering::Relaxed);
@@ -1245,7 +1243,7 @@ impl Store {
 
     /// Adds a value, unless the key has one. A value that cannot be written is not an error
     /// to the build: it is counted, and compiled again by the next.
-    pub(super) fn insert(&self, key: &[u8; KEY], value: &[u8]) {
+    pub fn insert(&self, key: &[u8; KEY], value: &[u8]) {
         let key = self.identity.key(key);
         if self.sealed().index.contains_key(&key) {
             return;
@@ -1271,7 +1269,7 @@ impl Store {
     }
 
     /// How many functions were found, and how many were not, since the last call.
-    pub(super) fn take_counts(&self) -> (usize, usize) {
+    pub fn take_counts(&self) -> (usize, usize) {
         (self.hits.swap(0, Ordering::Relaxed), self.misses.swap(0, Ordering::Relaxed))
     }
 }
@@ -1491,22 +1489,6 @@ mod private {
     #[cfg(not(any(unix, windows)))]
     pub(super) fn others_write(_: &File) -> Option<&'static str> {
         None
-    }
-}
-
-/// The store as Cranelift asks for it: one of these per function compiled.
-pub(super) struct Lookup(pub(super) &'static Store);
-
-impl CacheKvStore for Lookup {
-    fn get(&self, key: &[u8]) -> Option<Cow<'_, [u8]>> {
-        let key = <&[u8; KEY]>::try_from(key).ok()?;
-        self.0.lookup(key).map(Cow::Owned)
-    }
-
-    fn insert(&mut self, key: &[u8], val: Vec<u8>) {
-        if let Ok(key) = <&[u8; KEY]>::try_from(key) {
-            self.0.insert(key, &val);
-        }
     }
 }
 
@@ -2229,10 +2211,10 @@ mod tests {
 
     #[test]
     fn no_bytes_break_the_reading_of_a_pack() {
-        use super::super::fuzz;
+        use ra_jit_fuzz as fuzz;
         let seeds = vec![pack(), MAGIC.to_vec(), Vec::new()];
         let (mut whole, mut cut) = (0, 0);
-        for bytes in fuzz::inputs("pack", seeds) {
+        for bytes in fuzz::inputs(concat!(env!("CARGO_MANIFEST_DIR"), "/corpus/pack"), seeds) {
             let (largest, (found, end)) = fuzz::largest_allocation(|| records(&bytes));
             assert!(largest <= fuzz::allowed(bytes.len()), "{largest} bytes for {}", bytes.len());
             assert!(end <= bytes.len());
@@ -2256,7 +2238,7 @@ mod tests {
 
     #[test]
     fn no_name_breaks_the_telling_of_what_a_file_is() {
-        use super::super::fuzz;
+        use ra_jit_fuzz as fuzz;
         let name = |it: &str| it.as_bytes().to_vec();
         let seeds = vec![
             name(&named(&[0xab; 32])),
@@ -2267,7 +2249,7 @@ mod tests {
             name(LOCK_FILE),
         ];
         let mut ours = 0;
-        for bytes in fuzz::inputs("name", seeds) {
+        for bytes in fuzz::inputs(concat!(env!("CARGO_MANIFEST_DIR"), "/corpus/name"), seeds) {
             let name = String::from_utf8_lossy(&bytes);
             let kind = Kind::of(&name);
             assert_eq!(kind == Some(Kind::Pack), is_pack(&name));

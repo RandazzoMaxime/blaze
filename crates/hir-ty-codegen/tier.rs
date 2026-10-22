@@ -232,6 +232,13 @@ impl Tiers {
         self.nodes.is_empty()
     }
 
+    /// Leaves the code installed as it is, with nothing more to install: a full build that may
+    /// yet be undone is made without it, and [`Tiers::clear`] follows once it is kept.
+    pub fn stop_trials(&mut self) {
+        self.fresh.clear();
+        self.trial.clear();
+    }
+
     /// Sends every function back to level 1, as a full build does.
     pub fn clear(&mut self) {
         self.fresh.clear();

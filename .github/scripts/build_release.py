@@ -66,8 +66,9 @@ MIN_COUNT = 1_000_000_000
 # What LLVM says of a function whose control flow changed since the profile was trained.
 STALE = re.compile(r"function control flow change detected \(hash mismatch\)")
 # The hash rustc gives the crate ra-jit, in each of its symbols. Cargo derives it from the
-# whole graph of the build: every crate's name, version, source and features, the profile, the
-# toolchain, and a wrapper of rustc around the workspace's crates. LLVM finds a function of the
+# whole graph of the build: every crate's name, version, source and features, the profile
+# (whether it builds incrementally too), the toolchain, and a wrapper of rustc around the
+# workspace's crates. LLVM finds a function of the
 # profile by its symbol, so a build whose hash is not the profile's finds next to nothing in it
 # (the crates that did not change below, none of the workspace's), and says nothing.
 CRATE = re.compile(rb"Cs([0-9A-Za-z]+)_6ra_jit")
@@ -92,9 +93,12 @@ def recipe(target, rustflags, cflags, features=None):
     of rustc: one around the workspace's crates (`ra-jit enable`'s, nixpkgs' cargo-auditable)
     changes their symbols, and the profile no longer finds them. Cargo hashes the empty
     `RUSTC_WORKSPACE_WRAPPER` too, unlike an unset one, so every build sets it, the training's
-    included, whatever cargo's configuration says."""
+    included, whatever cargo's configuration says. Nor incremental, which a developer's
+    `CARGO_INCREMENTAL=1` would otherwise turn on for the workspace's crates, changing them as
+    well (`0` is `dist`'s own setting, so the hashes are those of a build without it)."""
     triple = target.replace("-", "_")
-    env = {"RUSTUP_TOOLCHAIN": TOOLCHAIN, "RUSTFLAGS": rustflags, "RUSTC_WRAPPER": "", "RUSTC_WORKSPACE_WRAPPER": ""}
+    env = {"RUSTUP_TOOLCHAIN": TOOLCHAIN, "RUSTFLAGS": rustflags, "RUSTC_WRAPPER": "", "RUSTC_WORKSPACE_WRAPPER": "",
+           "CARGO_INCREMENTAL": "0"}
     for name in ("CFLAGS", "CXXFLAGS"):
         env[f"{name}_{triple}"] = " ".join(filter(None, [os.environ.get(f"{name}_{triple}"), cflags]))
     return env, ["cargo", "build", "-p", "ra-jit", "--profile", "dist", "--locked", "--target", target,

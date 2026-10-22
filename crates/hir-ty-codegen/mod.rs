@@ -104,8 +104,6 @@ pub use debuginfo::Sidecar;
 mod float_pair;
 mod fncache;
 mod fragment;
-#[cfg(test)]
-mod fuzz;
 mod home;
 pub use home::body_file;
 #[cfg(feature = "llvm")]
@@ -116,8 +114,8 @@ use self::places::{row_location, source_location};
 mod promote;
 mod settled;
 mod stable;
+use ra_jit_store as store;
 pub use stable::{block_place, lower_declared};
-mod store;
 mod target;
 pub use target::{Arch, Calls, ObjectFormat, Target, UnwindFormat, VariableArguments};
 pub mod tier;
@@ -125,13 +123,14 @@ pub mod tier;
 pub use patch::{Stale, StaleSteps};
 /// For `crates/ra-jit-bench` alone.
 #[doc(hidden)]
-pub use store::bench;
-pub use store::{
-    Collected, FORMAT as STORE_FORMAT, FetchMissing, Stats, StoreDir, Verified, compiles_against,
-    fetch_missing_with, identify_ahead, is_off as store_is_off, is_pack, limit_from_env,
-    name_file_whole, pack_format, pack_keys, pack_name, parse_size, seal_open, settled,
-    write_file_whole,
-};
+pub mod bench {
+    use ra_jit_store::KEY;
+
+    /// The key of the entry for `name`, as a build asks for it.
+    pub fn entry_key(name: &str, debug: bool, program: &[u8; KEY]) -> Option<[u8; KEY]> {
+        super::cached::Entry::key(name, debug, Some(program))
+    }
+}
 mod type_id;
 mod unwind;
 mod vtable;
@@ -265,6 +264,24 @@ pub trait SymbolResolver {
     fn defines(&self, _symbol: &str) -> bool {
         false
     }
+    /// Whether the executable the patch goes into has the symbol: rustc's own link of it
+    /// leaves out every function nothing calls.
+    fn linked(&self, _symbol: &str) -> bool {
+        true
+    }
+    /// The copies the executable a patch goes into has of the instances of `func`, a generic
+    /// function of a module, each by its path as [`Spelling::instance_path`] writes it with
+    /// rustc's symbol of it. `None` when that can't be told of each, as of one copied twice.
+    fn rustc_instances(&self, _func: FunctionId) -> Option<Vec<(String, String)>> {
+        None
+    }
+    /// rustc's symbol of the closure at `expr` in the body of `owner`, which is not generic.
+    fn closure(&self, _owner: FunctionId, _expr: hir_def::hir::ExprId) -> Option<String> {
+        None
+    }
+    /// The build is no patch of what rustc linked but one in full, which is linked: what
+    /// only that executable has is not to be named.
+    fn in_full(&self) {}
     /// The `StableCrateId` of each crate that compiled a copy of an instance of a function
     /// named `function`.
     fn makers(&self, _function: &str) -> Vec<u64> {
@@ -524,22 +541,57 @@ impl CodegenUnit {
         denied: &FxHashSet<FunctionId>,
         known: &mut Rejections,
     ) -> Result<CodegenUnit> {
+        let unit =
+            CodegenUnit::compile_or_hold(db, symbols, roots, denied, known, &|| false, false)?;
+        Ok(unit.expect("a build that is never held makes a unit"))
+    }
+
+    /// As [`CodegenUnit::compile`], but an edit that can't be a patch is built whole only if
+    /// `hold` says not to hold it. `None` when it is held: nothing is built, and the next edit
+    /// is still a patch of the last full build. A text that does not compile is held, so that
+    /// the build of the next one that does is not of what this one made of the program.
+    ///
+    /// With `undoable`, a full build that replaces another keeps what it replaced until
+    /// [`Rejections::keep_built`] or [`Rejections::undo_built`]: a build the daemon refuses
+    /// once it is made is undone, and the next edit is a patch of the build before it.
+    pub fn compile_or_hold(
+        db: &dyn HirDatabase,
+        symbols: &dyn SymbolResolver,
+        roots: Roots<'_>,
+        denied: &FxHashSet<FunctionId>,
+        known: &mut Rejections,
+        hold: &dyn Fn() -> bool,
+        undoable: bool,
+    ) -> Result<Option<CodegenUnit>> {
         let on_demand: FxHashSet<FunctionId> = roots.on_demand.iter().copied().collect();
         let all = || roots.entries.iter().chain(roots.on_demand).copied();
-        let mut declined = None;
         // Code of the checkout comes from the store in the first build alone: what a patch is
-        // of has to be compiled here, to tell what an edit changes.
-        let hydrate = known.base.is_none();
-        if let Some(base) = known.base.take().filter(|it| !it.outdated()) {
+        // of has to be compiled here, to tell what an edit changes. The build that makes a base
+        // while edits are patches of rustc's executable is that first build too.
+        let hydrate = known.base.is_none() && !known.full;
+        let mut replaced = match known.base.take() {
+            Some(base) => Some(base),
+            None if !known.full => known.rustc.take(),
+            None => None,
+        };
+        let over_rustc = replaced.as_ref().is_some_and(|it| it.rustc);
+        let forgot = known.forgot_rustc.take().filter(|_| replaced.is_none());
+        let mut declined =
+            replaced.as_ref().filter(|it| it.rustc).and_then(|it| it.why_outdated()).or(forgot);
+        if let Some(base) = replaced.take_if(|it| !it.outdated()) {
             let start = stdx::time::Instant::now();
-            let own_statics = OwnStatics::new(
-                db,
-                symbols,
-                all().map(|root| root.krate(db)).collect(),
-                known.theirs.clone(),
-                known.unknown.clone(),
-                !roots.on_demand.is_empty(),
-            );
+            // Every static is rustc's, which rustc's code reads.
+            let own_statics = match base.rustc {
+                true => OwnStatics::none(),
+                false => OwnStatics::new(
+                    db,
+                    symbols,
+                    all().map(|root| root.krate(db)).collect(),
+                    known.theirs.clone(),
+                    known.unknown.clone(),
+                    !roots.on_demand.is_empty(),
+                ),
+            };
             let statics = start.elapsed();
             let mut stale = std::mem::take(&mut known.stale);
             if stale.is_empty() {
@@ -580,6 +632,7 @@ impl CodegenUnit {
                     rounds: 1,
                     patched: Some(patch.bodies),
                     declined: None,
+                    over_rustc: base.rustc,
                 };
                 let unit = CodegenUnit {
                     object: None,
@@ -589,9 +642,29 @@ impl CodegenUnit {
                     skipped: base.skipped.clone(),
                     instances: base.instances.len(),
                 };
-                known.base = Some(base);
-                return Ok(unit);
+                known.put_base(base);
+                return Ok(Some(unit));
             }
+            replaced = Some(base);
+        }
+        if let Some(base) = replaced.take_if(|_| hold()) {
+            known.stats = BuildStats {
+                bodies: base.bodies,
+                reused: base.bodies,
+                declined,
+                ..BuildStats::default()
+            };
+            known.put_base(base);
+            return Ok(None);
+        }
+        known.undo = None;
+        if let Some(base) = replaced.filter(|_| undoable) {
+            let mut kept = known.clone();
+            kept.put_base(base);
+            known.undo = Some(Box::new(kept));
+        }
+        if over_rustc {
+            symbols.in_full();
         }
         let patching = known.patching;
         let used_by_rustc = known.used_by_rustc;
@@ -605,15 +678,24 @@ impl CodegenUnit {
             left,
             futures,
             base,
+            rustc,
+            full,
+            forgot_rustc: _,
             patching: _,
             counted,
             stale: _,
             frozen: _,
             used_by_rustc: _,
             tiers,
+            undo,
         } = known;
-        // A full build is linked again, and the program that runs it starts at level 1.
-        tiers.clear();
+        // A full build is linked again, and the program that runs it starts at level 1: once
+        // it is kept, when it can be undone.
+        if undo.is_some() {
+            tiers.stop_trials();
+        } else {
+            tiers.clear();
+        }
         if roots.start.is_some() {
             backend::set_whole_program();
         }
@@ -830,10 +912,13 @@ impl CodegenUnit {
                     rounds,
                     patched: None,
                     declined,
+                    over_rustc: false,
                 };
                 if patching {
                     *base = patch::Base::record(db, &cg, roots.entries, &compiled, &skipped);
                 }
+                // The executable is linked from this object from now on.
+                (*rustc, *full) = (None, false);
                 if let Some(path) = std::env::var_os("RA_JIT_LAYOUTS") {
                     let lines = cg
                         .layouts
@@ -854,14 +939,14 @@ impl CodegenUnit {
                 backend::Tally::global().report();
                 (*theirs, *unknown) = (own_statics.theirs, own_statics.unknown);
                 let patch = if patching { Some(patch::empty_object()?) } else { None };
-                return Ok(CodegenUnit {
+                return Ok(Some(CodegenUnit {
                     object: Some(object),
                     patch,
                     apart,
                     compiled,
                     skipped,
                     instances,
-                });
+                }));
             }
             let first = failed.first().map_or("", |it| it.1.why.as_str());
             start_over(&format!("{} instances did not compile, the first: {first}", failed.len()));
@@ -890,6 +975,17 @@ struct OwnStatics {
 }
 
 impl OwnStatics {
+    /// None: those of a patch of what rustc linked, all of whose statics are rustc's.
+    fn none() -> OwnStatics {
+        OwnStatics {
+            crates: FxHashSet::default(),
+            shared: FxHashSet::default(),
+            theirs: FxHashSet::default(),
+            unknown: FxHashSet::default(),
+            unbuilt: FxHashSet::default(),
+        }
+    }
+
     fn new(
         db: &dyn HirDatabase,
         symbols: &dyn SymbolResolver,
@@ -963,6 +1059,14 @@ pub(crate) struct Rejected {
     why: String,
 }
 
+/// What [`Rejections`] knows of the executable rustc linked, as a base to patch.
+pub struct RustcBase(patch::Base);
+
+/// An object that defines nothing, for the target the process compiles for.
+pub fn empty_object() -> Result<Vec<u8>> {
+    patch::empty_object()
+}
+
 #[derive(Default, Clone)]
 pub struct Rejections {
     rejected: FxHashMap<Instance, Rejected>,
@@ -980,6 +1084,13 @@ pub struct Rejections {
     /// library: it then has code of its own for every function of theirs without a symbol.
     pub used_by_rustc: bool,
     base: Option<patch::Base>,
+    /// The executable rustc linked, which an edit is a patch of until there is a `base`.
+    rustc: Option<patch::Base>,
+    /// Whether the next build is a full one though `rustc` could be patched: the one that
+    /// makes a `base`, while nobody waits.
+    full: bool,
+    /// Why `rustc` was let go of by an edit, for the build in full it makes to say.
+    forgot_rustc: Option<&'static str>,
     frozen: patch::Frozen,
     stale: Vec<Stale>,
     /// How many functions had been compiled when the last build finished.
@@ -987,9 +1098,29 @@ pub struct Rejections {
     pub stats: BuildStats,
     /// The functions at a level above 1, which a patch has at that level.
     pub tiers: tier::Tiers,
+    /// What the last full build replaced, while it can still be undone.
+    undo: Option<Box<Rejections>>,
 }
 
 impl Rejections {
+    /// Keeps the last full build: the next edit is a patch of it.
+    pub fn keep_built(&mut self) {
+        if self.undo.take().is_some() {
+            self.tiers.clear();
+        }
+    }
+
+    /// Puts back what the last full build replaced, when it was built undoably and replaced
+    /// a build: the next edit is a patch of that one, as if the full build had not been made.
+    /// Whether there was one to put back.
+    pub fn undo_built(&mut self) -> bool {
+        let Some(kept) = self.undo.take() else { return false };
+        let (counted, stats) = (self.counted, self.stats);
+        *self = *kept;
+        (self.counted, self.stats) = (counted, stats);
+        true
+    }
+
     fn compiled_since_last_build(&mut self) -> usize {
         let total = COMPILED.load(std::sync::atomic::Ordering::Relaxed);
         total - std::mem::replace(&mut self.counted, total)
@@ -998,13 +1129,106 @@ impl Rejections {
     /// Looks at one part in `parts` of what the last full build compiled for what an edit
     /// changed, which threads can do a part each. `None` when no patch is to be made.
     pub fn stale(&self, db: &dyn HirDatabase, part: usize, parts: usize) -> Option<Stale> {
-        Some(self.base.as_ref()?.stale(db, part, parts))
+        Some(self.patched()?.stale(db, part, parts))
     }
 
-    /// Whether the next build is a patch of the last one. A build that is interrupted leaves
-    /// nothing to patch.
+    /// What the next build is a patch of, if it is one.
+    fn patched(&self) -> Option<&patch::Base> {
+        self.base.as_ref().or(self.rustc.as_ref().filter(|it| !self.full && !it.outdated()))
+    }
+
+    /// Whether the next build is a patch of the last one, or of what rustc linked. A build
+    /// that is interrupted leaves nothing to patch.
     pub fn patches(&self) -> bool {
-        self.base.is_some()
+        self.base.is_some() || self.patched().is_some()
+    }
+
+    /// Has the next builds patch the executable rustc linked, until one in full makes a base
+    /// of ours: rustc compiled what the daemon reads. `debug` is whether a patch says which
+    /// lines its code is of.
+    pub fn start_from_rustc(&mut self, debug: bool) {
+        self.rustc = Some(patch::Base::of_rustc(debug));
+    }
+
+    /// Whether the edits are patches of what rustc linked, which a build in full while
+    /// nobody waits would replace with a base of ours.
+    pub fn wants_base(&self) -> bool {
+        self.base.is_none() && self.rustc.as_ref().is_some_and(|it| !it.outdated())
+    }
+
+    /// Makes the next build the full one that [`Rejections::wants_base`] asks for.
+    pub fn build_base(&mut self) {
+        self.full = true;
+    }
+
+    /// Whether the next build is the one [`Rejections::build_base`] asked for.
+    pub fn builds_base(&self) -> bool {
+        self.full && self.rustc.is_some() && self.base.is_none()
+    }
+
+    /// Takes what rustc linked as a base out, to keep it through what forgets the rest.
+    pub fn take_rustc(&mut self) -> Option<RustcBase> {
+        self.full = false;
+        self.rustc.take().map(RustcBase)
+    }
+
+    pub fn put_rustc(&mut self, rustc: Option<RustcBase>) {
+        self.rustc = rustc.map(|it| it.0);
+    }
+
+    /// Puts a base taken out for a build back where it was: what rustc linked or ours.
+    fn put_base(&mut self, base: patch::Base) {
+        match base.rustc {
+            true => self.rustc = Some(base),
+            false => self.base = Some(base),
+        }
+    }
+
+    /// Stops patching what rustc linked: the executable is no longer the one it linked.
+    pub fn forget_rustc(&mut self) {
+        (self.rustc, self.full) = (None, false);
+    }
+
+    /// [`Rejections::forget_rustc`] for an edit no patch of it can be, which the build in full
+    /// that follows says.
+    pub fn forget_rustc_for(&mut self, why: &'static str) {
+        if self.base.is_none() && self.rustc.is_some() && !self.full {
+            self.forgot_rustc = Some(why);
+        }
+        self.forget_rustc();
+    }
+
+    /// Notes what rustc compiled of `file`, which is about to change: the functions written
+    /// in it and the statics declared there and in their bodies. Asked before the edit.
+    pub fn home(
+        &mut self,
+        db: &dyn HirDatabase,
+        symbols: &dyn SymbolResolver,
+        file: base_db::FileId,
+        functions: &[FunctionId],
+        statics: &[StaticId],
+    ) {
+        if self.base.is_none()
+            && let Some(rustc) = &mut self.rustc
+        {
+            rustc.home(db, symbols, file, functions, statics);
+        }
+    }
+
+    /// Whether the patches of what rustc linked replace each of rustc's copies of the generic
+    /// functions of the modules of `file` named `names`, which [`Self::home`] took in.
+    pub fn copies_homed(&self, file: base_db::FileId, names: &[String]) -> bool {
+        self.base.is_none() && self.rustc.as_ref().is_some_and(|it| it.copies_homed(file, names))
+    }
+
+    /// Whether [`Self::home`] has to note `file` yet.
+    pub fn homes_file(&self, file: base_db::FileId) -> bool {
+        self.homes() && self.rustc.as_ref().is_some_and(|it| !it.homed(file))
+    }
+
+    /// Whether a patch of what rustc linked has to know `file` before it changes.
+    pub fn homes(&self) -> bool {
+        self.base.is_none() && self.rustc.as_ref().is_some_and(|it| !it.outdated())
     }
 
     /// The function of the last full build that is defined under `symbol`, as the object has
@@ -1048,11 +1272,15 @@ impl Rejections {
     /// and what an edit took away can only be looked at where a panic can be caught.
     pub fn forget_base(&mut self) {
         self.base = None;
+        self.forget_rustc();
     }
 
     /// Notes that rustc compiled `crates` from other source than they are first built from
     /// here, so that what it compiled of them and of those that see them is not to be linked.
     pub fn distrust(&mut self, db: &dyn HirDatabase, crates: &[Crate]) {
+        if !crates.is_empty() {
+            self.forget_rustc();
+        }
         self.frozen.distrust(crates.iter().flat_map(|it| it.transitive_rev_deps(db)));
     }
 
@@ -1065,8 +1293,18 @@ impl Rejections {
             }
             None => self.frozen.edit(base_db::all_crates(db).iter().copied()),
         }
-        if let Some(base) = &mut self.base {
+        for base in [&mut self.base, &mut self.rustc].into_iter().flatten() {
             base.touch(db, crates);
+        }
+        self.forget();
+    }
+
+    /// Notes that files rustc read, as it read them, were taken in for the first time: a build
+    /// of the daemon's own compiled without them, and what rustc linked is of them.
+    pub fn touch_own(&mut self, db: &dyn HirDatabase) {
+        self.frozen.edit(base_db::all_crates(db).iter().copied());
+        if let Some(base) = &mut self.base {
+            base.touch(db, None);
         }
         self.forget();
     }
@@ -1086,7 +1324,7 @@ impl Rejections {
     /// items, and not handed to a macro.
     pub fn touch_bodies(&mut self, db: &dyn HirDatabase, file: base_db::FileId) {
         self.frozen.edit_bodies(file);
-        if let Some(base) = &mut self.base {
+        for base in [&mut self.base, &mut self.rustc].into_iter().flatten() {
             base.touch_bodies(db, file);
         }
         self.forget();
@@ -1102,8 +1340,11 @@ impl Rejections {
     /// Hands the next build what [`Rejections::stale`] found, every part of it and with no
     /// edit in between.
     pub fn set_stale(&mut self, db: &dyn HirDatabase, mut stale: Vec<Stale>) {
+        let patched = self.patched().is_some();
         if let Some(base) = &mut self.base {
             base.settle(db, &mut stale);
+        } else if let Some(rustc) = self.rustc.as_mut().filter(|_| patched) {
+            rustc.settle(db, &mut stale);
         }
         self.stale = stale;
     }
@@ -1141,6 +1382,9 @@ pub struct BuildStats {
     pub patched: Option<usize>,
     /// Why the build wrote the whole object again, when a patch was tried.
     pub declined: Option<&'static str>,
+    /// Whether the patch is of the executable rustc linked, which only a splice adds it to:
+    /// a link puts rustc's objects behind it, whose calls within themselves stay there.
+    pub over_rustc: bool,
 }
 
 /// Time spent in each step of the last round.
@@ -1212,6 +1456,180 @@ enum Callee<'db> {
     Instance(InstanceDef, GenericArgs<'db>),
     /// With how many of the arguments are for named parameters, when the rest are for `...`.
     Pointer(Value, ExternAbi, Option<usize>),
+}
+
+/// How rustc's demangled symbols spell the types and instances of the program.
+struct Spelling<'a, 'db> {
+    db: &'db dyn HirDatabase,
+    symbols: &'a dyn SymbolResolver,
+}
+
+impl<'db> Spelling<'_, 'db> {
+    /// A generic function with its arguments as it reads in a demangled rustc symbol:
+    /// `<Vec<u8> as Clone>::clone`, `<Option<u8>>::map::<u8, F>`, `core::mem::swap::<u8>`.
+    fn instance_path(&self, func: FunctionId, args: GenericArgs<'db>) -> Option<String> {
+        let db = self.db;
+        let signature = FunctionSignature::of(db, func);
+        // The future of an `async fn` is laid out differently by the two compilers.
+        if signature.is_async() {
+            return None;
+        }
+        let name = signature.name.as_str();
+        let interner = DbInterner::new_no_crate(db);
+        let types = |args: &[hir_ty::next_solver::GenericArg<'db>]| {
+            args.iter()
+                .filter(|it| it.region().is_none())
+                .map(|it| self.symbol_arg(*it))
+                .collect::<Option<Vec<_>>>()
+        };
+        let parent = hir_ty::generics::generics(db, func.into()).len_parent();
+        let (parent, own) = args.as_slice().split_at_checked(parent)?;
+        let mut path = match func.lookup(db).container {
+            ItemContainerId::ModuleId(_) => self.symbols.item(func.into())?,
+            ItemContainerId::TraitId(trait_) => {
+                let (self_ty, rest) = parent.split_first()?;
+                let mut path = format!(
+                    "<{} as {}",
+                    self.symbol_type(self_ty.ty()?)?,
+                    self.symbols.item(trait_.into())?
+                );
+                let rest = types(rest)?;
+                if !rest.is_empty() {
+                    path.push_str(&format!("<{}>", rest.join(", ")));
+                }
+                format!("{path}>::{name}")
+            }
+            ItemContainerId::ImplId(impl_) => {
+                let parent_args = GenericArgs::new_from_slice(parent);
+                let self_ty =
+                    db.impl_self_ty(impl_).instantiate(interner, parent_args).skip_norm_wip();
+                let self_ty = self.symbol_type(self_ty)?;
+                match db.impl_trait(impl_) {
+                    None => format!("<{self_ty}>::{name}"),
+                    Some(trait_ref) => {
+                        let trait_ref =
+                            trait_ref.instantiate(interner, parent_args).skip_norm_wip();
+                        let mut path = format!(
+                            "<{self_ty} as {}",
+                            self.symbols.item(trait_ref.def_id.0.into())?
+                        );
+                        let rest = types(&trait_ref.args.as_slice()[1..])?;
+                        if !rest.is_empty() {
+                            path.push_str(&format!("<{}>", rest.join(", ")));
+                        }
+                        format!("{path}>::{name}")
+                    }
+                }
+            }
+            ItemContainerId::ExternBlockId(_) => return None,
+        };
+        let own = types(own)?;
+        if !own.is_empty() {
+            path.push_str(&format!("::<{}>", own.join(", ")));
+        }
+        Some(path)
+    }
+
+    /// A type or a `usize` an instance is instantiated with, as rustc's symbols spell it.
+    fn symbol_arg(&self, arg: hir_ty::next_solver::GenericArg<'db>) -> Option<String> {
+        match (arg.ty(), arg.konst()) {
+            (Some(ty), _) => self.symbol_type(ty),
+            (None, Some(len)) => Some(try_const_usize(self.db, len)?.to_string()),
+            (None, None) => None,
+        }
+    }
+
+    /// A type as it reads in a demangled rustc symbol. `None` for the types whose spelling
+    /// there this does not know: closures, `dyn`, function pointers, anything with a lifetime
+    /// argument.
+    fn symbol_type(&self, ty: Ty<'db>) -> Option<String> {
+        use std::fmt::Write;
+        let db = self.db;
+        let list = |tys: &mut dyn Iterator<Item = Ty<'db>>| {
+            tys.map(|it| self.symbol_type(it)).collect::<Option<Vec<_>>>().map(|it| it.join(", "))
+        };
+        Some(match ty.kind() {
+            TyKind::Bool => "bool".to_owned(),
+            TyKind::Char => "char".to_owned(),
+            TyKind::Str => "str".to_owned(),
+            TyKind::Never => "!".to_owned(),
+            TyKind::Int(it) => it.name_str().to_owned(),
+            TyKind::Uint(it) => it.name_str().to_owned(),
+            TyKind::Float(it) => it.name_str().to_owned(),
+            TyKind::Ref(_, pointee, Mutability::Not) => format!("&{}", self.symbol_type(pointee)?),
+            TyKind::Ref(_, pointee, Mutability::Mut) => {
+                format!("&mut {}", self.symbol_type(pointee)?)
+            }
+            TyKind::RawPtr(pointee, Mutability::Not) => {
+                format!("*const {}", self.symbol_type(pointee)?)
+            }
+            TyKind::RawPtr(pointee, Mutability::Mut) => {
+                format!("*mut {}", self.symbol_type(pointee)?)
+            }
+            TyKind::Slice(element) => format!("[{}]", self.symbol_type(element)?),
+            TyKind::Array(element, len) => {
+                format!("[{}; {}]", self.symbol_type(element)?, try_const_usize(db, len)?)
+            }
+            TyKind::Tuple(tys) if tys.len() == 1 => format!("({},)", list(&mut tys.iter())?),
+            TyKind::Tuple(tys) => format!("({})", list(&mut tys.iter())?),
+            TyKind::Adt(adt, args) => {
+                let mut path = self.symbols.item(adt.def_id().into())?;
+                let interner = DbInterner::new_no_crate(db);
+                let defaults = db.generic_defaults(adt.def_id().into());
+                let mut args = args.as_slice();
+                // rustc leaves out the arguments that say what the default says.
+                while let Some((last, rest)) = args.split_last()
+                    && let Some(default) = defaults.get(rest.len())
+                    && default.instantiate(interner, rest).skip_norm_wip() == *last
+                {
+                    args = rest;
+                }
+                let args = args.iter().filter(|it| it.region().is_none());
+                let args = args.map(|it| self.symbol_arg(*it)).collect::<Option<Vec<_>>>()?;
+                if !args.is_empty() {
+                    write!(path, "<{}>", args.join(", ")).ok()?;
+                }
+                path
+            }
+            TyKind::FnPtr(..) => {
+                let sig = ty.fn_sig(DbInterner::new_no_crate(db)).no_bound_vars()?;
+                if sig.abi() != ExternAbi::Rust
+                    || sig.c_variadic()
+                    || sig.safety() != hir_ty::next_solver::abi::Safety::Safe
+                {
+                    return None;
+                }
+                let mut path = format!("fn({})", list(&mut sig.inputs().iter().copied())?);
+                if !sig.output().is_unit() {
+                    write!(path, " -> {}", self.symbol_type(sig.output())?).ok()?;
+                }
+                path
+            }
+            TyKind::Dynamic(bounds, _) => {
+                let principal = bounds.principal()?.no_bound_vars()?;
+                let mut path = format!("dyn {}", self.symbols.item(principal.def_id.0.into())?);
+                let args = principal.args.iter().filter(|it| it.region().is_none());
+                let mut args = args.map(|it| self.symbol_arg(it)).collect::<Option<Vec<_>>>()?;
+                for bound in bounds.projection_bounds() {
+                    let bound = bound.no_bound_vars()?;
+                    let hir_ty::next_solver::TermId::TypeAliasId(alias) = bound.def_id.0 else {
+                        return None;
+                    };
+                    let name = hir_def::signatures::TypeAliasSignature::of(db, alias).name.clone();
+                    let ty = rustc_type_ir::inherent::Term::as_type(&bound.term)?;
+                    args.push(format!("{} = {}", name.as_str(), self.symbol_type(ty)?));
+                }
+                if !args.is_empty() {
+                    write!(path, "<{}>", args.join(", ")).ok()?;
+                }
+                for auto in bounds.auto_traits() {
+                    write!(path, " + {}", self.symbols.item(auto.0.into())?).ok()?;
+                }
+                path
+            }
+            _ => return None,
+        })
+    }
 }
 
 /// Stitches compiled functions into one object: gives every function and data object they
@@ -1535,6 +1953,54 @@ fn root_serial(db: &dyn HirDatabase, func: FunctionId) -> u128 {
     compiled_root(db, func).as_ref().map_or(0, print_of)
 }
 
+/// A hash of the text of `func` and of where it starts, which says what rustc compiled of it
+/// and of each block in it, and where its panics are. `None` for one a macro writes.
+fn written_print(db: &dyn HirDatabase, func: FunctionId) -> Option<u64> {
+    use std::hash::{Hash, Hasher};
+    let source = func.lookup(db).source(db);
+    if source.file_id.macro_file().is_some() {
+        return None;
+    }
+    let mut hasher = rustc_hash::FxHasher::default();
+    (*declaration_location(db, func))?.hash(&mut hasher);
+    source.value.syntax().text().to_string().hash(&mut hasher);
+    Some(hasher.finish())
+}
+
+/// The closures written in the body of `func` in the order the body has them: each as the
+/// instance its code is compiled as, with a hash of its type, which says what it captures
+/// and how it is called. `None` for one that is not a plain closure (`async`). `None` in all
+/// for a generic function, whose closures are instances of its arguments.
+#[allow(clippy::type_complexity)]
+fn closures_of(
+    db: &dyn HirDatabase,
+    func: FunctionId,
+) -> Option<Vec<(hir_def::hir::ExprId, Option<(Instance, u64)>)>> {
+    use std::hash::{Hash, Hasher};
+    let body = Body::of(db, func.into());
+    let infer = InferenceResult::of(db, DefWithBodyId::from(func));
+    let checked = crate_checks_overflow(db, func.krate(db)).unwrap_or(false);
+    let closures = body.exprs().filter(|(_, it)| matches!(it, hir_def::hir::Expr::Closure { .. }));
+    closures
+        .map(|(expr, _)| {
+            let ty = infer.expr_ty(expr);
+            let TyKind::Closure(id, args) = ty.kind() else { return Some((expr, None)) };
+            let parent = args.as_closure().parent_args();
+            if !parent.is_empty() {
+                return None;
+            }
+            let instance = Instance {
+                def: InstanceDef::Closure(id.0.as_id()),
+                args: GenericArgs::new_from_slice(parent).store(),
+                checked,
+            };
+            let mut hasher = rustc_hash::FxHasher::default();
+            format!("{args:?}").hash(&mut hasher);
+            Some((expr, Some((instance, hasher.finish()))))
+        })
+        .collect()
+}
+
 #[salsa::tracked(returns(copy))]
 fn instance_serial(db: &dyn HirDatabase, instance: Instance, env: StoredParamEnvAndCrate) -> u128 {
     compiled_instance(db, instance, env).as_ref().map_or(0, print_of)
@@ -1550,6 +2016,8 @@ fn static_serial(db: &dyn HirDatabase, id: StaticId) -> u128 {
 pub struct Unnamed {
     state: std::sync::Mutex<UnnamedState>,
     told: ToldTypes,
+    /// The generic instances the functions reach are compiled too.
+    follow: bool,
 }
 
 /// The types [`compile_unnamed`] told of, for the build that comes next.
@@ -1570,12 +2038,29 @@ impl Unnamed {
         let state = UnnamedState { roots, ..Default::default() };
         let told = ToldTypes::default();
         *TOLD_UNNAMED.lock().unwrap_or_else(|e| e.into_inner()) = Some(told.clone());
-        Unnamed { state: std::sync::Mutex::new(state), told }
+        Unnamed { state: std::sync::Mutex::new(state), told, follow: true }
+    }
+
+    /// The functions alone, without the instances they reach: what an edit's first look at
+    /// the functions of its file compiles.
+    pub fn alone(roots: Vec<FunctionId>) -> Unnamed {
+        Unnamed { follow: false, ..Unnamed::new(roots) }
     }
 
     /// How many functions and instances were compiled.
     pub fn compiled(&self) -> usize {
         self.state.lock().unwrap_or_else(|e| e.into_inner()).compiled
+    }
+}
+
+/// Compiles a function written in a file [`Rejections::home`] notes next, which compiles them
+/// one after another, so that threads share that work. One rustc copies into its callers,
+/// which `home` passes over, is not compiled.
+pub fn compile_written(db: &dyn HirDatabase, func: FunctionId) {
+    if !patch::copied_by_rustc(db, func) {
+        let compile = || compiled_root(db, func).is_ok();
+        // One that panics does again as `home` compiles it, which says so.
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(compile));
     }
 }
 
@@ -1620,7 +2105,8 @@ pub fn compile_unnamed(db: &dyn HirDatabase, unnamed: &Unnamed, done: &dyn Fn() 
         if let Ok(Some(compiled)) = compiled {
             unnamed.told.ahead(db, compiled);
         }
-        for request in compiled.iter().flatten().flat_map(|it| &it.requests.funcs) {
+        let followed = compiled.iter().flatten().filter(|_| unnamed.follow);
+        for request in followed.flat_map(|it| &it.requests.funcs) {
             let FuncTarget::Instance(callee, asked) = &request.target else { continue };
             let named = matches!(callee.def, InstanceDef::Fn(_))
                 && callee.args.as_ref().iter().all(|it| it.region().is_some());
@@ -2250,6 +2736,34 @@ fn returns_async_block<'db>(db: &'db dyn HirDatabase, func: FunctionId) -> bool 
     let returned = body.locals[returned_local(body)].ty.as_ref();
     rustc_type_ir::TypeVisitable::visit_with(&returned, &mut finder);
     finder.coroutine
+}
+
+/// Whether a caller of the function gets a value of a type that only its body says: the
+/// future of an `async fn`, or what an `impl Trait` it returns stands for. The caller has the
+/// code for that type, compiled from the body as it was then.
+fn hands_out_opaque(db: &dyn HirDatabase, func: FunctionId) -> bool {
+    struct Finder(bool);
+    impl<'db> rustc_type_ir::TypeVisitor<DbInterner<'db>> for Finder {
+        type Result = ();
+
+        fn visit_ty(&mut self, ty: Ty<'db>) {
+            if let TyKind::Alias(rustc_type_ir::AliasTy {
+                kind: rustc_type_ir::AliasTyKind::Opaque { .. },
+                ..
+            }) = ty.kind()
+            {
+                self.0 = true;
+            }
+            rustc_type_ir::TypeSuperVisitable::super_visit_with(&ty, self)
+        }
+    }
+    if FunctionSignature::of(db, func).is_async() {
+        return true;
+    }
+    let mut finder = Finder(false);
+    let declared = db.callable_item_signature(func.into()).skip_binder().skip_binder().output();
+    rustc_type_ir::TypeVisitable::visit_with(&declared, &mut finder);
+    finder.0
 }
 
 /// The methods of the `Fn` traits and of the `AsyncFn` traits, each from the one that borrows
@@ -3416,6 +3930,22 @@ fn inline(ctx: &mut cranelift_codegen::Context, inlined: &[ir::Function]) -> Res
     Ok(())
 }
 
+/// The store as Cranelift asks for it: one of these per function compiled.
+struct IncrementalCache(&'static store::Store);
+
+impl cranelift_codegen::incremental_cache::CacheKvStore for IncrementalCache {
+    fn get(&self, key: &[u8]) -> Option<Cow<'_, [u8]>> {
+        let key = <&[u8; store::KEY]>::try_from(key).ok()?;
+        self.0.lookup(key).map(Cow::Owned)
+    }
+
+    fn insert(&mut self, key: &[u8], val: Vec<u8>) {
+        if let Ok(key) = <&[u8; store::KEY]>::try_from(key) {
+            self.0.insert(key, &val);
+        }
+    }
+}
+
 /// Runs Cranelift on a finished function. Cranelift panics on IR it has no lowering for
 /// (i128 corners, for one); that must cost us one function, not the process.
 fn emit(ctx: &mut cranelift_codegen::Context) -> Result<Code> {
@@ -3437,7 +3967,7 @@ fn emit(ctx: &mut cranelift_codegen::Context) -> Result<Code> {
     let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         match store::Store::global() {
             Some(store) => ctx
-                .compile_with_cache(isa, &mut store::Lookup(store), &mut Default::default())
+                .compile_with_cache(isa, &mut IncrementalCache(store), &mut Default::default())
                 .map(drop),
             None => ctx.compile(isa, &mut Default::default()).map(drop),
         }
@@ -3899,9 +4429,10 @@ impl<'a, 'db> ObjectCodegen<'a, 'db> {
             // What the store has is not compiled, nor looked into for what it calls.
             let in_store = |callee: &Instance| {
                 let Some(entries) = entries else { return false };
-                names
-                    .instance(callee)
-                    .is_some_and(|name| entries.usable(&name, &|symbol| symbols.defines(symbol)))
+                names.instance(callee).is_some_and(|name| {
+                    entries
+                        .usable(&name, &|symbol| symbols.defines(symbol) && symbols.linked(symbol))
+                })
             };
             let mut homes = home::Homes::default();
             let mut state = ahead.lock().unwrap_or_else(|e| e.into_inner());
@@ -4329,15 +4860,22 @@ impl<'a, 'db> ObjectCodegen<'a, 'db> {
         Ok(checked)
     }
 
-    /// rustc's copy of the instance `symbol` is one of that is compiled as `checked` says.
+    /// rustc's copy of the instance `symbol` is one of that is compiled as `checked` says, and
+    /// that the executable has: the one its crate's symbol names may be one nothing called.
     fn rustc_copy(&self, symbol: String, checked: bool) -> Option<String> {
-        let Some(mixed) = &self.mixed else { return Some(symbol) };
+        let linked = |it: &str| self.symbols.linked(it);
+        let Some(mixed) = &self.mixed else {
+            if linked(&symbol) {
+                return Some(symbol);
+            }
+            return self.symbols.copies(&symbol).into_iter().map(|it| it.0).find(|it| linked(it));
+        };
         let copies = self.symbols.copies(&symbol);
         if copies.is_empty() {
-            return Some(symbol);
+            return Some(symbol).filter(|it| linked(it));
         }
         let of = |id: u64| mixed.holder(self.db, id).is_some_and(|it| it.1 == checked);
-        copies.into_iter().find(|it| of(it.1)).map(|it| it.0)
+        copies.into_iter().find(|it| of(it.1) && linked(&it.0)).map(|it| it.0)
     }
 
     /// The function of the program that an instance without arguments is of, and its symbol.
@@ -4493,10 +5031,12 @@ impl<'a, 'db> ObjectCodegen<'a, 'db> {
         }
         let Some(entries) = self.entries.clone() else { return Ok(None) };
         let symbols = self.symbols;
-        if !entries.usable(name, &|symbol| symbols.defines(symbol)) {
+        if !entries.usable(name, &|symbol| symbols.defines(symbol) && symbols.linked(symbol)) {
             let why = match entries.get(name) {
                 None => "no entry",
-                Some(it) if !it.links(&|symbol| symbols.defines(symbol)) => {
+                Some(it)
+                    if !it.links(&|symbol| symbols.defines(symbol) && symbols.linked(symbol)) =>
+                {
                     "an entry linked against what the program lacks"
                 }
                 Some(_) => "an entry that calls what cannot be used",
@@ -4879,7 +5419,10 @@ impl<'a, 'db> ObjectCodegen<'a, 'db> {
         }
         // rustc's copy when ours has no value to give.
         let ours = self.own_statics.replaces(db, id) && compiled_static(db, id).is_ok();
-        let theirs = || (!ours).then(|| self.symbols.static_(id)).flatten();
+        let rustcs = (!ours).then(|| self.symbols.static_(id)).flatten();
+        // One the linker left out of what rustc linked is used by none of rustc's code there.
+        let unlinked = rustcs.as_ref().is_some_and(|it| !self.symbols.linked(it));
+        let theirs = || rustcs.filter(|_| !unlinked);
         if let Some(symbol) = static_link_name(db, id).or_else(theirs) {
             let data = self.module.declare_data(
                 &symbol,
@@ -4911,13 +5454,16 @@ impl<'a, 'db> ObjectCodegen<'a, 'db> {
             if self.replaced.broken.contains(&node) {
                 unsupported!("a static of the base changed");
             }
+            if known.symbol.is_empty() {
+                unsupported!("a static that rustc's symbols name no copy of");
+            }
             let data =
                 self.module.declare_data(&known.symbol, Linkage::Import, known.writable, false)?;
             self.imported_statics.insert(id, data);
             return Ok(data);
         }
         let compiled = compiled_static(db, id).as_ref().map_err(Clone::clone)?;
-        if compiled.writable && !self.own_statics.owns(db, id) {
+        if compiled.writable && !self.own_statics.owns(db, id) && !unlinked {
             let name = hir_def::signatures::StaticSignature::of(db, id).name.as_str();
             unsupported!("writable static `{name}` without a rustc symbol");
         }
@@ -5335,69 +5881,12 @@ impl<'a, 'db> ObjectCodegen<'a, 'db> {
         self.define_shim(id, &mut ctx).ok()
     }
 
-    /// A generic function with its arguments as it reads in a demangled rustc symbol:
-    /// `<Vec<u8> as Clone>::clone`, `<Option<u8>>::map::<u8, F>`, `core::mem::swap::<u8>`.
+    fn spelling(&self) -> Spelling<'_, 'db> {
+        Spelling { db: self.db, symbols: self.symbols }
+    }
+
     fn instance_path(&self, func: FunctionId, args: GenericArgs<'db>) -> Option<String> {
-        let db = self.db;
-        let signature = FunctionSignature::of(db, func);
-        // The future of an `async fn` is laid out differently by the two compilers.
-        if signature.is_async() {
-            return None;
-        }
-        let name = signature.name.as_str();
-        let interner = DbInterner::new_no_crate(db);
-        let types = |args: &[hir_ty::next_solver::GenericArg<'db>]| {
-            args.iter()
-                .filter(|it| it.region().is_none())
-                .map(|it| self.symbol_arg(*it))
-                .collect::<Option<Vec<_>>>()
-        };
-        let parent = hir_ty::generics::generics(db, func.into()).len_parent();
-        let (parent, own) = args.as_slice().split_at_checked(parent)?;
-        let mut path = match func.lookup(db).container {
-            ItemContainerId::ModuleId(_) => self.symbols.item(func.into())?,
-            ItemContainerId::TraitId(trait_) => {
-                let (self_ty, rest) = parent.split_first()?;
-                let mut path = format!(
-                    "<{} as {}",
-                    self.symbol_type(self_ty.ty()?)?,
-                    self.symbols.item(trait_.into())?
-                );
-                let rest = types(rest)?;
-                if !rest.is_empty() {
-                    path.push_str(&format!("<{}>", rest.join(", ")));
-                }
-                format!("{path}>::{name}")
-            }
-            ItemContainerId::ImplId(impl_) => {
-                let parent_args = GenericArgs::new_from_slice(parent);
-                let self_ty =
-                    db.impl_self_ty(impl_).instantiate(interner, parent_args).skip_norm_wip();
-                let self_ty = self.symbol_type(self_ty)?;
-                match db.impl_trait(impl_) {
-                    None => format!("<{self_ty}>::{name}"),
-                    Some(trait_ref) => {
-                        let trait_ref =
-                            trait_ref.instantiate(interner, parent_args).skip_norm_wip();
-                        let mut path = format!(
-                            "<{self_ty} as {}",
-                            self.symbols.item(trait_ref.def_id.0.into())?
-                        );
-                        let rest = types(&trait_ref.args.as_slice()[1..])?;
-                        if !rest.is_empty() {
-                            path.push_str(&format!("<{}>", rest.join(", ")));
-                        }
-                        format!("{path}>::{name}")
-                    }
-                }
-            }
-            ItemContainerId::ExternBlockId(_) => return None,
-        };
-        let own = types(own)?;
-        if !own.is_empty() {
-            path.push_str(&format!("::<{}>", own.join(", ")));
-        }
-        Some(path)
+        self.spelling().instance_path(func, args)
     }
 
     /// A `TypeId::of::<T>` that returns `hash`, the two words of which are its value.
@@ -5477,105 +5966,8 @@ impl<'a, 'db> ObjectCodegen<'a, 'db> {
         args.as_slice().first()?.ty()
     }
 
-    /// A type as it reads in a demangled rustc symbol. `None` for the types whose spelling
-    /// there this does not know: closures, `dyn`, function pointers, anything with a lifetime
-    /// argument.
-    /// A type or a `usize` an instance is instantiated with, as rustc's symbols spell it.
-    fn symbol_arg(&self, arg: hir_ty::next_solver::GenericArg<'db>) -> Option<String> {
-        match (arg.ty(), arg.konst()) {
-            (Some(ty), _) => self.symbol_type(ty),
-            (None, Some(len)) => Some(try_const_usize(self.db, len)?.to_string()),
-            (None, None) => None,
-        }
-    }
-
     fn symbol_type(&self, ty: Ty<'db>) -> Option<String> {
-        use std::fmt::Write;
-        let db = self.db;
-        let list = |tys: &mut dyn Iterator<Item = Ty<'db>>| {
-            tys.map(|it| self.symbol_type(it)).collect::<Option<Vec<_>>>().map(|it| it.join(", "))
-        };
-        Some(match ty.kind() {
-            TyKind::Bool => "bool".to_owned(),
-            TyKind::Char => "char".to_owned(),
-            TyKind::Str => "str".to_owned(),
-            TyKind::Never => "!".to_owned(),
-            TyKind::Int(it) => it.name_str().to_owned(),
-            TyKind::Uint(it) => it.name_str().to_owned(),
-            TyKind::Float(it) => it.name_str().to_owned(),
-            TyKind::Ref(_, pointee, Mutability::Not) => format!("&{}", self.symbol_type(pointee)?),
-            TyKind::Ref(_, pointee, Mutability::Mut) => {
-                format!("&mut {}", self.symbol_type(pointee)?)
-            }
-            TyKind::RawPtr(pointee, Mutability::Not) => {
-                format!("*const {}", self.symbol_type(pointee)?)
-            }
-            TyKind::RawPtr(pointee, Mutability::Mut) => {
-                format!("*mut {}", self.symbol_type(pointee)?)
-            }
-            TyKind::Slice(element) => format!("[{}]", self.symbol_type(element)?),
-            TyKind::Array(element, len) => {
-                format!("[{}; {}]", self.symbol_type(element)?, try_const_usize(db, len)?)
-            }
-            TyKind::Tuple(tys) if tys.len() == 1 => format!("({},)", list(&mut tys.iter())?),
-            TyKind::Tuple(tys) => format!("({})", list(&mut tys.iter())?),
-            TyKind::Adt(adt, args) => {
-                let mut path = self.symbols.item(adt.def_id().into())?;
-                let interner = DbInterner::new_no_crate(db);
-                let defaults = db.generic_defaults(adt.def_id().into());
-                let mut args = args.as_slice();
-                // rustc leaves out the arguments that say what the default says.
-                while let Some((last, rest)) = args.split_last()
-                    && let Some(default) = defaults.get(rest.len())
-                    && default.instantiate(interner, rest).skip_norm_wip() == *last
-                {
-                    args = rest;
-                }
-                let args = args.iter().filter(|it| it.region().is_none());
-                let args = args.map(|it| self.symbol_arg(*it)).collect::<Option<Vec<_>>>()?;
-                if !args.is_empty() {
-                    write!(path, "<{}>", args.join(", ")).ok()?;
-                }
-                path
-            }
-            TyKind::FnPtr(..) => {
-                let sig = ty.fn_sig(DbInterner::new_no_crate(db)).no_bound_vars()?;
-                if sig.abi() != ExternAbi::Rust
-                    || sig.c_variadic()
-                    || sig.safety() != hir_ty::next_solver::abi::Safety::Safe
-                {
-                    return None;
-                }
-                let mut path = format!("fn({})", list(&mut sig.inputs().iter().copied())?);
-                if !sig.output().is_unit() {
-                    write!(path, " -> {}", self.symbol_type(sig.output())?).ok()?;
-                }
-                path
-            }
-            TyKind::Dynamic(bounds, _) => {
-                let principal = bounds.principal()?.no_bound_vars()?;
-                let mut path = format!("dyn {}", self.symbols.item(principal.def_id.0.into())?);
-                let args = principal.args.iter().filter(|it| it.region().is_none());
-                let mut args = args.map(|it| self.symbol_arg(it)).collect::<Option<Vec<_>>>()?;
-                for bound in bounds.projection_bounds() {
-                    let bound = bound.no_bound_vars()?;
-                    let hir_ty::next_solver::TermId::TypeAliasId(alias) = bound.def_id.0 else {
-                        return None;
-                    };
-                    let name = hir_def::signatures::TypeAliasSignature::of(db, alias).name.clone();
-                    let ty = rustc_type_ir::inherent::Term::as_type(&bound.term)?;
-                    args.push(format!("{} = {}", name.as_str(), self.symbol_type(ty)?));
-                }
-                if !args.is_empty() {
-                    write!(path, "<{}>", args.join(", ")).ok()?;
-                }
-                for auto in bounds.auto_traits() {
-                    write!(path, " + {}", self.symbols.item(auto.0.into())?).ok()?;
-                }
-                path
-            }
-            _ => return None,
-        })
+        self.spelling().symbol_type(ty)
     }
 
     /// rustc's own `<dyn Any>::is::<T>` or `downcast_ref::<T>`, when `func` is such a method

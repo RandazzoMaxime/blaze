@@ -695,6 +695,7 @@ dependencies = [
  "hir-def",
  "hir-expand",
  "hir-ide",
+ "hir-ty-borrowck",
  "intern",
  "itertools",
  "la-arena",
@@ -844,6 +845,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "hir-ty-borrowck"
+version = "0.0.0"
+dependencies = [
+ "base-db",
+ "hir-def",
+ "hir-ty",
+ "la-arena",
+ "ra-ap-rustc_ast_ir",
+ "ra-ap-rustc_type_ir",
+ "rustc-hash 2.1.2",
+ "salsa",
+ "smallvec",
+]
+
+[[package]]
 name = "hir-ty-codegen"
 version = "0.1.0"
 dependencies = [
@@ -853,7 +869,6 @@ dependencies = [
  "cranelift-frontend",
  "cranelift-module",
  "cranelift-object",
- "crc32fast",
  "either",
  "hir-def",
  "hir-expand",
@@ -861,14 +876,13 @@ dependencies = [
  "indexmap",
  "intern",
  "la-arena",
- "libc",
- "memmap2",
  "object 0.37.3",
  "postcard",
  "ra-ap-rustc_abi",
  "ra-ap-rustc_ast_ir",
  "ra-ap-rustc_index",
  "ra-ap-rustc_type_ir",
+ "ra-jit-store",
  "rustc-demangle",
  "rustc-hash 2.1.2",
  "rustc-stable-hash",
@@ -883,7 +897,6 @@ dependencies = [
  "tracing",
  "triomphe",
  "wasm-encoder",
- "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -1589,6 +1602,18 @@ dependencies = [
  "quote",
  "syn 2.0.117",
  "synstructure",
+]
+
+[[package]]
+name = "ra-jit-store"
+version = "0.1.0"
+dependencies = [
+ "crc32fast",
+ "libc",
+ "memmap2",
+ "rustc-hash 2.1.2",
+ "sha2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

@@ -65,7 +65,26 @@ impl Linked {
     /// rest of the link line. The patch is read here and now: the next edit writes another.
     pub(crate) fn read(binary: PathBuf, patch: &Path, object: &Path) -> Linked {
         let (patch, object) = (std::fs::read(patch), object.to_owned());
-        Linked(std::thread::spawn(move || Baseline::read(binary, &patch?, &object)))
+        // Taken before the daemon answers: whoever is given the program waits for the write.
+        let lock = Writing::ahead(&binary);
+        Linked(std::thread::spawn(move || Baseline::read(binary, &patch?, &object, false, lock)))
+    }
+
+    /// As [`Linked::read`], of what rustc linked, which `binary` is another name of: it is
+    /// made a copy of its own first, for a splice to write. One the daemon linked is refused:
+    /// cargo's place for the program has the daemon's once it served one.
+    pub(crate) fn read_rustcs(binary: PathBuf, patch: &Path, object: &Path) -> Linked {
+        let (patch, object) = (std::fs::read(patch), object.to_owned());
+        Linked(std::thread::spawn(move || {
+            let mut copy = binary.clone().into_os_string();
+            copy.push(".copy");
+            std::fs::copy(&binary, &copy)?;
+            // Whoever takes the file meanwhile takes either, which are the same, and waits for
+            // the write of the copy.
+            let lock = Writing::ahead(copy.as_ref());
+            std::fs::rename(&copy, &binary)?;
+            Baseline::read(binary, &patch?, &object, true, lock)
+        }))
     }
 
     pub(crate) fn baseline(self) -> anyhow::Result<Baseline> {
@@ -153,13 +172,34 @@ pub(crate) struct Spliced {
 }
 
 impl Baseline {
-    /// Reads the executable at `path`, which was linked with `patch` ahead of `object`.
-    fn read(path: PathBuf, patch: &[u8], object: &Path) -> anyhow::Result<Baseline> {
+    /// Reads the executable at `path`, which was linked with `patch` ahead of `object`, and
+    /// writes it in place under `lock` ([`Writing::ahead`]).
+    fn read(
+        path: PathBuf,
+        patch: &[u8],
+        object: &Path,
+        rustcs: bool,
+        lock: Option<File>,
+    ) -> anyhow::Result<Baseline> {
         let file = File::open(&path)?;
         let stamp = Stamp::of(&file)?;
         // SAFETY: the daemon is the one that has the link write the file, and it does not
         // start another while this reads.
         let bytes = unsafe { memmap2::Mmap::map(&file)? };
+        if rustcs {
+            let image = object::File::parse(&*bytes)?;
+            ensure!(
+                matches!(image.format(), object::BinaryFormat::Elf | object::BinaryFormat::MachO),
+                "only an ELF or Mach-O executable of rustc's is patched as it is"
+            );
+            // A Rust symbol has no `-` in it, and every object the daemon writes defines some
+            // with one.
+            let ours = |name: &[u8]| name.windows(6).any(|it| it == b"ra-jit");
+            ensure!(
+                !image.symbols().any(|it| it.name_bytes().is_ok_and(ours)),
+                "the executable where cargo has the program is one the daemon linked"
+            );
+        }
         let (image, baked) = if bytes.starts_with(b"\0asm") {
             (Executable::Wasm(wasm::Module::read(bytes.to_vec())?), wasm::defined(patch)?)
         } else {
@@ -182,7 +222,7 @@ impl Baseline {
         drop(bytes);
         let (left, stamp) = match &image {
             Executable::Elf(image) => {
-                let moved = laid_out(&path, image).unwrap_or_default();
+                let moved = laid_out(&path, image, lock).unwrap_or_default();
                 (Left { appended: None, moved }, Stamp::of(&File::open(&path)?)?)
             }
             _ => (Left::default(), stamp),
@@ -259,8 +299,9 @@ impl Baseline {
         };
         let placed = start.elapsed();
 
-        let file = OpenOptions::new().read(true).write(true).open(&self.path)?;
-        ensure!(Stamp::of(&file)? == self.stamp, "the executable was written by someone else");
+        let writing = Writing::open(&self.path)?;
+        let file = &writing.file;
+        ensure!(Stamp::of(file)? == self.stamp, "the executable was written by someone else");
         for (offset, bytes) in self.undo.drain(..).rev() {
             write_all_at(&file, &bytes, offset)?;
         }
@@ -307,7 +348,7 @@ impl Baseline {
         }
         self.stamp = Stamp::of(&file)?;
         let redirected_at = start.elapsed();
-        drop(file);
+        drop(writing);
         if std::env::var_os("RA_JIT_STATS").is_some() {
             let us = |it: std::time::Duration| it.as_micros();
             eprintln!(
@@ -333,12 +374,29 @@ impl Baseline {
         patch: &[u8],
         base: u64,
     ) -> anyhow::Result<([u8; 16], ra_jit_live::format::Code, Vec<(u64, u64)>)> {
-        let Executable::MachO(image) = &*self.image else {
-            bail!("edits are applied to a running program on macOS only")
-        };
-        let uuid = macho::uuid(image).context("the executable has no UUID")?;
-        let (code, moved) = macho::live(image, &self.baked, &self.originals, patch, base)?;
-        Ok((uuid, code, moved))
+        match &*self.image {
+            Executable::MachO(image) => {
+                let uuid = macho::uuid(image).context("the executable has no UUID")?;
+                let (code, moved) = macho::live(image, &self.baked, &self.originals, patch, base)?;
+                Ok((uuid, code, moved))
+            }
+            Executable::Elf(image) => {
+                ensure!(image.machine == Machine::X86_64, "live edits support Linux x86-64 only");
+                let uuid = image.id.context("the executable has no GNU build ID")?;
+                let patch = Patch::read(patch, image)?;
+                ensure!(
+                    self.baked
+                        .iter()
+                        .all(|it| patch.replaced.iter().any(|replaced| replaced.name == &**it)),
+                    "a function the executable was linked with a patch of is as it first was"
+                );
+                let (code, moved) = patch.place_live_simple(image, &self.originals, base)?;
+                Ok((uuid, code, moved))
+            }
+            _ => bail!(
+                "edits are applied to running programs on macOS AArch64 and Linux x86-64 only"
+            ),
+        }
     }
 
     /// Whether a patch can call the C symbol `name`, as far as the executable says: an
@@ -365,6 +423,7 @@ impl Baseline {
     pub(crate) fn uuid(&self) -> Option<[u8; 16]> {
         match &*self.image {
             Executable::MachO(image) => macho::uuid(image),
+            Executable::Elf(image) => image.id,
             _ => None,
         }
     }
@@ -478,21 +537,104 @@ fn read_exact_at(mut file: &File, bytes: &mut [u8], offset: u64) -> std::io::Res
 /// Copies what a debugger reads of the executable at `path` to where its splices write it,
 /// while the daemon waits for the first edit: the splices find it there. Nothing is copied
 /// of a program that runs, which the kernel lets nothing write and which is linked again.
-fn laid_out(path: &Path, image: &Image) -> std::io::Result<Vec<debug::Moved>> {
+fn laid_out(path: &Path, image: &Image, lock: Option<File>) -> std::io::Result<Vec<debug::Moved>> {
     let start = std::time::Instant::now();
     let moved = image.described.laid_out(image.tail());
     if moved.is_empty() {
         return Ok(moved);
     }
-    let file = OpenOptions::new().read(true).write(true).open(path)?;
+    let writing = match lock {
+        Some(lock) => Writing::under(lock, path)?,
+        None => Writing::open(path)?,
+    };
+    let paused = pause_mid_write();
     for run in &moved {
-        copy_within(&file, run)?;
+        copy_within(&writing.file, run)?;
+    }
+    if paused {
+        eprintln!("laid out: written");
     }
     if std::env::var_os("RA_JIT_STATS").is_some() {
         let bytes: u64 = moved.iter().map(|it| it.len).sum();
         eprintln!("laid out: {bytes} bytes of debug info in {:.1?}", start.elapsed());
     }
     Ok(moved)
+}
+
+/// Waits for `RA_JIT_LAYOUT_PAUSE_MS` with the executable open for writing, and says so, as
+/// `laid_out` says when the write is over: `harness/cargo_ra_jit.py` has a client be given
+/// the program meanwhile, every way a user is given one.
+fn pause_mid_write() -> bool {
+    let pause = std::env::var("RA_JIT_LAYOUT_PAUSE_MS").ok().and_then(|it| it.parse().ok());
+    if let Some(pause) = pause {
+        eprintln!("laid out: paused");
+        std::thread::sleep(std::time::Duration::from_millis(pause));
+    }
+    pause.is_some()
+}
+
+/// An executable open to be written in place, on Unix under an exclusive lock on it taken first:
+/// on Linux a program started while its file is open for writing is refused ("text file
+/// busy"), and whatever is given the program waits for the lock ([`unwritten`]). The file is
+/// closed before the lock is let go.
+struct Writing {
+    file: File,
+    _lock: File,
+}
+
+impl Writing {
+    fn open(path: &Path) -> std::io::Result<Writing> {
+        Writing::under(Writing::lock(path)?, path)
+    }
+
+    /// The lock on the executable a link just wrote at `path`, taken before the daemon answers
+    /// for it, of an ELF file: the one written in place after the answer ([`laid_out`]).
+    fn ahead(path: &Path) -> Option<File> {
+        use std::io::Read as _;
+        let mut magic = [0; 4];
+        let file = File::open(path).ok()?;
+        (&file).read_exact(&mut magic).ok()?;
+        if magic != *b"\x7fELF" {
+            return None;
+        }
+        drop(file);
+        Writing::lock(path).ok()
+    }
+
+    fn lock(path: &Path) -> std::io::Result<File> {
+        let lock = File::open(path)?;
+        // On Windows a lock keeps out this process's own writes too, and a program that runs
+        // is moved aside there rather than refused.
+        #[cfg(unix)]
+        lock.lock()?;
+        Ok(lock)
+    }
+
+    fn under(lock: File, path: &Path) -> std::io::Result<Writing> {
+        let file = OpenOptions::new().read(true).write(true).open(path)?;
+        Ok(Writing { file, _lock: lock })
+    }
+}
+
+/// Waits until the daemon is through writing the executable at `path` in place: one it
+/// linked, which it writes after it answered. On Unix the file returned keeps it from writing
+/// again until it is dropped, so a program started meanwhile is not refused.
+pub(crate) fn unwritten(path: &Path) -> std::io::Result<File> {
+    loop {
+        let file = File::open(path)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt as _;
+            file.lock_shared()?;
+            // A copy the daemon is to write may have been put in its place meanwhile
+            // (`Linked::read_rustcs`), under the lock of its own.
+            let (locked, now) = (file.metadata()?, std::fs::metadata(path)?);
+            if (locked.dev(), locked.ino()) != (now.dev(), now.ino()) {
+                continue;
+            }
+        }
+        return Ok(file);
+    }
 }
 
 /// Writes a run of the file again behind where it is.
@@ -616,6 +758,7 @@ impl Machine {
                 elf::R_X86_64_GOTPCREL | elf::R_X86_64_GOTPCRELX | elf::R_X86_64_REX_GOTPCRELX => {
                     (Fixup::ThroughSlot, Field::Distance)
                 }
+                elf::R_X86_64_TLSGD => (Fixup::ThreadLocal, Field::Distance),
                 other => bail!("a relocation of type {other}, which only the linker handles"),
             },
             Machine::Aarch64 => match r_type {
@@ -776,6 +919,7 @@ impl Field {
 /// What a splice has to know of the executable. Nothing of the file is read again.
 struct Image {
     len: u64,
+    id: Option<[u8; 16]>,
     machine: Machine,
     header: elf::FileHeader64<Endianness>,
     segments: Vec<elf::ProgramHeader64<Endianness>>,
@@ -852,7 +996,8 @@ impl Image {
         let (table, _) = (file.section_by_name(".symtab").and_then(|it| it.file_range()))
             .context("the executable has no symbol table")?;
         for symbol in file.symbols() {
-            if !symbol.is_definition() || symbol.section_index().is_none() {
+            let defines = symbol.is_definition() || symbol.kind() == SymbolKind::Tls;
+            if !defines || symbol.section_index().is_none() {
                 continue;
             }
             let name = symbol.name_bytes()?;
@@ -885,6 +1030,7 @@ impl Image {
 
         let mut image = Image {
             len: bytes.len() as u64,
+            id: file.build_id().ok().flatten().map(binary_id),
             machine,
             header,
             segments,
@@ -925,6 +1071,19 @@ impl Image {
             }
         }
         Ok(false)
+    }
+
+    /// How far the thread-local `offset` into the executable's block of them is from the
+    /// thread pointer: on x86-64 the block ends where the pointer is, at a multiple of what
+    /// it is aligned to.
+    fn thread_offset(&self, offset: u64) -> anyhow::Result<i32> {
+        let e = Endianness::Little;
+        ensure!(self.machine == Machine::X86_64, "a thread-local of an AArch64 executable");
+        let block = self.segments_of(elf::PT_TLS).next().context("no block of thread-locals")?;
+        let (start, size) = (block.p_vaddr(e), block.p_memsz(e));
+        let align = block.p_align(e).max(1);
+        let below = size + (start.wrapping_neg().wrapping_sub(size) & (align - 1));
+        i32::try_from(offset as i64 - below as i64).context("a block of thread-locals of 2 GB")
     }
 
     fn segments_of(&self, kind: u32) -> impl Iterator<Item = &elf::ProgramHeader64<Endianness>> {
@@ -1082,6 +1241,21 @@ impl LoadRelocations {
 
     fn len_with(&self, added: usize) -> usize {
         self.table.len() + added * Self::ENTRY
+    }
+
+    fn rebases(&self, relative: u32) -> Vec<u64> {
+        let e = Endianness::Little;
+        let Ok((entries, _)) = object::slice_from_bytes::<elf::Rela64<Endianness>>(
+            &self.table,
+            self.table.len() / Self::ENTRY,
+        ) else {
+            return Vec::new();
+        };
+        entries
+            .iter()
+            .filter(|it| it.r_info.get(e) == u64::from(relative))
+            .map(|it| it.r_offset.get(e))
+            .collect()
     }
 
     /// Makes the entries of `table` for the addresses that `statics` stored those for what
@@ -1247,6 +1421,8 @@ enum Target {
     Theirs(u64),
     /// In another library: the loader writes its address to the slot.
     Import(u64),
+    /// A thread-local of the executable, this far from the thread pointer.
+    ThreadLocal(i32),
 }
 
 struct Replaced<'a> {
@@ -1281,6 +1457,9 @@ enum Fixup {
     Relative,
     /// Where a slot that holds the address is from the code.
     ThroughSlot,
+    /// The address of a thread-local, as `__tls_get_addr` gives it: the code that calls it
+    /// is written over with code that adds to the thread pointer.
+    ThreadLocal,
 }
 
 impl Fixup {
@@ -1289,6 +1468,34 @@ impl Fixup {
             bail!("a relocation that is not ELF's")
         };
         machine.fixup(r_type)
+    }
+
+    /// Where the field of a call to `__tls_get_addr` is in a section, for each thread-local
+    /// it reaches: the call goes, with the code that makes it.
+    fn thread_calls(
+        relocations: impl Iterator<Item = (u64, object::Relocation)>,
+        machine: Machine,
+    ) -> anyhow::Result<FxHashSet<u64>> {
+        let mut calls = FxHashSet::default();
+        for (at, relocation) in relocations {
+            if let (Fixup::ThreadLocal, _) = Fixup::of(&relocation, machine)? {
+                calls.insert(at + 8);
+            }
+        }
+        Ok(calls)
+    }
+
+    /// The code `__tls_get_addr` is called by for an `R_X86_64_TLSGD`, whose field is the
+    /// 4 bytes after `GENERAL.0`: `data16 lea sym@tlsgd(%rip), %rdi`, then
+    /// `data16 data16 rex.W call __tls_get_addr`.
+    const GENERAL: ([u8; 4], [u8; 4]) = ([0x66, 0x48, 0x8d, 0x3d], [0x66, 0x66, 0x48, 0xe8]);
+
+    /// What is written over `GENERAL` for a thread-local `offset` from the thread pointer:
+    /// `mov %fs:0, %rax`, then `lea offset(%rax), %rax`.
+    fn local(offset: i32) -> [u8; 16] {
+        let mut code = [0x64, 0x48, 0x8b, 0x04, 0x25, 0, 0, 0, 0, 0x48, 0x8d, 0x80, 0, 0, 0, 0];
+        code[12..].copy_from_slice(&offset.to_le_bytes());
+        code
     }
 }
 
@@ -1390,10 +1597,16 @@ impl<'a> Patch<'a> {
         }
         let (mut slots, mut stubs) = (FxHashSet::default(), FxHashSet::default());
         for section in patch.file.sections().filter(|it| loaded.contains(&it.index())) {
-            for (_, relocation) in section.relocations() {
+            let calls = Fixup::thread_calls(section.relocations(), image.machine)?;
+            for (at, relocation) in section.relocations() {
                 let RelocationTarget::Symbol(index) = relocation.target() else {
                     bail!("a relocation against no symbol")
                 };
+                if calls.contains(&at) {
+                    let called = patch.file.symbol_by_index(index)?.name_bytes()?;
+                    ensure!(called == b"__tls_get_addr", "a thread-local reached another way");
+                    continue;
+                }
                 let target = match patch.targets.get(&index) {
                     Some(target) => *target,
                     None => {
@@ -1403,6 +1616,12 @@ impl<'a> Patch<'a> {
                     }
                 };
                 match (Fixup::of(&relocation, image.machine)?, target) {
+                    ((Fixup::ThreadLocal, _), Target::ThreadLocal(_)) => {
+                        ensure!(relocation.addend() == -4, "a thread-local reached another way");
+                    }
+                    ((Fixup::ThreadLocal, _), _) | (_, Target::ThreadLocal(_)) => {
+                        bail!("a thread-local reached another way")
+                    }
                     ((Fixup::Absolute, _), Target::Import(_)) => {
                         bail!("data that stores the address of an import")
                     }
@@ -1470,8 +1689,8 @@ impl<'a> Patch<'a> {
         let shown = || String::from_utf8_lossy(name);
         ensure!(symbol.is_undefined(), "{} is neither defined nor undefined", shown());
         match image.symbols.get(name) {
-            Some(Named::One(Defined { kind: SymbolKind::Tls, .. })) => {
-                bail!("{} is thread-local", shown())
+            Some(Named::One(Defined { kind: SymbolKind::Tls, address, .. })) => {
+                Ok(Target::ThreadLocal(image.thread_offset(*address)?))
             }
             Some(Named::One(defined)) => Ok(Target::Theirs(defined.address)),
             Some(Named::Many) => bail!("{} names several things in the executable", shown()),
@@ -1521,12 +1740,94 @@ impl<'a> Patch<'a> {
 
     /// Lays the patch out behind the executable and gives everything in it its address.
     fn place(&self, image: &Image) -> anyhow::Result<Addition> {
+        self.place_at(image, None)
+    }
+
+    fn place_live_simple(
+        &self,
+        image: &Image,
+        originals: &FxHashMap<u64, Vec<u8>>,
+        base: u64,
+    ) -> anyhow::Result<(ra_jit_live::format::Code, Vec<(u64, u64)>)> {
+        let addition = self.place_at(image, Some(base))?;
+        let mut all = addition.appended;
+        let data_at = addition.live_data_at as usize;
+        let data = all.split_off(data_at);
+        let mut text = all;
+        text.resize(text.len().next_multiple_of(image.page() as usize), 0);
+        let mut writes = Vec::new();
+        let mut moved = Vec::new();
+        for replaced in &self.replaced {
+            let Some(old) = replaced.old.filter(|it| it.kind == SymbolKind::Text) else { continue };
+            let offset = image.offset_of(old.address)?;
+            let bytes = addition
+                .overwritten
+                .iter()
+                .find(|(at, _)| *at == offset)
+                .map(|(_, bytes)| bytes.clone())
+                .context("the function jump is missing")?;
+            moved.push((base, old.address));
+            writes.push(ra_jit_live::format::Write {
+                address: old.address,
+                bytes,
+                pointers: Vec::new(),
+            });
+        }
+        let redirected = writes.len() as u64;
+        let rebases = image
+            .relocations
+            .as_ref()
+            .map(|it| it.rebases(image.machine.relative()))
+            .unwrap_or_default();
+        for old in self.in_place.values().flatten() {
+            let offset = image.offset_of(old.old.address)?;
+            let bytes = addition
+                .overwritten
+                .iter()
+                .find(|(at, _)| *at == offset)
+                .map(|(_, bytes)| bytes.clone())
+                .context("the static write is missing")?;
+            let after = rebases.partition_point(|it| *it < old.old.address);
+            let pointers = rebases[after..]
+                .iter()
+                .take_while(|it| **it < old.old.address + bytes.len() as u64)
+                .map(|it| it - old.old.address)
+                .collect();
+            writes.push(ra_jit_live::format::Write { address: old.old.address, bytes, pointers });
+        }
+        let statics = writes.len() as u64 - redirected;
+        let written: FxHashSet<u64> = writes.iter().map(|it| it.address).collect();
+        for (&address, bytes) in originals {
+            if !written.contains(&address) {
+                writes.push(ra_jit_live::format::Write {
+                    address,
+                    bytes: bytes.clone(),
+                    pointers: Vec::new(),
+                });
+            }
+        }
+        let code = ra_jit_live::format::Code {
+            base,
+            text,
+            data,
+            frames: addition.live_frames,
+            pointers: addition.live_pointers,
+            writes,
+            redirected,
+            statics,
+        };
+        Ok((code, moved))
+    }
+
+    fn place_at(&self, image: &Image, live_base: Option<u64>) -> anyhow::Result<Addition> {
         let e = Endianness::Little;
         let page = image.page();
         let machine = image.machine;
         let (stub_len, stub_align) = machine.stub();
-        let (offset, base) =
-            image.behind(image.len.next_multiple_of(page), image.end().next_multiple_of(page));
+        let (offset, base) = live_base.map_or_else(
+            || image.behind(image.len.next_multiple_of(page), image.end().next_multiple_of(page)),
+            |base| (0, base),
+        );
         let relocations = image.relocations.as_ref().filter(|_| image.pie);
         ensure!(!image.pie || relocations.is_some(), "an executable the loader fixes nothing in");
         let fixed_up = if image.pie { self.stored + self.slots.len() } else { 0 };
@@ -1589,6 +1890,7 @@ impl<'a> Patch<'a> {
                 Target::Section(section) => (section, 0),
                 Target::Theirs(address) => return Ok(address.wrapping_add_signed(added)),
                 Target::Import(slot) => return Ok(slot.wrapping_add_signed(added)),
+                Target::ThreadLocal(_) => bail!("the address of a thread-local"),
             };
             let in_place = self.in_place.get(&section).map_or(&[][..], |it| it);
             let found = match target {
@@ -1652,8 +1954,12 @@ impl<'a> Patch<'a> {
                     None => vec![0; it.size as usize],
                 })
                 .collect();
+            let calls = Fixup::thread_calls(section.relocations(), machine)?;
             for (at, relocation) in section.relocations() {
                 let RelocationTarget::Symbol(index) = relocation.target() else { continue };
+                if calls.contains(&at) {
+                    continue;
+                }
                 let target = self.targets[&index];
                 if let Some(which) = in_place.iter().position(|it| it.holds(at)) {
                     let within = (at - in_place[which].offset) as usize;
@@ -1671,6 +1977,21 @@ impl<'a> Patch<'a> {
                 let place = base + start + at;
                 let (fixup, field) = Fixup::of(&relocation, machine)?;
                 let to = match (fixup, target) {
+                    (Fixup::ThreadLocal, Target::ThreadLocal(offset)) => {
+                        let code = (place - base - 4) as usize;
+                        let code = appended.get_mut(code..code + 16);
+                        let code = code.context("a relocation past its section")?;
+                        let (lea, call) = Fixup::GENERAL;
+                        ensure!(
+                            code[..4] == lea && code[8..12] == call,
+                            "a thread-local reached by code of another shape"
+                        );
+                        code.copy_from_slice(&Fixup::local(offset));
+                        continue;
+                    }
+                    (Fixup::ThreadLocal, _) | (_, Target::ThreadLocal(_)) => {
+                        bail!("a thread-local reached another way")
+                    }
                     (Fixup::Absolute, _) => {
                         let value = address(target, relocation.addend(), true)?;
                         store(&mut appended, place, value);
@@ -1713,7 +2034,7 @@ impl<'a> Patch<'a> {
             let code = match self.targets[&index] {
                 Target::Import(slot) => machine.stub_through(slot, stub)?,
                 Target::Theirs(address) => machine.far_jump(address, stub)?,
-                Target::Ours(..) | Target::Section(_) => continue,
+                Target::Ours(..) | Target::Section(_) | Target::ThreadLocal(_) => continue,
             };
             appended[(stub - base) as usize..][..stub_len].copy_from_slice(&code);
         }
@@ -1814,6 +2135,15 @@ impl<'a> Patch<'a> {
         header.e_phnum.set(e, u16::try_from(segments.len())?);
         overwritten.push((0, object::bytes_of(&header).to_vec()));
 
+        let live_frames = self.sections[Segment::Read as usize]
+            .iter()
+            .find_map(|&index| {
+                let section = self.file.section_by_index(index).ok()?;
+                (section.name_bytes().ok()? == b".eh_frame")
+                    .then(|| (placed[&index], section.size()))
+            })
+            .unwrap_or((0, 0));
+
         Ok(Addition {
             offset,
             appended,
@@ -1822,6 +2152,9 @@ impl<'a> Patch<'a> {
             overwritten,
             redirected,
             described,
+            live_data_at: extents[Segment::Data as usize].0,
+            live_frames,
+            live_pointers: fixed.iter().map(|it| it.r_offset.get(e).saturating_sub(base)).collect(),
         })
     }
 }
@@ -1839,6 +2172,9 @@ struct Addition {
     redirected: usize,
     /// What a debugger reads of it, behind the headers.
     described: debug::Tail,
+    live_data_at: u64,
+    live_frames: (u64, u64),
+    live_pointers: Vec<u64>,
 }
 
 fn read_i32(bytes: &[u8]) -> i32 {
@@ -1850,9 +2186,50 @@ fn relative(to: u64, from: u64) -> anyhow::Result<i32> {
     i32::try_from(to.wrapping_sub(from) as i64).context("the program is too large")
 }
 
+fn binary_id(build_id: &[u8]) -> [u8; 16] {
+    let mut id = [0; 16];
+    let len = build_id.len().min(id.len());
+    id[..len].copy_from_slice(&build_id[..len]);
+    id
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{Field, Machine};
+    use super::{Field, Machine, Writing};
+
+    /// A client starts the program the daemon writes in place once the daemon is through,
+    /// not while the file is open for writing, which on Linux is "text file busy".
+    #[cfg(unix)]
+    #[test]
+    fn a_program_written_in_place_starts_after_the_write() {
+        // `true` from PATH (NixOS has no /usr/bin/true), under its own name: a coreutils of
+        // one binary is the program its name says.
+        let path = std::env::var_os("PATH").unwrap_or_default();
+        let found =
+            std::env::split_paths(&path).map(|dir| dir.join("true")).find(|it| it.is_file());
+        let dir = std::env::temp_dir().join(format!("ra-jit-writing-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let program = dir.join("true");
+        std::fs::copy(found.expect("a `true` on PATH"), &program).unwrap();
+        // A copy out of the Nix store is read-only, as the store is.
+        let writable = std::os::unix::fs::PermissionsExt::from_mode(0o755);
+        std::fs::set_permissions(&program, writable).unwrap();
+        let writing = Writing::open(&program).unwrap();
+        let client = std::thread::spawn({
+            let program = program.clone();
+            move || {
+                let started = crate::cargo::run::started(&mut std::process::Command::new(program));
+                (std::time::Instant::now(), started.and_then(|mut it| it.wait()))
+            }
+        });
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        let written = std::time::Instant::now();
+        drop(writing);
+        let (started, ended) = client.join().unwrap();
+        std::fs::remove_dir_all(&dir).unwrap();
+        assert!(started > written, "started while the file was open for writing");
+        assert!(ended.unwrap().success());
+    }
 
     fn words(code: &[u8]) -> Vec<u32> {
         code.chunks(4).map(|it| u32::from_le_bytes(it.try_into().unwrap())).collect()

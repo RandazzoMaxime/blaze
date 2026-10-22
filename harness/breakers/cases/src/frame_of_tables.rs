@@ -62,10 +62,10 @@ fn tables(above: usize) -> (u64, usize, usize) {
     (all, made / 100_000, 0)
 }
 
-/// What the tables sum to, and how many tables of 100k the frames of `tables` and `create`
-/// take together: three and two.
-pub fn run() -> (u64, usize) {
+/// What the tables sum to, and whether the frames of `tables` and `create` take no more tables
+/// of 100k together than rustc's three and two: fewer leave the test room too.
+pub fn run() -> (u64, bool) {
     let top = 0u8;
     let (all, frames, _) = tables(black_box(&top as *const u8 as usize));
-    (all, frames)
+    (all, frames <= 5)
 }

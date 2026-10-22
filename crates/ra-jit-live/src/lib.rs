@@ -22,12 +22,14 @@
 //! did, for the program to show. `RA_JIT_TIER=off` in the program's environment turns the
 //! sampling off.
 //!
-//! macOS on AArch64 only, for now; elsewhere [`Live::start`] says so.
+//! macOS on AArch64 and Linux on x86-64; elsewhere [`Live::start`] says so.
 
 use std::{fmt, path::PathBuf, sync::OnceLock, time::Duration};
 
 pub mod format;
 
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+mod linux;
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 mod macos;
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
@@ -81,6 +83,8 @@ impl fmt::Display for Outcome {
 pub struct Live {
     #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
     inner: macos::Live,
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    inner: linux::Live,
 }
 
 impl Live {
@@ -88,15 +92,25 @@ impl Live {
     pub fn start() -> Result<Live, String> {
         #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
         return macos::Live::start().map(|inner| Live { inner });
-        #[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
-        Err("live edits run on macOS on AArch64 only".to_owned())
+        #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+        return linux::Live::start().map(|inner| Live { inner });
+        #[cfg(not(any(
+            all(target_os = "macos", target_arch = "aarch64"),
+            all(target_os = "linux", target_arch = "x86_64")
+        )))]
+        Err("live edits run on macOS AArch64 and Linux x86-64".to_owned())
     }
 
     /// Applies the newest patch that came in since the last call, if any.
     pub fn poll(&mut self) -> Option<Outcome> {
         #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
         return self.inner.poll();
-        #[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
+        #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+        return self.inner.poll();
+        #[cfg(not(any(
+            all(target_os = "macos", target_arch = "aarch64"),
+            all(target_os = "linux", target_arch = "x86_64")
+        )))]
         None
     }
 
@@ -107,7 +121,12 @@ impl Live {
     pub fn apply_as_they_come(self, told: impl FnMut(Outcome) + Send + 'static) {
         #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
         self.inner.apply_as_they_come(told);
-        #[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
+        #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+        self.inner.apply_as_they_come(told);
+        #[cfg(not(any(
+            all(target_os = "macos", target_arch = "aarch64"),
+            all(target_os = "linux", target_arch = "x86_64")
+        )))]
         drop(told);
     }
 }

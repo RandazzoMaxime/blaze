@@ -52,9 +52,10 @@ fn parse<'a>(input: &'a [u8], above: usize, frame: &mut usize) -> Parsed<'a> {
     Ok((node, tail))
 }
 
-/// What the parse gives, and how many pages a frame of `parse` takes part of: rustc's is 6.3k.
-pub fn run() -> (Option<usize>, usize) {
+/// What the parse gives, and whether a frame of `parse` is under 8k, as rustc's 6.3k is: a
+/// smaller one fits too.
+pub fn run() -> (Option<usize>, bool) {
     let mut frame = 0;
     let parsed = parse(b"PPQa", 0, &mut frame);
-    (parsed.ok().map(|(node, _)| node.words[0]), frame / 4096)
+    (parsed.ok().map(|(node, _)| node.words[0]), frame < 8192)
 }

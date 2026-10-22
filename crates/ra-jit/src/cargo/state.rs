@@ -385,18 +385,29 @@ impl Built {
         let said = cargo.stdout.take().context("cargo has no output")?;
         let mut built = Built { started, artifacts: Vec::new(), scripts: Vec::new() };
         let ahead = ahead.map(|it| it.config.id());
+        // Cargo waits while its output is unread, so the daemon is told on a thread of its own.
+        let (tell, told) = std::sync::mpsc::channel::<Request>();
+        let telling = std::thread::spawn(move || {
+            for said in told {
+                let _ = client::ask(said, Start::Never);
+            }
+        });
         for message in Message::parse_stream(BufReader::new(said)) {
             let message = message?;
             // The worker that loads the workspace meanwhile reads what the scripts said and
-            // where the proc macros are from cargo's one build of them.
+            // where the proc macros are from cargo's one build of them, and the symbols of
+            // each library as it is built.
             let loads = match &message {
                 Message::BuildScriptExecuted(_) => true,
-                Message::CompilerArtifact(it) => it.target.is_proc_macro(),
+                Message::CompilerArtifact(it) => {
+                    it.target.is_proc_macro()
+                        || it.filenames.iter().any(|it| it.extension() == Some("rlib"))
+                }
                 _ => false,
             };
             if loads && let Some(id) = &ahead {
                 let said = Request::Said { id: id.clone(), line: serde_json::to_string(&message)? };
-                let _ = client::ask(said, Start::Never);
+                let _ = tell.send(said);
             }
             match message {
                 Message::CompilerArtifact(artifact) => built.artifacts.push(artifact),
@@ -408,6 +419,9 @@ impl Built {
                 _ => {}
             }
         }
+        // What cargo said reaches the worker before it is told the build is over.
+        drop(tell);
+        let _ = telling.join();
         let status = cargo.wait()?;
         Ok(if status.success() { Ok(built) } else { Err(status.code().unwrap_or(101)) })
     }
@@ -581,6 +595,9 @@ impl State {
                 (Ok(()), Some((checkout, at))) => &self.checkouts[checkout].programs[at].binary,
                 _ => &program.cargos,
             };
+            // On Linux cargo's program is the daemon's file, which whatever starts it next
+            // starts with no word to the daemon, which may still be writing it.
+            let _unwritten = answer.is_ok().then(|| crate::splice::unwritten(from));
             let package = match (&answer, program.asked_as) {
                 (Ok(()), Some((checkout, at))) => {
                     let plan = &self.checkouts[checkout].programs[at];
@@ -831,7 +848,7 @@ impl Program {
 fn build_locks<'a>(executables: impl Iterator<Item = &'a Path>) -> Vec<std::fs::File> {
     // `debug/app`, `debug/examples/app` and `debug/deps/app-…` are all of `debug`.
     let lock_of = |executable: &Path| {
-        let mut above = executable.ancestors().skip(1).take(2);
+        let above = executable.ancestors().skip(1).take(2);
         above.map(|dir| dir.join(".cargo-lock")).find(|it| it.is_file())
     };
     let mut locks: Vec<PathBuf> = executables.filter_map(lock_of).collect();

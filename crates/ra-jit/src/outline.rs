@@ -17,7 +17,7 @@ use ide_db::{
 use rustc_hash::{FxHashMap, FxHashSet, FxHasher};
 use syntax::{
     AstNode, Edition, SyntaxKind, SyntaxNode, TextRange, WalkEvent,
-    ast::{self, HasAttrs, HasName},
+    ast::{self, HasAttrs, HasGenericParams, HasName},
 };
 use vfs::FileId;
 
@@ -45,6 +45,22 @@ pub(crate) struct Outlines {
     files: FxHashMap<FileId, Option<u64>>,
     /// The types each file defines, as [`types`] has them.
     types: FxHashMap<FileId, FxHashMap<String, u64>>,
+    /// What [`copied`] found in each file before its first edit: as rustc compiled it.
+    copied: FxHashMap<FileId, Copied>,
+}
+
+/// What an edit just applied changed of a file.
+pub(crate) struct Changed {
+    pub(crate) file: FileId,
+    /// Whether nothing changed but bodies that nothing else sees into.
+    pub(crate) bodies_only: bool,
+    /// Whether a function that rustc copies into each crate or instance that calls it is
+    /// not as rustc compiled it, or not where: a patch of rustc's executable redirects the
+    /// one copy its symbol names.
+    pub(crate) copied: bool,
+    /// The names of the generic functions of the file's modules that are not as rustc
+    /// compiled them, or not where: a patch replaces their copies when it knows each of them.
+    pub(crate) generics: Vec<String>,
 }
 
 impl Outlines {
@@ -52,6 +68,7 @@ impl Outlines {
     pub(crate) fn before_edit(&mut self, db: &RootDatabase, listed: &Listed, files: &[FileId]) {
         for &file in files {
             self.types.entry(file).or_insert_with(|| types(db, file));
+            self.copied.entry(file).or_insert_with(|| copied(db, file));
         }
         let new: Vec<_> = files.iter().copied().filter(|it| !self.files.contains_key(it)).collect();
         let outlines = outlines(db, listed, &new);
@@ -77,14 +94,14 @@ impl Outlines {
         changed
     }
 
-    /// For each file of the edit that was just applied, whether nothing changed in it but
-    /// bodies that nothing else sees into. Asked after [`Outlines::before_edit`].
+    /// What the edit that was just applied changed of each of its files. Asked after
+    /// [`Outlines::before_edit`].
     pub(crate) fn after_edit(
         &mut self,
         db: &RootDatabase,
         listed: &Listed,
         files: Vec<FileId>,
-    ) -> Vec<(FileId, bool)> {
+    ) -> Vec<Changed> {
         let off = std::env::var_os("RA_JIT_NO_BODIES").is_some();
         let start = std::time::Instant::now();
         let changed = self.types_changed(db, &files);
@@ -100,16 +117,100 @@ impl Outlines {
             .zip(outlines)
             .map(|(file, now)| {
                 let was = self.files.insert(file, now);
-                (file, !off && now.is_some() && was == Some(now))
+                let bodies_only = !off && now.is_some() && was == Some(now);
+                let (copied, generics) = match self.copied.get(&file) {
+                    Some(was) => {
+                        let now = copied(db, file);
+                        let names = was.generics.keys().chain(now.generics.keys());
+                        let mut changed: Vec<String> = names
+                            .filter(|it| was.generics.get(*it) != now.generics.get(*it))
+                            .cloned()
+                            .collect();
+                        changed.sort_unstable();
+                        changed.dedup();
+                        (was.others != now.others, changed)
+                    }
+                    None => (true, Vec::new()),
+                };
+                Changed { file, bodies_only, copied, generics }
             })
             .collect();
         // An edit to more than bodies can change which functions there are, in any file, and
         // what is kept here was found by asking the ones listed before it.
-        if files.iter().any(|&(_, bodies_only)| !bodies_only) {
+        if files.iter().any(|it| !it.bodies_only) {
             self.files.clear();
         }
         files
     }
+}
+
+/// Hashes of the functions in a file whose code rustc copies into what calls them, and where
+/// each starts. A panic in a copy says the line and column rustc compiled it at.
+#[derive(Clone, PartialEq, Eq, Debug)]
+struct Copied {
+    /// Generic functions of the file's modules, not `#[inline]`, by name: rustc's symbols
+    /// name each copy by the types it is of.
+    generics: FxHashMap<String, u64>,
+    /// The rest: generic ones through their `impl` or trait, the default bodies of trait
+    /// methods, those declared in bodies, and `#[inline]` ones.
+    others: u64,
+}
+
+fn copied(db: &RootDatabase, file: FileId) -> Copied {
+    let edition =
+        relevant_crates(db, file).first().map_or(Edition::CURRENT, |it| it.data(db).edition);
+    let tree = EditionedFileId::new(db, file, edition).parse(db).syntax_node();
+    copied_in(&tree)
+}
+
+fn copied_in(tree: &SyntaxNode) -> Copied {
+    let generic = |params: Option<ast::GenericParamList>| {
+        params.is_some_and(|it| {
+            it.generic_params().any(|it| !matches!(it, ast::GenericParam::LifetimeParam(_)))
+        })
+    };
+    let is_copied = |func: &ast::Fn| {
+        let impl_trait_parameter = func.param_list().is_some_and(|it| {
+            it.syntax().descendants().any(|it| it.kind() == SyntaxKind::IMPL_TRAIT_TYPE)
+        });
+        let inline = func.attrs().any(|attr| {
+            let text = attr.syntax().text().to_string();
+            text.contains("inline") && !text.contains("never")
+        });
+        let around = func.syntax().ancestors().skip(1).any(|it| {
+            ast::Trait::cast(it.clone()).is_some()
+                || ast::Impl::cast(it).is_some_and(|it| generic(it.generic_param_list()))
+        });
+        generic(func.generic_param_list()) || impl_trait_parameter || inline || around
+    };
+    let of_modules = |func: &ast::Fn| {
+        let inline = func.attrs().any(|attr| attr.syntax().text().to_string().contains("inline"));
+        let in_modules = func.syntax().ancestors().skip(1).all(|it| {
+            matches!(
+                it.kind(),
+                SyntaxKind::SOURCE_FILE | SyntaxKind::MODULE | SyntaxKind::ITEM_LIST
+            )
+        });
+        in_modules && !inline
+    };
+    let text = tree.text().to_string();
+    let line_starts: Vec<usize> =
+        std::iter::once(0).chain(text.match_indices('\n').map(|(at, _)| at + 1)).collect();
+    let mut generics: FxHashMap<String, FxHasher> = FxHashMap::default();
+    let mut others = FxHasher::default();
+    for func in tree.descendants().filter_map(ast::Fn::cast).filter(is_copied) {
+        let name = func.name().map(|it| it.text().to_string());
+        let hasher = match name {
+            Some(name) if of_modules(&func) => generics.entry(name).or_default(),
+            _ => &mut others,
+        };
+        let start = usize::from(func.syntax().text_range().start());
+        let line = line_starts.partition_point(|&it| it <= start) - 1;
+        (line, text[line_starts[line]..start].chars().count()).hash(hasher);
+        func.syntax().text().to_string().hash(hasher);
+    }
+    let generics = generics.into_iter().map(|(name, it)| (name, it.finish())).collect();
+    Copied { generics, others: others.finish() }
 }
 
 /// The [`outline`] of each file. A wide edit is of thousands of files: their bodies are
@@ -571,6 +672,62 @@ mod tests {
     #[track_caller]
     fn seen(before: &str, after: &str) {
         assert_ne!(hash(before), hash(after), "{before:?} to {after:?} is not seen");
+    }
+
+    fn copies(text: &str) -> Copied {
+        copied_in(&SourceFile::parse(text, Edition::CURRENT).syntax_node())
+    }
+
+    #[test]
+    fn what_rustc_copies_is_told() {
+        let same = |before: &str, after: &str| {
+            assert_eq!(copies(before), copies(after), "{before:?} to {after:?} is told");
+        };
+        let told = |before: &str, after: &str| {
+            assert_ne!(copies(before), copies(after), "{before:?} to {after:?} is not told");
+        };
+        same("fn f() { 1; }", "fn f() { 2; }");
+        same("fn f<'a>(x: &'a u8) { 1; }", "fn f<'a>(x: &'a u8) { 2; }");
+        same("impl S { fn f(&self) { 1; } }", "impl S { fn f(&self) { 2; } }");
+        told("fn f<T>() { 1; }", "fn f<T>() { 2; }");
+        told("fn f<const N: usize>() { 1; }", "fn f<const N: usize>() { 2; }");
+        told("fn f(x: impl Fn()) { 1; }", "fn f(x: impl Fn()) { 2; }");
+        told("impl<T> S<T> { fn f(&self) { 1; } }", "impl<T> S<T> { fn f(&self) { 2; } }");
+        told("trait T { fn f(&self) { 1; } }", "trait T { fn f(&self) { 2; } }");
+        told("#[inline] fn f() { 1; }", "#[inline] fn f() { 2; }");
+        same("#[inline(never)] fn f() { 1; }", "#[inline(never)] fn f() { 2; }");
+        // Moved, by a line or along one.
+        told("fn g() {}\nfn f<T>() {}", "fn g() {\n}\nfn f<T>() {}");
+        told("fn g() {} fn f<T>() {}", "fn g() { } fn f<T>() {}");
+        told("/* ab */ fn f<T>() {}", "/* é */ fn f<T>() {}");
+        same("fn f<T>() {}\nfn g() {}", "fn f<T>() {}\nfn g() {\n}");
+    }
+
+    #[test]
+    fn generics_of_modules_are_told_apart() {
+        let others = |before: &str, after: &str| copies(before).others != copies(after).others;
+        let generics =
+            |before: &str, after: &str| copies(before).generics != copies(after).generics;
+        for (before, after) in [
+            ("fn f<T>() { 1; }", "fn f<T>() { 2; }"),
+            ("fn g() {}\nfn f<T>() {}", "fn g() {\n}\nfn f<T>() {}"),
+            ("mod m { fn f(x: impl Fn()) { 1; } }", "mod m { fn f(x: impl Fn()) { 2; } }"),
+            ("fn f<T>() {}\nfn g<T>() {}", "fn f<T>() { }\nfn g<T>() {}"),
+        ] {
+            assert!(generics(before, after) && !others(before, after), "{before:?}");
+        }
+        for (before, after) in [
+            ("impl<T> S<T> { fn f(&self) { 1; } }", "impl<T> S<T> { fn f(&self) { 2; } }"),
+            ("trait T { fn f(&self) { 1; } }", "trait T { fn f(&self) { 2; } }"),
+            ("#[inline] fn f<T>() { 1; }", "#[inline] fn f<T>() { 2; }"),
+            ("fn g() { fn f<T>() { 1; } }", "fn g() { fn f<T>() { 2; } }"),
+        ] {
+            assert!(others(before, after) && !generics(before, after), "{before:?}");
+        }
+        let (before, after) =
+            (copies("fn f<T>() {}\nfn g<T>() {}"), copies("fn f<T>() { }\nfn g<T>() {}"));
+        assert_ne!(before.generics["f"], after.generics["f"]);
+        assert_eq!(before.generics["g"], after.generics["g"]);
     }
 
     #[test]

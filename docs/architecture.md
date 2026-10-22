@@ -186,14 +186,14 @@ Each object format has its own implementation:
 | Format | File | Notes |
 |---|---|---|
 | ELF | `splice.rs`, `splice/debug.rs` | New segments for read-only data, code and data, new program headers, the unwinder's search table extended. Debug sections are rewritten so a debugger sees the new code. |
-| Mach-O arm64 | `splice/macho.rs` | The patch goes where `__LINKEDIT` was, `__LINKEDIT` is written again behind it, and the file is re-signed. Executables with chained fixups are declined. |
+| Mach-O arm64 | `splice/macho.rs` | The patch goes where `__LINKEDIT` was, `__LINKEDIT` is written again behind it, and the file is re-signed. Executables with chained fixups are declined, so the daemon's link asks for dyld info (`-no_fixup_chains`). |
 | PE x86-64 | `splice/pe.rs` | New sections behind the linker's last, `.pdata` extended for the unwinder. |
 | wasm | `splice/wasm.rs` | Nothing jumps: the module is written again with the new function bodies under the same indices. |
 
 ## The disk store
 
-`store.rs` is a content-addressed key-value store of compiled functions, independent of
-Rust: a key is a hash of what the value was made from. It is used when `RA_JIT_CACHE` names
+`crates/ra-jit-store` is a content-addressed key-value store of compiled functions,
+independent of Rust: a key is a hash of what the value was made from. It is used when `RA_JIT_CACHE` names
 a directory. `stable.rs` gives function instances names that are the same in every run on
 the same sources, and `cached.rs` keeps entries under them: a function of a crate that no
 edit reaches, as it was stitched into an object. A build that finds an entry for an
@@ -241,6 +241,49 @@ that is unchanged, the build stays the daemon's.
 The daemon assumes the source it loads is the source rustc compiled. The client records the
 time just before cargo starts. When a worker has loaded, the daemon checks that no source
 file rustc read is newer than that, and discards the worker if one is.
+
+### The first edits patch what rustc linked
+
+The daemon is ready once it has loaded the workspace and read the symbols of the executable
+rustc linked; it compiles nothing of its own first ([#11](https://github.com/indexable-inc/ra-jit/issues/11)).
+The first edits are patches of that executable (`patch::Base::of_rustc`), spliced into it as
+later edits are spliced into the daemon's own links. To link a body against code it did not
+compile, the resolver also uses rustc's private local symbols (`symbols::Linked`), which it
+stops using once a build is in full. On macOS the wrapper links those executables with
+`-Wl,-headerpad,0x400000` and `-Wl,-bind_at_load`, so a splice has room for its load commands
+and the unwind table of a program of some four hundred thousand functions, and every import
+is bound at start; the daemon's own links leave both out of rustc's line
+(`cargo::plan::rustc_link_args`). While cargo builds, the spare worker resolves the names
+of each crate cargo is done with and compiles its functions, without the generic instances
+they reach, on a quarter of the cores, the rest being cargo's. It reads the symbols of each
+library as cargo writes it (`symbols::read_ahead`), so that once cargo is done only the
+program's own are left to read. Every line of cargo's reaches it through the daemon as cargo
+says it, and the spare reads its input from its first moment: a full pipe would have cargo
+wait.
+
+A patch over rustc has no marks of before to compare with, so the daemon takes them just in
+time: before an edit's text reaches the database, `home` notes the functions written in the
+file, their closures and the statics they declare, under rustc's symbols. An `async` block
+has no mark; the hash of its function's text and place stands in. rustc copies a generic
+function into the crates that call it, line numbers and all, so `home` also takes in the
+copies of the file's generic functions that its other functions reach and the executable
+has under their paths (`Base::home_copies`, `symbols::Linked::instances_of`): an edit that
+changes or moves the lines of such a function is a patch that replaces each of those copies
+under rustc's symbol, as long as the executable has no other copy of that name. A file not
+noted before it changed, an edit that is more than function bodies, an edit of an
+`#[inline]` or default trait function, or of a generic one with copies `home` did not take
+in (the outline's copied fingerprint tells), a changed static, and `include!`d or asset
+files take a build in full, and the build log says which (`no patch: ...`). So does a patch
+the splice can't place: one that calls a libc function the executable does not import, or
+has frames that do not fit the header's room on macOS, with the program's own beside them. A thread-local of
+the executable is reached as rustc's code reaches it: on Linux x86-64 the general-dynamic
+sequence is rewritten to the executable's local one (an offset from `%fs`), on macOS through
+the descriptor's slot.
+
+Once nothing waits for a second, the daemon builds its own base in full in the background,
+from the store as far as it can; an edit that comes meanwhile interrupts it and is a patch
+of rustc's executable. `RA_JIT_RUSTC_BASE=0` makes the first build the daemon's own, as
+before. `harness/rustcbase.py` checks every kind of edit against cargo.
 
 An alternative wrapper exists in `stub.rs` (`RA_JIT_WRAPS_RUSTC`), where rustc compiles only
 a stub for each workspace crate and all code is ra-jit's. It makes the first build faster,

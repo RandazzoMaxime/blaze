@@ -37,7 +37,7 @@ pub(crate) const DRIVEN: &str = "RA_JIT_CARGO_DRIVES";
 /// crates that are the daemon's to compile, as a list of paths.
 pub(crate) const STAGED: &str = "RA_JIT_STAGED_CRATES";
 /// The file in the record of a unit that says rustc built what stands in for the crate.
-const STANDS_IN: &str = "stands-in";
+pub(crate) const STANDS_IN: &str = "stands-in";
 
 /// What the variables that name the programs of a build start with.
 const PROGRAM_OF: &str = "CARGO_BIN_EXE_";
@@ -99,6 +99,11 @@ pub(crate) fn command(mut args: impl Iterator<Item = OsString>) -> anyhow::Resul
     if unit.linked {
         std::fs::create_dir_all(&copies)?;
         compiler.arg(format!("--print=link-args={}", line.display())).arg("-Csave-temps");
+        if unit.for_apple() {
+            for arg in super::plan::rustc_link_args() {
+                compiler.arg(format!("-Clink-arg={arg}"));
+            }
+        }
     }
     let status =
         compiler.status().with_context(|| format!("running {}", Path::new(&rustc).display()))?;
@@ -288,6 +293,8 @@ impl Unit {
             std::process::exit(super::FAILED);
         }
         let binary = &checkout.programs[at].binary;
+        // Cargo starts the program with no word to the daemon, which may still be writing it.
+        let _unwritten = crate::splice::unwritten(binary);
         let record = self.as_record(0, Vec::new(), None);
         let linked = record.outputs().into_iter().next().ok_or("rustc names no executable")?;
         place(binary, &linked).map_err(|it| format!("installing {}: {it}", linked.display()))?;
@@ -310,6 +317,16 @@ impl Unit {
         let mut command = Command::new(rustc);
         command.args(args).stdin(Stdio::null());
         std::thread::spawn(move || command.output())
+    }
+
+    /// Whether rustc compiles the crate for an Apple platform, whose linker is told how much
+    /// room to leave after the load commands.
+    fn for_apple(&self) -> bool {
+        let at = self.args.iter().position(|it| it == "--target");
+        let target = at.and_then(|at| self.args.get(at + 1)).map(String::as_str);
+        let target =
+            target.or_else(|| self.args.iter().find_map(|it| it.strip_prefix("--target=")));
+        target.map_or(cfg!(target_vendor = "apple"), |it| it.contains("-apple-"))
     }
 
     /// Whether the crate is one the first build of the workspace leaves to the daemon.
@@ -432,7 +449,8 @@ impl Unit {
         // The executable is the daemon's to link; of the outputs it reads the libraries.
         let libraries =
             record.outputs().into_iter().filter(|it| it.extension().is_some_and(|it| it == "rlib"));
-        let mut originals: Vec<PathBuf> = libraries.filter(|it| it.exists()).collect();
+        let mut originals: Vec<(PathBuf, bool)> =
+            libraries.filter(|it| it.exists()).map(|it| (it, false)).collect();
         if let Some(line) = &link_line {
             let line = std::fs::read_to_string(line)
                 .with_context(|| format!("rustc wrote no link line to {}", line.display()))?;
@@ -441,15 +459,23 @@ impl Unit {
                 .into_iter()
                 .filter(|it| it.ends_with(".rcgu.o") || super::plan::is_symbols(it))
                 .map(PathBuf::from);
-            originals.extend(objects.filter(|it| it.exists()));
+            // The objects are rustc's to delete once it has linked, and kept for the daemon
+            // alone: they are moved rather than copied, as copying those of a large program
+            // holds up the build. On Apple's systems the program's debug info stays in them,
+            // where a debugger looks for it.
+            let moved = !self.for_apple();
+            originals.extend(objects.filter(|it| it.exists()).map(|it| (it, moved)));
         }
         std::fs::create_dir_all(to)?;
         let mut copies = Vec::new();
-        for original in originals {
+        for (original, moved) in originals {
             let name = original.file_name().context("an output without a name")?;
             let copy = to.join(name);
-            std::fs::copy(&original, &copy)
-                .with_context(|| format!("copying {}", original.display()))?;
+            // Another file system takes a copy.
+            if !(moved && std::fs::rename(&original, &copy).is_ok()) {
+                std::fs::copy(&original, &copy)
+                    .with_context(|| format!("copying {}", original.display()))?;
+            }
             copies.push(Copied { original, copy });
         }
         // The daemon tells which crate a file of rustc's is by the dep-info next to it, of

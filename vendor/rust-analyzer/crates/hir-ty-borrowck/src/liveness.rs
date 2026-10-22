@@ -534,6 +534,21 @@ fn live_regions_of<'db>(
                     }
                     None => (),
                 }
+                // What an `impl Trait` does not capture need not be live.
+                if let rustc_type_ir::AliasTyKind::Opaque { .. } = alias.kind
+                    && let Some(captured) = super::regions::opaque_captures(
+                        self.ctx.db,
+                        alias.kind.def_id(),
+                        alias.args.len(),
+                    )
+                {
+                    for (arg, captured) in alias.args.iter().zip(captured) {
+                        if captured {
+                            rustc_type_ir::TypeVisitable::visit_with(&arg, self);
+                        }
+                    }
+                    return;
+                }
             }
             rustc_type_ir::TypeSuperVisitable::super_visit_with(&ty, self)
         }
@@ -587,7 +602,7 @@ fn alias_bound<'db>(
 
 /// `ty`, its regions all `'static`, normalized as far as the solver goes: rustc normalizes the
 /// outlives clauses of the parameter environment before alias liveness matches them.
-fn normalize_erased<'db>(ctx: &Ctx<'_, 'db>, ty: Ty<'db>) -> Option<Ty<'db>> {
+pub(super) fn normalize_erased<'db>(ctx: &Ctx<'_, 'db>, ty: Ty<'db>) -> Option<Ty<'db>> {
     use hir_ty::next_solver::{infer::traits::ObligationCause, obligation_ctxt::ObligationCtxt};
     if !rustc_type_ir::TypeVisitableExt::has_aliases(&ty) {
         return None;

@@ -44,6 +44,8 @@ CODELESS = {
     "returns a value referencing data owned by the current function": "E0515",
 }
 NOT_GENERAL = re.compile(r"^implementation of `.*` is not general enough$")
+# rustc's error for a type that must outlive every lifetime of a `for<'a>`, which names the type.
+FORALL_OUTLIVES = re.compile(r"^(`.+`|the parameter type) does not live long enough$")
 # Flags that do not change what the borrow checker says.
 INERT = re.compile(r"^(-[AWDF] ?\S*|--cap-lints(=| )\S+|-g|-C ?\S+|-O|--crate-type(=| )\S+|--check-cfg(=| )\S+"
                    r"|--error-format(=| )\S+|--diagnostic-width(=| )\S+|-Z ?(ui-testing|deduplicate-diagnostics|"
@@ -69,11 +71,14 @@ def key_of(code, message):
             return name
     if NOT_GENERAL.match(message):
         return "not-general"
+    if FORALL_OUTLIVES.match(message):
+        return "forall-outlives"
     return None
 
 
 def is_borrowck(key):
-    return key is not None and (key in BORROWCK or key in CODELESS.values() or key == "not-general")
+    return key is not None and (key in BORROWCK or key in CODELESS.values()
+                                or key in ("not-general", "forall-outlives"))
 
 
 class Unit:
@@ -297,7 +302,7 @@ def ra_jit_run(binary, units, mode, jobs, work):
         files[copy] = unit.label
         by_edition[unit.edition].append(copy)
     env = dict(os.environ, RA_JIT_BORROWCK=mode)
-    env.pop("RUST_BACKTRACE", None)
+    env["RUST_BACKTRACE"] = "0"
     results = {}
 
     def run(edition, chunk):

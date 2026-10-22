@@ -9,6 +9,13 @@ back them is under [docs/upstream/](../upstream/), each with a `SOURCE.md`. Sear
   does about each. 2026-10-20.
 - [mir-gap.md](mir-gap.md): ra-jit's MIR against rustc's optimized MIR, match rates, the
   passes ported and not, and the production gaps ranked. 2026-10-20.
+- [glancer.md](glancer.md): Rust Glancer (frozen, offloaded per-package index, phase-wise memory
+  discipline), matklad's three tiers (syntax trees, stubs, `.rmeta`-like dependencies), what
+  rustc's `.rmeta` keeps MIR for, and salsa 0.28's persistence. 2026-10-21.
+- [daemon-memory.md](daemon-memory.md): what the daemon's memory is (by salsa query and
+  allocation site, ripgrep and nushell), the spare worker's share, and what salsa 0.28.5's
+  `lru` can and cannot evict (not a query with cycle handling, only at a new revision).
+  2026-10-21.
 - [borrowck.md](borrowck.md): rustc's NLL borrow checker and Polonius (the nightly-default
   alpha, the legacy datalog analysis, stabilization status, the UI tests that tell them apart),
   rust-analyzer's removed borrowck, and what ra-jit builds. 2026-10-20.

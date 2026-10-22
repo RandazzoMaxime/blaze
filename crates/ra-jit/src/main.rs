@@ -108,6 +108,10 @@ struct Args {
     /// The executable `link_cmd` writes. With it an edit that fits a patch is added to the
     /// executable where it is, and `link_cmd` only runs when that can't be done.
     splice: Option<PathBuf>,
+    /// The executable rustc linked of the program, from the source the daemon first reads:
+    /// the first edits are patches of a copy of it at `splice`, while nothing waits for the
+    /// object of the whole program.
+    rustc_binary: Option<PathBuf>,
     /// Tab-separated per-function outcome, for the harness.
     report: Option<PathBuf>,
     /// File of function paths to leave to rustc, for bisecting miscompiles.
@@ -191,6 +195,7 @@ impl Args {
         let mut link_cmd = None;
         let mut patch = None;
         let mut splice = None;
+        let mut rustc_binary = None;
         let mut report = None;
         let mut deny = None;
         let mut isolate = None;
@@ -221,6 +226,7 @@ impl Args {
                 "--link-cmd" => link_cmd = Some(value()?),
                 "--patch" => patch = Some(PathBuf::from(value()?)),
                 "--binary" | "--splice" => splice = Some(PathBuf::from(value()?)),
+                "--rustc-binary" => rustc_binary = Some(PathBuf::from(value()?)),
                 "--report" => report = Some(PathBuf::from(value()?)),
                 "--deny" => deny = Some(PathBuf::from(value()?)),
                 "--isolate" => isolate = Some(PathBuf::from(value()?)),
@@ -258,6 +264,7 @@ impl Args {
             link_cmd,
             patch,
             splice,
+            rustc_binary,
             report,
             deny,
             isolate,
@@ -303,6 +310,10 @@ struct Resolver<'a> {
     /// The symbols of the functions asked about, for every thread of the build: the threads
     /// that compile find them ahead of the one that puts the functions in the object.
     named: Arc<std::sync::Mutex<FxHashMap<FunctionId, Option<String>>>>,
+    /// The symbols of what rustc linked, when the patch goes into it.
+    linked: Option<Arc<symbols::Linked>>,
+    /// Set once the build turns out to be one in full, which `linked` is not for.
+    in_full: Arc<std::sync::atomic::AtomicBool>,
 }
 
 /// The [`SymbolTable::generation`] and the checkout that paths were found with.
@@ -324,6 +335,49 @@ fn source_path(
     let base = base.and_then(|base| Path::new(&path).strip_prefix(base).ok());
     let relative = Path::new(&path).strip_prefix(root).ok().or(base);
     Some(relative.map_or(path.clone(), |it| it.to_string_lossy().into_owned()))
+}
+
+impl<'a> Resolver<'a> {
+    /// The symbols of the program of `args`, which panic locations are named for from now on.
+    /// `known` says whether what is compiled is a patch of what rustc linked.
+    fn of(
+        db: &'a RootDatabase,
+        table: &'a SymbolTable,
+        args: &Args,
+        known: &Rejections,
+        contents: &'a content::Contents,
+        listed: &'a Listed,
+    ) -> Resolver<'a> {
+        let over_rustc = known.homes() && !known.builds_base();
+        let linked = args.splice.as_deref().filter(|_| over_rustc).and_then(rustc_symbols);
+        let (root, base) = (args.checkout.clone(), args.base.clone());
+        let debug = args.debug;
+        let apart = (debug.kept != plan::Kept::Linked).then(|| args.out.clone());
+        let named = (root.clone(), base.clone());
+        hir_ty_codegen::name_sources(move |db, file| {
+            source_path(db, &named.0, named.1.as_deref(), file)
+        });
+        Resolver {
+            db,
+            table,
+            root,
+            base,
+            contents,
+            debug,
+            apart,
+            listed,
+            shared_paths: Default::default(),
+            named: Default::default(),
+            linked,
+            in_full: Arc::default(),
+        }
+    }
+
+    /// What rustc linked, while the build is a patch of it.
+    fn rustcs(&self) -> Option<&symbols::Linked> {
+        let in_full = self.in_full.load(std::sync::atomic::Ordering::Relaxed);
+        self.linked.as_deref().filter(|_| !in_full)
+    }
 }
 
 impl Resolver<'_> {
@@ -409,7 +463,11 @@ impl Resolver<'_> {
         if let Some(symbol) = symbol {
             return Some(symbol.to_owned());
         }
-        // rustc has built nothing of the crate: the function is ours to name, unless it is
+        // A patch of what rustc linked redirects a function private to its object as well,
+        // by the symbol the executable keeps of it.
+        if let Some(symbol) = self.rustcs().and_then(|it| it.private(&path)) {
+            return Some(symbol.to_owned());
+        } // rustc has built nothing of the crate: the function is ours to name, unless it is
         // declared in an `extern` block, where what it links to names it.
         if matches!(func.lookup(self.db).container, ItemContainerId::ExternBlockId(_)) {
             return None;
@@ -799,7 +857,8 @@ impl SymbolResolver for Resolver<'_> {
                 let contents = self.contents;
                 let (debug, apart) = (self.debug, self.apart.clone());
                 let (listed, named) = (self.listed, self.named.clone());
-                let shared_paths = self.shared_paths.clone();
+                let (shared_paths, linked) = (self.shared_paths.clone(), self.linked.clone());
+                let in_full = self.in_full.clone();
                 scope.spawn(move || {
                     let resolver = Resolver {
                         db: &db,
@@ -812,6 +871,8 @@ impl SymbolResolver for Resolver<'_> {
                         listed,
                         shared_paths,
                         named,
+                        linked,
+                        in_full,
                     };
                     hir::attach_db(&db, || {
                         loop {
@@ -859,6 +920,53 @@ impl SymbolResolver for Resolver<'_> {
 
     fn defines(&self, symbol: &str) -> bool {
         self.table.defines(symbol)
+    }
+
+    fn linked(&self, symbol: &str) -> bool {
+        self.rustcs().is_none_or(|it| it.has(symbol))
+    }
+
+    fn in_full(&self) {
+        self.in_full.store(true, std::sync::atomic::Ordering::Relaxed);
+        // Some were named after what only rustc's executable has.
+        self.named.lock().unwrap_or_else(|e| e.into_inner()).clear();
+    }
+
+    fn rustc_instances(&self, func: FunctionId) -> Option<Vec<(String, String)>> {
+        let path = self.path(func)?;
+        // The crates that share a name are told apart by ids that demangled paths leave out.
+        if path.contains('[') {
+            return None;
+        }
+        self.rustcs()?.instances_of(&path)
+    }
+
+    fn closure(&self, owner: FunctionId, expr: hir_def::hir::ExprId) -> Option<String> {
+        let source_map = &Body::with_source_map(self.db, owner.into()).1;
+        let written = source_map.expr_syntax(expr).ok()?;
+        let sema = hir::Semantics::new(self.db);
+        let node = written.value.to_node(&sema.parse_or_expand(written.file_id));
+        let mut inner = Vec::new();
+        for node in sema.ancestors_with_macros(node.syntax().clone()) {
+            if is_closure(&node) {
+                inner.push(format!("{{closure#{}}}", closure_number(&sema, &node)?));
+                continue;
+            }
+            if let Some(func) = ast::Fn::cast(node) {
+                // The body of an `async fn` is a closure of its own to rustc.
+                if func.async_token().is_some() {
+                    return None;
+                }
+                break;
+            }
+        }
+        let mut path = self.path(owner)?;
+        for segment in inner.iter().rev() {
+            path.push_str("::");
+            path.push_str(segment);
+        }
+        let private = || self.rustcs()?.private(&path);
+        self.table.get(&path).or_else(private).map(str::to_owned)
     }
 
     fn makers(&self, function: &str) -> Vec<u64> {
@@ -978,9 +1086,10 @@ impl SymbolResolver for Resolver<'_> {
         };
         let module = it.module(self.db);
         let name = it.name(self.db);
+        let private = |path: &str| self.rustcs().and_then(|it| it.private(path)).map(str::to_owned);
         if module.nearest_non_block_module(self.db) == module {
             let path = self.item_path(module, name.as_str())?;
-            return self.table.get(&path).map(str::to_owned);
+            return self.table.get(&path).map(str::to_owned).or_else(|| private(&path));
         }
         // A static in a body is named after the items around it, which only the syntax knows.
         let sema = hir::Semantics::new(self.db);
@@ -1047,11 +1156,14 @@ impl SymbolResolver for Resolver<'_> {
             .table
             .get_nested(&path, &closures, place, &around)
             .or_else(|| self.table.get_at(&path, place, &around));
-        symbol.map(str::to_owned)
+        symbol.map(str::to_owned).or_else(|| closures.is_empty().then(|| private(&path)).flatten())
     }
 
     fn path(&self, path: &str) -> Option<String> {
-        self.table.get(path).map(str::to_owned)
+        // A patch of rustc's executable can call what is private to an object of it too, as
+        // the copies rustc made of a generic function of another crate are.
+        let private = || self.rustcs()?.private(path);
+        self.table.get(path).or_else(private).map(str::to_owned)
     }
 
     fn item(&self, item: ModuleDefId) -> Option<String> {
@@ -2251,7 +2363,7 @@ fn report_sharing(db: &RootDatabase) {
     );
 }
 
-fn resolve_crates(db: &RootDatabase, args: &Args) -> anyhow::Result<usize> {
+fn resolve_crates(db: &RootDatabase, args: &Args, threads: usize) -> anyhow::Result<usize> {
     let mut seen = FxHashSet::default();
     let mut crates = Vec::new();
     for name in args.crates() {
@@ -2260,7 +2372,7 @@ fn resolve_crates(db: &RootDatabase, args: &Args) -> anyhow::Result<usize> {
             crates.extend(krate.transitive_deps(db).into_iter().filter(|&dep| seen.insert(dep)));
         }
     }
-    resolve_all(db, &crates);
+    resolve_all(db, &crates, threads);
     Ok(crates.len())
 }
 
@@ -2283,13 +2395,12 @@ fn resolve_names(db: &RootDatabase, crates: &[ide_db::base_db::Crate]) {
     });
 }
 
-/// Resolves the names and finds the impls of `crates`, on every core.
-fn resolve_all(db: &RootDatabase, crates: &[ide_db::base_db::Crate]) {
+/// Resolves the names and finds the impls of `crates`, on `threads`.
+fn resolve_all(db: &RootDatabase, crates: &[ide_db::base_db::Crate], threads: usize) {
     // A crate comes after its dependencies in the list: a thread that starts on one whose
     // dependencies are not resolved resolves them itself, one after the other.
     let next = std::sync::atomic::AtomicUsize::new(0);
     let helping = std::sync::atomic::AtomicUsize::new(0);
-    let threads = std::thread::available_parallelism().map_or(1, |it| it.get());
     std::thread::scope(|scope| {
         for _ in 0..threads {
             let db = db.clone();
@@ -2534,6 +2645,122 @@ fn functions_of_modules(db: &RootDatabase, krate: Crate) -> Vec<FunctionId> {
 }
 
 /// What scopes declare that has code.
+/// What rustc linked of the program, when the daemon's first edits are patches of it rather
+/// than of a build of its own: a daemon's, whose edits are spliced, of the files rustc built
+/// it from (`unwritten`). `RA_JIT_RUSTC_BASE=0` has the first build be the daemon's.
+fn rustcs_to_patch(args: &Args, unwritten: bool) -> Option<PathBuf> {
+    let off = std::env::var_os("RA_JIT_RUSTC_BASE").is_some_and(|it| it == "0");
+    let spliced = args.splice.is_some() && args.patch.is_some() && args.link_cmd.is_some();
+    let daemon = args.socket.is_some() && args.isolate.is_none();
+    let rustcs = args.rustc_binary.as_ref().filter(|it| it.is_file());
+    rustcs.filter(|_| unwritten && spliced && daemon && *SPLICING && !off).cloned()
+}
+
+/// Has the executable at `--splice` be the one rustc linked at `rustcs`, and the objects
+/// empty, for edits to be spliced into it as patches. Watches every file rustc read: one an
+/// `include!` in a body names is first seen when the body is compiled.
+fn start_from_rustc(
+    args: &Args,
+    rustcs: &Path,
+    table: &SymbolTable,
+    files: &mut Vec<WatchedFile>,
+) -> anyhow::Result<()> {
+    let (Some(binary), Some(patch)) = (args.splice.as_deref(), args.patch.as_deref()) else {
+        bail!("patching what rustc linked takes --splice and --patch");
+    };
+    let empty = hir_ty_codegen::empty_object().map_err(|it| anyhow::anyhow!("{it}"))?;
+    std::fs::write(&args.out, &empty)?;
+    std::fs::write(patch, &empty)?;
+    // Another name for it at once, for a client to install: the copy a splice writes is
+    // made while the daemon waits for the first edit.
+    let _ = std::fs::remove_file(binary);
+    if std::fs::hard_link(rustcs, binary).is_err() {
+        std::fs::copy(rustcs, binary)?;
+    }
+    let linked = Linked::read_rustcs(binary.to_owned(), patch, &args.out);
+    lock(&LINKED).insert(binary.to_owned(), Executable::Linked(linked));
+    lock(&RUSTC_LINKED).insert(binary.to_owned());
+    let rustcs = rustcs.to_owned();
+    let names = std::thread::spawn(move || symbols::Linked::read(&rustcs));
+    lock(&RUSTC_SYMBOLS).insert(binary.to_owned(), LinkedNames::Reading(names));
+    let mut watched: FxHashSet<PathBuf> = files.iter().map(|it| it.path.clone()).collect();
+    for source in table.sources() {
+        if !watched.insert(source.to_owned()) {
+            continue;
+        }
+        let Some(path) = source.to_str().and_then(|it| AbsPathBuf::try_from(it).ok()) else {
+            continue;
+        };
+        files.extend(WatchedFile::new(Watched::Included(path), source, source));
+    }
+    Ok(())
+}
+
+/// Has each program whose edits are patches of what rustc linked take in what rustc compiled
+/// of `files`, which are about to change: the functions written in them and the statics
+/// their bodies declare. A static declared outside a body is no edit of bodies alone.
+fn home_in_rustcs(
+    db: &RootDatabase,
+    listed: &Listed,
+    programs: &mut [Program],
+    files: &[vfs::FileId],
+) {
+    if files.is_empty() || !programs.iter().any(|it| it.known.homes()) {
+        return;
+    }
+    hir::attach_db(db, || {
+        let functions = listed.in_files(db, files);
+        let found: Vec<_> = files
+            .iter()
+            .zip(functions)
+            .filter_map(|(&file, functions)| {
+                let functions = functions?;
+                let mut declared = Declared {
+                    bodies: functions.iter().map(|&it| it.into()).collect(),
+                    ..Declared::default()
+                };
+                while !declared.bodies.is_empty() {
+                    for body in std::mem::take(&mut declared.bodies) {
+                        for (_, def_map) in Body::of(db, body).blocks(db) {
+                            for (_, module) in def_map.modules(db) {
+                                declared.in_scope(db, module.scope(db));
+                            }
+                        }
+                    }
+                }
+                Some((file, functions, declared.statics))
+            })
+            .collect();
+        let homing = |file: vfs::FileId| programs.iter().any(|it| it.known.homes_file(file));
+        let written: Vec<FunctionId> = found
+            .iter()
+            .filter(|(file, ..)| homing(*file))
+            .flat_map(|(_, functions, _)| functions.iter().copied())
+            .collect();
+        let next = std::sync::atomic::AtomicUsize::new(0);
+        std::thread::scope(|scope| {
+            for _ in 0..cores().min(written.len()) {
+                let (db, written, next) = (db.clone(), &written, &next);
+                scope.spawn(move || {
+                    hir::attach_db(&db, || {
+                        while let Some(&func) = written.get(next.fetch_add(1, Ordering::Relaxed)) {
+                            hir_ty_codegen::compile_written(&db, func);
+                        }
+                    })
+                });
+            }
+        });
+        let contents = content::Contents::default();
+        for program in programs.iter_mut().filter(|it| it.known.homes()) {
+            let Program { args, table, known, .. } = program;
+            let resolver = Resolver::of(db, table, args, known, &contents, listed);
+            for (file, functions, statics) in &found {
+                known.home(db, &resolver, *file, functions, statics);
+            }
+        }
+    });
+}
+
 #[derive(Default)]
 struct Declared {
     functions: Vec<FunctionId>,
@@ -2634,6 +2861,21 @@ struct Build {
     looked: hir_ty_codegen::StaleSteps,
     /// Why rustc does not compile what was built, when `env!` asks for a variable nobody set.
     unset: Option<String>,
+    /// The files of a full build made for an edit, in the order they are written: they stand
+    /// for the program once the build is kept ([`Build::keep`]), and one that is undone leaves
+    /// those of the build before.
+    unwritten: Vec<(PathBuf, Vec<u8>)>,
+}
+
+impl Build {
+    /// Writes the files of the build: what was built is the program from now on.
+    fn keep(&mut self, known: &mut Rejections) -> anyhow::Result<()> {
+        known.keep_built();
+        for (path, bytes) in std::mem::take(&mut self.unwritten) {
+            replace(&path, &bytes)?;
+        }
+        Ok(())
+    }
 }
 
 thread_local! {
@@ -2657,34 +2899,33 @@ impl Drop for Probing {
     }
 }
 
-fn build(
+/// [`build`] of a build that is never held.
+fn build_unheld(
     db: &RootDatabase,
     table: &SymbolTable,
     args: &Args,
     known: &mut Rejections,
     listed: &Listed,
 ) -> anyhow::Result<Build> {
+    let built = build(db, table, args, known, listed, None)?;
+    Ok(built.expect("a build that is never held is made"))
+}
+
+/// Builds the program, as a patch of the last full build where it can be. With `hold`, the
+/// build is of an edit: where it can't be a patch and `hold` says to hold it, nothing is built
+/// (`None`, see [`CodegenUnit::compile_or_hold`]), and a full build is undoable, its files
+/// left to [`Build::keep`].
+fn build(
+    db: &RootDatabase,
+    table: &SymbolTable,
+    args: &Args,
+    known: &mut Rejections,
+    listed: &Listed,
+    hold: Option<&dyn Fn() -> bool>,
+) -> anyhow::Result<Option<Build>> {
     let start = Instant::now();
     let contents = &content::Contents::default();
-    let (root, base) = (args.checkout.clone(), args.base.clone());
-    let debug = args.debug;
-    let apart = (debug.kept != plan::Kept::Linked).then(|| args.out.clone());
-    let named = (root.clone(), base.clone());
-    hir_ty_codegen::name_sources(move |db, file| {
-        source_path(db, &named.0, named.1.as_deref(), file)
-    });
-    let resolver = Resolver {
-        db,
-        table,
-        root,
-        base,
-        contents,
-        debug,
-        apart,
-        listed,
-        shared_paths: Default::default(),
-        named: Default::default(),
-    };
+    let resolver = Resolver::of(db, table, args, known, contents, listed);
     let hir_db: &dyn HirDatabase = db;
     let mut functions = Vec::new();
     let mut kept = Vec::new();
@@ -2767,9 +3008,13 @@ fn build(
     let looked = known.stale_steps();
     let revalidate = start.elapsed();
     // Salsa attaches the database for the duration of the closure; the solver needs it.
-    let mut unit =
-        hir::attach_db(db, || CodegenUnit::compile(hir_db, &resolver, roots, &denied, known))
-            .map_err(anyhow::Error::msg)?;
+    let undoable = hold.is_some();
+    let hold = hold.unwrap_or(&|| false);
+    let unit = hir::attach_db(db, || {
+        CodegenUnit::compile_or_hold(hir_db, &resolver, roots, &denied, known, hold, undoable)
+    })
+    .map_err(anyhow::Error::msg)?;
+    let Some(mut unit) = unit else { return Ok(None) };
     let name = |func| resolver.path(func).unwrap_or_else(|| "<assoc fn>".to_owned());
     let codegen = start.elapsed();
     if std::env::var_os("RA_JIT_STATS").is_some() {
@@ -2780,20 +3025,21 @@ fn build(
         );
     }
     let start = Instant::now();
-    if let Some(object) = &mut unit.object {
+    let mut unwritten = Vec::new();
+    if let Some(mut object) = unit.object.take() {
         // A patch defines again what the object does, and the linker of Mach-O takes two
         // definitions of a name only when one of them gives way.
-        weaken::ours(object);
+        weaken::ours(&mut object);
         // The files a debugger is sent to are there before the object that sends it.
-        for file in &unit.apart {
-            replace(Path::new(&file.name), &file.bytes)?;
+        for file in std::mem::take(&mut unit.apart) {
+            unwritten.push((PathBuf::from(file.name), file.bytes));
         }
-        replace(&args.out, object)?;
+        unwritten.push((args.out.clone(), object));
     }
-    if let (Some(path), Some(patch)) = (&args.patch, &unit.patch) {
-        replace(path, patch)?;
+    if let (Some(path), Some(patch)) = (&args.patch, unit.patch.take()) {
+        unwritten.push((path.clone(), patch));
     }
-    let build = Build {
+    let mut build = Build {
         compiled: unit.compiled.len(),
         skipped: unit
             .skipped
@@ -2806,7 +3052,12 @@ fn build(
         steps: [setup, revalidate - setup, codegen - revalidate],
         looked,
         unset: unset_in(db, &local),
+        unwritten,
     };
+    // A patch is of the last full build and replaces nothing the next edit is built from.
+    if !undoable || known.stats.patched.is_some() {
+        build.keep(known)?;
+    }
     if let Some(path) = &args.report {
         let compiled: Vec<String> = unit.compiled.iter().map(|&(func, _)| name(func)).collect();
         build.write_report(path, &compiled)?;
@@ -2825,7 +3076,7 @@ fn build(
         }
         std::fs::write(dir.join("index.tsv"), index)?;
     }
-    Ok(build)
+    Ok(Some(build))
 }
 
 impl Build {
@@ -2929,20 +3180,78 @@ pub(crate) fn lock<T>(mutex: &std::sync::Mutex<T>) -> std::sync::MutexGuard<'_, 
 pub(crate) static LINKED: std::sync::LazyLock<std::sync::Mutex<FxHashMap<PathBuf, Executable>>> =
     std::sync::LazyLock::new(Default::default);
 
+/// The executables of [`LINKED`] that are copies of what rustc linked, which only a patch of
+/// it is spliced into: a link of one with the daemon's objects leaves the calls rustc made
+/// inside its own objects to the code as it was.
+static RUSTC_LINKED: std::sync::LazyLock<std::sync::Mutex<FxHashSet<PathBuf>>> =
+    std::sync::LazyLock::new(Default::default);
+
+/// The symbols of what rustc linked, by where it is spliced: being read until the first edit.
+static RUSTC_SYMBOLS: std::sync::LazyLock<std::sync::Mutex<FxHashMap<PathBuf, LinkedNames>>> =
+    std::sync::LazyLock::new(Default::default);
+
+enum LinkedNames {
+    Reading(std::thread::JoinHandle<anyhow::Result<symbols::Linked>>),
+    Read(Arc<symbols::Linked>),
+}
+
+/// [`RUSTC_SYMBOLS`] of the executable at `binary`. None when they could not be read, which
+/// leaves a missing one to the splice to find.
+fn rustc_symbols(binary: &Path) -> Option<Arc<symbols::Linked>> {
+    let mut all = lock(&RUSTC_SYMBOLS);
+    let names = match all.remove(binary)? {
+        LinkedNames::Read(names) => names,
+        LinkedNames::Reading(thread) => match thread.join() {
+            Ok(Ok(names)) => Arc::new(names),
+            Ok(Err(error)) => {
+                eprintln!("reading the symbols of what rustc linked: {error:#}");
+                return None;
+            }
+            Err(_) => return None,
+        },
+    };
+    all.insert(binary.to_owned(), LinkedNames::Read(names.clone()));
+    Some(names)
+}
+
+static SPLICING: std::sync::LazyLock<bool> =
+    std::sync::LazyLock::new(|| std::env::var_os("RA_JIT_SPLICE").is_none_or(|it| it != "0"));
+
+/// Why a patch of what rustc linked was not spliced into it: the program is built in full
+/// and linked instead.
+#[derive(Debug)]
+struct RustcLinkedLost(String);
+
+impl std::fmt::Display for RustcLinkedLost {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "the patch of what rustc linked was not spliced into it{}", self.0)
+    }
+}
+
+impl std::error::Error for RustcLinkedLost {}
+
 /// Brings an executable up to date with its objects. An edit that left the whole object alone
 /// is spliced into the executable at `splice`, which `--binary` names, when that is known from
 /// its last link; anything else, and whatever the splice declines, runs the link command, whose
-/// result is then known. `RA_JIT_SPLICE=0` has every edit linked in full.
+/// result is then known. `RA_JIT_SPLICE=0` has every edit linked in full. A patch of what rustc
+/// linked (`over_rustc`) is spliced or fails with [`RustcLinkedLost`].
 fn link(
     cmd: Option<&str>,
     splice: Option<&Path>,
     patch: Option<&Path>,
     object: &Path,
     patched: bool,
+    over_rustc: bool,
     defer: bool,
 ) -> anyhow::Result<()> {
-    static SPLICING: std::sync::LazyLock<bool> =
-        std::sync::LazyLock::new(|| std::env::var_os("RA_JIT_SPLICE").is_none_or(|it| it != "0"));
+    let rustcs = splice.is_some_and(|it| lock(&RUSTC_LINKED).contains(it));
+    if let Some(binary) = splice.filter(|_| rustcs && !over_rustc) {
+        // The objects are the daemon's own: nothing of them is in what rustc linked.
+        lock(&RUSTC_LINKED).remove(binary);
+        lock(&LINKED).remove(binary);
+    }
+    // What waits to be spliced is linked in full when the splice fails.
+    let defer = defer && !over_rustc;
     let splice = splice.filter(|_| *SPLICING);
     // An older edit's splice under way is given up on. It gives the executable back, or, to an
     // edit whose splice waits for the edits to stop anyway, what to publish it with meanwhile.
@@ -2984,6 +3293,9 @@ fn link(
         None => false,
     };
     let Some(cmd) = cmd else { return Ok(()) };
+    if over_rustc && !(rustcs && splice.is_some()) {
+        return Err(RustcLinkedLost("; it is not where the patch is asked for".to_owned()).into());
+    }
     // This splice or link has the edits of the one that waits.
     if let Some(binary) = splice {
         splicer::forget(binary);
@@ -3011,7 +3323,12 @@ fn link(
                 // and is spliced once the edits stop (see `splicer`).
                 Ok(patch) if defer && baseline.uuid().is_some() => {
                     lock(&LINKED).insert(binary.to_owned(), Executable::Read(Box::new(baseline)));
-                    splicer::defer(binary, patch);
+                    if cfg!(target_os = "linux") && live::any_running() {
+                        // Linux keeps the running inode executable. The next start gets a
+                        // fresh link after the process exits.
+                    } else {
+                        splicer::defer(binary, patch);
+                    }
                     eprintln!(
                         "link: {:.1?} (the splice waits for the edits to stop)",
                         start.elapsed()
@@ -3051,6 +3368,12 @@ fn link(
                 }
                 declined = format!("; not spliced: {why:#}");
             }
+        }
+    }
+    if let Some(binary) = splice.filter(|_| rustcs) {
+        lock(&RUSTC_LINKED).remove(binary);
+        if over_rustc {
+            return Err(RustcLinkedLost(declined).into());
         }
     }
     run_link(cmd, start, &declined)?;
@@ -3382,6 +3705,23 @@ fn refusal(
     broken: Option<String>,
     out_of_date: Option<(FunctionId, String)>,
 ) -> Option<String> {
+    if let Some(unparsed) = unparsed(db, sources, watched) {
+        return Some(unparsed);
+    }
+    if broken.is_some() {
+        return broken;
+    }
+    let (func, why) = out_of_date?;
+    let name = hir::Function::from(func).name(db).display(db, syntax::Edition::CURRENT).to_string();
+    // What the frontend turns down is as a rule code that does not compile.
+    if why.starts_with("frontend:") {
+        return Some(format!("`{name}` has an error ra-jit cannot say more of: {why}"));
+    }
+    Some(format!("`{name}` is not compiled by ra-jit: {why}"))
+}
+
+/// The first error of the first of `sources` that does not parse, where it is.
+fn unparsed(db: &RootDatabase, sources: &[vfs::FileId], watched: &Sources) -> Option<String> {
     let Sources { paths } = watched;
     for &file in sources {
         let path = paths.get(&file);
@@ -3404,16 +3744,7 @@ fn refusal(
             return Some(format!("{path}:{}: {error}", line + 1));
         }
     }
-    if broken.is_some() {
-        return broken;
-    }
-    let (func, why) = out_of_date?;
-    let name = hir::Function::from(func).name(db).display(db, syntax::Edition::CURRENT).to_string();
-    // What the frontend turns down is as a rule code that does not compile.
-    if why.starts_with("frontend:") {
-        return Some(format!("`{name}` has an error ra-jit cannot say more of: {why}"));
-    }
-    Some(format!("`{name}` is not compiled by ra-jit: {why}"))
+    None
 }
 
 /// The errors rust-analyzer is as sure of as rustc is: a wrong one fails a build that is
@@ -3528,6 +3859,15 @@ struct WatchedFile {
     mtime: SystemTime,
 }
 
+/// What [`WatchedFile::include_sources`] took in.
+#[derive(Clone, Copy, PartialEq)]
+enum Loaded {
+    Nothing,
+    /// Files that rustc read as they are now: what it linked is of them.
+    AsRustcRead,
+    New,
+}
+
 impl WatchedFile {
     /// Whether the file is never written again: everything is watched but the sysroot, the
     /// registry, the Nix store (crates vendored by Nix, which `nix run` of the demo reads its
@@ -3564,17 +3904,33 @@ impl WatchedFile {
     }
 
     /// Puts the files an `include!` named that were not loaded in their source roots, and
-    /// watches them: whether there were any.
+    /// watches them: whether there were any, and whether each was what rustc read.
     fn include_sources(
         files: &mut Vec<WatchedFile>,
         tree: &mut tree::Tree,
         db: &mut RootDatabase,
-    ) -> bool {
+    ) -> Loaded {
         let added = tree.included(db);
-        for (file, path) in &added {
-            files.extend(WatchedFile::new(Watched::Source(*file), path, &db.on_disk(path)));
+        if added.is_empty() {
+            return Loaded::Nothing;
         }
-        !added.is_empty()
+        // Watched as rustc read it until now (see `start_from_rustc`).
+        let mut was = FxHashMap::default();
+        files.retain(|it| {
+            let watched = matches!(it.file, Watched::Included(_))
+                && added.iter().any(|(_, path)| *path == it.path);
+            if watched {
+                was.insert(it.path.clone(), it.mtime);
+            }
+            !watched
+        });
+        let mut as_rustc_read = true;
+        for (file, path) in &added {
+            let now = WatchedFile::new(Watched::Source(*file), path, &db.on_disk(path));
+            as_rustc_read &= now.as_ref().is_some_and(|it| was.get(path) == Some(&it.mtime));
+            files.extend(now);
+        }
+        if as_rustc_read { Loaded::AsRustcRead } else { Loaded::New }
     }
 
     /// Adds the files the last build included that are not watched yet. One is read again once
@@ -3642,6 +3998,7 @@ fn build_batch(db: &RootDatabase, args: Args) -> anyhow::Result<()> {
             link_cmd: None,
             patch: None,
             splice: None,
+            rustc_binary: None,
             report: Some(report.join(format!("{krate}.tsv"))),
             deny: None,
             isolate: None,
@@ -3655,7 +4012,7 @@ fn build_batch(db: &RootDatabase, args: Args) -> anyhow::Result<()> {
             members: args.members.clone(),
         };
         let built = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            build(db, table, &args, &mut Rejections::default(), &mut Listed::default())
+            build_unheld(db, table, &args, &mut Rejections::default(), &mut Listed::default())
         }));
         let error = match built {
             Ok(Ok(_)) => continue,
@@ -3761,6 +4118,7 @@ impl Target {
             link_cmd,
             splice,
             symbol_files,
+            rustc_binary: None,
             ..daemon.clone()
         })
     }
@@ -4140,7 +4498,14 @@ struct Running {
     /// Whether a change to the source waits for the build: one that patches is short, and
     /// has nothing to patch once it is interrupted.
     kept: bool,
+    /// Whether it is the build in full that nobody asked for, of a base of the daemon's own
+    /// while edits patch what rustc linked: whoever asks for the program interrupts it.
+    own_base: bool,
 }
+
+/// How long the daemon waits with nothing asked of it before it builds a base of its own
+/// for edits that patch what rustc linked.
+const OWN_BASE_AFTER: Duration = Duration::from_secs(1);
 
 /// The builds under way and the requests that wait for them. A build reads the database on
 /// threads of its own, so requests for other programs are not kept waiting by it.
@@ -4214,13 +4579,14 @@ impl Builds {
     }
 
     /// Queues a request, or takes back the program of a build that is over and answers its
-    /// clients. Those of a build that was interrupted ask again, ahead of the others.
-    fn take(&mut self, event: Event, programs: &mut [Program]) -> anyhow::Result<()> {
+    /// clients, which is when it returns true. Those of a build that was interrupted ask again,
+    /// ahead of the others.
+    fn take(&mut self, event: Event, programs: &mut [Program]) -> anyhow::Result<bool> {
         self.stuck = false;
         let (at, program, answer) = match event {
             Event::Asked(asked) => {
                 self.waiting.push_back(asked);
-                return Ok(());
+                return Ok(false);
             }
             Event::Edited(edited) => {
                 if let Some(older) = self.edits.iter_mut().find(|it| it.path == edited.path) {
@@ -4229,37 +4595,57 @@ impl Builds {
                 } else {
                     self.edits.push(edited);
                 }
-                return Ok(());
+                return Ok(false);
             }
             Event::Built(at, program, answer) => (at, program, answer),
             Event::Unlinked(at) => {
                 programs[at].unbuilt.stale = true;
                 programs[at].wrote = None;
-                return Ok(());
+                programs[at].known.forget_rustc();
+                return Ok(false);
             }
             Event::Tier(ask) => {
                 self.tier_asks.push(ask);
-                return Ok(());
+                return Ok(false);
             }
             Event::Tiered(at, tiered) => {
                 self.tiered.push((at, tiered));
                 self.install_tiered(programs);
-                return Ok(());
+                return Ok(false);
             }
         };
-        let Some(Running { clients, .. }) = self.running.remove(&at) else { return Ok(()) };
+        let Some(Running { clients, own_base, .. }) = self.running.remove(&at) else {
+            return Ok(false);
+        };
         programs[at] = *program;
         let program = &mut programs[at];
         let Some(answer) = answer else {
             eprintln!("interrupted: {}", program.args.krate);
             let patching = program.known.patching;
+            // The executable is still what rustc linked, which edits go on patching.
+            let binary = program.args.splice.as_deref();
+            let rustcs = program
+                .known
+                .take_rustc()
+                .filter(|_| binary.is_some_and(|it| lock(&RUSTC_LINKED).contains(it)));
+            let patches_rustcs = rustcs.is_some();
             program.known = Rejections::default();
             program.known.patching = patching;
-            program.unbuilt.stale = true;
-            (program.wrote, program.whole) = (None, None);
+            program.known.put_rustc(rustcs);
+            program.whole = None;
+            if !patches_rustcs {
+                program.unbuilt.stale = true;
+                program.wrote = None;
+            }
+            if own_base {
+                // Nobody asked for it, and it is built again once nobody asks for anything. An
+                // edit that came as it started is still to be built.
+                program.unbuilt.stale = !patches_rustcs || !program.unbuilt.edited.is_empty();
+                return Ok(false);
+            }
             program.interrupted += 1;
             clients.into_iter().rev().for_each(|it| self.waiting.push_front(it));
-            return Ok(());
+            return Ok(false);
         };
         (program.interrupted, program.moved) = (0, false);
         let answer = answer?;
@@ -4273,7 +4659,7 @@ impl Builds {
                 Err(why) => writeln!(&client, "error: {}", why.replace('\n', " ")),
             };
         }
-        Ok(())
+        Ok(true)
     }
 
     /// Leaves no build under way, for the database to be written to: a write stops every
@@ -4427,11 +4813,40 @@ fn requested(stream: UnixStream) -> Option<Event> {
 /// Ends the process when its standard input ends: the daemon that started this worker holds
 /// the other end for as long as it lives, however it dies.
 fn end_with_input() {
-    let mut held = [0u8; 64];
-    while std::io::Read::read(&mut std::io::stdin(), &mut held).is_ok_and(|read| read > 0) {}
+    while input_line().is_some() {}
     // The executables on disk get the last edits before the worker goes.
     splicer::flush();
     std::process::exit(0);
+}
+
+/// The lines of the standard input, read on a thread of their own from the first use on. The
+/// daemon writes what cargo says to a spare worker as cargo says it, and waits while the
+/// pipe is full: cargo then waits for the daemon.
+static INPUT: std::sync::LazyLock<Mutex<std::sync::mpsc::Receiver<String>>> =
+    std::sync::LazyLock::new(|| {
+        let (line, lines) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let mut input = std::io::stdin().lock();
+            loop {
+                let mut text = Vec::new();
+                match std::io::BufRead::read_until(&mut input, b'\n', &mut text) {
+                    Ok(len) if len > 0 => {
+                        let text = String::from_utf8(text)
+                            .unwrap_or_else(|it| String::from_utf8_lossy(it.as_bytes()).into());
+                        if line.send(text).is_err() {
+                            break;
+                        }
+                    }
+                    _ => break,
+                }
+            }
+        });
+        Mutex::new(lines)
+    });
+
+/// The next line of the standard input, `None` once it has ended.
+fn input_line() -> Option<String> {
+    INPUT.lock().unwrap_or_else(|e| e.into_inner()).recv().ok()
 }
 
 const HELP: &str = "\
@@ -4544,12 +4959,15 @@ fn main() -> anyhow::Result<()> {
     run(Args::parse(std::env::args().skip(1))?, None)
 }
 
-/// Compiles the crates `args` names on every core until `done`: the symbols a build waits
-/// for are not needed for it.
+/// Compiles the crates `args` names on `threads` threads until `done`: the symbols a build
+/// waits for are not needed for it. With `follow` the generic instances their functions
+/// reach are compiled too.
 fn lower_until(
     db: &RootDatabase,
     args: &Args,
     listed: &Listed,
+    threads: usize,
+    follow: bool,
     done: &(dyn Fn() -> bool + Sync),
 ) -> anyhow::Result<()> {
     if done() {
@@ -4573,8 +4991,10 @@ fn lower_until(
         }
     }
     let count = functions.len();
-    let unnamed = hir_ty_codegen::Unnamed::new(functions);
-    let threads = std::thread::available_parallelism().map_or(1, |it| it.get());
+    let unnamed = match follow {
+        true => hir_ty_codegen::Unnamed::new(functions),
+        false => hir_ty_codegen::Unnamed::alone(functions),
+    };
     std::thread::scope(|scope| {
         for _ in 0..threads {
             let (db, unnamed) = (db.clone(), &unnamed);
@@ -4607,6 +5027,16 @@ fn lower_until(
     let compiled = unnamed.compiled();
     eprintln!("compiled ahead: {compiled} from {count} functions in {:.1?}", start.elapsed());
     Ok(())
+}
+
+fn cores() -> usize {
+    std::thread::available_parallelism().map_or(1, |it| it.get())
+}
+
+/// The threads that work beside a build of cargo's: a quarter of the cores, the rest being
+/// cargo's.
+fn beside_cargo() -> usize {
+    (cores() / 4).max(1)
 }
 
 /// How cargo is asked about the workspace of `args`.
@@ -4699,7 +5129,8 @@ impl Held {
         checkouts.load_config = load_config();
         let all: Vec<ide_db::base_db::Crate> =
             Crate::all(&db).into_iter().map(Into::into).collect();
-        resolve_all(&db, &all);
+        // The spare starts with the daemon, which the first build starts as cargo does.
+        resolve_all(&db, &all, beside_cargo());
         eprintln!("spare: {} crates in {:.1?}", all.len(), start.elapsed());
         Ok(Held { db, vfs, checkouts })
     }
@@ -4800,16 +5231,17 @@ impl Said {
                 read.more.notify_all();
             };
             loop {
-                // Not `stdin().lines()`: that holds the standard input's lock for the whole loop,
-                // and `end_with_input` below waits for it.
-                let mut text = String::new();
-                let got = std::io::stdin().read_line(&mut text);
-                let line = got
-                    .ok()
-                    .filter(|&len| len > 0)
-                    .and_then(|_| serde_json::from_str::<Line>(&text).ok());
+                let line = input_line().and_then(|text| serde_json::from_str::<Line>(&text).ok());
                 match line {
-                    Some(Line::Said { said: line }) => tell(&|it| it.said.push(line.clone())),
+                    // A library is read for its symbols, and is nothing the workspace is
+                    // loaded from.
+                    Some(Line::Said { said: line }) => match libraries_in(&line) {
+                        Some(files) => files
+                            .into_iter()
+                            .map(|it| cargo::Record::kept_copy(&it).unwrap_or(it))
+                            .for_each(symbols::read_ahead),
+                        None => tell(&|it| it.said.push(line.clone())),
+                    },
                     Some(Line::Whole(told)) => {
                         tell(&|it| it.ended = true);
                         _ = built.send(Args::parse(told.args.into_iter()));
@@ -4872,6 +5304,27 @@ impl Awaited {
             _ => None,
         }
     }
+}
+
+/// The libraries cargo says it built in `line`, when it is of a crate that is not a proc
+/// macro.
+fn libraries_in(line: &str) -> Option<Vec<PathBuf>> {
+    #[derive(serde::Deserialize)]
+    struct Message {
+        reason: String,
+        target: Target,
+        filenames: Vec<PathBuf>,
+    }
+    #[derive(serde::Deserialize)]
+    struct Target {
+        kind: Vec<String>,
+    }
+    let message: Message = serde_json::from_str(line).ok()?;
+    let proc_macro = message.target.kind.iter().any(|it| it == "proc-macro");
+    (message.reason == "compiler-artifact" && !proc_macro).then(|| {
+        let rlib = |it: &PathBuf| it.extension().is_some_and(|it| it == "rlib");
+        message.filenames.into_iter().filter(rlib).collect()
+    })
 }
 
 /// A checkout that is loaded while cargo builds it. What its build scripts say and where
@@ -4972,9 +5425,11 @@ impl Beside {
     }
 }
 
-/// Compiles the crates of the checkout loaded beside cargo's build that cargo has said
-/// everything of, and takes in what cargo says next, until it has said all of it. The crates
-/// of the packages cargo builds are what it comes back with, by the file each starts from.
+/// Compiles the functions of the crates of the checkout loaded beside cargo's build that
+/// cargo has said everything of, and takes in what cargo says next, until its build is over.
+/// The crates of the packages cargo builds are what it comes back with, by the file each
+/// starts from. The generic instances those functions reach are left to the edits: on a
+/// quarter of the cores they made cargo's build of nushell a twentieth slower.
 fn follow_cargo(
     db: &mut RootDatabase,
     vfs: &mut Vfs,
@@ -4984,13 +5439,14 @@ fn follow_cargo(
 ) -> anyhow::Result<Option<FxHashSet<PathBuf>>> {
     let Some(mut beside) = checkouts.beside.take() else { return Ok(None) };
     let mut ready = FxHashSet::default();
+    let mut all_applied = false;
     loop {
         let (lines, ended) = beside.said.so_far();
         let workspace = &checkouts.loaded.workspaces()[beside.at];
         let ProjectWorkspaceKind::Cargo { cargo, .. } = &workspace.kind else { return Ok(None) };
         let (now, all) = beside.ready(cargo, &lines);
         let all = all || ended;
-        if lines.len() > beside.applied && (all || now != ready) {
+        if lines.len() > beside.applied && (now != ready || all && !all_applied) {
             let scripts =
                 WorkspaceBuildScripts::of_messages(cargo, lines.iter().map(String::as_str));
             let mut workspace = workspace.clone();
@@ -4999,17 +5455,20 @@ fn follow_cargo(
             let Checkouts { loaded, cargo_config, load_config, .. } = checkouts;
             loaded.add(Vec::new(), &cargo_config.extra_env, load_config, vfs, db)?;
             beside.applied = lines.len();
+            all_applied = all;
         }
-        if all {
-            // With all of it said, every crate of the build is ready.
+        if ended {
             let workspace = &checkouts.loaded.workspaces()[beside.at];
             let ProjectWorkspaceKind::Cargo { cargo, .. } = &workspace.kind else {
                 return Ok(None);
             };
             return Ok(Some(beside.built_roots(cargo)));
         }
+        // With all of it said, cargo still compiles and links the last crates: the cores
+        // are cargo's until its build is over.
         ready = now;
-        // Whether cargo has said what makes another crate ready, asked once a line.
+        // Whether cargo has said what makes another crate ready, or that its build is over,
+        // asked once a line.
         let seen = Mutex::new((lines.len(), false));
         let more = || {
             let mut seen = seen.lock().unwrap_or_else(|e| e.into_inner());
@@ -5036,9 +5495,8 @@ fn follow_cargo(
                 debug,
                 ..args.clone()
             };
-            // Every core resolves the names; one would, were it left to the compiling.
-            resolve_crates(db, &of_ready)?;
-            lower_until(db, &of_ready, listed, &more)?;
+            resolve_crates(db, &of_ready, beside_cargo())?;
+            lower_until(db, &of_ready, listed, beside_cargo(), false, &more)?;
         }
         while !more() {
             let seen = seen.lock().unwrap_or_else(|e| e.into_inner()).0;
@@ -5050,11 +5508,10 @@ fn follow_cargo(
 /// Loads the library of the toolchain, waits to be told a build, and runs as the worker of
 /// it. The process ends when its input does without a build.
 fn spare(dir: &Path) -> anyhow::Result<()> {
+    // A build may start while the library loads, and its lines are read as they come.
+    std::sync::LazyLock::force(&INPUT);
     let held = Held::load(dir).inspect_err(|why| eprintln!("spare: nothing held: {why:#}")).ok();
-    let mut line = String::new();
-    if std::io::stdin().read_line(&mut line)? == 0 {
-        return Ok(());
-    }
+    let Some(line) = input_line() else { return Ok(()) };
     let told: Told = serde_json::from_str(&line).context("what the spare worker is told")?;
     for (name, value) in &told.env {
         // SAFETY: the threads that loaded the library have ended, and the ones that remain
@@ -5136,7 +5593,7 @@ fn run_holding(
     let start = Instant::now();
     let cargo_config = cargo_config(&args);
     let selection = args.selection.clone();
-    hir_ty_codegen::identify_ahead();
+    ra_jit_store::identify_ahead();
     let projects: Vec<&Path> =
         std::iter::once(&args.project).chain(&args.also).map(PathBuf::as_path).collect();
     let beside = |said: &Arc<Said>| Beside {
@@ -5158,15 +5615,16 @@ fn run_holding(
     };
     let listed = Arc::new(Listed::default());
     ide_db::base_db::set_process_env(&mut db, process::own());
-    // What is compiled while cargo builds is stored too, so the store is told the toolchain
-    // first. A build told ahead of cargo's links the library of the toolchain that was loaded, or
-    // is not the daemon's.
+    // What is compiled ahead is stored too, so the store is told the toolchain first. A build
+    // told ahead of cargo's links the library of the toolchain that was loaded, or is not the
+    // daemon's.
     let library = ahead.then(|| built_library(&vfs, emits.triple()));
     match toolchain_identity(&vfs, library.as_ref().unwrap_or(&args.symbol_files)) {
-        Some(toolchain) => hir_ty_codegen::compiles_against(&toolchain),
+        Some(toolchain) => ra_jit_store::compiles_against(&toolchain),
         None => eprintln!("store: the toolchain of the library cannot be told from another"),
     }
     let built = follow_cargo(&mut db, &mut vfs, &mut checkouts, &args, &listed)?;
+    let beside = built.is_some();
     let Parts { root, base, members, debug } = checkouts.parts(&args.project)?;
     (args.checkout, args.base, args.members, args.debug) = (root, base, members, debug);
     // The names are resolved before cargo says which program it built: those of the crates
@@ -5200,11 +5658,11 @@ fn run_holding(
     if checkouts.lto(&args.project)? {
         linked_from_libraries(&db, &args)?;
     }
-    let mut resolved = resolve_crates(&db, &args)?;
+    let mut resolved = resolve_crates(&db, &args, cores())?;
     // Resolving the names finds the files `include!` names that were not loaded. With those
     // in, there may be more.
-    while WatchedFile::include_sources(&mut files, &mut tree, &mut db) {
-        resolved = resolve_crates(&db, &args)?;
+    while WatchedFile::include_sources(&mut files, &mut tree, &mut db) != Loaded::Nothing {
+        resolved = resolve_crates(&db, &args, cores())?;
     }
     eprintln!("resolve: {resolved} crates in {:.1?}", start.elapsed());
     memory::checkpoint("resolve");
@@ -5213,7 +5671,7 @@ fn run_holding(
         let start = Instant::now();
         let Parts { root: checkout, base, members, debug } = checkouts.parts(also)?;
         let of_it = Args { checkout, base, members, debug, ..args.clone() };
-        let resolved = resolve_crates(&db, &of_it)?;
+        let resolved = resolve_crates(&db, &of_it, cores())?;
         eprintln!("resolve {}: {resolved} crates in {:.1?}", also.display(), start.elapsed());
     }
     if !args.also.is_empty() {
@@ -5234,7 +5692,11 @@ fn run_holding(
     let mut known = Rejections::default();
     known.patching = args.patch.is_some();
     let mut outlines = outline::Outlines::default();
-    lower_until(&db, &args, &listed, &|| table.is_finished())?;
+    // Beside cargo the symbols were read as cargo wrote them, and are there a moment after
+    // the names are resolved: a compile started now would hold up readiness past that.
+    if !beside {
+        lower_until(&db, &args, &listed, cores(), true, &|| table.is_finished())?;
+    }
     let (table, whole) =
         table.join().map_err(|_| anyhow::anyhow!("loading the symbols panicked"))??;
     if let Some(whole) = whole {
@@ -5258,12 +5720,12 @@ fn run_holding(
     if let Some(asked) = doc {
         let krate = *crates_named(&db, &args.krate, &args)?.first().context("no such crate")?;
         known.used_by_rustc = true;
-        let built = build(&db, &table, &args, &mut known, &listed)?;
+        let built = build_unheld(&db, &table, &args, &mut known, &listed)?;
         eprint!("doctests: ");
         report(&built);
         doctest::document(&mut db, krate);
         let code = doctest::run(&db, asked, krate, &args.out, emits.triple())?;
-        hir_ty_codegen::settled();
+        ra_jit_store::settled();
         std::process::exit(code);
     }
     if let Some(stale) = stale_copies(&db, &table, &args) {
@@ -5289,32 +5751,58 @@ fn run_holding(
             bail!(why);
         }
     }
-    let mut cold = build(&db, &table, &args, &mut known, &listed)?;
-    // An `include!` in a body is first seen when the body is compiled.
-    if WatchedFile::include_sources(&mut files, &mut tree, &mut db) {
-        known.touch(&db, None);
-        cold = build(&db, &table, &args, &mut known, &listed)?;
-    }
-    if let Some(unset) = &cold.unset {
-        bail!("{unset}");
-    }
-    eprint!("cold: ");
-    report(&cold);
-    memory::report(&mut db, "build")?;
-    report_stats(&known.stats);
-    link(
-        args.link_cmd.as_deref(),
-        args.splice.as_deref(),
-        args.patch.as_deref(),
-        &args.out,
-        false,
-        false,
-    )?;
+    let cold = match rustcs_to_patch(&args, written.is_empty()) {
+        Some(rustcs) => {
+            let start = Instant::now();
+            start_from_rustc(&args, &rustcs, &table, &mut files)?;
+            known.start_from_rustc(args.debug.level != plan::Level::Nothing);
+            // An edit is to bodies alone by the functions listed of its crate, which a build
+            // lists of each crate it compiles: none is compiled here.
+            for krate in args.crates() {
+                for krate in crates_to_build(&db, &table, krate, &args)? {
+                    let root = crate_root_file(&db, krate);
+                    if root.is_some_and(|it| args.owns(&db, krate.root_file(&db), &it)) {
+                        listed.of(&db, krate);
+                    }
+                }
+            }
+            eprintln!(
+                "cold: none, the first edits patch what rustc linked ({:.1?})",
+                start.elapsed()
+            );
+            None
+        }
+        None => {
+            let mut cold = build_unheld(&db, &table, &args, &mut known, &listed)?;
+            // An `include!` in a body is first seen when the body is compiled.
+            if WatchedFile::include_sources(&mut files, &mut tree, &mut db) != Loaded::Nothing {
+                known.touch(&db, None);
+                cold = build_unheld(&db, &table, &args, &mut known, &listed)?;
+            }
+            if let Some(unset) = &cold.unset {
+                bail!("{unset}");
+            }
+            eprint!("cold: ");
+            report(&cold);
+            memory::report(&mut db, "build")?;
+            report_stats(&known.stats);
+            link(
+                args.link_cmd.as_deref(),
+                args.splice.as_deref(),
+                args.patch.as_deref(),
+                &args.out,
+                false,
+                false,
+                false,
+            )?;
+            Some(cold)
+        }
+    };
     // What this build added goes to the other machines while the daemon waits for edits; a
     // build that is not a daemon's has nothing to wait for but this.
     match shared {
         Some(shared) if args.socket.is_none() && !args.watch => {
-            hir_ty_codegen::settled();
+            ra_jit_store::settled();
             shared.push()
         }
         Some(shared) => shared.keep(),
@@ -5344,7 +5832,7 @@ fn run_holding(
         },
         None if args.watch => None,
         None => {
-            hir_ty_codegen::settled();
+            ra_jit_store::settled();
             // The process is ending: what these hold is not freed one allocation at a time.
             std::mem::forget((db, table, known, cold, as_compiled));
             return Ok(());
@@ -5391,7 +5879,8 @@ fn run_holding(
         );
     }
     // The first is the program asked for when a request names none.
-    let (wrote, whole) = (Some(args.out.clone()), Some(args.out.clone()));
+    // Patches of what rustc linked have no object with all of the program.
+    let (wrote, whole) = (Some(args.out.clone()), cold.as_ref().map(|_| args.out.clone()));
     let mut tests_now = None;
     let tests = Some(hir::attach_db(&db, || Tests::of(&db, &listed, &args, &mut tests_now)));
     let mut programs = vec![Program {
@@ -5448,10 +5937,13 @@ fn run_holding(
         if WatchedFile::unwatched(&files, &db) || tree.includes_more(&db) {
             builds.settle(&mut db, &mut programs)?;
         }
-        if WatchedFile::watch_included(&mut files, &mut db)
-            | WatchedFile::include_sources(&mut files, &mut tree, &mut db)
-        {
-            programs.iter_mut().for_each(|it| it.known.touch(&db, None));
+        let included = WatchedFile::watch_included(&mut files, &mut db);
+        match WatchedFile::include_sources(&mut files, &mut tree, &mut db) {
+            _ if included => programs.iter_mut().for_each(|it| it.known.touch(&db, None)),
+            Loaded::Nothing => {}
+            // A build of the daemon's own compiled without them; what rustc linked is of them.
+            Loaded::AsRustcRead => programs.iter_mut().for_each(|it| it.known.touch_own(&db)),
+            Loaded::New => programs.iter_mut().for_each(|it| it.known.touch(&db, None)),
         }
         // The program each client asks for.
         let mut clients: Vec<(usize, Asked)> = Vec::new();
@@ -5468,15 +5960,45 @@ fn run_holding(
                     && builds.edits.is_empty()
                     && builds.tier_asks.is_empty()
                     && builds.unasked.is_empty();
-                if builds.stuck || idle {
-                    let event = builds.events.recv()?;
-                    builds.take(event, &mut programs)?;
+                // A base of its own is built in the background, which edits interrupt.
+                let wants_base = (overlay != Overlay::Always && viewed.is_empty())
+                    .then(|| {
+                        (0..programs.len()).find(|&at| {
+                            let program = &programs[at];
+                            !builds.running.contains_key(&at)
+                                && !program.unbuilt.stale
+                                && program.known.wants_base()
+                        })
+                    })
+                    .flatten();
+                let (mut own_base, mut interrupt) = (None, false);
+                match wants_base {
+                    Some(at) if idle => match builds.events.recv_timeout(OWN_BASE_AFTER) {
+                        Ok(event) => {
+                            if builds.take(event, &mut programs)? {
+                                memory::served(&mut db)?;
+                            }
+                        }
+                        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => own_base = Some(at),
+                        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                            bail!("nothing takes requests any more")
+                        }
+                    },
+                    _ if builds.stuck || idle => {
+                        let event = builds.events.recv()?;
+                        if builds.take(event, &mut programs)? {
+                            memory::served(&mut db)?;
+                        }
+                    }
+                    _ => {}
                 }
                 loop {
                     // Asked again after each: a checkout that joins takes long enough for the
                     // requests sent with its own to arrive.
                     while let Ok(event) = builds.events.try_recv() {
-                        builds.take(event, &mut programs)?;
+                        if builds.take(event, &mut programs)? {
+                            memory::served(&mut db)?;
+                        }
                     }
                     let Some((request, target, stream)) = builds.waiting.pop_front() else {
                         break;
@@ -5645,6 +6167,7 @@ fn run_holding(
                         if builds.running.contains_key(&at)
                             || outputs.get(&at).is_some_and(|it| *it != wanted)
                         {
+                            interrupt |= builds.running.get(&at).is_some_and(|it| it.own_base);
                             later.push((request, asked, stream));
                             continue;
                         }
@@ -5810,8 +6333,11 @@ fn run_holding(
                         let _ = writeln!(&edited.client, "error: {shown} is read from elsewhere");
                         continue;
                     }
+                    // One being built stands in as unbuilt meanwhile: the edit waits for it.
                     let owners: Vec<usize> = (0..programs.len())
-                        .filter(|&at| programs[at].wrote.is_some())
+                        .filter(|&at| {
+                            programs[at].wrote.is_some() || builds.running.contains_key(&at)
+                        })
                         .filter(|&at| programs[at].args.owns(&db, id, &path))
                         .collect();
                     if owners.is_empty() {
@@ -5826,6 +6352,9 @@ fn run_holding(
                                 .is_some_and(|it| *it != Outputs::of(&programs[*at].args))
                     });
                     if busy {
+                        interrupt |= owners
+                            .iter()
+                            .any(|at| builds.running.get(at).is_some_and(|it| it.own_base));
                         builds.edits.push(edited);
                         continue;
                     }
@@ -5851,8 +6380,20 @@ fn run_holding(
                     outputs.insert(owners[0], Outputs::of(&programs[owners[0]].args));
                     clients.push((owners[0], (Request::Edit, target(owners[0]), edited.client)));
                 }
-                builds.stuck = clients.is_empty();
-                if builds.stuck {
+                if interrupt {
+                    builds.settle(&mut db, &mut programs)?;
+                }
+                if let Some(at) = own_base.filter(|_| clients.is_empty())
+                    && let Some(client) = Client::nobody()
+                {
+                    programs[at].build_own_base();
+                    let target = (at != 0).then(|| Target::of(&programs[at].args));
+                    outputs.insert(at, Outputs::of(&programs[at].args));
+                    clients.push((at, (Request::Sync, target, client)));
+                }
+                // What waited for the build that was interrupted is asked again at once.
+                builds.stuck = clients.is_empty() && !interrupt;
+                if clients.is_empty() {
                     continue;
                 }
                 // A package that was the same in two checkouts may have been edited in one.
@@ -6019,7 +6560,9 @@ fn run_holding(
             Watched::Source(id) => Some(id),
             Watched::Included(_) => None,
         });
-        outlines.before_edit(&db, &listed, &editing.collect::<Vec<_>>());
+        let editing: Vec<_> = editing.collect();
+        home_in_rustcs(&db, &listed, &mut programs, &editing);
+        outlines.before_edit(&db, &listed, &editing);
         for &index in &gone {
             if let Watched::Source(id) = files[index].file {
                 change.change_file(id, None);
@@ -6084,7 +6627,15 @@ fn run_holding(
         let before_outlines = start.elapsed();
         let sources = outlines.after_edit(&db, &listed, sources);
         let outlined = start.elapsed();
-        for (file, bodies_only) in sources {
+        for outline::Changed { file, bodies_only, copied, generics } in sources {
+            if copied || !generics.is_empty() {
+                let why = "an edit of a generic, inline or default trait function, which rustc copies into its callers";
+                let unknown = |it: &Program| copied || !it.known.copies_homed(file, &generics);
+                programs
+                    .iter_mut()
+                    .filter(|it| unknown(it))
+                    .for_each(|it| it.known.forget_rustc_for(why));
+            }
             if bodies_only {
                 if std::env::var_os("RA_JIT_STATS").is_some() {
                     eprintln!("bodies only: {file:?}");
@@ -6128,9 +6679,10 @@ fn run_holding(
                 }
                 // The program is linked unless every client of it loads the patch.
                 let link = clients.iter().any(|it| it.0 != Request::Patch);
-                let defer = clients.iter().all(|it| it.0 == Request::Edit);
+                let defer = clients.iter().all(|it| it.0 == Request::Edit) || live::any_running();
                 let patches = program.known.patches() && !program.moved;
-                let kept = patches || program.interrupted >= INTERRUPTIONS;
+                let own_base = program.known.builds_base();
+                let kept = !own_base && (patches || program.interrupted >= INTERRUPTIONS);
                 // What stands in for the program while it is built says what program it is.
                 let away = Program {
                     args: program.args.clone(),
@@ -6145,7 +6697,7 @@ fn run_holding(
                     tests_now: None,
                 };
                 let mut program = Box::new(std::mem::replace(program, away));
-                builds.running.insert(at, Running { clients, kept });
+                builds.running.insert(at, Running { clients, kept, own_base });
                 let (db, listed, paths, sender) =
                     (db.clone(), listed.clone(), paths.clone(), sender.clone());
                 let wanted = outputs.remove(&at);
@@ -6179,8 +6731,9 @@ fn run_holding(
                             || clients.iter().any(|it| it.0 == at && it.1.0 != Request::Patch);
                         let link = link && !detached;
                         let mut theirs = clients.iter().filter(|it| it.0 == at).peekable();
-                        let defer =
-                            theirs.peek().is_some() && theirs.all(|it| it.1.0 == Request::Edit);
+                        let defer = (theirs.peek().is_some()
+                            && theirs.all(|it| it.1.0 == Request::Edit))
+                            || live::any_running();
                         let (db, listed, paths, edit) = (db.clone(), &*listed, &*paths, &edit);
                         let wanted = outputs.get(&at);
                         let build = scope.spawn(move || {
@@ -6266,6 +6819,7 @@ fn run_holding(
                 outputs.remove(&at).unwrap_or_else(|| Outputs::of(&programs[at].args));
             // The answer names a patch when the whole object is as it was.
             let patched = built.starts_with("patch=");
+            let over_rustc = programs[at].known.stats.over_rustc;
             let spliced = patch.clone();
             let link_cmd = link_cmd.filter(|_| clients.iter().any(|it| it.0 != Request::Patch));
             let defer = clients.iter().all(|it| it.0 == Request::Edit);
@@ -6282,6 +6836,7 @@ fn run_holding(
                     spliced.as_deref(),
                     &object,
                     patched,
+                    over_rustc,
                     defer,
                 )
                 .err();
@@ -6304,6 +6859,7 @@ fn run_holding(
             });
             links.insert(out, linked);
         }
+        memory::served(&mut db)?;
     }
 }
 
@@ -6424,6 +6980,17 @@ impl Program {
         );
         self.unbuilt.stale = true;
         true
+    }
+
+    /// Has the next build be one in full of the program, for edits to patch from then on
+    /// rather than what rustc linked.
+    fn build_own_base(&mut self) {
+        eprintln!(
+            "compiling the program for edits to patch, while nobody asks: {}",
+            self.args.krate
+        );
+        self.known.build_base();
+        self.unbuilt.stale = true;
     }
 
     /// Takes a build that panicked as the build's error, not the worker's: the clients are
@@ -6634,7 +7201,10 @@ impl Program {
         edited.retain(|file| paths.paths.get(file).is_none_or(|it| args.owns(db, *file, it)));
         // Neither is what no crate that is built reads: an example, or a test.
         edited.retain(|&file| listed.sees(db, file));
-        // The check of the edited files does not wait for the build: it reads other things.
+        // The check of the edited files does not wait for the build: it reads other things. A
+        // build that can't be a patch waits for it, and a text that does not compile is not
+        // built whole: what it would make of the program is not what runs, and the next edit
+        // that compiles is to be a patch of what does.
         let (warm, broken) = std::thread::scope(|scope| {
             let check = {
                 let (db, edited) = (db.clone(), &edited);
@@ -6647,10 +7217,29 @@ impl Program {
                     broken
                 })
             };
-            let warm = build(db, table, args, known, listed);
-            (warm, check.join().ok().flatten())
+            let (check, checked) = (std::sync::Mutex::new(Some(check)), std::sync::OnceLock::new());
+            let broken = || {
+                let joined = || lock(&check).take().and_then(|it| it.join().ok()).flatten();
+                checked.get_or_init(joined).clone()
+            };
+            let hold = || unparsed(db, &edited, paths).is_some() || broken().is_some();
+            let warm = build(db, table, args, known, listed, Some(&hold));
+            (warm, broken())
         });
-        let mut warm = warm?;
+        let hold = || unparsed(db, &edited, paths).is_some() || broken.is_some();
+        let held = |known: &Rejections| {
+            let why = refusal(db, &edited, paths, broken.clone(), None);
+            let why = why.unwrap_or_else(|| "the source does not compile".to_owned());
+            eprintln!(
+                "edit (apply {apply:.1?}): not built: no patch, and the source does not compile; \
+                 the next edit is a patch of the last build"
+            );
+            report_stats(&known.stats);
+            eprintln!("refused: {why}");
+            eprintln!("edit-to-binary: {:.1?}", start.elapsed());
+            why
+        };
+        let Some(mut warm) = warm? else { return Ok(Err(held(known))) };
         // Code compiled at a higher level can call what rustc built into its callers and left
         // no symbol of. The executable can't take a patch with it, and a full link would start
         // the program over, so the code goes instead; of several functions installed
@@ -6671,11 +7260,12 @@ impl Program {
             if !again {
                 break;
             }
-            warm = build(db, table, args, known, listed)?;
+            match build(db, table, args, known, listed, Some(&hold))? {
+                Some(again) => warm = again,
+                None => return Ok(Err(held(known))),
+            }
         }
-        if known.stats.patched.is_none() {
-            *whole = Some(args.out.clone());
-        }
+        let full = known.stats.patched.is_none();
         *wrote = Some(args.out.clone());
         let built = start.elapsed();
         eprint!("edit (apply {apply:.1?}): ");
@@ -6708,11 +7298,30 @@ impl Program {
             None => {}
         }
         let checked = start.elapsed();
-        if failed.is_none() || known.stats.patched.is_none() {
-            let patched = known.stats.patched.is_some();
+        // A full build that is refused is undone, when there is a build before it: that one
+        // stays the program, and what the next edit is a patch of.
+        let undone = failed.is_some() && known.undo_built();
+        if undone {
+            eprintln!(
+                "undone: the build is refused, and the next edit is a patch of the one before"
+            );
+        } else {
+            warm.keep(known)?;
+            if full {
+                *whole = Some(args.out.clone());
+            }
+        }
+        if failed.is_none() || full && !undone {
+            let patched = !full;
             let (splice, patch) = (args.splice.as_deref(), args.patch.as_deref());
             let cmd = args.link_cmd.as_deref().filter(|_| failed.is_none() && link_it);
-            let unlinked = link(cmd, splice, patch, &args.out, patched, defer).err();
+            let over_rustc = known.stats.over_rustc;
+            let unlinked = link(cmd, splice, patch, &args.out, patched, over_rustc, defer).err();
+            if let Some(lost) = unlinked.as_ref().filter(|it| it.is::<RustcLinkedLost>()) {
+                eprintln!("{lost}: built in full");
+                known.forget_rustc();
+                return self.sync(db, listed, paths, edit, wanted, link_it, defer);
+            }
             failed = failed.or(unlinked.map(|it| it.to_string()));
         }
         if let Some(why) = &failed {

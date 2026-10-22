@@ -13,7 +13,7 @@ use std::{
 use base_db::{Crate, FileId};
 use cranelift_module::{Linkage, Module};
 use cranelift_object::{ObjectBuilder, ObjectModule};
-use hir_def::{FunctionId, HasModule, StaticId};
+use hir_def::{FunctionId, HasModule, Lookup, StaticId, signatures::FunctionSignature};
 use rustc_hash::{FxBuildHasher, FxHashMap, FxHashSet};
 
 type FxIndexMap<K, V> = indexmap::IndexMap<K, V, FxBuildHasher>;
@@ -110,6 +110,30 @@ fn probe<T>(query: impl FnOnce() -> T) -> Option<T> {
             Some(_) => std::panic::resume_unwind(stopped),
         },
     }
+}
+
+/// Whether `root` has a type or constant to be given, of its own or of its `impl` or trait
+/// (`Self` of a trait's method).
+pub(super) fn copied_by_rustc(db: &dyn HirDatabase, root: FunctionId) -> bool {
+    let generics = hir_ty::generics::generics(db, root.into());
+    generics.iter(false).any(|(id, _)| !matches!(id, hir_def::GenericParamId::LifetimeParamId(_)))
+}
+
+/// What a closure of the body of `root`, which is not generic, is compiled in.
+fn closure_env(db: &dyn HirDatabase, root: FunctionId) -> StoredParamEnvAndCrate {
+    let param_env = hir_ty::next_solver::ParamEnv::empty();
+    hir_ty::traits::ParamEnvAndCrate { param_env, krate: root.krate(db) }.store()
+}
+
+fn closure_mark(
+    db: &dyn HirDatabase,
+    instance: &Instance,
+    env: &StoredParamEnvAndCrate,
+    debug: bool,
+) -> Option<Mark> {
+    let compiled = compiled_instance(db, instance.clone(), env.clone()).as_ref().ok()?;
+    let serial = instance_serial(db, instance.clone(), env.clone());
+    Some(Mark::of_function(db, serial, compiled, debug))
 }
 
 #[derive(Clone)]
@@ -325,6 +349,8 @@ pub(super) struct Base {
     /// tells what of it: the first edit takes a full build without any.
     hydrated: bool,
     outdated: bool,
+    /// Why what rustc linked can't be patched any longer, when that is what this is.
+    outdated_by: Option<&'static str>,
     /// The instances that did not compile when the base was built. What called them was left
     /// to rustc, and stays there for as long as the base does.
     rejected: Vec<(Instance, StoredParamEnvAndCrate)>,
@@ -334,6 +360,38 @@ pub(super) struct Base {
     /// anywhere can change that.
     cached_roots: Vec<u32>,
     cached_instances: Vec<u32>,
+    /// Whether the base is the executable rustc linked, and not an object of ours: every
+    /// function and static in it is rustc's. It knows the files that were about to change,
+    /// in `homed`, as they were when rustc compiled them, and nothing else.
+    pub(super) rustc: bool,
+    homed: FxHashSet<FileId>,
+    /// The functions of the `homed` files that rustc's symbols name no copy of, with what
+    /// each compiled to then: the symbols may miss one rustc has, whose callers no patch
+    /// reaches, so one that changes declines.
+    unnamed: Vec<(FunctionId, Option<Mark>, FileId)>,
+    /// The closures written in the functions of the `homed` files.
+    closures: Vec<HomedClosures>,
+    /// The generic functions of the modules of each `homed` file by name, and whether each of
+    /// rustc's copies of those of the name is an instance of the base, which a patch replaces
+    /// under rustc's symbol.
+    copies_homed: FxHashMap<FileId, FxHashMap<String, bool>>,
+}
+
+/// The closures rustc compiled of the body of a function of a file an edit changes. rustc's
+/// code that takes one as an argument is of its type then: one that captures or is called
+/// otherwise declines, as does one rustc's symbols name no copy of that changed.
+#[derive(Clone)]
+struct HomedClosures {
+    root: FunctionId,
+    file: FileId,
+    /// As [`super::closures_of`] has them.
+    closures: Vec<Option<(Instance, u64)>>,
+    /// Those rustc's symbols name no copy of, or that did not compile, with what each
+    /// compiled to then. The others are among the instances of the base.
+    unnamed: Vec<(Instance, Option<Mark>)>,
+    /// [`super::written_print`] of the root, for one with an `async` block, which no mark
+    /// here says a change to.
+    written: Option<u64>,
 }
 
 /// Where in the base the code of each crate is, and the code that comes from the bodies of
@@ -682,10 +740,284 @@ impl Base {
                 .iter()
                 .any(|(name, _)| super::stable::StableNames::of_checkout(name)),
             outdated: false,
+            outdated_by: None,
             bodies: cg.bodies,
             cached_roots,
             cached_instances,
+            rustc: false,
+            homed: FxHashSet::default(),
+            unnamed: Vec::new(),
+            closures: Vec::new(),
+            copies_homed: FxHashMap::default(),
         })
+    }
+
+    /// The executable rustc linked as a base, before anything of it is known: `home` takes
+    /// in the files an edit is about to change. `debug` is whether a patch says which lines
+    /// its code is of.
+    pub(super) fn of_rustc(debug: bool) -> Base {
+        Base {
+            debug,
+            entries: Vec::new(),
+            compiled: Vec::new(),
+            marks: Vec::new(),
+            crates: Vec::new(),
+            files: Vec::new(),
+            touched: Touched::default(),
+            skipped: Vec::new(),
+            left: Vec::new(),
+            from_rustc: Vec::new(),
+            their_statics: TheirStatics::default(),
+            their_walk: TheirWalk::default(),
+            instances: FxIndexMap::default(),
+            homes: Homes::default(),
+            statics: FxHashMap::default(),
+            found: FxHashMap::default(),
+            found_instances: FxHashMap::default(),
+            hydrated: false,
+            outdated: false,
+            outdated_by: None,
+            rejected: Vec::new(),
+            bodies: 0,
+            cached_roots: Vec::new(),
+            cached_instances: Vec::new(),
+            rustc: true,
+            homed: FxHashSet::default(),
+            unnamed: Vec::new(),
+            closures: Vec::new(),
+            copies_homed: FxHashMap::default(),
+        }
+    }
+
+    /// Takes in what rustc compiled of `file` before an edit changes it: the `functions`
+    /// written in it that rustc has a symbol for, and the `statics` declared in it or in their
+    /// bodies. The source is what rustc compiled until then, so the marks are of rustc's copies.
+    pub(super) fn home(
+        &mut self,
+        db: &dyn HirDatabase,
+        symbols: &dyn SymbolResolver,
+        file: FileId,
+        functions: &[FunctionId],
+        statics: &[StaticId],
+    ) {
+        if !self.homed.insert(file) {
+            return;
+        }
+        for &root in functions {
+            let known = self.homes.root.contains_key(&root)
+                || self.skipped.iter().any(|it| it.0 == root)
+                || self.unnamed.iter().any(|it| it.0 == root);
+            // rustc copies a generic one into what calls it: a change to one is a change to
+            // the file's copies, which no patch of what rustc linked is made for.
+            if known || copied_by_rustc(db, root) {
+                continue;
+            }
+            self.home_closures(db, symbols, root);
+            let Some(symbol) = symbols.function(root) else {
+                let mark = compiled_root(db, root).as_ref().ok().map(|compiled| {
+                    Mark::of_function(db, root_serial(db, root), compiled, self.debug)
+                });
+                self.unnamed.push((root, mark, body_file(db, root.into())));
+                continue;
+            };
+            match compiled_root(db, root) {
+                Ok(compiled) => {
+                    self.marks.push(Mark::of_function(
+                        db,
+                        root_serial(db, root),
+                        compiled,
+                        self.debug,
+                    ));
+                    self.compiled.push((root, symbol));
+                    self.crates.push(root.krate(db));
+                    self.files.push(body_file(db, root.into()));
+                }
+                Err(e) => {
+                    self.skipped.push((root, e.clone()));
+                    self.left.push(Some(Left::of(db, root)));
+                }
+            }
+        }
+        for &id in statics {
+            if self.statics.contains_key(&id) {
+                continue;
+            }
+            let compiled = compiled_static(db, id).as_ref().ok();
+            // One that does not compile is never what it was: a change to the file declines.
+            let mark = compiled.map_or(Mark { serial: 0, locations: 0, lines: 0 }, |it| {
+                Mark::new(db, static_serial(db, id), &it.requests)
+            });
+            let known = BaseStatic {
+                symbol: symbols.static_(id).unwrap_or_default(),
+                writable: compiled.is_some_and(|it| it.writable),
+                mark,
+                krate: id.krate(db),
+                file: body_file(db, id.into()),
+                parents: Vec::new(),
+                theirs: false,
+            };
+            self.statics.insert(id, known);
+        }
+        let homed = self.home_copies(db, symbols, functions);
+        self.copies_homed.insert(file, homed);
+        self.homes = Homes::new(&self.compiled, &self.crates, &self.files, &self.instances);
+    }
+
+    /// Whether [`Self::home`] noted `file`.
+    pub(super) fn homed(&self, file: FileId) -> bool {
+        self.homed.contains(&file)
+    }
+
+    /// Whether [`Self::home`] took in each of rustc's copies of the generic functions of the
+    /// modules of `file` named `names`.
+    pub(super) fn copies_homed(&self, file: FileId, names: &[String]) -> bool {
+        let Some(homed) = self.copies_homed.get(&file) else { return false };
+        names.iter().all(|it| homed.get(it).copied().unwrap_or(false))
+    }
+
+    /// Takes in rustc's copies of the generic functions of a file's modules, `functions` being
+    /// what is written in it: the instances its other functions reach, and those reach in turn,
+    /// that rustc's executable has. A patch replaces one under rustc's symbol, as it does a
+    /// closure. Whether those are all the copies the executable has of the functions of each
+    /// name: rustc also copies one for a caller elsewhere, of which nothing here knows.
+    fn home_copies(
+        &mut self,
+        db: &dyn HirDatabase,
+        symbols: &dyn SymbolResolver,
+        functions: &[FunctionId],
+    ) -> FxHashMap<String, bool> {
+        let of_modules = |func: FunctionId| {
+            matches!(func.lookup(db).container, hir_def::ItemContainerId::ModuleId(_))
+        };
+        let generic: FxHashSet<FunctionId> = functions
+            .iter()
+            .copied()
+            .filter(|&it| copied_by_rustc(db, it) && of_modules(it))
+            .collect();
+        let mut homed: FxHashMap<String, bool> = FxHashMap::default();
+        if generic.is_empty() {
+            return homed;
+        }
+        // rustc's copies by their paths, with the function each is of.
+        let mut copies: FxHashMap<String, (FunctionId, String)> = FxHashMap::default();
+        let mut unknown: FxHashSet<FunctionId> = FxHashSet::default();
+        for &func in &generic {
+            let Some(found) = symbols.rustc_instances(func) else {
+                unknown.insert(func);
+                continue;
+            };
+            for (path, symbol) in found {
+                if let Some((other, _)) = copies.insert(path, (func, symbol)) {
+                    unknown.extend([func, other]);
+                }
+            }
+        }
+        let note = |requests: &Requests, queue: &mut Vec<(Instance, StoredParamEnvAndCrate)>| {
+            for request in &requests.funcs {
+                if let FuncTarget::Instance(instance, env) = &request.target
+                    && let InstanceDef::Fn(func) = instance.def
+                    && generic.contains(&func)
+                {
+                    queue.push((instance.clone(), env.clone()));
+                }
+            }
+        };
+        let mut queue = Vec::new();
+        for &root in functions.iter().filter(|&&it| !copied_by_rustc(db, it)) {
+            let Ok(compiled) = compiled_root(db, root) else { continue };
+            note(&compiled.requests, &mut queue);
+            let env = closure_env(db, root);
+            for (_, closure) in super::closures_of(db, root).into_iter().flatten() {
+                let Some((instance, _)) = closure else { continue };
+                let compiled = compiled_instance(db, instance, env.clone());
+                if let Ok(compiled) = compiled.as_ref() {
+                    note(&compiled.requests, &mut queue);
+                }
+            }
+        }
+        let mut found: FxIndexMap<Instance, StoredParamEnvAndCrate> = FxIndexMap::default();
+        while let Some((instance, env)) = queue.pop() {
+            if found.contains_key(&instance) {
+                continue;
+            }
+            if let Ok(compiled) = compiled_instance(db, instance.clone(), env.clone()).as_ref() {
+                note(&compiled.requests, &mut queue);
+            }
+            found.insert(instance, env);
+        }
+        let spelling = super::Spelling { db, symbols };
+        for (instance, env) in found {
+            let InstanceDef::Fn(func) = instance.def else { continue };
+            // One the executable has no copy of under its path is left to what calls it.
+            let Some(path) = spelling.instance_path(func, instance.args.as_ref()) else {
+                continue;
+            };
+            let Some((_, symbol)) = copies.remove(&path) else { continue };
+            let mark = closure_mark(db, &instance, &env, self.debug);
+            if mark.is_none() {
+                unknown.insert(func);
+                continue;
+            }
+            let files = body_files(db, &instance);
+            let known = BaseInstance {
+                env,
+                symbol,
+                mark,
+                forwarded: false,
+                files,
+                parents: Vec::new(),
+                theirs: false,
+            };
+            self.instances.entry(instance).or_insert(known);
+        }
+        unknown.extend(copies.into_values().map(|it| it.0));
+        for func in generic {
+            let name = FunctionSignature::of(db, func).name.as_str().to_owned();
+            *homed.entry(name).or_insert(true) &= !unknown.contains(&func);
+        }
+        homed
+    }
+
+    /// Takes in the closures rustc compiled of the body of `root`: those it has a symbol of
+    /// are instances of the base, which a patch replaces under it.
+    fn home_closures(
+        &mut self,
+        db: &dyn HirDatabase,
+        symbols: &dyn SymbolResolver,
+        root: FunctionId,
+    ) {
+        let Some(found) = super::closures_of(db, root) else { return };
+        if found.is_empty() {
+            return;
+        }
+        let file = body_file(db, root.into());
+        let env = closure_env(db, root);
+        let mut unnamed = Vec::new();
+        for (expr, closure) in &found {
+            let Some((instance, _)) = closure else { continue };
+            let mark = closure_mark(db, instance, &env, self.debug);
+            match symbols.closure(root, *expr).filter(|_| mark.is_some()) {
+                Some(symbol) => {
+                    let known = BaseInstance {
+                        env: env.clone(),
+                        symbol,
+                        mark,
+                        forwarded: false,
+                        files: Some(Box::new([file])),
+                        parents: Vec::new(),
+                        theirs: false,
+                    };
+                    self.instances.entry(instance.clone()).or_insert(known);
+                }
+                None => unnamed.push((instance.clone(), mark)),
+            }
+        }
+        let closures: Vec<_> = found.into_iter().map(|it| it.1).collect();
+        let written = match closures.iter().any(Option::is_none) {
+            true => super::written_print(db, root),
+            false => None,
+        };
+        self.closures.push(HomedClosures { root, file, closures, unnamed, written });
     }
 
     /// Whether an edit changed code that the base has from the store, which no patch can
@@ -694,8 +1026,22 @@ impl Base {
         self.outdated
     }
 
+    /// Why what rustc linked can't be patched any longer.
+    pub(super) fn why_outdated(&self) -> Option<&'static str> {
+        self.outdated_by
+    }
+
+    fn outdate_rustc(&mut self, why: &'static str) {
+        if self.rustc {
+            self.outdated = true;
+            self.outdated_by.get_or_insert(why);
+        }
+    }
+
     /// Notes that a file changed: one of `crates`, or with `None` one we can't place.
     pub(super) fn touch(&mut self, db: &dyn HirDatabase, crates: Option<&[Crate]>) {
+        // rustc's copies of what sees the file are of before, and nothing here says which.
+        self.outdate_rustc("an edit that is more than the bodies of functions");
         let Some(crates) = crates else {
             self.touched.any = true;
             self.outdated |= self.hydrated;
@@ -714,6 +1060,9 @@ impl Base {
     /// the program sees into.
     pub(super) fn touch_bodies(&mut self, db: &dyn HirDatabase, file: FileId) {
         self.touched.bodies.insert(file);
+        if !self.homed.contains(&file) {
+            self.outdate_rustc("a file whose functions were not looked at before it changed");
+        }
         self.outdated |= self.hydrated
             && base_db::relevant_crates(db, file).iter().any(|it| self.crates.contains(it));
     }
@@ -853,6 +1202,49 @@ impl Base {
                 None => return stale.declined("a root of the base is gone"),
             }
         }
+        for (root, was, file) in self.unnamed.iter().skip(part).step_by(parts) {
+            let touched =
+                self.touched.reaches(root.krate(db)) || self.touched.reaches_bodies(Some(&[*file]));
+            if !touched {
+                continue;
+            }
+            let mark = probe(|| {
+                let compiled = compiled_root(db, *root).as_ref().ok()?;
+                Some(Mark::of_function(db, root_serial(db, *root), compiled, self.debug))
+            });
+            // One that did not compile then can't be told to be the same.
+            if was.is_none() || mark != Some(*was) {
+                return stale.declined("a function that rustc's symbols name no copy of changed");
+            }
+        }
+        for homed in self.closures.iter().skip(part).step_by(parts) {
+            let touched = self.touched.reaches(homed.root.krate(db))
+                || self.touched.reaches_bodies(Some(&[homed.file]));
+            if !touched {
+                continue;
+            }
+            let now = probe(|| {
+                super::closures_of(db, homed.root).map(|it| it.into_iter().map(|it| it.1).collect())
+            });
+            // An `async` block has no mark here to tell a change by, but where and how the
+            // root is written.
+            let asynchronous = homed.closures.iter().any(Option::is_none);
+            let rewritten = || {
+                homed.written.is_none()
+                    || probe(|| super::written_print(db, homed.root)).flatten() != homed.written
+            };
+            if now.flatten().as_ref() != Some(&homed.closures) || (asynchronous && rewritten()) {
+                return stale.declined("a closure in what rustc linked is another now");
+            }
+            let env = closure_env(db, homed.root);
+            for (instance, was) in &homed.unnamed {
+                let mark = probe(|| closure_mark(db, instance, &env, self.debug));
+                if was.is_none() || mark != Some(*was) {
+                    return stale
+                        .declined("a closure that rustc's symbols name no copy of changed");
+                }
+            }
+        }
         stale.steps.roots = start.elapsed();
         for i in self.instances_to_ask(check_all, part, parts) {
             let Some((instance, was)) = self.instances.get_index(i) else { continue };
@@ -909,6 +1301,10 @@ impl Base {
             if !touched {
                 eprintln!("check-all: MISSED static {id:?} of {:?}", was.krate);
                 continue;
+            }
+            // rustc's code reads rustc's copy, which a patch has no copy of its own beside.
+            if self.rustc {
+                return stale.declined("a static changed, and rustc's copy is the program's");
             }
             stale.their_walk_changed |= was.theirs;
             // rustc's code has rustc's copy, and a thread's copy is laid out by the linker.
@@ -1042,9 +1438,13 @@ impl Base {
         stale: Vec<Stale>,
     ) -> Result<std::result::Result<Patch, &'static str>> {
         let start = stdx::time::Instant::now();
-        if roots.entries != self.entries {
+        if !self.rustc && roots.entries != self.entries {
             return Ok(Err("the roots compiled whether called or not changed"));
         }
+        // Every function is in rustc's executable: one a patch calls is called there, and only
+        // what changed is compiled.
+        let none = FxHashSet::default();
+        let on_demand = if self.rustc { &none } else { on_demand };
         let all: FxHashSet<FunctionId> =
             roots.entries.iter().chain(roots.on_demand).copied().collect();
         let known_roots =
@@ -1094,11 +1494,18 @@ impl Base {
                 .collect(),
             broken: broken.iter().map(|it| it.0.clone()).collect(),
         };
-        if let Some((_, why)) = broken.iter().find(|it| self.reaches(db, &it.0, &unchanged)) {
+        // Nothing tells what in rustc's code refers to what.
+        if let Some((_, why)) =
+            broken.iter().find(|it| self.rustc || self.reaches(db, &it.0, &unchanged))
+        {
             return Ok(Err(why));
         }
-        changed_instances.retain(|it| self.reaches(db, &Node::Instance(it.clone()), &unchanged));
-        changed_statics.retain(|&it| self.reaches(db, &Node::Static(it), &unchanged));
+        // rustc's code may call any of them still.
+        if !self.rustc {
+            changed_instances
+                .retain(|it| self.reaches(db, &Node::Instance(it.clone()), &unchanged));
+            changed_statics.retain(|&it| self.reaches(db, &Node::Static(it), &unchanged));
+        }
         let verify = start.elapsed();
 
         let mut cg = ObjectCodegen::new(
@@ -1135,6 +1542,11 @@ impl Base {
             if cg.static_data(id).is_err() {
                 return Ok(Err("a static of the base no longer has a value"));
             }
+        }
+        // rustc's callers of one that hands out a value of a type only its body names go on
+        // calling or polling rustc's code for that type, which is of the source before.
+        if self.rustc && changed_roots.iter().any(|&root| super::hands_out_opaque(db, root)) {
+            return Ok(Err("a function that hands rustc's code an `impl Trait` changed or moved"));
         }
         let mut queued: FxHashSet<FunctionId> = known_roots().collect();
         let mut queue = changed_roots;

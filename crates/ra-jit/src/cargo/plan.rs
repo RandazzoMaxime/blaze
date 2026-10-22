@@ -13,6 +13,11 @@ use crate::weaken;
 /// What an ELF linker is told so that the first definition of a name is the one that stays.
 const FIRST_DEFINITION_STAYS: &str = "-Wl,--allow-multiple-definition";
 
+/// What Apple's linker is told so that the loader finds what it fixes up in tables, as the
+/// splice reads and writes them, and not in chains through the pointers themselves. The
+/// linker makes chains for a deployment target of macOS 12 or later, as nix's shell sets.
+const NO_FIXUP_CHAINS: &str = "-Wl,-no_fixup_chains";
+
 /// The room Apple's linker is told to leave after the load commands when nothing says more,
 /// so that a splice has room there for its two segments and for the unwind table, which
 /// makes way for the patch's frames in `__TEXT`: that of a program of some hundred thousand
@@ -20,8 +25,25 @@ const FIRST_DEFINITION_STAYS: &str = "-Wl,--allow-multiple-definition";
 /// [`headerpad_file`].
 const HEADERPAD: u64 = 0x100000;
 
+/// The same for rustc's links of a program, which nothing links again with more: the first
+/// edits are spliced into them. Room for the unwind table of a program of some four hundred
+/// thousand functions, as nushell is twice over; one of more is built in full for its first
+/// edit. The room is zeros the program never touches: it costs its size on disk.
+const RUSTC_HEADERPAD: u64 = 0x400000;
+
 /// How the room is asked for.
 const HEADERPAD_FLAG: &str = "-Wl,-headerpad,";
+
+/// What a driver of the `cc` kind is told to take out code nothing reaches with, alone or
+/// passed to the linker: `--gc-sections` of an ELF linker, `-dead_strip` of Apple's.
+const STRIPS_UNREACHED: [&str; 2] = ["--gc-sections", "-dead_strip"];
+
+/// How a driver of the `cc` kind passes the linker arguments, separated by commas.
+const TO_THE_LINKER: &str = "-Wl,";
+
+/// How `link.exe` is told what to take out, in options separated by commas: `REF` takes out
+/// code nothing reaches, `NOREF` keeps it.
+const OPT: &str = "/OPT:";
 
 /// The same for `link.exe`, which warns of every name it does so for unless told not to.
 const FIRST_DEFINITION_STAYS_MSVC: [&str; 2] = ["/FORCE:MULTIPLE", "/IGNORE:4006"];
@@ -58,6 +80,9 @@ pub(crate) struct Plan {
     pub(crate) patch: PathBuf,
     /// The executable the daemon links and splices.
     pub(crate) binary: PathBuf,
+    /// The executable rustc linked, which the daemon's first edits are patches of.
+    #[serde(default)]
+    pub(crate) rustc_binary: Option<PathBuf>,
     /// The command that links `binary`, for a shell.
     pub(crate) link_cmd: String,
     pub(crate) symbol_files: Vec<PathBuf>,
@@ -107,11 +132,13 @@ impl Plan {
             let why = "the link line is not one of a linker driven by `cc` or of `link.exe`";
             return Ok(Err(why.to_owned()));
         };
+        let mut patched_as_built = !unit_test && !unit.is_test() && calls_by_symbol(unit);
         let mut plan = Plan {
             crates: vec![unit.source.clone()],
             object: dir.join("ra-jit.o"),
             patch: dir.join("patch.o"),
             binary: dir.join("bin"),
+            rustc_binary: None,
             link_cmd: String::new(),
             symbol_files: Vec::new(),
             unit_test,
@@ -142,6 +169,7 @@ impl Plan {
             if member.is_none() {
                 continue;
             }
+            patched_as_built &= calls_by_symbol(owner);
             // With `cfg(test)` the daemon has it on every crate of the workspace, and rustc
             // built the libraries of a unit test without it.
             if unit_test {
@@ -151,6 +179,7 @@ impl Plan {
             }
         }
         plan.symbol_files = link.rustc_files();
+        plan.rustc_binary = link.output().filter(|_| patched_as_built).map(PathBuf::from);
         std::fs::create_dir_all(dir)?;
         link.give_way(&plan.copies)?;
         let apple = link.flavor == Flavor::Apple;
@@ -179,6 +208,14 @@ fn entitlements(source: &Path) -> Option<PathBuf> {
     let file =
         manifest.get("package")?.get("metadata")?.get("ra-jit")?.get("entitlements")?.as_str()?;
     Some(package.join(file))
+}
+
+/// Whether rustc compiled `unit` with one copy of each function that is not generic or
+/// `#[inline]`, which every call goes to: no inlining, and nothing made private to an object.
+fn calls_by_symbol(unit: &Record) -> bool {
+    unit.codegen("opt-level").unwrap_or("0") == "0"
+        && unit.codegen("incremental").is_some()
+        && !unit.stands_in()
 }
 
 /// Why the tests of `unit` are only right as rustc built them, if they are. rustc's
@@ -274,7 +311,7 @@ impl LinkLine {
             .filter_map(|it| it.split_once('='))
             .map(|(name, value)| (name.to_owned(), value.to_owned()))
             .collect();
-        let args: Vec<String> = words[first + 1..]
+        let mut args: Vec<String> = words[first + 1..]
             .iter()
             // rustc's object of the names the program has to keep stays while it is there:
             // `-Csave-temps` keeps rustc's directory.
@@ -282,6 +319,14 @@ impl LinkLine {
             .cloned()
             .collect();
         let flavor = Flavor::of(&args)?;
+        if flavor == Flavor::Apple {
+            // The wrapper's come after what cargo asked.
+            for added in rustc_link_args() {
+                if let Some(at) = args.iter().rposition(|it| *it == added) {
+                    args.remove(at);
+                }
+            }
+        }
         let (without, linker) = (without.to_vec(), words[first].clone());
         Some(LinkLine { without, env, linker, args, flavor })
     }
@@ -346,6 +391,7 @@ impl LinkLine {
         if self.flavor == Flavor::Msvc {
             self.args.retain(|it| !it.eq_ignore_ascii_case(WARNINGS_FAIL));
         }
+        self.keep_unreached();
         let first = self
             .args
             .iter()
@@ -358,6 +404,37 @@ impl LinkLine {
         }
     }
 
+    /// Has the linker keep the code nothing in the executable reaches, which rustc's line
+    /// has it take out. A patch calls the code of the executable by name, also code the
+    /// executable's own did not reach when it was linked (an instance of a generic function
+    /// for a type first used in an edit, a function its callers no longer call), and a
+    /// splice declines a patch that calls what is not there, so the edit is linked in full.
+    fn keep_unreached(&mut self) {
+        match self.flavor {
+            Flavor::Cc | Flavor::Apple => self.args.retain_mut(|arg| {
+                if STRIPS_UNREACHED.contains(&arg.as_str()) {
+                    return false;
+                }
+                let Some(passed) = arg.strip_prefix(TO_THE_LINKER) else { return true };
+                let kept: Vec<&str> =
+                    passed.split(',').filter(|it| !STRIPS_UNREACHED.contains(it)).collect();
+                let any = !kept.is_empty();
+                *arg = format!("{TO_THE_LINKER}{}", kept.join(","));
+                any
+            }),
+            Flavor::Msvc => {
+                for arg in &mut self.args {
+                    let named = arg.get(..OPT.len()).filter(|it| it.eq_ignore_ascii_case(OPT));
+                    let Some(options) = named.map(|_| &arg[OPT.len()..]) else { continue };
+                    let options: Vec<&str> = (options.split(','))
+                        .map(|it| if it.eq_ignore_ascii_case("REF") { "NOREF" } else { it })
+                        .collect();
+                    *arg = format!("{OPT}{}", options.join(","));
+                }
+            }
+        }
+    }
+
     fn command_of_cc(
         mut self,
         ours: Vec<String>,
@@ -365,8 +442,11 @@ impl LinkLine {
         binary: &Path,
         response: &Path,
     ) -> anyhow::Result<String> {
-        let flag = (self.flavor != Flavor::Apple).then(|| FIRST_DEFINITION_STAYS.to_owned());
-        self.args.splice(first..first, ours.into_iter().chain(flag));
+        let flag = match self.flavor {
+            Flavor::Apple => NO_FIXUP_CHAINS,
+            _ => FIRST_DEFINITION_STAYS,
+        };
+        self.args.splice(first..first, ours.into_iter().chain([flag.to_owned()]));
         let output =
             self.args.iter().position(|it| it == "-o").context("the link names no output")?;
         *self.args.get_mut(output + 1).context("the link names no output")? =
@@ -483,6 +563,19 @@ pub(crate) fn headerpad_file(binary: &Path) -> PathBuf {
 /// The room the link of the executable at `binary` asks for, when it reads it from a file.
 pub(crate) fn headerpad_of(binary: &Path) -> Option<u64> {
     headerpad_in(std::fs::read_to_string(headerpad_file(binary)).ok()?.trim())
+}
+
+/// What rustc's link of a program for Apple is told besides what cargo asked, for the
+/// daemon's first edits to be spliced into it: the room after the load commands, an address
+/// slot of each function of another library (which ld64 makes of each lazy one when
+/// everything is bound at load), and fixups in tables. The daemon's own links leave these out
+/// of the line.
+pub(crate) fn rustc_link_args() -> [String; 3] {
+    [
+        format!("{HEADERPAD_FLAG}{RUSTC_HEADERPAD:#x}"),
+        "-Wl,-bind_at_load".to_owned(),
+        NO_FIXUP_CHAINS.to_owned(),
+    ]
 }
 
 pub(crate) fn write_headerpad(binary: &Path, pad: u64) -> std::io::Result<()> {
@@ -605,6 +698,7 @@ mod tests {
             args,
             [
                 "/p/ra-jit.o",
+                NO_FIXUP_CHAINS,
                 &weak.display().to_string(),
                 "/t/libstd-3.rlib",
                 "-arch",
@@ -631,7 +725,13 @@ mod tests {
         };
         assert_eq!(pad(&line("")), Some(HEADERPAD));
         std::fs::remove_file(headerpad_file(&binary)).unwrap();
-        assert_eq!(pad(&line(r#""-Wl,-headerpad,0x400000""#)), Some(0x400000));
+        assert_eq!(pad(&line(r#""-Wl,-headerpad,0x800000""#)), Some(0x800000));
+        std::fs::remove_file(headerpad_file(&binary)).unwrap();
+        // What the wrapper added to rustc's link is not the daemon's to ask for.
+        let wrapper = rustc_link_args().map(|it| format!("{it:?}")).join(" ");
+        assert_eq!(pad(&line(&format!(r#""-Wl,-headerpad,0x100" {wrapper}"#))), Some(0x100));
+        let args = std::fs::read_to_string(&response).unwrap();
+        assert!(!args.contains("bind_at_load") && !args.contains("0x400000"), "{args}");
         std::fs::remove_file(headerpad_file(&binary)).unwrap();
         // Hexadecimal, as ld64 reads it, with or without `0x`; the last one is the one.
         assert_eq!(pad(&line(r#""-Wl,-headerpad,10" "-Wl,-headerpad,200""#)), Some(0x200));
@@ -639,6 +739,37 @@ mod tests {
         write_headerpad(&binary, 0x8000).unwrap();
         assert_eq!(pad(&line(r#""-Wl,-headerpad,0x0""#)), Some(0x8000));
         assert_eq!(pad(&line("")), Some(HEADERPAD));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// A patch calls the base object's instances by name, also one the base's own code no
+    /// longer reaches, so no link takes out what nothing reaches: not Apple's, an ELF
+    /// linker's or `link.exe`.
+    #[test]
+    fn links_keep_what_a_patch_may_call() {
+        let dir = std::env::temp_dir().join(format!("ra-jit-plan-strip-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let (response, binary) = (dir.join("link.args"), dir.join("bin"));
+        let args = |line: &str| {
+            LinkLine::parse(line).unwrap().command(&[], &binary, &response).unwrap();
+            let args = std::fs::read_to_string(&response).unwrap();
+            args.lines().flat_map(|it| shlex::split(it).unwrap()).collect::<Vec<_>>()
+        };
+        let apple = args(
+            r#""cc" "/t/a.1.rcgu.o" "-arch" "arm64" "-Wl,-dead_strip" "-dead_strip" "-o" "/t/a-1""#,
+        );
+        assert!(!apple.iter().any(|it| it.contains("dead_strip")), "{apple:?}");
+        let elf = args(
+            r#""cc" "/t/a.1.rcgu.o" "-Wl,--as-needed" "-Wl,--gc-sections" "-Wl,-O1,--gc-sections,-z,now" "-o" "/t/a-1""#,
+        );
+        let expected = [FIRST_DEFINITION_STAYS, "-Wl,--as-needed", "-Wl,-O1,-z,now"];
+        assert_eq!(elf.iter().filter(|it| it.starts_with("-Wl,")).collect::<Vec<_>>(), expected);
+        let msvc = r#""link.exe" "/NOLOGO" "C:\\t\\a.1.rcgu.o" "/OPT:REF,NOICF" "/opt:ref" "/OUT:C:\\t\\a.exe""#;
+        LinkLine::parse(msvc).unwrap().command(&[], &binary, &response).unwrap();
+        let msvc = std::fs::read_to_string(&response).unwrap();
+        let opt: Vec<&str> =
+            msvc.lines().filter(|it| it.to_ascii_uppercase().contains("/OPT:")).collect();
+        assert_eq!(opt, [r#""/OPT:NOREF,NOICF""#, r#""/OPT:NOREF""#]);
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
@@ -652,6 +783,7 @@ mod tests {
             object: PathBuf::from("P:/ra-jit.o"),
             patch: PathBuf::from("P:/patch.o"),
             binary: PathBuf::from("P:/bin"),
+            rustc_binary: None,
             link_cmd: String::new(),
             symbol_files: Vec::new(),
             unit_test: false,
@@ -700,6 +832,7 @@ mod tests {
             object: PathBuf::from("/p/ra-jit.o"),
             patch: PathBuf::from("/p/patch.o"),
             binary: PathBuf::from("/p/bin"),
+            rustc_binary: None,
             link_cmd: String::new(),
             symbol_files: Vec::new(),
             unit_test: false,

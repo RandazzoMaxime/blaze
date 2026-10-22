@@ -3,6 +3,7 @@
 use std::{
     hash::{DefaultHasher, Hash, Hasher},
     path::{Path, PathBuf},
+    sync::{Arc, Mutex},
     time::SystemTime,
 };
 
@@ -131,6 +132,59 @@ impl Named {
     }
 }
 
+/// What was read of a library before the table was asked for: with its length and when it
+/// was written, which a library written again since has others of.
+type ReadAhead = FxHashMap<PathBuf, ((u64, SystemTime), Vec<Named>)>;
+
+static READ_AHEAD: std::sync::LazyLock<Mutex<ReadAhead>> = std::sync::LazyLock::new(Mutex::default);
+
+/// Reads the symbols of a library cargo just built, while it builds the rest of what links
+/// with it, on a quarter of the cores: the others are cargo's.
+#[allow(dead_code)] // `ra-jit-wasm` builds this file too, and reads nothing ahead.
+pub(crate) fn read_ahead(file: PathBuf) {
+    static READERS: std::sync::LazyLock<Mutex<std::sync::mpsc::Sender<PathBuf>>> =
+        std::sync::LazyLock::new(|| {
+            let (send, receive) = std::sync::mpsc::channel::<PathBuf>();
+            let receive = Arc::new(Mutex::new(receive));
+            let cores = std::thread::available_parallelism().map_or(1, |it| it.get());
+            for _ in 0..cores.div_ceil(4) {
+                let receive = receive.clone();
+                std::thread::spawn(move || {
+                    loop {
+                        let file = receive.lock().unwrap_or_else(|e| e.into_inner()).recv();
+                        let Ok(file) = file else { return };
+                        let Some(stamp) = stamp_of(&file) else { continue };
+                        if let Ok(names) = names_of_file(&file) {
+                            lock(&READ_AHEAD).insert(file, (stamp, names));
+                        }
+                    }
+                });
+            }
+            Mutex::new(send)
+        });
+    let _ = lock(&READERS).send(file);
+}
+
+fn lock<T>(it: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    it.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+fn stamp_of(file: &Path) -> Option<(u64, SystemTime)> {
+    let meta = std::fs::metadata(file).ok()?;
+    Some((meta.len(), meta.modified().ok()?))
+}
+
+/// The symbols of `file` as they were read ahead, unless it was written again since.
+fn read_before(file: &Path) -> Option<Vec<Named>> {
+    let (stamp, names) = lock(&READ_AHEAD).remove(file)?;
+    let names = (stamp_of(file)? == stamp).then_some(names)?;
+    READ_BEFORE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    Some(names)
+}
+
+/// How many files the last table took as they were read ahead.
+static READ_BEFORE: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
 /// The symbols of each of `files`, which are objects or archives of them, read on every core.
 fn names_of(files: &[PathBuf]) -> Vec<anyhow::Result<Vec<Named>>> {
     let next = std::sync::atomic::AtomicUsize::new(0);
@@ -139,7 +193,7 @@ fn names_of(files: &[PathBuf]) -> Vec<anyhow::Result<Vec<Named>>> {
         loop {
             let at = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             let Some(file) = files.get(at) else { return read };
-            read.push((at, names_of_file(file)));
+            read.push((at, read_before(file).map_or_else(|| names_of_file(file), Ok)));
         }
     };
     let threads = std::thread::available_parallelism().map_or(1, |it| it.get()).min(files.len());
@@ -181,6 +235,12 @@ fn names_of_object(data: &[u8], names: &mut Vec<Named>) {
             continue;
         }
         let Ok(name) = symbol.name() else { continue };
+        // `<name>.llvm.<hash>` is a function LLVM made local and promoted for ThinLTO: its
+        // signature may no longer be the Rust ABI (dead arguments removed), so it is no copy
+        // to call.
+        if name.contains(".llvm.") {
+            continue;
+        }
         // Mach-O spells every name of C and Rust with an underscore in front, which the
         // writer of an object adds back.
         let name = match object.format() {
@@ -189,6 +249,130 @@ fn names_of_object(data: &[u8], names: &mut Vec<Named>) {
         };
         names.push(Named::new(name, private));
     }
+}
+
+pub(crate) fn hashed(symbol: &str) -> u64 {
+    use std::hash::BuildHasher;
+    rustc_hash::FxBuildHasher.hash_one(symbol)
+}
+
+/// The symbols of an executable rustc linked, which a patch is spliced into.
+pub(crate) struct Linked {
+    /// What it defines or takes from a library, [`hashed`].
+    names: FxHashSet<u64>,
+    /// Its functions and statics of symbols private to the object they were in, by their
+    /// paths, with their addresses: none for a path that two have, or a symbol that two
+    /// copies have, which a patch would replace one of.
+    private: FxHashMap<String, Option<(String, u64)>>,
+    /// The symbol of each function rustc compiled from Rust (or C++), a line each:
+    /// demangled when asked, for a few.
+    functions: String,
+}
+
+impl Linked {
+    pub(crate) fn read(path: &Path) -> anyhow::Result<Linked> {
+        let data = std::fs::read(path).with_context(|| format!("reading {}", path.display()))?;
+        let object = object::File::parse(&*data)?;
+        let mut linked = Linked {
+            names: FxHashSet::default(),
+            private: FxHashMap::default(),
+            functions: String::new(),
+        };
+        for symbol in object.symbols().chain(object.dynamic_symbols()) {
+            let Ok(name) = symbol.name() else { continue };
+            let name = match object.format() {
+                object::BinaryFormat::MachO => name.strip_prefix('_').unwrap_or(name),
+                _ => name,
+            };
+            linked.names.insert(hashed(name));
+            if (name.starts_with("_R") || name.starts_with("_ZN"))
+                && symbol.kind() == SymbolKind::Text
+                && symbol.section_index().is_some()
+            {
+                linked.functions.push_str(name);
+                linked.functions.push('\n');
+            }
+            let private = symbol.is_local()
+                && matches!(symbol.kind(), SymbolKind::Text | SymbolKind::Data)
+                && symbol.section_index().is_some();
+            if !private || !name.starts_with("_R") {
+                continue;
+            }
+            let Some((_, path)) = Named::new(name, true).demangled else { continue };
+            let address = symbol.address();
+            linked
+                .private
+                .entry(path)
+                .and_modify(|it| {
+                    if it.as_ref().is_none_or(|it| it.0 != name || it.1 != address) {
+                        *it = None;
+                    }
+                })
+                .or_insert_with(|| Some((name.to_owned(), address)));
+        }
+        Ok(linked)
+    }
+
+    pub(crate) fn has(&self, symbol: &str) -> bool {
+        self.names.contains(&hashed(symbol))
+    }
+
+    /// The one private symbol of the function or static at `path`.
+    pub(crate) fn private(&self, path: &str) -> Option<&str> {
+        self.private.get(path)?.as_ref().map(|it| &*it.0)
+    }
+
+    /// The copies of the instances of the generic function at `path`, each by its path, as
+    /// `core::mem::swap::<u8>`, with its symbol. `None` when one is of more than an instance
+    /// (a closure in it, say), or two have one path.
+    pub(crate) fn instances_of(&self, path: &str) -> Option<Vec<(String, String)>> {
+        let name = path.rsplit("::").next().filter(|it| !it.is_empty() && it.is_ascii())?;
+        // How the v0 mangling writes a name, which the symbol of each copy has whole.
+        let separator =
+            if name.starts_with(|it: char| it.is_ascii_digit() || it == '_') { "_" } else { "" };
+        let written = format!("{}{separator}{name}", name.len());
+        let prefix = format!("{path}::<");
+        let mut found: FxHashMap<String, String> = FxHashMap::default();
+        for symbol in self.functions.lines().filter(|it| it.contains(&written)) {
+            let Some((_, demangled)) = Named::new(symbol, true).demangled else { continue };
+            // The legacy mangling leaves out the types of an instance.
+            if symbol.starts_with("_ZN")
+                && (demangled == path || demangled.starts_with(&format!("{path}::")))
+            {
+                return None;
+            }
+            let Some(args) = demangled.strip_prefix(&prefix) else { continue };
+            if !closes_at_end(args) {
+                return None;
+            }
+            if found.get(&demangled).is_some_and(|it| it != symbol) {
+                return None;
+            }
+            found.insert(demangled, symbol.to_owned());
+        }
+        Some(found.into_iter().collect())
+    }
+}
+
+/// Whether the arguments of an instance, as a demangled symbol has them after the `<` that
+/// opens them, are all that follows.
+fn closes_at_end(args: &str) -> bool {
+    let mut depth = 1;
+    let mut last = ' ';
+    for (at, it) in args.char_indices() {
+        match it {
+            '<' => depth += 1,
+            // The `->` of a function type.
+            '>' if last == '-' => {}
+            '>' => depth -= 1,
+            _ => {}
+        }
+        if depth == 0 {
+            return at + 1 == args.len();
+        }
+        last = it;
+    }
+    false
 }
 
 impl SymbolTable {
@@ -200,7 +384,13 @@ impl SymbolTable {
             SymbolTable { read: Some(SystemTime::now()), generation, ..SymbolTable::default() };
         let mut symbols = Vec::new();
         let mut owners = Vec::new();
-        for (file, names) in files.iter().zip(names_of(files)) {
+        let start = std::time::Instant::now();
+        READ_BEFORE.store(0, std::sync::atomic::Ordering::Relaxed);
+        let read = names_of(files);
+        // What was read ahead of files that are not of the link is not asked for again.
+        lock(&READ_AHEAD).clear();
+        let read_in = start.elapsed();
+        for (file, names) in files.iter().zip(read) {
             let first = symbols.len();
             for name in names? {
                 table.add_name(name, &mut symbols);
@@ -228,8 +418,18 @@ impl SymbolTable {
                 }
             }
         }
+        let added_in = start.elapsed() - read_in;
         table.place(unplaced);
         table.index(symbols);
+        if std::env::var_os("RA_JIT_STATS").is_some() {
+            let indexed_in = start.elapsed() - read_in - added_in;
+            let ahead = READ_BEFORE.load(std::sync::atomic::Ordering::Relaxed);
+            eprintln!(
+                "symbols: read {read_in:.1?} ({ahead} of {} files ahead), added {added_in:.1?}, \
+                 indexed {indexed_in:.1?}",
+                files.len()
+            );
+        }
         Ok(table)
     }
 
@@ -290,8 +490,7 @@ impl SymbolTable {
     }
 
     fn hashed(symbol: &str) -> u64 {
-        use std::hash::BuildHasher;
-        rustc_hash::FxBuildHasher.hash_one(symbol)
+        hashed(symbol)
     }
 
     /// Whether the function at `path` is defined under a symbol private to its object.
@@ -378,6 +577,11 @@ impl SymbolTable {
     /// then not what it would build now.
     pub(crate) fn written_since_built(&self) -> Option<&Path> {
         self.all_written_since_built().next()
+    }
+
+    /// Every file rustc read of the crates it built, as their dep-info files list them.
+    pub(crate) fn sources(&self) -> impl Iterator<Item = &Path> {
+        self.built_from.iter().flat_map(|(_, sources)| sources.iter().map(|it| &*it.path))
     }
 
     /// Every source that was written after rustc built the crate it is of.
@@ -833,7 +1037,39 @@ mod tests {
 
     use rustc_hash::FxHashMap;
 
-    use super::{SymbolTable, V0, crate_sources, function_name};
+    use object::{
+        Architecture, BinaryFormat, Endianness, SymbolFlags, SymbolKind, SymbolScope,
+        write::{Object, Symbol, SymbolSection},
+    };
+
+    use super::{SymbolTable, V0, crate_sources, function_name, names_of_object};
+
+    #[test]
+    fn thin_lto_promoted_names_are_no_copies() {
+        let mut object = Object::new(BinaryFormat::Elf, Architecture::X86_64, Endianness::Little);
+        let text = object.section_id(object::write::StandardSection::Text);
+        let at = object.append_section_data(text, &[0xc3; 2], 1);
+        // The same function as rustc emits it, and as ThinLTO promotes it from another unit.
+        let name = "_ZN3dep4cell5World3get17h0123456789abcdefE";
+        for (nth, name) in
+            [name.to_owned(), format!("{name}.llvm.1234567890")].into_iter().enumerate()
+        {
+            object.add_symbol(Symbol {
+                name: name.into_bytes(),
+                value: at + nth as u64,
+                size: 1,
+                kind: SymbolKind::Text,
+                scope: SymbolScope::Linkage,
+                weak: false,
+                section: SymbolSection::Section(text),
+                flags: SymbolFlags::None,
+            });
+        }
+        let mut names = Vec::new();
+        names_of_object(&object.write().unwrap(), &mut names);
+        let names: Vec<&str> = names.iter().map(|it| it.name.as_str()).collect();
+        assert_eq!(names, [name]);
+    }
 
     #[test]
     fn crate_sources_of_a_path_with_a_space() {
