@@ -3461,6 +3461,17 @@ fn build(
     .map_err(anyhow::Error::msg)?;
     let Some(mut unit) = unit else { return Ok(None) };
     let name = |func| resolver.path(func).unwrap_or_else(|| "<assoc fn>".to_owned());
+    // Looking for the macro costs a walk of every macro call of the crate, so it is done once
+    // a crate, and not for the standard library's own build, whose refusals are only counted.
+    let mut failed_macros = FxHashMap::default();
+    let mut explained = |func: FunctionId, error: CodegenError| {
+        if args.library {
+            return error;
+        }
+        with_failed_macro(db, func, error, |krate| {
+            failed_macros.entry(krate).or_insert_with(|| failed_macro(db, krate)).clone()
+        })
+    };
     let codegen = start.elapsed();
     if std::env::var_os("RA_JIT_STATS").is_some() {
         eprintln!(
@@ -3489,7 +3500,7 @@ fn build(
         skipped: unit
             .skipped
             .into_iter()
-            .map(|(func, e)| (name(func), with_failed_macro(db, func, e)))
+            .map(|(func, e)| (name(func), explained(func, e)))
             .collect(),
         instances: unit.instances,
         codegen,
@@ -3554,7 +3565,12 @@ impl Build {
 /// `error` with the macro of the function's crate that did not expand, when the frontend is
 /// what turned the function down: what such a macro would have written is what is then
 /// missing, and the name or method that does not resolve says nothing of it.
-fn with_failed_macro(db: &RootDatabase, func: FunctionId, error: CodegenError) -> CodegenError {
+fn with_failed_macro(
+    db: &RootDatabase,
+    func: FunctionId,
+    error: CodegenError,
+    failed_macro: impl FnOnce(Crate) -> Option<String>,
+) -> CodegenError {
     let frontend = match &error {
         CodegenError::Frontend(_) => true,
         CodegenError::Unsupported(why) => why.contains("frontend:"),
@@ -3564,7 +3580,7 @@ fn with_failed_macro(db: &RootDatabase, func: FunctionId, error: CodegenError) -
         return error;
     }
     let krate = hir::Function::from(func).module(db).krate(db);
-    let Some(failed) = failed_macro(db, krate) else { return error };
+    let Some(failed) = failed_macro(krate) else { return error };
     match error {
         CodegenError::Frontend(why) => CodegenError::Frontend(format!("{why} ({failed})")),
         CodegenError::Unsupported(why) => CodegenError::Unsupported(format!("{why} ({failed})")),

@@ -569,16 +569,19 @@ program's object and the unit's):
 |---|---|
 | `cargo build`, cold, rustc's prebuilt standard library | 5.53 to 5.58 s, 0.38 GB |
 | `cargo build` after touching `main.rs` | 0.53 s |
-| ra-jit, empty store and remote: the unit compiled, kept and pushed | 20.7 s, 6.4 GB, then 0.64 s to link |
-| ra-jit, warm store | 5.61 to 5.63 s, 4.5 GB, then 0.64 s to link |
-| ra-jit, a second empty store, the unit and functions from the remote (a directory) | 5.60 to 5.63 s, then 0.64 s to link |
+| ra-jit, empty store and remote: the unit compiled, kept and pushed | 13.7 s, 6.4 GB, then 0.64 s to link |
+| ra-jit, warm store | 5.41 to 5.44 s, 4.6 GB, then 0.64 s to link |
+| ra-jit, a second empty store, the unit and functions from the remote (a directory) | 5.41 to 5.46 s, then 0.64 s to link |
 
-With a warm remote ripgrep is 6.25 s against cargo's 5.55: 13% over the K bar below. Of ra-jit's
-5.6 s, 2.8 s is resolving the 60 crates and 0.5 s loading the workspace; compiling the
-program's 4,755 functions and the 8,829 instances the store did not have is 2.1 s (the other
-24,434 come from the store). The empty store's 20.7 s is the unit's 14 s (7.3 s compiling,
-6.7 s emitting) and the program's 2.9 s on top of resolving. The executable is 67 MB against
-cargo's 53 MB: the link takes the whole unit.
+With a warm remote ripgrep is 6.1 s against cargo's 5.55: 9% over the K bar below. Of ra-jit's
+5.4 s, 2.7 s is resolving the 60 crates and 0.5 s loading the workspace; compiling the
+program's 4,755 functions and the 8,829 instances the store did not have is 2.0 s (the other
+24,434 come from the store). The empty store's 13.7 s is the unit's 7.2 s of compiling and the
+program's 2.8 s on top of resolving. The executable is 67 MB against cargo's 53 MB: the link
+takes the whole unit. Until 2026-10-22 a build also spent 6.7 s (16.5 s over the flat syntax
+tree, #42) after compiling: every function the frontend turned down walked all the macro calls
+of its crate, `core`'s for most of the unit's 2,000; that is now once a crate, and never for the
+unit, whose refusals nobody reads.
 
 Not yet measured: the other bench apps with every crate ra-jit's. The step K
 bar: with a warm remote, `cargo ra-jit build` from nothing is no slower than cargo's cold build;
