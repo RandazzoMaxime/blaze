@@ -1250,6 +1250,11 @@ impl<'db> Builder<'_, '_, 'db> {
             TyKind::Array(inner, _) | TyKind::Slice(inner) | TyKind::RawPtr(inner, _) => {
                 self.well_formed(inner, at, depth + 1)
             }
+            TyKind::Alias(alias) => {
+                for it in alias.args.types() {
+                    self.well_formed(it, at, depth + 1);
+                }
+            }
             _ => (),
         }
     }
@@ -2235,7 +2240,25 @@ impl<'db> Builder<'_, '_, 'db> {
                                 .callable_item_signature(def.0)
                                 .instantiate(self.interner(), args)
                                 .skip_norm_wip();
-                            let source = Ty::new_fn_ptr(self.interner(), sig);
+                            // rustc instantiates the item's late-bound lifetimes and proves
+                            // its signature well-formed with them: `&'a &'b ()` that `'b: 'a`.
+                            let sig = self.ctx.infcx.instantiate_binder_with_fresh_vars(
+                                hir_ty::Span::Dummy,
+                                hir_ty::next_solver::infer::BoundRegionConversionTime::FnCall,
+                                sig,
+                            );
+                            let sig = rustc_type_ir::fold_regions(self.interner(), sig, |r, _| {
+                                match r.kind() {
+                                    RegionKind::ReError(_) => self.fresh(),
+                                    _ => r,
+                                }
+                            });
+                            let wf = At { category: Category::Boring, span };
+                            for ty in sig.inputs_and_output.iter() {
+                                self.well_formed(ty, wf, 0);
+                            }
+                            let source =
+                                Ty::new_fn_ptr(self.interner(), rustc_type_ir::Binder::dummy(sig));
                             self.relate(source, target, Variance::Covariant, at);
                         }
                     }
@@ -2532,8 +2555,13 @@ impl<'db> Builder<'_, '_, 'db> {
                             keep_static,
                             returns_self,
                         );
-                        // The where clauses of the associated types in the signature hold
-                        // for it to be well-formed.
+                        // The signature as written is well-formed, `&'a &'b ()` that `'b: 'a`
+                        // even where it normalizes to `()`; and the where clauses of its
+                        // associated types hold.
+                        let wf = At { category: Category::Boring, span };
+                        for ty in inputs.iter().copied().chain([output]) {
+                            self.well_formed(ty, wf, 0);
+                        }
                         let at = At { category: Category::Predicate, span };
                         for ty in inputs.iter().copied().chain([output]) {
                             for (def, args) in projections(ty) {
