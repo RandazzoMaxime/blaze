@@ -107,7 +107,7 @@ jobs:
       pinned-ui: true
       cargo-ra-jit: ${{ needs.changes.outputs.tier == 'full' }}
       bench: ${{ needs.changes.outputs.tier == 'full' }}
-      bun-e2e: ${{ needs.changes.outputs.tier == 'full' }}
+      bun-e2e: true
 
   linux-arm64:
     name: linux arm64
