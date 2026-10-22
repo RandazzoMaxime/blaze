@@ -805,6 +805,22 @@ impl SyntaxNode {
         }
     }
 
+    /// What stepping down by `child_or_token_at_range` from this node finds first of `kind`
+    /// and `range`, when this is a flat tree's node and the range is not empty; `None` when
+    /// it is not, for the caller to step.
+    pub(crate) fn flat_node_at_range(
+        &self,
+        range: TextRange,
+        kind: SyntaxKind,
+    ) -> Option<Option<SyntaxNode>> {
+        match self.0 {
+            Ref::Flat(root, at) if !range.is_empty() => Some(
+                flat(&root).tree.node_at_range(at, range, kind).map(|it| SyntaxNode(flat_ref(root, it))),
+            ),
+            _ => None,
+        }
+    }
+
     pub fn child_or_token_at_range(&self, range: TextRange) -> Option<SyntaxElement> {
         if let Ref::Flat(root, at) = self.0 {
             return flat(&root).tree.child_at_range(at, range).map(|it| flat_element(root, it));

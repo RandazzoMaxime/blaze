@@ -1,7 +1,8 @@
 //! `cargo run --release -p syntax --example trees -- DIR...`: every `.rs` file under the
 //! directories parsed into green trees and into flat ones, on one thread: the time to parse,
 //! the bytes all the trees hold at once, and the time to walk every node and token of each
-//! through the cursor's API, as lowering does.
+//! through the cursor's API, as lowering does, then every node alone, as an ast id map does,
+//! and one node in 16 found again from a pointer, as a diagnostic's span is.
 
 use std::{
     alloc::{GlobalAlloc, Layout, System},
@@ -10,7 +11,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use syntax::{AstNode, Edition, SourceFile, WalkEvent};
+use syntax::{AstNode, Edition, SourceFile, SyntaxNodePtr, WalkEvent};
 
 struct Counting;
 
@@ -49,6 +50,8 @@ struct Measured {
     parsed: Duration,
     held: isize,
     walked: Duration,
+    nodes: Duration,
+    found: Duration,
     elements: usize,
 }
 
@@ -70,6 +73,27 @@ fn measure(texts: &[String], green: bool) -> Measured {
         }
     }
     let walked = start.elapsed();
+    let start = Instant::now();
+    let mut ptrs = Vec::new();
+    for parse in &parses {
+        let mut of_file = Vec::new();
+        for (i, node) in parse.tree().syntax().descendants().enumerate() {
+            std::hint::black_box((node.kind(), node.text_range()));
+            if i % 16 == 0 {
+                of_file.push(SyntaxNodePtr::new(&node));
+            }
+        }
+        ptrs.push(of_file);
+    }
+    let nodes = start.elapsed();
+    let start = Instant::now();
+    for (parse, of_file) in parses.iter().zip(&ptrs) {
+        let root = parse.tree().syntax().clone();
+        for ptr in of_file {
+            std::hint::black_box(ptr.to_node(&root));
+        }
+    }
+    let found = start.elapsed();
     // A parse's tree is dropped on a thread of its own, so the next count waits for it.
     drop(parses);
     let mut last = HELD.load(Ordering::Relaxed);
@@ -81,7 +105,7 @@ fn measure(texts: &[String], green: bool) -> Measured {
         }
         last = now;
     }
-    Measured { parsed, held, walked, elements }
+    Measured { parsed, held, walked, nodes, found, elements }
 }
 
 fn main() {
@@ -105,10 +129,13 @@ fn main() {
     );
     for (name, it) in [("green", &green), ("flat", &flat)] {
         println!(
-            "{name:5}: parsed in {:8.1} ms, holds {:8.1} MB, walked in {:8.1} ms",
+            "{name:5}: parsed in {:8.1} ms, holds {:8.1} MB, walked in {:8.1} ms, \
+             its nodes in {:8.1} ms, one pointer in 16 found in {:8.1} ms",
             ms(it.parsed),
             mb(it.held),
-            ms(it.walked)
+            ms(it.walked),
+            ms(it.nodes),
+            ms(it.found)
         );
     }
 }

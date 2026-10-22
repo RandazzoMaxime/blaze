@@ -147,11 +147,12 @@ impl FlatTree {
     #[inline]
     fn node_from(&self, at: u32, mut from: u32) -> Option<u32> {
         let end = self.end(at);
+        // A token's subtree is itself.
         while from < end {
             if self.parents[from as usize] & TOKEN == 0 {
                 return Some(from);
             }
-            from = self.end(from);
+            from += 1;
         }
         None
     }
@@ -200,6 +201,28 @@ impl FlatTree {
             next = self.next_sibling_or_token(it);
         }
         last_less.or(Some(first)).filter(|&it| contains(it))
+    }
+
+    /// The first node of `kind` and `range` that `child_at_range` steps down to from `at`, for
+    /// a range that is not empty: those steps go through the ancestors of the last element to
+    /// start at or before the range, and stop at the first that does not hold it or is a
+    /// token. Found from the bottom up, so the depth is walked once.
+    pub(crate) fn node_at_range(&self, at: u32, range: TextRange, kind: SyntaxKind) -> Option<u32> {
+        debug_assert!(!range.is_empty());
+        let (lo, hi) = (at as usize, self.end(at) as usize);
+        let start = u32::from(range.start());
+        let n = self.starts[lo..hi].partition_point(|&it| it <= start);
+        let mut it = (lo + n).checked_sub(1).filter(|&it| it >= lo)? as u32;
+        let mut found = None;
+        loop {
+            if !self.is_token(it) && self.range(it) == range && self.kind(it) == kind {
+                found = Some(it);
+            }
+            if it == at {
+                return found;
+            }
+            it = self.parent(it)?;
+        }
     }
 
     /// The subtree of node `at`, as a tree of its own.
@@ -436,6 +459,24 @@ mod tests {
                                     describe(Some(g.covering_element(at))),
                                     describe(Some(f.covering_element(at)))
                                 );
+                                if g.parent().is_none() {
+                                    for kind in (0..5).chain(100..105).map(SyntaxKind) {
+                                        let stepped = |root: &SyntaxNode| {
+                                            std::iter::successors(Some(root.clone()), |it| {
+                                                it.child_or_token_at_range(at)?.into_node()
+                                            })
+                                            .find(|it| it.text_range() == at && it.kind() == kind)
+                                        };
+                                        let found = f
+                                            .flat_node_at_range(at, kind)
+                                            .unwrap_or_else(|| stepped(f));
+                                        assert_eq!(
+                                            stepped(g).map(|it| describe(Some(it.into()))),
+                                            found.map(|it| describe(Some(it.into()))),
+                                            "seed {seed}, {kind:?} at {at:?}"
+                                        );
+                                    }
+                                }
                             }
                             let offset = TextSize::from(start);
                             let tokens = |it: TokenAtOffset<_>| {

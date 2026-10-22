@@ -249,6 +249,14 @@ impl<L: Language> SyntaxNode<L> {
         self.raw.child_or_token_at_range(range).map(SyntaxElement::from)
     }
 
+    pub(crate) fn flat_node_at_range(
+        &self,
+        range: TextRange,
+        kind: SyntaxKind,
+    ) -> Option<Option<SyntaxNode<L>>> {
+        self.raw.flat_node_at_range(range, kind).map(|it| it.map(SyntaxNode::from))
+    }
+
     /// Returns an independent copy of the subtree rooted at this node.
     ///
     /// The parent of the returned node will be `None`, the start offset will be

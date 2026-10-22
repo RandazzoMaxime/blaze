@@ -82,6 +82,9 @@ impl<L: Language> SyntaxNodePtr<L> {
         if root.parent().is_some() {
             return None;
         }
+        if let Some(found) = root.flat_node_at_range(self.range, L::kind_to_raw(self.kind)) {
+            return found;
+        }
         successors(Some(root.clone()), |node| node.child_or_token_at_range(self.range)?.into_node())
             .find(|it| it.text_range() == self.range && it.kind() == self.kind)
     }
