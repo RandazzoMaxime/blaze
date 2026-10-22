@@ -406,12 +406,8 @@ def backtraces(binary, cwd, env=None):
 BEHIND = "behind rustc"
 
 
-# What is known to be wrong, and why. rung2's ra-jit build polls the future of tower-http's
-# `open_file`, which rustc's copy of that non-generic function makes, with ra-jit's copy of its
-# body, and the two lay that future out differently: ra-jit reads its state at byte 0x3d4, rustc
-# writes it at 0x344. The first poll finds no valid state and traps, where the cargo build
-# panics in tokio.
-OPEN = {"rung2: frames of each panic", f"rung2: {DEBUGGER}"}
+# What is known to be wrong, and why.
+OPEN = set()
 # Under LLVM gdb shows a slice's length and not its elements, `&[i32](size=2)` where rustc's build
 # shows `&[i32](size=2) = {2, 3}`; not looked into yet. Windows asks cdb, which has no such check.
 if LLVM and sys.platform == "linux":
@@ -843,7 +839,9 @@ def profiler(tally, what, binary, cwd, crates):
     naked = naked_functions(cwd)
     lost = [name for name, line in read
             if not re.search(r"\.rs:\d+$|-cgu\.\d+:0$", line) and name.rsplit("::", 1)[-1] not in naked]
-    through = sum(bool(re.search(r"4main\b|::main\b", stack)) for stack in stacks)
+    # Where the program's `main` is inlined into the `main` that calls it, its frame is named
+    # `main` and its line is one of the program's; the shell's `main` has no such line.
+    through = sum(bool(re.search(r"4main\b|::main\b|^\s+[0-9a-f]+ main\n\s+\S+\.rs:\d+", stack, re.M)) for stack in stacks)
     # Where perf looks a frame's CFI up somewhere else, how far its stacks get says nothing of the CFI:
     # some reach main where the code it lands in has the same rules, and some stop.
     verdict = ("NO SAMPLES" if not mine else "NO LINE" if lost else "named" if through

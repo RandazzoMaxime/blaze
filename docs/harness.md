@@ -28,12 +28,14 @@ need a few gigabytes there.
 
 ### The gate
 
-The gate is what CI runs on every pull request and push to main. A change is not done until
-all of it exits 0 under both backends. `harness/ci.py` is the one list of it: which harness
-runs in which part, on which hosts and under which backend.
+The gate is what CI runs: its fast tier on every pull request and push to main, all of it
+nightly ([CI](#ci)). A change is not done until all of it exits 0 under both backends.
+`harness/ci.py` is the one list of it: which harness runs in which part, in which tier, on
+which hosts and under which backend.
 
-    python3 ci.py --list            # every harness, its part, its environment
+    python3 ci.py --list            # every harness, its part, its quick part, its environment
     python3 ci.py --parts           # the parts that have harnesses on this machine
+    python3 ci.py --parts fast      # the fast tier's parts here (quick-1, quick-2)
     python3 ci.py core              # run one part here, as CI does
 
 A part runs all of its harnesses even when one fails, then names the ones that failed and how
@@ -83,6 +85,7 @@ with reasons. The daemon's log says `backend: llvm -O2 fast emit` when LLVM is i
 | `bintest.py <name>` | A real program from `breakers/bins.json`: the same command lines given to cargo's binary and ra-jit's |
 | `alone.py` | A program whose workspace crates rustc compiles nothing of, so no refused function can hide behind rustc's copy |
 | `wholeprogram.py` | Programs ra-jit builds whole, with its own `main` (as `runbench.py` builds them): one on the default allocator, one with a `#[global_allocator]` of its own, one with a library's, one whose allocator is under a `#[cfg]` that is false. Each has to print and exit as cargo's build does; `--release` builds both in the release profile |
+| `bun_repros.py` | Two nightly fixtures for Bun's `adt_const_params` and `core::mem::type_info` blockers. Each compares output with cargo's binary and checks the report for its expected refusal. It uses `nightly-2026-09-15` and sets `RA_JIT_OTHER_TOOLCHAIN=1`. |
 | `backends.py` | One program compiled by each code producer: counts, time per function, and what LLVM left to Cranelift |
 | `borrowck_ui.py <rust checkout>` | The borrow checker ([borrowck.md](borrowck.md)) against rustc's borrow-check UI tests: each unit passes when ra-jit reports the errors (code and line) the pinned nightly rustc reports, under Polonius and NLL. `--min-pass N` fails below N Polonius passes |
 | `scoreboard.py` | Runs the targets in `targets.json` and fails when behaviour differs or coverage drops below the committed `scoreboard.json` |
@@ -93,7 +96,7 @@ with reasons. The daemon's log says `backend: llvm -O2 fast emit` when LLVM is i
 | Script | What it checks |
 |---|---|
 | `stress.py` | 100 edits of the kinds people make (bodies, signatures, new items, moved lines, broken code, reverts, an editor's edit while another client's build runs) applied in order to a three-crate workspace under one warm daemon, each compared with `cargo build` of the same source. The first edit cargo builds after broken code has to be a patch of the build before it ([#31](https://github.com/indexable-inc/ra-jit/issues/31)), and the edit sent during a build has to be taken ([#32](https://github.com/indexable-inc/ra-jit/issues/32)); it exits 1 when a step is wrong |
-| `programs.py` | Two programs of one workspace built by one daemon |
+| `programs.py` | Two programs of one workspace built by one daemon. With `RA_JIT_ALONE=1` rustc builds stand-ins for the workspace's crates and the daemon compiles every function of both programs, `main` too: under LLVM an edit of what both use has to reach each ([#63](https://github.com/indexable-inc/ra-jit/issues/63)) |
 | `worktrees.py` | Several checkouts of one workspace built by one daemon, edited independently |
 | `includes.py` | Edits to a file only `include!` names |
 | `splices.py` | Edits that are hard on the splice: thread-locals, statics, vtables, function pointers, closures, panics, foreign calls. Counts how each step was linked |
@@ -106,11 +109,12 @@ with reasons. The daemon's log says `backend: llvm -O2 fast emit` when LLVM is i
 | `buildmodel.py` | One small cargo project per feature of cargo's build model, under both backends, with steps that change one input at a time |
 | `cargo_ra_jit.py` | `cargo ra-jit` against plain cargo on seven real projects, 22 flag combinations, and 11 daemon lifecycle checks. Needs the network and about 20 minutes; not in CI |
 | `debuginfo.py` | Backtraces, `llvm-dwarfdump --verify`, gdb stopping and stepping, locals |
-| `live_e2e.py` | Edits of a running program that links `ra-jit-live`, each applied as a patch. Linux x86-64 and macOS AArch64 |
+| `live_e2e.py` | Edits of a running program that links `ra-jit-live`, each applied as a patch; then another program built meanwhile, a start again from the executable, and a panic that unwinds through the patched code. Linux x86-64 and macOS AArch64 |
 | `live_latency.py` | Edit-to-running time of live edits on `harness/live`, `demo/life`, `harness/live-bevy` and `harness/live-egui`: isolated edits, bursts of valid keystrokes, real typing replayed key by key (most texts in between do not compile; a program told to restart is started again), and a session's restarts against `cargo run`. Writes p50 to p99 and every sample, with the machine and its battery, to `LATENCY_JSON`. Measures; checks nothing; macOS on AArch64 ([live.md](live.md#latency-under-typing)) |
 | `fncache.py` | `#[ra_jit::cache]` ([fn-cache.md](fn-cache.md)): a cold run computes and a warm one finds the result on disk; comment, format, moved-line and unrelated edits keep it, an edit of a function it reaches through another drops it; generic instances are kept apart; impure functions are refused saying where; a restarted daemon finds the same results; cargo's build caches nothing. `--live`: a live edit computes again and drops the old results, macOS on AArch64 |
 | `spaces.py` | A two-crate workspace under a directory whose name has spaces, `$$`, `#` and quotes, built and edited with `cargo ra-jit build`; every edit has to be applied by the daemon against rustc's symbols ([#14](https://github.com/indexable-inc/ra-jit/issues/14)) |
 | `rustcbase.py` | The first edits after a cold `cargo ra-jit build`, spliced into the executable rustc linked ([#11](https://github.com/indexable-inc/ra-jit/issues/11)), against plain cargo: bodies, closures, a dependency crate, function-local statics, two edits in a row, and a `#[ra_jit::cache]` function and what it reaches have to be patches; generic, `#[inline]` and default trait functions, statics, new items, `async`, `impl Trait` and `include_str!` edits have to be built in full and say why; and the daemon's own base, built while nothing waits, takes the edits after it. Every edit's output and exit status against cargo's, macOS and Linux |
+| `nocompact.py` | A program linked with `-no_compact_unwind`, as bun is, which has `__eh_frame` and no `__unwind_info`: its edits are spliced, and the unwinder finds the frame of the edited function where its symbol now is, behind the program's frames and, once a thousand new functions outgrow that room, with all of them moved into the header's ([#33](https://github.com/indexable-inc/ra-jit/issues/33)). macOS on AArch64 |
 | `headerpad.py` | A program whose unwind table does not fit the room its link leaves after the load commands: the first link is done again with room, the edits after it are spliced, and a restarted daemon starts from the room kept beside the executable ([#13](https://github.com/indexable-inc/ra-jit/issues/13)). It is built for macOS 14, as nix's shell builds, which Apple's linker gives chained fixups unless told not to ([#30](https://github.com/indexable-inc/ra-jit/issues/30)). The daemon's own links, with `RA_JIT_RUSTC_BASE=0`. macOS on AArch64 |
 | `tiers.py` | Tiers ([tiers.md](tiers.md)): `demo/lifebench` running under the daemon reaches levels 2 and 3 with output identical to cargo's, an edit of a tiered function demotes it and is applied at once, and `RA_JIT_TIER=off` changes nothing. macOS on AArch64 with `--features llvm`; it exits 0 elsewhere |
 | `tierbench.py` | The benchmark table of [tiers.md](tiers.md): `demo/lifebench` at level 1, 2 and 3 under a daemon and as cargo builds it (release, and `-O3` with the dev profile's checks), in interleaved rounds, the steady rate of each; `--together` runs a round's builds at once, for a loaded machine. Measures; checks nothing; not in CI |
@@ -164,9 +168,14 @@ time with the exact peak of its largest process (`wait4`) and the peak of its wh
 (sampled), `memory.Sampler` follows a long-lived process such as the daemon with its workers,
 and `memory.in_child` measures a function that runs commands itself
 ([benchmarks.md](benchmarks.md#memory-and-disk)); a harness that reports memory uses it rather
-than a way of its own. `benchcharts.py` draws the README's charts (SVG, a light and a dark
-version) from the same results `benchreport.py` writes the tables from; `benchreport.py`
-regenerates them whenever it writes a table, and `benchreport.py --charts` on its own.
+than a way of its own. Every README benchmark is a matrix over the platforms of
+`benchplatforms.py` (macOS arm64, Linux aarch64, Linux x86-64): it names a result's platform from
+its host, files it as `docs/benchmarks/<platform>.json`, and gives the workflows the platforms
+whose runner is registered. `benchreport.py` writes each table from the newest stored result of
+every platform, so one that did not run keeps its last numbers. `benchcharts.py` draws the
+README's charts (SVG, a light and a dark version, a bar per platform) from the same results;
+`benchreport.py` regenerates them whenever it writes a table, `--charts` on its own, and
+`--render` every table and chart.
 `live_latency.py` times live edits on macOS on AArch64, per keystroke under typing (`replay`,
 `burst`) as well as one edit at a time (`socket`, or `cargo` through `cargo ra-jit build`), and
 the restarts of a session against `cargo run` (`restart`); its JSON goes to `benchhistory.py
@@ -242,25 +251,46 @@ For a CI failure, the last line of the harness step lists which scripts failed.
 
 ## CI
 
-`.github/workflows/ra-jit.yaml` runs on every pull request, every push to main, nightly and by
-hand. It calls `ra-jit-platform.yaml` once for each of Linux x86-64, Linux AArch64, macOS arm64
-and Windows x86-64, each on a machine of its own kind. Each platform:
+`.github/workflows/ra-jit.yaml` runs in two tiers. It calls `ra-jit-platform.yaml` once for
+each platform, each on a machine of its own kind.
+
+The **fast tier** runs on every pull request, every push to main and every entry of the merge
+queue, and takes about ten minutes. On Linux x86-64, Linux AArch64 and macOS arm64 it:
 
 - builds ra-jit once, with the `llvm` feature, and hands the binary to its other jobs;
 - runs `harness/unittests.py`;
-- runs each part of `ci.py --parts` under each backend as a job of its own;
-- on Linux x86-64 and macOS, runs `cargo_ra_jit.py` on its checks, on ripgrep and
-  hyperfine, and on fd. Nightly and by hand, Linux AArch64 also runs it on ripgrep, fd,
-  bat, hyperfine, just, axum and nushell, with each project's tests.
+- runs the parts of `ci.py --parts fast` (`quick-1` and `quick-2`, three to six minutes each)
+  under each backend, as a job each;
+- on Linux x86-64, runs rustc's borrow-check tests with a floor under the passes, and the
+  run-pass tests of `harness/ui-pinned.txt`, against that build.
+
+`fork alone` builds and tests `vendor/rust-analyzer` outside this repository.
+
+The **full tier** runs nightly and by hand (`gh workflow run ra-jit.yaml --ref <branch> -f
+tier=full`, or `-f tier=fast`), and takes about an hour. It adds Windows x86-64, every part
+of `ci.py --parts` (`keys.py`, `buildmodel.py`, the store and the daemon harnesses,
+`debuginfo.py`), `cargo_ra_jit.py` on its checks, on ripgrep and hyperfine and on fd (Linux
+x86-64 and macOS), and on ripgrep, fd, bat, hyperfine, just, axum and nushell with each
+project's tests (Linux AArch64), and the ripgrep bench. A failed nightly opens an issue named
+"Nightly ra-jit failed", or comments on it while it is open
+(`.github/actions/nightly-issue`).
 
 A change to nothing but documentation or the site runs `fmt` and nothing else. On a pull
-request a newer push cancels the run before it. On main a run always finishes, and the newest
-push waits behind it.
+request a newer push cancels the run before it. Every push to main and every merge-queue entry
+runs to the end in a concurrency group of its own: with one group for main, a merge every few
+minutes replaced each waiting run with the next, and 7 of 10 runs on main were cancelled.
+
+The build and the unit tests compile through sccache, which keeps rustc's output in the
+Actions cache; rust-cache keeps the dependencies from crates.io and leaves out the crates of
+this repository and `vendor/`, which are most of the build. The harnesses run without the
+wrapper, since `cargo_ra_jit.py` tests a user's own.
 
 `ci` is the job that says whether everything that ran passed, and it is the one check branch
-rules require. A job that is renamed or split does not change it. In the run of 2026-10-20 the
-builds took 6 minutes (Linux) to 13 minutes (Windows), and most parts 5 to 12 minutes after
-that. The whole run took about 35 minutes, and Windows finished last.
+rules and the merge queue require. A job that is renamed or split does not change it.
+Measured on 2026-10-22 ([#67](https://github.com/indexable-inc/ra-jit/pull/67)): the fast
+tier took 15.4 minutes with the sccache cache empty and 10.1 with it filled, where the macOS
+build (4 minutes) and then its harnesses (6) are the longest path. One tier that ran everything
+took 44 to 67 minutes before.
 
 The repository ruleset `main` (Settings, Rules) holds the default branch to three rules. A
 push to it needs `ci` to have passed on the commit pushed, the branch can't be deleted, and
@@ -279,14 +309,17 @@ out right, it fails the run until it is taken off the list:
 - `"open"` in a `buildmodel/*/case.json`: a case that comes out WRONG, on every host or by
   host (`{"linux": "why"}`).
 
-The other workflows: `bench-readme.yaml` measures real projects on the dedicated benchmark
-machine and commits the README's numbers to main. It runs only while the repository variable
-`BENCH_RUNNER` is `true` ([benchmarks.md](benchmarks.md)). `bench.yaml` (compile times) and
-`claims.yaml` (rustc's `tests/ui`) run on pull requests and pushes too, `nix-live.yaml` and
-`fork-sync.yaml` on pushes to main that touch what they cover, `fuzz.yaml` nightly, and
-`live-*.yaml` on their own branches. None of them is part of `ci`; on a pull request claims
-runs only its first 150 tests, so the few that once differed from rustc
-(`harness/ui-pinned.txt`, `uitest.py --tests`) run in ra-jit.yaml's `borrowck` job, which is. `site.yaml` deploys the
+The other workflows: `bench-readme.yaml` measures real projects on each platform's dedicated
+benchmark machine and commits the README's numbers to main. It runs a platform only once the
+repository variable `BENCH_RUNNERS` names it ([benchmarks.md](benchmarks.md#the-machines)). `bench.yaml` (the store's
+microbenchmarks, two minutes) runs on pull requests and pushes too. `claims.yaml` (all of
+rustc's `tests/ui`, both backends, and the scoreboard) and `nix-live.yaml` (the flake, the demo
+and live edits, 40 minutes; also on a change to the flake, `nix/` or the dependencies) run
+nightly and open an issue when they fail, like ra-jit.yaml's full tier. `fork-sync.yaml` runs
+on pushes to main that touch `vendor/`, `fuzz.yaml` nightly, and `live-*.yaml` on their own
+branches. None of them is part of `ci`; the few `tests/ui` programs that once differed from
+rustc (`harness/ui-pinned.txt`, `uitest.py --tests`) run in ra-jit.yaml's `pinned-ui` job,
+on Linux x86-64 and macOS, which is. `site.yaml` deploys the
 site, and `release.yaml` builds releases from tags, each target through
 `.github/scripts/build_release.py` (the `dist` profile with PGO, [reports/RELEASE-BUILD.md](reports/RELEASE-BUILD.md)),
 the recipe the flake's `dist` runs too. `pgo.yaml` trains the profiles it uses, by hand and on

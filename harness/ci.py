@@ -1,9 +1,15 @@
 #!/usr/bin/env python3
 """ci.py: the harnesses CI runs, in parts that take about the same time on a hosted runner.
 
-usage: ci.py PART      run the harnesses of PART for RA_JIT_BACKEND on this machine
-       ci.py --parts   the parts this machine has harnesses in, as a JSON list (CI's matrix)
-       ci.py --list    which harness runs in which part, on which hosts and backends
+usage: ci.py PART                 run the harnesses of PART for RA_JIT_BACKEND on this machine
+       ci.py --parts [TIER]       the parts this machine has harnesses in, as a JSON list (CI's
+                                  matrix): TIER `full` (the default) or `fast`
+       ci.py --list               which harness runs in which part, on which hosts and backends
+
+The fast tier, of every pull request and push, is the harnesses that take a few minutes, in the
+parts quick-1 and quick-2 of about four minutes each on a hosted runner. The full tier, nightly
+and by hand, is every harness, in the parts core, keys-N, buildmodel, store-kills, store and
+daemon.
 
 Every harness in a part runs even when one before it fails; the part fails at the end and names
 them. RA_JIT_BIN is the ra-jit the harnesses run, as for each harness on its own.
@@ -25,64 +31,76 @@ def on(*hosts, backend=None):
 EVERYWHERE = on()
 # (part, arguments, environment, where it runs). The order is the order of each part's run.
 HARNESSES = [
-    ("core", ["difftest.py", "corpus", "--bin", "runner", "--crate", "cases", "--layouts"], {}, EVERYWHERE),
-    ("core", ["programs.py"], {}, EVERYWHERE),
-    ("core", ["breakers.py"], {}, EVERYWHERE),
-    ("core", ["unwinds.py"], {}, EVERYWHERE),
-    ("core", ["growth.py"], {}, on(backend="cranelift")),
-    ("core", ["wholeprogram.py"], {}, on("linux", "macos")),
-    ("core", ["splices.py"], {}, EVERYWHERE),
-    ("core", ["live_e2e.py"], {}, on("linux-x86_64")),
+    ("core", ["difftest.py", "corpus", "--bin", "runner", "--crate", "cases", "--layouts"], {}, EVERYWHERE, 2),
+    ("core", ["programs.py"], {}, EVERYWHERE, 1),
+    # The daemon compiles every function of both programs, main too, and LLVM is optimizing: an
+    # edit of what both use has to reach each program, whatever its callers had built into them.
+    ("core", ["programs.py"], {"RA_JIT_ALONE": "1"}, on("linux", "macos", backend="llvm"), 1),
+    ("core", ["breakers.py"], {}, EVERYWHERE, 1),
+    ("core", ["unwinds.py"], {}, EVERYWHERE, 1),
+    ("core", ["growth.py"], {}, on(backend="cranelift"), 1),
+    ("core", ["wholeprogram.py"], {}, on("linux", "macos"), 2),
+    ("core", ["splices.py"], {}, EVERYWHERE, 2),
+    ("core", ["live_e2e.py"], {}, on("linux-x86_64"), 1),
     # Apple's linker leaves no more room than it is told, and gives a newer macOS chained fixups.
-    ("core", ["headerpad.py"], {}, on("macos")),
+    ("core", ["headerpad.py"], {}, on("macos"), 1),
+    # bun links with `-no_compact_unwind`, which leaves `__eh_frame` alone to the unwinder.
+    ("core", ["nocompact.py"], {}, on("macos"), 1),
     # A branch reaches 128 MB on AArch64, and the splice has to get past that. Mach-O is not spliced.
-    ("core", ["farsplices.py"], {"RA_JIT_SPLICE": "1"}, on("linux-aarch64")),
+    ("core", ["farsplices.py"], {"RA_JIT_SPLICE": "1"}, on("linux-aarch64"), 1),
     # `cargo ra-jit` hands Windows builds to cargo, so there the daemon links nothing to test.
-    ("core", ["unreached.py"], {}, on("linux", "macos")),
-    ("core", ["loadedits.py"], {}, on("linux", "macos")),
-    ("core", ["asmedits.py"], {}, EVERYWHERE),
-    ("core", ["includes.py"], {}, EVERYWHERE),
-    ("core", ["worktrees.py"], {}, EVERYWHERE),
-    ("core", ["worktrees.py", "--join", "--together"], {}, on("macos")),
-    ("core", ["worktrees.py", "--overlay"], {}, on("macos")),
+    ("core", ["unreached.py"], {}, on("linux", "macos"), 1),
+    ("core", ["loadedits.py"], {}, on("linux", "macos"), 2),
+    ("core", ["asmedits.py"], {}, EVERYWHERE, 1),
+    ("core", ["includes.py"], {}, EVERYWHERE, 1),
+    ("core", ["worktrees.py"], {}, EVERYWHERE, 2),
+    ("core", ["worktrees.py", "--join", "--together"], {}, on("macos"), 2),
+    ("core", ["worktrees.py", "--overlay"], {}, on("macos"), 2),
     # Tiers take live edits, which are macOS's alone; the harness picks its backends.
-    ("core", ["tiers.py"], {}, on("macos", backend="cranelift")),
+    ("core", ["tiers.py"], {}, on("macos", backend="cranelift"), 1),
     # Generated programs on fixed seeds, and generated edits under a daemon against cold builds.
     # Only x86-64 Linux has been fuzzed so far.
-    ("core", ["fuzz/fuzz.py", "smoke", "--backends", BACKEND], {}, on("linux-x86_64")),
-    ("core", ["fuzz/edits.py", "smoke", "--backends", BACKEND], {}, on("linux-x86_64")),
+    ("core", ["fuzz/fuzz.py", "smoke", "--backends", BACKEND], {}, on("linux-x86_64"), 2),
+    ("core", ["fuzz/edits.py", "smoke", "--backends", BACKEND], {}, on("linux-x86_64"), 2),
     # How much of the corpus LLVM compiled itself, and what it left to Cranelift and why.
-    ("core", ["backends.py", "corpus", "runner", "cases", "--bin", "runner", "--levels", "2f"], {}, on(backend="llvm")),
+    ("core", ["backends.py", "corpus", "runner", "cases", "--bin", "runner", "--levels", "2f"], {}, on(backend="llvm"), 2),
     # DWARF read by gdb out of an ELF executable, or a PDB read by cdb.
-    ("core", ["debuginfo.py"], {}, on("linux", "windows")),
-    *((f"keys-{k}", ["keys.py", "--shard", f"{k}/{KEYS}"], {}, EVERYWHERE) for k in range(1, KEYS + 1)),
+    ("core", ["debuginfo.py"], {}, on("linux", "windows"), None),
+    *((f"keys-{k}", ["keys.py", "--shard", f"{k}/{KEYS}"], {}, EVERYWHERE, None) for k in range(1, KEYS + 1)),
     # Builds for Linux targets besides the host; the cases of another host say so.
-    ("buildmodel", ["buildmodel.py", "--backend", BACKEND], {}, on("linux", "windows")),
-    ("store-kills", ["storekills.py", "--kills", "100"], {}, EVERYWHERE),
-    ("store", ["storecorrupts.py", "--rounds", "4"], {}, EVERYWHERE),
+    ("buildmodel", ["buildmodel.py", "--backend", BACKEND], {}, on("linux", "windows"), None),
+    ("store-kills", ["storekills.py", "--kills", "100"], {}, EVERYWHERE, None),
+    ("store", ["storecorrupts.py", "--rounds", "4"], {}, EVERYWHERE, None),
     # It mounts a tmpfs, or fills a disk image on Windows.
-    ("store", ["storefull.py"], {}, on("linux", "windows")),
-    ("store", ["storeshared.py"], {}, EVERYWHERE),
-    ("store", ["storeguards.py"], {}, on("linux")),
-    ("daemon", ["stress.py"], {}, EVERYWHERE),
-    ("daemon", ["selects.py"], {}, on("linux")),
+    ("store", ["storefull.py"], {}, on("linux", "windows"), None),
+    ("store", ["storeshared.py"], {}, EVERYWHERE, None),
+    ("store", ["storeguards.py"], {}, on("linux"), None),
+    ("daemon", ["stress.py"], {}, EVERYWHERE, 2),
+    ("daemon", ["selects.py"], {}, on("linux"), 2),
     # MinIO as one program in ~/s3tools, which CI puts there on Linux.
-    ("daemon", ["remote.py"], {}, on("linux")),
+    ("daemon", ["remote.py"], {}, on("linux"), None),
 ]
 
 
-def parts():
+def part_of(harness, tier):
+    part, _, _, _, quick = harness
+    return part if tier == "full" else quick and f"quick-{quick}"
+
+
+def parts(tier="full"):
     seen = []
-    for part, _, _, here in HARNESSES:
-        if here() and part not in seen:
+    for harness in HARNESSES:
+        part = part_of(harness, tier)
+        if part and harness[3]() and part not in seen:
             seen.append(part)
     return seen
 
 
 def run(part):
-    chosen = [(args, env) for p, args, env, here in HARNESSES if p == part and here()]
+    tier = "fast" if part.startswith("quick-") else "full"
+    chosen = [(h[1], h[2]) for h in HARNESSES if part_of(h, tier) == part and h[3]()]
     if not chosen:
-        sys.exit(f"ci.py: no harness of part {part!r} runs on {SYSTEM} {ARCH} with {BACKEND}; the parts here are {parts()}")
+        sys.exit(f"ci.py: no harness of part {part!r} runs on {SYSTEM} {ARCH} with {BACKEND}; the parts here are {parts(tier)}")
     failed, times = [], []
     for args, env in chosen:
         what = " ".join(args)
@@ -101,12 +119,12 @@ def run(part):
 
 
 def main():
-    arg = sys.argv[1] if len(sys.argv) == 2 else "--help"
-    if arg == "--parts":
-        print(json.dumps(parts()))
-    elif arg == "--list":
-        for part, args, env, _ in HARNESSES:
-            print(f"{part:12} {' '.join(f'{k}={v}' for k, v in env.items())} {' '.join(args)}")
+    arg = sys.argv[1] if len(sys.argv) in (2, 3) else "--help"
+    if arg == "--parts" and sys.argv[2:] in ([], ["full"], ["fast"]):
+        print(json.dumps(parts(*sys.argv[2:])))
+    elif arg == "--list" and len(sys.argv) == 2:
+        for part, args, env, _, quick in HARNESSES:
+            print(f"{part:12} {f'quick-{quick}' if quick else '':8} {' '.join(f'{k}={v}' for k, v in env.items())} {' '.join(args)}")
     elif arg.startswith("-"):
         print(__doc__)
         sys.exit(0 if arg == "--help" else 2)

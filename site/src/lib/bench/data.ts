@@ -32,6 +32,7 @@ export type Run = {
 	date: string;
 	commit?: string;
 	runUrl?: string;
+	platform: string;
 	machine?: string;
 	cpu?: string;
 	cores?: number;
@@ -66,7 +67,9 @@ export type ProjectHistory = {
 	phases: Record<string, PhaseHistory>;
 };
 export type Point = { date: string; commit?: string; runUrl?: string };
-export type BuildMachine = { machine: string; runs: Point[]; keys: string[]; results: Record<string, ProjectHistory> };
+export type BuildMachine = { machine: string; platform: string; runs: Point[]; keys: string[]; results: Record<string, ProjectHistory> };
+/** The newest run of one platform. */
+export type Latest = { run: Run; results: Record<string, Entry> };
 export type LiveMachine = {
 	machine: string;
 	runs: Point[];
@@ -77,7 +80,8 @@ export type LiveMachine = {
 export type History = {
 	build: BuildMachine[];
 	live: LiveMachine[];
-	latest: { run: Run; results: Record<string, Entry> } | null;
+	/** The newest run of each platform, in PLATFORMS order. */
+	latest: Latest[];
 	/** The charts keep the most recent runs of each machine. */
 	maxRuns: number;
 };
@@ -88,8 +92,10 @@ const PHASE_NUMBERS = [
 ] as const;
 const ENTRY_NUMBERS = ['store_mb', 'resident_ready_mb', 'resident_end_mb', 'builds', 'disk_mb', 'cargo_disk_mb'] as const;
 
+// The platforms each benchmark runs on, in the README's order (harness/benchplatforms.py PLATFORMS).
+export const PLATFORMS = ['macOS arm64', 'Linux aarch64', 'Linux x86-64'];
 // The README's order of projects (harness/benchreport.py PROJECTS) and of backends.
-const PROJECTS = ['ripgrep', 'fd', 'bat', 'hyperfine', 'just', 'axum', 'nushell', 'cargo'];
+const PROJECTS = ['ripgrep', 'fd', 'bat', 'hyperfine', 'just', 'axum', 'nushell', 'helix', 'bevy', 'zed', 'cargo'];
 const BACKENDS = ['cranelift', 'llvm'];
 const PROGRAMS = ['probe', 'life'];
 const MODES = ['socket', 'burst', 'replay', 'cargo'];
@@ -111,12 +117,24 @@ export function projectOrder(a: string, b: string) {
 	return ranked(PROJECTS)(pa, pb) || ranked(BACKENDS)(ba ?? '', bb ?? '');
 }
 export const backendOrder = ranked(BACKENDS);
+export const platformOrder = ranked(PLATFORMS);
+
+/** A line's platform: its own, or for a line from before lines said it, what its CPU says. */
+function platformOf(line: Json) {
+	const named = str(line.platform);
+	if (named) return named;
+	const cpu = str(line.cpu) ?? '';
+	if (/Apple/.test(cpu)) return 'macOS arm64';
+	if (/Neoverse|Graviton|aarch64|ARM/i.test(cpu)) return 'Linux aarch64';
+	return 'Linux x86-64';
+}
 
 function run(line: Json): Run {
 	return {
 		date: str(line.date) ?? '',
 		commit: str(line.commit),
 		runUrl: str(line.run_url),
+		platform: platformOf(line),
 		machine: str(line.machine),
 		cpu: str(line.cpu),
 		cores: num(line.cores),
@@ -235,8 +253,8 @@ export function parseHistory(files: string[]): History {
 				phases,
 			};
 		}
-		return { machine, runs: group.map(point), keys, results };
-	});
+		return { machine, platform: platformOf(group.at(-1)!), runs: group.map(point), keys, results };
+	}).sort((a, b) => platformOrder(a.platform, b.platform));
 
 	const live: LiveMachine[] = machines(lives).map(({ machine, group }) => {
 		const programs = [...new Set(group.flatMap((l) => Object.keys(l.results as Json)))].sort(ranked(PROGRAMS));
@@ -254,15 +272,17 @@ export function parseHistory(files: string[]): History {
 		return { machine, runs: group.map(point), programs, modes, results };
 	});
 
-	const last = [...builds].sort(byDate).at(-1);
-	let latest: History['latest'] = null;
-	if (last) {
-		const results: Record<string, Entry> = {};
-		for (const key of Object.keys(last.results as Json).sort(projectOrder)) {
-			const e = entry((last.results as Json)[key]);
-			if (e) results[key] = e;
-		}
-		latest = { run: run(last), results };
-	}
+	const newest = new Map<string, Json>();
+	for (const line of [...builds].sort(byDate)) newest.set(platformOf(line), line);
+	const latest: Latest[] = [...newest]
+		.sort(([a], [b]) => platformOrder(a, b))
+		.map(([, last]) => {
+			const results: Record<string, Entry> = {};
+			for (const key of Object.keys(last.results as Json).sort(projectOrder)) {
+				const e = entry((last.results as Json)[key]);
+				if (e) results[key] = e;
+			}
+			return { run: run(last), results };
+		});
 	return { build, live, latest, maxRuns: MAX_RUNS };
 }

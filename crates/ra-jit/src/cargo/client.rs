@@ -56,7 +56,15 @@ pub(crate) fn ask(request: Request, start: Start) -> anyhow::Result<Option<Reply
         }
         // One that took its socket with it shut down; one that was killed left it.
         Err(_) if left(&socket) => return Ok(None),
-        reply => reply?,
+        reply => {
+            let reply = reply?;
+            if matches!(reply, Reply::Stopping)
+                || replaces && matches!(reply, Reply::Restart { .. })
+            {
+                ended(&mut stream);
+            }
+            reply
+        }
     };
     if let Reply::Restart { .. } = reply {
         if start == Start::Never {
@@ -66,6 +74,14 @@ pub(crate) fn ask(request: Request, start: Start) -> anyhow::Result<Option<Reply
         reply = exchange(&mut started(&home)?, &envelope)?;
     }
     Ok(Some(reply))
+}
+
+/// Waits for a daemon that answered it ends to have exited, with its workers stopped and its
+/// log written: it keeps the connection until its process exits, and no other process has it.
+fn ended(stream: &mut UnixStream) {
+    let _ = stream.set_read_timeout(Some(PATIENCE));
+    let mut rest = [0; 64];
+    while matches!(std::io::Read::read(stream, &mut rest), Ok(1..)) {}
 }
 
 /// Whether the daemon that did not answer has shut down, rather than been killed.

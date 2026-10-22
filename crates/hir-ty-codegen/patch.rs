@@ -25,7 +25,7 @@ use super::{
     Roots, SymbolResolver, TheirStatics, Walked, async_blocks, compiled_instance, compiled_root,
     compiled_static, declaration_location,
     fragment::{CompiledFunction, DataRequest, FuncTarget, Requests},
-    home::{body_file, body_files},
+    home::{body_file, body_files, written_in},
     instance_serial, is_thread_local, left_to_rustc, root_serial, row_location, source_location,
     static_serial, target,
 };
@@ -224,6 +224,112 @@ impl TheirWalk {
     }
 }
 
+/// A function rustc's copy of a function left to rustc calls rustc's copy of: an instance of
+/// a generic one, which rustc puts in the crate that calls it, or one no copy of ours takes
+/// the place of. rustc's copies are of the source the daemon started from, so the copy of
+/// the function left to rustc is only good while each of these is what it was then.
+#[derive(Clone)]
+struct Reached {
+    node: Node,
+    env: StoredParamEnvAndCrate,
+    /// The function left to rustc it was reached from.
+    by: FunctionId,
+    krate: Crate,
+    files: Option<Box<[FileId]>>,
+    /// Whether what it calls is among the others: one that does not compile calls nobody
+    /// knows what.
+    walked: bool,
+}
+
+impl Reached {
+    /// From the functions left to rustc through what of rustc's they reach, stopping at a
+    /// function of ours: rustc's code calls it by its symbol, which ours takes over. The
+    /// functions of crates the build has none of are only rustc's, and no edit reaches them.
+    fn walk(
+        db: &dyn HirDatabase,
+        from_rustc: &[FunctionId],
+        compiled: &[(FunctionId, String)],
+        skipped: &[(FunctionId, CodegenError)],
+    ) -> Vec<Reached> {
+        let ours: FxHashSet<FunctionId> = compiled.iter().map(|it| it.0).collect();
+        let crates: FxHashSet<Crate> = compiled
+            .iter()
+            .map(|it| it.0)
+            .chain(skipped.iter().map(|it| it.0))
+            .map(|it| it.krate(db))
+            .collect();
+        let (mut stack, mut reached) = (Vec::new(), Vec::new());
+        for &by in from_rustc {
+            match compiled_root(db, by) {
+                Ok(compiled) => stack.push((&compiled.requests, by)),
+                Err(_) => reached.push(Reached {
+                    node: Node::Root(by),
+                    env: closure_env(db, by),
+                    by,
+                    krate: by.krate(db),
+                    files: None,
+                    walked: false,
+                }),
+            }
+        }
+        let mut seen = FxHashSet::default();
+        while let Some((requests, by)) = stack.pop() {
+            for request in &requests.funcs {
+                let FuncTarget::Instance(instance, env) = &request.target else { continue };
+                if !seen.insert((instance.clone(), env.clone())) {
+                    continue;
+                }
+                let (node, krate, files, requests) = match instance.def {
+                    InstanceDef::Fn(func) if instance.args.as_ref().is_empty() => {
+                        if ours.contains(&func) || !crates.contains(&func.krate(db)) {
+                            continue;
+                        }
+                        let compiled = compiled_root(db, func).as_ref().ok();
+                        let files = Some(Box::from([body_file(db, func.into())]));
+                        (Node::Root(func), func.krate(db), files, compiled.map(|it| &it.requests))
+                    }
+                    _ => {
+                        let compiled = compiled_instance(db, instance.clone(), env.clone());
+                        let krate = written_in(db, instance).map_or(env.krate, |it| it.krate(db));
+                        let requests = compiled.as_ref().ok().map(|it| &it.requests);
+                        (
+                            Node::Instance(instance.clone()),
+                            krate,
+                            body_files(db, instance),
+                            requests,
+                        )
+                    }
+                };
+                stack.extend(requests.map(|it| (it, by)));
+                let walked = requests.is_some();
+                reached.push(Reached { node, env: env.clone(), by, krate, files, walked });
+            }
+        }
+        reached
+    }
+
+    fn mark(&self, db: &dyn HirDatabase) -> Option<Mark> {
+        let (serial, compiled) = match &self.node {
+            Node::Root(func) => (root_serial(db, *func), compiled_root(db, *func)),
+            Node::Instance(instance) => (
+                instance_serial(db, instance.clone(), self.env.clone()),
+                compiled_instance(db, instance.clone(), self.env.clone()),
+            ),
+            Node::Static(_) => return None,
+        };
+        Some(Mark::new(db, serial, &compiled.as_ref().ok()?.requests))
+    }
+
+    /// The function whose code it is.
+    fn func(&self, db: &dyn HirDatabase) -> Option<FunctionId> {
+        match &self.node {
+            Node::Root(func) => Some(*func),
+            Node::Instance(instance) => written_in(db, instance),
+            Node::Static(_) => None,
+        }
+    }
+}
+
 #[derive(Clone)]
 pub(super) struct BaseStatic {
     pub(super) symbol: String,
@@ -264,13 +370,22 @@ pub struct OutOfDate {
     /// Whether it was left to rustc in the build the daemon started from, when rustc compiled
     /// it from source that built: the reason is then ra-jit's, not an error of the source.
     pub left_from_the_start: bool,
+    /// What rustc's copy calls a copy of rustc's of that changed, when it is not the function
+    /// itself. `None` in it for code of no function of its own.
+    pub calls: Option<Option<FunctionId>>,
 }
 
-/// The functions left to rustc as rustc compiled them: its copies are not built again while
-/// the daemon runs, so one is only good for as long as its function is what it was then.
+/// The functions left to rustc as rustc compiled them, and what of rustc's they call: its
+/// copies are not built again while the daemon runs, so one is only good for as long as its
+/// function, and what it calls of rustc's, is what it was then.
 #[derive(Clone, Default)]
 pub(crate) struct Frozen {
-    left: Option<FxHashMap<FunctionId, Left>>,
+    /// `None` for one an edit had reached by the time it was first left to rustc: what rustc
+    /// compiled of it is not known.
+    left: Option<FxHashMap<FunctionId, Option<Left>>>,
+    /// What each of [`Reached`] compiled to when first reached, with `None` as for `left`, and
+    /// `Some(None)` for one that did not compile.
+    reached: FxHashMap<(Node, StoredParamEnvAndCrate), Option<Option<Mark>>>,
     /// The crates that have seen an edit since.
     edited: FxHashSet<Crate>,
     /// The files that have seen an edit to the bodies of functions alone, which can change
@@ -294,7 +409,35 @@ impl Frozen {
         self.edited.extend(crates);
     }
 
-    /// A function of `base` that rustc's copy is no longer right for, and why.
+    /// Whether an edit since the daemon started can have changed what the root is.
+    fn touched_root(&self, db: &dyn HirDatabase, root: FunctionId) -> bool {
+        self.edited.contains(&root.krate(db))
+            || self.edited_bodies.contains(&body_file(db, root.into()))
+    }
+
+    fn touched(&self, db: &dyn HirDatabase, reached: &Reached) -> bool {
+        let bodies = match &reached.files {
+            // What it calls is of its crates or of what they depend on: rustc copies the
+            // generic functions of those into it.
+            _ if !reached.walked => {
+                let mut crates: FxHashSet<Crate> = FxHashSet::default();
+                for krate in [reached.krate, reached.env.krate] {
+                    crates.insert(krate);
+                    crates.extend(krate.transitive_deps(db));
+                }
+                let in_crates = |file: FileId| {
+                    base_db::relevant_crates(db, file).iter().any(|it| crates.contains(it))
+                };
+                self.edited_bodies.iter().any(|&it| in_crates(it))
+            }
+            Some(files) => files.iter().any(|it| self.edited_bodies.contains(it)),
+            None => !self.edited_bodies.is_empty(),
+        };
+        bodies || self.edited.contains(&reached.krate) || self.edited.contains(&reached.env.krate)
+    }
+
+    /// A function of `base` that rustc's copy is no longer right for, and why. The first call
+    /// with a base of ours notes what rustc compiled: of what no edit has reached by then.
     pub(crate) fn out_of_date(&mut self, db: &dyn HirDatabase, base: &Base) -> Option<OutOfDate> {
         let now = || {
             let theirs = base.skipped.iter().filter(|it| !it.1.no_symbol());
@@ -306,27 +449,57 @@ impl Frozen {
                 func,
                 why: why.to_string(),
                 left_from_the_start: true,
+                calls: None,
             });
-            self.left = Some(now().map(|(root, _)| (root, Left::of(db, root))).collect());
-            return other;
+            let left = now()
+                .map(|(root, _)| (root, (!self.touched_root(db, root)).then(|| Left::of(db, root))))
+                .collect();
+            self.left = Some(left);
+            return other.or_else(|| self.out_of_date(db, base));
         };
-        now().find_map(|(root, why)| {
+        let own = now().find_map(|(root, why)| {
             let fresh = match left.get(&root) {
                 _ if distrusted(root) => false,
                 // Nothing to tell a change by: any edit that it can see may be one.
-                Some(Left { code: None, .. }) => {
-                    !self.edited.contains(&root.krate(db))
-                        && !self.edited_bodies.contains(&body_file(db, root.into()))
-                }
-                Some(was) => probe(|| Left::of(db, root)).as_ref() == Some(was),
-                None => false,
+                Some(Some(Left { code: None, .. })) => !self.touched_root(db, root),
+                Some(Some(was)) => probe(|| Left::of(db, root)).as_ref() == Some(was),
+                Some(None) | None => false,
             };
             (!fresh).then(|| OutOfDate {
                 func: root,
                 why: why.to_string(),
                 left_from_the_start: left.contains_key(&root),
+                calls: None,
             })
-        })
+        });
+        if own.is_some() {
+            return own;
+        }
+        let why = |by| base.skipped.iter().find(|it| it.0 == by).map(|it| it.1.to_string());
+        for reached in &base.reached {
+            let key = (reached.node.clone(), reached.env.clone());
+            let touched = self.touched(db, reached);
+            let fresh = match self.reached.get(&key) {
+                Some(Some(_)) if !touched => true,
+                Some(Some(Some(was))) => probe(|| reached.mark(db)).flatten() == Some(*was),
+                // Without code to tell a change by, any edit that reaches it may be one.
+                Some(Some(None) | None) => false,
+                None => {
+                    let known = (!touched).then(|| probe(|| reached.mark(db)).flatten());
+                    self.reached.insert(key, known);
+                    !touched
+                }
+            };
+            if !fresh {
+                return Some(OutOfDate {
+                    func: reached.by,
+                    why: why(reached.by).unwrap_or_default(),
+                    left_from_the_start: true,
+                    calls: Some(reached.func(db).filter(|&it| it != reached.by)),
+                });
+            }
+        }
+        None
     }
 }
 
@@ -349,6 +522,8 @@ pub(super) struct Base {
     from_rustc: Vec<FunctionId>,
     their_statics: TheirStatics,
     their_walk: TheirWalk,
+    /// What rustc's copies of `from_rustc` call of rustc's.
+    reached: Vec<Reached>,
     pub(super) instances: FxIndexMap<Instance, BaseInstance>,
     homes: Homes,
     pub(super) statics: FxHashMap<StaticId, BaseStatic>,
@@ -697,6 +872,7 @@ impl Base {
         let from_rustc: Vec<FunctionId> = left_to_rustc(db, cg.symbols, skipped).collect();
         let (their_statics, walked) = TheirStatics::walk(db, from_rustc.iter().copied());
         let their_walk = TheirWalk::new(db, &their_statics, walked, &mut instances, &mut statics);
+        let reached = Reached::walk(db, &from_rustc, compiled, skipped);
         let rejected = cg
             .rejected
             .iter()
@@ -732,6 +908,7 @@ impl Base {
             from_rustc,
             their_statics,
             their_walk,
+            reached,
             instances,
             statics,
             found: cg
@@ -782,6 +959,7 @@ impl Base {
             from_rustc: Vec::new(),
             their_statics: TheirStatics::default(),
             their_walk: TheirWalk::default(),
+            reached: Vec::new(),
             instances: FxIndexMap::default(),
             homes: Homes::default(),
             statics: FxHashMap::default(),
@@ -1337,7 +1515,8 @@ impl Base {
             if !touched && !check_all {
                 continue;
             }
-            if probe(|| Left::of(db, root)).as_ref() != Some(was) {
+            // Without code to tell a change by, any edit that reaches it may be one.
+            if was.code.is_none() && touched || probe(|| Left::of(db, root)).as_ref() != Some(was) {
                 if !touched {
                     eprintln!("check-all: MISSED function left to rustc {root:?}");
                     continue;
@@ -1607,6 +1786,16 @@ impl Base {
 #[cfg(test)]
 mod tests {
     use super::probe;
+
+    #[test]
+    fn a_program_started_again_keeps_what_rustcs_copies_are_of() {
+        let file = base_db::FileId::from_raw(7);
+        let mut known = crate::Rejections { patching: true, full: true, ..Default::default() };
+        known.frozen.edit_bodies(file);
+        known.start_again();
+        assert!(known.patching && !known.full);
+        assert!(known.frozen.edited_bodies.contains(&file));
+    }
 
     #[test]
     fn a_probe_that_is_interrupted_goes_on_unwinding_and_one_that_panics_finds_nothing() {

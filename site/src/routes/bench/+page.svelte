@@ -25,8 +25,10 @@
 	const cpuLine = (run: Run) =>
 		[run.cpu?.replace(/( \d+-Core)? Processor$/, ''), run.cores ? `${run.cores} cores` : undefined].filter(Boolean).join(', ');
 
-	// Latest run.
-	let latest = $derived(data.latest);
+	// Latest run, of the platform chosen.
+	let platforms = $derived(data.latest.map((l) => ({ value: l.run.platform, label: l.run.platform })));
+	let platformWanted = $state('Linux x86-64');
+	let latest = $derived(data.latest.find((l) => l.run.platform === platformWanted) ?? data.latest.at(-1));
 	let latestKeys = $derived(latest ? Object.keys(latest.results) : []);
 	let summaryBackends = $derived(backendOptions(latestKeys));
 	let summaryBackendWanted = $state('cranelift');
@@ -77,7 +79,7 @@
 	};
 
 	// History of build runs.
-	let buildMachines = $derived(data.build.map((m) => ({ value: m.machine, label: machineLabel(m.machine) })));
+	let buildMachines = $derived(data.build.map((m) => ({ value: m.machine, label: `${m.platform}: ${machineLabel(m.machine)}` })));
 	let buildMachineWanted = $state('');
 	let buildMachine = $derived(
 		data.build.find((m) => m.machine === buildMachineWanted) ??
@@ -156,15 +158,19 @@
 	<h1>Benchmark history</h1>
 	<p class="lede">
 		How long ra-jit takes to build after an edit, next to plain cargo on the same machine, on real projects at pinned commits
-		(<a href="{REPO}/blob/main/docs/benchmarks.md">how it is measured</a>), and how soon a live edit runs. It updates after
-		every push to main and every night.
+		(<a href="{REPO}/blob/main/docs/benchmarks.md">how it is measured</a>), and how soon a live edit runs. Each platform,
+		macOS arm64, Linux aarch64 and Linux x86-64, is measured on a machine of its own, so compare its numbers with each other,
+		not with another platform's. It updates after every push to main and every night.
 	</p>
 
 	<h2>Latest run</h2>
 	{#if latest}
 		{@const run = latest.run}
+		{#if platforms.length > 1}
+			<Choice label="Platform" options={platforms} value={run.platform} onchange={(v) => ((platformWanted = v), (buildMachineWanted = ''))} />
+		{/if}
 		<p>
-			{machineLabel(run.machine ?? '')}{#if cpuLine(run)}&nbsp;({cpuLine(run)}){/if}, ra-jit
+			{run.platform}, {machineLabel(run.machine ?? '')}{#if cpuLine(run)}&nbsp;({cpuLine(run)}){/if}, ra-jit
 			{#if run.commit}<a href={commitUrl(run.commit)}><code>{short(run.commit)}</code></a>{:else}(commit unknown){/if}
 			on {when(run.date)}{#if run.runs}, median of {run.runs} edits{/if}.
 			{#if run.runUrl}<a href={run.runUrl}>The CI run</a>.{/if}

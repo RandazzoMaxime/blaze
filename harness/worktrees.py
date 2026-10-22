@@ -94,6 +94,26 @@ def splice(program):
     return ["--binary", program["bin"]]
 
 
+def logged(log_path, since):
+    """What the daemon logged from byte `since` on, at most its last 300 lines."""
+    with open(log_path, errors="replace") as log:
+        log.seek(since)
+        lines = log.readlines()
+    return "".join("    daemon: " + line for line in lines[-300:])
+
+
+def unanswered(daemon, log_path, since):
+    """Prints where the daemon's threads wait and what it logged in the step, for a request it never answered."""
+    stacks = ["sample", str(daemon.pid), "2"] if sys.platform == "darwin" else \
+        ["gdb", "-p", str(daemon.pid), "-batch", "-ex", "thread apply all bt"]
+    try:
+        print(subprocess.run(stacks, capture_output=True, text=True, timeout=60).stdout[-60000:], flush=True)
+    except (OSError, subprocess.TimeoutExpired) as error:
+        print(f"    no stacks of the daemon: {error}", flush=True)
+    print(logged(log_path, since), flush=True)
+    daemon.kill()
+
+
 def main():
     # cargo names a checkout by its real path, and the temporary directory of macOS is a link.
     work = os.path.realpath(tempfile.mkdtemp(prefix="ra-jit-worktrees-"))
@@ -147,6 +167,8 @@ def main():
 
     wrong = asked = 0
     for what, edits, order, broken in STEPS:
+        # From the end of the step before: what the daemon did meanwhile is part of this one.
+        since, wrong_before = os.path.getsize(log_path), wrong
         for at, path, old, new in edits:
             path = os.path.join(checkouts[at]["ws"], path)
             if old is None:
@@ -174,7 +196,12 @@ def main():
         for at in order:
             checkout = checkouts[at]
             began, reply = asking.pop(at, None) or ask(at)
-            reply = reply.communicate(timeout=120)[0].strip()
+            try:
+                reply = reply.communicate(timeout=120)[0].strip()
+            except subprocess.TimeoutExpired:
+                print(f"    checkout {at} NO ANSWER in 120 s; the daemon's threads and what it logged in the step:", flush=True)
+                unanswered(daemon, log_path, since)
+                raise
             took = (time.time() - began) * 1000
             cargo = subprocess.run(["cargo", "build", "-q", "-p", "sapp", *TARGET_ARGS], cwd=checkout["ws"], capture_output=True,
                                    text=True, env={**os.environ, "CARGO_TARGET_DIR": checkout["reference"]})
@@ -193,6 +220,8 @@ def main():
             print(f"    checkout {at} {verdict:16} {took:6.0f} ms  {reply[:90]}", flush=True)
             if daemon.poll() is not None:
                 raise SystemExit(f"the daemon died: {log_path}")
+        if wrong > wrong_before:
+            print(f"    what the daemon logged in the step:\n{logged(log_path, since)}", flush=True)
     daemon.kill()
     print(f"{asked - wrong} of {asked} right; log {log_path}")
     sys.exit(1 if wrong else 0)

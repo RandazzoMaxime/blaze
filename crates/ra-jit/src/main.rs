@@ -2728,6 +2728,31 @@ fn rustcs_to_patch(args: &Args, unwritten: bool) -> Option<PathBuf> {
 /// Has the executable at `--splice` be the one rustc linked at `rustcs`, and the objects
 /// empty, for edits to be spliced into it as patches. Watches every file rustc read: one an
 /// `include!` in a body names is first seen when the body is compiled.
+/// The file at `path` as the filesystem names it, through no link. rustc's dep-info names a
+/// file of the workspace where it is, and the workspace's files are named through the path it
+/// was given (`/tmp` is a link on macOS).
+fn real_path(path: &Path) -> PathBuf {
+    dunce::canonicalize(path).unwrap_or_else(|_| path.to_owned())
+}
+
+/// The sources of `files` that are among `written`, which rustc's dep-info names.
+fn written_sources<'a>(
+    files: &[WatchedFile],
+    written: impl IntoIterator<Item = &'a Path>,
+) -> FxHashMap<vfs::FileId, PathBuf> {
+    let written: FxHashSet<PathBuf> = written.into_iter().map(real_path).collect();
+    if written.is_empty() {
+        return FxHashMap::default();
+    }
+    let source = |it: &WatchedFile| match it.file {
+        Watched::Source(id) if written.contains(&real_path(&it.path)) => {
+            Some((id, it.path.clone()))
+        }
+        _ => None,
+    };
+    files.iter().filter_map(source).collect()
+}
+
 fn start_from_rustc(
     args: &Args,
     rustcs: &Path,
@@ -2753,8 +2778,14 @@ fn start_from_rustc(
     let names = std::thread::spawn(move || symbols::Linked::read(&rustcs));
     lock(&RUSTC_SYMBOLS).insert(binary.to_owned(), LinkedNames::Reading(names));
     let mut watched: FxHashSet<PathBuf> = files.iter().map(|it| it.path.clone()).collect();
+    let mut real_watched: Option<FxHashSet<PathBuf>> = None;
     for source in table.sources() {
         if !watched.insert(source.to_owned()) {
+            continue;
+        }
+        let real_watched = real_watched
+            .get_or_insert_with(|| files.iter().map(|it| real_path(&it.path)).collect());
+        if !real_watched.insert(real_path(source)) {
             continue;
         }
         let Some(path) = source.to_str().and_then(|it| AbsPathBuf::try_from(it).ok()) else {
@@ -3392,12 +3423,7 @@ fn link(
                 // and is spliced once the edits stop (see `splicer`).
                 Ok(patch) if defer && baseline.uuid().is_some() => {
                     lock(&LINKED).insert(binary.to_owned(), Executable::Read(Box::new(baseline)));
-                    if cfg!(target_os = "linux") && live::any_running() {
-                        // Linux keeps the running inode executable. The next start gets a
-                        // fresh link after the process exits.
-                    } else {
-                        splicer::defer(binary, patch);
-                    }
+                    splicer::defer(binary, patch);
                     eprintln!(
                         "link: {:.1?} (the splice waits for the edits to stop)",
                         start.elapsed()
@@ -3805,8 +3831,20 @@ fn refusal(
     if let Some(broken) = broken {
         return Some(Refused::Error(broken));
     }
-    let hir_ty_codegen::OutOfDate { func, why, left_from_the_start } = out_of_date?;
-    let name = hir::Function::from(func).name(db).display(db, syntax::Edition::CURRENT).to_string();
+    let hir_ty_codegen::OutOfDate { func, why, left_from_the_start, calls } = out_of_date?;
+    let named =
+        |func| hir::Function::from(func).name(db).display(db, syntax::Edition::CURRENT).to_string();
+    let name = named(func);
+    if let Some(calls) = calls {
+        let calls = match calls {
+            Some(it) => format!("calls rustc's copy of `{}`, which is", named(it)),
+            None => "may call code of rustc's that is".to_owned(),
+        };
+        return Some(Refused::Cargos(format!(
+            "`{name}` is not compiled by ra-jit, and rustc's copy of it {calls} from before the \
+             edit: {why}"
+        )));
+    }
     // What the frontend turns down is as a rule code that does not compile, unless it turned
     // the function down when rustc compiled it.
     if why.starts_with("frontend:") && !left_from_the_start {
@@ -4734,7 +4772,6 @@ impl Builds {
         let program = &mut programs[at];
         let Some(answer) = answer else {
             eprintln!("interrupted: {}", program.args.krate);
-            let patching = program.known.patching;
             // The executable is still what rustc linked, which edits go on patching.
             let binary = program.args.splice.as_deref();
             let rustcs = program
@@ -4742,8 +4779,7 @@ impl Builds {
                 .take_rustc()
                 .filter(|_| binary.is_some_and(|it| lock(&RUSTC_LINKED).contains(it)));
             let patches_rustcs = rustcs.is_some();
-            program.known = Rejections::default();
-            program.known.patching = patching;
+            program.known.start_again();
             program.known.put_rustc(rustcs);
             program.whole = None;
             if !patches_rustcs {
@@ -5682,6 +5718,9 @@ fn run_holding(
         eprintln!("backend: {backend}");
     }
     process_wide();
+    if args.socket.is_some() || args.watch {
+        hir_ty_codegen::builds_edits();
+    }
     // Nothing asks for a symbol before the first build, so they load next to the workspace.
     let (symbol_files, root) = (args.symbol_files.clone(), args.root()?);
     let (said, whole) = match ahead {
@@ -5857,13 +5896,7 @@ fn run_holding(
     // source written since: an error there fails the build rather than run the old code.
     let written: FxHashSet<&Path> = table.all_written_since_built().collect();
     if !written.is_empty() {
-        let paths: FxHashMap<vfs::FileId, PathBuf> = files
-            .iter()
-            .filter_map(|it| match it.file {
-                Watched::Source(id) if written.contains(&*it.path) => Some((id, it.path.clone())),
-                _ => None,
-            })
-            .collect();
+        let paths = written_sources(&files, written.iter().copied());
         let mut edited: Vec<_> = paths.keys().copied().collect();
         edited.sort_unstable();
         let sources = Sources { paths };
@@ -6803,7 +6836,7 @@ fn run_holding(
                 }
                 // The program is linked unless every client of it loads the patch.
                 let link = clients.iter().any(|it| it.0 != Request::Patch);
-                let defer = clients.iter().all(|it| it.0 == Request::Edit) || live::any_running();
+                let defer = clients.iter().all(|it| it.0 == Request::Edit);
                 let patches = program.known.patches() && !program.moved;
                 let own_base = program.known.builds_base();
                 let kept = !own_base && (patches || program.interrupted >= INTERRUPTIONS);
@@ -6855,9 +6888,8 @@ fn run_holding(
                             || clients.iter().any(|it| it.0 == at && it.1.0 != Request::Patch);
                         let link = link && !detached;
                         let mut theirs = clients.iter().filter(|it| it.0 == at).peekable();
-                        let defer = (theirs.peek().is_some()
-                            && theirs.all(|it| it.1.0 == Request::Edit))
-                            || live::any_running();
+                        let defer =
+                            theirs.peek().is_some() && theirs.all(|it| it.1.0 == Request::Edit);
                         let (db, listed, paths, edit) = (db.clone(), &*listed, &*paths, &edit);
                         let wanted = outputs.get(&at);
                         let build = scope.spawn(move || {
@@ -7121,9 +7153,7 @@ impl Program {
     /// told why, the worker stays, and the next build is a whole one, since what the build
     /// left of the patch base and of the executable may be half written.
     fn panicked(&mut self, panic: &(dyn std::any::Any + Send)) -> Result<String, Refused> {
-        let patching = self.known.patching;
-        self.known = Rejections::default();
-        self.known.patching = patching;
+        self.known.start_again();
         self.unbuilt.stale = true;
         (self.wrote, self.whole) = (None, None);
         let why = format!("a build of {} panicked: {}", self.args.krate, panic_message(panic));
@@ -7185,13 +7215,14 @@ impl Program {
         let Parts { root, base, members, debug } = parts;
         (self.args.checkout, self.args.base) = (root, base);
         (self.args.members, self.args.debug) = (members, debug);
-        let patching = self.known.patching;
-        self.known = Rejections::default();
-        self.known.patching = patching;
         (self.whole, self.moved) = (None, true);
         self.unbuilt.stale = true;
         match linked {
+            // rustc has built the checkout since: its copies are new ones.
             Some(linked) => {
+                let patching = self.known.patching;
+                self.known = Rejections::default();
+                self.known.patching = patching;
                 self.args.symbol_files = linked.symbol_files.clone();
                 if linked.link_cmd.is_some() {
                     self.args.link_cmd = linked.link_cmd.clone();
@@ -7202,7 +7233,10 @@ impl Program {
                 self.unbuilt.named_anew = true;
                 self.args.widened.clear();
             }
-            None => self.known.distrust(db, new),
+            None => {
+                self.known.start_again();
+                self.known.distrust(db, new);
+            }
         }
         Ok(())
     }
@@ -7646,6 +7680,30 @@ mod tests {
         };
         assert!(!changed("same.rs"));
         assert!(changed("written.rs"));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// A workspace given through a link (`/tmp` on macOS) has its files named through it, and
+    /// rustc's dep-info names them where they are: a file written after rustc built it is
+    /// the workspace's file all the same, and an error in it fails the build (#50).
+    #[cfg(unix)]
+    #[test]
+    fn a_source_written_since_rustc_built_it_is_found_through_a_link() {
+        let dir = std::env::temp_dir().join(format!("ra-jit-written-{}", std::process::id()));
+        let (real, link) = (dir.join("real"), dir.join("link"));
+        std::fs::create_dir_all(real.join("src")).unwrap();
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        let (written, same) = (real.join("src/lib.rs"), real.join("src/same.rs"));
+        let mut files = Vec::new();
+        for (id, path) in [(0, &written), (1, &same)] {
+            std::fs::write(path, "fn f() {}\n").unwrap();
+            let watched = Watched::Source(vfs::FileId::from_raw(id));
+            let named = link.join(path.strip_prefix(&real).unwrap());
+            files.extend(WatchedFile::new(watched, &named, &named));
+        }
+        let found = written_sources(&files, [&*real_path(&written)]);
+        let found: Vec<_> = found.into_iter().collect();
+        assert_eq!(found, [(vfs::FileId::from_raw(0), link.join("src/lib.rs"))]);
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

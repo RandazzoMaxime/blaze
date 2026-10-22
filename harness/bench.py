@@ -770,7 +770,9 @@ def library():
     """The source of the toolchain's standard library, which is pinned with the toolchain."""
     sysroot = subprocess.run(["rustc", "--print", "sysroot"], capture_output=True, text=True,
                              env=dict(os.environ, RUSTUP_TOOLCHAIN=TOOLCHAIN), check=True).stdout.strip()
-    return os.path.join(sysroot, "lib/rustlib/src/rust/library")
+    library = os.path.join(sysroot, "lib/rustlib/src/rust/library")
+    # A nix toolchain is a tree of symlinks to its rust-src, and ripgrep searches no symlinked file.
+    return os.path.dirname(os.path.dirname(os.path.dirname(os.path.realpath(os.path.join(library, "core/src/lib.rs")))))
 
 
 def runtime(name, spec, theirs, ws, build, runs, wrong):
@@ -825,6 +827,13 @@ def machine():
 
     memory = read("/proc/meminfo", r"^MemTotal:\s+(\d+) kB")
     cpu = read("/proc/cpuinfo", r"^model name\s*:\s*(.*)$")
+    if not cpu and platform.system() == "Linux":
+        # An Arm core's /proc/cpuinfo has no model name; lscpu names it from the part number.
+        try:
+            found = re.search(r"^Model name:\s*(.*)$", subprocess.run(["lscpu"], capture_output=True, text=True).stdout, re.M)
+            cpu = found[1].strip() if found else None
+        except OSError:
+            pass
     if platform.system() == "Darwin":
         cpu = first_line("sysctl", "-n", "machdep.cpu.brand_string")
         memory = str(int(first_line("sysctl", "-n", "hw.memsize") or 0) // 1024) or None

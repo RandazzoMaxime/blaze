@@ -6958,3 +6958,75 @@ pub mod inlined {
         (was_x.max(x), was_y.min(y), was_z, size_of_val(&x) + size_of_val(&y), z.len())
     }
 }
+
+/// An `impl Trait` whose code is a trait method's `impl Trait`, as through
+/// `impl<T: RenderOnce> View for T`: the type is the impl's once the types are known.
+pub mod opaque_of_trait_method {
+    pub trait Value {
+        fn get(self) -> u32;
+    }
+
+    impl Value for u32 {
+        fn get(self) -> u32 {
+            self
+        }
+    }
+
+    impl Value for (u32, u8) {
+        fn get(self) -> u32 {
+            self.0 * 1000 + u32::from(self.1)
+        }
+    }
+
+    pub trait RenderOnce {
+        fn render(self) -> impl Value;
+    }
+
+    pub trait View {
+        fn render(self) -> impl Value;
+    }
+
+    impl<T: RenderOnce> View for T {
+        fn render(self) -> impl Value {
+            RenderOnce::render(self)
+        }
+    }
+
+    pub struct Well(pub u32);
+
+    impl RenderOnce for Well {
+        fn render(self) -> impl Value {
+            self.0 + 1
+        }
+    }
+
+    pub struct Pair(pub u32);
+
+    impl RenderOnce for Pair {
+        fn render(self) -> impl Value {
+            (self.0, 7u8)
+        }
+    }
+
+    fn layout<V: View>(view: V) -> u32 {
+        view.render().get()
+    }
+
+    fn rendered<T: RenderOnce>(it: T) -> impl Value {
+        it.render()
+    }
+
+    fn wrapped<T: RenderOnce>(it: T) -> Option<impl Value> {
+        Some(it.render())
+    }
+
+    pub fn run(n: u32) -> (u32, u32, u32, u32, Option<u32>) {
+        (
+            layout(Well(n)),
+            layout(Pair(n)),
+            rendered(Well(n)).get(),
+            rendered(Pair(n)).get(),
+            wrapped(Well(n)).map(Value::get),
+        )
+    }
+}

@@ -598,6 +598,11 @@ pub(crate) fn rustc_link_args() -> [String; 3] {
     ]
 }
 
+/// What rustc's link of a program for Linux is told besides what cargo asked, and the daemon's
+/// links with it: a GNU build ID, by which a program that takes edits while it runs is known
+/// (`ra-jit-live`). Not every C compiler has the linker write one (NixOS's does not).
+pub(crate) const BUILD_ID: &str = "-Wl,--build-id";
+
 pub(crate) fn write_headerpad(binary: &Path, pad: u64) -> std::io::Result<()> {
     std::fs::write(headerpad_file(binary), format!("{HEADERPAD_FLAG}{pad:#x}\n"))
 }

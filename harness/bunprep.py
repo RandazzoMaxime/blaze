@@ -34,9 +34,9 @@ MARKER = ".bunprep-built"
 # Flags of bun's link that are not kept, by why. Every other flag is: `--wrap`, the exported
 # symbols, the stack size and the libraries are what the program is.
 DROPPED = [
-    # An executable linked without compact unwind info has only `__eh_frame`, and one without
-    # `.eh_frame_hdr` none to find: ra-jit links such a program again at every edit instead of
-    # adding the change to it.
+    # An executable linked without `.eh_frame_hdr` has no index of its frames: ra-jit links
+    # such a program again at every edit instead of adding the change to it. One linked
+    # without compact unwind info is spliced (#33); bun's numbers are of the link without it.
     r"-Wl,-no_compact_unwind", r"-Wl,--no-eh-frame-hdr",
     # Files bun's own link writes or reads: its map, its LTO object, its symbol order.
     r"-Wl,-map,.*", r"-Wl,-Map=.*", r"-Wl,-object_path_lto,.*", r"-Wl,-order_file,.*",

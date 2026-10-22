@@ -96,8 +96,8 @@ use hir_ty::mir::{
 
 mod asm;
 mod backend;
-pub use backend::Backend;
 use backend::Step;
+pub use backend::{Backend, builds_edits};
 mod cached;
 mod debuginfo;
 pub use debuginfo::Sidecar;
@@ -780,14 +780,10 @@ impl CodegenUnit {
                             Ok(symbol) => compiled.push((root, symbol)),
                             Err(e) => {
                                 // rustc's copy calls what ours would have.
-                                if !on_demand.is_empty()
-                                    && !e.no_symbol()
-                                    && !cg.want_reachable_from(root)
-                                {
-                                    let krate = root.krate(db);
-                                    let rest =
-                                        roots.on_demand.iter().filter(|it| it.krate(db) == krate);
-                                    cg.wanted.extend(rest);
+                                if !on_demand.is_empty() && !e.no_symbol() {
+                                    let unseen = cg.want_reachable_from(root);
+                                    let rest = roots.on_demand.iter();
+                                    cg.wanted.extend(rest.filter(|it| unseen.calls(it.krate(db))));
                                 }
                                 skipped.push((root, e));
                             }
@@ -1174,6 +1170,16 @@ impl Rejections {
 
     pub fn put_rustc(&mut self, rustc: Option<RustcBase>) {
         self.rustc = rustc.map(|it| it.0);
+    }
+
+    /// Forgets what the builds found, for a program that is built as if never built: after a
+    /// build that was interrupted or panicked, or once its checkout is loaded again. What
+    /// rustc's copies are copies of is kept, since they are not built again: the first build
+    /// takes the source as it is then for what rustc compiled, which after an edit it is not.
+    pub fn start_again(&mut self) {
+        let Rejections { patching, used_by_rustc, .. } = *self;
+        let frozen = std::mem::take(&mut self.frozen);
+        *self = Rejections { patching, used_by_rustc, frozen, ..Rejections::default() };
     }
 
     /// Puts a base taken out for a build back where it was: what rustc linked or ours.
@@ -2999,6 +3005,20 @@ struct TheirStatics {
     unknown: FxHashSet<Crate>,
 }
 
+/// The crates whose functions code that could not be compiled may call, which nothing then
+/// tells: rustc's copy of it calls rustc's copies of them, unless ours are compiled.
+#[derive(Default)]
+struct Unseen {
+    all: bool,
+    crates: FxHashSet<Crate>,
+}
+
+impl Unseen {
+    fn calls(&self, krate: Crate) -> bool {
+        self.all || self.crates.contains(&krate)
+    }
+}
+
 /// The instances the walk for [`TheirStatics`] went through. What it found stays as it is
 /// until the code of one of them, or of a static it found, changes.
 type Walked = Vec<(Instance, StoredParamEnvAndCrate)>;
@@ -3717,6 +3737,15 @@ fn described<'db>(
     (source, Some((env.store(), variables)).filter(|it| !it.1.is_empty()))
 }
 
+/// Whether the crate has `panic = "abort"`. The standard library's crates are compiled
+/// before, for whichever the program has, and whatever of theirs is compiled again is in the
+/// program's crates.
+fn panics_abort(db: &dyn HirDatabase, krate: Crate) -> bool {
+    let abort =
+        cfg::CfgAtom::KeyValue { key: intern::sym::panic, value: intern::Symbol::intern("abort") };
+    !krate.data(db).origin.is_lang() && krate.cfg_options(db).check_atom(&abort)
+}
+
 fn build<'db>(
     cg: &mut Recorder<'db>,
     env: ParamEnvAndCrate<'db>,
@@ -3731,6 +3760,7 @@ fn build<'db>(
     // the one just below it is taken for none at all.
     ctx.func.params.ensure_base_srcloc(ir::SourceLoc::new(0));
     let mut builder_ctx = FunctionBuilderContext::new();
+    let aborts = panics_abort(cg.db, env.krate);
     let mut fx = FunctionCx {
         cg,
         body,
@@ -3750,6 +3780,7 @@ fn build<'db>(
         free_argument_slots: Vec::new(),
         given_away: None,
         in_cleanup: false,
+        aborts,
         guarded: false,
         ret_mode: PassMode::Ignore,
         tracked,
@@ -4241,19 +4272,22 @@ impl<'a, 'db> ObjectCodegen<'a, 'db> {
     }
 
     /// Wants the functions that `func` and the instances it calls refer to, for when `func`
-    /// itself is left to rustc. `false` when the body can't be compiled to find them.
-    fn want_reachable_from(&mut self, func: FunctionId) -> bool {
+    /// itself is left to rustc, and says what of the code it reaches can't be compiled to find
+    /// them.
+    fn want_reachable_from(&mut self, func: FunctionId) -> Unseen {
         let db = self.db;
-        let Ok(compiled) = compiled_root(db, func).as_ref() else { return false };
-        self.want_requested(&compiled.requests);
-        true
+        let Ok(compiled) = compiled_root(db, func).as_ref() else {
+            return Unseen { all: false, crates: FxHashSet::from_iter([func.krate(db)]) };
+        };
+        self.want_requested(&compiled.requests)
     }
 
     /// Wants the functions the requests and the instances they name refer to, without putting
     /// any of it in the object.
-    fn want_requested(&mut self, requests: &'db Requests) {
+    fn want_requested(&mut self, requests: &'db Requests) -> Unseen {
         let db = self.db;
         let (mut seen, mut seen_statics) = (FxHashSet::default(), FxHashSet::default());
+        let mut unseen = Unseen::default();
         let mut stack = vec![requests];
         while let Some(requests) = stack.pop() {
             for request in &requests.funcs {
@@ -4261,10 +4295,13 @@ impl<'a, 'db> ObjectCodegen<'a, 'db> {
                 match instance.def {
                     InstanceDef::Fn(func) if instance.args.as_ref().is_empty() => self.want(func),
                     _ if !seen.insert(instance) => {}
-                    _ => {
-                        let compiled = compiled_instance(db, instance.clone(), env.clone());
-                        stack.extend(compiled.as_ref().ok().map(|it| &it.requests));
-                    }
+                    _ => match compiled_instance(db, instance.clone(), env.clone()) {
+                        Ok(compiled) => stack.push(&compiled.requests),
+                        Err(_) => match home::mentioned_crates(db, instance) {
+                            Some(crates) => unseen.crates.extend(crates),
+                            None => unseen.all = true,
+                        },
+                    },
                 }
             }
             for request in &requests.datas {
@@ -4276,6 +4313,7 @@ impl<'a, 'db> ObjectCodegen<'a, 'db> {
                 }
             }
         }
+        unseen
     }
 
     /// Puts a non-generic function in the object, exported under its rustc symbol name.
@@ -5435,7 +5473,9 @@ impl<'a, 'db> ObjectCodegen<'a, 'db> {
             if self.on_demand_crates.contains(&id.krate(db))
                 && let Ok(compiled) = compiled_static(db, id).as_ref()
             {
-                self.want_requested(&compiled.requests);
+                let unseen = self.want_requested(&compiled.requests);
+                let rest = self.on_demand.iter().filter(|it| unseen.calls(it.krate(db)));
+                self.wanted.extend(rest);
             }
             return Ok(data);
         }
@@ -6241,6 +6281,9 @@ struct FunctionCx<'cx, 'db> {
     /// whole into it are. Nothing reads those again, so the callee can be handed them.
     given_away: Option<GivenAway>,
     in_cleanup: bool,
+    /// The crate it is compiled for has `panic = "abort"`: no call of it unwinds (rustc's
+    /// `fn_can_unwind`), and so none has a landing pad.
+    aborts: bool,
     /// Whether a call was made by [`Self::guarded_call`].
     guarded: bool,
     ret_mode: PassMode,
@@ -7871,7 +7914,7 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
             }
             let block = &body.basic_blocks[id];
             let unwind = block.terminator.as_ref().and_then(|it| it.kind.unwind());
-            worklist.extend(unwind.filter(|it| !resumes_only.contains(it)));
+            worklist.extend(unwind.filter(|it| !self.aborts && !resumes_only.contains(it)));
         }
         let state = frame.as_ref().map(|(frame, ..)| frame.state()).map(|it| in_frame(self, it));
         match (frame, state) {
@@ -7917,7 +7960,8 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
                 unsupported!("block without terminator");
             };
             self.at(terminator.span);
-            self.unwind_to = terminator.kind.unwind().filter(|it| !resumes_only.contains(it));
+            self.unwind_to =
+                terminator.kind.unwind().filter(|it| !self.aborts && !resumes_only.contains(it));
             let target = match &terminator.kind {
                 // A promoted call already holds its value, and that value is read-only.
                 TerminatorKind::Call { destination, target: Some(target), .. }
@@ -10307,6 +10351,7 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
             let pointer = self.builder.ins().load(ptr(), MEM, addr, 0);
             let values = self.operands(args)?;
             let sig = fn_ty.fn_sig(self.interner);
+            self.check_abort_unwinding(sig.abi())?;
             let named = sig.c_variadic().then(|| sig.inputs().skip_binder().len());
             self.emit_call(Callee::Pointer(pointer, sig.abi(), named), &values, dst, dst_ty.ty)?;
             return self.finish_call(destination, target);
@@ -10330,6 +10375,9 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
             }
         };
         let db = self.cg.db;
+        if let ItemContainerId::ExternBlockId(_) = func.lookup(db).container {
+            self.check_abort_unwinding(FunctionSignature::of(db, func).abi)?;
+        }
         if fncache::is_code(db, func) {
             self.cache_code(generic_args, dst)?;
             return self.finish_call(destination, target);
@@ -12799,6 +12847,13 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
                 let outcome = Type::int_with_byte_size(outcome as u16).ok_or_else(|| {
                     CodegenError::Unsupported(format!("`catch_unwind` giving {outcome} bytes"))
                 })?;
+                if self.aborts {
+                    // Nothing unwinds to be caught, as rustc has it.
+                    self.builder.ins().call_indirect(try_sig, try_fn, &[data]);
+                    let zero = self.builder.ins().iconst(outcome, 0);
+                    self.builder.ins().store(MEM, zero, dst, 0);
+                    return Ok(Intrinsic::Inline);
+                }
                 let returned = self.builder.create_block();
                 let caught = self.builder.create_block();
                 let done = self.builder.create_block();
@@ -13474,9 +13529,18 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
         self.builder.block_params(after).to_vec()
     }
 
+    /// Turns down a call that can unwind in code that cannot: rustc ends the program when
+    /// it does (`AbortUnwindingCalls`).
+    fn check_abort_unwinding(&self, abi: ExternAbi) -> Result<()> {
+        if self.aborts && abi.as_str().ends_with("-unwind") {
+            unsupported!("a call of an `extern \"{}\"` function with `panic = \"abort\"`", abi);
+        }
+        Ok(())
+    }
+
     /// The block that cleans up after a call that unwinds, if there is anything to clean up.
     fn landing_pad_for_call(&mut self) -> Option<ir::Block> {
-        if self.in_cleanup {
+        if self.in_cleanup || self.aborts {
             return None;
         }
         if self.inner_pad.is_some() {
@@ -13728,7 +13792,7 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
         body: impl FnOnce(&mut Self) -> Result<()>,
         cleanup: impl FnOnce(&mut Self) -> Result<()>,
     ) -> Result<()> {
-        if self.in_cleanup {
+        if self.in_cleanup || self.aborts {
             return body(self);
         }
         let outer = self.landing_pad_for_call();
@@ -14238,7 +14302,7 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
         count: usize,
         mut drop: impl FnMut(&mut Self, usize) -> Result<()>,
     ) -> Result<()> {
-        if self.in_cleanup || count < 2 {
+        if self.in_cleanup || self.aborts || count < 2 {
             return (0..count).try_for_each(|at| drop(self, at));
         }
         let outer = self.landing_pad_for_call();
@@ -14290,7 +14354,7 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
         let size = self.layout(element)?.size.bytes() as i64;
         let done = self.builder.create_block();
         let zero = self.builder.ins().iconst(ptr(), 0);
-        if self.in_cleanup {
+        if self.in_cleanup || self.aborts {
             self.drop_elements_from(addr, len, element, size, zero, None, done)?;
         } else {
             // If an element's drop unwinds, the ones after it are still dropped on the way out.
