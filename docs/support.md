@@ -18,6 +18,13 @@ layout code is rustc's own `rustc_abi` crate from the 1.99.0 tag. Nothing has be
 another stable version. Some reports were measured on `nightly-2026-05-10` before the move
 to stable; those are marked where they are used.
 
+`cargo ra-jit` on another toolchain goes to cargo. `RA_JIT_OTHER_TOOLCHAIN=1` builds with it
+anyway, for a project pinned to a nightly of the next release, which rustc 1.99.0 can't build
+even with `RUSTC_BOOTSTRAP=1` when the project uses library features 1.99.0 does not have.
+Nothing checks that the other rustc lays out, mangles and passes values as 1.99.0 does: bun's
+pinned `nightly-2026-09-15` does for what the harness runs of bun
+([research/bun.md](research/bun.md)).
+
 ## Platforms
 
 | | Linux x86-64 | Linux AArch64 | Windows x86-64 MSVC | macOS arm64 | wasm32 |
@@ -27,7 +34,7 @@ to stable; those are marked where they are used.
 | Full link | yes (1) | yes (1) | yes (1) | yes (1) | yes, older branch (2) |
 | Splice | yes (3) | yes (3) | yes (4) | yes, with a limit (5) | yes, older branch (2) |
 | Debug info | yes (6) | yes (6) | lines only (7) | unverified (7) | no |
-| `cargo ra-jit` | yes (8) | unverified (9) | no: goes to cargo (9) | no: goes to cargo (9) | no |
+| `cargo ra-jit` | yes (8) | unverified (9) | no: goes to cargo (9) | yes, by hand (9) | no |
 | Disk store | yes (10) | yes (10) | yes (10) | yes (10) | unverified |
 | Remote store | yes, not real AWS (11) | unverified | unverified | unverified | unverified |
 | Fuzzed | yes (12) | no | no | no | no |
@@ -66,9 +73,10 @@ to stable; those are marked where they are used.
    cargo, 66 of 66 flag steps, 11 of 11 lifecycle checks
    ([reports/CARGO.md](reports/CARGO.md)). Not in CI. Run by hand for these docs on a new
    project and on ripgrep 15.1.0.
-9. `cargo ra-jit` hands any target that is not ELF to cargo (`unsupported_target` in
-   `cargo/cli.rs`), and has not been built or run on macOS or Windows. Nobody recorded
-   running it on Linux AArch64.
+9. `cargo ra-jit` links ELF and Mach-O executables and hands any other target (Windows'
+   PE) to cargo (`unsupported_target` in `cargo/cli.rs`). On macOS arm64 it was run by hand
+   on bun 1.4.3's dev loop ([research/bun.md](research/bun.md)).
+   Nobody recorded running it on Linux AArch64.
 10. CI: `storekills.py`, `storecorrupts.py` and `storeshared.py` on all four platforms.
     `storefull.py` on Linux only. The earlier
     [reports/DISKCACHE.md](reports/DISKCACHE.md) says "Linux x86-64 only"; PLAT-ABI2 is

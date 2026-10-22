@@ -72,6 +72,7 @@ def workspace(name, spec):
             subprocess.run(["cargo", "generate-lockfile"], cwd=ws, check=True, capture_output=True)
     else:
         ws = apps.checkout(name, spec)
+        apps.prepare(ws, spec)
     apps.localize(ws)
     os.environ.update(spec.get("build_env", {}))
     apps.setup(ws, spec)

@@ -343,7 +343,9 @@ impl Optimization {
     /// Cranelift built in is unrolled late in the pipeline, after LLVM's last numbering of
     /// values, while the copies are still joined by branches on constants: each copy keeps
     /// its own `%` and overflow check (16 `urem`s where rustc, which optimizes the callee on
-    /// its own before building it in, has 7, in the Life benchmark's `step`).
+    /// its own before building it in, has 7, in the Life benchmark's `step`). Instruction
+    /// combining named in a pipeline checks that one run of it left nothing to combine and
+    /// aborts the process when it did, which the default pipelines do not ask for.
     fn pipeline(self) -> Option<&'static str> {
         match self.passes {
             Passes::None => None,
@@ -496,5 +498,53 @@ impl fmt::Display for Unhandled {
                 write!(f, "llvm: {}", message.lines().next().unwrap_or_default())
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use inkwell::memory_buffer::MemoryBuffer;
+
+    use super::*;
+
+    /// Reduced with `llvm-reduce` from a function of bun 1.4.3 at `-O3` on AArch64, where one
+    /// run of instruction combining after `default<O3>` leaves more to combine.
+    const SHORT_OF_A_FIXPOINT: &str = r#"
+define void @f(ptr %0, i1 %.not) personality ptr null {
+frame:
+  %1 = load volatile i32, ptr null, align 4
+  %2 = icmp ne i32 %1, 0
+  %.not7.not.not = select i1 %.not, i1 false, i1 %2
+  br i1 %.not7.not.not, label %3, label %common.ret
+
+3:
+  %4 = load i32, ptr %0, align 1
+  %5 = udiv i32 %1, %4
+  %6 = icmp eq i32 %5, 1
+  call void @llvm.assume(i1 %6)
+  %7 = urem i32 %1, %4
+  %8 = icmp ne i32 %7, 0
+  call void @llvm.assume(i1 %8)
+  br label %common.ret
+
+common.ret:
+  ret void
+}
+
+declare void @llvm.assume(i1 noundef)
+"#;
+
+    #[test]
+    fn instruction_combining_short_of_a_fixpoint_does_not_abort() {
+        let optimization =
+            Optimization { passes: Passes::Aggressive, selection: Selection::Optimized };
+        let machine = Machine::create(optimization).unwrap();
+        let context = Context::create();
+        // LLVM reads to a nul.
+        let text = format!("{SHORT_OF_A_FIXPOINT}\0");
+        let source = MemoryBuffer::create_from_memory_range_copy(text.as_bytes(), "short");
+        let module = context.create_module_from_ir(source).unwrap();
+        let pipeline = optimization.pipeline().unwrap();
+        module.run_passes(pipeline, &machine, PassBuilderOptions::create()).unwrap();
     }
 }

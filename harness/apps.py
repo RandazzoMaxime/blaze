@@ -6,7 +6,9 @@ usage: apps.py <name> [--stage build,workload,perf,tests,edits] [--json out.json
 
 <name> is an entry of apps/apps.json. The checkout (APPS_DIR/<name>, cloned at `rev`) gets
 the source of every dependency in a directory beside it (`cargo vendor`, and the source
-replacement it prints in `.cargo/config.toml`), at the locked versions. The stages:
+replacement it prints in `.cargo/config.toml`), at the locked versions. An entry with `prepare`
+has that module of the harness make what cargo needs before it (for bun, bunprep.py: its own
+build of its C and C++, and the member rustc links). The stages:
 
 build     cargo builds the program for the link line; ra-jit compiles every crate linked into
           it and links its objects ahead of rustc's. Then the same with ra-jit as cargo's
@@ -22,7 +24,7 @@ edits     the daemon holds the program; each edit of `edits` is timed to a linke
 The backend is the environment's, as for the other harnesses: `RA_JIT_BACKEND`, `RA_JIT_OPT`,
 `RA_JIT_EMIT`.
 """
-import argparse, json, os, re, shlex, shutil, socket, subprocess, sys, time
+import argparse, importlib, json, os, re, shlex, shutil, socket, subprocess, sys, time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
@@ -58,6 +60,14 @@ def checkout(name, spec):
         else:
             shutil.copytree(os.path.join(HERE, "apps", spec["source"]), ws, dirs_exist_ok=True)
     return os.path.join(ws, spec.get("dir", ""))
+
+
+def prepare(ws, spec):
+    """What the application's own build makes before cargo can build it: `prepare` names a
+    module of the harness whose `in_place(ws)` makes it, once, and returns the environment
+    every build of the workspace needs (bunprep.py)."""
+    if "prepare" in spec:
+        os.environ.update(importlib.import_module(spec["prepare"]).in_place(ws))
 
 
 def localize(ws):
@@ -364,6 +374,7 @@ def main():
     # What the build scripts of the application read.
     os.environ.update(spec.get("build_env", {}))
     ws = checkout(a.name, spec)
+    prepare(ws, spec)
     localize(ws)
     os.environ["RUSTFLAGS"] = FLAGS
     backend = os.environ.get("RA_JIT_BACKEND", "cranelift")

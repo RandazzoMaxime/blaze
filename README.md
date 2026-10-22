@@ -118,7 +118,30 @@ What each program takes, release → ra-jit: its build from cold (for ra-jit, ca
 Release with dev checks: `cargo build --release` with `-C overflow-checks=on -C debug-assertions=on`. Measured by hand with `harness/bench.py --runtime` (harness/runbench.py); the `bench-readme` workflow re-runs it on the dedicated benchmark machine.
 <!-- runbench:end -->
 
-Not measured yet: workspaces of a million lines or more, and test suites
+### bun
+
+[bun](https://github.com/oven-sh/bun)'s Rust port, 1.4.3: 1.25M lines of Rust in 103 crates
+on a nightly, beside a JavaScript engine's C and C++ ([what it took](docs/research/bun.md)).
+
+<!-- bench-bun:start -->
+Edit, then build, on real projects at pinned commits. Each cell is incremental `cargo build` → `cargo ra-jit build`, both warm, same linker, median of 3 edits. macOS arm64, one machine (Apple M5 Max, 18 cores, 128 GiB), ra-jit [`1645168dc4`](https://github.com/indexable-inc/ra-jit/commit/1645168dc4abbdfab2e234232efb73a5c1ec2935) on 2026-10-21.
+
+| Project | Edit a function | Edit a widely used function | Change a signature | Nothing changed |
+|---|---:|---:|---:|---:|
+| bun bun-v1.4.3 | 12.16 s → **1.09 s** (11x) | 26.75 s → **1.81 s** (15x) | 9.83 s → **126.44 s** (c) (0.1x) | 168 ms → **73 ms** (2.3x) |
+
+(c): the daemon handed this edit to cargo (a fallback, so about cargo's time).
+
+Measured by hand with `harness/bench.py`; the `bench-bun` workflow re-runs it on the dedicated benchmark machine. The ra-jit measured is `cargo build --release`; the binaries a release ships are the `dist` profile with PGO, which start and edit faster ([how](https://github.com/indexable-inc/ra-jit/blob/main/docs/reports/RELEASE-BUILD.md)). Every number, its samples and what the daemon did: [raw JSON](docs/benchmarks/bun-macos-arm64.json).
+<!-- bench-bun:end -->
+
+<!-- runbench-bun:start -->
+ra-jit's whole-program build of bun does not link yet: about 1,300 of its functions are not
+compiled ([#35](https://github.com/indexable-inc/ra-jit/issues/35)), so how fast it runs is not
+measured.
+<!-- runbench-bun:end -->
+
+Not measured yet: test suites
 ([#benchmarks](https://github.com/indexable-inc/ra-jit/issues?q=label%3Abenchmarks)).
 
 ## Try it on your project

@@ -43,9 +43,13 @@ All of these are rustc's, written from `compiler/rustc_borrowck` at the pinned n
 ([research/borrowck.md](research/borrowck.md) has the sources):
 
 - Moves and initialization: moves out of places, partial moves, maybe-uninitialized reads,
-  assignment to immutable locals (E0381, E0382, E0384, E0505, E0507, E0508, E0509).
+  assignment to immutable locals (E0381, E0382, E0384, E0505, E0507, E0508, E0509). A `match`
+  whose arms test the value reads what it matches first, so a value moved out whole is
+  reported there.
 - Conflicting borrows: shared, mutable, two-phase (`vec.push(vec.len())`), shallow borrows of
-  match scrutinees, and fake reads (E0499, E0500, E0501, E0502, E0503, E0506, E0524).
+  match scrutinees, and fake reads (E0499, E0500, E0501, E0502, E0503, E0506, E0524). The drop
+  of the old value before an assignment is the assignment's write, so assigning to a borrowed
+  place is E0506 rather than E0597.
 - Region inference: liveness of locals (drops kept live only back to where the local may be
   initialized), outlives constraints from every statement, call, cast and aggregate, the
   signature's universal regions and implied bounds (normalized parameters and the impl
@@ -53,7 +57,10 @@ All of these are rustc's, written from `compiler/rustc_borrowck` at the pinned n
   supertraits) and the region constraints of proving them with the trait solver (a where
   clause or impl that proves a bound relates its regions to the bound's, `&'max G: Get` proving
   `&'min G: Get` makes them equal, and the impl's own `T: 'a` must hold), type tests, and lifetimes written in `let` annotations (`let _: T = value`
-  of any value included), casts, turbofishes (a method's own, `x.f::<&'a T>()`, too) and struct
+  of any value included, and of each variable a destructuring pattern binds, `y` in
+  `let (y, _): (&'static u32, u32)`), struct and variant patterns that spell out generic
+  arguments (`let Foo::<'static> { .. } = foo`) and constant patterns (`<() as Foo<'static>>::C`,
+  compared as `PartialEq` compares), casts, turbofishes (a method's own, `x.f::<&'a T>()`, too) and struct
   literal and variant paths, in closures too. A function item called through a variable
   (`let f = foo::<&'static u32>; f(&x)`) has the variable's type. A struct literal proves the struct's where clauses, an array
   repeat `[x; N]` of more than one copy proves `x`'s type `Copy`, and a path that names an
@@ -134,8 +141,8 @@ With no borrow checker, the 245 units rustc accepts would pass. Now:
 
 | Mode | In scope | Pass | rustc accepts, ra-jit too | rustc rejects, same errors |
 |---|---|---|---|---|
-| Polonius | 1579 | 1241 (78.6%) | 245 of 245 | 996 of 1334 |
-| NLL | 1577 | 1234 (78.2%) | 226 of 226 | 1008 of 1351 |
+| Polonius | 1579 | 1259 (79.7%) | 245 of 245 | 1014 of 1334 |
+| NLL | 1577 | 1253 (79.5%) | 226 of 226 | 1027 of 1351 |
 
 463 units are out of scope; 344 of them need a nightly feature. CI runs the scoring on Linux
 and fails below a floor a few units under the count there.
@@ -148,8 +155,8 @@ just, axum, nushell, delta, eza, tokei and starship it finds nothing, nor on the
 ## What is left
 
 Every failing unit is one where rustc gives an error ra-jit does not, or gives it on another
-line or with another code. By what is wrong, most first: 44 "lifetime may not live long
-enough" not reported, 33 E0597 not reported, 13 E0310, 11 E0309, 7 E0700, then a long tail. The causes, grouped:
+line or with another code. By what is wrong, most first: 42 "lifetime may not live long
+enough" not reported, 28 E0597 not reported, 13 E0310, 11 E0309, 7 E0700, then a long tail. The causes, grouped:
 
 - **Higher-ranked regions and placeholders** (`for<'a>` bounds, closures with higher-ranked
   signatures): rustc checks them with placeholders in universes; ra-jit does not yet, and
