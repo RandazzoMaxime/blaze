@@ -1230,16 +1230,16 @@ fn place_in_definition(
     target: &SyntaxNode,
     counts: &dyn Fn(&SyntaxNode) -> bool,
 ) -> Option<u32> {
-    let mut around = sema.ancestors_with_macros(target.clone()).skip(1);
+    let along: Vec<_> = sema.ancestors_with_macros(target.clone()).collect();
     let mut root = None;
-    let owner = around.find(|node| {
+    let owner = along.iter().skip(1).cloned().find(|node| {
         root = Some(node.clone());
         is_definition(node)
     });
     let owner = owner.or(root)?;
     let late = LateImports::around(sema, &owner);
     let mut count =
-        Count { sema, target, counts, late, seen: 0, earlier: None, waiting: Vec::new() };
+        Count { sema, target, along, counts, late, seen: 0, earlier: None, waiting: Vec::new() };
     count.all_in(&owner)?;
     while let Some(call) = count.waiting.pop() {
         count.expansion_of(&call)?;
@@ -1347,6 +1347,8 @@ enum Turn {
 struct Count<'a, 'db> {
     sema: &'a hir::Semantics<'db, RootDatabase>,
     target: &'a SyntaxNode,
+    /// The target and what it is in, the macros it is expanded from with their expansions.
+    along: Vec<SyntaxNode>,
     counts: &'a dyn Fn(&SyntaxNode) -> bool,
     late: LateImports,
     seen: u32,
@@ -1374,6 +1376,14 @@ impl Count<'_, '_> {
     }
 
     fn expansion_of(&mut self, call: &ast::MacroCall) -> Option<()> {
+        // A macro used in a body is expanded twice, to items and to statements, and of the
+        // same text: the target is in one of them, which need not be the one sema gives.
+        let at = self.along.iter().position(|it| it == call.syntax());
+        if let Some(root) = at.and_then(|at| at.checked_sub(1)).map(|at| self.along[at].clone())
+            && root.parent().is_none()
+        {
+            return self.all_in(&root);
+        }
         match self.sema.expand_macro_call(call) {
             Some(expansion) => self.all_in(&expansion.value),
             None => Some(()),
