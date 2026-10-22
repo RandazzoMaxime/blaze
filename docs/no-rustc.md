@@ -250,17 +250,17 @@ scripts are in `harness/norustc/`: setup.sh, wrap.sh, count.py, classify.py and 
 | no-op build | 0 | 0 | 0 |
 | body edit | 0 | 0 | 23 (2 + 21), 484 s: to cargo |
 | body edit again | 0 | 0 | 44 (1 + 43), 467 s: to cargo |
-| leaf edit | 0 | 0 | BEVY_LEAF |
-| new function | 0 | 0 | BEVY_NEWFN |
+| leaf edit | 0 | 0 | 80 (37 + 43), 489 s: to cargo, which compiles 36 workspace libraries |
+| new function | 0 | 0 | 44 (1 + 43), 465 s: to cargo |
 | signature edit | 0 | 128 (83 + 45), 8.6 s: to cargo | (no such edit) |
-| an error | 6 (6 + 0): to cargo, rustc prints it | 4 (1 + 3): rustc prints it | BEVY_BROKEN |
-| the error mended | 0 | 0 | BEVY_FIXED |
+| an error | 6 (6 + 0): to cargo, rustc prints it | 4 (1 + 3): rustc prints it | 26 (1 + 25), 468 s: to cargo, rustc prints it |
+| the error mended | 0 | 0 | 59 (1 + 58), 481 s: to cargo |
 | first `test --no-run` | 106 (45 + 61), 5.5 s | 156 (115 + 41), 15.9 s | (not a step) |
 | `test --no-run` after a body edit | 0 | 22 (0 + 22), 6.0 s | |
 | `test --no-run` after a test was added | 75 (18 + 57): to cargo | 47 (11 + 36): to cargo | |
 | doctests, first | 97 (27 + 70) and 2 rustdoc, 28.2 s | 212 (165 + 47) and 1 rustdoc, 13.3 s | |
 | doctests, again | 90 (27 + 63) and 2 rustdoc, 28.0 s | 92 (78 + 14) and 1 rustdoc, 8.2 s | |
-| `check` | 38 (35 + 3) | 413 (408 + 5) | BEVY_CHECK |
+| `check` | 38 (35 + 3) | 413 (408 + 5) | 441 (419 + 22) |
 
 Plain `cargo` on ripgrep after `ra-jit enable`, same counting ("cargo" there is the user's
 command):
@@ -303,9 +303,10 @@ What the numbers say:
 - **On bevy every edit went to cargo.** The first edit could not be spliced into rustc's
   executable ("the program is too large", [#79](https://github.com/indexable-inc/ra-jit/issues/79)),
   so the daemon built the whole program, which took about 8 minutes and then panicked in
-  rust-analyzer ("inference vars shouldn't exist out of inference"); cargo then built the edit.
-  The next edit found the daemon unable to load the workspace for the same panic, and went to
-  cargo again. Those are bugs of their own; for this document they show how much of a build
+  rust-analyzer ("inference vars shouldn't exist out of inference",
+  [#96](https://github.com/indexable-inc/ra-jit/issues/96)); cargo then built the edit.
+  Every later edit, the error and its mending included, found the daemon unable to load the
+  workspace for the same panic, waited about 8 minutes, and went to cargo again. Those are bugs of their own; for this document they show how much of a build
   can end up rustc's without anyone seeing it.
 - **Plain cargo after `ra-jit enable` runs rustc on every edit**: the dep-info of the program,
   and every workspace library above an edited one, since the wrapper reaches only what cargo
@@ -323,7 +324,7 @@ What the numbers say:
   library's features ("the package 'ripgrep' does not contain these features: default, log"),
   which fails, so `globset` and `grep-printer` on ripgrep and `nu-protocol` on nushell go to
   rustdoc.
-- **`check` is all rustc's**: 35 and 408 crates checked.
+- **`check` is all rustc's**: 35, 408 and 419 crates checked or compiled.
 - **Functions left to rustc**, from the workers' logs: ripgrep's program had 1,769 of 1,769
   functions compiled by ra-jit; over every build (tests and doctests included) 53 distinct
   functions were left to rustc, all for "no rustc symbol". nushell: 534 distinct, 533 for "no
