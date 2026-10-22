@@ -4,7 +4,7 @@ ra-jit has its own borrow checker, the crate `hir-ty-borrowck` in the rust-analy
 (`vendor/rust-analyzer/crates/hir-ty-borrowck`, next to `hir-ty`). It checks the MIR rust-analyzer
 lowers, the same MIR the code generator compiles, and it is meant to give exactly rustc's
 verdict: the same errors, on the same lines, and none where rustc gives none. It gives
-rustc's verdict on 85% of rustc's own borrow-check tests today, and on every one rustc
+rustc's verdict on 86% of rustc's own borrow-check tests today, and on every one rustc
 accepts; how they are scored and what is left is below.
 
 It runs as part of rust-analyzer's diagnostics, so the daemon computes it for every edited
@@ -69,7 +69,11 @@ All of these are rustc's, written from `compiler/rustc_borrowck` at the pinned n
   `dyn Any + 'r` in the signature implies `'r: 'static`, which `trait Any: 'static` requires.
   The type an object binds an associated type to is invariant (`dyn Trait<Out = &'a u32>`),
   and unsizing to `dyn Trait` proves the value's type implements `Trait`, with what its impl
-  needs of the regions.
+  needs of the regions. An associated type in a signature is related as what it normalizes
+  to, so `for x in &mut v` keeps `v` borrowed in the `IterMut<'a, T>` that
+  `<&'a mut Vec<T> as IntoIterator>::IntoIter` is. A parameter that elides one lifetime has
+  it once however often its type does (`s: S2` with `type S2<'a> = S<'a, 'a>`), and
+  `Self::Target` in an impl for `S<'_, '_>` has the impl's lifetimes.
 - Well-formedness in bodies: a called function's signature as written, before its associated
   types are normalized, and its generic arguments are well-formed at the call (`&'a &'b ()`
   that `'b: 'a`); so is a function item's signature where it becomes a function pointer, with
@@ -180,8 +184,8 @@ With no borrow checker, the 245 units rustc accepts would pass. Now:
 
 | Mode | In scope | Pass | rustc accepts, ra-jit too | rustc rejects, same errors |
 |---|---|---|---|---|
-| Polonius | 1579 | 1339 (84.8%) | 245 of 245 | 1094 of 1334 |
-| NLL | 1577 | 1331 (84.4%) | 226 of 226 | 1105 of 1351 |
+| Polonius | 1579 | 1363 (86.3%) | 245 of 245 | 1118 of 1334 |
+| NLL | 1577 | 1358 (86.1%) | 226 of 226 | 1132 of 1351 |
 
 463 units are out of scope; 344 of them need a nightly feature. CI runs the scoring on Linux
 and fails below a floor a few units under the count there.
@@ -194,9 +198,10 @@ just, axum, nushell, delta, eza, tokei and starship it finds nothing, nor on the
 ## What is left
 
 Every failing unit is one where rustc gives an error ra-jit does not, or gives it on another
-line or with another code. By what is wrong, most first: 29 "lifetime may not live long
-enough" not reported, 21 E0597 not reported, 16 "lifetime may not live long enough" on
-another line, 12 E0309, 11 E0310 and 10 E0521 not reported, then a long tail. The causes, grouped:
+line or with another code. By what is wrong, most first: 35 "lifetime may not live long
+enough" not reported, 21 E0597 and 20 E0310 not reported, 15 with only an error rustc does
+not give, 12 E0309 not reported, 10 "lifetime may not live long enough" on another line and
+10 E0521 not reported, then a long tail. The causes, grouped:
 
 - **Higher-ranked regions and placeholders** (`for<'a>` bounds, closures with higher-ranked
   signatures): rustc checks them with placeholders in universes; ra-jit does not yet, and
