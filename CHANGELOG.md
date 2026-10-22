@@ -44,6 +44,18 @@ All notable changes to ra-jit are written here. The format follows
   and the spare worker the daemon starts after the first build holds 940 MB more on ripgrep.
   salsa's `lru` cannot evict `infer` or MIR (they have cycle handling), and on `described`
   it freed 206 MB of ripgrep's live heap and none of its footprint, so no eviction is on.
+- Proc-macro expansions are kept in the store
+  ([#38](https://github.com/indexable-inc/ra-jit/issues/38)): a derive or attribute macro's
+  output is found again by the next daemon, keyed by the macro library's content, the
+  macro, its input tokens and the shape of their spans, the environment and the directory.
+  An expansion that asked the compiler anything, or failed, is not kept. Function-like macros
+  are kept with `RA_JIT_PROC_MACRO_CACHE=all`, a macro is left out by name with
+  `RA_JIT_PROC_MACRO_CACHE_SKIP`, and `RA_JIT_PROC_MACRO_CACHE=check` expands anyway and
+  reports any that differ ([docs/cache.md](docs/cache.md), `harness/expansions.py`). On a
+  warm start helix's 1455 kept expansions take resolve from 6.0 to 4.3 s and the time to
+  ready from 9.6 to 8.0 s, nushell's 1588 from 5.8 to 4.5 s and from 10.1 to 8.8 s (Linux
+  x86-64, 16 cores of an otherwise idle host, medians of four runs each); cold starts
+  (helix 35.5 and 35.2 s, nushell 36.8 and 36.7 s) and memory do not change.
 - `#[ra_jit::cache]` ([#17](https://github.com/indexable-inc/ra-jit/issues/17)): the
   `ra-jit-cache` crate's attribute keeps what a pure function returns, in memory and under
   `target/ra-jit/fn-cache`, by its arguments and a hash of the code ra-jit compiled for it and

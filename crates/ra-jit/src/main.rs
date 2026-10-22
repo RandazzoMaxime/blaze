@@ -5878,6 +5878,7 @@ fn spare(dir: &Path) -> anyhow::Result<()> {
 fn process_wide() {
     hir_def::nameres::EXPAND_BUILTIN_DERIVES.store(true, std::sync::atomic::Ordering::Relaxed);
     project_model::SYSROOT_AS_BUILT.store(true, std::sync::atomic::Ordering::Relaxed);
+    ra_jit_expand::install();
 }
 
 /// Loads the workspace `args` names and builds what they ask for, then serves it when they
@@ -6019,6 +6020,9 @@ fn run_holding(
         resolved = resolve_crates(&db, &args, cores())?;
     }
     eprintln!("resolve: {resolved} crates in {:.1?}", start.elapsed());
+    if let Some(said) = ra_jit_expand::report() {
+        eprintln!("{said}");
+    }
     memory::checkpoint("resolve");
     // What the other checkouts don't share with this one, before a request waits for it.
     for also in &args.also {
@@ -6133,6 +6137,9 @@ fn run_holding(
             }
             eprint!("cold: ");
             report(&cold);
+            if let Some(said) = ra_jit_expand::report() {
+                eprintln!("{said}");
+            }
             memory::report(&mut db, "build")?;
             report_stats(&known.stats);
             link(
