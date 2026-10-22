@@ -11,6 +11,7 @@ import json
 import os
 import re
 import shutil
+import subprocess
 import sys
 import tempfile
 
@@ -30,22 +31,82 @@ CASES = {
     "adt_const_params": {
         "package": "runner",
         "crate": "adt_const_params",
-        "expected": "refused",
-        "reasons": (
-            re.compile(r"constant of type"),
-            re.compile(r"adt_const_params"),
-            re.compile(r"built-in macro.*not implemented"),
-        ),
+        "expected": "compiled",
+        "reasons": (),
     },
     "type_info": {
         "package": "runner",
         "crate": "type_info",
-        "expected": "refused",
-        "reasons": (
-            re.compile(r"type_id_fields"),
-            re.compile(r"type_id_variants"),
-            re.compile(r"UnresolvedMethod\(\"fields\"\)"),
-        ),
+        "expected": "compiled",
+        "reasons": (),
+    },
+    "inherent_associated_types": {
+        "package": "runner",
+        "crate": "inherent_associated_types",
+        "expected": "compiled",
+        "reasons": (),
+    },
+    "cfg_if_macros": {
+        "package": "runner",
+        "crate": "cfg_if_macros",
+        "expected": "compiled",
+        "reasons": (),
+    },
+    # Every crate ra-jit's, as in bun's whole-program link: no rustc copy defines the statics.
+    "exported_statics": {
+        "package": "runner",
+        "crate": "runner,exported_statics",
+        "alone": True,
+        "expected": "compiled",
+        "reasons": (),
+    },
+    "same_name": {
+        "package": "runner",
+        "crate": "runner,same_name",
+        "alone": True,
+        "expected": "compiled",
+        "reasons": (),
+    },
+    "unreached_externs": {
+        "package": "runner",
+        "crate": "runner,unreached_externs",
+        "alone": True,
+        "cargo_args": ["--release"],
+        # Without difftest's `-C link-dead-code`, as runbench builds bun: rustc's link takes
+        # out what nothing reaches, and so does the link of ra-jit's object.
+        "rustflags": "",
+        "expected": "compiled",
+        "reasons": (),
+    },
+    "macro_fragments": {
+        "package": "runner",
+        "crate": "macro_fragments",
+        "expected": "compiled",
+        "reasons": (),
+    },
+    "frame_pointers": {
+        "package": "runner",
+        "crate": "runner",
+        # bun's own build keeps frame pointers; LLVM, unlike Cranelift, otherwise gives the
+        # register to values.
+        "rustflags": "-C link-dead-code -Cforce-frame-pointers=yes",
+        "env": {"RA_JIT_BACKEND": "llvm"},
+        "expected": "compiled",
+        "reasons": (),
+    },
+    "macro_impls": {
+        "package": "runner",
+        "crate": "dtoa",
+        "expected": "compiled",
+        "reasons": (),
+    },
+    # Read with `ra-jit mir`, which lowers every crate `--crate` names.
+    "std_copies": {
+        "package": "runner",
+        "crate": "foldhash",
+        "expected": "compiled",
+        "reasons": (),
+        "mir": True,
     },
 }
 
@@ -69,14 +130,55 @@ def rows_for(fx):
     ]
 
 
+def run_mir_case(name, case, workspace, json_path):
+    """Every function of the crates `--crate` names lowers to MIR."""
+    run = subprocess.run([RA_JIT, "mir", workspace, "--crate", case["crate"]], capture_output=True, text=True)
+    if run.returncode != 0:
+        raise SystemExit(f"{name}: ra-jit mir failed:\n{run.stderr[-2000:]}")
+    reasons = re.findall(r"^// ra-jit: no MIR: (.*)$", run.stdout, re.M)
+    lowered = len(re.findall(r"^fn ", run.stdout, re.M))
+    print(f"{name}: {lowered} lowered, {len(reasons)} refused")
+    for reason in sorted(set(reasons)):
+        print(f"  {reason}")
+    if case["expected"] == "compiled" and reasons:
+        raise SystemExit(f"{name}: expected every function to lower, {len(reasons)} did not")
+    result = {"case": name, "state": "refused" if reasons else "compiled", "compiled": lowered,
+              "refused": len(reasons), "reasons": reasons, "match": True}
+    if json_path:
+        with open(json_path, "w") as out:
+            json.dump(result, out, indent=1)
+    return result
+
+
 def run_case(name, root, json_path=None):
     case = CASES[name]
     workspace = os.path.join(root, name)
+    if case.get("mir"):
+        return run_mir_case(name, case, workspace, json_path)
     target = tempfile.mkdtemp(prefix=f"ra-jit-bun-{name}-")
     os.environ["CARGO_TARGET_DIR"] = target
-    fx = Fixture(workspace, [case["crate"]], ["-p", case["package"]])
+    env = dict(case.get("env", {}))
+    if "rustflags" in case:
+        env["RUSTFLAGS"] = case["rustflags"]
+    saved = {key: os.environ.get(key) for key in env}
+    os.environ.update(env)
+    try:
+        return build_case(name, case, workspace, json_path)
+    finally:
+        for key, value in saved.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+
+
+def build_case(name, case, workspace, json_path):
+    fx = Fixture(workspace, [case["crate"]], ["-p", case["package"], *case.get("cargo_args", ())])
     fx.rustc_build()
     expected = fx.behaviour(fx.reference)
+    if case.get("alone"):
+        fx.alone = True
+        fx.rustc_build()
     fx.ra_jit_build()
     actual = fx.behaviour(fx.binary)
     rows = rows_for(fx)

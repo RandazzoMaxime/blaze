@@ -377,6 +377,10 @@ impl Entry {
         }
         // Nor is code for one target what another runs.
         field(super::Target::selected().ok()?.triple().as_bytes());
+        // Nor code that gives the frame pointer's register to values; the keys without stay.
+        if super::backend::frame_pointers() {
+            field(b"frame pointers");
+        }
         field(&[debug as u8]);
         field(name.as_bytes());
         Some(hasher.finalize().into())

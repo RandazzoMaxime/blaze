@@ -58,6 +58,19 @@ pub(super) fn edits_follow() -> bool {
     BUILDS_EDITS.load(Ordering::Relaxed)
 }
 
+/// Whether every function of the build under way keeps its frame pointer, as the program asks
+/// with `-C force-frame-pointers`: one answer for all the code a build writes, as the debug
+/// level is.
+static FRAME_POINTERS: AtomicBool = AtomicBool::new(false);
+
+pub(super) fn keep_frame_pointers(keep: bool) {
+    FRAME_POINTERS.store(keep, Ordering::Relaxed);
+}
+
+pub(super) fn frame_pointers() -> bool {
+    FRAME_POINTERS.load(Ordering::Relaxed)
+}
+
 /// Says the build under way is of a whole program.
 pub(super) fn set_whole_program() {
     WHOLE_PROGRAM.store(true, Ordering::Relaxed);

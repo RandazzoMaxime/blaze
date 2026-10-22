@@ -60,7 +60,7 @@ use hir_def::{
 };
 use hir_ty_codegen::{
     Backend, CodegenError, CodegenUnit, ContentId, ParallelWork, Rejections, Roots, SymbolResolver,
-    exported_symbol, tier as codegen_tier,
+    exported_static, exported_symbol, tier as codegen_tier,
 };
 use ide_db::{ChangeWithProcMacros, RootDatabase};
 use load_cargo::{LoadCargoConfig, ProcMacroServerChoice};
@@ -925,6 +925,10 @@ impl SymbolResolver for Resolver<'_> {
         self.debug.level == plan::Level::Full
     }
 
+    fn keeps_frame_pointers(&self) -> bool {
+        self.debug.frame_pointers
+    }
+
     fn debug_apart(&self) -> Option<String> {
         self.apart.as_ref().map(|it| it.to_string_lossy().into_owned())
     }
@@ -1526,6 +1530,25 @@ fn crates_named(db: &RootDatabase, krate: &str, args: &Args) -> anyhow::Result<V
     let of_checkout = |krate: &Crate| args.members.contains(&(*krate).into());
     if found.iter().any(of_checkout) {
         found.retain(of_checkout);
+    }
+    // The standard library vendors private copies of crates (foldhash, libc, hashbrown) that
+    // are libstd's, built by rustc, and in rust-analyzer's graph of it one may be a crate rustc
+    // does not build at all: std's foldhash, which hashbrown has without its default hasher.
+    let of_program = |krate: &Crate| !krate.origin(db).is_lang();
+    if found.iter().any(of_program) {
+        found.retain(of_program);
+    }
+    // One of the crates after the first is one the first links: a binary of another package
+    // may have the name too, as bun's `bun-sema` has the library `bun_sema`'s.
+    if let Some(first) = args.crates().next().filter(|&it| it != krate) {
+        let program: FxHashSet<ide_db::base_db::Crate> = crates_named(db, first, args)?
+            .into_iter()
+            .flat_map(|it| ide_db::base_db::Crate::from(it).transitive_deps(db))
+            .collect();
+        let linked = |krate: &Crate| program.contains(&(*krate).into());
+        if found.iter().any(linked) {
+            found.retain(linked);
+        }
     }
     anyhow::ensure!(!found.is_empty(), "crate {krate} not found in workspace");
     Ok(found)
@@ -2272,6 +2295,16 @@ fn workspace_at(
     let root = AbsPathBuf::assert_utf8(std::env::current_dir()?.join(project));
     let manifest = ProjectManifest::discover_single(&root)?;
     let mut workspace = ProjectWorkspace::load(manifest.clone(), cargo_config, &|_| {})?;
+    // Without the standard library's source every call into it is unresolved, and each
+    // function making one would be refused for a reason that says nothing of the toolchain.
+    if workspace.sysroot.is_rust_lib_src_empty() {
+        let toolchain =
+            workspace.sysroot.root().map_or("the toolchain".to_owned(), |it| it.to_string());
+        anyhow::bail!(
+            "{toolchain} has no source of the standard library, which ra-jit compiles from: \
+             `rustup component add rust-src` installs it"
+        );
+    }
     let mut debug = plan::Whole { debug: plan::Described::NOTHING, lto: false };
     let mut scripts = None;
     if let ProjectWorkspaceKind::Cargo { cargo, .. } = &mut workspace.kind {
@@ -2603,6 +2636,7 @@ impl ListedCrate {
                 hir_def::attrs::AttrFlags::query(db, it.into())
                     .contains(hir_def::attrs::AttrFlags::USED)
                     || hir_def::attrs::AttrFlags::link_section(db, it.into()).is_some()
+                    || exported_static(db, it).is_some()
             })
             .collect();
         // A crate with `#![no_main]` has no `main` of Rust's: one it exports is the runtime's.
@@ -3854,14 +3888,14 @@ fn refusal(
     let hir_ty_codegen::OutOfDate { func, why, left_from_the_start, calls } = out_of_date?;
     let named =
         |func| hir::Function::from(func).name(db).display(db, syntax::Edition::CURRENT).to_string();
-    let name = named(func);
+    let name = func.map_or("drop glue or a shim".to_owned(), |it| format!("`{}`", named(it)));
     if let Some(calls) = calls {
         let calls = match calls {
             Some(it) => format!("calls rustc's copy of `{}`, which is", named(it)),
             None => "may call code of rustc's that is".to_owned(),
         };
         return Some(Refused::Cargos(format!(
-            "`{name}` is not compiled by ra-jit, and rustc's copy of it {calls} from before the \
+            "{name} is not compiled by ra-jit, and rustc's copy of it {calls} from before the \
              edit: {why}"
         )));
     }
@@ -3869,11 +3903,11 @@ fn refusal(
     // the frontend turned the function down when rustc compiled it. Code rustc compiles
     // that ra-jit takes for wrong is ra-jit's to fix, and not for rustc to build.
     if does_not_compile(&why) && !left_from_the_start {
-        let message = format!("`{name}` has an error ra-jit cannot say more of: {why}");
+        let message = format!("{name} has an error ra-jit cannot say more of: {why}");
         return Some(Refused::Error(written_at(db, func, watched, root, &message)));
     }
     Some(Refused::Cargos(format!(
-        "`{name}` is not compiled by ra-jit and rustc's copy is from before the edit: {why}"
+        "{name} is not compiled by ra-jit and rustc's copy is from before the edit: {why}"
     )))
 }
 
@@ -3903,19 +3937,21 @@ fn does_not_compile(why: &str) -> bool {
     })
 }
 
-/// `message` as an error at the name of `func`, or of no place when its file is not one of
-/// `watched`.
+/// `message` as an error at the name of `func`, or of no place when there is none (drop glue,
+/// a shim) or its file is not one of `watched`.
 fn written_at(
     db: &RootDatabase,
-    func: hir_def::FunctionId,
+    func: Option<hir_def::FunctionId>,
     watched: &Sources,
     root: &Path,
     message: &str,
 ) -> String {
-    let at = hir::HasSource::source(hir::Function::from(func), db).and_then(|source| {
-        let name = source.value.name()?;
-        Some(source.with_value(name.syntax()).original_file_range_rooted(db))
-    });
+    let at = func.and_then(|func| hir::HasSource::source(hir::Function::from(func), db)).and_then(
+        |source| {
+            let name = source.value.name()?;
+            Some(source.with_value(name.syntax()).original_file_range_rooted(db))
+        },
+    );
     match at {
         Some(at) if watched.paths.contains_key(&at.file_id.file_id(db)) => {
             let file = at.file_id.file_id(db);
@@ -5878,6 +5914,7 @@ fn spare(dir: &Path) -> anyhow::Result<()> {
 fn process_wide() {
     hir_def::nameres::EXPAND_BUILTIN_DERIVES.store(true, std::sync::atomic::Ordering::Relaxed);
     project_model::SYSROOT_AS_BUILT.store(true, std::sync::atomic::Ordering::Relaxed);
+    ra_jit_expand::install();
 }
 
 /// Loads the workspace `args` names and builds what they ask for, then serves it when they
@@ -6019,6 +6056,9 @@ fn run_holding(
         resolved = resolve_crates(&db, &args, cores())?;
     }
     eprintln!("resolve: {resolved} crates in {:.1?}", start.elapsed());
+    if let Some(said) = ra_jit_expand::report() {
+        eprintln!("{said}");
+    }
     memory::checkpoint("resolve");
     // What the other checkouts don't share with this one, before a request waits for it.
     for also in &args.also {
@@ -6133,6 +6173,9 @@ fn run_holding(
             }
             eprint!("cold: ");
             report(&cold);
+            if let Some(said) = ra_jit_expand::report() {
+                eprintln!("{said}");
+            }
             memory::report(&mut db, "build")?;
             report_stats(&known.stats);
             link(

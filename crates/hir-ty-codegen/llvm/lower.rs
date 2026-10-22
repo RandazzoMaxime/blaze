@@ -532,7 +532,10 @@ impl<'ctx, 'f> Lowering<'ctx, 'f> {
         });
         let target = crate::Target::selected().map_err(Unhandled::Llvm)?;
         let probe = target.stack_probe().map(|probe| ("probe-stack", probe));
-        for (name, value) in [("target-cpu", target.cpu())].into_iter().chain(probe) {
+        // Without, LLVM gives the frame pointer's register to values, and code that walks the
+        // frames by it reads one of those.
+        let frame = crate::backend::frame_pointers().then_some(("frame-pointer", "all"));
+        for (name, value) in [("target-cpu", target.cpu())].into_iter().chain(probe).chain(frame) {
             let attribute = context.create_string_attribute(name, value);
             function.add_attribute(AttributeLoc::Function, attribute);
         }

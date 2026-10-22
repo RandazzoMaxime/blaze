@@ -39,6 +39,30 @@ entries unreachable; they are removed over time as least recently used.
 on that is not the text of its file, and checks that a build with a store filled before the
 change still prints what cargo's build prints.
 
+### Proc-macro expansions
+
+The store also keeps what derive and attribute macros expand to, so a daemon that loads a
+workspace again does not run them again (`crates/ra-jit-expand`). The key is a SHA-256 of
+the macro library's content, the macro's name and kind, its input with each span replaced
+by its place in the call's table of spans, that table (each span's byte range within the
+item it is anchored to, and which of the call's anchors and hygiene contexts it has), the
+environment and the current directory the macro is given. The output is kept with its spans
+written the same way, so tokens the macro made from a string at the call site come back
+anchored where the next call is. An expansion is not kept when it failed, when it asked
+rust-analyzer anything while it ran (a span's text, file or line), or when its output has a
+span anchored where no span of its input is.
+
+A macro that reads a file or an environment variable by itself is pure to the key and is
+not: name it in `RA_JIT_PROC_MACRO_CACHE_SKIP` (a comma-separated list of macro names) to
+expand it every time. `RA_JIT_PROC_MACRO_CACHE=all` keeps function-like macros too, which
+are off by default because they are the ones that read outside their input (`sqlx::query!`,
+`include_dir!`). `RA_JIT_PROC_MACRO_CACHE=check` expands every call anyway and says which
+macro expanded otherwise than it was kept. `RA_JIT_PROC_MACRO_CACHE=off` keeps nothing. The
+daemon's log has a line per load: how many expansions ran and in how long, how many came
+from the store, and why the rest were not kept. rustc's own cache, `-Zcache-proc-macros`,
+keeps derives only ([research/proc-macro-cache.md](research/proc-macro-cache.md)).
+`harness/expansions.py` tests it.
+
 ## The disk store
 
 Set `RA_JIT_CACHE` to a directory. The daemon reads the variable when it starts, so under

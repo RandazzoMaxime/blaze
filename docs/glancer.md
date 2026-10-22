@@ -163,9 +163,25 @@ domain. Seeing the sub-requests needs a hook in load-cargo's `Expander`
 (`vendor/rust-analyzer/crates/load-cargo/src/lib.rs`, around line 703): a new module file
 in load-cargo declared with one line, which counts the callback's requests per expansion.
 
-**Payoff.** Unmeasured. bevy's 14.4 s load is where it should show (derive-heavy); step 0
-times expansions to say how much of a load they are before this is built. A warm start
-saves the expansion and the server round trip; a cold start gains nothing.
+**Payoff, measured (2026-10-21, dev-aws-7, 16 cores, `cargo ra-jit build` cold then warm on
+one store).** Expansion is a small part of a load. nushell's cold start expands 1677 macros
+in 3.20 s (summed over threads; 1520 derives take 2.95 s) of a 14.3 s load; helix's 1476 in
+3.40 s. On the warm start 1583 (nushell) and 1455 (helix) come from the store in about 0.6 s,
+plus 0.4 to 0.5 s to key them, and the expansions left are function-like macros, which are
+not kept by default. Resolve goes from 5.0 to 3.9 s on nushell and from 5.5 to 4.1 s on helix;
+time to ready from 33.6 to 32.3 s and from 139.4 to 138.2 s. ripgrep expands no proc macro.
+Peak memory, the daemon's memory once ready and the store's size do not change (store +0.01 GB).
+Since the daemon is ready once it has read what rustc linked (cold-start, #11), the same
+expansions are a larger share of a warm start (main 494f0ee948, against a build that also had
+#37's first form, which only acts on the background base; dev-aws-7 with nothing else running, 16 cores, medians of four interleaved runs each): helix's resolve goes from 6.0 to
+4.3 s and its time to ready from 9.6 to 8.0 s, nushell's from 5.8 to 4.5 s and from 10.1 to
+8.8 s. Cold starts do not change (helix 35.5 and 35.2 s, nushell 36.8 and 36.7 s): the
+daemon is ready 1.7 to 3.7 s after cargo returns either way, and runs on a busy host that
+looked slower differed in cargo's own build time.
+
+Build scripts need no cache of their own: a warm start does not run them. The daemon reads
+their results from the messages of cargo's own build, which cargo's fingerprints keep fresh
+(helix: the command returns in 0.5 s and the workspace loads in 0.6 s).
 
 **Risks.** A macro that is impure without asking the server (reads a file through
 `std::fs`, `env!` at expansion time) gives a stale expansion: the opt-out, and a check mode
@@ -188,8 +204,22 @@ numbers, and only for what they show.
 **Where.** `lru = N` on the three queries is an attribute in upstream files; ra-jit's
 monomorphized MIR is ra-jit's own query.
 
-**Payoff.** Unmeasured until step 0; helix's 18.4 GB and nushell's 15.8 GB are the
-numbers to move. The bound is what infer and MIR hold of those, which step 0 reports.
+**Payoff, measured (2026-10-21, dev-aws-7, 16 cores, `harness/heap.py` on jemalloc
+profiles).** Inference and MIR hold little of the peak; debug information holds most of it.
+At helix's high-water mark (an interval dump, 15.4 GB live of a 17.9 GB peak) `mir_body` holds
+0.5 GB, `compiled_instance` and `compiled_root` 1.0 GB, `inlinable` 0.15 GB, while the
+`described` query holds 5.8 GB, most of it copies of the type tables each memo makes
+(`Arc<[DebugType]>` and `Vec<Field>` cloned), and the DWARF writer's names (`Dwarf::named`)
+3.0 GB: together 62% of the peak. Once the build is over helix holds 6.4 GB live (`described`
+2.1 GB, item trees 1.3 GB, ra-jit's own structures 1.2 GB) and nushell 5.6 GB (`described`
+1.0 GB, ra-jit's own 1.1 GB, `mir_body` 0.5 GB, item trees 0.4 GB). With `RA_JIT_DEBUGINFO=0`,
+helix's warm start peaks at 8.6 GB instead of 17.0 GB and holds 5.9 GB once ready instead of
+11.9 GB; nushell's 10.5 and 7.2 GB instead of 14.0 and 10.3 GB; the stores are 0.25 and
+0.31 GB instead of 1.70 and 0.91 GB. Line tables alone (`lines`) leave what is held once
+ready where it was. So the first target is debug information: one copy of a type's
+description shared by the memos that reach it, and the writer's names interned, before an
+LRU on infer and MIR. About 5 GB of what the daemon holds once ready is the allocator's and
+not live (helix 11.7 GB resident against 6.4 GB live, nushell 10.2 against 5.6 GB).
 
 **Risks.** An edit that reaches many bodies recomputes their MIR: the edit harnesses
 (`editbench.py`, `movedlines.py`, `storefirst.py`) and edit-to-binary times are the check.
@@ -259,6 +289,18 @@ nushell 7.2 s + 5.0 s, helix 7.1 s + 5.6 s, less the workspace's own share), and
 inference and MIR of dependency instances. Memory: salsa memos of dependencies become pages
 of a mapped file, which the kernel can drop.
 
+Measured with step 0 (2026-10-21, dev-aws-7, 16 cores): a warm start loads the workspace in
+0.6 s (helix) and 1.2 s (nushell) and resolves in 5.5 s and 5.0 s, of 146 s and 34 s to
+ready. The rest goes to compiling with every function found in the store (nushell 14 s) and to
+compiling the checkout again so the first edit can be patched (nushell 9 s, helix 47 s), which
+is item 2's. Of what is live once a build is over, the dependency front end (item trees,
+def maps, impl headers, salsa inputs) is about 1.8 GB on helix and 1.1 GB on nushell, against
+2.1 GB and 1.0 GB of debug-info descriptions (item 5). So 1b's first family is the item
+tree, the largest single front-end query on both (helix 1.3 GB, nushell 0.4 GB), and the time
+1a and 1b can save on a warm start is about 5 s. Since cold-start (#11) a warm start is ready
+in 8.0 s on helix and 8.8 s on nushell with item 3, of which resolving is 4.3 s and 4.5 s:
+what is left of the warm start is mostly this item's.
+
 **Risks.** It is the largest change here and touches the most upstream behaviour. The
 differential checker, kept as a mode, is the guard: a frozen value that differs from the
 live one is a bug, never a fallback. salsa's own `persistence` feature is the alternative
@@ -323,7 +365,9 @@ and cold-start time and RSS on helix and nushell before and after.
    expansions counted and timed (the one new piece of code here).
 3. The restart round: helix's first round of 29 s is thrown away because one instance needs
    a writable static (`__RUST_STD_INTERNAL_VAL`, std's thread-local) without a rustc symbol.
-   Rejecting the instance's call chain without starting over saves it.
+   Compiling the instance saves it, which is no-rustc's step E (#85); keeping the
+   rejection so a later daemon forwards its callers to rustc's copies (#37's first form) is
+   not merged.
 4. Proc-macro expansion cache (item 3), with its check mode.
 5. Memo eviction (item 5), sized by step 0.
 6. Item 1a, then 1b family by family, then 1c.
@@ -338,8 +382,8 @@ stops.
 
 | Work | Issue | Lane |
 |---|---|---|
-| The restart round (step 3) | #37 | glancer, gated on dev-aws-7, merging |
-| Proc-macro expansion cache (item 3) | #38 | glancer, gated on dev-aws-7, merging after #37 |
+| The restart round (step 3) | #37 | glancer, redirected to no-rustc step E (#85): the instances are compiled, not left to rustc; kept rejections are not merged |
+| Proc-macro expansion cache (item 3) | #38 | glancer, merging |
 | `described` copies whole type closures (item 5) | #55 | share-types, dev-aws-6 |
 | The spare worker's memory (item 5) | #56 | spare, its own AWS host |
 | salsa eviction of queries with cycle handling (item 5) | #57 | spare, after #56 |
@@ -349,11 +393,15 @@ stops.
 | ra-jit never runs rustc | #81 to #93 | no-rustc; steps A to M of `docs/no-rustc.md`, A to C ready to assign |
 
 - **no-rustc.** Andrew's rule is that ra-jit must never run rustc. Since cold-start (#11)
-  the time to ready is what rustc linked. The background own base, and #37's forwarding of
-  callers to rustc's copies, build on that, so the warm start is cheap today because rustc
-  built the program. Without rustc the daemon's own build is the ready path again. That
-  makes items 1 and 2 (#40, #41) the warm start's path once more, as they were planned
-  before #11: they skip the analysis of what is unchanged on the daemon's own build.
+  the time to ready is what rustc linked, so the warm start is cheap today because rustc
+  built the program. Without rustc the daemon's own build is the ready path again, and the
+  cold start is the store and the remote serving what ra-jit built, the standard library
+  included (no-rustc's steps F, G and K, which the cold-start lane owns). That makes items
+  1 and 2 (#40, #41) the cold and warm start's path: a frozen dependency and an unchanged
+  checkout are linked from what ra-jit built and kept, without analysis. Item 3's keys
+  name the macro's library by its content, so they hold when ra-jit builds that library
+  (step J). #37 no longer keeps rejections to forward their callers to rustc's copies: the
+  restart round goes because the instances compile (step E).
   `docs/no-rustc.md` says in which order rustc goes (its step K, #91, is the cold start). Items 1 and 2 are designed not to need rustc's
   output, and a step here that adds a new dependency on it says so in this table.
 - **flat-syntax (#42)** and item 1 both change what dependency files cost. A frozen crate
@@ -367,6 +415,14 @@ stops.
   compiled names and sits next to the store; salsa state is theirs. Both need a serialization
   layer for ids that survive a process: whoever lands first puts it where the other can use
   it, and says so in this file.
+- **bun** (the bun-e lane, 2026-10-22) is measured here and not worked on there: its cold
+  start and the daemon's memory are this lane's. `bench.py bun` on Linux x86-64 (16 cores of an
+  AWS c8a.24xlarge, Cranelift, memory by `harness/memory.py`,
+  [docs/benchmarks/bun-linux-x86-64.json](benchmarks/bun-linux-x86-64.json)): cold to ready in
+  70.9 s + 2.4 s against cargo's 73.1 s, the cold build at most 15.5 GB at once against
+  cargo's 4.5 GB. The daemon holds 12.5 GB once ready and 25.7 GB after the first edit, and the
+  edit that adds a function peaks at 33.5 GB against cargo's 3.3 GB. On macOS arm64
+  (2026-10-21, `docs/research/bun.md`) it was 291 s to ready, 28 GB, near 40 GB at an edit.
 - **architecture split**: the store is the crate `crates/ra-jit-store`, and the code
   generator moves to a crate of its own. New store-side code (item 3's cache, item 1's
   container, item 2's manifest) goes in or beside `ra-jit-store`, behind the store's
@@ -377,5 +433,3 @@ stops.
 - bevy and ripgrep with step 1; zed's own base past the memory bound (#55).
 - Whether `instance_path` and `home::Mentions`, which also walk types without a memo,
   grow the same way on other workspaces; on helix they were under 3% of the sample.
-- How much of a load proc-macro expansion is (step 0).
-- What share of RSS infer and MIR hold (step 0).
