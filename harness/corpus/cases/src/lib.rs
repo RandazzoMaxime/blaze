@@ -7030,3 +7030,35 @@ pub mod opaque_of_trait_method {
         )
     }
 }
+
+/// A `const` item whose value passes a borrowed array of `const fn` calls to a `const fn`:
+/// rustc promotes the array, as `embed_migrations!` relies on.
+pub mod const_fn_promoted {
+    pub struct Migration {
+        pub name: &'static str,
+        pub down: Option<&'static str>,
+    }
+
+    impl Migration {
+        pub const fn new(name: &'static str, down: Option<&'static str>) -> Self {
+            Self { name, down }
+        }
+    }
+
+    pub struct Migrations {
+        pub all: &'static [Migration],
+    }
+
+    impl Migrations {
+        pub const fn new(all: &'static [Migration]) -> Self {
+            Migrations { all }
+        }
+    }
+
+    pub const MIGRATIONS: Migrations =
+        Migrations::new(&[Migration::new("a", Some("b")), Migration::new("c", None)]);
+
+    pub fn run() -> usize {
+        MIGRATIONS.all.iter().filter(|it| it.down.is_some()).count() + MIGRATIONS.all[1].name.len()
+    }
+}
