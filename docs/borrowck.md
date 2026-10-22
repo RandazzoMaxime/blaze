@@ -62,6 +62,14 @@ All of these are rustc's, written from `compiler/rustc_borrowck` at the pinned n
   (`impl Copy for Foo<'static>`); a loop's way back may unwind as rustc's `FalseUnwind`, so a
   borrow that must outlive the function is reported in a loop that never ends; and
   `dyn Any + 'r` in the signature implies `'r: 'static`, which `trait Any: 'static` requires.
+- Well-formedness in bodies: a called function's signature as written, before its associated
+  types are normalized, and its generic arguments are well-formed at the call (`&'a &'b ()`
+  that `'b: 'a`); so is a function item's signature where it becomes a function pointer, with
+  its late-bound lifetimes instantiated. A function item is well-formed with its where clauses
+  and return type, and an associated type `<T as Trait>::Ty` where `T` implements `Trait`
+  (`impl Trait for &'static ()` makes `<&'a () as Trait>::Ty` need `'a: 'static`). The
+  generic arguments a path spells out are well-formed, and a called function's where clauses
+  hold for them, in code that is never reached too.
 - Promotion: a borrowed function item, and a named `const` whose type has no interior
   mutability whatever its drop (rustc asks whether the value needs dropping, not the type).
 - Region inference: liveness of locals (drops kept live only back to where the local may be
@@ -155,8 +163,8 @@ With no borrow checker, the 245 units rustc accepts would pass. Now:
 
 | Mode | In scope | Pass | rustc accepts, ra-jit too | rustc rejects, same errors |
 |---|---|---|---|---|
-| Polonius | 1579 | 1294 (82.0%) | 245 of 245 | 1049 of 1334 |
-| NLL | 1577 | 1288 (81.7%) | 226 of 226 | 1062 of 1351 |
+| Polonius | 1579 | 1311 (83.0%) | 245 of 245 | 1066 of 1334 |
+| NLL | 1577 | 1304 (82.7%) | 226 of 226 | 1078 of 1351 |
 
 463 units are out of scope; 344 of them need a nightly feature. CI runs the scoring on Linux
 and fails below a floor a few units under the count there.
@@ -169,8 +177,10 @@ just, axum, nushell, delta, eza, tokei and starship it finds nothing, nor on the
 ## What is left
 
 Every failing unit is one where rustc gives an error ra-jit does not, or gives it on another
-line or with another code. By what is wrong, most first: 38 "lifetime may not live long
-enough" not reported, 23 E0597 not reported, 13 E0310, 11 E0309, 10 E0515, then a long tail. The causes, grouped:
+line or with another code. By what is wrong, most first: 32 "lifetime may not live long
+enough" not reported, 21 E0597 not reported, 19 "lifetime may not live long enough" on
+another line, 11 E0597 on another line, 10 each of E0309, E0310 and E0507 not reported, then
+a long tail. The causes, grouped:
 
 - **Higher-ranked regions and placeholders** (`for<'a>` bounds, closures with higher-ranked
   signatures): rustc checks them with placeholders in universes; ra-jit does not yet, and
