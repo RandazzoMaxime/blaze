@@ -50,7 +50,9 @@ All of these are rustc's, written from `compiler/rustc_borrowck` at the pinned n
   initialized), outlives constraints from every statement, call, cast and aggregate, the
   signature's universal regions and implied bounds (normalized parameters and the impl
   header included, for associated consts too), where clauses (elaborated through
-  supertraits), type tests, and lifetimes written in `let` annotations (`let _: T = value`
+  supertraits) and the region constraints of proving them with the trait solver (a where
+  clause or impl that proves a bound relates its regions to the bound's, `&'max G: Get` proving
+  `&'min G: Get` makes them equal, and the impl's own `T: 'a` must hold), type tests, and lifetimes written in `let` annotations (`let _: T = value`
   of any value included), casts, turbofishes and struct literal and variant paths. A function item, closure or safe function pointer cast to a
   function pointer is a subtype of it by signature. A where clause `for<'a> T: 'a` is
   `T: 'static`, and a type parameter that fails it is rustc's codeless "does not live long
@@ -124,8 +126,8 @@ With no borrow checker, the 245 units rustc accepts would pass. Now:
 
 | Mode | In scope | Pass | rustc accepts, ra-jit too | rustc rejects, same errors |
 |---|---|---|---|---|
-| Polonius | 1579 | 1204 (76.2%) | 245 of 245 | 959 of 1334 |
-| NLL | 1577 | 1197 (75.9%) | 226 of 226 | 971 of 1351 |
+| Polonius | 1579 | 1223 (77.5%) | 245 of 245 | 978 of 1334 |
+| NLL | 1577 | 1216 (77.1%) | 226 of 226 | 990 of 1351 |
 
 463 units are out of scope; 344 of them need a nightly feature. CI runs the scoring on Linux
 and fails below a floor a few units under the count there.
@@ -138,8 +140,8 @@ just, axum, nushell, delta, eza, tokei and starship it finds nothing, nor on the
 ## What is left
 
 Every failing unit is one where rustc gives an error ra-jit does not, or gives it on another
-line or with another code. By what is wrong, most first: 61 "lifetime may not live long
-enough" not reported, 36 E0597 not reported, 13 E0310, 11 E0309, 7 E0700, then a long tail. The causes, grouped:
+line or with another code. By what is wrong, most first: 51 "lifetime may not live long
+enough" not reported, 35 E0597 not reported, 13 E0310, 11 E0309, 7 E0700, then a long tail. The causes, grouped:
 
 - **Higher-ranked regions and placeholders** (`for<'a>` bounds, closures with higher-ranked
   signatures): rustc checks them with placeholders in universes; ra-jit does not yet, and
@@ -162,7 +164,9 @@ enough" not reported, 36 E0597 not reported, 13 E0310, 11 E0309, 7 E0700, then a
   on `x` with no arms read `x`; rust-analyzer's captures nothing there, so the E0381 of an
   uninitialized `x` is missed.
 - **Trait selection's region obligations**: an impl's `T: 'static` proven at an unsizing
-  cast, or the region constraints of an impl a method resolves to.
+  cast. A bound on a closure's type is not proven through the solver: rust-analyzer gives a
+  closure one signature, `fn(&'1 T)` for one `'1`, where rustc's is `for<'a> fn(&'a T)`, so
+  proving it would tie every call's borrow to one region.
 - **Differences in rust-analyzer's MIR lowering** (below).
 
 ## What depends on rust-analyzer's MIR lowering
@@ -189,6 +193,10 @@ changes to rust-analyzer were needed, each made as rustc does it:
 - A function item or a tuple struct's or variant's constructor written as a value
   (`let f = foo::<T>;`) is assigned to where it goes, though zero sized, so a closure that
   captures `f` or a method that takes it by value does not read it uninitialized (E0381).
+- The trait solver (`hir-ty/src/next_solver/solver.rs`) answers with the region constraints
+  of what it proves, as rustc's does, for an interner made with `with_regions()`: the
+  borrow checker's. rust-analyzer's dropped them; type inference does not ask for them and
+  its answers are cached apart.
 
 These are differences still open, each the cause of some failures, all of them errors
 missed rather than errors made up:
