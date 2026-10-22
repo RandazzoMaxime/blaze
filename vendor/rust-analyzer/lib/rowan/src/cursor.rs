@@ -815,7 +815,10 @@ impl SyntaxNode {
     ) -> Option<Option<SyntaxNode>> {
         match self.0 {
             Ref::Flat(root, at) if !range.is_empty() => Some(
-                flat(&root).tree.node_at_range(at, range, kind).map(|it| SyntaxNode(flat_ref(root, it))),
+                flat(&root)
+                    .tree
+                    .node_at_range(at, range, kind)
+                    .map(|it| SyntaxNode(flat_ref(root, it))),
             ),
             _ => None,
         }
