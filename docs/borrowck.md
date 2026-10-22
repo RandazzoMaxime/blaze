@@ -55,7 +55,15 @@ All of these are rustc's, written from `compiler/rustc_borrowck` at the pinned n
   the borrow is of a field of a value whose type implements `Drop` and the drop is of that
   value, E0373 ("may outlive the current block") for a closure a `let` binds as a block's
   value, and E0597 rather than E0515 for what a function returns as an `impl Trait` that
-  captures no lifetime (rustc's `OpaqueType` constraint).
+  captures no lifetime (rustc's `OpaqueType` constraint). The mutable borrows of a variable
+  declared without `mut` are one E0596, at the declaration once there are two.
+- `'static` in what a type or signature spells (`x: &'static u32` in a struct, a parameter
+  `&'static T`) is related as any other region; a copied value proves its type `Copy`
+  (`impl Copy for Foo<'static>`); a loop's way back may unwind as rustc's `FalseUnwind`, so a
+  borrow that must outlive the function is reported in a loop that never ends; and
+  `dyn Any + 'r` in the signature implies `'r: 'static`, which `trait Any: 'static` requires.
+- Promotion: a borrowed function item, and a named `const` whose type has no interior
+  mutability whatever its drop (rustc asks whether the value needs dropping, not the type).
 - Region inference: liveness of locals (drops kept live only back to where the local may be
   initialized), outlives constraints from every statement, call, cast and aggregate, the
   signature's universal regions and implied bounds (normalized parameters and the impl
@@ -147,8 +155,8 @@ With no borrow checker, the 245 units rustc accepts would pass. Now:
 
 | Mode | In scope | Pass | rustc accepts, ra-jit too | rustc rejects, same errors |
 |---|---|---|---|---|
-| Polonius | 1579 | 1278 (80.9%) | 245 of 245 | 1033 of 1334 |
-| NLL | 1577 | 1272 (80.7%) | 226 of 226 | 1046 of 1351 |
+| Polonius | 1579 | 1294 (82.0%) | 245 of 245 | 1049 of 1334 |
+| NLL | 1577 | 1288 (81.7%) | 226 of 226 | 1062 of 1351 |
 
 463 units are out of scope; 344 of them need a nightly feature. CI runs the scoring on Linux
 and fails below a floor a few units under the count there.
@@ -161,8 +169,8 @@ just, axum, nushell, delta, eza, tokei and starship it finds nothing, nor on the
 ## What is left
 
 Every failing unit is one where rustc gives an error ra-jit does not, or gives it on another
-line or with another code. By what is wrong, most first: 42 "lifetime may not live long
-enough" not reported, 28 E0597 not reported, 13 E0310, 11 E0309, 7 E0700, then a long tail. The causes, grouped:
+line or with another code. By what is wrong, most first: 38 "lifetime may not live long
+enough" not reported, 23 E0597 not reported, 13 E0310, 11 E0309, 10 E0515, then a long tail. The causes, grouped:
 
 - **Higher-ranked regions and placeholders** (`for<'a>` bounds, closures with higher-ranked
   signatures): rustc checks them with placeholders in universes; ra-jit does not yet, and
