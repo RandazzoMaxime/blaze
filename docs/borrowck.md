@@ -4,7 +4,7 @@ ra-jit has its own borrow checker, the crate `hir-ty-borrowck` in the rust-analy
 (`vendor/rust-analyzer/crates/hir-ty-borrowck`, next to `hir-ty`). It checks the MIR rust-analyzer
 lowers, the same MIR the code generator compiles, and it is meant to give exactly rustc's
 verdict: the same errors, on the same lines, and none where rustc gives none. It gives
-rustc's verdict on 87% of rustc's own borrow-check tests today, and on every one rustc
+rustc's verdict on 88% of rustc's own borrow-check tests today, and on every one rustc
 accepts; how they are scored and what is left is below.
 
 It runs as part of rust-analyzer's diagnostics, so the daemon computes it for every edited
@@ -89,7 +89,9 @@ All of these are rustc's, written from `compiler/rustc_borrowck` at the pinned n
   and return type, and an associated type `<T as Trait>::Ty` where `T` implements `Trait`
   (`impl Trait for &'static ()` makes `<&'a () as Trait>::Ty` need `'a: 'static`). The
   generic arguments a path spells out are well-formed, and a called function's where clauses
-  hold for them, in code that is never reached too.
+  hold for them, in code that is never reached too. A constant named through a type that
+  spells out lifetimes, `A::<'a>::C` or `<A<'a>>::C`, has its impl's self type (or for a
+  trait's constant, `Self`) equal to `A<'a>`, in a range pattern's bounds too.
 - Promotion: a borrowed function item, and a named `const` whose type has no interior
   mutability whatever its drop (rustc asks whether the value needs dropping, not the type).
   In a `const` or `static` item's value, a call of a `const fn` is promotable too
@@ -123,7 +125,9 @@ All of these are rustc's, written from `compiler/rustc_borrowck` at the pinned n
 - Errors on universal regions: "lifetime may not live long enough", E0521, E0309, E0310,
   E0311, with rustc's object lifetime defaults (`&'a dyn Trait` is `dyn Trait + 'a`, a trait
   bounded by `'static` makes its objects `'static`, elsewhere in a body the lifetime is
-  inferred).
+  inferred). Of universal regions made to outlive each other, as rustc only the first made
+  (a closure's creator's before its own) is checked against all it outlives, the others only
+  against it, so the error is the one rustc reports.
 - Loans that outlive their storage: E0597, E0515, E0716, and promoted constants (calls of
   `#[rustc_promotable]` functions such as `size_of` included) and extended temporaries of
   `const` and `static` items as `'static`. An expression statement's value is not read once
@@ -141,7 +145,11 @@ All of these are rustc's, written from `compiler/rustc_borrowck` at the pinned n
   its signature, `for<'a> FnOnce(&'a T)`, and the borrow of its environment) and its
   creator's (every other region of its type, and the enclosing item's lifetime parameters,
   late-bound ones included, so `foo::<&'a u32>(&local)` in a closure needs `local` to outlive
-  the creator's `'a`).
+  the creator's `'a`). Its parameters and return slot have the types written for them
+  (rustc's `check_signature_annotation`: `|x: &'a i32| -> &'static i32 { x }` needs
+  `'a: 'static`), and a closure typed without an expected signature has the lifetimes elided
+  in its parameters' types as its own, as rustc's signature binds them, so
+  `let f = |x: &i32| -> &i32 { x };` is an error.
   One of its own made to outlive what it is not known to is an error in the closure
   (`with(|x| x)` returning the borrow it was given), named E0521 or a `FnMut` escape as
   rustc names it. What a closure needs of its creator's regions is a requirement the creator
@@ -165,7 +173,11 @@ All of these are rustc's, written from `compiler/rustc_borrowck` at the pinned n
   clauses, not the trait's. The where clauses of an ADT, impl, trait or function must be
   well-formed given its bounds and what its signature's and impl header's types imply
   (`fn foo<'a, L: X<&'a Nested<K>>>()` needs `K: 'a`). As rustc, an item that also needs a lifetime to outlive one
-  it does not (E0491) gets only that error, which ra-jit does not report yet.
+  it does not (E0491) gets only that error, which ra-jit does not report yet. The type a
+  returned `impl Trait` hides must be well-formed and outlive what its bounds say, given what
+  the function knows (rustc's `check_opaque_meets_bounds`): `-> impl Sized + 'static` hiding
+  a `T` is E0310 at the `impl Trait`. A closure or coroutine outlives as its captures do, and
+  an `impl Trait` with no outlives bound as its arguments.
 - E0621 ("explicit lifetime required") where rustc gives it: not in a trait impl's method,
   nor for an anonymous lifetime of `self` or of the return type.
 - Where errors are: at the expression rustc points to. A borrow `format_args!` (so
@@ -192,8 +204,8 @@ With no borrow checker, the 245 units rustc accepts would pass. Now:
 
 | Mode | In scope | Pass | rustc accepts, ra-jit too | rustc rejects, same errors |
 |---|---|---|---|---|
-| Polonius | 1579 | 1373 (87.0%) | 245 of 245 | 1128 of 1334 |
-| NLL | 1577 | 1368 (86.7%) | 226 of 226 | 1142 of 1351 |
+| Polonius | 1579 | 1392 (88.2%) | 245 of 245 | 1147 of 1334 |
+| NLL | 1577 | 1387 (88.0%) | 226 of 226 | 1161 of 1351 |
 
 463 units are out of scope; 344 of them need a nightly feature. CI runs the scoring on Linux
 and fails below a floor a few units under the count there.
@@ -206,10 +218,10 @@ just, axum, nushell, delta, eza, tokei and starship it finds nothing, nor on the
 ## What is left
 
 Every failing unit is one where rustc gives an error ra-jit does not, or gives it on another
-line or with another code. By what is wrong, most first: 29 "lifetime may not live long
-enough", 21 E0310 and 19 E0597 not reported, 15 with only an error rustc does not give, 11
-E0309 not reported, 10 "lifetime may not live long enough" on another line and 10 E0521 not
-reported, then a long tail. The causes, grouped:
+line or with another code. By what is wrong, most first: 26 "lifetime may not live long
+enough" and 18 E0597 not reported, 15 with only an error rustc does not give, 11 E0309 and
+10 E0310 not reported, 8 "lifetime may not live long enough" on another line, and 8 each of
+E0716, E0507 and E0521 not reported, then a long tail. The causes, grouped:
 
 - **Higher-ranked regions and placeholders** (`for<'a>` bounds, closures with higher-ranked
   signatures): rustc checks them with placeholders in universes; ra-jit does not yet, and
@@ -218,9 +230,6 @@ reported, then a long tail. The causes, grouped:
   trait bound needs of the regions (`<T as Dummy<'a>>::Out` in a field, proven by an impl
   that needs `T: 'a`), a projection's `<T as Trait>::Assoc: 'a`, and items whose signature
   or impl header has an associated type (what normalizing it implies) are not checked yet.
-- **Written closure parameter types**: `|x: &'x u32|` gives `x` the creator's `'x` in rustc,
-  the closure's own lifetime in ra-jit, so an error the annotation causes is reported where
-  `x` is used instead of at the parameter.
 - **Member constraints of `impl Trait`**: the choice rustc makes is not applied, and a
   projection bound that names a lifetime (`impl Iterator<Item = Box<dyn Foo>>`) leaves them
   out.
@@ -266,6 +275,11 @@ changes to rust-analyzer were needed, each made as rustc does it:
 - A function item or a tuple struct's or variant's constructor written as a value
   (`let f = foo::<T>;`) is assigned to where it goes, though zero sized, so a closure that
   captures `f` or a method that takes it by value does not read it uninitialized (E0381).
+- A range pattern's bounds carry their expressions' spans, as other operands do, so a
+  constant named there is found with the lifetimes its path writes.
+- Type inference records the closures it types without an expected signature
+  (`InferenceResult::closures_without_expectation`), whose elided parameter lifetimes rustc
+  binds in the closure's signature where rust-analyzer's signature has none.
 - The trait solver (`hir-ty/src/next_solver/solver.rs`) answers with the region constraints
   of what it proves, as rustc's does, for an interner made with `with_regions()`: the
   borrow checker's. rust-analyzer's dropped them; type inference does not ask for them and
