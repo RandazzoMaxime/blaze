@@ -285,7 +285,9 @@ from the store as far as it can; an edit that comes meanwhile interrupts it and 
 of rustc's executable. A worker that holds more than a quarter of the machine's memory while
 it builds that base gives it up for good, logs so, and edits go on patching rustc's
 executable: what the build computed stays in the database, so the bound is on what the
-worker keeps (`RA_JIT_OWN_BASE_MEMORY`, in megabytes, or `off`). zed's base outgrows it, on
+worker keeps (`RA_JIT_OWN_BASE_MEMORY`, a size such as `40G`, or `off`). The daemon's
+`RA_JIT_MEMORY_MAX` does not stand for it: that stops the worker asked longest ago, never the
+one asked last, which is the one building its base. zed's base outgrows it, on
 the debuginfo types of [#55](https://github.com/indexable-inc/ra-jit/issues/55).
 `RA_JIT_RUSTC_BASE=0` makes the first build the daemon's own, as before. `harness/rustcbase.py` checks every kind of edit against cargo.
 

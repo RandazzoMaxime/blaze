@@ -4592,14 +4592,17 @@ struct Running {
 /// for edits that patch what rustc linked.
 const OWN_BASE_AFTER: Duration = Duration::from_secs(1);
 
-/// Megabytes the daemon may hold while it builds a base of its own, which no edit waits for:
-/// a quarter of the machine's memory, or what `RA_JIT_OWN_BASE_MEMORY` says (`off` for no
-/// bound). What the build computed stays, so the bound is on what the daemon keeps after it.
+/// Bytes the daemon may hold while it builds a base of its own, which no edit waits for:
+/// what `RA_JIT_OWN_BASE_MEMORY` says (a size, or `off` for no bound), else a quarter of the
+/// machine's memory. What the build computed stays, so the bound is on what the daemon keeps
+/// after it.
 fn own_base_budget() -> Option<u64> {
     match std::env::var("RA_JIT_OWN_BASE_MEMORY") {
         Ok(it) if it == "off" => None,
-        Ok(it) => it.parse().ok(),
-        Err(_) => memory::physical().map(|it| it / 4),
+        it => it
+            .ok()
+            .and_then(|it| ra_jit_store::parse_size(&it))
+            .or_else(|| memory::of_the_machine().map(|it| it / 4)),
     }
 }
 
@@ -6824,9 +6827,13 @@ fn run_holding(
                     let krate = program.args.krate.clone();
                     std::thread::spawn(move || {
                         while !done.load(Ordering::SeqCst) {
-                            if let Some(held) = memory::resident().filter(|&it| it > budget) {
+                            if let Some(held) =
+                                memory::held_by(std::process::id()).filter(|&it| it > budget)
+                            {
                                 eprintln!(
-                                    "not compiling the program for edits to patch any more: it holds {held} MB, more than the {budget} MB it may (RA_JIT_OWN_BASE_MEMORY), and edits go on patching what rustc linked: {krate}"
+                                    "not compiling the program for edits to patch any more: it holds {} MB, more than the {} MB it may (RA_JIT_OWN_BASE_MEMORY), and edits go on patching what rustc linked: {krate}",
+                                    held >> 20,
+                                    budget >> 20
                                 );
                                 let _ = sender.send(Event::OverBudget(at));
                                 return;
