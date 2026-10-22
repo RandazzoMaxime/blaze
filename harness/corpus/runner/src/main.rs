@@ -723,6 +723,13 @@ fn main() {
     }
     case!(cases::opaque_of_trait_method::run(4), cases::opaque_of_trait_method::run(90));
     case!(cases::constructor_extends_temporaries::run(), cases::statement_borrows_temporary::run(true, &None));
+    let text = std::hint::black_box(b"a // b /** c */ \\\" d <!-- e \"\"\" f /".to_vec());
+    case!(
+        cases::byte_compares::run(&text),
+        cases::byte_compares::order(*b"abc", *b"abd", b"zy", b"za"),
+        cases::byte_compares::order(*b"abd", *b"abc", b"za", b"zy"),
+        cases::byte_compares::order(*b"abc", *b"abc", b"zy", b"zy"),
+    );
 }
 
 fn nest<T>(depth: u8, value: T) -> Option<Option<T>> {

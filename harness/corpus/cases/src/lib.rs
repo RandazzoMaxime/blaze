@@ -7150,3 +7150,31 @@ pub mod constructor_extends_temporaries {
         log.into_inner()
     }
 }
+
+/// Bytes compared with needles of a few bytes whose number is known, as LLVM writes them in
+/// loads, and the order of short byte arrays, which keeps the sign `memcmp` gives.
+pub mod byte_compares {
+    use core::cmp::Ordering;
+
+    pub fn run(text: &[u8]) -> Vec<(usize, u8)> {
+        let needles: [&[u8]; 6] = [b"/", b"//", b"/**", b"\\\"", b"<!--", b"\"\"\""];
+        let mut found = Vec::new();
+        for at in 0..text.len() {
+            let window = &text[at..];
+            let mut which = 0;
+            for (bit, needle) in needles.iter().enumerate() {
+                if window.starts_with(needle) {
+                    which |= 1 << bit;
+                }
+            }
+            if which != 0 {
+                found.push((at, which));
+            }
+        }
+        found
+    }
+
+    pub fn order(a: [u8; 3], b: [u8; 3], c: &[u8], d: &[u8]) -> (Ordering, Ordering, bool, bool) {
+        (a.cmp(&b), c[..2].cmp(&d[..2]), a == b, c[..1] == d[..1])
+    }
+}

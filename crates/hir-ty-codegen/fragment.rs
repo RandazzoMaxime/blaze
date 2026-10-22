@@ -377,11 +377,21 @@ impl Wants {
     /// The number of the function asked for that goes on unwinding, `_Unwind_Resume`.
     #[cfg(feature = "llvm")]
     pub(super) fn resume(&self) -> Option<u32> {
+        self.symbol("_Unwind_Resume")
+    }
+
+    /// The number of the function asked for that compares memory, `memcmp`.
+    #[cfg(feature = "llvm")]
+    pub(super) fn memcmp(&self) -> Option<u32> {
+        self.symbol("memcmp")
+    }
+
+    #[cfg(feature = "llvm")]
+    fn symbol(&self, symbol: &str) -> Option<u32> {
         let mut funcs = self.requests.funcs.iter();
-        let resume = funcs.position(
-            |it| matches!(&it.target, FuncTarget::Symbol(name) if name == "_Unwind_Resume"),
-        );
-        resume.map(|it| it as u32)
+        let found =
+            funcs.position(|it| matches!(&it.target, FuncTarget::Symbol(name) if name == symbol));
+        found.map(|it| it as u32)
     }
 
     #[cfg(feature = "llvm")]

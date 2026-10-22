@@ -187,6 +187,12 @@ All notable changes to ra-jit are written here. The format follows
 
 ### Changed
 
+- With LLVM, `memcmp` is called by its own name in the function's module rather than as one
+  of the functions asked for, so LLVM writes a comparison of a few bytes it knows the number of
+  as loads, and one only for equality as `bcmp`, as it does for rustc. On Linux x86-64 (AMD
+  EPYC 9R45) tokei calls the C library's comparisons 155.9 million times instead of 278.6
+  million (cargo's release build: 155.1 million) and runs at 1.34 times the release build
+  instead of 1.51. words' machine code is the same, 48 bytes further on.
 - With LLVM at `-O3` the bodies of the functions a function calls are built into it before
   the default pipeline, and the branches on what they return threaded and the values
   numbered again, as is done for what Cranelift builds in: a loop over `i + 1..n` inside one
