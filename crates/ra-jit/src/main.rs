@@ -2728,6 +2728,31 @@ fn rustcs_to_patch(args: &Args, unwritten: bool) -> Option<PathBuf> {
 /// Has the executable at `--splice` be the one rustc linked at `rustcs`, and the objects
 /// empty, for edits to be spliced into it as patches. Watches every file rustc read: one an
 /// `include!` in a body names is first seen when the body is compiled.
+/// The file at `path` as the filesystem names it, through no link. rustc's dep-info names a
+/// file of the workspace where it is, and the workspace's files are named through the path it
+/// was given (`/tmp` is a link on macOS).
+fn real_path(path: &Path) -> PathBuf {
+    dunce::canonicalize(path).unwrap_or_else(|_| path.to_owned())
+}
+
+/// The sources of `files` that are among `written`, which rustc's dep-info names.
+fn written_sources<'a>(
+    files: &[WatchedFile],
+    written: impl IntoIterator<Item = &'a Path>,
+) -> FxHashMap<vfs::FileId, PathBuf> {
+    let written: FxHashSet<PathBuf> = written.into_iter().map(real_path).collect();
+    if written.is_empty() {
+        return FxHashMap::default();
+    }
+    let source = |it: &WatchedFile| match it.file {
+        Watched::Source(id) if written.contains(&real_path(&it.path)) => {
+            Some((id, it.path.clone()))
+        }
+        _ => None,
+    };
+    files.iter().filter_map(source).collect()
+}
+
 fn start_from_rustc(
     args: &Args,
     rustcs: &Path,
@@ -2753,8 +2778,14 @@ fn start_from_rustc(
     let names = std::thread::spawn(move || symbols::Linked::read(&rustcs));
     lock(&RUSTC_SYMBOLS).insert(binary.to_owned(), LinkedNames::Reading(names));
     let mut watched: FxHashSet<PathBuf> = files.iter().map(|it| it.path.clone()).collect();
+    let mut real_watched: Option<FxHashSet<PathBuf>> = None;
     for source in table.sources() {
         if !watched.insert(source.to_owned()) {
+            continue;
+        }
+        let real_watched = real_watched
+            .get_or_insert_with(|| files.iter().map(|it| real_path(&it.path)).collect());
+        if !real_watched.insert(real_path(source)) {
             continue;
         }
         let Some(path) = source.to_str().and_then(|it| AbsPathBuf::try_from(it).ok()) else {
@@ -5864,13 +5895,7 @@ fn run_holding(
     // source written since: an error there fails the build rather than run the old code.
     let written: FxHashSet<&Path> = table.all_written_since_built().collect();
     if !written.is_empty() {
-        let paths: FxHashMap<vfs::FileId, PathBuf> = files
-            .iter()
-            .filter_map(|it| match it.file {
-                Watched::Source(id) if written.contains(&*it.path) => Some((id, it.path.clone())),
-                _ => None,
-            })
-            .collect();
+        let paths = written_sources(&files, written.iter().copied());
         let mut edited: Vec<_> = paths.keys().copied().collect();
         edited.sort_unstable();
         let sources = Sources { paths };
@@ -7652,6 +7677,30 @@ mod tests {
         };
         assert!(!changed("same.rs"));
         assert!(changed("written.rs"));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// A workspace given through a link (`/tmp` on macOS) has its files named through it, and
+    /// rustc's dep-info names them where they are: a file written after rustc built it is
+    /// the workspace's file all the same, and an error in it fails the build (#50).
+    #[cfg(unix)]
+    #[test]
+    fn a_source_written_since_rustc_built_it_is_found_through_a_link() {
+        let dir = std::env::temp_dir().join(format!("ra-jit-written-{}", std::process::id()));
+        let (real, link) = (dir.join("real"), dir.join("link"));
+        std::fs::create_dir_all(real.join("src")).unwrap();
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        let (written, same) = (real.join("src/lib.rs"), real.join("src/same.rs"));
+        let mut files = Vec::new();
+        for (id, path) in [(0, &written), (1, &same)] {
+            std::fs::write(path, "fn f() {}\n").unwrap();
+            let watched = Watched::Source(vfs::FileId::from_raw(id));
+            let named = link.join(path.strip_prefix(&real).unwrap());
+            files.extend(WatchedFile::new(watched, &named, &named));
+        }
+        let found = written_sources(&files, [&*real_path(&written)]);
+        let found: Vec<_> = found.into_iter().collect();
+        assert_eq!(found, [(vfs::FileId::from_raw(0), link.join("src/lib.rs"))]);
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
