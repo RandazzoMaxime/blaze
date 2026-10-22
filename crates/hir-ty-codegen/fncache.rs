@@ -14,7 +14,8 @@
 //! A function can be cached when what it gives depends on its arguments alone. It can't when
 //! what it reaches reads a static that can change, a thread-local or a foreign static, calls a
 //! foreign function other than the allocator, `mem*` and libm, or the code of the workspace
-//! dereferences a raw pointer, takes an address as a number or has assembly in it. Neither can
+//! dereferences a raw pointer, takes an address as a number or has assembly in it, or core's
+//! formats, hashes or orders pointers by their addresses or gives one as a number. Neither can
 //! it when an argument can change behind a shared reference, as a `Cell` or an atomic can, or
 //! holds a raw pointer of a type of the workspace. The standard library's I/O, time,
 //! randomness and environment are all foreign calls or statics that change, so they are seen.
@@ -304,6 +305,11 @@ impl<'db> Walk<'db> {
         if diverges(db, func) {
             // A panic: what it prints is no result.
             return (Node::Leaf(name(), None), site, false);
+        }
+        if let Some(what) = gives_address(db, func) {
+            let name = name();
+            let why = format!("calls `{name}`, which {what}");
+            return (Node::Leaf(name, Some(why)), site, false);
         }
         let codec = is_codec(db, func);
         let named = instance.args.as_ref().iter().all(|it| it.region().is_some());
@@ -665,6 +671,41 @@ fn pure_foreign(symbol: &str) -> bool {
         || symbol.starts_with("__rg_")
         || matches!(symbol, "memcpy" | "memmove" | "memset" | "memcmp" | "bcmp" | "strlen")
         || LIBM.iter().any(|it| symbol == *it || symbol.strip_suffix('f') == Some(it))
+}
+
+/// What a function of core does that gives another result in another run, where the same
+/// values are at other addresses: an address as a number, or pointers formatted, hashed or
+/// ordered by theirs. Whether two pointers are equal is the same in every run, so equality is
+/// not one. core is otherwise trusted, and its MIR not looked through: in it addresses are
+/// also numbers where what it gives doesn't depend on them, as in slice iteration and `memchr`.
+fn gives_address(db: &dyn HirDatabase, func: FunctionId) -> Option<&'static str> {
+    if !matches!(func.krate(db).data(db).origin, base_db::CrateOrigin::Lang(LangCrateOrigin::Core))
+    {
+        return None;
+    }
+    let signature = FunctionSignature::of(db, func);
+    let name = signature.name.as_str();
+    match func.lookup(db).container {
+        ItemContainerId::ModuleId(_) => {
+            matches!(name, "pointer_fmt_inner" | "wide_pointer_fmt_inner")
+                .then_some("formats an address")
+        }
+        ItemContainerId::ImplId(id) => {
+            if !matches!(db.impl_self_ty(id).skip_binder().kind(), TyKind::RawPtr(..)) {
+                return None;
+            }
+            let Some(trait_ref) = db.impl_trait(id) else {
+                return matches!(name, "addr" | "expose_provenance")
+                    .then_some("gives an address as a number");
+            };
+            match TraitSignature::of(db, trait_ref.skip_binder().def_id.0).name.as_str() {
+                "Hash" => Some("hashes an address"),
+                "PartialOrd" | "Ord" => Some("orders pointers by their addresses"),
+                _ => None,
+            }
+        }
+        _ => None,
+    }
 }
 
 fn diverges(db: &dyn HirDatabase, func: FunctionId) -> bool {
