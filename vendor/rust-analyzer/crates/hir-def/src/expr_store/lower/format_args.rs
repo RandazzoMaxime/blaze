@@ -31,10 +31,10 @@ impl<'db> ExprCollector<'db> {
         syntax_ptr: AstPtr<ast::Expr>,
     ) -> ExprId {
         let mut args = FormatArgumentsCollector::default();
-        let mut bytes = Vec::new();
+        let mut written = Vec::new();
         f.args().for_each(|arg| {
             let expr = arg.expr();
-            bytes.push(expr.clone().is_some_and(is_byte_literal));
+            written.push(expr.clone().is_some_and(is_written_literal));
             args.add(FormatArgument {
                 kind: match arg.name() {
                     Some(name) => FormatArgumentKind::Named(name.as_name()),
@@ -98,7 +98,7 @@ impl<'db> ExprCollector<'db> {
                 HygieneId::ROOT,
             ),
         };
-        self.inline_literals(&mut fmt, &bytes);
+        self.inline_literals(&mut fmt, &written);
 
         let idx = self.collect_format_args_impl(syntax_ptr, fmt);
 
@@ -186,7 +186,12 @@ impl<'db> ExprCollector<'db> {
                                         .arguments
                                         .iter()
                                         .map(|arg| arg.expr)
-                                        .chain(fmt.orphans.iter().copied())
+                                        .chain(fmt.orphans.iter().copied().filter(|orphan| {
+                                            fmt.arguments
+                                                .arguments
+                                                .iter()
+                                                .all(|arg| arg.expr != *orphan)
+                                        }))
                                         .map(|expr| Statement::Expr { expr, has_semi: true })
                                         .collect(),
                                     tail: Some(from_str),
@@ -427,16 +432,18 @@ impl<'db> ExprCollector<'db> {
     /// rustc's `inline_literals`: a string literal, or an integer literal its type can hold,
     /// formatted with a plain `{}` becomes part of the template instead of an argument. That is
     /// what makes `Arguments::as_str` of `format_args!("{}", "a")` `Some`, and the payload of
-    /// `panic!("boom {}", 7)` a `&str`. `bytes` says which arguments are written as `b'x'`,
-    /// which rustc leaves alone and the lowered literal does not tell from `120u8`.
-    fn inline_literals(&mut self, fmt: &mut FormatArgs, bytes: &[bool]) {
+    /// `panic!("boom {}", 7)` a `&str`. `written` says which arguments are literals as written:
+    /// one a macro call expands to stays an argument, since `line!()`, `column!()` and `file!()`
+    /// expand to placeholders the code generator puts the place in the source for, and a byte
+    /// `b'x'`, which rustc leaves alone, lowers to what `120u8` does.
+    fn inline_literals(&mut self, fmt: &mut FormatArgs, written: &[bool]) {
         let mut remove = vec![false; fmt.arguments.arguments.len()];
         for piece in fmt.template.iter_mut() {
             let FormatArgsPiece::Placeholder(placeholder) = piece else { continue };
             let Ok(index) = placeholder.argument.index else { continue };
             if placeholder.format_trait != FormatTrait::Display
                 || placeholder.format_options != FormatOptions::default()
-                || bytes.get(index).copied().unwrap_or(true)
+                || !written.get(index).copied().unwrap_or(false)
             {
                 continue;
             }
@@ -583,8 +590,8 @@ impl<'db> ExprCollector<'db> {
     }
 }
 
-/// Whether `expr`, through parentheses and `&`, is a byte literal.
-fn is_byte_literal(mut expr: ast::Expr) -> bool {
+/// Whether `expr`, through parentheses and `&`, is a literal written as one, and not a byte.
+fn is_written_literal(mut expr: ast::Expr) -> bool {
     loop {
         expr = match expr {
             ast::Expr::ParenExpr(it) => match it.expr() {
@@ -595,7 +602,7 @@ fn is_byte_literal(mut expr: ast::Expr) -> bool {
                 Some(inner) => inner,
                 None => return false,
             },
-            ast::Expr::Literal(it) => return matches!(it.kind(), ast::LiteralKind::Byte(_)),
+            ast::Expr::Literal(it) => return !matches!(it.kind(), ast::LiteralKind::Byte(_)),
             _ => return false,
         }
     }
