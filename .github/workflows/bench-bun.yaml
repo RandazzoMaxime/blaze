@@ -1,9 +1,12 @@
-# bun (oven-sh/bun 1.4.3, its Rust port: 1.25M lines in 103 crates) built through ra-jit on the
-# dedicated benchmark machine, nightly: the edits of harness/bench.py and the runtime of
-# harness/runbench.py, into the README's bun section (docs/research/bun.md says what it is).
-# Too slow for every push: bun's own build of its C and C++ (once per revision, kept in
-# BENCH_HOME), cargo's cold build and ra-jit's whole-program LLVM build each take minutes.
-# It shares bench-readme's concurrency group, so the two never run at once on the one machine.
+# bun (oven-sh/bun 1.4.3, its Rust port: 1.25M lines in 103 crates) built through ra-jit on each
+# platform's dedicated benchmark machine, nightly: the edits of harness/bench.py and the runtime
+# of harness/runbench.py, into the README's bun section, a row per platform
+# (docs/research/bun.md says what it is). The platforms and their runners are bench-readme's
+# (harness/benchplatforms.py, BENCH_RUNNERS); one whose runner is not registered is skipped and
+# keeps its last numbers. Too slow for every push: bun's own build of its C and C++ (once per
+# revision, kept in BENCH_HOME), cargo's cold build and ra-jit's whole-program LLVM build each
+# take minutes. It shares bench-readme's concurrency group, so the two never run at once on the
+# machines.
 name: bench-bun
 on:
   schedule:
@@ -27,15 +30,34 @@ defaults:
     shell: bash
 
 jobs:
+  platforms:
+    name: platforms with a registered runner
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.matrix.outputs.matrix }}
+      any: ${{ steps.matrix.outputs.any }}
+    steps:
+      - uses: actions/checkout@v7
+      - id: matrix
+        env:
+          BENCH_RUNNERS: ${{ vars.BENCH_RUNNERS }}
+          BENCH_RUNNER: ${{ vars.BENCH_RUNNER }}
+        run: python3 harness/benchplatforms.py matrix
+
   bench:
-    name: bench (bun, Linux x86-64)
-    if: vars.BENCH_RUNNER == 'true'
-    runs-on: [self-hosted, linux, x64, bench-x86]
+    name: bench (bun, ${{ matrix.name }})
+    needs: platforms
+    if: needs.platforms.outputs.any == 'true'
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.platforms.outputs.matrix) }}
+    runs-on: ${{ matrix.labels }}
     timeout-minutes: 360
     env:
       # Kept between runs, outside the checkout, as bench-readme's: ra-jit builds
       # incrementally, bun is cloned once and its C and C++ built once per revision.
       BENCH_HOME: ${{ github.workspace }}/../bench-state
+      BENCH_WORK: ${{ matrix.work }}
       CARGO_TERM_COLOR: never
     steps:
       - uses: actions/checkout@v7
@@ -50,30 +72,50 @@ jobs:
         id: bench
         run: |
           export RA_JIT_BIN="$BENCH_HOME/target/release/ra-jit" RA_JIT_PROJECTS="$BENCH_HOME/projects"
-          rm -rf "$BENCH_HOME/work-bun" "$BENCH_HOME/reference-bun"
+          work=${BENCH_WORK:+$BENCH_WORK-bun}
+          work=${work:-$BENCH_HOME/work-bun}
+          rm -rf "$work" "$BENCH_HOME/reference-bun"
+          mkdir -p "$RUNNER_TEMP/results"
           nix develop .#bench-bun -c env -u CARGO_INCREMENTAL -u RUSTC_WRAPPER python3 harness/bench.py bun \
-            --runs 3 --work "$BENCH_HOME/work-bun" --reference "$BENCH_HOME/reference-bun" --out "$RUNNER_TEMP/bench-bun.json" \
+            --runs 3 --work "$work" --reference "$BENCH_HOME/reference-bun" --out "$RUNNER_TEMP/results/bench-bun.json" \
             || { status=$?; [ "$status" = 3 ] || exit "$status"; echo "wrong=true" >> "$GITHUB_OUTPUT"; }
       - name: Runtime bench
         continue-on-error: true
         run: |
           export RA_JIT_BIN="$BENCH_HOME/target-llvm/release/ra-jit" APPS_DIR="$BENCH_HOME/apps"
           nix develop .#bench-bun -c env -u CARGO_INCREMENTAL -u RUSTC_WRAPPER python3 harness/bench.py --runtime bun \
-            --runs 5 --out "$RUNNER_TEMP/runtime-bun.json"
+            --runs 5 --out "$RUNNER_TEMP/results/runtime-bun.json"
       - uses: actions/upload-artifact@v7
         if: always()
         with:
-          name: bench-bun
-          path: |
-            ${{ runner.temp }}/bench-bun.json
-            ${{ runner.temp }}/runtime-bun.json
-      - name: README
-        continue-on-error: true
+          name: bench-bun-${{ matrix.slug }}
+          path: ${{ runner.temp }}/results/
+          if-no-files-found: ignore
+      - name: Fail on a wrong result
+        if: steps.bench.outputs.wrong == 'true'
         run: |
-          for result in bench-bun runtime-bun; do
-            [ -f "$RUNNER_TEMP/$result.json" ] || continue
-            nix develop .#bench -c python3 harness/benchreport.py "$RUNNER_TEMP/$result.json" --name bun \
-              ${{ inputs.force && '--force' || '' }} || true
+          echo "::error::under ra-jit bun said something else than under cargo: see the Bench step"
+          exit 1
+
+  publish:
+    name: README
+    needs: [platforms, bench]
+    if: always() && needs.platforms.outputs.any == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: bench-bun-*
+          path: ${{ runner.temp }}/results
+      - name: README
+        run: |
+          for result in "$RUNNER_TEMP"/results/bench-bun-*/bench-bun.json "$RUNNER_TEMP"/results/bench-bun-*/runtime-bun.json; do
+            [ -f "$result" ] || continue
+            python3 harness/benchreport.py "$result" --name bun ${{ inputs.force && '--force' || '' }} \
+              || echo "::warning::$result was not published"
           done
       - name: Commit to main
         run: |
@@ -88,9 +130,4 @@ jobs:
             git push -q origin HEAD:main && exit 0
             sleep $((attempt * 5))
           done
-          exit 1
-      - name: Fail on a wrong result
-        if: steps.bench.outputs.wrong == 'true'
-        run: |
-          echo "::error::under ra-jit bun said something else than under cargo: see the Bench step"
           exit 1

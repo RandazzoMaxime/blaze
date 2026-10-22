@@ -49,7 +49,7 @@ translate 76.1 s, describe 6.2 s, store write 1.3 s (on main: store read 28.1 s,
 35.8 s). nushell with step 1: infer 32.0 s, MIR 27.9 s, monomorphize 15.4 s, translate
 76.1 s.
 
-From the committed benchmarks (`docs/benchmarks/linux-x86_64.json`, `2b2f2dcd5b`, same
+From the committed benchmarks ([`docs/benchmarks/linux-x86_64.json`](https://github.com/indexable-inc/ra-jit/blob/b3e953eb13e8e4476a4673ab1c7dfbdff61880c6/docs/benchmarks/linux-x86_64.json), `2b2f2dcd5b`, same
 machine type): ripgrep ready 12.5 s at 2.6 GB, load 0.9 s, resolve 0.5 s; bevy ready
 115.8 s at 8.5 GB, load 14.4 s, resolve 12.6 s; nushell load 7.2 s, resolve 5.0 s; helix load
 7.1 s, resolve 5.6 s. zed did not fit in 111 GB (#29); it has not been measured with step 1.

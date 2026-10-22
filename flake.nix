@@ -197,7 +197,7 @@
         # What harness/bench.py and runbench.py measure bun in (bunprep.py, docs/research/bun.md):
         # bun's pinned nightly in place of 1.99.0 (rust-src, which ra-jit reads `core` from), and
         # what bun's own build of its C and C++ needs, as its flake.nix has it: LLVM 23 as the
-        # C and C++ compiler, cmake, ninja, go, a bun to run its build scripts, and on Linux lld.
+        # C and C++ compiler, cmake, ninja, nasm (x86), go, a bun to run its build scripts, and on Linux lld.
         # ra-jit itself is built in the bench shell.
         devShells.bench-bun = (pkgs.mkShell.override { stdenv = pkgs.llvmPackages_23.stdenv; }) {
           packages = [
@@ -210,6 +210,7 @@
             pkgs.pkg-config
             pkgs.cmake
             pkgs.ninja
+            pkgs.nasm
             pkgs.go
             pkgs.bun
             pkgs.perl
