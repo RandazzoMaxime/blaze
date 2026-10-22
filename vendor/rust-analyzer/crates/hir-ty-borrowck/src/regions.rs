@@ -24,8 +24,8 @@ use hir_ty::{
     GenericPredicates, InferBodyId,
     db::GeneralConstId,
     mir::{
-        AggregateKind, BorrowKind, CastKind, LocalId, MirBody, MirSpan, Operand, OperandKind,
-        PlaceElem, PlaceTy, ProjectionElem, Rvalue, StatementKind, TerminatorKind,
+        AggregateKind, BinOp, BorrowKind, CastKind, LocalId, MirBody, MirSpan, Operand,
+        OperandKind, PlaceElem, PlaceTy, ProjectionElem, Rvalue, StatementKind, TerminatorKind,
     },
     next_solver::{ConstKind, GenericArgKind, GenericArgs, Region, Ty, TyKind},
 };
@@ -1948,7 +1948,10 @@ impl<'db> Builder<'_, '_, 'db> {
                 };
                 self.relate(ta, tb, inner, at);
             }
-            (TyKind::RawPtr(ta, ma), TyKind::RawPtr(tb, _)) => {
+            // rust-analyzer lowers coercing `&T` to `*const T` as a borrow, where rustc's is
+            // `&raw const *x` of the raw pointer's type.
+            (TyKind::Ref(_, ta, _), TyKind::RawPtr(tb, ma))
+            | (TyKind::RawPtr(ta, ma), TyKind::RawPtr(tb, _)) => {
                 let inner = match ma {
                     rustc_ast_ir::Mutability::Not => variance,
                     rustc_ast_ir::Mutability::Mut => variance.xform(Variance::Invariant),
@@ -1982,7 +1985,10 @@ impl<'db> Builder<'_, '_, 'db> {
             }
             (TyKind::Dynamic(pa, ra), TyKind::Dynamic(pb, rb)) => {
                 self.relate_regions(ra, rb, variance, at);
-                for (x, y) in pa.iter().zip(pb.iter()) {
+                let unless_auto = |it: &rustc_type_ir::Binder<_, _>| {
+                    !matches!(it.skip_binder(), rustc_type_ir::ExistentialPredicate::AutoTrait(_))
+                };
+                for (x, y) in pa.iter().filter(unless_auto).zip(pb.iter().filter(unless_auto)) {
                     let (x, y) = (x.skip_binder(), y.skip_binder());
                     match (x, y) {
                         (
@@ -2208,6 +2214,22 @@ impl<'db> Builder<'_, '_, 'db> {
             self.relate(dest, written, Variance::Invariant, at);
         }
         match rvalue {
+            // Raw and function pointers compare when they have a common supertype.
+            Rvalue::BinaryOp(op, left, right) | Rvalue::CheckedBinaryOp(op, left, right)
+                if matches!(
+                    op,
+                    BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge
+                ) =>
+            {
+                if let (Some(left), Some(right)) = (self.operand_ty(left), self.operand_ty(right))
+                    && matches!(left.kind(), TyKind::RawPtr(..) | TyKind::FnPtr(..))
+                {
+                    let common = self.renumber(left);
+                    let at = At { category: Category::CallArgument, span };
+                    self.relate(left, common, Variance::Covariant, at);
+                    self.relate(right, common, Variance::Covariant, at);
+                }
+            }
             Rvalue::Repeat(operand, len) => {
                 if let (Some(ty), TyKind::Array(element, _)) =
                     (self.operand_ty(operand), dest.kind())
@@ -2449,6 +2471,73 @@ impl<'db> Builder<'_, '_, 'db> {
                     CastKind::PointerCoercion(hir_ty::PointerCast::Unsize) => {
                         self.unsize(source, target, at)
                     }
+                    // rust-analyzer's kind for any reference cast to a raw pointer: rustc's
+                    // `&raw const *x` of the pointer's type, then for an array (`&[T; N] as
+                    // *const T`) its element a subtype of what the pointer points to.
+                    CastKind::PointerCoercion(hir_ty::PointerCast::ArrayToPointer) => {
+                        if let TyKind::Ref(_, from, _) | TyKind::RawPtr(from, _) = source.kind()
+                            && let TyKind::RawPtr(to, mutability) = target.kind()
+                        {
+                            let interner = self.interner();
+                            let erase = |ty| {
+                                rustc_type_ir::fold_regions(interner, ty, |_, _| {
+                                    Region::new_erased(interner)
+                                })
+                            };
+                            match from.kind() {
+                                TyKind::Array(element, _) if erase(element) == erase(to) => {
+                                    self.relate(element, to, Variance::Covariant, at)
+                                }
+                                _ => {
+                                    let variance = match mutability {
+                                        rustc_ast_ir::Mutability::Not => Variance::Covariant,
+                                        rustc_ast_ir::Mutability::Mut => Variance::Invariant,
+                                    };
+                                    self.relate(from, to, variance, at)
+                                }
+                            }
+                        }
+                    }
+                    // `*const [T; N]` to `*const T`, rustc's `ArrayToPointer`; and between
+                    // pointers to trait objects, the object's lifetime may only shorten and the
+                    // principal trait's arguments stay, else a vtable method could be called
+                    // with what it cannot take (rust-lang/rust#136702).
+                    CastKind::PtrToPtr => {
+                        if let (TyKind::RawPtr(from, _), TyKind::RawPtr(to, _)) =
+                            (source.kind(), target.kind())
+                        {
+                            let (from_tail, to_tail) = (self.tail(from), self.tail(to));
+                            let interner = self.interner();
+                            let erase = |ty| {
+                                rustc_type_ir::fold_regions(interner, ty, |_, _| {
+                                    Region::new_erased(interner)
+                                })
+                            };
+                            if let TyKind::Array(element, _) = from.kind()
+                                && erase(element) == erase(to)
+                            {
+                                self.relate(element, to, Variance::Covariant, at)
+                            } else if let (
+                                TyKind::Dynamic(from_predicates, from_region),
+                                TyKind::Dynamic(to_predicates, to_region),
+                            ) = (from_tail.kind(), to_tail.kind())
+                            {
+                                use rustc_type_ir::inherent::BoundExistentialPredicates as _;
+                                match (from_predicates.principal(), to_predicates.principal()) {
+                                    (Some(_), Some(_)) => {
+                                        self.relate(from_tail, to_tail, Variance::Covariant, at)
+                                    }
+                                    (None, None) => self.relate_regions(
+                                        from_region,
+                                        to_region,
+                                        Variance::Covariant,
+                                        at,
+                                    ),
+                                    _ => (),
+                                }
+                            }
+                        }
+                    }
                     CastKind::PointerCoercion(hir_ty::PointerCast::MutToConstPointer) => {
                         if let (TyKind::RawPtr(x, _), TyKind::RawPtr(y, _)) =
                             (source.kind(), target.kind())
@@ -2664,6 +2753,30 @@ impl<'db> Builder<'_, '_, 'db> {
             }
             _ => (),
         }
+    }
+
+    /// What a pointer to `ty` is wide for, with its regions: its struct's last field, and so on.
+    fn tail(&mut self, mut ty: Ty<'db>) -> Ty<'db> {
+        for _ in 0..16 {
+            match ty.kind() {
+                TyKind::Adt(def, args) => {
+                    let AdtId::StructId(id) = def.def_id() else { break };
+                    let types = self.ctx.db.field_types(hir_def::VariantId::StructId(id));
+                    let Some((_, last)) = types.iter().last() else { break };
+                    let field = last.ty().instantiate(self.interner(), args).skip_norm_wip();
+                    ty = match rustc_type_ir::TypeVisitableExt::has_aliases(&field) {
+                        true => self.normalize(field).unwrap_or(field),
+                        false => field,
+                    };
+                }
+                TyKind::Tuple(tys) => match tys.last() {
+                    Some(it) => ty = it,
+                    None => break,
+                },
+                _ => break,
+            }
+        }
+        ty
     }
 
     fn unsize_pointee(&mut self, source: Ty<'db>, target: Ty<'db>, at: At) {

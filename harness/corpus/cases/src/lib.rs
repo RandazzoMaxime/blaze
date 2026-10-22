@@ -7212,3 +7212,36 @@ pub mod associated_type_returns {
         total + value(pair).copied().unwrap_or(0) as usize
     }
 }
+
+/// Raw pointers related as rustc relates them: coerced from references, compared through a
+/// common supertype, an array's pointer cast to its element's, and a trait object's lifetime
+/// shortened.
+pub mod pointer_relations {
+    use std::fmt::Debug;
+
+    pub fn same<'a, 'b>(x: *const &'a i32, y: *const &'b i32) -> bool {
+        x == y
+    }
+
+    pub fn first<'a>(items: &[&'a i32; 3]) -> *const &'a i32 {
+        items as *const &i32
+    }
+
+    pub fn shorten<'a, 'b>(x: *const (dyn Debug + 'a)) -> *const (dyn Debug + 'b)
+    where
+        'a: 'b,
+    {
+        x as _
+    }
+
+    pub fn run(value: i32) -> String {
+        let x = &value;
+        let items = [x, x, x];
+        let pointer = first(&items);
+        let shown: &dyn Debug = &value;
+        let shortened = shorten(shown);
+        // SAFETY: both point into `items` and `value`, alive for the whole function.
+        let (first, shown) = unsafe { (**pointer, format!("{:?}", &*shortened)) };
+        format!("{} {} {}", same(pointer, pointer), first, shown)
+    }
+}
