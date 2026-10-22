@@ -75,26 +75,30 @@ a build took:
 same working directory, the variables cargo sets, cargo's `Running` lines and the same exit
 status.
 
-While cargo builds, a spare worker already loads the workspace and compiles ahead on a
-quarter of the cores. When cargo is done it reads the symbols of the executable rustc linked,
-and the daemon is ready: the first edits are patches spliced into that executable. The
-daemon builds its own base in the background once nothing has waited for a second
-([architecture.md](architecture.md#the-first-edits-patch-what-rustc-linked)). On Linux x86-64
-(16 cores) the daemon was ready 0.25 to 0.5 s after the command returned for just and
-ripgrep, and 3 to 4 s after for nushell:
+While cargo builds, a spare worker already loads the workspace, resolves it and compiles the
+functions of each crate cargo is done with on a quarter of the cores, and reads the symbols of
+each library as cargo writes it. When cargo is done it reads the symbols of the executable
+rustc linked, and the daemon is ready: the first edits are patches spliced into that
+executable. The daemon builds its own base in the background once nothing has waited for a
+second ([architecture.md](architecture.md#the-first-edits-patch-what-rustc-linked)). On Linux
+x86-64 (16 vCPUs, 8 cores), from an empty store, in interleaved runs:
 
-| Project | `cargo build` | `cargo ra-jit build` | Ready, empty store | Ready, filled store | First edit |
-|---|---|---|---|---|---|
-| just | 7.4 s | 8.4 s | 8.9 s | 8.7 s | 0.4 s, a patch |
-| ripgrep | 5.0 s | 6.3 s | 6.6 s | 6.6 s | 1.4 to 1.7 s, in full |
-| nushell | 35.1 s | 43.4 to 44.5 s | 46.5 to 47.5 s | 46.2 to 46.4 s | 1.6 to 1.9 s, a patch |
+| Project | `cargo build` | `cargo ra-jit build` | Ready | First edit |
+|---|---|---|---|---|
+| just | 7.6 to 7.7 s | 8.0 to 8.3 s | 8.4 to 8.7 s | 0.5 s, a patch |
+| ripgrep | 5.0 to 5.4 s | 5.4 to 5.7 s | 5.6 to 5.9 s | 1.4 to 1.5 s, a patch |
+| nushell | 34.7 to 37.0 s | 37.4 to 38.9 s | 39.0 to 40.5 s | 1.7 to 2.4 s, a patch |
 
-The command takes longer than cargo's because of the spare worker beside it. With
-`RA_JIT_SPARE=0` it is within a second of cargo's, and the daemon is ready later, as it
-loads the workspace only then: 12.5 s for just, 9.1 s for ripgrep and 48.5 to 49.6 s for
-nushell, whose first edit then takes 3.1 s. ripgrep's first edit, in `main`, moves the
-lines of a generic function below it, which rustc copied into its callers, so it is built in
-full.
+The command takes longer than cargo's because of the spare worker beside it: what it reads
+and resolves of the standard library (some 10 core-seconds on every project) and of the
+workspace takes cores from cargo, and on this machine every second core is a hyperthread of
+another, so a core cargo leaves idle is still not free. With `RA_JIT_SPARE=0` the command is
+within a few percent of cargo's, and the daemon is ready later, as it loads the workspace only
+then: 11.8 s for just, 8.2 s for ripgrep and 46.7 s for nushell. ripgrep's first edit, in
+`main`, moves the lines of a generic function below it, which rustc copied into its callers:
+the patch replaces those copies too. On macOS that patch's frames (244 KB) are more than the
+unwind table of rustc's link (218 KB) they would take the place of, so the splice moves both
+tables into the room the link leaves after its load commands, and the edit is a patch there too.
 
 ## When cargo builds instead
 

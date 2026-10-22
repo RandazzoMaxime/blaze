@@ -181,9 +181,10 @@ SCENARIOS = {
     "body": ([[edit(M, "    x * 3\n", "    x * 4\n")]], ["patch"], 0, {}),
     "second": ([[edit(M, "    x * 3\n", "    x * 4\n")],
                 [edit(M, "    x * 4\n", "    x * 5\n"), edit(M, "x + 10", "x + 20")]], ["patch", "patch"], 0, {}),
-    # Moves every function below: their frames are more than the room this small executable's
-    # unwind table leaves on macOS (a real program's is far larger), and it is built in full.
-    "moved-panic": ([[edit(M, "    x * 3\n", "    let y = x * 3;\n    y + 1\n")]], [None], 0, {}),
+    # Moves every function below: on macOS their frames are more than this small executable's
+    # unwind table, so both tables move into the header's room, and the panic unwinds through
+    # the patch's frames there.
+    "moved-panic": ([[edit(M, "    x * 3\n", "    let y = x * 3;\n    y + 1\n")]], ["patch"], 0, {}),
     "closure": ([[edit(M, "x + 10", "x + 11")]], ["patch"], 0, {}),
     # A new item is more than bodies: rustc's copies of what sees the file may differ.
     "new-fn": ([[edit(M, "    x * 3\n}\n", "    helper(x) * 3\n}\n\nfn helper(x: u64) -> u64 {\n    x + 2\n}\n")]],
@@ -194,7 +195,8 @@ SCENARIOS = {
     "counted-body": ([[edit(M, "Ordering::Relaxed) + 1", "Ordering::Relaxed) + 2")]], ["patch"], 0, {}),
     "unused-std": ([[edit(M, "    x * 3\n", "    let _ = std::os::unix::process::parent_id();\n    x * 3\n")]],
                    [None], 0, {}),
-    "generic": ([[edit(M, "{value}{value} at", "{value}-{value} at")]], ["full"], 0, {}),
+    # rustc's one copy, `twice::<i32>`, is an instance of the base that the patch replaces.
+    "generic": ([[edit(M, "{value}{value} at", "{value}-{value} at")]], ["patch"], 0, {}),
     "generic-moved": ([[edit(M, '        "world".to_owned()\n', '        let it = "world";\n        it.to_owned()\n')]],
                       ["full"], 0, {}),
     "inline": ([[edit(M, "    x + 1\n}\n\nfn counted", "    x + 2\n}\n\nfn counted")]], ["full"], 0, {}),
@@ -203,7 +205,7 @@ SCENARIOS = {
     "async": ([[edit(M, "    x * 2\n", "    x * 6\n")]], ["full"], 0, {}),
     "rpit": ([[edit(M, '    "shown"\n', '    "shown!"\n')]], ["full"], 0, {}),
     "asset": ([[edit("app/src/asset.txt", "one", "two")]], ["full"], 0, {}),
-    "full-then-patch": ([[edit(M, "{value}{value} at", "{value}-{value} at")],
+    "full-then-patch": ([[edit(M, "    x + 1\n}\n\nfn counted", "    x + 2\n}\n\nfn counted")],
                          [edit(M, "    x * 3\n", "    x * 4\n")]], ["full", "patch"], 0, {}),
     "own-base": ([[edit(M, "    x * 3\n", "    x * 4\n")]], ["patch"], 8, {}),
     # A patch of rustc's executable when the edit interrupts the daemon's own base; in full when
@@ -216,12 +218,61 @@ CACHED_SCENARIOS = {
     "cached-then-reached": ([[edit(M, "    acc + 1\n", "    acc + 2\n")],
                              [edit(M, "rotate_left(17)", "rotate_left(19)")],
                              [edit(M, "rotate_left(19)", "rotate_left(17)")]], ["full", "patch", "patch"], 0, {}),
-    # Rustc's copy of the cached function calls the patched one. The patch's frames can be more
-    # than this small executable's unwind table leaves on macOS.
+    # Rustc's copy of the cached function calls the patched one. On macOS the patch's frames
+    # are more than this small executable's unwind table.
     "cached-reached": ([[edit(M, "    7\n", "    8\n")],
-                        [edit(M, "rotate_left(17)", "rotate_left(19)")]], ["patch", None], 0, {}),
+                        [edit(M, "rotate_left(17)", "rotate_left(19)")]], ["patch", "patch"], 0, {}),
 }
 SCENARIOS.update(CACHED_SCENARIOS)
+
+# A program whose generic functions sit below what the edits change, as ripgrep's `print_stats`
+# sits below `main`: rustc copied each into its callers with the lines it was at.
+GENERIC_MAIN = """\
+use std::fmt::Write as _;
+
+fn work(x: u64) -> u64 {
+    x * 3
+}
+
+fn main() {
+    let filled = [7u8; 4096];
+    std::hint::black_box(&filled);
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let mut out = String::new();
+    show(&mut out, work(7));
+    show(&mut out, "text");
+    out.push_str(&dep::wrap(5));
+    print!("{out}");
+    if args.first().is_some_and(|it| it == "panic") {
+        boom::<u8>(1);
+    }
+}
+
+fn show<W: std::fmt::Write, T: std::fmt::Display>(out: &mut W, value: T) {
+    writeln!(out, "{value} at {}", line!()).unwrap();
+}
+
+fn boom<T: Default + std::fmt::Debug>(code: u64) {
+    if code > 0 {
+        panic!("boom {:?} {code}", T::default());
+    }
+}
+"""
+GENERIC_FILES = {
+    **FILES,
+    "app/src/main.rs": GENERIC_MAIN,
+    "dep/src/lib.rs": "pub fn value(x: u64) -> u64 {\n    x + 100\n}\n\n"
+                      "pub fn wrap<T: std::fmt::Display>(value: T) -> String {\n"
+                      "    format!(\"wrapped {value} at {}\\n\", line!())\n}\n",
+}
+GENERIC_SCENARIOS = {
+    "generic-below": ([[edit(M, "    x * 3\n", "    let y = x * 3;\n    y\n")]], ["patch"], 0, {}),
+    "generic-below-body": ([[edit(M, '"{value} at {}"', '"{value} is at {}"')]], ["patch"], 0, {}),
+    # Copied into a crate that calls it from another file, which nothing homed of `dep` knows.
+    "generic-elsewhere": ([[edit("dep/src/lib.rs", "    x + 100\n", "    let y = x + 100;\n    y\n")]],
+                          ["full"], 0, {}),
+}
+SCENARIOS.update(GENERIC_SCENARIOS)
 
 
 def opt(name, default=None):
@@ -297,7 +348,12 @@ def main():
     failed = []
     for name in names:
         edits, expected, wait, extra = SCENARIOS[name]
-        write_workspace(ws, CACHED_FILES if name in CACHED_SCENARIOS else FILES)
+        files = FILES
+        if name in CACHED_SCENARIOS:
+            files = CACHED_FILES
+        elif name in GENERIC_SCENARIOS:
+            files = GENERIC_FILES
+        write_workspace(ws, files)
         home, target, store = (os.path.join(work, it) for it in ("home", "target", "store"))
         for path in (home, target, store, fn_cache):
             shutil.rmtree(path, ignore_errors=True)
