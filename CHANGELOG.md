@@ -400,6 +400,11 @@ All notable changes to ra-jit are written here. The format follows
 - fd built with inlining across crates crashed the LLVM backend on Linux and macOS: an address
   rebuilt as a `getelementptr` may be a sum that is a constant (a global's address plus an
   offset), which is in no block, and LLVM read freed memory when the builder was put before it.
+- A build in full no longer keeps rustc's copy of an instance that did not compile once an
+  edit changed it, as `located::<u8>` of a generic function with a `Location::caller()`
+  constant, which `main` calls: the program printed what it did before the edit. Such an edit
+  goes to cargo, which names the function (`soakrows.py`, "an instance rustc's copy stands in
+  for, edited").
 - A borrowed constant with a cast in it, `&[b"node" as &[u8]][..]` returned for `'static`, is
   promoted as rustc promotes it, where it was built on the stack and the reference outlived
   it: every cast is promotable but of a pointer to an integer. bun's `new Bun.Transpiler()`

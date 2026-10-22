@@ -891,6 +891,29 @@ pub(crate) fn scaled<T: Into<u64>>(x: T) -> u64 {
         raise Wrong("`seven` is not left to rustc: the row needs another function that is")
 
 
+def forwarded_edited(row):
+    """An instance that does not compile, `located::<u8>` (for the constant `breakers.py
+    caller_in_constant` is about): `main` calls rustc's copy of it. An edit of the generic
+    function before the daemon first built in full kept that copy, and the program printed
+    what it did before the edit."""
+    with open(row.path("core/src/lib.rs"), "a") as lib:
+        lib.write("""
+pub fn located<T: Default + Into<u64>>() -> u64 {
+    const CALLER: &std::panic::Location<'static> = std::panic::Location::caller();
+    T::default().into() + u64::from(CALLER.line() > 0)
+}
+""")
+    show_in_main(row, '    println!("located {}", soak_core::located::<u8>());\n')
+    row.both("cold", want="located 1")
+    row.warm()
+    row.both("warm", want="located 1")
+    lib = row.path("core/src/lib.rs")
+    in_place(lib, open(lib).read().replace("into() + u64::from", "into() + 10 * u64::from"))
+    how, _ = row.both("the generic function edited", want="located 10")
+    if how != "daemon" and not how.startswith("cargo"):
+        raise Wrong(f"the edit was neither the daemon's nor cargo's: {how}")
+
+
 def outside_its_package(row):
     """A module whose file is outside its package (`#[path = "../../shared/outside.rs"]`), as
     bun's runtime has: the file is in no package's directory, so it was not loaded, the
@@ -940,6 +963,7 @@ ROWS = {
     "a function that is another under test": (another_under_test, {}),
     "functions rustc keeps to an object": (kept_to_an_object, {"CARGO_INCREMENTAL": "0"}),
     "an item added beside a function left to rustc": (beside_one_left, {}),
+    "an instance rustc's copy stands in for, edited": (forwarded_edited, {}),
     "a module file outside its package": (outside_its_package, {}),
     "an edit reached through a blanket impl": (through_a_blanket_impl, {}),
     "an edit only a function left to rustc reaches": (reached_from_one_left, {}),

@@ -3845,14 +3845,14 @@ fn refusal(
     let hir_ty_codegen::OutOfDate { func, why, left_from_the_start, calls } = out_of_date?;
     let named =
         |func| hir::Function::from(func).name(db).display(db, syntax::Edition::CURRENT).to_string();
-    let name = named(func);
+    let name = func.map_or("drop glue or a shim".to_owned(), |it| format!("`{}`", named(it)));
     if let Some(calls) = calls {
         let calls = match calls {
             Some(it) => format!("calls rustc's copy of `{}`, which is", named(it)),
             None => "may call code of rustc's that is".to_owned(),
         };
         return Some(Refused::Cargos(format!(
-            "`{name}` is not compiled by ra-jit, and rustc's copy of it {calls} from before the \
+            "{name} is not compiled by ra-jit, and rustc's copy of it {calls} from before the \
              edit: {why}"
         )));
     }
@@ -3860,11 +3860,11 @@ fn refusal(
     // the function down when rustc compiled it.
     if why.starts_with("frontend:") && !left_from_the_start {
         return Some(Refused::Error(format!(
-            "`{name}` has an error ra-jit cannot say more of: {why}"
+            "{name} has an error ra-jit cannot say more of: {why}"
         )));
     }
     Some(Refused::Cargos(format!(
-        "`{name}` is not compiled by ra-jit and rustc's copy is from before the edit: {why}"
+        "{name} is not compiled by ra-jit and rustc's copy is from before the edit: {why}"
     )))
 }
 

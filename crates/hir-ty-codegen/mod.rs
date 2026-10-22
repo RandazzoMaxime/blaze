@@ -1336,9 +1336,10 @@ impl Rejections {
         self.forget();
     }
 
-    /// A function the last build left to rustc that is not what rustc compiled, and why it was
-    /// left. rustc's copies are those of the build the daemon started from: the first call, to
-    /// be made after that build, notes what they are copies of.
+    /// A function the last build left to rustc, or an instance it calls rustc's copy of, that
+    /// is not what rustc compiled, and why it was left. rustc's copies are those of the build
+    /// the daemon started from: the first call, to be made after that build, notes what they
+    /// are copies of.
     pub fn out_of_date(&mut self, db: &dyn HirDatabase) -> Option<OutOfDate> {
         self.frozen.out_of_date(db, self.base.as_ref()?)
     }
