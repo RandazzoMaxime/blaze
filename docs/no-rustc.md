@@ -422,6 +422,14 @@ away) are compiled, along with their callers, instead of being kept as rejection
 are forwarded to rustc's copies. Done when helix's own base builds in one round with none of them
 left to rustc, and `harness/norustc/left.py` counts no more functions left to rustc than before.
 
+Done 2026-10-22. The one refused instance was `Context::with`'s closure, whose static std's
+`thread_local!` declares in the body. rust-analyzer expands a macro used in a body twice, to items
+and to statements, and ra-jit counted the static's place in the other expansion, so it never found
+rustc's symbol. helix's own base now builds in one round. `count.py` and `left.py` at the branch's
+base and with the fix, on dev-aws-5: ripgrep 53 distinct functions left to rustc both times,
+nushell 534 both times, and every step's rustc runs the same but nushell's "test added" (47 runs
+before, 41 after, 11 compiles both times).
+
 **F. The standard library compiled by ra-jit.** ([#86](https://github.com/indexable-inc/ra-jit/issues/86)) `core`, `alloc`, `std`, `compiler_builtins`
 (with its intrinsics and `#[naked]` functions), `panic_unwind`, `panic_abort`, `unwind`,
 `proc_macro`, `test` and their dependencies, from `rust-src`, with std's own build script and
@@ -518,7 +526,7 @@ Lanes whose work makes a rustc path do more, to redirect:
   to rustc, which step E removes.
 - **kept-rejections** ([#37](https://github.com/indexable-inc/ra-jit/issues/37)): sends callers
   to rustc's copies of rejected code. Redirected to compiling them (E), owned by the glancer
-  lane; the kept rejections are not merged.
+  lane, and done that way; the kept rejections are not merged.
 
 Aligned: Axionize's #34, #35 and #75 work (step E), the proc-macro expansion cache #38 (J),
 include-loop's own base (K), and glancer's #40 and #41 (the cold start).

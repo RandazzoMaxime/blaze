@@ -362,6 +362,15 @@ All notable changes to ra-jit are written here. The format follows
 
 ### Fixed
 
+- helix's own build threw its first round away (about 30 s) because std's `Context::with`
+  closure was refused for "a writable static without a rustc symbol": the static is declared by
+  `thread_local!` in a body, which rust-analyzer expands twice, and ra-jit looked for the
+  static's place in the other expansion. It finds rustc's symbol now, and the build takes one
+  round: the daemon's own build in the background is done at 114.5 s instead of 130.3 s, a
+  second daemon's at 85.9 s instead of 109.4 s, and with `RA_JIT_RUSTC_BASE=0` the daemon is
+  ready at 116.2 s instead of 142.3 s (Linux x86-64, 16 cores, medians of three). Nothing is
+  left to rustc for it, and `harness/norustc` counts the same functions left to rustc on
+  ripgrep (53) and nushell (534) (#37, no-rustc step E).
 - On Linux AArch64, an `asm!` of an instruction that the function's `#[target_feature]`
   enables and the target's baseline lacks (zlib-rs's `crc32w`, in bat) was refused by the
   assembler: the block is assembled apart from its function, so it now starts with the
