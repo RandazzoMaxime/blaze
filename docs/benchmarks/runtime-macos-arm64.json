@@ -3,7 +3,7 @@
  "commit": "efd7e4bbeb19ba26d0491a19d64b4795eb9694ae",
  "date": "2026-10-22T05:09:25Z",
  "host": {
-  "name": "GitHub-hosted macos-15 runner (a shared VM)",
+  "name": "GitHub-hosted macos-15 runner, a shared VM",
   "cpu": "Apple M1 (Virtual)",
   "cores": 3,
   "machine_cores": 3,
