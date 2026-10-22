@@ -770,7 +770,9 @@ def library():
     """The source of the toolchain's standard library, which is pinned with the toolchain."""
     sysroot = subprocess.run(["rustc", "--print", "sysroot"], capture_output=True, text=True,
                              env=dict(os.environ, RUSTUP_TOOLCHAIN=TOOLCHAIN), check=True).stdout.strip()
-    return os.path.join(sysroot, "lib/rustlib/src/rust/library")
+    library = os.path.join(sysroot, "lib/rustlib/src/rust/library")
+    # A nix toolchain is a tree of symlinks to its rust-src, and ripgrep searches no symlinked file.
+    return os.path.dirname(os.path.dirname(os.path.dirname(os.path.realpath(os.path.join(library, "core/src/lib.rs")))))
 
 
 def runtime(name, spec, theirs, ws, build, runs, wrong):
