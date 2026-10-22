@@ -130,7 +130,10 @@ with reasons. The daemon's log says `backend: llvm -O2 fast emit` when LLVM is i
 ### Timing
 
 `bench.py`, `editloop.py`, `edittimes.py`, `scaling.py`, `dxedits.py`, `linkbench.py`,
-`shapes.py`, `heap.py`, `fnincr.py`, `realbench.py` and `live_latency.py` measure and do not gate. `fnincr.py` counts
+`shapes.py`, `heap.py`, `heapfold.py`, `fnincr.py`, `realbench.py` and `live_latency.py` measure and do not gate.
+`heap.py` gives a heap profile's bytes to the salsa query whose value or record holds them, and to
+ra-jit's own structures; `heapfold.py` makes of a profile on macOS what `jeprof --collapsed` makes
+of it on Linux, for `heap.py` to read ([research/daemon-memory.md](research/daemon-memory.md)). `fnincr.py` counts
 the queries an edit inside one function of a big file runs (the file comes from `genbig.py`),
 against the same functions in many small files ([reports/INCREMENTAL.md](reports/INCREMENTAL.md)). `realbench.py` times
 `cargo ra-jit build` against `cargo build` on ripgrep, just and nushell (cold, no-op and

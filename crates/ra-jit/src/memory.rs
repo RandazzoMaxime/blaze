@@ -1,8 +1,8 @@
 //! Where the daemon's memory is.
 //!
 //! With `RA_JIT_MEMORY` naming a directory, the daemon reports what the process holds after
-//! each step of warming up, and once warm writes there what every ingredient of the database
-//! holds. A build with the `heap-profile` feature allocates with jemalloc instead of
+//! each step of warming up, and once warm and after each request it answers writes there what
+//! every ingredient of the database holds. A build with the `heap-profile` feature allocates with jemalloc instead of
 //! mimalloc: it can tell how much of the heap is live, and with `_RJEM_MALLOC_CONF=prof:true`
 //! it writes a profile of the heap next to the ingredients, for `jeprof` to read.
 
@@ -19,10 +19,23 @@ pub(crate) fn report_dir() -> Option<PathBuf> {
 }
 
 /// Megabytes of memory the process has resident.
+#[cfg(not(target_os = "macos"))]
 pub(crate) fn resident() -> Option<u64> {
     let status = std::fs::read_to_string("/proc/self/status").ok()?;
     let line = status.lines().find_map(|it| it.strip_prefix("VmRSS:"))?;
     Some(line.trim().trim_end_matches("kB").trim().parse::<u64>().ok()? / 1024)
+}
+
+/// Megabytes of memory the process owns: its physical footprint, which is what Activity
+/// Monitor shows, and which still counts pages macOS has compressed.
+#[cfg(target_os = "macos")]
+pub(crate) fn resident() -> Option<u64> {
+    let mut info = std::mem::MaybeUninit::<libc::rusage_info_v4>::zeroed();
+    // SAFETY: `info` has room for the `RUSAGE_INFO_V4` record the call writes.
+    let pid = std::process::id() as libc::c_int;
+    let ok = unsafe { libc::proc_pid_rusage(pid, libc::RUSAGE_INFO_V4, info.as_mut_ptr().cast()) };
+    // SAFETY: the call wrote the record when it returned 0, and zeroes are a record too.
+    (ok == 0).then(|| unsafe { info.assume_init() }.ri_phys_footprint >> 20)
 }
 
 /// Bytes allocated and not freed, when the allocator counts them.
@@ -53,6 +66,16 @@ pub(crate) fn report(db: &mut RootDatabase, step: &str) -> anyhow::Result<()> {
     write_heap_profile(&dir.join(format!("{step}.prof")))?;
     std::fs::write(dir.join(format!("{step}.tsv")), ingredients(db))?;
     Ok(())
+}
+
+/// [`report`] once the daemon has answered a request, as `request-N`, N counting from 1.
+pub(crate) fn served(db: &mut RootDatabase) -> anyhow::Result<()> {
+    static SERVED: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    if report_dir().is_none() {
+        return Ok(());
+    }
+    let served = SERVED.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+    report(db, &format!("request-{served}"))
 }
 
 /// A line for every struct and query of the database: how many there are and the bytes of
@@ -86,6 +109,14 @@ fn write_heap_profile(path: &Path) -> anyhow::Result<()> {
     // SAFETY: `opt.prof` is a `bool`.
     if !unsafe { tikv_jemalloc_ctl::raw::read::<bool>(b"opt.prof\0") }.unwrap_or(false) {
         return Ok(());
+    }
+    // A profile has the addresses of the code that allocated, and on macOS nothing of where
+    // the program was loaded, which `harness/heapfold.py` needs to name them.
+    #[cfg(target_os = "macos")]
+    {
+        // SAFETY: image 0 is the program itself, which is loaded for as long as it runs.
+        let header = unsafe { libc::_dyld_get_image_header(0) } as usize;
+        std::fs::write(path.with_extension("load"), format!("{header:#x}\n"))?;
     }
     let path = std::ffi::CString::new(path.as_os_str().as_bytes())?;
     // SAFETY: `prof.dump` takes a C string, which `path` is for the length of the call.
