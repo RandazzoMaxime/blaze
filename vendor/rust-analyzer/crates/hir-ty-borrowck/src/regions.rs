@@ -2969,6 +2969,7 @@ impl<'db> Builder<'_, '_, 'db> {
                     }
                     _ => None,
                 };
+                let mut annotated = false;
                 let args = match span {
                     _ if let Some(args) = self_args => args,
                     _ if let Some(args) = through_local => args,
@@ -2977,10 +2978,18 @@ impl<'db> Builder<'_, '_, 'db> {
                             || matches!(store[expr],
                                 hir_def::hir::Expr::Call { callee, .. } if spelled(callee)) =>
                     {
+                        annotated = true;
                         self.written(args.as_ref())
                     }
                     _ => self.renumber(args.as_ref()),
                 };
+                // The arguments a path spells out are well-formed, as rustc's user type
+                // annotation: `Outer::<T, Inner<T>> { .. }` where `struct Inner<T: 'static>`.
+                if annotated {
+                    for ty in args.types() {
+                        self.well_formed(ty, boring, 0);
+                    }
+                }
                 let fields = self.ctx.db.field_types(*variant);
                 for ((_, field), operand) in fields.iter().zip(operands.iter()) {
                     let field = field.ty().instantiate(self.interner(), args).skip_norm_wip();
