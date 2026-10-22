@@ -32,8 +32,9 @@ KINDS = [
 
 # What a frame itself does, the first that matches.
 OWN = [
+    ("flat trees built (rowan's flat builder)", ("FlatTreeBuilder", "rowan::flat::FlatTree>::subtree")),
     ("green trees built (rowan's builder and node cache)", ("GreenNodeBuilder", "node_cache::NodeCache", "SyntaxTreeBuilder", "rowan::green::")),
-    ("red nodes walked (rowan's cursor)", ("rowan::cursor", "rowan::api", "<rowan::")),
+    ("trees walked (rowan's cursor, green or flat)", ("rowan::cursor", "rowan::api", "rowan::flat", "<rowan::")),
     ("lexed and parsed (events)", ("parser::", "LexedStr", "rustc_lexer")),
     ("anchors hashed", ("hir_def::expr_store::body::tree_hash",)),
     ("ast id maps", ("span::ast_id::",)),
