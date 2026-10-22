@@ -3,7 +3,7 @@
 
     benchhistory.py build RESULT [--history FILE]
     benchhistory.py live LATENCY... [--history FILE] [--machine NAME]
-    benchhistory.py check HISTORY [--last N] [--noise PERCENT] [--report FILE]
+    benchhistory.py check HISTORY [--last N] [--least N] [--noise PERCENT] [--report FILE]
 
 `build` appends one line to FILE for a result of bench.py, by default its platform's
 (benchplatforms.py): docs/benchmarks/history/<platform>.jsonl, e.g. linux-x86-64.jsonl; `live`
@@ -38,7 +38,9 @@ daemon after each phase, once ready and at the end of the run, and its disk; car
 not checked. The band is `--noise` percent (default 10) or three times the
 spread the history shows (1.4826 times the median absolute deviation, as a percent of the
 median), whichever is larger; with fewer than three earlier lines it is twice `--noise`. A
-phase the daemon built that cargo now builds is a regression whatever the times. The
+number with fewer than `--least` earlier values (default 1) is not checked: on a machine whose
+own runs differ by more than that band, as a hosted runner's do, one or two runs say nothing of
+its noise. A phase the daemon built that cargo now builds is a regression whatever the times. The
 regressions are written to stdout and, as markdown, to `--report`; the exit status is 1 when
 there is one, and 0 with nothing to compare against.
 """
@@ -181,7 +183,7 @@ def series(line):
     return numbers, built
 
 
-def regressions(lines, last, noise):
+def regressions(lines, last, noise, least=1):
     now = lines[-1]
     same = [l for l in lines[:-1] if l.get("machine") == now.get("machine") and l.get("cores") == now.get("cores")][-last:]
     if not same:
@@ -191,7 +193,7 @@ def regressions(lines, last, noise):
     found = []
     for name, value in sorted(numbers.items()):
         history = [n[name] for n, _ in earlier if name in n]
-        if not history:
+        if len(history) < max(least, 1):
             continue
         median = statistics.median(history)
         if len(history) >= 3 and median > 0:
@@ -209,10 +211,12 @@ def regressions(lines, last, noise):
     return found, len(same)
 
 
-def report(now, found, compared):
+def report(now, found, compared, least=1):
     head = f"{now['suite']} benchmarks on {now.get('machine')}, ra-jit {(now.get('commit') or '?')[:10]}, {now['date']}"
     if now.get("run_url"):
         head += f" ([run]({now['run_url']}))"
+    if compared < least:
+        return f"{head}: not checked, {compared} runs before it on this machine of the {least} its noise is told from."
     if not found:
         return f"{head}: nothing regressed against the {compared} runs before it."
     lines = [f"{head}: {len(found)} regressed against the median of the {compared} runs before it.", "",
@@ -248,10 +252,11 @@ def main():
         append(history, live_line(argv, machine))
     elif command == "check":
         last, noise = int(options(argv, "--last", "7")), float(options(argv, "--noise", "10"))
+        least = int(options(argv, "--least", "1"))
         out = options(argv, "--report")
         lines = [json.loads(l) for l in open(argv[0]) if l.strip()]
-        found, compared = regressions(lines, last, noise)
-        text = report(lines[-1], found, compared)
+        found, compared = regressions(lines, last, noise, least)
+        text = report(lines[-1], found, compared, least)
         print(text)
         if out:
             open(out, "w").write(text + "\n")
