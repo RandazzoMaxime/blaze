@@ -13,7 +13,7 @@ pub(crate) mod run;
 mod say;
 pub(crate) mod script;
 mod state;
-mod switch;
+pub(crate) mod switch;
 mod units;
 
 use std::{collections::BTreeMap, path::Path, process::Command, time::Instant};
