@@ -35,6 +35,10 @@ and listed (`--report`, `cargo ra-jit status`); it is treated as a bug to fix, n
 normal path. What must not happen is a best-effort lowering of input the generator does not
 understand, because that is wrong code nobody sees.
 
+Leaning on rustc's copy and on cargo is how ra-jit works today, not how it is meant to:
+ra-jit is to compile everything itself and never run rustc, and each place it still does is a
+bug to remove ([no-rustc.md](no-rustc.md)).
+
 The same rule shapes the smaller pieces. `type_id.rs` computes `TypeId` hashes the way the
 pinned rustc does and returns `None` for a type whose hash needs something it does not
 reproduce. The splice returns an error for anything it has no answer for and the caller
