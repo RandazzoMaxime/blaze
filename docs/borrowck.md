@@ -43,9 +43,19 @@ All of these are rustc's, written from `compiler/rustc_borrowck` at the pinned n
 ([research/borrowck.md](research/borrowck.md) has the sources):
 
 - Moves and initialization: moves out of places, partial moves, maybe-uninitialized reads,
-  assignment to immutable locals (E0381, E0382, E0384, E0505, E0507, E0508, E0509).
+  assignment to immutable locals (E0381, E0382, E0384, E0505, E0507, E0508, E0509). A `match`
+  whose arms test the value reads what it matches first, so a value moved out whole is
+  reported there.
 - Conflicting borrows: shared, mutable, two-phase (`vec.push(vec.len())`), shallow borrows of
-  match scrutinees, and fake reads (E0499, E0500, E0501, E0502, E0503, E0506, E0524).
+  match scrutinees, and fake reads (E0499, E0500, E0501, E0502, E0503, E0506, E0524). The drop
+  of the old value before an assignment is the assignment's write, so assigning to a borrowed
+  place is E0506 rather than E0597. A `match` reads a discriminant, and switches on a `bool`,
+  integer or `char` it tests against a literal, at what it matches rather than at the arm.
+- Errors for a borrow that does not live long enough, as rustc chooses among them: E0713 when
+  the borrow is of a field of a value whose type implements `Drop` and the drop is of that
+  value, E0373 ("may outlive the current block") for a closure a `let` binds as a block's
+  value, and E0597 rather than E0515 for what a function returns as an `impl Trait` that
+  captures no lifetime (rustc's `OpaqueType` constraint).
 - Region inference: liveness of locals (drops kept live only back to where the local may be
   initialized), outlives constraints from every statement, call, cast and aggregate, the
   signature's universal regions and implied bounds (normalized parameters and the impl
@@ -137,8 +147,8 @@ With no borrow checker, the 245 units rustc accepts would pass. Now:
 
 | Mode | In scope | Pass | rustc accepts, ra-jit too | rustc rejects, same errors |
 |---|---|---|---|---|
-| Polonius | 1579 | 1248 (79.0%) | 245 of 245 | 1003 of 1334 |
-| NLL | 1577 | 1241 (78.7%) | 226 of 226 | 1015 of 1351 |
+| Polonius | 1579 | 1278 (80.9%) | 245 of 245 | 1033 of 1334 |
+| NLL | 1577 | 1272 (80.7%) | 226 of 226 | 1046 of 1351 |
 
 463 units are out of scope; 344 of them need a nightly feature. CI runs the scoring on Linux
 and fails below a floor a few units under the count there.

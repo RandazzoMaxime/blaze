@@ -58,9 +58,26 @@ pub(in super::super) fn is_guarded(loc: ir::SourceLoc) -> bool {
     !loc.is_default() && loc.bits() & GUARDED != 0
 }
 
-/// The source location without the mark, which says the statement alone.
+/// The source location without the marks, which says the statement alone.
 pub(in super::super) fn unguarded(loc: ir::SourceLoc) -> ir::SourceLoc {
-    if loc.is_default() { ir::SourceLoc::new(0) } else { ir::SourceLoc::new(loc.bits() & !GUARDED) }
+    if loc.is_default() {
+        ir::SourceLoc::new(0)
+    } else {
+        ir::SourceLoc::new(loc.bits() & !(GUARDED | IN_BOUNDS))
+    }
+}
+
+/// The mark of an `iadd` that offsets a pointer within what it points into, as the `offset`
+/// intrinsic does: LLVM builds it as `getelementptr inbounds`.
+const IN_BOUNDS: u32 = 1 << 30;
+
+pub(in super::super) fn in_bounds(loc: ir::SourceLoc) -> ir::SourceLoc {
+    let bits = if loc.is_default() { 0 } else { loc.bits() };
+    ir::SourceLoc::new(bits | IN_BOUNDS)
+}
+
+pub(in super::super) fn is_in_bounds(loc: ir::SourceLoc) -> bool {
+    !loc.is_default() && loc.bits() & IN_BOUNDS != 0
 }
 /// Where a call that unwound finds its exception, from the frame pointer: the first of
 /// the four slots a caller leaves above the return address for the function to use as it

@@ -32,11 +32,17 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use super::{
     Arch,
     backend::{Optimization, Passes, Phase, Selection, Tally},
-    fragment::{Code, Wants},
+    fragment::{Code, Hint, Wants},
 };
 
 mod emitted;
 mod lower;
+mod rebase;
+
+/// What runs again where [`rebase::rebase`] said what addresses are based on: what is stored
+/// through one and loaded again is forwarded, and a slot that is then only written goes.
+const REBASED: &str = "function(instcombine<no-verify-fixpoint>,sroa,gvn,dse,\
+                       instcombine<no-verify-fixpoint>,simplifycfg)";
 
 use lower::{Defined, Lowering};
 
@@ -95,6 +101,7 @@ pub(super) fn emit(
         module.set_data_layout(&machine.get_target_data().get_data_layout());
         let constants: FxHashMap<u32, &[u8]> = recorder.constants().collect();
         let statics: FxHashSet<u32> = recorder.statics().collect();
+        let resume = recorder.resume();
         let shown = tally.time(Phase::Lower, || {
             let own = Defined {
                 name: if wrapped { INNER } else { OWN },
@@ -120,11 +127,17 @@ pub(super) fn emit(
             let mut by_id = FxHashMap::default();
             for (it, defined) in std::iter::zip(&seen, &shown) {
                 if let Ok(function) = Lowering::add(context, &module, defined) {
-                    if it.never {
-                        let never = Attribute::get_named_enum_kind_id("noinline");
+                    let hint = match it.hint {
+                        Hint::None => None,
+                        Hint::Inline => Some("inlinehint"),
+                        Hint::Always => Some("alwaysinline"),
+                        Hint::Never => Some("noinline"),
+                    };
+                    if let Some(hint) = hint {
+                        let hint = Attribute::get_named_enum_kind_id(hint);
                         function.add_attribute(
                             AttributeLoc::Function,
-                            context.create_enum_attribute(never, 0),
+                            context.create_enum_attribute(hint, 0),
                         );
                     }
                     by_id.insert(it.id.as_u32(), function);
@@ -137,14 +150,16 @@ pub(super) fn emit(
             for (it, defined) in std::iter::zip(&seen, &shown) {
                 let Some(&function) = by_id.get(&it.id.as_u32()) else { continue };
                 let defined = Lowering::define(
-                    context, &module, function, defined, &constants, &statics, &declared,
+                    context, &module, function, defined, &constants, &statics, resume, &declared,
                 );
                 if defined.is_err() {
                     by_id.remove(&it.id.as_u32());
                     unshow(&module, &FxHashMap::from_iter([(it.id.as_u32(), function)]));
                 }
             }
-            Lowering::define(context, &module, function, &own, &constants, &statics, &by_id)?;
+            Lowering::define(
+                context, &module, function, &own, &constants, &statics, resume, &by_id,
+            )?;
             if wrapped {
                 wrap(context, &module, function, weights)?;
             }
@@ -166,6 +181,13 @@ pub(super) fn emit(
                     module.run_passes(pipeline, machine, PassBuilderOptions::create())
                 })
                 .map_err(|e| Unhandled::Llvm(e.to_string_lossy().into_owned()))?;
+            if rebase::rebase(&module) {
+                tally
+                    .time(Phase::Optimize, || {
+                        module.run_passes(REBASED, machine, PassBuilderOptions::create())
+                    })
+                    .map_err(|e| Unhandled::Llvm(e.to_string_lossy().into_owned()))?;
+            }
         }
         unshow(&module, &shown);
         if module.get_function(INNER).is_some() {
@@ -321,7 +343,9 @@ impl Optimization {
     /// Cranelift built in is unrolled late in the pipeline, after LLVM's last numbering of
     /// values, while the copies are still joined by branches on constants: each copy keeps
     /// its own `%` and overflow check (16 `urem`s where rustc, which optimizes the callee on
-    /// its own before building it in, has 7, in the Life benchmark's `step`).
+    /// its own before building it in, has 7, in the Life benchmark's `step`). Instruction
+    /// combining named in a pipeline checks that one run of it left nothing to combine and
+    /// aborts the process when it did, which the default pipelines do not ask for.
     fn pipeline(self) -> Option<&'static str> {
         match self.passes {
             Passes::None => None,
@@ -329,7 +353,7 @@ impl Optimization {
             Passes::Default => Some("function(sroa,instsimplify,sroa,jump-threading),default<O2>"),
             Passes::Aggressive => Some(
                 "function(sroa,instsimplify,sroa,jump-threading),default<O3>,\
-                 function(gvn,sccp,instcombine,simplifycfg)",
+                 function(gvn,sccp,instcombine<no-verify-fixpoint>,simplifycfg)",
             ),
         }
     }
@@ -474,5 +498,53 @@ impl fmt::Display for Unhandled {
                 write!(f, "llvm: {}", message.lines().next().unwrap_or_default())
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use inkwell::memory_buffer::MemoryBuffer;
+
+    use super::*;
+
+    /// Reduced with `llvm-reduce` from a function of bun 1.4.3 at `-O3` on AArch64, where one
+    /// run of instruction combining after `default<O3>` leaves more to combine.
+    const SHORT_OF_A_FIXPOINT: &str = r#"
+define void @f(ptr %0, i1 %.not) personality ptr null {
+frame:
+  %1 = load volatile i32, ptr null, align 4
+  %2 = icmp ne i32 %1, 0
+  %.not7.not.not = select i1 %.not, i1 false, i1 %2
+  br i1 %.not7.not.not, label %3, label %common.ret
+
+3:
+  %4 = load i32, ptr %0, align 1
+  %5 = udiv i32 %1, %4
+  %6 = icmp eq i32 %5, 1
+  call void @llvm.assume(i1 %6)
+  %7 = urem i32 %1, %4
+  %8 = icmp ne i32 %7, 0
+  call void @llvm.assume(i1 %8)
+  br label %common.ret
+
+common.ret:
+  ret void
+}
+
+declare void @llvm.assume(i1 noundef)
+"#;
+
+    #[test]
+    fn instruction_combining_short_of_a_fixpoint_does_not_abort() {
+        let optimization =
+            Optimization { passes: Passes::Aggressive, selection: Selection::Optimized };
+        let machine = Machine::create(optimization).unwrap();
+        let context = Context::create();
+        // LLVM reads to a nul.
+        let text = format!("{SHORT_OF_A_FIXPOINT}\0");
+        let source = MemoryBuffer::create_from_memory_range_copy(text.as_bytes(), "short");
+        let module = context.create_module_from_ir(source).unwrap();
+        let pipeline = optimization.pipeline().unwrap();
+        module.run_passes(pipeline, &machine, PassBuilderOptions::create()).unwrap();
     }
 }

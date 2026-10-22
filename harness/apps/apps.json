@@ -757,6 +757,22 @@
    "\\(\\d+\\) panicked"
   ]
  },
+ "nativecalls": {
+  "source": "nativecalls",
+  "package": "nativecalls",
+  "runs": [
+   [],
+   [
+    "10"
+   ],
+   [
+    "100000"
+   ]
+  ],
+  "bench": [
+   "200000000"
+  ]
+ },
  "jsonrt": {
   "source": "jsonrt",
   "package": "jsonrt",
@@ -1774,6 +1790,52 @@
     "new": "    writeln!(writer, \"Resolved settings for indeed: \\\"{}\\\"\", path.display())?;\n",
     "what": "a word in a message"
    }
+  ]
+ },
+ "bun": {
+  "repo": "https://github.com/oven-sh/bun",
+  "rev": "c6da4a4d3010e5553438c60f6bd76d981976867c",
+  "prepare": "bunprep",
+  "package": "bun-exe",
+  "bin": "bun",
+  "runs": [
+   [
+    "--version"
+   ],
+   [
+    "--revision"
+   ],
+   [
+    "-e",
+    "console.log(1 + 2)"
+   ],
+   [
+    "-e",
+    "console.log(Bun.hash('ra-jit'), Bun.semver.order('1.2.3', '1.10.0'), new URL('https://a.b/c?d=1').searchParams.get('d'), JSON.stringify(Bun.deepEquals({a: [1]}, {a: [1]})))"
+   ],
+   [
+    "build",
+    "--no-bundle",
+    "--minify",
+    "src/js/node/http2.ts"
+   ],
+   [
+    "build",
+    "--no-bundle",
+    "src/js/node/net.ts"
+   ],
+   [
+    "-e",
+    "const t = new Bun.Transpiler({ loader: \"ts\", minifyWhitespace: true }); const fs = require(\"fs\"); const sources = [\"http2\", \"net\", \"_http_server\", \"fs\", \"child_process\"].map(n => fs.readFileSync(\"src/js/node/\" + n + \".ts\", \"utf8\")); let n = 0; for (let i = 0; i < 2; i++) for (const s of sources) n += t.transformSync(s).length; console.log(n)"
+   ],
+   [
+    "-e",
+    "throw new Error('expected')"
+   ]
+  ],
+  "bench": [
+   "-e",
+   "const t = new Bun.Transpiler({ loader: \"ts\", minifyWhitespace: true }); const fs = require(\"fs\"); const sources = [\"http2\", \"net\", \"_http_server\", \"fs\", \"child_process\"].map(n => fs.readFileSync(\"src/js/node/\" + n + \".ts\", \"utf8\")); let n = 0; for (let i = 0; i < 60; i++) for (const s of sources) n += t.transformSync(s).length; console.log(n)"
   ]
  }
 }

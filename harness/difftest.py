@@ -73,6 +73,17 @@ def toolchain():
     return sysroot, host()
 
 
+def only_the_link_failed(stderr):
+    """Whether all that failed in a build with stand-ins is the link of the program. The
+    stand-ins have none of the workspace's code, so native code linked into the program that
+    calls a function of the workspace (C calling a `#[no_mangle]` function, as bun's does) finds
+    it nowhere; ra-jit's objects define it in the link that is run, and what is taken from
+    cargo's is the link line, which rustc prints first."""
+    errors = [line for line in stderr.splitlines() if line.startswith("error")]
+    return bool(errors) and errors[0].startswith("error: linking with ") and all(
+        line.startswith(("error: linking with ", "error: could not compile ")) for line in errors)
+
+
 def linker_line(output):
     """The line of `--print link-args`, as the arguments from the linker on: the C compiler
     where it drives the linker, and a linker of the `link.exe` kind (rustc's own `rust-lld`,
@@ -163,7 +174,7 @@ class Fixture:
         out = subprocess.run(
             ["cargo", "rustc", *self.target_args, *target, "--", "--print", "link-args", "-C", "save-temps"],
             cwd=self.ws, capture_output=True, text=True, env=env)
-        if out.returncode != 0:
+        if out.returncode != 0 and not (self.alone and only_the_link_failed(out.stderr)):
             raise SystemExit(f"cargo failed:\n{out.stderr[-3000:]}")
         self.link_args = [a for a in linker_line(out.stdout + out.stderr) if not a.endswith("symbols.o")]
         self.reference = linkline.output_of(self.link_args)

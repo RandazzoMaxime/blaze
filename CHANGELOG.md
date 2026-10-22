@@ -8,6 +8,27 @@ All notable changes to ra-jit are written here. The format follows
 
 ### Added
 
+- `RA_JIT_OTHER_TOOLCHAIN=1` has `cargo ra-jit` build with a rustc other than 1.99.0, for a
+  project pinned to a nightly of the next release that 1.99.0 can't build (bun's
+  `nightly-2026-09-15`). Without it such a build goes to cargo, as before, and says why. The
+  builds of a nightly cargo are the daemon's: `-Z embed-metadata=no`, which it passes every
+  crate, no longer sends them to cargo, and build scripts' output and the seeded target are
+  found in its second build-directory layout (`soakrows.py`, "a project pinned to a nightly").
+- The `bench-bun` workflow measures bun nightly on the benchmark machine (edits and runtime,
+  into the README's bun section), in `nix develop .#bench-bun`: bun's nightly and what its own
+  build of its C and C++ needs. Too slow for every push.
+- `benchreport.py --name NAME` stores a project measured on its own in
+  `docs/benchmarks/NAME-<os>-<arch>.json` (`runtime-NAME-…` for the runtime) and writes it
+  between `<!-- bench-NAME:start -->`/`<!-- runbench-NAME:start -->` and their ends in the
+  README. The table says the platform it was measured on.
+- `bench.py bun` times the edits on bun (body, signature, leaf, generic, new function) in a copy
+  of the tree `bunprep.py` prepares, under bun's pinned nightly; bun is measured only when
+  named.
+- bun (its Rust port, 1.4.3: 1.25M lines in 103 crates, with a JavaScript runtime's C and C++)
+  in `apps.json`, so `apps.py bun` and `runbench.py bun` build it whole-program and compare
+  its runs with cargo's. An entry's `prepare` names a module of the harness that makes what
+  the program's own build makes before cargo: `bunprep.py` runs bun's build of its C and C++
+  once per revision and adds a member, `bun-exe`, that rustc links with them.
 - `RA_JIT_MEMORY` reports after every request a worker answers too (`request-N`), and on
   macOS its resident figure is the physical footprint rather than 0. A `heap-profile` build
   writes where it was loaded beside each heap profile, which `harness/heapfold.py` needs to
@@ -130,7 +151,7 @@ All notable changes to ra-jit are written here. The format follows
 - A borrow checker, the crate `hir-ty-borrowck` in the rust-analyzer subtree, written to give
   rustc's verdict: Polonius alpha by default as nightly rustc does, NLL with
   `RA_JIT_BORROWCK=nll`. It gives rustc's errors on
-  1248 of 1579 of rustc's own borrow-check tests that it can run, and none on any of the 245
+  1278 of 1579 of rustc's own borrow-check tests that it can run, and none on any of the 245
   rustc accepts, scored by `harness/borrowck_ui.py`, and finds nothing in ripgrep, fd, bat,
   hyperfine, just, axum, nushell, delta, eza, tokei and starship. Its errors are rust-analyzer diagnostics and
   `ra-jit borrowck` prints them ([docs/borrowck.md](docs/borrowck.md)).
@@ -143,13 +164,22 @@ All notable changes to ra-jit are written here. The format follows
   of rustc's borrow-check errors, so `cargo check` stays the final word.
 - `ra-jit borrowck`: the borrow-check errors of single files, or of a cargo workspace with
   `--project`.
-- `RA_JIT_INLINE=all`, off by default: a program built whole with LLVM at `-O2` or `-O3`
-  has what it calls in every crate built into it or shown to LLVM, the standard library's generic and `#[inline]`
-  functions as rustc does across crates. On Linux x86-64 it takes the geometric mean of the
-  14 runtime benchmarks from 3.92x the time of `cargo build --release` to 1.20x at `-O3`
-  and 1.21x at `-O2` ([README](README.md#how-fast)). Without it, `-O2` and `-O3` build in
-  only what the function's own crate defines (commit 99cbb902ad says otherwise: the levels
-  alone do not turn it on).
+- Inlining across crates, on by default in a program built whole with LLVM at `-O2` or
+  `-O3`: it has what it calls in every crate built into it or shown to LLVM, the standard
+  library's generic and `#[inline]` functions as rustc does across crates.
+  `RA_JIT_INLINE=crate` keeps that to the function's own crate, `RA_JIT_INLINE=all` does it
+  in other builds too. On Linux x86-64 (AWS c6i.16xlarge, at 13ee5a5339) the geometric mean
+  of 14 runtime benchmarks was 1.15x the time of `cargo build --release` at `-O3` and 1.16x
+  at `-O2`, against 3.89x with each crate alone; the programs other than the kernels took
+  2.3 to 3.7 times as long to build as with each crate alone (ripgrep 30.1 s against 8.5 s).
+  The README's table, measured at the merge into main, has 1.21x over 15 benchmarks
+  ([README](README.md#how-fast)): numeric's ra-jit build took 57 ms in three of its five
+  runs and 32 ms in the other two, where release's took 31 ms in all. A whole program's
+  build from cold against `cargo build --release`'s from cold: ripgrep 31.7 s against
+  8.4 s, tokei 50.7 s against 13.2 s, bat 125 s against 53.3 s, eza 38.9 s against 34.6 s.
+  Commit 99cbb902ad's message
+  says the levels alone turned it on; until b460bbe327 they did not, and it took
+  `RA_JIT_INLINE=all`.
 
 ### Changed
 
@@ -269,6 +299,27 @@ All notable changes to ra-jit are written here. The format follows
   (`__m256i`) is an alloca of that alignment, which LLVM can take apart; `memcpy`, `memmove`
   and `memset` are LLVM's intrinsics rather than calls it knows nothing of, so a copy of a
   known size is a few loads and stores.
+- A program built whole runs faster with LLVM: a landing pad whose cleanup only resumes is
+  left out, so LLVM sees a call that cannot unwind into anything; what a check that is off
+  (`ub_checks()` and its kind) guards is not compiled, so its panics do not use up what may be
+  built in; a `match` is a chain of
+  comparisons of up to 256 that LLVM makes a switch of; bodies are built in and shown up to
+  16 calls deep (an iterator's adapters reach `Vec::push` that deep); `offset` is a
+  `getelementptr inbounds`, also once Cranelift has inlined it; and a body built to be
+  measured and then not used gives back what its build counted of its call's share, so that
+  `vec![false; n]`'s `from_elem` is shown to LLVM, which then knows the vector's length and
+  drops the sieve kernel's bounds checks. A body shown to LLVM carries its `#[inline]`,
+  `#[inline(always)]` or `#[inline(never)]` as rustc emits it. An address the code computed
+  as an integer (from `ptrtoint`s, through adds, phis and selects) is rebuilt after the passes
+  as pointers and `getelementptr`s on the pointers it came from, so that LLVM can follow what
+  is stored and loaded through it: nbody's array of deltas leaves the stack. On Linux x86-64 the geometric mean at `-O3` goes
+  from 1.20x (ra-jit f3eeb5295e) to 1.15x of release's time at 13ee5a5339.
+- On macOS arm64, ripgrep, fd, bat and jsonrt build whole: NEON's pairwise maximum, minimum
+  and add, its table lookups (`tbl1`, `tbx1`), `sqdmulh`, `uaddlp` and `saddlp`, the CRC-32
+  instructions, and the generic `simd_reduce_max`, `simd_reduce_min` and `simd_ctpop` are
+  compiled, lane by lane or as one instruction. On a MacBook Pro (Apple M5 Max, macOS 27.0.1),
+  median of three runs: ripgrep 1.15x, fd 1.01x, bat 1.16x and jsonrt 1.26x of release's
+  time, every output the same as release's.
 
 ### Fixed
 
@@ -284,6 +335,23 @@ All notable changes to ra-jit are written here. The format follows
   `own-base-budget`). zed's base, which the loop had hidden, passes it: 51 GB of 74 GB live are
   debuginfo types
   ([#55](https://github.com/indexable-inc/ra-jit/issues/55)).
+- bat builds whole: an `impl` inside a function body of a dependency (bincode's `EnumAccess`
+  for `&mut Deserializer`, inside `deserialize_enum`) was not found, as rust-analyzer only
+  looked into the bodies of workspace crates; a dependency's file is now lexed for an `impl`
+  inside a function's braces, and only the functions holding one are lowered.
+- A whole program's build no longer builds a body it found too large again at each call
+  that allows no more: with what such a body counted given back, ripgrep's build across
+  crates took 416 s on Linux x86-64 and numeric's 151 s; 30.1 s and 8.7 s now.
+- LLVM's `instcombine`, as ra-jit's pipelines name it, runs without verifying that it reached
+  its fixpoint, as the one in `default<O3>` does: an LLVM built with that check ended the
+  process on a function of jsonrt, and of nushell at `-O3` across crates.
+- fd built with inlining across crates crashed the LLVM backend on Linux and macOS: an address
+  rebuilt as a `getelementptr` may be a sum that is a constant (a global's address plus an
+  offset), which is in no block, and LLVM read freed memory when the builder was put before it.
+- A borrowed constant with a cast in it, `&[b"node" as &[u8]][..]` returned for `'static`, is
+  promoted as rustc promotes it, where it was built on the stack and the reference outlived
+  it: every cast is promotable but of a pointer to an integer. bun's `new Bun.Transpiler()`
+  crashed on it (breakers, `promoted_index_of_casts`).
 - A `match` arm's guard with `let` (`if let` guards and their chains) dropped what it bound
   and its temporaries at the end of the guard, before the arm ran, in editions before 2024;
   rustc keeps them until the arm ends or the next arm is tried
@@ -300,6 +368,32 @@ All notable changes to ra-jit are written here. The format follows
   under them, are unchanged. helix is ready in 109 s at 18.4 GB of memory instead of 631 s at
   100.7 GB, its store is 1.6 GB instead of 14 GB, and its first `cargo ra-jit run` takes
   46.9 s instead of 640.8 s (`harness/deepnames.py`).
+- A `Box` beside an allocator that has a size (`Box<[T], &Arena>`, as bun's arenas) is
+  dereferenced and dropped through its pointer wherever its layout put it: a deref of one was
+  left to rustc, and its drop read the pointer from the start of the `Box`. `breakers.py`
+  runs the crates of `NIGHTLY_CRATES` with RUSTC_BOOTSTRAP=1 (`allocated`, `allocator_api`).
+- `simd_reduce_max` and `simd_reduce_min` of integer lanes are compiled (AArch64's `vmaxvq_u8`
+  and the other `vmaxv`/`vminv`, AVX-512's `_mm512_reduce_max_*`): a function that reached
+  them was left to rustc (bun's ASCII checks; `simd_reduce_max` breaker).
+- `RA_JIT_OPT=3`'s last instruction combining no longer aborts the process when one run of it
+  leaves something to combine ("Instruction Combining … did not reach a fixpoint after 1
+  iterations", bun's whole-program build on AArch64): the default pipelines never ask LLVM to
+  check that, and a pass named in a pipeline did.
+- `apps.py`'s and `runbench.py`'s whole-program build of a program whose C calls its Rust
+  by an unmangled name (a `#[no_mangle]` function) goes on when cargo's link of the stand-ins
+  fails for want of those functions: what is taken from it is the link line, and ra-jit's
+  objects define them. It ended at "cargo failed" (bun; `nativecalls` in `apps.json`).
+- What stands in for a crate in cargo's build (the source with no code that cargo links when
+  ra-jit compiles the crate: `apps.py`'s and `runbench.py`'s whole-program builds, and the
+  crates the daemon builds while cargo builds the rest) builds with a nightly cargo that names
+  each dependency twice, its `.rlib` and its `.rmeta`. It had an `extern crate` for each
+  (`E0259`, bun 1.4.3 on `nightly-2026-09-15`).
+- A `macro_rules!` that a macro of another crate defines (`dep::define_log!(log)`, as bun's
+  `bun_core::define_scoped_log!` at the top of a file) is in the textual scope of the modules
+  after it, as in rustc. rust-analyzer expanded a call by a path only after the file's modules
+  were collected, so their calls of the macro were missing expressions and their functions were
+  left to rustc (`IncompleteExpr`); in bun one such function in `bun_runtime` sent every
+  signature edit of the crate to cargo (`harness/breakers`, `macro_defined_by_foreign_macro`).
 - `harness/apps.py`'s perf stage ends with its timings again: since the rename from rustd it
   stored ra-jit's as `ra-jit_s` and printed `ra_jit_s`, a `KeyError` after every workload.
   wasmrun builds wasmtime 36.0.19 (was 25.0.3, which Dependabot's alerts name); its workload
@@ -362,6 +456,21 @@ All notable changes to ra-jit are written here. The format follows
   installs ra-jit and the programs it runs; the flake had no package of that name.
 - A release's archive and the flake's build have `ra-jit-rustc-first`, which `cargo ra-jit`
   runs in the first build of a workspace; they had only ra-jit, cargo-ra-jit and ra-jit-rustc.
+- A module whose file is outside its package, by `#[path = "../../shared/outside.rs"]` as
+  bun's runtime has, is compiled by ra-jit and its edits are built. The file was in no
+  package's directory and so not loaded: the functions that called into it were left to
+  rustc, an edit to it was not seen and the program kept running the old code, and in a
+  binary crate the daemon could not load the workspace ("unresolved module ... [E0583]").
+  The file is now put in the source root of the one that declares it, as a file an
+  `include!` names is. `soakrows.py`'s "a module file outside its package" fails without
+  this.
+- An edit that could change a function ra-jit left to rustc from the start, such as an item
+  added elsewhere in its crate, is built by cargo, as docs/cargo.md says. It failed the
+  build: when the function was one the frontend turned down, ra-jit took that for an error
+  of the source ("has an error ra-jit cannot say more of"), and every build after it failed
+  too until cargo built once. A function the frontend turns down only after an edit is still
+  reported as an error. Found building bun; `soakrows.py`'s "an item added beside a function
+  left to rustc" fails without this.
 - A worker that loaded its workspace beside cargo's first build
   ([#11](https://github.com/indexable-inc/ra-jit/issues/11)) ends when its daemon does, as
   every other worker does: once told what cargo built, it waited for a lock on its standard

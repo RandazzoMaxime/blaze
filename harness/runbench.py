@@ -22,12 +22,16 @@ release's; a build that differs is reported and not timed.
 
 NAME is `kernels` (harness/corpus/kernels, a benchmark per kernel) or an entry of
 apps/apps.json with a `bench` (checked out as apps.py does, under APPS_DIR). Default: kernels,
-numeric, jsonrt, ripgrep, fd, bat.
+numeric, jsonrt, ripgrep, fd, tokei, eza, bat.
 
 Memory is kept beside the times (memory.py, docs/benchmarks.md "Memory and disk"): each run's
 peak resident memory as the kernel kept it (`wait4`), the size of each program, and what each
 build held: `build_largest_mb`, the largest one process (rustc, ra-jit, the linker), exact, and
 `build_peak_mb`, the most the build's processes held at once, sampled.
+
+Every build is cold, its target directory removed first, and `build_s` is the whole of it: for
+ra-jit, cargo's pass with ra-jit standing in for rustc (build scripts, proc macros, the
+libraries' metadata; `cargo_s`), ra-jit's compile (`ra_jit_s`) and the link (`link_s`).
 
 The ratio is ra-jit's time over release's (1.00 is as fast, 1.10 is 10% slower), with the
 geometric mean over the benchmarks. RA_JIT_BIN names the ra-jit used; it needs `--features
@@ -40,7 +44,7 @@ sys.path.insert(0, HERE)
 import apps, memory  # noqa: E402
 
 KERNELS = ["sieve", "collatz", "fnv", "qsort", "matmul", "nbody", "mandelbrot", "words"]
-DEFAULT = ["kernels", "numeric", "jsonrt", "ripgrep", "fd", "bat"]
+DEFAULT = ["kernels", "numeric", "jsonrt", "ripgrep", "fd", "tokei", "eza", "bat"]
 RA_JIT_ENV = {"RA_JIT_BACKEND": "llvm", "RA_JIT_OPT": "3"}
 # What a variant may not inherit from the shell: the build is said by its flags alone.
 OWN_VARS = ["RA_JIT_BACKEND", "RA_JIT_OPT", "RA_JIT_EMIT", "RA_JIT_MIR_OPT", "RA_JIT_INLINE",
@@ -68,6 +72,7 @@ def workspace(name, spec):
             subprocess.run(["cargo", "generate-lockfile"], cwd=ws, check=True, capture_output=True)
     else:
         ws = apps.checkout(name, spec)
+        apps.prepare(ws, spec)
     apps.localize(ws)
     os.environ.update(spec.get("build_env", {}))
     apps.setup(ws, spec)
@@ -76,6 +81,8 @@ def workspace(name, spec):
 
 def cargo_release(ws, spec, label, rustflags):
     target = os.path.join(ws, f"target-{label}")
+    # Cold, as ra-jit's build is: the build time is published beside it.
+    shutil.rmtree(target, ignore_errors=True)
     env = {**os.environ, "CARGO_TARGET_DIR": target, "RUSTFLAGS": f"--cap-lints allow {rustflags}".strip()}
     for var in OWN_VARS[:-3]:
         env.pop(var, None)
@@ -96,11 +103,16 @@ def ra_jit_release(ws, spec, label, extra):
         os.environ.update({**RA_JIT_ENV, **extra, "RUSTFLAGS": apps.FLAGS})
         fx = apps.App(ws, {**spec, "cargo_args": [*spec.get("cargo_args", []), "--release"]}, alone=True)
         fx.ra_jit_args = ["--release"]
+        # Cold: cargo's pass with ra-jit standing in for rustc (build scripts, proc macros,
+        # the libraries' metadata) is part of the build, as rustc's is of cargo's.
+        shutil.rmtree(os.path.join(ws, "target-alone"), ignore_errors=True)
         fx.rustc_build()
         fx.ra_jit_build()
         kept = os.path.join(ws, f"bin-{label}")
         shutil.copy2(fx.binary, kept)
-        return kept, fx.ra_jit_secs + fx.link_secs, fx.summary(), fx
+        parts = {"cargo_s": round(fx.cargo_secs, 1), "ra_jit_s": round(fx.ra_jit_secs, 1),
+                 "link_s": round(fx.link_secs, 1)}
+        return kept, fx.cargo_secs + fx.ra_jit_secs + fx.link_secs, {**fx.summary(), "parts": parts}, fx
     finally:
         for var, value in saved.items():
             if value is None:
@@ -187,7 +199,7 @@ def main():
                     extra = {} if build == "ra-jit" else variants[build]
                     binary, secs, summary, used = ra_jit_measured(ws, spec, build, extra)
                     programs[build] = binary
-                    info[build] = {"build_s": round(secs, 1), "compiled": summary["compiled"],
+                    info[build] = {"build_s": round(secs, 1), **summary["parts"], "compiled": summary["compiled"],
                                    "left": summary["left"], "reasons": summary["reasons"]}
                 # What building it held (memory.py), and what it built.
                 info[build].update(build_peak_mb=used["peak_mb"], build_largest_mb=used["largest_mb"],
