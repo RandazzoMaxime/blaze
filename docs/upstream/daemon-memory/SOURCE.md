@@ -14,5 +14,13 @@ Apache-2.0. Verbatim; each file name says the upstream file and its lines, with 
 | `salsa-0.28.5_src_function_execute.rs-364-396.rs.txt` | `previous_iteration`: such a memo without a value is taken for a cycle head that panicked, and `Cancelled::PropagatedPanic` is thrown |
 | `salsa-0.28.5_src_function_execute.rs-510-562.rs.txt` | `PoisonProvisionalIfPanicking`: the memo a panic leaves has a `fixpoint_initial` origin, which an evicted memo does not |
 
+Written here on **2026-10-22** for [#57](https://github.com/indexable-inc/ra-jit/issues/57), not
+fetched:
+
+| file | what it is |
+|---|---|
+| `salsa-0.28.5-evicted-memo.patch.txt` | the patch to salsa 0.28.5 that tells an evicted memo from one a panic left, and evicts no provisional memo; paths are salsa's own |
+| `salsa-issue-lru-cycle.md` | a draft of the salsa issue that proposes it, not filed |
+
 The same `previous_iteration` is in salsa's latest source on docs.rs
 (`https://docs.rs/salsa/latest/src/salsa/function/execute.rs.html`, read the same day).

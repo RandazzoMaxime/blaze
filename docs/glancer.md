@@ -212,6 +212,21 @@ worker the daemon starts for the next project (940 MB on ripgrep). Sharing what 
 keeps, the spare, and a patched salsa that can evict a query with cycle handling are the
 next steps, each its own issue.
 
+**Measured (2026-10-22, #56, #57; Linux x86-64, 16 cores).** The spare is gone once a
+workspace is loaded: one is started for a build as it begins, and `RA_JIT_SPARE=ready` keeps
+the old one. An idle daemon holds 1.28 GB instead of 2.64; the daemon after `bench.py`'s edits
+2.31 GB instead of 3.63 on ripgrep and 11.36 instead of 12.70 on nushell, with the same edit
+times. A second project's cold start is unchanged
+and its warm start pays the library's load, 1.3 s on ripgrep and 0.9 s on nushell
+([cargo.md](cargo.md#what-a-build-does)). A vendored salsa patched to tell an evicted memo from one
+a panic left lets `lru` on `infer`, the MIR queries and `inlinable` through nushell's cold
+build and edits, but it is not merged: it took nushell's daemon after edits from 12.9 to
+12.45 GB and its signature edit from 0.42 to 2.43 s, since what depends on an evicted memo
+cannot be backdated; on `infer` and `runtime_mir_body` alone, 0.35 GB and 0.42 to 0.64 s. A
+forced `mi_collect` after each request returned 30 to 40 MB of ripgrep's worker. The rest is
+the values the daemon keeps, `described` first (#55)
+([research/daemon-memory.md](research/daemon-memory.md#2026-10-22-the-spare-and-eviction)).
+
 ### Item 1: frozen dependency artifacts
 
 **Design.** One artifact per dependency crate, content-addressed by its source hash, cfg,

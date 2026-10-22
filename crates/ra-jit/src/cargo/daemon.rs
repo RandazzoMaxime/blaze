@@ -64,7 +64,7 @@ enum Spares {
     /// beside cargo; none waits for a build nobody has asked for.
     Asked,
     /// `ready`: as well, one is started again once a workspace is loaded, and waits with the
-    /// library loaded for the next. The daemon holds it, 0.6 to 0.9 GB, for as long as it runs.
+    /// library loaded for the next. The daemon holds it, 1.3 GB on Linux, for as long as it runs.
     Ready,
 }
 
