@@ -1,8 +1,11 @@
 # Benchmarks
 
-The build table in the README comes from here. It is measured by CI on one dedicated machine,
-on real projects at pinned commits, against plain cargo on the same machine, and written back
-to the README by a bot commit. This page says how, so that anyone can check it or run it again.
+The README's benchmark tables come from here. Each is a matrix over three platforms, macOS
+arm64, Linux aarch64 and Linux x86-64, each measured on a dedicated machine of its own, on real
+projects at pinned commits, against plain cargo on the same machine, and written back to the
+README by a bot commit. A platform's numbers compare with each other and with its own history,
+not with another platform's: the machines differ in more than their architecture. This page
+says how, so that anyone can check it or run it again.
 
 ## What is measured
 
@@ -94,9 +97,9 @@ macOS number are therefore not the same count; within one machine both sides are
 
 **Cost.** The sampling thread wakes every 10 ms and reads a few dozen small files or calls;
 while it runs, Python switches threads every 0.1 ms instead of 5 ms, so the end of a timed
-command is seen within that. On the Mac below, a no-op `cargo build` of ra-jit itself took a
+command is seen within that. On the MacBook of the macOS results, a no-op `cargo build` of ra-jit itself took a
 median 322 ms without it and 319 ms with it (30 runs each, taking turns): no cost the noise
-shows. Two runs of the Mac's measurement below gave the same peaks within 1%.
+shows. Two runs of the Mac's measurement gave the same peaks within 1%.
 
 **Disk** is counted as `du` counts it: the blocks each file uses, a file with several hard
 links once.
@@ -104,62 +107,7 @@ links once.
 The history (`rss_mb`) still has the daemon's workers' high-water marks summed, as before; the
 history's memory alerts check the new numbers too (below).
 
-<!-- benchmem:start -->
-### Memory, macOS arm64, MacBook Pro (Mac17,6), macOS 27.0.1, with other work running
-
-ra-jit [`84760c3f51`](https://github.com/indexable-inc/ra-jit/commit/84760c3f517a76f6e8a3aa41ccd81fc3f26b87c7), 2026-10-21T21:03:27Z, Rust 1.99.0, 3 runs of each edit, 1 cold. Measured by hand with `harness/bench.py`, published with `benchreport.py --memory`; raw: [benchmarks/memory-macos-arm64.json](benchmarks/memory-macos-arm64.json). Its times are in the raw file too; the build table above is the benchmark machine's.
-
-| Machine | |
-|---|---|
-| Name | MacBook Pro (Mac17,6), macOS 27.0.1, with other work running |
-| CPU | Apple M5 Max |
-| Cores | 18 |
-| Memory (GiB) | 128 |
-| OS | macOS |
-| Kernel | 27.0.0 |
-| rustc | rustc 1.99.0 (b940084d7 2026-09-28) |
-| Linker | - |
-| Load average at the start | 48.0, 46.1, 48.4 |
-
-#### Memory and disk, Cranelift
-
-Peak: the most every process doing the work held at once, sampled every 10 ms and never below the largest process, median of the runs. Largest process: the peak of the one process that held the most, as the kernel kept it: `wait4`'s for the command's tree, and each process's peak sampled (on macOS the kernel's peak footprint of each, counting for the daemon only a peak it passed during the step). ra-jit is the daemon, its workers and what they run, and the `cargo ra-jit build` with any cargo it ran; cargo is cargo itself, rustc, build scripts and the linker. Daemon after: what the daemon and its workers hold once the step is over ([how](#memory-and-disk)).
-
-| Project | Step | cargo, peak | ra-jit, peak | cargo, largest process | ra-jit, largest process | Daemon after |
-|---|---|---:|---:|---:|---:|---:|
-| ripgrep 15.1.0 | Cold, until the daemon is ready | 541 MB | 2.4 GB | 356 MB | 2.2 GB | 2.2 GB |
-| ripgrep 15.1.0 | Edit a function | 235 MB | 2.9 GB | 235 MB | 1.9 GB | 2.9 GB |
-| ripgrep 15.1.0 | Edit a widely used function | 243 MB | 2.9 GB | 243 MB | 1.9 GB | 2.8 GB |
-| ripgrep 15.1.0 | Change a signature | 235 MB | 2.9 GB | 235 MB | 1.9 GB | 2.8 GB |
-| ripgrep 15.1.0 | Edit a generic function | 237 MB | 2.9 GB | 237 MB | 1.9 GB | 2.8 GB |
-| ripgrep 15.1.0 | Add a function | 234 MB | 2.9 GB | 234 MB | 1.9 GB | 2.8 GB |
-| ripgrep 15.1.0 | Add a struct field | 286 MB | 2.9 GB | 286 MB | 1.9 GB | 2.8 GB |
-| ripgrep 15.1.0 | Nothing changed | 40 MB | 2.8 GB | 40 MB | 1.9 GB | 2.8 GB |
-| fd 10.3.0 | Cold, until the daemon is ready | 897 MB | 1.9 GB | 389 MB | 1.8 GB | 1.8 GB |
-| fd 10.3.0 | Edit a function | 212 MB | 2.6 GB | 212 MB | 1.6 GB | 2.6 GB |
-| fd 10.3.0 | Edit a widely used function | 199 MB | 2.6 GB | 192 MB | 1.6 GB | 2.6 GB |
-| fd 10.3.0 | Change a signature | 226 MB | 2.6 GB | 226 MB | 1.6 GB | 2.6 GB |
-| fd 10.3.0 | Add a function | 211 MB | 2.6 GB | 211 MB | 1.6 GB | 2.6 GB |
-| fd 10.3.0 | Add a struct field | 258 MB | 2.6 GB | 258 MB | 1.6 GB | 2.6 GB |
-| fd 10.3.0 | Nothing changed | 48 MB | 2.5 GB | 48 MB | 1.6 GB | 2.5 GB |
-| nushell 0.108.0 | Cold, until the daemon is ready | 2.4 GB | 16.1 GB | 1.1 GB | 15.3 GB | 11.5 GB |
-| nushell 0.108.0 | Edit a function | 1.1 GB | 12.5 GB | 1.1 GB | 11.5 GB | 12.5 GB |
-| nushell 0.108.0 | Edit a widely used function | 1.1 GB | 12.5 GB | 1.1 GB | 11.5 GB | 12.5 GB |
-| nushell 0.108.0 | Change a signature | 1.1 GB | 12.5 GB | 1.1 GB | 11.5 GB | 12.5 GB |
-| nushell 0.108.0 | Edit a generic function | 1.1 GB | 13.2 GB | 1.1 GB | 11.3 GB | 12.2 GB |
-| nushell 0.108.0 | Add a function | 1.1 GB | 12.5 GB | 1.1 GB | 11.5 GB | 12.5 GB |
-| nushell 0.108.0 | Add a struct field | 1.1 GB | 13.3 GB | 1.1 GB | 11.4 GB | 12.2 GB |
-| nushell 0.108.0 | Nothing changed | 156 MB | 12.1 GB | 156 MB | 11.2 GB | 12.1 GB |
-
-The daemon between builds, and what each side keeps on disk once the edits are done (as `du` counts it). After the first build: once the step after the cold build (nothing changed) is done; growth is from then to the end, over every edit made and taken back. Warm store: the cold start of another checkout with the store the first one filled.
-
-| Project | Daemon ready | After the first build | At the end | Growth | Warm store: peak, ready | cargo target | ra-jit target | Store | Home |
-|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
-| ripgrep 15.1.0 | 2.2 GB | 2.8 GB | 2.8 GB after 39 builds | +23 MB | 2.3 GB, 2.0 GB | 416 MB | 526 MB | 72 MB | 0 MB |
-| fd 10.3.0 | 1.8 GB | 2.5 GB | 2.6 GB after 33 builds | +50 MB | 1.9 GB, 1.6 GB | 355 MB | 427 MB | 33 MB | 0 MB |
-| nushell 0.108.0 | 11.5 GB | 12.1 GB | 12.5 GB after 39 builds | +367 MB | 16.5 GB, 11.7 GB | 5.3 GB | 5.8 GB | 1.1 GB | 1 MB |
-
-<!-- benchmem:end -->
+Each platform's memory tables are with the rest of its numbers, under [Results](#results).
 
 ## Projects
 
@@ -271,59 +219,86 @@ editor sends it over the daemon's socket (`harness/live_latency.py --program pro
 flow to set against subsecond's; the restart flow above is what ra-jit does where it cannot
 patch, today Linux.
 
-## The machine
+## The machines
 
-Every result records its machine: the name it was given (`RA_JIT_BENCH_MACHINE`), the CPU, the
-cores the run could use (it may be pinned with `taskset`) and the machine's total, memory,
-kernel, rustc, C compiler, linker and LLVM version (below and in the JSON).
+Every result records its machine and platform: the name it was given (`RA_JIT_BENCH_MACHINE`),
+the CPU, the cores the run could use (it may be pinned with `taskset`) and the machine's total,
+memory, OS, kernel, rustc, C compiler, linker, LLVM version and the load average when it
+started (below and in the JSON). The platforms, their runners' labels and how a result is
+filed are `harness/benchplatforms.py`.
 
-The CI machine is a dedicated AWS instance used for nothing else, registered as a self-hosted
-GitHub Actions runner with the labels `self-hosted, linux, x64, bench-x86`. It runs as user
-`andrew` from `~/actions-runner` under a user systemd unit (`ra-jit-bench-runner.service`,
-lingering, so it starts at boot); `harness/benchrunner.sh` sets all of that up, and its `.env`
-names the machine for the results. Once it is registered, set the repository variable that turns
-the workflow's job on (`gh variable set BENCH_RUNNER -R indexable-inc/ra-jit -b true`); until
-then every run of the workflow is skipped rather than left waiting for a runner that is not
-there. The instance meant for it is `dev-aws-bench-x86`
-(i-01666717f0de39201, us-west-2a, on demand, ttl a year, tagged `ix-dev-purpose=ra-jit-bench`):
-16 AMD EPYC 9R45 (Zen 5) cores, one thread per core, NixOS. It was launched as a c8a.4xlarge
-(32 GiB), but nushell's daemon alone holds 15 GB, so it should be resized to m8a.4xlarge (the
-same 16 cores, 64 GiB) before it takes the runner. A cloud VM is not bare metal, but its cores
-are not shared with other tenants; the spread columns show how much the numbers move.
+Each platform is meant to run on a dedicated machine that runs nothing else, registered as a
+self-hosted GitHub Actions runner. A shared runner is no use: GitHub's hosted macOS arm64 runner
+(`macos-15`) is a 3-core VM with 7 GB of memory, less than nushell's daemon holds, with
+neighbours that move the numbers. The three:
 
-The first published run (2026-10-20) was made by hand, before that runner existed, on
-`dev-aws-11`: a bare-metal c8a.metal-24xl (96 of the same Zen 5 cores, 188 GiB) that was idle
-and claimed for the run, with the benchmark pinned to cores 0-15 (`taskset -c 0-15`), so that
-cargo and the daemon had 16 cores as on the CI machine.
+| Platform | Runner labels | Machine | Why |
+|---|---|---|---|
+| Linux x86-64 | `self-hosted, linux, x64, bench-x86` | `dev-aws-bench-x86` (i-01666717f0de39201, us-west-2a), resized to m8a.4xlarge: 16 AMD EPYC 9R45 (Zen 5) cores, one thread per core, 64 GiB | already launched for it, on demand, ttl a year, tagged `ix-dev-purpose=ra-jit-bench`; launched as a c8a.4xlarge (32 GiB), too little for nushell's daemon (15 GB) beside cargo |
+| Linux aarch64 | `self-hosted, linux, ARM64, bench-arm64` | a new `dev-aws-bench-arm64`, m8g.4xlarge: 16 Graviton4 (Neoverse V2) cores, 64 GiB, on demand | the same core count and memory as the x86 machine; a cloud VM is not bare metal, but its cores are not shared with other tenants |
+| macOS arm64 | `self-hosted, macOS, ARM64, bench-macos` | a Mac mini M4 Pro (14 cores, 64 GB) kept for it, plugged in, not sleeping (`sudo pmset -a sleep 0`), or an EC2 mac-m4pro.metal host if it has to be in AWS | bare metal, and the only way to measure macOS: a MacBook in use is busy with other work |
+
+`harness/benchrunner.sh PLATFORM MACHINE` sets a runner up: it checks the platform is the
+machine's, installs the runner in `~/actions-runner`, registers it with the platform's labels and
+runs it at boot (on Linux as user `andrew` from a user systemd unit,
+`ra-jit-bench-runner.service`, lingering; on macOS as the runner's launchd service), and its
+`.env` names the machine for the results. It needs Nix with flakes on the machine:
+
+```
+scp harness/benchrunner.sh HOST:
+gh api -X POST repos/indexable-inc/ra-jit/actions/runners/registration-token --jq .token \
+  | ssh HOST bash benchrunner.sh linux-aarch64 "'AWS m8g.4xlarge (dev-aws-bench-arm64)'"
+```
+
+Then name the platform in the repository variable `BENCH_RUNNERS`, comma-separated, which turns
+its jobs on: `gh variable set BENCH_RUNNERS -R indexable-inc/ra-jit -b linux-x86-64,linux-aarch64,macos-arm64`.
+A platform it does not name is skipped by every run rather than left waiting for a runner that
+is not there, and the README keeps its last numbers, under their machine, date and commit.
+(`BENCH_RUNNER=true`, from before there were platforms, still means Linux x86-64.)
+
+Until the runners exist the numbers are measured by hand with the same harness, pinned to 16
+cores (`taskset -c 0-15`) so that cargo and the daemon have the 16 cores of the machines above:
+on 2026-10-22, Linux x86-64 on `dev-aws-8` (a c7a.48xlarge, AMD EPYC 9R14, idle and claimed for
+the run) and Linux aarch64 on a c8g.16xlarge (Graviton4) launched for it; macOS arm64 is the
+MacBook Pro (M5 Max) run of 2026-10-21, made while it was busy with other work (its load average
+is in the README), so its times are noisier than the others'. The first published run
+(2026-10-20) was on `dev-aws-11`, a bare-metal c8a.metal-24xl pinned the same way.
 
 ## When it runs and what it commits
 
 `.github/workflows/bench-readme.yaml` runs on every push to main that touches code (not docs,
 the site or the README), every night at 09:17 UTC, and by hand (`gh workflow run bench-readme
 --repo indexable-inc/ra-jit`, with `-f force=true` to write the README even when nothing moved).
-One run at a time; a push during a run waits, and a newer push replaces the waiting one.
+One run at a time; a push during a run waits, and a newer push replaces the waiting one. A run
+has a job per registered platform, on its runner, at the same time, and then one job that
+publishes them all.
 
-After the run `harness/benchreport.py` compares the result with the stored one
-(`docs/benchmarks/linux-x86_64.json`). It writes the README section, this page's "Latest run"
-and the JSON only when:
+That job hands each platform's result to `harness/benchreport.py`, which compares it with the
+stored one of the same platform (`docs/benchmarks/<platform>.json`, e.g. `linux-x86-64.json`;
+`runtime-<platform>.json` for the runtime). It replaces the stored result, and writes the
+README's tables and this page's results from the newest stored result of every platform, only
+when:
 
 - a median of either side, in any phase, moved by more than 10% and more than 50 ms,
 - a step the daemon built is now built by cargo, or the other way round,
+- a peak of either side moved by more than 10% and 100 MB,
 - a project or backend was added or removed, or
 - the stored run is more than 24 hours old (so the commit the README names stays within a day
   of main).
 
-The workflow then commits those three files to main as `github-actions[bot]` with `[skip ci]`
-in the message (so the commit starts no other workflow), rebasing onto main if main moved during
-the run. It uses the job's `GITHUB_TOKEN` with `contents: write`; main has no branch protection.
+It then commits those files to main as `github-actions[bot]` with `[skip ci]` in the message (so
+the commit starts no other workflow), once for every platform, rebasing onto main if main moved
+during the run. It uses the job's `GITHUB_TOKEN` with `contents: write`; main has no branch
+protection. `bench-bun.yaml` does the same for bun, nightly, on the same runners.
 
 ## History and regressions
 
-Every run of the workflow appends one line to `docs/benchmarks/history/linux-x86_64.jsonl`
-(`harness/benchhistory.py build`), whether or not the README changed: the medians, spreads, who
-built each step, memory and store size of each project and phase, the machine and the run's
-link. The site's [/bench](https://ra-jit.ix.dev/bench) page charts that file, and the workflow
-starts the site's deploy after it commits.
+Every run of the workflow appends one line per platform to
+`docs/benchmarks/history/<platform>.jsonl` (`harness/benchhistory.py build`), whether or not the
+README changed: the medians, spreads, who built each step, memory and store size of each project
+and phase, the platform, the machine and the run's link. The site's
+[/bench](https://ra-jit.ix.dev/bench) page charts those files, a platform and machine at a time,
+and the workflow starts the site's deploy after it commits.
 
 `benchhistory.py check` then compares the new line with the median of the last seven from the
 same machine with the same cores. A number regressed when it is above that median by more than
@@ -345,7 +320,7 @@ machine; the band widens with the spread its own history shows.
 
 ## Run it yourself
 
-On Linux x86-64 with Nix (or with Rust 1.99.0, rust-src, LLVM 20 and Python 3 installed):
+On any of the platforms with Nix (or with Rust 1.99.0, rust-src, LLVM 20 and Python 3 installed):
 
 ```
 nix develop .#bench
@@ -365,8 +340,10 @@ and 30 GB of disk.
 `python3 harness/bench.py --compare OLD.json NEW.json` lists what got slower or holds more
 memory. On macOS give `--work` a short directory (`--work /tmp/bench`): the daemon's socket
 path has to fit in 104 bytes, which a work directory under `$TMPDIR` does not leave room for.
-`python3 harness/benchreport.py RESULT --memory` publishes a run's memory alone (the README's
-memory table and the section under "Memory and disk"), as the Mac's below was.
+`python3 harness/benchreport.py RESULT` publishes a run as its platform's (the machine it ran
+on): `RA_JIT_BENCH_MACHINE` names that machine in the tables, and `taskset -c 0-15` before
+`python3` gives it the 16 cores of the benchmark machines. `benchreport.py --render` writes
+every table and chart again from the stored results.
 
 ## Caveats
 
@@ -452,9 +429,114 @@ this page existed; not updated by CI.
 ## Results
 
 <!-- bench:start -->
-### Latest run
+Every number of the newest run of each platform. Each platform is a machine of its own: its numbers compare with each other and with its own history, not with another platform's.
 
-ra-jit [`2b2f2dcd5b`](https://github.com/indexable-inc/ra-jit/commit/2b2f2dcd5bc4d7132fe62bf36669a34c657dafe7), 2026-10-20T23:52:46Z, Rust 1.99.0, 5 runs of each edit. Raw: [benchmarks/linux-x86_64.json](benchmarks/linux-x86_64.json). Measured by hand with `harness/bench.py`; the `bench-readme` workflow re-runs it on the dedicated benchmark machine. The ra-jit measured is `cargo build --release`; the binaries a release ships are the `dist` profile with PGO, which start and edit faster ([how](https://github.com/indexable-inc/ra-jit/blob/main/docs/reports/RELEASE-BUILD.md)).
+### macOS arm64
+
+ra-jit [`84760c3f51`](https://github.com/indexable-inc/ra-jit/commit/84760c3f517a76f6e8a3aa41ccd81fc3f26b87c7), 2026-10-21T21:03:27Z, Rust 1.99.0, 3 runs of each edit, measured by hand. Raw: [benchmarks/macos-arm64.json](benchmarks/macos-arm64.json).
+
+| Machine | |
+|---|---|
+| Name | MacBook Pro (Mac17,6), macOS 27.0.1, with other work running |
+| CPU | Apple M5 Max |
+| Cores | 18 |
+| Memory (GiB) | 128 |
+| OS | macOS |
+| Kernel | 27.0.0 |
+| rustc | rustc 1.99.0 (b940084d7 2026-09-28) |
+| C compiler | Apple clang version 21.0.0 (clang-2100.3.34.2) |
+| Linker | - |
+| LLVM | - |
+| Incremental | profile default (on for dev) |
+| Compiler cache | none |
+| Load average at the start | 48.0, 46.1, 48.4 |
+
+#### Edits, Cranelift, macOS arm64
+
+Median, then the fastest and slowest run. Built: who built the edit (daemon, or cargo and why). Link: the change was spliced into the program, or it was linked again.
+
+| Project | Edit | cargo | ra-jit | | cargo runs | ra-jit runs | Built | Link |
+|---|---|---:|---:|---:|---|---|---|---|
+| ripgrep 15.1.0 | Edit a function | 993 ms | 126 ms | 7.9x | 646 ms to 1.11 s | 125 ms to 191 ms | daemon | spliced |
+| ripgrep 15.1.0 | Edit a widely used function | 1.31 s | 159 ms | 8.2x | 1.02 s to 4.28 s | 104 ms to 160 ms | daemon | spliced |
+| ripgrep 15.1.0 | Change a signature | 828 ms | 175 ms | 4.7x | 785 ms to 1.36 s | 102 ms to 305 ms | daemon | spliced |
+| ripgrep 15.1.0 | Edit a generic function | 1.93 s | 100 ms | 19x | 1.27 s to 1.95 s | 92 ms to 157 ms | daemon | spliced |
+| ripgrep 15.1.0 | Add a function | 1.81 s | 248 ms | 7.3x | 706 ms to 2.86 s | 104 ms to 271 ms | daemon | spliced |
+| ripgrep 15.1.0 | Add a struct field | 1.88 s | 191 ms | 9.8x | 1.35 s to 1.96 s | 94 ms to 298 ms | daemon | spliced |
+| ripgrep 15.1.0 | Nothing changed | 67 ms | 54 ms | 1.2x | 63 ms to 72 ms | 50 ms to 61 ms | daemon |  |
+| fd 10.3.0 | Edit a function | 630 ms | 109 ms | 5.8x | 611 ms to 1.29 s | 99 ms to 140 ms | daemon | spliced |
+| fd 10.3.0 | Edit a widely used function | 734 ms | 102 ms | 7.2x | 691 ms to 1.01 s | 87 ms to 105 ms | daemon | spliced |
+| fd 10.3.0 | Change a signature | 681 ms | 113 ms | 6.0x | 563 ms to 835 ms | 100 ms to 205 ms | daemon | spliced |
+| fd 10.3.0 | Add a function | 712 ms | 126 ms | 5.7x | 593 ms to 745 ms | 106 ms to 228 ms | daemon | spliced |
+| fd 10.3.0 | Add a struct field | 1.09 s | 127 ms | 8.6x | 894 ms to 1.31 s | 113 ms to 143 ms | daemon | spliced |
+| fd 10.3.0 | Nothing changed | 144 ms | 49 ms | 2.9x | 85 ms to 369 ms | 48 ms to 84 ms | daemon |  |
+| nushell 0.108.0 | Edit a function | 1.81 s | 454 ms | 4.0x | 1.66 s to 1.89 s | 383 ms to 713 ms | daemon | spliced |
+| nushell 0.108.0 | Edit a widely used function | 14.39 s | 850 ms | 17x | 12.49 s to 15.24 s | 840 ms to 861 ms | daemon | spliced |
+| nushell 0.108.0 | Change a signature | 10.28 s | 716 ms | 14x | 9.54 s to 12.34 s | 694 ms to 867 ms | daemon | spliced |
+| nushell 0.108.0 | Edit a generic function | 20.61 s | 2.12 s | 9.7x | 9.59 s to 26.96 s | 986 ms to 2.50 s | daemon | full link: a program too large for frames in front of its own: one is 0x1000020 bytes in |
+| nushell 0.108.0 | Add a function | 2.47 s | 444 ms | 5.6x | 1.74 s to 2.86 s | 353 ms to 480 ms | daemon | spliced |
+| nushell 0.108.0 | Add a struct field | 25.84 s | 2.51 s | 10x | 23.58 s to 30.94 s | 2.21 s to 3.54 s | daemon | full link: a program too large for frames in front of its own: one is 0x1000008 bytes in |
+| nushell 0.108.0 | Nothing changed | 407 ms | 45 ms | 9.0x | 347 ms to 433 ms | 41 ms to 56 ms | daemon |  |
+
+#### Cold, Cranelift, macOS arm64
+
+From an empty target directory, crates already downloaded, one run. `cargo ra-jit build` is cargo's own build (the daemon is not loaded yet); the daemon then loads the workspace and builds it once, and edits are fast from then on. Warm store: the same in another checkout of the same commit, with the store the first one filled.
+
+| Project | `cargo build` | `cargo ra-jit build` | Daemon ready, empty store | Daemon ready, warm store | Functions compiled | Daemon memory | Store |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| ripgrep 15.1.0 | 9.83 s | 12.08 s | 14.68 s | 17.62 s | 18,437 | 2,360 MB | 72 MB |
+| fd 10.3.0 | 9.17 s | 11.57 s | 12.62 s | 13.16 s | 8,478 | 1,946 MB | 32 MB |
+| nushell 0.108.0 | 49.69 s | 77.23 s | 92.67 s | 139.83 s | 167,893 | 16,137 MB | 1,121 MB |
+
+#### Memory and disk, Cranelift, macOS arm64
+
+Peak: the most every process doing the work held at once, sampled every 10 ms and never below the largest process, median of the runs. Largest process: the peak of the one process that held the most, as the kernel kept it: `wait4`'s for the command's tree, and each process's peak sampled (on macOS the kernel's peak footprint of each, counting for the daemon only a peak it passed during the step). ra-jit is the daemon, its workers and what they run, and the `cargo ra-jit build` with any cargo it ran; cargo is cargo itself, rustc, build scripts and the linker. Daemon after: what the daemon and its workers hold once the step is over ([how](#memory-and-disk)).
+
+| Project | Step | cargo, peak | ra-jit, peak | cargo, largest process | ra-jit, largest process | Daemon after |
+|---|---|---:|---:|---:|---:|---:|
+| ripgrep 15.1.0 | Cold, until the daemon is ready | 541 MB | 2.4 GB | 356 MB | 2.2 GB | 2.2 GB |
+| ripgrep 15.1.0 | Edit a function | 235 MB | 2.9 GB | 235 MB | 1.9 GB | 2.9 GB |
+| ripgrep 15.1.0 | Edit a widely used function | 243 MB | 2.9 GB | 243 MB | 1.9 GB | 2.8 GB |
+| ripgrep 15.1.0 | Change a signature | 235 MB | 2.9 GB | 235 MB | 1.9 GB | 2.8 GB |
+| ripgrep 15.1.0 | Edit a generic function | 237 MB | 2.9 GB | 237 MB | 1.9 GB | 2.8 GB |
+| ripgrep 15.1.0 | Add a function | 234 MB | 2.9 GB | 234 MB | 1.9 GB | 2.8 GB |
+| ripgrep 15.1.0 | Add a struct field | 286 MB | 2.9 GB | 286 MB | 1.9 GB | 2.8 GB |
+| ripgrep 15.1.0 | Nothing changed | 40 MB | 2.8 GB | 40 MB | 1.9 GB | 2.8 GB |
+| fd 10.3.0 | Cold, until the daemon is ready | 897 MB | 1.9 GB | 389 MB | 1.8 GB | 1.8 GB |
+| fd 10.3.0 | Edit a function | 212 MB | 2.6 GB | 212 MB | 1.6 GB | 2.6 GB |
+| fd 10.3.0 | Edit a widely used function | 199 MB | 2.6 GB | 192 MB | 1.6 GB | 2.6 GB |
+| fd 10.3.0 | Change a signature | 226 MB | 2.6 GB | 226 MB | 1.6 GB | 2.6 GB |
+| fd 10.3.0 | Add a function | 211 MB | 2.6 GB | 211 MB | 1.6 GB | 2.6 GB |
+| fd 10.3.0 | Add a struct field | 258 MB | 2.6 GB | 258 MB | 1.6 GB | 2.6 GB |
+| fd 10.3.0 | Nothing changed | 48 MB | 2.5 GB | 48 MB | 1.6 GB | 2.5 GB |
+| nushell 0.108.0 | Cold, until the daemon is ready | 2.4 GB | 16.1 GB | 1.1 GB | 15.3 GB | 11.5 GB |
+| nushell 0.108.0 | Edit a function | 1.1 GB | 12.5 GB | 1.1 GB | 11.5 GB | 12.5 GB |
+| nushell 0.108.0 | Edit a widely used function | 1.1 GB | 12.5 GB | 1.1 GB | 11.5 GB | 12.5 GB |
+| nushell 0.108.0 | Change a signature | 1.1 GB | 12.5 GB | 1.1 GB | 11.5 GB | 12.5 GB |
+| nushell 0.108.0 | Edit a generic function | 1.1 GB | 13.2 GB | 1.1 GB | 11.3 GB | 12.2 GB |
+| nushell 0.108.0 | Add a function | 1.1 GB | 12.5 GB | 1.1 GB | 11.5 GB | 12.5 GB |
+| nushell 0.108.0 | Add a struct field | 1.1 GB | 13.3 GB | 1.1 GB | 11.4 GB | 12.2 GB |
+| nushell 0.108.0 | Nothing changed | 156 MB | 12.1 GB | 156 MB | 11.2 GB | 12.1 GB |
+
+The daemon between builds, and what each side keeps on disk once the edits are done (as `du` counts it). After the first build: once the step after the cold build (nothing changed) is done; growth is from then to the end, over every edit made and taken back. Warm store: the cold start of another checkout with the store the first one filled.
+
+| Project | Daemon ready | After the first build | At the end | Growth | Warm store: peak, ready | cargo target | ra-jit target | Store | Home |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| ripgrep 15.1.0 | 2.2 GB | 2.8 GB | 2.8 GB after 39 builds | +23 MB | 2.3 GB, 2.0 GB | 416 MB | 526 MB | 72 MB | 0 MB |
+| fd 10.3.0 | 1.8 GB | 2.5 GB | 2.6 GB after 33 builds | +50 MB | 1.9 GB, 1.6 GB | 355 MB | 427 MB | 33 MB | 0 MB |
+| nushell 0.108.0 | 11.5 GB | 12.1 GB | 12.5 GB after 39 builds | +367 MB | 16.5 GB, 11.7 GB | 5.3 GB | 5.8 GB | 1.1 GB | 1 MB |
+
+#### How fast the program runs, Cranelift, macOS arm64
+
+The same command run by the program ra-jit linked and by cargo's debug and release builds, in turn. Median, then fastest and slowest; where measured, then the program's peak resident memory while it ran (median of the runs, as the kernel kept it) and the size of the program.
+
+| Project | Command | ra-jit | cargo debug | cargo release |
+|---|---|---:|---:|---:|
+| ripgrep 15.1.0 | `rg -uuu --sort path -c \w+_unchecked\(\|unsafe \{ <the toolchain's library source>` | 1.01 s (676 ms to 1.43 s); 12 MB, 28.5 MB | 753 ms (679 ms to 1.07 s); 8 MB, 15.6 MB | 167 ms (129 ms to 308 ms); 6 MB, 6.6 MB |
+
+### Linux x86-64
+
+ra-jit [`2b2f2dcd5b`](https://github.com/indexable-inc/ra-jit/commit/2b2f2dcd5bc4d7132fe62bf36669a34c657dafe7), 2026-10-20T23:52:46Z, Rust 1.99.0, 5 runs of each edit, measured by hand. Raw: [benchmarks/linux-x86-64.json](benchmarks/linux-x86-64.json).
 
 | Machine | |
 |---|---|
@@ -462,6 +544,7 @@ ra-jit [`2b2f2dcd5b`](https://github.com/indexable-inc/ra-jit/commit/2b2f2dcd5bc
 | CPU | Intel(R) Xeon(R) Platinum 8488C |
 | Cores | 16 |
 | Memory (GiB) | 124 |
+| OS | Linux |
 | Kernel | 6.18.53 |
 | rustc | rustc 1.99.0 (b940084d7 2026-09-28) |
 | C compiler | gcc (GCC) 16.2.0 |
@@ -470,7 +553,7 @@ ra-jit [`2b2f2dcd5b`](https://github.com/indexable-inc/ra-jit/commit/2b2f2dcd5bc
 | Incremental | profile default (on for dev) |
 | Compiler cache | none |
 
-#### Edits, Cranelift
+#### Edits, Cranelift, Linux x86-64
 
 Median, then the fastest and slowest run. Built: who built the edit (daemon, or cargo and why). Link: the change was spliced into the program, or it was linked again.
 
@@ -528,7 +611,7 @@ Median, then the fastest and slowest run. Built: who built the edit (daemon, or 
 
 - bevy 0.20.0: only the steps shown are measured, then the build failed: examples/showcase/breakout.rs:67:18: no method `chain` on type `(fn apply_velocity(Query<'_, '_, (&mut Transform, &Velocity), ()>, Res<'_,` …
 
-#### Cold, Cranelift
+#### Cold, Cranelift, Linux x86-64
 
 From an empty target directory, crates already downloaded, median of 5 runs, each from nothing. `cargo ra-jit build` is cargo's own build (the daemon is not loaded yet); the daemon then loads the workspace and builds it once, and edits are fast from then on. Warm store: the same in another checkout of the same commit, with the store the first one filled.
 
@@ -544,7 +627,7 @@ From an empty target directory, crates already downloaded, median of 5 runs, eac
 | helix 25.07.1 (one run) | 31.30 s | 32.11 s | 670.71 s | 712.74 s | 149,754 | 98,182 MB | 14,638 MB |
 | bevy 0.20.0 (one run) | 75.10 s | 76.64 s | 115.78 s | - | 9,917 | 8,468 MB | - |
 
-#### Against the fastest setups, Cranelift
+#### Against the fastest setups, Cranelift, Linux x86-64
 
 The same steps, each built after plain cargo by the fastest ways to build Rust there already are, each into a target directory of its own, median of the same runs. Plain cargo is incremental, with the default linker. mold and wild link instead of GNU ld; `-Zthreads=8` is the parallel front end on the same compiler; the nightly (rustc 1.101.0-nightly (a30aa9064 2026-10-08)) is there to tell its own difference from Cranelift's (rustc_codegen_cranelift comes only with nightlies); `cargo check` builds no code, so nothing can be run after it. The fastest of each row is in bold; "failed" is a setup that could not build the project, and is not timed after that.
 
@@ -567,7 +650,7 @@ The same steps, each built after plain cargo by the fastest ways to build Rust t
 | nushell 0.108.0 | Add a struct field | 9.71 s | 3.31 s | 9.26 s | 9.32 s | 9.61 s | 9.99 s | 7.83 s | 6.93 s | **400 ms** |
 | nushell 0.108.0 | Nothing changed | 240 ms | 241 ms | 244 ms | 242 ms | 243 ms | 246 ms | 248 ms | 245 ms | **38 ms** |
 
-#### Test suites, Cranelift
+#### Test suites, Cranelift, Linux x86-64
 
 `cargo ra-jit test` and `cargo test` of the same tests, median of three: after the edit of a widely used function (the file named), and again with nothing changed. Each includes running the tests. First runs: the three untimed runs of `cargo ra-jit test` before them (the first is handed to cargo, the daemon builds the test targets at the second). Every test has to end the same way under both, every time.
 
@@ -580,7 +663,7 @@ The same steps, each built after plain cargo by the fastest ways to build Rust t
 | axum 0.8.6 | `cargo test -p example-testing` | 6 | no: `cargo ra-jit test` exited 101, `cargo test` 0 | `axum-core/src/body.rs` | 1.29 s | 1.56 s | 0.8x | cargo: a library its unit tests are linked with as rustc bui | 109 ms | 7.06 s | 10.52 s, 261 ms, 283 ms |
 | nushell 0.108.0 | `cargo test -p nu-path -p nu-protocol` | 349 | yes | `crates/nu-path/src/components.rs` | 4.92 s | 12.61 s | 0.4x | cargo: a library its unit tests are linked with as rustc bui | 2.46 s | 12.37 s | 29.66 s, 8.59 s, 8.51 s |
 
-#### How fast the program runs, Cranelift
+#### How fast the program runs, Cranelift, Linux x86-64
 
 The same command run by the program ra-jit linked and by cargo's debug and release builds, in turn. Median, then fastest and slowest; where measured, then the program's peak resident memory while it ran (median of the runs, as the kernel kept it) and the size of the program.
 
@@ -588,7 +671,7 @@ The same command run by the program ra-jit linked and by cargo's debug and relea
 |---|---|---:|---:|---:|
 | ripgrep 15.1.0 | `rg -uuu --sort path -c \w+_unchecked\(\|unsafe \{ <the toolchain's library source>` | 45 ms (43 ms to 46 ms) | 44 ms (42 ms to 45 ms) | 16 ms (15 ms to 17 ms) |
 
-#### Edits, LLVM
+#### Edits, LLVM, Linux x86-64
 
 Median, then the fastest and slowest run. Built: who built the edit (daemon, or cargo and why). Link: the change was spliced into the program, or it was linked again.
 
@@ -637,7 +720,7 @@ Median, then the fastest and slowest run. Built: who built the edit (daemon, or 
 | nushell 0.108.0 | Add a struct field | 9.69 s | 326 ms | 30x | 9.63 s to 9.90 s | 322 ms to 464 ms | daemon | spliced |
 | nushell 0.108.0 | Nothing changed | 240 ms | 38 ms | 6.3x | 239 ms to 240 ms | 38 ms to 38 ms | daemon |  |
 
-#### Cold, LLVM
+#### Cold, LLVM, Linux x86-64
 
 From an empty target directory, crates already downloaded, median of 5 runs, each from nothing. `cargo ra-jit build` is cargo's own build (the daemon is not loaded yet); the daemon then loads the workspace and builds it once, and edits are fast from then on. Warm store: the same in another checkout of the same commit, with the store the first one filled.
 
@@ -651,7 +734,7 @@ From an empty target directory, crates already downloaded, median of 5 runs, eac
 | axum 0.8.6 | 8.57 s (8.55 s to 8.59 s) | 9.19 s (9.15 s to 9.27 s) | 16.56 s (16.51 s to 16.64 s) | 16.33 s (16.30 s to 16.42 s) | 5,515 | 2,468 MB | 43 MB |
 | nushell 0.108.0 | 32.03 s (31.78 s to 32.04 s) | 32.84 s (32.72 s to 33.42 s) | 84.12 s (83.52 s to 84.22 s) | 63.39 s (62.09 s to 63.75 s) | 160,179 | 15,404 MB | 1,093 MB |
 
-#### How fast the program runs, LLVM
+#### How fast the program runs, LLVM, Linux x86-64
 
 The same command run by the program ra-jit linked and by cargo's debug and release builds, in turn. Median, then fastest and slowest; where measured, then the program's peak resident memory while it ran (median of the runs, as the kernel kept it) and the size of the program.
 

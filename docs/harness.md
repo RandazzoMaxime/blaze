@@ -168,9 +168,14 @@ time with the exact peak of its largest process (`wait4`) and the peak of its wh
 (sampled), `memory.Sampler` follows a long-lived process such as the daemon with its workers,
 and `memory.in_child` measures a function that runs commands itself
 ([benchmarks.md](benchmarks.md#memory-and-disk)); a harness that reports memory uses it rather
-than a way of its own. `benchcharts.py` draws the README's charts (SVG, a light and a dark
-version) from the same results `benchreport.py` writes the tables from; `benchreport.py`
-regenerates them whenever it writes a table, and `benchreport.py --charts` on its own.
+than a way of its own. Every README benchmark is a matrix over the platforms of
+`benchplatforms.py` (macOS arm64, Linux aarch64, Linux x86-64): it names a result's platform from
+its host, files it as `docs/benchmarks/<platform>.json`, and gives the workflows the platforms
+whose runner is registered. `benchreport.py` writes each table from the newest stored result of
+every platform, so one that did not run keeps its last numbers. `benchcharts.py` draws the
+README's charts (SVG, a light and a dark version, a bar per platform) from the same results;
+`benchreport.py` regenerates them whenever it writes a table, `--charts` on its own, and
+`--render` every table and chart.
 `live_latency.py` times live edits on macOS on AArch64, per keystroke under typing (`replay`,
 `burst`) as well as one edit at a time (`socket`, or `cargo` through `cargo ra-jit build`), and
 the restarts of a session against `cargo run` (`restart`); its JSON goes to `benchhistory.py
@@ -304,9 +309,9 @@ out right, it fails the run until it is taken off the list:
 - `"open"` in a `buildmodel/*/case.json`: a case that comes out WRONG, on every host or by
   host (`{"linux": "why"}`).
 
-The other workflows: `bench-readme.yaml` measures real projects on the dedicated benchmark
-machine and commits the README's numbers to main. It runs only while the repository variable
-`BENCH_RUNNER` is `true` ([benchmarks.md](benchmarks.md)). `bench.yaml` (the store's
+The other workflows: `bench-readme.yaml` measures real projects on each platform's dedicated
+benchmark machine and commits the README's numbers to main. It runs a platform only once the
+repository variable `BENCH_RUNNERS` names it ([benchmarks.md](benchmarks.md#the-machines)). `bench.yaml` (the store's
 microbenchmarks, two minutes) runs on pull requests and pushes too. `claims.yaml` (all of
 rustc's `tests/ui`, both backends, and the scoreboard) and `nix-live.yaml` (the flake, the demo
 and live edits, 40 minutes; also on a change to the flake, `nix/` or the dependencies) run

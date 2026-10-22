@@ -45,9 +45,39 @@ Live edit to running code, Game of Life demo (median of 20 edits, one 96-core Li
 | One function, 300 new functions added | 282 ms | 60 ms | 4.7x |
 
 <!-- bench:start -->
-<picture><source media="(prefers-color-scheme: dark)" srcset="docs/benchmarks/charts/edits-dark.svg"><img alt="How many times faster an edit builds under ra-jit than under cargo: ripgrep 15.1.0 11×, fd 10.3.0 5.6×, bat 0.26.0 14×, hyperfine 1.19.0 4.4×, just 1.43.0 16×, axum 0.8.6 8.1×, nushell 0.108.0 19×, helix 25.07.1 12×" src="docs/benchmarks/charts/edits-light.svg" width="760"></picture>
+<picture><source media="(prefers-color-scheme: dark)" srcset="docs/benchmarks/charts/edits-dark.svg"><img alt="How many times faster an edit builds under ra-jit than under cargo, by platform: ripgrep 15.1.0: macOS arm64 8.1×, Linux x86-64 11×; fd 10.3.0: macOS arm64 6.0×, Linux x86-64 5.6×; bat 0.26.0: Linux x86-64 14×; hyperfine 1.19.0: Linux x86-64 4.4×; just 1.43.0: Linux x86-64 16×; axum 0.8.6: Linux x86-64 8.1×; nushell 0.108.0: macOS arm64 10.0×, Linux x86-64 19×; helix 25.07.1: Linux x86-64 12×" src="docs/benchmarks/charts/edits-light.svg" width="760"></picture>
 
-Edit, then build, on real projects at pinned commits. Each cell is incremental `cargo build` → `cargo ra-jit build`, both warm, same linker, median of 5 edits. Linux x86-64, AWS c7i.16xlarge (dev-aws-7), pinned to 16 cores with taskset (Intel(R) Xeon(R) Platinum 8488C, 16 of its 64 cores, 124 GiB), ra-jit [`2b2f2dcd5b`](https://github.com/indexable-inc/ra-jit/commit/2b2f2dcd5bc4d7132fe62bf36669a34c657dafe7) on 2026-10-20.
+Edit, then build, on real projects at pinned commits: incremental `cargo build` → `cargo ra-jit build`, both warm, same linker, Cranelift, the median of each run's edits. Each platform is a machine of its own: compare numbers within a platform, not across.
+
+An edit to one function, cargo → ra-jit:
+
+| Project | macOS arm64 | Linux aarch64 | Linux x86-64 |
+|---|---:|---:|---:|
+| ripgrep 15.1.0 | 993 ms → **126 ms** (7.9x) | - | 655 ms → **104 ms** (6.3x) |
+| fd 10.3.0 | 630 ms → **109 ms** (5.8x) | - | 649 ms → **115 ms** (5.6x) |
+| bat 0.26.0 | - | - | 650 ms → **69 ms** (9.4x) |
+| hyperfine 1.19.0 | - | - | 528 ms → **117 ms** (4.5x) |
+| just 1.43.0 | - | - | 899 ms → **58 ms** (16x) |
+| axum 0.8.6 | - | - | 559 ms → **69 ms** (8.1x) |
+| nushell 0.108.0 | 1.81 s → **454 ms** (4.0x) | - | 1.62 s → **279 ms** (5.8x) |
+| helix 25.07.1 | - | - | 2.80 s → **231 ms** (12x) |
+| bevy 0.20.0 | - | - | - |
+
+- **macOS arm64**: MacBook Pro (Mac17,6), macOS 27.0.1, with other work running (Apple M5 Max, 18 cores, 128 GiB), ra-jit [`84760c3f51`](https://github.com/indexable-inc/ra-jit/commit/84760c3f517a76f6e8a3aa41ccd81fc3f26b87c7) on 2026-10-21, median of 3 edits, load average 48 at the start, by hand.
+- **Linux aarch64**: not measured yet ([the machines](docs/benchmarks.md#the-machines)).
+- **Linux x86-64**: AWS c7i.16xlarge (dev-aws-7), pinned to 16 cores with taskset (Intel(R) Xeon(R) Platinum 8488C, 16 of its 64 cores, 124 GiB), ra-jit [`2b2f2dcd5b`](https://github.com/indexable-inc/ra-jit/commit/2b2f2dcd5bc4d7132fe62bf36669a34c657dafe7) on 2026-10-20, median of 5 edits, by hand.
+
+<details><summary>Every kind of edit, by platform</summary>
+
+**macOS arm64**
+
+| Project | Edit a function | Edit a widely used function | Change a signature | Nothing changed |
+|---|---:|---:|---:|---:|
+| ripgrep 15.1.0 | 993 ms → **126 ms** (7.9x) | 1.31 s → **159 ms** (8.2x) | 828 ms → **175 ms** (4.7x) | 67 ms → **54 ms** (1.2x) |
+| fd 10.3.0 | 630 ms → **109 ms** (5.8x) | 734 ms → **102 ms** (7.2x) | 681 ms → **113 ms** (6.0x) | 144 ms → **49 ms** (2.9x) |
+| nushell 0.108.0 | 1.81 s → **454 ms** (4.0x) | 14.39 s → **850 ms** (17x) | 10.28 s → **716 ms** (14x) | 407 ms → **45 ms** (9.0x) |
+
+**Linux x86-64**
 
 | Project | Edit a function | Edit a widely used function | Change a signature | Nothing changed |
 |---|---:|---:|---:|---:|
@@ -63,25 +93,72 @@ Edit, then build, on real projects at pinned commits. Each cell is incremental `
 
 - bevy 0.20.0: only the steps shown are measured, then the build failed: examples/showcase/breakout.rs:67:18: no method `chain` on type `(fn apply_velocity(Query<'_, '_, (&mut Transform, &Velocity), ()>, Res<'_,` …
 
-Measured by hand with `harness/bench.py`; the `bench-readme` workflow re-runs it on the dedicated benchmark machine. The ra-jit measured is `cargo build --release`; the binaries a release ships are the `dist` profile with PGO, which start and edit faster ([how](https://github.com/indexable-inc/ra-jit/blob/main/docs/reports/RELEASE-BUILD.md)). Cold builds, the spread of every number, the LLVM tier and how fast the built programs run: [docs/benchmarks.md](docs/benchmarks.md) ([raw JSON](docs/benchmarks/linux-x86_64.json)).
+</details>
+
+Measured by hand with `harness/bench.py`, or by the `bench-readme` workflow on each platform's benchmark machine once it is registered. The ra-jit measured is `cargo build --release`; the binaries a release ships are the `dist` profile with PGO, which start and edit faster ([how](https://github.com/indexable-inc/ra-jit/blob/main/docs/reports/RELEASE-BUILD.md)). Cold builds, the spread of every number, the LLVM tier and how fast the built programs run: [docs/benchmarks.md](docs/benchmarks.md). Raw JSON: [macOS arm64](docs/benchmarks/macos-arm64.json), [Linux x86-64](docs/benchmarks/linux-x86-64.json).
 <!-- bench:end -->
 
 <!-- benchmem:start -->
-<picture><source media="(prefers-color-scheme: dark)" srcset="docs/benchmarks/charts/memory-dark.svg"><img alt="Peak memory while an edit to one function builds, cargo and ra-jit: ripgrep 15.1.0 235 MB for cargo, 2.9 GB for ra-jit, fd 10.3.0 212 MB for cargo, 2.6 GB for ra-jit, nushell 0.108.0 1.1 GB for cargo, 12.5 GB for ra-jit" src="docs/benchmarks/charts/memory-light.svg" width="760"></picture>
+<picture><source media="(prefers-color-scheme: dark)" srcset="docs/benchmarks/charts/memory-dark.svg"><img alt="Peak memory while an edit to one function builds, by platform: ripgrep 15.1.0: macOS arm64 2.9 GB for ra-jit, 235 MB for cargo; fd 10.3.0: macOS arm64 2.6 GB for ra-jit, 212 MB for cargo; nushell 0.108.0: macOS arm64 12.5 GB for ra-jit, 1.1 GB for cargo" src="docs/benchmarks/charts/memory-light.svg" width="760"></picture>
 
-Memory and disk, Cranelift. Peak: the most every process doing the work held at once, cargo → ra-jit. For ra-jit that is the daemon, its workers and what they run, and `cargo ra-jit build` with any cargo it ran; for plain cargo, cargo itself, rustc, build scripts and the linker. On disk: cargo's target directory → ra-jit's target directory, store and home. macOS arm64, MacBook Pro (Mac17,6), macOS 27.0.1, with other work running (Apple M5 Max, 18 cores, 128 GiB), ra-jit [`84760c3f51`](https://github.com/indexable-inc/ra-jit/commit/84760c3f517a76f6e8a3aa41ccd81fc3f26b87c7) on 2026-10-21, load average 48.0 when it started; how it is measured: [docs/benchmarks.md](docs/benchmarks.md#memory-and-disk).
+Memory and disk, Cranelift, from the same runs as the build table. Peak: the most every process doing the work held at once, cargo → ra-jit. For ra-jit that is the daemon, its workers and what they run, and `cargo ra-jit build` with any cargo it ran; for plain cargo, cargo itself, rustc, build scripts and the linker. How it is measured: [docs/benchmarks.md](docs/benchmarks.md#memory-and-disk).
+
+Peak while an edit to one function builds, cargo → ra-jit:
+
+| Project | macOS arm64 | Linux aarch64 | Linux x86-64 |
+|---|---:|---:|---:|
+| ripgrep 15.1.0 | 235 MB → **2.9 GB** | - | - |
+| fd 10.3.0 | 212 MB → **2.6 GB** | - | - |
+| nushell 0.108.0 | 1.1 GB → **12.5 GB** | - | - |
+
+Linux x86-64: its stored run is from before memory was measured.
+
+<details><summary>The daemon between edits, cold builds and disk, by platform</summary>
+
+**macOS arm64**
 
 | Project | Edit a function, peak | Daemon between edits | Cold until ready, peak | On disk |
 |---|---:|---:|---:|---:|
 | ripgrep 15.1.0 | 235 MB → **2.9 GB** | 2.2 GB ready, 2.8 GB after 39 builds | 541 MB → **2.4 GB** | 416 MB → 598 MB |
 | fd 10.3.0 | 212 MB → **2.6 GB** | 1.8 GB ready, 2.6 GB after 33 builds | 897 MB → **1.9 GB** | 355 MB → 460 MB |
 | nushell 0.108.0 | 1.1 GB → **12.5 GB** | 11.5 GB ready, 12.5 GB after 39 builds | 2.4 GB → **16.1 GB** | 5.3 GB → 6.9 GB |
+
+On disk: cargo's target directory → ra-jit's target directory, store and home.
+
+</details>
 <!-- benchmem:end -->
 
 <!-- runbench:start -->
-<picture><source media="(prefers-color-scheme: dark)" srcset="docs/benchmarks/charts/runtime-dark.svg"><img alt="Time of each benchmark, ra-jit's build ÷ cargo build --release: sieve 0.95×, collatz 1.02×, fnv 1.00×, qsort 1.04×, matmul 1.16×, nbody 1.41×, mandelbrot 1.00×, words 1.33×, numeric 1.83×, jsonrt 1.34×, ripgrep 1.15×, fd 1.26×, tokei 1.67×, eza 1.10×, bat 1.25×" src="docs/benchmarks/charts/runtime-light.svg" width="760"></picture>
+<picture><source media="(prefers-color-scheme: dark)" srcset="docs/benchmarks/charts/runtime-dark.svg"><img alt="Time of each benchmark, ra-jit's build ÷ cargo build --release, by platform: Linux x86-64 geometric mean 1.21×" src="docs/benchmarks/charts/runtime-light.svg" width="760"></picture>
 
-How fast the programs run. Each program is built by `cargo build --release` and by ra-jit with LLVM at `-O3`, every crate of it compiled by ra-jit, with the release profile; each benchmark is then run 5 times, the builds taking turns, median. A run is published only when every program did what the release build's did. Linux x86-64, AWS c6i.16xlarge (dev-aws-6) (Intel(R) Xeon(R) Platinum 8375C CPU @ 2.90GHz, 64 cores, 124 GiB), ra-jit [`2302d0f50b`](https://github.com/indexable-inc/ra-jit/commit/2302d0f50b9a8f7d9002e706434011141a887b43) on 2026-10-22.
+How fast the programs run. Each program is built by `cargo build --release` and by ra-jit with LLVM at `-O3`, every crate of it compiled by ra-jit, with the release profile; each benchmark is then run several times, the builds taking turns, median. A run is published only when every program did what the release build's did. Each platform is a machine of its own, and each number is ra-jit's time ÷ release's on it: 1x is as fast.
+
+| Benchmark | macOS arm64 | Linux aarch64 | Linux x86-64 |
+|---|---:|---:|---:|
+| sieve | - | - | 0.95x |
+| collatz | - | - | 1.02x |
+| fnv | - | - | 1.00x |
+| qsort | - | - | 1.04x |
+| matmul | - | - | 1.16x |
+| nbody | - | - | 1.41x |
+| mandelbrot | - | - | 1.00x |
+| words | - | - | 1.33x |
+| numeric | - | - | 1.83x |
+| jsonrt | - | - | 1.34x |
+| ripgrep | - | - | 1.15x |
+| fd | - | - | 1.26x |
+| tokei | - | - | 1.67x |
+| eza | - | - | 1.10x |
+| bat | - | - | 1.25x |
+| **Geometric mean** | - | - | **1.21x** |
+
+- **macOS arm64**: not measured yet ([the machines](docs/benchmarks.md#the-machines)).
+- **Linux aarch64**: not measured yet ([the machines](docs/benchmarks.md#the-machines)).
+- **Linux x86-64**: AWS c6i.16xlarge (dev-aws-6) (Intel(R) Xeon(R) Platinum 8375C CPU @ 2.90GHz, 64 cores, 124 GiB), ra-jit [`2302d0f50b`](https://github.com/indexable-inc/ra-jit/commit/2302d0f50b9a8f7d9002e706434011141a887b43) on 2026-10-22, each benchmark run 5 times, by hand.
+
+<details><summary>Times, memory and builds, by platform</summary>
+
+**Linux x86-64**
 
 | Benchmark | `cargo build --release` | ra-jit, LLVM | ra-jit ÷ release | release with dev checks ÷ release | Peak memory, release → ra-jit |
 |---|---:|---:|---:|---:|---:|
@@ -115,7 +192,11 @@ What each program takes, release → ra-jit: its build from cold (for ra-jit, ca
 | eza | 34.60 s → 38.90 s | 2.64 MB → 6.92 MB | 4.4 GB → 6.9 GB | 463 MB → 6.9 GB |
 | bat | 53.30 s → 125.00 s | 7.55 MB → 14.64 MB | 5.9 GB → 9.3 GB | 688 MB → 9.3 GB |
 
-Release with dev checks: `cargo build --release` with `-C overflow-checks=on -C debug-assertions=on`. Measured by hand with `harness/bench.py --runtime` (harness/runbench.py); the `bench-readme` workflow re-runs it on the dedicated benchmark machine.
+Release with dev checks: `cargo build --release` with `-C overflow-checks=on -C debug-assertions=on`.
+
+</details>
+
+Measured by hand with `harness/bench.py --runtime` (harness/runbench.py), or by the `bench-readme` workflow on each platform's benchmark machine once it is registered. Raw JSON: [Linux x86-64](docs/benchmarks/runtime-linux-x86-64.json).
 <!-- runbench:end -->
 
 ### bun
@@ -124,15 +205,21 @@ Release with dev checks: `cargo build --release` with `-C overflow-checks=on -C 
 on a nightly, beside a JavaScript engine's C and C++ ([what it took](docs/research/bun.md)).
 
 <!-- bench-bun:start -->
-Edit, then build, on real projects at pinned commits. Each cell is incremental `cargo build` → `cargo ra-jit build`, both warm, same linker, median of 3 edits. macOS arm64, one machine (Apple M5 Max, 18 cores, 128 GiB), ra-jit [`1645168dc4`](https://github.com/indexable-inc/ra-jit/commit/1645168dc4abbdfab2e234232efb73a5c1ec2935) on 2026-10-21.
+Edit, then build, bun at its pinned commit: incremental `cargo build` → `cargo ra-jit build`, both warm, same linker, Cranelift, the median of each run's edits. Each platform is a machine of its own: compare numbers within a platform, not across.
 
-| Project | Edit a function | Edit a widely used function | Change a signature | Nothing changed |
+| Platform | Edit a function | Edit a widely used function | Change a signature | Nothing changed |
 |---|---:|---:|---:|---:|
-| bun bun-v1.4.3 | 12.16 s → **1.09 s** (11x) | 26.75 s → **1.81 s** (15x) | 9.83 s → **126.44 s** (c) (0.1x) | 168 ms → **73 ms** (2.3x) |
+| macOS arm64 | 12.16 s → **1.09 s** (11x) | 26.75 s → **1.81 s** (15x) | 9.83 s → **126.44 s** (c) (0.1x) | 168 ms → **73 ms** (2.3x) |
+| Linux aarch64 | not measured yet | | | |
+| Linux x86-64 | not measured yet | | | |
+
+- **macOS arm64**: one machine (Apple M5 Max, 18 cores, 128 GiB), ra-jit [`1645168dc4`](https://github.com/indexable-inc/ra-jit/commit/1645168dc4abbdfab2e234232efb73a5c1ec2935) on 2026-10-21, load average 28 at the start, by hand.
+- **Linux aarch64**: not measured yet ([the machines](docs/benchmarks.md#the-machines)).
+- **Linux x86-64**: not measured yet ([the machines](docs/benchmarks.md#the-machines)).
 
 (c): the daemon handed this edit to cargo (a fallback, so about cargo's time).
 
-Measured by hand with `harness/bench.py`; the `bench-bun` workflow re-runs it on the dedicated benchmark machine. The ra-jit measured is `cargo build --release`; the binaries a release ships are the `dist` profile with PGO, which start and edit faster ([how](https://github.com/indexable-inc/ra-jit/blob/main/docs/reports/RELEASE-BUILD.md)). Every number, its samples and what the daemon did: [raw JSON](docs/benchmarks/bun-macos-arm64.json).
+Measured by hand with `harness/bench.py`, or by the `bench-bun` workflow on each platform's benchmark machine once it is registered. The ra-jit measured is `cargo build --release`; the binaries a release ships are the `dist` profile with PGO, which start and edit faster ([how](https://github.com/indexable-inc/ra-jit/blob/main/docs/reports/RELEASE-BUILD.md)). Raw JSON: [macOS arm64](docs/benchmarks/bun-macos-arm64.json).
 <!-- bench-bun:end -->
 
 <!-- runbench-bun:start -->

@@ -5,14 +5,15 @@
     benchhistory.py live LATENCY... [--history FILE] [--machine NAME]
     benchhistory.py check HISTORY [--last N] [--noise PERCENT] [--report FILE]
 
-`build` appends one line to FILE (default docs/benchmarks/history/linux-x86_64.jsonl) for a
-result of bench.py; `live` appends one line (default docs/benchmarks/history/macos-arm64-live.jsonl)
-for the files live_latency.py wrote with LATENCY_JSON, one per program. A line keeps the
-medians and spreads of each phase, not every sample: the full result is the workflow's
-artifact, and the latest one is docs/benchmarks/linux-x86_64.json.
+`build` appends one line to FILE for a result of bench.py, by default its platform's
+(benchplatforms.py): docs/benchmarks/history/<platform>.jsonl, e.g. linux-x86-64.jsonl; `live`
+appends one line (default docs/benchmarks/history/macos-arm64-live.jsonl) for the files
+live_latency.py wrote with LATENCY_JSON, one per program. A line keeps the medians and spreads
+of each phase, not every sample: the full result is the workflow's artifact, and the latest of
+each platform is docs/benchmarks/<platform>.json.
 
 A build line:
-    {"suite": "build", "date", "commit", "machine", "cpu", "cores", "runs", "run_url",
+    {"suite": "build", "date", "commit", "platform", "machine", "cpu", "cores", "runs", "run_url",
      "results": {"<project>/<backend>": {"tag", "store_mb", "runtime_s": {"ra-jit", "cargo debug", "cargo release"},
                  "runtime_mb": {"ra-jit", "cargo debug", "cargo release"},
                  "resident_ready_mb", "resident_end_mb", "builds", "disk_mb", "cargo_disk_mb",
@@ -43,10 +44,12 @@ there is one, and 0 with nothing to compare against.
 """
 import datetime, json, os, statistics, sys
 
+from benchplatforms import platform, slug
+
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
-BUILD_HISTORY = os.path.join(ROOT, "docs/benchmarks/history/linux-x86_64.jsonl")
-LIVE_HISTORY = os.path.join(ROOT, "docs/benchmarks/history/macos-arm64-live.jsonl")
+HISTORY = os.path.join(ROOT, "docs/benchmarks/history")
+LIVE_HISTORY = os.path.join(HISTORY, "macos-arm64-live.jsonl")
 PHASE_FIELDS = ("wall_s", "cargo_s", "rss_mb", "built", "link", "compiled", "build_s", "warm_s",
                 "warm_store_s", "warm_store_build_s", "check_s")
 # What is checked, and the least change that counts.
@@ -63,7 +66,7 @@ def spread(samples, prefix=""):
 
 def build_line(result):
     host = result.get("host") or {}
-    line = dict(suite="build", date=result["date"], commit=result.get("commit"), machine=host.get("name"),
+    line = dict(suite="build", date=result["date"], commit=result.get("commit"), platform=platform(result), machine=host.get("name"),
                 cpu=host.get("cpu"), cores=host.get("cores") or result.get("cores"), runs=result.get("runs"),
                 run_url=result.get("run_url") or actions_run(), results={})
     for key, measured in result["results"].items():
@@ -236,8 +239,9 @@ def main():
         raise SystemExit(__doc__)
     command = argv.pop(0)
     if command == "build":
-        history = options(argv, "--history", BUILD_HISTORY)
-        append(history, build_line(json.load(open(argv[0]))))
+        result = json.load(open(argv[0]))
+        history = options(argv, "--history", os.path.join(HISTORY, f"{slug(platform(result))}.jsonl"))
+        append(history, build_line(result))
     elif command == "live":
         history = options(argv, "--history", LIVE_HISTORY)
         machine = options(argv, "--machine")
