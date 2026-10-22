@@ -327,6 +327,12 @@ All notable changes to ra-jit are written here. The format follows
 
 ### Fixed
 
+- On Linux AArch64, an `asm!` of an instruction that the function's `#[target_feature]`
+  enables and the target's baseline lacks (zlib-rs's `crc32w`, in bat) was refused by the
+  assembler: the block is assembled apart from its function, so it now starts with the
+  `.arch_extension` of each such feature. The runtime benchmark's whole-program builds of
+  tokei and eza no longer fail to link there: they kept rustc's object of the names a
+  program keeps out of the line, which is how GNU ld takes the panic runtime (#78).
 - A checkout that an edit broke could be answered ok, linked with rustc's copy of the function
   from before the edit: a program whose build was interrupted, or panicked, or whose checkout
   was loaded again with the same link, forgot what rustc's copies are copies of, and its next
