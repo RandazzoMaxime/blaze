@@ -58,7 +58,7 @@ use hir_def::{
 };
 use hir_ty_codegen::{
     Backend, CodegenError, CodegenUnit, ContentId, ParallelWork, Rejections, Roots, SymbolResolver,
-    exported_symbol, tier as codegen_tier,
+    exported_symbol, linked_symbol, tier as codegen_tier,
 };
 use ide_db::{ChangeWithProcMacros, RootDatabase};
 use load_cargo::{LoadCargoConfig, ProcMacroServerChoice};
@@ -445,6 +445,11 @@ impl Resolver<'_> {
         if let Some(symbol) = exported_symbol(self.db, func) {
             return Some(symbol);
         }
+        if let Some(symbol) = linked_symbol(self.db, func)
+            && !self.rustc_built(hir_def::HasModule::krate(&func, self.db))
+        {
+            return Some(symbol);
+        }
         // Not a function until it or the `impl<T>` it is in is given its types: there is
         // nothing to name, the more so in a crate of such alone, which rustc builds nothing
         // of. One of a name that another in the same function has is not to be taken for it.
@@ -575,6 +580,9 @@ impl Resolver<'_> {
     /// standard library's memchr) is taken for one of its items.
     fn crate_path(&self, krate: Crate) -> Option<String> {
         let name = krate.display_name(self.db)?;
+        if self.table.is_empty() && krate.origin(self.db).is_lang() {
+            return Some(name.crate_name().to_string());
+        }
         match self.own_crate_id(krate.into()) {
             Some(own) => Some(format!("{}[{own:x}]", name.crate_name())),
             None => self.table.crate_path(name.crate_name().as_str(), &self.crate_root(krate)?),
@@ -582,12 +590,18 @@ impl Resolver<'_> {
     }
 
     /// What stands for a crate of the checkout that rustc built nothing of, the same after
-    /// every edit: its name and where in the checkout its source starts.
+    /// every edit: its name and where in the checkout its source starts. One of the standard
+    /// library, when the build has nothing of rustc's, by its name alone: a program has one
+    /// of each name, wherever its source is.
     fn own_crate_id(&self, krate: ide_db::base_db::Crate) -> Option<u64> {
-        if krate.data(self.db).origin.is_lang() || self.rustc_crate_id(krate).is_some() {
+        let lang = krate.data(self.db).origin.is_lang();
+        if lang && !self.table.is_empty() || self.rustc_crate_id(krate).is_some() {
             return None;
         }
         let name = Crate::from(krate).display_name(self.db)?;
+        if lang {
+            return Some(short_hash(&format!("ra-jit crate {}", name.crate_name())));
+        }
         let root = self.crate_root(krate.into())?;
         let root = self.inside(&root).unwrap_or(&root);
         let named = format!("ra-jit crate {} {}", name.crate_name(), root.display());
@@ -992,6 +1006,10 @@ impl SymbolResolver for Resolver<'_> {
     /// when nothing rustc built gives them their types. Its functions are still not ours to
     /// name.
     fn rustc_built(&self, krate: ide_db::base_db::Crate) -> bool {
+        // The standard library is rustc's prebuilt one, unless the build has nothing of rustc's.
+        if krate.data(self.db).origin.is_lang() {
+            return !self.table.is_empty();
+        }
         if self.own_crate_id(krate).is_none() {
             return true;
         }
@@ -2607,7 +2625,11 @@ impl ListedCrate {
 /// are read off the source: on every core, as a build waits for this of every crate it builds.
 fn exported(db: &RootDatabase, functions: &[FunctionId]) -> Vec<bool> {
     let exported = |db: &RootDatabase, functions: &[FunctionId]| -> Vec<bool> {
-        let exported = |&it| exported_symbol(db, it).is_some() || serves_allocator(db, it);
+        let exported = |&it| {
+            exported_symbol(db, it).is_some()
+                || linked_symbol(db, it).is_some()
+                || serves_allocator(db, it)
+        };
         functions.iter().map(exported).collect()
     };
     let threads = std::thread::available_parallelism().map_or(1, |it| it.get());
