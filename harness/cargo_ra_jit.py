@@ -295,6 +295,11 @@ class Side:
         return max(loads, default=(0, 0))[::-1]
 
 
+def by_rustc(stderr):
+    """Whether cargo built any of it: ra-jit said it fell back, or cargo compiled a crate."""
+    return bool(re.search(r"; building with cargo$|^\s*Compiling ", stderr, re.M))
+
+
 def how_built(stderr):
     """Whether the daemon built it, or why cargo did."""
     reason = re.search(r"^ra-jit: (.*); (building with cargo|this is `cargo \w+`)$", stderr, re.M)
@@ -766,13 +771,14 @@ def daemon(work):
     open(demo, "a").write("\n// edited\n")
     _, example = here.cargo("run", "--example", "demo")
     check("an edited example with a dev-dependency is the daemon's", how_built(example.stderr) == "daemon" and example.returncode == 0 and " DEMO" in example.stdout, f"{how_built(example.stderr)}: {example.stdout.strip()[-80:]}")
-    # What the daemon does not build, cargo does: an error is rustc's, and code rust-analyzer
-    # turns down wrongly is built all the same.
+    # An error is ra-jit's, written as rustc and cargo write it, and no rustc runs to say it.
     main = os.path.join(ws, "app/src/main.rs")
     kept = open(main).read()
     open(main, "a").write("\nfn broken() -> u32 { \"text\" }\n")
     _, broken = here.cargo("build")
-    check("an edit the daemon turns down goes to cargo, with rustc's error", broken.returncode == 101 and how_built(broken.stderr).startswith("cargo") and "error[E0308]" in broken.stderr, f"exit {broken.returncode}, {how_built(broken.stderr)[:80]}")
+    said = re.search(r'^error\[E0308\]: .*\n +--> app/src/main\.rs:\d+:22\n', broken.stderr, re.M)
+    ended = 'error: could not compile `app` (bin "app") due to 1 previous error' in broken.stderr
+    check("an edit with an error fails the build with ra-jit's error, as rustc writes it, and no cargo", broken.returncode == 101 and not by_rustc(broken.stderr) and said and ended, f"exit {broken.returncode}, {broken.stderr.strip()[-300:]}")
     open(main, "w").write(kept)
     here.cargo("stop")
     manners(work, ws, env, here, check, edit)
@@ -931,8 +937,8 @@ def manners(work, ws, env, here, check, edit):
         open(file, "a").write(USE_AFTER_MOVE)
         _, wrong = here.cargo("run")
         # The daemon refuses an edit its borrow checker finds wrong, as one with a type error,
-        # and cargo's rustc says what is.
-        check(f"a use after a move in {name} is refused by the daemon and is rustc's error on a warm `cargo ra-jit run`", wrong.returncode == 101 and how_built(wrong.stderr) != "daemon" and "E0382" in wrong.stderr, f"exit {wrong.returncode}, {how_built(wrong.stderr)}")
+        # and says what is.
+        check(f"a use after a move in {name} is the daemon's error on a warm `cargo ra-jit run`", wrong.returncode == 101 and not by_rustc(wrong.stderr) and "error[E0382]" in wrong.stderr, f"exit {wrong.returncode}, {how_built(wrong.stderr)}")
         _, checked = here.cargo("check")
         check(f"and `cargo ra-jit check` of it", checked.returncode == 101 and "E0382" in checked.stderr, f"exit {checked.returncode}")
         open(file, "w").write(kept)
@@ -1279,8 +1285,8 @@ def plain(work):
     kept = open(broken).read()
     open(broken, "a").write("\nfn broken() -> u32 { \"text\" }\n")
     mine = here.cargo("build")[1]
-    # What the daemon does not build, rustc does: the error is rustc's.
-    check("a build that does not compile fails with rustc's error and cargo's status", mine.returncode == 101 and "error[E0308]" in mine.stderr, f"exit {mine.returncode}")
+    # The daemon's verdict is the build's: the error is the daemon's, written as rustc writes it.
+    check("a build that does not compile fails with the daemon's error and cargo's status", mine.returncode == 101 and "error[E0308]" in mine.stderr and here.how_built(mine.stderr) == "daemon", f"exit {mine.returncode}, {here.how_built(mine.stderr)}")
     open(broken, "w").write(kept)
     mine, how, wrong = same("run", "mended")
     check("and the build after it is mended is right", mine.returncode == 0 and not wrong, f"{how[:90]}; {wrong or 'same as cargo'}")
