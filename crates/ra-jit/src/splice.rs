@@ -301,7 +301,10 @@ impl Baseline {
 
         let writing = Writing::open(&self.path)?;
         let file = &writing.file;
-        ensure!(Stamp::of(file)? == self.stamp, "the executable was written by someone else");
+        ensure!(
+            Stamp::of(&writing.lock)? == self.stamp,
+            "the executable was written by someone else"
+        );
         for (offset, bytes) in self.undo.drain(..).rev() {
             write_all_at(&file, &bytes, offset)?;
         }
@@ -348,7 +351,7 @@ impl Baseline {
         }
         self.stamp = Stamp::of(&file)?;
         let redirected_at = start.elapsed();
-        drop(writing);
+        writing.done()?;
         if std::env::var_os("RA_JIT_STATS").is_some() {
             let us = |it: std::time::Duration| it.as_micros();
             eprintln!(
@@ -535,8 +538,7 @@ fn read_exact_at(mut file: &File, bytes: &mut [u8], offset: u64) -> std::io::Res
 }
 
 /// Copies what a debugger reads of the executable at `path` to where its splices write it,
-/// while the daemon waits for the first edit: the splices find it there. Nothing is copied
-/// of a program that runs, which the kernel lets nothing write and which is linked again.
+/// while the daemon waits for the first edit: the splices find it there.
 fn laid_out(path: &Path, image: &Image, lock: Option<File>) -> std::io::Result<Vec<debug::Moved>> {
     let start = std::time::Instant::now();
     let moved = image.described.laid_out(image.tail());
@@ -558,6 +560,7 @@ fn laid_out(path: &Path, image: &Image, lock: Option<File>) -> std::io::Result<V
         let bytes: u64 = moved.iter().map(|it| it.len).sum();
         eprintln!("laid out: {bytes} bytes of debug info in {:.1?}", start.elapsed());
     }
+    writing.done()?;
     Ok(moved)
 }
 
@@ -579,12 +582,44 @@ fn pause_mid_write() -> bool {
 /// closed before the lock is let go.
 struct Writing {
     file: File,
-    _lock: File,
+    lock: File,
+    /// The copy that is written in place of the executable a program runs, and where it goes
+    /// once written ([`Writing::done`]).
+    copy: Option<(PathBuf, PathBuf)>,
 }
 
 impl Writing {
+    /// The executable at `path`, or a copy of it when a program runs it, which on Unix nothing
+    /// may write: the program runs on from the file it was started from, and the copy is put
+    /// at `path` for the next start.
     fn open(path: &Path) -> std::io::Result<Writing> {
-        Writing::under(Writing::lock(path)?, path)
+        let lock = Writing::lock(path)?;
+        match OpenOptions::new().read(true).write(true).open(path) {
+            #[cfg(unix)]
+            Err(busy) if busy.raw_os_error() == Some(libc::ETXTBSY) => {
+                let mut copy = path.as_os_str().to_owned();
+                copy.push(".splicing");
+                let copy = PathBuf::from(copy);
+                let file = std::fs::copy(path, &copy)
+                    .and_then(|_| OpenOptions::new().read(true).write(true).open(&copy));
+                match file {
+                    Ok(file) => Ok(Writing { file, lock, copy: Some((copy, path.to_owned())) }),
+                    Err(why) => {
+                        _ = std::fs::remove_file(&copy);
+                        Err(why)
+                    }
+                }
+            }
+            opened => Ok(Writing { file: opened?, lock, copy: None }),
+        }
+    }
+
+    /// Puts the copy written, if it is one, in place of the executable.
+    fn done(mut self) -> std::io::Result<()> {
+        match self.copy.take() {
+            Some((copy, path)) => std::fs::rename(copy, path),
+            None => Ok(()),
+        }
     }
 
     /// The lock on the executable a link just wrote at `path`, taken before the daemon answers
@@ -612,7 +647,15 @@ impl Writing {
 
     fn under(lock: File, path: &Path) -> std::io::Result<Writing> {
         let file = OpenOptions::new().read(true).write(true).open(path)?;
-        Ok(Writing { file, _lock: lock })
+        Ok(Writing { file, lock, copy: None })
+    }
+}
+
+impl Drop for Writing {
+    fn drop(&mut self) {
+        if let Some((copy, _)) = self.copy.take() {
+            _ = std::fs::remove_file(copy);
+        }
     }
 }
 

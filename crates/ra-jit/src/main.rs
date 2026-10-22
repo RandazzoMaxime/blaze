@@ -3392,12 +3392,7 @@ fn link(
                 // and is spliced once the edits stop (see `splicer`).
                 Ok(patch) if defer && baseline.uuid().is_some() => {
                     lock(&LINKED).insert(binary.to_owned(), Executable::Read(Box::new(baseline)));
-                    if cfg!(target_os = "linux") && live::any_running() {
-                        // Linux keeps the running inode executable. The next start gets a
-                        // fresh link after the process exits.
-                    } else {
-                        splicer::defer(binary, patch);
-                    }
+                    splicer::defer(binary, patch);
                     eprintln!(
                         "link: {:.1?} (the splice waits for the edits to stop)",
                         start.elapsed()
@@ -3805,8 +3800,20 @@ fn refusal(
     if let Some(broken) = broken {
         return Some(Refused::Error(broken));
     }
-    let hir_ty_codegen::OutOfDate { func, why, left_from_the_start } = out_of_date?;
-    let name = hir::Function::from(func).name(db).display(db, syntax::Edition::CURRENT).to_string();
+    let hir_ty_codegen::OutOfDate { func, why, left_from_the_start, calls } = out_of_date?;
+    let named =
+        |func| hir::Function::from(func).name(db).display(db, syntax::Edition::CURRENT).to_string();
+    let name = named(func);
+    if let Some(calls) = calls {
+        let calls = match calls {
+            Some(it) => format!("calls rustc's copy of `{}`, which is", named(it)),
+            None => "may call code of rustc's that is".to_owned(),
+        };
+        return Some(Refused::Cargos(format!(
+            "`{name}` is not compiled by ra-jit, and rustc's copy of it {calls} from before the \
+             edit: {why}"
+        )));
+    }
     // What the frontend turns down is as a rule code that does not compile, unless it turned
     // the function down when rustc compiled it.
     if why.starts_with("frontend:") && !left_from_the_start {
@@ -6806,7 +6813,7 @@ fn run_holding(
                 }
                 // The program is linked unless every client of it loads the patch.
                 let link = clients.iter().any(|it| it.0 != Request::Patch);
-                let defer = clients.iter().all(|it| it.0 == Request::Edit) || live::any_running();
+                let defer = clients.iter().all(|it| it.0 == Request::Edit);
                 let patches = program.known.patches() && !program.moved;
                 let own_base = program.known.builds_base();
                 let kept = !own_base && (patches || program.interrupted >= INTERRUPTIONS);
@@ -6858,9 +6865,8 @@ fn run_holding(
                             || clients.iter().any(|it| it.0 == at && it.1.0 != Request::Patch);
                         let link = link && !detached;
                         let mut theirs = clients.iter().filter(|it| it.0 == at).peekable();
-                        let defer = (theirs.peek().is_some()
-                            && theirs.all(|it| it.1.0 == Request::Edit))
-                            || live::any_running();
+                        let defer =
+                            theirs.peek().is_some() && theirs.all(|it| it.1.0 == Request::Edit);
                         let (db, listed, paths, edit) = (db.clone(), &*listed, &*paths, &edit);
                         let wanted = outputs.get(&at);
                         let build = scope.spawn(move || {

@@ -721,6 +721,7 @@ fn main() {
         case!(inlined::unwinds(n), inlined::shapes(n as u64), inlined::shapes(!(n as u64)));
         case!(inlined::instances(n as u8, -(n as i64), "moved"));
     }
+    case!(cases::opaque_of_trait_method::run(4), cases::opaque_of_trait_method::run(90));
 }
 
 fn nest<T>(depth: u8, value: T) -> Option<Option<T>> {
