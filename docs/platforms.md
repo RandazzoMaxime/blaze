@@ -38,7 +38,12 @@ the executable") and the edit is linked in full. `unreached.py` tests this on Li
 macOS; on Linux at 3a844b09d5, before the rule covered more than macOS, it was 1 of 3. On
 Windows only the link line is tested, by a unit test in `cargo/plan.rs`. rustc's own link,
 which the first edits after a cold build are spliced into, still takes the code out, and
-those edits are linked in full ([#52](https://github.com/indexable-inc/ra-jit/issues/52)).
+those edits are linked in full until step G of [no-rustc.md](no-rustc.md) links nothing
+rustc built ([#52](https://github.com/indexable-inc/ra-jit/issues/52)). What that link keeps
+includes the standard library's optimized code, where a function an object keeps to itself
+can take its arguments otherwise than its signature says: LLVM passes the `&u16` of
+`<u16 as Debug>::fmt` as a `u16`. A patch calls a local of rustc's executable only if it
+was a hidden global or is of a crate that calls by symbol; ra-jit builds the rest into it.
 
 On every platform the gate in CI is the corpus with layouts, programs, stress, breakers,
 unwinds, splices, asmedits, includes, worktrees, keys, storekills, storecorrupts and

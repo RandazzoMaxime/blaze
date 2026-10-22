@@ -45,7 +45,7 @@ use std::{
     process::Command,
     sync::{
         Arc, Mutex,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
     },
     time::{Duration, Instant, SystemTime},
 };
@@ -112,6 +112,9 @@ struct Args {
     /// the first edits are patches of a copy of it at `splice`, while nothing waits for the
     /// object of the whole program.
     rustc_binary: Option<PathBuf>,
+    /// Of `symbol_files`, those of the crates rustc compiled with a symbol for each function,
+    /// which every call goes to: a patch of `rustc_binary` may call what is private to them.
+    by_symbol: Vec<PathBuf>,
     /// Tab-separated per-function outcome, for the harness.
     report: Option<PathBuf>,
     /// File of function paths to leave to rustc, for bisecting miscompiles.
@@ -196,6 +199,7 @@ impl Args {
         let mut patch = None;
         let mut splice = None;
         let mut rustc_binary = None;
+        let mut by_symbol = Vec::new();
         let mut report = None;
         let mut deny = None;
         let mut isolate = None;
@@ -227,6 +231,12 @@ impl Args {
                 "--patch" => patch = Some(PathBuf::from(value()?)),
                 "--binary" | "--splice" => splice = Some(PathBuf::from(value()?)),
                 "--rustc-binary" => rustc_binary = Some(PathBuf::from(value()?)),
+                "--by-symbol-in" => {
+                    let listed = value()?;
+                    let listed = std::fs::read_to_string(&listed)
+                        .with_context(|| format!("reading the symbol files in {listed}"))?;
+                    by_symbol.extend(listed.lines().map(PathBuf::from));
+                }
                 "--report" => report = Some(PathBuf::from(value()?)),
                 "--deny" => deny = Some(PathBuf::from(value()?)),
                 "--isolate" => isolate = Some(PathBuf::from(value()?)),
@@ -265,6 +275,7 @@ impl Args {
             patch,
             splice,
             rustc_binary,
+            by_symbol,
             report,
             deny,
             isolate,
@@ -2774,8 +2785,8 @@ fn start_from_rustc(
     let linked = Linked::read_rustcs(binary.to_owned(), patch, &args.out);
     lock(&LINKED).insert(binary.to_owned(), Executable::Linked(linked));
     lock(&RUSTC_LINKED).insert(binary.to_owned());
-    let rustcs = rustcs.to_owned();
-    let names = std::thread::spawn(move || symbols::Linked::read(&rustcs));
+    let (rustcs, by_symbol) = (rustcs.to_owned(), args.by_symbol.clone());
+    let names = std::thread::spawn(move || symbols::Linked::read(&rustcs, &by_symbol));
     lock(&RUSTC_SYMBOLS).insert(binary.to_owned(), LinkedNames::Reading(names));
     let mut watched: FxHashSet<PathBuf> = files.iter().map(|it| it.path.clone()).collect();
     let mut real_watched: Option<FxHashSet<PathBuf>> = None;
@@ -4155,6 +4166,7 @@ fn build_batch(db: &RootDatabase, args: Args) -> anyhow::Result<()> {
             patch: None,
             splice: None,
             rustc_binary: None,
+            by_symbol: Vec::new(),
             report: Some(report.join(format!("{krate}.tsv"))),
             deny: None,
             isolate: None,
@@ -4275,6 +4287,7 @@ impl Target {
             splice,
             symbol_files,
             rustc_binary: None,
+            by_symbol: Vec::new(),
             ..daemon.clone()
         })
     }
@@ -4520,7 +4533,7 @@ fn compile_tiered(
         tier::done(&binary, Vec::new(), counters);
         return;
     }
-    let db = db.clone();
+    let (db, tiering) = (db.clone(), Tiering::start());
     let asked_of = binary.clone();
     // Each body built in or shown is built inside the one that calls it, up to ten deep, with
     // the frames of a whole function's build each; a thread's default 2 MiB does not hold that.
@@ -4540,7 +4553,7 @@ fn compile_tiered(
                 (symbol, asked.node, asked.level, prepared, start.elapsed())
             })
             .collect();
-        drop(db);
+        drop((db, tiering));
         let (mut code, mut done) = (Vec::new(), Vec::new());
         for (symbol, node, level, prepared, with_db) in prepared {
             let room = ra_jit_live::format::COUNTERS as u32;
@@ -4587,6 +4600,34 @@ fn compile_tiered(
     if let Err(why) = spawned {
         eprintln!("tier: no thread to compile on: {why}");
         tier::done(&asked_of, Vec::new(), counters);
+    }
+}
+
+/// A compile at a higher level that holds the database, which [`let_go`] waits to have none.
+struct Tiering;
+
+static TIERING: AtomicUsize = AtomicUsize::new(0);
+
+impl Tiering {
+    fn start() -> Self {
+        TIERING.fetch_add(1, Ordering::Relaxed);
+        Tiering
+    }
+}
+
+impl Drop for Tiering {
+    fn drop(&mut self) {
+        TIERING.fetch_sub(1, Ordering::Relaxed);
+    }
+}
+
+/// Lets go now of what the queries with an `lru` keep past it, the trees parsed and the bodies
+/// lowered for the builds that are over, which would otherwise wait for the next edit. Only
+/// when nothing else holds the database: this cancels what does.
+fn let_go(db: &mut RootDatabase, builds: &Builds) {
+    use ide_db::base_db::salsa::Database;
+    if builds.running.is_empty() && TIERING.load(Ordering::Relaxed) == 0 {
+        db.trigger_lru_eviction();
     }
 }
 
@@ -6170,6 +6211,7 @@ fn run_holding(
                     Some(at) if idle => match builds.events.recv_timeout(OWN_BASE_AFTER) {
                         Ok(event) => {
                             if builds.take(event, &mut programs)? {
+                                let_go(&mut db, &builds);
                                 memory::served(&mut db)?;
                             }
                         }
@@ -6181,6 +6223,7 @@ fn run_holding(
                     _ if builds.stuck || idle => {
                         let event = builds.events.recv()?;
                         if builds.take(event, &mut programs)? {
+                            let_go(&mut db, &builds);
                             memory::served(&mut db)?;
                         }
                     }
@@ -6194,6 +6237,7 @@ fn run_holding(
                     // requests sent with its own to arrive.
                     while let Ok(event) = builds.events.try_recv() {
                         if builds.take(event, &mut programs)? {
+                            let_go(&mut db, &builds);
                             memory::served(&mut db)?;
                         }
                     }
@@ -7079,6 +7123,7 @@ fn run_holding(
             });
             links.insert(out, linked);
         }
+        let_go(&mut db, &builds);
         memory::served(&mut db)?;
     }
 }

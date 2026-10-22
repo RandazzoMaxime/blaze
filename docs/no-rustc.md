@@ -484,9 +484,10 @@ Lanes whose work makes a rustc path do more, to redirect:
 
 - **The rustc base and the cold start** (#11, `cold-start-2`): make the daemon's first edits
   fast on ra-jit's own executable, toward step K, rather than tune patching rustc's.
-- **rustc-dead-code** (#52, branch `rustc-dead-code`): keeps code in rustc's link so that edits
-  spliced into rustc's executable can call it. It extends the rustc base; step G removes the
-  problem. Its correctness fixes may land; the keeping should not.
+- **rustc-dead-code** (#52, done): kept code in rustc's link so that edits spliced into
+  rustc's executable could call it. Its correctness fix landed (a patch calls no local of an
+  optimized object, whose arguments LLVM may have changed); the keeping was deleted, and the
+  edits it would have spliced are linked in full until step G.
 - **The fallback to cargo** (#27, closed): "fails instead of going to cargo" was fixed by going to
   cargo. Step D reverses it; the resolution bug behind it (`.chain()` on a tuple of systems) is an
   E or D bug to fix in ra-jit.

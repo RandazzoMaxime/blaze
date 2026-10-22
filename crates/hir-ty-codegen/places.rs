@@ -97,18 +97,18 @@ fn anchor_location(
     line_and_column(db, FileRange { file_id, range: TextRange::empty(start) })
 }
 
-/// The text of the anchor of the body, and where each of its rows begins.
+/// Where each row of the anchor of the body begins.
 #[salsa::tracked(returns(ref))]
-fn anchor_rows(db: &dyn HirDatabase, owner: DefWithBodyId) -> Option<(String, Vec<u32>)> {
-    let text = body_syntax(db, owner).as_ref()?.root().text().to_string();
+fn anchor_rows(db: &dyn HirDatabase, owner: DefWithBodyId) -> Option<Box<[u32]>> {
+    let text = body_syntax(db, owner).as_ref()?.text();
     let ends = text.bytes().enumerate().filter(|&(_, byte)| byte == b'\n');
-    let starts = std::iter::once(0).chain(ends.map(|(at, _)| at as u32 + 1)).collect();
-    Some((text, starts))
+    Some(std::iter::once(0).chain(ends.map(|(at, _)| at as u32 + 1)).collect())
 }
 
 /// The place of `offset` in the anchor of the body.
 fn anchored(db: &dyn HirDatabase, owner: DefWithBodyId, offset: TextSize) -> Option<Place> {
-    let (text, starts) = anchor_rows(db, owner).as_ref()?;
+    let starts = anchor_rows(db, owner).as_ref()?;
+    let text = body_syntax(db, owner).as_ref()?.text();
     let at = u32::from(offset);
     let row = starts.partition_point(|&start| start <= at).checked_sub(1)?;
     let written = text.get(starts[row] as usize..at as usize)?;
@@ -142,7 +142,7 @@ fn call_node(db: &dyn HirDatabase, syntax: &BodySyntax, call: MacroCallId) -> Ca
         && ast_id.file_id == syntax.file_id
         && let Some(ptr) = syntax.ast_id_map.try_get_erased(ast_id.value.erase())
     {
-        return CallNode::Anchored(ptr.to_node(&syntax.root()));
+        return CallNode::Anchored(ptr.to_node(&syntax.root(db)));
     }
     CallNode::Other(loc.to_node(db))
 }
@@ -181,7 +181,7 @@ fn source_range(
     let range = match span {
         MirSpan::ExprId(expr) => {
             let root = match source.file_id == syntax.file_id {
-                true => syntax.root(),
+                true => syntax.root(db),
                 false => source.file_id.parse_or_expand(db),
             };
             let node = source.value.syntax_node_ptr().to_node(&root);

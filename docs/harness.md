@@ -139,7 +139,9 @@ with reasons. The daemon's log says `backend: llvm -O2 fast emit` when LLVM is i
 `shapes.py`, `heap.py`, `heapfold.py`, `fnincr.py`, `realbench.py` and `live_latency.py` measure and do not gate.
 `heap.py` gives a heap profile's bytes to the salsa query whose value or record holds them, and to
 ra-jit's own structures; `heapfold.py` makes of a profile on macOS what `jeprof --collapsed` makes
-of it on Linux, for `heap.py` to read ([research/daemon-memory.md](research/daemon-memory.md)). `fnincr.py` counts
+of it on Linux, for `heap.py` to read ([research/daemon-memory.md](research/daemon-memory.md)); `heap.py --syntax`
+says what of it is syntax trees, of which kind and from which query, and `cpufold.py` folds a
+`perf script` the same way for time ([flat-syntax.md](flat-syntax.md)). `fnincr.py` counts
 the queries an edit inside one function of a big file runs (the file comes from `genbig.py`),
 against the same functions in many small files ([reports/INCREMENTAL.md](reports/INCREMENTAL.md)). `realbench.py` times
 `cargo ra-jit build` against `cargo build` on ripgrep, just and nushell (cold, no-op and
@@ -148,7 +150,8 @@ times a cold `cargo ra-jit build` of a real project until the daemon is ready an
 edit, from an empty or a filled store, with every line the daemon logged and the cores busy
 along the way: the readiness check of [#11](https://github.com/indexable-inc/ra-jit/issues/11),
 whose numbers are in [cargo.md](cargo.md#what-a-build-does). With `--max-wait S` it fails when
-the daemon was ready more than S seconds after the command returned. Their docstrings say how to run them.
+the daemon was ready more than S seconds after the command returned; `--until TEXT` waits for a
+line the daemon logs, and `--memory` follows what its processes hold. Their docstrings say how to run them.
 `bench.py` on real projects, with `benchreport.py`, is also what writes the README's build
 table: [benchmarks.md](benchmarks.md). Besides the edits `bench.py` times repeated cold builds
 against fresh cargo with an empty and with a warm store (`--cold-runs`), the same steps under
