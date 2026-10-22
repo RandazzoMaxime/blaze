@@ -199,11 +199,19 @@ SCENARIOS = {
     # Moves `Side`'s derives, which rustc has no copy of, a line down and changes nothing else.
     "moved-uncopied": ([[edit(M, "    x * 3\n", "    let y = x * 3;\n    y\n")]], ["patch"], 0, {}),
     "closure": ([[edit(M, "x + 10", "x + 11")]], ["patch"], 0, {}),
-    # A new item is more than bodies: rustc's copies of what sees the file may differ.
+    # A new function of a crate nothing depends on, whose files did not name it: nothing but
+    # what calls it sees it, and what rustc compiled of every file of the crate is taken in
+    # before the edit. The patch compiles it under a name of its own.
     "new-fn": ([[edit(M, "    x * 3\n}\n", "    helper(x) * 3\n}\n\nfn helper(x: u64) -> u64 {\n    x + 2\n}\n")]],
-               ["full"], 0, {}),
+               ["patch"], 0, {}),
     "new-fn-then-patch": ([[edit(M, "    x * 3\n}\n", "    helper(x) * 3\n}\n\nfn helper(x: u64) -> u64 {\n    x + 2\n}\n")],
-                          [edit(M, "    x + 2\n}\n", "    x + 5\n}\n")]], ["full", "patch"], 0, {}),
+                          [edit(M, "    x + 2\n}\n", "    x + 5\n}\n")]], ["patch", "patch"], 0, {}),
+    # rustc's copies of what sees the new function may be in the crates that depend on it.
+    "new-fn-dep": ([[edit(D, "    x + 100\n}\n", "    extra(x) + 100\n}\n\nfn extra(x: u64) -> u64 {\n    x + 1\n}\n")]],
+                   ["full"], 0, {}),
+    # The crate names `value` already, which can mean the new function now.
+    "new-fn-named": ([[edit(M, "    x * 3\n}\n", "    value(x) * 3\n}\n\nfn value(x: u64) -> u64 {\n    x + 2\n}\n")]],
+                     ["full"], 0, {}),
     "dep": ([[edit("dep/src/lib.rs", "x + 100", "x + 200")]], ["patch"], 0, {}),
     "counted-body": ([[edit(M, "Ordering::Relaxed) + 1", "Ordering::Relaxed) + 2")]], ["patch"], 0, {}),
     "unused-std": ([[edit(M, "    x * 3\n", "    let _ = std::os::unix::process::parent_id();\n    x * 3\n")]],

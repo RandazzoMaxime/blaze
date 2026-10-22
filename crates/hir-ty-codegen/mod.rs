@@ -1368,6 +1368,26 @@ impl Rejections {
         self.futures.clear();
     }
 
+    /// Notes that functions were added to a file of `crates` and nothing else of it changed but
+    /// bodies that nothing else sees into, where no other crate depends on `crates`, no file of
+    /// them named the new functions before, and `files` are their files: a patch of what rustc
+    /// linked looks at all of their code again.
+    pub fn touch_added(
+        &mut self,
+        db: &dyn HirDatabase,
+        crates: &[Crate],
+        files: &[base_db::FileId],
+    ) {
+        self.frozen.edit(crates.iter().flat_map(|it| it.transitive_rev_deps(db)));
+        if let Some(base) = &mut self.base {
+            base.touch(db, Some(crates));
+        }
+        if let Some(rustc) = &mut self.rustc {
+            rustc.touch_added(db, crates, files);
+        }
+        self.forget();
+    }
+
     /// Notes that a file changed in the bodies of functions alone, none of which the rest of
     /// the program sees into: not `const` or `async`, not returning `impl Trait`, declaring no
     /// items, and not handed to a macro.

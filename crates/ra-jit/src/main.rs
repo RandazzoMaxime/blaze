@@ -7447,15 +7447,7 @@ fn run_holding(
             Watched::Included(_) => None,
         });
         let editing: Vec<_> = editing.collect();
-        home_in_rustcs(&db, &listed, &mut programs, &editing);
-        outlines.before_edit(&db, &listed, &editing);
-        for &index in &gone {
-            if let Watched::Source(id) = files[index].file {
-                change.change_file(id, None);
-                sources.push(id);
-                removed.push(id);
-            }
-        }
+        let mut texts = Vec::new();
         for index in touched {
             let WatchedFile { file, path, .. } = &files[index];
             match file {
@@ -7465,11 +7457,30 @@ fn run_holding(
                         None => source_on_disk(&db.on_disk(path))?,
                     };
                     let text = test_harness::kept(&db.file_text(*id).text(&db), text);
-                    change.change_file(*id, Some(text));
-                    sources.push(*id);
+                    texts.push((*id, text));
                 }
                 Watched::Included(path) => included.push(path.clone()),
             }
+        }
+        // An edit that adds functions to a crate is a patch when what rustc compiled of every
+        // file of the crate is known from before it.
+        let homing = programs.iter().any(|it| it.known.homes());
+        let mut homed = outlines.adding(&db, if homing { &texts } else { &[] });
+        homed.extend(&editing);
+        homed.sort_unstable();
+        homed.dedup();
+        home_in_rustcs(&db, &listed, &mut programs, &homed);
+        outlines.before_edit(&db, &listed, &editing);
+        for &index in &gone {
+            if let Watched::Source(id) = files[index].file {
+                change.change_file(id, None);
+                sources.push(id);
+                removed.push(id);
+            }
+        }
+        for (id, text) in texts {
+            change.change_file(id, Some(text));
+            sources.push(id);
         }
         let read = read.elapsed();
         eprintln!("change: {changed} files");
@@ -7529,7 +7540,7 @@ fn run_holding(
         let before_outlines = start.elapsed();
         let sources = outlines.after_edit(&db, &listed, sources);
         let outlined = start.elapsed();
-        for outline::Changed { file, bodies_only, copied, generics, inline } in sources {
+        for outline::Changed { file, bodies_only, copied, generics, inline, added } in sources {
             if copied || !generics.is_empty() || !inline.is_empty() {
                 let why = "an edit of a generic, inline or default trait function, which rustc copies into its callers";
                 let inline_unlinked = |program: &Program| {
@@ -7551,6 +7562,14 @@ fn run_holding(
                 continue;
             }
             let crates = ide_db::base_db::relevant_crates(&db, file);
+            if let Some(files) = added {
+                if std::env::var_os("RA_JIT_STATS").is_some() {
+                    eprintln!("functions added: {file:?}");
+                }
+                programs.iter_mut().for_each(|it| it.known.touch_added(&db, crates, &files));
+                listed.touch(&db, Some(crates));
+                continue;
+            }
             let crates = (!crates.is_empty()).then_some(crates);
             programs.iter_mut().for_each(|it| it.known.touch(&db, crates));
             listed.touch(&db, crates);

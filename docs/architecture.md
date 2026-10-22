@@ -309,8 +309,12 @@ the workspace that no function of the executable is named after (`has_no_functio
 was not compiled or not linked, so nothing of rustc's calls it: the patch compiles it under a
 name of its own, and an edit of it, `#[inline]` or not, is a patch too. Of a function rustc's
 symbols name no copy of, `home` keeps a mark, and one whose code is the same where it moved,
-as an unused derive below the edit, is no change. A file not
-noted before it changed, an edit that is more than function bodies, an edit of an
+as an unused derive below the edit, is no change. An edit that adds functions to a file and
+changes nothing else of it but bodies is a patch too when they are not generic or `#[inline]`,
+no other crate depends on the file's, and no file of that crate named them before
+(`Outlines::adding`): only that crate's code sees them, and `home` takes in every file of it
+before the edit, so its marks tell what of it changed. A file not
+noted before it changed, any other edit that is more than function bodies, an edit of an
 `#[inline]` function the executable has a copy of, of a default trait function, or of a
 generic one with copies `home` did not take in (the outline's copied fingerprint tells), a
 changed static, and `include!`d or asset
