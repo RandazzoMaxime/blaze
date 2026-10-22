@@ -580,4 +580,28 @@ mod tests {
         drop(second);
         std::fs::remove_dir_all(&dir).unwrap();
     }
+
+    /// A socket let go of is free at once, also while another thread starts processes, each
+    /// of which has every open file of this one until it runs its program.
+    #[test]
+    fn a_socket_let_go_of_is_free_while_processes_start() {
+        let dir = scratch("lock-forks");
+        private_dir(&dir).unwrap();
+        let socket = dir.join("sock");
+        let done = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let starts = std::thread::spawn({
+            let done = done.clone();
+            move || {
+                while !done.load(Ordering::Relaxed) {
+                    let _ = std::process::Command::new("true").status();
+                }
+            }
+        });
+        // Each bind comes after the one before it was dropped.
+        let taken = (0..1000).filter(|_| Served::bind(&socket).is_err()).count();
+        done.store(true, Ordering::Relaxed);
+        starts.join().unwrap();
+        std::fs::remove_dir_all(&dir).unwrap();
+        assert_eq!(taken, 0, "the socket was still taken after it was let go of");
+    }
 }
