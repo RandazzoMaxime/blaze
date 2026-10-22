@@ -52,6 +52,9 @@ lto = "thin"
 # rustc's layout code, from the tag of the stable in `harness/toolchain`.
 ra-ap-rustc_abi = { path = "vendor/rustc_abi" }
 rowan = { path = "vendor/rust-analyzer/lib/rowan" }
+# The trait solver, with fixes of rustc's backported.
+ra-ap-rustc_type_ir = { path = "vendor/rustc_type_ir" }
+ra-ap-rustc_next_trait_solver = { path = "vendor/rustc_next_trait_solver" }
 
 # line-index = { path = "lib/line-index" }
 # la-arena = { path = "lib/la-arena" }
