@@ -62,6 +62,9 @@ It is refused when anything it reaches:
   them from the system;
 - in a crate of the workspace, dereferences a raw pointer, takes an address as a number or has
   assembly in it;
+- turns an address into data, which another run has another of: formats a pointer (`{:p}`),
+  hashes or orders pointers, or asks for an address (`addr`, `expose_provenance`). Comparing
+  two pointers for equality is fine;
 - can't be compiled by ra-jit.
 
 Or when an argument can change behind a shared reference (it holds an `UnsafeCell`, as `Cell`,
