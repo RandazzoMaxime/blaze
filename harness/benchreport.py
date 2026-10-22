@@ -223,12 +223,13 @@ def machines(results, extra=lambda r: ""):
 
 
 def where(results):
-    """Each platform's machine (the start of its name), commit and date, for a chart's subtitle."""
+    """Each platform's machine (the start of its name) and the day it was measured, for a chart's
+    footer; the commit is in the table's machine lines."""
     def name(r):
         host = r.get("host") or {}
         named = re.split(r" \(|, ", host.get("name") or "")[0]
         return named or re.sub(r"( \d+-Core)? Processor$", "", host.get("cpu") or "") or "one machine"
-    return " ".join(f"{p}: {name(r)}, ra-jit {short(r.get('commit'))}, {r['date'][:10]}." for p, r in results.items())
+    return " ".join(f"{p}: {name(r)}, {r['date'][:10]}." for p, r in results.items())
 
 
 def keys_of(results, backend):
@@ -739,8 +740,8 @@ def runtime_chart(results):
               for bench, row in pr["benches"].items() if rough(row)}
     builds = sorted({b[2] for b in best.values()})
     named = builds[0] if len(builds) == 1 else "; ".join(f"{p} {b[2]}" for p, b in best.items())
-    return benchcharts.runtime(rows, {p: b[1] for p, b in best.items()}, f"ra-jit at {named}. " + where({p: results[p] for p in best}),
-                               marked, f"≈: runs varied more than {ROUGH:g}×.")
+    return benchcharts.runtime(rows, {p: b[1] for p, b in best.items()}, f"ra-jit's LLVM at {named}. " + where({p: results[p] for p in best}),
+                               marked, f"≈: that benchmark's runs varied by more than {ROUGH:g}×, so read it as rough.")
 
 
 def runtime_tables(result):
