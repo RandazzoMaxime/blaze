@@ -98,6 +98,14 @@ impl<L: Language> SyntaxNode<L> {
     pub fn new_root(green: GreenNode) -> SyntaxNode<L> {
         SyntaxNode::from(cursor::SyntaxNode::new_root(green))
     }
+    /// The root of a flat tree.
+    pub fn new_flat_root(tree: std::sync::Arc<crate::FlatTree>) -> SyntaxNode<L> {
+        SyntaxNode::from(cursor::SyntaxNode::new_flat_root(tree))
+    }
+    /// The flat tree this node is in, if it is in one.
+    pub fn flat_tree(&self) -> Option<&std::sync::Arc<crate::FlatTree>> {
+        self.raw.flat_tree()
+    }
     /// Returns a green tree, equal to the green tree this node
     /// belongs two, except with this node substitute. The complexity
     /// of operation is proportional to the depth of the tree
@@ -123,6 +131,11 @@ impl<L: Language> SyntaxNode<L> {
 
     pub fn green(&self) -> &GreenNodeData {
         self.raw.green()
+    }
+
+    /// The text of the node's first child, when that is a token.
+    pub fn first_child_token_text(&self) -> Option<&str> {
+        self.raw.first_child_token_text()
     }
 
     pub fn parent(&self) -> Option<SyntaxNode<L>> {

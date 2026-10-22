@@ -5122,6 +5122,7 @@ pub(crate) fn version() -> String {
 
 fn main() -> anyhow::Result<()> {
     trace::began();
+    syntax::set_green_trees(std::env::var_os("RA_JIT_GREEN_TREES").is_some());
     let stands_in_for_rustc = std::env::var_os("RA_JIT_WRAPS_RUSTC").is_some();
     match std::env::args().nth(1).as_deref() {
         _ if stands_in_for_rustc => {}

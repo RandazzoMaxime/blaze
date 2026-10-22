@@ -7,6 +7,10 @@
 //! `SyntaxNode`. This allows cursor to provide iteration over both ancestors
 //! and descendants, as well as a cheep access to absolute offset of the node in
 //! file.
+//!
+//! A cursor can also point into a [`FlatTree`]: then it is the tree's root and an
+//! element's number, and moving is arithmetic on the tree's arrays, with nothing
+//! allocated. A green tree of a flat one's part is made only when asked for.
 
 // Implementation notes:
 //
@@ -30,22 +34,30 @@
 // from that point towards the root have ref count equal to one.
 //
 // A root `NodeData` owns its green node and is responsible for freeing it.
+//
+// A `FlatRoot` is counted by every cursor into its tree, and owns the tree and
+// the green trees made of its parts, which live as long as it does: a `&GreenNodeData`
+// handed out for a flat node points into one of them. Two roots of one tree have equal
+// cursors, as two roots of one green node do.
 
 use std::{
-    cell::Cell,
+    cell::{Cell, RefCell},
     fmt,
     hash::{Hash, Hasher},
     iter,
     mem::ManuallyDrop,
     ptr, slice,
+    sync::Arc,
 };
 
 use countme::Count;
+use rustc_hash::FxHashMap;
 
 use crate::{
+    flat::FlatTree,
     green::{GreenChild, GreenElementRef, GreenNodeData, GreenTokenData, SyntaxKind},
-    Direction, GreenNode, GreenToken, NodeOrToken, SyntaxText, TextRange, TextSize, TokenAtOffset,
-    WalkEvent,
+    Direction, GreenNode, GreenToken, NodeCache, NodeOrToken, SyntaxText, TextRange, TextSize,
+    TokenAtOffset, WalkEvent,
 };
 
 enum Green {
@@ -65,50 +77,124 @@ struct NodeData {
     offset: TextSize,
 }
 
+struct FlatRoot {
+    rc: Cell<u32>,
+    tree: Arc<FlatTree>,
+    greens: RefCell<FxHashMap<u32, NodeOrToken<GreenNode, GreenToken>>>,
+}
+
+/// What a cursor points at: a `NodeData`, or an element of a flat tree.
+enum Ref {
+    Green(ptr::NonNull<NodeData>),
+    Flat(ptr::NonNull<FlatRoot>, u32),
+}
+
+impl Clone for Ref {
+    #[inline]
+    fn clone(&self) -> Self {
+        match *self {
+            Ref::Green(ptr) => {
+                data(&ptr).inc_rc();
+                Ref::Green(ptr)
+            }
+            Ref::Flat(root, at) => {
+                flat(&root).inc_rc();
+                Ref::Flat(root, at)
+            }
+        }
+    }
+}
+
+impl Drop for Ref {
+    #[inline]
+    fn drop(&mut self) {
+        match *self {
+            Ref::Green(ptr) => {
+                if data(&ptr).dec_rc() {
+                    unsafe { free(ptr) }
+                }
+            }
+            Ref::Flat(root, _) => {
+                if flat(&root).dec_rc() {
+                    drop(unsafe { Box::from_raw(root.as_ptr()) })
+                }
+            }
+        }
+    }
+}
+
+#[inline]
+fn data(ptr: &ptr::NonNull<NodeData>) -> &NodeData {
+    unsafe { ptr.as_ref() }
+}
+
+#[inline]
+fn flat(root: &ptr::NonNull<FlatRoot>) -> &FlatRoot {
+    unsafe { root.as_ref() }
+}
+
+impl FlatRoot {
+    #[inline]
+    fn inc_rc(&self) {
+        let rc = match self.rc.get().checked_add(1) {
+            Some(it) => it,
+            None => std::process::abort(),
+        };
+        self.rc.set(rc)
+    }
+
+    #[inline]
+    fn dec_rc(&self) -> bool {
+        let rc = self.rc.get() - 1;
+        self.rc.set(rc);
+        rc == 0
+    }
+
+    /// The green tree of element `at`, made the first time it is asked for and kept as
+    /// long as the root.
+    fn green(&self, at: u32) -> GreenElementRef<'_> {
+        let mut greens = self.greens.borrow_mut();
+        let green = greens.entry(at).or_insert_with(|| {
+            let tree = &self.tree;
+            if tree.is_token(at) {
+                NodeOrToken::Token(GreenToken::new(tree.kind(at), tree.token_text(at)))
+            } else {
+                NodeOrToken::Node(tree.green(at, &mut NodeCache::default()))
+            }
+        });
+        let green: GreenElementRef<'_> = match green {
+            NodeOrToken::Node(it) => NodeOrToken::Node(&**it),
+            NodeOrToken::Token(it) => NodeOrToken::Token(&**it),
+        };
+        // SAFETY: a green tree is on the heap and stays in `greens`, which only grows, for as
+        // long as `self` lives; moving the map's entries does not move what they point to.
+        unsafe { std::mem::transmute::<GreenElementRef<'_>, GreenElementRef<'_>>(green) }
+    }
+}
+
+/// A cursor at element `at` of the flat tree `root`.
+#[inline]
+fn flat_ref(root: ptr::NonNull<FlatRoot>, at: u32) -> Ref {
+    flat(&root).inc_rc();
+    Ref::Flat(root, at)
+}
+
+#[inline]
+fn flat_element(root: ptr::NonNull<FlatRoot>, at: u32) -> SyntaxElement {
+    let element = flat_ref(root, at);
+    match flat(&root).tree.is_token(at) {
+        true => NodeOrToken::Token(SyntaxToken(element)),
+        false => NodeOrToken::Node(SyntaxNode(element)),
+    }
+}
+
 pub type SyntaxElement = NodeOrToken<SyntaxNode, SyntaxToken>;
 
-pub struct SyntaxNode {
-    ptr: ptr::NonNull<NodeData>,
-}
+#[derive(Clone)]
+pub struct SyntaxNode(Ref);
 
-impl Clone for SyntaxNode {
-    #[inline]
-    fn clone(&self) -> Self {
-        self.data().inc_rc();
-        SyntaxNode { ptr: self.ptr }
-    }
-}
-
-impl Drop for SyntaxNode {
-    #[inline]
-    fn drop(&mut self) {
-        if self.data().dec_rc() {
-            unsafe { free(self.ptr) }
-        }
-    }
-}
-
-#[derive(Debug)]
-pub struct SyntaxToken {
-    ptr: ptr::NonNull<NodeData>,
-}
-
-impl Clone for SyntaxToken {
-    #[inline]
-    fn clone(&self) -> Self {
-        self.data().inc_rc();
-        SyntaxToken { ptr: self.ptr }
-    }
-}
-
-impl Drop for SyntaxToken {
-    #[inline]
-    fn drop(&mut self) {
-        if self.data().dec_rc() {
-            unsafe { free(self.ptr) }
-        }
-    }
-}
+#[derive(Clone)]
+pub struct SyntaxToken(Ref);
 
 #[inline(never)]
 unsafe fn free(mut data: ptr::NonNull<NodeData>) {
@@ -148,7 +234,10 @@ impl NodeData {
         let res = NodeData {
             _c: Count::new(),
             rc: Cell::new(1),
-            parent: parent.as_ref().map(|it| it.ptr),
+            parent: parent.as_ref().map(|it| match it.0 {
+                Ref::Green(ptr) => ptr,
+                Ref::Flat(..) => unreachable!("a green node's parent is green"),
+            }),
             index,
             green,
             offset,
@@ -186,7 +275,7 @@ impl NodeData {
         let parent = self.parent()?;
         debug_assert!(matches!(parent.green, Green::Node { .. }));
         parent.inc_rc();
-        Some(SyntaxNode { ptr: ptr::NonNull::from(parent) })
+        Some(SyntaxNode(Ref::Green(ptr::NonNull::from(parent))))
     }
 
     #[inline]
@@ -283,11 +372,122 @@ impl NodeData {
     }
 }
 
+impl Ref {
+    #[inline]
+    fn kind(&self) -> SyntaxKind {
+        match self {
+            Ref::Green(ptr) => data(ptr).kind(),
+            Ref::Flat(root, at) => flat(root).tree.kind(*at),
+        }
+    }
+
+    #[inline]
+    fn text_range(&self) -> TextRange {
+        match self {
+            Ref::Green(ptr) => data(ptr).text_range(),
+            Ref::Flat(root, at) => flat(root).tree.range(*at),
+        }
+    }
+
+    #[inline]
+    fn index(&self) -> usize {
+        match self {
+            Ref::Green(ptr) => data(ptr).index() as usize,
+            Ref::Flat(root, at) => flat(root).tree.index(*at),
+        }
+    }
+
+    #[inline]
+    fn green(&self) -> GreenElementRef<'_> {
+        match self {
+            Ref::Green(ptr) => data(ptr).green(),
+            Ref::Flat(root, at) => flat(root).green(*at),
+        }
+    }
+
+    #[inline]
+    fn parent(&self) -> Option<SyntaxNode> {
+        match self {
+            Ref::Green(ptr) => data(ptr).parent_node(),
+            Ref::Flat(root, at) => {
+                flat(root).tree.parent(*at).map(|it| SyntaxNode(flat_ref(*root, it)))
+            }
+        }
+    }
+
+    #[inline]
+    fn next_sibling_or_token(&self) -> Option<SyntaxElement> {
+        match self {
+            Ref::Green(ptr) => data(ptr).next_sibling_or_token(),
+            Ref::Flat(root, at) => {
+                flat(root).tree.next_sibling_or_token(*at).map(|it| flat_element(*root, it))
+            }
+        }
+    }
+
+    #[inline]
+    fn prev_sibling_or_token(&self) -> Option<SyntaxElement> {
+        match self {
+            Ref::Green(ptr) => data(ptr).prev_sibling_or_token(),
+            Ref::Flat(root, at) => {
+                flat(root).tree.prev_sibling_or_token(*at).map(|it| flat_element(*root, it))
+            }
+        }
+    }
+
+    #[inline]
+    fn key(&self) -> (usize, u32) {
+        match self {
+            Ref::Green(ptr) => {
+                let (green, offset) = data(ptr).key();
+                (green.as_ptr() as usize, offset.into())
+            }
+            Ref::Flat(root, at) => (Arc::as_ptr(&flat(root).tree) as usize, *at),
+        }
+    }
+
+    /// The element of a green tree equal to the flat one this points into that is where
+    /// this element is.
+    fn green_twin(&self) -> SyntaxElement {
+        let Ref::Flat(root, at) = self else { unreachable!("a green element is its own twin") };
+        let tree = &flat(root).tree;
+        let mut path = Vec::new();
+        let mut at = *at;
+        while let Some(parent) = tree.parent(at) {
+            path.push(tree.index(at));
+            at = parent;
+        }
+        let green = flat(root).green(0).into_node().expect("the root is a node").to_owned();
+        let mut element: SyntaxElement = SyntaxNode::new_root(green).into();
+        for index in path.into_iter().rev() {
+            let node = element.into_node().expect("a token has no children");
+            element = node.children_with_tokens().nth(index).expect("the twin has the child");
+        }
+        element
+    }
+}
+
 impl SyntaxNode {
     pub fn new_root(green: GreenNode) -> SyntaxNode {
         let green = GreenNode::into_raw(green);
         let green = Green::Node { ptr: green };
-        SyntaxNode { ptr: NodeData::new(None, 0, 0.into(), green) }
+        SyntaxNode(Ref::Green(NodeData::new(None, 0, 0.into(), green)))
+    }
+
+    /// The root of a flat tree.
+    pub fn new_flat_root(tree: Arc<FlatTree>) -> SyntaxNode {
+        assert!(!tree.is_empty() && !tree.is_token(0), "a tree's root is a node");
+        let root = FlatRoot { rc: Cell::new(1), tree, greens: RefCell::default() };
+        let root = unsafe { ptr::NonNull::new_unchecked(Box::into_raw(Box::new(root))) };
+        SyntaxNode(Ref::Flat(root, 0))
+    }
+
+    /// The flat tree this node is in, if it is in one.
+    pub fn flat_tree(&self) -> Option<&Arc<FlatTree>> {
+        match &self.0 {
+            Ref::Green(_) => None,
+            Ref::Flat(root, _) => Some(&flat(root).tree),
+        }
     }
 
     fn new_child(
@@ -297,26 +497,28 @@ impl SyntaxNode {
         offset: TextSize,
     ) -> SyntaxNode {
         let green = Green::Node { ptr: green.into() };
-        SyntaxNode { ptr: NodeData::new(Some(parent), index, offset, green) }
+        SyntaxNode(Ref::Green(NodeData::new(Some(parent), index, offset, green)))
     }
 
     pub fn clone_subtree(&self) -> SyntaxNode {
-        SyntaxNode::new_root(self.green().to_owned())
-    }
-
-    #[inline]
-    fn data(&self) -> &NodeData {
-        unsafe { self.ptr.as_ref() }
+        match &self.0 {
+            Ref::Green(_) => SyntaxNode::new_root(self.green().to_owned()),
+            Ref::Flat(root, 0) => SyntaxNode(flat_ref(*root, 0)),
+            Ref::Flat(root, at) => {
+                SyntaxNode::new_flat_root(Arc::new(flat(root).tree.subtree(*at)))
+            }
+        }
     }
 
     pub fn replace_with(&self, replacement: GreenNode) -> GreenNode {
         assert_eq!(self.kind(), replacement.kind());
+        if let Ref::Flat(..) = self.0 {
+            return self.0.green_twin().into_node().unwrap().replace_with(replacement);
+        }
         match &self.parent() {
             None => replacement,
             Some(parent) => {
-                let new_parent = parent
-                    .green_ref()
-                    .replace_child(self.data().index() as usize, replacement.into());
+                let new_parent = parent.green_ref().replace_child(self.index(), replacement.into());
                 parent.replace_with(new_parent)
             }
         }
@@ -324,22 +526,22 @@ impl SyntaxNode {
 
     #[inline]
     pub fn kind(&self) -> SyntaxKind {
-        self.data().kind()
+        self.0.kind()
     }
 
     #[inline]
     fn offset(&self) -> TextSize {
-        self.data().offset()
+        self.text_range().start()
     }
 
     #[inline]
     pub fn text_range(&self) -> TextRange {
-        self.data().text_range()
+        self.0.text_range()
     }
 
     #[inline]
     pub fn index(&self) -> usize {
-        self.data().index() as usize
+        self.0.index()
     }
 
     #[inline]
@@ -351,14 +553,27 @@ impl SyntaxNode {
     pub fn green(&self) -> &GreenNodeData {
         self.green_ref()
     }
+
+    /// The text of the node's first child, when that is a token.
+    #[inline]
+    pub fn first_child_token_text(&self) -> Option<&str> {
+        match &self.0 {
+            Ref::Green(_) => Some(self.green_ref().children().next()?.into_token()?.text()),
+            Ref::Flat(root, at) => {
+                let tree = &flat(root).tree;
+                let first = tree.first_child_or_token(*at).filter(|&it| tree.is_token(it))?;
+                Some(tree.token_text(first))
+            }
+        }
+    }
     #[inline]
     fn green_ref(&self) -> &GreenNodeData {
-        self.data().green().into_node().unwrap()
+        self.0.green().into_node().unwrap()
     }
 
     #[inline]
     pub fn parent(&self) -> Option<SyntaxNode> {
-        self.data().parent_node()
+        self.0.parent()
     }
 
     #[inline]
@@ -368,7 +583,10 @@ impl SyntaxNode {
 
     #[inline]
     pub fn tree_top(&self) -> SyntaxNode {
-        self.ancestors().last().unwrap()
+        match &self.0 {
+            Ref::Green(_) => self.ancestors().last().unwrap(),
+            Ref::Flat(root, _) => SyntaxNode(flat_ref(*root, 0)),
+        }
     }
 
     #[inline]
@@ -382,6 +600,17 @@ impl SyntaxNode {
     }
 
     pub fn first_child(&self) -> Option<SyntaxNode> {
+        if let Ref::Flat(root, at) = self.0 {
+            let tree = &flat(&root).tree;
+            let mut child = tree.first_child_or_token(at);
+            while let Some(it) = child {
+                if !tree.is_token(it) {
+                    return Some(SyntaxNode(flat_ref(root, it)));
+                }
+                child = tree.next_sibling_or_token(it);
+            }
+            return None;
+        }
         self.green_ref().children().raw.enumerate().find_map(|(index, child)| {
             child.as_ref().into_node().map(|green| {
                 SyntaxNode::new_child(
@@ -394,6 +623,17 @@ impl SyntaxNode {
         })
     }
     pub fn last_child(&self) -> Option<SyntaxNode> {
+        if let Ref::Flat(root, at) = self.0 {
+            let tree = &flat(&root).tree;
+            let mut child = tree.last_child_or_token(at);
+            while let Some(it) = child {
+                if !tree.is_token(it) {
+                    return Some(SyntaxNode(flat_ref(root, it)));
+                }
+                child = tree.prev_sibling_or_token(it);
+            }
+            return None;
+        }
         self.green_ref().children().raw.enumerate().rev().find_map(|(index, child)| {
             child.as_ref().into_node().map(|green| {
                 SyntaxNode::new_child(
@@ -407,11 +647,17 @@ impl SyntaxNode {
     }
 
     pub fn first_child_or_token(&self) -> Option<SyntaxElement> {
+        if let Ref::Flat(root, at) = self.0 {
+            return flat(&root).tree.first_child_or_token(at).map(|it| flat_element(root, it));
+        }
         self.green_ref().children().raw.next().map(|child| {
             SyntaxElement::new(child.as_ref(), self.clone(), 0, self.offset() + child.rel_offset())
         })
     }
     pub fn last_child_or_token(&self) -> Option<SyntaxElement> {
+        if let Ref::Flat(root, at) = self.0 {
+            return flat(&root).tree.last_child_or_token(at).map(|it| flat_element(root, it));
+        }
         self.green_ref().children().raw.enumerate().next_back().map(|(index, child)| {
             SyntaxElement::new(
                 child.as_ref(),
@@ -423,17 +669,47 @@ impl SyntaxNode {
     }
 
     pub fn next_sibling(&self) -> Option<SyntaxNode> {
-        self.data().next_sibling()
+        if let Ref::Flat(root, at) = self.0 {
+            let tree = &flat(&root).tree;
+            let mut sibling = tree.next_sibling_or_token(at);
+            while let Some(it) = sibling {
+                if !tree.is_token(it) {
+                    return Some(SyntaxNode(flat_ref(root, it)));
+                }
+                sibling = tree.next_sibling_or_token(it);
+            }
+            return None;
+        }
+        data(self.green_ptr()).next_sibling()
     }
     pub fn prev_sibling(&self) -> Option<SyntaxNode> {
-        self.data().prev_sibling()
+        if let Ref::Flat(root, at) = self.0 {
+            let tree = &flat(&root).tree;
+            let mut sibling = tree.prev_sibling_or_token(at);
+            while let Some(it) = sibling {
+                if !tree.is_token(it) {
+                    return Some(SyntaxNode(flat_ref(root, it)));
+                }
+                sibling = tree.prev_sibling_or_token(it);
+            }
+            return None;
+        }
+        data(self.green_ptr()).prev_sibling()
+    }
+
+    #[inline]
+    fn green_ptr(&self) -> &ptr::NonNull<NodeData> {
+        match &self.0 {
+            Ref::Green(ptr) => ptr,
+            Ref::Flat(..) => unreachable!("a flat node has no NodeData"),
+        }
     }
 
     pub fn next_sibling_or_token(&self) -> Option<SyntaxElement> {
-        self.data().next_sibling_or_token()
+        self.0.next_sibling_or_token()
     }
     pub fn prev_sibling_or_token(&self) -> Option<SyntaxElement> {
-        self.data().prev_sibling_or_token()
+        self.0.prev_sibling_or_token()
     }
 
     pub fn first_token(&self) -> Option<SyntaxToken> {
@@ -546,6 +822,9 @@ impl SyntaxNode {
     }
 
     pub fn child_or_token_at_range(&self, range: TextRange) -> Option<SyntaxElement> {
+        if let Ref::Flat(root, at) = self.0 {
+            return flat(&root).tree.child_at_range(at, range).map(|it| flat_element(root, it));
+        }
         let rel_range = range - self.offset();
         self.green_ref().child_at_range(rel_range).map(|(index, rel_offset, green)| {
             SyntaxElement::new(green, self.clone(), index as u32, self.offset() + rel_offset)
@@ -561,47 +840,48 @@ impl SyntaxToken {
         offset: TextSize,
     ) -> SyntaxToken {
         let green = Green::Token { ptr: green.into() };
-        SyntaxToken { ptr: NodeData::new(Some(parent), index, offset, green) }
-    }
-
-    #[inline]
-    fn data(&self) -> &NodeData {
-        unsafe { self.ptr.as_ref() }
+        SyntaxToken(Ref::Green(NodeData::new(Some(parent), index, offset, green)))
     }
 
     pub fn replace_with(&self, replacement: GreenToken) -> GreenNode {
         assert_eq!(self.kind(), replacement.kind());
+        if let Ref::Flat(..) = self.0 {
+            return self.0.green_twin().into_token().unwrap().replace_with(replacement);
+        }
         let parent = self.parent().unwrap();
-        let me: u32 = self.data().index();
+        let me = self.index();
 
-        let new_parent = parent.green_ref().replace_child(me as usize, replacement.into());
+        let new_parent = parent.green_ref().replace_child(me, replacement.into());
         parent.replace_with(new_parent)
     }
 
     #[inline]
     pub fn kind(&self) -> SyntaxKind {
-        self.data().kind()
+        self.0.kind()
     }
 
     #[inline]
     pub fn text_range(&self) -> TextRange {
-        self.data().text_range()
+        self.0.text_range()
     }
 
     #[inline]
     pub fn index(&self) -> usize {
-        self.data().index() as usize
+        self.0.index()
     }
 
     #[inline]
     pub fn text(&self) -> &str {
-        match self.data().green().as_token() {
+        if let Ref::Flat(root, at) = &self.0 {
+            return flat(root).tree.token_text(*at);
+        }
+        match self.0.green().as_token() {
             Some(it) => it.text(),
             None => {
                 debug_assert!(
                     false,
                     "corrupted tree: a node thinks it is a token: {:?}",
-                    self.data().green().as_node().unwrap().to_string()
+                    self.0.green().as_node().unwrap().to_string()
                 );
                 ""
             }
@@ -610,12 +890,12 @@ impl SyntaxToken {
 
     #[inline]
     pub fn green(&self) -> &GreenTokenData {
-        self.data().green().into_token().unwrap()
+        self.0.green().into_token().unwrap()
     }
 
     #[inline]
     pub fn parent(&self) -> Option<SyntaxNode> {
-        self.data().parent_node()
+        self.0.parent()
     }
 
     #[inline]
@@ -629,10 +909,10 @@ impl SyntaxToken {
     }
 
     pub fn next_sibling_or_token(&self) -> Option<SyntaxElement> {
-        self.data().next_sibling_or_token()
+        self.0.next_sibling_or_token()
     }
     pub fn prev_sibling_or_token(&self) -> Option<SyntaxElement> {
-        self.data().prev_sibling_or_token()
+        self.0.prev_sibling_or_token()
     }
 
     #[inline]
@@ -774,7 +1054,7 @@ impl SyntaxElement {
 impl PartialEq for SyntaxNode {
     #[inline]
     fn eq(&self, other: &SyntaxNode) -> bool {
-        self.data().key() == other.data().key()
+        self.0.key() == other.0.key()
     }
 }
 
@@ -783,7 +1063,7 @@ impl Eq for SyntaxNode {}
 impl Hash for SyntaxNode {
     #[inline]
     fn hash<H: Hasher>(&self, state: &mut H) {
-        self.data().key().hash(state);
+        self.0.key().hash(state);
     }
 }
 
@@ -811,7 +1091,7 @@ impl fmt::Display for SyntaxNode {
 impl PartialEq for SyntaxToken {
     #[inline]
     fn eq(&self, other: &SyntaxToken) -> bool {
-        self.data().key() == other.data().key()
+        self.0.key() == other.0.key()
     }
 }
 
@@ -820,7 +1100,16 @@ impl Eq for SyntaxToken {}
 impl Hash for SyntaxToken {
     #[inline]
     fn hash<H: Hasher>(&self, state: &mut H) {
-        self.data().key().hash(state);
+        self.0.key().hash(state);
+    }
+}
+
+impl fmt::Debug for SyntaxToken {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("SyntaxToken")
+            .field("kind", &self.kind())
+            .field("text_range", &self.text_range())
+            .finish()
     }
 }
 

@@ -9,20 +9,21 @@
 #![deny(unsafe_code)]
 
 #[allow(unsafe_code)]
-mod green;
-#[allow(unsafe_code)]
 pub mod cursor;
+#[allow(unsafe_code)]
+mod green;
 
 pub mod api;
+mod flat;
 mod syntax_text;
 mod utility_types;
 
-mod cow_mut;
 #[allow(unsafe_code)]
 mod arc;
+pub mod ast;
+mod cow_mut;
 #[cfg(feature = "serde1")]
 mod serde_impls;
-pub mod ast;
 
 pub use text_size::{TextLen, TextRange, TextSize};
 
@@ -30,6 +31,7 @@ pub use crate::{
     api::{
         Language, SyntaxElement, SyntaxElementChildren, SyntaxNode, SyntaxNodeChildren, SyntaxToken,
     },
+    flat::{FlatTree, FlatTreeBuilder},
     green::{
         Checkpoint, Children, GreenNode, GreenNodeBuilder, GreenNodeData, GreenToken,
         GreenTokenData, NodeCache, SyntaxKind,
