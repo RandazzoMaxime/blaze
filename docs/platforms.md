@@ -80,8 +80,9 @@ Runs natively on `ubuntu-24.04-arm` in CI under both backends, including `debugi
 and `farsplices.py`.
 
 A `b` or `bl` reaches 128 MB. When a function and its replacement are further apart than
-that, the splice uses a longer jump, and a function too short to hold it is linked in full.
-`farsplices.py` tests this with 160 MB between the code and the splice (6 of 6).
+that, the splice uses a longer jump of 12 bytes, and ra-jit makes no function shorter than
+that. `farsplices.py` tests this with 160 MB between the code and the splice, and
+`bigbinary.py` with 220 MB of code.
 
 An executable marked as needing BTI landing pads is declined by the splice. That check is
 written and has never been exercised: no test builds such an executable.

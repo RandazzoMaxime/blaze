@@ -5,7 +5,7 @@ The file is not a `.rs` file, so nothing loads it until the macro is expanded. E
 it or the file that includes it, asks the daemon for the program and compares what it prints
 with what `cargo build` of the same source prints.
 """
-import os, re, shlex, subprocess, sys, tempfile, time
+import errno, os, re, shlex, subprocess, sys, tempfile, time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
@@ -86,11 +86,21 @@ def follow(files, steps):
     subprocess.run([RA_JIT, "sync", socket, *ask], capture_output=True, text=True, timeout=120)
 
     def run(path):
-        try:
-            ran = subprocess.run([*RUNNER, path], capture_output=True, text=True, timeout=30)
-        except Exception as error:
-            return f"did not run: {error}"
-        return ran.stdout + (f"[exit {ran.returncode}]" if ran.returncode else "")
+        # After a full link the daemon writes the debug info in place, and Linux runs no
+        # program while its file is open for writing ("text file busy"): what is given the
+        # program waits, as `cargo ra-jit run` does.
+        deadline = time.monotonic() + 120
+        while True:
+            try:
+                ran = subprocess.run([*RUNNER, path], capture_output=True, text=True, timeout=30)
+            except OSError as error:
+                if error.errno == errno.ETXTBSY and time.monotonic() < deadline:
+                    time.sleep(0.1)
+                    continue
+                return f"did not run: {error}"
+            except Exception as error:
+                return f"did not run: {error}"
+            return ran.stdout + (f"[exit {ran.returncode}]" if ran.returncode else "")
 
     def linked(seen):
         """How the daemon made the binary since the log was `seen` long."""

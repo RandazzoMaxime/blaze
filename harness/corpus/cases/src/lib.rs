@@ -7212,3 +7212,174 @@ pub mod associated_type_returns {
         total + value(pair).copied().unwrap_or(0) as usize
     }
 }
+
+/// What bevy's `#[derive(QueryData)]` writes for a read-only query: a `release_state` under
+/// `where` clauses on the `ReadOnly` of each field's type, whose locals are of
+/// `<<F as QueryData>::ReadOnly as QueryData>::Item<'w, 'static>`. The solver can't decide
+/// that alias of a tuple's under those clauses, and the drop passes asked whether a variable
+/// has drop glue (#96). `Loud` is behind such an alias, and its drops are counted.
+pub mod undecided_alias_drop {
+    use std::marker::PhantomData;
+    use std::sync::atomic::{AtomicU32, Ordering};
+
+    static DROPS: AtomicU32 = AtomicU32::new(0);
+
+    pub trait WorldQuery {
+        type State;
+    }
+
+    pub unsafe trait QueryData: WorldQuery {
+        type ReadOnly: ReadOnlyQueryData<State = <Self as WorldQuery>::State>;
+        type Item<'w, 's>;
+    }
+
+    pub unsafe trait IterQueryData: QueryData {}
+
+    pub unsafe trait ReadOnlyQueryData: IterQueryData<ReadOnly = Self> {}
+
+    pub trait ReleaseStateQueryData: QueryData {
+        fn release_state<'w>(item: Self::Item<'w, '_>) -> Self::Item<'w, 'static>;
+    }
+
+    pub trait Component: 'static {}
+
+    impl<T: Component> WorldQuery for &T {
+        type State = u8;
+    }
+
+    unsafe impl<T: Component> QueryData for &T {
+        type ReadOnly = Self;
+        type Item<'w, 's> = &'w T;
+    }
+
+    unsafe impl<T: Component> IterQueryData for &T {}
+
+    unsafe impl<T: Component> ReadOnlyQueryData for &T {}
+
+    impl<T: Component> ReleaseStateQueryData for &T {
+        fn release_state<'w>(item: Self::Item<'w, '_>) -> Self::Item<'w, 'static> {
+            item
+        }
+    }
+
+    impl<T: WorldQuery> WorldQuery for Option<T> {
+        type State = T::State;
+    }
+
+    unsafe impl<T: QueryData> QueryData for Option<T> {
+        type ReadOnly = Option<T::ReadOnly>;
+        type Item<'w, 's> = Option<T::Item<'w, 's>>;
+    }
+
+    unsafe impl<T: IterQueryData> IterQueryData for Option<T> {}
+
+    unsafe impl<T: ReadOnlyQueryData> ReadOnlyQueryData for Option<T> {}
+
+    impl<T: ReleaseStateQueryData> ReleaseStateQueryData for Option<T> {
+        fn release_state<'w>(item: Self::Item<'w, '_>) -> Self::Item<'w, 'static> {
+            item.map(T::release_state)
+        }
+    }
+
+    impl<A: WorldQuery, B: WorldQuery> WorldQuery for (A, B) {
+        type State = (A::State, B::State);
+    }
+
+    unsafe impl<A: QueryData, B: QueryData> QueryData for (A, B) {
+        type ReadOnly = (A::ReadOnly, B::ReadOnly);
+        type Item<'w, 's> = (A::Item<'w, 's>, B::Item<'w, 's>);
+    }
+
+    unsafe impl<A: IterQueryData, B: IterQueryData> IterQueryData for (A, B) {}
+
+    unsafe impl<A: ReadOnlyQueryData, B: ReadOnlyQueryData> ReadOnlyQueryData for (A, B) {}
+
+    impl<A: ReleaseStateQueryData, B: ReleaseStateQueryData> ReleaseStateQueryData for (A, B) {
+        fn release_state<'w>(item: Self::Item<'w, '_>) -> Self::Item<'w, 'static> {
+            (A::release_state(item.0), B::release_state(item.1))
+        }
+    }
+
+    pub struct Loud(pub u32);
+
+    impl Drop for Loud {
+        fn drop(&mut self) {
+            DROPS.fetch_add(self.0, Ordering::Relaxed);
+        }
+    }
+
+    pub struct Owned;
+
+    impl WorldQuery for Owned {
+        type State = ();
+    }
+
+    unsafe impl QueryData for Owned {
+        type ReadOnly = Self;
+        type Item<'w, 's> = Loud;
+    }
+
+    unsafe impl IterQueryData for Owned {}
+
+    unsafe impl ReadOnlyQueryData for Owned {}
+
+    impl ReleaseStateQueryData for Owned {
+        fn release_state<'w>(item: Self::Item<'w, '_>) -> Self::Item<'w, 'static> {
+            Loud(item.0 + 1)
+        }
+    }
+
+    pub struct Clip(pub u32);
+
+    impl Component for Clip {}
+
+    pub struct ReadOnlyQuery;
+
+    pub struct ReadOnlyQueryItem<'w, 's> {
+        pub clip: <<Option<&'static Clip> as QueryData>::ReadOnly as QueryData>::Item<'w, 's>,
+        pub owned:
+            <<Option<(&'static Clip, Owned)> as QueryData>::ReadOnly as QueryData>::Item<'w, 's>,
+        pub marker: PhantomData<(&'w (), &'s ())>,
+    }
+
+    impl WorldQuery for ReadOnlyQuery {
+        type State = ();
+    }
+
+    unsafe impl QueryData for ReadOnlyQuery {
+        type ReadOnly = Self;
+        type Item<'w, 's> = ReadOnlyQueryItem<'w, 's>;
+    }
+
+    unsafe impl IterQueryData for ReadOnlyQuery {}
+
+    unsafe impl ReadOnlyQueryData for ReadOnlyQuery {}
+
+    impl ReleaseStateQueryData for ReadOnlyQuery
+    where
+        for<'a> Option<&'static Clip>: QueryData<ReadOnly: ReleaseStateQueryData>,
+        for<'a> Option<(&'static Clip, Owned)>: QueryData<ReadOnly: ReleaseStateQueryData>,
+    {
+        fn release_state<'w>(item: Self::Item<'w, '_>) -> Self::Item<'w, 'static> {
+            ReadOnlyQueryItem {
+                clip: <<Option<&'static Clip> as QueryData>::ReadOnly>::release_state(item.clip),
+                owned: <<Option<(&'static Clip, Owned)> as QueryData>::ReadOnly>::release_state(
+                    item.owned,
+                ),
+                marker: PhantomData,
+            }
+        }
+    }
+
+    pub fn run(n: u32) -> (Option<u32>, Option<(u32, u32)>, u32) {
+        DROPS.store(0, Ordering::Relaxed);
+        let clip = Clip(n * 2);
+        let owned = Some((&clip, Loud(n)));
+        let item = ReadOnlyQueryItem { clip: Some(&clip), owned, marker: PhantomData };
+        let released = <ReadOnlyQuery as ReleaseStateQueryData>::release_state(item);
+        let seen =
+            (released.clip.map(|it| it.0), released.owned.as_ref().map(|it| (it.0.0, it.1.0)));
+        drop(released);
+        (seen.0, seen.1, DROPS.load(Ordering::Relaxed))
+    }
+}
