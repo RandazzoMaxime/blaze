@@ -723,6 +723,7 @@ fn main() {
     }
     case!(cases::opaque_of_trait_method::run(4), cases::opaque_of_trait_method::run(90));
     case!(cases::pointer_relations::run(7));
+    case!(cases::static_places::run());
     case!(cases::associated_type_returns::run(&["a".into(), "bcd".into()]));
     case!(cases::constructor_extends_temporaries::run(), cases::statement_borrows_temporary::run(true, &None));
 }

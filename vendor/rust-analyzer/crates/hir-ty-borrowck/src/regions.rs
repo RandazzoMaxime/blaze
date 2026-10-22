@@ -2106,7 +2106,27 @@ impl<'db> Builder<'_, '_, 'db> {
             }
             OperandKind::Constant { ty, .. } => Some(self.renumber(ty.as_ref())),
             OperandKind::Allocation { allocation } => Some(self.renumber(allocation.as_ref().ty)),
-            OperandKind::Static(_) => None,
+            // A reference to the static, every lifetime of its type `'static`, elided ones
+            // too; mutable for a `static mut`, rustc's `*mut T`, so that what is written
+            // through it is `'static`.
+            OperandKind::Static(id) => {
+                let db = self.ctx.db;
+                let ty = db.value_ty((*id).into())?.instantiate_identity().skip_norm_wip();
+                let ty = rustc_type_ir::fold_regions(self.interner(), ty, |region, _| match region
+                    .kind()
+                {
+                    RegionKind::ReBound(..) => region,
+                    _ => self.static_region(),
+                });
+                let mutable = hir_def::signatures::StaticSignature::of(db, *id)
+                    .flags
+                    .contains(hir_def::signatures::StaticFlags::MUTABLE);
+                let mutability = match mutable {
+                    true => rustc_ast_ir::Mutability::Mut,
+                    false => rustc_ast_ir::Mutability::Not,
+                };
+                Some(Ty::new_ref(self.interner(), self.static_region(), ty, mutability))
+            }
         }
     }
 
@@ -2929,6 +2949,25 @@ impl<'db> Builder<'_, '_, 'db> {
                     TyKind::FnDef(def, _) if !matches!(def.0, CallableDefId::FunctionId(_))
                 );
                 let category = if constructor { Category::Boring } else { Category::CallArgument };
+                // `Fn::call(&f, (x,))` that lowering passes as `Fn::call(&f, x)`: each argument
+                // is its element of the signature's tuple.
+                let lang = self.interner().lang_items();
+                let calls = [lang.Fn_call, lang.FnMut_call_mut, lang.FnOnce_call_once];
+                let inputs = match (func_ty.kind(), inputs.as_slice()) {
+                    (TyKind::FnDef(def, _), &[receiver, tupled])
+                        if let CallableDefId::FunctionId(function) = def.0
+                            && calls.contains(&Some(function))
+                            && let TyKind::Tuple(elements) = tupled.kind()
+                            && args.len() == 1 + elements.len()
+                            && !(args.len() == 2
+                                && self
+                                    .operand_ty(&args[1])
+                                    .is_some_and(|it| matches!(it.kind(), TyKind::Tuple(_)))) =>
+                    {
+                        std::iter::once(receiver).chain(elements.iter()).collect()
+                    }
+                    _ => inputs,
+                };
                 for (arg, input) in args.iter().zip(inputs) {
                     if let Some(ty) = self.operand_ty(arg) {
                         let at = At { category, span: arg.span().unwrap_or(span) };
@@ -2939,8 +2978,6 @@ impl<'db> Builder<'_, '_, 'db> {
                 // which lowering passes the arguments of one by one: proving it implements the
                 // trait equates the arguments with its signature's inputs, whose regions are in
                 // its type (`let f = |_| {}; f(&x)`).
-                let lang = self.interner().lang_items();
-                let calls = [lang.Fn_call, lang.FnMut_call_mut, lang.FnOnce_call_once];
                 if let TyKind::FnDef(def, _) = func_ty.kind()
                     && let CallableDefId::FunctionId(function) = def.0
                     && calls.contains(&Some(function))

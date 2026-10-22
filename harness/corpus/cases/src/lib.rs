@@ -7245,3 +7245,21 @@ pub mod pointer_relations {
         format!("{} {} {}", same(pointer, pointer), first, shown)
     }
 }
+
+/// Statics read and written with what lives as long as they do, and a `'static` function
+/// object called through a static.
+pub mod static_places {
+    static BASE: u8 = 40;
+    static mut LATEST: &u8 = &BASE;
+    static ADD: &(dyn Fn(&'static u8) -> u8 + Sync) = &|it| *it + 2;
+
+    pub fn run() -> u8 {
+        static TWO: u8 = 2;
+        // SAFETY: only this function touches `LATEST`, on one thread.
+        let latest = unsafe {
+            LATEST = &TWO;
+            *LATEST
+        };
+        ADD(&BASE) + latest
+    }
+}
