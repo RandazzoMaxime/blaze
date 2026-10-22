@@ -180,4 +180,5 @@ cases![
     literal_operands,
     moved_bits_unread,
     const_location,
+    provided_method_static,
 ];

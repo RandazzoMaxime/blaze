@@ -11,7 +11,7 @@ mod program;
 
 use std::{
     ffi::OsString,
-    io::Write as _,
+    io::{IsTerminal as _, Write as _},
     path::{Path, PathBuf},
     process::{Command, Stdio},
     sync::Mutex,
@@ -50,30 +50,50 @@ pub(crate) struct Asked {
     dir: PathBuf,
 }
 
-/// Which examples the arguments after `--` ask for.
+/// Which examples the arguments after `--` ask for, and how the harness shows them.
 #[derive(Default)]
 struct Wanted {
     filters: Vec<String>,
     skipped: Vec<String>,
     exact: bool,
+    /// libtest's `--format=terse`: a character for each example that does not fail.
+    terse: bool,
 }
 
 impl Wanted {
     /// `Err` is the argument that asks for something not done here.
     fn parse(args: &[String]) -> Result<Wanted, String> {
         let mut wanted = Wanted::default();
+        let (mut quiet, mut format) = (false, None);
         let mut args = args.iter();
         while let Some(arg) = args.next() {
-            match arg.as_str() {
+            let (flag, joined) = match arg.split_once('=') {
+                Some((flag, value)) if flag.starts_with("--") => (flag, Some(value)),
+                _ => (arg.as_str(), None),
+            };
+            let mut value = || joined.or_else(|| args.next().map(String::as_str));
+            match flag {
                 "--exact" => wanted.exact = true,
-                "--skip" => wanted.skipped.extend(args.next().cloned()),
+                "--skip" => wanted.skipped.extend(value().map(str::to_owned)),
                 // The examples run as many at a time as there are processors either way.
-                "--test-threads" => _ = args.next(),
-                _ if arg.starts_with("--test-threads=") => {}
+                "--test-threads" => _ = value(),
+                "-q" | "--quiet" => quiet = true,
+                "--format" => match value() {
+                    Some(it @ ("pretty" | "terse")) => format = Some(it == "terse"),
+                    _ => return Err(arg.clone()),
+                },
+                // Nothing is shown in color, which is what `auto` is when the output is not
+                // a terminal.
+                "--color" => match value() {
+                    Some("never") => {}
+                    Some("auto") if !std::io::stdout().is_terminal() => {}
+                    _ => return Err(arg.clone()),
+                },
                 _ if arg.starts_with('-') => return Err(arg.clone()),
                 _ => wanted.filters.push(arg.clone()),
             }
         }
+        wanted.terse = format.unwrap_or(quiet);
         Ok(wanted)
     }
 
@@ -494,6 +514,61 @@ impl Test {
     }
 }
 
+/// libtest's line of the results of `--format=terse` ends after this many of them.
+const TERSE_COLUMNS: usize = 88;
+
+/// What the harness has shown of the examples that ended so far.
+#[derive(Default)]
+struct Progress {
+    terse: bool,
+    total: usize,
+    count: usize,
+    column: usize,
+}
+
+impl Progress {
+    /// Shows how `test` ended as libtest's pretty or terse output does.
+    fn ended(
+        &mut self,
+        out: &mut impl std::io::Write,
+        test: &Test,
+        result: &anyhow::Result<Ended>,
+    ) -> std::io::Result<()> {
+        if !self.terse {
+            let word = match result {
+                Ok(Ended::Passed) => "ok",
+                Ok(Ended::Ignored) => "ignored",
+                Ok(Ended::Failed(_)) | Err(_) => "FAILED",
+            };
+            return writeln!(out, "test {} ... {word}", test.shown_name());
+        }
+        let short = match result {
+            Ok(Ended::Passed) => ".",
+            Ok(Ended::Ignored) => "i",
+            Ok(Ended::Failed(_)) | Err(_) => {
+                // A failure is on a line of its own, after the progress of the one before.
+                if self.column != 0 {
+                    self.progress(out)?;
+                }
+                self.count += 1;
+                return writeln!(out, "{} --- FAILED", test.name);
+            }
+        };
+        out.write_all(short.as_bytes())?;
+        self.count += 1;
+        self.column += 1;
+        if self.column % TERSE_COLUMNS == TERSE_COLUMNS - 1 {
+            self.progress(out)?;
+        }
+        out.flush()
+    }
+
+    fn progress(&mut self, out: &mut impl std::io::Write) -> std::io::Result<()> {
+        self.column = 0;
+        writeln!(out, " {}/{}", self.count, self.total)
+    }
+}
+
 /// What the harness shows of an example that ran and failed.
 fn failure(ran: &std::process::Output) -> String {
     let (stdout, stderr) =
@@ -555,6 +630,11 @@ pub(crate) fn run(
     let out = std::io::stdout();
     writeln!(&out, "\nrunning {} test{}", tests.len(), if tests.len() == 1 { "" } else { "s" })?;
     let next = Mutex::new(0);
+    let shown = Mutex::new(Progress {
+        terse: asked.wanted.terse,
+        total: tests.len(),
+        ..Default::default()
+    });
     let ended: Mutex<Vec<(usize, anyhow::Result<Ended>)>> = Mutex::new(Vec::new());
     let threads = std::thread::available_parallelism().map_or(1, |it| it.get()).min(tests.len());
     std::thread::scope(|scope| {
@@ -570,12 +650,9 @@ pub(crate) fn run(
                     let dir = asked.dir.join(at.to_string());
                     let result = test.run(asked, &dir, ours, target);
                     _ = std::fs::remove_dir_all(&dir);
-                    let word = match &result {
-                        Ok(Ended::Passed) => "ok",
-                        Ok(Ended::Ignored) => "ignored",
-                        Ok(Ended::Failed(_)) | Err(_) => "FAILED",
-                    };
-                    _ = writeln!(&out, "test {} ... {word}", test.shown_name());
+                    let mut progress = shown.lock().unwrap_or_else(|it| it.into_inner());
+                    _ = progress.ended(&mut out.lock(), test, &result);
+                    drop(progress);
                     ended.lock().unwrap_or_else(|it| it.into_inner()).push((at, result));
                 }
             });
@@ -588,8 +665,9 @@ pub(crate) fn run(
         match result {
             Ok(Ended::Passed) => passed += 1,
             Ok(Ended::Ignored) => ignored += 1,
-            Ok(Ended::Failed(shown)) => failed.push((tests[at].shown_name(), shown)),
-            Err(error) => failed.push((tests[at].shown_name(), format!("ra-jit: {error:#}"))),
+            // libtest lists a failure by the name alone, without how it is tested.
+            Ok(Ended::Failed(shown)) => failed.push((tests[at].name.clone(), shown)),
+            Err(error) => failed.push((tests[at].name.clone(), format!("ra-jit: {error:#}"))),
         }
     }
     if !failed.is_empty() {

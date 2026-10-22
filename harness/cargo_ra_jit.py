@@ -534,13 +534,15 @@ def project(name, spec, work, mode):
 
 
 FLAG_WORKSPACE = {
-    "Cargo.toml": '[workspace]\nmembers = ["app", "util"]\nresolver = "2"\n\n[profile.quick]\ninherits = "dev"\n\n[profile.release]\npanic = "abort"\n\n[profile.quick.package.util]\nopt-level = 3\noverflow-checks = false\n',
+    "Cargo.toml": '[workspace]\nmembers = ["app", "util", "shout"]\nresolver = "2"\n\n[profile.quick]\ninherits = "dev"\n\n[profile.release]\npanic = "abort"\n\n[profile.quick.package.util]\nopt-level = 3\noverflow-checks = false\n',
     "util/Cargo.toml": '[package]\nname = "util"\nversion = "0.1.0"\nedition = "2021"\n\n[features]\nloud = []\n',
     "util/src/lib.rs": '/// ```\n/// assert_eq!(util::greeting("it").len(), 8);\n/// ```\n///\n/// ```should_panic\n/// assert_eq!(util::greeting("it"), "");\n/// ```\npub fn greeting(name: &str) -> String {\n    let text = format!("hello {name}");\n    if cfg!(feature = "loud") { text.to_uppercase() } else { text }\n}\n\nthread_local! {\n    static SAID: std::cell::RefCell<Option<String>> = None.into();\n}\n\npub fn said() -> String {\n    SAID.with_borrow(|it| it.clone().unwrap_or_default())\n}\n\n#[cfg(test)]\nmod tests {\n    // A test and the library see one thread local, whoever compiled either.\n    #[test]\n    fn says_what_a_test_set() {\n        super::SAID.with_borrow_mut(|it| *it = Some("set".to_string()));\n        assert_eq!(super::said(), "set");\n    }\n\n    #[test]\n    fn greets() {\n        assert!(super::greeting("a").to_lowercase().starts_with("hello"));\n    }\n}\n',
-    "app/Cargo.toml": '[package]\nname = "app"\nversion = "0.1.0"\nedition = "2021"\ndefault-run = "app"\n\n[features]\nloud = ["util/loud"]\n\n[dependencies]\nutil = { path = "../util" }\n',
+    "app/Cargo.toml": '[package]\nname = "app"\nversion = "0.1.0"\nedition = "2021"\ndefault-run = "app"\n\n[features]\nloud = ["util/loud"]\n\n[dependencies]\nutil = { path = "../util" }\n\n[dev-dependencies]\nshout = { path = "../shout" }\n',
+    "shout/Cargo.toml": '[package]\nname = "shout"\nversion = "0.1.0"\nedition = "2021"\n',
+    "shout/src/lib.rs": 'pub fn shout(text: &str) -> String {\n    text.to_uppercase()\n}\n',
     "app/src/main.rs": '#![allow(unexpected_cfgs)]\n\nfn main() {\n    let name = std::env::args().nth(1).unwrap_or("world".to_string());\n    println!("{}", util::greeting(&name));\n    println!("{} {} {}", cfg!(debug_assertions), cfg!(extra), cfg!(target_feature = "avx2"));\n    let sum = std::panic::catch_unwind(|| name.len() as u8 + 251);\n    println!("{:?}", sum.ok());\n    if name == "fail" {\n        std::process::exit(3);\n    }\n}\n\n#[cfg(test)]\nmod tests {\n    #[test]\n    fn in_the_program() {\n        assert_eq!(util::greeting("x").len(), 7);\n    }\n}\n',
     "app/src/bin/other.rs": 'fn main() {\n    println!("other: {}", util::greeting("other"));\n}\n',
-    "app/examples/demo.rs": 'fn main() {\n    println!("demo: {}", util::greeting("demo"));\n}\n',
+    "app/examples/demo.rs": 'fn main() {\n    println!("demo: {} {}", util::greeting("demo"), shout::shout("demo"));\n}\n',
     "app/tests/it.rs": '#[test]\nfn greets_it() {\n    assert_eq!(util::greeting("it").to_lowercase(), "hello it");\n}\n\n#[test]\nfn fails_when_asked() {\n    assert!(std::env::var("FLAGS_FAIL").is_err());\n}\n\n// A cargo inside writes the programs again, and on macOS it removes each and copies it back: a\n// test starting one meanwhile finds none.\nstatic BUILDING: std::sync::Mutex<()> = std::sync::Mutex::new(());\n\n// A cargo run by a test has the units of the build: the program stays the file it was.\n#[test]\nfn a_cargo_inside_leaves_the_program() {\n    use std::os::unix::fs::MetadataExt;\n    let _building = BUILDING.lock().unwrap_or_else(|it| it.into_inner());\n    let program = env!("CARGO_BIN_EXE_app");\n    let before = std::fs::metadata(program).unwrap().ino();\n    let cargo = std::env::var("CARGO").unwrap_or("cargo".to_string());\n    let built = std::process::Command::new(cargo).args(["build", "-q", "-p", "app"]).status().unwrap();\n    assert!(built.success());\n    assert_eq!(before, std::fs::metadata(program).unwrap().ino());\n}\n\n// What cargo tells a test of the places of the build is what the daemon tells it.\n#[test]\nfn the_places_of_the_build_are_cargos() {\n    assert!(std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).is_dir());\n    let _building = BUILDING.lock().unwrap_or_else(|it| it.into_inner());\n    let ran = std::process::Command::new(env!("CARGO_BIN_EXE_other")).output().unwrap();\n    assert_eq!(String::from_utf8_lossy(&ran.stdout).lines().count(), 1);\n}\n',
 }
 
@@ -597,6 +599,10 @@ FLAG_CASES = [
     ("test", ["--no-run"], {}),
     ("test", ["--doc"], {}),
     ("test", ["--doc", "--features", "loud", "-p", "util"], {}),
+    # Flags of how the results are shown are the harness's: ra-jit runs the doctests all the
+    # same, and shows them as libtest does.
+    ("test", ["--doc", "-q"], {}),
+    ("test", ["--doc", "--", "--format=terse", "--color", "never"], {}),
     ("test", [], {"CARGO_INCREMENTAL": "0"}),
 ]
 
@@ -622,6 +628,13 @@ def flags(work):
             (_, mine), (_, other) = ours.cargo(command, *args, env=extra), theirs.cargo(command, *args, env=extra)
             read = test_results if command == "test" else program_output
             differs = difference(read(mine), read(other))
+            if "--doc" in args:
+                left = re.search(r"ra-jit: the doctests are left to rustdoc: (.*)", mine.stderr)
+                # A panic message has the id of the thread, and where the terse progress
+                # (` 1/2`) and blank lines fall depends on which test finished first.
+                text = lambda ran: re.sub(r"finished in [0-9.]+s", "", re.sub(r"' \(\d+\) panicked", "' panicked", ran.stdout))
+                said = lambda ran: sorted(line for line in re.sub(r" \d+/\d+$", "", text(ran), flags=re.M).splitlines() if line)
+                differs = differs or (left and f"left to rustdoc: {left[1]}") or difference(said(mine), said(other))
             if differs and mine.returncode != other.returncode:
                 differs += f"; {mine.stderr.strip()[-600:]!r}"
             shown = " ".join([*(f"{k}={v}" for k, v in extra.items()), "cargo ra-jit", command, *args])
@@ -744,6 +757,23 @@ def daemon(work):
     edit(ws, "six")
     _, again = here.cargo("run")
     check("the build after that starts a daemon again and succeeds", again.returncode == 0 and "hello world" in again.stdout and status()[0] not in (None, pid))
+
+    # An example has the dev-dependencies, as cargo builds it: its edit is one the daemon
+    # builds, not one rust-analyzer finds names missing from.
+    demo = os.path.join(ws, "app/examples/demo.rs")
+    here.cargo("run", "--example", "demo")
+    wait_warm(here, ws)
+    open(demo, "a").write("\n// edited\n")
+    _, example = here.cargo("run", "--example", "demo")
+    check("an edited example with a dev-dependency is the daemon's", how_built(example.stderr) == "daemon" and example.returncode == 0 and " DEMO" in example.stdout, f"{how_built(example.stderr)}: {example.stdout.strip()[-80:]}")
+    # What the daemon does not build, cargo does: an error is rustc's, and code rust-analyzer
+    # turns down wrongly is built all the same.
+    main = os.path.join(ws, "app/src/main.rs")
+    kept = open(main).read()
+    open(main, "a").write("\nfn broken() -> u32 { \"text\" }\n")
+    _, broken = here.cargo("build")
+    check("an edit the daemon turns down goes to cargo, with rustc's error", broken.returncode == 101 and how_built(broken.stderr).startswith("cargo") and "error[E0308]" in broken.stderr, f"exit {broken.returncode}, {how_built(broken.stderr)[:80]}")
+    open(main, "w").write(kept)
     here.cargo("stop")
     manners(work, ws, env, here, check, edit)
     abuse(work, ws, tree, env, check, status, alive)
@@ -1249,7 +1279,8 @@ def plain(work):
     kept = open(broken).read()
     open(broken, "a").write("\nfn broken() -> u32 { \"text\" }\n")
     mine = here.cargo("build")[1]
-    check("a build that does not compile fails with cargo's status", mine.returncode == 101, f"exit {mine.returncode}")
+    # What the daemon does not build, rustc does: the error is rustc's.
+    check("a build that does not compile fails with rustc's error and cargo's status", mine.returncode == 101 and "error[E0308]" in mine.stderr, f"exit {mine.returncode}")
     open(broken, "w").write(kept)
     mine, how, wrong = same("run", "mended")
     check("and the build after it is mended is right", mine.returncode == 0 and not wrong, f"{how[:90]}; {wrong or 'same as cargo'}")

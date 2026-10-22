@@ -135,7 +135,11 @@ A single build goes to cargo when:
 - the daemon refused the build or failed.
 
 Doc tests go through ra-jit in rustdoc's place. An example ra-jit cannot build is left to
-rustdoc, with a line saying why.
+rustdoc, with a line saying why. Of the test harness's flags, `-q`, `--format pretty`,
+`--format terse`, `--color never`, `--exact`, `--skip`, `--test-threads` and test filters
+are handled, and the results are shown as libtest shows them; any other flag leaves the
+library's doctests to rustdoc. Each library's doctests load the workspace again in a
+process of their own, about 2 s each on ripgrep, which the daemon does not do for them yet.
 
 The fallback is per invocation or per program, not per crate. If one program of an
 invocation cannot be the daemon's, cargo builds the invocation.
