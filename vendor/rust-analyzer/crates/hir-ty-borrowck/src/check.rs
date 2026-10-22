@@ -694,6 +694,47 @@ impl<'a, 'db> Checker<'a, '_, 'db> {
         }
     }
 
+    /// Whether `span` is a `&raw const` or `&raw mut`, which lowering builds from a borrow.
+    fn is_raw_borrow(&self, span: MirSpan) -> bool {
+        matches!(span, MirSpan::ExprId(expr) if matches!(
+            self.ctx.store[expr],
+            hir_def::hir::Expr::Ref { rawness: hir_def::hir::type_ref::Rawness::RawPtr, .. }
+        ))
+    }
+
+    /// rustc's `is_disaligned`: whether `place` is in a `#[repr(packed)]` struct, not behind a
+    /// reference, that may leave it less aligned than its type asks for, as one whose layout
+    /// is not known (of a type parameter) may.
+    fn is_disaligned(&self, place: PlaceRef<'_>) -> bool {
+        let mut pack: Option<u64> = None;
+        for at in (0..place.projection.len()).rev() {
+            if matches!(place.projection[at], ProjectionElem::Deref) {
+                break;
+            }
+            let base = self.ctx.place_ty(self.body, place.local, &place.projection[..at]);
+            if base.variant_id.is_none()
+                && let TyKind::Adt(adt, _) = base.ty.kind()
+                && let Some(packed) = adt.repr(self.ctx.db).pack
+            {
+                let packed = packed.bytes();
+                pack = Some(pack.map_or(packed, |it| it.min(packed)));
+            }
+        }
+        let Some(pack) = pack else { return false };
+        let ty = self.ctx.place_ty(self.body, place.local, place.projection).ty;
+        let env = hir_ty::ParamEnvAndCrate { param_env: self.ctx.env, krate: self.ctx.krate };
+        // An unsized value's alignment is known only for a slice or `str` tail, not a `dyn`.
+        let known_tail = || {
+            let normalize = |ty| liveness::normalize_erased(self.ctx, ty).unwrap_or(ty);
+            let tail = hir_ty::layout::struct_tail_erasing_lifetimes(self.ctx.db, ty, &normalize);
+            matches!(tail.kind(), TyKind::Slice(_) | TyKind::Str)
+        };
+        match self.ctx.db.layout_of_ty(ty.store(), env.store()) {
+            Ok(layout) => layout.align.abi.bytes() > pack || !(layout.is_sized() || known_tail()),
+            Err(_) => true,
+        }
+    }
+
     fn mutate_destination(&mut self, location: Location, place: PlaceRef<'_>, span: MirSpan) {
         if self.is_union_literal(place, span) {
             // Lowering builds a union literal by assigning its field, where rustc assigns the
@@ -724,6 +765,16 @@ impl<'a, 'db> Checker<'a, '_, 'db> {
                 };
                 self.access_place(location, place, span, access, Allowed::No, depth);
                 self.check_if_path_or_subpath_is_moved(location, action, place, span);
+                if !matches!(kind, BorrowKind::Shallow)
+                    && !self.is_raw_borrow(span)
+                    && self.is_disaligned(place)
+                {
+                    self.report(
+                        "E0793",
+                        span,
+                        "reference to field of packed struct is unaligned".to_owned(),
+                    );
+                }
             }
             Rvalue::Len(place) | Rvalue::Discriminant(place) | Rvalue::CopyForDeref(place) => {
                 let place = PlaceRef::of(place);
