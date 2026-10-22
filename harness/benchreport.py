@@ -691,6 +691,22 @@ def platform_doc(name, result):
     return lines
 
 
+ROUGH = 1.5
+
+
+def rough(row):
+    """Whether a benchmark's runs varied too much to read its ratio closely: the slowest run of
+    release or of ra-jit took more than ROUGH times its fastest."""
+    return any(max(runs) > ROUGH * min(runs) for b in ("release", "ra-jit") if (runs := (row.get(b) or {}).get("runs")) and min(runs) > 0)
+
+
+def ratio_cell(row):
+    return ("≈" if rough(row) else "") + times(row["ra-jit"]["ratio"])
+
+
+ROUGH_NOTE = f"≈: that benchmark's runs varied by more than {ROUGH:g}× from fastest to slowest on that machine; read it as rough."
+
+
 def runtime_best(measured):
     """Of a runbench.py result's ra-jit builds, the one whose geometric mean is lowest: (its
     ratio of each benchmark, the geometric mean, how it was built), or None."""
@@ -719,9 +735,12 @@ def runtime_chart(results):
     if not best:
         return None
     rows = [(bench, {p: b[0][bench] for p, b in best.items() if bench in b[0]}) for bench in benchmarks(results)]
+    marked = {(bench, p) for p in best for pr in results[p]["runbench"]["programs"].values()
+              for bench, row in pr["benches"].items() if rough(row)}
     builds = sorted({b[2] for b in best.values()})
     named = builds[0] if len(builds) == 1 else "; ".join(f"{p} {b[2]}" for p, b in best.items())
-    return benchcharts.runtime(rows, {p: b[1] for p, b in best.items()}, f"ra-jit at {named}. " + where({p: results[p] for p in best}))
+    return benchcharts.runtime(rows, {p: b[1] for p, b in best.items()}, f"ra-jit at {named}. " + where({p: results[p] for p in best}),
+                               marked, f"≈: runs varied more than {ROUGH:g}×.")
 
 
 def runtime_tables(result):
@@ -736,7 +755,7 @@ def runtime_tables(result):
     for name, program in measured["programs"].items():
         for bench, row in program["benches"].items():
             lines.append(f"| {bench} | {seconds(row['release']['median_s'])} | **{seconds(row['ra-jit']['median_s'])}** | "
-                         f"{times(row['ra-jit']['ratio'])} |" + ((f" {times(row['checked']['ratio'])} |" if "checked" in row else " - |") if checked else "") +
+                         f"{ratio_cell(row)} |" + ((f" {times(row['checked']['ratio'])} |" if "checked" in row else " - |") if checked else "") +
                          f" {mem(row, 'release')} → {mem(row, 'ra-jit')} |")
         info = program["builds"]
         if info.get("release", {}).get("size_mb") is not None and info.get("ra-jit", {}).get("size_mb") is not None:
@@ -774,15 +793,17 @@ def runtime_section(results, start=RUN_START, end=RUN_END, name=None):
               "builds taking turns, median. A run is published only when every program did what the release build's did. Each "
               "platform is a machine of its own, and each number is ra-jit's time ÷ release's on it: 1x is as fast.", "",
               "| Benchmark | " + " | ".join(NAMES) + " |", "|---|" + "---:|" * len(NAMES)]
+    noisy = False
     for bench in benchmarks(results):
         cells = []
         for p in NAMES:
             row = next((pr["benches"][bench] for pr in (results[p]["runbench"]["programs"].values() if p in results else [])
                         if bench in pr["benches"]), None)
-            cells.append(times(row["ra-jit"]["ratio"]) if row and "ra-jit" in row else "-")
+            cells.append(ratio_cell(row) if row and "ra-jit" in row else "-")
+            noisy = noisy or bool(row and "ra-jit" in row and rough(row))
         lines.append(f"| {bench} | " + " | ".join(cells) + " |")
     means = [f"**{times(g)}**" if p in results and (g := (results[p]["runbench"].get("geomean") or {}).get("ra-jit")) else "-" for p in NAMES]
-    lines += [f"| **Geometric mean** | " + " | ".join(means) + " |", "",
+    lines += [f"| **Geometric mean** | " + " | ".join(means) + " |", "", *([ROUGH_NOTE, ""] if noisy else []),
               *machines(results, lambda r: f", each benchmark run {rounds(r)} times" if rounds(r) else ""), "",
               "<details><summary>Times, memory and builds, by platform</summary>"]
     for p, r in results.items():

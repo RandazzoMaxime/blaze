@@ -236,8 +236,9 @@ def memory(rows, where):
                      for p, by in rows)
 
 
-def runtime(rows, geomeans, where):
-    """`rows`: (benchmark, {platform: ra-jit's time / release's}); `geomeans`: {platform: geometric mean}."""
+def runtime(rows, geomeans, where, rough=(), rough_note=""):
+    """`rows`: (benchmark, {platform: ra-jit's time / release's}); `geomeans`: {platform: geometric mean};
+    `rough`: the (benchmark, platform) whose runs varied too much to read closely, labelled ≈."""
     rows = [(b, {k: v for k, v in by.items() if v}) for b, by in rows]
     rows = [(b, by) for b, by in rows if by]
     if not rows:
@@ -245,14 +246,15 @@ def runtime(rows, geomeans, where):
     measured = {k for _, by in rows for k in by}
     values = [v for _, by in rows for v in by.values()] + [v for v in geomeans.values() if v]
     lo, hi = bounds(values + [1.0], pad=1.3)
-    cells = lambda by: [(NAMES.index(k), by[k], None, None, f"{by[k]:.2f}×") if by.get(k) else
-                        (NAMES.index(k), None, None, None, f"{k}: not measured") for k in NAMES if k in measured]
-    bars = [(b, False, cells(by)) for b, by in rows]
+    cells = lambda b, by: [(NAMES.index(k), by[k], None, None, ("≈" if (b, k) in rough else "") + f"{by[k]:.2f}×") if by.get(k) else
+                           (NAMES.index(k), None, None, None, f"{k}: not measured") for k in NAMES if k in measured]
+    bars = [(b, False, cells(b, by)) for b, by in rows]
     if any(geomeans.values()):
-        bars.append(("Geometric mean", True, cells(geomeans)))
+        bars.append(("Geometric mean", True, cells(None, geomeans)))
+    marked = any(k in measured for _, k in rough)
     write("runtime", chart("How fast the program ra-jit builds runs",
                            f"Time of each benchmark with ra-jit's LLVM build ÷ its time with cargo build --release on the same "
-                           f"machine: 1× is as fast, to the right is slower. {where}",
+                           f"machine: 1× is as fast, to the right is slower. {where}" + (f" {rough_note}" if marked else ""),
                            bars, "time ÷ cargo build --release (log scale)", lo, hi, lambda v: f"{v:g}×",
                            reference=1.0, reference_label="as fast as release", legend=platform_legend(measured)))
     return "; ".join(f"{k} geometric mean {v:.2f}×" for k, v in geomeans.items() if v) or \
