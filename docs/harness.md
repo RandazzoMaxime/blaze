@@ -77,7 +77,8 @@ with reasons. The daemon's log says `backend: llvm -O2 fast emit` when LLVM is i
 | `breakers.py` | Every reduction under `harness/breakers/`, each run on its own so a crash in one does not hide the others. These are minimal cases of bugs found in real crates, rustc's tests and the fuzzer |
 | `unwinds.py` | Edits to functions a panic unwinds through |
 | `growth.py` | That the code of one function grows in a straight line with the arms of its match: the `serialize` `#[derive(Serialize)]` gives an internally tagged enum, a `?` in every arm, at 160 and 320 arms (issue #5) |
-| `asmedits.py` | Edits to `asm!` blocks and the code around them |
+| `asmedits.py` | Edits to `asm!` blocks and the code around them; with `RA_JIT_ASSEMBLER=cc`, assembled by the C compiler, as a build without LLVM does |
+| `norustc.py` | How often rustc and rustdoc run when `harness/norustc/fixture` is built, edited, tested, doctested and checked with `cargo ra-jit`, through a copy of the toolchain that logs every run; a count above `norustc/baseline.json` fails ([no-rustc.md](no-rustc.md), step A). `--record` lowers the baseline |
 | `fuzz/fuzz.py` | Generated programs, see below |
 | `uitest.py <rust checkout>` | rustc's own `tests/ui` run-pass tests. Every file is either run or left out with a counted reason |
 | `libsuite.py <rust checkout> coretests\|alloctests\|stdtests` | The standard library's test suites, cut down to what builds on stable |
@@ -286,7 +287,9 @@ takes about ten minutes. On Linux x86-64, Linux AArch64 and macOS arm64 it:
 
 `fork alone` builds and tests `vendor/rust-analyzer` outside this repository, and the `fmt`
 job checks formatting and has `harness/imports.py` import every script of the harness, so one
-that only a seldom tier or a person runs can't break unnoticed. A script does nothing when
+that only a seldom tier or a person runs can't break unnoticed. It also runs
+`harness/rustcsites.py`, which fails when ra-jit's code gains a place that starts rustc, rustdoc
+or cargo ([no-rustc.md](no-rustc.md)). A script does nothing when
 imported: its work is under `if __name__ == "__main__":`.
 
 The **full tier** runs nightly and by hand (`gh workflow run ra-jit.yaml --ref <branch> -f
