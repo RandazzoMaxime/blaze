@@ -1432,9 +1432,15 @@ impl<'db> Builder<'_, '_, 'db> {
             let Some(value) = value else { continue };
             let ty = self.written(ty);
             let at = At { category: Category::TypeAnnotation, span: MirSpan::PatId(pat) };
-            if let Pat::Path(_) = self.ctx.store[pat] {
-                // A constant's value is compared with `PartialEq<Self>`, both sides of a type
-                // they are subtypes of: `x: &'x str` matches a `&'static str`.
+            if let Pat::Path(_) = self.ctx.store[pat]
+                && let Some(constant) = self.pattern_constant(pat)
+            {
+                // rustc ascribes a constant's type to what it matches contravariantly:
+                // `x: &'x str` matches a `&'static str`, a `&'a str` only matches a
+                // `&'static str` if `'a: 'static`.
+                let constant = self.regions.local_tys[constant.into_raw().into_u32() as usize];
+                self.relate(constant, value, Variance::Covariant, at);
+            } else if let Pat::Path(_) = self.ctx.store[pat] {
                 let common = self.renumber(value);
                 self.relate(value, common, Variance::Covariant, at);
                 self.relate(ty, common, Variance::Covariant, at);
@@ -1442,6 +1448,22 @@ impl<'db> Builder<'_, '_, 'db> {
                 self.relate(value, ty, Variance::Covariant, at);
             }
         }
+    }
+
+    /// The local a constant pattern's value is put in to be compared.
+    fn pattern_constant(&self, pat: hir_def::hir::PatId) -> Option<LocalId> {
+        self.body.basic_blocks.iter().find_map(|(_, block)| {
+            block.statements.iter().find_map(|statement| match &statement.kind {
+                StatementKind::Assign(place, Rvalue::Use(operand))
+                    if statement.span == MirSpan::PatId(pat)
+                        && matches!(operand.kind, OperandKind::Constant { .. })
+                        && place.as_ref().projection.as_slice().is_empty() =>
+                {
+                    Some(place.as_ref().local)
+                }
+                _ => None,
+            })
+        })
     }
 
     /// The place the `let` of the pattern `pat` reads its value from: the fake read lowered at
@@ -2700,6 +2722,10 @@ impl<'db> Builder<'_, '_, 'db> {
         let path = match span {
             MirSpan::ExprId(expr) => match &self.ctx.store[expr] {
                 hir_def::hir::Expr::Path(path) => Some(path),
+                _ => None,
+            },
+            MirSpan::PatId(pat) => match &self.ctx.store[pat] {
+                Pat::Path(path) => Some(path),
                 _ => None,
             },
             _ => None,
