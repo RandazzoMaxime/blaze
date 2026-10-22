@@ -4,7 +4,7 @@ ra-jit has its own borrow checker, the crate `hir-ty-borrowck` in the rust-analy
 (`vendor/rust-analyzer/crates/hir-ty-borrowck`, next to `hir-ty`). It checks the MIR rust-analyzer
 lowers, the same MIR the code generator compiles, and it is meant to give exactly rustc's
 verdict: the same errors, on the same lines, and none where rustc gives none. It gives
-rustc's verdict on 84% of rustc's own borrow-check tests today, and on every one rustc
+rustc's verdict on 85% of rustc's own borrow-check tests today, and on every one rustc
 accepts; how they are scored and what is left is below.
 
 It runs as part of rust-analyzer's diagnostics, so the daemon computes it for every edited
@@ -95,8 +95,12 @@ All of these are rustc's, written from `compiler/rustc_borrowck` at the pinned n
   compared as `PartialEq` compares), casts, turbofishes (a method's own, `x.f::<&'a T>()`, too) and struct
   literal and variant paths, in closures too; `Self { .. }` and `Self(..)` in an impl have the
   impl's self type. A function item called through a variable
-  (`let f = foo::<&'static u32>; f(&x)`) has the variable's type, and the variable is used
-  where it is called (a captured constructor too). A struct literal proves the struct's where clauses, an array
+  (`let f = foo::<&'static u32>; f(&x)`, or through a reference, `let f = &foo::<..>`) has the
+  variable's type, and the variable is used where it is called (a captured constructor too).
+  A closure called through a variable takes its arguments as its signature says, whose
+  lifetimes rustc infers once, in its type (`let f = |_| {}; f(&x)` in a loop needs `x` to
+  live as long as `f`), unless it writes a parameter's or its return's type. `self` of a
+  method of `impl dyn Trait` is `dyn Trait + 'static`, as the impl's header defaults it. A struct literal proves the struct's where clauses, an array
   repeat `[x; N]` of more than one copy proves `x`'s type `Copy`, and a path that names an
   associated item through a type (`Foo::f`, `<()>::f`, `T::f`, not `Default::default`) has its
   generic arguments and its impl's self type and trait arguments well-formed, as rustc's user
@@ -175,8 +179,8 @@ With no borrow checker, the 245 units rustc accepts would pass. Now:
 
 | Mode | In scope | Pass | rustc accepts, ra-jit too | rustc rejects, same errors |
 |---|---|---|---|---|
-| Polonius | 1579 | 1329 (84.2%) | 245 of 245 | 1084 of 1334 |
-| NLL | 1577 | 1321 (83.8%) | 226 of 226 | 1095 of 1351 |
+| Polonius | 1579 | 1337 (84.7%) | 245 of 245 | 1092 of 1334 |
+| NLL | 1577 | 1329 (84.3%) | 226 of 226 | 1103 of 1351 |
 
 463 units are out of scope; 344 of them need a nightly feature. CI runs the scoring on Linux
 and fails below a floor a few units under the count there.
@@ -189,9 +193,9 @@ just, axum, nushell, delta, eza, tokei and starship it finds nothing, nor on the
 ## What is left
 
 Every failing unit is one where rustc gives an error ra-jit does not, or gives it on another
-line or with another code. By what is wrong, most first: 30 "lifetime may not live long
-enough" not reported, 22 E0597 not reported, 16 "lifetime may not live long enough" on
-another line, 12 E0309 and 11 each of E0310 and E0521 not reported, then a long tail. The causes, grouped:
+line or with another code. By what is wrong, most first: 29 "lifetime may not live long
+enough" not reported, 21 E0597 not reported, 16 "lifetime may not live long enough" on
+another line, 12 E0309, 11 E0310 and 10 E0521 not reported, then a long tail. The causes, grouped:
 
 - **Higher-ranked regions and placeholders** (`for<'a>` bounds, closures with higher-ranked
   signatures): rustc checks them with placeholders in universes; ra-jit does not yet, and
