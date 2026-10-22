@@ -328,6 +328,20 @@ SCENARIOS.update(UNBUILT_SCENARIOS)
 # and the edit patches what rustc linked.
 SCENARIOS["own-base-budget"] = ([[edit(M, "    x * 3\n", "    x * 4\n")]], ["patch"], 8, {"RA_JIT_OWN_BASE_MEMORY": "1"})
 
+# A program whose package has a library too, as each example of bevy's package has bevy: the
+# library is a crate of the program's files too, and the program depends on it.
+LIB_FILES = {
+    **FILES,
+    "app/Cargo.toml": FILES["app/Cargo.toml"] + '\n[lib]\nname = "applib"\n',
+    "app/src/main.rs": MAIN.replace('println!("dep {}", dep::value(2));', 'println!("dep {}", applib::base(dep::value(2)));'),
+    "app/src/lib.rs": "pub fn base(x: u64) -> u64 {\n    x + 1000\n}\n",
+}
+LIB_SCENARIOS = {
+    "new-fn-beside-lib": ([[edit(M, "    x * 3\n}\n", "    helper(x) * 3\n}\n\nfn helper(x: u64) -> u64 {\n    x + 2\n}\n")]],
+                          ["patch"], 0, {}),
+}
+SCENARIOS.update(LIB_SCENARIOS)
+
 # How the daemon's own base is to go before the first edit, in the scenarios that say.
 OWN_BASE = {"unbuilt-member": "built", "own-base-budget": "given up"}
 
@@ -404,6 +418,8 @@ def main():
             files = GENERIC_FILES
         elif name in UNBUILT_SCENARIOS:
             files = UNBUILT_FILES
+        elif name in LIB_SCENARIOS:
+            files = LIB_FILES
         write_workspace(ws, files)
         home, target, store = (os.path.join(work, it) for it in ("home", "target", "store"))
         for path in (home, target, store, fn_cache):

@@ -57,7 +57,9 @@ pub(crate) struct Outlines {
 struct Adding {
     /// Where the new functions are in the new text.
     functions: FxHashSet<TextRange>,
-    /// The files of the crates of the file.
+    /// The crates the file is a module of.
+    crates: Vec<ide_db::base_db::Crate>,
+    /// The files of those crates.
     files: Vec<FileId>,
 }
 
@@ -77,9 +79,9 @@ pub(crate) struct Changed {
     /// compiled them, or not where: a patch is right when the executable has no copy of them.
     pub(crate) inline: Vec<String>,
     /// When the edit added functions, changed nothing else but bodies that nothing else sees
-    /// into, and is one [`Outlines::adding`] took: the files of the crates of the file, whose
-    /// code is all that can see the new functions.
-    pub(crate) added: Option<Vec<FileId>>,
+    /// into, and is one [`Outlines::adding`] took: the crates the file is a module of, and
+    /// their files, whose code is all that can see the new functions.
+    pub(crate) added: Option<(Vec<ide_db::base_db::Crate>, Vec<FileId>)>,
 }
 
 impl Outlines {
@@ -182,7 +184,7 @@ impl Outlines {
                     copied,
                     generics,
                     inline,
-                    added: added.map(|it| it.files),
+                    added: added.map(|it| (it.crates, it.files)),
                 }
             })
             .collect();
@@ -471,7 +473,13 @@ fn outline_without(
 
 /// What [`Outlines::adding`] finds of an edit that gives `file` the text `text`.
 fn adding(db: &RootDatabase, file: FileId, text: &str) -> Option<Adding> {
-    let crates = relevant_crates(db, file);
+    // The crates of the file's source root hold every target of its package, and the
+    // library's are depended on by the others.
+    let crates: Vec<_> = (relevant_crates(db, file).iter().copied())
+        .filter(|&krate| {
+            hir_def::nameres::crate_def_map(db, krate).modules_for_file(db, file).next().is_some()
+        })
+        .collect();
     let edition = crates.first()?.data(db).edition;
     if crates.iter().any(|it| it.transitive_rev_deps(db).len() != 1) {
         return None;
@@ -510,7 +518,7 @@ fn adding(db: &RootDatabase, file: FileId, text: &str) -> Option<Adding> {
         }
     }
     let functions = added.iter().map(|it| it.syntax().text_range()).collect();
-    Some(Adding { functions, files: files.into_iter().map(|it| it.0).collect() })
+    Some(Adding { functions, crates, files: files.into_iter().map(|it| it.0).collect() })
 }
 
 /// The functions written in `now` that `was` has none of, when nothing else changed but bodies

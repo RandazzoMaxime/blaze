@@ -7561,15 +7561,15 @@ fn run_holding(
                 programs.iter_mut().for_each(|it| it.known.touch_bodies(&db, file));
                 continue;
             }
-            let crates = ide_db::base_db::relevant_crates(&db, file);
-            if let Some(files) = added {
+            if let Some((crates, files)) = added {
                 if std::env::var_os("RA_JIT_STATS").is_some() {
                     eprintln!("functions added: {file:?}");
                 }
-                programs.iter_mut().for_each(|it| it.known.touch_added(&db, crates, &files));
-                listed.touch(&db, Some(crates));
+                programs.iter_mut().for_each(|it| it.known.touch_added(&db, &crates, &files));
+                listed.touch(&db, Some(&crates));
                 continue;
             }
+            let crates = ide_db::base_db::relevant_crates(&db, file);
             let crates = (!crates.is_empty()).then_some(crates);
             programs.iter_mut().for_each(|it| it.known.touch(&db, crates));
             listed.touch(&db, crates);
