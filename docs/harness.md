@@ -99,6 +99,7 @@ with reasons. The daemon's log says `backend: llvm -O2 fast emit` when LLVM is i
 | `splices.py` | Edits that are hard on the splice: thread-locals, statics, vtables, function pointers, closures, panics, foreign calls. Counts how each step was linked |
 | `farsplices.py` | Splices into a binary whose code is further from its end than an AArch64 branch reaches |
 | `unreached.py` | Edits under `cargo ra-jit` that call instances of another crate's generic function the executable did not reach when it was linked: each is spliced, not linked in full. The daemon's own links, with `RA_JIT_RUSTC_BASE=0`. Linux and macOS; on Windows `cargo ra-jit` hands builds to cargo |
+| `loadedits.py` | A file written while a worker loads, after the worker read it and before it took its timestamp (held there with `RA_JIT_LOAD_PAUSE_MS`), is built as written: the next build, and the one after an edit of another crate, print the new text ([#53](https://github.com/indexable-inc/ra-jit/issues/53)). Linux and macOS |
 | `agents.py` | Random edits of the kind coding agents make, on a real workspace |
 | `invalidation.py` | How much the database redoes after different kinds of edit |
 | `movedlines.py` | A panic reports its new line after lines are added above its function (seven ways to panic, each against cargo), and moving a function compiles nothing |

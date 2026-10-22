@@ -39,6 +39,7 @@ HARNESSES = [
     ("core", ["farsplices.py"], {"RA_JIT_SPLICE": "1"}, on("linux-aarch64")),
     # `cargo ra-jit` hands Windows builds to cargo, so there the daemon links nothing to test.
     ("core", ["unreached.py"], {}, on("linux", "macos")),
+    ("core", ["loadedits.py"], {}, on("linux", "macos")),
     ("core", ["asmedits.py"], {}, EVERYWHERE),
     ("core", ["includes.py"], {}, EVERYWHERE),
     ("core", ["worktrees.py"], {}, EVERYWHERE),
