@@ -1,42 +1,56 @@
 # ra-jit: the daemon's own checks. The harnesses compare what ra-jit builds with what rustc
-# builds, under both producers, on Linux x86-64, Linux AArch64, Windows x86-64 and macOS arm64,
-# each on a machine of its own kind (ra-jit-platform.yaml). What runs when, and how long it
-# takes, is in docs/harness.md ("CI").
+# builds, under both producers, each platform on a machine of its own kind
+# (ra-jit-platform.yaml). What runs when, and how long it takes, is in docs/harness.md ("CI").
 #
-#   pull request, push to main   fmt; per platform the unit tests, one build, every harness in
-#                                parts of a few minutes each, and on Linux x86-64 and macOS
-#                                `cargo ra-jit` on small projects
-#   nightly, by hand             all of that, and `cargo ra-jit` on the larger projects (AArch64)
+#   fast tier: pull request, push to main, merge queue (about 10 minutes)
+#       fmt; on Linux x86-64, Linux AArch64 and macOS arm64 the unit tests, one build and the
+#       quick harnesses (harness/ci.py --parts fast); rustc's borrow-check tests with a floor
+#       under the passes and the pinned run-pass tests; vendor/rust-analyzer on its own
+#   full tier: nightly, by hand (an hour)
+#       all of that with every harness, Windows x86-64 too, `cargo ra-jit` on small projects
+#       (Linux x86-64, macOS) and the larger ones (AArch64), and the ripgrep bench. A failed
+#       nightly opens an issue, or adds to the one still open.
 #
 # A change to nothing but documentation or the site runs fmt alone. `ci` is the one check that
-# says whether everything that ran passed: it is the check branch rules require.
+# says whether everything that ran passed: it is the check branch rules and the merge queue
+# require.
 name: ra-jit
 on:
   push:
     branches: ["main"]
   pull_request:
+  merge_group:
   schedule:
     - cron: "23 6 * * *"
   workflow_dispatch:
+    inputs:
+      tier:
+        description: "fast or full"
+        default: full
+        type: choice
+        options: [full, fast]
 
 concurrency:
-  group: ra-jit-${{ github.ref }}
-  # On main a run finishes and the newest push waits behind it (a pending run is replaced by a
-  # newer one): with several agents pushing, cancelling left main without a single finished run.
-  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+  # A pull request's newer push cancels its run before. Every push to main and every entry of
+  # the merge queue runs to the end in a group of its own: with a merge every few minutes, one
+  # group for main replaced each waiting run with the next, and main had almost no finished run.
+  group: ra-jit-${{ github.event_name }}-${{ github.event_name == 'pull_request' && github.ref || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
   contents: read
 
 jobs:
-  # Whether anything but documentation changed: the files of the pull request, or of the push
-  # against the commit main was at before it. Anything that cannot be told counts as code.
+  # Whether anything but documentation changed: the files of the pull request, of the merge
+  # queue's entry, or of the push against the commit main was at before it. Anything that cannot
+  # be told counts as code. And which tier runs.
   changes:
     name: changes
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     outputs:
       code: ${{ steps.files.outputs.code }}
+      tier: ${{ steps.files.outputs.tier }}
     steps:
       - id: files
         env:
@@ -45,10 +59,14 @@ jobs:
           PR: ${{ github.event.pull_request.number }}
           BEFORE: ${{ github.event.before }}
           AFTER: ${{ github.sha }}
+          QUEUE_BASE: ${{ github.event.merge_group.base_sha }}
+          QUEUE_HEAD: ${{ github.event.merge_group.head_sha }}
+          TIER: ${{ github.event_name == 'schedule' && 'full' || inputs.tier || 'fast' }}
         run: |
           case "$EVENT" in
             pull_request) files=$(gh api --paginate "repos/$GITHUB_REPOSITORY/pulls/$PR/files" --jq '.[].filename') || files=;;
             push) files=$(gh api "repos/$GITHUB_REPOSITORY/compare/$BEFORE...$AFTER" --jq 'if (.files | length) >= 300 then "" else .files[].filename end') || files=;;
+            merge_group) files=$(gh api "repos/$GITHUB_REPOSITORY/compare/$QUEUE_BASE...$QUEUE_HEAD" --jq 'if (.files | length) >= 300 then "" else .files[].filename end') || files=;;
             *) files=;;
           esac
           code=false
@@ -61,6 +79,7 @@ jobs:
             esac
           done <<< "$files"
           echo "code=$code" | tee -a "$GITHUB_OUTPUT"
+          echo "tier=$TIER" | tee -a "$GITHUB_OUTPUT"
 
   fmt:
     name: fmt
@@ -82,8 +101,10 @@ jobs:
     with:
       platform: linux-x64
       os: ubuntu-24.04
-      cargo-ra-jit: true
-      bench: true
+      tier: ${{ needs.changes.outputs.tier }}
+      borrowck: true
+      cargo-ra-jit: ${{ needs.changes.outputs.tier == 'full' }}
+      bench: ${{ needs.changes.outputs.tier == 'full' }}
 
   linux-arm64:
     name: linux arm64
@@ -93,7 +114,8 @@ jobs:
     with:
       platform: linux-arm64
       os: ubuntu-24.04-arm
-      projects: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
+      tier: ${{ needs.changes.outputs.tier }}
+      projects: ${{ needs.changes.outputs.tier == 'full' }}
 
   macos:
     name: macos arm64
@@ -103,49 +125,19 @@ jobs:
     with:
       platform: macos-arm64
       os: macos-15
-      cargo-ra-jit: true
+      tier: ${{ needs.changes.outputs.tier }}
+      cargo-ra-jit: ${{ needs.changes.outputs.tier == 'full' }}
 
+  # Its build alone takes longer than the whole fast tier.
   windows:
     name: windows x64
     needs: changes
-    if: needs.changes.outputs.code == 'true'
+    if: needs.changes.outputs.code == 'true' && needs.changes.outputs.tier == 'full'
     uses: ./.github/workflows/ra-jit-platform.yaml
     with:
       platform: windows-x64
       os: windows-2025
-
-  # The borrow checker against rustc's own borrow-check tests (docs/borrowck.md), at the
-  # commit of the nightly whose verdicts they are scored by, with a floor under the passes.
-  borrowck:
-    name: borrowck
-    needs: changes
-    if: needs.changes.outputs.code == 'true'
-    runs-on: ubuntu-24.04
-    timeout-minutes: 60
-    steps:
-      - uses: actions/checkout@v7
-      - uses: ./.github/actions/toolchain
-      - run: rustup toolchain install nightly-2026-10-09 --profile minimal
-      - uses: Swatinem/rust-cache@v2
-      - run: cargo build -p ra-jit --release
-      - name: rustc's tests
-        run: |
-          git init -q "$RUNNER_TEMP/rust"
-          cd "$RUNNER_TEMP/rust"
-          git remote add origin https://github.com/rust-lang/rust
-          git sparse-checkout set tests/ui
-          git fetch -q --depth 1 --filter=blob:none origin a30aa9064df6a504b6a323c6884a2f4cfbfff666
-          git checkout -q FETCH_HEAD
-      - run: python3 harness/borrowck_ui.py "$RUNNER_TEMP/rust" --bin target/release/ra-jit --jobs 4 --mode both --min-pass 1309
-      # The few run-pass tests of rustc's that the nightly claims run once caught ra-jit failing,
-      # on every pull request (harness/ui-pinned.txt), from the tests of the pinned toolchain.
-      - name: pinned run-pass tests
-        run: |
-          dirs=$(sed 's/#.*//' harness/ui-pinned.txt | xargs -n1 dirname | sed 's|^|tests/ui/|' | sort -u)
-          git clone -q --depth 1 --branch 1.99.0 --filter=blob:none --sparse https://github.com/rust-lang/rust "$RUNNER_TEMP/rust-1.99"
-          git -C "$RUNNER_TEMP/rust-1.99" sparse-checkout set tests/auxiliary $dirs
-          cd harness
-          RA_JIT_BIN="$GITHUB_WORKSPACE/target/release/ra-jit" python3 uitest.py "$RUNNER_TEMP/rust-1.99" --tests ui-pinned.txt --jobs 4 --work "$RUNNER_TEMP/ui"
+      tier: full
 
   # vendor/rust-analyzer as the fork has it, built and tested outside this repository, so that
   # the subtree cannot come to depend on crates/ (docs/architecture-split.md, step 5).
@@ -162,12 +154,13 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: ${{ runner.temp }}/rust-analyzer
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - working-directory: ${{ runner.temp }}/rust-analyzer
         run: cargo test -p hir-ty -p hir-ty-borrowck -p hir-ty-wfcheck && cargo check -p hir
 
   ci:
     name: ci
-    needs: [changes, fmt, linux-x64, linux-arm64, macos, windows, borrowck, fork]
+    needs: [changes, fmt, linux-x64, linux-arm64, macos, windows, fork]
     if: always()
     runs-on: ubuntu-24.04
     timeout-minutes: 5
@@ -177,3 +170,15 @@ jobs:
         run: |
           echo "$NEEDS" | jq -r 'to_entries[] | "\(.value.result)\t\(.key)"'
           ! echo "$NEEDS" | jq -e 'any(.[]; .result == "failure" or .result == "cancelled")' > /dev/null
+
+  nightly:
+    name: nightly issue
+    needs: ci
+    if: always() && github.event_name == 'schedule' && needs.ci.result != 'success'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      issues: write
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/nightly-issue

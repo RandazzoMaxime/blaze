@@ -1,7 +1,7 @@
 # One platform of ra-jit.yaml: its unit tests, one build of ra-jit with both producers, and the
-# harnesses against that build, split into parts (harness/ci.py) that each run on a machine of
-# their own. Each platform builds on its own kind of machine, so nothing is cross-compiled or
-# emulated but what `buildmodel.py` builds for other targets.
+# harnesses of the tier against that build, split into parts (harness/ci.py) that each run on a
+# machine of their own. Each platform builds on its own kind of machine, so nothing is
+# cross-compiled or emulated but what `buildmodel.py` builds for other targets.
 name: ra-jit platform
 on:
   workflow_call:
@@ -14,6 +14,14 @@ on:
         description: the hosted runner
         type: string
         required: true
+      tier:
+        description: "`fast` (the quick harnesses) or `full` (every harness), as in harness/ci.py"
+        type: string
+        required: true
+      borrowck:
+        description: rustc's borrow-check tests and the pinned run-pass tests, against this build
+        type: boolean
+        default: false
       cargo-ra-jit:
         description: "`cargo ra-jit` against cargo on small projects at pinned commits"
         type: boolean
@@ -33,6 +41,11 @@ env:
   CARGO_TERM_COLOR: always
   # Git Bash on Windows has `python` and no `python3`.
   PYTHON: ${{ startsWith(inputs.os, 'windows') && 'python' || 'python3' }}
+  # sccache keeps what rustc compiled in the Actions cache, for the steps that set RUSTC_WRAPPER:
+  # rust-cache keeps the dependencies from crates.io and drops the crates of this repository and
+  # vendor/, which are most of a build. The harnesses run without it, since cargo_ra_jit.py
+  # tests a user's own wrapper.
+  SCCACHE_GHA_ENABLED: "true"
 
 defaults:
   run:
@@ -53,7 +66,11 @@ jobs:
         with:
           shared-key: tests
           save-if: ${{ github.ref == 'refs/heads/main' }}
+      - uses: mozilla-actions/sccache-action@v0.0.9
       - run: $PYTHON harness/unittests.py
+        env:
+          RUSTC_WRAPPER: sccache
+      - run: sccache --show-stats
 
   build:
     name: build
@@ -72,6 +89,7 @@ jobs:
         with:
           shared-key: build
           save-if: ${{ github.ref == 'refs/heads/main' }}
+      - uses: mozilla-actions/sccache-action@v0.0.9
       # On Windows the build is against the static C runtime, and names libraries of the SDK
       # that the linker is not otherwise shown.
       - name: cargo build -p ra-jit --release --features llvm
@@ -81,6 +99,9 @@ jobs:
             export CARGO_ENCODED_RUSTFLAGS=$(printf '%s\x1f%s\x1f%s\x1f%s' -C target-feature=+crt-static -L "native=$(cygpath -w "$sdk")")
           fi
           cargo build -p ra-jit --release --features llvm --locked
+        env:
+          RUSTC_WRAPPER: sccache
+      - run: sccache --show-stats
       # The four binaries run each other from next to themselves. A tar keeps them executable.
       - name: Pack
         working-directory: target/release
@@ -93,7 +114,7 @@ jobs:
           path: target/release/ra-jit.tar
           retention-days: 3
       - id: parts
-        run: echo "parts=$($PYTHON harness/ci.py --parts)" >> "$GITHUB_OUTPUT"
+        run: echo "parts=$($PYTHON harness/ci.py --parts ${{ inputs.tier }})" >> "$GITHUB_OUTPUT"
 
   harness:
     name: harness (${{ matrix.backend }}, ${{ matrix.part }})
@@ -122,7 +143,7 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           case "$RA_JIT_PART" in
-            core) sudo apt-get install -y valgrind gdb;;
+            core|quick-1) sudo apt-get install -y valgrind gdb;;
             buildmodel) [ "$(uname -m)" = x86_64 ] && sudo apt-get install -y gcc-aarch64-linux-gnu musl-tools qemu-user || true;;
           esac
         env:
@@ -173,6 +194,45 @@ jobs:
             [ -f "$report" ] && { echo "::group::$report"; head -c 20000 "$report"; echo; echo "::endgroup::"; }
           done
           true
+
+  # The borrow checker against rustc's own borrow-check tests (docs/borrowck.md), at the
+  # commit of the nightly whose verdicts they are scored by, with a floor under the passes; and
+  # the few run-pass tests of rustc's that the nightly claims run once caught ra-jit failing
+  # (harness/ui-pinned.txt), from the tests of the pinned toolchain.
+  borrowck:
+    name: borrowck
+    if: inputs.borrowck
+    needs: build
+    runs-on: ${{ inputs.os }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/toolchain
+        with:
+          llvm: run
+      - run: rustup toolchain install nightly-2026-10-09 --profile minimal
+      - uses: actions/download-artifact@v8
+        with:
+          name: ra-jit-${{ inputs.platform }}
+          path: target/release
+      - run: tar -xf ra-jit.tar
+        working-directory: target/release
+      - name: rustc's tests
+        run: |
+          git init -q "$RUNNER_TEMP/rust"
+          cd "$RUNNER_TEMP/rust"
+          git remote add origin https://github.com/rust-lang/rust
+          git sparse-checkout set tests/ui
+          git fetch -q --depth 1 --filter=blob:none origin a30aa9064df6a504b6a323c6884a2f4cfbfff666
+          git checkout -q FETCH_HEAD
+      - run: python3 harness/borrowck_ui.py "$RUNNER_TEMP/rust" --bin target/release/ra-jit --jobs 4 --mode both --min-pass 1309
+      - name: pinned run-pass tests
+        run: |
+          dirs=$(sed 's/#.*//' harness/ui-pinned.txt | xargs -n1 dirname | sed 's|^|tests/ui/|' | sort -u)
+          git clone -q --depth 1 --branch 1.99.0 --filter=blob:none --sparse https://github.com/rust-lang/rust "$RUNNER_TEMP/rust-1.99"
+          git -C "$RUNNER_TEMP/rust-1.99" sparse-checkout set tests/auxiliary $dirs
+          cd harness
+          RA_JIT_BIN="$GITHUB_WORKSPACE/target/release/ra-jit" python3 uitest.py "$RUNNER_TEMP/rust-1.99" --tests ui-pinned.txt --jobs 4 --work "$RUNNER_TEMP/ui"
 
   # `cargo ra-jit` in place of cargo on projects at pinned commits, and the flags, the daemon's
   # life and plain cargo after `ra-jit enable`. Incremental compilation is left to the profile,

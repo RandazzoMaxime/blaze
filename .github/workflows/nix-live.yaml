@@ -1,5 +1,9 @@
 # What is new since the fork: the flake (per-unit nix builds of the daemon and the demo), the
-# unit graphs behind them, the Game of Life demo, and live edits (ra-jit-live).
+# unit graphs behind them, the Game of Life demo, and live edits (ra-jit-live). It takes about
+# 40 minutes, so it runs nightly, by hand, and on a change to the flake, nix/ or the
+# dependencies (which the unit graphs are generated from); the
+# fast tier of ra-jit.yaml has live edits on every change (live_e2e.py, tiers.py). A failed
+# nightly opens an issue, or adds to the one still open.
 #
 #   unit graphs   nix/units/*.json are what `nix/unit_graph.py` generates from Cargo.lock now
 #   nix           `nix build` of the daemon, the demo and the per-unit builds, and the flake's apps
@@ -14,36 +18,24 @@ on:
       - "flake.nix"
       - "flake.lock"
       - "nix/**"
-      - "Cargo.toml"
       - "Cargo.lock"
-      - "crates/**"
-      - "demo/**"
-      - "harness/live/**"
-      - "harness/live_e2e.py"
-      - ".gitmodules"
-      - "vendor/**"
+      - "**/Cargo.toml"
       - ".github/workflows/nix-live.yaml"
   pull_request:
     paths:
       - "flake.nix"
       - "flake.lock"
       - "nix/**"
-      - "Cargo.toml"
       - "Cargo.lock"
-      - "crates/**"
-      - "demo/**"
-      - "harness/live/**"
-      - "harness/live_e2e.py"
-      - ".gitmodules"
-      - "vendor/**"
+      - "**/Cargo.toml"
       - ".github/workflows/nix-live.yaml"
+  schedule:
+    - cron: "11 5 * * *"
   workflow_dispatch:
 
 concurrency:
-  group: nix-live-${{ github.ref }}
-  # On main a run finishes and the newest push waits behind it (a pending run is replaced by a
-  # newer one): with several agents pushing, cancelling left main without a single finished run.
-  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+  group: nix-live-${{ github.event_name }}-${{ github.event_name == 'pull_request' && github.ref || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
   CARGO_INCREMENTAL: 0
@@ -158,3 +150,15 @@ jobs:
       - name: the demo builds on macOS
         run: cargo build --locked
         working-directory: demo/life
+
+  nightly:
+    name: nightly issue
+    needs: [unit-graphs, nix, nix-darwin, demo, live-edits]
+    if: always() && github.event_name == 'schedule' && (contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled'))
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      issues: write
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/nightly-issue

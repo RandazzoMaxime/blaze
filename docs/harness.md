@@ -28,12 +28,14 @@ need a few gigabytes there.
 
 ### The gate
 
-The gate is what CI runs on every pull request and push to main. A change is not done until
-all of it exits 0 under both backends. `harness/ci.py` is the one list of it: which harness
-runs in which part, on which hosts and under which backend.
+The gate is what CI runs: its fast tier on every pull request and push to main, all of it
+nightly ([CI](#ci)). A change is not done until all of it exits 0 under both backends.
+`harness/ci.py` is the one list of it: which harness runs in which part, in which tier, on
+which hosts and under which backend.
 
-    python3 ci.py --list            # every harness, its part, its environment
+    python3 ci.py --list            # every harness, its part, its quick part, its environment
     python3 ci.py --parts           # the parts that have harnesses on this machine
+    python3 ci.py --parts fast      # the fast tier's parts here (quick-1, quick-2)
     python3 ci.py core              # run one part here, as CI does
 
 A part runs all of its harnesses even when one fails, then names the ones that failed and how
@@ -242,25 +244,46 @@ For a CI failure, the last line of the harness step lists which scripts failed.
 
 ## CI
 
-`.github/workflows/ra-jit.yaml` runs on every pull request, every push to main, nightly and by
-hand. It calls `ra-jit-platform.yaml` once for each of Linux x86-64, Linux AArch64, macOS arm64
-and Windows x86-64, each on a machine of its own kind. Each platform:
+`.github/workflows/ra-jit.yaml` runs in two tiers. It calls `ra-jit-platform.yaml` once for
+each platform, each on a machine of its own kind.
+
+The **fast tier** runs on every pull request, every push to main and every entry of the merge
+queue, and takes about ten minutes. On Linux x86-64, Linux AArch64 and macOS arm64 it:
 
 - builds ra-jit once, with the `llvm` feature, and hands the binary to its other jobs;
 - runs `harness/unittests.py`;
-- runs each part of `ci.py --parts` under each backend as a job of its own;
-- on Linux x86-64 and macOS, runs `cargo_ra_jit.py` on its checks, on ripgrep and
-  hyperfine, and on fd. Nightly and by hand, Linux AArch64 also runs it on ripgrep, fd,
-  bat, hyperfine, just, axum and nushell, with each project's tests.
+- runs the parts of `ci.py --parts fast` (`quick-1` and `quick-2`, three to six minutes each)
+  under each backend, as a job each;
+- on Linux x86-64, runs rustc's borrow-check tests with a floor under the passes, and the
+  run-pass tests of `harness/ui-pinned.txt`, against that build.
+
+`fork alone` builds and tests `vendor/rust-analyzer` outside this repository.
+
+The **full tier** runs nightly and by hand (`gh workflow run ra-jit.yaml --ref <branch> -f
+tier=full`, or `-f tier=fast`), and takes about an hour. It adds Windows x86-64, every part
+of `ci.py --parts` (`keys.py`, `buildmodel.py`, the store and the daemon harnesses,
+`debuginfo.py`), `cargo_ra_jit.py` on its checks, on ripgrep and hyperfine and on fd (Linux
+x86-64 and macOS), and on ripgrep, fd, bat, hyperfine, just, axum and nushell with each
+project's tests (Linux AArch64), and the ripgrep bench. A failed nightly opens an issue named
+"Nightly ra-jit failed", or comments on it while it is open
+(`.github/actions/nightly-issue`).
 
 A change to nothing but documentation or the site runs `fmt` and nothing else. On a pull
-request a newer push cancels the run before it. On main a run always finishes, and the newest
-push waits behind it.
+request a newer push cancels the run before it. Every push to main and every merge-queue entry
+runs to the end in a concurrency group of its own: with one group for main, a merge every few
+minutes replaced each waiting run with the next, and 7 of 10 runs on main were cancelled.
+
+The build and the unit tests compile through sccache, which keeps rustc's output in the
+Actions cache; rust-cache keeps the dependencies from crates.io and leaves out the crates of
+this repository and `vendor/`, which are most of the build. The harnesses run without the
+wrapper, since `cargo_ra_jit.py` tests a user's own.
 
 `ci` is the job that says whether everything that ran passed, and it is the one check branch
-rules require. A job that is renamed or split does not change it. In the run of 2026-10-20 the
-builds took 6 minutes (Linux) to 13 minutes (Windows), and most parts 5 to 12 minutes after
-that. The whole run took about 35 minutes, and Windows finished last.
+rules and the merge queue require. A job that is renamed or split does not change it.
+Measured on 2026-10-22 ([#67](https://github.com/indexable-inc/ra-jit/pull/67)): the fast
+tier took 15.4 minutes with the sccache cache empty and 10.1 with it filled, where the macOS
+build (4 minutes) and then its harnesses (6) are the longest path. One tier that ran everything
+took 44 to 67 minutes before.
 
 The repository ruleset `main` (Settings, Rules) holds the default branch to three rules. A
 push to it needs `ci` to have passed on the commit pushed, the branch can't be deleted, and
@@ -281,12 +304,15 @@ out right, it fails the run until it is taken off the list:
 
 The other workflows: `bench-readme.yaml` measures real projects on the dedicated benchmark
 machine and commits the README's numbers to main. It runs only while the repository variable
-`BENCH_RUNNER` is `true` ([benchmarks.md](benchmarks.md)). `bench.yaml` (compile times) and
-`claims.yaml` (rustc's `tests/ui`) run on pull requests and pushes too, `nix-live.yaml` and
-`fork-sync.yaml` on pushes to main that touch what they cover, `fuzz.yaml` nightly, and
-`live-*.yaml` on their own branches. None of them is part of `ci`; on a pull request claims
-runs only its first 150 tests, so the few that once differed from rustc
-(`harness/ui-pinned.txt`, `uitest.py --tests`) run in ra-jit.yaml's `borrowck` job, which is. `site.yaml` deploys the
+`BENCH_RUNNER` is `true` ([benchmarks.md](benchmarks.md)). `bench.yaml` (the store's
+microbenchmarks, two minutes) runs on pull requests and pushes too. `claims.yaml` (all of
+rustc's `tests/ui`, both backends, and the scoreboard) and `nix-live.yaml` (the flake, the demo
+and live edits, 40 minutes; also on a change to the flake, `nix/` or the dependencies) run
+nightly and open an issue when they fail, like ra-jit.yaml's full tier. `fork-sync.yaml` runs
+on pushes to main that touch `vendor/`, `fuzz.yaml` nightly, and `live-*.yaml` on their own
+branches. None of them is part of `ci`; the few `tests/ui` programs that once differed from
+rustc (`harness/ui-pinned.txt`, `uitest.py --tests`) run in ra-jit.yaml's `borrowck` job,
+which is. `site.yaml` deploys the
 site, and `release.yaml` builds releases from tags, each target through
 `.github/scripts/build_release.py` (the `dist` profile with PGO, [reports/RELEASE-BUILD.md](reports/RELEASE-BUILD.md)),
 the recipe the flake's `dist` runs too. `pgo.yaml` trains the profiles it uses, by hand and on
