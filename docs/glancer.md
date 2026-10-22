@@ -108,8 +108,11 @@ were stable names: 665,474,913 bytes for one `helix-parsec` closure, and the lar
    ran, so this half is mostly done. Proc macros: one proc-macro server process
    (`proc_macro_processes: 1`), and no cache of expansions.
 4. **Syntax trees.** rowan everywhere. The parse query keeps at most 128 trees, macro
-   expansions 512 and 1,024, bodies 512 and 4,096 (salsa `lru` attributes in the subtree), so
-   retained syntax is bounded already; what a flat tree would save is transient.
+   expansions 512 and 1,024, bodies 512 and 4,096 (salsa `lru` attributes in the subtree),
+   but ra-jit's `body_syntax` held each anchor's green node, which kept whole files' trees
+   past that lru until #42's step (a)
+   ([flat-syntax.md](flat-syntax.md#step-a-no-tree-outlives-its-query)). Since #42's steps
+   (b) and (c) the compiler's parses make flat trees (arrays) behind rowan's cursor.
 5. **Memory discipline.** No eviction of inference or MIR: `infer`, `mir_body` and
    ra-jit's monomorphized MIR have no `lru`, and ra-jit drops nothing. Measuring is there:
    with `RA_JIT_MEMORY=<dir>`, `crates/ra-jit/src/memory.rs` reports resident memory after
@@ -210,6 +213,21 @@ worker the daemon starts for the next project (940 MB on ripgrep). Sharing what 
 keeps, the spare, and a patched salsa that can evict a query with cycle handling are the
 next steps, each its own issue.
 
+**Measured (2026-10-22, #56, #57; Linux x86-64, 16 cores).** The spare is gone once a
+workspace is loaded: one is started for a build as it begins, and `RA_JIT_SPARE=ready` keeps
+the old one. An idle daemon holds 1.28 GB instead of 2.64; the daemon after `bench.py`'s edits
+2.31 GB instead of 3.63 on ripgrep and 11.36 instead of 12.70 on nushell, with the same edit
+times. A second project's cold start is unchanged
+and its warm start pays the library's load, 1.3 s on ripgrep and 0.9 s on nushell
+([cargo.md](cargo.md#what-a-build-does)). A vendored salsa patched to tell an evicted memo from one
+a panic left lets `lru` on `infer`, the MIR queries and `inlinable` through nushell's cold
+build and edits, but it is not merged: it took nushell's daemon after edits from 12.9 to
+12.45 GB and its signature edit from 0.42 to 2.43 s, since what depends on an evicted memo
+cannot be backdated; on `infer` and `runtime_mir_body` alone, 0.35 GB and 0.42 to 0.64 s. A
+forced `mi_collect` after each request returned 30 to 40 MB of ripgrep's worker. The rest is
+the values the daemon keeps, `described` first (#55)
+([research/daemon-memory.md](research/daemon-memory.md#2026-10-22-the-spare-and-eviction)).
+
 ### Item 1: frozen dependency artifacts
 
 **Design.** One artifact per dependency crate, content-addressed by its source hash, cfg,
@@ -269,11 +287,20 @@ crate graph.
 
 ### Item 4: a flat syntax tree for files nobody edits
 
-Taken up on 2026-10-22 by its own lane (#42); what follows is why it had been deferred,
-which that lane measures against. Retained syntax is already bounded by the parse LRU; what a flat tree saves is
-the transient cost of parsing and the allocations rowan makes, and step 0 has to show that
-those are a large share of load before this is worth rewriting the parser's output and
-every `ItemTree` lowering. Item 1 would remove most dependency parsing anyway.
+Its own lane (#42); the measurements and the design are in
+[flat-syntax.md](flat-syntax.md). On main after the first request, syntax was 12.7% of
+nushell's live heap (1,164 MB), 22% of ripgrep's (315 MB) and 8% of helix's (852 MB), most of
+it green trees of whole files that `body_syntax` kept past the parse lru. Step (a), merged,
+keeps an anchor's text and range instead and parses it again when asked: nushell's syntax
+falls to 676 MB and helix's to 436 MB, resident memory right after the first request is
+1.1 GB and 2.1 GB less, and ready time does not move. In cold time, building green trees and
+walking red ones are 16% of ripgrep's samples to the first request and 7% of nushell's. Steps
+(b) and (c), merged, put a flat tree behind rowan's cursor so that no lowering code changes:
+building trees falls from 12.1% of ripgrep's cold-start CPU to 1.9% and from 5.4% to 1.1% on
+nushell, trees as a whole take a quarter to a third less CPU, and ready time and resident
+memory do not move. What is left of syntax is lexing and parsing to events (3.6% on nushell),
+token trees (4.0%) and walking (5.2%), and in memory macro expansions' trees and span maps.
+Item 1 would remove most dependency parsing anyway; each says here which share it took.
 
 ### Item 6: no LSP-shaped guessing
 
@@ -318,7 +345,7 @@ stops.
 | salsa eviction of queries with cycle handling (item 5) | #57 | spare, after #56 |
 | Frozen dependency artifacts (item 1) | #40 | glancer, after #38 |
 | The workspace's own state (item 2) | #41 | glancer, after #40's 1a |
-| A flat syntax tree (item 4) | #42 | flat-syntax, no longer deferred |
+| A flat syntax tree (item 4) | #42 | flat-syntax: done, steps (a), (b) and (c) merged |
 | ra-jit never runs rustc | #81 to #93 | no-rustc; steps A to M of `docs/no-rustc.md`, A to C ready to assign |
 
 - **no-rustc.** Andrew's rule is that ra-jit must never run rustc. Since cold-start (#11)

@@ -44,8 +44,8 @@ a platform's memory is its result's.
 
 Every table of the README comes with its chart (benchcharts.py), written to
 docs/benchmarks/charts/ by the same call that writes the table: the edit speed-ups with the
-build table, memory with the memory table, the runtime ratios with the runtime table, each with
-a bar per platform. `--render` writes every table and chart again from the stored results, and
+build table, memory and disk with the memory table, the runtime ratios with the runtime table,
+each ra-jit against cargo with a bar per platform and each platform's geometric mean. `--render` writes every table and chart again from the stored results, and
 `--charts` the charts alone.
 
 The last line says `changed` or `unchanged`, and so does `changed=true|false` in
@@ -223,12 +223,13 @@ def machines(results, extra=lambda r: ""):
 
 
 def where(results):
-    """Each platform's machine (the start of its name), commit and date, for a chart's subtitle."""
+    """Each platform's machine (the start of its name) and the day it was measured, for a chart's
+    footer; the commit is in the table's machine lines."""
     def name(r):
         host = r.get("host") or {}
         named = re.split(r" \(|, ", host.get("name") or "")[0]
         return named or re.sub(r"( \d+-Core)? Processor$", "", host.get("cpu") or "") or "one machine"
-    return " ".join(f"{p}: {name(r)}, ra-jit {short(r.get('commit'))}, {r['date'][:10]}." for p, r in results.items())
+    return " ".join(f"{p}: {name(r)}, {r['date'][:10]}." for p, r in results.items())
 
 
 def keys_of(results, backend):
@@ -285,6 +286,24 @@ def memory_chart(results, backend):
     return benchcharts.memory(rows, where({p: r for p, r in results.items() if has_memory(r)}))
 
 
+def on_disk(measured):
+    """(cargo's target directory, ra-jit's target directory, store and home) in MB, once a
+    project's edits are done, or None."""
+    disk = measured.get("disk_mb") or {}
+    ours = sum(disk.get(k) or 0 for k in ("target", "store", "home"))
+    return (disk["cargo target"], ours) if disk.get("cargo target") and ours else None
+
+
+def disk_chart(results, backend):
+    rows = []
+    for key in keys_of(results, backend):
+        by = {p: d for p, r in results.items() if key in r["results"] and (d := on_disk(r["results"][key]))}
+        if by:
+            rows.append((label_of(results, key), by))
+    return benchcharts.disk(rows, where({p: r for p, r in results.items()
+                                         if any(on_disk(m) for k, m in r["results"].items() if k.endswith("/" + backend))}))
+
+
 def readme_section(results, start=START, end=END, name=None):
     """The README's build table: for the projects, an edit to one function on each platform, then
     every kind of edit by platform; for one project measured on its own (`name`), a row per platform."""
@@ -292,7 +311,7 @@ def readme_section(results, start=START, end=END, name=None):
     workflow = f"bench-{name}" if name else "bench-readme"
     lines = [start]
     if not name and (summary := edits_chart(results, backend)):
-        lines += [benchcharts.picture("edits", f"How many times faster an edit builds under ra-jit than under cargo, by platform: {summary}"), ""]
+        lines += [benchcharts.picture("edits", f"How much faster an edit builds under ra-jit than under cargo, by platform: {summary}"), ""]
     lines += [f"Edit, then build, {'on real projects at pinned commits' if not name else name + ' at its pinned commit'}: "
               "incremental `cargo build` → `cargo ra-jit build`, both "
               "warm, same linker, Cranelift, the median of each run's edits. Each platform is a machine of its "
@@ -368,7 +387,9 @@ def memory_readme(results):
     if backend is None:
         return "\n".join([MEM_START, "Memory: no platform's stored run measured it yet.", MEM_END])
     if summary := memory_chart(measured, backend):
-        lines += [benchcharts.picture("memory", f"Peak memory while an edit to one function builds, by platform: {summary}"), ""]
+        lines += [benchcharts.picture("memory", f"Peak memory while an edit to one function builds, ra-jit against cargo, by platform: {summary}"), ""]
+    if summary := disk_chart(measured, backend):
+        lines += [benchcharts.picture("disk", f"What a project's build keeps on disk, ra-jit against cargo, by platform: {summary}"), ""]
     lines += [f"Memory and disk, {BACKEND_NAMES[backend]}, from the same runs as the build table. Peak: the most every process "
               "doing the work held at once, cargo → ra-jit. For ra-jit that is the daemon, its workers and what they run, and "
               "`cargo ra-jit build` with any cargo it ran; for plain cargo, cargo itself, rustc, build scripts and the linker. "
@@ -739,8 +760,8 @@ def runtime_chart(results):
               for bench, row in pr["benches"].items() if rough(row)}
     builds = sorted({b[2] for b in best.values()})
     named = builds[0] if len(builds) == 1 else "; ".join(f"{p} {b[2]}" for p, b in best.items())
-    return benchcharts.runtime(rows, {p: b[1] for p, b in best.items()}, f"ra-jit at {named}. " + where({p: results[p] for p in best}),
-                               marked, f"≈: runs varied more than {ROUGH:g}×.")
+    return benchcharts.runtime(rows, f"ra-jit's LLVM at {named}. " + where({p: results[p] for p in best}),
+                               marked, f"≈: that benchmark's runs varied by more than {ROUGH:g}×, so read it as rough.")
 
 
 def runtime_tables(result):
@@ -765,7 +786,7 @@ def runtime_tables(result):
                          f"{megabytes(info['release'].get('build_largest_mb'))} → {megabytes(info['ra-jit'].get('build_largest_mb'))} |")
     geomean = measured.get("geomean") or {}
     if geomean.get("ra-jit"):
-        lines.append(f"| **Geometric mean** | | | **{times(geomean['ra-jit'])}** |" +
+        lines.append(f"| **All benchmarks (geometric mean)** | | | **{times(geomean['ra-jit'])}** |" +
                      (f" {times(geomean['checked'])} |" if checked and geomean.get("checked") else (" |" if checked else "")) + " |")
     if sized:
         lines += ["", "What each program takes, release → ra-jit: its build from cold (for ra-jit, cargo running the build "
@@ -787,7 +808,7 @@ def runtime_section(results, start=RUN_START, end=RUN_END, name=None):
     workflow = f"bench-{name}" if name else "bench-readme"
     lines = [start]
     if not name and (summary := runtime_chart(results)):
-        lines += [benchcharts.picture("runtime", f"Time of each benchmark, ra-jit's build ÷ cargo build --release, by platform: {summary}"), ""]
+        lines += [benchcharts.picture("runtime", f"How fast each benchmark runs built by ra-jit, against cargo build --release, by platform: {summary}"), ""]
     lines += ["How fast the programs run. Each program is built by `cargo build --release` and by ra-jit with LLVM at `-O3`, "
               "every crate of it compiled by ra-jit, with the release profile; each benchmark is then run several times, the "
               "builds taking turns, median. A run is published only when every program did what the release build's did. Each "
@@ -803,7 +824,7 @@ def runtime_section(results, start=RUN_START, end=RUN_END, name=None):
             noisy = noisy or bool(row and "ra-jit" in row and rough(row))
         lines.append(f"| {bench} | " + " | ".join(cells) + " |")
     means = [f"**{times(g)}**" if p in results and (g := (results[p]["runbench"].get("geomean") or {}).get("ra-jit")) else "-" for p in NAMES]
-    lines += [f"| **Geometric mean** | " + " | ".join(means) + " |", "", *([ROUGH_NOTE, ""] if noisy else []),
+    lines += [f"| **All benchmarks (geometric mean)** | " + " | ".join(means) + " |", "", *([ROUGH_NOTE, ""] if noisy else []),
               *machines(results, lambda r: f", each benchmark run {rounds(r)} times" if rounds(r) else ""), "",
               "<details><summary>Times, memory and builds, by platform</summary>"]
     for p, r in results.items():
@@ -822,6 +843,7 @@ def charts():
     measured = {p: r for p, r in results.items() if has_memory(r)}
     if backend := memory_backend(measured):
         print("memory:", memory_chart(measured, backend))
+        print("disk:", disk_chart(measured, backend))
     print("runtime:", runtime_chart(stored_all("runtime")))
 
 

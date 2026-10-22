@@ -13,7 +13,7 @@ pub(crate) mod run;
 mod say;
 pub(crate) mod script;
 mod state;
-mod switch;
+pub(crate) mod switch;
 mod units;
 
 use std::{collections::BTreeMap, path::Path, process::Command, time::Instant};
@@ -143,7 +143,8 @@ fn plain_cargo(args: Vec<String>) -> anyhow::Result<i32> {
 
 /// Builds what `asked` names and then runs what the subcommand runs. Cargo builds what
 /// the daemon has not been given yet and what only cargo acts on (a manifest, a build
-/// script), and so does it a program the daemon was asked for and did not build.
+/// script), and so does it a program the daemon was asked for and did not build, unless the
+/// source has an error: the build fails with it.
 fn build(asked: &Invocation) -> anyhow::Result<i32> {
     use crate::trace::{CLIENT, note};
     note("client start", CLIENT, crate::trace::began());
@@ -166,7 +167,11 @@ fn build(asked: &Invocation) -> anyhow::Result<i32> {
             held = Some(settled);
             state
         }
-        Ok(Err(ToCargo(state, reason))) => {
+        Ok(Err(NotServed::Error(said))) => {
+            eprintln!("{said}");
+            return Ok(FAILED);
+        }
+        Ok(Err(NotServed::Cargo(ToCargo(state, reason)))) => {
             say::fallback(&reason, "building with cargo");
             let mut counts = state.counts;
             *counts.cargo.entry(reason).or_default() += 1;
@@ -248,8 +253,7 @@ fn staged(
     });
     let state = match Built::staged(asked, &crates)? {
         Ok(built) => daemons(asked, cwd, key, built)
-            .unwrap_or_else(|why| Err(format!("{why:#}")))
-            .map_err(|why| NotStaged::Cargos(Some(why), None)),
+            .unwrap_or_else(|why| Err(NotStaged::Cargos(Some(format!("{why:#}")), None))),
         Err(code) => Err(NotStaged::Failed(code)),
     };
     if let (Err(_), Some(id)) = (&state, ahead) {
@@ -259,28 +263,39 @@ fn staged(
 }
 
 /// The programs of a build whose workspace crates cargo built what stands in for, as the
-/// daemon builds them. `Err` is why it did not build one.
+/// daemon builds them. `Err` is what is not the daemon's: the source has an error, which is
+/// said, or why cargo builds it.
 fn daemons(
     asked: &Invocation,
     cwd: &Path,
     key: &str,
     built: Built,
-) -> anyhow::Result<Result<(State, Held), String>> {
+) -> anyhow::Result<Result<(State, Held), NotStaged>> {
     let state = State::after(asked, cwd, key, built, Counts::default())?;
-    Ok(first_by_daemon(state))
-}
-
-fn first_by_daemon(mut state: State) -> Result<(State, Held), String> {
+    let cargos = |why| Ok(Err(NotStaged::Cargos(Some(why), None)));
     if let Some(why) = &state.refusal {
-        return Err(why.clone());
+        return cargos(why.clone());
     }
     if let Some((program, why)) = state.left_to_cargo().next() {
-        return Err(format!("`{}`: {why}", program.name));
+        return cargos(format!("`{}`: {why}", program.name));
     }
-    let answers = state.checkouts.iter().map(built).collect::<Result<Vec<_>, _>>();
-    let answers = answers.map_err(NotBuilt::why)?;
+    let answers = match state.checkouts.iter().map(self::built).collect::<Result<Vec<_>, _>>() {
+        Ok(answers) => answers,
+        Err(NotBuilt::Error(said)) => {
+            eprintln!("{}", state.turned_down(&said));
+            return Ok(Err(NotStaged::Failed(FAILED)));
+        }
+        Err(why) => return cargos(why.why()),
+    };
+    Ok(first_by_daemon(state, &answers).map_err(|why| NotStaged::Cargos(Some(why), None)))
+}
+
+fn first_by_daemon(
+    mut state: State,
+    answers: &[Vec<Result<(), String>>],
+) -> Result<(State, Held), String> {
     let held = state.hold();
-    let cargos = state.settle(&answers, &held)?;
+    let cargos = state.settle(answers, &held)?;
     if let Some((_, why)) = cargos.first() {
         return Err(why.clone());
     }
@@ -299,28 +314,38 @@ const STAGED: &str = "RA_JIT_FIRST_BUILD";
 /// program whose source changed.
 struct ToCargo(Box<State>, String);
 
+/// Why the daemon's programs are not the build.
+enum NotServed {
+    Cargo(ToCargo),
+    /// The source has an error, written as rustc and cargo write it.
+    Error(String),
+}
+
 /// Has the daemon bring the programs of `state` up to date and puts them where cargo has
-/// them. Rustc sees none of it: the daemon builds what rust-analyzer passes, which has no
-/// borrow checker and few of rustc's lints.
-fn by_daemon(mut state: State) -> Result<(State, Held), ToCargo> {
+/// them. Rustc sees none of it: the daemon builds what rust-analyzer passes, and its verdict
+/// on the source is the build's.
+fn by_daemon(mut state: State) -> Result<(State, Held), NotServed> {
     use crate::trace::{CLIENT, note};
+    let to_cargo = |state, why| NotServed::Cargo(ToCargo(Box::new(state), why));
     let checking = Instant::now();
     let cargos = state.refusal.clone().or_else(|| state.broken_guard());
     if let Some(reason) = cargos.or_else(|| state.stale_cargos()) {
-        return Err(ToCargo(Box::new(state), reason));
+        return Err(to_cargo(state, reason));
     }
     note("client checks", CLIENT, checking);
-    // What the daemon did not build, cargo does: an error is then rustc's, and code
-    // rust-analyzer turns down wrongly is built.
+    // What the daemon did not build for an error in the source is not built: an item
+    // rust-analyzer does not resolve is ra-jit's to fix, not rustc's to build. What it does
+    // not build otherwise, cargo does.
     let answers = match state.checkouts.iter().map(built).collect::<Result<Vec<_>, _>>() {
         Ok(answers) => answers,
-        Err(why) => return Err(ToCargo(Box::new(state), why.why())),
+        Err(NotBuilt::Error(said)) => return Err(NotServed::Error(state.turned_down(&said))),
+        Err(why) => return Err(to_cargo(state, why.why())),
     };
     let settling = Instant::now();
     let held = state.hold();
     let cargos = match state.settle(&answers, &held) {
         Ok(cargos) => cargos.len(),
-        Err(why) => return Err(ToCargo(Box::new(state), why)),
+        Err(why) => return Err(to_cargo(state, why)),
     };
     note("client settle", CLIENT, settling);
     let served = cargos < state.programs.len() || state.programs.is_empty();

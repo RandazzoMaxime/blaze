@@ -55,6 +55,12 @@ pub(crate) fn wrapper_path() -> std::io::Result<PathBuf> {
     Ok(this.with_file_name(format!("ra-jit-rustc{}", std::env::consts::EXE_SUFFIX)))
 }
 
+/// Whether `path` is the wrapper, under either of its names.
+pub(crate) fn is_wrapper(path: &Path) -> bool {
+    let stem = path.file_stem().and_then(|it| it.to_str());
+    stem.is_some_and(|it| it == "ra-jit-rustc" || it == "ra-jit-rustc-first")
+}
+
 /// The same wrapper under the path it has in the first build of a workspace.
 pub(crate) fn first_wrapper_path() -> std::io::Result<PathBuf> {
     let this = std::env::current_exe()?;

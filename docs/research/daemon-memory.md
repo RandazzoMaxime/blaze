@@ -148,3 +148,68 @@ nushell, whose processes were not measured one by one).
 4. **What the allocator keeps**: jemalloc's footprint was 450 MB over its live count on
    ripgrep once ready, and mimalloc's eviction above returned nothing. Whatever is evicted is
    worth measuring as footprint, not only as live bytes.
+
+## 2026-10-22: the spare and eviction
+
+For [#56](https://github.com/indexable-inc/ra-jit/issues/56) and
+[#57](https://github.com/indexable-inc/ra-jit/issues/57). Measured on an AWS c8a.48xlarge (AMD
+EPYC 9R45, Linux 6.18), each run pinned to 16 of its cores, ra-jit at `494f0ee948` and branches
+of it, Cranelift. Before and after ran on the same host; `spare.py` interleaves its variants
+round by round, `bench.py` ran main's and the branch's three runs of a project one after the
+other.
+
+### The spare
+
+- Since #11 a new project's spare loads its workspace beside cargo: the client sends
+  `Request::Ahead` before cargo starts, and `Daemon::ahead` hands it the spare (**read**,
+  `cargo/daemon.rs`). Only the spare held in reserve afterwards, which `reap` started again once
+  a workspace was loaded, waits for a build nobody has asked for.
+- That one held 1.3 GB on Linux: an idle daemon with one tiny project 2,635 MB, 1,275 without
+  it (**read**, `spare.py`, medians of 3).
+- Starting a spare when a build of a new workspace begins (`Daemon::new_spare` in `ahead`), and
+  none after, leaves a second project's cold start as it was: ripgrep 4.74 to 4.86 s, fd 24.21
+  to 24.17 s, nushell 30.48 to 30.70 s. A warm one (cargo had built it, the daemon started
+  again) pays the library's load: 1.29 to 2.62 s, 2.19 to 3.48 s, 8.62 to 9.51 s (**read**).
+- Two ways to win that back were measured and dropped (**read**, 3 rounds on ripgrep): a spare
+  told its build at once that loads the library with the workspace, as a plain worker does
+  (warm 2.90 s), and one that resolves the library on every core instead of a quarter (2.66 s).
+  The time is not the resolving.
+- No spare at all (`RA_JIT_SPARE=0`) holds the same and loses the overlap with cargo: cold 7.14
+  s on ripgrep, 27.46 s on fd, 38.43 s on nushell; warm 2.14, 2.25 and 6.83 s (**read**).
+- Loading the library into the spare without resolving it holds 1,631 MB idle (350 MB more than
+  none) and gains nothing: warm 2.55 s on ripgrep, cold as with one (**read**).
+- Letting the reserve spare go once a project is served and idle was not built: it holds what no
+  spare holds once the time is up, and what the old default held until then (**unverified**).
+- `bench.py`, main against the branch, 3 runs: ripgrep's daemon after its edits 3,623 to 3,656
+  MB on main, 2,307 to 2,336 on the branch; fd 3,420 to 3,466, 2,039 to 2,080; nushell 12,695
+  to 12,976, 11,362 to 11,623. Once ready the same (1,835 and 1,838 MB on ripgrep), since the
+  reserve was started after it. Every edit time within 5 ms on ripgrep and fd, within 50 ms on
+  nushell (signature 0.284 and 0.333 s, the rest within 22 ms) (**read**). Nothing the change
+  touches runs during an edit, so the 50 ms is the runs' spread (**unverified**).
+
+### salsa's `lru` with the patch
+
+- salsa 0.28.5 vendored with two changes (`docs/upstream/daemon-memory/`): `previous_iteration`
+  takes a memo without a value that is not its own cycle head for an earlier revision's, and
+  `can_evict_value` refuses a provisional memo. The memo a panic leaves cannot be told by its
+  origin, contrary to the guess above: `fixpoint_initial` makes a `Derived` origin with no
+  edges. It is provisional and its own cycle head, which an evicted memo is not (**read**).
+- With `lru` on `infer`, `mir_body`, `runtime_mir_body` (2,048 each), their closure queries
+  (1,024) and `inlinable` (8,192), nushell's cold build, edits and warm start finish and every
+  program behaves as cargo's (**read**, `bench.py`, 1 run). Values are evicted at the
+  `synthetic_write` after the build: the reports count memos without values from `warm-up` on.
+- nushell, 1 run each: the daemon after edits 12.4 to 12.5 GB with `lru`, 12.9 GB on main;
+  edits body 0.73 s (0.41), signature 2.43 s (0.42), the others within 0.1 s; a second run,
+  with the forced collect below, 0.78 and 2.32 s (**read**). An
+  edit that re-executes an evicted memo cannot backdate it, so what depends on it runs again,
+  down to the compiled code (**unverified** as the whole cause).
+- `lru` on `infer` and `runtime_mir_body` alone, so that `mir_body` stops the chain: 12.56 GB
+  after edits, body 0.52 s, signature 0.64 s (**read**, 1 run).
+- A forced `mi_collect(true)` after the warm-up and after each request, which reclaims the
+  segments of threads that ended: 1 to 8 ms on ripgrep, 20 to 50 ms on nushell's 11 GB worker;
+  ripgrep's worker 2,150 MB against 2,185 on main after the edits; nushell's daemon 12.85 GB
+  after edits against 12.9 (**read**, 1 run each). With `lru` as well, the collect after
+  nushell's cold build took its worker from 14.06 to 12.03 GB, and the next ones 20 to 200 MB
+  each, ending near 10.9 GB (**read**, the worker's log, 1 run).
+- Nothing of it is merged. What is left to evict is bounded by those queries' values (about
+  1.2 GB on nushell, above) and costs edits; `described` (#55) is twice that and keeps edits.

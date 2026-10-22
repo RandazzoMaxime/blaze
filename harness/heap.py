@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""heap.py FOLDED [ROWS]: attributes a heap profile to salsa queries and to ra-jit's own structures.
+"""heap.py FOLDED [ROWS] [--syntax]: attributes a heap profile to salsa queries and to ra-jit's own structures.
 
 FOLDED is what `jeprof --collapsed` makes of a profile the daemon wrote (on macOS, what
 `heapfold.py` makes of it): build it with `--features heap-profile`, run it with
@@ -9,6 +9,11 @@ Each allocation goes to the innermost salsa ingredient on its stack: a query's `
 memo keeps, which an `lru` can let go of), its `record` (the dependencies and revisions salsa keeps
 of the memo, which stay when the value goes), an `interned` value, or a tracked struct or input.
 What no ingredient made goes to ra-jit's own structures by the function that allocated it.
+
+`--syntax` also says what of it is syntax: rowan's green nodes (the trees, which a memo of
+`parse` or anything holding a `GreenNode` keeps), its flat trees (the same, as arrays), its
+red nodes (cursors over a tree), the
+lexer's and parser's buffers, ast id maps and span maps, each by the ingredient that made it.
 """
 import collections, re, sys
 
@@ -20,6 +25,14 @@ OWN = [("symbol table", "SymbolTable"), ("vfs / file loading", "vfs::"), ("vfs /
        ("project model", "project_model"), ("splice", "ra_jit::splice"), ("checkouts", "ra_jit::Checkouts"),
        ("object emission", "cranelift_object"), ("object emission", "object::write"),
        ("codegen driver (outside queries)", "hir_ty_codegen::"), ("ra-jit main (other)", "ra_jit::")]
+# What of an allocation is syntax, by the innermost frame that says so.
+SYNTAX = [("flat trees", ("rowan::flat", "FlatTree")),
+          ("green nodes", ("rowan::green", "rowan::arc", "GreenNodeBuilder", "SyntaxTreeBuilder")),
+          ("red nodes", ("rowan::cursor", "rowan::api")),
+          ("lexer and parser buffers", ("parser::", "LexedStr", "rustc_lexer")),
+          ("ast id maps", ("AstIdMap",)),
+          ("span maps", ("RealSpanMap", "span::map::", "SpanMap")),
+          ("token trees", ("tt::", "syntax_bridge::"))]
 
 
 def short(name):
@@ -46,11 +59,27 @@ def bucket(frames):
                          frames[-1])[:90]
 
 
+def syntax(frames):
+    """What kind of syntax the allocation is, or None when it is not syntax."""
+    for frame in reversed(frames):
+        if INGREDIENT.search(frame) or EXECUTE.search(frame):
+            return None
+        for label, needles in SYNTAX:
+            if any(it in frame for it in needles):
+                return label
+    return None
+
+
 def main():
-    totals = collections.Counter()
-    for line in open(sys.argv[1]):
+    args = [a for a in sys.argv[1:] if not a.startswith("--")]
+    totals, of_syntax = collections.Counter(), collections.Counter()
+    for line in open(args[0]):
         stack, _, size = line.rstrip().rpartition(" ")
-        totals[bucket(stack.split(";"))] += int(size)
+        frames = stack.split(";")
+        where = bucket(frames)
+        totals[where] += int(size)
+        if "--syntax" in sys.argv and (kind := syntax(frames)):
+            of_syntax[(kind, where[1])] += int(size)
     whole = sum(totals.values())
     kinds = collections.Counter()
     for (kind, _), size in totals.items():
@@ -58,9 +87,19 @@ def main():
     print(f"total sampled live: {whole / 2**20:.0f} MB")
     for kind, size in kinds.most_common():
         print(f"{kind}: {size / 2**20:.0f} MB")
-    top = int(sys.argv[2]) if len(sys.argv) > 2 else 45
+    top = int(args[1]) if len(args) > 1 else 45
     for (kind, name), size in totals.most_common(top):
         print(f"{size / 2**20:8.0f} MB {100 * size / whole:5.1f}%  {kind:8} {name[:140]}")
+    if "--syntax" in sys.argv:
+        by_kind = collections.Counter()
+        for (kind, _), size in of_syntax.items():
+            by_kind[kind] += size
+        print(f"\nsyntax: {sum(by_kind.values()) / 2**20:.0f} MB, {100 * sum(by_kind.values()) / whole:.1f}% of the live heap")
+        for kind, size in by_kind.most_common():
+            print(f"{size / 2**20:8.0f} MB {100 * size / whole:5.1f}%  {kind}")
+        print("by the ingredient that made it:")
+        for (kind, name), size in of_syntax.most_common(top):
+            print(f"{size / 2**20:8.0f} MB {100 * size / whole:5.1f}%  {kind:26} {name[:110]}")
 
 
 if __name__ == "__main__":

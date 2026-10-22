@@ -722,7 +722,11 @@ fn main() {
         case!(inlined::instances(n as u8, -(n as i64), "moved"));
     }
     case!(cases::opaque_of_trait_method::run(4), cases::opaque_of_trait_method::run(90));
+    case!(cases::pointer_relations::run(7));
+    case!(cases::static_places::run());
+    case!(cases::associated_type_returns::run(&["a".into(), "bcd".into()]));
     case!(cases::constructor_extends_temporaries::run(), cases::statement_borrows_temporary::run(true, &None));
+    case!(cases::undecided_alias_drop::run(3), cases::undecided_alias_drop::run(40));
     let text = std::hint::black_box(b"a // b /** c */ \\\" d <!-- e \"\"\" f /".to_vec());
     case!(
         cases::byte_compares::run(&text),

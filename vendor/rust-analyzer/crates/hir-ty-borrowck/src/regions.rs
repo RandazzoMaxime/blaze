@@ -24,10 +24,10 @@ use hir_ty::{
     GenericPredicates, InferBodyId,
     db::GeneralConstId,
     mir::{
-        AggregateKind, BorrowKind, CastKind, LocalId, MirBody, MirSpan, Operand, OperandKind,
-        PlaceElem, PlaceTy, ProjectionElem, Rvalue, StatementKind, TerminatorKind,
+        AggregateKind, BinOp, BorrowKind, CastKind, LocalId, MirBody, MirSpan, Operand,
+        OperandKind, PlaceElem, PlaceTy, ProjectionElem, Rvalue, StatementKind, TerminatorKind,
     },
-    next_solver::{ConstKind, GenericArgKind, GenericArgs, Region, Ty, TyKind},
+    next_solver::{Clause, ConstKind, GenericArgKind, GenericArgs, Region, Ty, TyKind},
 };
 
 use super::{
@@ -118,7 +118,7 @@ pub(super) struct Regions<'db> {
     /// Per universal region, the universal regions it is known to outlive.
     known: Vec<BitSet>,
     /// The type parameters known to outlive a region.
-    type_bounds: Vec<(Ty<'db>, Rv)>,
+    pub(super) type_bounds: Vec<(Ty<'db>, Rv)>,
     /// The type of each local, its regions variables.
     pub(super) local_tys: Vec<Ty<'db>>,
     /// The region of the loan each borrow makes.
@@ -451,8 +451,11 @@ pub(super) fn build<'db>(
         returns_opaque: false,
         elided_output: None,
         location: None,
+        env_aliases: Vec::new(),
+        annotated: FxHashSet::default(),
     };
     builder.universal_regions();
+    builder.env_aliases();
     builder.location = None;
     builder.annotations();
     for &block in &cfg.order {
@@ -473,6 +476,12 @@ pub(super) fn build<'db>(
 
 struct Builder<'c, 'a, 'db> {
     ctx: &'c Ctx<'a, 'db>,
+    /// The associated types, regions erased, that a where clause or a parameter's type says
+    /// outlive some region: rustc's declared bounds from the environment, known before
+    /// `known_relations` says which regions.
+    env_aliases: Vec<Ty<'db>>,
+    /// The variables a `let` writes the type of.
+    annotated: FxHashSet<LocalId>,
     body: &'c MirBody<'db>,
     regions: Regions<'db>,
     /// What each closure checked so far needs of the body that creates it, with how many
@@ -677,11 +686,29 @@ impl<'db> Builder<'_, '_, 'db> {
                         }
                     }
                     // Each elided input lifetime is its own region before `&dyn Trait` copies
-                    // it into the object's default, so that the two are the same one.
-                    for input in &mut inputs {
+                    // it into the object's default, so that the two are the same one. A
+                    // parameter that elides one lifetime has it once however often its type
+                    // does (`S2` of `type S2<'a> = S<'a, 'a>`).
+                    let resolver = {
+                        use hir_def::resolver::HasResolver;
+                        function.resolver(self.ctx.db)
+                    };
+                    let aligned = written.params.len() == inputs.len();
+                    for (index, input) in inputs.iter_mut().enumerate() {
+                        let single = aligned
+                            && written.params.get(index).is_some_and(|&param| {
+                                elided_lifetimes(self.ctx.db, &resolver, &written.store, param)
+                                    == Some(1)
+                            });
+                        let mut only = None;
                         *input =
                             rustc_type_ir::fold_regions(self.interner(), *input, |region, _| {
                                 match region.kind() {
+                                    RegionKind::ReError(_) if single => {
+                                        *only.get_or_insert_with(|| {
+                                            self.new_universal(UniversalKind::AnonParam)
+                                        })
+                                    }
                                     RegionKind::ReError(_) => {
                                         self.new_universal(UniversalKind::AnonParam)
                                     }
@@ -804,6 +831,31 @@ impl<'db> Builder<'_, '_, 'db> {
             for rv in unsuggested {
                 self.regions.unsuggested.extend(self.regions.universal(rv));
             }
+            // Nor for an anonymous lifetime no parameter's written type has, the impl's in
+            // `impl MyStruct<'_>` or a C variadic's `ap: ...`: rustc's `find_param_with_region`
+            // finds no parameter.
+            let variadic = match owner {
+                InferBodyId::DefWithBodyId(DefWithBodyId::FunctionId(function)) => {
+                    FunctionSignature::of(self.ctx.db, function).is_varargs()
+                }
+                _ => false,
+            };
+            let written_params = body.param_locals.len().saturating_sub(usize::from(variadic));
+            let mut in_params = Vec::new();
+            for &local in body.param_locals.iter().take(written_params) {
+                if let Some(ty) = local_tys[local.into_raw().into_u32() as usize] {
+                    regions_of(ty, &mut in_params);
+                }
+            }
+            let in_params: FxHashSet<usize> =
+                in_params.into_iter().filter_map(|rv| self.regions.universal(rv)).collect();
+            for index in 0..self.regions.universals.len() {
+                if self.regions.universals[index].1 == UniversalKind::AnonParam
+                    && !in_params.contains(&index)
+                {
+                    self.regions.unsuggested.insert(index);
+                }
+            }
             if opaque
                 && !hidden_static
                 && let Some((_, output)) = &signature
@@ -895,6 +947,7 @@ impl<'db> Builder<'_, '_, 'db> {
         // A variable with a type written out keeps the lifetimes the type names, as rustc
         // relates it to the annotation.
         let annotated = self.annotated_locals();
+        self.annotated = annotated.clone();
         for (local, data) in body.locals.iter() {
             let slot = &mut local_tys[local.into_raw().into_u32() as usize];
             if slot.is_some() {
@@ -1005,11 +1058,84 @@ impl<'db> Builder<'_, '_, 'db> {
         let &[tupled] = sig.inputs().as_slice() else { return false };
         let TyKind::Tuple(inputs) = tupled.kind() else { return false };
         local_tys[env_local.into_raw().into_u32() as usize] = Some(closure);
-        for (&local, ty) in params.iter().zip(inputs.iter()) {
+        for (index, (&local, ty)) in params.iter().zip(inputs.iter()).enumerate() {
+            let ty = self.elided_own(index, ty).unwrap_or(ty);
+            let ty = self.written_object_default(index, ty).unwrap_or(ty);
             local_tys[local.into_raw().into_u32() as usize] = Some(ty);
         }
         local_tys[super::return_slot().into_raw().into_u32() as usize] = Some(sig.output());
         true
+    }
+
+    /// The closure's parameter `index` written `&dyn Trait`, as `&'r (dyn Trait + 'r)` with
+    /// its reference's lifetime, as rustc's object lifetime default, where inference gave the
+    /// object a region of its own.
+    fn written_object_default(&mut self, index: usize, ty: Ty<'db>) -> Option<Ty<'db>> {
+        let closure = self.ctx.closure_expr?;
+        let hir_def::hir::Expr::Closure { arg_types, .. } = &self.ctx.store[closure] else {
+            return None;
+        };
+        let written = self.lower_written((*arg_types.get(index)?)?, MirSpan::ExprId(closure));
+        let TyKind::Ref(_, written, _) = written.kind() else { return None };
+        let TyKind::Dynamic(_, object) = written.kind() else { return None };
+        if !matches!(object.kind(), RegionKind::ReStatic) || writes_static_object(self.ctx.store) {
+            return None;
+        }
+        let TyKind::Ref(region, inner, mutability) = ty.kind() else { return None };
+        let TyKind::Dynamic(predicates, _) = inner.kind() else { return None };
+        let interner = self.interner();
+        Some(Ty::new_ref(
+            interner,
+            region,
+            Ty::new_dynamic(interner, predicates, region),
+            mutability,
+        ))
+    }
+
+    /// The type of the closure's parameter `index`, where the closure is typed without an
+    /// expected signature, with each lifetime elided in its written type a late-bound one of
+    /// the closure's own, as rustc's closure signature binds them: `|x: &i32| -> &i32 { x }`
+    /// returns what lives as long as the call, not as long as the closure's type says.
+    fn elided_own(&mut self, index: usize, ty: Ty<'db>) -> Option<Ty<'db>> {
+        let closure = self.ctx.closure_expr?;
+        if !self.ctx.infer.closures_without_expectation.contains(&closure) {
+            return None;
+        }
+        let hir_def::hir::Expr::Closure { arg_types, .. } = &self.ctx.store[closure] else {
+            return None;
+        };
+        let written = self.lower_written((*arg_types.get(index)?)?, MirSpan::ExprId(closure));
+        let regions = |ty: Ty<'db>| {
+            let mut found = Vec::new();
+            rustc_type_ir::fold_regions(self.interner(), ty, |region, _| {
+                found.push(region);
+                region
+            });
+            found
+        };
+        let elided: Vec<bool> = regions(written)
+            .into_iter()
+            .map(|region| {
+                !matches!(
+                    region.kind(),
+                    RegionKind::ReEarlyParam(_)
+                        | RegionKind::ReLateParam(_)
+                        | RegionKind::ReStatic
+                        | RegionKind::ReBound(..)
+                )
+            })
+            .collect();
+        if elided.len() != regions(ty).len() || !elided.contains(&true) {
+            return None;
+        }
+        let mut position = 0;
+        Some(rustc_type_ir::fold_regions(self.interner(), ty, |region, _| {
+            position += 1;
+            match elided[position - 1] {
+                true => self.new_universal(UniversalKind::AnonParam),
+                false => region,
+            }
+        }))
     }
 
     /// What a `let` with a type written out requires, as rustc's user type annotations: that
@@ -1026,6 +1152,7 @@ impl<'db> Builder<'_, '_, 'db> {
         }
         self.pattern_paths();
         self.path_arguments();
+        self.closure_annotations();
         for (pat, initializer) in lets {
             let Some(ty) = self.ctx.infer.type_of_pat.get(pat).map(|it| it.as_ref()) else {
                 continue;
@@ -1051,6 +1178,40 @@ impl<'db> Builder<'_, '_, 'db> {
                     self.relate(value, ty, Variance::Covariant, at);
                 }
             }
+        }
+    }
+
+    /// A closure's parameters and return slot have the types written for them, as rustc's
+    /// `check_signature_annotation`: in `|x: &'a i32| -> &'static i32` that `x` is a
+    /// `&'a i32` and the closure returns a `&'static i32`.
+    fn closure_annotations(&mut self) {
+        let Some(closure) = self.ctx.closure_expr else { return };
+        let hir_def::hir::Expr::Closure {
+            arg_types,
+            ret_type,
+            closure_kind: hir_def::hir::ClosureKind::Closure,
+            ..
+        } = &self.ctx.store[closure]
+        else {
+            return;
+        };
+        let params = self.body.param_locals.get(1..).unwrap_or_default();
+        if !self.regions.check_universals || params.len() != arg_types.len() {
+            return;
+        }
+        let span = MirSpan::ExprId(closure);
+        let at = At { category: Category::Boring, span };
+        let written: Vec<_> = params
+            .iter()
+            .copied()
+            .zip(arg_types.iter().copied())
+            .chain([(super::return_slot(), *ret_type)])
+            .collect();
+        for (local, type_ref) in written {
+            let Some(type_ref) = type_ref else { continue };
+            let ty = self.written(self.lower_written(type_ref, span));
+            let local_ty = self.regions.local_tys[local.into_raw().into_u32() as usize];
+            self.relate(local_ty, ty, Variance::Invariant, at);
         }
     }
 
@@ -1407,6 +1568,68 @@ impl<'db> Builder<'_, '_, 'db> {
         found
     }
 
+    fn env_aliases(&mut self) {
+        fn behind_refs<'db>(ty: Ty<'db>, out: &mut Vec<Ty<'db>>, depth: usize) {
+            if depth > 4 {
+                return;
+            }
+            match ty.kind() {
+                TyKind::Ref(_, inner, _) => {
+                    alias_components(inner, out);
+                    behind_refs(inner, out, depth + 1);
+                }
+                TyKind::Adt(_, args) => {
+                    for it in args.types() {
+                        behind_refs(it, out, depth + 1);
+                    }
+                }
+                TyKind::Tuple(tys) => {
+                    for it in tys.iter() {
+                        behind_refs(it, out, depth + 1);
+                    }
+                }
+                TyKind::Array(inner, _) | TyKind::Slice(inner) | TyKind::RawPtr(inner, _) => {
+                    behind_refs(inner, out, depth + 1)
+                }
+                _ => (),
+            }
+        }
+        let interner = self.interner();
+        let mut aliases = Vec::new();
+        for clause in self.ctx.env.caller_bounds().iter() {
+            if let ClauseKind::TypeOutlives(OutlivesPredicate(ty, _)) = clause.kind().skip_binder()
+                && let TyKind::Alias(_) = ty.kind()
+            {
+                aliases.push(ty);
+            }
+        }
+        if self.ctx.closure_local.is_none() {
+            let signature: Vec<Ty<'db>> = self
+                .body
+                .param_locals
+                .iter()
+                .chain((!self.returns_opaque).then_some(&super::return_slot()))
+                .map(|&it| self.regions.local_tys[it.into_raw().into_u32() as usize])
+                .collect();
+            let mut found = Vec::new();
+            for ty in signature {
+                behind_refs(ty, &mut found, 0);
+            }
+            for ty in found {
+                aliases.push(ty);
+                if let Some(normalized) = self.normalize(ty) {
+                    alias_components(normalized, &mut aliases);
+                }
+            }
+        }
+        self.env_aliases = aliases
+            .into_iter()
+            .map(|ty| {
+                rustc_type_ir::fold_regions(interner, ty, |_, _| Region::new_static(interner))
+            })
+            .collect();
+    }
+
     /// What the signature says of which universal regions outlive which: its where clauses
     /// and what its parameters' types imply, as `&'a T` that `T: 'a`.
     fn known_relations(&mut self) {
@@ -1435,6 +1658,7 @@ impl<'db> Builder<'_, '_, 'db> {
                         if let Some(region) =
                             self.signature_region(region, rustc_type_ir::INNERMOST).and_then(rv_of)
                         {
+                            let ty = self.signature_ty(ty);
                             self.regions.type_bounds.push((ty, region));
                         }
                     }
@@ -1452,6 +1676,7 @@ impl<'db> Builder<'_, '_, 'db> {
                         if let Some(region) =
                             self.signature_region(region, rustc_type_ir::INNERMOST).and_then(rv_of)
                         {
+                            let ty = self.signature_ty(ty);
                             self.regions.type_bounds.push((ty, region));
                         }
                     }
@@ -1621,7 +1846,7 @@ impl<'db> Builder<'_, '_, 'db> {
         }
         match ty.kind() {
             TyKind::Ref(region, inner, _) => {
-                if let Some(shorter) = rv_of(region) {
+                if let Some(shorter) = self.region_rv(region) {
                     let referent = match inner.kind() {
                         TyKind::Alias(_) => self.normalize(inner).unwrap_or(inner),
                         _ => inner,
@@ -1629,6 +1854,7 @@ impl<'db> Builder<'_, '_, 'db> {
                     let mut components = Vec::new();
                     let mut params = Vec::new();
                     outlives_components(referent, &mut components, &mut params);
+                    alias_components(referent, &mut params);
                     pairs.extend(components.into_iter().map(|longer| (longer, shorter)));
                     self.regions.type_bounds.extend(params.into_iter().map(|it| (it, shorter)));
                 }
@@ -1653,29 +1879,7 @@ impl<'db> Builder<'_, '_, 'db> {
                     .iter_instantiated(self.interner(), args.as_slice())
                     .map(|it| it.skip_norm_wip())
                     .collect();
-                for clause in clauses {
-                    match clause.kind().skip_binder() {
-                        ClauseKind::RegionOutlives(OutlivesPredicate(longer, shorter)) => {
-                            if let (Some(longer), Some(shorter)) =
-                                (self.region_rv(longer), self.region_rv(shorter))
-                            {
-                                pairs.push((longer, shorter));
-                            }
-                        }
-                        ClauseKind::TypeOutlives(OutlivesPredicate(ty, region)) => {
-                            if let Some(shorter) = self.region_rv(region) {
-                                let mut components = Vec::new();
-                                let mut params = Vec::new();
-                                outlives_components(ty, &mut components, &mut params);
-                                pairs.extend(components.into_iter().map(|it| (it, shorter)));
-                                self.regions
-                                    .type_bounds
-                                    .extend(params.into_iter().chain([ty]).map(|it| (it, shorter)));
-                            }
-                        }
-                        _ => (),
-                    }
-                }
+                self.implied_by_clauses(clauses, pairs);
             }
             TyKind::Tuple(tys) => {
                 for it in tys.iter() {
@@ -1710,7 +1914,25 @@ impl<'db> Builder<'_, '_, 'db> {
                     }
                 }
             }
-            TyKind::Alias(_) => {
+            // A projection implies what its arguments' well-formedness does as well as what its
+            // normalized type does: `<&'a &'b () as Trait>::Type` that `'b: 'a`.
+            // And the bounds of its trait, which its trait reference's well-formedness needs:
+            // `<T as Trait<A>>::Assoc` that `A: 'static` where `trait Trait<A: 'static>`.
+            TyKind::Alias(alias) => {
+                if let rustc_type_ir::AliasTyKind::Projection { def_id } = alias.kind {
+                    for it in alias.args.types() {
+                        self.implied_bounds(it, pairs, seen, depth + 1);
+                    }
+                    let clauses: Vec<_> =
+                        GenericPredicates::query_all(self.ctx.db, def_id.0.into())
+                            .iter_instantiated(self.interner(), alias.args.as_slice())
+                            .map(|it| it.skip_norm_wip())
+                            .filter(|it| {
+                                !rustc_type_ir::TypeVisitableExt::has_escaping_bound_vars(it)
+                            })
+                            .collect();
+                    self.implied_by_clauses(clauses, pairs);
+                }
                 if let Some(normalized) = self.normalize(ty)
                     && normalized != ty
                 {
@@ -1721,54 +1943,35 @@ impl<'db> Builder<'_, '_, 'db> {
         }
     }
 
-    /// `ty` an associated type normalized, with the lifetimes it takes from its arguments
-    /// the same regions: the solver gives the result regions of its own, related to those it
-    /// came from only by constraints it records.
     fn normalize(&mut self, ty: Ty<'db>) -> Option<Ty<'db>> {
-        use hir_ty::next_solver::{
-            infer::{region_constraints::Constraint, traits::ObligationCause},
-            obligation_ctxt::ObligationCtxt,
-        };
-        let infcx = &self.ctx.infcx;
-        let constraints_before = infcx
-            .inner
-            .borrow_mut()
-            .unwrap_region_constraints()
-            .region_constraint_data()
-            .constraints
-            .len();
-        let first_new = infcx.num_region_vars();
-        let mut ocx = ObligationCtxt::new(infcx);
-        let normalized =
-            ocx.structurally_normalize_ty(&ObligationCause::dummy(), self.ctx.env, ty).ok()?;
-        let mut same = FxHashMap::default();
-        {
-            let mut inner = infcx.inner.borrow_mut();
-            let collector = inner.unwrap_region_constraints();
-            let data = collector.region_constraint_data();
-            for constraint in &data.constraints[constraints_before..] {
-                if let Constraint::VarSubVar(a, b) = *constraint {
-                    let (new, old) = if a.index() >= first_new { (a, b) } else { (b, a) };
-                    if new.index() >= first_new && old.index() < first_new {
-                        same.entry(new).or_insert(old);
+        normalize(self.ctx, ty)
+    }
+
+    /// What outlives clauses a well-formed type needs imply.
+    fn implied_by_clauses(&mut self, clauses: Vec<Clause<'db>>, pairs: &mut Vec<(Rv, Rv)>) {
+        for clause in clauses {
+            match clause.kind().skip_binder() {
+                ClauseKind::RegionOutlives(OutlivesPredicate(longer, shorter)) => {
+                    if let (Some(longer), Some(shorter)) =
+                        (self.region_rv(longer), self.region_rv(shorter))
+                    {
+                        pairs.push((longer, shorter));
                     }
                 }
+                ClauseKind::TypeOutlives(OutlivesPredicate(ty, region)) => {
+                    if let Some(shorter) = self.region_rv(region) {
+                        let mut components = Vec::new();
+                        let mut params = Vec::new();
+                        outlives_components(ty, &mut components, &mut params);
+                        pairs.extend(components.into_iter().map(|it| (it, shorter)));
+                        self.regions
+                            .type_bounds
+                            .extend(params.into_iter().chain([ty]).map(|it| (it, shorter)));
+                    }
+                }
+                _ => (),
             }
         }
-        let mut unmapped = false;
-        let normalized = rustc_type_ir::fold_regions(self.interner(), normalized, |region, _| {
-            match region.kind() {
-                RegionKind::ReVar(vid) if vid.index() >= first_new => match same.get(&vid) {
-                    Some(&old) => Region::new_var(self.interner(), old),
-                    None => {
-                        unmapped = true;
-                        region
-                    }
-                },
-                _ => region,
-            }
-        });
-        (!unmapped).then_some(normalized)
     }
 
     fn outlives(&mut self, sup: Rv, sub: Rv, at: At) {
@@ -1927,7 +2130,10 @@ impl<'db> Builder<'_, '_, 'db> {
                 };
                 self.relate(ta, tb, inner, at);
             }
-            (TyKind::RawPtr(ta, ma), TyKind::RawPtr(tb, _)) => {
+            // rust-analyzer lowers coercing `&T` to `*const T` as a borrow, where rustc's is
+            // `&raw const *x` of the raw pointer's type.
+            (TyKind::Ref(_, ta, _), TyKind::RawPtr(tb, ma))
+            | (TyKind::RawPtr(ta, ma), TyKind::RawPtr(tb, _)) => {
                 let inner = match ma {
                     rustc_ast_ir::Mutability::Not => variance,
                     rustc_ast_ir::Mutability::Mut => variance.xform(Variance::Invariant),
@@ -1961,13 +2167,39 @@ impl<'db> Builder<'_, '_, 'db> {
             }
             (TyKind::Dynamic(pa, ra), TyKind::Dynamic(pb, rb)) => {
                 self.relate_regions(ra, rb, variance, at);
-                for (x, y) in pa.iter().zip(pb.iter()) {
+                let unless_auto = |it: &rustc_type_ir::Binder<_, _>| {
+                    !matches!(it.skip_binder(), rustc_type_ir::ExistentialPredicate::AutoTrait(_))
+                };
+                for (x, y) in pa.iter().filter(unless_auto).zip(pb.iter().filter(unless_auto)) {
                     let (x, y) = (x.skip_binder(), y.skip_binder());
                     match (x, y) {
                         (
                             rustc_type_ir::ExistentialPredicate::Trait(x),
                             rustc_type_ir::ExistentialPredicate::Trait(y),
-                        ) => self.relate_args(x.args, y.args, None, Variance::Invariant, at),
+                        ) if x.def_id == y.def_id => {
+                            self.relate_args(x.args, y.args, None, Variance::Invariant, at)
+                        }
+                        // An upcast, `dyn Foo<'static>` to `dyn Bar<'static, 'a>` with
+                        // `trait Foo<'a>: Bar<'a, 'a>`: the supertrait as the source's
+                        // arguments instantiate it is the target's.
+                        (
+                            rustc_type_ir::ExistentialPredicate::Trait(x),
+                            rustc_type_ir::ExistentialPredicate::Trait(y),
+                        ) => {
+                            let interner = self.interner();
+                            let source = rustc_type_ir::Binder::dummy(
+                                x.with_self_ty(interner, Ty::new_unit(interner)),
+                            );
+                            let found = rustc_type_ir::elaborate::supertraits(interner, source)
+                                .find(|it| it.def_id() == y.def_id)
+                                .and_then(|it| it.no_bound_vars());
+                            if let Some(found) = found {
+                                let args = GenericArgs::new_from_iter(
+                                    found.args.iter().skip(1).collect::<Vec<_>>(),
+                                );
+                                self.relate_args(args, y.args, None, Variance::Invariant, at);
+                            }
+                        }
                         // `dyn Foo<Bar = &'a u32>`: the binding is invariant.
                         (
                             rustc_type_ir::ExistentialPredicate::Projection(x),
@@ -2000,6 +2232,22 @@ impl<'db> Builder<'_, '_, 'db> {
                     _ => None,
                 };
                 self.relate_args(x.args, y.args, variances.as_deref(), Variance::Invariant, at)
+            }
+            // A signature's associated type against what it is,
+            // `<&'a mut Vec<T> as IntoIterator>::IntoIter` and `IterMut<'_, T>`.
+            (TyKind::Alias(x), _) | (_, TyKind::Alias(x))
+                if matches!(x.kind, rustc_type_ir::AliasTyKind::Projection { .. }) =>
+            {
+                let normalize = |this: &mut Self, ty: Ty<'db>| match ty.kind() {
+                    TyKind::Alias(_) => this.normalize(ty).filter(|&it| it != ty),
+                    _ => Some(ty),
+                };
+                if let Some(a) = normalize(self, a)
+                    && let Some(b) = normalize(self, b)
+                    && !matches!((a.kind(), b.kind()), (TyKind::Alias(_), TyKind::Alias(_)))
+                {
+                    self.relate(a, b, variance, at);
+                }
             }
             (TyKind::Closure(_, aa), TyKind::Closure(_, ab))
             | (TyKind::FnDef(_, aa), TyKind::FnDef(_, ab)) => {
@@ -2034,21 +2282,112 @@ impl<'db> Builder<'_, '_, 'db> {
     /// That `ty` outlives `region`: each region in it does, and each type parameter in it
     /// must, which is a type test.
     fn type_outlives(&mut self, ty: Ty<'db>, region: Region<'db>, at: At) {
-        let Some(region) = rv_of(region) else { return };
+        self.type_outlives_at(ty, region, at, 0);
+    }
+
+    fn type_outlives_at(&mut self, ty: Ty<'db>, region: Region<'db>, at: At, depth: usize) {
+        let Some(rv) = self.region_rv(region) else { return };
         let mut components = Vec::new();
         let mut params = Vec::new();
         outlives_components(ty, &mut components, &mut params);
         for longer in components {
-            self.outlives(longer, region, at);
+            self.outlives(longer, rv, at);
         }
         for param in params {
             self.regions.type_tests.push(TypeTest {
                 ty: param,
-                lower: region,
+                lower: rv,
                 span: at.span,
                 forall: false,
             });
         }
+        if depth > 4 {
+            return;
+        }
+        let mut aliases = Vec::new();
+        alias_components(ty, &mut aliases);
+        for alias in aliases {
+            self.alias_outlives(alias, region, at, depth);
+        }
+    }
+
+    /// `<T as Trait>::Item: 'r` as rustc's `alias_ty_must_outlive`: what it normalizes to
+    /// outlives `'r`; else with no bound from the where clauses or the trait, and lifetimes in
+    /// its arguments, each argument does; else the trait's one bound does, or a type test
+    /// that some bound or every argument does.
+    fn alias_outlives(&mut self, ty: Ty<'db>, region: Region<'db>, at: At, depth: usize) {
+        let TyKind::Alias(alias) = ty.kind() else { return };
+        if rustc_type_ir::TypeVisitableExt::has_escaping_bound_vars(&ty)
+            || ty.references_non_lt_error()
+        {
+            return;
+        }
+        let opaque = matches!(alias.kind, rustc_type_ir::AliasTyKind::Opaque { .. });
+        if !opaque
+            && let Some(normalized) = self.normalize(ty)
+            && !matches!(normalized.kind(), TyKind::Alias(_) | TyKind::Infer(_))
+        {
+            self.type_outlives_at(normalized, region, at, depth + 1);
+            return;
+        }
+        let Some(rv) = self.region_rv(region) else { return };
+        let interner = self.interner();
+        let erase = |ty: Ty<'db>| {
+            rustc_type_ir::fold_regions(interner, ty, |_, _| Region::new_static(interner))
+        };
+        let erased = erase(ty);
+        let in_env = self.env_aliases.contains(&erased);
+        let from_trait: Vec<Region<'db>> =
+            rustc_type_ir::Interner::item_bounds(interner, alias.kind.def_id())
+                .iter_instantiated(interner, alias.args)
+                .filter_map(|it| match it.skip_norm_wip().kind().skip_binder() {
+                    ClauseKind::TypeOutlives(OutlivesPredicate(bounded, bound))
+                        if erase(bounded) == erased =>
+                    {
+                        Some(bound)
+                    }
+                    _ => None,
+                })
+                .collect();
+        let mut has_regions = false;
+        rustc_type_ir::fold_regions(interner, alias.args, |region, _| {
+            has_regions |= !matches!(region.kind(), RegionKind::ReBound(..));
+            region
+        });
+        if !in_env && from_trait.is_empty() && (has_regions || opaque) {
+            let captured = opaque
+                .then(|| opaque_captures(self.ctx.db, alias.kind.def_id(), alias.args.len()))
+                .flatten();
+            for (index, arg) in alias.args.iter().enumerate() {
+                if captured.as_ref().is_some_and(|it| !it[index]) {
+                    continue;
+                }
+                match arg.kind() {
+                    GenericArgKind::Lifetime(it) => {
+                        if let Some(longer) = self.region_rv(it) {
+                            self.outlives(longer, rv, at);
+                        }
+                    }
+                    GenericArgKind::Type(it) => self.type_outlives_at(it, region, at, depth + 1),
+                    GenericArgKind::Const(_) => (),
+                }
+            }
+            return;
+        }
+        if !in_env
+            && let Some(&bound) = from_trait.first()
+            && from_trait.iter().all(|&it| it == bound)
+        {
+            if let Some(bound) = self
+                .signature_region(bound, rustc_type_ir::INNERMOST)
+                .and_then(rv_of)
+                .or_else(|| self.region_rv(bound))
+            {
+                self.outlives(bound, rv, at);
+            }
+            return;
+        }
+        self.regions.type_tests.push(TypeTest { ty, lower: rv, span: at.span, forall: false });
     }
 
     fn place_ty(&self, local: LocalId, projection: &[PlaceElem]) -> PlaceTy<'db> {
@@ -2063,7 +2402,27 @@ impl<'db> Builder<'_, '_, 'db> {
             }
             OperandKind::Constant { ty, .. } => Some(self.renumber(ty.as_ref())),
             OperandKind::Allocation { allocation } => Some(self.renumber(allocation.as_ref().ty)),
-            OperandKind::Static(_) => None,
+            // A reference to the static, every lifetime of its type `'static`, elided ones
+            // too; mutable for a `static mut`, rustc's `*mut T`, so that what is written
+            // through it is `'static`.
+            OperandKind::Static(id) => {
+                let db = self.ctx.db;
+                let ty = db.value_ty((*id).into())?.instantiate_identity().skip_norm_wip();
+                let ty = rustc_type_ir::fold_regions(self.interner(), ty, |region, _| match region
+                    .kind()
+                {
+                    RegionKind::ReBound(..) => region,
+                    _ => self.static_region(),
+                });
+                let mutable = hir_def::signatures::StaticSignature::of(db, *id)
+                    .flags
+                    .contains(hir_def::signatures::StaticFlags::MUTABLE);
+                let mutability = match mutable {
+                    true => rustc_ast_ir::Mutability::Mut,
+                    false => rustc_ast_ir::Mutability::Not,
+                };
+                Some(Ty::new_ref(self.interner(), self.static_region(), ty, mutability))
+            }
         }
     }
 
@@ -2110,7 +2469,20 @@ impl<'db> Builder<'_, '_, 'db> {
         };
         let expr = self.callee_expr(func, call)?;
         match &self.ctx.store[expr] {
-            hir_def::hir::Expr::Path(path) if spells_generics(path) => Some(self.written(ty)),
+            hir_def::hir::Expr::Path(path) if spells_generics(path) => {
+                let ty = self.written(ty);
+                if let TyKind::FnDef(def, args) = ty.kind()
+                    && let CallableDefId::FunctionId(function) = def.0
+                {
+                    let container = function.lookup(self.ctx.db).container;
+                    let parent =
+                        hir_ty::generics::generics(self.ctx.db, function.into()).len_parent();
+                    let args =
+                        GenericArgs::new_from_iter(args.iter().take(parent).collect::<Vec<_>>());
+                    self.written_self(path, container, args, MirSpan::ExprId(expr));
+                }
+                Some(ty)
+            }
             // `x.f::<&'a T>()`: the method's own arguments as written, the impl's or trait's
             // inferred.
             hir_def::hir::Expr::MethodCall { generic_args: Some(_), .. } => {
@@ -2161,6 +2533,31 @@ impl<'db> Builder<'_, '_, 'db> {
         let projection = place.projection.as_slice();
         let dest = self.place_ty(place.local, projection).ty;
         let at = At { category: self.category_of_assignment(place.local, projection), span };
+        let first = self.regions.outlives.len();
+        self.assign(place, rvalue, dest, at, span);
+        // rustc relates a variable with a type written out to its annotation, so what flows
+        // into a lifetime the annotation names, `let p: &'static T = ..`, is blamed on that.
+        if projection.is_empty() && self.annotated.contains(&place.local) {
+            for index in first..self.regions.outlives.len() {
+                let constraint = &self.regions.outlives[index];
+                if constraint.category == Category::Assignment
+                    && self.regions.universal(constraint.sub).is_some()
+                {
+                    self.regions.outlives[index].category = Category::TypeAnnotation;
+                }
+            }
+        }
+    }
+
+    fn assign(
+        &mut self,
+        place: &hir_ty::mir::StoredPlace,
+        rvalue: &Rvalue,
+        dest: Ty<'db>,
+        at: At,
+        span: MirSpan,
+    ) {
+        let projection = place.projection.as_slice();
         if let MirSpan::ExprId(expr) = span
             && let hir_def::hir::Expr::Cast { .. } = self.ctx.store[expr]
             && matches!(rvalue, Rvalue::Use(_) | Rvalue::Cast(..))
@@ -2170,7 +2567,28 @@ impl<'db> Builder<'_, '_, 'db> {
             let at = At { category: Category::TypeAnnotation, span };
             self.relate(dest, written, Variance::Invariant, at);
         }
+        // A range pattern's bounds, `A::<'a>::X..=Y`, are named constants compared.
+        if let Rvalue::BinaryOp(_, left, right) | Rvalue::CheckedBinaryOp(_, left, right) = rvalue {
+            self.constant_ty(left, span);
+            self.constant_ty(right, span);
+        }
         match rvalue {
+            // Raw and function pointers compare when they have a common supertype.
+            Rvalue::BinaryOp(op, left, right) | Rvalue::CheckedBinaryOp(op, left, right)
+                if matches!(
+                    op,
+                    BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge
+                ) =>
+            {
+                if let (Some(left), Some(right)) = (self.operand_ty(left), self.operand_ty(right))
+                    && matches!(left.kind(), TyKind::RawPtr(..) | TyKind::FnPtr(..))
+                {
+                    let common = self.renumber(left);
+                    let at = At { category: Category::CallArgument, span };
+                    self.relate(left, common, Variance::Covariant, at);
+                    self.relate(right, common, Variance::Covariant, at);
+                }
+            }
             Rvalue::Repeat(operand, len) => {
                 if let (Some(ty), TyKind::Array(element, _)) =
                     (self.operand_ty(operand), dest.kind())
@@ -2253,17 +2671,39 @@ impl<'db> Builder<'_, '_, 'db> {
         if let MirSpan::ExprId(expr) = span {
             self.path_well_formed(expr, id.lookup(db).container, args, span);
         }
-        if let Some(anchor) = path.and_then(|it| it.type_anchor())
-            && let ItemContainerId::ImplId(impl_) = id.lookup(db).container
+        if let Some(path) = path {
+            self.written_self(path, id.lookup(db).container, args, span);
+        }
+        Some(ty)
+    }
+
+    /// For an associated item named through a written self type, `<Foo<'a>>::C` or
+    /// `Foo::<'a>::new`, that type equal to the impl's or the trait's self type.
+    fn written_self(
+        &mut self,
+        path: &hir_def::expr_store::path::Path,
+        container: ItemContainerId,
+        args: GenericArgs<'db>,
+        span: MirSpan,
+    ) {
+        let written = match path.type_anchor() {
+            Some(anchor) => Some(self.lower_written(anchor, span)),
+            None => self.lower_written_qualifier(path, span),
+        };
+        let self_ty = match container {
+            ItemContainerId::ImplId(impl_) => Some(self.declared(
+                self.ctx.db.impl_self_ty(impl_).instantiate(self.interner(), args).skip_norm_wip(),
+            )),
+            ItemContainerId::TraitId(_) => args.types().next(),
+            _ => None,
+        };
+        if let Some(written) = written
+            && let Some(self_ty) = self_ty
         {
-            let written = self.written(self.lower_written(anchor, span));
-            let self_ty = self.declared(
-                db.impl_self_ty(impl_).instantiate(self.interner(), args).skip_norm_wip(),
-            );
+            let written = self.written(written);
             let at = At { category: Category::TypeAnnotation, span };
             self.relate(self_ty, written, Variance::Invariant, at);
         }
-        Some(ty)
     }
 
     /// A function item used as a value whose path spells out generic arguments,
@@ -2300,12 +2740,45 @@ impl<'db> Builder<'_, '_, 'db> {
         if def.def_id() != adt {
             return None;
         }
+        // The impl's anonymous lifetimes (`impl MyStruct<'_>`) are universal regions.
+        if let Some((raw, named)) = self.impl_self
+            && raw == ty
+            && let TyKind::Adt(_, named) = named.kind()
+        {
+            return Some(rustc_type_ir::fold_regions(self.interner(), named, |region, depth| {
+                match region.kind() {
+                    RegionKind::ReVar(_) | RegionKind::ReBound(..) => region,
+                    _ => self.signature_region(region, depth).unwrap_or_else(|| self.fresh()),
+                }
+            }));
+        }
         Some(self.written(args))
     }
 
     /// A type written in the body, lowered as inference lowers it, its lifetimes the
     /// signature's where it names them.
     fn lower_written(&self, type_ref: hir_def::type_ref::TypeRefId, span: MirSpan) -> Ty<'db> {
+        self.lowering(span, |ctx| ctx.lower_ty(type_ref))
+    }
+
+    /// The type a value path's qualifier spells out with generic arguments, `A<'a>` of
+    /// `A::<'a>::C`, lowered as `lower_written` lowers.
+    fn lower_written_qualifier(
+        &self,
+        path: &hir_def::expr_store::path::Path,
+        span: MirSpan,
+    ) -> Option<Ty<'db>> {
+        let segments = path.segments();
+        let qualifier = segments.get(segments.len().checked_sub(2)?)?;
+        qualifier.args_and_bindings?;
+        self.lowering(span, |ctx| ctx.lower_value_path_qualifier(path))
+    }
+
+    fn lowering<T>(
+        &self,
+        span: MirSpan,
+        f: impl FnOnce(&mut hir_ty::TyLoweringContext<'db, '_>) -> T,
+    ) -> T {
         let db = self.ctx.db;
         let store_owner = self.ctx.owner.expression_store_owner(db);
         let mut resolver = store_owner.resolver(db);
@@ -2314,7 +2787,7 @@ impl<'db> Builder<'_, '_, 'db> {
             _ => None,
         };
         let generics = std::cell::OnceCell::new();
-        hir_ty::TyLoweringContext::new(
+        let mut ctx = hir_ty::TyLoweringContext::new(
             db,
             &resolver,
             hir_def::expr_store::ExpressionStore::of(db, store_owner),
@@ -2323,8 +2796,8 @@ impl<'db> Builder<'_, '_, 'db> {
             &generics,
             hir_ty::LifetimeElisionKind::Infer,
             hir_ty::LifetimeLoweringMode::LateParam,
-        )
-        .lower_ty(type_ref)
+        );
+        f(&mut ctx)
     }
 
     fn rvalue_ty(&mut self, rvalue: &Rvalue, span: MirSpan) -> Option<Ty<'db>> {
@@ -2412,6 +2885,73 @@ impl<'db> Builder<'_, '_, 'db> {
                     CastKind::PointerCoercion(hir_ty::PointerCast::Unsize) => {
                         self.unsize(source, target, at)
                     }
+                    // rust-analyzer's kind for any reference cast to a raw pointer: rustc's
+                    // `&raw const *x` of the pointer's type, then for an array (`&[T; N] as
+                    // *const T`) its element a subtype of what the pointer points to.
+                    CastKind::PointerCoercion(hir_ty::PointerCast::ArrayToPointer) => {
+                        if let TyKind::Ref(_, from, _) | TyKind::RawPtr(from, _) = source.kind()
+                            && let TyKind::RawPtr(to, mutability) = target.kind()
+                        {
+                            let interner = self.interner();
+                            let erase = |ty| {
+                                rustc_type_ir::fold_regions(interner, ty, |_, _| {
+                                    Region::new_erased(interner)
+                                })
+                            };
+                            match from.kind() {
+                                TyKind::Array(element, _) if erase(element) == erase(to) => {
+                                    self.relate(element, to, Variance::Covariant, at)
+                                }
+                                _ => {
+                                    let variance = match mutability {
+                                        rustc_ast_ir::Mutability::Not => Variance::Covariant,
+                                        rustc_ast_ir::Mutability::Mut => Variance::Invariant,
+                                    };
+                                    self.relate(from, to, variance, at)
+                                }
+                            }
+                        }
+                    }
+                    // `*const [T; N]` to `*const T`, rustc's `ArrayToPointer`; and between
+                    // pointers to trait objects, the object's lifetime may only shorten and the
+                    // principal trait's arguments stay, else a vtable method could be called
+                    // with what it cannot take (rust-lang/rust#136702).
+                    CastKind::PtrToPtr => {
+                        if let (TyKind::RawPtr(from, _), TyKind::RawPtr(to, _)) =
+                            (source.kind(), target.kind())
+                        {
+                            let (from_tail, to_tail) = (self.tail(from), self.tail(to));
+                            let interner = self.interner();
+                            let erase = |ty| {
+                                rustc_type_ir::fold_regions(interner, ty, |_, _| {
+                                    Region::new_erased(interner)
+                                })
+                            };
+                            if let TyKind::Array(element, _) = from.kind()
+                                && erase(element) == erase(to)
+                            {
+                                self.relate(element, to, Variance::Covariant, at)
+                            } else if let (
+                                TyKind::Dynamic(from_predicates, from_region),
+                                TyKind::Dynamic(to_predicates, to_region),
+                            ) = (from_tail.kind(), to_tail.kind())
+                            {
+                                use rustc_type_ir::inherent::BoundExistentialPredicates as _;
+                                match (from_predicates.principal(), to_predicates.principal()) {
+                                    (Some(_), Some(_)) => {
+                                        self.relate(from_tail, to_tail, Variance::Covariant, at)
+                                    }
+                                    (None, None) => self.relate_regions(
+                                        from_region,
+                                        to_region,
+                                        Variance::Covariant,
+                                        at,
+                                    ),
+                                    _ => (),
+                                }
+                            }
+                        }
+                    }
                     CastKind::PointerCoercion(hir_ty::PointerCast::MutToConstPointer) => {
                         if let (TyKind::RawPtr(x, _), TyKind::RawPtr(y, _)) =
                             (source.kind(), target.kind())
@@ -2484,6 +3024,7 @@ impl<'db> Builder<'_, '_, 'db> {
                     }
                     _ => None,
                 };
+                let mut annotated = false;
                 let args = match span {
                     _ if let Some(args) = self_args => args,
                     _ if let Some(args) = through_local => args,
@@ -2492,10 +3033,18 @@ impl<'db> Builder<'_, '_, 'db> {
                             || matches!(store[expr],
                                 hir_def::hir::Expr::Call { callee, .. } if spelled(callee)) =>
                     {
+                        annotated = true;
                         self.written(args.as_ref())
                     }
                     _ => self.renumber(args.as_ref()),
                 };
+                // The arguments a path spells out are well-formed, as rustc's user type
+                // annotation: `Outer::<T, Inner<T>> { .. }` where `struct Inner<T: 'static>`.
+                if annotated {
+                    for ty in args.types() {
+                        self.well_formed(ty, boring, 0);
+                    }
+                }
                 let fields = self.ctx.db.field_types(*variant);
                 for ((_, field), operand) in fields.iter().zip(operands.iter()) {
                     let field = field.ty().instantiate(self.interner(), args).skip_norm_wip();
@@ -2590,12 +3139,23 @@ impl<'db> Builder<'_, '_, 'db> {
                         self.outlives(region, loan, at);
                     }
                     if mutability == rustc_ast_ir::Mutability::Not {
-                        break;
+                        return;
                     }
                 }
-                TyKind::RawPtr(..) => break,
+                TyKind::RawPtr(..) => return,
                 _ => (),
             }
+        }
+        // A capture by reference is rustc's `*(*env).i`, reborrowed through the closure's
+        // reference to itself too: `|| &mut x` returns what lives only as long as the call.
+        if projection.first() == Some(&ProjectionElem::Deref)
+            && self.ctx.upvars.iter().any(|it| it.local == local && it.by_ref)
+            && let Some(env) = self.ctx.closure_local
+            && let TyKind::Ref(region, _, _) =
+                self.regions.local_tys[env.into_raw().into_u32() as usize].kind()
+            && let Some(region) = rv_of(region)
+        {
+            self.outlives(region, loan, at);
         }
     }
 
@@ -2627,6 +3187,30 @@ impl<'db> Builder<'_, '_, 'db> {
             }
             _ => (),
         }
+    }
+
+    /// What a pointer to `ty` is wide for, with its regions: its struct's last field, and so on.
+    fn tail(&mut self, mut ty: Ty<'db>) -> Ty<'db> {
+        for _ in 0..16 {
+            match ty.kind() {
+                TyKind::Adt(def, args) => {
+                    let AdtId::StructId(id) = def.def_id() else { break };
+                    let types = self.ctx.db.field_types(hir_def::VariantId::StructId(id));
+                    let Some((_, last)) = types.iter().last() else { break };
+                    let field = last.ty().instantiate(self.interner(), args).skip_norm_wip();
+                    ty = match rustc_type_ir::TypeVisitableExt::has_aliases(&field) {
+                        true => self.normalize(field).unwrap_or(field),
+                        false => field,
+                    };
+                }
+                TyKind::Tuple(tys) => match tys.last() {
+                    Some(it) => ty = it,
+                    None => break,
+                },
+                _ => break,
+            }
+        }
+        ty
     }
 
     fn unsize_pointee(&mut self, source: Ty<'db>, target: Ty<'db>, at: At) {
@@ -2779,6 +3363,25 @@ impl<'db> Builder<'_, '_, 'db> {
                     TyKind::FnDef(def, _) if !matches!(def.0, CallableDefId::FunctionId(_))
                 );
                 let category = if constructor { Category::Boring } else { Category::CallArgument };
+                // `Fn::call(&f, (x,))` that lowering passes as `Fn::call(&f, x)`: each argument
+                // is its element of the signature's tuple.
+                let lang = self.interner().lang_items();
+                let calls = [lang.Fn_call, lang.FnMut_call_mut, lang.FnOnce_call_once];
+                let inputs = match (func_ty.kind(), inputs.as_slice()) {
+                    (TyKind::FnDef(def, _), &[receiver, tupled])
+                        if let CallableDefId::FunctionId(function) = def.0
+                            && calls.contains(&Some(function))
+                            && let TyKind::Tuple(elements) = tupled.kind()
+                            && args.len() == 1 + elements.len()
+                            && !(args.len() == 2
+                                && self
+                                    .operand_ty(&args[1])
+                                    .is_some_and(|it| matches!(it.kind(), TyKind::Tuple(_)))) =>
+                    {
+                        std::iter::once(receiver).chain(elements.iter()).collect()
+                    }
+                    _ => inputs,
+                };
                 for (arg, input) in args.iter().zip(inputs) {
                     if let Some(ty) = self.operand_ty(arg) {
                         let at = At { category, span: arg.span().unwrap_or(span) };
@@ -2789,8 +3392,6 @@ impl<'db> Builder<'_, '_, 'db> {
                 // which lowering passes the arguments of one by one: proving it implements the
                 // trait equates the arguments with its signature's inputs, whose regions are in
                 // its type (`let f = |_| {}; f(&x)`).
-                let lang = self.interner().lang_items();
-                let calls = [lang.Fn_call, lang.FnMut_call_mut, lang.FnOnce_call_once];
                 if let TyKind::FnDef(def, _) = func_ty.kind()
                     && let CallableDefId::FunctionId(function) = def.0
                     && calls.contains(&Some(function))
@@ -3160,6 +3761,14 @@ impl<'db> Builder<'_, '_, 'db> {
         }
     }
 
+    /// `ty` of the signature with its lifetimes as universal regions.
+    fn signature_ty(&mut self, ty: Ty<'db>) -> Ty<'db> {
+        let interner = self.interner();
+        rustc_type_ir::fold_regions(interner, ty, |region, depth| {
+            self.signature_region(region, depth).unwrap_or(region)
+        })
+    }
+
     fn region_rv(&self, region: Region<'db>) -> Option<Rv> {
         match region.kind() {
             RegionKind::ReStatic => Some(self.regions.static_rv),
@@ -3259,6 +3868,7 @@ fn writes_self(
     match &store[ty] {
         TypeRef::Path(path) => {
             path.is_self_type()
+                || path.qualifier().is_some_and(|it| it.is_self_type())
                 || path.type_anchor().is_some_and(|it| writes_self(store, it))
                 || path.generic_args().into_iter().flatten().flatten().any(|args| {
                     args.args
@@ -3271,6 +3881,63 @@ fn writes_self(
         TypeRef::Reference(it) => writes_self(store, it.ty),
         TypeRef::Array(it) => writes_self(store, it.ty),
         _ => false,
+    }
+}
+
+/// How many lifetimes the type `ty` in `store` elides: `&T`, `'_`, and a path that writes
+/// none of its lifetimes, one for `S2` of `type S2<'a> = S<'a, 'a>` though its type has it
+/// twice. `None` where that is not known (`dyn Trait`, `impl Trait`, `Self`, associated types).
+fn elided_lifetimes(
+    db: &dyn hir_ty::db::HirDatabase,
+    resolver: &hir_def::resolver::Resolver<'_>,
+    store: &hir_def::expr_store::ExpressionStore,
+    ty: hir_def::hir::type_ref::TypeRefId,
+) -> Option<usize> {
+    use hir_def::{
+        expr_store::path::GenericArg,
+        hir::{
+            generics::GenericParams,
+            type_ref::{LifetimeRef, TypeRef},
+        },
+        resolver::TypeNs,
+    };
+    let count = |it| elided_lifetimes(db, resolver, store, it);
+    match &store[ty] {
+        TypeRef::Reference(it) => {
+            let elided =
+                matches!(it.lifetime.map(|it| &store[it]), None | Some(LifetimeRef::Placeholder));
+            Some(elided as usize + count(it.ty)?)
+        }
+        TypeRef::Tuple(tys) => tys.iter().map(|&it| count(it)).sum(),
+        TypeRef::RawPtr(it, _) | TypeRef::Slice(it) => count(*it),
+        TypeRef::Array(it) => count(it.ty),
+        TypeRef::Never | TypeRef::TypeParam(_) => Some(0),
+        TypeRef::Path(path) => {
+            let params = match resolver.resolve_path_in_type_ns_fully(db, path)? {
+                TypeNs::AdtId(it) => GenericParams::of(db, it.into()).len_lifetimes(),
+                TypeNs::TypeAliasId(it) => GenericParams::of(db, it.into()).len_lifetimes(),
+                TypeNs::BuiltinType(_) | TypeNs::GenericParam(_) => 0,
+                _ => return None,
+            };
+            let (mut written, mut placeholders, mut inner) = (0, 0, 0);
+            for args in path.generic_args().into_iter().flatten().flatten() {
+                if !args.bindings.is_empty() {
+                    return None;
+                }
+                for arg in &args.args {
+                    match arg {
+                        GenericArg::Lifetime(it) => {
+                            written += 1;
+                            placeholders += matches!(store[*it], LifetimeRef::Placeholder) as usize;
+                        }
+                        GenericArg::Type(it) => inner += count(*it)?,
+                        GenericArg::Const(_) => (),
+                    }
+                }
+            }
+            Some(inner + if written == 0 { params } else { placeholders })
+        }
+        _ => None,
     }
 }
 
@@ -3352,6 +4019,9 @@ pub(super) fn outlives_components<'db>(
         TyKind::Closure(_, args) => {
             outlives_components(args.as_closure().tupled_upvars_ty(), regions, params)
         }
+        TyKind::Coroutine(_, args) => {
+            outlives_components(args.as_coroutine().tupled_upvars_ty(), regions, params)
+        }
         TyKind::Tuple(tys) => {
             for it in tys.iter() {
                 outlives_components(it, regions, params);
@@ -3359,6 +4029,47 @@ pub(super) fn outlives_components<'db>(
         }
         TyKind::Array(inner, _) | TyKind::Slice(inner) | TyKind::RawPtr(inner, _) => {
             outlives_components(inner, regions, params)
+        }
+        _ => (),
+    }
+}
+
+/// The associated and opaque types among what `outlives_components` splits `ty` into, which
+/// it leaves out.
+pub(super) fn alias_components<'db>(ty: Ty<'db>, out: &mut Vec<Ty<'db>>) {
+    let args = |args: GenericArgs<'db>, out: &mut Vec<Ty<'db>>| {
+        for it in args.types() {
+            alias_components(it, out);
+        }
+    };
+    match ty.kind() {
+        TyKind::Alias(alias)
+            if matches!(
+                alias.kind,
+                rustc_type_ir::AliasTyKind::Projection { .. }
+                    | rustc_type_ir::AliasTyKind::Opaque { .. }
+            ) =>
+        {
+            out.push(ty)
+        }
+        TyKind::Ref(_, inner, _)
+        | TyKind::Array(inner, _)
+        | TyKind::Slice(inner)
+        | TyKind::RawPtr(inner, _) => alias_components(inner, out),
+        TyKind::Dynamic(predicates, _) => {
+            for predicate in predicates.iter() {
+                if let rustc_type_ir::ExistentialPredicate::Trait(it) = predicate.skip_binder() {
+                    args(it.args, out);
+                }
+            }
+        }
+        TyKind::Adt(_, it) | TyKind::FnDef(_, it) => args(it, out),
+        TyKind::Closure(_, it) => alias_components(it.as_closure().tupled_upvars_ty(), out),
+        TyKind::Coroutine(_, it) => alias_components(it.as_coroutine().tupled_upvars_ty(), out),
+        TyKind::Tuple(tys) => {
+            for it in tys.iter() {
+                alias_components(it, out);
+            }
         }
         _ => (),
     }
@@ -3494,4 +4205,56 @@ pub(super) fn blame(path: &[Outlives]) -> Option<Outlives> {
         .find(|it| interest(it) == best && it.span != MirSpan::Unknown)
         .or_else(|| path.iter().rev().find(|it| interest(it) == best))
         .copied()
+}
+
+/// `ty` an associated type normalized, with the lifetimes it takes from its arguments the same
+/// regions: the solver gives the result regions of its own, related to those it came from only
+/// by constraints it records.
+pub(super) fn normalize<'db>(ctx: &Ctx<'_, 'db>, ty: Ty<'db>) -> Option<Ty<'db>> {
+    use hir_ty::next_solver::{
+        infer::{region_constraints::Constraint, traits::ObligationCause},
+        obligation_ctxt::ObligationCtxt,
+    };
+    if rustc_type_ir::TypeVisitableExt::has_escaping_bound_vars(&ty) {
+        return None;
+    }
+    let infcx = &ctx.infcx;
+    let constraints_before = infcx
+        .inner
+        .borrow_mut()
+        .unwrap_region_constraints()
+        .region_constraint_data()
+        .constraints
+        .len();
+    let first_new = infcx.num_region_vars();
+    let mut ocx = ObligationCtxt::new(infcx);
+    let normalized = ocx.structurally_normalize_ty(&ObligationCause::dummy(), ctx.env, ty).ok()?;
+    let mut same = FxHashMap::default();
+    {
+        let mut inner = infcx.inner.borrow_mut();
+        let collector = inner.unwrap_region_constraints();
+        let data = collector.region_constraint_data();
+        for constraint in &data.constraints[constraints_before..] {
+            if let Constraint::VarSubVar(a, b) = *constraint {
+                let (new, old) = if a.index() >= first_new { (a, b) } else { (b, a) };
+                if new.index() >= first_new && old.index() < first_new {
+                    same.entry(new).or_insert(old);
+                }
+            }
+        }
+    }
+    let mut unmapped = false;
+    let normalized = rustc_type_ir::fold_regions(ctx.infcx.interner, normalized, |region, _| {
+        match region.kind() {
+            RegionKind::ReVar(vid) if vid.index() >= first_new => match same.get(&vid) {
+                Some(&old) => Region::new_var(ctx.infcx.interner, old),
+                None => {
+                    unmapped = true;
+                    region
+                }
+            },
+            _ => region,
+        }
+    });
+    (!unmapped).then_some(normalized)
 }

@@ -662,15 +662,15 @@ def keystrokes(text: str, ops: list[Op], rng: random.Random) -> Iterator[tuple[s
 
 
 def builds(answer: str) -> bool | None:
-    """Whether the daemon's answer to an edit says its text compiles: an error that is a
-    diagnostic (`<file>.rs:<line>: ...`) or one it has no words for (`` `step` has an error
-    ra-jit cannot say more of: ...``) says it does not; one that is ra-jit's own (a function
-    it does not compile, such as `` `main` is not compiled by ra-jit: unsupported: ...``) says
-    nothing against the text, which rustc would build. `no program built has <file>` says
-    nothing of the text either way (None): the daemon did not build it."""
+    """Whether the daemon's answer to an edit says its text compiles: `error: ` is an error in
+    the source, as rustc writes it, and says it does not; one that is ra-jit's own (`cargo: `,
+    a function it does not compile, such as `` `main` is not compiled by ra-jit: unsupported:
+    ...``, or `failed: `) says nothing against the text, which rustc would build. `no program
+    built has <file>` says nothing of the text either way (None): the daemon did not build
+    it."""
     if answer.startswith("error: no program built has "):
         return None
-    return not (re.match(r"error: \S+?\.rs:\d+(:\d+)?: ", answer) or "has an error ra-jit cannot say more of" in answer)
+    return not answer.startswith("error: ")
 
 
 def outcome_lines(log: list[str]) -> tuple[list[tuple[int, int]], list[int]]:

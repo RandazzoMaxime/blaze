@@ -61,8 +61,15 @@ const CHECKS: &str = "ra-jit-check";
 
 /// Builds what cargo asked rustc for and ends as rustc would have.
 pub(crate) fn command(mut args: impl Iterator<Item = OsString>) -> anyhow::Result<()> {
-    let rustc = args.next().context("cargo names rustc first")?;
+    let mut rustc = args.next().context("cargo names rustc first")?;
+    // A cargo that asks through ra-jit as both wrappers names it twice.
+    if super::switch::is_wrapper(Path::new(&rustc)) {
+        rustc = args.next().context("cargo names rustc after the wrapper")?;
+    }
     let args: Vec<OsString> = args.collect();
+    if let Some(replied) = crate::answers::reply(&rustc, &args) {
+        std::process::exit(replied?);
+    }
     // The wrapper the user had for the workspace's crates still runs rustc.
     let mut compiler = match Enabled::read().and_then(|it| it.chained) {
         Some(chained) => {
@@ -174,7 +181,8 @@ pub(crate) fn settled(cargo: u32) {
 }
 
 /// Writes down that `who` linked a program for plain cargo, and `what` of it: its name
-/// when it was the daemon, why it was not when it was rustc.
+/// when it was the daemon, why it was not when it was rustc. `error` is the daemon's too:
+/// it found an error in the source, which no rustc ran to say.
 fn tally(who: &str, what: &str) {
     let log = daemon::home().and_then(|home| {
         private_dir(&home)?;
@@ -193,7 +201,7 @@ pub(crate) fn tallied() -> Vec<String> {
     let (mut daemon, mut rustc) = (0u64, 0u64);
     for line in log.lines() {
         match line.split_once('\t') {
-            Some(("daemon", _)) => daemon += 1,
+            Some(("daemon" | "error", _)) => daemon += 1,
             Some((_, why)) => {
                 rustc += 1;
                 *reasons.entry(why).or_default() += 1;
@@ -288,10 +296,18 @@ impl Unit {
                 .map_err(NotBuilt::Failed)
         });
         let read = deps.join().map_err(|_| "rustc did not run".to_owned());
+        // An error in the source fails the unit, as ra-jit writes it, and cargo says the
+        // crate did not compile. What the daemon did not build otherwise, rustc does.
+        match answer {
+            Ok(()) => {}
+            Err(NotBuilt::Error(said)) => {
+                tally("error", &self.crate_name);
+                eprintln!("{said}");
+                std::process::exit(super::FAILED);
+            }
+            Err(why) => return Err(why.why()),
+        }
         let read = read?.map_err(|it| format!("rustc did not run: {it}"))?;
-        // What the daemon did not build, rustc does: an error is then rustc's, and code
-        // rust-analyzer turns down wrongly is built.
-        answer.map_err(NotBuilt::why)?;
         if !read.status.success() {
             let _ = std::io::stderr().write_all(&read.stderr);
             std::process::exit(super::FAILED);

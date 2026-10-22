@@ -5,14 +5,17 @@
 
 use hir_def::hir::{BindingAnnotation, BindingId, ExprId, Pat, Statement};
 use rustc_hash::{FxHashMap, FxHashSet};
-use rustc_type_ir::inherent::IntoKind;
+use rustc_type_ir::{
+    ClauseKind, OutlivesPredicate, RegionKind,
+    inherent::{GenericArgs as _, IntoKind, Region as _},
+};
 
 use hir_ty::{
     mir::{
         AsmOperand, BinOp, BorrowKind, LocalId, MirBody, MirSpan, MutBorrowKind, Operand,
         OperandKind, PlaceElem, ProjectionElem, Rvalue, StatementKind, StoredPlace, TerminatorKind,
     },
-    next_solver::{Ty, TyKind},
+    next_solver::{GenericArgKind, Region, Ty, TyKind},
 };
 
 use super::{
@@ -1129,8 +1132,17 @@ impl<'a, 'db> Checker<'a, '_, 'db> {
                         );
                         return;
                     }
+                    // A `const` or `static` item's value is rustc's `UseAsConst`, not returned.
                     (None, Category::Return)
-                        if !blamed.from_closure && !self.regions.returns_static_opaque =>
+                        if !blamed.from_closure
+                            && !self.regions.returns_static_opaque
+                            && !matches!(
+                                self.ctx.owner,
+                                hir_ty::InferBodyId::DefWithBodyId(
+                                    hir_def::DefWithBodyId::ConstId(_)
+                                        | hir_def::DefWithBodyId::StaticId(_)
+                                )
+                            ) =>
                     {
                         let span = if blamed.span == MirSpan::Unknown {
                             loan.span
@@ -1168,10 +1180,86 @@ impl<'a, 'db> Checker<'a, '_, 'db> {
             Some(name) => {
                 self.report("E0597", loan.span, format!("`{name}` does not live long enough"))
             }
+            // At the temporary, as rustc's: a pattern's borrow, `match Some(s()) {
+            // Some(ref m) => .. }`, at `Some(s())`, not at `ref m`.
             None => {
-                self.report("E0716", loan.span, "temporary value dropped while borrowed".to_owned())
+                let span = match loan.span {
+                    MirSpan::ExprId(_) => loan.span,
+                    _ => temporary_span(self.body, loan.local).unwrap_or(loan.span),
+                };
+                self.report("E0716", span, "temporary value dropped while borrowed".to_owned())
             }
         }
+    }
+
+    /// What rustc's `def_descr` calls the function being checked.
+    fn owner_descr(&self) -> &'static str {
+        let hir_ty::InferBodyId::DefWithBodyId(hir_def::DefWithBodyId::FunctionId(function)) =
+            self.ctx.owner
+        else {
+            return "function";
+        };
+        match hir_def::Lookup::lookup(&function, self.ctx.db).container {
+            hir_def::ItemContainerId::ImplId(_) | hir_def::ItemContainerId::TraitId(_) => {
+                if hir_def::signatures::FunctionSignature::of(self.ctx.db, function)
+                    .has_self_param()
+                {
+                    "method"
+                } else {
+                    "associated function"
+                }
+            }
+            _ => "function",
+        }
+    }
+
+    /// Whether the region `rv` is in the type of a parameter, which rustc's E0521 names as
+    /// where the data comes from; not in `f: impl FnOnce(&'a T)`, whose type is a parameter.
+    fn parameter_names(&self, rv: regions::Rv) -> bool {
+        // A closure's reference to itself is not one of its parameters.
+        let own = usize::from(self.ctx.closure_local.is_some());
+        self.body.param_locals.iter().skip(own).any(|&local| {
+            let ty = self.regions.local_tys[local.into_raw().into_u32() as usize];
+            let mut found = false;
+            rustc_type_ir::fold_regions(self.ctx.infcx.interner, ty, |region, _| {
+                found |= regions::rv_of(region) == Some(rv);
+                region
+            });
+            found
+        })
+    }
+
+    /// Whether the region `rv` is in the type of what a closure captures or of one of its
+    /// parameters, which rustc's E0521 names as where the data comes from or goes; the
+    /// closure's reference to itself is neither, nor is `'static`.
+    fn closure_variable_names(&self, rv: regions::Rv) -> bool {
+        if rv == self.regions.static_rv {
+            return false;
+        }
+        let tys = &self.regions.local_tys;
+        let Some((&env, params)) = self.body.param_locals.split_first() else { return false };
+        let env = tys[env.into_raw().into_u32() as usize];
+        let env = match env.kind() {
+            TyKind::Ref(_, inner, _) => inner,
+            _ => env,
+        };
+        let captured = match env.kind() {
+            TyKind::Closure(_, args) => Some(args.as_closure().tupled_upvars_ty()),
+            TyKind::Coroutine(_, args) => Some(args.as_coroutine().tupled_upvars_ty()),
+            _ => None,
+        };
+        let interner = self.ctx.infcx.interner;
+        captured
+            .into_iter()
+            .chain(params.iter().map(|&it| tys[it.into_raw().into_u32() as usize]))
+            .any(|ty| {
+                let mut found = false;
+                rustc_type_ir::fold_regions(interner, ty, |region, _| {
+                    found |= regions::rv_of(region) == Some(rv);
+                    region
+                });
+                found
+            })
     }
 
     /// The universal regions made to outlive what the signature does not say they outlive,
@@ -1186,12 +1274,23 @@ impl<'a, 'db> Checker<'a, '_, 'db> {
             if matches!(kind, UniversalKind::Static | UniversalKind::FnBody) {
                 continue;
             }
-            if in_closure && self.propagate(longer) {
+            // As rustc, only the representative of the universal regions that outlive each
+            // other is checked against all it outlives; the others only against it.
+            let failing: Vec<usize> = match self.representative(longer) {
+                Some(representative) => Some(representative)
+                    .filter(|&it| !self.regions.knows(longer, it))
+                    .into_iter()
+                    .collect(),
+                None => self
+                    .values
+                    .universals_of(longer_rv)
+                    .filter(|&it| !self.regions.knows(longer, it))
+                    .collect(),
+            };
+            if failing.is_empty() || in_closure && self.propagate(longer, &failing) {
                 continue;
             }
-            let shorter =
-                self.values.universals_of(longer_rv).find(|&it| !self.regions.knows(longer, it));
-            let Some(shorter) = shorter else { continue };
+            let shorter = failing[0];
             let (shorter_rv, shorter_kind) = universals[shorter];
             let path =
                 regions::constraint_path(self.regions, self.region_count, longer_rv, shorter_rv);
@@ -1211,6 +1310,8 @@ impl<'a, 'db> Checker<'a, '_, 'db> {
                 ("", "captured variable cannot escape `FnMut` closure body".to_owned())
             } else if escapes
                 && matches!(blamed.category, Category::Assignment | Category::CallArgument)
+                && (self.closure_variable_names(longer_rv)
+                    || self.closure_variable_names(shorter_rv))
             {
                 ("E0521", "borrowed data escapes outside of closure".to_owned())
             } else if !self.regions.is_impl_item
@@ -1225,8 +1326,9 @@ impl<'a, 'db> Checker<'a, '_, 'db> {
                 ("E0621", "explicit lifetime required in the type of a parameter".to_owned())
             } else if blamed.category == Category::CallArgument
                 && shorter_kind == UniversalKind::Static
+                && self.parameter_names(longer_rv)
             {
-                ("E0521", "borrowed data escapes outside of function".to_owned())
+                ("E0521", format!("borrowed data escapes outside of {}", self.owner_descr()))
             } else {
                 ("", "lifetime may not live long enough".to_owned())
             };
@@ -1273,20 +1375,24 @@ impl<'a, 'db> Checker<'a, '_, 'db> {
                     continue;
                 }
                 if reported.insert((test.ty, test.span)) {
+                    let what = match test.ty.kind() {
+                        TyKind::Alias(_) => "associated type",
+                        _ => "parameter type",
+                    };
                     let (code, message) = match kind {
-                        _ if test.forall => ("", "the parameter type does not live long enough"),
+                        _ if test.forall => ("", format!("the {what} does not live long enough")),
                         UniversalKind::Static => {
-                            ("E0310", "the parameter type may not live long enough")
+                            ("E0310", format!("the {what} may not live long enough"))
                         }
                         UniversalKind::Named => {
-                            ("E0309", "the parameter type may not live long enough")
+                            ("E0309", format!("the {what} may not live long enough"))
                         }
-                        _ => ("E0311", "the parameter type may not live long enough"),
+                        _ => ("E0311", format!("the {what} may not live long enough")),
                     };
                     self.errors.push(Some(BorrowckDiagnostic {
                         code,
                         span: test.span,
-                        message: message.to_owned(),
+                        message,
                         at_signature: false,
                     }));
                 }
@@ -1300,7 +1406,7 @@ impl<'a, 'db> Checker<'a, '_, 'db> {
     /// outlives one of its creator's becomes a requirement on the creator's regions, from the
     /// largest of them `longer` outlives to the smallest that outlive the shorter one. `false`
     /// when `longer` outlives none of the creator's, which is an error in the closure.
-    fn propagate(&mut self, longer: usize) -> bool {
+    fn propagate(&mut self, longer: usize, failing: &[usize]) -> bool {
         let known = self.regions;
         let universals = &known.universals;
         let non_local =
@@ -1323,9 +1429,7 @@ impl<'a, 'db> Checker<'a, '_, 'db> {
             return false;
         }
         let longer_rv = universals[longer].0;
-        let failing: Vec<usize> =
-            self.values.universals_of(longer_rv).filter(|&it| !knows(longer, it)).collect();
-        for shorter in failing {
+        for &shorter in failing {
             let path = regions::constraint_path(
                 known,
                 self.region_count,
@@ -1361,6 +1465,28 @@ impl<'a, 'db> Checker<'a, '_, 'db> {
             }
         }
         true
+    }
+
+    /// rustc's representative of the strongly connected universal regions `universal` is one
+    /// of, where it is not that region itself: the first made, a closure's creator's before
+    /// its own. Not the function body's.
+    fn representative(&self, universal: usize) -> Option<usize> {
+        let universals = &self.regions.universals;
+        let rank = |it: usize| {
+            let local = !matches!(universals[it].1, UniversalKind::Static | UniversalKind::Creator);
+            (local, it)
+        };
+        let rv = universals[universal].0;
+        let representative = self
+            .values
+            .universals_of(rv)
+            .filter(|&it| {
+                universals[it].1 != UniversalKind::FnBody
+                    && self.values.universals_of(universals[it].0).any(|it| it == universal)
+            })
+            .chain([universal])
+            .min_by_key(|&it| rank(it))?;
+        (representative != universal).then_some(representative)
     }
 
     /// rustc's `non_local_upper_bounds`: `universal` if it is the creator's, else the smallest
@@ -1402,6 +1528,9 @@ impl<'a, 'db> Checker<'a, '_, 'db> {
     /// or the function body every parameter outlives, outlives `lower` as region inference
     /// left them.
     fn type_test_holds(&self, ty: Ty<'db>, lower: usize) -> bool {
+        if let TyKind::Alias(alias) = ty.kind() {
+            return self.alias_test_holds(ty, alias, lower, 0);
+        }
         let fn_body = self.regions.universals[1].0;
         let needed: Vec<usize> = self.values.universals_of(lower).collect();
         self.regions.type_bounds_of(ty).into_iter().chain([fn_body]).any(|bound| {
@@ -1410,6 +1539,101 @@ impl<'a, 'db> Checker<'a, '_, 'db> {
                 .iter()
                 .all(|&shorter| have.iter().any(|&longer| self.regions.knows(longer, shorter)))
         })
+    }
+
+    /// rustc's `alias_bound`: an associated type outlives `lower` where a where clause or the
+    /// trait says it outlives a region that does, or where all its arguments do.
+    fn alias_test_holds(
+        &self,
+        ty: Ty<'db>,
+        alias: rustc_type_ir::AliasTy<hir_ty::next_solver::DbInterner<'db>>,
+        lower: usize,
+        depth: usize,
+    ) -> bool {
+        let interner = self.ctx.infcx.interner;
+        let needed: Vec<usize> = self.values.universals_of(lower).collect();
+        let outlives = |bound: usize| {
+            let have: Vec<usize> = self.values.universals_of(bound).collect();
+            needed
+                .iter()
+                .all(|&shorter| have.iter().any(|&longer| self.regions.knows(longer, shorter)))
+        };
+        let erase = |ty: Ty<'db>| {
+            rustc_type_ir::fold_regions(interner, ty, |_, _| Region::new_static(interner))
+        };
+        let erased = erase(ty);
+        let regions_of = |ty: Ty<'db>| {
+            let mut out = Vec::new();
+            rustc_type_ir::fold_regions(interner, ty, |region, _| {
+                out.push(match region.kind() {
+                    RegionKind::ReStatic => Some(self.regions.static_rv),
+                    _ => regions::rv_of(region),
+                });
+                region
+            });
+            out
+        };
+        let knows_all = |longer: usize, shorter: usize| {
+            let have: Vec<usize> = self.values.universals_of(longer).collect();
+            self.values
+                .universals_of(shorter)
+                .all(|it| have.iter().any(|&longer| self.regions.knows(longer, it)))
+        };
+        // rustc's `VerifyIfEq`: a bound on the same associated type, with equal regions.
+        let mine = regions_of(ty);
+        if self.regions.type_bounds.iter().any(|&(bounded, region)| {
+            erase(bounded) == erased
+                && regions_of(bounded).iter().zip(&mine).all(|pair| match pair {
+                    (Some(x), Some(y)) => x == y || (knows_all(*x, *y) && knows_all(*y, *x)),
+                    _ => false,
+                })
+                && outlives(region)
+        }) {
+            return true;
+        }
+        for clause in rustc_type_ir::Interner::item_bounds(interner, alias.kind.def_id())
+            .iter_instantiated(interner, alias.args)
+        {
+            if let ClauseKind::TypeOutlives(OutlivesPredicate(bounded, region)) =
+                clause.skip_norm_wip().kind().skip_binder()
+                && erase(bounded) == erased
+            {
+                match region.kind() {
+                    RegionKind::ReStatic => return true,
+                    _ if regions::rv_of(region).is_some_and(outlives) => return true,
+                    _ => (),
+                }
+            }
+        }
+        if depth > 4 {
+            return false;
+        }
+        let mut components = Vec::new();
+        let mut params = Vec::new();
+        let captured = match alias.kind {
+            rustc_type_ir::AliasTyKind::Opaque { .. } => {
+                regions::opaque_captures(self.ctx.db, alias.kind.def_id(), alias.args.len())
+            }
+            _ => None,
+        };
+        for (index, arg) in alias.args.iter().enumerate() {
+            if captured.as_ref().is_some_and(|it| !it[index]) {
+                continue;
+            }
+            match arg.kind() {
+                GenericArgKind::Lifetime(region) => components.extend(regions::rv_of(region)),
+                GenericArgKind::Type(it) => {
+                    regions::outlives_components(it, &mut components, &mut params);
+                    regions::alias_components(it, &mut params);
+                }
+                GenericArgKind::Const(_) => (),
+            }
+        }
+        components.into_iter().all(outlives)
+            && params.into_iter().all(|it| match it.kind() {
+                TyKind::Alias(inner) => self.alias_test_holds(it, inner, lower, depth + 1),
+                _ => self.type_test_holds(it, lower),
+            })
     }
 
     fn check_access_permissions(
@@ -1978,11 +2202,13 @@ impl<'a, 'db> Checker<'a, '_, 'db> {
 
     fn report_move_errors(&mut self) {
         let errors = std::mem::take(&mut self.move_errors);
-        let mut reported_groups: FxHashSet<ExprId> = FxHashSet::default();
+        let mut reported_groups: FxHashSet<(ExprId, LocalId, Vec<PlaceElem>)> =
+            FxHashSet::default();
         for error in errors {
             let mut span = error.span;
             // A variable bound by a pattern is reported where the value matched on is, once
-            // for all the variables of the pattern.
+            // for the variables of the pattern that move out of the same place, as rustc's
+            // `MovesFromPlace` groups them: `(D(s), &t)` is two errors.
             let statement = self.body.basic_blocks[error.location.block]
                 .statements
                 .get(error.location.statement);
@@ -1997,7 +2223,14 @@ impl<'a, 'db> Checker<'a, '_, 'db> {
             {
                 match self.scrutinee_of(binding) {
                     Some(Some(scrutinee)) => {
-                        if !reported_groups.insert(scrutinee) {
+                        let len = match error.kind {
+                            MoveErrorKind::Borrowed(len)
+                            | MoveErrorKind::Destructor(len)
+                            | MoveErrorKind::SliceOrArray(len) => len,
+                            MoveErrorKind::Guard => 0,
+                        };
+                        let base = error.place.1[..len.min(error.place.1.len())].to_vec();
+                        if !reported_groups.insert((scrutinee, error.place.0, base)) {
                             continue;
                         }
                         span = MirSpan::ExprId(scrutinee);
@@ -2022,13 +2255,26 @@ impl<'a, 'db> Checker<'a, '_, 'db> {
         matches!(ty.kind(), TyKind::Slice(_) | TyKind::Array(..))
     }
 
+    /// A slice or array type as rustc writes it: `[A; 1]`, not the length's representation.
+    fn array_name(&self, ty: Ty<'_>) -> String {
+        match ty.kind() {
+            TyKind::Array(element, len) => {
+                match hir_ty::consteval::try_const_usize(self.ctx.db, len) {
+                    Some(len) => format!("[{element:?}; {len}]"),
+                    None => format!("[{element:?}; _]"),
+                }
+            }
+            _ => format!("{ty:?}"),
+        }
+    }
+
     fn move_error_message(&self, error: &MoveError) -> String {
         let place = PlaceRef { local: error.place.0, projection: &error.place.1 };
         match error.kind {
             MoveErrorKind::Borrowed(len) if self.is_slice_or_array(error, len + 1) => {
                 let ty = self.ctx.place_ty(self.body, place.local, &place.projection[..len + 1]).ty;
                 let kind = if matches!(ty.kind(), TyKind::Slice(_)) { "slice" } else { "array" };
-                format!("cannot move out of type `{ty:?}`, a non-copy {kind}")
+                format!("cannot move out of type `{}`, a non-copy {kind}", self.array_name(ty))
             }
             MoveErrorKind::Borrowed(len) => {
                 let base = place.base(len);
@@ -2055,7 +2301,7 @@ impl<'a, 'db> Checker<'a, '_, 'db> {
                 let base = place.base(len);
                 let ty = self.ctx.place_ty(self.body, base.local, base.projection).ty;
                 let kind = if matches!(ty.kind(), TyKind::Slice(_)) { "slice" } else { "array" };
-                format!("cannot move out of type `{ty:?}`, a non-copy {kind}")
+                format!("cannot move out of type `{}`, a non-copy {kind}", self.array_name(ty))
             }
         }
     }
@@ -2081,6 +2327,30 @@ fn capture_temps(body: &MirBody<'_>) -> FxHashMap<LocalId, MirSpan> {
         }
     }
     temps
+}
+
+/// Where the temporary `local` is made: the statement or call that assigns it.
+fn temporary_span(body: &MirBody<'_>, local: LocalId) -> Option<MirSpan> {
+    for (_, block) in body.basic_blocks.iter() {
+        for statement in &block.statements {
+            if let StatementKind::Assign(place, _) = &statement.kind
+                && place.local == local
+                && place.projection.as_slice().is_empty()
+                && statement.span != MirSpan::Unknown
+            {
+                return Some(statement.span);
+            }
+        }
+        if let Some(terminator) = &block.terminator
+            && let TerminatorKind::Call { destination, .. } = &terminator.kind
+            && destination.local == local
+            && destination.projection.as_slice().is_empty()
+            && terminator.span != MirSpan::Unknown
+        {
+            return Some(terminator.span);
+        }
+    }
+    None
 }
 
 fn static_muts(ctx: &Ctx<'_, '_>, body: &MirBody<'_>) -> FxHashSet<LocalId> {

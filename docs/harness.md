@@ -102,6 +102,8 @@ with reasons. The daemon's log says `backend: llvm -O2 fast emit` when LLVM is i
 | `includes.py` | Edits to a file only `include!` names |
 | `splices.py` | Edits that are hard on the splice: thread-locals, statics, vtables, function pointers, closures, panics, foreign calls. Counts how each step was linked |
 | `farsplices.py` | Splices into a binary whose code is further from its end than an AArch64 branch reaches |
+| `farfile.py` | Edits of a program whose file is 2.3 GB of a section nothing loads, as a debug build of bevy's is mostly debug info: bodies, a caller, a new function and taking it back each have to be spliced, which a patch placed as far from the code as it is behind the file is not ([#79](https://github.com/indexable-inc/ra-jit/issues/79)). Linux |
+| `bigbinary.py` | Edits of a program larger than any place of the splice is sized for: 220 MB of code, over 16 MB of frames the unwinder reads from `__eh_frame` or `.eh_frame`, and on Linux 4.2 GB of `.debug_abbrev`. A function shorter than the long jump, one that panics through its replacement, 3,000 functions added and a new function each have to be spliced ([architecture.md](architecture.md#no-size-is-a-reason-to-link-in-full)). Nightly, Linux and macOS |
 | `unreached.py` | Edits under `cargo ra-jit` that call instances of another crate's generic function the executable did not reach when it was linked: each is spliced, not linked in full. The daemon's own links, with `RA_JIT_RUSTC_BASE=0`. Linux and macOS; on Windows `cargo ra-jit` hands builds to cargo |
 | `loadedits.py` | A file written while a worker loads, after the worker read it and before it took its timestamp (held there with `RA_JIT_LOAD_PAUSE_MS`), is built as written: the next build, and the one after an edit of another crate, print the new text ([#53](https://github.com/indexable-inc/ra-jit/issues/53)). Linux and macOS |
 | `agents.py` | Random edits of the kind coding agents make, on a real workspace |
@@ -114,7 +116,7 @@ with reasons. The daemon's log says `backend: llvm -O2 fast emit` when LLVM is i
 | `live_latency.py` | Edit-to-running time of live edits on `harness/live`, `demo/life`, `harness/live-bevy` and `harness/live-egui`: isolated edits, bursts of valid keystrokes, real typing replayed key by key (most texts in between do not compile; a program told to restart is started again), and a session's restarts against `cargo run`. Writes p50 to p99 and every sample, with the machine and its battery, to `LATENCY_JSON`. Measures; checks nothing; macOS on AArch64 ([live.md](live.md#latency-under-typing)) |
 | `fncache.py` | `#[ra_jit::cache]` ([fn-cache.md](fn-cache.md)): a cold run computes and a warm one finds the result on disk; comment, format, moved-line and unrelated edits keep it, an edit of a function it reaches through another drops it; generic instances are kept apart; impure functions are refused saying where; a restarted daemon finds the same results; cargo's build caches nothing. `--live`: a live edit computes again and drops the old results, macOS on AArch64 |
 | `spaces.py` | A two-crate workspace under a directory whose name has spaces, `$$`, `#` and quotes, built and edited with `cargo ra-jit build`; every edit has to be applied by the daemon against rustc's symbols ([#14](https://github.com/indexable-inc/ra-jit/issues/14)) |
-| `rustcbase.py` | The first edits after a cold `cargo ra-jit build`, spliced into the executable rustc linked ([#11](https://github.com/indexable-inc/ra-jit/issues/11)), against plain cargo: bodies, closures, a dependency crate, function-local statics, two edits in a row, and a `#[ra_jit::cache]` function and what it reaches have to be patches; generic, `#[inline]` and default trait functions, statics, new items, `async`, `impl Trait` and `include_str!` edits have to be built in full and say why; and the daemon's own base, built while nothing waits, takes the edits after it, also when a crate it loads includes a file no build script wrote (`unbuilt-member`), and is given up once it holds more memory than `RA_JIT_OWN_BASE_MEMORY` (`own-base-budget`). Every edit's output and exit status against cargo's, macOS and Linux |
+| `rustcbase.py` | The first edits after a cold `cargo ra-jit build`, spliced into the executable rustc linked ([#11](https://github.com/indexable-inc/ra-jit/issues/11)), against plain cargo: bodies, closures, a dependency crate, function-local statics, two edits in a row, and a `#[ra_jit::cache]` function and what it reaches have to be patches; generic, `#[inline]` and default trait functions, statics, new items, `async`, `impl Trait` and `include_str!` edits have to be built in full and say why; and the daemon's own base, built while nothing waits, takes the edits after it; an edit that comes as it builds is a patch of rustc's executable, or of the base when it had begun to link ([#79](https://github.com/indexable-inc/ra-jit/issues/79)), also when a crate it loads includes a file no build script wrote (`unbuilt-member`), and is given up once it holds more memory than `RA_JIT_OWN_BASE_MEMORY` (`own-base-budget`). Every edit's output and exit status against cargo's, macOS and Linux |
 | `nocompact.py` | A program linked with `-no_compact_unwind`, as bun is, which has `__eh_frame` and no `__unwind_info`: its edits are spliced, and the unwinder finds the frame of the edited function where its symbol now is, behind the program's frames and, once a thousand new functions outgrow that room, with all of them moved into the header's ([#33](https://github.com/indexable-inc/ra-jit/issues/33)). macOS on AArch64 |
 | `headerpad.py` | A program whose unwind table does not fit the room its link leaves after the load commands: the first link is done again with room, the edits after it are spliced, and a restarted daemon starts from the room kept beside the executable ([#13](https://github.com/indexable-inc/ra-jit/issues/13)). It is built for macOS 14, as nix's shell builds, which Apple's linker gives chained fixups unless told not to ([#30](https://github.com/indexable-inc/ra-jit/issues/30)). The daemon's own links, with `RA_JIT_RUSTC_BASE=0`. macOS on AArch64 |
 | `tiers.py` | Tiers ([tiers.md](tiers.md)): `demo/lifebench` running under the daemon reaches levels 2 and 3 with output identical to cargo's, an edit of a tiered function demotes it and is applied at once, and `RA_JIT_TIER=off` changes nothing. macOS on AArch64 with `--features llvm`; it exits 0 elsewhere |
@@ -136,10 +138,17 @@ with reasons. The daemon's log says `backend: llvm -O2 fast emit` when LLVM is i
 ### Timing
 
 `bench.py`, `editloop.py`, `edittimes.py`, `scaling.py`, `dxedits.py`, `linkbench.py`,
-`shapes.py`, `heap.py`, `heapfold.py`, `fnincr.py`, `realbench.py` and `live_latency.py` measure and do not gate.
+`shapes.py`, `heap.py`, `heapfold.py`, `fnincr.py`, `realbench.py`, `spare.py` and `live_latency.py` measure and do not gate.
+`spare.py` starts a daemon with a tiny project, then builds one of `bench.py`'s projects under it
+from an empty target directory and again once cargo has built it, each until the daemon is
+ready, for builds of ra-jit given as `--variant LABEL:BIN[:VAR=VALUE...]` in interleaved
+rounds: the second project's cold and warm start and what the daemon's processes hold before and
+after, which is how the spare worker's default was chosen ([cargo.md](cargo.md#what-a-build-does)).
 `heap.py` gives a heap profile's bytes to the salsa query whose value or record holds them, and to
 ra-jit's own structures; `heapfold.py` makes of a profile on macOS what `jeprof --collapsed` makes
-of it on Linux, for `heap.py` to read ([research/daemon-memory.md](research/daemon-memory.md)). `fnincr.py` counts
+of it on Linux, for `heap.py` to read ([research/daemon-memory.md](research/daemon-memory.md)); `heap.py --syntax`
+says what of it is syntax trees, of which kind and from which query, and `cpufold.py` folds a
+`perf script` the same way for time ([flat-syntax.md](flat-syntax.md)). `fnincr.py` counts
 the queries an edit inside one function of a big file runs (the file comes from `genbig.py`),
 against the same functions in many small files ([reports/INCREMENTAL.md](reports/INCREMENTAL.md)). `realbench.py` times
 `cargo ra-jit build` against `cargo build` on ripgrep, just and nushell (cold, no-op and
@@ -148,7 +157,8 @@ times a cold `cargo ra-jit build` of a real project until the daemon is ready an
 edit, from an empty or a filled store, with every line the daemon logged and the cores busy
 along the way: the readiness check of [#11](https://github.com/indexable-inc/ra-jit/issues/11),
 whose numbers are in [cargo.md](cargo.md#what-a-build-does). With `--max-wait S` it fails when
-the daemon was ready more than S seconds after the command returned. Their docstrings say how to run them.
+the daemon was ready more than S seconds after the command returned; `--until TEXT` waits for a
+line the daemon logs, and `--memory` follows what its processes hold. Their docstrings say how to run them.
 `bench.py` on real projects, with `benchreport.py`, is also what writes the README's build
 table: [benchmarks.md](benchmarks.md). Besides the edits `bench.py` times repeated cold builds
 against fresh cargo with an empty and with a warm store (`--cold-runs`), the same steps under
@@ -255,8 +265,17 @@ For a CI failure, the last line of the harness step lists which scripts failed.
 `.github/workflows/ra-jit.yaml` runs in two tiers. It calls `ra-jit-platform.yaml` once for
 each platform, each on a machine of its own kind.
 
-The **fast tier** runs on every pull request, every push to main and every entry of the merge
-queue, and takes about ten minutes. On Linux x86-64, Linux AArch64 and macOS arm64 it:
+A change reaches main through the **merge queue** alone
+([contributing.md](contributing.md#landing-a-change)). The queue takes pull requests in order,
+merges each onto main and the entries ahead of it, runs the fast tier on that, and moves main to
+it once it passes; an entry that fails leaves the queue, and the ones behind it are tested again
+without it. So main is always a commit the fast tier passed on. A pull request's own run is
+`fmt` alone, which lets it join the queue within a minute: the queue tests it merged anyway, and
+testing it alone first would make every landing wait for the fast tier twice. For the fast tier
+on a branch before queueing it, `gh workflow run ra-jit.yaml --ref <branch> -f tier=fast`.
+
+The **fast tier** runs on every entry of the merge queue, every push to main and by hand, and
+takes about ten minutes. On Linux x86-64, Linux AArch64 and macOS arm64 it:
 
 - builds ra-jit once, with the `llvm` feature, and hands the binary to its other jobs;
 - runs `harness/unittests.py`;
@@ -287,22 +306,31 @@ minutes replaced each waiting run with the next, and 7 of 10 runs on main were c
 The build and the unit tests compile through sccache, which keeps rustc's output in the
 Actions cache; rust-cache keeps the dependencies from crates.io and leaves out the crates of
 this repository and `vendor/`, which are most of the build. The harnesses run without the
-wrapper, since `cargo_ra_jit.py` tests a user's own.
+wrapper, since `cargo_ra_jit.py` tests a user's own. Main alone writes either cache (sccache is
+read-only elsewhere, `SCCACHE_GHA_RW_MODE`): what a pull request or a queue entry wrote would
+be kept for its own ref, which nothing reads again, and would push main's entries out of the
+repository's 10 GB. The harness jobs' Ubuntu packages (valgrind and gdb) come through
+`.github/actions/apt`, which keeps them in the cache per runner image: the runners' mirror
+sometimes serves a few tens of kB/s, and installing them took 8 to 12 minutes in a cluster of
+runs.
 
 `ci` is the job that says whether everything that ran passed, and it is the one check branch
-rules and the merge queue require. A job that is renamed or split does not change it.
-Measured on 2026-10-22 ([#67](https://github.com/indexable-inc/ra-jit/pull/67)): the fast
-tier took 15.4 minutes with the sccache cache empty and 10.1 with it filled, where the macOS
-build (4 minutes) and then its harnesses (6) are the longest path. One tier that ran everything
-took 44 to 67 minutes before.
+rules and the merge queue require. A job that is renamed or split does not change it. Measured
+on 2026-10-22 ([reports/CI.md](reports/CI.md)): the fast tier took 13.3 minutes at the median
+and 20.4 at p90 on main, where the longest path is the macOS build (4 minutes) and then its
+slowest harness part (6), and the p90 is the package mirror. No job waits for a runner.
 
-The repository ruleset `main` (Settings, Rules) holds the default branch to three rules. A
-push to it needs `ci` to have passed on the commit pushed, the branch can't be deleted, and
-it can't be force-pushed. Repository admins bypass all three, so a merge pushed straight to
-main and a scrub of history still work for them. A ruleset can't exempt the token a workflow
-runs with, so the `bench-readme` commit to main is refused while the ruleset is active.
-`gh api repos/indexable-inc/ra-jit/rulesets` shows its state: `evaluate` only records what
-it would have refused (Insights, Rule insights), and `active` refuses it.
+The repository ruleset `main` (Settings, Rules) is active and holds the default branch to four
+rules: a change comes through the merge queue, a push needs `ci` to have passed on the commit
+pushed, the branch can't be deleted, and it can't be force-pushed. The queue merges with a
+merge commit, builds up to five entries at once, merges up to five together, needs every entry
+green, and counts an entry failed after 60 minutes without `ci`. Repository admins bypass the
+rules (`bypass_actors`), for repairs; work lands through the queue. A ruleset can't exempt the
+token a workflow runs with, so the workflows that commit to main (`pgo.yaml`'s pin,
+`bench-readme.yaml`, `bench-bun.yaml`, `live-latency.yaml`) check out with the secret
+`RA_JIT_BOT_TOKEN`, a token of an identity the ruleset lets past; without it their push is
+refused. `gh api repos/indexable-inc/ra-jit/rulesets/25516056` shows the rules, and Insights,
+Rule insights what they refused.
 
 What is known to be wrong is written down, says why, and does not fail the run. Once it comes
 out right, it fails the run until it is taken off the list:

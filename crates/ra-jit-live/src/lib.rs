@@ -177,7 +177,7 @@ pub fn edit(path: &std::path::Path, text: &str) -> Result<String, String> {
     match reply.strip_prefix("error: ") {
         _ if reply.is_empty() => Err("the daemon hung up without an answer".to_owned()),
         _ if reply.starts_with("ok") => Ok(reply.to_owned()),
-        Some(why) => Err(why.to_owned()),
+        Some(why) => Err(format::unescape(why)),
         None => Err(reply.to_owned()),
     }
 }

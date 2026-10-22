@@ -3,12 +3,14 @@
 
 #![allow(clippy::print_stderr, reason = "a command line program: stderr is where it speaks")]
 
+mod answers;
 mod borrowck;
 mod cargo;
 mod content;
 mod dep_info;
 mod deps;
 mod doctest;
+mod errors;
 mod inputs;
 mod live;
 mod memory;
@@ -45,7 +47,7 @@ use std::{
     process::Command,
     sync::{
         Arc, Mutex,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
     },
     time::{Duration, Instant, SystemTime},
 };
@@ -112,6 +114,9 @@ struct Args {
     /// the first edits are patches of a copy of it at `splice`, while nothing waits for the
     /// object of the whole program.
     rustc_binary: Option<PathBuf>,
+    /// Of `symbol_files`, those of the crates rustc compiled with a symbol for each function,
+    /// which every call goes to: a patch of `rustc_binary` may call what is private to them.
+    by_symbol: Vec<PathBuf>,
     /// Tab-separated per-function outcome, for the harness.
     report: Option<PathBuf>,
     /// File of function paths to leave to rustc, for bisecting miscompiles.
@@ -196,6 +201,7 @@ impl Args {
         let mut patch = None;
         let mut splice = None;
         let mut rustc_binary = None;
+        let mut by_symbol = Vec::new();
         let mut report = None;
         let mut deny = None;
         let mut isolate = None;
@@ -227,6 +233,12 @@ impl Args {
                 "--patch" => patch = Some(PathBuf::from(value()?)),
                 "--binary" | "--splice" => splice = Some(PathBuf::from(value()?)),
                 "--rustc-binary" => rustc_binary = Some(PathBuf::from(value()?)),
+                "--by-symbol-in" => {
+                    let listed = value()?;
+                    let listed = std::fs::read_to_string(&listed)
+                        .with_context(|| format!("reading the symbol files in {listed}"))?;
+                    by_symbol.extend(listed.lines().map(PathBuf::from));
+                }
                 "--report" => report = Some(PathBuf::from(value()?)),
                 "--deny" => deny = Some(PathBuf::from(value()?)),
                 "--isolate" => isolate = Some(PathBuf::from(value()?)),
@@ -265,6 +277,7 @@ impl Args {
             patch,
             splice,
             rustc_binary,
+            by_symbol,
             report,
             deny,
             isolate,
@@ -2774,8 +2787,8 @@ fn start_from_rustc(
     let linked = Linked::read_rustcs(binary.to_owned(), patch, &args.out);
     lock(&LINKED).insert(binary.to_owned(), Executable::Linked(linked));
     lock(&RUSTC_LINKED).insert(binary.to_owned());
-    let rustcs = rustcs.to_owned();
-    let names = std::thread::spawn(move || symbols::Linked::read(&rustcs));
+    let (rustcs, by_symbol) = (rustcs.to_owned(), args.by_symbol.clone());
+    let names = std::thread::spawn(move || symbols::Linked::read(&rustcs, &by_symbol));
     lock(&RUSTC_SYMBOLS).insert(binary.to_owned(), LinkedNames::Reading(names));
     let mut watched: FxHashSet<PathBuf> = files.iter().map(|it| it.path.clone()).collect();
     let mut real_watched: Option<FxHashSet<PathBuf>> = None;
@@ -3793,9 +3806,10 @@ struct Sources {
 
 /// Why the daemon did not build a program.
 enum Refused {
-    /// The source has an error: the build fails, as rustc's would.
+    /// The source has an error, written as rustc writes it: the build fails with it, as
+    /// rustc's would, and no rustc runs to say it again.
     Error(String),
-    /// The source is one ra-jit does not build as it is: cargo builds it.
+    /// The source is one ra-jit does not build as it is, or ra-jit failed to: cargo builds it.
     Cargos(String),
 }
 
@@ -3803,7 +3817,11 @@ impl Refused {
     /// The line that tells a client.
     fn reply(&self) -> String {
         match self {
-            Refused::Error(why) => format!("error: {}", why.replace('\n', " ")),
+            Refused::Error(why) => {
+                let mut line = "error: ".to_owned();
+                ra_jit_live::format::escape(why, &mut line);
+                line
+            }
             Refused::Cargos(why) => format!("cargo: {}", why.replace('\n', " ")),
         }
     }
@@ -3818,14 +3836,16 @@ impl std::fmt::Display for Refused {
 
 /// Why the source as it is can't be built by the daemon, when it can't: a file that does
 /// not parse, then the errors found in the edited files, then a function left uncompiled.
+/// Paths are shown from `root`, the workspace's, as rustc's errors show them.
 fn refusal(
     db: &RootDatabase,
     sources: &[vfs::FileId],
     watched: &Sources,
+    root: &Path,
     broken: Option<String>,
     out_of_date: Option<hir_ty_codegen::OutOfDate>,
 ) -> Option<Refused> {
-    if let Some(unparsed) = unparsed(db, sources, watched) {
+    if let Some(unparsed) = unparsed(db, sources, watched, root) {
         return Some(Refused::Error(unparsed));
     }
     if let Some(broken) = broken {
@@ -3845,20 +3865,80 @@ fn refusal(
              edit: {why}"
         )));
     }
-    // What the frontend turns down is as a rule code that does not compile, unless it turned
-    // the function down when rustc compiled it.
-    if why.starts_with("frontend:") && !left_from_the_start {
-        return Some(Refused::Error(format!(
-            "`{name}` has an error ra-jit cannot say more of: {why}"
-        )));
+    // What the frontend turns down as code that does not compile, rustc would too, unless
+    // the frontend turned the function down when rustc compiled it. Code rustc compiles
+    // that ra-jit takes for wrong is ra-jit's to fix, and not for rustc to build.
+    if does_not_compile(&why) && !left_from_the_start {
+        let message = format!("`{name}` has an error ra-jit cannot say more of: {why}");
+        return Some(Refused::Error(written_at(db, func, watched, root, &message)));
     }
     Some(Refused::Cargos(format!(
         "`{name}` is not compiled by ra-jit and rustc's copy is from before the edit: {why}"
     )))
 }
 
+/// What the frontend says of a function that does not compile, of its reasons: the rest are
+/// code ra-jit does not compile yet, or its own failures.
+const DOES_NOT_COMPILE: &[&str] = &[
+    "IncompleteExpr",
+    "IncompletePattern",
+    "UnresolvedName",
+    "RecordLiteralWithoutPath",
+    "UnresolvedMethod",
+    "UnresolvedField",
+    "MissingFunctionDefinition",
+    "HasErrors",
+    "TypeError",
+    "ContinueWithoutLoop",
+    "BreakWithoutLoop",
+    "MutatingRvalue",
+    "UnresolvedLabel",
+];
+
+/// Whether `why`, a reason a function is not compiled, says it does not compile.
+fn does_not_compile(why: &str) -> bool {
+    why.strip_prefix("frontend: mir: ").is_some_and(|it| {
+        let variant = it.split(|c: char| !c.is_alphanumeric()).next().unwrap_or(it);
+        DOES_NOT_COMPILE.contains(&variant)
+    })
+}
+
+/// `message` as an error at the name of `func`, or of no place when its file is not one of
+/// `watched`.
+fn written_at(
+    db: &RootDatabase,
+    func: hir_def::FunctionId,
+    watched: &Sources,
+    root: &Path,
+    message: &str,
+) -> String {
+    let at = hir::HasSource::source(hir::Function::from(func), db).and_then(|source| {
+        let name = source.value.name()?;
+        Some(source.with_value(name.syntax()).original_file_range_rooted(db))
+    });
+    match at {
+        Some(at) if watched.paths.contains_key(&at.file_id.file_id(db)) => {
+            let file = at.file_id.file_id(db);
+            let text = db.file_text(file).text(db);
+            errors::at(None, message, &shown(watched, file, root), text, at.range)
+        }
+        _ => errors::of_none(message),
+    }
+}
+
+/// `file` as rustc names it in an error: from `root` when it is below it.
+fn shown(watched: &Sources, file: vfs::FileId, root: &Path) -> String {
+    let Some(path) = watched.paths.get(&file) else { return String::new() };
+    path.strip_prefix(root).unwrap_or(path).display().to_string()
+}
+
 /// The first error of the first of `sources` that does not parse, where it is.
-fn unparsed(db: &RootDatabase, sources: &[vfs::FileId], watched: &Sources) -> Option<String> {
+fn unparsed(
+    db: &RootDatabase,
+    sources: &[vfs::FileId],
+    watched: &Sources,
+    root: &Path,
+) -> Option<String> {
     let Sources { paths } = watched;
     for &file in sources {
         let path = paths.get(&file);
@@ -3876,9 +3956,14 @@ fn unparsed(db: &RootDatabase, sources: &[vfs::FileId], watched: &Sources) -> Op
             if syntax::ast::Expr::parse(text, edition).errors().is_empty() {
                 continue;
             }
-            let path = path.map(|it| it.display().to_string()).unwrap_or_default();
-            let line = text[..usize::from(error.range().start())].matches('\n').count();
-            return Some(format!("{path}:{}: {error}", line + 1));
+            let range = syntax::TextRange::empty(error.range().start());
+            return Some(errors::at(
+                None,
+                &error.to_string(),
+                &shown(watched, file, root),
+                text,
+                range,
+            ));
         }
     }
     None
@@ -3913,12 +3998,14 @@ const BORROWCK: &[&str] = &[
     "E0594", "E0596", "E0597", "E0621", "E0716", "borrowck",
 ];
 
-/// How many errors a failed build says.
-const SAID: usize = 8;
-
-/// The errors written in the edited files, as rust-analyzer finds them. Nothing may reach
-/// them, so the build never looks at them.
-fn broken_in(db: &RootDatabase, edited: &[vfs::FileId], watched: &Sources) -> Option<String> {
+/// The errors written in the edited files, as rust-analyzer finds them, as rustc writes them
+/// with paths from `root`. Nothing may reach them, so the build never looks at them.
+fn broken_in(
+    db: &RootDatabase,
+    edited: &[vfs::FileId],
+    watched: &Sources,
+    root: &Path,
+) -> Option<String> {
     let threads = std::thread::available_parallelism().map_or(1, |it| it.get());
     let config = ide_diagnostics::DiagnosticsConfig::test_sample();
     let refuse_borrowck = std::env::var_os("RA_JIT_BORROWCK_REFUSE").is_none_or(|it| it != "0");
@@ -3956,24 +4043,20 @@ fn broken_in(db: &RootDatabase, edited: &[vfs::FileId], watched: &Sources) -> Op
         return None;
     }
     found.sort_by_key(|(at, ..)| (at.file_id, at.range.start()));
-    let more = found.len().saturating_sub(SAID);
-    let mut said: Vec<_> = found
+    let said: Vec<_> = found
         .iter()
-        .take(SAID)
         .map(|(at, code, message)| {
             let text = db.file_text(at.file_id).text(db);
-            let before = &text[..usize::from(at.range.start()).min(text.len())];
-            let line = before.matches('\n').count() + 1;
-            let column = before.rsplit('\n').next().map_or(0, |it| it.chars().count()) + 1;
-            let path = watched.paths.get(&at.file_id);
-            let path = path.map(|it| it.display().to_string()).unwrap_or_default();
-            format!("{path}:{line}:{column}: {message} [{code}]")
+            // rustc's codes are `E` and four digits; rust-analyzer's own names are not codes.
+            let rustcs = code
+                .strip_prefix('E')
+                .is_some_and(|it| !it.is_empty() && it.bytes().all(|b| b.is_ascii_digit()));
+            let code = rustcs.then_some(*code);
+            let path = shown(watched, at.file_id, root);
+            errors::at(code, message, &path, text, at.range)
         })
         .collect();
-    if more > 0 {
-        said.push(format!("and {more} more"));
-    }
-    Some(said.join("\n"))
+    Some(said.join("\n\n"))
 }
 
 /// The text of the source file at `path` as the database has it.
@@ -4155,6 +4238,7 @@ fn build_batch(db: &RootDatabase, args: Args) -> anyhow::Result<()> {
             patch: None,
             splice: None,
             rustc_binary: None,
+            by_symbol: Vec::new(),
             report: Some(report.join(format!("{krate}.tsv"))),
             deny: None,
             isolate: None,
@@ -4275,6 +4359,7 @@ impl Target {
             splice,
             symbol_files,
             rustc_binary: None,
+            by_symbol: Vec::new(),
             ..daemon.clone()
         })
     }
@@ -4520,7 +4605,7 @@ fn compile_tiered(
         tier::done(&binary, Vec::new(), counters);
         return;
     }
-    let db = db.clone();
+    let (db, tiering) = (db.clone(), Tiering::start());
     let asked_of = binary.clone();
     // Each body built in or shown is built inside the one that calls it, up to ten deep, with
     // the frames of a whole function's build each; a thread's default 2 MiB does not hold that.
@@ -4540,7 +4625,7 @@ fn compile_tiered(
                 (symbol, asked.node, asked.level, prepared, start.elapsed())
             })
             .collect();
-        drop(db);
+        drop((db, tiering));
         let (mut code, mut done) = (Vec::new(), Vec::new());
         for (symbol, node, level, prepared, with_db) in prepared {
             let room = ra_jit_live::format::COUNTERS as u32;
@@ -4587,6 +4672,34 @@ fn compile_tiered(
     if let Err(why) = spawned {
         eprintln!("tier: no thread to compile on: {why}");
         tier::done(&asked_of, Vec::new(), counters);
+    }
+}
+
+/// A compile at a higher level that holds the database, which [`let_go`] waits to have none.
+struct Tiering;
+
+static TIERING: AtomicUsize = AtomicUsize::new(0);
+
+impl Tiering {
+    fn start() -> Self {
+        TIERING.fetch_add(1, Ordering::Relaxed);
+        Tiering
+    }
+}
+
+impl Drop for Tiering {
+    fn drop(&mut self) {
+        TIERING.fetch_sub(1, Ordering::Relaxed);
+    }
+}
+
+/// Lets go now of what the queries with an `lru` keep past it, the trees parsed and the bodies
+/// lowered for the builds that are over, which would otherwise wait for the next edit. Only
+/// when nothing else holds the database: this cancels what does.
+fn let_go(db: &mut RootDatabase, builds: &Builds) {
+    use ide_db::base_db::salsa::Database;
+    if builds.running.is_empty() && TIERING.load(Ordering::Relaxed) == 0 {
+        db.trigger_lru_eviction();
     }
 }
 
@@ -4639,6 +4752,39 @@ struct Edited {
 
 /// Set while the builds under way are told to stop for a change to the source.
 static INTERRUPTING: AtomicBool = AtomicBool::new(false);
+
+/// How many builds have begun to link. An interruption waits for them: a link is not stopped,
+/// and once it has begun the executable it writes is the program, which a build interrupted
+/// after it would leave the daemon without. The daemon's own base, once it links, has
+/// replaced the executable rustc linked.
+static LINKING: Mutex<usize> = Mutex::new(0);
+
+thread_local! {
+    /// Whether the build on this thread is one of [`LINKING`].
+    static LINKS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Called before a build links, which it does not once an interruption has begun: it then
+/// unwinds as an interrupted build does.
+fn begin_link() {
+    if LINKS.get() {
+        return;
+    }
+    let mut linking = lock(&LINKING);
+    if INTERRUPTING.load(Ordering::SeqCst) {
+        drop(linking);
+        std::panic::resume_unwind(Box::new(ide_db::base_db::salsa::Cancelled::PendingWrite));
+    }
+    *linking += 1;
+    LINKS.set(true);
+}
+
+/// After a build on this thread is over: it holds up no interruption.
+fn end_link() {
+    if LINKS.replace(false) {
+        *lock(&LINKING) -= 1;
+    }
+}
 
 /// Reading a loaded checkout from another place is long when the build takes more than this,
 /// or than `RA_JIT_SLOW_SWITCH_MS`.
@@ -4855,10 +5001,19 @@ impl Builds {
             let event = self.events.recv()?;
             self.take(event, programs)?;
         }
-        if self.running.is_empty() {
-            return Ok(());
+        loop {
+            if self.running.is_empty() {
+                return Ok(());
+            }
+            let linking = lock(&LINKING);
+            if *linking == 0 {
+                INTERRUPTING.store(true, Ordering::SeqCst);
+                break;
+            }
+            drop(linking);
+            let event = self.events.recv()?;
+            self.take(event, programs)?;
         }
-        INTERRUPTING.store(true, Ordering::SeqCst);
         db.trigger_cancellation();
         while !self.running.is_empty() {
             let event = self.events.recv()?;
@@ -4975,7 +5130,7 @@ fn requested(stream: UnixStream) -> Option<Event> {
         Ok(lines) => lines,
         Err(error) => {
             // A client that hangs up before the answer is not the daemon's problem.
-            let _ = writeln!(&stream, "error: {error}");
+            let _ = writeln!(&stream, "failed: {error}");
             return None;
         }
     };
@@ -4998,7 +5153,7 @@ fn requested(stream: UnixStream) -> Option<Event> {
         let client = Client { stream, env: process::decode(&env) };
         return Some(Event::Asked((request, target, client)));
     }
-    let _ = writeln!(&stream, "error: unknown request {request:?}");
+    let _ = writeln!(&stream, "failed: unknown request {request:?}");
     None
 }
 
@@ -5081,6 +5236,8 @@ pub(crate) fn version() -> String {
 
 fn main() -> anyhow::Result<()> {
     trace::began();
+    syntax::set_green_trees(std::env::var_os("RA_JIT_GREEN_TREES").is_some());
+    project_model::answer_toolchain_questions_with(answers::ask);
     let stands_in_for_rustc = std::env::var_os("RA_JIT_WRAPS_RUSTC").is_some();
     match std::env::args().nth(1).as_deref() {
         _ if stands_in_for_rustc => {}
@@ -5936,8 +6093,9 @@ fn run_holding(
         let mut edited: Vec<_> = paths.keys().copied().collect();
         edited.sort_unstable();
         let sources = Sources { paths };
-        let broken = broken_in(&db, &edited, &sources);
-        let why = hir::attach_db(&db, || refusal(&db, &edited, &sources, broken, None));
+        let broken = broken_in(&db, &edited, &sources, &args.checkout);
+        let why =
+            hir::attach_db(&db, || refusal(&db, &edited, &sources, &args.checkout, broken, None));
         if let Some(why) = why {
             bail!("{why}");
         }
@@ -6170,6 +6328,7 @@ fn run_holding(
                     Some(at) if idle => match builds.events.recv_timeout(OWN_BASE_AFTER) {
                         Ok(event) => {
                             if builds.take(event, &mut programs)? {
+                                let_go(&mut db, &builds);
                                 memory::served(&mut db)?;
                             }
                         }
@@ -6181,6 +6340,7 @@ fn run_holding(
                     _ if builds.stuck || idle => {
                         let event = builds.events.recv()?;
                         if builds.take(event, &mut programs)? {
+                            let_go(&mut db, &builds);
                             memory::served(&mut db)?;
                         }
                     }
@@ -6194,6 +6354,7 @@ fn run_holding(
                     // requests sent with its own to arrive.
                     while let Ok(event) = builds.events.try_recv() {
                         if builds.take(event, &mut programs)? {
+                            let_go(&mut db, &builds);
                             memory::served(&mut db)?;
                         }
                     }
@@ -6257,12 +6418,12 @@ fn run_holding(
                             listed.touch(&db, Some(&new));
                             lock(&as_built).clear();
                             if let Err(error) = reloaded.and(started) {
-                                let _ = writeln!(&stream, "error: {error:#}");
+                                let _ = writeln!(&stream, "failed: {error:#}");
                                 continue;
                             }
                         }
                         Err(error) => {
-                            let _ = writeln!(&stream, "error: {error:#}");
+                            let _ = writeln!(&stream, "failed: {error:#}");
                             continue;
                         }
                     }
@@ -6465,7 +6626,7 @@ fn run_holding(
                         }
                         // A request for what can't be built is the client's mistake.
                         Err(e) => {
-                            let _ = writeln!(&stream, "error: {e:#}");
+                            let _ = writeln!(&stream, "failed: {e:#}");
                         }
                     }
                 }
@@ -6933,6 +7094,7 @@ fn run_holding(
                         Ok(answer) => Some(answer),
                         Err(panic) => Some(Ok(program.panicked(&*panic))),
                     };
+                    end_link();
                     let _ = sender.send(Event::Built(at, program, answer));
                 });
             }
@@ -6957,7 +7119,12 @@ fn run_holding(
                         let (db, listed, paths, edit) = (db.clone(), &*listed, &*paths, &edit);
                         let wanted = outputs.get(&at);
                         let build = scope.spawn(move || {
-                            program.sync(&db, listed, paths, edit, wanted, link, defer)
+                            let answer =
+                                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                                    program.sync(&db, listed, paths, edit, wanted, link, defer)
+                                }));
+                            end_link();
+                            answer.unwrap_or_else(|panic| std::panic::resume_unwind(panic))
                         });
                         (at, build)
                     })
@@ -7066,7 +7233,7 @@ fn run_holding(
                 for (_, _, client) in clients {
                     let _ = match &failed {
                         None => writeln!(&client, "ok {built}"),
-                        Some(why) => writeln!(&client, "error: {why}"),
+                        Some(why) => writeln!(&client, "failed: {why}"),
                     };
                 }
                 if let (Some(_), Some((over, unlinked))) = (&failed, read_as) {
@@ -7079,6 +7246,7 @@ fn run_holding(
             });
             links.insert(out, linked);
         }
+        let_go(&mut db, &builds);
         memory::served(&mut db)?;
     }
 }
@@ -7222,7 +7390,7 @@ impl Program {
         (self.wrote, self.whole) = (None, None);
         let why = format!("a build of {} panicked: {}", self.args.krate, panic_message(panic));
         eprintln!("{why}");
-        Err(Refused::Error(why))
+        Err(Refused::Cargos(why))
     }
 
     /// Notes the crates rustc did not compile from the files this program is of, when it joins
@@ -7430,10 +7598,10 @@ impl Program {
         // that compiles is to be a patch of what does.
         let (warm, broken) = std::thread::scope(|scope| {
             let check = {
-                let (db, edited) = (db.clone(), &edited);
+                let (db, edited, root) = (db.clone(), &edited, &args.checkout);
                 scope.spawn(move || {
                     let start = Instant::now();
-                    let broken = broken_in(&db, edited, paths);
+                    let broken = broken_in(&db, edited, paths, root);
                     if std::env::var_os("RA_JIT_STATS").is_some() {
                         eprintln!("check-us: {}", start.elapsed().as_micros());
                     }
@@ -7445,15 +7613,16 @@ impl Program {
                 let joined = || lock(&check).take().and_then(|it| it.join().ok()).flatten();
                 checked.get_or_init(joined).clone()
             };
-            let hold = || unparsed(db, &edited, paths).is_some() || broken().is_some();
+            let hold =
+                || unparsed(db, &edited, paths, &args.checkout).is_some() || broken().is_some();
             let warm = build(db, table, args, known, listed, Some(&hold));
             (warm, broken())
         });
-        let hold = || unparsed(db, &edited, paths).is_some() || broken.is_some();
+        let hold = || unparsed(db, &edited, paths, &args.checkout).is_some() || broken.is_some();
         let held = |known: &Rejections| {
-            let why = refusal(db, &edited, paths, broken.clone(), None);
-            let why =
-                why.unwrap_or_else(|| Refused::Error("the source does not compile".to_owned()));
+            let why = refusal(db, &edited, paths, &args.checkout, broken.clone(), None);
+            let why = why
+                .unwrap_or_else(|| Refused::Error(errors::of_none("the source does not compile")));
             eprintln!(
                 "edit (apply {apply:.1?}): not built: no patch, and the source does not compile; \
                  the next edit is a patch of the last build"
@@ -7499,11 +7668,11 @@ impl Program {
         let out_of_date = hir::attach_db(db, || known.out_of_date(db));
         let dated = start.elapsed();
         let mut failed = unnamed
-            .map(Refused::Error)
-            .or_else(|| refusal(db, &edited, paths, broken, out_of_date))
-            .or_else(|| warm.unset.clone().map(Refused::Error));
+            .map(Refused::Cargos)
+            .or_else(|| refusal(db, &edited, paths, &args.checkout, broken, out_of_date))
+            .or_else(|| warm.unset.as_deref().map(|it| Refused::Error(errors::of_none(it))));
         let refused = start.elapsed();
-        failed = failed.or_else(|| stale_copies(db, table, args).map(Refused::Error));
+        failed = failed.or_else(|| stale_copies(db, table, args).map(Refused::Cargos));
         let copies = start.elapsed();
         let now = hir::attach_db(db, || Tests::of(db, listed, args, tests_now));
         if std::env::var_os("RA_JIT_STATS").is_some() {
@@ -7517,7 +7686,7 @@ impl Program {
             );
         }
         match tests {
-            Some(first) => failed = failed.or_else(|| first.changed(&now).map(Refused::Error)),
+            Some(first) => failed = failed.or_else(|| first.changed(&now).map(Refused::Cargos)),
             // The first build of the program is of the source rustc built it from.
             None if failed.is_none() => *tests = Some(now),
             None => {}
@@ -7541,13 +7710,14 @@ impl Program {
             let (splice, patch) = (args.splice.as_deref(), args.patch.as_deref());
             let cmd = args.link_cmd.as_deref().filter(|_| failed.is_none() && link_it);
             let over_rustc = known.stats.over_rustc;
+            begin_link();
             let unlinked = link(cmd, splice, patch, &args.out, patched, over_rustc, defer).err();
             if let Some(lost) = unlinked.as_ref().filter(|it| it.is::<RustcLinkedLost>()) {
                 eprintln!("{lost}: built in full");
                 known.forget_rustc();
                 return self.sync(db, listed, paths, edit, wanted, link_it, defer);
             }
-            failed = failed.or(unlinked.map(|it| Refused::Error(it.to_string())));
+            failed = failed.or(unlinked.map(|it| Refused::Cargos(it.to_string())));
         }
         if let Some(why) = &failed {
             eprintln!("refused: {why}");

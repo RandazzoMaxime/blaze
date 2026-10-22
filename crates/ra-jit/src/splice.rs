@@ -28,6 +28,8 @@
 //! The patch holds everything that differs from the object the executable was linked from, so
 //! each splice starts from the executable as the linker left it: the last one is undone
 //! first. Anything the splice has no answer for is an error, and the caller links in full.
+//! No size is such an error: what is sized for what, and the rules for a change to it, are in
+//! docs/architecture.md ("No size is a reason to link in full").
 //!
 //! That is the splice of an ELF executable. A wasm module is written again instead, with
 //! the patch's functions in place of its own: see [`wasm`].
@@ -1039,7 +1041,10 @@ impl Image {
         let (table, _) = (file.section_by_name(".symtab").and_then(|it| it.file_range()))
             .context("the executable has no symbol table")?;
         for symbol in file.symbols() {
-            let defines = symbol.is_definition() || symbol.kind() == SymbolKind::Tls;
+            // A global label of assembly, of no type and no size, which `object` counts as
+            // no definition, is one to the linker.
+            let label = symbol.kind() == SymbolKind::Unknown && symbol.is_global();
+            let defines = symbol.is_definition() || label || symbol.kind() == SymbolKind::Tls;
             if !defines || symbol.section_index().is_none() {
                 continue;
             }
@@ -1172,6 +1177,26 @@ impl Image {
             }
             None => (offset, address),
         }
+    }
+
+    /// Where a splice that adds `len` bytes adds them to the file and to memory. Behind
+    /// the file, and as far from it in memory as the linker's frames are ([`Image::behind`]),
+    /// where that is close enough: the patch's code and the program's reach each other, and
+    /// the unwind table reaches every frame, by four-byte distances. A program whose file is
+    /// gigabytes of what a debugger reads, behind a few hundred megabytes loaded, would have
+    /// the patch too far from its code that way, and the patch is then right behind what the
+    /// program loads instead. That costs perf, which finds a frame's rules as far into the
+    /// file as the frame's mapping says, the rules of the patch's functions.
+    fn placement(&self, len: u64) -> (u64, u64) {
+        let e = Endianness::Little;
+        let page = self.page();
+        let (offset, address) =
+            self.behind(self.len.next_multiple_of(page), self.end().next_multiple_of(page));
+        let start = self.segments_of(elf::PT_LOAD).map(|it| it.p_vaddr(e)).min().unwrap_or(0);
+        if address + len - start <= i32::MAX as u64 {
+            return (offset, address);
+        }
+        (self.len.next_multiple_of(page), self.end().next_multiple_of(page))
     }
 
     fn page(&self) -> u64 {
@@ -1867,10 +1892,6 @@ impl<'a> Patch<'a> {
         let page = image.page();
         let machine = image.machine;
         let (stub_len, stub_align) = machine.stub();
-        let (offset, base) = live_base.map_or_else(
-            || image.behind(image.len.next_multiple_of(page), image.end().next_multiple_of(page)),
-            |base| (0, base),
-        );
         let relocations = image.relocations.as_ref().filter(|_| image.pie);
         ensure!(!image.pie || relocations.is_some(), "an executable the loader fixes nothing in");
         let fixed_up = if image.pie { self.stored + self.slots.len() } else { 0 };
@@ -1912,6 +1933,7 @@ impl<'a> Patch<'a> {
             }
             extents[segment as usize] = (start, reserve(0, 1));
         }
+        let (offset, base) = live_base.map_or_else(|| image.placement(end), |base| (0, base));
         // The headers go where their place in memory is their place in the file, further
         // by what the first segment is: past the other three in both.
         let first = image.segments_of(elf::PT_LOAD).next().context("nothing is loaded")?;
@@ -2163,12 +2185,19 @@ impl<'a> Patch<'a> {
         segments.push(header);
         let headers = object::bytes_of_slice(&segments).to_vec();
         let headers_offset = offset + headers_at;
-        let described = self.describe(
-            &image.described,
-            machine,
-            (headers_offset + headers.len() as u64).max(image.tail()),
-            |target, added| address(target, added, false),
-        )?;
+        // What a debugger reads is no reason to link in full: without it the patch's code has
+        // no lines, and the program's are where they were.
+        let described = self
+            .describe(
+                &image.described,
+                machine,
+                (headers_offset + headers.len() as u64).max(image.tail()),
+                |target, added| address(target, added, false),
+            )
+            .unwrap_or_else(|why| {
+                eprintln!("splice: the patch's code has no lines for a debugger: {why:#}");
+                debug::Tail::default()
+            });
         let mut header = image.header;
         if let Some((at, count)) = described.headers {
             header.e_shoff.set(e, at);

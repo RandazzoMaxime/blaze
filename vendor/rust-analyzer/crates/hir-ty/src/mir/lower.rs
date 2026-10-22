@@ -2017,6 +2017,12 @@ impl<'a, 'db> MirLowerCtx<'a, 'db> {
         ty: Ty<'db>,
         loc: &ExprId,
     ) -> Result<'db, Operand> {
+        let mut operand = self.lower_literal_or_const(ty, loc)?;
+        operand.span = Some((*loc).into());
+        Ok(operand)
+    }
+
+    fn lower_literal_or_const(&mut self, ty: Ty<'db>, loc: &ExprId) -> Result<'db, Operand> {
         match &self.store[*loc] {
             Expr::Literal(l) => self.lower_literal_to_operand(ty, l),
             Expr::Path(c) => {
@@ -3173,6 +3179,10 @@ impl<'a, 'db> MirLowerCtx<'a, 'db> {
                             scope.pop_assume_dropped(self);
                             return Ok(None);
                         };
+                        // rustc's `FakeReadCause::ForLet` of `x`, before the initializer's
+                        // temporaries are dropped: what the value borrows from a `match` arm's
+                        // bindings, dropped as the arm ends, must outlive them.
+                        self.push_fake_read(c, local.into(), MirSpan::PatId(*pat));
                         current = temporaries.pop_and_drop(self, c, span);
                         if let Some(scope) =
                             self.drop_scopes.iter_mut().rev().find(|it| !it.temporaries)

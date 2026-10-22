@@ -2,7 +2,8 @@
 # builds, under both producers, each platform on a machine of its own kind
 # (ra-jit-platform.yaml). What runs when, and how long it takes, is in docs/harness.md ("CI").
 #
-#   fast tier: pull request, push to main, merge queue (about 10 minutes)
+#   pull request: fmt alone (under a minute), so that it can join the merge queue at once
+#   fast tier: merge queue, push to main, by hand (about 10 minutes)
 #       fmt; on Linux x86-64, Linux AArch64 and macOS arm64 the unit tests, one build and the
 #       quick harnesses (harness/ci.py --parts fast); rustc's borrow-check tests with a floor
 #       under the passes; the pinned run-pass tests (Linux x86-64, macOS); vendor/rust-analyzer
@@ -14,7 +15,8 @@
 #
 # A change to nothing but documentation or the site runs fmt alone. `ci` is the one check that
 # says whether everything that ran passed: it is the check branch rules and the merge queue
-# require.
+# require. The queue tests each pull request merged onto main and whatever is ahead of it, and
+# main moves only to what it tested (docs/harness.md, "CI").
 name: ra-jit
 on:
   push:
@@ -42,22 +44,21 @@ permissions:
   contents: read
 
 jobs:
-  # Whether anything but documentation changed: the files of the pull request, of the merge
-  # queue's entry, or of the push against the commit main was at before it. Anything that cannot
-  # be told counts as code. And which tier runs.
+  # Which tier runs: `none` for a pull request (the merge queue tests it merged, and testing it
+  # alone first would only make its landing wait twice) and for a change to nothing but
+  # documentation, the files of the merge queue's entry or of the push against the commit main
+  # was at before it. Anything that cannot be told counts as code.
   changes:
     name: changes
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     outputs:
-      code: ${{ steps.files.outputs.code }}
       tier: ${{ steps.files.outputs.tier }}
     steps:
       - id: files
         env:
           GH_TOKEN: ${{ github.token }}
           EVENT: ${{ github.event_name }}
-          PR: ${{ github.event.pull_request.number }}
           BEFORE: ${{ github.event.before }}
           AFTER: ${{ github.sha }}
           QUEUE_BASE: ${{ github.event.merge_group.base_sha }}
@@ -65,7 +66,7 @@ jobs:
           TIER: ${{ github.event_name == 'schedule' && 'full' || inputs.tier || 'fast' }}
         run: |
           case "$EVENT" in
-            pull_request) files=$(gh api --paginate "repos/$GITHUB_REPOSITORY/pulls/$PR/files" --jq '.[].filename') || files=;;
+            pull_request) echo "tier=none" | tee -a "$GITHUB_OUTPUT"; exit 0;;
             push) files=$(gh api "repos/$GITHUB_REPOSITORY/compare/$BEFORE...$AFTER" --jq 'if (.files | length) >= 300 then "" else .files[].filename end') || files=;;
             merge_group) files=$(gh api "repos/$GITHUB_REPOSITORY/compare/$QUEUE_BASE...$QUEUE_HEAD" --jq 'if (.files | length) >= 300 then "" else .files[].filename end') || files=;;
             *) files=;;
@@ -79,7 +80,7 @@ jobs:
               *) code=true;;
             esac
           done <<< "$files"
-          echo "code=$code" | tee -a "$GITHUB_OUTPUT"
+          [ "$code" = true ] || TIER=none
           echo "tier=$TIER" | tee -a "$GITHUB_OUTPUT"
 
   fmt:
@@ -93,13 +94,15 @@ jobs:
           components: rustfmt
       # Some scripts ask rustc for the host when imported: after the toolchain is installed.
       - run: python3 harness/imports.py
+      # No new place in ra-jit's code starts rustc, rustdoc or cargo (docs/no-rustc.md).
+      - run: python3 harness/rustcsites.py
       # The code that is ra-jit's own: vendor/ is the forks' code, formatted by their rules.
       - run: cargo fmt -p ra-jit -p ra-jit-live -p hir-ty-codegen -p ra-jit-store -p ra-jit-fuzz -- --check
 
   linux-x64:
     name: linux x64
     needs: changes
-    if: needs.changes.outputs.code == 'true'
+    if: needs.changes.outputs.tier != 'none'
     uses: ./.github/workflows/ra-jit-platform.yaml
     with:
       platform: linux-x64
@@ -114,7 +117,7 @@ jobs:
   linux-arm64:
     name: linux arm64
     needs: changes
-    if: needs.changes.outputs.code == 'true'
+    if: needs.changes.outputs.tier != 'none'
     uses: ./.github/workflows/ra-jit-platform.yaml
     with:
       platform: linux-arm64
@@ -125,7 +128,7 @@ jobs:
   macos:
     name: macos arm64
     needs: changes
-    if: needs.changes.outputs.code == 'true'
+    if: needs.changes.outputs.tier != 'none'
     uses: ./.github/workflows/ra-jit-platform.yaml
     with:
       platform: macos-arm64
@@ -138,7 +141,7 @@ jobs:
   windows:
     name: windows x64
     needs: changes
-    if: needs.changes.outputs.code == 'true' && needs.changes.outputs.tier == 'full'
+    if: needs.changes.outputs.tier == 'full'
     uses: ./.github/workflows/ra-jit-platform.yaml
     with:
       platform: windows-x64
@@ -150,7 +153,7 @@ jobs:
   fork:
     name: fork alone
     needs: changes
-    if: needs.changes.outputs.code == 'true'
+    if: needs.changes.outputs.tier != 'none'
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     steps:
