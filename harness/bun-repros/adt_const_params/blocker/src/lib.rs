@@ -15,13 +15,9 @@ fn check<const REQUIREMENT: Requirement>(subscribed: bool) -> bool {
     }
 }
 
-fn run() -> (bool, bool) {
+pub fn run() -> (bool, bool) {
     (
         check::<{ Requirement::Connected }>(false),
         check::<{ Requirement::NotSubscriber }>(true),
     )
-}
-
-fn main() {
-    println!("{:?}", run());
 }

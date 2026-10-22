@@ -1,4 +1,3 @@
-[package]
-name = "adt_const_params"
-version = "0.0.0"
-edition = "2024"
+[workspace]
+members = ["blocker", "runner"]
+resolver = "3"

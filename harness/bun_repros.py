@@ -28,7 +28,7 @@ from difftest import Fixture, RA_JIT  # noqa: E402
 
 CASES = {
     "adt_const_params": {
-        "package": "adt_const_params",
+        "package": "runner",
         "crate": "adt_const_params",
         "expected": "refused",
         "reasons": (
@@ -38,7 +38,7 @@ CASES = {
         ),
     },
     "type_info": {
-        "package": "type_info",
+        "package": "runner",
         "crate": "type_info",
         "expected": "refused",
         "reasons": (re.compile(r"type_id_fields"), re.compile(r"type_id_variants")),
