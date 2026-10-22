@@ -102,13 +102,13 @@ def run_case(name, root, json_path=None):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("cases", nargs="*", choices=sorted(CASES), default=sorted(CASES))
+    parser.add_argument("cases", nargs="*", choices=sorted(CASES))
     parser.add_argument("--json-dir", help="write one JSON report per case")
     args = parser.parse_args()
     check_toolchain()
     root = os.path.join(HERE, "bun-repros")
     results = []
-    for name in args.cases:
+    for name in args.cases or sorted(CASES):
         path = os.path.join(args.json_dir, f"{name}.json") if args.json_dir else None
         results.append(run_case(name, root, path))
     print(json.dumps({"toolchain": NIGHTLY, "ra_jit": RA_JIT, "cases": results}, indent=1))
