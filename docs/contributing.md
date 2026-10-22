@@ -31,6 +31,8 @@ you send them, including fixes you find here and want to upstream.
     vendor/rust-analyzer/     rust-analyzer with ra-jit's changes, a git subtree
     vendor/rust-analyzer/crates/hir-ty-borrowck/
                               the borrow checker, a crate next to hir-ty (borrowck.md)
+    vendor/rust-analyzer/lib/rowan/
+                              rowan 0.17.0 with a flat kind of tree behind its cursor (flat-syntax.md)
     vendor/rustc_abi/         rustc's layout crate, copied from the 1.99.0 tag, a git subtree
     vendor/subtree.py         moves vendor/ changes to the forks, and the forks and upstream into vendor/
     vendor/source.rev         the commit of the old development branch this tree last took from
