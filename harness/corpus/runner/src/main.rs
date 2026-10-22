@@ -722,6 +722,7 @@ fn main() {
         case!(inlined::instances(n as u8, -(n as i64), "moved"));
     }
     case!(cases::opaque_of_trait_method::run(4), cases::opaque_of_trait_method::run(90));
+    case!(cases::constructor_extends_temporaries::run(), cases::statement_borrows_temporary::run(true, &None));
 }
 
 fn nest<T>(depth: u8, value: T) -> Option<Option<T>> {

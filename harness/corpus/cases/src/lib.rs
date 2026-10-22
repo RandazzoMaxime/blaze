@@ -7087,3 +7087,31 @@ pub mod statement_borrows_temporary {
         value.as_ref().map_or(0, String::len)
     }
 }
+
+/// Temporaries borrowed by a tuple struct's or variant's constructor arguments in a `let`
+/// live as long as the variable (Rust 1.89), not through a constructor held in a variable.
+pub mod constructor_extends_temporaries {
+    use std::cell::RefCell;
+
+    pub struct Loud<'a>(pub u8, pub &'a RefCell<Vec<u8>>);
+
+    impl Drop for Loud<'_> {
+        fn drop(&mut self) {
+            self.1.borrow_mut().push(self.0);
+        }
+    }
+
+    pub struct Pair<'a, 'b>(pub &'a Loud<'b>, pub u8);
+
+    pub fn run() -> Vec<u8> {
+        let log = RefCell::new(Vec::new());
+        {
+            let a = Some(&Loud(1, &log));
+            let b = Pair(&Loud(2, &log), 3);
+            let some = Some;
+            let c = some(Loud(4, &log).0);
+            log.borrow_mut().push(10 + a.map_or(0, |it| it.0) + b.0.0 + b.1 + c.unwrap_or(0));
+        }
+        log.into_inner()
+    }
+}
