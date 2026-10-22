@@ -54,7 +54,8 @@ All of these are rustc's, written from `compiler/rustc_borrowck` at the pinned n
   clause or impl that proves a bound relates its regions to the bound's, `&'max G: Get` proving
   `&'min G: Get` makes them equal, and the impl's own `T: 'a` must hold), type tests, and lifetimes written in `let` annotations (`let _: T = value`
   of any value included), casts, turbofishes (a method's own, `x.f::<&'a T>()`, too) and struct
-  literal and variant paths. A struct literal proves the struct's where clauses, an array
+  literal and variant paths, in closures too. A function item called through a variable
+  (`let f = foo::<&'static u32>; f(&x)`) has the variable's type. A struct literal proves the struct's where clauses, an array
   repeat `[x; N]` of more than one copy proves `x`'s type `Copy`, and a path that names an
   associated item through a type (`Foo::f`, `<()>::f`, `T::f`, not `Default::default`) has its
   generic arguments and its impl's self type and trait arguments well-formed, as rustc's user
@@ -80,7 +81,9 @@ All of these are rustc's, written from `compiler/rustc_borrowck` at the pinned n
 - Closures: captures, E0373, `FnMut` escapes, E0596 and E0594 through captures. A closure's
   body has two kinds of universal region, as rustc's: its own (the late-bound lifetimes of
   its signature, `for<'a> FnOnce(&'a T)`, and the borrow of its environment) and its
-  creator's (every other region of its type, and the enclosing item's lifetime parameters).
+  creator's (every other region of its type, and the enclosing item's lifetime parameters,
+  late-bound ones included, so `foo::<&'a u32>(&local)` in a closure needs `local` to outlive
+  the creator's `'a`).
   One of its own made to outlive what it is not known to is an error in the closure
   (`with(|x| x)` returning the borrow it was given), named E0521 or a `FnMut` escape as
   rustc names it. What a closure needs of its creator's regions is a requirement the creator
@@ -131,8 +134,8 @@ With no borrow checker, the 245 units rustc accepts would pass. Now:
 
 | Mode | In scope | Pass | rustc accepts, ra-jit too | rustc rejects, same errors |
 |---|---|---|---|---|
-| Polonius | 1579 | 1230 (77.9%) | 245 of 245 | 985 of 1334 |
-| NLL | 1577 | 1223 (77.6%) | 226 of 226 | 997 of 1351 |
+| Polonius | 1579 | 1241 (78.6%) | 245 of 245 | 996 of 1334 |
+| NLL | 1577 | 1234 (78.2%) | 226 of 226 | 1008 of 1351 |
 
 463 units are out of scope; 344 of them need a nightly feature. CI runs the scoring on Linux
 and fails below a floor a few units under the count there.
@@ -146,7 +149,7 @@ just, axum, nushell, delta, eza, tokei and starship it finds nothing, nor on the
 
 Every failing unit is one where rustc gives an error ra-jit does not, or gives it on another
 line or with another code. By what is wrong, most first: 44 "lifetime may not live long
-enough" not reported, 34 E0597 not reported, 13 E0310, 11 E0309, 7 E0700, then a long tail. The causes, grouped:
+enough" not reported, 33 E0597 not reported, 13 E0310, 11 E0309, 7 E0700, then a long tail. The causes, grouped:
 
 - **Higher-ranked regions and placeholders** (`for<'a>` bounds, closures with higher-ranked
   signatures): rustc checks them with placeholders in universes; ra-jit does not yet, and
