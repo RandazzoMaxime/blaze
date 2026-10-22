@@ -12495,6 +12495,47 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
                     self.builder.ins().store(MEM, value, dst, offset);
                 }
             }
+            ("simd_select_bitmask", [mask, on_true, on_false]) => {
+                let (mask, _) = self.operand(mask)?;
+                let (on_true, _) = self.operand(on_true)?;
+                let (on_false, _) = self.operand(on_false)?;
+                let (lane, count) = self.simd_lanes(dst_ty)?;
+                // Lane i by bit i of the mask, an integer or bytes: its bytes in memory in order.
+                let lanes: Vec<Value> = (0..count)
+                    .map(|i| {
+                        let offset = (i * lane.ty.bytes() as u64) as i32;
+                        let byte = self.builder.ins().load(types::I8, MEM, mask, (i / 8) as i32);
+                        let bit = self.builder.ins().ushr_imm(byte, (i % 8) as i64);
+                        let bit = self.builder.ins().band_imm(bit, 1);
+                        let a = self.builder.ins().load(lane.ty, MEM, on_true, offset);
+                        let b = self.builder.ins().load(lane.ty, MEM, on_false, offset);
+                        self.builder.ins().select(bit, a, b)
+                    })
+                    .collect();
+                for (i, value) in lanes.into_iter().enumerate() {
+                    self.builder.ins().store(MEM, value, dst, i as i32 * lane.ty.bytes() as i32);
+                }
+            }
+            ("simd_fma" | "simd_relaxed_fma", [a, b, c]) => {
+                let (a, _) = self.operand(a)?;
+                let (b, _) = self.operand(b)?;
+                let (c, _) = self.operand(c)?;
+                let (lane, count) = self.simd_lanes(dst_ty)?;
+                if !lane.ty.is_float() {
+                    unsupported!("`{name}` of integers");
+                }
+                let lanes: Vec<Value> = (0..count)
+                    .map(|i| {
+                        let offset = (i * lane.ty.bytes() as u64) as i32;
+                        let [x, y, z] =
+                            [a, b, c].map(|v| self.builder.ins().load(lane.ty, MEM, v, offset));
+                        self.builder.ins().fma(x, y, z)
+                    })
+                    .collect();
+                for (i, value) in lanes.into_iter().enumerate() {
+                    self.builder.ins().store(MEM, value, dst, i as i32 * lane.ty.bytes() as i32);
+                }
+            }
             ("simd_extract", [vector, index]) => {
                 let (vector, ty) = self.operand(vector)?;
                 let (index, _) = self.load_scalar(index)?;
@@ -13331,6 +13372,68 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
                     self.builder.ins().store(MEM, high, dst, lane + 8);
                 }
             }
+            (_, [a, indices, b]) if name.starts_with("x86.avx512.vpermi2var.") => {
+                let (a, ty) = self.operand(a)?;
+                let (indices, _) = self.operand(indices)?;
+                let (b, _) = self.operand(b)?;
+                let width: i64 = match name.split('.').nth(3) {
+                    Some("qi") => 1,
+                    Some("hi") => 2,
+                    Some("d" | "ps") => 4,
+                    Some("q" | "pd") => 8,
+                    _ => unsupported!("LLVM intrinsic `{name}`"),
+                };
+                let lanes = self.layout(ty)?.size.bytes() as i64 / width;
+                let int = Type::int(width as u16 * 8).expect("a lane of 1 to 8 bytes");
+                // Each lane is the one its index names of `a` then `b`, by its low bits.
+                let values: Vec<Value> = (0..lanes)
+                    .map(|lane| {
+                        let index =
+                            self.builder.ins().load(int, MEM, indices, (lane * width) as i32);
+                        let index = self.builder.ins().band_imm(index, 2 * lanes - 1);
+                        let index = if width < 8 {
+                            self.builder.ins().uextend(ptr(), index)
+                        } else {
+                            index
+                        };
+                        let second = self.builder.ins().icmp_imm(
+                            IntCC::UnsignedGreaterThanOrEqual,
+                            index,
+                            lanes,
+                        );
+                        let base = self.builder.ins().select(second, b, a);
+                        let slot = self.builder.ins().band_imm(index, lanes - 1);
+                        let offset = self.builder.ins().imul_imm(slot, width);
+                        let addr = self.builder.ins().iadd(base, offset);
+                        self.builder.ins().load(int, MEM, addr, 0)
+                    })
+                    .collect();
+                for (lane, value) in values.into_iter().enumerate() {
+                    self.builder.ins().store(MEM, value, dst, lane as i32 * width as i32);
+                }
+            }
+            ("x86.sse41.phminposuw", [words]) => {
+                let (words, _) = self.operand(words)?;
+                // The least of eight unsigned words, then the first lane that holds it, then zeros.
+                let mut least = self.builder.ins().load(types::I16, MEM, words, 0);
+                let mut at = self.builder.ins().iconst(types::I16, 0);
+                for lane in 1..8 {
+                    let word = self.builder.ins().load(types::I16, MEM, words, lane * 2);
+                    let less = self.builder.ins().icmp(IntCC::UnsignedLessThan, word, least);
+                    let index = self.builder.ins().iconst(types::I16, i64::from(lane));
+                    least = self.builder.ins().select(less, word, least);
+                    at = self.builder.ins().select(less, index, at);
+                }
+                let zero = self.builder.ins().iconst(types::I16, 0);
+                self.builder.ins().store(MEM, least, dst, 0);
+                self.builder.ins().store(MEM, at, dst, 2);
+                for lane in 2..8 {
+                    self.builder.ins().store(MEM, zero, dst, lane * 2);
+                }
+            }
+            // Clears the upper halves of the vector registers, in which no value is kept from
+            // one of ra-jit's instructions to the next.
+            ("x86.avx.vzeroupper", []) => {}
             // A hint to the cache, which the program behaves the same without.
             ("prefetch.p0", [_address, _write, _locality, _cache]) => {}
             _ => unsupported!("LLVM intrinsic `{name}`"),
