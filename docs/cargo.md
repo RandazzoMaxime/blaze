@@ -80,7 +80,8 @@ functions of each crate cargo is done with on a quarter of the cores, and reads 
 each library as cargo writes it. When cargo is done it reads the symbols of the executable
 rustc linked, and the daemon is ready: the first edits are patches spliced into that
 executable. The daemon builds its own base in the background once nothing has waited for a
-second ([architecture.md](architecture.md#the-first-edits-patch-what-rustc-linked)). On Linux
+second, and gives it up when that would take more than a quarter of the machine's memory
+([architecture.md](architecture.md#the-first-edits-patch-what-rustc-linked)). On Linux
 x86-64 (16 vCPUs, 8 cores), from an empty store, in interleaved runs:
 
 | Project | `cargo build` | `cargo ra-jit build` | Ready | First edit |
@@ -222,6 +223,7 @@ started it. To change one, run `cargo ra-jit stop` first.
 |---|---|---|
 | `RA_JIT_HOME` | the daemon's directory (also read by every client) | see above |
 | `RA_JIT_IDLE_SECS` | seconds without a request before the daemon exits; 0 is never | 1800 |
+| `RA_JIT_OWN_BASE_MEMORY` | megabytes a worker may hold while it builds its own base in the background, past which it gives that base up and edits patch rustc's executable; `off` is no bound | a quarter of the machine's memory |
 | `RA_JIT_CACHE` | directory of the disk store; without it nothing is kept on disk | not set |
 | `RA_JIT_REMOTE` and the other store variables | see [cache.md](cache.md) | not set |
 

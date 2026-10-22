@@ -278,7 +278,12 @@ All notable changes to ra-jit are written here. The format follows
   daemon's crates, and whose build script cargo never ran. A file an `include!`,
   `include_str!` or `include_bytes!` names and that cannot be read is now read again once it
   is there, rather than taken for one still to load before each request
-  (`harness/rustcbase.py`'s `unbuilt-member`).
+  (`harness/rustcbase.py`'s `unbuilt-member`). And since a base nobody waits for must not
+  take the machine, a worker that holds more than a quarter of its memory while it builds one
+  gives it up and says so; edits go on patching rustc's executable (`RA_JIT_OWN_BASE_MEMORY`,
+  `own-base-budget`). zed's base, which the loop had hidden, passes it: 51 GB of 74 GB live are
+  debuginfo types
+  ([#55](https://github.com/indexable-inc/ra-jit/issues/55)).
 - A `match` arm's guard with `let` (`if let` guards and their chains) dropped what it bound
   and its temporaries at the end of the guard, before the arm ran, in editions before 2024;
   rustc keeps them until the arm ends or the next arm is tried

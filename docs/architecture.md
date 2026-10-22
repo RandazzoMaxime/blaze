@@ -282,8 +282,12 @@ the descriptor's slot.
 
 Once nothing waits for a second, the daemon builds its own base in full in the background,
 from the store as far as it can; an edit that comes meanwhile interrupts it and is a patch
-of rustc's executable. `RA_JIT_RUSTC_BASE=0` makes the first build the daemon's own, as
-before. `harness/rustcbase.py` checks every kind of edit against cargo.
+of rustc's executable. A worker that holds more than a quarter of the machine's memory while
+it builds that base gives it up for good, logs so, and edits go on patching rustc's
+executable: what the build computed stays in the database, so the bound is on what the
+worker keeps (`RA_JIT_OWN_BASE_MEMORY`, in megabytes, or `off`). zed's base outgrows it, on
+the debuginfo types of [#55](https://github.com/indexable-inc/ra-jit/issues/55).
+`RA_JIT_RUSTC_BASE=0` makes the first build the daemon's own, as before. `harness/rustcbase.py` checks every kind of edit against cargo.
 
 An alternative wrapper exists in `stub.rs` (`RA_JIT_WRAPS_RUSTC`), where rustc compiles only
 a stub for each workspace crate and all code is ra-jit's. It makes the first build faster,
