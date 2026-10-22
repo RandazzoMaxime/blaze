@@ -83,11 +83,12 @@ jobs:
           echo "tier=$TIER" | tee -a "$GITHUB_OUTPUT"
 
   fmt:
-    name: fmt
+    name: fmt, harness imports
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v7
+      - run: python3 harness/imports.py
       - uses: ./.github/actions/toolchain
         with:
           components: rustfmt

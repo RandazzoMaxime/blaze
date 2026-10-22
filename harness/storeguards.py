@@ -119,13 +119,13 @@ def writable_store(checkout, store):
           "not changed by the daemon, the program right")
 
 
-def unsigned(store, work):
+def unsigned(checkout, store, work):
     remote, second = os.path.join(work, "remote"), os.path.join(work, "second")
     nothing_asked = {"RA_JIT_REMOTE_UNSIGNED": ""}
     status, out = cache(store, "push", remote, env=nothing_asked)
     if status != 0:
         fail(f"push: {out}")
-    names_no_checkout(CHECKOUT, remote, "the remote")
+    names_no_checkout(checkout, remote, "the remote")
     for value in ("", "0", "true"):
         status, out = cache(second, "pull", remote, env={"RA_JIT_REMOTE_UNSIGNED": value})
         if status == 0 or "RA_JIT_REMOTE_UNSIGNED=1" not in out or files(second, ".pack"):
@@ -227,19 +227,23 @@ def another_cargo_home(work):
           f"the place under the home it was built with")
 
 
-if os.name != "posix":
-    raise SystemExit("storeguards.py: the modes of files are checked on Unix only")
-WORK = scratch("ra-jit-storeguards-")
-CHECKOUT = Checkout(WORK)
-STORE = os.path.join(WORK, "store")
-filled(CHECKOUT, STORE, "fill")
-CHECKOUT.set(1)
-filled(CHECKOUT, STORE, "fill")
-the_users_alone(STORE)
-names_no_checkout(CHECKOUT, STORE, "the store")
-unsigned(STORE, WORK)
-another_cargo_home(WORK)
-writable_pack(CHECKOUT, STORE)
-writable_store(CHECKOUT, STORE)
-shutil.rmtree(WORK, ignore_errors=True)
-print("storeguards: all right")
+def main():
+    if os.name != "posix":
+        raise SystemExit("storeguards.py: the modes of files are checked on Unix only")
+    work = scratch("ra-jit-storeguards-")
+    checkout = Checkout(work)
+    store = os.path.join(work, "store")
+    filled(checkout, store, "fill")
+    checkout.set(1)
+    filled(checkout, store, "fill")
+    the_users_alone(store)
+    names_no_checkout(checkout, store, "the store")
+    unsigned(checkout, store, work)
+    another_cargo_home(work)
+    writable_pack(checkout, store)
+    writable_store(checkout, store)
+    shutil.rmtree(work, ignore_errors=True)
+    print("storeguards: all right")
+
+if __name__ == "__main__":
+    main()

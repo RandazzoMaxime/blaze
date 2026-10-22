@@ -39,7 +39,8 @@ which hosts and under which backend.
     python3 ci.py core              # run one part here, as CI does
 
 A part runs all of its harnesses even when one fails, then names the ones that failed and how
-long each took. Alongside the harnesses, CI runs `cargo fmt --all -- --check` and
+long each took. Alongside the harnesses, CI runs `cargo fmt --all -- --check`,
+`python3 harness/imports.py`, which imports every script of the harness, and
 `python3 harness/unittests.py`, which runs the Rust unit tests and holds them to its `OPEN`
 list (below).
 
@@ -264,7 +265,10 @@ queue, and takes about ten minutes. On Linux x86-64, Linux AArch64 and macOS arm
 - on Linux x86-64, runs rustc's borrow-check tests with a floor under the passes, and the
   run-pass tests of `harness/ui-pinned.txt`, against that build.
 
-`fork alone` builds and tests `vendor/rust-analyzer` outside this repository.
+`fork alone` builds and tests `vendor/rust-analyzer` outside this repository, and the `fmt`
+job checks formatting and has `harness/imports.py` import every script of the harness, so one
+that only a seldom tier or a person runs can't break unnoticed. A script does nothing when
+imported: its work is under `if __name__ == "__main__":`.
 
 The **full tier** runs nightly and by hand (`gh workflow run ra-jit.yaml --ref <branch> -f
 tier=full`, or `-f tier=fast`), and takes about an hour. It adds Windows x86-64, every part
