@@ -54,6 +54,29 @@ fn memory_max() -> Result<Option<u64>, String> {
     }
 }
 
+/// When the daemon has a spare worker, from `RA_JIT_SPARE`.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Spares {
+    /// `0`: none. A workspace is loaded once cargo has built it.
+    Never,
+    /// Without it: one as the daemon starts, for the build that started it, and one for each
+    /// build after it that the daemon is told of as cargo begins it. Each loads its workspace
+    /// beside cargo; none waits for a build nobody has asked for.
+    Asked,
+    /// `ready`: as well, one is started again once a workspace is loaded, and waits with the
+    /// library loaded for the next. The daemon holds it, 0.6 to 0.9 GB, for as long as it runs.
+    Ready,
+}
+
+fn spares() -> Result<Spares, String> {
+    match std::env::var("RA_JIT_SPARE") {
+        Err(_) => Ok(Spares::Asked),
+        Ok(text) if text == "0" => Ok(Spares::Never),
+        Ok(text) if text == "ready" => Ok(Spares::Ready),
+        Ok(text) => Err(format!("RA_JIT_SPARE=`{text}` is neither `0` nor `ready`")),
+    }
+}
+
 /// What a worker holds and how much it is in use.
 struct Held {
     bytes: u64,
@@ -756,8 +779,9 @@ struct Daemon {
     /// The most the workers may hold together, in bytes.
     memory_max: Option<u64>,
     workers: Mutex<FxHashMap<String, Arc<Worker>>>,
-    /// The worker the next workspace is loaded by. `RA_JIT_SPARE=0` has none.
+    /// The worker the next workspace is loaded by, when there is one.
     spare: Mutex<Option<Spare>>,
+    spare_when: Spares,
     /// The workers told a build ahead of cargo's, by [`WorkerConfig::id`].
     ahead: Mutex<FxHashMap<String, Spare>>,
     /// How many spare workers were started: each has a directory of its own.
@@ -826,6 +850,7 @@ pub(crate) fn serve() -> anyhow::Result<()> {
     let home = home()?;
     private_dir(&home).with_context(|| format!("the daemon's directory {}", home.display()))?;
     let memory_max = memory_max().map_err(anyhow::Error::msg)?;
+    let spare_when = spares().map_err(anyhow::Error::msg)?;
     let socket = socket_in(&home);
     let served = match Served::bind(&socket) {
         Ok(served) => served,
@@ -848,10 +873,12 @@ pub(crate) fn serve() -> anyhow::Result<()> {
         memory_max,
         workers: Mutex::default(),
         spare: Mutex::default(),
+        spare_when,
         ahead: Mutex::default(),
         spares: AtomicUsize::new(0),
         asked: Mutex::new(Instant::now()),
     });
+    // A build starts the daemon, and is given this one.
     daemon.spare();
     eprintln!(
         "daemon {} ({}) of pid {} listens on {}",
@@ -1096,9 +1123,11 @@ impl Daemon {
                 worker.note_end();
             }
             // The next spare starts when the worker that was one has loaded its workspace.
-            let loading = lock(&self.workers).values().any(|it| it.loading());
-            if !loading && lock(&self.ahead).is_empty() {
-                self.spare();
+            if self.spare_when == Spares::Ready {
+                let loading = lock(&self.workers).values().any(|it| it.loading());
+                if !loading && lock(&self.ahead).is_empty() {
+                    self.spare();
+                }
             }
             // A program that takes edits is being edited, however long since the last save:
             // a worker started again would link it again on the next one.
@@ -1161,7 +1190,8 @@ impl Daemon {
         if lock(&self.workers).contains_key(&id) {
             return;
         }
-        let Some(spare) = lock(&self.spare).take() else { return };
+        let waiting = lock(&self.spare).take();
+        let Some(spare) = waiting.or_else(|| self.new_spare()) else { return };
         let mut args = ahead.config.args(&ahead.root, &ahead.crates);
         args.extend(["--out".into(), "none".into()]);
         if let Some(spare) = spare.told(&args, &ahead.config, &ahead.root, true)
@@ -1173,9 +1203,6 @@ impl Daemon {
 
     /// Starts a spare worker when there is none.
     fn spare(&self) {
-        if std::env::var_os("RA_JIT_SPARE").is_some_and(|it| it == "0") {
-            return;
-        }
         let mut spare = lock(&self.spare);
         if let Some(old) = spare.as_mut() {
             let Some(status) = exited(&mut old.child) else { return };
@@ -1186,14 +1213,16 @@ impl Daemon {
                 log_tail(&old.log)
             );
         }
+        *spare = self.new_spare();
+    }
+
+    /// A spare worker started now, unless `RA_JIT_SPARE=0` says there are none.
+    fn new_spare(&self) -> Option<Spare> {
+        if self.spare_when == Spares::Never {
+            return None;
+        }
         let dir = self.home.join("spares").join(self.spares.fetch_add(1, Relaxed).to_string());
-        *spare = match Spare::start(&dir) {
-            Ok(spare) => Some(spare),
-            Err(why) => {
-                eprintln!("no spare worker: {why:#}");
-                None
-            }
-        };
+        Spare::start(&dir).inspect_err(|why| eprintln!("no spare worker: {why:#}")).ok()
     }
 
     /// Stops the workers and the daemon. A client told it ends waits for its connection to
