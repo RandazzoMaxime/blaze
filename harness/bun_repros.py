@@ -52,6 +52,12 @@ CASES = {
         "expected": "compiled",
         "reasons": (),
     },
+    "macro_fragments": {
+        "package": "runner",
+        "crate": "macro_fragments",
+        "expected": "compiled",
+        "reasons": (),
+    },
     "macro_impls": {
         "package": "runner",
         "crate": "dtoa",

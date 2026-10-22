@@ -357,6 +357,12 @@ All notable changes to ra-jit are written here. The format follows
 
 ### Fixed
 
+- An `$n:expr` passed on to another macro is one operand there, as rustc has it: in
+  `tags!(@count (0u8 + 1u8) + 1u8,)` the rule `(@ $n:expr,)` took `count (0u8 + 1u8)` for a
+  call and matched, so bun's `task_tag::COUNT` expanded to nothing and `TaskTag::name`, the one
+  function of bun's left to rustc for a reason other than having no instance, failed on
+  `[&str; {const error}]`. The parser now stops an expression where such a fragment starts.
+  `harness/bun-repros/macro_fragments`.
 - A `macro_rules!` that a macro of another crate defines, called by a name a `use` imports
   (`use cfg_if::cfg_if; cfg_if! { .. macro_rules! trace { .. } }`), is in the textual scope of
   what follows. The call waited for imports to be resolved, by when `#[macro_use]` had taken

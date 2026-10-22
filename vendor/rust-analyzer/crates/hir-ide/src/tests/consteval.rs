@@ -2815,6 +2815,46 @@ const GOAL: u8 = {
 }
 
 #[test]
+fn expression_fragment_is_one_operand_to_the_next_matcher() {
+    // bun's `task_tag::tags!`: `tags!(@count (0u8 + 1u8) + 1u8,)` is not `@ $n:expr,` of a call
+    // of `count`, as the fragment is one whole.
+    check_number(
+        r#"
+//- minicore: index, slice, option
+#[rustc_builtin_macro]
+macro_rules! stringify {}
+pub struct TaskTag(pub u8);
+pub mod task_tag {
+    use super::TaskTag;
+    macro_rules! tags {
+        ($($name:ident),* $(,)?) => {
+            tags!(@ 0u8, $($name,)*);
+            pub const COUNT: u8 = tags!(@count 0u8, $($name,)*);
+            pub const NAMES: [&str; COUNT as usize] = [$(stringify!($name)),*];
+        };
+        (@ $n:expr, $head:ident, $($rest:ident,)*) => {
+            pub const $head: TaskTag = TaskTag($n);
+            tags!(@ $n + 1u8, $($rest,)*);
+        };
+        (@ $n:expr,) => {};
+        (@count $n:expr, $head:ident, $($rest:ident,)*) => { tags!(@count $n + 1u8, $($rest,)*) };
+        (@count $n:expr,) => { $n };
+    }
+    tags! {
+        AnyTaskJob,
+        AsyncModule,
+        BakeHotReloadEvent,
+        ChromePipeEvent,
+        Close,
+    }
+}
+const GOAL: usize = task_tag::NAMES.len() * 1000 + task_tag::Close.0 as usize;
+"#,
+        5004,
+    );
+}
+
+#[test]
 fn adt_const_params() {
     check_number(
         r#"
