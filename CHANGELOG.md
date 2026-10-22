@@ -52,8 +52,9 @@ All notable changes to ra-jit are written here. The format follows
   are kept with `RA_JIT_PROC_MACRO_CACHE=all`, a macro is left out by name with
   `RA_JIT_PROC_MACRO_CACHE_SKIP`, and `RA_JIT_PROC_MACRO_CACHE=check` expands anyway and
   reports any that differ ([docs/cache.md](docs/cache.md), `harness/expansions.py`). On a
-  warm start nushell's 1583 kept expansions take resolve from 5.0 to 3.9 s and helix's 1455
-  from 5.5 to 4.1 s (Linux x86-64, 16 cores); expansion is about 3.3 s of a cold load.
+  warm start helix's 1455 kept expansions take resolve from 6.4 to 4.6 s and the time to
+  ready from 10.3 to 8.4 s, nushell's 1588 from 6.1 to 4.7 s and from 10.8 to 9.2 s (Linux
+  x86-64, 16 cores, two runs each); memory and cold starts do not change.
 - `#[ra_jit::cache]` ([#17](https://github.com/indexable-inc/ra-jit/issues/17)): the
   `ra-jit-cache` crate's attribute keeps what a pure function returns, in memory and under
   `target/ra-jit/fn-cache`, by its arguments and a hash of the code ra-jit compiled for it and
