@@ -366,7 +366,10 @@ pub(super) fn for_build<T>(work: impl FnOnce() -> T) -> T {
 /// Whether a build's compiles build in what they call across crates: in a build of a whole
 /// program unless `RA_JIT_INLINE=crate` (or `0`, which builds nothing in), and in any build
 /// with `RA_JIT_INLINE=all`.
-/// The daemon's builds do not: an entry of the store is keyed by its own function alone.
+/// The builds of a process that builds edits of them do not, whatever it says: an entry of
+/// the store, and a function an edit's patch compares with the build before, is keyed by its
+/// own function alone, so a body built into a function of another crate would outlive an
+/// edit of it.
 fn across() -> bool {
     static ASKED: std::sync::LazyLock<Option<bool>> =
         std::sync::LazyLock::new(|| match std::env::var("RA_JIT_INLINE").as_deref() {
@@ -374,7 +377,9 @@ fn across() -> bool {
             Ok("crate" | "0") => Some(false),
             _ => None,
         });
-    super::backend::optimizing() && ASKED.unwrap_or_else(super::backend::whole_program)
+    !super::backend::edits_follow()
+        && super::backend::optimizing()
+        && ASKED.unwrap_or_else(super::backend::whole_program)
 }
 
 /// How large a body of `instance` the compile under way may build into its caller, if it may

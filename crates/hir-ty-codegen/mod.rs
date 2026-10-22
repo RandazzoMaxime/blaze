@@ -96,8 +96,8 @@ use hir_ty::mir::{
 
 mod asm;
 mod backend;
-pub use backend::Backend;
 use backend::Step;
+pub use backend::{Backend, builds_edits};
 mod cached;
 mod debuginfo;
 pub use debuginfo::Sidecar;

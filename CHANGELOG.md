@@ -327,6 +327,12 @@ All notable changes to ra-jit are written here. The format follows
 
 ### Fixed
 
+- An edit of code two programs share ran wrong with the LLVM backend when the daemon compiled a
+  program's `main` itself (on macOS and Windows, whose temporary paths go through a link): it
+  took that build for one of a whole program and inlined across crates, and a caller holding
+  the old body of an edited function was kept, as what is kept is compared by each function's
+  own code. A daemon or `--watch` no longer inlines across crates; `programs.py` with
+  `RA_JIT_ALONE=1` builds both programs that way in CI (#63).
 - bat builds whole: an `impl` inside a function body of a dependency (bincode's `EnumAccess`
   for `&mut Deserializer`, inside `deserialize_enum`) was not found, as rust-analyzer only
   looked into the bodies of workspace crates; a dependency's file is now lexed for an `impl`

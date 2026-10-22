@@ -43,9 +43,26 @@ const LLVM_LIMIT: usize = 10_000;
 /// it has (see [`Backend::emit`]).
 static WHOLE_PROGRAM: AtomicBool = AtomicBool::new(false);
 
-/// Says the build under way is of a whole program.
+/// Whether the process goes on to build edits of what it builds: a daemon's worker, or one
+/// that watches its files. What it compiles is kept by each function's own code alone (the
+/// store, and the build an edit is a patch of), so none of its builds is of a whole program,
+/// whose functions have what they call built into them.
+static BUILDS_EDITS: AtomicBool = AtomicBool::new(false);
+
+/// Says the process goes on to build edits of what it builds. Before its first build.
+pub fn builds_edits() {
+    BUILDS_EDITS.store(true, Ordering::Relaxed);
+}
+
+pub(super) fn edits_follow() -> bool {
+    BUILDS_EDITS.load(Ordering::Relaxed)
+}
+
+/// Says the build under way is of a whole program, unless edits of it follow.
 pub(super) fn set_whole_program() {
-    WHOLE_PROGRAM.store(true, Ordering::Relaxed);
+    if !edits_follow() {
+        WHOLE_PROGRAM.store(true, Ordering::Relaxed);
+    }
 }
 
 pub(super) fn whole_program() -> bool {

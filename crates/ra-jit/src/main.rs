@@ -5682,6 +5682,9 @@ fn run_holding(
         eprintln!("backend: {backend}");
     }
     process_wide();
+    if args.socket.is_some() || args.watch {
+        hir_ty_codegen::builds_edits();
+    }
     // Nothing asks for a symbol before the first build, so they load next to the workspace.
     let (symbol_files, root) = (args.symbol_files.clone(), args.root()?);
     let (said, whole) = match ahead {
