@@ -97,15 +97,20 @@ def by_ra_jit(work, args):
     return ran(ws)
 
 
-WORK = scratch("ra-jit-selects-")
-wrong = 0
-for what, cargo_args, ra_jit_args in SELECTIONS:
-    cargos, rajits = by_cargo(WORK, cargo_args), by_ra_jit(WORK, ra_jit_args)
-    more = sorted(rajits - cargos)
-    wrong += bool(more)
-    print(f"  {what}: cargo ran {len(cargos)} ({', '.join(sorted(cargos))}); ra-jit ran {len(rajits)}"
-          + (f", WRONG: cargo did not run {', '.join(more)}" if more else ", none that cargo did not"))
-shutil.rmtree(WORK, ignore_errors=True)
-if wrong:
-    raise SystemExit(f"selects: {wrong} of {len(SELECTIONS)} selections WRONG")
-print(f"selects: {len(SELECTIONS)} of {len(SELECTIONS)} right")
+def main():
+    work = scratch("ra-jit-selects-")
+    wrong = 0
+    for what, cargo_args, ra_jit_args in SELECTIONS:
+        cargos, rajits = by_cargo(work, cargo_args), by_ra_jit(work, ra_jit_args)
+        more = sorted(rajits - cargos)
+        wrong += bool(more)
+        print(f"  {what}: cargo ran {len(cargos)} ({', '.join(sorted(cargos))}); ra-jit ran {len(rajits)}"
+              + (f", WRONG: cargo did not run {', '.join(more)}" if more else ", none that cargo did not"))
+    shutil.rmtree(work, ignore_errors=True)
+    if wrong:
+        raise SystemExit(f"selects: {wrong} of {len(SELECTIONS)} selections WRONG")
+    print(f"selects: {len(SELECTIONS)} of {len(SELECTIONS)} right")
+
+
+if __name__ == "__main__":
+    main()

@@ -181,4 +181,5 @@ def main():
     sys.exit(3 if unstable else 2 if untested else 0 if ok else 1)
 
 
-main()
+if __name__ == "__main__":
+    main()

@@ -73,4 +73,5 @@ def main():
     sys.exit(0 if result["match"] else 1)
 
 
-main()
+if __name__ == "__main__":
+    main()

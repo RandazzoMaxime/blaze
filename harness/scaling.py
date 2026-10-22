@@ -176,4 +176,5 @@ def main():
         json.dump(records, open(out, "w"), indent=1)
 
 
-main()
+if __name__ == "__main__":
+    main()
