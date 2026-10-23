@@ -4502,7 +4502,12 @@ impl<'a, 'db> ObjectCodegen<'a, 'db> {
             ("__rust_alloc", to("__rdl_alloc", "__ra_jit_global_alloc"), 2, true),
             ("__rust_dealloc", to("__rdl_dealloc", "__ra_jit_global_dealloc"), 3, false),
             ("__rust_realloc", to("__rdl_realloc", "__ra_jit_global_realloc"), 4, true),
-            ("__rust_alloc_zeroed", to("__rdl_alloc_zeroed", "__ra_jit_global_alloc_zeroed"), 2, true),
+            (
+                "__rust_alloc_zeroed",
+                to("__rdl_alloc_zeroed", "__ra_jit_global_alloc_zeroed"),
+                2,
+                true,
+            ),
             ("__rust_alloc_error_handler", "__rdl_alloc_error_handler", 2, false),
             ("__rust_no_alloc_shim_is_unstable_v2", "", 0, false),
         ];

@@ -3394,7 +3394,8 @@ fn link_executable(
     for named in args.crates() {
         program.extend(crates_named(db, named, args)?);
     }
-    let objects: Vec<&Path> = std::iter::once(args.out.as_path()).chain(args.prebuilt.as_deref()).collect();
+    let objects: Vec<&Path> =
+        std::iter::once(args.out.as_path()).chain(args.prebuilt.as_deref()).collect();
     let took = link::executable(db, &program, &objects, sysroot, exe)?;
     let stand_ins = link::stand_ins(exe)?;
     eprintln!(

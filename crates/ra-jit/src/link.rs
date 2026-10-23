@@ -57,11 +57,12 @@ pub(crate) fn executable(
 /// the program can reach, as the link leaves out every one it can't.
 pub(crate) fn stand_ins(exe: &Path) -> anyhow::Result<Vec<String>> {
     let bytes = std::fs::read(exe).with_context(|| format!("reading {}", exe.display()))?;
-    let said = memchr::memmem::find_iter(&bytes, hir_ty_codegen::STAND_IN_SAYS.as_bytes()).map(|at| {
-        let rest = &bytes[at..];
-        let end = memchr::memchr(b'\n', rest).unwrap_or(rest.len());
-        String::from_utf8_lossy(&rest[..end]).into_owned()
-    });
+    let said =
+        memchr::memmem::find_iter(&bytes, hir_ty_codegen::STAND_IN_SAYS.as_bytes()).map(|at| {
+            let rest = &bytes[at..];
+            let end = memchr::memchr(b'\n', rest).unwrap_or(rest.len());
+            String::from_utf8_lossy(&rest[..end]).into_owned()
+        });
     Ok(said.collect())
 }
 
@@ -113,7 +114,10 @@ fn depth_first(
 ) {
     let data = krate.data(db);
     let left_out = data.target_kind.is_proc_macro()
-        || matches!(data.origin, CrateOrigin::Lang(LangCrateOrigin::ProcMacro | LangCrateOrigin::Test))
+        || matches!(
+            data.origin,
+            CrateOrigin::Lang(LangCrateOrigin::ProcMacro | LangCrateOrigin::Test)
+        )
         || Crate::from(krate)
             .display_name(db)
             .is_some_and(|name| name.crate_name().as_str() == unlinked);

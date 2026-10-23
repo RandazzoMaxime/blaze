@@ -39,8 +39,8 @@ use syntax::{
 use tt::TextSize;
 
 use crate::{
-    AdtId, AstIdLoc, AttrDefId, ExternBlockId, FieldId, FunctionId, GenericDefId, HasModule, LifetimeParamId,
-    LocalFieldId, MacroId, ModuleId, TraitId, TypeOrConstParamId, VariantId,
+    AdtId, AstIdLoc, AttrDefId, ExternBlockId, FieldId, FunctionId, GenericDefId, HasModule,
+    LifetimeParamId, LocalFieldId, MacroId, ModuleId, TraitId, TypeOrConstParamId, VariantId,
     hir::generics::{GenericParams, LocalLifetimeParamId, LocalTypeOrConstParamId},
     nameres::ModuleOrigin,
     resolver::{HasResolver, Resolver},
@@ -695,7 +695,9 @@ fn parse_link_tt(tt: &ast::TokenTree) -> Option<(NativeLib, Option<CfgExpr>)> {
             Some(NodeOrToken::Token(eq)) if eq.kind() == T![=] => {
                 children.next();
                 let Some(NodeOrToken::Token(value)) = children.next() else { continue };
-                let Some(value) = ast::String::cast(value).and_then(|it| Some(it.value().ok()?.into_owned())) else {
+                let Some(value) =
+                    ast::String::cast(value).and_then(|it| Some(it.value().ok()?.into_owned()))
+                else {
                     continue;
                 };
                 match key.text() {
