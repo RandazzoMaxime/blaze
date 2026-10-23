@@ -482,6 +482,7 @@ pub(super) fn build<'db>(
         parent_late: FxHashMap::default(),
         impl_self: None,
         returns_opaque: false,
+        opaque_bounds: Vec::new(),
         elided_output: None,
         location: None,
         env_aliases: Vec::new(),
@@ -536,6 +537,9 @@ struct Builder<'c, 'a, 'db> {
     /// The return type is an `impl Trait`, so the return slot has the type it hides, which
     /// implies nothing to the body.
     returns_opaque: bool,
+    /// The trait and projection bounds of the returned `impl Trait`, of the type it hides,
+    /// proven where the body first assigns the return slot.
+    opaque_bounds: Vec<Clause<'db>>,
     /// The region lifetime elision gives the elided lifetimes of the return type.
     elided_output: Option<Region<'db>>,
     location: Option<Location>,
@@ -722,7 +726,7 @@ impl<'db> Builder<'_, '_, 'db> {
                         // Only where `Self` is written: an elided `&str` in `impl Trait for &str`
                         // is the same type to rust-analyzer, but a lifetime of its own.
                         let store = &written.store;
-                        let mut folder = ImplSelf { interner: self.interner(), impl_self };
+                        let mut folder = Replace::new(self.interner(), impl_self);
                         for (input, &param) in inputs.iter_mut().zip(&written.params) {
                             if writes_self(store, param) {
                                 *input =
@@ -837,7 +841,25 @@ impl<'db> Builder<'_, '_, 'db> {
                 );
                 region
             });
-            let hidden_static = opaque && self.regions.universals.len() == 2 && !names_parameter;
+            // A lifetime parameter it captures is not a universal region until something names
+            // it.
+            let captures_parameter = signature.as_ref().is_some_and(|(_, output)| {
+                let TyKind::Alias(alias) = output.kind() else { return false };
+                let Some(captured) =
+                    opaque_captures(self.ctx.db, alias.kind.def_id(), alias.args.len())
+                else {
+                    return false;
+                };
+                alias.args.iter().zip(captured).any(|(arg, captured)| {
+                    captured
+                        && matches!(arg.kind(), GenericArgKind::Lifetime(region)
+                            if !matches!(region.kind(), RegionKind::ReStatic))
+                })
+            });
+            let hidden_static = opaque
+                && self.regions.universals.len() == 2
+                && !names_parameter
+                && !captures_parameter;
             let captures_lifetime = signature.as_ref().is_some_and(|(_, output)| {
                 let TyKind::Alias(alias) = output.kind() else { return true };
                 let Some(captured) =
@@ -876,6 +898,38 @@ impl<'db> Builder<'_, '_, 'db> {
                 })
             });
             local_tys[return_local.into_raw().into_u32() as usize] = Some(ty);
+            // rustc proves an `impl Trait`'s bounds of the type it hides where the body
+            // defines it: `impl Iterator<Item = Box<dyn Foo>>` hiding `Iter<'a, T>` needs the
+            // where clauses of `Iter<'a, T>`'s `Iterator` impl and its `Item` the bound's.
+            if opaque
+                && let Some((_, output)) = &signature
+                && let TyKind::Alias(alias) = output.kind()
+                && let rustc_type_ir::AliasTyKind::Opaque { .. } = alias.kind
+            {
+                let interner = self.interner();
+                let bounds = rustc_type_ir::Interner::item_bounds(interner, alias.kind.def_id());
+                let mut hidden = Replace::new(interner, (*output, ty));
+                for clause in bounds.iter_instantiated(interner, alias.args.as_slice()) {
+                    let clause = clause.skip_norm_wip();
+                    if !matches!(
+                        clause.kind().skip_binder(),
+                        ClauseKind::Trait(_) | ClauseKind::Projection(_)
+                    ) {
+                        continue;
+                    }
+                    let clause = rustc_type_ir::TypeFoldable::fold_with(clause, &mut hidden);
+                    let clause =
+                        rustc_type_ir::fold_regions(interner, clause, |region, depth| match region
+                            .kind()
+                        {
+                            RegionKind::ReVar(_) => region,
+                            _ => {
+                                self.signature_region(region, depth).unwrap_or_else(|| self.fresh())
+                            }
+                        });
+                    self.opaque_bounds.push(clause);
+                }
+            }
             let mut unsuggested = Vec::new();
             regions_of(ty, &mut unsuggested);
             if let InferBodyId::DefWithBodyId(DefWithBodyId::FunctionId(function)) = owner
@@ -2714,6 +2768,10 @@ impl<'db> Builder<'_, '_, 'db> {
         let at = At { category: self.category_of_assignment(place.local, projection), span };
         if projection.is_empty() {
             self.sized_local(place.local, dest, span);
+            if place.local == super::return_slot() && !self.opaque_bounds.is_empty() {
+                let bounds = std::mem::take(&mut self.opaque_bounds);
+                self.clauses(bounds, At { category: Category::Predicate, span }, true);
+            }
         }
         let first = self.regions.outlives.len();
         self.assign(place, rvalue, dest, at, span);
@@ -3917,6 +3975,11 @@ impl<'db> Builder<'_, '_, 'db> {
             .iter_instantiated(self.interner(), args.as_slice())
             .map(|it| it.skip_norm_wip())
             .collect();
+        self.clauses(clauses, at, type_outlives);
+    }
+
+    /// `clauses`, which hold where `at` is.
+    fn clauses(&mut self, clauses: Vec<Clause<'db>>, at: At, type_outlives: bool) {
         // Outliving every `'a` of the clause's own `for<'a>` is outliving `'static`.
         let forall = |region: Region<'db>| match region.kind() {
             RegionKind::ReBound(rustc_type_ir::BoundVarIndexKind::Bound(binder), _) => {
@@ -4239,21 +4302,44 @@ impl<'db> rustc_type_ir::TypeFolder<hir_ty::next_solver::DbInterner<'db>> for Ob
     }
 }
 
-/// Each occurrence of an impl's self type made the one with universal regions for its
-/// anonymous lifetimes.
-struct ImplSelf<'db> {
+/// Each occurrence of one type made another: an impl's self type the one with universal
+/// regions for its anonymous lifetimes, an `impl Trait` the type it hides. The first may name
+/// bound lifetimes, shifted under each binder; the second names none.
+struct Replace<'db> {
     interner: hir_ty::next_solver::DbInterner<'db>,
-    impl_self: (Ty<'db>, Ty<'db>),
+    replace: (Ty<'db>, Ty<'db>),
+    binders: u32,
 }
 
-impl<'db> rustc_type_ir::TypeFolder<hir_ty::next_solver::DbInterner<'db>> for ImplSelf<'db> {
+impl<'db> Replace<'db> {
+    fn new(interner: hir_ty::next_solver::DbInterner<'db>, replace: (Ty<'db>, Ty<'db>)) -> Self {
+        Replace { interner, replace, binders: 0 }
+    }
+}
+
+impl<'db> rustc_type_ir::TypeFolder<hir_ty::next_solver::DbInterner<'db>> for Replace<'db> {
     fn cx(&self) -> hir_ty::next_solver::DbInterner<'db> {
         self.interner
     }
 
+    fn fold_binder<T: rustc_type_ir::TypeFoldable<hir_ty::next_solver::DbInterner<'db>>>(
+        &mut self,
+        binder: rustc_type_ir::Binder<hir_ty::next_solver::DbInterner<'db>, T>,
+    ) -> rustc_type_ir::Binder<hir_ty::next_solver::DbInterner<'db>, T> {
+        use rustc_type_ir::TypeSuperFoldable;
+        self.binders += 1;
+        let binder = binder.super_fold_with(self);
+        self.binders -= 1;
+        binder
+    }
+
     fn fold_ty(&mut self, ty: Ty<'db>) -> Ty<'db> {
         use rustc_type_ir::TypeSuperFoldable;
-        if ty == self.impl_self.0 { self.impl_self.1 } else { ty.super_fold_with(self) }
+        if ty == rustc_type_ir::shift_vars(self.interner, self.replace.0, self.binders) {
+            self.replace.1
+        } else {
+            ty.super_fold_with(self)
+        }
     }
 }
 
