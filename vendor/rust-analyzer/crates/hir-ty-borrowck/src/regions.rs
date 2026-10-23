@@ -2755,9 +2755,9 @@ impl<'db> Builder<'_, '_, 'db> {
             }
             _ => {
                 let constant = match rvalue {
-                    Rvalue::Use(operand) => self
-                        .constant_ty(operand, span)
-                        .or_else(|| self.written_fn_item(operand, span)),
+                    Rvalue::Use(operand) => {
+                        self.constant_ty(operand, span).or_else(|| self.fn_item(operand, span))
+                    }
                     _ => None,
                 };
                 if let Some(ty) = constant.or_else(|| self.rvalue_ty(rvalue, span)) {
@@ -2869,13 +2869,27 @@ impl<'db> Builder<'_, '_, 'db> {
         }
     }
 
-    /// A function item used as a value whose path spells out generic arguments,
-    /// `let f = <&'static u32 as Trait>::method;`, with the lifetimes written there and its
-    /// where clauses proven, as rustc's user type annotation on the path.
-    fn written_fn_item(&mut self, operand: &Operand, span: MirSpan) -> Option<Ty<'db>> {
-        let ty = self.written_callee(operand, span)?;
+    /// A function item used as a value, with its where clauses proven, as rustc's type check
+    /// proves those of every function item it names (`let f: fn(&'a str) -> _ = extend;` or
+    /// passing `extend` to a call); where its path spells out generic arguments,
+    /// `let f = <&'static u32 as Trait>::method;`, with the lifetimes written there, as
+    /// rustc's user type annotation on the path.
+    fn fn_item(&mut self, operand: &Operand, span: MirSpan) -> Option<Ty<'db>> {
+        let ty = match self.written_callee(operand, span) {
+            Some(ty) => ty,
+            None => match &operand.kind {
+                OperandKind::Constant { .. } | OperandKind::Allocation { .. } => {
+                    self.operand_ty(operand).filter(|it| matches!(it.kind(), TyKind::FnDef(..)))?
+                }
+                _ => return None,
+            },
+        };
         if let TyKind::FnDef(def, args) = ty.kind() {
-            self.callee_predicates(def.0, args, operand.span().unwrap_or(span));
+            let span = operand.span().unwrap_or(span);
+            self.callee_predicates(def.0, args, span);
+            for ty in args.types() {
+                self.well_formed(ty, At { category: Category::Boring, span }, 0);
+            }
         }
         Some(ty)
     }
@@ -3082,7 +3096,7 @@ impl<'db> Builder<'_, '_, 'db> {
                 let target = self.renumber(target.as_ref());
                 let source = match kind {
                     CastKind::PointerCoercion(hir_ty::PointerCast::ReifyFnPointer) => {
-                        self.written_callee(operand, span).or_else(|| self.operand_ty(operand))?
+                        self.fn_item(operand, span).or_else(|| self.operand_ty(operand))?
                     }
                     _ => self.operand_ty(operand)?,
                 };
@@ -3666,7 +3680,8 @@ impl<'db> Builder<'_, '_, 'db> {
                     _ => inputs,
                 };
                 for (arg, input) in args.iter().zip(inputs) {
-                    if let Some(ty) = self.operand_ty(arg) {
+                    let fn_item = arg.span().and_then(|it| self.fn_item(arg, it));
+                    if let Some(ty) = fn_item.or_else(|| self.operand_ty(arg)) {
                         let at = At { category, span: arg.span().unwrap_or(span) };
                         self.relate(ty, input, Variance::Covariant, at);
                     }
