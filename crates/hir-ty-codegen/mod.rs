@@ -5092,10 +5092,11 @@ impl<'a, 'db> ObjectCodegen<'a, 'db> {
             Some(written_with) => written_with == instance.checked,
             // The standard library is built without the checks. rustc compiles an `#[inline]`
             // function of it in each crate that calls it, where what it calls that takes the
-            // checks from its caller (`#[rustc_inherit_overflow_checks]`) has that crate's: a
-            // copy the standard library's build exports has none.
+            // checks from its caller (`#[rustc_inherit_overflow_checks]`) has that crate's:
+            // the copy ra-jit's build of the standard library exports has none.
             None => {
                 !instance.checked
+                    || !self.symbols.nothing_of_rustc()
                     || !AttrFlags::query(self.db, func.into()).contains(AttrFlags::IS_INLINE)
             }
         }

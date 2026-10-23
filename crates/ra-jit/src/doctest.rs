@@ -599,7 +599,15 @@ impl Test {
         let edition = edition.parse().unwrap_or(Edition::CURRENT);
         let program = Program::of(&example.code, frame, &id, edition);
         let in_one = edition.at_least_2024();
-        Test { name, marks: example.marks, program, shown_path, line: example.line, edition, in_one }
+        Test {
+            name,
+            marks: example.marks,
+            program,
+            shown_path,
+            line: example.line,
+            edition,
+            in_one,
+        }
     }
 
     /// The lines before the program's first in a file of it whose lines are numbered as
@@ -935,8 +943,11 @@ fn add_crates(
     let dependencies: Vec<BuiltDependency> = std::iter::once(BuiltDependency::new(named, library))
         .chain(data.dependencies.iter().cloned())
         .collect();
-    let (workspace, cfg, env) =
-        (library.workspace_data(db).clone(), library.cfg_options(db).clone(), library.env(db).clone());
+    let (workspace, cfg, env) = (
+        library.workspace_data(db).clone(),
+        library.cfg_options(db).clone(),
+        library.env(db).clone(),
+    );
     let cwd = std::env::current_dir().unwrap_or_default();
     let (mut added, mut crates) = (Vec::new(), Vec::new());
     for (n, &at) in wanted.iter().enumerate() {
