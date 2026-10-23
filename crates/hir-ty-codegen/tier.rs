@@ -342,9 +342,14 @@ pub(super) fn plain<T>(work: impl FnOnce() -> T) -> T {
 /// As [`plain`], for the compile of a function of a build. In a build of a whole program or
 /// with `RA_JIT_INLINE=all` (see [`across`]), and LLVM at `-O2` or above, `work` builds in
 /// and shows LLVM what the function calls of any crate, as a compile at a level above 1
-/// does with no function hot: what it builds in then depends on the database alone.
+/// does with no function hot: what it builds in then depends on the database alone. A build
+/// whose compiles import what they call ([`super::imports`]) builds nothing in here.
 pub(super) fn for_build<T>(work: impl FnOnce() -> T) -> T {
-    let fresh = across().then(|| Inlining {
+    #[cfg(feature = "llvm")]
+    let imports = super::imports::enabled();
+    #[cfg(not(feature = "llvm"))]
+    let imports = false;
+    let fresh = (across() && !imports).then(|| Inlining {
         roots: FxHashSet::default(),
         instances: FxHashSet::default(),
         inlined: Vec::new(),
@@ -370,7 +375,7 @@ pub(super) fn for_build<T>(work: impl FnOnce() -> T) -> T {
 /// the store, and a function an edit's patch compares with the build before, is keyed by its
 /// own function alone, so a body built into a function of another crate would outlive an
 /// edit of it.
-fn across() -> bool {
+pub(super) fn across() -> bool {
     static ASKED: std::sync::LazyLock<Option<bool>> =
         std::sync::LazyLock::new(|| match std::env::var("RA_JIT_INLINE").as_deref() {
             Ok("all") => Some(true),
@@ -422,7 +427,7 @@ pub(super) fn inline_limit(db: &dyn HirDatabase, instance: &Instance) -> Option<
 /// only if it is generic or `#[inline]`, as rustc does across crates. The library keeps what
 /// the rest of its functions refer to to itself (the `static`s of `std::rt`), and has them
 /// compiled already.
-fn shared(db: &dyn HirDatabase, instance: &Instance) -> bool {
+pub(super) fn shared(db: &dyn HirDatabase, instance: &Instance) -> bool {
     let InstanceDef::Fn(func) = instance.def else { return true };
     !func.krate(db).data(db).origin.is_lang()
         || AttrFlags::query(db, func.into()).contains(AttrFlags::IS_INLINE)
@@ -633,7 +638,7 @@ fn size(func: &ir::Function) -> usize {
 /// Has each two-way branch on a constant go where the constant sends it, and drops the blocks
 /// no path reaches then: the checks `ub_checks()` turns off would else be built into every
 /// caller of a body that has one, and counted.
-fn fold_known_branches(
+pub(super) fn fold_known_branches(
     ctx: &mut cranelift_codegen::Context,
     isa: &dyn cranelift_codegen::isa::TargetIsa,
 ) {
@@ -1016,7 +1021,7 @@ fn produce(
 ) -> Result<super::fragment::Code> {
     use super::backend::{Optimization, Passes, Selection};
     let optimization = Optimization { passes: Passes::Aggressive, selection: Selection::Optimized };
-    let code = super::llvm::emit(recorder, named, func, optimization, weights)
+    let code = super::llvm::emit(recorder, named, func, optimization, weights, &[])
         .map_err(|why| CodegenError::Unsupported(format!("LLVM has no code for it: {why}")))?;
     super::backend::pad(code)
 }

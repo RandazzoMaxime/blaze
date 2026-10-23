@@ -1,14 +1,14 @@
 {
  "toolchain": "1.99.0",
- "commit": "e8d8a63da4",
- "date": "2026-10-23T20:28:32Z",
+ "commit": "68c3558698d1a050d728c592737766712fefae86",
+ "date": "2026-10-23T20:54:57Z",
  "host": {
-  "name": "AWS c8a.8xlarge, pinned to 16 cores with taskset",
+  "name": null,
   "cpu": "AMD EPYC 9R45",
   "cores": 16,
-  "machine_cores": 32,
-  "load": "14.0, 14.5, 10.3",
-  "memory_gib": 62,
+  "machine_cores": 96,
+  "load": "12.0, 7.9, 5.4",
+  "memory_gib": 185,
   "os": "Linux",
   "arch": "x86_64",
   "kernel": "6.18.53",
@@ -32,70 +32,70 @@
    "bun": {
     "builds": {
      "release": {
-      "build_s": 135.5,
-      "build_peak_mb": 6203,
-      "build_largest_mb": 3693,
+      "build_s": 135.6,
+      "build_peak_mb": 6249,
+      "build_largest_mb": 3694,
       "size_mb": 314.01
      },
      "checked": {
-      "build_s": 141.8,
-      "build_peak_mb": 6336,
-      "build_largest_mb": 3670,
+      "build_s": 142.3,
+      "build_peak_mb": 6438,
+      "build_largest_mb": 3673,
       "size_mb": 321.05
      },
      "ra-jit": {
-      "build_s": 666.9,
-      "cargo_s": 4.9,
-      "ra_jit_s": 659.3,
-      "link_s": 2.6,
+      "build_s": 129.2,
+      "cargo_s": 5.0,
+      "ra_jit_s": 122.5,
+      "link_s": 1.7,
       "compiled": 68315,
       "left": 0,
       "reasons": {},
-      "build_peak_mb": 21094,
-      "build_largest_mb": 20965,
-      "size_mb": 315.21
+      "build_peak_mb": 15929,
+      "build_largest_mb": 15801,
+      "size_mb": 297.55
      }
     },
     "benches": {
      "bun": {
       "release": {
-       "median_s": 0.3889,
+       "median_s": 0.3891,
        "ratio": 1.0,
        "runs": [
-        0.3899,
-        0.3896,
-        0.3889,
-        0.3889,
-        0.3886
+        0.3915,
+        0.3891,
+        0.3887,
+        0.3891,
+        0.3879
        ],
-       "peak_mb": 58,
-       "peak_max_mb": 58
+       "peak_mb": 51,
+       "peak_max_mb": 51
       },
       "checked": {
-       "median_s": 0.4234,
-       "ratio": 1.089,
+       "median_s": 0.4273,
+       "ratio": 1.098,
        "runs": [
-        0.4229,
-        0.4232,
-        0.4235,
-        0.4234,
-        0.4234
+        0.427,
+        0.4271,
+        0.4282,
+        0.4285,
+        0.4273
        ],
-       "peak_mb": 59,
-       "peak_max_mb": 59
+       "peak_mb": 52,
+       "peak_max_mb": 52
       },
       "ra-jit": {
-       "median_s": 0.4884,
-       "ratio": 1.256,
+       "median_s": 0.4763,
+       "ratio": 1.224,
        "runs": [
-        0.4891,
-        0.4884,
-        0.4884,
-        0.4884,
-        0.4864
+        0.4768,
+        0.4758,
+        0.4767,
+        0.4762,
+        0.4763
        ],
-       "peak_mb": 64,
-       "peak_max_mb": 64
+       "peak_mb": 62,
+       "peak_max_mb": 62
       }
      }
     }
@@ -103,8 +103,8 @@
   },
   "geomean": {
    "release": 1.0,
-   "checked": 1.089,
-   "ra-jit": 1.256
+   "checked": 1.098,
+   "ra-jit": 1.224
   }
  }
 }

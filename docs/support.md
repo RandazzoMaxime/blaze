@@ -203,8 +203,11 @@ exist.
 
 The daemon refuses source in which rust-analyzer finds an error (a type mismatch, an
 unresolved name, a missing field), and under `cargo ra-jit` cargo then runs and rustc
-reports it. An error rust-analyzer does not find is not refused. Borrow-check errors are the
-main case: ra-jit's borrow checker ([borrowck.md](borrowck.md)) refuses what it finds, and it
+reports it. An error rust-analyzer does not find is not refused, and a crate ra-jit compiles
+without rustc, as it does a whole program's, is then built and run: one that calls a macro of
+several statements in the parentheses of another macro's call, say
+([#154](https://github.com/indexable-inc/ra-jit/issues/154)).
+Borrow-check errors are the main case: ra-jit's borrow checker ([borrowck.md](borrowck.md)) refuses what it finds, and it
 finds nothing rustc accepts in rustc's tests or in seven real projects, but it misses about a
 third of the errors rustc gives (67% of rustc's borrow-check tests get rustc's verdict), and
 an edit with one it misses builds and runs. Run `cargo ra-jit check` or `cargo check` to get
