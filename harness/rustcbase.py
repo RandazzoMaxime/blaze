@@ -214,6 +214,12 @@ SCENARIOS = {
     "own-base-new-fn-removed": ([[edit(M, "    x * 3\n}\n", "    helper(x) * 3\n}\n\nfn helper(x: u64) -> u64 {\n    x + 2\n}\n")],
                                  [edit(M, "    helper(x) * 3\n}\n\nfn helper(x: u64) -> u64 {\n    x + 2\n}\n", "    x * 3\n}\n")]],
                                 ["patch", "patch"], 8, {}),
+    # A function rustc compiled, taken away with its one call, and written back.
+    "fn-removed": ([[edit(M, "fn work(x: u64) -> u64 {\n    x * 3\n}\n\n", ""),
+                     edit(M, '    println!("work {}", work(7));\n', "")],
+                    [edit(M, "fn mapped(", "fn work(x: u64) -> u64 {\n    x * 3\n}\n\nfn mapped("),
+                     edit(M, '    println!("{}", twice(3));\n', '    println!("work {}", work(7));\n    println!("{}", twice(3));\n')]],
+                   ["patch", "patch"], 0, {}),
     # rustc's copies of what sees the new function may be in the crates that depend on it.
     "new-fn-dep": ([[edit(D, "    x + 100\n}\n", "    extra(x) + 100\n}\n\nfn extra(x: u64) -> u64 {\n    x + 1\n}\n")]],
                    ["full"], 0, {}),
