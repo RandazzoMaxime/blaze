@@ -1368,10 +1368,11 @@ impl Rejections {
         self.futures.clear();
     }
 
-    /// Notes that functions were added to a file of `crates` and nothing else of it changed but
-    /// bodies that nothing else sees into, where no other crate depends on `crates`, no file of
-    /// them named the new functions before, and `files` are their files: a patch of what rustc
-    /// linked looks at all of their code again.
+    /// Notes that functions were added to a file of `crates`, or taken away, and nothing else of
+    /// it changed but bodies that nothing else sees into, where no other crate depends on
+    /// `crates`, no file of them named the new functions before (or names those taken away
+    /// after), and `files` are their files: a patch of what rustc linked looks at all of their
+    /// code again.
     pub fn touch_added(
         &mut self,
         db: &dyn HirDatabase,

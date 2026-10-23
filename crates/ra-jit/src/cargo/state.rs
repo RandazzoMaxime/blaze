@@ -425,6 +425,35 @@ impl Staged {
     }
 }
 
+/// What the checker of `cargo ra-jit check` with the flags of `asked` loads: the workspace
+/// as a build of those flags has it, with the crates of every package of it. A flag that
+/// picks the tests checks them as `cargo check --tests` does, with `cfg(test)`.
+pub(crate) fn checked(asked: &Invocation) -> anyhow::Result<daemon::Ahead> {
+    if let Some(why) = other_toolchain() {
+        anyhow::bail!(why);
+    }
+    let metadata = metadata(asked)?;
+    let root = metadata.workspace_root.clone().into_std_path_buf();
+    let project =
+        project(asked, &std::env::current_dir()?, &metadata).map_err(anyhow::Error::msg)?;
+    let crates: Vec<PathBuf> = metadata
+        .workspace_packages()
+        .iter()
+        .flat_map(|it| &it.targets)
+        .filter(|it| !it.is_custom_build())
+        .map(|it| it.src_path.clone().into_std_path_buf())
+        .collect();
+    anyhow::ensure!(!crates.is_empty(), "the workspace has no crate to check");
+    let config = WorkerConfig {
+        repository: repository(&root),
+        project: project.strip_prefix(&root).unwrap_or(Path::new("")).to_owned(),
+        cfg_test: asked.flags.dev_targets,
+        selection: asked.selection(),
+        env: worker_env(),
+    };
+    Ok(daemon::Ahead { config, crates, root })
+}
+
 impl Built {
     /// Runs cargo on what `asked` builds, with ra-jit as the wrapper of the workspace's
     /// crates. Progress and diagnostics are cargo's own. `Err` is cargo's exit status when
