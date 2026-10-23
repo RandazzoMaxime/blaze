@@ -206,6 +206,13 @@ All notable changes to ra-jit are written here. The format follows
 
 ### Changed
 
+- The daemon keeps what each debug type is told as once, rather than in every set of debug
+  types it is in ([#55](https://github.com/indexable-inc/ra-jit/issues/55)); the DWARF it
+  writes is the same. On Linux x86-64 (16 cores, `memsplit.py`, one run each) the daemon
+  after its own base and edits holds 7.5 GB instead of 9.7 on nushell and 6.4 instead of 11.3
+  on helix, and bun's own base, which was given up at a quarter of a 124 GiB host's memory,
+  is built at 18.9 GB, so its signature edit is a 6.3 s patch instead of a 32.8 s full link.
+  The own base asks the allocator to give back what it freed before it gives up for memory.
 - ra-jit allocates with jemalloc on Linux and macOS, and with mimalloc on Windows only
   ([#39](https://github.com/indexable-inc/ra-jit/issues/39)). mimalloc 3 kept more of what a
   build freed, transparent huge pages included: on Linux x86-64 (16 cores, `bench.py`, two
@@ -388,6 +395,14 @@ All notable changes to ra-jit are written here. The format follows
 
 ### Fixed
 
+- The borrow checker no longer reports "temporary value dropped while borrowed" on every
+  field of a `tracing::trace!` with tracing 0.1.44, which names fields with a `const` in a
+  block inside its callsite's `static`: a `const fn` method call there is promoted, as rustc
+  promotes it, so cargo's edit build goes through again
+  ([#109](https://github.com/indexable-inc/ra-jit/issues/109)). A trait object given for a
+  type parameter bounded `T: 'a` lives for `'a`, as rustc's object lifetime default, where
+  rust-analyzer made it `'static` and the checker said "lifetime may not live long enough"
+  ([#84](https://github.com/indexable-inc/ra-jit/issues/84)).
 - A program whose `main` is C's, as bun's, is built as a whole program: LLVM gets every body
   and inlines across crates, where each function was compiled alone before. `derive(PartialEq)`
   of an enum compares the discriminants first, as rustc's does. bun's whole program, every

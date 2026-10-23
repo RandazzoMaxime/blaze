@@ -65,7 +65,7 @@
    "rustdoc": 0
   },
   "doctests": {
-   "rustc": 3,
+   "rustc": 0,
    "rustdoc": 0
   },
   "edits": {
