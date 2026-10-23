@@ -283,7 +283,12 @@ impl Linked {
         by_symbol: &[PathBuf],
         shared: &FxHashSet<String>,
     ) -> anyhow::Result<Linked> {
-        let data = std::fs::read(path).with_context(|| format!("reading {}", path.display()))?;
+        let file =
+            std::fs::File::open(path).with_context(|| format!("reading {}", path.display()))?;
+        // Only its symbols are read of it, which are a little of a program with debug info.
+        // SAFETY: a linker writes a new file in place of the one it links over, not into it,
+        // and nothing else writes what rustc linked.
+        let data = unsafe { memmap2::Mmap::map(&file)? };
         let object = object::File::parse(&*data)?;
         let hidden = hidden_globals(&data);
         let own = defined_in(by_symbol);
