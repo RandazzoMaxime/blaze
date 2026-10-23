@@ -17,7 +17,8 @@ is not inert), or when it sets a lint level on the command line.
 
 Each lint is scored on its own, by the (lint, line) of every error: one ra-jit reports that
 rustc does not is wrong, one rustc reports that ra-jit does not is missed. A lint whose
-errors ra-jit may fail a build with must have none wrong.
+errors ra-jit may fail a build with must have none wrong. What ra-jit finds in a macro's
+expansion is not counted: it fails no build.
 """
 import argparse, collections, concurrent.futures, hashlib, json, os, re, subprocess, sys, tempfile, time
 
@@ -78,6 +79,10 @@ def rustc_errors(toolchain, unit, cache, work):
         if d["message"].startswith("aborting due to"):
             continue
         code = (d.get("code") or {}).get("code")
+        # The one lint rustc writes with an error code: E0133 is the hard error too, which has no
+        # lint level to note.
+        if code == "E0133" and any(c["message"] == "the lint level is defined here" for c in d.get("children", [])):
+            code = "unsafe_op_in_unsafe_fn"
         at = None
         for span in (s for s in d.get("spans", []) if s.get("is_primary")):
             while span and os.path.basename(span["file_name"]) != os.path.basename(unit.path):
@@ -137,8 +142,10 @@ def main():
         if "panic" in got:
             panics.append((unit.label, got["panic"].splitlines()[0][:120]))
             continue
+        # A lint in what a macro expands to fails no build of ra-jit's (`broken_in`), so it is
+        # not ra-jit's verdict to score.
         have = {(d["code"], d["line"]) for d in got.get("diagnostics", [])
-                if d["severity"] == "Error" and LINT.match(d["code"])}
+                if d["severity"] == "Error" and LINT.match(d["code"]) and not d.get("expanded")}
         messages = {(d["code"], d["line"]): d["message"] for d in got.get("diagnostics", [])}
         for it in have & unit.want:
             per[it[0]]["right"] += 1

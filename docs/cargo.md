@@ -61,7 +61,10 @@ each crate of the workspace, the arguments, the files rustc wrote and, for a pro
 line the linker was run with. Diagnostics, progress and the exit status are cargo's.
 
 When that build succeeds, the command tells the daemon to load the workspace and returns
-without waiting. The daemon is started if it is not running. Until the workspace is loaded,
+without waiting. The daemon is started if it is not running. It loads the workspace with what
+cargo said of the build scripts it ran and the proc macros it built, kept in
+`target/ra-jit/<build>/scripts`: none of them is built or run again for it, in
+`target/rust-analyzer` or anywhere else. Until the workspace is loaded,
 builds are cargo's, and each one says so:
 
     ra-jit: the daemon is still loading the workspace (951ms so far); building with cargo
@@ -350,7 +353,7 @@ end in rustc doing the work. An error ra-jit cannot diagnose itself, such as a u
 move, fails with rustc's message and status 101, as under cargo.
 
 The store is on by default in this mode and in `cargo ra-jit`: `$XDG_CACHE_HOME/ra-jit/store`,
-else `~/.cache/ra-jit/store`, limited to 32 GiB. `RA_JIT_CACHE=<dir>` moves it, `RA_JIT_CACHE=off`
+else `~/.cache/ra-jit/store`, limited to a tenth of its disk (at most 32 GiB). `RA_JIT_CACHE=<dir>` moves it, `RA_JIT_CACHE=off`
 disables it, `RA_JIT_CACHE_MAX` sets the limit. The socket and logs are in
 `$XDG_RUNTIME_DIR/ra-jit`, else `~/.cache/ra-jit`.
 

@@ -3195,6 +3195,7 @@ dependencies = [
  "pdb",
  "project-model",
  "pulldown-cmark",
+ "ra-jit-cache",
  "ra-jit-expand",
  "ra-jit-live",
  "ra-jit-store",
@@ -3286,6 +3287,7 @@ dependencies = [
  "rustc-hash 2.1.2",
  "sha2 0.10.9",
  "windows-sys 0.61.2",
+ "zstd",
 ]
 
 [[package]]
