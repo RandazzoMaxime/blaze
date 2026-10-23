@@ -72,6 +72,9 @@ pub(super) fn check<'db>(
         if !regions.members.is_empty() {
             eprintln!("members {:?} choices {:?}", regions.members, regions.choices);
         }
+        for test in &regions.type_tests {
+            eprintln!("type test {:?}: '{} at {:?}", test.ty, test.lower, test.span);
+        }
         for constraint in &regions.outlives {
             eprintln!("{constraint:?}");
         }

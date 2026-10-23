@@ -1986,7 +1986,7 @@ impl<'db> Builder<'_, '_, 'db> {
         signature.extend(self.impl_header_types());
         let mut seen = FxHashSet::default();
         for ty in signature {
-            self.implied_bounds(ty, &mut pairs, &mut seen, 0);
+            self.implied_bounds(ty, &mut pairs, &mut seen, 0, false);
         }
         let count = self.regions.universals.len();
         let mut known = vec![BitSet::new(count); count];
@@ -2155,10 +2155,11 @@ impl<'db> Builder<'_, '_, 'db> {
         &mut self,
         ty: Ty<'db>,
         pairs: &mut Vec<(Rv, Rv)>,
-        seen: &mut FxHashSet<Ty<'db>>,
+        seen: &mut FxHashSet<(Ty<'db>, bool)>,
         depth: usize,
+        in_field: bool,
     ) {
-        if depth > 4 || !seen.insert(ty) {
+        if depth > 4 || !seen.insert((ty, in_field)) {
             return;
         }
         match ty.kind() {
@@ -2175,12 +2176,12 @@ impl<'db> Builder<'_, '_, 'db> {
                     pairs.extend(components.into_iter().map(|longer| (longer, shorter)));
                     self.regions.type_bounds.extend(params.into_iter().map(|it| (it, shorter)));
                 }
-                self.implied_bounds(inner, pairs, seen, depth + 1);
+                self.implied_bounds(inner, pairs, seen, depth + 1, in_field);
             }
             TyKind::Adt(def, args) => {
                 for arg in args.iter() {
                     if let GenericArgKind::Type(arg) = arg.kind() {
-                        self.implied_bounds(arg, pairs, seen, depth + 1);
+                        self.implied_bounds(arg, pairs, seen, depth + 1, in_field);
                     }
                 }
                 // What the fields imply is what rustc infers of the type's parameters.
@@ -2188,7 +2189,7 @@ impl<'db> Builder<'_, '_, 'db> {
                 for variant in adt_variants(self.ctx.db, adt) {
                     for (_, field) in self.ctx.db.field_types(variant).iter() {
                         let field = field.ty().instantiate(self.interner(), args).skip_norm_wip();
-                        self.implied_bounds(field, pairs, seen, depth + 1);
+                        self.implied_bounds(field, pairs, seen, depth + 1, true);
                     }
                 }
                 // And the bounds the type declares, which its well-formedness needs.
@@ -2200,15 +2201,16 @@ impl<'db> Builder<'_, '_, 'db> {
             }
             TyKind::Tuple(tys) => {
                 for it in tys.iter() {
-                    self.implied_bounds(it, pairs, seen, depth + 1);
+                    self.implied_bounds(it, pairs, seen, depth + 1, in_field);
                 }
             }
             TyKind::Array(inner, _) | TyKind::Slice(inner) | TyKind::RawPtr(inner, _) => {
-                self.implied_bounds(inner, pairs, seen, depth + 1)
+                self.implied_bounds(inner, pairs, seen, depth + 1, in_field)
             }
             // `dyn Any + 'r` is well-formed only where `'r` outlives what the trait requires of
-            // `Self`: `trait Any: 'static`.
-            TyKind::Dynamic(predicates, region) => {
+            // `Self`: `trait Any: 'static`. Not in a field, of which rustc's inferred outlives
+            // leave out what mentions `Self`.
+            TyKind::Dynamic(predicates, region) if !in_field => {
                 let Some(shorter) = rv_of(region) else { return };
                 for predicate in predicates.iter() {
                     let trait_ = match predicate.skip_binder() {
@@ -2238,7 +2240,7 @@ impl<'db> Builder<'_, '_, 'db> {
             TyKind::Alias(alias) => {
                 if let rustc_type_ir::AliasTyKind::Projection { def_id } = alias.kind {
                     for it in alias.args.types() {
-                        self.implied_bounds(it, pairs, seen, depth + 1);
+                        self.implied_bounds(it, pairs, seen, depth + 1, in_field);
                     }
                     let clauses: Vec<_> =
                         GenericPredicates::query_all(self.ctx.db, def_id.0.into())
@@ -2253,7 +2255,7 @@ impl<'db> Builder<'_, '_, 'db> {
                 if let Some(normalized) = self.normalize(ty)
                     && normalized != ty
                 {
-                    self.implied_bounds(normalized, pairs, seen, depth + 1);
+                    self.implied_bounds(normalized, pairs, seen, depth + 1, in_field);
                 }
             }
             _ => (),
@@ -3852,14 +3854,19 @@ impl<'db> Builder<'_, '_, 'db> {
             }
             // The value implements the object's trait, with what the impl proving it needs:
             // `impl<T: 'static> Gettable<T> for S<T>` makes `&S<&'a u8> as &dyn Gettable<_>`
-            // need `'a: 'static`.
+            // need `'a: 'static`; and what the trait says its types outlive, `T: 'static` of a
+            // `T` as `dyn Any + 'a`.
             (_, TyKind::Dynamic(predicates, region)) => {
                 self.type_outlives(source, region, at);
                 for predicate in predicates.iter() {
                     if let rustc_type_ir::ExistentialPredicate::Trait(principal) =
                         predicate.skip_binder()
                     {
-                        self.prove(principal.with_self_ty(self.interner(), source), at);
+                        let trait_ref = principal.with_self_ty(self.interner(), source);
+                        for region in self.trait_outlives(trait_ref) {
+                            self.type_outlives(source, region, at);
+                        }
+                        self.prove(trait_ref, at);
                     }
                 }
             }
