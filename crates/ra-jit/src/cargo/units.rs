@@ -120,9 +120,10 @@ impl Record {
         Ok(())
     }
 
-    /// Writes the record of a library of a package outside the workspace, where
+    /// Writes the record of a library or proc macro of a package outside the workspace, where
     /// [`Record::all`] does not read it: only a build script ra-jit compiles reads it, to
-    /// compile the library from source as rustc did ([`Record::described`]).
+    /// compile the library from source as rustc did, or to expand with the proc macro
+    /// ([`Record::described`]).
     pub(crate) fn write_described(&self, dir: &Path) -> anyhow::Result<()> {
         let unit = dir.join(&self.id);
         std::fs::create_dir_all(&unit)?;

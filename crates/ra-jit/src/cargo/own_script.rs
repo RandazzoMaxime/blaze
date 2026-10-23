@@ -5,7 +5,8 @@
 //! over the standard library's unit from the store, linked by `cc`. It writes the executable
 //! and the dep-info where rustc would have, with the files `include!` and its kin read and
 //! the variables `env!` and `option_env!` read, and cargo runs the script as it would rustc's.
-//! A script that read a variable cargo sets for rustc alone is left to rustc.
+//! A script that read a variable cargo sets for rustc alone is left to rustc. A proc macro the
+//! script links is expanded with the library rustc compiled of it, by rust-analyzer's server.
 
 use std::{
     collections::BTreeMap,
@@ -41,6 +42,8 @@ struct Described {
     env: BTreeMap<String, String>,
     /// The name each library is linked under and where it is in the description.
     deps: Vec<(String, usize)>,
+    /// The library rustc compiled of a proc macro, which rust-analyzer's server expands with.
+    proc_macro: Option<PathBuf>,
 }
 
 /// The arguments of one run of rustc, as cargo gave them for a crate.
@@ -133,6 +136,7 @@ pub(crate) fn compile(
         cfg: asked.cfg(),
         env,
         deps: Vec::new(),
+        proc_macro: None,
     };
     crates.push(script);
     let mut linked = BTreeMap::new();
@@ -220,6 +224,7 @@ pub(crate) fn build_nothing(sysroot: &Path, dir: &Path, store: &Path) -> Result<
         cfg: vec!["debug_assertions".to_owned()],
         env: BTreeMap::new(),
         deps: Vec::new(),
+        proc_macro: None,
     };
     let exe = dir.join("build-script-build");
     build(sysroot, &[script], dir, &exe, Some(store.to_owned()), false)
@@ -249,13 +254,13 @@ fn add(
         return Ok(at);
     }
     let name = path.file_name().and_then(|it| it.to_str()).unwrap_or_default();
-    let unit = name
+    let library = name
         .strip_prefix("lib")
         .and_then(|it| it.strip_suffix(".rlib").or(it.strip_suffix(".rmeta")));
-    let Some(unit) = unit else {
-        return Err(format!(
-            "it links {name}, which is not a library ra-jit compiles (a proc macro)"
-        ));
+    let (prefix, suffix) = (std::env::consts::DLL_PREFIX, std::env::consts::DLL_SUFFIX);
+    let proc_macro = name.strip_prefix(prefix).and_then(|it| it.strip_suffix(suffix));
+    let Some(unit) = library.or(proc_macro) else {
+        return Err(format!("it links {name}, which is not a library ra-jit knows"));
     };
     let dir = path.parent().map(Record::dir_for).ok_or("a library without a directory")?;
     let record = Record::described(&dir, unit).ok_or_else(|| {
@@ -271,7 +276,10 @@ fn add(
         cfg: asked.cfg(),
         env: record.crate_env.clone(),
         deps: Vec::new(),
+        proc_macro: library.is_none().then(|| path.to_owned()),
     });
+    // A proc macro's libraries are described too, though rustc's library of it is what
+    // expands: what the store keeps of the script is keyed by them.
     let mut deps = Vec::new();
     for (name, path) in asked.externs() {
         deps.push((name, add(crates, linked, &path)?));
@@ -289,7 +297,8 @@ fn described(krate: &Described, member: bool) -> Value {
         "cfg": krate.cfg,
         "env": krate.env,
         "is_workspace_member": member,
-        "is_proc_macro": false,
+        "is_proc_macro": krate.proc_macro.is_some(),
+        "proc_macro_dylib_path": krate.proc_macro,
     })
 }
 

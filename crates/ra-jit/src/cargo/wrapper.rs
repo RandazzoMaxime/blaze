@@ -169,8 +169,8 @@ pub(crate) fn command(mut args: impl Iterator<Item = OsString>) -> anyhow::Resul
 }
 
 /// Builds a crate of a package outside the workspace as cargo asked: its build script by
-/// ra-jit where it can be, the rest by `compiler`, rustc, whose libraries are described for
-/// the scripts that link them. The code to end with.
+/// ra-jit where it can be, the rest by `compiler`, rustc, whose libraries and proc macros are
+/// described for the scripts that link them. The code to end with.
 fn outside(mut compiler: Command, rustc: &OsString, args: &[OsString]) -> anyhow::Result<i32> {
     let unit = Unit::of(args);
     if let Some(unit) = unit.as_ref().filter(|it| it.script)
@@ -184,7 +184,7 @@ fn outside(mut compiler: Command, rustc: &OsString, args: &[OsString]) -> anyhow
     let status = compiler.status()?;
     if let Some(unit) = unit.filter(|it| status.success() && !it.script) {
         let record = unit.as_record(stamp_now(), Vec::new(), None);
-        if record.is_rlib() {
+        if record.is_rlib() || record.runs_in_build() {
             record.write_described(&unit.records)?;
         }
     }

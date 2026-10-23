@@ -766,6 +766,43 @@ loads. `proc_macro` is ra-jit's from F, so the bridge matches the server, which 
 same rust-analyzer. [#38](https://github.com/indexable-inc/ra-jit/issues/38)'s expansion cache
 makes recompiling a macro rare. Risk: the bridge's ABI between the library and the server.
 
+The plan (the `no-rustc-l3` lane, 2026-10-23). What stands in the way, read in the vendored
+rust-analyzer: the toolchain's server (`rust-analyzer-proc-macro-srv` in the sysroot's
+`libexec`, which `ProcMacroServerChoice::Sysroot` starts) opens a library with
+`rustc_metadata::locator::get_proc_macros`, which reads rustc's metadata in the library's
+`.rustc` section: the rustc version it was compiled by and the stable crate id that names the
+`__rustc_proc_macro_decls_<id>__` static, the list of the crate's macros. ra-jit writes no
+rustc metadata and will not, so a library ra-jit compiles needs a server of its own. The
+server's side of the bridge (`proc_macro::bridge::server`) is unstable and ra-jit is built
+on stable, so ra-jit cannot link it into itself; it can compile it, as it compiles any crate,
+from the toolchain's `library/proc_macro` and the vendored `proc-macro-srv`. A server and a
+library both compiled by ra-jit from the one `proc_macro` source agree on the bridge by
+construction (its `Buffer`, `Closure` and `Client` are `repr(C)` with `extern "C"` functions,
+but each toolchain encodes the messages its own way). The stages, each lowering a count:
+
+- J0. A build script that links a proc macro is compiled by ra-jit, the macro expanded with
+  the library rustc compiled of it (cargo names it in `--extern`) by the toolchain's server, as
+  the daemon does. The wrapper describes a proc macro of a package outside the workspace as it
+  does a library, and the script's description has the macro and its libraries, so what the
+  store keeps of the script is keyed by them. Count: nushell's nu-cmd-lang and oem_cp scripts.
+- J1. ra-jit's proc-macro server: `proc-macro-srv` and `proc-macro-srv-cli` built by ra-jit
+  with nothing of rustc's (G) over the toolchain's `proc_macro`, kept in the store by
+  toolchain and shipped with the standard library (above), started by `load_config` in place of
+  the toolchain's. It opens a library with `dlopen` and finds its macros by a symbol, as
+  rust-analyzer did before it read metadata: rustc's `__rustc_proc_macro_decls_*__`, or
+  ra-jit's. It serves rustc's libraries too, which is how it is checked: the harness expands
+  every macro call of the bench apps with both servers and holds the outputs equal.
+- J2. Proc-macro crates compiled by ra-jit into a library for J1's server: the crate and its
+  libraries from source as code that can be loaded (position-independent, the standard
+  library's unit built so too), the list of macros written as rustc's harness writes it (a
+  static of `proc_macro::bridge::client::ProcMacro::{custom_derive, attr, bang}` of each
+  `#[proc_macro*]` function) under ra-jit's symbol, linked with `cc -shared`. Used where every
+  crate that expands with the macro is ra-jit's: a build script's macros (J0's then need no
+  rustc library of their own when nothing else of rustc's names them) and the daemon's builds.
+  Count: the proc macros of scripts, and with K every proc macro and the libraries only they
+  link (syn, quote, proc-macro2, ...), which is most of what rustc compiles in a cold build of
+  a crate with derives.
+
 **K. The cold build is ra-jit's.** ([#91](https://github.com/indexable-inc/ra-jit/issues/91)) `cargo ra-jit build` with nothing built plans the units
 (plan.rs), and the daemon compiles them all, taking what the store and the remote have, links
 the program with G's line and patches its own executable from the first edit on. No `cargo
