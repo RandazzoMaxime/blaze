@@ -30,7 +30,8 @@ back them is under [docs/upstream/](../upstream/), each with a `SOURCE.md`. Sear
   rust-analyzer's removed borrowck, and what ra-jit builds. 2026-10-20.
 - [bun.md](bun.md): bun's Rust port (1.4.3, 1.25M lines in 103 crates on a nightly) built
   by ra-jit: how the harness builds it, what broke and was fixed, what is filed, and its edit
-  and runtime numbers against cargo. 2026-10-21.
+  and runtime numbers against cargo; why the whole program ran 5.9x slower than release and
+  the added function took 19.8 s, and the macOS whole-program link. 2026-10-21, 2026-10-23.
 - [../architecture-split.md](../architecture-split.md): what of ra-jit belongs in the
   rust-analyzer subtree and what in `crates/`; ra-jit's changes to rust-analyzer by purpose,
   upstream's churn on the files they touch, rustc's crate split, and a migration plan.

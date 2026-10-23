@@ -326,6 +326,28 @@ tree, the largest single front-end query on both (helix 1.3 GB, nushell 0.4 GB),
 in 8.0 s on helix and 8.8 s on nushell with item 3, of which resolving is 4.3 s and 4.5 s:
 what is left of the warm start is mostly this item's.
 
+**Built (2026-10-23).** Three families are frozen for each crate whose source is the
+toolchain's, a registry's or a git checkout's and whose dependencies' are too: the `DefMap`
+(with the `LocalDefMap`), the `TraitImpls` and `InherentImpls`, and the lang items, each its own
+store entry under the crate's Merkle key (`crates/ra-jit/src/frozen.rs`; the encodings in
+`hir-def`'s `nameres/frozen.rs` and `hir-ty`'s `method_resolution/frozen.rs`). The bytes hold
+no salsa ids: a file is its crate's index and its path from the crate's root, a module of a
+block is its owner's body and the block's `AstId`, an interned id is its loc. A file outside the
+crate's directory, which a build script may have written, is named with a hash of its text, and
+bytes whose file changed are not read. `RA_JIT_FROZEN=check` resolves and finds as well and fails
+the build on any difference, `verify` writes what was read and fails the same way; on ripgrep's
+153 parts and hello's 78 both find none. The entries go through `ra_jit_store::Store` and so
+travel through the remote with the packs. On dev-aws-8, pinned to one socket's 96 cores, hello's
+build with a warm remote resolves in 0.33 s of 2.2 s and takes 1.22 s of 3.02 s, 2.3 GB of 3.4 GB;
+ripgrep's resolves in 0.38 s of 2.4 s and takes 4.25 s, against cargo's cold 5.5 s.
+
+What resolving still did for a build is now the build's: the impl headers' types (about 1 s of
+ripgrep's compiling, most of it expanding the macros that write `core`'s impls) and the
+expansions behind signatures and bodies. Lowering every impl header after names are read costs
+the same second on the resolve side, so the next families are the impl headers and the macro
+expansions of frozen crates. The spare daemon (`Held::load`) does not read frozen values yet: the
+store's identity is told the toolchain once a process, before the spare knows the build's.
+
 **Risks.** It is the largest change here and touches the most upstream behaviour. The
 differential checker, kept as a mode, is the guard: a frozen value that differs from the
 live one is a bug, never a fallback. salsa's own `persistence` feature is the alternative
@@ -453,6 +475,21 @@ stops.
   cargo's 4.5 GB. The daemon holds 12.5 GB once ready and 25.7 GB after the first edit, and the
   edit that adds a function peaks at 33.5 GB against cargo's 3.3 GB. On macOS arm64
   (2026-10-21, `docs/research/bun.md`) it was 291 s to ready, 28 GB, near 40 GB at an edit.
+  2026-10-23, ra-jit `948d54e375` (the bun-perf lane), same machine: an added function is now
+  a patch, so its 33.5 GB peak is gone; every edit peaks at 27.3 GB at most. The daemon holds
+  12.0 GB once ready and 27.2 GB from the first build on, then stays flat to 0.1 GB over 33
+  builds: the growth is the background build of the program for edits to patch (every
+  function of bun's C-ABI main is an entry, about 68k functions), not the edits. Cold, the
+  build peaks at 15.4 GB against cargo's 4.5 GB, as before.
+  On macOS arm64 (Apple M5 Max, 128 GiB, same commit, read, the daemon's log of `bench.py bun
+  --keep`) the background build of the program for edits gives up: "it holds 32826 MB, more
+  than the 32768 MB it may (`RA_JIT_OWN_BASE_MEMORY`)", a quarter of 128 GiB; Linux's quarter
+  of 185 GiB is 46 GB, which bun's base fits. Edits then go on patching rustc's executable,
+  which a signature edit cannot patch ("an edit that is more than the bodies of functions"):
+  its first sample writes the whole object and links bun in full, twice (280 s, then 279 s
+  again with `-headerpad` for the splices to fit), 574 s; the two after it splice into that
+  link in under 2 s. bun's base needs about 1 GB less, or the bound more room, for macOS's
+  signature edit to be a patch as Linux's is.
 - **architecture split**: the store is the crate `crates/ra-jit-store`, and the code
   generator moves to a crate of its own. New store-side code (item 3's cache, item 1's
   container, item 2's manifest) goes in or beside `ra-jit-store`, behind the store's

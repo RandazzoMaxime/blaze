@@ -4,7 +4,7 @@
     bench.py [PROJECT...] [--backend cranelift|llvm]... [--runs N] [--out FILE] [--work DIR]
              [--reference DIR] [--keep]
     bench.py --compare BASELINE RESULT [--threshold PERCENT]
-    bench.py --runtime [NAME...] [--runs N] [--out FILE]
+    bench.py --runtime [NAME...] [--runs N] [--builds release,checked,ra-jit] [--out FILE]
 
 `--runtime` is how fast programs run rather than how fast they build: it runs runbench.py on
 its programs (NAME..., its defaults without), `--runs` rounds each (default 5), and writes its
@@ -941,9 +941,10 @@ def runtime_bench(argv):
     `cargo build --release`, in a result that names the machine, commit and date as the rest."""
     rounds = options(argv, "--runs", "5")[0]
     out = options(argv, "--out", os.path.join(HERE, "runtime.json"))[0]
+    builds = [arg for given in options(argv, "--builds") for arg in ("--builds", given)]
     names = [a for a in argv if not a.startswith("--")]
     measured = os.path.join(tempfile.mkdtemp(prefix="ra-jit-runbench-"), "runbench.json")
-    ran = subprocess.run([sys.executable, os.path.join(HERE, "runbench.py"), *names, "--rounds", rounds, "--json", measured])
+    ran = subprocess.run([sys.executable, os.path.join(HERE, "runbench.py"), *names, "--rounds", rounds, *builds, "--json", measured])
     result = dict(toolchain=TOOLCHAIN, commit=ra_jit_commit(), date=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
                   host=machine(), runbench=json.load(open(measured)) if os.path.exists(measured) else None)
     if os.environ.get("GITHUB_RUN_ID"):

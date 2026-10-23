@@ -21,8 +21,9 @@ use super::{CodegenError, Result, debuginfo::SlotPlaces, fragment::Code, fragmen
 
 /// Names the producer: `cranelift` (the default) or `llvm`.
 const BACKEND: &str = "RA_JIT_BACKEND";
-/// How hard LLVM optimizes each function, `0` to `3`. Functions are compiled alone at any
-/// level: nothing is inlined across them.
+/// How hard LLVM optimizes each function, `0` to `3`. Each function is compiled alone, with
+/// what it calls built into it at `-O2` and above only in a build of a whole program (see
+/// `tier::across`).
 const OPTIMIZATION: &str = "RA_JIT_OPT";
 /// How LLVM turns the optimized function into machine code: `optimized` (the default) or
 /// `fast`, its quick instruction selection and register allocation. Most of LLVM's time on a
@@ -37,10 +38,10 @@ const SELECTION: &str = "RA_JIT_EMIT";
 #[cfg(feature = "llvm")]
 const LLVM_LIMIT: usize = 10_000;
 
-/// Whether the build under way is of a whole program: one rustc built nothing of, whose
-/// `main` ra-jit writes. Its object is linked once and runs as it is, never edited nor
-/// compiled again as a tier, so LLVM is given every body, as large and with what handlers
-/// it has (see [`Backend::emit`]).
+/// Whether the build under way is of a whole program: one rustc built nothing of, whatever
+/// its `main` is (ra-jit's, or C's as bun's), in a process no edit follows. Its object is
+/// linked once and runs as it is, never edited nor compiled again as a tier, so LLVM is given
+/// every body, as large and with what handlers it has (see [`Backend::emit`]).
 static WHOLE_PROGRAM: AtomicBool = AtomicBool::new(false);
 
 /// Whether the process goes on to build edits of what it builds: a daemon's worker, or one
