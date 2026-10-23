@@ -868,7 +868,7 @@ fn plan(
                 "ra-jit: {} is rustc's: `{name}` links another copy of the library",
                 test.name
             );
-        } else if has_errors(db, example.root_file) {
+        } else if has_errors(db, example.root_file, denies_lints(source)) {
             eprintln!("ra-jit: {} is rustc's: rust-analyzer finds an error in it", test.name);
         } else if test.marks.no_run {
             plans[at] = Plan::Checked;
@@ -881,14 +881,46 @@ fn plan(
 
 /// Whether rust-analyzer finds an error of any kind in the example's file: rustc, which says
 /// what, compiles it then. An example rustc does not compile fails, and one that does not
-/// name what it uses compiles to a program that runs.
-fn has_errors(db: &RootDatabase, file: vfs::FileId) -> bool {
+/// name what it uses compiles to a program that runs. Where the program denies lints, as
+/// `#![doc(test(attr(deny(warnings))))]` has it do, a warning or a use of something
+/// deprecated is one too: rustc has lints rust-analyzer does not.
+fn has_errors(db: &RootDatabase, file: vfs::FileId, denies_lints: bool) -> bool {
+    use ide_db::Severity;
     let config = ide_diagnostics::DiagnosticsConfig::test_sample();
     let resolve = ide_db::assists::AssistResolveStrategy::None;
     hir::attach_db(db, || {
         let syntax = ide_diagnostics::syntax_diagnostics(db, &config, file);
         let semantic = ide_diagnostics::semantic_diagnostics(db, &config, &resolve, file);
-        syntax.into_iter().chain(semantic).any(|it| it.severity == ide_db::Severity::Error)
+        let mut found = syntax.into_iter().chain(semantic);
+        found.any(|it| {
+            it.severity == Severity::Error || denies_lints && it.severity == Severity::Warning
+        }) || denies_lints && uses_deprecated(db, file)
+    })
+}
+
+/// Whether the program has an inner attribute that denies or forbids lints.
+fn denies_lints(source: &str) -> bool {
+    let attrs = source.lines().map(str::trim_start);
+    attrs.into_iter().any(|it| it.starts_with("#![deny") || it.starts_with("#![forbid"))
+}
+
+/// Whether the file names an item, or calls a method, marked `#[deprecated]`.
+fn uses_deprecated(db: &RootDatabase, file: vfs::FileId) -> bool {
+    use syntax::{AstNode as _, ast};
+    let sema = hir::Semantics::new(db);
+    let tree = sema.parse_guess_edition(file);
+    tree.syntax().descendants().any(|node| {
+        let used = if let Some(path) = ast::Path::cast(node.clone()) {
+            match sema.resolve_path(&path) {
+                Some(hir::PathResolution::Def(def)) => Some(def),
+                _ => None,
+            }
+        } else {
+            ast::MethodCallExpr::cast(node)
+                .and_then(|call| sema.resolve_method_call(&call))
+                .map(hir::ModuleDef::Function)
+        };
+        used.and_then(|it| it.attrs(db)).is_some_and(|it| it.is_deprecated())
     })
 }
 
