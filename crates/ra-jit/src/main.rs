@@ -136,6 +136,9 @@ struct Args {
     /// The executable to link `out` into, with the standard library's object and the native
     /// libraries the crates ask for, in a build with nothing of rustc's ([`link::executable`]).
     exe: Option<PathBuf>,
+    /// Where to write, after `exe` is linked, the dep-info rustc would have of the crate asked
+    /// for: the files of its modules, as cargo reads them to know when to build it again.
+    dep_info: Option<PathBuf>,
     /// The build is of the standard library alone ([`std_unit`]): a crate it names is the
     /// library's, not another of that name the program has too.
     library: bool,
@@ -229,6 +232,7 @@ impl Args {
         let mut isolate = None;
         let mut prebuilt = None;
         let mut exe = None;
+        let mut dep_info = None;
         let mut cfg_test = false;
         let mut dev_deps = false;
         let mut own_target = false;
@@ -270,6 +274,7 @@ impl Args {
                 "--isolate" => isolate = Some(PathBuf::from(value()?)),
                 "--prebuilt" => prebuilt = Some(PathBuf::from(value()?)),
                 "--exe" => exe = Some(PathBuf::from(value()?)),
+                "--dep-info" => dep_info = Some(PathBuf::from(value()?)),
                 "--watch" => watch = true,
                 "--socket" => socket = Some(PathBuf::from(value()?)),
                 "--cfg-test" => cfg_test = true,
@@ -313,6 +318,7 @@ impl Args {
             isolate,
             prebuilt,
             exe,
+            dep_info,
             library: false,
             cfg_test,
             own_target,
@@ -3750,6 +3756,38 @@ fn link_executable(
     Ok(())
 }
 
+/// Writes to `path` the dep-info rustc writes of the crate `args` asks for, linked as `exe`:
+/// one rule naming the files of its modules, the root first, and a rule of no files for each.
+fn write_dep_info(
+    db: &RootDatabase,
+    args: &Args,
+    files: &[WatchedFile],
+    exe: &Path,
+    path: &Path,
+) -> anyhow::Result<()> {
+    let mut modules = Vec::new();
+    for krate in crates_named(db, &args.krate, args)? {
+        let ids = krate.modules(db).into_iter();
+        modules.extend(ids.map(|it| it.definition_source_file_id(db).original_file(db).file_id(db)));
+    }
+    let named = |id: &vfs::FileId| {
+        files.iter().find(|it| matches!(it.file, Watched::Source(of) if of == *id))
+    };
+    let mut paths: Vec<String> = Vec::new();
+    for path in modules.iter().filter_map(named).map(|it| it.path.display().to_string()) {
+        if !paths.contains(&path) {
+            paths.push(path);
+        }
+    }
+    anyhow::ensure!(!paths.is_empty(), "no file of `{}` was loaded", args.krate);
+    let escaped: Vec<String> = paths.iter().map(|it| dep_info::escaped(it)).collect();
+    let mut text = format!("{}: {}\n\n", dep_info::escaped(&exe.display().to_string()), escaped.join(" "));
+    for file in &escaped {
+        text += &format!("{file}:\n");
+    }
+    std::fs::write(path, text).with_context(|| format!("writing {}", path.display()))
+}
+
 /// [`build`] of a build that is never held.
 fn build_unheld(
     db: &RootDatabase,
@@ -5090,6 +5128,7 @@ fn build_batch(db: &RootDatabase, args: Args) -> anyhow::Result<()> {
             isolate: None,
             prebuilt: args.prebuilt.clone(),
             exe: args.exe.clone(),
+            dep_info: None,
             library: args.library,
             cfg_test: args.cfg_test,
             own_target: args.own_target,
@@ -7065,6 +7104,9 @@ fn run_holding(
                 let workspace = checkouts.loaded.workspaces().first();
                 let sysroot = workspace.and_then(|it| it.sysroot.root());
                 link_executable(&db, &table, &args, sysroot.map(|it| it.as_ref()), exe)?;
+                if let Some(path) = &args.dep_info {
+                    write_dep_info(&db, &args, &files, exe, path)?;
+                }
             }
             Some(cold)
         }

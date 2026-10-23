@@ -20,7 +20,7 @@ use super::{
     ancestor::Cargo,
     cli,
     daemon::{self, NotBuilt},
-    say, script,
+    own_script, say, script,
     state::{State, place},
     switch::Enabled,
     units::{Copied, Record, stamp_now},
@@ -98,6 +98,15 @@ pub(crate) fn command(mut args: impl Iterator<Item = OsString>) -> anyhow::Resul
     };
     let plain = unit.linked && std::env::var_os(DRIVEN).is_none();
     let dir = unit.records.join(&unit.id);
+    if unit.script && std::env::var_os(own_script::BY_RUSTC).is_none() {
+        match unit.by_ra_jit(&rustc, &dir) {
+            Ok(()) => std::process::exit(0),
+            Err(why) => {
+                let package = std::env::var("CARGO_PKG_NAME").unwrap_or_default();
+                say::fallback(&why, &format!("rustc compiles the build script of `{package}`"));
+            }
+        }
+    }
     if unit.is_staged() {
         match unit.stood_in(&rustc, &dir) {
             Ok(code) => std::process::exit(code),
@@ -338,6 +347,18 @@ impl Unit {
         Ok(())
     }
 
+    /// Has ra-jit compile and link the build script, where rustc would have put it, and
+    /// records it as [`Unit::record`] does a script of rustc's. `dir` is where the unit is
+    /// recorded. `Err` is why rustc is to compile it.
+    fn by_ra_jit(&self, rustc: &OsString, dir: &Path) -> Result<(), String> {
+        let stamp = stamp_now();
+        let copies = dir.join(stamp.to_string());
+        let record = self.as_record(0, Vec::new(), None);
+        let exe = record.outputs().into_iter().next().ok_or("rustc names no executable")?;
+        own_script::compile(rustc, &self.args, &self.cwd, &self.source, &exe, &copies)?;
+        self.record(stamp, &copies, None, &self.source).map_err(|it| format!("{it:#}"))
+    }
+
     /// Has rustc write the dep-info cargo reads to know what the program was compiled
     /// from, while the daemon builds it. Rustc stops once it has read the source: it
     /// checks nothing, and the daemon builds what rust-analyzer passes.
@@ -498,6 +519,9 @@ impl Unit {
             link_line,
             env: std::env::vars()
                 .filter(|(name, _)| name.starts_with(PROGRAM_OF) || name == SCRATCH)
+                .collect(),
+            crate_env: std::env::vars()
+                .filter(|(name, _)| super::own_script::read_by_crates(name))
                 .collect(),
         }
     }
