@@ -388,9 +388,9 @@ stops.
 |---|---|---|
 | The restart round (step 3) | #37 | glancer, done as part of no-rustc step E (#85): the instance compiles, nothing is kept or forwarded to rustc |
 | Proc-macro expansion cache (item 3) | #38 | glancer, merged ([#110](https://github.com/indexable-inc/ra-jit/pull/110)) |
-| `described` copies whole type closures (item 5) | #55 | share-types, dev-aws-6 |
-| The spare worker's memory (item 5) | #56 | spare, its own AWS host |
-| salsa eviction of queries with cycle handling (item 5) | #57 | spare, after #56 |
+| `described` copies whole type closures (item 5) | #55 | share-types (restarted 2026-10-22 as share-types-3) |
+| The spare worker's memory (item 5) | #56 | spare, merged (8e01def1cf): 1.3 GB less after edits; a warm second project's cost is #99 |
+| salsa eviction of queries with cycle handling (item 5) | #57 | spare, closed unmerged: lru saves 0.35-0.5 GB on nushell but slows the signature edit 0.42 to 0.64-2.43 s |
 | Frozen dependency artifacts (item 1) | #40 | glancer, after #38 |
 | The workspace's own state (item 2) | #41 | glancer, after #40's 1a |
 | A flat syntax tree (item 4) | #42 | flat-syntax: done, steps (a), (b) and (c) merged |
