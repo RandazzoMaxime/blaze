@@ -257,17 +257,17 @@ is not there, and the README keeps its last numbers, under their machine, date a
 (`BENCH_RUNNER=true`, from before there were platforms, still means Linux x86-64.)
 
 Until the runners exist the numbers are measured by hand with the same harness, pinned to 16
-cores (`taskset -c 0-15`) so that cargo and the daemon have the 16 cores of the machines above:
-on 2026-10-22, Linux x86-64 on `dev-aws-8` (a c7a.48xlarge, AMD EPYC 9R14, idle and claimed for
-the run) and Linux aarch64 on a c8g.16xlarge (Graviton4, Neoverse-V2) launched for it. macOS
-arm64's edits are the MacBook Pro (M5 Max) run of 2026-10-21, made while it was busy with other
-work (its load average is in the README), so its times are noisier than the others'; its runtime
-is one run on GitHub's `macos-15` runner, a shared virtual M1 with 3 cores and 7 GiB, whose runs
-of a benchmark varied by up to 17× (eza, which reads the disk), so the README marks every
-benchmark whose runs varied by more than 1.5× with ≈. Linux aarch64's runtime was measured but
-is not published, since ra-jit's builds of tokei, eza and bat failed there
-([#78](https://github.com/indexable-inc/ra-jit/issues/78)). The first published run
-(2026-10-20) was on `dev-aws-11`, a bare-metal c8a.metal-24xl pinned the same way.
+cores with `taskset` so that cargo and the daemon have the 16 cores of the machines above. The
+edits: on 2026-10-22, Linux x86-64 on `dev-aws-8` (a c7a.48xlarge, AMD EPYC 9R14, idle and
+claimed for the run) and Linux aarch64 on a c8g.16xlarge (Graviton4, Neoverse-V2) launched for
+it; macOS arm64's are the MacBook Pro (M5 Max) run of 2026-10-21, made while it was busy with
+other work (its load average is in the README), so its times are noisier than the others'. The
+runtime, each benchmark run 10 times on 2026-10-23: Linux x86-64 on `dev-aws-11` (a bare-metal
+c8a.metal-24xl, AMD EPYC 9R45, idle and claimed for the run) and Linux aarch64 on a c8g.8xlarge
+(Graviton4) launched for it. macOS arm64's runtime is one run on GitHub's `macos-15` runner, a
+shared virtual M1 with 3 cores and 7 GiB, whose runs of a benchmark have varied by up to 17×
+(eza, which reads the disk), so the README marks every benchmark whose runs varied by more than
+1.5× with ≈. The first published run (2026-10-20) was on `dev-aws-11` too.
 
 ## When it runs and what it commits
 
