@@ -738,7 +738,7 @@ impl Dwarf {
 
     /// Writes what `ty` is made of into its `entry`: the types at `made_of`, in the order
     /// [`Told`] says.
-    fn fill(&mut self, of: &mut FunctionTypes, entry: UnitEntryId, ty: &Told, made_of: &[Part]) {
+    fn fill(&mut self, of: &mut FunctionTypes, entry: UnitEntryId, ty: &Told, made_of: &[Of<'_>]) {
         let size = |unit: &mut gimli::write::Unit, size: u64| {
             unit.get_mut(entry).set(DW_AT_byte_size, AttributeValue::Udata(size));
         };
