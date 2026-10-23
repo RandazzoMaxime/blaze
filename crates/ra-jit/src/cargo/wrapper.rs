@@ -144,6 +144,7 @@ pub(crate) fn command(mut args: impl Iterator<Item = OsString>) -> anyhow::Resul
         }
         if unit.for_linux() {
             compiler.arg(format!("-Clink-arg={}", super::plan::BUILD_ID));
+            compiler.arg(format!("-Clink-arg={}", super::plan::kept_builtins()));
         }
     }
     let status =
@@ -495,6 +496,7 @@ impl Unit {
             stand_in.arg(format!("--print=link-args={}", line.display())).arg("-Csave-temps");
             if self.for_linux() {
                 stand_in.arg(format!("-Clink-arg={}", super::plan::BUILD_ID));
+                stand_in.arg(format!("-Clink-arg={}", super::plan::kept_builtins()));
             }
         }
         let built = stand_in.stdin(Stdio::null()).output().context("running rustc")?;
