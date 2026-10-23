@@ -876,7 +876,7 @@ impl<'ctx, 'f> Lowering<'ctx, 'f> {
 
     /// Whether `a` is `b` but for parameters that are pointers in one and integers of their
     /// width in the other, which are passed alike.
-    fn same_but_pointers(a: FunctionType<'ctx>, b: FunctionType<'ctx>) -> bool {
+    pub(super) fn same_but_pointers(a: FunctionType<'ctx>, b: FunctionType<'ctx>) -> bool {
         let (left, right) = (a.get_param_types(), b.get_param_types());
         let address = |ty: &BasicMetadataTypeEnum<'ctx>| match ty {
             BasicMetadataTypeEnum::PointerType(_) => true,

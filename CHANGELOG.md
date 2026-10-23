@@ -397,6 +397,12 @@ All notable changes to ra-jit are written here. The format follows
 
 ### Fixed
 
+- A body imported through another was called with the importer's type for it: an export
+  declares what it calls with the types it calls it through, and one has as an integer what
+  another has as a pointer. LLVM takes a call of a body through a type it does not have to be
+  undefined, and of `ptr::write::<ForOf>` imported through a function that had the address as
+  an integer it kept nothing of what was written, so bun's parser crashed. Such a call is now
+  made through the callee's own type, the arguments converted (a unit test of `llvm.rs`).
 - A function declared in a trait's provided method was compiled only in a build with nothing
   of rustc's. rustc compiles one only where it instantiates the method, so it has no symbol
   of it in any build, and ra-jit names it: a call of ours that LLVM did not build in was of a

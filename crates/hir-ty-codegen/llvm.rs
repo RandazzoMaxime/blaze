@@ -132,6 +132,9 @@ pub(super) fn emit(
             for import in imports {
                 link(context, &module, import)?;
             }
+            if !imports.is_empty() {
+                agree_calls(context, &module)?;
+            }
             // Every body shown is declared before any is defined, as one may call another.
             let mut by_id = FxHashMap::default();
             for (it, defined) in std::iter::zip(&seen, &shown) {
@@ -362,6 +365,130 @@ fn link<'ctx>(
         module.add_function(&own_name, own.get_type(), Some(Linkage::External));
     }
     module.link_in_module(imported).map_err(llvm)
+}
+
+/// Has each call in the bodies linked in ([`link`]) made through the type its callee has in
+/// `module`. An export declares what it calls with the types it calls it through, and a
+/// parameter that one has as a pointer another has as an integer of its width
+/// ([`Lowering::same_but_pointers`]), so a body linked in can call another with a type it
+/// does not have. LLVM takes such a call of a body to be undefined: of `ptr::write`, imported
+/// through a function that passed it the address as an integer, it kept nothing of what was
+/// written. A call of a body through a type that differs in more than that is refused, as one
+/// request is of one signature; one of a function only declared is left, as a C variadic
+/// one is called with the arguments it is given.
+fn agree_calls<'ctx>(context: &'ctx Context, module: &Module<'ctx>) -> Result<(), Unhandled> {
+    use inkwell::{
+        basic_block::BasicBlock,
+        llvm_sys::{core, debuginfo},
+        types::{BasicMetadataTypeEnum, FunctionType},
+        values::{
+            AsValueRef as _, BasicMetadataValueEnum, BasicValueEnum, CallSiteValue,
+            InstructionOpcode, InstructionValue,
+        },
+    };
+    let builder = context.create_builder();
+    for function in module.get_functions() {
+        for block in function.get_basic_block_iter() {
+            let mut next = block.get_first_instruction();
+            while let Some(instruction) = next {
+                next = instruction.get_next_instruction();
+                let opcode = instruction.get_opcode();
+                if !matches!(opcode, InstructionOpcode::Call | InstructionOpcode::Invoke) {
+                    continue;
+                }
+                // SAFETY: a call or an invoke is a call site.
+                let call = unsafe { CallSiteValue::new(instruction.as_value_ref()) };
+                // SAFETY: the instruction is a call; what it calls may be any value. Not
+                // `get_called_fn_value`, which has no function for a call of another type.
+                let callee = unsafe { core::LLVMGetCalledValue(instruction.as_value_ref()) };
+                if unsafe { core::LLVMIsAFunction(callee) }.is_null() {
+                    continue;
+                }
+                // SAFETY: it is a function.
+                let Some(callee) = (unsafe { FunctionValue::new(callee) }) else { continue };
+                if callee.count_basic_blocks() == 0 {
+                    continue;
+                }
+                // SAFETY: a call has the type it calls through.
+                let through = unsafe {
+                    FunctionType::new(core::LLVMGetCalledFunctionType(instruction.as_value_ref()))
+                };
+                let ty = callee.get_type();
+                if through == ty {
+                    continue;
+                }
+                if !Lowering::same_but_pointers(through, ty) {
+                    return Err(Unhandled::Shape("an import called with another signature"));
+                }
+                builder.position_before(&instruction);
+                let params = ty.get_param_types();
+                let mut args: Vec<BasicValueEnum<'ctx>> = Vec::new();
+                for (at, param) in params.iter().enumerate() {
+                    let arg = instruction
+                        .get_operand(at as u32)
+                        .and_then(|it| it.value())
+                        .ok_or(Unhandled::Shape("a call without its arguments"))?;
+                    args.push(match (*param, arg) {
+                        (BasicMetadataTypeEnum::PointerType(to), BasicValueEnum::IntValue(int)) => {
+                            builder.build_int_to_ptr(int, to, "")?.into()
+                        }
+                        (BasicMetadataTypeEnum::IntType(to), BasicValueEnum::PointerValue(ptr)) => {
+                            builder.build_ptr_to_int(ptr, to, "")?.into()
+                        }
+                        _ => arg,
+                    });
+                }
+                let made = match opcode {
+                    InstructionOpcode::Invoke => {
+                        // SAFETY: an invoke has both.
+                        let (then, catch) = unsafe {
+                            let at = instruction.as_value_ref();
+                            (
+                                BasicBlock::new(core::LLVMGetNormalDest(at)),
+                                BasicBlock::new(core::LLVMGetUnwindDest(at)),
+                            )
+                        };
+                        let (Some(then), Some(catch)) = (then, catch) else {
+                            return Err(Unhandled::Shape("an invoke without its destinations"));
+                        };
+                        builder.build_direct_invoke(callee, &args, then, catch, "")?
+                    }
+                    _ => {
+                        let args: Vec<BasicMetadataValueEnum<'ctx>> =
+                            args.iter().map(|&it| it.into()).collect();
+                        let made = builder.build_direct_call(callee, &args, "")?;
+                        made.set_tail_call_kind(call.get_tail_call_kind());
+                        made
+                    }
+                };
+                made.set_call_convention(call.get_call_convention());
+                // What a parameter that is a pointer here and an integer there is told is of
+                // the one it was.
+                let through_params = through.get_param_types();
+                let places = (0..call.count_arguments())
+                    .filter(|&at| through_params.get(at as usize) == params.get(at as usize))
+                    .map(AttributeLoc::Param);
+                for loc in [AttributeLoc::Function, AttributeLoc::Return].into_iter().chain(places)
+                {
+                    for attribute in call.attributes(loc) {
+                        made.add_attribute(loc, attribute);
+                    }
+                }
+                // SAFETY: both are instructions.
+                let made = unsafe { InstructionValue::new(made.as_value_ref()) };
+                unsafe {
+                    let location =
+                        debuginfo::LLVMInstructionGetDebugLoc(instruction.as_value_ref());
+                    if !location.is_null() {
+                        debuginfo::LLVMInstructionSetDebugLoc(made.as_value_ref(), location);
+                    }
+                }
+                instruction.replace_all_uses_with(&made);
+                instruction.erase_from_basic_block();
+            }
+        }
+    }
+    Ok(())
 }
 
 /// What the body of the requested function `id` that LLVM is shown is called in the module.
@@ -681,6 +808,80 @@ done:
 declare i32 @"ra-jit.f.0"(i32)
 declare i32 @"ra-jit.f.1"(i32)
 "#;
+
+    /// An export that writes through an address it has as an integer, by its request 1.
+    const PASSES_AN_ADDRESS: &str = r#"
+define void @"ra-jit.own"(i64 %to, ptr %from) {
+  call void @"ra-jit.f.1"(i64 %to, ptr nonnull %from)
+  ret void
+}
+
+declare void @"ra-jit.f.1"(i64, ptr)
+"#;
+
+    /// `ptr::write`, which has the address as a pointer, and that of what it writes as an
+    /// integer.
+    const WRITES: &str = r#"
+define void @"ra-jit.own"(ptr %to, i64 %from) {
+  %address = inttoptr i64 %from to ptr
+  %value = load i64, ptr %address
+  store i64 %value, ptr %to
+  ret void
+}
+"#;
+
+    fn exported(context: &Context, text: &str, funcs: Vec<u32>, id: u32) -> Import {
+        let export = super::super::imports::Export {
+            bitcode: parsed(context, text).write_bitcode_to_memory().as_slice().to_vec(),
+            requests: Default::default(),
+            signature: ir::Signature::new(cranelift_codegen::isa::CallConv::SystemV),
+            size: 3,
+            hint: Hint::Inline,
+        };
+        Import { export: std::sync::Arc::new(export), id, funcs, datas: Vec::new() }
+    }
+
+    /// bun's parser wrote garbage for a `for … of`: `ptr::write::<ForOf>` was imported
+    /// through a function that passed it the address as an integer, and LLVM, given a call
+    /// of a type the body did not have, kept nothing of what was written.
+    #[test]
+    fn a_body_imported_through_another_is_called_with_its_own_type() {
+        let context = Context::create();
+        let passes = exported(&context, PASSES_AN_ADDRESS, vec![5, 6], 5);
+        let writes = exported(&context, WRITES, vec![6], 6);
+        let module = context.create_module("ra-jit");
+        let (i64, ptr) = (context.i64_type(), context.ptr_type(Default::default()));
+        let own = module.add_function(
+            OWN,
+            context.void_type().fn_type(&[i64.into(), ptr.into()], false),
+            None,
+        );
+        link(&context, &module, &passes).unwrap();
+        link(&context, &module, &writes).unwrap();
+        agree_calls(&context, &module).unwrap();
+        let builder = context.create_builder();
+        builder.position_at_end(context.append_basic_block(own, ""));
+        let callee = module.get_function("ra-jit.f.5").unwrap();
+        let args = [own.get_nth_param(0).unwrap().into(), own.get_nth_param(1).unwrap().into()];
+        builder.build_direct_call(callee, &args, "").unwrap();
+        builder.build_return(None).unwrap();
+        module.verify().unwrap();
+        let body = module.get_function("ra-jit.f.5").unwrap();
+        let text = body.print_to_string().to_string_lossy().into_owned();
+        let all = module.print_to_string().to_string_lossy().into_owned();
+        let agreed =
+            ["inttoptr i64 %to to ptr", "ptrtoint ptr %from to i64", "@ra-jit.f.6(ptr %1, i64 %2)"];
+        assert!(agreed.iter().all(|it| text.contains(it)), "{all}");
+
+        let optimization =
+            Optimization { passes: Passes::Aggressive, selection: Selection::Optimized };
+        let machine = Machine::create(optimization).unwrap();
+        let pipeline = optimization.pipeline().unwrap();
+        module.run_passes(pipeline, &machine, PassBuilderOptions::create()).unwrap();
+        module.run_passes("elim-avail-extern", &machine, PassBuilderOptions::create()).unwrap();
+        let text = own.print_to_string().to_string_lossy().into_owned();
+        assert!(text.contains("load i64, ptr %1") && text.contains("store i64"), "{text}");
+    }
 
     fn parsed<'ctx>(context: &'ctx Context, text: &str) -> Module<'ctx> {
         let text = format!("{text}\0");
