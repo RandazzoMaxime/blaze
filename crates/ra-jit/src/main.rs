@@ -3750,7 +3750,7 @@ fn link_executable(
 fn write_dep_info(
     db: &RootDatabase,
     args: &Args,
-    files: &[WatchedFile],
+    vfs: &vfs::Vfs,
     exe: &Path,
     path: &Path,
 ) -> anyhow::Result<()> {
@@ -3759,11 +3759,9 @@ fn write_dep_info(
         let ids = krate.modules(db).into_iter();
         modules.extend(ids.map(|it| it.definition_source_file_id(db).original_file(db).file_id(db)));
     }
-    let named = |id: &vfs::FileId| {
-        files.iter().find(|it| matches!(it.file, Watched::Source(of) if of == *id))
-    };
+    let named = |id: &vfs::FileId| Some(vfs.file_path(*id).as_path()?.to_string());
     let mut paths: Vec<String> = Vec::new();
-    for path in modules.iter().filter_map(named).map(|it| it.path.display().to_string()) {
+    for path in modules.iter().filter_map(named) {
         if !paths.contains(&path) {
             paths.push(path);
         }
@@ -7093,7 +7091,7 @@ fn run_holding(
                 let sysroot = workspace.and_then(|it| it.sysroot.root());
                 link_executable(&db, &table, &args, sysroot.map(|it| it.as_ref()), exe)?;
                 if let Some(path) = &args.dep_info {
-                    write_dep_info(&db, &args, &files, exe, path)?;
+                    write_dep_info(&db, &args, &vfs, exe, path)?;
                 }
             }
             Some(cold)
