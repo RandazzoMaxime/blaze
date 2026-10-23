@@ -7091,7 +7091,7 @@ fn run_holding(
                 let sysroot = workspace.and_then(|it| it.sysroot.root());
                 link_executable(&db, &table, &args, sysroot.map(|it| it.as_ref()), exe)?;
                 if let Some(path) = &args.dep_info {
-                    write_dep_info(&db, &args, &vfs, exe, path)?;
+                    write_dep_info(&db, &args, tree.vfs(), exe, path)?;
                 }
             }
             Some(cold)
