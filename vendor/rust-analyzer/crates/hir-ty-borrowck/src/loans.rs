@@ -802,7 +802,7 @@ pub(super) fn places_conflict<'db>(
                     return false;
                 }
                 (ProjectionElem::Field(_), TyKind::Adt(def, _), Depth::Drop)
-                    if base_ty.variant_id.is_none() && ctx.has_destructor(def.def_id()) =>
+                    if ctx.has_destructor(def.def_id()) =>
                 {
                     return true;
                 }
