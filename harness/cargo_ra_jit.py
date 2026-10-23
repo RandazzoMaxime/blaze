@@ -541,10 +541,12 @@ def project(name, spec, work, mode):
 FLAG_WORKSPACE = {
     "Cargo.toml": '[workspace]\nmembers = ["app", "util", "shout"]\nresolver = "2"\n\n[profile.quick]\ninherits = "dev"\n\n[profile.release]\npanic = "abort"\n\n[profile.quick.package.util]\nopt-level = 3\noverflow-checks = false\n',
     "util/Cargo.toml": '[package]\nname = "util"\nversion = "0.1.0"\nedition = "2021"\n\n[features]\nloud = []\n',
-    "util/src/lib.rs": '/// ```\n/// assert_eq!(util::greeting("it").len(), 8);\n/// ```\n///\n/// ```should_panic\n/// assert_eq!(util::greeting("it"), "");\n/// ```\npub fn greeting(name: &str) -> String {\n    let text = format!("hello {name}");\n    if cfg!(feature = "loud") { text.to_uppercase() } else { text }\n}\n\nthread_local! {\n    static SAID: std::cell::RefCell<Option<String>> = None.into();\n}\n\npub fn said() -> String {\n    SAID.with_borrow(|it| it.clone().unwrap_or_default())\n}\n\n#[cfg(test)]\nmod tests {\n    // A test and the library see one thread local, whoever compiled either.\n    #[test]\n    fn says_what_a_test_set() {\n        super::SAID.with_borrow_mut(|it| *it = Some("set".to_string()));\n        assert_eq!(super::said(), "set");\n    }\n\n    #[test]\n    fn greets() {\n        assert!(super::greeting("a").to_lowercase().starts_with("hello"));\n    }\n}\n',
+    "util/src/lib.rs": '/// ```\n/// assert_eq!(util::greeting("it").len(), 8);\n/// ```\n///\n/// ```should_panic\n/// assert_eq!(util::greeting("it"), "");\n/// ```\npub fn greeting(name: &str) -> String {\n    let text = format!("hello {name}");\n    if cfg!(feature = "loud") { text.to_uppercase() } else { text }\n}\n\n/// ```\n/// assert_eq!(util::WORDS.len(), 1);\n/// ```\npub const WORDS: &[&str] = &["hello"];\n\nthread_local! {\n    static SAID: std::cell::RefCell<Option<String>> = None.into();\n}\n\npub fn said() -> String {\n    SAID.with_borrow(|it| it.clone().unwrap_or_default())\n}\n\n/// What a word count is laid out with: `loud` puts a volume before it.\n#[repr(C)]\npub struct Words {\n    #[cfg(feature = "loud")]\n    pub volume: u64,\n    pub count: u64,\n}\n\npub fn words(count: u64) -> Words {\n    Words {\n        #[cfg(feature = "loud")]\n        volume: 11,\n        count,\n    }\n}\n\n#[cfg(test)]\nmod tests {\n    // A test and the library see one thread local, whoever compiled either.\n    #[test]\n    fn says_what_a_test_set() {\n        super::SAID.with_borrow_mut(|it| *it = Some("set".to_string()));\n        assert_eq!(super::said(), "set");\n    }\n\n    #[test]\n    fn greets() {\n        assert!(super::greeting("a").to_lowercase().starts_with("hello"));\n    }\n}\n',
     "app/Cargo.toml": '[package]\nname = "app"\nversion = "0.1.0"\nedition = "2021"\ndefault-run = "app"\n\n[features]\nloud = ["util/loud"]\n\n[dependencies]\nutil = { path = "../util" }\n\n[dev-dependencies]\nshout = { path = "../shout" }\n',
-    "shout/Cargo.toml": '[package]\nname = "shout"\nversion = "0.1.0"\nedition = "2021"\n',
-    "shout/src/lib.rs": 'pub fn shout(text: &str) -> String {\n    text.to_uppercase()\n}\n',
+    "shout/Cargo.toml": '[package]\nname = "shout"\nversion = "0.1.0"\nedition = "2021"\n\n[dependencies]\nutil = { path = "../util" }\n',
+    # Its examples link against util as cargo built it, with the features of every package the
+    # build selects: `Words` has a volume when app's `loud` is on, whichever package is tested.
+    "shout/src/lib.rs": 'pub fn shout(text: &str) -> String {\n    text.to_uppercase()\n}\n\n/// ```\n/// assert_eq!(shout::counted(3), 3);\n/// ```\npub fn counted(count: u64) -> u64 {\n    util::words(count).count\n}\n',
     "app/src/main.rs": '#![allow(unexpected_cfgs)]\n\nfn main() {\n    let name = std::env::args().nth(1).unwrap_or("world".to_string());\n    println!("{}", util::greeting(&name));\n    println!("{} {} {}", cfg!(debug_assertions), cfg!(extra), cfg!(target_feature = "avx2"));\n    let sum = std::panic::catch_unwind(|| name.len() as u8 + 251);\n    println!("{:?}", sum.ok());\n    if name == "fail" {\n        std::process::exit(3);\n    }\n}\n\n#[cfg(test)]\nmod tests {\n    #[test]\n    fn in_the_program() {\n        assert_eq!(util::greeting("x").len(), 7);\n    }\n}\n',
     "app/src/bin/other.rs": 'fn main() {\n    println!("other: {}", util::greeting("other"));\n}\n',
     "app/examples/demo.rs": 'fn main() {\n    println!("demo: {} {}", util::greeting("demo"), shout::shout("demo"));\n}\n',
@@ -604,6 +606,7 @@ FLAG_CASES = [
     ("test", ["--no-run"], {}),
     ("test", ["--doc"], {}),
     ("test", ["--doc", "--features", "loud", "-p", "util"], {}),
+    ("test", ["--doc", "--workspace", "--features", "app/loud"], {}),
     # Flags of how the results are shown are the harness's: ra-jit runs the doctests all the
     # same, and shows them as libtest does.
     ("test", ["--doc", "-q"], {}),
@@ -654,6 +657,8 @@ def flags(work):
     wait_warm(ours, ws)
     round_of("warm")
     rewrite(os.path.join(ws, "util/src/lib.rs"), 'format!("hello {name}")', 'format!("hello {name}!")')
+    # rustc's program of an example has the constant in it: the one of the warm round is stale.
+    rewrite(os.path.join(ws, "util/src/lib.rs"), '&["hello"]', '&["hello", "there"]')
     rewrite(os.path.join(ws, "app/src/main.rs"), ".len(), 7)", ".len(), 8)")
     rewrite(os.path.join(ws, "app/src/main.rs"), "    if name ==", EDITED_IN_CALL + "    if name ==")
     rewrite(os.path.join(ws, "app/src/main.rs"), "#[cfg(test)]", EDITED_IN + "#[cfg(test)]")
@@ -779,6 +784,37 @@ def daemon(work):
     said = re.search(r'^error\[E0308\]: .*\n +--> app/src/main\.rs:\d+:22\n', broken.stderr, re.M)
     ended = 'error: could not compile `app` (bin "app") due to 1 previous error' in broken.stderr
     check("an edit with an error fails the build with ra-jit's error, as rustc writes it, and no cargo", broken.returncode == 101 and not by_rustc(broken.stderr) and said and ended, f"exit {broken.returncode}, {broken.stderr.strip()[-300:]}")
+    open(main, "w").write(kept)
+    # So does one written while no daemon ran, which the worker finds as it loads.
+    here.cargo("stop")
+    open(main, "a").write("\nfn broken() -> u32 { \"text\" }\n")
+    _, broken = here.cargo("build")
+    said = re.search(r'^error\[E0308\]: .*\n +--> app/src/main\.rs:\d+:22\n', broken.stderr, re.M)
+    ended = 'error: could not compile `app` (bin "app") due to 1 previous error' in broken.stderr
+    check("an error written before the daemon loaded fails the build with ra-jit's error, and no cargo", broken.returncode == 101 and not by_rustc(broken.stderr) and said and ended, f"exit {broken.returncode}, {broken.stderr.strip()[-300:]}")
+    open(main, "w").write(kept)
+    _, mended = here.cargo("run")
+    check("the build after it is mended is the daemon's", mended.returncode == 0 and not by_rustc(mended.stderr) and "hello world" in mended.stdout, f"exit {mended.returncode}, {mended.stderr.strip()[-300:]}")
+    # A lint the source denies fails the build as rustc's would, unless the flags cap lints.
+    wait_warm(here, ws)
+    open(main, "a").write("\n#[deny(non_snake_case)]\npub fn Denied() {}\n")
+    _, denied = here.cargo("build")
+    said = re.search(r'^error: .*`Denied`.*\n +--> app/src/main\.rs:\d+:8\n', denied.stderr, re.M)
+    check("an edit with a lint its source denies fails the build with ra-jit's error, and no cargo", denied.returncode == 101 and not by_rustc(denied.stderr) and said, f"exit {denied.returncode}, {denied.stderr.strip()[-300:]}")
+    capped = {"RUSTFLAGS": "--cap-lints warn"}
+    here.cargo("build", env=capped)
+    wait_warm(here, ws)
+    open(main, "a").write("\n// edited\n")
+    _, allowed = here.cargo("run", env=capped)
+    check("with `--cap-lints` among the flags the build of that edit is the daemon's", allowed.returncode == 0 and how_built(allowed.stderr) == "daemon" and "hello world" in allowed.stdout, f"exit {allowed.returncode}, {how_built(allowed.stderr)}: {allowed.stderr.strip()[-300:]}")
+    open(main, "w").write(kept)
+    # `cargo ra-jit check` is what the daemon's build says, with no rustc.
+    _, checked = here.cargo("check")
+    check("`cargo ra-jit check` of a loaded build is the daemon's, and no rustc", checked.returncode == 0 and not by_rustc(checked.stderr) and "[ra-jit]" in checked.stderr, f"exit {checked.returncode}, {checked.stderr.strip()[-300:]}")
+    open(main, "a").write("\nfn broken() -> u32 { \"text\" }\n")
+    _, failed = here.cargo("check")
+    said = re.search(r'^error\[E0308\]: .*\n +--> app/src/main\.rs:\d+:22\n', failed.stderr, re.M)
+    check("`cargo ra-jit check` of an edit with an error fails with ra-jit's error, and no rustc", failed.returncode == 101 and not by_rustc(failed.stderr) and said, f"exit {failed.returncode}, {failed.stderr.strip()[-300:]}")
     open(main, "w").write(kept)
     here.cargo("stop")
     manners(work, ws, env, here, check, edit)

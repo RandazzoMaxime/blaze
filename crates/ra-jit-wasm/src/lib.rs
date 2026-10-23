@@ -399,6 +399,7 @@ impl Compiler {
                 start: None,
                 whole: false,
                 kept: &[],
+                offered: &[],
             };
             let unit = hir::attach_db(db, || {
                 CodegenUnit::compile(db, resolver, roots, &Default::default(), known)

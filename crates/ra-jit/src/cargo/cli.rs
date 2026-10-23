@@ -102,6 +102,8 @@ pub(crate) enum Subcommand {
     Build,
     Run,
     Test,
+    /// What a build of the same flags says of the source, and no program run.
+    Check,
 }
 
 impl Subcommand {
@@ -110,6 +112,7 @@ impl Subcommand {
             "build" | "b" => Some(Subcommand::Build),
             "run" | "r" => Some(Subcommand::Run),
             "test" | "t" => Some(Subcommand::Test),
+            "check" | "c" => Some(Subcommand::Check),
             _ => None,
         }
     }
@@ -119,6 +122,7 @@ impl Subcommand {
             Subcommand::Build => "build",
             Subcommand::Run => "run",
             Subcommand::Test => "test",
+            Subcommand::Check => "check",
         }
     }
 }
@@ -214,7 +218,8 @@ pub(crate) fn of_cargo(args: &[String]) -> Option<Invocation> {
     let subcommand = loop {
         let word = words.next()?;
         if !word.starts_with('-') {
-            break Subcommand::named(word)?;
+            // rustc links nothing for `cargo check` that the daemon would load.
+            break Subcommand::named(word).filter(|it| *it != Subcommand::Check)?;
         }
         if word == "-C" {
             return None;
@@ -335,6 +340,7 @@ impl Invocation {
             target: self.target(),
             dev_deps: self.subcommand == Subcommand::Test || self.flags.dev_targets,
             config: self.flags.config.clone(),
+            asked_in: None,
         }
     }
 
@@ -490,5 +496,12 @@ mod tests {
         assert_ne!(build("test", "--bin a").key(cwd), build("build", "--bin a").key(cwd));
         assert_ne!(build("build", "").key(cwd), build("build", "").key(Path::new("/other")));
         assert_ne!(build("build", "--features a").key(cwd), build("build", "").key(cwd));
+    }
+
+    #[test]
+    fn check_asks_of_the_build_of_its_flags_and_plain_cargo_check_is_cargos() {
+        let cwd = Path::new("/ws");
+        assert_eq!(build("check", "--bin a").key(cwd), build("build", "--bin a").key(cwd));
+        assert_eq!(of_cargo(&["check".to_owned()]), None);
     }
 }

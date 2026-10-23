@@ -47,6 +47,23 @@ pub(crate) struct Outlines {
     types: FxHashMap<FileId, FxHashMap<String, u64>>,
     /// What [`copied`] found in each file before its first edit: as rustc compiled it.
     copied: FxHashMap<FileId, Copied>,
+    /// The files of the edit about to be applied that it adds functions to, as
+    /// [`Outlines::adding`] found them.
+    adding: FxHashMap<FileId, Adding>,
+}
+
+/// An edit about to be applied that adds functions to a file, or takes them away, and changes
+/// nothing else of it but bodies that nothing else sees into.
+struct Adding {
+    /// Where the new functions are in the new text, or those taken away in the text before.
+    functions: FxHashSet<TextRange>,
+    /// Of an edit that takes them away: the [`outline`] of the file before it without them,
+    /// which the file is to have after it.
+    away: Option<u64>,
+    /// The crates the file is a module of.
+    crates: Vec<ide_db::base_db::Crate>,
+    /// The files of those crates.
+    files: Vec<FileId>,
 }
 
 /// What an edit just applied changed of a file.
@@ -61,6 +78,13 @@ pub(crate) struct Changed {
     /// The names of the generic functions of the file's modules that are not as rustc
     /// compiled them, or not where: a patch replaces their copies when it knows each of them.
     pub(crate) generics: Vec<String>,
+    /// The names of the `#[inline]` functions that are not generic and are not as rustc
+    /// compiled them, or not where: a patch is right when the executable has no copy of them.
+    pub(crate) inline: Vec<String>,
+    /// When the edit added functions or took them away, changed nothing else but bodies that
+    /// nothing else sees into, and is one [`Outlines::adding`] took: the crates the file is a
+    /// module of, and their files, whose code is all that can see the functions.
+    pub(crate) added: Option<(Vec<ide_db::base_db::Crate>, Vec<FileId>)>,
 }
 
 impl Outlines {
@@ -73,6 +97,29 @@ impl Outlines {
         let new: Vec<_> = files.iter().copied().filter(|it| !self.files.contains_key(it)).collect();
         let outlines = outlines(db, listed, &new);
         self.files.extend(new.into_iter().zip(outlines));
+    }
+
+    /// The files of the crates of each file the edit about to give them `texts` adds functions
+    /// to, when it changes nothing else of it but bodies that nothing else sees into, no other
+    /// crate depends on those, and no file of them names any of the new functions yet. Only
+    /// their code sees the new functions, and only what names one can mean another thing now:
+    /// what rustc compiled of every file of them is to be taken in before the edit. So too of
+    /// an edit that takes such functions away, which no file of them names after it.
+    pub(crate) fn adding(
+        &mut self,
+        db: &RootDatabase,
+        listed: &Listed,
+        texts: &[(FileId, String)],
+    ) -> Vec<FileId> {
+        self.adding.clear();
+        let mut homed = Vec::new();
+        for (file, text) in texts {
+            if let Some(adding) = adding(db, listed, *file, text) {
+                homed.extend(&adding.files);
+                self.adding.insert(*file, adding);
+            }
+        }
+        homed
     }
 
     /// The types that the files of the edit just applied defined and now define otherwise,
@@ -118,23 +165,45 @@ impl Outlines {
             .map(|(file, now)| {
                 let was = self.files.insert(file, now);
                 let bodies_only = !off && now.is_some() && was == Some(now);
-                let (copied, generics) = match self.copied.get(&file) {
+                let added = self.adding.remove(&file).filter(|adding| {
+                    !off && !bodies_only
+                        && match adding.away {
+                            Some(away) => now == Some(away),
+                            None => {
+                                was.flatten().is_some()
+                                    && outline_without(db, listed, file, &adding.functions)
+                                        == was.flatten()
+                            }
+                        }
+                });
+                let (copied, generics, inline) = match self.copied.get(&file) {
                     Some(was) => {
                         let now = copied(db, file);
-                        let names = was.generics.keys().chain(now.generics.keys());
-                        let mut changed: Vec<String> = names
-                            .filter(|it| was.generics.get(*it) != now.generics.get(*it))
-                            .cloned()
-                            .collect();
-                        changed.sort_unstable();
-                        changed.dedup();
-                        (was.others != now.others, changed)
+                        let changed = |was: &FxHashMap<String, u64>, now: &FxHashMap<_, _>| {
+                            let mut changed: Vec<String> = (was.keys().chain(now.keys()))
+                                .filter(|it| was.get(*it) != now.get(*it))
+                                .cloned()
+                                .collect();
+                            changed.sort_unstable();
+                            changed.dedup();
+                            changed
+                        };
+                        let generics = changed(&was.generics, &now.generics);
+                        (was.others != now.others, generics, changed(&was.inline, &now.inline))
                     }
-                    None => (true, Vec::new()),
+                    None => (true, Vec::new(), Vec::new()),
                 };
-                Changed { file, bodies_only, copied, generics }
+                Changed {
+                    file,
+                    bodies_only,
+                    copied,
+                    generics,
+                    inline,
+                    added: added.map(|it| (it.crates, it.files)),
+                }
             })
             .collect();
+        self.adding.clear();
         // An edit to more than bodies can change which functions there are, in any file, and
         // what is kept here was found by asking the ones listed before it.
         if files.iter().any(|it| !it.bodies_only) {
@@ -151,8 +220,11 @@ struct Copied {
     /// Generic functions of the file's modules, not `#[inline]`, by name: rustc's symbols
     /// name each copy by the types it is of.
     generics: FxHashMap<String, u64>,
+    /// `#[inline]` functions that are not generic, of the file's modules and their `impl`s,
+    /// by name: rustc copies one into each crate that calls it.
+    inline: FxHashMap<String, u64>,
     /// The rest: generic ones through their `impl` or trait, the default bodies of trait
-    /// methods, those declared in bodies, and `#[inline]` ones.
+    /// methods, those declared in bodies, and generic or `#[inline(always)]` `#[inline]` ones.
     others: u64,
 }
 
@@ -183,25 +255,53 @@ fn copied_in(tree: &SyntaxNode) -> Copied {
         });
         generic(func.generic_param_list()) || impl_trait_parameter || inline || around
     };
+    let inline = |func: &ast::Fn| {
+        func.attrs().any(|attr| attr.syntax().text().to_string().contains("inline"))
+    };
     let of_modules = |func: &ast::Fn| {
-        let inline = func.attrs().any(|attr| attr.syntax().text().to_string().contains("inline"));
         let in_modules = func.syntax().ancestors().skip(1).all(|it| {
             matches!(
                 it.kind(),
                 SyntaxKind::SOURCE_FILE | SyntaxKind::MODULE | SyntaxKind::ITEM_LIST
             )
         });
-        in_modules && !inline
+        in_modules && !inline(func)
+    };
+    // Not generic, and not `#[inline(always)]`, which LLVM puts into each caller at every
+    // level.
+    let inline_alone = |func: &ast::Fn| {
+        let generic = generic(func.generic_param_list())
+            || func.syntax().ancestors().skip(1).any(|it| {
+                ast::Trait::cast(it.clone()).is_some()
+                    || ast::Impl::cast(it).is_some_and(|it| generic(it.generic_param_list()))
+            })
+            || func.param_list().is_some_and(|it| {
+                it.syntax().descendants().any(|it| it.kind() == SyntaxKind::IMPL_TRAIT_TYPE)
+            });
+        let always = func.attrs().any(|attr| attr.syntax().text().to_string().contains("always"));
+        let of_items = func.syntax().ancestors().skip(1).all(|it| {
+            matches!(
+                it.kind(),
+                SyntaxKind::SOURCE_FILE
+                    | SyntaxKind::MODULE
+                    | SyntaxKind::ITEM_LIST
+                    | SyntaxKind::IMPL
+                    | SyntaxKind::ASSOC_ITEM_LIST
+            )
+        });
+        inline(func) && !generic && !always && of_items
     };
     let text = tree.text().to_string();
     let line_starts: Vec<usize> =
         std::iter::once(0).chain(text.match_indices('\n').map(|(at, _)| at + 1)).collect();
     let mut generics: FxHashMap<String, FxHasher> = FxHashMap::default();
+    let mut inlined: FxHashMap<String, FxHasher> = FxHashMap::default();
     let mut others = FxHasher::default();
     for func in tree.descendants().filter_map(ast::Fn::cast).filter(is_copied) {
         let name = func.name().map(|it| it.text().to_string());
         let hasher = match name {
             Some(name) if of_modules(&func) => generics.entry(name).or_default(),
+            Some(name) if inline_alone(&func) => inlined.entry(name).or_default(),
             _ => &mut others,
         };
         let start = usize::from(func.syntax().text_range().start());
@@ -210,7 +310,8 @@ fn copied_in(tree: &SyntaxNode) -> Copied {
         func.syntax().text().to_string().hash(hasher);
     }
     let generics = generics.into_iter().map(|(name, it)| (name, it.finish())).collect();
-    Copied { generics, others: others.finish() }
+    let inline = inlined.into_iter().map(|(name, it)| (name, it.finish())).collect();
+    Copied { generics, inline, others: others.finish() }
 }
 
 /// The [`outline`] of each file. A wide edit is of thousands of files: their bodies are
@@ -360,9 +461,160 @@ fn outline(db: &RootDatabase, file: FileId, functions: &[FunctionId]) -> Option<
     let edition =
         relevant_crates(db, file).first().map_or(Edition::CURRENT, |it| it.data(db).edition);
     let tree = EditionedFileId::new(db, file, edition).parse(db).syntax_node();
-    let (hash, found) = hash_outside_bodies(&tree, &seen.declaring);
+    let (hash, found) = hash_outside_bodies(&tree, &seen.declaring, &FxHashSet::default());
     // Each of them has to be one of the bodies that were kept in.
     (found == seen.declaring.len()).then_some(hash)
+}
+
+/// The [`outline`] of the file as if the functions at `added` were not written in it, when
+/// none of them declares items.
+fn outline_without(
+    db: &RootDatabase,
+    listed: &Listed,
+    file: FileId,
+    added: &FxHashSet<TextRange>,
+) -> Option<u64> {
+    let functions = listed.in_files(db, &[file]).pop().flatten()?;
+    let seen = hir::attach_db(db, || Written::of(db, &functions))?;
+    if seen.declaring.iter().any(|it| added.contains(it)) {
+        return None;
+    }
+    let edition =
+        relevant_crates(db, file).first().map_or(Edition::CURRENT, |it| it.data(db).edition);
+    let tree = EditionedFileId::new(db, file, edition).parse(db).syntax_node();
+    let (hash, found) = hash_outside_bodies(&tree, &seen.declaring, added);
+    (found == seen.declaring.len()).then_some(hash)
+}
+
+/// What [`Outlines::adding`] finds of an edit that gives `file` the text `text`.
+fn adding(db: &RootDatabase, listed: &Listed, file: FileId, text: &str) -> Option<Adding> {
+    let edition = relevant_crates(db, file).first()?.data(db).edition;
+    let was = EditionedFileId::new(db, file, edition).parse(db).syntax_node();
+    let now = ast::SourceFile::parse(text, edition).tree().syntax().clone();
+    // Functions taken away are those the text before has that the edit added to it, and what
+    // names them is looked for in the file as the edit leaves it.
+    let (added, away) = match added_functions(&was, &now) {
+        Some(added) => (added, false),
+        None => (added_functions(&now, &was)?, true),
+    };
+    let crates = listed.crates_of(db, file);
+    if crates.is_empty() || crates.iter().any(|it| it.transitive_rev_deps(db).len() != 1) {
+        return None;
+    }
+    let names: FxHashSet<String> =
+        added.iter().filter_map(|it| it.name()).map(|it| it.text().to_string()).collect();
+    let mut files: Vec<(FileId, Edition)> = hir::attach_db(db, || {
+        let modules = crates.iter().flat_map(|&krate| {
+            let edition = krate.data(db).edition;
+            hir::Crate::from(krate).modules(db).into_iter().map(move |it| (it, edition))
+        });
+        modules
+            .map(|(module, edition)| {
+                (module.definition_source_file_id(db).original_file(db).file_id(db), edition)
+            })
+            .collect()
+    });
+    files.sort_unstable();
+    files.dedup();
+    for &(other, edition) in &files {
+        let tree = match other == file && away {
+            true => now.clone(),
+            false => EditionedFileId::new(db, other, edition).parse(db).syntax_node(),
+        };
+        // A file another one includes is written as part of it, and the names of macros are
+        // matched by name.
+        let includes = tree
+            .descendants()
+            .filter_map(ast::MacroCall::cast)
+            .any(|it| it.path().is_some_and(|path| path.syntax().text() == "include"));
+        let names_one = tree.descendants_with_tokens().filter_map(|it| it.into_token()).any(|it| {
+            it.kind() == SyntaxKind::IDENT && names.contains(it.text().trim_start_matches("r#"))
+        });
+        if includes || names_one {
+            return None;
+        }
+    }
+    let functions = added.iter().map(|it| it.syntax().text_range()).collect();
+    let away = match away {
+        true => Some(outline_without(db, listed, file, &functions)?),
+        false => None,
+    };
+    Some(Adding { functions, away, crates, files: files.into_iter().map(|it| it.0).collect() })
+}
+
+/// The functions written in `now` that `was` has none of, when nothing else changed but bodies
+/// that nothing else sees into: functions of the file's modules, each of a name no function of
+/// its module had, that rustc compiles once under a symbol of their own.
+fn added_functions(was: &SyntaxNode, now: &SyntaxNode) -> Option<Vec<ast::Fn>> {
+    let (was_written, now_written) = (functions_of_modules(was)?, functions_of_modules(now)?);
+    if was_written.keys().any(|it| !now_written.contains_key(it)) {
+        return None;
+    }
+    let added: Vec<ast::Fn> = (now_written.into_iter())
+        .filter(|(key, _)| !was_written.contains_key(key))
+        .map(|it| it.1)
+        .collect();
+    if added.is_empty() || !added.iter().all(added_alone) {
+        return None;
+    }
+    let skipped: FxHashSet<TextRange> = added.iter().map(|it| it.syntax().text_range()).collect();
+    let none = FxHashSet::default();
+    let same =
+        hash_outside_bodies(was, &none, &none).0 == hash_outside_bodies(now, &none, &skipped).0;
+    same.then_some(added)
+}
+
+/// The functions of a file's modules by the names of the modules and their own, or `None` when
+/// two have one name: a `#[cfg]` tells which is compiled.
+fn functions_of_modules(tree: &SyntaxNode) -> Option<FxHashMap<(Vec<String>, String), ast::Fn>> {
+    let mut found = FxHashMap::default();
+    for func in tree.descendants().filter_map(ast::Fn::cast) {
+        let Some(name) = func.name() else { continue };
+        let mut modules = Vec::new();
+        let of_modules = func.syntax().ancestors().skip(1).all(|it| match it.kind() {
+            SyntaxKind::SOURCE_FILE | SyntaxKind::ITEM_LIST => true,
+            SyntaxKind::MODULE => {
+                let name = ast::Module::cast(it).and_then(|it| it.name());
+                modules.push(name.map(|it| it.text().to_string()).unwrap_or_default());
+                true
+            }
+            _ => false,
+        });
+        if !of_modules {
+            continue;
+        }
+        modules.reverse();
+        if found.insert((modules, name.text().to_string()), func).is_some() {
+            return None;
+        }
+    }
+    Some(found)
+}
+
+/// Whether a function added to a file is compiled once, under its own symbol, and seen by
+/// nothing but what calls it: not generic, not `#[inline]`, and with a body that nothing else
+/// sees into and that declares no items.
+fn added_alone(func: &ast::Fn) -> bool {
+    let impl_trait_parameter = func.param_list().is_some_and(|it| {
+        it.syntax().descendants().any(|it| it.kind() == SyntaxKind::IMPL_TRAIT_TYPE)
+    });
+    let inline = func.attrs().any(|attr| {
+        let text = attr.syntax().text().to_string();
+        text.contains("inline") && !text.contains("never")
+    });
+    let Some(body) = func.body() else { return false };
+    let declares = body.syntax().descendants().skip(1).any(|it| {
+        ast::Item::can_cast(it.kind())
+            && !matches!(
+                it.kind(),
+                SyntaxKind::MACRO_CALL | SyntaxKind::USE | SyntaxKind::EXTERN_CRATE
+            )
+    });
+    func.generic_param_list().is_none()
+        && !impl_trait_parameter
+        && !inline
+        && !declares
+        && is_unseen_body(body.syntax())
 }
 
 /// What looking at the functions written in a file tells that how they are written does not.
@@ -451,16 +703,26 @@ fn skeleton_of(tree: &SyntaxNode) -> Option<u64> {
             return None;
         }
     }
-    Some(hash_outside_bodies(tree, &FxHashSet::default()).0)
+    Some(hash_outside_bodies(tree, &FxHashSet::default(), &FxHashSet::default()).0)
 }
 
-/// The hash, and how many of the `declaring` functions were come by.
-fn hash_outside_bodies(file: &SyntaxNode, declaring: &FxHashSet<TextRange>) -> (u64, usize) {
+/// The hash, and how many of the `declaring` functions were come by. The functions at
+/// `skipped` are left out whole.
+fn hash_outside_bodies(
+    file: &SyntaxNode,
+    declaring: &FxHashSet<TextRange>,
+    skipped: &FxHashSet<TextRange>,
+) -> (u64, usize) {
     let mut hasher = FxHasher::default();
     let mut found = 0;
     let mut walk = file.preorder_with_tokens();
     while let Some(event) = walk.next() {
         match event {
+            WalkEvent::Enter(syntax::NodeOrToken::Node(node))
+                if node.kind() == SyntaxKind::FN && skipped.contains(&node.text_range()) =>
+            {
+                walk.skip_subtree();
+            }
             WalkEvent::Enter(syntax::NodeOrToken::Node(node)) => {
                 node.kind().hash(&mut hasher);
                 if node.kind() == SyntaxKind::FN && declaring.contains(&node.text_range()) {
@@ -559,23 +821,41 @@ pub(crate) fn left_to_rustc(
 }
 
 impl Listed {
-    /// Whether the file is a module of a crate that is built, or of one that such a crate uses.
-    /// Any file may be one before a crate is listed.
-    pub(crate) fn sees(&self, db: &RootDatabase, file: FileId) -> bool {
+    /// The crates that are built and those they use, once any is built.
+    pub(crate) fn programs(
+        &self,
+        db: &RootDatabase,
+    ) -> Option<std::sync::Arc<FxHashSet<ide_db::base_db::Crate>>> {
         // Copied out: a query that is cancelled unwinds, and would poison the lock.
         let built = crate::lock(&self.built).clone();
-        // Before the first build there is no telling.
-        built.is_empty()
-            || relevant_crates(db, file).iter().any(|&krate| {
-                let read = built.iter().any(|&built| {
-                    let built = ide_db::base_db::Crate::from(built);
-                    built == krate || built.transitive_deps(db).contains(&krate)
-                });
-                read && hir_def::nameres::crate_def_map(db, krate)
+        let read: FxHashSet<_> = (built.iter())
+            .flat_map(|&it| ide_db::base_db::Crate::from(it).transitive_deps(db))
+            .collect();
+        (!read.is_empty()).then(|| std::sync::Arc::new(read))
+    }
+
+    /// The crates the file is a module of, of those that are built and those they use: no
+    /// other is part of a program. Before the first build, of all of them. The crates of a
+    /// file's source root are every target of its package, and an example of bevy is one of
+    /// hundreds.
+    pub(crate) fn crates_of(&self, db: &RootDatabase, file: FileId) -> Vec<ide_db::base_db::Crate> {
+        let programs = self.programs(db);
+        (relevant_crates(db, file).iter().copied())
+            .filter(|krate| programs.as_ref().is_none_or(|it| it.contains(krate)))
+            .filter(|&krate| {
+                hir_def::nameres::crate_def_map(db, krate)
                     .modules_for_file(db, file)
                     .next()
                     .is_some()
             })
+            .collect()
+    }
+
+    /// Whether the file is a module of a crate that is built, or of one that such a crate uses.
+    /// Any file may be one before a crate is listed.
+    pub(crate) fn sees(&self, db: &RootDatabase, file: FileId) -> bool {
+        // Before the first build there is no telling.
+        self.programs(db).is_none() || !self.crates_of(db, file).is_empty()
     }
 
     /// For each file the functions written in it that no body declares, as the file is now,
@@ -661,7 +941,7 @@ mod tests {
 
     fn hash(text: &str) -> u64 {
         let tree = SourceFile::parse(text, Edition::CURRENT).syntax_node();
-        hash_outside_bodies(&tree, &FxHashSet::default()).0
+        hash_outside_bodies(&tree, &FxHashSet::default(), &FxHashSet::default()).0
     }
 
     #[track_caller]
@@ -728,6 +1008,45 @@ mod tests {
             (copies("fn f<T>() {}\nfn g<T>() {}"), copies("fn f<T>() { }\nfn g<T>() {}"));
         assert_ne!(before.generics["f"], after.generics["f"]);
         assert_eq!(before.generics["g"], after.generics["g"]);
+    }
+
+    #[test]
+    fn inline_functions_alone_are_told_apart() {
+        let others = |before: &str, after: &str| copies(before).others != copies(after).others;
+        let inline = |before: &str, after: &str| copies(before).inline != copies(after).inline;
+        for (before, after) in [
+            ("#[inline] fn f() { 1; }", "#[inline] fn f() { 2; }"),
+            ("impl S { #[inline] fn f(&self) { 1; } }", "impl S { #[inline] fn f(&self) { 2; } }"),
+            (
+                "impl T for S { #[inline] fn f(&self) { 1; } }",
+                "impl T for S { #[inline] fn f(&self) { 2; } }",
+            ),
+            ("mod m { #[inline] pub fn f() { 1; } }", "mod m { #[inline] pub fn f() { 2; } }"),
+        ] {
+            assert!(inline(before, after) && !others(before, after), "{before:?}");
+        }
+        for (before, after) in [
+            ("#[inline(always)] fn f() { 1; }", "#[inline(always)] fn f() { 2; }"),
+            ("#[inline] fn f<T>() { 1; }", "#[inline] fn f<T>() { 2; }"),
+            ("#[inline] fn f(x: impl Fn()) { 1; }", "#[inline] fn f(x: impl Fn()) { 2; }"),
+            (
+                "impl<T> S<T> { #[inline] fn f() { 1; } }",
+                "impl<T> S<T> { #[inline] fn f() { 2; } }",
+            ),
+            (
+                "trait T { #[inline] fn f(&self) { 1; } }",
+                "trait T { #[inline] fn f(&self) { 2; } }",
+            ),
+            ("fn g() { #[inline] fn f() { 1; } }", "fn g() { #[inline] fn f() { 2; } }"),
+        ] {
+            assert!(others(before, after) && !inline(before, after), "{before:?}");
+        }
+        let (before, after) = (
+            copies("#[inline] fn f() {}\n#[inline] fn g() {}"),
+            copies("#[inline] fn f() { }\n#[inline] fn g() {}"),
+        );
+        assert_ne!(before.inline["f"], after.inline["f"]);
+        assert_eq!(before.inline["g"], after.inline["g"]);
     }
 
     #[test]
@@ -820,10 +1139,66 @@ mod tests {
         let hash = |text: &str| {
             let tree = SourceFile::parse(text, Edition::CURRENT).syntax_node();
             let declaring = tree.descendants().find(|it| it.kind() == SyntaxKind::FN).unwrap();
-            hash_outside_bodies(&tree, &FxHashSet::from_iter([declaring.text_range()]))
+            let declaring = FxHashSet::from_iter([declaring.text_range()]);
+            hash_outside_bodies(&tree, &declaring, &FxHashSet::default())
         };
         let (one, found) = hash(&text(1));
         assert_eq!(found, 1);
         assert_ne!(one, hash(&text(2)).0);
+    }
+
+    fn added(before: &str, after: &str) -> Option<Vec<String>> {
+        let parse = |text: &str| SourceFile::parse(text, Edition::CURRENT).syntax_node();
+        let added = added_functions(&parse(before), &parse(after))?;
+        Some(added.iter().map(|it| it.name().unwrap().text().to_string()).collect())
+    }
+
+    #[test]
+    fn functions_added_alone() {
+        let before = "fn f() { 1; }\nmod m {\n    fn g() {}\n}\n";
+        let after = "fn f() { h(); }\n\n#[inline(never)]\nfn h() -> u8 { 2 }\nmod m {\n    fn g() {}\n    fn f() {}\n}\n";
+        let mut names = added(before, after).unwrap();
+        names.sort();
+        assert_eq!(names, ["f", "h"]);
+    }
+
+    #[test]
+    fn more_than_functions_added() {
+        let before = "fn f() { 1; }\n";
+        for after in [
+            // Nothing added, or something else.
+            "fn f() { 2; }\n",
+            "fn f() { 1; }\nfn g() {}\nstruct S;\n",
+            // Taken away or renamed.
+            "fn g() { 1; }\n",
+            // Copied by rustc into what calls it.
+            "fn f() { 1; }\nfn g<T>() {}\n",
+            "fn f() { 1; }\nfn g(_: impl Copy) {}\n",
+            "fn f() { 1; }\n#[inline]\nfn g() {}\n",
+            // Seen into, or declaring an item.
+            "fn f() { 1; }\nconst fn g() {}\n",
+            "fn f() { 1; }\nasync fn g() {}\n",
+            "fn f() { 1; }\nfn g() -> impl Copy {}\n",
+            "fn f() { 1; }\nfn g() { fn h() {} }\n",
+            "fn f() { 1; }\n#[test]\nfn g() {}\n",
+            // A method, or one a macro is handed.
+            "fn f() { 1; }\nstruct S;\nimpl S { fn g() {} }\n",
+            "fn f() { 1; }\nm! { fn g() {} }\n",
+            // Two of one name, one of which a `#[cfg]` takes out.
+            "fn f() { 1; }\n#[cfg(unix)]\nfn g() {}\n#[cfg(not(unix))]\nfn g() {}\n",
+        ] {
+            assert_eq!(added(before, after), None, "{after}");
+        }
+    }
+
+    #[test]
+    fn functions_taken_away_alone() {
+        let before = "fn f() { h(); }\n\nfn h() -> u8 { 2 }\nmod m {\n    fn g() {}\n}\n";
+        let after = "fn f() { 1; }\nmod m {\n    fn g() {}\n}\n";
+        assert_eq!(added(before, after), None);
+        assert_eq!(added(after, before).unwrap(), ["h"]);
+        // Taken away with something else, or one rustc copies into what calls it.
+        assert_eq!(added("fn f() { 1; }\n", "fn f() { h(); }\n\nfn h() {}\nstruct S;\n"), None);
+        assert_eq!(added("fn f() { 1; }\n", "fn f() { h(); }\n\n#[inline]\nfn h() {}\n"), None);
     }
 }

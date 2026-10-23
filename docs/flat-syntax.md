@@ -34,6 +34,12 @@ first request. Each claim is **read** (measured, or read in a source), or **unve
 - What that does to the daemon: the time to ready, the first answer and resident memory do
   not move beyond the spread of two runs (ripgrep keeps 0.1 to 0.3 GB more that mimalloc has
   not yet returned, and answers 0.2 s sooner) (**read**).
+- Walking flat trees took a larger share than walking green ones only because building
+  trees went: it cost about the same samples. Reading the arrays directly in the compiler
+  path's hot walks (ast id maps, `body_syntax`, `syntax::ast`'s accessors) halves it, from
+  10.0% to 5.0% of ripgrep's cold-start CPU, 4.9% to 2.05% of nushell's and 1.85% to 0.89%
+  of helix's; ready time, the first answer and memory do not move (**read**,
+  [below](#walking-the-arrays-without-the-cursor)).
 
 ## What syntax holds (step 1, memory)
 
@@ -233,8 +239,8 @@ of a kind does (`harness/cpufold.py`, perf runs of `heap-profile` builds):
 
 All **read**; the nushell (a) run had other work beside it, so its sample count is not
 comparable. Building trees all but goes; walking takes a larger share than rowan's cursor
-did, which the benchmark above does not show (**unverified** why; the daemon walks many trees
-on 64 threads at once, and a step reads three or four arrays. Elements as one array of
+did, which the benchmark above does not show (why: [below](#walking-the-arrays-without-the-cursor);
+the two columns are builds at two commits, and building had been most of the rest. Elements as one array of
 16-byte structs, tried, were no faster on one thread and 12% larger, so they are not used). Together they fall from 19.4% to 14.7% of ripgrep's samples, from 9.2% to 6.3% of
 nushell's and from 3.6% to 2.5% of helix's.
 
@@ -274,8 +280,120 @@ asks a flat tree for a green one (`green()`, `replace_with`, the syntax editor) 
 tree of that part, made then and kept with the root, so editing behaves as on a green tree
 (the test compares `replace_with` and `clone_subtree` on every node).
 
+## Walking the arrays without the cursor
+
+2026-10-22, main at `a7622669fb` and the `flat-walk` branch on it, the same host, builds and
+runs as above (perf of `heap-profile` builds, then quiet rounds of release and `dist` builds).
+
+**Why walking took a larger share.** The same binary (main), with flat trees and with
+`RA_JIT_GREEN_TREES=1`, samples whose innermost frame of a kind walks a tree:
+
+| | ripgrep | nushell | helix |
+|---|---:|---:|---:|
+| walking green trees | 574 | 2,511 | 1,767 |
+| walking flat trees | 638 | 2,469 | 1,777 |
+| building green trees, of all samples | 9.5% | 4.5% | 2.0% |
+| building flat trees, of all samples | 1.8% | 0.9% | 0.35% |
+
+**Read.** Walking costs flat trees about what it cost green ones (+11%, −2%, +1%): the share
+rose because building trees, a large part of the rest, all but went, and the (a) and (c)
+columns above are two builds at two commits, so they overstate the difference. What flat
+trees did add is 13 to 17% of their walking, in two places. `body_syntax` hashed each body's
+whole anchor again: the kept trees were found by their root, and every body made a new copy
+of its anchor, so none was ever found. And finding an item from its pointer
+(`HasSource::source`, through `node_at_range`) cost 3 to 6 times what it did on green trees.
+Walking through the cursor was otherwise cheaper on flat trees (ast id maps 15 to 20% fewer
+samples).
+
+**What changed.** The compiler path's hot walks read the arrays and make a cursor only of
+what they keep:
+
+- rowan: a flat tree's elements by number (kind, parent, end, range, a token's text,
+  children, descendants); `hash_subtree`, which hashes a subtree in place as its copy would be
+  hashed; on the cursor `flat()` (the tree and the number), `flat_element`, `to_flat()` (a
+  green tree's twin), and `child_where`, `child_token`, `children_where` and `ancestor_where`,
+  which scan the arrays of a flat node; `SyntaxNodePtr::from_parts`. `node_at_range` stops
+  at the first ancestor larger than the range.
+- `AstIdMap::from_source` and `relative_to` walk the elements by number, a block left once
+  the walk is past its end, and make cursors only of the items they name.
+- `body_syntax` hashes an anchor in place, and a kept tree is also found by the anchor it was
+  made of (the file's tree, held weakly, and the anchor's number), so the bodies of an anchor
+  hash and copy it once on each thread; `with_source_map` compares kind and length before a
+  hash.
+- `syntax::ast`'s child, children and token accessors (attributes, items, every typed child)
+  scan the arrays; so do `lower_path`'s climb to an enclosing use-tree list and
+  `loaded_crates`' identifiers of a file (as text, no longer interned).
+
+One path: these callers have no cursor fallback. A green tree reaching them (what the syntax
+editor makes, or every tree under `RA_JIT_GREEN_TREES=1`) is made flat first, except in the
+accessors, whose green arm is the cursor, for trees the syntax editor makes.
+
+**Measured, the daemon** (`harness/cpufold.py`, as above):
+
+| | ripgrep, main | ripgrep, branch | nushell, main | nushell, branch | helix, main | helix, branch |
+|---|---:|---:|---:|---:|---:|---:|
+| samples | 6,358 | 6,183 | 50,590 | 51,587 | 96,058 | 96,914 |
+| walking trees | 10.0% | 5.0% | 4.9% | 2.05% | 1.85% | 0.89% |
+| ast id maps, on the stack | 1.54% | 0.57% | 0.99% | 0.39% | 0.34% | 0.13% |
+| body syntax, on the stack | 4.26% | 2.88% | 2.09% | 1.04% | 0.73% | 0.48% |
+
+All **read**. Walking now takes about half what it took green trees (309, 1,058 and 863
+samples against 574, 2,511 and 1,767). By caller, on nushell (samples with the function on
+the stack, main against the branch): `AstIdMap::from_source` 503 to 203, `relative_to` 431
+to 50, `body_syntax` 1,094 to 588, the item tree's lowering 212 to 139, its attributes 152 to
+90, `loaded_crates` 108 to 21, `lower_path` 447 to 331. What is left of walking is spread
+thin: hashing an anchor the first time a thread meets it (0.16%), pointer lookups (0.15%),
+the token converter of macro inputs (`syntax_bridge`, 0.2%, which hands its preorder to
+callbacks) and freeing the arrays (0.06%).
+
+Ready time, the first answer and resident memory (`harness/coldprof.py`, quiet rounds, main
+and the branch alternating which goes first), release builds:
+
+| project | ready | first request answered | largest process at its peak | worker after the first request | a few seconds later |
+|---|---:|---:|---:|---:|---:|
+| ripgrep, main | 6.11 / 6.26 s | 8.82 / 8.96 s | 2,441 / 2,404 MB | 2,197 / 2,151 MB | 2,208 / 2,155 MB |
+| ripgrep, branch | 6.09 / 6.25 s | 8.80 / 9.06 s | 2,490 / 2,470 MB | 2,213 / 2,183 MB | 2,226 / 2,192 MB |
+| nushell, main | 36.1 / 36.9 / 36.3 / 36.7 s | 52.5 / 53.7 / 53.2 / 53.6 s | 14,857 / 14,839 / 14,990 / 15,006 MB | 11,195 / 11,207 / 11,222 / 11,295 MB | 10,820 / 10,858 / 11,256 / 11,344 MB |
+| nushell, branch | 35.9 / 37.1 / 36.8 / 37.6 s | 52.9 / 54.3 / 53.9 / 54.8 s | 14,871 / 15,283 / 15,171 / 15,245 MB | 11,246 / 11,224 / 11,156 / 11,255 MB | 11,330 / 10,934 / 10,821 / 10,912 MB |
+| helix, main | 34.7 / 35.7 / 36.0 / 35.8 s | 108.9 / 111.0 / 109.9 / 109.4 s | 17,594 / 17,701 / 17,587 / 17,622 MB | 12,210 / 12,155 / 12,188 / 12,252 MB | 12,271 / 12,245 / 12,282 / 12,339 MB |
+| helix, branch | 35.5 / 36.1 / 35.4 / 36.4 s | 120.2 / 113.2 / 113.3 / 114.7 s | 17,520 / 17,662 / 17,816 / 17,523 MB | 12,177 / 12,210 / 12,268 / 12,202 MB | 12,261 / 12,279 / 12,338 / 12,254 MB |
+
+`dist` builds (the release profile with thin LTO, as shipped but without PGO):
+
+| project | ready | first request answered | largest process at its peak | worker after the first request | a few seconds later |
+|---|---:|---:|---:|---:|---:|
+| nushell, main | 37.4 / 36.3 s | 54.0 / 53.1 s | 15,052 / 15,140 MB | 11,267 / 11,139 MB | 10,986 / 11,166 MB |
+| nushell, branch | 36.8 / 36.7 s | 53.6 / 53.4 s | 14,887 / 15,185 MB | 11,310 / 11,115 MB | 10,923 / 10,751 MB |
+| helix, main | 36.2 / 36.7 s | 106.5 / 108.2 s | 17,697 / 17,664 MB | 12,224 / 12,188 MB | 12,313 / 12,269 MB |
+| helix, branch | 36.0 / 36.1 s | 106.3 / 107.5 s | 17,842 / 17,896 MB | 12,142 / 11,994 MB | 12,220 / 12,103 MB |
+
+All **read**. Ready time and memory do not move. With release builds the branch answered
+later in every pair: 0.7 s on nushell (1.3%) and 5.6 s on helix (5%), almost all of it in the
+code generator's whole-program rounds (helix's round that is started over took 29.2 to
+30.1 s on main and 30.9 to 38.5 s on the branch), which walk no syntax. Its perf profiles
+differ there only in what was inlined where: functions present in one build and not the
+other add up to thousands of samples each way in `hir-ty` and `hir-ty-codegen`, which the
+branch hardly touches, while the work under them (the closure lookups that are a quarter of
+helix's samples) is the same. With thin LTO, which redoes the inlining across crates, the
+difference is gone (helix 106.9 s against 107.4 s on average, nushell 53.5 s against
+53.6 s, the started-over round 27.9 s in both). So it was the release build's layout, not the
+change (**read**, the cause by elimination). The CPU saved is a few percent of the cold
+start spread over 64 threads, and as with (c) it does not shorten the path to the first
+answer.
+
+**Gate.** Unit tests, rust-analyzer's tests of `parser`, `syntax`, `mbe`, `syntax-bridge`,
+`hir-expand`, `hir-def`, `span` and `rowan` (the new test compares the array walks with the
+cursor's on green and flat trees, and `hash_subtree` in place with the copy's hash), hir-ide
+(its 18 known failures), the corpus under Cranelift and LLVM (MATCH, 0 of 910 layouts
+differ), the corpus with `RA_CHECK_RELATIVE_BODIES=1 RA_JIT_CHECK_PLACES=1`, mixfutures under
+both, growth, movedlines (6 of 6), norustc (no count above its baseline, and none above
+main's), borrowck_ui (Polonius 1,405 and NLL 1,401, as main), the pinned ui tests (15 of 15)
+and the ui run-pass tests, whose differences from `ui-known.txt` are the same on main on this
+host (**read**).
+
 ## Not checked
 
-- bun: not run.
+- bun: not run. Its workspace builds only after bun's own build has made its C and C++
+  (`harness/bunprep.py` under `nix develop .#bench-bun`), which the host did not have.
 - Files being edited keep a flat tree too: the daemon has no editor's buffers, so nothing
   in ra-jit tells an edited file from another. `RA_JIT_GREEN_TREES=1` makes every tree green.

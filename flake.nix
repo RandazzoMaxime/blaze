@@ -63,6 +63,15 @@
           # -O0 of a debug build, which fails configure probes (jemalloc's, in fd).
           hardeningDisable = [ "all" ];
         };
+        # LLVM 20 for `--features llvm`, in one prefix for LLVM_SYS_201_PREFIX: the headers,
+        # `llvm-config`, the library a build links to by its path in the store, and the tools.
+        # It is the one LLVM ra-jit supports building against on macOS: flake.lock pins it, so
+        # it can't go away as Homebrew's llvm@20 did. On Linux its library wants nix's C
+        # library, so a build against it belongs in a nix shell (`.#bench` has the same LLVM).
+        llvm = pkgs.symlinkJoin {
+          name = "ra-jit-llvm-${pkgs.llvmPackages_20.llvm.version}";
+          paths = [ pkgs.llvmPackages_20.llvm.dev pkgs.llvmPackages_20.llvm.lib pkgs.llvmPackages_20.llvm ];
+        };
         rustPlatform = pkgs.makeRustPlatform {
           cargo = rust;
           rustc = rust;
@@ -180,7 +189,7 @@
           # `nix profile install github:indexable-inc/ra-jit#ra-jit`: ra-jit, cargo-ra-jit and
           # ra-jit-rustc, so `ra-jit enable` and `cargo ra-jit` both work.
           ra-jit = daemon;
-          inherit dist daemon run life daemon-units life-bin;
+          inherit dist daemon run life daemon-units life-bin llvm;
         };
         apps.default = {
           type = "app";
@@ -192,6 +201,7 @@
         };
         devShells.default = pkgs.mkShell {
           packages = [ rust pkgs.python3 ];
+          LLVM_SYS_201_PREFIX = "${llvm}";
         };
         devShells.bench = pkgs.mkShell bench;
         # What harness/bench.py and runbench.py measure bun in (bunprep.py, docs/research/bun.md):

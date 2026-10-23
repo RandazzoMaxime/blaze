@@ -39,8 +39,8 @@ use syntax::{
 use tt::TextSize;
 
 use crate::{
-    AdtId, AstIdLoc, AttrDefId, FieldId, FunctionId, GenericDefId, HasModule, LifetimeParamId,
-    LocalFieldId, MacroId, ModuleId, TraitId, TypeOrConstParamId, VariantId,
+    AdtId, AstIdLoc, AttrDefId, ExternBlockId, FieldId, FunctionId, GenericDefId, HasModule,
+    LifetimeParamId, LocalFieldId, MacroId, ModuleId, TraitId, TypeOrConstParamId, VariantId,
     hir::generics::{GenericParams, LocalLifetimeParamId, LocalTypeOrConstParamId},
     nameres::ModuleOrigin,
     resolver::{HasResolver, Resolver},
@@ -250,6 +250,9 @@ fn match_attr_flags(attr_flags: &mut AttrFlags, attr: ast::Meta) -> ControlFlow<
                     "macro_export" => attr_flags.insert(AttrFlags::IS_MACRO_EXPORT),
                     "must_use" => attr_flags.insert(AttrFlags::IS_MUST_USE),
                     "no_mangle" => attr_flags.insert(AttrFlags::NO_MANGLE),
+                    "rustc_std_internal_symbol" | "panic_handler" => {
+                        attr_flags.insert(AttrFlags::LINKED_BY_NAME)
+                    }
                     "used" => attr_flags.insert(AttrFlags::USED),
                     "track_caller" => attr_flags.insert(AttrFlags::TRACK_CALLER),
                     "inline" => attr_flags.insert(AttrFlags::IS_INLINE),
@@ -391,6 +394,9 @@ bitflags::bitflags! {
         const INLINE_NEVER = 1 << 61;
         /// `#[inline(always)]`: built into its callers where they are optimized.
         const INLINE_ALWAYS = 1 << 62;
+        /// `#[rustc_std_internal_symbol]` or `#[panic_handler]`: a function a declaration of
+        /// another crate links to by its name.
+        const LINKED_BY_NAME = 1 << 63;
     }
 }
 
@@ -643,6 +649,102 @@ fn extract_doc_aliases(result: &mut Vec<Symbol>, attr: ast::Meta) -> ControlFlow
     ControlFlow::Continue(())
 }
 
+/// A native library a crate is linked against, from a `#[link(...)]`.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct NativeLib {
+    pub name: Symbol,
+    pub kind: NativeLibKind,
+    /// `+verbatim`: the name is the file's, with no `lib` or extension added.
+    pub verbatim: bool,
+    /// `+whole-archive`: every object of a static library is linked, reached or not.
+    pub whole_archive: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum NativeLibKind {
+    /// No `kind`: the linker takes whichever it finds, as `dylib` does.
+    Unspecified,
+    Dylib,
+    Static,
+    Framework,
+    RawDylib,
+}
+
+/// The library of a `link(...)`, and the `cfg(...)` it is linked under. `None` for one with no
+/// name (`wasm_import_module` alone).
+fn parse_link_tt(tt: &ast::TokenTree) -> Option<(NativeLib, Option<CfgExpr>)> {
+    let mut lib = NativeLib {
+        name: Symbol::empty(),
+        kind: NativeLibKind::Unspecified,
+        verbatim: false,
+        whole_archive: false,
+    };
+    let mut cfg = None;
+    let mut named = false;
+    let mut children = TokenTreeChildren::new(tt).peekable();
+    while let Some(child) = children.next() {
+        let NodeOrToken::Token(key) = child else { continue };
+        if key.kind() != SyntaxKind::IDENT {
+            continue;
+        }
+        match children.peek() {
+            Some(NodeOrToken::Node(group)) if key.text() == "cfg" => {
+                cfg = link_cfg(group);
+                children.next();
+            }
+            Some(NodeOrToken::Token(eq)) if eq.kind() == T![=] => {
+                children.next();
+                let Some(NodeOrToken::Token(value)) = children.next() else { continue };
+                let Some(value) =
+                    ast::String::cast(value).and_then(|it| Some(it.value().ok()?.into_owned()))
+                else {
+                    continue;
+                };
+                match key.text() {
+                    "name" => {
+                        lib.name = Symbol::intern(&value);
+                        named = true;
+                    }
+                    "kind" => {
+                        lib.kind = match &*value {
+                            "static" => NativeLibKind::Static,
+                            "dylib" => NativeLibKind::Dylib,
+                            "framework" => NativeLibKind::Framework,
+                            "raw-dylib" => NativeLibKind::RawDylib,
+                            _ => NativeLibKind::Unspecified,
+                        }
+                    }
+                    "modifiers" => {
+                        for modifier in value.split(',') {
+                            let (on, name) = modifier.split_at(modifier.len().min(1));
+                            match name {
+                                "verbatim" => lib.verbatim = on == "+",
+                                "whole-archive" => lib.whole_archive = on == "+",
+                                _ => (),
+                            }
+                        }
+                    }
+                    _ => (),
+                }
+            }
+            _ => (),
+        }
+    }
+    named.then_some((lib, cfg))
+}
+
+/// The `cfg(...)` of a `link(...)`, the group after `cfg`: read as the predicate of a
+/// `#[cfg]` with that group.
+fn link_cfg(group: &ast::TokenTree) -> Option<CfgExpr> {
+    let text = format!("#[cfg{}] fn f() {{}}", group.syntax().text());
+    let file = SourceFile::parse(&text, span::Edition::CURRENT).tree();
+    let attr = file.syntax().descendants().find_map(ast::Attr::cast)?;
+    match attr.meta()? {
+        ast::Meta::CfgMeta(it) => Some(CfgExpr::parse_from_ast(it.cfg_predicate()?)),
+        _ => None,
+    }
+}
+
 fn extract_cfgs(result: &mut Vec<CfgExpr>, attr: ast::Meta) -> ControlFlow<Infallible> {
     if let ast::Meta::CfgMeta(attr) = attr
         && let Some(cfg_predicate) = attr.cfg_predicate()
@@ -798,16 +900,51 @@ impl AttrFlags {
         symbol_attr(db, owner, "link_name")
     }
 
+    /// The native libraries the `#[link(...)]`s of an `extern` block link its crate against,
+    /// those whose `cfg(...)` the crate does not have left out, in the order written.
+    #[salsa::tracked(returns(ref))]
+    pub fn native_libs(db: &dyn SourceDatabase, owner: ExternBlockId) -> Box<[NativeLib]> {
+        let krate = owner.lookup(db).container.krate(db);
+        let mut libs = Vec::new();
+        collect_attrs::<Infallible>(db, AttrDefId::ExternBlockId(owner), |attr| {
+            if let ast::Meta::TokenTreeMeta(attr) = &attr
+                && attr.path().is1("link")
+                && let Some(tt) = attr.token_tree()
+                && let Some((lib, cfg)) = parse_link_tt(&tt)
+                && cfg.is_none_or(|it| krate.cfg_options(db).check(&it) != Some(false))
+            {
+                libs.push(lib);
+            }
+            ControlFlow::Continue(())
+        });
+        libs.into_boxed_slice()
+    }
+
     /// The section `#[link_section]` puts an item in.
     #[salsa::tracked(returns(clone))]
     pub fn link_section(db: &dyn SourceDatabase, owner: AttrDefId) -> Option<Symbol> {
         symbol_attr(db, owner, "link_section")
     }
 
+    /// The linkage `#[linkage]` asks of an item, as `extern_weak`.
+    #[salsa::tracked(returns(clone))]
+    pub fn linkage(db: &dyn SourceDatabase, owner: AttrDefId) -> Option<Symbol> {
+        symbol_attr(db, owner, "linkage")
+    }
+
     /// The symbol `#[export_name]` gives an item.
     #[salsa::tracked(returns(clone))]
     pub fn export_name(db: &dyn SourceDatabase, owner: AttrDefId) -> Option<Symbol> {
         symbol_attr(db, owner, "export_name")
+    }
+
+    /// Whether `owner` has the attribute `#[name]`, once its `cfg_attr`s are expanded.
+    pub fn has_word(db: &dyn SourceDatabase, owner: AttrDefId, name: &str) -> bool {
+        let found = collect_attrs(db, owner, |attr| match attr {
+            ast::Meta::PathMeta(attr) if attr.path().is1(name) => ControlFlow::Break(()),
+            _ => ControlFlow::Continue(()),
+        });
+        found.is_some()
     }
 
     #[inline]

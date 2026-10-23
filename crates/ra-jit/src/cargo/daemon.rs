@@ -119,6 +119,12 @@ const LAST_LINES: usize = 12;
 /// daemon that started it is gone.
 pub(crate) const ENDS_WITH_INPUT: &str = "RA_JIT_ENDS_WITH_INPUT";
 
+/// Where a worker that listens at `socket` leaves the errors it found in the source as it
+/// loaded the workspace, as rustc writes them, before it ends.
+pub(crate) fn errors_beside(socket: &Path) -> PathBuf {
+    socket.with_file_name("errors")
+}
+
 /// A request with the version of the client that sends it.
 #[derive(Serialize, Deserialize)]
 pub(crate) struct Envelope {
@@ -345,6 +351,9 @@ enum Warmth {
     Ready,
     /// Why the worker has no part in the checkout as cargo last built it.
     Failed(String, SystemTime),
+    /// The errors in the source the worker found loading it or building it first, as rustc
+    /// writes them: each program's build fails with them until a source is written.
+    Broken(String, SystemTime),
 }
 
 impl Warmth {
@@ -353,6 +362,7 @@ impl Warmth {
             Warmth::Loading(since) => format!("loading for {:.0?}", since.elapsed()),
             Warmth::Ready => "ready".to_owned(),
             Warmth::Failed(why, _) => format!("failed: {why}"),
+            Warmth::Broken(..) => "the source has an error".to_owned(),
         }
     }
 }
@@ -407,6 +417,7 @@ impl Worker {
         // The worker of a daemon that was killed may still be there, on its way out: it
         // is not the one to connect to.
         let _ = std::fs::remove_file(&socket);
+        let _ = std::fs::remove_file(errors_beside(&socket));
         let config = &checkout.config;
         let mut args = config.args(&checkout.root, &first.crates);
         let named: [(&str, &Path); 5] = [
@@ -537,8 +548,12 @@ impl Worker {
     /// Waits for the process to listen, then has it build every program of `checkout` once.
     fn warm(&self, checkout: &Checkout) {
         let warmth = match self.warmed(checkout) {
-            Ok(()) => Warmth::Ready,
-            Err(why) => Warmth::Failed(format!("{why:#}"), SystemTime::now()),
+            Ok(None) => Warmth::Ready,
+            Ok(Some(said)) => Warmth::Broken(said, SystemTime::now()),
+            Err(why) => match std::fs::read_to_string(errors_beside(&self.socket)) {
+                Ok(said) if self.ended().is_some() => Warmth::Broken(said, SystemTime::now()),
+                _ => Warmth::Failed(format!("{why:#}"), SystemTime::now()),
+            },
         };
         eprintln!("{}: {}", checkout.root.display(), warmth.describe());
         self.set(&checkout.key, warmth);
@@ -551,16 +566,21 @@ impl Worker {
         lock(&self.checkouts).values().any(|it| matches!(it.warmth, Warmth::Loading(_)))
     }
 
-    fn warmed(&self, checkout: &Checkout) -> anyhow::Result<()> {
+    /// The errors in the source, when the worker found any.
+    fn warmed(&self, checkout: &Checkout) -> anyhow::Result<Option<String>> {
         self.connected()?;
         // A source written since cargo built is the daemon's like any edit: it compiles
         // every function and static of the workspace from what it reads. The program the
         // worker was started on is built already, and is asked for too: what the worker then
         // compiles again by itself, for the first edit to be a patch, is part of warming up.
         for plan in &checkout.programs {
-            self.ask(checkout, plan)?.map_err(|it| anyhow::Error::msg(it.why()))?;
+            match self.ask(checkout, plan)? {
+                Ok(_) => {}
+                Err(NotBuilt::Error(said)) => return Ok(Some(said)),
+                Err(why) => anyhow::bail!(why.why()),
+            }
         }
-        Ok(())
+        Ok(None)
     }
 
     /// A connection to the process, once it has loaded the workspace and listens.
@@ -1033,6 +1053,10 @@ impl Daemon {
                 ),
             },
             Warmth::Failed(reason, _) => Reply::Cold { reason },
+            Warmth::Broken(said, _) => {
+                let programs = checkout.programs.iter().map(|_| Err(NotBuilt::Error(said.clone())));
+                Reply::Synced { programs: programs.collect(), spans: Vec::new() }
+            }
         }
     }
 
@@ -1064,15 +1088,19 @@ impl Daemon {
         // What a worker could not load once it can't load again, until cargo builds anew or
         // a source is written: the failure may be an error in the source.
         let failed = workers.get(&id).and_then(|it| match lock(&it.checkouts).get(&checkout.key) {
-            Some(Loaded { generation, warmth: Warmth::Failed(why, at), .. })
-                if *generation == checkout.generation =>
-            {
-                Some((why.clone(), *at))
+            Some(Loaded { generation, warmth, .. }) if *generation == checkout.generation => {
+                match warmth {
+                    Warmth::Failed(why, at) => Some((Some(why.clone()), *at)),
+                    // Its builds say the errors.
+                    Warmth::Broken(_, at) => Some((None, *at)),
+                    _ => None,
+                }
             }
             _ => None,
         });
         match failed {
-            Some((why, at)) if !checkout.written_since(at) => anyhow::bail!(why),
+            Some((Some(why), at)) if !checkout.written_since(at) => anyhow::bail!(why),
+            Some((None, at)) if !checkout.written_since(at) => return Ok(()),
             Some(_) => {
                 if let Some(old) = workers.remove(&id) {
                     old.stop();

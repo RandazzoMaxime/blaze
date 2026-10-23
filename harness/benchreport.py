@@ -32,10 +32,12 @@ geometric mean. It is stored in docs/benchmarks/runtime-<platform>.json, and dif
 median of any build moved by more than noise, a benchmark is new or gone, or the stored run is
 older than `--max-age`. A build that failed, or whose program did not do what the release build's
 did, has the whole result refused.
-`--name NAME` is a project measured on its own (bun, by the bench-bun workflow): its results are
-stored in docs/benchmarks/NAME-<platform>.json and runtime-NAME-<platform>.json, and written
-between `<!-- bench-NAME:start -->` and `<!-- bench-NAME:end -->` (`runbench-NAME` for the
-runtime) in README.md, a row per platform; docs/benchmarks.md and the charts are left as they are.
+`--name NAME` is a project measured on its own (bun, by the bench-bun workflow, which needs hours):
+its results are stored in docs/benchmarks/NAME-<platform>.json and runtime-NAME-<platform>.json,
+compared with those, and are a project like the others in every table and chart: each platform's
+results are its own result's with those of each project measured on its own folded in
+(`stored_all`), and a footnote under each table names the machine, commit and date of each such
+project. docs/benchmarks.md has every number of each, under its platform.
 A result in which a program said something else than cargo's (`wrong`) is refused: exit 2,
 nothing written. A test suite that ended otherwise under `cargo ra-jit test` is not refused: the
 tests table says how, and the workflow fails after writing. `--check` writes nothing and exits 1
@@ -71,7 +73,13 @@ REPO = "https://github.com/indexable-inc/ra-jit"
 FLOOR_S = 0.05
 
 # The order of the projects and phases in the tables, and what the README calls each edit.
-PROJECTS = ["ripgrep", "fd", "bat", "hyperfine", "just", "axum", "nushell", "helix", "bevy", "zed", "cargo"]
+PROJECTS = ["ripgrep", "fd", "bat", "hyperfine", "just", "axum", "nushell", "helix", "bevy", "zed", "cargo", "bun"]
+# The projects measured on their own (`--name`): what to say of each under the tables.
+APART = {
+    "bun": "It is the Rust port of [bun](https://github.com/oven-sh/bun), 1.25M lines of Rust in 103 crates on a nightly "
+           "beside a JavaScript engine's C and C++, built with frame pointers as bun's own build is "
+           "(`-C force-frame-pointers=yes`; [what it took](docs/research/bun.md)). Its test suites are not measured yet.",
+}
 EDITS = {
     "body": "Edit a function",
     "leaf": "Edit a widely used function",
@@ -126,8 +134,8 @@ def ordered(result, backend):
 
 
 def project_name(key, measured):
-    tag = measured.get("tag", "")
-    return f"{key.split('/')[0]} {tag.lstrip('v').removeprefix('axum-v')}".strip()
+    tag = re.sub(r"^[a-z-]*?v?(?=\d)", "", measured.get("tag", ""))
+    return f"{key.split('/')[0]} {tag}".strip()
 
 
 def failure(key, measured):
@@ -198,38 +206,93 @@ def load_stored(path):
     return None
 
 
-def stored_all(kind="", name=None, override=None):
-    """The newest stored result of each platform that has one, with `override` (a result just
-    measured) in place of its platform's."""
-    found = {p: r for p in NAMES if (r := load_stored(stored_path(p, kind, name)))}
-    if override:
-        found[platform(override)] = override
-    return {p: found[p] for p in NAMES if p in found}
+def stored_all(kind="", override=None, name=None):
+    """The newest stored result of each platform that has one, with the newest of each project
+    measured on its own (`names()`) folded in (`fold`). `override`, a result just measured (of
+    project `name`, or the platform's own), takes the place of the stored one."""
+    found = {}
+    for p in NAMES:
+        own = load_stored(stored_path(p, kind))
+        apart = {n: r for n in names() if (r := load_stored(stored_path(p, kind, n)))}
+        if override and platform(override) == p:
+            if name:
+                apart[name] = override
+            else:
+                own = override
+        if own or apart:
+            found[p] = fold(own, apart, kind)
+    return found
+
+
+def fold(own, apart, kind):
+    """One platform's result with the projects (for the runtime, the programs) of each result in
+    `apart` (name: result) added to its own, and its geometric means taken again over all of them.
+    The results it came from stay as `own` and `apart`, for the lines that name their machines."""
+    if not apart:
+        return own
+    merged = dict(own or next(iter(apart.values())), own=own, apart=apart)
+    parts = ([own] if own else []) + list(apart.values())
+    if kind == "runtime":
+        runs = [r.get("runbench") or {} for r in parts]
+        programs = {p: v for rb in runs for p, v in (rb.get("programs") or {}).items()}
+        builds = list(dict.fromkeys(b for rb in runs for b in rb.get("builds") or []))
+        means = {b: math.exp(sum(map(math.log, found)) / len(found)) for b in builds
+                 if (found := [row[b]["ratio"] for v in programs.values() for row in v["benches"].values() if row.get(b, {}).get("ratio")])}
+        variants = {k: v for rb in runs for k, v in (rb.get("variants") or {}).items()}
+        merged["runbench"] = dict(runs[0], programs=programs, builds=builds, variants=variants, geomean=means)
+    else:
+        merged["results"] = {k: m for r in parts for k, m in r["results"].items()}
+    return merged
+
+
+def own(result):
+    """What a platform measured in its own run, without the projects measured on their own: None
+    when it has only those."""
+    return result.get("own") if "apart" in result else result
 
 
 def who(result):
     return f"[by CI]({result['run_url']})" if result.get("run_url") else "by hand"
 
 
-def machines(results, extra=lambda r: ""):
+def machines(results, extra=lambda r: "", said=False):
     """A line per platform: its machine, the ra-jit it measured and when, or that it has not
-    been measured."""
+    been measured; then a line for each project measured on its own, with its machines (and what
+    it is, when `said`)."""
     lines = []
     for p in NAMES:
-        r = results.get(p)
+        r = own(results[p]) if p in results else None
         lines.append(f"- **{p}**: " + (f"{machine_line(r)}, ra-jit {commit_link(r)} on {r['date'][:10]}{extra(r)}{loaded(r)}, {who(r)}."
                                        if r else f"{NOT_MEASURED} ([the machines](docs/benchmarks.md#the-machines))."))
+    return lines + apart_lines(results, extra, said)
+
+
+def apart_lines(results, extra=lambda r: "", said=False):
+    """For each project measured on its own, where and when: `said` adds what it is (APART)."""
+    lines = []
+    for name in names():
+        on = {p: r["apart"][name] for p, r in results.items() if name in r.get("apart", {})}
+        if on:
+            what = f" {APART[name]}" if said and name in APART else ""
+            lines.append(f"- **{name}** is measured on its own, by the `bench-{name}` workflow: " + "; ".join(
+                f"{p} on {machine_line(r)}, ra-jit {commit_link(r)} on {r['date'][:10]}{extra(r)}{loaded(r)}, {who(r)}"
+                for p, r in on.items()) + "." + what)
     return lines
 
 
 def where(results):
     """Each platform's machine (the start of its name) and the day it was measured, for a chart's
-    footer; the commit is in the table's machine lines."""
+    footer, then each project measured on its own; the commit is in the table's machine lines."""
     def name(r):
         host = r.get("host") or {}
         named = re.split(r" \(|, ", host.get("name") or "")[0]
         return named or re.sub(r"( \d+-Core)? Processor$", "", host.get("cpu") or "") or "one machine"
-    return " ".join(f"{p}: {name(r)}, {r['date'][:10]}." for p, r in results.items())
+    said = [f"{p}: {name(r)}, {r['date'][:10]}." for p, full in results.items() if (r := own(full))]
+    for n in names():
+        on = {p: r["apart"][n] for p, r in results.items() if n in r.get("apart", {})}
+        if on:
+            said.append(f"{n}, measured on its own: " + "; ".join(f"{p}: {name(r)}, {r['date'][:10]}" for p, r in on.items()) + ".")
+    return " ".join(said)
 
 
 def keys_of(results, backend):
@@ -240,8 +303,14 @@ def label_of(results, key):
     return next(project_name(key, r["results"][key]) for r in results.values() if key in r["results"])
 
 
-def raw_links(results, kind="", name=None):
-    return ", ".join(f"[{p}]({os.path.relpath(stored_path(p, kind, name), ROOT)})" for p in results)
+def raw_links(results, kind=""):
+    """Links to each platform's stored result, then to each project measured on its own's."""
+    link = lambda p, name=None: f"[{p}]({os.path.relpath(stored_path(p, kind, name), ROOT)})"
+    said = [", ".join(link(p) for p, r in results.items() if own(r))]
+    for name in names():
+        if on := [p for p, r in results.items() if name in r.get("apart", {})]:
+            said.append(f"{name}: " + ", ".join(link(p, name) for p in on))
+    return "; ".join(s for s in said if s)
 
 
 def edit_cell(phase):
@@ -304,16 +373,14 @@ def disk_chart(results, backend):
                                          if any(on_disk(m) for k, m in r["results"].items() if k.endswith("/" + backend))}))
 
 
-def readme_section(results, start=START, end=END, name=None):
-    """The README's build table: for the projects, an edit to one function on each platform, then
-    every kind of edit by platform; for one project measured on its own (`name`), a row per platform."""
+def readme_section(results):
+    """The README's build table: an edit to one function of each project on each platform, then
+    every kind of edit by platform."""
     backend = "cranelift"
-    workflow = f"bench-{name}" if name else "bench-readme"
-    lines = [start]
-    if not name and (summary := edits_chart(results, backend)):
+    lines = [START]
+    if summary := edits_chart(results, backend):
         lines += [benchcharts.picture("edits", f"How much faster an edit builds under ra-jit than under cargo, by platform: {summary}"), ""]
-    lines += [f"Edit, then build, {'on real projects at pinned commits' if not name else name + ' at its pinned commit'}: "
-              "incremental `cargo build` → `cargo ra-jit build`, both "
+    lines += ["Edit, then build, on real projects at pinned commits: incremental `cargo build` → `cargo ra-jit build`, both "
               "warm, same linker, Cranelift, the median of each run's edits. Each platform is a machine of its "
               "own: compare numbers within a platform, not across.", ""]
     fell_back = False
@@ -331,50 +398,31 @@ def readme_section(results, start=START, end=END, name=None):
             out.append(f"| {project_name(key, measured)} | " + " | ".join(cells) + " |")
         return out
 
-    if name:
-        lines += ["| Platform | " + " | ".join(EDITS[p] for p in README_PHASES) + " |", "|---|" + "---:|" * len(README_PHASES)]
+    lines += ["An edit to one function, cargo → ra-jit:", "",
+              "| Project | " + " | ".join(NAMES) + " |", "|---|" + "---:|" * len(NAMES)]
+    for key in keys_of(results, backend):
+        cells = []
         for p in NAMES:
-            r = results.get(p)
-            key = next(iter(ordered(r, backend)), None) if r else None
-            if key is None:
-                lines.append(f"| {p} | {NOT_MEASURED} |" + " |" * (len(README_PHASES) - 1))
-                continue
-            cells = []
-            for label in README_PHASES:
-                text, fell = edit_cell(r["results"][key]["phases"].get(label))
-                fell_back |= fell
-                cells.append(text)
-            lines.append(f"| {p} | " + " | ".join(cells) + " |")
-        lines += ["", *machines(results)]
-        for p, r in results.items():
-            lines += [f"- {p}, {line[2:]}" for line in failures(r, ordered(r, backend))[1:]]
-    else:
-        lines += ["An edit to one function, cargo → ra-jit:", "",
-                  "| Project | " + " | ".join(NAMES) + " |", "|---|" + "---:|" * len(NAMES)]
-        for key in keys_of(results, backend):
-            cells = []
-            for p in NAMES:
-                measured = (results.get(p) or {"results": {}})["results"].get(key)
-                text, fell = edit_cell(measured["phases"].get("body")) if measured else ("-", False)
-                fell_back |= fell
-                cells.append(text or "-")
-            lines.append(f"| {label_of(results, key)} | " + " | ".join(cells) + " |")
-        lines += ["", *machines(results, lambda r: f", median of {r['runs']} edits"), "",
-                  "<details><summary>Every kind of edit, by platform</summary>"]
-        for p, r in results.items():
-            keys = ordered(r, backend)
-            lines += ["", f"**{p}**", "", *phase_table(r, keys), *failures(r, keys)]
-        lines += ["", "</details>"]
-    lines.append("")
+            measured = (results.get(p) or {"results": {}})["results"].get(key)
+            text, fell = edit_cell(measured["phases"].get("body")) if measured else ("-", False)
+            fell_back |= fell
+            cells.append(text or "-")
+        lines.append(f"| {label_of(results, key)} | " + " | ".join(cells) + " |")
+    lines += ["", *machines(results, lambda r: f", median of {r['runs']} edits", said=True), "",
+              "<details><summary>Every kind of edit, by platform</summary>"]
+    for p, r in results.items():
+        keys = ordered(r, backend)
+        lines += ["", f"**{p}**", "", *phase_table(r, keys), *failures(r, keys)]
+    lines += ["", "</details>", ""]
     if fell_back:
         lines += ["(c): the daemon handed this edit to cargo (a fallback, so about cargo's time).", ""]
     built = (f" The ra-jit measured is `cargo build --release`; the binaries a release ships are the `dist` profile with PGO, "
              f"which start and edit faster ([how]({REPO}/blob/main/docs/reports/RELEASE-BUILD.md)).")
-    lines.append(f"Measured by hand with `harness/bench.py`, or by the `{workflow}` workflow on each platform's benchmark machine "
-                 "once it is registered." + built + ("" if name else " Cold builds, the spread of every number, the LLVM tier "
-                 "and how fast the built programs run: [docs/benchmarks.md](docs/benchmarks.md).")
-                 + f" Raw JSON: {raw_links(results, name=name)}.")
-    lines.append(end)
+    lines.append("Measured by hand with `harness/bench.py`, or by the `bench-readme` workflow (a project measured on its own, by "
+                 "its own workflow) on each platform's benchmark machine once it is registered." + built + " Cold builds, the "
+                 "spread of every number, the LLVM tier and how fast the built programs run: [docs/benchmarks.md](docs/benchmarks.md)."
+                 + f" Raw JSON: {raw_links(results)}.")
+    lines.append(END)
     return "\n".join(lines)
 
 
@@ -446,7 +494,7 @@ def memory_tables(result, keys, backend, name=""):
             step = "Cold, until the daemon is ready" if label == "cold" else EDITS[label]
             lines.append(f"| {project_name(key, measured)} | {step} | {megabytes(m['cargo']['peak_mb'])} | {megabytes(m['ra-jit']['peak_mb'])} | "
                          f"{megabytes(m['cargo']['largest_mb'])} | {megabytes(m['ra-jit']['largest_mb'])} | {megabytes(m['ra-jit'].get('resident_mb'))} |")
-    lines += ["", "The daemon between builds, and what each side keeps on disk once the edits are done (as `du` counts it). "
+    lines += ["", "The daemon between builds, and what each side keeps on disk once the edits are done (each block once, [how](#memory-and-disk)). "
               "After the first build: once the step after the cold build (nothing changed) is done; growth is from then to the end, "
               "over every edit made and taken back. Warm store: the cold start of another checkout with the store the first one filled.", "",
               "| Project | Daemon ready | After the first build | At the end | Growth | Warm store: peak, ready | cargo target | ra-jit target | Store | Home |",
@@ -630,17 +678,21 @@ def options(argv, name, default=None):
 
 def doc_section(results):
     """docs/benchmarks.md's results: every number of the newest run of each platform."""
-    lines = [START, "Every number of the newest run of each platform. Each platform is a machine of its own: its numbers "
+    lines = [START, "Every number of the newest run of each platform, then of each project measured on its own on it "
+             "(bun, by the `bench-bun` workflow), under its own machine. Each platform is a machine of its own: its numbers "
              "compare with each other and with its own history, not with another platform's.", ""]
     for p, r in results.items():
-        lines += platform_doc(p, r)
+        if own(r):
+            lines += platform_doc(p, own(r), stored_path(p))
+        for name, apart in r.get("apart", {}).items():
+            lines += platform_doc(f"{p}, {name}", apart, stored_path(p, name=name))
     lines.append(END)
     return "\n".join(lines)
 
 
-def platform_doc(name, result):
+def platform_doc(name, result, stored):
     host = result.get("host") or {}
-    raw = os.path.relpath(stored_path(name), os.path.join(ROOT, "docs"))
+    raw = os.path.relpath(stored, os.path.join(ROOT, "docs"))
     lines = [f"### {name}", "",
              f"ra-jit {commit_link(result)}, {result['date']}, Rust {result['toolchain']}, {result['runs']} runs of each edit, "
              f"measured {who(result)}. Raw: [{raw}]({raw}).", "",
@@ -801,13 +853,12 @@ def rounds(result):
     return len(rows[0]["release"]["runs"]) if rows else None
 
 
-def runtime_section(results, start=RUN_START, end=RUN_END, name=None):
+def runtime_section(results):
     """The README's table of how fast what ra-jit's LLVM builds runs, against cargo's release
     build: ra-jit's time ÷ release's of each benchmark on each platform, then by platform the
     times, memory and builds."""
-    workflow = f"bench-{name}" if name else "bench-readme"
-    lines = [start]
-    if not name and (summary := runtime_chart(results)):
+    lines = [RUN_START]
+    if summary := runtime_chart(results):
         lines += [benchcharts.picture("runtime", f"How fast each benchmark runs built by ra-jit, against cargo build --release, by platform: {summary}"), ""]
     lines += ["How fast the programs run. Each program is built by `cargo build --release` and by ra-jit with LLVM at `-O3`, "
               "every crate of it compiled by ra-jit, with the release profile; each benchmark is then run several times, the "
@@ -831,8 +882,9 @@ def runtime_section(results, start=RUN_START, end=RUN_END, name=None):
         lines += ["", f"**{p}**", "", *runtime_tables(r)]
     lines += ["", "Release with dev checks: `cargo build --release` with `-C overflow-checks=on -C debug-assertions=on`.", "",
               "</details>", "",
-              f"Measured by hand with `harness/bench.py --runtime` (harness/runbench.py), or by the `{workflow}` workflow on each "
-              f"platform's benchmark machine once it is registered. Raw JSON: {raw_links(results, 'runtime', name)}.", end]
+              "Measured by hand with `harness/bench.py --runtime` (harness/runbench.py), or by the `bench-readme` workflow (a "
+              "project measured on its own, by its own workflow) on each platform's benchmark machine once it is registered. "
+              f"Raw JSON: {raw_links(results, 'runtime')}.", RUN_END]
     return "\n".join(lines)
 
 
@@ -859,18 +911,13 @@ def names():
     return sorted(found)
 
 
-def write_sections(kind="", name=None, override=None):
-    """Every table (and its chart) a stored result of `kind` feeds, from each platform's newest."""
-    if name:
-        runtime = kind == "runtime"
-        marks = (f"<!-- {'runbench' if runtime else 'bench'}-{name}:start -->", f"<!-- {'runbench' if runtime else 'bench'}-{name}:end -->")
-        results = stored_all(kind, name, override)
-        if results:
-            splice(README, (runtime_section if runtime else readme_section)(results, *marks, name=name), *marks)
-    elif kind == "runtime":
-        if results := stored_all("runtime", override=override):
+def write_sections(kind="", override=None, name=None):
+    """Every table (and its chart) a stored result of `kind` feeds, from each platform's newest,
+    with `override` (of project `name`, when it is measured on its own) in place of its stored one."""
+    if kind == "runtime":
+        if results := stored_all("runtime", override, name):
             splice(README, runtime_section(results), RUN_START, RUN_END)
-    elif results := stored_all(override=override):
+    elif results := stored_all("", override, name):
         splice(README, readme_section(results))
         splice(DOC, doc_section(results))
         splice(README, memory_readme(results), MEM_START, MEM_END)
@@ -880,9 +927,6 @@ def render():
     """Every table and chart again from the stored results."""
     write_sections()
     write_sections("runtime")
-    for name in names():
-        write_sections(name=name)
-        write_sections("runtime", name)
 
 
 def main():
@@ -926,7 +970,7 @@ def main():
         os.makedirs(os.path.dirname(stored_at), exist_ok=True)
         if os.path.abspath(paths[0]) != os.path.abspath(stored_at):
             shutil.copyfile(paths[0], stored_at)
-        write_sections(kind, name, result)
+        write_sections(kind, result, name)
     if os.environ.get("GITHUB_OUTPUT"):
         open(os.environ["GITHUB_OUTPUT"], "a").write(f"changed={'true' if changed else 'false'}\n")
     print("changed" if changed else "unchanged")

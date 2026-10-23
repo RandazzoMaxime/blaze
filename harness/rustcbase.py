@@ -87,6 +87,14 @@ fn work(x: u64) -> u64 {
     x * 3
 }
 
+// What it derives is never called: rustc's executable has no copy of it.
+#[allow(dead_code)]
+#[derive(Debug, Clone, PartialEq)]
+enum Side {
+    Left,
+    Right,
+}
+
 fn mapped(xs: &[u64]) -> Vec<u64> {
     xs.iter().map(|x| x + 10).collect()
 }
@@ -129,10 +137,13 @@ FILES = {
     "app/src/main.rs": MAIN,
     "app/src/asset.txt": "one\n",
     "dep/Cargo.toml": '[package]\nname = "dep"\nversion = "0.1.0"\nedition = "2024"\n',
-    "dep/src/lib.rs": "pub fn value(x: u64) -> u64 {\n    x + 100\n}\n",
+    "dep/src/lib.rs": "pub fn value(x: u64) -> u64 {\n    x + 100\n}\n\n"
+                      "#[inline]\npub fn spare_inline(x: u64) -> u64 {\n    x + 7\n}\n\n"
+                      "#[allow(dead_code)]\nfn never_called(x: u64) -> u64 {\n    x + 8\n}\n",
 }
 
 M = "app/src/main.rs"
+D = "dep/src/lib.rs"
 
 # A program with a `#[ra_jit::cache]` function (docs/fn-cache.md): rustc's copy of it caches
 # nothing, ours does, and a patch of what it reaches must not find what the code before kept.
@@ -185,12 +196,36 @@ SCENARIOS = {
     # unwind table, so both tables move into the header's room, and the panic unwinds through
     # the patch's frames there.
     "moved-panic": ([[edit(M, "    x * 3\n", "    let y = x * 3;\n    y + 1\n")]], ["patch"], 0, {}),
+    # Moves `Side`'s derives, which rustc has no copy of, a line down and changes nothing else.
+    "moved-uncopied": ([[edit(M, "    x * 3\n", "    let y = x * 3;\n    y\n")]], ["patch"], 0, {}),
     "closure": ([[edit(M, "x + 10", "x + 11")]], ["patch"], 0, {}),
-    # A new item is more than bodies: rustc's copies of what sees the file may differ.
+    # A new function of a crate nothing depends on, whose files did not name it: nothing but
+    # what calls it sees it, and what rustc compiled of every file of the crate is taken in
+    # before the edit. The patch compiles it under a name of its own.
     "new-fn": ([[edit(M, "    x * 3\n}\n", "    helper(x) * 3\n}\n\nfn helper(x: u64) -> u64 {\n    x + 2\n}\n")]],
-               ["full"], 0, {}),
+               ["patch"], 0, {}),
     "new-fn-then-patch": ([[edit(M, "    x * 3\n}\n", "    helper(x) * 3\n}\n\nfn helper(x: u64) -> u64 {\n    x + 2\n}\n")],
-                          [edit(M, "    x + 2\n}\n", "    x + 5\n}\n")]], ["full", "patch"], 0, {}),
+                          [edit(M, "    x + 2\n}\n", "    x + 5\n}\n")]], ["patch", "patch"], 0, {}),
+    # Taken away again, as the benchmark's edits are, and added again: no edit links in full.
+    "new-fn-removed": ([[edit(M, "    x * 3\n}\n", "    helper(x) * 3\n}\n\nfn helper(x: u64) -> u64 {\n    x + 2\n}\n")],
+                        [edit(M, "    helper(x) * 3\n}\n\nfn helper(x: u64) -> u64 {\n    x + 2\n}\n", "    x * 3\n}\n")],
+                        [edit(M, "    x * 3\n}\n", "    helper(x) * 3\n}\n\nfn helper(x: u64) -> u64 {\n    x + 2\n}\n")]],
+                       ["patch", "patch", "patch"], 0, {}),
+    "own-base-new-fn-removed": ([[edit(M, "    x * 3\n}\n", "    helper(x) * 3\n}\n\nfn helper(x: u64) -> u64 {\n    x + 2\n}\n")],
+                                 [edit(M, "    helper(x) * 3\n}\n\nfn helper(x: u64) -> u64 {\n    x + 2\n}\n", "    x * 3\n}\n")]],
+                                ["patch", "patch"], 8, {}),
+    # A function rustc compiled, taken away with its one call, and written back.
+    "fn-removed": ([[edit(M, "fn work(x: u64) -> u64 {\n    x * 3\n}\n\n", ""),
+                     edit(M, '    println!("work {}", work(7));\n', "")],
+                    [edit(M, "fn mapped(", "fn work(x: u64) -> u64 {\n    x * 3\n}\n\nfn mapped("),
+                     edit(M, '    println!("{}", twice(3));\n', '    println!("work {}", work(7));\n    println!("{}", twice(3));\n')]],
+                   ["patch", "patch"], 0, {}),
+    # rustc's copies of what sees the new function may be in the crates that depend on it.
+    "new-fn-dep": ([[edit(D, "    x + 100\n}\n", "    extra(x) + 100\n}\n\nfn extra(x: u64) -> u64 {\n    x + 1\n}\n")]],
+                   ["full"], 0, {}),
+    # The crate names `value` already, which can mean the new function now.
+    "new-fn-named": ([[edit(M, "    x * 3\n}\n", "    value(x) * 3\n}\n\nfn value(x: u64) -> u64 {\n    x + 2\n}\n")]],
+                     ["full"], 0, {}),
     "dep": ([[edit("dep/src/lib.rs", "x + 100", "x + 200")]], ["patch"], 0, {}),
     "counted-body": ([[edit(M, "Ordering::Relaxed) + 1", "Ordering::Relaxed) + 2")]], ["patch"], 0, {}),
     "unused-std": ([[edit(M, "    x * 3\n", "    let _ = std::os::unix::process::parent_id();\n    x * 3\n")]],
@@ -200,6 +235,12 @@ SCENARIOS = {
     "generic-moved": ([[edit(M, '        "world".to_owned()\n', '        let it = "world";\n        it.to_owned()\n')]],
                       ["full"], 0, {}),
     "inline": ([[edit(M, "    x + 1\n}\n\nfn counted", "    x + 2\n}\n\nfn counted")]], ["full"], 0, {}),
+    # Neither has a copy in rustc's executable, nothing there calls them: a patch has the one
+    # copy, which the second edit calls.
+    "inline-uncopied": ([[edit(D, "    x + 7\n", "    x + 70\n")],
+                         [edit(D, "    x + 100\n", "    spare_inline(x) + 100\n")]], ["patch", "patch"], 0, {}),
+    "uncompiled": ([[edit(D, "    x + 8\n", "    x + 80\n")],
+                    [edit(D, "    x + 100\n", "    never_called(x) + 100\n")]], ["patch", "patch"], 0, {}),
     "trait-default": ([[edit(M, '"hello {}"', '"hi {}"')]], ["full"], 0, {}),
     "counted-static": ([[edit(M, "AtomicU32::new(0);\n    CALLS", "AtomicU32::new(5);\n    CALLS")]], ["full"], 0, {}),
     "async": ([[edit(M, "    x * 2\n", "    x * 6\n")]], ["full"], 0, {}),
@@ -301,6 +342,31 @@ SCENARIOS.update(UNBUILT_SCENARIOS)
 # and the edit patches what rustc linked.
 SCENARIOS["own-base-budget"] = ([[edit(M, "    x * 3\n", "    x * 4\n")]], ["patch"], 8, {"RA_JIT_OWN_BASE_MEMORY": "1"})
 
+# A program whose package has a library too, as each example of bevy's package has bevy: the
+# library is a crate of the program's files too, and the program depends on it.
+LIB_FILES = {
+    **FILES,
+    "app/Cargo.toml": FILES["app/Cargo.toml"] + '\n[lib]\nname = "applib"\n',
+    "app/src/main.rs": MAIN.replace('println!("dep {}", dep::value(2));', 'println!("dep {}", applib::base(dep::value(2)));'),
+    "app/src/lib.rs": "pub fn base(x: u64) -> u64 {\n    x + 1000\n}\n",
+}
+LIB_SCENARIOS = {
+    "new-fn-beside-lib": ([[edit(M, "    x * 3\n}\n", "    helper(x) * 3\n}\n\nfn helper(x: u64) -> u64 {\n    x + 2\n}\n")]],
+                          ["patch"], 0, {}),
+}
+SCENARIOS.update(LIB_SCENARIOS)
+# The library of the package has the program's name, as most have: rustc's symbols of the two
+# tell them apart by their crate ids alone.
+SAME_NAME_FILES = {
+    **FILES,
+    "app/src/main.rs": MAIN.replace('println!("dep {}", dep::value(2));', 'println!("dep {}", app::base(dep::value(2)));'),
+    "app/src/lib.rs": LIB_FILES["app/src/lib.rs"],
+}
+SAME_NAME_SCENARIOS = {
+    "body-beside-its-library": ([[edit(M, "    x * 3\n", "    x * 4\n")]], ["patch"], 0, {}),
+}
+SCENARIOS.update(SAME_NAME_SCENARIOS)
+
 # How the daemon's own base is to go before the first edit, in the scenarios that say.
 OWN_BASE = {"unbuilt-member": "built", "own-base-budget": "given up"}
 
@@ -377,6 +443,10 @@ def main():
             files = GENERIC_FILES
         elif name in UNBUILT_SCENARIOS:
             files = UNBUILT_FILES
+        elif name in LIB_SCENARIOS:
+            files = LIB_FILES
+        elif name in SAME_NAME_SCENARIOS:
+            files = SAME_NAME_FILES
         write_workspace(ws, files)
         home, target, store = (os.path.join(work, it) for it in ("home", "target", "store"))
         for path in (home, target, store, fn_cache):

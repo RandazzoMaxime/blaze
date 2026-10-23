@@ -1859,14 +1859,96 @@ fn sysroot_to_crate_graph(
         CfgAtom::KeyValue { key, value } if key.as_str() == "target_arch" => Some(value.clone()),
         _ => None,
     });
+    let scripted = build_script_cfgs(&rustc_cfg);
     let (public_deps, proc_macro) =
         sysroot_crates_to_crate_graph(crate_graph, sysroot, rustc_cfg, load, crate_ws_data);
+    // Nor are those of `compiler_builtins` and `libc`, whose cfgs are said here as theirs
+    // would for the target.
+    let crates: Vec<_> = crate_graph.iter().collect();
+    for krate in crates {
+        let data = &crate_graph[krate];
+        let named = data.extra.display_name.as_ref().map(|it| it.crate_name().as_str());
+        let Some((_, cfgs)) = scripted.iter().find(|(name, _)| Some(*name) == named) else {
+            continue;
+        };
+        if !matches!(data.basic.origin, CrateOrigin::Lang(_)) {
+            continue;
+        }
+        for cfg in cfgs.clone() {
+            crate_graph.insert_cfg(krate, cfg);
+        }
+    }
     // The build script of `std` is not run: what it says of the target is said here.
     let std = public_deps.deps.iter().find(|(name, ..)| name.as_str() == "std");
     if let (Some(&(_, std, _)), Some(arch)) = (std, arch) {
         crate_graph.set_env(std, "STD_ENV_ARCH", arch.as_str());
     }
+    // The library as built has its copy of `backtrace` know it is in std.
+    if let Some(&(_, std, _)) = std
+        && sysroot_as_built()
+    {
+        crate_graph.set_cfg(std, Symbol::intern("backtrace_in_libstd"));
+    }
     (public_deps, proc_macro)
+}
+
+/// The cfgs the build scripts of the standard library's `compiler_builtins` and `libc` set for
+/// the target of `rustc_cfg`, as their `build.rs` (and `libm/configure.rs`) compute them with
+/// nothing in the environment, for the library rustc ships: optimized, not on libc's CI.
+/// Targets no backend of ra-jit's has (32-bit ARM, Thumb) are left as on any other.
+fn build_script_cfgs(rustc_cfg: &[CfgAtom]) -> Vec<(&'static str, Vec<CfgAtom>)> {
+    let value = |key: &str| {
+        rustc_cfg.iter().find_map(|atom| match atom {
+            CfgAtom::KeyValue { key: it, value } if it.as_str() == key => Some(value.as_str()),
+            _ => None,
+        })
+    };
+    let has = |flag: &str| {
+        rustc_cfg.iter().any(|atom| matches!(atom, CfgAtom::Flag(it) if it.as_str() == flag))
+    };
+    let feature = |name: &str| {
+        rustc_cfg.iter().any(|atom| match atom {
+            CfgAtom::KeyValue { key, value } => {
+                key.as_str() == "target_feature" && value.as_str() == name
+            }
+            _ => false,
+        })
+    };
+    let (arch, os, env, abi) = (
+        value("target_arch").unwrap_or_default(),
+        value("target_os").unwrap_or_default(),
+        value("target_env").unwrap_or_default(),
+        value("target_abi").unwrap_or_default(),
+    );
+    let flags = |names: &[(&str, bool)]| -> Vec<CfgAtom> {
+        names.iter().filter(|it| it.1).map(|it| CfgAtom::Flag(Symbol::intern(it.0))).collect()
+    };
+
+    let wasm = arch.starts_with("wasm");
+    let mut builtins = flags(&[
+        ("mem_unaligned", matches!(arch, "x86_64" | "x86" | "aarch64" | "bpf")),
+        ("x86_no_sse2", arch == "x86" && !feature("sse2")),
+        ("intrinsics_enabled", true),
+        ("optimizations_enabled", true),
+        ("f16_enabled", has("target_has_reliable_f16")),
+        ("f128_enabled", has("target_has_reliable_f128")),
+    ]);
+    if (wasm && os != "wasi") || env == "sgx" || matches!(os, "none" | "uefi" | "xous") {
+        builtins.push(CfgAtom::KeyValue { key: sym::feature, value: Symbol::intern("mem") });
+    }
+
+    let musl = (env == "musl" || env == "ohos")
+        && (matches!(arch, "loongarch64" | "hexagon") || env == "ohos" || abi == "pauthtest");
+    let musl32 = musl && value("target_pointer_width") == Some("32");
+    let libc = flags(&[
+        ("freebsd12", true),
+        ("libc_pauthtest", abi == "pauthtest"),
+        ("musl_v1_2_3", musl),
+        ("musl32_time64", musl32),
+        ("linux_time_bits64", musl32),
+        ("musl_redir_time64", musl && matches!(arch, "arm" | "mips" | "powerpc" | "x86")),
+    ]);
+    vec![("compiler_builtins", builtins), ("libc", libc)]
 }
 
 fn sysroot_crates_to_crate_graph(
@@ -2059,8 +2141,18 @@ fn sysroot_metadata_config(
         })
         .collect();
 
+    // The toolchain's std is built with `backtrace` (and the default `panic-unwind`), whose
+    // symbolization is crates of their own.
+    let features = if sysroot_as_built() {
+        crate::CargoFeatures::Selected {
+            features: vec!["sysroot/backtrace".to_owned()],
+            no_default_features: false,
+        }
+    } else {
+        Default::default()
+    };
     CargoMetadataConfig {
-        features: Default::default(),
+        features,
         targets,
         // NOTE: Not passing extra_args / metadata_extra_args / config_path here is very
         // intentional. The sysroot config has nothing to do with the workspace's config, so it's

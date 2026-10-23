@@ -4,7 +4,7 @@ ra-jit has its own borrow checker, the crate `hir-ty-borrowck` in the rust-analy
 (`vendor/rust-analyzer/crates/hir-ty-borrowck`, next to `hir-ty`). It checks the MIR rust-analyzer
 lowers, the same MIR the code generator compiles, and it is meant to give exactly rustc's
 verdict: the same errors, on the same lines, and none where rustc gives none. It gives
-rustc's verdict on 90% of rustc's own borrow-check tests today, and on every one rustc
+rustc's verdict on 92% of rustc's own borrow-check tests today, and on every one rustc
 accepts; how they are scored and what is left is below.
 
 It runs as part of rust-analyzer's diagnostics, so the daemon computes it for every edited
@@ -46,23 +46,33 @@ All of these are rustc's, written from `compiler/rustc_borrowck` at the pinned n
   assignment to immutable locals (E0381, E0382, E0384, E0505, E0507, E0508, E0509). A `match`
   whose arms test the value reads what it matches first, so a value moved out whole is
   reported there. A `match` arm's guard sees the variables its pattern binds by reference, so
-  it cannot move out of them (E0507), and casting an enum to an integer moves the enum
+  it cannot move out of them (E0507) nor borrow them mutably (E0596), and casting an enum to an integer moves the enum
   (`*e as usize` behind a reference is E0507). A pattern's moves out of what it may not move
   out of are one error at the value matched for each place they move out of, as rustc's
-  `MovesFromPlace`: `(D(s), &t)` is an E0509 and an E0507.
+  `MovesFromPlace`: `(D(s), &t)` is an E0509 and an E0507. A move of a subslice of an array
+  moves each of its elements, so `let [_y @ .., _, _] = a` after `let [_x, _, _] = a` uses a
+  moved element, and so does assigning `a[2]` after moving it out, as rustc reads the array
+  to index it.
+- Match guards (E0510): rustc fake-borrows, through every guard of a `match`, what its arms
+  test and the references that and what they bind are behind, so a guard that assigns or
+  mutably borrows one of them, closures included, could change which arm matches; assigning
+  what the guard's arm binds by value is E0506, as the guard sees it through a reference.
 - Unaligned references (E0793): a `&` or `&mut` of a field a `#[repr(packed)]` struct may
   leave less aligned than its type needs, as rustc's `check_packed_ref` (not `&raw`, nor
   behind a pointer; a field of a type parameter or of a `dyn` tail may be unaligned).
 - Conflicting borrows: shared, mutable, two-phase (`vec.push(vec.len())`), shallow borrows of
   match scrutinees, and fake reads (E0499, E0500, E0501, E0502, E0503, E0506, E0524). The drop
   of the old value before an assignment is the assignment's write, so assigning to a borrowed
-  place is E0506 rather than E0597. A `match` reads a discriminant, and switches on a `bool`,
+  place is E0506 rather than E0597. A compound assignment's read and write are one access
+  unless the place goes through a field whose type has lifetimes (`*s.pointer += 1`), where
+  rustc reports a conflict of each. A `match` reads a discriminant, and switches on a `bool`,
   integer or `char` it tests against a literal, at what it matches rather than at the arm.
 - Errors for a borrow that does not live long enough, as rustc chooses among them: E0713 when
   the borrow is of a field of a value whose type implements `Drop` and the drop is of that
   value, E0373 ("may outlive the current block") for a closure a `let` binds as a block's
   value, and E0597 rather than E0515 for what a function returns as an `impl Trait` that
-  captures no lifetime (rustc's `OpaqueType` constraint). The mutable borrows of a variable
+  captures no lifetime (rustc's `OpaqueType` constraint), even when a `move` closure in it
+  borrows a variable it took by value. The mutable borrows of a variable
   declared without `mut` are one E0596, at the declaration once there are two.
 - `'static` in what a type or signature spells (`x: &'static u32` in a struct, a parameter
   `&'static T`) is related as any other region; a copied value proves its type `Copy`
@@ -73,7 +83,14 @@ All of these are rustc's, written from `compiler/rustc_borrowck` at the pinned n
   and unsizing to `dyn Trait` proves the value's type implements `Trait`, with what its impl
   needs of the regions. An associated type in a signature is related as what it normalizes
   to, so `for x in &mut v` keeps `v` borrowed in the `IterMut<'a, T>` that
-  `<&'a mut Vec<T> as IntoIterator>::IntoIter` is. A parameter that elides one lifetime has
+  `<&'a mut Vec<T> as IntoIterator>::IntoIter` is. Unsizing an array to a slice keeps its
+  element type (`[T; N]: Unsize<[T]>`), so `&mut [&'a T; 1]` as `&mut [&'b T]` makes `'a`
+  and `'b` one; unsizing inside a struct (`&RefCell<T>` to `&RefCell<dyn Read>`) unsizes the
+  argument its last field does and keeps the others. A closure typed against an expected
+  signature with no `for<'a>` has it, so its parameters' types are the `Fn` bound's arguments
+  (`|z: &[i32]|` passed as `F: FnOnce(S)` takes the `S` it is called with). A variable with a
+  written type is related to it as rustc's user type annotation, so an error through it is
+  blamed on the annotation. A parameter that elides one lifetime has
   it once however often its type does (`s: S2` with `type S2<'a> = S<'a, 'a>`), and
   `Self::Target` in an impl for `S<'_, '_>` has the impl's lifetimes.
 - Raw pointers: a reference coerced to one relates what it points to, raw and function
@@ -107,7 +124,9 @@ All of these are rustc's, written from `compiler/rustc_borrowck` at the pinned n
   well as what it normalizes to, `<&'a &'b () as Trait>::Type` that `'b: 'a`, and its trait's
   outlives where clauses, `<T as Trait<A>>::Assoc` that `A: 'static` where
   `trait Trait<A: 'static>`), where clauses (elaborated through
-  supertraits) and the region constraints of proving them with the trait solver (a where
+  supertraits) and the region constraints of proving them with the trait solver (a
+  callee's `I: IntoIterator<Item = T>` makes what `I` normalizes the projection to `T`, so
+  `buffer.extend(data.split(..))` borrows `data` for as long as `buffer` holds it; a where
   clause or impl that proves a bound relates its regions to the bound's, `&'max G: Get` proving
   `&'min G: Get` makes them equal, and the impl's own `T: 'a` must hold), type tests (an
   associated type `<T as Trait>::Assoc: 'a` as rustc's alias bound: what it normalizes to
@@ -160,14 +179,20 @@ All of these are rustc's, written from `compiler/rustc_borrowck` at the pinned n
   `async fn`, those its bounds name; its type parameters are always captured.
 - `impl Trait`'s hidden type: each of its regions must be `'static` or one of the lifetimes
   the `impl Trait` captures (rustc's member constraints), else E0700 at the signature; and it
-  must outlive what the bounds say (`impl Copy + 'a`). rustc picks the captured lifetime a
+  must outlive what the bounds say (`impl Copy + 'a`). The same holds of an `impl Trait` an
+  `async fn` declares it returns, the future's output, in the body that makes the future,
+  with the errors at the function's block as rustc's; only the future captures every
+  lifetime. A C variadic's `VaList` lifetime is never captured. A trait object in the hidden
+  type has its lifetime inferred, and a borrowed capture of a closure or `async` block
+  returned through an `impl Trait` that captures no lifetime is E0597, not E0373, as rustc's.
+  rustc picks the captured lifetime a
   region becomes and checks the body with that choice; ra-jit only tests that one exists, so
   it reports E0700 where rustc does and leaves the errors that choice causes unreported.
 - Closures: captures, E0373, `FnMut` escapes, E0596 and E0594 through captures. A closure's
   body has two kinds of universal region, as rustc's: its own (the late-bound lifetimes of
   its signature, `for<'a> FnOnce(&'a T)`, and the borrow of its environment) and its
   creator's (every other region of its type, and the enclosing item's lifetime parameters,
-  late-bound ones included, so `foo::<&'a u32>(&local)` in a closure needs `local` to outlive
+  late-bound ones and the anonymous ones of its impl, `impl Foo<'_>`, included, so `foo::<&'a u32>(&local)` in a closure needs `local` to outlive
   the creator's `'a`). Its parameters and return slot have the types written for them
   (rustc's `check_signature_annotation`: `|x: &'a i32| -> &'static i32 { x }` needs
   `'a: 'static`), and a closure typed without an expected signature has the lifetimes elided
@@ -210,15 +235,24 @@ All of these are rustc's, written from `compiler/rustc_borrowck` at the pinned n
   it does not (E0491) gets only that error, which ra-jit does not report yet. The type a
   returned `impl Trait` hides must be well-formed and outlive what its bounds say, given what
   the function knows (rustc's `check_opaque_meets_bounds`): `-> impl Sized + 'static` hiding
-  a `T` is E0310 at the `impl Trait`. A closure or coroutine outlives as its captures do, and
+  a `T` is E0310 at the `impl Trait`. Its trait and associated type bounds hold of the type
+  it hides where the body returns it, as rustc proves them there: `impl Iterator<Item =
+  Box<dyn Foo>>` hiding `Iter<'a, T>` needs the where clauses of that `Iterator` impl with
+  `'a` `'static`. A closure or coroutine outlives as its captures do, and
   an `impl Trait` with no outlives bound as its arguments.
+- Function items and locals, as rustc's type check: a function item used as a value, not
+  only called (`let f: fn(&'a str) -> _ = extend;`, or passed to a call), needs its where
+  clauses and its type arguments well-formed; a variable's or temporary's type is `Sized`,
+  which a where clause `<&'static T as A>::X: Sized` proves only for `'static`.
 - E0621 ("explicit lifetime required") where rustc gives it: for an anonymous lifetime a
   parameter's written type has, not in a trait impl's method, nor for one of `self`, of the
   return type or of an impl's header.
 - Where errors are: at the expression rustc points to. A borrow `format_args!` (so
   `println!`, `format!`, `write!`) makes of an argument has no syntax of its own, so its
   errors are at the argument, or for a variable the template names (`"{x}"`) at the
-  template.
+  template. An error in an expression a macro writes (`&$e`) is at the macro's definition
+  when it is in the same file, as rustc reports it there; one in what the caller wrote is at
+  the caller's.
 
 ## How it is tested
 
@@ -239,8 +273,8 @@ With no borrow checker, the 245 units rustc accepts would pass. Now:
 
 | Mode | In scope | Pass | rustc accepts, ra-jit too | rustc rejects, same errors |
 |---|---|---|---|---|
-| Polonius | 1579 | 1433 (90.8%) | 245 of 245 | 1188 of 1334 |
-| NLL | 1577 | 1429 (90.6%) | 226 of 226 | 1203 of 1351 |
+| Polonius | 1579 | 1471 (93.2%) | 245 of 245 | 1226 of 1334 |
+| NLL | 1577 | 1467 (93.0%) | 226 of 226 | 1241 of 1351 |
 
 463 units are out of scope; 344 of them need a nightly feature. CI runs the scoring on Linux
 and fails below a floor a few units under the count there.
@@ -253,11 +287,10 @@ just, axum, nushell, delta, eza, tokei and starship it finds nothing, nor on the
 ## What is left
 
 Every failing unit is one where rustc gives an error ra-jit does not, or gives it on another
-line or with another code. By what is wrong, most first: 14 "lifetime may not live long
-enough" and 11 E0597 not reported, 9 "lifetime may not live long enough" on another line,
-9 with only an error rustc does not give, 8 each of E0716 and E0700, 7 each of E0507 and E0521,
-6 each of E0510 and E0310, and 5 each of E0309, E0311, E0382 and higher-ranked errors not
-reported, then a long tail. The causes, grouped:
+line or with another code. By what is wrong, most first: 11 "lifetime may not live long
+enough" not reported, 9 on another line or with another code, 9 with only an error rustc does
+not give, 8 of E0597 not reported, 7 each of E0716 and E0507, 6 each of E0309 and E0310, and
+5 each of E0311, E0521 and higher-ranked errors not reported, then a long tail. The causes, grouped:
 
 - **Higher-ranked regions and placeholders** (`for<'a>` bounds, closures with higher-ranked
   signatures): rustc checks them with placeholders in universes; ra-jit does not yet, and
@@ -279,7 +312,8 @@ reported, then a long tail. The causes, grouped:
 - **Trait selection's region obligations**: an impl's `T: 'static` proven at an unsizing
   cast. A bound on a closure's type is not proven through the solver: rust-analyzer gives a
   closure one signature, `fn(&'1 T)` for one `'1`, where rustc's is `for<'a> fn(&'a T)`, so
-  proving it would tie every call's borrow to one region.
+  proving it would tie every call's borrow to one region. Only an `Fn` bound with no
+  `for<'a>`, on a closure typed against one, relates its parameters.
 - **Differences in rust-analyzer's MIR lowering** (below).
 
 ## What depends on rust-analyzer's MIR lowering
@@ -336,6 +370,9 @@ missed rather than errors made up:
   in rustc, so what it binds by value is dropped first; rust-analyzer binds them in the
   pattern's order (`dropck/eager-by-ref-binding-for-guards.rs`, where it reports two errors
   rustc does not).
+- Arms after an irrefutable one are not lowered, so their guards are not checked
+  (`&_ => ..., &_ if { b = &true; false } => ...` is an E0510 in rustc,
+  `nll/match-guards-partially-borrow.rs`).
 - Unwind paths are not lowered. rustc's MIR gives every call and drop a cleanup path ending
   at `resume`, where any borrow still live that outlives the function's own regions is an
   error (E0597 for `let x = ...; let r: &'a _ = &x; f();`). ra-jit checks that at each call,

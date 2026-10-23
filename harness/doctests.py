@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """The doctests of real crates, run by `cargo test --doc` and by `cargo ra-jit test --doc`:
-the same tests must end the same way and print the same.
+the same tests must end the same way and print the same, in ra-jit's first run and in its
+second, which reuses what rustc compiled of the examples.
 
     RA_JIT_BIN=../target/release/ra-jit python3 doctests.py [--few] [name-version ...]
 
@@ -43,7 +44,12 @@ def row(spec):
     with tempfile.TemporaryDirectory(prefix="ra-jit-doctests-") as scratch:
         want = tested(crate, [], os.path.join(scratch, "cargo"))
         got = tested(crate, ["ra-jit"], os.path.join(scratch, "ra-jit"))
-    return judged(want, got)
+        # The second run has what rustc compiled of the examples in the first.
+        again = tested(crate, ["ra-jit"], os.path.join(scratch, "ra-jit"))
+    verdict = judged(want, got)
+    if verdict[0] == "same" and want[:2] != again[:2]:
+        return "WRONG", f"the second run differs: {judged(want, again)[1]}"
+    return verdict
 
 
 def judged(want, got):
