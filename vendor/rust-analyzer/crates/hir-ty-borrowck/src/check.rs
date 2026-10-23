@@ -520,7 +520,16 @@ impl<'a, 'db> Checker<'a, '_, 'db> {
         let projection = place.projection.as_slice();
         let local = place.local;
         let what = self.quoted(PlaceRef { local, projection }, "value");
-        if guard.tested.iter().any(|(it, fake)| *it == local && fake.starts_with(projection)) {
+        if !assign && guard.bindings.contains(&local) {
+            self.report(
+                "E0596",
+                span,
+                format!(
+                    "cannot borrow {what} as mutable, as it is immutable for the pattern guard"
+                ),
+            );
+        } else if guard.tested.iter().any(|(it, fake)| *it == local && fake.starts_with(projection))
+        {
             let message = match assign {
                 true => format!("cannot assign {what} in match guard"),
                 false => format!("cannot mutably borrow {what} in match guard"),
@@ -2387,11 +2396,13 @@ impl<'a, 'db> Checker<'a, '_, 'db> {
 
 /// What a `match` arm's guard must leave alone: the places the `match` tests and the
 /// references they are behind, which rustc fake-borrows shallowly through every guard, and
-/// what the arm binds by value, which a guard sees through shared references.
+/// what the arm binds by value, which a guard sees through shared references, as it sees
+/// the arm's bindings.
 #[derive(Default)]
 struct Guard {
     tested: Vec<(LocalId, Vec<PlaceElem>)>,
     bound: Vec<(LocalId, Vec<PlaceElem>)>,
+    bindings: Vec<LocalId>,
 }
 
 /// The [`Guard`] of each expression and pattern in a `match` arm's guard.
@@ -2416,7 +2427,7 @@ fn guard_borrows(ctx: &Ctx<'_, '_>, body: &MirBody<'_>) -> FxHashMap<MirSpan, st
             });
             if let Some(guard) = arm.guard {
                 guarded.push((arms_of.len(), guard));
-                arms_of.push(Vec::new());
+                arms_of.push((Vec::new(), Vec::new()));
             }
         }
         matches.push((Vec::new(), guarded));
@@ -2433,8 +2444,14 @@ fn guard_borrows(ctx: &Ctx<'_, '_>, body: &MirBody<'_>) -> FxHashMap<MirSpan, st
     for (_, block) in body.basic_blocks.iter() {
         for statement in &block.statements {
             let MirSpan::PatId(pat) = statement.span else { continue };
-            let StatementKind::Assign(_, rvalue) = &statement.kind else { continue };
+            let StatementKind::Assign(dest, rvalue) = &statement.kind else { continue };
             if let Some(&(index, arm)) = bound_by.get(&pat) {
+                if let Some(arm) = arm
+                    && dest.projection.as_slice().is_empty()
+                    && !arms_of[arm].1.contains(&dest.local)
+                {
+                    arms_of[arm].1.push(dest.local);
+                }
                 let source = match rvalue {
                     Rvalue::Use(Operand {
                         kind: OperandKind::Copy(place) | OperandKind::Move(place),
@@ -2453,7 +2470,7 @@ fn guard_borrows(ctx: &Ctx<'_, '_>, body: &MirBody<'_>) -> FxHashMap<MirSpan, st
                     if let Some(arm) = arm
                         && by_value
                     {
-                        add(&mut arms_of[arm], place.local, projection);
+                        add(&mut arms_of[arm].0, place.local, projection);
                     }
                 }
                 continue;
@@ -2484,11 +2501,11 @@ fn guard_borrows(ctx: &Ctx<'_, '_>, body: &MirBody<'_>) -> FxHashMap<MirSpan, st
     }
     for (tested, guarded) in matches {
         for (arm, guard) in guarded {
-            let bound = std::mem::take(&mut arms_of[arm]);
-            if tested.is_empty() && bound.is_empty() {
+            let (bound, bindings) = std::mem::take(&mut arms_of[arm]);
+            if tested.is_empty() && bound.is_empty() && bindings.is_empty() {
                 continue;
             }
-            let it = std::rc::Rc::new(Guard { tested: tested.clone(), bound });
+            let it = std::rc::Rc::new(Guard { tested: tested.clone(), bound, bindings });
             let mut stack = vec![guard];
             while let Some(expr) = stack.pop() {
                 out.insert(MirSpan::ExprId(expr), it.clone());
