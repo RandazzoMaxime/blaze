@@ -4257,6 +4257,7 @@ impl<'db> Builder<'_, '_, 'db> {
                     }
                     self.caller_bound(trait_ref, at);
                     self.closure_bound(trait_ref, at);
+                    let trait_ref = self.normalize_closure_args(trait_ref);
                     self.prove(trait_ref, at);
                 }
                 _ => (),
@@ -4319,6 +4320,50 @@ impl<'db> Builder<'_, '_, 'db> {
             return;
         };
         self.relate(inputs, expected, Variance::Invariant, at);
+    }
+
+    /// `trait_ref` with an associated type of a closure's type normalized, to what does not
+    /// name the closure: `Vec<&'a str>: FromIterator<<Map<I, F> as Iterator>::Item>` is about
+    /// the `&'r str` the closure returns.
+    fn normalize_closure_args(
+        &mut self,
+        trait_ref: rustc_type_ir::TraitRef<hir_ty::next_solver::DbInterner<'db>>,
+    ) -> rustc_type_ir::TraitRef<hir_ty::next_solver::DbInterner<'db>> {
+        use rustc_type_ir::inherent::GenericArg as _;
+        if !trait_ref.args.iter().any(|arg| {
+            arg.as_type()
+                .is_some_and(|ty| matches!(ty.kind(), TyKind::Alias(..)) && names_closure(ty))
+        }) {
+            return trait_ref;
+        }
+        let args: Vec<hir_ty::next_solver::GenericArg<'db>> = trait_ref
+            .args
+            .iter()
+            .map(|arg| match arg.as_type() {
+                Some(ty) if matches!(ty.kind(), TyKind::Alias(..)) && names_closure(ty) => {
+                    match self.normalize(ty) {
+                        // Not one with a trait object, whose lifetime an impl may leave out,
+                        // `impl Params for &[&dyn ToSql]`, which rust-analyzer makes `'static`.
+                        Some(normalized)
+                            if !names_closure(normalized)
+                                && !normalized.walk().any(|it| {
+                                    it.as_type()
+                                        .is_some_and(|it| matches!(it.kind(), TyKind::Dynamic(..)))
+                                })
+                                && !matches!(
+                                    normalized.kind(),
+                                    TyKind::Alias(..) | TyKind::Infer(_)
+                                ) =>
+                        {
+                            normalized.into()
+                        }
+                        _ => arg,
+                    }
+                }
+                _ => arg,
+            })
+            .collect();
+        rustc_type_ir::TraitRef::new(self.interner(), trait_ref.def_id, args)
     }
 
     /// A trait bound on a type parameter, proven by the one where clause of this body that
