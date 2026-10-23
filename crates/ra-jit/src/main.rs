@@ -146,6 +146,9 @@ struct Args {
     also: Vec<PathBuf>,
     /// What the code has a debugger told: what `profile` asks for.
     debug: plan::Described,
+    /// Whether the flags rustc is given cap the lints, so that a lint the source denies may
+    /// not fail its build.
+    lints_capped: bool,
     /// The root of the workspace `project` is in. Another checkout has crates of the same
     /// names, and the ones to build are the ones below this.
     checkout: PathBuf,
@@ -311,6 +314,7 @@ impl Args {
             },
             also,
             debug: plan::Described::NOTHING,
+            lints_capped: false,
             checkout: PathBuf::new(),
             base: None,
             members: Arc::default(),
@@ -1974,7 +1978,7 @@ impl Checkouts {
             None => self.debug[at].debug.level,
         };
         let debug = plan::Described { level, ..self.debug[at].debug };
-        Ok(Parts { root, base, members, debug })
+        Ok(Parts { root, base, members, debug, lints_capped: self.debug[at].lints_capped })
     }
 
     /// Whether the program of the checkout `project` is of is one rustc links from bitcode.
@@ -2377,6 +2381,7 @@ struct Parts {
     members: Arc<FxHashSet<ide_db::base_db::Crate>>,
     /// What the build has a debugger told.
     debug: plan::Described,
+    lints_capped: bool,
 }
 
 /// Whether the files of a package under `dir`, a directory of the checkout at `base`, are
@@ -2516,7 +2521,8 @@ fn workspace_at(
              `rustup component add rust-src` installs it"
         );
     }
-    let mut debug = plan::Whole { debug: plan::Described::NOTHING, lto: false };
+    let mut debug =
+        plan::Whole { debug: plan::Described::NOTHING, lto: false, lints_capped: false };
     let mut scripts = None;
     if let ProjectWorkspaceKind::Cargo { cargo, .. } = &mut workspace.kind {
         if !selection.dev_deps {
@@ -4531,6 +4537,12 @@ const BORROWCK: &[&str] = &[
     "E0594", "E0596", "E0597", "E0621", "E0716", "borrowck",
 ];
 
+/// The lints rust-analyzer finds where rustc does, and nowhere else, as `lints_ui.py` scores
+/// them against rustc's UI tests. None is denied by default, so one at the level of an
+/// error is one a source denies, which no flag but `--cap-lints` or `--force-warn` undoes.
+const DENIED: &[&str] =
+    &["non_snake_case", "non_camel_case_types", "non_upper_case_globals", "unused_must_use"];
+
 /// The errors written in the edited files, as rust-analyzer finds them, as rustc writes them
 /// with paths from `root`. Nothing may reach them, so the build never looks at them.
 fn broken_in(
@@ -4539,6 +4551,7 @@ fn broken_in(
     watched: &Sources,
     root: &Path,
     within: Option<Arc<FxHashSet<ide_db::base_db::Crate>>>,
+    lints: bool,
 ) -> Option<String> {
     let threads = std::thread::available_parallelism().map_or(1, |it| it.get());
     let config = ide_diagnostics::DiagnosticsConfig::test_sample();
@@ -4562,9 +4575,13 @@ fn broken_in(
                             })
                             .filter(|it| {
                                 let code = it.code.as_str();
+                                // rustc says nothing of most lints in what another crate's
+                                // macro expands to.
+                                let expanded = it.main_node.is_some_and(|it| it.file_id.is_macro());
                                 it.severity == ide_db::Severity::Error
                                     && (SURE.contains(&code)
-                                        || refuse_borrowck && BORROWCK.contains(&code))
+                                        || refuse_borrowck && BORROWCK.contains(&code)
+                                        || lints && !expanded && DENIED.contains(&code))
                             })
                             .map(|it| (it.range, it.code.as_str(), it.message))
                             .collect::<Vec<_>>()
@@ -4784,6 +4801,7 @@ fn build_batch(db: &RootDatabase, args: Args) -> anyhow::Result<()> {
             selection: args.selection.clone(),
             also: Vec::new(),
             debug: args.debug,
+            lints_capped: args.lints_capped,
             checkout: args.checkout.clone(),
             base: args.base.clone(),
             members: args.members.clone(),
@@ -4883,7 +4901,8 @@ impl Target {
     fn args(self, daemon: &Args, checkouts: &Checkouts) -> anyhow::Result<Args> {
         let Target { project, krate, batch, out, patch, link_cmd, splice, symbol_files } = self;
         let project = project.unwrap_or_else(|| daemon.project.clone());
-        let Parts { root: checkout, base, members, debug } = checkouts.parts(&project)?;
+        let Parts { root: checkout, base, members, debug, lints_capped } =
+            checkouts.parts(&project)?;
         let symbol_files =
             if symbol_files.is_empty() { daemon.symbol_files.clone() } else { symbol_files };
         let batch = batch.unwrap_or_else(|| {
@@ -4896,6 +4915,7 @@ impl Target {
             base,
             members,
             debug,
+            lints_capped,
             krate,
             batch,
             widened: Vec::new(),
@@ -6377,7 +6397,7 @@ fn follow_cargo(
             }
             seen.1
         };
-        let Parts { root, base, members, debug } = checkouts.parts(&args.project)?;
+        let Parts { root, base, members, debug, lints_capped } = checkouts.parts(&args.project)?;
         let mut names = args.crates().filter(|it| ready.contains(&root.join(it.as_str()))).cloned();
         if let Some(krate) = names.next() {
             let of_ready = Args {
@@ -6388,6 +6408,7 @@ fn follow_cargo(
                 base,
                 members,
                 debug,
+                lints_capped,
                 ..args.clone()
             };
             resolve_crates(db, &of_ready, beside_cargo())?;
@@ -6525,8 +6546,9 @@ fn run_holding(
     }
     let built = follow_cargo(&mut db, &mut vfs, &mut checkouts, &args, &listed)?;
     let beside = built.is_some();
-    let Parts { root, base, members, debug } = checkouts.parts(&args.project)?;
+    let Parts { root, base, members, debug, lints_capped } = checkouts.parts(&args.project)?;
     (args.checkout, args.base, args.members, args.debug) = (root, base, members, debug);
+    args.lints_capped = lints_capped;
     // The names are resolved before cargo says which program it built: those of the crates
     // it built are, and not of every crate of the workspace.
     if let Some(built) = built {
@@ -6575,8 +6597,8 @@ fn run_holding(
     // What the other checkouts don't share with this one, before a request waits for it.
     for also in &args.also {
         let start = Instant::now();
-        let Parts { root: checkout, base, members, debug } = checkouts.parts(also)?;
-        let of_it = Args { checkout, base, members, debug, ..args.clone() };
+        let Parts { root: checkout, base, members, debug, lints_capped } = checkouts.parts(also)?;
+        let of_it = Args { checkout, base, members, debug, lints_capped, ..args.clone() };
         let resolved = resolve_crates(&db, &of_it, cores())?;
         eprintln!("resolve {}: {resolved} crates in {:.1?}", also.display(), start.elapsed());
     }
@@ -6612,6 +6634,7 @@ fn run_holding(
             base: args.base,
             members: args.members,
             debug: args.debug,
+            lints_capped: args.lints_capped,
             selection: args.selection,
             ..whole
         };
@@ -6645,7 +6668,7 @@ fn run_holding(
         let mut edited: Vec<_> = paths.keys().copied().collect();
         edited.sort_unstable();
         let sources = Sources { paths };
-        let broken = broken_in(&db, &edited, &sources, &args.checkout, None);
+        let broken = broken_in(&db, &edited, &sources, &args.checkout, None, !args.lints_capped);
         let why =
             hir::attach_db(&db, || refusal(&db, &edited, &sources, &args.checkout, broken, None));
         if let Some(why) = why {
@@ -8054,9 +8077,10 @@ impl Program {
         new: &[ide_db::base_db::Crate],
         files: &[WatchedFile],
     ) -> anyhow::Result<()> {
-        let Parts { root, base, members, debug } = parts;
+        let Parts { root, base, members, debug, lints_capped } = parts;
         (self.args.checkout, self.args.base) = (root, base);
         (self.args.members, self.args.debug) = (members, debug);
+        self.args.lints_capped = lints_capped;
         (self.whole, self.moved) = (None, true);
         self.unbuilt.stale = true;
         match linked {
@@ -8210,10 +8234,10 @@ impl Program {
         let (warm, broken) = std::thread::scope(|scope| {
             let check = {
                 let (db, edited, root) = (db.clone(), &edited, &args.checkout);
-                let within = listed.programs(&db);
+                let (within, lints) = (listed.programs(&db), !args.lints_capped);
                 scope.spawn(move || {
                     let start = Instant::now();
-                    let broken = broken_in(&db, edited, paths, root, within);
+                    let broken = broken_in(&db, edited, paths, root, within, lints);
                     if std::env::var_os("RA_JIT_STATS").is_some() {
                         eprintln!("check-us: {}", start.elapsed().as_micros());
                     }
