@@ -5088,7 +5088,17 @@ impl<'a, 'db> ObjectCodegen<'a, 'db> {
     /// function of another compiles a copy with its own.
     fn as_its_crate_compiles(&self, instance: &Instance) -> bool {
         let InstanceDef::Fn(func) = instance.def else { return false };
-        crate_checks_overflow(self.db, func.krate(self.db)).is_none_or(|it| it == instance.checked)
+        match crate_checks_overflow(self.db, func.krate(self.db)) {
+            Some(written_with) => written_with == instance.checked,
+            // The standard library is built without the checks, and an `#[inline]` function of
+            // it that takes them from its caller is compiled by a caller that checks with them,
+            // as rustc does: a copy the standard library's build exports has none.
+            None => {
+                let flags = AttrFlags::query(self.db, func.into());
+                let inherits = AttrFlags::RUSTC_INHERIT_OVERFLOW_CHECKS | AttrFlags::IS_INLINE;
+                !instance.checked || !flags.contains(inherits)
+            }
+        }
     }
 
     /// The instance as the crate rustc had compile it does: `instance` is as the crate that
