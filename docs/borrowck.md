@@ -116,9 +116,13 @@ All of these are rustc's, written from `compiler/rustc_borrowck` at the pinned n
   relates regions and which is only checked; an `impl Trait` likewise, as the arguments it
   captures; an `async` block as what it captures, as a closure), and lifetimes written in `let` annotations (`let _: T = value`
   of any value included, and of each variable a destructuring pattern binds, `y` in
-  `let (y, _): (&'static u32, u32)`), struct and variant patterns that spell out generic
-  arguments (`let Foo::<'static> { .. } = foo`) and constant patterns (`<() as Foo<'static>>::C`,
-  compared as `PartialEq` compares), casts, turbofishes (a method's own, `x.f::<&'a T>()`, too) and struct
+  `let (y, _): (&'static u32, u32)`; a lifetime left out, or a `_`, that an alias uses twice
+  is one lifetime, as in `let (y, _z): (&u32, &u32)` written `Pair<u32>` with
+  `type Pair<'a, T> = (&'a T, &'a T)`; the variable's type is well-formed, so
+  `let z: &'a &u32 = &&y` needs `y` to outlive `'a`), struct and variant patterns that spell out generic
+  arguments (`let Foo::<'static> { .. } = foo`) and constant patterns (`<() as Foo<'a>>::C`,
+  whose type is a subtype of what it matches, as rustc ascribes it, so it matches a
+  `&'static u32` only if `'a: 'static`), casts, turbofishes (a method's own, `x.f::<&'a T>()`, too) and struct
   literal and variant paths, in closures too; `Self { .. }` and `Self(..)` in an impl have the
   impl's self type, with its anonymous lifetimes (`impl Foo<'_>`) as the impl's own. A function item called through a variable
   (`let f = foo::<&'static u32>; f(&x)`, or through a reference, `let f = &foo::<..>`) has the
@@ -229,8 +233,8 @@ With no borrow checker, the 245 units rustc accepts would pass. Now:
 
 | Mode | In scope | Pass | rustc accepts, ra-jit too | rustc rejects, same errors |
 |---|---|---|---|---|
-| Polonius | 1579 | 1429 (90.5%) | 245 of 245 | 1184 of 1334 |
-| NLL | 1577 | 1425 (90.4%) | 226 of 226 | 1199 of 1351 |
+| Polonius | 1579 | 1432 (90.7%) | 245 of 245 | 1187 of 1334 |
+| NLL | 1577 | 1428 (90.6%) | 226 of 226 | 1202 of 1351 |
 
 463 units are out of scope; 344 of them need a nightly feature. CI runs the scoring on Linux
 and fails below a floor a few units under the count there.
@@ -243,8 +247,8 @@ just, axum, nushell, delta, eza, tokei and starship it finds nothing, nor on the
 ## What is left
 
 Every failing unit is one where rustc gives an error ra-jit does not, or gives it on another
-line or with another code. By what is wrong, most first: 16 "lifetime may not live long
-enough" and 12 E0597 not reported, 10 with only an error rustc does not give, 9 "lifetime may
+line or with another code. By what is wrong, most first: 14 "lifetime may not live long
+enough" and 11 E0597 not reported, 10 with only an error rustc does not give, 9 "lifetime may
 not live long enough" on another line, 8 each of E0716 and E0700, 7 each of E0507 and E0521,
 6 each of E0510 and E0310, and 5 each of E0309, E0311, E0382 and higher-ranked errors not
 reported, then a long tail. The causes, grouped:
