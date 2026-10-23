@@ -338,6 +338,9 @@ pub(crate) struct Built {
     started: u128,
     artifacts: Vec<Artifact>,
     scripts: Vec<BuildScript>,
+    /// What cargo said of each build script it ran and each proc macro it built, a line
+    /// each as it said it, a fresh one too.
+    said: Vec<String>,
 }
 
 /// The crates of a workspace the first build of it leaves to the daemon.
@@ -496,7 +499,8 @@ impl Built {
         cargo.stdout(Stdio::piped());
         let mut cargo = cargo.spawn().context("running cargo")?;
         let said = cargo.stdout.take().context("cargo has no output")?;
-        let mut built = Built { started, artifacts: Vec::new(), scripts: Vec::new() };
+        let mut built =
+            Built { started, artifacts: Vec::new(), scripts: Vec::new(), said: Vec::new() };
         let ahead = ahead.map(|it| it.config.id());
         // Cargo waits while its output is unread, so the daemon is told on a thread of its own.
         let (tell, told) = std::sync::mpsc::channel::<Request>();
@@ -510,17 +514,20 @@ impl Built {
             // The worker that loads the workspace meanwhile reads what the scripts said and
             // where the proc macros are from cargo's one build of them, and the symbols of
             // each library as it is built.
-            let loads = match &message {
+            let scripted = match &message {
                 Message::BuildScriptExecuted(_) => true,
-                Message::CompilerArtifact(it) => {
-                    it.target.is_proc_macro()
-                        || it.filenames.iter().any(|it| it.extension() == Some("rlib"))
-                }
+                Message::CompilerArtifact(it) => it.target.is_proc_macro(),
                 _ => false,
             };
+            let loads = scripted
+                || matches!(&message, Message::CompilerArtifact(it)
+                    if it.filenames.iter().any(|it| it.extension() == Some("rlib")));
             if loads && let Some(id) = &ahead {
                 let said = Request::Said { id: id.clone(), line: serde_json::to_string(&message)? };
                 let _ = tell.send(said);
+            }
+            if scripted {
+                built.said.push(serde_json::to_string(&message)?);
             }
             match message {
                 Message::CompilerArtifact(artifact) => built.artifacts.push(artifact),
@@ -844,6 +851,13 @@ impl State {
             env: worker_env(),
         };
         let sysroot_libraries = sysroot_libraries();
+        let scripts = match kept_said(&dir, &built.said) {
+            Ok(file) => Some(file),
+            Err(why) => {
+                eprintln!("ra-jit: what the build scripts said is not kept: {why}");
+                None
+            }
+        };
         let checkout = |unit_test: bool| Checkout {
             key: format!("{key}{}", if unit_test { "-unit" } else { "" }),
             generation: 0,
@@ -853,6 +867,7 @@ impl State {
             programs: Vec::new(),
             sources: Vec::new(),
             env: env.clone(),
+            scripts: scripts.clone(),
         };
         let mut checkouts = [checkout(false), checkout(true)];
         let executables = artifacts.iter().filter(|it| !it.target.is_custom_build());
@@ -1028,6 +1043,20 @@ fn is_placed(from: &Path, to: &Path) -> bool {
         && from.len() == to.len()
         && written(&from).is_some()
         && written(&from) == written(&to)
+}
+
+/// Writes `said`, what cargo said of the build scripts and proc macros of a build, to the
+/// file `scripts` in `dir`, whole or not at all: a worker started after the build loads the
+/// workspace with it, and does not build the scripts and proc macros again in a target
+/// directory of its own to find out.
+fn kept_said(dir: &Path, said: &[String]) -> std::io::Result<PathBuf> {
+    std::fs::create_dir_all(dir)?;
+    let file = dir.join("scripts");
+    let mut new = file.as_os_str().to_owned();
+    new.push(format!(".{}.new", std::process::id()));
+    std::fs::write(&new, said.join("\n"))?;
+    std::fs::rename(&new, &file)?;
+    Ok(file)
 }
 
 /// The package of what a debugger reads of the executable at `binary`, linked from `object`

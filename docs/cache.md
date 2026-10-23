@@ -156,7 +156,8 @@ A remote is a directory or `s3://bucket/prefix`. It holds sealed packs under the
 their bytes, a list of the keys in each pack, and one manifest per project that lists the
 packs that project's builds were served from.
 
-    packs/<sha256>.pack.zst      a pack, compressed with zstd again (its blocks already are)
+    packs/<sha256>.pack          a pack as the store has it (its blocks are compressed)
+    packs/<sha256>.pack.zst      a pack an older ra-jit sent compressed whole, still read
     keys/<sha256>                the keys of one pack
     manifests/<project>          one line per pack
     units/<sha256>, deps/<project>   cargo's builds of dependencies, see below
