@@ -17225,6 +17225,18 @@
      "crate_type": "lib",
      "deps": [
       {
+       "i": 85,
+       "name": "crc32fast"
+      },
+      {
+       "i": 146,
+       "name": "hashbrown"
+      },
+      {
+       "i": 188,
+       "name": "indexmap"
+      },
+      {
        "i": 218,
        "name": "memchr"
       },
@@ -17249,6 +17261,9 @@
       "std",
       "unaligned",
       "wasm",
+      "write",
+      "write_core",
+      "write_std",
       "xcoff"
      ],
      "kind": "lib",
@@ -17281,6 +17296,9 @@
       "std",
       "unaligned",
       "wasm",
+      "write",
+      "write_core",
+      "write_std",
       "xcoff"
      ],
      "kind": "custom-build",
@@ -17318,6 +17336,9 @@
       "std",
       "unaligned",
       "wasm",
+      "write",
+      "write_core",
+      "write_std",
       "xcoff"
      ],
      "kind": "custom-build",
@@ -34449,6 +34470,18 @@
      "crate_type": "lib",
      "deps": [
       {
+       "i": 83,
+       "name": "crc32fast"
+      },
+      {
+       "i": 143,
+       "name": "hashbrown"
+      },
+      {
+       "i": 185,
+       "name": "indexmap"
+      },
+      {
        "i": 218,
        "name": "memchr"
       },
@@ -34473,6 +34506,9 @@
       "std",
       "unaligned",
       "wasm",
+      "write",
+      "write_core",
+      "write_std",
       "xcoff"
      ],
      "kind": "lib",
@@ -34505,6 +34541,9 @@
       "std",
       "unaligned",
       "wasm",
+      "write",
+      "write_core",
+      "write_std",
       "xcoff"
      ],
      "kind": "custom-build",
@@ -34542,6 +34581,9 @@
       "std",
       "unaligned",
       "wasm",
+      "write",
+      "write_core",
+      "write_std",
       "xcoff"
      ],
      "kind": "custom-build",
@@ -51705,6 +51747,18 @@
      "crate_type": "lib",
      "deps": [
       {
+       "i": 85,
+       "name": "crc32fast"
+      },
+      {
+       "i": 147,
+       "name": "hashbrown"
+      },
+      {
+       "i": 189,
+       "name": "indexmap"
+      },
+      {
        "i": 219,
        "name": "memchr"
       },
@@ -51729,6 +51783,9 @@
       "std",
       "unaligned",
       "wasm",
+      "write",
+      "write_core",
+      "write_std",
       "xcoff"
      ],
      "kind": "lib",
@@ -51761,6 +51818,9 @@
       "std",
       "unaligned",
       "wasm",
+      "write",
+      "write_core",
+      "write_std",
       "xcoff"
      ],
      "kind": "custom-build",
@@ -51798,6 +51858,9 @@
       "std",
       "unaligned",
       "wasm",
+      "write",
+      "write_core",
+      "write_std",
       "xcoff"
      ],
      "kind": "custom-build",
@@ -68956,6 +69019,18 @@
      "crate_type": "lib",
      "deps": [
       {
+       "i": 83,
+       "name": "crc32fast"
+      },
+      {
+       "i": 144,
+       "name": "hashbrown"
+      },
+      {
+       "i": 186,
+       "name": "indexmap"
+      },
+      {
        "i": 219,
        "name": "memchr"
       },
@@ -68980,6 +69055,9 @@
       "std",
       "unaligned",
       "wasm",
+      "write",
+      "write_core",
+      "write_std",
       "xcoff"
      ],
      "kind": "lib",
@@ -69012,6 +69090,9 @@
       "std",
       "unaligned",
       "wasm",
+      "write",
+      "write_core",
+      "write_std",
       "xcoff"
      ],
      "kind": "custom-build",
@@ -69049,6 +69130,9 @@
       "std",
       "unaligned",
       "wasm",
+      "write",
+      "write_core",
+      "write_std",
       "xcoff"
      ],
      "kind": "custom-build",

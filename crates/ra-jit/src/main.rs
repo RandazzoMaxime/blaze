@@ -371,6 +371,9 @@ struct Resolver<'a> {
     /// The crates the programs are made of, which a file that several crates share is read as
     /// a module of.
     programs: Option<Arc<FxHashSet<ide_db::base_db::Crate>>>,
+    /// The object is the standard library's, which is split into parts for the linker
+    /// ([`std_unit`]).
+    library: bool,
 }
 
 /// The standard library ra-jit built before the program ([`std_unit`]).
@@ -426,13 +429,28 @@ pub(crate) fn unlinked_panic_runtime(db: &RootDatabase, program: &[Crate]) -> &'
 fn defined_symbols(path: &Path) -> anyhow::Result<FxHashSet<String>> {
     use object::{Object as _, ObjectSymbol as _, SymbolScope};
     let bytes = std::fs::read(path).with_context(|| format!("reading {}", path.display()))?;
-    let file =
-        object::File::parse(&*bytes).with_context(|| format!("parsing {}", path.display()))?;
-    // A hidden one stands in for a function ra-jit could not compile, which a program
-    // compiles itself to be told why. A thread-local is not a "definition" to `object`.
-    let defined =
-        file.symbols().filter(|it| !it.is_undefined() && it.scope() == SymbolScope::Dynamic);
-    Ok(defined.filter_map(|it| it.name().ok().map(str::to_owned)).collect())
+    let objects: Vec<&[u8]> = if link::split::is_archive(&bytes) {
+        let archive = object::read::archive::ArchiveFile::parse(&*bytes)
+            .with_context(|| format!("parsing {}", path.display()))?;
+        archive
+            .members()
+            .map(|it| Ok(it?.data(&*bytes)?))
+            .collect::<object::Result<_>>()
+            .with_context(|| format!("parsing {}", path.display()))?
+    } else {
+        vec![&bytes]
+    };
+    let mut names = FxHashSet::default();
+    for bytes in objects {
+        let file =
+            object::File::parse(bytes).with_context(|| format!("parsing {}", path.display()))?;
+        // A hidden one stands in for a function ra-jit could not compile, which a program
+        // compiles itself to be told why. A thread-local is not a "definition" to `object`.
+        let defined =
+            file.symbols().filter(|it| !it.is_undefined() && it.scope() == SymbolScope::Dynamic);
+        names.extend(defined.filter_map(|it| it.name().ok().map(str::to_owned)));
+    }
+    Ok(names)
 }
 
 /// The [`SymbolTable::generation`] and the checkout that paths were found with.
@@ -501,6 +519,7 @@ impl<'a> Resolver<'a> {
             prebuilt,
             members: args.members.clone(),
             programs: listed.programs(db),
+            library: args.library,
         }
     }
 
@@ -1127,7 +1146,7 @@ impl SymbolResolver for Resolver<'_> {
                 let (shared_paths, linked) = (self.shared_paths.clone(), self.linked.clone());
                 let (in_full, prebuilt) = (self.in_full.clone(), self.prebuilt.clone());
                 let members = self.members.clone();
-                let programs = self.programs.clone();
+                let (programs, library) = (self.programs.clone(), self.library);
                 scope.spawn(move || {
                     let resolver = Resolver {
                         db: &db,
@@ -1145,6 +1164,7 @@ impl SymbolResolver for Resolver<'_> {
                         prebuilt,
                         members,
                         programs,
+                        library,
                     };
                     hir::attach_db(&db, || {
                         loop {
@@ -1179,6 +1199,10 @@ impl SymbolResolver for Resolver<'_> {
 
     fn debug_apart(&self) -> Option<String> {
         self.apart.as_ref().map(|it| it.to_string_lossy().into_owned())
+    }
+
+    fn debug_grouped(&self) -> bool {
+        self.library
     }
 
     fn function(&self, func: FunctionId) -> Option<String> {
@@ -3606,13 +3630,16 @@ fn std_unit(
     // for by its name: it comes with the crates that use it.
     unit.retain(|(name, _)| crates_named(db, name, args).is_ok());
     let Some(((first, _), rest)) = unit.split_first() else { return Ok(None) };
+    // Lines at most, as rustc's own standard library is described: the variables of every
+    // function of it would be most of the object, and the linker reads all of it.
+    let debug = plan::Described { level: args.debug.level.min(plan::Level::Lines), ..args.debug };
     let mut hasher = Sha256::new();
     let mut field = |bytes: &[u8]| {
         hasher.update((bytes.len() as u64).to_le_bytes());
         hasher.update(bytes);
     };
-    field(b"ra-jit standard library 1");
-    field(format!("{:?} {:?}", args.selection.target, args.debug).as_bytes());
+    field(b"ra-jit standard library 2");
+    field(format!("{:?} {debug:?}", args.selection.target).as_bytes());
     // A crate that is not the library's own is told by where its source is.
     let mut described: Vec<String> = members
         .iter()
@@ -3631,9 +3658,11 @@ fn std_unit(
         field(it.as_bytes());
     }
     let key: [u8; 32] = hasher.finalize().into();
-    let path = args.out.with_extension("std.o");
+    let object = args.out.with_extension("std.o");
+    let archive = args.out.with_extension("std.a");
     let store = ra_jit_store::Store::global();
     if let Some(bytes) = store.and_then(|it| it.get(&key)) {
+        let path = if link::split::is_archive(&bytes) { archive } else { object };
         std::fs::write(&path, bytes).with_context(|| format!("writing {}", path.display()))?;
         eprintln!("standard library: from the store, {} crates", members.len());
         return Ok(Some(path));
@@ -3642,10 +3671,11 @@ fn std_unit(
         krate: first.clone(),
         batch: rest.iter().map(|it| it.0.clone()).collect(),
         widened: Vec::new(),
-        out: path.clone(),
+        out: object.clone(),
         report: None,
         exe: None,
         library: true,
+        debug,
         ..args.clone()
     };
     let built = build_unheld(db, table, &of_unit, &mut Rejections::default(), listed)
@@ -3655,9 +3685,30 @@ fn std_unit(
         })?;
     eprint!("standard library: {} crates, ", members.len());
     report(&built);
+    let mut path = object;
+    let mut bytes = std::fs::read(&path).with_context(|| format!("reading {}", path.display()))?;
+    if object::FileKind::parse(&*bytes).is_ok_and(|it| it == object::FileKind::Elf64) {
+        let start = Instant::now();
+        match link::split::split(&bytes, link::split::PARTS) {
+            Ok(parts) => {
+                eprintln!(
+                    "standard library: {} parts in {:.1?}",
+                    link::split::PARTS + 1,
+                    start.elapsed()
+                );
+                std::fs::remove_file(&path)
+                    .with_context(|| format!("removing {}", path.display()))?;
+                path = archive;
+                std::fs::write(&path, &parts)
+                    .with_context(|| format!("writing {}", path.display()))?;
+                bytes = parts;
+            }
+            Err(e) => eprintln!("standard library: kept as one object: {e:#}"),
+        }
+    }
     if let Some(store) = store {
         store.settled();
-        store.insert(&key, &std::fs::read(&path)?);
+        store.insert(&key, &bytes);
         store.flush();
     }
     Ok(Some(path))
