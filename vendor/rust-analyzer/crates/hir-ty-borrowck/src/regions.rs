@@ -4286,12 +4286,16 @@ impl<'db> Builder<'_, '_, 'db> {
         for clause in GenericPredicates::query_all(db, trait_ref.def_id.0.into())
             .iter_instantiated(self.interner(), trait_ref.args.as_slice())
         {
+            // `trait Trait<'a>: 'a` of `Trait<'static>` too.
             if let ClauseKind::TypeOutlives(OutlivesPredicate(ty, region)) =
                 clause.skip_norm_wip().kind().skip_binder()
                 && ty == trait_ref.self_ty()
-                && !matches!(region.kind(), RegionKind::ReStatic | RegionKind::ReBound(..))
+                && !matches!(region.kind(), RegionKind::ReBound(..))
             {
-                regions.push(region);
+                regions.push(match region.kind() {
+                    RegionKind::ReStatic => self.static_region(),
+                    _ => region,
+                });
             }
         }
         regions
