@@ -100,7 +100,8 @@ const BORROWCK_CODES: &[&str] = &[
 ];
 
 /// `ra-jit borrowck --project DIR`: the borrow checker's errors in the crates of the cargo
-/// workspace at `DIR`, one JSON object per line, and a last line counting files and errors.
+/// workspace at `DIR`, one JSON object per line, and a last line counting files, errors and
+/// `unused_mut` warnings.
 fn check_project(project: &str) -> anyhow::Result<()> {
     let root = AbsPathBuf::assert_utf8(dunce::canonicalize(project)?);
     let cargo_config = CargoConfig {
@@ -136,6 +137,7 @@ fn check_project(project: &str) -> anyhow::Result<()> {
     });
     let stdout = std::io::stdout();
     let mut errors = 0;
+    let mut unused_mut = 0;
     for &file in &files {
         let found = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             diagnostics(&db, &config, file)
@@ -146,9 +148,14 @@ fn check_project(project: &str) -> anyhow::Result<()> {
             Ok(found) => {
                 for it in found {
                     let code = it["code"].as_str().unwrap_or_default();
-                    if it["severity"] == "Error" && BORROWCK_CODES.contains(&code) {
+                    if it["severity"] == "Error"
+                        && (BORROWCK_CODES.contains(&code) || code == "unused_mut")
+                    {
                         errors += 1;
                         writeln!(stdout, "{}", serde_json::json!({ "path": path, "error": it }))?;
+                    } else if code == "unused_mut" {
+                        unused_mut += 1;
+                        writeln!(stdout, "{}", serde_json::json!({ "path": path, "warning": it }))?;
                     }
                 }
             }
@@ -162,7 +169,12 @@ fn check_project(project: &str) -> anyhow::Result<()> {
     writeln!(
         stdout.lock(),
         "{}",
-        serde_json::json!({ "files": files.len(), "errors": errors, "secs": secs })
+        serde_json::json!({
+            "files": files.len(),
+            "errors": errors,
+            "unused_mut": unused_mut,
+            "secs": secs
+        })
     )?;
     Ok(())
 }
