@@ -368,7 +368,8 @@ impl LinkLine {
 
     /// The line without rustc's object of the names the program keeps once it is gone:
     /// `-Csave-temps` keeps rustc's directory, and nothing else does.
-    pub(crate) fn present(mut self) -> LinkLine {
+    #[cfg(test)]
+    fn present(mut self) -> LinkLine {
         self.args.retain(|it| !is_symbols(it) || Path::new(it).exists());
         self
     }
@@ -377,11 +378,6 @@ impl LinkLine {
     fn output(&self) -> Option<&str> {
         let at = self.args.iter().position(|it| it == "-o")?;
         self.args.get(at + 1).map(|it| &**it)
-    }
-
-    /// Whether `file` is one of what is linked.
-    pub(crate) fn has(&self, file: &str) -> bool {
-        self.args.iter().any(|it| it == file)
     }
 
     /// What rustc built that is linked, and the standard library's crates next to it.

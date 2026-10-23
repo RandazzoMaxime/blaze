@@ -865,8 +865,10 @@ class Soak:
         self.keep_logs(where)
         for tree in self.touched:
             # What the daemon linked of the tree that differs.
-            for at, built in enumerate(glob.glob(os.path.join(tree.root, "target", "ra-jit", "*", "programs", "*", "ra-jit.o"))):
-                shutil.copy(built, os.path.join(where, f"{self.name(tree).replace('/', '-')}-{at}-{os.path.basename(os.path.dirname(built))}.o"))
+            # Between links the daemon keeps it packed, as `ra-jit.o.zst`.
+            for at, built in enumerate(glob.glob(os.path.join(tree.root, "target", "ra-jit", "*", "programs", "*", "ra-jit.o*"))):
+                kept = f"{self.name(tree).replace('/', '-')}-{at}-{os.path.basename(os.path.dirname(built))}.o"
+                shutil.copy(built, os.path.join(where, kept + (".zst" if built.endswith(".zst") else "")))
             diff = tree.git("diff", "HEAD", check=False).stdout if os.path.isdir(tree.root) else ""
             open(os.path.join(where, self.name(tree).replace("/", "-") + ".diff"), "w").write(diff)
         self.state["failures"].append(dict(step=step, why=why[:2000]))

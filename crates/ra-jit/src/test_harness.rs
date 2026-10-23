@@ -37,9 +37,6 @@ pub(crate) fn kept(was: &str, text: String) -> String {
 pub(crate) struct Harness {
     /// The module, which starts with [`MARK`].
     pub(crate) text: String,
-    /// The tests and how each is marked, without where they are: what rustc's harness
-    /// lists the same while it is.
-    pub(crate) listed: String,
 }
 
 /// One test as libtest describes it.
@@ -164,16 +161,7 @@ pub(crate) fn module(
         Some(it) if it.parent().is_some_and(|it| it.ends_with("tests")) => "IntegrationTest",
         _ => "Unknown",
     };
-    let listed = tests.iter().map(|it| {
-        format!(
-            "{} {} {:?} {:?}\n",
-            it.path.join("::"),
-            it.ignore,
-            it.ignore_message,
-            it.should_panic
-        )
-    });
-    Some(Harness { text: text(&tests, test_type), listed: listed.collect() })
+    Some(Harness { text: text(&tests, test_type) })
 }
 
 fn text(tests: &[Test], test_type: &str) -> String {

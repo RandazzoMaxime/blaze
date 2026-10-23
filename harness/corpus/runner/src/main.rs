@@ -581,6 +581,9 @@ fn main() {
     println!("raw_newline {:?}", cases::raw_newline::run());
     println!("tail_temporaries {:?}", cases::tail_temporaries::run(true));
     println!("tail_temporaries {:?}", cases::tail_temporaries::run(false));
+    println!("const_field_names {:?}", cases::const_field_names::run());
+    println!("object_lifetime_default {:?}", cases::object_lifetime_default::run());
+    println!("cargo_borrows {:?}", cases::cargo_borrows::run());
     println!("shared_map {:?}", cases::shared_map::build());
     println!("lazy statics {:?}", cases::repeated_statics::lazy());
     println!("repeated statics in_closure {:?}", cases::repeated_statics::in_closure());
@@ -638,6 +641,8 @@ fn main() {
         cases::variadic::string(c"text")
     );
     println!("const_pointer_into_const {:?}", cases::const_pointer_into_const::run());
+    let words: [&[u8]; 8] = [b"do", b"if", b"of", b"for", b"lex", b"while", b"", b"in"];
+    println!("const_tables {}", cases::const_tables::run(&words));
     println!("enum_ordering {:?}", cases::enum_ordering::run(7));
     {
         use cases::added_strings::Segment;
@@ -739,6 +744,7 @@ fn main() {
     case!(cases::provided_futures::run(7));
     case!(cases::optional_repeats_per_field::run(5));
     case!(cases::deep_send_cycle::run(3));
+    case!(cases::returned_in_place::run());
 }
 
 fn nest<T>(depth: u8, value: T) -> Option<Option<T>> {

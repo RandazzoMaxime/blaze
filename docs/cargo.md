@@ -234,6 +234,12 @@ them too:
     target/<profile>/.ra-jit-units/     what the wrapper recorded of each rustc run
     target/ra-jit/<key>/                state of one command line, and the daemon's objects
 
+On Linux the object with all of a program the daemon compiled, `programs/<unit>/ra-jit.o`, is
+kept compressed as `ra-jit.o.zst` between the links that read it, a sixth of its size, and
+inflated again for the next: the executable has the debug information, so nothing else reads
+it. With `split-debuginfo` set, or on macOS, where a debugger reads the object, it stays as it
+is.
+
 Cargo keeps what it builds through a workspace wrapper apart from what it builds without
 one. `cargo build` and `cargo ra-jit build` in one checkout therefore each compile the
 workspace's crates once, and share the dependencies.

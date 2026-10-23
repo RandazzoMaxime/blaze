@@ -283,6 +283,30 @@ writable static without a rustc symbol, and `UnresolvedMethod("collect")`), on b
 
 ([research/daemon-memory.md](research/daemon-memory.md#2026-10-23-the-own-base-and-the-allocator)).
 
+**Measured (2026-10-23, #55; Linux x86-64, 16 cores, 124 GiB).** A set of debug types kept
+every type it is made of as its own strings, so every set with a `String` in it had its own
+`String`, `Vec` and `RawVec`. What a type is told as, apart from where its parts are in the
+set, is now interned once, and a set holds a reference to it for each of its types and a
+number for each part: 12 bytes a type and 4 a part, against the whole description. The
+DWARF is the same bytes: 941 objects and executables of `debuginfo.py`'s stress, rung2 and corpus programs, built on one core so
+that the order is the same, have the same `--debug-info` and `--debug-line` once paths are
+set aside, and `debuginfo.py` passes, perf's unwinding included. And before the own base
+gives up for memory, it has jemalloc give back what it holds freed. `memsplit.py`, after
+main's jemalloc (main → branch, one run each at once on two sets of 16 cores):
+
+| | after the own base | after its edits | most at an edit |
+|---|---|---|---|
+| nushell | 11.17 → 8.48 GB | 9.74 → 7.46 GB | 13.96 → 11.73 GB |
+| helix | 11.74 → 7.09 GB | 11.30 → 6.39 GB | 14.54 → 9.89 GB |
+| bun | 30.72 GB given up → 18.89 GB | 24.87 → 15.94 GB | 33.62 → 23.23 GB |
+
+bun's base was given up on main at this host's bound (31.7 GB, a quarter of 124 GiB, as on
+the 128 GiB Mac), and its signature edit wrote the whole object and linked it, 32.8 s; it
+builds now, peaks at 24.0 GB, and the signature edit is a patch, 6.3 s. Edits are otherwise
+the same (nushell's 0.28-0.35 s, helix's 0.11-0.21 s, both builds). zed's own base still
+does not fit: it reaches the bound in 94 s rather than 27 s, and with no bound passed 64 GB
+([research/daemon-memory.md](research/daemon-memory.md#2026-10-23-sharing-described-55)).
+
 ### Item 1: frozen dependency artifacts
 
 **Design.** One artifact per dependency crate, content-addressed by its source hash, cfg,
@@ -423,7 +447,8 @@ and cold-start time and RSS on helix and nushell before and after.
 5. Memo eviction (item 5), sized by step 0.
 6. Item 1a, then 1b family by family, then 1c.
 7. The warm-start manifest (item 2), then salsa state with cold-start-2.
-8. zed measured again (its ready path fits since cold-start-2; its own base waits on #55);
+8. zed measured again (its ready path fits since cold-start-2; its own base still passes the
+   bound with #55, #29);
    item 6 if the numbers say so. Item 4 has its own lane (#42).
 
 ## Working with the other lanes
@@ -435,7 +460,7 @@ stops.
 |---|---|---|
 | The restart round (step 3) | #37 | glancer, done as part of no-rustc step E (#85): the instance compiles, nothing is kept or forwarded to rustc |
 | Proc-macro expansion cache (item 3) | #38 | glancer, merged ([#110](https://github.com/indexable-inc/ra-jit/pull/110)) |
-| `described` copies whole type closures (item 5) | #55 | share-types (restarted 2026-10-22 as share-types-3) |
+| `described` copies whole type closures (item 5) | #55 | glancer (share-types-4): types interned once, helix 11.3 → 6.4 GB after edits, bun's base fits |
 | The spare worker's memory (item 5) | #56 | spare, merged (8e01def1cf): 1.3 GB less after edits; a warm second project's cost is #99 |
 | salsa eviction of queries with cycle handling (item 5) | #57 | spare, closed unmerged: lru saves 0.35-0.5 GB on nushell but slows the signature edit 0.42 to 0.64-2.43 s |
 | What the daemon keeps after ready, and the allocator (item 5) | #39 | glancer: jemalloc on Unix, 1.3 GB less on nushell after edits |
@@ -490,6 +515,10 @@ stops.
   again with `-headerpad` for the splices to fit), 574 s; the two after it splice into that
   link in under 2 s. bun's base needs about 1 GB less, or the bound more room, for macOS's
   signature edit to be a patch as Linux's is.
+  2026-10-23 (#55): on a Linux host whose quarter is the Mac's (31.7 GB of 124 GiB), main's
+  bun base is given up the same way and its signature edit is a full link (32.8 s, 33.6 GB);
+  with the debug types shared it builds, at most 24.0 GB and 18.9 GB after, and the signature
+  edit is a 6.3 s patch (item 5's measurements above; the Mac not run again).
 - **architecture split**: the store is the crate `crates/ra-jit-store`, and the code
   generator moves to a crate of its own. New store-side code (item 3's cache, item 1's
   container, item 2's manifest) goes in or beside `ra-jit-store`, behind the store's
@@ -497,6 +526,7 @@ stops.
 
 ## Not checked
 
-- bevy and ripgrep with step 1; zed's own base past the memory bound (#55).
+- bevy and ripgrep with step 1; what zed's own base holds past 64 GB once `described` is
+  shared (#29).
 - Whether `instance_path` and `home::Mentions`, which also walk types without a memo,
   grow the same way on other workspaces; on helix they were under 3% of the sample.

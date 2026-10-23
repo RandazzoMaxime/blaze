@@ -4663,6 +4663,24 @@ pub mod simd_aarch64 {
             )
         }
     }
+    /// The sums of pairs of lanes of 8, 16 and 32 bits, wrapping, and a movemask made of them.
+    pub fn sums(v: uint8x16_t, w: uint8x16_t) -> (Bytes, [u16; 8], [u32; 4], u16) {
+        unsafe {
+            let (s, t) = (vreinterpretq_u16_u8(v), vreinterpretq_u16_u8(w));
+            let (x, y) = (vreinterpretq_u32_u8(w), vreinterpretq_u32_u8(v));
+            let bits: Bytes = [1, 2, 4, 8, 16, 32, 64, 128, 1, 2, 4, 8, 16, 32, 64, 128];
+            let high = vandq_u8(vcgtq_u8(w, vdupq_n_u8(9)), vld1q_u8(bits.as_ptr()));
+            let folded = vpaddq_u8(high, high);
+            let folded = vpaddq_u8(folded, folded);
+            let folded = vpaddq_u8(folded, folded);
+            (
+                bytes(vpaddq_u8(v, w)),
+                core::mem::transmute(vpaddq_u16(t, s)),
+                core::mem::transmute(vpaddq_u32(x, y)),
+                vgetq_lane_u16::<0>(vreinterpretq_u16_u8(folded)),
+            )
+        }
+    }
     pub fn across(v: uint8x16_t) -> (u8, u8, u8, u16, u32, u8) {
         unsafe {
             (
@@ -4765,7 +4783,7 @@ pub mod simd_aarch64 {
             group(b"AbA\xffcdA\x80")
         );
         out += &format!(" {:?} {:?}", select(v, w), wide(v, w));
-        out += &format!(" {:?} {:?}", pairs(v, w), checksums(v, w));
+        out += &format!(" {:?} {:?} {:?}", pairs(v, w), sums(v, w), checksums(v, w));
         if std::arch::is_aarch64_feature_detected!("neon") {
             out += " neon";
         }
@@ -5552,6 +5570,40 @@ pub mod variadic {
 }
 
 /// A constant holding a pointer into another, over-aligned constant.
+/// Constants that point into constants: a keyword lookup by length then bytes, as bun's
+/// lexer tables, a slice that starts past the start of another, and slices of slices.
+pub mod const_tables {
+    const KEYWORDS: &[(&[u8], u32)] =
+        &[(b"do", 1), (b"if", 2), (b"in", 3), (b"for", 4), (b"let", 5), (b"while", 6)];
+    const DIGITS: &[u8] = b"0123456789abcdef";
+    const TAIL: &[u8] = DIGITS.split_at(10).1;
+    const NESTED: &[&[&str]] = &[&["alpha", "beta"], &[], &["gamma"]];
+
+    fn index(key: &[u8]) -> u32 {
+        match key.len() {
+            2 if key == b"do" => 1,
+            2 if key == b"if" => 2,
+            2 if key == b"in" => 3,
+            3 if key == b"for" => 4,
+            3 if key == b"let" => 5,
+            5 if key == b"while" => 6,
+            _ => u32::MAX,
+        }
+    }
+
+    fn lookup(key: &[u8]) -> Option<u32> {
+        KEYWORDS.iter().find(|(it, _)| *it == key).map(|(_, value)| *value)
+    }
+
+    pub fn run(words: &[&[u8]]) -> String {
+        let found: Vec<(u32, Option<u32>)> =
+            words.iter().map(|it| (index(it), lookup(it))).collect();
+        let nested: Vec<String> = NESTED.iter().map(|it| it.join("+")).collect();
+        let tail = std::str::from_utf8(TAIL).unwrap();
+        format!("{found:?} {tail} {nested:?} {}", DIGITS[TAIL.len() + words.len()] as char)
+    }
+}
+
 pub mod const_pointer_into_const {
     use std::marker::PhantomData;
 
@@ -5878,6 +5930,216 @@ pub mod tail_temporaries {
         };
         LOG.with(|log| log.borrow_mut().push(second));
         LOG.with(|log| std::mem::take(&mut *log.borrow_mut()))
+    }
+}
+
+/// Field names a `static` borrows from `const`s in blocks, as tracing 0.1.44's `trace!`
+/// writes them (issue #109): the `static`'s value promotes them.
+pub mod const_field_names {
+    pub fn run() -> Vec<&'static str> {
+        let fields = old_macros::fieldset!(start, end);
+        fields.0.to_vec()
+    }
+}
+
+/// A trait object given for a parameter bounded `T: 'a` lives for `'a`, rustc's object
+/// lifetime default (issue #84): `Ref<'a, dyn Show>` is `Ref<'a, dyn Show + 'a>`.
+pub mod object_lifetime_default {
+    pub trait Show {
+        fn show(&self) -> String;
+    }
+
+    impl Show for String {
+        fn show(&self) -> String {
+            self.clone()
+        }
+    }
+
+    pub struct Ref<'a, T: 'a + ?Sized> {
+        r: &'a T,
+    }
+
+    pub struct Ref2<'a, T: ?Sized>
+    where
+        T: 'a,
+    {
+        r: &'a T,
+    }
+
+    struct Container<'a> {
+        t: Ref<'a, dyn Show>,
+        u: Ref2<'a, dyn Show>,
+    }
+
+    fn put<'a>(t: Ref<'a, dyn Show + 'a>, u: Ref2<'a, dyn Show + 'a>, c: &mut Container<'a>) {
+        c.t = t;
+        c.u = u;
+    }
+
+    pub fn run() -> String {
+        let (a, b, first) = ("a".to_string(), "b".to_string(), "first".to_string());
+        let mut c = Container { t: Ref { r: &first }, u: Ref2 { r: &first } };
+        put(Ref { r: &a }, Ref2 { r: &b }, &mut c);
+        format!("{}{}", c.t.r.show(), c.u.r.show())
+    }
+}
+
+/// What cargo 0.99 borrows as rustc accepts: rusqlite's `impl Params for &[&dyn ToSql]`,
+/// whose elided lifetimes leave the trait object any lifetime; `&|_| true`, promoted as it
+/// captures nothing; callbacks that borrow a value without drop glue declared after them and
+/// are moved away, which the unwind path still drops; and an `async fn` returning
+/// `impl Iterator + 'b` of a struct holding `&'a self` with `'a: 'b`.
+pub mod cargo_borrows {
+    use std::future::Future;
+    use std::pin::pin;
+    use std::rc::Rc;
+    use std::task::{Context, Poll, Waker};
+
+    pub trait ToSql {
+        fn value(&self) -> u64;
+    }
+
+    impl ToSql for u64 {
+        fn value(&self) -> u64 {
+            *self
+        }
+    }
+
+    impl ToSql for String {
+        fn value(&self) -> u64 {
+            self.len() as u64
+        }
+    }
+
+    impl<T: ToSql + ?Sized> ToSql for &T {
+        fn value(&self) -> u64 {
+            (**self).value()
+        }
+    }
+
+    pub trait Params {
+        fn sum(&self) -> u64;
+    }
+
+    impl Params for &[&dyn ToSql] {
+        fn sum(&self) -> u64 {
+            self.iter().map(|it| it.value()).sum()
+        }
+    }
+
+    struct Statement<'conn>(&'conn str);
+
+    impl Statement<'_> {
+        fn exists<P: Params>(&mut self, params: P) -> bool {
+            params.sum() > self.0.len() as u64
+        }
+    }
+
+    fn params(ids: &[u64], conn: &str) -> usize {
+        let mut statement = Statement(conn);
+        let mut found = 0;
+        for id in ids {
+            let names = vec![format!("name{id}")];
+            for name in names.iter() {
+                let params = &[&id as &dyn ToSql, &name as &dyn ToSql] as &[&dyn ToSql];
+                found += usize::from(statement.exists(params));
+            }
+        }
+        found
+    }
+
+    fn keep(keep_previous: Option<&dyn Fn(u64) -> bool>, ids: &[u64]) -> usize {
+        let keep_previous = keep_previous.unwrap_or(&|_| true);
+        ids.iter().filter(|&&id| keep_previous(id)).count()
+    }
+
+    struct Counter<const N: usize> {
+        slots: [u32; N],
+        index: usize,
+    }
+
+    impl<const N: usize> Counter<N> {
+        fn add(&mut self, value: u32) {
+            self.slots[self.index] = value;
+            self.index = (self.index + 1) % N;
+        }
+    }
+
+    struct Callbacks<'a> {
+        progress: Option<Box<dyn FnMut(u32) -> bool + 'a>>,
+    }
+
+    struct FetchOptions<'cb> {
+        callbacks: Option<Callbacks<'cb>>,
+    }
+
+    fn fetch(cb: &mut dyn FnMut(FetchOptions<'_>) -> u32) -> u32 {
+        let mut callbacks = Callbacks { progress: None };
+        let mut counter = Counter::<4> { slots: [0; 4], index: 0 };
+        callbacks.progress = Some(Box::new(|value| {
+            counter.add(value);
+            counter.slots.iter().sum::<u32>() > 10
+        }));
+        std::hint::black_box(&mut callbacks);
+        let options = FetchOptions { callbacks: Some(callbacks) };
+        cb(options)
+    }
+
+    struct Index<'gctx> {
+        name: &'gctx str,
+        cache: Vec<u8>,
+    }
+
+    impl<'gctx> Index<'gctx> {
+        async fn load(&self) -> Rc<Vec<u8>> {
+            Rc::new(self.cache.clone())
+        }
+
+        async fn summaries<'a, 'b>(
+            &'a self,
+            req: &'b u8,
+        ) -> Result<impl Iterator<Item = u8> + 'b, ()>
+        where
+            'a: 'b,
+        {
+            let summaries = self.load().await;
+            struct I<'a> {
+                index: &'a Index<'a>,
+                req: &'a u8,
+                summaries: Rc<Vec<u8>>,
+                i: usize,
+            }
+            impl Iterator for I<'_> {
+                type Item = u8;
+                fn next(&mut self) -> Option<u8> {
+                    let it = *self.summaries.get(self.i)?;
+                    self.i += 1;
+                    Some(it + *self.req + self.index.name.len() as u8)
+                }
+            }
+            Ok(I { index: self, req, summaries, i: 0 })
+        }
+    }
+
+    fn block_on<F: Future>(future: F) -> F::Output {
+        let mut future = pin!(future);
+        let mut cx = Context::from_waker(Waker::noop());
+        loop {
+            if let Poll::Ready(value) = future.as_mut().poll(&mut cx) {
+                return value;
+            }
+        }
+    }
+
+    pub fn run() -> (usize, usize, u32, Vec<u8>) {
+        let fetched = fetch(&mut |mut options| {
+            let mut progress = options.callbacks.take().and_then(|it| it.progress).unwrap();
+            (1..=5).filter(|&it| progress(it)).count() as u32
+        });
+        let index = Index { name: "crates", cache: vec![1, 2, 3] };
+        let req = 10;
+        let summaries = block_on(index.summaries(&req)).map(|it| it.collect()).unwrap_or_default();
+        (params(&[1, 2, 30], "conn"), keep(None, &[1, 2, 3]), fetched, summaries)
     }
 }
 
@@ -6396,7 +6658,9 @@ pub mod inline_asm {
     #[target_feature(enable = "crc")]
     unsafe fn crc(state: u32, word: u32) -> u32 {
         let out: u32;
-        unsafe { asm!("crc32w {0:w}, {1:w}, {2:w}", lateout(reg) out, in(reg) state, in(reg) word) };
+        unsafe {
+            asm!("crc32w {0:w}, {1:w}, {2:w}", lateout(reg) out, in(reg) state, in(reg) word)
+        };
         out
     }
 
@@ -7564,7 +7828,10 @@ pub mod provided_futures {
         }
     }
     pub trait ServiceExt<R: Role>: Service<R> + Sized {
-        fn serve<T, A>(self, transport: T) -> impl Future<Output = Result<Running<R, Self>, R::Error>>
+        fn serve<T, A>(
+            self,
+            transport: T,
+        ) -> impl Future<Output = Result<Running<R, Self>, R::Error>>
         where
             T: IntoTransport<R, A>,
         {
@@ -7840,5 +8107,75 @@ pub mod deep_send_cycle {
         let mut sent = Sent((0..n).map(|_| ring()).collect::<Vec<_>>());
         let taken = core::mem::take(&mut *sent);
         (taken.len(), sent.len())
+    }
+}
+
+/// Values built in the local a function returns, which code generation puts in the caller's
+/// destination: what the callee reads while building and what the caller keeps after a panic
+/// are not that memory.
+pub mod returned_in_place {
+    use std::panic::{self, AssertUnwindSafe};
+
+    #[derive(Debug, Clone, PartialEq)]
+    pub struct Big {
+        pub words: [u64; 6],
+        pub name: String,
+    }
+
+    #[inline(never)]
+    fn build(seed: u64) -> Big {
+        let mut big = Big { words: [seed; 6], name: String::new() };
+        for (at, word) in big.words.iter_mut().enumerate() {
+            *word = word.wrapping_mul(at as u64 + 3);
+        }
+        big.name.push_str("built");
+        big
+    }
+
+    /// `chain = next(&chain)` assigns through a temporary, so `from` is not the destination.
+    #[inline(never)]
+    fn next(from: &Big) -> Big {
+        let mut big = Big { words: [0; 6], name: String::from("next") };
+        for at in 0..6 {
+            big.words[at] = from.words[5 - at] + big.words[at.saturating_sub(1)];
+        }
+        big.name.push_str(&from.name);
+        big
+    }
+
+    #[inline(never)]
+    fn early(limit: u64) -> Big {
+        let mut big = build(limit);
+        for step in 0..10 {
+            if step == limit {
+                big.name.push('!');
+                return big;
+            }
+            big.words[step as usize % 6] += step;
+        }
+        big
+    }
+
+    #[inline(never)]
+    fn half(fail: bool) -> Big {
+        let mut big = build(9);
+        big.words[0] = 0;
+        big.name.clear();
+        if fail {
+            panic!("half built");
+        }
+        big
+    }
+
+    pub fn run() -> (Big, Big, Big, Big, bool, Big) {
+        let first = build(5);
+        let mut chain = build(2);
+        for _ in 0..3 {
+            chain = next(&chain);
+        }
+        let (stopped, ran) = (early(4), early(20));
+        let mut kept = build(1);
+        let caught = panic::catch_unwind(AssertUnwindSafe(|| kept = half(true))).is_err();
+        (first, chain, stopped, ran, caught, kept)
     }
 }

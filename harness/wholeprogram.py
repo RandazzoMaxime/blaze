@@ -15,8 +15,8 @@ the same.
   custom_alloc   a `#[global_allocator]` of the program that counts what it is asked for
   lib_alloc      the `#[global_allocator]` is in a library of the workspace
   cfg_alloc      a `#[global_allocator]` under a `#[cfg]` that is false, as ripgrep's
+  trait_block    a method a trait provides calls a function declared in its body
   c_main         `#![no_main]` and a `main` of C's, as bun's, with a body of 16 384 statements
-  provided_fn    a function declared in a trait's provided method, which rustc has no symbol of
 
 The backend is `RA_JIT_BACKEND`'s; `--release` builds both with the release profile. With
 LLVM, a build of a whole program, whichever `main` it has, leaves no function to Cranelift
@@ -28,7 +28,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 import apps
 
-CASES = ["default_alloc", "custom_alloc", "lib_alloc", "cfg_alloc", "c_main", "provided_fn"]
+CASES = ["default_alloc", "custom_alloc", "lib_alloc", "cfg_alloc", "trait_block", "c_main"]
 # What `backend::Backend::emit` leaves to Cranelift only in a build that is not of a whole program.
 NOT_WHOLE = ("a body larger than LLVM is given in a build", "a handler LLVM lowers only for a tier")
 

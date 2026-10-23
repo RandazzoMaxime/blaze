@@ -174,7 +174,7 @@ All notable changes to ra-jit are written here. The format follows
 - A borrow checker, the crate `hir-ty-borrowck` in the rust-analyzer subtree, written to give
   rustc's verdict: Polonius alpha by default as nightly rustc does, NLL with
   `RA_JIT_BORROWCK=nll`. It gives rustc's errors on
-  1506 of 1579 of rustc's own borrow-check tests that it can run, and none on any of the 245
+  1511 of 1579 of rustc's own borrow-check tests that it can run, and none on any of the 245
   rustc accepts, scored by `harness/borrowck_ui.py`, and finds nothing in ripgrep, fd, bat,
   hyperfine, just, axum, nushell, delta, eza, tokei and starship. Its errors, and rustc's
   `unused_mut` warning, are rust-analyzer diagnostics and `ra-jit borrowck` prints them ([docs/borrowck.md](docs/borrowck.md)).
@@ -215,6 +215,13 @@ All notable changes to ra-jit are written here. The format follows
   does not build in is dropped. Bun on 16 cores (c8a.24xlarge) builds in 118 s where it took
   564 s, against 135 s for cargo's release build, and runs 1.244x cargo's where it ran 1.267x.
   `RA_JIT_IMPORT=0` builds the callees in as before.
+- The daemon keeps what each debug type is told as once, rather than in every set of debug
+  types it is in ([#55](https://github.com/indexable-inc/ra-jit/issues/55)); the DWARF it
+  writes is the same. On Linux x86-64 (16 cores, `memsplit.py`, one run each) the daemon
+  after its own base and edits holds 7.5 GB instead of 9.7 on nushell and 6.4 instead of 11.3
+  on helix, and bun's own base, which was given up at a quarter of a 124 GiB host's memory,
+  is built at 18.9 GB, so its signature edit is a 6.3 s patch instead of a 32.8 s full link.
+  The own base asks the allocator to give back what it freed before it gives up for memory.
 - ra-jit allocates with jemalloc on Linux and macOS, and with mimalloc on Windows only
   ([#39](https://github.com/indexable-inc/ra-jit/issues/39)). mimalloc 3 kept more of what a
   build freed, transparent huge pages included: on Linux x86-64 (16 cores, `bench.py`, two
@@ -403,12 +410,6 @@ All notable changes to ra-jit are written here. The format follows
   undefined, and of `ptr::write::<ForOf>` imported through a function that had the address as
   an integer it kept nothing of what was written, so bun's parser crashed. Such a call is now
   made through the callee's own type, the arguments converted (a unit test of `llvm.rs`).
-- A function declared in a trait's provided method was compiled only in a build with nothing
-  of rustc's. rustc compiles one only where it instantiates the method, so it has no symbol
-  of it in any build, and ra-jit names it: a call of ours that LLVM did not build in was of a
-  name nothing defined (bstr's `ByteVec::from_os_str_lossy::imp`, which failed the link of
-  ripgrep's whole program). It is now compiled where it is called, in every build
-  (`wholeprogram.py`'s `provided_fn`).
 - On Linux AArch64, an `asm!` of a feature LLVM's assembler has no `.arch_extension` for was
   refused: constant_time_eq's `mrs {}, dit` under `#[target_feature(enable = "dit")]`, which
   failed bun's build there. Such a feature (`dit`, `bti`, `jsconv` and the others of a later
@@ -417,6 +418,19 @@ All notable changes to ra-jit are written here. The format follows
 - `runbench.py` runs cargo's release build from beside ra-jit's, in the workspace, where it ran
   it from cargo's target directory. helix looks for its `runtime` next to itself, so only
   cargo's build warned that there was none, and helix was reported as running differently.
+- The borrow checker no longer reports "temporary value dropped while borrowed" on every
+  field of a `tracing::trace!` with tracing 0.1.44, which names fields with a `const` in a
+  block inside its callsite's `static`: a `const fn` method call there is promoted, as rustc
+  promotes it, so cargo's edit build goes through again
+  ([#109](https://github.com/indexable-inc/ra-jit/issues/109)). A trait object given for a
+  type parameter bounded `T: 'a` lives for `'a`, as rustc's object lifetime default, where
+  rust-analyzer made it `'static` and the checker said "lifetime may not live long enough"
+  ([#84](https://github.com/indexable-inc/ra-jit/issues/84)). All of cargo 0.99 now checks
+  clean, where five false errors were left: rusqlite's `params![..]` of locals (an impl
+  header's `&dyn ToSql` is for any lifetime, not only `'static`), `unwrap_or(&|_| true)` (a
+  closure capturing nothing is promoted), git2 callbacks borrowing a counter declared after
+  them (a panic's path drops nothing for a value with no drop glue), and an `async fn`
+  returning `impl Iterator + 'b` of `&'a self` with `'a: 'b`.
 - A program whose `main` is C's, as bun's, is built as a whole program: LLVM gets every body
   and inlines across crates, where each function was compiled alone before. `derive(PartialEq)`
   of an enum compares the discriminants first, as rustc's does. bun's whole program, every

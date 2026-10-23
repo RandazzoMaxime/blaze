@@ -545,11 +545,11 @@ pub(super) struct KeptTypes {
 impl KeptTypes {
     /// The key the set is in the store under, which is of nothing but what the set tells.
     pub(super) fn keep(&mut self, store: &Store, types: &TypeSet) -> [u8; KEY] {
-        let at = types.as_ptr() as usize;
+        let at = types.at();
         if let Some((_, key)) = self.keys.get(&at) {
             return *key;
         }
-        let bytes = postcard::to_allocvec(&**types).unwrap_or_default();
+        let bytes = postcard::to_allocvec(&types.to_vec()).unwrap_or_default();
         let mut hasher = Sha256::new();
         hasher.update(b"ra-jit types 1");
         hasher.update(&bytes);
@@ -1054,7 +1054,7 @@ mod tests {
     fn read_back(written: &Entry) -> Entry {
         let mut read = Entry::decode(&written.encode().unwrap()).unwrap();
         if let (Some(read), Some(written)) = (&mut read.debug, &written.debug) {
-            let stored = |it: &TypeSet| postcard::to_allocvec(&**it).unwrap();
+            let stored = |it: &TypeSet| postcard::to_allocvec(&it.to_vec()).unwrap();
             let sets = written.types.iter().map(stored);
             read.types =
                 sets.map(|it| postcard::from_bytes::<Vec<_>>(&it).unwrap().into()).collect();
@@ -1121,7 +1121,7 @@ mod tests {
         chain.variables[0].scope = Some(39_999);
         let isa = Target::selected().and_then(|it| it.isa("backtracking", false)).unwrap();
         // Only ELF and Mach-O have the tables.
-        let Some(mut context) = DebugContext::new(&*isa, "/", true, None) else { return };
+        let Some(mut context) = DebugContext::new(&*isa, "/", true, None, false) else { return };
         for (at, debug) in [deep.debug.unwrap(), ring, chain].iter().enumerate() {
             context.add_function(FuncId::from_u32(at as u32), 8, debug);
         }

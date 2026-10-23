@@ -295,7 +295,15 @@ fn promoted_borrows(ctx: &Ctx<'_, '_>, body: &MirBody<'_>) -> FxHashSet<Location
         for statement in &block.statements {
             match &statement.kind {
                 StatementKind::Assign(place, rvalue) => {
-                    define(&mut defs, place.local, place.projection.is_empty().then_some(rvalue))
+                    define(&mut defs, place.local, place.projection.is_empty().then_some(rvalue));
+                    // A mutable borrow of a part of the temporary is a use rustc's
+                    // `TempState` takes for a mutation, `&mut t.0` of `let ref a @ (ref mut
+                    // b, _) = (1, 2)`, so `a` borrows the temporary itself.
+                    if let Rvalue::Ref(BorrowKind::Mut { .. }, borrowed) = rvalue
+                        && !borrowed.projection.as_slice().is_empty()
+                    {
+                        define(&mut defs, borrowed.local, None);
+                    }
                 }
                 StatementKind::Deinit(place) => define(&mut defs, place.local, None),
                 _ => (),
@@ -329,12 +337,10 @@ fn promoted_borrows(ctx: &Ctx<'_, '_>, body: &MirBody<'_>) -> FxHashSet<Location
             && temp(local)
             && match defs.get(&local) {
                 Some(Some(Rvalue::Use(it))) => operand(it),
+                // A closure that captures nothing too, `unwrap_or(&|_| true)`.
                 Some(Some(Rvalue::Aggregate(kind, operands))) => {
-                    !matches!(
-                        kind,
-                        hir_ty::mir::AggregateKind::Union(..)
-                            | hir_ty::mir::AggregateKind::Closure(_)
-                    ) && operands.iter().all(operand)
+                    !matches!(kind, hir_ty::mir::AggregateKind::Union(..))
+                        && operands.iter().all(operand)
                 }
                 _ => false,
             }
@@ -413,6 +419,23 @@ fn const_promotable(
                     != hir_ty::drop::DropGlue::None
             });
             callable && !dropped && all(args.to_vec())
+        }
+        // `NAME.as_str()` of a `const NAME`, as tracing's `fieldset!` names its fields.
+        Expr::MethodCall { receiver, args, .. } => {
+            let callable = ctx.infer.method_resolution(expr).is_some_and(|(func, _)| {
+                hir_def::signatures::FunctionSignature::of(ctx.db, func).is_const()
+            });
+            let dropped = std::iter::once(receiver).chain(args.iter()).any(|&it| {
+                hir_ty::drop::has_drop_glue(&ctx.infcx, ctx.infer.expr_ty(it), ctx.env)
+                    != hir_ty::drop::DropGlue::None
+            });
+            callable && !dropped && all(std::iter::once(*receiver).chain(args.to_vec()).collect())
+        }
+        // A block of items and a tail is its tail in MIR, where rustc promotes.
+        Expr::Block { statements, tail: Some(tail), .. }
+            if statements.iter().all(|it| matches!(it, hir_def::hir::Statement::Item(_))) =>
+        {
+            const_promotable(ctx, body, *tail, depth + 1)
         }
         _ => false,
     }

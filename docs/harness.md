@@ -343,8 +343,8 @@ green, and counts an entry failed after 60 minutes without `ci`. Repository admi
 rules (`bypass_actors`), for repairs; work lands through the queue. A ruleset can't exempt the
 token a workflow runs with, so the workflows that commit to main (`pgo.yaml`'s pin,
 `bench-readme.yaml`, `bench-bun.yaml`, `live-latency.yaml`) check out with the secret
-`RA_JIT_BOT_TOKEN`, a token of an identity the ruleset lets past; without it their push is
-refused. `gh api repos/indexable-inc/ra-jit/rulesets/25516056` shows the rules, and Insights,
+`RA_JIT_BOT_TOKEN`, a fine-grained token of a repository admin (Contents read and write on
+ra-jit alone) that the admin bypass lets past; without it their push is refused. `gh api repos/indexable-inc/ra-jit/rulesets/25516056` shows the rules, and Insights,
 Rule insights what they refused.
 
 What is known to be wrong is written down, says why, and does not fail the run. Once it comes

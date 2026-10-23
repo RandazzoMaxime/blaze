@@ -46,7 +46,8 @@ All of these are rustc's, written from `compiler/rustc_borrowck` at the pinned n
   assignment to immutable locals (E0381, E0382, E0384, E0505, E0507, E0508, E0509). A `match`
   whose arms test the value reads what it matches first, so a value moved out whole is
   reported there. A `match` arm's guard sees the variables its pattern binds by reference, so
-  it cannot move out of them (E0507) nor borrow them mutably (E0596), and casting an enum to an integer moves the enum
+  it cannot move out of them (E0507), borrow them mutably (E0596) nor assign them or through
+  them (E0594, "immutable for the pattern guard"), and casting an enum to an integer moves the enum
   (`*e as usize` behind a reference is E0507). A pattern's moves out of what it may not move
   out of are one error at the value matched for each place they move out of, as rustc's
   `MovesFromPlace`: `(D(s), &t)` is an E0509 and an E0507. A move of a subslice of an array
@@ -116,7 +117,10 @@ All of these are rustc's, written from `compiler/rustc_borrowck` at the pinned n
 - Promotion: a borrowed function item, and a named `const` whose type has no interior
   mutability whatever its drop (rustc asks whether the value needs dropping, not the type).
   In a `const` or `static` item's value, a call of a `const fn` is promotable too
-  (`Migrations::new(&[Migration::new("a")])`), as it is in rustc's const contexts.
+  (`Migrations::new(&[Migration::new("a")])`), as it is in rustc's const contexts, a method
+  call and a block of items and a tail included: tracing's `fieldset!` names a field
+  `{ const NAME: FieldName<..> = ..; NAME.as_str() }` in a `static`. A closure that captures
+  nothing is an aggregate of constants, promoted as rustc promotes it (`unwrap_or(&|_| true)`).
 - Region inference: liveness of locals (drops kept live only back to where the local may be
   initialized; what a drop uses as rustc's dropck: an associated type as what it normalizes
   to, another alias what its bounds and captures leave, all its arguments under a binder of
@@ -180,14 +184,19 @@ All of these are rustc's, written from `compiler/rustc_borrowck` at the pinned n
   `const` and `static` items as `'static` (not a variable the value borrows, which is E0597
   there, as rustc's `UseAsConst` rather than E0515). E0716 of what a pattern borrows
   (`ref m` in a `match` on a temporary) is at the temporary, as rustc reports it. An expression statement's value is not read once
-  its temporaries are dropped, so `&temp();` alone is no E0716, as in rustc.
+  its temporaries are dropped, so `&temp();` alone is no E0716, as in rustc. A temporary
+  borrowed mutably through a field (`&mut (1, 2).0`) is not promoted, as rustc's
+  `promote_consts`. On an unwind path the drop of a local with no drop glue ends nothing,
+  as rustc's cleanup blocks drop only what has glue and end no storage: a counter declared
+  after the callbacks that borrow it stays borrowed while a panic drops them.
 - `impl Trait` captures: a return-position `impl Trait` keeps alive and relates only the
   lifetimes it captures, those listed in `use<..>` or, before edition 2024 outside traits and
   `async fn`, those its bounds name; its type parameters are always captured.
 - `impl Trait`'s hidden type: each of its regions must be `'static` or one of the lifetimes
   the `impl Trait` captures (rustc's member constraints), else E0700 at the signature; and it
   must outlive what the bounds say (`impl Copy + 'a`). The same holds of an `impl Trait` an
-  `async fn` declares it returns, the future's output, in the body that makes the future,
+  `async fn` declares it returns, the future's output (whose hidden type's lifetimes are the
+  member constraints' to choose, not those type inference unified), in the body that makes the future,
   with the errors at the function's block as rustc's; only the future captures every
   lifetime. A C variadic's `VaList` lifetime is never captured. A trait object in the hidden
   type has its lifetime inferred, and a borrowed capture of a closure or `async` block
@@ -257,9 +266,11 @@ All of these are rustc's, written from `compiler/rustc_borrowck` at the pinned n
 - Where errors are: at the expression rustc points to. A borrow `format_args!` (so
   `println!`, `format!`, `write!`) makes of an argument has no syntax of its own, so its
   errors are at the argument, or for a variable the template names (`"{x}"`) at the
-  template. An error in an expression a macro writes (`&$e`) is at the macro's definition
+  template; one at what else it lowers to, as its call of `Arguments::new`, is at the macro
+  call. An error in an expression a macro writes (`&$e`) is at the macro's definition
   when it is in the same file, as rustc reports it there; one in what the caller wrote is at
-  the caller's.
+  the caller's. A variable a macro of another crate declares, as `pin!`'s, is a temporary in
+  the messages, as rustc's `describe_place` leaves it unnamed (E0716, not E0597).
 - `unused_mut` ("variable does not need to be mutable"), a warning: a binding declared `mut`
   that no assignment or mutable borrow needs the `mut` of, as rustc's `used_mut`. A closure
   needs the `mut` of a captured variable when its body mutates it, and a name that starts
@@ -284,8 +295,8 @@ With no borrow checker, the 245 units rustc accepts would pass. Now:
 
 | Mode | In scope | Pass | rustc accepts, ra-jit too | rustc rejects, same errors |
 |---|---|---|---|---|
-| Polonius | 1579 | 1506 (95.4%) | 245 of 245 | 1261 of 1334 |
-| NLL | 1577 | 1502 (95.2%) | 226 of 226 | 1276 of 1351 |
+| Polonius | 1579 | 1511 (95.7%) | 245 of 245 | 1266 of 1334 |
+| NLL | 1577 | 1507 (95.6%) | 226 of 226 | 1281 of 1351 |
 
 463 units are out of scope; 344 of them need a nightly feature. CI runs the scoring on Linux
 and fails below a floor a few units under the count there.
@@ -298,10 +309,10 @@ just, axum, nushell, delta, eza, tokei and starship it finds nothing, nor on the
 ## What is left
 
 Every failing unit is one where rustc gives an error ra-jit does not, or gives it on another
-line or with another code. By what is wrong, most first: 10 "lifetime may not live long
-enough" not reported, 6 on another line or with another code, 2 with only an error rustc does
-not give, 7 of E0597 not reported, 6 of E0309, and 5 each of E0716, E0311, E0507, E0310 and
-higher-ranked errors not reported, then a long tail. The causes, grouped:
+line or with another code. By what is wrong, most first: 12 "lifetime may not live long
+enough" not reported, 4 on another line or with another code, 2 with only an error rustc does
+not give, 7 of E0597 not reported, 6 of E0309, 5 each of E0311, E0507, E0310 and
+higher-ranked errors and 4 of E0716 not reported, then a long tail. The causes, grouped:
 
 - **Higher-ranked regions and placeholders** (`for<'a>` bounds, closures with higher-ranked
   signatures): rustc checks them with placeholders in universes; ra-jit does not yet, and
@@ -349,6 +360,11 @@ changes to rust-analyzer were needed, each made as rustc does it:
 - A `let`'s temporaries borrowed in a tuple struct's or variant's constructor arguments
   (`let x = Some(&temp());`, `Self(&temp())`) live as long as the variable, as in rustc since
   1.89; through a constructor held in a variable they are still the statement's.
+- The `super let`s of `format_args!` and `pin!` extend the temporaries of their initializers
+  only when a `let` extends the block they are in (rust-lang/rust#145784); otherwise what they
+  bind lives as long as the temporaries of the expression the block is in, so
+  `identity(pin!(x))` kept past its statement, and `println!("{:?}", { &temp() })` from 2024
+  on, are E0716.
 - A function item or a tuple struct's or variant's constructor written as a value
   (`let f = foo::<T>;`) is assigned to where it goes, though zero sized, so a closure that
   captures `f` or a method that takes it by value does not read it uninitialized (E0381).
@@ -372,6 +388,21 @@ changes to rust-analyzer were needed, each made as rustc does it:
   their guards are checked (`&_ => ..., &_ if { b = &true; false } => ...` is an E0510).
   Before the other passes each becomes a jump to its real target, as rustc's
   `CleanupPostBorrowck` does, so what runs is unchanged.
+- What a panic drops: the operands of the calls and aggregates being lowered go before the
+  temporaries that live to the end of the statement, as rustc keeps them in the scope of the
+  expression they are operands of. In `boom().extend(&String::from(..))` a panic in the
+  deref drops `boom()` first, so an `impl Trait` it returns keeps no borrow of the string
+  alive (`impl-trait/wf-check-hidden-type.rs`).
+- Type lowering gives a trait object written without a lifetime, as a type argument, the
+  lifetime of its parameter's one outlives bound (`hir-ty/src/generics.rs`,
+  `object_lifetime_default`, RFC 599): `Ref<'x, dyn Trait>` with `T: 'a + ?Sized` on `Ref`
+  is `dyn Trait + 'x`, not `'static`. In an impl header, a trait object behind a reference
+  whose lifetime is elided has that lifetime too (`hir-ty/src/lower.rs`, `impl_header`), as
+  rustc makes both one fresh parameter of the impl: rusqlite's `impl Params for
+  &[&dyn ToSql]` holds for `params![id, name]` of locals.
+- Type inference takes an inline `asm!` output as a place written, as rustc's
+  `check_expr_asm_operand` does, so `out(reg) v[0]` indexes with `IndexMut` and needs `v`
+  mutable (E0596).
 
 These are differences still open, each the cause of some failures, all of them errors
 missed rather than errors made up:
@@ -402,6 +433,8 @@ rough.
 ## Debugging
 
 - `echo file.rs | ra-jit borrowck --edition 2021` prints a file's diagnostics as JSON.
-- `RA_JIT_BORROWCK_MIR=<function>` with that command prints the MIR of a top-level function.
+- `RA_JIT_BORROWCK_MIR=<function>` with that command, or with `--project`, prints the MIR
+  of a top-level function and its closures.
 - `RA_JIT_BORROWCK_DEBUG=1` prints each body's locals, universal regions, constraints and
-  loans.
+  loans; `RA_JIT_BORROWCK_DEBUG=<function>` only those of that function and its closures,
+  which a project needs.

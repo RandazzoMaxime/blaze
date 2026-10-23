@@ -66,7 +66,7 @@ pub(super) fn check<'db>(
         None => loans.compute_scopes(body, &cfg, &values),
     }
     let borrows_entry = loans.entry_sets(ctx, body, &cfg);
-    if std::env::var_os("RA_JIT_BORROWCK_DEBUG").is_some() {
+    if crate::debugging(ctx.db, ctx.owner) {
         for (local, ty) in regions.local_tys.iter().enumerate() {
             eprintln!("_{local}: {ty:?}");
         }
@@ -551,14 +551,25 @@ impl<'a, 'db> Checker<'a, '_, 'db> {
         let projection = place.projection.as_slice();
         let local = place.local;
         let what = self.quoted(PlaceRef { local, projection }, "value");
-        if !assign && guard.bindings.contains(&local) {
-            self.report(
-                "E0596",
-                span,
-                format!(
-                    "cannot borrow {what} as mutable, as it is immutable for the pattern guard"
-                ),
-            );
+        if guard.bindings.contains(&local) {
+            // The guard sees the variable through a shared reference, so assigning it is not
+            // the reassignment of an immutable variable (E0384) but a mutability error.
+            if assign {
+                self.access_reported.insert((PlaceRef { local, projection }.key(), span));
+                self.report(
+                    "E0594",
+                    span,
+                    format!("cannot assign to {what}, as it is immutable for the pattern guard"),
+                );
+            } else {
+                self.report(
+                    "E0596",
+                    span,
+                    format!(
+                        "cannot borrow {what} as mutable, as it is immutable for the pattern guard"
+                    ),
+                );
+            }
         } else if guard.tested.iter().any(|(it, fake)| *it == local && fake.starts_with(projection))
         {
             let message = match assign {
@@ -740,6 +751,18 @@ impl<'a, 'db> Checker<'a, '_, 'db> {
         self.assigned_local = super::return_slot();
         match kind {
             TerminatorKind::SwitchInt { discr, .. } => self.consume_operand(location, discr, span),
+            TerminatorKind::Drop { place, .. }
+                if self.body.basic_blocks[location.block].is_cleanup
+                    && place.projection.as_slice().is_empty()
+                    && hir_ty::drop::has_drop_glue(
+                        &self.ctx.infcx,
+                        self.body.locals[place.local].ty.as_ref(),
+                        self.ctx.env,
+                    ) == hir_ty::drop::DropGlue::None =>
+            {
+                // rustc's unwind paths drop only what has drop glue and end no storage, so a
+                // borrow of a `MetricsCounter` stays valid while the callbacks holding it drop.
+            }
             TerminatorKind::Drop { place, target, .. } => {
                 // The drop of the old value of an assignment, `x = y` lowered as `drop(x)` then
                 // `x = y` where it goes: rustc's `Drop { replace: true }`, a write.
@@ -986,7 +1009,10 @@ impl<'a, 'db> Checker<'a, '_, 'db> {
             // A binding of a pattern is a new variable each time, where rustc ends the storage
             // of the bindings of a candidate whose guard fails; lowering does not.
             let binds = matches!(span, MirSpan::PatId(_) | MirSpan::BindingId(_));
-            if !binds && self.ever.contains(place.local.into_raw().into_u32() as usize) {
+            if !binds
+                && self.ever.contains(place.local.into_raw().into_u32() as usize)
+                && !self.access_reported.contains(&(place.key(), span))
+            {
                 self.report_illegal_reassignment(place, span);
             }
             return;

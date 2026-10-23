@@ -29,7 +29,7 @@ use inkwell::{
     },
     intrinsics::Intrinsic,
     module::{FlagBehavior, Linkage, Module},
-    types::{BasicMetadataTypeEnum, BasicType, BasicTypeEnum, FunctionType, IntType},
+    types::{BasicMetadataTypeEnum, BasicType, BasicTypeEnum, FunctionType, IntType, VectorType},
     values::{
         BasicMetadataValueEnum, BasicValue, BasicValueEnum, CallSiteValue, FloatValue,
         FunctionValue, InstructionValue, IntValue, PhiValue, PointerValue, VectorValue,
@@ -1619,6 +1619,20 @@ impl<'ctx, 'f> Lowering<'ctx, 'f> {
                 Opcode::SaddSat => saturating("llvm.sadd.sat")?,
                 Opcode::UsubSat => saturating("llvm.usub.sat")?,
                 Opcode::SsubSat => saturating("llvm.ssub.sat")?,
+                // The pairs of `l` and then of `r`, which AArch64 selects as one `addp`.
+                Opcode::IaddPairwise => {
+                    let index = self.context.i32_type();
+                    let lanes = l.get_type().get_size();
+                    let mask = |first: u32| {
+                        let lanes: Vec<IntValue<'ctx>> = (0..lanes)
+                            .map(|lane| index.const_int(u64::from(lane * 2 + first), false))
+                            .collect();
+                        VectorType::const_vector(&lanes)
+                    };
+                    let even = b.build_shuffle_vector(l, r, mask(0), "")?;
+                    let odd = b.build_shuffle_vector(l, r, mask(1), "")?;
+                    b.build_int_add(even, odd, "")?
+                }
                 _ => return Err(Unhandled::Opcode(opcode)),
             };
             self.set(inst, Operand::Vector(value));

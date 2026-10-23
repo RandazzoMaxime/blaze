@@ -371,6 +371,17 @@ impl Wants {
         })
     }
 
+    /// Each data object asked for so far that is read-only, by its place among the requests.
+    #[cfg(feature = "llvm")]
+    pub(super) fn readonly(&self) -> impl Iterator<Item = (u32, &ConstBlob)> + '_ {
+        self.requests.datas.iter().enumerate().filter_map(|(index, data)| match data {
+            DataRequest::Blob { blob, identity } if *identity != DataIdentity::Writable => {
+                Some((index as u32, blob))
+            }
+            _ => None,
+        })
+    }
+
     /// The places among the requests of the data objects that are statics. Two of them can be
     /// one object: an `extern` static and the `#[no_mangle]` one it names.
     #[cfg(feature = "llvm")]

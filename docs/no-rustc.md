@@ -161,9 +161,11 @@ These are the places ra-jit still runs rustc or relies on what it wrote, as of m
   server. Since B, ra-jit answers rustc's questions itself for the releases and targets it has
   the answers of (1.99.0, the targets of `harness/answers.py`); another release is asked each
   question once per toolchain and the answer kept.
-- Doctest examples are compiled by rustc, and a library whose doctests ra-jit cannot take is
-  left to rustdoc ([#28](https://github.com/indexable-inc/ra-jit/issues/28)). Since A, a
-  member of a workspace is no longer left to rustdoc for its features.
+- Doctest examples are compiled by rustc when ra-jit does not build them (`compile_fail`, an
+  error, a second copy of the library; since L's second part ra-jit builds the rest), and a
+  library whose doctests ra-jit cannot take is left to rustdoc
+  ([#28](https://github.com/indexable-inc/ra-jit/issues/28)). Since A, a member of a workspace
+  is no longer left to rustdoc for its features.
 - Under plain cargo after `ra-jit enable`, rustc builds every crate of the workspace except the
   programs the daemon has loaded, and writes the dep-info of those.
 - `cargo ra-jit check` is `cargo check`.
@@ -227,7 +229,7 @@ Paths are under `crates/`; line numbers are of 41e7906192.
 | Where | What it does | When |
 |---|---|---|
 | `ra-jit/src/cargo/run.rs:136` | `cargo test --doc` with ra-jit as `RUSTDOC` | `cargo ra-jit test` of a library with doctests |
-| `ra-jit/src/doctest.rs:203`, `:246` `compile` | rustc links a probe program to learn the link line, and compiles or checks each example | every library's doctests, except what is unchanged since the last run (L's first part) |
+| `ra-jit/src/doctest.rs` `compile` | rustc compiles or checks an example ra-jit does not build | `compile_fail`, an example rust-analyzer finds an error in or that links a second copy of the library, a build or link of ra-jit's that failed; except what is unchanged since the last run (L's first part). Since L's second part, no probe |
 | `ra-jit/src/doctest.rs:301` `leave_to_rustdoc` | hands the library to rustdoc | `-q`, a library ra-jit cannot load; until A, every package whose features `cargo build --unit-graph` rejected (below) |
 | `ra-jit/src/cargo/mod.rs:139` | `cargo ra-jit check` is `cargo check` | every check |
 | `ra-jit/src/test_harness.rs` `module` returning `None` | leaves the test program's harness to rustc, and a test added to cargo | a bench, an `ignore` written as a token tree (H) |
@@ -374,7 +376,7 @@ steps not shown ran none before and none now.
 - **The fixture of `harness/norustc.py`**, in CI on Linux x86-64, Linux AArch64 and macOS
   arm64 under both backends: the cold build 74 to 76 rustc runs before A, 18 after A, 6 now;
   edits 5 (277 to 297 on macOS, whose daemon did not listen, #106), 0 now; tests 16 to 19, 12
-  after B, 7 now (H, below); doctests 23, 6 after B, 3 now (L's first part, below); check 7, then 8 since the fixture
+  after B, 7 after H, 6 with ra-jit's harness always (Linux x86-64 cranelift, the one platform measured; below); doctests 23, 6 after B, 3 after L's first part, 0 now (L's second, below); check 7, then 8 since the fixture
   has one library more, 5 now. These are `norustc/baseline.json`.
 
 ## The plan
@@ -390,13 +392,13 @@ the counts of [How often](#how-often) lower, measured by step A's check, and non
 | [C](https://github.com/indexable-inc/ra-jit/issues/83). `asm!` assembled in process | the assembler run | A | small to medium | low | the `no-rustc-abc` lane: done |
 | [D](https://github.com/indexable-inc/ra-jit/issues/84). ra-jit's verdict is the final word | the fallback on an error, `cargo ra-jit check` as `cargo check` | A; borrowck work | large | high | the app-fixes worker's `no-rustc-d` lane, which also has [#96](https://github.com/indexable-inc/ra-jit/issues/96) |
 | [E](https://github.com/indexable-inc/ra-jit/issues/85). No function left to rustc | the refused classes; a refusal fails the build | A | large, ongoing | medium | the bun lane (bun's classes, #34, #35) and the glancer lane (kept rejections, #37) |
-| [F](https://github.com/indexable-inc/ra-jit/issues/86). The standard library compiled by ra-jit | the sysroot's rlibs | C, E | large | high | the cold-start lane |
-| [G](https://github.com/indexable-inc/ra-jit/issues/87). Every crate compiled and linked by ra-jit | rustc's rlibs, objects, symbols and link line, "no rustc symbol" | E, F | large | high | the cold-start lane |
-| [H](https://github.com/indexable-inc/ra-jit/issues/88). ra-jit writes the test harness | the fallback when a test is added | G | medium | medium | the `no-rustc-hl` lane: done |
-| [I](https://github.com/indexable-inc/ra-jit/issues/89). Build scripts compiled and run by ra-jit | build scripts and their probes by rustc | B, G | medium | medium | none yet |
+| [F](https://github.com/indexable-inc/ra-jit/issues/86). The standard library compiled by ra-jit | the sysroot's rlibs | C, E | large | high | the no-rustc F+G lane |
+| [G](https://github.com/indexable-inc/ra-jit/issues/87). Every crate compiled and linked by ra-jit | rustc's rlibs, objects, symbols and link line, "no rustc symbol" | E, F | large | high | the no-rustc F+G lane |
+| [H](https://github.com/indexable-inc/ra-jit/issues/88). ra-jit writes the test harness | the fallback when a test is added | G | medium | medium | the `no-rustc-hl` lane: done; the `no-rustc-l2` lane: ra-jit's harness always, done |
+| [I](https://github.com/indexable-inc/ra-jit/issues/89). Build scripts compiled and run by ra-jit | build scripts and their probes by rustc | B, G | medium | medium | the `no-rustc-l2` lane, after L; the F+G lane consumes it for the standard library's scripts |
 | [J](https://github.com/indexable-inc/ra-jit/issues/90). Proc macros compiled and loaded by ra-jit | proc macros by rustc, the toolchain's proc-macro server | F, G | large | high | none yet |
 | [K](https://github.com/indexable-inc/ra-jit/issues/91). The cold build is ra-jit's | cargo's first build, the rustc base (#11) | G, I, J | medium | high | none yet |
-| [L](https://github.com/indexable-inc/ra-jit/issues/92). Doctests by the daemon (#28) | probe and examples by rustc, rustdoc | B, G, D | medium | medium | the `no-rustc-hl` lane: first part done |
+| [L](https://github.com/indexable-inc/ra-jit/issues/92). Doctests by the daemon (#28) | probe and examples by rustc, rustdoc | B, G, D | medium | medium | the `no-rustc-hl` lane: first part done; the `no-rustc-l2` lane: second part (examples by ra-jit) done |
 | [M](https://github.com/indexable-inc/ra-jit/issues/93). Remove the wrapper and the fallback | `ra-jit-rustc`, `ra-jit-rustc-first`, stand-ins, dep-info, settle, `by_cargo`, `only_cargo` | all | medium | low | none yet |
 
 A, B and C landed on 2026-10-22. D and E run alongside everything: they are
@@ -671,10 +673,13 @@ crate a test program is built from, a module `__ra_jit_test_harness` that lists 
 function as a `test::TestDescAndFn` (its path, `#[ignore]` with its message, `#[should_panic]`
 with `expected`, the file, line and column of its name, unit or integration test) and whose
 `main` calls `test::test_main_static`. That `main` is the program's start, ahead of the one
-rustc wrote. While a program's tests are the ones rustc listed, rustc's harness is kept (writing
-ra-jit's makes the whole program a build); once a test is added, removed, renamed or its
-attributes change, the module is written and kept current, so that change is an edit the daemon
-builds. Unit and integration test programs alike: the plan marks every test program's directory
+rustc wrote. Every program of tests starts in ra-jit's harness, written when the program is
+first asked for (a worker's first program at its load, which then starts from a build of its
+own rather than what rustc linked; the others at the first `test` that asks for them), so the
+whole build it takes runs while nobody edits and the first edit is a patch; a test added,
+removed, renamed or with other attributes is an edit like another. The harness written into a
+library's root file is an edit of the program of its tests alone: the programs that link the
+library do not take it over from rustc for that. Unit and integration test programs alike: the plan marks every test program's directory
 (`tests`). `cfg_attr`s are expanded by the crate's cfg. rust-analyzer resolves the module's
 paths to private tests (a patch in `hir-def`'s path resolution, for that module only). A
 program with a bench or an `ignore` it does not read keeps rustc's harness, and adding a test
@@ -693,6 +698,15 @@ over from rustc (`widen` keeps to the crates rustc linked): its functions were n
 and never compiled, and the link failed. On the bench apps (`harness/norustc/count.py`, dev-aws-11,
 2026-10-23), "test-added" went from 18 rustc runs to none on ripgrep and from 11 to none on
 nushell; "test-edit" is as before (0.2 s and 5.3 s).
+
+Then (the `no-rustc-l2` lane, 2026-10-23) ra-jit's harness is always written, not only once
+the tests differ from rustc's, so no program of tests depends on rustc's harness. Written at
+the first edit, as it first was everywhere, it made that edit 0.4 s on ripgrep against 0.2 s:
+the edit wrote the harness into seven libraries' root files, which took those libraries over
+from rustc in every program that links them, and built two programs whole. On dev-aws-11 against
+main, ripgrep: first `test --no-run` 4.0 s (3.9), "test-edit" 0.2 s (0.2), "test-added" 0.7 s
+(1.0); nushell: first `test --no-run` 11.8 s (11.7), "test-edit" 1.4 s (4.3, and 4.6 with
+rustc's harness on the same main), "test-added" 1.5 s (1.9).
 
 **I. Build scripts compiled and run by ra-jit.** ([#89](https://github.com/indexable-inc/ra-jit/issues/89)) The daemon compiles, links and runs build
 scripts with `RUSTC` naming ra-jit, so that `autocfg`, `version_check`, `rustversion` and the
@@ -726,7 +740,54 @@ library's doctests run a second time with nothing changed run no rustc; after an
 library, every example of it is compiled again. The fixture's doctests went from 6 to 3.
 `harness/doctests.py` runs ra-jit twice on each crate and holds both runs to rustdoc's, and
 the flag check's edit changes a constant an example reads, which a stale program would show.
-What is left of L is the rest of the paragraph above.
+
+Done second (the `no-rustc-l2` lane, 2026-10-23): ra-jit compiles and links the examples, with
+no probe. The doctest process loads the library as before, and adds each example to
+rust-analyzer's graph as a crate of its own: one file at the path rustdoc shows (so a panic's
+location is rustdoc's), its text moved down to the line it starts at, depending on the library
+and the library's dependencies, built with `cfg(doc, doctest)` and the example's edition. Each
+is compiled as a program over the standard library's unit (G's, from the store or built once),
+then linked with G's line by its own thread, run, and removed, while the next is compiled. An
+example that is only to compile passes when rust-analyzer finds no error in it. rustc still
+builds an example that is `compile_fail` (D), one rust-analyzer finds an error in (rustc
+prints it), one naming a dependency that links a second copy of the library (two copies of a
+trait rust-analyzer takes for one), and one whose build, link or stand-in check fails; the
+memo of the first part keeps those. A program that denies lints (a line `#![deny(...)]` or
+`#![forbid(...)]`, as `doc(test(attr(deny(warnings))))` gives every example of chrono) also
+goes to rustc when rust-analyzer warns about it or it names a `#[deprecated]` item, macro
+arguments included: rustdoc fails such an example, and ra-jit would pass it. The fixture's
+doctests went from 3 to 0. On the 30 crates of `harness/doctests.py` (3,095 examples) ra-jit
+builds 2,748 and rustc 340, every crate's results the same as rustdoc's (since the frozen def
+maps, url's and textwrap's second runs panic before any example is built, on main too:
+[#161](https://github.com/indexable-inc/ra-jit/issues/161)); most of rustc's are
+serde_json's 97, serde_core's 68 and hashbrown's 63, which name `serde`, linking a second copy
+of the library, and `time`'s 74, `compile_fail` and others with an error. Building whole programs
+of examples found two codegen bugs that rustc's copies of the libraries had hidden:
+`relocate_data_pointer` followed two allocations that seemed to point at each other forever
+(url), and an `#[inline]` function of the standard library that takes its caller's overflow
+checks was taken from ra-jit's build of the standard library, which has none (itertools; the
+fixture's `should_panic` example now holds it). ra-jit's program of an example is kept in
+`<target>/<profile>/ra-jit-doctest` under a key of its source, its edition and the ra-jit
+executable, and the libraries it is built against as for rustc's, and is run again while they
+are unchanged; an example that names `include!`, `include_str!`, `include_bytes!` or `env!` is
+compiled each time. A few examples are compiled at once, each on its own snapshot of the
+database (a sixteenth of the cores, from 1 to 4).
+
+Counted as in [How often](#how-often) on dev-aws-11 (Linux x86-64, 96 cores, Cranelift), main
+at 04bdd5b against this lane:
+
+| Doctests | ripgrep, main | ripgrep, L | nushell, main | nushell, L |
+|---|---|---|---|---|
+| first run | 35 rustc, 12.0 s | 4, 28.7 s | 128, 9.3 s | 6, 25.3 s |
+| again | 0, 8.3 s | 0, 8.5 s | 0, 7.7 s | 0, 5.3 s |
+
+What rustc still runs on a first run is cargo's, not the examples': ripgrep's 3 workspace
+libraries and a build script; nushell's 3 proc macros and 2 workspace libraries, and one
+example of nu-protocol's left to rustc. The first run is slower: the standard library's unit
+is built once per store (6.6 s), and each example is a whole program, so the library's
+functions it reaches are compiled again for every example (10.7 s for ripgrep's 22). What is left of
+L is that cost, the daemon taking the examples in place of a process per library, and rustdoc
+for `-q` and a library ra-jit cannot load.
 
 **M. Remove the wrapper and the fallback.** ([#93](https://github.com/indexable-inc/ra-jit/issues/93)) Plain cargo after `ra-jit enable` names ra-jit as
 `build.rustc`; ra-jit answers cargo's questions (B) and writes for each unit the files cargo
@@ -840,8 +901,50 @@ longer than when resolving ran live, which lowered the impl headers on idle thre
 frozen family. A build waits for the remote's packs before it reads what is frozen: the store
 reads its packs once, when first opened, and one opened mid-fetch missed the standard library's.
 
-Not yet measured: the other bench apps with every crate ra-jit's. The step K
-bar: with a warm remote, `cargo ra-jit build` from nothing is no slower than cargo's cold build;
+The link takes only what is reached of the unit (2026-10-23, same host). The unit is described
+to line tables at most, as rustc's own standard library is (its object 64 to 52 MB), and is
+kept as an archive of 17 parts: each function's sections with its unwind entry and its
+exception table, and each debug unit (256 functions, its own section set) in the part most of
+its functions are in, so that lld reads the parts on its threads. On one object lld read 140,000
+sections one after another, as fast on one thread as on 96.
+
+| Link | Before | After |
+|---|---|---|
+| hello, ra-jit's link | 160 to 167 ms | 130 ms |
+| hello, lld alone | 113 ms | 93 ms (cargo's: 25 ms) |
+| hello's executable | 20.4 MB | 15.2 MB |
+| ripgrep's executable | 55.1 MB | 50.1 MB (cargo's: 53.2 MB) |
+| ripgrep, warm remote, the whole build | 4.24 to 4.29 s | 4.20 to 4.28 s |
+
+ripgrep's link stays at 0.24 s: its own 64 MB object is now most of what lld reads, and it is
+written each build. The `cc` in front of lld (nix's wrappers, `collect2`) costs 35 ms more.
+
+A checkout's own functions come from the store too (2026-10-23, same host and pinning, the
+roots-store lane): a root whose code the store has whole, with all it calls, is put in the
+object from it instead of compiled, the roots are asked about at once on every core, and the
+crates are listed on every core. The other bench apps, with every crate ra-jit's and linked by
+ra-jit, each executable printing what cargo's does:
+
+| App | `cargo build`, cold | ra-jit, empty store and remote | warm store | empty store, warm remote | Executable (cargo's) |
+|---|---|---|---|---|---|
+| ripgrep (`rg --version`) | 5.53 to 5.76 s | 16.8 to 17.4 s | 3.98 to 3.99 s | 4.01 to 4.02 s | 49.3 MB (53.2) |
+| nushell (`nu -c "[3 1 2] \| math sum"`) | 33.1 to 33.2 s, 2.4 GB | 78.9 s, 23 GB | 31.3 s, 13.8 GB | 31.5 s | 346 MB (539) |
+| helix (`hx --version`) | 31.3 to 31.4 s, 1.8 GB | 87.0 to 89.7 s, 23 GB | 25.5 to 25.7 s, 13 GB | 26.0 to 26.3 s | 302 MB (426) |
+
+With a warm remote all three are under cargo's cold build: ripgrep by 28%, nushell by 5%,
+helix by 16%. Before, nushell's warm build was 48.7 s: 15,786 of its 239,163 functions were
+compiled, the roots that were only called, which compiling ahead did not ask the store about;
+now 4 are. Of nushell's 31 s, resolving is 3.8 s, asking the store about the roots 3 s (its 32 MB
+of unpacked blocks thrash), putting the functions in the object 4 s, describing them 4 s,
+writing the object 7 s, listing 4.7 s and the link 1 s. An empty store is slower than cargo by
+2.4 to 3x: it compiles what the store then has, and keeps each root whole, which costs nothing
+measurable against main's build (helix 87 s against main's 92 s, ripgrep 17.3 against 16.8 s).
+helix is built with `HELIX_DISABLE_AUTO_GRAMMAR_BUILD=1` for cargo and ra-jit alike: its build
+script fetches the tree-sitter grammars, which the executable does not contain. bevy
+(`breakout`, cargo 78.2 s cold, 8.2 GB) does not build yet: its `main` is left to rustc
+(`UnresolvedMethod("chain")`), and the SSE compares glam calls are not lowered in this build.
+
+The step K bar: with a warm remote, `cargo ra-jit build` from nothing is no slower than cargo's cold build;
 with an empty store, it is measured and published beside cargo's, and the gap is an issue of its
 own. Until K lands, the rustc base stays as it is; it is not made faster or extended.
 

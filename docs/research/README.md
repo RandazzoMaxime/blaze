@@ -18,7 +18,8 @@ back them is under [docs/upstream/](../upstream/), each with a `SOURCE.md`. Sear
   2026-10-21. A spare only for a build that asks, salsa patched to evict queries with cycle
   handling and what that costs edits, and a forced `mi_collect`. 2026-10-22. What the own
   base adds after ready (`described` first), the daemon's tree process by process, and
-  mimalloc against jemalloc. 2026-10-23.
+  mimalloc against jemalloc. 2026-10-23. Sharing `described`'s types: nushell, helix, bun
+  and zed before and after, and how the DWARF was found the same. 2026-10-23.
 - [disk.md](disk.md): what ra-jit keeps on disk against cargo on ripgrep, helix, nushell and
   bevy, part by part with reflinked blocks counted once, the store before and after zstd
   blocks, what is left after the no-rustc lane (F/G) projected, and which compressed debug
