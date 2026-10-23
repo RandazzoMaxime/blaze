@@ -5389,7 +5389,10 @@ fn spells_generics(path: &hir_def::expr_store::path::Path) -> bool {
         || path.generic_args().is_some_and(|args| args.iter().any(Option::is_some))
 }
 
-fn adt_variants(db: &dyn hir_ty::db::HirDatabase, adt: AdtId) -> Vec<hir_def::VariantId> {
+pub(super) fn adt_variants(
+    db: &dyn hir_ty::db::HirDatabase,
+    adt: AdtId,
+) -> Vec<hir_def::VariantId> {
     match adt {
         AdtId::StructId(it) => vec![it.into()],
         AdtId::UnionId(it) => vec![it.into()],
