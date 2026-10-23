@@ -174,9 +174,9 @@ All notable changes to ra-jit are written here. The format follows
 - A borrow checker, the crate `hir-ty-borrowck` in the rust-analyzer subtree, written to give
   rustc's verdict: Polonius alpha by default as nightly rustc does, NLL with
   `RA_JIT_BORROWCK=nll`. It gives rustc's errors on
-  1511 of 1579 of rustc's own borrow-check tests that it can run, and none on any of the 245
+  1511 of 1580 of rustc's own borrow-check tests that it can run, and none on any of the 245
   rustc accepts, scored by `harness/borrowck_ui.py`, and finds nothing in ripgrep, fd, bat,
-  hyperfine, just, axum, nushell, delta, eza, tokei and starship. Its errors, and rustc's
+  hyperfine, just, axum, nushell, delta, eza, tokei, starship and cargo. Its errors, and rustc's
   `unused_mut` warning, are rust-analyzer diagnostics and `ra-jit borrowck` prints them ([docs/borrowck.md](docs/borrowck.md)).
 - Item well-formedness, the crate `hir-ty-wfcheck` next to the borrow checker: rustc's E0309
   and E0310 outside function bodies, for struct, enum and union fields (`&'static T` without
@@ -395,6 +395,15 @@ All notable changes to ra-jit are written here. The format follows
 
 ### Fixed
 
+- The borrow checker panicked on the corpus's `release_state`, whose impl's where clauses
+  name associated types of concrete types (`Option<&'static C>: QueryData<ReadOnly: ..>`), so
+  every error in the corpus's main file went unreported. As rustc, it now normalizes those
+  where clauses before using them, and relates two associated types by what they normalize to
+  (a GAT's `Self::Item<'w, '_>` and `Self::Item<'w, 'static>` are the same `&'w T`, where it
+  said "lifetime may not live long enough"). A panic now fails the check where it was
+  skipped: `ra-jit borrowck --project` exits with an error and counts panics,
+  `borrowck_ui.py` fails on a panic or on any error in a test rustc accepts, and CI checks the
+  corpus and `mixfutures` crates.
 - The borrow checker no longer reports "temporary value dropped while borrowed" on every
   field of a `tracing::trace!` with tracing 0.1.44, which names fields with a `const` in a
   block inside its callsite's `static`: a `const fn` method call there is promoted, as rustc
@@ -402,7 +411,12 @@ All notable changes to ra-jit are written here. The format follows
   ([#109](https://github.com/indexable-inc/ra-jit/issues/109)). A trait object given for a
   type parameter bounded `T: 'a` lives for `'a`, as rustc's object lifetime default, where
   rust-analyzer made it `'static` and the checker said "lifetime may not live long enough"
-  ([#84](https://github.com/indexable-inc/ra-jit/issues/84)).
+  ([#84](https://github.com/indexable-inc/ra-jit/issues/84)). All of cargo 0.99 now checks
+  clean, where five false errors were left: rusqlite's `params![..]` of locals (an impl
+  header's `&dyn ToSql` is for any lifetime, not only `'static`), `unwrap_or(&|_| true)` (a
+  closure capturing nothing is promoted), git2 callbacks borrowing a counter declared after
+  them (a panic's path drops nothing for a value with no drop glue), and an `async fn`
+  returning `impl Iterator + 'b` of `&'a self` with `'a: 'b`.
 - A program whose `main` is C's, as bun's, is built as a whole program: LLVM gets every body
   and inlines across crates, where each function was compiled alone before. `derive(PartialEq)`
   of an enum compares the discriminants first, as rustc's does. bun's whole program, every

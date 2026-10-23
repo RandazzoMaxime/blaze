@@ -5570,6 +5570,40 @@ pub mod variadic {
 }
 
 /// A constant holding a pointer into another, over-aligned constant.
+/// Constants that point into constants: a keyword lookup by length then bytes, as bun's
+/// lexer tables, a slice that starts past the start of another, and slices of slices.
+pub mod const_tables {
+    const KEYWORDS: &[(&[u8], u32)] =
+        &[(b"do", 1), (b"if", 2), (b"in", 3), (b"for", 4), (b"let", 5), (b"while", 6)];
+    const DIGITS: &[u8] = b"0123456789abcdef";
+    const TAIL: &[u8] = DIGITS.split_at(10).1;
+    const NESTED: &[&[&str]] = &[&["alpha", "beta"], &[], &["gamma"]];
+
+    fn index(key: &[u8]) -> u32 {
+        match key.len() {
+            2 if key == b"do" => 1,
+            2 if key == b"if" => 2,
+            2 if key == b"in" => 3,
+            3 if key == b"for" => 4,
+            3 if key == b"let" => 5,
+            5 if key == b"while" => 6,
+            _ => u32::MAX,
+        }
+    }
+
+    fn lookup(key: &[u8]) -> Option<u32> {
+        KEYWORDS.iter().find(|(it, _)| *it == key).map(|(_, value)| *value)
+    }
+
+    pub fn run(words: &[&[u8]]) -> String {
+        let found: Vec<(u32, Option<u32>)> =
+            words.iter().map(|it| (index(it), lookup(it))).collect();
+        let nested: Vec<String> = NESTED.iter().map(|it| it.join("+")).collect();
+        let tail = std::str::from_utf8(TAIL).unwrap();
+        format!("{found:?} {tail} {nested:?} {}", DIGITS[TAIL.len() + words.len()] as char)
+    }
+}
+
 pub mod const_pointer_into_const {
     use std::marker::PhantomData;
 
@@ -5947,6 +5981,165 @@ pub mod object_lifetime_default {
         let mut c = Container { t: Ref { r: &first }, u: Ref2 { r: &first } };
         put(Ref { r: &a }, Ref2 { r: &b }, &mut c);
         format!("{}{}", c.t.r.show(), c.u.r.show())
+    }
+}
+
+/// What cargo 0.99 borrows as rustc accepts: rusqlite's `impl Params for &[&dyn ToSql]`,
+/// whose elided lifetimes leave the trait object any lifetime; `&|_| true`, promoted as it
+/// captures nothing; callbacks that borrow a value without drop glue declared after them and
+/// are moved away, which the unwind path still drops; and an `async fn` returning
+/// `impl Iterator + 'b` of a struct holding `&'a self` with `'a: 'b`.
+pub mod cargo_borrows {
+    use std::future::Future;
+    use std::pin::pin;
+    use std::rc::Rc;
+    use std::task::{Context, Poll, Waker};
+
+    pub trait ToSql {
+        fn value(&self) -> u64;
+    }
+
+    impl ToSql for u64 {
+        fn value(&self) -> u64 {
+            *self
+        }
+    }
+
+    impl ToSql for String {
+        fn value(&self) -> u64 {
+            self.len() as u64
+        }
+    }
+
+    impl<T: ToSql + ?Sized> ToSql for &T {
+        fn value(&self) -> u64 {
+            (**self).value()
+        }
+    }
+
+    pub trait Params {
+        fn sum(&self) -> u64;
+    }
+
+    impl Params for &[&dyn ToSql] {
+        fn sum(&self) -> u64 {
+            self.iter().map(|it| it.value()).sum()
+        }
+    }
+
+    struct Statement<'conn>(&'conn str);
+
+    impl Statement<'_> {
+        fn exists<P: Params>(&mut self, params: P) -> bool {
+            params.sum() > self.0.len() as u64
+        }
+    }
+
+    fn params(ids: &[u64], conn: &str) -> usize {
+        let mut statement = Statement(conn);
+        let mut found = 0;
+        for id in ids {
+            let names = vec![format!("name{id}")];
+            for name in names.iter() {
+                let params = &[&id as &dyn ToSql, &name as &dyn ToSql] as &[&dyn ToSql];
+                found += usize::from(statement.exists(params));
+            }
+        }
+        found
+    }
+
+    fn keep(keep_previous: Option<&dyn Fn(u64) -> bool>, ids: &[u64]) -> usize {
+        let keep_previous = keep_previous.unwrap_or(&|_| true);
+        ids.iter().filter(|&&id| keep_previous(id)).count()
+    }
+
+    struct Counter<const N: usize> {
+        slots: [u32; N],
+        index: usize,
+    }
+
+    impl<const N: usize> Counter<N> {
+        fn add(&mut self, value: u32) {
+            self.slots[self.index] = value;
+            self.index = (self.index + 1) % N;
+        }
+    }
+
+    struct Callbacks<'a> {
+        progress: Option<Box<dyn FnMut(u32) -> bool + 'a>>,
+    }
+
+    struct FetchOptions<'cb> {
+        callbacks: Option<Callbacks<'cb>>,
+    }
+
+    fn fetch(cb: &mut dyn FnMut(FetchOptions<'_>) -> u32) -> u32 {
+        let mut callbacks = Callbacks { progress: None };
+        let mut counter = Counter::<4> { slots: [0; 4], index: 0 };
+        callbacks.progress = Some(Box::new(|value| {
+            counter.add(value);
+            counter.slots.iter().sum::<u32>() > 10
+        }));
+        std::hint::black_box(&mut callbacks);
+        let options = FetchOptions { callbacks: Some(callbacks) };
+        cb(options)
+    }
+
+    struct Index<'gctx> {
+        name: &'gctx str,
+        cache: Vec<u8>,
+    }
+
+    impl<'gctx> Index<'gctx> {
+        async fn load(&self) -> Rc<Vec<u8>> {
+            Rc::new(self.cache.clone())
+        }
+
+        async fn summaries<'a, 'b>(
+            &'a self,
+            req: &'b u8,
+        ) -> Result<impl Iterator<Item = u8> + 'b, ()>
+        where
+            'a: 'b,
+        {
+            let summaries = self.load().await;
+            struct I<'a> {
+                index: &'a Index<'a>,
+                req: &'a u8,
+                summaries: Rc<Vec<u8>>,
+                i: usize,
+            }
+            impl Iterator for I<'_> {
+                type Item = u8;
+                fn next(&mut self) -> Option<u8> {
+                    let it = *self.summaries.get(self.i)?;
+                    self.i += 1;
+                    Some(it + *self.req + self.index.name.len() as u8)
+                }
+            }
+            Ok(I { index: self, req, summaries, i: 0 })
+        }
+    }
+
+    fn block_on<F: Future>(future: F) -> F::Output {
+        let mut future = pin!(future);
+        let mut cx = Context::from_waker(Waker::noop());
+        loop {
+            if let Poll::Ready(value) = future.as_mut().poll(&mut cx) {
+                return value;
+            }
+        }
+    }
+
+    pub fn run() -> (usize, usize, u32, Vec<u8>) {
+        let fetched = fetch(&mut |mut options| {
+            let mut progress = options.callbacks.take().and_then(|it| it.progress).unwrap();
+            (1..=5).filter(|&it| progress(it)).count() as u32
+        });
+        let index = Index { name: "crates", cache: vec![1, 2, 3] };
+        let req = 10;
+        let summaries = block_on(index.summaries(&req)).map(|it| it.collect()).unwrap_or_default();
+        (params(&[1, 2, 30], "conn"), keep(None, &[1, 2, 3]), fetched, summaries)
     }
 }
 
@@ -6465,7 +6658,9 @@ pub mod inline_asm {
     #[target_feature(enable = "crc")]
     unsafe fn crc(state: u32, word: u32) -> u32 {
         let out: u32;
-        unsafe { asm!("crc32w {0:w}, {1:w}, {2:w}", lateout(reg) out, in(reg) state, in(reg) word) };
+        unsafe {
+            asm!("crc32w {0:w}, {1:w}, {2:w}", lateout(reg) out, in(reg) state, in(reg) word)
+        };
         out
     }
 
@@ -7619,7 +7814,10 @@ pub mod provided_futures {
         }
     }
     pub trait ServiceExt<R: Role>: Service<R> + Sized {
-        fn serve<T, A>(self, transport: T) -> impl Future<Output = Result<Running<R, Self>, R::Error>>
+        fn serve<T, A>(
+            self,
+            transport: T,
+        ) -> impl Future<Output = Result<Running<R, Self>, R::Error>>
         where
             T: IntoTransport<R, A>,
         {

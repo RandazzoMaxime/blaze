@@ -24,11 +24,11 @@ sys.path.insert(0, HERE)
 from storelib import Checkout, Daemon, cache, files, scratch, stats, verify
 
 WINDOWS = os.name == "nt"
-# NTFS keeps a log and a file table of its own, which do not fit in the 8 MB a tmpfs can be.
-SIZE = (64 if WINDOWS else 8) << 20
-# How much room the store has, in bytes. A cold build of the workspace writes about 1.5 MB
-# with Cranelift on Linux and under 512 KB with LLVM on Windows, so the last room is measured,
-# two thirds of what it writes, and only the rooms smaller than that are tried.
+# A cold build keeps the frozen def maps, impls and lang items of std and the crates under it
+# (about 18 MB on Linux), and the room made under a running daemon has to take them all.
+SIZE = 64 << 20
+# How much room the store has, in bytes. What a cold build of the workspace writes is
+# measured, and the last room is two thirds of it; only the rooms smaller than that are tried.
 ROOMS = [0, 4096, 16 << 10, 128 << 10, 512 << 10]
 SEALS = {"RA_JIT_CACHE_SEAL_AT": "1", "RA_JIT_CACHE_MAX": "off"}
 NO_ROOM = "There is not enough space on the disk" if WINDOWS else "No space left on device"

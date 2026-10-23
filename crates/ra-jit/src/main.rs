@@ -1229,6 +1229,11 @@ impl SymbolResolver for Resolver<'_> {
         self.table.defines(symbol)
     }
 
+    fn provides(&self, symbol: &str) -> bool {
+        self.table.defines(symbol)
+            || self.prebuilt.as_ref().is_some_and(|it| it.defined.contains(symbol))
+    }
+
     fn linked(&self, symbol: &str) -> bool {
         self.rustcs().is_none_or(|it| it.has(symbol))
     }
@@ -3180,6 +3185,31 @@ impl Listed {
         lock(&self.functions).entry(krate).or_insert(listed).clone()
     }
 
+    /// Lists `crates` on every core, a crate to a thread at a time.
+    fn of_all(&self, db: &RootDatabase, crates: &[Crate]) {
+        let threads = std::thread::available_parallelism().map_or(1, |it| it.get());
+        let next = std::sync::atomic::AtomicUsize::new(0);
+        std::thread::scope(|scope| {
+            let parts: Vec<_> = (0..threads.min(crates.len()))
+                .map(|_| {
+                    let (db, next) = (db.clone(), &next);
+                    scope.spawn(move || {
+                        hir::attach_db(&db, || {
+                            let at = || next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                            while let Some(&krate) = crates.get(at()) {
+                                self.of(&db, krate);
+                            }
+                        })
+                    })
+                })
+                .collect();
+            // A query that is cancelled unwinds, and goes on unwinding here as what it is.
+            for part in parts {
+                part.join().unwrap_or_else(|e| std::panic::resume_unwind(e));
+            }
+        });
+    }
+
     /// Notes that a build of `crates` began: the files they read are a program's before the
     /// build lists them, as the check of its edited files has it.
     fn building(&self, crates: impl IntoIterator<Item = Crate>) {
@@ -3860,6 +3890,7 @@ fn build(
             .map(Crate::from)
             .filter(|it| !asked.contains(it))
             .collect();
+        listed.of_all(db, &linked.iter().copied().collect::<Vec<_>>());
         for krate in linked {
             local.push(krate);
             let listed = listed.of(db, krate);
