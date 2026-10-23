@@ -1819,6 +1819,7 @@ version = "0.0.0"
 dependencies = [
  "base-db",
  "hir-def",
+ "hir-expand",
  "hir-ty",
  "la-arena",
  "ra-ap-rustc_ast_ir",
@@ -1826,6 +1827,7 @@ dependencies = [
  "rustc-hash 2.1.2",
  "salsa",
  "smallvec",
+ "syntax",
 ]
 
 [[package]]

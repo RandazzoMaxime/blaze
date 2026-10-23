@@ -1022,7 +1022,8 @@ fn commit_of_sources(built: &[u8]) -> Option<String> {
 
 /// What tells the toolchain whose library was loaded from any other: the name of the built
 /// library the program links, its commit, and the name of its compiler, each of which has
-/// a hash of the toolchain in it. `None` when it has none of them.
+/// a hash of the toolchain in it, and what the metadata of its `core`, `alloc` and `std`
+/// says of each (`metadata_hash`). `None` when it has none of them.
 fn toolchain_identity(vfs: &vfs::Vfs, symbol_files: &[PathBuf]) -> Option<String> {
     let mut identity: Vec<String> = symbol_files
         .iter()
@@ -1030,6 +1031,21 @@ fn toolchain_identity(vfs: &vfs::Vfs, symbol_files: &[PathBuf]) -> Option<String
         .filter(|it| it.starts_with("libstd-"))
         .map(str::to_owned)
         .collect();
+    for rlib in symbol_files {
+        let Some(name) = rlib.file_name().and_then(|it| it.to_str()) else { continue };
+        if !["libcore-", "liballoc-", "libstd-"].iter().any(|it| name.starts_with(it))
+            || !name.ends_with(".rlib")
+        {
+            continue;
+        }
+        let Ok(file) = std::fs::File::open(rlib) else { continue };
+        // SAFETY: a library of the toolchain is not written once it is installed, nor one cargo
+        // built while a build links it.
+        let Ok(bytes) = (unsafe { memmap2::Mmap::map(&file) }) else { continue };
+        if let Some(hash) = metadata_hash(&bytes) {
+            identity.push(format!("{name}={hash}"));
+        }
+    }
     let toolchain = vfs.iter().find_map(|(_, path)| {
         let path = path.as_path()?.as_str().replace('\\', "/");
         let (toolchain, _) = path.split_once("lib/rustlib/src/rust/")?;
@@ -1045,6 +1061,36 @@ fn toolchain_identity(vfs: &vfs::Vfs, symbol_files: &[PathBuf]) -> Option<String
     }
     identity.sort_unstable();
     (!identity.is_empty()).then(|| identity.join(" "))
+}
+
+/// A hash of what the metadata of the crate in the rlib `archive` says it is: the header,
+/// and the start of the crate's root, which holds its target and the hash rustc gives the
+/// crate (its SVH). That hash is another for other sources or other flags, which the name of
+/// the file need not show: a library rebuilt under the same toolchain, by `-Zbuild-std` or
+/// into a patched sysroot, keeps its name. The rlibs of a toolchain hold a stub of their
+/// metadata with the root in it, and others all of it.
+fn metadata_hash(archive: &[u8]) -> Option<String> {
+    use object::{Object as _, ObjectSection as _};
+    use sha2::{Digest, Sha256};
+    /// How much of the root is hashed: the crate's header, of a few dozen bytes, and more.
+    const ROOT: usize = 256;
+    let parsed = object::read::archive::ArchiveFile::parse(archive).ok()?;
+    let member = parsed.members().filter_map(Result::ok).find(|it| it.name() == b"lib.rmeta")?;
+    let member = member.data(archive).ok()?;
+    let metadata = match object::File::parse(member) {
+        Ok(object) => object.section_by_name(".rmeta")?.data().ok()?,
+        Err(_) => member,
+    };
+    if !metadata.starts_with(b"rust\0\0\0") {
+        return None;
+    }
+    let root = u64::from_le_bytes(metadata.get(8..16)?.try_into().ok()?);
+    let root = metadata.get(usize::try_from(root).ok()?..)?;
+    let mut hasher = Sha256::new();
+    hasher.update(&metadata[..16]);
+    hasher.update(&root[..root.len().min(ROOT)]);
+    let hash = hasher.finalize();
+    Some(hash[..8].iter().map(|it| format!("{it:02x}")).collect())
 }
 
 /// The built `std` of the toolchain whose library was loaded, for `triple`.
@@ -8739,6 +8785,45 @@ fn report_stats(stats: &hir_ty_codegen::BuildStats) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// An rlib whose `lib.rmeta` is `metadata`, as an archive of one member.
+    fn rlib(metadata: &[u8]) -> Vec<u8> {
+        let mut archive = b"!<arch>\n".to_vec();
+        // The name, then what of the member is not read, then its size.
+        let size = metadata.len();
+        let header = format!("{:<48}{size:<10}`\n", "lib.rmeta/");
+        archive.extend_from_slice(header.as_bytes());
+        archive.extend_from_slice(metadata);
+        if metadata.len() % 2 == 1 {
+            archive.push(b'\n');
+        }
+        archive
+    }
+
+    /// Metadata with its root at 32: the crate's header, then `rest`.
+    fn metadata(svh: [u8; 16], rest: &[u8]) -> Vec<u8> {
+        let mut bytes = b"rust\0\0\0\x0a".to_vec();
+        bytes.extend_from_slice(&32u64.to_le_bytes());
+        bytes.extend_from_slice(&[0xc1; 16]);
+        bytes.extend_from_slice(b"\0\x14aarch64-apple-darwin\xc1");
+        bytes.extend_from_slice(&svh);
+        bytes.extend_from_slice(rest);
+        bytes
+    }
+
+    #[test]
+    fn a_library_is_told_apart_by_the_hash_its_metadata_gives_it() {
+        let built = metadata([1; 16], &[0; 8]);
+        let hash = metadata_hash(&rlib(&built));
+        assert!(hash.is_some());
+        assert_eq!(metadata_hash(&rlib(&built)), hash);
+        assert_ne!(metadata_hash(&rlib(&metadata([2; 16], &[0; 8]))), hash);
+        // Past the start of the root is what the rest of the metadata is, which the hash of
+        // the crate covers.
+        let long = |end| metadata([1; 16], &[[0; 512].as_slice(), &[end]].concat());
+        assert_eq!(metadata_hash(&rlib(&long(1))), metadata_hash(&rlib(&long(2))));
+        assert_eq!(metadata_hash(&rlib(b"not metadata")), None);
+    }
 
     /// A file of a package is in the source root of each of its targets, and a program reads
     /// it as a module of its own crates only; a file in none of them is read in all.

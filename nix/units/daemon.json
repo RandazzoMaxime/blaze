@@ -1,7 +1,7 @@
 {
  "dir": ".",
  "inputs": {
-  "Cargo.lock": "b41dd3971ff4aeecfb4a52fa3fc451830bfb765be61546dcca5fc9ad995b67e5",
+  "Cargo.lock": "a9378038f2eb4fb5632f6077cf7ffc4275eb8c750c94f96a426b3ed7205d6a5d",
   "Cargo.toml": "4f71340b2d7f3f874e690331931f61541000600a05e19974a81ba3f0c8c74ef5"
  },
  "packages": {
@@ -14459,6 +14459,10 @@
        "name": "hir_def"
       },
       {
+       "i": 154,
+       "name": "hir_expand"
+      },
+      {
        "i": 156,
        "name": "hir_ty"
       },
@@ -14485,6 +14489,10 @@
       {
        "i": 369,
        "name": "smallvec"
+      },
+      {
+       "i": 383,
+       "name": "syntax"
       }
      ],
      "edition": "2024",
@@ -19346,10 +19354,6 @@
        "name": "tikv_jemalloc_ctl"
       },
       {
-       "i": 400,
-       "name": "tikv_jemalloc_sys"
-      },
-      {
        "i": 403,
        "name": "tikv_jemallocator"
       },
@@ -19593,10 +19597,6 @@
       {
        "i": 399,
        "name": "tikv_jemalloc_ctl"
-      },
-      {
-       "i": 400,
-       "name": "tikv_jemalloc_sys"
       },
       {
        "i": 403,
@@ -19844,10 +19844,6 @@
        "name": "tikv_jemalloc_ctl"
       },
       {
-       "i": 400,
-       "name": "tikv_jemalloc_sys"
-      },
-      {
        "i": 403,
        "name": "tikv_jemallocator"
       },
@@ -20091,10 +20087,6 @@
       {
        "i": 399,
        "name": "tikv_jemalloc_ctl"
-      },
-      {
-       "i": 400,
-       "name": "tikv_jemalloc_sys"
       },
       {
        "i": 403,
@@ -31605,6 +31597,10 @@
        "name": "hir_def"
       },
       {
+       "i": 151,
+       "name": "hir_expand"
+      },
+      {
        "i": 153,
        "name": "hir_ty"
       },
@@ -31631,6 +31627,10 @@
       {
        "i": 370,
        "name": "smallvec"
+      },
+      {
+       "i": 384,
+       "name": "syntax"
       }
      ],
      "edition": "2024",
@@ -36664,10 +36664,6 @@
        "name": "tikv_jemalloc_ctl"
       },
       {
-       "i": 401,
-       "name": "tikv_jemalloc_sys"
-      },
-      {
        "i": 404,
        "name": "tikv_jemallocator"
       },
@@ -36911,10 +36907,6 @@
       {
        "i": 400,
        "name": "tikv_jemalloc_ctl"
-      },
-      {
-       "i": 401,
-       "name": "tikv_jemalloc_sys"
       },
       {
        "i": 404,
@@ -37162,10 +37154,6 @@
        "name": "tikv_jemalloc_ctl"
       },
       {
-       "i": 401,
-       "name": "tikv_jemalloc_sys"
-      },
-      {
        "i": 404,
        "name": "tikv_jemallocator"
       },
@@ -37409,10 +37397,6 @@
       {
        "i": 400,
        "name": "tikv_jemalloc_ctl"
-      },
-      {
-       "i": 401,
-       "name": "tikv_jemalloc_sys"
       },
       {
        "i": 404,
@@ -48955,6 +48939,10 @@
        "name": "hir_def"
       },
       {
+       "i": 155,
+       "name": "hir_expand"
+      },
+      {
        "i": 157,
        "name": "hir_ty"
       },
@@ -48981,6 +48969,10 @@
       {
        "i": 370,
        "name": "smallvec"
+      },
+      {
+       "i": 384,
+       "name": "syntax"
       }
      ],
      "edition": "2024",
@@ -53842,10 +53834,6 @@
        "name": "tikv_jemalloc_ctl"
       },
       {
-       "i": 401,
-       "name": "tikv_jemalloc_sys"
-      },
-      {
        "i": 404,
        "name": "tikv_jemallocator"
       },
@@ -54089,10 +54077,6 @@
       {
        "i": 400,
        "name": "tikv_jemalloc_ctl"
-      },
-      {
-       "i": 401,
-       "name": "tikv_jemalloc_sys"
       },
       {
        "i": 404,
@@ -54340,10 +54324,6 @@
        "name": "tikv_jemalloc_ctl"
       },
       {
-       "i": 401,
-       "name": "tikv_jemalloc_sys"
-      },
-      {
        "i": 404,
        "name": "tikv_jemallocator"
       },
@@ -54587,10 +54567,6 @@
       {
        "i": 400,
        "name": "tikv_jemalloc_ctl"
-      },
-      {
-       "i": 401,
-       "name": "tikv_jemalloc_sys"
       },
       {
        "i": 404,
@@ -66128,6 +66104,10 @@
        "name": "hir_def"
       },
       {
+       "i": 152,
+       "name": "hir_expand"
+      },
+      {
        "i": 154,
        "name": "hir_ty"
       },
@@ -66154,6 +66134,10 @@
       {
        "i": 371,
        "name": "smallvec"
+      },
+      {
+       "i": 385,
+       "name": "syntax"
       }
      ],
      "edition": "2024",
@@ -71187,10 +71171,6 @@
        "name": "tikv_jemalloc_ctl"
       },
       {
-       "i": 402,
-       "name": "tikv_jemalloc_sys"
-      },
-      {
        "i": 405,
        "name": "tikv_jemallocator"
       },
@@ -71434,10 +71414,6 @@
       {
        "i": 401,
        "name": "tikv_jemalloc_ctl"
-      },
-      {
-       "i": 402,
-       "name": "tikv_jemalloc_sys"
       },
       {
        "i": 405,
@@ -71685,10 +71661,6 @@
        "name": "tikv_jemalloc_ctl"
       },
       {
-       "i": 402,
-       "name": "tikv_jemalloc_sys"
-      },
-      {
        "i": 405,
        "name": "tikv_jemallocator"
       },
@@ -71932,10 +71904,6 @@
       {
        "i": 401,
        "name": "tikv_jemalloc_ctl"
-      },
-      {
-       "i": 402,
-       "name": "tikv_jemalloc_sys"
       },
       {
        "i": 405,
