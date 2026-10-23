@@ -32,6 +32,7 @@ mod tier;
 mod trace;
 mod tree;
 mod weaken;
+mod whole;
 
 /// The daemon holds millions of small allocations and frees a file's worth of them on each
 /// edit, which the system allocator is slow at. jemalloc gives the system back more of what
@@ -3303,7 +3304,10 @@ fn start_from_rustc(
         bail!("patching what rustc linked takes --splice and --patch");
     };
     let empty = hir_ty_codegen::empty_object().map_err(|it| anyhow::anyhow!("{it}"))?;
-    std::fs::write(&args.out, &empty)?;
+    {
+        let _writing = whole::writing(&args.out);
+        std::fs::write(&args.out, &empty)?;
+    }
     std::fs::write(patch, &empty)?;
     // Another name for it at once, for a client to install: the copy a splice writes is
     // made while the daemon waits for the first edit.
@@ -3570,6 +3574,7 @@ impl Build {
     fn keep(&mut self, known: &mut Rejections) -> anyhow::Result<()> {
         known.keep_built();
         for (path, bytes) in std::mem::take(&mut self.unwritten) {
+            let _writing = whole::writing(&path);
             replace(&path, &bytes)?;
         }
         Ok(())
@@ -4143,7 +4148,8 @@ impl std::error::Error for RustcLinkedLost {}
 /// is spliced into the executable at `splice`, which `--binary` names, when that is known from
 /// its last link; anything else, and whatever the splice declines, runs the link command, whose
 /// result is then known. `RA_JIT_SPLICE=0` has every edit linked in full. A patch of what rustc
-/// linked (`over_rustc`) is spliced or fails with [`RustcLinkedLost`].
+/// linked (`over_rustc`) is spliced or fails with [`RustcLinkedLost`]. With `packs` the object
+/// is kept packed after the link ([`whole`]).
 fn link(
     cmd: Option<&str>,
     splice: Option<&Path>,
@@ -4152,6 +4158,7 @@ fn link(
     patched: bool,
     over_rustc: bool,
     defer: bool,
+    packs: bool,
 ) -> anyhow::Result<()> {
     let rustcs = splice.is_some_and(|it| lock(&RUSTC_LINKED).contains(it));
     if let Some(binary) = splice.filter(|_| rustcs && !over_rustc) {
@@ -4280,6 +4287,7 @@ fn link(
             return Err(RustcLinkedLost(declined).into());
         }
     }
+    let reading = whole::read(object)?;
     run_link(cmd, start, &declined)?;
     if let Some(binary) = splice
         && let Some(pad) = headerpad_short(binary)
@@ -4288,11 +4296,29 @@ fn link(
         let again = format!("; again with -Wl,-headerpad,{pad:#x}, for the splices to fit");
         run_link(cmd, Instant::now(), &again)?;
     }
+    drop(reading);
     if let (Some(binary), Some(patch)) = (splice, patch) {
         let linked = Executable::Linked(Linked::read(binary.to_owned(), patch, object));
         lock(&LINKED).insert(binary.to_owned(), linked);
     }
+    if packs {
+        let start = Instant::now();
+        match whole::pack(object) {
+            Ok(true) => eprintln!("link: the whole object packed in {:.1?}", start.elapsed()),
+            Ok(false) => {}
+            Err(e) => eprintln!("link: the whole object is kept as it is: {e}"),
+        }
+    }
     Ok(())
+}
+
+/// Whether the object with all of the program is kept packed between links ([`whole`]): a
+/// daemon's, whose executable has the debug information, and that nothing links but it.
+fn packs_whole(args: &Args) -> bool {
+    args.socket.is_some()
+        && args.isolate.is_none()
+        && args.exe.is_none()
+        && args.debug.kept == plan::Kept::Linked
 }
 
 /// Runs the link command `cmd` and says how long it took since `start` and how it ended, with
@@ -7028,6 +7054,7 @@ fn run_holding(
                 false,
                 false,
                 false,
+                packs_whole(&args),
             )?;
             if let Some(exe) = &args.exe {
                 let workspace = checkouts.loaded.workspaces().first();
@@ -8164,6 +8191,7 @@ fn run_holding(
             let over = viewed.get(base).unwrap_or(base);
             let from = Settled::of(&files, &db, base, over, patch, link_cmd.clone());
             let (as_built, object) = (as_built.clone(), out.clone());
+            let packs = packs_whole(&programs[at].args);
             let read_as = (over != base).then(|| (over.clone(), unlinked.clone()));
             let linked = std::thread::spawn(move || {
                 let failed = link(
@@ -8174,6 +8202,7 @@ fn run_holding(
                     patched,
                     over_rustc,
                     defer,
+                    packs,
                 )
                 .err();
                 if failed.is_none() {
@@ -8542,7 +8571,9 @@ impl Program {
         // A patch is for the object with all of the program, which this build may be the
         // first to be asked for at this place.
         if let Some(whole) = whole.as_ref().filter(|it| **it != args.out) {
+            let _reading = whole::read(whole)?;
             if !same_file::is_same_file(whole, &args.out).unwrap_or(false) {
+                let _writing = whole::writing(&args.out);
                 _ = std::fs::remove_file(&args.out);
                 if std::fs::hard_link(whole, &args.out).is_err() {
                     std::fs::copy(whole, &args.out)?;
@@ -8688,7 +8719,9 @@ impl Program {
             let cmd = args.link_cmd.as_deref().filter(|_| failed.is_none() && link_it);
             let over_rustc = known.stats.over_rustc;
             begin_link();
-            let unlinked = link(cmd, splice, patch, &args.out, patched, over_rustc, defer).err();
+            let packs = packs_whole(args);
+            let unlinked =
+                link(cmd, splice, patch, &args.out, patched, over_rustc, defer, packs).err();
             if let Some(lost) = unlinked.as_ref().filter(|it| it.is::<RustcLinkedLost>()) {
                 eprintln!("{lost}: built in full");
                 known.forget_rustc();
