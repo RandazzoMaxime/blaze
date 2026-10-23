@@ -4246,7 +4246,13 @@ impl<'a, 'db> ObjectCodegen<'a, 'db> {
         // A patch is added to a program that is linked already, and is read with it.
         let apart = symbols.debug_apart().filter(|_| base.is_none());
         let debug = symbols.debug_directory().and_then(|directory| {
-            DebugContext::new(module.isa(), &directory, symbols.describes_variables(), apart)
+            DebugContext::new(
+                module.isa(),
+                &directory,
+                symbols.describes_variables(),
+                apart,
+                sections,
+            )
                 .map(debuginfo::Describer::new)
         });
         let debugged = debug.is_some();

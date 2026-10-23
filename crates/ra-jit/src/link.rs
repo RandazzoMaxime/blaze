@@ -15,6 +15,8 @@ use ide_db::RootDatabase;
 use ide_db::base_db::{self, CrateOrigin, LangCrateOrigin};
 use rustc_hash::FxHashSet;
 
+pub(crate) mod split;
+
 /// Links `objects` into the executable `exe`, with the native libraries of the crates `program`
 /// links. How long `cc` took.
 pub(crate) fn executable(
@@ -33,7 +35,13 @@ pub(crate) fn executable(
         cmd.arg(format!("-B{}", gcc_ld.display())).arg("-fuse-ld=lld");
     }
     cmd.args(target.leading());
-    cmd.args(objects);
+    for &object in objects {
+        if split::is_archive(&leading_bytes(object)?) {
+            cmd.arg("-Wl,--whole-archive").arg(object).arg("-Wl,--no-whole-archive");
+        } else {
+            cmd.arg(object);
+        }
+    }
     for lib in native_libs(db, program) {
         cmd.args(target.lib(&lib));
     }
@@ -51,6 +59,19 @@ pub(crate) fn executable(
         );
     }
     Ok(start.elapsed())
+}
+
+/// The first bytes of the file at `path`, which tell an archive from an object.
+fn leading_bytes(path: &Path) -> anyhow::Result<[u8; 8]> {
+    use std::io::Read;
+    let mut bytes = [0; 8];
+    let mut file =
+        std::fs::File::open(path).with_context(|| format!("opening {}", path.display()))?;
+    match file.read_exact(&mut bytes) {
+        Ok(()) => Ok(bytes),
+        Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => Ok([0; 8]),
+        Err(e) => Err(e).with_context(|| format!("reading {}", path.display())),
+    }
 }
 
 /// What the stand-ins left in the executable say: the functions ra-jit could not compile that
