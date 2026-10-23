@@ -1021,6 +1021,20 @@ paid once, by the release, instead of on a user's machine (`crates/ra-jit/src/sh
 binary under test into `$NR_ROOT/std-remote` and points `RA_JIT_STD_FROM` at it. `NR_STD=build`
 leaves every build to make the library itself.
 
+On dev-aws-11 (2026-10-23, against main cd48ca75f7), "cold" with an empty store: ripgrep 4.4 s
+(main 11.6 s; 4.5 s before step I), nushell 27.7 s (main 38.9 s; 25.6 s before step I); with
+`NR_STD=build`, 11.4 s and 36.8 s. The fetch and pull of the library take 0.1 to 0.2 s of that.
+The rustc counts are main's (ripgrep cold 39, nushell cold 493).
+
+Built here, the library is still 8 s of the cold build: resolving its 27 crates 1.9 s (core's
+def map alone 0.9 s, which the others wait on), compiling 5 s, then splitting, freezing and
+storing. The compile does not get faster past 16 cores (round 1 takes 4.5 s on 16, 3.9 s on 96):
+a profile has a fifth of its samples in rust-analyzer's interning of types, generic arguments
+and predicates, and the lock slow paths beside it, a contention the cores only add to. And a
+round is compiled twice: 78 generic instances of the library do not compile (SIMD intrinsics
+ra-jit has no lowering for), and the build starts over without them, 1.1 s. Cranelift now
+compiles `cmpxchg16b`'s 128-bit compare-and-swap, which was 5 more of them.
+
 The step K bar: with a warm remote, `cargo ra-jit build` from nothing is no slower than cargo's cold build;
 with an empty store, it is measured and published beside cargo's, and the gap is an issue of its
 own. Until K lands, the rustc base stays as it is; it is not made faster or extended.
