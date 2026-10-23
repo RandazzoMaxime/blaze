@@ -641,6 +641,8 @@ fn main() {
         cases::variadic::string(c"text")
     );
     println!("const_pointer_into_const {:?}", cases::const_pointer_into_const::run());
+    let words: [&[u8]; 8] = [b"do", b"if", b"of", b"for", b"lex", b"while", b"", b"in"];
+    println!("const_tables {}", cases::const_tables::run(&words));
     println!("enum_ordering {:?}", cases::enum_ordering::run(7));
     {
         use cases::added_strings::Segment;

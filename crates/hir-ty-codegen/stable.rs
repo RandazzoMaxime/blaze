@@ -254,7 +254,17 @@ impl<'a, 'db> StableNames<'a, 'db> {
         if !of_checkout {
             return Vec::new();
         }
-        self.listed(name, |it| it.functions.get(name).cloned()).unwrap_or_default()
+        // A function with lifetime parameters alone is one function whatever they are: its
+        // instance has them all erased.
+        let erased = name.rfind('<').filter(|&at| {
+            let args = name[at + 1..].strip_suffix('>');
+            args.is_some_and(|it| it.split(',').all(|arg| arg.is_empty() || arg == "'_"))
+        });
+        let name = match erased {
+            Some(at) => std::borrow::Cow::Owned(format!("{}<>", &name[..at])),
+            None => std::borrow::Cow::Borrowed(name),
+        };
+        self.listed(&name, |it| it.functions.get(&*name).cloned()).unwrap_or_default()
     }
 
     /// What the crate that `name` is of declares: a name starts with the kind of the item

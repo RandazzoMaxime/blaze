@@ -392,8 +392,8 @@ the counts of [How often](#how-often) lower, measured by step A's check, and non
 | [C](https://github.com/indexable-inc/ra-jit/issues/83). `asm!` assembled in process | the assembler run | A | small to medium | low | the `no-rustc-abc` lane: done |
 | [D](https://github.com/indexable-inc/ra-jit/issues/84). ra-jit's verdict is the final word | the fallback on an error, `cargo ra-jit check` as `cargo check` | A; borrowck work | large | high | the app-fixes worker's `no-rustc-d` lane, which also has [#96](https://github.com/indexable-inc/ra-jit/issues/96) |
 | [E](https://github.com/indexable-inc/ra-jit/issues/85). No function left to rustc | the refused classes; a refusal fails the build | A | large, ongoing | medium | the bun lane (bun's classes, #34, #35) and the glancer lane (kept rejections, #37) |
-| [F](https://github.com/indexable-inc/ra-jit/issues/86). The standard library compiled by ra-jit | the sysroot's rlibs | C, E | large | high | the cold-start lane |
-| [G](https://github.com/indexable-inc/ra-jit/issues/87). Every crate compiled and linked by ra-jit | rustc's rlibs, objects, symbols and link line, "no rustc symbol" | E, F | large | high | the cold-start lane |
+| [F](https://github.com/indexable-inc/ra-jit/issues/86). The standard library compiled by ra-jit | the sysroot's rlibs | C, E | large | high | the no-rustc F+G lane |
+| [G](https://github.com/indexable-inc/ra-jit/issues/87). Every crate compiled and linked by ra-jit | rustc's rlibs, objects, symbols and link line, "no rustc symbol" | E, F | large | high | the no-rustc F+G lane |
 | [H](https://github.com/indexable-inc/ra-jit/issues/88). ra-jit writes the test harness | the fallback when a test is added | G | medium | medium | the `no-rustc-hl` lane: done; the `no-rustc-l2` lane: ra-jit's harness always, done |
 | [I](https://github.com/indexable-inc/ra-jit/issues/89). Build scripts compiled and run by ra-jit | build scripts and their probes by rustc | B, G | medium | medium | the `no-rustc-l2` lane, after L; the F+G lane consumes it for the standard library's scripts |
 | [J](https://github.com/indexable-inc/ra-jit/issues/90). Proc macros compiled and loaded by ra-jit | proc macros by rustc, the toolchain's proc-macro server | F, G | large | high | none yet |
@@ -919,8 +919,32 @@ sections one after another, as fast on one thread as on 96.
 ripgrep's link stays at 0.24 s: its own 64 MB object is now most of what lld reads, and it is
 written each build. The `cc` in front of lld (nix's wrappers, `collect2`) costs 35 ms more.
 
-Not yet measured: the other bench apps with every crate ra-jit's. The step K
-bar: with a warm remote, `cargo ra-jit build` from nothing is no slower than cargo's cold build;
+A checkout's own functions come from the store too (2026-10-23, same host and pinning, the
+roots-store lane): a root whose code the store has whole, with all it calls, is put in the
+object from it instead of compiled, the roots are asked about at once on every core, and the
+crates are listed on every core. The other bench apps, with every crate ra-jit's and linked by
+ra-jit, each executable printing what cargo's does:
+
+| App | `cargo build`, cold | ra-jit, empty store and remote | warm store | empty store, warm remote | Executable (cargo's) |
+|---|---|---|---|---|---|
+| ripgrep (`rg --version`) | 5.53 to 5.76 s | 16.8 to 17.4 s | 3.98 to 3.99 s | 4.01 to 4.02 s | 49.3 MB (53.2) |
+| nushell (`nu -c "[3 1 2] \| math sum"`) | 33.1 to 33.2 s, 2.4 GB | 78.9 s, 23 GB | 31.3 s, 13.8 GB | 31.5 s | 346 MB (539) |
+| helix (`hx --version`) | 31.3 to 31.4 s, 1.8 GB | 87.0 to 89.7 s, 23 GB | 25.5 to 25.7 s, 13 GB | 26.0 to 26.3 s | 302 MB (426) |
+
+With a warm remote all three are under cargo's cold build: ripgrep by 28%, nushell by 5%,
+helix by 16%. Before, nushell's warm build was 48.7 s: 15,786 of its 239,163 functions were
+compiled, the roots that were only called, which compiling ahead did not ask the store about;
+now 4 are. Of nushell's 31 s, resolving is 3.8 s, asking the store about the roots 3 s (its 32 MB
+of unpacked blocks thrash), putting the functions in the object 4 s, describing them 4 s,
+writing the object 7 s, listing 4.7 s and the link 1 s. An empty store is slower than cargo by
+2.4 to 3x: it compiles what the store then has, and keeps each root whole, which costs nothing
+measurable against main's build (helix 87 s against main's 92 s, ripgrep 17.3 against 16.8 s).
+helix is built with `HELIX_DISABLE_AUTO_GRAMMAR_BUILD=1` for cargo and ra-jit alike: its build
+script fetches the tree-sitter grammars, which the executable does not contain. bevy
+(`breakout`, cargo 78.2 s cold, 8.2 GB) does not build yet: its `main` is left to rustc
+(`UnresolvedMethod("chain")`), and the SSE compares glam calls are not lowered in this build.
+
+The step K bar: with a warm remote, `cargo ra-jit build` from nothing is no slower than cargo's cold build;
 with an empty store, it is measured and published beside cargo's, and the gap is an issue of its
 own. Until K lands, the rustc base stays as it is; it is not made faster or extended.
 
