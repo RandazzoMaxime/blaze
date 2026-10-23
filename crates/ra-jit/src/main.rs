@@ -6924,6 +6924,7 @@ fn run_holding(
     // What is frozen names the files its `include!`s read: those not loaded yet are, and
     // what named them is read again.
     if WatchedFile::include_sources(&mut files, &mut tree, &mut db) != Loaded::Nothing {
+        listed.touch(&db, None);
         served = frozen::serve(&mut db, &built);
     }
     let mut resolved = resolve_crates(&db, &args, cores())?;

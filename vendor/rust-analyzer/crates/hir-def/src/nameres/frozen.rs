@@ -1930,7 +1930,8 @@ impl Dec<'_> {
             let path = self.str()?.to_owned();
             let written = match self.bool()? {
                 true => {
-                    let bytes = self.bytes.get(self.at..self.at + 16).ok_or("a hash past the end")?;
+                    let bytes =
+                        self.bytes.get(self.at..self.at + 16).ok_or("a hash past the end")?;
                     self.at += 16;
                     Some(u128::from_le_bytes(bytes.try_into().expect("16 bytes")))
                 }
@@ -2920,7 +2921,10 @@ pub fn made() {}
         assert_eq!(unreadable(&db, lib, &bytes), None);
         let changed = TestDB::with_files(&OUTSIDE.replace("{}\n", "{}\npub fn more() {}\n"));
         let why = unreadable(&changed, crate_named(&changed, "lib"), &bytes);
-        assert!(why.as_ref().is_some_and(|it| it.ends_with("is not the file that was written")), "{why:?}");
+        assert!(
+            why.as_ref().is_some_and(|it| it.ends_with("is not the file that was written")),
+            "{why:?}"
+        );
     }
 
     #[test]
@@ -2940,9 +2944,13 @@ made_by!();
         let lib = crate_named(&db, "lib");
         let bytes = encode(&db, lib).unwrap();
         assert_eq!(unreadable(&db, lib, &bytes), None);
-        let changed = TestDB::with_files(&INCLUDING.replace("made_by!();", "made_by!();\nfn more() {}"));
+        let changed =
+            TestDB::with_files(&INCLUDING.replace("made_by!();", "made_by!();\nfn more() {}"));
         let why = unreadable(&changed, crate_named(&changed, "lib"), &bytes);
-        assert!(why.as_ref().is_some_and(|it| it.ends_with("is not the file that was written")), "{why:?}");
+        assert!(
+            why.as_ref().is_some_and(|it| it.ends_with("is not the file that was written")),
+            "{why:?}"
+        );
         let (without, _) = INCLUDING.split_once("//- /lib/data").unwrap();
         let without = TestDB::with_files(without);
         let why = unreadable(&without, crate_named(&without, "lib"), &bytes);
