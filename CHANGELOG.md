@@ -395,6 +395,12 @@ All notable changes to ra-jit are written here. The format follows
 
 ### Fixed
 
+- A daemon's link that fails on names nothing defines, used only by code rustc's own link
+  takes out, is run again as rustc's line has it, with `--gc-sections` (or `-dead_strip`,
+  `/OPT:REF`). The daemon leaves those out so a patch can call what the executable's code no
+  longer reaches, and zed's webrtc then needs X11's `libXtst`, which nothing links: its own
+  base failed to link after 662 s ([#29](https://github.com/indexable-inc/ra-jit/issues/29)).
+  An executable linked so takes edits that call into what it left out as builds in full.
 - The borrow checker reports what normalizing a signature's associated type needs of its
   lifetimes (`-> <&'a () as Visitor<'d>>::Value` proven by `impl<'a, 'd: 'a>`), and relates
   an associated type through a where clause's projection (`T: Fun<F<'a> = [u8]>` borrowing for

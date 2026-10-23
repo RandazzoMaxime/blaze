@@ -34,7 +34,11 @@ rustc's line has the linker take it out (`--gc-sections` for ELF, `-dead_strip` 
 linker, `/OPT:REF` for `link.exe`, which becomes `/OPT:NOREF`), and a later patch may call
 it, for example an instance of a generic function from another crate for a type an edit
 starts using. A splice that does not find what the patch calls declines it ("... is not in
-the executable") and the edit is linked in full. `unreached.py` tests this on Linux and
+the executable") and the edit is linked in full. When the link that keeps it fails on names
+nothing defines that only other objects use (zed's webrtc calls X11's `libXtst`, which
+rustc's line never links, from code it takes out), the daemon links as rustc's line has it,
+from the response file `link.reached.args` next to its own, and links that executable so
+from then on. `unreached.py` tests this on Linux and
 macOS; on Linux at 3a844b09d5, before the rule covered more than macOS, it was 1 of 3. On
 Windows only the link line is tested, by a unit test in `cargo/plan.rs`. rustc's own link,
 which the first edits after a cold build are spliced into, still takes the code out, and
