@@ -13563,6 +13563,16 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
             _ => b.ins().iadd(l, r),
         };
         match (op, args) {
+            // Cranelift's pairwise add is NEON's of 16 bytes, which LLVM selects again from it.
+            ("addp", [a, b]) if lanes * width == 16 && ty.bits() <= 32 => {
+                let vector = ty.by(lanes as u32).expect("16 bytes of lanes");
+                let (a, _) = self.operand(a)?;
+                let (b, _) = self.operand(b)?;
+                let a = self.builder.ins().load(vector, MEM, a, 0);
+                let b = self.builder.ins().load(vector, MEM, b, 0);
+                let sum = self.builder.ins().iadd_pairwise(a, b);
+                self.builder.ins().store(MEM, sum, dst, 0);
+            }
             ("umaxp" | "smaxp" | "uminp" | "sminp" | "addp", [a, b]) => {
                 let (a, _) = self.operand(a)?;
                 let (b, _) = self.operand(b)?;

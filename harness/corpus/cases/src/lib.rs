@@ -4663,6 +4663,24 @@ pub mod simd_aarch64 {
             )
         }
     }
+    /// The sums of pairs of lanes of 8, 16 and 32 bits, wrapping, and a movemask made of them.
+    pub fn sums(v: uint8x16_t, w: uint8x16_t) -> (Bytes, [u16; 8], [u32; 4], u16) {
+        unsafe {
+            let (s, t) = (vreinterpretq_u16_u8(v), vreinterpretq_u16_u8(w));
+            let (x, y) = (vreinterpretq_u32_u8(w), vreinterpretq_u32_u8(v));
+            let bits: Bytes = [1, 2, 4, 8, 16, 32, 64, 128, 1, 2, 4, 8, 16, 32, 64, 128];
+            let high = vandq_u8(vcgtq_u8(w, vdupq_n_u8(9)), vld1q_u8(bits.as_ptr()));
+            let folded = vpaddq_u8(high, high);
+            let folded = vpaddq_u8(folded, folded);
+            let folded = vpaddq_u8(folded, folded);
+            (
+                bytes(vpaddq_u8(v, w)),
+                core::mem::transmute(vpaddq_u16(t, s)),
+                core::mem::transmute(vpaddq_u32(x, y)),
+                vgetq_lane_u16::<0>(vreinterpretq_u16_u8(folded)),
+            )
+        }
+    }
     pub fn across(v: uint8x16_t) -> (u8, u8, u8, u16, u32, u8) {
         unsafe {
             (
@@ -4765,7 +4783,7 @@ pub mod simd_aarch64 {
             group(b"AbA\xffcdA\x80")
         );
         out += &format!(" {:?} {:?}", select(v, w), wide(v, w));
-        out += &format!(" {:?} {:?}", pairs(v, w), checksums(v, w));
+        out += &format!(" {:?} {:?} {:?}", pairs(v, w), sums(v, w), checksums(v, w));
         if std::arch::is_aarch64_feature_detected!("neon") {
             out += " neon";
         }
