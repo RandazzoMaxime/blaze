@@ -168,7 +168,8 @@ These are the places ra-jit still runs rustc or relies on what it wrote, as of m
 - `cargo ra-jit check` is `cargo check`.
 - Under Cranelift, every `asm!` block was assembled by running rustc (`hir-ty-codegen/asm.rs`).
   Since C, a build of ra-jit with LLVM assembles it in process and one without has clang or
-  the host's `cc` assemble it; rustc is left only where there is neither.
+  the host's `cc` assemble it; where there is neither, the build fails and says to install
+  clang.
 
 ### Where, and when
 
@@ -228,7 +229,6 @@ Paths are under `crates/`; line numbers are of 41e7906192.
 | `ra-jit/src/doctest.rs:203`, `:246` `compile` | rustc links a probe program to learn the link line, and compiles or checks each example | every library's doctests |
 | `ra-jit/src/doctest.rs:301` `leave_to_rustdoc` | hands the library to rustdoc | `-q`, a library ra-jit cannot load; until A, every package whose features `cargo build --unit-graph` rejected (below) |
 | `ra-jit/src/cargo/mod.rs:139` | `cargo ra-jit check` is `cargo check` | every check |
-| `hir-ty-codegen/asm.rs:717` `run_assembler` | rustc assembles each `asm!` block (cached by its text) | Cranelift, the first build of a program with `asm!`; since C, only where ra-jit is built without LLVM and there is neither clang nor a `cc` for the host |
 | `ra-jit/src/main.rs:5084`, `:5127` `RA_JIT_WRAPS_RUSTC` | ra-jit standing in for rustc for a whole build | the harness's "alone" builds |
 | `harness/apps.py:113` | the harness's "alone" mode: cargo with ra-jit as `RUSTC_WRAPPER`, linking the sysroot's rlibs | the harness only |
 
@@ -385,7 +385,7 @@ the counts of [How often](#how-often) lower, measured by step A's check, and non
 |---|---|---|---|---|---|
 | [A](https://github.com/indexable-inc/ra-jit/issues/81). Count every rustc run and refuse new ones | nothing; makes the rest measurable | | small | low | the `no-rustc-abc` lane: done |
 | [B](https://github.com/indexable-inc/ra-jit/issues/82). ra-jit answers rustc's questions | every query | A | medium | medium | the `no-rustc-abc` lane: done, first asks left |
-| [C](https://github.com/indexable-inc/ra-jit/issues/83). `asm!` assembled in process | the assembler run | A | small to medium | low | the `no-rustc-abc` lane: done, rustc left without clang or LLVM |
+| [C](https://github.com/indexable-inc/ra-jit/issues/83). `asm!` assembled in process | the assembler run | A | small to medium | low | the `no-rustc-abc` lane: done |
 | [D](https://github.com/indexable-inc/ra-jit/issues/84). ra-jit's verdict is the final word | the fallback on an error, `cargo ra-jit check` as `cargo check` | A; borrowck work | large | high | the app-fixes worker's `no-rustc-d` lane, which also has [#96](https://github.com/indexable-inc/ra-jit/issues/96) |
 | [E](https://github.com/indexable-inc/ra-jit/issues/85). No function left to rustc | the refused classes; a refusal fails the build | A | large, ongoing | medium | the bun lane (bun's classes, #34, #35) and the glancer lane (kept rejections, #37) |
 | [F](https://github.com/indexable-inc/ra-jit/issues/86). The standard library compiled by ra-jit | the sysroot's rlibs | C, E | large | high | the cold-start lane |
@@ -458,10 +458,15 @@ build of ra-jit with LLVM (CI's) assembles every block with LLVM's MC assembler 
 whatever the backend; before, only the LLVM backend did. A build without LLVM, which the release
 is, has the platform's C compiler assemble the block, clang for any target or `cc` for the
 host's own, with the text as rustc hands it to its assembler (Intel syntax on x86-64). That is a
-process, but not rustc, and the C toolchain is outside the rule. rustc is left where there is
-neither, Windows without clang among them (`FIXME` in `asm.rs`); an assembler in process for a
-build without LLVM removes it. `RA_JIT_ASSEMBLER=cc|rustc` picks one, and asmedits.py also runs
-with `cc` in the fast tier.
+process, but not rustc, and the C toolchain is outside the rule. `RA_JIT_ASSEMBLER=cc` picks the
+C compiler in a build with LLVM, and asmedits.py also runs with it in the fast tier.
+
+The rustc that assembled where there was neither LLVM nor a C compiler is gone (the `no-rustc-hl`
+lane, 2026-10-23): such a build fails with what to install, clang or a build of ra-jit with LLVM.
+Of what support.md lists, that is Windows x86-64 MSVC without clang on PATH and a build of ra-jit
+without LLVM (CI's builds have it); the other places (cross targets other than the host's,
+for which there is no `cc`) need clang as they did. An assembler in process for a build without
+LLVM is still to write.
 
 **D. ra-jit's verdict is the final word.** ([#84](https://github.com/indexable-inc/ra-jit/issues/84)) An error is ra-jit's, written as rustc writes it,
 with the status cargo returns; the build does not go to cargo to have rustc print it.
