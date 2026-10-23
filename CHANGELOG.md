@@ -216,7 +216,12 @@ All notable changes to ra-jit are written here. The format follows
   and 30.7 s); a warm one, which cargo had built, loads the library first: ripgrep 1.29 to
   2.62 s, fd 2.19 to 3.48 s, nushell 8.62 to 9.51 s (`harness/spare.py`, 3 interleaved rounds).
   `RA_JIT_SPARE=ready` keeps one loaded as before; `RA_JIT_SPARE=0` still starts none.
-
+- With LLVM, `memcmp` is called by its own name in the function's module rather than as one
+  of the functions asked for, so LLVM writes a comparison of a few bytes it knows the number of
+  as loads, and one only for equality as `bcmp`, as it does for rustc. On Linux x86-64 (AMD
+  EPYC 9R45) tokei calls the C library's comparisons 155.9 million times instead of 278.6
+  million (cargo's release build: 155.1 million) and runs at 1.34 times the release build
+  instead of 1.51. words' machine code is the same, 48 bytes further on.
 - With LLVM at `-O3` the bodies of the functions a function calls are built into it before
   the default pipeline, and the branches on what they return threaded and the values
   numbered again, as is done for what Cranelift builds in: a loop over `i + 1..n` inside one
@@ -366,6 +371,13 @@ All notable changes to ra-jit are written here. The format follows
   permutes (`vpermi2var` of bytes, words, dwords and qwords), SSE4.1's `phminposuw` and
   `vzeroupper` are compiled, lane by lane, which nushell's dependencies reach for
   (corpus `simd_x86`).
+- AArch64's SHA-1, SHA-256, SHA-512 and AES instructions (`vsha256hq_u32`, `vsha512hq_u64`,
+  `vaeseq_u8` and the rest, as sha2 calls them) are compiled, each as a function of the one
+  instruction, and NEON's sums of every lane made wider (`vaddlvq_u8`) and doubled products
+  made wider (`vqdmull_s16`) lane by lane. `simd_reduce_add_ordered` and `_unordered` (and
+  `mul`) are compiled, which `vaddv_u8` and AVX-512's `_mm512_reduce_add_epi32` are, and
+  `simd_masked_load` and `simd_masked_store` (AVX-512's `_mm512_mask_loadu_epi8`, in fff_search
+  under nushell): a lane the mask leaves out is not read or written (corpus `crypto_lanes`).
 
 ### Fixed
 
@@ -378,6 +390,26 @@ All notable changes to ra-jit are written here. The format follows
   ready at 116.2 s instead of 142.3 s (Linux x86-64, 16 cores, medians of three). Nothing is
   left to rustc for it, and `harness/norustc` counts the same functions left to rustc on
   ripgrep (53) and nushell (534) (#37, no-rustc step E).
+- A `#[global_allocator]` in an inline `#[cfg(test)] mod test { .. }` of a library (ureq's)
+  gave the library's stand-in an allocator outside the test build, whose functions nothing
+  defined: every allocation of the program reached the stand-in's trap, so nushell, which links
+  ureq, stopped at its first allocation. The `#[cfg]`s of the inline modules an allocator is in
+  are now the forwarding allocator's.
+- A constant that read a static holding `&dyn` of another static failed to evaluate
+  (`InvalidVTableId`): the vtable was the id the static's own evaluation gave the type, which
+  meant nothing to the reading evaluation, and a static the reference pointed into was not
+  looked through for it. rustls's `ALL_CIPHER_SUITES` is one, which kept nushell from linking
+  (corpus `dyn_static_suites`).
+- A tuple struct with fields seen in other modules than the struct, both `pub(in path)` (ring's
+  `aes::Counter`, `pub(in super::super)` with a `pub(super)` field), had no constructor:
+  the least of those visibilities was folded from none, which is none. Its construction and
+  patterns were refused, and with them ring's AES-GCM under nushell (corpus
+  `narrow_constructors`).
+- An `async fn` or block that awaited the `impl Future` of a provided method of a trait,
+  which the impl leaves as the trait has it, had no layout: the trait's opaque type was left
+  for the solver, which reveals nothing of a trait's, and came out an error. It is the hidden
+  type of the trait's body now. rmcp's `ServiceExt::serve` is one, in nushell's MCP server
+  (corpus `provided_futures`).
 - `-C force-frame-pointers` in a build's flags keeps frame pointers in ra-jit's code too: LLVM
   gave the register to values, so code that walks frames by it read garbage. bun, built with
   every function ra-jit's, faulted in `bun_core::return_address` on its first `-e`; it now
