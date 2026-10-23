@@ -2931,8 +2931,10 @@ fn harnesses<'a>(
             let listed = module.as_ref().map(|it| it.listed.clone());
             let as_rustc = first.entry(file).or_insert_with(|| listed.clone());
             let written = test_harness::without(&text).len() != text.len();
-            let module =
-                module.filter(|_| written || *as_rustc != listed || harness_alone(args).is_some());
+            let always = std::env::var_os("RA_JIT_HARNESS_ALWAYS").is_some();
+            let module = module.filter(|_| {
+                always || written || *as_rustc != listed || harness_alone(args).is_some()
+            });
             let module = module.map(|it| it.text).unwrap_or_default();
             let wanted = format!("{}{module}", test_harness::without(&text));
             if *text != *wanted {
