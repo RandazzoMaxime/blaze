@@ -3120,6 +3120,7 @@ fn build(
         entries: &entries,
         on_demand: &on_demand,
         start: main.filter(|it| own(it).is_some()),
+        whole: local.iter().all(|&krate| resolver.own_crate_id(krate.into()).is_some()),
         kept: &kept,
     };
     let setup = start.elapsed();
@@ -3224,7 +3225,13 @@ fn build(
         let mut index = String::new();
         for (i, &(func, _)) in unit.compiled.iter().enumerate() {
             let single = hir::attach_db(db, || {
-                let roots = Roots { entries: &[func], on_demand: &[], start: None, kept: &[] };
+                let roots = Roots {
+                    entries: &[func],
+                    on_demand: &[],
+                    start: None,
+                    whole: false,
+                    kept: &[],
+                };
                 CodegenUnit::compile(hir_db, &resolver, roots, &Default::default(), known)
             })
             .map_err(anyhow::Error::msg)?;
