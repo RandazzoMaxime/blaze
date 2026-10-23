@@ -78,7 +78,8 @@ usage: cargo ra-jit <command> [cargo's flags]
   status             whether ra-jit is enabled, what the daemon has loaded, what fell back
   stop               ends the daemon; the next build starts one
   enable, disable    plain `cargo build|run|test|check` through ra-jit, and back
-  cache clear        forgets the results `#[ra_jit::cache]` functions kept
+  cache              what the `#[ra_jit::cache]` functions kept, by function
+  cache clear        forgets it; `--stale`, all but what each function's code computed
 
 Any other command is cargo's own. CARGO.md is the guide.";
 
@@ -110,15 +111,70 @@ fn settle(cargo: u32, typed: &[String]) -> anyhow::Result<()> {
     settled
 }
 
-/// `cargo ra-jit cache clear`: forgets the results `#[ra_jit::cache]` functions kept, which
-/// are under the target directory unless `RA_JIT_FN_CACHE_DIR` says where. Any other verb is
-/// one of `ra-jit cache`, on the disk store.
+/// `cargo ra-jit cache`: what the `#[ra_jit::cache]` functions kept, which is under the target
+/// directory unless `RA_JIT_FN_CACHE_DIR` says where; `cache clear` forgets it, and `cache clear
+/// --stale` all but what each function's code computed. Any other verb is one of `ra-jit cache`,
+/// on the disk store.
 fn cache(args: Vec<String>) -> anyhow::Result<i32> {
-    if args.first().map(String::as_str) != Some("clear") {
-        crate::remote::command(args.into_iter())?;
+    let args: Vec<&str> = args.iter().map(String::as_str).collect();
+    let stale = match args[..] {
+        [] => return list_kept(&fn_cache_dir()?).map(|()| 0),
+        ["clear"] => false,
+        ["clear", "--stale"] => true,
+        _ => {
+            crate::remote::command(args.into_iter().map(str::to_owned))?;
+            return Ok(0);
+        }
+    };
+    let dir = fn_cache_dir()?;
+    if stale {
+        let (results, bytes) = fn_cache::__private::clear_stale(&dir);
+        println!("forgot {results} results of older code ({})", size(bytes));
         return Ok(0);
     }
-    let dir = match std::env::var_os("RA_JIT_FN_CACHE_DIR") {
+    match std::fs::remove_dir_all(&dir) {
+        Ok(()) => println!("cleared the kept results in {}", dir.display()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => println!("no results are kept"),
+        Err(e) => return Err(e).with_context(|| format!("clearing {}", dir.display())),
+    }
+    Ok(0)
+}
+
+/// What each cached function holds: the results of its code, and of the older codes kept for an
+/// edit taken back.
+fn list_kept(dir: &std::path::Path) -> anyhow::Result<()> {
+    let (held, other) = fn_cache::__private::holdings(dir);
+    if held.is_empty() && other.0 == 0 {
+        println!("no results are kept");
+        return Ok(());
+    }
+    println!("kept in {}", dir.display());
+    for function in &held {
+        let Some(&(now, now_bytes)) = function.codes.first() else { continue };
+        let older = &function.codes[1..];
+        let (old, old_bytes) = older.iter().fold((0, 0), |(n, b), it| (n + it.0, b + it.1));
+        print!("  {}: {now} results ({})", function.name, size(now_bytes));
+        if old > 0 {
+            print!(", and {old} of {} older code ({})", older.len(), size(old_bytes));
+        }
+        println!();
+    }
+    if other.0 > 0 {
+        println!("  {} results of code no function has now ({})", other.0, size(other.1));
+    }
+    Ok(())
+}
+
+fn size(bytes: u64) -> String {
+    match bytes {
+        0..1024 => format!("{bytes} B"),
+        1024..1048576 => format!("{:.1} KiB", bytes as f64 / 1024.0),
+        _ => format!("{:.1} MiB", bytes as f64 / 1048576.0),
+    }
+}
+
+fn fn_cache_dir() -> anyhow::Result<std::path::PathBuf> {
+    Ok(match std::env::var_os("RA_JIT_FN_CACHE_DIR") {
         Some(dir) => std::path::PathBuf::from(dir),
         None => {
             let metadata = cargo_metadata::MetadataCommand::new()
@@ -128,13 +184,7 @@ fn cache(args: Vec<String>) -> anyhow::Result<i32> {
                 .context("running `cargo metadata`")?;
             metadata.target_directory.as_std_path().join("ra-jit").join("fn-cache")
         }
-    };
-    match std::fs::remove_dir_all(&dir) {
-        Ok(()) => println!("cleared the kept results in {}", dir.display()),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => println!("no results are kept"),
-        Err(e) => return Err(e).with_context(|| format!("clearing {}", dir.display())),
-    }
-    Ok(0)
+    })
 }
 
 /// Runs cargo with `args` and nothing of ra-jit's but its answers to what cargo asks rustc.
