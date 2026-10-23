@@ -211,6 +211,12 @@ fn around(dir: &Path) -> Option<String> {
     Some(format!("`{outer}` stays cargo's `{OUTER_KEY}`: it runs ra-jit's wrapper as it ran rustc"))
 }
 
+/// Whether the user has cargo run every rustc through a wrapper of their own in `dir`.
+pub(crate) fn user_wraps(dir: &Path) -> bool {
+    let set = std::env::var_os("CARGO_BUILD_RUSTC_WRAPPER").is_some_and(|it| !it.is_empty());
+    set || around(dir).is_some()
+}
+
 /// What has cargo not run ra-jit in `dir` while it is enabled: cargo reads the variable
 /// ahead of every file, and a file nearer the workspace ahead of the one in its home.
 fn overrides(dir: &Path) -> Vec<String> {

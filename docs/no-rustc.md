@@ -184,7 +184,7 @@ Paths are under `crates/`; line numbers are of 41e7906192.
 | Where | What it does | When |
 |---|---|---|
 | `ra-jit/src/cargo/state.rs:366` `Built::by` | runs `cargo build` or `cargo test` with ra-jit as `RUSTC_WORKSPACE_WRAPPER` | the first build of every workspace and profile, and every fallback below |
-| `ra-jit/src/cargo/wrapper.rs:63` `command` | runs rustc for each crate of the workspace, adding `--print=link-args` and `-Csave-temps` to record the link | every rustc run cargo makes for a workspace crate |
+| `ra-jit/src/cargo/wrapper.rs:63` `command` | runs rustc for each crate of the workspace, adding `--print=link-args` and `-Csave-temps` to record the link; as cargo's `RUSTC_WRAPPER` too, runs rustc for each crate outside it but the build scripts, which ra-jit compiles (I) | every rustc run cargo makes; a build script only when ra-jit says why it does not compile it |
 | `ra-jit/src/cargo/wrapper.rs:315` `dep_info` | runs rustc for dep-info only when the daemon built the crate | plain cargo after `ra-jit enable`, every build the daemon serves |
 | `ra-jit/src/cargo/wrapper.rs:382` `stood_in`, `ra-jit/src/stub.rs:49` | has rustc build a few-line stand-in of each workspace crate | `RA_JIT_FIRST_BUILD=1` only; off by default |
 | `ra-jit/src/cargo/wrapper.rs:157`, `ra-jit/src/cargo/mod.rs:85` `settle` | after cargo has linked a program, runs cargo again in the background to load the build | plain cargo, after every command that linked |
@@ -374,7 +374,9 @@ steps not shown ran none before and none now.
   features than cargo's; fixed under A below). That bug was there before; rustdoc hid it.
 - **`check`** is plain `cargo check` (D) and moves with what the steps before it left built.
 - **The fixture of `harness/norustc.py`**, in CI on Linux x86-64, Linux AArch64 and macOS
-  arm64 under both backends: the cold build 74 to 76 rustc runs before A, 18 after A, 6 now;
+  arm64 under both backends: the cold build 74 to 76 rustc runs before A, 18 after A, 6 before I,
+  5 with its build script compiled by ra-jit (I's first part, Linux x86-64
+  cranelift, the one platform measured; below);
   edits 5 (277 to 297 on macOS, whose daemon did not listen, #106), 0 now; tests 16 to 19, 12
   after B, 7 after H, 6 with ra-jit's harness always (Linux x86-64 cranelift, the one platform measured; below); doctests 23, 6 after B, 3 after L's first part, 0 now (L's second, below); check 7, then 8 since the fixture
   has one library more, 5 now. These are `norustc/baseline.json`.
@@ -395,7 +397,7 @@ the counts of [How often](#how-often) lower, measured by step A's check, and non
 | [F](https://github.com/indexable-inc/ra-jit/issues/86). The standard library compiled by ra-jit | the sysroot's rlibs | C, E | large | high | the no-rustc F+G lane |
 | [G](https://github.com/indexable-inc/ra-jit/issues/87). Every crate compiled and linked by ra-jit | rustc's rlibs, objects, symbols and link line, "no rustc symbol" | E, F | large | high | the no-rustc F+G lane |
 | [H](https://github.com/indexable-inc/ra-jit/issues/88). ra-jit writes the test harness | the fallback when a test is added | G | medium | medium | the `no-rustc-hl` lane: done; the `no-rustc-l2` lane: ra-jit's harness always, done |
-| [I](https://github.com/indexable-inc/ra-jit/issues/89). Build scripts compiled and run by ra-jit | build scripts and their probes by rustc | B, G | medium | medium | the `no-rustc-l2` lane, after L; the F+G lane consumes it for the standard library's scripts |
+| [I](https://github.com/indexable-inc/ra-jit/issues/89). Build scripts compiled and run by ra-jit | build scripts and their probes by rustc | B, G | medium | medium | the `no-rustc-l2` lane: first part done (scripts compiled and linked by ra-jit, their runs kept in the store); the F+G lane consumes it for the standard library's scripts |
 | [J](https://github.com/indexable-inc/ra-jit/issues/90). Proc macros compiled and loaded by ra-jit | proc macros by rustc, the toolchain's proc-macro server | F, G | large | high | none yet |
 | [K](https://github.com/indexable-inc/ra-jit/issues/91). The cold build is ra-jit's | cargo's first build, the rustc base (#11) | G, I, J | medium | high | none yet |
 | [L](https://github.com/indexable-inc/ra-jit/issues/92). Doctests by the daemon (#28) | probe and examples by rustc, rustdoc | B, G, D | medium | medium | the `no-rustc-hl` lane: first part done; the `no-rustc-l2` lane: second part (examples by ra-jit) done |
@@ -714,6 +716,49 @@ feature probes of `anyhow` and `proc-macro2` are answered by ra-jit (B for their
 check for their test programs). rust-analyzer's `cargo check --compile-time-deps` is replaced by
 the daemon's own run. Risk: a probe answered differently from rustc turns a feature off
 silently; the harness compares every script's output with what it prints under rustc.
+
+First part done (the `no-rustc-l2` lane, 2026-10-23): when cargo asks rustc for a build script,
+ra-jit compiles and links it, and cargo runs it as it would rustc's. `crates/ra-jit/src/cargo/own_script.rs`
+describes the script and every library it links as a `rust-project.json` (each crate's root,
+edition, `--cfg`s, `debug_assertions` as rustc sets it, the variables of `env!` cargo set, and
+its `--extern`s), from cargo's arguments and the wrapper's records of those libraries, and runs
+ra-jit's build with nothing of rustc's over it (step G: every crate from source over the
+standard library's unit from the store, linked by `cc`), with `--dep-info` writing the files of
+the script's modules where rustc would have. To see the scripts of packages outside the
+workspace, every crates.io package's among them, `cargo ra-jit` names its wrapper as cargo's
+`RUSTC_WRAPPER` as well as its workspace wrapper (`RA_JIT_EVERY_CRATE`), unless the user has a
+`rustc-wrapper` of their own; cargo keys no unit by that wrapper, so plain cargo's builds stay
+this one's. A crate outside the workspace that is not a build script goes to rustc as before,
+and a library of one is described (`crate.json` in its unit's records) for the scripts that link
+it. A run of a script (`ra-jit build-script`, `cargo/script.rs`) is kept in the store, keyed by
+the script's executable, its directory, its arguments and its environment but the jobserver's:
+what it printed and the files it left in `OUT_DIR`, and the contents of each file it named with
+`rerun-if-changed`. A later run with the same key and those files unchanged prints and writes
+that without running; a script that names nothing it reads is not kept, since cargo runs it
+again for any change to its package. rustc still compiles a script, and ra-jit says why, when it
+links a proc macro (J), when a library it links was compiled before ra-jit described it, when its
+source uses `include!`, `include_str!`, `include_bytes!` or `env!` of a variable that is not
+cargo's (which the dep-info does not name), or when it calls a function ra-jit could not
+compile. `RA_JIT_SCRIPTS_BY_RUSTC=1` has rustc compile them all, for comparing.
+
+A script's compile needs the standard library's unit, which the store has once per toolchain
+(and machine, until the remote has it): the first build on a new store waits for it. The
+scripts of a cold build ask for it at once, so the store has one process make it while the
+others wait (`Store::making`); before that, ripgrep's seven first scripts each built it, 10 s
+apiece. A crate's frozen def map is no longer keyed by where cargo is (`CARGO`), which differs
+between a script's compile and the daemon's, so a script finds the standard library resolved
+in the store (0.25 s rather than 2 to 5 s). On dev-aws-11 (`harness/norustc/count.py`, against
+main 24be505), "cold": with a store that has the standard library's unit, ripgrep 4.6 s (main
+4.5), nushell 27.2 s (25.6 to 25.9); with an empty store, 11.2 s and 37.3 s. rustc compiles
+the build scripts of the cold build: ripgrep 7 times before, 1 (crossbeam-utils, `include!`);
+nushell 50 before, 5 (crossbeam-utils and portable-atomic, `include!`; bigdecimal, `env!`;
+nu-cmd-lang and oem_cp, a proc macro). Not done: `RUSTC`
+naming ra-jit while scripts run, so their probes are ra-jit's; rust-analyzer's `cargo check
+--compile-time-deps` replaced; the harness that compares every script's output with rustc's. For
+the F+G lane: the printed lines a library is linked with are where cargo keeps them
+(`cargo::script::printed`), whether ra-jit compiled the script or not, and a script ra-jit
+compiles is one more crate of a `rust-project.json`, so the standard library's scripts can take
+the same path.
 
 **J. Proc macros compiled and loaded by ra-jit.** ([#90](https://github.com/indexable-inc/ra-jit/issues/90)) The proc-macro crate and its dependencies are
 compiled by ra-jit into a library that rust-analyzer's proc-macro server, running inside ra-jit,
