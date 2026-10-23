@@ -145,6 +145,10 @@ def about_rustc():
             yield ["--print", "cfg", "-O", "-C", "overflow-checks=on", *t], variables, ""
             yield ["--print", "cfg", "--cfg", 'feature="b"', "--cfg", "foo", "--cfg", 'feature="a"',
                    "--cfg", 'feature="b"', *t], variables, ""
+        # What RUSTFLAGS of no bearing on the answers add, as count.py's `-C link-dead-code`.
+        flags = ["-C", "link-dead-code", "-C", "force-frame-pointers=yes", "-Crpath", "-C", "force-unwind-tables=no"]
+        yield [*flags, "-O", *t, "--print", "cfg"], {}, ""
+        yield [*PROBE[:4], *flags, *t, *PROBE[4:]], {}, ""
         yield ["-", "--crate-name", "x", "--print=file-names", "--crate-type", "lib", "--crate-type", "bin",
                "--crate-type", "lib", "--print=crate-name", *t], {}, ""
 

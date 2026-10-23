@@ -131,7 +131,7 @@ const LINTS: [&str; 10] = [
 ];
 
 /// The codegen options that change no answer.
-const IGNORED_CODEGEN: [&str; 12] = [
+const IGNORED_CODEGEN: [&str; 16] = [
     "embed-bitcode",
     "debuginfo",
     "metadata",
@@ -144,6 +144,10 @@ const IGNORED_CODEGEN: [&str; 12] = [
     "link-arg",
     "link-args",
     "split-debuginfo",
+    "link-dead-code",
+    "rpath",
+    "force-frame-pointers",
+    "force-unwind-tables",
 ];
 
 fn yes(value: Option<&str>) -> Option<bool> {

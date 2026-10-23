@@ -371,10 +371,10 @@ steps not shown ran none before and none now.
   there before; rustdoc hid it.
 - **`check`** is plain `cargo check` (D) and moves with what the steps before it left built.
 - **The fixture of `harness/norustc.py`**, in CI on Linux x86-64, Linux AArch64 and macOS
-  arm64 under both backends: the cold build 74 to 76 rustc runs before A, 18 now; edits 5 (277
-  to 297 on macOS, whose daemon did not listen, #106), 0 now; tests 16 to 19, 12 now; doctests
-  23, 6 now; check 7, and 8 since the fixture has one library more. These are
-  `norustc/baseline.json`.
+  arm64 under both backends: the cold build 74 to 76 rustc runs before A, 18 after A, 6 now;
+  edits 5 (277 to 297 on macOS, whose daemon did not listen, #106), 0 now; tests 16 to 19, 12
+  now; doctests 23, 6 now; check 7, then 8 since the fixture has one library more, 5 now. These
+  are `norustc/baseline.json`.
 
 ## The plan
 
@@ -469,9 +469,11 @@ has. cargos ra-jit does not drive (rust-analyzer's `cargo check --compile-time-d
 ra-jit check` and the subcommands ra-jit does not claim) ask through ra-jit as `RUSTC_WRAPPER`
 with `RA_JIT_ONLY_ASKS=1`, which answers questions and leaves every compile as it was. On the
 fixture: the cold build 18 rustc runs to 6 (its 12 questions to none), check 8 to 5, and the
-build-script check of rust-analyzer's that a 96-core host's tests ran lost its 3. Linux AArch64
-keeps one ask, rust-analyzer's target spec, until its specs are in the data (answers.py prints
-them on that host).
+build-script check of rust-analyzer's that a 96-core host's tests ran lost its 3. Linux
+AArch64's target specs came from answers.py's run in CI there, and its cold build went from 7 to
+6 with them. Codegen options that change no answer (`-C link-dead-code`, `rpath`,
+`force-frame-pointers`, `force-unwind-tables`) no longer send a question to rustc: count.py's
+`RUSTFLAGS` have the first, so every question of ripgrep's went to rustc until then.
 
 **C. `asm!` assembled in process.** ([#83](https://github.com/indexable-inc/ra-jit/issues/83)) The assembly text ra-jit already produces goes to LLVM's
 assembler (the LLVM backend links LLVM already) or to an assembler crate, in process. Risk is
