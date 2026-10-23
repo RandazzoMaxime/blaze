@@ -794,10 +794,7 @@ fn build(
     };
     for (at, example) in add_crates(db, asked, krate, tests, &wanted) {
         let test = &tests[at];
-        let file = example.root_file;
-        let sources = crate::Sources { paths: [(file, example.path)].into_iter().collect() };
-        let checkout = &building.args.checkout;
-        if crate::broken_in(db, &[file], &sources, checkout, None, true).is_some() {
+        if has_errors(db, example.root_file) {
             eprintln!("ra-jit: {} is rustc's: rust-analyzer finds an error in it", test.name);
             continue;
         }
@@ -813,12 +810,23 @@ fn build(
     ours
 }
 
+/// Whether rust-analyzer finds an error of any kind in the example's file: rustc, which says
+/// what, compiles it then. An example rustc does not compile fails, and one that does not
+/// name what it uses compiles to a program that runs.
+fn has_errors(db: &RootDatabase, file: vfs::FileId) -> bool {
+    let config = ide_diagnostics::DiagnosticsConfig::test_sample();
+    let resolve = ide_db::assists::AssistResolveStrategy::None;
+    hir::attach_db(db, || {
+        let syntax = ide_diagnostics::syntax_diagnostics(db, &config, file);
+        let semantic = ide_diagnostics::semantic_diagnostics(db, &config, &resolve, file);
+        syntax.into_iter().chain(semantic).any(|it| it.severity == ide_db::Severity::Error)
+    })
+}
+
 /// The crate of an example in the graph.
 struct Added {
     name: String,
     root_file: vfs::FileId,
-    /// The path its file is named by: the file the example is in.
-    path: PathBuf,
 }
 
 /// The first of the files and source roots of the examples' crates, counted down from: ids no
@@ -887,7 +895,7 @@ fn add_crates(
                 .durability(Durability::MEDIUM)
                 .new(db);
         crates.push(krate);
-        added.push((at, Added { name, root_file: file, path }));
+        added.push((at, Added { name, root_file: file }));
     }
     let all: Vec<base_db::Crate> = base_db::all_crates(db).iter().copied().chain(crates).collect();
     base_db::set_all_crates_with_durability(db, all, Durability::MEDIUM);

@@ -60,13 +60,13 @@ def judged(want, got):
     left = re.search(r"ra-jit: the doctests are left to rustdoc: (.*)", got[2])
     if left:
         return "refused", left.group(1)
-    built = re.findall(r"doctests: compiled (\d+) of (\d+) fns", got[2])
+    built = re.findall(r"doctests: (\d+) built by ra-jit, (\d+) by rustc", got[2])
     if not built:
         return "WRONG", "ra-jit did not say what it built for the doctests"
     tests = sum(l.startswith("test ") and not l.startswith("test result") for l in want[1])
     if not tests:
         return "WRONG", f"cargo ran no doctest: {want[2].strip()[-200:]}"
-    return "same", f"{tests} doctests, {sum(int(n) for n, _ in built)} of {sum(int(n) for _, n in built)} functions of the library from ra-jit"
+    return "same", f"{tests} doctests, {sum(int(n) for n, _ in built)} built by ra-jit, {sum(int(n) for _, n in built)} by rustc"
 
 
 def main():
