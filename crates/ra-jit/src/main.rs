@@ -6690,6 +6690,9 @@ fn run_holding(
     if checkouts.lto(&args.project)? {
         linked_from_libraries(&db, &args)?;
     }
+    // The store reads its packs when first opened, which serving does: what is fetched after
+    // that is not in it for this build.
+    let shared = shared.join().map_err(|_| anyhow::anyhow!("fetching the store panicked"))?;
     let built = built_crates(&db, &args)?;
     let served = frozen::serve(&mut db, &built);
     let mut resolved = resolve_crates(&db, &args, cores())?;
@@ -6755,7 +6758,6 @@ fn run_holding(
         );
         known.patching = args.patch.is_some();
     }
-    let shared = shared.join().map_err(|_| anyhow::anyhow!("fetching the store panicked"))?;
     if let Some(asked) = doc {
         let krate = *crates_named(&db, &args.krate, &args)?.first().context("no such crate")?;
         known.used_by_rustc = true;
