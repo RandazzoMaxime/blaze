@@ -289,6 +289,11 @@ fn var_of(command: &Command, name: &str) -> Option<OsString> {
     }
 }
 
+/// The rustc of the toolchain that `program`, as this process would run it, is.
+pub(crate) fn toolchain_rustc_of(program: &OsStr) -> Option<PathBuf> {
+    toolchain_rustc(program, &|name| std::env::var_os(name))
+}
+
 /// The executable of the toolchain that `program` runs. rustup's proxy runs the toolchain
 /// rustup set for the process it started, and is not known without that.
 fn toolchain_rustc(program: &OsStr, var: &dyn Fn(&str) -> Option<OsString>) -> Option<PathBuf> {

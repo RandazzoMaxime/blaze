@@ -767,6 +767,7 @@ impl<'a> Patch<'a> {
             live_data_at: 0,
             live_frames: (0, 0),
             live_pointers: Vec::new(),
+            defined: Vec::new(),
         })
     }
 

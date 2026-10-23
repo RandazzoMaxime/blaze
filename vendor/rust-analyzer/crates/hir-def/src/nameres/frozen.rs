@@ -106,11 +106,19 @@ pub fn set(db: &mut dyn SourceDatabase, maps: FxHashMap<Crate, Frozen>) {
     }
 }
 
-static DIFFERENCES: Mutex<Vec<String>> = Mutex::new(Vec::new());
+/// Each difference found, by the crate and the kind of what was frozen: a crate's `DefMap`
+/// is resolved again when an `include!` loads a file, and only the last one is the crate's.
+static DIFFERENCES: Mutex<Vec<(Crate, &'static str, String)>> = Mutex::new(Vec::new());
 
 /// The differences [`Mode::Check`] and [`Mode::Verify`] found since this was last called.
 pub fn differences() -> Vec<String> {
-    std::mem::take(&mut *DIFFERENCES.lock().unwrap())
+    let found = std::mem::take(&mut *DIFFERENCES.lock().unwrap());
+    found.into_iter().map(|(_, _, it)| it).collect()
+}
+
+/// Forgets a difference found before in the frozen `kind` of `krate`, which agrees now.
+fn agrees(krate: Crate, kind: &str) {
+    DIFFERENCES.lock().unwrap().retain(|(at, of, _)| (*at, *of) != (krate, kind));
 }
 
 fn differs(db: &dyn SourceDatabase, krate: Crate, what: &str, written: &[u8], frozen: &[u8]) {
@@ -121,19 +129,21 @@ fn differs(db: &dyn SourceDatabase, krate: Crate, what: &str, written: &[u8], fr
 pub fn record_difference(
     db: &dyn SourceDatabase,
     krate: Crate,
-    kind: &str,
+    kind: &'static str,
     what: &str,
     written: &[u8],
     frozen: &[u8],
 ) {
     let at = written.iter().zip(frozen).position(|(a, b)| a != b).unwrap_or(written.len());
     let name = krate.extra_data(db).display_name.as_ref().map(|it| it.to_string());
-    DIFFERENCES.lock().unwrap().push(format!(
+    let said = format!(
         "the frozen {kind} of `{}` differs from {what}: {} bytes against {}, first at byte {at}",
         name.as_deref().unwrap_or("?"),
         written.len(),
         frozen.len(),
-    ));
+    );
+    agrees(krate, kind);
+    DIFFERENCES.lock().unwrap().push((krate, kind, said));
 }
 
 /// What [`super::crate_local_def_map`] serves for `krate` instead of resolving it, when its
@@ -166,7 +176,7 @@ pub(super) fn check(db: &dyn SourceDatabase, krate: Crate, def_map: &DefMap, loc
         return;
     }
     match encode_maps(db, krate, def_map, local) {
-        Ok(written) if *written == *frozen.bytes => {}
+        Ok(written) if *written == *frozen.bytes => agrees(krate, "def map"),
         Ok(written) => differs(db, krate, "the live one", &written, &frozen.bytes),
         Err(why) => {
             differs(db, krate, &format!("the live one, which it cannot write ({why})"), &[], &[])
@@ -421,6 +431,12 @@ pub struct Enc<'a> {
     searched: FxHashSet<ModuleId>,
 }
 
+/// Whether `loc` is an `include!` that reads a file: not the call of its argument, which has
+/// the same definition and no argument of its own.
+fn includes(loc: &MacroCallLoc) -> bool {
+    loc.def.is_include() && matches!(loc.kind, MacroCallKind::FnLike { eager: Some(_), .. })
+}
+
 fn hash128(bytes: &[u8]) -> u128 {
     let half = |seed: u8| {
         #[allow(deprecated)]
@@ -669,12 +685,21 @@ impl Enc<'_> {
     }
 
     fn call_loc(&mut self, call: MacroCallId) -> R {
-        let MacroCallLoc { def, krate, kind, ctxt, macro_depth } = call.loc(self.db).clone();
+        let loc = call.loc(self.db).clone();
+        let included = includes(&loc).then(|| loc.include_file_id(self.db, call));
+        let MacroCallLoc { def, krate, kind, ctxt, macro_depth } = loc;
         self.def_id(def)?;
         self.krate(krate)?;
         self.call_kind(kind)?;
         self.context(ctxt)?;
         self.u32(macro_depth);
+        // What `include!` expands to is the file it reads, which the header must name: one a
+        // build script writes may not be there yet, or may have other text, where it is read.
+        match included {
+            None => {}
+            Some(Some(file)) => self.file(file)?,
+            Some(None) => return Err("an include! of a file that is not loaded".to_owned()),
+        }
         Ok(())
     }
 
@@ -1899,15 +1924,18 @@ impl Dec<'_> {
 
     /// The files the bytes name, as named in the header: the first that is not loaded, or
     /// that is outside its crate's directory and whose text is not what was written, is an
-    /// error.
+    /// error. Each that is not loaded is noted as an `include!` that found nothing is, for
+    /// whoever owns the VFS to load.
     fn files(&mut self) -> R {
         let n = self.len()?;
+        let mut not_loaded = None;
         for _ in 0..n {
             let owner = self.u32()?;
             let path = self.str()?.to_owned();
             let written = match self.bool()? {
                 true => {
-                    let bytes = self.bytes.get(self.at..self.at + 16).ok_or("a hash past the end")?;
+                    let bytes =
+                        self.bytes.get(self.at..self.at + 16).ok_or("a hash past the end")?;
                     self.at += 16;
                     Some(u128::from_le_bytes(bytes.try_into().expect("16 bytes")))
                 }
@@ -1921,7 +1949,13 @@ impl Dec<'_> {
             let full = joined(dir, &path);
             let source_root = self.db.source_root(*source_root).source_root(self.db);
             let found = source_root.file_for_path(&vfs_path(*real, full.clone())).copied();
-            let found = found.ok_or_else(|| format!("{full} is not loaded"))?;
+            let Some(found) = found else {
+                let krate = self.closure[owner as usize];
+                let anchor = krate.data(self.db).root_file_id;
+                self.db.include_source(base_db::AnchoredPath { anchor, path: &path });
+                not_loaded.get_or_insert_with(|| format!("{full} is not loaded"));
+                continue;
+            };
             if let Some(written) = written
                 && hash128(self.db.file_text(found).text(self.db).as_bytes()) != written
             {
@@ -1929,7 +1963,7 @@ impl Dec<'_> {
             }
             self.files.push(found);
         }
-        Ok(())
+        not_loaded.map_or(Ok(()), Err)
     }
 
     fn file(&mut self) -> R<base_db::EditionedFileId> {
@@ -1965,7 +1999,14 @@ impl Dec<'_> {
             }
             NEW => {
                 let loc = self.call_loc()?;
+                let include = includes(&loc);
                 let call = MacroCallId::new(self.db, loc);
+                if include {
+                    let written = self.file()?;
+                    if call.loc(self.db).include_file_id(self.db, call) != Some(written) {
+                        return Err("an include! of another file than was written".to_owned());
+                    }
+                }
                 self.calls.push(call);
                 Ok(call)
             }
@@ -2891,7 +2932,47 @@ pub fn made() {}
         assert_eq!(unreadable(&db, lib, &bytes), None);
         let changed = TestDB::with_files(&OUTSIDE.replace("{}\n", "{}\npub fn more() {}\n"));
         let why = unreadable(&changed, crate_named(&changed, "lib"), &bytes);
-        assert!(why.as_ref().is_some_and(|it| it.ends_with("is not the file that was written")), "{why:?}");
+        assert!(
+            why.as_ref().is_some_and(|it| it.ends_with("is not the file that was written")),
+            "{why:?}"
+        );
+    }
+
+    #[test]
+    fn an_included_file_is_read_only_as_written() {
+        const INCLUDED: &str = r#"
+//- /main.rs crate:main deps:lib
+lib::unroll!();
+//- /lib/src/lib.rs crate:lib
+#[rustc_builtin_macro]
+macro_rules! include { () => {} }
+include!("../out/made.rs");
+//- /lib/out/made.rs
+#[macro_export]
+macro_rules! unroll { () => { pub fn made() {} } }
+"#;
+        let db = TestDB::with_files(INCLUDED);
+        let lib = crate_named(&db, "lib");
+        let bytes = encode(&db, lib).unwrap();
+        assert_eq!(unreadable(&db, lib, &bytes), None);
+        let mut served = TestDB::with_files(INCLUDED);
+        let frozen = Frozen { bytes: bytes.as_slice().into(), mode: Mode::Serve };
+        let served_lib = crate_named(&served, "lib");
+        set(&mut served, [(served_lib, frozen)].into_iter().collect());
+        for name in ["lib", "main"] {
+            let dump =
+                |db: &TestDB| super::super::crate_def_map(db, crate_named(db, name)).dump(db);
+            assert_eq!(dump(&served), dump(&db), "{name}");
+        }
+        let changed = TestDB::with_files(&INCLUDED.replace("unroll {", "unroll_more {"));
+        let why = unreadable(&changed, crate_named(&changed, "lib"), &bytes);
+        assert!(
+            why.as_ref().is_some_and(|it| it.ends_with("is not the file that was written")),
+            "{why:?}"
+        );
+        let missing = TestDB::with_files(INCLUDED.split("//- /lib/out").next().unwrap());
+        let why = unreadable(&missing, crate_named(&missing, "lib"), &bytes);
+        assert!(why.as_ref().is_some_and(|it| it.ends_with("is not loaded")), "{why:?}");
     }
 
     #[test]

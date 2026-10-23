@@ -2005,6 +2005,12 @@ pub(super) fn uuid(image: &Image) -> Option<[u8; 16]> {
 /// one that has the room,
 /// and for one that is not an AArch64 executable with unwind tables.
 pub(super) fn headerpad_short(commands: &[u8]) -> anyhow::Result<Option<u64>> {
+    Ok(headerpad_wanted(commands)?.and_then(|(pad, short)| short.then_some(pad)))
+}
+
+/// The `-headerpad` of [`headerpad_short`] whether or not the executable has the room, and
+/// whether it is short of it.
+pub(super) fn headerpad_wanted(commands: &[u8]) -> anyhow::Result<Option<(u64, bool)>> {
     let executable = u32_at(commands, 0)? == macho::MH_MAGIC_64
         && u32_at(commands, 4)? == macho::CPU_TYPE_ARM64
         && u32_at(commands, 12)? == macho::MH_EXECUTE;
@@ -2044,10 +2050,7 @@ pub(super) fn headerpad_short(commands: &[u8]) -> anyhow::Result<Option<u64>> {
         },
     };
     let needed = (len + 2 * (SEGMENT + SECTION)).next_multiple_of(16) + moved;
-    if needed <= room {
-        return Ok(None);
-    }
-    Ok(Some((needed + needed / 4 - len).next_multiple_of(PAGE as usize) as u64))
+    Ok(Some(((needed + needed / 4 - len).next_multiple_of(PAGE as usize) as u64, needed > room)))
 }
 
 /// The `LC_UUID` among the load commands `commands` start with.

@@ -182,7 +182,9 @@ references against the executable's symbols, and writes a jump to the new code o
 entry of each replaced function. Calls, vtables and function pointers still arrive at the
 old entry and continue to the new code. A static with a new value is written in place when
 it is no larger. Each splice starts from the executable as the linker left it, so splices
-do not accumulate. Anything the splice has no answer for is an error and the daemon links in
+do not accumulate; a program built in full onto what rustc linked is spliced into that
+executable whole, and the patches after it start from what that left (see "The first edits
+patch what rustc linked"). Anything the splice has no answer for is an error and the daemon links in
 full; `RA_JIT_SPLICE=0` turns it off.
 
 Each object format has its own implementation:
@@ -205,7 +207,8 @@ has for the same program. The rules for a change to the splice:
    program: then say so where it is checked.
 2. A constant room (`Patch::ROOM`, the `ROOM` of `splice/debug.rs`, the 64 MB of
    `Image::tail`) says where something goes first, so that the next splice finds it in the same
-   place. It never decides whether something fits: past it, what is behind moves.
+   place. It never decides whether something fits: past it, what is behind moves (a debug
+   section, what outgrew its room, to behind every other).
 3. What a debugger reads is never a reason to link in full. When it can't be written, the
    patch's code has no lines, and the program's are where they were.
 4. A new size limit, or a new layout for one, gets a step in `harness/bigbinary.py`, which runs
@@ -336,6 +339,29 @@ worker keeps (`RA_JIT_OWN_BASE_MEMORY`, a size such as `40G`, or `off`). The dae
 `RA_JIT_MEMORY_MAX` does not stand for it: that stops the worker asked longest ago, never the
 one asked last, which is the one building its base. zed's base outgrows it, on
 the debuginfo types of [#55](https://github.com/indexable-inc/ra-jit/issues/55).
+
+An edit is never linked in full for want of a base ([#159](https://github.com/indexable-inc/ra-jit/issues/159)).
+Once the own base is given up, or before it is done, an edit that needs a build in full is
+built onto rustc's executable: its names are rustc's where the program has no other
+(`Resolver::onto`), and the object, all of the program, is spliced into that executable as a
+patch is (`splice::Baseline::spliced_whole`): each of its functions that rustc's has is
+redirected, the rest are new, and a function too short for the jump or a name rustc's has
+more than one of is one of the new. The executable is read again in the background with the
+object's symbols in it, the base of the patches after, which name against rustc's symbols too
+and are spliced onto what the whole splice left, an `#[inline]` function's edit too, since that
+object has marks to compare with.
+nushell's signature edit with its base given up at 2 GB is spliced whole in 1.5 s (Linux's
+full link of it took 1.3 s; the point is macOS's and the largest programs', which take
+minutes), and the edits after it splice in about 10 ms. Such a build keeps
+nothing in the store: it names rustc's private symbols, which no other link has. rustc's link
+on Linux keeps the compiler-builtins functions ra-jit's code calls (`--undefined`,
+`hir_ty_codegen::BUILTINS`), which it would otherwise drop as unused. A splice that fails, of
+the whole or of a patch after it (a library function the executable does not import, a
+static that grows), has the daemon start again from what cargo builds and link, as when the
+first edits' splice fails: that is what splicing can't do, and an own base links it too. Only ELF is spliced whole; on macOS
+such an edit still links in full, and the link takes the room for splices that the executable
+there wanted (`headerpad_ahead`), so it is not linked twice.
+
 `RA_JIT_RUSTC_BASE=0` makes the first build the daemon's own, as before. `harness/rustcbase.py` checks every kind of edit against cargo.
 
 An alternative wrapper exists in `stub.rs` (`RA_JIT_WRAPS_RUSTC`), where rustc compiles only

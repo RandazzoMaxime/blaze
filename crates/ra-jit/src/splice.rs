@@ -123,6 +123,8 @@ pub(crate) struct Baseline {
     /// What the last splice left behind what the linker wrote, which the next one mostly
     /// writes again as it is.
     left: Left,
+    /// Where what a debugger reads of an ELF executable is.
+    copies: debug::Copies,
     /// What the file was when we last left it: someone else may have written it since.
     stamp: Stamp,
     /// What the last splice of a Mach-O executable appended, with the hashes of its pages.
@@ -134,8 +136,6 @@ pub(crate) struct Baseline {
 struct Left {
     /// What was appended, and where.
     appended: Option<(u64, Vec<u8>)>,
-    /// The runs of what the linker wrote that are further on too.
-    moved: Vec<debug::Moved>,
 }
 
 impl Left {
@@ -197,12 +197,15 @@ impl Parsed {
     /// ([`Writing::ahead`]) to leave room for what splices add.
     fn laid_out(self, path: PathBuf, lock: Option<File>) -> anyhow::Result<Baseline> {
         let Parsed { image, baked, stamp } = self;
-        let (left, stamp) = match &image {
+        let (copies, stamp) = match &image {
             Executable::Elf(image) => {
-                let moved = laid_out(&path, image, lock).unwrap_or_default();
-                (Left { appended: None, moved }, Stamp::of(&File::open(&path)?)?)
+                let copies = laid_out(&path, image, lock).unwrap_or_else(|why| {
+                    eprintln!("splice: what a debugger reads stays where the linker put it: {why}");
+                    image.described.as_linked()
+                });
+                (copies, Stamp::of(&File::open(&path)?)?)
             }
-            _ => (Left::default(), stamp),
+            _ => (debug::Copies::default(), stamp),
         };
         Ok(Baseline {
             path,
@@ -210,7 +213,8 @@ impl Parsed {
             baked,
             undo: Vec::new(),
             originals: FxHashMap::default(),
-            left,
+            left: Left::default(),
+            copies,
             stamp,
             appended: None,
         })
@@ -272,6 +276,7 @@ impl Baseline {
             undo: Vec::new(),
             originals: self.originals.clone(),
             left: Left::default(),
+            copies: self.copies.clone(),
             stamp: self.stamp.clone(),
             appended: None,
         }
@@ -293,32 +298,90 @@ impl Baseline {
     /// A Mach-O splice stops when `give_up` is set, with [`GaveUp`], and leaves the executable
     /// and what is known of it as they were.
     pub(crate) fn splice(&mut self, patch: &[u8], give_up: &AtomicBool) -> anyhow::Result<Spliced> {
+        self.splice_as(patch, give_up, false).map(|(spliced, _)| spliced)
+    }
+
+    /// Splices `object`, all of a program the daemon built, into the executable rustc linked,
+    /// and starts reading what that leaves as an executable the daemon linked with `patch`
+    /// ahead of `object` ([`Linked::read`]): the next edits are patches of the object, spliced
+    /// into it. So a build in full is not linked in full. Only of ELF executables; anything
+    /// else, and whatever the splice declines, is an error.
+    pub(crate) fn spliced_whole(
+        mut self,
+        object_path: &Path,
+        patch: &Path,
+    ) -> anyhow::Result<(Linked, Spliced)> {
+        ensure!(
+            matches!(*self.image, Executable::Elf(_)),
+            "only an ELF executable takes all of a program spliced"
+        );
+        let start = std::time::Instant::now();
+        let object = std::fs::read(object_path)?;
+        let read = start.elapsed();
+        let (spliced, defined) = self.splice_as(&object, &AtomicBool::new(false), true)?;
+        if std::env::var_os("RA_JIT_STATS").is_some() {
+            let us = |it: std::time::Duration| it.as_micros();
+            eprintln!("splice-whole-us: read={} splice={}", us(read), us(start.elapsed() - read));
+        }
+        let (path, object) = (self.path.clone(), object_path.to_owned());
+        let patch = std::fs::read(patch);
+        let lock = Writing::ahead(&path);
+        let linked = Linked(std::thread::spawn(move || {
+            let mut parsed = Baseline::parse(&path, &patch?, &object, false)?;
+            let Executable::Elf(image) = &mut parsed.image else {
+                bail!("the executable is ELF no more")
+            };
+            // What the object adds is in no symbol table, and is what the next patch refers to.
+            for (name, defined) in defined {
+                image.symbols.insert(name, Named::One(defined));
+            }
+            parsed.laid_out(path, lock)
+        }));
+        Ok((linked, spliced))
+    }
+
+    /// [`Baseline::splice`], and with `whole` of all of a program ([`Patch::read`]); with where
+    /// the patch has each symbol it defines now, of an ELF executable.
+    fn splice_as(
+        &mut self,
+        patch: &[u8],
+        give_up: &AtomicBool,
+        whole: bool,
+    ) -> anyhow::Result<(Spliced, Vec<(Box<[u8]>, Defined)>)> {
         self.read_again_if_signed()?;
         let start = std::time::Instant::now();
-        let (addition, len) = match &*self.image {
+        let (mut addition, len, pointed) = match &*self.image {
             Executable::Elf(image) => {
-                let patch = Patch::read(patch, image)?;
+                let patch = Patch::read(patch, image, whole)?;
+                if whole && std::env::var_os("RA_JIT_STATS").is_some() {
+                    eprintln!("splice-us: read={}", start.elapsed().as_micros());
+                }
                 self.has_baked(patch.replaced.iter().map(|it| it.name))?;
-                (patch.place(image)?, image.len)
+                let addition = patch.place(image, &self.copies)?;
+                let moves = !addition.described.moved.is_empty();
+                let pointed = moves.then(|| image.described.pointed(&addition.described.copies));
+                (addition, image.len, pointed)
             }
             Executable::Pe(image) => {
                 let patch = pe::Patch::read(patch, image)?;
                 self.has_baked(patch.defined())?;
-                (patch.place(image)?, image.len)
+                (patch.place(image)?, image.len, None)
             }
             Executable::Wasm(module) => {
                 let (bytes, spliced) = self.rewrite(module, patch)?;
                 std::fs::write(&self.path, bytes)?;
                 self.stamp = Stamp::of(&File::open(&self.path)?)?;
-                return Ok(spliced);
+                return Ok((spliced, Vec::new()));
             }
             Executable::MachO(image) => {
                 let Baseline { path, baked, undo, originals, stamp, appended, .. } = self;
-                return macho::splice(
+                let spliced = macho::splice(
                     image, path, baked, undo, originals, stamp, appended, patch, give_up,
-                );
+                )?;
+                return Ok((spliced, Vec::new()));
             }
         };
+        let defined = std::mem::take(&mut addition.defined);
         let placed = start.elapsed();
 
         let writing = Writing::open(&self.path)?;
@@ -332,32 +395,36 @@ impl Baseline {
         }
         // Until this is through, nothing is known of what is behind the linker's.
         let left = std::mem::take(&mut self.left);
+        let described = &addition.described;
+        // First, as the code appended may reach where a section was: each goes where nothing
+        // is still to be read, and the headers left when the splice is undone point there.
+        let mut copied = 0;
+        for run in &described.moved {
+            copy_within(&file, run)?;
+            copied += run.len;
+        }
+        if let Some((table, headers)) = &pointed {
+            write_all_at(&file, headers, *table)?;
+            for run in &described.moved {
+                let_go(&file, run.from, run.len);
+            }
+        }
+        self.copies = described.copies.clone();
+        let copied_at = start.elapsed();
         left.append(&file, addition.offset, &addition.appended)?;
         write_all_at(&file, &addition.headers, addition.headers_offset)?;
         let appended_at = start.elapsed();
         let mut end = (addition.offset + addition.appended.len() as u64)
             .max(addition.headers_offset + addition.headers.len() as u64);
-        // A run the last splice copied stays where it is while nothing else is written there,
-        // also when this one has no use for it: the next may.
-        let mut moved = left.moved;
-        moved.retain(|it| it.to >= end);
-        let mut copied = 0;
-        for run in addition.described.moved {
-            if !moved.contains(&run) {
-                moved.retain(|it| it.to + it.len <= run.to || run.to + run.len <= it.to);
-                copy_within(&file, &run)?;
-                copied += run.len;
-                moved.push(run);
-            }
+        for run in &described.copied {
+            copy_within(&file, run)?;
+            end = end.max(run.to + run.len);
         }
-        let copied_at = start.elapsed();
-        for (offset, bytes) in &addition.described.written {
+        for (offset, bytes) in &described.written {
             write_all_at(&file, bytes, *offset)?;
-            let written = *offset + bytes.len() as u64;
-            moved.retain(|it| it.to + it.len <= *offset || written <= it.to);
-            end = end.max(written);
+            end = end.max(*offset + bytes.len() as u64);
         }
-        end = moved.iter().map(|it| it.to + it.len).fold(end, u64::max);
+        end = described.moved.iter().map(|it| it.to + it.len).fold(end, u64::max);
         // A file is not cut short behind what a splice wrote: XFS takes a truncation, also to
         // the size the file has, as a reason to write out every page of it not yet written when
         // it is closed, 100 ms of nushell's after a link. Nothing reads what is past `end`.
@@ -365,7 +432,14 @@ impl Baseline {
             file.set_len(end.max(len))?;
         }
         let written_at = start.elapsed();
-        for (offset, bytes) in &addition.overwritten {
+        // What a whole program is spliced over is read again as linked: nothing undoes it.
+        // Its jumps are written a run of the file at a time, for a file whose blocks another
+        // shares (a copy on XFS or Btrfs) takes a write as long as it takes the block's copy.
+        if whole {
+            addition.overwritten.sort_by_key(|it| it.0);
+            write_runs(&file, &addition.overwritten)?;
+        }
+        for (offset, bytes) in addition.overwritten.iter().filter(|_| !whole) {
             let mut old = vec![0; bytes.len()];
             read_exact_at(&file, &mut old, *offset)?;
             self.undo.push((*offset, old));
@@ -377,18 +451,18 @@ impl Baseline {
         if std::env::var_os("RA_JIT_STATS").is_some() {
             let us = |it: std::time::Duration| it.as_micros();
             eprintln!(
-                "splice-us: place={} append={} copy={} write={} redirect={} close={}",
+                "splice-us: place={} copy={} append={} write={} redirect={} close={}",
                 us(placed),
-                us(appended_at - placed),
-                us(copied_at - appended_at),
-                us(written_at - copied_at),
+                us(copied_at - placed),
+                us(appended_at - copied_at),
+                us(written_at - appended_at),
                 us(redirected_at - written_at),
                 us(start.elapsed() - redirected_at)
             );
         }
         let appended = addition.appended.len();
-        self.left = Left { appended: Some((addition.offset, addition.appended)), moved };
-        Ok(Spliced { redirected: addition.redirected, appended, copied })
+        self.left = Left { appended: Some((addition.offset, addition.appended)) };
+        Ok((Spliced { redirected: addition.redirected, appended, copied }, defined))
     }
 
     /// `patch` laid out at `base` of a program that runs the executable as the linker wrote
@@ -408,14 +482,15 @@ impl Baseline {
             Executable::Elf(image) => {
                 ensure!(image.machine == Machine::X86_64, "live edits support Linux x86-64 only");
                 let uuid = image.id.context("the executable has no GNU build ID")?;
-                let patch = Patch::read(patch, image)?;
+                let patch = Patch::read(patch, image, false)?;
                 ensure!(
                     self.baked
                         .iter()
                         .all(|it| patch.replaced.iter().any(|replaced| replaced.name == &**it)),
                     "a function the executable was linked with a patch of is as it first was"
                 );
-                let (code, moved) = patch.place_live_simple(image, &self.originals, base)?;
+                let (code, moved) =
+                    patch.place_live_simple(image, &self.copies, &self.originals, base)?;
                 Ok((uuid, code, moved))
             }
             _ => bail!(
@@ -505,6 +580,12 @@ impl Baseline {
 /// it, when the room its header has is too little: only Apple's linker leaves no more than it
 /// is told to. `None` for an executable that has the room, or needs none.
 pub(crate) fn headerpad_short(path: &Path) -> anyhow::Result<Option<u64>> {
+    Ok(headerpad_wanted(path)?.and_then(|(pad, short)| short.then_some(pad)))
+}
+
+/// The `-headerpad` of [`headerpad_short`] whether or not the executable at `path` has the
+/// room, and whether it is short of it.
+pub(crate) fn headerpad_wanted(path: &Path) -> anyhow::Result<Option<(u64, bool)>> {
     use std::io::Read as _;
     const HEADER: usize = size_of::<object::macho::MachHeader64<object::LittleEndian>>();
     let mut file = File::open(path)?;
@@ -516,7 +597,7 @@ pub(crate) fn headerpad_short(path: &Path) -> anyhow::Result<Option<u64>> {
     let len = u32::from_le_bytes(commands[20..24].try_into()?) as usize;
     commands.resize(HEADER + len, 0);
     file.read_exact(&mut commands[HEADER..])?;
-    macho::headerpad_short(&commands)
+    macho::headerpad_wanted(&commands)
 }
 
 /// Why a splice stopped half way: a newer edit wants the executable.
@@ -560,12 +641,13 @@ fn read_exact_at(mut file: &File, bytes: &mut [u8], offset: u64) -> std::io::Res
 }
 
 /// Copies what a debugger reads of the executable at `path` to where its splices write it,
-/// while the daemon waits for the first edit: the splices find it there.
-fn laid_out(path: &Path, image: &Image, lock: Option<File>) -> std::io::Result<Vec<debug::Moved>> {
+/// while the daemon waits for the first edit, and points the section headers there: the
+/// splices find it there, and where the linker put it is let go of.
+fn laid_out(path: &Path, image: &Image, lock: Option<File>) -> std::io::Result<debug::Copies> {
     let start = std::time::Instant::now();
-    let moved = image.described.laid_out(image.tail());
+    let (moved, copies) = image.described.laid_out(image.tail());
     if moved.is_empty() {
-        return Ok(moved);
+        return Ok(copies);
     }
     let writing = match lock {
         Some(lock) => Writing::under(lock, path)?,
@@ -575,6 +657,20 @@ fn laid_out(path: &Path, image: &Image, lock: Option<File>) -> std::io::Result<V
     for run in &moved {
         copy_within(&writing.file, run)?;
     }
+    let (table, headers) = image.described.pointed(&copies);
+    write_all_at(&writing.file, &headers, table)?;
+    let mut linkers: Vec<(u64, u64)> = moved.iter().map(|it| (it.from, it.from + it.len)).collect();
+    linkers.sort_unstable();
+    let mut runs: Vec<(u64, u64)> = Vec::with_capacity(linkers.len());
+    for (start, end) in linkers {
+        match runs.last_mut() {
+            Some(last) if start <= last.1 => last.1 = last.1.max(end),
+            _ => runs.push((start, end)),
+        }
+    }
+    for (start, end) in runs {
+        let_go(&writing.file, start, end - start);
+    }
     if paused {
         eprintln!("laid out: written");
     }
@@ -583,7 +679,36 @@ fn laid_out(path: &Path, image: &Image, lock: Option<File>) -> std::io::Result<V
         eprintln!("laid out: {bytes} bytes of debug info in {:.1?}", start.elapsed());
     }
     writing.done()?;
-    Ok(moved)
+    Ok(copies)
+}
+
+/// Lets go of the whole blocks of a run of the file nothing reads any more: the filesystem
+/// keeps them no longer, and they read as zeros. Elsewhere than on Linux they stay.
+fn let_go(file: &File, from: u64, len: u64) {
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::fd::AsRawFd as _;
+        let (start, end) =
+            (from.next_multiple_of(debug::BLOCK), (from + len) / debug::BLOCK * debug::BLOCK);
+        if end <= start {
+            return;
+        }
+        let (Ok(start), Ok(len)) = (i64::try_from(start), i64::try_from(end - start)) else {
+            return;
+        };
+        let mode = libc::FALLOC_FL_PUNCH_HOLE | libc::FALLOC_FL_KEEP_SIZE;
+        // SAFETY: the descriptor is open for writing, and the range is the file's.
+        if unsafe { libc::fallocate(file.as_raw_fd(), mode, start, len) } != 0 {
+            eprintln!(
+                "splice: what a debugger no longer reads is kept: {}",
+                std::io::Error::last_os_error()
+            );
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        _ = (file, from, len);
+    }
 }
 
 /// Waits for `RA_JIT_LAYOUT_PAUSE_MS` with the executable open for writing, and says so, as
@@ -622,7 +747,7 @@ impl Writing {
                 let mut copy = path.as_os_str().to_owned();
                 copy.push(".splicing");
                 let copy = PathBuf::from(copy);
-                let file = std::fs::copy(path, &copy)
+                let file = copy_file(path, &copy)
                     .and_then(|_| OpenOptions::new().read(true).write(true).open(&copy));
                 match file {
                     Ok(file) => Ok(Writing { file, lock, copy: Some((copy, path.to_owned())) }),
@@ -700,6 +825,83 @@ pub(crate) fn unwritten(path: &Path) -> std::io::Result<File> {
         }
         return Ok(file);
     }
+}
+
+/// Writes `writes`, in the order of the file, each run of them with no more than `GAP` between
+/// two at once: the run is read, written over and written back.
+fn write_runs(file: &File, writes: &[(u64, Vec<u8>)]) -> std::io::Result<()> {
+    const GAP: u64 = 256 << 10;
+    let mut at = 0;
+    while at < writes.len() {
+        let start = writes[at].0;
+        let mut end = start + writes[at].1.len() as u64;
+        let mut next = at + 1;
+        while let Some((offset, bytes)) = writes.get(next).filter(|it| it.0 <= end + GAP) {
+            end = end.max(offset + bytes.len() as u64);
+            next += 1;
+        }
+        let mut run = vec![0; (end - start) as usize];
+        read_exact_at(file, &mut run, start)?;
+        for (offset, bytes) in &writes[at..next] {
+            let from = (offset - start) as usize;
+            run[from..from + bytes.len()].copy_from_slice(bytes);
+        }
+        write_all_at(file, &run, start)?;
+        at = next;
+    }
+    Ok(())
+}
+
+/// Copies the file at `from` to `to` as [`std::fs::copy`] does, but for the runs of it the
+/// filesystem keeps no blocks of, which stay so in the copy: a spliced executable has many,
+/// and a filesystem that shares no blocks writes the rest in full.
+fn copy_file(from: &Path, to: &Path) -> std::io::Result<()> {
+    #[cfg(target_os = "linux")]
+    if copy_holes(from, to).is_ok() {
+        return Ok(());
+    }
+    std::fs::copy(from, to).map(drop)
+}
+
+#[cfg(target_os = "linux")]
+fn copy_holes(from: &Path, to: &Path) -> std::io::Result<()> {
+    use std::os::fd::AsRawFd as _;
+    let source = File::open(from)?;
+    let metadata = source.metadata()?;
+    let target = OpenOptions::new().write(true).create(true).truncate(true).open(to)?;
+    target.set_permissions(metadata.permissions())?;
+    target.set_len(metadata.len())?;
+    let (fd, out) = (source.as_raw_fd(), target.as_raw_fd());
+    let end = i64::try_from(metadata.len()).map_err(std::io::Error::other)?;
+    let mut at = 0;
+    while at < end {
+        // SAFETY: `lseek` and `copy_file_range` on descriptors this function holds open.
+        let data = unsafe { libc::lseek(fd, at, libc::SEEK_DATA) };
+        if data < 0 {
+            let error = std::io::Error::last_os_error();
+            if error.raw_os_error() == Some(libc::ENXIO) {
+                break;
+            }
+            return Err(error);
+        }
+        let hole = unsafe { libc::lseek(fd, data, libc::SEEK_HOLE) };
+        if hole < 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        let (mut source, mut target) = (data, data);
+        while source < hole {
+            let len = usize::try_from(hole - source).unwrap_or(usize::MAX).min(1 << 30);
+            let copied =
+                unsafe { libc::copy_file_range(fd, &mut source, out, &mut target, len, 0) };
+            match copied {
+                ..0 => return Err(std::io::Error::last_os_error()),
+                0 => return Err(std::io::ErrorKind::UnexpectedEof.into()),
+                _ => {}
+            }
+        }
+        at = hole;
+    }
+    Ok(())
 }
 
 /// Writes a run of the file again behind where it is.
@@ -1012,11 +1214,14 @@ struct Defined {
     address: u64,
     size: u64,
     kind: SymbolKind,
-    /// Where the file has its entry of the symbol table.
+    /// Where the file has its entry of the symbol table, or [`Defined::NO_ENTRY`] for what a
+    /// splice of all of a program added ([`Baseline::spliced_whole`]).
     entry: u64,
 }
 
 impl Defined {
+    const NO_ENTRY: u64 = u64::MAX;
+
     fn is(&self, other: &Defined) -> bool {
         (self.address, self.size, self.kind) == (other.address, other.size, other.kind)
     }
@@ -1535,6 +1740,12 @@ impl InPlace {
     fn holds(&self, offset: u64) -> bool {
         (self.offset..self.offset + self.size).contains(&offset)
     }
+
+    /// Which of `all`, by where their section has them, holds `offset`.
+    fn holding(all: &[InPlace], offset: u64) -> Option<usize> {
+        let at = all.partition_point(|it| it.offset + it.size <= offset);
+        all.get(at).filter(|it| it.holds(offset)).map(|_| at)
+    }
 }
 
 /// How a relocation of the patch gets its value.
@@ -1592,7 +1803,11 @@ impl<'a> Patch<'a> {
     /// What a table of the executable is given to grow into before what follows it moves.
     const ROOM: u64 = 1 << 20;
 
-    fn read(bytes: &'a [u8], image: &Image) -> anyhow::Result<Patch<'a>> {
+    /// With `whole`, the patch is an object with all of the program, which replaces every
+    /// function of the executable it defines that can be jumped from: one that can't, or
+    /// whose name the executable has several of, is rustc's still where rustc's code that the
+    /// object leaves calls it, as the linker would leave it there too.
+    fn read(bytes: &'a [u8], image: &Image, whole: bool) -> anyhow::Result<Patch<'a>> {
         let file = ElfFile64::<Endianness>::parse(bytes)?;
         let mut patch = Patch {
             file,
@@ -1623,6 +1838,25 @@ impl<'a> Patch<'a> {
                 patch.frames += Self::frames_in(section.data()?, 0)?.len();
             }
         }
+        if whole {
+            let missing: Vec<_> = (patch.file.symbols())
+                .filter(|it| it.is_undefined())
+                .filter_map(|it| it.name_bytes().ok())
+                .filter(|name| !name.is_empty() && *name != b"__tls_get_addr")
+                .filter(|name| !image.symbols.contains_key(*name))
+                .filter(|name| !image.imports.contains_key(*name))
+                .map(String::from_utf8_lossy)
+                .collect();
+            if std::env::var_os("RA_JIT_STATS").is_some() {
+                eprintln!("splice: not in the executable: {missing:?}");
+            }
+            ensure!(
+                missing.is_empty(),
+                "{} of what it refers to are not in the executable, as {}",
+                missing.len(),
+                missing.iter().take(3).map(|it| it.as_ref()).collect::<Vec<_>>().join(", ")
+            );
+        }
         let loaded: FxHashSet<SectionIndex> = patch.sections.iter().flatten().copied().collect();
         let code: FxHashSet<SectionIndex> =
             patch.sections[Segment::Code as usize].iter().copied().collect();
@@ -1635,6 +1869,15 @@ impl<'a> Patch<'a> {
             let section = symbol.section_index().context("a symbol in no section")?;
             let old = match image.symbols.get(name) {
                 None => None,
+                Some(Named::One(old))
+                    if whole
+                        && old.kind == SymbolKind::Text
+                        && code.contains(&section)
+                        && old.size < image.machine.jump() as u64 =>
+                {
+                    None
+                }
+                Some(Named::Many) if whole && code.contains(&section) => None,
                 Some(Named::One(old))
                     if old.kind == SymbolKind::Text && code.contains(&section) =>
                 {
@@ -1731,6 +1974,9 @@ impl<'a> Patch<'a> {
             }
         }
 
+        for statics in patch.in_place.values_mut() {
+            statics.sort_unstable_by_key(|it| it.offset);
+        }
         Ok(patch)
     }
 
@@ -1827,17 +2073,18 @@ impl<'a> Patch<'a> {
     }
 
     /// Lays the patch out behind the executable and gives everything in it its address.
-    fn place(&self, image: &Image) -> anyhow::Result<Addition> {
-        self.place_at(image, None)
+    fn place(&self, image: &Image, copies: &debug::Copies) -> anyhow::Result<Addition> {
+        self.place_at(image, copies, None)
     }
 
     fn place_live_simple(
         &self,
         image: &Image,
+        copies: &debug::Copies,
         originals: &FxHashMap<u64, Vec<u8>>,
         base: u64,
     ) -> anyhow::Result<(ra_jit_live::format::Code, Vec<(u64, u64)>)> {
-        let addition = self.place_at(image, Some(base))?;
+        let addition = self.place_at(image, copies, Some(base))?;
         let mut all = addition.appended;
         let data_at = addition.live_data_at as usize;
         let data = all.split_off(data_at);
@@ -1907,8 +2154,15 @@ impl<'a> Patch<'a> {
         Ok((code, moved))
     }
 
-    fn place_at(&self, image: &Image, live_base: Option<u64>) -> anyhow::Result<Addition> {
+    fn place_at(
+        &self,
+        image: &Image,
+        copies: &debug::Copies,
+        live_base: Option<u64>,
+    ) -> anyhow::Result<Addition> {
         let e = Endianness::Little;
+        let code: FxHashSet<SectionIndex> =
+            self.sections[Segment::Code as usize].iter().copied().collect();
         let page = image.page();
         let machine = image.machine;
         let (stub_len, stub_align) = machine.stub();
@@ -1980,19 +2234,17 @@ impl<'a> Patch<'a> {
             let in_place = self.in_place.get(&section).map_or(&[][..], |it| it);
             let found = match target {
                 Target::Section(_) if exact => {
-                    in_place.iter().find(|it| it.holds(added as u64)).map(|it| (it, added as u64))
+                    InPlace::holding(in_place, added as u64).map(|it| (&in_place[it], added as u64))
                 }
                 Target::Section(_) => {
-                    let near = |it: &InPlace| {
-                        (it.offset as i64 - 8..(it.offset + it.size) as i64).contains(&added)
-                    };
-                    ensure!(
-                        !in_place.iter().any(near),
-                        "code that refers to a static through its section"
-                    );
+                    // The first that ends past it is the one it can be just ahead of.
+                    let first =
+                        in_place.partition_point(|it| (it.offset + it.size) as i64 <= added);
+                    let near = in_place.get(first).is_some_and(|it| it.offset as i64 - 8 <= added);
+                    ensure!(!near, "code that refers to a static through its section");
                     None
                 }
-                _ => in_place.iter().find(|it| it.holds(at)).map(|it| (it, at)),
+                _ => InPlace::holding(in_place, at).map(|it| (&in_place[it], at)),
             };
             Ok(match (found, target) {
                 (Some((it, at)), Target::Section(_)) => it.old.address + (at - it.offset),
@@ -2031,7 +2283,7 @@ impl<'a> Patch<'a> {
             let data = section.data()?;
             appended[start as usize..][..data.len()].copy_from_slice(data);
             let in_place = self.in_place.get(&section.index()).map_or(&[][..], |it| it);
-            let code = self.sections[Segment::Code as usize].contains(&section.index());
+            let code = code.contains(&section.index());
             let mut values: Vec<Vec<u8>> = in_place
                 .iter()
                 .map(|it| match data.get(it.offset as usize..(it.offset + it.size) as usize) {
@@ -2046,7 +2298,7 @@ impl<'a> Patch<'a> {
                     continue;
                 }
                 let target = self.targets[&index];
-                if let Some(which) = in_place.iter().position(|it| it.holds(at)) {
+                if let Some(which) = InPlace::holding(in_place, at) {
                     let within = (at - in_place[which].offset) as usize;
                     let (Fixup::Absolute, _) = Fixup::of(&relocation, machine)? else {
                         bail!("a static that stores a distance")
@@ -2133,9 +2385,11 @@ impl<'a> Patch<'a> {
             })?;
             overwritten.push((image.offset_of(old.address)?, jump));
             // Its symbol names the new code, for whoever reads a backtrace.
-            let named = [new.to_le_bytes(), replaced.size.to_le_bytes()].concat();
-            overwritten
-                .push((old.entry + offset_of!(elf::Sym64<Endianness>, st_value) as u64, named));
+            if old.entry != Defined::NO_ENTRY {
+                let named = [new.to_le_bytes(), replaced.size.to_le_bytes()].concat();
+                let value = old.entry + offset_of!(elf::Sym64<Endianness>, st_value) as u64;
+                overwritten.push((value, named));
+            }
             redirected += 1;
         }
 
@@ -2207,17 +2461,13 @@ impl<'a> Patch<'a> {
         let headers_offset = offset + headers_at;
         // What a debugger reads is no reason to link in full: without it the patch's code has
         // no lines, and the program's are where they were.
-        let described = self
-            .describe(
-                &image.described,
-                machine,
-                (headers_offset + headers.len() as u64).max(image.tail()),
-                |target, added| address(target, added, false),
-            )
-            .unwrap_or_else(|why| {
-                eprintln!("splice: the patch's code has no lines for a debugger: {why:#}");
-                debug::Tail::default()
-            });
+        let described = self.describe(
+            &image.described,
+            copies,
+            machine,
+            (headers_offset + headers.len() as u64).max(image.tail()),
+            |target, added| address(target, added, false),
+        );
         let mut header = image.header;
         if let Some((at, count)) = described.headers {
             header.e_shoff.set(e, at);
@@ -2236,6 +2486,27 @@ impl<'a> Patch<'a> {
             })
             .unwrap_or((0, 0));
 
+        let defined = (self.replaced.iter())
+            .map(|replaced| {
+                let in_place = (self.in_place.get(&replaced.section)).is_some_and(|it| {
+                    it.binary_search_by_key(&replaced.offset, |it| it.offset).is_ok()
+                });
+                let old = replaced.old.filter(|_| in_place);
+                let defined = Defined {
+                    address: old.map_or(base + placed[&replaced.section] + replaced.offset, |it| {
+                        it.address
+                    }),
+                    size: replaced.size,
+                    kind: match code.contains(&replaced.section) {
+                        true => SymbolKind::Text,
+                        false => SymbolKind::Data,
+                    },
+                    entry: replaced.old.map_or(Defined::NO_ENTRY, |it| it.entry),
+                };
+                (Box::from(replaced.name), defined)
+            })
+            .collect();
+
         Ok(Addition {
             offset,
             appended,
@@ -2247,6 +2518,7 @@ impl<'a> Patch<'a> {
             live_data_at: extents[Segment::Data as usize].0,
             live_frames,
             live_pointers: fixed.iter().map(|it| it.r_offset.get(e).saturating_sub(base)).collect(),
+            defined,
         })
     }
 }
@@ -2267,6 +2539,8 @@ struct Addition {
     live_data_at: u64,
     live_frames: (u64, u64),
     live_pointers: Vec<u64>,
+    /// Where each symbol the patch defines is now, of an ELF executable.
+    defined: Vec<(Box<[u8]>, Defined)>,
 }
 
 fn read_i32(bytes: &[u8]) -> i32 {
@@ -2321,6 +2595,31 @@ mod tests {
         std::fs::remove_dir_all(&dir).unwrap();
         assert!(started > written, "started while the file was open for writing");
         assert!(ended.unwrap().success());
+    }
+
+    /// What a splice let go of stays so in the copy written while the program runs.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_copy_keeps_no_blocks_of_what_was_let_go_of() {
+        use super::{OpenOptions, copy_file, let_go};
+        use std::os::unix::fs::MetadataExt as _;
+        let dir = std::env::temp_dir().join(format!("ra-jit-holes-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let (path, copy) = (dir.join("program"), dir.join("copy"));
+        let bytes: Vec<u8> = (0..4 << 20).map(|it: u32| (it % 251) as u8 + 1).collect();
+        std::fs::write(&path, &bytes).unwrap();
+        let file = OpenOptions::new().read(true).write(true).open(&path).unwrap();
+        let_go(&file, 1 << 20, 2 << 20);
+        file.sync_all().unwrap();
+        drop(file);
+        copy_file(&path, &copy).unwrap();
+        let (read, held) = (std::fs::read(&copy).unwrap(), std::fs::metadata(&copy).unwrap());
+        std::fs::remove_dir_all(&dir).unwrap();
+        assert_eq!(read.len(), bytes.len());
+        assert!(read[1 << 20..3 << 20].iter().all(|&it| it == 0));
+        assert_eq!(read[..1 << 20], bytes[..1 << 20]);
+        assert_eq!(read[3 << 20..], bytes[3 << 20..]);
+        assert!(held.blocks() * 512 <= 2 << 20 | 1 << 16, "{} bytes held", held.blocks() * 512);
     }
 
     fn words(code: &[u8]) -> Vec<u32> {
