@@ -1183,7 +1183,18 @@ impl<'db> Builder<'_, '_, 'db> {
         self.closure_annotations();
         for annotation in lets {
             let (pat, initializer) = (annotation.pat, annotation.initializer);
-            let Some(ty) = self.annotation_ty(annotation) else { continue };
+            // A variable with a type written out has it, lifetimes and all.
+            let local = match self.ctx.store[pat] {
+                Pat::Bind { id, subpat: None } => self.body.binding_locals.get(id).copied(),
+                _ => None,
+            };
+            let ty = match local {
+                Some(local) if self.annotated.contains(&local) => {
+                    Some(self.regions.local_tys[local.into_raw().into_u32() as usize])
+                }
+                _ => self.annotation_ty(annotation),
+            };
+            let Some(ty) = ty else { continue };
             let at = At { category: Category::TypeAnnotation, span: MirSpan::PatId(pat) };
             self.well_formed(ty, at, 0);
             if !matches!(self.ctx.store[pat], Pat::Bind { subpat: None, .. }) {
