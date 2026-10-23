@@ -739,7 +739,20 @@ again for any change to its package. rustc still compiles a script, and ra-jit s
 links a proc macro (J), when a library it links was compiled before ra-jit described it, when its
 source uses `include!`, `include_str!`, `include_bytes!` or `env!` of a variable that is not
 cargo's (which the dep-info does not name), or when it calls a function ra-jit could not
-compile. `RA_JIT_SCRIPTS_BY_RUSTC=1` has rustc compile them all, for comparing. Not done: `RUSTC`
+compile. `RA_JIT_SCRIPTS_BY_RUSTC=1` has rustc compile them all, for comparing.
+
+A script's compile needs the standard library's unit, which the store has once per toolchain
+(and machine, until the remote has it): the first build on a new store waits for it. The
+scripts of a cold build ask for it at once, so the store has one process make it while the
+others wait (`Store::making`); before that, ripgrep's seven first scripts each built it, 10 s
+apiece. A crate's frozen def map is no longer keyed by where cargo is (`CARGO`), which differs
+between a script's compile and the daemon's, so a script finds the standard library resolved
+in the store (0.25 s rather than 2 to 5 s). On dev-aws-11 (`harness/norustc/count.py`, against
+main 24be505), "cold": with a store that has the standard library's unit, ripgrep 4.6 s (main
+4.5), nushell 27.2 s (25.6 to 25.9); with an empty store, 11.2 s and 37.3 s. rustc compiles
+the build scripts of the cold build: ripgrep 7 times before, 1 (crossbeam-utils, `include!`);
+nushell 50 before, 5 (crossbeam-utils and portable-atomic, `include!`; bigdecimal, `env!`;
+nu-cmd-lang and oem_cp, a proc macro). Not done: `RUSTC`
 naming ra-jit while scripts run, so their probes are ra-jit's; rust-analyzer's `cargo check
 --compile-time-deps` replaced; the harness that compares every script's output with rustc's. For
 the F+G lane: the printed lines a library is linked with are where cargo keeps them
