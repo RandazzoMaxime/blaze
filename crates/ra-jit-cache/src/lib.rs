@@ -29,8 +29,8 @@
 //!
 //! The arguments have to implement `serde::Serialize` and the result `Serialize` and
 //! `DeserializeOwned`. Results are kept under the target directory the program was built in,
-//! `target/ra-jit/fn-cache`, up to 512 MiB, the least recently used going first. The
-//! environment of the program can change that:
+//! `target/ra-jit/fn-cache`, up to 512 MiB, the least recently used going first, and for no
+//! more than a function's last three codes. The environment of the program can change that:
 //!
 //! - `RA_JIT_FN_CACHE=off` calls every function every time; `memory` keeps results for the
 //!   run alone.
@@ -38,7 +38,8 @@
 //! - `RA_JIT_FN_CACHE_SIZE` is how much to keep there, in bytes, or with `K`, `M` or `G`.
 //! - `RA_JIT_FN_CACHE_LOG=1` says on stderr what became of each call.
 //!
-//! `cargo ra-jit cache clear` empties the directory of a project.
+//! `cargo ra-jit cache` lists what each function kept, and `cargo ra-jit cache clear` empties
+//! the directory of a project (`--stale`: of all but what each function's code computed).
 
 pub use ra_jit_cache_macros::cache;
 
@@ -49,7 +50,7 @@ mod store;
 pub mod __private {
     use serde::{Serialize, de::DeserializeOwned};
 
-    pub use crate::store::{Key, call, key};
+    pub use crate::store::{Held, Key, call, clear_stale, holdings, key};
 
     /// What ra-jit names the code of a cached function by, with the function's name, or
     /// without a name for the code why the function is not cached. All zeros when ra-jit did

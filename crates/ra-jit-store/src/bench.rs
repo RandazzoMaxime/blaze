@@ -7,7 +7,7 @@ use std::{
     sync::atomic::{AtomicUsize, Ordering},
 };
 
-use super::{Identity, KEY, Pack, StoreDir, Tuning, record};
+use super::{Identity, KEY, Limit, Pack, StoreDir, Tuning, record};
 
 /// A key as the store has it on disk: the entry's key under the identity of the build.
 pub struct Salted(Identity);
@@ -27,10 +27,10 @@ pub fn encode_record(key: &[u8; KEY], value: &[u8]) -> Vec<u8> {
     record(key, value, value.len() as u32)
 }
 
-/// How many records a sealed pack has, once its bytes are checked against its name and each
-/// record against its checksum.
+/// How many values a sealed pack has, once its bytes are checked against its name and each
+/// value, unpacked, against its checksum.
 pub fn check_pack(name: &str, bytes: &[u8]) -> Result<usize, &'static str> {
-    Pack::check(name, bytes).map(|it| it.len())
+    Pack::verify(name, bytes).map(|it| it.entries.len())
 }
 
 /// A store in a directory of its own with one sealed pack, which goes with it.
@@ -51,7 +51,7 @@ impl SealedStore {
         _ = std::fs::remove_dir_all(&dir);
         let identity = Identity::new(b"a build", "a toolchain");
         // Nothing is sealed until all of it is in, and then all of it in one pack.
-        let tuning = Tuning { seal_at: 1 << 30, limit: None };
+        let tuning = Tuning { seal_at: 1 << 30, limit: Limit::Off };
         let store = super::Store::open(&dir, identity, tuning)?;
         let keys: Vec<[u8; KEY]> = (0..count).map(|it| key_of(it as u64)).collect();
         for (at, key) in keys.iter().enumerate() {

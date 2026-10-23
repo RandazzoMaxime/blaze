@@ -4671,10 +4671,18 @@ const BORROWCK: &[&str] = &[
 ];
 
 /// The lints rust-analyzer finds where rustc does, and nowhere else, as `lints_ui.py` scores
-/// them against rustc's UI tests. None is denied by default, so one at the level of an
-/// error is one a source denies, which no flag but `--cap-lints` or `--force-warn` undoes.
-const DENIED: &[&str] =
-    &["non_snake_case", "non_camel_case_types", "non_upper_case_globals", "unused_must_use"];
+/// them against rustc's UI tests and its probes of each place a lint applies. None is denied
+/// by default, so one at the level of an error is one a source denies, which no flag but
+/// `--cap-lints` or `--force-warn` undoes.
+const DENIED: &[&str] = &[
+    "non_snake_case",
+    "non_camel_case_types",
+    "non_upper_case_globals",
+    "unused_must_use",
+    "deprecated_safe_2024",
+    "elided_lifetimes_in_paths",
+    "unsafe_op_in_unsafe_fn",
+];
 
 /// The errors written in the edited files, as rust-analyzer finds them, as rustc writes them
 /// with paths from `root`. Nothing may reach them, so the build never looks at them.

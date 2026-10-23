@@ -525,16 +525,25 @@ enable`. What stays with cargo for now: what the frontend turns down as unsuppor
 link that failed). An error in a file written before the worker loaded the workspace is ra-jit's
 too since 2026-10-23: the worker leaves it beside its socket and every build of the checkout
 fails with it until a source is written. The lints followed: a lint the source denies fails the
-build for the four lints `harness/lints_ui.py` finds rust-analyzer reports only where rustc does
+build for the seven lints `harness/lints_ui.py` finds rust-analyzer reports only where rustc does
 (on rustc's UI tests that deny or forbid a lint, 2026-10-23: non_snake_case 31 right, 0 wrong,
-9 missed; non_camel_case_types 22, 0, 2; unused_must_use 15, 0, 29; non_upper_case_globals 9,
-0, 4; the same against 1.99.0 and the nightly of 2026-10-09). Three had been wrong first:
-rust-analyzer's case rules were rustc's of an old commit, and its `unused_must_use` looked into
-`if` and `match` arms and took `Result<(), Never>` for one to use. None of the four is denied by
-default, so the level is the source's, which only `--cap-lints` and `--force-warn` undo; with
-either among the flags no lint fails a build. A lint in what a macro expands to does not. The
-other lints are not ra-jit's verdict yet: a crate that denies one rust-analyzer does not find
-runs code rustc turns down. `cargo ra-jit check` is the daemon's verdict on the build of the
+9 missed; non_camel_case_types 22, 0, 2; unused_must_use 14, 0, 30; non_upper_case_globals 9,
+0, 4; deprecated_safe_2024 3, 0, 0; elided_lifetimes_in_paths 1, 0, 0; unsafe_op_in_unsafe_fn
+1, 0, 0; the same against 1.99.0 and the nightly of 2026-10-09). The last three have few UI
+tests, so `harness/lints_probes` has a unit for each place they apply (a parameter, a return
+type, a `let`, a closure, a trait method, a macro, an `unsafe fn`, editions 2021 and 2024; 85
+units with the brace lints): elided_lifetimes_in_paths 25, 0, 6; unsafe_op_in_unsafe_fn 10, 0,
+1; deprecated_safe_2024 8, 0, 2. Five had been wrong first: rust-analyzer's case rules were
+rustc's of an old commit, its `unused_must_use` looked into `if` and `match` arms and took
+`Result<(), Never>` for one to use, and it took a deprecated-safe call (`std::env::set_var`
+before 2024) in an `unsafe fn` for the lint, which rustc reports there only where
+`unsafe_op_in_unsafe_fn` is not allowed. None of the seven is denied by default, so the level
+is the source's, which only `--cap-lints` and `--force-warn` undo; with either among the flags
+no lint fails a build. A lint in what a macro expands to does not, and `lints_ui.py` does not
+count one (rustc reports it in the macro's definition). The other lints are not ra-jit's
+verdict yet: a crate that denies one rust-analyzer does not find runs code rustc turns down.
+Those with the most errors in rustc's UI tests are `dead_code` (294), `explicit_outlives_requirements`
+(226), `unused_unsafe` (181), `unreachable_patterns` (128) and `unused_variables` (75). `cargo ra-jit check` is the daemon's verdict on the build of the
 same flags when it has that build loaded. Since 2026-10-23 any other check is the daemon's too,
 not `cargo check`: the daemon starts a checker (`ra-jit --check`, `crates/ra-jit/src/check.rs`)
 that loads the workspace as the worker of that build would and builds nothing, and answers each

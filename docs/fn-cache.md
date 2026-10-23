@@ -128,14 +128,20 @@ none, and each holds its key, so a damaged one is never taken for another.
 | `RA_JIT_FN_CACHE_LOG=1` | says for each call whether the result was found or computed |
 | `RA_JIT_FN_CACHE_TRACE=1`, set for the daemon | prints each function the code hash goes through |
 
-`cargo ra-jit cache clear` forgets everything that was kept.
+A function's results on disk are kept for the code it has and the two codes before it: the
+first call of a run with code the function did not have drops what any older code computed,
+at once rather than when the size is reached.
+
+`cargo ra-jit cache` lists what each function holds, for its code and for the older ones;
+`cargo ra-jit cache clear --stale` forgets all but what each function's code computed, and
+`cargo ra-jit cache clear` everything.
 
 ## Live edits
 
 When a live edit changes the code a cached function reaches, the function is in the patch with
 its new hash: the next call computes again, and what the old code computed is dropped from
-memory. Results on disk are kept under the old hash, and are found again if the edit is
-taken back.
+memory. Results on disk are kept under the old hash, with those of the code before it, and are
+found again if the edit is taken back.
 
 ## How it is built
 

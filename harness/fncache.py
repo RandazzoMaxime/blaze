@@ -322,6 +322,19 @@ def main():
         found = said(stderr)
         verdict("a daemon started again finds the results", reply.startswith("ok") and found.get("slow") == "found on disk",
                 f"{took * 1000:.0f} ms, slow {found.get('slow')}" + ("" if reply.startswith("ok") else f", the daemon said {reply[:200]}"))
+        # `cargo ra-jit cache` lists what each function kept, by its code and the older ones;
+        # `clear --stale` leaves the code's alone, and the next run still finds them.
+        cargo_ra_jit = os.path.join(os.path.dirname(os.path.abspath(RA_JIT)), "cargo-ra-jit")
+        listed = lambda *args: subprocess.run([cargo_ra_jit, "ra-jit", "cache", *args], capture_output=True, text=True,
+                                              env={**os.environ, "RA_JIT_FN_CACHE_DIR": store}, timeout=60).stdout
+        before = listed()
+        cleared = listed("clear", "--stale")
+        after = listed()
+        _, stderr, _ = run(binary)
+        slow = re.search(r"^  fcache::slow: 1 results .*$", before, re.M)
+        verdict("the store lists each function, and forgets old code", bool(slow) and "older code" in before
+                and "older code" not in after and said(stderr).get("slow") == "found on disk",
+                f"{slow[0].strip() if slow else before[:120]!r}; {cleared.strip()}")
         # Under cargo the attribute does nothing: every call runs, and nothing is kept.
         theirs, stderr, cargo_took = run(cargo(), {**os.environ, "RA_JIT_FN_CACHE_LOG": "1", "RA_JIT_FN_CACHE_DIR": store})
         verdict("cargo's build caches nothing", "ra-jit" not in stderr and theirs == ours, f"{cargo_took * 1000:.0f} ms")
