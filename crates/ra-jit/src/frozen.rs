@@ -87,9 +87,12 @@ fn key_of(
         krate.cfg_options(db).into_iter().map(|it| it.to_string()).collect();
     cfgs.sort_unstable();
     field(cfgs.join("\n").as_bytes());
+    // `CARGO` is wherever the cargo found on `PATH` is, which differs between a build script's
+    // compile and the daemon's, and no crate's names are resolved by it.
     let mut env: Vec<String> = krate
         .env(db)
         .iter()
+        .filter(|(name, _)| *name != "CARGO")
         .map(|(name, value)| format!("{name}={}", value.replace(package, "<source>/")))
         .collect();
     env.sort_unstable();
