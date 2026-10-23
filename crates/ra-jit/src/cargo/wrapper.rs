@@ -63,15 +63,25 @@ const CHECKS: &str = "ra-jit-check";
 pub(crate) fn command(mut args: impl Iterator<Item = OsString>) -> anyhow::Result<()> {
     let mut rustc = args.next().context("cargo names rustc first")?;
     // A cargo that asks through ra-jit as both wrappers names it twice.
+    let mut twice = None;
     if super::switch::is_wrapper(Path::new(&rustc)) {
+        twice = Some(rustc);
         rustc = args.next().context("cargo names rustc after the wrapper")?;
     }
     let args: Vec<OsString> = args.collect();
     if let Some(replied) = crate::answers::reply(&rustc, &args) {
         std::process::exit(replied?);
     }
+    let only_asks = std::env::var_os(crate::answers::ONLY_ASKS).is_some();
     // The wrapper the user had for the workspace's crates still runs rustc.
     let mut compiler = match Enabled::read().and_then(|it| it.chained) {
+        // What a cargo that only asks through ra-jit compiles is compiled as it would be
+        // without it, by the workspace's wrapper when there is one.
+        _ if only_asks => {
+            let mut command = Command::new(twice.as_ref().unwrap_or(&rustc));
+            command.args(twice.as_ref().map(|_| &rustc)).env_remove(crate::answers::ONLY_ASKS);
+            command
+        }
         Some(chained) => {
             let mut command = Command::new(chained);
             command.arg(&rustc);
@@ -80,6 +90,9 @@ pub(crate) fn command(mut args: impl Iterator<Item = OsString>) -> anyhow::Resul
         None => Command::new(&rustc),
     };
     compiler.args(&args);
+    if only_asks {
+        std::process::exit(compiler.status()?.code().unwrap_or(1));
+    }
     let Some(unit) = Unit::of(&args) else {
         std::process::exit(compiler.status()?.code().unwrap_or(1));
     };

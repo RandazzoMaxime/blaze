@@ -135,9 +135,11 @@ fn cache(args: Vec<String>) -> anyhow::Result<i32> {
     Ok(0)
 }
 
-/// Runs cargo with `args` and nothing of ra-jit's.
+/// Runs cargo with `args` and nothing of ra-jit's but its answers to what cargo asks rustc.
 fn plain_cargo(args: Vec<String>) -> anyhow::Result<i32> {
-    let status = Command::new(state::cargo_path()).args(args).status().context("running cargo")?;
+    let mut cargo = Command::new(state::cargo_path());
+    crate::answers::ready_cargo(&mut cargo);
+    let status = cargo.args(args).status().context("running cargo")?;
     Ok(run::exit_code(status))
 }
 
