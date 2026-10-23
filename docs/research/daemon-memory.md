@@ -367,3 +367,58 @@ about 0.58 and 0.18 GB/s; with `RA_JIT_OWN_BASE_MEMORY=off` under a 64 GB cgroup
 branch's worker was killed at 66.7 GB (**read**). So what `described` copied was most of
 zed's growth, as the 2026-10-22 profile said, and something else still grows past 64 GB; #29
 stays open.
+
+## 2026-10-23: each type once (#29)
+
+For [#29](https://github.com/indexable-inc/ra-jit/issues/29). Same host (dev-aws-7, 124 GiB),
+ra-jit's `described-nodes` branch, Cranelift, 16 cores, `harness/memsplit.py` with
+`RA_JIT_OWN_BASE_MEMORY=off` under a 64 GB cgroup, profiles with `heap.py`.
+
+### What changed
+
+- A `TypeSet` was still made per variable's type: the types reachable from it, two pointers
+  deep, each with the places of its parts in that list, so a type in many sets was in each
+  (#55 interned the descriptions, not the lists). Now a type is described once, by
+  `told_type(env, ty, pointers)`, a salsa query of the type alone that names its parts by
+  type; the types that are made of each other are put together into one group by their
+  strongly connected components (Tarjan's), and every set that reaches a group shares it by
+  `Arc`. What sets hold is linear in the distinct types, not in the sum of the sets' lengths
+  (**read**, `crates/hir-ty-codegen/debuginfo/set.rs`). A type as deep as the writer goes
+  (`DebugType::DEEPEST`) is not told of, as the writer did not tell of it before.
+- `debuginfo.py` passes and matches main's run row for row; what differs is counts from the
+  newer main its run was built on (8,558 against 8,407 functions, debugger sections 1.9%
+  larger) (**read**).
+- On zed, what `described` held went from 31 GB of a 47.8 GB sample to 2.4 GB for
+  `told_type` (**read**, two profiles of the own base at about the same point).
+
+### zed
+
+- The own base finishes: 1,893,135 functions in 5 rounds, 662 s, a peak of 62.6 GB for the
+  daemon's tree (the worker's high-water mark 59.6 GB), 51.5 GB once done; ready before it
+  at 14.4 GB (**read**). 497 s of the 662 are rounds thrown away: a static used by a function
+  left to rustc (twice), 369 instances that wait on the layout of an `async` coroutine, 9
+  writable statics without a rustc symbol (**read**, the worker's log).
+- Its link failed first: without `--gc-sections`, which the daemon takes out so a patch can
+  call what the executable's own code no longer reaches, lld reads webrtc's
+  `SharedXDisplay::IgnoreXServerGrabs`, which calls `XTestQueryExtension` and
+  `XTestGrabControl`; rustc's line never links `libXtst`, and its `--gc-sections` drops that
+  code before lld looks for the names. The link now writes rustc's own line next to its own and
+  runs it when the linker names what nothing defines and none of it is in the daemon's
+  objects: 27.5 s failed, then 9.9 s (**read**).
+- `memsplit.py` took the base as done at its `stats:` line and made its first edit while
+  the base was being linked, which interrupted it; it waits for `edit-to-binary:` now.
+- After the base, 44.4 GB sampled live (**read**): salsa's records 10.5 GB (`told_type` 5.39M
+  memos, `layout_of_ty` 4.26M, `row_place` 2.85M, `layout_of_adt` 2.21M,
+  `compiled_instance` 1.91M, `inlinable` 1.37M), MIR about 8.9 GB (`runtime_mir_body` 2.2,
+  `monomorphized_runtime_mir_body_for_coroutine` 2.1, `mir_body` 1.9), `compiled_instance`'s
+  code 3.9 GB, inference 2.8 GB, ra-jit's symbol table 1.9 GB, `inlinable` 1.5 GB,
+  `told_type` 1.4 GB, layouts 1.6 GB.
+- Under the default bound, a quarter of memory (31.7 GB here), the base is still given up,
+  and zed's edits patch rustc's executable (#159). All of it is held in the one revision the
+  base is built in, where salsa evicts nothing (above): the base would have to be built in
+  pieces, revisions apart, for `lru` to bound it
+  ([#188](https://github.com/indexable-inc/ra-jit/issues/188)) (**unverified** as a fix).
+- `memsplit.py`'s body edit of zed is in `crates/zed/src/main.rs`, whose `main` ra-jit leaves
+  to rustc (it awaits through `async` blocks whose coroutine layout it can't make), so it
+  is no patch: the build in full is refused, cargo builds it, and in the same cgroup as the
+  59 GB worker cargo's build was killed (**read**).
