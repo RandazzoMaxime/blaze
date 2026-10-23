@@ -8,6 +8,14 @@ All notable changes to ra-jit are written here. The format follows
 
 ### Added
 
+- An edit that needs a build in full no longer links in full when the daemon has no base of
+  its own (it gave it up, or hasn't built it yet) (#159): on Linux the program is built onto
+  the executable rustc linked and spliced into it whole, and the edits after it are patches of
+  that. nushell's signature edit with its base given up at 2 GB is spliced in 1.5 s, and the
+  edits after splice in about 10 ms. macOS still links such an edit in full, but no longer
+  twice: the link takes the room for splices the executable there wanted. `rustcbase.py`
+  checks that every build in full of the rustc phase is spliced whole on Linux, and
+  `own-base-budget-full` a given-up base's.
 - Const eval answers nightly's reflection, `core::mem::type_info` (#34): a type's variants
   and fields, a field's type, name and offset, a type's size, whether it is signed, an array's
   length and element, what a pointer points to, a variant's name, as rustc does, and two of
@@ -174,7 +182,7 @@ All notable changes to ra-jit are written here. The format follows
 - A borrow checker, the crate `hir-ty-borrowck` in the rust-analyzer subtree, written to give
   rustc's verdict: Polonius alpha by default as nightly rustc does, NLL with
   `RA_JIT_BORROWCK=nll`. It gives rustc's errors on
-  1517 of 1580 of rustc's own borrow-check tests that it can run, and none on any of the 245
+  1523 of 1580 of rustc's own borrow-check tests that it can run, and none on any of the 245
   rustc accepts, scored by `harness/borrowck_ui.py`, and finds nothing in ripgrep, fd, bat,
   hyperfine, just, axum, nushell, delta, eza, tokei, starship and cargo. Its errors, and rustc's
   `unused_mut` warning, are rust-analyzer diagnostics and `ra-jit borrowck` prints them ([docs/borrowck.md](docs/borrowck.md)).
@@ -206,6 +214,15 @@ All notable changes to ra-jit are written here. The format follows
 
 ### Changed
 
+- A whole program's compiles under LLVM import what they call, as ThinLTO's backends do,
+  where each built its callees again from MIR and optimized them from scratch. Each function
+  a compile calls is lowered and run through LLVM's pre-link pipeline once in the process,
+  and a compile links in the bodies small enough to be built in (100 instructions, 300 for
+  `#[inline]`, the whole budget of 40 000 for `#[inline(always)]`), and those of what they
+  call with 0.7 of the room each call deeper, 8 deep, as `available_externally`; what LLVM
+  does not build in is dropped. Bun on 16 cores (c8a.24xlarge) builds in 118 s where it took
+  564 s, against 135 s for cargo's release build, and runs 1.244x cargo's where it ran 1.267x.
+  `RA_JIT_IMPORT=0` builds the callees in as before.
 - The daemon keeps what each debug type is told as once, rather than in every set of debug
   types it is in ([#55](https://github.com/indexable-inc/ra-jit/issues/55)); the DWARF it
   writes is the same. On Linux x86-64 (16 cores, `memsplit.py`, one run each) the daemon
@@ -395,11 +412,39 @@ All notable changes to ra-jit are written here. The format follows
 
 ### Fixed
 
+- The borrow checker holds a struct or enum to what its fields need of its lifetimes,
+  rustc's inferred outlives bounds, where it is named or built: `B(x)` with
+  `struct B<'a, 'b>(&'b mut F<'a, 'b>)` needs `'a: 'b`. A closure passed for a bound with
+  `for<'r>`, `impl FnOnce(&mut T)`, takes the bound's other lifetimes, so what it needs of
+  them reaches its creator. A function item's return type is well-formed but for what names
+  a late-bound lifetime, as rustc's: `foo` returning `(&'c (), PhantomData<&'b &'a ()>)`
+  needs `'a: 'b` where it is a method's receiver. A trait object's associated type is held
+  to the bounds its trait declares for it: `dyn Trait<Assoc = &'a ()>` with
+  `type Assoc: 'static` needs `'a: 'static`. 1523 of 1580 of rustc's tests now (was 1520).
+- A returned `impl Trait` hiding a type parameter is checked when the function's lifetimes
+  are late-bound or elided: `fn f<T>(d: T, p: &mut ()) -> impl Sized + '_ { (d, p) }` gives
+  rustc's E0311, and with `p: &'b mut ()` its E0309. The borrow checker relates the hidden
+  type to an elided `+ '_` bound, so `dest: &mut T` returned behind `impl FnOnce() + '_ + 'a`
+  gives E0621. 1520 of 1580 of rustc's tests now (was 1517).
 - The borrow checker reports what normalizing a signature's associated type needs of its
   lifetimes (`-> <&'a () as Visitor<'d>>::Value` proven by `impl<'a, 'd: 'a>`), and relates
   an associated type through a where clause's projection (`T: Fun<F<'a> = [u8]>` borrowing for
   `'a`); item checking reports what the impl of an associated type in a field needs
   (`<T as Dummy<'a>>::Out` that `T: 'a`). 1517 of 1580 of rustc's tests now (was 1511).
+- A body imported through another was called with the importer's type for it: an export
+  declares what it calls with the types it calls it through, and one has as an integer what
+  another has as a pointer. LLVM takes a call of a body through a type it does not have to be
+  undefined, and of `ptr::write::<ForOf>` imported through a function that had the address as
+  an integer it kept nothing of what was written, so bun's parser crashed. Such a call is now
+  made through the callee's own type, the arguments converted (a unit test of `llvm.rs`).
+- On Linux AArch64, an `asm!` of a feature LLVM's assembler has no `.arch_extension` for was
+  refused: constant_time_eq's `mrs {}, dit` under `#[target_feature(enable = "dit")]`, which
+  failed bun's build there. Such a feature (`dit`, `bti`, `jsconv` and the others of a later
+  Armv8 or Armv9, and `v8.4a` and the like themselves) now starts the block with `.arch` of
+  the version that has it.
+- `runbench.py` runs cargo's release build from beside ra-jit's, in the workspace, where it ran
+  it from cargo's target directory. helix looks for its `runtime` next to itself, so only
+  cargo's build warned that there was none, and helix was reported as running differently.
 - The borrow checker panicked on the corpus's `release_state`, whose impl's where clauses
   name associated types of concrete types (`Option<&'static C>: QueryData<ReadOnly: ..>`), so
   every error in the corpus's main file went unreported. As rustc, it now normalizes those

@@ -7,7 +7,8 @@ baseline fails: ra-jit is to run no rustc, and a change may only lower the count
     norustc.py [--record] [--keep]
 
 The workspace, norustc/fixture, has a program with an `asm!` block, a library with unit tests,
-doctests and features, which the root package uses through another library, a proc macro, and a path dependency outside the workspace with a build script. It
+doctests and features, which the root package uses through another library, a proc macro, and a path dependency outside the workspace with a build script that
+`include!`s a file, `include_str!`s another and reads a variable with `option_env!`. It
 is built with a copy of the pinned toolchain whose rustc, rustdoc and cargo write a line for
 each run and then become the real tool, linked with rustup under a name of its own for the run.
 A scenario ends once no counted tool runs and the log has been still for a while, so what the
@@ -172,6 +173,11 @@ def main():
     env = {k: v for k, v in os.environ.items() if not k.startswith(("RA_JIT", "RUSTC", "RUSTDOC"))}
     for unset in ("RUSTFLAGS", "CARGO_TARGET_DIR", "CARGO_BUILD_TARGET", "CARGO"):
         env.pop(unset, None)
+    # Flags the shell gives a target (nix's x86-64 Linux shell sets
+    # CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS) have cargo ask rustc about the target again
+    # under them: six more runs that only ask in the cold build.
+    for key in [k for k in env if k.endswith("RUSTFLAGS")]:
+        del env[key]
     env.update(RUSTUP_TOOLCHAIN=name, RA_JIT_HOME=home, RA_JIT_CACHE=os.path.join(work, "store"),
                PATH=os.path.dirname(os.path.abspath(RA_JIT)) + os.pathsep + env["PATH"],
                CARGO_TERM_COLOR="never", RUST_BACKTRACE="0", CARGO_NET_OFFLINE="true")
