@@ -183,6 +183,7 @@ impl std::error::Error for TooLong {}
 pub(super) enum Body {
     File(File),
     S3(ByteStream),
+    Http(hyper::body::Incoming),
 }
 
 impl Body {
@@ -195,6 +196,7 @@ impl Body {
                 Ok((read != 0).then_some(chunk))
             }
             Body::S3(stream) => Ok(stream.try_next().await?.map(|it| it.to_vec())),
+            Body::Http(body) => super::https::next(body).await,
         }
     }
 }

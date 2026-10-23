@@ -2,7 +2,8 @@
 //! `ra-jit cache pull REMOTE`, and the same done by the daemon when `RA_JIT_REMOTE` names one.
 //! The commands on the local store alone, `ra-jit cache stats|gc|verify`, are here with them.
 //!
-//! A remote is a directory or `s3://bucket/prefix`. It holds sealed packs under the hash of
+//! A remote is a directory, `s3://bucket/prefix`, or an `https://` address that is read from
+//! only (`https.rs`). It holds sealed packs under the hash of
 //! their bytes, the keys of each pack under the hash of those, and one manifest a project:
 //! the packs its builds were served from. A push sends the packs the manifest lacks and
 //! adds them to it; a pull fetches the ones it lists that are not here. With
@@ -24,6 +25,7 @@
 //! longer is refused with nothing of it kept.
 
 mod collect;
+mod https;
 mod keeper;
 mod s3;
 mod signed;
@@ -47,6 +49,7 @@ use rustc_hash::FxHashMap;
 use tokio::{io::AsyncSeekExt, runtime::Runtime};
 use url::Url;
 
+use https::Https;
 use s3::{S3, Written};
 use signed::{NotRewritten, Trust, Turns, Unremembered};
 use transfer::{Body, Object, TooLong, Version};
@@ -84,6 +87,8 @@ enum Place {
     /// A directory, such as a mount shared by the machines.
     Dir(PathBuf),
     S3(Box<S3>),
+    /// Files an HTTPS server hands out, such as a release's assets: read-only.
+    Https(Box<Https>),
 }
 
 impl Remote {
@@ -102,10 +107,14 @@ impl Remote {
         let place = if spec.starts_with("s3://") {
             let spec = Url::parse(spec).context("the address of the remote is not a URL")?;
             Place::S3(Box::new(S3::open(&spec, patience, traffic.clone()).await?))
+        } else if spec.starts_with("https://") || spec.starts_with("http://") {
+            let spec = Url::parse(spec).context("the address of the remote is not a URL")?;
+            Place::Https(Box::new(Https::open(&spec, patience, traffic.clone())?))
         } else {
             Place::Dir(PathBuf::from(spec))
         };
-        let read_only = std::env::var_os("RA_JIT_REMOTE_READONLY").is_some_and(|it| it != "0");
+        let read_only = matches!(place, Place::Https(_))
+            || std::env::var_os("RA_JIT_REMOTE_READONLY").is_some_and(|it| it != "0");
         let object_max = match std::env::var("RA_JIT_REMOTE_MAX") {
             Ok(text) => parse_size(&text)
                 .with_context(|| format!("RA_JIT_REMOTE_MAX=`{text}` is not a size"))?,
@@ -121,6 +130,14 @@ impl Remote {
             turns,
             object_max,
         })
+    }
+
+    /// The remote with its lists taken as they are, signed or not, and written unsigned:
+    /// for the standard library a release ships (`shipped.rs`), which is as trusted as the
+    /// release, or as the remote the user named for it.
+    pub(crate) fn as_release(mut self) -> Remote {
+        self.trust = Trust::of_release();
+        self
     }
 
     /// The most that is taken of one object that says nothing of its size.
@@ -154,6 +171,7 @@ impl Remote {
                 }
             }
             Place::S3(s3) => Ok(s3.read_from(name, offset).await?.map(Body::S3)),
+            Place::Https(https) => Ok(https.read_from(name, offset).await?.map(Body::Http)),
         }
     }
 
@@ -187,6 +205,7 @@ impl Remote {
                 Ok(Some((bytes, version)))
             }
             Place::S3(s3) => s3.read_small(name, most).await,
+            Place::Https(https) => https.read_small(name, most).await,
         }
     }
 
@@ -211,6 +230,7 @@ impl Remote {
                 }
             }
             Place::S3(s3) => s3.found(name).await,
+            Place::Https(https) => https.found(name).await,
         }
     }
 
@@ -236,6 +256,7 @@ impl Remote {
                 tokio::task::spawn_blocking(move || list_dir(&dir, &prefix)).await?
             }
             Place::S3(s3) => s3.list(prefix).await,
+            Place::Https(_) => bail!("a remote over HTTPS cannot be listed"),
         }
     }
 
@@ -258,6 +279,7 @@ impl Remote {
                 }
             }
             Place::S3(s3) => s3.delete(name).await,
+            Place::Https(_) => bail!("a remote over HTTPS is read-only"),
         }
     }
 
@@ -290,6 +312,7 @@ impl Remote {
                 tokio::task::spawn_blocking(write).await?
             }
             Place::S3(s3) => s3.write_small(name, &bytes, read_at).await,
+            Place::Https(_) => bail!("a remote over HTTPS is read-only"),
         }
     }
 
@@ -306,6 +329,7 @@ impl Remote {
                 Ok(())
             }
             Place::S3(s3) => s3.send_file(name, file, len).await,
+            Place::Https(_) => bail!("a remote over HTTPS is read-only"),
         }
     }
 
@@ -456,6 +480,7 @@ impl Place {
         match self {
             Place::Dir(dir) => dir.display().to_string(),
             Place::S3(s3) => s3.place(),
+            Place::Https(https) => https.place(),
         }
     }
 }
@@ -714,14 +739,33 @@ async fn send_pack(store: &Path, remote: &Remote, pack: Digest) -> anyhow::Resul
     let (size, keys) = tokio::task::spawn_blocking(move || keys_of(&from, pack)).await??;
     let keys_digest = Digest::of(&keys);
     remote.send_named_by_hash(&keys_object(&keys_digest), keys).await?;
-    // A sealed pack's values are compressed already: the pack is sent as it is.
-    let listed = Listed { size, keys: keys_digest, format: STORE_FORMAT, packed: None };
+    let from = store.join(pack_file(&pack));
+    let packed = tokio::task::spawn_blocking(move || packed(&from, size)).await??;
+    let mut listed = Listed { size, keys: keys_digest, format: STORE_FORMAT, packed: None };
+    if let Some(packed) = packed {
+        let len = packed.len() as u64;
+        listed.packed = Some((Digest::of(&packed), len));
+        let (object, _) = listed.object(&pack);
+        remote.send_named_by_hash(&object, packed).await?;
+        return Ok((listed, len));
+    }
     let (object, _) = listed.object(&pack);
     if remote.holds(&object, size).await? {
         return Ok((listed, 0));
     }
     remote.send_file(&object, &store.join(pack_file(&pack)), size).await?;
     Ok((listed, size))
+}
+
+/// The pack at `path`, of `size` bytes, compressed, when that makes it a quarter smaller or
+/// more. A pack's small values are compressed already and its large ones are not, which
+/// keeps them as they are to be read in place: compiled code that compresses to a fifth.
+fn packed(path: &Path, size: u64) -> anyhow::Result<Option<Vec<u8>>> {
+    let file = File::open(path)?;
+    // SAFETY: a sealed pack is never written to again.
+    let bytes = unsafe { memmap2::Mmap::map(&file)? };
+    let packed = zstd::bulk::compress(&bytes, 3)?;
+    Ok((packed.len() as u64 * 4 <= size * 3).then_some(packed))
 }
 
 /// Makes the directory a store of this build's format, and seals what ended daemons left
@@ -844,6 +888,11 @@ async fn keep_under(dir: StoreDir, limit: Option<u64>) -> anyhow::Result<String>
         0 => String::new(),
         evicted => format!(", {evicted} packs unused the longest evicted to stay under the limit"),
     })
+}
+
+/// Whether the remote lists any pack of `project`.
+pub(crate) async fn lists(remote: &Remote, project: &str) -> anyhow::Result<bool> {
+    Ok(Manifest::fetch(remote, project).await?.is_some_and(|it| !it.0.is_empty()))
 }
 
 /// Fetches the packs of the project's manifest that are not in the local store, as far as
