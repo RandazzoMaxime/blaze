@@ -53,7 +53,7 @@ was linked again where it was added, or is missing. Differences under 50 ms are 
 
 The ra-jit of a backend is `RA_JIT_BIN` (cranelift) or `RA_JIT_LLVM_BIN` (llvm).
 """
-import glob, importlib, json, os, platform, re, shutil, statistics, subprocess, sys, tempfile, time
+import glob, importlib, json, os, platform, re, shutil, statistics, struct, subprocess, sys, tempfile, time
 
 import cargo_ra_jit, memory
 from cargo_ra_jit import HERE, ROOT, TOOLCHAIN, Side, difference, fetch, how_built, program_output, test_results, timed, wait_warm
@@ -507,6 +507,39 @@ def disk(ws, ours, theirs):
             "home": memory.disk_mb(ours.env["RA_JIT_HOME"]), "cargo target": memory.disk_mb(theirs.env["CARGO_TARGET_DIR"])}
 
 
+# The keys the projects measured so far in this run stored: what one store on the machine would
+# have before the next project (docs/benchmarks.md, "Fairness").
+STORED = {}
+
+
+def store_entries(path):
+    """The keys of the sealed packs of the store at `path`, each with the bytes of disk it takes:
+    its pack's size shared among the pack's entries by the length of their values. Packs of
+    another format than crates/ra-jit-store's 3 (the magic, the counts of blocks and entries, a
+    header of 12 bytes per block, then per entry the key, its block, where it starts, its length
+    and its checksum) are not read."""
+    entries = {}
+    names = os.listdir(path) if os.path.isdir(path) else []
+    for name in names:
+        if not name.endswith(".pack"):
+            continue
+        try:
+            pack = open(os.path.join(path, name), "rb").read()
+        except OSError:
+            continue
+        if pack[:8] != b"rajitpk\x03" or len(pack) < 16:
+            continue
+        blocks, count = struct.unpack_from("<II", pack, 8)
+        at = 16 + 12 * blocks
+        if at + 48 * count > len(pack):
+            continue
+        keyed = [(pack[at + 48 * n:at + 48 * n + 32], struct.unpack_from("<I", pack, at + 48 * n + 40)[0]) for n in range(count)]
+        values = sum(length for _, length in keyed) or 1
+        for key, length in keyed:
+            entries.setdefault(key, len(pack) * length / values)
+    return entries
+
+
 def store_mb(path):
     total = 0
     for root, _, files in os.walk(path):
@@ -711,8 +744,12 @@ def measure(name, spec, backend, runs, work, reference_dir, cold_runs=1, setup_n
                               warm_store_samples_s=[round(b + w, 3) for b, w, _ in warm_store],
                               warm_store_memory=dict(peak_mb=round(statistics.median(u["peak_mb"] for _, _, u in warm_store)),
                                                      resident_mb=round(statistics.median(u["resident_mb"] for _, _, u in warm_store))))
+    entries = store_entries(ours.env["RA_JIT_CACHE"])
+    added = sum(size for key, size in entries.items() if key not in STORED)
+    STORED.update(entries)
+    print(f"  store {store_mb(ours.env['RA_JIT_CACHE'])} MB, {added / 1e6:.0f} MB of it not stored by a project before", flush=True)
     result = dict(phases=phases, wrong=wrong, tag=spec["tag"], rev=spec["rev"], store_mb=store_mb(ours.env["RA_JIT_CACHE"]),
-                  cold_runs=cold_runs, resident=resident, disk_mb=end_disk)
+                  store_added_mb=round(added / 1e6), cold_runs=cold_runs, resident=resident, disk_mb=end_disk)
     if "RUSTUP_TOOLCHAIN" in prepared:
         # The project's own toolchain, not the one ra-jit is pinned to.
         result["toolchain"] = prepared["RUSTUP_TOOLCHAIN"]

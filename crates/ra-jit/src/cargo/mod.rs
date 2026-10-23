@@ -496,7 +496,22 @@ fn after_build(
     }
 }
 
-/// `cargo ra-jit status`: the daemon, its workers, and how the builds of each checkout went.
+/// What the store of compiled code holds and may hold, and where it is.
+fn store_status() -> String {
+    let Some(dir) = daemon::store() else {
+        return "store: none (RA_JIT_CACHE says so)".to_owned();
+    };
+    let held = ra_jit_store::StoreDir::at(&dir).stats().map_or(0, |it| it.held());
+    let most = match ra_jit_store::limit_for(&dir) {
+        Ok(Some(most)) => format!("at most {} MB", most >> 20),
+        Ok(None) => "no limit".to_owned(),
+        Err(why) => why,
+    };
+    format!("store: {} MB, {most} (`ra-jit cache gc` collects it), {}", held >> 20, dir.display())
+}
+
+/// `cargo ra-jit status`: the daemon, its workers, the store, and how the builds of each
+/// checkout went.
 fn status() -> anyhow::Result<i32> {
     use std::fmt::Write as _;
     let mut said = String::new();
@@ -538,6 +553,7 @@ fn status() -> anyhow::Result<i32> {
         }
         _ => said.push_str("daemon: not running\n"),
     }
+    let _ = writeln!(said, "{}", store_status());
     for state in State::all() {
         let to_cargo: u64 = state.counts.cargo.values().sum();
         let _ = writeln!(
