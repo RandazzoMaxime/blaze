@@ -6,10 +6,21 @@ reflinked files), Cranelift, `harness/bench.py` with `--keep`, rustup's 1.99.0. 
 inference). The first pass (the store, #131 and #136) is at the end; the second pass, on
 `origin/main` at 1c4cbb9 against the branch that loads build scripts from cargo's messages and
 sends packs compressed once (#153), then main at 04bdd5b against the one that keeps `ra-jit.o`
-packed, is first.
+packed, is next. The third pass (main at 9cd2512 with #175's formatting against the splice that keeps one copy of
+the debug sections, and the daemon's program against rustc's) is first; its ext4 runs are on
+an ext4 image mounted on the same host.
 
 ## Short version
 
+- The splice keeps one copy of what a debugger reads: the linker's is let go of (its blocks
+  punched) once copied behind the image. Where nothing is reflinked (ext4) bevy's target is
+  23,487 → 21,930 MB and helix's 5,471 → 4,964, its edits as fast; on XFS, where the copy
+  shared the linker's blocks, the same (**read**).
+- The daemon's program larger than rustc's (helix 748 MB against 424) is rustc's objects
+  linked beside ra-jit's: ra-jit's own code and debug information are about 240 MB of it,
+  the rest rustc's, again. G links none of rustc's (**read**). Merging the duplicated strings
+  saves 37 MB of helix's and costs a third of a second a full link: not shipped.
+- Compressed debug information stays off (below).
 - The 31.6 GB measured for bevy in the first pass was a run whose edits all fell out of the
   splice to a full 300k-function compile, which wrote a 2.4 GB `ra-jit.o` and 11.8 GB of
   `.ra-jit-units`. On main at 1c4cbb9 bevy's edits splice, and its target is 16,241 MB against
@@ -30,8 +41,8 @@ packed, is first.
 - Packs sent to a remote were zstd again over zstd blocks. They are sent as they are now.
 - Compressed debug information: zlib is the only one every reader takes (std's backtrace, gdb,
   lldb, addr2line); lldb 20 cannot read zstd. On bevy's program it is 2,021 → 768 MB, but a
-  panic's backtrace inflates it all (~4-6 s, ~1.6 GB) (**read**). Not shipped: a choice
-  for Andrew.
+  panic's backtrace inflates it all (~4-6 s, ~1.6 GB) (**read**). Off, decided 2026-10-23:
+  the panic's cost is paid in the edit loop.
 
 ## After F/G, projected
 
@@ -55,7 +66,8 @@ assumes F/G changes neither `deps` nor `incremental`).
 
 So on XFS ra-jit is 1.8 GB below cargo today and F/G does not move it. Where nothing is
 reflinked F/G brings it from 23.6 GB to 17.3 GB, just below cargo, and the program's second
-copy of its debug sections (1.55 GB there, below) is what is left over cargo's.
+copy of its debug sections was what is left over cargo's. The splice keeps one copy now
+(below): measured on ext4, `debug/examples` 3,657 → 2,083 MB, and after F/G about 15.7 GB.
 
 All four, MB, XFS (`bench.py`'s `disk_mb` and the breakdowns of the kept targets, **read**).
 "main" is 1c4cbb9, before this pass; "scripts" is #153 (build scripts from cargo's messages);
@@ -82,24 +94,77 @@ is the program the daemon linked being larger than rustc's (its code and debug i
 Cranelift's) and the packed `ra-jit.o`, against an `incremental` smaller than cargo's: helix
 397 MB over, ripgrep 43; nushell 107 under, bevy 1,779 under.
 
-## The program's second copy of its debug sections
+## One copy of the debug sections
 
-- What it is (**read**, `splice.rs`, `splice/debug.rs`): a splice appends code behind the
-  image and copies the sections a debugger reads behind that code (64 MiB of room), pointing
-  the section headers at the copies. Each splice sources the copies from the linker's own
-  offsets, which are never written, and a copy the appended code has grown into is copied
-  again from there. Undoing the last splice is already a journal of the ranges it overwrote
-  (`self.undo`): the linker's copy is the source of the next copy, not of the undo.
-- What it costs: on XFS the copies are `copy_file_range` reflinks of the linker's blocks,
-  181 MB on bevy; with no reflinks it is the sections again, 1,553 MB (**read**).
-- Not changed here. A copy a section that outgrew its room moves is written over the copies
-  behind it, and today that is undone by copying from the linker's offsets again. Without them
-  the undo would have to journal whole copies, unless a section only ever moves to space past
-  the end of the file: the headers pointed at the copies when they are first laid out
-  (`Described::laid_out`), the linker's ranges punched then, and a copy that moved punched
-  once the splice that moved it can no longer be undone, at the next splice. That changes
-  the order a splice writes in (`splice.rs`) and is worth 1.5 GB on bevy only where nothing
-  is reflinked; on XFS 181 MB (**unverified**, the design; the cost is **read**).
+- Before (**read**, `splice.rs`, `splice/debug.rs` at 9cd2512): a splice appended code behind
+  the image and copied the sections a debugger reads behind that code (64 MiB of room),
+  pointing the section headers at the copies. Each splice copied them again from the
+  linker's offsets, which were never written, so the program held the sections twice: on XFS
+  the copy was `copy_file_range` reflinks of the linker's blocks (181 MB on bevy), with no
+  reflinks the sections again (1,553 MB).
+- Now (**read**, the same files): when the program is first laid out the sections are copied
+  behind the room, the linker's section header table is rewritten where it is to point at
+  the copies, and the linker's ranges are punched (`fallocate` `PUNCH_HOLE`, the file's size
+  kept). A section moves only to space past every other's room, never over a copy: when what
+  a patch adds to it outgrows its room, or when the appended code reaches it. Its old range
+  is punched once the move is written. Undo is the journal it was (`self.undo`), of the
+  ranges a splice overwrote, and no splice overwrites a copy it reads. Where `fallocate`
+  cannot punch (a filesystem without holes) the linker's ranges are kept, as before; a
+  Mach-O program is spliced otherwise and not changed.
+- The ETXTBSY copy of the program, made when a running program holds the file, copies its
+  data runs only (`SEEK_DATA`/`SEEK_HOLE`), so a punched range stays a hole there too.
+
+ext4, the same host and cores, MB and seconds (`bench.py`, **read**):
+
+| project | target before → after | the program before → after | cargo's target | edits before → after |
+|---|---:|---:|---:|---|
+| helix | 5,471 → 4,964 | 1,231 → 714 (rustc's 424) | 3,714 | body 47.1 → 48.5 (a full link both), signature 0.417 → 0.424, leaf 0.116 → 0.118, struct 0.298 → 0.299, new fn 0.135 → 0.134 |
+| bevy | 23,487 → 21,930 | 3,657 → 2,083 (cargo's 2,016) | 17,551 | body 1.127 → 1.119, leaf 0.397 → 0.407, new fn 0.970 → 0.974 |
+
+- On XFS the same: ripgrep 503 → 503 MB, helix 4,538 → 4,546, nushell 5,537 after (cargo's
+  407, 3,713, 5,343), edits within a run's noise (**read**).
+- Laying out bevy's 1.58 GB of debug sections takes 274-331 ms either way, once per daemon,
+  off the edit; a splice's own moves took 16-34 µs on bevy's edits (**read**, the daemon log).
+- After F/G with no reflinks, bevy is 21,930 less `.ra-jit-units` (4,219) and rustc's program
+  kept (2,017): 15,694 MB against cargo's 17,551 (**unverified**, the same assumption as the
+  table above).
+
+## The daemon's program against rustc's
+
+helix's `hx`, MB per section, the linked programs of the bench (**read**, their section
+headers; `ra-jit.o` is the object the daemon compiled, packed between links).
+
+| section | rustc's | the daemon's | of it from `ra-jit.o` |
+|---|---:|---:|---:|
+| `.debug_str` | 146.8 | 224.8 | 78.0 |
+| `.debug_info` | 132.5 | 224.0 | 94.6 |
+| `.text` | 37.1 | 82.2 | 36.3 |
+| `.strtab` | 40.3 | 54.4 | 6.3 |
+| `.debug_line` | 23.1 | 35.1 | 12.3 |
+| `.debug_ranges` | 14.4 | 24.6 | 10.4 |
+| `.symtab` | 4.9 | 13.8 | 14.8 in the object, most of it section symbols the link drops |
+| `.eh_frame` | 4.5 | 10.9 | 5.0 |
+| `.rela*` | 4.9 | 7.2 | |
+| **the file** | **424** | **748** | |
+
+- The daemon links `ra-jit.o` (151,608 functions Cranelift compiled) with rustc's whole link
+  line, `--allow-multiple-definition`, so rustc's objects and their debug information are in
+  the program beside ra-jit's: of the 324 MB over rustc's, ra-jit's own code, unwind tables
+  and debug information are about 240, the rest rustc's linked twice (**read**). G builds
+  every crate with ra-jit and links none of rustc's; ripgrep's program there is 50.1 MB
+  against cargo's 53.2 (**reported**, [no-rustc.md](../no-rustc.md)). helix built that way fails
+  at a build script today, so its program after G is not measured.
+- Not padding: the 64 MiB of room behind the image is a hole until a splice writes code into
+  it, and a splice writes its 10.5 MB of tables in place, the same blocks each time. XFS keeps
+  blocks past the end of a file it just grew (245 MB seen right after a link) and lets them
+  go later; a measure taken then counts them (**read**, FIEMAP's `unwritten,eof` extents).
+- Strings duplicated across units: `object` writes `.debug_str` `SHF_MERGE|SHF_STRINGS` with
+  an entry size of 0, which lld does not merge. Entry size 1 lets it: helix's `.debug_str`
+  224.8 → 188.0 MB, the full link 1,269 → 1,605 ms (**read**, alternating runs, the same
+  inputs). Not shipped: most of what it merges is rustc's copy beside ra-jit's, which G
+  removes, and a third of a second on every full link is the edit loop's.
+- Types are already one per unit of 256 functions (`hir-ty-codegen/debuginfo.rs`); symbols are
+  what a debugger and a backtrace read, as in cargo's debug program.
 
 ## `ra-jit.o`
 
@@ -143,8 +208,10 @@ nixpkgs' binutils 2.46 `objcopy` nor LLVM 20's `llvm-objcopy` writes zstd (**rea
 - What it costs: a panic's backtrace inflates every section, about 4-6 s and 1.6 GB of memory
   per symbolized panic on bevy (**unverified**, from the inflate time); gdb's start 11.47 →
   8.32 s, lldb's 3.49 → 6.41 s (**read**).
-- Not shipped. Split DWARF in the store would keep the program small without the panic's cost,
-  but lldb and std read `.dwo` and `.dwp` differently, and it is not measured here.
+- Off by default, decided 2026-10-23: a panic's backtrace is part of the edit loop, and 4-6 s
+  of inflating on each is worse there than 1.25 GB on disk. Split DWARF in the store would keep
+  the program small without the panic's cost, but lldb and std read `.dwo` and `.dwp`
+  differently, and it is not measured here.
 
 ## The store
 
@@ -164,10 +231,11 @@ nixpkgs' binutils 2.46 `objcopy` nor LLVM 20's `llvm-objcopy` writes zstd (**rea
 
 ## Left
 
-- The daemon's program larger than rustc's: helix 748 MB against 424.
+- The daemon's program larger than rustc's (helix 748 MB against 424), rustc's objects linked
+  beside ra-jit's until G; then measuring helix's, which fails at a build script today.
 - helix's closure fallback, which links in full.
-- The second copy of the debug sections where nothing is reflinked (above).
-- Whether to compress the program's debug information with zlib (above).
+- Split DWARF in the store, if a program's debug information is to be smaller and a panic
+  not to pay for it.
 
 ## First pass (2026-10-22 main, against #136)
 
