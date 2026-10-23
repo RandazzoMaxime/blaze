@@ -95,6 +95,21 @@ pub fn borrowck<'db>(db: &'db dyn HirDatabase, def: DefWithBodyId) -> BorrowckRe
     if infer.has_type_mismatches() || infer.is_erroneous() {
         return result;
     }
+    // A `static` of a type that is not `Sized` is rustc's E0277, which keeps it from being
+    // borrow checked; a `const` is checked all the same.
+    if let DefWithBodyId::StaticId(it) = def
+        && let Some(ty) = db.value_ty(it.into())
+        && {
+            use hir_ty::next_solver::TyKind;
+            use rustc_type_ir::inherent::IntoKind;
+            matches!(
+                ty.instantiate_identity().skip_norm_wip().kind(),
+                TyKind::Str | TyKind::Slice(_) | TyKind::Dynamic(..)
+            )
+        }
+    {
+        return result;
+    }
     let body = match db.mir_body(owner) {
         Ok(body) => body,
         Err(error) => {

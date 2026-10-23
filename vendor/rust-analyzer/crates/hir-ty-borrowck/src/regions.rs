@@ -926,6 +926,17 @@ impl<'db> Builder<'_, '_, 'db> {
                 _ => None,
             };
             self.elided_output = elided;
+            // rustc's E0106, which rust-analyzer does not report: a return type that elides a
+            // lifetime where no parameter has one, `fn f<R>(r: R) -> Box<dyn Foo + '_>`.
+            if inputs.is_empty()
+                && self_region.is_none()
+                && self.ctx.closure_local.is_none()
+                && let InferBodyId::DefWithBodyId(DefWithBodyId::FunctionId(function)) = owner
+                && let written = FunctionSignature::of(self.ctx.db, function)
+                && written.ret_type.is_some_and(|it| writes_elided(&written.store, it))
+            {
+                self.ctx.tainted.set(true);
+            }
             let is_fn = matches!(owner, InferBodyId::DefWithBodyId(DefWithBodyId::FunctionId(_)));
             // A returned `impl Trait` is checked as the type it hides; its lifetimes are
             // `'static` when nothing it could capture is, and left free otherwise.
@@ -4784,6 +4795,44 @@ fn writes_self(
         TypeRef::RawPtr(it, _) | TypeRef::Slice(it) => writes_self(store, *it),
         TypeRef::Reference(it) => writes_self(store, it.ty),
         TypeRef::Array(it) => writes_self(store, it.ty),
+        _ => false,
+    }
+}
+
+/// Whether the type `ty` in `store` writes `&T` or `'_`, a lifetime that elision gives the
+/// return type, outside a `fn` pointer and `Fn(..)`, which elide on their own.
+fn writes_elided(
+    store: &hir_def::expr_store::ExpressionStore,
+    ty: hir_def::hir::type_ref::TypeRefId,
+) -> bool {
+    use hir_def::{
+        expr_store::path::{GenericArg, GenericArgsParentheses, Path},
+        hir::type_ref::{LifetimeRef, LifetimeRefId, TypeBound, TypeRef},
+    };
+    let lifetime = |it: LifetimeRefId| matches!(store[it], LifetimeRef::Placeholder);
+    let path = |path: &Path| {
+        path.generic_args().into_iter().flatten().flatten().any(|args| {
+            matches!(args.parenthesized, GenericArgsParentheses::No)
+                && args.args.iter().any(|arg| match arg {
+                    GenericArg::Lifetime(it) => lifetime(*it),
+                    GenericArg::Type(it) => writes_elided(store, *it),
+                    _ => false,
+                })
+        })
+    };
+    match &store[ty] {
+        TypeRef::Reference(it) => it.lifetime.is_none_or(lifetime) || writes_elided(store, it.ty),
+        TypeRef::Path(it) => path(it),
+        TypeRef::Tuple(tys) => tys.iter().any(|&it| writes_elided(store, it)),
+        TypeRef::RawPtr(it, _) | TypeRef::Slice(it) => writes_elided(store, *it),
+        TypeRef::Array(it) => writes_elided(store, it.ty),
+        TypeRef::ImplTrait(bounds) | TypeRef::DynTrait(bounds) => {
+            bounds.iter().any(|bound| match bound {
+                TypeBound::Lifetime(it) => lifetime(*it),
+                TypeBound::Path(it, _) => path(&store[*it]),
+                _ => false,
+            })
+        }
         _ => false,
     }
 }
