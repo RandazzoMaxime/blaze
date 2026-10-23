@@ -392,7 +392,7 @@ the counts of [How often](#how-often) lower, measured by step A's check, and non
 | [E](https://github.com/indexable-inc/ra-jit/issues/85). No function left to rustc | the refused classes; a refusal fails the build | A | large, ongoing | medium | the bun lane (bun's classes, #34, #35) and the glancer lane (kept rejections, #37) |
 | [F](https://github.com/indexable-inc/ra-jit/issues/86). The standard library compiled by ra-jit | the sysroot's rlibs | C, E | large | high | the cold-start lane |
 | [G](https://github.com/indexable-inc/ra-jit/issues/87). Every crate compiled and linked by ra-jit | rustc's rlibs, objects, symbols and link line, "no rustc symbol" | E, F | large | high | the cold-start lane |
-| [H](https://github.com/indexable-inc/ra-jit/issues/88). ra-jit writes the test harness | the fallback when a test is added | G | medium | medium | the `no-rustc-hl` lane: done |
+| [H](https://github.com/indexable-inc/ra-jit/issues/88). ra-jit writes the test harness | the fallback when a test is added | G | medium | medium | the `no-rustc-hl` lane: done; the `no-rustc-l2` lane: ra-jit's harness always, done |
 | [I](https://github.com/indexable-inc/ra-jit/issues/89). Build scripts compiled and run by ra-jit | build scripts and their probes by rustc | B, G | medium | medium | none yet |
 | [J](https://github.com/indexable-inc/ra-jit/issues/90). Proc macros compiled and loaded by ra-jit | proc macros by rustc, the toolchain's proc-macro server | F, G | large | high | none yet |
 | [K](https://github.com/indexable-inc/ra-jit/issues/91). The cold build is ra-jit's | cargo's first build, the rustc base (#11) | G, I, J | medium | high | none yet |
@@ -671,10 +671,13 @@ crate a test program is built from, a module `__ra_jit_test_harness` that lists 
 function as a `test::TestDescAndFn` (its path, `#[ignore]` with its message, `#[should_panic]`
 with `expected`, the file, line and column of its name, unit or integration test) and whose
 `main` calls `test::test_main_static`. That `main` is the program's start, ahead of the one
-rustc wrote. While a program's tests are the ones rustc listed, rustc's harness is kept (writing
-ra-jit's makes the whole program a build); once a test is added, removed, renamed or its
-attributes change, the module is written and kept current, so that change is an edit the daemon
-builds. Unit and integration test programs alike: the plan marks every test program's directory
+rustc wrote. Every program of tests starts in ra-jit's harness, written when the program is
+first asked for (a worker's first program at its load, which then starts from a build of its
+own rather than what rustc linked; the others at the first `test` that asks for them), so the
+whole build it takes runs while nobody edits and the first edit is a patch; a test added,
+removed, renamed or with other attributes is an edit like another. The harness written into a
+library's root file is an edit of the program of its tests alone: the programs that link the
+library do not take it over from rustc for that. Unit and integration test programs alike: the plan marks every test program's directory
 (`tests`). `cfg_attr`s are expanded by the crate's cfg. rust-analyzer resolves the module's
 paths to private tests (a patch in `hir-def`'s path resolution, for that module only). A
 program with a bench or an `ignore` it does not read keeps rustc's harness, and adding a test
@@ -693,6 +696,15 @@ over from rustc (`widen` keeps to the crates rustc linked): its functions were n
 and never compiled, and the link failed. On the bench apps (`harness/norustc/count.py`, dev-aws-11,
 2026-10-23), "test-added" went from 18 rustc runs to none on ripgrep and from 11 to none on
 nushell; "test-edit" is as before (0.2 s and 5.3 s).
+
+Then (the `no-rustc-l2` lane, 2026-10-23) ra-jit's harness is always written, not only once
+the tests differ from rustc's, so no program of tests depends on rustc's harness. Written at
+the first edit, as it first was everywhere, it made that edit 0.4 s on ripgrep against 0.2 s:
+the edit wrote the harness into seven libraries' root files, which took those libraries over
+from rustc in every program that links them, and built two programs whole. On dev-aws-11 against
+main, ripgrep: first `test --no-run` 4.0 s (3.9), "test-edit" 0.2 s (0.2), "test-added" 0.7 s
+(1.0); nushell: first `test --no-run` 11.8 s (11.7), "test-edit" 1.4 s (4.3, and 4.6 with
+rustc's harness on the same main), "test-added" 1.5 s (1.9).
 
 **I. Build scripts compiled and run by ra-jit.** ([#89](https://github.com/indexable-inc/ra-jit/issues/89)) The daemon compiles, links and runs build
 scripts with `RUSTC` naming ra-jit, so that `autocfg`, `version_check`, `rustversion` and the
