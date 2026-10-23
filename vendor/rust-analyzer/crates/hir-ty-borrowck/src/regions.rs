@@ -1932,8 +1932,36 @@ impl<'db> Builder<'_, '_, 'db> {
                     .skip_norm_wip()
                     .output()
                     .skip_binder();
-                if !rustc_type_ir::TypeVisitableExt::has_escaping_bound_vars(&output) {
-                    self.well_formed(output, at, depth + 1);
+                self.well_formed_unbound(output, at, depth + 1);
+            }
+            _ => (),
+        }
+    }
+
+    /// What of `ty`'s well-formedness names no region bound outside it, as rustc's `wf`
+    /// leaves out a requirement with an escaping bound region: of `(&'c (), &'b &'a ())` with
+    /// `'c` late-bound, that `'a: 'b`.
+    fn well_formed_unbound(&mut self, ty: Ty<'db>, at: At, depth: usize) {
+        use rustc_type_ir::inherent::GenericArgs as _;
+        if !rustc_type_ir::TypeVisitableExt::has_escaping_bound_vars(&ty) {
+            return self.well_formed(ty, at, depth);
+        }
+        if depth > 16 {
+            return;
+        }
+        match ty.kind() {
+            TyKind::Ref(_, inner, _)
+            | TyKind::RawPtr(inner, _)
+            | TyKind::Slice(inner)
+            | TyKind::Array(inner, _) => self.well_formed_unbound(inner, at, depth + 1),
+            TyKind::Tuple(tys) => {
+                for ty in tys {
+                    self.well_formed_unbound(ty, at, depth + 1);
+                }
+            }
+            TyKind::Adt(_, args) => {
+                for ty in args.types() {
+                    self.well_formed_unbound(ty, at, depth + 1);
                 }
             }
             _ => (),
