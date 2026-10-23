@@ -745,16 +745,37 @@ memo of the first part keeps those. A program that denies lints (a line `#![deny
 goes to rustc when rust-analyzer warns about it or it names a `#[deprecated]` item, macro
 arguments included: rustdoc fails such an example, and ra-jit would pass it. The fixture's
 doctests went from 3 to 0. On the 30 crates of `harness/doctests.py` (3,095 examples) ra-jit
-builds 2,748 and rustc 340, every crate's results the same as rustdoc's; most of rustc's are
+builds 2,748 and rustc 340, every crate's results the same as rustdoc's (since the frozen def
+maps, url's and textwrap's second runs panic before any example is built, on main too:
+[#161](https://github.com/indexable-inc/ra-jit/issues/161)); most of rustc's are
 serde_json's 97, serde_core's 68 and hashbrown's 63, which name `serde`, linking a second copy
 of the library, and `time`'s 74, `compile_fail` and others with an error. Building whole programs
 of examples found two codegen bugs that rustc's copies of the libraries had hidden:
 `relocate_data_pointer` followed two allocations that seemed to point at each other forever
 (url), and an `#[inline]` function of the standard library that takes its caller's overflow
 checks was taken from ra-jit's build of the standard library, which has none (itertools; the
-fixture's `should_panic` example now holds it). What is left of L is the daemon taking the
-examples in place of a process per library, and rustdoc for `-q` and a library ra-jit cannot
-load.
+fixture's `should_panic` example now holds it). ra-jit's program of an example is kept in
+`<target>/<profile>/ra-jit-doctest` under a key of its source, its edition and the ra-jit
+executable, and the libraries it is built against as for rustc's, and is run again while they
+are unchanged; an example that names `include!`, `include_str!`, `include_bytes!` or `env!` is
+compiled each time. A few examples are compiled at once, each on its own snapshot of the
+database (a sixteenth of the cores, from 1 to 4).
+
+Counted as in [How often](#how-often) on dev-aws-11 (Linux x86-64, 96 cores, Cranelift), main
+at 04bdd5b against this lane:
+
+| Doctests | ripgrep, main | ripgrep, L | nushell, main | nushell, L |
+|---|---|---|---|---|
+| first run | 35 rustc, 12.0 s | 4, 28.7 s | 128, 9.3 s | 6, 25.3 s |
+| again | 0, 8.3 s | 0, 8.5 s | 0, 7.7 s | 0, 5.3 s |
+
+What rustc still runs on a first run is cargo's, not the examples': ripgrep's 3 workspace
+libraries and a build script; nushell's 3 proc macros and 2 workspace libraries, and one
+example of nu-protocol's left to rustc. The first run is slower: the standard library's unit
+is built once per store (6.6 s), and each example is a whole program, so the library's
+functions it reaches are compiled again for every example (10.7 s for ripgrep's 22). What is left of
+L is that cost, the daemon taking the examples in place of a process per library, and rustdoc
+for `-q` and a library ra-jit cannot load.
 
 **M. Remove the wrapper and the fallback.** ([#93](https://github.com/indexable-inc/ra-jit/issues/93)) Plain cargo after `ra-jit enable` names ra-jit as
 `build.rustc`; ra-jit answers cargo's questions (B) and writes for each unit the files cargo
