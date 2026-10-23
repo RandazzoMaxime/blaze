@@ -14,8 +14,6 @@ codegen/equal-pointers-unequal/strict-provenance/inline1.rs  # known-bug #107975
 codegen/equal-pointers-unequal/strict-provenance/inline2.rs  # known-bug #107975
 codegen/equal-pointers-unequal/strict-provenance/zero.rs  # known-bug #107975
 macros/metavar_cross_edition_recursive_macros.rs  # known-bug #130484: rustc matches a 2024 crate's fragments as 2018's
-drop/issue-90752-raw-ptr-shenanigans.rs  # rustc's drop elaboration leaks S(1) and the test asserts the leak; ra-jit drops both
-
 # What ra-jit does not do yet.
 async-await/async-fn-size-uninit-locals.rs  # exact future sizes: ra-jit's coroutine layout keeps locals rustc overlaps or leaves out
 codegen/issue-28950.rs  # needs -O's in-place vec! of a 32 KiB array on a 16 KiB stack; ra-jit's goes through the stack (SIGSEGV)
