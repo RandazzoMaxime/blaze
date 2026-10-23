@@ -3469,6 +3469,32 @@ impl<'db> Builder<'_, '_, 'db> {
             (TyKind::Dynamic(..), TyKind::Dynamic(..)) => {
                 self.relate(source, target, Variance::Covariant, at)
             }
+            // rustc's struct unsizing, `RefCell<T>: Unsize<RefCell<dyn Trait>>`: the argument
+            // its tail unsizes does so, and the others are the same.
+            (TyKind::Adt(source_def, from), TyKind::Adt(target_def, to))
+                if source_def == target_def =>
+            {
+                let interner = self.interner();
+                let erase = |ty| {
+                    rustc_type_ir::fold_regions(interner, ty, |_, _| Region::new_erased(interner))
+                };
+                for (x, y) in from.iter().zip(to.iter()) {
+                    match (x.kind(), y.kind()) {
+                        (GenericArgKind::Type(x), GenericArgKind::Type(y))
+                            if erase(x) == erase(y) =>
+                        {
+                            self.relate(x, y, Variance::Invariant, at)
+                        }
+                        (GenericArgKind::Type(x), GenericArgKind::Type(y)) => {
+                            self.unsize_pointee(x, y, at)
+                        }
+                        (GenericArgKind::Lifetime(x), GenericArgKind::Lifetime(y)) => {
+                            self.relate_regions(x, y, Variance::Invariant, at)
+                        }
+                        _ => (),
+                    }
+                }
+            }
             // The value implements the object's trait, with what the impl proving it needs:
             // `impl<T: 'static> Gettable<T> for S<T>` makes `&S<&'a u8> as &dyn Gettable<_>`
             // need `'a: 'static`.
