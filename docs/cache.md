@@ -152,12 +152,16 @@ These act on the store `cargo ra-jit status` names.
 
 ## The remote
 
-A remote is a directory or `s3://bucket/prefix`. It holds sealed packs under the hash of
+A remote is a directory, `s3://bucket/prefix`, or an `https://` address it is only read from,
+whose files are named by their paths with `.` for `/` (a GitHub release's assets: see "The
+standard library" below). It holds sealed packs under the hash of
 their bytes, a list of the keys in each pack, and one manifest per project that lists the
 packs that project's builds were served from.
 
     packs/<sha256>.pack          a pack as the store has it (its blocks are compressed)
-    packs/<sha256>.pack.zst      a pack an older ra-jit sent compressed whole, still read
+    packs/<sha256>.pack.zst      a pack sent compressed whole: one a quarter smaller or more
+                                 that way, as one with values over 1 MB is (those are kept
+                                 uncompressed in the store, to be read in place)
     keys/<sha256>                the keys of one pack
     manifests/<project>          one line per pack
     units/<sha256>, deps/<project>   cargo's builds of dependencies, see below
@@ -196,6 +200,21 @@ push. A daemon killed with SIGKILL pushes nothing on its way out; the next push 
 
 `RA_JIT_REMOTE` needs the local store (`RA_JIT_CACHE` not `off`): the remote fills and
 reads it.
+
+### The standard library
+
+A build with nothing of rustc's (a build script, `--exe` with every crate ra-jit's) starts
+from the standard library compiled by ra-jit, which takes seconds on many cores. A release
+ships it: `ra-jit std REMOTE` builds it for the binary and toolchain at hand and pushes it as
+the project `std-<target>-<build>`, and the release attaches that remote's files. Before such a
+build first reads the store it fetches the project once per store, from:
+
+| Variable | Meaning | Default |
+|---|---|---|
+| `RA_JIT_STD_FROM` | the remote to fetch the standard library from, or `off` | the binary's own release, when it is one; otherwise none |
+
+A build of another binary (crates.io, nix, your own) finds nothing for its `<build>` and
+compiles the library itself, once per store.
 
 ### S3 address and credentials
 

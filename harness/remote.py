@@ -279,7 +279,7 @@ def round_trip(top, remote, name, crates, target, workspace):
     objects = bucket.objects()
     packs = [it for it in objects if it.startswith("packs/")]
     check("the bucket has A's packs, their keys and the manifest",
-          out.returncode == 0 and packs and sorted("packs/" + it for it in a.packs()) == sorted(packs)
+          out.returncode == 0 and packs and sorted("packs/" + it for it in a.packs()) == sorted(it.removesuffix(".zst") for it in packs)
           and "manifests/default" in objects and len([it for it in objects if it.startswith("keys/")]) == len(packs),
           f"{len(objects)} objects")
     check("every object in the bucket is what its name says",

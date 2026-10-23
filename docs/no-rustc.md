@@ -989,6 +989,38 @@ script fetches the tree-sitter grammars, which the executable does not contain. 
 (`breakout`, cargo 78.2 s cold, 8.2 GB) does not build yet: its `main` is left to rustc
 (`UnresolvedMethod("chain")`), and the SSE compares glam calls are not lowered in this build.
 
+#### The standard library, shipped
+
+Build scripts by ra-jit (step I, #186) put the standard library on every cold build's path: a
+script is a program with nothing of rustc's, so the first one builds the unit and the frozen
+parts of the library's crates, 7.5 s on 96 cores, while the others wait on it. On an empty
+store ripgrep went from 4.5 to 11.2 s and nushell from 25.6 to 37.3 s. That cost is now
+paid once, by the release, instead of on a user's machine (`crates/ra-jit/src/shipped.rs`):
+
+- `ra-jit std REMOTE` builds a script that does nothing into a store of its own and pushes that
+  store to REMOTE as the project `std-<target>-<build>`, where `<build>` is what the store keys
+  by: the ra-jit binary's bytes and the toolchain's commit and compiler name. Only that binary
+  with that toolchain can use it, and every key in it says so.
+- The release workflow runs it with each target's archived binary and the pinned 1.99.0, and
+  attaches the remote's files to the release with `.` for `/` (`manifests.std-…`, `packs.….pack.zst`,
+  `keys.…`). A remote can be a plain `https://` address now (`remote/https.rs`): read-only,
+  flat, redirects followed, which is what a release's download URL is.
+- A build with nothing of rustc's, before it first reads the store, fetches that project once
+  per store: from `RA_JIT_STD_FROM` when set (`off` for nowhere), otherwise from its own
+  release when it is one (`RA_JIT_RELEASE`, set by the workflow on a tag). Builds that start
+  together take a lock and fetch once; `fetched-<project>` in the store dir records that it is
+  done, and a failure is retried an hour later. A pack is used only once its bytes hash to the
+  name the manifest lists, as with any remote.
+- `push` now sends a pack zstd-compressed when that saves a quarter or more. A pack keeps
+  values over 1 MB uncompressed so they can be read in place, which the unit's 17 archive parts
+  are: the library's 65 MB of packs go over the wire as 18.6 MB.
+- Builds from crates.io or nix are other binaries, so nothing is shipped for them and they build
+  the unit locally, once per store.
+
+`harness/norustc/count.py` does what a release does by default: it runs `ra-jit std` with the
+binary under test into `$NR_ROOT/std-remote` and points `RA_JIT_STD_FROM` at it. `NR_STD=build`
+leaves every build to make the library itself.
+
 The step K bar: with a warm remote, `cargo ra-jit build` from nothing is no slower than cargo's cold build;
 with an empty store, it is measured and published beside cargo's, and the gap is an issue of its
 own. Until K lands, the rustc base stays as it is; it is not made faster or extended.
