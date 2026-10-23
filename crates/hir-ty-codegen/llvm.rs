@@ -180,7 +180,10 @@ pub(super) fn emit(
         if let Some(pipeline) = optimization.pipeline() {
             tally
                 .time(Phase::Optimize, || {
-                    module.run_passes(pipeline, machine, PassBuilderOptions::create())
+                    // rustc vectorizes straight-line code at `-O2` and `-O3`.
+                    let options = PassBuilderOptions::create();
+                    options.set_loop_slp_vectorization(true);
+                    module.run_passes(pipeline, machine, options)
                 })
                 .map_err(|e| Unhandled::Llvm(e.to_string_lossy().into_owned()))?;
             if rebase::rebase(&module) {
@@ -298,11 +301,6 @@ pub(super) fn assemble(text: &str) -> Result<Vec<u8>, String> {
 
 /// Sets the options of LLVM that only its command line reaches, for the process.
 ///
-/// The SLP vectorizer is off. LLVM 20.1's makes one store of several equal rows of an array
-/// of `i128` with lanes of it left as poison, so that part of the array is never written
-/// (`breakers/cases/src/repeat_rows.rs`). The `default<O2>` pipeline turns the pass on
-/// whatever its options say, which leaves the flag the pass itself reads.
-///
 /// On AArch64 the quick selection is not the global instruction selector. That one deletes
 /// the unused copy of the selector register at a landing pad and leaves the register a
 /// live-in of the block, and LLVM 20.1's fast register allocator does not reload a value it
@@ -312,7 +310,7 @@ pub(super) fn assemble(text: &str) -> Result<Vec<u8>, String> {
 fn set_options(arch: Arch) {
     static SET: Once = Once::new();
     SET.call_once(|| {
-        let mut arguments = vec![c"ra-jit".as_ptr(), c"-vectorize-slp=false".as_ptr()];
+        let mut arguments = vec![c"ra-jit".as_ptr()];
         if arch == Arch::Aarch64 {
             arguments.push(c"-aarch64-enable-global-isel-at-O=-1".as_ptr());
         }
