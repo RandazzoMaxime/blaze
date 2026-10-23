@@ -40,7 +40,7 @@ use std::{
 use anyhow::{Context, bail};
 use futures_util::{StreamExt, stream};
 use ra_jit_store::{
-    FORMAT as STORE_FORMAT, StoreDir, limit_from_env, name_file_whole, pack_format, pack_keys,
+    FORMAT as STORE_FORMAT, StoreDir, limit_for, name_file_whole, pack_format, pack_keys,
     parse_size, write_file_whole,
 };
 use rustc_hash::FxHashMap;
@@ -878,7 +878,7 @@ async fn keep_under(dir: StoreDir, limit: Option<u64>) -> anyhow::Result<String>
 /// they fit under `RA_JIT_CACHE_MAX`. A pack of another format than this build reads is left
 /// where it is, and one that is longer than the manifest says is rejected.
 pub(crate) async fn pull(store: &Path, remote: &Remote, project: &str) -> anyhow::Result<String> {
-    let limit = limit_from_env().map_err(anyhow::Error::msg)?;
+    let limit = limit_for(store).map_err(anyhow::Error::msg)?;
     let dir = claim(store, false).await?;
     let local = local_packs(&dir)?;
     let Some(manifest) = Manifest::fetch(remote, project).await? else {
@@ -1034,7 +1034,7 @@ fn stats(store: &Path) -> anyhow::Result<()> {
     println!("open bytes: {}", stats.open_bytes);
     println!("temporary files: {}", stats.temporary);
     println!("temporary bytes: {}", stats.temporary_bytes);
-    match limit_from_env().map_err(anyhow::Error::msg)? {
+    match limit_for(store).map_err(anyhow::Error::msg)? {
         Some(limit) => println!("limit bytes: {limit}"),
         None => println!("limit bytes: off"),
     }
@@ -1049,7 +1049,7 @@ fn stats(store: &Path) -> anyhow::Result<()> {
 /// `RA_JIT_CACHE_MAX` names.
 fn collect(store: &Path, mut args: impl Iterator<Item = String>) -> anyhow::Result<()> {
     let limit = match (args.next().as_deref(), args.next()) {
-        (None, _) => limit_from_env().map_err(anyhow::Error::msg)?,
+        (None, _) => limit_for(store).map_err(anyhow::Error::msg)?,
         (Some("--max"), Some(size)) => {
             Some(parse_size(&size).with_context(|| format!("`{size}` is not a size"))?)
         }
@@ -1215,7 +1215,7 @@ impl Lazy {
         let (missing, _) = manifest.missing(&local);
         // A pack the store may not hold is not one to fetch, and the keys of them all are
         // kept in memory: no more of them than one object may be.
-        let limit = limit_from_env().map_err(anyhow::Error::msg)?.unwrap_or(u64::MAX);
+        let limit = limit_for(store).map_err(anyhow::Error::msg)?.unwrap_or(u64::MAX);
         let held = &Room::of(Some(remote.object_max));
         let fetched = stream::iter(missing.into_iter().map(|(pack, listed)| async move {
             if listed.size > limit {

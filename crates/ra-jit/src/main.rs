@@ -12,6 +12,7 @@ mod dep_info;
 mod deps;
 mod doctest;
 mod errors;
+mod frozen;
 mod inputs;
 mod link;
 mod live;
@@ -2733,6 +2734,14 @@ fn report_sharing(db: &RootDatabase) {
 }
 
 fn resolve_crates(db: &RootDatabase, args: &Args, threads: usize) -> anyhow::Result<usize> {
+    let crates = built_crates(db, args)?;
+    resolve_all(db, &crates, threads);
+    Ok(crates.len())
+}
+
+/// The crates a build of `args` compiles and every crate they depend on, each after its
+/// dependencies.
+fn built_crates(db: &RootDatabase, args: &Args) -> anyhow::Result<Vec<ide_db::base_db::Crate>> {
     let mut seen = FxHashSet::default();
     let mut crates = Vec::new();
     for name in args.crates() {
@@ -2741,8 +2750,7 @@ fn resolve_crates(db: &RootDatabase, args: &Args, threads: usize) -> anyhow::Res
             crates.extend(krate.transitive_deps(db).into_iter().filter(|&dep| seen.insert(dep)));
         }
     }
-    resolve_all(db, &crates, threads);
-    Ok(crates.len())
+    Ok(crates)
 }
 
 /// Resolves the names of `crates` again after an edit to many files, on every core: whoever
@@ -2783,15 +2791,21 @@ fn resolve_all(db: &RootDatabase, crates: &[ide_db::base_db::Crate], threads: us
                     hir::attach_db(&db, || {
                         _ = hir::crate_def_map(&db, krate);
                         let names = start.elapsed();
-                        warm_impls(&db, krate, helping, threads);
+                        let frozen = hir_ty::method_resolution::frozen::served(&db, krate);
+                        if !frozen {
+                            warm_impls(&db, krate, helping, threads);
+                        }
                         _ = hir::TraitImpls::for_crate(&db, krate);
                         // Which of its dependencies the crate names is read off its files,
                         // and the first body inferred would wait for that of every crate.
                         _ = hir::TraitImpls::for_crate_and_deps(&db, krate);
-                        // A build asks which functions written in the bodies of the standard
-                        // library share a path, which every body of the crate is lowered for:
-                        // threads are idle here, waiting for the crates that come next.
-                        if krate.data(&db).origin.is_lang() {
+                        if frozen {
+                            warm_files(&db, krate, helping, threads);
+                        } else if krate.data(&db).origin.is_lang() {
+                            // A build asks which functions written in the bodies of the
+                            // standard library share a path, which every body of the crate is
+                            // lowered for: threads are idle here, waiting for the crates that
+                            // come next.
                             _ = declared_in(&db, krate.into());
                         }
                         if std::env::var_os("RA_JIT_STATS").is_some() {
@@ -2824,9 +2838,43 @@ fn warm_impls(
     helping: &std::sync::atomic::AtomicUsize,
     threads: usize,
 ) {
-    use std::sync::atomic::Ordering::Relaxed;
     let work = hir_ty::method_resolution::impl_work(db, krate);
-    let wanted = (work.len() / 64).min(threads - 1);
+    on_idle_threads(db, &work, 64, helping, threads, |db, work| work.run(db));
+}
+
+/// Parses the files of the modules of `krate`, whose names and impls were read rather than
+/// found, with the threads no other crate has: a signature or body of the crate that a build
+/// lowers parses its whole file first, one file after another.
+fn warm_files(
+    db: &RootDatabase,
+    krate: ide_db::base_db::Crate,
+    helping: &std::sync::atomic::AtomicUsize,
+    threads: usize,
+) {
+    let def_map = hir_def::nameres::crate_def_map(db, krate);
+    let mut seen = FxHashSet::default();
+    let files: Vec<_> = def_map
+        .modules(db)
+        .filter_map(|(_, data)| data.origin.file_id())
+        .filter(|&file| seen.insert(file))
+        .collect();
+    on_idle_threads(db, &files, 4, helping, threads, |db, &file| {
+        _ = hir::HirFileId::from(file).ast_id_map(db);
+    });
+}
+
+/// Runs `run` on each of `work` here and on the threads no other crate has, one for each
+/// `per` items.
+fn on_idle_threads<T: Sync>(
+    db: &RootDatabase,
+    work: &[T],
+    per: usize,
+    helping: &std::sync::atomic::AtomicUsize,
+    threads: usize,
+    run: impl Fn(&RootDatabase, &T) + Sync,
+) {
+    use std::sync::atomic::Ordering::Relaxed;
+    let wanted = (work.len() / per).min(threads - 1);
     let mut helpers = 0;
     _ = helping.fetch_update(Relaxed, Relaxed, |busy| {
         helpers = wanted.min(threads.saturating_sub(busy + 1));
@@ -2836,18 +2884,18 @@ fn warm_impls(
         return;
     }
     let next = std::sync::atomic::AtomicUsize::new(0);
-    let run = |db: &RootDatabase| {
-        while let Some(&work) = work.get(next.fetch_add(1, Relaxed)) {
-            work.run(db);
+    let each = |db: &RootDatabase| {
+        while let Some(item) = work.get(next.fetch_add(1, Relaxed)) {
+            run(db, item);
         }
     };
     std::thread::scope(|scope| {
         for _ in 0..helpers {
             let db = db.clone();
-            let run = &run;
-            scope.spawn(move || hir::attach_db(&db, || run(&db)));
+            let each = &each;
+            scope.spawn(move || hir::attach_db(&db, || each(&db)));
         }
-        run(db);
+        each(db);
     });
     helping.fetch_sub(helpers, Relaxed);
 }
@@ -4667,10 +4715,18 @@ const BORROWCK: &[&str] = &[
 ];
 
 /// The lints rust-analyzer finds where rustc does, and nowhere else, as `lints_ui.py` scores
-/// them against rustc's UI tests. None is denied by default, so one at the level of an
-/// error is one a source denies, which no flag but `--cap-lints` or `--force-warn` undoes.
-const DENIED: &[&str] =
-    &["non_snake_case", "non_camel_case_types", "non_upper_case_globals", "unused_must_use"];
+/// them against rustc's UI tests and its probes of each place a lint applies. None is denied
+/// by default, so one at the level of an error is one a source denies, which no flag but
+/// `--cap-lints` or `--force-warn` undoes.
+const DENIED: &[&str] = &[
+    "non_snake_case",
+    "non_camel_case_types",
+    "non_upper_case_globals",
+    "unused_must_use",
+    "deprecated_safe_2024",
+    "elided_lifetimes_in_paths",
+    "unsafe_op_in_unsafe_fn",
+];
 
 /// The errors written in the edited files, as rust-analyzer finds them, as rustc writes them
 /// with paths from `root`. Nothing may reach them, so the build never looks at them.
@@ -6719,6 +6775,11 @@ fn run_holding(
     if checkouts.lto(&args.project)? {
         linked_from_libraries(&db, &args)?;
     }
+    // The store reads its packs when first opened, which serving does: what is fetched after
+    // that is not in it for this build.
+    let shared = shared.join().map_err(|_| anyhow::anyhow!("fetching the store panicked"))?;
+    let built = built_crates(&db, &args)?;
+    let served = frozen::serve(&mut db, &built);
     let mut resolved = resolve_crates(&db, &args, cores())?;
     // Resolving the names finds the files `include!` names that were not loaded. With those
     // in, there may be more.
@@ -6728,6 +6789,7 @@ fn run_holding(
     let texts = harnesses(&db, [&args], None, &mut as_rustc);
     write_harnesses(&mut db, texts);
     eprintln!("resolve: {resolved} crates in {:.1?}", start.elapsed());
+    frozen::store(&db, &served)?;
     if let Some(said) = ra_jit_expand::report() {
         eprintln!("{said}");
     }
@@ -6783,7 +6845,6 @@ fn run_holding(
         );
         known.patching = args.patch.is_some();
     }
-    let shared = shared.join().map_err(|_| anyhow::anyhow!("fetching the store panicked"))?;
     if let Some(asked) = doc {
         let krate = *crates_named(&db, &args.krate, &args)?.first().context("no such crate")?;
         known.used_by_rustc = true;
