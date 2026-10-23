@@ -3929,17 +3929,25 @@ impl<'db> Builder<'_, '_, 'db> {
             (TyKind::Adt(da, aa), TyKind::Adt(db, ab)) if da == db => {
                 for (x, y) in aa.iter().zip(ab.iter()) {
                     match (x.kind(), y.kind()) {
+                        // `Cell<T>: CoerceUnsized<Cell<U>>` where `T: CoerceUnsized<U>`: a
+                        // pointer in it coerces as one, `&'a mut (dyn Trait + 'static)` to
+                        // `&'a mut (dyn Trait + 'a)`.
                         (GenericArgKind::Type(x), GenericArgKind::Type(y)) => {
-                            if matches!(x.kind(), TyKind::Adt(..))
-                                && matches!(y.kind(), TyKind::Adt(..))
-                            {
+                            let pointer = |ty: Ty<'db>| {
+                                matches!(
+                                    ty.kind(),
+                                    TyKind::Adt(..) | TyKind::Ref(..) | TyKind::RawPtr(..)
+                                )
+                            };
+                            if pointer(x) && pointer(y) {
                                 self.unsize(x, y, at);
                             } else {
                                 self.unsize_pointee(x, y, at);
                             }
                         }
+                        // The impls keep a lifetime as it is: `Ref<'b, T>` to `Ref<'b, U>`.
                         (GenericArgKind::Lifetime(x), GenericArgKind::Lifetime(y)) => {
-                            self.relate_regions(x, y, Variance::Covariant, at)
+                            self.relate_regions(x, y, Variance::Invariant, at)
                         }
                         _ => (),
                     }
