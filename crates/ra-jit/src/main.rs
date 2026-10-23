@@ -3798,11 +3798,12 @@ fn build(
                 main = main.or_else(|| harness_main(db, &listed.functions));
             }
             functions.extend(listed.functions.iter().copied().zip(listed.exported.iter().copied()));
-            if table.is_empty() {
+            // rustc's copy of the crate has them when rustc built it.
+            let own = resolver.own_crate_id(krate.into()).is_some();
+            if table.is_empty() || own {
                 functions.extend(listed.in_provided.iter().map(|&it| (it, false)));
             }
-            // rustc's copy of the crate has them when rustc built it.
-            if resolver.own_crate_id(krate.into()).is_some() {
+            if own {
                 kept.extend(&listed.kept);
             }
             every_static.extend(&listed.statics);
