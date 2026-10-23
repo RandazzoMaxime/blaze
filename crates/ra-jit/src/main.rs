@@ -214,6 +214,7 @@ impl Args {
         let mut all_features = false;
         let mut profile = None;
         let mut config = Vec::new();
+        let mut asked_in = None;
         let mut also = Vec::new();
         let mut target = None;
         while let Some(arg) = args.next() {
@@ -260,6 +261,7 @@ impl Args {
                 "--release" => profile = Some("release".to_owned()),
                 "--profile" => profile = Some(value()?),
                 "--config" => config.push(value()?),
+                "--asked-in" => asked_in = Some(PathBuf::from(value()?)),
                 _ if project.is_none() => project = Some(PathBuf::from(arg)),
                 _ => bail!("unexpected argument {arg}"),
             }
@@ -293,6 +295,7 @@ impl Args {
                 target,
                 dev_deps: cfg_test || dev_deps,
                 config,
+                asked_in,
             },
             also,
             debug: plan::Described::NOTHING,
