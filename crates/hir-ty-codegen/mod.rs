@@ -4263,7 +4263,7 @@ impl<'a, 'db> ObjectCodegen<'a, 'db> {
                 apart,
                 sections && symbols.debug_grouped(),
             )
-                .map(debuginfo::Describer::new)
+            .map(debuginfo::Describer::new)
         });
         let debugged = debug.is_some();
         let described = start.elapsed();
