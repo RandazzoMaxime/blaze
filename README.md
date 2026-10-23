@@ -6,43 +6,205 @@
   ra-jit
 </h1>
 
-Edit Rust. See it change in milliseconds, in the program that is already running.
+ra-jit makes rebuilding a Rust project after an edit take milliseconds. It runs beside cargo,
+keeps your project compiled in memory, and after an edit compiles only the functions you changed
+and writes them into the program cargo already built. A program that opts in can take the new
+code while it keeps running.
+
+On real projects such as ripgrep, nushell, helix and bun, an edit builds
+<!-- benchheadline:start -->10× faster on macOS arm64, 17× faster on Linux aarch64 and 14× faster on Linux x86-64<!-- benchheadline:end -->
+than with an incremental `cargo build` (the average over the projects; [How fast](#how-fast) has
+every number).
+
+To try it on a project of yours, on macOS on Apple silicon or on Linux:
+
+```sh
+rustup toolchain install 1.99.0 --component rust-src
+cargo +1.99.0 install --locked ra-jit
+cd my-project
+rustup override set 1.99.0
+cargo ra-jit run
+```
+
+Wait a few seconds, change a function, and run `cargo ra-jit run` again: the `Finished` line now
+says `[ra-jit]`, which means ra-jit built it instead of cargo.
+
+## Install
+
+What you need:
+
+- **Rust 1.99.0 with its source code** (the `rust-src` component). ra-jit works with this one
+  version only: it links its code with code rustc 1.99.0 compiled, so the two have to agree on how
+  types are laid out and functions are called. Your project has to build with 1.99.0 too; on any
+  other version every build is plain cargo's.
+- **macOS on Apple silicon, or Linux on x86-64 or ARM64.** On Windows ra-jit installs and runs,
+  but hands every build to cargo. Intel Macs are not supported.
+- **Memory to spare.** ra-jit's background process holds a few GB for a small project and tens of
+  GB for the largest ([numbers](#how-fast)).
+
+### From crates.io
+
+```sh
+rustup toolchain install 1.99.0 --component rust-src
+cargo +1.99.0 install --locked ra-jit
+```
+
+This compiles ra-jit from source, which takes a few minutes, and puts four programs in
+`~/.cargo/bin`: `cargo-ra-jit` (what `cargo ra-jit` runs), `ra-jit`, `ra-jit-rustc` and
+`ra-jit-rustc-first`. They find each other by being in the same directory, so keep them together.
+
+### With Nix
+
+```sh
+nix profile install github:indexable-inc/ra-jit#ra-jit
+```
+
+Or try it without installing anything: in a project, `nix run github:indexable-inc/ra-jit#ra-jit -- build`
+is `cargo ra-jit build`. In a flake, take the package from the input:
+
+```nix
+{
+  inputs.ra-jit.url = "github:indexable-inc/ra-jit";
+  # ... then use ra-jit.packages.${system}.ra-jit in a dev shell or a profile.
+}
+```
+
+Nix compiles ra-jit from source; there is no binary cache yet. You still need Rust 1.99.0 with
+`rust-src` for your project, as above.
+
+### Prebuilt binaries
+
+Not yet: no release with binaries has been published. The first one will be on the
+[releases page](https://github.com/indexable-inc/ra-jit/releases), and `cargo binstall ra-jit`
+will install it.
+
+## Use it on your project
+
+```sh
+cd my-project
+rustup override set 1.99.0    # or a rust-toolchain.toml with channel = "1.99.0"
+cargo ra-jit build
+```
+
+The first build is cargo's, with cargo's usual output. When it is done, ra-jit starts a background
+process, the daemon, which loads your project: a few seconds for a small one, up to about a minute
+for a very large one. Until then builds are still cargo's, and each one says so:
 
 ```
-nix run github:indexable-inc/ra-jit
+ra-jit: the daemon is still loading the workspace (951ms so far); building with cargo
 ```
 
-That opens a Game of Life window you can edit while it runs (live on macOS Apple silicon).
+`cargo ra-jit status` says `ready` once it is done. From then on, an edit builds like this:
 
-![Editing the running Game of Life: rule, colours and speed change live](docs/demo.avif)
+```
+$ cargo ra-jit build
+    Finished `dev` profile [ra-jit] target(s) in 0.02s
+```
 
-<p align="center">
-  <a href="https://ra-jit.ix.dev/updates?src=readme">
-    <picture>
-      <source media="(prefers-color-scheme: dark)" srcset="docs/brand/signup-on-dark.svg">
-      <img alt="Tell us you use ra-jit" src="docs/brand/signup-on-light.svg" height="36">
-    </picture>
-  </a>
-</p>
+`[ra-jit]` means ra-jit built it. The program is where cargo would have put it, under `target/`.
 
-<p align="center">For release news: Watch → Custom → Releases on GitHub.</p>
+- `cargo ra-jit build`, `cargo ra-jit run` and `cargo ra-jit test` take cargo's flags and do what
+  cargo's commands do: `run` passes what follows `--` to your program, and `test` runs and reports
+  the tests as `cargo test` does.
+- `cargo ra-jit check` reports the errors a build would fail with.
+- `cargo ra-jit status` shows what the daemon has loaded, how many builds it did and how many it
+  left to cargo, and why.
+- `cargo ra-jit stop` stops the daemon. It also stops by itself after 30 minutes without a build.
 
-## What you get
+Any other subcommand goes to cargo unchanged. When ra-jit can't be sure its result would be the
+same as cargo's, it lets cargo do that build and prints one line saying why
+(`ra-jit: <reason>; building with cargo`). That happens after a change to `Cargo.toml`,
+`Cargo.lock` or what a build script reads, when a test is added or removed, and for a few flags
+such as `--message-format` and `-Z`. The full list is in [docs/cargo.md](docs/cargo.md).
 
-- **Live edits.** Save a file and the running program has the new code about a millisecond
-  later. Its state stays. ([docs/live.md](docs/live.md))
-- **Fast builds.** After the first build, an edit rebuilds only the functions you changed.
-  No `rustc`, no waiting.
-- **Same cargo.** `cargo ra-jit build|run|test|check` in any project.
+### Rebuild on every save
+
+ra-jit has no watch mode of its own; any file watcher can run it. With
+[watchexec](https://github.com/watchexec/watchexec):
+
+```sh
+watchexec -e rs -- cargo ra-jit build
+```
+
+### Make plain `cargo build` use ra-jit
+
+For editors, scripts and agents that run `cargo build` themselves:
+
+```sh
+ra-jit enable
+```
+
+From then on plain `cargo build`, `run`, `test` and `check` go through ra-jit, in every project of
+your user. It adds one setting to `~/.cargo/config.toml`, and `ra-jit disable` puts the file back
+as it was. Edits are slower this way than with `cargo ra-jit`, and on some projects slower than plain
+cargo ([why](docs/cargo.md#plain-cargo-switched-on-globally)).
+
+### Change a running program
+
+A program that links the `ra-jit-live` crate takes each edit while it runs, and keeps its state:
+useful for games, GUIs and anything slow to get back to where you were.
+
+```toml
+[dependencies]
+ra-jit-live = "0.1"
+```
+
+```rust
+let mut live = ra_jit_live::Live::start().ok();
+loop {
+    if let Some(outcome) = live.as_mut().and_then(|it| it.poll()) {
+        eprintln!("ra-jit: {outcome}");
+    }
+    // ...one frame of your program
+}
+```
+
+Start it with `cargo ra-jit run`. In another terminal, build after each edit with
+`cargo ra-jit build` (or the `watchexec` line above). The next `poll` swaps in the functions that
+changed, usually in under a millisecond, and prints
+`ra-jit: edit ... applied: 1 functions in 745.4µs`. An edit that changes a type the program is
+holding, such as a struct's fields, can't be applied to data that already exists, so `poll` asks
+for a restart instead.
+
+Live edits work on macOS on Apple silicon. Linux x86-64 support is on `main` and comes with the
+next release. More in [docs/live.md](docs/live.md).
+
+## What works and what doesn't yet
+
+- **Platforms.** macOS on Apple silicon, Linux x86-64 and Linux ARM64 are measured below. On
+  Windows every build is cargo's. Intel Macs are not supported.
+- **One Rust version.** 1.99.0 only (see [Install](#install)).
+- **Not every build is ra-jit's.** The changes listed above go to cargo, and so does code ra-jit
+  can't compile yet. `cargo ra-jit status` counts both; in the tables below, `(c)` marks an edit
+  that went to cargo.
+- **Errors.** An edit with a type error fails to build, as it would under cargo. The borrow checker
+  is new: 0.1.0 has none, so an edit with a borrow error builds and runs; the one on `main` finds
+  about two thirds of rustc's borrow errors. Keep `cargo check` or your CI as the final word.
+- **Memory and disk.** The daemon holds several times the memory cargo uses while building, and a
+  project's build keeps more on disk than cargo's does ([numbers](#how-fast)).
+- **Correctness.** Every change to ra-jit is checked by comparing what it builds with what rustc
+  builds, on rustc's own tests and on real projects, but it is young: if a program behaves
+  differently under ra-jit, that's a bug, and an
+  [issue](https://github.com/indexable-inc/ra-jit/issues) is welcome.
+
+What is supported in detail: [docs/support.md](docs/support.md). Everything about the cargo
+commands: [docs/cargo.md](docs/cargo.md).
+
+## How it works
+
+ra-jit keeps your project parsed and type-checked in memory with
+[rust-analyzer](https://github.com/rust-lang/rust-analyzer), the engine behind most Rust editor
+plugins, and generates machine code itself with [Cranelift](https://cranelift.dev). After an edit
+it compiles only the functions that changed, and writes them into the existing program instead of
+linking it again from scratch, which is where most of an incremental build's time goes. The first
+build is cargo's, and ra-jit's code is linked with what it produced. The whole design:
+[docs/architecture.md](docs/architecture.md).
 
 ## How fast
 
-Live edit to running code, Game of Life demo (median of 20 edits, one 96-core Linux machine):
-
-| Edit | incremental `cargo build` | ra-jit live | |
-|---|---:|---:|---:|
-| One function | 169 ms | 7 ms | **24x** |
-| One function, 300 new functions added | 282 ms | 60 ms | 4.7x |
+How long an edit takes to build, how much memory and disk ra-jit uses, and how fast the programs
+it builds run, against cargo. The tables are written by the benchmark harness
+([docs/benchmarks.md](docs/benchmarks.md)) and kept current by CI.
 
 <!-- bench:start -->
 <picture><source media="(prefers-color-scheme: dark)" srcset="docs/benchmarks/charts/edits-dark.svg"><img alt="How much faster an edit builds under ra-jit than under cargo, by platform: All projects (geometric mean): macOS arm64 10× faster, Linux aarch64 17× faster, Linux x86-64 14× faster; ripgrep 15.1.0: macOS arm64 8.1× faster, Linux aarch64 25× faster, Linux x86-64 13× faster; fd 10.3.0: macOS arm64 6.0× faster, Linux aarch64 27× faster, Linux x86-64 12× faster; bat 0.26.0: Linux aarch64 39× faster, Linux x86-64 18× faster; hyperfine 1.19.0: Linux aarch64 19× faster, Linux x86-64 11× faster; just 1.43.0: Linux aarch64 26× faster, Linux x86-64 17× faster; axum 0.8.6: Linux aarch64 16× faster, Linux x86-64 8.5× faster; nushell 0.108.0: macOS arm64 10× faster, Linux aarch64 40× faster, Linux x86-64 17× faster; helix 25.07.1: Linux aarch64 52× faster, Linux x86-64 25× faster; bevy 0.20.0: Linux aarch64 4.4× slower, Linux x86-64 4.8× faster; bun 1.4.3: macOS arm64 21× faster, Linux x86-64 23× faster" src="docs/benchmarks/charts/edits-light.svg" width="760"></picture>
@@ -328,68 +490,36 @@ Release with dev checks: `cargo build --release` with `-C overflow-checks=on -C 
 Measured by hand with `harness/bench.py --runtime` (harness/runbench.py), or by the `bench-readme` workflow (a project measured on its own, by its own workflow) on each platform's benchmark machine once it is registered. Raw JSON: [macOS arm64](docs/benchmarks/runtime-macos-arm64.json), [Linux aarch64](docs/benchmarks/runtime-linux-aarch64.json), [Linux x86-64](docs/benchmarks/runtime-linux-x86-64.json); bun: [macOS arm64](docs/benchmarks/runtime-bun-macos-arm64.json), [Linux x86-64](docs/benchmarks/runtime-bun-linux-x86-64.json).
 <!-- runbench:end -->
 
-## Try it on your project
+## Demo: a Game of Life you can edit
 
-```
-nix run github:indexable-inc/ra-jit#ra-jit -- build
-```
-
-No nix? Put the binaries from a [release](https://github.com/indexable-inc/ra-jit/releases)
-on your PATH, or build them with `cargo +1.99.0 install --locked --profile dist ra-jit`. Then
-use Rust 1.99.0 with its source:
-`rustup toolchain install 1.99.0 -c rust-src && rustup override set 1.99.0`.
-
-A release's binaries and nix build the same ra-jit: the `dist` profile (thin LTO), optimized
-with the profile of its own work that [pgo/profiles.json](pgo/profiles.json) pins
-([how](docs/reports/RELEASE-BUILD.md)). `cargo install` builds `dist` without that last step,
-which on Linux starts about 10% slower and edits about 3% slower than a release's binaries:
-cargo takes no compiler flags from a crate, and the crates it builds from crates.io are not
-the ones the profile was made of, so none could be handed to it either. (`--profile dist`
-comes with the first release after 0.1.0.)
-
-### Use it as your normal `cargo build`
-
-```
-nix profile install github:indexable-inc/ra-jit#ra-jit
-ra-jit enable
+```sh
+nix run github:indexable-inc/ra-jit
 ```
 
-From then on plain `cargo build`, `run`, `test` and `check` in any project go through ra-jit.
-`ra-jit disable` puts your cargo config back.
+This opens a Game of Life window. On macOS on Apple silicon you can change its rules, colours and
+speed while it runs; elsewhere the window runs without live edits. It needs Nix, and builds ra-jit
+from source the first time.
 
-### Live edits
+![Editing the running Game of Life: rule, colours and speed change live](docs/demo.avif)
 
-Add the crate and poll once per frame:
+## Updates
 
-```toml
-ra-jit-live = "0.1"
-```
+<p align="center">
+  <a href="https://ra-jit.ix.dev/updates?src=readme">
+    <picture>
+      <source media="(prefers-color-scheme: dark)" srcset="docs/brand/signup-on-dark.svg">
+      <img alt="Tell us you use ra-jit" src="docs/brand/signup-on-light.svg" height="36">
+    </picture>
+  </a>
+</p>
 
-```rust
-let mut live = ra_jit_live::Live::start().ok();
-loop {
-    if let Some(outcome) = live.as_mut().and_then(|it| it.poll()) {
-        eprintln!("ra-jit: {outcome}");
-    }
-    // ...your frame
-}
-```
+<p align="center">For release news: Watch → Custom → Releases on GitHub.</p>
 
-### Cached functions
+## Contributing
 
-`#[ra_jit::cache]` on a pure function keeps its results across runs, until an edit changes
-the code it reaches ([docs/fn-cache.md](docs/fn-cache.md)).
-
-## What to know
-
-- Live edits work on macOS Apple silicon only. Elsewhere you still get fast builds.
-- An edit with a borrow-check error is refused, but the borrow checker still misses about a
-  third of rustc's errors: `cargo check` stays the final word.
-- Rust 1.99.0 only.
-- Changing a struct the program is using asks for a restart.
-
-More: [how it works](docs/architecture.md), [full results](docs/results.md),
-[what is supported](docs/support.md).
+How to build ra-jit from a checkout, run its tests and send a change:
+[docs/contributing.md](docs/contributing.md). To report a security problem:
+[SECURITY.md](SECURITY.md).
 
 ## Credits
 
