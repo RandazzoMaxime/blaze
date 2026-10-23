@@ -822,8 +822,8 @@ struct Added {
 }
 
 /// The first of the files and source roots of the examples' crates, counted down from: ids no
-/// file or source root of the workspace has.
-const FIRST_FILE: u32 = 0x7fff_ffff;
+/// file or source root of the workspace has. A file's is the highest a span can name.
+const FIRST_FILE: u32 = 0x007f_ffff;
 const FIRST_SOURCE_ROOT: u32 = u32::MAX;
 
 /// Adds a crate for each example of `tests` at `wanted`: a binary whose one file has the
