@@ -41,12 +41,17 @@ runs:
         if [ "${{ inputs.llvm }}" = build ]; then sudo apt-get install -y llvm-20-dev libpolly-20-dev; fi
         echo "LLVM_SYS_201_PREFIX=/usr/lib/llvm-20" >> "$GITHUB_ENV"
 
+    # The flake's LLVM, which flake.lock pins: a build links its library by the path in the store,
+    # so a run realises the same path. Its bin stays off PATH, where its tools would come before
+    # Xcode's.
+    - if: runner.os == 'macOS' && inputs.llvm != 'none'
+      uses: DeterminateSystems/nix-installer-action@v23
     - name: LLVM 20 (macOS)
       if: runner.os == 'macOS' && inputs.llvm != 'none'
       shell: bash
       run: |
-        brew install llvm@20
-        echo "LLVM_SYS_201_PREFIX=$(brew --prefix llvm@20)" >> "$GITHUB_ENV"
+        nix build .#llvm --out-link "$RUNNER_TEMP/llvm-20"
+        echo "LLVM_SYS_201_PREFIX=$RUNNER_TEMP/llvm-20" >> "$GITHUB_ENV"
 
     # The harnesses run the linker themselves, with the environment the compiler has. In Git
     # Bash the `link` of coreutils comes before the linker, so it goes.
