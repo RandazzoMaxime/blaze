@@ -83,7 +83,8 @@ def cargo_release(ws, spec, label, rustflags):
     target = os.path.join(ws, f"target-{label}")
     # Cold, as ra-jit's build is: the build time is published beside it.
     shutil.rmtree(target, ignore_errors=True)
-    env = {**os.environ, "CARGO_TARGET_DIR": target, "RUSTFLAGS": f"--cap-lints allow {rustflags}".strip()}
+    flags = f"--cap-lints allow {apps.own_flags(spec)} {rustflags}"
+    env = {**os.environ, "CARGO_TARGET_DIR": target, "RUSTFLAGS": " ".join(flags.split())}
     for var in OWN_VARS[:-3]:
         env.pop(var, None)
     argv = ["cargo", "build", "--release", "-p", spec["package"], *spec.get("cargo_args", [])]
@@ -100,7 +101,7 @@ def ra_jit_release(ws, spec, label, extra):
     try:
         for var in OWN_VARS:
             os.environ.pop(var, None)
-        os.environ.update({**RA_JIT_ENV, **extra, "RUSTFLAGS": apps.FLAGS})
+        os.environ.update({**RA_JIT_ENV, **extra, "RUSTFLAGS": f"{apps.FLAGS} {apps.own_flags(spec)}".strip()})
         fx = apps.App(ws, {**spec, "cargo_args": [*spec.get("cargo_args", []), "--release"]}, alone=True)
         fx.ra_jit_args = ["--release"]
         # Cold: cargo's pass with ra-jit standing in for rustc (build scripts, proc macros,

@@ -5,6 +5,7 @@
 
 use std::{
     fmt::Write,
+    path::PathBuf,
     process::Command,
     sync::{Arc, Mutex, OnceLock},
 };
@@ -149,6 +150,15 @@ pub(super) fn vector_instruction(instruction: &str, result: &str) -> String {
     format!(
         ".globl {SYMBOL}\n{SYMBOL}:\nmovdqu xmm0, [{a}]\nmovdqu xmm1, [{b}]\n\
          movdqu xmm2, [{c}]\n{instruction}\nmovdqu [{c}], {result}\nret\n"
+    )
+}
+
+/// The same for AArch64, with the instructions of `extension`: `v0` to `v2` are loaded from
+/// where the three arguments point, and `v0` is written where the third does.
+pub(super) fn neon_instruction(extension: &str, instruction: &str) -> String {
+    format!(
+        ".arch_extension {extension}\n.globl {SYMBOL}\n{SYMBOL}:\nldr q0, [x0]\nldr q1, [x1]\n\
+         ldr q2, [x2]\n{instruction}\nstr q0, [x2]\nret\n"
     )
 }
 
@@ -741,32 +751,117 @@ pub(super) fn assemble(triple: &str, text: &str) -> Result<Arc<Assembled>, Strin
     Ok(code)
 }
 
-/// What turns the text of a block into an object file.
+/// What turns the text of a block into an object file. `RA_JIT_ASSEMBLER=cc` or `rustc`
+/// picks one.
 #[derive(Clone, Copy)]
 enum Assembler {
-    /// rustc, run as a process: the one assembler sure to be there.
+    /// The platform's C compiler, run as a process: clang, or a `cc` for the host.
+    Cc,
+    /// rustc, run as a process, where there is no other.
     Rustc,
-    /// LLVM's, in this process, when LLVM is the producer of code.
+    /// LLVM's, in this process, when ra-jit is built with LLVM.
     #[cfg(feature = "llvm")]
     Llvm,
 }
 
 impl Assembler {
     fn selected() -> Assembler {
-        match super::Backend::from_env() {
-            #[cfg(feature = "llvm")]
-            Ok(super::Backend::Llvm(_)) => Assembler::Llvm,
-            _ => Assembler::Rustc,
+        match std::env::var("RA_JIT_ASSEMBLER").as_deref() {
+            Ok("cc") => return Assembler::Cc,
+            Ok("rustc") => return Assembler::Rustc,
+            _ => {}
         }
+        #[cfg(feature = "llvm")]
+        return Assembler::Llvm;
+        #[cfg(not(feature = "llvm"))]
+        Assembler::Cc
     }
 
     fn assemble(self, triple: &str, text: &str, key: &[u8; 32]) -> Result<Assembled, String> {
         match self {
+            // FIXME: rustc, where the C compiler cannot assemble the text or there is none.
+            Assembler::Cc => match run_cc(triple, text, key) {
+                Some(Ok(code)) => Ok(code),
+                Some(Err(why)) => {
+                    run_assembler(triple, text, key).map_err(|e| format!("{why}; {e}"))
+                }
+                None => run_assembler(triple, text, key),
+            },
             Assembler::Rustc => run_assembler(triple, text, key),
             #[cfg(feature = "llvm")]
             Assembler::Llvm => code(&super::llvm::assemble(text)?),
         }
     }
+}
+
+/// The text as rustc hands it to the assembler: `asm!` is in Intel's syntax on x86-64.
+fn as_rustc_gives_it(triple: &str, text: &str) -> String {
+    if triple.starts_with("x86_64") {
+        format!(".intel_syntax noprefix\n{text}\n.att_syntax\n")
+    } else {
+        format!("{text}\n")
+    }
+}
+
+/// The C compiler that assembles for `triple`, with the arguments that say the target:
+/// clang for any target it knows, else `cc` for the host's alone. `None` when there is none.
+fn c_compiler(triple: &str) -> Option<(PathBuf, Vec<String>)> {
+    let paths = std::env::var_os("PATH")?;
+    let find = |name: &str| {
+        let name = format!("{name}{}", std::env::consts::EXE_SUFFIX);
+        std::env::split_paths(&paths).map(|dir| dir.join(&name)).find(|it| it.is_file())
+    };
+    if let Some(clang) = find("clang") {
+        return Some((clang, vec![format!("--target={triple}")]));
+    }
+    let host = triple.starts_with(std::env::consts::ARCH)
+        && match std::env::consts::OS {
+            "macos" => triple.contains("-apple-darwin"),
+            "linux" => triple.contains("-linux-"),
+            _ => false,
+        };
+    Some((find("cc").filter(|_| host)?, Vec::new()))
+}
+
+/// The block assembled by the platform's C compiler. `None` when there is none for `triple`.
+fn run_cc(triple: &str, text: &str, key: &[u8; 32]) -> Option<Result<Assembled, String>> {
+    let (compiler, target) = c_compiler(triple)?;
+    static RUNS: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+    let run = RUNS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let name: String =
+        key[..8].iter().map(|it| format!("{it:02x}")).chain([format!("-{run}.o")]).collect();
+    let dir = std::env::temp_dir().join(format!("ra-jit-asm-{}", std::process::id()));
+    let failed = |what: &str, e: &dyn std::fmt::Display| format!("inline assembly: {what}: {e}");
+    if let Err(e) = std::fs::create_dir_all(&dir) {
+        return Some(Err(failed("no directory to assemble in", &e)));
+    }
+    let object = dir.join(name);
+    #[allow(clippy::disallowed_methods)]
+    let child = Command::new(&compiler)
+        .args(&target)
+        .args(["-c", "-x", "assembler", "-o"])
+        .arg(&object)
+        .arg("-")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
+        .spawn();
+    let output = child.and_then(|mut child| {
+        let mut stdin = child.stdin.take().ok_or(std::io::ErrorKind::BrokenPipe)?;
+        std::io::Write::write_all(&mut stdin, as_rustc_gives_it(triple, text).as_bytes())?;
+        drop(stdin);
+        child.wait_with_output()
+    });
+    let said = compiler.display().to_string();
+    let code = match output {
+        Ok(output) if output.status.success() => {
+            std::fs::read(&object).map_err(|e| failed("no object", &e)).and_then(|it| code(&it))
+        }
+        Ok(output) => Err(failed(&said, &String::from_utf8_lossy(&output.stderr).trim())),
+        Err(e) => Err(failed(&format!("{said} did not run"), &e)),
+    };
+    _ = std::fs::remove_file(&object);
+    Some(code)
 }
 
 /// FIXME: this runs rustc, which is the one assembler sure to be there and to read what

@@ -4,7 +4,7 @@ ra-jit has its own borrow checker, the crate `hir-ty-borrowck` in the rust-analy
 (`vendor/rust-analyzer/crates/hir-ty-borrowck`, next to `hir-ty`). It checks the MIR rust-analyzer
 lowers, the same MIR the code generator compiles, and it is meant to give exactly rustc's
 verdict: the same errors, on the same lines, and none where rustc gives none. It gives
-rustc's verdict on 90% of rustc's own borrow-check tests today, and on every one rustc
+rustc's verdict on 91% of rustc's own borrow-check tests today, and on every one rustc
 accepts; how they are scored and what is left is below.
 
 It runs as part of rust-analyzer's diagnostics, so the daemon computes it for every edited
@@ -49,7 +49,10 @@ All of these are rustc's, written from `compiler/rustc_borrowck` at the pinned n
   it cannot move out of them (E0507), and casting an enum to an integer moves the enum
   (`*e as usize` behind a reference is E0507). A pattern's moves out of what it may not move
   out of are one error at the value matched for each place they move out of, as rustc's
-  `MovesFromPlace`: `(D(s), &t)` is an E0509 and an E0507.
+  `MovesFromPlace`: `(D(s), &t)` is an E0509 and an E0507. A move of a subslice of an array
+  moves each of its elements, so `let [_y @ .., _, _] = a` after `let [_x, _, _] = a` uses a
+  moved element, and so does assigning `a[2]` after moving it out, as rustc reads the array
+  to index it.
 - Unaligned references (E0793): a `&` or `&mut` of a field a `#[repr(packed)]` struct may
   leave less aligned than its type needs, as rustc's `check_packed_ref` (not `&raw`, nor
   behind a pointer; a field of a type parameter or of a `dyn` tail may be unaligned).
@@ -107,7 +110,9 @@ All of these are rustc's, written from `compiler/rustc_borrowck` at the pinned n
   well as what it normalizes to, `<&'a &'b () as Trait>::Type` that `'b: 'a`, and its trait's
   outlives where clauses, `<T as Trait<A>>::Assoc` that `A: 'static` where
   `trait Trait<A: 'static>`), where clauses (elaborated through
-  supertraits) and the region constraints of proving them with the trait solver (a where
+  supertraits) and the region constraints of proving them with the trait solver (a
+  callee's `I: IntoIterator<Item = T>` makes what `I` normalizes the projection to `T`, so
+  `buffer.extend(data.split(..))` borrows `data` for as long as `buffer` holds it; a where
   clause or impl that proves a bound relates its regions to the bound's, `&'max G: Get` proving
   `&'min G: Get` makes them equal, and the impl's own `T: 'a` must hold), type tests (an
   associated type `<T as Trait>::Assoc: 'a` as rustc's alias bound: what it normalizes to
@@ -116,9 +121,13 @@ All of these are rustc's, written from `compiler/rustc_borrowck` at the pinned n
   relates regions and which is only checked; an `impl Trait` likewise, as the arguments it
   captures; an `async` block as what it captures, as a closure), and lifetimes written in `let` annotations (`let _: T = value`
   of any value included, and of each variable a destructuring pattern binds, `y` in
-  `let (y, _): (&'static u32, u32)`), struct and variant patterns that spell out generic
-  arguments (`let Foo::<'static> { .. } = foo`) and constant patterns (`<() as Foo<'static>>::C`,
-  compared as `PartialEq` compares), casts, turbofishes (a method's own, `x.f::<&'a T>()`, too) and struct
+  `let (y, _): (&'static u32, u32)`; a lifetime left out, or a `_`, that an alias uses twice
+  is one lifetime, as in `let (y, _z): (&u32, &u32)` written `Pair<u32>` with
+  `type Pair<'a, T> = (&'a T, &'a T)`; the variable's type is well-formed, so
+  `let z: &'a &u32 = &&y` needs `y` to outlive `'a`), struct and variant patterns that spell out generic
+  arguments (`let Foo::<'static> { .. } = foo`) and constant patterns (`<() as Foo<'a>>::C`,
+  whose type is a subtype of what it matches, as rustc ascribes it, so it matches a
+  `&'static u32` only if `'a: 'static`), casts, turbofishes (a method's own, `x.f::<&'a T>()`, too) and struct
   literal and variant paths, in closures too; `Self { .. }` and `Self(..)` in an impl have the
   impl's self type, with its anonymous lifetimes (`impl Foo<'_>`) as the impl's own. A function item called through a variable
   (`let f = foo::<&'static u32>; f(&x)`, or through a reference, `let f = &foo::<..>`) has the
@@ -171,11 +180,22 @@ All of these are rustc's, written from `compiler/rustc_borrowck` at the pinned n
   `let f = |x: &i32| -> &i32 { x };` is an error.
   One of its own made to outlive what it is not known to is an error in the closure
   (`with(|x| x)` returning the borrow it was given), named E0521 or a `FnMut` escape as
-  rustc names it. What a closure needs of its creator's regions is a requirement the creator
+  rustc names it: E0521 only when a captured variable's or a parameter's type names one of
+  the two lifetimes, else "lifetime may not live long enough". A borrow through a variable
+  the closure captures by reference outlives the closure's borrow of its environment, so
+  returning `&mut *captured` from an `FnMut` closure is the escape rustc reports. A local
+  with a written type that a value outliving a universal lifetime is assigned to is blamed
+  as rustc blames a type annotation, not the assignment. What a closure needs of its creator's regions is a requirement the creator
   proves where it makes the closure (closures are checked before the bodies that make them),
   so the error is the creator's, as in rustc. So is a `T: 'a` the closure cannot prove: the
   creator proves `T` outlives each of its regions that outlive `'a`, and an error is
   reported where the closure needed it.
+- `const { .. }` blocks: MIR lowering makes one a constant with a body of its own, checked
+  with its function as rustc checks an inline const, as a closure is: the regions of its type
+  and its function's lifetimes are its creator's, and what it needs of them is proven where
+  the function evaluates it (`const { InvariantRef::<'a>::NEW }` compared with a borrow of a
+  local needs the local to outlive `'a`). What its value borrows becomes part of the value,
+  as for a `const` item, but no call in it is promoted.
 - `async` blocks and `async fn` bodies: checked as rustc checks a coroutine, as a closure
   of the body that makes it, for moves, initialization and loans across `.await`. Every
   region of the future's type is its creator's, and an `async fn` relates the future's
@@ -224,8 +244,8 @@ With no borrow checker, the 245 units rustc accepts would pass. Now:
 
 | Mode | In scope | Pass | rustc accepts, ra-jit too | rustc rejects, same errors |
 |---|---|---|---|---|
-| Polonius | 1579 | 1422 (90.1%) | 245 of 245 | 1177 of 1334 |
-| NLL | 1577 | 1418 (89.9%) | 226 of 226 | 1192 of 1351 |
+| Polonius | 1579 | 1440 (91.2%) | 245 of 245 | 1195 of 1334 |
+| NLL | 1577 | 1436 (91.1%) | 226 of 226 | 1210 of 1351 |
 
 463 units are out of scope; 344 of them need a nightly feature. CI runs the scoring on Linux
 and fails below a floor a few units under the count there.
@@ -238,11 +258,11 @@ just, axum, nushell, delta, eza, tokei and starship it finds nothing, nor on the
 ## What is left
 
 Every failing unit is one where rustc gives an error ra-jit does not, or gives it on another
-line or with another code. By what is wrong, most first: 17 "lifetime may not live long
-enough" and 12 E0597 not reported, 10 with only an error rustc does not give, 9 "lifetime may
-not live long enough" on another line, 9 E0716 and 8 E0700 not reported, 7 each of E0507,
-E0521 and `FnMut` escapes, 6 each of E0510 and E0310, and 5 each of E0309, E0311 and
-higher-ranked errors not reported, then a long tail. The causes, grouped:
+line or with another code. By what is wrong, most first: 14 "lifetime may not live long
+enough" and 10 E0597 not reported, 9 "lifetime may not live long enough" on another line,
+9 with only an error rustc does not give, 8 each of E0716 and E0700, 7 each of E0507 and E0521,
+6 each of E0510 and E0310, and 5 each of E0309, E0311 and higher-ranked errors not reported,
+then a long tail. The causes, grouped:
 
 - **Higher-ranked regions and placeholders** (`for<'a>` bounds, closures with higher-ranked
   signatures): rustc checks them with placeholders in universes; ra-jit does not yet, and

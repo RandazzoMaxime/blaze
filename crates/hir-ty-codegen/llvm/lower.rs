@@ -113,6 +113,9 @@ pub(super) struct Lowering<'ctx, 'f> {
     statics: &'f FxHashSet<u32>,
     /// The number in the name of `_Unwind_Resume`, whose calls are LLVM's `resume`.
     resume: Option<u32>,
+    /// The number in the name of `memcmp`, which is called by its own name: LLVM writes a
+    /// comparison of the C library's of a few bytes it knows the number of as loads.
+    memcmp: Option<u32>,
     pads: FxHashMap<Pad, BasicBlock<'ctx>>,
     /// The block the allocas are in.
     frame: Option<BasicBlock<'ctx>>,
@@ -529,7 +532,10 @@ impl<'ctx, 'f> Lowering<'ctx, 'f> {
         });
         let target = crate::Target::selected().map_err(Unhandled::Llvm)?;
         let probe = target.stack_probe().map(|probe| ("probe-stack", probe));
-        for (name, value) in [("target-cpu", target.cpu())].into_iter().chain(probe) {
+        // Without, LLVM gives the frame pointer's register to values, and code that walks the
+        // frames by it reads one of those.
+        let frame = crate::backend::frame_pointers().then_some(("frame-pointer", "all"));
+        for (name, value) in [("target-cpu", target.cpu())].into_iter().chain(probe).chain(frame) {
             let attribute = context.create_string_attribute(name, value);
             function.add_attribute(AttributeLoc::Function, attribute);
         }
@@ -549,6 +555,7 @@ impl<'ctx, 'f> Lowering<'ctx, 'f> {
         constants: &'f FxHashMap<u32, &'f [u8]>,
         statics: &'f FxHashSet<u32>,
         resume: Option<u32>,
+        memcmp: Option<u32>,
         shown: &'f FxHashMap<u32, FunctionValue<'ctx>>,
     ) -> Lowered<()> {
         let func = defined.func;
@@ -577,6 +584,7 @@ impl<'ctx, 'f> Lowering<'ctx, 'f> {
             constants,
             statics,
             resume,
+            memcmp,
             pads: FxHashMap::default(),
             frame: None,
             arrival: None,
@@ -1878,10 +1886,14 @@ impl<'ctx, 'f> Lowering<'ctx, 'f> {
             return Ok(callee);
         }
         let data = &self.func.dfg.ext_funcs[func_ref];
-        let name = self.external_name(&data.name)?;
+        let mut name = self.external_name(&data.name)?;
         let sig = &self.func.dfg.signatures[data.signature];
         let ty = Self::function_type(self.context, sig)?;
         let shown = match super::Symbol::parse(&name) {
+            Some(super::Symbol::Func(id)) if Some(id) == self.memcmp => {
+                name = "memcmp".to_owned();
+                None
+            }
             Some(super::Symbol::Func(id)) => self.shown.get(&id).copied(),
             _ => None,
         };
@@ -1893,7 +1905,10 @@ impl<'ctx, 'f> Lowering<'ctx, 'f> {
             }
             Some(known) => known,
             None => {
-                let pointers = self.pointer_params.get(&name).map_or(&[][..], Vec::as_slice);
+                let pointers = match name.as_str() {
+                    "memcmp" => &[0, 1][..],
+                    _ => self.pointer_params.get(&name).map_or(&[][..], Vec::as_slice),
+                };
                 let ty = Self::with_pointers(self.context, ty, pointers);
                 let callee = self.module.add_function(&name, ty, Some(Linkage::External));
                 Self::mark_signature(self.context, sig, Side::Caller, |loc, attribute| {

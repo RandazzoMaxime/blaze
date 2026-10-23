@@ -7,7 +7,7 @@ use hir_def::hir::{BindingAnnotation, BindingId, ExprId, Pat, Statement};
 use rustc_hash::{FxHashMap, FxHashSet};
 use rustc_type_ir::{
     ClauseKind, OutlivesPredicate, RegionKind,
-    inherent::{Clause as _, IntoKind, Region as _},
+    inherent::{GenericArgs as _, IntoKind, Region as _},
 };
 
 use hir_ty::{
@@ -1216,7 +1216,9 @@ impl<'a, 'db> Checker<'a, '_, 'db> {
     /// Whether the region `rv` is in the type of a parameter, which rustc's E0521 names as
     /// where the data comes from; not in `f: impl FnOnce(&'a T)`, whose type is a parameter.
     fn parameter_names(&self, rv: regions::Rv) -> bool {
-        self.body.param_locals.iter().any(|&local| {
+        // A closure's reference to itself is not one of its parameters.
+        let own = usize::from(self.ctx.closure_local.is_some());
+        self.body.param_locals.iter().skip(own).any(|&local| {
             let ty = self.regions.local_tys[local.into_raw().into_u32() as usize];
             let mut found = false;
             rustc_type_ir::fold_regions(self.ctx.infcx.interner, ty, |region, _| {
@@ -1227,6 +1229,39 @@ impl<'a, 'db> Checker<'a, '_, 'db> {
         })
     }
 
+    /// Whether the region `rv` is in the type of what a closure captures or of one of its
+    /// parameters, which rustc's E0521 names as where the data comes from or goes; the
+    /// closure's reference to itself is neither, nor is `'static`.
+    fn closure_variable_names(&self, rv: regions::Rv) -> bool {
+        if rv == self.regions.static_rv {
+            return false;
+        }
+        let tys = &self.regions.local_tys;
+        let Some((&env, params)) = self.body.param_locals.split_first() else { return false };
+        let env = tys[env.into_raw().into_u32() as usize];
+        let env = match env.kind() {
+            TyKind::Ref(_, inner, _) => inner,
+            _ => env,
+        };
+        let captured = match env.kind() {
+            TyKind::Closure(_, args) => Some(args.as_closure().tupled_upvars_ty()),
+            TyKind::Coroutine(_, args) => Some(args.as_coroutine().tupled_upvars_ty()),
+            _ => None,
+        };
+        let interner = self.ctx.infcx.interner;
+        captured
+            .into_iter()
+            .chain(params.iter().map(|&it| tys[it.into_raw().into_u32() as usize]))
+            .any(|ty| {
+                let mut found = false;
+                rustc_type_ir::fold_regions(interner, ty, |region, _| {
+                    found |= regions::rv_of(region) == Some(rv);
+                    region
+                });
+                found
+            })
+    }
+
     /// The universal regions made to outlive what the signature does not say they outlive,
     /// and the type parameters made to outlive what they are not known to.
     fn report_region_errors(&mut self) {
@@ -1234,7 +1269,7 @@ impl<'a, 'db> Checker<'a, '_, 'db> {
             return;
         }
         let universals = &self.regions.universals;
-        let in_closure = self.ctx.closure_local.is_some();
+        let in_closure = self.ctx.closure_local.is_some() || self.ctx.inline_const;
         for (longer, &(longer_rv, kind)) in universals.iter().enumerate() {
             if matches!(kind, UniversalKind::Static | UniversalKind::FnBody) {
                 continue;
@@ -1275,6 +1310,8 @@ impl<'a, 'db> Checker<'a, '_, 'db> {
                 ("", "captured variable cannot escape `FnMut` closure body".to_owned())
             } else if escapes
                 && matches!(blamed.category, Category::Assignment | Category::CallArgument)
+                && (self.closure_variable_names(longer_rv)
+                    || self.closure_variable_names(shorter_rv))
             {
                 ("E0521", "borrowed data escapes outside of closure".to_owned())
             } else if !self.regions.is_impl_item
@@ -1827,6 +1864,35 @@ impl<'a, 'db> Checker<'a, '_, 'db> {
             self.report_use_of_moved_or_uninitialized(location, action, place, span, path);
             return;
         }
+        // A subslice of an array is moved if an element of it is, which a move of the array's
+        // elements has a path for (rustc's `check_if_subslice_element_is_moved`).
+        if let Some((&ProjectionElem::Subslice { from, to }, _)) = place.projection.split_last() {
+            let base = place.base(place.projection.len() - 1);
+            if let TyKind::Array(_, len) =
+                self.ctx.place_ty(self.body, base.local, base.projection).ty.kind()
+            {
+                let Some(len) = hir_ty::consteval::try_const_usize(self.ctx.db, len) else {
+                    return;
+                };
+                let Some(array) = self.move_path_for(base) else { return };
+                let range = from..(len as u64).saturating_sub(to);
+                let uninit = &self.uninit;
+                let moved = self.moves.paths[array].children.iter().find_map(|&child| {
+                    match self.moves.paths[child].projection.last() {
+                        Some(ProjectionElem::ConstantIndex { offset, .. })
+                            if range.contains(offset) =>
+                        {
+                            self.moves.find_in_descendants(child, &|it| uninit.contains(it))
+                        }
+                        _ => None,
+                    }
+                });
+                if let Some(moved) = moved {
+                    self.report_use_of_moved_or_uninitialized(location, action, base, span, moved);
+                }
+                return;
+            }
+        }
         if let Some(path) = self.move_path_for(place) {
             let uninit = &self.uninit;
             if let Some(moved) = self.moves.find_in_descendants(path, &|it| uninit.contains(it)) {
@@ -1849,7 +1915,7 @@ impl<'a, 'db> Checker<'a, '_, 'db> {
                 && let TyKind::Array(..) =
                     self.ctx.place_ty(self.body, base.local, base.projection).ty.kind()
             {
-                self.check_if_full_path_is_moved(location, InitAction::Use, base, span);
+                self.check_if_path_or_subpath_is_moved(location, InitAction::Use, base, span);
             }
         }
         for len in (0..place.projection.len()).rev() {

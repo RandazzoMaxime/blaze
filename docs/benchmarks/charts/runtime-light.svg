@@ -1,4 +1,4 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="760" height="913" viewBox="0 0 760 913" role="img" aria-label="How fast the programs ra-jit builds run, against cargo build --release">
+<svg xmlns="http://www.w3.org/2000/svg" width="760" height="956" viewBox="0 0 760 956" role="img" aria-label="How fast the programs ra-jit builds run, against cargo build --release">
 <title>How fast the programs ra-jit builds run, against cargo build --release</title>
 <style>text{font-family:-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans', Helvetica, Arial, sans-serif;fill:#1f2328}.d{fill:#59636e}.b{font-weight:600}.v{font-variant-numeric:tabular-nums}.g{stroke:#e3e7eb}.r{stroke:#59636e;stroke-width:1.25}.z{fill:#f6f8fa}.o{fill:none;stroke-width:1.25}.p0{fill:#1f6fd0}.w0{stroke:#1f6fd0}.p1{fill:#d8700a}.w1{stroke:#d8700a}.p2{fill:#12a07a}.w2{stroke:#12a07a}</style>
 <text x="16" y="26" font-size="17" class="b">How fast the programs ra-jit builds run, against cargo build --release</text>
@@ -8,6 +8,7 @@
 <text x="34" y="86" font-size="12.5">macOS arm64</text>
 <rect x="132.25" y="76" width="12" height="12" rx="3" class="p2"/>
 <text x="150.2" y="86" font-size="12.5">Linux x86-64</text>
+<rect x="16" y="804" width="728" height="43" class="z"/>
 <rect x="16" y="718" width="728" height="43" class="z"/>
 <rect x="16" y="632" width="728" height="43" class="z"/>
 <rect x="16" y="546" width="728" height="43" class="z"/>
@@ -15,109 +16,116 @@
 <rect x="16" y="374" width="728" height="43" class="z"/>
 <rect x="16" y="288" width="728" height="43" class="z"/>
 <rect x="16" y="202" width="728" height="43" class="z"/>
-<line x1="126.6" y1="116" x2="126.6" y2="804" class="g"/>
-<line x1="224.9" y1="116" x2="224.9" y2="804" class="g"/>
-<line x1="302.9" y1="116" x2="302.9" y2="804" class="g"/>
-<line x1="358.3" y1="116" x2="358.3" y2="804" class="g"/>
-<line x1="436.3" y1="116" x2="436.3" y2="804" class="g"/>
-<line x1="514.3" y1="116" x2="514.3" y2="804" class="g"/>
-<line x1="569.6" y1="116" x2="569.6" y2="804" class="g"/>
-<line x1="647.6" y1="116" x2="647.6" y2="804" class="g"/>
+<line x1="126.6" y1="116" x2="126.6" y2="847" class="g"/>
+<line x1="182.3" y1="116" x2="182.3" y2="847" class="g"/>
+<line x1="266.7" y1="116" x2="266.7" y2="847" class="g"/>
+<line x1="333.8" y1="116" x2="333.8" y2="847" class="g"/>
+<line x1="381.4" y1="116" x2="381.4" y2="847" class="g"/>
+<line x1="448.4" y1="116" x2="448.4" y2="847" class="g"/>
+<line x1="515.5" y1="116" x2="515.5" y2="847" class="g"/>
+<line x1="563" y1="116" x2="563" y2="847" class="g"/>
+<line x1="630.1" y1="116" x2="630.1" y2="847" class="g"/>
 <line x1="16" y1="159" x2="744" y2="159" class="r"/>
-<rect x="402.7" y="124" width="33.5" height="12" rx="2" class="p0"/>
-<rect x="414.7" y="139" width="21.5" height="12" rx="2" class="p2"/>
-<rect x="430" y="167" width="6.2" height="12" rx="2" class="p0"/>
-<rect x="436.3" y="182" width="37.9" height="12" rx="2" class="p2"/>
-<rect x="436.3" y="210" width="2" height="12" rx="2" class="p0"/>
-<rect x="435.7" y="225" width="2" height="12" rx="2" class="p2"/>
-<rect x="434.7" y="253" width="2" height="12" rx="2" class="p0"/>
-<rect x="436.1" y="268" width="2" height="12" rx="2" class="p2"/>
-<rect x="436.3" y="296" width="2.9" height="12" rx="2" class="p0"/>
-<rect x="436.3" y="311" width="2" height="12" rx="2" class="p2"/>
-<rect x="416.2" y="339" width="20.1" height="12" rx="2" class="p0"/>
-<rect x="415.7" y="354" width="20.6" height="12" rx="2" class="p2"/>
-<rect x="181.8" y="382" width="254.5" height="12" rx="2" class="p0"/>
-<rect x="374.4" y="397" width="61.8" height="12" rx="2" class="p2"/>
-<rect x="436.3" y="425" width="2.3" height="12" rx="2" class="p0"/>
-<rect x="435.7" y="440" width="2" height="12" rx="2" class="p2"/>
-<rect x="369.1" y="468" width="67.2" height="12" rx="2" class="p0"/>
-<rect x="382.8" y="483" width="53.4" height="12" rx="2" class="p2"/>
-<rect x="391.3" y="511" width="44.9" height="12" rx="2" class="p0"/>
-<rect x="436.3" y="526" width="3.9" height="12" rx="2" class="p2"/>
-<rect x="389.2" y="554" width="47" height="12" rx="2" class="p0"/>
-<rect x="386.1" y="569" width="50.2" height="12" rx="2" class="p2"/>
-<rect x="408.4" y="597" width="27.9" height="12" rx="2" class="p0"/>
-<rect x="418.1" y="612" width="18.2" height="12" rx="2" class="p2"/>
-<rect x="413.6" y="640" width="22.7" height="12" rx="2" class="p0"/>
-<rect x="404.6" y="655" width="31.7" height="12" rx="2" class="p2"/>
-<rect x="300.2" y="683" width="136" height="12" rx="2" class="p0"/>
-<rect x="362.4" y="698" width="73.9" height="12" rx="2" class="p2"/>
-<rect x="436.3" y="726" width="137.6" height="12" rx="2" class="p0"/>
-<rect x="421.1" y="741" width="15.2" height="12" rx="2" class="p2"/>
-<rect x="418.8" y="769" width="17.5" height="12" rx="2" class="p0"/>
-<rect x="396.3" y="784" width="40" height="12" rx="2" class="p2"/>
-<line x1="436.3" y1="108" x2="436.3" y2="804" class="r"/>
-<text x="126.6" y="821" font-size="11.5" text-anchor="middle" class="d v">5×</text>
-<text x="224.9" y="821" font-size="11.5" text-anchor="middle" class="d v">3×</text>
-<text x="302.9" y="821" font-size="11.5" text-anchor="middle" class="d v">2×</text>
-<text x="358.3" y="821" font-size="11.5" text-anchor="middle" class="d v">1.5×</text>
-<text x="436.3" y="821" font-size="11.5" text-anchor="middle" class="d v">1×</text>
-<text x="514.3" y="821" font-size="11.5" text-anchor="middle" class="d v">1.5×</text>
-<text x="569.6" y="821" font-size="11.5" text-anchor="middle" class="d v">2×</text>
-<text x="647.6" y="821" font-size="11.5" text-anchor="middle" class="d v">3×</text>
+<rect x="419.6" y="124" width="28.8" height="12" rx="2" class="p0"/>
+<rect x="412.9" y="139" width="35.5" height="12" rx="2" class="p2"/>
+<rect x="443" y="167" width="5.4" height="12" rx="2" class="p0"/>
+<rect x="448.4" y="182" width="32.6" height="12" rx="2" class="p2"/>
+<rect x="448.4" y="210" width="2" height="12" rx="2" class="p0"/>
+<rect x="447.9" y="225" width="2" height="12" rx="2" class="p2"/>
+<rect x="447.1" y="253" width="2" height="12" rx="2" class="p0"/>
+<rect x="448.2" y="268" width="2" height="12" rx="2" class="p2"/>
+<rect x="448.4" y="296" width="2.5" height="12" rx="2" class="p0"/>
+<rect x="448.4" y="311" width="2" height="12" rx="2" class="p2"/>
+<rect x="431.2" y="339" width="17.3" height="12" rx="2" class="p0"/>
+<rect x="430.7" y="354" width="17.7" height="12" rx="2" class="p2"/>
+<rect x="229.7" y="382" width="218.7" height="12" rx="2" class="p0"/>
+<rect x="395.3" y="397" width="53.1" height="12" rx="2" class="p2"/>
+<rect x="448.4" y="425" width="2" height="12" rx="2" class="p0"/>
+<rect x="447.9" y="440" width="2" height="12" rx="2" class="p2"/>
+<rect x="390.7" y="468" width="57.8" height="12" rx="2" class="p0"/>
+<rect x="402.5" y="483" width="45.9" height="12" rx="2" class="p2"/>
+<rect x="409.8" y="511" width="38.6" height="12" rx="2" class="p0"/>
+<rect x="448.4" y="526" width="3.3" height="12" rx="2" class="p2"/>
+<rect x="408" y="554" width="40.4" height="12" rx="2" class="p0"/>
+<rect x="405.3" y="569" width="43.1" height="12" rx="2" class="p2"/>
+<rect x="424.4" y="597" width="24" height="12" rx="2" class="p0"/>
+<rect x="432.8" y="612" width="15.6" height="12" rx="2" class="p2"/>
+<rect x="428.9" y="640" width="19.5" height="12" rx="2" class="p0"/>
+<rect x="421.2" y="655" width="27.2" height="12" rx="2" class="p2"/>
+<rect x="331.5" y="683" width="116.9" height="12" rx="2" class="p0"/>
+<rect x="384.9" y="698" width="63.5" height="12" rx="2" class="p2"/>
+<rect x="448.4" y="726" width="118.3" height="12" rx="2" class="p0"/>
+<rect x="435.4" y="741" width="13" height="12" rx="2" class="p2"/>
+<rect x="433.4" y="769" width="15" height="12" rx="2" class="p0"/>
+<rect x="414" y="784" width="34.4" height="12" rx="2" class="p2"/>
+<rect x="449.4" y="813.5" width="9" height="9" rx="2" class="o w0"/>
+<rect x="157.6" y="827" width="290.8" height="12" rx="2" class="p2"/>
+<line x1="448.4" y1="108" x2="448.4" y2="847" class="r"/>
+<text x="126.6" y="864" font-size="11.5" text-anchor="middle" class="d v">7×</text>
+<text x="182.3" y="864" font-size="11.5" text-anchor="middle" class="d v">5×</text>
+<text x="266.7" y="864" font-size="11.5" text-anchor="middle" class="d v">3×</text>
+<text x="333.8" y="864" font-size="11.5" text-anchor="middle" class="d v">2×</text>
+<text x="381.4" y="864" font-size="11.5" text-anchor="middle" class="d v">1.5×</text>
+<text x="448.4" y="864" font-size="11.5" text-anchor="middle" class="d v">1×</text>
+<text x="515.5" y="864" font-size="11.5" text-anchor="middle" class="d v">1.5×</text>
+<text x="563" y="864" font-size="11.5" text-anchor="middle" class="d v">2×</text>
+<text x="630.1" y="864" font-size="11.5" text-anchor="middle" class="d v">3×</text>
 <text x="114.6" y="135.5" font-size="13" text-anchor="end" class="b">All benchmarks</text>
 <text x="114.6" y="149.5" font-size="11" text-anchor="end" class="d">geometric mean</text>
-<text x="442.3" y="134" font-size="12" class="v b">1.19× slower</text>
-<text x="442.3" y="149" font-size="12" class="v b">1.12× slower</text>
+<text x="454.4" y="134" font-size="12" class="v b">1.19× slower</text>
+<text x="454.4" y="149" font-size="12" class="v b">1.24× slower</text>
 <text x="114.6" y="185" font-size="13" text-anchor="end">sieve</text>
-<text x="442.3" y="177" font-size="12" class="v">1.03× slower</text>
-<text x="480.2" y="192" font-size="12" class="v">1.22× faster</text>
+<text x="454.4" y="177" font-size="12" class="v">1.03× slower</text>
+<text x="487" y="192" font-size="12" class="v">1.22× faster</text>
 <text x="114.6" y="228" font-size="13" text-anchor="end">collatz</text>
-<text x="442.3" y="220" font-size="12" class="v">1.00×</text>
-<text x="442.3" y="235" font-size="12" class="v">1.00×</text>
+<text x="454.4" y="220" font-size="12" class="v">1.00×</text>
+<text x="454.4" y="235" font-size="12" class="v">1.00×</text>
 <text x="114.6" y="271" font-size="13" text-anchor="end">fnv</text>
-<text x="442.3" y="263" font-size="12" class="v">1.01× slower</text>
-<text x="442.3" y="278" font-size="12" class="v">1.00×</text>
+<text x="454.4" y="263" font-size="12" class="v">1.01× slower</text>
+<text x="454.4" y="278" font-size="12" class="v">1.00×</text>
 <text x="114.6" y="314" font-size="13" text-anchor="end">qsort</text>
-<text x="445.2" y="306" font-size="12" class="v">1.02× faster</text>
-<text x="443.8" y="321" font-size="12" class="v">1.01× faster</text>
+<text x="456.9" y="306" font-size="12" class="v">1.02× faster</text>
+<text x="455.7" y="321" font-size="12" class="v">1.01× faster</text>
 <text x="114.6" y="357" font-size="13" text-anchor="end">matmul</text>
-<text x="442.3" y="349" font-size="12" class="v">1.11× slower</text>
-<text x="442.3" y="364" font-size="12" class="v">1.11× slower</text>
+<text x="454.4" y="349" font-size="12" class="v">1.11× slower</text>
+<text x="454.4" y="364" font-size="12" class="v">1.11× slower</text>
 <text x="114.6" y="400" font-size="13" text-anchor="end">nbody</text>
-<text x="442.3" y="392" font-size="12" class="v">3.75× slower</text>
-<text x="442.3" y="407" font-size="12" class="v">1.38× slower</text>
+<text x="454.4" y="392" font-size="12" class="v">3.75× slower</text>
+<text x="454.4" y="407" font-size="12" class="v">1.38× slower</text>
 <text x="114.6" y="443" font-size="13" text-anchor="end">mandelbrot</text>
-<text x="444.6" y="435" font-size="12" class="v">1.01× faster</text>
-<text x="442.3" y="450" font-size="12" class="v">1.00×</text>
+<text x="456.4" y="435" font-size="12" class="v">1.01× faster</text>
+<text x="454.4" y="450" font-size="12" class="v">1.00×</text>
 <text x="114.6" y="486" font-size="13" text-anchor="end">words</text>
-<text x="442.3" y="478" font-size="12" class="v">1.42× slower</text>
-<text x="442.3" y="493" font-size="12" class="v">1.32× slower</text>
+<text x="454.4" y="478" font-size="12" class="v">1.42× slower</text>
+<text x="454.4" y="493" font-size="12" class="v">1.32× slower</text>
 <text x="114.6" y="529" font-size="13" text-anchor="end">numeric</text>
-<text x="442.3" y="521" font-size="12" class="v">1.26× slower</text>
-<text x="446.1" y="536" font-size="12" class="v">1.02× faster</text>
+<text x="454.4" y="521" font-size="12" class="v">1.26× slower</text>
+<text x="457.8" y="536" font-size="12" class="v">1.02× faster</text>
 <text x="114.6" y="572" font-size="13" text-anchor="end">jsonrt</text>
-<text x="442.3" y="564" font-size="12" class="v">1.28× slower</text>
-<text x="442.3" y="579" font-size="12" class="v">1.30× slower</text>
+<text x="454.4" y="564" font-size="12" class="v">1.28× slower</text>
+<text x="454.4" y="579" font-size="12" class="v">1.30× slower</text>
 <text x="114.6" y="615" font-size="13" text-anchor="end">ripgrep</text>
-<text x="442.3" y="607" font-size="12" class="v">≈1.16× slower</text>
-<text x="442.3" y="622" font-size="12" class="v">1.10× slower</text>
+<text x="454.4" y="607" font-size="12" class="v">≈1.16× slower</text>
+<text x="454.4" y="622" font-size="12" class="v">1.10× slower</text>
 <text x="114.6" y="658" font-size="13" text-anchor="end">fd</text>
-<text x="442.3" y="650" font-size="12" class="v">≈1.12× slower</text>
-<text x="442.3" y="665" font-size="12" class="v">1.18× slower</text>
+<text x="454.4" y="650" font-size="12" class="v">≈1.12× slower</text>
+<text x="454.4" y="665" font-size="12" class="v">1.18× slower</text>
 <text x="114.6" y="701" font-size="13" text-anchor="end">tokei</text>
-<text x="442.3" y="693" font-size="12" class="v">≈2.03× slower</text>
-<text x="442.3" y="708" font-size="12" class="v">1.47× slower</text>
+<text x="454.4" y="693" font-size="12" class="v">≈2.03× slower</text>
+<text x="454.4" y="708" font-size="12" class="v">1.47× slower</text>
 <text x="114.6" y="744" font-size="13" text-anchor="end">eza</text>
-<text x="579.9" y="736" font-size="12" class="v">≈2.04× faster</text>
-<text x="442.3" y="751" font-size="12" class="v">1.08× slower</text>
+<text x="572.7" y="736" font-size="12" class="v">≈2.04× faster</text>
+<text x="454.4" y="751" font-size="12" class="v">1.08× slower</text>
 <text x="114.6" y="787" font-size="13" text-anchor="end">bat</text>
-<text x="442.3" y="779" font-size="12" class="v">1.09× slower</text>
-<text x="442.3" y="794" font-size="12" class="v">1.23× slower</text>
-<text x="436.3" y="103" font-size="11.5" text-anchor="middle" class="d">as fast as release</text>
-<text x="428.3" y="841" font-size="12" text-anchor="end" class="d">← ra-jit's program slower</text>
-<text x="444.3" y="841" font-size="12" class="d">ra-jit's program faster →</text>
-<text x="16" y="865" font-size="11.5" class="d">Each colour is a machine of its own: compare bars of one colour, not across colours. ra-jit's LLVM at -O3. macOS arm64:</text>
-<text x="16" y="882" font-size="11.5" class="d">GitHub-hosted macos-15 runner, 2026-10-22. Linux x86-64: AWS c7a.48xlarge, 2026-10-22. ≈: that benchmark's runs varied by</text>
-<text x="16" y="899" font-size="11.5" class="d">more than 1.5×, so read it as rough.</text>
+<text x="454.4" y="779" font-size="12" class="v">1.09× slower</text>
+<text x="454.4" y="794" font-size="12" class="v">1.23× slower</text>
+<text x="114.6" y="830" font-size="13" text-anchor="end">bun</text>
+<text x="464.4" y="822" font-size="11.5" class="d">not measured yet</text>
+<text x="454.4" y="837" font-size="12" class="v">5.80× slower</text>
+<text x="448.4" y="103" font-size="11.5" text-anchor="middle" class="d">as fast as release</text>
+<text x="440.4" y="884" font-size="12" text-anchor="end" class="d">← ra-jit's program slower</text>
+<text x="456.4" y="884" font-size="12" class="d">ra-jit's program faster →</text>
+<text x="16" y="908" font-size="11.5" class="d">Each colour is a machine of its own: compare bars of one colour, not across colours. ra-jit's LLVM at -O3. macOS arm64:</text>
+<text x="16" y="925" font-size="11.5" class="d">GitHub-hosted macos-15 runner, 2026-10-22. Linux x86-64: AWS c7a.48xlarge, 2026-10-22. bun, measured on its own: Linux x86-64:</text>
+<text x="16" y="942" font-size="11.5" class="d">AWS c8a.24xlarge, 2026-10-22. ≈: that benchmark's runs varied by more than 1.5×, so read it as rough.</text>
 </svg>

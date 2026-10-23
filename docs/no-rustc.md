@@ -158,13 +158,17 @@ These are the places ra-jit still runs rustc or relies on what it wrote, as of m
 - rust-analyzer loads a workspace with `cargo metadata`, `cargo check --compile-time-deps` (which
   compiles the build scripts and proc macros with rustc and runs the scripts) and rustc's
   answers to `--print`; proc macros are rustc's libraries run by the toolchain's proc-macro
-  server.
+  server. Since B, each of rustc's answers is asked once per toolchain and kept: the first
+  ask of each question still runs rustc.
 - Doctest examples are compiled by rustc, and a library whose doctests ra-jit cannot take is
-  left to rustdoc ([#28](https://github.com/indexable-inc/ra-jit/issues/28)).
+  left to rustdoc ([#28](https://github.com/indexable-inc/ra-jit/issues/28)). Since A, a
+  member of a workspace is no longer left to rustdoc for its features.
 - Under plain cargo after `ra-jit enable`, rustc builds every crate of the workspace except the
   programs the daemon has loaded, and writes the dep-info of those.
 - `cargo ra-jit check` is `cargo check`.
-- Under Cranelift, every `asm!` block is assembled by running rustc (`hir-ty-codegen/asm.rs`).
+- Under Cranelift, every `asm!` block was assembled by running rustc (`hir-ty-codegen/asm.rs`).
+  Since C, a build of ra-jit with LLVM assembles it in process and one without has clang or
+  the host's `cc` assemble it; rustc is left only where there is neither.
 
 ### Where, and when
 
@@ -209,7 +213,7 @@ Paths are under `crates/`; line numbers are of 41e7906192.
 
 | Where | What it does | When |
 |---|---|---|
-| `ra-jit/src/main.rs:2261` `ProjectWorkspace::load` | `cargo metadata`, plus rustc's `-vV`, `--print sysroot`, `--print cfg`, `--print target-spec-json` through `cargo rustc --print` (`vendor/rust-analyzer/crates/project-model/src/toolchain_info/`) | every load: the daemon's workers and spares, and each doctest process |
+| `ra-jit/src/main.rs:2261` `ProjectWorkspace::load` | `cargo metadata`, plus rustc's `-vV`, `--print sysroot`, `--print cfg`, `--print target-spec-json` through `cargo rustc --print` (`vendor/rust-analyzer/crates/project-model/src/toolchain_info/`) | every load: the daemon's workers and spares, and each doctest process; since B, rustc answers each question once per toolchain |
 | `ra-jit/src/main.rs:2272` | asks rustc for the target triple | every load |
 | `ra-jit/src/plan.rs:475` | `cargo build --unit-graph`, which asks rustc about the target | every load, and every doctest run per library |
 | `ra-jit/src/main.rs:2314`, `ra-jit/src/inputs.rs:282` `run_build_scripts` | rust-analyzer's `cargo check --compile-time-deps`: rustc compiles every build script and proc macro and their dependencies, and the scripts run | every load whose target directory does not have them yet; after an edit to a proc macro or build script |
@@ -222,9 +226,9 @@ Paths are under `crates/`; line numbers are of 41e7906192.
 |---|---|---|
 | `ra-jit/src/cargo/run.rs:136` | `cargo test --doc` with ra-jit as `RUSTDOC` | `cargo ra-jit test` of a library with doctests |
 | `ra-jit/src/doctest.rs:203`, `:246` `compile` | rustc links a probe program to learn the link line, and compiles or checks each example | every library's doctests |
-| `ra-jit/src/doctest.rs:301` `leave_to_rustdoc` | hands the library to rustdoc | `-q`, a library ra-jit cannot load, and today every package whose features `cargo build --unit-graph` rejects (below) |
+| `ra-jit/src/doctest.rs:301` `leave_to_rustdoc` | hands the library to rustdoc | `-q`, a library ra-jit cannot load; until A, every package whose features `cargo build --unit-graph` rejected (below) |
 | `ra-jit/src/cargo/mod.rs:139` | `cargo ra-jit check` is `cargo check` | every check |
-| `hir-ty-codegen/asm.rs:717` `run_assembler` | rustc assembles each `asm!` block (cached by its text) | Cranelift, the first build of a program with `asm!` |
+| `hir-ty-codegen/asm.rs:717` `run_assembler` | rustc assembles each `asm!` block (cached by its text) | Cranelift, the first build of a program with `asm!`; since C, only where ra-jit is built without LLVM and there is neither clang nor a `cc` for the host |
 | `ra-jit/src/main.rs:5084`, `:5127` `RA_JIT_WRAPS_RUSTC` | ra-jit standing in for rustc for a whole build | the harness's "alone" builds |
 | `harness/apps.py:113` | the harness's "alone" mode: cargo with ra-jit as `RUSTC_WRAPPER`, linking the sysroot's rlibs | the harness only |
 
@@ -335,29 +339,65 @@ What the numbers say:
   bun's [#34](https://github.com/indexable-inc/ra-jit/issues/34) and
   [#35](https://github.com/indexable-inc/ra-jit/issues/35) are the real refusals.
 
+#### After A, B and C
+
+Counted the same way on dev-aws-eph-norustc (Linux x86-64, 96 cores, Cranelift), ra-jit at
+8155abc19c (2026-10-22): A, B and C merged, and D's first part and the spare that starts only
+for a build that asks for one (#56) with them. rustc runs per step (compiles + queries); the
+steps not shown ran none before and none now.
+
+| Step | ripgrep before | ripgrep now | nushell before | nushell now |
+|---|---|---|---|---|
+| cold build | 116 (43 + 73), 6.2 s | 59 (42 + 17), 4.2 s | 618 (523 + 95), 40.0 s | 559 (522 + 37), 24.0 s |
+| signature edit | 0 | 0 | 128 (83 + 45), 8.6 s | 90 (83 + 7), 5.6 s |
+| an error | 6 (6 + 0) | 0 (D) | 4 (1 + 3) | 0 (D) |
+| first `test --no-run` | 106 (45 + 61) | 56 (50 + 6) | 156 (115 + 41) | 123 (115 + 8) |
+| `test --no-run` after a body edit | 0 | 0 | 22 (0 + 22), 6.0 s | 0 |
+| `test --no-run` after a test was added | 75 (18 + 57) | 18 (18 + 0) | 47 (11 + 36) | 11 (11 + 0) |
+| doctests, first | 97 (27 + 70) and 2 rustdoc, 28.2 s | 8 (7 + 1), 3.0 s | 212 (165 + 47) and 1 rustdoc | 132 (131 + 1), no rustdoc |
+| doctests, again | 90 (27 + 63) and 2 rustdoc, 28.0 s | 6 (6 + 0), 2.9 s | 92 (78 + 14) and 1 rustdoc | 123 (123 + 0), no rustdoc |
+| `check` | 38 (35 + 3) | 38 (35 + 3) | 413 (408 + 5) | 446 (441 + 5) |
+
+- **Queries** went from 73 to 17 in ripgrep's cold build and from 95 to 37 in nushell's. What
+  is left is each question's first ask per toolchain (cargo's probes, rust-analyzer's `cfg`
+  and target spec, the sysroot), and the probes of `cargo check --compile-time-deps` and of
+  plain `cargo check`, which ra-jit does not wrap (steps I and D).
+- **Doctests** no longer go to rustdoc: globset, grep-printer and nu-protocol are ra-jit's.
+  Their examples are still compiled and linked by rustc in the doctest process (step L), which
+  is why nushell's second run compiles 123 where it compiled 78 and left nu-protocol to
+  rustdoc. On ripgrep the run fails: one of globset's examples, built from functions the store
+  had, crashes ([#101](https://github.com/indexable-inc/ra-jit/issues/101)). That bug was
+  there before; rustdoc hid it.
+- **`check`** is plain `cargo check` (D) and moves with what the steps before it left built.
+- **The fixture of `harness/norustc.py`**, in CI on Linux x86-64, Linux AArch64 and macOS
+  arm64 under both backends: the cold build 74 to 76 rustc runs before A, 18 now; edits 5 (277
+  to 297 on macOS, whose daemon did not listen, #106), 0 now; tests 16 to 19, 12 now; doctests
+  23, 6 now; check 7, and 8 since the fixture has one library more. These are
+  `norustc/baseline.json`.
+
 ## The plan
 
 The steps in the order they can land. Each has an issue labelled `no-rustc`, #81 to #93. Effort is a rough
 size for one person: small is days, medium one to three weeks, large more. Each step ends with
 the counts of [How often](#how-often) lower, measured by step A's check, and none higher.
 
-| Step | Removes | Needs | Effort | Risk |
-|---|---|---|---|---|
-| [A](https://github.com/indexable-inc/ra-jit/issues/81). Count every rustc run and refuse new ones | nothing; makes the rest measurable | | small | low |
-| [B](https://github.com/indexable-inc/ra-jit/issues/82). ra-jit answers rustc's questions | every query | A | medium | medium |
-| [C](https://github.com/indexable-inc/ra-jit/issues/83). `asm!` assembled in process | the assembler run | A | small to medium | low |
-| [D](https://github.com/indexable-inc/ra-jit/issues/84). ra-jit's verdict is the final word | the fallback on an error, `cargo ra-jit check` as `cargo check` | A; borrowck work | large | high |
-| [E](https://github.com/indexable-inc/ra-jit/issues/85). No function left to rustc | the refused classes; a refusal fails the build | A | large, ongoing | medium |
-| [F](https://github.com/indexable-inc/ra-jit/issues/86). The standard library compiled by ra-jit | the sysroot's rlibs | C, E | large | high |
-| [G](https://github.com/indexable-inc/ra-jit/issues/87). Every crate compiled and linked by ra-jit | rustc's rlibs, objects, symbols and link line, "no rustc symbol" | E, F | large | high |
-| [H](https://github.com/indexable-inc/ra-jit/issues/88). ra-jit writes the test harness | the fallback when a test is added | G | medium | medium |
-| [I](https://github.com/indexable-inc/ra-jit/issues/89). Build scripts compiled and run by ra-jit | build scripts and their probes by rustc | B, G | medium | medium |
-| [J](https://github.com/indexable-inc/ra-jit/issues/90). Proc macros compiled and loaded by ra-jit | proc macros by rustc, the toolchain's proc-macro server | F, G | large | high |
-| [K](https://github.com/indexable-inc/ra-jit/issues/91). The cold build is ra-jit's | cargo's first build, the rustc base (#11) | G, I, J | medium | high |
-| [L](https://github.com/indexable-inc/ra-jit/issues/92). Doctests by the daemon (#28) | probe and examples by rustc, rustdoc | B, G, D | medium | medium |
-| [M](https://github.com/indexable-inc/ra-jit/issues/93). Remove the wrapper and the fallback | `ra-jit-rustc`, `ra-jit-rustc-first`, stand-ins, dep-info, settle, `by_cargo`, `only_cargo` | all | medium | low |
+| Step | Removes | Needs | Effort | Risk | Owner |
+|---|---|---|---|---|---|
+| [A](https://github.com/indexable-inc/ra-jit/issues/81). Count every rustc run and refuse new ones | nothing; makes the rest measurable | | small | low | the `no-rustc-abc` lane: done |
+| [B](https://github.com/indexable-inc/ra-jit/issues/82). ra-jit answers rustc's questions | every query | A | medium | medium | the `no-rustc-abc` lane: done, first asks left |
+| [C](https://github.com/indexable-inc/ra-jit/issues/83). `asm!` assembled in process | the assembler run | A | small to medium | low | the `no-rustc-abc` lane: done, rustc left without clang or LLVM |
+| [D](https://github.com/indexable-inc/ra-jit/issues/84). ra-jit's verdict is the final word | the fallback on an error, `cargo ra-jit check` as `cargo check` | A; borrowck work | large | high | the app-fixes worker's `no-rustc-d` lane, which also has [#96](https://github.com/indexable-inc/ra-jit/issues/96) |
+| [E](https://github.com/indexable-inc/ra-jit/issues/85). No function left to rustc | the refused classes; a refusal fails the build | A | large, ongoing | medium | the bun lane (bun's classes, #34, #35) and the glancer lane (kept rejections, #37) |
+| [F](https://github.com/indexable-inc/ra-jit/issues/86). The standard library compiled by ra-jit | the sysroot's rlibs | C, E | large | high | the cold-start lane |
+| [G](https://github.com/indexable-inc/ra-jit/issues/87). Every crate compiled and linked by ra-jit | rustc's rlibs, objects, symbols and link line, "no rustc symbol" | E, F | large | high | the cold-start lane |
+| [H](https://github.com/indexable-inc/ra-jit/issues/88). ra-jit writes the test harness | the fallback when a test is added | G | medium | medium | none yet |
+| [I](https://github.com/indexable-inc/ra-jit/issues/89). Build scripts compiled and run by ra-jit | build scripts and their probes by rustc | B, G | medium | medium | none yet |
+| [J](https://github.com/indexable-inc/ra-jit/issues/90). Proc macros compiled and loaded by ra-jit | proc macros by rustc, the toolchain's proc-macro server | F, G | large | high | none yet |
+| [K](https://github.com/indexable-inc/ra-jit/issues/91). The cold build is ra-jit's | cargo's first build, the rustc base (#11) | G, I, J | medium | high | none yet |
+| [L](https://github.com/indexable-inc/ra-jit/issues/92). Doctests by the daemon (#28) | probe and examples by rustc, rustdoc | B, G, D | medium | medium | none yet |
+| [M](https://github.com/indexable-inc/ra-jit/issues/93). Remove the wrapper and the fallback | `ra-jit-rustc`, `ra-jit-rustc-first`, stand-ins, dep-info, settle, `by_cargo`, `only_cargo` | all | medium | low | none yet |
 
-A, B and C can start now and in parallel. D and E run alongside everything: they are
+A, B and C landed on 2026-10-22. D and E run alongside everything: they are
 correctness work whose bar rises as the others land. F, G, I and J are the core and go in that
 order, I and J in parallel once G is in. K, H and L follow, M last.
 
@@ -368,6 +408,24 @@ bench apps, failing when a count goes up, and the fmt job refuses a new `Command
 rustdoc or cargo outside that function. Also fix the doctest features bug above, which sends
 packages to rustdoc for no reason.
 
+Done (the `no-rustc-abc` lane, [#97](https://github.com/indexable-inc/ra-jit/pull/97) and
+[#100](https://github.com/indexable-inc/ra-jit/pull/100)), in a different form from the one
+above. `harness/norustc.py`, in the fast tier on every platform and backend CI has, builds a
+small workspace (`harness/norustc/fixture`: a program with an `asm!` block, a library with unit
+tests, doctests and features the root package uses through another library, a proc macro, and a
+path dependency outside the workspace with a build script) through a copy of the toolchain whose
+rustc, rustdoc and cargo log every run, in five scenarios: a cold build, edits, tests, doctests
+and check. A count above `harness/norustc/baseline.json` fails the queue; a lower one says to
+lower it (`norustc.py --record`). The baselines are CI's: a 96-core dev host counts more, its
+spares asking more. `harness/rustcsites.py`, in the fmt job, counts the places in `crates/` that
+start rustc, rustdoc or cargo, or read which to start, per file against
+`harness/norustc/sites.json`, and fails on a new one. Not done: one function every start goes
+through, with `ra-jit cargo status` printing the counts, and the bench apps counted nightly
+(`harness/norustc/count.py` is still run by hand). The doctest bug: the doctest process planned
+the workspace's root package and ran the build scripts with the member's features, which the
+root does not have; it now selects the package (`--package`, from `CARGO_PKG_NAME`) and plans
+the package rustdoc runs the examples in.
+
 **B. ra-jit answers rustc's questions.** ([#82](https://github.com/indexable-inc/ra-jit/issues/82)) `-vV`, `--print cfg`, `sysroot`, `target-libdir`,
 `target-spec-json`, `file-names`, `split-debuginfo` and the rest are answered by ra-jit from
 its own targets, byte for byte as rustc 1.99.0 answers them. rust-analyzer's `toolchain_info`
@@ -376,9 +434,34 @@ run with `RUSTC` naming ra-jit, and a load asks them once, not once per worker a
 a wrong `cfg` builds the wrong code without a word; the harness compares every answer with
 rustc's on every target ra-jit knows.
 
+Done in part (the `no-rustc-abc` lane, [#100](https://github.com/indexable-inc/ra-jit/pull/100)):
+the answers are rustc's, asked once per toolchain and kept, not ra-jit's own.
+`crates/ra-jit/src/answers.rs` keeps each answer to `-vV`, `--version` and the `--print` kinds
+that read no source (cfg, target-spec-json, sysroot, target-libdir, cargo's file-names probe and
+the rest) under ra-jit's cache, by the rustc it is of (its canonical path, length and time), the
+arguments, the variables rustc reads for them and the input, and gives it again byte for byte;
+only an answer with status 0 and nothing on stderr is kept, and `RA_JIT_ANSWERS=0` asks rustc
+every time. The processes that ask one question together wait for the first one's answer, so
+each is asked once. cargo asks through ra-jit as the workspace's wrapper in builds and as
+`RUSTC_WRAPPER` in the cargos ra-jit runs only to ask (`metadata`, `rustc --print`,
+`--unit-graph`, `config get`), unless the user named a wrapper; rust-analyzer's queries go
+through a hook in project-model's `utf8_stdout`. Left: the first ask of each question, 12 on
+the fixture's cold build and 17 on ripgrep's, which answering from ra-jit's own targets removes;
+`cargo check --compile-time-deps`'s probes (I) and plain `cargo check`'s (D).
+
 **C. `asm!` assembled in process.** ([#83](https://github.com/indexable-inc/ra-jit/issues/83)) The assembly text ra-jit already produces goes to LLVM's
 assembler (the LLVM backend links LLVM already) or to an assembler crate, in process. Risk is
 low: the cache key and the output are the same, and `harness/asmedits.py` compares.
+
+Done (the `no-rustc-abc` lane, [#102](https://github.com/indexable-inc/ra-jit/pull/102)). A
+build of ra-jit with LLVM (CI's) assembles every block with LLVM's MC assembler in process,
+whatever the backend; before, only the LLVM backend did. A build without LLVM, which the release
+is, has the platform's C compiler assemble the block, clang for any target or `cc` for the
+host's own, with the text as rustc hands it to its assembler (Intel syntax on x86-64). That is a
+process, but not rustc, and the C toolchain is outside the rule. rustc is left where there is
+neither, Windows without clang among them (`FIXME` in `asm.rs`); an assembler in process for a
+build without LLVM removes it. `RA_JIT_ASSEMBLER=cc|rustc` picks one, and asmedits.py also runs
+with `cc` in the fast tier.
 
 **D. ra-jit's verdict is the final word.** ([#84](https://github.com/indexable-inc/ra-jit/issues/84)) An error is ra-jit's, written as rustc writes it,
 with the status cargo returns; the build does not go to cargo to have rustc print it.
@@ -421,6 +504,23 @@ find (helix's `__RUST_STD_INTERNAL_VAL`, a thread-local of std's, which throws a
 away) are compiled, along with their callers, instead of being kept as rejections whose callers
 are forwarded to rustc's copies. Done when helix's own base builds in one round with none of them
 left to rustc, and `harness/norustc/left.py` counts no more functions left to rustc than before.
+
+Done 2026-10-22. The one refused instance was `Context::with`'s closure, whose static std's
+`thread_local!` declares in the body. rust-analyzer expands a macro used in a body twice, to items
+and to statements, and ra-jit counted the static's place in the other expansion, so it never found
+rustc's symbol. helix's own base now builds in one round. `count.py` and `left.py` at the branch's
+base and with the fix, on dev-aws-5: ripgrep 53 distinct functions left to rustc both times,
+nushell 534 both times, and every step's rustc runs the same but nushell's "test added" (47 runs
+before, 41 after, 11 compiles both times).
+
+Owner of bun's classes: the `bun-e` lane (2026-10-22). It compiles what bun leaves to rustc
+today: `adt_const_params` constants, `core::mem::type_info`, inherent associated types,
+`lol_html`'s macros, `core`'s methods in `no_std` crates and the rest of #35's table, plus what
+bun's whole-program report finds after them. Each class lands with its `bun_repros.py` fixture
+(#75) expecting `compiled`. Done when bun's whole-program report (`runbench.py bun`) leaves no
+function to rustc but those step G removes ("no rustc symbol"). On Linux x86-64 it leaves none
+(2026-10-22, `857eab0e9b`: 68,315 functions compiled, the program links and each of
+`apps.json`'s runs matches cargo's); macOS arm64 is to be run again.
 
 **F. The standard library compiled by ra-jit.** ([#86](https://github.com/indexable-inc/ra-jit/issues/86)) `core`, `alloc`, `std`, `compiler_builtins`
 (with its intrinsics and `#[naked]` functions), `panic_unwind`, `panic_abort`, `unwind`,
@@ -601,12 +701,14 @@ Lanes whose work makes a rustc path do more, to redirect:
 - **The fallback to cargo** (#27, closed): "fails instead of going to cargo" was fixed by going to
   cargo. Step D reverses it; the resolution bug behind it (`.chain()` on a tuple of systems) is an
   E or D bug to fix in ra-jit.
-- **bun-edits**: patches rustc's executable for const-generic statics so that functions left to
-  rustc keep working. Its correctness fix (cfcb0c879b) is fine; the rest builds on functions left
-  to rustc, which step E removes.
+- **bun-edits**: patched rustc's executable for const-generic statics so that functions left to
+  rustc keep working. Redirected on 2026-10-22 as `bun-e`: the static naming, the exposure of
+  rustc's local statics and the holding of functions left to rustc through edits were dropped;
+  its two correctness fixes (no stale copy of an instance, no static counted twice) stay, and
+  the lane owns bun's part of step E (above).
 - **kept-rejections** ([#37](https://github.com/indexable-inc/ra-jit/issues/37)): sends callers
   to rustc's copies of rejected code. Redirected to compiling them (E), owned by the glancer
-  lane; the kept rejections are not merged.
+  lane, and done that way; the kept rejections are not merged.
 
 Aligned: Axionize's #34, #35 and #75 work (step E), the proc-macro expansion cache #38 (J),
 include-loop's own base (K), and glancer's #40 and #41 (the cold start).

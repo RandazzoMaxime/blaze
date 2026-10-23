@@ -17,6 +17,9 @@ back them is under [docs/upstream/](../upstream/), each with a `SOURCE.md`. Sear
   `lru` can and cannot evict (not a query with cycle handling, only at a new revision).
   2026-10-21. A spare only for a build that asks, salsa patched to evict queries with cycle
   handling and what that costs edits, and a forced `mi_collect`. 2026-10-22.
+- [proc-macro-cache.md](proc-macro-cache.md): rustc's `-Zcache-proc-macros` (derives only, a
+  query per expansion), the earlier attempts, and what ra-jit's expansion cache keys and why
+  spans are in the key. 2026-10-21.
 - [borrowck.md](borrowck.md): rustc's NLL borrow checker and Polonius (the nightly-default
   alpha, the legacy datalog analysis, stabilization status, the UI tests that tell them apart),
   rust-analyzer's removed borrowck, and what ra-jit builds. 2026-10-20.

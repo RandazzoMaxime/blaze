@@ -8,6 +8,13 @@ All notable changes to ra-jit are written here. The format follows
 
 ### Added
 
+- Const eval answers nightly's reflection, `core::mem::type_info` (#34): a type's variants
+  and fields, a field's type, name and offset, a type's size, whether it is signed, an array's
+  length and element, what a pointer points to, a variant's name, as rustc does, and two of
+  its `TypeId`s compare. Bun's `MultiArrayList` asks it of every type it holds, which left 907
+  of bun's functions to rustc; `harness/bun-repros/type_info` asks what it does and now
+  compiles. A constant that holds a `TypeId` is still refused: the evaluator's ids are not
+  rustc's hashes.
 - The daemon's workers hold at most half of the machine's memory together, or what
   `RA_JIT_MEMORY_MAX` says (a size, or `off`). Over it, the worker asked longest ago is
   stopped; `cargo ra-jit status` shows the limit and what each worker holds. `docs/reports/SOAK.md`
@@ -18,13 +25,13 @@ All notable changes to ra-jit are written here. The format follows
   builds of a nightly cargo are the daemon's: `-Z embed-metadata=no`, which it passes every
   crate, no longer sends them to cargo, and build scripts' output and the seeded target are
   found in its second build-directory layout (`soakrows.py`, "a project pinned to a nightly").
-- The `bench-bun` workflow measures bun nightly on the benchmark machine (edits and runtime,
-  into the README's bun section), in `nix develop .#bench-bun`: bun's nightly and what its own
-  build of its C and C++ needs. Too slow for every push.
+- The `bench-bun` workflow measures bun nightly on the benchmark machine (edits and runtime),
+  in `nix develop .#bench-bun`: bun's nightly and what its own build of its C and C++ needs.
+  Too slow for every push.
 - `benchreport.py --name NAME` stores a project measured on its own in
-  `docs/benchmarks/NAME-<os>-<arch>.json` (`runtime-NAME-…` for the runtime) and writes it
-  between `<!-- bench-NAME:start -->`/`<!-- runbench-NAME:start -->` and their ends in the
-  README. The table says the platform it was measured on.
+  `docs/benchmarks/NAME-<os>-<arch>.json` (`runtime-NAME-…` for the runtime), and every README
+  table and chart shows it as a project like the others, in the geometric means too, with a
+  footnote naming the machine, commit and date it was measured at.
 - `bench.py bun` times the edits on bun (body, signature, leaf, generic, new function) in a copy
   of the tree `bunprep.py` prepares, under bun's pinned nightly; bun is measured only when
   named.
@@ -44,6 +51,18 @@ All notable changes to ra-jit are written here. The format follows
   and the spare worker the daemon starts after the first build holds 940 MB more on ripgrep.
   salsa's `lru` cannot evict `infer` or MIR (they have cycle handling), and on `described`
   it freed 206 MB of ripgrep's live heap and none of its footprint, so no eviction is on.
+- Proc-macro expansions are kept in the store
+  ([#38](https://github.com/indexable-inc/ra-jit/issues/38)): a derive or attribute macro's
+  output is found again by the next daemon, keyed by the macro library's content, the
+  macro, its input tokens and the shape of their spans, the environment and the directory.
+  An expansion that asked the compiler anything, or failed, is not kept. Function-like macros
+  are kept with `RA_JIT_PROC_MACRO_CACHE=all`, a macro is left out by name with
+  `RA_JIT_PROC_MACRO_CACHE_SKIP`, and `RA_JIT_PROC_MACRO_CACHE=check` expands anyway and
+  reports any that differ ([docs/cache.md](docs/cache.md), `harness/expansions.py`). On a
+  warm start helix's 1455 kept expansions take resolve from 6.0 to 4.3 s and the time to
+  ready from 9.6 to 8.0 s, nushell's 1588 from 5.8 to 4.5 s and from 10.1 to 8.8 s (Linux
+  x86-64, 16 cores of an otherwise idle host, medians of four runs each); cold starts
+  (helix 35.5 and 35.2 s, nushell 36.8 and 36.7 s) and memory do not change.
 - `#[ra_jit::cache]` ([#17](https://github.com/indexable-inc/ra-jit/issues/17)): the
   `ra-jit-cache` crate's attribute keeps what a pure function returns, in memory and under
   `target/ra-jit/fn-cache`, by its arguments and a hash of the code ra-jit compiled for it and
@@ -155,7 +174,7 @@ All notable changes to ra-jit are written here. The format follows
 - A borrow checker, the crate `hir-ty-borrowck` in the rust-analyzer subtree, written to give
   rustc's verdict: Polonius alpha by default as nightly rustc does, NLL with
   `RA_JIT_BORROWCK=nll`. It gives rustc's errors on
-  1422 of 1579 of rustc's own borrow-check tests that it can run, and none on any of the 245
+  1440 of 1579 of rustc's own borrow-check tests that it can run, and none on any of the 245
   rustc accepts, scored by `harness/borrowck_ui.py`, and finds nothing in ripgrep, fd, bat,
   hyperfine, just, axum, nushell, delta, eza, tokei and starship. Its errors are rust-analyzer diagnostics and
   `ra-jit borrowck` prints them ([docs/borrowck.md](docs/borrowck.md)).
@@ -197,7 +216,12 @@ All notable changes to ra-jit are written here. The format follows
   and 30.7 s); a warm one, which cargo had built, loads the library first: ripgrep 1.29 to
   2.62 s, fd 2.19 to 3.48 s, nushell 8.62 to 9.51 s (`harness/spare.py`, 3 interleaved rounds).
   `RA_JIT_SPARE=ready` keeps one loaded as before; `RA_JIT_SPARE=0` still starts none.
-
+- With LLVM, `memcmp` is called by its own name in the function's module rather than as one
+  of the functions asked for, so LLVM writes a comparison of a few bytes it knows the number of
+  as loads, and one only for equality as `bcmp`, as it does for rustc. On Linux x86-64 (AMD
+  EPYC 9R45) tokei calls the C library's comparisons 155.9 million times instead of 278.6
+  million (cargo's release build: 155.1 million) and runs at 1.34 times the release build
+  instead of 1.51. words' machine code is the same, 48 bytes further on.
 - With LLVM at `-O3` the bodies of the functions a function calls are built into it before
   the default pipeline, and the branches on what they return threaded and the values
   numbered again, as is done for what Cranelift builds in: a loop over `i + 1..n` inside one
@@ -347,9 +371,92 @@ All notable changes to ra-jit are written here. The format follows
   permutes (`vpermi2var` of bytes, words, dwords and qwords), SSE4.1's `phminposuw` and
   `vzeroupper` are compiled, lane by lane, which nushell's dependencies reach for
   (corpus `simd_x86`).
+- AArch64's SHA-1, SHA-256, SHA-512 and AES instructions (`vsha256hq_u32`, `vsha512hq_u64`,
+  `vaeseq_u8` and the rest, as sha2 calls them) are compiled, each as a function of the one
+  instruction, and NEON's sums of every lane made wider (`vaddlvq_u8`) and doubled products
+  made wider (`vqdmull_s16`) lane by lane. `simd_reduce_add_ordered` and `_unordered` (and
+  `mul`) are compiled, which `vaddv_u8` and AVX-512's `_mm512_reduce_add_epi32` are, and
+  `simd_masked_load` and `simd_masked_store` (AVX-512's `_mm512_mask_loadu_epi8`, in fff_search
+  under nushell): a lane the mask leaves out is not read or written (corpus `crypto_lanes`).
 
 ### Fixed
 
+- helix's own build threw its first round away (about 30 s) because std's `Context::with`
+  closure was refused for "a writable static without a rustc symbol": the static is declared by
+  `thread_local!` in a body, which rust-analyzer expands twice, and ra-jit looked for the
+  static's place in the other expansion. It finds rustc's symbol now, and the build takes one
+  round: the daemon's own build in the background is done at 114.5 s instead of 130.3 s, a
+  second daemon's at 85.9 s instead of 109.4 s, and with `RA_JIT_RUSTC_BASE=0` the daemon is
+  ready at 116.2 s instead of 142.3 s (Linux x86-64, 16 cores, medians of three). Nothing is
+  left to rustc for it, and `harness/norustc` counts the same functions left to rustc on
+  ripgrep (53) and nushell (534) (#37, no-rustc step E).
+- A `#[global_allocator]` in an inline `#[cfg(test)] mod test { .. }` of a library (ureq's)
+  gave the library's stand-in an allocator outside the test build, whose functions nothing
+  defined: every allocation of the program reached the stand-in's trap, so nushell, which links
+  ureq, stopped at its first allocation. The `#[cfg]`s of the inline modules an allocator is in
+  are now the forwarding allocator's.
+- A constant that read a static holding `&dyn` of another static failed to evaluate
+  (`InvalidVTableId`): the vtable was the id the static's own evaluation gave the type, which
+  meant nothing to the reading evaluation, and a static the reference pointed into was not
+  looked through for it. rustls's `ALL_CIPHER_SUITES` is one, which kept nushell from linking
+  (corpus `dyn_static_suites`).
+- A tuple struct with fields seen in other modules than the struct, both `pub(in path)` (ring's
+  `aes::Counter`, `pub(in super::super)` with a `pub(super)` field), had no constructor:
+  the least of those visibilities was folded from none, which is none. Its construction and
+  patterns were refused, and with them ring's AES-GCM under nushell (corpus
+  `narrow_constructors`).
+- An `async fn` or block that awaited the `impl Future` of a provided method of a trait,
+  which the impl leaves as the trait has it, had no layout: the trait's opaque type was left
+  for the solver, which reveals nothing of a trait's, and came out an error. It is the hidden
+  type of the trait's body now. rmcp's `ServiceExt::serve` is one, in nushell's MCP server
+  (corpus `provided_futures`).
+- `-C force-frame-pointers` in a build's flags keeps frame pointers in ra-jit's code too: LLVM
+  gave the register to values, so code that walks frames by it read garbage. bun, built with
+  every function ra-jit's, faulted in `bun_core::return_address` on its first `-e`; it now
+  gives cargo's output on each of its runs. `harness/apps/apps.json` gives bun its own build's
+  `-Cforce-frame-pointers=yes`. `harness/bun-repros/frame_pointers`.
+- On ELF, a build that no edits follow puts each function and datum of its object in a
+  section of its own, as rustc does, so the link takes out what nothing reaches. A program
+  whose `main` is the C runtime's has every function compiled, and bun's link was missing
+  what only such code calls and nothing defines on Linux: `GetLastError` of
+  `bun_windows_sys`, and `ShellInterpreter__getConstructor` of a binding bun's C++ leaves
+  out. The daemon's builds keep one section, as their links keep everything.
+  `harness/bun-repros/unreached_externs`.
+- A crate a build names after the program is one the program links, also when a binary of
+  another package has its name: a build of bun with every crate ra-jit's took `--crate
+  bun_sema` for the library and for `bun_sema_standalone`'s `bun-sema` too, whose code calls a
+  library bun does not link, and the link failed on `bun_sema_standalone::parse`.
+  `harness/bun-repros/same_name`.
+- A `#[no_mangle]` or `#[export_name]` static of a program whose every crate is ra-jit's is
+  defined under that name, also when it is private and when no Rust code uses it. Our copy had
+  a name of its own, as rustc's was the one code of another language found, and one only that
+  code reads was not compiled at all: bun's link was missing `Bun__version`,
+  `Bun__Node__ZeroFillBuffers` and the other statics its C++ reads.
+  `harness/bun-repros/exported_statics`.
+- An `$n:expr` passed on to another macro is one operand there, as rustc has it: in
+  `tags!(@count (0u8 + 1u8) + 1u8,)` the rule `(@ $n:expr,)` took `count (0u8 + 1u8)` for a
+  call and matched, so bun's `task_tag::COUNT` expanded to nothing and `TaskTag::name`, the one
+  function of bun's left to rustc for a reason other than having no instance, failed on
+  `[&str; {const error}]`. The parser now stops an expression where such a fragment starts.
+  `harness/bun-repros/macro_fragments`.
+- A `macro_rules!` that a macro of another crate defines, called by a name a `use` imports
+  (`use cfg_if::cfg_if; cfg_if! { .. macro_rules! trace { .. } }`), is in the textual scope of
+  what follows. The call waited for imports to be resolved, by when `#[macro_use]` had taken
+  the module's macros to its parent without it, and every `trace!` of lol_html's parser was a
+  missing expression: 43 of bun's functions (the `StateMachine` impls of `Lexer` and
+  `TagScanner`, `TransformStream::write`) were left to rustc. Such a call is now expanded where
+  it is written, as one by a path to the other crate was. `harness/bun-repros/cfg_if_macros`.
+- `--crate NAME` names no crate of the standard library's when a crate of the program has the
+  name. std vendors foldhash 0.2.0, libc and hashbrown, and its foldhash, which rustc does not
+  build (hashbrown has it only with its default hasher), sees no `core` in rust-analyzer's
+  graph: bun's whole-program build compiled it beside bun's two foldhash, and its 27 functions
+  that did not lower were counted as left to rustc. `harness/bun-repros/std_copies` checks it.
+- A dependency's impl that a macro writes in a function body is found: dtoa's `write` calls
+  `dtoa!`, which calls `diyfp!`, which writes `impl DiyFp` there, and `normalize_boundary`
+  went unresolved because no `impl` is in `write`'s own text. A dependency's function is now
+  looked into for impls when it calls a `macro_rules!` of its crate or of a dependency that
+  writes one, in its text or through another macro. The dtoa functions bun left to rustc
+  compile; `harness/bun-repros/macro_impls` builds dtoa.
 - On Linux AArch64, an `asm!` of an instruction that the function's `#[target_feature]`
   enables and the target's baseline lacks (zlib-rs's `crc32w`, in bat) was refused by the
   assembler: the block is assembled apart from its function, so it now starts with the
@@ -400,6 +507,37 @@ All notable changes to ra-jit are written here. The format follows
 - fd built with inlining across crates crashed the LLVM backend on Linux and macOS: an address
   rebuilt as a `getelementptr` may be a sum that is a constant (a global's address plus an
   offset), which is in no block, and LLVM read freed memory when the builder was put before it.
+- A `const { .. }` block in a function is a constant evaluated for each instance of the
+  function, as rustc's inline consts are, and no longer code the function runs: what only
+  compile time may run in one (`#[rustc_comptime]`, `type_info`'s `field`, bun's
+  `MultiArrayList::check`) was refused with "intrinsic `type_id_field_representing_type`",
+  and every function reaching it with it (591 of bun's 680 refusals on Linux). A block met
+  while evaluating a constant runs in that evaluation, so its `TypeId`s compare. `n += i` on an
+  integer variable whose operator was not looked up while its type was unknown is lowered as
+  the built-in it is, where it was "adjustment of binary op was missing" (`bun_repros.py`
+  `type_info`).
+- A constant of a struct, enum, tuple or array type given as a const generic argument
+  (`adt_const_params`: `check::<{ Requirement::Within { low: 3, high: 9 } }>`,
+  `filtered::<{ Filter { mask: 0xf0, strict: true } }>`) compiles and evaluates, and
+  `#[derive(ConstParamTy)]` expands. Every function reaching one was refused ("constant of type
+  JSType", bun's `alloc`, `test_correct_state` and `completions`) (`bun_repros.py`
+  `adt_const_params`).
+- A path through a type alias of an inherent impl (`ThreadPool::Worker::get(..)`, `Self::Slot`,
+  `Slots<u32>::Slot`, nightly's `inherent_associated_types`) is the alias's type: the
+  functions that name one had no type for it and were left to rustc, and rustc's copy of
+  bun's `run_nested_rename_task` sent every edit of its crate to cargo (`bun_repros.py`
+  `inherent_associated_types`).
+- A build in full no longer keeps rustc's copy of an instance that did not compile once an
+  edit changed it, as `located::<u8>` of a generic function with a `Location::caller()`
+  constant, which `main` calls: the program printed what it did before the edit. Such an edit
+  goes to cargo, which names the function (`soakrows.py`, "an instance rustc's copy stands in
+  for, edited").
+- A static declared in a function's body, as the `FLAG` of a method of bun's
+  `impl<const SSL: bool, ..> NewServer<SSL, ..>`, is rustc's in a crate with a function left
+  to rustc that reaches what ra-jit can't tell: rustc's copy of that function reaches the
+  static through rustc's copy of the other. A build in full had its own copy beside rustc's,
+  and the two counted apart, in the base the daemon builds after the first patch
+  (`soakrows.py`, "statics one codegen unit uses").
 - A borrowed constant with a cast in it, `&[b"node" as &[u8]][..]` returned for `'static`, is
   promoted as rustc promotes it, where it was built on the stack and the reference outlived
   it: every cast is promotable but of a pointer to an integer. bun's `new Bun.Transpiler()`

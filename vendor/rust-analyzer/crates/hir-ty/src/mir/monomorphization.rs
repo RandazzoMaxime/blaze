@@ -198,11 +198,14 @@ impl<'db> Filler<'db> {
         let crate::ImplTraitId::ReturnTypeImplTrait(func, idx) = opaque.loc(db) else {
             return None;
         };
-        // A trait's own is the impl's, which `impl_opaque` has not found.
-        if matches!(
+        // A trait's own is the impl's, which `impl_opaque` has not found, except of a provided
+        // method the impl leaves as the trait has it: its body is the trait's, and the solver
+        // reveals nothing of the trait's.
+        let in_trait = matches!(
             hir_def::Lookup::lookup(&func, db).container,
             hir_def::ItemContainerId::TraitId(_)
-        ) {
+        );
+        if in_trait && !hir_def::signatures::FunctionSignature::of(db, func).has_body() {
             return None;
         }
         if alias.args.has_type_flags(TypeFlags::HAS_PARAM) || references_non_lt_error(&alias.args) {
@@ -210,7 +213,7 @@ impl<'db> Filler<'db> {
         }
         let hidden = crate::opaques::rpit_hidden_types(db, func).get(idx)?;
         let hidden = hidden.get().instantiate(self.infcx.interner, alias.args).skip_norm_wip();
-        hidden.has_type_flags(TypeFlags::HAS_TY_OPAQUE).then_some(hidden)
+        (in_trait || hidden.has_type_flags(TypeFlags::HAS_TY_OPAQUE)).then_some(hidden)
     }
 
     fn fill_ty(&mut self, t: &mut StoredTy) -> Result<(), MirLowerError<'db>> {
@@ -397,6 +400,15 @@ pub fn monomorphized<'db>(
     let mut body = body.clone();
     filler.fill_body(&mut body)?;
     Ok(body)
+}
+
+/// `ty` of a monomorphized body with its aliases normalized, as the body's own types are.
+pub(crate) fn normalized_ty<'db>(
+    db: &'db dyn HirDatabase,
+    ty: Ty<'db>,
+    trait_env: ParamEnvAndCrate<'db>,
+) -> Result<Ty<'db>, MirLowerError<'db>> {
+    ty.try_fold_with(&mut Filler::new(db, trait_env, GenericArgs::empty()))
 }
 
 #[salsa::tracked(returns(as_ref), cycle_result = monomorphized_mir_body_cycle_result)]

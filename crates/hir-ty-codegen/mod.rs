@@ -260,6 +260,11 @@ pub trait SymbolResolver {
     fn describes_variables(&self) -> bool {
         true
     }
+    /// Whether every function keeps its frame pointer, as `-C force-frame-pointers` has it:
+    /// code that walks its own frames (bun's backtraces) reads them.
+    fn keeps_frame_pointers(&self) -> bool {
+        false
+    }
     /// Whether the program's rustc build has the symbol, defined or referred to.
     fn defines(&self, _symbol: &str) -> bool {
         false
@@ -577,6 +582,7 @@ impl CodegenUnit {
         hold: &dyn Fn() -> bool,
         undoable: bool,
     ) -> Result<Option<CodegenUnit>> {
+        backend::keep_frame_pointers(symbols.keeps_frame_pointers());
         let on_demand: FxHashSet<FunctionId> = roots.on_demand.iter().copied().collect();
         let all = || roots.entries.iter().chain(roots.on_demand).copied();
         // Code of the checkout comes from the store in the first build alone: what a patch is
@@ -991,8 +997,8 @@ struct OwnStatics {
     shared: FxHashSet<Crate>,
     theirs: FxHashSet<StaticId>,
     /// Crates with a function left to rustc that refers to we don't know what. That can be
-    /// any static of the crate but the ones declared in the body of another function.
-    // FIXME: a closure that such a function hands out can refer to the statics of its body.
+    /// any static of the crate: one declared in the body of another function too, through
+    /// rustc's copy of that function, which it calls.
     unknown: FxHashSet<Crate>,
     /// The crates of the program rustc built nothing of, whose statics have no copy but ours.
     unbuilt: FxHashSet<Crate>,
@@ -1053,13 +1059,11 @@ impl OwnStatics {
     }
 
     fn owns(&self, db: &dyn HirDatabase, id: StaticId) -> bool {
-        let module = id.module(db);
-        if self.unbuilt.contains(&module.krate(db)) {
+        let krate = id.module(db).krate(db);
+        if self.unbuilt.contains(&krate) {
             return true;
         }
-        self.crates.contains(&module.krate(db))
-            && !self.theirs.contains(&id)
-            && (module.is_block_module(db) || !self.unknown.contains(&module.krate(db)))
+        self.crates.contains(&krate) && !self.theirs.contains(&id) && !self.unknown.contains(&krate)
     }
 
     /// Whether our copy of the static stands in for the one rustc exports. rustc's is what the
@@ -1370,9 +1374,10 @@ impl Rejections {
         self.forget();
     }
 
-    /// A function the last build left to rustc that is not what rustc compiled, and why it was
-    /// left. rustc's copies are those of the build the daemon started from: the first call, to
-    /// be made after that build, notes what they are copies of.
+    /// A function the last build left to rustc, or an instance it calls rustc's copy of, that
+    /// is not what rustc compiled, and why it was left. rustc's copies are those of the build
+    /// the daemon started from: the first call, to be made after that build, notes what they
+    /// are copies of.
     pub fn out_of_date(&mut self, db: &dyn HirDatabase) -> Option<OutOfDate> {
         self.frozen.out_of_date(db, self.base.as_ref()?)
     }
@@ -3583,6 +3588,20 @@ pub fn exported_symbol(db: &dyn HirDatabase, func: FunctionId) -> Option<String>
         .then(|| FunctionSignature::of(db, func).name.as_str().to_owned())
 }
 
+/// The symbol a static of the program, not of an `extern` block, is exported under when an
+/// attribute names it: code of another language finds it by that name, whatever its
+/// visibility and whether or not Rust code uses it.
+pub fn exported_static(db: &dyn HirDatabase, id: StaticId) -> Option<intern::Symbol> {
+    let signature = StaticSignature::of(db, id);
+    if signature.flags.contains(StaticFlags::EXTERN) {
+        return None;
+    }
+    AttrFlags::export_name(db, id.into()).or_else(|| {
+        let unmangled = AttrFlags::query(db, id.into()).contains(AttrFlags::NO_MANGLE);
+        unmangled.then(|| signature.name.symbol().clone())
+    })
+}
+
 /// The symbol an item of an `extern` block links to.
 pub fn link_name(db: &dyn HirDatabase, func: FunctionId) -> Option<String> {
     let ItemContainerId::ExternBlockId(_) = func.lookup(db).container else {
@@ -4060,11 +4079,12 @@ fn emit(ctx: &mut cranelift_codegen::Context) -> Result<Code> {
     let mut isa = &**if large { target_for_large()? } else { target()? };
     let func = &ctx.func;
     if !isa.flags().preserve_frame_pointers()
-        && func.layout.entry_block().is_some_and(|entry| {
-            func.layout
-                .block_insts(entry)
-                .any(|inst| func.dfg.insts[inst].opcode() == ir::Opcode::GetFramePointer)
-        })
+        && (backend::frame_pointers()
+            || func.layout.entry_block().is_some_and(|entry| {
+                func.layout
+                    .block_insts(entry)
+                    .any(|inst| func.dfg.insts[inst].opcode() == ir::Opcode::GetFramePointer)
+            }))
     {
         isa = &**target_with_frame_pointer()?;
     }
@@ -4181,7 +4201,15 @@ impl<'a, 'db> ObjectCodegen<'a, 'db> {
         hydrate: bool,
     ) -> Result<Self> {
         let start = stdx::time::Instant::now();
-        let builder = ObjectBuilder::new(target()?.clone(), "ra-jit", default_libcall_names())?;
+        let isa = target()?.clone();
+        // A program's own link takes out what nothing reaches section by section, as of
+        // rustc's objects, and what only that refers to need be defined nowhere: bun's calls of
+        // Windows on Linux. The daemon's links keep everything for edits to be spliced into.
+        // Apple's linker takes out symbols, and has room for 255 sections.
+        let sections = !backend::edits_follow()
+            && isa.triple().binary_format == target_lexicon::BinaryFormat::Elf;
+        let mut builder = ObjectBuilder::new(isa, "ra-jit", default_libcall_names())?;
+        builder.per_function_section(sections).per_data_object_section(sections);
         let mut module = ObjectModule::new(builder);
         let unwind = UnwindContext::new(&mut module).map_err(CodegenError::Backend)?;
         let built = start.elapsed();
@@ -5644,10 +5672,7 @@ impl<'a, 'db> ObjectCodegen<'a, 'db> {
         let db = self.db;
         let signature = StaticSignature::of(db, id);
         if !signature.flags.contains(StaticFlags::EXTERN) {
-            let exported = AttrFlags::export_name(db, id.into()).or_else(|| {
-                let unmangled = AttrFlags::query(db, id.into()).contains(AttrFlags::NO_MANGLE);
-                unmangled.then(|| signature.name.symbol().clone())
-            });
+            let exported = exported_static(db, id);
             return Ok(exported.filter(|name| self.symbols.defines(name.as_str())));
         }
         let name = AttrFlags::link_name(db, id.into());
@@ -5722,9 +5747,11 @@ impl<'a, 'db> ObjectCodegen<'a, 'db> {
         // value is: what the value points to may point back at the static.
         let thread_local = is_thread_local(db, id);
         let own = (!self.patching).then(|| self.symbols.own_static(id)).flatten();
+        let exported = exported_static(db, id).filter(|_| !self.patching);
         let data = if let Some(known) = again {
             self.module.declare_data(&known.symbol, Linkage::Hidden, compiled.writable, false)?
-        } else if let Some(name) = own {
+        } else if let Some(name) = own.or_else(|| exported.map(|it| it.as_str().to_owned())) {
+            // Nothing rustc built defines it: what finds it by name finds ours.
             self.module.declare_data(&name, Linkage::Export, compiled.writable, thread_local)?
         } else if self.patching || thread_local {
             // Nothing else defines the statics of a program compiled to WebAssembly, and
@@ -6655,6 +6682,23 @@ fn return_slot() -> LocalId {
 }
 /// Field accesses can be unaligned (packed structs, chunked copies).
 const MEM: MemFlagsData = MemFlagsData::new().with_notrap();
+
+/// The function of AArch64's crypto instruction `llvm.{name}` names, whose operands are in
+/// LLVM's order: the first is the one the instruction writes over.
+fn neon_crypto(name: &str) -> String {
+    let op = name.trim_start_matches("aarch64.crypto.");
+    let (extension, operands) = match op {
+        "aese" | "aesd" => ("aes", "v0.16b, v1.16b"),
+        "aesmc" | "aesimc" => ("aes", "v0.16b, v0.16b"),
+        "sha256h" | "sha256h2" => ("sha2", "q0, q1, v2.4s"),
+        "sha256su1" | "sha1su0" => ("sha2", "v0.4s, v1.4s, v2.4s"),
+        "sha256su0" | "sha1su1" => ("sha2", "v0.4s, v1.4s"),
+        "sha512h" | "sha512h2" => ("sha3", "q0, q1, v2.2d"),
+        "sha512su1" => ("sha3", "v0.2d, v1.2d, v2.2d"),
+        _ => ("sha3", "v0.2d, v1.2d"),
+    };
+    asm::neon_instruction(extension, &format!("{op} {operands}"))
+}
 
 /// The vector of 16 bytes a SIMD operation on `count` integer lanes of `lane` is done in, and
 /// how many of them there are: one Cranelift and LLVM both have for every target.
@@ -8944,6 +8988,9 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
                 return Ok(ConstBlob { bytes, relocs: Vec::new(), fn_relocs: Vec::new(), align });
             }
             TyKind::Ref(_, pointee, _) => pointee,
+            TyKind::Adt(..) | TyKind::Tuple(_) | TyKind::Array(..) => {
+                return self.aggregate_valtree_blob(ty, valtree);
+            }
             _ => unsupported!("constant of type {ty:?}"),
         };
         let mut bytes = vec![0; layout.size.bytes_usize()];
@@ -8976,6 +9023,60 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
         };
         let target = self.cg.define_const(target)?;
         Ok(ConstBlob { bytes, relocs: vec![(0, target, 0)], fn_relocs: Vec::new(), align })
+    }
+
+    /// A struct, enum, tuple or array that a const generic argument is (`adt_const_params`):
+    /// const eval gives its fields in order, an enum's after the index of its variant.
+    fn aggregate_valtree_blob(&mut self, ty: Ty<'db>, valtree: ValTree<'db>) -> Result<ConstBlob> {
+        let layout = self.layout(ty)?;
+        let mut blob = ConstBlob {
+            bytes: vec![0; layout.size.bytes_usize()],
+            relocs: Vec::new(),
+            fn_relocs: Vec::new(),
+            align: layout.align.abi.bytes(),
+        };
+        let items = valtree.inner().to_branch();
+        let (shape, fields) = match ty.kind() {
+            TyKind::Adt(def, args) => match def.def_id() {
+                AdtId::StructId(id) => (self.variant_shape(id.into(), args)?, &items[..]),
+                AdtId::UnionId(_) => unsupported!("a union constant"),
+                AdtId::EnumId(id) => {
+                    let index = match items.first().map(|it| it.kind()) {
+                        Some(ConstKind::Value(it)) => it.value.inner().to_leaf().to_u32() as usize,
+                        _ => unsupported!("an enum constant without its variant"),
+                    };
+                    let variants = &id.enum_variants(self.cg.db).variants;
+                    if index >= variants.len() {
+                        unsupported!("an enum constant of variant {index} of {}", variants.len());
+                    }
+                    (self.variant_shape(variants[index].0.into(), args)?, &items[1..])
+                }
+            },
+            _ => (Some((layout.clone(), None)), &items[..]),
+        };
+        let Some((variant, tag)) = shape else {
+            unsupported!("a constant of a variant its type has no room for");
+        };
+        if let Some((offset, tag_ty, tag)) = tag {
+            let len = tag_ty.bytes() as usize;
+            blob.bytes[offset..offset + len].copy_from_slice(&tag.to_le_bytes()[..len]);
+        }
+        for (i, field) in fields.iter().enumerate() {
+            let ConstKind::Value(field) = field.kind() else {
+                unsupported!("an unevaluated constant in a constant");
+            };
+            let field = self.valtree_blob(field.ty, field.value)?;
+            let at = variant.fields.offset(i).bytes_usize();
+            let Some(place) = blob.bytes.get_mut(at..at + field.bytes.len()) else {
+                unsupported!("a field of a constant out of its bounds");
+            };
+            place.copy_from_slice(&field.bytes);
+            let at = at as u32;
+            blob.relocs
+                .extend(field.relocs.into_iter().map(|(it, data, add)| (it + at, data, add)));
+            blob.fn_relocs.extend(field.fn_relocs.into_iter().map(|(it, func)| (it + at, func)));
+        }
+        Ok(blob)
     }
 
     /// `in_static` says the value is a static's, where memory behind a mutable pointer can be
@@ -9932,6 +10033,22 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
         variant: VariantId,
         args: GenericArgs<'db>,
     ) -> Result<Option<Arc<Layout>>> {
+        let Some((layout, tag)) = self.variant_shape(variant, args)? else { return Ok(None) };
+        if let Some((offset, ty, tag)) = tag {
+            let value = self.iconst(ty, tag);
+            self.builder.ins().store(MEM, value, dst, offset as i32);
+        }
+        Ok(Some(layout))
+    }
+
+    /// Layout whose `fields` describe `variant`, and the tag of a variant of a multi-variant
+    /// enum that has one: where it goes, as what and its value. `None` for a variant the
+    /// layout has no room for.
+    fn variant_shape(
+        &mut self,
+        variant: VariantId,
+        args: GenericArgs<'db>,
+    ) -> Result<Option<(Arc<Layout>, Option<(usize, types::Type, u128)>)>> {
         let db = self.cg.db;
         let adt: AdtId = variant.adt_id(db);
         let layout = self.layout(Ty::new_adt(self.interner, adt, args))?;
@@ -9944,7 +10061,7 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
                     VariantId::EnumVariantId(variant) => variant.index(db) == index.0,
                     _ => true,
                 };
-                return Ok(inhabited.then_some(layout));
+                return Ok(inhabited.then_some((layout, None)));
             }
             Variants::Empty => return Ok(None),
         };
@@ -9953,7 +10070,7 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
         };
         let index = variant.index(db);
         let tag_ty = self.scalar(*tag)?.ty;
-        let offset = layout.fields.offset(tag_field.index()).bytes() as i32;
+        let offset = layout.fields.offset(tag_field.index()).bytes_usize();
         let tag_value = match tag_encoding {
             TagEncoding::Direct => {
                 let discr = db
@@ -9966,11 +10083,8 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
                 Some(((index - niche_variants.start.0) as u128).wrapping_add(*niche_start))
             }
         };
-        if let Some(tag_value) = tag_value {
-            let value = self.iconst(tag_ty, tag_value);
-            self.builder.ins().store(MEM, value, dst, offset);
-        }
-        Ok(Some(Arc::new(Layout::for_variant(&layout, RustcEnumVariantIdx(index)))))
+        let layout = Arc::new(Layout::for_variant(&layout, RustcEnumVariantIdx(index)));
+        Ok(Some((layout, tag_value.map(|it| (offset, tag_ty, it)))))
     }
 
     fn write_fields(&mut self, dst: Value, layout: &Layout, operands: &[Operand]) -> Result<()> {
@@ -13030,6 +13144,72 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
                 self.builder.ins().store(MEM, acc, dst, 0);
             }
             (
+                "simd_reduce_add_ordered"
+                | "simd_reduce_mul_ordered"
+                | "simd_reduce_add_unordered"
+                | "simd_reduce_mul_unordered",
+                [arg, start @ ..],
+            ) if start.len() == name.ends_with("_ordered") as usize => {
+                let (src, ty) = self.operand(arg)?;
+                let (lane, count) = self.simd_lanes(ty)?;
+                let lane_at = |this: &mut Self, i: u64| {
+                    this.builder.ins().load(lane.ty, MEM, src, (i * lane.ty.bytes() as u64) as i32)
+                };
+                let (mut acc, first) = match start {
+                    [start] => (self.load_scalar(start)?.0, 0),
+                    _ => (lane_at(self, 0), 1),
+                };
+                let add = name.starts_with("simd_reduce_add");
+                for i in first..count {
+                    let value = lane_at(self, i);
+                    let ins = self.builder.ins();
+                    acc = match (add, lane.ty.is_float()) {
+                        (true, true) => ins.fadd(acc, value),
+                        (true, false) => ins.iadd(acc, value),
+                        (false, true) => ins.fmul(acc, value),
+                        (false, false) => ins.imul(acc, value),
+                    };
+                }
+                self.builder.ins().store(MEM, acc, dst, 0);
+            }
+            // Only the lanes a mask has are read or written: the others may be past the end of
+            // what the pointer may reach.
+            ("simd_masked_load", [mask, pointer, values])
+            | ("simd_masked_store", [mask, pointer, values]) => {
+                let (mask, mask_ty) = self.operand(mask)?;
+                let (pointer, _) = self.load_scalar(pointer)?;
+                let (values, ty) = self.operand(values)?;
+                let (mask_lane, count) = self.simd_lanes(mask_ty)?;
+                let (lane, _) = self.simd_lanes(ty)?;
+                let chosen: Vec<Value> = (0..count)
+                    .map(|i| {
+                        let offset = (i * mask_lane.ty.bytes() as u64) as i32;
+                        let chosen = self.builder.ins().load(mask_lane.ty, MEM, mask, offset);
+                        self.builder.ins().icmp_imm(IntCC::SignedLessThan, chosen, 0)
+                    })
+                    .collect();
+                let load = name == "simd_masked_load";
+                if load {
+                    let size = self.layout(ty)?.size;
+                    self.copy(dst, values, size);
+                }
+                for (i, chosen) in chosen.into_iter().enumerate() {
+                    let offset = i as i32 * lane.ty.bytes() as i32;
+                    let (on, next) = (self.builder.create_block(), self.builder.create_block());
+                    self.builder.ins().brif(chosen, on, &[], next, &[]);
+                    self.builder.switch_to_block(on);
+                    if load {
+                        let value = self.builder.ins().load(lane.ty, MEM, pointer, offset);
+                        self.builder.ins().store(MEM, value, dst, offset);
+                    } else {
+                        let value = self.builder.ins().load(lane.ty, MEM, values, offset);
+                        self.builder.ins().store(MEM, value, pointer, offset);
+                    }
+                    self.builder.ins().jump(next, &[]);
+                    self.builder.switch_to_block(next);
+                }
+            }
+            (
                 "fabs"
                 | "fabsf32"
                 | "fabsf64"
@@ -13408,6 +13588,61 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
                     self.builder.ins().store(MEM, value, dst, pair as i32 * 2 * width);
                 }
             }
+            ("uaddlv" | "saddlv" | "uaddv" | "saddv", [a]) => {
+                let Some(sum_ty) =
+                    parts.first().and_then(|it| Type::int(it.strip_prefix('i')?.parse().ok()?))
+                else {
+                    return Ok(false);
+                };
+                let (a, _) = self.operand(a)?;
+                // The sum of every lane, each as wide as the sum.
+                let mut sum = self.builder.ins().iconst(sum_ty, 0);
+                for lane in 0..lanes {
+                    let value = self.builder.ins().load(ty, MEM, a, lane * width);
+                    let value = if sum_ty.bits() < ty.bits() {
+                        self.builder.ins().ireduce(sum_ty, value)
+                    } else if sum_ty.bits() == ty.bits() {
+                        value
+                    } else if op.starts_with('s') {
+                        self.builder.ins().sextend(sum_ty, value)
+                    } else {
+                        self.builder.ins().uextend(sum_ty, value)
+                    };
+                    sum = self.builder.ins().iadd(sum, value);
+                }
+                self.builder.ins().store(MEM, sum, dst, 0);
+            }
+            ("sqdmull", [a, b]) if ty.bits() >= 32 => {
+                let (a, _) = self.operand(a)?;
+                let (b, _) = self.operand(b)?;
+                let narrow = ty.half_width().expect("a lane of at least 32 bits");
+                let least = -(1i64 << (narrow.bits() - 1));
+                // Twice the product, past the lane's range only for the least by itself: that
+                // is the most.
+                let values: Vec<Value> = (0..lanes)
+                    .map(|lane| {
+                        let at = lane * narrow.bytes() as i32;
+                        let l = self.builder.ins().load(narrow, MEM, a, at);
+                        let r = self.builder.ins().load(narrow, MEM, b, at);
+                        let l_least = self.builder.ins().icmp_imm(IntCC::Equal, l, least);
+                        let r_least = self.builder.ins().icmp_imm(IntCC::Equal, r, least);
+                        let both = self.builder.ins().band(l_least, r_least);
+                        let l = self.builder.ins().sextend(ty, l);
+                        let r = self.builder.ins().sextend(ty, r);
+                        let product = self.builder.ins().imul(l, r);
+                        let twice = self.builder.ins().ishl_imm(product, 1);
+                        let most = match ty.bits() {
+                            64 => i64::MAX,
+                            bits => (1i64 << (bits - 1)) - 1,
+                        };
+                        let most = self.builder.ins().iconst(ty, most);
+                        self.builder.ins().select(both, most, twice)
+                    })
+                    .collect();
+                for (lane, value) in values.into_iter().enumerate() {
+                    self.builder.ins().store(MEM, value, dst, lane as i32 * width);
+                }
+            }
             ("tbl1" | "tbx1", [.., table, indices]) if ty == types::I8 => {
                 let kept = match args {
                     [kept, _, _] if op == "tbx1" => Some(self.operand(kept)?.0),
@@ -13586,6 +13821,37 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
                 // The instruction takes its third vector in `xmm0`.
                 let rounds = "movdqa xmm3, xmm0\nmovdqa xmm0, xmm2\nsha256rnds2 xmm3, xmm1";
                 self.vector_assembly(asm::vector_instruction(rounds, "xmm3"), a, b, dst)?;
+            }
+            (
+                "aarch64.crypto.sha256su0"
+                | "aarch64.crypto.sha512su0"
+                | "aarch64.crypto.sha1su1"
+                | "aarch64.crypto.aese"
+                | "aarch64.crypto.aesd",
+                [a, b],
+            ) => {
+                let instruction = neon_crypto(name);
+                self.vector_assembly(instruction, a, b, dst)?;
+            }
+            ("aarch64.crypto.aesmc" | "aarch64.crypto.aesimc", [a]) => {
+                let instruction = neon_crypto(name);
+                self.vector_assembly(instruction, a, a, dst)?;
+            }
+            (
+                "aarch64.crypto.sha256h"
+                | "aarch64.crypto.sha256h2"
+                | "aarch64.crypto.sha256su1"
+                | "aarch64.crypto.sha512h"
+                | "aarch64.crypto.sha512h2"
+                | "aarch64.crypto.sha512su1"
+                | "aarch64.crypto.sha1su0",
+                [a, b, c],
+            ) => {
+                let (c, ty) = self.operand(c)?;
+                let size = self.layout(ty)?.size;
+                self.copy(dst, c, size);
+                let instruction = neon_crypto(name);
+                self.vector_assembly(instruction, a, b, dst)?;
             }
             ("x86.sha1rnds4", [a, b, function]) => {
                 let (function, _) = self.load_scalar(function)?;
