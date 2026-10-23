@@ -101,8 +101,13 @@ command is seen within that. On the MacBook of the macOS results, a no-op `cargo
 median 322 ms without it and 319 ms with it (30 runs each, taking turns): no cost the noise
 shows. Two runs of the Mac's measurement gave the same peaks within 1%.
 
-**Disk** is counted as `du` counts it: the blocks each file uses, a file with several hard
-links once.
+**Disk** is the blocks the files use, a file with several hard links once
+(`memory.disk_mb`). On Linux each block is counted once however many files share it: a
+copy the file system made by sharing the blocks (a reflink, which `std::fs::copy` makes on
+XFS and Btrfs, and which ra-jit's copies of rustc's objects and libraries are) takes no
+more disk than the one file, and is counted so, where `du` counts it once per file. The
+kernel says which blocks are shared (`FIEMAP`); where it does not, a file is counted as
+`du` counts it. On macOS a clone is counted as `du` counts it, once per file.
 
 The history (`rss_mb`) still has the daemon's workers' high-water marks summed, as before; the
 history's memory alerts check the new numbers too (below).
