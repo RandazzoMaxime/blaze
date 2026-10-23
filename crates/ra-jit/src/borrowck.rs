@@ -194,9 +194,22 @@ fn dump_mir(db: &RootDatabase, file: vfs::FileId, name: &str) {
                 && function.name(db).as_str() == name
             {
                 let Ok(id) = hir_def::FunctionId::try_from(function) else { continue };
-                match db.mir_body(hir_ty::InferBodyId::DefWithBodyId(id.into())) {
-                    Ok(body) => eprintln!("{}", hir_ty::mir::print_mir_body(db, body, name)),
-                    Err(err) => eprintln!("{name}: {err:?}"),
+                let mut bodies = match db.mir_body(hir_ty::InferBodyId::DefWithBodyId(id.into())) {
+                    Ok(body) => vec![body],
+                    Err(err) => {
+                        eprintln!("{name}: {err:?}");
+                        continue;
+                    }
+                };
+                // The closures after it, as the borrow checker checks them with it.
+                while let Some(body) = bodies.pop() {
+                    eprintln!("{}", hir_ty::mir::print_mir_body(db, body, name));
+                    for &closure in &body.closures {
+                        match db.mir_body_for_closure(closure) {
+                            Ok(it) => bodies.push(it),
+                            Err(err) => eprintln!("{name} closure: {err:?}"),
+                        }
+                    }
                 }
             }
         }
