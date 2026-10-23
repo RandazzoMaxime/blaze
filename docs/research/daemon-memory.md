@@ -304,3 +304,66 @@ its own, ra-jit at `d6291bd7cb` (main) and the `mem-39` branch, Cranelift. Per p
 - `dirty_decay_ms:0` would give back another 0.6 GB on nushell; each page a build frees is then
   returned at once and faulted in again at the next build. Not taken: the edits it was measured
   with were within the spread, but one run is not enough to say (**unverified**).
+
+## 2026-10-23: sharing `described` (#55)
+
+For [#55](https://github.com/indexable-inc/ra-jit/issues/55). Same host as above (dev-aws-7,
+124 GiB), ra-jit main at `04bdd5b01e` (with jemalloc) and the `share-types-4` branch merged
+onto it, Cranelift, each pair at once on two sets of 16 cores, one run each, with
+`harness/memsplit.py` (the edits body and add-a-function; bun's signature and
+add-a-function).
+
+### What changed
+
+- A set of debug types (`TypeSet`, what `described` returns for a variable's type) was a list
+  of `DebugType`s, each with its own `String`s: the name of every type, field and generic
+  parameter, copied into every set the type is in. What a type is told as apart from the
+  places of its parts in the set (`Told`) is now interned once per distinct description, and a
+  set holds, for each of its types, a reference to that and the places of its parts: 8 bytes
+  for the reference and 4 for where its parts start, plus 4 for each part. That is linear in the
+  distinct descriptions and in the sum of the sets' lengths, not in what the sets spell out
+  (**read**, `crates/hir-ty-codegen/debuginfo/set.rs`). The store keeps a set as the list it
+  was, so stored entries are read back the same.
+- Before the own base gives up for memory, the worker asks jemalloc to purge the pages of what
+  it freed (`arena.<all>.purge`) and gives up only if it is still over. How much of bun's
+  figures below this is was not measured apart (**unverified**).
+
+### The DWARF is the same
+
+- The objects of a parallel build differ between two runs of the same ra-jit: which unit a
+  type's entry is shared in follows the order functions are compiled in (`debuginfo.py`'s
+  rung2, stress and corpus objects, main against main: 17 of 99 with debug info differ in
+  their DIEs) (**read**).
+- On one core (`taskset -c 40`, which `available_parallelism` follows) the order is fixed.
+  `debuginfo.py --only stress`, `rung2` and `corpus` on main and on the branch: all 941
+  objects and executables with debug info have the same `llvm-dwarfdump --debug-info
+  --debug-line`, once the checkout's path and the temporary directories' names are set aside;
+  the `.debug_info` and `.debug_line` bytes are the same, `.debug_str` one byte shorter for the
+  shorter checkout path (**read**). `debuginfo.py` in full passes on both, perf unwinding by
+  `.eh_frame` included (341 and 338 frames of ra-jit's functions in about 400 samples, none
+  without a line) (**read**).
+
+### Memory, main → branch
+
+| | ready | after the own base (most) | after its edits | most at an edit |
+|---|---|---|---|---|
+| nushell | 5.48 → 5.41 GB | 11.17 (13.78) → 8.48 (11.50) GB | 9.74 → 7.46 GB | 13.96 → 11.73 GB |
+| helix | 4.19 → 4.00 GB | 11.74 (16.17) → 7.09 (11.54) GB | 11.30 → 6.39 GB | 14.54 → 9.89 GB |
+| bun | 10.46 → 8.87 GB | 30.72 (31.86) given up → 18.89 (24.03) GB | 24.87 → 15.94 GB | 33.62 → 23.23 GB |
+
+(**read**.) The edits' times are the same but for bun's signature edit: 32.8 s on main, where
+the base was given up at this host's bound (31.7 GB, a quarter of its memory, the same as the
+128 GiB Mac's 32 GB) and the edit wrote the whole object and linked it, against 6.3 s on the
+branch, where the base was built and the edit patched it. nushell's edits 0.28-0.35 s on both
+after the first (1.95 and 2.20 s right after the own base); helix's 0.11-0.21 s (1.48 and
+2.24 s). The own base took 22 s on nushell on both, 70 → 61 s on helix, 28 → 38 s on bun,
+where main's stopped at the bound.
+
+### zed
+
+Before main's jemalloc (main `ee227bdb4d` against the branch then, mimalloc): ready at 16.2
+and 14.7 GB; the own base reached the bound (31.7 GB) in 27 s on main and 94 s on the branch,
+about 0.58 and 0.18 GB/s; with `RA_JIT_OWN_BASE_MEMORY=off` under a 64 GB cgroup the
+branch's worker was killed at 66.7 GB (**read**). So what `described` copied was most of
+zed's growth, as the 2026-10-22 profile said, and something else still grows past 64 GB; #29
+stays open.
