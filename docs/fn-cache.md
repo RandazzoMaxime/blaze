@@ -64,9 +64,11 @@ It is refused when anything it reaches:
 
 - reads or writes a static that can change (`static mut`, an atomic, a `Mutex`), a thread-local
   or a foreign static;
-- calls a foreign function other than the allocator, `memcpy` and its kin and libm, which is
-  how I/O, time, randomness, the environment and threads are seen: the standard library gets
-  them from the system;
+- calls a foreign function other than the allocator, `memcpy` and its kin, libm and LLVM's
+  intrinsics, which is how I/O, time, randomness, the environment and threads are seen: the
+  standard library gets them from the system. Of LLVM's intrinsics, those that read a counter,
+  randomness, an address or the state of the machine, or set it, are refused (`llvm.x86.rdtsc`,
+  `rdrand`, the floating-point environment);
 - in a crate of the workspace, dereferences a raw pointer, takes an address as a number or has
   assembly in it;
 - turns an address into data, which another run has another of: formats a pointer (`{:p}`),
@@ -83,6 +85,14 @@ It is refused when anything it reaches:
 
 The functions those are told by are always compiled as calls, never built into their caller,
 so the walk sees them.
+
+The functions of `core` and `alloc` that aren't generic are called as rustc built them, so their
+code is not hashed: the toolchain in the key stands for it. What they do is looked through
+instead, in their MIR and that of the `core` and `alloc` they call, directly or through others,
+for the same: `core::arch::x86_64::_rdtsc` reads the cycle counter and is refused, formatting a
+number is not. A panic there is fine, as anywhere. Not looked through are what a generic body
+calls by a trait of its parameters, what a `dyn` calls (the code reached builds that vtable)
+and what dropping a value does.
 
 Or when an argument can change behind a shared reference (it holds an `UnsafeCell`, as `Cell`,
 `RefCell`, `Mutex` and atomics do; the counts of an `Rc` or an `Arc` are left to the rule above),

@@ -21,10 +21,12 @@ in memory, found on disk or computed, and each step says which it has to be:
 - `shared` takes an `Rc`, `looked` makes a `HashMap` and `given` takes one, and are kept: the
   second run finds them on disk, `given`'s though its map's entries are in another order;
 - `holders` reads an `Rc`'s count and `ordered` a `HashMap`'s order, and are refused;
+- `spelled` formats numbers, all of it in core, and is kept; `ticks` reads the cycle counter
+  through a function of core known by its name, and is refused on x86-64;
 - a daemon started again finds what the first kept: the hash is the same in every process;
 - cargo's own build runs every call, and prints the same.
 """
-import os, re, shutil, subprocess, sys, tempfile, time
+import os, platform, re, shutil, subprocess, sys, tempfile, time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
@@ -136,6 +138,23 @@ fn given(map: HashMap<u64, u64>) -> u64 {
     map[&3] + map.len() as u64
 }
 
+/// Formatting, all of it core's: what it reaches there is pure.
+#[ra_jit::cache]
+fn spelled(n: u64) -> String {
+    format!("{n:>8}|{:.3}|{:e}", n as f64 / 7.0, n as f32)
+}
+
+/// The processor's cycle counter, read by a function of core known by its name.
+#[ra_jit::cache]
+fn ticks(n: u64) -> bool {
+    #[cfg(target_arch = "x86_64")]
+    let read: unsafe fn() -> u64 = core::arch::x86_64::_rdtsc;
+    #[cfg(not(target_arch = "x86_64"))]
+    let read: unsafe fn() -> u64 = || 1;
+    let ticks = unsafe { read() };
+    ticks > 0 || n > 0
+}
+
 #[inline(never)]
 fn unrelated() -> u64 {
     7
@@ -157,6 +176,8 @@ fn main() {
     println!("looked {}", looked(1000));
     println!("ordered {}", ordered(64).len());
     println!("given {}", given((0..64).map(|i| (i, i + 1)).collect()));
+    println!("spelled {}", spelled(1234));
+    println!("ticks {}", ticks(2));
 }
 """
 SLOW_BODY = """    let mut acc = 1;
@@ -168,9 +189,9 @@ SLOW_BODY = """    let mut acc = 1;
 # (what the step is, [(file, old, new)], {function: what the run says of it}, run twice)
 STEPS = [
     ("first run", [], {"slow": "computed", "fib": "computed", "shared": "computed", "looked": "computed",
-                       "given": "computed"}, False),
+                       "given": "computed", "spelled": "computed"}, False),
     ("second run", [], {"slow": "found on disk", "fib": "found on disk", "shared": "found on disk",
-                        "looked": "found on disk", "given": "found on disk"}, False),
+                        "looked": "found on disk", "given": "found on disk", "spelled": "found on disk"}, False),
     ("a comment and a format edit in it", [(MAIN, SLOW_BODY,
         "    // Comments and spaces are not code.\n    let mut acc = 1;\n\n    for i in 0..rounds { acc = step(acc, i); }\n    acc\n")],
         {"slow": "found on disk"}, False),
@@ -195,6 +216,9 @@ REFUSED = {
     "ordered": re.compile(r"`fcache::ordered` is not cached: it calls `[^`]*::keys[^`]*`, which gives the entries of "
                           r"a map in the order of its random seed, at src/main\.rs:\d+:\d+"),
 }
+if platform.machine() in ("x86_64", "AMD64"):
+    REFUSED["ticks"] = re.compile(r"`fcache::ticks` is not cached: it calls `[^`]*::_rdtsc`, which calls the foreign "
+                                  r"function `llvm\.x86\.rdtsc`, at src/main\.rs:\d+:\d+")
 
 
 def said(stderr):

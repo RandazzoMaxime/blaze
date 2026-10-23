@@ -13,12 +13,15 @@
 //!
 //! A function can be cached when what it gives depends on its arguments alone. It can't when
 //! what it reaches reads a static that can change, a thread-local or a foreign static, calls a
-//! foreign function other than the allocator, `mem*` and libm, or the code of the workspace
+//! foreign function other than the allocator, `mem*`, libm and the LLVM intrinsics that read
+//! no counter, randomness or state of the machine, or the code of the workspace
 //! dereferences a raw pointer, takes an address as a number or has assembly in it, or core's
 //! formats, hashes or orders pointers by their addresses or gives one as a number. Neither can
 //! it when an argument can change behind a shared reference, as a `Cell` or an atomic can, or
 //! holds a raw pointer of a type of the workspace. The standard library's I/O, time,
 //! randomness and environment are all foreign calls or statics that change, so they are seen.
+//! The functions of core and alloc that aren't generic run as rustc built them and are known by
+//! their names, not hashed; their MIR is looked through for the same instead.
 //!
 //! Two of those are let through where what they change is nothing the result can see. The
 //! counts of an `Rc` or an `Arc` in an argument change behind a shared reference, so what reads
@@ -48,11 +51,11 @@ use hir_ty::{
     InferBodyId,
     db::{HirDatabase, InternedClosureId, InternedCoroutineId},
     mir::{
-        CastKind, MirBody, MirSpan, Operand, OperandKind, ProjectionElem, Rvalue, StatementKind,
-        TerminatorKind,
+        AggregateKind, CastKind, MirBody, MirSpan, Operand, OperandKind, ProjectionElem, Rvalue,
+        StatementKind, TerminatorKind,
     },
-    next_solver::{DbInterner, GenericArgs, Ty, TyKind},
-    traits::StoredParamEnvAndCrate,
+    next_solver::{DbInterner, GenericArgs, ParamEnv, Ty, TyKind},
+    traits::{ParamEnvAndCrate, StoredParamEnvAndCrate},
 };
 
 use super::{
@@ -254,6 +257,15 @@ struct Walk<'db> {
     /// An argument holds a reference count, which what reads one gives and the key does not
     /// tell: two arguments can share a value or not.
     counted: bool,
+    /// What each function of core and alloc known by its name does that is not pure.
+    library: FxHashMap<FunctionId, Option<String>>,
+}
+
+/// A body of core or alloc looked through: a function's, or a closure's.
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+enum LibraryBody<'db> {
+    Fn(FunctionId),
+    Closure(InternedClosureId<'db>),
 }
 
 impl<'db> Walk<'db> {
@@ -265,6 +277,7 @@ impl<'db> Walk<'db> {
             index: FxHashMap::default(),
             segments: Vec::new(),
             counted,
+            library: FxHashMap::default(),
         }
     }
 
@@ -351,13 +364,72 @@ impl<'db> Walk<'db> {
             return (Node::Instance(instance.clone(), env.clone()), site, codec);
         }
         match func.krate(db).data(db).origin {
-            // Neither does I/O, nor has a static that changes but an atomic of its own, which
-            // only what is given one reaches.
             base_db::CrateOrigin::Lang(LangCrateOrigin::Core | LangCrateOrigin::Alloc) => {
-                (Node::Leaf(name(), None), site, codec)
+                let why =
+                    self.library(func).map(|what| format!("calls `{}`, which {what}", name()));
+                (Node::Leaf(name(), why), site, codec)
             }
             _ => (Node::Root(func), site, codec),
         }
+    }
+
+    /// What a function of core or alloc, known by its name and not hashed, does that is not
+    /// pure, as its MIR and that of the core and alloc it calls tell: a foreign function, a
+    /// static that changes, a thread-local or assembly. Not looked through are what a generic
+    /// body calls by a trait of its parameters, what a `dyn` calls, which the code reached
+    /// makes the vtable of, and what dropping a value does.
+    fn library(&mut self, func: FunctionId) -> Option<String> {
+        if let Some(it) = self.library.get(&func) {
+            return it.clone();
+        }
+        let db = self.db;
+        let start = LibraryBody::Fn(func);
+        let mut parent = FxHashMap::default();
+        let mut seen = FxHashSet::from_iter([start]);
+        let mut queue = std::collections::VecDeque::from([start]);
+        let mut calls = Vec::new();
+        let mut found = None;
+        while let Some(at) = queue.pop_front() {
+            calls.clear();
+            if let Some(what) = library_body(db, at, &mut calls) {
+                found = Some((at, what));
+                break;
+            }
+            for &next in &calls {
+                if seen.insert(next) {
+                    parent.insert(next, at);
+                    queue.push_back(next);
+                }
+            }
+        }
+        let Some((at, what)) = found else {
+            // What it reaches is as pure as it is.
+            for body in seen {
+                if let LibraryBody::Fn(it) = body {
+                    self.library.insert(it, None);
+                }
+            }
+            return None;
+        };
+        let mut chain = vec![at];
+        while let Some(&up) = parent.get(chain.last().unwrap()) {
+            chain.push(up);
+        }
+        chain.pop();
+        chain.reverse();
+        let told = match chain.as_slice() {
+            [] => what,
+            _ => {
+                let names: Vec<String> = chain.iter().map(|&it| library_name(db, it)).collect();
+                let shown = match names.len() {
+                    ..=3 => names.join(" → "),
+                    _ => format!("{} → … → {}", names[0], names[names.len() - 1]),
+                };
+                format!("reaches {shown}, which {what}")
+            }
+        };
+        self.library.insert(func, Some(told.clone()));
+        Some(told)
     }
 
     fn hash_node(&mut self, at: u32, node: &Node) {
@@ -542,10 +614,7 @@ impl<'db> Walk<'db> {
 
     fn static_node(&mut self, id: StaticId) -> Node {
         let db = self.db;
-        let signature = StaticSignature::of(db, id);
-        if signature.flags.contains(StaticFlags::EXTERN) {
-            let name = AttrFlags::link_name(db, id.into())
-                .map_or_else(|| signature.name.as_str().to_owned(), |it| it.as_str().to_owned());
+        if let Some(name) = foreign_static(db, id) {
             let why = (!name.starts_with("__rust_"))
                 .then(|| format!("reads the foreign static `{name}`"));
             return Node::Leaf(name, why);
@@ -680,8 +749,41 @@ impl<'db> Walk<'db> {
 }
 
 /// The foreign functions that give what they are given alone: the allocator, Rust's own
-/// shims and libm.
+/// shims, libm and LLVM's intrinsics but those that read a counter, randomness, an address
+/// or state of the machine, or set it.
 fn pure_foreign(symbol: &str) -> bool {
+    const MACHINE: &[&str] = &[
+        "rdtsc",
+        "rdpmc",
+        "rdpid",
+        "rdpru",
+        "rdrand",
+        "rdseed",
+        "rndr",
+        "irg",
+        "readcyclecounter",
+        "readsteadycounter",
+        "xgetbv",
+        "xsave",
+        "xrstor",
+        "mxcsr",
+        "fpcr",
+        "fpsr",
+        "fpenv",
+        "rounding",
+        "flags.read",
+        "flags.write",
+        "read_register",
+        "write_register",
+        "fsbase",
+        "gsbase",
+        "pkru",
+        "rdssp",
+        "address",
+        "thread.pointer",
+        "stacksave",
+        "sponentry",
+    ];
     const LIBM: &[&str] = &[
         "acos",
         "asin",
@@ -728,6 +830,7 @@ fn pure_foreign(symbol: &str) -> bool {
         || symbol.starts_with("__rg_")
         || matches!(symbol, "memcpy" | "memmove" | "memset" | "memcmp" | "bcmp" | "strlen")
         || LIBM.iter().any(|it| symbol == *it || symbol.strip_suffix('f') == Some(it))
+        || symbol.strip_prefix("llvm.").is_some_and(|it| !MACHINE.iter().any(|m| it.contains(m)))
 }
 
 /// What a function of core does that gives another result in another run, where the same
@@ -1030,6 +1133,149 @@ fn raw_use(body: &MirBody<'_>) -> Option<(&'static str, MirSpan)> {
         }
     }
     None
+}
+
+/// What `body`, of core or alloc, does itself that is not pure; else the bodies of core and
+/// alloc it calls, or makes a closure or a function pointer of, are pushed to `calls`.
+fn library_body<'db>(
+    db: &'db dyn HirDatabase,
+    body: LibraryBody<'db>,
+    calls: &mut Vec<LibraryBody<'db>>,
+) -> Option<String> {
+    let (mir, krate) = match body {
+        LibraryBody::Fn(func) if FunctionSignature::is_intrinsic(db, func) => return None,
+        LibraryBody::Fn(func) => (db.mir_body(func.into()), func.krate(db)),
+        LibraryBody::Closure(closure) => {
+            (db.mir_body_for_closure(closure), closure.loc(db).owner.module(db).krate(db))
+        }
+    };
+    let mir = match mir {
+        Ok(it) => it,
+        Err(e) => return Some(format!("has MIR ra-jit can't read ({e:?})")),
+    };
+    let env = ParamEnvAndCrate { param_env: ParamEnv::empty(), krate };
+    for (_, block) in mir.basic_blocks.iter() {
+        for statement in &block.statements {
+            match &statement.kind {
+                StatementKind::InlineAsm(_) => return Some("has assembly in it".to_owned()),
+                StatementKind::Assign(_, rvalue) => {
+                    if let Rvalue::Aggregate(AggregateKind::Closure(ty), _) = rvalue
+                        && let TyKind::Closure(id, _) = ty.as_ref().kind()
+                    {
+                        calls.push(LibraryBody::Closure(id.0));
+                    }
+                    for operand in operands(rvalue) {
+                        if let Some(what) = library_operand(db, env, operand, calls) {
+                            return Some(what);
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        if let Some(terminator) = &block.terminator
+            && let TerminatorKind::Call { func, args, .. } = &terminator.kind
+        {
+            for operand in std::iter::once(func).chain(args.iter()) {
+                if let Some(what) = library_operand(db, env, operand, calls) {
+                    return Some(what);
+                }
+            }
+        }
+    }
+    None
+}
+
+/// What an operand of a body of core or alloc reads or names that is not pure; else the
+/// function of core or alloc it names, if one, is pushed to `calls`.
+fn library_operand<'db>(
+    db: &'db dyn HirDatabase,
+    env: ParamEnvAndCrate<'db>,
+    operand: &Operand,
+    calls: &mut Vec<LibraryBody<'db>>,
+) -> Option<String> {
+    if let OperandKind::Static(id) = &operand.kind {
+        let id = *id;
+        if let Some(name) = foreign_static(db, id) {
+            return (!name.starts_with("__rust_"))
+                .then(|| format!("reads the foreign static `{name}`"));
+        }
+        let name = static_name(db, id);
+        if is_thread_local(db, id) {
+            return Some(format!("uses the thread-local `{name}`"));
+        }
+        return match compiled_static(db, id) {
+            Ok(it) => it.writable.then(|| format!("reads the static `{name}`, which can change")),
+            Err(e) => Some(format!("reads the static `{name}`, which ra-jit can't compile ({e})")),
+        };
+    }
+    let (func, args) = fn_item(operand)?;
+    if diverges(db, func) {
+        // A panic, the handler core declares as foreign among them: what it prints is no
+        // result.
+        return None;
+    }
+    if let Some(symbol) = link_name(db, func) {
+        return (!pure_foreign(&symbol)).then(|| format!("calls the foreign function `{symbol}`"));
+    }
+    if FunctionSignature::is_intrinsic(db, func) {
+        return None;
+    }
+    if let Some(what) = gives_address(db, func, false) {
+        return Some(format!("calls `{}`, which {what}", function_name(db, func, args)));
+    }
+    let func = match func.lookup(db).container {
+        ItemContainerId::TraitId(_) => {
+            if rustc_type_ir::TypeVisitableExt::has_param(&args) {
+                return None;
+            }
+            let (either::Either::Left(it), _) = db.lookup_impl_method(env, func, args) else {
+                return None;
+            };
+            if !FunctionSignature::of(db, it).has_body() {
+                return None;
+            }
+            it
+        }
+        _ => func,
+    };
+    if is_library(db, func.krate(db)) {
+        calls.push(LibraryBody::Fn(func));
+    }
+    None
+}
+
+fn is_library(db: &dyn HirDatabase, krate: Crate) -> bool {
+    matches!(
+        krate.data(db).origin,
+        base_db::CrateOrigin::Lang(LangCrateOrigin::Core | LangCrateOrigin::Alloc)
+    )
+}
+
+fn library_name(db: &dyn HirDatabase, body: LibraryBody<'_>) -> String {
+    match body {
+        LibraryBody::Fn(func) => {
+            format!("`{}`", function_name(db, func, GenericArgs::new_from_slice(&[])))
+        }
+        LibraryBody::Closure(closure) => match closure.loc(db).owner.as_function() {
+            Some(func) => {
+                format!(
+                    "a closure in `{}`",
+                    function_name(db, func, GenericArgs::new_from_slice(&[]))
+                )
+            }
+            None => "a closure".to_owned(),
+        },
+    }
+}
+
+/// The symbol a foreign static is linked by, if `id` is one.
+fn foreign_static(db: &dyn HirDatabase, id: StaticId) -> Option<String> {
+    let signature = StaticSignature::of(db, id);
+    signature.flags.contains(StaticFlags::EXTERN).then(|| {
+        AttrFlags::link_name(db, id.into())
+            .map_or_else(|| signature.name.as_str().to_owned(), |it| it.as_str().to_owned())
+    })
 }
 
 /// Why the arguments of the closure can't be what a result is kept by, and whether one holds
