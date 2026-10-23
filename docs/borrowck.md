@@ -58,6 +58,9 @@ All of these are rustc's, written from `compiler/rustc_borrowck` at the pinned n
   test and the references that and what they bind are behind, so a guard that assigns or
   mutably borrows one of them, closures included, could change which arm matches; assigning
   what the guard's arm binds by value is E0506, as the guard sees it through a reference.
+  Indexing (E0510) too: in `x[1][{ x = y; 2 }]` with `x: &[&[i32]]`, the slice `x[1]`
+  indexes was bounds-checked before the second index, so what it is behind may not change
+  there.
 - Unaligned references (E0793): a `&` or `&mut` of a field a `#[repr(packed)]` struct may
   leave less aligned than its type needs, as rustc's `check_packed_ref` (not `&raw`, nor
   behind a pointer; a field of a type parameter or of a `dyn` tail may be unaligned).
@@ -306,8 +309,8 @@ With no borrow checker, the 246 units rustc accepts would pass. Now:
 
 | Mode | In scope | Pass | rustc accepts, ra-jit too | rustc rejects, same errors |
 |---|---|---|---|---|
-| Polonius | 1581 | 1532 (96.9%) | 246 of 246 | 1286 of 1335 |
-| NLL | 1579 | 1528 (96.8%) | 227 of 227 | 1301 of 1352 |
+| Polonius | 1581 | 1534 (97.0%) | 246 of 246 | 1288 of 1335 |
+| NLL | 1579 | 1530 (96.9%) | 227 of 227 | 1303 of 1352 |
 
 460 units are out of scope; 344 of them need a nightly feature. CI runs the scoring on Linux
 and fails below a floor a few units under the count there, on any error in a unit rustc
@@ -324,8 +327,8 @@ files, errors and files it panicked on; a panic makes it fail.
 Every failing unit is one where rustc gives an error ra-jit does not, or gives it on another
 line or with another code. By what is wrong, most first: 5 "lifetime may not live long
 enough" not reported, 3 on another line or with another code, 1 with only an error rustc does
-not give, 5 each of E0507, E0310 and higher-ranked errors, 3 each of E0309, E0311 and E0597,
-2 of E0700 not reported, then a long tail. The causes, grouped:
+not give, 5 each of E0507, E0310 and higher-ranked errors, 3 each of E0309, E0311 and E0597
+not reported, then a long tail. The causes, grouped:
 
 - **Higher-ranked regions and placeholders** (`for<'a>` bounds, closures with higher-ranked
   signatures): rustc checks them with placeholders in universes; ra-jit does not yet, and
