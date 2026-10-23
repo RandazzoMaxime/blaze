@@ -81,7 +81,9 @@ All of these are rustc's, written from `compiler/rustc_borrowck` at the pinned n
   `dyn Any + 'r` in the signature implies `'r: 'static`, which `trait Any: 'static` requires.
   The type an object binds an associated type to is invariant (`dyn Trait<Out = &'a u32>`),
   and unsizing to `dyn Trait` proves the value's type implements `Trait`, with what its impl
-  needs of the regions. An associated type in a signature is related as what it normalizes
+  needs of the regions and what the trait says its types outlive (`T` as `dyn Any + 'a` needs
+  `T: 'static`); a field's `dyn Any + 'a` implies nothing of `'a`, as rustc's inferred
+  outlives leave out what mentions `Self`. An associated type in a signature is related as what it normalizes
   to, so `for x in &mut v` keeps `v` borrowed in the `IterMut<'a, T>` that
   `<&'a mut Vec<T> as IntoIterator>::IntoIter` is. Unsizing an array to a slice keeps its
   element type (`[T; N]: Unsize<[T]>`), so `&mut [&'a T; 1]` as `&mut [&'b T]` makes `'a`
@@ -117,7 +119,8 @@ All of these are rustc's, written from `compiler/rustc_borrowck` at the pinned n
   (`Migrations::new(&[Migration::new("a")])`), as it is in rustc's const contexts.
 - Region inference: liveness of locals (drops kept live only back to where the local may be
   initialized; what a drop uses as rustc's dropck: an associated type as what it normalizes
-  to, another alias what its bounds and captures leave, `for<'a> T: 'a` as `'static`, and
+  to, another alias what its bounds and captures leave, all its arguments under a binder of
+  its type (`fn(T::Gat<'a, '_>)`), `for<'a> T: 'a` as `'static`, and
   nothing of a `ManuallyDrop`), outlives constraints from every statement, call, cast and aggregate, the
   signature's universal regions and implied bounds (normalized parameters and the impl
   header included, for associated consts too; a projection implies what its arguments do as
@@ -126,7 +129,11 @@ All of these are rustc's, written from `compiler/rustc_borrowck` at the pinned n
   `trait Trait<A: 'static>`), where clauses (elaborated through
   supertraits) and the region constraints of proving them with the trait solver (a
   callee's `I: IntoIterator<Item = T>` makes what `I` normalizes the projection to `T`, so
-  `buffer.extend(data.split(..))` borrows `data` for as long as `buffer` holds it; a where
+  `buffer.extend(data.split(..))` borrows `data` for as long as `buffer` holds it; a bound's
+  associated type of a closure's type is normalized before it is proven, so
+  `v.iter().map(|l| l.trim()).collect::<Vec<&'a str>>()` borrows `v` for `'a`, though not
+  where that type has a trait object, whose lifetime rust-analyzer makes `'static` in an impl
+  header that leaves it out; `Trait<'static>` of `trait Trait<'a>: 'a` needs `'static`; a where
   clause or impl that proves a bound relates its regions to the bound's, `&'max G: Get` proving
   `&'min G: Get` makes them equal, and the impl's own `T: 'a` must hold), type tests (an
   associated type `<T as Trait>::Assoc: 'a` as rustc's alias bound: what it normalizes to
@@ -273,8 +280,8 @@ With no borrow checker, the 245 units rustc accepts would pass. Now:
 
 | Mode | In scope | Pass | rustc accepts, ra-jit too | rustc rejects, same errors |
 |---|---|---|---|---|
-| Polonius | 1579 | 1471 (93.2%) | 245 of 245 | 1226 of 1334 |
-| NLL | 1577 | 1467 (93.0%) | 226 of 226 | 1241 of 1351 |
+| Polonius | 1579 | 1494 (94.6%) | 245 of 245 | 1249 of 1334 |
+| NLL | 1577 | 1490 (94.5%) | 226 of 226 | 1264 of 1351 |
 
 463 units are out of scope; 344 of them need a nightly feature. CI runs the scoring on Linux
 and fails below a floor a few units under the count there.
@@ -287,10 +294,10 @@ just, axum, nushell, delta, eza, tokei and starship it finds nothing, nor on the
 ## What is left
 
 Every failing unit is one where rustc gives an error ra-jit does not, or gives it on another
-line or with another code. By what is wrong, most first: 11 "lifetime may not live long
-enough" not reported, 9 on another line or with another code, 9 with only an error rustc does
-not give, 8 of E0597 not reported, 7 each of E0716 and E0507, 6 each of E0309 and E0310, and
-5 each of E0311, E0521 and higher-ranked errors not reported, then a long tail. The causes, grouped:
+line or with another code. By what is wrong, most first: 10 "lifetime may not live long
+enough" not reported, 6 on another line or with another code, 4 with only an error rustc does
+not give, 7 of E0597 not reported, 6 of E0309, and 5 each of E0716, E0311, E0507, E0310 and
+higher-ranked errors not reported, then a long tail. The causes, grouped:
 
 - **Higher-ranked regions and placeholders** (`for<'a>` bounds, closures with higher-ranked
   signatures): rustc checks them with placeholders in universes; ra-jit does not yet, and
