@@ -33,6 +33,15 @@ pub(crate) fn kept(was: &str, text: String) -> String {
     }
 }
 
+/// ra-jit's harness for a crate.
+pub(crate) struct Harness {
+    /// The module, which starts with [`MARK`].
+    pub(crate) text: String,
+    /// The tests and how each is marked, without where they are: what rustc's harness
+    /// lists the same while it is.
+    pub(crate) listed: String,
+}
+
 /// One test as libtest describes it.
 struct Test {
     /// The function from the crate's root, and the name libtest shows: the same path
@@ -48,6 +57,7 @@ struct Test {
     end: (usize, usize),
 }
 
+#[derive(Debug)]
 enum ShouldPanic {
     No,
     Yes,
@@ -55,14 +65,14 @@ enum ShouldPanic {
 }
 
 /// The module for the tests of `krate`, `None` when it has what the harness rustc writes
-/// has and this one does not: a benchmark, or an attribute of a test inside `cfg_attr`.
+/// has and this one does not: a benchmark, or an `ignore` with a list after it.
 /// `file_name` is what rustc is told a file is called.
 pub(crate) fn module(
     db: &RootDatabase,
     krate: hir::Crate,
     functions: impl IntoIterator<Item = hir::Function>,
     file_name: &dyn Fn(vfs::FileId) -> Option<String>,
-) -> Option<String> {
+) -> Option<Harness> {
     use hir::HasSource as _;
     let edition = krate.edition(db);
     let mut tests = Vec::new();
@@ -90,16 +100,30 @@ pub(crate) fn module(
             start: (0, 0),
             end: (0, 0),
         };
-        for attr in source.value.attrs() {
+        // What `cfg_attr` gives for the crate's cfgs is written as if alone.
+        let mut metas: Vec<ast::Meta> = source.value.attrs().filter_map(|it| it.meta()).collect();
+        metas.reverse();
+        let mut attrs = Vec::new();
+        while let Some(meta) = metas.pop() {
+            let ast::Meta::CfgAttrMeta(cfg_attr) = meta else {
+                attrs.push(meta);
+                continue;
+            };
+            let predicate = cfg::CfgExpr::parse_from_ast(cfg_attr.cfg_predicate()?);
+            if krate.cfg(db).check(&predicate) != Some(false) {
+                let inner: Vec<ast::Meta> = cfg_attr.metas().collect();
+                metas.extend(inner.into_iter().rev());
+            }
+        }
+        for meta in attrs {
             let named = |path: Option<ast::Path>| path.map(|it| it.syntax().text().to_string());
-            match attr.meta() {
-                Some(ast::Meta::CfgAttrMeta(_)) => return None,
-                Some(ast::Meta::PathMeta(meta)) => match named(meta.path()).as_deref() {
+            match meta {
+                ast::Meta::PathMeta(meta) => match named(meta.path()).as_deref() {
                     Some("ignore") => test.ignore = true,
                     Some("should_panic") => test.should_panic = ShouldPanic::Yes,
                     _ => {}
                 },
-                Some(ast::Meta::KeyValueMeta(meta)) => {
+                ast::Meta::KeyValueMeta(meta) => {
                     let value = meta.expr().and_then(|it| string_of(&it));
                     match named(meta.path()).as_deref() {
                         Some("ignore") => (test.ignore, test.ignore_message) = (true, value),
@@ -109,7 +133,7 @@ pub(crate) fn module(
                         _ => {}
                     }
                 }
-                Some(ast::Meta::TokenTreeMeta(meta)) => match named(meta.path()).as_deref() {
+                ast::Meta::TokenTreeMeta(meta) => match named(meta.path()).as_deref() {
                     Some("ignore") => return None,
                     Some("should_panic") => {
                         test.should_panic =
@@ -140,7 +164,16 @@ pub(crate) fn module(
         Some(it) if it.parent().is_some_and(|it| it.ends_with("tests")) => "IntegrationTest",
         _ => "Unknown",
     };
-    Some(text(&tests, test_type))
+    let listed = tests.iter().map(|it| {
+        format!(
+            "{} {} {:?} {:?}\n",
+            it.path.join("::"),
+            it.ignore,
+            it.ignore_message,
+            it.should_panic
+        )
+    });
+    Some(Harness { text: text(&tests, test_type), listed: listed.collect() })
 }
 
 fn text(tests: &[Test], test_type: &str) -> String {

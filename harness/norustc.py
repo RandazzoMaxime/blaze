@@ -64,6 +64,14 @@ SCENARIOS = [
         ("again", ["test", "--doc", "-p", "word"], [], False),
     ]),
     ("check", [("check", ["check"], [], False)]),
+    # With no build of its flags loaded the daemon loads the workspace to check it.
+    ("check unloaded", [
+        ("the daemon stopped", ["stop"], [], False),
+        ("check", ["check"], [], False),
+        ("an error", ["check"], [(MAIN, "fn main() {", 'fn wrong() -> u32 {\n    "no"\n}\n\nfn main() {')], False),
+        ("the error mended", ["check"], [(MAIN, 'fn wrong() -> u32 {\n    "no"\n}\n\n', "")], False),
+        ("another package", ["check", "-p", "word"], [], False),
+    ]),
 ]
 
 
