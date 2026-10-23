@@ -12,9 +12,9 @@ macro_rules! times4 {
 #[inline(never)]
 fn mix(seed: u64) -> u64 {
     let mut acc = seed;
-    times4!(times4!(times4!(times4!(times4!(times4!(times4!(
+    times4! { times4! { times4! { times4! { times4! { times4! { times4! {
         acc = acc.rotate_left(5) ^ black_box(acc >> 3);
-    )))))));
+    } } } } } } }
     acc
 }
 
