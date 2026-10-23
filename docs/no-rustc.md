@@ -623,7 +623,10 @@ rustc wrote, and the module is written again after each change, so a test added,
 renamed is an edit the daemon builds. rust-analyzer resolves the module's paths to private tests
 (a patch in `hir-def`'s path resolution, for that module only). A program with a bench, a
 `cfg_attr` on a test or an `ignore` it does not read keeps rustc's harness, and adding a test
-to it still goes to cargo. A library's file a unit test is linked with as rustc built it (without
+to it still goes to cargo. A test program built without incremental compilation or optimized,
+which rustc's harness calls private or inlined copies of the tests in, was cargo's; it is now the
+daemon's when ra-jit wrote its harness (the plan leaves the reason in the program's directory,
+`harness-alone`, for the daemon to refuse with when it wrote none). A library's file a unit test is linked with as rustc built it (without
 `cfg(test)`) is now guarded by its text without the items marked `#[test]` or `#[cfg(test)]`,
 every other token at its line and column: a change to its tests alone keeps rustc's library,
 and cargo's dep-info of it is made newer than the file so cargo does not build it again. On the

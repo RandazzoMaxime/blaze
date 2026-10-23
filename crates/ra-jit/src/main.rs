@@ -8186,6 +8186,12 @@ impl Program {
                 .unwrap_or_default()
                 .first()
                 .is_some_and(|&krate| harness_main(db, &listed.of(db, krate).functions).is_some());
+        let alone = args.out.parent().map(|it| it.join(cargo::plan::HARNESS_ALONE));
+        if let Some(why) = alone.and_then(|it| std::fs::read_to_string(it).ok())
+            && !harnessed
+        {
+            failed = failed.or(Some(Refused::Cargos(why)));
+        }
         match tests {
             Some(_) if harnessed => {}
             Some(first) => failed = failed.or_else(|| first.changed(&now).map(Refused::Cargos)),
