@@ -4,7 +4,7 @@ ra-jit has its own borrow checker, the crate `hir-ty-borrowck` in the rust-analy
 (`vendor/rust-analyzer/crates/hir-ty-borrowck`, next to `hir-ty`). It checks the MIR rust-analyzer
 lowers, the same MIR the code generator compiles, and it is meant to give exactly rustc's
 verdict: the same errors, on the same lines, and none where rustc gives none. It gives
-rustc's verdict on 90% of rustc's own borrow-check tests today, and on every one rustc
+rustc's verdict on 91% of rustc's own borrow-check tests today, and on every one rustc
 accepts; how they are scored and what is left is below.
 
 It runs as part of rust-analyzer's diagnostics, so the daemon computes it for every edited
@@ -49,7 +49,10 @@ All of these are rustc's, written from `compiler/rustc_borrowck` at the pinned n
   it cannot move out of them (E0507), and casting an enum to an integer moves the enum
   (`*e as usize` behind a reference is E0507). A pattern's moves out of what it may not move
   out of are one error at the value matched for each place they move out of, as rustc's
-  `MovesFromPlace`: `(D(s), &t)` is an E0509 and an E0507.
+  `MovesFromPlace`: `(D(s), &t)` is an E0509 and an E0507. A move of a subslice of an array
+  moves each of its elements, so `let [_y @ .., _, _] = a` after `let [_x, _, _] = a` uses a
+  moved element, and so does assigning `a[2]` after moving it out, as rustc reads the array
+  to index it.
 - Unaligned references (E0793): a `&` or `&mut` of a field a `#[repr(packed)]` struct may
   leave less aligned than its type needs, as rustc's `check_packed_ref` (not `&raw`, nor
   behind a pointer; a field of a type parameter or of a `dyn` tail may be unaligned).
@@ -107,7 +110,9 @@ All of these are rustc's, written from `compiler/rustc_borrowck` at the pinned n
   well as what it normalizes to, `<&'a &'b () as Trait>::Type` that `'b: 'a`, and its trait's
   outlives where clauses, `<T as Trait<A>>::Assoc` that `A: 'static` where
   `trait Trait<A: 'static>`), where clauses (elaborated through
-  supertraits) and the region constraints of proving them with the trait solver (a where
+  supertraits) and the region constraints of proving them with the trait solver (a
+  callee's `I: IntoIterator<Item = T>` makes what `I` normalizes the projection to `T`, so
+  `buffer.extend(data.split(..))` borrows `data` for as long as `buffer` holds it; a where
   clause or impl that proves a bound relates its regions to the bound's, `&'max G: Get` proving
   `&'min G: Get` makes them equal, and the impl's own `T: 'a` must hold), type tests (an
   associated type `<T as Trait>::Assoc: 'a` as rustc's alias bound: what it normalizes to
@@ -239,8 +244,8 @@ With no borrow checker, the 245 units rustc accepts would pass. Now:
 
 | Mode | In scope | Pass | rustc accepts, ra-jit too | rustc rejects, same errors |
 |---|---|---|---|---|
-| Polonius | 1579 | 1433 (90.8%) | 245 of 245 | 1188 of 1334 |
-| NLL | 1577 | 1429 (90.6%) | 226 of 226 | 1203 of 1351 |
+| Polonius | 1579 | 1440 (91.2%) | 245 of 245 | 1195 of 1334 |
+| NLL | 1577 | 1436 (91.1%) | 226 of 226 | 1210 of 1351 |
 
 463 units are out of scope; 344 of them need a nightly feature. CI runs the scoring on Linux
 and fails below a floor a few units under the count there.
@@ -254,10 +259,10 @@ just, axum, nushell, delta, eza, tokei and starship it finds nothing, nor on the
 
 Every failing unit is one where rustc gives an error ra-jit does not, or gives it on another
 line or with another code. By what is wrong, most first: 14 "lifetime may not live long
-enough" and 11 E0597 not reported, 9 "lifetime may not live long enough" on another line,
+enough" and 10 E0597 not reported, 9 "lifetime may not live long enough" on another line,
 9 with only an error rustc does not give, 8 each of E0716 and E0700, 7 each of E0507 and E0521,
-6 each of E0510 and E0310, and 5 each of E0309, E0311, E0382 and higher-ranked errors not
-reported, then a long tail. The causes, grouped:
+6 each of E0510 and E0310, and 5 each of E0309, E0311 and higher-ranked errors not reported,
+then a long tail. The causes, grouped:
 
 - **Higher-ranked regions and placeholders** (`for<'a>` bounds, closures with higher-ranked
   signatures): rustc checks them with placeholders in universes; ra-jit does not yet, and
