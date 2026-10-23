@@ -7897,10 +7897,10 @@ fn run_holding(
             wanted.extend(crates_named(&db, &args.krate, args).unwrap_or_default().first());
         }
         let texts = harnesses(&db, programs.iter().map(|it| &it.args), Some(&wanted));
+        let mut untouched: Vec<vfs::FileId> = Vec::new();
         if !texts.is_empty() {
             let roots: Vec<_> = texts.iter().map(|it| it.0).collect();
-            let untouched: Vec<_> =
-                roots.iter().copied().filter(|it| !editing.contains(it)).collect();
+            untouched = roots.iter().copied().filter(|it| !editing.contains(it)).collect();
             home_in_rustcs(&db, &listed, &mut programs, &untouched);
             outlines.before_edit(&db, &listed, &untouched);
             for file in write_harnesses(&mut db, texts) {
@@ -7928,9 +7928,15 @@ fn run_holding(
         }
         // Asked of every file before any is noted: noting one forgets the functions listed.
         for program in &mut programs {
+            // A harness written into the root of a library is an edit of the program of its
+            // tests alone: the others link the library, which runs none of it.
+            let args = &program.args;
+            let own = crates_named(&db, &args.krate, args).ok();
+            let own = own.and_then(|it| it.first().map(|it| it.root_file(&db)));
+            let edited = sources.iter().filter(|it| !untouched.contains(it) || own == Some(**it));
             let unbuilt = &mut program.unbuilt;
             unbuilt.stale |= changed != 0;
-            unbuilt.edited.extend(&sources);
+            unbuilt.edited.extend(edited);
             unbuilt.edited.sort_unstable();
             unbuilt.edited.dedup();
         }
