@@ -818,15 +818,18 @@ item 1):
 |---|---|
 | hello, warm remote, nothing frozen | 3.02 to 3.03 s, 3.4 GB: resolving 2.2 s |
 | hello, warm remote, frozen | 1.22 to 1.23 s, 2.3 GB: resolving 0.33 s, loading 0.39 s, linking 0.17 s |
-| ripgrep, `cargo build`, cold | 5.70 to 5.74 s |
+| ripgrep, `cargo build`, cold | 5.50 to 5.56 s |
 | ripgrep, empty store and remote: the unit compiled and its 153 frozen parts written | 14.8 s |
-| ripgrep, warm store | 4.56 to 4.60 s |
-| ripgrep, a second empty store, everything from the remote | 4.60 to 4.62 s, 3.9 GB |
+| ripgrep, warm store | 4.28 to 4.31 s |
+| ripgrep, a second empty store, everything from the remote | 4.24 to 4.29 s, 3.8 GB |
 
-ripgrep with a warm remote is now 19% under cargo's cold build. Of its 4.6 s, loading the
-workspace is 0.47 s (0.12 s of it is the rustup proxy in front of each of the dozen cargo and
-rustc calls), resolving 0.39 s, compiling 3.3 s and linking 0.25 s. Compiling is 1 s longer than
-when resolving ran live, which lowered the impl headers on idle threads: the next frozen family.
+ripgrep with a warm remote is now 23% under cargo's cold build, its executable printing what
+cargo's does. Of its 4.25 s, loading the workspace is 0.46 s (0.12 s of it is the rustup proxy
+in front of each of the dozen cargo and rustc calls), fetching from the remote 0.2 s beside it,
+resolving 0.38 s, compiling ripgrep's 4,754 functions 3.0 s and linking 0.24 s. Compiling is
+longer than when resolving ran live, which lowered the impl headers on idle threads: the next
+frozen family. A build waits for the remote's packs before it reads what is frozen: the store
+reads its packs once, when first opened, and one opened mid-fetch missed the standard library's.
 
 Not yet measured: the other bench apps with every crate ra-jit's. The step K
 bar: with a warm remote, `cargo ra-jit build` from nothing is no slower than cargo's cold build;

@@ -314,7 +314,7 @@ the build on any difference, `verify` writes what was read and fails the same wa
 153 parts and hello's 78 both find none. The entries go through `ra_jit_store::Store` and so
 travel through the remote with the packs. On dev-aws-8, pinned to one socket's 96 cores, hello's
 build with a warm remote resolves in 0.33 s of 2.2 s and takes 1.22 s of 3.02 s, 2.3 GB of 3.4 GB;
-ripgrep's resolves in 0.39 s of 2.4 s and takes 4.60 s of 5.95 s.
+ripgrep's resolves in 0.38 s of 2.4 s and takes 4.25 s, against cargo's cold 5.5 s.
 
 What resolving still did for a build is now the build's: the impl headers' types (about 1 s of
 ripgrep's compiling, most of it expanding the macros that write `core`'s impls) and the
