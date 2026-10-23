@@ -3247,12 +3247,17 @@ impl Ready<'_> {
 /// find it ahead of the one that puts the functions in the object, which has it to wait
 /// for otherwise.
 #[derive(Default, Clone)]
-struct ToldTypes(
+struct ToldTypes(std::sync::Arc<TypesTold>);
+
+#[derive(Default)]
+struct TypesTold {
+    /// What the type of each variable is told as.
     #[allow(clippy::type_complexity)]
-    std::sync::Arc<
+    roots:
         std::sync::Mutex<FxHashMap<(StoredParamEnvAndCrate, StoredTy), Option<debuginfo::TypeSet>>>,
-    >,
-);
+    /// The sets of the types they are made of, which are shared.
+    sets: debuginfo::Sets,
+}
 
 impl ToldTypes {
     fn told(
@@ -3262,12 +3267,12 @@ impl ToldTypes {
         ty: &StoredTy,
     ) -> Option<debuginfo::TypeSet> {
         let key = (env.clone(), ty.clone());
-        if let Some(told) = self.0.lock().unwrap_or_else(|e| e.into_inner()).get(&key) {
+        if let Some(told) = self.0.roots.lock().unwrap_or_else(|e| e.into_inner()).get(&key) {
             return told.clone();
         }
-        let told = debuginfo::described(db, env.clone(), ty.clone());
+        let told = debuginfo::described(db, env, ty, &self.0.sets);
         // Another thread may have told of it meanwhile, and the functions share one set.
-        self.0.lock().unwrap_or_else(|e| e.into_inner()).entry(key).or_insert(told).clone()
+        self.0.roots.lock().unwrap_or_else(|e| e.into_inner()).entry(key).or_insert(told).clone()
     }
 
     /// Tells of the types of the variables of `compiled`, for [`describe_variables`] to find.

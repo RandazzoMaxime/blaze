@@ -17,9 +17,9 @@ mod split;
 mod types;
 
 use codeview::CodeView;
-use set::Told;
 pub(super) use set::TypeSet;
-pub(super) use types::described;
+use set::{Of, Told};
+pub(super) use types::{Sets, described};
 
 use cranelift_codegen::{
     binemit::CodeOffset,
@@ -102,7 +102,7 @@ pub(super) struct Place {
     pub(super) column: u32,
 }
 
-/// A type among the types of a [`TypeSet`], by its place in them.
+/// A type among the types of a list of [`DebugType`]s, by its place in it.
 pub(super) type TypeIndex = u32;
 
 /// What a debugger is told of a type: its name, its size, and what it is made of as far as
@@ -500,6 +500,8 @@ pub(super) struct Dwarf {
     /// The addresses the entries of a unit kept apart name by their place in this list.
     addresses: Vec<Address>,
     types: FxHashMap<SharedType, UnitEntryId>,
+    /// The first entry of each name among `types`.
+    names: FxHashMap<Symbol, UnitEntryId>,
     /// The entry of the type each set seen is of, by where the set is, with the set so that
     /// nothing else comes to be there.
     sets: FxHashMap<usize, (TypeSet, Option<UnitEntryId>)>,
@@ -519,10 +521,11 @@ enum SharedType {
     Array(UnitEntryId, u64),
 }
 
-/// The entries of one function's types, as far as they have been asked for.
-struct FunctionTypes<'a> {
-    types: &'a TypeSet,
-    entries: Vec<Option<UnitEntryId>>,
+/// The entries of the types of one set, as far as they have been asked for.
+#[derive(Default)]
+struct FunctionTypes {
+    /// By where each type's set is.
+    entries: FxHashMap<usize, UnitEntryId>,
     /// How many types the one being told of is inside of.
     inside: u32,
 }
@@ -546,6 +549,7 @@ impl Dwarf {
             files: FxHashMap::default(),
             ranges: Vec::new(),
             types: FxHashMap::default(),
+            names: FxHashMap::default(),
             sets: FxHashMap::default(),
             namespaces: FxHashMap::default(),
             variables,
@@ -600,6 +604,7 @@ impl Dwarf {
         let id = std::mem::take(&mut self.id).finish();
         self.files.clear();
         self.types.clear();
+        self.names.clear();
         self.sets.clear();
         self.namespaces.clear();
         self.begin_unit();
@@ -639,39 +644,42 @@ impl Dwarf {
         if let Some((_, entry)) = self.sets.get(&at) {
             return *entry;
         }
-        let mut of = FunctionTypes { types, entries: vec![None; types.len()], inside: 0 };
-        let entry = self.ty(&mut of, 0);
+        let entry = self.ty(&mut FunctionTypes::default(), &Of::Type(types.clone()));
         self.sets.insert(at, (types.clone(), entry));
         entry
     }
 
-    /// The entry of the type at `index` of `of`. A type inside more than
-    /// [`DebugType::DEEPEST`] others is not told of: the types of an entry read from the
-    /// store are not known to be what a compiler would have written, and each one inside
-    /// another takes a few frames of the stack.
-    fn ty(&mut self, of: &mut FunctionTypes<'_>, index: TypeIndex) -> Option<UnitEntryId> {
-        if let Some(entry) = of.entries.get(index as usize).copied()? {
+    /// The entry of the type `part` is. A type inside more than [`DebugType::DEEPEST`]
+    /// others is not told of: the types of an entry read from the store are not known to be
+    /// what a compiler would have written, and each one inside another takes a few frames of
+    /// the stack.
+    fn ty(&mut self, of: &mut FunctionTypes, part: &Of<'_>) -> Option<UnitEntryId> {
+        let set = match part {
+            Of::Type(set) => set,
+            Of::Named(name) => return self.names.get(*name).copied(),
+        };
+        if let Some(&entry) = of.entries.get(&set.at()) {
             return Some(entry);
         }
         if of.inside == DebugType::DEEPEST {
             return None;
         }
         of.inside += 1;
-        let entry = self.new_type(of, index);
+        let entry = self.new_type(of, set);
         of.inside -= 1;
         entry
     }
 
-    /// The entry of the type at `index` of `of`, which has none yet.
-    fn new_type(&mut self, of: &mut FunctionTypes<'_>, index: TypeIndex) -> Option<UnitEntryId> {
-        let types: &TypeSet = of.types;
-        let (ty, made_of) = types.get(index)?;
+    /// The entry of the type of `set`, which has none yet.
+    fn new_type(&mut self, of: &mut FunctionTypes, set: &TypeSet) -> Option<UnitEntryId> {
+        let ty: &Told = &set.node().told;
+        let made_of: Vec<Of<'_>> = set.of().collect();
         let shared = match ty {
             Told::Base { name, size, .. } => {
                 SharedType::Named(DW_TAG_base_type, name.clone(), *size)
             }
             Told::Pointer { name } => SharedType::Named(DW_TAG_pointer_type, name.clone(), 0),
-            Told::Array { len } => SharedType::Array(self.ty(of, *made_of.first()?)?, *len),
+            Told::Array { len } => SharedType::Array(self.ty(of, made_of.first()?)?, *len),
             Told::Struct(it) | Told::Enum { of: it, .. } => {
                 SharedType::Named(DW_TAG_structure_type, it.name.clone(), it.size)
             }
@@ -681,11 +689,11 @@ impl Dwarf {
             }
         };
         if let Some(&entry) = self.types.get(&shared) {
-            of.entries[index as usize] = Some(entry);
+            of.entries.insert(set.at(), entry);
             // A function that followed fewer pointers to the type left it without what it
             // points to.
             if let Told::Pointer { .. } = ty
-                && let Some(&to) = made_of.first()
+                && let Some(to) = made_of.first()
                 && self.dwarf.unit.get(entry).get(DW_AT_type).is_none()
                 && let Some(to) = self.ty(of, to)
             {
@@ -704,10 +712,13 @@ impl Dwarf {
             }
             SharedType::Array(..) => self.dwarf.unit.add(self.dwarf.unit.root(), DW_TAG_array_type),
         };
-        // A type that points to itself finds its entry here.
-        of.entries[index as usize] = Some(entry);
+        of.entries.insert(set.at(), entry);
+        if let SharedType::Named(_, name, _) = &shared {
+            self.names.entry(name.clone()).or_insert(entry);
+        }
         self.types.insert(shared, entry);
-        self.fill(of, entry, ty, made_of);
+        // A type made of itself finds its entry here.
+        self.fill(of, entry, ty, &made_of);
         Some(entry)
     }
 
@@ -727,13 +738,7 @@ impl Dwarf {
 
     /// Writes what `ty` is made of into its `entry`: the types at `made_of`, in the order
     /// [`Told`] says.
-    fn fill(
-        &mut self,
-        of: &mut FunctionTypes<'_>,
-        entry: UnitEntryId,
-        ty: &Told,
-        made_of: &[TypeIndex],
-    ) {
+    fn fill(&mut self, of: &mut FunctionTypes, entry: UnitEntryId, ty: &Told, made_of: &[Part]) {
         let size = |unit: &mut gimli::write::Unit, size: u64| {
             unit.get_mut(entry).set(DW_AT_byte_size, AttributeValue::Udata(size));
         };
@@ -744,12 +749,12 @@ impl Dwarf {
                 self.dwarf.unit.get_mut(entry).set(DW_AT_encoding, encoding);
             }
             Told::Pointer { .. } => {
-                if let Some(to) = made_of.first().and_then(|&to| self.ty(of, to)) {
+                if let Some(to) = made_of.first().and_then(|to| self.ty(of, to)) {
                     self.dwarf.unit.get_mut(entry).set(DW_AT_type, AttributeValue::UnitRef(to));
                 }
             }
             Told::Array { len } => {
-                let Some(element) = made_of.first().and_then(|&it| self.ty(of, it)) else {
+                let Some(element) = made_of.first().and_then(|it| self.ty(of, it)) else {
                     return;
                 };
                 let unit = &mut self.dwarf.unit;
@@ -790,12 +795,12 @@ impl Dwarf {
     /// each variant.
     fn variants(
         &mut self,
-        of: &mut FunctionTypes<'_>,
+        of: &mut FunctionTypes,
         entry: UnitEntryId,
         whole: &set::Shape,
         tag: Option<Tag>,
         variants: &[set::Shaped],
-        made_of: &[TypeIndex],
+        made_of: &[Of<'_>],
     ) {
         let (parameters, mut left) = made_of.split_at(whole.parameters.len());
         let part = self.dwarf.unit.add(entry, DW_TAG_variant_part);
@@ -840,12 +845,12 @@ impl Dwarf {
     /// The fields of the type at `entry`, by their names and offsets, of the types at `types`.
     fn members(
         &mut self,
-        of: &mut FunctionTypes<'_>,
+        of: &mut FunctionTypes,
         entry: UnitEntryId,
         fields: &[(Symbol, u64)],
-        types: &[TypeIndex],
+        types: &[Of<'_>],
     ) {
-        for ((name, offset), &ty) in fields.iter().zip(types) {
+        for ((name, offset), ty) in fields.iter().zip(types) {
             let Some(ty) = self.ty(of, ty) else { continue };
             let member = self.named(entry, DW_TAG_member, name.as_str());
             let member = self.dwarf.unit.get_mut(member);
@@ -858,12 +863,12 @@ impl Dwarf {
     /// pretty-printer finds what a `Vec` holds by: those at `types`.
     fn parameters(
         &mut self,
-        of: &mut FunctionTypes<'_>,
+        of: &mut FunctionTypes,
         entry: UnitEntryId,
         parameters: &[Symbol],
-        types: &[TypeIndex],
+        types: &[Of<'_>],
     ) {
-        for (name, &ty) in parameters.iter().zip(types) {
+        for (name, ty) in parameters.iter().zip(types) {
             let Some(ty) = self.ty(of, ty) else { continue };
             let parameter = self.named(entry, DW_TAG_template_type_parameter, name.as_str());
             self.dwarf.unit.get_mut(parameter).set(DW_AT_type, AttributeValue::UnitRef(ty));
@@ -881,6 +886,7 @@ impl Dwarf {
         let unit = self.dwarf.unit.get_mut(entry);
         unit.set(DW_AT_byte_size, AttributeValue::Udata(size));
         unit.set(DW_AT_encoding, AttributeValue::Encoding(gimli::DW_ATE_unsigned));
+        self.names.entry(Symbol::intern(&name)).or_insert(entry);
         self.types.insert(shared, entry);
         entry
     }
