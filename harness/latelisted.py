@@ -13,7 +13,10 @@ edit's patch then compiled every one of them as a function added. Here a library
 `exports.in` (not a `.rs` file, so nothing loads it but the macro) with EXPORTS functions of the
 C ABI, and the binary's build script keeps cargo busy after it. Once the daemon serves the build,
 a function is added to the library: its patch has to be of a few functions, not of the
-EXPORTS, and the program has to print what cargo's does.
+EXPORTS, and the program has to print what cargo's does. The daemon's first build is its own
+(`RA_JIT_RUSTC_BASE=0`), which the edit patches: a base it builds in the background, once
+idle, may be given up on a small machine, and an added function does not patch what rustc
+linked.
 
 Python 3, stdlib only.
 """
@@ -64,23 +67,17 @@ def worker_log(home):
     return None
 
 
-def compiled_for_edits(log):
-    """Waits until the worker has compiled the program it patches edits of, which it does
-    while no build asks: what it lists then is what an edit's patch is told apart from."""
-    began = time.time()
-    while time.time() - began < 300:
-        text = open(log, errors="replace").read()
-        at = text.find("compiling the program for edits to patch")
-        if at >= 0 and "\nedit-to-binary: " in text[at:]:
-            return True
-        time.sleep(0.25)
-    return False
+def tails(home, lines=40):
+    """The last lines of each of the daemon's logs, for a failure on a machine whose files are
+    gone once it ends."""
+    logs = sorted(glob.glob(os.path.join(home, "*.log")) + glob.glob(os.path.join(home, "*", "*", "log")))
+    return "".join(f"\n--- {log}\n" + "".join(open(log, errors="replace").readlines()[-lines:]) for log in logs)
 
 
-def build(side, step):
+def build(side, step, home):
     _, ran = side.cargo("build")
     if ran.returncode != 0:
-        raise SystemExit(f"{step}: the build failed:\n{(ran.stdout + ran.stderr)[-3000:]}")
+        raise SystemExit(f"{step}: the build failed:\n{(ran.stdout + ran.stderr)[-3000:]}{tails(home)}")
     return ran.stdout + ran.stderr
 
 
@@ -101,36 +98,34 @@ def main():
     env["PATH"] = bin_dir + os.pathsep + env["PATH"]
     for name in ("RUSTC_WRAPPER", "CARGO_INCREMENTAL", "RA_JIT_SPARE"):
         env.pop(name, None)
+    env["RA_JIT_RUSTC_BASE"] = "0"
     first, side = Side(first_ws, env, True), Side(ws, env, True)
     reference = Side(ws, env, False)
     program = os.path.join(ws, "target", "debug", "app")
     wrong = []
     try:
         # A daemon with a spare already up is told of the next build ahead of cargo.
-        build(first, "first")
+        build(first, "first", home)
         wait_warm(first, first_ws)
         settled(home)
-        build(side, "cold")
+        build(side, "cold", home)
         _, states = wait_warm(side, ws)
         if states != ["ready"]:
-            raise SystemExit(f"the daemon did not get ready: {states}; its logs are under {home}")
+            raise SystemExit(f"the daemon did not get ready: {states}{tails(home)}")
         for _ in range(240):
-            if "[ra-jit]" in build(side, "wait for the daemon"):
+            if "[ra-jit]" in build(side, "wait for the daemon", home):
                 break
             time.sleep(0.5)
         else:
-            raise SystemExit(f"no build said `[ra-jit]`; the daemon's logs are under {home}")
-        log = worker_log(home)
-        if log is None:
-            raise SystemExit(f"the daemon listed nothing beside cargo's build, which is what this tests; its logs are under {home}")
-        if not compiled_for_edits(log):
-            raise SystemExit(f"the daemon did not compile the program for edits to patch; its log is {log}")
+            raise SystemExit(f"no build said `[ra-jit]`{tails(home)}")
+        if worker_log(home) is None:
+            raise SystemExit(f"the daemon listed nothing beside cargo's build, which is what this tests{tails(home)}")
         seen = len(patches(home))
         lib = os.path.join(ws, "gen/src/lib.rs")
         text = open(lib).read()
         open(lib, "w").write(text.replace("pub fn value() -> u32 {\n    1\n}",
                                           "pub fn value() -> u32 {\n    1 + added()\n}\n\nfn added() -> u32 {\n    40\n}"))
-        said = build(side, "a function added")
+        said = build(side, "a function added", home)
         made = patches(home)[seen:]
         ran = subprocess.run([program], capture_output=True, text=True, timeout=60)
         _, theirs = reference.cargo("run", "-q", "-p", "app")
@@ -148,7 +143,7 @@ def main():
     for why in wrong:
         print(f"  {why}")
     if wrong:
-        print(f"under {root}")
+        print(f"under {root}{tails(home)}")
         sys.exit(1)
     shutil.rmtree(root, ignore_errors=True)
 
