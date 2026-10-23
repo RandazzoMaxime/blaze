@@ -388,6 +388,14 @@ All notable changes to ra-jit are written here. The format follows
 
 ### Fixed
 
+- The borrow checker no longer reports "temporary value dropped while borrowed" on every
+  field of a `tracing::trace!` with tracing 0.1.44, which names fields with a `const` in a
+  block inside its callsite's `static`: a `const fn` method call there is promoted, as rustc
+  promotes it, so cargo's edit build goes through again
+  ([#109](https://github.com/indexable-inc/ra-jit/issues/109)). A trait object given for a
+  type parameter bounded `T: 'a` lives for `'a`, as rustc's object lifetime default, where
+  rust-analyzer made it `'static` and the checker said "lifetime may not live long enough"
+  ([#84](https://github.com/indexable-inc/ra-jit/issues/84)).
 - A program whose `main` is C's, as bun's, is built as a whole program: LLVM gets every body
   and inlines across crates, where each function was compiled alone before. `derive(PartialEq)`
   of an enum compares the discriminants first, as rustc's does. bun's whole program, every

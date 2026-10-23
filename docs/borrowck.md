@@ -117,7 +117,9 @@ All of these are rustc's, written from `compiler/rustc_borrowck` at the pinned n
 - Promotion: a borrowed function item, and a named `const` whose type has no interior
   mutability whatever its drop (rustc asks whether the value needs dropping, not the type).
   In a `const` or `static` item's value, a call of a `const fn` is promotable too
-  (`Migrations::new(&[Migration::new("a")])`), as it is in rustc's const contexts.
+  (`Migrations::new(&[Migration::new("a")])`), as it is in rustc's const contexts, a method
+  call and a block of items and a tail included: tracing's `fieldset!` names a field
+  `{ const NAME: FieldName<..> = ..; NAME.as_str() }` in a `static`.
 - Region inference: liveness of locals (drops kept live only back to where the local may be
   initialized; what a drop uses as rustc's dropck: an associated type as what it normalizes
   to, another alias what its bounds and captures leave, all its arguments under a binder of
@@ -387,6 +389,10 @@ changes to rust-analyzer were needed, each made as rustc does it:
   expression they are operands of. In `boom().extend(&String::from(..))` a panic in the
   deref drops `boom()` first, so an `impl Trait` it returns keeps no borrow of the string
   alive (`impl-trait/wf-check-hidden-type.rs`).
+- Type lowering gives a trait object written without a lifetime, as a type argument, the
+  lifetime of its parameter's one outlives bound (`hir-ty/src/generics.rs`,
+  `object_lifetime_default`, RFC 599): `Ref<'x, dyn Trait>` with `T: 'a + ?Sized` on `Ref`
+  is `dyn Trait + 'x`, not `'static`.
 - Type inference takes an inline `asm!` output as a place written, as rustc's
   `check_expr_asm_operand` does, so `out(reg) v[0]` indexes with `IndexMut` and needs `v`
   mutable (E0596).
