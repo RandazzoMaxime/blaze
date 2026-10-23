@@ -186,7 +186,7 @@ All of these are rustc's, written from `compiler/rustc_borrowck` at the pinned n
   body has two kinds of universal region, as rustc's: its own (the late-bound lifetimes of
   its signature, `for<'a> FnOnce(&'a T)`, and the borrow of its environment) and its
   creator's (every other region of its type, and the enclosing item's lifetime parameters,
-  late-bound ones included, so `foo::<&'a u32>(&local)` in a closure needs `local` to outlive
+  late-bound ones and the anonymous ones of its impl, `impl Foo<'_>`, included, so `foo::<&'a u32>(&local)` in a closure needs `local` to outlive
   the creator's `'a`). Its parameters and return slot have the types written for them
   (rustc's `check_signature_annotation`: `|x: &'a i32| -> &'static i32 { x }` needs
   `'a: 'static`), and a closure typed without an expected signature has the lifetimes elided
@@ -229,8 +229,15 @@ All of these are rustc's, written from `compiler/rustc_borrowck` at the pinned n
   it does not (E0491) gets only that error, which ra-jit does not report yet. The type a
   returned `impl Trait` hides must be well-formed and outlive what its bounds say, given what
   the function knows (rustc's `check_opaque_meets_bounds`): `-> impl Sized + 'static` hiding
-  a `T` is E0310 at the `impl Trait`. A closure or coroutine outlives as its captures do, and
+  a `T` is E0310 at the `impl Trait`. Its trait and associated type bounds hold of the type
+  it hides where the body returns it, as rustc proves them there: `impl Iterator<Item =
+  Box<dyn Foo>>` hiding `Iter<'a, T>` needs the where clauses of that `Iterator` impl with
+  `'a` `'static`. A closure or coroutine outlives as its captures do, and
   an `impl Trait` with no outlives bound as its arguments.
+- Function items and locals, as rustc's type check: a function item used as a value, not
+  only called (`let f: fn(&'a str) -> _ = extend;`, or passed to a call), needs its where
+  clauses and its type arguments well-formed; a variable's or temporary's type is `Sized`,
+  which a where clause `<&'static T as A>::X: Sized` proves only for `'static`.
 - E0621 ("explicit lifetime required") where rustc gives it: for an anonymous lifetime a
   parameter's written type has, not in a trait impl's method, nor for one of `self`, of the
   return type or of an impl's header.
@@ -260,8 +267,8 @@ With no borrow checker, the 245 units rustc accepts would pass. Now:
 
 | Mode | In scope | Pass | rustc accepts, ra-jit too | rustc rejects, same errors |
 |---|---|---|---|---|
-| Polonius | 1579 | 1459 (92.4%) | 245 of 245 | 1214 of 1334 |
-| NLL | 1577 | 1455 (92.3%) | 226 of 226 | 1229 of 1351 |
+| Polonius | 1579 | 1463 (92.7%) | 245 of 245 | 1218 of 1334 |
+| NLL | 1577 | 1459 (92.5%) | 226 of 226 | 1233 of 1351 |
 
 463 units are out of scope; 344 of them need a nightly feature. CI runs the scoring on Linux
 and fails below a floor a few units under the count there.
@@ -274,11 +281,11 @@ just, axum, nushell, delta, eza, tokei and starship it finds nothing, nor on the
 ## What is left
 
 Every failing unit is one where rustc gives an error ra-jit does not, or gives it on another
-line or with another code. By what is wrong, most first: 14 "lifetime may not live long
-enough" not reported, 9 with only an error rustc does not give, 8 each of E0716, E0597 and
-E0700 not reported, 8 "lifetime may not live long enough" on another line, 7 of E0507, 6 each
-of E0521 and E0310, and 5 each of E0309, E0311 and higher-ranked errors not reported, then a
-long tail. The causes, grouped:
+line or with another code. By what is wrong, most first: 11 "lifetime may not live long
+enough" not reported, 9 with only an error rustc does not give, 8 each of E0597 and E0700 not
+reported, 8 "lifetime may not live long enough" on another line, 7 each of E0716 and E0507,
+6 each of E0309, E0521 and E0310, and 5 each of E0311 and higher-ranked errors not reported,
+then a long tail. The causes, grouped:
 
 - **Higher-ranked regions and placeholders** (`for<'a>` bounds, closures with higher-ranked
   signatures): rustc checks them with placeholders in universes; ra-jit does not yet, and
