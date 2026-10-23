@@ -26,8 +26,8 @@ checkout, the release's own recipe builds all of it, with the profile
     cp shipped/* ~/.cargo/bin/
 
 That build has the Cranelift backend only. The LLVM one (`RA_JIT_BACKEND=llvm`) is
-`--features llvm` on either command, and needs LLVM 20 with `LLVM_SYS_201_PREFIX` set to its
-prefix ([which LLVM](contributing.md#llvm-for---features-llvm)); with it the crates are not the ones the profile was trained on, and the script says
+`--features llvm` on either command, run inside `nix develop`, which has the LLVM 20 the flake
+pins ([which LLVM](contributing.md#llvm-for---features-llvm)); with it the crates are not the ones the profile was trained on, and the script says
 so. `cargo build -p ra-jit --release` is the quicker build the harnesses and CI use while
 working on ra-jit; it is not what ships.
 

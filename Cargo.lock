@@ -1846,6 +1846,7 @@ dependencies = [
  "inkwell",
  "intern",
  "la-arena",
+ "llvm-sys",
  "object 0.37.3",
  "postcard",
  "ra-ap-rustc_abi",

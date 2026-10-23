@@ -191,6 +191,9 @@ did about it in one line.
 - The gate, under Cranelift and under LLVM, on the platform you have. Say which platforms
   you did not run. CI's fast tier covers Linux x86-64, Linux AArch64 and macOS on every
   change; Windows and the slow harnesses run nightly ([harness.md](harness.md#ci)).
+- The LLVM backend builds in the flake's dev shell, against the LLVM it pins:
+  `nix develop -c cargo +1.99.0 build -p ra-jit --release --features llvm`
+  ([LLVM for `--features llvm`](#llvm-for---features-llvm)).
 - `cargo fmt --all -- --check` and
   `cargo test --release -p hir-ty -p hir-def -p parser -p syntax -p ra-jit`.
 - For anything that changes numbers in [results.md](results.md): the command, the commit
@@ -268,26 +271,16 @@ few thousand and before a release after large changes to the daemon.
 
 ## LLVM for `--features llvm`
 
-The LLVM backend builds against LLVM 20, found through `LLVM_SYS_201_PREFIX`; a build without
-the feature needs no LLVM, and neither does what ships. A build links `libLLVM` dynamically, by
-its path.
+The LLVM backend builds against one LLVM, the 20.1.8 the flake pins (`flake.lock`), on macOS
+and on Linux alike, in the flake's dev shell:
 
-On macOS the one supported LLVM is the flake's, LLVM 20.1.8 pinned by `flake.lock`:
+    nix develop -c cargo +1.99.0 build -p ra-jit --release --features llvm
 
-    nix build .#llvm --out-link target/llvm-20
-    export LLVM_SYS_201_PREFIX=$PWD/target/llvm-20
-    cargo +1.99.0 build -p ra-jit --release --features llvm
-
-`nix develop` sets the same prefix. The out-link keeps that LLVM from being garbage-collected
-while it exists, and a binary built against it loads its library from the store, so the same
-`nix build` brings it back on another Mac or after a collection. CI's macOS jobs do exactly
-this (`.github/actions/toolchain`). Homebrew is not a supported source: its `llvm@20` is gone,
-and a version that moves under a build is a build that stops linking.
-
-On Linux, nix's `libLLVM` is built against nix's C library, so a build against it belongs in
-`nix develop .#bench`, which has the same LLVM; outside nix use the distribution's LLVM 20
-(apt.llvm.org's, `LLVM_SYS_201_PREFIX=/usr/lib/llvm-20`), as CI does. On Windows CI fetches
-the 20.1.8 release.
+CI builds it the same way (`.github/actions/toolchain`). Outside the shell the build stops and
+says to enter it: neither Homebrew's LLVM nor a distribution's is a source. A build without the
+feature needs no LLVM, and neither does what ships. A binary built with it loads `libLLVM`
+from the store by its path, so after a garbage collection `nix develop` brings it back. Windows,
+which has no Nix, gets LLVM's release of the same version in CI.
 
 ## Credit
 
