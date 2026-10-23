@@ -1,8 +1,10 @@
 //! The questions cargo, rust-analyzer and ra-jit ask rustc, answered by ra-jit: `-vV`,
 //! `--print cfg`, `sysroot`, `target-libdir`, `target-spec-json`, the names of the files of
 //! each kind of crate, and the rest of what a release of rustc says the same way every time
-//! it is asked. rustc is asked each question once per toolchain and the answer is kept, byte
-//! for byte; every later asker, the daemon's workers and spares among them, is given that.
+//! it is asked. ra-jit answers from what it knows of the release and its targets ([`own`]),
+//! running no rustc. A question it does not know the answer of is asked of rustc once per
+//! toolchain and the answer is kept, byte for byte; every later asker, the daemon's workers
+//! and spares among them, is given that.
 //!
 //! cargo asks through its wrapper, which is ra-jit's in the builds of `cargo ra-jit` and in
 //! the cargos ra-jit runs only to ask; rust-analyzer asks through [`ask`], which ra-jit hands
@@ -16,6 +18,8 @@ use std::{
 };
 
 use sha2::{Digest as _, Sha256};
+
+mod own;
 
 /// What rustc can be asked to print without compiling, whatever the input is.
 const ABOUT_RUSTC: [&str; 20] = [
@@ -74,7 +78,12 @@ const READ_BY_RUSTC: [&str; 9] = [
 /// The variable that names the wrapper cargo runs every rustc through.
 const WRAPPER: &str = "RUSTC_WRAPPER";
 
-/// The variable that says no answer is kept or given: rustc is asked every time.
+/// The variable that tells ra-jit as cargo's wrapper only to answer questions, and to leave
+/// what cargo compiles as it would be without ra-jit.
+pub(crate) const ONLY_ASKS: &str = "RA_JIT_ONLY_ASKS";
+
+/// The variable that says which answers are given: `0` none, so rustc is asked every time;
+/// `own` only ra-jit's own, so a question it has no answer of fails.
 const OFF: &str = "RA_JIT_ANSWERS";
 
 /// Whether rustc run with `args` compiles nothing and says only what its release, the
@@ -127,9 +136,21 @@ pub(crate) fn is_question(args: &[OsString]) -> bool {
         && (kinds.iter().all(about_rustc) || (from_stdin && inputs == 0))
 }
 
-/// rustc's answer to what `command` asks it, given `stdin`: the kept answer, or rustc's now,
-/// kept when it is one. `command` runs rustc and asks a question ([`is_question`]).
+/// rustc's answer to what `command` asks it, given `stdin`: ra-jit's own, the kept answer, or
+/// rustc's now, kept when it is one. `command` runs rustc and asks a question ([`is_question`]).
 pub(crate) fn answer(command: &mut Command, stdin: &[u8]) -> io::Result<Output> {
+    let given = std::env::var_os(OFF);
+    if given.as_ref().is_none_or(|it| it != "0") {
+        let var = |name: &str| var_of(command, name);
+        let args: Vec<OsString> = command.get_args().map(OsStr::to_owned).collect();
+        let rustc = toolchain_rustc(command.get_program(), &var);
+        if let Some(stdout) = rustc.and_then(|rustc| own::answer(&rustc, &args, stdin, &var)) {
+            return Ok(Output { status: ExitStatus::default(), stdout, stderr: Vec::new() });
+        }
+    }
+    if given.is_some_and(|it| it == "own") {
+        return Err(io::Error::other("ra-jit has no answer of its own to this question"));
+    }
     let key = key(command, stdin);
     let file = key.as_ref().and_then(|key| Some(dir()?.join(key)));
     if let Some(stdout) = file.as_deref().and_then(kept) {
@@ -176,17 +197,21 @@ pub(crate) fn ask(command: &mut Command) -> Option<io::Result<Output>> {
     }
 }
 
-/// Has a cargo that only asks (`cargo metadata`, `cargo rustc --print`, `--unit-graph`) ask
-/// rustc through ra-jit, unless the user named a wrapper of their own. It is `RUSTC_WRAPPER`,
-/// not the workspace's: cargo runs the print of `cargo rustc --print` through that one alone.
+/// Has a cargo ask rustc through ra-jit, unless the user named a wrapper of their own: one
+/// that only asks (`cargo metadata`, `cargo rustc --print`, `--unit-graph`), and one whose
+/// build is not ra-jit's (rust-analyzer's `cargo check` of build scripts, `cargo ra-jit
+/// check`), which compiles as it would without ra-jit. It is `RUSTC_WRAPPER`, not the
+/// workspace's: cargo runs the print of `cargo rustc --print` through that one alone.
 pub(crate) fn ready_cargo(command: &mut Command) {
-    let named = command.get_envs().any(|(it, value)| it == WRAPPER && value.is_some())
-        || std::env::var_os(WRAPPER).is_some_and(|it| !it.is_empty());
+    let named = [WRAPPER, "CARGO_BUILD_RUSTC_WRAPPER"].iter().any(|name| {
+        command.get_envs().any(|(it, value)| it == *name && value.is_some())
+            || std::env::var_os(name).is_some_and(|it| !it.is_empty())
+    });
     let wrapper = crate::cargo::switch::wrapper_path().ok().filter(|it| it.is_file());
     if let Some(wrapper) = wrapper
         && !named
     {
-        command.env(WRAPPER, wrapper);
+        command.env(WRAPPER, wrapper).env(ONLY_ASKS, "1");
     }
 }
 
@@ -228,12 +253,7 @@ fn dir() -> Option<PathBuf> {
 /// The name of the question: the rustc that is asked, its arguments, what it reads of its
 /// environment and of standard input. `None` when which rustc runs is not known.
 fn key(command: &Command, stdin: &[u8]) -> Option<String> {
-    let var = |name: &str| -> Option<OsString> {
-        match command.get_envs().find(|(it, _)| *it == name) {
-            Some((_, value)) => value.map(OsStr::to_owned),
-            None => std::env::var_os(name),
-        }
-    };
+    let var = |name: &str| var_of(command, name);
     let rustc = toolchain_rustc(command.get_program(), &var)?;
     let is = std::fs::metadata(&rustc).ok()?;
     let mut hasher = Sha256::new();
@@ -259,6 +279,14 @@ fn key(command: &Command, stdin: &[u8]) -> Option<String> {
     }
     hasher.update(stdin);
     Some(hasher.finalize().iter().map(|it| format!("{it:02x}")).collect())
+}
+
+/// The variable `name` as `command` will have it.
+fn var_of(command: &Command, name: &str) -> Option<OsString> {
+    match command.get_envs().find(|(it, _)| *it == name) {
+        Some((_, value)) => value.map(OsStr::to_owned),
+        None => std::env::var_os(name),
+    }
 }
 
 /// The executable of the toolchain that `program` runs. rustup's proxy runs the toolchain
