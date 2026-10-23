@@ -115,7 +115,7 @@ mod promote;
 mod settled;
 mod stable;
 use ra_jit_store as store;
-pub use stable::{block_place, lower_declared};
+pub use stable::{block_place, lower_declared, static_place};
 mod target;
 pub use target::{Arch, Calls, ObjectFormat, Target, UnwindFormat, VariableArguments};
 pub mod tier;
@@ -300,6 +300,16 @@ pub trait SymbolResolver {
     /// Whether rustc compiled the crate, so that what is skipped of it is in the program.
     fn rustc_built(&self, _krate: Crate) -> bool {
         true
+    }
+    /// Whether nothing linked into the program is rustc's, so that what rustc adds at the
+    /// link, the allocator's shim, is the build's to add.
+    fn nothing_of_rustc(&self) -> bool {
+        false
+    }
+    /// The name a static of a crate rustc built nothing of is defined under, for objects
+    /// built apart from this one to refer to it by. `None`: only this object refers to it.
+    fn own_static(&self, _id: StaticId) -> Option<String> {
+        None
     }
     /// rustc's `StableCrateId` of a crate, which its symbols carry.
     fn stable_crate_id(&self, krate: Crate) -> Option<u64>;
@@ -532,6 +542,10 @@ pub struct Roots<'a> {
     /// The statics a linker or a runtime finds though no code names them, in the crates
     /// rustc built nothing of: `#[used]` ones, and those put in a section by name.
     pub kept: &'a [StaticId],
+    /// Statics defined, where they can be, for objects built apart from this one: those of a
+    /// library built before the programs that use it. One that cannot be is left out, and a
+    /// function that uses it is refused.
+    pub offered: &'a [StaticId],
 }
 
 impl CodegenUnit {
@@ -744,9 +758,13 @@ impl CodegenUnit {
             let mut next = 0;
             if let Some(main) = start {
                 cg.define_start(main)?;
+                cg.define_allocator_shim(main)?;
             }
             for &id in roots.kept {
                 cg.static_data(id)?;
+            }
+            for &id in roots.offered {
+                _ = cg.static_data(id);
             }
             loop {
                 // Every core compiles the roots found so far, before they are put in the
@@ -785,8 +803,11 @@ impl CodegenUnit {
                         match result {
                             Ok(symbol) => compiled.push((root, symbol)),
                             Err(e) => {
-                                // rustc's copy calls what ours would have.
-                                if !on_demand.is_empty() && !e.no_symbol() {
+                                // rustc's copy calls what ours would have, when it has one.
+                                if !on_demand.is_empty()
+                                    && !e.no_symbol()
+                                    && !cg.own_statics.unbuilt.contains(&root.krate(db))
+                                {
                                     let unseen = cg.want_reachable_from(root);
                                     let rest = roots.on_demand.iter();
                                     cg.wanted.extend(rest.filter(|it| unseen.calls(it.krate(db))));
@@ -879,6 +900,13 @@ impl CodegenUnit {
                 if left.len() != before {
                     start_over("an `async` block is shared with a function left to rustc");
                     continue;
+                }
+            }
+            if failed.is_empty() && symbols.nothing_of_rustc() {
+                for (root, e) in &skipped {
+                    if let Some(symbol) = symbols.function(*root) {
+                        cg.define_refused(&symbol, &e.to_string())?;
+                    }
                 }
             }
             if failed.is_empty() {
@@ -1119,6 +1147,12 @@ impl Rejections {
         *self = *kept;
         (self.counted, self.stats) = (counted, stats);
         true
+    }
+
+    /// Leaves what was compiled since the last build out of the next one's count: it was
+    /// another build's, made before it.
+    pub fn not_counted(&mut self) {
+        self.compiled_since_last_build();
     }
 
     fn compiled_since_last_build(&mut self) -> usize {
@@ -1698,6 +1732,12 @@ struct ObjectCodegen<'a, 'db> {
     mixed: Option<settled::Mixed>,
     /// What `finish` adds to the object of the relocations of the functions defined.
     elf_relocs: Vec<ElfReloc>,
+    /// Symbols an `extern_weak` static points to, which `finish` makes weak: absent, they are 0.
+    weak_imports: Vec<cranelift_module::FuncOrDataId>,
+    /// Functions exported before their code failed, which nothing defines yet.
+    unstitched: FxHashSet<FuncId>,
+    /// Functions `finish` hides from other objects: see [`ObjectCodegen::define_refused`].
+    hidden: Vec<FuncId>,
     statics: FxHashMap<StaticId, DataId>,
     /// Statics nothing exports and nothing can write to, which we give a copy of the value.
     frozen_statics: FxHashMap<StaticId, DataId>,
@@ -3572,6 +3612,39 @@ pub fn link_name(db: &dyn HirDatabase, func: FunctionId) -> Option<String> {
     Some(name.as_str().to_owned())
 }
 
+/// The symbol a function that isn't exported takes in a crate rustc built nothing of, for the
+/// declarations in other crates of the standard library that name it as written: rustc gives
+/// it a name of its own. core declares the `#[panic_handler]` as `panic_impl`, and the
+/// personality is the one the unwinding tables name.
+pub fn linked_symbol(db: &dyn HirDatabase, func: FunctionId) -> Option<String> {
+    if let ItemContainerId::ExternBlockId(_) = func.lookup(db).container {
+        return None;
+    }
+    let flags = AttrFlags::query(db, func.into());
+    if flags.contains(AttrFlags::LINKED_BY_NAME) {
+        if AttrFlags::has_word(db, func.into(), "panic_handler") {
+            return Some("panic_impl".to_owned());
+        }
+        return Some(FunctionSignature::of(db, func).name.as_str().to_owned());
+    }
+    let lang = flags.lang_item_with_attrs(db, func.into())?;
+    (lang == intern::sym::eh_personality).then(|| unwind::PERSONALITY.to_owned())
+}
+
+/// Whether a crate declares the `#[global_allocator]`.
+#[salsa::tracked(returns(copy))]
+fn declares_global_allocator(db: &dyn HirDatabase, krate: Crate) -> bool {
+    let def_map = hir_def::nameres::crate_def_map(db, krate);
+    def_map.modules(db).any(|(_, module)| {
+        module.scope(db).declarations().any(|it| match it {
+            hir_def::ModuleDefId::StaticId(id) => {
+                AttrFlags::has_word(db, id.into(), "global_allocator")
+            }
+            _ => false,
+        })
+    })
+}
+
 /// The symbol a static of an `extern` block links to.
 fn static_link_name(db: &dyn HirDatabase, id: StaticId) -> Option<String> {
     let signature = StaticSignature::of(db, id);
@@ -4241,6 +4314,9 @@ impl<'a, 'db> ObjectCodegen<'a, 'db> {
             own_statics,
             mixed,
             elf_relocs: Vec::new(),
+            weak_imports: Vec::new(),
+            unstitched: FxHashSet::default(),
+            hidden: Vec::new(),
             tiers: None,
             found_instances: FxHashMap::default(),
         })
@@ -4255,6 +4331,18 @@ impl<'a, 'db> ObjectCodegen<'a, 'db> {
         let mut product = self.module.finish();
         for reloc in &self.elf_relocs {
             reloc.add(&mut product).map_err(CodegenError::Backend)?;
+        }
+        for &import in &self.weak_imports {
+            let symbol = match import {
+                cranelift_module::FuncOrDataId::Func(id) => product.function_symbol(id),
+                cranelift_module::FuncOrDataId::Data(id) => product.data_symbol(id),
+            };
+            product.object.symbol_mut(symbol).weak = true;
+        }
+        for &id in &self.hidden {
+            let symbol = product.function_symbol(id);
+            product.object.symbol_mut(symbol).scope =
+                cranelift_object::object::SymbolScope::Linkage;
         }
         self.unwind.emit(&mut product).map_err(CodegenError::Backend)?;
         let apart = match self.debug {
@@ -4366,7 +4454,10 @@ impl<'a, 'db> ObjectCodegen<'a, 'db> {
         let id =
             self.module.declare_function(&symbol, Linkage::Export, &compiled.code.signature)?;
         self.shape_origin(id, InstanceDef::Fn(func), &func, false, took);
-        self.stitch(id, compiled)?;
+        if let Err(e) = self.stitch(id, compiled) {
+            self.unstitched.insert(id);
+            return Err(e);
+        }
         let name = hir_ty::mir::type_name::rustc_debug_function(db, func, &[])
             .unwrap_or_else(|| FunctionSignature::of(db, func).name.as_str().to_owned());
         let declared = self.debug_declaration_at(func);
@@ -4382,6 +4473,120 @@ impl<'a, 'db> ObjectCodegen<'a, 'db> {
         let id = self.module.declare_function("main", Linkage::Export, &compiled.code.signature)?;
         self.stitch(id, compiled)?;
         Ok(())
+    }
+
+    /// What rustc's allocator shim puts in a program: the entries of the global allocator
+    /// that `alloc` calls by name, here going to std's defaults. Only in a program with nothing
+    /// of rustc's: one linked with rustc's `alloc` has rustc's shim.
+    fn define_allocator_shim(&mut self, main: FunctionId) -> Result<()> {
+        let db = self.db;
+        if !self.symbols.nothing_of_rustc() {
+            return Ok(());
+        }
+        let Some(boxed) = DbInterner::new_with(db, main.krate(db)).lang_items().OwnedBox else {
+            return Ok(());
+        };
+        let program = linked_crates(db, self.own_statics.crates.iter().copied());
+        if !program.contains(&boxed.krate(db)) {
+            return Ok(());
+        }
+        if program.into_iter().any(|it| declares_global_allocator(db, it)) {
+            unsupported!("a `#[global_allocator]`, without rustc's shim for it");
+        }
+        let entries = [
+            ("__rust_alloc", "__rdl_alloc", 2, true),
+            ("__rust_dealloc", "__rdl_dealloc", 3, false),
+            ("__rust_realloc", "__rdl_realloc", 4, true),
+            ("__rust_alloc_zeroed", "__rdl_alloc_zeroed", 2, true),
+            ("__rust_alloc_error_handler", "__rdl_alloc_error_handler", 2, false),
+            ("__rust_no_alloc_shim_is_unstable_v2", "", 0, false),
+        ];
+        for (name, default, params, returns) in entries {
+            let mut sig = self.module.make_signature();
+            sig.params.extend((0..params).map(|_| AbiParam::new(ptr())));
+            sig.returns.extend(returns.then(|| AbiParam::new(ptr())));
+            let id = self
+                .module
+                .declare_function(name, Linkage::Export, &sig)
+                .map_err(|e| CodegenError::Backend(e.to_string()))?;
+            let target = (!default.is_empty()).then(|| self.import(default, &sig)).transpose()?;
+            let mut ctx = self.module.make_context();
+            ctx.func.signature = sig;
+            let mut builder_ctx = std::mem::take(&mut self.builder_ctx);
+            let mut builder = FunctionBuilder::new(&mut ctx.func, &mut builder_ctx);
+            let block = builder.create_block();
+            builder.append_block_params_for_function_params(block);
+            builder.switch_to_block(block);
+            let args = builder.block_params(block).to_vec();
+            let results = match target {
+                Some(target) => {
+                    let callee = self.module.declare_func_in_func(target, builder.func);
+                    let call = builder.ins().call(callee, &args);
+                    builder.inst_results(call).to_vec()
+                }
+                None => Vec::new(),
+            };
+            builder.ins().return_(&results);
+            builder.seal_all_blocks();
+            builder.finalize(self.module.isa().frontend_config());
+            self.builder_ctx = builder_ctx;
+            self.define_shim(id, &mut ctx)?;
+        }
+        Ok(())
+    }
+
+    /// A function of ours that could not be compiled and that something in the object calls,
+    /// in a build with nothing of rustc's to call instead: the call links, and says why when
+    /// it runs. Hidden, so that a program built over this object compiles its own and is told.
+    fn define_refused(&mut self, symbol: &str, reason: &str) -> Result<()> {
+        let backend = |e: cranelift_module::ModuleError| CodegenError::Backend(e.to_string());
+        let declarations = self.module.declarations();
+        let Some(cranelift_module::FuncOrDataId::Func(id)) = declarations.get_name(symbol) else {
+            return Ok(());
+        };
+        let decl = declarations.get_function_decl(id);
+        let sig = decl.signature.clone();
+        let id = match decl.linkage {
+            Linkage::Import => {
+                self.module.declare_function(symbol, Linkage::Hidden, &sig).map_err(backend)?
+            }
+            Linkage::Export if self.unstitched.remove(&id) => {
+                self.hidden.push(id);
+                id
+            }
+            _ => return Ok(()),
+        };
+        let message = format!("ra-jit could not compile `{symbol}`: {reason}\n").into_bytes();
+        let len = message.len() as i64;
+        let text = self.declare_local_data(false)?;
+        let mut data = DataDescription::new();
+        data.define(message.into_boxed_slice());
+        self.module.define_data(text, &data).map_err(backend)?;
+        let mut write = self.module.make_signature();
+        write.params.extend([types::I32, ptr(), ptr()].map(AbiParam::new));
+        write.returns.push(AbiParam::new(ptr()));
+        let write = self.import("write", &write)?;
+        let abort = self.import("abort", &self.module.make_signature())?;
+        let mut ctx = self.module.make_context();
+        ctx.func.signature = sig;
+        let mut builder_ctx = std::mem::take(&mut self.builder_ctx);
+        let mut builder = FunctionBuilder::new(&mut ctx.func, &mut builder_ctx);
+        let block = builder.create_block();
+        builder.append_block_params_for_function_params(block);
+        builder.switch_to_block(block);
+        let text = self.module.declare_data_in_func(text, builder.func);
+        let text = builder.ins().symbol_value(ptr(), text);
+        let stderr = builder.ins().iconst(types::I32, 2);
+        let len = builder.ins().iconst(ptr(), len);
+        let write = self.module.declare_func_in_func(write, builder.func);
+        builder.ins().call(write, &[stderr, text, len]);
+        let abort = self.module.declare_func_in_func(abort, builder.func);
+        builder.ins().call(abort, &[]);
+        builder.ins().trap(TrapCode::user(1).expect("non-zero trap code"));
+        builder.seal_all_blocks();
+        builder.finalize(self.module.isa().frontend_config());
+        self.builder_ctx = builder_ctx;
+        self.define_shim(id, &mut ctx)
     }
 
     /// Puts the instances requested by calls in the object. Returns the ones that failed.
@@ -5486,6 +5691,12 @@ impl<'a, 'db> ObjectCodegen<'a, 'db> {
         // One the linker left out of what rustc linked is used by none of rustc's code there.
         let unlinked = rustcs.as_ref().is_some_and(|it| !self.symbols.linked(it));
         let theirs = || rustcs.filter(|_| !unlinked);
+        let weak = AttrFlags::linkage(db, id.into()).is_some_and(|it| it.as_str() == "extern_weak");
+        if weak && let Some(symbol) = static_link_name(db, id) {
+            let data = self.weak_static(&symbol)?;
+            self.imported_statics.insert(id, data);
+            return Ok(data);
+        }
         if let Some(symbol) = static_link_name(db, id).or_else(theirs) {
             let data = self.module.declare_data(
                 &symbol,
@@ -5535,17 +5746,13 @@ impl<'a, 'db> ObjectCodegen<'a, 'db> {
         // Not shared with equal data: a static has an address of its own. Known before its
         // value is: what the value points to may point back at the static.
         let thread_local = is_thread_local(db, id);
+        let own = (!self.patching).then(|| self.symbols.own_static(id)).flatten();
         let exported = exported_static(db, id).filter(|_| !self.patching);
         let data = if let Some(known) = again {
             self.module.declare_data(&known.symbol, Linkage::Hidden, compiled.writable, false)?
-        } else if let Some(name) = exported {
+        } else if let Some(name) = own.or_else(|| exported.map(|it| it.as_str().to_owned())) {
             // Nothing rustc built defines it: what finds it by name finds ours.
-            self.module.declare_data(
-                name.as_str(),
-                Linkage::Export,
-                compiled.writable,
-                thread_local,
-            )?
+            self.module.declare_data(&name, Linkage::Export, compiled.writable, thread_local)?
         } else if self.patching || thread_local {
             // Nothing else defines the statics of a program compiled to WebAssembly, and
             // under its own name a static is the same one after a build in full.
@@ -6091,6 +6298,40 @@ impl<'a, 'db> ObjectCodegen<'a, 'db> {
         self.module
             .declare_data(&format!(".Lra-jit.const.{n}"), Linkage::Local, writable, false)
             .map_err(|e| CodegenError::Backend(e.to_string()))
+    }
+
+    /// An `extern_weak` static: not the memory at `symbol` but a pointer to it, 0 when nothing
+    /// linked defines it.
+    fn weak_static(&mut self, symbol: &str) -> Result<DataId> {
+        use cranelift_module::FuncOrDataId;
+        let target = match self.module.declarations().get_name(symbol) {
+            Some(known) => known,
+            None => FuncOrDataId::Data(
+                self.module
+                    .declare_data(symbol, Linkage::Import, false, false)
+                    .map_err(|e| CodegenError::Backend(e.to_string()))?,
+            ),
+        };
+        self.weak_imports.push(target);
+        let data = self.declare_local_data(false)?;
+        let bytes = self.module.isa().pointer_bytes();
+        let mut description = DataDescription::new();
+        description.define_zeroinit(bytes.into());
+        description.set_align(bytes.into());
+        match target {
+            FuncOrDataId::Func(id) => {
+                let func = self.module.declare_func_in_data(id, &mut description);
+                description.write_function_addr(0, func);
+            }
+            FuncOrDataId::Data(id) => {
+                let global = self.module.declare_data_in_data(id, &mut description);
+                description.write_data_addr(0, global, 0);
+            }
+        }
+        self.module
+            .define_data(data, &description)
+            .map_err(|e| CodegenError::Backend(e.to_string()))?;
+        Ok(data)
     }
 
     /// Defines `id` as `blob`, in a section of its own named `section` when there is one.
@@ -8421,15 +8662,45 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
 
         self.builder.switch_to_block(panic_block);
         let location = self.caller_location()?;
-        let mut sig = self.cg.make_signature();
-        sig.params.extend([AbiParam::new(ptr()); 3]);
-        let callee = self.cg.import_path("core::panicking::panic_bounds_check", &sig);
-        let callee = self.cg.declare_func_in_func(callee, self.builder.func);
-        self.invoke(callee, &[index, len, location]);
+        self.call_panic(&["panicking", "panic_bounds_check"], &[index, len, location])?;
         self.builder.ins().trap(TrapCode::user(1).expect("non-zero trap code"));
 
         self.builder.switch_to_block(ok_block);
         Ok(())
+    }
+
+    /// Calls the panic function core declares at `path` with pointer-sized `args`: the
+    /// function itself, as any other call of it, or by its path when core isn't in the graph.
+    fn call_panic(&mut self, path: &[&str], args: &[Value]) -> Result<()> {
+        let mut sig = self.cg.make_signature();
+        sig.params.extend(args.iter().map(|_| AbiParam::new(ptr())));
+        let callee = match self.core_function(path) {
+            Some(func) => {
+                let none = GenericArgs::new_from_slice(&[]);
+                self.cg.callee(InstanceDef::Fn(func), none, self.env, &sig)?
+            }
+            None => self.cg.import_path(&format!("core::{}", path.join("::")), &sig),
+        };
+        let callee = self.cg.declare_func_in_func(callee, self.builder.func);
+        self.invoke(callee, args);
+        Ok(())
+    }
+
+    /// The function core declares at `path`, its modules then its name.
+    fn core_function(&self, path: &[&str]) -> Option<FunctionId> {
+        let db = self.cg.db;
+        let core = self.interner.lang_items().PanicBoundsCheck?.krate(db);
+        let (name, modules) = path.split_last()?;
+        let mut module = hir_def::nameres::crate_def_map(db, core).root_module_id();
+        for it in modules {
+            let children = module.def_map(db).module(db, module).children(db);
+            module = *children.get(&hir_expand::name::Name::new_root(it))?;
+        }
+        let scope = module.def_map(db).module(db, module).scope(db);
+        match scope.get(&hir_expand::name::Name::new_root(name)).take_values()? {
+            hir_def::ModuleDefId::FunctionId(func) => Some(func),
+            _ => None,
+        }
     }
 
     fn static_ty(&self, id: StaticId) -> Ty<'db> {
@@ -10111,7 +10382,7 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
         Ok(self.cg.checked)
     }
 
-    /// Branches to a call of rustc's `panic_const_*` when `cond` is set.
+    /// Branches to a call of core's `panic_const_*` when `cond` is set.
     fn panic_if(&mut self, cond: Value, op: OverflowOp) -> Result<()> {
         let name = match op {
             OverflowOp::Add => "add_overflow",
@@ -10125,7 +10396,7 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
             OverflowOp::DivByZero => "div_by_zero",
             OverflowOp::RemByZero => "rem_by_zero",
         };
-        let path = format!("core::panicking::panic_const::panic_const_{name}");
+        let name = format!("panic_const_{name}");
         let panic_block = self.builder.create_block();
         let ok_block = self.builder.create_block();
         self.builder.set_cold_block(panic_block);
@@ -10133,11 +10404,7 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
 
         self.builder.switch_to_block(panic_block);
         let location = self.caller_location()?;
-        let mut sig = self.cg.make_signature();
-        sig.params.push(AbiParam::new(ptr()));
-        let callee = self.cg.import_path(&path, &sig);
-        let callee = self.cg.declare_func_in_func(callee, self.builder.func);
-        self.invoke(callee, &[location]);
+        self.call_panic(&["panicking", "panic_const", &name], &[location])?;
         self.builder.ins().trap(TrapCode::user(1).expect("non-zero trap code"));
 
         self.builder.switch_to_block(ok_block);

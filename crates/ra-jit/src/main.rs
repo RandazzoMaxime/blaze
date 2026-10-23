@@ -61,7 +61,7 @@ use hir_def::{
 };
 use hir_ty_codegen::{
     Backend, CodegenError, CodegenUnit, ContentId, ParallelWork, Rejections, Roots, SymbolResolver,
-    exported_static, exported_symbol, tier as codegen_tier,
+    exported_static, exported_symbol, linked_symbol, tier as codegen_tier,
 };
 use ide_db::{ChangeWithProcMacros, RootDatabase};
 use load_cargo::{LoadCargoConfig, ProcMacroServerChoice};
@@ -124,6 +124,13 @@ struct Args {
     deny: Option<PathBuf>,
     /// Directory that gets one object per compiled function, for testing each in isolation.
     isolate: Option<PathBuf>,
+    /// An object of the standard library ra-jit built before, in a build with nothing of
+    /// rustc's: the standard library's crates are not compiled, and what the program calls of
+    /// them is called by the names that object defines.
+    prebuilt: Option<PathBuf>,
+    /// The build is of the standard library alone ([`std_unit`]): a crate it names is the
+    /// library's, not another of that name the program has too.
+    library: bool,
     /// Build the workspace's crates as `cargo test` does, with `cfg(test)`.
     cfg_test: bool,
     /// Run build scripts and build proc macros in a directory of ra-jit's own under the
@@ -206,6 +213,7 @@ impl Args {
         let mut report = None;
         let mut deny = None;
         let mut isolate = None;
+        let mut prebuilt = None;
         let mut cfg_test = false;
         let mut dev_deps = false;
         let mut own_target = false;
@@ -244,6 +252,7 @@ impl Args {
                 "--report" => report = Some(PathBuf::from(value()?)),
                 "--deny" => deny = Some(PathBuf::from(value()?)),
                 "--isolate" => isolate = Some(PathBuf::from(value()?)),
+                "--prebuilt" => prebuilt = Some(PathBuf::from(value()?)),
                 "--watch" => watch = true,
                 "--socket" => socket = Some(PathBuf::from(value()?)),
                 "--cfg-test" => cfg_test = true,
@@ -284,6 +293,8 @@ impl Args {
             report,
             deny,
             isolate,
+            prebuilt,
+            library: false,
             cfg_test,
             own_target,
             selection: plan::Selection {
@@ -331,6 +342,59 @@ struct Resolver<'a> {
     linked: Option<Arc<symbols::Linked>>,
     /// Set once the build turns out to be one in full, which `linked` is not for.
     in_full: Arc<std::sync::atomic::AtomicBool>,
+    /// The standard library ra-jit built before, when the program is linked with it instead
+    /// of compiling its crates.
+    prebuilt: Option<Arc<Prebuilt>>,
+}
+
+/// The standard library ra-jit built before the program ([`std_unit`]).
+struct Prebuilt {
+    /// What its object defines for others to link to.
+    defined: FxHashSet<String>,
+    /// Its crates, as [`library_unit`] has them.
+    crates: FxHashSet<ide_db::base_db::Crate>,
+}
+
+/// The crates of the standard library a program links, which ra-jit builds apart from it
+/// ([`std_unit`]): what the program's crates take of the library, and everything that
+/// depends on, whoever's it is (rust-analyzer gives the library a crate of the workspace's
+/// where both use one), but `test`, `proc_macro` and `panic_abort`. rust-analyzer's graph has
+/// every crate depend on the first two, which a program links only as a test or a macro, and
+/// the panic runtime is `panic_unwind`'s.
+fn library_unit(db: &RootDatabase, program: &[Crate]) -> FxHashSet<ide_db::base_db::Crate> {
+    use ide_db::base_db::LangCrateOrigin::{ProcMacro, Test};
+    let left_out = |it: ide_db::base_db::Crate| match it.data(db).origin {
+        CrateOrigin::Lang(ProcMacro | Test) => true,
+        _ => Crate::from(it)
+            .display_name(db)
+            .is_some_and(|name| name.crate_name().as_str() == "panic_abort"),
+    };
+    let deps = |it: ide_db::base_db::Crate| it.data(db).dependencies.iter().map(|dep| dep.crate_id);
+    let mut unit = FxHashSet::default();
+    let mut next: Vec<ide_db::base_db::Crate> = program
+        .iter()
+        .flat_map(|&it| deps(it.into()))
+        .filter(|it| it.data(db).origin.is_lang())
+        .collect();
+    while let Some(krate) = next.pop() {
+        if !left_out(krate) && unit.insert(krate) {
+            next.extend(deps(krate));
+        }
+    }
+    unit
+}
+
+/// The names an object defines for others to link to.
+fn defined_symbols(path: &Path) -> anyhow::Result<FxHashSet<String>> {
+    use object::{Object as _, ObjectSymbol as _, SymbolScope};
+    let bytes = std::fs::read(path).with_context(|| format!("reading {}", path.display()))?;
+    let file =
+        object::File::parse(&*bytes).with_context(|| format!("parsing {}", path.display()))?;
+    // A hidden one stands in for a function ra-jit could not compile, which a program
+    // compiles itself to be told why. A thread-local is not a "definition" to `object`.
+    let defined =
+        file.symbols().filter(|it| !it.is_undefined() && it.scope() == SymbolScope::Dynamic);
+    Ok(defined.filter_map(|it| it.name().ok().map(str::to_owned)).collect())
 }
 
 /// The [`SymbolTable::generation`] and the checkout that paths were found with.
@@ -374,6 +438,15 @@ impl<'a> Resolver<'a> {
         hir_ty_codegen::name_sources(move |db, file| {
             source_path(db, &named.0, named.1.as_deref(), file)
         });
+        let prebuilt = args.prebuilt.as_deref().filter(|_| table.is_empty()).map(|path| {
+            let defined = defined_symbols(path);
+            let defined =
+                defined.unwrap_or_else(|e| panic!("the standard library ra-jit built: {e:#}"));
+            let program: Vec<Crate> =
+                args.crates().filter_map(|it| crates_named(db, it, args).ok()).flatten().collect();
+            let crates = library_unit(db, &program);
+            Arc::new(Prebuilt { defined, crates })
+        });
         Resolver {
             db,
             table,
@@ -387,7 +460,18 @@ impl<'a> Resolver<'a> {
             named: Default::default(),
             linked,
             in_full: Arc::default(),
+            prebuilt,
         }
+    }
+
+    /// Whether the crate is of the standard library ra-jit built before.
+    fn prebuilt(&self, krate: ide_db::base_db::Crate) -> bool {
+        self.prebuilt.as_ref().is_some_and(|it| it.crates.contains(&krate))
+    }
+
+    /// The name of a function or static of the prebuilt standard library, when it defines it.
+    fn in_prebuilt(&self, symbol: String) -> Option<String> {
+        self.prebuilt.as_ref().is_some_and(|it| it.defined.contains(&symbol)).then_some(symbol)
     }
 
     /// What rustc linked, while the build is a patch of it.
@@ -466,6 +550,20 @@ impl Resolver<'_> {
         if in_harness(self.db, func) {
             return Some(format!("ra-jit.harness.{}", self.path(func)?));
         }
+        let krate = hir_def::HasModule::krate(&func, self.db);
+        if let Some(symbol) = linked_symbol(self.db, func)
+            && (!self.rustc_built(krate) || self.prebuilt(krate))
+        {
+            return Some(symbol);
+        }
+        if self.prebuilt(krate) {
+            if self.is_generic(func)
+                || matches!(func.lookup(self.db).container, ItemContainerId::ExternBlockId(_))
+            {
+                return None;
+            }
+            return self.in_prebuilt(self.own_function_name(func)?);
+        }
         // Not a function until it or the `impl<T>` it is in is given its types: there is
         // nothing to name, the more so in a crate of such alone, which rustc builds nothing
         // of. One of a name that another in the same function has is not to be taken for it.
@@ -475,7 +573,6 @@ impl Resolver<'_> {
         // The symbol of a path is the one rustc gave a function it built under it, which is
         // not known to be this one when a body has two of the path. One of a crate rustc
         // built nothing of is named by where it is written as well.
-        let krate = hir_def::HasModule::krate(&func, self.db);
         if self.rustc_built(krate) && self.shares_path(func) {
             return None;
         }
@@ -503,12 +600,40 @@ impl Resolver<'_> {
         if self.rustc_built(krate) {
             return None;
         }
+        self.own_function_name(func)
+    }
+
+    /// The name of a non-generic function of a crate rustc built nothing of: where it is,
+    /// and for one in a body where in the source that is.
+    fn own_function_name(&self, func: FunctionId) -> Option<String> {
+        let krate = hir_def::HasModule::krate(&func, self.db);
         let id = self.own_crate_id(krate)?;
+        let path = self.path(func)?;
         if hir_def::HasModule::module(&func, self.db).block(self.db).is_none() {
             return Some(format!("ra-jit.{id:x}.{path}"));
         }
         let place = hir_ty_codegen::block_place(self.db, self, func)?;
         Some(format!("ra-jit.{id:x}.{path}.{:x}", short_hash(&place)))
+    }
+
+    /// The name a static of a crate rustc built nothing of is defined under, in a build with
+    /// nothing of rustc's: the one it is declared to have, else where it is, as
+    /// [`Self::own_function_name`] has it of a function.
+    fn own_static_name(&self, id: hir_def::StaticId) -> Option<String> {
+        let db = self.db;
+        if let Some(name) = exported_static(db, id) {
+            return Some(name.as_str().to_owned());
+        }
+        let ModuleDef::Static(it) = ModuleDef::from(ModuleDefId::StaticId(id)) else {
+            return None;
+        };
+        let crate_id = self.own_crate_id(it.module(db).krate(db).into())?;
+        let (module, name) = (it.module(db), it.name(db));
+        if module.nearest_non_block_module(db) == module {
+            return Some(format!("ra-jit.{crate_id:x}.{}", self.item_path(module, name.as_str())?));
+        }
+        let place = hir_ty_codegen::static_place(db, self, id)?;
+        Some(format!("ra-jit.{crate_id:x}.{}.{:x}", name.as_str(), short_hash(&place)))
     }
 
     /// Whether the function, or the `impl` it is in, takes types or constants. A method a
@@ -596,6 +721,9 @@ impl Resolver<'_> {
     /// standard library's memchr) is taken for one of its items.
     fn crate_path(&self, krate: Crate) -> Option<String> {
         let name = krate.display_name(self.db)?;
+        if self.table.is_empty() && krate.origin(self.db).is_lang() {
+            return Some(name.crate_name().to_string());
+        }
         match self.own_crate_id(krate.into()) {
             Some(own) => Some(format!("{}[{own:x}]", name.crate_name())),
             None => self.table.crate_path(name.crate_name().as_str(), &self.crate_root(krate)?),
@@ -603,12 +731,18 @@ impl Resolver<'_> {
     }
 
     /// What stands for a crate of the checkout that rustc built nothing of, the same after
-    /// every edit: its name and where in the checkout its source starts.
+    /// every edit: its name and where in the checkout its source starts. One of the standard
+    /// library, when the build has nothing of rustc's, by its name alone: a program has one
+    /// of each name, wherever its source is.
     fn own_crate_id(&self, krate: ide_db::base_db::Crate) -> Option<u64> {
-        if krate.data(self.db).origin.is_lang() || self.rustc_crate_id(krate).is_some() {
+        let lang = krate.data(self.db).origin.is_lang();
+        if lang && !self.table.is_empty() || self.rustc_crate_id(krate).is_some() {
             return None;
         }
         let name = Crate::from(krate).display_name(self.db)?;
+        if lang {
+            return Some(short_hash(&format!("ra-jit crate {}", name.crate_name())));
+        }
         let root = self.crate_root(krate.into())?;
         let root = self.inside(&root).unwrap_or(&root);
         let named = format!("ra-jit crate {} {}", name.crate_name(), root.display());
@@ -890,7 +1024,7 @@ impl SymbolResolver for Resolver<'_> {
                 let (debug, apart) = (self.debug, self.apart.clone());
                 let (listed, named) = (self.listed, self.named.clone());
                 let (shared_paths, linked) = (self.shared_paths.clone(), self.linked.clone());
-                let in_full = self.in_full.clone();
+                let (in_full, prebuilt) = (self.in_full.clone(), self.prebuilt.clone());
                 scope.spawn(move || {
                     let resolver = Resolver {
                         db: &db,
@@ -905,6 +1039,7 @@ impl SymbolResolver for Resolver<'_> {
                         named,
                         linked,
                         in_full,
+                        prebuilt,
                     };
                     hir::attach_db(&db, || {
                         loop {
@@ -1017,6 +1152,14 @@ impl SymbolResolver for Resolver<'_> {
     /// when nothing rustc built gives them their types. Its functions are still not ours to
     /// name.
     fn rustc_built(&self, krate: ide_db::base_db::Crate) -> bool {
+        // The standard library is rustc's prebuilt one, unless the build has nothing of rustc's,
+        // where it is ra-jit's, compiled with the program or before it.
+        if self.prebuilt(krate) {
+            return true;
+        }
+        if krate.data(self.db).origin.is_lang() {
+            return !self.table.is_empty() || self.prebuilt.is_some();
+        }
         if self.own_crate_id(krate).is_none() {
             return true;
         }
@@ -1116,7 +1259,18 @@ impl SymbolResolver for Resolver<'_> {
         Some(earlier)
     }
 
+    fn nothing_of_rustc(&self) -> bool {
+        self.table.is_empty()
+    }
+
+    fn own_static(&self, id: StaticId) -> Option<String> {
+        self.table.is_empty().then(|| self.own_static_name(id)).flatten()
+    }
+
     fn static_(&self, id: StaticId) -> Option<String> {
+        if self.prebuilt(hir_def::HasModule::krate(&id, self.db)) {
+            return self.in_prebuilt(self.own_static_name(id)?);
+        }
         let ModuleDef::Static(it) = ModuleDef::from(ModuleDefId::StaticId(id)) else {
             return None;
         };
@@ -1543,6 +1697,9 @@ fn closure_number(sema: &hir::Semantics<'_, RootDatabase>, closure: &SyntaxNode)
 /// example of the same name.
 fn crates_named(db: &RootDatabase, krate: &str, args: &Args) -> anyhow::Result<Vec<Crate>> {
     let mut found = crates_called(db, krate, args);
+    if args.library {
+        found.retain(|it| ide_db::base_db::Crate::from(*it).data(db).origin.is_lang());
+    }
     // A dependency may be another version of the crate being built, and another checkout
     // has a crate of its name too.
     let of_checkout = |krate: &Crate| args.members.contains(&(*krate).into());
@@ -2633,6 +2790,10 @@ struct ListedCrate {
     shared_paths: std::sync::Mutex<Vec<(SharedKey, Arc<std::sync::OnceLock<FxHashSet<String>>>)>>,
     /// The statics a linker or a runtime finds though no code names them.
     kept: Vec<StaticId>,
+    /// Every static, in a body or not.
+    statics: Vec<StaticId>,
+    /// See [`Declared::in_provided`].
+    in_provided: Vec<FunctionId>,
     /// For each, whether a runtime looks it up by name.
     exported: Vec<bool>,
     main: Option<FunctionId>,
@@ -2704,9 +2865,10 @@ fn has_no_main(db: &RootDatabase, krate: Crate) -> bool {
 
 impl ListedCrate {
     fn new(db: &RootDatabase, krate: Crate) -> ListedCrate {
-        let Declared { functions, statics, .. } = declared_in(db, krate);
+        let Declared { functions, statics, in_provided, .. } = declared_in(db, krate);
         let kept = statics
-            .into_iter()
+            .iter()
+            .copied()
             .filter(|&it| {
                 hir_def::attrs::AttrFlags::query(db, it.into())
                     .contains(hir_def::attrs::AttrFlags::USED)
@@ -2721,7 +2883,8 @@ impl ListedCrate {
             .find(|&it| hir::Function::from(it).is_main(db))
             .filter(|_| !has_no_main(db, krate));
         let exported = exported(db, &functions);
-        ListedCrate { functions, shared_paths: Default::default(), kept, exported, main }
+        let shared_paths = Default::default();
+        ListedCrate { functions, shared_paths, kept, statics, in_provided, exported, main }
     }
 }
 
@@ -2729,7 +2892,11 @@ impl ListedCrate {
 /// are read off the source: on every core, as a build waits for this of every crate it builds.
 fn exported(db: &RootDatabase, functions: &[FunctionId]) -> Vec<bool> {
     let exported = |db: &RootDatabase, functions: &[FunctionId]| -> Vec<bool> {
-        let exported = |&it| exported_symbol(db, it).is_some() || serves_allocator(db, it);
+        let exported = |&it| {
+            exported_symbol(db, it).is_some()
+                || linked_symbol(db, it).is_some()
+                || serves_allocator(db, it)
+        };
         functions.iter().map(exported).collect()
     };
     let threads = std::thread::available_parallelism().map_or(1, |it| it.get());
@@ -2807,12 +2974,18 @@ fn declared_in(db: &RootDatabase, krate: Crate) -> Declared {
     let scopes = start.elapsed();
     let count = declared.bodies.len();
     // A body's blocks include those of the blocks in it, but not those of the items in them.
-    while !declared.bodies.is_empty() {
-        let round = lower(db, std::mem::take(&mut declared.bodies));
-        for body in round {
-            for (_, def_map) in Body::of(db, body).blocks(db) {
-                for (_, module) in def_map.modules(db) {
-                    declared.in_scope(db, module.scope(db));
+    while !declared.bodies.is_empty() || !declared.provided.is_empty() {
+        for under_provided in [false, true] {
+            let bodies = match under_provided {
+                true => std::mem::take(&mut declared.provided),
+                false => std::mem::take(&mut declared.bodies),
+            };
+            declared.under_provided = under_provided;
+            for body in lower(db, bodies) {
+                for (_, def_map) in Body::of(db, body).blocks(db) {
+                    for (_, module) in def_map.modules(db) {
+                        declared.in_scope(db, module.scope(db));
+                    }
                 }
             }
         }
@@ -2989,6 +3162,14 @@ struct Declared {
     statics: Vec<StaticId>,
     /// The bodies whose blocks declare more scopes.
     bodies: Vec<DefWithBodyId>,
+    /// Functions declared in the body of a trait's provided method, or in theirs: generic
+    /// over nothing, though rustc compiles one only where it instantiates the method, so
+    /// that what rustc built has no symbol of it.
+    in_provided: Vec<FunctionId>,
+    /// The bodies of provided methods and of what is declared in them.
+    provided: Vec<DefWithBodyId>,
+    /// Whether the scopes looked through are of [`Declared::provided`] bodies.
+    under_provided: bool,
 }
 
 impl Declared {
@@ -3008,29 +3189,51 @@ impl Declared {
                 ModuleDefId::FunctionId(id)
                     if !matches!(id.lookup(db).container, ItemContainerId::ExternBlockId(_)) =>
                 {
-                    self.functions.push(id);
-                    self.bodies.push(id.into());
+                    self.function(id);
                 }
-                ModuleDefId::ConstId(id) => self.bodies.push(id.into()),
+                ModuleDefId::ConstId(id) => self.body(id.into()),
                 ModuleDefId::StaticId(id) => {
                     self.statics.push(id);
-                    self.bodies.push(id.into());
+                    self.body(id.into());
+                }
+                ModuleDefId::TraitId(id) => {
+                    for &(_, item) in id.trait_items(db).items.iter() {
+                        match item {
+                            AssocItemId::FunctionId(id) => self.provided.push(id.into()),
+                            AssocItemId::ConstId(id) => self.provided.push(id.into()),
+                            AssocItemId::TypeAliasId(_) => {}
+                        }
+                    }
                 }
                 _ => {}
             }
         }
-        self.bodies.extend(scope.unnamed_consts().map(DefWithBodyId::from));
+        for id in scope.unnamed_consts() {
+            self.body(id.into());
+        }
         for imp in scope.impls() {
             for &(_, item) in imp.impl_items(db).items.iter() {
                 match item {
-                    AssocItemId::FunctionId(id) => {
-                        self.functions.push(id);
-                        self.bodies.push(id.into());
-                    }
-                    AssocItemId::ConstId(id) => self.bodies.push(id.into()),
+                    AssocItemId::FunctionId(id) => self.function(id),
+                    AssocItemId::ConstId(id) => self.body(id.into()),
                     AssocItemId::TypeAliasId(_) => {}
                 }
             }
+        }
+    }
+
+    fn function(&mut self, id: FunctionId) {
+        match self.under_provided {
+            true => self.in_provided.push(id),
+            false => self.functions.push(id),
+        }
+        self.body(id.into());
+    }
+
+    fn body(&mut self, id: DefWithBodyId) {
+        match self.under_provided {
+            true => self.provided.push(id),
+            false => self.bodies.push(id),
         }
     }
 }
@@ -3121,6 +3324,95 @@ impl Drop for Probing {
     }
 }
 
+/// The standard library of a build with nothing of rustc's, compiled before the program into
+/// an object of its own beside `--out` (docs/no-rustc.md, step F): the store's when it has the
+/// one of these crates, cfgs and target, otherwise built here and kept there. `None` when the
+/// build has something of rustc's, is given the library, or compiles it with the program.
+fn std_unit(
+    db: &RootDatabase,
+    table: &SymbolTable,
+    args: &Args,
+    listed: &Listed,
+) -> anyhow::Result<Option<PathBuf>> {
+    use sha2::{Digest, Sha256};
+    if !table.is_empty() || args.prebuilt.is_some() || args.patch.is_some() {
+        return Ok(None);
+    }
+    let mut program = Vec::new();
+    for named in args.crates() {
+        program.extend(crates_named(db, named, args)?);
+    }
+    let base = |it: &Crate| ide_db::base_db::Crate::from(*it);
+    if program.iter().any(|it| base(it).data(db).origin.is_lang()) {
+        return Ok(None);
+    }
+    let members = library_unit(db, &program);
+    let lang = members.iter().copied().filter(|it| it.data(db).origin.is_lang());
+    let named = |it: ide_db::base_db::Crate| {
+        Some((Crate::from(it).display_name(db)?.crate_name().as_str().to_owned(), it))
+    };
+    let mut unit: Vec<_> = lang.filter_map(named).collect();
+    unit.sort_unstable();
+    // One that only renames another, as `rustc_std_workspace_core` does `core`, is not asked
+    // for by its name: it comes with the crates that use it.
+    unit.retain(|(name, _)| crates_named(db, name, args).is_ok());
+    let Some(((first, _), rest)) = unit.split_first() else { return Ok(None) };
+    let mut hasher = Sha256::new();
+    let mut field = |bytes: &[u8]| {
+        hasher.update((bytes.len() as u64).to_le_bytes());
+        hasher.update(bytes);
+    };
+    field(b"ra-jit standard library 1");
+    field(format!("{:?} {:?}", args.selection.target, args.debug).as_bytes());
+    // A crate that is not the library's own is told by where its source is.
+    let mut described: Vec<String> = members
+        .iter()
+        .map(|&krate| {
+            let mut cfgs: Vec<String> =
+                krate.cfg_options(db).into_iter().map(|it| it.to_string()).collect();
+            cfgs.sort_unstable();
+            let name = Crate::from(krate).display_name(db).map(|it| it.to_string());
+            let root =
+                (!krate.data(db).origin.is_lang()).then(|| crate_root_file(db, krate.into()));
+            format!("{name:?} {root:?} {:?} {}", krate.data(db).edition, cfgs.join(" "))
+        })
+        .collect();
+    described.sort_unstable();
+    for it in &described {
+        field(it.as_bytes());
+    }
+    let key: [u8; 32] = hasher.finalize().into();
+    let path = args.out.with_extension("std.o");
+    let store = ra_jit_store::Store::global();
+    if let Some(bytes) = store.and_then(|it| it.get(&key)) {
+        std::fs::write(&path, bytes).with_context(|| format!("writing {}", path.display()))?;
+        eprintln!("standard library: from the store, {} crates", members.len());
+        return Ok(Some(path));
+    }
+    let of_unit = Args {
+        krate: first.clone(),
+        batch: rest.iter().map(|it| it.0.clone()).collect(),
+        widened: Vec::new(),
+        out: path.clone(),
+        report: None,
+        library: true,
+        ..args.clone()
+    };
+    let built = build_unheld(db, table, &of_unit, &mut Rejections::default(), listed)
+        .with_context(|| {
+            let names: Vec<&str> = unit.iter().map(|it| it.0.as_str()).collect();
+            format!("building the standard library ({})", names.join(", "))
+        })?;
+    eprint!("standard library: {} crates, ", members.len());
+    report(&built);
+    if let Some(store) = store {
+        store.settled();
+        store.insert(&key, &std::fs::read(&path)?);
+        store.flush();
+    }
+    Ok(Some(path))
+}
+
 /// [`build`] of a build that is never held.
 fn build_unheld(
     db: &RootDatabase,
@@ -3151,6 +3443,7 @@ fn build(
     let hir_db: &dyn HirDatabase = db;
     let mut functions = Vec::new();
     let mut kept = Vec::new();
+    let mut every_static: Vec<StaticId> = Vec::new();
     // The `main` of the crate asked for: another program of the workspace among the crates
     // is only here for what this one uses of it.
     let mut main = None;
@@ -3168,12 +3461,45 @@ fn build(
                 main = main.or_else(|| harness_main(db, &listed.functions));
             }
             functions.extend(listed.functions.iter().copied().zip(listed.exported.iter().copied()));
+            if table.is_empty() {
+                functions.extend(listed.in_provided.iter().map(|&it| (it, false)));
+            }
             // rustc's copy of the crate has them when rustc built it.
             if resolver.own_crate_id(krate.into()).is_some() {
                 kept.extend(&listed.kept);
             }
+            every_static.extend(&listed.statics);
         }
     }
+    // With nothing of rustc's every crate the program links is ra-jit's to compile; the
+    // standard library is built apart ([`std_unit`]) or asked for by name.
+    if table.is_empty() {
+        let asked: FxHashSet<Crate> = local.iter().copied().collect();
+        let linked: FxHashSet<Crate> = local
+            .iter()
+            .flat_map(|&it| ide_db::base_db::Crate::from(it).transitive_deps(db))
+            .filter(|it| !it.data(db).origin.is_lang() && !resolver.prebuilt(*it))
+            .map(Crate::from)
+            .filter(|it| !asked.contains(it))
+            .collect();
+        for krate in linked {
+            local.push(krate);
+            let listed = listed.of(db, krate);
+            functions.extend(listed.functions.iter().copied().zip(listed.exported.iter().copied()));
+            functions.extend(listed.in_provided.iter().map(|&it| (it, false)));
+            kept.extend(&listed.kept);
+            every_static.extend(&listed.statics);
+        }
+    }
+    // A library built before the programs that use it has every static a generic function
+    // of it uses, for the instances they compile.
+    let offered: Vec<StaticId> = match main.is_none() && table.is_empty() {
+        true => every_static
+            .into_iter()
+            .filter(|id| !matches!(id.lookup(db).container, ItemContainerId::ExternBlockId(_)))
+            .collect(),
+        false => Vec::new(),
+    };
     let list = start.elapsed();
     // With a program to start from, only what it reaches is compiled, and what a runtime
     // looks up by name. Without one any function may be the one called.
@@ -3190,6 +3516,7 @@ fn build(
         on_demand: &on_demand,
         start: main.filter(|it| own(it).is_some() || in_harness(db, *it)),
         kept: &kept,
+        offered: &offered,
     };
     let setup = start.elapsed();
     if std::env::var_os("RA_JIT_STATS").is_some() {
@@ -3242,6 +3569,17 @@ fn build(
     .map_err(anyhow::Error::msg)?;
     let Some(mut unit) = unit else { return Ok(None) };
     let name = |func| resolver.path(func).unwrap_or_else(|| "<assoc fn>".to_owned());
+    // Looking for the macro costs a walk of every macro call of the crate, so it is done once
+    // a crate, and not for the standard library's own build, whose refusals are only counted.
+    let mut failed_macros = FxHashMap::default();
+    let mut explained = |func: FunctionId, error: CodegenError| {
+        if args.library {
+            return error;
+        }
+        with_failed_macro(db, func, error, |krate| {
+            failed_macros.entry(krate).or_insert_with(|| failed_macro(db, krate)).clone()
+        })
+    };
     let codegen = start.elapsed();
     if std::env::var_os("RA_JIT_STATS").is_some() {
         eprintln!(
@@ -3270,7 +3608,7 @@ fn build(
         skipped: unit
             .skipped
             .into_iter()
-            .map(|(func, e)| (name(func), with_failed_macro(db, func, e)))
+            .map(|(func, e)| (name(func), explained(func, e)))
             .collect(),
         instances: unit.instances,
         codegen,
@@ -3293,7 +3631,13 @@ fn build(
         let mut index = String::new();
         for (i, &(func, _)) in unit.compiled.iter().enumerate() {
             let single = hir::attach_db(db, || {
-                let roots = Roots { entries: &[func], on_demand: &[], start: None, kept: &[] };
+                let roots = Roots {
+                    entries: &[func],
+                    on_demand: &[],
+                    start: None,
+                    kept: &[],
+                    offered: &[],
+                };
                 CodegenUnit::compile(hir_db, &resolver, roots, &Default::default(), known)
             })
             .map_err(anyhow::Error::msg)?;
@@ -3329,7 +3673,12 @@ impl Build {
 /// `error` with the macro of the function's crate that did not expand, when the frontend is
 /// what turned the function down: what such a macro would have written is what is then
 /// missing, and the name or method that does not resolve says nothing of it.
-fn with_failed_macro(db: &RootDatabase, func: FunctionId, error: CodegenError) -> CodegenError {
+fn with_failed_macro(
+    db: &RootDatabase,
+    func: FunctionId,
+    error: CodegenError,
+    failed_macro: impl FnOnce(Crate) -> Option<String>,
+) -> CodegenError {
     let frontend = match &error {
         CodegenError::Frontend(_) => true,
         CodegenError::Unsupported(why) => why.contains("frontend:"),
@@ -3339,7 +3688,7 @@ fn with_failed_macro(db: &RootDatabase, func: FunctionId, error: CodegenError) -
         return error;
     }
     let krate = hir::Function::from(func).module(db).krate(db);
-    let Some(failed) = failed_macro(db, krate) else { return error };
+    let Some(failed) = failed_macro(krate) else { return error };
     match error {
         CodegenError::Frontend(why) => CodegenError::Frontend(format!("{why} ({failed})")),
         CodegenError::Unsupported(why) => CodegenError::Unsupported(format!("{why} ({failed})")),
@@ -4357,6 +4706,8 @@ fn build_batch(db: &RootDatabase, args: Args) -> anyhow::Result<()> {
             report: Some(report.join(format!("{krate}.tsv"))),
             deny: None,
             isolate: None,
+            prebuilt: args.prebuilt.clone(),
+            library: args.library,
             cfg_test: args.cfg_test,
             own_target: args.own_target,
             selection: args.selection.clone(),
@@ -6243,6 +6594,10 @@ fn run_holding(
             None
         }
         None => {
+            if let Some(unit) = std_unit(&db, &table, &args, &listed)? {
+                args.prebuilt = Some(unit);
+                known.not_counted();
+            }
             let mut cold = build_unheld(&db, &table, &args, &mut known, &listed)?;
             // An `include!` in a body is first seen when the body is compiled.
             if WatchedFile::include_sources(&mut files, &mut tree, &mut db) != Loaded::Nothing {

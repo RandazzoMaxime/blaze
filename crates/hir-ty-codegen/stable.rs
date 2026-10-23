@@ -783,3 +783,17 @@ pub fn block_place(
     write!(out, "#{}", id.value.erase().into_raw()).ok()?;
     Some(out)
 }
+
+/// Where a static inside a block is written, as [`block_place`] has it of a function.
+pub fn static_place(
+    db: &dyn HirDatabase,
+    symbols: &dyn SymbolResolver,
+    id: hir_def::StaticId,
+) -> Option<String> {
+    id.module(db).block(db)?;
+    let id = id.lookup(db).id;
+    let mut out = String::new();
+    file_name(db, symbols, &mut out, id.file_id, &|path| path)?;
+    write!(out, "#{}", id.value.erase().into_raw()).ok()?;
+    Some(out)
+}
