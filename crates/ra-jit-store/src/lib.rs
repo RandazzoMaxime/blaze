@@ -1408,6 +1408,23 @@ impl Store {
         })
     }
 
+    /// Waits for no other process to be making the value of `key`, and has the others wait for
+    /// this one until the file it returns is dropped, by when the value is to be in a sealed
+    /// pack ([`Self::flush`]). A value several processes would make at once, as the build
+    /// scripts of a cold build would the standard library's unit, is made by the first, and the
+    /// others find it.
+    pub fn making(&self, key: &[u8; KEY]) -> io::Result<File> {
+        let key = self.identity.key(key);
+        let mut name = named(&key);
+        name.truncate(name.len() - ".pack".len());
+        let path = self.dir.dir.join(format!("making-{name}"));
+        let mut options = OpenOptions::new();
+        let file = private::file(options.create(true).truncate(false).write(true)).open(&path)?;
+        file.lock()?;
+        self.refresh();
+        Ok(file)
+    }
+
     /// Reads the sealed packs that were added to the directory since the last call, by this
     /// daemon or any other, and forgets the ones that were taken out of it.
     pub fn refresh(&self) {

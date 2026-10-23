@@ -3661,10 +3661,24 @@ fn std_unit(
     let object = args.out.with_extension("std.o");
     let archive = args.out.with_extension("std.a");
     let store = ra_jit_store::Store::global();
-    if let Some(bytes) = store.and_then(|it| it.get(&key)) {
-        let path = if link::split::is_archive(&bytes) { archive } else { object };
-        std::fs::write(&path, bytes).with_context(|| format!("writing {}", path.display()))?;
+    let stored = || -> anyhow::Result<Option<PathBuf>> {
+        let Some(bytes) = store.and_then(|it| it.get(&key)) else { return Ok(None) };
+        let path = if link::split::is_archive(&bytes) { &archive } else { &object };
+        std::fs::write(path, bytes).with_context(|| format!("writing {}", path.display()))?;
         eprintln!("standard library: from the store, {} crates", members.len());
+        Ok(Some(path.clone()))
+    };
+    if let Some(path) = stored()? {
+        return Ok(Some(path));
+    }
+    let _making = match store.map(|it| it.making(&key)).transpose() {
+        Ok(making) => making,
+        Err(e) => {
+            eprintln!("standard library: building it beside any other process that is: {e}");
+            None
+        }
+    };
+    if let Some(path) = stored()? {
         return Ok(Some(path));
     }
     let of_unit = Args {

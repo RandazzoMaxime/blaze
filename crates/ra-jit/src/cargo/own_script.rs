@@ -119,6 +119,7 @@ pub(crate) fn compile(
     dir: &Path,
 ) -> Result<(), String> {
     let asked = Asked { args, cwd };
+    unread(&source.display().to_string())?;
     let rustc = crate::answers::toolchain_rustc_of(rustc).ok_or("its toolchain is not known")?;
     let sysroot = rustc.parent().and_then(Path::parent).ok_or("its toolchain is not known")?;
     let library = sysroot.join("lib/rustlib/src/rust/library");
@@ -186,14 +187,17 @@ pub(crate) fn compile(
         return Err(format!("it calls functions ra-jit could not compile ({line})"));
     }
     let read = std::fs::read_to_string(&dep_info).map_err(|it| it.to_string())?;
-    let files = crate::dep_info::DepInfo::parse(&read).files;
-    for file in &files {
-        let text = std::fs::read_to_string(file).map_err(|it| format!("{file}: {it}"))?;
-        if let Some(why) = unrecorded_read(&text) {
-            return Err(format!("{file} {why}, which ra-jit's dep-info does not name"));
-        }
+    crate::dep_info::DepInfo::parse(&read).files.iter().try_for_each(|it| unread(it))
+}
+
+/// Whether the file reads nothing a dep-info of its modules alone leaves out, and if it does,
+/// why rustc is to compile it.
+fn unread(file: &str) -> Result<(), String> {
+    let text = std::fs::read_to_string(file).map_err(|it| format!("{file}: {it}"))?;
+    match unrecorded_read(&text) {
+        Some(why) => Err(format!("{file} {why}, which ra-jit's dep-info does not name")),
+        None => Ok(()),
     }
-    Ok(())
 }
 
 /// What the text reads while it is compiled that a dep-info of its modules alone leaves out:
