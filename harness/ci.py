@@ -83,8 +83,9 @@ HARNESSES = [
     ("buildmodel", ["buildmodel.py", "--backend", BACKEND], {}, on("linux", "windows"), None),
     ("store-kills", ["storekills.py", "--kills", "100"], {}, EVERYWHERE, None),
     ("store", ["storecorrupts.py", "--rounds", "4"], {}, EVERYWHERE, None),
-    # It mounts a tmpfs, or fills a disk image on Windows.
-    ("store", ["storefull.py"], {}, on("linux", "windows"), None),
+    # It mounts a tmpfs, or fills a disk image on Windows. In the fast tier: what a build
+    # keeps grows with features that write the store, and a full disk is where that shows.
+    ("store", ["storefull.py"], {}, on("linux", "windows"), 2),
     ("store", ["storeshared.py"], {}, EVERYWHERE, None),
     ("store", ["storeguards.py"], {}, on("linux"), None),
     ("daemon", ["stress.py"], {}, EVERYWHERE, 2),

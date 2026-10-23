@@ -295,16 +295,18 @@ With no borrow checker, the 245 units rustc accepts would pass. Now:
 
 | Mode | In scope | Pass | rustc accepts, ra-jit too | rustc rejects, same errors |
 |---|---|---|---|---|
-| Polonius | 1579 | 1511 (95.7%) | 245 of 245 | 1266 of 1334 |
-| NLL | 1577 | 1507 (95.6%) | 226 of 226 | 1281 of 1351 |
+| Polonius | 1580 | 1511 (95.6%) | 245 of 245 | 1266 of 1335 |
+| NLL | 1578 | 1507 (95.5%) | 226 of 226 | 1281 of 1352 |
 
-463 units are out of scope; 344 of them need a nightly feature. CI runs the scoring on Linux
-and fails below a floor a few units under the count there.
+461 units are out of scope; 344 of them need a nightly feature. CI runs the scoring on Linux
+and fails below a floor a few units under the count there, on any error in a unit rustc
+accepts, and on any unit the checker panics on, as a panic hides every error in its file.
 
 The other check is that it finds nothing in code rustc accepts.
 `ra-jit borrowck --project DIR` checks a cargo workspace; on ripgrep, fd, bat, hyperfine,
-just, axum, nushell, delta, eza, tokei and starship it finds nothing, nor on the harness's
-`corpus` and `mixfutures` crates.
+just, axum, nushell, delta, eza, tokei, starship and cargo it finds nothing, nor on the
+harness's `corpus` and `mixfutures` crates, which CI checks too. Its last line counts the
+files, errors and files it panicked on; a panic makes it fail.
 
 ## What is left
 
