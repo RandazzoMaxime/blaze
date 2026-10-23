@@ -731,10 +731,17 @@ example that is only to compile passes when rust-analyzer finds no error in it. 
 builds an example that is `compile_fail` (D), one rust-analyzer finds an error in (rustc
 prints it), one naming a dependency that links a second copy of the library (two copies of a
 trait rust-analyzer takes for one), and one whose build, link or stand-in check fails; the
-memo of the first part keeps those. The fixture's doctests went from 3 to 0, and every crate of
-`harness/doctests.py` builds all its examples with ra-jit. What is left of L is the daemon
-taking the examples in place of a process per library, and rustdoc for `-q` and a library
-ra-jit cannot load.
+memo of the first part keeps those. The fixture's doctests went from 3 to 0. On the 30 crates
+of `harness/doctests.py` ra-jit builds 3,076 of 3,513 examples; most of the rest are
+serde_core's, serde_json's and hashbrown's, which name `serde`, linking a second copy of the
+library, and `time`'s, `compile_fail` and others with an error. Building whole programs
+of examples found two codegen bugs that rustc's copies of the libraries had hidden:
+`relocate_data_pointer` followed two allocations that seemed to point at each other forever
+(url), and an `#[inline]` function of the standard library that takes its caller's overflow
+checks was taken from ra-jit's build of the standard library, which has none (itertools; the
+fixture's `should_panic` example now holds it). What is left of L is the daemon taking the
+examples in place of a process per library, and rustdoc for `-q` and a library ra-jit cannot
+load.
 
 **M. Remove the wrapper and the fallback.** ([#93](https://github.com/indexable-inc/ra-jit/issues/93)) Plain cargo after `ra-jit enable` names ra-jit as
 `build.rustc`; ra-jit answers cargo's questions (B) and writes for each unit the files cargo
