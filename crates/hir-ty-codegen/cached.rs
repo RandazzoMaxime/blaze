@@ -545,11 +545,11 @@ pub(super) struct KeptTypes {
 impl KeptTypes {
     /// The key the set is in the store under, which is of nothing but what the set tells.
     pub(super) fn keep(&mut self, store: &Store, types: &TypeSet) -> [u8; KEY] {
-        let at = types.as_ptr() as usize;
+        let at = types.at();
         if let Some((_, key)) = self.keys.get(&at) {
             return *key;
         }
-        let bytes = postcard::to_allocvec(&**types).unwrap_or_default();
+        let bytes = postcard::to_allocvec(&types.to_vec()).unwrap_or_default();
         let mut hasher = Sha256::new();
         hasher.update(b"ra-jit types 1");
         hasher.update(&bytes);
@@ -1054,7 +1054,7 @@ mod tests {
     fn read_back(written: &Entry) -> Entry {
         let mut read = Entry::decode(&written.encode().unwrap()).unwrap();
         if let (Some(read), Some(written)) = (&mut read.debug, &written.debug) {
-            let stored = |it: &TypeSet| postcard::to_allocvec(&**it).unwrap();
+            let stored = |it: &TypeSet| postcard::to_allocvec(&it.to_vec()).unwrap();
             let sets = written.types.iter().map(stored);
             read.types =
                 sets.map(|it| postcard::from_bytes::<Vec<_>>(&it).unwrap().into()).collect();

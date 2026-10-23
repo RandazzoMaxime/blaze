@@ -83,6 +83,24 @@ pub(crate) fn live() -> Option<u64> {
     None
 }
 
+/// Gives the system back the pages of what was freed, which jemalloc keeps for ten seconds
+/// to reuse otherwise.
+pub(crate) fn give_back() {
+    #[cfg(unix)]
+    // SAFETY: `arena.<i>.purge` reads and writes nothing, and 4096 (`MALLCTL_ARENAS_ALL`)
+    // is every arena.
+    unsafe {
+        use std::ptr::null_mut;
+        tikv_jemalloc_sys::mallctl(
+            c"arena.4096.purge".as_ptr(),
+            null_mut(),
+            null_mut(),
+            null_mut(),
+            0,
+        );
+    }
+}
+
 /// Reports what the process holds now that `step` is done.
 pub(crate) fn checkpoint(step: &str) {
     if report_dir().is_none() {

@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """The doctests of real crates, run by `cargo test --doc` and by `cargo ra-jit test --doc`:
 the same tests must end the same way and print the same, in ra-jit's first run and in its
-second, which reuses what rustc compiled of the examples.
+second, which reuses what rustc compiled of the examples ra-jit leaves to it. Each crate's
+line says how many examples ra-jit built and how many rustc did.
 
     RA_JIT_BIN=../target/release/ra-jit python3 doctests.py [--few] [name-version ...]
 
@@ -44,7 +45,7 @@ def row(spec):
     with tempfile.TemporaryDirectory(prefix="ra-jit-doctests-") as scratch:
         want = tested(crate, [], os.path.join(scratch, "cargo"))
         got = tested(crate, ["ra-jit"], os.path.join(scratch, "ra-jit"))
-        # The second run has what rustc compiled of the examples in the first.
+        # The second run has what rustc compiled of the examples in the first, and the store.
         again = tested(crate, ["ra-jit"], os.path.join(scratch, "ra-jit"))
     verdict = judged(want, got)
     if verdict[0] == "same" and want[:2] != again[:2]:
@@ -60,13 +61,13 @@ def judged(want, got):
     left = re.search(r"ra-jit: the doctests are left to rustdoc: (.*)", got[2])
     if left:
         return "refused", left.group(1)
-    built = re.findall(r"doctests: compiled (\d+) of (\d+) fns", got[2])
+    built = re.findall(r"doctests: (\d+) built by ra-jit, (\d+) by rustc", got[2])
     if not built:
         return "WRONG", "ra-jit did not say what it built for the doctests"
     tests = sum(l.startswith("test ") and not l.startswith("test result") for l in want[1])
     if not tests:
         return "WRONG", f"cargo ran no doctest: {want[2].strip()[-200:]}"
-    return "same", f"{tests} doctests, {sum(int(n) for n, _ in built)} of {sum(int(n) for _, n in built)} functions of the library from ra-jit"
+    return "same", f"{tests} doctests, {sum(int(n) for n, _ in built)} built by ra-jit, {sum(int(n) for _, n in built)} by rustc"
 
 
 def main():
