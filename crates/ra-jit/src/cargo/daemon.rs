@@ -315,6 +315,10 @@ pub(crate) struct Checkout {
     /// programs are, and in a request under them the ones of the process that asks.
     #[serde(default)]
     pub(crate) env: BTreeMap<String, String>,
+    /// The file of what cargo said of the build scripts it ran and the proc macros it
+    /// built, which a worker loads the checkout with.
+    #[serde(default)]
+    pub(crate) scripts: Option<PathBuf>,
 }
 
 impl Checkout {
@@ -459,6 +463,10 @@ impl Worker {
         std::fs::write(&symbols, listed)?;
         args.push("--symbols-in".into());
         args.push(symbols.into());
+        if let Some(scripts) = &checkout.scripts {
+            args.push("--scripts-from".into());
+            args.push(scripts.into());
+        }
         let mut env = crate::process::own();
         for (name, value) in &config.env {
             env.set(name, value);

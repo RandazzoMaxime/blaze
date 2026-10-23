@@ -206,6 +206,13 @@ All notable changes to ra-jit are written here. The format follows
 
 ### Changed
 
+- ra-jit allocates with jemalloc on Linux and macOS, and with mimalloc on Windows only
+  ([#39](https://github.com/indexable-inc/ra-jit/issues/39)). mimalloc 3 kept more of what a
+  build freed, transparent huge pages included: on Linux x86-64 (16 cores, `bench.py`, two
+  interleaved rounds) the daemon after its edits holds 1.57 GB instead of 2.03 on ripgrep, 9.52
+  instead of 10.80 on nushell, 11.07 instead of 12.13 on helix and 24.3 instead of 27.0 on bun,
+  with the same edit times. `RA_JIT_MEMORY` reports the live heap without the `heap-profile`
+  feature, which now only adds jemalloc's profiler.
 - The daemon no longer keeps a spare worker loaded for the next project
   ([#56](https://github.com/indexable-inc/ra-jit/issues/56)). It starts one as it starts, for
   the build that started it, and one each time a build of a new workspace begins, which loads
