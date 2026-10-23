@@ -279,7 +279,7 @@ def round_trip(top, remote, name, crates, target, workspace):
     objects = bucket.objects()
     packs = [it for it in objects if it.startswith("packs/")]
     check("the bucket has A's packs, their keys and the manifest",
-          out.returncode == 0 and packs and sorted("packs/" + it + ".zst" for it in a.packs()) == sorted(packs)
+          out.returncode == 0 and packs and sorted("packs/" + it for it in a.packs()) == sorted(packs)
           and "manifests/default" in objects and len([it for it in objects if it.startswith("keys/")]) == len(packs),
           f"{len(objects)} objects")
     check("every object in the bucket is what its name says",
@@ -389,7 +389,7 @@ def transfers(top, remote):
     parts = proxy.seen("PUT", "partNumber=")
     check("a big pack goes up in parts, a few at a time",
           out.returncode == 0 and len(parts) == 3 and proxy.seen("POST", r"uploads") and proxy.seen("POST", "uploadId=")
-          and digest(unpacked(bucket.get("packs/" + name + ".zst"))) == name[:-5] and not bucket.uploads(), f"{len(parts)} parts")
+          and digest(bucket.get("packs/" + name)) == name[:-5] and not bucket.uploads(), f"{len(parts)} parts")
     check("ra-jit counts the requests the proxy saw", said_number(out.stderr, "requests") == len(proxy.requests),
           f"{said_number(out.stderr, 'requests')} and {len(proxy.requests)}")
     proxy.clear()
@@ -409,7 +409,7 @@ def transfers(top, remote):
               proxy.fault("PUT", "/manifests/", times=1, status=503)]
     out = a.ra_jit("cache", "push", address)
     check("5xx on a part, on completing and on the manifest: sent again",
-          out.returncode == 0 and [it.hits for it in faults] == [2, 1, 1] and digest(unpacked(bucket.get("packs/" + name + ".zst"))) == name[:-5])
+          out.returncode == 0 and [it.hits for it in faults] == [2, 1, 1] and digest(bucket.get("packs/" + name)) == name[:-5])
 
     a, b, address, bucket, name = pushed("always 503")
     proxy.fault("GET", "/packs/", times=1000, status=503)
@@ -435,7 +435,7 @@ def transfers(top, remote):
     fault = proxy.fault("PUT", "partNumber=1", times=1, cut_request=2 * MIB)
     out = a.ra_jit("cache", "push", address)
     check("the connection dropped in the middle of a part: sent again",
-          out.returncode == 0 and fault.hits == 1 and digest(unpacked(bucket.get("packs/" + name + ".zst"))) == name[:-5] and not bucket.uploads())
+          out.returncode == 0 and fault.hits == 1 and digest(bucket.get("packs/" + name)) == name[:-5] and not bucket.uploads())
 
     a, b, address, bucket, name = pushed("stall")
     fault = proxy.fault("GET", "/packs/", times=1, stall=(3 * MIB, 6))
@@ -480,7 +480,7 @@ def transfers(top, remote):
 
     a, b, address, bucket, name = pushed("spoiled partial")
     b.add_pack(filler(f"{remote.name} there already", 4096))
-    open(os.path.join(b.store, name + ".zst.tmp"), "wb").write(b"what a stopped process left of something else" * 1000)
+    open(os.path.join(b.store, name + ".fetch.tmp"), "wb").write(b"what a stopped process left of something else" * 1000)
     out = b.ra_jit("cache", "pull", address)
     check("a part kept aside that is of something else: fetched from the start",
           out.returncode == 0 and b.packs().get(name) is True and not b.partials()
@@ -564,10 +564,10 @@ def transfers(top, remote):
     proxy.rate = None
     objects = bucket.objects()
     check("the service killed in a push: said, no pack and no manifest in the bucket",
-          out.returncode != 0 and "packs/" + name + ".zst" not in objects and "manifests/default" not in objects, out.stderr.strip()[-60:])
+          out.returncode != 0 and "packs/" + name not in objects and "manifests/default" not in objects, out.stderr.strip()[-60:])
     out = a.ra_jit("cache", "push", address)
     check("back: the push goes through and no upload is left unfinished",
-          out.returncode == 0 and digest(unpacked(bucket.get("packs/" + name + ".zst"))) == name[:-5] and not bucket.uploads(),
+          out.returncode == 0 and digest(bucket.get("packs/" + name)) == name[:-5] and not bucket.uploads(),
           out.stdout.strip() or out.stderr.strip()[-200:])
 
 
@@ -722,7 +722,7 @@ def collected(top, remote):
           and said.get("objects removed") == [0] and bucket.objects() == left, out.stdout.replace("\n", "; ")[:110])
 
     # A pack that was there before and is listed nowhere is sent again once it is old, and its age starts anew.
-    bucket.put(f"packs/{digest(stray)}.pack.zst", packed(stray))
+    bucket.put(f"packs/{digest(stray)}.pack", stray)
     c = Machine(top, f"g-{remote.name}-c", remote)
     c.add_pack(stray)
     aged(3 * DAYS)
@@ -886,7 +886,7 @@ def over_tls(top, remote):
         out = b.ra_jit("cache", "pull", address, env=trusting)
         check("a big pack sent and fetched over TLS, the certificate trusted through SSL_CERT_FILE",
               sent.returncode == 0 and out.returncode == 0 and b.packs() == {name: True}
-              and digest(unpacked(bucket.get("packs/" + name + ".zst"))) == name[:-5], out.stdout.strip())
+              and digest(bucket.get("packs/" + name)) == name[:-5], out.stdout.strip())
         b.empty()
         start = time.time()
         out = b.ra_jit("cache", "pull", address, env={"RA_JIT_REMOTE_TIMEOUT": "2"})
@@ -912,14 +912,14 @@ def spoiled(top, remote):
         other = big_store(a, f"{remote.name} {what} whole") if what == "one byte changed" else None
         if a.ra_jit("cache", "push", address).returncode != 0:
             raise SystemExit("the push failed")
-        sent = bucket.get("packs/" + name + ".zst")
-        bucket.put("packs/" + name + ".zst", spoil(sent))
+        sent = bucket.get("packs/" + name)
+        bucket.put("packs/" + name, spoil(sent))
         out = b.ra_jit("cache", "pull", address)
         check(f"a pack with {what}: rejected, said, counted, not in the store",
-              out.returncode != 0 and name not in b.packs() and not b.partials() and "rejected packs/" + name + ".zst" in out.stderr
+              out.returncode != 0 and name not in b.packs() and not b.partials() and "rejected packs/" + name in out.stderr
               and said_number(out.stderr, "objects rejected") == 1 and (other is None or b.packs() == {other: True}),
               out.stderr.strip().split("\n")[-1][-60:])
-        bucket.put("packs/" + name + ".zst", sent)
+        bucket.put("packs/" + name, sent)
         out = b.ra_jit("cache", "pull", address)
         check("put back: fetched", out.returncode == 0 and b.packs().get(name) is True)
     # An object that is what the manifest says and unpacks to something else than the pack.
@@ -940,7 +940,7 @@ def spoiled(top, remote):
     a, b = (Machine(top, f"s-{remote.name}-gone-{it}", remote) for it in "ab")
     name = big_store(a, f"{remote.name} gone")
     a.ra_jit("cache", "push", address)
-    bucket.delete("packs/" + name + ".zst")
+    bucket.delete("packs/" + name)
     out = b.ra_jit("cache", "pull", address)
     check("a pack the manifest lists that is not there: said", out.returncode != 0 and "is listed and is not there" in out.stderr
           and not b.packs() and not b.partials())
@@ -954,7 +954,7 @@ def guarded(top, remote):
     a, b, c, d = (Machine(top, f"u-{remote.name}-{it}", remote) for it in "abcd")
     first = a.add_pack(filler(f"{remote.name} guarded 1", MIB))
     out = a.ra_jit("cache", "push", address, env=nothing_asked)
-    check("a machine with no keys pushes without being asked anything", out.returncode == 0 and "packs/" + first + ".zst" in bucket.objects())
+    check("a machine with no keys pushes without being asked anything", out.returncode == 0 and "packs/" + first in bucket.objects())
     for value in ("", "0", "true"):
         out = b.ra_jit("cache", "pull", address, env={"RA_JIT_REMOTE_UNSIGNED": value})
         check(f"a list nobody signed is not taken with RA_JIT_REMOTE_UNSIGNED={value!r}",
@@ -965,28 +965,36 @@ def guarded(top, remote):
 
     # A pack is as long as its list says, as it is sent and as it unpacks: one byte less
     # listed of either, and it is not what was listed.
+    # The same of one an older ra-jit sent compressed, listed with what was sent.
     manifest = bucket.get("manifests/default").decode()
-    pack, size, keys, fmt, zdigest, zsize = manifest.split()
+    pack, size, keys, fmt = manifest.split()
+    zipped = packed(bucket.get(f"packs/{pack}.pack"))
+    bucket.put(f"packs/{pack}.pack.zst", zipped)
+    zdigest, zsize = digest(zipped), len(zipped)
     b.empty()
-    for what, line in [(f"listed as {listed} unpacked", f"{pack} {listed} {keys} {fmt} {zdigest} {zsize}")
+    for what, line in [(f"listed as {listed}", f"{pack} {listed} {keys} {fmt}")
                        for listed in (0, 1, int(size) - 1)] + \
-                      [(f"listed as {listed} sent", f"{pack} {size} {keys} {fmt} {zdigest} {listed}")
-                       for listed in (0, int(zsize) - 1)]:
+                      [(f"{zsize} sent, listed as {listed} unpacked", f"{pack} {listed} {keys} {fmt} {zdigest} {zsize}")
+                       for listed in (0, 1, int(size) - 1)] + \
+                      [(f"{zsize} sent, listed as {listed} sent", f"{pack} {size} {keys} {fmt} {zdigest} {listed}")
+                       for listed in (0, zsize - 1)]:
         bucket.put("manifests/default", (line + "\n").encode())
         out = b.ra_jit("cache", "pull", address)
-        check(f"a pack of {size} bytes, {zsize} sent, {what}: rejected, nothing kept",
+        check(f"a pack of {size} bytes, {what}: rejected, nothing kept",
               out.returncode != 0 and "1 of them rejected" in out.stderr and not b.packs() and not b.partials()
               and not [it for it in os.listdir(b.store) if it not in ("version", "lock", "turns")],
               out.stderr.strip().splitlines()[0][-60:])
-    # A pack that is small as sent and unpacks to a great deal, listed as small: stopped there.
-    # ra-jit itself packs it, so that the harness needs no zstd of its own.
+    # A pack that is small as sent compressed and unpacks to a great deal, listed as small:
+    # stopped there.
     bombs, bomb_bucket = remote.fresh()
     bomber = Machine(top, f"u-{remote.name}-bomb", remote)
     bomb = bomber.add_pack(pack_of([(hashlib.sha256(b"bomb").digest(), bytes(64 * MIB))]))
     bomber.ra_jit("cache", "push", bombs)
-    pack, size, keys, fmt, zdigest, zsize = bomb_bucket.get("manifests/default").decode().split()
-    bomb_bucket.put("manifests/default", f"{pack} {MIB} {keys} {fmt} {zdigest} {zsize}\n".encode())
-    address, sent = bombs, int(zsize)
+    pack, size, keys, fmt = bomb_bucket.get("manifests/default").decode().split()
+    zipped = packed(bomb_bucket.get(f"packs/{pack}.pack"))
+    bomb_bucket.put(f"packs/{pack}.pack.zst", zipped)
+    bomb_bucket.put("manifests/default", f"{pack} {MIB} {keys} {fmt} {digest(zipped)} {len(zipped)}\n".encode())
+    address, sent = bombs, len(zipped)
     out = b.ra_jit("cache", "pull", address)
     most = max([os.path.getsize(os.path.join(b.store, it)) for it in os.listdir(b.store)
                 if os.path.isfile(os.path.join(b.store, it))] + [0])
@@ -1088,11 +1096,11 @@ def poisoned(top, remote, a, crates, target, workspace, address, bucket, expecte
         return m
 
     # 1. The pack A sent, changed in place: its name no longer fits.
-    pack = "packs/" + listed[0][0] + ".pack.zst"
+    pack = "packs/" + listed[0][0] + ".pack"
     data = bucket.get(pack)
-    records = records_of(unpacked(data))
+    records = records_of(data)
     changed = pack_of([(key, value[:-1] + bytes([value[-1] ^ 0x55]) if value else value) for key, value in records])
-    bucket.put(pack, packed(changed))
+    bucket.put(pack, changed)
     b = machine("changed")
     log, _ = b.build(crates, env={"RA_JIT_REMOTE": address})
     check("code changed under A's name: rejected, B compiles its own and prints the same",
