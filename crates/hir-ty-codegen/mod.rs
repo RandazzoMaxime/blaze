@@ -260,6 +260,11 @@ pub trait SymbolResolver {
     fn describes_variables(&self) -> bool {
         true
     }
+    /// Whether the object is split into parts that a linker reads apart, so that each unit
+    /// of its description is best in sections of its own, beside the functions it describes.
+    fn debug_grouped(&self) -> bool {
+        false
+    }
     /// Whether every function keeps its frame pointer, as `-C force-frame-pointers` has it:
     /// code that walks its own frames (bun's backtraces) reads them.
     fn keeps_frame_pointers(&self) -> bool {
@@ -4254,8 +4259,14 @@ impl<'a, 'db> ObjectCodegen<'a, 'db> {
         // A patch is added to a program that is linked already, and is read with it.
         let apart = symbols.debug_apart().filter(|_| base.is_none());
         let debug = symbols.debug_directory().and_then(|directory| {
-            DebugContext::new(module.isa(), &directory, symbols.describes_variables(), apart)
-                .map(debuginfo::Describer::new)
+            DebugContext::new(
+                module.isa(),
+                &directory,
+                symbols.describes_variables(),
+                apart,
+                sections && symbols.debug_grouped(),
+            )
+            .map(debuginfo::Describer::new)
         });
         let debugged = debug.is_some();
         let described = start.elapsed();
@@ -8173,7 +8184,17 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
             held.locals.binary_search(&local).ok()
         };
         // In an `async` body a temporary may be kept in the future where its binding is not.
-        let forwarded = if frame.is_none() { forwarded_temps(body) } else { FxHashMap::default() };
+        let mut forwarded =
+            if frame.is_none() { forwarded_temps(body) } else { FxHashMap::default() };
+        let in_place = match self.ret_mode {
+            PassMode::Indirect if frame.is_none() => {
+                returned_in_place(body, &forwarded).filter(|it| !forwarded.contains_key(it))
+            }
+            _ => None,
+        };
+        if let Some(local) = in_place {
+            self.locals.insert(local, self.locals[returned_local(body)]);
+        }
         // A local kept in a register gets a slot only when it needs memory: see `local_slot`.
         let mut registers = Vec::new();
         if frame.is_none() {
@@ -8188,6 +8209,13 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
         for &(local, ty) in &registers {
             let var = self.builder.declare_var(ty);
             self.registers.insert(local, Register { var, ty });
+        }
+        if frame.is_none() {
+            for (temp, from) in moved_arguments(body, &forwarded) {
+                if !self.registers.contains_key(&temp) && !self.registers.contains_key(&from) {
+                    forwarded.insert(temp, from);
+                }
+            }
         }
         for (local, data) in body.locals.iter() {
             if self.locals.contains_idx(local)
@@ -12101,6 +12129,11 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
                 .then(|| self.cg.declare_inlined(&body, self.builder.func));
         }
         let InstanceDef::Fn(func) = def else { return None };
+        let own =
+            self.body.is_some_and(|it| it.owner.module(db).krate(db).data(db).origin.is_local());
+        if fncache::kept_a_call(db, func, args, own) {
+            return None;
+        }
         let signature = FunctionSignature::of(db, func);
         if signature.abi != ExternAbi::Rust
             || signature.is_varargs()
@@ -13564,6 +13597,16 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
             _ => b.ins().iadd(l, r),
         };
         match (op, args) {
+            // Cranelift's pairwise add is NEON's of 16 bytes, which LLVM selects again from it.
+            ("addp", [a, b]) if lanes * width == 16 && ty.bits() <= 32 => {
+                let vector = ty.by(lanes as u32).expect("16 bytes of lanes");
+                let (a, _) = self.operand(a)?;
+                let (b, _) = self.operand(b)?;
+                let a = self.builder.ins().load(vector, MEM, a, 0);
+                let b = self.builder.ins().load(vector, MEM, b, 0);
+                let sum = self.builder.ins().iadd_pairwise(a, b);
+                self.builder.ins().store(MEM, sum, dst, 0);
+            }
             ("umaxp" | "smaxp" | "uminp" | "sminp" | "addp", [a, b]) => {
                 let (a, _) = self.operand(a)?;
                 let (b, _) = self.operand(b)?;
@@ -15258,6 +15301,195 @@ fn register_locals(body: &MirBody<'_>, forwarded: &FxHashMap<LocalId, LocalId>) 
             !bound.contains(local) && mentions.get(local).is_none_or(|(all, plain)| all == plain)
         })
         .collect()
+}
+
+/// The local every return of `body` moves to the return slot, when nothing else mentions the
+/// slot, as rustc's `RenameReturnPlace` finds it: in the caller's memory the value is built
+/// where the caller wants it and returning copies nothing. A call's destination is a temporary
+/// or a fresh binding, so the callee reaches that memory through nothing else.
+fn returned_in_place(
+    body: &MirBody<'_>,
+    forwarded: &FxHashMap<LocalId, LocalId>,
+) -> Option<LocalId> {
+    if body.coroutine.is_some() {
+        return None;
+    }
+    let whole = |place: &StoredPlace| place.projection.as_slice().is_empty().then_some(place.local);
+    let slot = return_slot();
+    // Whether what runs from statement `at` of `block` on is storage markers, constants written
+    // to other locals (drop flags) and jumps to a return: nothing touches `returned` after it
+    // is moved.
+    let returns = |returned: LocalId, mut block: BasicBlockId, mut at: usize| {
+        let inert = |kind: &StatementKind| match kind {
+            StatementKind::StorageLive(_) | StatementKind::StorageDead(_) | StatementKind::Nop => {
+                true
+            }
+            StatementKind::Assign(
+                to,
+                Rvalue::Use(Operand {
+                    kind: OperandKind::Constant { .. } | OperandKind::Allocation { .. },
+                    ..
+                }),
+            ) => whole(to).is_some_and(|it| {
+                it != returned && it != slot && forwarded.get(&it) != Some(&returned)
+            }),
+            _ => false,
+        };
+        for _ in 0..body.basic_blocks.len() {
+            let data = &body.basic_blocks[block];
+            if !data.statements[at..].iter().all(|it| inert(&it.kind)) {
+                return false;
+            }
+            match data.terminator.as_ref().map(|it| &it.kind) {
+                Some(TerminatorKind::Return) => return true,
+                Some(TerminatorKind::Goto { target }) => (block, at) = (*target, 0),
+                _ => return false,
+            }
+        }
+        false
+    };
+    let mut returned = None;
+    let mut moves = 0;
+    for (id, block) in body.basic_blocks.iter() {
+        for (at, statement) in block.statements.iter().enumerate() {
+            let StatementKind::Assign(to, rvalue) = &statement.kind else { continue };
+            if whole(to) != Some(slot) {
+                continue;
+            }
+            let Rvalue::Use(Operand {
+                kind: OperandKind::Copy(from) | OperandKind::Move(from),
+                ..
+            }) = rvalue
+            else {
+                return None;
+            };
+            let from = whole(from)?;
+            if *returned.get_or_insert(from) != from || !returns(from, id, at + 1) {
+                return None;
+            }
+            moves += 1;
+        }
+    }
+    let local = returned.filter(|&it| it != slot)?;
+    let mut mentions = 0;
+    body.visit_places(|place| mentions += usize::from(place.local == slot));
+    let eligible = mentions == moves
+        && body.locals[local].ty == body.locals[slot].ty
+        && !body.param_locals.contains(&local)
+        && !body.upvars_in_place.iter().any(|it| it.0 == local)
+        && !body.promoted_locals.iter().any(|it| it.0 == local);
+    eligible.then_some(local)
+}
+
+/// The temporaries a call's argument is moved through, each with the local moved into it:
+/// `f(value)` moves `value` to a temporary and the temporary to `f`. The two can be one slot,
+/// nothing reading or writing `value` between the move and the call, and the callee then gets
+/// `value`'s memory, as rustc passes a moved local.
+fn moved_arguments(
+    body: &MirBody<'_>,
+    forwarded: &FxHashMap<LocalId, LocalId>,
+) -> Vec<(LocalId, LocalId)> {
+    let whole = |place: &StoredPlace| place.projection.as_slice().is_empty().then_some(place.local);
+    let slot = return_slot();
+    let mut found = Vec::new();
+    for (_, block) in body.basic_blocks.iter() {
+        let Some(TerminatorKind::Call { func, args, destination, .. }) =
+            block.terminator.as_ref().map(|it| &it.kind)
+        else {
+            continue;
+        };
+        let plain = |operand: &Operand| match &operand.kind {
+            OperandKind::Copy(place) | OperandKind::Move(place) => whole(place),
+            _ => None,
+        };
+        for arg in args.iter() {
+            let OperandKind::Move(temp) = &arg.kind else { continue };
+            let Some(temp) = whole(temp) else { continue };
+            let Some(at) = block.statements.iter().rposition(
+                |it| matches!(&it.kind, StatementKind::Assign(to, _) if to.local == temp),
+            ) else {
+                continue;
+            };
+            let StatementKind::Assign(
+                _,
+                Rvalue::Use(Operand { kind: OperandKind::Move(from), .. }),
+            ) = &block.statements[at].kind
+            else {
+                continue;
+            };
+            let Some(from) = whole(from) else { continue };
+            let apart = |local: Option<LocalId>| local.is_some_and(|it| it != from && it != temp);
+            let between = block.statements[at + 1..].iter().all(|it| match &it.kind {
+                StatementKind::StorageLive(_)
+                | StatementKind::StorageDead(_)
+                | StatementKind::Nop => true,
+                StatementKind::Assign(to, Rvalue::Use(operand)) => {
+                    apart(whole(to))
+                        && match operand.kind {
+                            OperandKind::Constant { .. } | OperandKind::Allocation { .. } => true,
+                            _ => apart(plain(operand)),
+                        }
+                }
+                _ => false,
+            });
+            let others = args.iter().filter(|it| !std::ptr::eq(*it, arg)).all(|it| {
+                matches!(it.kind, OperandKind::Constant { .. } | OperandKind::Allocation { .. })
+                    || apart(plain(it))
+            });
+            let callee =
+                matches!(func.kind, OperandKind::Constant { .. } | OperandKind::Allocation { .. })
+                    || apart(plain(func));
+            if between && others && callee && apart(whole(destination)) {
+                found.push((temp, from));
+            }
+        }
+    }
+    if found.is_empty() {
+        return found;
+    }
+    let mut mentions: FxHashMap<LocalId, usize> = FxHashMap::default();
+    body.visit_places(|place| *mentions.entry(place.local).or_default() += 1);
+    let dropped_or_read = |local: LocalId| {
+        let drops = body
+            .basic_blocks
+            .iter()
+            .filter_map(|(_, block)| block.terminator.as_ref())
+            .filter(
+                |it| matches!(&it.kind, TerminatorKind::Drop { place, .. } if place.local == local),
+            )
+            .count();
+        let fake_reads = body
+            .basic_blocks
+            .iter()
+            .flat_map(|(_, block)| &block.statements)
+            .filter(|it| matches!(&it.kind, StatementKind::FakeRead(place) if place.local == local))
+            .count();
+        drops + fake_reads
+    };
+    let bound: rustc_hash::FxHashSet<LocalId> = body
+        .binding_locals
+        .values()
+        .chain(&body.param_locals)
+        .copied()
+        .chain(body.promoted_locals.iter().map(|it| it.0))
+        .chain(body.upvars_in_place.iter().map(|it| it.0))
+        .chain([slot])
+        .chain(forwarded.values().copied())
+        .collect();
+    found.retain(|&(temp, from)| {
+        !bound.contains(&temp)
+            && !forwarded.contains_key(&temp)
+            && !forwarded.contains_key(&from)
+            && from != slot
+            && !body.promoted_locals.iter().any(|it| it.0 == from)
+            && mentions[&temp] - dropped_or_read(temp) == 2
+            && body.locals[temp].ty == body.locals[from].ty
+    });
+    let temps: rustc_hash::FxHashSet<LocalId> = found.iter().map(|it| it.0).collect();
+    found.retain(|(_, from)| !temps.contains(from));
+    found.sort();
+    found.dedup();
+    found
 }
 
 /// The temporaries a `let` is initialized through, each with the binding it is copied to right
