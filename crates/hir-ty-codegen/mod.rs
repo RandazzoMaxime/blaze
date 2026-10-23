@@ -784,6 +784,8 @@ impl CodegenUnit {
             for &id in roots.offered {
                 _ = cg.static_data(id);
             }
+            // Every root at once: an entry calls roots a later round is to find.
+            cg.find_stored_roots(&all().collect::<Vec<_>>());
             loop {
                 // Every core compiles the roots found so far, before they are put in the
                 // object one by one.
@@ -799,7 +801,7 @@ impl CodegenUnit {
                 symbols.in_parallel(ours.len(), &|db, symbols, at| {
                     if symbols.function(ours[at]).is_none() {
                         _ = db.mir_body(ours[at].into());
-                    } else if stored.contains(&ours[at]) {
+                    } else if stored.get(&ours[at]).is_some_and(Option::is_some) {
                     } else if let (Ok(compiled), Some(told)) =
                         (compiled_root(db, ours[at]).as_ref(), told)
                     {
@@ -1809,8 +1811,12 @@ struct ObjectCodegen<'a, 'db> {
     tiers: Option<&'a tier::Tiers>,
     /// What each function built from an entry of the store is an instance of.
     found_instances: FxHashMap<FuncId, (Instance, StoredParamEnvAndCrate)>,
-    /// The roots whose code the store has whole: put in the object from it, not compiled.
-    stored_roots: FxHashSet<FunctionId>,
+    /// Whether the store has the code of a root whole, by its name, for the roots asked
+    /// about: those it has are put in the object from it, not compiled.
+    stored_roots: FxHashMap<FunctionId, Option<StableName>>,
+    /// The root each name of a root is of, as [`ObjectCodegen::find_stored_roots`] named
+    /// them; `None` for a name more than one has.
+    root_names: FxHashMap<StableName, Option<FunctionId>>,
 }
 
 /// Why an entry with a file of its own under what stands for cargo's directory is not kept.
@@ -4386,7 +4392,8 @@ impl<'a, 'db> ObjectCodegen<'a, 'db> {
             hidden: Vec::new(),
             tiers: None,
             found_instances: FxHashMap::default(),
-            stored_roots: FxHashSet::default(),
+            stored_roots: FxHashMap::default(),
+            root_names: FxHashMap::default(),
         })
     }
 
@@ -4503,7 +4510,11 @@ impl<'a, 'db> ObjectCodegen<'a, 'db> {
     /// Puts a non-generic function in the object, exported under its rustc symbol name.
     fn define_function(&mut self, func: FunctionId) -> Result<String> {
         let db = self.db;
-        if let Some(name) = self.stored_root(func)
+        let stored = match self.stored_roots.get(&func) {
+            Some(name) => name.clone(),
+            None => self.stored_root(func),
+        };
+        if let Some(name) = stored
             && let Some(symbol) = self.symbols.function(func)
             && let Some(entry) = self.entries.as_ref().and_then(|it| it.get(&name))
         {
@@ -4570,6 +4581,7 @@ impl<'a, 'db> ObjectCodegen<'a, 'db> {
 
     /// The name of the entry of the store that root `func` is put in the object from, if the
     /// store has it and all it calls.
+    /// The name of `func` when the store has its code whole, for a root no round asked about.
     fn stored_root(&mut self, func: FunctionId) -> Option<StableName> {
         if !self.roots_from_store() {
             return None;
@@ -4579,16 +4591,26 @@ impl<'a, 'db> ObjectCodegen<'a, 'db> {
         let usable = |entries: &cached::Entries| {
             entries.usable(&name, &|symbol| symbols.provides(symbol) && symbols.linked(symbol))
         };
-        (stable::StableNames::of_checkout(&name) && self.entries.as_deref().is_some_and(usable))
-            .then_some(name)
+        let stored =
+            stable::StableNames::of_checkout(&name) && self.entries.as_deref().is_some_and(usable);
+        let stored = stored.then_some(name);
+        self.stored_roots.insert(func, stored.clone());
+        stored
     }
 
-    /// Finds, on every core, which of `roots` the store has, for them not to be compiled ahead.
+    /// Names `roots` on every core, and finds which of them the store has, for them not to be
+    /// compiled ahead.
     fn find_stored_roots(&mut self, roots: &[FunctionId]) {
         if !self.roots_from_store() {
             return;
         }
         let Some(entries) = self.entries.clone() else { return };
+        let roots: Vec<FunctionId> =
+            roots.iter().copied().filter(|it| !self.stored_roots.contains_key(it)).collect();
+        if roots.is_empty() {
+            return;
+        }
+        let roots = &roots[..];
         let start = stdx::time::Instant::now();
         let owned = &self.own_statics.crates;
         let next = std::sync::atomic::AtomicUsize::new(0);
@@ -4596,28 +4618,32 @@ impl<'a, 'db> ObjectCodegen<'a, 'db> {
         let threads = std::thread::available_parallelism().map_or(1, |it| it.get());
         self.symbols.in_parallel(threads, &|db, symbols, _| {
             let names = stable::StableNames::new(db, symbols, owned.clone(), true);
-            let mut stored = Vec::new();
+            let mut named = Vec::new();
             while let Some(&func) =
                 roots.get(next.fetch_add(1, std::sync::atomic::Ordering::Relaxed))
             {
                 let Some(name) = names.instance(&root_instance(db, func)) else { continue };
+                let name = StableName::from(name);
                 let usable = |symbol: &str| symbols.provides(symbol) && symbols.linked(symbol);
-                if stable::StableNames::of_checkout(&name) && entries.usable(&name, &usable) {
-                    stored.push(func);
-                }
+                let stored =
+                    stable::StableNames::of_checkout(&name) && entries.usable(&name, &usable);
+                named.push((func, name, stored));
             }
-            found.lock().unwrap_or_else(|e| e.into_inner()).extend(stored);
+            found.lock().unwrap_or_else(|e| e.into_inner()).extend(named);
         });
         let found = found.into_inner().unwrap_or_else(|e| e.into_inner());
-        if std::env::var_os("RA_JIT_STATS").is_some() {
-            eprintln!(
-                "stored roots: {} of {} in {:.1?}",
-                found.len(),
-                roots.len(),
-                start.elapsed()
-            );
+        let mut stored = 0;
+        for (func, name, whole) in found {
+            self.root_names
+                .entry(name.clone())
+                .and_modify(|it| *it = it.filter(|&it| it == func))
+                .or_insert(Some(func));
+            stored += usize::from(whole);
+            self.stored_roots.insert(func, whole.then_some(name));
         }
-        self.stored_roots.extend(found);
+        if std::env::var_os("RA_JIT_STATS").is_some() {
+            eprintln!("stored roots: {stored} of {} in {:.1?}", roots.len(), start.elapsed());
+        }
     }
 
     /// Puts the `main` the C runtime calls in the object.
@@ -4853,16 +4879,24 @@ impl<'a, 'db> ObjectCodegen<'a, 'db> {
         let told = self.debug.is_some().then(|| self.told.clone());
         let told = told.as_ref();
         let on_demand = self.on_demand;
-        let stored = &self.stored_roots.clone();
+        let (stored, roots_from_store) = (&self.stored_roots.clone(), self.roots_from_store());
         let work = |db: &dyn HirDatabase, symbols: &dyn SymbolResolver, _: usize| {
             let names = stable::StableNames::new(db, symbols, owned.clone(), hydrate);
-            // What the store has is not compiled, nor looked into for what it calls.
-            let in_store = |callee: &Instance| {
+            let usable = |name: &str| {
                 let Some(entries) = entries else { return false };
-                names.instance(callee).is_some_and(|name| {
-                    entries
-                        .usable(&name, &|symbol| symbols.provides(symbol) && symbols.linked(symbol))
-                })
+                entries.usable(name, &|symbol| symbols.provides(symbol) && symbols.linked(symbol))
+            };
+            // What the store has is not compiled, nor looked into for what it calls.
+            let in_store = |callee: &Instance| names.instance(callee).is_some_and(|it| usable(&it));
+            // A root only called is asked about here, as it is reached.
+            let stored_root = |root: FunctionId| match stored.get(&root) {
+                Some(name) => name.is_some(),
+                None => {
+                    roots_from_store
+                        && names.instance(&root_instance(db, root)).is_some_and(|name| {
+                            stable::StableNames::of_checkout(&name) && usable(&name)
+                        })
+                }
             };
             let mut homes = home::Homes::default();
             let mut state = ahead.lock().unwrap_or_else(|e| e.into_inner());
@@ -4890,7 +4924,7 @@ impl<'a, 'db> ObjectCodegen<'a, 'db> {
                 let (mut found, mut called) = (Vec::new(), Vec::new());
                 let compiled = match &job {
                     // One without a symbol is left to rustc, and so is what only it calls.
-                    either::Either::Left(root) if stored.contains(root) => None,
+                    either::Either::Left(root) if stored_root(*root) => None,
                     either::Either::Left(root) => symbols.function(*root).and_then(|_| {
                         if told.is_some() {
                             root_rows(db, *root);
@@ -5311,6 +5345,11 @@ impl<'a, 'db> ObjectCodegen<'a, 'db> {
 
     /// The function of the program that an instance without arguments is of, and its symbol.
     fn root_named(&self, name: &str) -> Option<(FunctionId, String)> {
+        if let Some(&Some(func)) = self.root_names.get(name)
+            && let Some(symbol) = self.symbols.function(func)
+        {
+            return Some((func, symbol));
+        }
         let of = self.names.functions_named(name);
         of.into_iter().find_map(|it| Some((it, self.symbols.function(it)?)))
     }
