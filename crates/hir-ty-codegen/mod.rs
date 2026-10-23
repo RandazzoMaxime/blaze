@@ -12094,6 +12094,11 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
                 .then(|| self.cg.declare_inlined(&body, self.builder.func));
         }
         let InstanceDef::Fn(func) = def else { return None };
+        let own =
+            self.body.is_some_and(|it| it.owner.module(db).krate(db).data(db).origin.is_local());
+        if fncache::kept_a_call(db, func, args, own) {
+            return None;
+        }
         let signature = FunctionSignature::of(db, func);
         if signature.abi != ExternAbi::Rust
             || signature.is_varargs()

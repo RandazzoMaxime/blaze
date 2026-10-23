@@ -274,9 +274,10 @@ impl<'db> Walk<'db> {
         to
     }
 
-    /// What a function an instance names is in the walk.
+    /// What a function an instance names is in the walk, when the node `from` calls it.
     fn function(
         &mut self,
+        from: u32,
         instance: &Instance,
         env: &StoredParamEnvAndCrate,
     ) -> (Node, Site, bool) {
@@ -306,7 +307,7 @@ impl<'db> Walk<'db> {
             // A panic: what it prints is no result.
             return (Node::Leaf(name(), None), site, false);
         }
-        if let Some(what) = gives_address(db, func) {
+        if let Some(what) = gives_address(db, func, self.is_own(from)) {
             let name = name();
             let why = format!("calls `{name}`, which {what}");
             return (Node::Leaf(name, Some(why)), site, false);
@@ -432,7 +433,7 @@ impl<'db> Walk<'db> {
                     }
                 }
                 FuncTarget::Instance(instance, env) => {
-                    let (node, site, codec) = self.function(instance, env);
+                    let (node, site, codec) = self.function(at, instance, env);
                     (3u8, self.edge(at, node, site, codec)).hash(hasher);
                 }
             }
@@ -678,7 +679,9 @@ fn pure_foreign(symbol: &str) -> bool {
 /// ordered by theirs. Whether two pointers are equal is the same in every run, so equality is
 /// not one. core is otherwise trusted, and its MIR not looked through: in it addresses are
 /// also numbers where what it gives doesn't depend on them, as in slice iteration and `memchr`.
-fn gives_address(db: &dyn HirDatabase, func: FunctionId) -> Option<&'static str> {
+/// So `addr` and `expose_provenance` count where code of the workspace calls them (`own`), as
+/// its casts do (`raw_use`): core and alloc call them to align and to tell a dangling pointer.
+fn gives_address(db: &dyn HirDatabase, func: FunctionId, own: bool) -> Option<&'static str> {
     if !matches!(func.krate(db).data(db).origin, base_db::CrateOrigin::Lang(LangCrateOrigin::Core))
     {
         return None;
@@ -695,7 +698,7 @@ fn gives_address(db: &dyn HirDatabase, func: FunctionId) -> Option<&'static str>
                 return None;
             }
             let Some(trait_ref) = db.impl_trait(id) else {
-                return matches!(name, "addr" | "expose_provenance")
+                return (own && matches!(name, "addr" | "expose_provenance"))
                     .then_some("gives an address as a number");
             };
             match TraitSignature::of(db, trait_ref.skip_binder().def_id.0).name.as_str() {
@@ -706,6 +709,18 @@ fn gives_address(db: &dyn HirDatabase, func: FunctionId) -> Option<&'static str>
         }
         _ => None,
     }
+}
+
+/// Whether a call of `func` is to stay a call, not have the callee built in where it is
+/// called: the walk knows what it does by the function called, and a body built into its
+/// caller is not called. `own` is whether the caller is code of the workspace.
+pub(super) fn kept_a_call(
+    db: &dyn HirDatabase,
+    func: FunctionId,
+    _: GenericArgs<'_>,
+    own: bool,
+) -> bool {
+    gives_address(db, func, own).is_some()
 }
 
 fn diverges(db: &dyn HirDatabase, func: FunctionId) -> bool {

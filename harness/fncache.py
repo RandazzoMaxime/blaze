@@ -17,6 +17,7 @@ in memory, found on disk or computed, and each step says which it has to be:
 - `width::<u8>` and `width::<u64>` are kept apart though their arguments are the same bytes;
 - `counted`, `noisy` and `addressed` are refused: a static that changes, printing and an
   address formatted (`{:p}`), the first two said with where they are written;
+- `exposed` is refused for `addr`, a method ra-jit would build into its caller but for that;
 - a daemon started again finds what the first kept: the hash is the same in every process;
 - cargo's own build runs every call, and prints the same.
 """
@@ -91,6 +92,12 @@ fn addressed(n: u64) -> bool {
     format!("{:p}", &n).len() > 2
 }
 
+/// An address as a number, by a method small enough to be built in where it is called.
+#[ra_jit::cache]
+fn exposed(n: u64) -> bool {
+    std::ptr::from_ref(&n).addr() > 0
+}
+
 #[inline(never)]
 fn unrelated() -> u64 {
     7
@@ -105,6 +112,7 @@ fn main() {
     println!("noisy {} {}", noisy(3), noisy(3));
     println!("addressed {} {}", addressed(4), addressed(4));
     println!("unrelated {}", unrelated());
+    println!("exposed {}", exposed(6));
 }
 """
 SLOW_BODY = """    let mut acc = 1;
@@ -134,6 +142,8 @@ REFUSED = {
     # What `format_args!` is lowered to has no place in the source, so neither has the call.
     "addressed": re.compile(r"`fcache::addressed` is not cached: it reaches .*, which calls `[^`]+`, which "
                             r"(formats an address|gives an address as a number)(, at src/main\.rs:\d+:\d+)?$"),
+    "exposed": re.compile(r"`fcache::exposed` is not cached: it calls `[^`]*\*const u64>::addr`, which gives an address "
+                          r"as a number, at src/main\.rs:\d+:\d+"),
 }
 
 
@@ -187,11 +197,12 @@ def main():
         assert build.returncode == 0, build.stderr[-2000:]
         return built(reference, "fcache")
 
-    wrong = 0
+    wrong = made = 0
 
     def verdict(what, ok, detail):
-        nonlocal wrong
+        nonlocal wrong, made
         wrong += not ok
+        made += 1
         print(f"{what:44} {'ok' if ok else 'WRONG':6} {detail}", flush=True)
 
     daemon = start()
@@ -244,7 +255,7 @@ def main():
         daemon.kill()
     entries = sum(len(files) for _, _, files in os.walk(store))
     print(f"{entries} results kept in {store}")
-    print(f"{len(STEPS) + 6 - wrong} of {len(STEPS) + 6} right; log {log_path}")
+    print(f"{made - wrong} of {made} right; log {log_path}")
     sys.exit(1 if wrong else 0)
 
 
