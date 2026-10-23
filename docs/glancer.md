@@ -358,7 +358,9 @@ store entry under the crate's Merkle key (`crates/ra-jit/src/frozen.rs`; the enc
 no salsa ids: a file is its crate's index and its path from the crate's root, a module of a
 block is its owner's body and the block's `AstId`, an interned id is its loc. A file outside the
 crate's directory, which a build script may have written, is named with a hash of its text, and
-bytes whose file changed are not read. `RA_JIT_FROZEN=check` resolves and finds as well and fails
+bytes whose file changed are not read. So is the file each `include!` reads: a second checkout
+of bevy read `crunchy`'s def map before the daemon had read the `OUT_DIR/lib.rs` it includes,
+and looking up its `macro_rules!` in the empty expansion panicked. `RA_JIT_FROZEN=check` resolves and finds as well and fails
 the build on any difference, `verify` writes what was read and fails the same way; on ripgrep's
 153 parts and hello's 78 both find none. The entries go through `ra_jit_store::Store` and so
 travel through the remote with the packs. On dev-aws-8, pinned to one socket's 96 cores, hello's
