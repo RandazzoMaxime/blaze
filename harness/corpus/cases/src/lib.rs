@@ -7828,3 +7828,73 @@ pub mod deep_send_cycle {
         (taken.len(), sent.len())
     }
 }
+
+/// Values built in the local a function returns, which code generation puts in the caller's
+/// destination: what the callee reads while building and what the caller keeps after a panic
+/// are not that memory.
+pub mod returned_in_place {
+    use std::panic::{self, AssertUnwindSafe};
+
+    #[derive(Debug, Clone, PartialEq)]
+    pub struct Big {
+        pub words: [u64; 6],
+        pub name: String,
+    }
+
+    #[inline(never)]
+    fn build(seed: u64) -> Big {
+        let mut big = Big { words: [seed; 6], name: String::new() };
+        for (at, word) in big.words.iter_mut().enumerate() {
+            *word = word.wrapping_mul(at as u64 + 3);
+        }
+        big.name.push_str("built");
+        big
+    }
+
+    /// `chain = next(&chain)` assigns through a temporary, so `from` is not the destination.
+    #[inline(never)]
+    fn next(from: &Big) -> Big {
+        let mut big = Big { words: [0; 6], name: String::from("next") };
+        for at in 0..6 {
+            big.words[at] = from.words[5 - at] + big.words[at.saturating_sub(1)];
+        }
+        big.name.push_str(&from.name);
+        big
+    }
+
+    #[inline(never)]
+    fn early(limit: u64) -> Big {
+        let mut big = build(limit);
+        for step in 0..10 {
+            if step == limit {
+                big.name.push('!');
+                return big;
+            }
+            big.words[step as usize % 6] += step;
+        }
+        big
+    }
+
+    #[inline(never)]
+    fn half(fail: bool) -> Big {
+        let mut big = build(9);
+        big.words[0] = 0;
+        big.name.clear();
+        if fail {
+            panic!("half built");
+        }
+        big
+    }
+
+    pub fn run() -> (Big, Big, Big, Big, bool, Big) {
+        let first = build(5);
+        let mut chain = build(2);
+        for _ in 0..3 {
+            chain = next(&chain);
+        }
+        let (stopped, ran) = (early(4), early(20));
+        let mut kept = build(1);
+        let caught = panic::catch_unwind(AssertUnwindSafe(|| kept = half(true))).is_err();
+        (first, chain, stopped, ran, caught, kept)
+    }
+}
