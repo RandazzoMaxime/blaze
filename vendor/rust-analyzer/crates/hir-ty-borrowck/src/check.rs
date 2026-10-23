@@ -116,6 +116,7 @@ pub(super) fn check<'db>(
         mut_errors: FxHashMap::default(),
         requirements: Vec::new(),
     };
+    let guard_borrows = guard_borrows(ctx, body);
     let tested_at = tested_at(ctx);
     let test_span = |span: MirSpan| match span {
         MirSpan::PatId(pat) => tested_at.get(&pat).map_or(span, |&it| MirSpan::ExprId(it)),
@@ -139,6 +140,16 @@ pub(super) fn check<'db>(
             };
             loans.before(&cfg, location, &mut checker.in_scope);
             checker.check_activations(location, span);
+            if let Some(guard) = guard_borrows.get(&it.span)
+                && let StatementKind::Assign(dest, rvalue) = &it.kind
+            {
+                match rvalue {
+                    Rvalue::Ref(BorrowKind::Mut { .. }, borrowed) => {
+                        checker.guard_conflict(guard, borrowed, false, span)
+                    }
+                    _ => checker.guard_conflict(guard, dest, true, span),
+                }
+            }
             checker.statement(location, &it.kind, span);
             apply(body, &moves, location, &mut checker.uninit, &mut checker.ever);
             loans.after(ctx, body, location, &mut checker.in_scope);
@@ -151,6 +162,11 @@ pub(super) fn check<'db>(
             };
             loans.before(&cfg, location, &mut checker.in_scope);
             checker.check_activations(location, span);
+            if let Some(guard) = guard_borrows.get(&terminator.span)
+                && let TerminatorKind::Call { destination, .. } = &terminator.kind
+            {
+                checker.guard_conflict(guard, destination, true, span);
+            }
             checker.terminator(location, &terminator.kind, span);
         }
     }
@@ -497,6 +513,39 @@ struct Checker<'a, 'b, 'db> {
 }
 
 impl<'a, 'db> Checker<'a, '_, 'db> {
+    /// A guard that assigns or mutably borrows what its `match` tests, or a place it is in,
+    /// could change which arm matches (E0510); one that touches what its arm binds by value
+    /// conflicts with the shared reference it sees that through.
+    fn guard_conflict(&mut self, guard: &Guard, place: &StoredPlace, assign: bool, span: MirSpan) {
+        let projection = place.projection.as_slice();
+        let local = place.local;
+        let what = self.quoted(PlaceRef { local, projection }, "value");
+        if guard.tested.iter().any(|(it, fake)| *it == local && fake.starts_with(projection)) {
+            let message = match assign {
+                true => format!("cannot assign {what} in match guard"),
+                false => format!("cannot mutably borrow {what} in match guard"),
+            };
+            self.report("E0510", span, message);
+        } else if guard.bound.iter().any(|(it, bound)| {
+            *it == local && (bound.starts_with(projection) || projection.starts_with(bound))
+        }) {
+            match assign {
+                true => self.report(
+                    "E0506",
+                    span,
+                    format!("cannot assign to {what} because it is borrowed"),
+                ),
+                false => self.report(
+                    "E0502",
+                    span,
+                    format!(
+                        "cannot borrow {what} as mutable because it is also borrowed as immutable"
+                    ),
+                ),
+            }
+        }
+    }
+
     fn report(&mut self, code: &'static str, span: MirSpan, message: String) {
         self.errors.push(Some(BorrowckDiagnostic { code, span, message, at_signature: false }));
     }
@@ -2334,6 +2383,137 @@ impl<'a, 'db> Checker<'a, '_, 'db> {
             }
         }
     }
+}
+
+/// What a `match` arm's guard must leave alone: the places the `match` tests and the
+/// references they are behind, which rustc fake-borrows shallowly through every guard, and
+/// what the arm binds by value, which a guard sees through shared references.
+#[derive(Default)]
+struct Guard {
+    tested: Vec<(LocalId, Vec<PlaceElem>)>,
+    bound: Vec<(LocalId, Vec<PlaceElem>)>,
+}
+
+/// The [`Guard`] of each expression and pattern in a `match` arm's guard.
+fn guard_borrows(ctx: &Ctx<'_, '_>, body: &MirBody<'_>) -> FxHashMap<MirSpan, std::rc::Rc<Guard>> {
+    use hir_def::hir::Expr;
+    let mut tested_by = FxHashMap::default();
+    let mut bound_by = FxHashMap::default();
+    let mut matches = Vec::new();
+    let mut arms_of = Vec::new();
+    for (_, expr) in ctx.store.exprs() {
+        let Expr::Match { arms, .. } = expr else { continue };
+        if arms.iter().all(|arm| arm.guard.is_none()) {
+            continue;
+        }
+        let mut guarded = Vec::new();
+        for arm in arms.iter() {
+            ctx.store.walk_pats(arm.pat, &mut |pat| {
+                tested_by.insert(pat, matches.len());
+                if matches!(ctx.store[pat], Pat::Bind { .. }) {
+                    bound_by.insert(pat, (matches.len(), arm.guard.map(|_| arms_of.len())));
+                }
+            });
+            if let Some(guard) = arm.guard {
+                guarded.push((arms_of.len(), guard));
+                arms_of.push(Vec::new());
+            }
+        }
+        matches.push((Vec::new(), guarded));
+    }
+    let mut out = FxHashMap::default();
+    if matches.is_empty() {
+        return out;
+    }
+    let add = |set: &mut Vec<(LocalId, Vec<PlaceElem>)>, local, projection: &[PlaceElem]| {
+        if !set.iter().any(|(it, other)| *it == local && other == projection) {
+            set.push((local, projection.to_vec()));
+        }
+    };
+    for (_, block) in body.basic_blocks.iter() {
+        for statement in &block.statements {
+            let MirSpan::PatId(pat) = statement.span else { continue };
+            let StatementKind::Assign(_, rvalue) = &statement.kind else { continue };
+            if let Some(&(index, arm)) = bound_by.get(&pat) {
+                let source = match rvalue {
+                    Rvalue::Use(Operand {
+                        kind: OperandKind::Copy(place) | OperandKind::Move(place),
+                        ..
+                    }) => Some((place, true)),
+                    Rvalue::Ref(_, place) => Some((place, false)),
+                    _ => None,
+                };
+                if let Some((place, by_value)) = source {
+                    let projection = place.projection.as_slice();
+                    for (len, elem) in projection.iter().enumerate() {
+                        if let ProjectionElem::Deref = elem {
+                            add(&mut matches[index].0, place.local, &projection[..len]);
+                        }
+                    }
+                    if let Some(arm) = arm
+                        && by_value
+                    {
+                        add(&mut arms_of[arm], place.local, projection);
+                    }
+                }
+                continue;
+            }
+            let Some(&index) = tested_by.get(&pat) else { continue };
+            let tested: Vec<&StoredPlace> = match rvalue {
+                Rvalue::Discriminant(place) | Rvalue::Len(place) => vec![place],
+                Rvalue::CheckedBinaryOp(_, a, b) => [a, b]
+                    .into_iter()
+                    .filter_map(|operand| match &operand.kind {
+                        OperandKind::Copy(place) => Some(place),
+                        _ => None,
+                    })
+                    .collect(),
+                _ => continue,
+            };
+            let set = &mut matches[index].0;
+            for place in tested {
+                let projection = place.projection.as_slice();
+                add(set, place.local, projection);
+                for (len, elem) in projection.iter().enumerate() {
+                    if let ProjectionElem::Deref = elem {
+                        add(set, place.local, &projection[..len]);
+                    }
+                }
+            }
+        }
+    }
+    for (tested, guarded) in matches {
+        for (arm, guard) in guarded {
+            let bound = std::mem::take(&mut arms_of[arm]);
+            if tested.is_empty() && bound.is_empty() {
+                continue;
+            }
+            let it = std::rc::Rc::new(Guard { tested: tested.clone(), bound });
+            let mut stack = vec![guard];
+            while let Some(expr) = stack.pop() {
+                out.insert(MirSpan::ExprId(expr), it.clone());
+                let mut pats = Vec::new();
+                match &ctx.store[expr] {
+                    Expr::Match { arms, .. } => pats.extend(arms.iter().map(|arm| arm.pat)),
+                    Expr::Let { pat, .. } => pats.push(*pat),
+                    Expr::Block { statements, .. } => {
+                        pats.extend(statements.iter().filter_map(|statement| match statement {
+                            Statement::Let { pat, .. } => Some(*pat),
+                            _ => None,
+                        }))
+                    }
+                    _ => {}
+                }
+                for pat in pats {
+                    ctx.store.walk_pats(pat, &mut |pat| {
+                        out.insert(MirSpan::PatId(pat), it.clone());
+                    });
+                }
+                ctx.store.walk_child_exprs(expr, |it| stack.push(it));
+            }
+        }
+    }
+    out
 }
 
 fn capture_temps(body: &MirBody<'_>) -> FxHashMap<LocalId, MirSpan> {
