@@ -432,6 +432,15 @@ enum PassMode {
         offset: Size,
         spilled: [Option<bool>; 2],
     },
+    /// A `Pair` with a 128-bit integer half that AAPCS64 puts on the stack while integer
+    /// registers are left: `skipped[i]` integer registers go unused before half `i`, which
+    /// the convention takes out of use (see `wide_ints_after_registers`).
+    SkippingPair {
+        a: AbiScalar,
+        b: AbiScalar,
+        offset: Size,
+        skipped: [u8; 2],
+    },
 }
 
 impl PassMode {
@@ -479,6 +488,34 @@ pub(crate) fn lone_register_i128(params: &[AbiParam]) -> Option<(usize, u32)> {
             ints += 1;
         } else {
             stack += 8;
+        }
+    }
+    None
+}
+
+/// The first 128-bit integer parameter that AAPCS64 puts on the stack while an integer
+/// register is still free, and how many are, as Cranelift places the parameters: such an
+/// integer starts at a register that is a multiple of `even` (2, or 1 on Apple's platforms).
+/// The convention takes the registers that are left out of use, as LLVM (so rustc) does, but
+/// Cranelift gives them to the integer parameters after it, so the two place those
+/// differently.
+pub(crate) fn stranded_i128(params: &[AbiParam], even: usize) -> Option<(usize, u8)> {
+    const REGS: usize = 8;
+    let mut ints = 0;
+    for (at, param) in params.iter().enumerate() {
+        let ty = param.value_type;
+        if param.purpose == ArgumentPurpose::StructReturn || ty.is_float() || ty.is_vector() {
+            continue;
+        }
+        if ty == types::I128 {
+            let start = ints + ints % even;
+            if start + 2 <= REGS {
+                ints = start + 2;
+            } else if ints < REGS {
+                return Some((at, (REGS - ints) as u8));
+            }
+        } else if ints < REGS {
+            ints += 1;
         }
     }
     None
@@ -7191,6 +7228,7 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
                 .collect::<Result<_>>()?;
             let mut abi = FnAbi { ret, args };
             self.wide_ints_on_stack(&mut abi)?;
+            self.wide_ints_after_registers(&mut abi)?;
             return Ok(abi);
         }
         if self.cg.target.call_conv == isa::CallConv::WindowsFastcall {
@@ -7269,6 +7307,47 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
         Ok(())
     }
 
+    /// Has the integer registers that a 128-bit integer going to the stack leaves go unused.
+    ///
+    /// By AAPCS64 such an integer takes every integer register that is left out of use, and
+    /// LLVM (so rustc) does so, where Cranelift gives them to the integer arguments after it.
+    /// Passed to nobody first, they are where neither backend puts anything else.
+    fn wide_ints_after_registers(&self, abi: &mut FnAbi) -> Result<()> {
+        let target = &self.cg.target;
+        if target.arch != Arch::Aarch64 {
+            return Ok(());
+        }
+        let even = if target.call_conv == isa::CallConv::AppleAarch64 { 1 } else { 2 };
+        while let Some((at, skipped)) =
+            stranded_i128(&self.signature(&abi.args, abi.ret).params, even)
+        {
+            let mut first = usize::from(matches!(abi.ret, PassMode::Indirect));
+            let arg = abi
+                .args
+                .iter()
+                .position(|&mode| {
+                    let mut these = Vec::new();
+                    self.push_abi_params(mode, &mut these);
+                    if first + these.len() > at {
+                        return true;
+                    }
+                    first += these.len();
+                    false
+                })
+                .expect("every parameter comes from an argument");
+            abi.args[arg] = match abi.args[arg] {
+                PassMode::Direct(_) => PassMode::Uniform { unit: types::I128, count: 1, skipped },
+                PassMode::Pair(a, b, offset) => {
+                    let mut gaps = [0; 2];
+                    gaps[usize::from(at > first)] = skipped;
+                    PassMode::SkippingPair { a, b, offset, skipped: gaps }
+                }
+                mode => unreachable!("a 128-bit integer passed as {mode:?}"),
+            };
+        }
+        Ok(())
+    }
+
     /// The C convention of the System V x86-64 psABI, as rustc's `callconv/x86_64.rs` has it.
     fn sysv_x86_64_abi(
         &self,
@@ -7303,6 +7382,7 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
                 PassMode::CastPair(a, b) => self.count_regs(&[a, b]),
                 PassMode::Uniform { .. } => unreachable!("x86-64 has no uniform aggregate"),
                 PassMode::SpilledPair { .. } => unreachable!("only the stack spills a pair"),
+                PassMode::SkippingPair { .. } => unreachable!("only AAPCS64 skips registers"),
             };
             let aggregate = matches!(mode, PassMode::Cast(_) | PassMode::CastPair(..));
             let in_registers = match (int_regs.checked_sub(ints), sse_regs.checked_sub(sses)) {
@@ -7758,6 +7838,12 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
                     }
                 }
             }
+            PassMode::SkippingPair { a, b, skipped, .. } => {
+                for (half, skipped) in [a, b].into_iter().zip(skipped) {
+                    params.extend((0..skipped).map(|_| AbiParam::new(types::I64)));
+                    params.push(half.param());
+                }
+            }
         }
     }
 
@@ -7851,6 +7937,14 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
                     }
                 }
             }
+            PassMode::SkippingPair { a, b, offset, skipped } => {
+                for (half, at, skipped) in [(a, 0, skipped[0]), (b, offset.bytes(), skipped[1])] {
+                    for _ in 0..skipped {
+                        values.push(self.zero(types::I64));
+                    }
+                    values.push(self.builder.ins().load(half.ty, MEM, addr, at as i32));
+                }
+            }
         }
     }
 
@@ -7908,6 +8002,15 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
                             self.builder.ins().load(half.ty, MEM, copy, 0)
                         }
                     };
+                    self.builder.ins().store(MEM, value, addr, at as i32);
+                }
+            }
+            PassMode::SkippingPair { offset, skipped, .. } => {
+                for (at, skipped) in [(0, skipped[0]), (offset.bytes(), skipped[1])] {
+                    for _ in 0..skipped {
+                        next();
+                    }
+                    let value = next();
                     self.builder.ins().store(MEM, value, addr, at as i32);
                 }
             }
@@ -12132,6 +12235,10 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
             PassMode::SpilledPair { spilled, .. } => {
                 spilled.iter().map(|it| it.map_or(1, |padded| 1 + usize::from(padded))).sum()
             }
+            PassMode::SkippingPair { skipped, .. } => {
+                2 + skipped.iter().map(|&it| usize::from(it)).sum::<usize>()
+            }
+            PassMode::Uniform { count, skipped, .. } => usize::from(count) + usize::from(skipped),
             _ => 1,
         };
         let mut sig = sig.clone();
