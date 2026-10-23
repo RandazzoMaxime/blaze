@@ -257,9 +257,11 @@ All of these are rustc's, written from `compiler/rustc_borrowck` at the pinned n
 - Where errors are: at the expression rustc points to. A borrow `format_args!` (so
   `println!`, `format!`, `write!`) makes of an argument has no syntax of its own, so its
   errors are at the argument, or for a variable the template names (`"{x}"`) at the
-  template. An error in an expression a macro writes (`&$e`) is at the macro's definition
+  template; one at what else it lowers to, as its call of `Arguments::new`, is at the macro
+  call. An error in an expression a macro writes (`&$e`) is at the macro's definition
   when it is in the same file, as rustc reports it there; one in what the caller wrote is at
-  the caller's.
+  the caller's. A variable a macro of another crate declares, as `pin!`'s, is a temporary in
+  the messages, as rustc's `describe_place` leaves it unnamed (E0716, not E0597).
 - `unused_mut` ("variable does not need to be mutable"), a warning: a binding declared `mut`
   that no assignment or mutable borrow needs the `mut` of, as rustc's `used_mut`. A closure
   needs the `mut` of a captured variable when its body mutates it, and a name that starts
@@ -284,8 +286,8 @@ With no borrow checker, the 245 units rustc accepts would pass. Now:
 
 | Mode | In scope | Pass | rustc accepts, ra-jit too | rustc rejects, same errors |
 |---|---|---|---|---|
-| Polonius | 1579 | 1506 (95.4%) | 245 of 245 | 1261 of 1334 |
-| NLL | 1577 | 1502 (95.2%) | 226 of 226 | 1276 of 1351 |
+| Polonius | 1579 | 1509 (95.6%) | 245 of 245 | 1264 of 1334 |
+| NLL | 1577 | 1505 (95.4%) | 226 of 226 | 1279 of 1351 |
 
 463 units are out of scope; 344 of them need a nightly feature. CI runs the scoring on Linux
 and fails below a floor a few units under the count there.
@@ -300,8 +302,8 @@ just, axum, nushell, delta, eza, tokei and starship it finds nothing, nor on the
 Every failing unit is one where rustc gives an error ra-jit does not, or gives it on another
 line or with another code. By what is wrong, most first: 10 "lifetime may not live long
 enough" not reported, 6 on another line or with another code, 2 with only an error rustc does
-not give, 7 of E0597 not reported, 6 of E0309, and 5 each of E0716, E0311, E0507, E0310 and
-higher-ranked errors not reported, then a long tail. The causes, grouped:
+not give, 7 of E0597 not reported, 6 of E0309, 5 each of E0311, E0507, E0310 and
+higher-ranked errors and 4 of E0716 not reported, then a long tail. The causes, grouped:
 
 - **Higher-ranked regions and placeholders** (`for<'a>` bounds, closures with higher-ranked
   signatures): rustc checks them with placeholders in universes; ra-jit does not yet, and
@@ -349,6 +351,11 @@ changes to rust-analyzer were needed, each made as rustc does it:
 - A `let`'s temporaries borrowed in a tuple struct's or variant's constructor arguments
   (`let x = Some(&temp());`, `Self(&temp())`) live as long as the variable, as in rustc since
   1.89; through a constructor held in a variable they are still the statement's.
+- The `super let`s of `format_args!` and `pin!` extend the temporaries of their initializers
+  only when a `let` extends the block they are in (rust-lang/rust#145784); otherwise what they
+  bind lives as long as the temporaries of the expression the block is in, so
+  `identity(pin!(x))` kept past its statement, and `println!("{:?}", { &temp() })` from 2024
+  on, are E0716.
 - A function item or a tuple struct's or variant's constructor written as a value
   (`let f = foo::<T>;`) is assigned to where it goes, though zero sized, so a closure that
   captures `f` or a method that takes it by value does not read it uninitialized (E0381).
