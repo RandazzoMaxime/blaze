@@ -80,7 +80,7 @@ fn key_of(
         hasher.update((bytes.len() as u64).to_le_bytes());
         hasher.update(bytes);
     };
-    field(b"ra-jit frozen def map 3");
+    field(b"ra-jit frozen def map 4");
     field(source.as_bytes());
     field(format!("{:?} {:?} {:?}", data.edition, data.target_kind, data.crate_attrs).as_bytes());
     let mut cfgs: Vec<String> =

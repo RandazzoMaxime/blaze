@@ -100,8 +100,8 @@ const BORROWCK_CODES: &[&str] = &[
 ];
 
 /// `ra-jit borrowck --project DIR`: the borrow checker's errors in the crates of the cargo
-/// workspace at `DIR`, one JSON object per line, and a last line counting files, errors and
-/// `unused_mut` warnings.
+/// workspace at `DIR`, one JSON object per line, and a last line counting files, errors,
+/// `unused_mut` warnings and files the checker panicked on, which fail it.
 fn check_project(project: &str) -> anyhow::Result<()> {
     let root = AbsPathBuf::assert_utf8(dunce::canonicalize(project)?);
     let cargo_config = CargoConfig {
@@ -138,6 +138,7 @@ fn check_project(project: &str) -> anyhow::Result<()> {
     let stdout = std::io::stdout();
     let mut errors = 0;
     let mut unused_mut = 0;
+    let mut panics = 0;
     for &file in &files {
         if let Ok(name) = std::env::var("RA_JIT_BORROWCK_MIR") {
             dump_mir(&db, file, &name);
@@ -163,6 +164,7 @@ fn check_project(project: &str) -> anyhow::Result<()> {
                 }
             }
             Err(panic) => {
+                panics += 1;
                 let panic = crate::panic_message(&*panic);
                 writeln!(stdout, "{}", serde_json::json!({ "path": path, "panic": panic }))?;
             }
@@ -176,9 +178,16 @@ fn check_project(project: &str) -> anyhow::Result<()> {
             "files": files.len(),
             "errors": errors,
             "unused_mut": unused_mut,
+            "panics": panics,
             "secs": secs
         })
     )?;
+    // A file the checker panics on has none of its errors reported.
+    anyhow::ensure!(
+        panics == 0,
+        "the borrow checker panicked on {panics} of {} files",
+        files.len()
+    );
     Ok(())
 }
 
@@ -194,9 +203,22 @@ fn dump_mir(db: &RootDatabase, file: vfs::FileId, name: &str) {
                 && function.name(db).as_str() == name
             {
                 let Ok(id) = hir_def::FunctionId::try_from(function) else { continue };
-                match db.mir_body(hir_ty::InferBodyId::DefWithBodyId(id.into())) {
-                    Ok(body) => eprintln!("{}", hir_ty::mir::print_mir_body(db, body, name)),
-                    Err(err) => eprintln!("{name}: {err:?}"),
+                let mut bodies = match db.mir_body(hir_ty::InferBodyId::DefWithBodyId(id.into())) {
+                    Ok(body) => vec![body],
+                    Err(err) => {
+                        eprintln!("{name}: {err:?}");
+                        continue;
+                    }
+                };
+                // The closures after it, as the borrow checker checks them with it.
+                while let Some(body) = bodies.pop() {
+                    eprintln!("{}", hir_ty::mir::print_mir_body(db, body, name));
+                    for &closure in &body.closures {
+                        match db.mir_body_for_closure(closure) {
+                            Ok(it) => bodies.push(it),
+                            Err(err) => eprintln!("{name} closure: {err:?}"),
+                        }
+                    }
                 }
             }
         }

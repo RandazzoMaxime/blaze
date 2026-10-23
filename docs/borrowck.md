@@ -119,7 +119,8 @@ All of these are rustc's, written from `compiler/rustc_borrowck` at the pinned n
   In a `const` or `static` item's value, a call of a `const fn` is promotable too
   (`Migrations::new(&[Migration::new("a")])`), as it is in rustc's const contexts, a method
   call and a block of items and a tail included: tracing's `fieldset!` names a field
-  `{ const NAME: FieldName<..> = ..; NAME.as_str() }` in a `static`.
+  `{ const NAME: FieldName<..> = ..; NAME.as_str() }` in a `static`. A closure that captures
+  nothing is an aggregate of constants, promoted as rustc promotes it (`unwrap_or(&|_| true)`).
 - Region inference: liveness of locals (drops kept live only back to where the local may be
   initialized; what a drop uses as rustc's dropck: an associated type as what it normalizes
   to, another alias what its bounds and captures leave, all its arguments under a binder of
@@ -185,14 +186,17 @@ All of these are rustc's, written from `compiler/rustc_borrowck` at the pinned n
   (`ref m` in a `match` on a temporary) is at the temporary, as rustc reports it. An expression statement's value is not read once
   its temporaries are dropped, so `&temp();` alone is no E0716, as in rustc. A temporary
   borrowed mutably through a field (`&mut (1, 2).0`) is not promoted, as rustc's
-  `promote_consts`.
+  `promote_consts`. On an unwind path the drop of a local with no drop glue ends nothing,
+  as rustc's cleanup blocks drop only what has glue and end no storage: a counter declared
+  after the callbacks that borrow it stays borrowed while a panic drops them.
 - `impl Trait` captures: a return-position `impl Trait` keeps alive and relates only the
   lifetimes it captures, those listed in `use<..>` or, before edition 2024 outside traits and
   `async fn`, those its bounds name; its type parameters are always captured.
 - `impl Trait`'s hidden type: each of its regions must be `'static` or one of the lifetimes
   the `impl Trait` captures (rustc's member constraints), else E0700 at the signature; and it
   must outlive what the bounds say (`impl Copy + 'a`). The same holds of an `impl Trait` an
-  `async fn` declares it returns, the future's output, in the body that makes the future,
+  `async fn` declares it returns, the future's output (whose hidden type's lifetimes are the
+  member constraints' to choose, not those type inference unified), in the body that makes the future,
   with the errors at the function's block as rustc's; only the future captures every
   lifetime. A C variadic's `VaList` lifetime is never captured. A trait object in the hidden
   type has its lifetime inferred, and a borrowed capture of a closure or `async` block
@@ -291,16 +295,18 @@ With no borrow checker, the 245 units rustc accepts would pass. Now:
 
 | Mode | In scope | Pass | rustc accepts, ra-jit too | rustc rejects, same errors |
 |---|---|---|---|---|
-| Polonius | 1579 | 1511 (95.7%) | 245 of 245 | 1266 of 1334 |
-| NLL | 1577 | 1507 (95.6%) | 226 of 226 | 1281 of 1351 |
+| Polonius | 1580 | 1511 (95.6%) | 245 of 245 | 1266 of 1335 |
+| NLL | 1578 | 1507 (95.5%) | 226 of 226 | 1281 of 1352 |
 
-463 units are out of scope; 344 of them need a nightly feature. CI runs the scoring on Linux
-and fails below a floor a few units under the count there.
+461 units are out of scope; 344 of them need a nightly feature. CI runs the scoring on Linux
+and fails below a floor a few units under the count there, on any error in a unit rustc
+accepts, and on any unit the checker panics on, as a panic hides every error in its file.
 
 The other check is that it finds nothing in code rustc accepts.
 `ra-jit borrowck --project DIR` checks a cargo workspace; on ripgrep, fd, bat, hyperfine,
-just, axum, nushell, delta, eza, tokei and starship it finds nothing, nor on the harness's
-`corpus` and `mixfutures` crates.
+just, axum, nushell, delta, eza, tokei, starship and cargo it finds nothing, nor on the
+harness's `corpus` and `mixfutures` crates, which CI checks too. Its last line counts the
+files, errors and files it panicked on; a panic makes it fail.
 
 ## What is left
 
@@ -392,7 +398,10 @@ changes to rust-analyzer were needed, each made as rustc does it:
 - Type lowering gives a trait object written without a lifetime, as a type argument, the
   lifetime of its parameter's one outlives bound (`hir-ty/src/generics.rs`,
   `object_lifetime_default`, RFC 599): `Ref<'x, dyn Trait>` with `T: 'a + ?Sized` on `Ref`
-  is `dyn Trait + 'x`, not `'static`.
+  is `dyn Trait + 'x`, not `'static`. In an impl header, a trait object behind a reference
+  whose lifetime is elided has that lifetime too (`hir-ty/src/lower.rs`, `impl_header`), as
+  rustc makes both one fresh parameter of the impl: rusqlite's `impl Params for
+  &[&dyn ToSql]` holds for `params![id, name]` of locals.
 - Type inference takes an inline `asm!` output as a place written, as rustc's
   `check_expr_asm_operand` does, so `out(reg) v[0]` indexes with `IndexMut` and needs `v`
   mutable (E0596).
@@ -426,6 +435,8 @@ rough.
 ## Debugging
 
 - `echo file.rs | ra-jit borrowck --edition 2021` prints a file's diagnostics as JSON.
-- `RA_JIT_BORROWCK_MIR=<function>` with that command prints the MIR of a top-level function.
+- `RA_JIT_BORROWCK_MIR=<function>` with that command, or with `--project`, prints the MIR
+  of a top-level function and its closures.
 - `RA_JIT_BORROWCK_DEBUG=1` prints each body's locals, universal regions, constraints and
-  loans.
+  loans; `RA_JIT_BORROWCK_DEBUG=<function>` only those of that function and its closures,
+  which a project needs.

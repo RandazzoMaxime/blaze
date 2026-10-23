@@ -207,7 +207,8 @@ has for the same program. The rules for a change to the splice:
    program: then say so where it is checked.
 2. A constant room (`Patch::ROOM`, the `ROOM` of `splice/debug.rs`, the 64 MB of
    `Image::tail`) says where something goes first, so that the next splice finds it in the same
-   place. It never decides whether something fits: past it, what is behind moves.
+   place. It never decides whether something fits: past it, what is behind moves (a debug
+   section, what outgrew its room, to behind every other).
 3. What a debugger reads is never a reason to link in full. When it can't be written, the
    patch's code has no lines, and the program's are where they were.
 4. A new size limit, or a new layout for one, gets a step in `harness/bigbinary.py`, which runs
