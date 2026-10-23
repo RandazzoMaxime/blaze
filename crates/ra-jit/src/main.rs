@@ -7004,12 +7004,16 @@ fn run_holding(
     }
     if let Some(asked) = doc {
         let krate = *crates_named(&db, &args.krate, &args)?.first().context("no such crate")?;
-        known.used_by_rustc = true;
-        let built = build_unheld(&db, &table, &args, &mut known, &listed)?;
-        eprint!("doctests: ");
-        report(&built);
-        doctest::document(&mut db, krate);
-        let code = doctest::run(&db, asked, krate, &args.out, emits.triple())?;
+        let workspace = checkouts.loaded.workspaces().first();
+        let sysroot: Option<PathBuf> =
+            workspace.and_then(|it| it.sysroot.root()).map(|it| AsRef::<Path>::as_ref(it).into());
+        let building = doctest::Building {
+            table: &table,
+            args: &args,
+            listed: &listed,
+            sysroot: sysroot.as_deref(),
+        };
+        let code = doctest::run(&mut db, &building, asked, krate, emits.triple())?;
         ra_jit_store::settled();
         std::process::exit(code);
     }
@@ -8074,10 +8078,12 @@ fn run_holding(
                     let (done, sender) = (done.clone(), sender.clone());
                     let krate = program.args.krate.clone();
                     std::thread::spawn(move || {
+                        let over = || memory::held_by(std::process::id()).filter(|&it| it > budget);
                         while !done.load(Ordering::SeqCst) {
-                            if let Some(held) =
-                                memory::held_by(std::process::id()).filter(|&it| it > budget)
-                            {
+                            if over().is_some() {
+                                memory::give_back();
+                            }
+                            if let Some(held) = over() {
                                 eprintln!(
                                     "not compiling the program for edits to patch any more: it holds {} MB, more than the {} MB it may (RA_JIT_OWN_BASE_MEMORY), and edits go on patching what rustc linked: {krate}",
                                     held >> 20,

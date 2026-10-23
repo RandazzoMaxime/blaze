@@ -177,7 +177,7 @@ def main():
                CARGO_TERM_COLOR="never", RUST_BACKTRACE="0", CARGO_NET_OFFLINE="true")
     if os.environ.get("RA_JIT_BACKEND"):
         env["RA_JIT_BACKEND"] = os.environ["RA_JIT_BACKEND"]
-    found = {}
+    found, failed = {}, []
     try:
         for scenario, steps in SCENARIOS:
             began = len(open(log).read().splitlines())
@@ -193,6 +193,8 @@ def main():
                 settle(log)
                 said = (ran.stderr.strip().splitlines() or [""])[-1][:100]
                 print(f"  {scenario}: {step}: exit {ran.returncode}  {said}", flush=True)
+                if scenario == "doctests" and ran.returncode != 0:
+                    failed.append(f"{scenario}: {step}: {said}")
             lines = open(log).read().splitlines()[began:]
             runs, questions = counts(lines)
             found[scenario] = {"rustc": runs["rustc"], "rustdoc": runs["rustdoc"]}
@@ -229,8 +231,13 @@ def main():
         print(f"lower: {line}; norustc.py --record lowers the baseline")
     for line in risen:
         print(f"RISEN: {line}")
+    for line in failed:
+        print(f"FAILED: {line}")
     if risen and not record:
         print("ra-jit runs rustc more than it did: docs/no-rustc.md says why that is refused")
+        sys.exit(1)
+    if failed:
+        print("the fixture's doctests failed: they pass under rustdoc")
         sys.exit(1)
 
 

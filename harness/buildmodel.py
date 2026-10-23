@@ -429,11 +429,11 @@ class Case:
         if want[:2] != got[:2]:
             lines = [f"cargo's `{w}`, ra-jit's `{g}`" for w, g in zip(want[1], got[1]) if w != g]
             raise Wrong((lines[0] if lines else f"cargo's ends with {want[0]} after {len(want[1])} lines, ra-jit's with {got[0]} after {len(got[1])}")[:300])
-        built = re.findall(r"doctests: compiled (\d+) of (\d+) fns", got[2])
+        built = re.findall(r"doctests: (\d+) built by ra-jit, (\d+) by rustc", got[2])
         if not built:
             raise Wrong("ra-jit did not say what it built for the doctests")
         tests = sum(l.startswith("test ") and not l.startswith("test result") for l in want[1])
-        return ("supported", f"{tests} doctests the same, {sum(int(n) for n, _ in built)} of {sum(int(n) for _, n in built)} functions of the library", [])
+        return ("supported", f"{tests} doctests the same, {sum(int(n) for n, _ in built)} built by ra-jit, {sum(int(n) for _, n in built)} by rustc", [])
 
     def row(self):
         """The case's line of the table."""

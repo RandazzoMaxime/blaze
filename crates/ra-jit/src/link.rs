@@ -26,42 +26,65 @@ pub(crate) fn executable(
     sysroot: Option<&Path>,
     exe: &Path,
 ) -> anyhow::Result<Duration> {
-    let Some(&first) = program.first() else { bail!("nothing to link") };
-    let target = Target::of(db, first.into());
-    let mut cmd = Command::new("cc");
-    if !target.apple
-        && let Some(gcc_ld) = sysroot.and_then(lld_dir)
-    {
-        cmd.arg(format!("-B{}", gcc_ld.display())).arg("-fuse-ld=lld");
-    }
-    cmd.args(target.leading());
-    for &object in objects {
-        if split::is_archive(&leading_bytes(object)?) {
-            cmd.arg("-Wl,--whole-archive").arg(object).arg("-Wl,--no-whole-archive");
-        } else {
-            cmd.arg(object);
+    Line::of(db, program, sysroot)?.link(objects, exe)
+}
+
+/// The arguments `cc` links the program of some crates with, around its objects.
+pub(crate) struct Line {
+    before: Vec<String>,
+    after: Vec<String>,
+}
+
+impl Line {
+    pub(crate) fn of(
+        db: &RootDatabase,
+        program: &[Crate],
+        sysroot: Option<&Path>,
+    ) -> anyhow::Result<Line> {
+        let Some(&first) = program.first() else { bail!("nothing to link") };
+        let target = Target::of(db, first.into());
+        let mut before = Vec::new();
+        if !target.apple
+            && let Some(gcc_ld) = sysroot.and_then(lld_dir)
+        {
+            before.extend([format!("-B{}", gcc_ld.display()), "-fuse-ld=lld".to_owned()]);
         }
+        before.extend(target.leading());
+        let native = native(db, program, &target);
+        let mut after = native.search;
+        for lib in &native.libs {
+            after.extend(target.lib(lib));
+        }
+        after.extend(native.args);
+        after.extend(target.trailing());
+        Ok(Line { before, after })
     }
-    let native = native(db, program, &target);
-    cmd.args(&native.search);
-    for lib in &native.libs {
-        cmd.args(target.lib(lib));
+
+    /// Links `objects` into the executable `exe`. How long `cc` took.
+    pub(crate) fn link(&self, objects: &[&Path], exe: &Path) -> anyhow::Result<Duration> {
+        let mut cmd = Command::new("cc");
+        cmd.args(&self.before);
+        for &object in objects {
+            if split::is_archive(&leading_bytes(object)?) {
+                cmd.arg("-Wl,--whole-archive").arg(object).arg("-Wl,--no-whole-archive");
+            } else {
+                cmd.arg(object);
+            }
+        }
+        cmd.args(&self.after).arg("-o").arg(exe);
+        let start = Instant::now();
+        let ran = cmd.output().with_context(|| format!("running {cmd:?}"))?;
+        if !ran.status.success() {
+            bail!(
+                "the link of {} failed ({}):\n{:?}\n{}",
+                exe.display(),
+                ran.status,
+                cmd,
+                String::from_utf8_lossy(&ran.stderr)
+            );
+        }
+        Ok(start.elapsed())
     }
-    cmd.args(&native.args);
-    cmd.args(target.trailing());
-    cmd.arg("-o").arg(exe);
-    let start = Instant::now();
-    let ran = cmd.output().with_context(|| format!("running {cmd:?}"))?;
-    if !ran.status.success() {
-        bail!(
-            "the link of {} failed ({}):\n{:?}\n{}",
-            exe.display(),
-            ran.status,
-            cmd,
-            String::from_utf8_lossy(&ran.stderr)
-        );
-    }
-    Ok(start.elapsed())
 }
 
 /// The first bytes of the file at `path`, which tell an archive from an object.

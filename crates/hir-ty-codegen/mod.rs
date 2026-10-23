@@ -5244,7 +5244,18 @@ impl<'a, 'db> ObjectCodegen<'a, 'db> {
     /// function of another compiles a copy with its own.
     fn as_its_crate_compiles(&self, instance: &Instance) -> bool {
         let InstanceDef::Fn(func) = instance.def else { return false };
-        crate_checks_overflow(self.db, func.krate(self.db)).is_none_or(|it| it == instance.checked)
+        match crate_checks_overflow(self.db, func.krate(self.db)) {
+            Some(written_with) => written_with == instance.checked,
+            // The standard library is built without the checks. rustc compiles an `#[inline]`
+            // function of it in each crate that calls it, where what it calls that takes the
+            // checks from its caller (`#[rustc_inherit_overflow_checks]`) has that crate's:
+            // the copy ra-jit's build of the standard library exports has none.
+            None => {
+                !instance.checked
+                    || !self.symbols.nothing_of_rustc()
+                    || !AttrFlags::query(self.db, func.into()).contains(AttrFlags::IS_INLINE)
+            }
+        }
     }
 
     /// The instance as the crate rustc had compile it does: `instance` is as the crate that
@@ -6583,6 +6594,8 @@ struct Relocations<'a, 'db> {
     map: &'a MemoryMap<'db>,
     in_static: bool,
     defined: FxHashMap<usize, DataId>,
+    /// The allocations [`FunctionCx::relocate_data_pointer`] is in the middle of, by start.
+    walking: Vec<usize>,
 }
 
 impl Relocations<'_, '_> {
@@ -9322,7 +9335,12 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
             fn_relocs: Vec::new(),
             align: layout.align.abi.bytes(),
         };
-        let mut map = Relocations { map: memory_map, in_static, defined: FxHashMap::default() };
+        let mut map = Relocations {
+            map: memory_map,
+            in_static,
+            defined: FxHashMap::default(),
+            walking: Vec::new(),
+        };
         self.relocate(&mut blob, 0, *ty, &mut map)?;
         Ok(blob)
     }
@@ -9595,16 +9613,21 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
                     align: map.align_of(start),
                 };
                 // What the allocation is of is not known here, so as in a union, every word
-                // of it that is the address of something const eval kept is taken to be one.
+                // of it that is the address of something const eval kept is taken to be one,
+                // but one of an allocation being walked: what const eval made of a constant
+                // points in no circle (a static is named, not walked), so that word is a
+                // number, and following it would not end.
+                map.walking.push(start);
                 for index in 0..target.bytes.len() / word() {
                     let at = index * word();
                     if let Some(inner) = target.usize_at(at)
                         && inner != 0
-                        && map.map.memory_at(inner).is_some_and(|it| it.0 != start)
+                        && map.map.memory_at(inner).is_some_and(|it| !map.walking.contains(&it.0))
                     {
                         self.relocate_data_pointer(&mut target, at, inner, mutability, map)?;
                     }
                 }
+                map.walking.pop();
                 let writable = map.in_static && mutability == Mutability::Mut;
                 let target = self.cg.define_data(target, writable)?;
                 map.defined.insert(start, target);
