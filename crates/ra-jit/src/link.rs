@@ -24,33 +24,55 @@ pub(crate) fn executable(
     sysroot: Option<&Path>,
     exe: &Path,
 ) -> anyhow::Result<Duration> {
-    let Some(&first) = program.first() else { bail!("nothing to link") };
-    let target = Target::of(db, first.into());
-    let mut cmd = Command::new("cc");
-    if !target.apple
-        && let Some(gcc_ld) = sysroot.and_then(lld_dir)
-    {
-        cmd.arg(format!("-B{}", gcc_ld.display())).arg("-fuse-ld=lld");
+    Line::of(db, program, sysroot)?.link(objects, exe)
+}
+
+/// The arguments `cc` links the program of some crates with, around its objects.
+pub(crate) struct Line {
+    before: Vec<String>,
+    after: Vec<String>,
+}
+
+impl Line {
+    pub(crate) fn of(
+        db: &RootDatabase,
+        program: &[Crate],
+        sysroot: Option<&Path>,
+    ) -> anyhow::Result<Line> {
+        let Some(&first) = program.first() else { bail!("nothing to link") };
+        let target = Target::of(db, first.into());
+        let mut before = Vec::new();
+        if !target.apple
+            && let Some(gcc_ld) = sysroot.and_then(lld_dir)
+        {
+            before.extend([format!("-B{}", gcc_ld.display()), "-fuse-ld=lld".to_owned()]);
+        }
+        before.extend(target.leading());
+        let mut after = Vec::new();
+        for lib in native_libs(db, program) {
+            after.extend(target.lib(&lib));
+        }
+        after.extend(target.trailing());
+        Ok(Line { before, after })
     }
-    cmd.args(target.leading());
-    cmd.args(objects);
-    for lib in native_libs(db, program) {
-        cmd.args(target.lib(&lib));
+
+    /// Links `objects` into the executable `exe`. How long `cc` took.
+    pub(crate) fn link(&self, objects: &[&Path], exe: &Path) -> anyhow::Result<Duration> {
+        let mut cmd = Command::new("cc");
+        cmd.args(&self.before).args(objects).args(&self.after).arg("-o").arg(exe);
+        let start = Instant::now();
+        let ran = cmd.output().with_context(|| format!("running {cmd:?}"))?;
+        if !ran.status.success() {
+            bail!(
+                "the link of {} failed ({}):\n{:?}\n{}",
+                exe.display(),
+                ran.status,
+                cmd,
+                String::from_utf8_lossy(&ran.stderr)
+            );
+        }
+        Ok(start.elapsed())
     }
-    cmd.args(target.trailing());
-    cmd.arg("-o").arg(exe);
-    let start = Instant::now();
-    let ran = cmd.output().with_context(|| format!("running {cmd:?}"))?;
-    if !ran.status.success() {
-        bail!(
-            "the link of {} failed ({}):\n{:?}\n{}",
-            exe.display(),
-            ran.status,
-            cmd,
-            String::from_utf8_lossy(&ran.stderr)
-        );
-    }
-    Ok(start.elapsed())
 }
 
 /// What the stand-ins left in the executable say: the functions ra-jit could not compile that

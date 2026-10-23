@@ -16,7 +16,10 @@ use std::{
     io::{IsTerminal as _, Write as _},
     path::{Path, PathBuf},
     process::{Command, Stdio},
-    sync::Mutex,
+    sync::{
+        Mutex,
+        atomic::{AtomicUsize, Ordering},
+    },
     time::{Duration, Instant},
 };
 
@@ -526,6 +529,13 @@ fn split_attrs(list: &str) -> Vec<String> {
     attrs
 }
 
+/// How many examples' programs ra-jit built and how many rustc did.
+#[derive(Default)]
+struct Counted {
+    ra_jit: AtomicUsize,
+    rustc: AtomicUsize,
+}
+
 /// How an example ended.
 enum Ended {
     Passed,
@@ -550,10 +560,29 @@ struct Test {
 
 /// What ra-jit built of an example.
 enum Ours {
-    /// The program, linked.
-    Linked(PathBuf),
     /// Nothing, the example being only to compile, and rust-analyzer finds no error in it.
     Checked,
+    /// Its object and the standard library's unit, to link in `dir` with `line`.
+    Compiled { objects: [PathBuf; 2], dir: PathBuf, line: crate::link::Line },
+}
+
+impl Ours {
+    /// Links the program, which calls nothing ra-jit could not compile.
+    fn link(&self) -> anyhow::Result<PathBuf> {
+        let Ours::Compiled { objects, dir, line } = self else {
+            anyhow::bail!("nothing to link");
+        };
+        let binary = dir.join("rust_out");
+        line.link(&[&objects[0], &objects[1]], &binary)?;
+        let stand_ins = crate::link::stand_ins(&binary)?;
+        if let Some(first) = stand_ins.first() {
+            anyhow::bail!(
+                "it calls {} functions ra-jit could not compile: {first}",
+                stand_ins.len()
+            );
+        }
+        Ok(binary)
+    }
 }
 
 impl Test {
@@ -594,25 +623,42 @@ impl Test {
         self.marks.ignore || self.marks.ignored_on.iter().any(|it| target.contains(it.as_str()))
     }
 
-    /// Runs what ra-jit built of the example, or has rustc build it in `dir` and runs that.
+    /// Links and runs what ra-jit built of the example, or has rustc build it in `dir` when
+    /// ra-jit built nothing or cannot link it, and runs that.
     fn run(
         &self,
         asked: &Asked,
         dir: &Path,
         ours: Option<&Ours>,
         target: &str,
+        counted: &Counted,
     ) -> anyhow::Result<Ended> {
         if self.is_ignored(target) {
             return Ok(Ended::Ignored);
         }
         let marks = &self.marks;
-        let binary = match ours {
-            Some(Ours::Checked) => return Ok(Ended::Passed),
-            Some(Ours::Linked(binary)) => binary.clone(),
-            None => match self.compiled(asked, dir)? {
-                Ok(binary) => binary,
-                Err(ended) => return Ok(ended),
-            },
+        let linked = match ours {
+            Some(Ours::Checked) => {
+                counted.ra_jit.fetch_add(1, Ordering::Relaxed);
+                return Ok(Ended::Passed);
+            }
+            Some(ours) => ours.link().inspect_err(|why| {
+                eprintln!("ra-jit: {} is rustc's: {why:#}", self.name);
+            }),
+            None => Err(anyhow::anyhow!("not built")),
+        };
+        let binary = match linked {
+            Ok(binary) => {
+                counted.ra_jit.fetch_add(1, Ordering::Relaxed);
+                binary
+            }
+            Err(_) => {
+                counted.rustc.fetch_add(1, Ordering::Relaxed);
+                match self.compiled(asked, dir)? {
+                    Ok(binary) => binary,
+                    Err(ended) => return Ok(ended),
+                }
+            }
         };
         let ran = match as_asked(&binary).current_dir(&asked.run_in).output() {
             Ok(ran) => ran,
@@ -763,38 +809,46 @@ fn tests(db: &RootDatabase, asked: &Asked, krate: hir::Crate) -> (Vec<Test>, usi
     (tests, left_out)
 }
 
-/// What ra-jit builds of each of `tests`, by its place: the program of an example that runs,
-/// nothing of one only to compile, each once rust-analyzer finds no error in it. `None` is
-/// rustc's to build, and why is said.
-fn build(
+/// How an example is built.
+enum Plan {
+    /// By rustc.
+    Rustc,
+    /// Not at all: it is only to compile, and rust-analyzer finds no error in it.
+    Checked,
+    /// By ra-jit, from its crate of this name.
+    Ours(String),
+}
+
+/// How each of `tests` is built, by its place, and the standard library's unit the ones
+/// ra-jit builds link: by ra-jit when rust-analyzer finds no error in it, else by rustc, and
+/// why is said.
+fn plan(
     db: &mut RootDatabase,
     building: &Building<'_>,
     asked: &Asked,
     krate: hir::Crate,
     tests: &[Test],
     target: &str,
-) -> Vec<Option<Ours>> {
-    let start = Instant::now();
-    let mut ours: Vec<Option<Ours>> = tests.iter().map(|_| None).collect();
+) -> (Vec<Plan>, Option<PathBuf>) {
+    let mut plans: Vec<Plan> = tests.iter().map(|_| Plan::Rustc).collect();
     let wanted: Vec<usize> = (0..tests.len())
         .filter(|&at| !tests[at].is_ignored(target) && !tests[at].marks.compile_fail)
         .collect();
     if wanted.is_empty() {
-        return ours;
+        return (plans, None);
     }
     let unit = match crate::std_unit(db, building.table, building.args, building.listed) {
         Ok(Some(unit)) => unit,
         Ok(None) => {
             eprintln!("ra-jit: the examples are rustc's: the standard library is not built apart");
-            return ours;
+            return (plans, None);
         }
         Err(error) => {
             eprintln!("ra-jit: the examples are rustc's: {error:#}");
-            return ours;
+            return (plans, None);
         }
     };
     let mixing = with_another_copy(db, krate);
-    let (mut checking, mut linking) = (Duration::ZERO, Duration::ZERO);
     for (at, example) in add_crates(db, asked, krate, tests, &wanted) {
         let test = &tests[at];
         let source = &test.program.source;
@@ -806,29 +860,15 @@ fn build(
                 "ra-jit: {} is rustc's: `{name}` links another copy of the library",
                 test.name
             );
-            continue;
-        }
-        let start = Instant::now();
-        let broken = has_errors(db, example.root_file);
-        checking += start.elapsed();
-        if broken {
+        } else if has_errors(db, example.root_file) {
             eprintln!("ra-jit: {} is rustc's: rust-analyzer finds an error in it", test.name);
-            continue;
-        }
-        if test.marks.no_run {
-            ours[at] = Some(Ours::Checked);
-            continue;
-        }
-        match link(db, building, asked, &example.name, &unit, &mut linking) {
-            Ok(binary) => ours[at] = Some(Ours::Linked(binary)),
-            Err(why) => eprintln!("ra-jit: {} is rustc's: {why:#}", test.name),
+        } else if test.marks.no_run {
+            plans[at] = Plan::Checked;
+        } else {
+            plans[at] = Plan::Ours(example.name);
         }
     }
-    eprintln!(
-        "doctests: built in {:.1?}: {checking:.1?} checking, {linking:.1?} linking",
-        start.elapsed()
-    );
-    ours
+    (plans, Some(unit))
 }
 
 /// Whether rust-analyzer finds an error of any kind in the example's file: rustc, which says
@@ -941,16 +981,16 @@ fn add_crates(
     added
 }
 
-/// Builds the example whose crate is `name` with everything it links over the standard
-/// library's `unit`, and links it with nothing of rustc's: the program.
-fn link(
+/// Compiles the example whose crate is `name` with everything it links over the standard
+/// library's `unit`, into an object in a directory of its own, to link with nothing of
+/// rustc's.
+fn compile(
     db: &RootDatabase,
     building: &Building<'_>,
     asked: &Asked,
     name: &str,
     unit: &Path,
-    linking: &mut Duration,
-) -> anyhow::Result<PathBuf> {
+) -> anyhow::Result<Ours> {
     let dir = asked.dir.join(name);
     std::fs::create_dir_all(&dir)?;
     let args = crate::Args {
@@ -970,15 +1010,8 @@ fn link(
         anyhow::bail!(unset);
     }
     let example = crate::crates_named(db, name, &args)?;
-    let binary = dir.join("rust_out");
-    let start = Instant::now();
-    crate::link::executable(db, &example, &[&args.out, unit], building.sysroot, &binary)?;
-    let stand_ins = crate::link::stand_ins(&binary)?;
-    *linking += start.elapsed();
-    if let Some(first) = stand_ins.first() {
-        anyhow::bail!("it calls {} functions ra-jit could not compile: {first}", stand_ins.len());
-    }
-    Ok(binary)
+    let line = crate::link::Line::of(db, &example, building.sysroot)?;
+    Ok(Ours::Compiled { objects: [args.out, unit.to_owned()], dir, line })
 }
 
 /// What the examples are built with: the run of ra-jit that loaded the library, with nothing
@@ -1008,38 +1041,36 @@ pub(crate) fn run(
     document(db, krate);
     let (tests, left_out) = hir::attach_db(db, || tests(db, asked, krate));
     library.set_cfg_options(db).to(cfg);
-    let ours = build(db, building, asked, krate, &tests, target);
-    let by_rustc = tests.iter().zip(&ours).filter(|(test, ours)| {
-        ours.is_none() && !test.is_ignored(target)
-    });
-    eprintln!(
-        "doctests: {} built by ra-jit, {} by rustc",
-        ours.iter().flatten().count(),
-        by_rustc.count()
-    );
+    let (plans, unit) = plan(db, building, asked, krate, &tests, target);
+    let db: &RootDatabase = db;
     let out = std::io::stdout();
     writeln!(&out, "\nrunning {} test{}", tests.len(), if tests.len() == 1 { "" } else { "s" })?;
-    let next = Mutex::new(0);
     let shown = Mutex::new(Progress {
         terse: asked.wanted.terse,
         total: tests.len(),
         ..Default::default()
     });
     let ended: Mutex<Vec<(usize, anyhow::Result<Ended>)>> = Mutex::new(Vec::new());
+    let counted = Counted::default();
+    // The examples rustc builds run while ra-jit compiles its, one at a time (each build is
+    // on every core), and each of those is linked, run and removed as soon as it is compiled.
+    let (ready, next) = std::sync::mpsc::channel::<(usize, Option<Ours>)>();
+    let next = Mutex::new(next);
     let threads = std::thread::available_parallelism().map_or(1, |it| it.get()).min(tests.len());
+    let mut compiling = Duration::ZERO;
     std::thread::scope(|scope| {
         for _ in 0..threads {
             scope.spawn(|| {
                 loop {
-                    let at = {
-                        let mut next = next.lock().unwrap_or_else(|it| it.into_inner());
-                        *next += 1;
-                        *next - 1
-                    };
-                    let Some(test) = tests.get(at) else { break };
+                    let job = next.lock().unwrap_or_else(|it| it.into_inner()).recv();
+                    let Ok((at, ours)) = job else { break };
+                    let test = &tests[at];
                     let dir = asked.dir.join(at.to_string());
-                    let result = test.run(asked, &dir, ours[at].as_ref(), target);
+                    let result = test.run(asked, &dir, ours.as_ref(), target, &counted);
                     _ = std::fs::remove_dir_all(&dir);
+                    if let Some(Ours::Compiled { dir, .. }) = &ours {
+                        _ = std::fs::remove_dir_all(dir);
+                    }
                     let mut progress = shown.lock().unwrap_or_else(|it| it.into_inner());
                     _ = progress.ended(&mut out.lock(), test, &result);
                     drop(progress);
@@ -1047,7 +1078,30 @@ pub(crate) fn run(
                 }
             });
         }
+        for (at, plan) in plans.iter().enumerate() {
+            match plan {
+                Plan::Rustc => _ = ready.send((at, None)),
+                Plan::Checked => _ = ready.send((at, Some(Ours::Checked))),
+                Plan::Ours(_) => {}
+            }
+        }
+        for (at, plan) in plans.iter().enumerate() {
+            let (Plan::Ours(name), Some(unit)) = (plan, &unit) else { continue };
+            let start = Instant::now();
+            let compiled = compile(db, building, asked, name, unit);
+            compiling += start.elapsed();
+            let compiled = compiled.inspect_err(|why| {
+                eprintln!("ra-jit: {} is rustc's: {why:#}", tests[at].name);
+            });
+            _ = ready.send((at, compiled.ok()));
+        }
+        drop(ready);
     });
+    eprintln!(
+        "doctests: {} built by ra-jit, {} by rustc; compiling took {compiling:.1?}",
+        counted.ra_jit.load(Ordering::Relaxed),
+        counted.rustc.load(Ordering::Relaxed),
+    );
     let mut ended = ended.into_inner().unwrap_or_else(|it| it.into_inner());
     ended.sort_by_key(|(at, _)| *at);
     let (mut passed, mut ignored, mut failed) = (0, 0, Vec::new());
