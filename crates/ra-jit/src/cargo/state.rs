@@ -455,7 +455,7 @@ impl Built {
         let started = stamp_now();
         let mut cargo = Command::new(cargo_path());
         match asked.subcommand {
-            Subcommand::Build | Subcommand::Run => cargo.arg("build"),
+            Subcommand::Build | Subcommand::Run | Subcommand::Check => cargo.arg("build"),
             Subcommand::Test => cargo.args(["test", "--no-run"]),
         };
         cargo.args(&asked.build_args).arg("--message-format=json-render-diagnostics");

@@ -45,7 +45,7 @@
  },
  "linux-x86_64 cranelift": {
   "check": {
-   "rustc": 5,
+   "rustc": 0,
    "rustdoc": 0
   },
   "cold build": {

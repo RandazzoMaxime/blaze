@@ -521,9 +521,21 @@ method or field, a type error, incomplete code) fail the build as ra-jit writes 
 rustc's form (`error[E0308]: ...`, ` --> file:line:col`, the line marked, then cargo's `could
 not compile` line), with status 101, under `cargo ra-jit` and under plain cargo after `ra-jit
 enable`. What stays with cargo for now: what the frontend turns down as unsupported
-(`NotSupported`, layouts, constants: step E), ra-jit's own failures (a build that panicked, a
-link that failed), an error in a file written before the worker loaded the workspace, and
-`cargo ra-jit check`. Counted on ripgrep with `harness/norustc` (dev-aws-3, 2026-10-22), the
+(`NotSupported`, layouts, constants: step E) and ra-jit's own failures (a build that panicked, a
+link that failed). An error in a file written before the worker loaded the workspace is ra-jit's
+too since 2026-10-23: the worker leaves it beside its socket and every build of the checkout
+fails with it until a source is written. The lints followed: a lint the source denies fails the
+build for the four lints `harness/lints_ui.py` finds rust-analyzer reports only where rustc does
+(on rustc's UI tests that deny or forbid a lint, 2026-10-23: non_snake_case 31 right, 0 wrong,
+9 missed; non_camel_case_types 22, 0, 2; unused_must_use 15, 0, 29; non_upper_case_globals 9,
+0, 4; the same against 1.99.0 and the nightly of 2026-10-09). Three had been wrong first:
+rust-analyzer's case rules were rustc's of an old commit, and its `unused_must_use` looked into
+`if` and `match` arms and took `Result<(), Never>` for one to use. None of the four is denied by
+default, so the level is the source's, which only `--cap-lints` and `--force-warn` undo; with
+either among the flags no lint fails a build. A lint in what a macro expands to does not. The
+other lints are not ra-jit's verdict yet: a crate that denies one rust-analyzer does not find
+runs code rustc turns down. `cargo ra-jit check` is the daemon's verdict on the build of the
+same flags when it has that build loaded, and `cargo check` otherwise. Counted on ripgrep with `harness/norustc` (dev-aws-3, 2026-10-22), the
 error step went from 6 rustc compiles in 0.9 s to none in 0.1 s. The first `test --no-run`
 after it compiled 5 workspace libraries more (50 compiles, not 45): the cargo build of the
 error had brought up to date the libraries an earlier edit had changed, which `cargo test`
@@ -532,8 +544,8 @@ workspace (dev-aws-3, cranelift, two runs each) the edits went from 5 rustc runs
 the tests that follow from 48 or 49 to 52 for the same reason: 138 runs in all, not 139 or 140.
 `cargo ra-jit check`
 can't be an in-process load yet: on ripgrep, loading the workspace and the standard library
-and checking its 97 files took 6 to 8.5 s, against 2.3 s for a warm `cargo check`. It needs a
-loaded workspace the daemon keeps warm.
+and checking its 97 files took 6 to 8.5 s, against 2.3 s for a warm `cargo check`, which is why
+it asks the daemon, which keeps the workspace loaded.
 
 **E. No function left to rustc.** ([#85](https://github.com/indexable-inc/ra-jit/issues/85)) The classes of #34 and #35 and the rest of
 [support.md](support.md#language) are compiled; a refusal fails the build with its reason. Until
