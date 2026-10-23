@@ -297,6 +297,11 @@ pub trait SymbolResolver {
     /// The build is no patch of what rustc linked but one in full, which is linked: what
     /// only that executable has is not to be named.
     fn in_full(&self) {}
+    /// Whether the build, in full, names what only the executable rustc linked has, for it is
+    /// spliced into that: the store keeps nothing of it, which another program can't use.
+    fn onto_rustcs(&self) -> bool {
+        false
+    }
     /// The `StableCrateId` of each crate that compiled a copy of an instance of a function
     /// named `function`.
     fn makers(&self, _function: &str) -> Vec<u64> {
@@ -666,6 +671,7 @@ impl CodegenUnit {
                     patched: Some(patch.bodies),
                     declined: None,
                     over_rustc: base.rustc,
+                    onto_rustcs: false,
                 };
                 let unit = CodegenUnit {
                     object: None,
@@ -956,6 +962,7 @@ impl CodegenUnit {
                     patched: None,
                     declined,
                     over_rustc: false,
+                    onto_rustcs: false,
                 };
                 if patching {
                     *base = patch::Base::record(db, &cg, roots.entries, &compiled, &skipped);
@@ -1102,6 +1109,31 @@ pub(crate) struct Rejected {
 
 /// What [`Rejections`] knows of the executable rustc linked, as a base to patch.
 pub struct RustcBase(patch::Base);
+
+/// The functions of compiler-builtins that compiled code calls for what Cranelift or LLVM has
+/// no instruction of: 128-bit division and checked multiplication, and conversions between
+/// 128-bit integers and floats, and halves. rustc's code may call none of them, and an
+/// executable it linked then has none for a patch to call.
+pub const BUILTINS: [&str; 18] = [
+    "__divti3",
+    "__udivti3",
+    "__modti3",
+    "__umodti3",
+    "__rust_i128_mulo",
+    "__rust_u128_mulo",
+    "__muloti4",
+    "__fixsfti",
+    "__fixunssfti",
+    "__fixdfti",
+    "__fixunsdfti",
+    "__floattisf",
+    "__floatuntisf",
+    "__floattidf",
+    "__floatuntidf",
+    "__extendhfsf2",
+    "__truncsfhf2",
+    "__truncdfhf2",
+];
 
 /// An object that defines nothing, for the target the process compiles for.
 pub fn empty_object() -> Result<Vec<u8>> {
@@ -1464,6 +1496,9 @@ pub struct BuildStats {
     /// Whether the patch is of the executable rustc linked, which only a splice adds it to:
     /// a link puts rustc's objects behind it, whose calls within themselves stay there.
     pub over_rustc: bool,
+    /// Whether the build in full names what only the executable rustc linked has, for it is
+    /// spliced into that rather than linked: the symbol resolver says.
+    pub onto_rustcs: bool,
 }
 
 /// Time spent in each step of the last round.
@@ -5046,7 +5081,8 @@ impl<'a, 'db> ObjectCodegen<'a, 'db> {
     ) {
         // What a patch refers to is in its base under names of that one object.
         let program = self.mixed.as_ref().map(|it| it.key);
-        let store = store::Store::global().filter(|_| self.base.is_none() && program != Some(None));
+        let own = self.base.is_none() && program != Some(None) && !self.symbols.onto_rustcs();
+        let store = store::Store::global().filter(|_| own);
         let Some(store) = store else { return };
         let Some(name) = self.stable_name(instance) else {
             self.kept.unnamed += 1;

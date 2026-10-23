@@ -8,6 +8,14 @@ All notable changes to ra-jit are written here. The format follows
 
 ### Added
 
+- An edit that needs a build in full no longer links in full when the daemon has no base of
+  its own (it gave it up, or hasn't built it yet) (#159): on Linux the program is built onto
+  the executable rustc linked and spliced into it whole, and the edits after it are patches of
+  that. nushell's signature edit with its base given up at 2 GB is spliced in 1.5 s, and the
+  edits after splice in about 10 ms. macOS still links such an edit in full, but no longer
+  twice: the link takes the room for splices the executable there wanted. `rustcbase.py`
+  checks that every build in full of the rustc phase is spliced whole on Linux, and
+  `own-base-budget-full` a given-up base's.
 - Const eval answers nightly's reflection, `core::mem::type_info` (#34): a type's variants
   and fields, a field's type, name and offset, a type's size, whether it is signed, an array's
   length and element, what a pointer points to, a variant's name, as rustc does, and two of

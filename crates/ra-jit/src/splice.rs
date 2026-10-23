@@ -297,31 +297,42 @@ impl Baseline {
     }
 
     /// Splices `object`, all of a program the daemon built, into the executable rustc linked,
-    /// and reads what that leaves as an executable the daemon linked with `patch` ahead of
-    /// `object`: the next edits are patches of the object, spliced into it. So a build in full
-    /// is not linked in full. Only of ELF executables; anything else, and whatever the splice
-    /// declines, is an error, and the caller links in full.
+    /// and starts reading what that leaves as an executable the daemon linked with `patch`
+    /// ahead of `object` ([`Linked::read`]): the next edits are patches of the object, spliced
+    /// into it. So a build in full is not linked in full. Only of ELF executables; anything
+    /// else, and whatever the splice declines, is an error.
     pub(crate) fn spliced_whole(
         mut self,
         object_path: &Path,
         patch: &Path,
-    ) -> anyhow::Result<(Baseline, Spliced)> {
+    ) -> anyhow::Result<(Linked, Spliced)> {
         ensure!(
             matches!(*self.image, Executable::Elf(_)),
             "only an ELF executable takes all of a program spliced"
         );
+        let start = std::time::Instant::now();
         let object = std::fs::read(object_path)?;
+        let read = start.elapsed();
         let (spliced, defined) = self.splice_as(&object, &AtomicBool::new(false), true)?;
-        let lock = Writing::ahead(&self.path);
-        let mut parsed = Baseline::parse(&self.path, &std::fs::read(patch)?, object_path, false)?;
-        let Executable::Elf(image) = &mut parsed.image else {
-            bail!("the executable is ELF no more")
-        };
-        // What the object adds is in no symbol table, and is what the next patch refers to.
-        for (name, defined) in defined {
-            image.symbols.insert(name, Named::One(defined));
+        if std::env::var_os("RA_JIT_STATS").is_some() {
+            let us = |it: std::time::Duration| it.as_micros();
+            eprintln!("splice-whole-us: read={} splice={}", us(read), us(start.elapsed() - read));
         }
-        Ok((parsed.laid_out(self.path.clone(), lock)?, spliced))
+        let (path, object) = (self.path.clone(), object_path.to_owned());
+        let patch = std::fs::read(patch);
+        let lock = Writing::ahead(&path);
+        let linked = Linked(std::thread::spawn(move || {
+            let mut parsed = Baseline::parse(&path, &patch?, &object, false)?;
+            let Executable::Elf(image) = &mut parsed.image else {
+                bail!("the executable is ELF no more")
+            };
+            // What the object adds is in no symbol table, and is what the next patch refers to.
+            for (name, defined) in defined {
+                image.symbols.insert(name, Named::One(defined));
+            }
+            parsed.laid_out(path, lock)
+        }));
+        Ok((linked, spliced))
     }
 
     /// [`Baseline::splice`], and with `whole` of all of a program ([`Patch::read`]); with where
@@ -337,6 +348,9 @@ impl Baseline {
         let (mut addition, len) = match &*self.image {
             Executable::Elf(image) => {
                 let patch = Patch::read(patch, image, whole)?;
+                if whole && std::env::var_os("RA_JIT_STATS").is_some() {
+                    eprintln!("splice-us: read={}", start.elapsed().as_micros());
+                }
                 self.has_baked(patch.replaced.iter().map(|it| it.name))?;
                 (patch.place(image)?, image.len)
             }
@@ -406,7 +420,14 @@ impl Baseline {
             file.set_len(end.max(len))?;
         }
         let written_at = start.elapsed();
-        for (offset, bytes) in &addition.overwritten {
+        // What a whole program is spliced over is read again as linked: nothing undoes it.
+        // Its jumps are written a run of the file at a time, for a file whose blocks another
+        // shares (a copy on XFS or Btrfs) takes a write as long as it takes the block's copy.
+        if whole {
+            addition.overwritten.sort_by_key(|it| it.0);
+            write_runs(&file, &addition.overwritten)?;
+        }
+        for (offset, bytes) in addition.overwritten.iter().filter(|_| !whole) {
             let mut old = vec![0; bytes.len()];
             read_exact_at(&file, &mut old, *offset)?;
             self.undo.push((*offset, old));
@@ -546,6 +567,12 @@ impl Baseline {
 /// it, when the room its header has is too little: only Apple's linker leaves no more than it
 /// is told to. `None` for an executable that has the room, or needs none.
 pub(crate) fn headerpad_short(path: &Path) -> anyhow::Result<Option<u64>> {
+    Ok(headerpad_wanted(path)?.and_then(|(pad, short)| short.then_some(pad)))
+}
+
+/// The `-headerpad` of [`headerpad_short`] whether or not the executable at `path` has the
+/// room, and whether it is short of it.
+pub(crate) fn headerpad_wanted(path: &Path) -> anyhow::Result<Option<(u64, bool)>> {
     use std::io::Read as _;
     const HEADER: usize = size_of::<object::macho::MachHeader64<object::LittleEndian>>();
     let mut file = File::open(path)?;
@@ -557,7 +584,7 @@ pub(crate) fn headerpad_short(path: &Path) -> anyhow::Result<Option<u64>> {
     let len = u32::from_le_bytes(commands[20..24].try_into()?) as usize;
     commands.resize(HEADER + len, 0);
     file.read_exact(&mut commands[HEADER..])?;
-    macho::headerpad_short(&commands)
+    macho::headerpad_wanted(&commands)
 }
 
 /// Why a splice stopped half way: a newer edit wants the executable.
@@ -741,6 +768,31 @@ pub(crate) fn unwritten(path: &Path) -> std::io::Result<File> {
         }
         return Ok(file);
     }
+}
+
+/// Writes `writes`, in the order of the file, each run of them with no more than `GAP` between
+/// two at once: the run is read, written over and written back.
+fn write_runs(file: &File, writes: &[(u64, Vec<u8>)]) -> std::io::Result<()> {
+    const GAP: u64 = 256 << 10;
+    let mut at = 0;
+    while at < writes.len() {
+        let start = writes[at].0;
+        let mut end = start + writes[at].1.len() as u64;
+        let mut next = at + 1;
+        while let Some((offset, bytes)) = writes.get(next).filter(|it| it.0 <= end + GAP) {
+            end = end.max(offset + bytes.len() as u64);
+            next += 1;
+        }
+        let mut run = vec![0; (end - start) as usize];
+        read_exact_at(file, &mut run, start)?;
+        for (offset, bytes) in &writes[at..next] {
+            let from = (offset - start) as usize;
+            run[from..from + bytes.len()].copy_from_slice(bytes);
+        }
+        write_all_at(file, &run, start)?;
+        at = next;
+    }
+    Ok(())
 }
 
 /// Writes a run of the file again behind where it is.
@@ -1579,6 +1631,12 @@ impl InPlace {
     fn holds(&self, offset: u64) -> bool {
         (self.offset..self.offset + self.size).contains(&offset)
     }
+
+    /// Which of `all`, by where their section has them, holds `offset`.
+    fn holding(all: &[InPlace], offset: u64) -> Option<usize> {
+        let at = all.partition_point(|it| it.offset + it.size <= offset);
+        all.get(at).filter(|it| it.holds(offset)).map(|_| at)
+    }
 }
 
 /// How a relocation of the patch gets its value.
@@ -1670,6 +1728,25 @@ impl<'a> Patch<'a> {
             if section.name_bytes()? == b".eh_frame" {
                 patch.frames += Self::frames_in(section.data()?, 0)?.len();
             }
+        }
+        if whole {
+            let missing: Vec<_> = (patch.file.symbols())
+                .filter(|it| it.is_undefined())
+                .filter_map(|it| it.name_bytes().ok())
+                .filter(|name| !name.is_empty() && *name != b"__tls_get_addr")
+                .filter(|name| !image.symbols.contains_key(*name))
+                .filter(|name| !image.imports.contains_key(*name))
+                .map(String::from_utf8_lossy)
+                .collect();
+            if std::env::var_os("RA_JIT_STATS").is_some() {
+                eprintln!("splice: not in the executable: {missing:?}");
+            }
+            ensure!(
+                missing.is_empty(),
+                "{} of what it refers to are not in the executable, as {}",
+                missing.len(),
+                missing.iter().take(3).map(|it| it.as_ref()).collect::<Vec<_>>().join(", ")
+            );
         }
         let loaded: FxHashSet<SectionIndex> = patch.sections.iter().flatten().copied().collect();
         let code: FxHashSet<SectionIndex> =
@@ -1788,6 +1865,9 @@ impl<'a> Patch<'a> {
             }
         }
 
+        for statics in patch.in_place.values_mut() {
+            statics.sort_unstable_by_key(|it| it.offset);
+        }
         Ok(patch)
     }
 
@@ -1966,6 +2046,8 @@ impl<'a> Patch<'a> {
 
     fn place_at(&self, image: &Image, live_base: Option<u64>) -> anyhow::Result<Addition> {
         let e = Endianness::Little;
+        let code: FxHashSet<SectionIndex> =
+            self.sections[Segment::Code as usize].iter().copied().collect();
         let page = image.page();
         let machine = image.machine;
         let (stub_len, stub_align) = machine.stub();
@@ -2037,19 +2119,17 @@ impl<'a> Patch<'a> {
             let in_place = self.in_place.get(&section).map_or(&[][..], |it| it);
             let found = match target {
                 Target::Section(_) if exact => {
-                    in_place.iter().find(|it| it.holds(added as u64)).map(|it| (it, added as u64))
+                    InPlace::holding(in_place, added as u64).map(|it| (&in_place[it], added as u64))
                 }
                 Target::Section(_) => {
-                    let near = |it: &InPlace| {
-                        (it.offset as i64 - 8..(it.offset + it.size) as i64).contains(&added)
-                    };
-                    ensure!(
-                        !in_place.iter().any(near),
-                        "code that refers to a static through its section"
-                    );
+                    // The first that ends past it is the one it can be just ahead of.
+                    let first =
+                        in_place.partition_point(|it| (it.offset + it.size) as i64 <= added);
+                    let near = in_place.get(first).is_some_and(|it| it.offset as i64 - 8 <= added);
+                    ensure!(!near, "code that refers to a static through its section");
                     None
                 }
-                _ => in_place.iter().find(|it| it.holds(at)).map(|it| (it, at)),
+                _ => InPlace::holding(in_place, at).map(|it| (&in_place[it], at)),
             };
             Ok(match (found, target) {
                 (Some((it, at)), Target::Section(_)) => it.old.address + (at - it.offset),
@@ -2088,7 +2168,7 @@ impl<'a> Patch<'a> {
             let data = section.data()?;
             appended[start as usize..][..data.len()].copy_from_slice(data);
             let in_place = self.in_place.get(&section.index()).map_or(&[][..], |it| it);
-            let code = self.sections[Segment::Code as usize].contains(&section.index());
+            let code = code.contains(&section.index());
             let mut values: Vec<Vec<u8>> = in_place
                 .iter()
                 .map(|it| match data.get(it.offset as usize..(it.offset + it.size) as usize) {
@@ -2103,7 +2183,7 @@ impl<'a> Patch<'a> {
                     continue;
                 }
                 let target = self.targets[&index];
-                if let Some(which) = in_place.iter().position(|it| it.holds(at)) {
+                if let Some(which) = InPlace::holding(in_place, at) {
                     let within = (at - in_place[which].offset) as usize;
                     let (Fixup::Absolute, _) = Fixup::of(&relocation, machine)? else {
                         bail!("a static that stores a distance")
@@ -2295,11 +2375,11 @@ impl<'a> Patch<'a> {
             })
             .unwrap_or((0, 0));
 
-        let code = &self.sections[Segment::Code as usize];
         let defined = (self.replaced.iter())
             .map(|replaced| {
-                let in_place = (self.in_place.get(&replaced.section))
-                    .is_some_and(|it| it.iter().any(|it| it.offset == replaced.offset));
+                let in_place = (self.in_place.get(&replaced.section)).is_some_and(|it| {
+                    it.binary_search_by_key(&replaced.offset, |it| it.offset).is_ok()
+                });
                 let old = replaced.old.filter(|_| in_place);
                 let defined = Defined {
                     address: old.map_or(base + placed[&replaced.section] + replaced.offset, |it| {
