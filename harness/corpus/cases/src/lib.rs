@@ -6400,6 +6400,19 @@ pub mod inline_asm {
         out
     }
 
+    /// A register of a feature the assembler has no extension of, only an architecture
+    /// version (constant_time_eq's).
+    #[target_feature(enable = "dit")]
+    unsafe fn dit() -> u64 {
+        let value: u64;
+        unsafe { asm!("mrs {}, dit", lateout(reg) value, options(nomem, preserves_flags, nostack)) };
+        value
+    }
+
+    fn timing_independent() -> Option<u64> {
+        std::arch::is_aarch64_feature_detected!("dit").then(|| unsafe { dit() })
+    }
+
     pub fn run() -> impl std::fmt::Debug {
         (
             add(40, 2),
@@ -6413,6 +6426,7 @@ pub mod inline_asm {
             thread_pointer(),
             stops(false),
             unsafe { crc(!0, 0x6c6c_6568) },
+            timing_independent(),
         )
     }
 }

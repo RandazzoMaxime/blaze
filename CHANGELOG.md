@@ -388,6 +388,11 @@ All notable changes to ra-jit are written here. The format follows
 
 ### Fixed
 
+- On Linux AArch64, an `asm!` of a feature LLVM's assembler has no `.arch_extension` for was
+  refused: constant_time_eq's `mrs {}, dit` under `#[target_feature(enable = "dit")]`, which
+  failed bun's build there. Such a feature (`dit`, `bti`, `jsconv` and the others of a later
+  Armv8 or Armv9, and `v8.4a` and the like themselves) now starts the block with `.arch` of
+  the version that has it.
 - `runbench.py` runs cargo's release build from beside ra-jit's, in the workspace, where it ran
   it from cargo's target directory. helix looks for its `runtime` next to itself, so only
   cargo's build warned that there was none, and helix was reported as running differently.
