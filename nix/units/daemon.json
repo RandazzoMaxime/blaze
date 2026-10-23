@@ -1,7 +1,7 @@
 {
  "dir": ".",
  "inputs": {
-  "Cargo.lock": "a9378038f2eb4fb5632f6077cf7ffc4275eb8c750c94f96a426b3ed7205d6a5d",
+  "Cargo.lock": "ec8b16c4c37ac93e27e0c0311d161759fe9e2a97382545d5f35c5b81b58f5459",
   "Cargo.toml": "4f71340b2d7f3f874e690331931f61541000600a05e19974a81ba3f0c8c74ef5"
  },
  "packages": {
@@ -17225,6 +17225,18 @@
      "crate_type": "lib",
      "deps": [
       {
+       "i": 85,
+       "name": "crc32fast"
+      },
+      {
+       "i": 146,
+       "name": "hashbrown"
+      },
+      {
+       "i": 188,
+       "name": "indexmap"
+      },
+      {
        "i": 218,
        "name": "memchr"
       },
@@ -17249,6 +17261,9 @@
       "std",
       "unaligned",
       "wasm",
+      "write",
+      "write_core",
+      "write_std",
       "xcoff"
      ],
      "kind": "lib",
@@ -17281,6 +17296,9 @@
       "std",
       "unaligned",
       "wasm",
+      "write",
+      "write_core",
+      "write_std",
       "xcoff"
      ],
      "kind": "custom-build",
@@ -17318,6 +17336,9 @@
       "std",
       "unaligned",
       "wasm",
+      "write",
+      "write_core",
+      "write_std",
       "xcoff"
      ],
      "kind": "custom-build",
@@ -19354,6 +19375,10 @@
        "name": "tikv_jemalloc_ctl"
       },
       {
+       "i": 400,
+       "name": "tikv_jemalloc_sys"
+      },
+      {
        "i": 403,
        "name": "tikv_jemallocator"
       },
@@ -19597,6 +19622,10 @@
       {
        "i": 399,
        "name": "tikv_jemalloc_ctl"
+      },
+      {
+       "i": 400,
+       "name": "tikv_jemalloc_sys"
       },
       {
        "i": 403,
@@ -19844,6 +19873,10 @@
        "name": "tikv_jemalloc_ctl"
       },
       {
+       "i": 400,
+       "name": "tikv_jemalloc_sys"
+      },
+      {
        "i": 403,
        "name": "tikv_jemallocator"
       },
@@ -20087,6 +20120,10 @@
       {
        "i": 399,
        "name": "tikv_jemalloc_ctl"
+      },
+      {
+       "i": 400,
+       "name": "tikv_jemalloc_sys"
       },
       {
        "i": 403,
@@ -34449,6 +34486,18 @@
      "crate_type": "lib",
      "deps": [
       {
+       "i": 83,
+       "name": "crc32fast"
+      },
+      {
+       "i": 143,
+       "name": "hashbrown"
+      },
+      {
+       "i": 185,
+       "name": "indexmap"
+      },
+      {
        "i": 218,
        "name": "memchr"
       },
@@ -34473,6 +34522,9 @@
       "std",
       "unaligned",
       "wasm",
+      "write",
+      "write_core",
+      "write_std",
       "xcoff"
      ],
      "kind": "lib",
@@ -34505,6 +34557,9 @@
       "std",
       "unaligned",
       "wasm",
+      "write",
+      "write_core",
+      "write_std",
       "xcoff"
      ],
      "kind": "custom-build",
@@ -34542,6 +34597,9 @@
       "std",
       "unaligned",
       "wasm",
+      "write",
+      "write_core",
+      "write_std",
       "xcoff"
      ],
      "kind": "custom-build",
@@ -36664,6 +36722,10 @@
        "name": "tikv_jemalloc_ctl"
       },
       {
+       "i": 401,
+       "name": "tikv_jemalloc_sys"
+      },
+      {
        "i": 404,
        "name": "tikv_jemallocator"
       },
@@ -36907,6 +36969,10 @@
       {
        "i": 400,
        "name": "tikv_jemalloc_ctl"
+      },
+      {
+       "i": 401,
+       "name": "tikv_jemalloc_sys"
       },
       {
        "i": 404,
@@ -37154,6 +37220,10 @@
        "name": "tikv_jemalloc_ctl"
       },
       {
+       "i": 401,
+       "name": "tikv_jemalloc_sys"
+      },
+      {
        "i": 404,
        "name": "tikv_jemallocator"
       },
@@ -37397,6 +37467,10 @@
       {
        "i": 400,
        "name": "tikv_jemalloc_ctl"
+      },
+      {
+       "i": 401,
+       "name": "tikv_jemalloc_sys"
       },
       {
        "i": 404,
@@ -51705,6 +51779,18 @@
      "crate_type": "lib",
      "deps": [
       {
+       "i": 85,
+       "name": "crc32fast"
+      },
+      {
+       "i": 147,
+       "name": "hashbrown"
+      },
+      {
+       "i": 189,
+       "name": "indexmap"
+      },
+      {
        "i": 219,
        "name": "memchr"
       },
@@ -51729,6 +51815,9 @@
       "std",
       "unaligned",
       "wasm",
+      "write",
+      "write_core",
+      "write_std",
       "xcoff"
      ],
      "kind": "lib",
@@ -51761,6 +51850,9 @@
       "std",
       "unaligned",
       "wasm",
+      "write",
+      "write_core",
+      "write_std",
       "xcoff"
      ],
      "kind": "custom-build",
@@ -51798,6 +51890,9 @@
       "std",
       "unaligned",
       "wasm",
+      "write",
+      "write_core",
+      "write_std",
       "xcoff"
      ],
      "kind": "custom-build",
@@ -53834,6 +53929,10 @@
        "name": "tikv_jemalloc_ctl"
       },
       {
+       "i": 401,
+       "name": "tikv_jemalloc_sys"
+      },
+      {
        "i": 404,
        "name": "tikv_jemallocator"
       },
@@ -54077,6 +54176,10 @@
       {
        "i": 400,
        "name": "tikv_jemalloc_ctl"
+      },
+      {
+       "i": 401,
+       "name": "tikv_jemalloc_sys"
       },
       {
        "i": 404,
@@ -54324,6 +54427,10 @@
        "name": "tikv_jemalloc_ctl"
       },
       {
+       "i": 401,
+       "name": "tikv_jemalloc_sys"
+      },
+      {
        "i": 404,
        "name": "tikv_jemallocator"
       },
@@ -54567,6 +54674,10 @@
       {
        "i": 400,
        "name": "tikv_jemalloc_ctl"
+      },
+      {
+       "i": 401,
+       "name": "tikv_jemalloc_sys"
       },
       {
        "i": 404,
@@ -68956,6 +69067,18 @@
      "crate_type": "lib",
      "deps": [
       {
+       "i": 83,
+       "name": "crc32fast"
+      },
+      {
+       "i": 144,
+       "name": "hashbrown"
+      },
+      {
+       "i": 186,
+       "name": "indexmap"
+      },
+      {
        "i": 219,
        "name": "memchr"
       },
@@ -68980,6 +69103,9 @@
       "std",
       "unaligned",
       "wasm",
+      "write",
+      "write_core",
+      "write_std",
       "xcoff"
      ],
      "kind": "lib",
@@ -69012,6 +69138,9 @@
       "std",
       "unaligned",
       "wasm",
+      "write",
+      "write_core",
+      "write_std",
       "xcoff"
      ],
      "kind": "custom-build",
@@ -69049,6 +69178,9 @@
       "std",
       "unaligned",
       "wasm",
+      "write",
+      "write_core",
+      "write_std",
       "xcoff"
      ],
      "kind": "custom-build",
@@ -71171,6 +71303,10 @@
        "name": "tikv_jemalloc_ctl"
       },
       {
+       "i": 402,
+       "name": "tikv_jemalloc_sys"
+      },
+      {
        "i": 405,
        "name": "tikv_jemallocator"
       },
@@ -71414,6 +71550,10 @@
       {
        "i": 401,
        "name": "tikv_jemalloc_ctl"
+      },
+      {
+       "i": 402,
+       "name": "tikv_jemalloc_sys"
       },
       {
        "i": 405,
@@ -71661,6 +71801,10 @@
        "name": "tikv_jemalloc_ctl"
       },
       {
+       "i": 402,
+       "name": "tikv_jemalloc_sys"
+      },
+      {
        "i": 405,
        "name": "tikv_jemallocator"
       },
@@ -71904,6 +72048,10 @@
       {
        "i": 401,
        "name": "tikv_jemalloc_ctl"
+      },
+      {
+       "i": 402,
+       "name": "tikv_jemalloc_sys"
       },
       {
        "i": 405,

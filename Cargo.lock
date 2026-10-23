@@ -3215,6 +3215,7 @@ dependencies = [
  "test-fixture",
  "thorin-dwp",
  "tikv-jemalloc-ctl",
+ "tikv-jemalloc-sys",
  "tikv-jemallocator",
  "tokio",
  "toml",
