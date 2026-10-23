@@ -3807,14 +3807,20 @@ fn write_dep_info(
     exe: &Path,
     path: &Path,
 ) -> anyhow::Result<()> {
-    let mut modules = Vec::new();
-    for krate in crates_named(db, &args.krate, args)? {
-        let files = krate.modules(db).into_iter().map(|it| it.definition_source_file_id(db));
-        modules.extend(files.map(|it| it.original_file(db).file_id(db)));
+    let mut files = Vec::new();
+    let krates = crates_named(db, &args.krate, args)?;
+    for &krate in &krates {
+        let modules = krate.modules(db).into_iter().map(|it| it.definition_source_file_id(db));
+        files.extend(modules.map(|it| it.original_file(db).file_id(db)));
+        let included = hir_def::include_macro_invoc(db, krate.into()).iter();
+        files.extend(included.map(|(_, file)| file.file_id(db)));
     }
     let named = |id: &vfs::FileId| Some(vfs.file_path(*id).as_path()?.to_string());
     let mut paths: Vec<String> = Vec::new();
-    for path in modules.iter().filter_map(named) {
+    // What `include_str!` and `include_bytes!` read from outside the VFS, as rustc names it.
+    let read = krates.iter().flat_map(|it| db.included_by((*it).into()));
+    let read: Vec<String> = read.map(|(path, _)| path.to_string()).collect();
+    for path in files.iter().filter_map(named).chain(read) {
         if !paths.contains(&path) {
             paths.push(path);
         }
@@ -3825,6 +3831,32 @@ fn write_dep_info(
     let mut text = format!("{target}: {}\n\n", escaped.join(" "));
     for file in &escaped {
         text += &format!("{file}:\n");
+    }
+    // The variables `env!` and `option_env!` read, with what each was, so that cargo builds
+    // again when one changes.
+    let mut env: Vec<(String, Option<String>)> = db
+        .env_read()
+        .into_iter()
+        .filter(|(krate, _)| krates.iter().any(|it| ide_db::base_db::Crate::from(*it) == *krate))
+        .map(|(krate, key)| {
+            let value = krate.env(db).get(&key);
+            let value = value.or_else(|| ide_db::base_db::process_env_var(db, &key));
+            (key, value)
+        })
+        .collect();
+    env.sort_unstable();
+    env.dedup();
+    if !env.is_empty() {
+        text.push('\n');
+    }
+    for (key, value) in env {
+        let key = dep_info::escaped_variable(&key);
+        match value {
+            Some(value) => {
+                text += &format!("# env-dep:{key}={}\n", dep_info::escaped_variable(&value))
+            }
+            None => text += &format!("# env-dep:{key}\n"),
+        }
     }
     std::fs::write(path, text).with_context(|| format!("writing {}", path.display()))
 }
