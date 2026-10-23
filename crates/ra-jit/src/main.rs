@@ -6889,7 +6889,12 @@ fn run_holding(
     // that is not in it for this build.
     let shared = shared.join().map_err(|_| anyhow::anyhow!("fetching the store panicked"))?;
     let built = built_crates(&db, &args)?;
-    let served = frozen::serve(&mut db, &built);
+    let mut served = frozen::serve(&mut db, &built);
+    // What is frozen names the files its `include!`s read: those not loaded yet are, and
+    // what named them is read again.
+    if WatchedFile::include_sources(&mut files, &mut tree, &mut db) != Loaded::Nothing {
+        served = frozen::serve(&mut db, &built);
+    }
     let mut resolved = resolve_crates(&db, &args, cores())?;
     // Resolving the names finds the files `include!` names that were not loaded. With those
     // in, there may be more.
