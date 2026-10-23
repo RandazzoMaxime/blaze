@@ -11,10 +11,7 @@ keeps your project compiled in memory, and after an edit compiles only the funct
 and writes them into the program cargo already built. A program that opts in can take the new
 code while it keeps running.
 
-On real projects such as ripgrep, nushell, helix and bun, an edit builds
-<!-- benchheadline:start -->10× faster on macOS arm64, 17× faster on Linux aarch64 and 14× faster on Linux x86-64<!-- benchheadline:end -->
-than with an incremental `cargo build` (the average over the projects; [How fast](#how-fast) has
-every number).
+On real projects such as ripgrep, nushell, helix and bun, an edit builds <!-- benchheadline:start -->10× faster on macOS arm64, 17× faster on Linux aarch64 and 14× faster on Linux x86-64<!-- benchheadline:end --> than with an incremental `cargo build` (the average over the projects; [How fast](#how-fast) has every number).
 
 To try it on a project of yours, on macOS on Apple silicon or on Linux:
 
