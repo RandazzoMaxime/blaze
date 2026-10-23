@@ -233,8 +233,8 @@ With no borrow checker, the 245 units rustc accepts would pass. Now:
 
 | Mode | In scope | Pass | rustc accepts, ra-jit too | rustc rejects, same errors |
 |---|---|---|---|---|
-| Polonius | 1579 | 1432 (90.7%) | 245 of 245 | 1187 of 1334 |
-| NLL | 1577 | 1428 (90.6%) | 226 of 226 | 1202 of 1351 |
+| Polonius | 1579 | 1430 (90.6%) | 245 of 245 | 1185 of 1334 |
+| NLL | 1577 | 1426 (90.4%) | 226 of 226 | 1200 of 1351 |
 
 463 units are out of scope; 344 of them need a nightly feature. CI runs the scoring on Linux
 and fails below a floor a few units under the count there.
@@ -248,8 +248,8 @@ just, axum, nushell, delta, eza, tokei and starship it finds nothing, nor on the
 
 Every failing unit is one where rustc gives an error ra-jit does not, or gives it on another
 line or with another code. By what is wrong, most first: 14 "lifetime may not live long
-enough" and 11 E0597 not reported, 10 with only an error rustc does not give, 9 "lifetime may
-not live long enough" on another line, 8 each of E0716 and E0700, 7 each of E0507 and E0521,
+enough" and 12 E0597 not reported, 9 "lifetime may not live long enough" on another line,
+9 E0716 not reported, 9 with only an error rustc does not give, 8 E0700, 7 each of E0507 and E0521,
 6 each of E0510 and E0310, and 5 each of E0309, E0311, E0382 and higher-ranked errors not
 reported, then a long tail. The causes, grouped:
 
@@ -274,6 +274,9 @@ reported, then a long tail. The causes, grouped:
   cast. A bound on a closure's type is not proven through the solver: rust-analyzer gives a
   closure one signature, `fn(&'1 T)` for one `'1`, where rustc's is `for<'a> fn(&'a T)`, so
   proving it would tie every call's borrow to one region.
+- **`const { .. }` blocks**: MIR lowering makes a function's inline const a constant with
+  a body of its own, which the borrow checker does not check yet; rustc checks it with the
+  function, as it does a closure, so an E0597, E0716 or E0381 in one is missed.
 - **Differences in rust-analyzer's MIR lowering** (below).
 
 ## What depends on rust-analyzer's MIR lowering
