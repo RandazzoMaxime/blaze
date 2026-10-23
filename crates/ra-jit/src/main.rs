@@ -3049,16 +3049,10 @@ fn harness_alone(args: &Args) -> Option<String> {
 /// The text of the root file of the crate of each program of tests of `programs` with ra-jit's
 /// test harness as the tests are now at its end, or without it where ra-jit writes none, for
 /// those that differ from the text they have. Only the crates among `of` when it is given.
-///
-/// rustc's harness stays while it lists the tests as they were when ra-jit first listed them
-/// (`first`, by root file), which is as rustc built them: a program that switches to ra-jit's
-/// is built anew, every function of it, and one test edited is not a reason to. A program
-/// whose tests are only right under ra-jit's, [`harness_alone`], has it from the start.
 fn harnesses<'a>(
     db: &RootDatabase,
     programs: impl IntoIterator<Item = &'a Args>,
     of: Option<&FxHashSet<Crate>>,
-    first: &mut FxHashMap<vfs::FileId, Option<String>>,
 ) -> Vec<(vfs::FileId, String)> {
     let mut texts: Vec<(vfs::FileId, String)> = Vec::new();
     for args in programs.into_iter().filter(|it| of_tests(it)) {
@@ -3077,11 +3071,6 @@ fn harnesses<'a>(
                 let name = |file| source_path(db, &args.checkout, args.base.as_deref(), file);
                 test_harness::module(db, krate, functions, &name)
             });
-            let listed = module.as_ref().map(|it| it.listed.clone());
-            let as_rustc = first.entry(file).or_insert_with(|| listed.clone());
-            let written = test_harness::without(&text).len() != text.len();
-            let module =
-                module.filter(|_| written || *as_rustc != listed || harness_alone(args).is_some());
             let module = module.map(|it| it.text).unwrap_or_default();
             let wanted = format!("{}{module}", test_harness::without(&text));
             if *text != *wanted {
@@ -6906,11 +6895,8 @@ fn run_holding(
     eprintln!("load workspace: {:.1?}", start.elapsed());
     memory::checkpoint("load");
 
-    // The tests of each program as rustc's harness lists them, by the root file of its crate.
-    // Listed once the names are resolved, on every core, and not on this thread alone.
-    let mut as_rustc = FxHashMap::default();
     if args.out.is_dir() {
-        let texts = harnesses(&db, [&args], None, &mut as_rustc);
+        let texts = harnesses(&db, [&args], None);
         write_harnesses(&mut db, texts);
         return build_batch(&db, args);
     }
@@ -6943,7 +6929,9 @@ fn run_holding(
         listed.touch(&db, None);
         resolved = resolve_crates(&db, &args, cores())?;
     }
-    let texts = harnesses(&db, [&args], None, &mut as_rustc);
+    // A tests' program starts in ra-jit's harness, which what rustc linked does not have.
+    let texts = harnesses(&db, [&args], None);
+    let harnessed = !texts.is_empty();
     write_harnesses(&mut db, texts);
     eprintln!("resolve: {resolved} crates in {:.1?}", start.elapsed());
     frozen::store(&db, &served)?;
@@ -7038,7 +7026,7 @@ fn run_holding(
             bail!("{why}");
         }
     }
-    let cold = match rustcs_to_patch(&args, written.is_empty()) {
+    let cold = match rustcs_to_patch(&args, written.is_empty() && !harnessed) {
         Some(rustcs) => {
             let start = Instant::now();
             start_from_rustc(&args, &rustcs, &table, &mut files)?;
@@ -7856,7 +7844,14 @@ fn run_holding(
             let unbuilt = &mut programs[*at].unbuilt;
             unbuilt.stale |= unbuilt.unlinked && *request != Request::Patch;
         }
-        let stale = building.iter().any(|&at| programs[at].unbuilt.stale) || !moved.is_empty();
+        // A program of tests asked for the first time is built with ra-jit's harness then, while
+        // nobody edits: the first edit is a patch of it.
+        let unharnessed = |at: &usize| {
+            of_tests(&programs[*at].args) && !harnessed.contains(&programs[*at].args.out)
+        };
+        let stale = building.iter().any(|&at| programs[at].unbuilt.stale)
+            || building.iter().any(unharnessed)
+            || !moved.is_empty();
         let (noticed, age) = match noticed {
             Some(noticed) => noticed,
             None if stale => (Instant::now(), Duration::ZERO),
@@ -7936,12 +7931,11 @@ fn run_holding(
             let args = &program.args;
             wanted.extend(crates_named(&db, &args.krate, args).unwrap_or_default().first());
         }
-        let texts =
-            harnesses(&db, programs.iter().map(|it| &it.args), Some(&wanted), &mut as_rustc);
+        let texts = harnesses(&db, programs.iter().map(|it| &it.args), Some(&wanted));
+        let mut untouched: Vec<vfs::FileId> = Vec::new();
         if !texts.is_empty() {
             let roots: Vec<_> = texts.iter().map(|it| it.0).collect();
-            let untouched: Vec<_> =
-                roots.iter().copied().filter(|it| !editing.contains(it)).collect();
+            untouched = roots.iter().copied().filter(|it| !editing.contains(it)).collect();
             home_in_rustcs(&db, &listed, &mut programs, &untouched);
             outlines.before_edit(&db, &listed, &untouched);
             for file in write_harnesses(&mut db, texts) {
@@ -7969,9 +7963,15 @@ fn run_holding(
         }
         // Asked of every file before any is noted: noting one forgets the functions listed.
         for program in &mut programs {
+            // A harness written into the root of a library is an edit of the program of its
+            // tests alone: the others link the library, which runs none of it.
+            let args = &program.args;
+            let own = crates_named(&db, &args.krate, args).ok();
+            let own = own.and_then(|it| it.first().map(|it| it.root_file(&db)));
+            let edited = sources.iter().filter(|it| !untouched.contains(it) || own == Some(**it));
             let unbuilt = &mut program.unbuilt;
             unbuilt.stale |= changed != 0;
-            unbuilt.edited.extend(&sources);
+            unbuilt.edited.extend(edited);
             unbuilt.edited.sort_unstable();
             unbuilt.edited.dedup();
         }
