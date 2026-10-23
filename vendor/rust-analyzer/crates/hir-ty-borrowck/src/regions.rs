@@ -1325,6 +1325,65 @@ impl<'db> Builder<'_, '_, 'db> {
                 Some(args.as_coroutine().return_ty());
             return true;
         }
+        if let TyKind::CoroutineClosure(def, args) = closure.kind() {
+            // An `async` closure called by reference returns a future whose captures are
+            // borrowed for as long as that reference: rustc's `AsyncFn` lending.
+            let TyKind::Coroutine(coroutine, _) =
+                body.locals[super::return_slot()].ty.as_ref().kind()
+            else {
+                return false;
+            };
+            let args = self.creator_args(args, args.as_coroutine_closure().parent_args().len());
+            let mut env_ty = Ty::new_coroutine_closure(interner, def, args);
+            let (kind, env_region) = match by_ref {
+                Some(mutability) => {
+                    let region = self.new_universal(UniversalKind::AnonParam);
+                    self.regions.closure_env = Some(self.regions.universals.len() - 1);
+                    env_ty = Ty::new_ref(interner, region, env_ty, mutability);
+                    let kind = if mutability.is_mut() {
+                        rustc_type_ir::ClosureKind::FnMut
+                    } else {
+                        rustc_type_ir::ClosureKind::Fn
+                    };
+                    (kind, region)
+                }
+                None => (rustc_type_ir::ClosureKind::FnOnce, Region::new_static(interner)),
+            };
+            let parts = args.as_coroutine_closure();
+            let mut late = FxHashMap::default();
+            let sig = rustc_type_ir::fold_regions(
+                interner,
+                parts.coroutine_closure_sig().skip_binder(),
+                |region, depth| match region.kind() {
+                    RegionKind::ReBound(
+                        rustc_type_ir::BoundVarIndexKind::Bound(debruijn),
+                        bound,
+                    ) if debruijn == depth => *late
+                        .entry(bound.var.as_u32())
+                        .or_insert_with(|| self.new_universal(UniversalKind::AnonParam)),
+                    _ => region,
+                },
+            );
+            let TyKind::Tuple(inputs) = sig.tupled_inputs_ty.kind() else { return false };
+            if inputs.len() != params.len() {
+                return false;
+            }
+            local_tys[env_local.into_raw().into_u32() as usize] = Some(env_ty);
+            for (&local, ty) in params.iter().zip(inputs.iter()) {
+                local_tys[local.into_raw().into_u32() as usize] = Some(ty);
+            }
+            local_tys[super::return_slot().into_raw().into_u32() as usize] =
+                Some(sig.to_coroutine_given_kind_and_upvars(
+                    interner,
+                    parts.parent_args(),
+                    coroutine,
+                    kind,
+                    env_region,
+                    parts.tupled_upvars_ty(),
+                    parts.coroutine_captures_by_ref_ty(),
+                ));
+            return true;
+        }
         let TyKind::Closure(def, args) = closure.kind() else { return false };
         let sig = args.as_closure().sig();
         let &[tupled] = sig.skip_binder().inputs().as_slice() else { return false };
@@ -3847,11 +3906,13 @@ impl<'db> Builder<'_, '_, 'db> {
         }
         // A capture by reference is rustc's `*(*env).i`, reborrowed through the closure's
         // reference to itself too: `|| &mut x` returns what lives only as long as the call.
+        // A coroutine's body has itself by value, as rustc checks it.
         if projection.first() == Some(&ProjectionElem::Deref)
             && self.ctx.upvars.iter().any(|it| it.local == local && it.by_ref)
             && let Some(env) = self.ctx.closure_local
-            && let TyKind::Ref(region, _, _) =
+            && let TyKind::Ref(region, env, _) =
                 self.regions.local_tys[env.into_raw().into_u32() as usize].kind()
+            && !matches!(env.kind(), TyKind::Coroutine(..))
             && let Some(region) = rv_of(region)
         {
             self.outlives(region, loan, at);
