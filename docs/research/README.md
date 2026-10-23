@@ -16,10 +16,13 @@ back them is under [docs/upstream/](../upstream/), each with a `SOURCE.md`. Sear
   allocation site, ripgrep and nushell), the spare worker's share, and what salsa 0.28.5's
   `lru` can and cannot evict (not a query with cycle handling, only at a new revision).
   2026-10-21. A spare only for a build that asks, salsa patched to evict queries with cycle
-  handling and what that costs edits, and a forced `mi_collect`. 2026-10-22.
+  handling and what that costs edits, and a forced `mi_collect`. 2026-10-22. What the own
+  base adds after ready (`described` first), the daemon's tree process by process, and
+  mimalloc against jemalloc. 2026-10-23.
 - [disk.md](disk.md): what ra-jit keeps on disk against cargo on ripgrep, helix, nushell and
   bevy, part by part with reflinked blocks counted once, the store before and after zstd
-  blocks, and what is left for the no-rustc lane. 2026-10-23.
+  blocks, what is left after the no-rustc lane (F/G) projected, and which compressed debug
+  information std, gdb, lldb and addr2line read. 2026-10-23.
 - [proc-macro-cache.md](proc-macro-cache.md): rustc's `-Zcache-proc-macros` (derives only, a
   query per expansion), the earlier attempts, and what ra-jit's expansion cache keys and why
   spans are in the key. 2026-10-21.
@@ -28,7 +31,8 @@ back them is under [docs/upstream/](../upstream/), each with a `SOURCE.md`. Sear
   rust-analyzer's removed borrowck, and what ra-jit builds. 2026-10-20.
 - [bun.md](bun.md): bun's Rust port (1.4.3, 1.25M lines in 103 crates on a nightly) built
   by ra-jit: how the harness builds it, what broke and was fixed, what is filed, and its edit
-  and runtime numbers against cargo. 2026-10-21.
+  and runtime numbers against cargo; why the whole program ran 5.9x slower than release and
+  the added function took 19.8 s, and the macOS whole-program link. 2026-10-21, 2026-10-23.
 - [../architecture-split.md](../architecture-split.md): what of ra-jit belongs in the
   rust-analyzer subtree and what in `crates/`; ra-jit's changes to rust-analyzer by purpose,
   upstream's churn on the files they touch, rustc's crate split, and a migration plan.

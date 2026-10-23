@@ -4,26 +4,26 @@
  "cores": 18,
  "runs": 3,
  "cold_runs": 1,
- "commit": "1645168dc4abbdfab2e234232efb73a5c1ec2935",
- "date": "2026-10-21T21:34:57Z",
+ "commit": "27077156ccbd476079d261e529fc25b3225f0ace",
+ "date": "2026-10-23T05:22:33Z",
  "host": {
   "name": null,
   "cpu": "Apple M5 Max",
   "cores": 18,
   "machine_cores": 18,
-  "load": "27.8, 39.6, 44.9",
+  "load": "8.5, 10.0, 13.9",
   "memory_gib": 128,
   "os": "Darwin",
   "arch": "arm64",
   "kernel": "27.0.0",
-  "rustc": "rustc 1.99.0 (b940084d7 2026-09-28)",
-  "cc": "Apple clang version 21.0.0 (clang-2100.3.34.2)",
-  "ld": "ld: unknown options: --version",
-  "llvm": null,
+  "rustc": "rustc 1.100.0-nightly (574ff7d98 2026-09-14)",
+  "cc": "clang version 21.1.8",
+  "ld": "ld: unknown option: --version",
+  "llvm": "23.1.3",
   "incremental": "profile default (on for dev)",
   "wrapper": null,
   "linker": "the toolchain's default (cc)",
-  "library_dirs": null
+  "library_dirs": 116
  },
  "backends": {
   "cranelift": {
@@ -35,459 +35,426 @@
   "bun/cranelift": {
    "phases": {
     "cold": {
-     "wall_s": 291.41,
-     "cargo_s": 106.419,
-     "rss_mb": 37556,
+     "wall_s": 81.441,
+     "cargo_s": 83.288,
+     "rss_mb": 13684,
      "built": "cargo",
-     "build_s": 163.724,
-     "warm_s": 127.686,
+     "build_s": 79.489,
+     "warm_s": 1.952,
      "samples_s": [
-      291.41
+      81.441
      ],
      "cargo_samples_s": [
-      106.419
+      83.288
      ],
      "build_samples_s": [
-      163.724
+      79.489
      ],
      "setups": {},
-     "compiled": 440560,
+     "compiled": 0,
      "steps_s": {
-      "load": 6.9,
-      "resolve": 18.0,
-      "compile": 119.5,
-      "emit": 0.505,
-      "link": 2.8
+      "load": 74.4,
+      "resolve": 1.5
      },
-     "threads_s": {
-      "infer": 334.8,
-      "mir": 106.4,
-      "monomorphize": 29.0,
-      "translate": 220.0,
-      "describe": 22.5,
-      "store read": 4.4,
-      "store write": 11.5,
-      "cranelift": 81.3
-     },
-     "started_over": [
-      "a static is used by a function left to rustc",
-      "a static is used by a function left to rustc",
-      "a static is used by a function left to rustc",
-      "a static is used by a function left to rustc",
-      "58 instances did not compile, the first: unsupported: callee `execute_until`: unsupported: callee `fire`: unsupported: writable static `CURRENT_TIME` without a rustc symbol"
-     ],
+     "threads_s": {},
+     "started_over": [],
      "memory": {
       "ra-jit": {
-       "peak_mb": 37556,
-       "peak_max_mb": 37556,
-       "largest_mb": 37522,
-       "resident_mb": 27588
+       "peak_mb": 13684,
+       "peak_max_mb": 13684,
+       "largest_mb": 11832,
+       "resident_mb": 11796
       },
       "cargo": {
-       "peak_mb": 3143,
-       "peak_max_mb": 3143,
-       "largest_mb": 2657
+       "peak_mb": 3145,
+       "peak_max_mb": 3145,
+       "largest_mb": 2683
       }
      },
      "disk_mb": {
-      "target": 8006,
-      "store": 2713,
+      "target": 7611,
+      "store": 155,
       "home": 1,
-      "cargo target": 4806
+      "cargo target": 4926
      },
-     "warm_store_build_s": 97.449,
-     "warm_store_s": 195.474,
+     "warm_store_build_s": 62.831,
+     "warm_store_s": 64.308,
      "warm_store_samples_s": [
-      195.474
+      64.308
      ],
      "warm_store_memory": {
-      "peak_mb": 43626,
-      "resident_mb": 29209
+      "peak_mb": 13755,
+      "resident_mb": 12025
      }
     },
     "no-op": {
      "memory": {
       "ra-jit": {
-       "peak_mb": 28087,
-       "peak_max_mb": 28549,
-       "largest_mb": 27088,
-       "resident_mb": 28078
+       "peak_mb": 26053,
+       "peak_max_mb": 34150,
+       "largest_mb": 26014,
+       "resident_mb": 26043
       },
       "cargo": {
-       "peak_mb": 77,
-       "peak_max_mb": 77,
-       "largest_mb": 77
+       "peak_mb": 98,
+       "peak_max_mb": 98,
+       "largest_mb": 98
       }
      },
-     "wall_s": 0.073,
-     "cargo_s": 0.168,
-     "rss_mb": 37556,
+     "wall_s": 0.122,
+     "cargo_s": 0.199,
+     "rss_mb": 34150,
      "built": "daemon",
      "compiled": 0,
      "samples_s": [
-      0.073,
-      0.075,
-      0.061
+      0.19,
+      0.122,
+      0.09
      ],
      "cargo_samples_s": [
-      0.203,
-      0.168,
-      0.161
+      0.214,
+      0.199,
+      0.137
      ],
      "setups": {}
     },
     "body": {
      "memory": {
       "ra-jit": {
-       "peak_mb": 28669,
-       "peak_max_mb": 28741,
-       "largest_mb": 27672,
-       "resident_mb": 28612
+       "peak_mb": 26066,
+       "peak_max_mb": 26338,
+       "largest_mb": 26035,
+       "resident_mb": 26057
       },
       "cargo": {
-       "peak_mb": 2088,
-       "peak_max_mb": 2097,
-       "largest_mb": 2088
+       "peak_mb": 2101,
+       "peak_max_mb": 2113,
+       "largest_mb": 2101
       }
      },
-     "wall_s": 1.089,
-     "cargo_s": 12.163,
-     "rss_mb": 37556,
+     "wall_s": 0.362,
+     "cargo_s": 7.546,
+     "rss_mb": 34150,
      "built": "daemon",
      "link": "spliced",
-     "compiled": 1,
+     "compiled": 0,
      "places": 1,
      "steps_ms": {
-      "settle": 0.73,
-      "read": 155.41,
-      "apply": 34.01,
-      "roots": 5.54,
-      "check": 271.92,
-      "reach": 0.8,
-      "resolve": 0.08,
+      "settle": 0.61,
+      "read": 30.23,
+      "apply": 580.98,
+      "roots": 5.44,
+      "check": 133.46,
+      "reach": 0.35,
+      "resolve": 0.04,
       "define": 0.0,
-      "object": 0.16,
+      "object": 0.12,
       "discarded": 0.0,
-      "statics": 2.12,
-      "setup": 0.69,
-      "compile-rest": 3.64,
-      "write": 1023.88,
-      "build-rest": 10.41,
-      "report": 6.74,
-      "refuse": 442.96,
-      "link": 276.19
+      "statics": 0.0,
+      "setup": 0.37,
+      "compile-rest": 0.56,
+      "write": 0.0,
+      "build-rest": 92.3,
+      "report": 0.06,
+      "refuse": 3.12,
+      "link": 97.17
      },
      "threads_s": {
-      "infer": 0.0,
-      "mir": 0.0,
-      "monomorphize": 0.0,
-      "translate": 0.003,
-      "describe": 0.0,
-      "store read": 0.0,
-      "store write": 0.0,
-      "cranelift": 0.0
+      "infer": 43.2,
+      "mir": 18.2,
+      "monomorphize": 19.7,
+      "translate": 137.1,
+      "describe": 3.9,
+      "store read": 0.096,
+      "store write": 0.549,
+      "cranelift": 63.7
      },
      "started_over": [],
-     "slowest_s": 2.412,
-     "back_s": 1.883,
-     "back_cargo_s": 11.421,
+     "slowest_s": 1.073,
+     "back_s": 0.314,
+     "back_cargo_s": 6.783,
      "back_link": "spliced",
      "samples_s": [
-      2.412,
-      1.089,
-      1.024
+      1.073,
+      0.362,
+      0.305
      ],
      "cargo_samples_s": [
-      15.035,
-      12.163,
-      11.413
+      7.546,
+      6.963,
+      7.712
      ],
      "setups": {}
     },
     "signature": {
      "memory": {
       "ra-jit": {
-       "peak_mb": 39580,
-       "peak_max_mb": 39580,
-       "largest_mb": 38591,
-       "resident_mb": 27069
+       "peak_mb": 27742,
+       "peak_max_mb": 37616,
+       "largest_mb": 27712,
+       "resident_mb": 27728
       },
       "cargo": {
-       "peak_mb": 2105,
-       "peak_max_mb": 2105,
-       "largest_mb": 2105
+       "peak_mb": 2116,
+       "peak_max_mb": 2120,
+       "largest_mb": 2116
       }
      },
-     "wall_s": 126.44,
-     "cargo_s": 9.829,
-     "rss_mb": 39580,
-     "built": "cargo: `run` is not compiled by ra-jit and rustc's copy is from before the edit: unsupported: callee `install`: unsupported: callee `posix_signal_handler`: unsupported: writable static `SHOULD_ABORT` without a rustc symbol",
+     "wall_s": 0.823,
+     "cargo_s": 7.256,
+     "rss_mb": 37616,
+     "built": "daemon",
      "link": "full link: no executable to add to",
-     "compiled": 371432,
+     "compiled": 20567,
      "places": 2,
      "steps_ms": {
-      "settle": 0.0,
-      "read": 1.01,
-      "apply": 0.14,
-      "roots": 5.01,
-      "check": 301.03,
-      "reach": 2124.8,
-      "resolve": 5105.57,
-      "define": 1619.38,
-      "object": 10888.21,
+      "settle": 0.61,
+      "read": 26.64,
+      "apply": 27.54,
+      "roots": 108.86,
+      "check": 44.67,
+      "reach": 1674.44,
+      "resolve": 2908.85,
+      "define": 290.78,
+      "object": 3311.63,
       "discarded": 0.0,
       "statics": 0.0,
       "setup": 0.0,
-      "compile-rest": 17088.69,
-      "write": 528.05,
-      "build-rest": 15.68,
-      "report": 5.75,
-      "refuse": 13.54,
-      "link": 2052.39
+      "compile-rest": 5635.52,
+      "write": 189.91,
+      "build-rest": 19.97,
+      "report": 6.78,
+      "refuse": 3.54,
+      "link": 559377.19
      },
      "threads_s": {
-      "infer": 67.1,
-      "mir": 19.2,
-      "monomorphize": 44.3,
-      "translate": 240.2,
-      "describe": 30.0,
-      "store read": 95.012,
-      "store write": 5.574,
-      "cranelift": 22.3
+      "infer": 0.0,
+      "mir": 0.193,
+      "monomorphize": 0.756,
+      "translate": 3.9,
+      "describe": 4.1,
+      "store read": 0.596,
+      "store write": 1.2,
+      "cranelift": 1.8
      },
-     "started_over": [
-      "a static is used by a function left to rustc",
-      "an entry of the store did not fit",
-      "a static is used by a function left to rustc",
-      "an entry of the store did not fit",
-      "a static is used by a function left to rustc",
-      "58 instances did not compile, the first: unsupported: callee `execute_until`: unsupported: callee `fire`: unsupported: writable static `CURRENT_TIME` without a rustc symbol"
-     ],
-     "slowest_s": 126.44,
-     "back_s": 76.65,
-     "back_cargo_s": 9.872,
-     "back_link": "full link: no executable to add to",
+     "started_over": [],
+     "slowest_s": 573.755,
+     "back_s": 0.729,
+     "back_cargo_s": 6.532,
+     "back_link": "spliced",
      "samples_s": [
-      126.44
+      573.755,
+      0.566,
+      0.823
      ],
      "cargo_samples_s": [
-      9.829
+      8.27,
+      7.256,
+      6.299
      ],
      "setups": {}
     },
     "leaf": {
      "memory": {
       "ra-jit": {
-       "peak_mb": 28337,
-       "peak_max_mb": 28338,
-       "largest_mb": 27344,
-       "resident_mb": 28334
+       "peak_mb": 27729,
+       "peak_max_mb": 27732,
+       "largest_mb": 27699,
+       "resident_mb": 27725
       },
       "cargo": {
-       "peak_mb": 2138,
-       "peak_max_mb": 2138,
-       "largest_mb": 2138
+       "peak_mb": 2149,
+       "peak_max_mb": 2150,
+       "largest_mb": 2149
       }
      },
-     "wall_s": 1.806,
-     "cargo_s": 26.748,
-     "rss_mb": 39580,
+     "wall_s": 0.457,
+     "cargo_s": 16.008,
+     "rss_mb": 37616,
      "built": "daemon",
      "link": "spliced",
      "compiled": 1,
      "places": 1,
      "steps_ms": {
-      "settle": 3.38,
-      "read": 0.07,
-      "apply": 5.89,
-      "roots": 4.16,
-      "check": 315.23,
-      "reach": 0.55,
-      "resolve": 0.29,
+      "settle": 3.0,
+      "read": 0.06,
+      "apply": 3.19,
+      "roots": 4.0,
+      "check": 115.29,
+      "reach": 1.26,
+      "resolve": 0.57,
       "define": 0.03,
-      "object": 0.22,
+      "object": 1.49,
       "discarded": 0.0,
-      "statics": 2.07,
-      "setup": 0.57,
-      "compile-rest": 2.73,
-      "write": 1505.34,
-      "build-rest": 9.78,
-      "report": 5.98,
-      "refuse": 316.79,
-      "link": 124.42
+      "statics": 1.98,
+      "setup": 0.41,
+      "compile-rest": 4.72,
+      "write": 154.22,
+      "build-rest": 22.48,
+      "report": 2.41,
+      "refuse": 3.49,
+      "link": 158.25
      },
      "threads_s": {
       "infer": 0.0,
       "mir": 0.0,
       "monomorphize": 0.0,
       "translate": 0.0,
-      "describe": 0.0,
+      "describe": 0.003,
       "store read": 0.0,
       "store write": 0.0,
       "cranelift": 0.0
      },
      "started_over": [],
-     "slowest_s": 2.374,
-     "back_s": 1.816,
-     "back_cargo_s": 23.983,
+     "slowest_s": 0.604,
+     "back_s": 0.492,
+     "back_cargo_s": 14.845,
      "back_link": "spliced",
      "samples_s": [
-      1.806,
-      0.779,
-      2.374
+      0.454,
+      0.604,
+      0.457
      ],
      "cargo_samples_s": [
-      29.591,
-      20.907,
-      26.748
+      16.949,
+      15.534,
+      16.008
      ],
      "setups": {}
     },
     "generic": {
      "memory": {
       "ra-jit": {
-       "peak_mb": 39693,
-       "peak_max_mb": 42121,
-       "largest_mb": 38697,
-       "resident_mb": 28217
+       "peak_mb": 27741,
+       "peak_max_mb": 27744,
+       "largest_mb": 27713,
+       "resident_mb": 27739
       },
       "cargo": {
-       "peak_mb": 2241,
-       "peak_max_mb": 2248,
-       "largest_mb": 2241
+       "peak_mb": 2257,
+       "peak_max_mb": 2265,
+       "largest_mb": 2257
       }
      },
-     "wall_s": 72.522,
-     "cargo_s": 31.803,
-     "rss_mb": 43071,
+     "wall_s": 0.568,
+     "cargo_s": 14.909,
+     "rss_mb": 37616,
      "built": "daemon",
-     "link": "full link: the whole object was written again",
-     "compiled": 8020,
+     "link": "spliced",
+     "compiled": 14,
      "places": 1,
      "steps_ms": {
-      "settle": 3.38,
-      "read": 0.07,
-      "apply": 17.31,
-      "roots": 4.22,
-      "check": 1501.17,
-      "reach": 350.81,
-      "resolve": 2147.68,
-      "define": 549.31,
-      "object": 10055.31,
-      "discarded": 52492.65,
-      "statics": 0.0,
-      "setup": 0.0,
-      "compile-rest": 8243.36,
-      "write": 726.62,
-      "build-rest": 11.76,
-      "report": 21.23,
-      "refuse": 101.95,
-      "link": 2052.31
+      "settle": 3.88,
+      "read": 4.35,
+      "apply": 6.54,
+      "roots": 6.3,
+      "check": 106.94,
+      "reach": 7.26,
+      "resolve": 1.32,
+      "define": 0.36,
+      "object": 8.69,
+      "discarded": 0.0,
+      "statics": 2.23,
+      "setup": 0.38,
+      "compile-rest": 7.97,
+      "write": 190.51,
+      "build-rest": 14.47,
+      "report": 2.49,
+      "refuse": 4.82,
+      "link": 207.54
      },
      "threads_s": {
       "infer": 0.0,
       "mir": 0.0,
       "monomorphize": 0.0,
-      "translate": 0.009,
-      "describe": 22.8,
-      "store read": 4.0,
-      "store write": 0.715,
-      "cranelift": 0.003
+      "translate": 0.049,
+      "describe": 0.012,
+      "store read": 0.0,
+      "store write": 0.0,
+      "cranelift": 0.002
      },
-     "started_over": [
-      "a static is used by a function left to rustc",
-      "a static is used by a function left to rustc",
-      "a static is used by a function left to rustc",
-      "a static is used by a function left to rustc",
-      "58 instances did not compile, the first: unsupported: callee `execute_until`: unsupported: callee `fire`: unsupported: writable static `CURRENT_TIME` without a rustc symbol"
-     ],
-     "slowest_s": 78.343,
-     "back_s": 65.18,
-     "back_cargo_s": 25.331,
-     "back_link": "full link: the whole object was written again",
+     "started_over": [],
+     "slowest_s": 0.692,
+     "back_s": 0.493,
+     "back_cargo_s": 13.377,
+     "back_link": "spliced",
      "samples_s": [
-      72.522,
-      78.343,
-      71.857
+      0.692,
+      0.523,
+      0.568
      ],
      "cargo_samples_s": [
-      34.14,
-      31.803,
-      25.09
+      14.909,
+      15.585,
+      13.089
      ],
      "setups": {}
     },
     "newfn": {
      "memory": {
       "ra-jit": {
-       "peak_mb": 39512,
-       "peak_max_mb": 39646,
-       "largest_mb": 38515,
-       "resident_mb": 28243
+       "peak_mb": 27754,
+       "peak_max_mb": 27755,
+       "largest_mb": 27720,
+       "resident_mb": 27754
       },
       "cargo": {
-       "peak_mb": 2238,
-       "peak_max_mb": 2272,
-       "largest_mb": 2238
+       "peak_mb": 2249,
+       "peak_max_mb": 2283,
+       "largest_mb": 2249
       }
      },
-     "wall_s": 50.501,
-     "cargo_s": 12.25,
-     "rss_mb": 43071,
+     "wall_s": 0.558,
+     "cargo_s": 11.1,
+     "rss_mb": 37616,
      "built": "daemon",
-     "link": "full link: the whole object was written again",
+     "link": "spliced",
      "compiled": 2,
      "places": 2,
      "steps_ms": {
-      "settle": 1.54,
-      "read": 9.38,
-      "apply": 232.05,
-      "roots": 130.41,
-      "check": 478.27,
-      "reach": 497.22,
-      "resolve": 3252.35,
-      "define": 977.37,
-      "object": 3624.59,
-      "discarded": 34585.24,
-      "statics": 0.0,
-      "setup": 0.0,
-      "compile-rest": 8302.27,
-      "write": 456.18,
-      "build-rest": 11.02,
-      "report": 5.2,
-      "refuse": 4.79,
-      "link": 1508.88
+      "settle": 0.48,
+      "read": 4.65,
+      "apply": 74.61,
+      "roots": 22.54,
+      "check": 180.82,
+      "reach": 1.36,
+      "resolve": 0.36,
+      "define": 0.01,
+      "object": 1.06,
+      "discarded": 0.0,
+      "statics": 1.62,
+      "setup": 0.32,
+      "compile-rest": 2.53,
+      "write": 105.82,
+      "build-rest": 12.06,
+      "report": 2.39,
+      "refuse": 3.81,
+      "link": 67.57
      },
      "threads_s": {
       "infer": 0.0,
       "mir": 0.0,
       "monomorphize": 0.0,
       "translate": 0.0,
-      "describe": 14.3,
-      "store read": 3.6,
-      "store write": 0.598,
+      "describe": 0.002,
+      "store read": 0.0,
+      "store write": 0.0,
       "cranelift": 0.0
      },
-     "started_over": [
-      "a static is used by a function left to rustc",
-      "a static is used by a function left to rustc",
-      "a static is used by a function left to rustc",
-      "a static is used by a function left to rustc",
-      "58 instances did not compile, the first: unsupported: callee `execute_until`: unsupported: callee `fire`: unsupported: writable static `CURRENT_TIME` without a rustc symbol"
-     ],
-     "slowest_s": 54.182,
-     "back_s": 62.044,
-     "back_cargo_s": 12.182,
-     "back_link": "full link: the whole object was written again",
+     "started_over": [],
+     "slowest_s": 0.566,
+     "back_s": 0.619,
+     "back_cargo_s": 10.919,
+     "back_link": "spliced",
      "samples_s": [
-      54.182,
-      48.007,
-      50.501
+      0.566,
+      0.558,
+      0.557
      ],
      "cargo_samples_s": [
-      19.06,
-      10.94,
-      12.25
+      10.765,
+      11.1,
+      11.705
      ],
      "setups": {}
     }
@@ -495,50 +462,50 @@
    "wrong": [],
    "tag": "bun-v1.4.3",
    "rev": "c6da4a4d3010e5553438c60f6bd76d981976867c",
-   "store_mb": 2825,
+   "store_mb": 2654,
    "cold_runs": 1,
    "resident": {
-    "ready_mb": 27588,
+    "ready_mb": 11796,
     "after": [
      {
       "phase": "no-op",
       "builds": 3,
-      "mb": 28078
+      "mb": 26043
      },
      {
       "phase": "body",
       "builds": 9,
-      "mb": 28612
+      "mb": 26057
      },
      {
       "phase": "signature",
-      "builds": 11,
-      "mb": 27069
+      "builds": 15,
+      "mb": 27728
      },
      {
       "phase": "leaf",
-      "builds": 17,
-      "mb": 28334
+      "builds": 21,
+      "mb": 27725
      },
      {
       "phase": "generic",
-      "builds": 23,
-      "mb": 28217
+      "builds": 27,
+      "mb": 27739
      },
      {
       "phase": "newfn",
-      "builds": 29,
-      "mb": 28243
+      "builds": 33,
+      "mb": 27754
      }
     ],
-    "end_mb": 28243,
-    "builds": 29
+    "end_mb": 27754,
+    "builds": 33
    },
    "disk_mb": {
-    "target": 9890,
-    "store": 2828,
-    "home": 7,
-    "cargo target": 5875
+    "target": 8551,
+    "store": 2649,
+    "home": 103,
+    "cargo target": 6036
    },
    "toolchain": "nightly-2026-09-15",
    "runtime": {
@@ -548,31 +515,31 @@
      "const t = new Bun.Transpiler({ loader: 'ts', minifyWhitespace: true }); const fs = require('fs'); const sources = ['http2', 'net', '_http_server', 'fs', 'child_process'].map(n => fs.readFileSync('src/js/node/' + n + '.ts', 'utf8')); let n = 0; for (let i = 0; i < 20; i++) for (const s of sources) n += t.transformSync(s).length; console.log(n)"
     ],
     "ra-jit": {
-     "median_s": 1.0604,
-     "min_s": 0.9541,
-     "max_s": 1.1103,
+     "median_s": 1.3255,
+     "min_s": 1.0785,
+     "max_s": 1.5485,
      "runs": 10,
-     "peak_mb": 71,
-     "peak_max_mb": 71,
-     "size_mb": 384.4
+     "peak_mb": 74,
+     "peak_max_mb": 74,
+     "size_mb": 478.6
     },
     "cargo debug": {
-     "median_s": 0.754,
-     "min_s": 0.6904,
-     "max_s": 0.8243,
+     "median_s": 0.8459,
+     "min_s": 0.7203,
+     "max_s": 0.9353,
      "runs": 10,
-     "peak_mb": 56,
-     "peak_max_mb": 56,
-     "size_mb": 189.6
+     "peak_mb": 54,
+     "peak_max_mb": 54,
+     "size_mb": 245.9
     },
     "cargo release": {
-     "median_s": 0.1174,
-     "min_s": 0.1057,
-     "max_s": 0.1215,
+     "median_s": 0.1131,
+     "min_s": 0.1085,
+     "max_s": 0.1513,
      "runs": 10,
-     "peak_mb": 42,
-     "peak_max_mb": 42,
-     "size_mb": 91.8
+     "peak_mb": 41,
+     "peak_max_mb": 41,
+     "size_mb": 103.1
     }
    }
   }

@@ -2,9 +2,9 @@
 //!
 //! With `RA_JIT_MEMORY` naming a directory, the daemon reports what the process holds after
 //! each step of warming up, and once warm and after each request it answers writes there what
-//! every ingredient of the database holds. A build with the `heap-profile` feature allocates with jemalloc instead of
-//! mimalloc: it can tell how much of the heap is live, and with `_RJEM_MALLOC_CONF=prof:true`
-//! it writes a profile of the heap next to the ingredients, for `jeprof` to read.
+//! every ingredient of the database holds, and how much of the heap is live. A build with the
+//! `heap-profile` feature run with `_RJEM_MALLOC_CONF=prof:true` also writes a profile of the
+//! heap next to the ingredients, for `jeprof` to read.
 
 use std::{
     fmt::Write as _,
@@ -74,12 +74,12 @@ fn kilobytes(text: &str, name: &str) -> Option<u64> {
 
 /// Bytes allocated and not freed, when the allocator counts them.
 pub(crate) fn live() -> Option<u64> {
-    #[cfg(feature = "heap-profile")]
+    #[cfg(unix)]
     {
         tikv_jemalloc_ctl::epoch::advance().ok()?;
         tikv_jemalloc_ctl::stats::allocated::read().ok().map(|it| it as u64)
     }
-    #[cfg(not(feature = "heap-profile"))]
+    #[cfg(windows)]
     None
 }
 

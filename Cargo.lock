@@ -3195,6 +3195,7 @@ dependencies = [
  "pdb",
  "project-model",
  "pulldown-cmark",
+ "ra-jit-cache",
  "ra-jit-expand",
  "ra-jit-live",
  "ra-jit-store",

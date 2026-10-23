@@ -33,7 +33,7 @@ pub(crate) fn serve(args: Args) -> anyhow::Result<()> {
     let projects = [args.project.as_path()];
     let selection = args.selection.clone();
     let (mut db, vfs, checkouts) =
-        crate::load(&projects, &cargo_config, crate::load_config(), selection, None)?;
+        crate::load(&projects, &cargo_config, crate::load_config(), selection, None, None)?;
     ide_db::base_db::set_process_env(&mut db, crate::process::own());
     let Parts { root, members, lints_capped, .. } = checkouts.parts(&args.project)?;
     let mut checker = Checker::new(&db, &vfs, &checkouts, &members, read_from, root, lints_capped);

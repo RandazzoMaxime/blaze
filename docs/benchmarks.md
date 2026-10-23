@@ -538,7 +538,7 @@ Peak: the most every process doing the work held at once, sampled every 10 ms an
 | nushell 0.108.0 | Add a struct field | 1.1 GB | 13.3 GB | 1.1 GB | 11.4 GB | 12.2 GB |
 | nushell 0.108.0 | Nothing changed | 156 MB | 12.1 GB | 156 MB | 11.2 GB | 12.1 GB |
 
-The daemon between builds, and what each side keeps on disk once the edits are done (as `du` counts it). After the first build: once the step after the cold build (nothing changed) is done; growth is from then to the end, over every edit made and taken back. Warm store: the cold start of another checkout with the store the first one filled.
+The daemon between builds, and what each side keeps on disk once the edits are done (each block once, [how](#memory-and-disk)). After the first build: once the step after the cold build (nothing changed) is done; growth is from then to the end, over every edit made and taken back. Warm store: the cold start of another checkout with the store the first one filled.
 
 | Project | Daemon ready | After the first build | At the end | Growth | Warm store: peak, ready | cargo target | ra-jit target | Store | Home |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
@@ -556,7 +556,7 @@ The same command run by the program ra-jit linked and by cargo's debug and relea
 
 ### macOS arm64, bun
 
-ra-jit [`1645168dc4`](https://github.com/indexable-inc/ra-jit/commit/1645168dc4abbdfab2e234232efb73a5c1ec2935), 2026-10-21T21:34:57Z, Rust 1.99.0, 3 runs of each edit, measured by hand. Raw: [benchmarks/bun-macos-arm64.json](benchmarks/bun-macos-arm64.json).
+ra-jit [`27077156cc`](https://github.com/indexable-inc/ra-jit/commit/27077156ccbd476079d261e529fc25b3225f0ace), 2026-10-23T05:22:33Z, Rust 1.99.0, 3 runs of each edit, measured by hand. Raw: [benchmarks/bun-macos-arm64.json](benchmarks/bun-macos-arm64.json).
 
 | Machine | |
 |---|---|
@@ -566,13 +566,13 @@ ra-jit [`1645168dc4`](https://github.com/indexable-inc/ra-jit/commit/1645168dc4a
 | Memory (GiB) | 128 |
 | OS | macOS |
 | Kernel | 27.0.0 |
-| rustc | rustc 1.99.0 (b940084d7 2026-09-28) |
-| C compiler | Apple clang version 21.0.0 (clang-2100.3.34.2) |
+| rustc | rustc 1.100.0-nightly (574ff7d98 2026-09-14) |
+| C compiler | clang version 21.1.8 |
 | Linker | - |
-| LLVM | - |
+| LLVM | 23.1.3 |
 | Incremental | profile default (on for dev) |
 | Compiler cache | none |
-| Load average at the start | 27.8, 39.6, 44.9 |
+| Load average at the start | 8.5, 10.0, 13.9 |
 
 #### Edits, Cranelift, macOS arm64, bun
 
@@ -580,12 +580,12 @@ Median, then the fastest and slowest run. Built: who built the edit (daemon, or 
 
 | Project | Edit | cargo | ra-jit | | cargo runs | ra-jit runs | Built | Link |
 |---|---|---:|---:|---:|---|---|---|---|
-| bun 1.4.3 | Edit a function | 12.16 s | 1.09 s | 11x | 11.41 s to 15.04 s | 1.02 s to 2.41 s | daemon | spliced |
-| bun 1.4.3 | Edit a widely used function | 26.75 s | 1.81 s | 15x | 20.91 s to 29.59 s | 779 ms to 2.37 s | daemon | spliced |
-| bun 1.4.3 | Change a signature | 9.83 s | 126.44 s | 0.1x | 9.83 s to 9.83 s | 126.44 s to 126.44 s | cargo: `run` is not compiled by ra-jit and rustc's copy is from before the edit: | full link: no executable to add to |
-| bun 1.4.3 | Edit a generic function | 31.80 s | 72.52 s | 0.4x | 25.09 s to 34.14 s | 71.86 s to 78.34 s | daemon | full link: the whole object was written again |
-| bun 1.4.3 | Add a function | 12.25 s | 50.50 s | 0.2x | 10.94 s to 19.06 s | 48.01 s to 54.18 s | daemon | full link: the whole object was written again |
-| bun 1.4.3 | Nothing changed | 168 ms | 73 ms | 2.3x | 161 ms to 203 ms | 61 ms to 75 ms | daemon |  |
+| bun 1.4.3 | Edit a function | 7.55 s | 362 ms | 21x | 6.96 s to 7.71 s | 305 ms to 1.07 s | daemon | spliced |
+| bun 1.4.3 | Edit a widely used function | 16.01 s | 457 ms | 35x | 15.53 s to 16.95 s | 454 ms to 604 ms | daemon | spliced |
+| bun 1.4.3 | Change a signature | 7.26 s | 823 ms | 8.8x | 6.30 s to 8.27 s | 566 ms to 573.75 s | daemon | full link: no executable to add to |
+| bun 1.4.3 | Edit a generic function | 14.91 s | 568 ms | 26x | 13.09 s to 15.59 s | 523 ms to 692 ms | daemon | spliced |
+| bun 1.4.3 | Add a function | 11.10 s | 558 ms | 20x | 10.77 s to 11.71 s | 557 ms to 566 ms | daemon | spliced |
+| bun 1.4.3 | Nothing changed | 199 ms | 122 ms | 1.6x | 137 ms to 214 ms | 90 ms to 190 ms | daemon |  |
 
 #### Cold, Cranelift, macOS arm64, bun
 
@@ -593,7 +593,7 @@ From an empty target directory, crates already downloaded, one run. `cargo ra-ji
 
 | Project | `cargo build` | `cargo ra-jit build` | Daemon ready, empty store | Daemon ready, warm store | Functions compiled | Daemon memory | Store |
 |---|---:|---:|---:|---:|---:|---:|---:|
-| bun 1.4.3 | 106.42 s | 163.72 s | 291.41 s | 195.47 s | 440,560 | 37,556 MB | 2,825 MB |
+| bun 1.4.3 | 83.29 s | 79.49 s | 81.44 s | 64.31 s | 0 | 13,684 MB | 2,654 MB |
 
 #### Memory and disk, Cranelift, macOS arm64, bun
 
@@ -601,19 +601,19 @@ Peak: the most every process doing the work held at once, sampled every 10 ms an
 
 | Project | Step | cargo, peak | ra-jit, peak | cargo, largest process | ra-jit, largest process | Daemon after |
 |---|---|---:|---:|---:|---:|---:|
-| bun 1.4.3 | Cold, until the daemon is ready | 3.1 GB | 37.6 GB | 2.7 GB | 37.5 GB | 27.6 GB |
-| bun 1.4.3 | Edit a function | 2.1 GB | 28.7 GB | 2.1 GB | 27.7 GB | 28.6 GB |
-| bun 1.4.3 | Edit a widely used function | 2.1 GB | 28.3 GB | 2.1 GB | 27.3 GB | 28.3 GB |
-| bun 1.4.3 | Change a signature | 2.1 GB | 39.6 GB | 2.1 GB | 38.6 GB | 27.1 GB |
-| bun 1.4.3 | Edit a generic function | 2.2 GB | 39.7 GB | 2.2 GB | 38.7 GB | 28.2 GB |
-| bun 1.4.3 | Add a function | 2.2 GB | 39.5 GB | 2.2 GB | 38.5 GB | 28.2 GB |
-| bun 1.4.3 | Nothing changed | 77 MB | 28.1 GB | 77 MB | 27.1 GB | 28.1 GB |
+| bun 1.4.3 | Cold, until the daemon is ready | 3.1 GB | 13.7 GB | 2.7 GB | 11.8 GB | 11.8 GB |
+| bun 1.4.3 | Edit a function | 2.1 GB | 26.1 GB | 2.1 GB | 26.0 GB | 26.1 GB |
+| bun 1.4.3 | Edit a widely used function | 2.1 GB | 27.7 GB | 2.1 GB | 27.7 GB | 27.7 GB |
+| bun 1.4.3 | Change a signature | 2.1 GB | 27.7 GB | 2.1 GB | 27.7 GB | 27.7 GB |
+| bun 1.4.3 | Edit a generic function | 2.3 GB | 27.7 GB | 2.3 GB | 27.7 GB | 27.7 GB |
+| bun 1.4.3 | Add a function | 2.2 GB | 27.8 GB | 2.2 GB | 27.7 GB | 27.8 GB |
+| bun 1.4.3 | Nothing changed | 98 MB | 26.1 GB | 98 MB | 26.0 GB | 26.0 GB |
 
-The daemon between builds, and what each side keeps on disk once the edits are done (as `du` counts it). After the first build: once the step after the cold build (nothing changed) is done; growth is from then to the end, over every edit made and taken back. Warm store: the cold start of another checkout with the store the first one filled.
+The daemon between builds, and what each side keeps on disk once the edits are done (each block once, [how](#memory-and-disk)). After the first build: once the step after the cold build (nothing changed) is done; growth is from then to the end, over every edit made and taken back. Warm store: the cold start of another checkout with the store the first one filled.
 
 | Project | Daemon ready | After the first build | At the end | Growth | Warm store: peak, ready | cargo target | ra-jit target | Store | Home |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
-| bun 1.4.3 | 27.6 GB | 28.1 GB | 28.2 GB after 29 builds | +165 MB | 43.6 GB, 29.2 GB | 5.9 GB | 9.9 GB | 2.8 GB | 7 MB |
+| bun 1.4.3 | 11.8 GB | 26.0 GB | 27.8 GB after 33 builds | +1.7 GB | 13.8 GB, 12.0 GB | 6.0 GB | 8.6 GB | 2.6 GB | 103 MB |
 
 #### How fast the program runs, Cranelift, macOS arm64, bun
 
@@ -621,7 +621,7 @@ The same command run by the program ra-jit linked and by cargo's debug and relea
 
 | Project | Command | ra-jit | cargo debug | cargo release |
 |---|---|---:|---:|---:|
-| bun 1.4.3 | `bun -e const t = new Bun.Transpiler({ loader: 'ts', minifyWhitespace: true }); const fs = require('fs'); const sources = ['http2', 'net', '_http_server', 'fs', 'child_process'].map(n => fs.readFileSync('src/js/node/' + n + '.ts', 'utf8')); let n = 0; for (let i = 0; i < 20; i++) for (const s of sources) n += t.transformSync(s).length; console.log(n)` | 1.06 s (954 ms to 1.11 s); 71 MB, 384.4 MB | 754 ms (690 ms to 824 ms); 56 MB, 189.6 MB | 117 ms (106 ms to 122 ms); 42 MB, 91.8 MB |
+| bun 1.4.3 | `bun -e const t = new Bun.Transpiler({ loader: 'ts', minifyWhitespace: true }); const fs = require('fs'); const sources = ['http2', 'net', '_http_server', 'fs', 'child_process'].map(n => fs.readFileSync('src/js/node/' + n + '.ts', 'utf8')); let n = 0; for (let i = 0; i < 20; i++) for (const s of sources) n += t.transformSync(s).length; console.log(n)` | 1.33 s (1.08 s to 1.55 s); 74 MB, 478.6 MB | 846 ms (720 ms to 935 ms); 54 MB, 245.9 MB | 113 ms (108 ms to 151 ms); 41 MB, 103.1 MB |
 
 ### Linux aarch64
 
@@ -786,7 +786,7 @@ Peak: the most every process doing the work held at once, sampled every 10 ms an
 | bevy 0.20.0 | Add a function | 6.7 GB | 50.3 GB | 6.3 GB | 41.2 GB | 42.1 GB |
 | bevy 0.20.0 | Nothing changed | 123 MB | 58.6 GB | 123 MB | 57.1 GB | 58.4 GB |
 
-The daemon between builds, and what each side keeps on disk once the edits are done (as `du` counts it). After the first build: once the step after the cold build (nothing changed) is done; growth is from then to the end, over every edit made and taken back. Warm store: the cold start of another checkout with the store the first one filled.
+The daemon between builds, and what each side keeps on disk once the edits are done (each block once, [how](#memory-and-disk)). After the first build: once the step after the cold build (nothing changed) is done; growth is from then to the end, over every edit made and taken back. Warm store: the cold start of another checkout with the store the first one filled.
 
 | Project | Daemon ready | After the first build | At the end | Growth | Warm store: peak, ready | cargo target | ra-jit target | Store | Home |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
@@ -951,7 +951,7 @@ Peak: the most every process doing the work held at once, sampled every 10 ms an
 | bevy 0.20.0 | Add a function | 6.7 GB | 50.0 GB | 6.3 GB | 41.2 GB | 42.0 GB |
 | bevy 0.20.0 | Nothing changed | 123 MB | 38.3 GB | 123 MB | 36.7 GB | 38.1 GB |
 
-The daemon between builds, and what each side keeps on disk once the edits are done (as `du` counts it). After the first build: once the step after the cold build (nothing changed) is done; growth is from then to the end, over every edit made and taken back. Warm store: the cold start of another checkout with the store the first one filled.
+The daemon between builds, and what each side keeps on disk once the edits are done (each block once, [how](#memory-and-disk)). After the first build: once the step after the cold build (nothing changed) is done; growth is from then to the end, over every edit made and taken back. Warm store: the cold start of another checkout with the store the first one filled.
 
 | Project | Daemon ready | After the first build | At the end | Growth | Warm store: peak, ready | cargo target | ra-jit target | Store | Home |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
@@ -1136,7 +1136,7 @@ Peak: the most every process doing the work held at once, sampled every 10 ms an
 | bevy 0.20.0 | Add a function | 8.5 GB | 85.1 GB | 8.1 GB | 42.2 GB | 43.3 GB |
 | bevy 0.20.0 | Nothing changed | 121 MB | 50.9 GB | 121 MB | 49.4 GB | 51.8 GB |
 
-The daemon between builds, and what each side keeps on disk once the edits are done (as `du` counts it). After the first build: once the step after the cold build (nothing changed) is done; growth is from then to the end, over every edit made and taken back. Warm store: the cold start of another checkout with the store the first one filled.
+The daemon between builds, and what each side keeps on disk once the edits are done (each block once, [how](#memory-and-disk)). After the first build: once the step after the cold build (nothing changed) is done; growth is from then to the end, over every edit made and taken back. Warm store: the cold start of another checkout with the store the first one filled.
 
 | Project | Daemon ready | After the first build | At the end | Growth | Warm store: peak, ready | cargo target | ra-jit target | Store | Home |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
@@ -1301,7 +1301,7 @@ Peak: the most every process doing the work held at once, sampled every 10 ms an
 | bevy 0.20.0 | Add a function | 8.5 GB | 55.9 GB | 8.1 GB | 42.3 GB | 43.5 GB |
 | bevy 0.20.0 | Nothing changed | 121 MB | 32.1 GB | 121 MB | 30.5 GB | 31.9 GB |
 
-The daemon between builds, and what each side keeps on disk once the edits are done (as `du` counts it). After the first build: once the step after the cold build (nothing changed) is done; growth is from then to the end, over every edit made and taken back. Warm store: the cold start of another checkout with the store the first one filled.
+The daemon between builds, and what each side keeps on disk once the edits are done (each block once, [how](#memory-and-disk)). After the first build: once the step after the cold build (nothing changed) is done; growth is from then to the end, over every edit made and taken back. Warm store: the cold start of another checkout with the store the first one filled.
 
 | Project | Daemon ready | After the first build | At the end | Growth | Warm store: peak, ready | cargo target | ra-jit target | Store | Home |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
@@ -1325,11 +1325,11 @@ The same command run by the program ra-jit linked and by cargo's debug and relea
 
 ### Linux x86-64, bun
 
-ra-jit [`7dcfe73922`](https://github.com/indexable-inc/ra-jit/commit/7dcfe739224e0f1b5a65c2bc744375bb0ef33714), 2026-10-22T21:42:28Z, Rust 1.99.0, 3 runs of each edit, measured by hand. Raw: [benchmarks/bun-linux-x86-64.json](benchmarks/bun-linux-x86-64.json).
+ra-jit [`948d54e375`](https://github.com/indexable-inc/ra-jit/commit/948d54e375ef4f4685a932539d3a4118992a31c1), 2026-10-23T04:03:30Z, Rust 1.99.0, 3 runs of each edit, measured by hand. Raw: [benchmarks/bun-linux-x86-64.json](benchmarks/bun-linux-x86-64.json).
 
 | Machine | |
 |---|---|
-| Name | AWS c8a.24xlarge (dev-aws-eph-rajit-bun), pinned to 16 cores with taskset |
+| Name | AWS c8a.24xlarge (dev-aws-eph-rajit-bunperf) |
 | CPU | AMD EPYC 9R45 |
 | Cores | 16 |
 | Memory (GiB) | 185 |
@@ -1341,7 +1341,7 @@ ra-jit [`7dcfe73922`](https://github.com/indexable-inc/ra-jit/commit/7dcfe739224
 | LLVM | 23.1.3 |
 | Incremental | profile default (on for dev) |
 | Compiler cache | none |
-| Load average at the start | 3.5, 3.4, 4.0 |
+| Load average at the start | 2.4, 1.1, 4.4 |
 
 #### Edits, Cranelift, Linux x86-64, bun
 
@@ -1349,12 +1349,12 @@ Median, then the fastest and slowest run. Built: who built the edit (daemon, or 
 
 | Project | Edit | cargo | ra-jit | | cargo runs | ra-jit runs | Built | Link |
 |---|---|---:|---:|---:|---|---|---|---|
-| bun 1.4.3 | Edit a function | 9.12 s | 489 ms | 19x | 9.08 s to 9.26 s | 479 ms to 498 ms | daemon | spliced |
-| bun 1.4.3 | Edit a widely used function | 16.48 s | 487 ms | 34x | 16.40 s to 16.51 s | 480 ms to 498 ms | daemon | spliced |
-| bun 1.4.3 | Change a signature | 9.17 s | 635 ms | 14x | 9.16 s to 9.24 s | 621 ms to 21.13 s | daemon | full link: the whole object was written again |
-| bun 1.4.3 | Edit a generic function | 16.73 s | 524 ms | 32x | 16.64 s to 16.76 s | 506 ms to 527 ms | daemon | spliced |
-| bun 1.4.3 | Add a function | 14.49 s | 19.80 s | 0.7x | 14.38 s to 14.91 s | 19.73 s to 19.95 s | daemon | full link: the whole object was written again |
-| bun 1.4.3 | Nothing changed | 74 ms | 19 ms | 3.9x | 74 ms to 93 ms | 17 ms to 20 ms | daemon |  |
+| bun 1.4.3 | Edit a function | 9.18 s | 441 ms | 21x | 9.18 s to 9.22 s | 435 ms to 448 ms | daemon | spliced |
+| bun 1.4.3 | Edit a widely used function | 16.52 s | 408 ms | 40x | 16.45 s to 16.68 s | 405 ms to 421 ms | daemon | spliced |
+| bun 1.4.3 | Change a signature | 9.26 s | 565 ms | 16x | 9.25 s to 9.31 s | 562 ms to 651 ms | daemon | spliced |
+| bun 1.4.3 | Edit a generic function | 16.80 s | 438 ms | 38x | 16.78 s to 16.83 s | 436 ms to 448 ms | daemon | spliced |
+| bun 1.4.3 | Add a function | 14.69 s | 641 ms | 23x | 14.55 s to 14.93 s | 638 ms to 666 ms | daemon | spliced |
+| bun 1.4.3 | Nothing changed | 73 ms | 18 ms | 4.1x | 72 ms to 74 ms | 17 ms to 19 ms | daemon |  |
 
 #### Cold, Cranelift, Linux x86-64, bun
 
@@ -1362,7 +1362,7 @@ From an empty target directory, crates already downloaded, one run. `cargo ra-ji
 
 | Project | `cargo build` | `cargo ra-jit build` | Daemon ready, empty store | Daemon ready, warm store | Functions compiled | Daemon memory | Store |
 |---|---:|---:|---:|---:|---:|---:|---:|
-| bun 1.4.3 | 73.06 s | 70.93 s | 73.34 s | 73.01 s | 0 | 33,820 MB | 183 MB |
+| bun 1.4.3 | 72.96 s | 70.82 s | 72.96 s | 73.11 s | 0 | 35,804 MB | 193 MB |
 
 #### Memory and disk, Cranelift, Linux x86-64, bun
 
@@ -1370,19 +1370,19 @@ Peak: the most every process doing the work held at once, sampled every 10 ms an
 
 | Project | Step | cargo, peak | ra-jit, peak | cargo, largest process | ra-jit, largest process | Daemon after |
 |---|---|---:|---:|---:|---:|---:|
-| bun 1.4.3 | Cold, until the daemon is ready | 4.5 GB | 15.5 GB | 3.0 GB | 12.3 GB | 12.5 GB |
-| bun 1.4.3 | Edit a function | 3.3 GB | 25.8 GB | 3.0 GB | 25.6 GB | 25.8 GB |
-| bun 1.4.3 | Edit a widely used function | 3.3 GB | 26.8 GB | 3.0 GB | 26.7 GB | 26.8 GB |
-| bun 1.4.3 | Change a signature | 3.3 GB | 26.9 GB | 3.0 GB | 26.7 GB | 26.8 GB |
-| bun 1.4.3 | Edit a generic function | 3.3 GB | 26.9 GB | 3.0 GB | 26.7 GB | 26.8 GB |
-| bun 1.4.3 | Add a function | 3.3 GB | 33.5 GB | 3.0 GB | 33.3 GB | 26.9 GB |
-| bun 1.4.3 | Nothing changed | 56 MB | 25.7 GB | 56 MB | 25.6 GB | 25.7 GB |
+| bun 1.4.3 | Cold, until the daemon is ready | 4.5 GB | 15.4 GB | 3.0 GB | 11.9 GB | 12.0 GB |
+| bun 1.4.3 | Edit a function | 3.3 GB | 27.3 GB | 3.0 GB | 27.1 GB | 27.2 GB |
+| bun 1.4.3 | Edit a widely used function | 3.3 GB | 27.3 GB | 3.0 GB | 27.1 GB | 27.2 GB |
+| bun 1.4.3 | Change a signature | 3.3 GB | 27.3 GB | 3.0 GB | 27.1 GB | 27.2 GB |
+| bun 1.4.3 | Edit a generic function | 3.3 GB | 27.3 GB | 3.0 GB | 27.1 GB | 27.2 GB |
+| bun 1.4.3 | Add a function | 3.3 GB | 27.3 GB | 3.0 GB | 27.1 GB | 27.3 GB |
+| bun 1.4.3 | Nothing changed | 56 MB | 27.2 GB | 56 MB | 27.0 GB | 27.2 GB |
 
-The daemon between builds, and what each side keeps on disk once the edits are done (as `du` counts it). After the first build: once the step after the cold build (nothing changed) is done; growth is from then to the end, over every edit made and taken back. Warm store: the cold start of another checkout with the store the first one filled.
+The daemon between builds, and what each side keeps on disk once the edits are done (each block once, [how](#memory-and-disk)). After the first build: once the step after the cold build (nothing changed) is done; growth is from then to the end, over every edit made and taken back. Warm store: the cold start of another checkout with the store the first one filled.
 
 | Project | Daemon ready | After the first build | At the end | Growth | Warm store: peak, ready | cargo target | ra-jit target | Store | Home |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
-| bun 1.4.3 | 12.5 GB | 25.7 GB | 26.9 GB after 33 builds | +1.2 GB | 15.5 GB, 12.5 GB | 5.7 GB | 7.6 GB | 183 MB | 1 MB |
+| bun 1.4.3 | 12.0 GB | 27.2 GB | 27.3 GB after 33 builds | +51 MB | 15.4 GB, 12.2 GB | 5.7 GB | 7.8 GB | 188 MB | 1 MB |
 
 #### How fast the program runs, Cranelift, Linux x86-64, bun
 
@@ -1390,55 +1390,6 @@ The same command run by the program ra-jit linked and by cargo's debug and relea
 
 | Project | Command | ra-jit | cargo debug | cargo release |
 |---|---|---:|---:|---:|
-| bun 1.4.3 | `bun -e const t = new Bun.Transpiler({ loader: 'ts', minifyWhitespace: true }); const fs = require('fs'); const sources = ['http2', 'net', '_http_server', 'fs', 'child_process'].map(n => fs.readFileSync('src/js/node/' + n + '.ts', 'utf8')); let n = 0; for (let i = 0; i < 20; i++) for (const s of sources) n += t.transformSync(s).length; console.log(n)` | 1.58 s (1.58 s to 1.58 s); 106 MB, 586.1 MB | 966 ms (965 ms to 966 ms); 79 MB, 397.9 MB | 135 ms (135 ms to 137 ms); 54 MB, 314.0 MB |
-
-#### Edits, LLVM, Linux x86-64, bun
-
-Median, then the fastest and slowest run. Built: who built the edit (daemon, or cargo and why). Link: the change was spliced into the program, or it was linked again.
-
-| Project | Edit | cargo | ra-jit | | cargo runs | ra-jit runs | Built | Link |
-|---|---|---:|---:|---:|---|---|---|---|
-| bun 1.4.3 | Edit a function | 9.13 s | 494 ms | 18x | 9.11 s to 9.21 s | 493 ms to 510 ms | daemon | spliced |
-| bun 1.4.3 | Edit a widely used function | 16.37 s | 502 ms | 33x | 16.34 s to 16.41 s | 499 ms to 514 ms | daemon | spliced |
-| bun 1.4.3 | Change a signature | 9.16 s | 618 ms | 15x | 9.15 s to 9.30 s | 602 ms to 21.94 s | daemon | full link: the whole object was written again |
-| bun 1.4.3 | Edit a generic function | 16.78 s | 527 ms | 32x | 16.71 s to 16.91 s | 516 ms to 535 ms | daemon | spliced |
-| bun 1.4.3 | Add a function | 14.62 s | 18.38 s | 0.8x | 14.47 s to 14.85 s | 18.33 s to 18.55 s | daemon | full link: the whole object was written again |
-| bun 1.4.3 | Nothing changed | 73 ms | 25 ms | 2.9x | 73 ms to 75 ms | 24 ms to 32 ms | daemon |  |
-
-#### Cold, LLVM, Linux x86-64, bun
-
-From an empty target directory, crates already downloaded, one run. `cargo ra-jit build` is cargo's own build (the daemon is not loaded yet); the daemon then loads the workspace and builds it once, and edits are fast from then on. Warm store: the same in another checkout of the same commit, with the store the first one filled.
-
-| Project | `cargo build` | `cargo ra-jit build` | Daemon ready, empty store | Daemon ready, warm store | Functions compiled | Daemon memory | Store |
-|---|---:|---:|---:|---:|---:|---:|---:|
-| bun 1.4.3 | 79.24 s | 73.28 s | 75.78 s | 72.76 s | 0 | 32,393 MB | 115 MB |
-
-#### Memory and disk, LLVM, Linux x86-64, bun
-
-Peak: the most every process doing the work held at once, sampled every 10 ms and never below the largest process, median of the runs. Largest process: the peak of the one process that held the most, as the kernel kept it: `wait4`'s for the command's tree, and each process's peak sampled (on macOS the kernel's peak footprint of each, counting for the daemon only a peak it passed during the step). ra-jit is the daemon, its workers and what they run, and the `cargo ra-jit build` with any cargo it ran; cargo is cargo itself, rustc, build scripts and the linker. Daemon after: what the daemon and its workers hold once the step is over ([how](#memory-and-disk)).
-
-| Project | Step | cargo, peak | ra-jit, peak | cargo, largest process | ra-jit, largest process | Daemon after |
-|---|---|---:|---:|---:|---:|---:|
-| bun 1.4.3 | Cold, until the daemon is ready | 4.5 GB | 15.4 GB | 3.0 GB | 12.1 GB | 12.3 GB |
-| bun 1.4.3 | Edit a function | 3.3 GB | 25.3 GB | 3.0 GB | 25.1 GB | 25.2 GB |
-| bun 1.4.3 | Edit a widely used function | 3.3 GB | 26.5 GB | 3.0 GB | 26.2 GB | 26.4 GB |
-| bun 1.4.3 | Change a signature | 3.3 GB | 26.5 GB | 3.0 GB | 26.2 GB | 26.4 GB |
-| bun 1.4.3 | Edit a generic function | 3.3 GB | 26.5 GB | 3.0 GB | 26.2 GB | 26.4 GB |
-| bun 1.4.3 | Add a function | 3.3 GB | 32.9 GB | 3.0 GB | 32.6 GB | 26.5 GB |
-| bun 1.4.3 | Nothing changed | 56 MB | 25.3 GB | 56 MB | 25.0 GB | 25.2 GB |
-
-The daemon between builds, and what each side keeps on disk once the edits are done (as `du` counts it). After the first build: once the step after the cold build (nothing changed) is done; growth is from then to the end, over every edit made and taken back. Warm store: the cold start of another checkout with the store the first one filled.
-
-| Project | Daemon ready | After the first build | At the end | Growth | Warm store: peak, ready | cargo target | ra-jit target | Store | Home |
-|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
-| bun 1.4.3 | 12.3 GB | 25.2 GB | 26.5 GB after 33 builds | +1.3 GB | 15.3 GB, 12.2 GB | 5.7 GB | 7.4 GB | 116 MB | 1 MB |
-
-#### How fast the program runs, LLVM, Linux x86-64, bun
-
-The same command run by the program ra-jit linked and by cargo's debug and release builds, in turn. Median, then fastest and slowest; where measured, then the program's peak resident memory while it ran (median of the runs, as the kernel kept it) and the size of the program.
-
-| Project | Command | ra-jit | cargo debug | cargo release |
-|---|---|---:|---:|---:|
-| bun 1.4.3 | `bun -e const t = new Bun.Transpiler({ loader: 'ts', minifyWhitespace: true }); const fs = require('fs'); const sources = ['http2', 'net', '_http_server', 'fs', 'child_process'].map(n => fs.readFileSync('src/js/node/' + n + '.ts', 'utf8')); let n = 0; for (let i = 0; i < 20; i++) for (const s of sources) n += t.transformSync(s).length; console.log(n)` | 3.72 s (3.71 s to 3.72 s); 91 MB, 524.2 MB | 969 ms (968 ms to 970 ms); 79 MB, 397.9 MB | 135 ms (135 ms to 136 ms); 54 MB, 314.0 MB |
+| bun 1.4.3 | `bun -e const t = new Bun.Transpiler({ loader: 'ts', minifyWhitespace: true }); const fs = require('fs'); const sources = ['http2', 'net', '_http_server', 'fs', 'child_process'].map(n => fs.readFileSync('src/js/node/' + n + '.ts', 'utf8')); let n = 0; for (let i = 0; i < 20; i++) for (const s of sources) n += t.transformSync(s).length; console.log(n)` | 1.39 s (1.39 s to 1.39 s); 109 MB, 591.5 MB | 952 ms (952 ms to 953 ms); 79 MB, 397.9 MB | 136 ms (136 ms to 137 ms); 54 MB, 314.0 MB |
 
 <!-- bench:end -->

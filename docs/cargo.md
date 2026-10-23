@@ -61,7 +61,10 @@ each crate of the workspace, the arguments, the files rustc wrote and, for a pro
 line the linker was run with. Diagnostics, progress and the exit status are cargo's.
 
 When that build succeeds, the command tells the daemon to load the workspace and returns
-without waiting. The daemon is started if it is not running. Until the workspace is loaded,
+without waiting. The daemon is started if it is not running. It loads the workspace with what
+cargo said of the build scripts it ran and the proc macros it built, kept in
+`target/ra-jit/<build>/scripts`: none of them is built or run again for it, in
+`target/rust-analyzer` or anywhere else. Until the workspace is loaded,
 builds are cargo's, and each one says so:
 
     ra-jit: the daemon is still loading the workspace (951ms so far); building with cargo
