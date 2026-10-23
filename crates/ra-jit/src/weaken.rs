@@ -77,9 +77,20 @@ fn weaken(data: &mut [u8]) {
     }
 }
 
+/// What becomes of a definition.
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum Made {
+    /// It stays as it is.
+    Kept,
+    /// Weak, and still a name the program can export.
+    Weak,
+    /// Weak and private to the program.
+    Private,
+}
+
 /// Makes the definitions of a Mach-O object weak; an object of another format stays as it is.
 pub(crate) fn definitions(data: &mut [u8]) {
-    weaken_but(data, |_| false);
+    weaken_but(data, |_| Made::Private);
 }
 
 /// As [`definitions`], for an object of ra-jit's. Of a program's whole, with a C `main` of
@@ -87,14 +98,28 @@ pub(crate) fn definitions(data: &mut [u8]) {
 /// stand-ins rustc built have weak ones for cargo's link of them, and of two weak ones Apple's
 /// linker may keep the stand-in's, which would start the program at whatever is laid out
 /// after its `main`. A patch has no `main`, and gives way to the object it patches.
+///
+/// A name of C's (`#[no_mangle]`, `#[export_name]`) is weak and not private: a program can
+/// export it (bun's `-exported_symbols_list` names its `napi_*` for the addons it loads), and
+/// Apple's linker exports no private one. The names of Rust's and of ra-jit's are private.
 pub(crate) fn ours(data: &mut [u8]) {
     let has_main = defined(data).iter().any(|it| it == b"_main");
     weaken_but(data, |name| {
         let name = name.strip_prefix(b"_").unwrap_or(name);
-        has_main
-            && (name == b"main"
-                || crate::stub::ALLOCATOR_FUNCTIONS.iter().any(|it| it.as_bytes() == name))
+        let stays = name == b"main"
+            || crate::stub::ALLOCATOR_FUNCTIONS.iter().any(|it| it.as_bytes() == name);
+        match () {
+            _ if has_main && stays => Made::Kept,
+            _ if of_rust(name) => Made::Private,
+            _ => Made::Weak,
+        }
     });
+}
+
+/// Whether a name (without Mach-O's `_`) is a symbol rustc mangled or one of ra-jit's own.
+fn of_rust(name: &[u8]) -> bool {
+    let v0 = name.strip_prefix(b"_R").and_then(|it| it.first()).is_some_and(|it| it.is_ascii_alphanumeric());
+    name.starts_with(b"_ZN") || v0 || name.starts_with(b"ra-jit.")
 }
 
 /// The names an object defines and other objects can see.
@@ -103,12 +128,12 @@ fn defined(data: &[u8]) -> Vec<Vec<u8>> {
     let mut names = Vec::new();
     weaken_but(&mut data, |name| {
         names.push(name.to_vec());
-        true
+        Made::Kept
     });
     names
 }
 
-fn weaken_but(data: &mut [u8], mut keep: impl FnMut(&[u8]) -> bool) {
+fn weaken_but(data: &mut [u8], mut made: impl FnMut(&[u8]) -> Made) {
     let Some((symbols, strings)) = symbol_table(data) else { return };
     let (Some(names), Some(_)) = (data.get(strings.clone()), data.get(symbols.clone())) else {
         return;
@@ -124,8 +149,11 @@ fn weaken_but(data: &mut [u8], mut keep: impl FnMut(&[u8]) -> bool) {
         }
         let name = names.get(symbol.n_strx.get(LE) as usize..).unwrap_or_default();
         let name = name.split(|&it| it == 0).next().unwrap_or_default();
-        if !keep(name) {
+        let made = made(name);
+        if made == Made::Private {
             symbol.n_type |= N_PEXT;
+        }
+        if made != Made::Kept {
             symbol.n_desc.set(LE, symbol.n_desc(LE) | N_WEAK_DEF);
         }
     }
@@ -147,4 +175,72 @@ fn symbol_table(data: &[u8]) -> Option<(Range<usize>, Range<usize>)> {
         return Some((start..start + len, strings));
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use object::write::{Mangling, Object, Symbol, SymbolSection};
+    use object::{
+        Architecture, BinaryFormat, Endianness, SectionKind, SymbolFlags, SymbolKind,
+        SymbolScope,
+    };
+
+    use super::*;
+
+    const NAMES: [&str; 6] = [
+        "_main",
+        "_napi_create_async_work",
+        "___ra_jit_global_alloc",
+        "__ZN3app4work17h0123456789abcdefE",
+        "__RNvCs1234_3app4work",
+        "_ra-jit.0123456789abcdef.app::work",
+    ];
+
+    fn object() -> Vec<u8> {
+        let mut object = Object::new(BinaryFormat::MachO, Architecture::Aarch64, Endianness::Little);
+        object.set_mangling(Mangling::None);
+        let text = object.add_section(Vec::new(), b"__text".to_vec(), SectionKind::Text);
+        for (at, name) in NAMES.iter().enumerate() {
+            let offset = object.append_section_data(text, &[0; 4], 4);
+            assert_eq!(offset, 4 * at as u64);
+            object.add_symbol(Symbol {
+                name: name.as_bytes().to_vec(),
+                value: offset,
+                size: 4,
+                kind: SymbolKind::Text,
+                scope: SymbolScope::Dynamic,
+                weak: false,
+                section: SymbolSection::Section(text),
+                flags: SymbolFlags::None,
+            });
+        }
+        object.write().unwrap()
+    }
+
+    /// Whether each of [`NAMES`] is private and whether it is weak.
+    fn made(data: &[u8]) -> Vec<(bool, bool)> {
+        let (symbols, strings) = symbol_table(data).unwrap();
+        let symbols = pod::slice_from_all_bytes::<Nlist64<LE>>(&data[symbols]).unwrap();
+        let named = |name: &str| {
+            let symbol = symbols.iter().find(|it| {
+                let at = strings.start + it.n_strx.get(LE) as usize;
+                data[at..].split(|&it| it == 0).next() == Some(name.as_bytes())
+            });
+            let symbol = symbol.unwrap();
+            (symbol.n_type & N_PEXT != 0, symbol.n_desc(LE) & N_WEAK_DEF != 0)
+        };
+        NAMES.iter().map(|it| named(it)).collect()
+    }
+
+    #[test]
+    fn a_name_of_cs_in_ours_can_still_be_exported() {
+        let mut data = object();
+        ours(&mut data);
+        let (private, weak) = (true, true);
+        let (kept, exported, mangled) = ((!private, !weak), (!private, weak), (private, weak));
+        assert_eq!(made(&data), [kept, exported, kept, mangled, mangled, mangled]);
+        let mut data = object();
+        definitions(&mut data);
+        assert!(made(&data).iter().all(|&it| it == (private, weak)));
+    }
 }
