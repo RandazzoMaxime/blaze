@@ -69,7 +69,9 @@ impl Linked {
         let (patch, object) = (std::fs::read(patch), object.to_owned());
         // Taken before the daemon answers: whoever is given the program waits for the write.
         let lock = Writing::ahead(&binary);
-        Linked(std::thread::spawn(move || Baseline::read(binary, &patch?, &object, false, lock)))
+        Linked(std::thread::spawn(move || {
+            Baseline::parse(&binary, &patch?, &object, false)?.laid_out(binary, lock)
+        }))
     }
 
     /// As [`Linked::read`], of what rustc linked, which `binary` is another name of: it is
@@ -78,14 +80,24 @@ impl Linked {
     pub(crate) fn read_rustcs(binary: PathBuf, patch: &Path, object: &Path) -> Linked {
         let (patch, object) = (std::fs::read(patch), object.to_owned());
         Linked(std::thread::spawn(move || {
+            let patch = patch?;
             let mut copy = binary.clone().into_os_string();
             copy.push(".copy");
-            std::fs::copy(&binary, &copy)?;
+            // The executable is read as the copy is written, which takes as long for a large
+            // one: a filesystem that shares the blocks first writes out what the linker wrote.
+            let copying = {
+                let (binary, copy) = (binary.clone(), copy.clone());
+                std::thread::spawn(move || std::fs::copy(binary, copy))
+            };
+            let parsed = Baseline::parse(&binary, &patch, &object, true);
+            copying.join().map_err(|_| anyhow::anyhow!("copying the executable panicked"))??;
+            let mut parsed = parsed?;
             // Whoever takes the file meanwhile takes either, which are the same, and waits for
             // the write of the copy.
             let lock = Writing::ahead(copy.as_ref());
             std::fs::rename(&copy, &binary)?;
-            Baseline::read(binary, &patch?, &object, true, lock)
+            parsed.stamp = Stamp::of(&File::open(&binary)?)?;
+            parsed.laid_out(binary, lock)
         }))
     }
 
@@ -173,17 +185,42 @@ pub(crate) struct Spliced {
     pub(crate) copied: u64,
 }
 
+/// An executable as [`Baseline::parse`] read it, before [`Parsed::laid_out`] writes it.
+struct Parsed {
+    image: Executable,
+    baked: Vec<Box<[u8]>>,
+    stamp: Stamp,
+}
+
+impl Parsed {
+    /// The baseline of the executable at `path`, which is written in place under `lock`
+    /// ([`Writing::ahead`]) to leave room for what splices add.
+    fn laid_out(self, path: PathBuf, lock: Option<File>) -> anyhow::Result<Baseline> {
+        let Parsed { image, baked, stamp } = self;
+        let (left, stamp) = match &image {
+            Executable::Elf(image) => {
+                let moved = laid_out(&path, image, lock).unwrap_or_default();
+                (Left { appended: None, moved }, Stamp::of(&File::open(&path)?)?)
+            }
+            _ => (Left::default(), stamp),
+        };
+        Ok(Baseline {
+            path,
+            image: Arc::new(image),
+            baked,
+            undo: Vec::new(),
+            originals: FxHashMap::default(),
+            left,
+            stamp,
+            appended: None,
+        })
+    }
+}
+
 impl Baseline {
-    /// Reads the executable at `path`, which was linked with `patch` ahead of `object`, and
-    /// writes it in place under `lock` ([`Writing::ahead`]).
-    fn read(
-        path: PathBuf,
-        patch: &[u8],
-        object: &Path,
-        rustcs: bool,
-        lock: Option<File>,
-    ) -> anyhow::Result<Baseline> {
-        let file = File::open(&path)?;
+    /// Reads the executable at `path`, which was linked with `patch` ahead of `object`.
+    fn parse(path: &Path, patch: &[u8], object: &Path, rustcs: bool) -> anyhow::Result<Parsed> {
+        let file = File::open(path)?;
         let stamp = Stamp::of(&file)?;
         // SAFETY: the daemon is the one that has the link write the file, and it does not
         // start another while this reads.
@@ -209,7 +246,7 @@ impl Baseline {
                 object::FileKind::MachO64 => Executable::MachO(macho::Image::read(&bytes)?),
                 object::FileKind::Pe64 => {
                     let object = std::fs::read(object)?;
-                    Executable::Pe(pe::Image::read(&bytes, &path, &[patch, &object])?)
+                    Executable::Pe(pe::Image::read(&bytes, path, &[patch, &object])?)
                 }
                 _ => Executable::Elf(Image::read(&bytes)?),
             };
@@ -221,24 +258,7 @@ impl Baseline {
                 .collect();
             (image, baked)
         };
-        drop(bytes);
-        let (left, stamp) = match &image {
-            Executable::Elf(image) => {
-                let moved = laid_out(&path, image, lock).unwrap_or_default();
-                (Left { appended: None, moved }, Stamp::of(&File::open(&path)?)?)
-            }
-            _ => (Left::default(), stamp),
-        };
-        Ok(Baseline {
-            path,
-            image: Arc::new(image),
-            baked,
-            undo: Vec::new(),
-            originals: FxHashMap::default(),
-            left,
-            stamp,
-            appended: None,
-        })
+        Ok(Parsed { image, baked, stamp })
     }
 
     /// What an edit is published with ([`Baseline::live`]) while a splice of the executable
