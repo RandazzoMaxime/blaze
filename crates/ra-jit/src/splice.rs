@@ -2438,6 +2438,7 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn a_copy_keeps_no_blocks_of_what_was_let_go_of() {
+        use super::{OpenOptions, copy_file, let_go};
         use std::os::unix::fs::MetadataExt as _;
         let dir = std::env::temp_dir().join(format!("ra-jit-holes-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
