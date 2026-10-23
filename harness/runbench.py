@@ -101,7 +101,12 @@ def ra_jit_release(ws, spec, label, extra):
     try:
         for var in OWN_VARS:
             os.environ.pop(var, None)
-        os.environ.update({**RA_JIT_ENV, **extra, "RUSTFLAGS": f"{apps.FLAGS} {apps.own_flags(spec)}".strip()})
+        # Not apps.FLAGS: its `-C link-dead-code` keeps the symbols of rustc's code for ra-jit's to
+        # be linked ahead of, and rustc builds none here. It would link without `-dead_strip` or
+        # `--gc-sections`, as the release build does not, and one object of every function then
+        # has the calls of code no build keeps (bun's of Windows' API on macOS) to resolve.
+        flags = f"--cap-lints allow {apps.own_flags(spec)}"
+        os.environ.update({**RA_JIT_ENV, **extra, "RUSTFLAGS": flags.strip()})
         fx = apps.App(ws, {**spec, "cargo_args": [*spec.get("cargo_args", []), "--release"]}, alone=True)
         fx.ra_jit_args = ["--release"]
         # Cold: cargo's pass with ra-jit standing in for rustc (build scripts, proc macros,

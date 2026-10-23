@@ -449,6 +449,21 @@ stops.
   cargo's 4.5 GB. The daemon holds 12.5 GB once ready and 25.7 GB after the first edit, and the
   edit that adds a function peaks at 33.5 GB against cargo's 3.3 GB. On macOS arm64
   (2026-10-21, `docs/research/bun.md`) it was 291 s to ready, 28 GB, near 40 GB at an edit.
+  2026-10-23, ra-jit `948d54e375` (the bun-perf lane), same machine: an added function is now
+  a patch, so its 33.5 GB peak is gone; every edit peaks at 27.3 GB at most. The daemon holds
+  12.0 GB once ready and 27.2 GB from the first build on, then stays flat to 0.1 GB over 33
+  builds: the growth is the background build of the program for edits to patch (every
+  function of bun's C-ABI main is an entry, about 68k functions), not the edits. Cold, the
+  build peaks at 15.4 GB against cargo's 4.5 GB, as before.
+  On macOS arm64 (Apple M5 Max, 128 GiB, same commit, read, the daemon's log of `bench.py bun
+  --keep`) the background build of the program for edits gives up: "it holds 32826 MB, more
+  than the 32768 MB it may (`RA_JIT_OWN_BASE_MEMORY`)", a quarter of 128 GiB; Linux's quarter
+  of 185 GiB is 46 GB, which bun's base fits. Edits then go on patching rustc's executable,
+  which a signature edit cannot patch ("an edit that is more than the bodies of functions"):
+  its first sample writes the whole object and links bun in full, twice (280 s, then 279 s
+  again with `-headerpad` for the splices to fit), 574 s; the two after it splice into that
+  link in under 2 s. bun's base needs about 1 GB less, or the bound more room, for macOS's
+  signature edit to be a patch as Linux's is.
 - **architecture split**: the store is the crate `crates/ra-jit-store`, and the code
   generator moves to a crate of its own. New store-side code (item 3's cache, item 1's
   container, item 2's manifest) goes in or beside `ra-jit-store`, behind the store's

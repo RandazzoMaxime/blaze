@@ -3725,6 +3725,7 @@ fn build(
         entries: &entries,
         on_demand: &on_demand,
         start: main.filter(|it| own(it).is_some() || in_harness(db, *it)),
+        whole: local.iter().all(|&krate| resolver.own_crate_id(krate.into()).is_some()),
         kept: &kept,
         offered: &offered,
     };
@@ -3845,6 +3846,7 @@ fn build(
                     entries: &[func],
                     on_demand: &[],
                     start: None,
+                    whole: false,
                     kept: &[],
                     offered: &[],
                 };
@@ -6742,6 +6744,8 @@ fn run_holding(
     // Resolving the names finds the files `include!` names that were not loaded. With those
     // in, there may be more.
     while WatchedFile::include_sources(&mut files, &mut tree, &mut db) != Loaded::Nothing {
+        // A crate listed beside cargo's build was listed without what they declare.
+        listed.touch(&db, None);
         resolved = resolve_crates(&db, &args, cores())?;
     }
     let texts = harnesses(&db, [&args], None, &mut as_rustc);
@@ -6865,6 +6869,7 @@ fn run_holding(
             // An `include!` in a body is first seen when the body is compiled.
             if WatchedFile::include_sources(&mut files, &mut tree, &mut db) != Loaded::Nothing {
                 known.touch(&db, None);
+                listed.touch(&db, None);
                 cold = build_unheld(&db, &table, &args, &mut known, &listed)?;
             }
             if let Some(unset) = &cold.unset {
@@ -7039,12 +7044,17 @@ fn run_holding(
             builds.settle(&mut db, &mut programs)?;
         }
         let included = WatchedFile::watch_included(&mut files, &mut db);
-        match WatchedFile::include_sources(&mut files, &mut tree, &mut db) {
+        let loaded = WatchedFile::include_sources(&mut files, &mut tree, &mut db);
+        match loaded {
             _ if included => programs.iter_mut().for_each(|it| it.known.touch(&db, None)),
             Loaded::Nothing => {}
             // A build of the daemon's own compiled without them; what rustc linked is of them.
             Loaded::AsRustcRead => programs.iter_mut().for_each(|it| it.known.touch_own(&db)),
             Loaded::New => programs.iter_mut().for_each(|it| it.known.touch(&db, None)),
+        }
+        // What they declare is in the crates now, and a listing from before has none of it.
+        if loaded != Loaded::Nothing {
+            listed.touch(&db, None);
         }
         // The program each client asks for.
         let mut clients: Vec<(usize, Asked)> = Vec::new();
