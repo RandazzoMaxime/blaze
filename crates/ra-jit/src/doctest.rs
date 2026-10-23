@@ -792,8 +792,20 @@ fn build(
             return ours;
         }
     };
+    let mixing = with_another_copy(db, krate);
     for (at, example) in add_crates(db, asked, krate, tests, &wanted) {
         let test = &tests[at];
+        let source = &test.program.source;
+        let names = |name: &String| {
+            source.contains(&format!("{name}::")) || source.contains(&format!("crate {name}"))
+        };
+        if let Some(name) = mixing.iter().find(|it| names(it)) {
+            eprintln!(
+                "ra-jit: {} is rustc's: `{name}` links another copy of the library",
+                test.name
+            );
+            continue;
+        }
         if has_errors(db, example.root_file) {
             eprintln!("ra-jit: {} is rustc's: rust-analyzer finds an error in it", test.name);
             continue;
@@ -821,6 +833,24 @@ fn has_errors(db: &RootDatabase, file: vfs::FileId) -> bool {
         let semantic = ide_diagnostics::semantic_diagnostics(db, &config, &resolve, file);
         syntax.into_iter().chain(semantic).any(|it| it.severity == ide_db::Severity::Error)
     })
+}
+
+/// The names of the dependencies of the library that link another copy of it, as a
+/// dev-dependency on a crate that depends on it from crates.io does. Its types and the
+/// library's are not each other's, which rustc says where an example mixes them, and
+/// rust-analyzer's checks do not.
+fn with_another_copy(db: &RootDatabase, library: hir::Crate) -> Vec<String> {
+    let library: ide_db::base_db::Crate = library.into();
+    let name = |krate: ide_db::base_db::Crate| {
+        hir::Crate::from(krate).display_name(db).map(|it| it.crate_name().as_str().to_owned())
+    };
+    let Some(own) = name(library) else { return Vec::new() };
+    let dependencies = library.data(db).dependencies.iter();
+    let mixing = dependencies.filter(|dependency| {
+        let linked = dependency.crate_id.transitive_deps(db);
+        linked.into_iter().any(|it| it != library && name(it).as_deref() == Some(own.as_str()))
+    });
+    mixing.map(|it| it.name.as_str().to_owned()).collect()
 }
 
 /// The crate of an example in the graph.
