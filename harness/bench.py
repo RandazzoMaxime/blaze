@@ -53,9 +53,9 @@ was linked again where it was added, or is missing. Differences under 50 ms are 
 
 The ra-jit of a backend is `RA_JIT_BIN` (cranelift) or `RA_JIT_LLVM_BIN` (llvm).
 """
-import glob, importlib, json, os, platform, re, shutil, statistics, struct, subprocess, sys, tempfile, time
+import glob, importlib, json, os, platform, re, shutil, statistics, subprocess, sys, tempfile, time
 
-import cargo_ra_jit, memory
+import cargo_ra_jit, memory, packs
 from cargo_ra_jit import HERE, ROOT, TOOLCHAIN, Side, difference, fetch, how_built, program_output, test_results, timed, wait_warm
 
 LET = "\n    let _bench_edit = 1u32;"
@@ -514,10 +514,8 @@ STORED = {}
 
 def store_entries(path):
     """The keys of the sealed packs of the store at `path`, each with the bytes of disk it takes:
-    its pack's size shared among the pack's entries by the length of their values. Packs of
-    another format than crates/ra-jit-store's 3 (the magic, the counts of blocks and entries, a
-    header of 12 bytes per block, then per entry the key, its block, where it starts, its length
-    and its checksum) are not read."""
+    its pack's size shared among the pack's entries by the length of their values. A pack of
+    another format than packs.py reads is not counted."""
     entries = {}
     names = os.listdir(path) if os.path.isdir(path) else []
     for name in names:
@@ -527,15 +525,11 @@ def store_entries(path):
             pack = open(os.path.join(path, name), "rb").read()
         except OSError:
             continue
-        if pack[:8] != b"rajitpk\x03" or len(pack) < 16:
+        laid = packs.index(pack)
+        if laid is None:
             continue
-        blocks, count = struct.unpack_from("<II", pack, 8)
-        at = 16 + 12 * blocks
-        if at + 48 * count > len(pack):
-            continue
-        keyed = [(pack[at + 48 * n:at + 48 * n + 32], struct.unpack_from("<I", pack, at + 48 * n + 40)[0]) for n in range(count)]
-        values = sum(length for _, length in keyed) or 1
-        for key, length in keyed:
+        values = sum(length for _, _, _, length, _ in laid[1]) or 1
+        for key, _, _, length, _ in laid[1]:
             entries.setdefault(key, len(pack) * length / values)
     return entries
 
