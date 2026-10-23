@@ -306,9 +306,12 @@ impl Target {
             Arch::Wasm32 => "x86_64-unknown-linux-gnu",
             Arch::X86_64 | Arch::Aarch64 => &self.triple,
         };
-        isa::lookup_by_name(triple)
-            .map_err(|e| e.to_string())?
-            .finish(settings::Flags::new(flags))
-            .map_err(|e| e.to_string())
+        let mut isa = isa::lookup_by_name(triple).map_err(|e| e.to_string())?;
+        if self.arch == Arch::X86_64 {
+            // Only a function of `#[target_feature(enable = "cmpxchg16b")]` compares and
+            // swaps 128 bits, as `core::arch::x86_64::cmpxchg16b` does.
+            isa.enable("has_cmpxchg16b").map_err(|e| e.to_string())?;
+        }
+        isa.finish(settings::Flags::new(flags)).map_err(|e| e.to_string())
     }
 }
