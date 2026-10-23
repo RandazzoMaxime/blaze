@@ -20,7 +20,6 @@ concurrency:
 env:
   CARGO_INCREMENTAL: 0
   CARGO_NET_RETRY: 10
-  LLVM_SYS_201_PREFIX: /usr/lib/llvm-20
 
 jobs:
   tests-ui:
@@ -39,13 +38,11 @@ jobs:
       INPUT_LIMIT: ${{ inputs.limit }}
     steps:
       - uses: actions/checkout@v7
-      - run: rustup toolchain install 1.99.0 --profile minimal -c rust-src && rustup default 1.99.0
-      - name: LLVM 20
-        run: |
-          wget -qO- https://apt.llvm.org/llvm.sh | sudo bash -s -- 20
-          sudo apt-get install -y llvm-20-dev libpolly-20-dev
+      - uses: ./.github/actions/toolchain
+        with:
+          llvm: build
       - uses: Swatinem/rust-cache@v2
-      - run: cargo build -p ra-jit --release --features llvm
+      - run: nix develop --command cargo build -p ra-jit --release --features llvm
       # The tests of the tag of the stable ra-jit is pinned to.
       - name: rust-lang/rust 1.99.0, tests only
         run: |
@@ -66,13 +63,11 @@ jobs:
     timeout-minutes: 120
     steps:
       - uses: actions/checkout@v7
-      - run: rustup toolchain install 1.99.0 --profile minimal -c rust-src && rustup default 1.99.0
-      - name: LLVM 20
-        run: |
-          wget -qO- https://apt.llvm.org/llvm.sh | sudo bash -s -- 20
-          sudo apt-get install -y llvm-20-dev libpolly-20-dev
+      - uses: ./.github/actions/toolchain
+        with:
+          llvm: build
       - uses: Swatinem/rust-cache@v2
-      - run: cargo build -p ra-jit --release --features llvm
+      - run: nix develop --command cargo build -p ra-jit --release --features llvm
       - name: scoreboard
         working-directory: harness
         run: RA_JIT_BIN="$GITHUB_WORKSPACE/target/release/ra-jit" python3 scoreboard.py

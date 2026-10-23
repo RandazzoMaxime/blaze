@@ -6,12 +6,14 @@
 mod answers;
 mod borrowck;
 mod cargo;
+mod check;
 mod content;
 mod dep_info;
 mod deps;
 mod doctest;
 mod errors;
 mod inputs;
+mod link;
 mod live;
 mod memory;
 mod mirdump;
@@ -128,6 +130,9 @@ struct Args {
     /// rustc's: the standard library's crates are not compiled, and what the program calls of
     /// them is called by the names that object defines.
     prebuilt: Option<PathBuf>,
+    /// The executable to link `out` into, with the standard library's object and the native
+    /// libraries the crates ask for, in a build with nothing of rustc's ([`link::executable`]).
+    exe: Option<PathBuf>,
     /// The build is of the standard library alone ([`std_unit`]): a crate it names is the
     /// library's, not another of that name the program has too.
     library: bool,
@@ -217,6 +222,7 @@ impl Args {
         let mut deny = None;
         let mut isolate = None;
         let mut prebuilt = None;
+        let mut exe = None;
         let mut cfg_test = false;
         let mut dev_deps = false;
         let mut own_target = false;
@@ -256,6 +262,7 @@ impl Args {
                 "--deny" => deny = Some(PathBuf::from(value()?)),
                 "--isolate" => isolate = Some(PathBuf::from(value()?)),
                 "--prebuilt" => prebuilt = Some(PathBuf::from(value()?)),
+                "--exe" => exe = Some(PathBuf::from(value()?)),
                 "--watch" => watch = true,
                 "--socket" => socket = Some(PathBuf::from(value()?)),
                 "--cfg-test" => cfg_test = true,
@@ -297,6 +304,7 @@ impl Args {
             deny,
             isolate,
             prebuilt,
+            exe,
             library: false,
             cfg_test,
             own_target,
@@ -368,16 +376,17 @@ struct Prebuilt {
 /// The crates of the standard library a program links, which ra-jit builds apart from it
 /// ([`std_unit`]): what the program's crates take of the library, and everything that
 /// depends on, whoever's it is (rust-analyzer gives the library a crate of the workspace's
-/// where both use one), but `test`, `proc_macro` and `panic_abort`. rust-analyzer's graph has
-/// every crate depend on the first two, which a program links only as a test or a macro, and
-/// the panic runtime is `panic_unwind`'s.
+/// where both use one), but `test`, `proc_macro` and the panic runtime the program does not
+/// link ([`unlinked_panic_runtime`]). rust-analyzer's graph has every crate depend on the
+/// first two, which a program links only as a test or a macro.
 fn library_unit(db: &RootDatabase, program: &[Crate]) -> FxHashSet<ide_db::base_db::Crate> {
     use ide_db::base_db::LangCrateOrigin::{ProcMacro, Test};
+    let unlinked = unlinked_panic_runtime(db, program);
     let left_out = |it: ide_db::base_db::Crate| match it.data(db).origin {
         CrateOrigin::Lang(ProcMacro | Test) => true,
         _ => Crate::from(it)
             .display_name(db)
-            .is_some_and(|name| name.crate_name().as_str() == "panic_abort"),
+            .is_some_and(|name| name.crate_name().as_str() == unlinked),
     };
     let deps = |it: ide_db::base_db::Crate| it.data(db).dependencies.iter().map(|dep| dep.crate_id);
     let mut unit = FxHashSet::default();
@@ -392,6 +401,17 @@ fn library_unit(db: &RootDatabase, program: &[Crate]) -> FxHashSet<ide_db::base_
         }
     }
     unit
+}
+
+/// The panic runtime a program does not link: `panic_unwind` when its crate is built with
+/// `panic = "abort"`, which the profile gives it as `cfg(panic = "abort")`, else
+/// `panic_abort`. std depends on both, and rustc links the one the strategy names.
+pub(crate) fn unlinked_panic_runtime(db: &RootDatabase, program: &[Crate]) -> &'static str {
+    let abort = program.first().is_some_and(|&it| {
+        let cfg = ide_db::base_db::Crate::from(it).cfg_options(db);
+        cfg.get_cfg_values("panic").any(|it| it.as_str() == "abort")
+    });
+    if abort { "panic_unwind" } else { "panic_abort" }
 }
 
 /// The names an object defines for others to link to.
@@ -1876,14 +1896,16 @@ fn crates_to_build(
     krate: &str,
     args: &Args,
 ) -> anyhow::Result<Vec<Crate>> {
-    let linked = |krate: &Crate| {
-        let name = krate.display_name(db);
-        let root = crate_root_file(db, *krate);
-        name.zip(root).is_some_and(|(name, root)| table.links(name.crate_name().as_str(), &root))
-    };
     let mut called = crates_called(db, krate, args);
-    called.retain(linked);
+    called.retain(|&it| links(db, table, it));
     if called.is_empty() { crates_named(db, krate, args) } else { Ok(called) }
+}
+
+/// Whether rustc linked the crate into the program the table is of.
+fn links(db: &RootDatabase, table: &SymbolTable, krate: Crate) -> bool {
+    let name = krate.display_name(db);
+    let root = crate_root_file(db, krate);
+    name.zip(root).is_some_and(|(name, root)| table.links(name.crate_name().as_str(), &root))
 }
 
 /// Whether the text of the path of the crate's root file ends with `end`.
@@ -2842,6 +2864,11 @@ struct ListedCrate {
     main: Option<FunctionId>,
 }
 
+fn is_bodiless_intrinsic(db: &RootDatabase, id: FunctionId) -> bool {
+    let signature = hir_def::signatures::FunctionSignature::of(db, id);
+    signature.flags.contains(hir_def::signatures::FnFlags::RUSTC_INTRINSIC) && !signature.has_body()
+}
+
 /// Whether `func` is of ra-jit's test harness.
 fn in_harness(db: &RootDatabase, func: FunctionId) -> bool {
     let module = hir::Function::from(func).module(db);
@@ -2857,18 +2884,38 @@ fn harness_main(db: &RootDatabase, functions: &[FunctionId]) -> Option<FunctionI
         .find(|&it| hir::Function::from(it).name(db).as_str() == "main" && in_harness(db, it))
 }
 
-/// The text of the root file of each crate of a program of `programs` built with
-/// `cfg(test)` with ra-jit's test harness as the tests are now at its end, or without it where
-/// ra-jit writes none, for those that differ from the text they have.
+/// Whether the program of `args` is one of tests, which starts in ra-jit's test harness where
+/// ra-jit writes one: a unit test, built with `cfg(test)`, or one the plan says is a test.
+fn of_tests(args: &Args) -> bool {
+    args.cfg_test || args.out.parent().is_some_and(|it| it.join(cargo::plan::TESTS).is_file())
+}
+
+/// Why the program of `args` is right only with ra-jit's test harness, when the plan says it
+/// is: rustc's calls copies of the tests the daemon's can't take the place of.
+fn harness_alone(args: &Args) -> Option<String> {
+    let file = args.out.parent()?.join(cargo::plan::TESTS);
+    std::fs::read_to_string(file).ok().filter(|it| !it.is_empty())
+}
+
+/// The text of the root file of the crate of each program of tests of `programs` with ra-jit's
+/// test harness as the tests are now at its end, or without it where ra-jit writes none, for
+/// those that differ from the text they have. Only the crates among `of` when it is given.
+///
+/// rustc's harness stays while it lists the tests as they were when ra-jit first listed them
+/// (`first`, by root file), which is as rustc built them: a program that switches to ra-jit's
+/// is built anew, every function of it, and one test edited is not a reason to. A program
+/// whose tests are only right under ra-jit's, [`harness_alone`], has it from the start.
 fn harnesses<'a>(
     db: &RootDatabase,
     programs: impl IntoIterator<Item = &'a Args>,
+    of: Option<&FxHashSet<Crate>>,
+    first: &mut FxHashMap<vfs::FileId, Option<String>>,
 ) -> Vec<(vfs::FileId, String)> {
     let mut texts: Vec<(vfs::FileId, String)> = Vec::new();
-    for args in programs.into_iter().filter(|it| it.cfg_test) {
-        for krate in crates_named(db, &args.krate, args).unwrap_or_default() {
+    for args in programs.into_iter().filter(|it| of_tests(it)) {
+        for krate in crates_named(db, &args.krate, args).unwrap_or_default().into_iter().take(1) {
             let file = krate.root_file(db);
-            if texts.iter().any(|it| it.0 == file) {
+            if of.is_some_and(|it| !it.contains(&krate)) || texts.iter().any(|it| it.0 == file) {
                 continue;
             }
             let text = db.file_text(file).text(db).clone();
@@ -2881,7 +2928,13 @@ fn harnesses<'a>(
                 let name = |file| source_path(db, &args.checkout, args.base.as_deref(), file);
                 test_harness::module(db, krate, functions, &name)
             });
-            let wanted = format!("{}{}", test_harness::without(&text), module.unwrap_or_default());
+            let listed = module.as_ref().map(|it| it.listed.clone());
+            let as_rustc = first.entry(file).or_insert_with(|| listed.clone());
+            let written = test_harness::without(&text).len() != text.len();
+            let module =
+                module.filter(|_| written || *as_rustc != listed || harness_alone(args).is_some());
+            let module = module.map(|it| it.text).unwrap_or_default();
+            let wanted = format!("{}{module}", test_harness::without(&text));
             if *text != *wanted {
                 texts.push((file, wanted));
             }
@@ -3260,9 +3313,11 @@ impl Declared {
     fn in_scope(&mut self, db: &RootDatabase, scope: &ItemScope) {
         for def in scope.declarations() {
             match def {
-                // A function declared in an `extern` block has no body to compile.
+                // A function declared in an `extern` block has no body to compile, nor has an
+                // intrinsic declared without one: every call to it is the compiler's own code.
                 ModuleDefId::FunctionId(id)
-                    if !matches!(id.lookup(db).container, ItemContainerId::ExternBlockId(_)) =>
+                    if !matches!(id.lookup(db).container, ItemContainerId::ExternBlockId(_))
+                        && !is_bodiless_intrinsic(db, id) =>
                 {
                     self.function(id);
                 }
@@ -3470,6 +3525,7 @@ fn std_unit(
         widened: Vec::new(),
         out: path.clone(),
         report: None,
+        exe: None,
         library: true,
         ..args.clone()
     };
@@ -3486,6 +3542,37 @@ fn std_unit(
         store.flush();
     }
     Ok(Some(path))
+}
+
+/// Links the executable of a build with nothing of rustc's: `--out` and the standard
+/// library's object, with the native libraries the crates ask for.
+fn link_executable(
+    db: &RootDatabase,
+    table: &SymbolTable,
+    args: &Args,
+    sysroot: Option<&Path>,
+    exe: &Path,
+) -> anyhow::Result<()> {
+    if !table.is_empty() {
+        bail!("--exe links a build with nothing of rustc's, and this one has rustc's symbols");
+    }
+    let mut program = Vec::new();
+    for named in args.crates() {
+        program.extend(crates_named(db, named, args)?);
+    }
+    let objects: Vec<&Path> =
+        std::iter::once(args.out.as_path()).chain(args.prebuilt.as_deref()).collect();
+    let took = link::executable(db, &program, &objects, sysroot, exe)?;
+    let stand_ins = link::stand_ins(exe)?;
+    eprintln!(
+        "linked {} in {took:.1?}, {} functions in it ra-jit could not compile",
+        exe.display(),
+        stand_ins.len()
+    );
+    for said in stand_ins.iter().take(8) {
+        eprintln!("  {said}");
+    }
+    Ok(())
 }
 
 /// [`build`] of a build that is never held.
@@ -3527,10 +3614,10 @@ fn build(
         for krate in crates_to_build(db, table, krate, args)? {
             local.push(krate);
             let listed = listed.of(db, krate);
-            // With `cfg(test)` the program starts in ra-jit's test harness, which calls every
-            // test, or in rustc's when ra-jit wrote none: the crate's own `main` is one
-            // function among the others.
-            if at == 0 && !args.cfg_test {
+            // A program of tests starts in ra-jit's test harness, which calls every test, or
+            // in rustc's when ra-jit wrote none: the crate's own `main` is one function among
+            // the others.
+            if at == 0 && !of_tests(args) {
                 main = main.or(listed.main);
             } else if at == 0 {
                 main = main.or_else(|| harness_main(db, &listed.functions));
@@ -4795,6 +4882,7 @@ fn build_batch(db: &RootDatabase, args: Args) -> anyhow::Result<()> {
             deny: None,
             isolate: None,
             prebuilt: args.prebuilt.clone(),
+            exe: args.exe.clone(),
             library: args.library,
             cfg_test: args.cfg_test,
             own_target: args.own_target,
@@ -5850,6 +5938,9 @@ fn main() -> anyhow::Result<()> {
     if std::env::var_os("RA_JIT_WRAPS_RUSTC").is_some() {
         return stub::command(std::env::args_os().skip(1));
     }
+    if std::env::args().nth(1).as_deref() == Some("--check") {
+        return check::serve(Args::parse(std::env::args().skip(2))?);
+    }
     if std::env::args().nth(1).as_deref() == Some("deps") {
         return deps::command(std::env::args().skip(2));
     }
@@ -6559,12 +6650,15 @@ fn run_holding(
             (args.krate, args.batch, args.widened) = (krate, batch, Vec::new());
         }
     }
-    let texts = harnesses(&db, [&args]);
-    write_harnesses(&mut db, texts);
     eprintln!("load workspace: {:.1?}", start.elapsed());
     memory::checkpoint("load");
 
+    // The tests of each program as rustc's harness lists them, by the root file of its crate.
+    // Listed once the names are resolved, on every core, and not on this thread alone.
+    let mut as_rustc = FxHashMap::default();
     if args.out.is_dir() {
+        let texts = harnesses(&db, [&args], None, &mut as_rustc);
+        write_harnesses(&mut db, texts);
         return build_batch(&db, args);
     }
 
@@ -6589,6 +6683,8 @@ fn run_holding(
     while WatchedFile::include_sources(&mut files, &mut tree, &mut db) != Loaded::Nothing {
         resolved = resolve_crates(&db, &args, cores())?;
     }
+    let texts = harnesses(&db, [&args], None, &mut as_rustc);
+    write_harnesses(&mut db, texts);
     eprintln!("resolve: {resolved} crates in {:.1?}", start.elapsed());
     if let Some(said) = ra_jit_expand::report() {
         eprintln!("{said}");
@@ -6730,6 +6826,11 @@ fn run_holding(
                 false,
                 false,
             )?;
+            if let Some(exe) = &args.exe {
+                let workspace = checkouts.loaded.workspaces().first();
+                let sysroot = workspace.and_then(|it| it.sysroot.root());
+                link_executable(&db, &table, &args, sysroot.map(|it| it.as_ref()), exe)?;
+            }
             Some(cold)
         }
     };
@@ -6870,6 +6971,8 @@ fn run_holding(
     let mut viewed: FxHashMap<PathBuf, PathBuf> = FxHashMap::default();
     // The crates whose variables name another checkout than the one they were loaded in.
     let mut placed = Placed::default();
+    // The programs whose tests ra-jit's harness lists, by their object.
+    let mut harnessed: FxHashSet<PathBuf> = FxHashSet::default();
     loop {
         if WatchedFile::unwatched(&files, &db) || tree.includes_more(&db) {
             builds.settle(&mut db, &mut programs)?;
@@ -7523,8 +7626,8 @@ fn run_holding(
                 Watched::Included(path) => included.push(path.clone()),
             }
         }
-        // An edit that adds functions to a crate is a patch when what rustc compiled of every
-        // file of the crate is known from before it.
+        // An edit that adds functions to a crate, or takes them away, is a patch when what
+        // rustc compiled of every file of the crate is known from before it.
         let homing = programs.iter().any(|it| it.known.homes());
         let mut homed = outlines.adding(&db, &listed, if homing { &texts } else { &[] });
         homed.extend(&editing);
@@ -7550,9 +7653,20 @@ fn run_holding(
         if changed != 0 || !background {
             db.apply_change(change);
         }
-        // The tests are listed again after the edit, and a root file the edit did not touch
-        // is noted as it was before its harness is written.
-        let texts = harnesses(&db, programs.iter().map(|it| &it.args));
+        // The tests of a crate an edited file is of are listed again after the edit, and those
+        // of a program asked for the first time; a root file the edit did not touch is noted
+        // as it was before its harness is written.
+        let mut wanted: FxHashSet<Crate> = editing
+            .iter()
+            .flat_map(|&file| ide_db::base_db::relevant_crates(&db, file).iter().copied())
+            .map(Crate::from)
+            .collect();
+        for program in programs.iter().filter(|it| harnessed.insert(it.args.out.clone())) {
+            let args = &program.args;
+            wanted.extend(crates_named(&db, &args.krate, args).unwrap_or_default().first());
+        }
+        let texts =
+            harnesses(&db, programs.iter().map(|it| &it.args), Some(&wanted), &mut as_rustc);
         if !texts.is_empty() {
             let roots: Vec<_> = texts.iter().map(|it| it.0).collect();
             let untouched: Vec<_> =
@@ -8108,9 +8222,11 @@ impl Program {
     }
 
     /// Takes over from rustc the crates that an edit since the last build is to, of those the
-    /// program uses and the daemon was not asked to build, and the crates between them and
-    /// the ones it was: rustc's copies of them are from before the edit. The result is why
-    /// one can't be taken over, when one can't.
+    /// program links and the daemon was not asked to build, and the crates between them and
+    /// the ones it was: rustc's copies of them are from before the edit. A crate the program
+    /// depends on but rustc did not link (an integration test's package's dependencies it does
+    /// not use) has nothing in it an edit changes. The result is why one can't be taken over,
+    /// when one can't.
     fn widen(&mut self, db: &RootDatabase) -> Option<String> {
         let built: Vec<ide_db::base_db::Crate> = self
             .args
@@ -8119,7 +8235,12 @@ impl Program {
             .flatten()
             .map(Into::into)
             .collect();
-        let used: FxHashSet<_> = built.iter().flat_map(|it| it.transitive_deps(db)).collect();
+        let table = &self.table;
+        let used: FxHashSet<_> = built
+            .iter()
+            .flat_map(|it| it.transitive_deps(db))
+            .filter(|&it| table.is_empty() || links(db, table, it.into()))
+            .collect();
         let edited: Vec<_> = self
             .unbuilt
             .edited
@@ -8322,13 +8443,12 @@ impl Program {
             );
         }
         // ra-jit's harness lists the tests as they are now, and rustc's as they were.
-        let harnessed = args.cfg_test
+        let harnessed = of_tests(args)
             && crates_named(db, &args.krate, args)
                 .unwrap_or_default()
                 .first()
                 .is_some_and(|&krate| harness_main(db, &listed.of(db, krate).functions).is_some());
-        let alone = args.out.parent().map(|it| it.join(cargo::plan::HARNESS_ALONE));
-        if let Some(why) = alone.and_then(|it| std::fs::read_to_string(it).ok())
+        if let Some(why) = harness_alone(args)
             && !harnessed
         {
             failed = failed.or(Some(Refused::Cargos(why)));

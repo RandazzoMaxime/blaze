@@ -8,7 +8,8 @@ The long version, with the rules for code and how to change the vendored rust-an
 ```
 git clone https://github.com/indexable-inc/ra-jit
 cd ra-jit
-nix develop            # Rust 1.99.0 with rust-src, and Python; or install 1.99.0 with rustup
+nix develop            # rustup at 1.99.0, Python, and the LLVM 20 of `--features llvm`
+rustup component add rust-src
 cargo build -p ra-jit --release
 ```
 
