@@ -274,6 +274,11 @@ pub trait SymbolResolver {
     fn defines(&self, _symbol: &str) -> bool {
         false
     }
+    /// Whether what the program is linked with has the symbol: rustc's build, or an object
+    /// ra-jit built before, which an entry of the store may name.
+    fn provides(&self, symbol: &str) -> bool {
+        self.defines(symbol)
+    }
     /// Whether the executable the patch goes into has the symbol: rustc's own link of it
     /// leaves out every function nothing calls.
     fn linked(&self, _symbol: &str) -> bool {
@@ -4753,7 +4758,7 @@ impl<'a, 'db> ObjectCodegen<'a, 'db> {
                 let Some(entries) = entries else { return false };
                 names.instance(callee).is_some_and(|name| {
                     entries
-                        .usable(&name, &|symbol| symbols.defines(symbol) && symbols.linked(symbol))
+                        .usable(&name, &|symbol| symbols.provides(symbol) && symbols.linked(symbol))
                 })
             };
             let mut homes = home::Homes::default();
@@ -5224,8 +5229,13 @@ impl<'a, 'db> ObjectCodegen<'a, 'db> {
                 // built it, and uses rustc's copies of the statics.
                 let symbol = decl.linkage_name(id).into_owned();
                 let checked = self.symbols.defines(&symbol);
+                // An item of an `extern` block is the symbol it links to, whoever declares it.
+                let foreign = |callee: &Instance| match callee.def {
+                    InstanceDef::Fn(func) => link_name(self.db, func).is_some(),
+                    _ => false,
+                };
                 let callee = match &request.target {
-                    FuncTarget::Instance(callee, _) => {
+                    FuncTarget::Instance(callee, _) if !foreign(callee) => {
                         let Ok(callee) = self.settled(callee) else {
                             return self.kept.unkept("unsettled callee");
                         };
@@ -5353,11 +5363,11 @@ impl<'a, 'db> ObjectCodegen<'a, 'db> {
         }
         let Some(entries) = self.entries.clone() else { return Ok(None) };
         let symbols = self.symbols;
-        if !entries.usable(name, &|symbol| symbols.defines(symbol) && symbols.linked(symbol)) {
+        if !entries.usable(name, &|symbol| symbols.provides(symbol) && symbols.linked(symbol)) {
             let why = match entries.get(name) {
                 None => "no entry",
                 Some(it)
-                    if !it.links(&|symbol| symbols.defines(symbol) && symbols.linked(symbol)) =>
+                    if !it.links(&|symbol| symbols.provides(symbol) && symbols.linked(symbol)) =>
                 {
                     "an entry linked against what the program lacks"
                 }

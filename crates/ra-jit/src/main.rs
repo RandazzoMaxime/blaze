@@ -1169,6 +1169,11 @@ impl SymbolResolver for Resolver<'_> {
         self.table.defines(symbol)
     }
 
+    fn provides(&self, symbol: &str) -> bool {
+        self.table.defines(symbol)
+            || self.prebuilt.as_ref().is_some_and(|it| it.defined.contains(symbol))
+    }
+
     fn linked(&self, symbol: &str) -> bool {
         self.rustcs().is_none_or(|it| it.has(symbol))
     }
