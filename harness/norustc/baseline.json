@@ -73,7 +73,7 @@
    "rustdoc": 0
   },
   "tests": {
-   "rustc": 7,
+   "rustc": 6,
    "rustdoc": 0
   }
  },
