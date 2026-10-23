@@ -83,6 +83,7 @@ libc.workspace = true
 
 [dev-dependencies]
 object = { version = "0.37", default-features = false, features = ["write", "elf"] }
+test-fixture.workspace = true
 
 [target.'cfg(windows)'.dependencies]
 find-msvc-tools = "0.1"

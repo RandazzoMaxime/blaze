@@ -252,7 +252,7 @@ jobs:
           git sparse-checkout set tests/ui
           git fetch -q --depth 1 --filter=blob:none origin a30aa9064df6a504b6a323c6884a2f4cfbfff666
           git checkout -q FETCH_HEAD
-      - run: python3 harness/borrowck_ui.py "$RUNNER_TEMP/rust" --bin target/release/ra-jit --jobs 4 --mode both --min-pass 1456
+      - run: python3 harness/borrowck_ui.py "$RUNNER_TEMP/rust" --bin target/release/ra-jit --jobs 4 --mode both --min-pass 1468
 
   # The few run-pass tests of rustc's that the nightly claims run, or a run on another
   # platform, once caught ra-jit failing (harness/ui-pinned.txt), from the tests of the pinned

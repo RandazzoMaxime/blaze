@@ -280,6 +280,11 @@ pub trait SymbolResolver {
     fn rustc_instances(&self, _func: FunctionId) -> Option<Vec<(String, String)>> {
         None
     }
+    /// Whether the executable a patch goes into has no copy of `func`, which is not generic:
+    /// the patch has the one there is.
+    fn rustc_has_none(&self, _func: FunctionId) -> bool {
+        false
+    }
     /// rustc's symbol of the closure at `expr` in the body of `owner`, which is not generic.
     fn closure(&self, _owner: FunctionId, _expr: hir_def::hir::ExprId) -> Option<String> {
         None
@@ -1361,6 +1366,26 @@ impl Rejections {
         self.unknown.clear();
         self.left.clear();
         self.futures.clear();
+    }
+
+    /// Notes that functions were added to a file of `crates` and nothing else of it changed but
+    /// bodies that nothing else sees into, where no other crate depends on `crates`, no file of
+    /// them named the new functions before, and `files` are their files: a patch of what rustc
+    /// linked looks at all of their code again.
+    pub fn touch_added(
+        &mut self,
+        db: &dyn HirDatabase,
+        crates: &[Crate],
+        files: &[base_db::FileId],
+    ) {
+        self.frozen.edit(crates.iter().flat_map(|it| it.transitive_rev_deps(db)));
+        if let Some(base) = &mut self.base {
+            base.touch(db, Some(crates));
+        }
+        if let Some(rustc) = &mut self.rustc {
+            rustc.touch_added(db, crates, files);
+        }
+        self.forget();
     }
 
     /// Notes that a file changed in the bodies of functions alone, none of which the rest of

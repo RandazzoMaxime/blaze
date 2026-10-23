@@ -184,6 +184,10 @@ impl Plan {
         plan.symbol_files = link.rustc_files();
         plan.rustc_binary = link.output().filter(|_| patched_as_built).map(PathBuf::from);
         std::fs::create_dir_all(dir)?;
+        match harness_alone(unit).filter(|_| unit.is_test()) {
+            Some(why) => std::fs::write(dir.join(HARNESS_ALONE), why)?,
+            None => _ = std::fs::remove_file(dir.join(HARNESS_ALONE)),
+        }
         link.give_way(&plan.copies)?;
         let apple = link.flavor == Flavor::Apple;
         plan.link_cmd =
@@ -221,9 +225,14 @@ fn calls_by_symbol(unit: &Record) -> bool {
         && !unit.stands_in()
 }
 
-/// Why the tests of `unit` are only right as rustc built them, if they are. rustc's
-/// harness stays in a test executable and calls the tests and their helpers, so each has
-/// to be a symbol the daemon's copy can take the place of, called the way the source says.
+/// The file in a program's directory that says why the daemon builds it only with ra-jit's
+/// test harness, when it does: [`harness_alone`].
+pub(crate) const HARNESS_ALONE: &str = "harness-alone";
+
+/// Why the tests of `unit` are only right as rustc built them under rustc's harness, if they
+/// are. rustc's harness, where it stays in a test executable, calls the tests and their
+/// helpers, so each has to be a symbol the daemon's copy can take the place of, called the
+/// way the source says. ra-jit's harness calls the daemon's copies.
 fn harness_alone(unit: &Record) -> Option<String> {
     let name = &unit.crate_name;
     if unit.codegen("incremental").is_none() {
@@ -257,9 +266,6 @@ fn unsupported(unit: &Record) -> Option<String> {
     }
     if let Some(flag) = unstable_flags(&unit.args).find(|it| !changes_nothing(it)) {
         return Some(format!("`{name}` is built with the unstable flag -Z {flag}"));
-    }
-    if unit.is_test() {
-        return harness_alone(unit);
     }
     None
 }
@@ -688,12 +694,14 @@ mod tests {
     #[test]
     fn tests_the_harness_reaches_by_symbol_only() {
         let incremental = "incremental=/t/debug/incremental";
-        assert_eq!(unsupported(&unit(&["--test", "-C", incremental])), None);
-        assert_eq!(unsupported(&unit(&["--test", "-C", incremental, "-C", "opt-level=0"])), None);
-        let private = unsupported(&unit(&["--test"]));
+        assert_eq!(harness_alone(&unit(&["--test", "-C", incremental])), None);
+        assert_eq!(harness_alone(&unit(&["--test", "-C", incremental, "-C", "opt-level=0"])), None);
+        let private = harness_alone(&unit(&["--test"]));
         assert!(private.is_some_and(|why| why.contains("without incremental")));
-        let inlined = unsupported(&unit(&["--test", "-C", incremental, "-C", "opt-level=2"]));
+        let inlined = harness_alone(&unit(&["--test", "-C", incremental, "-C", "opt-level=2"]));
         assert!(inlined.is_some_and(|why| why.contains("opt-level 2")));
+        // ra-jit's harness calls the daemon's copies: the program is not refused for them.
+        assert_eq!(unsupported(&unit(&["--test"])), None);
         assert_eq!(unsupported(&unit(&["-C", "opt-level=3"])), None);
     }
 
