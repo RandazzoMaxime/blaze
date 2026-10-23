@@ -791,6 +791,24 @@ tree, #42) after compiling: every function the frontend turned down walked all t
 of its crate, `core`'s for most of the unit's 2,000; that is now once a crate, and never for the
 unit, whose refusals nobody reads.
 
+With frozen dependency artifacts (#40, 2026-10-23, same host and pinning; each crate's
+`DefMap`, impls and lang items read from the store instead of resolved, [glancer.md](glancer.md),
+item 1):
+
+| Build | Wall time |
+|---|---|
+| hello, warm remote, nothing frozen | 3.02 to 3.03 s, 3.4 GB: resolving 2.2 s |
+| hello, warm remote, frozen | 1.22 to 1.23 s, 2.3 GB: resolving 0.33 s, loading 0.39 s, linking 0.17 s |
+| ripgrep, `cargo build`, cold | 5.70 to 5.74 s |
+| ripgrep, empty store and remote: the unit compiled and its 153 frozen parts written | 14.8 s |
+| ripgrep, warm store | 4.56 to 4.60 s |
+| ripgrep, a second empty store, everything from the remote | 4.60 to 4.62 s, 3.9 GB |
+
+ripgrep with a warm remote is now 19% under cargo's cold build. Of its 4.6 s, loading the
+workspace is 0.47 s (0.12 s of it is the rustup proxy in front of each of the dozen cargo and
+rustc calls), resolving 0.39 s, compiling 3.3 s and linking 0.25 s. Compiling is 1 s longer than
+when resolving ran live, which lowered the impl headers on idle threads: the next frozen family.
+
 Not yet measured: the other bench apps with every crate ra-jit's. The step K
 bar: with a warm remote, `cargo ra-jit build` from nothing is no slower than cargo's cold build;
 with an empty store, it is measured and published beside cargo's, and the gap is an issue of its
