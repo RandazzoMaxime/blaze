@@ -24,7 +24,8 @@ How to build, test and change ra-jit, including the vendored rust-analyzer, is
 - **Land small and often, through the merge queue only.** After the local gate, run
   `python3 .github/scripts/land.py "what the branch does"` in the lane's worktree: it opens the
   pull request, queues it and waits until the fast tier (about 10 minutes) has passed on it
-  merged onto main and it is merged, or says why not. Never push to main or merge into it by
+  merged onto main and it is merged, or says why not. Its waiting survives a tool that kills
+  it; `land.py --wait` picks it up again. Never push to main or merge into it by
   hand: [docs/contributing.md](docs/contributing.md#landing-a-change).
 - **Delete what a lane made when it is done:** its worktree, target directory and dev-host
   directories, and its merged branch.
