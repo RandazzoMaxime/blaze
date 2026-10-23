@@ -302,8 +302,9 @@ when:
 
 It then commits those files to main as `github-actions[bot]` with `[skip ci]` in the message (so
 the commit starts no other workflow), once for every platform, rebasing onto main if main moved
-during the run. It uses the job's `GITHUB_TOKEN` with `contents: write`; main has no branch
-protection. `bench-bun.yaml` does the same for bun, nightly, on the same runners: bun takes
+during the run. It pushes with the secret `RA_JIT_BOT_TOKEN`, a repository admin's token, which
+the ruleset on main lets past its merge queue; the job's own `GITHUB_TOKEN` is refused
+([harness.md](harness.md#ci)). `bench-bun.yaml` does the same for bun, nightly, on the same runners: bun takes
 hours, so it has a workflow and a stored result of its own (`docs/benchmarks/bun-<platform>.json`
 and `runtime-bun-<platform>.json`, written by `benchreport.py --name bun`), but it is a project like
 the others in the README's tables and charts and in their geometric means. Each table folds a
