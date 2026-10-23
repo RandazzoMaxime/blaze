@@ -2692,12 +2692,29 @@ impl<'db> Builder<'_, '_, 'db> {
         self.prove(trait_ref, At { category: Category::Predicate, span });
     }
 
+    /// rustc's `check_local`: a variable's or temporary's type is `Sized`, which a where clause
+    /// on an associated type, `<&'static T as A>::X: Sized`, proves for those lifetimes only.
+    fn sized_local(&mut self, local: LocalId, ty: Ty<'db>, span: MirSpan) {
+        if local == super::return_slot()
+            || self.body.param_locals.contains(&local)
+            || !matches!(ty.kind(), TyKind::Alias(alias) if matches!(alias.kind, rustc_type_ir::AliasTyKind::Projection { .. }))
+        {
+            return;
+        }
+        let Some(sized) = self.interner().lang_items().Sized else { return };
+        let trait_ref = rustc_type_ir::TraitRef::new(self.interner(), sized.into(), [ty]);
+        self.prove(trait_ref, At { category: Category::Predicate, span });
+    }
+
     fn statement(&mut self, kind: &StatementKind, span: MirSpan) {
         kind.for_each_operand(&mut |operand| self.copy_bound(operand, span));
         let StatementKind::Assign(place, rvalue) = kind else { return };
         let projection = place.projection.as_slice();
         let dest = self.place_ty(place.local, projection).ty;
         let at = At { category: self.category_of_assignment(place.local, projection), span };
+        if projection.is_empty() {
+            self.sized_local(place.local, dest, span);
+        }
         let first = self.regions.outlives.len();
         self.assign(place, rvalue, dest, at, span);
         // rustc relates a variable with a type written out to its annotation, so what flows
