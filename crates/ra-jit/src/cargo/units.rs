@@ -207,6 +207,25 @@ impl Record {
         Inputs::parse(&text, &self.cwd)
     }
 
+    /// Cargo's own copies of the unit's dep-info, in its fingerprint directory: a source
+    /// written after one of them is a change to cargo, which builds the unit again.
+    pub(crate) fn cargo_dep_info(&self) -> Vec<PathBuf> {
+        let extra = self.extra_filename();
+        let Some(profile) = self.out_dir().and_then(|it| it.parent().map(Path::to_path_buf)) else {
+            return Vec::new();
+        };
+        let Ok(units) = std::fs::read_dir(profile.join(".fingerprint")) else { return Vec::new() };
+        let units = units
+            .flatten()
+            .filter(|it| !extra.is_empty() && it.file_name().to_string_lossy().ends_with(extra));
+        let files =
+            units.flat_map(|it| std::fs::read_dir(it.path()).into_iter().flatten().flatten());
+        files
+            .filter(|it| it.file_name().to_string_lossy().starts_with("dep-"))
+            .map(|it| it.path())
+            .collect()
+    }
+
     /// The copy of `original`, when it is a file of this unit.
     pub(crate) fn copy_of(&self, original: &Path) -> Option<&Path> {
         let named = self.copies.iter().find(|it| it.original == original);

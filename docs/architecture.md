@@ -226,16 +226,17 @@ Each place, and how it is covered:
 ## The disk store
 
 `crates/ra-jit-store` is a content-addressed key-value store of compiled functions,
-independent of Rust: a key is a hash of what the value was made from. It is used when `RA_JIT_CACHE` names
-a directory. `stable.rs` gives function instances names that are the same in every run on
+independent of Rust: a key is a hash of what the value was made from. There is one per user
+and machine, shared by every daemon and checkout, unless `RA_JIT_CACHE` names another
+directory or `off`. `stable.rs` gives function instances names that are the same in every run on
 the same sources, and `cached.rs` keeps entries under them: a function of a crate that no
 edit reaches, as it was stitched into an object. A build that finds an entry for an
 instance and for everything it calls puts them in the object without asking the database
 about the instance.
 
-On disk the store is a set of immutable packs named by the SHA-256 of their bytes, plus one
-open pack per running daemon. Format, locking, integrity checks and size limits are in
-[cache.md](cache.md).
+On disk the store is a set of immutable packs named by the SHA-256 of their bytes, their
+values in zstd blocks behind an index, plus one open pack per running daemon. Format,
+locking, integrity checks and size limits are in [cache.md](cache.md).
 
 ## The remote store
 
@@ -304,10 +305,20 @@ function into the crates that call it, line numbers and all, so `home` also take
 copies of the file's generic functions that its other functions reach and the executable
 has under their paths (`Base::home_copies`, `symbols::Linked::instances_of`): an edit that
 changes or moves the lines of such a function is a patch that replaces each of those copies
-under rustc's symbol, as long as the executable has no other copy of that name. A file not
-noted before it changed, an edit that is more than function bodies, an edit of an
-`#[inline]` or default trait function, or of a generic one with copies `home` did not take
-in (the outline's copied fingerprint tells), a changed static, and `include!`d or asset
+under rustc's symbol, as long as the executable has no other copy of that name. A function of
+the workspace that no function of the executable is named after (`has_no_function_named`)
+was not compiled or not linked, so nothing of rustc's calls it: the patch compiles it under a
+name of its own, and an edit of it, `#[inline]` or not, is a patch too. Of a function rustc's
+symbols name no copy of, `home` keeps a mark, and one whose code is the same where it moved,
+as an unused derive below the edit, is no change. An edit that adds functions to a file and
+changes nothing else of it but bodies is a patch too when they are not generic or `#[inline]`,
+no other crate depends on the file's, and no file of that crate named them before
+(`Outlines::adding`): only that crate's code sees them, and `home` takes in every file of it
+before the edit, so its marks tell what of it changed. A file not
+noted before it changed, any other edit that is more than function bodies, an edit of an
+`#[inline]` function the executable has a copy of, of a default trait function, or of a
+generic one with copies `home` did not take in (the outline's copied fingerprint tells), a
+changed static, and `include!`d or asset
 files take a build in full, and the build log says which (`no patch: ...`). So does a patch
 the splice can't place: one that calls a libc function the executable does not import, or
 has frames that do not fit the header's room on macOS, with the program's own beside them. A thread-local of

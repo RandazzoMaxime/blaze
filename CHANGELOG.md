@@ -174,10 +174,10 @@ All notable changes to ra-jit are written here. The format follows
 - A borrow checker, the crate `hir-ty-borrowck` in the rust-analyzer subtree, written to give
   rustc's verdict: Polonius alpha by default as nightly rustc does, NLL with
   `RA_JIT_BORROWCK=nll`. It gives rustc's errors on
-  1455 of 1579 of rustc's own borrow-check tests that it can run, and none on any of the 245
+  1506 of 1579 of rustc's own borrow-check tests that it can run, and none on any of the 245
   rustc accepts, scored by `harness/borrowck_ui.py`, and finds nothing in ripgrep, fd, bat,
-  hyperfine, just, axum, nushell, delta, eza, tokei and starship. Its errors are rust-analyzer diagnostics and
-  `ra-jit borrowck` prints them ([docs/borrowck.md](docs/borrowck.md)).
+  hyperfine, just, axum, nushell, delta, eza, tokei and starship. Its errors, and rustc's
+  `unused_mut` warning, are rust-analyzer diagnostics and `ra-jit borrowck` prints them ([docs/borrowck.md](docs/borrowck.md)).
 - Item well-formedness, the crate `hir-ty-wfcheck` next to the borrow checker: rustc's E0309
   and E0310 outside function bodies, for struct, enum and union fields (`&'static T` without
   `T: 'static`), a trait impl's associated types, an impl of a trait bounded by `'static`,
@@ -206,6 +206,13 @@ All notable changes to ra-jit are written here. The format follows
 
 ### Changed
 
+- ra-jit allocates with jemalloc on Linux and macOS, and with mimalloc on Windows only
+  ([#39](https://github.com/indexable-inc/ra-jit/issues/39)). mimalloc 3 kept more of what a
+  build freed, transparent huge pages included: on Linux x86-64 (16 cores, `bench.py`, two
+  interleaved rounds) the daemon after its edits holds 1.57 GB instead of 2.03 on ripgrep, 9.52
+  instead of 10.80 on nushell, 11.07 instead of 12.13 on helix and 24.3 instead of 27.0 on bun,
+  with the same edit times. `RA_JIT_MEMORY` reports the live heap without the `heap-profile`
+  feature, which now only adds jemalloc's profiler.
 - The daemon no longer keeps a spare worker loaded for the next project
   ([#56](https://github.com/indexable-inc/ra-jit/issues/56)). It starts one as it starts, for
   the build that started it, and one each time a build of a new workspace begins, which loads
@@ -381,6 +388,21 @@ All notable changes to ra-jit are written here. The format follows
 
 ### Fixed
 
+- A program whose `main` is C's, as bun's, is built as a whole program: LLVM gets every body
+  and inlines across crates, where each function was compiled alone before. `derive(PartialEq)`
+  of an enum compares the discriminants first, as rustc's does. bun's whole program, every
+  function ra-jit's, runs at 1.28x cargo's release build on Linux x86-64 (was 5.80x) and 1.25x
+  on macOS arm64, where it now links: `runbench.py` no longer passes `-C link-dead-code`
+  (which dropped `-dead_strip`), and the names of C in ra-jit's Mach-O objects stay
+  exportable, as bun's `napi_*` must be
+  ([#35](https://github.com/indexable-inc/ra-jit/issues/35)). The build takes longer, 565 s
+  against 87 s on 16 cores: every compile carries the bodies it may inline.
+- Adding a function to bun took 19.8 s, more than cargo's 14.5 s; it is a patch now, 0.64 s on
+  Linux x86-64 and 0.56 s on macOS arm64. An added function in a program whose every function
+  is an entry no longer forces a full build, and a crate the daemon listed before the files
+  its `include!`s name were loaded is listed again once they are (`harness/latelisted.py`), so
+  bun's 2,834 generated C-ABI functions are entries from the start. The edit's peak memory
+  falls from 33.5 to 27.3 GB.
 - helix's own build threw its first round away (about 30 s) because std's `Context::with`
   closure was refused for "a writable static without a rustc symbol": the static is declared by
   `thread_local!` in a body, which rust-analyzer expands twice, and ra-jit looked for the

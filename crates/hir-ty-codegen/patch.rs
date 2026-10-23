@@ -73,6 +73,12 @@ impl Mark {
         }
         Mark { lines: hasher.finish(), ..Mark::new(db, serial, &compiled.requests) }
     }
+
+    /// Whether the code is the same, wherever in the file it is: a copy of rustc's that no
+    /// patch reaches does what it did, and only a debugger is told the lines it was at.
+    fn same_code(self, other: Mark) -> bool {
+        Mark { lines: 0, ..self } == Mark { lines: 0, ..other }
+    }
 }
 
 /// Something in the base that an edit can change or take away.
@@ -717,6 +723,9 @@ pub struct Stale {
     /// What a patch can't replace, and why. That only matters for what the program still
     /// reaches.
     broken: Vec<(Node, &'static str)>,
+    /// The functions of the base an edit took away: what rustc or the base has of them stays
+    /// where nothing calls it any more.
+    gone: Vec<FunctionId>,
     /// Why no patch can hold the change.
     declined: Option<&'static str>,
     /// Something the functions left to rustc reach changed, so what they reach may have.
@@ -752,6 +761,8 @@ impl Stale {
 pub(super) struct Unchanged {
     pub(super) changed: FxHashSet<Node>,
     pub(super) broken: FxHashSet<Node>,
+    /// The roots the edit took away, which refer to nothing any more.
+    pub(super) gone: FxHashSet<FunctionId>,
 }
 
 pub(super) struct Patch {
@@ -1264,6 +1275,20 @@ impl Base {
             self.hydrated && self.crates.iter().any(|it| self.touched.crates.contains(it));
     }
 
+    /// Notes that functions were added to a file of `crates`, or taken away, and nothing else of
+    /// it changed but bodies that nothing else sees into, where no other crate depends on
+    /// `crates`, no file of them named the new functions before (or names those taken away
+    /// after), and `files` are their files. What rustc compiled of them is then known when
+    /// [`Self::home`] took in every one of those files.
+    pub(super) fn touch_added(&mut self, db: &dyn HirDatabase, crates: &[Crate], files: &[FileId]) {
+        if !files.iter().all(|it| self.homed.contains(it)) {
+            return self.touch(db, Some(crates));
+        }
+        self.touched.crates.extend(crates.iter().copied());
+        self.outdated |=
+            self.hydrated && self.crates.iter().any(|it| self.touched.crates.contains(it));
+    }
+
     /// Notes that a file changed in the bodies of functions alone, none of which the rest of
     /// the program sees into.
     pub(super) fn touch_bodies(&mut self, db: &dyn HirDatabase, file: FileId) {
@@ -1407,7 +1432,7 @@ impl Base {
                 }
                 Some(Some(_)) => stale.roots.push(root),
                 Some(None) => return stale.declined("a root of the base no longer compiles"),
-                None => return stale.declined("a root of the base is gone"),
+                None => stale.gone.push(root),
             }
         }
         for (root, was, file) in self.unnamed.iter().skip(part).step_by(parts) {
@@ -1420,8 +1445,12 @@ impl Base {
                 let compiled = compiled_root(db, *root).as_ref().ok()?;
                 Some(Mark::of_function(db, root_serial(db, *root), compiled, self.debug))
             });
+            let Some(mark) = mark else {
+                stale.gone.push(*root);
+                continue;
+            };
             // One that did not compile then can't be told to be the same.
-            if was.is_none() || mark != Some(*was) {
+            if !was.zip(mark).is_some_and(|(was, now)| was.same_code(now)) {
                 return stale.declined("a function that rustc's symbols name no copy of changed");
             }
         }
@@ -1434,6 +1463,10 @@ impl Base {
             let now = probe(|| {
                 super::closures_of(db, homed.root).map(|it| it.into_iter().map(|it| it.1).collect())
             });
+            let Some(now) = now else {
+                stale.gone.push(homed.root);
+                continue;
+            };
             // An `async` block has no mark here to tell a change by, but where and how the
             // root is written.
             let asynchronous = homed.closures.iter().any(Option::is_none);
@@ -1441,13 +1474,13 @@ impl Base {
                 homed.written.is_none()
                     || probe(|| super::written_print(db, homed.root)).flatten() != homed.written
             };
-            if now.flatten().as_ref() != Some(&homed.closures) || (asynchronous && rewritten()) {
+            if now.as_ref() != Some(&homed.closures) || (asynchronous && rewritten()) {
                 return stale.declined("a closure in what rustc linked is another now");
             }
             let env = closure_env(db, homed.root);
             for (instance, was) in &homed.unnamed {
                 let mark = probe(|| closure_mark(db, instance, &env, self.debug));
-                if was.is_none() || mark != Some(*was) {
+                if !was.zip(mark.flatten()).is_some_and(|(was, now)| was.same_code(now)) {
                     return stale
                         .declined("a closure that rustc's symbols name no copy of changed");
                 }
@@ -1532,8 +1565,12 @@ impl Base {
             if !touched && !check_all {
                 continue;
             }
+            let Some(now) = probe(|| Left::of(db, root)) else {
+                stale.gone.push(root);
+                continue;
+            };
             // Without code to tell a change by, any edit that reaches it may be one.
-            if was.code.is_none() && touched || probe(|| Left::of(db, root)).as_ref() != Some(was) {
+            if was.code.is_none() && touched || now != *was {
                 if !touched {
                     eprintln!("check-all: MISSED function left to rustc {root:?}");
                     continue;
@@ -1604,6 +1641,9 @@ impl Base {
         if unchanged.broken.contains(parent) {
             return false;
         }
+        if matches!(parent, Node::Root(root) if unchanged.gone.contains(root)) {
+            return false;
+        }
         if !unchanged.changed.contains(parent) {
             return true;
         }
@@ -1647,9 +1687,19 @@ impl Base {
         stale: Vec<Stale>,
     ) -> Result<std::result::Result<Patch, &'static str>> {
         let start = stdx::time::Instant::now();
-        if !self.rustc && roots.entries != self.entries {
-            return Ok(Err("the roots compiled whether called or not changed"));
-        }
+        // A function added where every function is compiled whether called or not, as all of
+        // a program's are when its `main` is C's, is compiled into the patch with the rest.
+        let added: FxHashSet<FunctionId> = match self.rustc {
+            true => FxHashSet::default(),
+            false => {
+                let base: FxHashSet<FunctionId> = self.entries.iter().copied().collect();
+                let now: FxHashSet<FunctionId> = roots.entries.iter().copied().collect();
+                if !base.is_subset(&now) {
+                    return Ok(Err("a root compiled whether called or not is gone"));
+                }
+                now.difference(&base).copied().collect()
+            }
+        };
         // Every function is in rustc's executable: one a patch calls is called there, and only
         // what changed is compiled.
         let none = FxHashSet::default();
@@ -1658,7 +1708,13 @@ impl Base {
             roots.entries.iter().chain(roots.on_demand).copied().collect();
         let known_roots =
             || self.compiled.iter().map(|it| it.0).chain(self.skipped.iter().map(|it| it.0));
-        if !known_roots().all(|root| all.contains(&root)) {
+        // One the look found gone is one the program no longer lists, and the other way round.
+        let gone: FxHashSet<FunctionId> =
+            stale.iter().flat_map(|it| it.gone.iter().copied()).collect();
+        if gone.iter().any(|root| all.contains(root)) {
+            return Ok(Err("a root of the base no longer compiles"));
+        }
+        if !known_roots().all(|root| all.contains(&root) || gone.contains(&root)) {
             return Ok(Err("a root of the base is gone"));
         }
 
@@ -1679,7 +1735,10 @@ impl Base {
         for node in known.tiers.nodes() {
             match &node.0 {
                 super::tier::Kind::Root(root) => {
-                    if self.homes.root.contains_key(root) && !changed_roots.contains(root) {
+                    if self.homes.root.contains_key(root)
+                        && !changed_roots.contains(root)
+                        && !gone.contains(root)
+                    {
                         changed_roots.push(*root);
                     }
                 }
@@ -1702,6 +1761,7 @@ impl Base {
                 .chain(changed_statics.iter().map(|&id| Node::Static(id)))
                 .collect(),
             broken: broken.iter().map(|it| it.0.clone()).collect(),
+            gone,
         };
         // Nothing tells what in rustc's code refers to what.
         if let Some((_, why)) =
@@ -1759,16 +1819,22 @@ impl Base {
         }
         let mut queued: FxHashSet<FunctionId> = known_roots().collect();
         let mut queue = changed_roots;
+        queue.extend(added.iter().copied().filter(|&func| queued.insert(func)));
         queue.extend(cg.wanted.drain(..).filter(|&func| queued.insert(func)));
         let mut next = 0;
         loop {
             while let Some(&root) = queue.get(next) {
                 next += 1;
-                if denied.contains(&root)
-                    || known.left.contains(&root)
-                    || cg.define_function(root).is_err()
-                {
+                if denied.contains(&root) || known.left.contains(&root) {
                     return Ok(Err("a root can't be compiled"));
+                }
+                match cg.define_function(root) {
+                    Ok(_) => {}
+                    // As in a full build, a function added to a crate whose symbols are
+                    // rustc's has none to be put in the object under: what calls it has a
+                    // copy of its own.
+                    Err(e) if e.no_symbol() && added.contains(&root) => {}
+                    Err(_) => return Ok(Err("a root can't be compiled")),
                 }
                 queue.extend(cg.wanted.drain(..).filter(|&func| queued.insert(func)));
             }

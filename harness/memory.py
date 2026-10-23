@@ -26,7 +26,7 @@ sampler reads as that process's largest (for a process that was already running 
 sampler started, such as a daemon, only a peak above the one it had then). Python 3 standard
 library only.
 """
-import ctypes, os, platform, resource, subprocess, sys, tempfile, threading, time
+import ctypes, os, platform, resource, stat, subprocess, sys, tempfile, threading, time
 
 DARWIN = platform.system() == "Darwin"
 INTERVAL = float(os.environ.get("RA_JIT_MEMORY_INTERVAL", "0.01"))
@@ -277,22 +277,80 @@ def in_child(fn, *args):
     return value, dict(largest_mb=largest, peak_mb=max(largest, sampler.peak_mb))
 
 
+# FS_IOC_FIEMAP, and what an extent's flags say: its place on disk is not known yet (delayed
+# allocation), or it is shared with another file (a reflink, a clone).
+FIEMAP, FIEMAP_UNKNOWN, FIEMAP_SHARED, FIEMAP_LAST = 0xC020660B, 0x2, 0x2000, 0x1
+
+
+def shared_extents(path, fd):
+    """The extents of the file `fd` that it shares with other files, as (start, length) on
+    its device, and the bytes of the rest; None where the kernel does not say (not Linux,
+    or a filesystem without FIEMAP)."""
+    import fcntl, struct
+    shared, own, start = [], 0, 0
+    while True:
+        # Up to 256 extents a call: a header of 32 bytes, 56 a extent.
+        answer = bytearray(struct.pack("=QQIIII", start, (1 << 64) - 1 - start, 0, 0, 256, 0) + bytes(56 * 256))
+        try:
+            fcntl.ioctl(fd, FIEMAP, answer)
+        except OSError:
+            return None
+        mapped = struct.unpack_from("=I", answer, 20)[0]
+        if mapped == 0:
+            return shared, own
+        for at in range(mapped):
+            logical, physical, length, _, _, flags = struct.unpack_from("=QQQQQI", answer, 32 + 56 * at)
+            if flags & FIEMAP_SHARED and not flags & FIEMAP_UNKNOWN:
+                shared.append((physical, length))
+            else:
+                own += length
+            start = logical + length
+            if flags & FIEMAP_LAST:
+                return shared, own
+
+
 def disk_mb(*paths):
-    """What the files under `paths` take on disk in megabytes, as `du` counts it: blocks
-    allocated, each file once however many links it has (cargo links what it builds into
-    target/debug)."""
-    seen, total = set(), 0
+    """What the files under `paths` take on disk in megabytes: blocks allocated, each file
+    once however many links it has (cargo links what it builds into target/debug), and on
+    Linux each block once however many files share it (a reflink: a copy on XFS or Btrfs).
+    Where the kernel does not say what is shared (macOS's clones, which APFS does not tell
+    apart) a file counts as `du` counts it, all of its blocks."""
+    seen, total, shared = set(), 0, {}
     for path in paths:
         for root, dirs, files in os.walk(path):
             for name in files + dirs:
+                at = os.path.join(root, name)
                 try:
-                    st = os.lstat(os.path.join(root, name))
+                    st = os.lstat(at)
                 except OSError:
                     continue
                 if (st.st_dev, st.st_ino) in seen:
                     continue
                 seen.add((st.st_dev, st.st_ino))
-                total += st.st_blocks * 512
+                extents = None
+                if sys.platform == "linux" and stat.S_ISREG(st.st_mode) and st.st_blocks:
+                    try:
+                        fd = os.open(at, os.O_RDONLY | os.O_NOFOLLOW)
+                    except OSError:
+                        fd = None
+                    if fd is not None:
+                        try:
+                            extents = shared_extents(at, fd)
+                        finally:
+                            os.close(fd)
+                if extents is None or not extents[0]:
+                    total += st.st_blocks * 512
+                    continue
+                # What the file has beyond its extents is preallocated past its end.
+                runs, own = extents
+                total += max(st.st_blocks * 512 - own - sum(length for _, length in runs), 0) + own
+                shared.setdefault(st.st_dev, []).extend(runs)
+    for runs in shared.values():
+        end = -1
+        for start, length in sorted(runs):
+            if start + length > end:
+                total += start + length - max(start, end)
+                end = start + length
     return round(total / 1e6)
 
 

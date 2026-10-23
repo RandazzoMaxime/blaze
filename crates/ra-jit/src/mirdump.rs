@@ -58,8 +58,9 @@ pub(crate) fn command(mut args: impl Iterator<Item = String>) -> anyhow::Result<
         load_config(),
         args.selection.clone(),
         None,
+        None,
     )?;
-    let Parts { root, base, members, debug } = checkouts.parts(&args.project)?;
+    let Parts { root, base, members, debug, .. } = checkouts.parts(&args.project)?;
     (args.checkout, args.base, args.members, args.debug) = (root, base, members, debug);
     hir::attach_db(&db, || {
         let mut dump =

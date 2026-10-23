@@ -511,6 +511,11 @@ def project(name, spec, work, mode):
         ask = asked_by(os.path.join(ws, "target-ref/debug", spec["client"]))
     runs("cold run")
     warm("warm-up")
+    # The daemon loads the workspace with what cargo said of its build scripts and proc
+    # macros, and builds none of them again for it.
+    if os.path.isdir(os.path.join(ws, "target", "rust-analyzer")):
+        row["wrong"].append("warm-up: the daemon built the build scripts and proc macros again")
+        print("  warm-up      the daemon built the build scripts and proc macros again", flush=True)
     step("warm build", "build", build, status)
     runs("warm run")
     step("cold test", "test", test, test_results)
@@ -541,7 +546,7 @@ def project(name, spec, work, mode):
 FLAG_WORKSPACE = {
     "Cargo.toml": '[workspace]\nmembers = ["app", "util", "shout"]\nresolver = "2"\n\n[profile.quick]\ninherits = "dev"\n\n[profile.release]\npanic = "abort"\n\n[profile.quick.package.util]\nopt-level = 3\noverflow-checks = false\n',
     "util/Cargo.toml": '[package]\nname = "util"\nversion = "0.1.0"\nedition = "2021"\n\n[features]\nloud = []\n',
-    "util/src/lib.rs": '/// ```\n/// assert_eq!(util::greeting("it").len(), 8);\n/// ```\n///\n/// ```should_panic\n/// assert_eq!(util::greeting("it"), "");\n/// ```\npub fn greeting(name: &str) -> String {\n    let text = format!("hello {name}");\n    if cfg!(feature = "loud") { text.to_uppercase() } else { text }\n}\n\nthread_local! {\n    static SAID: std::cell::RefCell<Option<String>> = None.into();\n}\n\npub fn said() -> String {\n    SAID.with_borrow(|it| it.clone().unwrap_or_default())\n}\n\n/// What a word count is laid out with: `loud` puts a volume before it.\n#[repr(C)]\npub struct Words {\n    #[cfg(feature = "loud")]\n    pub volume: u64,\n    pub count: u64,\n}\n\npub fn words(count: u64) -> Words {\n    Words {\n        #[cfg(feature = "loud")]\n        volume: 11,\n        count,\n    }\n}\n\n#[cfg(test)]\nmod tests {\n    // A test and the library see one thread local, whoever compiled either.\n    #[test]\n    fn says_what_a_test_set() {\n        super::SAID.with_borrow_mut(|it| *it = Some("set".to_string()));\n        assert_eq!(super::said(), "set");\n    }\n\n    #[test]\n    fn greets() {\n        assert!(super::greeting("a").to_lowercase().starts_with("hello"));\n    }\n}\n',
+    "util/src/lib.rs": '/// ```\n/// assert_eq!(util::greeting("it").len(), 8);\n/// ```\n///\n/// ```should_panic\n/// assert_eq!(util::greeting("it"), "");\n/// ```\npub fn greeting(name: &str) -> String {\n    let text = format!("hello {name}");\n    if cfg!(feature = "loud") { text.to_uppercase() } else { text }\n}\n\n/// ```\n/// assert_eq!(util::WORDS.len(), 1);\n/// ```\npub const WORDS: &[&str] = &["hello"];\n\nthread_local! {\n    static SAID: std::cell::RefCell<Option<String>> = None.into();\n}\n\npub fn said() -> String {\n    SAID.with_borrow(|it| it.clone().unwrap_or_default())\n}\n\n/// What a word count is laid out with: `loud` puts a volume before it.\n#[repr(C)]\npub struct Words {\n    #[cfg(feature = "loud")]\n    pub volume: u64,\n    pub count: u64,\n}\n\npub fn words(count: u64) -> Words {\n    Words {\n        #[cfg(feature = "loud")]\n        volume: 11,\n        count,\n    }\n}\n\n#[cfg(test)]\nmod tests {\n    // A test and the library see one thread local, whoever compiled either.\n    #[test]\n    fn says_what_a_test_set() {\n        super::SAID.with_borrow_mut(|it| *it = Some("set".to_string()));\n        assert_eq!(super::said(), "set");\n    }\n\n    #[test]\n    fn greets() {\n        assert!(super::greeting("a").to_lowercase().starts_with("hello"));\n    }\n}\n',
     "app/Cargo.toml": '[package]\nname = "app"\nversion = "0.1.0"\nedition = "2021"\ndefault-run = "app"\n\n[features]\nloud = ["util/loud"]\n\n[dependencies]\nutil = { path = "../util" }\n\n[dev-dependencies]\nshout = { path = "../shout" }\n',
     "shout/Cargo.toml": '[package]\nname = "shout"\nversion = "0.1.0"\nedition = "2021"\n\n[dependencies]\nutil = { path = "../util" }\n',
     # Its examples link against util as cargo built it, with the features of every package the
@@ -657,6 +662,8 @@ def flags(work):
     wait_warm(ours, ws)
     round_of("warm")
     rewrite(os.path.join(ws, "util/src/lib.rs"), 'format!("hello {name}")', 'format!("hello {name}!")')
+    # rustc's program of an example has the constant in it: the one of the warm round is stale.
+    rewrite(os.path.join(ws, "util/src/lib.rs"), '&["hello"]', '&["hello", "there"]')
     rewrite(os.path.join(ws, "app/src/main.rs"), ".len(), 7)", ".len(), 8)")
     rewrite(os.path.join(ws, "app/src/main.rs"), "    if name ==", EDITED_IN_CALL + "    if name ==")
     rewrite(os.path.join(ws, "app/src/main.rs"), "#[cfg(test)]", EDITED_IN + "#[cfg(test)]")
@@ -783,6 +790,69 @@ def daemon(work):
     ended = 'error: could not compile `app` (bin "app") due to 1 previous error' in broken.stderr
     check("an edit with an error fails the build with ra-jit's error, as rustc writes it, and no cargo", broken.returncode == 101 and not by_rustc(broken.stderr) and said and ended, f"exit {broken.returncode}, {broken.stderr.strip()[-300:]}")
     open(main, "w").write(kept)
+    # So does one written while no daemon ran, which the worker finds as it loads.
+    here.cargo("stop")
+    open(main, "a").write("\nfn broken() -> u32 { \"text\" }\n")
+    _, broken = here.cargo("build")
+    said = re.search(r'^error\[E0308\]: .*\n +--> app/src/main\.rs:\d+:22\n', broken.stderr, re.M)
+    ended = 'error: could not compile `app` (bin "app") due to 1 previous error' in broken.stderr
+    check("an error written before the daemon loaded fails the build with ra-jit's error, and no cargo", broken.returncode == 101 and not by_rustc(broken.stderr) and said and ended, f"exit {broken.returncode}, {broken.stderr.strip()[-300:]}")
+    open(main, "w").write(kept)
+    _, mended = here.cargo("run")
+    check("the build after it is mended is the daemon's", mended.returncode == 0 and not by_rustc(mended.stderr) and "hello world" in mended.stdout, f"exit {mended.returncode}, {mended.stderr.strip()[-300:]}")
+    # A lint the source denies fails the build as rustc's would, unless the flags cap lints.
+    wait_warm(here, ws)
+    open(main, "a").write("\n#[deny(non_snake_case)]\npub fn Denied() {}\n")
+    _, denied = here.cargo("build")
+    said = re.search(r'^error: .*`Denied`.*\n +--> app/src/main\.rs:\d+:8\n', denied.stderr, re.M)
+    check("an edit with a lint its source denies fails the build with ra-jit's error, and no cargo", denied.returncode == 101 and not by_rustc(denied.stderr) and said, f"exit {denied.returncode}, {denied.stderr.strip()[-300:]}")
+    open(main, "w").write(kept)
+    wait_warm(here, ws)
+    open(main, "a").write("\n#[deny(elided_lifetimes_in_paths)]\npub fn hidden(_: std::fmt::Arguments) {}\n")
+    _, denied = here.cargo("build")
+    said = re.search(r'^error: hidden lifetime parameters in types are deprecated\n +--> app/src/main\.rs:\d+:28\n', denied.stderr, re.M)
+    check("and so does one with a lint of a type's hidden lifetime it denies", denied.returncode == 101 and not by_rustc(denied.stderr) and said, f"exit {denied.returncode}, {denied.stderr.strip()[-300:]}")
+    capped = {"RUSTFLAGS": "--cap-lints warn"}
+    here.cargo("build", env=capped)
+    wait_warm(here, ws)
+    open(main, "a").write("\n// edited\n")
+    _, allowed = here.cargo("run", env=capped)
+    check("with `--cap-lints` among the flags the build of that edit is the daemon's", allowed.returncode == 0 and how_built(allowed.stderr) == "daemon" and "hello world" in allowed.stdout, f"exit {allowed.returncode}, {how_built(allowed.stderr)}: {allowed.stderr.strip()[-300:]}")
+    open(main, "w").write(kept)
+    # `cargo ra-jit check` is what the daemon's build says, with no rustc.
+    _, checked = here.cargo("check")
+    check("`cargo ra-jit check` of a loaded build is the daemon's, and no rustc", checked.returncode == 0 and not by_rustc(checked.stderr) and "[ra-jit]" in checked.stderr, f"exit {checked.returncode}, {checked.stderr.strip()[-300:]}")
+    open(main, "a").write("\nfn broken() -> u32 { \"text\" }\n")
+    _, failed = here.cargo("check")
+    said = re.search(r'^error\[E0308\]: .*\n +--> app/src/main\.rs:\d+:22\n', failed.stderr, re.M)
+    check("`cargo ra-jit check` of an edit with an error fails with ra-jit's error, and no rustc", failed.returncode == 101 and not by_rustc(failed.stderr) and said, f"exit {failed.returncode}, {failed.stderr.strip()[-300:]}")
+    open(main, "w").write(kept)
+    # With no build of its flags loaded, the check is the daemon's checker's: no `cargo check`.
+    cargo_checked = lambda stderr: by_rustc(stderr) or bool(re.search(r"^\s*Checking |this is `cargo check`", stderr, re.M))
+    here.cargo("stop")
+    _, unloaded = here.cargo("check")
+    check("`cargo ra-jit check` with no build loaded is the daemon's, and no rustc", unloaded.returncode == 0 and not cargo_checked(unloaded.stderr) and "[ra-jit]" in unloaded.stderr, f"exit {unloaded.returncode}, {unloaded.stderr.strip()[-300:]}")
+    open(main, "a").write("\nfn broken() -> u32 { \"text\" }\n")
+    _, failed = here.cargo("check")
+    said = re.search(r'^error\[E0308\]: .*\n +--> app/src/main\.rs:\d+:22\n', failed.stderr, re.M)
+    check("and of an edit with an error, ra-jit's error", failed.returncode == 101 and not cargo_checked(failed.stderr) and said, f"exit {failed.returncode}, {failed.stderr.strip()[-300:]}")
+    open(main, "w").write(kept)
+    _, mended = here.cargo("check")
+    check("and once it is mended, no error", mended.returncode == 0 and not cargo_checked(mended.stderr), f"exit {mended.returncode}, {mended.stderr.strip()[-300:]}")
+    # A module in a file the checker did not load is loaded with the workspace again.
+    added = os.path.join(ws, "app/src/added.rs")
+    open(added, "w").write("pub fn added() -> u32 { \"no\" }\n")
+    open(main, "a").write("\nmod added;\nfn more() -> u32 { added::added() }\n")
+    _, moduled = here.cargo("check")
+    said = re.search(r'^error\[E0308\]: .*\n +--> app/src/added\.rs:1:25\n', moduled.stderr, re.M)
+    check("and of a new module with an error, its error", moduled.returncode == 101 and not cargo_checked(moduled.stderr) and said, f"exit {moduled.returncode}, {moduled.stderr.strip()[-300:]}")
+    open(added, "w").write("pub fn added() -> u32 { 1 }\n")
+    _, moduled = here.cargo("check")
+    check("and once that is mended, no error", moduled.returncode == 0 and not cargo_checked(moduled.stderr), f"exit {moduled.returncode}, {moduled.stderr.strip()[-300:]}")
+    open(main, "w").write(kept)
+    os.remove(added)
+    _, other = here.cargo("check", "--release")
+    check("`cargo ra-jit check` of flags no build had is the daemon's, and no rustc", other.returncode == 0 and not cargo_checked(other.stderr) and "`release` profile [ra-jit]" in other.stderr, f"exit {other.returncode}, {other.stderr.strip()[-300:]}")
     here.cargo("stop")
     manners(work, ws, env, here, check, edit)
     abuse(work, ws, tree, env, check, status, alive)

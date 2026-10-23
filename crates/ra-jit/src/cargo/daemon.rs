@@ -119,6 +119,12 @@ const LAST_LINES: usize = 12;
 /// daemon that started it is gone.
 pub(crate) const ENDS_WITH_INPUT: &str = "RA_JIT_ENDS_WITH_INPUT";
 
+/// Where a worker that listens at `socket` leaves the errors it found in the source as it
+/// loaded the workspace, as rustc writes them, before it ends.
+pub(crate) fn errors_beside(socket: &Path) -> PathBuf {
+    socket.with_file_name("errors")
+}
+
 /// A request with the version of the client that sends it.
 #[derive(Serialize, Deserialize)]
 pub(crate) struct Envelope {
@@ -149,6 +155,9 @@ pub(crate) enum Request {
     },
     /// No build follows the [`Request::Ahead`] of this [`WorkerConfig::id`].
     Forget(String),
+    /// `cargo ra-jit check` of a build the daemon has no programs of: what a checker that
+    /// loaded the workspace as it would finds in its crates, with no rustc.
+    Check(Ahead),
     Status,
     Stop,
 }
@@ -172,6 +181,11 @@ pub(crate) enum Reply {
         spans: Vec<crate::trace::Span>,
     },
     Warming,
+    /// What the checker of a [`Request::Check`] found: no error, or the errors as rustc
+    /// writes them.
+    Checked {
+        errors: Option<String>,
+    },
     Status(Status),
     Stopping,
 }
@@ -301,6 +315,10 @@ pub(crate) struct Checkout {
     /// programs are, and in a request under them the ones of the process that asks.
     #[serde(default)]
     pub(crate) env: BTreeMap<String, String>,
+    /// The file of what cargo said of the build scripts it ran and the proc macros it
+    /// built, which a worker loads the checkout with.
+    #[serde(default)]
+    pub(crate) scripts: Option<PathBuf>,
 }
 
 impl Checkout {
@@ -345,6 +363,9 @@ enum Warmth {
     Ready,
     /// Why the worker has no part in the checkout as cargo last built it.
     Failed(String, SystemTime),
+    /// The errors in the source the worker found loading it or building it first, as rustc
+    /// writes them: each program's build fails with them until a source is written.
+    Broken(String, SystemTime),
 }
 
 impl Warmth {
@@ -353,6 +374,7 @@ impl Warmth {
             Warmth::Loading(since) => format!("loading for {:.0?}", since.elapsed()),
             Warmth::Ready => "ready".to_owned(),
             Warmth::Failed(why, _) => format!("failed: {why}"),
+            Warmth::Broken(..) => "the source has an error".to_owned(),
         }
     }
 }
@@ -407,6 +429,7 @@ impl Worker {
         // The worker of a daemon that was killed may still be there, on its way out: it
         // is not the one to connect to.
         let _ = std::fs::remove_file(&socket);
+        let _ = std::fs::remove_file(errors_beside(&socket));
         let config = &checkout.config;
         let mut args = config.args(&checkout.root, &first.crates);
         let named: [(&str, &Path); 5] = [
@@ -440,6 +463,10 @@ impl Worker {
         std::fs::write(&symbols, listed)?;
         args.push("--symbols-in".into());
         args.push(symbols.into());
+        if let Some(scripts) = &checkout.scripts {
+            args.push("--scripts-from".into());
+            args.push(scripts.into());
+        }
         let mut env = crate::process::own();
         for (name, value) in &config.env {
             env.set(name, value);
@@ -537,8 +564,12 @@ impl Worker {
     /// Waits for the process to listen, then has it build every program of `checkout` once.
     fn warm(&self, checkout: &Checkout) {
         let warmth = match self.warmed(checkout) {
-            Ok(()) => Warmth::Ready,
-            Err(why) => Warmth::Failed(format!("{why:#}"), SystemTime::now()),
+            Ok(None) => Warmth::Ready,
+            Ok(Some(said)) => Warmth::Broken(said, SystemTime::now()),
+            Err(why) => match std::fs::read_to_string(errors_beside(&self.socket)) {
+                Ok(said) if self.ended().is_some() => Warmth::Broken(said, SystemTime::now()),
+                _ => Warmth::Failed(format!("{why:#}"), SystemTime::now()),
+            },
         };
         eprintln!("{}: {}", checkout.root.display(), warmth.describe());
         self.set(&checkout.key, warmth);
@@ -551,16 +582,21 @@ impl Worker {
         lock(&self.checkouts).values().any(|it| matches!(it.warmth, Warmth::Loading(_)))
     }
 
-    fn warmed(&self, checkout: &Checkout) -> anyhow::Result<()> {
+    /// The errors in the source, when the worker found any.
+    fn warmed(&self, checkout: &Checkout) -> anyhow::Result<Option<String>> {
         self.connected()?;
         // A source written since cargo built is the daemon's like any edit: it compiles
         // every function and static of the workspace from what it reads. The program the
         // worker was started on is built already, and is asked for too: what the worker then
         // compiles again by itself, for the first edit to be a patch, is part of warming up.
         for plan in &checkout.programs {
-            self.ask(checkout, plan)?.map_err(|it| anyhow::Error::msg(it.why()))?;
+            match self.ask(checkout, plan)? {
+                Ok(_) => {}
+                Err(NotBuilt::Error(said)) => return Ok(Some(said)),
+                Err(why) => anyhow::bail!(why.why()),
+            }
         }
-        Ok(())
+        Ok(None)
     }
 
     /// A connection to the process, once it has loaded the workspace and listens.
@@ -755,6 +791,98 @@ impl Spare {
     }
 }
 
+/// The process that loads a workspace to check it, as the worker of a build with its
+/// [`WorkerConfig`] would, and says what rust-analyzer finds in its crates when asked.
+struct Checker {
+    /// The [`WorkerConfig::id`] it was started with.
+    id: String,
+    child: Child,
+    socket: PathBuf,
+    log: PathBuf,
+    project: PathBuf,
+    asked: Instant,
+}
+
+impl Checker {
+    fn start(ahead: &Ahead, id: &str, dir: &Path) -> anyhow::Result<Checker> {
+        private_dir(dir)?;
+        let (socket, log) = (dir.join("sock"), dir.join("log"));
+        let _ = std::fs::remove_file(&socket);
+        let mut args: Vec<OsString> = vec!["--check".into()];
+        args.extend(ahead.config.args(&ahead.root, &ahead.crates));
+        args.extend(["--out".into(), "none".into(), "--socket".into(), socket.clone().into()]);
+        let mut command = Command::new(std::env::current_exe()?);
+        command.args(&args);
+        match store() {
+            Some(store) => command.env("RA_JIT_CACHE", store),
+            None => command.env_remove("RA_JIT_CACHE"),
+        };
+        let output =
+            private_file(OpenOptions::new().write(true).create(true).truncate(true), &log)?;
+        command.envs(&ahead.config.env).env(ENDS_WITH_INPUT, "1");
+        command.current_dir(&ahead.root);
+        command.stdin(Stdio::piped()).stdout(output.try_clone()?).stderr(output);
+        own_group(&mut command);
+        let child = command.spawn().context("starting a checker")?;
+        Ok(Checker {
+            id: id.to_owned(),
+            child,
+            socket,
+            log,
+            project: ahead.root.join(&ahead.config.project),
+            asked: Instant::now(),
+        })
+    }
+
+    fn ended(&mut self) -> Option<String> {
+        exited(&mut self.child)
+    }
+
+    /// Its answer: `ok`, the errors, or [`crate::check::RELOAD`]. Waits for it to have loaded
+    /// the workspace and to listen.
+    fn ask(&mut self) -> anyhow::Result<String> {
+        let mut stream = loop {
+            match socket::connect(&self.socket) {
+                Ok(stream) => break stream,
+                Err(_) => {
+                    if let Some(how) = self.ended() {
+                        anyhow::bail!(
+                            "the daemon could not load the workspace to check it ({how}: {}); \
+                             its log is {}",
+                            last_words(&self.log),
+                            self.log.display()
+                        );
+                    }
+                    std::thread::sleep(POLL);
+                }
+            }
+        };
+        stream.write_all(b"check\n")?;
+        let mut reply = String::new();
+        BufReader::new(stream).read_line(&mut reply)?;
+        match reply.trim_end() {
+            "" => anyhow::bail!("the checker hung up; its log is {}", self.log.display()),
+            reply => Ok(reply.to_owned()),
+        }
+    }
+
+    fn status(&mut self) -> WorkerStatus {
+        let pid = self.child.id();
+        WorkerStatus {
+            pid,
+            project: self.project.clone(),
+            log: self.log.clone(),
+            bytes: crate::memory::held_by(pid),
+            checkouts: vec![(self.project.clone(), "checks".to_owned())],
+        }
+    }
+
+    fn stop(&mut self) {
+        kill(&mut self.child);
+        let _ = std::fs::remove_file(&self.socket);
+    }
+}
+
 /// Has a worker start in a process group of its own, for `kill` to end what it started with
 /// it: the cargo it asks of a workspace, which would go on in the daemon's home.
 fn own_group(command: &mut Command) {
@@ -791,6 +919,8 @@ struct Daemon {
     ahead: Mutex<FxHashMap<String, Spare>>,
     /// How many spare workers were started: each has a directory of its own.
     spares: AtomicUsize,
+    /// The checker of the last [`Request::Check`], loaded for the next one.
+    checker: Mutex<Option<Checker>>,
     asked: Mutex<Instant>,
 }
 
@@ -881,6 +1011,7 @@ pub(crate) fn serve() -> anyhow::Result<()> {
         spare_when,
         ahead: Mutex::default(),
         spares: AtomicUsize::new(0),
+        checker: Mutex::default(),
         asked: Mutex::new(Instant::now()),
     });
     // A build starts the daemon, and is given this one.
@@ -1000,12 +1131,17 @@ impl Daemon {
                 Ok(()) => self.built(&checkout),
                 Err(why) => Reply::Cold { reason: format!("{why:#}") },
             },
+            Request::Check(ahead) => self.check(&ahead),
             Request::Status => Reply::Status(Status {
                 pid: std::process::id(),
                 version: self.version.clone(),
                 idle_secs: self.idle.map(|it| it.as_secs()),
                 memory_max: self.memory_max,
-                workers: lock(&self.workers).values().map(|it| it.status()).collect(),
+                workers: lock(&self.workers)
+                    .values()
+                    .map(|it| it.status())
+                    .chain(lock(&self.checker).as_mut().map(Checker::status))
+                    .collect(),
             }),
             Request::Stop => Reply::Stopping,
         }
@@ -1033,6 +1169,10 @@ impl Daemon {
                 ),
             },
             Warmth::Failed(reason, _) => Reply::Cold { reason },
+            Warmth::Broken(said, _) => {
+                let programs = checkout.programs.iter().map(|_| Err(NotBuilt::Error(said.clone())));
+                Reply::Synced { programs: programs.collect(), spans: Vec::new() }
+            }
         }
     }
 
@@ -1064,15 +1204,19 @@ impl Daemon {
         // What a worker could not load once it can't load again, until cargo builds anew or
         // a source is written: the failure may be an error in the source.
         let failed = workers.get(&id).and_then(|it| match lock(&it.checkouts).get(&checkout.key) {
-            Some(Loaded { generation, warmth: Warmth::Failed(why, at), .. })
-                if *generation == checkout.generation =>
-            {
-                Some((why.clone(), *at))
+            Some(Loaded { generation, warmth, .. }) if *generation == checkout.generation => {
+                match warmth {
+                    Warmth::Failed(why, at) => Some((Some(why.clone()), *at)),
+                    // Its builds say the errors.
+                    Warmth::Broken(_, at) => Some((None, *at)),
+                    _ => None,
+                }
             }
             _ => None,
         });
         match failed {
-            Some((why, at)) if !checkout.written_since(at) => anyhow::bail!(why),
+            Some((Some(why), at)) if !checkout.written_since(at) => anyhow::bail!(why),
+            Some((None, at)) if !checkout.written_since(at) => return Ok(()),
             Some(_) => {
                 if let Some(old) = workers.remove(&id) {
                     old.stop();
@@ -1165,6 +1309,13 @@ impl Daemon {
                 }
                 keep
             });
+            // One that is checking holds the lock, and is not idle.
+            if let Ok(mut checker) = self.checker.try_lock()
+                && checker.as_ref().is_some_and(|it| it.asked.elapsed() >= idle)
+                && let Some(mut idle) = checker.take()
+            {
+                idle.stop();
+            }
         }
     }
 
@@ -1186,6 +1337,51 @@ impl Daemon {
                 most >> 20
             );
             worker.stop();
+        }
+    }
+
+    /// Has the checker of `ahead` say what it finds in the source, started when the one
+    /// there is of another build or ended, and started again when it can only take the
+    /// source in by loading it again.
+    fn check(&self, ahead: &Ahead) -> Reply {
+        let id = ahead.config.id();
+        let mut held = lock(&self.checker);
+        for _ in 0..2 {
+            if let Some(mut other) = held.take_if(|it| it.id != id || it.ended().is_some()) {
+                other.stop();
+            }
+            let checker = match held.as_mut() {
+                Some(checker) => checker,
+                None => {
+                    let dir = self.home.join("checkers").join(&id);
+                    match Checker::start(ahead, &id, &dir) {
+                        Ok(checker) => held.insert(checker),
+                        Err(why) => return Reply::Cold { reason: format!("{why:#}") },
+                    }
+                }
+            };
+            checker.asked = Instant::now();
+            match checker.ask() {
+                Ok(reply) if reply == "ok" => return Reply::Checked { errors: None },
+                Ok(reply) if reply == crate::check::RELOAD => {
+                    if let Some(mut old) = held.take() {
+                        old.stop();
+                    }
+                }
+                Ok(reply) => match NotBuilt::of(&reply) {
+                    NotBuilt::Error(said) => return Reply::Checked { errors: Some(said) },
+                    why => return Reply::Cold { reason: why.why() },
+                },
+                Err(why) => {
+                    if let Some(mut gone) = held.take() {
+                        gone.stop();
+                    }
+                    return Reply::Cold { reason: format!("{why:#}") };
+                }
+            }
+        }
+        Reply::Cold {
+            reason: "the checker loaded the workspace twice and still had to again".to_owned(),
         }
     }
 
@@ -1241,6 +1437,9 @@ impl Daemon {
         let mut spare = lock(&self.spare);
         if let Some(spare) = spare.as_mut() {
             spare.stop();
+        }
+        if let Some(checker) = lock(&self.checker).as_mut() {
+            checker.stop();
         }
         for spare in ahead.values_mut() {
             spare.stop();

@@ -7729,3 +7729,102 @@ pub mod crypto_lanes {
         out
     }
 }
+
+/// A `$(..)?` repeats as often as the variables in it do, also when they were matched outside
+/// it: a getter per field and a setter for the fields that name one, as bevy's
+/// `impl_atomic_pod!` makes them.
+pub mod optional_repeats_per_field {
+    macro_rules! accessors {
+        ($blob:ident $(, field($index:literal : $ty:ty, $getter:ident $(, $($setter:ident)?)?))*) => {
+            pub struct $blob(pub [u32; 3]);
+
+            impl $blob {
+                $(
+                    $(
+                        pub fn $getter(&self) -> $ty {
+                            self.0[$index] as $ty
+                        }
+
+                        $(
+                            pub fn $setter(&mut self, value: $ty) {
+                                self.0[$index] = value as u32;
+                            }
+                        )?
+                    )*
+                )?
+            }
+        };
+    }
+
+    accessors!(Blob, field(0: u32, tag, set_tag), field(1: u8, kind), field(2: u16, flags, set_flags));
+
+    pub fn run(n: u32) -> (u32, u16, [u32; 3]) {
+        let mut blob = Blob([n, 9, 0]);
+        blob.set_tag(n + 1);
+        blob.set_flags(n as u16 * 3);
+        (blob.tag(), blob.flags(), blob.0)
+    }
+}
+
+/// Whether a type deep in a cycle of `Arc`s, `Weak`s and locks is `Send` takes as many nested
+/// goals as rustc's recursion limit allows once a `Vec`'s capacity, a constant, is evaluated on
+/// the way. The trait solver must not then prove the goals above it again, or it never meets the
+/// cycle and overflows into an ambiguity: bevy's `in_set` over wgpu's handles.
+pub mod deep_send_cycle {
+    use core::ops::{Deref, DerefMut};
+    use std::sync::{Arc, Mutex, RwLock, Weak};
+
+    pub struct Sent<T: Send>(pub T);
+
+    impl<T: Send> Deref for Sent<T> {
+        type Target = T;
+        fn deref(&self) -> &T {
+            &self.0
+        }
+    }
+
+    impl<T: Send> DerefMut for Sent<T> {
+        fn deref_mut(&mut self) -> &mut T {
+            &mut self.0
+        }
+    }
+
+    macro_rules! ring {
+        ($($name:ident => $next:ident, $later:ident),*) => {
+            $(
+                pub struct $name {
+                    pub next: Mutex<Option<Arc<$next>>>,
+                    pub first: Weak<Ring0>,
+                    pub all: RwLock<Vec<Arc<$later>>>,
+                }
+            )*
+        };
+    }
+
+    ring!(
+        Ring0 => Ring1, Ring2,
+        Ring1 => Ring2, Ring3,
+        Ring2 => Ring3, Ring4,
+        Ring3 => Ring4, Ring5,
+        Ring4 => Ring5, Ring6,
+        Ring5 => Ring6, Ring7,
+        Ring6 => Ring7, Ring8,
+        Ring7 => Ring8, Ring9,
+        Ring8 => Ring9, Ring10,
+        Ring9 => Ring10, Ring11,
+        Ring10 => Ring11, Ring12,
+        Ring11 => Ring12, Ring13,
+        Ring12 => Ring13, Ring14,
+        Ring13 => Ring14, Ring15,
+        Ring14 => Ring15, Ring0,
+        Ring15 => Ring0, Ring1
+    );
+
+    pub fn run(n: usize) -> (usize, usize) {
+        let ring =
+            || Ring0 { next: Mutex::new(None), first: Weak::new(), all: RwLock::new(Vec::new()) };
+        let mut sent = Sent((0..n).map(|_| ring()).collect::<Vec<_>>());
+        let taken = core::mem::take(&mut *sent);
+        (taken.len(), sent.len())
+    }
+}

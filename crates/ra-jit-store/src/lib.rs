@@ -10,20 +10,24 @@
 //! - `version` names the format of everything else in it. A daemon that finds an older
 //!   format, or none in a directory that has files, empties the directory and starts over.
 //!   One that finds a newer format leaves it alone and compiles without a store.
-//! - `<sha256>.pack` is a sealed pack: the magic, then records. It is named by the hash of its
-//!   bytes and never changes, so the same file can be on any machine or in a bucket. The
-//!   hash is checked the first time a process reads the pack, and the checksum of a record
-//!   every time its value is read. A pack that fails either is removed, and what was in it
-//!   is compiled again.
-//! - `<pid>-<nanos>.open` is the pack one daemon appends to, which it holds locked. An open
-//!   pack nobody holds was left by a daemon that ended, and whoever finds it seals the
-//!   records of it that are whole.
+//! - `<sha256>.pack` is a sealed pack: the magic, an index of where each value is, then the
+//!   values in blocks of about [`BLOCK`] bytes, each compressed on its own with zstd. It is
+//!   named by the hash of its bytes and never changes, so the same file can be on any
+//!   machine or in a bucket. The hash is checked the first time a process reads the pack,
+//!   and the checksum of a value every time it is read. A pack that fails either is
+//!   removed, and what was in it is compiled again.
+//! - `<pid>-<nanos>.open` is the pack one daemon appends to, which it holds locked: the
+//!   magic, then records, as they come and not compressed. It is sealed into a pack of its
+//!   own and removed. An open pack nobody holds was left by a daemon that ended, and
+//!   whoever finds it seals the records of it that are whole.
 //! - `*.tmp` is a file on its way to another name, locked while it is written.
 //! - `lock` is held by whoever empties the directory or collects garbage in it.
 //!
-//! A record is the key, the length of the value, a checksum of all three and the value. The
-//! key on disk is not the caller's: it is hashed together with [`Identity`], so that a value
-//! is only ever found by the build of ra-jit that wrote it, for the toolchain it wrote it for.
+//! A record is the key, the length of the value, a checksum of all three and the value. An
+//! entry of the index of a sealed pack is the key, the block, where the value starts in the
+//! block once it is unpacked, its length and the same checksum. The key on disk is not the
+//! caller's: it is hashed together with [`Identity`], so that a value is only ever found by
+//! the build of ra-jit that wrote it, for the toolchain it wrote it for.
 //!
 //! # Why daemons that share a directory do not corrupt it
 //!
@@ -51,12 +55,29 @@ use sha2::{Digest, Sha256};
 pub const KEY: usize = 32;
 /// The format of the directory, of a pack and of a record. A change to any of them is
 /// another number here and another last byte of [`MAGIC`].
-pub const FORMAT: u32 = 2;
-const MAGIC: &[u8; 8] = b"rajitpk\x02";
+pub const FORMAT: u32 = 3;
+const MAGIC: &[u8; 8] = b"rajitpk\x03";
 const VERSION_FILE: &str = "version";
 const LOCK_FILE: &str = "lock";
 /// The key, the length of the value and the checksum of the record.
 const HEADER: usize = KEY + 4 + 4;
+/// The key, the block, where the value is in it, its length and its checksum.
+const ENTRY: usize = KEY + 4 * 4;
+/// What a block takes on disk, what it takes unpacked, and how it is packed.
+const BLOCK_HEADER: usize = 3 * 4;
+/// A sealed pack keeps its values in blocks of about this many bytes, each compressed on its
+/// own: reading a value unpacks its block. A build reads values in about the order it added
+/// them, so the next value it asks for is mostly in the block it just unpacked.
+const BLOCK: usize = 128 << 10;
+/// The most a compressed block holds once it is unpacked. A value larger than this is a
+/// block of its own, kept as it is.
+const BLOCK_MAX: usize = 1 << 20;
+/// How hard a block is compressed: zstd's default, which makes a pack of compiled code
+/// about a fifth of its size at some 700 MB a second.
+#[cfg(not(target_family = "wasm"))]
+const PACKING: i32 = 3;
+/// What the blocks unpacked lately may take in memory.
+const UNPACKED: usize = 32 << 20;
 /// An open pack smaller than this is left open: a pack per edit would be a pack per function.
 const SEAL_AT: u64 = 4 << 20;
 /// An open pack is sealed in the middle of a build at this many times the size it is sealed
@@ -64,9 +85,14 @@ const SEAL_AT: u64 = 4 << 20;
 const ROLL_AFTER: u64 = 16;
 /// Records wait in memory until there are this many bytes of them, or the build ends.
 const WRITE_AT: usize = 64 << 10;
-/// What the packs of a store may take when `RA_JIT_CACHE_MAX` does not say.
+/// What the packs of a store may take when `RA_JIT_CACHE_MAX` does not say: this share of
+/// the disk it is on that is free or already the store's, so that a disk that fills up
+/// with other things takes room back from the store. Within [`LEAST_LIMIT`] and
+/// [`MOST_LIMIT`].
+const SHARE_OF_DISK: u64 = 10;
+const LEAST_LIMIT: u64 = 256 << 20;
 /// Generous: the packs are what make an edit fast, and a dev machine has the disk.
-const DEFAULT_LIMIT: u64 = 32 << 30;
+const MOST_LIMIT: u64 = 32 << 30;
 /// More sealed packs than this that are smaller than [`SEAL_AT`] are made one: every daemon
 /// that ends leaves one behind.
 const SMALL_PACKS: usize = 16;
@@ -154,15 +180,84 @@ pub fn parse_size(text: &str) -> Option<u64> {
     digits.parse::<u64>().ok()?.checked_mul(1 << shift)
 }
 
-/// The most the packs of a store may take, from `RA_JIT_CACHE_MAX`: a size, or `off` for no
-/// limit.
-pub fn limit_from_env() -> Result<Option<u64>, String> {
-    match std::env::var("RA_JIT_CACHE_MAX") {
-        Err(_) => Ok(Some(DEFAULT_LIMIT)),
-        Ok(text) if text == "off" => Ok(None),
-        Ok(text) => parse_size(&text)
-            .map(Some)
-            .ok_or_else(|| format!("RA_JIT_CACHE_MAX=`{text}` is neither a size nor `off`")),
+/// The most the packs of a store may take.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Limit {
+    Off,
+    Bytes(u64),
+    /// [`SHARE_OF_DISK`] of the disk, as it is when the store is collected.
+    OfDisk,
+}
+
+impl Limit {
+    /// From `RA_JIT_CACHE_MAX`: a size, or `off` for no limit.
+    pub fn from_env() -> Result<Limit, String> {
+        match std::env::var("RA_JIT_CACHE_MAX") {
+            Err(_) => Ok(Limit::OfDisk),
+            Ok(text) if text == "off" => Ok(Limit::Off),
+            Ok(text) => parse_size(&text)
+                .map(Limit::Bytes)
+                .ok_or_else(|| format!("RA_JIT_CACHE_MAX=`{text}` is neither a size nor `off`")),
+        }
+    }
+
+    /// What it comes to now for the store in `dir`, in bytes.
+    pub fn bytes(self, dir: &Path) -> Option<u64> {
+        match self {
+            Limit::Off => None,
+            Limit::Bytes(bytes) => Some(bytes),
+            Limit::OfDisk => Some(match free_space(dir) {
+                Some(free) => {
+                    let held = StoreDir::at(dir).stats().map_or(0, |it| it.held());
+                    (free.saturating_add(held) / SHARE_OF_DISK).clamp(LEAST_LIMIT, MOST_LIMIT)
+                }
+                None => MOST_LIMIT,
+            }),
+        }
+    }
+}
+
+/// The most the packs of the store in `dir` may take now, from `RA_JIT_CACHE_MAX` or the
+/// disk it is on: `None` for no limit.
+pub fn limit_for(dir: &Path) -> Result<Option<u64>, String> {
+    Ok(Limit::from_env()?.bytes(dir))
+}
+
+/// The bytes the user may still write to the disk `path` is on, or would be on: the
+/// nearest directory above it that is there says.
+fn free_space(path: &Path) -> Option<u64> {
+    let there = path.ancestors().find(|it| it.exists())?;
+    #[cfg(unix)]
+    {
+        let path = std::ffi::CString::new(there.as_os_str().as_encoded_bytes()).ok()?;
+        // SAFETY: `path` ends in a zero and lives through the call, which fills `stats`.
+        let mut stats: libc::statvfs = unsafe { std::mem::zeroed() };
+        if unsafe { libc::statvfs(path.as_ptr(), &mut stats) } != 0 {
+            return None;
+        }
+        #[allow(clippy::useless_conversion, reason = "the widths differ by system")]
+        Some(u64::from(stats.f_bavail).saturating_mul(u64::from(stats.f_frsize)))
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::ffi::OsStrExt as _;
+        let wide: Vec<u16> = there.as_os_str().encode_wide().chain([0]).collect();
+        let mut free = 0;
+        // SAFETY: `wide` ends in a zero and lives through the call, which fills `free`.
+        let done = unsafe {
+            windows_sys::Win32::Storage::FileSystem::GetDiskFreeSpaceExW(
+                wide.as_ptr(),
+                &mut free,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+            )
+        };
+        (done != 0).then_some(free)
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        _ = there;
+        None
     }
 }
 
@@ -176,7 +271,7 @@ pub fn pack_name(bytes: &[u8]) -> Option<String> {
 /// what its name says and every record is as it was written. They are the keys as they are
 /// on disk, which only the build of ra-jit that wrote them can make.
 pub fn pack_keys(name: &str, bytes: &[u8]) -> Result<Vec<[u8; KEY]>, &'static str> {
-    Ok(Pack::check(name, bytes)?.into_iter().map(|it| it.key).collect())
+    Ok(Pack::verify(name, bytes)?.entries.into_iter().map(|it| it.key).collect())
 }
 
 /// Asked for a key, as it is on disk, that no sealed pack of the store has: brings the pack
@@ -279,15 +374,16 @@ fn checksum(key: &[u8], value: &[u8]) -> u32 {
     hasher.finalize()
 }
 
-/// One record of a pack, by where its value is.
+/// One record of an open pack, by where its value is.
 struct Record {
     key: [u8; KEY],
     value: Range<usize>,
     checksum: u32,
 }
 
-/// The records at the start of a pack that are as they were written, and how many bytes they
-/// and the magic take. Whatever follows them was cut short or is not what was written.
+/// The records at the start of an open pack that are as they were written, and how many
+/// bytes they and the magic take. Whatever follows them was cut short or is not what was
+/// written.
 fn records(pack: &[u8]) -> (Vec<Record>, usize) {
     let mut found = Vec::new();
     let mut at = MAGIC.len();
@@ -316,23 +412,224 @@ fn records(pack: &[u8]) -> (Vec<Record>, usize) {
     (found, at)
 }
 
-/// The keys of the records a pack is laid out as, going by their lengths alone.
-fn headed(pack: &[u8]) -> Vec<[u8; KEY]> {
-    let mut keys = Vec::new();
-    let mut at = MAGIC.len();
-    if !pack.starts_with(MAGIC) {
-        return keys;
-    }
-    while let Some(header) = pack.get(at..at + HEADER) {
-        let (key, rest) = header.split_at(KEY);
-        let len = u32::from_le_bytes(rest[..4].try_into().expect("four bytes")) as usize;
-        at += HEADER + len;
-        if at > pack.len() {
-            break;
+fn u32_at(bytes: &[u8], at: usize) -> Option<u32> {
+    Some(u32::from_le_bytes(bytes.get(at..at.checked_add(4)?)?.try_into().ok()?))
+}
+
+/// A block of a sealed pack.
+#[derive(Clone, Copy)]
+struct Block {
+    /// Where it starts in the pack.
+    at: u64,
+    stored: u32,
+    raw: u32,
+    /// Whether it is compressed. One that is not is as many bytes on disk as unpacked.
+    packed: bool,
+}
+
+impl Block {
+    /// The values of the block, from its bytes on disk.
+    fn unpack(&self, stored: &[u8]) -> Option<Vec<u8>> {
+        if stored.len() != self.stored as usize {
+            return None;
         }
-        keys.push(key.try_into().expect("a key"));
+        if !self.packed {
+            return Some(stored.to_vec());
+        }
+        #[cfg(not(target_family = "wasm"))]
+        {
+            let raw = zstd::bulk::decompress(stored, self.raw as usize).ok()?;
+            (raw.len() == self.raw as usize).then_some(raw)
+        }
+        // Nothing seals a compressed block there, and one from elsewhere is not read.
+        #[cfg(target_family = "wasm")]
+        None
     }
-    keys
+}
+
+/// Where a value of a sealed pack is.
+struct Entry {
+    key: [u8; KEY],
+    block: u32,
+    /// Where the value starts in its block, unpacked.
+    at: u32,
+    len: u32,
+    checksum: u32,
+}
+
+impl Entry {
+    fn value<'a>(&self, blocks: &'a [Vec<u8>]) -> &'a [u8] {
+        &blocks[self.block as usize][self.at as usize..][..self.len as usize]
+    }
+}
+
+/// What the index of a sealed pack says: its blocks, and which value is where in them.
+struct Index {
+    blocks: Vec<Block>,
+    entries: Vec<Entry>,
+}
+
+impl Index {
+    /// The index of a sealed pack, if the pack is laid out as one: blocks that take the rest
+    /// of it, and values that are within their blocks.
+    fn read(pack: &[u8]) -> Option<Index> {
+        if !pack.starts_with(MAGIC) {
+            return None;
+        }
+        let mut at = MAGIC.len();
+        let (blocks, entries) = (u32_at(pack, at)? as usize, u32_at(pack, at + 4)? as usize);
+        at += 8;
+        let data = (blocks.checked_mul(BLOCK_HEADER)?)
+            .checked_add(entries.checked_mul(ENTRY)?)?
+            .checked_add(at)?;
+        if data > pack.len() {
+            return None;
+        }
+        let mut index =
+            Index { blocks: Vec::with_capacity(blocks), entries: Vec::with_capacity(entries) };
+        let mut start = data as u64;
+        for _ in 0..blocks {
+            let (stored, raw) = (u32_at(pack, at)?, u32_at(pack, at + 4)?);
+            let packed = match u32_at(pack, at + 8)? {
+                0 if stored == raw => false,
+                1 if raw as usize <= BLOCK_MAX => true,
+                _ => return None,
+            };
+            at += BLOCK_HEADER;
+            index.blocks.push(Block { at: start, stored, raw, packed });
+            start += u64::from(stored);
+        }
+        if start != pack.len() as u64 {
+            return None;
+        }
+        for _ in 0..entries {
+            let key = pack.get(at..at + KEY)?.try_into().ok()?;
+            let field = |n: usize| u32_at(pack, at + KEY + 4 * n);
+            let (block, start, len, checksum) = (field(0)?, field(1)?, field(2)?, field(3)?);
+            at += ENTRY;
+            let raw = index.blocks.get(block as usize)?.raw;
+            if u64::from(start) + u64::from(len) > u64::from(raw) {
+                return None;
+            }
+            index.entries.push(Entry { key, block, at: start, len, checksum });
+        }
+        Some(index)
+    }
+
+    /// Every block of `pack` unpacked, if every one unpacks and every value in them is what
+    /// its checksum says.
+    fn unpack_all(&self, pack: &[u8]) -> Result<Vec<Vec<u8>>, &'static str> {
+        let blocks: Vec<Vec<u8>> = (self.blocks.iter())
+            .map(|it| it.unpack(&pack[it.at as usize..][..it.stored as usize]))
+            .collect::<Option<_>>()
+            .ok_or("has a block that does not unpack")?;
+        if self.entries.iter().any(|it| checksum(&it.key, it.value(&blocks)) != it.checksum) {
+            return Err("has a value that is not what was written");
+        }
+        Ok(blocks)
+    }
+}
+
+/// A sealed pack on its way, made of values in the order they are added.
+struct Sealing {
+    blocks: Vec<(u32, u32, bool)>,
+    entries: Vec<Entry>,
+    /// The blocks that are done, as they are on disk.
+    data: Vec<u8>,
+    /// The values of the block being filled.
+    raw: Vec<u8>,
+    /// Whether a value, empty or not, is in the block being filled.
+    filling: bool,
+    #[cfg(not(target_family = "wasm"))]
+    packer: Option<zstd::bulk::Compressor<'static>>,
+}
+
+impl Sealing {
+    fn new() -> Sealing {
+        Sealing {
+            blocks: Vec::new(),
+            entries: Vec::new(),
+            data: Vec::new(),
+            raw: Vec::new(),
+            filling: false,
+            #[cfg(not(target_family = "wasm"))]
+            packer: zstd::bulk::Compressor::new(PACKING).ok(),
+        }
+    }
+
+    fn add(&mut self, key: &[u8; KEY], value: &[u8], checksum: u32) {
+        if self.raw.len() + value.len() > BLOCK_MAX {
+            self.close();
+        }
+        let block = self.blocks.len() as u32;
+        let (at, len) = (self.raw.len() as u32, value.len() as u32);
+        self.entries.push(Entry { key: *key, block, at, len, checksum });
+        self.raw.extend_from_slice(value);
+        self.filling = true;
+        if self.raw.len() >= BLOCK {
+            self.close();
+        }
+    }
+
+    /// Ends the block being filled: compressed, unless that does not make it smaller.
+    fn close(&mut self) {
+        if !std::mem::take(&mut self.filling) {
+            return;
+        }
+        let raw = std::mem::take(&mut self.raw);
+        #[cfg(not(target_family = "wasm"))]
+        let packed = (self.packer.as_mut())
+            .filter(|_| raw.len() <= BLOCK_MAX)
+            .and_then(|packer| packer.compress(&raw).ok())
+            .filter(|it| it.len() < raw.len());
+        #[cfg(target_family = "wasm")]
+        let packed: Option<Vec<u8>> = None;
+        let stored = packed.as_deref().unwrap_or(&raw);
+        self.blocks.push((stored.len() as u32, raw.len() as u32, packed.is_some()));
+        self.data.extend_from_slice(stored);
+        self.raw = raw;
+        self.raw.clear();
+    }
+
+    /// The bytes of the pack.
+    fn finish(mut self) -> Vec<u8> {
+        self.close();
+        let index = BLOCK_HEADER * self.blocks.len() + ENTRY * self.entries.len();
+        let mut pack = Vec::with_capacity(MAGIC.len() + 8 + index + self.data.len());
+        pack.extend_from_slice(MAGIC);
+        pack.extend_from_slice(&(self.blocks.len() as u32).to_le_bytes());
+        pack.extend_from_slice(&(self.entries.len() as u32).to_le_bytes());
+        for (stored, raw, packed) in self.blocks {
+            for field in [stored, raw, u32::from(packed)] {
+                pack.extend_from_slice(&field.to_le_bytes());
+            }
+        }
+        for entry in self.entries {
+            pack.extend_from_slice(&entry.key);
+            for field in [entry.block, entry.at, entry.len, entry.checksum] {
+                pack.extend_from_slice(&field.to_le_bytes());
+            }
+        }
+        pack.extend_from_slice(&self.data);
+        pack
+    }
+}
+
+/// Seals the whole records at the start of the open pack `bytes`, which is at `path` and
+/// held: writes them as a sealed pack, then removes the open one. One with no whole record
+/// is only removed.
+fn seal_records(dir: &Path, path: &Path, bytes: &[u8]) -> io::Result<()> {
+    let (records, _) = records(bytes);
+    if !records.is_empty() {
+        let mut sealing = Sealing::new();
+        for record in &records {
+            sealing.add(&record.key, &bytes[record.value.clone()], record.checksum);
+        }
+        let sealed = sealing.finish();
+        write_whole(&dir.join(named(&Sha256::digest(&sealed))), &sealed, true)?;
+    }
+    std::fs::remove_file(path)?;
+    sync_dir(dir)
 }
 
 fn record(key: &[u8; KEY], value: &[u8], len: u32) -> Vec<u8> {
@@ -424,6 +721,13 @@ pub struct Stats {
     pub temporary_bytes: u64,
     /// When the pack that has gone unused the longest was last used, and the one used last.
     pub used: Option<(SystemTime, SystemTime)>,
+}
+
+impl Stats {
+    /// What the store takes on disk.
+    pub fn held(&self) -> u64 {
+        self.pack_bytes + self.open_bytes + self.temporary_bytes
+    }
 }
 
 /// What [`StoreDir::collect`] did.
@@ -599,7 +903,7 @@ impl StoreDir {
     /// makes one pack of many, so what a store holds is told by its keys and not by the
     /// names of its packs.
     ///
-    /// Only the headers of the records are read, not what they hold, so this is no check: a
+    /// Only the indexes of the packs are read, not what they hold, so this is no check: a
     /// damaged pack may be said to hold a key that a build will not get from it.
     pub fn keys(&self) -> io::Result<FxHashSet<[u8; KEY]>> {
         let mut keys = FxHashSet::default();
@@ -609,7 +913,9 @@ impl StoreDir {
             // SAFETY: a sealed pack is never written again; one that is removed stays
             // mapped.
             let Ok(pack) = (unsafe { memmap2::Mmap::map(&file) }) else { continue };
-            keys.extend(headed(&pack));
+            if let Some(index) = Index::read(&pack) {
+                keys.extend(index.entries.iter().map(|it| it.key));
+            }
         }
         Ok(keys)
     }
@@ -637,20 +943,11 @@ impl StoreDir {
         adopted
     }
 
-    /// Gives an open pack that is held here the name of its whole records, or removes it
-    /// when it has none.
+    /// Seals the whole records of an open pack that is held here, and removes it.
     fn seal_left(&self, path: &Path, mut file: &File) -> io::Result<()> {
         let mut pack = Vec::new();
         io::Read::read_to_end(&mut file, &mut pack)?;
-        let (records, whole) = records(&pack);
-        if records.is_empty() {
-            return std::fs::remove_file(path);
-        }
-        if whole != pack.len() {
-            file.set_len(whole as u64)?;
-        }
-        file.sync_all()?;
-        std::fs::rename(path, self.dir.join(named(&Sha256::digest(&pack[..whole]))))
+        seal_records(&self.dir, path, &pack)
     }
 
     /// Counts what is in the directory without reading any of it.
@@ -700,10 +997,10 @@ impl StoreDir {
                 // Evicted since it was listed.
                 Err(_) => continue,
             };
-            match Pack::check(&name, &pack) {
-                Ok(records) => {
+            match Pack::verify(&name, &pack) {
+                Ok(index) => {
                     verified.packs += 1;
-                    verified.records += records.len();
+                    verified.records += index.entries.len();
                     verified.bytes += pack.len() as u64;
                 }
                 Err(why) => verified.corrupt.push((name, why.to_owned())),
@@ -793,24 +1090,29 @@ impl StoreDir {
         if small.len() <= SMALL_PACKS {
             return Ok(0);
         }
-        let mut merged = MAGIC.to_vec();
+        let mut merged = Sealing::new();
+        let mut values = 0;
         let mut keys = FxHashSet::default();
         let mut taken = Vec::new();
         for listed in &small {
             let Ok(pack) = self.read(&listed.name) else { continue };
-            // One that is not what its name says is left for whoever reads it to remove.
-            let Ok(records) = Pack::check(&listed.name, &pack) else { continue };
-            if merged.len() + pack.len() > (SEAL_AT * ROLL_AFTER) as usize {
+            // One that is not what it was sealed as is left for whoever reads it to remove.
+            let Ok(index) = Pack::check(&listed.name, &pack) else { continue };
+            let Ok(blocks) = index.unpack_all(&pack) else { continue };
+            let len: usize = index.entries.iter().map(|it| it.len as usize).sum();
+            if values + len > (SEAL_AT * ROLL_AFTER) as usize {
                 break;
             }
-            for record in records {
-                if keys.insert(record.key) {
-                    merged.extend_from_slice(&pack[record.value.start - HEADER..record.value.end]);
+            for entry in &index.entries {
+                if keys.insert(entry.key) {
+                    merged.add(&entry.key, entry.value(&blocks), entry.checksum);
+                    values += entry.len as usize;
                 }
             }
             taken.push(listed);
         }
         let (Some(last), true) = (taken.last(), taken.len() > 1) else { return Ok(0) };
+        let merged = merged.finish();
         let name = named(&Sha256::digest(&merged));
         self.write_whole(&name, &merged)?;
         // As lately used as the last of what it was made of.
@@ -874,6 +1176,7 @@ pub struct Store {
     identity: Identity,
     tuning: Tuning,
     sealed: RwLock<Sealed>,
+    unpacked: Mutex<Unpacked>,
     writer: Mutex<Writer>,
     hits: AtomicUsize,
     misses: AtomicUsize,
@@ -888,13 +1191,13 @@ pub struct Store {
 struct Tuning {
     /// The size an open pack is sealed at between builds.
     seal_at: u64,
-    limit: Option<u64>,
+    limit: Limit,
 }
 
 impl Tuning {
     /// `RA_JIT_CACHE_MAX` and `RA_JIT_CACHE_SEAL_AT`, a size each.
     fn from_env() -> io::Result<Tuning> {
-        let limit = limit_from_env().map_err(io::Error::other)?;
+        let limit = Limit::from_env().map_err(io::Error::other)?;
         let seal_at = match std::env::var("RA_JIT_CACHE_SEAL_AT") {
             Err(_) => SEAL_AT,
             Ok(text) => parse_size(&text).filter(|&it| it != 0).ok_or_else(|| {
@@ -916,6 +1219,7 @@ struct Sealed {
 struct Pack {
     name: String,
     file: File,
+    blocks: Vec<Block>,
     /// Whether a value of it was read since its time of last use was last set.
     used: AtomicBool,
     /// Whether it was found to have changed since it was first read.
@@ -926,25 +1230,75 @@ struct Pack {
 #[derive(Clone)]
 struct Place {
     pack: Arc<Pack>,
-    at: u64,
+    block: u32,
+    at: u32,
     len: u32,
     checksum: u32,
 }
 
 impl Pack {
-    /// The records of a pack whose bytes are what its name says, or what is wrong with it.
-    fn check(name: &str, bytes: &[u8]) -> Result<Vec<Record>, &'static str> {
+    /// The index of a pack whose bytes are what its name says, or what is wrong with it.
+    /// Its values are checked as they are read.
+    fn check(name: &str, bytes: &[u8]) -> Result<Index, &'static str> {
         if !bytes.starts_with(MAGIC) {
             return Err("is not a pack of this format");
         }
         if named(&Sha256::digest(bytes)) != name {
             return Err("is not what was sealed under that name");
         }
-        let (records, whole) = records(bytes);
-        if whole != bytes.len() {
-            return Err("has a record that is not what was written");
+        Index::read(bytes).ok_or("has an index that is not what was written")
+    }
+
+    /// As [`Self::check`], with every value read and checked.
+    fn verify(name: &str, bytes: &[u8]) -> Result<Index, &'static str> {
+        let index = Pack::check(name, bytes)?;
+        index.unpack_all(bytes)?;
+        Ok(index)
+    }
+}
+
+/// The blocks of sealed packs unpacked lately, the values next to the one asked for.
+#[derive(Default)]
+struct Unpacked {
+    held: FxHashMap<(usize, u32), Held>,
+    bytes: usize,
+    clock: u64,
+}
+
+struct Held {
+    raw: Arc<[u8]>,
+    used: u64,
+    /// Keeps the address the block is known by from being another pack's.
+    _pack: Arc<Pack>,
+}
+
+impl Unpacked {
+    fn get(&mut self, pack: &Arc<Pack>, block: u32) -> Option<Arc<[u8]>> {
+        self.clock += 1;
+        let held = self.held.get_mut(&(Arc::as_ptr(pack) as usize, block))?;
+        held.used = self.clock;
+        Some(held.raw.clone())
+    }
+
+    fn put(&mut self, pack: &Arc<Pack>, block: u32, raw: Arc<[u8]>) {
+        self.clock += 1;
+        self.bytes += raw.len();
+        let held = Held { raw, used: self.clock, _pack: pack.clone() };
+        if let Some(was) = self.held.insert((Arc::as_ptr(pack) as usize, block), held) {
+            self.bytes -= was.raw.len();
         }
-        Ok(records)
+        while self.bytes > UNPACKED && self.held.len() > 1 {
+            let Some((&oldest, _)) = self.held.iter().min_by_key(|(_, it)| it.used) else { break };
+            if let Some(gone) = self.held.remove(&oldest) {
+                self.bytes -= gone.raw.len();
+            }
+        }
+    }
+
+    fn forget(&mut self, pack: &Arc<Pack>) {
+        let address = Arc::as_ptr(pack) as usize;
+        self.held.retain(|&(of, _), _| of != address);
+        self.bytes = self.held.values().map(|it| it.raw.len()).sum();
     }
 }
 
@@ -1001,6 +1355,7 @@ impl Store {
             identity,
             tuning,
             sealed: RwLock::default(),
+            unpacked: Mutex::default(),
             writer: Mutex::default(),
             hits: AtomicUsize::new(0),
             misses: AtomicUsize::new(0),
@@ -1013,7 +1368,7 @@ impl Store {
     }
 
     fn collect(&self) {
-        if let Err(e) = self.dir.collect(self.tuning.limit) {
+        if let Err(e) = self.dir.collect(self.tuning.limit.bytes(&self.dir.dir)) {
             eprintln!("store: garbage not collected: {e}");
         }
     }
@@ -1059,22 +1414,17 @@ impl Store {
             sealed.packs.retain(|name, _| !gone.contains(name));
             sealed.index.retain(|_, place| !gone.contains(&place.pack.name));
         }
-        for (pack, records) in read {
-            for record in records {
-                let place = Place {
-                    pack: pack.clone(),
-                    at: record.value.start as u64,
-                    len: record.value.len() as u32,
-                    checksum: record.checksum,
-                };
-                sealed.index.entry(record.key).or_insert(place);
+        for (pack, entries) in read {
+            for Entry { key, block, at, len, checksum } in entries {
+                let place = Place { pack: pack.clone(), block, at, len, checksum };
+                sealed.index.entry(key).or_insert(place);
             }
             sealed.packs.insert(pack.name.clone(), pack);
         }
     }
 
     /// Reads and checks packs, several at a time: hashing them is most of starting up.
-    fn read_packs(&self, names: &[&String]) -> Vec<(Arc<Pack>, Vec<Record>)> {
+    fn read_packs(&self, names: &[&String]) -> Vec<(Arc<Pack>, Vec<Entry>)> {
         let next = AtomicUsize::new(0);
         let read = Mutex::new(Vec::new());
         let threads = std::thread::available_parallelism().map_or(1, |it| it.get());
@@ -1094,8 +1444,9 @@ impl Store {
         read.into_inner().unwrap_or_default()
     }
 
-    /// The pack and its records, if it is what its name says. One that is not is removed.
-    fn read_pack(&self, name: &str) -> Option<(Arc<Pack>, Vec<Record>)> {
+    /// The pack and where its values are, if it is what its name says. One that is not is
+    /// removed.
+    fn read_pack(&self, name: &str) -> Option<(Arc<Pack>, Vec<Entry>)> {
         // To write as well where that is allowed, which is what Windows asks of whoever
         // sets a file's time of last use.
         let opened = self.dir.open(name, true).or_else(|_| self.dir.open(name, false));
@@ -1111,9 +1462,10 @@ impl Store {
         let mut bytes = Vec::new();
         io::Read::read_to_end(&mut file, &mut bytes).ok()?;
         match Pack::check(name, &bytes) {
-            Ok(records) => {
+            Ok(Index { blocks, entries }) => {
                 let (used, changed) = (AtomicBool::new(false), AtomicBool::new(false));
-                Some((Arc::new(Pack { name: name.to_owned(), file, used, changed }), records))
+                let pack = Pack { name: name.to_owned(), file, blocks, used, changed };
+                Some((Arc::new(pack), entries))
             }
             Err(why) => {
                 self.discard(name, why);
@@ -1212,14 +1564,40 @@ impl Store {
     pub fn get(&self, key: &[u8; KEY]) -> Option<Vec<u8>> {
         let key = self.identity.key(key);
         let place = self.place(&key)?;
-        let mut value = vec![0; place.len as usize];
-        let read = read_at(&place.pack.file, &mut value, place.at);
-        if read.is_err() || checksum(&key, &value) != place.checksum {
+        let value = self.value(&place).filter(|it| checksum(&key, it) == place.checksum);
+        if value.is_none() {
             self.forget(&place.pack);
             return None;
         }
         place.pack.used.store(true, Ordering::Relaxed);
-        Some(value)
+        value
+    }
+
+    /// The bytes at `place`, read from its block: from disk where the block is as it is,
+    /// unpacked or from those unpacked lately where it is compressed.
+    fn value(&self, place: &Place) -> Option<Vec<u8>> {
+        let block = place.pack.blocks[place.block as usize];
+        if !block.packed {
+            let mut value = vec![0; place.len as usize];
+            read_at(&place.pack.file, &mut value, block.at + u64::from(place.at)).ok()?;
+            return Some(value);
+        }
+        let held = self.unpacked().get(&place.pack, place.block);
+        let raw = match held {
+            Some(raw) => raw,
+            None => {
+                let mut stored = vec![0; block.stored as usize];
+                read_at(&place.pack.file, &mut stored, block.at).ok()?;
+                let raw: Arc<[u8]> = block.unpack(&stored)?.into();
+                self.unpacked().put(&place.pack, place.block, raw.clone());
+                raw
+            }
+        };
+        Some(raw[place.at as usize..][..place.len as usize].to_vec())
+    }
+
+    fn unpacked(&self) -> MutexGuard<'_, Unpacked> {
+        self.unpacked.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
     /// Stops reading a pack that changed after it was first read, and removes it.
@@ -1230,6 +1608,7 @@ impl Store {
         }
         // The pack stays known, so that it is not read again should it not be removable.
         self.sealed_mut().index.retain(|_, place| !Arc::ptr_eq(&place.pack, pack));
+        self.unpacked().forget(pack);
         self.discard(&pack.name, "has a value that is not what was written");
     }
 
@@ -1253,7 +1632,7 @@ impl Store {
         // others and no longer. Its checksum is worked out before, and a pack that is full
         // is hashed and sealed after.
         let record = record(&key, value, len);
-        let roll_at = self.tuning.seal_at * ROLL_AFTER;
+        let roll_at = self.tuning.seal_at.saturating_mul(ROLL_AFTER);
         let Some(full) = self.writer().add(&self.dir, roll_at, &key, &record) else {
             return;
         };
@@ -1387,17 +1766,16 @@ impl New {
         Ok(())
     }
 
-    /// Gives the pack the name of its bytes, which is when other daemons start to read it.
-    /// The bytes are hashed here, all at once and from the file, and not as they are added:
-    /// adding is under the lock every thread that compiles waits for.
+    /// Seals the pack under the name of its sealed bytes, which is when other daemons start
+    /// to read it. The records are compressed and hashed here, all at once and from the
+    /// file, and not as they are added: adding is under the lock every thread that compiles
+    /// waits for.
     fn seal(mut self, dir: &Path) -> io::Result<()> {
         self.write_out()?;
-        self.file.sync_all()?;
-        let mut hash = Sha256::new();
+        let mut pack = Vec::with_capacity(self.written as usize);
         io::Seek::seek(&mut self.file, io::SeekFrom::Start(0))?;
-        io::copy(&mut self.file, &mut hash)?;
-        std::fs::rename(&self.path, dir.join(named(&hash.finalize())))?;
-        sync_dir(dir)
+        io::Read::read_to_end(&mut self.file, &mut pack)?;
+        seal_records(dir, &self.path, &pack)
     }
 }
 
@@ -1497,7 +1875,7 @@ mod tests {
     use super::*;
 
     /// Seals at every flush, and keeps everything.
-    const EAGER: Tuning = Tuning { seal_at: 1, limit: None };
+    const EAGER: Tuning = Tuning { seal_at: 1, limit: Limit::Off };
 
     fn scratch(name: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("ra-jit-store-{name}-{}", std::process::id()));
@@ -1601,7 +1979,7 @@ mod tests {
     #[test]
     fn a_small_open_pack_stays_open_and_is_sealed_by_the_next_daemon() {
         let dir = scratch("adopt");
-        let store = open(&dir, Tuning { seal_at: SEAL_AT, limit: None });
+        let store = open(&dir, Tuning { seal_at: SEAL_AT, limit: Limit::Off });
         store.insert(&[1; KEY], b"one");
         store.flush();
         assert_eq!(files(&dir, Kind::Open).len(), 1);
@@ -1615,7 +1993,7 @@ mod tests {
     #[test]
     fn a_torn_open_pack_keeps_its_whole_records() {
         let dir = scratch("torn");
-        let store = open(&dir, Tuning { seal_at: SEAL_AT, limit: None });
+        let store = open(&dir, Tuning { seal_at: SEAL_AT, limit: Limit::Off });
         store.insert(&[1; KEY], b"one");
         store.insert(&[2; KEY], b"two");
         store.flush();
@@ -1763,11 +2141,24 @@ mod tests {
         std::fs::remove_dir_all(dir).unwrap();
     }
 
+    /// Bytes that do not compress, the same for the same seed.
+    fn noise(seed: u8, len: usize) -> Vec<u8> {
+        let mut state = 0x9e37_79b9_7f4a_7c15 ^ u64::from(seed);
+        (0..len)
+            .map(|_| {
+                state ^= state << 13;
+                state ^= state >> 7;
+                state ^= state << 17;
+                state as u8
+            })
+            .collect()
+    }
+
     fn pack_of(dir: &Path, key: u8, len: usize, age: u64) -> PathBuf {
         std::fs::create_dir_all(dir).unwrap();
         let before: FxHashSet<PathBuf> = files(dir, Kind::Pack).into_iter().collect();
         let store = open(dir, EAGER);
-        store.insert(&[key; KEY], &vec![key; len]);
+        store.insert(&[key; KEY], &noise(key, len));
         store.flush();
         let new = files(dir, Kind::Pack).into_iter().find(|it| !before.contains(it)).unwrap();
         let used = SystemTime::now() - Duration::from_secs(age);
@@ -1789,7 +2180,7 @@ mod tests {
         assert_eq!((collected.evicted, collected.kept), (1, 2));
         assert!(oldest.exists() && !middle.exists() && newest.exists());
         // A daemon that has it open still reads it; the next does not find it.
-        assert_eq!(store.get(&[2; KEY]).as_deref(), Some(&[2; 1000][..]));
+        assert_eq!(store.get(&[2; KEY]), Some(noise(2, 1000)));
         assert_eq!(open(&dir, EAGER).get(&[2; KEY]), None);
         let collected = StoreDir::at(&dir).collect(Some(0)).unwrap();
         assert_eq!((collected.evicted, collected.kept, collected.kept_bytes), (2, 0, 0));
@@ -1799,14 +2190,14 @@ mod tests {
     #[test]
     fn a_daemon_keeps_its_store_under_the_limit() {
         let dir = scratch("limit");
-        let store = open(&dir, Tuning { seal_at: 1, limit: Some(5000) });
+        let store = open(&dir, Tuning { seal_at: 1, limit: Limit::Bytes(5000) });
         for key in 0..20 {
-            store.insert(&[key; KEY], &[key; 1000]);
+            store.insert(&[key; KEY], &noise(key, 1000));
             store.flush();
         }
         let stats = StoreDir::at(&dir).stats().unwrap();
         assert!(stats.pack_bytes <= 5000 && stats.packs >= 3, "{stats:?}");
-        assert_eq!(store.get(&[19; KEY]).as_deref(), Some(&[19; 1000][..]));
+        assert_eq!(store.get(&[19; KEY]), Some(noise(19, 1000)));
         assert_eq!(store.get(&[0; KEY]), None);
         std::fs::remove_dir_all(dir).unwrap();
     }
@@ -1818,8 +2209,10 @@ mod tests {
         let store = StoreDir::at(&dir);
         store.claim().unwrap();
         for key in 0..SMALL_PACKS as u8 + 4 {
-            let mut pack = MAGIC.to_vec();
-            pack.extend(record(&identity("a toolchain").key(&[key; KEY]), &[key; 10], 10));
+            let (on_disk, value) = (identity("a toolchain").key(&[key; KEY]), [key; 10]);
+            let mut sealing = Sealing::new();
+            sealing.add(&on_disk, &value, checksum(&on_disk, &value));
+            let pack = sealing.finish();
             store.write_whole(&named(&Sha256::digest(&pack)), &pack).unwrap();
         }
         let collected = store.collect(None).unwrap();
@@ -1835,7 +2228,7 @@ mod tests {
     #[test]
     fn stores_that_share_a_directory_find_what_the_others_sealed() {
         let dir = scratch("shared");
-        let limit = Some(64 << 10);
+        let limit = Limit::Bytes(64 << 10);
         std::thread::scope(|scope| {
             for writer in 0..6u8 {
                 let dir = &dir;
@@ -1914,8 +2307,8 @@ mod tests {
         for name in store.packs().unwrap() {
             let pack = std::fs::read(dir.join(&name)).unwrap();
             held.extend(pack_keys(&name, &pack).unwrap());
-            // Cut short in a value, the record it is in is not counted.
-            assert_eq!(headed(&pack[..pack.len() - 1]).len(), headed(&pack).len() - 1);
+            // Cut short, a pack says nothing of what it holds.
+            assert!(Index::read(&pack[..pack.len() - 1]).is_none());
         }
         assert!(!held.is_empty());
         assert_eq!(store.keys().unwrap(), held.into_iter().collect());
@@ -1983,6 +2376,16 @@ mod tests {
         assert_eq!(parse_size(""), None);
         assert_eq!(parse_size("99999999999999999999G"), None);
         assert_eq!(parse_size("17179869184G"), None);
+    }
+
+    #[test]
+    fn the_default_limit_is_a_share_of_the_disk_within_bounds() {
+        let dir = scratch("limit-of-disk").join("not there yet");
+        let most = Limit::OfDisk.bytes(&dir).unwrap();
+        assert!((LEAST_LIMIT..=MOST_LIMIT).contains(&most), "{most}");
+        assert!(free_space(&dir).is_some());
+        assert_eq!(Limit::Bytes(7).bytes(&dir), Some(7));
+        assert_eq!(Limit::Off.bytes(&dir), None);
     }
 
     /// `/dev/full` takes no byte, as a disk with no room does.
@@ -2066,7 +2469,7 @@ mod tests {
     fn the_store_and_its_files_are_the_users_alone() {
         let dir = scratch("private");
         let pack = sealed(&dir);
-        let store = open(&dir, Tuning { seal_at: u64::MAX, limit: None });
+        let store = open(&dir, Tuning { seal_at: u64::MAX, limit: Limit::Off });
         store.insert(&[3; KEY], b"three");
         store.flush();
         assert_eq!(mode(&dir), 0o700);
@@ -2201,19 +2604,31 @@ mod tests {
         assert!(refused.to_string().contains("belongs to another user"), "{refused}");
     }
 
-    /// A pack with two records, as it is sealed.
-    fn pack() -> Vec<u8> {
+    /// An open pack with two records.
+    fn open_records() -> Vec<u8> {
         let mut pack = MAGIC.to_vec();
         pack.extend(record(&[1; KEY], b"one", 3));
         pack.extend(record(&[2; KEY], &[7; 300], 300));
         pack
     }
 
+    /// A pack of the same records, as it is sealed: in a compressed block, and the second
+    /// again in one that is kept as it is.
+    fn pack() -> Vec<u8> {
+        let mut sealing = Sealing::new();
+        sealing.add(&[1; KEY], b"one", checksum(&[1; KEY], b"one"));
+        sealing.add(&[2; KEY], &[7; 300], checksum(&[2; KEY], &[7; 300]));
+        sealing.close();
+        sealing.packer = None;
+        sealing.add(&[3; KEY], &[7; 300], checksum(&[3; KEY], &[7; 300]));
+        sealing.finish()
+    }
+
     #[test]
     fn no_bytes_break_the_reading_of_a_pack() {
         use ra_jit_fuzz as fuzz;
-        let seeds = vec![pack(), MAGIC.to_vec(), Vec::new()];
-        let (mut whole, mut cut) = (0, 0);
+        let seeds = vec![open_records(), pack(), MAGIC.to_vec(), Vec::new()];
+        let (mut whole, mut cut, mut sealed) = (0, 0, 0);
         for bytes in fuzz::inputs(concat!(env!("CARGO_MANIFEST_DIR"), "/corpus/pack"), seeds) {
             let (largest, (found, end)) = fuzz::largest_allocation(|| records(&bytes));
             assert!(largest <= fuzz::allowed(bytes.len()), "{largest} bytes for {}", bytes.len());
@@ -2223,17 +2638,56 @@ mod tests {
             }
             // Under the name of its bytes, which whoever writes a pack can give it.
             let name = named(&Sha256::digest(&bytes));
-            match Pack::check(&name, &bytes) {
-                Ok(records) => {
-                    assert_eq!(records.len(), found.len());
+            let (largest, checked) = fuzz::largest_allocation(|| Pack::verify(&name, &bytes));
+            assert!(largest <= fuzz::allowed(bytes.len()), "{largest} bytes for {}", bytes.len());
+            match checked {
+                Ok(index) => {
+                    assert!(
+                        index.entries.iter().all(|it| (it.block as usize) < index.blocks.len())
+                    );
                     whole += 1;
                 }
                 Err(_) => cut += 1,
             }
+            sealed += usize::from(Pack::check(&name, &bytes).is_ok());
             assert!(Pack::check(&named(&[0; 32]), &bytes).is_err());
         }
-        eprintln!("pack: {whole} whole, {cut} not");
-        assert!(whole > 3 && cut > 0);
+        eprintln!("pack: {whole} whole, {cut} not, {sealed} laid out as sealed");
+        assert!(whole > 3 && cut > 0 && sealed >= whole);
+    }
+
+    #[test]
+    fn values_are_compressed_in_blocks_and_read_back_from_any_of_them() {
+        let dir = scratch("blocks");
+        let store = open(&dir, Tuning { seal_at: 1 << 40, limit: Limit::Off });
+        let value = |n: u32| format!("fn f{n}() {{ {} }}", "let x = 1; ".repeat(n as usize % 50));
+        let key = |n: u32| {
+            let mut key = [1; KEY];
+            key[..4].copy_from_slice(&n.to_le_bytes());
+            key
+        };
+        let count = 4 * BLOCK as u32 / 200;
+        for n in 0..count {
+            store.insert(&key(n), value(n).as_bytes());
+        }
+        let large = noise(9, BLOCK_MAX + 1);
+        store.insert(&[9; KEY], &large);
+        store.settle(1);
+        let [pack] = &files(&dir, Kind::Pack)[..] else { panic!("one pack") };
+        let bytes = std::fs::read(pack).unwrap();
+        let index = Index::read(&bytes).unwrap();
+        assert!(index.blocks.len() > 3, "{} blocks", index.blocks.len());
+        assert!(index.blocks.iter().any(|it| !it.packed && it.raw as usize == large.len()));
+        let values: usize = index.entries.iter().map(|it| it.len as usize).sum();
+        assert!(bytes.len() - large.len() < (values - large.len()) / 3, "{} bytes", bytes.len());
+        let reader = open(&dir, EAGER);
+        // Backwards, so that no block is the one read before.
+        for n in (0..count).rev() {
+            assert_eq!(reader.get(&key(n)), Some(value(n).into_bytes()), "{n}");
+        }
+        assert_eq!(reader.get(&[9; KEY]), Some(large));
+        assert!(StoreDir::at(&dir).verify().unwrap().corrupt.is_empty());
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

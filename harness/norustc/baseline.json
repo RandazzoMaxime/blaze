@@ -1,7 +1,11 @@
 {
  "linux-aarch64 cranelift": {
   "check": {
-   "rustc": 5,
+   "rustc": 0,
+   "rustdoc": 0
+  },
+  "check unloaded": {
+   "rustc": 0,
    "rustdoc": 0
   },
   "cold build": {
@@ -9,7 +13,7 @@
    "rustdoc": 0
   },
   "doctests": {
-   "rustc": 6,
+   "rustc": 3,
    "rustdoc": 0
   },
   "edits": {
@@ -17,13 +21,17 @@
    "rustdoc": 0
   },
   "tests": {
-   "rustc": 12,
+   "rustc": 7,
    "rustdoc": 0
   }
  },
  "linux-aarch64 llvm": {
   "check": {
-   "rustc": 5,
+   "rustc": 0,
+   "rustdoc": 0
+  },
+  "check unloaded": {
+   "rustc": 0,
    "rustdoc": 0
   },
   "cold build": {
@@ -31,7 +39,7 @@
    "rustdoc": 0
   },
   "doctests": {
-   "rustc": 6,
+   "rustc": 3,
    "rustdoc": 0
   },
   "edits": {
@@ -39,13 +47,17 @@
    "rustdoc": 0
   },
   "tests": {
-   "rustc": 12,
+   "rustc": 7,
    "rustdoc": 0
   }
  },
  "linux-x86_64 cranelift": {
   "check": {
-   "rustc": 5,
+   "rustc": 0,
+   "rustdoc": 0
+  },
+  "check unloaded": {
+   "rustc": 0,
    "rustdoc": 0
   },
   "cold build": {
@@ -53,7 +65,7 @@
    "rustdoc": 0
   },
   "doctests": {
-   "rustc": 6,
+   "rustc": 3,
    "rustdoc": 0
   },
   "edits": {
@@ -61,13 +73,17 @@
    "rustdoc": 0
   },
   "tests": {
-   "rustc": 12,
+   "rustc": 7,
    "rustdoc": 0
   }
  },
  "linux-x86_64 llvm": {
   "check": {
-   "rustc": 5,
+   "rustc": 0,
+   "rustdoc": 0
+  },
+  "check unloaded": {
+   "rustc": 0,
    "rustdoc": 0
   },
   "cold build": {
@@ -75,7 +91,7 @@
    "rustdoc": 0
   },
   "doctests": {
-   "rustc": 6,
+   "rustc": 3,
    "rustdoc": 0
   },
   "edits": {
@@ -83,13 +99,17 @@
    "rustdoc": 0
   },
   "tests": {
-   "rustc": 12,
+   "rustc": 7,
    "rustdoc": 0
   }
  },
  "macos-aarch64 cranelift": {
   "check": {
-   "rustc": 5,
+   "rustc": 0,
+   "rustdoc": 0
+  },
+  "check unloaded": {
+   "rustc": 0,
    "rustdoc": 0
   },
   "cold build": {
@@ -97,7 +117,7 @@
    "rustdoc": 0
   },
   "doctests": {
-   "rustc": 6,
+   "rustc": 3,
    "rustdoc": 0
   },
   "edits": {
@@ -105,13 +125,17 @@
    "rustdoc": 0
   },
   "tests": {
-   "rustc": 12,
+   "rustc": 7,
    "rustdoc": 0
   }
  },
  "macos-aarch64 llvm": {
   "check": {
-   "rustc": 5,
+   "rustc": 0,
+   "rustdoc": 0
+  },
+  "check unloaded": {
+   "rustc": 0,
    "rustdoc": 0
   },
   "cold build": {
@@ -119,7 +143,7 @@
    "rustdoc": 0
   },
   "doctests": {
-   "rustc": 6,
+   "rustc": 3,
    "rustdoc": 0
   },
   "edits": {
@@ -127,7 +151,7 @@
    "rustdoc": 0
   },
   "tests": {
-   "rustc": 12,
+   "rustc": 7,
    "rustdoc": 0
   }
  }

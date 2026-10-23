@@ -40,7 +40,7 @@ use std::{
 use anyhow::{Context, bail};
 use futures_util::{StreamExt, stream};
 use ra_jit_store::{
-    FORMAT as STORE_FORMAT, StoreDir, limit_from_env, name_file_whole, pack_format, pack_keys,
+    FORMAT as STORE_FORMAT, StoreDir, limit_for, name_file_whole, pack_format, pack_keys,
     parse_size, write_file_whole,
 };
 use rustc_hash::FxHashMap;
@@ -714,42 +714,14 @@ async fn send_pack(store: &Path, remote: &Remote, pack: Digest) -> anyhow::Resul
     let (size, keys) = tokio::task::spawn_blocking(move || keys_of(&from, pack)).await??;
     let keys_digest = Digest::of(&keys);
     remote.send_named_by_hash(&keys_object(&keys_digest), keys).await?;
-    let (from, aside) = (store.join(pack_file(&pack)), store.join(format!("{pack}.pack.send.tmp")));
-    let packing = aside.clone();
-    let packed = tokio::task::spawn_blocking(move || pack_whole(&from, &packing)).await?;
-    let sent = async {
-        let (packed, packed_size) = packed?;
-        let listed = Listed {
-            size,
-            keys: keys_digest,
-            format: STORE_FORMAT,
-            packed: Some((packed, packed_size)),
-        };
-        let (object, _) = listed.object(&pack);
-        if remote.holds(&object, packed_size).await? {
-            return Ok((listed, 0));
-        }
-        remote.send_file(&object, &aside, packed_size).await?;
-        Ok((listed, packed_size))
+    // A sealed pack's values are compressed already: the pack is sent as it is.
+    let listed = Listed { size, keys: keys_digest, format: STORE_FORMAT, packed: None };
+    let (object, _) = listed.object(&pack);
+    if remote.holds(&object, size).await? {
+        return Ok((listed, 0));
     }
-    .await;
-    _ = tokio::fs::remove_file(&aside).await;
-    sent
-}
-
-/// How hard packs are compressed for the remote: zstd's default, which makes a pack a
-/// seventh of its size at a tenth of a second for 50 MB.
-const PACKING: i32 = 3;
-
-/// Compresses the file `from` into `to`, a temporary file of the store's, and says what
-/// hash and size it has.
-fn pack_whole(from: &Path, to: &Path) -> anyhow::Result<(Digest, u64)> {
-    let mut packed = zstd::Encoder::new(File::create(to)?, PACKING)?;
-    std::io::copy(&mut File::open(from)?, &mut packed)?;
-    packed.finish()?.sync_all()?;
-    // SAFETY: nothing else writes a file this process made under its own name.
-    let bytes = unsafe { memmap2::Mmap::map(&File::open(to)?)? };
-    Ok((Digest::of(&bytes), bytes.len() as u64))
+    remote.send_file(&object, &store.join(pack_file(&pack)), size).await?;
+    Ok((listed, size))
 }
 
 /// Makes the directory a store of this build's format, and seals what ended daemons left
@@ -878,7 +850,7 @@ async fn keep_under(dir: StoreDir, limit: Option<u64>) -> anyhow::Result<String>
 /// they fit under `RA_JIT_CACHE_MAX`. A pack of another format than this build reads is left
 /// where it is, and one that is longer than the manifest says is rejected.
 pub(crate) async fn pull(store: &Path, remote: &Remote, project: &str) -> anyhow::Result<String> {
-    let limit = limit_from_env().map_err(anyhow::Error::msg)?;
+    let limit = limit_for(store).map_err(anyhow::Error::msg)?;
     let dir = claim(store, false).await?;
     let local = local_packs(&dir)?;
     let Some(manifest) = Manifest::fetch(remote, project).await? else {
@@ -1034,7 +1006,7 @@ fn stats(store: &Path) -> anyhow::Result<()> {
     println!("open bytes: {}", stats.open_bytes);
     println!("temporary files: {}", stats.temporary);
     println!("temporary bytes: {}", stats.temporary_bytes);
-    match limit_from_env().map_err(anyhow::Error::msg)? {
+    match limit_for(store).map_err(anyhow::Error::msg)? {
         Some(limit) => println!("limit bytes: {limit}"),
         None => println!("limit bytes: off"),
     }
@@ -1049,7 +1021,7 @@ fn stats(store: &Path) -> anyhow::Result<()> {
 /// `RA_JIT_CACHE_MAX` names.
 fn collect(store: &Path, mut args: impl Iterator<Item = String>) -> anyhow::Result<()> {
     let limit = match (args.next().as_deref(), args.next()) {
-        (None, _) => limit_from_env().map_err(anyhow::Error::msg)?,
+        (None, _) => limit_for(store).map_err(anyhow::Error::msg)?,
         (Some("--max"), Some(size)) => {
             Some(parse_size(&size).with_context(|| format!("`{size}` is not a size"))?)
         }
@@ -1215,7 +1187,7 @@ impl Lazy {
         let (missing, _) = manifest.missing(&local);
         // A pack the store may not hold is not one to fetch, and the keys of them all are
         // kept in memory: no more of them than one object may be.
-        let limit = limit_from_env().map_err(anyhow::Error::msg)?.unwrap_or(u64::MAX);
+        let limit = limit_for(store).map_err(anyhow::Error::msg)?.unwrap_or(u64::MAX);
         let held = &Room::of(Some(remote.object_max));
         let fetched = stream::iter(missing.into_iter().map(|(pack, listed)| async move {
             if listed.size > limit {

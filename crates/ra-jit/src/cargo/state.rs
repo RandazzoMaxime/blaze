@@ -150,6 +150,18 @@ enum Guard {
         what: String,
         files: Vec<(PathBuf, bool)>,
     },
+    /// Files that are to be as they were when cargo built but for their tests: what rustc
+    /// built of them without `cfg(test)` holds while the rest is, every token where it was.
+    /// Each is there or not, and when it was there, when it was written and its
+    /// [`without_tests`].
+    /// `cargo` is cargo's dep-info of what rustc built from them, made newer than a file only
+    /// its tests changed in, so cargo doesn't build it again either.
+    BesideTests {
+        what: String,
+        files: Vec<(PathBuf, Option<(u128, String)>)>,
+        #[serde(default)]
+        cargo: Vec<PathBuf>,
+    },
     /// A directory with nothing in it written since cargo built.
     Tree {
         what: String,
@@ -201,6 +213,32 @@ impl Guard {
                 })?;
                 Some(format!("{what} {} changed", changed.0.display()))
             }
+            Guard::BesideTests { what, files, cargo } => {
+                let mut tests_only = None;
+                let changed = files.iter().find(|(file, was)| {
+                    let written = written_at(file);
+                    match (written, was) {
+                        (None, None) => false,
+                        (Some(_), None) | (None, Some(_)) => true,
+                        // Written while cargo built or after: what it was then is not known.
+                        (Some(_), Some((then, _))) if *then > built_at => true,
+                        (Some(now), Some(_)) if now <= built_at => false,
+                        (Some(now), Some((_, print))) => {
+                            tests_only = tests_only.max(Some(now));
+                            without_tests(file).as_ref() != Some(print)
+                        }
+                    }
+                });
+                if let Some((file, _)) = changed {
+                    return Some(format!("{what} {} changed", file.display()));
+                }
+                let stale = cargo.iter().filter(|it| written_at(it) < tests_only);
+                for file in stale {
+                    let file = std::fs::File::options().write(true).open(file);
+                    _ = file.and_then(|it| it.set_modified(std::time::SystemTime::now()));
+                }
+                None
+            }
             Guard::Tree { what, dir } => {
                 let changed = newer_in(dir, built_at)?;
                 Some(format!("{what} and {} changed", changed.display()))
@@ -220,6 +258,52 @@ impl Guard {
         });
         Guard::Files { what: what.to_owned(), files: files.collect() }
     }
+
+    fn beside_tests(what: &str, files: Vec<PathBuf>, cargo: Vec<PathBuf>) -> Guard {
+        let files = files.into_iter().map(|it| {
+            let was = written_at(&it).zip(without_tests(&it));
+            (it, was)
+        });
+        Guard::BesideTests { what: what.to_owned(), files: files.collect(), cargo }
+    }
+}
+
+/// A hash of the Rust source in `file` with every item marked `#[test]` or `#[cfg(test)]`
+/// blanked, and the blanks it ends with dropped: the same while only those change and every
+/// other token keeps its line and column. A file that isn't Rust, one `include!`d or
+/// `include_str!`d, is hashed as it is. `None` when it can't be read.
+fn without_tests(file: &Path) -> Option<String> {
+    use sha2::Digest as _;
+    use syntax::{AstNode as _, ast};
+    let text = std::fs::read_to_string(file).ok()?;
+    if file.extension().is_none_or(|it| it != "rs") {
+        let hash = sha2::Sha256::digest(&text);
+        return Some(hash[..16].iter().map(|it| format!("{it:02x}")).collect());
+    }
+    let parse = syntax::SourceFile::parse(&text, syntax::Edition::CURRENT);
+    let mut bytes = text.clone().into_bytes();
+    let only_tests = |item: &ast::Item| {
+        ast::HasAttrs::attrs(item).any(|attr| {
+            let attr: String =
+                attr.syntax().text().to_string().chars().filter(|it| !it.is_whitespace()).collect();
+            attr == "#[test]" || attr == "#[cfg(test)]"
+        })
+    };
+    for item in parse.tree().syntax().descendants().filter_map(ast::Item::cast) {
+        if only_tests(&item) {
+            let range = item.syntax().text_range();
+            for byte in &mut bytes[usize::from(range.start())..usize::from(range.end())] {
+                if *byte != b'\n' {
+                    *byte = b' ';
+                }
+            }
+        }
+    }
+    let blanked = String::from_utf8_lossy(&bytes);
+    let lines: Vec<&str> = blanked.lines().map(str::trim_end).collect();
+    let kept = lines.len() - lines.iter().rev().take_while(|it| it.is_empty()).count();
+    let hash = sha2::Sha256::digest(lines[..kept].join("\n"));
+    Some(hash[..16].iter().map(|it| format!("{it:02x}")).collect())
 }
 
 /// When the file was last written, as a stamp. `None` when it is not there.
@@ -254,6 +338,9 @@ pub(crate) struct Built {
     started: u128,
     artifacts: Vec<Artifact>,
     scripts: Vec<BuildScript>,
+    /// What cargo said of each build script it ran and each proc macro it built, a line
+    /// each as it said it, a fresh one too.
+    said: Vec<String>,
 }
 
 /// The crates of a workspace the first build of it leaves to the daemon.
@@ -341,6 +428,35 @@ impl Staged {
     }
 }
 
+/// What the checker of `cargo ra-jit check` with the flags of `asked` loads: the workspace
+/// as a build of those flags has it, with the crates of every package of it. A flag that
+/// picks the tests checks them as `cargo check --tests` does, with `cfg(test)`.
+pub(crate) fn checked(asked: &Invocation) -> anyhow::Result<daemon::Ahead> {
+    if let Some(why) = other_toolchain() {
+        anyhow::bail!(why);
+    }
+    let metadata = metadata(asked)?;
+    let root = metadata.workspace_root.clone().into_std_path_buf();
+    let project =
+        project(asked, &std::env::current_dir()?, &metadata).map_err(anyhow::Error::msg)?;
+    let crates: Vec<PathBuf> = metadata
+        .workspace_packages()
+        .iter()
+        .flat_map(|it| &it.targets)
+        .filter(|it| !it.is_custom_build())
+        .map(|it| it.src_path.clone().into_std_path_buf())
+        .collect();
+    anyhow::ensure!(!crates.is_empty(), "the workspace has no crate to check");
+    let config = WorkerConfig {
+        repository: repository(&root),
+        project: project.strip_prefix(&root).unwrap_or(Path::new("")).to_owned(),
+        cfg_test: asked.flags.dev_targets,
+        selection: asked.selection(),
+        env: worker_env(),
+    };
+    Ok(daemon::Ahead { config, crates, root })
+}
+
 impl Built {
     /// Runs cargo on what `asked` builds, with ra-jit as the wrapper of the workspace's
     /// crates. Progress and diagnostics are cargo's own. `Err` is cargo's exit status when
@@ -371,7 +487,7 @@ impl Built {
         let started = stamp_now();
         let mut cargo = Command::new(cargo_path());
         match asked.subcommand {
-            Subcommand::Build | Subcommand::Run => cargo.arg("build"),
+            Subcommand::Build | Subcommand::Run | Subcommand::Check => cargo.arg("build"),
             Subcommand::Test => cargo.args(["test", "--no-run"]),
         };
         cargo.args(&asked.build_args).arg("--message-format=json-render-diagnostics");
@@ -383,7 +499,8 @@ impl Built {
         cargo.stdout(Stdio::piped());
         let mut cargo = cargo.spawn().context("running cargo")?;
         let said = cargo.stdout.take().context("cargo has no output")?;
-        let mut built = Built { started, artifacts: Vec::new(), scripts: Vec::new() };
+        let mut built =
+            Built { started, artifacts: Vec::new(), scripts: Vec::new(), said: Vec::new() };
         let ahead = ahead.map(|it| it.config.id());
         // Cargo waits while its output is unread, so the daemon is told on a thread of its own.
         let (tell, told) = std::sync::mpsc::channel::<Request>();
@@ -397,17 +514,20 @@ impl Built {
             // The worker that loads the workspace meanwhile reads what the scripts said and
             // where the proc macros are from cargo's one build of them, and the symbols of
             // each library as it is built.
-            let loads = match &message {
+            let scripted = match &message {
                 Message::BuildScriptExecuted(_) => true,
-                Message::CompilerArtifact(it) => {
-                    it.target.is_proc_macro()
-                        || it.filenames.iter().any(|it| it.extension() == Some("rlib"))
-                }
+                Message::CompilerArtifact(it) => it.target.is_proc_macro(),
                 _ => false,
             };
+            let loads = scripted
+                || matches!(&message, Message::CompilerArtifact(it)
+                    if it.filenames.iter().any(|it| it.extension() == Some("rlib")));
             if loads && let Some(id) = &ahead {
                 let said = Request::Said { id: id.clone(), line: serde_json::to_string(&message)? };
                 let _ = tell.send(said);
+            }
+            if scripted {
+                built.said.push(serde_json::to_string(&message)?);
             }
             match message {
                 Message::CompilerArtifact(artifact) => built.artifacts.push(artifact),
@@ -731,6 +851,13 @@ impl State {
             env: worker_env(),
         };
         let sysroot_libraries = sysroot_libraries();
+        let scripts = match kept_said(&dir, &built.said) {
+            Ok(file) => Some(file),
+            Err(why) => {
+                eprintln!("ra-jit: what the build scripts said is not kept: {why}");
+                None
+            }
+        };
         let checkout = |unit_test: bool| Checkout {
             key: format!("{key}{}", if unit_test { "-unit" } else { "" }),
             generation: 0,
@@ -740,6 +867,7 @@ impl State {
             programs: Vec::new(),
             sources: Vec::new(),
             env: env.clone(),
+            scripts: scripts.clone(),
         };
         let mut checkouts = [checkout(false), checkout(true)];
         let executables = artifacts.iter().filter(|it| !it.target.is_custom_build());
@@ -915,6 +1043,20 @@ fn is_placed(from: &Path, to: &Path) -> bool {
         && from.len() == to.len()
         && written(&from).is_some()
         && written(&from) == written(&to)
+}
+
+/// Writes `said`, what cargo said of the build scripts and proc macros of a build, to the
+/// file `scripts` in `dir`, whole or not at all: a worker started after the build loads the
+/// workspace with it, and does not build the scripts and proc macros again in a target
+/// directory of its own to find out.
+fn kept_said(dir: &Path, said: &[String]) -> std::io::Result<PathBuf> {
+    std::fs::create_dir_all(dir)?;
+    let file = dir.join("scripts");
+    let mut new = file.as_os_str().to_owned();
+    new.push(format!(".{}.new", std::process::id()));
+    std::fs::write(&new, said.join("\n"))?;
+    std::fs::rename(&new, &file)?;
+    Ok(file)
 }
 
 /// The package of what a debugger reads of the executable at `binary`, linked from `object`
@@ -1244,7 +1386,14 @@ fn guards(
         guards.extend(package.map(|it| rerun_guards(it, script)).into_iter().flatten());
     }
     let left = checkouts.iter().flat_map(|it| &it.programs).flat_map(|it| it.left_to_rustc.clone());
-    guards.push(Guard::files("a library its unit tests are linked with as rustc built it:", left));
+    let mut left: Vec<PathBuf> = left.collect();
+    left.sort();
+    left.dedup();
+    let built = used.iter().filter(|it| !it.is_test());
+    let built = built.filter(|it| it.inputs().files.iter().any(|file| left.contains(file)));
+    let cargo = built.flat_map(Record::cargo_dep_info).collect();
+    let what = "a library its unit tests are linked with as rustc built it:";
+    guards.push(Guard::beside_tests(what, left, cargo));
     guards
 }
 
@@ -1356,5 +1505,24 @@ mod tests {
         let far = said("FAR").unwrap();
         assert_eq!((PathBuf::from(far.value), far.force), (top.join("data"), true));
         std::fs::remove_dir_all(&top).unwrap();
+    }
+
+    #[test]
+    fn only_tests_changed_keeps_the_text_without_tests() {
+        let dir = std::env::temp_dir().join(format!("ra-jit-beside-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("lib.rs");
+        let print = |text: &str| {
+            std::fs::write(&file, text).unwrap();
+            without_tests(&file).unwrap()
+        };
+        let base = "pub fn one() -> u32 {\n    1\n}\n\n#[cfg(test)]\nmod tests {\n    #[test]\n    fn t() {}\n}\n";
+        let was = print(base);
+        assert_eq!(print(&format!("{base}\n#[test]\nfn added() {{}}\n")), was);
+        assert_eq!(print(&base.replace("fn t() {}", "fn t() { assert!(true); }")), was);
+        assert_ne!(print(&base.replace("    1\n", "    2\n")), was);
+        assert_ne!(print(&format!("\n{base}")), was);
+        assert_ne!(print(&format!("{base}\n#[cfg(not(test))]\nfn other() {{}}\n")), was);
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }

@@ -5,7 +5,9 @@ use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
 // Diagnostic: borrowck
 //
 // An error of rustc's borrow checker: a use of a moved or uninitialized value, a mutation of
-// what is not mutable, a borrow that conflicts with another or does not live long enough.
+// what is not mutable, a borrow that conflicts with another or does not live long enough. Also
+// rustc's `unused_mut` lint, which its borrow checker gives: a variable declared `mut` that is
+// never mutated.
 pub(crate) fn borrowck_error(
     ctx: &DiagnosticsContext<'_, '_>,
     d: &hir::BorrowckError,
@@ -13,9 +15,20 @@ pub(crate) fn borrowck_error(
     // rustc gives some errors no code, as "lifetime may not live long enough".
     let code = match d.code {
         "" => DiagnosticCode::Ra("borrowck", crate::Severity::Error),
+        "unused_mut" => DiagnosticCode::RustcLint("unused_mut"),
         code => DiagnosticCode::RustcHardError(code),
     };
     let mut diagnostic = Diagnostic::new_with_syntax_node_ptr(ctx, code, d.message.clone(), d.node);
+    // rustc's span of an expression a macro writes, `&$e`, is in the macro's definition, where
+    // its first token is; one the caller writes is the caller's. A definition in another file
+    // stays at the call.
+    if let Some(file) = d.node.file_id.macro_file() {
+        let start = d.node.value.text_range().start();
+        let (origin, context) = hir::InMacroFile::new(file, start).original_file_range(ctx.sema.db);
+        if !context.is_root() && origin.file_id.file_id(ctx.sema.db) == diagnostic.range.file_id {
+            diagnostic.range.range = origin.range;
+        }
+    }
     if d.at_end {
         let range = diagnostic.range.range;
         if let Some(last) = range.end().checked_sub(TextSize::new(1))

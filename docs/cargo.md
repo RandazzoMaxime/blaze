@@ -26,8 +26,8 @@ checkout, the release's own recipe builds all of it, with the profile
     cp shipped/* ~/.cargo/bin/
 
 That build has the Cranelift backend only. The LLVM one (`RA_JIT_BACKEND=llvm`) is
-`--features llvm` on either command, and needs LLVM 20 with `LLVM_SYS_201_PREFIX` set to its
-prefix; with it the crates are not the ones the profile was trained on, and the script says
+`--features llvm` on either command, run inside `nix develop`, which has the LLVM 20 the flake
+pins ([which LLVM](contributing.md#llvm-for---features-llvm)); with it the crates are not the ones the profile was trained on, and the script says
 so. `cargo build -p ra-jit --release` is the quicker build the harnesses and CI use while
 working on ra-jit; it is not what ships.
 
@@ -44,8 +44,12 @@ The project you build must use Rust 1.99.0, the toolchain ra-jit is pinned to. U
     cargo ra-jit stop
 
 `build`, `run` and `test` take the flags cargo takes and leave the same files in the same
-places under `target/`. `check` is `cargo check` and nothing else: ra-jit has no diagnostics
-of its own. `status` prints what the daemon holds, and for every workspace how many builds
+places under `target/`. `check` is what the daemon says of the source as it builds the
+programs of the build with the same flags, when it has that build loaded: the errors a build
+would fail with, or `Finished`, and no rustc. Any other check is the daemon's too: it loads
+the workspace as a build of those flags would, builds nothing, and says what it finds in every
+file of the workspace's crates. The build scripts and proc macros are the ones cargo built
+before; a workspace that never had them built has rustc build them first. `status` prints what the daemon holds, and for every workspace how many builds
 the daemon served and how many went to cargo, with the reasons. `stop` ends the daemon. Any
 other subcommand is passed to cargo as typed.
 
@@ -57,7 +61,10 @@ each crate of the workspace, the arguments, the files rustc wrote and, for a pro
 line the linker was run with. Diagnostics, progress and the exit status are cargo's.
 
 When that build succeeds, the command tells the daemon to load the workspace and returns
-without waiting. The daemon is started if it is not running. Until the workspace is loaded,
+without waiting. The daemon is started if it is not running. It loads the workspace with what
+cargo said of the build scripts it ran and the proc macros it built, kept in
+`target/ra-jit/<build>/scripts`: none of them is built or run again for it, in
+`target/rust-analyzer` or anywhere else. Until the workspace is loaded,
 builds are cargo's, and each one says so:
 
     ra-jit: the daemon is still loading the workspace (951ms so far); building with cargo
@@ -269,8 +276,12 @@ a shell without the variable keeps no store, whatever later shells have set.
   ([#84](https://github.com/indexable-inc/ra-jit/issues/84)). What they do not find is
   built: rust-analyzer reports few of rustc's errors for certain, and the borrow checker
   passes part of rustc's tests ([borrowck.md](borrowck.md)). Code rustc builds that ra-jit
-  takes for an error fails the build too; that is a ra-jit bug to report. `cargo ra-jit
-  check` is still `cargo check`.
+  takes for an error fails the build too; that is a ra-jit bug to report. A lint the source
+  denies fails it as well, for the lints rust-analyzer finds only where rustc does
+  (`non_snake_case`, `non_camel_case_types`, `non_upper_case_globals`, `unused_must_use`),
+  unless `--cap-lints` or `--force-warn` is among rustc's flags. `cargo ra-jit check` says
+  what such a build would, when the daemon has it loaded, and what it finds in the whole
+  workspace otherwise.
 - Linux x86-64 and macOS arm64 have been run; on macOS only ripgrep, fd and hyperfine and
   the generated workspace of the harness. The code compiles for Windows, but every build
   there would go to cargo (the link step knows ELF and Mach-O), and the command has not
@@ -342,7 +353,7 @@ end in rustc doing the work. An error ra-jit cannot diagnose itself, such as a u
 move, fails with rustc's message and status 101, as under cargo.
 
 The store is on by default in this mode and in `cargo ra-jit`: `$XDG_CACHE_HOME/ra-jit/store`,
-else `~/.cache/ra-jit/store`, limited to 32 GiB. `RA_JIT_CACHE=<dir>` moves it, `RA_JIT_CACHE=off`
+else `~/.cache/ra-jit/store`, limited to a tenth of its disk (at most 32 GiB). `RA_JIT_CACHE=<dir>` moves it, `RA_JIT_CACHE=off`
 disables it, `RA_JIT_CACHE_MAX` sets the limit. The socket and logs are in
 `$XDG_RUNTIME_DIR/ra-jit`, else `~/.cache/ra-jit`.
 
