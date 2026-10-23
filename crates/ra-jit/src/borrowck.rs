@@ -139,6 +139,9 @@ fn check_project(project: &str) -> anyhow::Result<()> {
     let mut errors = 0;
     let mut unused_mut = 0;
     for &file in &files {
+        if let Ok(name) = std::env::var("RA_JIT_BORROWCK_MIR") {
+            dump_mir(&db, file, &name);
+        }
         let found = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             diagnostics(&db, &config, file)
         }));

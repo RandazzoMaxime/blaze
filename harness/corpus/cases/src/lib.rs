@@ -5899,6 +5899,57 @@ pub mod tail_temporaries {
     }
 }
 
+/// Field names a `static` borrows from `const`s in blocks, as tracing 0.1.44's `trace!`
+/// writes them (issue #109): the `static`'s value promotes them.
+pub mod const_field_names {
+    pub fn run() -> Vec<&'static str> {
+        let fields = old_macros::fieldset!(start, end);
+        fields.0.to_vec()
+    }
+}
+
+/// A trait object given for a parameter bounded `T: 'a` lives for `'a`, rustc's object
+/// lifetime default (issue #84): `Ref<'a, dyn Show>` is `Ref<'a, dyn Show + 'a>`.
+pub mod object_lifetime_default {
+    pub trait Show {
+        fn show(&self) -> String;
+    }
+
+    impl Show for String {
+        fn show(&self) -> String {
+            self.clone()
+        }
+    }
+
+    pub struct Ref<'a, T: 'a + ?Sized> {
+        r: &'a T,
+    }
+
+    pub struct Ref2<'a, T: ?Sized>
+    where
+        T: 'a,
+    {
+        r: &'a T,
+    }
+
+    struct Container<'a> {
+        t: Ref<'a, dyn Show>,
+        u: Ref2<'a, dyn Show>,
+    }
+
+    fn put<'a>(t: Ref<'a, dyn Show + 'a>, u: Ref2<'a, dyn Show + 'a>, c: &mut Container<'a>) {
+        c.t = t;
+        c.u = u;
+    }
+
+    pub fn run() -> String {
+        let (a, b, first) = ("a".to_string(), "b".to_string(), "first".to_string());
+        let mut c = Container { t: Ref { r: &first }, u: Ref2 { r: &first } };
+        put(Ref { r: &a }, Ref2 { r: &b }, &mut c);
+        format!("{}{}", c.t.r.show(), c.u.r.show())
+    }
+}
+
 /// A derived ordering over an enum whose variants carry fields of several types.
 pub mod enum_ordering {
     use std::path::PathBuf;
