@@ -46,7 +46,8 @@ All of these are rustc's, written from `compiler/rustc_borrowck` at the pinned n
   assignment to immutable locals (E0381, E0382, E0384, E0505, E0507, E0508, E0509). A `match`
   whose arms test the value reads what it matches first, so a value moved out whole is
   reported there. A `match` arm's guard sees the variables its pattern binds by reference, so
-  it cannot move out of them (E0507) nor borrow them mutably (E0596), and casting an enum to an integer moves the enum
+  it cannot move out of them (E0507), borrow them mutably (E0596) nor assign them or through
+  them (E0594, "immutable for the pattern guard"), and casting an enum to an integer moves the enum
   (`*e as usize` behind a reference is E0507). A pattern's moves out of what it may not move
   out of are one error at the value matched for each place they move out of, as rustc's
   `MovesFromPlace`: `(D(s), &t)` is an E0509 and an E0507. A move of a subslice of an array
@@ -180,7 +181,9 @@ All of these are rustc's, written from `compiler/rustc_borrowck` at the pinned n
   `const` and `static` items as `'static` (not a variable the value borrows, which is E0597
   there, as rustc's `UseAsConst` rather than E0515). E0716 of what a pattern borrows
   (`ref m` in a `match` on a temporary) is at the temporary, as rustc reports it. An expression statement's value is not read once
-  its temporaries are dropped, so `&temp();` alone is no E0716, as in rustc.
+  its temporaries are dropped, so `&temp();` alone is no E0716, as in rustc. A temporary
+  borrowed mutably through a field (`&mut (1, 2).0`) is not promoted, as rustc's
+  `promote_consts`.
 - `impl Trait` captures: a return-position `impl Trait` keeps alive and relates only the
   lifetimes it captures, those listed in `use<..>` or, before edition 2024 outside traits and
   `async fn`, those its bounds name; its type parameters are always captured.
@@ -286,8 +289,8 @@ With no borrow checker, the 245 units rustc accepts would pass. Now:
 
 | Mode | In scope | Pass | rustc accepts, ra-jit too | rustc rejects, same errors |
 |---|---|---|---|---|
-| Polonius | 1579 | 1509 (95.6%) | 245 of 245 | 1264 of 1334 |
-| NLL | 1577 | 1505 (95.4%) | 226 of 226 | 1279 of 1351 |
+| Polonius | 1579 | 1511 (95.7%) | 245 of 245 | 1266 of 1334 |
+| NLL | 1577 | 1507 (95.6%) | 226 of 226 | 1281 of 1351 |
 
 463 units are out of scope; 344 of them need a nightly feature. CI runs the scoring on Linux
 and fails below a floor a few units under the count there.
@@ -300,8 +303,8 @@ just, axum, nushell, delta, eza, tokei and starship it finds nothing, nor on the
 ## What is left
 
 Every failing unit is one where rustc gives an error ra-jit does not, or gives it on another
-line or with another code. By what is wrong, most first: 10 "lifetime may not live long
-enough" not reported, 6 on another line or with another code, 2 with only an error rustc does
+line or with another code. By what is wrong, most first: 12 "lifetime may not live long
+enough" not reported, 4 on another line or with another code, 2 with only an error rustc does
 not give, 7 of E0597 not reported, 6 of E0309, 5 each of E0311, E0507, E0310 and
 higher-ranked errors and 4 of E0716 not reported, then a long tail. The causes, grouped:
 
@@ -379,6 +382,14 @@ changes to rust-analyzer were needed, each made as rustc does it:
   their guards are checked (`&_ => ..., &_ if { b = &true; false } => ...` is an E0510).
   Before the other passes each becomes a jump to its real target, as rustc's
   `CleanupPostBorrowck` does, so what runs is unchanged.
+- What a panic drops: the operands of the calls and aggregates being lowered go before the
+  temporaries that live to the end of the statement, as rustc keeps them in the scope of the
+  expression they are operands of. In `boom().extend(&String::from(..))` a panic in the
+  deref drops `boom()` first, so an `impl Trait` it returns keeps no borrow of the string
+  alive (`impl-trait/wf-check-hidden-type.rs`).
+- Type inference takes an inline `asm!` output as a place written, as rustc's
+  `check_expr_asm_operand` does, so `out(reg) v[0]` indexes with `IndexMut` and needs `v`
+  mutable (E0596).
 
 These are differences still open, each the cause of some failures, all of them errors
 missed rather than errors made up:
