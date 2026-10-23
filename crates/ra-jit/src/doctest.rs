@@ -904,24 +904,33 @@ fn denies_lints(source: &str) -> bool {
     attrs.into_iter().any(|it| it.starts_with("#![deny") || it.starts_with("#![forbid"))
 }
 
-/// Whether the file names an item, or calls a method, marked `#[deprecated]`.
+/// Whether the file names an item, or calls a method, marked `#[deprecated]`, the arguments
+/// of its macros (`assert_eq!`) included.
 fn uses_deprecated(db: &RootDatabase, file: vfs::FileId) -> bool {
     use syntax::{AstNode as _, ast};
     let sema = hir::Semantics::new(db);
-    let tree = sema.parse_guess_edition(file);
-    tree.syntax().descendants().any(|node| {
-        let used = if let Some(path) = ast::Path::cast(node.clone()) {
-            match sema.resolve_path(&path) {
-                Some(hir::PathResolution::Def(def)) => Some(def),
-                _ => None,
+    let mut trees = vec![sema.parse_guess_edition(file).syntax().clone()];
+    while let Some(tree) = trees.pop() {
+        for node in tree.descendants() {
+            let used = if let Some(call) = ast::MacroCall::cast(node.clone()) {
+                trees.extend(sema.expand_macro_call(&call).map(|it| it.value));
+                None
+            } else if let Some(path) = ast::Path::cast(node.clone()) {
+                match sema.resolve_path(&path) {
+                    Some(hir::PathResolution::Def(def)) => Some(def),
+                    _ => None,
+                }
+            } else {
+                ast::MethodCallExpr::cast(node)
+                    .and_then(|call| sema.resolve_method_call(&call))
+                    .map(hir::ModuleDef::Function)
+            };
+            if used.and_then(|it| it.attrs(db)).is_some_and(|it| it.is_deprecated()) {
+                return true;
             }
-        } else {
-            ast::MethodCallExpr::cast(node)
-                .and_then(|call| sema.resolve_method_call(&call))
-                .map(hir::ModuleDef::Function)
-        };
-        used.and_then(|it| it.attrs(db)).is_some_and(|it| it.is_deprecated())
-    })
+        }
+    }
+    false
 }
 
 /// The names of the dependencies of the library that link another copy of it, as a
