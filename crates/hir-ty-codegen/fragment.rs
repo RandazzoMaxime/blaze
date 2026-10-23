@@ -258,13 +258,20 @@ impl Inlinable {
         pointees: Vec<(u32, Pointee)>,
         seen: Vec<Seen>,
     ) -> Option<Inlinable> {
-        let ordered = requests.datas.iter().enumerate().all(|(at, request)| match request {
+        requests.ordered().then_some(Inlinable { func, requests, pointees, seen })
+    }
+}
+
+impl Requests {
+    /// Whether each blob points only at what was asked for before it, as
+    /// [`Recorder::moved_requests`] takes them.
+    pub(super) fn ordered(&self) -> bool {
+        self.datas.iter().enumerate().all(|(at, request)| match request {
             DataRequest::Blob { blob, .. } | DataRequest::Vtable { blob, .. } => {
                 blob.relocs.iter().all(|it| (it.1.as_u32() as usize) < at)
             }
             _ => true,
-        });
-        ordered.then_some(Inlinable { func, requests, pointees, seen })
+        })
     }
 }
 
@@ -335,7 +342,7 @@ pub(super) struct Recorder<'db> {
 /// once the database is let go of (see `tier::Prepared`).
 pub(super) struct Wants {
     pub(super) isa: &'static dyn TargetIsa,
-    requests: Requests,
+    pub(super) requests: Requests,
     funcs: FxHashMap<FuncRequest, FuncId>,
     shared: FxHashMap<ConstBlob, DataId>,
     /// The parameters of the function that are addresses of memory its signature says
@@ -671,10 +678,138 @@ impl<'db> Recorder<'db> {
     /// Puts what `body` asks for among what this function asks for, and gives `body` as it
     /// is in this function's names, with the bodies it shows LLVM moved among this one's.
     fn moved(&mut self, body: &Inlinable) -> ir::Function {
+        let (funcs, datas) = self.moved_requests(&body.requests);
+        let rename = |func: &ir::Function| {
+            let mut func = func.clone();
+            let names: Vec<_> = func
+                .params
+                .user_named_funcs()
+                .iter()
+                .map(|(name, it)| (name, it.clone()))
+                .collect();
+            for (name, was) in names {
+                let index = match was.namespace {
+                    0 => funcs[was.index as usize].as_u32(),
+                    1 => datas[was.index as usize].as_u32(),
+                    // A callee that was put in this one, which nothing calls any more.
+                    _ => continue,
+                };
+                func.params.reset_user_func_name(
+                    name,
+                    ir::UserExternalName { namespace: was.namespace, index },
+                );
+            }
+            func
+        };
+        for seen in &body.seen {
+            let id = funcs[seen.id.as_u32() as usize];
+            if !self.seen.iter().any(|it| it.id == id) {
+                let func = rename(&seen.func);
+                self.seen.push(Seen { id, func, pointees: seen.pointees.clone(), hint: seen.hint });
+            }
+        }
+        rename(&body.func)
+    }
+
+    /// Keeps of what the function asks for only what `code` refers to, directly or through
+    /// the data it refers to, renumbered in `code`. What the bodies it imported ask for is
+    /// asked for before LLVM builds them in (see [`super::imports`]), and the most of it is
+    /// of calls LLVM then takes out: each would be compiled, and whatever that calls.
+    #[cfg(feature = "llvm")]
+    pub(super) fn keep_referenced(&mut self, code: &mut Code) {
+        let requests = &self.wants.requests;
+        let mut funcs = vec![false; requests.funcs.len()];
+        let mut datas = vec![false; requests.datas.len()];
+        let mut reached = Vec::new();
+        for reloc in &code.relocs {
+            match reloc.name {
+                ModuleRelocTarget::User { namespace: 0, index } => funcs[index as usize] = true,
+                ModuleRelocTarget::User { namespace: 1, index } => reached.push(index as usize),
+                _ => {}
+            }
+        }
+        while let Some(at) = reached.pop() {
+            if std::mem::replace(&mut datas[at], true) {
+                continue;
+            }
+            if let DataRequest::Blob { blob, .. } | DataRequest::Vtable { blob, .. } =
+                &requests.datas[at]
+            {
+                reached.extend(blob.relocs.iter().map(|it| it.1.as_u32() as usize));
+                for &(_, func) in &blob.fn_relocs {
+                    funcs[func.as_u32() as usize] = true;
+                }
+            }
+        }
+        if funcs.iter().chain(&datas).all(|&it| it) {
+            return;
+        }
+        let numbered = |kept: &[bool]| {
+            let mut next = 0;
+            let numbers = kept.iter().map(|&it| {
+                let number = next;
+                next += u32::from(it);
+                it.then_some(number)
+            });
+            numbers.collect::<Vec<Option<u32>>>()
+        };
+        let (func_numbers, data_numbers) = (numbered(&funcs), numbered(&datas));
+        let func = |id: FuncId| FuncId::from_u32(func_numbers[id.as_u32() as usize].unwrap());
+        let data = |id: DataId| DataId::from_u32(data_numbers[id.as_u32() as usize].unwrap());
+        let renumbered = |blob: &mut ConstBlob| {
+            blob.relocs.iter_mut().for_each(|it| it.1 = data(it.1));
+            blob.fn_relocs.iter_mut().for_each(|it| it.1 = func(it.1));
+        };
+        let Requests { funcs: all_funcs, datas: all_datas } =
+            std::mem::take(&mut self.wants.requests);
+        let kept_funcs: Vec<FuncRequest> =
+            iter::zip(all_funcs, &funcs).filter(|it| *it.1).map(|it| it.0).collect();
+        let mut kept_datas: Vec<DataRequest> =
+            iter::zip(all_datas, &datas).filter(|it| *it.1).map(|it| it.0).collect();
+        for request in &mut kept_datas {
+            if let DataRequest::Blob { blob, .. } | DataRequest::Vtable { blob, .. } = request {
+                renumbered(blob);
+            }
+        }
+        for reloc in &mut code.relocs {
+            if let ModuleRelocTarget::User { namespace, index } = &mut reloc.name {
+                *index = match *namespace {
+                    0 => func(FuncId::from_u32(*index)).as_u32(),
+                    1 => data(DataId::from_u32(*index)).as_u32(),
+                    _ => *index,
+                };
+            }
+        }
+        let wants = &mut self.wants;
+        wants.funcs = kept_funcs
+            .iter()
+            .enumerate()
+            .map(|(at, it)| (it.clone(), FuncId::from_u32(at as u32)))
+            .collect();
+        wants.shared = std::mem::take(&mut wants.shared)
+            .into_iter()
+            .filter_map(|(mut blob, id)| {
+                data_numbers[id.as_u32() as usize]?;
+                renumbered(&mut blob);
+                Some((blob, data(id)))
+            })
+            .collect();
+        let kept = |id: &mut DataId| {
+            data_numbers[id.as_u32() as usize].map(|it| *id = DataId::from_u32(it)).is_some()
+        };
+        self.statics.retain(|_, id| kept(id));
+        self.vtables.retain(|_, id| kept(id));
+        wants.requests = Requests { funcs: kept_funcs, datas: kept_datas };
+    }
+
+    /// Puts `requests`, another function's, among what this function asks for: what each
+    /// of them is here. Each blob of `requests` points only at what came before it
+    /// ([`Inlinable::of`]).
+    pub(super) fn moved_requests(&mut self, requests: &Requests) -> (Vec<FuncId>, Vec<DataId>) {
         let funcs: Vec<FuncId> =
-            body.requests.funcs.iter().map(|it| self.func(it.target.clone(), &it.sig)).collect();
-        let mut datas: Vec<DataId> = Vec::with_capacity(body.requests.datas.len());
-        for request in &body.requests.datas {
+            requests.funcs.iter().map(|it| self.func(it.target.clone(), &it.sig)).collect();
+        let mut datas: Vec<DataId> = Vec::with_capacity(requests.datas.len());
+        for request in &requests.datas {
             // `Inlinable::of` saw to it that a blob points only at what came before it.
             let moved = |blob: &ConstBlob| ConstBlob {
                 bytes: blob.bytes.clone(),
@@ -709,36 +844,7 @@ impl<'db> Recorder<'db> {
             };
             datas.push(id);
         }
-        let rename = |func: &ir::Function| {
-            let mut func = func.clone();
-            let names: Vec<_> = func
-                .params
-                .user_named_funcs()
-                .iter()
-                .map(|(name, it)| (name, it.clone()))
-                .collect();
-            for (name, was) in names {
-                let index = match was.namespace {
-                    0 => funcs[was.index as usize].as_u32(),
-                    1 => datas[was.index as usize].as_u32(),
-                    // A callee that was put in this one, which nothing calls any more.
-                    _ => continue,
-                };
-                func.params.reset_user_func_name(
-                    name,
-                    ir::UserExternalName { namespace: was.namespace, index },
-                );
-            }
-            func
-        };
-        for seen in &body.seen {
-            let id = funcs[seen.id.as_u32() as usize];
-            if !self.seen.iter().any(|it| it.id == id) {
-                let func = rename(&seen.func);
-                self.seen.push(Seen { id, func, pointees: seen.pointees.clone(), hint: seen.hint });
-            }
-        }
-        rename(&body.func)
+        (funcs, datas)
     }
 
     /// Declares in `func` a callee whose body is put where it is called: `body`, with what

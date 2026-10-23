@@ -206,6 +206,15 @@ All notable changes to ra-jit are written here. The format follows
 
 ### Changed
 
+- A whole program's compiles under LLVM import what they call, as ThinLTO's backends do,
+  where each built its callees again from MIR and optimized them from scratch. Each function
+  a compile calls is lowered and run through LLVM's pre-link pipeline once in the process,
+  and a compile links in the bodies small enough to be built in (100 instructions, 300 for
+  `#[inline]`, the whole budget of 40 000 for `#[inline(always)]`), and those of what they
+  call with 0.7 of the room each call deeper, 8 deep, as `available_externally`; what LLVM
+  does not build in is dropped. Bun on 16 cores (c8a.24xlarge) builds in 118 s where it took
+  564 s, against 135 s for cargo's release build, and runs 1.244x cargo's where it ran 1.267x.
+  `RA_JIT_IMPORT=0` builds the callees in as before.
 - ra-jit allocates with jemalloc on Linux and macOS, and with mimalloc on Windows only
   ([#39](https://github.com/indexable-inc/ra-jit/issues/39)). mimalloc 3 kept more of what a
   build freed, transparent huge pages included: on Linux x86-64 (16 cores, `bench.py`, two
