@@ -257,6 +257,18 @@ jobs:
           git fetch -q --depth 1 --filter=blob:none origin a30aa9064df6a504b6a323c6884a2f4cfbfff666
           git checkout -q FETCH_HEAD
       - run: python3 harness/borrowck_ui.py "$RUNNER_TEMP/rust" --bin target/release/ra-jit --jobs 4 --mode both --min-pass 1508
+      # Crates rustc accepts: an error is a false one, and a file the checker panics on (which
+      # fails `ra-jit borrowck`) would have none of its errors reported.
+      - name: the corpus and mixfutures
+        run: |
+          for crate in corpus mixfutures; do
+            (cd harness/$crate && ../../target/release/ra-jit borrowck --project .) > "$RUNNER_TEMP/$crate.json" || true
+            python3 -c 'import json, sys
+          lines = [json.loads(it) for it in open(sys.argv[1])]
+          bad = [it for it in lines if "error" in it or "panic" in it]
+          print(sys.argv[2], *bad, lines[-1] if lines else "no output", sep="\n")
+          sys.exit(bool(bad) or not lines or "files" not in lines[-1])' "$RUNNER_TEMP/$crate.json" $crate
+          done
 
   # The few run-pass tests of rustc's that the nightly claims run, or a run on another
   # platform, once caught ra-jit failing (harness/ui-pinned.txt), from the tests of the pinned
