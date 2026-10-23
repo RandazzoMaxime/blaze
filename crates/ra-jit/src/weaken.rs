@@ -118,7 +118,10 @@ pub(crate) fn ours(data: &mut [u8]) {
 
 /// Whether a name (without Mach-O's `_`) is a symbol rustc mangled or one of ra-jit's own.
 fn of_rust(name: &[u8]) -> bool {
-    let v0 = name.strip_prefix(b"_R").and_then(|it| it.first()).is_some_and(|it| it.is_ascii_alphanumeric());
+    let v0 = name
+        .strip_prefix(b"_R")
+        .and_then(|it| it.first())
+        .is_some_and(|it| it.is_ascii_alphanumeric());
     name.starts_with(b"_ZN") || v0 || name.starts_with(b"ra-jit.")
 }
 
@@ -181,8 +184,7 @@ fn symbol_table(data: &[u8]) -> Option<(Range<usize>, Range<usize>)> {
 mod tests {
     use object::write::{Mangling, Object, Symbol, SymbolSection};
     use object::{
-        Architecture, BinaryFormat, Endianness, SectionKind, SymbolFlags, SymbolKind,
-        SymbolScope,
+        Architecture, BinaryFormat, Endianness, SectionKind, SymbolFlags, SymbolKind, SymbolScope,
     };
 
     use super::*;
@@ -197,7 +199,8 @@ mod tests {
     ];
 
     fn object() -> Vec<u8> {
-        let mut object = Object::new(BinaryFormat::MachO, Architecture::Aarch64, Endianness::Little);
+        let mut object =
+            Object::new(BinaryFormat::MachO, Architecture::Aarch64, Endianness::Little);
         object.set_mangling(Mangling::None);
         let text = object.add_section(Vec::new(), b"__text".to_vec(), SectionKind::Text);
         for (at, name) in NAMES.iter().enumerate() {
