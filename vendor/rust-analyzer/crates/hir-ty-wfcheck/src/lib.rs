@@ -38,7 +38,8 @@ use hir_ty::{
     },
 };
 
-use outlives::{Inferred, Known, Needs};
+pub use outlives::Inferred;
+use outlives::{Known, Needs};
 
 /// Where an error is: rustc's span of it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, SalsaValue)]

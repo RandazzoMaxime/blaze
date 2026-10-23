@@ -393,7 +393,7 @@ pub(crate) fn projection_needs<'db>(
 /// of its own parameters, `T: 'a` and `'b: 'a` with `'a` a lifetime parameter, never
 /// `'static`. Worked out to a fixed point, as ADTs can contain each other.
 #[derive(Default)]
-pub(crate) struct Inferred<'db> {
+pub struct Inferred<'db> {
     memo: FxHashMap<AdtId, Vec<OutlivesPredicate<DbInterner<'db>, GenericArg<'db>>>>,
     in_progress: FxHashSet<AdtId>,
     cyclic: bool,
@@ -401,7 +401,7 @@ pub(crate) struct Inferred<'db> {
 }
 
 impl<'db> Inferred<'db> {
-    pub(crate) fn of(
+    pub fn of(
         &mut self,
         db: &'db dyn HirDatabase,
         adt: AdtId,

@@ -547,6 +547,7 @@ pub(super) fn build<'db>(
         returns_opaque: false,
         opaque_bounds: Vec::new(),
         elided_output: None,
+        inferred: Default::default(),
         location: None,
         env_aliases: Vec::new(),
         annotated: FxHashMap::default(),
@@ -608,6 +609,8 @@ struct Builder<'c, 'a, 'db> {
     opaque_bounds: Vec<Clause<'db>>,
     /// The region lifetime elision gives the elided lifetimes of the return type.
     elided_output: Option<Region<'db>>,
+    /// rustc's `inferred_outlives_of` the ADTs the body uses.
+    inferred: hir_ty_wfcheck::Inferred<'db>,
     location: Option<Location>,
     /// rustc's `AggregateTemp`s: the temporaries a struct or variant expression, or a call of
     /// a constructor, builds its fields in.
@@ -4519,10 +4522,30 @@ impl<'db> Builder<'_, '_, 'db> {
         at: At,
         type_outlives: bool,
     ) {
-        let clauses: Vec<_> = GenericPredicates::query_all(self.ctx.db, def)
-            .iter_instantiated(self.interner(), args.as_slice())
+        let interner = self.interner();
+        let mut clauses: Vec<_> = GenericPredicates::query_all(self.ctx.db, def)
+            .iter_instantiated(interner, args.as_slice())
             .map(|it| it.skip_norm_wip())
             .collect();
+        // What an ADT's fields need of its lifetimes, rustc's `inferred_outlives_of`, holds
+        // where it is used as its where clauses do.
+        if let GenericDefId::AdtId(adt) = def
+            && args.regions().next().is_some()
+        {
+            for predicate in self.inferred.of(self.ctx.db, adt) {
+                let OutlivesPredicate(arg, region) = rustc_type_ir::EarlyBinder::bind(predicate)
+                    .instantiate(interner, args)
+                    .skip_norm_wip();
+                use rustc_type_ir::Upcast as _;
+                clauses.push(match arg.kind() {
+                    GenericArgKind::Type(ty) => OutlivesPredicate(ty, region).upcast(interner),
+                    GenericArgKind::Lifetime(longer) => {
+                        OutlivesPredicate(longer, region).upcast(interner)
+                    }
+                    GenericArgKind::Const(_) => continue,
+                });
+            }
+        }
         self.clauses(clauses, at, type_outlives);
     }
 
@@ -4704,9 +4727,11 @@ impl<'db> Builder<'_, '_, 'db> {
 
     /// `F: FnOnce(S, T)` of a closure of this body typed against an expected signature: rustc
     /// gives the closure that signature, so its parameters' types are the bound's arguments
-    /// (`|z: &[i32]|` passed as `F` takes the `S` it is called with). A bound with `for<'a>`
-    /// or a closure typed without one has a higher-ranked signature in rustc, which this
-    /// closure's one signature cannot stand for.
+    /// (`|z: &[i32]|` passed as `F` takes the `S` it is called with). A closure typed without
+    /// one has a higher-ranked signature in rustc, which this closure's one signature cannot
+    /// stand for. Of a bound with `for<'r>`, rustc's closure signature binds `'r` too, so
+    /// only the bound's other regions are related: `impl FnOnce(&mut F<'a, 'b>)` makes the
+    /// closure's `F<'1, '2>` that `F<'a, 'b>`, and leaves its `&'r` its own.
     fn closure_bound(
         &mut self,
         trait_ref: rustc_type_ir::TraitRef<hir_ty::next_solver::DbInterner<'db>>,
@@ -4718,20 +4743,42 @@ impl<'db> Builder<'_, '_, 'db> {
         let lang = self.interner().lang_items();
         if loc.owner != self.ctx.owner
             || self.ctx.infer.closures_without_expectation.contains(&loc.expr)
-            || rustc_type_ir::TypeVisitableExt::has_escaping_bound_vars(&trait_ref)
             || ![lang.Fn, lang.FnMut, lang.FnOnce].contains(&Some(trait_ref.def_id.0))
         {
             return;
         }
         let sig = args.as_closure().sig();
-        if !sig.bound_vars().is_empty() {
-            return;
-        }
         let &[inputs] = sig.skip_binder().inputs().as_slice() else { return };
         let Some(expected) = trait_ref.args.as_slice().get(1).and_then(|it| it.as_type()) else {
             return;
         };
+        let higher_ranked = !sig.bound_vars().is_empty();
+        if (higher_ranked || rustc_type_ir::TypeVisitableExt::has_escaping_bound_vars(&expected))
+            && !self.binds_alike(inputs, expected)
+        {
+            return;
+        }
+        // A region either binds is no region of the body, which relating leaves out.
         self.relate(inputs, expected, Variance::Invariant, at);
+    }
+
+    /// Whether `a` and `b`, each under a binder of its own, differ only in regions, and bind
+    /// a region in the same places.
+    fn binds_alike(&self, a: Ty<'db>, b: Ty<'db>) -> bool {
+        let interner = self.interner();
+        let shape = |ty: Ty<'db>| {
+            let mut bound = Vec::new();
+            let erased = rustc_type_ir::fold_regions(interner, ty, |region, depth| {
+                bound.push(matches!(
+                    region.kind(),
+                    RegionKind::ReBound(rustc_type_ir::BoundVarIndexKind::Bound(binder), _)
+                        if binder == depth
+                ));
+                Region::new_erased(interner)
+            });
+            (erased, bound)
+        };
+        shape(a) == shape(b)
     }
 
     /// `trait_ref` with an associated type of a closure's type normalized, to what does not
