@@ -990,8 +990,10 @@ def guarded(top, remote):
     bomber = Machine(top, f"u-{remote.name}-bomb", remote)
     bomb = bomber.add_pack(pack_of([(hashlib.sha256(b"bomb").digest(), bytes(64 * MIB))]))
     bomber.ra_jit("cache", "push", bombs)
-    pack, size, keys, fmt = bomb_bucket.get("manifests/default").decode().split()
-    zipped = packed(bomb_bucket.get(f"packs/{pack}.pack"))
+    pack, size, keys, fmt, *sent_as = bomb_bucket.get("manifests/default").decode().split()
+    check("a pack that compresses to a quarter is sent compressed",
+          len(sent_as) == 2 and int(sent_as[1]) * 4 <= int(size), " ".join(sent_as))
+    zipped = bomb_bucket.get(f"packs/{pack}.pack.zst") if sent_as else packed(bomb_bucket.get(f"packs/{pack}.pack"))
     bomb_bucket.put(f"packs/{pack}.pack.zst", zipped)
     bomb_bucket.put("manifests/default", f"{pack} {MIB} {keys} {fmt} {digest(zipped)} {len(zipped)}\n".encode())
     address, sent = bombs, len(zipped)
