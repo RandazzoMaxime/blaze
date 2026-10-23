@@ -69,6 +69,9 @@ pub(super) fn check<'db>(
             eprintln!("_{local}: {ty:?}");
         }
         eprintln!("universals {:?}", regions.universals);
+        if !regions.members.is_empty() {
+            eprintln!("members {:?} choices {:?}", regions.members, regions.choices);
+        }
         for constraint in &regions.outlives {
             eprintln!("{constraint:?}");
         }
