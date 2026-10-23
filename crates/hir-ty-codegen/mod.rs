@@ -9405,26 +9405,28 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
         let target = match map.defined.get(&start) {
             Some(&target) => target,
             None => {
-                let mut target = ConstBlob {
+                let mut blob = ConstBlob {
                     bytes: memory.to_vec(),
                     relocs: Vec::new(),
                     fn_relocs: Vec::new(),
                     align: map.align_of(start),
                 };
+                // Named before its words are walked: two allocations can point at each other.
+                let writable = map.in_static && mutability == Mutability::Mut;
+                let target = self.cg.declare_local_data(writable)?;
+                map.defined.insert(start, target);
                 // What the allocation is of is not known here, so as in a union, every word
                 // of it that is the address of something const eval kept is taken to be one.
-                for index in 0..target.bytes.len() / word() {
+                for index in 0..blob.bytes.len() / word() {
                     let at = index * word();
-                    if let Some(inner) = target.usize_at(at)
+                    if let Some(inner) = blob.usize_at(at)
                         && inner != 0
                         && map.map.memory_at(inner).is_some_and(|it| it.0 != start)
                     {
-                        self.relocate_data_pointer(&mut target, at, inner, mutability, map)?;
+                        self.relocate_data_pointer(&mut blob, at, inner, mutability, map)?;
                     }
                 }
-                let writable = map.in_static && mutability == Mutability::Mut;
-                let target = self.cg.define_data(target, writable)?;
-                map.defined.insert(start, target);
+                self.cg.fill_data(target, blob, None)?;
                 target
             }
         };

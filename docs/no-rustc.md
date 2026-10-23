@@ -161,9 +161,11 @@ These are the places ra-jit still runs rustc or relies on what it wrote, as of m
   server. Since B, ra-jit answers rustc's questions itself for the releases and targets it has
   the answers of (1.99.0, the targets of `harness/answers.py`); another release is asked each
   question once per toolchain and the answer kept.
-- Doctest examples are compiled by rustc, and a library whose doctests ra-jit cannot take is
-  left to rustdoc ([#28](https://github.com/indexable-inc/ra-jit/issues/28)). Since A, a
-  member of a workspace is no longer left to rustdoc for its features.
+- Doctest examples are compiled by rustc when ra-jit does not build them (`compile_fail`, an
+  error, a second copy of the library; since L's second part ra-jit builds the rest), and a
+  library whose doctests ra-jit cannot take is left to rustdoc
+  ([#28](https://github.com/indexable-inc/ra-jit/issues/28)). Since A, a member of a workspace
+  is no longer left to rustdoc for its features.
 - Under plain cargo after `ra-jit enable`, rustc builds every crate of the workspace except the
   programs the daemon has loaded, and writes the dep-info of those.
 - `cargo ra-jit check` is `cargo check`.
@@ -227,7 +229,7 @@ Paths are under `crates/`; line numbers are of 41e7906192.
 | Where | What it does | When |
 |---|---|---|
 | `ra-jit/src/cargo/run.rs:136` | `cargo test --doc` with ra-jit as `RUSTDOC` | `cargo ra-jit test` of a library with doctests |
-| `ra-jit/src/doctest.rs:203`, `:246` `compile` | rustc links a probe program to learn the link line, and compiles or checks each example | every library's doctests, except what is unchanged since the last run (L's first part) |
+| `ra-jit/src/doctest.rs` `compile` | rustc compiles or checks an example ra-jit does not build | `compile_fail`, an example rust-analyzer finds an error in or that links a second copy of the library, a build or link of ra-jit's that failed; except what is unchanged since the last run (L's first part). Since L's second part, no probe |
 | `ra-jit/src/doctest.rs:301` `leave_to_rustdoc` | hands the library to rustdoc | `-q`, a library ra-jit cannot load; until A, every package whose features `cargo build --unit-graph` rejected (below) |
 | `ra-jit/src/cargo/mod.rs:139` | `cargo ra-jit check` is `cargo check` | every check |
 | `ra-jit/src/test_harness.rs` `module` returning `None` | leaves the test program's harness to rustc, and a test added to cargo | a bench, an `ignore` written as a token tree (H) |
@@ -374,7 +376,7 @@ steps not shown ran none before and none now.
 - **The fixture of `harness/norustc.py`**, in CI on Linux x86-64, Linux AArch64 and macOS
   arm64 under both backends: the cold build 74 to 76 rustc runs before A, 18 after A, 6 now;
   edits 5 (277 to 297 on macOS, whose daemon did not listen, #106), 0 now; tests 16 to 19, 12
-  after B, 7 now (H, below); doctests 23, 6 after B, 3 now (L's first part, below); check 7, then 8 since the fixture
+  after B, 7 now (H, below); doctests 23, 6 after B, 3 after L's first part, 0 now (L's second, below); check 7, then 8 since the fixture
   has one library more, 5 now. These are `norustc/baseline.json`.
 
 ## The plan
@@ -396,7 +398,7 @@ the counts of [How often](#how-often) lower, measured by step A's check, and non
 | [I](https://github.com/indexable-inc/ra-jit/issues/89). Build scripts compiled and run by ra-jit | build scripts and their probes by rustc | B, G | medium | medium | none yet |
 | [J](https://github.com/indexable-inc/ra-jit/issues/90). Proc macros compiled and loaded by ra-jit | proc macros by rustc, the toolchain's proc-macro server | F, G | large | high | none yet |
 | [K](https://github.com/indexable-inc/ra-jit/issues/91). The cold build is ra-jit's | cargo's first build, the rustc base (#11) | G, I, J | medium | high | none yet |
-| [L](https://github.com/indexable-inc/ra-jit/issues/92). Doctests by the daemon (#28) | probe and examples by rustc, rustdoc | B, G, D | medium | medium | the `no-rustc-hl` lane: first part done |
+| [L](https://github.com/indexable-inc/ra-jit/issues/92). Doctests by the daemon (#28) | probe and examples by rustc, rustdoc | B, G, D | medium | medium | the `no-rustc-hl` lane: first part done; the `no-rustc-l2` lane: second part (examples by ra-jit) done |
 | [M](https://github.com/indexable-inc/ra-jit/issues/93). Remove the wrapper and the fallback | `ra-jit-rustc`, `ra-jit-rustc-first`, stand-ins, dep-info, settle, `by_cargo`, `only_cargo` | all | medium | low | none yet |
 
 A, B and C landed on 2026-10-22. D and E run alongside everything: they are
@@ -717,7 +719,22 @@ library's doctests run a second time with nothing changed run no rustc; after an
 library, every example of it is compiled again. The fixture's doctests went from 6 to 3.
 `harness/doctests.py` runs ra-jit twice on each crate and holds both runs to rustdoc's, and
 the flag check's edit changes a constant an example reads, which a stale program would show.
-What is left of L is the rest of the paragraph above.
+
+Done second (the `no-rustc-l2` lane, 2026-10-23): ra-jit compiles and links the examples, with
+no probe. The doctest process loads the library as before, and adds each example to
+rust-analyzer's graph as a crate of its own: one file at the path rustdoc shows (so a panic's
+location is rustdoc's), its text moved down to the line it starts at, depending on the library
+and the library's dependencies, built with `cfg(doc, doctest)` and the example's edition. Each
+is compiled as a program over the standard library's unit (G's, from the store or built once),
+then linked with G's line by its own thread, run, and removed, while the next is compiled. An
+example that is only to compile passes when rust-analyzer finds no error in it. rustc still
+builds an example that is `compile_fail` (D), one rust-analyzer finds an error in (rustc
+prints it), one naming a dependency that links a second copy of the library (two copies of a
+trait rust-analyzer takes for one), and one whose build, link or stand-in check fails; the
+memo of the first part keeps those. The fixture's doctests went from 3 to 0, and every crate of
+`harness/doctests.py` builds all its examples with ra-jit. What is left of L is the daemon
+taking the examples in place of a process per library, and rustdoc for `-q` and a library
+ra-jit cannot load.
 
 **M. Remove the wrapper and the fallback.** ([#93](https://github.com/indexable-inc/ra-jit/issues/93)) Plain cargo after `ra-jit enable` names ra-jit as
 `build.rustc`; ra-jit answers cargo's questions (B) and writes for each unit the files cargo
