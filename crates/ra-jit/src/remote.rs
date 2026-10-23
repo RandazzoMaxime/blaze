@@ -714,42 +714,14 @@ async fn send_pack(store: &Path, remote: &Remote, pack: Digest) -> anyhow::Resul
     let (size, keys) = tokio::task::spawn_blocking(move || keys_of(&from, pack)).await??;
     let keys_digest = Digest::of(&keys);
     remote.send_named_by_hash(&keys_object(&keys_digest), keys).await?;
-    let (from, aside) = (store.join(pack_file(&pack)), store.join(format!("{pack}.pack.send.tmp")));
-    let packing = aside.clone();
-    let packed = tokio::task::spawn_blocking(move || pack_whole(&from, &packing)).await?;
-    let sent = async {
-        let (packed, packed_size) = packed?;
-        let listed = Listed {
-            size,
-            keys: keys_digest,
-            format: STORE_FORMAT,
-            packed: Some((packed, packed_size)),
-        };
-        let (object, _) = listed.object(&pack);
-        if remote.holds(&object, packed_size).await? {
-            return Ok((listed, 0));
-        }
-        remote.send_file(&object, &aside, packed_size).await?;
-        Ok((listed, packed_size))
+    // A sealed pack's values are compressed already: the pack is sent as it is.
+    let listed = Listed { size, keys: keys_digest, format: STORE_FORMAT, packed: None };
+    let (object, _) = listed.object(&pack);
+    if remote.holds(&object, size).await? {
+        return Ok((listed, 0));
     }
-    .await;
-    _ = tokio::fs::remove_file(&aside).await;
-    sent
-}
-
-/// How hard packs are compressed for the remote: zstd's default, which makes a pack a
-/// seventh of its size at a tenth of a second for 50 MB.
-const PACKING: i32 = 3;
-
-/// Compresses the file `from` into `to`, a temporary file of the store's, and says what
-/// hash and size it has.
-fn pack_whole(from: &Path, to: &Path) -> anyhow::Result<(Digest, u64)> {
-    let mut packed = zstd::Encoder::new(File::create(to)?, PACKING)?;
-    std::io::copy(&mut File::open(from)?, &mut packed)?;
-    packed.finish()?.sync_all()?;
-    // SAFETY: nothing else writes a file this process made under its own name.
-    let bytes = unsafe { memmap2::Mmap::map(&File::open(to)?)? };
-    Ok((Digest::of(&bytes), bytes.len() as u64))
+    remote.send_file(&object, &store.join(pack_file(&pack)), size).await?;
+    Ok((listed, size))
 }
 
 /// Makes the directory a store of this build's format, and seals what ended daemons left
