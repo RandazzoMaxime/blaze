@@ -150,6 +150,18 @@ enum Guard {
         what: String,
         files: Vec<(PathBuf, bool)>,
     },
+    /// Files that are to be as they were when cargo built but for their tests: what rustc
+    /// built of them without `cfg(test)` holds while the rest is, every token where it was.
+    /// Each is there or not, and when it was there, when it was written and its
+    /// [`without_tests`].
+    /// `cargo` is cargo's dep-info of what rustc built from them, made newer than a file only
+    /// its tests changed in, so cargo doesn't build it again either.
+    BesideTests {
+        what: String,
+        files: Vec<(PathBuf, Option<(u128, String)>)>,
+        #[serde(default)]
+        cargo: Vec<PathBuf>,
+    },
     /// A directory with nothing in it written since cargo built.
     Tree {
         what: String,
@@ -201,6 +213,32 @@ impl Guard {
                 })?;
                 Some(format!("{what} {} changed", changed.0.display()))
             }
+            Guard::BesideTests { what, files, cargo } => {
+                let mut tests_only = None;
+                let changed = files.iter().find(|(file, was)| {
+                    let written = written_at(file);
+                    match (written, was) {
+                        (None, None) => false,
+                        (Some(_), None) | (None, Some(_)) => true,
+                        // Written while cargo built or after: what it was then is not known.
+                        (Some(_), Some((then, _))) if *then > built_at => true,
+                        (Some(now), Some(_)) if now <= built_at => false,
+                        (Some(now), Some((_, print))) => {
+                            tests_only = tests_only.max(Some(now));
+                            without_tests(file).as_ref() != Some(print)
+                        }
+                    }
+                });
+                if let Some((file, _)) = changed {
+                    return Some(format!("{what} {} changed", file.display()));
+                }
+                let stale = cargo.iter().filter(|it| written_at(it) < tests_only);
+                for file in stale {
+                    let file = std::fs::File::options().write(true).open(file);
+                    _ = file.and_then(|it| it.set_modified(std::time::SystemTime::now()));
+                }
+                None
+            }
             Guard::Tree { what, dir } => {
                 let changed = newer_in(dir, built_at)?;
                 Some(format!("{what} and {} changed", changed.display()))
@@ -220,6 +258,52 @@ impl Guard {
         });
         Guard::Files { what: what.to_owned(), files: files.collect() }
     }
+
+    fn beside_tests(what: &str, files: Vec<PathBuf>, cargo: Vec<PathBuf>) -> Guard {
+        let files = files.into_iter().map(|it| {
+            let was = written_at(&it).zip(without_tests(&it));
+            (it, was)
+        });
+        Guard::BesideTests { what: what.to_owned(), files: files.collect(), cargo }
+    }
+}
+
+/// A hash of the Rust source in `file` with every item marked `#[test]` or `#[cfg(test)]`
+/// blanked, and the blanks it ends with dropped: the same while only those change and every
+/// other token keeps its line and column. A file that isn't Rust, one `include!`d or
+/// `include_str!`d, is hashed as it is. `None` when it can't be read.
+fn without_tests(file: &Path) -> Option<String> {
+    use sha2::Digest as _;
+    use syntax::{AstNode as _, ast};
+    let text = std::fs::read_to_string(file).ok()?;
+    if file.extension().is_none_or(|it| it != "rs") {
+        let hash = sha2::Sha256::digest(&text);
+        return Some(hash[..16].iter().map(|it| format!("{it:02x}")).collect());
+    }
+    let parse = syntax::SourceFile::parse(&text, syntax::Edition::CURRENT);
+    let mut bytes = text.clone().into_bytes();
+    let only_tests = |item: &ast::Item| {
+        ast::HasAttrs::attrs(item).any(|attr| {
+            let attr: String =
+                attr.syntax().text().to_string().chars().filter(|it| !it.is_whitespace()).collect();
+            attr == "#[test]" || attr == "#[cfg(test)]"
+        })
+    };
+    for item in parse.tree().syntax().descendants().filter_map(ast::Item::cast) {
+        if only_tests(&item) {
+            let range = item.syntax().text_range();
+            for byte in &mut bytes[usize::from(range.start())..usize::from(range.end())] {
+                if *byte != b'\n' {
+                    *byte = b' ';
+                }
+            }
+        }
+    }
+    let blanked = String::from_utf8_lossy(&bytes);
+    let lines: Vec<&str> = blanked.lines().map(str::trim_end).collect();
+    let kept = lines.len() - lines.iter().rev().take_while(|it| it.is_empty()).count();
+    let hash = sha2::Sha256::digest(lines[..kept].join("\n"));
+    Some(hash[..16].iter().map(|it| format!("{it:02x}")).collect())
 }
 
 /// When the file was last written, as a stamp. `None` when it is not there.
@@ -1244,7 +1328,14 @@ fn guards(
         guards.extend(package.map(|it| rerun_guards(it, script)).into_iter().flatten());
     }
     let left = checkouts.iter().flat_map(|it| &it.programs).flat_map(|it| it.left_to_rustc.clone());
-    guards.push(Guard::files("a library its unit tests are linked with as rustc built it:", left));
+    let mut left: Vec<PathBuf> = left.collect();
+    left.sort();
+    left.dedup();
+    let built = used.iter().filter(|it| !it.is_test());
+    let built = built.filter(|it| it.inputs().files.iter().any(|file| left.contains(file)));
+    let cargo = built.flat_map(Record::cargo_dep_info).collect();
+    let what = "a library its unit tests are linked with as rustc built it:";
+    guards.push(Guard::beside_tests(what, left, cargo));
     guards
 }
 
