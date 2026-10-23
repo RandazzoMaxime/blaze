@@ -17,7 +17,7 @@
    "rustdoc": 0
   },
   "tests": {
-   "rustc": 12,
+   "rustc": 7,
    "rustdoc": 0
   }
  },
@@ -39,7 +39,7 @@
    "rustdoc": 0
   },
   "tests": {
-   "rustc": 12,
+   "rustc": 7,
    "rustdoc": 0
   }
  },
@@ -61,7 +61,7 @@
    "rustdoc": 0
   },
   "tests": {
-   "rustc": 12,
+   "rustc": 7,
    "rustdoc": 0
   }
  },
@@ -83,7 +83,7 @@
    "rustdoc": 0
   },
   "tests": {
-   "rustc": 12,
+   "rustc": 7,
    "rustdoc": 0
   }
  },
@@ -105,7 +105,7 @@
    "rustdoc": 0
   },
   "tests": {
-   "rustc": 12,
+   "rustc": 7,
    "rustdoc": 0
   }
  },
@@ -127,7 +127,7 @@
    "rustdoc": 0
   },
   "tests": {
-   "rustc": 12,
+   "rustc": 7,
    "rustdoc": 0
   }
  }

@@ -1448,4 +1448,23 @@ mod tests {
         assert_eq!((PathBuf::from(far.value), far.force), (top.join("data"), true));
         std::fs::remove_dir_all(&top).unwrap();
     }
+
+    #[test]
+    fn only_tests_changed_keeps_the_text_without_tests() {
+        let dir = std::env::temp_dir().join(format!("ra-jit-beside-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("lib.rs");
+        let print = |text: &str| {
+            std::fs::write(&file, text).unwrap();
+            without_tests(&file).unwrap()
+        };
+        let base = "pub fn one() -> u32 {\n    1\n}\n\n#[cfg(test)]\nmod tests {\n    #[test]\n    fn t() {}\n}\n";
+        let was = print(base);
+        assert_eq!(print(&format!("{base}\n#[test]\nfn added() {{}}\n")), was);
+        assert_eq!(print(&base.replace("fn t() {}", "fn t() { assert!(true); }")), was);
+        assert_ne!(print(&base.replace("    1\n", "    2\n")), was);
+        assert_ne!(print(&format!("\n{base}")), was);
+        assert_ne!(print(&format!("{base}\n#[cfg(not(test))]\nfn other() {{}}\n")), was);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 }
