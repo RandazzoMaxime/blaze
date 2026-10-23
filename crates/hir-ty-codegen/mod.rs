@@ -6417,6 +6417,8 @@ struct Relocations<'a, 'db> {
     map: &'a MemoryMap<'db>,
     in_static: bool,
     defined: FxHashMap<usize, DataId>,
+    /// The allocations [`FunctionCx::relocate_data_pointer`] is in the middle of, by start.
+    walking: Vec<usize>,
 }
 
 impl Relocations<'_, '_> {
@@ -9139,7 +9141,12 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
             fn_relocs: Vec::new(),
             align: layout.align.abi.bytes(),
         };
-        let mut map = Relocations { map: memory_map, in_static, defined: FxHashMap::default() };
+        let mut map = Relocations {
+            map: memory_map,
+            in_static,
+            defined: FxHashMap::default(),
+            walking: Vec::new(),
+        };
         self.relocate(&mut blob, 0, *ty, &mut map)?;
         Ok(blob)
     }
@@ -9405,28 +9412,31 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
         let target = match map.defined.get(&start) {
             Some(&target) => target,
             None => {
-                let mut blob = ConstBlob {
+                let mut target = ConstBlob {
                     bytes: memory.to_vec(),
                     relocs: Vec::new(),
                     fn_relocs: Vec::new(),
                     align: map.align_of(start),
                 };
-                // Named before its words are walked: two allocations can point at each other.
-                let writable = map.in_static && mutability == Mutability::Mut;
-                let target = self.cg.declare_local_data(writable)?;
-                map.defined.insert(start, target);
                 // What the allocation is of is not known here, so as in a union, every word
-                // of it that is the address of something const eval kept is taken to be one.
-                for index in 0..blob.bytes.len() / word() {
+                // of it that is the address of something const eval kept is taken to be one,
+                // but one of an allocation being walked: what const eval made of a constant
+                // points in no circle (a static is named, not walked), so that word is a
+                // number, and following it would not end.
+                map.walking.push(start);
+                for index in 0..target.bytes.len() / word() {
                     let at = index * word();
-                    if let Some(inner) = blob.usize_at(at)
+                    if let Some(inner) = target.usize_at(at)
                         && inner != 0
-                        && map.map.memory_at(inner).is_some_and(|it| it.0 != start)
+                        && map.map.memory_at(inner).is_some_and(|it| !map.walking.contains(&it.0))
                     {
-                        self.relocate_data_pointer(&mut blob, at, inner, mutability, map)?;
+                        self.relocate_data_pointer(&mut target, at, inner, mutability, map)?;
                     }
                 }
-                self.cg.fill_data(target, blob, None)?;
+                map.walking.pop();
+                let writable = map.in_static && mutability == Mutability::Mut;
+                let target = self.cg.define_data(target, writable)?;
+                map.defined.insert(start, target);
                 target
             }
         };
