@@ -8043,10 +8043,12 @@ fn run_holding(
                     let (done, sender) = (done.clone(), sender.clone());
                     let krate = program.args.krate.clone();
                     std::thread::spawn(move || {
+                        let over = || memory::held_by(std::process::id()).filter(|&it| it > budget);
                         while !done.load(Ordering::SeqCst) {
-                            if let Some(held) =
-                                memory::held_by(std::process::id()).filter(|&it| it > budget)
-                            {
+                            if over().is_some() {
+                                memory::give_back();
+                            }
+                            if let Some(held) = over() {
                                 eprintln!(
                                     "not compiling the program for edits to patch any more: it holds {} MB, more than the {} MB it may (RA_JIT_OWN_BASE_MEMORY), and edits go on patching what rustc linked: {krate}",
                                     held >> 20,
