@@ -1070,8 +1070,8 @@ fn compile(
 ) -> anyhow::Result<Ours> {
     // What a program reads while it is compiled, besides the libraries, is named by rustc's
     // dep-info only, which ra-jit does not write.
-    let reads =
-        ["include", "env!", "option_env!"].iter().any(|it| test.program.source.contains(it));
+    let reads = ["include!", "include_str!", "include_bytes!", "env!"];
+    let reads = reads.iter().any(|it| test.program.source.contains(it));
     let ra_jit = std::env::current_exe().ok().and_then(|it| stamp(&it));
     let env = [("RA_JIT", format!("{ra_jit:?}"))];
     let edition = format!("{:?}", test.edition);
