@@ -27,20 +27,26 @@
         nightly = pkgs.rust-bin.nightly."2026-10-09".default.override {
           extensions = [ "rust-src" "rustc-codegen-cranelift-preview" ];
         };
+        # The one LLVM the `llvm` feature builds against, for every build of it: the dev shells
+        # here, CI (`.#llvm`, .github/actions/toolchain) and a release built with the feature.
+        # LLVM_SYS_201_PREFIX names the output with llvm-config, the headers and the libraries;
+        # crates/hir-ty-codegen/build.rs links what it names and refuses any other.
+        llvm = pkgs.llvmPackages_20.llvm;
+        llvmEnv = { LLVM_SYS_201_PREFIX = "${llvm.dev}"; };
         # What harness/bench.py runs in on the benchmark machine (docs/benchmarks.md): the
         # pinned toolchain, LLVM 20 for `--features llvm`, and the C side the projects' build
         # scripts use. Nothing here wraps rustc (no sccache) or replaces the default linker:
         # mold and wild are on PATH for the setups that ask for them with `-fuse-ld`. Every
         # library directory here costs every link a `realpath` in Nix's linker wrapper, which
         # cargo pays and ra-jit does not: what only one project needs goes in a shell of its own.
-        bench = {
+        bench = llvmEnv // {
           packages = [
             rust
             pkgs.python3
             pkgs.git
             pkgs.pkg-config
             pkgs.openssl
-            pkgs.llvmPackages_20.llvm.dev
+            llvm.dev
             pkgs.libffi
             pkgs.libxml2
             pkgs.zlib
@@ -58,19 +64,9 @@
             pkgs.dioxus-cli
           ];
           RA_JIT_NIGHTLY = "${nightly}";
-          LLVM_SYS_201_PREFIX = "${pkgs.llvmPackages_20.llvm.dev}";
           # A C compiler as a distribution ships it: the wrapper's _FORTIFY_SOURCE warns at the
           # -O0 of a debug build, which fails configure probes (jemalloc's, in fd).
           hardeningDisable = [ "all" ];
-        };
-        # LLVM 20 for `--features llvm`, in one prefix for LLVM_SYS_201_PREFIX: the headers,
-        # `llvm-config`, the library a build links to by its path in the store, and the tools.
-        # It is the one LLVM ra-jit supports building against on macOS: flake.lock pins it, so
-        # it can't go away as Homebrew's llvm@20 did. On Linux its library wants nix's C
-        # library, so a build against it belongs in a nix shell (`.#bench` has the same LLVM).
-        llvm = pkgs.symlinkJoin {
-          name = "ra-jit-llvm-${pkgs.llvmPackages_20.llvm.version}";
-          paths = [ pkgs.llvmPackages_20.llvm.dev pkgs.llvmPackages_20.llvm.lib pkgs.llvmPackages_20.llvm ];
         };
         rustPlatform = pkgs.makeRustPlatform {
           cargo = rust;
@@ -189,7 +185,10 @@
           # `nix profile install github:indexable-inc/ra-jit#ra-jit`: ra-jit, cargo-ra-jit and
           # ra-jit-rustc, so `ra-jit enable` and `cargo ra-jit` both work.
           ra-jit = daemon;
-          inherit dist daemon run life daemon-units life-bin llvm;
+          inherit dist daemon run life daemon-units life-bin;
+          # The pinned LLVM's tools, with the libLLVM a build of the `llvm` feature loads: what CI
+          # realises where it runs such a build.
+          inherit llvm;
         };
         apps.default = {
           type = "app";
@@ -199,10 +198,21 @@
           type = "app";
           program = "${run}/bin/ra-jit";
         };
-        devShells.default = pkgs.mkShell {
-          packages = [ rust pkgs.python3 ];
-          LLVM_SYS_201_PREFIX = "${llvm}";
-        };
+        # `nix develop`: the pinned LLVM (LLVM_SYS_201_PREFIX, its tools on PATH) and the C
+        # toolchain it was built with, so `cargo build --features llvm` links against it. Rust is
+        # rustup at the pinned toolchain: plain `cargo` is 1.99.0 and `cargo +<toolchain>` works.
+        devShells.default = pkgs.mkShell (llvmEnv // {
+          packages = [ pkgs.rustup pkgs.python3 llvm llvm.dev ];
+          RUSTUP_TOOLCHAIN = pkgs.lib.fileContents ./harness/toolchain;
+          # As in the bench shell: the wrapper's _FORTIFY_SOURCE fails configure probes at -O0 in
+          # the C code of the projects the harnesses build.
+          hardeningDisable = [ "all" ];
+        } // pkgs.lib.optionalAttrs (system == "x86_64-linux") {
+          # rustup's rustc links x86-64 Linux with its own rust-lld, past the wrapper of the
+          # shell's linker that writes the store's libraries into the binary's RUNPATH: without
+          # this the binary finds neither libLLVM nor the store's glibc and libgcc_s when it runs.
+          CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS = "-Clinker-features=-lld";
+        });
         devShells.bench = pkgs.mkShell bench;
         # What harness/bench.py and runbench.py measure bun in (bunprep.py, docs/research/bun.md):
         # bun's pinned nightly in place of 1.99.0 (rust-src, which ra-jit reads `core` from), and

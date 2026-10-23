@@ -535,7 +535,18 @@ default, so the level is the source's, which only `--cap-lints` and `--force-war
 either among the flags no lint fails a build. A lint in what a macro expands to does not. The
 other lints are not ra-jit's verdict yet: a crate that denies one rust-analyzer does not find
 runs code rustc turns down. `cargo ra-jit check` is the daemon's verdict on the build of the
-same flags when it has that build loaded, and `cargo check` otherwise. Counted on ripgrep with `harness/norustc` (dev-aws-3, 2026-10-22), the
+same flags when it has that build loaded. Since 2026-10-23 any other check is the daemon's too,
+not `cargo check`: the daemon starts a checker (`ra-jit --check`, `crates/ra-jit/src/check.rs`)
+that loads the workspace as the worker of that build would and builds nothing, and answers each
+check with what the build's verdict finds in every file of the workspace's crates (rust-analyzer's
+sure errors, the borrow checker's, the deny lints). It stays loaded and takes in edits of the
+files it has; a new source file, a changed manifest, or a changed build script or proc macro
+has it load again. The build scripts and proc macros are cargo's from an earlier build; a
+workspace that never had them built has rust-analyzer's `cargo check --compile-time-deps` build
+them with rustc, which I and J remove. Code rustc accepts that ra-jit takes for wrong fails such
+a check, as it fails a build. On `harness/norustc.py`'s workspace (dev host, cranelift) the
+`check unloaded` scenario (the daemon stopped, an error, the error mended, another package)
+runs no rustc, and `check` itself none on every platform CI has (5 recorded before). Counted on ripgrep with `harness/norustc` (dev-aws-3, 2026-10-22), the
 error step went from 6 rustc compiles in 0.9 s to none in 0.1 s. The first `test --no-run`
 after it compiled 5 workspace libraries more (50 compiles, not 45): the cargo build of the
 error had brought up to date the libraries an earlier edit had changed, which `cargo test`

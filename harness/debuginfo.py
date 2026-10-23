@@ -32,7 +32,8 @@ import linkline
 from difftest import Fixture, RA_JIT, WINDOWS, sysroot_rlibs, built
 
 LLVM = os.environ.get("RA_JIT_BACKEND") == "llvm"
-DWARFDUMP = shutil.which("llvm-dwarfdump") or shutil.which("llvm-dwarfdump-20") or "/usr/lib/llvm-20/bin/llvm-dwarfdump"
+# The pinned LLVM's, on PATH in the flake's dev shell and in CI.
+DWARFDUMP = shutil.which("llvm-dwarfdump") or "llvm-dwarfdump"
 PDBUTIL = shutil.which("llvm-pdbutil") or os.path.join(os.environ.get("LLVM_SYS_201_PREFIX", r"C:\llvm20"), "bin", "llvm-pdbutil.exe")
 CDB = shutil.which("cdb") or r"C:\Program Files (x86)\Windows Kits\10\Debuggers\x64\cdb.exe"
 DEBUGGER = "cdb" if WINDOWS else "gdb"
