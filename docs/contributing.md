@@ -266,6 +266,29 @@ how many have: 24 after a one-line edit, about 1,600 for code 23 commits and 6,7
 (of the 187,000 functions a profile has). Run the workflow by hand when that count passes a
 few thousand and before a release after large changes to the daemon.
 
+## LLVM for `--features llvm`
+
+The LLVM backend builds against LLVM 20, found through `LLVM_SYS_201_PREFIX`; a build without
+the feature needs no LLVM, and neither does what ships. A build links `libLLVM` dynamically, by
+its path.
+
+On macOS the one supported LLVM is the flake's, LLVM 20.1.8 pinned by `flake.lock`:
+
+    nix build .#llvm --out-link target/llvm-20
+    export LLVM_SYS_201_PREFIX=$PWD/target/llvm-20
+    cargo +1.99.0 build -p ra-jit --release --features llvm
+
+`nix develop` sets the same prefix. The out-link keeps that LLVM from being garbage-collected
+while it exists, and a binary built against it loads its library from the store, so the same
+`nix build` brings it back on another Mac or after a collection. CI's macOS jobs do exactly
+this (`.github/actions/toolchain`). Homebrew is not a supported source: its `llvm@20` is gone,
+and a version that moves under a build is a build that stops linking.
+
+On Linux, nix's `libLLVM` is built against nix's C library, so a build against it belongs in
+`nix develop .#bench`, which has the same LLVM; outside nix use the distribution's LLVM 20
+(apt.llvm.org's, `LLVM_SYS_201_PREFIX=/usr/lib/llvm-20`), as CI does. On Windows CI fetches
+the 20.1.8 release.
+
 ## Credit
 
 A commit or pull request that carries someone else's idea, diagnosis, workaround or patch

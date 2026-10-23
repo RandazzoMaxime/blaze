@@ -52,7 +52,8 @@ Cranelift is the default. Either leave `RA_JIT_BACKEND` unset or set it:
 
 ### Under LLVM
 
-Build with the `llvm` feature against LLVM 20, then select the backend. The gate is run at
+Build with the `llvm` feature against LLVM 20 (on macOS the flake's,
+[contributing.md](contributing.md#llvm-for---features-llvm)), then select the backend. The gate is run at
 `-O2` with fast instruction selection, and that is the only LLVM configuration it covers.
 
     LLVM_SYS_201_PREFIX=/usr/lib/llvm-20 cargo +1.99.0 build -p ra-jit --release --features llvm
