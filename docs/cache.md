@@ -205,7 +205,7 @@ reads it.
 
 A build with nothing of rustc's (a build script, `--exe` with every crate ra-jit's) starts
 from the standard library compiled by ra-jit, which takes seconds on many cores. A release
-ships it: `ra-jit std REMOTE` builds it for the binary and toolchain at hand and pushes it as
+ships it: `ra-jit std REMOTE TOOLCHAIN` builds it for the binary and the toolchain at that sysroot and pushes it as
 the project `std-<target>-<build>`, and the release attaches that remote's files. Before such a
 build first reads the store it fetches the project once per store, from:
 

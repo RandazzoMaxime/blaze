@@ -1,8 +1,8 @@
 //! The standard library as a release of ra-jit ships it (docs/no-rustc.md, "The standard
 //! library, shipped"). A build with nothing of rustc's starts from the standard library's unit
 //! and the frozen maps of its crates, which take seconds to make on a machine of many cores
-//! and most of a minute on a laptop. `ra-jit std REMOTE` makes them once, for the toolchain
-//! installed and this build of ra-jit, and sends them to a remote as the project
+//! and most of a minute on a laptop. `ra-jit std REMOTE TOOLCHAIN` makes them once, for the
+//! toolchain and this build of ra-jit, and sends them to a remote as the project
 //! `std-<target>-<build>`; the release workflow does that for each target and attaches what
 //! it sent to the release. A build of a release fetches that project before it first reads
 //! the store, once a store, and `RA_JIT_STD_FROM` names another remote to fetch it from
@@ -15,9 +15,7 @@
 //! `RA_JIT_REMOTE_TRUST` is for the lists of `RA_JIT_REMOTE`.
 
 use std::{
-    ffi::OsString,
-    path::{Path, PathBuf},
-    process::Command,
+    path::Path,
     thread::JoinHandle,
     time::{Duration, Instant, SystemTime},
 };
@@ -101,25 +99,23 @@ pub(crate) fn fetched(ahead: Option<JoinHandle<()>>) {
     }
 }
 
-const USAGE: &str = "usage: ra-jit std REMOTE\n\n\
-                     Builds the standard library of the toolchain `rustc` is (RUSTC names \
-                     another) for a build with nothing of rustc's, and sends it to REMOTE \
-                     for this build of ra-jit to fetch with RA_JIT_STD_FROM=REMOTE. Nothing \
-                     is built when REMOTE has it.";
+const USAGE: &str = "usage: ra-jit std REMOTE TOOLCHAIN\n\n\
+                     Builds the standard library of TOOLCHAIN (the directory `rustc --print \
+                     sysroot` names) for a build with nothing of rustc's, and sends it to \
+                     REMOTE for this build of ra-jit to fetch with RA_JIT_STD_FROM=REMOTE. \
+                     Nothing is built when REMOTE has it.";
 
-/// `ra-jit std REMOTE`: builds the standard library for this build of ra-jit, the installed
+/// `ra-jit std REMOTE TOOLCHAIN`: builds the standard library for this build of ra-jit, the
 /// toolchain and the target of this machine into a store of its own, and sends that to
 /// `REMOTE` under the project a build fetches it as.
 pub(crate) fn command(mut args: impl Iterator<Item = String>) -> anyhow::Result<()> {
-    let Some(to) = args.next().filter(|it| !it.starts_with('-')) else { anyhow::bail!(USAGE) };
-    let rustc = std::env::var_os("RUSTC").unwrap_or_else(|| OsString::from("rustc"));
-    let asked = Command::new(&rustc).args(["--print", "sysroot"]).output();
-    let asked = asked.with_context(|| format!("{} did not run", rustc.to_string_lossy()))?;
-    if !asked.status.success() {
-        anyhow::bail!("{} --print sysroot: {}", rustc.to_string_lossy(), asked.status);
-    }
-    let sysroot = PathBuf::from(String::from_utf8(asked.stdout)?.trim_end());
+    let mut words = args.by_ref().filter(|it| !it.starts_with('-'));
+    let (Some(to), Some(sysroot)) = (words.next(), words.next()) else { anyhow::bail!(USAGE) };
+    let sysroot = std::path::absolute(sysroot)?;
     let sysroot = sysroot.as_path();
+    if !sysroot.join("lib/rustlib").is_dir() {
+        anyhow::bail!("{} is not a toolchain: it has no lib/rustlib", sysroot.display());
+    }
     let mut identity = crate::installed_identity(&format!("{}/", sysroot.display()));
     identity.sort_unstable();
     ra_jit_store::compiles_against(&identity.join(" "));

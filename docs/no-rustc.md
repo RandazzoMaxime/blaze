@@ -997,8 +997,8 @@ parts of the library's crates, 7.5 s on 96 cores, while the others wait on it. O
 store ripgrep went from 4.5 to 11.2 s and nushell from 25.6 to 37.3 s. That cost is now
 paid once, by the release, instead of on a user's machine (`crates/ra-jit/src/shipped.rs`):
 
-- `ra-jit std REMOTE` builds a script that does nothing into a store of its own and pushes that
-  store to REMOTE as the project `std-<target>-<build>`, where `<build>` is what the store keys
+- `ra-jit std REMOTE TOOLCHAIN` builds a script that does nothing over TOOLCHAIN (a sysroot)
+  into a store of its own, running no rustc, and pushes that store to REMOTE as the project `std-<target>-<build>`, where `<build>` is what the store keys
   by: the ra-jit binary's bytes and the toolchain's commit and compiler name. Only that binary
   with that toolchain can use it, and every key in it says so.
 - The release workflow runs it with each target's archived binary and the pinned 1.99.0, and
