@@ -4,7 +4,7 @@ ra-jit has its own borrow checker, the crate `hir-ty-borrowck` in the rust-analy
 (`vendor/rust-analyzer/crates/hir-ty-borrowck`, next to `hir-ty`). It checks the MIR rust-analyzer
 lowers, the same MIR the code generator compiles, and it is meant to give exactly rustc's
 verdict: the same errors, on the same lines, and none where rustc gives none. It gives
-rustc's verdict on 92% of rustc's own borrow-check tests today, and on every one rustc
+rustc's verdict on 95% of rustc's own borrow-check tests today, and on every one rustc
 accepts; how they are scored and what is left is below.
 
 It runs as part of rust-analyzer's diagnostics, so the daemon computes it for every edited
@@ -81,7 +81,9 @@ All of these are rustc's, written from `compiler/rustc_borrowck` at the pinned n
   `dyn Any + 'r` in the signature implies `'r: 'static`, which `trait Any: 'static` requires.
   The type an object binds an associated type to is invariant (`dyn Trait<Out = &'a u32>`),
   and unsizing to `dyn Trait` proves the value's type implements `Trait`, with what its impl
-  needs of the regions. An associated type in a signature is related as what it normalizes
+  needs of the regions and what the trait says its types outlive (`T` as `dyn Any + 'a` needs
+  `T: 'static`); a field's `dyn Any + 'a` implies nothing of `'a`, as rustc's inferred
+  outlives leave out what mentions `Self`. An associated type in a signature is related as what it normalizes
   to, so `for x in &mut v` keeps `v` borrowed in the `IterMut<'a, T>` that
   `<&'a mut Vec<T> as IntoIterator>::IntoIter` is. Unsizing an array to a slice keeps its
   element type (`[T; N]: Unsize<[T]>`), so `&mut [&'a T; 1]` as `&mut [&'b T]` makes `'a`
@@ -117,7 +119,8 @@ All of these are rustc's, written from `compiler/rustc_borrowck` at the pinned n
   (`Migrations::new(&[Migration::new("a")])`), as it is in rustc's const contexts.
 - Region inference: liveness of locals (drops kept live only back to where the local may be
   initialized; what a drop uses as rustc's dropck: an associated type as what it normalizes
-  to, another alias what its bounds and captures leave, `for<'a> T: 'a` as `'static`, and
+  to, another alias what its bounds and captures leave, all its arguments under a binder of
+  its type (`fn(T::Gat<'a, '_>)`), `for<'a> T: 'a` as `'static`, and
   nothing of a `ManuallyDrop`), outlives constraints from every statement, call, cast and aggregate, the
   signature's universal regions and implied bounds (normalized parameters and the impl
   header included, for associated consts too; a projection implies what its arguments do as
@@ -126,7 +129,11 @@ All of these are rustc's, written from `compiler/rustc_borrowck` at the pinned n
   `trait Trait<A: 'static>`), where clauses (elaborated through
   supertraits) and the region constraints of proving them with the trait solver (a
   callee's `I: IntoIterator<Item = T>` makes what `I` normalizes the projection to `T`, so
-  `buffer.extend(data.split(..))` borrows `data` for as long as `buffer` holds it; a where
+  `buffer.extend(data.split(..))` borrows `data` for as long as `buffer` holds it; a bound's
+  associated type of a closure's type is normalized before it is proven, so
+  `v.iter().map(|l| l.trim()).collect::<Vec<&'a str>>()` borrows `v` for `'a`, though not
+  where that type has a trait object, whose lifetime rust-analyzer makes `'static` in an impl
+  header that leaves it out; `Trait<'static>` of `trait Trait<'a>: 'a` needs `'static`; a where
   clause or impl that proves a bound relates its regions to the bound's, `&'max G: Get` proving
   `&'min G: Get` makes them equal, and the impl's own `T: 'a` must hold), type tests (an
   associated type `<T as Trait>::Assoc: 'a` as rustc's alias bound: what it normalizes to
@@ -253,6 +260,10 @@ All of these are rustc's, written from `compiler/rustc_borrowck` at the pinned n
   template. An error in an expression a macro writes (`&$e`) is at the macro's definition
   when it is in the same file, as rustc reports it there; one in what the caller wrote is at
   the caller's.
+- `unused_mut` ("variable does not need to be mutable"), a warning: a binding declared `mut`
+  that no assignment or mutable borrow needs the `mut` of, as rustc's `used_mut`. A closure
+  needs the `mut` of a captured variable when its body mutates it, and a name that starts
+  with `_` is left alone, as rustc does.
 
 ## How it is tested
 
@@ -273,8 +284,8 @@ With no borrow checker, the 245 units rustc accepts would pass. Now:
 
 | Mode | In scope | Pass | rustc accepts, ra-jit too | rustc rejects, same errors |
 |---|---|---|---|---|
-| Polonius | 1579 | 1471 (93.2%) | 245 of 245 | 1226 of 1334 |
-| NLL | 1577 | 1467 (93.0%) | 226 of 226 | 1241 of 1351 |
+| Polonius | 1579 | 1506 (95.4%) | 245 of 245 | 1261 of 1334 |
+| NLL | 1577 | 1502 (95.2%) | 226 of 226 | 1276 of 1351 |
 
 463 units are out of scope; 344 of them need a nightly feature. CI runs the scoring on Linux
 and fails below a floor a few units under the count there.
@@ -287,10 +298,10 @@ just, axum, nushell, delta, eza, tokei and starship it finds nothing, nor on the
 ## What is left
 
 Every failing unit is one where rustc gives an error ra-jit does not, or gives it on another
-line or with another code. By what is wrong, most first: 11 "lifetime may not live long
-enough" not reported, 9 on another line or with another code, 9 with only an error rustc does
-not give, 8 of E0597 not reported, 7 each of E0716 and E0507, 6 each of E0309 and E0310, and
-5 each of E0311, E0521 and higher-ranked errors not reported, then a long tail. The causes, grouped:
+line or with another code. By what is wrong, most first: 10 "lifetime may not live long
+enough" not reported, 6 on another line or with another code, 2 with only an error rustc does
+not give, 7 of E0597 not reported, 6 of E0309, and 5 each of E0716, E0311, E0507, E0310 and
+higher-ranked errors not reported, then a long tail. The causes, grouped:
 
 - **Higher-ranked regions and placeholders** (`for<'a>` bounds, closures with higher-ranked
   signatures): rustc checks them with placeholders in universes; ra-jit does not yet, and
@@ -302,10 +313,6 @@ not give, 8 of E0597 not reported, 7 each of E0716 and E0507, 6 each of E0309 an
 - **Member constraints of `impl Trait`**: the choice rustc makes is not applied, and a
   projection bound that names a lifetime (`impl Iterator<Item = Box<dyn Foo>>`) leaves them
   out.
-- **Match fake edges**: rustc's MIR gives each arm, guard and or-pattern alternative an
-  imaginary edge from the one before, so borrowck cannot tell an arm is unreachable or a
-  guard always runs. rust-analyzer lowers arms one after the other and none after an
-  irrefutable one, so a move in an arm that never runs is not seen (`nll/match-cfg-fake-edges.rs`).
 - **Captures of an empty `match`**: rustc's capture analysis has a closure that matches
   on `x` with no arms read `x`; rust-analyzer's captures nothing there, so the E0381 of an
   uninitialized `x` is missed.
@@ -357,6 +364,14 @@ changes to rust-analyzer were needed, each made as rustc does it:
   of what it proves, as rustc's does, for an interner made with `with_regions()`: the
   borrow checker's. rust-analyzer's dropped them; type inference does not ask for them and
   its answers are cached apart.
+- False edges (`TerminatorKind::FalseEdge`): each way a match arm can match is linked to the
+  next by an edge only borrow checking follows, and so are an `if let` or `let .. else` to
+  its else and an or-pattern's alternatives as it binds, so borrowck cannot tell an arm is
+  unreachable or that a guard always runs (`nll/match-cfg-fake-edges.rs`). Arms and
+  alternatives after one that cannot fail are lowered too, reached only by these edges, so
+  their guards are checked (`&_ => ..., &_ if { b = &true; false } => ...` is an E0510).
+  Before the other passes each becomes a jump to its real target, as rustc's
+  `CleanupPostBorrowck` does, so what runs is unchanged.
 
 These are differences still open, each the cause of some failures, all of them errors
 missed rather than errors made up:
@@ -370,9 +385,6 @@ missed rather than errors made up:
   in rustc, so what it binds by value is dropped first; rust-analyzer binds them in the
   pattern's order (`dropck/eager-by-ref-binding-for-guards.rs`, where it reports two errors
   rustc does not).
-- Arms after an irrefutable one are not lowered, so their guards are not checked
-  (`&_ => ..., &_ if { b = &true; false } => ...` is an E0510 in rustc,
-  `nll/match-guards-partially-borrow.rs`).
 - Unwind paths are not lowered. rustc's MIR gives every call and drop a cleanup path ending
   at `resume`, where any borrow still live that outlives the function's own regions is an
   error (E0597 for `let x = ...; let r: &'a _ = &x; f();`). ra-jit checks that at each call,

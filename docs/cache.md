@@ -1,9 +1,9 @@
 # The disk store and the remote
 
 ra-jit keeps compiled functions in memory while a daemon runs. Two more layers keep them
-longer. The disk store is a directory on this machine that every daemon of the user can
-share. The remote is a directory or an S3 bucket that several machines push to and pull
-from. Both are off until you configure them.
+longer. The disk store is one directory on this machine that every daemon and every
+checkout of the user shares, on by default. The remote is a directory or an S3 bucket that
+several machines push to and pull from, off until you configure it.
 
 The reports behind this file are [reports/DISKCACHE.md](reports/DISKCACHE.md) and
 [reports/REMOTE.md](reports/REMOTE.md). The variables and commands below were checked
@@ -65,19 +65,22 @@ keeps derives only ([research/proc-macro-cache.md](research/proc-macro-cache.md)
 
 ## The disk store
 
-Set `RA_JIT_CACHE` to a directory. The daemon reads the variable when it starts, so under
-`cargo ra-jit` it has to be set in the environment of the command that starts the daemon;
-run `cargo ra-jit stop` first if one is running.
-
-    export RA_JIT_CACHE=~/.cache/ra-jit-store
-    cargo ra-jit stop
-    cargo ra-jit build
+The store is `ra-jit/store` in the user's cache directory (`$XDG_CACHE_HOME`, else
+`~/.cache`), whatever the checkout: two checkouts, or two projects with dependencies in
+common, keep a function once. `RA_JIT_CACHE` names another directory, or `off` for none.
+The daemon reads the variable when it starts, so under `cargo ra-jit` it has to be set in
+the environment of the command that starts the daemon; run `cargo ra-jit stop` first if
+one is running. `cargo ra-jit status` says how much the store holds, the most it may hold,
+and where it is.
 
 | Variable | Meaning | Default |
 |---|---|---|
-| `RA_JIT_CACHE` | the store's directory | not set: no store |
-| `RA_JIT_CACHE_MAX` | the most the sealed packs may take: bytes, or a number with `K`, `M` or `G`, or `off` | 8G |
+| `RA_JIT_CACHE` | the store's directory, or `off` | `ra-jit/store` in the user's cache directory |
+| `RA_JIT_CACHE_MAX` | the most the sealed packs may take: bytes, or a number with `K`, `M` or `G`, or `off` | a tenth of the disk the store is on that is free or the store's, at least 256M and at most 32G |
 | `RA_JIT_CACHE_SEAL_AT` | size at which an open pack is sealed at the end of a build; exists for the harnesses | 4M |
+
+The default limit is worked out again at each collection, so a disk that fills up with
+other things takes room back from the store.
 
 ### What is on disk
 
@@ -86,15 +89,26 @@ named by the hash of its bytes and never changed afterwards. `<pid>-<nanos>.open
 pack one daemon is appending to, held locked. `*.tmp` is a file on its way to another name.
 `lock` is held while the directory is emptied or collected.
 
+A sealed pack is an index, then the values. The index has, for each value, its key, its
+block, where it starts in the block, its length and a checksum. The values are in blocks of
+about 128K, each compressed on its own with zstd (level 3), so reading a value reads and
+unpacks its block. A daemon keeps the last 32M of blocks it unpacked, since a build reads
+values in about the order it added them. A value larger than 1M is a block of its own,
+kept as it is, and so is a block that compression would not make smaller. An open pack is
+not compressed: its records are appended as they come, and it is compressed when it is
+sealed. Compiled code compresses to about a fifth: the 1.6 GB store of a helix build is
+about 0.3 GB.
+
 A daemon that finds an older format, or files with no `version`, empties the directory and
 starts over. One that finds a newer format leaves it alone and runs without a store.
 
 ### Integrity and crashes
 
-A pack's hash is checked the first time a process reads it, and each record carries a
-checksum that is checked every time its value is read. A pack that fails either check is
-removed and what was in it is compiled again. A sealed pack appears by a rename after it is
-written and synced. An open pack left by a daemon that died is sealed up to its last whole
+A pack's hash is checked the first time a process reads it, and each value carries a
+checksum that is checked every time it is read. A pack that fails either check, or has a
+block that does not unpack, is removed and what was in it is compiled again. A sealed pack
+appears by a rename after it is written and synced, and the open pack it was sealed from is
+removed after that. An open pack left by a daemon that died is sealed up to its last whole
 record by whoever finds it.
 
 Several daemons can share one directory. Reading and adding take no lock; only collection
@@ -113,11 +127,15 @@ least recently used packs until the rest fit under `RA_JIT_CACHE_MAX`. A pack co
 when a daemon read a value from it during a build.
 
 Eviction is by pack, not by record. One recently used record keeps its whole pack, which
-can be up to 64M, so a limit smaller than a few packs evicts nearly everything.
+holds up to 64M of values (some 13M on disk), so a limit smaller than a few packs evicts
+nearly everything. The limit counts bytes on disk, compressed.
+
+Upgrading ra-jit leaves the old build's entries in the store, unreachable, until they are
+the least recently used; `ra-jit cache gc --max 0` empties the store at once.
 
 ### Commands
 
-These act on the store `RA_JIT_CACHE` names.
+These act on the store `cargo ra-jit status` names.
 
     ra-jit cache stats                 format, packs, bytes, limit, oldest and newest use
     ra-jit cache verify                read everything; exit 1 if a pack is not what was written
@@ -138,7 +156,7 @@ A remote is a directory or `s3://bucket/prefix`. It holds sealed packs under the
 their bytes, a list of the keys in each pack, and one manifest per project that lists the
 packs that project's builds were served from.
 
-    packs/<sha256>.pack.zst      a pack, compressed with zstd
+    packs/<sha256>.pack.zst      a pack, compressed with zstd again (its blocks already are)
     keys/<sha256>                the keys of one pack
     manifests/<project>          one line per pack
     units/<sha256>, deps/<project>   cargo's builds of dependencies, see below
@@ -175,7 +193,8 @@ push. A daemon killed with SIGKILL pushes nothing on its way out; the next push 
 | `RA_JIT_REMOTE_SIGN` | file holding the key this machine signs manifests with | not set |
 | `RA_JIT_REMOTE_TRUST` | public keys this machine accepts manifests from, comma separated | not set |
 
-`RA_JIT_REMOTE` needs `RA_JIT_CACHE` as well: the remote fills and reads the local store.
+`RA_JIT_REMOTE` needs the local store (`RA_JIT_CACHE` not `off`): the remote fills and
+reads it.
 
 ### S3 address and credentials
 

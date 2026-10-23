@@ -28,6 +28,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 from storelib import Checkout, Daemon, cache, files, run, scratch, verify
 from difftest import Fixture
+import packs
 
 SEALS = {"RA_JIT_CACHE_SEAL_AT": "1", "RA_JIT_CACHE_MAX": "off"}
 OTHERS_WRITE = "written to by other users"
@@ -60,14 +61,19 @@ def the_users_alone(store):
 
 def held_in(path):
     """The bytes of a file as a store would hold them: a remote sends its packs through zstd,
-    and a path that is looked for is not found in what is compressed."""
+    a sealed pack keeps its values in zstd blocks, and a path that is looked for is not found
+    in what is compressed."""
     data = open(path, "rb").read()
-    if not path.endswith(".zst"):
-        return data
-    unpacked = subprocess.run(["zstd", "-d", "-c", "-q"], input=data, capture_output=True)
-    if unpacked.returncode != 0:
-        fail(f"{path} is not zstd: {unpacked.stderr.decode()[-200:]}")
-    return unpacked.stdout
+    if path.endswith(".zst"):
+        unpacked = subprocess.run(["zstd", "-d", "-c", "-q"], input=data, capture_output=True)
+        if unpacked.returncode != 0:
+            fail(f"{path} is not zstd: {unpacked.stderr.decode()[-200:]}")
+        data = unpacked.stdout
+    if data.startswith(packs.MAGIC):
+        if packs.index(data) is None:
+            fail(f"{path} is not laid out as a sealed pack")
+        return b"".join(packs.blocks(data))
+    return data
 
 
 def names_no_checkout(checkout, directory, what):

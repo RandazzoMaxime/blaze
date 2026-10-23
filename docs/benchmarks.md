@@ -151,7 +151,11 @@ builds it in a few minutes on the same machine. Its build needs `nix develop .#b
   no lld, no sccache or other `RUSTC_WRAPPER` on either side (bench.py removes it).
 - Crates are downloaded before the cold build on both sides; downloading is not timed.
 - ra-jit's store starts empty for each project and backend and for every cold run. "Cold, warm
-  store" is the one phase that starts with a store, and it is reported apart.
+  store" is the one phase that starts with a store, and it is reported apart. On a machine
+  the store is one for every project, so the Store column is what a project adds to a store
+  that has nothing of it. `store_added_mb` in the results is what it adds to one that has
+  what the projects before it in the run stored: the disk of its entries whose keys none of
+  them had (a pack's size shared among its entries by the length of their values).
 - The machine runs nothing else: it is a dedicated instance used only by this workflow.
 
 ## Tiers

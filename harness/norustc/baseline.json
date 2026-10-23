@@ -1,7 +1,11 @@
 {
  "linux-aarch64 cranelift": {
   "check": {
-   "rustc": 5,
+   "rustc": 0,
+   "rustdoc": 0
+  },
+  "check unloaded": {
+   "rustc": 0,
    "rustdoc": 0
   },
   "cold build": {
@@ -23,7 +27,11 @@
  },
  "linux-aarch64 llvm": {
   "check": {
-   "rustc": 5,
+   "rustc": 0,
+   "rustdoc": 0
+  },
+  "check unloaded": {
+   "rustc": 0,
    "rustdoc": 0
   },
   "cold build": {
@@ -48,6 +56,10 @@
    "rustc": 0,
    "rustdoc": 0
   },
+  "check unloaded": {
+   "rustc": 0,
+   "rustdoc": 0
+  },
   "cold build": {
    "rustc": 6,
    "rustdoc": 0
@@ -67,7 +79,11 @@
  },
  "linux-x86_64 llvm": {
   "check": {
-   "rustc": 5,
+   "rustc": 0,
+   "rustdoc": 0
+  },
+  "check unloaded": {
+   "rustc": 0,
    "rustdoc": 0
   },
   "cold build": {
@@ -89,7 +105,11 @@
  },
  "macos-aarch64 cranelift": {
   "check": {
-   "rustc": 5,
+   "rustc": 0,
+   "rustdoc": 0
+  },
+  "check unloaded": {
+   "rustc": 0,
    "rustdoc": 0
   },
   "cold build": {
@@ -111,7 +131,11 @@
  },
  "macos-aarch64 llvm": {
   "check": {
-   "rustc": 5,
+   "rustc": 0,
+   "rustdoc": 0
+  },
+  "check unloaded": {
+   "rustc": 0,
    "rustdoc": 0
   },
   "cold build": {

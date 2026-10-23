@@ -356,7 +356,8 @@ def score(units, expected, actual, mode):
         for d in diags:
             # An error rustc gives no code rust-analyzer reports as `borrowck`.
             d["code"] = key_of(None if d["code"] == "borrowck" else d["code"], d["message"]) or d["code"]
-        got_b = {(d["code"], d["line"]) for d in diags if is_borrowck(d["code"])}
+        # rustc's errors, which a lint is where it is denied.
+        got_b = {(d["code"], d["line"]) for d in diags if is_borrowck(d["code"]) and d["severity"] == "Error"}
         stray = sorted({d["code"] for d in diags if d["severity"] == "Error" and not is_borrowck(d["code"])
                         and d["code"] not in rustc_keys})
         if stray:

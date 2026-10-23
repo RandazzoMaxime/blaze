@@ -74,11 +74,12 @@ usage: cargo ra-jit <command> [cargo's flags]
 
   build, run, test   by the daemon when it has the workspace loaded, by cargo otherwise
   check              what the daemon's build of the same flags says, when it has one loaded;
-                     `cargo check` otherwise
+                     otherwise what the daemon finds loading the workspace as it, with no rustc
   status             whether ra-jit is enabled, what the daemon has loaded, what fell back
   stop               ends the daemon; the next build starts one
   enable, disable    plain `cargo build|run|test|check` through ra-jit, and back
-  cache clear        forgets the results `#[ra_jit::cache]` functions kept
+  cache              what the `#[ra_jit::cache]` functions kept, by function
+  cache clear        forgets it; `--stale`, all but what each function's code computed
 
 Any other command is cargo's own. CARGO.md is the guide.";
 
@@ -110,15 +111,70 @@ fn settle(cargo: u32, typed: &[String]) -> anyhow::Result<()> {
     settled
 }
 
-/// `cargo ra-jit cache clear`: forgets the results `#[ra_jit::cache]` functions kept, which
-/// are under the target directory unless `RA_JIT_FN_CACHE_DIR` says where. Any other verb is
-/// one of `ra-jit cache`, on the disk store.
+/// `cargo ra-jit cache`: what the `#[ra_jit::cache]` functions kept, which is under the target
+/// directory unless `RA_JIT_FN_CACHE_DIR` says where; `cache clear` forgets it, and `cache clear
+/// --stale` all but what each function's code computed. Any other verb is one of `ra-jit cache`,
+/// on the disk store.
 fn cache(args: Vec<String>) -> anyhow::Result<i32> {
-    if args.first().map(String::as_str) != Some("clear") {
-        crate::remote::command(args.into_iter())?;
+    let args: Vec<&str> = args.iter().map(String::as_str).collect();
+    let stale = match args[..] {
+        [] => return list_kept(&fn_cache_dir()?).map(|()| 0),
+        ["clear"] => false,
+        ["clear", "--stale"] => true,
+        _ => {
+            crate::remote::command(args.into_iter().map(str::to_owned))?;
+            return Ok(0);
+        }
+    };
+    let dir = fn_cache_dir()?;
+    if stale {
+        let (results, bytes) = fn_cache::__private::clear_stale(&dir);
+        println!("forgot {results} results of older code ({})", size(bytes));
         return Ok(0);
     }
-    let dir = match std::env::var_os("RA_JIT_FN_CACHE_DIR") {
+    match std::fs::remove_dir_all(&dir) {
+        Ok(()) => println!("cleared the kept results in {}", dir.display()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => println!("no results are kept"),
+        Err(e) => return Err(e).with_context(|| format!("clearing {}", dir.display())),
+    }
+    Ok(0)
+}
+
+/// What each cached function holds: the results of its code, and of the older codes kept for an
+/// edit taken back.
+fn list_kept(dir: &std::path::Path) -> anyhow::Result<()> {
+    let (held, other) = fn_cache::__private::holdings(dir);
+    if held.is_empty() && other.0 == 0 {
+        println!("no results are kept");
+        return Ok(());
+    }
+    println!("kept in {}", dir.display());
+    for function in &held {
+        let Some(&(now, now_bytes)) = function.codes.first() else { continue };
+        let older = &function.codes[1..];
+        let (old, old_bytes) = older.iter().fold((0, 0), |(n, b), it| (n + it.0, b + it.1));
+        print!("  {}: {now} results ({})", function.name, size(now_bytes));
+        if old > 0 {
+            print!(", and {old} of {} older code ({})", older.len(), size(old_bytes));
+        }
+        println!();
+    }
+    if other.0 > 0 {
+        println!("  {} results of code no function has now ({})", other.0, size(other.1));
+    }
+    Ok(())
+}
+
+fn size(bytes: u64) -> String {
+    match bytes {
+        0..1024 => format!("{bytes} B"),
+        1024..1048576 => format!("{:.1} KiB", bytes as f64 / 1024.0),
+        _ => format!("{:.1} MiB", bytes as f64 / 1048576.0),
+    }
+}
+
+fn fn_cache_dir() -> anyhow::Result<std::path::PathBuf> {
+    Ok(match std::env::var_os("RA_JIT_FN_CACHE_DIR") {
         Some(dir) => std::path::PathBuf::from(dir),
         None => {
             let metadata = cargo_metadata::MetadataCommand::new()
@@ -128,13 +184,7 @@ fn cache(args: Vec<String>) -> anyhow::Result<i32> {
                 .context("running `cargo metadata`")?;
             metadata.target_directory.as_std_path().join("ra-jit").join("fn-cache")
         }
-    };
-    match std::fs::remove_dir_all(&dir) {
-        Ok(()) => println!("cleared the kept results in {}", dir.display()),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => println!("no results are kept"),
-        Err(e) => return Err(e).with_context(|| format!("clearing {}", dir.display())),
-    }
-    Ok(0)
+    })
 }
 
 /// Runs cargo with `args` and nothing of ra-jit's but its answers to what cargo asks rustc.
@@ -220,35 +270,49 @@ fn build(asked: &Invocation) -> anyhow::Result<i32> {
 const FAILED: i32 = 101;
 
 /// `cargo ra-jit check`: what the daemon says of the source as it builds the programs of
-/// the build with the same flags, when it has that build loaded, and no rustc. Any other
-/// check is cargo's, and loads nothing: rustc links no program for it.
+/// the build with the same flags, when it has that build loaded. Any other check is the
+/// daemon's checker's, which loads the workspace as that build would and builds nothing.
+/// Neither runs rustc on the source.
 fn check(asked: &Invocation) -> anyhow::Result<i32> {
     let started = Instant::now();
     let cwd = std::env::current_dir()?;
-    let cargos = |why: &str| {
-        say::fallback(why, "this is `cargo check`");
-        plain_cargo(std::iter::once("check".to_owned()).chain(asked.typed.clone()).collect())
+    let finished = |profile: &str| {
+        let took = started.elapsed().as_secs_f64();
+        let finished = format!("`{profile}` profile [ra-jit] target(s) in {took:.2}s");
+        say::status(asked.flags.quiet, "Finished", &finished);
     };
-    let state = match State::read(&asked.key(&cwd)) {
-        Ok(state) if state.programs.is_empty() => {
-            return cargos("the daemon builds no program of it");
+    if let Ok(state) = State::read(&asked.key(&cwd))
+        && !state.programs.is_empty()
+    {
+        match by_daemon(state) {
+            Ok((state, _held)) => {
+                finished(&state.profile);
+                state.write()?;
+                return Ok(0);
+            }
+            Err(NotServed::Error(said)) => {
+                eprintln!("{said}");
+                return Ok(FAILED);
+            }
+            Err(NotServed::Cargo(_)) => {}
         }
-        Ok(state) => state,
-        Err(why) => return cargos(why.unwrap_or("the daemon has not built it")),
-    };
-    match by_daemon(state) {
-        Ok((state, _held)) => {
-            let took = started.elapsed().as_secs_f64();
-            let finished = format!("`{}` profile [ra-jit] target(s) in {took:.2}s", state.profile);
-            say::status(asked.flags.quiet, "Finished", &finished);
-            state.write()?;
+    }
+    let ahead = state::checked(asked)?;
+    let profile = ahead.config.selection.profile.clone();
+    match client::ask(Request::Check(ahead), Start::IfMissing)? {
+        Some(daemon::Reply::Checked { errors: None }) => {
+            finished(&profile);
             Ok(0)
         }
-        Err(NotServed::Error(said)) => {
+        Some(daemon::Reply::Checked { errors: Some(said) }) => {
             eprintln!("{said}");
             Ok(FAILED)
         }
-        Err(NotServed::Cargo(ToCargo(_, why))) => cargos(&why),
+        Some(daemon::Reply::Cold { reason }) => {
+            eprintln!("error: ra-jit could not check the workspace: {reason}");
+            Ok(FAILED)
+        }
+        reply => anyhow::bail!("the daemon answered a check with {reply:?}"),
     }
 }
 
@@ -531,7 +595,22 @@ fn after_build(
     }
 }
 
-/// `cargo ra-jit status`: the daemon, its workers, and how the builds of each checkout went.
+/// What the store of compiled code holds and may hold, and where it is.
+fn store_status() -> String {
+    let Some(dir) = daemon::store() else {
+        return "store: none (RA_JIT_CACHE says so)".to_owned();
+    };
+    let held = ra_jit_store::StoreDir::at(&dir).stats().map_or(0, |it| it.held());
+    let most = match ra_jit_store::limit_for(&dir) {
+        Ok(Some(most)) => format!("at most {} MB", most >> 20),
+        Ok(None) => "no limit".to_owned(),
+        Err(why) => why,
+    };
+    format!("store: {} MB, {most} (`ra-jit cache gc` collects it), {}", held >> 20, dir.display())
+}
+
+/// `cargo ra-jit status`: the daemon, its workers, the store, and how the builds of each
+/// checkout went.
 fn status() -> anyhow::Result<i32> {
     use std::fmt::Write as _;
     let mut said = String::new();
@@ -573,6 +652,7 @@ fn status() -> anyhow::Result<i32> {
         }
         _ => said.push_str("daemon: not running\n"),
     }
+    let _ = writeln!(said, "{}", store_status());
     for state in State::all() {
         let to_cargo: u64 = state.counts.cargo.values().sum();
         let _ = writeln!(
