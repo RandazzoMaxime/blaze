@@ -211,12 +211,14 @@ fn diagnostics(
                 let before = &text[..start];
                 let line = before.matches('\n').count() + 1;
                 let col = before.rsplit('\n').next().map_or(0, |it| it.chars().count()) + 1;
+                let expanded = it.main_node.is_some_and(|it| it.file_id.is_macro());
                 serde_json::json!({
                     "code": it.code.as_str(),
                     "severity": format!("{:?}", it.severity),
                     "line": line,
                     "col": col,
                     "message": it.message,
+                    "expanded": expanded,
                 })
             })
             .collect()

@@ -888,6 +888,20 @@ impl CrateGraphBuilder {
         self.arena[krate].env.set(key, value);
     }
 
+    /// Sets a flag `cfg` reads in `krate`, as a build script of it would.
+    pub fn set_cfg(&mut self, krate: CrateBuilderId, flag: Symbol) {
+        self.arena[krate].cfg_options.insert_atom(flag);
+    }
+
+    pub fn insert_cfg(&mut self, krate: CrateBuilderId, cfg: cfg::CfgAtom) {
+        match cfg {
+            cfg::CfgAtom::Flag(flag) => self.arena[krate].cfg_options.insert_atom(flag),
+            cfg::CfgAtom::KeyValue { key, value } => {
+                self.arena[krate].cfg_options.insert_key_value(key, value)
+            }
+        }
+    }
+
     /// Removes all crates from this crate graph except for the ones in `to_keep` and fixes up the dependencies.
     /// Returns a mapping from old crate ids to new crate ids.
     pub fn remove_crates_except(

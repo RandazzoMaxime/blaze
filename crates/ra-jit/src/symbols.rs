@@ -262,19 +262,33 @@ pub(crate) struct Linked {
     /// What it defines or takes from a library, [`hashed`].
     names: FxHashSet<u64>,
     /// Its functions and statics of symbols private to the object they were in, by their
-    /// paths, with their addresses: none for a path that two have, or a symbol that two
-    /// copies have, which a patch would replace one of.
+    /// paths as [`SymbolTable`] spells them, with their addresses: none for a path that two
+    /// have, or a symbol that two copies have, which a patch would replace one of.
     private: FxHashMap<String, Option<(String, u64)>>,
     /// The symbol of each function rustc compiled from Rust (or C++), a line each:
     /// demangled when asked, for a few.
     functions: String,
+    /// The symbols of the functions left out of the others, being private to an object
+    /// whose crate calls them its own way, a line each.
+    unkept: String,
 }
 
 impl Linked {
     /// `by_symbol` are the objects and archives of the crates rustc compiled with a symbol for
-    /// each function, which every call goes to (`cargo::plan`'s `calls_by_symbol`).
-    pub(crate) fn read(path: &Path, by_symbol: &[PathBuf]) -> anyhow::Result<Linked> {
-        let data = std::fs::read(path).with_context(|| format!("reading {}", path.display()))?;
+    /// each function, which every call goes to (`cargo::plan`'s `calls_by_symbol`), and
+    /// `shared` the names that more than one crate of the link has, as
+    /// [`SymbolTable::shared_names`] has them.
+    pub(crate) fn read(
+        path: &Path,
+        by_symbol: &[PathBuf],
+        shared: &FxHashSet<String>,
+    ) -> anyhow::Result<Linked> {
+        let file =
+            std::fs::File::open(path).with_context(|| format!("reading {}", path.display()))?;
+        // Only its symbols are read of it, which are a little of a program with debug info.
+        // SAFETY: a linker writes a new file in place of the one it links over, not into it,
+        // and nothing else writes what rustc linked.
+        let data = unsafe { memmap2::Mmap::map(&file)? };
         let object = object::File::parse(&*data)?;
         let hidden = hidden_globals(&data);
         let own = defined_in(by_symbol);
@@ -282,7 +296,9 @@ impl Linked {
             names: FxHashSet::default(),
             private: FxHashMap::default(),
             functions: String::new(),
+            unkept: String::new(),
         };
+        let mut local = Vec::new();
         for symbol in object.symbols().chain(object.dynamic_symbols()) {
             let Ok(name) = symbol.name() else { continue };
             let name = match object.format() {
@@ -298,14 +314,18 @@ impl Linked {
                 && !hidden.contains(&symbol.index().0)
                 && !matches!(symbol.flags(), object::SymbolFlags::Elf { st_other, .. }
                     if st_other & 3 == object::elf::STV_HIDDEN);
+            let function = (name.starts_with("_R") || name.starts_with("_ZN"))
+                && symbol.kind() == SymbolKind::Text
+                && symbol.section_index().is_some();
             if internal && !own.contains(&hashed(name)) {
+                if function {
+                    linked.unkept.push_str(name);
+                    linked.unkept.push('\n');
+                }
                 continue;
             }
             linked.names.insert(hashed(name));
-            if (name.starts_with("_R") || name.starts_with("_ZN"))
-                && symbol.kind() == SymbolKind::Text
-                && symbol.section_index().is_some()
-            {
+            if function {
                 linked.functions.push_str(name);
                 linked.functions.push('\n');
             }
@@ -315,18 +335,10 @@ impl Linked {
             if !private || !name.starts_with("_R") {
                 continue;
             }
-            let Some((_, path)) = Named::new(name, true).demangled else { continue };
-            let address = symbol.address();
-            linked
-                .private
-                .entry(path)
-                .and_modify(|it| {
-                    if it.as_ref().is_none_or(|it| it.0 != name || it.1 != address) {
-                        *it = None;
-                    }
-                })
-                .or_insert_with(|| Some((name.to_owned(), address)));
+            let Some((with_ids, path)) = Named::new(name, true).demangled else { continue };
+            local.push((with_ids, path, name.to_owned(), symbol.address()));
         }
+        linked.private = by_path(local, shared);
         Ok(linked)
     }
 
@@ -337,6 +349,23 @@ impl Linked {
     /// The one private symbol of the function or static at `path`.
     pub(crate) fn private(&self, path: &str) -> Option<&str> {
         self.private.get(path)?.as_ref().map(|it| &*it.0)
+    }
+
+    /// Whether no function in the executable has `name` anywhere in its symbol: it then has
+    /// no copy of a function of that name, nor of a closure or instance of one.
+    pub(crate) fn has_no_function_named(&self, name: &str) -> bool {
+        if name.is_empty() || !name.is_ascii() {
+            return false;
+        }
+        // Both manglings write a name after its length; v0 puts a `_` between them when the
+        // name starts with one or with a digit.
+        let written = [format!("{}{name}", name.len()), format!("{}_{name}", name.len())];
+        let has = |it: &String| {
+            let finder = memchr::memmem::Finder::new(it.as_bytes());
+            finder.find(self.functions.as_bytes()).is_some()
+                || finder.find(self.unkept.as_bytes()).is_some()
+        };
+        !written.iter().any(has)
     }
 
     /// The copies of the instances of the generic function at `path`, each by its path, as
@@ -635,6 +664,11 @@ impl SymbolTable {
 
     /// Whether the crate named `name` whose source starts at `root` is one of the link. A
     /// bench may be named as the library, start where a test does, and be another program.
+    /// Whether the table has no symbol of rustc's: the build has nothing rustc built.
+    pub(crate) fn is_empty(&self) -> bool {
+        self.names.is_empty()
+    }
+
     pub(crate) fn links(&self, name: &str, root: &Path) -> bool {
         self.linked.contains(&(name.to_owned(), self.real(root)))
     }
@@ -691,6 +725,11 @@ impl SymbolTable {
         self.read.is_some_and(|read| {
             self.built_from.iter().any(|(built, _)| written(built).is_some_and(|it| it > read))
         })
+    }
+
+    /// The names that more than one crate of the link has.
+    pub(crate) fn shared_names(&self) -> FxHashSet<String> {
+        self.crates.iter().filter(|it| it.1.is_none()).map(|it| it.0.clone()).collect()
     }
 
     pub(crate) fn stable_crate_id(&self, name: &str, root: &Path) -> Option<u64> {
@@ -830,6 +869,34 @@ fn without_instantiating_crate(symbol: &str) -> &str {
     let digits = ident.chars().take_while(char::is_ascii_digit).count();
     let named = ident[..digits].parse() == Ok(ident.len() - digits);
     if id.chars().all(is_base62) && named { &symbol[..crate_start] } else { symbol }
+}
+
+/// The private symbols of an executable, each as demangled with the ids of its crates and
+/// without, its name and its address, by their paths: with `name[id]` for a crate of a name
+/// in `shared`, as [`SymbolTable`] spells those, so that the item of one is not taken for
+/// that of the other. A path that two symbols have names none.
+fn by_path(
+    private: Vec<(String, String, String, u64)>,
+    shared: &FxHashSet<String>,
+) -> FxHashMap<String, Option<(String, u64)>> {
+    let shared = |krate: &str| shared.contains(krate);
+    let mut found: FxHashMap<String, Option<(String, u64)>> = FxHashMap::default();
+    for (with_ids, path, name, address) in &private {
+        let path = if crate_ids(with_ids).any(|(krate, _)| shared(krate)) {
+            without_ids(with_ids, |krate| !shared(krate))
+        } else {
+            path.clone()
+        };
+        found
+            .entry(path)
+            .and_modify(|it| {
+                if it.as_ref().is_none_or(|it| it.0 != *name || it.1 != *address) {
+                    *it = None;
+                }
+            })
+            .or_insert_with(|| Some((name.clone(), *address)));
+    }
+    found
 }
 
 /// The `name[id]` a demangled v0 symbol prints for each crate in it.
@@ -1118,7 +1185,10 @@ mod tests {
         write::{Object, Symbol, SymbolSection},
     };
 
-    use super::{Linked, SymbolTable, V0, crate_sources, function_name, names_of_object};
+    use super::{
+        Linked, SymbolTable, V0, by_path, crate_sources, function_name, names_of_object,
+        without_ids,
+    };
 
     #[test]
     fn a_patch_calls_no_function_an_optimized_object_kept_to_itself() {
@@ -1166,7 +1236,7 @@ mod tests {
                 ("_RNvCs5678_3dep6helper", local, default),
             ],
         );
-        let linked = Linked::read(&linked, &[own]).unwrap();
+        let linked = Linked::read(&linked, &[own], &Default::default()).unwrap();
         assert!(linked.has("exported"));
         assert!(linked.has("made_local"));
         assert!(linked.has("_RNvCs1234_3app6helper"));
@@ -1245,6 +1315,32 @@ mod tests {
         assert_eq!(table.crates["core"], table.copies(by_reference).next().map(|it| it.1));
         assert_eq!(table.copies("_RNvCslFwujm09uXn_4kdep5small").count(), 0);
         assert_eq!(table.makers("sum").count(), 2);
+    }
+
+    #[test]
+    fn private_functions_of_crates_that_share_a_name() {
+        let symbol = |with_ids: &str, name: &str, address| {
+            (with_ids.to_owned(), without_ids(with_ids, |_| true), name.to_owned(), address)
+        };
+        let shared = ["app".to_owned()].into_iter().collect();
+        let found = by_path(
+            vec![
+                symbol("app[a1]::work", "bin_work", 1),
+                symbol("app[b2]::work", "lib_work", 2),
+                symbol("<app[a1]::World as dep[c3]::Greet>::name", "bin_name", 3),
+                symbol("dep[c3]::value", "dep_value", 4),
+                symbol("dep[c3]::twice", "one_copy", 5),
+                symbol("dep[c3]::twice", "other_copy", 6),
+            ],
+            &shared,
+        );
+        let named = |path: &str| found.get(path).map(|it| it.as_ref().map(|it| &*it.0));
+        assert_eq!(named("app[a1]::work"), Some(Some("bin_work")));
+        assert_eq!(named("app[b2]::work"), Some(Some("lib_work")));
+        assert_eq!(named("app::work"), None);
+        assert_eq!(named("<app[a1]::World as dep::Greet>::name"), Some(Some("bin_name")));
+        assert_eq!(named("dep::value"), Some(Some("dep_value")));
+        assert_eq!(named("dep::twice"), Some(None));
     }
 
     #[test]

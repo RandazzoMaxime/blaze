@@ -61,6 +61,8 @@ HARNESSES = [
     ("core", ["includes.py"], {}, EVERYWHERE, 1),
     # Each scenario runs rustc and rustdoc no more often than norustc/baseline.json says.
     ("core", ["norustc.py"], {}, on("linux", "macos"), 2),
+    # ra-jit answers what is asked of rustc as rustc answers it, on every target it knows.
+    ("core", ["answers.py"], {}, on("linux", "macos", backend="cranelift"), 1),
     ("core", ["worktrees.py"], {}, EVERYWHERE, 2),
     ("core", ["worktrees.py", "--join", "--together"], {}, on("macos"), 2),
     ("core", ["worktrees.py", "--overlay"], {}, on("macos"), 2),

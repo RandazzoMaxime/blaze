@@ -19,6 +19,9 @@ back them is under [docs/upstream/](../upstream/), each with a `SOURCE.md`. Sear
   handling and what that costs edits, and a forced `mi_collect`. 2026-10-22. What the own
   base adds after ready (`described` first), the daemon's tree process by process, and
   mimalloc against jemalloc. 2026-10-23.
+- [disk.md](disk.md): what ra-jit keeps on disk against cargo on ripgrep, helix, nushell and
+  bevy, part by part with reflinked blocks counted once, the store before and after zstd
+  blocks, and what is left for the no-rustc lane. 2026-10-23.
 - [proc-macro-cache.md](proc-macro-cache.md): rustc's `-Zcache-proc-macros` (derives only, a
   query per expansion), the earlier attempts, and what ra-jit's expansion cache keys and why
   spans are in the key. 2026-10-21.

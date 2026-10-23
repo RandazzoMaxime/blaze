@@ -40,12 +40,13 @@ pub(crate) fn command(args: impl Iterator<Item = String>) -> anyhow::Result<()> 
     }
     let code = match asked {
         Asked::Build(asked) => match asked.only_cargo() {
-            None if asked.flags.doc => run::only_doc_tests(&asked.typed)?,
+            None if asked.flags.doc => run::only_doc_tests(&asked, &asked.typed)?,
             Some(reason) => {
                 say::fallback(&reason, &format!("this is `cargo {}`", asked.subcommand.name()));
                 let typed = std::iter::once(asked.subcommand.name().to_owned()).chain(asked.typed);
                 plain_cargo(typed.collect())?
             }
+            None if asked.subcommand == Subcommand::Check => check(&asked)?,
             None => build(&asked)?,
         },
         Asked::Cargo(args) => plain_cargo(args)?,
@@ -72,7 +73,8 @@ cargo ra-jit: builds with the ra-jit daemon, with cargo's flags
 usage: cargo ra-jit <command> [cargo's flags]
 
   build, run, test   by the daemon when it has the workspace loaded, by cargo otherwise
-  check              `cargo check`
+  check              what the daemon's build of the same flags says, when it has one loaded;
+                     otherwise what the daemon finds loading the workspace as it, with no rustc
   status             whether ra-jit is enabled, what the daemon has loaded, what fell back
   stop               ends the daemon; the next build starts one
   enable, disable    plain `cargo build|run|test|check` through ra-jit, and back
@@ -135,9 +137,11 @@ fn cache(args: Vec<String>) -> anyhow::Result<i32> {
     Ok(0)
 }
 
-/// Runs cargo with `args` and nothing of ra-jit's.
+/// Runs cargo with `args` and nothing of ra-jit's but its answers to what cargo asks rustc.
 fn plain_cargo(args: Vec<String>) -> anyhow::Result<i32> {
-    let status = Command::new(state::cargo_path()).args(args).status().context("running cargo")?;
+    let mut cargo = Command::new(state::cargo_path());
+    crate::answers::ready_cargo(&mut cargo);
+    let status = cargo.args(args).status().context("running cargo")?;
     Ok(run::exit_code(status))
 }
 
@@ -214,6 +218,53 @@ fn build(asked: &Invocation) -> anyhow::Result<i32> {
 
 /// The status of a build that failed, as cargo's of one rustc turned down.
 const FAILED: i32 = 101;
+
+/// `cargo ra-jit check`: what the daemon says of the source as it builds the programs of
+/// the build with the same flags, when it has that build loaded. Any other check is the
+/// daemon's checker's, which loads the workspace as that build would and builds nothing.
+/// Neither runs rustc on the source.
+fn check(asked: &Invocation) -> anyhow::Result<i32> {
+    let started = Instant::now();
+    let cwd = std::env::current_dir()?;
+    let finished = |profile: &str| {
+        let took = started.elapsed().as_secs_f64();
+        let finished = format!("`{profile}` profile [ra-jit] target(s) in {took:.2}s");
+        say::status(asked.flags.quiet, "Finished", &finished);
+    };
+    if let Ok(state) = State::read(&asked.key(&cwd))
+        && !state.programs.is_empty()
+    {
+        match by_daemon(state) {
+            Ok((state, _held)) => {
+                finished(&state.profile);
+                state.write()?;
+                return Ok(0);
+            }
+            Err(NotServed::Error(said)) => {
+                eprintln!("{said}");
+                return Ok(FAILED);
+            }
+            Err(NotServed::Cargo(_)) => {}
+        }
+    }
+    let ahead = state::checked(asked)?;
+    let profile = ahead.config.selection.profile.clone();
+    match client::ask(Request::Check(ahead), Start::IfMissing)? {
+        Some(daemon::Reply::Checked { errors: None }) => {
+            finished(&profile);
+            Ok(0)
+        }
+        Some(daemon::Reply::Checked { errors: Some(said) }) => {
+            eprintln!("{said}");
+            Ok(FAILED)
+        }
+        Some(daemon::Reply::Cold { reason }) => {
+            eprintln!("error: ra-jit could not check the workspace: {reason}");
+            Ok(FAILED)
+        }
+        reply => anyhow::bail!("the daemon answered a check with {reply:?}"),
+    }
+}
 
 /// Why the first build of a workspace is not rustc's of what the workspace depends on and
 /// the daemon's of the workspace.
@@ -472,7 +523,7 @@ fn after_build(
     held: Option<Held>,
 ) -> anyhow::Result<i32> {
     match asked.subcommand {
-        Subcommand::Build => Ok(0),
+        Subcommand::Build | Subcommand::Check => Ok(0),
         Subcommand::Run => match run::program(asked, state, cwd, held)? {
             Some(code) => Ok(code),
             // Cargo says which programs there are to pick from.
@@ -494,7 +545,22 @@ fn after_build(
     }
 }
 
-/// `cargo ra-jit status`: the daemon, its workers, and how the builds of each checkout went.
+/// What the store of compiled code holds and may hold, and where it is.
+fn store_status() -> String {
+    let Some(dir) = daemon::store() else {
+        return "store: none (RA_JIT_CACHE says so)".to_owned();
+    };
+    let held = ra_jit_store::StoreDir::at(&dir).stats().map_or(0, |it| it.held());
+    let most = match ra_jit_store::limit_for(&dir) {
+        Ok(Some(most)) => format!("at most {} MB", most >> 20),
+        Ok(None) => "no limit".to_owned(),
+        Err(why) => why,
+    };
+    format!("store: {} MB, {most} (`ra-jit cache gc` collects it), {}", held >> 20, dir.display())
+}
+
+/// `cargo ra-jit status`: the daemon, its workers, the store, and how the builds of each
+/// checkout went.
 fn status() -> anyhow::Result<i32> {
     use std::fmt::Write as _;
     let mut said = String::new();
@@ -536,6 +602,7 @@ fn status() -> anyhow::Result<i32> {
         }
         _ => said.push_str("daemon: not running\n"),
     }
+    let _ = writeln!(said, "{}", store_status());
     for state in State::all() {
         let to_cargo: u64 = state.counts.cargo.values().sum();
         let _ = writeln!(

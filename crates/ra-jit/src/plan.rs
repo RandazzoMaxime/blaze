@@ -1,7 +1,12 @@
 //! What cargo builds: the units of a build of one package, with the features and the profile
 //! of each. `cargo metadata` has neither as a build of a single package has them.
 
-use std::{collections::BTreeSet, path::Path, process::Stdio, str::FromStr};
+use std::{
+    collections::BTreeSet,
+    path::{Path, PathBuf},
+    process::Stdio,
+    str::FromStr,
+};
 
 use anyhow::Context;
 use cargo_platform::{Cfg, Platform};
@@ -36,6 +41,11 @@ pub(crate) struct Selection {
     /// the configuration files can.
     #[serde(default)]
     pub(crate) config: Vec<String>,
+    /// Where the build was asked for, when not in the package's directory: the manifest given
+    /// with `--manifest-path`, or the directory cargo looked for one from. What `--workspace`,
+    /// `-p` and no package at all select is decided there.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) asked_in: Option<PathBuf>,
 }
 
 impl Default for Selection {
@@ -50,6 +60,7 @@ impl Default for Selection {
             target: None,
             dev_deps: false,
             config: Vec::new(),
+            asked_in: None,
         }
     }
 }
@@ -345,6 +356,7 @@ struct Flags {
     split_debuginfo: Option<String>,
     strip: Option<String>,
     frame_pointers: bool,
+    lints_capped: bool,
 }
 
 impl Flags {
@@ -387,6 +399,12 @@ impl Flags {
     fn parse<'a>(mut words: impl Iterator<Item = &'a str>) -> Flags {
         let mut flags = Flags::default();
         while let Some(word) = words.next() {
+            if ["--cap-lints", "--force-warn"].iter().any(|it| {
+                word.strip_prefix(it).is_some_and(|rest| rest.is_empty() || rest.starts_with('='))
+            }) {
+                flags.lints_capped = true;
+                continue;
+            }
             let option = match word {
                 "-O" => "opt-level=3",
                 "-g" => "debuginfo=2",
@@ -465,6 +483,7 @@ pub(crate) struct Plan {
     packages: FxHashMap<String, Built>,
     lto: bool,
     frame_pointers: bool,
+    lints_capped: bool,
 }
 
 /// What a plan says of a program as a whole.
@@ -474,6 +493,9 @@ pub(crate) struct Whole {
     pub(crate) debug: Described,
     /// Whether rustc links it from bitcode, with `lto`.
     pub(crate) lto: bool,
+    /// Whether `--cap-lints` or `--force-warn` is among the flags, so that a lint the source
+    /// denies may not fail rustc's build.
+    pub(crate) lints_capped: bool,
 }
 
 impl Plan {
@@ -485,10 +507,18 @@ impl Plan {
     ) -> anyhow::Result<Plan> {
         // The unit graph is the only place cargo says which features and which profile each
         // package of one build has.
-        let dir = manifest.parent().unwrap_or(Path::new("."));
+        let (dir, manifest) = match &selection.asked_in {
+            Some(asked_in) if asked_in.is_dir() => (asked_in.as_path(), None),
+            Some(asked_in) => {
+                (asked_in.parent().unwrap_or(Path::new(".")), Some(asked_in.as_path()))
+            }
+            None => (manifest.parent().unwrap_or(Path::new(".")), Some(manifest)),
+        };
         let mut command = asked.cargo(dir);
         command.args(["build", "--unit-graph", "-Z", "unstable-options"]);
-        command.arg("--manifest-path").arg(manifest);
+        if let Some(manifest) = manifest {
+            command.arg("--manifest-path").arg(manifest);
+        }
         command.args(selection.flags());
         if selection.dev_deps {
             command.arg("--all-targets");
@@ -517,7 +547,7 @@ impl Plan {
     /// What the plan says of the programs cargo was asked to build.
     pub(crate) fn whole(&self) -> anyhow::Result<Whole> {
         let debug = Described { frame_pointers: self.frame_pointers, ..self.described()? };
-        Ok(Whole { debug, lto: self.lto })
+        Ok(Whole { debug, lto: self.lto, lints_capped: self.lints_capped })
     }
 
     /// How the package cargo calls `id` is built, when the build has it.
@@ -642,7 +672,12 @@ impl UnitGraph {
                 (package_named(id), Built { features, profile, primary, for_target })
             })
             .collect();
-        Ok(Plan { packages, lto, frame_pointers: flags.frame_pointers })
+        Ok(Plan {
+            packages,
+            lto,
+            frame_pointers: flags.frame_pointers,
+            lints_capped: flags.lints_capped,
+        })
     }
 }
 
@@ -659,5 +694,15 @@ mod tests {
         assert!(kept("-Cforce-frame-pointers=non-leaf"));
         assert!(!kept("-Cforce-frame-pointers=yes -Cforce-frame-pointers=no"));
         assert!(!kept("-C link-dead-code"));
+    }
+
+    #[test]
+    fn the_flags_that_cap_lints_are_read() {
+        let capped = |flags: &str| Flags::parse(flags.split_whitespace()).lints_capped;
+        assert!(capped("--cap-lints warn"));
+        assert!(capped("-C opt-level=1 --cap-lints=allow"));
+        assert!(capped("--force-warn non_snake_case"));
+        assert!(!capped("-D warnings -A dead_code"));
+        assert!(!capped("--cap-lintsx"));
     }
 }

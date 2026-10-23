@@ -22,13 +22,18 @@ use anyhow::Context as _;
 use ide_db::{RootDatabase, base_db::SourceDatabase};
 use syntax::Edition;
 
-use crate::cargo::plan::LinkLine;
+use crate::{cargo::plan::LinkLine, plan::Selection};
 use extract::{Example, Marks};
 use program::{Frame, Program};
 
 /// The variable that makes `ra-jit` stand in for rustdoc. Its value is the rustdoc to run for
 /// what is left to it.
 pub(crate) const ENABLED: &str = "RA_JIT_RUSTDOC";
+
+/// The variable that tells ra-jit as rustdoc the build `cargo test --doc` was asked for, as
+/// JSON: cargo builds the libraries the examples link against with its features, which a
+/// package shares with the others it selects, not with those of a build of the package alone.
+pub(crate) const BUILD: &str = "RA_JIT_DOCTEST_BUILD";
 
 /// The code a test harness ends with when a test failed.
 const FAILED: i32 = 101;
@@ -45,6 +50,8 @@ pub(crate) struct Asked {
     rustc_args: Vec<String>,
     target: Option<String>,
     features: Vec<String>,
+    /// The build cargo was asked for, when ra-jit asked it.
+    build: Option<Selection>,
     wanted: Wanted,
     /// Where the programs are built.
     dir: PathBuf,
@@ -180,6 +187,10 @@ impl Asked {
         }
         let wanted =
             Wanted::parse(&test_args).map_err(|arg| format!("the tests are run with `{arg}`"))?;
+        let build = match std::env::var(BUILD) {
+            Ok(build) => Some(serde_json::from_str(&build).map_err(|it| format!("{BUILD}: {it}"))?),
+            Err(_) => None,
+        };
         Ok(Asked {
             crate_name: crate_name.ok_or("rustdoc is not told the name of the crate")?,
             source: source.ok_or("rustdoc is given no source file")?,
@@ -188,6 +199,7 @@ impl Asked {
             rustc_args,
             target,
             features,
+            build,
             wanted,
             dir: std::env::temp_dir().join(format!("ra-jit-doctest-{}", std::process::id())),
         })
@@ -201,11 +213,14 @@ impl Asked {
         // What a program that uses the library is linked from: every example is linked from
         // that and its own object.
         let probe = format!("extern crate r#{};\nfn main() {{}}\n", self.crate_name);
-        let built = self.compile(&probe, &self.dir.join("probe"), &self.edition, &[], true)?;
-        if !built.status.success() {
+        let (built, made) =
+            self.compile(&probe, &self.dir.join("probe"), &self.edition, &[], true)?;
+        if !built.success {
             return Ok(Err("a program that uses the library is not built by rustc".to_owned()));
         }
-        let Some(line) = self.link_line(&self.dir.join("probe"))? else {
+        // Only its link line is of use.
+        _ = std::fs::remove_file(made.join("rust_out"));
+        let Some(line) = self.link_line(&made)? else {
             return Ok(Err("the link line is not one of an ELF linker driven by `cc`".to_owned()));
         };
         // The package is where cargo runs the examples, not where it runs rustdoc: that is
@@ -217,16 +232,29 @@ impl Asked {
             "--out".to_owned(),
             self.object().display().to_string(),
             "--dev-deps".to_owned(),
-            "--no-default-features".to_owned(),
         ];
-        // The build scripts run from the workspace's root, whose package is another one: the
-        // features are this package's once it is the one selected. `package/feature` would name
-        // a dependency of the root's, which this package need not be.
-        if let Some(package) = std::env::var("CARGO_PKG_NAME").ok().filter(|it| !it.is_empty()) {
-            args.extend(["--package".to_owned(), package]);
-        }
-        if !self.features.is_empty() {
-            args.extend(["--features".to_owned(), self.features.join(",")]);
+        match &self.build {
+            // Built as cargo built it: a dependency of this package and of another one cargo
+            // selected has the features both ask for, and its types are laid out with them.
+            Some(build) => {
+                args.extend(Selection { target: None, ..build.clone() }.flags());
+                if let Some(asked_in) = &build.asked_in {
+                    args.extend(["--asked-in".to_owned(), asked_in.display().to_string()]);
+                }
+            }
+            // The build scripts run from the workspace's root, whose package is another one:
+            // the features are this package's once it is the one selected. `package/feature`
+            // would name a dependency of the root's, which this package need not be.
+            None => {
+                args.push("--no-default-features".to_owned());
+                let package = std::env::var("CARGO_PKG_NAME").ok().filter(|it| !it.is_empty());
+                if let Some(package) = package {
+                    args.extend(["--package".to_owned(), package]);
+                }
+                if !self.features.is_empty() {
+                    args.extend(["--features".to_owned(), self.features.join(",")]);
+                }
+            }
         }
         if let Some(target) = &self.target {
             args.extend(["--target".to_owned(), target.clone()]);
@@ -250,31 +278,98 @@ impl Asked {
         self.dir.join("ra-jit.o")
     }
 
-    /// Has rustc compile `source` into a program in `dir`.
+    /// Has rustc compile `source` into a program, or finds the program it compiled of it in an
+    /// earlier run, when nothing it was compiled from has changed since. The directory with
+    /// what rustc wrote is `scratch` or the one it was remembered in.
     fn compile(
         &self,
         source: &str,
-        dir: &Path,
+        scratch: &Path,
         edition: &str,
         env: &[(&str, String)],
         links: bool,
-    ) -> anyhow::Result<std::process::Output> {
+    ) -> anyhow::Result<(Compiled, PathBuf)> {
+        let memo = self.memo().map(|memo| memo.join(self.key(source, edition, env, links)));
+        if let Some(dir) = &memo {
+            if let Some(compiled) = Remembered::read(dir, env) {
+                return Ok((compiled, dir.clone()));
+            }
+            _ = std::fs::remove_dir_all(dir);
+        }
+        let memo = memo.filter(|dir| {
+            dir.parent().is_some_and(|it| std::fs::create_dir_all(it).is_ok())
+                && std::fs::create_dir(dir).is_ok()
+        });
+        let dir = memo.as_deref().unwrap_or(scratch);
         std::fs::create_dir_all(dir)?;
         let rustc = std::env::var_os("RUSTC").unwrap_or_else(|| "rustc".into());
         let mut rustc = as_asked(rustc);
         rustc.args(&self.rustc_args).args(["--edition", edition, "--color", "never"]);
-        rustc.arg("--crate-type=bin").arg("-o").arg(dir.join("rust_out"));
+        rustc.arg("--crate-type=bin").arg("--out-dir").arg(dir);
+        // Each output is named: with `-o` and more than one, rustc warns that it names them.
+        let (out, deps) = (dir.join("rust_out"), dir.join("rust_out.d"));
+        let emit = if links { "link" } else { "metadata" };
+        rustc.arg(format!("--emit={emit}={},dep-info={}", out.display(), deps.display()));
         if links {
             let line = dir.join("link.line");
             rustc.arg(format!("--print=link-args={}", line.display())).arg("-Csave-temps");
-        } else {
-            rustc.arg("--emit=metadata");
         }
         rustc.arg("-").envs(env.iter().map(|(name, value)| (name, value)));
         rustc.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
         let mut rustc = rustc.spawn().context("running rustc")?;
         rustc.stdin.take().context("rustc takes no input")?.write_all(source.as_bytes())?;
-        Ok(rustc.wait_with_output()?)
+        let ran = rustc.wait_with_output()?;
+        let compiled = Compiled {
+            success: ran.status.success(),
+            stderr: String::from_utf8_lossy(&ran.stderr).into_owned(),
+        };
+        if memo.is_some() {
+            Remembered::write(dir, &compiled);
+        }
+        Ok((compiled, dir.to_owned()))
+    }
+
+    /// Where rustc's programs of the examples stay from run to run: beside what cargo built
+    /// them against, in `<target>/<profile>/ra-jit-doctest`.
+    fn memo(&self) -> Option<PathBuf> {
+        let deps = self.rustc_args.windows(2).find_map(|it| match it[0] == "-L" {
+            true => it[1].strip_prefix("dependency="),
+            false => None,
+        })?;
+        let cwd = std::env::current_dir().ok()?;
+        Some(cwd.join(deps).parent()?.join("ra-jit-doctest"))
+    }
+
+    /// What tells a program rustc compiles apart from another: everything it is given, and
+    /// the libraries named with `--extern` as they are now. Cargo builds a library again when
+    /// one it is built against changes, so those name every library the program reads.
+    fn key(&self, source: &str, edition: &str, env: &[(&str, String)], links: bool) -> String {
+        use sha2::{Digest as _, Sha256};
+        let mut hasher = Sha256::new();
+        let mut add = |it: &[u8]| {
+            hasher.update((it.len() as u64).to_le_bytes());
+            hasher.update(it);
+        };
+        add(env!("CARGO_PKG_VERSION").as_bytes());
+        for name in ["RUSTC", "RUSTUP_TOOLCHAIN"] {
+            add(std::env::var(name).unwrap_or_default().as_bytes());
+        }
+        for arg in &self.rustc_args {
+            add(arg.as_bytes());
+        }
+        let externs = self.rustc_args.windows(2).filter(|it| it[0] == "--extern");
+        for (_, file) in externs.filter_map(|it| it[1].split_once('=')) {
+            add(format!("{:?}", stamp(Path::new(file))).as_bytes());
+        }
+        for (name, value) in env {
+            add(name.as_bytes());
+            add(value.as_bytes());
+        }
+        add(edition.as_bytes());
+        add(&[u8::from(links)]);
+        add(source.as_bytes());
+        let digest = hasher.finalize();
+        digest[..16].iter().map(|it| format!("{it:02x}")).collect()
     }
 
     /// The line rustc linked the program in `dir` with, when it is one ra-jit links by.
@@ -290,6 +385,72 @@ impl Asked {
         let cwd = std::env::current_dir().unwrap_or_default();
         file.strip_prefix(&cwd).unwrap_or(file).display().to_string()
     }
+}
+
+/// What rustc said of a program it compiled.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct Compiled {
+    success: bool,
+    stderr: String,
+}
+
+/// A program rustc compiled in an earlier run, in the directory it compiled it in, with what
+/// it read: its dep-info names the files and the variables of the environment.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct Remembered {
+    compiled: Compiled,
+    files: Vec<(PathBuf, Option<(u64, u128)>)>,
+    env: Vec<(String, Option<String>)>,
+}
+
+impl Remembered {
+    const FILE: &str = "rustc.json";
+
+    /// What rustc said of the program in `dir`, when it read nothing since that is not as it
+    /// was. `env` is what the program is compiled with beside ra-jit's environment.
+    fn read(dir: &Path, env: &[(&str, String)]) -> Option<Compiled> {
+        let text = std::fs::read(dir.join(Self::FILE)).ok()?;
+        let it: Remembered = serde_json::from_slice(&text).ok()?;
+        let same_file = |(file, was): &(PathBuf, _)| stamp(file) == *was;
+        let same_variable = |(name, was): &(String, Option<String>)| {
+            let given = env.iter().find(|(it, _)| it == name).map(|(_, value)| value.clone());
+            given.or_else(|| std::env::var(name).ok()) == *was
+        };
+        (it.files.iter().all(same_file) && it.env.iter().all(same_variable)).then_some(it.compiled)
+    }
+
+    /// Remembers what rustc said of the program it compiled in `dir`, when it wrote what it
+    /// read. A program it said nothing of is compiled again next time.
+    fn write(dir: &Path, compiled: &Compiled) {
+        // `-Csave-temps` keeps LLVM's bitcode too, which nothing links.
+        for entry in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+            if entry.path().extension().is_some_and(|it| it == "bc") {
+                _ = std::fs::remove_file(entry.path());
+            }
+        }
+        let Ok(text) = std::fs::read_to_string(dir.join("rust_out.d")) else { return };
+        let read = crate::dep_info::DepInfo::parse(&text);
+        // The source is given on standard input, which dep-info names `-`.
+        let files = read.files.iter().filter(|it| *it != "-").map(PathBuf::from);
+        let files = files.map(|file| (stamp(&file), file)).map(|(was, file)| (file, was));
+        let it = Remembered {
+            compiled: Compiled { success: compiled.success, stderr: compiled.stderr.clone() },
+            files: files.collect(),
+            env: read.env,
+        };
+        let Ok(text) = serde_json::to_vec(&it) else { return };
+        let written = dir.join(format!("{}.{}", Self::FILE, std::process::id()));
+        if std::fs::write(&written, text).is_ok() {
+            _ = std::fs::rename(&written, dir.join(Self::FILE));
+        }
+    }
+}
+
+/// A file's length and when it was written, `None` when there is none.
+fn stamp(file: &Path) -> Option<(u64, u128)> {
+    let meta = std::fs::metadata(file).ok()?;
+    let written = meta.modified().ok()?.duration_since(std::time::UNIX_EPOCH).ok()?;
+    Some((meta.len(), written.as_nanos()))
 }
 
 /// The feature a `--cfg feature="name"` turns on.
@@ -471,9 +632,9 @@ impl Test {
             ("UNSTABLE_RUSTDOC_TEST_LINE", line.to_string()),
         ];
         let runs = !marks.no_run && !marks.compile_fail;
-        let built = asked.compile(&self.program.source, dir, edition, &env, runs)?;
-        let errors = String::from_utf8_lossy(&built.stderr);
-        match (built.status.success(), marks.compile_fail) {
+        let (built, made) = asked.compile(&self.program.source, dir, edition, &env, runs)?;
+        let errors = &built.stderr;
+        match (built.success, marks.compile_fail) {
             (true, true) => {
                 return Ok(Ended::Failed(
                     "Test compiled successfully, but it's marked `compile_fail`.".to_owned(),
@@ -495,11 +656,17 @@ impl Test {
             (true, false) if !runs => return Ok(Ended::Passed),
             (true, false) => {}
         }
-        let binary = dir.join("rust_out");
-        let line = asked.link_line(dir)?.context("rustc's link line is of another linker")?;
+        let mut binary = made.join("rust_out");
+        let line = asked.link_line(&made)?.context("rustc's link line is of another linker")?;
         // An example that does not name the library is not linked with it: ra-jit's code of
         // the library has no place in it either.
         if asked.library().is_none_or(|it| line.has(it)) {
+            // What rustc linked is linked again with ra-jit's code each run, and not kept.
+            if made != dir {
+                _ = std::fs::remove_file(&binary);
+            }
+            std::fs::create_dir_all(dir)?;
+            binary = dir.join("rust_out");
             let command = line.command(&[ours], &binary, &dir.join("link.args"))?;
             let linked = crate::shell(&command).output().context("running the linker")?;
             anyhow::ensure!(

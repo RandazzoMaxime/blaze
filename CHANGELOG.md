@@ -25,13 +25,13 @@ All notable changes to ra-jit are written here. The format follows
   builds of a nightly cargo are the daemon's: `-Z embed-metadata=no`, which it passes every
   crate, no longer sends them to cargo, and build scripts' output and the seeded target are
   found in its second build-directory layout (`soakrows.py`, "a project pinned to a nightly").
-- The `bench-bun` workflow measures bun nightly on the benchmark machine (edits and runtime,
-  into the README's bun section), in `nix develop .#bench-bun`: bun's nightly and what its own
-  build of its C and C++ needs. Too slow for every push.
+- The `bench-bun` workflow measures bun nightly on the benchmark machine (edits and runtime),
+  in `nix develop .#bench-bun`: bun's nightly and what its own build of its C and C++ needs.
+  Too slow for every push.
 - `benchreport.py --name NAME` stores a project measured on its own in
-  `docs/benchmarks/NAME-<os>-<arch>.json` (`runtime-NAME-…` for the runtime) and writes it
-  between `<!-- bench-NAME:start -->`/`<!-- runbench-NAME:start -->` and their ends in the
-  README. The table says the platform it was measured on.
+  `docs/benchmarks/NAME-<os>-<arch>.json` (`runtime-NAME-…` for the runtime), and every README
+  table and chart shows it as a project like the others, in the geometric means too, with a
+  footnote naming the machine, commit and date it was measured at.
 - `bench.py bun` times the edits on bun (body, signature, leaf, generic, new function) in a copy
   of the tree `bunprep.py` prepares, under bun's pinned nightly; bun is measured only when
   named.
@@ -174,7 +174,7 @@ All notable changes to ra-jit are written here. The format follows
 - A borrow checker, the crate `hir-ty-borrowck` in the rust-analyzer subtree, written to give
   rustc's verdict: Polonius alpha by default as nightly rustc does, NLL with
   `RA_JIT_BORROWCK=nll`. It gives rustc's errors on
-  1433 of 1579 of rustc's own borrow-check tests that it can run, and none on any of the 245
+  1499 of 1579 of rustc's own borrow-check tests that it can run, and none on any of the 245
   rustc accepts, scored by `harness/borrowck_ui.py`, and finds nothing in ripgrep, fd, bat,
   hyperfine, just, axum, nushell, delta, eza, tokei and starship. Its errors are rust-analyzer diagnostics and
   `ra-jit borrowck` prints them ([docs/borrowck.md](docs/borrowck.md)).
