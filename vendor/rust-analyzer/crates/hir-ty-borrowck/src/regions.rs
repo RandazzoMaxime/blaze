@@ -549,6 +549,7 @@ pub(super) fn build<'db>(
         annotated: FxHashMap::default(),
         const_positions: 0,
         aggregate_temps: aggregate_temps(body),
+        synthesized: synthesized(ctx),
     };
     builder.universal_regions();
     builder.env_aliases();
@@ -607,6 +608,19 @@ struct Builder<'c, 'a, 'db> {
     /// rustc's `AggregateTemp`s: the temporaries a struct or variant expression, or a call of
     /// a constructor, builds its fields in.
     aggregate_temps: FxHashSet<LocalId>,
+    /// The expressions lowering makes that the source does not write, as the `let x = x;` of
+    /// each parameter of an `async fn`: rustc's desugarings, `Boring` to blame.
+    synthesized: FxHashSet<hir_def::hir::ExprId>,
+}
+
+fn synthesized(ctx: &Ctx<'_, '_>) -> FxHashSet<hir_def::hir::ExprId> {
+    let InferBodyId::DefWithBodyId(def) = ctx.owner else { return FxHashSet::default() };
+    let (_, source_map) = hir_def::expr_store::Body::with_source_map(ctx.db, def);
+    ctx.store
+        .exprs()
+        .map(|(expr, _)| expr)
+        .filter(|&expr| source_map.expr_syntax(expr).is_err())
+        .collect()
 }
 
 fn aggregate_temps(body: &MirBody<'_>) -> FxHashSet<LocalId> {
@@ -2356,11 +2370,19 @@ impl<'db> Builder<'_, '_, 'db> {
     fn outlives(&mut self, sup: Rv, sub: Rv, at: At) {
         if sup != sub {
             let location = self.location;
+            let category = match at.span {
+                MirSpan::ExprId(expr)
+                    if at.category != Category::Return && self.synthesized.contains(&expr) =>
+                {
+                    Category::Boring
+                }
+                _ => at.category,
+            };
             self.regions.outlives.push(Outlives {
                 sup,
                 sub,
                 location,
-                category: at.category,
+                category,
                 span: at.span,
                 from_closure: false,
             });

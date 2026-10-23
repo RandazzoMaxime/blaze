@@ -172,6 +172,11 @@ pub fn borrowck<'db>(db: &'db dyn HirDatabase, def: DefWithBodyId) -> BorrowckRe
         }
     }
     result.diagnostics.extend(diagnostics.into_iter().rev().flatten());
+    if std::env::var_os("RA_JIT_BORROWCK_DEBUG").is_some() {
+        for it in &result.diagnostics {
+            eprintln!("diagnostic {it:?}");
+        }
+    }
     result
 }
 
