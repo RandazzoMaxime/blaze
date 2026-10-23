@@ -288,6 +288,12 @@ its own, ra-jit at `d6291bd7cb` (main) and the `mem-39` branch, Cranelift. Per p
 | nushell | 6.16 → 5.21 GB | 10.77 → 10.06 GB | 10.80 → 9.52 GB | 10.86 → 10.08 GB |
 | helix | 4.13 → 3.71 GB | 15.95 → 14.23 GB | 12.13 → 11.07 GB | 16.07 → 14.23 GB |
 | bun | 12.29 → 10.72 GB | 24.86 → 23.75 GB | 27.00 → 24.28 GB | 36.05 → 32.90 GB |
+| bevy | 8.84 → 8.68 GB | 31.61 → 31.62 GB | 43.46 → 41.15 GB | 84.31 → 76.12 GB |
+
+  bevy one run each, after one another. Its body and leaf edits fall back to cargo on both
+  builds after 512-577 s (a writable static without a rustc symbol; `UnresolvedMethod("collect")`
+  in `prepare_mesh_view_bind_groups`), and those are its peaks; add-a-function is a full link,
+  438 → 452 s. The branch's run stopped after add-a-function when the host's `/tmp` filled up.
 
   Edits within the runs' spread: nushell's six edits 0.25-0.39 s on main and 0.26-0.39 s on
   the branch (medians of the two rounds, each edit's within 35 ms of main's, either way);

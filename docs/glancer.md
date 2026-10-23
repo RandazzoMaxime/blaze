@@ -276,7 +276,10 @@ runs' spread (`bench.py`, two interleaved rounds, main → branch):
 | nushell | 6.16 → 5.21 GB | 10.80 → 9.52 GB | 10.86 → 10.08 GB |
 | helix | 4.13 → 3.71 GB | 12.13 → 11.07 GB | 16.07 → 14.23 GB |
 | bun (1 run) | 12.29 → 10.72 GB | 27.00 → 24.28 GB | 36.05 → 32.90 GB |
-| bevy (1 run) | BEVY_READY | BEVY_END | BEVY_PEAK |
+| bevy (1 run) | 8.84 → 8.68 GB | 43.46 → 41.15 GB | 84.31 → 76.12 GB |
+
+bevy's most is at the two edits that fall back to cargo after about 9 minutes each (a
+writable static without a rustc symbol, and `UnresolvedMethod("collect")`), on both builds.
 
 ([research/daemon-memory.md](research/daemon-memory.md#2026-10-23-the-own-base-and-the-allocator)).
 
