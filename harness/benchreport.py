@@ -494,7 +494,7 @@ def memory_tables(result, keys, backend, name=""):
             step = "Cold, until the daemon is ready" if label == "cold" else EDITS[label]
             lines.append(f"| {project_name(key, measured)} | {step} | {megabytes(m['cargo']['peak_mb'])} | {megabytes(m['ra-jit']['peak_mb'])} | "
                          f"{megabytes(m['cargo']['largest_mb'])} | {megabytes(m['ra-jit']['largest_mb'])} | {megabytes(m['ra-jit'].get('resident_mb'))} |")
-    lines += ["", "The daemon between builds, and what each side keeps on disk once the edits are done (as `du` counts it). "
+    lines += ["", "The daemon between builds, and what each side keeps on disk once the edits are done (each block once, [how](#memory-and-disk)). "
               "After the first build: once the step after the cold build (nothing changed) is done; growth is from then to the end, "
               "over every edit made and taken back. Warm store: the cold start of another checkout with the store the first one filled.", "",
               "| Project | Daemon ready | After the first build | At the end | Growth | Warm store: peak, ready | cargo target | ra-jit target | Store | Home |",
