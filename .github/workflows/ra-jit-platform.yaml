@@ -101,15 +101,18 @@ jobs:
           shared-key: build
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - uses: mozilla-actions/sccache-action@v0.0.9
-      # On Windows the build is against the static C runtime, and names libraries of the SDK
-      # that the linker is not otherwise shown.
+      # In the flake's dev shell, against the LLVM it pins. On Windows, which has no Nix, the
+      # build is against the static C runtime, and names libraries of the SDK that the linker is
+      # not otherwise shown.
       - name: cargo build -p ra-jit --release --features llvm
         run: |
           if [ "$RUNNER_OS" = Windows ]; then
             sdk=$(ls -d "/c/Program Files (x86)/Windows Kits/10/Lib/"*/um/x64 | tail -n 1)
             export CARGO_ENCODED_RUSTFLAGS=$(printf '%s\x1f%s\x1f%s\x1f%s' -C target-feature=+crt-static -L "native=$(cygpath -w "$sdk")")
+            cargo build -p ra-jit --release --features llvm --locked
+          else
+            nix develop --command cargo build -p ra-jit --release --features llvm --locked
           fi
-          cargo build -p ra-jit --release --features llvm --locked
         env:
           RUSTC_WRAPPER: sccache
       - run: sccache --show-stats
@@ -212,6 +215,7 @@ jobs:
       - uses: actions/checkout@v7
       - uses: ./.github/actions/toolchain
         with:
+          llvm: run
           nightly: nightly-2026-09-15
       - uses: actions/download-artifact@v8
         with:

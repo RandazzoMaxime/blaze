@@ -191,6 +191,10 @@ did about it in one line.
 - The gate, under Cranelift and under LLVM, on the platform you have. Say which platforms
   you did not run. CI's fast tier covers Linux x86-64, Linux AArch64 and macOS on every
   change; Windows and the slow harnesses run nightly ([harness.md](harness.md#ci)).
+- The LLVM backend builds against the one LLVM 20 the flake pins, in its dev shell:
+  `nix develop -c cargo +1.99.0 build -p ra-jit --release --features llvm`. CI builds it the same
+  way, and outside the shell the build stops and says so (Windows, which has no Nix, gets LLVM's
+  release of the same version).
 - `cargo fmt --all -- --check` and
   `cargo test --release -p hir-ty -p hir-def -p parser -p syntax -p ra-jit`.
 - For anything that changes numbers in [results.md](results.md): the command, the commit
