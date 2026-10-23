@@ -358,15 +358,24 @@ impl Optimization {
     /// its own before building it in, has 7, in the Life benchmark's `step`). Instruction
     /// combining named in a pipeline checks that one run of it left nothing to combine and
     /// aborts the process when it did, which the default pipelines do not ask for.
+    ///
+    /// The levels above 1 run LLVM's pipelines as rustc's release profile does, whose codegen
+    /// units go through ThinLTO within the crate: the one before linking, then the one at
+    /// it, so every function is simplified twice. The second time a loop is small enough to
+    /// unroll whole that the first left too big (nbody's loops over pairs of bodies).
     fn pipeline(self) -> Option<&'static str> {
         match self.passes {
             Passes::None => None,
             Passes::Less => Some("function(sroa,instsimplify,sroa),default<O1>"),
-            Passes::Default => Some("function(sroa,instsimplify,sroa,jump-threading),default<O2>"),
+            Passes::Default => Some(
+                "function(sroa,instsimplify,sroa,jump-threading),\
+                 thinlto-pre-link<O2>,thinlto<O2>",
+            ),
             Passes::Aggressive => Some(
                 "function(sroa,instsimplify,sroa,jump-threading),\
                  cgscc(inline,function(sroa,instsimplify,sroa,jump-threading,early-cse<memssa>)),\
-                 default<O3>,function(gvn,sccp,instcombine<no-verify-fixpoint>,simplifycfg)",
+                 thinlto-pre-link<O3>,thinlto<O3>,\
+                 function(gvn,sccp,instcombine<no-verify-fixpoint>,simplifycfg)",
             ),
         }
     }
