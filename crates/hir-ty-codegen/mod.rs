@@ -4579,8 +4579,6 @@ impl<'a, 'db> ObjectCodegen<'a, 'db> {
             && self.symbols.nothing_of_rustc()
     }
 
-    /// The name of the entry of the store that root `func` is put in the object from, if the
-    /// store has it and all it calls.
     /// The name of `func` when the store has its code whole, for a root no round asked about.
     fn stored_root(&mut self, func: FunctionId) -> Option<StableName> {
         if !self.roots_from_store() {
