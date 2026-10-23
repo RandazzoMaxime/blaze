@@ -291,15 +291,13 @@ Edit, then build, bun at its pinned commit: incremental `cargo build` → `cargo
 
 | Platform | Edit a function | Edit a widely used function | Change a signature | Nothing changed |
 |---|---:|---:|---:|---:|
-| macOS arm64 | 12.16 s → **1.09 s** (11x) | 26.75 s → **1.81 s** (15x) | 9.83 s → **126.44 s** (c) (0.1x) | 168 ms → **73 ms** (2.3x) |
+| macOS arm64 | 7.55 s → **362 ms** (21x) | 16.01 s → **457 ms** (35x) | 7.26 s → **823 ms** (8.8x) | 199 ms → **122 ms** (1.6x) |
 | Linux aarch64 | not measured yet | | | |
-| Linux x86-64 | 9.12 s → **489 ms** (19x) | 16.48 s → **487 ms** (34x) | 9.17 s → **635 ms** (14x) | 74 ms → **19 ms** (3.9x) |
+| Linux x86-64 | 9.18 s → **441 ms** (21x) | 16.52 s → **408 ms** (40x) | 9.26 s → **565 ms** (16x) | 73 ms → **18 ms** (4.1x) |
 
-- **macOS arm64**: one machine (Apple M5 Max, 18 cores, 128 GiB), ra-jit [`1645168dc4`](https://github.com/indexable-inc/ra-jit/commit/1645168dc4abbdfab2e234232efb73a5c1ec2935) on 2026-10-21, load average 28 at the start, by hand.
+- **macOS arm64**: one machine (Apple M5 Max, 18 cores, 128 GiB), ra-jit [`27077156cc`](https://github.com/indexable-inc/ra-jit/commit/27077156ccbd476079d261e529fc25b3225f0ace) on 2026-10-23, by hand.
 - **Linux aarch64**: not measured yet ([the machines](docs/benchmarks.md#the-machines)).
-- **Linux x86-64**: AWS c8a.24xlarge (dev-aws-eph-rajit-bun), pinned to 16 cores with taskset (AMD EPYC 9R45, 16 of its 96 cores, 185 GiB), ra-jit [`7dcfe73922`](https://github.com/indexable-inc/ra-jit/commit/7dcfe739224e0f1b5a65c2bc744375bb0ef33714) on 2026-10-22, by hand.
-
-(c): the daemon handed this edit to cargo (a fallback, so about cargo's time).
+- **Linux x86-64**: AWS c8a.24xlarge (dev-aws-eph-rajit-bunperf) (AMD EPYC 9R45, 16 of its 96 cores, 185 GiB), ra-jit [`948d54e375`](https://github.com/indexable-inc/ra-jit/commit/948d54e375ef4f4685a932539d3a4118992a31c1) on 2026-10-23, by hand.
 
 Measured by hand with `harness/bench.py`, or by the `bench-bun` workflow on each platform's benchmark machine once it is registered. The ra-jit measured is `cargo build --release`; the binaries a release ships are the `dist` profile with PGO, which start and edit faster ([how](https://github.com/indexable-inc/ra-jit/blob/main/docs/reports/RELEASE-BUILD.md)). Raw JSON: [macOS arm64](docs/benchmarks/bun-macos-arm64.json), [Linux x86-64](docs/benchmarks/bun-linux-x86-64.json).
 <!-- bench-bun:end -->
@@ -309,33 +307,46 @@ How fast the programs run. Each program is built by `cargo build --release` and 
 
 | Benchmark | macOS arm64 | Linux aarch64 | Linux x86-64 |
 |---|---:|---:|---:|
-| bun | - | - | 5.80x |
-| **Geometric mean** | - | - | **5.80x** |
+| bun | 1.25x | - | 1.28x |
+| **All benchmarks (geometric mean)** | **1.25x** | - | **1.28x** |
 
-- **macOS arm64**: not measured yet ([the machines](docs/benchmarks.md#the-machines)).
+- **macOS arm64**: one machine (Apple M5 Max, 18 cores, 128 GiB), ra-jit [`948d54e375`](https://github.com/indexable-inc/ra-jit/commit/948d54e375ef4f4685a932539d3a4118992a31c1) on 2026-10-23, each benchmark run 5 times, load average 29 at the start, by hand.
 - **Linux aarch64**: not measured yet ([the machines](docs/benchmarks.md#the-machines)).
-- **Linux x86-64**: AWS c8a.24xlarge (dev-aws-eph-rajit-bun), pinned to 16 cores with taskset (AMD EPYC 9R45, 16 of its 96 cores, 185 GiB), ra-jit [`7dcfe73922`](https://github.com/indexable-inc/ra-jit/commit/7dcfe739224e0f1b5a65c2bc744375bb0ef33714) on 2026-10-22, each benchmark run 5 times, by hand.
+- **Linux x86-64**: AWS c8a.24xlarge (dev-aws-eph-rajit-bunperf) (AMD EPYC 9R45, 16 of its 96 cores, 185 GiB), ra-jit [`948d54e375`](https://github.com/indexable-inc/ra-jit/commit/948d54e375ef4f4685a932539d3a4118992a31c1) on 2026-10-23, each benchmark run 5 times, load average 13 at the start, by hand.
 
 <details><summary>Times, memory and builds, by platform</summary>
 
-**Linux x86-64**
+**macOS arm64**
 
-| Benchmark | `cargo build --release` | ra-jit, LLVM | ra-jit ÷ release | release with dev checks ÷ release | Peak memory, release → ra-jit |
-|---|---:|---:|---:|---:|---:|
-| bun | 392 ms | **2.27 s** | 5.80x | 1.09x | 57 MB → 75 MB |
-| **Geometric mean** | | | **5.80x** | 1.09x | |
+| Benchmark | `cargo build --release` | ra-jit, LLVM | ra-jit ÷ release | Peak memory, release → ra-jit |
+|---|---:|---:|---:|---:|
+| bun | 332 ms | **415 ms** | 1.25x | 43 MB → 46 MB |
+| **All benchmarks (geometric mean)** | | | **1.25x** | |
 
 What each program takes, release → ra-jit: its build from cold (for ra-jit, cargo running the build scripts and proc macros, ra-jit's compile of every crate and the link), its size, and its build's memory (the most the build's processes held at once, and the largest one process: rustc or ra-jit, or the linker).
 
 | Program | Build | Size | Build, peak | Build, largest process |
 |---|---:|---:|---:|---:|
-| bun | 135.20 s → 86.90 s | 314.01 MB → 363.54 MB | 6.3 GB → 28.1 GB | 3.7 GB → 28.0 GB |
+| bun | 177.40 s → 983.10 s | 103.09 MB → 129.61 MB | 7.1 GB → 27.3 GB | 4.7 GB → 27.3 GB |
+
+**Linux x86-64**
+
+| Benchmark | `cargo build --release` | ra-jit, LLVM | ra-jit ÷ release | release with dev checks ÷ release | Peak memory, release → ra-jit |
+|---|---:|---:|---:|---:|---:|
+| bun | 386 ms | **495 ms** | 1.28x | 1.10x | 57 MB → 54 MB |
+| **All benchmarks (geometric mean)** | | | **1.28x** | 1.10x | |
+
+What each program takes, release → ra-jit: its build from cold (for ra-jit, cargo running the build scripts and proc macros, ra-jit's compile of every crate and the link), its size, and its build's memory (the most the build's processes held at once, and the largest one process: rustc or ra-jit, or the linker).
+
+| Program | Build | Size | Build, peak | Build, largest process |
+|---|---:|---:|---:|---:|
+| bun | 138.60 s → 565.10 s | 314.01 MB → 317.24 MB | 6.3 GB → 28.3 GB | 3.7 GB → 28.2 GB |
 
 Release with dev checks: `cargo build --release` with `-C overflow-checks=on -C debug-assertions=on`.
 
 </details>
 
-Measured by hand with `harness/bench.py --runtime` (harness/runbench.py), or by the `bench-bun` workflow on each platform's benchmark machine once it is registered. Raw JSON: [Linux x86-64](docs/benchmarks/runtime-bun-linux-x86-64.json).
+Measured by hand with `harness/bench.py --runtime` (harness/runbench.py), or by the `bench-bun` workflow on each platform's benchmark machine once it is registered. Raw JSON: [macOS arm64](docs/benchmarks/runtime-bun-macos-arm64.json), [Linux x86-64](docs/benchmarks/runtime-bun-linux-x86-64.json).
 <!-- runbench-bun:end -->
 
 Not measured yet: test suites

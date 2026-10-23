@@ -198,6 +198,17 @@ EPYC 9R45) unless said otherwise.
   62,031 functions by ra-jit and none left, built in 983 s against 177 s for cargo's release
   build; the run takes 0.415 s against 0.333 s, 1.25x, 46 MB against 43 MB at most. This closed
   [#35](https://github.com/indexable-inc/ra-jit/issues/35).
+- **macOS arm64 edits** (`bench.py bun --backend cranelift --runs 3`, `27077156cc`, the code of
+  `948d54e375`, load average about 26 from other work, read,
+  [docs/benchmarks/bun-macos-arm64.json](../benchmarks/bun-macos-arm64.json)), median, cargo →
+  ra-jit: a body 7.5 s → 0.36 s, a widely used function 16.0 s → 0.46 s, a generic function
+  14.9 s → 0.57 s (was 72.5 s), a new function 11.1 s → 0.56 s (was 50.5 s), all spliced; a
+  signature 7.3 s → 0.82 s (was 126 s, cargo's); nothing changed 199 ms → 122 ms; cold to ready
+  81.4 s against cargo's 83.3 s (was 291 s). The signature's median hides its first sample,
+  574 s: the daemon gave its own base up at the memory bound of a 128 GiB machine, so that edit
+  could not patch rustc's executable and linked bun in full, twice
+  ([docs/glancer.md](../glancer.md), bun). The dev loop's `Bun.Transpiler` run takes 1.33 s,
+  against 0.85 s for cargo's debug build and 0.11 s for its release build.
 
 The reduced nightly fixtures in `harness/bun-repros` keep these two refusals measurable without
 building Bun's native C and C++ dependencies. Run them with `python3 harness/bun_repros.py` after
