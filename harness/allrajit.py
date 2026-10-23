@@ -1,9 +1,12 @@
 #!/usr/bin/env python3
 """allrajit.py: programs with nothing rustc built in them (docs/no-rustc.md, steps F and G).
 
-Two programs, a hello and one that uses collections, `catch_unwind`, threads, channels,
-formatting, a file and an uncaught panic, are built by ra-jit with every crate its own,
-the standard library included, and linked by `cc`. Each is built three ways:
+Four programs, a hello, one that uses collections, `catch_unwind`, threads, channels,
+formatting, a file and an uncaught panic, one with a `#[global_allocator]` of its own, and
+one built with `panic = "abort"`, are built by ra-jit with every crate its own, the standard
+library included, and linked by ra-jit (`--exe`): the native libraries are the ones the
+crates' `#[link]`s ask for, and nothing it could not compile may be left in the executable.
+Each is built three ways:
 
   - whole: the program and the standard library in one build, one object;
   - over the unit: the standard library built once, alone, into an object of its own
@@ -26,11 +29,16 @@ sys.path.insert(0, HERE)
 from difftest import RA_JIT
 from storelib import scratch
 
-# The crates of the standard library a program on Linux links, by the names cargo gives them.
-STD = ["std", "core", "alloc", "compiler_builtins", "panic_unwind", "unwind", "libc", "cfg_if",
-       "hashbrown", "rustc_demangle", "std_detect", "addr2line", "gimli", "object", "miniz_oxide",
-       "adler2", "memchr"]
-LIBS = ["-lgcc_s", "-lc", "-lm", "-lpthread", "-ldl", "-lutil", "-lrt"]
+# The crates of the standard library a program on Linux links, by the names cargo gives them,
+# but the panic runtime.
+STD = ["std", "core", "alloc", "compiler_builtins", "unwind", "libc", "cfg_if", "hashbrown",
+       "rustc_demangle", "std_detect", "addr2line", "gimli", "object", "miniz_oxide", "adler2",
+       "memchr"]
+
+
+def std_of(panic):
+    return STD + ["panic_abort" if panic == "abort" else "panic_unwind"]
+
 
 HELLO = """fn main() {
     let v: Vec<u32> = (1..=10).collect();
@@ -97,8 +105,39 @@ fn main() {
     if std::env::args().count() > 1 { let none: Option<u8> = None; none.expect("asked to fail"); }
 }
 """
-# (program, its source, the runs to compare: the arguments of each)
-PROGRAMS = [("hello", HELLO, [["a", "b"]]), ("rich", RICH, [[], ["fail"]])]
+ALLOC = r"""use std::alloc::{GlobalAlloc, Layout, System};
+use std::sync::atomic::{AtomicUsize, Ordering};
+
+struct Counting;
+static ALLOCS: AtomicUsize = AtomicUsize::new(0);
+
+unsafe impl GlobalAlloc for Counting {
+    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+        ALLOCS.fetch_add(1, Ordering::Relaxed);
+        unsafe { System.alloc(layout) }
+    }
+    unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) { unsafe { System.dealloc(ptr, layout) } }
+}
+
+#[global_allocator]
+static A: Counting = Counting;
+
+fn main() {
+    let before = ALLOCS.load(Ordering::Relaxed);
+    let v: Vec<Box<u64>> = (0..100).map(Box::new).collect();
+    let s: String = v.iter().map(|b| b.to_string()).collect();
+    println!("{} {} counted {}", s.len(), v.len(), ALLOCS.load(Ordering::Relaxed) - before >= 101);
+}
+"""
+ABORT = r"""fn main() {
+    let caught = std::panic::catch_unwind(|| 1);
+    println!("caught {:?}", caught.ok());
+    if std::env::args().count() > 1 { panic!("aborting {}", 3); }
+}
+"""
+# (program, its source, the runs to compare: the arguments of each, its panic strategy)
+PROGRAMS = [("hello", HELLO, [["a", "b"]], "unwind"), ("rich", RICH, [[], ["fail"]], "unwind"),
+            ("counting", ALLOC, [[]], "unwind"), ("abort", ABORT, [[], ["fail"]], "abort")]
 
 
 def run(cmd, cwd, what, env=None):
@@ -118,11 +157,13 @@ def outcome(binary, args, cwd):
     return ran.returncode, unthreaded(ran.stdout), unthreaded(ran.stderr)
 
 
-def package(work, name, source):
+def package(work, name, source, panic):
     root = os.path.join(work, name)
     os.makedirs(os.path.join(root, "src"))
     with open(os.path.join(root, "Cargo.toml"), "w") as f:
         f.write(f'[package]\nname = "{name}"\nversion = "0.1.0"\nedition = "2021"\n[workspace]\n')
+        if panic == "abort":
+            f.write('[profile.dev]\npanic = "abort"\n')
     with open(os.path.join(root, "src/main.rs"), "w") as f:
         f.write(source)
     subprocess.run(["cargo", "generate-lockfile", "-q"], cwd=root, check=True)
@@ -134,28 +175,42 @@ def ra_jit(root, crates, out, *extra, env=None):
     return run([RA_JIT, root, *args, "--out", out, *extra], root, f"ra-jit {' '.join(crates[:1])}", env)
 
 
+def linked(ran, what):
+    """How long ra-jit's link took, failing when it left something it could not compile."""
+    said = re.search(r"^linked .* in (\S+), (\d+) functions in it ra-jit could not compile$",
+                     ran.stderr, re.M)
+    if not said:
+        raise SystemExit(f"FAIL: {what}: ra-jit did not say it linked:\n{ran.stderr}")
+    if said.group(2) != "0":
+        raise SystemExit(f"FAIL: {what}: the executable can reach {said.group(2)} functions ra-jit "
+                         f"could not compile:\n{ran.stderr}")
+    return said.group(1)
+
+
 def main():
     if not sys.platform.startswith("linux"):
-        print("not run: the link line here is Linux's (step G gives ra-jit its own)")
+        print("not run: the programs ra-jit links with nothing of rustc's are Linux's so far")
         return
     ways = [way for way in ["whole", "unit", "stored"] if way in sys.argv[1:] or len(sys.argv) == 1]
     work = scratch("ra-jit-allrajit-")
     passed = False
     try:
-        roots = {name: package(work, name, source) for name, source, _ in PROGRAMS}
+        roots = {name: package(work, name, source, panic) for name, source, _, panic in PROGRAMS}
         expected = {}
-        for name, _, runs in PROGRAMS:
+        for name, _, runs, _ in PROGRAMS:
             root = roots[name]
             target = os.path.join(root, "target")
             run(["cargo", "build", "-q", "--target-dir", target], root, f"cargo build of {name}")
             binary = os.path.join(root, "target/debug", name)
             expected[name] = [outcome(binary, args, root) for args in runs]
         lines = []
-        unit = None
+        units = {}
         if "unit" in ways:
-            unit = os.path.join(work, "std.o")
-            _, took = ra_jit(roots["hello"], STD, unit)
-            lines.append(f"the standard library alone: {took:.2f} s, {os.path.getsize(unit) >> 20} MB")
+            for panic, program in [("unwind", "hello"), ("abort", "abort")]:
+                units[panic] = os.path.join(work, f"std-{panic}.o")
+                _, took = ra_jit(roots[program], std_of(panic), units[panic])
+                lines.append(f"the standard library alone, panic = \"{panic}\": {took:.2f} s, "
+                             f"{os.path.getsize(units[panic]) >> 20} MB")
         remote = {"RA_JIT_REMOTE": os.path.join(work, "remote"), "RA_JIT_PROJECT": "allrajit",
                   "RA_JIT_REMOTE_UNSIGNED": "1"}
         os.makedirs(remote["RA_JIT_REMOTE"])
@@ -165,38 +220,39 @@ def main():
             # The first program again once the store has the library, and the second on
             # another store.
             programs = PROGRAMS + PROGRAMS[:1] + PROGRAMS[1:2] if way == "stored" else PROGRAMS
-            for at, (name, _, runs) in enumerate(programs):
+            # The panic strategies whose library some store or the remote has.
+            compiled = set()
+            for at, (name, _, runs, panic) in enumerate(programs):
                 root = roots[name]
                 obj = os.path.join(work, f"{name}-{way}.o")
                 binary = os.path.join(work, f"{name}-{way}")
+                exe = ["--exe", binary]
                 how = ""
                 if way == "whole":
-                    _, took = ra_jit(root, [name, *STD], obj)
-                    objects = [obj]
+                    ran, took = ra_jit(root, [name, *std_of(panic)], obj, *exe)
                 elif way == "unit":
-                    _, took = ra_jit(root, [name], obj, "--prebuilt", unit)
-                    objects = [obj, unit]
+                    ran, took = ra_jit(root, [name], obj, "--prebuilt", units[panic], *exe)
                 else:
                     store = stores[at == len(programs) - 1]
-                    ran, took = ra_jit(root, [name], obj, env=store)
-                    objects = [obj, os.path.splitext(obj)[0] + ".std.o"]
+                    ran, took = ra_jit(root, [name], obj, *exe, env=store)
                     said = re.findall(r"^standard library: (.*)$", ran.stderr, re.M)
                     stored = bool(said) and said[0].startswith("from the store")
-                    if not said or stored != (at > 0):
+                    if not said or stored != (panic in compiled):
                         raise SystemExit(f"FAIL: {name} ({way}, build {at + 1}) "
-                                         f"{'should have taken' if at else 'took'} the standard library "
-                                         f"from the store: {said}\n{ran.stderr}")
+                                         f"{'should have taken' if panic in compiled else 'took'} the "
+                                         f"standard library from the store: {said}\n{ran.stderr}")
+                    compiled.add(panic)
                     how = (", the standard library from the remote" if store is stores[1]
                            else ", the standard library from the store" if stored
                            else ", the standard library compiled, stored and pushed")
-                _, linked = run(["cc", *objects, "-o", binary, *LIBS], root, f"the link of {name} ({way})")
+                link_took = linked(ran, f"{name} ({way})")
                 for args, want in zip(runs, expected[name]):
                     got = outcome(binary, args, root)
                     if got != want:
                         raise SystemExit(f"FAIL: {name} {' '.join(args)} ({way}) differs from cargo's:\n"
                                          f"cargo:  {want}\nra-jit: {got}")
-                lines.append(f"{name} ({way}): built in {took:.2f} s{how}, linked in {linked:.2f} s, "
-                             f"{len(runs)} runs as cargo's")
+                lines.append(f"{name} ({way}): built and linked in {took:.2f} s{how}, the link "
+                             f"{link_took}, {len(runs)} runs as cargo's")
         print("\n".join(lines))
         print(f"PASS: {len(PROGRAMS)} programs with nothing of rustc's, {' and '.join(ways)}")
         passed = True
