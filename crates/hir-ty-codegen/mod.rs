@@ -3656,15 +3656,20 @@ pub fn linked_symbol(db: &dyn HirDatabase, func: FunctionId) -> Option<String> {
     (lang == intern::sym::eh_personality).then(|| unwind::PERSONALITY.to_owned())
 }
 
-/// Whether a crate declares the `#[global_allocator]`.
+/// How the message of a stand-in for a function ra-jit could not compile starts
+/// ([`ObjectCodegen::define_refused`]): what is left of them once linked is what is reachable.
+pub const STAND_IN_SAYS: &str = "ra-jit could not compile ";
+
+/// Whether a crate declares the `#[global_allocator]`: whether it has the function the
+/// attribute's expansion exports for `__rust_alloc` (the attribute itself is gone from the
+/// static once expanded).
 #[salsa::tracked(returns(copy))]
 fn declares_global_allocator(db: &dyn HirDatabase, krate: Crate) -> bool {
     let def_map = hir_def::nameres::crate_def_map(db, krate);
     def_map.modules(db).any(|(_, module)| {
         module.scope(db).declarations().any(|it| match it {
-            hir_def::ModuleDefId::StaticId(id) => {
-                AttrFlags::has_word(db, id.into(), "global_allocator")
-            }
+            hir_def::ModuleDefId::FunctionId(id) => AttrFlags::export_name(db, id.into())
+                .is_some_and(|it| it.as_str() == "__ra_jit_global_alloc"),
             _ => false,
         })
     })
@@ -4501,8 +4506,9 @@ impl<'a, 'db> ObjectCodegen<'a, 'db> {
     }
 
     /// What rustc's allocator shim puts in a program: the entries of the global allocator
-    /// that `alloc` calls by name, here going to std's defaults. Only in a program with nothing
-    /// of rustc's: one linked with rustc's `alloc` has rustc's shim.
+    /// that `alloc` calls by name, going to the `#[global_allocator]`'s (the functions its
+    /// expansion exports) or else to std's defaults. Only in a program with nothing of
+    /// rustc's: one linked with rustc's `alloc` has rustc's shim.
     fn define_allocator_shim(&mut self, main: FunctionId) -> Result<()> {
         let db = self.db;
         if !self.symbols.nothing_of_rustc() {
@@ -4515,14 +4521,18 @@ impl<'a, 'db> ObjectCodegen<'a, 'db> {
         if !program.contains(&boxed.krate(db)) {
             return Ok(());
         }
-        if program.into_iter().any(|it| declares_global_allocator(db, it)) {
-            unsupported!("a `#[global_allocator]`, without rustc's shim for it");
-        }
+        let declared = program.into_iter().any(|it| declares_global_allocator(db, it));
+        let to = |default, declared_one| if declared { declared_one } else { default };
         let entries = [
-            ("__rust_alloc", "__rdl_alloc", 2, true),
-            ("__rust_dealloc", "__rdl_dealloc", 3, false),
-            ("__rust_realloc", "__rdl_realloc", 4, true),
-            ("__rust_alloc_zeroed", "__rdl_alloc_zeroed", 2, true),
+            ("__rust_alloc", to("__rdl_alloc", "__ra_jit_global_alloc"), 2, true),
+            ("__rust_dealloc", to("__rdl_dealloc", "__ra_jit_global_dealloc"), 3, false),
+            ("__rust_realloc", to("__rdl_realloc", "__ra_jit_global_realloc"), 4, true),
+            (
+                "__rust_alloc_zeroed",
+                to("__rdl_alloc_zeroed", "__ra_jit_global_alloc_zeroed"),
+                2,
+                true,
+            ),
             ("__rust_alloc_error_handler", "__rdl_alloc_error_handler", 2, false),
             ("__rust_no_alloc_shim_is_unstable_v2", "", 0, false),
         ];
@@ -4581,7 +4591,7 @@ impl<'a, 'db> ObjectCodegen<'a, 'db> {
             }
             _ => return Ok(()),
         };
-        let message = format!("ra-jit could not compile `{symbol}`: {reason}\n").into_bytes();
+        let message = format!("{STAND_IN_SAYS}`{symbol}`: {reason}\n").into_bytes();
         let len = message.len() as i64;
         let text = self.declare_local_data(false)?;
         let mut data = DataDescription::new();

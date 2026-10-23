@@ -13,6 +13,7 @@ mod doctest;
 mod errors;
 mod frozen;
 mod inputs;
+mod link;
 mod live;
 mod memory;
 mod mirdump;
@@ -129,6 +130,9 @@ struct Args {
     /// rustc's: the standard library's crates are not compiled, and what the program calls of
     /// them is called by the names that object defines.
     prebuilt: Option<PathBuf>,
+    /// The executable to link `out` into, with the standard library's object and the native
+    /// libraries the crates ask for, in a build with nothing of rustc's ([`link::executable`]).
+    exe: Option<PathBuf>,
     /// The build is of the standard library alone ([`std_unit`]): a crate it names is the
     /// library's, not another of that name the program has too.
     library: bool,
@@ -218,6 +222,7 @@ impl Args {
         let mut deny = None;
         let mut isolate = None;
         let mut prebuilt = None;
+        let mut exe = None;
         let mut cfg_test = false;
         let mut dev_deps = false;
         let mut own_target = false;
@@ -257,6 +262,7 @@ impl Args {
                 "--deny" => deny = Some(PathBuf::from(value()?)),
                 "--isolate" => isolate = Some(PathBuf::from(value()?)),
                 "--prebuilt" => prebuilt = Some(PathBuf::from(value()?)),
+                "--exe" => exe = Some(PathBuf::from(value()?)),
                 "--watch" => watch = true,
                 "--socket" => socket = Some(PathBuf::from(value()?)),
                 "--cfg-test" => cfg_test = true,
@@ -298,6 +304,7 @@ impl Args {
             deny,
             isolate,
             prebuilt,
+            exe,
             library: false,
             cfg_test,
             own_target,
@@ -369,16 +376,17 @@ struct Prebuilt {
 /// The crates of the standard library a program links, which ra-jit builds apart from it
 /// ([`std_unit`]): what the program's crates take of the library, and everything that
 /// depends on, whoever's it is (rust-analyzer gives the library a crate of the workspace's
-/// where both use one), but `test`, `proc_macro` and `panic_abort`. rust-analyzer's graph has
-/// every crate depend on the first two, which a program links only as a test or a macro, and
-/// the panic runtime is `panic_unwind`'s.
+/// where both use one), but `test`, `proc_macro` and the panic runtime the program does not
+/// link ([`unlinked_panic_runtime`]). rust-analyzer's graph has every crate depend on the
+/// first two, which a program links only as a test or a macro.
 fn library_unit(db: &RootDatabase, program: &[Crate]) -> FxHashSet<ide_db::base_db::Crate> {
     use ide_db::base_db::LangCrateOrigin::{ProcMacro, Test};
+    let unlinked = unlinked_panic_runtime(db, program);
     let left_out = |it: ide_db::base_db::Crate| match it.data(db).origin {
         CrateOrigin::Lang(ProcMacro | Test) => true,
         _ => Crate::from(it)
             .display_name(db)
-            .is_some_and(|name| name.crate_name().as_str() == "panic_abort"),
+            .is_some_and(|name| name.crate_name().as_str() == unlinked),
     };
     let deps = |it: ide_db::base_db::Crate| it.data(db).dependencies.iter().map(|dep| dep.crate_id);
     let mut unit = FxHashSet::default();
@@ -393,6 +401,17 @@ fn library_unit(db: &RootDatabase, program: &[Crate]) -> FxHashSet<ide_db::base_
         }
     }
     unit
+}
+
+/// The panic runtime a program does not link: `panic_unwind` when its crate is built with
+/// `panic = "abort"`, which the profile gives it as `cfg(panic = "abort")`, else
+/// `panic_abort`. std depends on both, and rustc links the one the strategy names.
+pub(crate) fn unlinked_panic_runtime(db: &RootDatabase, program: &[Crate]) -> &'static str {
+    let abort = program.first().is_some_and(|&it| {
+        let cfg = ide_db::base_db::Crate::from(it).cfg_options(db);
+        cfg.get_cfg_values("panic").any(|it| it.as_str() == "abort")
+    });
+    if abort { "panic_unwind" } else { "panic_abort" }
 }
 
 /// The names an object defines for others to link to.
@@ -2850,6 +2869,11 @@ struct ListedCrate {
     main: Option<FunctionId>,
 }
 
+fn is_bodiless_intrinsic(db: &RootDatabase, id: FunctionId) -> bool {
+    let signature = hir_def::signatures::FunctionSignature::of(db, id);
+    signature.flags.contains(hir_def::signatures::FnFlags::RUSTC_INTRINSIC) && !signature.has_body()
+}
+
 /// Whether `func` is of ra-jit's test harness.
 fn in_harness(db: &RootDatabase, func: FunctionId) -> bool {
     let module = hir::Function::from(func).module(db);
@@ -3268,9 +3292,11 @@ impl Declared {
     fn in_scope(&mut self, db: &RootDatabase, scope: &ItemScope) {
         for def in scope.declarations() {
             match def {
-                // A function declared in an `extern` block has no body to compile.
+                // A function declared in an `extern` block has no body to compile, nor has an
+                // intrinsic declared without one: every call to it is the compiler's own code.
                 ModuleDefId::FunctionId(id)
-                    if !matches!(id.lookup(db).container, ItemContainerId::ExternBlockId(_)) =>
+                    if !matches!(id.lookup(db).container, ItemContainerId::ExternBlockId(_))
+                        && !is_bodiless_intrinsic(db, id) =>
                 {
                     self.function(id);
                 }
@@ -3478,6 +3504,7 @@ fn std_unit(
         widened: Vec::new(),
         out: path.clone(),
         report: None,
+        exe: None,
         library: true,
         ..args.clone()
     };
@@ -3494,6 +3521,37 @@ fn std_unit(
         store.flush();
     }
     Ok(Some(path))
+}
+
+/// Links the executable of a build with nothing of rustc's: `--out` and the standard
+/// library's object, with the native libraries the crates ask for.
+fn link_executable(
+    db: &RootDatabase,
+    table: &SymbolTable,
+    args: &Args,
+    sysroot: Option<&Path>,
+    exe: &Path,
+) -> anyhow::Result<()> {
+    if !table.is_empty() {
+        bail!("--exe links a build with nothing of rustc's, and this one has rustc's symbols");
+    }
+    let mut program = Vec::new();
+    for named in args.crates() {
+        program.extend(crates_named(db, named, args)?);
+    }
+    let objects: Vec<&Path> =
+        std::iter::once(args.out.as_path()).chain(args.prebuilt.as_deref()).collect();
+    let took = link::executable(db, &program, &objects, sysroot, exe)?;
+    let stand_ins = link::stand_ins(exe)?;
+    eprintln!(
+        "linked {} in {took:.1?}, {} functions in it ra-jit could not compile",
+        exe.display(),
+        stand_ins.len()
+    );
+    for said in stand_ins.iter().take(8) {
+        eprintln!("  {said}");
+    }
+    Ok(())
 }
 
 /// [`build`] of a build that is never held.
@@ -4803,6 +4861,7 @@ fn build_batch(db: &RootDatabase, args: Args) -> anyhow::Result<()> {
             deny: None,
             isolate: None,
             prebuilt: args.prebuilt.clone(),
+            exe: args.exe.clone(),
             library: args.library,
             cfg_test: args.cfg_test,
             own_target: args.own_target,
@@ -6741,6 +6800,11 @@ fn run_holding(
                 false,
                 false,
             )?;
+            if let Some(exe) = &args.exe {
+                let workspace = checkouts.loaded.workspaces().first();
+                let sysroot = workspace.and_then(|it| it.sysroot.root());
+                link_executable(&db, &table, &args, sysroot.map(|it| it.as_ref()), exe)?;
+            }
             Some(cold)
         }
     };
