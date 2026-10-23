@@ -52,11 +52,14 @@ pub(crate) struct Outlines {
     adding: FxHashMap<FileId, Adding>,
 }
 
-/// An edit about to be applied that adds functions to a file and changes nothing else of it
-/// but bodies that nothing else sees into.
+/// An edit about to be applied that adds functions to a file, or takes them away, and changes
+/// nothing else of it but bodies that nothing else sees into.
 struct Adding {
-    /// Where the new functions are in the new text.
+    /// Where the new functions are in the new text, or those taken away in the text before.
     functions: FxHashSet<TextRange>,
+    /// Of an edit that takes them away: the [`outline`] of the file before it without them,
+    /// which the file is to have after it.
+    away: Option<u64>,
     /// The crates the file is a module of.
     crates: Vec<ide_db::base_db::Crate>,
     /// The files of those crates.
@@ -78,9 +81,9 @@ pub(crate) struct Changed {
     /// The names of the `#[inline]` functions that are not generic and are not as rustc
     /// compiled them, or not where: a patch is right when the executable has no copy of them.
     pub(crate) inline: Vec<String>,
-    /// When the edit added functions, changed nothing else but bodies that nothing else sees
-    /// into, and is one [`Outlines::adding`] took: the crates the file is a module of, and
-    /// their files, whose code is all that can see the new functions.
+    /// When the edit added functions or took them away, changed nothing else but bodies that
+    /// nothing else sees into, and is one [`Outlines::adding`] took: the crates the file is a
+    /// module of, and their files, whose code is all that can see the functions.
     pub(crate) added: Option<(Vec<ide_db::base_db::Crate>, Vec<FileId>)>,
 }
 
@@ -100,7 +103,8 @@ impl Outlines {
     /// to, when it changes nothing else of it but bodies that nothing else sees into, no other
     /// crate depends on those, and no file of them names any of the new functions yet. Only
     /// their code sees the new functions, and only what names one can mean another thing now:
-    /// what rustc compiled of every file of them is to be taken in before the edit.
+    /// what rustc compiled of every file of them is to be taken in before the edit. So too of
+    /// an edit that takes such functions away, which no file of them names after it.
     pub(crate) fn adding(
         &mut self,
         db: &RootDatabase,
@@ -163,8 +167,14 @@ impl Outlines {
                 let bodies_only = !off && now.is_some() && was == Some(now);
                 let added = self.adding.remove(&file).filter(|adding| {
                     !off && !bodies_only
-                        && was.flatten().is_some()
-                        && outline_without(db, listed, file, &adding.functions) == was.flatten()
+                        && match adding.away {
+                            Some(away) => now == Some(away),
+                            None => {
+                                was.flatten().is_some()
+                                    && outline_without(db, listed, file, &adding.functions)
+                                        == was.flatten()
+                            }
+                        }
                 });
                 let (copied, generics, inline) = match self.copied.get(&file) {
                     Some(was) => {
@@ -481,7 +491,12 @@ fn adding(db: &RootDatabase, listed: &Listed, file: FileId, text: &str) -> Optio
     let edition = relevant_crates(db, file).first()?.data(db).edition;
     let was = EditionedFileId::new(db, file, edition).parse(db).syntax_node();
     let now = ast::SourceFile::parse(text, edition).tree().syntax().clone();
-    let added = added_functions(&was, &now)?;
+    // Functions taken away are those the text before has that the edit added to it, and what
+    // names them is looked for in the file as the edit leaves it.
+    let (added, away) = match added_functions(&was, &now) {
+        Some(added) => (added, false),
+        None => (added_functions(&now, &was)?, true),
+    };
     let crates = listed.crates_of(db, file);
     if crates.is_empty() || crates.iter().any(|it| it.transitive_rev_deps(db).len() != 1) {
         return None;
@@ -502,7 +517,10 @@ fn adding(db: &RootDatabase, listed: &Listed, file: FileId, text: &str) -> Optio
     files.sort_unstable();
     files.dedup();
     for &(other, edition) in &files {
-        let tree = EditionedFileId::new(db, other, edition).parse(db).syntax_node();
+        let tree = match other == file && away {
+            true => now.clone(),
+            false => EditionedFileId::new(db, other, edition).parse(db).syntax_node(),
+        };
         // A file another one includes is written as part of it, and the names of macros are
         // matched by name.
         let includes = tree
@@ -517,7 +535,11 @@ fn adding(db: &RootDatabase, listed: &Listed, file: FileId, text: &str) -> Optio
         }
     }
     let functions = added.iter().map(|it| it.syntax().text_range()).collect();
-    Some(Adding { functions, crates, files: files.into_iter().map(|it| it.0).collect() })
+    let away = match away {
+        true => Some(outline_without(db, listed, file, &functions)?),
+        false => None,
+    };
+    Some(Adding { functions, away, crates, files: files.into_iter().map(|it| it.0).collect() })
 }
 
 /// The functions written in `now` that `was` has none of, when nothing else changed but bodies
@@ -1167,5 +1189,16 @@ mod tests {
         ] {
             assert_eq!(added(before, after), None, "{after}");
         }
+    }
+
+    #[test]
+    fn functions_taken_away_alone() {
+        let before = "fn f() { h(); }\n\nfn h() -> u8 { 2 }\nmod m {\n    fn g() {}\n}\n";
+        let after = "fn f() { 1; }\nmod m {\n    fn g() {}\n}\n";
+        assert_eq!(added(before, after), None);
+        assert_eq!(added(after, before).unwrap(), ["h"]);
+        // Taken away with something else, or one rustc copies into what calls it.
+        assert_eq!(added("fn f() { 1; }\n", "fn f() { h(); }\n\nfn h() {}\nstruct S;\n"), None);
+        assert_eq!(added("fn f() { 1; }\n", "fn f() { h(); }\n\n#[inline]\nfn h() {}\n"), None);
     }
 }
