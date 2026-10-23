@@ -3696,9 +3696,9 @@ fn build(
                 main = main.or_else(|| harness_main(db, &listed.functions));
             }
             functions.extend(listed.functions.iter().copied().zip(listed.exported.iter().copied()));
-            if table.is_empty() {
-                functions.extend(listed.in_provided.iter().map(|&it| (it, false)));
-            }
+            // rustc has no symbol of one even when it built the crate, so a call of ours is of
+            // the name ra-jit gives it, and ra-jit compiles it.
+            functions.extend(listed.in_provided.iter().map(|&it| (it, false)));
             // rustc's copy of the crate has them when rustc built it.
             if resolver.own_crate_id(krate.into()).is_some() {
                 kept.extend(&listed.kept);

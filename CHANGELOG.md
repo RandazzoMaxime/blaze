@@ -388,6 +388,12 @@ All notable changes to ra-jit are written here. The format follows
 
 ### Fixed
 
+- A function declared in a trait's provided method was compiled only in a build with nothing
+  of rustc's. rustc compiles one only where it instantiates the method, so it has no symbol
+  of it in any build, and ra-jit names it: a call of ours that LLVM did not build in was of a
+  name nothing defined (bstr's `ByteVec::from_os_str_lossy::imp`, which failed the link of
+  ripgrep's whole program). It is now compiled where it is called, in every build
+  (`wholeprogram.py`'s `provided_fn`).
 - On Linux AArch64, an `asm!` of a feature LLVM's assembler has no `.arch_extension` for was
   refused: constant_time_eq's `mrs {}, dit` under `#[target_feature(enable = "dit")]`, which
   failed bun's build there. Such a feature (`dit`, `bti`, `jsconv` and the others of a later
