@@ -234,6 +234,8 @@ pub(super) enum Operand<'a> {
         size: Option<u32>,
         input: bool,
         output: bool,
+        /// Whether the block may change it, which it may with no `output` too.
+        written: bool,
     },
     Const(i128),
     /// A `label` block. The function returns which one the block jumped to, counted from 1,
@@ -608,6 +610,206 @@ fn wrapper_x86_64(
     }
     Ok(Wrapper { text, slot_size: slot_size.next_multiple_of(16).max(16), offsets })
 }
+
+/// A block as LLVM's inline assembly, which a compile LLVM lowers puts where the call of the
+/// block's [`Wrapper`] is, as rustc gives LLVM the block: the inputs are read from the slot
+/// the wrapper is passed, the outputs written back to it, at the wrapper's offsets.
+#[derive(Debug, PartialEq, Eq)]
+pub(super) struct Inline {
+    /// The template, with each operand as LLVM numbers it.
+    pub(super) text: String,
+    pub(super) constraints: String,
+    /// Where each output goes in the slot, `None` for one only overwritten, and its size, in
+    /// the order of the constraints; then where each input comes from.
+    pub(super) outputs: Vec<(Option<u32>, u32)>,
+    pub(super) inputs: Vec<(u32, u32)>,
+    pub(super) options: AsmOptions,
+}
+
+/// The blocks given to LLVM as inline assembly, by the text of their wrappers, which is what
+/// the request of the call of one says. `None` where two blocks of one wrapper are not one
+/// block.
+static INLINE: std::sync::LazyLock<Mutex<FxHashMap<String, Option<Arc<Inline>>>>> =
+    std::sync::LazyLock::new(Mutex::default);
+
+/// Keeps `inline` as the block the wrapper of `text` is.
+pub(super) fn keep_inline(text: &str, inline: Option<Inline>) {
+    let mut known = INLINE.lock().unwrap_or_else(|e| e.into_inner());
+    match known.get_mut(text) {
+        Some(kept) => {
+            if kept.as_deref() != inline.as_ref() {
+                *kept = None;
+            }
+        }
+        None => _ = known.insert(text.to_owned(), inline.map(Arc::new)),
+    }
+}
+
+/// The block the wrapper of `text` is, as LLVM's inline assembly.
+pub(super) fn inline_of(text: &str) -> Option<Arc<Inline>> {
+    INLINE.lock().unwrap_or_else(|e| e.into_inner()).get(text).cloned().flatten()
+}
+
+/// The block as LLVM's inline assembly, where it is one LLVM takes as rustc's LLVM does:
+/// operands in general registers, of a block that returns and does not unwind, has no labels
+/// nor `sym`s, and asks for no ABI's registers. LLVM ends the process on assembly it rejects,
+/// so a template that defines a label of a name, which is defined twice where LLVM copies the
+/// block, is left to the wrapper too.
+pub(super) fn inline(
+    arch: Arch,
+    template: &[AsmPiece],
+    options: AsmOptions,
+    operands: &[Operand<'_>],
+    offsets: &[Option<u32>],
+    clobber_abi: bool,
+) -> Option<Inline> {
+    static ASKED: std::sync::LazyLock<bool> = std::sync::LazyLock::new(|| {
+        std::env::var_os("RA_JIT_INLINE_ASM").is_none_or(|it| it != "0")
+    });
+    let jumps = operands.iter().any(|it| matches!(it, Operand::Label | Operand::Sym));
+    if !*ASKED
+        || !matches!(arch, Arch::X86_64 | Arch::Aarch64)
+        || jumps
+        || clobber_abi
+        || options.intersects(AsmOptions::NORETURN | AsmOptions::MAY_UNWIND)
+    {
+        return None;
+    }
+    let named_label = |line: &str| {
+        let line = line.trim();
+        line.split_once(':').is_some_and(|(name, _)| {
+            !name.is_empty()
+                && !name.bytes().all(|it| it.is_ascii_digit())
+                && name.bytes().all(|it| it.is_ascii_alphanumeric() || b"_.$".contains(&it))
+        })
+    };
+    for piece in template {
+        if let AsmPiece::Lit(lit) = piece
+            && lit.split(['\n', ';']).any(named_label)
+        {
+            return None;
+        }
+    }
+    let constraint = |reg: &InlineAsmRegOrRegClass| -> Option<String> {
+        match (arch, reg) {
+            (Arch::X86_64, InlineAsmRegOrRegClass::Reg(name)) => {
+                let name = name.as_str().trim_matches('"');
+                match named(name).ok()? {
+                    Reg::Gpr(row) if !HIGH.contains(&name) => {
+                        Some(format!("{{{}}}", X86_LLVM[row]))
+                    }
+                    _ => None,
+                }
+            }
+            (Arch::X86_64, InlineAsmRegOrRegClass::RegClass(class)) => match class.as_str() {
+                "reg" => Some("r".to_owned()),
+                "reg_abcd" => Some("Q".to_owned()),
+                "reg_byte" => Some("q".to_owned()),
+                _ => None,
+            },
+            (Arch::Aarch64, InlineAsmRegOrRegClass::Reg(name)) => {
+                aarch64::llvm_register(name.as_str())
+            }
+            (Arch::Aarch64, InlineAsmRegOrRegClass::RegClass(class)) => {
+                (class.as_str() == "reg").then(|| "r".to_owned())
+            }
+            _ => None,
+        }
+    };
+    let (mut outputs, mut inputs, mut clobbers) = (Vec::new(), Vec::new(), Vec::new());
+    let (mut out_codes, mut in_codes) = (Vec::new(), Vec::new());
+    // What LLVM numbers each operand that is a register: the outputs first.
+    let mut numbers = vec![None; operands.len()];
+    for (index, operand) in operands.iter().enumerate() {
+        let Operand::Reg { reg, size, output, input, written } = *operand else { continue };
+        let code = constraint(reg)?;
+        let size = match size {
+            Some(size @ (1 | 2 | 4 | 8)) => size,
+            Some(_) => return None,
+            None => 8,
+        };
+        match (input, output, written) {
+            (_, true, _) => {
+                numbers[index] = Some(out_codes.len());
+                out_codes.push(format!("=&{code}"));
+                outputs.push((Some(offsets[index]?), size));
+            }
+            (false, false, _) if matches!(reg, InlineAsmRegOrRegClass::Reg(_)) => {
+                clobbers.push(format!("~{code}"));
+            }
+            // An output nothing reads: a register the block overwrites, an input's too.
+            (false, false, _) | (true, false, true) => {
+                numbers[index] = Some(out_codes.len());
+                out_codes.push(format!("=&{code}"));
+                outputs.push((None, size));
+            }
+            (true, false, false) => {}
+        }
+    }
+    for (index, operand) in operands.iter().enumerate() {
+        let Operand::Reg { reg, size: Some(size), input: true, output, written } = *operand else {
+            continue;
+        };
+        let code = match (output || written, numbers[index]) {
+            (true, Some(tied)) => tied.to_string(),
+            _ => {
+                numbers[index] = Some(out_codes.len() + in_codes.len());
+                constraint(reg)?
+            }
+        };
+        in_codes.push(code);
+        inputs.push((offsets[index]?, size));
+    }
+    let mut text = String::new();
+    for piece in template {
+        let (index, modifier) = match piece {
+            AsmPiece::Lit(lit) => {
+                text.push_str(&lit.replace('$', "$$"));
+                continue;
+            }
+            AsmPiece::Operand { index, modifier } => (*index, *modifier),
+        };
+        match operands.get(index)? {
+            Operand::Const(value) => _ = write!(text, "{value}"),
+            Operand::Reg { reg: InlineAsmRegOrRegClass::RegClass(class), .. } => {
+                let modifier = match (arch, class.as_str(), modifier) {
+                    (Arch::X86_64, "reg_byte", None) => None,
+                    (Arch::X86_64, "reg" | "reg_abcd", None | Some('r')) => Some('q'),
+                    (Arch::X86_64, "reg" | "reg_abcd", Some('e')) => Some('k'),
+                    (Arch::X86_64, "reg" | "reg_abcd", Some('x')) => Some('w'),
+                    (Arch::X86_64, "reg" | "reg_abcd", Some('l')) => Some('b'),
+                    (Arch::X86_64, "reg_abcd", Some('h')) => Some('h'),
+                    (Arch::Aarch64, "reg", None | Some('x')) => Some('x'),
+                    (Arch::Aarch64, "reg", Some('w')) => Some('w'),
+                    _ => return None,
+                };
+                let number = numbers[index]?;
+                match modifier {
+                    Some(modifier) => _ = write!(text, "${{{number}:{modifier}}}"),
+                    None => _ = write!(text, "${{{number}}}"),
+                }
+            }
+            _ => return None,
+        }
+    }
+    if !options.contains(AsmOptions::PRESERVES_FLAGS) {
+        match arch {
+            Arch::X86_64 => {
+                clobbers.extend(["~{dirflag}", "~{fpsr}", "~{flags}"].map(String::from))
+            }
+            _ => clobbers.push("~{cc}".to_owned()),
+        }
+    }
+    if !options.contains(AsmOptions::NOMEM) {
+        clobbers.push("~{memory}".to_owned());
+    }
+    let constraints = [out_codes, in_codes, clobbers].concat().join(",");
+    Some(Inline { text, constraints, outputs, inputs, options })
+}
+
+/// How LLVM's inline assembly names each row of `GPR`.
+const X86_LLVM: [&str; 13] =
+    ["ax", "cx", "dx", "si", "di", "r8", "r9", "r10", "r11", "r12", "r13", "r14", "r15"];
 
 /// The machine code of a function, and where in it the operands it names go.
 #[derive(Default)]

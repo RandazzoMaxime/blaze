@@ -108,6 +108,7 @@ pub(super) fn emit(
         let statics: FxHashSet<u32> = recorder.statics().collect();
         let resume = recorder.resume();
         let memcmp = recorder.memcmp();
+        let blocks_asm = recorder.asm_blocks();
         let readonly: FxHashMap<u32, &super::ConstBlob> = recorder.readonly().collect();
         told_constants(
             context,
@@ -158,7 +159,15 @@ pub(super) fn emit(
             for (it, defined) in std::iter::zip(&seen, &shown) {
                 let Some(&function) = by_id.get(&it.id.as_u32()) else { continue };
                 let defined = Lowering::define(
-                    context, &module, function, defined, &constants, &statics, resume, memcmp,
+                    context,
+                    &module,
+                    function,
+                    defined,
+                    &constants,
+                    &statics,
+                    resume,
+                    memcmp,
+                    &blocks_asm,
                     &declared,
                 );
                 if defined.is_err() {
@@ -167,7 +176,16 @@ pub(super) fn emit(
                 }
             }
             Lowering::define(
-                context, &module, function, &own, &constants, &statics, resume, memcmp, &by_id,
+                context,
+                &module,
+                function,
+                &own,
+                &constants,
+                &statics,
+                resume,
+                memcmp,
+                &blocks_asm,
+                &by_id,
             )?;
             if wrapped {
                 wrap(context, &module, function, weights)?;
@@ -317,8 +335,18 @@ pub(super) fn export(
         mark_hint(context, function, hint);
         let shown = FxHashMap::default();
         let (resume, memcmp) = (recorder.resume(), recorder.memcmp());
+        let blocks_asm = recorder.asm_blocks();
         Lowering::define(
-            context, &module, function, &own, &constants, &statics, resume, memcmp, &shown,
+            context,
+            &module,
+            function,
+            &own,
+            &constants,
+            &statics,
+            resume,
+            memcmp,
+            &blocks_asm,
+            &shown,
         )?;
         module.verify().map_err(|e| Unhandled::Llvm(e.to_string_lossy().into_owned()))?;
         module

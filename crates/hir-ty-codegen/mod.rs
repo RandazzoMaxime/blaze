@@ -9713,7 +9713,7 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
             });
             operands.push(match operand {
                 AsmOperand::Sym(_) => asm::Operand::Sym,
-                AsmOperand::Reg { reg, input, output } => {
+                AsmOperand::Reg { reg, input, output, written } => {
                     let mut size = None;
                     let tys = [
                         input.as_ref().map(|it| self.operand_ty(it)).transpose()?,
@@ -9733,6 +9733,7 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
                         size,
                         input: input.is_some(),
                         output: output.is_some(),
+                        written: *written,
                     }
                 }
                 AsmOperand::Const(value) => {
@@ -9783,7 +9784,19 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
         }
         let mut wrapper = asm::wrapper(&self.cg.target, &block.template, block.options, &operands)
             .map_err(CodegenError::Unsupported)?;
+        // LLVM is not given the features `extensions` has the assembler take.
+        let inline = extensions.is_empty().then(|| {
+            asm::inline(
+                arch,
+                &block.template,
+                block.options,
+                &operands,
+                &wrapper.offsets,
+                block.clobber_abi,
+            )
+        });
         wrapper.text.insert_str(0, &extensions);
+        asm::keep_inline(&wrapper.text, inline.flatten());
         let slot = self.builder.create_sized_stack_slot(StackSlotData::new(
             StackSlotKind::ExplicitSlot,
             wrapper.slot_size,

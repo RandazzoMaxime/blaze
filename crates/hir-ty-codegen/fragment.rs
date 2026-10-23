@@ -404,6 +404,19 @@ impl Wants {
         self.symbol("memcmp")
     }
 
+    /// The `asm!` blocks it calls the wrappers of that go where they are called as LLVM's
+    /// inline assembly, by the places of the wrappers among the requests.
+    #[cfg(feature = "llvm")]
+    pub(super) fn asm_blocks(&self) -> FxHashMap<u32, std::sync::Arc<super::asm::Inline>> {
+        let funcs = self.requests.funcs.iter().enumerate();
+        funcs
+            .filter_map(|(at, it)| match &it.target {
+                FuncTarget::Asm(text) => Some((at as u32, super::asm::inline_of(text)?)),
+                _ => None,
+            })
+            .collect()
+    }
+
     #[cfg(feature = "llvm")]
     fn symbol(&self, symbol: &str) -> Option<u32> {
         let mut funcs = self.requests.funcs.iter();
