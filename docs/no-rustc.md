@@ -366,9 +366,9 @@ steps not shown ran none before and none now.
 - **Doctests** no longer go to rustdoc: globset, grep-printer and nu-protocol are ra-jit's.
   Their examples are still compiled and linked by rustc in the doctest process (step L), which
   is why nushell's second run compiles 123 where it compiled 78 and left nu-protocol to
-  rustdoc. On ripgrep the run fails: one of globset's examples, built from functions the store
-  had, crashes ([#101](https://github.com/indexable-inc/ra-jit/issues/101)). That bug was
-  there before; rustdoc hid it.
+  rustdoc. On ripgrep the run failed on about half the runs: one of globset's examples crashed
+  ([#101](https://github.com/indexable-inc/ra-jit/issues/101), a library built with fewer
+  features than cargo's; fixed under A below). That bug was there before; rustdoc hid it.
 - **`check`** is plain `cargo check` (D) and moves with what the steps before it left built.
 - **The fixture of `harness/norustc.py`**, in CI on Linux x86-64, Linux AArch64 and macOS
   arm64 under both backends: the cold build 74 to 76 rustc runs before A, 18 now; edits 5 (277
@@ -425,7 +425,17 @@ through, with `ra-jit cargo status` printing the counts, and the bench apps coun
 (`harness/norustc/count.py` is still run by hand). The doctest bug: the doctest process planned
 the workspace's root package and ran the build scripts with the member's features, which the
 root does not have; it now selects the package (`--package`, from `CARGO_PKG_NAME`) and plans
-the package rustdoc runs the examples in.
+the package rustdoc runs the examples in. That still built the library as a build of its package
+alone does, while cargo built the libraries the examples link against with the features of the
+whole build it was asked for: under `--workspace` a dependency two packages share has the
+features of both, and ra-jit laid out its types without them
+([#101](https://github.com/indexable-inc/ra-jit/issues/101): globset's example freed a
+regex-automata cache whose `dfa-onepass` part ra-jit's code never wrote, and crashed when the
+stack held a bad pointer there). `cargo ra-jit test` now tells the doctest process its own
+selection (`RA_JIT_DOCTEST_BUILD`: packages, `--workspace`, features, profile, and where it was
+run), and the library is planned from the same `cargo build --unit-graph`;
+`cargo_ra_jit.py`'s flags check has a case whose layout differs by a feature only another
+package turns on.
 
 **B. ra-jit answers rustc's questions.** ([#82](https://github.com/indexable-inc/ra-jit/issues/82)) `-vV`, `--print cfg`, `sysroot`, `target-libdir`,
 `target-spec-json`, `file-names`, `split-debuginfo` and the rest are answered by ra-jit from

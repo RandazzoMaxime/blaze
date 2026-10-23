@@ -40,7 +40,7 @@ pub(crate) fn command(args: impl Iterator<Item = String>) -> anyhow::Result<()> 
     }
     let code = match asked {
         Asked::Build(asked) => match asked.only_cargo() {
-            None if asked.flags.doc => run::only_doc_tests(&asked.typed)?,
+            None if asked.flags.doc => run::only_doc_tests(&asked, &asked.typed)?,
             Some(reason) => {
                 say::fallback(&reason, &format!("this is `cargo {}`", asked.subcommand.name()));
                 let typed = std::iter::once(asked.subcommand.name().to_owned()).chain(asked.typed);

@@ -1,7 +1,12 @@
 //! What cargo builds: the units of a build of one package, with the features and the profile
 //! of each. `cargo metadata` has neither as a build of a single package has them.
 
-use std::{collections::BTreeSet, path::Path, process::Stdio, str::FromStr};
+use std::{
+    collections::BTreeSet,
+    path::{Path, PathBuf},
+    process::Stdio,
+    str::FromStr,
+};
 
 use anyhow::Context;
 use cargo_platform::{Cfg, Platform};
@@ -36,6 +41,11 @@ pub(crate) struct Selection {
     /// the configuration files can.
     #[serde(default)]
     pub(crate) config: Vec<String>,
+    /// Where the build was asked for, when not in the package's directory: the manifest given
+    /// with `--manifest-path`, or the directory cargo looked for one from. What `--workspace`,
+    /// `-p` and no package at all select is decided there.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) asked_in: Option<PathBuf>,
 }
 
 impl Default for Selection {
@@ -50,6 +60,7 @@ impl Default for Selection {
             target: None,
             dev_deps: false,
             config: Vec::new(),
+            asked_in: None,
         }
     }
 }
@@ -485,10 +496,18 @@ impl Plan {
     ) -> anyhow::Result<Plan> {
         // The unit graph is the only place cargo says which features and which profile each
         // package of one build has.
-        let dir = manifest.parent().unwrap_or(Path::new("."));
+        let (dir, manifest) = match &selection.asked_in {
+            Some(asked_in) if asked_in.is_dir() => (asked_in.as_path(), None),
+            Some(asked_in) => {
+                (asked_in.parent().unwrap_or(Path::new(".")), Some(asked_in.as_path()))
+            }
+            None => (manifest.parent().unwrap_or(Path::new(".")), Some(manifest)),
+        };
         let mut command = asked.cargo(dir);
         command.args(["build", "--unit-graph", "-Z", "unstable-options"]);
-        command.arg("--manifest-path").arg(manifest);
+        if let Some(manifest) = manifest {
+            command.arg("--manifest-path").arg(manifest);
+        }
         command.args(selection.flags());
         if selection.dev_deps {
             command.arg("--all-targets");

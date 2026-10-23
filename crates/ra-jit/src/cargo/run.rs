@@ -8,6 +8,8 @@ use std::{
 
 use anyhow::Context as _;
 
+use crate::plan::Selection;
+
 use super::{
     cli::Invocation,
     say,
@@ -127,17 +129,22 @@ pub(crate) fn doc_tests(asked: &Invocation) -> anyhow::Result<i32> {
     args.extend(asked.positional.iter().cloned());
     args.push("--".to_owned());
     args.extend(asked.trailing.iter().cloned());
-    only_doc_tests(&args)
+    only_doc_tests(asked, &args)
 }
 
 /// Runs `cargo test` with `args`, which ask for the doc tests alone, with ra-jit in
-/// rustdoc's place.
-pub(crate) fn only_doc_tests(args: &[String]) -> anyhow::Result<i32> {
+/// rustdoc's place. ra-jit is told the build `asked` is, whose features cargo builds the
+/// libraries with.
+pub(crate) fn only_doc_tests(asked: &Invocation, args: &[String]) -> anyhow::Result<i32> {
     let rustdoc = std::env::var_os("RUSTDOC").unwrap_or_else(|| "rustdoc".into());
+    let cwd = std::env::current_dir()?;
+    let asked_in = asked.flags.manifest_path.as_ref().map_or(cwd.clone(), |it| cwd.join(it));
+    let build = Selection { asked_in: Some(asked_in), ..asked.selection() };
     let mut cargo = crate::doctest::as_asked(cargo_path());
     cargo
         .env("RUSTDOC", std::env::current_exe().context("finding ra-jit itself")?)
-        .env(crate::doctest::ENABLED, rustdoc);
+        .env(crate::doctest::ENABLED, rustdoc)
+        .env(crate::doctest::BUILD, serde_json::to_string(&build)?);
     cargo.arg("test").args(args);
     as_built(&mut cargo)?;
     Ok(exit_code(cargo.status().context("running `cargo test --doc`")?))
