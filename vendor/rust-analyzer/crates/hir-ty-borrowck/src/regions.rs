@@ -321,7 +321,8 @@ pub(super) fn opaque_captures(
                 RegionKind::ReEarlyParam(it) => {
                     named.insert(it.index as usize);
                 }
-                RegionKind::ReStatic | RegionKind::ReBound(..) => (),
+                // `+ '_`, the lifetime elision's, which no argument is.
+                RegionKind::ReStatic | RegionKind::ReBound(..) | RegionKind::ReError(_) => (),
                 _ => unknown = true,
             }
             region
@@ -1176,8 +1177,19 @@ impl<'db> Builder<'_, '_, 'db> {
                         {
                             // Under the clause's own binder, the signature's is one further out.
                             let binder = rustc_type_ir::INNERMOST.shifted_in(1);
-                            match self.signature_region(region, binder).and_then(rv_of) {
-                                Some(rv) => outlived.push(rv),
+                            // A lifetime the bound elides, `+ '_`, rustc captures too.
+                            let elided = matches!(region.kind(), RegionKind::ReError(_));
+                            let rv = match elided {
+                                true => self.elided_output.and_then(rv_of),
+                                false => self.signature_region(region, binder).and_then(rv_of),
+                            };
+                            match rv {
+                                Some(rv) => {
+                                    outlived.push(rv);
+                                    if elided && !choices.contains(&rv) {
+                                        choices.push(rv);
+                                    }
+                                }
                                 None => known = false,
                             }
                         }
