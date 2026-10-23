@@ -555,6 +555,21 @@ impl<'a, 'db> Checker<'a, '_, 'db> {
         }
     }
 
+    fn field_with_regions(&self, place: PlaceRef<'_>) -> bool {
+        place.projection.iter().enumerate().any(|(at, elem)| {
+            if !matches!(elem, ProjectionElem::Field(_)) {
+                return false;
+            }
+            let ty = self.ctx.place_ty(self.body, place.local, &place.projection[..=at]).ty;
+            let mut regions = false;
+            rustc_type_ir::fold_regions(self.ctx.infcx.interner, ty, |region, _| {
+                regions = true;
+                region
+            });
+            regions
+        })
+    }
+
     fn report(&mut self, code: &'static str, span: MirSpan, message: String) {
         self.errors.push(Some(BorrowckDiagnostic { code, span, message, at_signature: false }));
     }
@@ -616,7 +631,21 @@ impl<'a, 'db> Checker<'a, '_, 'db> {
                         span,
                     );
                 } else {
-                    self.consume_rvalue(location, rvalue, span);
+                    // rustc reports a conflict of `x += 1` once, for its read, but twice
+                    // through a field whose type has lifetimes (`*s.pointer += 1`): renumbering
+                    // gives the read's and the write's places different field types.
+                    let read = match span {
+                        MirSpan::ExprId(expr) => match self.ctx.store[expr] {
+                            hir_def::hir::Expr::BinaryOp {
+                                lhs,
+                                op: Some(hir_def::hir::BinaryOp::Assignment { op: Some(_) }),
+                                ..
+                            } if self.field_with_regions(place) => MirSpan::ExprId(lhs),
+                            _ => span,
+                        },
+                        _ => span,
+                    };
+                    self.consume_rvalue(location, rvalue, read);
                 }
                 self.mutate_destination(location, place, span);
             }
