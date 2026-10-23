@@ -84,7 +84,12 @@ All of these are rustc's, written from `compiler/rustc_borrowck` at the pinned n
   to, so `for x in &mut v` keeps `v` borrowed in the `IterMut<'a, T>` that
   `<&'a mut Vec<T> as IntoIterator>::IntoIter` is. Unsizing an array to a slice keeps its
   element type (`[T; N]: Unsize<[T]>`), so `&mut [&'a T; 1]` as `&mut [&'b T]` makes `'a`
-  and `'b` one. A parameter that elides one lifetime has
+  and `'b` one; unsizing inside a struct (`&RefCell<T>` to `&RefCell<dyn Read>`) unsizes the
+  argument its last field does and keeps the others. A closure typed against an expected
+  signature with no `for<'a>` has it, so its parameters' types are the `Fn` bound's arguments
+  (`|z: &[i32]|` passed as `F: FnOnce(S)` takes the `S` it is called with). A variable with a
+  written type is related to it as rustc's user type annotation, so an error through it is
+  blamed on the annotation. A parameter that elides one lifetime has
   it once however often its type does (`s: S2` with `type S2<'a> = S<'a, 'a>`), and
   `Self::Target` in an impl for `S<'_, '_>` has the impl's lifetimes.
 - Raw pointers: a reference coerced to one relates what it points to, raw and function
@@ -252,8 +257,8 @@ With no borrow checker, the 245 units rustc accepts would pass. Now:
 
 | Mode | In scope | Pass | rustc accepts, ra-jit too | rustc rejects, same errors |
 |---|---|---|---|---|
-| Polonius | 1579 | 1451 (91.9%) | 245 of 245 | 1206 of 1334 |
-| NLL | 1577 | 1447 (91.8%) | 226 of 226 | 1221 of 1351 |
+| Polonius | 1579 | 1455 (92.1%) | 245 of 245 | 1210 of 1334 |
+| NLL | 1577 | 1451 (92.0%) | 226 of 226 | 1225 of 1351 |
 
 463 units are out of scope; 344 of them need a nightly feature. CI runs the scoring on Linux
 and fails below a floor a few units under the count there.
@@ -267,10 +272,10 @@ just, axum, nushell, delta, eza, tokei and starship it finds nothing, nor on the
 
 Every failing unit is one where rustc gives an error ra-jit does not, or gives it on another
 line or with another code. By what is wrong, most first: 14 "lifetime may not live long
-enough" and 10 E0597 not reported, 9 "lifetime may not live long enough" on another line,
-9 with only an error rustc does not give, 8 each of E0716 and E0700, 7 each of E0507 and E0521,
-6 of E0310, and 5 each of E0309, E0311 and higher-ranked errors not reported, then a long
-tail. The causes, grouped:
+enough" not reported, 9 with only an error rustc does not give, 8 each of E0716, E0597 and
+E0700 not reported, 8 "lifetime may not live long enough" on another line, 7 of E0507, 6 each
+of E0521 and E0310, and 5 each of E0309, E0311 and higher-ranked errors not reported, then a
+long tail. The causes, grouped:
 
 - **Higher-ranked regions and placeholders** (`for<'a>` bounds, closures with higher-ranked
   signatures): rustc checks them with placeholders in universes; ra-jit does not yet, and
@@ -292,7 +297,8 @@ tail. The causes, grouped:
 - **Trait selection's region obligations**: an impl's `T: 'static` proven at an unsizing
   cast. A bound on a closure's type is not proven through the solver: rust-analyzer gives a
   closure one signature, `fn(&'1 T)` for one `'1`, where rustc's is `for<'a> fn(&'a T)`, so
-  proving it would tie every call's borrow to one region.
+  proving it would tie every call's borrow to one region. Only an `Fn` bound with no
+  `for<'a>`, on a closure typed against one, relates its parameters.
 - **Differences in rust-analyzer's MIR lowering** (below).
 
 ## What depends on rust-analyzer's MIR lowering
