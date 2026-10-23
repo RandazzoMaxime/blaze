@@ -6,6 +6,7 @@
 mod answers;
 mod borrowck;
 mod cargo;
+mod check;
 mod content;
 mod dep_info;
 mod deps;
@@ -5849,6 +5850,9 @@ fn main() -> anyhow::Result<()> {
     }
     if std::env::var_os("RA_JIT_WRAPS_RUSTC").is_some() {
         return stub::command(std::env::args_os().skip(1));
+    }
+    if std::env::args().nth(1).as_deref() == Some("--check") {
+        return check::serve(Args::parse(std::env::args().skip(2))?);
     }
     if std::env::args().nth(1).as_deref() == Some("deps") {
         return deps::command(std::env::args().skip(2));
