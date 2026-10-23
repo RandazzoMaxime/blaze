@@ -57,7 +57,7 @@ Each fix is its own commit on `main` with a regression case (read, the commits):
 | LLVM's `instcombine` named in the `-O3` pipeline aborts the process when one run leaves work (AArch64) | whole-program build | `llvm.rs` test |
 | an `asm!` of a feature LLVM's AArch64 assembler has no `.arch_extension` for (constant_time_eq's `mrs {}, dit`) was refused | the Linux aarch64 build | `asm.rs` test, corpus `inline_asm` |
 | a body imported through another was called with the importer's type for it, which LLVM takes to be undefined: `ptr::write::<ForOf>` lost its write | the parser crashed in the whole-program build with imports | `llvm.rs` test |
-| a function declared in a trait's provided method was compiled only when nothing was rustc's, so a call of it by ra-jit's name had nothing to link to | ripgrep's and helix's whole programs did not link | `wholeprogram.py` `provided_fn` |
+| a function declared in a trait's provided method was compiled only when nothing was rustc's, so a call of it by ra-jit's name had nothing to link to | ripgrep's and helix's whole programs did not link | `wholeprogram.py` `trait_block` (fixed on main the same day, #160) |
 | `simd_reduce_max`/`min` (NEON `vmaxvq_u8`) were not compiled | 164 functions | breaker `simd_reduce_max` |
 | a `Box<[T], &Arena>` (an allocator with a size) was not dereferenced, and its drop read the pointer at offset 0 | 151 functions | breaker crate `allocated` |
 | a borrowed constant with a cast in it (`&[b"browser" as &[u8], b"module"][..]`) was built on the stack, not promoted, and its slice outlived the frame | `new Bun.Transpiler()` crashed in the dev-loop build | breaker `promoted_index_of_casts` |
