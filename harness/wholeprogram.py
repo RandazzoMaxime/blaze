@@ -16,8 +16,11 @@ the same.
   lib_alloc      the `#[global_allocator]` is in a library of the workspace
   cfg_alloc      a `#[global_allocator]` under a `#[cfg]` that is false, as ripgrep's
   trait_block    a method a trait provides calls a function declared in its body
+  c_main         `#![no_main]` and a `main` of C's, as bun's, with a body of 16 384 statements
 
-The backend is `RA_JIT_BACKEND`'s; `--release` builds both with the release profile.
+The backend is `RA_JIT_BACKEND`'s; `--release` builds both with the release profile. With
+LLVM, a build of a whole program, whichever `main` it has, leaves no function to Cranelift
+for being large or for its handlers, as a build that edits follow does.
 """
 import argparse, os, shutil, sys, tempfile
 
@@ -25,7 +28,9 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 import apps
 
-CASES = ["default_alloc", "custom_alloc", "lib_alloc", "cfg_alloc", "trait_block"]
+CASES = ["default_alloc", "custom_alloc", "lib_alloc", "cfg_alloc", "trait_block", "c_main"]
+# What `backend::Backend::emit` leaves to Cranelift only in a build that is not of a whole program.
+NOT_WHOLE = ("a body larger than LLVM is given in a build", "a handler LLVM lowers only for a tier")
 
 
 def check(ws, case, release):
@@ -37,6 +42,10 @@ def check(ws, case, release):
         fx.ra_jit_build()
     except SystemExit as failed:
         return f"  ra-jit's build failed: {str(failed)[-800:]}"
+    log = open(os.path.join(fx.work, "all.stderr")).read()
+    left = [line.strip() for line in log.splitlines() if line.strip().endswith(NOT_WHOLE)]
+    if left:
+        return "  not built as a whole program, LLVM left to Cranelift:\n" + "\n".join(f"    {it}" for it in left)
     program, _ = apps.reference(ws, {"package": case}, "release" if release else "debug")
     theirs, ours = fx.behaviour(program), fx.behaviour(fx.binary)
     if theirs == ours:

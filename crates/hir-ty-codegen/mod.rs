@@ -544,6 +544,9 @@ pub struct Roots<'a> {
     /// The `main` of a program rustc built nothing of: the `main` the C runtime calls is
     /// then ours to write as well.
     pub start: Option<FunctionId>,
+    /// Whether rustc built nothing of any crate of the program but the standard library's,
+    /// whatever its `main` is: bun's is C's, and every one of its functions is an entry.
+    pub whole: bool,
     /// The statics a linker or a runtime finds though no code names them, in the crates
     /// rustc built nothing of: `#[used]` ones, and those put in a section by name.
     pub kept: &'a [StaticId],
@@ -721,7 +724,7 @@ impl CodegenUnit {
         } else {
             tiers.clear();
         }
-        if roots.start.is_some() {
+        if (roots.start.is_some() || roots.whole) && !backend::edits_follow() {
             backend::set_whole_program();
         }
         let mut own_statics = OwnStatics::new(

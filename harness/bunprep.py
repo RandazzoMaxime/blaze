@@ -173,9 +173,40 @@ def link_args(tree):
     # rustc links with -nodefaultlibs, so the C++ library clang++ would add is named: on Linux
     # the archive, as bun's `-static-libstdc++` has it, which no loader has to find.
     args.append("-lc++" if darwin else "-l:libstdc++.a" if "-static-libstdc++" in flags else "-lstdc++")
+    system = system_parts(tree, os.environ)
+    if system:
+        args.append(f"-L{system}/lib")
     path = os.path.join(out, "ra-jit-link.args")
     open(path, "w").write("\n".join(args) + "\n")
     return path
+
+
+# What bun takes of macOS itself rather than building (ICU, `libicucore`, and SQLite), which
+# nixpkgs' SDK leaves out of the headers and stubs it ships.
+SYSTEM = ["include/unicode", "include/sqlite3.h", "include/sqlite3ext.h", "lib/libicucore.tbd", "lib/libsqlite3.tbd"]
+
+
+def system_parts(tree, env):
+    """On macOS, a directory with what of `SYSTEM` Apple's SDK has and the SDK the compiler is
+    given does not: `include` for the compiler, `lib` for the link. `None` where nothing is
+    missing."""
+    sdk = env.get("SDKROOT")
+    if sys.platform != "darwin" or (sdk and os.path.exists(os.path.join(sdk, "usr/include/unicode/utypes.h"))):
+        return None
+    plain = {k: v for k, v in env.items() if k not in ("SDKROOT", "DEVELOPER_DIR")}
+    apple = subprocess.run(["/usr/bin/xcrun", "--sdk", "macosx", "--show-sdk-path"], env=plain,
+                           capture_output=True, text=True, check=True).stdout.strip()
+    system = os.path.join(build_dir(tree), "ra-jit-system")
+    for path in SYSTEM:
+        target = os.path.join(apple, "usr", path)
+        if not os.path.exists(target):
+            raise SystemExit(f"bunprep: bun's build on macOS needs what the system has of it, and {target} is missing")
+        link = os.path.join(system, path)
+        os.makedirs(os.path.dirname(link), exist_ok=True)
+        if os.path.lexists(link):
+            os.remove(link)
+        os.symlink(target, link)
+    return system
 
 
 def overlay(tree):
@@ -236,6 +267,9 @@ def native(tree, head):
     env = rust_env(os.environ)
     if sys.platform == "darwin" and not env.get("SDKROOT"):
         env["SDKROOT"] = subprocess.run(["xcrun", "--show-sdk-path"], capture_output=True, text=True, check=True).stdout.strip()
+    system = system_parts(tree, env)
+    if system:
+        env["NIX_CFLAGS_COMPILE"] = f"{env.get('NIX_CFLAGS_COMPILE', '')} -isystem {system}/include".strip()
     bun = env.get("BUN_BOOTSTRAP") or shutil.which("bun", path=env["PATH"]) or "bun"
     print(f"bunprep: bun's own build of {head[:10]}'s C and C++ in {tree} (once per revision)", flush=True)
     log = open(os.path.join(tree, "bunprep-build.log"), "w")
@@ -248,11 +282,12 @@ def native(tree, head):
             raise SystemExit(f"bun's own build failed (the log is {tree}/bunprep-build.log):\n"
                              + open(log.name).read()[-3000:])
 
-    if sys.platform != "darwin":
-        # A release build without LTO compresses its objects' debug sections with zstd, which
-        # nixpkgs' LLVM is built without ("cannot compress debug sections (zstd not enabled)");
-        # bun's ELF link compresses them with zlib, and so do its objects here.
-        edit(os.path.join(tree, "scripts/build/flags.ts"), 'flag: ["-g", "-gz=zstd"],', 'flag: ["-g", "-gz=zlib"],')
+    # A release build without LTO compresses its objects' debug sections with zstd, which
+    # nixpkgs' LLVM is built without ("cannot compress debug sections (zstd not enabled)");
+    # bun's ELF link compresses them with zlib, and so do its objects here. Mach-O has no
+    # compressed sections, and the objects there are left as they are.
+    edit(os.path.join(tree, "scripts/build/flags.ts"), 'flag: ["-g", "-gz=zstd"],',
+         'flag: ["-g"],' if sys.platform == "darwin" else 'flag: ["-g", "-gz=zlib"],')
     run([bun, "scripts/build.ts", f"--profile={PROFILE}", "--lto=off", "--configure-only"])
     run(["ninja", "-C", build_dir(tree), *native_targets(tree)])
     log.close()

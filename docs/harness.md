@@ -105,6 +105,8 @@ with reasons. The daemon's log says `backend: llvm -O2 fast emit` when LLVM is i
 | `programs.py` | Two programs of one workspace built by one daemon. With `RA_JIT_ALONE=1` rustc builds stand-ins for the workspace's crates and the daemon compiles every function of both programs, `main` too: under LLVM an edit of what both use has to reach each ([#63](https://github.com/indexable-inc/ra-jit/issues/63)) |
 | `worktrees.py` | Several checkouts of one workspace built by one daemon, edited independently |
 | `includes.py` | Edits to a file only `include!` names |
+| `latelisted.py` | What a file named by `include!` through a build script's variable declares is listed in its crate though the daemon listed the crate beside cargo's build before it read the file, as bun's generated bindings are: an edit that adds a function then patches a few functions, not every one the file declares |
+| `rustsrc.py` | A toolchain without `rust-src` is turned down, saying how to install it |
 | `splices.py` | Edits that are hard on the splice: thread-locals, statics, vtables, function pointers, closures, panics, foreign calls. Counts how each step was linked |
 | `farsplices.py` | Splices into a binary whose code is further from its end than an AArch64 branch reaches |
 | `farfile.py` | Edits of a program whose file is 2.3 GB of a section nothing loads, as a debug build of bevy's is mostly debug info: bodies, a caller, a new function and taking it back each have to be spliced, which a patch placed as far from the code as it is behind the file is not ([#79](https://github.com/indexable-inc/ra-jit/issues/79)). Linux |
@@ -145,7 +147,11 @@ with reasons. The daemon's log says `backend: llvm -O2 fast emit` when LLVM is i
 ### Timing
 
 `bench.py`, `editloop.py`, `edittimes.py`, `scaling.py`, `dxedits.py`, `linkbench.py`,
-`shapes.py`, `heap.py`, `heapfold.py`, `fnincr.py`, `realbench.py`, `spare.py` and `live_latency.py` measure and do not gate.
+`shapes.py`, `heap.py`, `heapfold.py`, `memsplit.py`, `fnincr.py`, `realbench.py`, `spare.py` and `live_latency.py` measure and do not gate.
+`memsplit.py` says what each process of the daemon holds (the daemon, the project's worker, the
+spare) and of what kind of page, once ready, once the daemon has built its own base and after
+edits, with `--env` to try an allocator setting
+([research/daemon-memory.md](research/daemon-memory.md#2026-10-23-the-own-base-and-the-allocator)).
 `spare.py` starts a daemon with a tiny project, then builds one of `bench.py`'s projects under it
 from an empty target directory and again once cargo has built it, each until the daemon is
 ready, for builds of ra-jit given as `--variant LABEL:BIN[:VAR=VALUE...]` in interleaved

@@ -511,6 +511,11 @@ def project(name, spec, work, mode):
         ask = asked_by(os.path.join(ws, "target-ref/debug", spec["client"]))
     runs("cold run")
     warm("warm-up")
+    # The daemon loads the workspace with what cargo said of its build scripts and proc
+    # macros, and builds none of them again for it.
+    if os.path.isdir(os.path.join(ws, "target", "rust-analyzer")):
+        row["wrong"].append("warm-up: the daemon built the build scripts and proc macros again")
+        print("  warm-up      the daemon built the build scripts and proc macros again", flush=True)
     step("warm build", "build", build, status)
     runs("warm run")
     step("cold test", "test", test, test_results)
