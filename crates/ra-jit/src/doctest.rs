@@ -22,13 +22,18 @@ use anyhow::Context as _;
 use ide_db::{RootDatabase, base_db::SourceDatabase};
 use syntax::Edition;
 
-use crate::cargo::plan::LinkLine;
+use crate::{cargo::plan::LinkLine, plan::Selection};
 use extract::{Example, Marks};
 use program::{Frame, Program};
 
 /// The variable that makes `ra-jit` stand in for rustdoc. Its value is the rustdoc to run for
 /// what is left to it.
 pub(crate) const ENABLED: &str = "RA_JIT_RUSTDOC";
+
+/// The variable that tells ra-jit as rustdoc the build `cargo test --doc` was asked for, as
+/// JSON: cargo builds the libraries the examples link against with its features, which a
+/// package shares with the others it selects, not with those of a build of the package alone.
+pub(crate) const BUILD: &str = "RA_JIT_DOCTEST_BUILD";
 
 /// The code a test harness ends with when a test failed.
 const FAILED: i32 = 101;
@@ -45,6 +50,8 @@ pub(crate) struct Asked {
     rustc_args: Vec<String>,
     target: Option<String>,
     features: Vec<String>,
+    /// The build cargo was asked for, when ra-jit asked it.
+    build: Option<Selection>,
     wanted: Wanted,
     /// Where the programs are built.
     dir: PathBuf,
@@ -180,6 +187,10 @@ impl Asked {
         }
         let wanted =
             Wanted::parse(&test_args).map_err(|arg| format!("the tests are run with `{arg}`"))?;
+        let build = match std::env::var(BUILD) {
+            Ok(build) => Some(serde_json::from_str(&build).map_err(|it| format!("{BUILD}: {it}"))?),
+            Err(_) => None,
+        };
         Ok(Asked {
             crate_name: crate_name.ok_or("rustdoc is not told the name of the crate")?,
             source: source.ok_or("rustdoc is given no source file")?,
@@ -188,6 +199,7 @@ impl Asked {
             rustc_args,
             target,
             features,
+            build,
             wanted,
             dir: std::env::temp_dir().join(format!("ra-jit-doctest-{}", std::process::id())),
         })
@@ -220,16 +232,29 @@ impl Asked {
             "--out".to_owned(),
             self.object().display().to_string(),
             "--dev-deps".to_owned(),
-            "--no-default-features".to_owned(),
         ];
-        // The build scripts run from the workspace's root, whose package is another one: the
-        // features are this package's once it is the one selected. `package/feature` would name
-        // a dependency of the root's, which this package need not be.
-        if let Some(package) = std::env::var("CARGO_PKG_NAME").ok().filter(|it| !it.is_empty()) {
-            args.extend(["--package".to_owned(), package]);
-        }
-        if !self.features.is_empty() {
-            args.extend(["--features".to_owned(), self.features.join(",")]);
+        match &self.build {
+            // Built as cargo built it: a dependency of this package and of another one cargo
+            // selected has the features both ask for, and its types are laid out with them.
+            Some(build) => {
+                args.extend(Selection { target: None, ..build.clone() }.flags());
+                if let Some(asked_in) = &build.asked_in {
+                    args.extend(["--asked-in".to_owned(), asked_in.display().to_string()]);
+                }
+            }
+            // The build scripts run from the workspace's root, whose package is another one:
+            // the features are this package's once it is the one selected. `package/feature`
+            // would name a dependency of the root's, which this package need not be.
+            None => {
+                args.push("--no-default-features".to_owned());
+                let package = std::env::var("CARGO_PKG_NAME").ok().filter(|it| !it.is_empty());
+                if let Some(package) = package {
+                    args.extend(["--package".to_owned(), package]);
+                }
+                if !self.features.is_empty() {
+                    args.extend(["--features".to_owned(), self.features.join(",")]);
+                }
+            }
         }
         if let Some(target) = &self.target {
             args.extend(["--target".to_owned(), target.clone()]);
