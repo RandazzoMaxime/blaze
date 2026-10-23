@@ -4663,6 +4663,7 @@ impl<'db> Builder<'_, '_, 'db> {
                         false => trait_ref,
                     };
                     self.trait_args_outlive(trait_ref, at);
+                    self.object_assoc_bounds(trait_ref, at);
                     // Of a call written as one: `map[i] = v` calls `IndexMut::index_mut`, which
                     // is E0594 where only `Index` is implemented.
                     if self.prove(trait_ref, at)
@@ -4713,6 +4714,55 @@ impl<'db> Builder<'_, '_, 'db> {
 
     /// The trait's where clauses on its arguments, which hold where `trait_ref` is well-formed:
     /// `trait Trait<ARG: 'static>` of `Trait<&'a str>` is `'a: 'static`.
+    /// Of a trait object proving its own trait, what the trait's bounds on an associated type
+    /// need of the type the object says it is, as rustc's object candidate checks them:
+    /// `dyn for<'a> Tr<'a, A = &'b u8>: Tr<'static>` with `type A: 'a` needs `'b: 'static`.
+    fn object_assoc_bounds(
+        &mut self,
+        trait_ref: rustc_type_ir::TraitRef<hir_ty::next_solver::DbInterner<'db>>,
+        at: At,
+    ) {
+        use rustc_type_ir::inherent::Term as _;
+        let TyKind::Dynamic(predicates, _) = trait_ref.self_ty().kind() else { return };
+        if rustc_type_ir::TypeVisitableExt::has_escaping_bound_vars(&trait_ref) {
+            return;
+        }
+        let interner = self.interner();
+        for predicate in predicates.iter() {
+            let rustc_type_ir::ExistentialPredicate::Projection(projection) =
+                predicate.skip_binder()
+            else {
+                continue;
+            };
+            let hir_ty::next_solver::TermId::TypeAliasId(assoc) = projection.def_id.0 else {
+                continue;
+            };
+            if assoc.lookup(self.ctx.db).container != ItemContainerId::TraitId(trait_ref.def_id.0) {
+                continue;
+            }
+            let Some(term) = projection.term.as_type() else { continue };
+            if rustc_type_ir::TypeVisitableExt::has_escaping_bound_vars(&term) {
+                continue;
+            }
+            let assoc = hir_ty::next_solver::SolverDefId::TypeAliasId(assoc);
+            let bounds = rustc_type_ir::Interner::item_bounds(interner, assoc);
+            for clause in bounds.iter_instantiated(interner, trait_ref.args.as_slice()) {
+                if let ClauseKind::TypeOutlives(OutlivesPredicate(bounded, region)) =
+                    clause.kind().skip_binder()
+                    && let TyKind::Alias(alias) = bounded.kind()
+                    && alias.kind.def_id() == assoc
+                    && !matches!(region.kind(), RegionKind::ReBound(..))
+                {
+                    let region = match region.kind() {
+                        RegionKind::ReStatic => self.static_region(),
+                        _ => region,
+                    };
+                    self.type_outlives(term, region, at);
+                }
+            }
+        }
+    }
+
     fn trait_args_outlive(
         &mut self,
         trait_ref: rustc_type_ir::TraitRef<hir_ty::next_solver::DbInterner<'db>>,

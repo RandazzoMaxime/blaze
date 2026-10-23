@@ -305,8 +305,8 @@ With no borrow checker, the 245 units rustc accepts would pass. Now:
 
 | Mode | In scope | Pass | rustc accepts, ra-jit too | rustc rejects, same errors |
 |---|---|---|---|---|
-| Polonius | 1580 | 1522 (96.3%) | 245 of 245 | 1277 of 1335 |
-| NLL | 1578 | 1518 (96.2%) | 226 of 226 | 1292 of 1352 |
+| Polonius | 1580 | 1523 (96.4%) | 245 of 245 | 1278 of 1335 |
+| NLL | 1578 | 1519 (96.3%) | 226 of 226 | 1293 of 1352 |
 
 461 units are out of scope; 344 of them need a nightly feature. CI runs the scoring on Linux
 and fails below a floor a few units under the count there, on any error in a unit rustc
@@ -321,7 +321,7 @@ files, errors and files it panicked on; a panic makes it fail.
 ## What is left
 
 Every failing unit is one where rustc gives an error ra-jit does not, or gives it on another
-line or with another code. By what is wrong, most first: 8 "lifetime may not live long
+line or with another code. By what is wrong, most first: 7 "lifetime may not live long
 enough" not reported, 3 on another line or with another code, 2 with only an error rustc does
 not give, 5 each of E0507, E0310 and higher-ranked errors, 4 each of E0309 and E0716, 3
 each of E0311, E0597 and E0700 not reported, then a long tail. The causes, grouped:
