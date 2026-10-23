@@ -348,6 +348,9 @@ struct Resolver<'a> {
     /// The crates of the workspace, which rustc compiled with a symbol for each function
     /// when `linked` is there.
     members: Arc<FxHashSet<ide_db::base_db::Crate>>,
+    /// The crates the programs are made of, which a file that several crates share is read as
+    /// a module of.
+    programs: Option<Arc<FxHashSet<ide_db::base_db::Crate>>>,
 }
 
 /// The standard library ra-jit built before the program ([`std_unit`]).
@@ -465,6 +468,15 @@ impl<'a> Resolver<'a> {
             in_full: Arc::default(),
             prebuilt,
             members: args.members.clone(),
+            programs: listed.programs(db),
+        }
+    }
+
+    /// What reads the syntax, with each file a module of the crates of the programs.
+    fn sema(&self) -> hir::Semantics<'a, RootDatabase> {
+        match &self.programs {
+            Some(crates) => hir::Semantics::new_within(self.db, crates.clone()),
+            None => hir::Semantics::new(self.db),
         }
     }
 
@@ -821,7 +833,7 @@ impl Resolver<'_> {
             }
             return Some(path);
         }
-        let sema = hir::Semantics::new(self.db);
+        let sema = self.sema();
         let source = module.definition_source(self.db);
         let hir::ModuleSource::BlockExpr(block) = source.value else { return None };
         let range = block.syntax().text_range();
@@ -1037,6 +1049,7 @@ impl SymbolResolver for Resolver<'_> {
                 let (shared_paths, linked) = (self.shared_paths.clone(), self.linked.clone());
                 let (in_full, prebuilt) = (self.in_full.clone(), self.prebuilt.clone());
                 let members = self.members.clone();
+                let programs = self.programs.clone();
                 scope.spawn(move || {
                     let resolver = Resolver {
                         db: &db,
@@ -1053,6 +1066,7 @@ impl SymbolResolver for Resolver<'_> {
                         in_full,
                         prebuilt,
                         members,
+                        programs,
                     };
                     hir::attach_db(&db, || {
                         loop {
@@ -1137,7 +1151,7 @@ impl SymbolResolver for Resolver<'_> {
     fn closure(&self, owner: FunctionId, expr: hir_def::hir::ExprId) -> Option<String> {
         let source_map = &Body::with_source_map(self.db, owner.into()).1;
         let written = source_map.expr_syntax(expr).ok()?;
-        let sema = hir::Semantics::new(self.db);
+        let sema = self.sema();
         let node = written.value.to_node(&sema.parse_or_expand(written.file_id));
         let mut inner = Vec::new();
         for node in sema.ancestors_with_macros(node.syntax().clone()) {
@@ -1236,7 +1250,7 @@ impl SymbolResolver for Resolver<'_> {
 
     fn declared_in(&self, adt: hir_def::AdtId) -> Option<FunctionId> {
         let adt = hir::Adt::from(adt);
-        let sema = hir::Semantics::new(self.db);
+        let sema = self.sema();
         let source = sema.source(adt)?;
         let mut around = sema.ancestors_with_macros(source.value.syntax().clone()).skip(1);
         let func = ast::Fn::cast(around.find(is_definition)?)?;
@@ -1304,7 +1318,7 @@ impl SymbolResolver for Resolver<'_> {
             return self.table.get(&path).map(str::to_owned).or_else(|| private(&path));
         }
         // A static in a body is named after the items around it, which only the syntax knows.
-        let sema = hir::Semantics::new(self.db);
+        let sema = self.sema();
         let source = sema.source(it)?;
         let mut names = vec![name.as_str().to_owned()];
         let mut closures = Vec::new();
@@ -4517,6 +4531,7 @@ fn broken_in(
     edited: &[vfs::FileId],
     watched: &Sources,
     root: &Path,
+    within: Option<Arc<FxHashSet<ide_db::base_db::Crate>>>,
 ) -> Option<String> {
     let threads = std::thread::available_parallelism().map_or(1, |it| it.get());
     let config = ide_diagnostics::DiagnosticsConfig::test_sample();
@@ -4524,17 +4539,18 @@ fn broken_in(
     let mut found: Vec<_> = std::thread::scope(|scope| {
         let checks: Vec<_> = (0..threads.min(edited.len()))
             .map(|part| {
-                let (db, config) = (db.clone(), &config);
+                let (db, config, within) = (db.clone(), &config, &within);
                 scope.spawn(move || {
                     let files = edited.iter().skip(part).step_by(threads);
                     hir::attach_db(&db, || {
                         files
                             .flat_map(|&file| {
-                                ide_diagnostics::semantic_diagnostics(
+                                ide_diagnostics::semantic_diagnostics_within(
                                     &db,
                                     config,
                                     &ide_db::assists::AssistResolveStrategy::None,
                                     file,
+                                    within.clone(),
                                 )
                             })
                             .filter(|it| {
@@ -6613,7 +6629,7 @@ fn run_holding(
         let mut edited: Vec<_> = paths.keys().copied().collect();
         edited.sort_unstable();
         let sources = Sources { paths };
-        let broken = broken_in(&db, &edited, &sources, &args.checkout);
+        let broken = broken_in(&db, &edited, &sources, &args.checkout, None);
         let why =
             hir::attach_db(&db, || refusal(&db, &edited, &sources, &args.checkout, broken, None));
         if let Some(why) = why {
@@ -8166,9 +8182,10 @@ impl Program {
         let (warm, broken) = std::thread::scope(|scope| {
             let check = {
                 let (db, edited, root) = (db.clone(), &edited, &args.checkout);
+                let within = listed.programs(&db);
                 scope.spawn(move || {
                     let start = Instant::now();
-                    let broken = broken_in(&db, edited, paths, root);
+                    let broken = broken_in(&db, edited, paths, root, within);
                     if std::env::var_os("RA_JIT_STATS").is_some() {
                         eprintln!("check-us: {}", start.elapsed().as_micros());
                     }
@@ -8437,6 +8454,42 @@ fn report_stats(stats: &hir_ty_codegen::BuildStats) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A file of a package is in the source root of each of its targets, and a program reads
+    /// it as a module of its own crates only; a file in none of them is read in all.
+    #[test]
+    fn a_file_shared_by_targets_is_read_within_the_crates_given() {
+        use test_fixture::WithFixture;
+        let (db, files) = RootDatabase::with_many_files(
+            r#"
+//- /src/main.rs crate:app
+mod shared;
+fn main() {}
+//- /src/shared.rs
+pub fn f() {}
+//- /examples/other.rs crate:other
+#[path = "../src/shared.rs"]
+mod shared;
+fn main() {}
+"#,
+        );
+        let [main, shared, other] = [0, 1, 2].map(|it| files[it].file_id(&db));
+        hir::attach_db(&db, || {
+            let crates_of = |sema: &hir::Semantics<'_, RootDatabase>, file| {
+                let modules = sema.file_to_module_defs(file);
+                modules.map(|it| ide_db::base_db::Crate::from(it.krate(&db))).collect::<Vec<_>>()
+            };
+            let all = hir::Semantics::new(&db);
+            let (app, example) = (crates_of(&all, main)[0], crates_of(&all, other)[0]);
+            assert_eq!(crates_of(&all, shared), [app, example]);
+            let within = |crates: &[_]| {
+                hir::Semantics::new_within(&db, Arc::new(crates.iter().copied().collect()))
+            };
+            assert_eq!(crates_of(&within(&[example]), shared), [example]);
+            assert_eq!(crates_of(&within(&[app]), shared), [app]);
+            assert_eq!(crates_of(&within(&[example]), main), [app]);
+        });
+    }
 
     #[test]
     fn a_link_command_of_lto_has_no_core() {

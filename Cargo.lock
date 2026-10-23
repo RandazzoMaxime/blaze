@@ -3208,6 +3208,7 @@ dependencies = [
  "shlex",
  "syntax",
  "tar",
+ "test-fixture",
  "thorin-dwp",
  "tikv-jemalloc-ctl",
  "tikv-jemallocator",

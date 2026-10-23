@@ -799,18 +799,27 @@ pub(crate) fn left_to_rustc(
 }
 
 impl Listed {
-    /// The crates the file is a module of, of those that are built and those they use: no
-    /// other is part of a program. Before the first build, of all of them. The crates of a
-    /// file's source root are every target of its package, and an example of bevy is one of
-    /// hundreds.
-    pub(crate) fn crates_of(&self, db: &RootDatabase, file: FileId) -> Vec<ide_db::base_db::Crate> {
+    /// The crates that are built and those they use, once any is built.
+    pub(crate) fn programs(
+        &self,
+        db: &RootDatabase,
+    ) -> Option<std::sync::Arc<FxHashSet<ide_db::base_db::Crate>>> {
         // Copied out: a query that is cancelled unwinds, and would poison the lock.
         let built = crate::lock(&self.built).clone();
         let read: FxHashSet<_> = (built.iter())
             .flat_map(|&it| ide_db::base_db::Crate::from(it).transitive_deps(db))
             .collect();
+        (!read.is_empty()).then(|| std::sync::Arc::new(read))
+    }
+
+    /// The crates the file is a module of, of those that are built and those they use: no
+    /// other is part of a program. Before the first build, of all of them. The crates of a
+    /// file's source root are every target of its package, and an example of bevy is one of
+    /// hundreds.
+    pub(crate) fn crates_of(&self, db: &RootDatabase, file: FileId) -> Vec<ide_db::base_db::Crate> {
+        let programs = self.programs(db);
         (relevant_crates(db, file).iter().copied())
-            .filter(|krate| built.is_empty() || read.contains(krate))
+            .filter(|krate| programs.as_ref().is_none_or(|it| it.contains(krate)))
             .filter(|&krate| {
                 hir_def::nameres::crate_def_map(db, krate)
                     .modules_for_file(db, file)
@@ -823,20 +832,8 @@ impl Listed {
     /// Whether the file is a module of a crate that is built, or of one that such a crate uses.
     /// Any file may be one before a crate is listed.
     pub(crate) fn sees(&self, db: &RootDatabase, file: FileId) -> bool {
-        // Copied out: a query that is cancelled unwinds, and would poison the lock.
-        let built = crate::lock(&self.built).clone();
         // Before the first build there is no telling.
-        built.is_empty()
-            || relevant_crates(db, file).iter().any(|&krate| {
-                let read = built.iter().any(|&built| {
-                    let built = ide_db::base_db::Crate::from(built);
-                    built == krate || built.transitive_deps(db).contains(&krate)
-                });
-                read && hir_def::nameres::crate_def_map(db, krate)
-                    .modules_for_file(db, file)
-                    .next()
-                    .is_some()
-            })
+        self.programs(db).is_none() || !self.crates_of(db, file).is_empty()
     }
 
     /// For each file the functions written in it that no body declares, as the file is now,
