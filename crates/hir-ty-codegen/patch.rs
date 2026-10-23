@@ -1647,9 +1647,19 @@ impl Base {
         stale: Vec<Stale>,
     ) -> Result<std::result::Result<Patch, &'static str>> {
         let start = stdx::time::Instant::now();
-        if !self.rustc && roots.entries != self.entries {
-            return Ok(Err("the roots compiled whether called or not changed"));
-        }
+        // A function added where every function is compiled whether called or not, as all of
+        // a program's are when its `main` is C's, is compiled into the patch with the rest.
+        let added: FxHashSet<FunctionId> = match self.rustc {
+            true => FxHashSet::default(),
+            false => {
+                let base: FxHashSet<FunctionId> = self.entries.iter().copied().collect();
+                let now: FxHashSet<FunctionId> = roots.entries.iter().copied().collect();
+                if !base.is_subset(&now) {
+                    return Ok(Err("a root compiled whether called or not is gone"));
+                }
+                now.difference(&base).copied().collect()
+            }
+        };
         // Every function is in rustc's executable: one a patch calls is called there, and only
         // what changed is compiled.
         let none = FxHashSet::default();
@@ -1759,16 +1769,22 @@ impl Base {
         }
         let mut queued: FxHashSet<FunctionId> = known_roots().collect();
         let mut queue = changed_roots;
+        queue.extend(added.iter().copied().filter(|&func| queued.insert(func)));
         queue.extend(cg.wanted.drain(..).filter(|&func| queued.insert(func)));
         let mut next = 0;
         loop {
             while let Some(&root) = queue.get(next) {
                 next += 1;
-                if denied.contains(&root)
-                    || known.left.contains(&root)
-                    || cg.define_function(root).is_err()
-                {
+                if denied.contains(&root) || known.left.contains(&root) {
                     return Ok(Err("a root can't be compiled"));
+                }
+                match cg.define_function(root) {
+                    Ok(_) => {}
+                    // As in a full build, a function added to a crate whose symbols are
+                    // rustc's has none to be put in the object under: what calls it has a
+                    // copy of its own.
+                    Err(e) if e.no_symbol() && added.contains(&root) => {}
+                    Err(_) => return Ok(Err("a root can't be compiled")),
                 }
                 queue.extend(cg.wanted.drain(..).filter(|&func| queued.insert(func)));
             }
