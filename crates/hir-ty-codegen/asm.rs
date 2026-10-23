@@ -751,14 +751,12 @@ pub(super) fn assemble(triple: &str, text: &str) -> Result<Arc<Assembled>, Strin
     Ok(code)
 }
 
-/// What turns the text of a block into an object file. `RA_JIT_ASSEMBLER=cc` or `rustc`
-/// picks one.
+/// What turns the text of a block into an object file. `RA_JIT_ASSEMBLER=cc` picks the C
+/// compiler in a build with LLVM.
 #[derive(Clone, Copy)]
 enum Assembler {
     /// The platform's C compiler, run as a process: clang, or a `cc` for the host.
     Cc,
-    /// rustc, run as a process, where there is no other.
-    Rustc,
     /// LLVM's, in this process, when ra-jit is built with LLVM.
     #[cfg(feature = "llvm")]
     Llvm,
@@ -766,10 +764,8 @@ enum Assembler {
 
 impl Assembler {
     fn selected() -> Assembler {
-        match std::env::var("RA_JIT_ASSEMBLER").as_deref() {
-            Ok("cc") => return Assembler::Cc,
-            Ok("rustc") => return Assembler::Rustc,
-            _ => {}
+        if std::env::var("RA_JIT_ASSEMBLER").as_deref() == Ok("cc") {
+            return Assembler::Cc;
         }
         #[cfg(feature = "llvm")]
         return Assembler::Llvm;
@@ -779,15 +775,7 @@ impl Assembler {
 
     fn assemble(self, triple: &str, text: &str, key: &[u8; 32]) -> Result<Assembled, String> {
         match self {
-            // FIXME: rustc, where the C compiler cannot assemble the text or there is none.
-            Assembler::Cc => match run_cc(triple, text, key) {
-                Some(Ok(code)) => Ok(code),
-                Some(Err(why)) => {
-                    run_assembler(triple, text, key).map_err(|e| format!("{why}; {e}"))
-                }
-                None => run_assembler(triple, text, key),
-            },
-            Assembler::Rustc => run_assembler(triple, text, key),
+            Assembler::Cc => run_cc(triple, text, key).unwrap_or_else(|| Err(no_assembler(triple))),
             #[cfg(feature = "llvm")]
             Assembler::Llvm => code(&super::llvm::assemble(text)?),
         }
@@ -821,6 +809,19 @@ fn c_compiler(triple: &str) -> Option<(PathBuf, Vec<String>)> {
             _ => false,
         };
     Some((find("cc").filter(|_| host)?, Vec::new()))
+}
+
+/// Why a block for `triple` is not assembled by a build of ra-jit without LLVM, and what to
+/// install that would.
+fn no_assembler(triple: &str) -> String {
+    let host = triple.starts_with(std::env::consts::ARCH)
+        && matches!(std::env::consts::OS, "macos" | "linux");
+    let or_cc = if host { " or a C compiler (`cc`)" } else { "" };
+    format!(
+        "inline assembly: nothing here assembles it for {triple}. This ra-jit was built without \
+         LLVM, so it assembles `asm!` with clang{or_cc}, and there is none on PATH: install \
+         clang, or use a build of ra-jit with LLVM (`--features llvm`)"
+    )
 }
 
 /// The block assembled by the platform's C compiler. `None` when there is none for `triple`.
@@ -862,51 +863,6 @@ fn run_cc(triple: &str, text: &str, key: &[u8; 32]) -> Option<Result<Assembled, 
     };
     _ = std::fs::remove_file(&object);
     Some(code)
-}
-
-/// FIXME: this runs rustc, which is the one assembler sure to be there and to read what
-/// `asm!` is written in. An assembler in this process would do without the files.
-fn run_assembler(triple: &str, text: &str, key: &[u8; 32]) -> Result<Assembled, String> {
-    // Two threads may be assembling the same text.
-    static RUNS: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
-    let run = RUNS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let name: String =
-        key[..8].iter().map(|it| format!("{it:02x}")).chain([format!("-{run}")]).collect();
-    let dir = std::env::temp_dir().join(format!("ra-jit-asm-{}", std::process::id()));
-    let failed = |what: &str, e: &dyn std::fmt::Display| format!("inline assembly: {what}: {e}");
-    std::fs::create_dir_all(&dir).map_err(|e| failed("no directory to assemble in", &e))?;
-    let [assembly, source, object] = ["s", "rs", "o"].map(|it| dir.join(format!("{name}.{it}")));
-    let remove = || {
-        for file in [&assembly, &source, &object] {
-            _ = std::fs::remove_file(file);
-        }
-    };
-    let wrote = std::fs::write(&assembly, text).and_then(|()| {
-        let source_text = format!(
-            "#![no_std]\ncore::arch::global_asm!(include_str!({:?}), options(raw));\n",
-            assembly.display().to_string()
-        );
-        std::fs::write(&source, source_text)
-    });
-    wrote.map_err(|e| failed("nothing written to assemble", &e))?;
-    let rustc = std::env::var_os("RUSTC").unwrap_or_else(|| "rustc".into());
-    #[allow(clippy::disallowed_methods)]
-    let output = Command::new(rustc)
-        .current_dir(&dir)
-        .args(["--edition=2021", "--crate-type=lib", "--emit=obj", "-Cpanic=abort"])
-        .args(["--crate-name=ra_jit_asm", "--target", triple, "-o"])
-        .arg(&object)
-        .arg(&source)
-        .output();
-    let code = match output {
-        Ok(output) if output.status.success() => {
-            std::fs::read(&object).map_err(|e| failed("no object", &e)).and_then(|it| code(&it))
-        }
-        Ok(output) => Err(failed("rustc", &String::from_utf8_lossy(&output.stderr))),
-        Err(e) => Err(failed("rustc did not run", &e)),
-    };
-    remove();
-    code
 }
 
 /// The function in an object that defines it alone.
