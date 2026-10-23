@@ -1,5 +1,6 @@
-//! A crate's `DefMap` and `LocalDefMap` written as bytes and read back into a running database
-//! (frozen dependency artifacts, ra-jit's `docs/glancer.md`, item 1).
+//! A crate's `DefMap` and `LocalDefMap`, and its lang items, written as bytes and read back
+//! into a running database (frozen dependency artifacts, ra-jit's `docs/glancer.md`, item 1).
+//! [`Enc`] and [`Dec`] write and read other values that name items, as `hir_ty` does impls.
 //!
 //! The bytes name nothing by a salsa id: a file is the crate it belongs to and its path from
 //! that crate's root directory, a module is its crate and its index in that crate's `DefMap`, a
@@ -18,11 +19,12 @@ use std::hash::{Hash, Hasher};
 use std::sync::{Arc, Mutex};
 
 use base_db::{Crate, SourceDatabase};
+use base_db::{FileId, VfsPath};
 use cfg::{CfgAtom, CfgExpr};
 use either::Either;
 use hir_expand::{
-    EagerCallInfo, ExpandErrorKind, ExpandTo, HirFileId, MacroCallId, MacroCallKind,
-    MacroCallLoc, MacroCallStyles, MacroDefId, MacroDefKind,
+    EagerCallInfo, ExpandErrorKind, ExpandTo, HirFileId, MacroCallId, MacroCallKind, MacroCallLoc,
+    MacroCallStyles, MacroDefId, MacroDefKind,
     attrs::AttrId,
     builtin::{BuiltinAttrExpander, BuiltinDeriveExpander, BuiltinFnLikeExpander, EagerExpander},
     mod_path::{ModPath, PathKind},
@@ -39,25 +41,25 @@ use span::{
 use syntax::ast;
 use triomphe::Arc as TArc;
 use tt::{Delimiter, DelimiterKind, IdentIsRaw, Leaf, LitKind, Spacing, Subtree, TokenTree};
-use base_db::{FileId, VfsPath};
 
 use crate::{
-    AdtId, AstId, BuiltinDeriveImplId, BuiltinDeriveImplLoc, ConstLoc, EnumLoc, EnumVariantId,
-    EnumVariantLoc, ExternBlockId, ExternBlockLoc, ExternCrateId, ExternCrateLoc, FunctionLoc,
-    ImplId, ImplLoc, Intern, ItemContainerId, Lookup, Macro2Loc, MacroExpander, MacroId,
-    MacroRulesLoc, MacroRulesLocFlags, ModuleDefId, ModuleId, ModuleIdLt,
-    StaticLoc, StructLoc, TraitLoc, TypeAliasLoc, UnionLoc, UseId, UseLoc,
+    AdtId, AssocItemId, AstId, BlockId, BuiltinDeriveImplId, BuiltinDeriveImplLoc, ConstLoc,
+    DefWithBodyId, EnumLoc, EnumVariantId, EnumVariantLoc, ExternBlockId, ExternBlockLoc,
+    ExternCrateId, ExternCrateLoc, FunctionLoc, ImplId, ImplLoc, Intern, ItemContainerId, Lookup,
+    Macro2Loc, MacroExpander, MacroId, MacroRulesLoc, MacroRulesLocFlags, ModuleDefId, ModuleId,
+    ModuleIdLt, StaticLoc, StructLoc, TraitLoc, TypeAliasLoc, UnionLoc, UseId, UseLoc,
     builtin_derive::BuiltinDeriveImplTrait,
     builtin_type::BuiltinType,
+    expr_store::Body,
     item_scope::{
         DeriveMacroInvocation, GlobId, ImportId, ImportOrDef, ImportOrExternCrate, ImportOrGlob,
         ItemScope,
     },
     item_tree::{TreeId, VisibilityExplicitness},
+    lang_item::{LangItemEnum, LangItemTarget, LangItems},
     nameres::{
-        DefDiagnostic, DefMap, DefMapCrateData, LocalDefMap, ModuleData, ModuleOrigin,
-        ModulesSlot, ScopeSlot,
-        diagnostics::DefDiagnosticKind,
+        DefDiagnostic, DefMap, DefMapCrateData, LocalDefMap, ModuleData, ModuleOrigin, ModulesSlot,
+        ScopeSlot, diagnostics::DefDiagnosticKind,
     },
     per_ns::Item,
     unstable_features::UnstableFeatures,
@@ -65,7 +67,6 @@ use crate::{
 };
 
 type R<T = ()> = Result<T, String>;
-
 /// What name resolution does with the frozen bytes of a crate.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Mode {
@@ -113,10 +114,22 @@ pub fn differences() -> Vec<String> {
 }
 
 fn differs(db: &dyn SourceDatabase, krate: Crate, what: &str, written: &[u8], frozen: &[u8]) {
+    record_difference(db, krate, "def map", what, written, frozen);
+}
+
+/// Records that the frozen `kind` of `krate` differs from `what`, which wrote `written`.
+pub fn record_difference(
+    db: &dyn SourceDatabase,
+    krate: Crate,
+    kind: &str,
+    what: &str,
+    written: &[u8],
+    frozen: &[u8],
+) {
     let at = written.iter().zip(frozen).position(|(a, b)| a != b).unwrap_or(written.len());
     let name = krate.extra_data(db).display_name.as_ref().map(|it| it.to_string());
     DIFFERENCES.lock().unwrap().push(format!(
-        "the frozen def map of `{}` differs from {what}: {} bytes against {}, first at byte {at}",
+        "the frozen {kind} of `{}` differs from {what}: {} bytes against {}, first at byte {at}",
         name.as_deref().unwrap_or("?"),
         written.len(),
         frozen.len(),
@@ -155,7 +168,9 @@ pub(super) fn check(db: &dyn SourceDatabase, krate: Crate, def_map: &DefMap, loc
     match encode_maps(db, krate, def_map, local) {
         Ok(written) if *written == *frozen.bytes => {}
         Ok(written) => differs(db, krate, "the live one", &written, &frozen.bytes),
-        Err(why) => differs(db, krate, &format!("the live one, which it cannot write ({why})"), &[], &[]),
+        Err(why) => {
+            differs(db, krate, &format!("the live one, which it cannot write ({why})"), &[], &[])
+        }
     }
 }
 
@@ -164,6 +179,94 @@ pub(super) fn check(db: &dyn SourceDatabase, krate: Crate, def_map: &DefMap, loc
 pub fn unreadable(db: &dyn SourceDatabase, krate: Crate, bytes: &[u8]) -> Option<String> {
     let mut dec = Dec::new(db, krate, bytes);
     dec.files().err()
+}
+
+/// The crates whose lang items are frozen, set by whoever has the bytes.
+#[salsa::input(singleton, debug)]
+pub struct FrozenLangItems {
+    #[returns(ref)]
+    pub maps: Arc<FxHashMap<Crate, Frozen>>,
+}
+
+/// Has finding the lang items of a crate use `maps`.
+pub fn set_lang_items(db: &mut dyn SourceDatabase, maps: FxHashMap<Crate, Frozen>) {
+    use salsa::{Durability, Setter};
+    let maps = Arc::new(maps);
+    match FrozenLangItems::try_get(db) {
+        Some(it) => {
+            it.set_maps(db).with_durability(Durability::HIGH).to(maps);
+        }
+        None => {
+            _ = FrozenLangItems::builder(maps).durability(Durability::HIGH).new(db);
+        }
+    }
+}
+
+fn frozen_lang_items(db: &dyn SourceDatabase, krate: Crate) -> Option<Frozen> {
+    FrozenLangItems::try_get(db)?.maps(db).get(&krate).cloned()
+}
+
+/// What [`crate_lang_items`](crate::lang_item::crate_lang_items) reads for `krate` instead of
+/// finding them, when they are frozen.
+pub(crate) fn served_lang_items(
+    db: &dyn SourceDatabase,
+    krate: Crate,
+) -> Option<Option<Box<LangItems>>> {
+    let frozen = frozen_lang_items(db, krate).filter(|it| it.mode != Mode::Check)?;
+    let read = || {
+        let mut dec = Dec::new_checked(db, krate, &frozen.bytes)?;
+        let items = dec.option(|dec| {
+            let mut items = LangItems::default();
+            let n = dec.len()?;
+            if n != LangItemEnum::ALL.len() {
+                return Err(format!("{n} lang items"));
+            }
+            for &which in LangItemEnum::ALL {
+                if let Some(target) = dec.option(Dec::lang_item_target)?
+                    && !items.set(which, target)
+                {
+                    return Err(format!("a lang item {which:?} of another kind"));
+                }
+            }
+            Ok(Box::new(items))
+        })?;
+        dec.finish()?;
+        Ok::<_, String>(items)
+    };
+    Some(read().unwrap_or_else(|why| panic!("frozen lang items do not read: {why}")))
+}
+
+/// The bytes of the lang items of `krate` as they are now: found, or read in [`Mode::Serve`]
+/// and [`Mode::Verify`].
+pub fn encode_lang_items(db: &dyn SourceDatabase, krate: Crate) -> R<Vec<u8>> {
+    let mut enc = Enc::new(db, krate);
+    enc.option(crate::lang_item::crate_lang_items(db, krate), |enc, items| {
+        enc.usize(LangItemEnum::ALL.len())?;
+        for &which in LangItemEnum::ALL {
+            enc.option(which.from_lang_items(items), Enc::lang_item_target)?;
+        }
+        Ok(())
+    })?;
+    enc.finish()
+}
+
+/// Records a difference between the frozen lang items of `krate` and the live ones in
+/// [`Mode::Check`], or what was read of them in [`Mode::Verify`].
+pub fn check_lang_items(db: &dyn SourceDatabase, krate: Crate) {
+    let Some(frozen) = frozen_lang_items(db, krate) else { return };
+    let what = match frozen.mode {
+        Mode::Serve => return,
+        Mode::Check => "the live ones",
+        Mode::Verify => "what was read of them",
+    };
+    match encode_lang_items(db, krate) {
+        Ok(written) if *written == *frozen.bytes => {}
+        Ok(written) => record_difference(db, krate, "lang items", what, &written, &frozen.bytes),
+        Err(why) => {
+            let what = format!("{what}, which cannot be written ({why})");
+            record_difference(db, krate, "lang items", &what, &[], &[])
+        }
+    }
 }
 
 /// The bytes of the `DefMap` of `krate` as name resolution computes it, or why it cannot be
@@ -199,7 +302,8 @@ fn root_dir(db: &dyn SourceDatabase, krate: Crate) -> R<(String, bool, base_db::
     let path = path.ok_or("a crate root with no path")?;
     let real = path.as_path().is_some();
     let path = on_disk(&path)?;
-    let dir = path.rsplit_once('/').map(|it| it.0.to_owned()).ok_or("a crate root in no directory")?;
+    let dir =
+        path.rsplit_once('/').map(|it| it.0.to_owned()).ok_or("a crate root in no directory")?;
     Ok((dir, real, source_root))
 }
 
@@ -246,10 +350,50 @@ fn position<T: PartialEq>(all: &[T], it: T) -> u32 {
     all.iter().position(|x| *x == it).unwrap() as u32
 }
 
+/// The items of `module` that have a body: a block in the module is in one of theirs.
+fn body_owners(db: &dyn SourceDatabase, module: ModuleId) -> Vec<DefWithBodyId> {
+    let def_map = module.def_map(db);
+    let Some((_, data)) = def_map.modules(db).find(|(id, _)| *id == module) else {
+        return Vec::new();
+    };
+    let scope = data.scope(db);
+    let mut owners: Vec<DefWithBodyId> = scope.unnamed_consts().map(Into::into).collect();
+    let assoc = |owners: &mut Vec<DefWithBodyId>, items: &[(Name, AssocItemId)]| {
+        for (_, item) in items {
+            match *item {
+                AssocItemId::FunctionId(it) => owners.push(it.into()),
+                AssocItemId::ConstId(it) => owners.push(it.into()),
+                AssocItemId::TypeAliasId(_) => {}
+            }
+        }
+    };
+    for def in scope.declarations() {
+        match def {
+            ModuleDefId::FunctionId(it) => owners.push(it.into()),
+            ModuleDefId::ConstId(it) => owners.push(it.into()),
+            ModuleDefId::StaticId(it) => owners.push(it.into()),
+            ModuleDefId::AdtId(AdtId::EnumId(it)) => {
+                let variants = &crate::signatures::EnumVariants::of(db, it).0.variants;
+                owners.extend(variants.values().map(|&(it, _)| DefWithBodyId::VariantId(it)));
+            }
+            ModuleDefId::TraitId(it) => {
+                assoc(&mut owners, &super::assoc::TraitItems::query(db, it).items)
+            }
+            _ => {}
+        }
+    }
+    for it in scope.impls() {
+        assoc(&mut owners, &super::assoc::ImplItems::of(db, it).0.items);
+    }
+    owners
+}
+
 const NEW: u8 = 0;
 const SEEN: u8 = 1;
 
-struct Enc<'a> {
+/// Writes values that name items of `krate` and its dependencies as frozen bytes; see the
+/// module documentation.
+pub struct Enc<'a> {
     db: &'a dyn SourceDatabase,
     out: Vec<u8>,
     /// Writing a fingerprint: macro calls and syntax contexts are written as hashes of what
@@ -271,6 +415,10 @@ struct Enc<'a> {
     context_hashes: FxHashMap<SyntaxContext, u128>,
     modules: FxHashMap<ModuleId, (u32, u32)>,
     indexed: FxHashSet<Crate>,
+    /// The body each block that was looked for is in, found by lowering every body of the
+    /// modules in `searched`.
+    block_owners: FxHashMap<BlockId, DefWithBodyId>,
+    searched: FxHashSet<ModuleId>,
 }
 
 fn hash128(bytes: &[u8]) -> u128 {
@@ -290,50 +438,71 @@ fn encode_maps(
     def_map: &DefMap,
     local: &LocalDefMap,
 ) -> R<Vec<u8>> {
-    let closure = closure(db, krate);
-    let crates = closure.iter().enumerate().map(|(i, &it)| (it, i as u32)).collect();
-    let mut enc = Enc {
-        db,
-        out: Vec::new(),
-        fingerprinting: false,
-        crates,
-        closure,
-        dirs: FxHashMap::default(),
-        owners: FxHashMap::default(),
-        file_names: FxHashMap::default(),
-        files: FxHashMap::default(),
-        file_order: Vec::new(),
-        calls: FxHashMap::default(),
-        contexts: FxHashMap::default(),
-        call_hashes: FxHashMap::default(),
-        context_hashes: FxHashMap::default(),
-        modules: FxHashMap::default(),
-        indexed: FxHashSet::default(),
-    };
+    let mut enc = Enc::new(db, krate);
     for (index, &module) in def_map.table(db).keys().enumerate() {
         enc.modules.insert(module, (0, index as u32));
     }
     enc.indexed.insert(krate);
     enc.def_map(def_map)?;
     enc.local(local)?;
-    // The files every other part names by index, first.
-    let body = std::mem::take(&mut enc.out);
-    enc.usize(enc.file_order.len())?;
-    for file in std::mem::take(&mut enc.file_order) {
-        let (owner, path) = enc.file_names[&file].clone();
-        enc.u32(owner);
-        enc.str(&path)?;
+    enc.finish()
+}
+
+impl<'a> Enc<'a> {
+    /// Writes values of `krate`, which names its dependencies by their index in its closure.
+    pub fn new(db: &'a dyn SourceDatabase, krate: Crate) -> Self {
+        let closure = closure(db, krate);
+        let crates = closure.iter().enumerate().map(|(i, &it)| (it, i as u32)).collect();
+        Enc {
+            db,
+            out: Vec::new(),
+            fingerprinting: false,
+            crates,
+            closure,
+            dirs: FxHashMap::default(),
+            owners: FxHashMap::default(),
+            file_names: FxHashMap::default(),
+            files: FxHashMap::default(),
+            file_order: Vec::new(),
+            calls: FxHashMap::default(),
+            contexts: FxHashMap::default(),
+            call_hashes: FxHashMap::default(),
+            context_hashes: FxHashMap::default(),
+            modules: FxHashMap::default(),
+            indexed: FxHashSet::default(),
+            block_owners: FxHashMap::default(),
+            searched: FxHashSet::default(),
+        }
     }
-    enc.out.extend_from_slice(&body);
-    Ok(enc.out)
+
+    /// The bytes written, after the files they name, which [`Dec::new_checked`] reads first.
+    pub fn finish(mut self) -> R<Vec<u8>> {
+        let body = std::mem::take(&mut self.out);
+        self.usize(self.file_order.len())?;
+        for file in std::mem::take(&mut self.file_order) {
+            let (owner, path) = self.file_names[&file].clone();
+            self.u32(owner);
+            self.str(&path)?;
+            // A file outside the directory of its crate's root may be one a build script
+            // wrote, which the key does not cover: its text is.
+            let outside = path.starts_with("../");
+            self.bool(outside);
+            if outside {
+                let text = self.db.file_text(file).text(self.db);
+                self.out.extend_from_slice(&hash128(text.as_bytes()).to_le_bytes());
+            }
+        }
+        self.out.extend_from_slice(&body);
+        Ok(self.out)
+    }
 }
 
 impl Enc<'_> {
-    fn u8(&mut self, it: u8) {
+    pub fn u8(&mut self, it: u8) {
         self.out.push(it);
     }
 
-    fn u32(&mut self, mut it: u32) {
+    pub fn u32(&mut self, mut it: u32) {
         loop {
             let byte = (it & 0x7f) as u8;
             it >>= 7;
@@ -345,26 +514,26 @@ impl Enc<'_> {
         }
     }
 
-    fn usize(&mut self, it: usize) -> R {
+    pub fn usize(&mut self, it: usize) -> R {
         self.u32(u32::try_from(it).map_err(|_| "a length over u32")?);
         Ok(())
     }
 
-    fn bool(&mut self, it: bool) {
+    pub fn bool(&mut self, it: bool) {
         self.u8(it as u8);
     }
 
-    fn str(&mut self, it: &str) -> R {
+    pub fn str(&mut self, it: &str) -> R {
         self.usize(it.len())?;
         self.out.extend_from_slice(it.as_bytes());
         Ok(())
     }
 
-    fn symbol(&mut self, it: &Symbol) -> R {
+    pub fn symbol(&mut self, it: &Symbol) -> R {
         self.str(it.as_str())
     }
 
-    fn name(&mut self, it: &Name) -> R {
+    pub fn name(&mut self, it: &Name) -> R {
         self.symbol(it.symbol())
     }
 
@@ -372,14 +541,14 @@ impl Enc<'_> {
         self.u8(it as u8);
     }
 
-    fn krate(&mut self, it: Crate) -> R {
+    pub fn krate(&mut self, it: Crate) -> R {
         let index = *self.crates.get(&it).ok_or("a crate outside the dependency closure")?;
         self.u32(index);
         Ok(())
     }
 
     /// Writes `f`'s output as a fingerprint, and returns it.
-    fn fingerprint(&mut self, f: impl FnOnce(&mut Self) -> R) -> R<Vec<u8>> {
+    pub fn fingerprint(&mut self, f: impl FnOnce(&mut Self) -> R) -> R<Vec<u8>> {
         let out = std::mem::take(&mut self.out);
         let was = std::mem::replace(&mut self.fingerprinting, true);
         let result = f(self);
@@ -389,7 +558,7 @@ impl Enc<'_> {
     }
 
     /// `entries` in the order of their keys' fingerprints.
-    fn sorted<K, V>(
+    pub fn sorted<K, V>(
         &mut self,
         entries: impl Iterator<Item = (K, V)>,
         key: impl Fn(&mut Self, &K) -> R,
@@ -727,11 +896,21 @@ impl Enc<'_> {
         Ok(())
     }
 
-    fn module(&mut self, it: ModuleId) -> R {
+    pub fn module(&mut self, it: ModuleId) -> R {
         let db = self.db;
-        if it.block(db).is_some() {
-            return Err("a module of a block".to_owned());
+        if let Some(block) = it.block(db) {
+            // A block is made as its body is lowered: it is named by that body.
+            let block = unsafe { block.to_static() };
+            let owner = self.block_owner(block)?;
+            self.u8(1);
+            self.body_owner(owner)?;
+            self.ast_id(block.ast_id(db))?;
+            let table = super::block_def_map(db, block).table(db);
+            let index = table.keys().position(|&m| m == it).ok_or("a module not in its block")?;
+            self.u32(index as u32);
+            return Ok(());
         }
+        self.u8(0);
         let krate = it.krate(db);
         if self.indexed.insert(krate) {
             let owner = *self.crates.get(&krate).ok_or("a module outside the closure")?;
@@ -744,6 +923,104 @@ impl Enc<'_> {
         self.u32(owner);
         self.u32(index);
         Ok(())
+    }
+
+    /// The body `block` is in: one of an item of the module the block is in, or, in a block
+    /// with items, that block's.
+    fn block_owner(&mut self, block: BlockId) -> R<DefWithBodyId> {
+        if let Some(&owner) = self.block_owners.get(&block) {
+            return Ok(owner);
+        }
+        let db = self.db;
+        let module = unsafe { block.module(db).to_static() };
+        if self.searched.insert(module) {
+            for owner in body_owners(db, module) {
+                for (found, _) in Body::of(db, owner).blocks(db) {
+                    self.block_owners.entry(found).or_insert(owner);
+                }
+            }
+        }
+        if let Some(&owner) = self.block_owners.get(&block) {
+            return Ok(owner);
+        }
+        let outer = module.block(db).map(|it| unsafe { it.to_static() });
+        let owner = outer.ok_or("a block in no body of its module")?;
+        let owner = self.block_owner(owner)?;
+        if !Body::of(db, owner).blocks(db).any(|(it, _)| it == block) {
+            return Err("a block in no body of the block it is in".to_owned());
+        }
+        self.block_owners.insert(block, owner);
+        Ok(owner)
+    }
+
+    pub fn lang_item_target(&mut self, it: LangItemTarget) -> R {
+        match it {
+            LangItemTarget::EnumId(it) => {
+                self.u8(0);
+                self.adt(it.into())
+            }
+            LangItemTarget::StructId(it) => {
+                self.u8(0);
+                self.adt(it.into())
+            }
+            LangItemTarget::UnionId(it) => {
+                self.u8(0);
+                self.adt(it.into())
+            }
+            LangItemTarget::FunctionId(it) => {
+                self.u8(1);
+                self.def(it.into())
+            }
+            LangItemTarget::StaticId(it) => {
+                self.u8(1);
+                self.def(it.into())
+            }
+            LangItemTarget::TypeAliasId(it) => {
+                self.u8(1);
+                self.def(it.into())
+            }
+            LangItemTarget::TraitId(it) => {
+                self.u8(1);
+                self.def(it.into())
+            }
+            LangItemTarget::ConstId(it) => {
+                self.u8(1);
+                self.def(it.into())
+            }
+            LangItemTarget::EnumVariantId(it) => {
+                self.u8(2);
+                self.variant(it)
+            }
+            LangItemTarget::ImplId(it) => {
+                self.u8(3);
+                self.impl_id(it)
+            }
+            LangItemTarget::MacroId(it) => {
+                self.u8(4);
+                self.macro_id(it)
+            }
+        }
+    }
+
+    pub fn body_owner(&mut self, it: DefWithBodyId) -> R {
+        match it {
+            DefWithBodyId::FunctionId(it) => {
+                self.u8(0);
+                self.def(it.into())
+            }
+            DefWithBodyId::StaticId(it) => {
+                self.u8(0);
+                self.def(it.into())
+            }
+            DefWithBodyId::ConstId(it) => {
+                self.u8(0);
+                self.def(it.into())
+            }
+            DefWithBodyId::VariantId(it) => {
+                self.u8(1);
+                self.variant(it)
+            }
+        }
     }
 
     fn visibility(&mut self, it: Visibility) -> R {
@@ -798,7 +1075,7 @@ impl Enc<'_> {
         self.ast_id(id)
     }
 
-    fn adt(&mut self, it: AdtId) -> R {
+    pub fn adt(&mut self, it: AdtId) -> R {
         let db = self.db;
         match it {
             AdtId::StructId(it) => {
@@ -876,7 +1153,7 @@ impl Enc<'_> {
         }
     }
 
-    fn def(&mut self, it: ModuleDefId) -> R {
+    pub fn def(&mut self, it: ModuleDefId) -> R {
         let db = self.db;
         match it {
             ModuleDefId::ModuleId(it) => {
@@ -934,7 +1211,7 @@ impl Enc<'_> {
         }
     }
 
-    fn variant(&mut self, it: EnumVariantId) -> R {
+    pub fn variant(&mut self, it: EnumVariantId) -> R {
         let EnumVariantLoc { id, parent, name } = it.lookup(self.db).clone();
         self.ast_id(id)?;
         self.adt(AdtId::EnumId(parent))?;
@@ -953,7 +1230,7 @@ impl Enc<'_> {
         self.ast_id(id)
     }
 
-    fn impl_id(&mut self, it: ImplId) -> R {
+    pub fn impl_id(&mut self, it: ImplId) -> R {
         let ImplLoc { container, id } = *it.lookup(self.db);
         self.module(container)?;
         self.ast_id(id)
@@ -1016,7 +1293,7 @@ impl Enc<'_> {
         }
     }
 
-    fn option<T>(&mut self, it: Option<T>, f: impl FnOnce(&mut Self, T) -> R) -> R {
+    pub fn option<T>(&mut self, it: Option<T>, f: impl FnOnce(&mut Self, T) -> R) -> R {
         match it {
             None => {
                 self.u8(0);
@@ -1029,7 +1306,7 @@ impl Enc<'_> {
         }
     }
 
-    fn builtin_derive_impl(&mut self, it: BuiltinDeriveImplId) -> R {
+    pub fn builtin_derive_impl(&mut self, it: BuiltinDeriveImplId) -> R {
         let BuiltinDeriveImplLoc { adt, trait_, derive_attr_id, derive_index } = *it.loc(self.db);
         self.adt(adt)?;
         self.u32(BuiltinDeriveImplTrait::ALL.iter().position(|x| *x == trait_).unwrap() as u32);
@@ -1114,7 +1391,8 @@ impl Enc<'_> {
             self.visibility(vis)?;
             self.option(import, |enc, ImportId { use_, idx }| enc.import(use_, idx))?;
         }
-        let types = self.sorted(use_imports_types.iter(), |enc, k| enc.import_or_extern_crate(**k))?;
+        let types =
+            self.sorted(use_imports_types.iter(), |enc, k| enc.import_or_extern_crate(**k))?;
         self.usize(types.len())?;
         for (&k, &v) in types {
             self.import_or_extern_crate(k)?;
@@ -1126,7 +1404,8 @@ impl Enc<'_> {
             self.import_or_glob(k)?;
             self.import_or_def(v)?;
         }
-        let macros = self.sorted(use_imports_macros.iter(), |enc, k| enc.import_or_extern_crate(**k))?;
+        let macros =
+            self.sorted(use_imports_macros.iter(), |enc, k| enc.import_or_extern_crate(**k))?;
         self.usize(macros.len())?;
         for (&k, &v) in macros {
             self.import_or_extern_crate(k)?;
@@ -1490,7 +1769,8 @@ impl Enc<'_> {
     }
 }
 
-struct Dec<'a> {
+/// Reads what [`Enc`] wrote.
+pub struct Dec<'a> {
     db: &'a dyn SourceDatabase,
     bytes: &'a [u8],
     at: usize,
@@ -1504,23 +1784,41 @@ struct Dec<'a> {
     contexts: Vec<SyntaxContext>,
     /// The modules of the crate being read, in its `DefMap`'s order.
     own: Vec<ModuleId>,
+    /// Reading the crate's own `DefMap`, whose modules are `own`.
+    in_def_map: bool,
     modules: FxHashMap<u32, Vec<ModuleId>>,
 }
 
 impl<'a> Dec<'a> {
     fn new(db: &'a dyn SourceDatabase, krate: Crate, bytes: &'a [u8]) -> Self {
         Dec {
-        db,
-        bytes,
-        at: 0,
-        krate,
-        closure: closure(db, krate),
-        paths: FxHashMap::default(),
-        files: Vec::new(),
-        calls: Vec::new(),
-        contexts: Vec::new(),
-        own: Vec::new(),
-        modules: FxHashMap::default(),
+            db,
+            bytes,
+            at: 0,
+            krate,
+            closure: closure(db, krate),
+            paths: FxHashMap::default(),
+            files: Vec::new(),
+            calls: Vec::new(),
+            contexts: Vec::new(),
+            own: Vec::new(),
+            in_def_map: false,
+            modules: FxHashMap::default(),
+        }
+    }
+
+    /// Reads `bytes` [`Enc::finish`] gave of values of `krate`, from the files they name.
+    pub fn new_checked(db: &'a dyn SourceDatabase, krate: Crate, bytes: &'a [u8]) -> R<Self> {
+        let mut dec = Dec::new(db, krate, bytes);
+        dec.files()?;
+        Ok(dec)
+    }
+
+    /// Whether the bytes were read to their end.
+    pub fn finish(&self) -> R {
+        match self.bytes.len() - self.at {
+            0 => Ok(()),
+            left => Err(format!("{left} bytes left over")),
         }
     }
 }
@@ -1528,6 +1826,7 @@ impl<'a> Dec<'a> {
 fn decode(db: &dyn SourceDatabase, krate: Crate, bytes: &[u8]) -> R<(DefMap, LocalDefMap)> {
     let mut dec = Dec::new(db, krate, bytes);
     dec.files()?;
+    dec.in_def_map = true;
     let mut def_map = dec.def_map()?;
     let local = dec.local()?;
     if dec.at != bytes.len() {
@@ -1538,13 +1837,13 @@ fn decode(db: &dyn SourceDatabase, krate: Crate, bytes: &[u8]) -> R<(DefMap, Loc
 }
 
 impl Dec<'_> {
-    fn u8(&mut self) -> R<u8> {
+    pub fn u8(&mut self) -> R<u8> {
         let it = *self.bytes.get(self.at).ok_or("the bytes end early")?;
         self.at += 1;
         Ok(it)
     }
 
-    fn u32(&mut self) -> R<u32> {
+    pub fn u32(&mut self) -> R<u32> {
         let mut it = 0u32;
         let mut shift = 0;
         loop {
@@ -1560,26 +1859,26 @@ impl Dec<'_> {
         }
     }
 
-    fn len(&mut self) -> R<usize> {
+    pub fn len(&mut self) -> R<usize> {
         Ok(self.u32()? as usize)
     }
 
-    fn bool(&mut self) -> R<bool> {
+    pub fn bool(&mut self) -> R<bool> {
         Ok(self.u8()? != 0)
     }
 
-    fn str(&mut self) -> R<&str> {
+    pub fn str(&mut self) -> R<&str> {
         let len = self.len()?;
         let bytes = self.bytes.get(self.at..self.at + len).ok_or("a string past the end")?;
         self.at += len;
         std::str::from_utf8(bytes).map_err(|_| "a string that is not UTF-8".to_owned())
     }
 
-    fn symbol(&mut self) -> R<Symbol> {
+    pub fn symbol(&mut self) -> R<Symbol> {
         Ok(Symbol::intern(self.str()?))
     }
 
-    fn name(&mut self) -> R<Name> {
+    pub fn name(&mut self) -> R<Name> {
         Ok(Name::new_symbol_root(self.symbol()?))
     }
 
@@ -1588,23 +1887,32 @@ impl Dec<'_> {
         Edition::iter().find(|e| *e as u8 == it).ok_or_else(|| format!("edition {it}"))
     }
 
-    fn krate(&mut self) -> R<Crate> {
+    pub fn krate(&mut self) -> R<Crate> {
         let index = self.len()?;
         self.closure.get(index).copied().ok_or_else(|| format!("crate {index}"))
     }
 
-    fn index<T: Copy>(&mut self, all: &[T]) -> R<T> {
+    pub fn index<T: Copy>(&mut self, all: &[T]) -> R<T> {
         let index = self.len()?;
         all.get(index).copied().ok_or_else(|| format!("variant {index}"))
     }
 
-    /// The files the bytes name, as named in the header: the first that is not loaded is an
+    /// The files the bytes name, as named in the header: the first that is not loaded, or
+    /// that is outside its crate's directory and whose text is not what was written, is an
     /// error.
     fn files(&mut self) -> R {
         let n = self.len()?;
         for _ in 0..n {
             let owner = self.u32()?;
             let path = self.str()?.to_owned();
+            let written = match self.bool()? {
+                true => {
+                    let bytes = self.bytes.get(self.at..self.at + 16).ok_or("a hash past the end")?;
+                    self.at += 16;
+                    Some(u128::from_le_bytes(bytes.try_into().expect("16 bytes")))
+                }
+                false => None,
+            };
             if !self.paths.contains_key(&owner) {
                 let krate = *self.closure.get(owner as usize).ok_or("a file's crate")?;
                 self.paths.insert(owner, root_dir(self.db, krate)?);
@@ -1613,7 +1921,13 @@ impl Dec<'_> {
             let full = joined(dir, &path);
             let source_root = self.db.source_root(*source_root).source_root(self.db);
             let found = source_root.file_for_path(&vfs_path(*real, full.clone())).copied();
-            self.files.push(found.ok_or_else(|| format!("{full} is not loaded"))?);
+            let found = found.ok_or_else(|| format!("{full} is not loaded"))?;
+            if let Some(written) = written
+                && hash128(self.db.file_text(found).text(self.db).as_bytes()) != written
+            {
+                return Err(format!("{full} is not the file that was written"));
+            }
+            self.files.push(found);
         }
         Ok(())
     }
@@ -1858,10 +2172,22 @@ impl Dec<'_> {
         Ok(tt::TopSubtree::from_serialized(tokens))
     }
 
-    fn module(&mut self) -> R<ModuleId> {
+    pub fn module(&mut self) -> R<ModuleId> {
+        let db = self.db;
+        if self.u8()? == 1 {
+            let owner = self.body_owner()?;
+            let block: AstId<ast::BlockExpr> = self.ast_id()?;
+            let index = self.len()?;
+            let (_, def_map) = Body::of(db, owner)
+                .blocks(db)
+                .find(|(it, _)| it.ast_id(db) == block)
+                .ok_or("a block not in its body")?;
+            let module = def_map.table(db).keys().nth(index).copied();
+            return module.ok_or_else(|| format!("module {index} of a block"));
+        }
         let owner = self.u32()?;
         let index = self.len()?;
-        if owner == 0 {
+        if owner == 0 && self.in_def_map {
             return self.own.get(index).copied().ok_or_else(|| format!("own module {index}"));
         }
         if !self.modules.contains_key(&owner) {
@@ -1870,6 +2196,41 @@ impl Dec<'_> {
             self.modules.insert(owner, table.keys().copied().collect());
         }
         self.modules[&owner].get(index).copied().ok_or_else(|| format!("module {index}"))
+    }
+
+    pub fn lang_item_target(&mut self) -> R<LangItemTarget> {
+        Ok(match self.u8()? {
+            0 => match self.adt()? {
+                AdtId::EnumId(it) => it.into(),
+                AdtId::StructId(it) => it.into(),
+                AdtId::UnionId(it) => it.into(),
+            },
+            1 => match self.def()? {
+                ModuleDefId::FunctionId(it) => it.into(),
+                ModuleDefId::StaticId(it) => it.into(),
+                ModuleDefId::TypeAliasId(it) => it.into(),
+                ModuleDefId::TraitId(it) => it.into(),
+                ModuleDefId::ConstId(it) => it.into(),
+                _ => return Err("a lang item that is no item".to_owned()),
+            },
+            2 => self.variant()?.into(),
+            3 => self.impl_id()?.into(),
+            4 => self.macro_id()?.into(),
+            it => return Err(format!("lang item {it}")),
+        })
+    }
+
+    pub fn body_owner(&mut self) -> R<DefWithBodyId> {
+        Ok(match self.u8()? {
+            0 => match self.def()? {
+                ModuleDefId::FunctionId(it) => it.into(),
+                ModuleDefId::StaticId(it) => it.into(),
+                ModuleDefId::ConstId(it) => it.into(),
+                _ => return Err("a body of an item with none".to_owned()),
+            },
+            1 => DefWithBodyId::VariantId(self.variant()?),
+            it => return Err(format!("body {it}")),
+        })
     }
 
     fn visibility(&mut self) -> R<Visibility> {
@@ -1899,23 +2260,31 @@ impl Dec<'_> {
         Ok(ExternBlockLoc { container: self.module()?, id: self.ast_id()? }.intern(self.db))
     }
 
-    fn impl_id(&mut self) -> R<ImplId> {
+    pub fn impl_id(&mut self) -> R<ImplId> {
         Ok(ImplLoc { container: self.module()?, id: self.ast_id()? }.intern(self.db))
     }
 
-    fn adt(&mut self) -> R<AdtId> {
+    pub fn adt(&mut self) -> R<AdtId> {
         let db = self.db;
         Ok(match self.u8()? {
-            0 => AdtId::StructId(StructLoc { container: self.module()?, id: self.ast_id()? }.intern(db)),
-            1 => AdtId::UnionId(UnionLoc { container: self.module()?, id: self.ast_id()? }.intern(db)),
-            2 => AdtId::EnumId(EnumLoc { container: self.module()?, id: self.ast_id()? }.intern(db)),
+            0 => AdtId::StructId(
+                StructLoc { container: self.module()?, id: self.ast_id()? }.intern(db),
+            ),
+            1 => AdtId::UnionId(
+                UnionLoc { container: self.module()?, id: self.ast_id()? }.intern(db),
+            ),
+            2 => {
+                AdtId::EnumId(EnumLoc { container: self.module()?, id: self.ast_id()? }.intern(db))
+            }
             it => return Err(format!("adt {it}")),
         })
     }
 
     fn expander(&mut self) -> R<MacroExpander> {
         Ok(match self.u8()? {
-            0 => MacroExpander::Declarative { styles: MacroCallStyles::from_bits_retain(self.u8()?) },
+            0 => {
+                MacroExpander::Declarative { styles: MacroCallStyles::from_bits_retain(self.u8()?) }
+            }
             1 => MacroExpander::BuiltIn(self.index(BuiltinFnLikeExpander::ALL)?),
             2 => MacroExpander::BuiltInAttr(self.index(BuiltinAttrExpander::ALL)?),
             3 => MacroExpander::BuiltInDerive(self.index(BuiltinDeriveExpander::ALL)?),
@@ -1935,7 +2304,8 @@ impl Dec<'_> {
                 let allow_internal_unsafe = self.bool()?;
                 let edition = self.edition()?;
                 MacroId::Macro2Id(
-                    Macro2Loc { container, id, expander, allow_internal_unsafe, edition }.intern(db),
+                    Macro2Loc { container, id, expander, allow_internal_unsafe, edition }
+                        .intern(db),
                 )
             }
             1 => {
@@ -1952,7 +2322,7 @@ impl Dec<'_> {
         })
     }
 
-    fn def(&mut self) -> R<ModuleDefId> {
+    pub fn def(&mut self) -> R<ModuleDefId> {
         let db = self.db;
         Ok(match self.u8()? {
             0 => ModuleDefId::ModuleId(self.module()?),
@@ -1983,7 +2353,7 @@ impl Dec<'_> {
         })
     }
 
-    fn variant(&mut self) -> R<EnumVariantId> {
+    pub fn variant(&mut self) -> R<EnumVariantId> {
         let id = self.ast_id()?;
         let AdtId::EnumId(parent) = self.adt()? else {
             return Err("a variant of no enum".to_owned());
@@ -2046,14 +2416,14 @@ impl Dec<'_> {
         })
     }
 
-    fn option<T>(&mut self, f: impl FnOnce(&mut Self) -> R<T>) -> R<Option<T>> {
+    pub fn option<T>(&mut self, f: impl FnOnce(&mut Self) -> R<T>) -> R<Option<T>> {
         match self.u8()? {
             0 => Ok(None),
             _ => f(self).map(Some),
         }
     }
 
-    fn builtin_derive_impl(&mut self) -> R<BuiltinDeriveImplId> {
+    pub fn builtin_derive_impl(&mut self) -> R<BuiltinDeriveImplId> {
         let adt = self.adt()?;
         let trait_ = self.index(BuiltinDeriveImplTrait::ALL)?;
         let derive_attr_id = AttrId::from_item_tree_index(self.u32()?);
@@ -2064,7 +2434,7 @@ impl Dec<'_> {
         ))
     }
 
-    fn many<T>(&mut self, mut f: impl FnMut(&mut Self) -> R<T>) -> R<Vec<T>> {
+    pub fn many<T>(&mut self, mut f: impl FnMut(&mut Self) -> R<T>) -> R<Vec<T>> {
         let n = self.len()?;
         let mut all = Vec::with_capacity(n);
         for _ in 0..n {
@@ -2117,7 +2487,8 @@ impl Dec<'_> {
         })?;
         let use_imports_types =
             self.many(|dec| Ok((dec.import_or_extern_crate()?, dec.import_or_def()?)))?;
-        let use_imports_values = self.many(|dec| Ok((dec.import_or_glob()?, dec.import_or_def()?)))?;
+        let use_imports_values =
+            self.many(|dec| Ok((dec.import_or_glob()?, dec.import_or_def()?)))?;
         let use_imports_macros =
             self.many(|dec| Ok((dec.import_or_extern_crate()?, dec.import_or_def()?)))?;
         let use_decls = self.many(Self::use_id)?;
@@ -2253,11 +2624,17 @@ impl Dec<'_> {
             5 => DefDiagnosticKind::UnimplementedBuiltinMacro { ast: self.ast_id()? },
             6 => {
                 let ast = self.ast_id()?;
-                DefDiagnosticKind::InvalidDeriveTarget { ast, id: AttrId::from_item_tree_index(self.u32()?) }
+                DefDiagnosticKind::InvalidDeriveTarget {
+                    ast,
+                    id: AttrId::from_item_tree_index(self.u32()?),
+                }
             }
             7 => {
                 let ast = self.ast_id()?;
-                DefDiagnosticKind::MalformedDerive { ast, id: AttrId::from_item_tree_index(self.u32()?) }
+                DefDiagnosticKind::MalformedDerive {
+                    ast,
+                    id: AttrId::from_item_tree_index(self.u32()?),
+                }
             }
             8 => {
                 let ast = self.ast_id()?;
@@ -2434,6 +2811,9 @@ macro Debug {}
 pub mod prelude { pub mod rust_2018 { pub use crate::{Clone, Debug, derive}; } }
 "#;
 
+    /// The differences are recorded for the whole process: the tests that read them take turns.
+    static TURN: Mutex<()> = Mutex::new(());
+
     fn crate_named(db: &TestDB, name: &str) -> Crate {
         *base_db::all_crates(db)
             .iter()
@@ -2456,7 +2836,9 @@ pub mod prelude { pub mod rust_2018 { pub use crate::{Clone, Debug, derive}; } }
         let mut db = TestDB::with_files(FIXTURE);
         let maps = bytes
             .iter()
-            .map(|(name, bytes)| (crate_named(&db, name), Frozen { bytes: bytes.as_slice().into(), mode }))
+            .map(|(name, bytes)| {
+                (crate_named(&db, name), Frozen { bytes: bytes.as_slice().into(), mode })
+            })
             .collect();
         set(&mut db, maps);
         db
@@ -2469,6 +2851,7 @@ pub mod prelude { pub mod rust_2018 { pub use crate::{Clone, Debug, derive}; } }
 
     #[test]
     fn read_back_writes_the_same_bytes() {
+        let _turn = TURN.lock().unwrap_or_else(|it| it.into_inner());
         let bytes = frozen();
         let db = with(Mode::Verify, &bytes);
         for (name, written) in &bytes {
@@ -2485,13 +2868,35 @@ pub mod prelude { pub mod rust_2018 { pub use crate::{Clone, Debug, derive}; } }
         let live = TestDB::with_files(FIXTURE);
         let served = with(Mode::Serve, &bytes);
         for name in ["lib", "main"] {
-            let dump = |db: &TestDB| super::super::crate_def_map(db, crate_named(db, name)).dump(db);
+            let dump =
+                |db: &TestDB| super::super::crate_def_map(db, crate_named(db, name)).dump(db);
             assert_eq!(dump(&served), dump(&live), "{name}");
         }
     }
 
     #[test]
+    fn a_file_outside_the_crate_is_read_only_as_written() {
+        const OUTSIDE: &str = r#"
+//- /main.rs crate:main deps:lib
+use lib::made::made;
+//- /lib/src/lib.rs crate:lib
+#[path = "../made.rs"]
+pub mod made;
+//- /lib/made.rs
+pub fn made() {}
+"#;
+        let db = TestDB::with_files(OUTSIDE);
+        let lib = crate_named(&db, "lib");
+        let bytes = encode(&db, lib).unwrap();
+        assert_eq!(unreadable(&db, lib, &bytes), None);
+        let changed = TestDB::with_files(&OUTSIDE.replace("{}\n", "{}\npub fn more() {}\n"));
+        let why = unreadable(&changed, crate_named(&changed, "lib"), &bytes);
+        assert!(why.as_ref().is_some_and(|it| it.ends_with("is not the file that was written")), "{why:?}");
+    }
+
+    #[test]
     fn checking_finds_a_difference() {
+        let _turn = TURN.lock().unwrap_or_else(|it| it.into_inner());
         let mut bytes = frozen();
         let db = with(Mode::Check, &bytes);
         _ = super::super::crate_def_map(&db, crate_named(&db, "main"));

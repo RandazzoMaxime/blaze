@@ -2773,15 +2773,21 @@ fn resolve_all(db: &RootDatabase, crates: &[ide_db::base_db::Crate], threads: us
                     hir::attach_db(&db, || {
                         _ = hir::crate_def_map(&db, krate);
                         let names = start.elapsed();
-                        warm_impls(&db, krate, helping, threads);
+                        let frozen = hir_ty::method_resolution::frozen::served(&db, krate);
+                        if !frozen {
+                            warm_impls(&db, krate, helping, threads);
+                        }
                         _ = hir::TraitImpls::for_crate(&db, krate);
                         // Which of its dependencies the crate names is read off its files,
                         // and the first body inferred would wait for that of every crate.
                         _ = hir::TraitImpls::for_crate_and_deps(&db, krate);
-                        // A build asks which functions written in the bodies of the standard
-                        // library share a path, which every body of the crate is lowered for:
-                        // threads are idle here, waiting for the crates that come next.
-                        if krate.data(&db).origin.is_lang() {
+                        if frozen {
+                            warm_files(&db, krate, helping, threads);
+                        } else if krate.data(&db).origin.is_lang() {
+                            // A build asks which functions written in the bodies of the
+                            // standard library share a path, which every body of the crate is
+                            // lowered for: threads are idle here, waiting for the crates that
+                            // come next.
                             _ = declared_in(&db, krate.into());
                         }
                         if std::env::var_os("RA_JIT_STATS").is_some() {
@@ -2814,9 +2820,43 @@ fn warm_impls(
     helping: &std::sync::atomic::AtomicUsize,
     threads: usize,
 ) {
-    use std::sync::atomic::Ordering::Relaxed;
     let work = hir_ty::method_resolution::impl_work(db, krate);
-    let wanted = (work.len() / 64).min(threads - 1);
+    on_idle_threads(db, &work, 64, helping, threads, |db, work| work.run(db));
+}
+
+/// Parses the files of the modules of `krate`, whose names and impls were read rather than
+/// found, with the threads no other crate has: a signature or body of the crate that a build
+/// lowers parses its whole file first, one file after another.
+fn warm_files(
+    db: &RootDatabase,
+    krate: ide_db::base_db::Crate,
+    helping: &std::sync::atomic::AtomicUsize,
+    threads: usize,
+) {
+    let def_map = hir_def::nameres::crate_def_map(db, krate);
+    let mut seen = FxHashSet::default();
+    let files: Vec<_> = def_map
+        .modules(db)
+        .filter_map(|(_, data)| data.origin.file_id())
+        .filter(|&file| seen.insert(file))
+        .collect();
+    on_idle_threads(db, &files, 4, helping, threads, |db, &file| {
+        _ = hir::HirFileId::from(file).ast_id_map(db);
+    });
+}
+
+/// Runs `run` on each of `work` here and on the threads no other crate has, one for each
+/// `per` items.
+fn on_idle_threads<T: Sync>(
+    db: &RootDatabase,
+    work: &[T],
+    per: usize,
+    helping: &std::sync::atomic::AtomicUsize,
+    threads: usize,
+    run: impl Fn(&RootDatabase, &T) + Sync,
+) {
+    use std::sync::atomic::Ordering::Relaxed;
+    let wanted = (work.len() / per).min(threads - 1);
     let mut helpers = 0;
     _ = helping.fetch_update(Relaxed, Relaxed, |busy| {
         helpers = wanted.min(threads.saturating_sub(busy + 1));
@@ -2826,18 +2866,18 @@ fn warm_impls(
         return;
     }
     let next = std::sync::atomic::AtomicUsize::new(0);
-    let run = |db: &RootDatabase| {
-        while let Some(&work) = work.get(next.fetch_add(1, Relaxed)) {
-            work.run(db);
+    let each = |db: &RootDatabase| {
+        while let Some(item) = work.get(next.fetch_add(1, Relaxed)) {
+            run(db, item);
         }
     };
     std::thread::scope(|scope| {
         for _ in 0..helpers {
             let db = db.clone();
-            let run = &run;
-            scope.spawn(move || hir::attach_db(&db, || run(&db)));
+            let each = &each;
+            scope.spawn(move || hir::attach_db(&db, || each(&db)));
         }
-        run(db);
+        each(db);
     });
     helping.fetch_sub(helpers, Relaxed);
 }

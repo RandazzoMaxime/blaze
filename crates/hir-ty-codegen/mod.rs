@@ -3662,16 +3662,20 @@ pub const STAND_IN_SAYS: &str = "ra-jit could not compile ";
 
 /// Whether a crate declares the `#[global_allocator]`: whether it has the function the
 /// attribute's expansion exports for `__rust_alloc` (the attribute itself is gone from the
-/// static once expanded).
+/// static once expanded). The expansion names the function as it exports it, so each module
+/// is asked for the name rather than for the attributes of all its functions.
 #[salsa::tracked(returns(copy))]
 fn declares_global_allocator(db: &dyn HirDatabase, krate: Crate) -> bool {
+    const EXPORTED: &str = "__ra_jit_global_alloc";
     let def_map = hir_def::nameres::crate_def_map(db, krate);
-    def_map.modules(db).any(|(_, module)| {
-        module.scope(db).declarations().any(|it| match it {
-            hir_def::ModuleDefId::FunctionId(id) => AttrFlags::export_name(db, id.into())
-                .is_some_and(|it| it.as_str() == "__ra_jit_global_alloc"),
-            _ => false,
-        })
+    let name = hir_expand::name::Name::new_root(EXPORTED);
+    def_map.modules(db).any(|(module_id, module)| {
+        let Some(hir_def::ModuleDefId::FunctionId(id)) = module.scope(db).get(&name).take_values()
+        else {
+            return false;
+        };
+        id.lookup(db).container == ItemContainerId::ModuleId(module_id)
+            && AttrFlags::export_name(db, id.into()).is_some_and(|it| it.as_str() == EXPORTED)
     })
 }
 

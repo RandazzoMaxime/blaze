@@ -1,6 +1,6 @@
-//! Frozen dependency artifacts (`docs/glancer.md`, item 1; #40): the def map of each crate
-//! whose source cannot change, written to the store once and read back instead of resolving
-//! it again.
+//! Frozen dependency artifacts (`docs/glancer.md`, item 1; #40): the def map, the impls and
+//! the lang items of each crate whose source cannot change, written to the store once and read
+//! back instead of resolving and finding them again.
 //!
 //! A crate is frozen when its source is the toolchain's (the standard library) or a
 //! registry's or git checkout's, and every crate it depends on is frozen too. Its key is a
@@ -9,23 +9,24 @@
 //! and ra-jit's own build.
 //!
 //! `RA_JIT_FROZEN` says what is done with what the store has: by default it is served;
-//! `check` resolves as well and fails the build on any difference, `verify` writes what was
-//! read and fails on any difference, `off` neither reads nor writes.
+//! `check` resolves and finds as well and fails the build on any difference, `verify` writes
+//! what was read and fails on any difference, `off` neither reads nor writes.
 
 use ide_db::base_db::Crate;
 use rustc_hash::FxHashMap;
 use sha2::{Digest, Sha256};
 
 use hir_def::nameres::frozen::{self as hir_frozen, Frozen, Mode};
+use hir_ty::method_resolution::frozen as impls_frozen;
 
-/// What a build did with the frozen def maps of the crates it resolved.
+/// What a build did with what is frozen of the crates it resolved.
 #[derive(Default)]
 pub(crate) struct Served {
     /// The key of each crate that can be frozen.
     keys: FxHashMap<Crate, [u8; 32]>,
-    /// The crates whose def map came from the store.
-    served: Vec<Crate>,
-    /// The crates whose def map the store has but which read a file that is not loaded.
+    /// The crates each [`Part`] of which came from the store, in the order of [`Part::ALL`].
+    served: [Vec<Crate>; 3],
+    /// The parts the store has but which name a file that is not loaded.
     unreadable: usize,
     mode: Option<Mode>,
 }
@@ -79,10 +80,11 @@ fn key_of(
         hasher.update((bytes.len() as u64).to_le_bytes());
         hasher.update(bytes);
     };
-    field(b"ra-jit frozen def map 1");
+    field(b"ra-jit frozen def map 3");
     field(source.as_bytes());
     field(format!("{:?} {:?} {:?}", data.edition, data.target_kind, data.crate_attrs).as_bytes());
-    let mut cfgs: Vec<String> = krate.cfg_options(db).into_iter().map(|it| it.to_string()).collect();
+    let mut cfgs: Vec<String> =
+        krate.cfg_options(db).into_iter().map(|it| it.to_string()).collect();
     cfgs.sort_unstable();
     field(cfgs.join("\n").as_bytes());
     let mut env: Vec<String> = krate
@@ -92,7 +94,8 @@ fn key_of(
         .collect();
     env.sort_unstable();
     field(env.join("\n").as_bytes());
-    let deps: Vec<_> = data.dependencies.iter().map(|it| (it.crate_id, it.name.to_string())).collect();
+    let deps: Vec<_> =
+        data.dependencies.iter().map(|it| (it.crate_id, it.name.to_string())).collect();
     for (dep, name) in deps {
         let dep_key = key(db, dep, keys)?;
         field(name.as_bytes());
@@ -101,7 +104,82 @@ fn key_of(
     Some(hasher.finalize().into())
 }
 
-/// Has name resolution read the def maps the store has of `crates` and their dependencies.
+/// What is frozen of a crate, each under its own key: the def map's is the crate's key.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Part {
+    DefMap,
+    Impls,
+    LangItems,
+}
+
+impl Part {
+    const ALL: [Part; 3] = [Part::DefMap, Part::Impls, Part::LangItems];
+
+    fn name(self) -> &'static str {
+        match self {
+            Part::DefMap => "def maps",
+            Part::Impls => "impls",
+            Part::LangItems => "lang items",
+        }
+    }
+
+    /// The key of this part of the crate whose key is `key`.
+    fn key(self, key: &[u8; 32]) -> [u8; 32] {
+        let tag: &[u8] = match self {
+            Part::DefMap => return *key,
+            Part::Impls => b"ra-jit frozen impls 1",
+            Part::LangItems => b"ra-jit frozen lang items 1",
+        };
+        let mut hasher = Sha256::new();
+        hasher.update(tag);
+        hasher.update(key);
+        hasher.finalize().into()
+    }
+
+    /// Why `bytes` cannot be read in this database: a file they name is not loaded.
+    fn unreadable(self, db: &ide_db::RootDatabase, krate: Crate, bytes: &[u8]) -> Option<String> {
+        if self != Part::Impls {
+            return hir_frozen::unreadable(db, krate, bytes);
+        }
+        // The impls are two parts, each naming its files.
+        let len = bytes.get(..4).and_then(|it| <[u8; 4]>::try_from(it).ok());
+        let Some(len) = len else { return Some("no length".to_owned()) };
+        let first = 4 + u32::from_le_bytes(len) as usize;
+        let (Some(traits), Some(inherent)) = (bytes.get(4..first), bytes.get(first..)) else {
+            return Some("a part past the end".to_owned());
+        };
+        [traits, inherent].into_iter().find_map(|part| hir_frozen::unreadable(db, krate, part))
+    }
+
+    fn set(self, db: &mut ide_db::RootDatabase, maps: FxHashMap<Crate, Frozen>) {
+        match self {
+            Part::DefMap => hir_frozen::set(db, maps),
+            Part::Impls => impls_frozen::set(db, maps),
+            Part::LangItems => hir_frozen::set_lang_items(db, maps),
+        }
+    }
+
+    fn encode(self, db: &ide_db::RootDatabase, krate: Crate) -> Result<Vec<u8>, String> {
+        hir::attach_db(db, || match self {
+            Part::DefMap => hir_frozen::encode(db, krate),
+            Part::Impls => impls_frozen::encode(db, krate),
+            Part::LangItems => hir_frozen::encode_lang_items(db, krate),
+        })
+    }
+
+    /// Records a difference between what was read and what is live; the def map's is
+    /// checked as it is resolved.
+    fn check(self, db: &ide_db::RootDatabase, krate: Crate) {
+        hir::attach_db(db, || match self {
+            Part::DefMap => {}
+            Part::Impls => impls_frozen::check(db, krate),
+            Part::LangItems => hir_frozen::check_lang_items(db, krate),
+        })
+    }
+}
+
+/// Has name resolution, finding impls and finding lang items read what the store has of
+/// `crates` and their dependencies.
 pub(crate) fn serve(db: &mut ide_db::RootDatabase, crates: &[Crate]) -> Served {
     let Some(mode) = mode() else { return Served::default() };
     let mut all: FxHashMap<Crate, Option<[u8; 32]>> = FxHashMap::default();
@@ -114,52 +192,71 @@ pub(crate) fn serve(db: &mut ide_db::RootDatabase, crates: &[Crate]) -> Served {
         all.into_iter().filter_map(|(krate, key)| Some((krate, key?))).collect();
     let mut served = Served { keys, mode: Some(mode), ..Served::default() };
     let Some(store) = ra_jit_store::Store::global() else { return served };
-    let mut maps = FxHashMap::default();
-    for (&krate, key) in &served.keys {
-        let Some(bytes) = store.get(key) else { continue };
-        if hir_frozen::unreadable(db, krate, &bytes).is_some() {
-            served.unreadable += 1;
-            continue;
+    for (index, part) in Part::ALL.into_iter().enumerate() {
+        let mut maps = FxHashMap::default();
+        for (&krate, key) in &served.keys {
+            // A part is read only with the def map it was found from.
+            if part != Part::DefMap && !served.served[0].contains(&krate) {
+                continue;
+            }
+            let Some(bytes) = store.get(&part.key(key)) else { continue };
+            if part.unreadable(db, krate, &bytes).is_some() {
+                served.unreadable += 1;
+                continue;
+            }
+            maps.insert(krate, Frozen { bytes: bytes.into(), mode });
+            served.served[index].push(krate);
         }
-        maps.insert(krate, Frozen { bytes: bytes.into(), mode });
-        served.served.push(krate);
+        part.set(db, maps);
     }
-    hir_frozen::set(db, maps);
     served
 }
 
-/// Writes to the store the def maps of the crates that can be frozen and were resolved, and
-/// fails on a difference between a frozen def map and a live one.
+/// Writes to the store what can be frozen of the crates that were resolved, and fails on a
+/// difference between what was frozen and what is live.
 pub(crate) fn store(db: &ide_db::RootDatabase, served: &Served) -> anyhow::Result<()> {
+    if served.mode != Some(Mode::Serve) {
+        for (index, part) in Part::ALL.into_iter().enumerate() {
+            served.served[index].iter().for_each(|&krate| part.check(db, krate));
+        }
+    }
     let differences = hir_frozen::differences();
     if !differences.is_empty() {
-        anyhow::bail!("frozen def maps differ:\n{}", differences.join("\n"));
+        anyhow::bail!("what was frozen differs:\n{}", differences.join("\n"));
     }
     let Some(store) = served.mode.and(ra_jit_store::Store::global()) else { return Ok(()) };
     let mut stored = 0;
     let mut refused: FxHashMap<String, usize> = FxHashMap::default();
-    for (&krate, key) in &served.keys {
-        if served.served.contains(&krate) || store.has(key) {
-            continue;
-        }
-        match hir::attach_db(db, || hir_frozen::encode(db, krate)) {
-            Ok(bytes) => {
-                if stored == 0 {
-                    store.settled();
-                }
-                store.insert(key, &bytes);
-                stored += 1;
+    for (index, part) in Part::ALL.into_iter().enumerate() {
+        for (&krate, key) in &served.keys {
+            let key = part.key(key);
+            if served.served[index].contains(&krate) || store.has(&key) {
+                continue;
             }
-            Err(why) => *refused.entry(why).or_default() += 1,
+            match part.encode(db, krate) {
+                Ok(bytes) => {
+                    if stored == 0 {
+                        store.settled();
+                    }
+                    store.insert(&key, &bytes);
+                    stored += 1;
+                }
+                Err(why) => *refused.entry(format!("{} with {why}", part.name())).or_default() += 1,
+            }
         }
     }
     if stored > 0 {
         store.flush();
     }
+    let from: Vec<String> = Part::ALL
+        .iter()
+        .zip(&served.served)
+        .map(|(part, crates)| format!("{} of {}", part.name(), crates.len()))
+        .collect();
     let mut said = format!(
-        "frozen def maps: {} of {} crates from the store, {stored} written",
-        served.served.len(),
-        served.keys.len()
+        "frozen, of {} crates: {} from the store, {stored} written",
+        served.keys.len(),
+        from.join(", ")
     );
     if served.unreadable > 0 {
         said += &format!(", {} naming a file not loaded", served.unreadable);
@@ -167,7 +264,7 @@ pub(crate) fn store(db: &ide_db::RootDatabase, served: &Served) -> anyhow::Resul
     if !refused.is_empty() {
         let mut refused: Vec<_> = refused.into_iter().collect();
         refused.sort_unstable_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
-        let why: Vec<String> = refused.iter().map(|(why, n)| format!("{n} with {why}")).collect();
+        let why: Vec<String> = refused.iter().map(|(why, n)| format!("{n} {why}")).collect();
         said += &format!(", not frozen: {}", why.join(", "));
     }
     eprintln!("{said}");
