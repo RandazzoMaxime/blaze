@@ -1762,6 +1762,20 @@ impl<'db> Builder<'_, '_, 'db> {
                 }
                 if let rustc_type_ir::AliasTyKind::Projection { .. } = alias.kind {
                     self.prove(alias.trait_ref(self.interner()), at);
+                    // And what it normalizes to, as rustc checks the normalized signature of a
+                    // call: `FnOnce(&'s str) -> [&'static &'s (); 0]` that `'s: 'static`. Not
+                    // one with a trait object, whose lifetime rust-analyzer can make `'static`.
+                    if rustc_type_ir::TypeVisitableExt::has_free_regions(&ty)
+                        && let Some(normalized) = self.normalize(ty)
+                        && !matches!(normalized.kind(), TyKind::Alias(..) | TyKind::Infer(_))
+                        && !normalized.walk().any(|it| {
+                            rustc_type_ir::inherent::GenericArg::as_type(&it).is_some_and(|it| {
+                                matches!(it.kind(), TyKind::Dynamic(..) | TyKind::Infer(_))
+                            })
+                        })
+                    {
+                        self.well_formed(normalized, at, depth + 1);
+                    }
                 }
             }
             // As rustc, a function item is well-formed with its where clauses and its return
@@ -4284,6 +4298,7 @@ impl<'db> Builder<'_, '_, 'db> {
                         }
                         false => trait_ref,
                     };
+                    self.trait_args_outlive(trait_ref, at);
                     // Of a call written as one: `map[i] = v` calls `IndexMut::index_mut`, which
                     // is E0594 where only `Index` is implemented.
                     if self.prove(trait_ref, at)
@@ -4330,6 +4345,48 @@ impl<'db> Builder<'_, '_, 'db> {
             }
         }
         regions
+    }
+
+    /// The trait's where clauses on its arguments, which hold where `trait_ref` is well-formed:
+    /// `trait Trait<ARG: 'static>` of `Trait<&'a str>` is `'a: 'static`.
+    fn trait_args_outlive(
+        &mut self,
+        trait_ref: rustc_type_ir::TraitRef<hir_ty::next_solver::DbInterner<'db>>,
+        at: At,
+    ) {
+        if rustc_type_ir::TypeVisitableExt::has_escaping_bound_vars(&trait_ref) {
+            return;
+        }
+        let db = self.ctx.db;
+        for clause in GenericPredicates::query_all(db, trait_ref.def_id.0.into())
+            .iter_instantiated(self.interner(), trait_ref.args.as_slice())
+        {
+            let region = |this: &mut Self, region: Region<'db>| match region.kind() {
+                RegionKind::ReStatic => Some(this.static_region()),
+                RegionKind::ReBound(..) => None,
+                _ => Some(region),
+            };
+            match clause.skip_norm_wip().kind().skip_binder() {
+                ClauseKind::TypeOutlives(OutlivesPredicate(ty, sub))
+                    if ty != trait_ref.self_ty()
+                        && !rustc_type_ir::TypeVisitableExt::has_escaping_bound_vars(&ty) =>
+                {
+                    if let Some(sub) = region(self, sub) {
+                        self.type_outlives(ty, sub, at);
+                    }
+                }
+                ClauseKind::RegionOutlives(OutlivesPredicate(longer, shorter)) => {
+                    if let Some(longer) = region(self, longer)
+                        && let Some(shorter) = region(self, shorter)
+                        && let (Some(longer), Some(shorter)) =
+                            (self.region_rv(longer), self.region_rv(shorter))
+                    {
+                        self.outlives(longer, shorter, at);
+                    }
+                }
+                _ => (),
+            }
+        }
     }
 
     /// `F: FnOnce(S, T)` of a closure of this body typed against an expected signature: rustc
