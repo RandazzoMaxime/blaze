@@ -785,6 +785,16 @@ def daemon(work):
     ended = 'error: could not compile `app` (bin "app") due to 1 previous error' in broken.stderr
     check("an edit with an error fails the build with ra-jit's error, as rustc writes it, and no cargo", broken.returncode == 101 and not by_rustc(broken.stderr) and said and ended, f"exit {broken.returncode}, {broken.stderr.strip()[-300:]}")
     open(main, "w").write(kept)
+    # So does one written while no daemon ran, which the worker finds as it loads.
+    here.cargo("stop")
+    open(main, "a").write("\nfn broken() -> u32 { \"text\" }\n")
+    _, broken = here.cargo("build")
+    said = re.search(r'^error\[E0308\]: .*\n +--> app/src/main\.rs:\d+:22\n', broken.stderr, re.M)
+    ended = 'error: could not compile `app` (bin "app") due to 1 previous error' in broken.stderr
+    check("an error written before the daemon loaded fails the build with ra-jit's error, and no cargo", broken.returncode == 101 and not by_rustc(broken.stderr) and said and ended, f"exit {broken.returncode}, {broken.stderr.strip()[-300:]}")
+    open(main, "w").write(kept)
+    _, mended = here.cargo("run")
+    check("the build after it is mended is the daemon's", mended.returncode == 0 and not by_rustc(mended.stderr) and "hello world" in mended.stdout, f"exit {mended.returncode}, {mended.stderr.strip()[-300:]}")
     here.cargo("stop")
     manners(work, ws, env, here, check, edit)
     abuse(work, ws, tree, env, check, status, alive)

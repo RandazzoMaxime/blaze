@@ -2814,7 +2814,8 @@ fn warm_impls(
 #[derive(Default)]
 struct Listed {
     functions: std::sync::Mutex<FxHashMap<Crate, std::sync::Arc<ListedCrate>>>,
-    /// Every crate that was listed, also once an edit has it listed again.
+    /// Every crate that was listed or that a build began, also once an edit has it listed
+    /// again.
     built: std::sync::Mutex<FxHashSet<Crate>>,
     /// What [`Listed::in_files`] found written in a file, by its [`outline::skeleton`] then.
     files: std::sync::Mutex<FxHashMap<vfs::FileId, (u64, Vec<FunctionId>)>>,
@@ -2979,6 +2980,12 @@ impl Listed {
         // A file of the crate that is a module of another too has more functions now.
         lock(&self.files).clear();
         lock(&self.functions).entry(krate).or_insert(listed).clone()
+    }
+
+    /// Notes that a build of `crates` began: the files they read are a program's before the
+    /// build lists them, as the check of its edited files has it.
+    fn building(&self, crates: impl IntoIterator<Item = Crate>) {
+        lock(&self.built).extend(crates);
     }
 
     /// Notes that a file changed: one of `crates`, or with `None` one we can't place.
@@ -4790,6 +4797,15 @@ fn build_batch(db: &RootDatabase, args: Args) -> anyhow::Result<()> {
             Err(panic) => format!("panicked: {}", panic_message(&*panic)),
         };
         std::fs::write(report.join(format!("{krate}.error")), error)?;
+    }
+    Ok(())
+}
+
+/// Leaves `said`, the errors in the source a worker found as it loaded the workspace, for
+/// the daemon to fail each build with.
+fn errors_for_the_daemon(args: &Args, said: &str) -> anyhow::Result<()> {
+    if let Some(socket) = &args.socket {
+        std::fs::write(cargo::daemon::errors_beside(socket), said)?;
     }
     Ok(())
 }
@@ -6633,6 +6649,9 @@ fn run_holding(
         let why =
             hir::attach_db(&db, || refusal(&db, &edited, &sources, &args.checkout, broken, None));
         if let Some(why) = why {
+            if let Refused::Error(said) = &why {
+                errors_for_the_daemon(&args, said)?;
+            }
             bail!("{why}");
         }
     }
@@ -6669,6 +6688,7 @@ fn run_holding(
                 cold = build_unheld(&db, &table, &args, &mut known, &listed)?;
             }
             if let Some(unset) = &cold.unset {
+                errors_for_the_daemon(&args, &errors::of_none(unset))?;
                 bail!("{unset}");
             }
             eprint!("cold: ");
@@ -7135,7 +7155,8 @@ fn run_holding(
                     match loaded {
                         Ok((args, table)) => {
                             // Never built: every file is as good as edited, but those were
-                            // checked when the programs before it were built.
+                            // checked when the programs before it were built, all but the
+                            // ones rustc did not read, which `distrust_rustc` adds.
                             let unbuilt = Unbuilt {
                                 edited: programs[0].unbuilt.edited.clone(),
                                 stale: true,
@@ -8003,16 +8024,22 @@ impl Program {
                 None => file.mtime != SystemTime::UNIX_EPOCH && file.mtime <= built?,
             })
         };
-        let other: Vec<_> = files
+        let unread: Vec<vfs::FileId> = files
             .iter()
             .filter_map(|it| {
                 let Watched::Source(id) = it.file else { return None };
-                let fresh = compiled_from(it, id)?;
-                (!fresh).then(|| ide_db::base_db::relevant_crates(db, id).to_vec())
+                (!compiled_from(it, id)?).then_some(id)
             })
-            .flatten()
+            .collect();
+        let other: Vec<_> = unread
+            .iter()
+            .flat_map(|&id| ide_db::base_db::relevant_crates(db, id).to_vec())
             .collect();
         self.known.distrust(db, &other);
+        // A file rustc did not read is edited for this program: its build checks it.
+        self.unbuilt.edited.extend(unread);
+        self.unbuilt.edited.sort_unstable();
+        self.unbuilt.edited.dedup();
     }
 
     /// Has the program be one of its checkout as it was loaded again: of the crates and the
@@ -8170,6 +8197,7 @@ impl Program {
             }
         }
         let &Edit { start, age, settled, read, apply, changed } = edit;
+        listed.building(args.crates().filter_map(|it| crates_named(db, it, args).ok()).flatten());
         // Another checkout's files are not this program's to be refused for.
         let mut edited = unbuilt.edited.clone();
         edited.retain(|file| paths.paths.get(file).is_none_or(|it| args.owns(db, *file, it)));
