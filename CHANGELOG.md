@@ -388,6 +388,9 @@ All notable changes to ra-jit are written here. The format follows
 
 ### Fixed
 
+- `runbench.py` runs cargo's release build from beside ra-jit's, in the workspace, where it ran
+  it from cargo's target directory. helix looks for its `runtime` next to itself, so only
+  cargo's build warned that there was none, and helix was reported as running differently.
 - A program whose `main` is C's, as bun's, is built as a whole program: LLVM gets every body
   and inlines across crates, where each function was compiled alone before. `derive(PartialEq)`
   of an enum compares the discriminants first, as rustc's does. bun's whole program, every

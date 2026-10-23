@@ -91,7 +91,10 @@ def cargo_release(ws, spec, label, rustflags):
     took, ran, used = memory.run(argv, ws, env)
     if ran.returncode != 0:
         raise SystemExit(f"`{shlex.join(argv)}` failed:\n{(ran.stdout + ran.stderr)[-3000:]}")
-    return os.path.join(target, "release", spec.get("bin", spec["package"])), took, used
+    # Beside ra-jit's, as a program may look for files next to itself (helix its `runtime`).
+    kept = os.path.join(ws, f"bin-{label}")
+    shutil.copy2(os.path.join(target, "release", spec.get("bin", spec["package"])), kept)
+    return kept, took, used
 
 
 def ra_jit_release(ws, spec, label, extra):
