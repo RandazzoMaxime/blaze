@@ -122,7 +122,8 @@ Median of three edits, warm, incremental `cargo build` → `cargo ra-jit build`:
   before it).
 - Linux x86-64, `bench.py bun --runs 3` pinned to 16 cores of an AWS c8a.24xlarge (AMD EPYC
   9R45), ra-jit `7dcfe73922`, 2026-10-22, Cranelift (read,
-  [docs/benchmarks/bun-linux-x86-64.json](../benchmarks/bun-linux-x86-64.json)): a body 9.1 s →
+  [docs/benchmarks/bun-linux-x86-64.json](../benchmarks/bun-linux-x86-64.json) as it was before
+  2026-10-23): a body 9.1 s →
   0.49 s, a widely used function 16.5 s → 0.49 s, a generic function 16.7 s → 0.52 s, all
   spliced; a signature 9.2 s → 0.64 s, the object written again, where macOS's went to cargo;
   a new function 14.5 s → 19.8 s, the object written again; nothing changed 74 ms → 19 ms.
@@ -137,10 +138,66 @@ Median of three edits, warm, incremental `cargo build` → `cargo ra-jit build`:
   `Bun.Transpiler` run takes 2.31 s against 0.39 s for cargo's release build (5.9x), 77 MB
   against 56 MB at most (read, `runbench.py`'s result). Pinned to 16 cores (`bench.py --runtime
   bun`, `7dcfe73922`): built in 86.9 s against 135.2 s, and 5.80x (read,
-  [docs/benchmarks/runtime-bun-linux-x86-64.json](../benchmarks/runtime-bun-linux-x86-64.json)).
-  That the gap is mostly code ra-jit's
-  LLVM does not optimise as rustc does (inlining across crates, `#[inline]` honoured) is
-  unverified.
+  [docs/benchmarks/runtime-bun-linux-x86-64.json](../benchmarks/runtime-bun-linux-x86-64.json)
+  as it was before 2026-10-23). That the gap is mostly inlining across crates LLVM did not get
+  to do was confirmed on 2026-10-23 (below).
+
+### 2026-10-23: the whole program's speed, and the edit that adds a function
+
+ra-jit `948d54e375` (the bun-perf lane), Linux x86-64 on 16 cores of an AWS c8a.24xlarge (AMD
+EPYC 9R45) unless said otherwise.
+
+- **Why the whole program ran 5.9x slower** (read, `perf record` of both binaries on the
+  `Bun.Transpiler` run, and ra-jit's build log): bun's `main` is C's, so ra-jit built it as a
+  library of entries, each function compiled on its own: LLVM saw no body of another crate's
+  function and inlined nothing across crates, `#[inline]` included. A second cost was `derive(PartialEq)` of an enum, which compared
+  the payloads of every variant in turn where rustc's compares the discriminants first: 23% of
+  the run in one comparison chain of the lexer's tokens. Both are fixed: a program whose main
+  is C's is built as a whole program, LLVM getting every body and inlining across crates
+  (`edfa181e49`, test `harness/wholeprogram`'s `c_main`), and the discriminants are compared
+  first (`3419d66b0e`, a unit test).
+- **After** (`bench.py --runtime bun --runs 5`, read,
+  [docs/benchmarks/runtime-bun-linux-x86-64.json](../benchmarks/runtime-bun-linux-x86-64.json)):
+  0.495 s against 0.387 s for cargo's release build, 1.28x (was 5.80x), and 1.10x for cargo's
+  release build with overflow checks; 54 MB against 57 MB at most. All 68,315 functions are
+  ra-jit's. The build takes 565 s against 139 s for cargo's (was 87 s): every compile of a
+  function now carries the bodies it may inline, 1.10 billion instructions shown to LLVM for
+  89.6 million of bun's own, and LLVM's optimiser spends about 5.2k CPU-seconds on them (read,
+  ra-jit's build statistics). A cache of the inlinable bodies across compiles would remove
+  most of that; it is not built. Making shown bodies `available_externally` cut LLVM's
+  optimise CPU by 41% and the build's wall time by 3%; capping what is shown made both the
+  build and the program slower; neither was kept.
+- **Where the remaining 1.28x is** (read, `perf`): `Lexer::next` 14.5% of the run against 13%
+  in cargo's, `get_hashed` 4.3% against 2.8%, `__key_index` 3.4% against 1.2%; the rest is
+  spread thinly. It is a general gap in ra-jit's LLVM IR (the runtime-parity lane's), not
+  bun's.
+- **Why adding a function took 19.8 s, slower than cargo's 14.5 s** (read, the daemon's log
+  of the edit): three causes, each fixed with a test. Every function of a program whose main
+  is C's is an entry, and a patch refused any change to the set of entries, so the edit
+  became a full build and link (`b4399dc352`). An added function has no symbol in rustc's
+  build, which the patch refused too (same commit). And the daemon of a build ahead of cargo
+  listed `bun_runtime` before it had loaded the files its `include!`s name (BUN_CODEGEN_DIR's
+  generated code), so 2,834 generated C-ABI functions were not entries; the first edit that
+  listed it again patched 13,002 functions, and every later patch redirected about 1,940
+  (`d59b7ca2cf`, `harness/latelisted.py`).
+- **After** (`bench.py bun --runs 3`, read,
+  [docs/benchmarks/bun-linux-x86-64.json](../benchmarks/bun-linux-x86-64.json)): a new function
+  0.64 s against cargo's 14.7 s (was 19.8 s), spliced; a body 0.44 s, a signature 0.57 s, a
+  widely used function 0.41 s, a generic function 0.44 s, nothing changed 18 ms; cold to
+  ready 73.0 s against cargo's 73.0 s. The daemon's memory is in
+  [docs/glancer.md](../glancer.md).
+- **macOS arm64** (Apple M5 Max, 18 cores, by hand): the whole-program build failed to link
+  for two reasons, both fixed. `runbench.py` built ra-jit's whole program with `-C
+  link-dead-code`, which takes `-dead_strip` off the link, so the one object had to resolve
+  bun's Windows-only externs (`bff512e014`); and ra-jit's Mach-O made every definition weak
+  and private, so `-exported_symbols_list` could not export `napi_*` ("cannot export hidden
+  symbol"; `108d569721`, a unit test). The run's "checked" build (cargo's release build with
+  overflow checks) fails on bun's own overflow, so the Mac compares release and ra-jit only.
+  After (`bench.py --runtime bun --runs 5 --builds release,ra-jit`, `948d54e375`, read,
+  [docs/benchmarks/runtime-bun-macos-arm64.json](../benchmarks/runtime-bun-macos-arm64.json)):
+  62,031 functions by ra-jit and none left, built in 983 s against 177 s for cargo's release
+  build; the run takes 0.415 s against 0.333 s, 1.25x, 46 MB against 43 MB at most. This closed
+  [#35](https://github.com/indexable-inc/ra-jit/issues/35).
 
 The reduced nightly fixtures in `harness/bun-repros` keep these two refusals measurable without
 building Bun's native C and C++ dependencies. Run them with `python3 harness/bun_repros.py` after
