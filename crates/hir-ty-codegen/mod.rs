@@ -260,6 +260,11 @@ pub trait SymbolResolver {
     fn describes_variables(&self) -> bool {
         true
     }
+    /// Whether the object is split into parts that a linker reads apart, so that each unit
+    /// of its description is best in sections of its own, beside the functions it describes.
+    fn debug_grouped(&self) -> bool {
+        false
+    }
     /// Whether every function keeps its frame pointer, as `-C force-frame-pointers` has it:
     /// code that walks its own frames (bun's backtraces) reads them.
     fn keeps_frame_pointers(&self) -> bool {
@@ -4256,7 +4261,7 @@ impl<'a, 'db> ObjectCodegen<'a, 'db> {
                 &directory,
                 symbols.describes_variables(),
                 apart,
-                sections,
+                sections && symbols.debug_grouped(),
             )
                 .map(debuginfo::Describer::new)
         });

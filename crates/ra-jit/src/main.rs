@@ -364,6 +364,9 @@ struct Resolver<'a> {
     /// The crates the programs are made of, which a file that several crates share is read as
     /// a module of.
     programs: Option<Arc<FxHashSet<ide_db::base_db::Crate>>>,
+    /// The object is the standard library's, which is split into parts for the linker
+    /// ([`std_unit`]).
+    library: bool,
 }
 
 /// The standard library ra-jit built before the program ([`std_unit`]).
@@ -509,6 +512,7 @@ impl<'a> Resolver<'a> {
             prebuilt,
             members: args.members.clone(),
             programs: listed.programs(db),
+            library: args.library,
         }
     }
 
@@ -1089,7 +1093,7 @@ impl SymbolResolver for Resolver<'_> {
                 let (shared_paths, linked) = (self.shared_paths.clone(), self.linked.clone());
                 let (in_full, prebuilt) = (self.in_full.clone(), self.prebuilt.clone());
                 let members = self.members.clone();
-                let programs = self.programs.clone();
+                let (programs, library) = (self.programs.clone(), self.library);
                 scope.spawn(move || {
                     let resolver = Resolver {
                         db: &db,
@@ -1107,6 +1111,7 @@ impl SymbolResolver for Resolver<'_> {
                         prebuilt,
                         members,
                         programs,
+                        library,
                     };
                     hir::attach_db(&db, || {
                         loop {
@@ -1141,6 +1146,10 @@ impl SymbolResolver for Resolver<'_> {
 
     fn debug_apart(&self) -> Option<String> {
         self.apart.as_ref().map(|it| it.to_string_lossy().into_owned())
+    }
+
+    fn debug_grouped(&self) -> bool {
+        self.library
     }
 
     fn function(&self, func: FunctionId) -> Option<String> {
