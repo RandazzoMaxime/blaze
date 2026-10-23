@@ -230,7 +230,7 @@ Paths are under `crates/`; line numbers are of 41e7906192.
 | `ra-jit/src/doctest.rs:203`, `:246` `compile` | rustc links a probe program to learn the link line, and compiles or checks each example | every library's doctests, except what is unchanged since the last run (L's first part) |
 | `ra-jit/src/doctest.rs:301` `leave_to_rustdoc` | hands the library to rustdoc | `-q`, a library ra-jit cannot load; until A, every package whose features `cargo build --unit-graph` rejected (below) |
 | `ra-jit/src/cargo/mod.rs:139` | `cargo ra-jit check` is `cargo check` | every check |
-| `ra-jit/src/test_harness.rs` `module` returning `None` | leaves the test program's harness to rustc, and a test added to cargo | a bench, a `cfg_attr` on a test, an `ignore` written as a token tree (H) |
+| `ra-jit/src/test_harness.rs` `module` returning `None` | leaves the test program's harness to rustc, and a test added to cargo | a bench, an `ignore` written as a token tree (H) |
 | `ra-jit/src/main.rs:5084`, `:5127` `RA_JIT_WRAPS_RUSTC` | ra-jit standing in for rustc for a whole build | the harness's "alone" builds |
 | `harness/apps.py:113` | the harness's "alone" mode: cargo with ra-jit as `RUSTC_WRAPPER`, linking the sysroot's rlibs | the harness only |
 
@@ -544,7 +544,18 @@ count one (rustc reports it in the macro's definition). The other lints are not 
 verdict yet: a crate that denies one rust-analyzer does not find runs code rustc turns down.
 Those with the most errors in rustc's UI tests are `dead_code` (294), `explicit_outlives_requirements`
 (226), `unused_unsafe` (181), `unreachable_patterns` (128) and `unused_variables` (75). `cargo ra-jit check` is the daemon's verdict on the build of the
-same flags when it has that build loaded, and `cargo check` otherwise. Counted on ripgrep with `harness/norustc` (dev-aws-3, 2026-10-22), the
+same flags when it has that build loaded. Since 2026-10-23 any other check is the daemon's too,
+not `cargo check`: the daemon starts a checker (`ra-jit --check`, `crates/ra-jit/src/check.rs`)
+that loads the workspace as the worker of that build would and builds nothing, and answers each
+check with what the build's verdict finds in every file of the workspace's crates (rust-analyzer's
+sure errors, the borrow checker's, the deny lints). It stays loaded and takes in edits of the
+files it has; a new source file, a changed manifest, or a changed build script or proc macro
+has it load again. The build scripts and proc macros are cargo's from an earlier build; a
+workspace that never had them built has rust-analyzer's `cargo check --compile-time-deps` build
+them with rustc, which I and J remove. Code rustc accepts that ra-jit takes for wrong fails such
+a check, as it fails a build. On `harness/norustc.py`'s workspace (dev host, cranelift) the
+`check unloaded` scenario (the daemon stopped, an error, the error mended, another package)
+runs no rustc, and `check` itself none on every platform CI has (5 recorded before). Counted on ripgrep with `harness/norustc` (dev-aws-3, 2026-10-22), the
 error step went from 6 rustc compiles in 0.9 s to none in 0.1 s. The first `test --no-run`
 after it compiled 5 workspace libraries more (50 compiles, not 45): the cargo build of the
 error had brought up to date the libraries an earlier edit had changed, which `cargo test`
@@ -660,20 +671,28 @@ crate a test program is built from, a module `__ra_jit_test_harness` that lists 
 function as a `test::TestDescAndFn` (its path, `#[ignore]` with its message, `#[should_panic]`
 with `expected`, the file, line and column of its name, unit or integration test) and whose
 `main` calls `test::test_main_static`. That `main` is the program's start, ahead of the one
-rustc wrote, and the module is written again after each change, so a test added, removed or
-renamed is an edit the daemon builds. rust-analyzer resolves the module's paths to private tests
-(a patch in `hir-def`'s path resolution, for that module only). A program with a bench, a
-`cfg_attr` on a test or an `ignore` it does not read keeps rustc's harness, and adding a test
+rustc wrote. While a program's tests are the ones rustc listed, rustc's harness is kept (writing
+ra-jit's makes the whole program a build); once a test is added, removed, renamed or its
+attributes change, the module is written and kept current, so that change is an edit the daemon
+builds. Unit and integration test programs alike: the plan marks every test program's directory
+(`tests`). `cfg_attr`s are expanded by the crate's cfg. rust-analyzer resolves the module's
+paths to private tests (a patch in `hir-def`'s path resolution, for that module only). A
+program with a bench or an `ignore` it does not read keeps rustc's harness, and adding a test
 to it still goes to cargo. A test program built without incremental compilation or optimized,
 which rustc's harness calls private or inlined copies of the tests in, was cargo's; it is now the
 daemon's when ra-jit wrote its harness (the plan leaves the reason in the program's directory,
-`harness-alone`, for the daemon to refuse with when it wrote none). A library's file a unit test is linked with as rustc built it (without
+`tests`, for the daemon to refuse with when it wrote none). A library's file a unit test is linked with as rustc built it (without
 `cfg(test)`) is now guarded by its text without the items marked `#[test]` or `#[cfg(test)]`,
 every other token at its line and column: a change to its tests alone keeps rustc's library,
 and cargo's dep-info of it is made newer than the file so cargo does not build it again. On the
 fixture "a test added" went from 5 rustc runs to none, so tests went from 12 to 7. The 7 are
 the first `test --no-run`, cargo building the test programs and the libraries an edit before
-changed, and the proc macro the worker's load compiles: the cold build's (K).
+changed, and the proc macro the worker's load compiles: the cold build's (K). An edit to a crate
+an integration test's package depends on but the test does not link no longer takes that crate
+over from rustc (`widen` keeps to the crates rustc linked): its functions were named as ra-jit's
+and never compiled, and the link failed. On the bench apps (`harness/norustc/count.py`, dev-aws-11,
+2026-10-23), "test-added" went from 18 rustc runs to none on ripgrep and from 11 to none on
+nushell; "test-edit" is as before (0.2 s and 5.3 s).
 
 **I. Build scripts compiled and run by ra-jit.** ([#89](https://github.com/indexable-inc/ra-jit/issues/89)) The daemon compiles, links and runs build
 scripts with `RUSTC` naming ra-jit, so that `autocfg`, `version_check`, `rustversion` and the
