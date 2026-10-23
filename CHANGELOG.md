@@ -174,10 +174,10 @@ All notable changes to ra-jit are written here. The format follows
 - A borrow checker, the crate `hir-ty-borrowck` in the rust-analyzer subtree, written to give
   rustc's verdict: Polonius alpha by default as nightly rustc does, NLL with
   `RA_JIT_BORROWCK=nll`. It gives rustc's errors on
-  1499 of 1579 of rustc's own borrow-check tests that it can run, and none on any of the 245
+  1506 of 1579 of rustc's own borrow-check tests that it can run, and none on any of the 245
   rustc accepts, scored by `harness/borrowck_ui.py`, and finds nothing in ripgrep, fd, bat,
-  hyperfine, just, axum, nushell, delta, eza, tokei and starship. Its errors are rust-analyzer diagnostics and
-  `ra-jit borrowck` prints them ([docs/borrowck.md](docs/borrowck.md)).
+  hyperfine, just, axum, nushell, delta, eza, tokei and starship. Its errors, and rustc's
+  `unused_mut` warning, are rust-analyzer diagnostics and `ra-jit borrowck` prints them ([docs/borrowck.md](docs/borrowck.md)).
 - Item well-formedness, the crate `hir-ty-wfcheck` next to the borrow checker: rustc's E0309
   and E0310 outside function bodies, for struct, enum and union fields (`&'static T` without
   `T: 'static`), a trait impl's associated types, an impl of a trait bounded by `'static`,
