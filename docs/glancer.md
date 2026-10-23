@@ -367,7 +367,11 @@ and cold-start time and RSS on helix and nushell before and after.
    a writable static (`__RUST_STD_INTERNAL_VAL`, std's thread-local) without a rustc symbol.
    Compiling the instance saves it, which is no-rustc's step E (#85); keeping the
    rejection so a later daemon forwards its callers to rustc's copies (#37's first form) is
-   not merged.
+   not merged. Done: the instance is `Context::with`'s closure, and its static is declared by
+   `thread_local!` in the body, which rust-analyzer expands twice (to items and to
+   statements, of the same text). ra-jit counted the static's place in the expansion sema
+   gave, which was not the one the static is in, so it never found rustc's symbol. The count
+   now goes into the expansions the static is in, and helix's own base builds in one round.
 4. Proc-macro expansion cache (item 3), with its check mode.
 5. Memo eviction (item 5), sized by step 0.
 6. Item 1a, then 1b family by family, then 1c.
@@ -382,11 +386,11 @@ stops.
 
 | Work | Issue | Lane |
 |---|---|---|
-| The restart round (step 3) | #37 | glancer, redirected to no-rustc step E (#85): the instances are compiled, not left to rustc; kept rejections are not merged |
-| Proc-macro expansion cache (item 3) | #38 | glancer, merging |
-| `described` copies whole type closures (item 5) | #55 | share-types, dev-aws-6 |
-| The spare worker's memory (item 5) | #56 | spare, its own AWS host |
-| salsa eviction of queries with cycle handling (item 5) | #57 | spare, after #56 |
+| The restart round (step 3) | #37 | glancer, done as part of no-rustc step E (#85): the instance compiles, nothing is kept or forwarded to rustc |
+| Proc-macro expansion cache (item 3) | #38 | glancer, merged ([#110](https://github.com/indexable-inc/ra-jit/pull/110)) |
+| `described` copies whole type closures (item 5) | #55 | share-types (restarted 2026-10-22 as share-types-3) |
+| The spare worker's memory (item 5) | #56 | spare, merged (8e01def1cf): 1.3 GB less after edits; a warm second project's cost is #99 |
+| salsa eviction of queries with cycle handling (item 5) | #57 | spare, closed unmerged: lru saves 0.35-0.5 GB on nushell but slows the signature edit 0.42 to 0.64-2.43 s |
 | Frozen dependency artifacts (item 1) | #40 | glancer, after #38 |
 | The workspace's own state (item 2) | #41 | glancer, after #40's 1a |
 | A flat syntax tree (item 4) | #42 | flat-syntax: done, steps (a), (b) and (c) merged |
@@ -401,7 +405,7 @@ stops.
   checkout are linked from what ra-jit built and kept, without analysis. Item 3's keys
   name the macro's library by its content, so they hold when ra-jit builds that library
   (step J). #37 no longer keeps rejections to forward their callers to rustc's copies: the
-  restart round goes because the instances compile (step E).
+  restart round is gone because the instance compiles (step E).
   `docs/no-rustc.md` says in which order rustc goes (its step K, #91, is the cold start). Items 1 and 2 are designed not to need rustc's
   output, and a step here that adds a new dependency on it says so in this table.
 - **flat-syntax (#42)** and item 1 both change what dependency files cost. A frozen crate
