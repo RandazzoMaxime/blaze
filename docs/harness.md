@@ -52,8 +52,8 @@ Cranelift is the default. Either leave `RA_JIT_BACKEND` unset or set it:
 
 ### Under LLVM
 
-Build with the `llvm` feature in the flake's dev shell, which has the LLVM 20 it pins, then
-select the backend. The gate is run at `-O2` with fast instruction selection, and that is the
+Build with the `llvm` feature in the flake's dev shell, which has the LLVM 20 it pins
+([contributing.md](contributing.md#llvm-for---features-llvm)), then select the backend. The gate is run at `-O2` with fast instruction selection, and that is the
 only LLVM configuration it covers.
 
     nix develop -c cargo +1.99.0 build -p ra-jit --release --features llvm

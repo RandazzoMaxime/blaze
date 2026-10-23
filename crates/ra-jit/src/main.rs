@@ -7587,8 +7587,8 @@ fn run_holding(
                 Watched::Included(path) => included.push(path.clone()),
             }
         }
-        // An edit that adds functions to a crate is a patch when what rustc compiled of every
-        // file of the crate is known from before it.
+        // An edit that adds functions to a crate, or takes them away, is a patch when what
+        // rustc compiled of every file of the crate is known from before it.
         let homing = programs.iter().any(|it| it.known.homes());
         let mut homed = outlines.adding(&db, &listed, if homing { &texts } else { &[] });
         homed.extend(&editing);
