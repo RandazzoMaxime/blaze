@@ -293,11 +293,50 @@ impl Baseline {
     /// A Mach-O splice stops when `give_up` is set, with [`GaveUp`], and leaves the executable
     /// and what is known of it as they were.
     pub(crate) fn splice(&mut self, patch: &[u8], give_up: &AtomicBool) -> anyhow::Result<Spliced> {
+        self.splice_as(patch, give_up, false).map(|(spliced, _)| spliced)
+    }
+
+    /// Splices `object`, all of a program the daemon built, into the executable rustc linked,
+    /// and reads what that leaves as an executable the daemon linked with `patch` ahead of
+    /// `object`: the next edits are patches of the object, spliced into it. So a build in full
+    /// is not linked in full. Only of ELF executables; anything else, and whatever the splice
+    /// declines, is an error, and the caller links in full.
+    pub(crate) fn spliced_whole(
+        mut self,
+        object_path: &Path,
+        patch: &Path,
+    ) -> anyhow::Result<(Baseline, Spliced)> {
+        ensure!(
+            matches!(*self.image, Executable::Elf(_)),
+            "only an ELF executable takes all of a program spliced"
+        );
+        let object = std::fs::read(object_path)?;
+        let (spliced, defined) = self.splice_as(&object, &AtomicBool::new(false), true)?;
+        let lock = Writing::ahead(&self.path);
+        let mut parsed = Baseline::parse(&self.path, &std::fs::read(patch)?, object_path, false)?;
+        let Executable::Elf(image) = &mut parsed.image else {
+            bail!("the executable is ELF no more")
+        };
+        // What the object adds is in no symbol table, and is what the next patch refers to.
+        for (name, defined) in defined {
+            image.symbols.insert(name, Named::One(defined));
+        }
+        Ok((parsed.laid_out(self.path.clone(), lock)?, spliced))
+    }
+
+    /// [`Baseline::splice`], and with `whole` of all of a program ([`Patch::read`]); with where
+    /// the patch has each symbol it defines now, of an ELF executable.
+    fn splice_as(
+        &mut self,
+        patch: &[u8],
+        give_up: &AtomicBool,
+        whole: bool,
+    ) -> anyhow::Result<(Spliced, Vec<(Box<[u8]>, Defined)>)> {
         self.read_again_if_signed()?;
         let start = std::time::Instant::now();
-        let (addition, len) = match &*self.image {
+        let (mut addition, len) = match &*self.image {
             Executable::Elf(image) => {
-                let patch = Patch::read(patch, image)?;
+                let patch = Patch::read(patch, image, whole)?;
                 self.has_baked(patch.replaced.iter().map(|it| it.name))?;
                 (patch.place(image)?, image.len)
             }
@@ -310,15 +349,17 @@ impl Baseline {
                 let (bytes, spliced) = self.rewrite(module, patch)?;
                 std::fs::write(&self.path, bytes)?;
                 self.stamp = Stamp::of(&File::open(&self.path)?)?;
-                return Ok(spliced);
+                return Ok((spliced, Vec::new()));
             }
             Executable::MachO(image) => {
                 let Baseline { path, baked, undo, originals, stamp, appended, .. } = self;
-                return macho::splice(
+                let spliced = macho::splice(
                     image, path, baked, undo, originals, stamp, appended, patch, give_up,
-                );
+                )?;
+                return Ok((spliced, Vec::new()));
             }
         };
+        let defined = std::mem::take(&mut addition.defined);
         let placed = start.elapsed();
 
         let writing = Writing::open(&self.path)?;
@@ -388,7 +429,7 @@ impl Baseline {
         }
         let appended = addition.appended.len();
         self.left = Left { appended: Some((addition.offset, addition.appended)), moved };
-        Ok(Spliced { redirected: addition.redirected, appended, copied })
+        Ok((Spliced { redirected: addition.redirected, appended, copied }, defined))
     }
 
     /// `patch` laid out at `base` of a program that runs the executable as the linker wrote
@@ -408,7 +449,7 @@ impl Baseline {
             Executable::Elf(image) => {
                 ensure!(image.machine == Machine::X86_64, "live edits support Linux x86-64 only");
                 let uuid = image.id.context("the executable has no GNU build ID")?;
-                let patch = Patch::read(patch, image)?;
+                let patch = Patch::read(patch, image, false)?;
                 ensure!(
                     self.baked
                         .iter()
@@ -1012,11 +1053,14 @@ struct Defined {
     address: u64,
     size: u64,
     kind: SymbolKind,
-    /// Where the file has its entry of the symbol table.
+    /// Where the file has its entry of the symbol table, or [`Defined::NO_ENTRY`] for what a
+    /// splice of all of a program added ([`Baseline::spliced_whole`]).
     entry: u64,
 }
 
 impl Defined {
+    const NO_ENTRY: u64 = u64::MAX;
+
     fn is(&self, other: &Defined) -> bool {
         (self.address, self.size, self.kind) == (other.address, other.size, other.kind)
     }
@@ -1592,7 +1636,11 @@ impl<'a> Patch<'a> {
     /// What a table of the executable is given to grow into before what follows it moves.
     const ROOM: u64 = 1 << 20;
 
-    fn read(bytes: &'a [u8], image: &Image) -> anyhow::Result<Patch<'a>> {
+    /// With `whole`, the patch is an object with all of the program, which replaces every
+    /// function of the executable it defines that can be jumped from: one that can't, or
+    /// whose name the executable has several of, is rustc's still where rustc's code that the
+    /// object leaves calls it, as the linker would leave it there too.
+    fn read(bytes: &'a [u8], image: &Image, whole: bool) -> anyhow::Result<Patch<'a>> {
         let file = ElfFile64::<Endianness>::parse(bytes)?;
         let mut patch = Patch {
             file,
@@ -1635,6 +1683,15 @@ impl<'a> Patch<'a> {
             let section = symbol.section_index().context("a symbol in no section")?;
             let old = match image.symbols.get(name) {
                 None => None,
+                Some(Named::One(old))
+                    if whole
+                        && old.kind == SymbolKind::Text
+                        && code.contains(&section)
+                        && old.size < image.machine.jump() as u64 =>
+                {
+                    None
+                }
+                Some(Named::Many) if whole && code.contains(&section) => None,
                 Some(Named::One(old))
                     if old.kind == SymbolKind::Text && code.contains(&section) =>
                 {
@@ -2133,9 +2190,11 @@ impl<'a> Patch<'a> {
             })?;
             overwritten.push((image.offset_of(old.address)?, jump));
             // Its symbol names the new code, for whoever reads a backtrace.
-            let named = [new.to_le_bytes(), replaced.size.to_le_bytes()].concat();
-            overwritten
-                .push((old.entry + offset_of!(elf::Sym64<Endianness>, st_value) as u64, named));
+            if old.entry != Defined::NO_ENTRY {
+                let named = [new.to_le_bytes(), replaced.size.to_le_bytes()].concat();
+                let value = old.entry + offset_of!(elf::Sym64<Endianness>, st_value) as u64;
+                overwritten.push((value, named));
+            }
             redirected += 1;
         }
 
@@ -2236,6 +2295,27 @@ impl<'a> Patch<'a> {
             })
             .unwrap_or((0, 0));
 
+        let code = &self.sections[Segment::Code as usize];
+        let defined = (self.replaced.iter())
+            .map(|replaced| {
+                let in_place = (self.in_place.get(&replaced.section))
+                    .is_some_and(|it| it.iter().any(|it| it.offset == replaced.offset));
+                let old = replaced.old.filter(|_| in_place);
+                let defined = Defined {
+                    address: old.map_or(base + placed[&replaced.section] + replaced.offset, |it| {
+                        it.address
+                    }),
+                    size: replaced.size,
+                    kind: match code.contains(&replaced.section) {
+                        true => SymbolKind::Text,
+                        false => SymbolKind::Data,
+                    },
+                    entry: replaced.old.map_or(Defined::NO_ENTRY, |it| it.entry),
+                };
+                (Box::from(replaced.name), defined)
+            })
+            .collect();
+
         Ok(Addition {
             offset,
             appended,
@@ -2247,6 +2327,7 @@ impl<'a> Patch<'a> {
             live_data_at: extents[Segment::Data as usize].0,
             live_frames,
             live_pointers: fixed.iter().map(|it| it.r_offset.get(e).saturating_sub(base)).collect(),
+            defined,
         })
     }
 }
@@ -2267,6 +2348,8 @@ struct Addition {
     live_data_at: u64,
     live_frames: (u64, u64),
     live_pointers: Vec<u64>,
+    /// Where each symbol the patch defines is now, of an ELF executable.
+    defined: Vec<(Box<[u8]>, Defined)>,
 }
 
 fn read_i32(bytes: &[u8]) -> i32 {

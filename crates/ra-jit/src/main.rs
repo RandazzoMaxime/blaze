@@ -4162,6 +4162,12 @@ fn link(
     packs: bool,
 ) -> anyhow::Result<()> {
     let rustcs = splice.is_some_and(|it| lock(&RUSTC_LINKED).contains(it));
+    // A build in full is spliced into what rustc linked rather than linked, when it can be:
+    // the edits after it are patches of its object, spliced into what that leaves.
+    let into_rustcs = splice
+        .filter(|_| rustcs && !patched && !over_rustc && *SPLICING && cmd.is_some())
+        .and_then(|binary| lock(&LINKED).remove(binary))
+        .map(Executable::baseline);
     if let Some(binary) = splice.filter(|_| rustcs && !over_rustc) {
         // The objects are the daemon's own: nothing of them is in what rustc linked.
         lock(&RUSTC_LINKED).remove(binary);
@@ -4209,6 +4215,10 @@ fn link(
         }
         None => false,
     };
+    if let Some(Ok(old)) = &into_rustcs {
+        live::tell_superseded();
+        live::restart(old, "the edit changes what the rest of the program sees");
+    }
     let Some(cmd) = cmd else { return Ok(()) };
     if over_rustc && !(rustcs && splice.is_some()) {
         return Err(RustcLinkedLost("; it is not where the patch is asked for".to_owned()).into());
@@ -4220,6 +4230,31 @@ fn link(
     let start = Instant::now();
     let mut declined = String::new();
     let running = splice.map_or(Ok(false), set_aside)?;
+    if let (Some(binary), Some(patch), Some(old)) = (splice, patch, into_rustcs) {
+        let spliced = match old {
+            _ if running => Err(anyhow::anyhow!("the executable is running")),
+            Ok(old) if old.is_of(binary) => {
+                let _reading = whole::read(object)?;
+                old.spliced_whole(object, patch)
+            }
+            Ok(_) => Err(anyhow::anyhow!("another executable is asked for")),
+            Err(why) => Err(why),
+        };
+        match spliced {
+            Ok((baseline, Spliced { redirected, appended, copied })) => {
+                lock(&LINKED).insert(binary.to_owned(), Executable::Read(Box::new(baseline)));
+                eprintln!(
+                    "link: {:.1?} (all of it spliced into what rustc linked: {redirected} functions redirected, {appended} bytes, {copied} copied)",
+                    start.elapsed()
+                );
+                if packs {
+                    _ = whole::pack(object);
+                }
+                return Ok(());
+            }
+            Err(why) => declined = format!("; not spliced into what rustc linked: {why:#}"),
+        }
+    }
     if let (Some(binary), Some(patch)) = (splice, patch) {
         let known = lock(&LINKED).remove(binary).map(Executable::baseline);
         // A program that runs the executable takes the edit in memory too.
