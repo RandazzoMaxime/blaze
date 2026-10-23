@@ -108,8 +108,12 @@ pub(super) enum UniversalKind {
     Creator,
 }
 
+/// The position among a closure's creator's regions of the anonymous lifetime 0 of the impl
+/// its enclosing method is in (`impl Foo<'_>`), past those of the closure's type.
+pub(super) const IMPL_ANON: usize = 1 << 20;
+
 /// The position among a closure's creator's regions of the enclosing item's late-bound
-/// lifetime 0, past those of the closure's type.
+/// lifetime 0.
 pub(super) const LATE_PARENT: usize = 1 << 24;
 
 /// In a `const { .. }` block, the position of its function's lifetime parameter at `index`:
@@ -1890,20 +1894,55 @@ impl<'db> Builder<'_, '_, 'db> {
             return None;
         };
         let raw = self.ctx.db.impl_self_ty(impl_).instantiate_identity().skip_norm_wip();
-        let mut anonymous = false;
+        let mut anonymous = 0;
         let named =
             rustc_type_ir::fold_regions(self.interner(), raw, |region, _| match region.kind() {
+                // In a closure, the impl's anonymous lifetimes are its creator's.
+                RegionKind::ReError(_) if self.nested() => {
+                    let region = self.new_universal(UniversalKind::Creator);
+                    self.regions
+                        .creator_positions
+                        .insert(self.regions.universals.len() - 1, IMPL_ANON + anonymous);
+                    anonymous += 1;
+                    region
+                }
                 RegionKind::ReError(_) => {
-                    anonymous = true;
+                    anonymous += 1;
                     self.new_universal(UniversalKind::AnonParam)
                 }
                 _ => region,
             });
-        if !anonymous {
+        if anonymous == 0 {
             return None;
         }
         self.impl_self = Some((raw, named));
         self.impl_self
+    }
+
+    /// The universal region of the anonymous lifetime `index` of the impl the body's method
+    /// is in, `impl Foo<'_>`.
+    fn impl_anon_region(&mut self, index: usize) -> Option<Region<'db>> {
+        if self.impl_self.is_none()
+            && let GenericDefId::FunctionId(function) = self.ctx.owner.generic_def(self.ctx.db)
+        {
+            self.impl_self_of(function);
+        }
+        let (raw, named) = self.impl_self?;
+        let mut anonymous = Vec::new();
+        let mut errors = Vec::new();
+        rustc_type_ir::fold_regions(self.interner(), raw, |region, _| {
+            errors.push(matches!(region.kind(), RegionKind::ReError(_)));
+            region
+        });
+        let mut position = 0;
+        rustc_type_ir::fold_regions(self.interner(), named, |region, _| {
+            if errors.get(position).copied().unwrap_or(false) {
+                anonymous.push(region);
+            }
+            position += 1;
+            region
+        });
+        anonymous.get(index).copied()
     }
 
     /// The self type and trait arguments of the impl a method is in, whose well-formedness the
@@ -2185,6 +2224,9 @@ impl<'db> Builder<'_, '_, 'db> {
             }
             _ if position >= LATE_PARENT => {
                 rv_of(this.parent_late_region((position - LATE_PARENT) as u32))
+            }
+            _ if position >= IMPL_ANON => {
+                this.impl_anon_region(position - IMPL_ANON).and_then(rv_of)
             }
             _ => regions.get(position).copied(),
         };
@@ -2918,6 +2960,9 @@ impl<'db> Builder<'_, '_, 'db> {
             return None;
         }
         // The impl's anonymous lifetimes (`impl MyStruct<'_>`) are universal regions.
+        if self.nested() && self.impl_self.is_none() {
+            self.impl_self_of(function);
+        }
         if let Some((raw, named)) = self.impl_self
             && raw == ty
             && let TyKind::Adt(_, named) = named.kind()
