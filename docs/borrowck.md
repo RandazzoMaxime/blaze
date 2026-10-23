@@ -4,7 +4,7 @@ ra-jit has its own borrow checker, the crate `hir-ty-borrowck` in the rust-analy
 (`vendor/rust-analyzer/crates/hir-ty-borrowck`, next to `hir-ty`). It checks the MIR rust-analyzer
 lowers, the same MIR the code generator compiles, and it is meant to give exactly rustc's
 verdict: the same errors, on the same lines, and none where rustc gives none. It gives
-rustc's verdict on 91% of rustc's own borrow-check tests today, and on every one rustc
+rustc's verdict on 92% of rustc's own borrow-check tests today, and on every one rustc
 accepts; how they are scored and what is left is below.
 
 It runs as part of rust-analyzer's diagnostics, so the daemon computes it for every edited
@@ -46,20 +46,26 @@ All of these are rustc's, written from `compiler/rustc_borrowck` at the pinned n
   assignment to immutable locals (E0381, E0382, E0384, E0505, E0507, E0508, E0509). A `match`
   whose arms test the value reads what it matches first, so a value moved out whole is
   reported there. A `match` arm's guard sees the variables its pattern binds by reference, so
-  it cannot move out of them (E0507), and casting an enum to an integer moves the enum
+  it cannot move out of them (E0507) nor borrow them mutably (E0596), and casting an enum to an integer moves the enum
   (`*e as usize` behind a reference is E0507). A pattern's moves out of what it may not move
   out of are one error at the value matched for each place they move out of, as rustc's
   `MovesFromPlace`: `(D(s), &t)` is an E0509 and an E0507. A move of a subslice of an array
   moves each of its elements, so `let [_y @ .., _, _] = a` after `let [_x, _, _] = a` uses a
   moved element, and so does assigning `a[2]` after moving it out, as rustc reads the array
   to index it.
+- Match guards (E0510): rustc fake-borrows, through every guard of a `match`, what its arms
+  test and the references that and what they bind are behind, so a guard that assigns or
+  mutably borrows one of them, closures included, could change which arm matches; assigning
+  what the guard's arm binds by value is E0506, as the guard sees it through a reference.
 - Unaligned references (E0793): a `&` or `&mut` of a field a `#[repr(packed)]` struct may
   leave less aligned than its type needs, as rustc's `check_packed_ref` (not `&raw`, nor
   behind a pointer; a field of a type parameter or of a `dyn` tail may be unaligned).
 - Conflicting borrows: shared, mutable, two-phase (`vec.push(vec.len())`), shallow borrows of
   match scrutinees, and fake reads (E0499, E0500, E0501, E0502, E0503, E0506, E0524). The drop
   of the old value before an assignment is the assignment's write, so assigning to a borrowed
-  place is E0506 rather than E0597. A `match` reads a discriminant, and switches on a `bool`,
+  place is E0506 rather than E0597. A compound assignment's read and write are one access
+  unless the place goes through a field whose type has lifetimes (`*s.pointer += 1`), where
+  rustc reports a conflict of each. A `match` reads a discriminant, and switches on a `bool`,
   integer or `char` it tests against a literal, at what it matches rather than at the arm.
 - Errors for a borrow that does not live long enough, as rustc chooses among them: E0713 when
   the borrow is of a field of a value whose type implements `Drop` and the drop is of that
@@ -76,7 +82,9 @@ All of these are rustc's, written from `compiler/rustc_borrowck` at the pinned n
   and unsizing to `dyn Trait` proves the value's type implements `Trait`, with what its impl
   needs of the regions. An associated type in a signature is related as what it normalizes
   to, so `for x in &mut v` keeps `v` borrowed in the `IterMut<'a, T>` that
-  `<&'a mut Vec<T> as IntoIterator>::IntoIter` is. A parameter that elides one lifetime has
+  `<&'a mut Vec<T> as IntoIterator>::IntoIter` is. Unsizing an array to a slice keeps its
+  element type (`[T; N]: Unsize<[T]>`), so `&mut [&'a T; 1]` as `&mut [&'b T]` makes `'a`
+  and `'b` one. A parameter that elides one lifetime has
   it once however often its type does (`s: S2` with `type S2<'a> = S<'a, 'a>`), and
   `Self::Target` in an impl for `S<'_, '_>` has the impl's lifetimes.
 - Raw pointers: a reference coerced to one relates what it points to, raw and function
@@ -244,8 +252,8 @@ With no borrow checker, the 245 units rustc accepts would pass. Now:
 
 | Mode | In scope | Pass | rustc accepts, ra-jit too | rustc rejects, same errors |
 |---|---|---|---|---|
-| Polonius | 1579 | 1440 (91.2%) | 245 of 245 | 1195 of 1334 |
-| NLL | 1577 | 1436 (91.1%) | 226 of 226 | 1210 of 1351 |
+| Polonius | 1579 | 1451 (91.9%) | 245 of 245 | 1206 of 1334 |
+| NLL | 1577 | 1447 (91.8%) | 226 of 226 | 1221 of 1351 |
 
 463 units are out of scope; 344 of them need a nightly feature. CI runs the scoring on Linux
 and fails below a floor a few units under the count there.
@@ -261,8 +269,8 @@ Every failing unit is one where rustc gives an error ra-jit does not, or gives i
 line or with another code. By what is wrong, most first: 14 "lifetime may not live long
 enough" and 10 E0597 not reported, 9 "lifetime may not live long enough" on another line,
 9 with only an error rustc does not give, 8 each of E0716 and E0700, 7 each of E0507 and E0521,
-6 each of E0510 and E0310, and 5 each of E0309, E0311 and higher-ranked errors not reported,
-then a long tail. The causes, grouped:
+6 of E0310, and 5 each of E0309, E0311 and higher-ranked errors not reported, then a long
+tail. The causes, grouped:
 
 - **Higher-ranked regions and placeholders** (`for<'a>` bounds, closures with higher-ranked
   signatures): rustc checks them with placeholders in universes; ra-jit does not yet, and
@@ -341,6 +349,9 @@ missed rather than errors made up:
   in rustc, so what it binds by value is dropped first; rust-analyzer binds them in the
   pattern's order (`dropck/eager-by-ref-binding-for-guards.rs`, where it reports two errors
   rustc does not).
+- Arms after an irrefutable one are not lowered, so their guards are not checked
+  (`&_ => ..., &_ if { b = &true; false } => ...` is an E0510 in rustc,
+  `nll/match-guards-partially-borrow.rs`).
 - Unwind paths are not lowered. rustc's MIR gives every call and drop a cleanup path ending
   at `resume`, where any borrow still live that outlives the function's own regions is an
   error (E0597 for `let x = ...; let r: &'a _ = &x; f();`). ra-jit checks that at each call,
