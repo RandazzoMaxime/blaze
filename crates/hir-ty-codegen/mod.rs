@@ -544,6 +544,9 @@ pub struct Roots<'a> {
     /// The `main` of a program rustc built nothing of: the `main` the C runtime calls is
     /// then ours to write as well.
     pub start: Option<FunctionId>,
+    /// Whether rustc built nothing of any crate of the program but the standard library's,
+    /// whatever its `main` is: bun's is C's, and every one of its functions is an entry.
+    pub whole: bool,
     /// The statics a linker or a runtime finds though no code names them, in the crates
     /// rustc built nothing of: `#[used]` ones, and those put in a section by name.
     pub kept: &'a [StaticId],
@@ -721,7 +724,7 @@ impl CodegenUnit {
         } else {
             tiers.clear();
         }
-        if roots.start.is_some() {
+        if (roots.start.is_some() || roots.whole) && !backend::edits_follow() {
             backend::set_whole_program();
         }
         let mut own_statics = OwnStatics::new(
@@ -3663,16 +3666,20 @@ pub const STAND_IN_SAYS: &str = "ra-jit could not compile ";
 
 /// Whether a crate declares the `#[global_allocator]`: whether it has the function the
 /// attribute's expansion exports for `__rust_alloc` (the attribute itself is gone from the
-/// static once expanded).
+/// static once expanded). The expansion names the function as it exports it, so each module
+/// is asked for the name rather than for the attributes of all its functions.
 #[salsa::tracked(returns(copy))]
 fn declares_global_allocator(db: &dyn HirDatabase, krate: Crate) -> bool {
+    const EXPORTED: &str = "__ra_jit_global_alloc";
     let def_map = hir_def::nameres::crate_def_map(db, krate);
-    def_map.modules(db).any(|(_, module)| {
-        module.scope(db).declarations().any(|it| match it {
-            hir_def::ModuleDefId::FunctionId(id) => AttrFlags::export_name(db, id.into())
-                .is_some_and(|it| it.as_str() == "__ra_jit_global_alloc"),
-            _ => false,
-        })
+    let name = hir_expand::name::Name::new_root(EXPORTED);
+    def_map.modules(db).any(|(module_id, module)| {
+        let Some(hir_def::ModuleDefId::FunctionId(id)) = module.scope(db).get(&name).take_values()
+        else {
+            return false;
+        };
+        id.lookup(db).container == ItemContainerId::ModuleId(module_id)
+            && AttrFlags::export_name(db, id.into()).is_some_and(|it| it.as_str() == EXPORTED)
     })
 }
 

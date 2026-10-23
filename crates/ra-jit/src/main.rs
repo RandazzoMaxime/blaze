@@ -12,6 +12,7 @@ mod dep_info;
 mod deps;
 mod doctest;
 mod errors;
+mod frozen;
 mod inputs;
 mod link;
 mod live;
@@ -33,14 +34,15 @@ mod tree;
 mod weaken;
 
 /// The daemon holds millions of small allocations and frees a file's worth of them on each
-/// edit, which the system allocator is slow at.
-#[cfg(not(feature = "heap-profile"))]
-#[global_allocator]
-static ALLOC: mimalloc::MiMalloc = mimalloc::MiMalloc;
-
-#[cfg(feature = "heap-profile")]
+/// edit, which the system allocator is slow at. jemalloc gives the system back more of what
+/// a build freed than mimalloc does. It is not built for Windows.
+#[cfg(unix)]
 #[global_allocator]
 static ALLOC: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
+
+#[cfg(windows)]
+#[global_allocator]
+static ALLOC: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 use ide_db::base_db::{CrateOrigin, LangCrateOrigin, SourceDatabase as _, TargetKind};
 use std::{
@@ -141,6 +143,9 @@ struct Args {
     /// Run build scripts and build proc macros in a directory of ra-jit's own under the
     /// target directory, so that nothing here waits for a cargo that is building there.
     own_target: bool,
+    /// What cargo said of the build scripts and proc macros of the build of `project`, a
+    /// line each: the workspace is loaded with that, and nothing is run to find it out.
+    scripts_from: Option<PathBuf>,
     /// Which build of the package this is: its profile, features, packages and target. The
     /// target is the triple to emit code for, when it is not the host: the workspace is
     /// loaded as cargo builds it for that target, and the objects are of its format and
@@ -226,6 +231,7 @@ impl Args {
         let mut cfg_test = false;
         let mut dev_deps = false;
         let mut own_target = false;
+        let mut scripts_from = None;
         let mut features = Vec::new();
         let mut no_default_features = false;
         let (mut packages, mut workspace) = (Vec::new(), false);
@@ -268,6 +274,7 @@ impl Args {
                 "--cfg-test" => cfg_test = true,
                 "--dev-deps" => dev_deps = true,
                 "--own-target" => own_target = true,
+                "--scripts-from" => scripts_from = Some(PathBuf::from(value()?)),
                 "--also" => also.push(PathBuf::from(value()?)),
                 "--target" => target = Some(value()?),
                 "--features" => features.extend(value()?.split(',').map(str::to_owned)),
@@ -308,6 +315,7 @@ impl Args {
             library: false,
             cfg_test,
             own_target,
+            scripts_from,
             selection: plan::Selection {
                 profile: profile.unwrap_or_else(|| "dev".to_owned()),
                 features,
@@ -1934,6 +1942,7 @@ fn load(
     load_config: LoadCargoConfig,
     selection: plan::Selection,
     beside: Option<Beside>,
+    scripts_said: Option<Vec<String>>,
 ) -> anyhow::Result<(RootDatabase, vfs::Vfs, Checkouts)> {
     let mut checkouts = Checkouts {
         compared: Default::default(),
@@ -1946,6 +1955,7 @@ fn load(
         inputs: inputs::Inputs::default(),
         debug: Vec::new(),
         beside,
+        scripts_said,
     };
     let mut db = RootDatabase::new(None);
     let mut vfs = vfs::Vfs::default();
@@ -1977,6 +1987,8 @@ struct Checkouts {
     /// Where cargo's own build says what the scripts and proc macros of the next checkout
     /// are, when it is loaded beside that build: nothing is then run to find out.
     beside: Option<Beside>,
+    /// The same of a build of the first checkout that is over, a line of cargo's each.
+    scripts_said: Option<Vec<String>>,
 }
 
 impl Checkouts {
@@ -2219,12 +2231,16 @@ impl Checkouts {
                 it.at = self.roots.len() + roots.len();
                 it
             });
+            // Cargo's lines are of the build of the project asked for first.
+            let said =
+                if Some(project) == projects.first() { self.scripts_said.take() } else { None };
             let (workspace, told) = workspace_at(
                 project,
                 &self.cargo_config,
                 &self.load_config,
                 &self.selection,
                 beside,
+                said,
             )?;
             debug.push(told);
             // The checkouts after the first run their build scripts where the first did. A
@@ -2345,7 +2361,7 @@ impl Checkouts {
         let mut config = self.cargo_config.clone();
         config.extra_env.extend(self.inputs.variables(root, env));
         let (workspace, debug) =
-            workspace_at(project, &config, &self.load_config, &self.selection, None)?;
+            workspace_at(project, &config, &self.load_config, &self.selection, None, None)?;
         Ok((workspace, debug, config))
     }
 
@@ -2529,6 +2545,7 @@ fn workspace_at(
     load_config: &LoadCargoConfig,
     selection: &plan::Selection,
     beside: Option<&mut Beside>,
+    said: Option<Vec<String>>,
 ) -> anyhow::Result<(ProjectWorkspace, plan::Whole)> {
     let root = AbsPathBuf::assert_utf8(std::env::current_dir()?.join(project));
     let manifest = ProjectManifest::discover_single(&root)?;
@@ -2591,12 +2608,21 @@ fn workspace_at(
     if let Some(scripts) = scripts {
         workspace.set_build_scripts(scripts);
     } else if load_config.load_out_dirs_from_check {
-        if let ProjectWorkspaceKind::Cargo { cargo, .. } = &workspace.kind
-            && cargo_config.target_dir_config == TargetDirectoryConfig::UseSubdirectory
-        {
-            seed_own_target(cargo.target_directory().as_ref());
-        }
-        let build_scripts = workspace.run_build_scripts(cargo_config, &|_| {})?;
+        let build_scripts = match (&workspace.kind, said) {
+            // Cargo's build that is over said it all: the scripts it ran said what they did,
+            // and it built the proc macros where they are.
+            (ProjectWorkspaceKind::Cargo { cargo, .. }, Some(said)) => {
+                WorkspaceBuildScripts::of_messages(cargo, said.iter().map(String::as_str))
+            }
+            (kind, _) => {
+                if let ProjectWorkspaceKind::Cargo { cargo, .. } = kind
+                    && cargo_config.target_dir_config == TargetDirectoryConfig::UseSubdirectory
+                {
+                    seed_own_target(cargo.target_directory().as_ref());
+                }
+                workspace.run_build_scripts(cargo_config, &|_| {})?
+            }
+        };
         // A crate whose script did not run is read without what it writes: thiserror's
         // `include!` of its `OUT_DIR` then leaves every derived `Error` unimplemented, and a
         // daemon that loaded that builds wrongly for as long as it runs.
@@ -2718,6 +2744,14 @@ fn report_sharing(db: &RootDatabase) {
 }
 
 fn resolve_crates(db: &RootDatabase, args: &Args, threads: usize) -> anyhow::Result<usize> {
+    let crates = built_crates(db, args)?;
+    resolve_all(db, &crates, threads);
+    Ok(crates.len())
+}
+
+/// The crates a build of `args` compiles and every crate they depend on, each after its
+/// dependencies.
+fn built_crates(db: &RootDatabase, args: &Args) -> anyhow::Result<Vec<ide_db::base_db::Crate>> {
     let mut seen = FxHashSet::default();
     let mut crates = Vec::new();
     for name in args.crates() {
@@ -2726,8 +2760,7 @@ fn resolve_crates(db: &RootDatabase, args: &Args, threads: usize) -> anyhow::Res
             crates.extend(krate.transitive_deps(db).into_iter().filter(|&dep| seen.insert(dep)));
         }
     }
-    resolve_all(db, &crates, threads);
-    Ok(crates.len())
+    Ok(crates)
 }
 
 /// Resolves the names of `crates` again after an edit to many files, on every core: whoever
@@ -2768,15 +2801,21 @@ fn resolve_all(db: &RootDatabase, crates: &[ide_db::base_db::Crate], threads: us
                     hir::attach_db(&db, || {
                         _ = hir::crate_def_map(&db, krate);
                         let names = start.elapsed();
-                        warm_impls(&db, krate, helping, threads);
+                        let frozen = hir_ty::method_resolution::frozen::served(&db, krate);
+                        if !frozen {
+                            warm_impls(&db, krate, helping, threads);
+                        }
                         _ = hir::TraitImpls::for_crate(&db, krate);
                         // Which of its dependencies the crate names is read off its files,
                         // and the first body inferred would wait for that of every crate.
                         _ = hir::TraitImpls::for_crate_and_deps(&db, krate);
-                        // A build asks which functions written in the bodies of the standard
-                        // library share a path, which every body of the crate is lowered for:
-                        // threads are idle here, waiting for the crates that come next.
-                        if krate.data(&db).origin.is_lang() {
+                        if frozen {
+                            warm_files(&db, krate, helping, threads);
+                        } else if krate.data(&db).origin.is_lang() {
+                            // A build asks which functions written in the bodies of the
+                            // standard library share a path, which every body of the crate is
+                            // lowered for: threads are idle here, waiting for the crates that
+                            // come next.
                             _ = declared_in(&db, krate.into());
                         }
                         if std::env::var_os("RA_JIT_STATS").is_some() {
@@ -2809,9 +2848,43 @@ fn warm_impls(
     helping: &std::sync::atomic::AtomicUsize,
     threads: usize,
 ) {
-    use std::sync::atomic::Ordering::Relaxed;
     let work = hir_ty::method_resolution::impl_work(db, krate);
-    let wanted = (work.len() / 64).min(threads - 1);
+    on_idle_threads(db, &work, 64, helping, threads, |db, work| work.run(db));
+}
+
+/// Parses the files of the modules of `krate`, whose names and impls were read rather than
+/// found, with the threads no other crate has: a signature or body of the crate that a build
+/// lowers parses its whole file first, one file after another.
+fn warm_files(
+    db: &RootDatabase,
+    krate: ide_db::base_db::Crate,
+    helping: &std::sync::atomic::AtomicUsize,
+    threads: usize,
+) {
+    let def_map = hir_def::nameres::crate_def_map(db, krate);
+    let mut seen = FxHashSet::default();
+    let files: Vec<_> = def_map
+        .modules(db)
+        .filter_map(|(_, data)| data.origin.file_id())
+        .filter(|&file| seen.insert(file))
+        .collect();
+    on_idle_threads(db, &files, 4, helping, threads, |db, &file| {
+        _ = hir::HirFileId::from(file).ast_id_map(db);
+    });
+}
+
+/// Runs `run` on each of `work` here and on the threads no other crate has, one for each
+/// `per` items.
+fn on_idle_threads<T: Sync>(
+    db: &RootDatabase,
+    work: &[T],
+    per: usize,
+    helping: &std::sync::atomic::AtomicUsize,
+    threads: usize,
+    run: impl Fn(&RootDatabase, &T) + Sync,
+) {
+    use std::sync::atomic::Ordering::Relaxed;
+    let wanted = (work.len() / per).min(threads - 1);
     let mut helpers = 0;
     _ = helping.fetch_update(Relaxed, Relaxed, |busy| {
         helpers = wanted.min(threads.saturating_sub(busy + 1));
@@ -2821,18 +2894,18 @@ fn warm_impls(
         return;
     }
     let next = std::sync::atomic::AtomicUsize::new(0);
-    let run = |db: &RootDatabase| {
-        while let Some(&work) = work.get(next.fetch_add(1, Relaxed)) {
-            work.run(db);
+    let each = |db: &RootDatabase| {
+        while let Some(item) = work.get(next.fetch_add(1, Relaxed)) {
+            run(db, item);
         }
     };
     std::thread::scope(|scope| {
         for _ in 0..helpers {
             let db = db.clone();
-            let run = &run;
-            scope.spawn(move || hir::attach_db(&db, || run(&db)));
+            let each = &each;
+            scope.spawn(move || hir::attach_db(&db, || each(&db)));
         }
-        run(db);
+        each(db);
     });
     helping.fetch_sub(helpers, Relaxed);
 }
@@ -3677,6 +3750,7 @@ fn build(
         entries: &entries,
         on_demand: &on_demand,
         start: main.filter(|it| own(it).is_some() || in_harness(db, *it)),
+        whole: local.iter().all(|&krate| resolver.own_crate_id(krate.into()).is_some()),
         kept: &kept,
         offered: &offered,
     };
@@ -3797,6 +3871,7 @@ fn build(
                     entries: &[func],
                     on_demand: &[],
                     start: None,
+                    whole: false,
                     kept: &[],
                     offered: &[],
                 };
@@ -4625,10 +4700,18 @@ const BORROWCK: &[&str] = &[
 ];
 
 /// The lints rust-analyzer finds where rustc does, and nowhere else, as `lints_ui.py` scores
-/// them against rustc's UI tests. None is denied by default, so one at the level of an
-/// error is one a source denies, which no flag but `--cap-lints` or `--force-warn` undoes.
-const DENIED: &[&str] =
-    &["non_snake_case", "non_camel_case_types", "non_upper_case_globals", "unused_must_use"];
+/// them against rustc's UI tests and its probes of each place a lint applies. None is denied
+/// by default, so one at the level of an error is one a source denies, which no flag but
+/// `--cap-lints` or `--force-warn` undoes.
+const DENIED: &[&str] = &[
+    "non_snake_case",
+    "non_camel_case_types",
+    "non_upper_case_globals",
+    "unused_must_use",
+    "deprecated_safe_2024",
+    "elided_lifetimes_in_paths",
+    "unsafe_op_in_unsafe_fn",
+];
 
 /// The errors written in the edited files, as rust-analyzer finds them, as rustc writes them
 /// with paths from `root`. Nothing may reach them, so the build never looks at them.
@@ -4886,6 +4969,7 @@ fn build_batch(db: &RootDatabase, args: Args) -> anyhow::Result<()> {
             library: args.library,
             cfg_test: args.cfg_test,
             own_target: args.own_target,
+            scripts_from: None,
             selection: args.selection.clone(),
             also: Vec::new(),
             debug: args.debug,
@@ -6131,7 +6215,7 @@ impl Held {
         // of the target directory, which a build that started beside this holds until it ends.
         let scriptless = LoadCargoConfig { load_out_dirs_from_check: false, ..load_config() };
         let (db, vfs, mut checkouts) =
-            load(&[dir], &cargo_config(&args), scriptless, args.selection, None)?;
+            load(&[dir], &cargo_config(&args), scriptless, args.selection, None, None)?;
         checkouts.load_config = load_config();
         let all: Vec<ide_db::base_db::Crate> =
             Crate::all(&db).into_iter().map(Into::into).collect();
@@ -6614,15 +6698,29 @@ fn run_holding(
         built: FxHashSet::default(),
         applied: 0,
     };
+    // A build that is over said what its scripts did and where its proc macros are once,
+    // and loading does not build them again to find out.
+    let scripts_said = match (&said, &args.scripts_from) {
+        (None, Some(file)) => match std::fs::read_to_string(file) {
+            Ok(text) => Some(text.lines().map(str::to_owned).collect::<Vec<_>>()),
+            Err(why) => {
+                eprintln!("build scripts: {} not read, they run: {why}", file.display());
+                None
+            }
+        },
+        _ => None,
+    };
     let read_from = SystemTime::now();
     let held = held.and_then(|mut held| {
         held.checkouts.beside = said.as_ref().map(beside);
+        held.checkouts.scripts_said = scripts_said.clone();
         held.with(&projects, &cargo_config, &selection)
     });
     let (mut db, mut vfs, mut checkouts) = match held {
         Some(Held { db, vfs, checkouts }) => (db, vfs, checkouts),
         None => {
-            load(&projects, &cargo_config, load_config(), selection, said.as_ref().map(beside))?
+            let beside = said.as_ref().map(beside);
+            load(&projects, &cargo_config, load_config(), selection, beside, scripts_said)?
         }
     };
     let listed = Arc::new(Listed::default());
@@ -6677,15 +6775,23 @@ fn run_holding(
     if checkouts.lto(&args.project)? {
         linked_from_libraries(&db, &args)?;
     }
+    // The store reads its packs when first opened, which serving does: what is fetched after
+    // that is not in it for this build.
+    let shared = shared.join().map_err(|_| anyhow::anyhow!("fetching the store panicked"))?;
+    let built = built_crates(&db, &args)?;
+    let served = frozen::serve(&mut db, &built);
     let mut resolved = resolve_crates(&db, &args, cores())?;
     // Resolving the names finds the files `include!` names that were not loaded. With those
     // in, there may be more.
     while WatchedFile::include_sources(&mut files, &mut tree, &mut db) != Loaded::Nothing {
+        // A crate listed beside cargo's build was listed without what they declare.
+        listed.touch(&db, None);
         resolved = resolve_crates(&db, &args, cores())?;
     }
     let texts = harnesses(&db, [&args], None, &mut as_rustc);
     write_harnesses(&mut db, texts);
     eprintln!("resolve: {resolved} crates in {:.1?}", start.elapsed());
+    frozen::store(&db, &served)?;
     if let Some(said) = ra_jit_expand::report() {
         eprintln!("{said}");
     }
@@ -6741,7 +6847,6 @@ fn run_holding(
         );
         known.patching = args.patch.is_some();
     }
-    let shared = shared.join().map_err(|_| anyhow::anyhow!("fetching the store panicked"))?;
     if let Some(asked) = doc {
         let krate = *crates_named(&db, &args.krate, &args)?.first().context("no such crate")?;
         let workspace = checkouts.loaded.workspaces().first();
@@ -6808,6 +6913,7 @@ fn run_holding(
             // An `include!` in a body is first seen when the body is compiled.
             if WatchedFile::include_sources(&mut files, &mut tree, &mut db) != Loaded::Nothing {
                 known.touch(&db, None);
+                listed.touch(&db, None);
                 cold = build_unheld(&db, &table, &args, &mut known, &listed)?;
             }
             if let Some(unset) = &cold.unset {
@@ -6982,12 +7088,17 @@ fn run_holding(
             builds.settle(&mut db, &mut programs)?;
         }
         let included = WatchedFile::watch_included(&mut files, &mut db);
-        match WatchedFile::include_sources(&mut files, &mut tree, &mut db) {
+        let loaded = WatchedFile::include_sources(&mut files, &mut tree, &mut db);
+        match loaded {
             _ if included => programs.iter_mut().for_each(|it| it.known.touch(&db, None)),
             Loaded::Nothing => {}
             // A build of the daemon's own compiled without them; what rustc linked is of them.
             Loaded::AsRustcRead => programs.iter_mut().for_each(|it| it.known.touch_own(&db)),
             Loaded::New => programs.iter_mut().for_each(|it| it.known.touch(&db, None)),
+        }
+        // What they declare is in the crates now, and a listing from before has none of it.
+        if loaded != Loaded::Nothing {
+            listed.touch(&db, None);
         }
         // The program each client asks for.
         let mut clients: Vec<(usize, Asked)> = Vec::new();

@@ -511,6 +511,11 @@ def project(name, spec, work, mode):
         ask = asked_by(os.path.join(ws, "target-ref/debug", spec["client"]))
     runs("cold run")
     warm("warm-up")
+    # The daemon loads the workspace with what cargo said of its build scripts and proc
+    # macros, and builds none of them again for it.
+    if os.path.isdir(os.path.join(ws, "target", "rust-analyzer")):
+        row["wrong"].append("warm-up: the daemon built the build scripts and proc macros again")
+        print("  warm-up      the daemon built the build scripts and proc macros again", flush=True)
     step("warm build", "build", build, status)
     runs("warm run")
     step("cold test", "test", test, test_results)
@@ -801,6 +806,12 @@ def daemon(work):
     _, denied = here.cargo("build")
     said = re.search(r'^error: .*`Denied`.*\n +--> app/src/main\.rs:\d+:8\n', denied.stderr, re.M)
     check("an edit with a lint its source denies fails the build with ra-jit's error, and no cargo", denied.returncode == 101 and not by_rustc(denied.stderr) and said, f"exit {denied.returncode}, {denied.stderr.strip()[-300:]}")
+    open(main, "w").write(kept)
+    wait_warm(here, ws)
+    open(main, "a").write("\n#[deny(elided_lifetimes_in_paths)]\npub fn hidden(_: std::fmt::Arguments) {}\n")
+    _, denied = here.cargo("build")
+    said = re.search(r'^error: hidden lifetime parameters in types are deprecated\n +--> app/src/main\.rs:\d+:28\n', denied.stderr, re.M)
+    check("and so does one with a lint of a type's hidden lifetime it denies", denied.returncode == 101 and not by_rustc(denied.stderr) and said, f"exit {denied.returncode}, {denied.stderr.strip()[-300:]}")
     capped = {"RUSTFLAGS": "--cap-lints warn"}
     here.cargo("build", env=capped)
     wait_warm(here, ws)

@@ -119,8 +119,8 @@ were stable names: 665,474,913 bytes for one `helix-parsec` closure, and the lar
    load, resolve, build, warm-up and each request answered (on macOS the physical footprint)
    and writes a table of every salsa ingredient (count,
    bytes of fields and of salsa's records; heap bytes only where an ingredient declares
-   `heap_size`, which no rust-analyzer query does). A build with the `heap-profile` feature
-   allocates with jemalloc, reports live bytes, and with `_RJEM_MALLOC_CONF=prof:true`
+   `heap_size`, which no rust-analyzer query does), and jemalloc's live bytes. A build with
+   the `heap-profile` feature, with `_RJEM_MALLOC_CONF=prof:true`, also
    writes a heap profile for `jeprof` (on macOS for `harness/heapfold.py`, with `heap.py` to
    give it to queries). rust-analyzer's own per-query report
    (`per_query_memory_usage` in `ide-db/src/apply_change.rs`) is commented out since its
@@ -258,6 +258,31 @@ forced `mi_collect` after each request returned 30 to 40 MB of ripgrep's worker.
 the values the daemon keeps, `described` first (#55)
 ([research/daemon-memory.md](research/daemon-memory.md#2026-10-22-the-spare-and-eviction)).
 
+**Measured (2026-10-23, #39; Linux x86-64, 16 cores).** What doubles the daemon after ready
+is its own base, not the first edit: once idle it compiles every function of the workspace,
+and keeps the memos. Of what that adds to the live heap, `described` is 82% on helix (5.6 of
+6.8 GB) and 59% on nushell (2.3 of 3.9 GB); `compiled_instance`, the MIR queries and
+`inlinable` the most of the rest. The tree holds nothing of another project's any more: the
+worker, the proc-macro server and the daemon. bun's add-a-function edit peaks at 33.8 GB
+because it writes the whole object, debug information included, for 2 functions compiled.
+What the allocator kept was the other lever: mimalloc 3 asks for transparent huge pages,
+and nushell's worker held 2.5-2.9 GB more with it than with jemalloc after the same build and
+edits. ra-jit now allocates with jemalloc on Unix (mimalloc on Windows), edits within the
+runs' spread (`bench.py`, two interleaved rounds, main → branch):
+
+| | ready | after its edits | most at an edit |
+|---|---|---|---|
+| ripgrep | 1.72 → 1.31 GB | 2.03 → 1.57 GB | 2.08 → 1.70 GB |
+| nushell | 6.16 → 5.21 GB | 10.80 → 9.52 GB | 10.86 → 10.08 GB |
+| helix | 4.13 → 3.71 GB | 12.13 → 11.07 GB | 16.07 → 14.23 GB |
+| bun (1 run) | 12.29 → 10.72 GB | 27.00 → 24.28 GB | 36.05 → 32.90 GB |
+| bevy (1 run) | 8.84 → 8.68 GB | 43.46 → 41.15 GB | 84.31 → 76.12 GB |
+
+bevy's most is at the two edits that fall back to cargo after about 9 minutes each (a
+writable static without a rustc symbol, and `UnresolvedMethod("collect")`), on both builds.
+
+([research/daemon-memory.md](research/daemon-memory.md#2026-10-23-the-own-base-and-the-allocator)).
+
 ### Item 1: frozen dependency artifacts
 
 **Design.** One artifact per dependency crate, content-addressed by its source hash, cfg,
@@ -300,6 +325,28 @@ tree, the largest single front-end query on both (helix 1.3 GB, nushell 0.4 GB),
 1a and 1b can save on a warm start is about 5 s. Since cold-start (#11) a warm start is ready
 in 8.0 s on helix and 8.8 s on nushell with item 3, of which resolving is 4.3 s and 4.5 s:
 what is left of the warm start is mostly this item's.
+
+**Built (2026-10-23).** Three families are frozen for each crate whose source is the
+toolchain's, a registry's or a git checkout's and whose dependencies' are too: the `DefMap`
+(with the `LocalDefMap`), the `TraitImpls` and `InherentImpls`, and the lang items, each its own
+store entry under the crate's Merkle key (`crates/ra-jit/src/frozen.rs`; the encodings in
+`hir-def`'s `nameres/frozen.rs` and `hir-ty`'s `method_resolution/frozen.rs`). The bytes hold
+no salsa ids: a file is its crate's index and its path from the crate's root, a module of a
+block is its owner's body and the block's `AstId`, an interned id is its loc. A file outside the
+crate's directory, which a build script may have written, is named with a hash of its text, and
+bytes whose file changed are not read. `RA_JIT_FROZEN=check` resolves and finds as well and fails
+the build on any difference, `verify` writes what was read and fails the same way; on ripgrep's
+153 parts and hello's 78 both find none. The entries go through `ra_jit_store::Store` and so
+travel through the remote with the packs. On dev-aws-8, pinned to one socket's 96 cores, hello's
+build with a warm remote resolves in 0.33 s of 2.2 s and takes 1.22 s of 3.02 s, 2.3 GB of 3.4 GB;
+ripgrep's resolves in 0.38 s of 2.4 s and takes 4.25 s, against cargo's cold 5.5 s.
+
+What resolving still did for a build is now the build's: the impl headers' types (about 1 s of
+ripgrep's compiling, most of it expanding the macros that write `core`'s impls) and the
+expansions behind signatures and bodies. Lowering every impl header after names are read costs
+the same second on the resolve side, so the next families are the impl headers and the macro
+expansions of frozen crates. The spare daemon (`Held::load`) does not read frozen values yet: the
+store's identity is told the toolchain once a process, before the spare knows the build's.
 
 **Risks.** It is the largest change here and touches the most upstream behaviour. The
 differential checker, kept as a mode, is the guard: a frozen value that differs from the
@@ -391,6 +438,7 @@ stops.
 | `described` copies whole type closures (item 5) | #55 | share-types (restarted 2026-10-22 as share-types-3) |
 | The spare worker's memory (item 5) | #56 | spare, merged (8e01def1cf): 1.3 GB less after edits; a warm second project's cost is #99 |
 | salsa eviction of queries with cycle handling (item 5) | #57 | spare, closed unmerged: lru saves 0.35-0.5 GB on nushell but slows the signature edit 0.42 to 0.64-2.43 s |
+| What the daemon keeps after ready, and the allocator (item 5) | #39 | glancer: jemalloc on Unix, 1.3 GB less on nushell after edits |
 | Frozen dependency artifacts (item 1) | #40 | glancer, after #38 |
 | The workspace's own state (item 2) | #41 | glancer, after #40's 1a |
 | A flat syntax tree (item 4) | #42 | flat-syntax: done, steps (a), (b) and (c) merged |
@@ -427,6 +475,21 @@ stops.
   cargo's 4.5 GB. The daemon holds 12.5 GB once ready and 25.7 GB after the first edit, and the
   edit that adds a function peaks at 33.5 GB against cargo's 3.3 GB. On macOS arm64
   (2026-10-21, `docs/research/bun.md`) it was 291 s to ready, 28 GB, near 40 GB at an edit.
+  2026-10-23, ra-jit `948d54e375` (the bun-perf lane), same machine: an added function is now
+  a patch, so its 33.5 GB peak is gone; every edit peaks at 27.3 GB at most. The daemon holds
+  12.0 GB once ready and 27.2 GB from the first build on, then stays flat to 0.1 GB over 33
+  builds: the growth is the background build of the program for edits to patch (every
+  function of bun's C-ABI main is an entry, about 68k functions), not the edits. Cold, the
+  build peaks at 15.4 GB against cargo's 4.5 GB, as before.
+  On macOS arm64 (Apple M5 Max, 128 GiB, same commit, read, the daemon's log of `bench.py bun
+  --keep`) the background build of the program for edits gives up: "it holds 32826 MB, more
+  than the 32768 MB it may (`RA_JIT_OWN_BASE_MEMORY`)", a quarter of 128 GiB; Linux's quarter
+  of 185 GiB is 46 GB, which bun's base fits. Edits then go on patching rustc's executable,
+  which a signature edit cannot patch ("an edit that is more than the bodies of functions"):
+  its first sample writes the whole object and links bun in full, twice (280 s, then 279 s
+  again with `-headerpad` for the splices to fit), 574 s; the two after it splice into that
+  link in under 2 s. bun's base needs about 1 GB less, or the bound more room, for macOS's
+  signature edit to be a patch as Linux's is.
 - **architecture split**: the store is the crate `crates/ra-jit-store`, and the code
   generator moves to a crate of its own. New store-side code (item 3's cache, item 1's
   container, item 2's manifest) goes in or beside `ra-jit-store`, behind the store's

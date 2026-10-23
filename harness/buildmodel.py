@@ -50,7 +50,8 @@ and the run fails on any WRONG row and on any row that is not what its `case.jso
               "paused": the clients ask while the daemon is held in the middle of the reload,
               "stale": the client asks with what cargo linked before the step, as one
               that leaves the build to the daemon does,
-              "expect": "same" | "refused"}]
+              "expect": "same" | "refused",
+              "links": "spliced": the daemon splices the edit into what it linked before}]
             After each step cargo builds again and the client names what it linked.
 """
 from concurrent.futures import ThreadPoolExecutor
@@ -276,6 +277,7 @@ class Case:
         obj, patch, binary = (os.path.join(self.work, f"daemon.{n}") for n in ("o", "patch.o", "bin"))
         # The path of a socket has a limit that the name of a case can take the copy past.
         socket, log_path = os.path.join(tempfile.mkdtemp(prefix="bm-"), "s"), os.path.join(self.work, "daemon.log")
+        self.daemon_log = log_path
         self.daemon_files = (obj, patch, binary)
         ask = self.ask(link, env)
         log = open(log_path, "a")
@@ -328,6 +330,7 @@ class Case:
         if not step.get("stale"):
             self.last_asked = self.asked(env)
         ask = [RA_JIT, "sync", socket, *self.last_asked]
+        logged = os.path.getsize(self.daemon_log)
         if step.get("paused"):
             return self.mid_reload(step, env, daemon, ask, binary, before)
         # Clients that ask at once race the reload: each is answered from one model.
@@ -352,6 +355,13 @@ class Case:
             verdict = ("same", "") if want == got else ("WRONG", differ(want, got))
         if verdict[0] != "WRONG" and verdict[0] != expect:
             verdict = ("WRONG", f"expected {expect}, got {verdict[0]}: {verdict[1]}")
+        # A Mach-O executable is linked in full after every edit.
+        if verdict[0] == "same" and step.get("links") == "spliced" and sys.platform != "darwin":
+            with open(self.daemon_log, errors="replace") as log:
+                log.seek(logged)
+                links = [line for line in log.read().splitlines() if line.startswith("link: ")]
+            if not any("(spliced" in line or "the splice waits" in line for line in links):
+                verdict = ("WRONG", f"linked in full where it is spliced: {links[-1] if links else 'no link'}")
         return (step["what"], verdict[0], verdict[1][:300])
 
     def mid_reload(self, step, env, daemon, ask, binary, before):

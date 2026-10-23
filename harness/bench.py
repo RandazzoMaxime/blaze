@@ -4,7 +4,7 @@
     bench.py [PROJECT...] [--backend cranelift|llvm]... [--runs N] [--out FILE] [--work DIR]
              [--reference DIR] [--keep]
     bench.py --compare BASELINE RESULT [--threshold PERCENT]
-    bench.py --runtime [NAME...] [--runs N] [--out FILE]
+    bench.py --runtime [NAME...] [--runs N] [--builds release,checked,ra-jit] [--out FILE]
 
 `--runtime` is how fast programs run rather than how fast they build: it runs runbench.py on
 its programs (NAME..., its defaults without), `--runs` rounds each (default 5), and writes its
@@ -55,7 +55,7 @@ The ra-jit of a backend is `RA_JIT_BIN` (cranelift) or `RA_JIT_LLVM_BIN` (llvm).
 """
 import glob, importlib, json, os, platform, re, shutil, statistics, subprocess, sys, tempfile, time
 
-import cargo_ra_jit, memory
+import cargo_ra_jit, memory, packs
 from cargo_ra_jit import HERE, ROOT, TOOLCHAIN, Side, difference, fetch, how_built, program_output, test_results, timed, wait_warm
 
 LET = "\n    let _bench_edit = 1u32;"
@@ -507,6 +507,33 @@ def disk(ws, ours, theirs):
             "home": memory.disk_mb(ours.env["RA_JIT_HOME"]), "cargo target": memory.disk_mb(theirs.env["CARGO_TARGET_DIR"])}
 
 
+# The keys the projects measured so far in this run stored: what one store on the machine would
+# have before the next project (docs/benchmarks.md, "Fairness").
+STORED = {}
+
+
+def store_entries(path):
+    """The keys of the sealed packs of the store at `path`, each with the bytes of disk it takes:
+    its pack's size shared among the pack's entries by the length of their values. A pack of
+    another format than packs.py reads is not counted."""
+    entries = {}
+    names = os.listdir(path) if os.path.isdir(path) else []
+    for name in names:
+        if not name.endswith(".pack"):
+            continue
+        try:
+            pack = open(os.path.join(path, name), "rb").read()
+        except OSError:
+            continue
+        laid = packs.index(pack)
+        if laid is None:
+            continue
+        values = sum(length for _, _, _, length, _ in laid[1]) or 1
+        for key, _, _, length, _ in laid[1]:
+            entries.setdefault(key, len(pack) * length / values)
+    return entries
+
+
 def store_mb(path):
     total = 0
     for root, _, files in os.walk(path):
@@ -711,8 +738,12 @@ def measure(name, spec, backend, runs, work, reference_dir, cold_runs=1, setup_n
                               warm_store_samples_s=[round(b + w, 3) for b, w, _ in warm_store],
                               warm_store_memory=dict(peak_mb=round(statistics.median(u["peak_mb"] for _, _, u in warm_store)),
                                                      resident_mb=round(statistics.median(u["resident_mb"] for _, _, u in warm_store))))
+    entries = store_entries(ours.env["RA_JIT_CACHE"])
+    added = sum(size for key, size in entries.items() if key not in STORED)
+    STORED.update(entries)
+    print(f"  store {store_mb(ours.env['RA_JIT_CACHE'])} MB, {added / 1e6:.0f} MB of it not stored by a project before", flush=True)
     result = dict(phases=phases, wrong=wrong, tag=spec["tag"], rev=spec["rev"], store_mb=store_mb(ours.env["RA_JIT_CACHE"]),
-                  cold_runs=cold_runs, resident=resident, disk_mb=end_disk)
+                  store_added_mb=round(added / 1e6), cold_runs=cold_runs, resident=resident, disk_mb=end_disk)
     if "RUSTUP_TOOLCHAIN" in prepared:
         # The project's own toolchain, not the one ra-jit is pinned to.
         result["toolchain"] = prepared["RUSTUP_TOOLCHAIN"]
@@ -910,9 +941,10 @@ def runtime_bench(argv):
     `cargo build --release`, in a result that names the machine, commit and date as the rest."""
     rounds = options(argv, "--runs", "5")[0]
     out = options(argv, "--out", os.path.join(HERE, "runtime.json"))[0]
+    builds = [arg for given in options(argv, "--builds") for arg in ("--builds", given)]
     names = [a for a in argv if not a.startswith("--")]
     measured = os.path.join(tempfile.mkdtemp(prefix="ra-jit-runbench-"), "runbench.json")
-    ran = subprocess.run([sys.executable, os.path.join(HERE, "runbench.py"), *names, "--rounds", rounds, "--json", measured])
+    ran = subprocess.run([sys.executable, os.path.join(HERE, "runbench.py"), *names, "--rounds", rounds, *builds, "--json", measured])
     result = dict(toolchain=TOOLCHAIN, commit=ra_jit_commit(), date=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
                   host=machine(), runbench=json.load(open(measured)) if os.path.exists(measured) else None)
     if os.environ.get("GITHUB_RUN_ID"):
