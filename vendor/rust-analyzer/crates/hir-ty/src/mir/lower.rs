@@ -111,8 +111,10 @@ impl DropScope {
     }
 }
 
-/// A binding of a guarded match arm that is moved into once its guard holds.
+/// A binding of a guarded match arm that is moved into once its guard holds, and is live
+/// only from then, as rustc binds what an arm binds by value after its guard.
 struct GuardedMove<'db> {
+    binding: BindingId,
     local: LocalId,
     place: Place<'db>,
     span: MirSpan,
@@ -167,8 +169,8 @@ struct MirLowerCtx<'a, 'db> {
     /// The alternative to match for an or-pattern, while an arm is lowered once per
     /// combination of alternatives.
     or_choices: FxHashMap<PatId, usize>,
-    /// While the pattern of a match arm that has a guard is lowered: what it binds by value of a
-    /// type that is not `Copy`, which is bound only once the guard holds. The guard reads each
+    /// While the pattern of a match arm that has a guard is lowered: what it binds by value,
+    /// which is bound only once the guard holds. The guard reads each
     /// through a shared reference to the place it comes out of (`guard_refs`), as rustc lowers
     /// it, so a guard that reads the value matched on does not read a moved value.
     guarded_moves: Option<Vec<GuardedMove<'db>>>,
@@ -1122,10 +1124,10 @@ impl<'a, 'db> MirLowerCtx<'a, 'db> {
                             let guarded = self.lower_guard(guard, then, expr_id.into());
                             self.guard_refs.clear();
                             if let Some((held, failed)) = guarded? {
-                                self.guard_held(held, moves.unwrap_or_default());
-                                self.set_goto(held, body, expr_id.into());
                                 let failed = self.guard_failed(failed, bound, guard.into());
                                 self.set_goto(failed, otherwise, expr_id.into());
+                                self.guard_held(held, moves.unwrap_or_default(), bound)?;
+                                self.set_goto(held, body, expr_id.into());
                             }
                             current = otherwise;
                         }
@@ -1158,10 +1160,10 @@ impl<'a, 'db> MirLowerCtx<'a, 'db> {
                         let guarded = self.lower_guard(guard, then, expr_id.into());
                         self.guard_refs.clear();
                         if let Some((held, failed)) = guarded? {
-                            self.guard_held(held, moves.unwrap_or_default());
-                            self.set_goto(held, next, expr_id.into());
                             let failed = self.guard_failed(failed, bound, guard.into());
                             self.set_goto(failed, o, expr_id.into());
+                            self.guard_held(held, moves.unwrap_or_default(), bound)?;
+                            self.set_goto(held, next, expr_id.into());
                         }
                         next
                     } else {
@@ -3823,11 +3825,30 @@ impl<'a, 'db> MirLowerCtx<'a, 'db> {
     }
 
     /// Where the guard of an arm held: what the arm binds by value is moved into its bindings.
-    fn guard_held(&mut self, current: BasicBlockId, moves: Vec<GuardedMove<'db>>) {
-        for GuardedMove { local, place, span } in moves {
+    /// They are declared there, but dropped after what the guard binds, as the pattern's other
+    /// bindings are: in the arm's scope they go at `bound`, before what the guard added.
+    fn guard_held(
+        &mut self,
+        current: BasicBlockId,
+        moves: Vec<GuardedMove<'db>>,
+        bound: usize,
+    ) -> Result<'db, ()> {
+        let mut at = bound;
+        for GuardedMove { binding, local, place, span } in moves {
+            let known = self.drop_scopes.last().is_some_and(|it| it.locals.contains(&local));
+            self.push_storage_live(binding, current)?;
+            if let Some(arm) = self.drop_scopes.last_mut()
+                && !known
+                && arm.locals.last() == Some(&local)
+            {
+                arm.locals.pop();
+                arm.locals.insert(at.min(arm.locals.len()), local);
+                at += 1;
+            }
             let mode = crate::BindingMode(crate::ByRef::No, rustc_ast_ir::Mutability::Not);
             self.push_match_assignment(current, local, mode, place, span);
         }
+        Ok(())
     }
 
     /// Lowers a match arm's guard to the blocks where it holds and where it fails, switching
