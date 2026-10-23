@@ -16,7 +16,7 @@ proxy or needs to kill the service.
     python3 remote.py --measure WORKSPACE -p PACKAGE --bin NAME --crate A,B,C [--run ARG]
                                                    a fresh machine with and without the remote
 """
-import argparse, hashlib, os, re, shlex, shutil, signal, subprocess, sys, tempfile, threading, time, zlib
+import argparse, hashlib, os, re, shlex, shutil, signal, subprocess, sys, tempfile, threading, time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
@@ -24,8 +24,8 @@ import linkline
 from difftest import RA_JIT, RUNNER, TARGET_ARGS, linker_line, sysroot_rlibs
 from s3fake import ACCESS, SECRET, Bucket, Proxy, Server, find
 
-FORMAT = 2
-MAGIC = b"rajitpk" + bytes([FORMAT])
+from packs import FORMAT, sealed as pack_of, records as records_of
+
 MIB = 1 << 20
 # Enough for three parts of a multipart upload.
 BIG = 20 * MIB
@@ -47,24 +47,6 @@ def digest(data):
     return hashlib.sha256(data).hexdigest()
 
 
-def pack_of(records):
-    """A pack with these `(key, value)` records, as crates/ra-jit-store lays one out."""
-    out = bytearray(MAGIC)
-    for key, value in records:
-        size = len(value).to_bytes(4, "little")
-        out += key + size + zlib.crc32(key + size + value).to_bytes(4, "little") + value
-    return bytes(out)
-
-
-def records_of(pack):
-    records, at = [], len(MAGIC)
-    while at + 40 <= len(pack):
-        size = int.from_bytes(pack[at + 32:at + 36], "little")
-        records.append((pack[at:at + 32], pack[at + 40:at + 40 + size]))
-        at += 40 + size
-    return records
-
-
 def packed(data):
     """`data` compressed the way ra-jit sends a pack."""
     return subprocess.run(["zstd", "-3", "-c"], input=data, capture_output=True, check=True).stdout
@@ -78,8 +60,8 @@ def unpacked(data):
 def filler(seed, size):
     """A sealed pack of `size` bytes that no build asks anything of."""
     # Bytes that do not compress, so that what goes over the line is as large as the pack.
-    value = bytearray(hashlib.shake_256(seed.encode()).digest(size - 48))
-    return pack_of([(hashlib.sha256(b"key" + seed.encode()).digest(), bytes(value[:size - 48]))])
+    value = hashlib.shake_256(seed.encode()).digest(size - len(pack_of([(bytes(32), b"")])))
+    return pack_of([(hashlib.sha256(b"key" + seed.encode()).digest(), value)])
 
 
 class Remote:

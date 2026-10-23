@@ -226,16 +226,17 @@ Each place, and how it is covered:
 ## The disk store
 
 `crates/ra-jit-store` is a content-addressed key-value store of compiled functions,
-independent of Rust: a key is a hash of what the value was made from. It is used when `RA_JIT_CACHE` names
-a directory. `stable.rs` gives function instances names that are the same in every run on
+independent of Rust: a key is a hash of what the value was made from. There is one per user
+and machine, shared by every daemon and checkout, unless `RA_JIT_CACHE` names another
+directory or `off`. `stable.rs` gives function instances names that are the same in every run on
 the same sources, and `cached.rs` keeps entries under them: a function of a crate that no
 edit reaches, as it was stitched into an object. A build that finds an entry for an
 instance and for everything it calls puts them in the object without asking the database
 about the instance.
 
-On disk the store is a set of immutable packs named by the SHA-256 of their bytes, plus one
-open pack per running daemon. Format, locking, integrity checks and size limits are in
-[cache.md](cache.md).
+On disk the store is a set of immutable packs named by the SHA-256 of their bytes, their
+values in zstd blocks behind an index, plus one open pack per running daemon. Format,
+locking, integrity checks and size limits are in [cache.md](cache.md).
 
 ## The remote store
 

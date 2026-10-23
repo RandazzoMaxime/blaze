@@ -3287,6 +3287,7 @@ dependencies = [
  "rustc-hash 2.1.2",
  "sha2 0.10.9",
  "windows-sys 0.61.2",
+ "zstd",
 ]
 
 [[package]]

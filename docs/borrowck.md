@@ -280,8 +280,8 @@ With no borrow checker, the 245 units rustc accepts would pass. Now:
 
 | Mode | In scope | Pass | rustc accepts, ra-jit too | rustc rejects, same errors |
 |---|---|---|---|---|
-| Polonius | 1579 | 1494 (94.6%) | 245 of 245 | 1249 of 1334 |
-| NLL | 1577 | 1490 (94.5%) | 226 of 226 | 1264 of 1351 |
+| Polonius | 1579 | 1499 (94.9%) | 245 of 245 | 1254 of 1334 |
+| NLL | 1577 | 1495 (94.8%) | 226 of 226 | 1269 of 1351 |
 
 463 units are out of scope; 344 of them need a nightly feature. CI runs the scoring on Linux
 and fails below a floor a few units under the count there.
@@ -295,7 +295,7 @@ just, axum, nushell, delta, eza, tokei and starship it finds nothing, nor on the
 
 Every failing unit is one where rustc gives an error ra-jit does not, or gives it on another
 line or with another code. By what is wrong, most first: 10 "lifetime may not live long
-enough" not reported, 6 on another line or with another code, 4 with only an error rustc does
+enough" not reported, 6 on another line or with another code, 2 with only an error rustc does
 not give, 7 of E0597 not reported, 6 of E0309, and 5 each of E0716, E0311, E0507, E0310 and
 higher-ranked errors not reported, then a long tail. The causes, grouped:
 

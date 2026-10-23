@@ -1,7 +1,7 @@
 {
  "dir": ".",
  "inputs": {
-  "Cargo.lock": "c85077527ed750dafbedf129c9408e4bc8dba94ec63b523b55a6602c6c74421a",
+  "Cargo.lock": "5c5bec88f7cf267608effa7da2c547d1ed55b98951ab81be8f67aa7118bd9074",
   "Cargo.toml": "4f71340b2d7f3f874e690331931f61541000600a05e19974a81ba3f0c8c74ef5"
  },
  "packages": {
@@ -20252,6 +20252,10 @@
       {
        "i": 361,
        "name": "sha2"
+      },
+      {
+       "i": 468,
+       "name": "zstd"
       }
      ],
      "edition": "2024",
@@ -37409,6 +37413,10 @@
       {
        "i": 362,
        "name": "sha2"
+      },
+      {
+       "i": 469,
+       "name": "zstd"
       }
      ],
      "edition": "2024",
@@ -54426,6 +54434,10 @@
       {
        "i": 362,
        "name": "sha2"
+      },
+      {
+       "i": 469,
+       "name": "zstd"
       }
      ],
      "edition": "2024",
@@ -71610,6 +71622,10 @@
       {
        "i": 363,
        "name": "sha2"
+      },
+      {
+       "i": 470,
+       "name": "zstd"
       }
      ],
      "edition": "2024",
