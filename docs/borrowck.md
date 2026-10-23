@@ -179,7 +179,13 @@ All of these are rustc's, written from `compiler/rustc_borrowck` at the pinned n
   `async fn`, those its bounds name; its type parameters are always captured.
 - `impl Trait`'s hidden type: each of its regions must be `'static` or one of the lifetimes
   the `impl Trait` captures (rustc's member constraints), else E0700 at the signature; and it
-  must outlive what the bounds say (`impl Copy + 'a`). rustc picks the captured lifetime a
+  must outlive what the bounds say (`impl Copy + 'a`). The same holds of an `impl Trait` an
+  `async fn` declares it returns, the future's output, in the body that makes the future,
+  with the errors at the function's block as rustc's; only the future captures every
+  lifetime. A C variadic's `VaList` lifetime is never captured. A trait object in the hidden
+  type has its lifetime inferred, and a borrowed capture of a closure or `async` block
+  returned through an `impl Trait` that captures no lifetime is E0597, not E0373, as rustc's.
+  rustc picks the captured lifetime a
   region becomes and checks the body with that choice; ra-jit only tests that one exists, so
   it reports E0700 where rustc does and leaves the errors that choice causes unreported.
 - Closures: captures, E0373, `FnMut` escapes, E0596 and E0594 through captures. A closure's
@@ -267,8 +273,8 @@ With no borrow checker, the 245 units rustc accepts would pass. Now:
 
 | Mode | In scope | Pass | rustc accepts, ra-jit too | rustc rejects, same errors |
 |---|---|---|---|---|
-| Polonius | 1579 | 1463 (92.7%) | 245 of 245 | 1218 of 1334 |
-| NLL | 1577 | 1459 (92.5%) | 226 of 226 | 1233 of 1351 |
+| Polonius | 1579 | 1471 (93.2%) | 245 of 245 | 1226 of 1334 |
+| NLL | 1577 | 1467 (93.0%) | 226 of 226 | 1241 of 1351 |
 
 463 units are out of scope; 344 of them need a nightly feature. CI runs the scoring on Linux
 and fails below a floor a few units under the count there.
@@ -282,10 +288,9 @@ just, axum, nushell, delta, eza, tokei and starship it finds nothing, nor on the
 
 Every failing unit is one where rustc gives an error ra-jit does not, or gives it on another
 line or with another code. By what is wrong, most first: 11 "lifetime may not live long
-enough" not reported, 9 with only an error rustc does not give, 8 each of E0597 and E0700 not
-reported, 8 "lifetime may not live long enough" on another line, 7 each of E0716 and E0507,
-6 each of E0309, E0521 and E0310, and 5 each of E0311 and higher-ranked errors not reported,
-then a long tail. The causes, grouped:
+enough" not reported, 9 on another line or with another code, 9 with only an error rustc does
+not give, 8 of E0597 not reported, 7 each of E0716 and E0507, 6 each of E0309 and E0310, and
+5 each of E0311, E0521 and higher-ranked errors not reported, then a long tail. The causes, grouped:
 
 - **Higher-ranked regions and placeholders** (`for<'a>` bounds, closures with higher-ranked
   signatures): rustc checks them with placeholders in universes; ra-jit does not yet, and
