@@ -43,7 +43,7 @@ in their own section. Each has a reduced case in `harness/breakers/`.
 | 3 | `assert!` of a condition longer than a line prints the condition on one line; rustc breaks it over several | both | open | `assert_message` |
 | 4 | When an operand of an array, tuple, struct literal or call panicked, the operands already made were dropped in the wrong order relative to the statement's temporaries | both | fixed, dcb6b1fa7a | `unwind_operand_order` |
 | 5 | A function with a C-convention aggregate argument passed on the stack whose size is not a multiple of eight was left to rustc (Cranelift panicked) | cranelift | fixed, ca26ccf5d1 | `stack_aggregate_odd_size` |
-| 6 | An array of repeated `[i128; 5]` rows came out with part of it unwritten | llvm | worked around, 02796328b3 | `repeat_rows` |
+| 6 | An array of repeated `[i128; 5]` rows came out with part of it unwritten | llvm | gone, SLP back on 2026-10-23 | `repeat_rows` |
 | 7 | Before the 2024 edition, the temporaries of the tail of an `if` branch were dropped at the end of the enclosing statement instead of the end of the branch | both | fixed, fa04742c8d | `if_branch_temporaries` |
 | 8 | A closure that matches on a field of a variable without binding anything, and uses another field, was left to rustc (`UnresolvedUpvar`) | both | fixed, 94141b5783 | `uncaptured_scrutinee` |
 | 9 | `let _ = items[at]` and `match items[at] { _ => .. }` did not check the index, so an index out of bounds did not panic | both | fixed, a5360940ee | `unread_index` |
@@ -347,6 +347,13 @@ vectorizer off (`-vectorize-slp=false`); the loop vectorizer stays on. I did not
 that costs in generated code speed, and I did not check whether a later LLVM has the bug.
 rustc 1.99 uses its own LLVM and did not show it on the same source. Reductions:
 `differs-checksum-L1-45-c17.rs`, `L1-77-c19`, `L1-142-c12`, `s2-49-c12`.
+
+2026-10-23: with the SLP vectorizer on again, `repeat_rows` and the four reductions match
+rustc on x86-64 and AArch64 at `-O2` and `-O3`, and so do 300 fresh programs on x86-64 at
+`-O2` (`fuzz.py run --seed slp1 --rounds 300 --backends llvm`). The IR ra-jit gives LLVM has changed since (copies
+are `memcpy`s, the pipeline is ThinLTO's); LLVM 20.1.8 is the same. The pass is on again, as
+rustc runs it: nbody went from 1.21 to 0.98 times release on x86-64 and from 1.28 to 1.04 on
+AArch64.
 
 **7. Temporaries of an `if` branch's tail, before 2024.** Before the 2024 edition the
 temporaries of a block's tail expression live as long as those of the expression the block is
@@ -756,8 +763,8 @@ Stopped mid-way when the work was wound down; in order of what I would do next:
   --coverage` prints it.
 
 - Finding 3, the `assert!` message, is open for the reason above.
-- Finding 6 is a workaround. The honest fix is in LLVM; the cost of running without the SLP
-  vectorizer was not measured.
+- Finding 6 no longer shows with the SLP vectorizer on (2026-10-23), with no change to LLVM:
+  what in ra-jit's IR it depended on is not known, and AArch64 has not had a long run with it.
 - Finding 20 is a workaround too, and its diagnosis is mine from the assembly; nobody who
   knows LLVM's fast register allocator has looked at it. Its cost on AArch64 was not measured.
 - macOS and Windows were not run. The ABI classes the generator aims at are the System V and

@@ -889,6 +889,24 @@ longer than when resolving ran live, which lowered the impl headers on idle thre
 frozen family. A build waits for the remote's packs before it reads what is frozen: the store
 reads its packs once, when first opened, and one opened mid-fetch missed the standard library's.
 
+The link takes only what is reached of the unit (2026-10-23, same host). The unit is described
+to line tables at most, as rustc's own standard library is (its object 64 to 52 MB), and is
+kept as an archive of 17 parts: each function's sections with its unwind entry and its
+exception table, and each debug unit (256 functions, its own section set) in the part most of
+its functions are in, so that lld reads the parts on its threads. On one object lld read 140,000
+sections one after another, as fast on one thread as on 96.
+
+| Link | Before | After |
+|---|---|---|
+| hello, ra-jit's link | 160 to 167 ms | 130 ms |
+| hello, lld alone | 113 ms | 93 ms (cargo's: 25 ms) |
+| hello's executable | 20.4 MB | 15.2 MB |
+| ripgrep's executable | 55.1 MB | 50.1 MB (cargo's: 53.2 MB) |
+| ripgrep, warm remote, the whole build | 4.24 to 4.29 s | 4.20 to 4.28 s |
+
+ripgrep's link stays at 0.24 s: its own 64 MB object is now most of what lld reads, and it is
+written each build. The `cc` in front of lld (nix's wrappers, `collect2`) costs 35 ms more.
+
 Not yet measured: the other bench apps with every crate ra-jit's. The step K
 bar: with a warm remote, `cargo ra-jit build` from nothing is no slower than cargo's cold build;
 with an empty store, it is measured and published beside cargo's, and the gap is an issue of its

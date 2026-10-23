@@ -32,6 +32,7 @@ mod tier;
 mod trace;
 mod tree;
 mod weaken;
+mod whole;
 
 /// The daemon holds millions of small allocations and frees a file's worth of them on each
 /// edit, which the system allocator is slow at. jemalloc gives the system back more of what
@@ -371,6 +372,9 @@ struct Resolver<'a> {
     /// The crates the programs are made of, which a file that several crates share is read as
     /// a module of.
     programs: Option<Arc<FxHashSet<ide_db::base_db::Crate>>>,
+    /// The object is the standard library's, which is split into parts for the linker
+    /// ([`std_unit`]).
+    library: bool,
 }
 
 /// The standard library ra-jit built before the program ([`std_unit`]).
@@ -426,13 +430,28 @@ pub(crate) fn unlinked_panic_runtime(db: &RootDatabase, program: &[Crate]) -> &'
 fn defined_symbols(path: &Path) -> anyhow::Result<FxHashSet<String>> {
     use object::{Object as _, ObjectSymbol as _, SymbolScope};
     let bytes = std::fs::read(path).with_context(|| format!("reading {}", path.display()))?;
-    let file =
-        object::File::parse(&*bytes).with_context(|| format!("parsing {}", path.display()))?;
-    // A hidden one stands in for a function ra-jit could not compile, which a program
-    // compiles itself to be told why. A thread-local is not a "definition" to `object`.
-    let defined =
-        file.symbols().filter(|it| !it.is_undefined() && it.scope() == SymbolScope::Dynamic);
-    Ok(defined.filter_map(|it| it.name().ok().map(str::to_owned)).collect())
+    let objects: Vec<&[u8]> = if link::split::is_archive(&bytes) {
+        let archive = object::read::archive::ArchiveFile::parse(&*bytes)
+            .with_context(|| format!("parsing {}", path.display()))?;
+        archive
+            .members()
+            .map(|it| Ok(it?.data(&*bytes)?))
+            .collect::<object::Result<_>>()
+            .with_context(|| format!("parsing {}", path.display()))?
+    } else {
+        vec![&bytes]
+    };
+    let mut names = FxHashSet::default();
+    for bytes in objects {
+        let file =
+            object::File::parse(bytes).with_context(|| format!("parsing {}", path.display()))?;
+        // A hidden one stands in for a function ra-jit could not compile, which a program
+        // compiles itself to be told why. A thread-local is not a "definition" to `object`.
+        let defined =
+            file.symbols().filter(|it| !it.is_undefined() && it.scope() == SymbolScope::Dynamic);
+        names.extend(defined.filter_map(|it| it.name().ok().map(str::to_owned)));
+    }
+    Ok(names)
 }
 
 /// The [`SymbolTable::generation`] and the checkout that paths were found with.
@@ -501,6 +520,7 @@ impl<'a> Resolver<'a> {
             prebuilt,
             members: args.members.clone(),
             programs: listed.programs(db),
+            library: args.library,
         }
     }
 
@@ -1127,7 +1147,7 @@ impl SymbolResolver for Resolver<'_> {
                 let (shared_paths, linked) = (self.shared_paths.clone(), self.linked.clone());
                 let (in_full, prebuilt) = (self.in_full.clone(), self.prebuilt.clone());
                 let members = self.members.clone();
-                let programs = self.programs.clone();
+                let (programs, library) = (self.programs.clone(), self.library);
                 scope.spawn(move || {
                     let resolver = Resolver {
                         db: &db,
@@ -1145,6 +1165,7 @@ impl SymbolResolver for Resolver<'_> {
                         prebuilt,
                         members,
                         programs,
+                        library,
                     };
                     hir::attach_db(&db, || {
                         loop {
@@ -1179,6 +1200,10 @@ impl SymbolResolver for Resolver<'_> {
 
     fn debug_apart(&self) -> Option<String> {
         self.apart.as_ref().map(|it| it.to_string_lossy().into_owned())
+    }
+
+    fn debug_grouped(&self) -> bool {
+        self.library
     }
 
     fn function(&self, func: FunctionId) -> Option<String> {
@@ -3279,7 +3304,10 @@ fn start_from_rustc(
         bail!("patching what rustc linked takes --splice and --patch");
     };
     let empty = hir_ty_codegen::empty_object().map_err(|it| anyhow::anyhow!("{it}"))?;
-    std::fs::write(&args.out, &empty)?;
+    {
+        let _writing = whole::writing(&args.out);
+        std::fs::write(&args.out, &empty)?;
+    }
     std::fs::write(patch, &empty)?;
     // Another name for it at once, for a client to install: the copy a splice writes is
     // made while the daemon waits for the first edit.
@@ -3546,6 +3574,7 @@ impl Build {
     fn keep(&mut self, known: &mut Rejections) -> anyhow::Result<()> {
         known.keep_built();
         for (path, bytes) in std::mem::take(&mut self.unwritten) {
+            let _writing = whole::writing(&path);
             replace(&path, &bytes)?;
         }
         Ok(())
@@ -3606,13 +3635,16 @@ fn std_unit(
     // for by its name: it comes with the crates that use it.
     unit.retain(|(name, _)| crates_named(db, name, args).is_ok());
     let Some(((first, _), rest)) = unit.split_first() else { return Ok(None) };
+    // Lines at most, as rustc's own standard library is described: the variables of every
+    // function of it would be most of the object, and the linker reads all of it.
+    let debug = plan::Described { level: args.debug.level.min(plan::Level::Lines), ..args.debug };
     let mut hasher = Sha256::new();
     let mut field = |bytes: &[u8]| {
         hasher.update((bytes.len() as u64).to_le_bytes());
         hasher.update(bytes);
     };
-    field(b"ra-jit standard library 1");
-    field(format!("{:?} {:?}", args.selection.target, args.debug).as_bytes());
+    field(b"ra-jit standard library 2");
+    field(format!("{:?} {debug:?}", args.selection.target).as_bytes());
     // A crate that is not the library's own is told by where its source is.
     let mut described: Vec<String> = members
         .iter()
@@ -3631,9 +3663,11 @@ fn std_unit(
         field(it.as_bytes());
     }
     let key: [u8; 32] = hasher.finalize().into();
-    let path = args.out.with_extension("std.o");
+    let object = args.out.with_extension("std.o");
+    let archive = args.out.with_extension("std.a");
     let store = ra_jit_store::Store::global();
     if let Some(bytes) = store.and_then(|it| it.get(&key)) {
+        let path = if link::split::is_archive(&bytes) { archive } else { object };
         std::fs::write(&path, bytes).with_context(|| format!("writing {}", path.display()))?;
         eprintln!("standard library: from the store, {} crates", members.len());
         return Ok(Some(path));
@@ -3642,10 +3676,11 @@ fn std_unit(
         krate: first.clone(),
         batch: rest.iter().map(|it| it.0.clone()).collect(),
         widened: Vec::new(),
-        out: path.clone(),
+        out: object.clone(),
         report: None,
         exe: None,
         library: true,
+        debug,
         ..args.clone()
     };
     let built = build_unheld(db, table, &of_unit, &mut Rejections::default(), listed)
@@ -3655,9 +3690,30 @@ fn std_unit(
         })?;
     eprint!("standard library: {} crates, ", members.len());
     report(&built);
+    let mut path = object;
+    let mut bytes = std::fs::read(&path).with_context(|| format!("reading {}", path.display()))?;
+    if object::FileKind::parse(&*bytes).is_ok_and(|it| it == object::FileKind::Elf64) {
+        let start = Instant::now();
+        match link::split::split(&bytes, link::split::PARTS) {
+            Ok(parts) => {
+                eprintln!(
+                    "standard library: {} parts in {:.1?}",
+                    link::split::PARTS + 1,
+                    start.elapsed()
+                );
+                std::fs::remove_file(&path)
+                    .with_context(|| format!("removing {}", path.display()))?;
+                path = archive;
+                std::fs::write(&path, &parts)
+                    .with_context(|| format!("writing {}", path.display()))?;
+                bytes = parts;
+            }
+            Err(e) => eprintln!("standard library: kept as one object: {e:#}"),
+        }
+    }
     if let Some(store) = store {
         store.settled();
-        store.insert(&key, &std::fs::read(&path)?);
+        store.insert(&key, &bytes);
         store.flush();
     }
     Ok(Some(path))
@@ -3742,11 +3798,12 @@ fn build(
                 main = main.or_else(|| harness_main(db, &listed.functions));
             }
             functions.extend(listed.functions.iter().copied().zip(listed.exported.iter().copied()));
-            if table.is_empty() {
+            // rustc's copy of the crate has them when rustc built it.
+            let own = resolver.own_crate_id(krate.into()).is_some();
+            if table.is_empty() || own {
                 functions.extend(listed.in_provided.iter().map(|&it| (it, false)));
             }
-            // rustc's copy of the crate has them when rustc built it.
-            if resolver.own_crate_id(krate.into()).is_some() {
+            if own {
                 kept.extend(&listed.kept);
             }
             every_static.extend(&listed.statics);
@@ -4092,7 +4149,8 @@ impl std::error::Error for RustcLinkedLost {}
 /// is spliced into the executable at `splice`, which `--binary` names, when that is known from
 /// its last link; anything else, and whatever the splice declines, runs the link command, whose
 /// result is then known. `RA_JIT_SPLICE=0` has every edit linked in full. A patch of what rustc
-/// linked (`over_rustc`) is spliced or fails with [`RustcLinkedLost`].
+/// linked (`over_rustc`) is spliced or fails with [`RustcLinkedLost`]. With `packs` the object
+/// is kept packed after the link ([`whole`]).
 fn link(
     cmd: Option<&str>,
     splice: Option<&Path>,
@@ -4101,6 +4159,7 @@ fn link(
     patched: bool,
     over_rustc: bool,
     defer: bool,
+    packs: bool,
 ) -> anyhow::Result<()> {
     let rustcs = splice.is_some_and(|it| lock(&RUSTC_LINKED).contains(it));
     if let Some(binary) = splice.filter(|_| rustcs && !over_rustc) {
@@ -4229,6 +4288,7 @@ fn link(
             return Err(RustcLinkedLost(declined).into());
         }
     }
+    let reading = whole::read(object)?;
     run_link(cmd, start, &declined)?;
     if let Some(binary) = splice
         && let Some(pad) = headerpad_short(binary)
@@ -4237,11 +4297,29 @@ fn link(
         let again = format!("; again with -Wl,-headerpad,{pad:#x}, for the splices to fit");
         run_link(cmd, Instant::now(), &again)?;
     }
+    drop(reading);
     if let (Some(binary), Some(patch)) = (splice, patch) {
         let linked = Executable::Linked(Linked::read(binary.to_owned(), patch, object));
         lock(&LINKED).insert(binary.to_owned(), linked);
     }
+    if packs {
+        let start = Instant::now();
+        match whole::pack(object) {
+            Ok(true) => eprintln!("link: the whole object packed in {:.1?}", start.elapsed()),
+            Ok(false) => {}
+            Err(e) => eprintln!("link: the whole object is kept as it is: {e}"),
+        }
+    }
     Ok(())
+}
+
+/// Whether the object with all of the program is kept packed between links ([`whole`]): a
+/// daemon's, whose executable has the debug information, and that nothing links but it.
+fn packs_whole(args: &Args) -> bool {
+    args.socket.is_some()
+        && args.isolate.is_none()
+        && args.exe.is_none()
+        && args.debug.kept == plan::Kept::Linked
 }
 
 /// Runs the link command `cmd` and says how long it took since `start` and how it ended, with
@@ -6981,6 +7059,7 @@ fn run_holding(
                 false,
                 false,
                 false,
+                packs_whole(&args),
             )?;
             if let Some(exe) = &args.exe {
                 let workspace = checkouts.loaded.workspaces().first();
@@ -8117,6 +8196,7 @@ fn run_holding(
             let over = viewed.get(base).unwrap_or(base);
             let from = Settled::of(&files, &db, base, over, patch, link_cmd.clone());
             let (as_built, object) = (as_built.clone(), out.clone());
+            let packs = packs_whole(&programs[at].args);
             let read_as = (over != base).then(|| (over.clone(), unlinked.clone()));
             let linked = std::thread::spawn(move || {
                 let failed = link(
@@ -8127,6 +8207,7 @@ fn run_holding(
                     patched,
                     over_rustc,
                     defer,
+                    packs,
                 )
                 .err();
                 if failed.is_none() {
@@ -8495,7 +8576,9 @@ impl Program {
         // A patch is for the object with all of the program, which this build may be the
         // first to be asked for at this place.
         if let Some(whole) = whole.as_ref().filter(|it| **it != args.out) {
+            let _reading = whole::read(whole)?;
             if !same_file::is_same_file(whole, &args.out).unwrap_or(false) {
+                let _writing = whole::writing(&args.out);
                 _ = std::fs::remove_file(&args.out);
                 if std::fs::hard_link(whole, &args.out).is_err() {
                     std::fs::copy(whole, &args.out)?;
@@ -8641,7 +8724,9 @@ impl Program {
             let cmd = args.link_cmd.as_deref().filter(|_| failed.is_none() && link_it);
             let over_rustc = known.stats.over_rustc;
             begin_link();
-            let unlinked = link(cmd, splice, patch, &args.out, patched, over_rustc, defer).err();
+            let packs = packs_whole(args);
+            let unlinked =
+                link(cmd, splice, patch, &args.out, patched, over_rustc, defer, packs).err();
             if let Some(lost) = unlinked.as_ref().filter(|it| it.is::<RustcLinkedLost>()) {
                 eprintln!("{lost}: built in full");
                 known.forget_rustc();

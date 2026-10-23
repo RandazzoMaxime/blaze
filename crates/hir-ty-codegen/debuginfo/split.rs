@@ -340,7 +340,7 @@ impl Split {
             (SectionId::DebugRanges, self.ranges),
             (SectionId::DebugAddr, self.addr),
         ];
-        let linked = linked.into_iter().map(|(id, written)| Section { id, written });
+        let linked = linked.into_iter().map(|(id, written)| Section { id, group: None, written });
         (linked.collect(), self.files)
     }
 }

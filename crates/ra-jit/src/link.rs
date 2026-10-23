@@ -15,6 +15,8 @@ use ide_db::RootDatabase;
 use ide_db::base_db::{self, CrateOrigin, LangCrateOrigin};
 use rustc_hash::FxHashSet;
 
+pub(crate) mod split;
+
 /// Links `objects` into the executable `exe`, with the native libraries of the crates `program`
 /// links. How long `cc` took.
 pub(crate) fn executable(
@@ -59,7 +61,15 @@ impl Line {
     /// Links `objects` into the executable `exe`. How long `cc` took.
     pub(crate) fn link(&self, objects: &[&Path], exe: &Path) -> anyhow::Result<Duration> {
         let mut cmd = Command::new("cc");
-        cmd.args(&self.before).args(objects).args(&self.after).arg("-o").arg(exe);
+        cmd.args(&self.before);
+        for &object in objects {
+            if split::is_archive(&leading_bytes(object)?) {
+                cmd.arg("-Wl,--whole-archive").arg(object).arg("-Wl,--no-whole-archive");
+            } else {
+                cmd.arg(object);
+            }
+        }
+        cmd.args(&self.after).arg("-o").arg(exe);
         let start = Instant::now();
         let ran = cmd.output().with_context(|| format!("running {cmd:?}"))?;
         if !ran.status.success() {
@@ -72,6 +82,19 @@ impl Line {
             );
         }
         Ok(start.elapsed())
+    }
+}
+
+/// The first bytes of the file at `path`, which tell an archive from an object.
+fn leading_bytes(path: &Path) -> anyhow::Result<[u8; 8]> {
+    use std::io::Read;
+    let mut bytes = [0; 8];
+    let mut file =
+        std::fs::File::open(path).with_context(|| format!("opening {}", path.display()))?;
+    match file.read_exact(&mut bytes) {
+        Ok(()) => Ok(bytes),
+        Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => Ok([0; 8]),
+        Err(e) => Err(e).with_context(|| format!("reading {}", path.display())),
     }
 }
 

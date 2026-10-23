@@ -5,7 +5,8 @@ reflinked files), Cranelift, `harness/bench.py` with `--keep`, rustup's 1.99.0. 
 **read** (measured, or read in the source), **reported** (someone says so) or **unverified** (our
 inference). The first pass (the store, #131 and #136) is at the end; the second pass, on
 `origin/main` at 1c4cbb9 against the branch that loads build scripts from cargo's messages and
-sends packs compressed once, is first.
+sends packs compressed once (#153), then main at 04bdd5b against the one that keeps `ra-jit.o`
+packed, is first.
 
 ## Short version
 
@@ -17,9 +18,12 @@ sends packs compressed once, is first.
   bevy, where every block is shared with cargo's rlibs or the daemon's program, and 53-538 MB
   on the others, where the daemon linked a program of its own (**read**, FIEMAP). On bevy they
   cost 6.2 GB only where nothing is reflinked (ext4) (**read**, `du`).
-- After F/G, projected on XFS: ripgrep 480 MB against cargo's 407, helix 4,586 against 3,713,
-  nushell 5,638 against 5,343, bevy 15,771 against 17,550. What is left over cargo's is
-  `ra-jit.o` (35-571 MB) and the daemon's program being larger than rustc's.
+- `ra-jit.o`, the whole program as the daemon compiled it, is kept zstd-packed between the
+  links that read it: ripgrep 532 → 503 MB, helix 5,022 → 4,534, nushell 6,181 → 5,774
+  (**read**).
+- After F/G, projected on XFS: ripgrep 450 MB against cargo's 407, helix 4,110 against 3,713,
+  nushell 5,236 against 5,343, bevy 15,771 against 17,550. What is left over cargo's is the
+  daemon's program being larger than rustc's (helix 748 MB against 424).
 - rust-analyzer built every build script and proc macro again in `target/rust-analyzer`
   (471 MB on bevy). The daemon now loads them from what cargo said of its build, and builds
   none: bevy 16,241 → 15,771 MB, its warm-up 30.2 → 20.2 s (**read**).
@@ -45,7 +49,7 @@ assumes F/G changes neither `deps` nor `incremental`).
 | `ra-jit/<build>/programs/*/cargo` | rustc's program, kept for the first edits' splices (F/G) | none | 0 (shared with the daemon's) | 2,016 | 0 | 0 |
 | `ra-jit/<build>/scripts` | what cargo said of its build scripts and proc macros | none | 0.03 | 0.03 | 0.03 | 0.03 |
 | `target/rust-analyzer` | rust-analyzer's own build scripts and proc macros (gone) | none | 0 (471 on main) | 0 | 0 | 0 |
-| `ra-jit/<build>/programs/*/ra-jit.o` | the program as ra-jit compiled it, only after a full link | none | 0 | 0 | 0 | 0 |
+| `ra-jit/<build>/programs/*/ra-jit.o` | the program as ra-jit compiled it, when the daemon links its own (none on bevy) | none | 0 | 0 | 0 | 0 |
 | `deps/*.rmeta`, `*.so`, `build`, `.fingerprint` | cargo's, the same | 1,177 | 1,176 | 1,058 | 1,176 | 1,058 |
 | **total** | | **17,550** | **15,771** | **23,577** | **15,771** | **17,345** |
 
@@ -54,22 +58,29 @@ reflinked F/G brings it from 23.6 GB to 17.3 GB, just below cargo, and the progr
 copy of its debug sections (1.55 GB there, below) is what is left over cargo's.
 
 All four, MB, XFS (`bench.py`'s `disk_mb` and the breakdowns of the kept targets, **read**).
-"F/G frees" is what removing `.ra-jit-units` and rustc's program kept would free; the last
-two columns are what is left over cargo's after F/G and where it is.
+"main" is 1c4cbb9, before this pass; "scripts" is #153 (build scripts from cargo's messages);
+"packed" is `ra-jit.o` kept packed (below), measured against main at 04bdd5b on the same
+host and cores (main there: ripgrep 532, helix 5,022, nushell 6,181). "F/G frees" is what
+removing `.ra-jit-units` and rustc's program kept would free, and "after F/G" what is left
+of "packed" then.
 
-| project | main | branch | cargo | F/G frees | after F/G | `ra-jit.o` | the daemon's program against cargo's |
-|---|---:|---:|---:|---:|---:|---:|---:|
-| ripgrep | 533 | 533 | 407 | 53 | 480 | 35 | 83 against 53 |
-| helix | 5,022 | 5,010 | 3,713 | 424 | 4,586 | 571 | 748 against 424 |
-| nushell | 6,175 | 6,176 | 5,343 | 538 | 5,638 | 474 | 817 against 538 |
-| bevy | 16,241 | 15,771 | 17,550 | 0 | 15,771 | none | 2,197 against 2,016 |
+| project | main | scripts | packed | cargo | F/G frees | after F/G | `ra-jit.o` | the daemon's program against cargo's |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| ripgrep | 533 | 533 | 503 | 407 | 53 | 450 | 35 → 6 | 83 against 53 |
+| helix | 5,022 | 5,010 | 4,534 | 3,713 | 424 | 4,110 | 572 → 93 | 748 against 424 |
+| nushell | 6,175 | 6,176 | 5,774 | 5,343 | 538 | 5,236 | 469 → 75 | 817 against 538 |
+| bevy | 16,241 | 15,771 | 15,771 | 17,550 | 0 | 15,771 | none | 2,197 against 2,016 |
+
+bevy's "packed" is not measured: it has no `ra-jit.o` to pack, its first edits being spliced
+into rustc's program. After F/G it will have one, about 2.4 GB as the first pass saw it, a
+sixth of that packed, and its own program in place of rustc's (**unverified**).
 
 On ripgrep, helix and nushell the daemon's spare worker loads the workspace while cargo builds,
 from cargo's messages as they come, so main had no `target/rust-analyzer` there either; bevy's
 worker loaded after the build, which built them again. After F/G what is left over cargo's
-is `ra-jit.o` and the program the daemon linked being larger than rustc's (its code and
-debug information, Cranelift's), against an `incremental` smaller than cargo's: helix 873 MB
-over, nushell 295, ripgrep 73; bevy 1,779 under.
+is the program the daemon linked being larger than rustc's (its code and debug information,
+Cranelift's) and the packed `ra-jit.o`, against an `incremental` smaller than cargo's: helix
+397 MB over, ripgrep 43; nushell 107 under, bevy 1,779 under.
 
 ## The program's second copy of its debug sections
 
@@ -81,11 +92,14 @@ over, nushell 295, ripgrep 73; bevy 1,779 under.
   (`self.undo`): the linker's copy is the source of the next copy, not of the undo.
 - What it costs: on XFS the copies are `copy_file_range` reflinks of the linker's blocks,
   181 MB on bevy; with no reflinks it is the sections again, 1,553 MB (**read**).
-- Not changed here. Dropping it means sourcing each copy from the last one and punching the
-  linker's range once the first splice can no longer be undone (at the second splice), which
-  also changes what a copy the code grew into is copied from. It is worth 1.5 GB only where
-  nothing is reflinked, and nothing ra-jit is benched on is (**unverified**, the design; the
-  cost is **read**).
+- Not changed here. A copy a section that outgrew its room moves is written over the copies
+  behind it, and today that is undone by copying from the linker's offsets again. Without them
+  the undo would have to journal whole copies, unless a section only ever moves to space past
+  the end of the file: the headers pointed at the copies when they are first laid out
+  (`Described::laid_out`), the linker's ranges punched then, and a copy that moved punched
+  once the splice that moved it can no longer be undone, at the next splice. That changes
+  the order a splice writes in (`splice.rs`) and is worth 1.5 GB on bevy only where nothing
+  is reflinked; on XFS 181 MB (**unverified**, the design; the cost is **read**).
 
 ## `ra-jit.o`
 
@@ -98,10 +112,17 @@ over, nushell 295, ripgrep 73; bevy 1,779 under.
 - helix's body edit links in full: "no patch: a closure in what rustc linked is another now",
   a 151k-function compile and 40 s against cargo's 2.3 s (**read**, its bench log), on main
   and on the branch.
-- `zstd -1 -T16` makes helix's 573 MB 94 MB in 91 ms (6.1x) (**read**). Not changed here:
-  the patch's layout and the full link read it whole, as a file, so storing it compressed (or
-  in the store) means inflating it to a file for each, or laying patches out from the
-  executable. It is the largest piece left over cargo's after F/G (above).
+- Only a link reads it on Linux: the splice of an ELF executable reads the executable and
+  the patch, not the object (`splice.rs` `Baseline::parse`), and the debugger reads the
+  executable. So the daemon keeps it zstd-packed beside where it was, `ra-jit.o.zst`, from the
+  end of each link to the next that reads it, which inflates it there first (`whole.rs`).
+  Not on macOS, where a debugger reads the object, nor with `split-debuginfo`, nor for the
+  harness's batch builds, which read the object.
+- Not in the global store: no other checkout or daemon has the same bytes, and the store's
+  collection could drop it while the daemon still links with it (**unverified**).
+- Packing takes 12-126 ms after a link, 16 threads at level 1 (**read**, the daemon logs);
+  inflating happens only for a link of an object a patch was spliced over, which a full build
+  does not need (it writes a new one).
 
 ## Compressed debug information
 
@@ -143,7 +164,6 @@ nixpkgs' binutils 2.46 `objcopy` nor LLVM 20's `llvm-objcopy` writes zstd (**rea
 
 ## Left
 
-- `ra-jit.o` compressed or in the store: 6x, and the largest piece left after F/G.
 - The daemon's program larger than rustc's: helix 748 MB against 424.
 - helix's closure fallback, which links in full.
 - The second copy of the debug sections where nothing is reflinked (above).

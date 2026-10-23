@@ -376,18 +376,22 @@ impl DebugContext {
     /// DWARF leaves the variables of the functions out unless `variables` asks for them, and
     /// on ELF keeps its entries apart from what is linked when `apart` names the file a
     /// debugger reads them from; Mach-O links none of it, and CodeView has neither yet.
+    /// With `grouped`, each unit linked on ELF has sections of its own (see
+    /// [`Dwarf::sections`]).
     pub(super) fn new(
         isa: &dyn TargetIsa,
         directory: &str,
         variables: bool,
         apart: Option<String>,
+        grouped: bool,
     ) -> Option<Self> {
         if super::Target::current().is_wasm() {
             return None;
         }
         match isa.triple().binary_format {
             target_lexicon::BinaryFormat::Elf => {
-                let dwarf = Dwarf::new(isa, directory, variables, apart);
+                let mut dwarf = Dwarf::new(isa, directory, variables, apart);
+                dwarf.grouped = grouped;
                 Some(DebugContext::Dwarf(Box::new(dwarf)))
             }
             target_lexicon::BinaryFormat::Macho => {
@@ -503,6 +507,8 @@ pub(super) struct Dwarf {
     namespaces: FxHashMap<String, UnitEntryId>,
     /// Whether the variables of the functions are told of, and not their lines alone.
     variables: bool,
+    /// Whether each unit is written in sections of its own.
+    grouped: bool,
 }
 
 /// What tells one type of the unit from another: every function with a variable of the
@@ -543,6 +549,7 @@ impl Dwarf {
             sets: FxHashMap::default(),
             namespaces: FxHashMap::default(),
             variables,
+            grouped: false,
         };
         context.begin_unit();
         context
@@ -1067,23 +1074,46 @@ impl Dwarf {
 
     /// The sections of the units, none of which is kept apart: none when no function is
     /// described.
+    ///
+    /// Grouped, each unit has its own sections, and only the strings are shared: what a
+    /// unit refers to is then its functions and the strings, and an object can be cut into
+    /// several with each unit beside its functions (`ra-jit`'s `link/split.rs`), which the
+    /// linker reads on threads of their own.
     fn sections(mut self) -> Result<Vec<Section>, String> {
         self.end_unit();
         let mut sections = Vec::new();
         if self.full.is_empty() {
             return Ok(sections);
         }
-        let mut dwarf = gimli::write::Dwarf::new();
-        (dwarf.strings, dwarf.line_strings) = (self.dwarf.strings, self.dwarf.line_strings);
-        for unit in self.full {
-            dwarf.units.add(unit);
+        let mut written = |group, unwritten: &Sections<SectionWriter>| {
+            unwritten.for_each(|id, section: &SectionWriter| {
+                sections.push(Section { id, group, written: section.clone() });
+                Ok::<_, String>(())
+            })
+        };
+        if !self.grouped {
+            let mut dwarf = gimli::write::Dwarf::new();
+            (dwarf.strings, dwarf.line_strings) = (self.dwarf.strings, self.dwarf.line_strings);
+            for unit in self.full {
+                dwarf.units.add(unit);
+            }
+            let mut out = Sections::new(SectionWriter::default());
+            dwarf.write(&mut out).map_err(|e| e.to_string())?;
+            written(None, &out)?;
+            return Ok(sections);
         }
-        let mut written = Sections::new(SectionWriter::default());
-        dwarf.write(&mut written).map_err(|e| e.to_string())?;
-        written.for_each(|id, section: &SectionWriter| {
-            sections.push(Section { id, written: section.clone() });
-            Ok::<_, String>(())
-        })?;
+        let (mut strings, mut line_strings) = (self.dwarf.strings, self.dwarf.line_strings);
+        for (group, unit) in self.full.into_iter().enumerate() {
+            let mut units = gimli::write::UnitTable::default();
+            units.add(unit);
+            let mut out = Sections::new(SectionWriter::default());
+            units.write(&mut out, &mut line_strings, &mut strings).map_err(|e| e.to_string())?;
+            written(Some(group), &out)?;
+        }
+        let mut out = Sections::new(SectionWriter::default());
+        line_strings.write(&mut out.debug_line_str).map_err(|e| e.to_string())?;
+        strings.write(&mut out.debug_str).map_err(|e| e.to_string())?;
+        written(None, &out)?;
         Ok(sections)
     }
 
@@ -1111,6 +1141,8 @@ impl Dwarf {
 /// One section of what a debugger reads that is linked into the program.
 struct Section {
     id: SectionId,
+    /// The unit it is of, when each has sections of its own; `None` for those of every unit.
+    group: Option<usize>,
     written: SectionWriter,
 }
 
@@ -1129,15 +1161,18 @@ fn place(product: &mut ObjectProduct, sections: Vec<Section>) -> Result<(), Stri
     let macho = product.object.format() == BinaryFormat::MachO;
     let mut placed = FxHashMap::default();
     let mut linked = Vec::new();
-    // A section with nothing in it is still there when another says where in it to read.
-    let read: Vec<SectionId> = (sections.iter().flat_map(|it| &it.written.relocs))
-        .filter_map(|it| match it.target {
-            Target::Section(section) => Some(section),
+    // A section with nothing in it is still there when another says where in it to read. A
+    // unit's own sections are read by that unit, and the shared ones by every unit.
+    let read: Vec<(Option<usize>, SectionId)> = (sections.iter())
+        .flat_map(|it| it.written.relocs.iter().map(move |reloc| (it.group, reloc)))
+        .filter_map(|(group, it)| match it.target {
+            Target::Section(section) => Some((group, section)),
             Target::Function(_) => None,
         })
         .collect();
-    for Section { id, written } in sections {
-        if written.bytes.slice().is_empty() && !read.contains(&id) {
+    for Section { id, group, written } in sections {
+        let is_read = read.iter().any(|&(by, it)| it == id && (by == group || group.is_none()));
+        if written.bytes.slice().is_empty() && !is_read {
             continue;
         }
         let kind = match id {
@@ -1152,15 +1187,16 @@ fn place(product: &mut ObjectProduct, sections: Vec<Section>) -> Result<(), Stri
         };
         let at = product.object.add_section(segment, name, kind);
         product.object.section_mut(at).set_data(written.bytes.slice().to_vec(), 1);
-        placed.insert(id, at);
-        linked.push((id, at, written.relocs));
+        placed.insert((group, id), at);
+        linked.push((id, group, at, written.relocs));
     }
-    for (id, at, relocs) in linked {
+    for (id, group, at, relocs) in linked {
         for reloc in &relocs {
             let (symbol, addend) = match reloc.target {
                 Target::Function(func) => function_place(product, func),
                 Target::Section(section) => {
-                    let Some(&section) = placed.get(&section) else {
+                    let found = placed.get(&(group, section)).or(placed.get(&(None, section)));
+                    let Some(&section) = found else {
                         return Err(format!("{} points to a section left out", id.name()));
                     };
                     if macho {
