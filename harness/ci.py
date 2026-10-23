@@ -59,6 +59,7 @@ HARNESSES = [
     # The assembler of a build of ra-jit without LLVM, which is the release's.
     ("core", ["asmedits.py"], {"RA_JIT_ASSEMBLER": "cc"}, on("linux", "macos", backend="cranelift"), 1),
     ("core", ["includes.py"], {}, EVERYWHERE, 1),
+    ("core", ["latelisted.py"], {}, on("linux", "macos"), 1),
     ("core", ["rustsrc.py"], {}, EVERYWHERE, 1),
     # Each scenario runs rustc and rustdoc no more often than norustc/baseline.json says.
     ("core", ["norustc.py"], {}, on("linux", "macos"), 2),
