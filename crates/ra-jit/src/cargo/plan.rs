@@ -184,9 +184,9 @@ impl Plan {
         plan.symbol_files = link.rustc_files();
         plan.rustc_binary = link.output().filter(|_| patched_as_built).map(PathBuf::from);
         std::fs::create_dir_all(dir)?;
-        match harness_alone(unit).filter(|_| unit.is_test()) {
-            Some(why) => std::fs::write(dir.join(HARNESS_ALONE), why)?,
-            None => _ = std::fs::remove_file(dir.join(HARNESS_ALONE)),
+        match unit.is_test() {
+            true => std::fs::write(dir.join(TESTS), harness_alone(unit).unwrap_or_default())?,
+            false => _ = std::fs::remove_file(dir.join(TESTS)),
         }
         link.give_way(&plan.copies)?;
         let apple = link.flavor == Flavor::Apple;
@@ -225,9 +225,10 @@ fn calls_by_symbol(unit: &Record) -> bool {
         && !unit.stands_in()
 }
 
-/// The file in a program's directory that says why the daemon builds it only with ra-jit's
-/// test harness, when it does: [`harness_alone`].
-pub(crate) const HARNESS_ALONE: &str = "harness-alone";
+/// The file in a program's directory that says it is a program of tests, which the daemon
+/// starts in ra-jit's test harness. It holds why the daemon builds it only with that harness,
+/// when it does: [`harness_alone`].
+pub(crate) const TESTS: &str = "tests";
 
 /// Why the tests of `unit` are only right as rustc built them under rustc's harness, if they
 /// are. rustc's harness, where it stays in a test executable, calls the tests and their
