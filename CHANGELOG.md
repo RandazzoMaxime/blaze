@@ -214,6 +214,16 @@ All notable changes to ra-jit are written here. The format follows
 
 ### Changed
 
+- Each debug type is described once, by itself, and the types made of each other are kept
+  together as one group that every set of debug types reaching them shares
+  ([#29](https://github.com/indexable-inc/ra-jit/issues/29)); the DWARF is the same. On Linux
+  x86-64 (16 cores, `memsplit.py`, one run each) the daemon after its own base and edits holds
+  7.36 GB instead of 7.63 on nushell, 5.87 instead of 6.55 on helix and 14.47 instead of
+  15.97 on bun, at most 7.9, 6.1 and 15.8 GB at an edit instead of 11.7, 9.8 and 22.9, and the
+  first edit after the base takes 0.37 s instead of 2.06 on nushell, 0.19 instead of 1.71 on
+  helix and 1.51 instead of 7.23 on bun. zed's own base, which passed 64 GB, finishes with no
+  bound of its own at 62.6 GB in 662 s; at the default bound, a quarter of memory, it is still
+  given up (#188).
 - The daemon keeps what each debug type is told as once, rather than in every set of debug
   types it is in ([#55](https://github.com/indexable-inc/ra-jit/issues/55)); the DWARF it
   writes is the same. On Linux x86-64 (16 cores, `memsplit.py`, one run each) the daemon

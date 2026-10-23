@@ -391,6 +391,27 @@ ra-jit's `described-nodes` branch, Cranelift, 16 cores, `harness/memsplit.py` wi
 - On zed, what `described` held went from 31 GB of a 47.8 GB sample to 2.4 GB for
   `told_type` (**read**, two profiles of the own base at about the same point).
 
+### Memory, main → branch
+
+main at `c93e530e47` against the branch merged onto it, one after the other on the same 16
+cores, one run each, `memsplit.py` with its default edits (bun's signature and add-a-function),
+bun in `nix develop .#bench-bun`:
+
+| | ready | after the own base (worker's most) | after its edits | most at an edit |
+|---|---|---|---|---|
+| nushell | 5.22 → 5.31 GB | 8.97 (11.46) → 7.87 (11.11) GB | 7.63 → 7.36 GB | 11.70 → 7.87 GB |
+| helix | 3.72 → 3.96 GB | 7.02 (11.39) → 6.14 (10.62) GB | 6.55 → 5.87 GB | 9.80 → 6.14 GB |
+| bun | 9.09 → 8.93 GB | 18.77 (24.18) → 15.85 (22.06) GB | 15.97 → 14.47 GB | 22.85 → 15.78 GB |
+
+(**read**.) The first edit after the own base is faster: nushell's body 2.06 → 0.37 s, helix's
+1.71 → 0.19 s, bun's signature 7.23 → 1.51 s (that main's first edit makes sets the base
+already made, which the branch finds in the groups it keeps, is **unverified**); the edits
+after it are within 0.1
+s of each other (nushell 0.28-0.36 s, helix 0.12-0.26 s, bun 0.65-1.02 s). The own base took
+19.7 → 21.5 s on nushell, 59.7 → 58.9 s on helix, 38.4 → 39.1 s on bun. Ready is 0.1-0.2 GB
+more on nushell and helix, and the cold builds the same (37.2 s on both, 35.0 and 35.5 s);
+why ready holds more was not looked at (**unverified**).
+
 ### zed
 
 - The own base finishes: 1,893,135 functions in 5 rounds, 662 s, a peak of 62.6 GB for the
