@@ -119,8 +119,8 @@ were stable names: 665,474,913 bytes for one `helix-parsec` closure, and the lar
    load, resolve, build, warm-up and each request answered (on macOS the physical footprint)
    and writes a table of every salsa ingredient (count,
    bytes of fields and of salsa's records; heap bytes only where an ingredient declares
-   `heap_size`, which no rust-analyzer query does). A build with the `heap-profile` feature
-   allocates with jemalloc, reports live bytes, and with `_RJEM_MALLOC_CONF=prof:true`
+   `heap_size`, which no rust-analyzer query does), and jemalloc's live bytes. A build with
+   the `heap-profile` feature, with `_RJEM_MALLOC_CONF=prof:true`, also
    writes a heap profile for `jeprof` (on macOS for `harness/heapfold.py`, with `heap.py` to
    give it to queries). rust-analyzer's own per-query report
    (`per_query_memory_usage` in `ide-db/src/apply_change.rs`) is commented out since its
@@ -258,6 +258,28 @@ forced `mi_collect` after each request returned 30 to 40 MB of ripgrep's worker.
 the values the daemon keeps, `described` first (#55)
 ([research/daemon-memory.md](research/daemon-memory.md#2026-10-22-the-spare-and-eviction)).
 
+**Measured (2026-10-23, #39; Linux x86-64, 16 cores).** What doubles the daemon after ready
+is its own base, not the first edit: once idle it compiles every function of the workspace,
+and keeps the memos. Of what that adds to the live heap, `described` is 82% on helix (5.6 of
+6.8 GB) and 59% on nushell (2.3 of 3.9 GB); `compiled_instance`, the MIR queries and
+`inlinable` the most of the rest. The tree holds nothing of another project's any more: the
+worker, the proc-macro server and the daemon. bun's add-a-function edit peaks at 33.8 GB
+because it writes the whole object, debug information included, for 2 functions compiled.
+What the allocator kept was the other lever: mimalloc 3 asks for transparent huge pages,
+and nushell's worker held 2.5-2.9 GB more with it than with jemalloc after the same build and
+edits. ra-jit now allocates with jemalloc on Unix (mimalloc on Windows), edits within the
+runs' spread (`bench.py`, two interleaved rounds, main → branch):
+
+| | ready | after its edits | most at an edit |
+|---|---|---|---|
+| ripgrep | 1.72 → 1.31 GB | 2.03 → 1.57 GB | 2.08 → 1.70 GB |
+| nushell | 6.16 → 5.21 GB | 10.80 → 9.52 GB | 10.86 → 10.08 GB |
+| helix | 4.13 → 3.71 GB | 12.13 → 11.07 GB | 16.07 → 14.23 GB |
+| bun (1 run) | 12.29 → 10.72 GB | 27.00 → 24.28 GB | 36.05 → 32.90 GB |
+| bevy (1 run) | BEVY_READY | BEVY_END | BEVY_PEAK |
+
+([research/daemon-memory.md](research/daemon-memory.md#2026-10-23-the-own-base-and-the-allocator)).
+
 ### Item 1: frozen dependency artifacts
 
 **Design.** One artifact per dependency crate, content-addressed by its source hash, cfg,
@@ -391,6 +413,7 @@ stops.
 | `described` copies whole type closures (item 5) | #55 | share-types (restarted 2026-10-22 as share-types-3) |
 | The spare worker's memory (item 5) | #56 | spare, merged (8e01def1cf): 1.3 GB less after edits; a warm second project's cost is #99 |
 | salsa eviction of queries with cycle handling (item 5) | #57 | spare, closed unmerged: lru saves 0.35-0.5 GB on nushell but slows the signature edit 0.42 to 0.64-2.43 s |
+| What the daemon keeps after ready, and the allocator (item 5) | #39 | glancer: jemalloc on Unix, 1.3 GB less on nushell after edits |
 | Frozen dependency artifacts (item 1) | #40 | glancer, after #38 |
 | The workspace's own state (item 2) | #41 | glancer, after #40's 1a |
 | A flat syntax tree (item 4) | #42 | flat-syntax: done, steps (a), (b) and (c) merged |

@@ -213,3 +213,88 @@ other.
   each, ending near 10.9 GB (**read**, the worker's log, 1 run).
 - Nothing of it is merged. What is left to evict is bounded by those queries' values (about
   1.2 GB on nushell, above) and costs edits; `described` (#55) is twice that and keeps edits.
+
+## 2026-10-23: the own base, and the allocator
+
+For [#39](https://github.com/indexable-inc/ra-jit/issues/39). Measured on an AWS c7i.16xlarge
+(dev-aws-7, Intel Xeon, Linux, transparent huge pages on `madvise`), each run on 16 cores of
+its own, ra-jit at `d6291bd7cb` (main) and the `mem-39` branch, Cranelift. Per process with
+`harness/memsplit.py`, per allocation with `heap.py` on jemalloc profiles, the whole tree with
+`bench.py`.
+
+### Why the daemon doubles after ready
+
+- It is not the first edit. One second after the daemon is ready with nothing asked, it builds
+  its own base: every function of the workspace compiled by ra-jit, so that later edits patch
+  its code (`build_own_base`). `bench.py`'s first edit comes after cargo's reference build, by
+  which time that is over, and the no-op before it already shows it: nushell 6.2 GB ready, 10.8
+  GB after; helix 4.0 and 16.2 GB (12.1 once the first edit is over); bun 12.3 and 24.9 GB
+  (**read**, `bench.py`, 1 run each on main).
+- What it keeps is the memos of compiling everything, `described` first (**read**, jemalloc's
+  sampled live heap, the worker of a store-warm daemon once ready against the measured one
+  after its own base):
+
+| | nushell ready | nushell own base | helix ready | helix own base |
+|---|---|---|---|---|
+| live heap | 4.1 GB | 8.0 GB | 3.2 GB | 10.0 GB |
+| `described`, value and record | 0.33 GB | 2.61 GB | 0.17 GB | 5.64 GB |
+| `compiled_instance`, value and record | | 0.54 GB | | 0.47 GB |
+| `runtime_mir_body` | 0.27 GB | 0.45 GB | 0.08 GB | 0.26 GB |
+| `mir_body` | 0.18 GB | 0.32 GB | 0.09 GB | 0.20 GB |
+| `inlinable`, value and record | | 0.27 GB | | 0.27 GB |
+| `infer`, value and record | 0.18 GB | 0.28 GB | 0.10 GB | 0.20 GB |
+
+  On helix `described` is 82% of what the own base adds; on nushell 59%. That is #55.
+- The spare is not in it any more: once the own base is built the tree is the project's
+  worker (the process started as the spare, so its command line says `--spare`), the
+  proc-macro server (85 MB) and the daemon itself (under 50 MB) (**read**, `memsplit.py`).
+  #56 took the reserve spare out; nothing of the figure is another project's.
+- bun's add-a-function edit (33.8 GB at most, 27.0 GB before it, on main) writes the whole
+  object again although it compiles 2 functions: 7.3 s writing the object, 8.4 s of threads
+  describing variables for the debugger, 5.3 s linking (**read**, the edit's steps in
+  `bench.py`'s result). The 6.8 GB above what the daemon holds is that write; the signature
+  edit before it is the same (36.0 GB at most) (**unverified**: not profiled, inferred from
+  the steps and the peak).
+
+### The allocator
+
+- ra-jit allocated with mimalloc 3.3.2 (`libmimalloc-sys` 0.1.49 builds its v3 unless told
+  `v2`). It asks for transparent huge pages (`allow_thp` is 1 by default) and purges freed
+  pages after a second (**read**, `options.c`). On a host with THP on `madvise`, nushell's
+  worker held 2.5-2.9 GB more than with jemalloc after the same build and edits
+  (**read**):
+
+| nushell, `memsplit.py`, after its edits | worker |
+|---|---|
+| mimalloc (main), two runs | 11.98, 12.37 GB |
+| mimalloc, `MIMALLOC_PURGE_DELAY=0` | 11.58 GB |
+| mimalloc, `MIMALLOC_ALLOW_THP=0` | 10.77 GB |
+| mimalloc, both | 11.00 GB |
+| jemalloc 5.3 (tikv-jemallocator 0.5.4), defaults, two runs | 9.46, 9.60 GB |
+| jemalloc, `background_thread:true,dirty_decay_ms:1000,muzzy_decay_ms:0` | 9.50 GB |
+| jemalloc, `narenas:16` | 10.76 GB |
+| jemalloc, `dirty_decay_ms:0,muzzy_decay_ms:0` | 8.98 GB |
+
+- The live heap is the same either way (about 8 GB after the own base); what differs is what
+  the allocator keeps of what the own base's build freed: the worker's high-water mark is
+  13.2-13.4 GB with jemalloc, 14.6-16.5 GB with mimalloc (**read**).
+- jemalloc on Unix, mimalloc kept for Windows (jemalloc is not built there), `bench.py`, two
+  rounds, main and the branch at once on two sets of 16 cores and swapped for the second round
+  (**read**; bun one run each, after one another on the same cores):
+
+| | ready | after the own base | after its edits | most at an edit |
+|---|---|---|---|---|
+| ripgrep | 1.72 → 1.31 GB | 2.05 → 1.68 GB | 2.03 → 1.57 GB | 2.08 → 1.70 GB |
+| nushell | 6.16 → 5.21 GB | 10.77 → 10.06 GB | 10.80 → 9.52 GB | 10.86 → 10.08 GB |
+| helix | 4.13 → 3.71 GB | 15.95 → 14.23 GB | 12.13 → 11.07 GB | 16.07 → 14.23 GB |
+| bun | 12.29 → 10.72 GB | 24.86 → 23.75 GB | 27.00 → 24.28 GB | 36.05 → 32.90 GB |
+
+  Edits within the runs' spread: nushell's six edits 0.25-0.39 s on main and 0.26-0.39 s on
+  the branch (medians of the two rounds, each edit's within 35 ms of main's, either way);
+  ripgrep's within 20 ms; helix's within 25 ms but signature's second round (0.39 s against
+  0.26-0.27); bun's, one run each, body 1.53 → 0.63 s, leaf 0.52 → 0.76 s, generic 0.80 → 0.68
+  s, the two full links 37.4 → 32.8 s and 26.4 → 26.4 s. The cold build to ready within the spread (nushell 39.5-48.0 s on main, 41.5-42.1
+  s on the branch; ripgrep 6.4-6.7 s and 6.4-7.1 s).
+- `dirty_decay_ms:0` would give back another 0.6 GB on nushell; each page a build frees is then
+  returned at once and faulted in again at the next build. Not taken: the edits it was measured
+  with were within the spread, but one run is not enough to say (**unverified**).

@@ -16,7 +16,9 @@ back them is under [docs/upstream/](../upstream/), each with a `SOURCE.md`. Sear
   allocation site, ripgrep and nushell), the spare worker's share, and what salsa 0.28.5's
   `lru` can and cannot evict (not a query with cycle handling, only at a new revision).
   2026-10-21. A spare only for a build that asks, salsa patched to evict queries with cycle
-  handling and what that costs edits, and a forced `mi_collect`. 2026-10-22.
+  handling and what that costs edits, and a forced `mi_collect`. 2026-10-22. What the own
+  base adds after ready (`described` first), the daemon's tree process by process, and
+  mimalloc against jemalloc. 2026-10-23.
 - [proc-macro-cache.md](proc-macro-cache.md): rustc's `-Zcache-proc-macros` (derives only, a
   query per expansion), the earlier attempts, and what ra-jit's expansion cache keys and why
   spans are in the key. 2026-10-21.

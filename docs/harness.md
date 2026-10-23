@@ -140,7 +140,11 @@ with reasons. The daemon's log says `backend: llvm -O2 fast emit` when LLVM is i
 ### Timing
 
 `bench.py`, `editloop.py`, `edittimes.py`, `scaling.py`, `dxedits.py`, `linkbench.py`,
-`shapes.py`, `heap.py`, `heapfold.py`, `fnincr.py`, `realbench.py`, `spare.py` and `live_latency.py` measure and do not gate.
+`shapes.py`, `heap.py`, `heapfold.py`, `memsplit.py`, `fnincr.py`, `realbench.py`, `spare.py` and `live_latency.py` measure and do not gate.
+`memsplit.py` says what each process of the daemon holds (the daemon, the project's worker, the
+spare) and of what kind of page, once ready, once the daemon has built its own base and after
+edits, with `--env` to try an allocator setting
+([research/daemon-memory.md](research/daemon-memory.md#2026-10-23-the-own-base-and-the-allocator)).
 `spare.py` starts a daemon with a tiny project, then builds one of `bench.py`'s projects under it
 from an empty target directory and again once cargo has built it, each until the daemon is
 ready, for builds of ra-jit given as `--variant LABEL:BIN[:VAR=VALUE...]` in interleaved
