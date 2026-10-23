@@ -60,15 +60,50 @@ pub(super) fn crc32(instruction: &str) -> String {
 /// function's `#[target_feature]` enables, for assembly of its `asm!`: rustc gives LLVM the
 /// features with the function the `asm!` is in, and this assembly is assembled apart from
 /// it. Only AArch64's assembler refuses an instruction the target lacks (`crc32w` on
-/// `aarch64-unknown-linux-gnu`); a feature with no extension of its own is left out.
+/// `aarch64-unknown-linux-gnu`). A feature it has no extension for is taken with the version
+/// of the architecture that has it (`mrs x0, dit` with `.arch armv8.4-a`), which comes first,
+/// as `.arch` sets the extensions anew.
 pub(super) fn extensions<'a>(arch: Arch, features: impl IntoIterator<Item = &'a str>) -> String {
     if arch != Arch::Aarch64 {
         return String::new();
     }
+    let features: Vec<&str> = features.into_iter().collect();
+    let versions = features.iter().filter_map(|it| aarch64_version(it));
+    // Armv9.n has what Armv8.(n + 5) has.
+    let version = versions.fold(None, |most: Option<(u8, u8)>, (major, minor)| {
+        let later = |(major, minor): (u8, u8)| if major == 9 { minor + 5 } else { minor };
+        let nine = major == 9 || most.is_some_and(|it| it.0 == 9);
+        let minor = later((major, minor)).max(most.map_or(0, later));
+        Some(if nine { (9, minor - 5) } else { (8, minor) })
+    });
     let mut names: Vec<&str> = features.into_iter().filter_map(aarch64_extension).collect();
     names.sort_unstable();
     names.dedup();
-    names.iter().map(|it| format!(".arch_extension {it}\n")).collect()
+    let version = version.map(|(major, minor)| match minor {
+        0 => format!(".arch armv{major}-a\n"),
+        _ => format!(".arch armv{major}.{minor}-a\n"),
+    });
+    version.into_iter().chain(names.iter().map(|it| format!(".arch_extension {it}\n"))).collect()
+}
+
+/// The version of AArch64, as major and minor, that has a target feature LLVM's assembler
+/// has no extension of, or that the feature is (`v8.4a`).
+fn aarch64_version(feature: &str) -> Option<(u8, u8)> {
+    Some(match feature {
+        "vh" => (8, 1),
+        "fcma" | "jsconv" => (8, 3),
+        "dit" | "lse2" | "rcpc2" => (8, 4),
+        "bti" | "flagm2" | "frintts" => (8, 5),
+        "ecv" => (8, 6),
+        "wfxt" => (8, 7),
+        _ => {
+            // `v9a` is Armv9.0.
+            let version = feature.strip_prefix('v')?.strip_suffix('a')?;
+            let (major, minor) = version.split_once('.').unwrap_or((version, "0"));
+            let major = major.parse().ok().filter(|it| matches!(it, 8 | 9))?;
+            (major, minor.parse().ok()?)
+        }
+    })
 }
 
 /// The name LLVM's AArch64 assembler gives the extension of a target feature as Rust names
@@ -920,4 +955,23 @@ fn code(object: &[u8]) -> Result<Assembled, String> {
     });
     let relocs = relocs.collect::<Result<_, &str>>()?;
     Ok(Assembled { code, relocs })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Arch, extensions};
+
+    /// constant_time_eq's `#[target_feature(enable = "dit")]` reads DIT, which LLVM's
+    /// assembler has no extension of: the architecture that has it comes before the
+    /// extensions, which `.arch` would otherwise take back.
+    #[test]
+    fn a_feature_with_no_extension_is_taken_with_its_architecture() {
+        let directives = extensions(Arch::Aarch64, ["sb", "dit", "crc", "jsconv"]);
+        assert_eq!(directives, ".arch armv8.4-a\n.arch_extension crc\n.arch_extension sb\n");
+        assert_eq!(extensions(Arch::Aarch64, ["v9.2a", "bti"]), ".arch armv9.2-a\n");
+        assert_eq!(extensions(Arch::Aarch64, ["v9a", "ecv"]), ".arch armv9.1-a\n");
+        assert_eq!(extensions(Arch::Aarch64, ["v9a", "dit"]), ".arch armv9-a\n");
+        assert_eq!(extensions(Arch::Aarch64, ["neon"]), ".arch_extension simd\n");
+        assert_eq!(extensions(Arch::X86_64, ["dit"]), "");
+    }
 }

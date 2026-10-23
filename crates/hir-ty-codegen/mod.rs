@@ -107,6 +107,8 @@ mod fragment;
 mod home;
 pub use home::body_file;
 #[cfg(feature = "llvm")]
+mod imports;
+#[cfg(feature = "llvm")]
 mod llvm;
 mod patch;
 mod places;
