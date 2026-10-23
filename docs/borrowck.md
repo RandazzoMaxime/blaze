@@ -71,7 +71,8 @@ All of these are rustc's, written from `compiler/rustc_borrowck` at the pinned n
   the borrow is of a field of a value whose type implements `Drop` and the drop is of that
   value, E0373 ("may outlive the current block") for a closure a `let` binds as a block's
   value, and E0597 rather than E0515 for what a function returns as an `impl Trait` that
-  captures no lifetime (rustc's `OpaqueType` constraint). The mutable borrows of a variable
+  captures no lifetime (rustc's `OpaqueType` constraint), even when a `move` closure in it
+  borrows a variable it took by value. The mutable borrows of a variable
   declared without `mut` are one E0596, at the declaration once there are two.
 - `'static` in what a type or signature spells (`x: &'static u32` in a struct, a parameter
   `&'static T`) is related as any other region; a copied value proves its type `Copy`
@@ -236,7 +237,9 @@ All of these are rustc's, written from `compiler/rustc_borrowck` at the pinned n
 - Where errors are: at the expression rustc points to. A borrow `format_args!` (so
   `println!`, `format!`, `write!`) makes of an argument has no syntax of its own, so its
   errors are at the argument, or for a variable the template names (`"{x}"`) at the
-  template.
+  template. An error in an expression a macro writes (`&$e`) is at the macro's definition
+  when it is in the same file, as rustc reports it there; one in what the caller wrote is at
+  the caller's.
 
 ## How it is tested
 
@@ -257,8 +260,8 @@ With no borrow checker, the 245 units rustc accepts would pass. Now:
 
 | Mode | In scope | Pass | rustc accepts, ra-jit too | rustc rejects, same errors |
 |---|---|---|---|---|
-| Polonius | 1579 | 1455 (92.1%) | 245 of 245 | 1210 of 1334 |
-| NLL | 1577 | 1451 (92.0%) | 226 of 226 | 1225 of 1351 |
+| Polonius | 1579 | 1459 (92.4%) | 245 of 245 | 1214 of 1334 |
+| NLL | 1577 | 1455 (92.3%) | 226 of 226 | 1229 of 1351 |
 
 463 units are out of scope; 344 of them need a nightly feature. CI runs the scoring on Linux
 and fails below a floor a few units under the count there.

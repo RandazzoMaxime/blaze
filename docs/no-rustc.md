@@ -227,7 +227,7 @@ Paths are under `crates/`; line numbers are of 41e7906192.
 | Where | What it does | When |
 |---|---|---|
 | `ra-jit/src/cargo/run.rs:136` | `cargo test --doc` with ra-jit as `RUSTDOC` | `cargo ra-jit test` of a library with doctests |
-| `ra-jit/src/doctest.rs:203`, `:246` `compile` | rustc links a probe program to learn the link line, and compiles or checks each example | every library's doctests |
+| `ra-jit/src/doctest.rs:203`, `:246` `compile` | rustc links a probe program to learn the link line, and compiles or checks each example | every library's doctests, except what is unchanged since the last run (L's first part) |
 | `ra-jit/src/doctest.rs:301` `leave_to_rustdoc` | hands the library to rustdoc | `-q`, a library ra-jit cannot load; until A, every package whose features `cargo build --unit-graph` rejected (below) |
 | `ra-jit/src/cargo/mod.rs:139` | `cargo ra-jit check` is `cargo check` | every check |
 | `ra-jit/src/main.rs:5084`, `:5127` `RA_JIT_WRAPS_RUSTC` | ra-jit standing in for rustc for a whole build | the harness's "alone" builds |
@@ -373,8 +373,8 @@ steps not shown ran none before and none now.
 - **The fixture of `harness/norustc.py`**, in CI on Linux x86-64, Linux AArch64 and macOS
   arm64 under both backends: the cold build 74 to 76 rustc runs before A, 18 after A, 6 now;
   edits 5 (277 to 297 on macOS, whose daemon did not listen, #106), 0 now; tests 16 to 19, 12
-  now; doctests 23, 6 now; check 7, then 8 since the fixture has one library more, 5 now. These
-  are `norustc/baseline.json`.
+  now; doctests 23, 6 after B, 3 now (L's first part, below); check 7, then 8 since the fixture
+  has one library more, 5 now. These are `norustc/baseline.json`.
 
 ## The plan
 
@@ -391,11 +391,11 @@ the counts of [How often](#how-often) lower, measured by step A's check, and non
 | [E](https://github.com/indexable-inc/ra-jit/issues/85). No function left to rustc | the refused classes; a refusal fails the build | A | large, ongoing | medium | the bun lane (bun's classes, #34, #35) and the glancer lane (kept rejections, #37) |
 | [F](https://github.com/indexable-inc/ra-jit/issues/86). The standard library compiled by ra-jit | the sysroot's rlibs | C, E | large | high | the cold-start lane |
 | [G](https://github.com/indexable-inc/ra-jit/issues/87). Every crate compiled and linked by ra-jit | rustc's rlibs, objects, symbols and link line, "no rustc symbol" | E, F | large | high | the cold-start lane |
-| [H](https://github.com/indexable-inc/ra-jit/issues/88). ra-jit writes the test harness | the fallback when a test is added | G | medium | medium | none yet |
+| [H](https://github.com/indexable-inc/ra-jit/issues/88). ra-jit writes the test harness | the fallback when a test is added | G | medium | medium | the `no-rustc-hl` lane |
 | [I](https://github.com/indexable-inc/ra-jit/issues/89). Build scripts compiled and run by ra-jit | build scripts and their probes by rustc | B, G | medium | medium | none yet |
 | [J](https://github.com/indexable-inc/ra-jit/issues/90). Proc macros compiled and loaded by ra-jit | proc macros by rustc, the toolchain's proc-macro server | F, G | large | high | none yet |
 | [K](https://github.com/indexable-inc/ra-jit/issues/91). The cold build is ra-jit's | cargo's first build, the rustc base (#11) | G, I, J | medium | high | none yet |
-| [L](https://github.com/indexable-inc/ra-jit/issues/92). Doctests by the daemon (#28) | probe and examples by rustc, rustdoc | B, G, D | medium | medium | none yet |
+| [L](https://github.com/indexable-inc/ra-jit/issues/92). Doctests by the daemon (#28) | probe and examples by rustc, rustdoc | B, G, D | medium | medium | the `no-rustc-hl` lane: first part done |
 | [M](https://github.com/indexable-inc/ra-jit/issues/93). Remove the wrapper and the fallback | `ra-jit-rustc`, `ra-jit-rustc-first`, stand-ins, dep-info, settle, `by_cargo`, `only_cargo` | all | medium | low | none yet |
 
 A, B and C landed on 2026-10-22. D and E run alongside everything: they are
@@ -605,6 +605,18 @@ build`, no rustc base. See [the cold start](#the-cold-start-without-rustc).
 **L. Doctests by the daemon.** ([#92](https://github.com/indexable-inc/ra-jit/issues/92)) [#28](https://github.com/indexable-inc/ra-jit/issues/28): the
 examples are compiled by the daemon that has the workspace loaded, linked with G's line; no probe
 program, no process per library, no rustdoc. `compile_fail` examples need D.
+
+Done first (the `no-rustc-hl` lane, 2026-10-23): what rustc compiled of an example, and the
+probe, stay in `<target>/<profile>/ra-jit-doctest`, each under a key of everything it was
+given (the arguments, the source, the edition, the variables set for it, and the libraries
+named with `--extern` by length and time written), and are taken again while every file and
+variable its dep-info names is as it was. Cargo builds a library again when one it is built
+against changes, so the `--extern` libraries stand for every library the program read. A
+library's doctests run a second time with nothing changed run no rustc; after an edit to the
+library, every example of it is compiled again. The fixture's doctests went from 6 to 3.
+`harness/doctests.py` runs ra-jit twice on each crate and holds both runs to rustdoc's, and
+the flag check's edit changes a constant an example reads, which a stale program would show.
+What is left of L is the rest of the paragraph above.
 
 **M. Remove the wrapper and the fallback.** ([#93](https://github.com/indexable-inc/ra-jit/issues/93)) Plain cargo after `ra-jit enable` names ra-jit as
 `build.rustc`; ra-jit answers cargo's questions (B) and writes for each unit the files cargo
