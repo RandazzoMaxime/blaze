@@ -205,10 +205,13 @@ impl FunctionUnwind {
     }
 }
 
+/// The symbol of the function the unwinder asks about a frame with landing pads.
+pub(super) const PERSONALITY: &str = "rust_eh_personality";
+
 /// The function the unwinder asks about a frame with landing pads: the program's own of that
 /// name when it defines one, the runtime's otherwise.
 fn personality(module: &mut dyn Module) -> Result<FuncId, String> {
-    const NAME: &str = "rust_eh_personality";
+    const NAME: &str = PERSONALITY;
     if let Some(cranelift_module::FuncOrDataId::Func(own)) = module.declarations().get_name(NAME) {
         return Ok(own);
     }

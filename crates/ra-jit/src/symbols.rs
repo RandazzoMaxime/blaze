@@ -635,6 +635,11 @@ impl SymbolTable {
 
     /// Whether the crate named `name` whose source starts at `root` is one of the link. A
     /// bench may be named as the library, start where a test does, and be another program.
+    /// Whether the table has no symbol of rustc's: the build has nothing rustc built.
+    pub(crate) fn is_empty(&self) -> bool {
+        self.names.is_empty()
+    }
+
     pub(crate) fn links(&self, name: &str, root: &Path) -> bool {
         self.linked.contains(&(name.to_owned(), self.real(root)))
     }
