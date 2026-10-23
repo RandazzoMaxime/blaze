@@ -185,6 +185,12 @@ All of these are rustc's, written from `compiler/rustc_borrowck` at the pinned n
   so the error is the creator's, as in rustc. So is a `T: 'a` the closure cannot prove: the
   creator proves `T` outlives each of its regions that outlive `'a`, and an error is
   reported where the closure needed it.
+- `const { .. }` blocks: MIR lowering makes one a constant with a body of its own, checked
+  with its function as rustc checks an inline const, as a closure is: the regions of its type
+  and its function's lifetimes are its creator's, and what it needs of them is proven where
+  the function evaluates it (`const { InvariantRef::<'a>::NEW }` compared with a borrow of a
+  local needs the local to outlive `'a`). What its value borrows becomes part of the value,
+  as for a `const` item, but no call in it is promoted.
 - `async` blocks and `async fn` bodies: checked as rustc checks a coroutine, as a closure
   of the body that makes it, for moves, initialization and loans across `.await`. Every
   region of the future's type is its creator's, and an `async fn` relates the future's
@@ -233,8 +239,8 @@ With no borrow checker, the 245 units rustc accepts would pass. Now:
 
 | Mode | In scope | Pass | rustc accepts, ra-jit too | rustc rejects, same errors |
 |---|---|---|---|---|
-| Polonius | 1579 | 1430 (90.6%) | 245 of 245 | 1185 of 1334 |
-| NLL | 1577 | 1426 (90.4%) | 226 of 226 | 1200 of 1351 |
+| Polonius | 1579 | 1433 (90.8%) | 245 of 245 | 1188 of 1334 |
+| NLL | 1577 | 1429 (90.6%) | 226 of 226 | 1203 of 1351 |
 
 463 units are out of scope; 344 of them need a nightly feature. CI runs the scoring on Linux
 and fails below a floor a few units under the count there.
@@ -248,8 +254,8 @@ just, axum, nushell, delta, eza, tokei and starship it finds nothing, nor on the
 
 Every failing unit is one where rustc gives an error ra-jit does not, or gives it on another
 line or with another code. By what is wrong, most first: 14 "lifetime may not live long
-enough" and 12 E0597 not reported, 9 "lifetime may not live long enough" on another line,
-9 E0716 not reported, 9 with only an error rustc does not give, 8 E0700, 7 each of E0507 and E0521,
+enough" and 11 E0597 not reported, 9 "lifetime may not live long enough" on another line,
+9 with only an error rustc does not give, 8 each of E0716 and E0700, 7 each of E0507 and E0521,
 6 each of E0510 and E0310, and 5 each of E0309, E0311, E0382 and higher-ranked errors not
 reported, then a long tail. The causes, grouped:
 
@@ -274,9 +280,6 @@ reported, then a long tail. The causes, grouped:
   cast. A bound on a closure's type is not proven through the solver: rust-analyzer gives a
   closure one signature, `fn(&'1 T)` for one `'1`, where rustc's is `for<'a> fn(&'a T)`, so
   proving it would tie every call's borrow to one region.
-- **`const { .. }` blocks**: MIR lowering makes a function's inline const a constant with
-  a body of its own, which the borrow checker does not check yet; rustc checks it with the
-  function, as it does a closure, so an E0597, E0716 or E0381 in one is missed.
 - **Differences in rust-analyzer's MIR lowering** (below).
 
 ## What depends on rust-analyzer's MIR lowering
