@@ -19,6 +19,13 @@
 //! it when an argument can change behind a shared reference, as a `Cell` or an atomic can, or
 //! holds a raw pointer of a type of the workspace. The standard library's I/O, time,
 //! randomness and environment are all foreign calls or statics that change, so they are seen.
+//!
+//! Two of those are let through where what they change is nothing the result can see. The
+//! counts of an `Rc` or an `Arc` in an argument change behind a shared reference, so what reads
+//! them is refused rather than the argument. The seed std's `HashMap` and `HashSet` make
+//! orders their entries alone, so a seed made for one is pure and what gives the entries in
+//! that order, or the seed, is not; `ra_jit` writes their entries sorted in a key for the
+//! same reason.
 
 use std::hash::{Hash, Hasher};
 
@@ -28,7 +35,9 @@ use cranelift_module::ModuleRelocTarget;
 use hir_def::{
     AdtId, DefWithBodyId, FunctionId, HasModule, ItemContainerId, Lookup, StaticId, VariantId,
     attrs::AttrFlags,
-    signatures::{FunctionSignature, StaticFlags, StaticSignature, TraitSignature},
+    signatures::{
+        FunctionSignature, StaticFlags, StaticSignature, StructSignature, TraitSignature,
+    },
 };
 use rustc_hash::{FxHashMap, FxHashSet};
 use rustc_type_ir::inherent::{GenericArgs as _, IntoKind};
@@ -133,7 +142,8 @@ pub(super) fn cache_code(
     closure: Instance,
     env: StoredParamEnvAndCrate,
 ) -> std::result::Result<u128, String> {
-    let mut walk = Walk::new(db);
+    let (trouble, counted) = arguments_trouble(db, &closure, &env);
+    let mut walk = Walk::new(db, counted);
     let root = walk.reach(Node::Instance(closure.clone(), env.clone()));
     let mut next = 0;
     while let Some(node) = walk.nodes.get(next).map(|it| it.node.clone()) {
@@ -144,7 +154,7 @@ pub(super) fn cache_code(
     if let Some(why) = walk.impure(root) {
         return Err(format!("`{name}` is not cached: {why}"));
     }
-    if let Some(why) = arguments_trouble(db, &closure, &env) {
+    if let Some(why) = trouble {
         return Err(format!("`{name}` is not cached: {why}"));
     }
     let mut hasher = rustc_stable_hash::StableSipHasher128::new();
@@ -241,16 +251,20 @@ struct Walk<'db> {
     index: FxHashMap<Node, u32>,
     /// What each node is when hashed, in the order the nodes were found.
     segments: Vec<u128>,
+    /// An argument holds a reference count, which what reads one gives and the key does not
+    /// tell: two arguments can share a value or not.
+    counted: bool,
 }
 
 impl<'db> Walk<'db> {
-    fn new(db: &'db dyn HirDatabase) -> Walk<'db> {
+    fn new(db: &'db dyn HirDatabase, counted: bool) -> Walk<'db> {
         Walk {
             db,
             homes: Homes::default(),
             nodes: Vec::new(),
             index: FxHashMap::default(),
             segments: Vec::new(),
+            counted,
         }
     }
 
@@ -307,10 +321,29 @@ impl<'db> Walk<'db> {
             // A panic: what it prints is no result.
             return (Node::Leaf(name(), None), site, false);
         }
-        if let Some(what) = gives_address(db, func, self.is_own(from)) {
+        let told = |what: &str| {
             let name = name();
             let why = format!("calls `{name}`, which {what}");
-            return (Node::Leaf(name, Some(why)), site, false);
+            (Node::Leaf(name, Some(why)), site, false)
+        };
+        if let Some(what) = gives_address(db, func, self.is_own(from)) {
+            return told(what);
+        }
+        if makes_seed(db, func) {
+            // A map's seed orders its entries alone, and what gives them in that order is
+            // refused (`seeded_order`).
+            if self.in_a_map(from) {
+                return (Node::Leaf(name(), None), site, false);
+            }
+            return told("makes a random seed");
+        }
+        if let Some(what) = seeded_order(db, func, instance.args.as_ref()) {
+            return told(what);
+        }
+        if self.counted
+            && let Some(what) = reads_count(db, func)
+        {
+            return told(what);
         }
         let codec = is_codec(db, func);
         let named = instance.args.as_ref().iter().all(|it| it.region().is_some());
@@ -416,6 +449,29 @@ impl<'db> Walk<'db> {
             Node::Leaf(..) => return false,
         };
         krate.data(db).origin.is_local()
+    }
+
+    /// Whether the node is code of std's `HashMap` or `HashSet`, or of the sysroot's
+    /// `hashbrown` they are made of: a seed made there is the seed of a map.
+    fn in_a_map(&self, at: u32) -> bool {
+        let db = self.db;
+        let func = match &self.nodes[at as usize].node {
+            Node::Root(func) => *func,
+            Node::Instance(instance, _) => match instance.def {
+                InstanceDef::Fn(func) => func,
+                _ => return false,
+            },
+            _ => return false,
+        };
+        let krate = func.krate(db);
+        match krate.data(db).origin {
+            base_db::CrateOrigin::Lang(LangCrateOrigin::Std) => {
+                let ItemContainerId::ImplId(id) = func.lookup(db).container else { return false };
+                hasher_of(db, db.impl_self_ty(id).skip_binder()).is_some()
+            }
+            base_db::CrateOrigin::Lang(_) => crate_name(db, krate) == "hashbrown",
+            _ => false,
+        }
     }
 
     fn requests(&mut self, at: u32, hasher: &mut impl Hasher, requests: &Requests, own: bool) {
@@ -717,10 +773,135 @@ fn gives_address(db: &dyn HirDatabase, func: FunctionId, own: bool) -> Option<&'
 pub(super) fn kept_a_call(
     db: &dyn HirDatabase,
     func: FunctionId,
-    _: GenericArgs<'_>,
+    args: GenericArgs<'_>,
     own: bool,
 ) -> bool {
     gives_address(db, func, own).is_some()
+        || makes_seed(db, func)
+        || seeded_order(db, func, args).is_some()
+        || reads_count(db, func).is_some()
+}
+
+/// Whether `func` makes a `RandomState`, whose seed is another in every run.
+fn makes_seed(db: &dyn HirDatabase, func: FunctionId) -> bool {
+    if !matches!(func.krate(db).data(db).origin, base_db::CrateOrigin::Lang(LangCrateOrigin::Std)) {
+        return false;
+    }
+    let ItemContainerId::ImplId(id) = func.lookup(db).container else { return false };
+    if !is_std_struct(db, db.impl_self_ty(id).skip_binder(), "RandomState") {
+        return false;
+    }
+    let name = &FunctionSignature::of(db, func).name;
+    match db.impl_trait(id) {
+        None => name.as_str() == "new",
+        Some(trait_ref) => {
+            TraitSignature::of(db, trait_ref.skip_binder().def_id.0).name.as_str() == "Default"
+        }
+    }
+}
+
+/// What a function of std's `HashMap` or `HashSet` of `RandomState` does that tells the order
+/// of its entries, which the seed decides, or gives the seed itself. What only looks up,
+/// inserts or counts gives the same whatever the seed.
+fn seeded_order(
+    db: &dyn HirDatabase,
+    func: FunctionId,
+    args: GenericArgs<'_>,
+) -> Option<&'static str> {
+    if !matches!(func.krate(db).data(db).origin, base_db::CrateOrigin::Lang(LangCrateOrigin::Std)) {
+        return None;
+    }
+    let ItemContainerId::ImplId(id) = func.lookup(db).container else { return None };
+    let interner = DbInterner::new_no_crate(db);
+    let parent = hir_ty::generics::generics(db, func.into()).len_parent();
+    let parent = GenericArgs::new_from_slice(args.as_slice().get(..parent)?);
+    let self_ty = db.impl_self_ty(id).instantiate(interner, parent).skip_norm_wip();
+    let hasher = hasher_of(db, self_ty)?;
+    if !is_std_struct(db, hasher, "RandomState") {
+        return None;
+    }
+    let name = &FunctionSignature::of(db, func).name;
+    let in_order = match db.impl_trait(id) {
+        None => matches!(
+            name.as_str(),
+            "iter"
+                | "iter_mut"
+                | "keys"
+                | "values"
+                | "values_mut"
+                | "into_keys"
+                | "into_values"
+                | "drain"
+                | "retain"
+                | "extract_if"
+                | "difference"
+                | "symmetric_difference"
+                | "intersection"
+                | "union"
+        ),
+        // A `&HashMap`'s is the map's `iter`, reached as that.
+        Some(trait_ref) => {
+            TraitSignature::of(db, trait_ref.skip_binder().def_id.0).name.as_str() == "IntoIterator"
+        }
+    };
+    if in_order {
+        return Some("gives the entries of a map in the order of its random seed");
+    }
+    (db.impl_trait(id).is_none() && name.as_str() == "hasher")
+        .then_some("gives a map's random seed")
+}
+
+/// The hasher of std's `HashMap` or `HashSet` when `ty` is one.
+fn hasher_of<'db>(db: &dyn HirDatabase, ty: Ty<'db>) -> Option<Ty<'db>> {
+    let TyKind::Adt(def, args) = ty.kind() else { return None };
+    let AdtId::StructId(id) = def.def_id() else { return None };
+    if !matches!(id.krate(db).data(db).origin, base_db::CrateOrigin::Lang(LangCrateOrigin::Std)) {
+        return None;
+    }
+    let at = match StructSignature::of(db, id).name.as_str() {
+        "HashMap" => 2,
+        "HashSet" => 1,
+        _ => return None,
+    };
+    args.as_slice().get(at)?.ty()
+}
+
+fn is_std_struct(db: &dyn HirDatabase, ty: Ty<'_>, name: &str) -> bool {
+    let TyKind::Adt(def, _) = ty.kind() else { return false };
+    let AdtId::StructId(id) = def.def_id() else { return false };
+    matches!(id.krate(db).data(db).origin, base_db::CrateOrigin::Lang(LangCrateOrigin::Std))
+        && StructSignature::of(db, id).name.as_str() == name
+}
+
+/// What a function of alloc's `Rc`, `Arc` or their `Weak` does that depends on how many hold
+/// the value, or on whether two hold the same one.
+fn reads_count(db: &dyn HirDatabase, func: FunctionId) -> Option<&'static str> {
+    if !matches!(func.krate(db).data(db).origin, base_db::CrateOrigin::Lang(LangCrateOrigin::Alloc))
+    {
+        return None;
+    }
+    let ItemContainerId::ImplId(id) = func.lookup(db).container else { return None };
+    if db.impl_trait(id).is_some() {
+        return None;
+    }
+    let TyKind::Adt(def, _) = db.impl_self_ty(id).skip_binder().kind() else { return None };
+    let AdtId::StructId(adt) = def.def_id() else { return None };
+    if !matches!(StructSignature::of(db, adt).name.as_str(), "Rc" | "Arc" | "Weak") {
+        return None;
+    }
+    match FunctionSignature::of(db, func).name.as_str() {
+        "strong_count" | "weak_count" | "get_mut" | "make_mut" | "try_unwrap" | "into_inner"
+        | "unwrap_or_clone" | "is_unique" | "upgrade" => Some("reads the reference count"),
+        "ptr_eq" => Some("tells whether two share their value"),
+        _ => None,
+    }
+}
+
+/// Whether `adt` is what an `Rc` or an `Arc` points to: its value with the counts.
+fn holds_counts(db: &dyn HirDatabase, adt: AdtId) -> bool {
+    let AdtId::StructId(id) = adt else { return false };
+    matches!(id.krate(db).data(db).origin, base_db::CrateOrigin::Lang(LangCrateOrigin::Alloc))
+        && matches!(StructSignature::of(db, id).name.as_str(), "RcInner" | "ArcInner")
 }
 
 fn diverges(db: &dyn HirDatabase, func: FunctionId) -> bool {
@@ -851,34 +1032,41 @@ fn raw_use(body: &MirBody<'_>) -> Option<(&'static str, MirSpan)> {
     None
 }
 
-/// Why the arguments of the closure can't be what a result is kept by.
+/// Why the arguments of the closure can't be what a result is kept by, and whether one holds
+/// the reference counts of an `Rc` or an `Arc`.
 fn arguments_trouble(
     db: &dyn HirDatabase,
     closure: &Instance,
     env: &StoredParamEnvAndCrate,
-) -> Option<String> {
-    let types = super::body_types(db, closure.clone(), env.clone()).as_ref().ok()?;
+) -> (Option<String>, bool) {
+    let Ok(types) = super::body_types(db, closure.clone(), env.clone()).as_ref() else {
+        return (None, false);
+    };
     let interner = DbInterner::new_with(db, env.krate);
     let mut seen = FxHashSet::default();
+    let mut counted = false;
     // The first parameter is the closure itself, which captures nothing.
     for ty in types.params.iter().skip(1) {
         let ty = ty.as_ref();
-        if let Some(why) = trouble(db, interner, ty, false, &mut seen) {
+        if let Some(why) = trouble(db, interner, ty, false, &mut seen, &mut counted) {
             let name = hir_ty::mir::type_name::rustc_type_name(db, ty).unwrap_or_default();
-            return Some(format!("an argument of type `{name}` {why}"));
+            return (Some(format!("an argument of type `{name}` {why}")), counted);
         }
     }
-    None
+    (None, counted)
 }
 
 /// Why a value of `ty` can't be what a result is kept by: it can change behind a shared
-/// reference, or it holds something the bytes it is written as don't tell all of.
+/// reference, or it holds something the bytes it is written as don't tell all of. The counts
+/// of an `Rc` or an `Arc` change behind one, but only what reads them sees that, and the walk
+/// refuses that instead (`reads_count`): `counted` is set when `ty` holds some.
 fn trouble<'db>(
     db: &'db dyn HirDatabase,
     interner: DbInterner<'db>,
     ty: Ty<'db>,
     in_library: bool,
     seen: &mut FxHashSet<Ty<'db>>,
+    counted: &mut bool,
 ) -> Option<String> {
     if !seen.insert(ty) {
         return None;
@@ -893,23 +1081,26 @@ fn trouble<'db>(
         | TyKind::Never
         | TyKind::FnDef(..)
         | TyKind::FnPtr(..) => None,
-        TyKind::Ref(_, pointee, _) => trouble(db, interner, pointee, in_library, seen),
-        TyKind::RawPtr(pointee, _) if in_library => trouble(db, interner, pointee, true, seen),
+        TyKind::Ref(_, pointee, _) => trouble(db, interner, pointee, in_library, seen, counted),
+        TyKind::RawPtr(pointee, _) if in_library => {
+            trouble(db, interner, pointee, true, seen, counted)
+        }
         TyKind::RawPtr(..) => Some("holds a raw pointer".to_owned()),
         TyKind::Array(element, _) | TyKind::Slice(element) | TyKind::Pat(element, _) => {
-            trouble(db, interner, element, in_library, seen)
+            trouble(db, interner, element, in_library, seen, counted)
         }
         TyKind::Tuple(fields) => {
-            fields.iter().find_map(|field| trouble(db, interner, field, in_library, seen))
+            fields.iter().find_map(|field| trouble(db, interner, field, in_library, seen, counted))
         }
         TyKind::Adt(def, args) => {
             let lang = interner.lang_items();
             let library = def.def_id().module(db).krate(db).data(db).origin.is_lang();
+            let counts = library && holds_counts(db, def.def_id());
             let variants: Vec<VariantId> = match def.def_id() {
                 AdtId::StructId(id) if Some(id) == lang.UnsafeCell => {
                     return Some(
                         "can change behind a shared reference: it holds an `UnsafeCell`, as \
-                         `Cell`, `RefCell`, `Mutex`, `Rc`, `Arc` and atomics do"
+                         `Cell`, `RefCell`, `Mutex` and atomics do"
                             .to_owned(),
                     );
                 }
@@ -921,16 +1112,21 @@ fn trouble<'db>(
                 AdtId::UnionId(id) => vec![id.into()],
             };
             let in_fields = variants.into_iter().find_map(|variant| {
-                db.field_types(variant).iter().find_map(|(_, field)| {
+                let fields = variant.fields(db).fields();
+                db.field_types(variant).iter().find_map(|(id, field)| {
+                    if counts && matches!(fields[id].name.as_str(), "strong" | "weak") {
+                        *counted = true;
+                        return None;
+                    }
                     let ty = field.ty().instantiate(interner, args).skip_norm_wip();
-                    trouble(db, interner, ty, library, seen)
+                    trouble(db, interner, ty, library, seen, counted)
                 })
             });
             in_fields.or_else(|| {
                 // What a marker holds a type for.
                 args.iter()
                     .filter_map(|it| it.ty())
-                    .find_map(|ty| trouble(db, interner, ty, library, seen))
+                    .find_map(|ty| trouble(db, interner, ty, library, seen, counted))
             })
         }
         TyKind::Dynamic(..) => Some("is a trait object".to_owned()),

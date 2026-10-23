@@ -18,6 +18,9 @@ in memory, found on disk or computed, and each step says which it has to be:
 - `counted`, `noisy` and `addressed` are refused: a static that changes, printing and an
   address formatted (`{:p}`), the first two said with where they are written;
 - `exposed` is refused for `addr`, a method ra-jit would build into its caller but for that;
+- `shared` takes an `Rc`, `looked` makes a `HashMap` and `given` takes one, and are kept: the
+  second run finds them on disk, `given`'s though its map's entries are in another order;
+- `holders` reads an `Rc`'s count and `ordered` a `HashMap`'s order, and are refused;
 - a daemon started again finds what the first kept: the hash is the same in every process;
 - cargo's own build runs every call, and prints the same.
 """
@@ -36,11 +39,14 @@ edition = "2024"
 
 [dependencies]
 ra-jit-cache = {{ path = "{ROOT}/crates/ra-jit-cache" }}
+serde = {{ version = "1", features = ["rc"] }}
 
 [workspace]
 """
 MAIN = "src/main.rs"
-MAIN_TEXT = """use std::sync::atomic::{AtomicU64, Ordering};
+MAIN_TEXT = """use std::collections::HashMap;
+use std::rc::Rc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 #[inline(never)]
 fn mix(x: u64) -> u64 {
@@ -98,6 +104,38 @@ fn exposed(n: u64) -> bool {
     std::ptr::from_ref(&n).addr() > 0
 }
 
+/// An `Rc` is its value: its count is not read.
+#[ra_jit::cache]
+fn shared(values: Rc<Vec<u64>>) -> u64 {
+    values.iter().sum()
+}
+
+/// What it gives is how many hold the value, which the arguments don't tell.
+#[ra_jit::cache]
+fn holders(value: Rc<u64>) -> usize {
+    Rc::strong_count(&value)
+}
+
+/// A map made and looked into: the seed it is made with orders its entries alone.
+#[ra_jit::cache]
+fn looked(n: u64) -> u64 {
+    let squares: HashMap<u64, u64> = (0..n).map(|i| (i, i * i)).collect();
+    squares[&(n / 2)] + squares.len() as u64
+}
+
+/// What it gives is in the order of a map's entries, another in every run.
+#[ra_jit::cache]
+fn ordered(n: u64) -> Vec<u64> {
+    let map: HashMap<u64, u64> = (0..n).map(|i| (i, i)).collect();
+    map.keys().copied().collect()
+}
+
+/// A map given: what it is looked up by is its entries, whatever their order.
+#[ra_jit::cache]
+fn given(map: HashMap<u64, u64>) -> u64 {
+    map[&3] + map.len() as u64
+}
+
 #[inline(never)]
 fn unrelated() -> u64 {
     7
@@ -113,6 +151,12 @@ fn main() {
     println!("addressed {} {}", addressed(4), addressed(4));
     println!("unrelated {}", unrelated());
     println!("exposed {}", exposed(6));
+    println!("shared {}", shared(Rc::new(vec![1, 2, 3])));
+    let one = Rc::new(5);
+    println!("holders {} {}", holders(one.clone()), holders(Rc::new(5)));
+    println!("looked {}", looked(1000));
+    println!("ordered {}", ordered(64).len());
+    println!("given {}", given((0..64).map(|i| (i, i + 1)).collect()));
 }
 """
 SLOW_BODY = """    let mut acc = 1;
@@ -123,8 +167,10 @@ SLOW_BODY = """    let mut acc = 1;
 """
 # (what the step is, [(file, old, new)], {function: what the run says of it}, run twice)
 STEPS = [
-    ("first run", [], {"slow": "computed", "fib": "computed"}, False),
-    ("second run", [], {"slow": "found on disk", "fib": "found on disk"}, False),
+    ("first run", [], {"slow": "computed", "fib": "computed", "shared": "computed", "looked": "computed",
+                       "given": "computed"}, False),
+    ("second run", [], {"slow": "found on disk", "fib": "found on disk", "shared": "found on disk",
+                        "looked": "found on disk", "given": "found on disk"}, False),
     ("a comment and a format edit in it", [(MAIN, SLOW_BODY,
         "    // Comments and spaces are not code.\n    let mut acc = 1;\n\n    for i in 0..rounds { acc = step(acc, i); }\n    acc\n")],
         {"slow": "found on disk"}, False),
@@ -144,6 +190,10 @@ REFUSED = {
                             r"(formats an address|gives an address as a number)(, at src/main\.rs:\d+:\d+)?$"),
     "exposed": re.compile(r"`fcache::exposed` is not cached: it calls `[^`]*\*const u64>::addr`, which gives an address "
                           r"as a number, at src/main\.rs:\d+:\d+"),
+    "holders": re.compile(r"`fcache::holders` is not cached: it calls `[^`]*::strong_count[^`]*`, which reads the "
+                          r"reference count, at src/main\.rs:\d+:\d+"),
+    "ordered": re.compile(r"`fcache::ordered` is not cached: it calls `[^`]*::keys[^`]*`, which gives the entries of "
+                          r"a map in the order of its random seed, at src/main\.rs:\d+:\d+"),
 }
 
 

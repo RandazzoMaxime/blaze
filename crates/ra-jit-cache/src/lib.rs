@@ -42,6 +42,7 @@
 
 pub use ra_jit_cache_macros::cache;
 
+mod key;
 mod store;
 
 #[doc(hidden)]
@@ -90,7 +91,7 @@ pub mod __private {
     /// Names what writes `A` and reads and writes `R`, for the code of a function that takes
     /// `A` and returns `R` to cover them: a result read back by other code is another result.
     pub fn __ra_jit_codec<A: Serialize, R: Serialize + DeserializeOwned>() {
-        let _ = encode::<A> as fn(&A) -> Option<Vec<u8>>;
+        let _ = crate::key::encode::<A> as fn(&A) -> Option<Vec<u8>>;
         let _ = encode::<R> as fn(&R) -> Option<Vec<u8>>;
         let _ = decode::<R> as fn(&[u8]) -> Option<R>;
     }
