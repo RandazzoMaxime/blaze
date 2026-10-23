@@ -243,7 +243,10 @@ It pushes the branch, opens its pull request ("Merge <branch>: what the branch d
 it. The queue merges it onto main and whatever is ahead of it, runs CI's fast tier on that
 (about ten minutes, [harness.md](harness.md#ci)) and merges it with a merge commit, as
 `git merge --no-ff` would. `land.py` waits for that and prints the commit, or says why the pull
-request left the queue; then fix the branch and run it again. A branch that conflicts with main
+request left the queue; then fix the branch and run it again. The waiting runs in a process of
+its own that outlives `land.py`, its terminal and a tool that ends its process group, writing to
+`.git/land/pr-N.log` in the main checkout; `land.py --wait` (or `--wait N`) follows it again, as
+does running `land.py` again on the branch, so nobody polls GitHub by hand. A branch that conflicts with main
 gets `git merge origin/main` first. Once it has merged, GitHub deletes the branch on origin;
 remove the worktree and the local branch
 (`git worktree remove <dir> && git branch -D <branch>`).
