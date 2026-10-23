@@ -5570,6 +5570,40 @@ pub mod variadic {
 }
 
 /// A constant holding a pointer into another, over-aligned constant.
+/// Constants that point into constants: a keyword lookup by length then bytes, as bun's
+/// lexer tables, a slice that starts past the start of another, and slices of slices.
+pub mod const_tables {
+    const KEYWORDS: &[(&[u8], u32)] =
+        &[(b"do", 1), (b"if", 2), (b"in", 3), (b"for", 4), (b"let", 5), (b"while", 6)];
+    const DIGITS: &[u8] = b"0123456789abcdef";
+    const TAIL: &[u8] = DIGITS.split_at(10).1;
+    const NESTED: &[&[&str]] = &[&["alpha", "beta"], &[], &["gamma"]];
+
+    fn index(key: &[u8]) -> u32 {
+        match key.len() {
+            2 if key == b"do" => 1,
+            2 if key == b"if" => 2,
+            2 if key == b"in" => 3,
+            3 if key == b"for" => 4,
+            3 if key == b"let" => 5,
+            5 if key == b"while" => 6,
+            _ => u32::MAX,
+        }
+    }
+
+    fn lookup(key: &[u8]) -> Option<u32> {
+        KEYWORDS.iter().find(|(it, _)| *it == key).map(|(_, value)| *value)
+    }
+
+    pub fn run(words: &[&[u8]]) -> String {
+        let found: Vec<(u32, Option<u32>)> =
+            words.iter().map(|it| (index(it), lookup(it))).collect();
+        let nested: Vec<String> = NESTED.iter().map(|it| it.join("+")).collect();
+        let tail = std::str::from_utf8(TAIL).unwrap();
+        format!("{found:?} {tail} {nested:?} {}", DIGITS[TAIL.len() + words.len()] as char)
+    }
+}
+
 pub mod const_pointer_into_const {
     use std::marker::PhantomData;
 
