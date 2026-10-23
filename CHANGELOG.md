@@ -395,7 +395,12 @@ All notable changes to ra-jit are written here. The format follows
   ([#109](https://github.com/indexable-inc/ra-jit/issues/109)). A trait object given for a
   type parameter bounded `T: 'a` lives for `'a`, as rustc's object lifetime default, where
   rust-analyzer made it `'static` and the checker said "lifetime may not live long enough"
-  ([#84](https://github.com/indexable-inc/ra-jit/issues/84)).
+  ([#84](https://github.com/indexable-inc/ra-jit/issues/84)). All of cargo 0.99 now checks
+  clean, where five false errors were left: rusqlite's `params![..]` of locals (an impl
+  header's `&dyn ToSql` is for any lifetime, not only `'static`), `unwrap_or(&|_| true)` (a
+  closure capturing nothing is promoted), git2 callbacks borrowing a counter declared after
+  them (a panic's path drops nothing for a value with no drop glue), and an `async fn`
+  returning `impl Iterator + 'b` of `&'a self` with `'a: 'b`.
 - A program whose `main` is C's, as bun's, is built as a whole program: LLVM gets every body
   and inlines across crates, where each function was compiled alone before. `derive(PartialEq)`
   of an enum compares the discriminants first, as rustc's does. bun's whole program, every
