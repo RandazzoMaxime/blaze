@@ -55,6 +55,9 @@ Each fix is its own commit on `main` with a regression case (read, the commits):
 | the stand-in for a crate had an `extern crate` per `--extern`, and nightly cargo names each dependency twice (`E0259`) | whole-program build | stub.rs test |
 | whole-program builds stopped when cargo's link of the stand-ins failed for want of `#[no_mangle]` functions C calls | whole-program build | `apps.json` `nativecalls` |
 | LLVM's `instcombine` named in the `-O3` pipeline aborts the process when one run leaves work (AArch64) | whole-program build | `llvm.rs` test |
+| an `asm!` of a feature LLVM's AArch64 assembler has no `.arch_extension` for (constant_time_eq's `mrs {}, dit`) was refused | the Linux aarch64 build | `asm.rs` test, corpus `inline_asm` |
+| a body imported through another was called with the importer's type for it, which LLVM takes to be undefined: `ptr::write::<ForOf>` lost its write | the parser crashed in the whole-program build with imports | `llvm.rs` test |
+| a function declared in a trait's provided method was compiled only when nothing was rustc's, so a call of it by ra-jit's name had nothing to link to | ripgrep's and helix's whole programs did not link | `wholeprogram.py` `provided_fn` |
 | `simd_reduce_max`/`min` (NEON `vmaxvq_u8`) were not compiled | 164 functions | breaker `simd_reduce_max` |
 | a `Box<[T], &Arena>` (an allocator with a size) was not dereferenced, and its drop read the pointer at offset 0 | 151 functions | breaker crate `allocated` |
 | a borrowed constant with a cast in it (`&[b"browser" as &[u8], b"module"][..]`) was built on the stack, not promoted, and its slice outlived the frame | `new Bun.Transpiler()` crashed in the dev-loop build | breaker `promoted_index_of_casts` |
@@ -164,7 +167,7 @@ EPYC 9R45) unless said otherwise.
   function now carries the bodies it may inline, 1.10 billion instructions shown to LLVM for
   89.6 million of bun's own, and LLVM's optimiser spends about 5.2k CPU-seconds on them (read,
   ra-jit's build statistics). A cache of the inlinable bodies across compiles would remove
-  most of that; it is not built. Making shown bodies `available_externally` cut LLVM's
+  most of that; it was built the same day (below). Making shown bodies `available_externally` cut LLVM's
   optimise CPU by 41% and the build's wall time by 3%; capping what is shown made both the
   build and the program slower; neither was kept.
 - **Where the remaining 1.28x is** (read, `perf`): `Lexer::next` 14.5% of the run against 13%
@@ -214,6 +217,71 @@ The reduced nightly fixtures in `harness/bun-repros` keep these two refusals mea
 building Bun's native C and C++ dependencies. Run them with `python3 harness/bun_repros.py` after
 installing `nightly-2026-09-15`. The fixtures compare ra-jit's binary with cargo's binary and fail
 if the expected refusal reason disappears without changing the fixture's expectation.
+
+### 2026-10-23: the whole-program build against cargo's release build
+
+Linux x86-64 on 16 cores of an AWS c8a.24xlarge (`taskset -c 0-15`), `runbench.py NAME
+--builds release,ra-jit`, against main `ac1ee2dd68` before.
+
+- **Why the build took 565 s** (read, ra-jit's build statistics): each compile of a function
+  built its callees again from MIR, as far as 16 calls deep and up to 120,000 instructions, and
+  LLVM optimized them from scratch in every caller. Building the callees' IR took 3,572
+  CPU-seconds and optimizing most of 3,757.
+- **What replaces it** (`crates/hir-ty-codegen/imports.rs`): ThinLTO's import scheme across a
+  whole program's compiles. Each callee is lowered alone and run through LLVM's ThinLTO
+  pre-link pipeline once per process. A compile chooses, before LLVM runs, the exports small
+  enough to be built in: 100 instructions, 300 for `#[inline]`, the 40,000 budget for
+  `#[inline(always)]`, then 0.7 of that room for each call deeper, 8 deep. It links them in as
+  `available_externally`, and what LLVM does not build in is dropped.
+- **The limits, measured on bun** (read, build and median of 9 interleaved runs against
+  cargo's release build):
+
+  | Plain / `#[inline]` | Build | Runtime |
+  |---|---:|---:|
+  | 200 / 600 | 161.5 s | 1.242x |
+  | 100 / 300 | 118.0 s | 1.244x |
+  | 60 / 150 | 102.9 s | 1.272x |
+  | 40 / 100 | 93.6 s | 1.311x |
+
+  Other settings tried:
+  - Imports 3 deep ran 1.785x: bun's hot paths go through chains of small wrappers.
+  - 12 deep gave nothing over 8.
+  - Leaving 0.9 of the room for each call deeper imported more and ran no faster.
+  - Building the imports in before LLVM's `-O3` pipeline and dropping them there saved 19 s of
+    161 but ran 1.293x.
+- **Two bugs the imports showed**, each fixed with a test (the table above):
+  - A body imported through another was called with the wrong type: bun's parser crashed.
+  - Functions declared in provided methods were never compiled: ripgrep and helix failed to
+    link. This was latent on main, where every such callee was built in.
+- **After** (read):
+
+  | Program | cargo release | main | now | Runtime, main → now |
+  |---|---:|---:|---:|---:|
+  | bun | 134.9 s | 563.8 s | 118.0 s | 1.267x → 1.244x |
+  | ripgrep | 6.0 s | 37.5 s | 11.0 s | 1.222x → 1.15x |
+  | helix | 33.4 s | 415.8 s | 64.7 s | not run → 1.24x |
+  | nushell | 79.4 s | 1042.9 s | 190.4 s | 1.266x → 1.20x |
+
+  Linux aarch64, bun, 16 cores of an AWS c8g.24xlarge (Neoverse-V2), main `ac1ee2dd68` before
+  (one run) and `a1ca869492` after (median of 5):
+
+  | Program | cargo release | main | now | Runtime, main → now |
+  |---|---:|---:|---:|---:|
+  | bun | 168.2 s | 694.1 s | 144.5 s | 1.178x → 1.198x |
+
+  cargo's release binary ran 536 ms both times. ra-jit's ran 632 ms before and 643 ms after:
+  about 2% slower, which is not explained yet. The limits above were tuned on x86-64 only.
+
+- **Why helix and nushell are still slower than cargo** (read, built with nothing imported):
+  every function is still a module of its own. With nothing imported:
+  - helix's 225,349 compiles take 512 CPU-seconds in LLVM;
+  - nushell's 421,385 take 1,151 CPU-seconds, 524 of them writing objects. That is about 72 s
+    on 16 cores, against 79.4 s for cargo's whole build.
+
+  With imports, each compile also optimizes its imports again: 52 per compile in helix, about
+  three times the size of its own code. Codegen units that share their imports, as rustc
+  partitions a crate, are
+  [#176](https://github.com/indexable-inc/ra-jit/issues/176).
 
 ## What is not known
 

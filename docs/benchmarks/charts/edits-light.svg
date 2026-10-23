@@ -29,7 +29,7 @@
 <line x1="630.1" y1="135" x2="630.1" y2="773" class="g"/>
 <line x1="16" y1="193" x2="744" y2="193" class="r"/>
 <rect x="282" y="143" width="151.4" height="12" rx="2" class="p0"/>
-<rect x="282" y="158" width="185.1" height="12" rx="2" class="p1"/>
+<rect x="282" y="158" width="186.8" height="12" rx="2" class="p1"/>
 <rect x="282" y="173" width="158" height="12" rx="2" class="p2"/>
 <rect x="282" y="201" width="137.1" height="12" rx="2" class="p0"/>
 <path d="M384.1 207H476.4M384.1 203v8M476.4 203v8" class="o w0"/>
@@ -81,7 +81,8 @@
 <path d="M210.2 701H292.5M210.2 697v8M292.5 697v8" class="o w2"/>
 <rect x="282" y="723" width="199.5" height="12" rx="2" class="p0"/>
 <path d="M425 729H515.6M425 725v8M515.6 725v8" class="o w0"/>
-<rect x="283" y="739.5" width="9" height="9" rx="2" class="o w1"/>
+<rect x="282" y="738" width="202.7" height="12" rx="2" class="p1"/>
+<path d="M468 744H526.2M468 740v8M526.2 740v8" class="o w1"/>
 <rect x="282" y="753" width="204.3" height="12" rx="2" class="p2"/>
 <path d="M466.5 759H521.7M466.5 755v8M521.7 755v8" class="o w2"/>
 <line x1="282" y1="127" x2="282" y2="773" class="r"/>
@@ -99,7 +100,7 @@
 <text x="118.8" y="162" font-size="13" text-anchor="end" class="b">All projects</text>
 <text x="118.8" y="176" font-size="11" text-anchor="end" class="d">geometric mean</text>
 <text x="439.5" y="153" font-size="12" class="v b">10× faster</text>
-<text x="473.1" y="168" font-size="12" class="v b">17× faster</text>
+<text x="474.9" y="168" font-size="12" class="v b">17× faster</text>
 <text x="446" y="183" font-size="12" class="v b">11× faster</text>
 <text x="118.8" y="226.5" font-size="13" text-anchor="end">ripgrep 15.1.0</text>
 <text x="482.4" y="211" font-size="12" class="v">8.1× faster</text>
@@ -139,12 +140,12 @@
 <text x="298.5" y="705" font-size="12" class="v">2.9× slower</text>
 <text x="118.8" y="748.5" font-size="13" text-anchor="end">bun 1.4.3</text>
 <text x="521.6" y="733" font-size="12" class="v">21× faster</text>
-<text x="298" y="748" font-size="11.5" class="d">not measured yet</text>
+<text x="532.2" y="748" font-size="12" class="v">22× faster</text>
 <text x="527.7" y="763" font-size="12" class="v">22× faster</text>
 <text x="282" y="122" font-size="11.5" text-anchor="middle" class="d">as fast as cargo</text>
 <text x="274" y="810" font-size="12" text-anchor="end" class="d">← ra-jit slower</text>
 <text x="290" y="810" font-size="12" class="d">ra-jit faster →</text>
 <text x="16" y="834" font-size="11.5" class="d">Each colour is a machine of its own: compare bars of one colour, not across colours. macOS arm64: MacBook Pro, 2026-10-21.</text>
 <text x="16" y="851" font-size="11.5" class="d">Linux aarch64: AWS c8g.16xlarge, 2026-10-22. Linux x86-64: AWS c7a.48xlarge, 2026-10-22. bun, measured on its own: macOS</text>
-<text x="16" y="868" font-size="11.5" class="d">arm64: Apple M5 Max, 2026-10-23; Linux x86-64: AWS c8a.24xlarge, 2026-10-23.</text>
+<text x="16" y="868" font-size="11.5" class="d">arm64: Apple M5 Max, 2026-10-23; Linux aarch64: AWS c8g.24xlarge, 2026-10-23; Linux x86-64: AWS c8a.24xlarge, 2026-10-23.</text>
 </svg>

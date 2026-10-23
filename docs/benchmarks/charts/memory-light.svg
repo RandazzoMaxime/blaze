@@ -28,7 +28,7 @@
 <line x1="510.8" y1="135" x2="510.8" y2="773" class="g"/>
 <line x1="16" y1="193" x2="744" y2="193" class="r"/>
 <rect x="154.3" y="143" width="279.1" height="12" rx="2" class="p0"/>
-<rect x="205.2" y="158" width="228.1" height="12" rx="2" class="p1"/>
+<rect x="205" y="158" width="228.4" height="12" rx="2" class="p1"/>
 <rect x="223.6" y="173" width="209.7" height="12" rx="2" class="p2"/>
 <rect x="154.1" y="201" width="279.2" height="12" rx="2" class="p0"/>
 <rect x="202.6" y="216" width="230.7" height="12" rx="2" class="p1"/>
@@ -58,7 +58,7 @@
 <rect x="208.6" y="680" width="224.8" height="12" rx="2" class="p1"/>
 <rect x="222.9" y="695" width="210.4" height="12" rx="2" class="p2"/>
 <rect x="152" y="723" width="281.3" height="12" rx="2" class="p0"/>
-<rect x="434.4" y="739.5" width="9" height="9" rx="2" class="o w1"/>
+<rect x="202.9" y="738" width="230.4" height="12" rx="2" class="p1"/>
 <rect x="209" y="753" width="224.4" height="12" rx="2" class="p2"/>
 <line x1="433.4" y1="127" x2="433.4" y2="773" class="r"/>
 <text x="130.8" y="790" font-size="11.5" text-anchor="middle" class="d v">15×</text>
@@ -114,12 +114,12 @@
 <text x="439.4" y="705" font-size="12" class="v">6.6× more · 55.8 GB vs cargo's 8.5 GB</text>
 <text x="118.8" y="748.5" font-size="13" text-anchor="end">bun 1.4.3</text>
 <text x="439.4" y="733" font-size="12" class="v">12× more · 26.1 GB vs cargo's 2.1 GB</text>
-<text x="449.4" y="748" font-size="11.5" class="d">not measured yet</text>
+<text x="439.4" y="748" font-size="12" class="v">7.9× more · 27.7 GB vs cargo's 3.5 GB</text>
 <text x="439.4" y="763" font-size="12" class="v">7.4× more · 24.5 GB vs cargo's 3.3 GB</text>
 <text x="433.4" y="122" font-size="11.5" text-anchor="middle" class="d">as much as cargo</text>
 <text x="425.4" y="810" font-size="12" text-anchor="end" class="d">← ra-jit uses more</text>
 <text x="441.4" y="810" font-size="12" class="d">ra-jit uses less →</text>
 <text x="16" y="834" font-size="11.5" class="d">Each colour is a machine of its own: compare bars of one colour, not across colours. macOS arm64: MacBook Pro, 2026-10-21.</text>
 <text x="16" y="851" font-size="11.5" class="d">Linux aarch64: AWS c8g.16xlarge, 2026-10-22. Linux x86-64: AWS c7a.48xlarge, 2026-10-22. bun, measured on its own: macOS</text>
-<text x="16" y="868" font-size="11.5" class="d">arm64: Apple M5 Max, 2026-10-23; Linux x86-64: AWS c8a.24xlarge, 2026-10-23.</text>
+<text x="16" y="868" font-size="11.5" class="d">arm64: Apple M5 Max, 2026-10-23; Linux aarch64: AWS c8g.24xlarge, 2026-10-23; Linux x86-64: AWS c8a.24xlarge, 2026-10-23.</text>
 </svg>

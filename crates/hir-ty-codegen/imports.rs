@@ -14,6 +14,10 @@
 //! 118 s against 135 s for cargo's release build, and runs 1.244x where it ran 1.267x: 372 283
 //! exports built in 284 s, and 4.6 million imports of 31.6 million instructions linked into
 //! 110 103 compiles in 211 s and optimized in 586 s (c8a.24xlarge, 2026-10-23).
+//!
+//! Each compile is still a module of its own, so two that call one function each link it in
+//! and optimize it: helix and nushell build in about twice the time of cargo's release build,
+//! and would with nothing imported. Codegen units that share their imports are #176.
 
 use std::{
     collections::VecDeque,
