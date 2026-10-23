@@ -4265,9 +4265,29 @@ impl<'db> Builder<'_, '_, 'db> {
                     self.caller_bound(trait_ref, at);
                     self.closure_bound(trait_ref, at);
                     let trait_ref = self.normalize_closure_args(trait_ref);
+                    // `for<'a> G: Outlives<'a>` is proven for a placeholder `'a`, which a
+                    // region outlives only by outliving `'static`.
+                    let forall =
+                        rustc_type_ir::TypeVisitableExt::has_escaping_bound_vars(&trait_ref);
+                    let trait_ref = match forall {
+                        true => {
+                            let interner = self.interner();
+                            rustc_type_ir::fold_regions(interner, trait_ref, |region, depth| {
+                                match region.kind() {
+                                    RegionKind::ReBound(
+                                        rustc_type_ir::BoundVarIndexKind::Bound(binder),
+                                        _,
+                                    ) if binder == depth => Region::new_static(interner),
+                                    _ => region,
+                                }
+                            })
+                        }
+                        false => trait_ref,
+                    };
                     // Of a call written as one: `map[i] = v` calls `IndexMut::index_mut`, which
                     // is E0594 where only `Index` is implemented.
                     if self.prove(trait_ref, at)
+                        && !forall
                         && at.category == Category::Predicate
                         && let MirSpan::ExprId(expr) = at.span
                         && matches!(
