@@ -582,6 +582,7 @@ fn main() {
     println!("tail_temporaries {:?}", cases::tail_temporaries::run(true));
     println!("tail_temporaries {:?}", cases::tail_temporaries::run(false));
     println!("const_field_names {:?}", cases::const_field_names::run());
+    println!("object_lifetime_default {:?}", cases::object_lifetime_default::run());
     println!("shared_map {:?}", cases::shared_map::build());
     println!("lazy statics {:?}", cases::repeated_statics::lazy());
     println!("repeated statics in_closure {:?}", cases::repeated_statics::in_closure());
