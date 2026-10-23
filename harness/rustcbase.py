@@ -10,7 +10,9 @@ the daemon is ready its edits one after the other, each built by `cargo ra-jit b
 `cargo build` into a target directory of its own. Both programs run without arguments and with
 `panic`; stdout, stderr and the exit status must be the same. Each edit also has the way it was
 built checked: `patch` when it was spliced into the executable it had (rustc's, or the daemon's
-own once it built one), `full` when the daemon built the program in full first. A scenario's
+own once it built one), `full` when the daemon built the program in full first. On Linux a build
+in full while the program is still what rustc linked is spliced into that whole (`whole`, issue
+#159), and a scenario's `full` asks for that there. A scenario's
 `wait` is how long it waits once ready, which lets the daemon build its own base meanwhile.
 The `cached-` scenarios have a program with a `#[ra_jit::cache]` function instead, whose
 results are kept in WORK/fn-cache.
@@ -341,6 +343,14 @@ SCENARIOS.update(UNBUILT_SCENARIOS)
 # The own base holds more than the memory it may, so it is given up once and not started again,
 # and the edit patches what rustc linked.
 SCENARIOS["own-base-budget"] = ([[edit(M, "    x * 3\n", "    x * 4\n")]], ["patch"], 8, {"RA_JIT_OWN_BASE_MEMORY": "1"})
+# Given up, and an edit that is more than bodies (#159): built in full, it is spliced into what
+# rustc linked rather than linked, and the edits after it are patches of that, an `#[inline]`
+# function's too: what it was spliced with has marks to compare with.
+SCENARIOS["own-base-budget-full"] = ([[edit(M, "    x + 1\n}\n\nfn counted", "    x + 2\n}\n\nfn counted")],
+                                      [edit(M, "    x * 3\n", "    x * 4\n")],
+                                      [edit(M, "    x + 2\n}\n\nfn counted", "    x + 3\n}\n\nfn counted")],
+                                      [edit(M, "    x * 4\n", "    x * 5\n")]],
+                                     ["full", "patch", "patch", "patch"], 8, {"RA_JIT_OWN_BASE_MEMORY": "1"})
 
 # A program whose package has a library too, as each example of bevy's package has bevy: the
 # library is a crate of the program's files too, and the program depends on it.
@@ -368,7 +378,7 @@ SAME_NAME_SCENARIOS = {
 SCENARIOS.update(SAME_NAME_SCENARIOS)
 
 # How the daemon's own base is to go before the first edit, in the scenarios that say.
-OWN_BASE = {"unbuilt-member": "built", "own-base-budget": "given up"}
+OWN_BASE = {"unbuilt-member": "built", "own-base-budget": "given up", "own-base-budget-full": "given up"}
 
 
 def opt(name, default=None):
@@ -411,11 +421,19 @@ def logs(home):
 
 
 def how_built(lines):
-    """`patch` when the build spliced into the executable it had, `full` when the daemon
-    linked the program in full, from what it logged. The last link is the edit's: one before
-    it can be of the daemon's own base, finished as the edit came."""
+    """`patch` when the build spliced into the executable it had, `whole` when the daemon
+    built the program in full and spliced it into what rustc linked, `full` when it linked
+    the program in full, from what it logged. The last link is the edit's: one before it can
+    be of the daemon's own base, finished as the edit came."""
     links = [it for it in lines if re.search(r"link: .*spliced", it)]
-    return "patch" if links and "(spliced:" in links[-1] else "full"
+    if links and "(spliced:" in links[-1]:
+        return "patch"
+    return "whole" if links and "(all of it spliced into" in links[-1] else "full"
+
+
+def wanted(want):
+    """What a scenario's `full` is on this platform: only an ELF executable is spliced whole."""
+    return "whole" if want == "full" and sys.platform == "linux" else want
 
 
 def main():
@@ -484,7 +502,7 @@ def main():
                 failed.append(f"{name}: the own base was {went}, not {OWN_BASE[name]} ({len(started)} starts, "
                               f"{interrupted} interrupted, {given_up} given up)")
         try:
-            for step, (replacements, want) in enumerate(zip(edits, expected), 1):
+            for step, (replacements, want) in enumerate(zip(edits, map(wanted, expected)), 1):
                 for file, old, new in replacements:
                     path = os.path.join(ws, file)
                     text = open(path).read()

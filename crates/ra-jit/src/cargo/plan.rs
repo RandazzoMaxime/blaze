@@ -606,6 +606,16 @@ pub(crate) fn rustc_link_args() -> [String; 3] {
 /// (`ra-jit-live`). Not every C compiler has the linker write one (NixOS's does not).
 pub(crate) const BUILD_ID: &str = "-Wl,--build-id";
 
+/// What rustc's link of a program for Linux is told to keep of compiler-builtins, for what
+/// the daemon compiles to call there: the functions of [`hir_ty_codegen::BUILTINS`], which
+/// the linker leaves out when rustc's code calls none of them. A name the target has no
+/// function of is no error.
+pub(crate) fn kept_builtins() -> String {
+    let kept: Vec<String> =
+        hir_ty_codegen::BUILTINS.iter().map(|it| format!("--undefined={it}")).collect();
+    format!("{TO_THE_LINKER}{}", kept.join(","))
+}
+
 pub(crate) fn write_headerpad(binary: &Path, pad: u64) -> std::io::Result<()> {
     std::fs::write(headerpad_file(binary), format!("{HEADERPAD_FLAG}{pad:#x}\n"))
 }
