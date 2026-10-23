@@ -548,6 +548,7 @@ pub(super) fn build<'db>(
         env_aliases: Vec::new(),
         annotated: FxHashMap::default(),
         const_positions: 0,
+        aggregate_temps: aggregate_temps(body),
     };
     builder.universal_regions();
     builder.env_aliases();
@@ -603,6 +604,40 @@ struct Builder<'c, 'a, 'db> {
     /// The region lifetime elision gives the elided lifetimes of the return type.
     elided_output: Option<Region<'db>>,
     location: Option<Location>,
+    /// rustc's `AggregateTemp`s: the temporaries a struct or variant expression, or a call of
+    /// a constructor, builds its fields in.
+    aggregate_temps: FxHashSet<LocalId>,
+}
+
+fn aggregate_temps(body: &MirBody<'_>) -> FxHashSet<LocalId> {
+    let mut out = FxHashSet::default();
+    let mut add = |operand: &Operand| {
+        if let OperandKind::Move(place) = &operand.kind
+            && place.projection.as_slice().is_empty()
+        {
+            out.insert(place.local);
+        }
+    };
+    for (_, data) in body.basic_blocks.iter() {
+        for it in &data.statements {
+            if let StatementKind::Assign(
+                _,
+                Rvalue::Aggregate(AggregateKind::Adt(..) | AggregateKind::Union(..), operands),
+            ) = &it.kind
+            {
+                operands.iter().for_each(&mut add);
+            }
+        }
+        if let Some(terminator) = &data.terminator
+            && let TerminatorKind::Call { func, args, .. } = &terminator.kind
+            && let OperandKind::Constant { ty, .. } = &func.kind
+            && let TyKind::FnDef(def, _) = ty.as_ref().kind()
+            && !matches!(def.0, CallableDefId::FunctionId(_))
+        {
+            args.iter().for_each(&mut add);
+        }
+    }
+    out
 }
 
 /// Where a constraint comes from.
@@ -2995,7 +3030,18 @@ impl<'db> Builder<'_, '_, 'db> {
         let StatementKind::Assign(place, rvalue) = kind else { return };
         let projection = place.projection.as_slice();
         let dest = self.place_ty(place.local, projection).ty;
-        let at = At { category: self.category_of_assignment(place.local, projection), span };
+        let mut at = At { category: self.category_of_assignment(place.local, projection), span };
+        // A field that is a place is the operand itself in rustc, with no temporary.
+        if at.category == Category::Boring
+            && projection.is_empty()
+            && self.aggregate_temps.contains(&place.local)
+            && !matches!(
+                rvalue,
+                Rvalue::Use(Operand { kind: OperandKind::Copy(_) | OperandKind::Move(_), .. })
+            )
+        {
+            at.category = Category::Usage;
+        }
         if projection.is_empty() {
             self.sized_local(place.local, dest, span);
             if place.local == super::return_slot() && !self.opaque_bounds.is_empty() {
