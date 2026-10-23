@@ -117,7 +117,9 @@ impl Dylib {
         let mut dylibs = DYLIBS.lock().unwrap_or_else(|it| it.into_inner());
         let dylibs = dylibs.get_or_insert_default();
         let dylib = dylibs.entry(path.to_path_buf());
-        dylib.or_insert_with(|| Arc::new(Dylib { path: path.to_path_buf(), hash: OnceLock::new() })).clone()
+        dylib
+            .or_insert_with(|| Arc::new(Dylib { path: path.to_path_buf(), hash: OnceLock::new() }))
+            .clone()
     }
 
     fn hash(&self) -> Option<&[u8; KEY]> {
@@ -201,7 +203,8 @@ impl Kept {
             table.insert(span);
         }
         let input = FlatTree::from_subtree(subtree.view(), CURRENT_API_VERSION, &mut table);
-        let attrs = attrs.map(|it| FlatTree::from_subtree(it.view(), CURRENT_API_VERSION, &mut table));
+        let attrs =
+            attrs.map(|it| FlatTree::from_subtree(it.view(), CURRENT_API_VERSION, &mut table));
         let mut spans = Spans::default();
         let shapes: Vec<Shape> = table.iter().map(|span| spans.shape_new(span)).collect();
         let mut env: Vec<_> = env.iter().collect();
