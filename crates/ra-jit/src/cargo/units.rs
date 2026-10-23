@@ -16,6 +16,9 @@ use crate::dep_info::DepInfo;
 /// The directory of the records, in the directory cargo builds a profile in.
 const RECORDS: &str = ".ra-jit-units";
 
+/// The file of a unit's directory that describes a library outside the workspace.
+const DESCRIBED: &str = "crate.json";
+
 /// The directories of a profile that cargo has rustc write to.
 const PLACES: [&str; 3] = ["deps", "examples", "build"];
 
@@ -115,6 +118,27 @@ impl Record {
         std::fs::write(&new, serde_json::to_vec(self)?)?;
         std::fs::rename(&new, unit.join("record.json"))?;
         Ok(())
+    }
+
+    /// Writes the record of a library of a package outside the workspace, where
+    /// [`Record::all`] does not read it: only a build script ra-jit compiles reads it, to
+    /// compile the library from source as rustc did ([`Record::described`]).
+    pub(crate) fn write_described(&self, dir: &Path) -> anyhow::Result<()> {
+        let unit = dir.join(&self.id);
+        std::fs::create_dir_all(&unit)?;
+        let new = unit.join(format!("{DESCRIBED}.{}.new", std::process::id()));
+        std::fs::write(&new, serde_json::to_vec(self)?)?;
+        std::fs::rename(&new, unit.join(DESCRIBED))?;
+        Ok(())
+    }
+
+    /// The record of the unit `id` in `dir`, of the workspace or described.
+    pub(crate) fn described(dir: &Path, id: &str) -> Option<Record> {
+        let unit = dir.join(id);
+        let text = std::fs::read_to_string(unit.join("record.json"))
+            .or_else(|_| std::fs::read_to_string(unit.join(DESCRIBED)))
+            .ok()?;
+        serde_json::from_str(&text).ok()
     }
 
     fn value(&self, flag: &str) -> Option<&str> {

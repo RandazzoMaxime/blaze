@@ -1335,10 +1335,22 @@ impl Store {
     /// The store of this process: the directory `RA_JIT_CACHE` names, when it names one. A
     /// directory that cannot be used is said once, and the process compiles without one.
     pub fn global() -> Option<&'static Store> {
+        Store::global_or(None)
+    }
+
+    /// The store of this process: the directory `RA_JIT_CACHE` names, or `otherwise` when the
+    /// variable is not set. The first call decides.
+    pub fn global_or(otherwise: Option<&Path>) -> Option<&'static Store> {
         static STORE: OnceLock<Option<Store>> = OnceLock::new();
         STORE
             .get_or_init(|| {
-                let dir = std::env::var_os("RA_JIT_CACHE").filter(|it| !is_off(it))?;
+                let dir = match std::env::var_os("RA_JIT_CACHE") {
+                    Some(named) => named,
+                    None => otherwise?.as_os_str().to_owned(),
+                };
+                if is_off(&dir) {
+                    return None;
+                }
                 let opened = Identity::current().and_then(|identity| {
                     Store::open(Path::new(&dir), identity, Tuning::from_env()?)
                 });

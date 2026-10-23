@@ -1091,6 +1091,18 @@ pub(crate) fn place(from: &Path, to: &Path) -> std::io::Result<()> {
 /// program that is running.
 pub(crate) fn as_built(command: &mut Command) -> std::io::Result<()> {
     command.env(switch::VARIABLE, switch::wrapper_path()?).env(wrapper::DRIVEN, "1");
+    every_crate(command)
+}
+
+/// Has cargo run the rustc of every crate through ra-jit's wrapper, for the build scripts of
+/// the packages outside the workspace (docs/no-rustc.md, step I), unless the user has a
+/// wrapper there. Cargo keys no unit by this wrapper, so the builds of plain cargo are still
+/// this one's.
+pub(crate) fn every_crate(command: &mut Command) -> std::io::Result<()> {
+    let dir = command.get_current_dir().map_or_else(std::env::current_dir, |it| Ok(it.to_owned()))?;
+    if !switch::user_wraps(&dir) {
+        command.env("RUSTC_WRAPPER", switch::wrapper_path()?).env(wrapper::EVERY_CRATE, "1");
+    }
     Ok(())
 }
 

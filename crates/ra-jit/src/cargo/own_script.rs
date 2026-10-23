@@ -227,9 +227,8 @@ fn add(
         return Err(format!("it links {name}, which is not a library ra-jit compiles (a proc macro)"));
     };
     let dir = path.parent().map(Record::dir_for).ok_or("a library without a directory")?;
-    let record = std::fs::read_to_string(dir.join(unit).join("record.json"))
-        .map_err(|_| format!("`{unit}`, which it links, has no record"))?;
-    let record: Record = serde_json::from_str(&record).map_err(|it| it.to_string())?;
+    let record = Record::described(&dir, unit)
+        .ok_or_else(|| format!("`{unit}`, which it links, was compiled before ra-jit described it"))?;
     let asked = Asked { args: &record.args, cwd: &record.cwd };
     let at = crates.len();
     linked.insert(path.to_owned(), at);
