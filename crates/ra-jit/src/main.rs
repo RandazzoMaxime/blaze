@@ -11,6 +11,7 @@ mod dep_info;
 mod deps;
 mod doctest;
 mod errors;
+mod frozen;
 mod inputs;
 mod live;
 mod memory;
@@ -2696,6 +2697,14 @@ fn report_sharing(db: &RootDatabase) {
 }
 
 fn resolve_crates(db: &RootDatabase, args: &Args, threads: usize) -> anyhow::Result<usize> {
+    let crates = built_crates(db, args)?;
+    resolve_all(db, &crates, threads);
+    Ok(crates.len())
+}
+
+/// The crates a build of `args` compiles and every crate they depend on, each after its
+/// dependencies.
+fn built_crates(db: &RootDatabase, args: &Args) -> anyhow::Result<Vec<ide_db::base_db::Crate>> {
     let mut seen = FxHashSet::default();
     let mut crates = Vec::new();
     for name in args.crates() {
@@ -2704,8 +2713,7 @@ fn resolve_crates(db: &RootDatabase, args: &Args, threads: usize) -> anyhow::Res
             crates.extend(krate.transitive_deps(db).into_iter().filter(|&dep| seen.insert(dep)));
         }
     }
-    resolve_all(db, &crates, threads);
-    Ok(crates.len())
+    Ok(crates)
 }
 
 /// Resolves the names of `crates` again after an edit to many files, on every core: whoever
@@ -6583,6 +6591,8 @@ fn run_holding(
     if checkouts.lto(&args.project)? {
         linked_from_libraries(&db, &args)?;
     }
+    let built = built_crates(&db, &args)?;
+    let served = frozen::serve(&mut db, &built);
     let mut resolved = resolve_crates(&db, &args, cores())?;
     // Resolving the names finds the files `include!` names that were not loaded. With those
     // in, there may be more.
@@ -6590,6 +6600,7 @@ fn run_holding(
         resolved = resolve_crates(&db, &args, cores())?;
     }
     eprintln!("resolve: {resolved} crates in {:.1?}", start.elapsed());
+    frozen::store(&db, &served)?;
     if let Some(said) = ra_jit_expand::report() {
         eprintln!("{said}");
     }
