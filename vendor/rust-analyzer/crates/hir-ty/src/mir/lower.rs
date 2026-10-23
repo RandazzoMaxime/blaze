@@ -1486,7 +1486,7 @@ impl<'a, 'db> MirLowerCtx<'a, 'db> {
                     // and not the value.
                     && !p.projection.as_slice().iter().any(|it| matches!(it, ProjectionElem::Deref))
                     // What a `const { .. }` block borrows is a constant whatever it is made of.
-                    && (self.inline_consts > 0 || self.is_promotable(*expr))
+                    && (self.inline_consts > 0 || self.is_promotable_place(*expr))
                 {
                     // The local holds what the fields and elements are taken out of.
                     let mut constant = *expr;
@@ -2525,12 +2525,43 @@ impl<'a, 'db> MirLowerCtx<'a, 'db> {
     /// Whether `&expr` is a borrow of a constant that rustc gives the `'static` lifetime.
     /// This looks at the syntax only; whether the type allows it is left to the user of
     /// `MirBody::promoted_locals`.
+    /// Whether the place `expr` is, borrowed, is of a promoted constant: rustc promotes the array
+    /// an element is borrowed out of whatever the index, which the borrow does not read
+    /// (`&ALL[i]`), but not an element read as a value (`&(ALL[i] + 1)`).
+    fn is_promotable_place(&mut self, expr: ExprId) -> bool {
+        match self.store[expr] {
+            Expr::Index { base, .. }
+                if matches!(self.expr_ty_without_adjust(base).kind(), TyKind::Array(..)) =>
+            {
+                self.is_promotable_unadjusted(base)
+            }
+            Expr::Field { expr: inner, .. } if !self.has_adjustments(expr) => {
+                self.is_promotable_place(inner)
+            }
+            _ => self.is_promotable(expr),
+        }
+    }
+
     fn is_promotable(&mut self, expr: ExprId) -> bool {
-        if let &Expr::Index { base, .. } = &self.store[expr]
-            && matches!(self.expr_ty_without_adjust(base).kind(), TyKind::Array(..))
+        if let &Expr::Index { base, index } = &self.store[expr]
+            && let TyKind::Array(_, len) = self.expr_ty_without_adjust(base).kind()
         {
-            // Indexing an array is built in, whatever adjustments inference left on it.
-            return self.is_promotable_unadjusted(base);
+            // Indexing an array is built in, whatever adjustments inference left on it. rustc
+            // promotes it only by a constant it can tell is in bounds: a literal less than the
+            // length, or a constant item, but not a `const { .. }` block, which it does not
+            // evaluate there.
+            let literal = match self.store[index] {
+                Expr::Literal(Literal::Int(it, _)) => u128::try_from(it).ok(),
+                Expr::Literal(Literal::Uint(it, _)) => Some(it),
+                _ => None,
+            };
+            let in_bounds = match literal {
+                Some(it) => {
+                    crate::consteval::try_const_usize(self.db, len).is_some_and(|len| it < len)
+                }
+                None => matches!(self.store[index], Expr::Path(_)) && self.names_constant(index),
+            };
+            return in_bounds && self.is_promotable_unadjusted(base);
         }
         let is_fn = matches!(self.expr_ty_without_adjust(expr).kind(), TyKind::FnDef(..));
         let adjustments = self.infer.expr_adjustments.get(&expr).map_or(&[][..], |it| &**it);
