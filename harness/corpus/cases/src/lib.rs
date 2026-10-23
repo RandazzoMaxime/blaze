@@ -5881,6 +5881,15 @@ pub mod tail_temporaries {
     }
 }
 
+/// Field names a `static` borrows from `const`s in blocks, as tracing 0.1.44's `trace!`
+/// writes them (issue #109): the `static`'s value promotes them.
+pub mod const_field_names {
+    pub fn run() -> Vec<&'static str> {
+        let fields = old_macros::fieldset!(start, end);
+        fields.0.to_vec()
+    }
+}
+
 /// A derived ordering over an enum whose variants carry fields of several types.
 pub mod enum_ordering {
     use std::path::PathBuf;
