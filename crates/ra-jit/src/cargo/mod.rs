@@ -74,7 +74,7 @@ usage: cargo ra-jit <command> [cargo's flags]
 
   build, run, test   by the daemon when it has the workspace loaded, by cargo otherwise
   check              what the daemon's build of the same flags says, when it has one loaded;
-                     `cargo check` otherwise
+                     otherwise what the daemon finds loading the workspace as it, with no rustc
   status             whether ra-jit is enabled, what the daemon has loaded, what fell back
   stop               ends the daemon; the next build starts one
   enable, disable    plain `cargo build|run|test|check` through ra-jit, and back
@@ -220,35 +220,49 @@ fn build(asked: &Invocation) -> anyhow::Result<i32> {
 const FAILED: i32 = 101;
 
 /// `cargo ra-jit check`: what the daemon says of the source as it builds the programs of
-/// the build with the same flags, when it has that build loaded, and no rustc. Any other
-/// check is cargo's, and loads nothing: rustc links no program for it.
+/// the build with the same flags, when it has that build loaded. Any other check is the
+/// daemon's checker's, which loads the workspace as that build would and builds nothing.
+/// Neither runs rustc on the source.
 fn check(asked: &Invocation) -> anyhow::Result<i32> {
     let started = Instant::now();
     let cwd = std::env::current_dir()?;
-    let cargos = |why: &str| {
-        say::fallback(why, "this is `cargo check`");
-        plain_cargo(std::iter::once("check".to_owned()).chain(asked.typed.clone()).collect())
+    let finished = |profile: &str| {
+        let took = started.elapsed().as_secs_f64();
+        let finished = format!("`{profile}` profile [ra-jit] target(s) in {took:.2}s");
+        say::status(asked.flags.quiet, "Finished", &finished);
     };
-    let state = match State::read(&asked.key(&cwd)) {
-        Ok(state) if state.programs.is_empty() => {
-            return cargos("the daemon builds no program of it");
+    if let Ok(state) = State::read(&asked.key(&cwd))
+        && !state.programs.is_empty()
+    {
+        match by_daemon(state) {
+            Ok((state, _held)) => {
+                finished(&state.profile);
+                state.write()?;
+                return Ok(0);
+            }
+            Err(NotServed::Error(said)) => {
+                eprintln!("{said}");
+                return Ok(FAILED);
+            }
+            Err(NotServed::Cargo(_)) => {}
         }
-        Ok(state) => state,
-        Err(why) => return cargos(why.unwrap_or("the daemon has not built it")),
-    };
-    match by_daemon(state) {
-        Ok((state, _held)) => {
-            let took = started.elapsed().as_secs_f64();
-            let finished = format!("`{}` profile [ra-jit] target(s) in {took:.2}s", state.profile);
-            say::status(asked.flags.quiet, "Finished", &finished);
-            state.write()?;
+    }
+    let ahead = state::checked(asked)?;
+    let profile = ahead.config.selection.profile.clone();
+    match client::ask(Request::Check(ahead), Start::IfMissing)? {
+        Some(daemon::Reply::Checked { errors: None }) => {
+            finished(&profile);
             Ok(0)
         }
-        Err(NotServed::Error(said)) => {
+        Some(daemon::Reply::Checked { errors: Some(said) }) => {
             eprintln!("{said}");
             Ok(FAILED)
         }
-        Err(NotServed::Cargo(ToCargo(_, why))) => cargos(&why),
+        Some(daemon::Reply::Cold { reason }) => {
+            eprintln!("error: ra-jit could not check the workspace: {reason}");
+            Ok(FAILED)
+        }
+        reply => anyhow::bail!("the daemon answered a check with {reply:?}"),
     }
 }
 
