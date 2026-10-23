@@ -17,7 +17,7 @@ use std::{
     path::{Path, PathBuf},
     process::{Command, Stdio},
     sync::Mutex,
-    time::Instant,
+    time::{Duration, Instant},
 };
 
 use anyhow::Context as _;
@@ -774,6 +774,7 @@ fn build(
     tests: &[Test],
     target: &str,
 ) -> Vec<Option<Ours>> {
+    let start = Instant::now();
     let mut ours: Vec<Option<Ours>> = tests.iter().map(|_| None).collect();
     let wanted: Vec<usize> = (0..tests.len())
         .filter(|&at| !tests[at].is_ignored(target) && !tests[at].marks.compile_fail)
@@ -793,6 +794,7 @@ fn build(
         }
     };
     let mixing = with_another_copy(db, krate);
+    let (mut checking, mut linking) = (Duration::ZERO, Duration::ZERO);
     for (at, example) in add_crates(db, asked, krate, tests, &wanted) {
         let test = &tests[at];
         let source = &test.program.source;
@@ -806,7 +808,10 @@ fn build(
             );
             continue;
         }
-        if has_errors(db, example.root_file) {
+        let start = Instant::now();
+        let broken = has_errors(db, example.root_file);
+        checking += start.elapsed();
+        if broken {
             eprintln!("ra-jit: {} is rustc's: rust-analyzer finds an error in it", test.name);
             continue;
         }
@@ -814,11 +819,15 @@ fn build(
             ours[at] = Some(Ours::Checked);
             continue;
         }
-        match link(db, building, asked, &example.name, &unit) {
+        match link(db, building, asked, &example.name, &unit, &mut linking) {
             Ok(binary) => ours[at] = Some(Ours::Linked(binary)),
             Err(why) => eprintln!("ra-jit: {} is rustc's: {why:#}", test.name),
         }
     }
+    eprintln!(
+        "doctests: built in {:.1?}: {checking:.1?} checking, {linking:.1?} linking",
+        start.elapsed()
+    );
     ours
 }
 
@@ -940,6 +949,7 @@ fn link(
     asked: &Asked,
     name: &str,
     unit: &Path,
+    linking: &mut Duration,
 ) -> anyhow::Result<PathBuf> {
     let dir = asked.dir.join(name);
     std::fs::create_dir_all(&dir)?;
@@ -961,8 +971,10 @@ fn link(
     }
     let example = crate::crates_named(db, name, &args)?;
     let binary = dir.join("rust_out");
+    let start = Instant::now();
     crate::link::executable(db, &example, &[&args.out, unit], building.sysroot, &binary)?;
     let stand_ins = crate::link::stand_ins(&binary)?;
+    *linking += start.elapsed();
     if let Some(first) = stand_ins.first() {
         anyhow::bail!("it calls {} functions ra-jit could not compile: {first}", stand_ins.len());
     }
