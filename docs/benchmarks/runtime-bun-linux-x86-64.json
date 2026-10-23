@@ -1,13 +1,13 @@
 {
  "toolchain": "1.99.0",
- "commit": "a1ca86949219f27b4b2a78767090900105322c5e",
- "date": "2026-10-23T20:15:40Z",
+ "commit": "68c3558698d1a050d728c592737766712fefae86",
+ "date": "2026-10-23T20:54:57Z",
  "host": {
   "name": null,
   "cpu": "AMD EPYC 9R45",
   "cores": 16,
   "machine_cores": 96,
-  "load": "11.5, 8.4, 8.1",
+  "load": "12.0, 7.9, 5.4",
   "memory_gib": 185,
   "os": "Linux",
   "arch": "x86_64",
@@ -32,70 +32,70 @@
    "bun": {
     "builds": {
      "release": {
-      "build_s": 135.5,
-      "build_peak_mb": 6296,
-      "build_largest_mb": 3697,
+      "build_s": 135.6,
+      "build_peak_mb": 6249,
+      "build_largest_mb": 3694,
       "size_mb": 314.01
      },
      "checked": {
-      "build_s": 142.1,
-      "build_peak_mb": 6386,
+      "build_s": 142.3,
+      "build_peak_mb": 6438,
       "build_largest_mb": 3673,
       "size_mb": 321.05
      },
      "ra-jit": {
-      "build_s": 118.4,
-      "cargo_s": 4.9,
-      "ra_jit_s": 111.7,
+      "build_s": 129.2,
+      "cargo_s": 5.0,
+      "ra_jit_s": 122.5,
       "link_s": 1.7,
       "compiled": 68315,
       "left": 0,
       "reasons": {},
-      "build_peak_mb": 18602,
-      "build_largest_mb": 18473,
-      "size_mb": 299.96
+      "build_peak_mb": 15929,
+      "build_largest_mb": 15801,
+      "size_mb": 297.55
      }
     },
     "benches": {
      "bun": {
       "release": {
-       "median_s": 0.3852,
+       "median_s": 0.3891,
        "ratio": 1.0,
        "runs": [
-        0.3902,
-        0.3854,
-        0.3847,
-        0.3847,
-        0.3852
+        0.3915,
+        0.3891,
+        0.3887,
+        0.3891,
+        0.3879
        ],
        "peak_mb": 51,
        "peak_max_mb": 51
       },
       "checked": {
-       "median_s": 0.4236,
-       "ratio": 1.1,
+       "median_s": 0.4273,
+       "ratio": 1.098,
        "runs": [
-        0.4241,
-        0.4234,
-        0.4239,
-        0.4236,
-        0.4233
+        0.427,
+        0.4271,
+        0.4282,
+        0.4285,
+        0.4273
        ],
        "peak_mb": 52,
        "peak_max_mb": 52
       },
       "ra-jit": {
-       "median_s": 0.4807,
-       "ratio": 1.248,
+       "median_s": 0.4763,
+       "ratio": 1.224,
        "runs": [
-        0.4807,
-        0.4801,
-        0.4806,
-        0.4807,
-        0.4815
+        0.4768,
+        0.4758,
+        0.4767,
+        0.4762,
+        0.4763
        ],
-       "peak_mb": 64,
-       "peak_max_mb": 64
+       "peak_mb": 62,
+       "peak_max_mb": 62
       }
      }
     }
@@ -103,8 +103,8 @@
   },
   "geomean": {
    "release": 1.0,
-   "checked": 1.1,
-   "ra-jit": 1.248
+   "checked": 1.098,
+   "ra-jit": 1.224
   }
  }
 }

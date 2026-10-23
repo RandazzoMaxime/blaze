@@ -184,7 +184,7 @@ On disk: cargo's target directory → ra-jit's target directory, store and home.
 <!-- benchmem:end -->
 
 <!-- runbench:start -->
-<picture><source media="(prefers-color-scheme: dark)" srcset="docs/benchmarks/charts/runtime-dark.svg"><img alt="How fast each benchmark runs built by ra-jit, against cargo build --release, by platform: All benchmarks (geometric mean): macOS arm64 1.18× slower, Linux aarch64 1.16× slower, Linux x86-64 1.12× slower; sieve: macOS arm64 1.12× slower, Linux aarch64 1.06× slower, Linux x86-64 1.02× slower; collatz: macOS arm64 1.01× slower, Linux aarch64 1.00×, Linux x86-64 1.00×; fnv: macOS arm64 1.00×, Linux aarch64 1.03× slower, Linux x86-64 1.00×; qsort: macOS arm64 1.05× faster, Linux aarch64 1.08× slower, Linux x86-64 1.11× slower; matmul: macOS arm64 1.21× slower, Linux aarch64 1.04× slower, Linux x86-64 1.04× slower; nbody: macOS arm64 1.31× slower, Linux aarch64 1.28× slower, Linux x86-64 1.27× slower; mandelbrot: macOS arm64 1.01× slower, Linux aarch64 1.00×, Linux x86-64 1.03× faster; words: macOS arm64 1.37× slower, Linux aarch64 1.30× slower, Linux x86-64 1.24× slower; numeric: macOS arm64 1.31× slower, Linux aarch64 1.18× slower, Linux x86-64 1.11× faster; jsonrt: macOS arm64 ≈1.38× slower, Linux aarch64 1.46× slower, Linux x86-64 1.25× slower; ripgrep: macOS arm64 ≈1.50× slower, Linux aarch64 1.33× slower, Linux x86-64 1.21× slower; fd: macOS arm64 ≈1.12× slower, Linux aarch64 1.31× slower, Linux x86-64 1.23× slower; tokei: macOS arm64 1.29× slower, Linux aarch64 1.27× slower, Linux x86-64 1.34× slower; eza: macOS arm64 ≈1.06× slower, Linux aarch64 1.06× slower, Linux x86-64 1.07× slower; bat: macOS arm64 ≈1.16× slower, Linux aarch64 1.16× slower, Linux x86-64 1.19× slower; bun: macOS arm64 1.25× slower, Linux aarch64 1.20× slower, Linux x86-64 1.25× slower" src="docs/benchmarks/charts/runtime-light.svg" width="760"></picture>
+<picture><source media="(prefers-color-scheme: dark)" srcset="docs/benchmarks/charts/runtime-dark.svg"><img alt="How fast each benchmark runs built by ra-jit, against cargo build --release, by platform: All benchmarks (geometric mean): macOS arm64 1.18× slower, Linux aarch64 1.16× slower, Linux x86-64 1.12× slower; sieve: macOS arm64 1.12× slower, Linux aarch64 1.06× slower, Linux x86-64 1.02× slower; collatz: macOS arm64 1.01× slower, Linux aarch64 1.00×, Linux x86-64 1.00×; fnv: macOS arm64 1.00×, Linux aarch64 1.03× slower, Linux x86-64 1.00×; qsort: macOS arm64 1.05× faster, Linux aarch64 1.08× slower, Linux x86-64 1.11× slower; matmul: macOS arm64 1.21× slower, Linux aarch64 1.04× slower, Linux x86-64 1.04× slower; nbody: macOS arm64 1.31× slower, Linux aarch64 1.28× slower, Linux x86-64 1.27× slower; mandelbrot: macOS arm64 1.01× slower, Linux aarch64 1.00×, Linux x86-64 1.03× faster; words: macOS arm64 1.37× slower, Linux aarch64 1.30× slower, Linux x86-64 1.24× slower; numeric: macOS arm64 1.31× slower, Linux aarch64 1.18× slower, Linux x86-64 1.11× faster; jsonrt: macOS arm64 ≈1.38× slower, Linux aarch64 1.46× slower, Linux x86-64 1.25× slower; ripgrep: macOS arm64 ≈1.50× slower, Linux aarch64 1.33× slower, Linux x86-64 1.21× slower; fd: macOS arm64 ≈1.12× slower, Linux aarch64 1.31× slower, Linux x86-64 1.23× slower; tokei: macOS arm64 1.29× slower, Linux aarch64 1.27× slower, Linux x86-64 1.34× slower; eza: macOS arm64 ≈1.06× slower, Linux aarch64 1.06× slower, Linux x86-64 1.07× slower; bat: macOS arm64 ≈1.16× slower, Linux aarch64 1.16× slower, Linux x86-64 1.19× slower; bun: macOS arm64 1.25× slower, Linux aarch64 1.17× slower, Linux x86-64 1.22× slower" src="docs/benchmarks/charts/runtime-light.svg" width="760"></picture>
 
 How fast the programs run. Each program is built by `cargo build --release` and by ra-jit with LLVM at `-O3`, every crate of it compiled by ra-jit, with the release profile; each benchmark is then run several times, the builds taking turns, median. A run is published only when every program did what the release build's did. Each platform is a machine of its own, and each number is ra-jit's time ÷ release's on it: 1x is as fast.
 
@@ -205,7 +205,7 @@ How fast the programs run. Each program is built by `cargo build --release` and 
 | tokei | 1.29x | 1.27x | 1.34x |
 | eza | ≈1.06x | 1.06x | 1.07x |
 | bat | ≈1.16x | 1.16x | 1.19x |
-| bun | 1.25x | 1.20x | 1.25x |
+| bun | 1.25x | 1.17x | 1.22x |
 | **All benchmarks (geometric mean)** | **1.18x** | **1.16x** | **1.12x** |
 
 ≈: that benchmark's runs varied by more than 1.5× from fastest to slowest on that machine; read it as rough.
@@ -213,7 +213,7 @@ How fast the programs run. Each program is built by `cargo build --release` and 
 - **macOS arm64**: GitHub-hosted macos-15 runner (a shared VM) (Apple M1 (Virtual), 3 cores, 7 GiB), ra-jit [`9c31e64d83`](https://github.com/indexable-inc/ra-jit/commit/9c31e64d83cd4cc2d0bbbd2e56b7e48d8a9326c6) on 2026-10-23, each benchmark run 5 times, load average 12 at the start, [by CI](https://github.com/indexable-inc/ra-jit/actions/runs/39876666206).
 - **Linux aarch64**: AWS c8g.8xlarge (Graviton4), pinned to 16 cores with taskset (Neoverse-V2, 16 of its 32 cores, 62 GiB), ra-jit [`9c31e64d83`](https://github.com/indexable-inc/ra-jit/commit/9c31e64d83cd4cc2d0bbbd2e56b7e48d8a9326c6) on 2026-10-23, each benchmark run 10 times, load average 12 at the start, by hand.
 - **Linux x86-64**: AWS c8a.metal-24xl (dev-aws-11), pinned to 16 cores with taskset (AMD EPYC 9R45, 16 of its 96 cores, 188 GiB), ra-jit [`9c31e64d83`](https://github.com/indexable-inc/ra-jit/commit/9c31e64d83cd4cc2d0bbbd2e56b7e48d8a9326c6) on 2026-10-23, each benchmark run 10 times, load average 12 at the start, by hand.
-- **bun** is measured on its own, by the `bench-bun` workflow: macOS arm64 on one machine (Apple M5 Max, 18 cores, 128 GiB), ra-jit [`948d54e375`](https://github.com/indexable-inc/ra-jit/commit/948d54e375ef4f4685a932539d3a4118992a31c1) on 2026-10-23, each benchmark run 5 times, load average 29 at the start, by hand; Linux aarch64 on one machine (Neoverse-V2, 16 of its 96 cores, 185 GiB), ra-jit [`a1ca869492`](https://github.com/indexable-inc/ra-jit/commit/a1ca86949219f27b4b2a78767090900105322c5e) on 2026-10-23, each benchmark run 5 times, load average 12 at the start, by hand; Linux x86-64 on one machine (AMD EPYC 9R45, 16 of its 96 cores, 185 GiB), ra-jit [`a1ca869492`](https://github.com/indexable-inc/ra-jit/commit/a1ca86949219f27b4b2a78767090900105322c5e) on 2026-10-23, each benchmark run 5 times, load average 12 at the start, by hand.
+- **bun** is measured on its own, by the `bench-bun` workflow: macOS arm64 on one machine (Apple M5 Max, 18 cores, 128 GiB), ra-jit [`948d54e375`](https://github.com/indexable-inc/ra-jit/commit/948d54e375ef4f4685a932539d3a4118992a31c1) on 2026-10-23, each benchmark run 5 times, load average 29 at the start, by hand; Linux aarch64 on one machine (Neoverse-V2, 16 of its 96 cores, 185 GiB), ra-jit [`68c3558698`](https://github.com/indexable-inc/ra-jit/commit/68c3558698d1a050d728c592737766712fefae86) on 2026-10-23, each benchmark run 5 times, load average 12 at the start, by hand; Linux x86-64 on one machine (AMD EPYC 9R45, 16 of its 96 cores, 185 GiB), ra-jit [`68c3558698`](https://github.com/indexable-inc/ra-jit/commit/68c3558698d1a050d728c592737766712fefae86) on 2026-10-23, each benchmark run 5 times, load average 12 at the start, by hand.
 
 <details><summary>Times, memory and builds, by platform</summary>
 
@@ -272,7 +272,7 @@ What each program takes, release → ra-jit: its build from cold (for ra-jit, ca
 | tokei | 88 ms | **112 ms** | 1.27x | 1.01x | 50 MB → 53 MB |
 | eza | 246 ms | **261 ms** | 1.06x | 1.07x | 46 MB → 46 MB |
 | bat | 88 ms | **102 ms** | 1.16x | 1.02x | 31 MB → 31 MB |
-| bun | 537 ms | **643 ms** | 1.20x | 1.09x | 54 MB → 58 MB |
+| bun | 535 ms | **624 ms** | 1.17x | 1.10x | 54 MB → 58 MB |
 | **All benchmarks (geometric mean)** | | | **1.16x** | 1.07x | |
 
 What each program takes, release → ra-jit: its build from cold (for ra-jit, cargo running the build scripts and proc macros, ra-jit's compile of every crate and the link), its size, and its build's memory (the most the build's processes held at once, and the largest one process: rustc or ra-jit, or the linker).
@@ -287,7 +287,7 @@ What each program takes, release → ra-jit: its build from cold (for ra-jit, ca
 | tokei | 13.80 s → 52.30 s | 5.43 MB → 9.32 MB | 3.4 GB → 4.8 GB | 536 MB → 4.8 GB |
 | eza | 35.70 s → 39.20 s | 2.38 MB → 5.59 MB | 3.4 GB → 4.2 GB | 575 MB → 4.2 GB |
 | bat | 51.20 s → 122.70 s | 6.99 MB → 13.03 MB | 3.7 GB → 6.6 GB | 1.3 GB → 6.6 GB |
-| bun | 168.20 s → 144.50 s | 318.66 MB → 303.68 MB | 6.5 GB → 18.9 GB | 3.7 GB → 18.8 GB |
+| bun | 167.40 s → 160.20 s | 318.66 MB → 301.54 MB | 6.5 GB → 16.0 GB | 3.7 GB → 16.0 GB |
 
 **Linux x86-64**
 
@@ -308,7 +308,7 @@ What each program takes, release → ra-jit: its build from cold (for ra-jit, ca
 | tokei | 80 ms | **107 ms** | 1.34x | 0.98x | 32 MB → 36 MB |
 | eza | 144 ms | **155 ms** | 1.07x | 1.04x | 28 MB → 28 MB |
 | bat | 56 ms | **67 ms** | 1.19x | 1.02x | 28 MB → 28 MB |
-| bun | 385 ms | **481 ms** | 1.25x | 1.10x | 51 MB → 64 MB |
+| bun | 389 ms | **476 ms** | 1.22x | 1.10x | 51 MB → 62 MB |
 | **All benchmarks (geometric mean)** | | | **1.12x** | 1.07x | |
 
 What each program takes, release → ra-jit: its build from cold (for ra-jit, cargo running the build scripts and proc macros, ra-jit's compile of every crate and the link), its size, and its build's memory (the most the build's processes held at once, and the largest one process: rustc or ra-jit, or the linker).
@@ -323,7 +323,7 @@ What each program takes, release → ra-jit: its build from cold (for ra-jit, ca
 | tokei | 10.30 s → 45.70 s | 5.51 MB → 10.81 MB | 3.0 GB → 4.9 GB | 477 MB → 4.8 GB |
 | eza | 28.30 s → 33.60 s | 2.68 MB → 6.04 MB | 3.0 GB → 4.2 GB | 463 MB → 4.2 GB |
 | bat | 42.40 s → 104.30 s | 7.55 MB → 14.22 MB | 3.4 GB → 7.0 GB | 689 MB → 7.0 GB |
-| bun | 135.50 s → 118.40 s | 314.01 MB → 299.96 MB | 6.3 GB → 18.6 GB | 3.7 GB → 18.5 GB |
+| bun | 135.60 s → 129.20 s | 314.01 MB → 297.55 MB | 6.2 GB → 15.9 GB | 3.7 GB → 15.8 GB |
 
 Release with dev checks: `cargo build --release` with `-C overflow-checks=on -C debug-assertions=on`.
 

@@ -25,8 +25,8 @@
 <line x1="651" y1="116" x2="651" y2="1102" class="g"/>
 <line x1="16" y1="174" x2="744" y2="174" class="r"/>
 <rect x="326.3" y="124" width="62.5" height="12" rx="2" class="p0"/>
-<rect x="331.1" y="139" width="57.7" height="12" rx="2" class="p1"/>
-<rect x="344.6" y="154" width="44.2" height="12" rx="2" class="p2"/>
+<rect x="331.8" y="139" width="57" height="12" rx="2" class="p1"/>
+<rect x="345.1" y="154" width="43.7" height="12" rx="2" class="p2"/>
 <rect x="346.3" y="182" width="42.5" height="12" rx="2" class="p0"/>
 <rect x="367.1" y="197" width="21.7" height="12" rx="2" class="p1"/>
 <rect x="382.4" y="212" width="6.4" height="12" rx="2" class="p2"/>
@@ -73,8 +73,8 @@
 <rect x="331.4" y="1009" width="57.4" height="12" rx="2" class="p1"/>
 <rect x="322.1" y="1024" width="66.7" height="12" rx="2" class="p2"/>
 <rect x="304.7" y="1052" width="84.1" height="12" rx="2" class="p0"/>
-<rect x="320.5" y="1067" width="68.3" height="12" rx="2" class="p1"/>
-<rect x="305" y="1082" width="83.8" height="12" rx="2" class="p2"/>
+<rect x="330.7" y="1067" width="58.1" height="12" rx="2" class="p1"/>
+<rect x="312.4" y="1082" width="76.4" height="12" rx="2" class="p2"/>
 <line x1="388.8" y1="108" x2="388.8" y2="1102" class="r"/>
 <text x="126.6" y="1119" font-size="11.5" text-anchor="middle" class="d v">2×</text>
 <text x="235.4" y="1119" font-size="11.5" text-anchor="middle" class="d v">1.5×</text>
@@ -148,8 +148,8 @@
 <text x="394.8" y="1034" font-size="12" class="v">1.19× slower</text>
 <text x="114.6" y="1077.5" font-size="13" text-anchor="end">bun</text>
 <text x="394.8" y="1062" font-size="12" class="v">1.25× slower</text>
-<text x="394.8" y="1077" font-size="12" class="v">1.20× slower</text>
-<text x="394.8" y="1092" font-size="12" class="v">1.25× slower</text>
+<text x="394.8" y="1077" font-size="12" class="v">1.17× slower</text>
+<text x="394.8" y="1092" font-size="12" class="v">1.22× slower</text>
 <text x="388.8" y="103" font-size="11.5" text-anchor="middle" class="d">as fast as release</text>
 <text x="380.8" y="1139" font-size="12" text-anchor="end" class="d">← ra-jit's program slower</text>
 <text x="396.8" y="1139" font-size="12" class="d">ra-jit's program faster →</text>

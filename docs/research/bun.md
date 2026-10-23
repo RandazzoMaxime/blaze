@@ -262,6 +262,10 @@ Linux x86-64 on 16 cores of an AWS c8a.24xlarge (`taskset -c 0-15`), `runbench.p
   | helix | 33.4 s | 415.8 s | 64.7 s | not run → 1.24x |
   | nushell | 79.4 s | 1042.9 s | 190.4 s | 1.266x → 1.20x |
 
+  With main of the same evening merged in (#160's ThinLTO pipelines, #171's constants), one
+  run each: bun 129.2 s against 135.6 s at 1.22x, ripgrep 12.4 s against 6.0 s at 1.06x,
+  helix 70.6 s against 33.5 s at 1.21x.
+
   Linux aarch64, bun, 16 cores of an AWS c8g.24xlarge (Neoverse-V2), main `ac1ee2dd68` before
   (one run) and `a1ca869492` after (median of 5):
 
@@ -270,7 +274,8 @@ Linux x86-64 on 16 cores of an AWS c8a.24xlarge (`taskset -c 0-15`), `runbench.p
   | bun | 168.2 s | 694.1 s | 144.5 s | 1.178x → 1.198x |
 
   cargo's release binary ran 536 ms both times. ra-jit's ran 632 ms before and 643 ms after:
-  about 2% slower, which is not explained yet. The limits above were tuned on x86-64 only.
+  about 2% slower; the limits above were tuned on x86-64 only. With main merged in (median of
+  5): 160.2 s against 167.4 s, at 1.17x (624 ms against 535 ms).
 
 - **Why helix and nushell are still slower than cargo** (read, built with nothing imported):
   every function is still a module of its own. With nothing imported:
