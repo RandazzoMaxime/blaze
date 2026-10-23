@@ -16,7 +16,7 @@ use std::{cell::RefCell, collections::hash_map::Entry, fmt, sync::Once};
 
 use cranelift_codegen::ir::{self, Opcode, Type};
 use inkwell::{
-    OptimizationLevel,
+    AddressSpace, GlobalVisibility, OptimizationLevel,
     attributes::{Attribute, AttributeLoc},
     context::Context,
     llvm_sys::support::LLVMParseCommandLineOptions,
@@ -25,7 +25,8 @@ use inkwell::{
     targets::{
         CodeModel, FileType, InitializationConfig, RelocMode, Target, TargetMachine, TargetTriple,
     },
-    values::FunctionValue,
+    types::{AnyType, BasicTypeEnum},
+    values::{BasicValueEnum, FunctionValue},
 };
 use rustc_hash::{FxHashMap, FxHashSet};
 
@@ -103,6 +104,13 @@ pub(super) fn emit(
         let statics: FxHashSet<u32> = recorder.statics().collect();
         let resume = recorder.resume();
         let memcmp = recorder.memcmp();
+        let readonly: FxHashMap<u32, &super::ConstBlob> = recorder.readonly().collect();
+        told_constants(
+            context,
+            &module,
+            &readonly,
+            machine.get_target_data().get_pointer_byte_size(None) as usize,
+        );
         let shown = tally.time(Phase::Lower, || {
             let own = Defined {
                 name: if wrapped { INNER } else { OWN },
@@ -195,6 +203,7 @@ pub(super) fn emit(
             }
         }
         unshow(&module, &shown);
+        retold_bytes(context, &module, &readonly);
         if module.get_function(INNER).is_some() {
             return Err(Unhandled::Shape("a body not built into the function that calls it"));
         }
@@ -488,6 +497,117 @@ impl fmt::Display for Symbol {
             Symbol::Func(index) => write!(f, "ra-jit.f.{index}"),
             Symbol::Data(index) => write!(f, "ra-jit.d.{index}"),
         }
+    }
+}
+
+/// Declares each of `readonly` that holds no function's address with what it holds, its
+/// bytes and the addresses into the others, as an `available_externally` constant, as rustc's
+/// constants are known to LLVM: a load through a pointer to it folds (a comparison with a
+/// literal is one with an immediate), and LLVM emits no copy, so it keeps its one address.
+fn told_constants<'ctx>(
+    context: &'ctx Context,
+    module: &Module<'ctx>,
+    readonly: &FxHashMap<u32, &super::ConstBlob>,
+    pointer: usize,
+) {
+    let i8 = context.i8_type();
+    let mut told: Vec<_> = readonly
+        .iter()
+        .filter_map(|(&index, &blob)| {
+            let mut relocs: Vec<(usize, u32, i64)> = blob
+                .relocs
+                .iter()
+                .map(|&(offset, target, addend)| (offset as usize, target.as_u32(), addend))
+                .collect();
+            relocs.sort_unstable_by_key(|it| it.0);
+            let fits = relocs.iter().all(|it| readonly.contains_key(&it.1))
+                && relocs.windows(2).all(|it| it[0].0 + pointer <= it[1].0)
+                && relocs.last().is_none_or(|it| it.0 + pointer <= blob.bytes.len());
+            (!blob.bytes.is_empty() && blob.fn_relocs.is_empty() && fits)
+                .then_some((index, blob, relocs))
+        })
+        .collect();
+    told.sort_unstable_by_key(|it| it.0);
+    let mut globals = Vec::with_capacity(told.len());
+    for (index, blob, relocs) in &told {
+        let mut fields: Vec<BasicTypeEnum<'ctx>> = Vec::new();
+        let mut at = 0;
+        for &(offset, _, _) in relocs {
+            if offset > at {
+                fields.push(i8.array_type((offset - at) as u32).into());
+            }
+            fields.push(context.ptr_type(AddressSpace::default()).into());
+            at = offset + pointer;
+        }
+        if at < blob.bytes.len() {
+            fields.push(i8.array_type((blob.bytes.len() - at) as u32).into());
+        }
+        let global = module.add_global(
+            context.struct_type(&fields, true),
+            None,
+            &Symbol::Data(*index).to_string(),
+        );
+        global.set_linkage(Linkage::AvailableExternally);
+        global.set_visibility(GlobalVisibility::Hidden);
+        global.set_constant(true);
+        global.set_alignment(blob.align as u32);
+        globals.push(global);
+    }
+    for ((_, blob, relocs), global) in std::iter::zip(&told, globals) {
+        let mut fields: Vec<BasicValueEnum<'ctx>> = Vec::new();
+        let mut at = 0;
+        for &(offset, target, addend) in relocs {
+            if offset > at {
+                fields.push(context.const_string(&blob.bytes[at..offset], false).into());
+            }
+            let name = Symbol::Data(target).to_string();
+            let target = module.get_global(&name).unwrap_or_else(|| {
+                let declared = module.add_global(i8, None, &name);
+                declared.set_linkage(Linkage::External);
+                declared.set_visibility(GlobalVisibility::Hidden);
+                declared
+            });
+            let address = target.as_pointer_value();
+            let address = match addend {
+                0 => address,
+                // SAFETY: a constant expression of an address `addend` bytes into the object.
+                _ => unsafe {
+                    address.const_gep(i8, &[context.i64_type().const_int(addend as u64, true)])
+                },
+            };
+            fields.push(address.into());
+            at = offset + pointer;
+        }
+        if at < blob.bytes.len() {
+            fields.push(context.const_string(&blob.bytes[at..], false).into());
+        }
+        global.set_initializer(&context.const_struct(&fields, true));
+    }
+}
+
+/// Gives back the bytes of each constant of [`told_constants`] that holds no address, which
+/// LLVM's optimizer takes from an `available_externally` object once it is done inlining:
+/// the code generator expands a `memcmp` of a few bytes after that, and folds a load of
+/// what it knows into an immediate.
+fn retold_bytes<'ctx>(
+    context: &'ctx Context,
+    module: &Module<'ctx>,
+    readonly: &FxHashMap<u32, &super::ConstBlob>,
+) {
+    for (&index, blob) in readonly {
+        if !blob.points_nowhere() || blob.bytes.is_empty() {
+            continue;
+        }
+        let Some(global) = module.get_global(&Symbol::Data(index).to_string()) else { continue };
+        if global.get_initializer().is_some() {
+            continue;
+        }
+        let bytes = context.const_struct(&[context.const_string(&blob.bytes, false).into()], true);
+        if global.get_value_type() != bytes.get_type().as_any_type_enum() {
+            continue;
+        }
+        global.set_initializer(&bytes);
+        global.set_linkage(Linkage::AvailableExternally);
     }
 }
 

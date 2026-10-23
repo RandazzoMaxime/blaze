@@ -86,7 +86,11 @@ All of these are rustc's, written from `compiler/rustc_borrowck` at the pinned n
   `T: 'static`); a field's `dyn Any + 'a` implies nothing of `'a`, as rustc's inferred
   outlives leave out what mentions `Self`. An associated type in a signature is related as what it normalizes
   to, so `for x in &mut v` keeps `v` borrowed in the `IterMut<'a, T>` that
-  `<&'a mut Vec<T> as IntoIterator>::IntoIter` is. Unsizing an array to a slice keeps its
+  `<&'a mut Vec<T> as IntoIterator>::IntoIter` is; two associated types are too (a GAT's
+  `Self::Item<'w, 's>` and `Self::Item<'w, 'static>` are both `&'w T`), with what a where
+  clause makes of their lifetimes (`T: Fun<F<'a> = [u8]>` makes `T::F<'x>` `[u8]` only where
+  `'x` is `'a`). The checker's where clauses that name no parameter are normalized first, as
+  rustc normalizes a param env. Unsizing an array to a slice keeps its
   element type (`[T; N]: Unsize<[T]>`), so `&mut [&'a T; 1]` as `&mut [&'b T]` makes `'a`
   and `'b` one; unsizing inside a struct (`&RefCell<T>` to `&RefCell<dyn Read>`) unsizes the
   argument its last field does and keeps the others. A closure typed against an expected
@@ -104,6 +108,10 @@ All of these are rustc's, written from `compiler/rustc_borrowck` at the pinned n
   (rustc's `*mut T`), so `BAR = &n` and `FOO(&n)` are E0597. `Fn::call` through a `dyn Fn`
   matches its tupled signature to the arguments one by one. E0521 in a function needs the
   escaping lifetime in a parameter's type, else it is "lifetime may not live long enough".
+- The signature's associated types are normalized as rustc's universal regions normalize
+  them: what the impl of one needs of the regions must hold, reported at the signature
+  (`-> <&'a () as Visitor<'d>>::Value` with `impl<'a, 'd: 'a> Visitor<'d> for &'a ()` and
+  `'a: 'd` makes `'a` and `'d` one, which the signature does not say).
 - Well-formedness in bodies: a called function's signature as written, before its associated
   types are normalized, and its generic arguments are well-formed at the call (`&'a &'b ()`
   that `'b: 'a`); so is a function item's signature where it becomes a function pointer, with
@@ -241,7 +249,9 @@ All of these are rustc's, written from `compiler/rustc_borrowck` at the pinned n
 - Items, as rustc's `wfcheck` (the crate `hir-ty-wfcheck`, next to the checker): a struct's,
   enum's or union's fields must be well-formed given its where clauses and what rustc infers
   from the fields (every `T: 'a`, never `T: 'static`), so `&'static T` or `Bar<T>` with
-  `struct Bar<T: 'static>` in a field needs `T: 'static` written (E0310). A trait impl's
+  `struct Bar<T: 'static>` in a field needs `T: 'static` written (E0310). What the impl of an
+  associated type in a field needs is not inferred, so `<T as Dummy<'a>>::Out` with only
+  `impl<'a, T: 'a> Dummy<'a> for T` needs `T: 'a` written (E0309). A trait impl's
   associated types must be well-formed given the impl's where clauses and what its header's
   types imply (E0309), and the impl must satisfy the trait's outlives bounds, as
   `trait Foo: 'static` (E0310); a generic associated type is checked with its own where
@@ -295,32 +305,33 @@ With no borrow checker, the 245 units rustc accepts would pass. Now:
 
 | Mode | In scope | Pass | rustc accepts, ra-jit too | rustc rejects, same errors |
 |---|---|---|---|---|
-| Polonius | 1579 | 1511 (95.7%) | 245 of 245 | 1266 of 1334 |
-| NLL | 1577 | 1507 (95.6%) | 226 of 226 | 1281 of 1351 |
+| Polonius | 1580 | 1517 (96.0%) | 245 of 245 | 1272 of 1335 |
+| NLL | 1578 | 1513 (95.9%) | 226 of 226 | 1287 of 1352 |
 
-463 units are out of scope; 344 of them need a nightly feature. CI runs the scoring on Linux
-and fails below a floor a few units under the count there.
+461 units are out of scope; 344 of them need a nightly feature. CI runs the scoring on Linux
+and fails below a floor a few units under the count there, on any error in a unit rustc
+accepts, and on any unit the checker panics on, as a panic hides every error in its file.
 
 The other check is that it finds nothing in code rustc accepts.
 `ra-jit borrowck --project DIR` checks a cargo workspace; on ripgrep, fd, bat, hyperfine,
-just, axum, nushell, delta, eza, tokei and starship it finds nothing, nor on the harness's
-`corpus` and `mixfutures` crates.
+just, axum, nushell, delta, eza, tokei, starship and cargo it finds nothing, nor on the
+harness's `corpus` and `mixfutures` crates, which CI checks too. Its last line counts the
+files, errors and files it panicked on; a panic makes it fail.
 
 ## What is left
 
 Every failing unit is one where rustc gives an error ra-jit does not, or gives it on another
-line or with another code. By what is wrong, most first: 12 "lifetime may not live long
-enough" not reported, 4 on another line or with another code, 2 with only an error rustc does
-not give, 7 of E0597 not reported, 6 of E0309, 5 each of E0311, E0507, E0310 and
-higher-ranked errors and 4 of E0716 not reported, then a long tail. The causes, grouped:
+line or with another code. By what is wrong, most first: 10 "lifetime may not live long
+enough" not reported, 3 on another line or with another code, 2 with only an error rustc does
+not give, 6 of E0309 not reported, 5 each of E0507, E0310 and higher-ranked errors, 4 of
+E0716, 3 each of E0311, E0597 and E0700 not reported, then a long tail. The causes, grouped:
 
 - **Higher-ranked regions and placeholders** (`for<'a>` bounds, closures with higher-ranked
   signatures): rustc checks them with placeholders in universes; ra-jit does not yet, and
   leaves out what a `for<'a>` lifetime is related to, apart from `for<'a> T: 'a`.
-- **Well-formedness of items** (most of what is left of E0309 and E0310): what proving a
-  trait bound needs of the regions (`<T as Dummy<'a>>::Out` in a field, proven by an impl
-  that needs `T: 'a`), and items whose signature
-  or impl header has an associated type (what normalizing it implies) are not checked yet.
+- **Well-formedness of items** (most of what is left of E0309 and E0310): items whose
+  signature or impl header has an associated type (what normalizing it implies) are not
+  checked yet, nor what an impl's or function's where clauses need of a projection in them.
 - **Member constraints of `impl Trait`**: the choice rustc makes is not applied, and a
   projection bound that names a lifetime (`impl Iterator<Item = Box<dyn Foo>>`) leaves them
   out.
