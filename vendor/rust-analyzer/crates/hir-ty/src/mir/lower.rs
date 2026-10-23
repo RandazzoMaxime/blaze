@@ -2771,7 +2771,19 @@ impl<'a, 'db> MirLowerCtx<'a, 'db> {
 
     /// The unwind drop tree's way out from where lowering is: every scope's drops.
     fn unwind_here(&mut self) -> Option<BasicBlockId> {
-        let in_scope = self.in_scope();
+        // rustc keeps the operands of an expression being lowered in that expression's own
+        // scope, inside the temporaries that live to the end of the statement: in
+        // `boom().extend(&String::from(..))` a panic in the deref drops `boom()` first.
+        let operands = &self.operand_locals;
+        let in_scope: Vec<LocalId> = self
+            .drop_scopes
+            .iter()
+            .flat_map(|it| {
+                let (pending, rest): (Vec<LocalId>, Vec<LocalId>) =
+                    it.in_order(operands).iter().partition(|it| operands.contains(it));
+                rest.into_iter().chain(pending)
+            })
+            .collect();
         self.unwind_through(&in_scope, None)
     }
 
