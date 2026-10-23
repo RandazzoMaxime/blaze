@@ -1335,10 +1335,22 @@ impl Store {
     /// The store of this process: the directory `RA_JIT_CACHE` names, when it names one. A
     /// directory that cannot be used is said once, and the process compiles without one.
     pub fn global() -> Option<&'static Store> {
+        Store::global_or(None)
+    }
+
+    /// The store of this process: the directory `RA_JIT_CACHE` names, or `otherwise` when the
+    /// variable is not set. The first call decides.
+    pub fn global_or(otherwise: Option<&Path>) -> Option<&'static Store> {
         static STORE: OnceLock<Option<Store>> = OnceLock::new();
         STORE
             .get_or_init(|| {
-                let dir = std::env::var_os("RA_JIT_CACHE").filter(|it| !is_off(it))?;
+                let dir = match std::env::var_os("RA_JIT_CACHE") {
+                    Some(named) => named,
+                    None => otherwise?.as_os_str().to_owned(),
+                };
+                if is_off(&dir) {
+                    return None;
+                }
                 let opened = Identity::current().and_then(|identity| {
                     Store::open(Path::new(&dir), identity, Tuning::from_env()?)
                 });
@@ -1394,6 +1406,23 @@ impl Store {
             writer.stop(io::Error::other("a thread panicked while it wrote to the store"));
             writer
         })
+    }
+
+    /// Waits for no other process to be making the value of `key`, and has the others wait for
+    /// this one until the file it returns is dropped, by when the value is to be in a sealed
+    /// pack ([`Self::flush`]). A value several processes would make at once, as the build
+    /// scripts of a cold build would the standard library's unit, is made by the first, and the
+    /// others find it.
+    pub fn making(&self, key: &[u8; KEY]) -> io::Result<File> {
+        let key = self.identity.key(key);
+        let mut name = named(&key);
+        name.truncate(name.len() - ".pack".len());
+        let path = self.dir.dir.join(format!("making-{name}"));
+        let mut options = OpenOptions::new();
+        let file = private::file(options.create(true).truncate(false).write(true)).open(&path)?;
+        file.lock()?;
+        self.refresh();
+        Ok(file)
     }
 
     /// Reads the sealed packs that were added to the directory since the last call, by this

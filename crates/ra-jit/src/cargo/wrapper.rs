@@ -20,7 +20,7 @@ use super::{
     ancestor::Cargo,
     cli,
     daemon::{self, NotBuilt},
-    say, script,
+    own_script, say, script,
     state::{State, place},
     switch::Enabled,
     units::{Copied, Record, stamp_now},
@@ -38,6 +38,10 @@ pub(crate) const DRIVEN: &str = "RA_JIT_CARGO_DRIVES";
 /// The variable `cargo ra-jit` sets in the first build of a workspace: the roots of the
 /// crates that are the daemon's to compile, as a list of paths.
 pub(crate) const STAGED: &str = "RA_JIT_STAGED_CRATES";
+
+/// The variable that says cargo runs every crate's rustc through this wrapper, and the
+/// workspace's through it twice.
+pub(crate) const EVERY_CRATE: &str = "RA_JIT_EVERY_CRATE";
 /// The file in the record of a unit that says rustc built what stands in for the crate.
 pub(crate) const STANDS_IN: &str = "stands-in";
 
@@ -73,6 +77,9 @@ pub(crate) fn command(mut args: impl Iterator<Item = OsString>) -> anyhow::Resul
         std::process::exit(replied?);
     }
     let only_asks = std::env::var_os(crate::answers::ONLY_ASKS).is_some();
+    // A crate cargo runs through this wrapper alone, when it is cargo's `RUSTC_WRAPPER` too,
+    // is not the workspace's.
+    let outside = twice.is_none() && !only_asks && std::env::var_os(EVERY_CRATE).is_some();
     // The wrapper the user had for the workspace's crates still runs rustc.
     let mut compiler = match Enabled::read().and_then(|it| it.chained) {
         // What a cargo that only asks through ra-jit compiles is compiled as it would be
@@ -82,22 +89,31 @@ pub(crate) fn command(mut args: impl Iterator<Item = OsString>) -> anyhow::Resul
             command.args(twice.as_ref().map(|_| &rustc)).env_remove(crate::answers::ONLY_ASKS);
             command
         }
-        Some(chained) => {
+        Some(chained) if !outside => {
             let mut command = Command::new(chained);
             command.arg(&rustc);
             command
         }
-        None => Command::new(&rustc),
+        _ => Command::new(&rustc),
     };
     compiler.args(&args);
     if only_asks {
         std::process::exit(compiler.status()?.code().unwrap_or(1));
+    }
+    if outside {
+        std::process::exit(self::outside(compiler, &rustc, &args)?);
     }
     let Some(unit) = Unit::of(&args) else {
         std::process::exit(compiler.status()?.code().unwrap_or(1));
     };
     let plain = unit.linked && std::env::var_os(DRIVEN).is_none();
     let dir = unit.records.join(&unit.id);
+    if unit.script && std::env::var_os(own_script::BY_RUSTC).is_none() {
+        match unit.by_ra_jit(&rustc, &dir) {
+            Ok(()) => std::process::exit(0),
+            Err(why) => unit.script_to_rustc(&why),
+        }
+    }
     if unit.is_staged() {
         match unit.stood_in(&rustc, &dir) {
             Ok(code) => std::process::exit(code),
@@ -150,6 +166,29 @@ pub(crate) fn command(mut args: impl Iterator<Item = OsString>) -> anyhow::Resul
         }
     }
     std::process::exit(status.code().unwrap_or(1));
+}
+
+/// Builds a crate of a package outside the workspace as cargo asked: its build script by
+/// ra-jit where it can be, the rest by `compiler`, rustc, whose libraries are described for
+/// the scripts that link them. The code to end with.
+fn outside(mut compiler: Command, rustc: &OsString, args: &[OsString]) -> anyhow::Result<i32> {
+    let unit = Unit::of(args);
+    if let Some(unit) = unit.as_ref().filter(|it| it.script)
+        && std::env::var_os(own_script::BY_RUSTC).is_none()
+    {
+        match unit.by_ra_jit(rustc, &unit.records.join(&unit.id)) {
+            Ok(()) => return Ok(0),
+            Err(why) => unit.script_to_rustc(&why),
+        }
+    }
+    let status = compiler.status()?;
+    if let Some(unit) = unit.filter(|it| status.success() && !it.script) {
+        let record = unit.as_record(stamp_now(), Vec::new(), None);
+        if record.is_rlib() {
+            record.write_described(&unit.records)?;
+        }
+    }
+    Ok(status.code().unwrap_or(1))
 }
 
 /// Starts a process that has the daemon load the build of the cargo above this one, when
@@ -338,6 +377,24 @@ impl Unit {
         Ok(())
     }
 
+    /// Has ra-jit compile and link the build script, where rustc would have put it, and
+    /// records it as [`Unit::record`] does a script of rustc's. `dir` is where the unit is
+    /// recorded. `Err` is why rustc is to compile it.
+    fn by_ra_jit(&self, rustc: &OsString, dir: &Path) -> Result<(), String> {
+        let stamp = stamp_now();
+        let copies = dir.join(stamp.to_string());
+        let record = self.as_record(0, Vec::new(), None);
+        let exe = record.outputs().into_iter().next().ok_or("rustc names no executable")?;
+        own_script::compile(rustc, &self.args, &self.cwd, &self.source, &exe, &copies)?;
+        self.record(stamp, &copies, None, &self.source).map_err(|it| format!("{it:#}"))
+    }
+
+    /// Says in one line why rustc compiles the build script and not ra-jit.
+    fn script_to_rustc(&self, why: &str) {
+        let package = std::env::var("CARGO_PKG_NAME").unwrap_or_default();
+        say::fallback(why, &format!("rustc compiles the build script of `{package}`"));
+    }
+
     /// Has rustc write the dep-info cargo reads to know what the program was compiled
     /// from, while the daemon builds it. Rustc stops once it has read the source: it
     /// checks nothing, and the daemon builds what rust-analyzer passes.
@@ -498,6 +555,9 @@ impl Unit {
             link_line,
             env: std::env::vars()
                 .filter(|(name, _)| name.starts_with(PROGRAM_OF) || name == SCRATCH)
+                .collect(),
+            crate_env: std::env::vars()
+                .filter(|(name, _)| super::own_script::read_by_crates(name))
                 .collect(),
         }
     }

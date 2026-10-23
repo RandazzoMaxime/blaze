@@ -16,6 +16,9 @@ use crate::dep_info::DepInfo;
 /// The directory of the records, in the directory cargo builds a profile in.
 const RECORDS: &str = ".ra-jit-units";
 
+/// The file of a unit's directory that describes a library outside the workspace.
+const DESCRIBED: &str = "crate.json";
+
 /// The directories of a profile that cargo has rustc write to.
 const PLACES: [&str; 3] = ["deps", "examples", "build"];
 
@@ -45,6 +48,10 @@ pub(crate) struct Record {
     /// `CARGO_BIN_EXE_<name>`, which `env!` reads in an integration test.
     #[serde(default)]
     pub(crate) env: BTreeMap<String, String>,
+    /// The variables cargo set for rustc that the crate's source can read with `env!`
+    /// ([`super::own_script::read_by_crates`]), for ra-jit to compile it as rustc did.
+    #[serde(default)]
+    pub(crate) crate_env: BTreeMap<String, String>,
 }
 
 /// A file rustc wrote and the copy the daemon reads in its place.
@@ -111,6 +118,27 @@ impl Record {
         std::fs::write(&new, serde_json::to_vec(self)?)?;
         std::fs::rename(&new, unit.join("record.json"))?;
         Ok(())
+    }
+
+    /// Writes the record of a library of a package outside the workspace, where
+    /// [`Record::all`] does not read it: only a build script ra-jit compiles reads it, to
+    /// compile the library from source as rustc did ([`Record::described`]).
+    pub(crate) fn write_described(&self, dir: &Path) -> anyhow::Result<()> {
+        let unit = dir.join(&self.id);
+        std::fs::create_dir_all(&unit)?;
+        let new = unit.join(format!("{DESCRIBED}.{}.new", std::process::id()));
+        std::fs::write(&new, serde_json::to_vec(self)?)?;
+        std::fs::rename(&new, unit.join(DESCRIBED))?;
+        Ok(())
+    }
+
+    /// The record of the unit `id` in `dir`, of the workspace or described.
+    pub(crate) fn described(dir: &Path, id: &str) -> Option<Record> {
+        let unit = dir.join(id);
+        let text = std::fs::read_to_string(unit.join("record.json"))
+            .or_else(|_| std::fs::read_to_string(unit.join(DESCRIBED)))
+            .ok()?;
+        serde_json::from_str(&text).ok()
     }
 
     fn value(&self, flag: &str) -> Option<&str> {
@@ -343,6 +371,7 @@ mod tests {
     fn two_units_told_different_places_are_not_one_request() {
         let told = |program: &str| Record {
             env: [("CARGO_BIN_EXE_cli".to_owned(), program.to_owned())].into(),
+            crate_env: BTreeMap::new(),
             ..record(&[])
         };
         let same = [told("/ws/target/debug/cli"), told("/ws/target/debug/cli")];
@@ -362,6 +391,7 @@ mod tests {
             copies: Vec::new(),
             link_line: None,
             env: BTreeMap::new(),
+            crate_env: BTreeMap::new(),
         }
     }
 

@@ -61,7 +61,7 @@
    "rustdoc": 0
   },
   "cold build": {
-   "rustc": 6,
+   "rustc": 5,
    "rustdoc": 0
   },
   "doctests": {

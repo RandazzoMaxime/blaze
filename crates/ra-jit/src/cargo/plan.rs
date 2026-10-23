@@ -676,6 +676,7 @@ mod tests {
             copies: Vec::new(),
             link_line: None,
             env: Default::default(),
+            crate_env: Default::default(),
         }
     }
 
