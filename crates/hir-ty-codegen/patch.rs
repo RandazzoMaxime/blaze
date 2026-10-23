@@ -25,7 +25,7 @@ use super::{
     Roots, SymbolResolver, TheirStatics, Walked, async_blocks, compiled_instance, compiled_root,
     compiled_static, declaration_location,
     fragment::{CompiledFunction, DataRequest, FuncTarget, Requests},
-    home::{body_file, body_files, written_in},
+    home::{body_file, body_files, mentioned_crates, written_in},
     instance_serial, is_thread_local, left_to_rustc, root_serial, row_location, source_location,
     static_serial, target,
 };
@@ -362,9 +362,11 @@ impl Left {
     }
 }
 
-/// A function left to rustc whose copy is no longer right for it.
+/// A function left to rustc, or an instance our code calls rustc's copy of, whose copy is no
+/// longer right for it.
 pub struct OutOfDate {
-    pub func: FunctionId,
+    /// `None` for an instance written in no function, as drop glue is.
+    pub func: Option<FunctionId>,
     /// Why ra-jit leaves it to rustc.
     pub why: String,
     /// Whether it was left to rustc in the build the daemon started from, when rustc compiled
@@ -436,8 +438,9 @@ impl Frozen {
         bodies || self.edited.contains(&reached.krate) || self.edited.contains(&reached.env.krate)
     }
 
-    /// A function of `base` that rustc's copy is no longer right for, and why. The first call
-    /// with a base of ours notes what rustc compiled: of what no edit has reached by then.
+    /// A function or instance of `base` that rustc's copy is no longer right for, and why. The
+    /// first call with a base of ours notes what rustc compiled: of what no edit has reached by
+    /// then.
     pub(crate) fn out_of_date(&mut self, db: &dyn HirDatabase, base: &Base) -> Option<OutOfDate> {
         let now = || {
             let theirs = base.skipped.iter().filter(|it| !it.1.no_symbol());
@@ -446,7 +449,7 @@ impl Frozen {
         let distrusted = |root: FunctionId| self.distrusted.contains(&root.krate(db));
         let Some(left) = &self.left else {
             let other = now().find(|it| distrusted(it.0)).map(|(func, why)| OutOfDate {
-                func,
+                func: Some(func),
                 why: why.to_string(),
                 left_from_the_start: true,
                 calls: None,
@@ -466,7 +469,7 @@ impl Frozen {
                 Some(None) | None => false,
             };
             (!fresh).then(|| OutOfDate {
-                func: root,
+                func: Some(root),
                 why: why.to_string(),
                 left_from_the_start: left.contains_key(&root),
                 calls: None,
@@ -492,14 +495,28 @@ impl Frozen {
             };
             if !fresh {
                 return Some(OutOfDate {
-                    func: reached.by,
+                    func: Some(reached.by),
                     why: why(reached.by).unwrap_or_default(),
                     left_from_the_start: true,
                     calls: Some(reached.func(db).filter(|&it| it != reached.by)),
                 });
             }
         }
-        None
+        // Our code calls rustc's copy of an instance that did not compile, which is of its
+        // function as rustc compiled it.
+        let edited = !self.edited.is_empty() || !self.edited_bodies.is_empty();
+        let mut forwarded = base.instances.iter().filter(|it| edited && it.1.forwarded);
+        forwarded.find_map(|(it, known)| {
+            let (crates, files) = (mentioned_crates(db, it), known.files.as_deref());
+            let untouched = crates.is_some_and(|it| it.is_disjoint(&self.edited))
+                && files.is_some_and(|it| it.iter().all(|it| !self.edited_bodies.contains(it)));
+            (!untouched).then(|| OutOfDate {
+                func: written_in(db, it),
+                why: "an instance of it does not compile".to_owned(),
+                left_from_the_start: false,
+                calls: None,
+            })
+        })
     }
 }
 

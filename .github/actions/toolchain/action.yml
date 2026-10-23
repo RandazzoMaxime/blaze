@@ -30,7 +30,8 @@ runs:
         rustup toolchain install 1.99.0 --profile minimal $components
         rustup default 1.99.0
         for t in ${{ inputs.targets }}; do rustup target add "$t"; done
-        if [ -n "${{ inputs.nightly }}" ]; then rustup toolchain install "${{ inputs.nightly }}" --profile minimal; fi
+        # With its library's source, which ra-jit compiles code built by it from.
+        if [ -n "${{ inputs.nightly }}" ]; then rustup toolchain install "${{ inputs.nightly }}" --profile minimal -c rust-src; fi
 
     - name: LLVM 20 (Linux)
       if: runner.os == 'Linux' && inputs.llvm != 'none'

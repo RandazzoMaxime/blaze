@@ -1,6 +1,6 @@
 # bun's Rust port through ra-jit
 
-2026-10-21. Claims are marked **read** (in a source we read, or measured here, with the
+2026-10-21; Linux x86-64 and the whole-program build 2026-10-22. Claims are marked **read** (in a source we read, or measured here, with the
 command), **reported** (someone says so, unchecked) or **unverified** (our inference). What was
 fetched is in [docs/upstream/bun/](../upstream/bun/SOURCE.md).
 
@@ -58,6 +58,20 @@ Each fix is its own commit on `main` with a regression case (read, the commits):
 | `simd_reduce_max`/`min` (NEON `vmaxvq_u8`) were not compiled | 164 functions | breaker `simd_reduce_max` |
 | a `Box<[T], &Arena>` (an allocator with a size) was not dereferenced, and its drop read the pointer at offset 0 | 151 functions | breaker crate `allocated` |
 | a borrowed constant with a cast in it (`&[b"browser" as &[u8], b"module"][..]`) was built on the stack, not promoted, and its slice outlived the frame | `new Bun.Transpiler()` crashed in the dev-loop build | breaker `promoted_index_of_casts` |
+| `core::mem::type_info` in const eval (#34) | 907 functions | `bun_repros.py` `type_info` |
+| a `const { .. }` block was code the function ran, not a constant per instance | 591 of 680 refusals on Linux | `type_info` |
+| constants of `adt_const_params` types, and `#[derive(ConstParamTy)]` (#34) | 304 functions | `adt_const_params` |
+| a path through an inherent impl's type alias (`inherent_associated_types`) | 14 functions | `inherent_associated_types` |
+| a `macro_rules!` that `cfg_if!` of another crate defines was not in scope after it | 43 functions of lol_html | `cfg_if_macros` |
+| an impl a macro writes in a dependency's function body was not found (dtoa's `DiyFp`) | dtoa | `macro_impls` |
+| `--crate foldhash` also took std's vendored copy, which sees no `core` | 27 functions counted left | `std_copies` |
+| an `$n:expr` passed on to another macro was not one operand (`task_tag::COUNT`) | `TaskTag::name` | `macro_fragments` |
+| a private `#[no_mangle]` static had a name of its own, or was not compiled | `Bun__version` and the other statics bun's C++ reads were undefined | `exported_statics` |
+| `--crate bun_sema` also took `bun_sema_standalone`'s binary `bun-sema` | `bun_sema_standalone::parse` undefined | `same_name` |
+| ra-jit's object was one section, so the link kept code nothing reaches | `GetLastError` and other Windows-only externs undefined on Linux | `unreached_externs` |
+| `-C force-frame-pointers` was not honoured, and LLVM gave the frame pointer to values | the whole-program binary faulted in `bun_core::return_address` | `frame_pointers` |
+| bun's Linux build: `-gz=zstd` with nixpkgs' LLVM, built without zstd (bun's ELF link uses zlib); bun's position-dependent objects in a PIE; the dependencies bun links lazily and its C++ library, which it links statically | `bench-bun` on Linux | `bunprep.py` |
+| bun's tree did not keep frame pointers, which bun's own build passes (`-Cforce-frame-pointers=yes`): cargo's own debug build faulted in `bun_core::return_address` on x86-64 | `bench.py bun`'s runtime on Linux | `bunprep.py` |
 
 Filed, not fixed (read, the issues):
 
@@ -66,11 +80,14 @@ Filed, not fixed (read, the issues):
   Fixed since (2026-10-22, `harness/nocompact.py`); bunprep drops it still, so the numbers
   here stay comparable.
 - [#34](https://github.com/indexable-inc/ra-jit/issues/34): `adt_const_params` constants and
-  `type_info` in const eval. Functions that reach them are left to rustc: in the dev loop rustc's
-  copy is linked; the whole-program report left 1,645 functions out, including 907 reaching
-  `type_info` and 304 reaching `adt_const_params`.
+  `type_info` in const eval. The whole-program report left 1,645 functions out, including 907
+  reaching `type_info` and 304 reaching `adt_const_params`. Both compile since 2026-10-22 (the
+  table above); a constant that holds a `TypeId` is still refused, as the evaluator's ids are
+  not rustc's hashes, and bun has none.
 - [#35](https://github.com/indexable-inc/ra-jit/issues/35): everything the whole-program build
-  can't compile yet, by cause, of which #34 is most.
+  can't compile yet, by cause, of which #34 is most. On Linux x86-64 it leaves nothing since
+  2026-10-22 (Numbers, below); macOS arm64's NEON cases were fixed on the `bun` branch and the
+  whole-program build was not run there again.
 - [#47](https://github.com/indexable-inc/ra-jit/issues/47): the cold build starts over once per
   static a function left to rustc uses ("a static is used by a function left to rustc", five
   rounds on bun), where one round could leave them all.
@@ -103,7 +120,27 @@ Median of three edits, warm, incremental `cargo build` → `cargo ra-jit build`:
 - Before the promotion fix in the table above, that run crashed (`SIGSEGV`): the dev loop's
   binary is the one bun's users of `Bun.Transpiler` would run (read, `bench.py` on the commit
   before it).
-- How fast ra-jit's whole-program LLVM build runs is not measured: it does not link (#35).
+- Linux x86-64, `bench.py bun --runs 3` pinned to 16 cores of an AWS c8a.24xlarge (AMD EPYC
+  9R45), ra-jit `7dcfe73922`, 2026-10-22, Cranelift (read,
+  [docs/benchmarks/bun-linux-x86-64.json](../benchmarks/bun-linux-x86-64.json)): a body 9.1 s →
+  0.49 s, a widely used function 16.5 s → 0.49 s, a generic function 16.7 s → 0.52 s, all
+  spliced; a signature 9.2 s → 0.64 s, the object written again, where macOS's went to cargo;
+  a new function 14.5 s → 19.8 s, the object written again; nothing changed 74 ms → 19 ms.
+  Cold to ready 73 s against cargo's 73 s. LLVM's edits take the same within 0.02 s. The
+  `Bun.Transpiler` run of the dev loop's program takes 1.58 s (Cranelift) and 3.72 s (LLVM at
+  `-O2`), against 0.97 s for cargo's debug build and 0.14 s for its release build.
+- ra-jit's whole-program build (`runbench.py bun --builds release,ra-jit --rounds 1`: every
+  crate of bun ra-jit's, LLVM at `-O3`, nothing linked from rustc) links on Linux x86-64 (an
+  AWS c8a.24xlarge, AMD EPYC 9R45, 96 cores, ra-jit `857eab0e9b`, 2026-10-22): 68,315
+  functions compiled by ra-jit and none left, in 51.3 s against 131.4 s for cargo's release
+  build. Each of `apps.json`'s eight runs gives cargo's status, stdout and stderr. Its
+  `Bun.Transpiler` run takes 2.31 s against 0.39 s for cargo's release build (5.9x), 77 MB
+  against 56 MB at most (read, `runbench.py`'s result). Pinned to 16 cores (`bench.py --runtime
+  bun`, `7dcfe73922`): built in 86.9 s against 135.2 s, and 5.80x (read,
+  [docs/benchmarks/runtime-bun-linux-x86-64.json](../benchmarks/runtime-bun-linux-x86-64.json)).
+  That the gap is mostly code ra-jit's
+  LLVM does not optimise as rustc does (inlining across crates, `#[inline]` honoured) is
+  unverified.
 
 The reduced nightly fixtures in `harness/bun-repros` keep these two refusals measurable without
 building Bun's native C and C++ dependencies. Run them with `python3 harness/bun_repros.py` after
@@ -112,7 +149,8 @@ if the expected refusal reason disappears without changing the fixture's expecta
 
 ## What is not known
 
-- Whether the Linux x86-64 path works: `nix develop .#bench-bun` evaluates, and the `bench-bun`
-  workflow has not run yet (unverified).
+- Whether the `bench-bun` workflow runs on Linux: `bunprep.py` and `bench.py bun` do by hand in
+  `nix develop .#bench-bun` on Linux x86-64 (read, Numbers), and the workflow has not run yet
+  (unverified).
 - bun's own test suite (`bun bd test`) was not run against ra-jit's binary; the comparison is
   the harness's command lines (unverified beyond those).

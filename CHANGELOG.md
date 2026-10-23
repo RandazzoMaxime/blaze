@@ -8,6 +8,13 @@ All notable changes to ra-jit are written here. The format follows
 
 ### Added
 
+- Const eval answers nightly's reflection, `core::mem::type_info` (#34): a type's variants
+  and fields, a field's type, name and offset, a type's size, whether it is signed, an array's
+  length and element, what a pointer points to, a variant's name, as rustc does, and two of
+  its `TypeId`s compare. Bun's `MultiArrayList` asks it of every type it holds, which left 907
+  of bun's functions to rustc; `harness/bun-repros/type_info` asks what it does and now
+  compiles. A constant that holds a `TypeId` is still refused: the evaluator's ids are not
+  rustc's hashes.
 - The daemon's workers hold at most half of the machine's memory together, or what
   `RA_JIT_MEMORY_MAX` says (a size, or `off`). Over it, the worker asked longest ago is
   stopped; `cargo ra-jit status` shows the limit and what each worker holds. `docs/reports/SOAK.md`
@@ -167,7 +174,7 @@ All notable changes to ra-jit are written here. The format follows
 - A borrow checker, the crate `hir-ty-borrowck` in the rust-analyzer subtree, written to give
   rustc's verdict: Polonius alpha by default as nightly rustc does, NLL with
   `RA_JIT_BORROWCK=nll`. It gives rustc's errors on
-  1422 of 1579 of rustc's own borrow-check tests that it can run, and none on any of the 245
+  1429 of 1579 of rustc's own borrow-check tests that it can run, and none on any of the 245
   rustc accepts, scored by `harness/borrowck_ui.py`, and finds nothing in ripgrep, fd, bat,
   hyperfine, just, axum, nushell, delta, eza, tokei and starship. Its errors are rust-analyzer diagnostics and
   `ra-jit borrowck` prints them ([docs/borrowck.md](docs/borrowck.md)).
@@ -371,6 +378,53 @@ All notable changes to ra-jit are written here. The format follows
   ready at 116.2 s instead of 142.3 s (Linux x86-64, 16 cores, medians of three). Nothing is
   left to rustc for it, and `harness/norustc` counts the same functions left to rustc on
   ripgrep (53) and nushell (534) (#37, no-rustc step E).
+- `-C force-frame-pointers` in a build's flags keeps frame pointers in ra-jit's code too: LLVM
+  gave the register to values, so code that walks frames by it read garbage. bun, built with
+  every function ra-jit's, faulted in `bun_core::return_address` on its first `-e`; it now
+  gives cargo's output on each of its runs. `harness/apps/apps.json` gives bun its own build's
+  `-Cforce-frame-pointers=yes`. `harness/bun-repros/frame_pointers`.
+- On ELF, a build that no edits follow puts each function and datum of its object in a
+  section of its own, as rustc does, so the link takes out what nothing reaches. A program
+  whose `main` is the C runtime's has every function compiled, and bun's link was missing
+  what only such code calls and nothing defines on Linux: `GetLastError` of
+  `bun_windows_sys`, and `ShellInterpreter__getConstructor` of a binding bun's C++ leaves
+  out. The daemon's builds keep one section, as their links keep everything.
+  `harness/bun-repros/unreached_externs`.
+- A crate a build names after the program is one the program links, also when a binary of
+  another package has its name: a build of bun with every crate ra-jit's took `--crate
+  bun_sema` for the library and for `bun_sema_standalone`'s `bun-sema` too, whose code calls a
+  library bun does not link, and the link failed on `bun_sema_standalone::parse`.
+  `harness/bun-repros/same_name`.
+- A `#[no_mangle]` or `#[export_name]` static of a program whose every crate is ra-jit's is
+  defined under that name, also when it is private and when no Rust code uses it. Our copy had
+  a name of its own, as rustc's was the one code of another language found, and one only that
+  code reads was not compiled at all: bun's link was missing `Bun__version`,
+  `Bun__Node__ZeroFillBuffers` and the other statics its C++ reads.
+  `harness/bun-repros/exported_statics`.
+- An `$n:expr` passed on to another macro is one operand there, as rustc has it: in
+  `tags!(@count (0u8 + 1u8) + 1u8,)` the rule `(@ $n:expr,)` took `count (0u8 + 1u8)` for a
+  call and matched, so bun's `task_tag::COUNT` expanded to nothing and `TaskTag::name`, the one
+  function of bun's left to rustc for a reason other than having no instance, failed on
+  `[&str; {const error}]`. The parser now stops an expression where such a fragment starts.
+  `harness/bun-repros/macro_fragments`.
+- A `macro_rules!` that a macro of another crate defines, called by a name a `use` imports
+  (`use cfg_if::cfg_if; cfg_if! { .. macro_rules! trace { .. } }`), is in the textual scope of
+  what follows. The call waited for imports to be resolved, by when `#[macro_use]` had taken
+  the module's macros to its parent without it, and every `trace!` of lol_html's parser was a
+  missing expression: 43 of bun's functions (the `StateMachine` impls of `Lexer` and
+  `TagScanner`, `TransformStream::write`) were left to rustc. Such a call is now expanded where
+  it is written, as one by a path to the other crate was. `harness/bun-repros/cfg_if_macros`.
+- `--crate NAME` names no crate of the standard library's when a crate of the program has the
+  name. std vendors foldhash 0.2.0, libc and hashbrown, and its foldhash, which rustc does not
+  build (hashbrown has it only with its default hasher), sees no `core` in rust-analyzer's
+  graph: bun's whole-program build compiled it beside bun's two foldhash, and its 27 functions
+  that did not lower were counted as left to rustc. `harness/bun-repros/std_copies` checks it.
+- A dependency's impl that a macro writes in a function body is found: dtoa's `write` calls
+  `dtoa!`, which calls `diyfp!`, which writes `impl DiyFp` there, and `normalize_boundary`
+  went unresolved because no `impl` is in `write`'s own text. A dependency's function is now
+  looked into for impls when it calls a `macro_rules!` of its crate or of a dependency that
+  writes one, in its text or through another macro. The dtoa functions bun left to rustc
+  compile; `harness/bun-repros/macro_impls` builds dtoa.
 - On Linux AArch64, an `asm!` of an instruction that the function's `#[target_feature]`
   enables and the target's baseline lacks (zlib-rs's `crc32w`, in bat) was refused by the
   assembler: the block is assembled apart from its function, so it now starts with the
@@ -421,6 +475,37 @@ All notable changes to ra-jit are written here. The format follows
 - fd built with inlining across crates crashed the LLVM backend on Linux and macOS: an address
   rebuilt as a `getelementptr` may be a sum that is a constant (a global's address plus an
   offset), which is in no block, and LLVM read freed memory when the builder was put before it.
+- A `const { .. }` block in a function is a constant evaluated for each instance of the
+  function, as rustc's inline consts are, and no longer code the function runs: what only
+  compile time may run in one (`#[rustc_comptime]`, `type_info`'s `field`, bun's
+  `MultiArrayList::check`) was refused with "intrinsic `type_id_field_representing_type`",
+  and every function reaching it with it (591 of bun's 680 refusals on Linux). A block met
+  while evaluating a constant runs in that evaluation, so its `TypeId`s compare. `n += i` on an
+  integer variable whose operator was not looked up while its type was unknown is lowered as
+  the built-in it is, where it was "adjustment of binary op was missing" (`bun_repros.py`
+  `type_info`).
+- A constant of a struct, enum, tuple or array type given as a const generic argument
+  (`adt_const_params`: `check::<{ Requirement::Within { low: 3, high: 9 } }>`,
+  `filtered::<{ Filter { mask: 0xf0, strict: true } }>`) compiles and evaluates, and
+  `#[derive(ConstParamTy)]` expands. Every function reaching one was refused ("constant of type
+  JSType", bun's `alloc`, `test_correct_state` and `completions`) (`bun_repros.py`
+  `adt_const_params`).
+- A path through a type alias of an inherent impl (`ThreadPool::Worker::get(..)`, `Self::Slot`,
+  `Slots<u32>::Slot`, nightly's `inherent_associated_types`) is the alias's type: the
+  functions that name one had no type for it and were left to rustc, and rustc's copy of
+  bun's `run_nested_rename_task` sent every edit of its crate to cargo (`bun_repros.py`
+  `inherent_associated_types`).
+- A build in full no longer keeps rustc's copy of an instance that did not compile once an
+  edit changed it, as `located::<u8>` of a generic function with a `Location::caller()`
+  constant, which `main` calls: the program printed what it did before the edit. Such an edit
+  goes to cargo, which names the function (`soakrows.py`, "an instance rustc's copy stands in
+  for, edited").
+- A static declared in a function's body, as the `FLAG` of a method of bun's
+  `impl<const SSL: bool, ..> NewServer<SSL, ..>`, is rustc's in a crate with a function left
+  to rustc that reaches what ra-jit can't tell: rustc's copy of that function reaches the
+  static through rustc's copy of the other. A build in full had its own copy beside rustc's,
+  and the two counted apart, in the base the daemon builds after the first patch
+  (`soakrows.py`, "statics one codegen unit uses").
 - A borrowed constant with a cast in it, `&[b"node" as &[u8]][..]` returned for `'static`, is
   promoted as rustc promotes it, where it was built on the stack and the reference outlived
   it: every cast is promotable but of a pointer to an integer. bun's `new Bun.Transpiler()`

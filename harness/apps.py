@@ -35,6 +35,13 @@ APPS_DIR = os.environ.get("APPS_DIR") or os.path.join(HERE, "vendor", "apps")
 SPECS = os.path.join(HERE, "apps", "apps.json")
 # A dependency that denies warnings must still build.
 FLAGS = "-C link-dead-code --cap-lints allow"
+
+
+def own_flags(spec):
+    """The flags the program's own build gives rustc (bun's `-Cforce-frame-pointers=yes`),
+    which the harness's RUSTFLAGS would otherwise take the place of. Each build has them, and
+    ra-jit reads them from RUSTFLAGS as cargo does."""
+    return spec.get("rustflags", "")
 STAGES = ["build", "workload", "perf", "tests", "edits"]
 
 
@@ -231,7 +238,7 @@ def reference(ws, spec, profile, timed=False):
     name = spec.get("bin", spec["package"])
     program = os.path.join(target, profile, name)
     cold = not os.path.exists(program)
-    env = {**os.environ, "CARGO_TARGET_DIR": target, "RUSTFLAGS": "--cap-lints allow"}
+    env = {**os.environ, "CARGO_TARGET_DIR": target, "RUSTFLAGS": f"--cap-lints allow {own_flags(spec)}".strip()}
     argv = ["cargo", "build", "-p", spec["package"], *spec.get("cargo_args", []),
             *(["--release"] if profile == "release" else [])]
     secs, _ = sh(argv, ws, env)
@@ -376,7 +383,7 @@ def main():
     ws = checkout(a.name, spec)
     prepare(ws, spec)
     localize(ws)
-    os.environ["RUSTFLAGS"] = FLAGS
+    os.environ["RUSTFLAGS"] = f"{FLAGS} {own_flags(spec)}".strip()
     backend = os.environ.get("RA_JIT_BACKEND", "cranelift")
     result = {"app": a.name, "backend": backend, "rev": spec.get("rev")}
     debug, result["debug_cold_s"] = reference(ws, spec, "debug")

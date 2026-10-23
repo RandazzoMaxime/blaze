@@ -419,6 +419,14 @@ stops.
   compiled names and sits next to the store; salsa state is theirs. Both need a serialization
   layer for ids that survive a process: whoever lands first puts it where the other can use
   it, and says so in this file.
+- **bun** (the bun-e lane, 2026-10-22) is measured here and not worked on there: its cold
+  start and the daemon's memory are this lane's. `bench.py bun` on Linux x86-64 (16 cores of an
+  AWS c8a.24xlarge, Cranelift, memory by `harness/memory.py`,
+  [docs/benchmarks/bun-linux-x86-64.json](benchmarks/bun-linux-x86-64.json)): cold to ready in
+  70.9 s + 2.4 s against cargo's 73.1 s, the cold build at most 15.5 GB at once against
+  cargo's 4.5 GB. The daemon holds 12.5 GB once ready and 25.7 GB after the first edit, and the
+  edit that adds a function peaks at 33.5 GB against cargo's 3.3 GB. On macOS arm64
+  (2026-10-21, `docs/research/bun.md`) it was 291 s to ready, 28 GB, near 40 GB at an edit.
 - **architecture split**: the store is the crate `crates/ra-jit-store`, and the code
   generator moves to a crate of its own. New store-side code (item 3's cache, item 1's
   container, item 2's manifest) goes in or beside `ra-jit-store`, behind the store's
