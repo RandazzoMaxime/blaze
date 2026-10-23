@@ -143,6 +143,9 @@ pub fn borrowck<'db>(db: &'db dyn HirDatabase, def: DefWithBodyId) -> BorrowckRe
     for (body, closure, inline_const) in bodies.into_iter().rev() {
         let mut ctx = Ctx::new(db, owner, store, infer, body, closure, mode);
         ctx.inline_const = inline_const.is_some();
+        if closure.is_none() && inline_const.is_none() && drops_in_const(&ctx, def, body) {
+            return result;
+        }
         let mut found = Vec::new();
         let needs = check::check(&ctx, body, &requirements, &mut found);
         if ctx.tainted.get() {
@@ -155,6 +158,49 @@ pub fn borrowck<'db>(db: &'db dyn HirDatabase, def: DefWithBodyId) -> BorrowckRe
     }
     result.diagnostics.extend(diagnostics.into_iter().rev().flatten());
     result
+}
+
+/// rustc's E0493, from checking a const context before borrow checking it: a `const` or
+/// `static` item or a `const fn` drops a value of a type with drop glue, and rustc does not
+/// borrow check it. What is moved out of, in part too, is taken not to be dropped.
+fn drops_in_const(ctx: &Ctx<'_, '_>, def: DefWithBodyId, body: &MirBody<'_>) -> bool {
+    use hir_ty::mir::{OperandKind, TerminatorKind};
+    let const_context = match def {
+        DefWithBodyId::ConstId(_) | DefWithBodyId::StaticId(_) => true,
+        DefWithBodyId::FunctionId(it) => {
+            hir_def::signatures::FunctionSignature::of(ctx.db, it).is_const()
+        }
+        _ => false,
+    };
+    if !const_context {
+        return false;
+    }
+    let mut moved = rustc_hash::FxHashSet::default();
+    let mut visit = |operand: &hir_ty::mir::Operand| {
+        if let OperandKind::Move(place) = &operand.kind {
+            moved.insert(place.local);
+        }
+    };
+    for (_, block) in body.basic_blocks.iter() {
+        for it in &block.statements {
+            it.kind.for_each_operand(&mut visit);
+        }
+        if let Some(terminator) = &block.terminator {
+            terminator.kind.for_each_operand(&mut visit);
+        }
+    }
+    body.basic_blocks.iter().any(|(_, block)| {
+        let Some(terminator) = &block.terminator else { return false };
+        let TerminatorKind::Drop { place, .. } = &terminator.kind else { return false };
+        place.projection.as_slice().is_empty()
+            && place.local != return_slot()
+            && !moved.contains(&place.local)
+            && hir_ty::drop::has_drop_glue(
+                &ctx.infcx,
+                body.locals[place.local].ty.as_ref(),
+                ctx.env,
+            ) == hir_ty::drop::DropGlue::HasDropGlue
+    })
 }
 
 /// The coroutines `body` makes, in the order it makes them.
