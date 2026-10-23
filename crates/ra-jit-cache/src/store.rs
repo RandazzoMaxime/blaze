@@ -62,7 +62,7 @@ pub fn key<A: Serialize>(code: &Code, args: &A) -> Option<Key> {
         return None;
     }
     let name = code.text();
-    let Some(args) = encode(args) else {
+    let Some(args) = crate::key::encode(args) else {
         cache.log(name, "not cached: the arguments could not be written");
         return None;
     };

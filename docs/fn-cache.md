@@ -26,7 +26,10 @@ a program ra-jit built caches.
 
 The key of a call is three things:
 
-- **The arguments**, written with serde (postcard).
+- **The arguments**, written with serde in a form of their own (`crates/ra-jit-cache/src/key.rs`):
+  each value says what it is and each sequence where it ends, and the entries of a std `HashMap`
+  or `HashSet` of `RandomState` are sorted, so the same map is the same key whatever order its
+  random seed gave its entries. Any other map keeps its order (an `IndexMap`'s is what it is).
 - **The code.** The hash of the machine code ra-jit compiled for the function's body and of
   everything that code can reach: every function it calls, directly or through others, as the
   instance it is (`largest::<u32>` and `largest::<i64>` are two), every vtable it builds and the
@@ -35,6 +38,10 @@ The key of a call is three things:
   so moving lines or reformatting keeps it. Another cached function called from it counts by
   its body's code, so recursion is no problem.
 - **The build**: the target, the toolchain, and the overflow checks the code was built with.
+  The toolchain is its commit and the names of its library and compiler, and a hash of what the
+  metadata of its `core`, `alloc` and `std` says of each crate (with the crate's hash, its SVH),
+  so a library rebuilt under the same toolchain (`-Zbuild-std`, a patched sysroot) is another.
+  The code store keys by the same.
 
 The hash is a salsa query, `cache_code`, of the database ra-jit compiles from
 (`crates/hir-ty-codegen/fncache.rs`), so a daemon works it out once per edit, and two daemons
@@ -57,24 +64,45 @@ It is refused when anything it reaches:
 
 - reads or writes a static that can change (`static mut`, an atomic, a `Mutex`), a thread-local
   or a foreign static;
-- calls a foreign function other than the allocator, `memcpy` and its kin and libm, which is
-  how I/O, time, randomness, the environment and threads are seen: the standard library gets
-  them from the system;
+- calls a foreign function other than the allocator, `memcpy` and its kin, libm and LLVM's
+  intrinsics, which is how I/O, time, randomness, the environment and threads are seen: the
+  standard library gets them from the system. Of LLVM's intrinsics, those that read a counter,
+  randomness, an address or the state of the machine, or set it, are refused (`llvm.x86.rdtsc`,
+  `rdrand`, the floating-point environment);
 - in a crate of the workspace, dereferences a raw pointer, takes an address as a number or has
   assembly in it;
 - turns an address into data, which another run has another of: formats a pointer (`{:p}`),
   hashes or orders pointers, or asks for an address (`addr`, `expose_provenance`). Comparing
   two pointers for equality is fine;
+- makes a `RandomState` other than for a std `HashMap` or `HashSet`, or gives the entries of one
+  of `RandomState` in their order (`iter`, `keys`, `values`, `drain`, `retain`, `for` over it,
+  `{:?}` of it, …) or its seed (`hasher`). Making one, looking up, inserting and `len` are fine:
+  the seed orders the entries and nothing else;
+- when an argument holds an `Rc` or an `Arc`, reads a count (`strong_count`, `get_mut`,
+  `make_mut`, `try_unwrap`, `Weak::upgrade`, …) or `ptr_eq`: the key is the value, not who else
+  holds it;
 - can't be compiled by ra-jit.
 
+The functions those are told by are always compiled as calls, never built into their caller,
+so the walk sees them.
+
+The functions of `core` and `alloc` that aren't generic are called as rustc built them, so their
+code is not hashed: the toolchain in the key stands for it. What they do is looked through
+instead, in their MIR and that of the `core` and `alloc` they call, directly or through others,
+for the same: `core::arch::x86_64::_rdtsc` reads the cycle counter and is refused, formatting a
+number is not. A panic there is fine, as anywhere. Not looked through are what a generic body
+calls by a trait of its parameters, what a `dyn` calls (the code reached builds that vtable)
+and what dropping a value does.
+
 Or when an argument can change behind a shared reference (it holds an `UnsafeCell`, as `Cell`,
-`RefCell`, `Mutex`, `Rc`, `Arc` and atomics do), holds a raw pointer of a type of the
-workspace, a union of one, or a trait object.
+`RefCell`, `Mutex` and atomics do; the counts of an `Rc` or an `Arc` are left to the rule above),
+holds a raw pointer of a type of the workspace, a union of one, or a trait object.
 
 A refused function runs every call, as under cargo.
 
-This is conservative. `HashMap::new` reads random keys, so a function that makes a `HashMap` is
-refused (its iteration order is random anyway); `BTreeMap` is fine.
+This is conservative. A `HashMap` compared with `==` is refused (`eq` iterates one of them).
+A map or set of another hasher keeps the order of its entries in the key, so the same entries
+put in another order are another key: a miss, never a wrong result.
 
 ## What can be a value
 
