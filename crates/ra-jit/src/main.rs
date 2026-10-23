@@ -34,14 +34,15 @@ mod tree;
 mod weaken;
 
 /// The daemon holds millions of small allocations and frees a file's worth of them on each
-/// edit, which the system allocator is slow at.
-#[cfg(not(feature = "heap-profile"))]
-#[global_allocator]
-static ALLOC: mimalloc::MiMalloc = mimalloc::MiMalloc;
-
-#[cfg(feature = "heap-profile")]
+/// edit, which the system allocator is slow at. jemalloc gives the system back more of what
+/// a build freed than mimalloc does. It is not built for Windows.
+#[cfg(unix)]
 #[global_allocator]
 static ALLOC: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
+
+#[cfg(windows)]
+#[global_allocator]
+static ALLOC: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 use ide_db::base_db::{CrateOrigin, LangCrateOrigin, SourceDatabase as _, TargetKind};
 use std::{
