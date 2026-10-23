@@ -488,6 +488,16 @@ def main():
         if args.min_pass is not None and mode == "polonius" and count["pass"] < args.min_pass:
             print(f"FAIL: {count['pass']} in-scope Polonius units pass, fewer than {args.min_pass}")
             exit_code = 1
+        # A unit ra-jit panics on has none of its errors reported, and an error on a unit
+        # rustc accepts is a false one: either fails the run, whatever the passes.
+        panicked = sorted(l for l, v in verdicts.items() if v[0] == "fail" and v[1].startswith("ra-jit panicked"))
+        false_errors = sorted(l for l, v in verdicts.items() if v[0] == "fail" and v[2] and not v[2]["want"])
+        for what, labels in (("ra-jit panicked on", panicked), ("errors rustc does not report on", false_errors)):
+            if labels:
+                print(f"FAIL ({mode}): {what} {len(labels)} units")
+                for label in labels:
+                    print(f"     {label}: {verdicts[label][1]}")
+                exit_code = 1
     print(f"\nrustc agrees with the tests' annotations on {agree} units, not on {disagree}")
     if args.json:
         json.dump(report, open(args.json, "w"), indent=1)
