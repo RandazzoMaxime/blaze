@@ -11911,13 +11911,15 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
         if fn_sig.c_variadic() {
             unsupported!("shim for a variadic function");
         }
-        // A vtable is called as a Rust function, whatever the function behind it is.
+        // A vtable is called as a Rust function, whatever the function behind it is, and its
+        // receiver is an argument like the rest: where it goes moves where they do.
         let abi = if receiver { ExternAbi::Rust } else { fn_sig.abi() };
-        let abi = self.fn_abi(abi, fn_sig.output(), fn_sig.inputs().iter().copied())?;
-        let mut sig = self.signature(&abi.args, abi.ret);
+        let pointer = receiver.then(|| Ty::new_imm_ptr(self.interner, Ty::new_unit(self.interner)));
+        let inputs = pointer.into_iter().chain(fn_sig.inputs().iter().copied());
+        let mut abi = self.fn_abi(abi, fn_sig.output(), inputs)?;
+        let sig = self.signature(&abi.args, abi.ret);
         if receiver {
-            let sret = matches!(abi.ret, PassMode::Indirect);
-            sig.params.insert(sret as usize, AbiParam::new(ptr()));
+            abi.args.remove(0);
         }
         Ok((fn_sig, sig, abi))
     }
@@ -12066,21 +12068,29 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
         };
         let parent_args = GenericArgs::new_from_slice(generic_args.as_closure().parent_args());
         let body = self.body_types(InstanceDef::Closure(id.0.as_id()), parent_args)?;
-        let mut sig = self.body_signature(body)?;
         let Some(receiver) = body.params.first() else {
             unsupported!("closure without a receiver");
         };
         if receiver.as_ref().as_reference().is_none() {
             // Taken by value, a closure without captures is not passed at all.
+            let sig = self.body_signature(body)?;
             return self.cg.callee(InstanceDef::Closure(id.0.as_id()), parent_args, self.env, &sig);
         }
-        let sret = sig.params.first().is_some_and(|it| it.purpose == ArgumentPurpose::StructReturn);
-        sig.params.remove(sret as usize);
+        let abi = self.closure_pointer_abi(body)?;
+        let sig = self.signature(&abi.args, abi.ret);
         let args = GenericArgs::new_from_slice(&[ty.into()]);
         self.cg.callee(InstanceDef::FnPointerShim, args, self.env, &sig)
     }
 
-    /// The body of a `FnPointerShim`: the signature of the closure body less its receiver.
+    /// How a fn pointer made of a closure that takes itself by reference is called: as the
+    /// closure body without its receiver.
+    fn closure_pointer_abi(&self, body: &BodyTypes) -> Result<FnAbi> {
+        let params = body.params.iter().skip(1).map(|ty| ty.as_ref());
+        self.fn_abi(ExternAbi::Rust, body.returned.as_ref(), params)
+    }
+
+    /// The body of a `FnPointerShim`: calls the closure body with a receiver, passing on the
+    /// arguments, which go elsewhere when the receiver moves them along the registers.
     fn fn_pointer_shim(&mut self, ty: Ty<'db>) -> Result<()> {
         let TyKind::Closure(id, generic_args) = ty.kind() else {
             unsupported!("fn pointer shim for {ty:?}");
@@ -12088,20 +12098,53 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
         let parent_args = GenericArgs::new_from_slice(generic_args.as_closure().parent_args());
         let body = self.body_types(InstanceDef::Closure(id.0.as_id()), parent_args)?;
         let sig = self.body_signature(body)?;
-        let sret = sig.params.first().is_some_and(|it| it.purpose == ArgumentPurpose::StructReturn);
-        let mut shim = sig.clone();
-        shim.params.remove(sret as usize);
-        self.builder.func.signature = shim;
+        let abi = self.closure_pointer_abi(body)?;
+        let shim = self.signature(&abi.args, abi.ret);
+        let sret = matches!(abi.ret, PassMode::Indirect);
+        let mut forwarded = sig.clone();
+        forwarded.params.remove(sret as usize);
+        self.builder.func.signature = shim.clone();
         let entry = self.builder.create_block();
         self.builder.append_block_params_for_function_params(entry);
         self.builder.switch_to_block(entry);
-        let mut params = self.builder.block_params(entry).to_vec();
+        let params = self.builder.block_params(entry).to_vec();
         let receiver = self.builder.ins().iconst(ptr(), 1);
-        params.insert(sret as usize, receiver);
+        let values = if forwarded.params == shim.params {
+            let mut values = params;
+            values.insert(sret as usize, receiver);
+            values
+        } else {
+            let to = self.fn_abi(
+                ExternAbi::Rust,
+                body.returned.as_ref(),
+                body.params.iter().map(|ty| ty.as_ref()),
+            )?;
+            let mut incoming = params.into_iter();
+            let mut values = Vec::new();
+            if sret {
+                values.push(incoming.next().expect("sret param"));
+            }
+            values.push(receiver);
+            for ((ty, mode), &to) in body.params.iter().skip(1).zip(abi.args).zip(&to.args[1..]) {
+                let layout = self.layout(ty.as_ref())?;
+                let addr = match mode {
+                    PassMode::OnStack { padded: true, .. } => {
+                        incoming.nth(1).expect("a parameter in memory after its padding")
+                    }
+                    PassMode::Indirect | PassMode::OnStack { .. } => {
+                        incoming.next().expect("indirect param")
+                    }
+                    _ => self.stack_slot(&layout),
+                };
+                self.receive(mode, &mut incoming, addr, &layout);
+                self.pass(to, addr, &layout, &mut values);
+            }
+            values
+        };
         let callee =
             self.cg.callee(InstanceDef::Closure(id.0.as_id()), parent_args, self.env, &sig)?;
         let callee = self.cg.declare_func_in_func(callee, self.builder.func);
-        let results = self.invoke(callee, &params);
+        let results = self.invoke(callee, &values);
         self.builder.ins().return_(&results);
         Ok(())
     }
@@ -12236,7 +12279,7 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
                 spilled.iter().map(|it| it.map_or(1, |padded| 1 + usize::from(padded))).sum()
             }
             PassMode::SkippingPair { skipped, .. } => {
-                2 + skipped.iter().map(|&it| usize::from(it)).sum::<usize>()
+                2 + skipped.into_iter().map(usize::from).sum::<usize>()
             }
             PassMode::Uniform { count, skipped, .. } => usize::from(count) + usize::from(skipped),
             _ => 1,
