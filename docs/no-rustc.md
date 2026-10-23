@@ -395,7 +395,7 @@ the counts of [How often](#how-often) lower, measured by step A's check, and non
 | [F](https://github.com/indexable-inc/ra-jit/issues/86). The standard library compiled by ra-jit | the sysroot's rlibs | C, E | large | high | the cold-start lane |
 | [G](https://github.com/indexable-inc/ra-jit/issues/87). Every crate compiled and linked by ra-jit | rustc's rlibs, objects, symbols and link line, "no rustc symbol" | E, F | large | high | the cold-start lane |
 | [H](https://github.com/indexable-inc/ra-jit/issues/88). ra-jit writes the test harness | the fallback when a test is added | G | medium | medium | the `no-rustc-hl` lane: done |
-| [I](https://github.com/indexable-inc/ra-jit/issues/89). Build scripts compiled and run by ra-jit | build scripts and their probes by rustc | B, G | medium | medium | none yet |
+| [I](https://github.com/indexable-inc/ra-jit/issues/89). Build scripts compiled and run by ra-jit | build scripts and their probes by rustc | B, G | medium | medium | the `no-rustc-l2` lane, after L; the F+G lane consumes it for the standard library's scripts |
 | [J](https://github.com/indexable-inc/ra-jit/issues/90). Proc macros compiled and loaded by ra-jit | proc macros by rustc, the toolchain's proc-macro server | F, G | large | high | none yet |
 | [K](https://github.com/indexable-inc/ra-jit/issues/91). The cold build is ra-jit's | cargo's first build, the rustc base (#11) | G, I, J | medium | high | none yet |
 | [L](https://github.com/indexable-inc/ra-jit/issues/92). Doctests by the daemon (#28) | probe and examples by rustc, rustdoc | B, G, D | medium | medium | the `no-rustc-hl` lane: first part done; the `no-rustc-l2` lane: second part (examples by ra-jit) done |
@@ -740,10 +740,14 @@ example that is only to compile passes when rust-analyzer finds no error in it. 
 builds an example that is `compile_fail` (D), one rust-analyzer finds an error in (rustc
 prints it), one naming a dependency that links a second copy of the library (two copies of a
 trait rust-analyzer takes for one), and one whose build, link or stand-in check fails; the
-memo of the first part keeps those. The fixture's doctests went from 3 to 0. On the 30 crates
-of `harness/doctests.py` ra-jit builds 3,076 of 3,513 examples; most of the rest are
-serde_core's, serde_json's and hashbrown's, which name `serde`, linking a second copy of the
-library, and `time`'s, `compile_fail` and others with an error. Building whole programs
+memo of the first part keeps those. A program that denies lints (a line `#![deny(...)]` or
+`#![forbid(...)]`, as `doc(test(attr(deny(warnings))))` gives every example of chrono) also
+goes to rustc when rust-analyzer warns about it or it names a `#[deprecated]` item, macro
+arguments included: rustdoc fails such an example, and ra-jit would pass it. The fixture's
+doctests went from 3 to 0. On the 30 crates of `harness/doctests.py` (3,095 examples) ra-jit
+builds 2,748 and rustc 340, every crate's results the same as rustdoc's; most of rustc's are
+serde_json's 97, serde_core's 68 and hashbrown's 63, which name `serde`, linking a second copy
+of the library, and `time`'s 74, `compile_fail` and others with an error. Building whole programs
 of examples found two codegen bugs that rustc's copies of the libraries had hidden:
 `relocate_data_pointer` followed two allocations that seemed to point at each other forever
 (url), and an `#[inline]` function of the standard library that takes its caller's overflow
