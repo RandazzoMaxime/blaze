@@ -207,6 +207,11 @@
           # As in the bench shell: the wrapper's _FORTIFY_SOURCE fails configure probes at -O0 in
           # the C code of the projects the harnesses build.
           hardeningDisable = [ "all" ];
+        } // pkgs.lib.optionalAttrs (system == "x86_64-linux") {
+          # rustup's rustc links x86-64 Linux with its own rust-lld, past the wrapper of the
+          # shell's linker that writes the store's libraries into the binary's RUNPATH: without
+          # this the binary finds neither libLLVM nor the store's glibc and libgcc_s when it runs.
+          CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS = "-Clinker-features=-lld";
         });
         devShells.bench = pkgs.mkShell bench;
         # What harness/bench.py and runbench.py measure bun in (bunprep.py, docs/research/bun.md):
