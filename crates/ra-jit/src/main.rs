@@ -7466,7 +7466,7 @@ fn run_holding(
         // An edit that adds functions to a crate is a patch when what rustc compiled of every
         // file of the crate is known from before it.
         let homing = programs.iter().any(|it| it.known.homes());
-        let mut homed = outlines.adding(&db, if homing { &texts } else { &[] });
+        let mut homed = outlines.adding(&db, &listed, if homing { &texts } else { &[] });
         homed.extend(&editing);
         homed.sort_unstable();
         homed.dedup();

@@ -101,11 +101,16 @@ impl Outlines {
     /// crate depends on those, and no file of them names any of the new functions yet. Only
     /// their code sees the new functions, and only what names one can mean another thing now:
     /// what rustc compiled of every file of them is to be taken in before the edit.
-    pub(crate) fn adding(&mut self, db: &RootDatabase, texts: &[(FileId, String)]) -> Vec<FileId> {
+    pub(crate) fn adding(
+        &mut self,
+        db: &RootDatabase,
+        listed: &Listed,
+        texts: &[(FileId, String)],
+    ) -> Vec<FileId> {
         self.adding.clear();
         let mut homed = Vec::new();
         for (file, text) in texts {
-            if let Some(adding) = adding(db, *file, text) {
+            if let Some(adding) = adding(db, listed, *file, text) {
                 homed.extend(&adding.files);
                 self.adding.insert(*file, adding);
             }
@@ -472,21 +477,15 @@ fn outline_without(
 }
 
 /// What [`Outlines::adding`] finds of an edit that gives `file` the text `text`.
-fn adding(db: &RootDatabase, file: FileId, text: &str) -> Option<Adding> {
-    // The crates of the file's source root hold every target of its package, and the
-    // library's are depended on by the others.
-    let crates: Vec<_> = (relevant_crates(db, file).iter().copied())
-        .filter(|&krate| {
-            hir_def::nameres::crate_def_map(db, krate).modules_for_file(db, file).next().is_some()
-        })
-        .collect();
-    let edition = crates.first()?.data(db).edition;
-    if crates.iter().any(|it| it.transitive_rev_deps(db).len() != 1) {
-        return None;
-    }
+fn adding(db: &RootDatabase, listed: &Listed, file: FileId, text: &str) -> Option<Adding> {
+    let edition = relevant_crates(db, file).first()?.data(db).edition;
     let was = EditionedFileId::new(db, file, edition).parse(db).syntax_node();
     let now = ast::SourceFile::parse(text, edition).tree().syntax().clone();
     let added = added_functions(&was, &now)?;
+    let crates = listed.crates_of(db, file);
+    if crates.is_empty() || crates.iter().any(|it| it.transitive_rev_deps(db).len() != 1) {
+        return None;
+    }
     let names: FxHashSet<String> =
         added.iter().filter_map(|it| it.name()).map(|it| it.text().to_string()).collect();
     let mut files: Vec<(FileId, Edition)> = hir::attach_db(db, || {
@@ -800,6 +799,27 @@ pub(crate) fn left_to_rustc(
 }
 
 impl Listed {
+    /// The crates the file is a module of, of those that are built and those they use: no
+    /// other is part of a program. Before the first build, of all of them. The crates of a
+    /// file's source root are every target of its package, and an example of bevy is one of
+    /// hundreds.
+    pub(crate) fn crates_of(&self, db: &RootDatabase, file: FileId) -> Vec<ide_db::base_db::Crate> {
+        // Copied out: a query that is cancelled unwinds, and would poison the lock.
+        let built = crate::lock(&self.built).clone();
+        let read: FxHashSet<_> = (built.iter())
+            .flat_map(|&it| ide_db::base_db::Crate::from(it).transitive_deps(db))
+            .collect();
+        (relevant_crates(db, file).iter().copied())
+            .filter(|krate| built.is_empty() || read.contains(krate))
+            .filter(|&krate| {
+                hir_def::nameres::crate_def_map(db, krate)
+                    .modules_for_file(db, file)
+                    .next()
+                    .is_some()
+            })
+            .collect()
+    }
+
     /// Whether the file is a module of a crate that is built, or of one that such a crate uses.
     /// Any file may be one before a crate is listed.
     pub(crate) fn sees(&self, db: &RootDatabase, file: FileId) -> bool {
