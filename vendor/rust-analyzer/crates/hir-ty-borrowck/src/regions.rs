@@ -4265,7 +4265,18 @@ impl<'db> Builder<'_, '_, 'db> {
                     self.caller_bound(trait_ref, at);
                     self.closure_bound(trait_ref, at);
                     let trait_ref = self.normalize_closure_args(trait_ref);
-                    self.prove(trait_ref, at);
+                    // Of a call written as one: `map[i] = v` calls `IndexMut::index_mut`, which
+                    // is E0594 where only `Index` is implemented.
+                    if self.prove(trait_ref, at)
+                        && at.category == Category::Predicate
+                        && let MirSpan::ExprId(expr) = at.span
+                        && matches!(
+                            self.ctx.store[expr],
+                            hir_def::hir::Expr::Call { .. } | hir_def::hir::Expr::MethodCall { .. }
+                        )
+                    {
+                        self.ctx.tainted.set(true);
+                    }
                 }
                 _ => (),
             }
@@ -4409,12 +4420,13 @@ impl<'db> Builder<'_, '_, 'db> {
     /// Proves `trait_ref` with the trait solver, as rustc's `prove_predicate`, and takes the
     /// region constraints proving it gives: a where clause or an impl it matches relates the
     /// regions of the two (`&'min G: Get` proven by `&'max G: Get` equals them), and the
-    /// impl's where clauses (`T: 'a`) hold. Nothing when it is not proven.
+    /// impl's where clauses (`T: 'a`) hold. Nothing when it is not proven, and `true` when
+    /// it does not hold.
     fn prove(
         &mut self,
         trait_ref: rustc_type_ir::TraitRef<hir_ty::next_solver::DbInterner<'db>>,
         at: At,
-    ) {
+    ) -> bool {
         use hir_ty::next_solver::{
             infer::{
                 region_constraints::Constraint,
@@ -4429,7 +4441,7 @@ impl<'db> Builder<'_, '_, 'db> {
                 rustc_type_ir::inherent::GenericArg::as_type(&arg).is_some_and(names_closure)
             })
         {
-            return;
+            return false;
         }
         let interner = self.interner();
         let (constraints_before, obligations_before) = {
@@ -4450,8 +4462,9 @@ impl<'db> Builder<'_, '_, 'db> {
             self.ctx.env,
             predicate,
         ));
-        if !ocx.evaluate_obligations_error_on_ambiguity().is_empty() {
-            return;
+        let errors = ocx.evaluate_obligations_error_on_ambiguity();
+        if !errors.is_empty() {
+            return errors.iter().any(|it| it.is_true_error());
         }
         let (constraints, obligations) = {
             let mut inner = self.ctx.infcx.inner.borrow_mut();
@@ -4503,6 +4516,7 @@ impl<'db> Builder<'_, '_, 'db> {
                 at,
             );
         }
+        false
     }
 
     /// `ty` of the signature with its lifetimes as universal regions.

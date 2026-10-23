@@ -145,6 +145,9 @@ pub fn borrowck<'db>(db: &'db dyn HirDatabase, def: DefWithBodyId) -> BorrowckRe
         ctx.inline_const = inline_const.is_some();
         let mut found = Vec::new();
         let needs = check::check(&ctx, body, &requirements, &mut found);
+        if ctx.tainted.get() {
+            return result;
+        }
         diagnostics.push(found);
         if let Some(nested) = closure.or(inline_const) {
             requirements.insert(nested, needs);
@@ -227,6 +230,9 @@ pub(crate) struct Ctx<'a, 'db> {
     /// For each expression in a `match` arm's guard, the variables the arm's pattern binds:
     /// rustc binds them by reference in the guard, so it cannot move out of them.
     pub(crate) guard_bindings: FxHashMap<ExprId, Vec<BindingId>>,
+    /// A where clause of a call does not hold, rustc's E0277, which rust-analyzer does not
+    /// report: rustc does not borrow check a body whose type check fails.
+    pub(crate) tainted: std::cell::Cell<bool>,
 }
 
 fn guard_bindings(store: &ExpressionStore) -> FxHashMap<ExprId, Vec<BindingId>> {
@@ -319,6 +325,7 @@ impl<'a, 'db> Ctx<'a, 'db> {
             closure_expr: closure,
             inline_const: false,
             guard_bindings: guard_bindings(store),
+            tainted: std::cell::Cell::new(false),
         }
     }
 

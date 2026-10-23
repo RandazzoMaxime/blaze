@@ -1859,6 +1859,11 @@ impl<'a, 'db> Checker<'a, '_, 'db> {
             Access::Mutate => ("E0594", "assign to"),
             _ => ("E0596", "borrow"),
         };
+        // rustc's `access_place_error_reported`: a borrow of a variable that is this error is
+        // not also one that does not live long enough.
+        if place.projection.is_empty() {
+            self.dead_reported.insert((place.local, span));
+        }
         let name = self.quoted(place, "data");
         let reason = if root == usize::MAX {
             match access {
