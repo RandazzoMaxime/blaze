@@ -139,7 +139,8 @@ pub(crate) fn compile(
     crates.push(script);
     let mut linked = BTreeMap::new();
     let deps = asked.externs();
-    let deps = deps.iter().map(|(name, path)| Ok((name.clone(), add(&mut crates, &mut linked, path)?)));
+    let deps =
+        deps.iter().map(|(name, path)| Ok((name.clone(), add(&mut crates, &mut linked, path)?)));
     crates[0].deps = deps.collect::<Result<_, String>>()?;
     std::fs::create_dir_all(dir).map_err(|it| it.to_string())?;
     let project = dir.join("rust-project.json");
@@ -178,7 +179,8 @@ pub(crate) fn compile(
         let last = said.lines().rev().find(|it| !it.trim().is_empty()).unwrap_or("");
         return Err(format!("ra-jit did not build it ({}): {last}", built.status));
     }
-    if let Some(line) = said.lines().find(|it| it.contains(" functions in it ra-jit could not compile"))
+    if let Some(line) =
+        said.lines().find(|it| it.contains(" functions in it ra-jit could not compile"))
         && !line.ends_with(", 0 functions in it ra-jit could not compile")
     {
         return Err(format!("it calls functions ra-jit could not compile ({line})"));
@@ -222,13 +224,18 @@ fn add(
         return Ok(at);
     }
     let name = path.file_name().and_then(|it| it.to_str()).unwrap_or_default();
-    let unit = name.strip_prefix("lib").and_then(|it| it.strip_suffix(".rlib").or(it.strip_suffix(".rmeta")));
+    let unit = name
+        .strip_prefix("lib")
+        .and_then(|it| it.strip_suffix(".rlib").or(it.strip_suffix(".rmeta")));
     let Some(unit) = unit else {
-        return Err(format!("it links {name}, which is not a library ra-jit compiles (a proc macro)"));
+        return Err(format!(
+            "it links {name}, which is not a library ra-jit compiles (a proc macro)"
+        ));
     };
     let dir = path.parent().map(Record::dir_for).ok_or("a library without a directory")?;
-    let record = Record::described(&dir, unit)
-        .ok_or_else(|| format!("`{unit}`, which it links, was compiled before ra-jit described it"))?;
+    let record = Record::described(&dir, unit).ok_or_else(|| {
+        format!("`{unit}`, which it links, was compiled before ra-jit described it")
+    })?;
     let asked = Asked { args: &record.args, cwd: &record.cwd };
     let at = crates.len();
     linked.insert(path.to_owned(), at);

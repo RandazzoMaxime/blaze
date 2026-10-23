@@ -1099,7 +1099,8 @@ pub(crate) fn as_built(command: &mut Command) -> std::io::Result<()> {
 /// wrapper there. Cargo keys no unit by this wrapper, so the builds of plain cargo are still
 /// this one's.
 pub(crate) fn every_crate(command: &mut Command) -> std::io::Result<()> {
-    let dir = command.get_current_dir().map_or_else(std::env::current_dir, |it| Ok(it.to_owned()))?;
+    let dir =
+        command.get_current_dir().map_or_else(std::env::current_dir, |it| Ok(it.to_owned()))?;
     if !switch::user_wraps(&dir) {
         command.env("RUSTC_WRAPPER", switch::wrapper_path()?).env(wrapper::EVERY_CRATE, "1");
     }

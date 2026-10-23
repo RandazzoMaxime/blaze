@@ -124,8 +124,7 @@ pub(crate) fn run_as_cargo_does(
     let (Some(key), Some(store), Some(out_dir)) = (key, store, out_dir) else {
         return become_it(&mut script);
     };
-    if let Some(kept) = store.get(&key).and_then(|it| Kept::read(&it)).filter(|it| it.still(&cwd))
-    {
+    if let Some(kept) = store.get(&key).and_then(|it| Kept::read(&it)).filter(|it| it.still(&cwd)) {
         kept.restore(&out_dir)?;
         std::io::stdout().write_all(&kept.stdout)?;
         std::io::stderr().write_all(&kept.stderr)?;
@@ -156,7 +155,12 @@ const MOST_KEPT: usize = 256 << 20;
 
 /// The key of a run of the script `real` in `cwd` with `args` and `env`. `None` when the
 /// script cannot be read.
-fn run_key(real: &Path, cwd: &Path, args: &[OsString], env: &[(String, String)]) -> Option<[u8; 32]> {
+fn run_key(
+    real: &Path,
+    cwd: &Path,
+    args: &[OsString],
+    env: &[(String, String)],
+) -> Option<[u8; 32]> {
     let mut hash = Sha256::new();
     let mut field = |bytes: &[u8]| {
         hash.update((bytes.len() as u64).to_le_bytes());

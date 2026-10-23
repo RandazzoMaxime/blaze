@@ -3756,8 +3756,8 @@ fn write_dep_info(
 ) -> anyhow::Result<()> {
     let mut modules = Vec::new();
     for krate in crates_named(db, &args.krate, args)? {
-        let ids = krate.modules(db).into_iter();
-        modules.extend(ids.map(|it| it.definition_source_file_id(db).original_file(db).file_id(db)));
+        let files = krate.modules(db).into_iter().map(|it| it.definition_source_file_id(db));
+        modules.extend(files.map(|it| it.original_file(db).file_id(db)));
     }
     let named = |id: &vfs::FileId| Some(vfs.file_path(*id).as_path()?.to_string());
     let mut paths: Vec<String> = Vec::new();
@@ -3768,7 +3768,8 @@ fn write_dep_info(
     }
     anyhow::ensure!(!paths.is_empty(), "no file of `{}` was loaded", args.krate);
     let escaped: Vec<String> = paths.iter().map(|it| dep_info::escaped(it)).collect();
-    let mut text = format!("{}: {}\n\n", dep_info::escaped(&exe.display().to_string()), escaped.join(" "));
+    let target = dep_info::escaped(&exe.display().to_string());
+    let mut text = format!("{target}: {}\n\n", escaped.join(" "));
     for file in &escaped {
         text += &format!("{file}:\n");
     }
