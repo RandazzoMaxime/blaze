@@ -15,6 +15,7 @@ the same.
   custom_alloc   a `#[global_allocator]` of the program that counts what it is asked for
   lib_alloc      the `#[global_allocator]` is in a library of the workspace
   cfg_alloc      a `#[global_allocator]` under a `#[cfg]` that is false, as ripgrep's
+  trait_block    a method a trait provides calls a function declared in its body
 
 The backend is `RA_JIT_BACKEND`'s; `--release` builds both with the release profile.
 """
@@ -24,7 +25,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 import apps
 
-CASES = ["default_alloc", "custom_alloc", "lib_alloc", "cfg_alloc"]
+CASES = ["default_alloc", "custom_alloc", "lib_alloc", "cfg_alloc", "trait_block"]
 
 
 def check(ws, case, release):
