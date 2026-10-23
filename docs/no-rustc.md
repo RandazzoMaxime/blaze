@@ -230,6 +230,7 @@ Paths are under `crates/`; line numbers are of 41e7906192.
 | `ra-jit/src/doctest.rs:203`, `:246` `compile` | rustc links a probe program to learn the link line, and compiles or checks each example | every library's doctests, except what is unchanged since the last run (L's first part) |
 | `ra-jit/src/doctest.rs:301` `leave_to_rustdoc` | hands the library to rustdoc | `-q`, a library ra-jit cannot load; until A, every package whose features `cargo build --unit-graph` rejected (below) |
 | `ra-jit/src/cargo/mod.rs:139` | `cargo ra-jit check` is `cargo check` | every check |
+| `ra-jit/src/test_harness.rs` `module` returning `None` | leaves the test program's harness to rustc, and a test added to cargo | a bench, a `cfg_attr` on a test, an `ignore` written as a token tree (H) |
 | `ra-jit/src/main.rs:5084`, `:5127` `RA_JIT_WRAPS_RUSTC` | ra-jit standing in for rustc for a whole build | the harness's "alone" builds |
 | `harness/apps.py:113` | the harness's "alone" mode: cargo with ra-jit as `RUSTC_WRAPPER`, linking the sysroot's rlibs | the harness only |
 
@@ -373,7 +374,7 @@ steps not shown ran none before and none now.
 - **The fixture of `harness/norustc.py`**, in CI on Linux x86-64, Linux AArch64 and macOS
   arm64 under both backends: the cold build 74 to 76 rustc runs before A, 18 after A, 6 now;
   edits 5 (277 to 297 on macOS, whose daemon did not listen, #106), 0 now; tests 16 to 19, 12
-  now; doctests 23, 6 after B, 3 now (L's first part, below); check 7, then 8 since the fixture
+  after B, 7 now (H, below); doctests 23, 6 after B, 3 now (L's first part, below); check 7, then 8 since the fixture
   has one library more, 5 now. These are `norustc/baseline.json`.
 
 ## The plan
@@ -391,7 +392,7 @@ the counts of [How often](#how-often) lower, measured by step A's check, and non
 | [E](https://github.com/indexable-inc/ra-jit/issues/85). No function left to rustc | the refused classes; a refusal fails the build | A | large, ongoing | medium | the bun lane (bun's classes, #34, #35) and the glancer lane (kept rejections, #37) |
 | [F](https://github.com/indexable-inc/ra-jit/issues/86). The standard library compiled by ra-jit | the sysroot's rlibs | C, E | large | high | the cold-start lane |
 | [G](https://github.com/indexable-inc/ra-jit/issues/87). Every crate compiled and linked by ra-jit | rustc's rlibs, objects, symbols and link line, "no rustc symbol" | E, F | large | high | the cold-start lane |
-| [H](https://github.com/indexable-inc/ra-jit/issues/88). ra-jit writes the test harness | the fallback when a test is added | G | medium | medium | the `no-rustc-hl` lane |
+| [H](https://github.com/indexable-inc/ra-jit/issues/88). ra-jit writes the test harness | the fallback when a test is added | G | medium | medium | the `no-rustc-hl` lane: done |
 | [I](https://github.com/indexable-inc/ra-jit/issues/89). Build scripts compiled and run by ra-jit | build scripts and their probes by rustc | B, G | medium | medium | none yet |
 | [J](https://github.com/indexable-inc/ra-jit/issues/90). Proc macros compiled and loaded by ra-jit | proc macros by rustc, the toolchain's proc-macro server | F, G | large | high | none yet |
 | [K](https://github.com/indexable-inc/ra-jit/issues/91). The cold build is ra-jit's | cargo's first build, the rustc base (#11) | G, I, J | medium | high | none yet |
@@ -520,9 +521,21 @@ method or field, a type error, incomplete code) fail the build as ra-jit writes 
 rustc's form (`error[E0308]: ...`, ` --> file:line:col`, the line marked, then cargo's `could
 not compile` line), with status 101, under `cargo ra-jit` and under plain cargo after `ra-jit
 enable`. What stays with cargo for now: what the frontend turns down as unsupported
-(`NotSupported`, layouts, constants: step E), ra-jit's own failures (a build that panicked, a
-link that failed), an error in a file written before the worker loaded the workspace, and
-`cargo ra-jit check`. Counted on ripgrep with `harness/norustc` (dev-aws-3, 2026-10-22), the
+(`NotSupported`, layouts, constants: step E) and ra-jit's own failures (a build that panicked, a
+link that failed). An error in a file written before the worker loaded the workspace is ra-jit's
+too since 2026-10-23: the worker leaves it beside its socket and every build of the checkout
+fails with it until a source is written. The lints followed: a lint the source denies fails the
+build for the four lints `harness/lints_ui.py` finds rust-analyzer reports only where rustc does
+(on rustc's UI tests that deny or forbid a lint, 2026-10-23: non_snake_case 31 right, 0 wrong,
+9 missed; non_camel_case_types 22, 0, 2; unused_must_use 15, 0, 29; non_upper_case_globals 9,
+0, 4; the same against 1.99.0 and the nightly of 2026-10-09). Three had been wrong first:
+rust-analyzer's case rules were rustc's of an old commit, and its `unused_must_use` looked into
+`if` and `match` arms and took `Result<(), Never>` for one to use. None of the four is denied by
+default, so the level is the source's, which only `--cap-lints` and `--force-warn` undo; with
+either among the flags no lint fails a build. A lint in what a macro expands to does not. The
+other lints are not ra-jit's verdict yet: a crate that denies one rust-analyzer does not find
+runs code rustc turns down. `cargo ra-jit check` is the daemon's verdict on the build of the
+same flags when it has that build loaded, and `cargo check` otherwise. Counted on ripgrep with `harness/norustc` (dev-aws-3, 2026-10-22), the
 error step went from 6 rustc compiles in 0.9 s to none in 0.1 s. The first `test --no-run`
 after it compiled 5 workspace libraries more (50 compiles, not 45): the cargo build of the
 error had brought up to date the libraries an earlier edit had changed, which `cargo test`
@@ -531,8 +544,8 @@ workspace (dev-aws-3, cranelift, two runs each) the edits went from 5 rustc runs
 the tests that follow from 48 or 49 to 52 for the same reason: 138 runs in all, not 139 or 140.
 `cargo ra-jit check`
 can't be an in-process load yet: on ripgrep, loading the workspace and the standard library
-and checking its 97 files took 6 to 8.5 s, against 2.3 s for a warm `cargo check`. It needs a
-loaded workspace the daemon keeps warm.
+and checking its 97 files took 6 to 8.5 s, against 2.3 s for a warm `cargo check`, which is why
+it asks the daemon, which keeps the workspace loaded.
 
 **E. No function left to rustc.** ([#85](https://github.com/indexable-inc/ra-jit/issues/85)) The classes of #34 and #35 and the rest of
 [support.md](support.md#language) are compiled; a refusal fails the build with its reason. Until
@@ -580,9 +593,58 @@ symbol", ABI and mangling parity, and [#52](https://github.com/indexable-inc/ra-
 Risk: a link line that differs from rustc's on a platform; the harness links every bench app
 on Linux, macOS, Windows and wasm and compares the programs' behaviour.
 
+The no-rustc-fg lane owns F and G. Where they are (2026-10-22, Linux x86-64): with no rustc
+symbols ra-jit compiles a program together with `std`, `core`, `alloc`, `compiler_builtins`,
+`panic_unwind`, `unwind`, `libc` and the 11 crates they use from `rust-src`, and `cc` links
+the one object with nothing rustc built. hello, and a program of collections, panics caught
+and uncaught, threads, channels and formatting, print what cargo's builds do. The standard
+library also builds alone, once, into an object of its own (a unit: its functions and statics
+exported under ra-jit's names, a static in a generic function's body included), and a program
+builds over it with `--prebuilt std.o`, compiling only its own crates and the generic functions
+of the library it instantiates. A build with nothing of rustc's that names none of the
+library's crates does that by itself: it takes the unit from the store (`RA_JIT_CACHE`), which
+fetches it from the remote, keyed by the library's crates, their cfgs and editions, the target
+and the debug info asked for (the store adds ra-jit's build and the toolchain), or compiles it
+once and keeps it there, and writes it beside `--out` as `<out>.std.o`; `harness/allrajit.py`
+checks all three ways against cargo. For G, such a build compiles every crate the program
+depends on as well, not only those it names, and links them with the unit: ripgrep (60 crates)
+builds, links and runs with nothing rustc built, and 19 of its commands (searches, `--json`,
+`-U`, `-P`, `--files`, errors, `--help`) print what cargo's build does, timings aside. A function
+ra-jit cannot compile (2,115 of the library's: 534 for f16 and f128, 222 intrinsics with no
+body, most of the rest `core::arch`'s SIMD) is, where something calls it, a hidden stand-in that says so when it runs; a program that calls
+one compiles its own copy and is told at its build. The unit is what the program takes of the
+library and everything that depends on, but `test`, `proc_macro` and `panic_abort`, which
+rust-analyzer's graph has every crate depend on: 21 crates, `rand` and `foldhash` among them,
+which std's own workspace adds to its graph and which nothing compiled uses. The library's
+build names only the library's crates, so the program's own `memchr` is not taken for std's. Not yet: `__rust_probestack` (a naked function, C), `#[global_allocator]` (the
+`__rg_*` shim is not generated; the build refuses), the cfgs of `compiler_builtins`' and
+`libc`'s build scripts, choosing `panic_abort`, and a link line of ra-jit's own (`cc` with a
+fixed list of libraries today).
+
 **H. ra-jit writes the test harness.** ([#88](https://github.com/indexable-inc/ra-jit/issues/88)) The `main` of a test executable, the list of `#[test]`,
 `#[should_panic]`, `#[ignore]` and benches as libtest's descriptors, is generated by ra-jit, so
 adding a test is a build like another.
+
+Done (the `no-rustc-hl` lane, 2026-10-23), for tests; benches are still rustc's.
+`crates/ra-jit/src/test_harness.rs` writes, into the daemon's text of the root file of each
+crate a test program is built from, a module `__ra_jit_test_harness` that lists every `#[test]`
+function as a `test::TestDescAndFn` (its path, `#[ignore]` with its message, `#[should_panic]`
+with `expected`, the file, line and column of its name, unit or integration test) and whose
+`main` calls `test::test_main_static`. That `main` is the program's start, ahead of the one
+rustc wrote, and the module is written again after each change, so a test added, removed or
+renamed is an edit the daemon builds. rust-analyzer resolves the module's paths to private tests
+(a patch in `hir-def`'s path resolution, for that module only). A program with a bench, a
+`cfg_attr` on a test or an `ignore` it does not read keeps rustc's harness, and adding a test
+to it still goes to cargo. A test program built without incremental compilation or optimized,
+which rustc's harness calls private or inlined copies of the tests in, was cargo's; it is now the
+daemon's when ra-jit wrote its harness (the plan leaves the reason in the program's directory,
+`harness-alone`, for the daemon to refuse with when it wrote none). A library's file a unit test is linked with as rustc built it (without
+`cfg(test)`) is now guarded by its text without the items marked `#[test]` or `#[cfg(test)]`,
+every other token at its line and column: a change to its tests alone keeps rustc's library,
+and cargo's dep-info of it is made newer than the file so cargo does not build it again. On the
+fixture "a test added" went from 5 rustc runs to none, so tests went from 12 to 7. The 7 are
+the first `test --no-run`, cargo building the test programs and the libraries an edit before
+changed, and the proc macro the worker's load compiles: the cold build's (K).
 
 **I. Build scripts compiled and run by ra-jit.** ([#89](https://github.com/indexable-inc/ra-jit/issues/89)) The daemon compiles, links and runs build
 scripts with `RUSTC` naming ra-jit, so that `autocfg`, `version_check`, `rustversion` and the
@@ -647,8 +709,68 @@ That is kept fast by not compiling, rather than by compiling as fast as rustc:
   program reaches it, so that a cold build compiles what the program uses rather than every
   function of every dependency.
 
-What has not been measured: ra-jit compiling every crate of a bench app, its dependencies and
-the standard library, with an empty store. Step G's issue starts by measuring it. The step K
+Measured first on hello world (dev-aws-8, 2026-10-22, three runs each, all agreeing within
+0.3 s), ra-jit compiling the program and the standard library's 18 crates into one object:
+
+| Build of hello world | Wall time |
+|---|---|
+| `cargo build`, rustc's prebuilt standard library | 0.19 s |
+| `cargo build -Zbuild-std=std,panic_unwind`, the standard library from source | 15.5 s |
+| ra-jit, every crate, no store | 5.2 to 5.4 s, then 0.12 s to link |
+| ra-jit, empty store | 5.4 to 5.5 s |
+| ra-jit, warm store | 5.4 to 5.5 s: 5,683 of 8,260 functions from the store |
+
+ra-jit is three times faster than cargo building the standard library, and 28 times slower
+than cargo taking rustc's prebuilt one. A store of functions does not close that: of the 5.4 s,
+3.0 s is resolving the 27 crates (what to compile, before any is compiled) and 0.5 s loading
+the workspace; compiling is 1.6 s. So F keeps the standard library in the store as one
+unit, an object and the list of what it exports under ra-jit's own names, built once per
+target and profile and served by the remote, and a program's build resolves and compiles
+only its own crates and the generic functions of the library it instantiates, as rustc's
+prebuilt library lets cargo do. The memory of the 5.4 s build peaks at 3.7 GB.
+
+The unit, measured the same way (dev-aws-8, 2026-10-22, `harness/allrajit.py` and three runs
+of hello by hand, agreeing within 0.05 s):
+
+| Build | Wall time |
+|---|---|
+| the standard library alone, into `std.o` (53 MB, 23,338 symbols) | 15.9 to 16.1 s, 4.2 GB |
+| hello, with the standard library in the same build | 4.2 s, then 0.12 s to link |
+| hello over `std.o` | 3.04 to 3.09 s, 2.2 GB, then 0.37 s to link |
+| the program of collections, threads and panics over `std.o` | 3.22 s, then 0.37 s to link |
+| hello on an empty store and remote: the unit compiled, kept and pushed | 17.4 to 17.6 s |
+| the program of collections, threads and panics, the unit from the store | 3.30 to 3.34 s |
+| the same on a second empty store, the unit from the remote (a directory) | 3.34 s |
+
+Over the unit hello compiles 138 functions in 0.15 s; 2.5 s of its 3.1 s is resolving the
+library's 27 crates, which the program's types and calls are checked against, and 0.4 s is
+loading the workspace. So the unit takes the library's compiling out of a program's build but
+not its resolving: that is what is left between ra-jit and cargo's 0.19 s, and a daemon pays
+it once. The link is slower because `cc` reads the whole of `std.o`; G's link line can take
+what the program reaches.
+
+ripgrep with every crate ra-jit's (dev-aws-8, 2026-10-22, 96 cores, `cc` linking the
+program's object and the unit's):
+
+| Build of ripgrep | Wall time |
+|---|---|
+| `cargo build`, cold, rustc's prebuilt standard library | 5.53 to 5.58 s, 0.38 GB |
+| `cargo build` after touching `main.rs` | 0.53 s |
+| ra-jit, empty store and remote: the unit compiled, kept and pushed | 13.7 s, 6.4 GB, then 0.64 s to link |
+| ra-jit, warm store | 5.41 to 5.44 s, 4.6 GB, then 0.64 s to link |
+| ra-jit, a second empty store, the unit and functions from the remote (a directory) | 5.41 to 5.46 s, then 0.64 s to link |
+
+With a warm remote ripgrep is 6.1 s against cargo's 5.55: 9% over the K bar below. Of ra-jit's
+5.4 s, 2.7 s is resolving the 60 crates and 0.5 s loading the workspace; compiling the
+program's 4,755 functions and the 8,829 instances the store did not have is 2.0 s (the other
+24,434 come from the store). The empty store's 13.7 s is the unit's 7.2 s of compiling and the
+program's 2.8 s on top of resolving. The executable is 67 MB against cargo's 53 MB: the link
+takes the whole unit. Until 2026-10-22 a build also spent 6.7 s (16.5 s over the flat syntax
+tree, #42) after compiling: every function the frontend turned down walked all the macro calls
+of its crate, `core`'s for most of the unit's 2,000; that is now once a crate, and never for the
+unit, whose refusals nobody reads.
+
+Not yet measured: the other bench apps with every crate ra-jit's. The step K
 bar: with a warm remote, `cargo ra-jit build` from nothing is no slower than cargo's cold build;
 with an empty store, it is measured and published beside cargo's, and the gap is an issue of its
 own. Until K lands, the rustc base stays as it is; it is not made faster or extended.

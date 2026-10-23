@@ -73,6 +73,12 @@ impl Mark {
         }
         Mark { lines: hasher.finish(), ..Mark::new(db, serial, &compiled.requests) }
     }
+
+    /// Whether the code is the same, wherever in the file it is: a copy of rustc's that no
+    /// patch reaches does what it did, and only a debugger is told the lines it was at.
+    fn same_code(self, other: Mark) -> bool {
+        Mark { lines: 0, ..self } == Mark { lines: 0, ..other }
+    }
 }
 
 /// Something in the base that an edit can change or take away.
@@ -1264,6 +1270,19 @@ impl Base {
             self.hydrated && self.crates.iter().any(|it| self.touched.crates.contains(it));
     }
 
+    /// Notes that functions were added to a file of `crates` and nothing else of it changed but
+    /// bodies that nothing else sees into, where no other crate depends on `crates`, no file of
+    /// them named the new functions before, and `files` are their files. What rustc compiled of
+    /// them is then known when [`Self::home`] took in every one of those files.
+    pub(super) fn touch_added(&mut self, db: &dyn HirDatabase, crates: &[Crate], files: &[FileId]) {
+        if !files.iter().all(|it| self.homed.contains(it)) {
+            return self.touch(db, Some(crates));
+        }
+        self.touched.crates.extend(crates.iter().copied());
+        self.outdated |=
+            self.hydrated && self.crates.iter().any(|it| self.touched.crates.contains(it));
+    }
+
     /// Notes that a file changed in the bodies of functions alone, none of which the rest of
     /// the program sees into.
     pub(super) fn touch_bodies(&mut self, db: &dyn HirDatabase, file: FileId) {
@@ -1421,7 +1440,7 @@ impl Base {
                 Some(Mark::of_function(db, root_serial(db, *root), compiled, self.debug))
             });
             // One that did not compile then can't be told to be the same.
-            if was.is_none() || mark != Some(*was) {
+            if !was.zip(mark.flatten()).is_some_and(|(was, now)| was.same_code(now)) {
                 return stale.declined("a function that rustc's symbols name no copy of changed");
             }
         }
@@ -1447,7 +1466,7 @@ impl Base {
             let env = closure_env(db, homed.root);
             for (instance, was) in &homed.unnamed {
                 let mark = probe(|| closure_mark(db, instance, &env, self.debug));
-                if was.is_none() || mark != Some(*was) {
+                if !was.zip(mark.flatten()).is_some_and(|(was, now)| was.same_code(now)) {
                     return stale
                         .declined("a closure that rustc's symbols name no copy of changed");
                 }

@@ -46,6 +46,7 @@ pub(crate) fn command(args: impl Iterator<Item = String>) -> anyhow::Result<()> 
                 let typed = std::iter::once(asked.subcommand.name().to_owned()).chain(asked.typed);
                 plain_cargo(typed.collect())?
             }
+            None if asked.subcommand == Subcommand::Check => check(&asked)?,
             None => build(&asked)?,
         },
         Asked::Cargo(args) => plain_cargo(args)?,
@@ -72,7 +73,8 @@ cargo ra-jit: builds with the ra-jit daemon, with cargo's flags
 usage: cargo ra-jit <command> [cargo's flags]
 
   build, run, test   by the daemon when it has the workspace loaded, by cargo otherwise
-  check              `cargo check`
+  check              what the daemon's build of the same flags says, when it has one loaded;
+                     `cargo check` otherwise
   status             whether ra-jit is enabled, what the daemon has loaded, what fell back
   stop               ends the daemon; the next build starts one
   enable, disable    plain `cargo build|run|test|check` through ra-jit, and back
@@ -216,6 +218,39 @@ fn build(asked: &Invocation) -> anyhow::Result<i32> {
 
 /// The status of a build that failed, as cargo's of one rustc turned down.
 const FAILED: i32 = 101;
+
+/// `cargo ra-jit check`: what the daemon says of the source as it builds the programs of
+/// the build with the same flags, when it has that build loaded, and no rustc. Any other
+/// check is cargo's, and loads nothing: rustc links no program for it.
+fn check(asked: &Invocation) -> anyhow::Result<i32> {
+    let started = Instant::now();
+    let cwd = std::env::current_dir()?;
+    let cargos = |why: &str| {
+        say::fallback(why, "this is `cargo check`");
+        plain_cargo(std::iter::once("check".to_owned()).chain(asked.typed.clone()).collect())
+    };
+    let state = match State::read(&asked.key(&cwd)) {
+        Ok(state) if state.programs.is_empty() => {
+            return cargos("the daemon builds no program of it");
+        }
+        Ok(state) => state,
+        Err(why) => return cargos(why.unwrap_or("the daemon has not built it")),
+    };
+    match by_daemon(state) {
+        Ok((state, _held)) => {
+            let took = started.elapsed().as_secs_f64();
+            let finished = format!("`{}` profile [ra-jit] target(s) in {took:.2}s", state.profile);
+            say::status(asked.flags.quiet, "Finished", &finished);
+            state.write()?;
+            Ok(0)
+        }
+        Err(NotServed::Error(said)) => {
+            eprintln!("{said}");
+            Ok(FAILED)
+        }
+        Err(NotServed::Cargo(ToCargo(_, why))) => cargos(&why),
+    }
+}
 
 /// Why the first build of a workspace is not rustc's of what the workspace depends on and
 /// the daemon's of the workspace.
@@ -474,7 +509,7 @@ fn after_build(
     held: Option<Held>,
 ) -> anyhow::Result<i32> {
     match asked.subcommand {
-        Subcommand::Build => Ok(0),
+        Subcommand::Build | Subcommand::Check => Ok(0),
         Subcommand::Run => match run::program(asked, state, cwd, held)? {
             Some(code) => Ok(code),
             // Cargo says which programs there are to pick from.

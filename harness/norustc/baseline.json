@@ -17,7 +17,7 @@
    "rustdoc": 0
   },
   "tests": {
-   "rustc": 12,
+   "rustc": 7,
    "rustdoc": 0
   }
  },
@@ -39,13 +39,13 @@
    "rustdoc": 0
   },
   "tests": {
-   "rustc": 12,
+   "rustc": 7,
    "rustdoc": 0
   }
  },
  "linux-x86_64 cranelift": {
   "check": {
-   "rustc": 5,
+   "rustc": 0,
    "rustdoc": 0
   },
   "cold build": {
@@ -61,7 +61,7 @@
    "rustdoc": 0
   },
   "tests": {
-   "rustc": 12,
+   "rustc": 7,
    "rustdoc": 0
   }
  },
@@ -83,7 +83,7 @@
    "rustdoc": 0
   },
   "tests": {
-   "rustc": 12,
+   "rustc": 7,
    "rustdoc": 0
   }
  },
@@ -105,7 +105,7 @@
    "rustdoc": 0
   },
   "tests": {
-   "rustc": 12,
+   "rustc": 7,
    "rustdoc": 0
   }
  },
@@ -127,7 +127,7 @@
    "rustdoc": 0
   },
   "tests": {
-   "rustc": 12,
+   "rustc": 7,
    "rustdoc": 0
   }
  }
