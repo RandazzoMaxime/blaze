@@ -301,6 +301,28 @@ tree, the largest single front-end query on both (helix 1.3 GB, nushell 0.4 GB),
 in 8.0 s on helix and 8.8 s on nushell with item 3, of which resolving is 4.3 s and 4.5 s:
 what is left of the warm start is mostly this item's.
 
+**Built (2026-10-23).** Three families are frozen for each crate whose source is the
+toolchain's, a registry's or a git checkout's and whose dependencies' are too: the `DefMap`
+(with the `LocalDefMap`), the `TraitImpls` and `InherentImpls`, and the lang items, each its own
+store entry under the crate's Merkle key (`crates/ra-jit/src/frozen.rs`; the encodings in
+`hir-def`'s `nameres/frozen.rs` and `hir-ty`'s `method_resolution/frozen.rs`). The bytes hold
+no salsa ids: a file is its crate's index and its path from the crate's root, a module of a
+block is its owner's body and the block's `AstId`, an interned id is its loc. A file outside the
+crate's directory, which a build script may have written, is named with a hash of its text, and
+bytes whose file changed are not read. `RA_JIT_FROZEN=check` resolves and finds as well and fails
+the build on any difference, `verify` writes what was read and fails the same way; on ripgrep's
+153 parts and hello's 78 both find none. The entries go through `ra_jit_store::Store` and so
+travel through the remote with the packs. On dev-aws-8, pinned to one socket's 96 cores, hello's
+build with a warm remote resolves in 0.33 s of 2.2 s and takes 1.22 s of 3.02 s, 2.3 GB of 3.4 GB;
+ripgrep's resolves in 0.38 s of 2.4 s and takes 4.25 s, against cargo's cold 5.5 s.
+
+What resolving still did for a build is now the build's: the impl headers' types (about 1 s of
+ripgrep's compiling, most of it expanding the macros that write `core`'s impls) and the
+expansions behind signatures and bodies. Lowering every impl header after names are read costs
+the same second on the resolve side, so the next families are the impl headers and the macro
+expansions of frozen crates. The spare daemon (`Held::load`) does not read frozen values yet: the
+store's identity is told the toolchain once a process, before the spare knows the build's.
+
 **Risks.** It is the largest change here and touches the most upstream behaviour. The
 differential checker, kept as a mode, is the guard: a frozen value that differs from the
 live one is a bug, never a fallback. salsa's own `persistence` feature is the alternative
