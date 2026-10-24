@@ -78,7 +78,7 @@ def main():
     if os.environ.get("NR_STD") != "build":
         toolchain = f"{L}/tc-{'nightly' if base == 'bun' else 'stable'}"
         shipped = f"{L}/std-remote"
-        subprocess.run(["ra-jit", "std", shipped], env=dict(env, RUSTC=f"{toolchain}/bin/rustc.real"), check=True)
+        subprocess.run(["ra-jit", "std", shipped, toolchain], env=env, check=True)
         env["RA_JIT_STD_FROM"] = shipped
     extra = json.loads(os.environ.get("NR_ENV", "{}"))
     env.update(extra)

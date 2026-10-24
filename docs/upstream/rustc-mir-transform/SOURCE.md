@@ -15,6 +15,11 @@ Fetched 2026-10-20 from `https://raw.githubusercontent.com/rust-lang/rust/<rev>/
   and maybe-uninit analyses with their switch-edge and dead-unwind rules),
   `drop_flag_effects.rs`, `move_paths_builder.rs` (`move_paths/builder.rs`) and
   `move_paths_mod.rs` (`move_paths/mod.rs`).
+- Added 2026-10-23 from the `1.99.0` tag, for what the borrow checker takes to be promoted in a
+  `const` or `static` item (`vendor/rust-analyzer/crates/hir-ty-borrowck/src/loans.rs`):
+  `1.99.0/promote_consts.rs`. `validate_ref` promotes a mutable borrow only of an empty array;
+  `validate_call` promotes a `const fn` call in an item only in `promotion_safe_blocks`, the
+  blocks reached from the start through gotos, calls, drops and asserts.
 
 What `1.99.0/` holds: `lib.rs` (the pipeline, `run_optimization_passes`), `pass_manager.rs`
 (how a pass is turned on, validated and dumped) and the source of every pass ra-jit ports

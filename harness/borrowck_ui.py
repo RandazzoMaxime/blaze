@@ -300,7 +300,8 @@ def ra_jit_run(binary, units, mode, jobs, work):
         with open(copy, "w") as f:
             f.write(rewrite(unit, text, revisions))
         files[copy] = unit.label
-        by_edition[unit.edition].append(copy)
+        cfgs = [f[6:].strip() for f in unit.flags if f.startswith(("--cfg ", "--cfg="))]
+        by_edition[unit.edition].append(copy + ("\t" + " ".join(cfgs) if cfgs else ""))
     env = dict(os.environ, RA_JIT_BORROWCK=mode)
     env["RUST_BACKTRACE"] = "0"
     results = {}
@@ -315,7 +316,8 @@ def ra_jit_run(binary, units, mode, jobs, work):
             except ValueError:
                 continue
             got[files[d["path"]]] = d
-        for path in chunk:
+        for line in chunk:
+            path = line.split("\t", 1)[0]
             if files[path] not in got:
                 got[files[path]] = {"panic": f"ra-jit exited ({proc.returncode}): {proc.stderr[-300:]}"}
         return got
