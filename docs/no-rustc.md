@@ -201,7 +201,7 @@ Paths are under `crates/`; line numbers are of 41e7906192.
 |---|---|---|
 | `ra-jit/src/cargo/mod.rs:305` `by_daemon`, `:300` `ToCargo`, `:395` `by_cargo` | sends the whole build to cargo | the source has an error (until D's first part: now it fails the build with ra-jit's error); rustc's copy of a refused function is stale; a build script's or proc macro's source changed; a manifest changed; the daemon did not build a program |
 | `ra-jit/src/cargo/cli.rs:297` `only_cargo` | sends the command to cargo untouched | of a build `--message-format`, `-Z`, `--exclude`, several targets, an unknown triple; of a check `--build-plan` and `--unit-graph` |
-| `ra-jit/src/cargo/mod.rs:139` `plain_cargo` | runs cargo with nothing of ra-jit's but its answers to cargo's questions (since B) | subcommands ra-jit does not claim, and a check with `--build-plan` or `--unit-graph` (until 2026-10-23, every `cargo ra-jit check`; until this change, one with `--message-format`, `-Z`, `--exclude` or several targets) |
+| `ra-jit/src/cargo/mod.rs:139` `plain_cargo` | runs cargo with nothing of ra-jit's but its answers to cargo's questions (since B) | subcommands ra-jit does not claim, and a check with `--build-plan` or `--unit-graph` (until 2026-10-23, every `cargo ra-jit check`; until 2026-10-24, one with `--message-format`, `-Z`, `--exclude` or several targets) |
 
 **What rustc compiled, linked into ra-jit's programs** (steps E, F, G)
 
