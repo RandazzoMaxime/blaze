@@ -41,10 +41,52 @@ pub(crate) fn held_by(pid: u32) -> Option<u64> {
     (ok == 0).then(|| unsafe { info.assume_init() }.ri_phys_footprint)
 }
 
-/// Bytes of memory the machine has, where the system says.
+/// Bytes of memory the machine has, where the system says, or the fewer the control group of
+/// the process allows: a container's, a CI job's or a systemd unit's, which the kernel holds
+/// the process to however much the machine has.
 #[cfg(not(target_os = "macos"))]
 pub(crate) fn of_the_machine() -> Option<u64> {
-    kilobytes(&std::fs::read_to_string("/proc/meminfo").ok()?, "MemTotal:")
+    let total = kilobytes(&std::fs::read_to_string("/proc/meminfo").ok()?, "MemTotal:")?;
+    let groups = std::fs::read_to_string("/proc/self/cgroup").unwrap_or_default();
+    let allowed = allowed_by(&groups, |file| {
+        std::fs::read_to_string(Path::new("/sys/fs/cgroup").join(file)).ok()
+    });
+    Some(allowed.map_or(total, |it| it.min(total)))
+}
+
+/// The fewest bytes the control groups of `/proc/self/cgroup` (`groups`) and the groups they
+/// are in allow, `read` reading a file under `/sys/fs/cgroup`: `memory.max` in version 2,
+/// where `max` allows any, and `memory/…/memory.limit_in_bytes` in version 1.
+#[cfg_attr(target_os = "macos", allow(dead_code))]
+fn allowed_by(groups: &str, read: impl Fn(&str) -> Option<String>) -> Option<u64> {
+    groups
+        .lines()
+        .filter_map(|line| {
+            let (_, line) = line.split_once(':')?;
+            let (controllers, path) = line.split_once(':')?;
+            let (under, file) = match controllers {
+                "" => ("", "memory.max"),
+                _ if controllers.split(',').any(|it| it == "memory") => {
+                    ("memory/", "memory.limit_in_bytes")
+                }
+                _ => return None,
+            };
+            let mut at = path.trim_matches('/');
+            let mut fewest: Option<u64> = None;
+            loop {
+                let dir = if at.is_empty() { String::new() } else { format!("{at}/") };
+                if let Some(bytes) = read(&format!("{under}{dir}{file}"))
+                    .and_then(|it| it.trim().parse::<u64>().ok())
+                {
+                    fewest = Some(fewest.map_or(bytes, |it| it.min(bytes)));
+                }
+                if at.is_empty() {
+                    break fewest;
+                }
+                at = at.rsplit_once('/').map_or("", |(up, _)| up);
+            }
+        })
+        .min()
 }
 
 /// Bytes of memory the machine has.
@@ -191,6 +233,32 @@ mod tests {
         assert_eq!(kilobytes(status, "VmRSS:"), Some(2048 << 10));
         assert_eq!(kilobytes(status, "VmSwap:"), None);
         assert_eq!(kilobytes("VmRSS: many kB\n", "VmRSS:"), None);
+    }
+
+    #[test]
+    fn a_control_group_allows_what_it_and_those_above_it_allow() {
+        let files = |files: &'static [(&'static str, &'static str)]| {
+            move |file: &str| files.iter().find(|it| it.0 == file).map(|it| it.1.to_owned())
+        };
+        let unit = files(&[
+            ("user.slice/memory.max", "8589934592\n"),
+            ("user.slice/run.scope/memory.max", "2147483648\n"),
+        ]);
+        assert_eq!(allowed_by("0::/user.slice/run.scope\n", &unit), Some(2 << 30));
+        let above = files(&[("a/memory.max", "1073741824\n"), ("a/b/memory.max", "max\n")]);
+        assert_eq!(allowed_by("0::/a/b\n", above), Some(1 << 30));
+        let container = files(&[("memory.max", "4294967296\n")]);
+        assert_eq!(allowed_by("0::/\n", container), Some(4 << 30));
+        let v1 = files(&[("memory/docker/c1/memory.limit_in_bytes", "536870912\n")]);
+        assert_eq!(
+            allowed_by("5:cpu,cpuacct:/docker/c1\n4:memory:/docker/c1\n", v1),
+            Some(512 << 20)
+        );
+        assert_eq!(
+            allowed_by("0::/user.slice\n", files(&[("user.slice/memory.max", "max\n")])),
+            None
+        );
+        assert_eq!(allowed_by("", files(&[])), None);
     }
 
     #[test]

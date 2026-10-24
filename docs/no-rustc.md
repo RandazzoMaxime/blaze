@@ -10,6 +10,18 @@ it could not do, the build fails, and that failure is a bug to fix.
 
 Andrew, 2026-10-22: "Everything should all be us 100%."
 
+The goal behind the rule is to own every layer, never by accepting less Rust. ra-jit moves step
+by step toward owning everything from source to running code, because owning it is what makes
+it fast, and it stays a superset of Rust on the way: every program rustc 1.99.0 builds builds
+and behaves the same under ra-jit, with the real standard library, C dependencies, build
+scripts and proc macros, and what ra-jit adds (live edits, tiers) comes on top. The one
+difference allowed is that build scripts and proc macros run sandboxed
+([#147](https://github.com/indexable-inc/ra-jit/issues/147)); one that needs more than the
+sandbox allows is the only exception, and is made to work rather than refused where possible.
+
+Andrew, 2026-10-24: "we want to be a superset of Rust (i.e., any existing Rust program should
+work, minus a proc macro that isn't sandboxed, which it should be tbh)."
+
 This describes where ra-jit is going, not where it is. Today rustc still does much of the work:
 it builds every program once before the daemon takes over, it compiles the standard library,
 the build scripts and the proc macros, it has the last word on errors, and it keeps a copy of

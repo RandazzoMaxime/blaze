@@ -27,6 +27,10 @@ class Wrong(Exception):
     pass
 
 
+class NotRun(Exception):
+    """What a row needs that this machine does not have."""
+
+
 class Row:
     """One workspace, the daemon that holds it, and what was compared."""
 
@@ -605,6 +609,51 @@ def no_ceiling(row):
         raise Wrong(f"not the daemon's: {how}")
 
 
+def in_a_control_group(row, allowed=6 << 30):
+    """A daemon started in a control group that allows 6 GB, as a container, a CI job or a
+    systemd unit is, has its workers hold at most half of that, not half of the machine's
+    memory, and builds."""
+    scope = ["systemd-run", "--user", "--scope", "--quiet", "-p", f"MemoryMax={allowed}"]
+    if not sys.platform.startswith("linux") or not shutil.which("systemd-run"):
+        raise NotRun("it starts a control group with systemd-run, on Linux")
+    probe = subprocess.run([*scope, "sh", "-c", 'cat "/sys/fs/cgroup$(sed -n "s/^0:://p" /proc/self/cgroup)/memory.max"'],
+                           capture_output=True, text=True)
+    if probe.stdout.strip() != str(allowed):
+        raise NotRun(f"no user systemd that limits a scope's memory: {(probe.stdout + probe.stderr).strip()[-200:]}")
+    side = Side(row.ws, row.env, True)
+    ran = subprocess.run([*scope, *side.argv("build")], cwd=row.ws, env=side.env, capture_output=True, text=True, timeout=1800)
+    if ran.returncode:
+        raise Wrong(f"the first build failed: {ran.stderr[-300:]}")
+    wait_warm(side, row.ws)
+    text = row.status()[2]
+    row.notes.append(text)
+    most = re.search(r"workers hold at most (\d+) MB", text)
+    if not most or int(most[1]) > allowed // 2 >> 20:
+        raise Wrong(f"the workers may hold more than half of the {allowed >> 20} MB the control group allows: {text.strip()[-300:]}")
+    row.edit()
+    how, _ = row.both("a body edited", want=f"mark {row.mark}")
+    if how != "daemon":
+        raise Wrong(f"the build after a body was edited was not the daemon's: {how}")
+
+
+def generated_for_a_proc_macro(row):
+    """A proc macro that `include!`s what its build script wrote to `OUT_DIR`, as biome's
+    macros are built on `biome_aria_metadata`: the script writes it while cargo builds, after
+    the build began, and the first edit after the build is still the daemon's."""
+    open(row.path("gen/build.rs"), "w").write(
+        'fn main() {\n    println!("cargo:rerun-if-changed=build.rs");\n'
+        '    let out = std::path::Path::new(&std::env::var("OUT_DIR").unwrap()).join("pepper.rs");\n'
+        '    std::fs::write(out, "#[allow(dead_code)]\\nconst PEPPER: u64 = 3;\\n").unwrap();\n}\n')
+    with open(row.path("gen/src/lib.rs"), "a") as lib:
+        lib.write('\ninclude!(concat!(env!("OUT_DIR"), "/pepper.rs"));\n')
+    row.git("add", "."), row.git("commit", "-qm", "a build script for the proc macro")
+    row.warm()
+    row.edit()
+    how, _ = row.both("a body edited after the first build", want=f"mark {row.mark}")
+    if how != "daemon":
+        raise Wrong(f"the first edit after the build was not the daemon's: {how}")
+
+
 def proc_macro_tests(row):
     """The tests of every package, the proc macro's own among them, which link the
     toolchain's `libstd`."""
@@ -1021,7 +1070,9 @@ ROWS = {
     "daemon binary replaced": (binary_replaced, {}),
     "memory ceiling": (memory_ceiling, {"RA_JIT_MEMORY_MAX": "1M"}),
     "no memory ceiling": (no_ceiling, {"RA_JIT_MEMORY_MAX": "off"}),
+    "control group's memory": (in_a_control_group, {}),
     "tests of a proc macro": (proc_macro_tests, {}),
+    "proc macro on generated code": (generated_for_a_proc_macro, {}),
     "a function that is another under test": (another_under_test, {}),
     "functions rustc keeps to an object": (kept_to_an_object, {"CARGO_INCREMENTAL": "0"}),
     "an item added beside a function left to rustc": (beside_one_left, {}),
@@ -1062,6 +1113,8 @@ def main():
             if found:
                 raise Wrong(f"{len(found)} panics logged: {found[0][:300]}")
             result = "right"
+        except NotRun as why:
+            result = f"not run: {why}"
         except Wrong as wrong:
             result, failed = f"WRONG: {wrong}", failed + 1
         except (subprocess.SubprocessError, OSError) as error:
@@ -1071,7 +1124,7 @@ def main():
             if at:
                 shutil.rmtree(os.path.dirname(at), ignore_errors=True)
         table.append((name, result, row.built, row.notes))
-        print(f"{'ok ' if result == 'right' else 'NOT'} {name}  {time.time() - began:.0f}s  {result if result != 'right' else ''}", flush=True)
+        print(f"{'ok ' if result == 'right' else '-- ' if result.startswith('not run') else 'NOT'} {name}  {time.time() - began:.0f}s  {result if result != 'right' else ''}", flush=True)
         for line in row.built:
             print(f"      {line}", flush=True)
     backend = os.environ.get("RA_JIT_BACKEND", "cranelift")

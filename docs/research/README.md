@@ -45,6 +45,10 @@ back them is under [docs/upstream/](../upstream/), each with a `SOURCE.md`. Sear
   their imports, the build and run times on ripgrep, helix, nushell and bun against compiles
   of one function and cargo's release build, and why LLVM takes four times rustc's time for
   code of the same size. 2026-10-24.
+- [concurrent-reads.md](concurrent-reads.md): the store's cache of unpacked blocks measured on
+  helix's warm start (a block unpacked once for every thread that asks, 32 MiB to 1 GiB: no
+  gain, values read about one to a block), and bbtree's ordered map against papaya and
+  DashMap for ra-jit's shared maps. 2026-10-24.
 - [../architecture-split.md](../architecture-split.md): what of ra-jit belongs in the
   rust-analyzer subtree and what in `crates/`; ra-jit's changes to rust-analyzer by purpose,
   upstream's churn on the files they touch, rustc's crate split, and a migration plan.

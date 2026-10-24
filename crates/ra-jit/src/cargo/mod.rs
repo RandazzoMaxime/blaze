@@ -4,6 +4,7 @@
 pub(crate) mod daemon;
 pub(crate) mod wrapper;
 
+mod affected;
 mod ancestor;
 mod cli;
 mod client;
@@ -213,6 +214,11 @@ fn build(asked: &Invocation) -> anyhow::Result<i32> {
     };
     let read = State::read(&key);
     note("client read state", CLIENT, started);
+    if let Ok(state) = &read
+        && asked.subcommand == Subcommand::Test
+    {
+        affected::ask(state);
+    }
     let mut served = false;
     let mut held = None;
     let state = match read.map(|state| by_daemon(state)) {
@@ -260,6 +266,12 @@ fn build(asked: &Invocation) -> anyhow::Result<i32> {
     };
     let writing = Instant::now();
     state.write()?;
+    if !served {
+        affected::forget(&state);
+    }
+    if asked.subcommand == Subcommand::Test {
+        affected::ask(&state);
+    }
     if served {
         note("client write state", CLIENT, writing);
         crate::trace::finish();
