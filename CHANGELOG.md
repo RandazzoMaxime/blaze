@@ -8,6 +8,10 @@ All notable changes to ra-jit are written here. The format follows
 
 ### Added
 
+- The SSE and AVX compares compile (#87): `llvm.x86.sse.cmp.ps` and `.ss`, `sse2.cmp.pd` and
+  `.sd` and AVX's 256-bit ones give a lane of all ones where the immediate's predicate holds, as
+  rustc's do. glam's `Vec4::cmpeq` and `is_finite_mask`, which bevy calls, were left to rustc;
+  `harness/breakers` checks each predicate, NaN lanes included, against rustc's program.
 - `RA_JIT_UNITS=1` compiles a whole program's functions many to an LLVM module, as rustc
   compiles a crate's codegen units (#176): the functions are found from their IR before any
   is compiled, cut into units of about 20,000 instructions in the order they were found in,
