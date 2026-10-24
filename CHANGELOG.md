@@ -451,6 +451,27 @@ All notable changes to ra-jit are written here. The format follows
 
 ### Fixed
 
+- The borrow checker no longer panics on rustc's UI tests (`lints_ui.py --deny unused_mut`
+  over all 20,450 files: 4 panics before, none now, and ra-jit's time from 67 s to 14 s). The
+  causes were in the trait solver and the lowering it reads: a trait object's projections
+  that become the same after substitution were deduplicated before being related, so
+  `dyn A<X = T> + B<X = T>` failed to relate to itself (rustc relates them all, #136458); the
+  `for<'b>` of an associated type's bound in a `for<'a>` was lowered as a binder of its own
+  instead of concatenated onto the outer one, as rustc does; and upcasting a higher-ranked
+  trait object built its supertraits outside the source's binder. Each has a regression test
+  in ide-diagnostics, which panicked as rustc's test did before the fix.
+- A 5,204-arm `else if` chain (rustc's `expr-stack-overflow.rs`, #206) is borrow checked in
+  4.5 s, where it took over 300 s and then overflowed the stack: finding each expression's
+  syntax walked down from the body's root, quadratic in the chain, and lowering, inference
+  and MIR building recursed once an arm. The walk now goes to the child that contains the
+  range, and the recursions grow their stack as rustc's `ensure_sufficient_stack` does
+  (`stdx::ensure_sufficient_stack`). 1,000 arms take 2.2 s (5.35 s before), 2,000 arms 2.5 s
+  (26 s); ide-diagnostics tests the 5,204-arm chain under 60 s.
+- A destructuring assignment that moves out of a reference (`S { b, .. } = *r`) is an error
+  at `*r`, as rustc reports it, and one that copies is not an error.
+- ide-diagnostics's 24 failing tests pass (756 pass, 1 ignored), and CI's fast tier runs them
+  in the fork job.
+
 - An expression of type `()` that computes nothing (an assignment, a block without a tail, a
   `break` or `return` without a value, an `if` without an `else`) gives its place the `()`, as
   rustc's MIR does: `let z: () = x = 1; let w = z;` was E0381, a build failed on code rustc
