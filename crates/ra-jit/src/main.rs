@@ -6444,13 +6444,14 @@ fn main() -> anyhow::Result<()> {
 /// being compiled then: the symbols a build waits for are not needed for it. With `follow`
 /// the generic instances their functions reach are compiled too.
 fn lower_until(
-    db: &RootDatabase,
+    db: &mut RootDatabase,
     args: &Args,
     listed: &Listed,
     threads: usize,
     follow: bool,
     done: &(dyn Fn() -> bool + Sync),
 ) -> anyhow::Result<()> {
+    use ide_db::base_db::salsa::Database as _;
     if done() {
         return Ok(());
     }
@@ -6480,23 +6481,26 @@ fn lower_until(
         let compiling: Vec<_> = (0..threads)
             .map(|_| {
                 let (db, unnamed) = (db.clone(), &unnamed);
-                let cancel = ide_db::base_db::salsa::Database::cancellation_token(&db);
-                let thread = scope.spawn(move || {
-                    hir::attach_db(&db, || hir_ty_codegen::compile_unnamed(&db, unnamed, done))
-                });
-                (cancel, thread)
+                scope.spawn(move || {
+                    let compile = || hir_ty_codegen::compile_unnamed(&db, unnamed, done);
+                    let compile = std::panic::AssertUnwindSafe(|| hir::attach_db(&db, compile));
+                    let _ = std::panic::catch_unwind(compile);
+                })
             })
             .collect();
         // What is being compiled once the build stops waiting is given up on, not finished:
-        // one function can take minutes, and readiness would wait for it.
-        while compiling.iter().any(|(_, thread)| !thread.is_finished()) {
+        // one function can take minutes, and readiness would wait for it. A thread's own
+        // cancellation is not enough: salsa ignores it inside a query that recovers from
+        // cycles, as inference and MIR building do, and so for most of what takes long.
+        while compiling.iter().any(|thread| !thread.is_finished()) {
             if done() {
-                compiling.iter().for_each(|(cancel, _)| cancel.cancel());
+                db.trigger_cancellation();
                 break;
             }
             std::thread::sleep(Duration::from_millis(5));
         }
     });
+    let db = &*db;
     // What the build lists of the crates to name what it keeps, while there is still time.
     let lower = |bodies: &[hir_def::DefWithBodyId]| {
         let next = std::sync::atomic::AtomicUsize::new(0);
@@ -7241,7 +7245,7 @@ fn run_holding(
     // Beside cargo the symbols were read as cargo wrote them, and are there a moment after
     // the names are resolved: a compile started now would hold up readiness past that.
     if !beside {
-        lower_until(&db, &args, &listed, cores(), true, &|| table.is_finished())?;
+        lower_until(&mut db, &args, &listed, cores(), true, &|| table.is_finished())?;
     }
     let (table, whole) =
         table.join().map_err(|_| anyhow::anyhow!("loading the symbols panicked"))??;

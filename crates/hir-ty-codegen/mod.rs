@@ -2278,7 +2278,7 @@ pub fn compile_unnamed(db: &dyn HirDatabase, unnamed: &Unnamed, done: &dyn Fn() 
                 }
             }
         }));
-        let given_up = compiled.as_ref().is_err_and(|it| it.is::<salsa::Cancelled>());
+        let given_up = compiled.is_err() && done();
         let mut found = Vec::new();
         if let Ok(Some(compiled)) = compiled {
             unnamed.told.ahead(db, compiled);
