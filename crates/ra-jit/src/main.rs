@@ -2511,6 +2511,16 @@ fn pause_after_load() {
     }
 }
 
+/// Waits for `RA_JIT_SYMBOLS_PAUSE_MS` before the symbols rustc built are read, and says so:
+/// what `harness/aheadready.py` has functions compiled ahead in.
+fn pause_before_symbols() {
+    let pause = std::env::var("RA_JIT_SYMBOLS_PAUSE_MS").ok().and_then(|it| it.parse().ok());
+    if let Some(pause) = pause {
+        eprintln!("symbols: paused");
+        std::thread::sleep(Duration::from_millis(pause));
+    }
+}
+
 /// The directory cargo put the executables of the build in: the one its `deps`, where the
 /// libraries of the build are, is in.
 fn executables_of(symbol_files: &[PathBuf]) -> Option<AbsPathBuf> {
@@ -6430,9 +6440,9 @@ fn main() -> anyhow::Result<()> {
     run(Args::parse(std::env::args().skip(1))?, None)
 }
 
-/// Compiles the crates `args` names on `threads` threads until `done`: the symbols a build
-/// waits for are not needed for it. With `follow` the generic instances their functions
-/// reach are compiled too.
+/// Compiles the crates `args` names on `threads` threads until `done`, giving up on what is
+/// being compiled then: the symbols a build waits for are not needed for it. With `follow`
+/// the generic instances their functions reach are compiled too.
 fn lower_until(
     db: &RootDatabase,
     args: &Args,
@@ -6467,11 +6477,24 @@ fn lower_until(
         false => hir_ty_codegen::Unnamed::alone(functions),
     };
     std::thread::scope(|scope| {
-        for _ in 0..threads {
-            let (db, unnamed) = (db.clone(), &unnamed);
-            scope.spawn(move || {
-                hir::attach_db(&db, || hir_ty_codegen::compile_unnamed(&db, unnamed, done))
-            });
+        let compiling: Vec<_> = (0..threads)
+            .map(|_| {
+                let (db, unnamed) = (db.clone(), &unnamed);
+                let cancel = ide_db::base_db::salsa::Database::cancellation_token(&db);
+                let thread = scope.spawn(move || {
+                    hir::attach_db(&db, || hir_ty_codegen::compile_unnamed(&db, unnamed, done))
+                });
+                (cancel, thread)
+            })
+            .collect();
+        // What is being compiled once the build stops waiting is given up on, not finished:
+        // one function can take minutes, and readiness would wait for it.
+        while compiling.iter().any(|(_, thread)| !thread.is_finished()) {
+            if done() {
+                compiling.iter().for_each(|(cancel, _)| cancel.cancel());
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(5));
         }
     });
     // What the build lists of the crates to name what it keeps, while there is still time.
@@ -7052,6 +7075,7 @@ fn run_holding(
         let whole = whole.map(|it| it.recv()?).transpose()?;
         let symbol_files = whole.as_ref().map_or(&symbol_files, |it| &it.symbol_files);
         let start = Instant::now();
+        pause_before_symbols();
         let table = SymbolTable::load(symbol_files, &root)?;
         eprintln!("symbols: {} in {:.1?}", table.len(), start.elapsed());
         Ok::<_, anyhow::Error>((table, whole))

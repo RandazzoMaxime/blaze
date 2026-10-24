@@ -2265,16 +2265,20 @@ pub fn compile_unnamed(db: &dyn HirDatabase, unnamed: &Unnamed, done: &dyn Fn() 
             std::thread::sleep(std::time::Duration::from_millis(1));
             continue;
         };
-        let compiled = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| match &job {
-            either::Either::Left(root) => {
-                root_rows(db, *root);
-                compiled_root(db, *root).as_ref().ok()
-            }
-            either::Either::Right((instance, env)) => {
-                instance_rows(db, instance.clone(), env.clone());
-                compiled_instance(db, instance.clone(), env.clone()).as_ref().ok()
+        let compiled = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            pause_ahead(db);
+            match &job {
+                either::Either::Left(root) => {
+                    root_rows(db, *root);
+                    compiled_root(db, *root).as_ref().ok()
+                }
+                either::Either::Right((instance, env)) => {
+                    instance_rows(db, instance.clone(), env.clone());
+                    compiled_instance(db, instance.clone(), env.clone()).as_ref().ok()
+                }
             }
         }));
+        let given_up = compiled.as_ref().is_err_and(|it| it.is::<salsa::Cancelled>());
         let mut found = Vec::new();
         if let Ok(Some(compiled)) = compiled {
             unnamed.told.ahead(db, compiled);
@@ -2290,12 +2294,27 @@ pub fn compile_unnamed(db: &dyn HirDatabase, unnamed: &Unnamed, done: &dyn Fn() 
         }
         let mut state = unnamed.state.lock().unwrap_or_else(|e| e.into_inner());
         state.working -= 1;
-        state.compiled += 1;
+        state.compiled += usize::from(!given_up);
         for it in found {
             if state.seen.insert(it.clone()) {
                 state.queue.push(it);
             }
         }
+    }
+}
+
+/// Holds each job of [`compile_unnamed`] for `RA_JIT_AHEAD_PAUSE_MS`, asking the database
+/// whether it was cancelled as a query does: a function that takes that long to compile, for
+/// `harness/aheadready.py`.
+fn pause_ahead(db: &dyn HirDatabase) {
+    static PAUSE: LazyLock<Option<u64>> = LazyLock::new(|| {
+        std::env::var("RA_JIT_AHEAD_PAUSE_MS").ok().and_then(|it| it.parse().ok())
+    });
+    let Some(pause) = *PAUSE else { return };
+    let start = std::time::Instant::now();
+    while start.elapsed() < std::time::Duration::from_millis(pause) {
+        salsa::Database::unwind_if_revision_cancelled(db);
+        std::thread::sleep(std::time::Duration::from_millis(1));
     }
 }
 

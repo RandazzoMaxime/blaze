@@ -422,6 +422,12 @@ All notable changes to ra-jit are written here. The format follows
 
 ### Fixed
 
+- A function the daemon compiles ahead, while it reads the symbols rustc built, is given up on
+  once they are read, where the worker used to finish it before it was ready. bevy's second
+  warm-store run began its derived `release_state` of a read-only query struct, which the
+  trait solver takes about two minutes over, and was ready 148 s after the build in place of
+  26 s. `harness/aheadready.py` holds each function compiled ahead for ten minutes and checks
+  that the daemon is ready within two.
 - A daemon's link that fails on names nothing defines, used only by code rustc's own link
   takes out, is run again as rustc's line has it, with `--gc-sections` (or `-dead_strip`,
   `/OPT:REF`). The daemon leaves those out so a patch can call what the executable's code no
