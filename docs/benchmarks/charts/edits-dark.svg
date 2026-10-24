@@ -139,7 +139,7 @@
 <text x="504.4" y="748" font-size="12" class="v">22× faster</text>
 <text x="498.6" y="763" font-size="12" class="v">22× faster</text>
 <text x="188.6" y="122" font-size="11.5" text-anchor="middle" class="d">as fast as cargo</text>
-<text x="215" y="810" font-size="12" text-anchor="end" class="d">← ra-jit slower</text>
+<text x="180.6" y="810" font-size="12" text-anchor="end" class="d">← ra-jit slower</text>
 <text x="196.6" y="810" font-size="12" class="d">ra-jit faster →</text>
 <text x="16" y="834" font-size="11.5" class="d">Each colour is a machine of its own: compare bars of one colour, not across colours. macOS arm64: MacBook Pro, 2026-10-21.</text>
 <text x="16" y="851" font-size="11.5" class="d">Linux aarch64: AWS c8g.16xlarge, 2026-10-23. Linux x86-64: AWS c8a.metal-24xl, 2026-10-23. bun, measured on its own: macOS</text>
