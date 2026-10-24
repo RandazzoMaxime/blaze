@@ -618,6 +618,7 @@ pub(super) fn build<'db>(
         synthesized: synthesized(ctx),
         placeholders: FxHashMap::default(),
         forall_universe: None,
+        elided: Default::default(),
     };
     builder.universal_regions();
     builder.env_aliases();
@@ -687,6 +688,10 @@ struct Builder<'c, 'a, 'db> {
     /// The universe of the placeholders a `for<'a>` predicate being proven is instantiated
     /// with, which a type outlives only by outliving `'static`.
     forall_universe: Option<rustc_type_ir::UniverseIndex>,
+    /// The region variables `renumber` gave the error regions rust-analyzer leaves for elided
+    /// lifetimes, each a late-bound lifetime of its own in rustc: the fn pointer two fn items
+    /// or closures coerce to, `if r { up } else { down }`, is `for<'a> fn(&'a T)` there.
+    elided: std::cell::RefCell<FxHashSet<rustc_type_ir::RegionVid>>,
 }
 
 fn synthesized(ctx: &Ctx<'_, '_>) -> FxHashSet<hir_def::hir::ExprId> {
@@ -753,6 +758,13 @@ impl<'db> Builder<'_, '_, 'db> {
         let infcx = &self.ctx.infcx;
         rustc_type_ir::fold_regions(self.interner(), value, |region, _| match region.kind() {
             RegionKind::ReBound(..) => region,
+            RegionKind::ReError(_) => {
+                let var = infcx.next_region_var(hir_ty::Span::Dummy);
+                if let RegionKind::ReVar(vid) = var.kind() {
+                    self.elided.borrow_mut().insert(vid);
+                }
+                var
+            }
             _ => infcx.next_region_var(hir_ty::Span::Dummy),
         })
     }
@@ -5159,13 +5171,20 @@ impl<'db> Builder<'_, '_, 'db> {
         // A placeholder equated with an error region stands for a lifetime rust-analyzer
         // elided in a signature, whose trait objects it gives `'static` rather than that
         // lifetime (`fn(&mut dyn Write)` for `for<'b> FnMut(&'b mut dyn Write)`), so nothing
-        // else said of it holds.
+        // else said of it holds. So does one equated with the variable `renumber` gave such a
+        // region.
+        let elided = self.elided.borrow();
         let unknown: FxHashSet<Region<'db>> = pairs
             .iter()
             .flat_map(|&(a, b)| [(a, b), (b, a)])
-            .filter(|(it, other)| it.is_placeholder() && other.is_error())
+            .filter(|(it, other)| {
+                it.is_placeholder()
+                    && (other.is_error()
+                        || matches!(other.kind(), RegionKind::ReVar(vid) if elided.contains(&vid)))
+            })
             .map(|(it, _)| it)
             .collect();
+        drop(elided);
         // `a <= b`: `b` outlives `a`.
         for (shorter, longer) in pairs {
             if unknown.contains(&shorter) || unknown.contains(&longer) {
