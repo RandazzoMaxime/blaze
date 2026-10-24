@@ -450,17 +450,16 @@ All notable changes to ra-jit are written here. The format follows
   build: …/out/roles_and_attributes.rs changed"). Cargo's build replaced the worker, which built
   the program in full again: biome's next edit after that took 130 s and 24 GB. Such a file is
   only written again when the script runs again, which the script's own guards are for.
-  soakrows.py's `a proc macro built on what its build script generated` has the proc macro
-  `include!` its script's output and checks that the first edit after the build is the
-  daemon's.
+  soakrows.py's `proc macro on generated code` has the proc macro `include!` its script's
+  output and checks that the first edit after the build is the daemon's.
 - On Linux the daemon's bounds on memory count what its control group allows, where they
   counted the machine's: the workers' `RA_JIT_MEMORY_MAX` (half) and the own base's
   `RA_JIT_OWN_BASE_MEMORY` (a quarter) were of the host's memory in a container, a CI job or a
   systemd unit that allows less, so the kernel killed the worker before either was reached. It
   is the least of `MemTotal` and the `memory.max` (version 2) or `memory.limit_in_bytes`
-  (version 1) of the process's group and those above it. soakrows.py's `started in a control
-  group that allows less memory` starts the daemon in a 6 GB scope and checks that its workers
-  hold at most 3072 MB; it said 95,887 MB on a 187 GB host before.
+  (version 1) of the process's group and those above it. soakrows.py's `control group's
+  memory` starts the daemon in a 6 GB scope and checks that its workers hold at most 3072 MB;
+  it said 96,021 MB on a 187 GB host before.
 - A function the daemon compiles ahead, while it reads the symbols rustc built, is given up on
   once they are read, where the worker used to finish it before it was ready. bevy's second
   warm-store run began its derived `release_state` of a read-only query struct, which the
