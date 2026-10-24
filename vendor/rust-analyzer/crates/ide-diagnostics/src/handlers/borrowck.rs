@@ -40,51 +40,6 @@ pub(crate) fn borrowck_error(
     diagnostic.stable()
 }
 
-#[cfg(test)]
-mod tests {
-    use crate::tests::check_diagnostics;
-
-    #[test]
-    fn unit_expression_initializes_its_place() {
-        check_diagnostics(
-            r#"
-//- minicore: copy
-#![deny(unused_mut)]
-fn f() -> () {
-    let mut x: i32;
-    let z: () = x = 10;
-    let w = z;
-    let mut q: () = x = 11;
-    q = x += 1;
-    let mut b: () = { x += 1; };
-    b = ();
-    let mut l: () = loop { break; };
-    l = ();
-    let mut i: () = if x > 0 { x = 1 };
-    i = ();
-    let _ = (q, b, l, i, x);
-    w
-}
-"#,
-        );
-    }
-
-    #[test]
-    fn unused_mut_self() {
-        check_diagnostics(
-            r#"
-#![deny(unused_mut)]
-struct S(u8);
-impl S {
-    fn read(mut self) -> u8 { self.0 }
-          //^^^^^^^^ error: variable does not need to be mutable
-    fn write(mut self) -> u8 { self.0 = 1; self.0 }
-}
-"#,
-        );
-    }
-}
-
 // Diagnostic: borrowck-skipped
 //
 // The borrow checker did not check a body, because MIR lowering does not support something
@@ -152,6 +107,46 @@ fn user(mut s: S) {
     let copied = s.copied();
     s.set();
     consume(copied);
+}
+"#,
+        );
+    }
+
+    #[test]
+    fn unit_expression_initializes_its_place() {
+        check_diagnostics(
+            r#"
+//- minicore: copy
+#![deny(unused_mut)]
+fn f() -> () {
+    let mut x: i32;
+    let z: () = x = 10;
+    let w = z;
+    let mut q: () = x = 11;
+    q = x += 1;
+    let mut b: () = { x += 1; };
+    b = ();
+    let mut l: () = loop { break; };
+    l = ();
+    let mut i: () = if x > 0 { x = 1 };
+    i = ();
+    let _ = (q, b, l, i, x);
+    w
+}
+"#,
+        );
+    }
+
+    #[test]
+    fn unused_mut_self() {
+        check_diagnostics(
+            r#"
+#![deny(unused_mut)]
+struct S(u8);
+impl S {
+    fn read(mut self) -> u8 { self.0 }
+          //^^^^^^^^ error: variable does not need to be mutable
+    fn write(mut self) -> u8 { self.0 = 1; self.0 }
 }
 "#,
         );
