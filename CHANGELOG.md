@@ -8,6 +8,13 @@ All notable changes to ra-jit are written here. The format follows
 
 ### Added
 
+- `vendor/proc-macro-srv`, the 1.99.0 release's proc-macro server with a loader that reads
+  the list of macros ra-jit writes into a proc-macro library, built by ra-jit with nothing of
+  rustc's. `RA_JIT_PROC_MACRO_COMPARE` and `RA_JIT_PROC_MACRO_LIBS` expand each call again
+  with it and ra-jit's library of the crate and compare the output with the toolchain's;
+  `harness/macroserver.py` holds serde_derive's, thiserror's, tokio's and clap's equal
+  ([no-rustc.md](docs/no-rustc.md), step J1). A proc-macro crate's `fn main` is no longer
+  taken for an entry point.
 - `RA_JIT_UNITS=1` compiles a whole program's functions many to an LLVM module, as rustc
   compiles a crate's codegen units (#176): the functions are found from their IR before any
   is compiled, cut into units of about 20,000 instructions in the order they were found in,
