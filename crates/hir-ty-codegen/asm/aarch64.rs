@@ -95,6 +95,14 @@ impl Reg {
     }
 }
 
+/// How LLVM's inline assembly names the general register `name` names, if it is one.
+pub(super) fn llvm_register(name: &str) -> Option<String> {
+    match Reg::named(name) {
+        Ok(Reg::Gpr(number)) => Some(format!("{{x{number}}}")),
+        _ => None,
+    }
+}
+
 pub(super) fn wrapper(
     format: ObjectFormat,
     template: &[AsmPiece],
