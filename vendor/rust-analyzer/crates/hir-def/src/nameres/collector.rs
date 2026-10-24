@@ -327,6 +327,7 @@ impl<'db> DefCollector<'db> {
                 () => (),
             }
         }
+        crate_data.proc_macro = self.is_proc_macro;
 
         for (name, dep) in &self.deps {
             // Add all
@@ -474,7 +475,6 @@ impl<'db> DefCollector<'db> {
             let module_id = self.def_map.root_module_id();
             let root = &mut self.def_map.modules.building()[module_id];
             root.scope_mut().censor_non_proc_macros(self.def_map.krate);
-            Arc::get_mut(&mut self.def_map.data).unwrap().proc_macro = true;
         }
     }
 
