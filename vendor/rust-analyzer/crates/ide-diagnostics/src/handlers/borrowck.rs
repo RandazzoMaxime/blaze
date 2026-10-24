@@ -192,6 +192,22 @@ fn tainted(x: NC) -> u32 {
         );
     }
 
+    // minicore's `impl<T> Default for &[T]`.
+    #[test]
+    fn an_empty_array_is_promoted_whatever_its_elements() {
+        check_diagnostics(
+            r#"
+//- minicore: copy, cell, unsize, coerce_unsized
+use core::cell::Cell;
+fn shared<T>() -> &'static [T] { &[] }
+fn unique<'a, T>() -> &'a mut [T] { &mut [] }
+fn cells() -> &'static [Cell<u8>] { &[] }
+fn one<T>(x: T) -> &'static [T] { &[x] }
+                                //^^^^ error: returns a value referencing data owned by the current function
+"#,
+        );
+    }
+
     // rustc's tests/ui/expr/if/expr-stack-overflow.rs: each expression's syntax was found by
     // walking down from the body's root, quadratic in the chain, and lowering it recursed
     // past the stack.
