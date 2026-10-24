@@ -202,7 +202,11 @@ All of these are rustc's, written from `compiler/rustc_borrowck` at the pinned n
   after the callbacks that borrow it stays borrowed while a panic drops them.
 - `impl Trait` captures: a return-position `impl Trait` keeps alive and relates only the
   lifetimes it captures, those listed in `use<..>` or, before edition 2024 outside traits and
-  `async fn`, those its bounds name; its type parameters are always captured.
+  `async fn`, those its bounds name; its type parameters are always captured. The lifetimes
+  elided in the function's parameters are among them: from edition 2024 all are captured,
+  before it the one lifetime elision gives the output when the bounds write `'_` or elide it
+  (`impl Iterator<Item = &i32> + '_`), and `use<'_>` lists that one. So mutating `self` while
+  an iterator `fn evens(&self) -> impl Iterator<Item = &i32> + '_` returned is live is E0502.
 - `impl Trait`'s hidden type: each of its regions must be `'static` or one of the lifetimes
   the `impl Trait` captures (rustc's member constraints), else E0700 at the signature; and it
   must outlive what the bounds say (`impl Copy + 'a`). The same holds of an `impl Trait` an
@@ -309,8 +313,8 @@ With no borrow checker, the 246 units rustc accepts would pass. Now:
 
 | Mode | In scope | Pass | rustc accepts, ra-jit too | rustc rejects, same errors |
 |---|---|---|---|---|
-| Polonius | 1581 | 1535 (97.1%) | 246 of 246 | 1289 of 1335 |
-| NLL | 1579 | 1531 (97.0%) | 227 of 227 | 1304 of 1352 |
+| Polonius | 1581 | 1536 (97.2%) | 246 of 246 | 1290 of 1335 |
+| NLL | 1579 | 1532 (97.0%) | 227 of 227 | 1305 of 1352 |
 
 460 units are out of scope; 344 of them need a nightly feature. CI runs the scoring on Linux
 and fails below a floor a few units under the count there, on any error in a unit rustc
@@ -325,10 +329,10 @@ files, errors and files it panicked on; a panic makes it fail.
 ## What is left
 
 Every failing unit is one where rustc gives an error ra-jit does not, or gives it on another
-line or with another code. By what is wrong, most first: 5 "lifetime may not live long
-enough" not reported, 3 on another line or with another code, 1 with only an error rustc does
-not give, 5 each of E0507, E0310 and higher-ranked errors, 3 each of E0309, E0311 and E0597
-not reported, then a long tail. The causes, grouped:
+line or with another code. By what is wrong, most first: 5 each of E0507, E0310 and
+higher-ranked errors not reported, 4 "lifetime may not live long enough" not reported, 3 on
+another line or with another code, 1 with only an error rustc does not give, 3 each of E0309,
+E0311 and E0597 not reported, then a long tail. The causes, grouped:
 
 - **Higher-ranked regions and placeholders** (`for<'a>` bounds, closures with higher-ranked
   signatures): rustc checks them with placeholders in universes; ra-jit does not yet, and
@@ -339,6 +343,12 @@ not reported, then a long tail. The causes, grouped:
 - **Member constraints of `impl Trait`**: the choice rustc makes is not applied, and a
   projection bound that names a lifetime (`impl Iterator<Item = Box<dyn Foo>>`) leaves them
   out.
+- **Blame through a callee's `impl Trait`**: a local borrowed into a call whose `impl Trait`
+  is returned through one that captures no lifetime is E0597 or E0716 in rustc 1.99 (the
+  call's argument blamed) and in the pinned nightly too, except under a `for<'a>` outlives
+  bound (`borrowck/alias-liveness/higher-ranked-outlives-for-capture.rs`), where the nightly
+  blames the return (E0515). ra-jit gives E0515 for both, so
+  `impl-trait/precise-capturing/migration-note.rs` has 12 of its 13 errors right.
 - **Captures of an empty `match`**: rustc's capture analysis has a closure that matches
   on `x` with no arms read `x`; rust-analyzer's captures nothing there, so the E0381 of an
   uninitialized `x` is missed.
@@ -415,6 +425,16 @@ changes to rust-analyzer were needed, each made as rustc does it:
   whose lifetime is elided has that lifetime too (`hir-ty/src/lower.rs`, `impl_header`), as
   rustc makes both one fresh parameter of the impl: rusqlite's `impl Params for
   &[&dyn ToSql]` holds for `params![id, name]` of locals.
+- A return-position `impl Trait` has a lifetime parameter for each lifetime elided in its
+  function's parameters, after the function's own (`hir-ty/src/lower.rs`, `elided_lifetimes`),
+  as rustc duplicates them as parameters of the opaque type. In its bounds, `'_` or an elided
+  lifetime is the one elision gives the output: the lifetime of `&self`, else the parameters'
+  only lifetime. rust-analyzer gives elided lifetimes in a signature an error region, so the
+  `impl Trait` could not hold the borrow it was given. Where the function is called, checked
+  or type checked, those parameters are the regions its inputs' elided lifetimes become. A
+  parameter whose lifetimes are not counted from its written type (`dyn Trait`, `impl Trait`,
+  a function pointer, an associated type) adds none, and gives elision no lifetime unless
+  `&self` does.
 - Type inference takes an inline `asm!` output as a place written, as rustc's
   `check_expr_asm_operand` does, so `out(reg) v[0]` indexes with `IndexMut` and needs `v`
   mutable (E0596).
