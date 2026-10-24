@@ -211,7 +211,9 @@ two workers, because unit tests are built with `cfg(test)` and integration tests
 
 A worker for a large workspace holds a lot of memory: 1.3 GB for ripgrep and 9.4 GB for
 dioxus-cli at the end of the agent-style edit runs in [results.md](results.md). The workers
-together hold at most half of the machine's memory, or what `RA_JIT_MEMORY_MAX` says. Once a
+together hold at most half of the machine's memory, or what `RA_JIT_MEMORY_MAX` says. On
+Linux the machine's memory is the least of what it has and what the control group the daemon
+was started in allows (a container's, a CI job's, a systemd unit's). Once a
 second, over that, the daemon stops the worker asked longest ago, and the next build of its
 workspace is cargo's while a worker loads it again. A worker that is answering or loading is
 never stopped, nor is the one asked last, nor any while a program takes live edits.
@@ -266,9 +268,9 @@ started it. To change one, run `cargo ra-jit stop` first.
 |---|---|---|
 | `RA_JIT_HOME` | the daemon's directory (also read by every client) | see above |
 | `RA_JIT_IDLE_SECS` | seconds without a request before the daemon exits; 0 is never | 1800 |
-| `RA_JIT_MEMORY_MAX` | the most the workers hold together, a size such as `6G`, or `off` | half the machine's memory |
+| `RA_JIT_MEMORY_MAX` | the most the workers hold together, a size such as `6G`, or `off` | half the machine's memory (on Linux, or of what its control group allows) |
 | `RA_JIT_SPARE` | `ready` keeps a spare worker with the library loaded at all times, for the next project; `0` starts none, and a workspace loads once cargo has built it | a spare for each build of a new workspace, as it begins |
-| `RA_JIT_OWN_BASE_MEMORY` | the most a worker may hold while it builds its own base in the background, a size such as `40G`, past which it gives that base up and edits patch rustc's executable; `off` is no bound | a quarter of the machine's memory |
+| `RA_JIT_OWN_BASE_MEMORY` | the most a worker may hold while it builds its own base in the background, a size such as `40G`, past which it gives that base up and edits patch rustc's executable; `off` is no bound | a quarter of the machine's memory (on Linux, or of what its control group allows) |
 | `RA_JIT_CACHE` | directory of the disk store; without it nothing is kept on disk | not set |
 | `RA_JIT_REMOTE` and the other store variables | see [cache.md](cache.md) | not set |
 
