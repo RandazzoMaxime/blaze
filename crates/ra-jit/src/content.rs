@@ -174,12 +174,36 @@ impl Contents {
         for (path, stands_for) in places {
             env = env.replace(path, stands_for);
         }
-        if let Some(out) = out {
+        if let Some(out) = out.clone() {
             self.places.lock().unwrap_or_else(|e| e.into_inner()).insert(out);
         }
         field(env.as_bytes());
         // What `env!` and `option_env!` in it read of the process the build is for.
         field(format!("{:?}", process_reads(krate)).as_bytes());
+        // What `include_bytes!` and `include_str!` in it read that no source root has, as it
+        // was read: known once the crate is listed, which asking its reads had it be.
+        let mut read: Vec<(Written, String, Hash)> = db
+            .included_by(krate)
+            .into_iter()
+            .map(|(path, bytes)| {
+                let path = Path::new(path.as_str());
+                let (by, path) = if let Ok(relative) = path.strip_prefix(&manifest) {
+                    (Written::InPackage, relative)
+                } else if let Some(Ok(relative)) = out.as_ref().map(|out| path.strip_prefix(out)) {
+                    (Written::ByBuildScript, relative)
+                } else {
+                    (Written::Elsewhere, path)
+                };
+                let hash = Sha256::digest(bytes.as_deref().unwrap_or_default()).into();
+                (by, path.to_string_lossy().into_owned(), hash)
+            })
+            .collect();
+        read.sort_unstable();
+        for (by, path, hash) in &read {
+            field(&[*by as u8]);
+            field(path.as_bytes());
+            field(hash);
+        }
 
         // In the order of their names: the order they are listed in is the build's.
         let mut dependencies: Vec<_> = data.dependencies.iter().collect();
@@ -279,6 +303,8 @@ fn cargo_home_of(path: &Path) -> Option<&Path> {
 enum Written {
     InPackage,
     ByBuildScript,
+    /// Read by `include_bytes!` or `include_str!` from anywhere else: by its whole path.
+    Elsewhere,
 }
 
 /// The hash of each file as it was last read, for as long as the daemon runs: a build hashes
