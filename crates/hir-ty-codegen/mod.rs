@@ -2284,16 +2284,20 @@ pub fn compile_unnamed(db: &dyn HirDatabase, unnamed: &Unnamed, done: &dyn Fn() 
             std::thread::sleep(std::time::Duration::from_millis(1));
             continue;
         };
-        let compiled = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| match &job {
-            either::Either::Left(root) => {
-                root_rows(db, *root);
-                compiled_root(db, *root).as_ref().ok()
-            }
-            either::Either::Right((instance, env)) => {
-                instance_rows(db, instance.clone(), env.clone());
-                compiled_instance(db, instance.clone(), env.clone()).as_ref().ok()
+        let compiled = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            pause_ahead(db);
+            match &job {
+                either::Either::Left(root) => {
+                    root_rows(db, *root);
+                    compiled_root(db, *root).as_ref().ok()
+                }
+                either::Either::Right((instance, env)) => {
+                    instance_rows(db, instance.clone(), env.clone());
+                    compiled_instance(db, instance.clone(), env.clone()).as_ref().ok()
+                }
             }
         }));
+        let given_up = compiled.is_err() && done();
         let mut found = Vec::new();
         if let Ok(Some(compiled)) = compiled {
             unnamed.told.ahead(db, compiled);
@@ -2309,12 +2313,27 @@ pub fn compile_unnamed(db: &dyn HirDatabase, unnamed: &Unnamed, done: &dyn Fn() 
         }
         let mut state = unnamed.state.lock().unwrap_or_else(|e| e.into_inner());
         state.working -= 1;
-        state.compiled += 1;
+        state.compiled += usize::from(!given_up);
         for it in found {
             if state.seen.insert(it.clone()) {
                 state.queue.push(it);
             }
         }
+    }
+}
+
+/// Holds each job of [`compile_unnamed`] for `RA_JIT_AHEAD_PAUSE_MS`, asking the database
+/// whether it was cancelled as a query does: a function that takes that long to compile, for
+/// `harness/aheadready.py`.
+fn pause_ahead(db: &dyn HirDatabase) {
+    static PAUSE: LazyLock<Option<u64>> = LazyLock::new(|| {
+        std::env::var("RA_JIT_AHEAD_PAUSE_MS").ok().and_then(|it| it.parse().ok())
+    });
+    let Some(pause) = *PAUSE else { return };
+    let start = std::time::Instant::now();
+    while start.elapsed() < std::time::Duration::from_millis(pause) {
+        salsa::Database::unwind_if_revision_cancelled(db);
+        std::thread::sleep(std::time::Duration::from_millis(1));
     }
 }
 
@@ -13948,6 +13967,68 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
 
     /// The signed `wide` lanes of two vectors, each saturated to half its width, signed or
     /// not: every 16 bytes of the result are those of `a` and then those of `b`.
+    /// `cmpps` and its kin: each lane of `a` against the same of `b` by the predicate of the
+    /// immediate, as `vcmpps` reads its low five bits (SSE's eight are the first eight), all
+    /// ones where it holds. One that signals and one that does not answer alike. A scalar
+    /// compare does the first lane alone and keeps the others of `a`.
+    fn compare_lanes(
+        &mut self,
+        a: &Operand,
+        b: &Operand,
+        predicate: u8,
+        dst: Value,
+        lane: Type,
+        scalar: bool,
+    ) -> Result<()> {
+        let (a, ty) = self.operand(a)?;
+        let (b, _) = self.operand(b)?;
+        let size = self.layout(ty)?.size;
+        let int = Type::int(lane.bits() as u16).expect("a lane of 32 or 64 bits");
+        let cc = match predicate & 0xf {
+            0 => Ok(FloatCC::Equal),
+            1 => Ok(FloatCC::LessThan),
+            2 => Ok(FloatCC::LessThanOrEqual),
+            3 => Ok(FloatCC::Unordered),
+            4 => Ok(FloatCC::NotEqual),
+            5 => Ok(FloatCC::UnorderedOrGreaterThanOrEqual),
+            6 => Ok(FloatCC::UnorderedOrGreaterThan),
+            7 => Ok(FloatCC::Ordered),
+            8 => Ok(FloatCC::UnorderedOrEqual),
+            9 => Ok(FloatCC::UnorderedOrLessThan),
+            10 => Ok(FloatCC::UnorderedOrLessThanOrEqual),
+            11 => Err(0),
+            12 => Ok(FloatCC::OrderedNotEqual),
+            13 => Ok(FloatCC::GreaterThanOrEqual),
+            14 => Ok(FloatCC::GreaterThan),
+            _ => Err(-1),
+        };
+        let lanes = if scalar { 1 } else { size.bytes() / u64::from(lane.bytes()) };
+        let values: Vec<Value> = (0..lanes as i32)
+            .map(|i| {
+                let at = i * lane.bytes() as i32;
+                let ones = self.builder.ins().iconst(int, -1);
+                let zero = self.builder.ins().iconst(int, 0);
+                match cc {
+                    Ok(cc) => {
+                        let l = self.builder.ins().load(lane, MEM, a, at);
+                        let r = self.builder.ins().load(lane, MEM, b, at);
+                        let holds = self.builder.ins().fcmp(cc, l, r);
+                        self.builder.ins().select(holds, ones, zero)
+                    }
+                    Err(0) => zero,
+                    Err(_) => ones,
+                }
+            })
+            .collect();
+        if scalar {
+            self.copy(dst, a, size);
+        }
+        for (i, value) in values.into_iter().enumerate() {
+            self.builder.ins().store(MEM, value, dst, i as i32 * lane.bytes() as i32);
+        }
+        Ok(())
+    }
+
     fn pack_lanes(
         &mut self,
         a: &Operand,
@@ -14208,6 +14289,19 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
             return Ok(());
         }
         match (name, args) {
+            (
+                "x86.sse.cmp.ps" | "x86.sse2.cmp.pd" | "x86.avx.cmp.ps.256" | "x86.avx.cmp.pd.256"
+                | "x86.sse.cmp.ss" | "x86.sse2.cmp.sd",
+                [a, b, predicate],
+            ) => {
+                let Some(predicate) = self.const_bits(predicate) else {
+                    unsupported!("`llvm.{name}` with a predicate that is not a constant");
+                };
+                let double = name.contains(".pd") || name.ends_with(".sd");
+                let lane = if double { types::F64 } else { types::F32 };
+                let scalar = name.ends_with(".ss") || name.ends_with(".sd");
+                self.compare_lanes(a, b, predicate as u8, dst, lane, scalar)?
+            }
             ("x86.sse3.ldu.dq" | "x86.avx.ldu.dq.256", [ptr]) => {
                 let (ptr, _) = self.load_scalar(ptr)?;
                 let size = self.layout(dst_ty)?.size;
