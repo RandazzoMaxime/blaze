@@ -143,11 +143,34 @@ pub(crate) fn compile(
     let deps =
         deps.iter().map(|(name, path)| Ok((name.clone(), add(&mut crates, &mut linked, path)?)));
     crates[0].deps = deps.collect::<Result<_, String>>()?;
+    let said = build(sysroot, &crates, dir, exe, super::daemon::store(), true)?;
+    if let Some(line) =
+        said.lines().find(|it| it.contains(" functions in it ra-jit could not compile"))
+        && !line.ends_with(", 0 functions in it ra-jit could not compile")
+    {
+        return Err(format!("it calls functions ra-jit could not compile ({line})"));
+    }
+    let read = std::fs::read_to_string(exe.with_extension("d")).map_err(|it| it.to_string())?;
+    crate::dep_info::DepInfo::parse(&read).files.iter().try_for_each(|it| unread(it))
+}
+
+/// Builds the first of `crates` over the standard library of `sysroot` into `exe` with its
+/// dep-info beside it, describing them in `dir`, with `store` as the store: what the build
+/// said, or why it did not build. With `shipped` it fetches the standard library as builds do
+/// (`shipped.rs`).
+fn build(
+    sysroot: &Path,
+    crates: &[Described],
+    dir: &Path,
+    exe: &Path,
+    store: Option<PathBuf>,
+    shipped: bool,
+) -> Result<String, String> {
     std::fs::create_dir_all(dir).map_err(|it| it.to_string())?;
     let project = dir.join("rust-project.json");
     let described = json!({
         "sysroot": sysroot,
-        "sysroot_src": library,
+        "sysroot_src": sysroot.join("lib/rustlib/src/rust/library"),
         "crates": crates.iter().enumerate().map(|(at, it)| described(it, at == 0)).collect::<Vec<_>>(),
     });
     std::fs::write(&project, described.to_string()).map_err(|it| it.to_string())?;
@@ -164,30 +187,45 @@ pub(crate) fn compile(
             ra_jit.env_remove(&name);
         }
     }
-    for kept in ["RA_JIT_HOME", "RA_JIT_BACKEND"] {
+    for kept in ["RA_JIT_HOME", "RA_JIT_BACKEND", "RA_JIT_STD_FROM"] {
         if let Some(value) = std::env::var_os(kept) {
             ra_jit.env(kept, value);
         }
     }
-    if let Some(store) = super::daemon::store() {
+    if let Some(store) = store {
         ra_jit.env("RA_JIT_CACHE", store);
+    }
+    if !shipped {
+        ra_jit.env("RA_JIT_STD_FROM", "off");
     }
     ra_jit.current_dir(dir).stdin(Stdio::null()).stdout(Stdio::null());
     let built = ra_jit.output().map_err(|it| format!("ra-jit did not run: {it}"))?;
-    let said = String::from_utf8_lossy(&built.stderr);
-    std::fs::write(dir.join("ra-jit.log"), &*said).map_err(|it| it.to_string())?;
+    let said = String::from_utf8_lossy(&built.stderr).into_owned();
+    std::fs::write(dir.join("ra-jit.log"), &said).map_err(|it| it.to_string())?;
     if !built.status.success() {
         let last = said.lines().rev().find(|it| !it.trim().is_empty()).unwrap_or("");
         return Err(format!("ra-jit did not build it ({}): {last}", built.status));
     }
-    if let Some(line) =
-        said.lines().find(|it| it.contains(" functions in it ra-jit could not compile"))
-        && !line.ends_with(", 0 functions in it ra-jit could not compile")
-    {
-        return Err(format!("it calls functions ra-jit could not compile ({line})"));
-    }
-    let read = std::fs::read_to_string(&dep_info).map_err(|it| it.to_string())?;
-    crate::dep_info::DepInfo::parse(&read).files.iter().try_for_each(|it| unread(it))
+    Ok(said)
+}
+
+/// Builds a script that does nothing over the standard library of `sysroot` in `dir`, into
+/// the store `store`: what the store then has is what any build script's build takes from
+/// it before its own crates, the standard library's unit and the frozen maps of its crates.
+pub(crate) fn build_nothing(sysroot: &Path, dir: &Path, store: &Path) -> Result<String, String> {
+    let source = dir.join("build.rs");
+    std::fs::create_dir_all(dir).map_err(|it| it.to_string())?;
+    std::fs::write(&source, "fn main() {}\n").map_err(|it| it.to_string())?;
+    let script = Described {
+        name: SCRIPT.to_owned(),
+        root: source,
+        edition: "2021".to_owned(),
+        cfg: vec!["debug_assertions".to_owned()],
+        env: BTreeMap::new(),
+        deps: Vec::new(),
+    };
+    let exe = dir.join("build-script-build");
+    build(sysroot, &[script], dir, &exe, Some(store.to_owned()), false)
 }
 
 /// Whether the file reads nothing a dep-info of its modules alone leaves out, and if it does,

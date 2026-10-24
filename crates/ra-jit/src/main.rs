@@ -22,6 +22,7 @@ mod outline;
 mod plan;
 mod process;
 mod remote;
+mod shipped;
 mod socket;
 mod splice;
 mod splicer;
@@ -1087,15 +1088,23 @@ fn toolchain_identity(vfs: &vfs::Vfs, symbol_files: &[PathBuf]) -> Option<String
         Some(toolchain.to_owned())
     });
     if let Some(toolchain) = &toolchain {
-        identity.extend(rustc_commit(toolchain));
-        for dir in ["lib", "bin"] {
-            let Ok(entries) = std::fs::read_dir(format!("{toolchain}{dir}")) else { continue };
-            let names = entries.filter_map(|it| it.ok()?.file_name().into_string().ok());
-            identity.extend(names.filter(|it| it.contains("rustc_driver-")));
-        }
+        identity.extend(installed_identity(toolchain));
     }
     identity.sort_unstable();
     (!identity.is_empty()).then(|| identity.join(" "))
+}
+
+/// What of [`toolchain_identity`] the toolchain installed at `toolchain` (with a `/` at its
+/// end) says: its commit and the name of its compiler. The whole of it for a build with
+/// nothing of rustc's, on any machine the toolchain is installed on.
+pub(crate) fn installed_identity(toolchain: &str) -> Vec<String> {
+    let mut identity: Vec<String> = rustc_commit(toolchain).into_iter().collect();
+    for dir in ["lib", "bin"] {
+        let Ok(entries) = std::fs::read_dir(format!("{toolchain}{dir}")) else { continue };
+        let names = entries.filter_map(|it| it.ok()?.file_name().into_string().ok());
+        identity.extend(names.filter(|it| it.contains("rustc_driver-")));
+    }
+    identity
 }
 
 /// A hash of what the metadata of the crate in the rlib `archive` says it is: the header,
@@ -4452,7 +4461,29 @@ fn link(
     if let Some(binary) = splice {
         headerpad_ahead(binary)?;
     }
-    run_link(cmd, start, &declined)?;
+    let reached = cargo::plan::reached_only(cmd);
+    let cmd = match reached.as_deref() {
+        Some(reached) if lock(&REACHED_ONLY).contains(cmd) => {
+            run_link(reached, start, &declined)?;
+            reached
+        }
+        _ => match (run_link(cmd, start, &declined), reached.as_deref()) {
+            (Err(why), Some(reached))
+                if why
+                    .downcast_ref::<LinkFailed>()
+                    .is_some_and(|it| it.names_undefined_outside([Some(object), patch])) =>
+            {
+                lock(&REACHED_ONLY).insert(cmd.to_owned());
+                let again = "; again without the code nothing reaches, as rustc's line has it: some of it uses what nothing defines";
+                run_link(reached, Instant::now(), again)?;
+                reached
+            }
+            (linked, _) => {
+                linked?;
+                cmd
+            }
+        },
+    };
     if let Some(binary) = splice
         && let Some(pad) = headerpad_short(binary)
     {
@@ -4490,12 +4521,56 @@ fn packs_whole(args: &Args) -> bool {
 fn run_link(cmd: &str, start: Instant, note: &str) -> anyhow::Result<()> {
     let linked = shell(cmd).output()?;
     let status = linked.status;
-    let said = String::from_utf8_lossy(&linked.stderr);
+    let said = String::from_utf8_lossy(&linked.stderr).into_owned();
     eprint!("{}{said}", String::from_utf8_lossy(&linked.stdout));
     eprintln!("link: {:.1?} ({status}{note})", start.elapsed());
-    anyhow::ensure!(status.success(), "the link failed ({status}): {}", last_lines(&said, 6));
+    if !status.success() {
+        return Err(LinkFailed { status, said }.into());
+    }
     Ok(())
 }
+
+/// The link commands whose executables are linked without the code nothing reaches
+/// ([`cargo::plan::reached_only`]): the line that keeps it failed on what nothing defines.
+static REACHED_ONLY: std::sync::LazyLock<std::sync::Mutex<FxHashSet<String>>> =
+    std::sync::LazyLock::new(Default::default);
+
+/// A link that ended in failure, with what the linker said.
+#[derive(Debug)]
+struct LinkFailed {
+    status: std::process::ExitStatus,
+    said: String,
+}
+
+impl LinkFailed {
+    /// How the linkers say that something uses a name nothing defines: lld, GNU ld, Apple's
+    /// and `link.exe`.
+    const UNDEFINED: [&str; 4] = [
+        "undefined symbol:",
+        "undefined reference to",
+        "Undefined symbols for architecture",
+        "unresolved external symbol",
+    ];
+
+    /// Whether the link failed on names nothing defines that only objects other than `ours`
+    /// use: what is wrong with the daemon's own is never taken out of sight.
+    fn names_undefined_outside<'a>(
+        &self,
+        ours: impl IntoIterator<Item = Option<&'a Path>>,
+    ) -> bool {
+        let mut ours = ours.into_iter().flatten().filter_map(Path::file_name);
+        Self::UNDEFINED.iter().any(|it| self.said.contains(it))
+            && !ours.any(|it| self.said.contains(&*it.to_string_lossy()))
+    }
+}
+
+impl std::fmt::Display for LinkFailed {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "the link failed ({}): {}", self.status, last_lines(&self.said, 6))
+    }
+}
+
+impl std::error::Error for LinkFailed {}
 
 /// Tells the link of the program at `binary` the room after the load commands that the
 /// executable there now wants for splices, when that is more than the link is told: what
@@ -6297,6 +6372,7 @@ fn main() -> anyhow::Result<()> {
             end_with_reader();
             return remote::command(std::env::args().skip(2));
         }
+        Some("std") => return shipped::command(std::env::args().skip(2)),
         _ => {}
     }
     #[cfg(windows)]
@@ -7038,6 +7114,11 @@ fn run_holding(
         Some(toolchain) => ra_jit_store::compiles_against(&toolchain),
         None => eprintln!("store: the toolchain of the library cannot be told from another"),
     }
+    // A build with nothing of rustc's starts from the standard library, which a release ships.
+    let nothing_of_rustc = library.is_none() && args.symbol_files.is_empty();
+    let shipped = (nothing_of_rustc && args.prebuilt.is_none() && args.patch.is_none())
+        .then(|| shipped::fetch_ahead(emits.triple()))
+        .flatten();
     let built = follow_cargo(&mut db, &mut vfs, &mut checkouts, &args, &listed)?;
     let beside = built.is_some();
     let Parts { root, base, members, debug, lints_capped } = checkouts.parts(&args.project)?;
@@ -7080,6 +7161,7 @@ fn run_holding(
     // The store reads its packs when first opened, which serving does: what is fetched after
     // that is not in it for this build.
     let shared = shared.join().map_err(|_| anyhow::anyhow!("fetching the store panicked"))?;
+    shipped::fetched(shipped);
     let built = built_crates(&db, &args)?;
     let mut served = frozen::serve(&mut db, &built);
     // What is frozen names the files its `include!`s read: those not loaded yet are, and

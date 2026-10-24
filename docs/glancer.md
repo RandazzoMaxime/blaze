@@ -304,8 +304,12 @@ bun's base was given up on main at this host's bound (31.7 GB, a quarter of 124 
 the 128 GiB Mac), and its signature edit wrote the whole object and linked it, 32.8 s; it
 builds now, peaks at 24.0 GB, and the signature edit is a patch, 6.3 s. Edits are otherwise
 the same (nushell's 0.28-0.35 s, helix's 0.11-0.21 s, both builds). zed's own base still
-does not fit: it reaches the bound in 94 s rather than 27 s, and with no bound passed 64 GB
+did not fit: it reaches the bound in 94 s rather than 27 s, and with no bound passed 64 GB
 ([research/daemon-memory.md](research/daemon-memory.md#2026-10-23-sharing-described-55)).
+With each type described once (#29) it finishes with no bound of its own in 662 s, at a peak
+of 62.6 GB, and is still given up at the default bound, a quarter of memory: it is all held in
+the one revision it is built in (#188,
+[research/daemon-memory.md](research/daemon-memory.md#2026-10-23-each-type-once-29)).
 
 ### Item 1: frozen dependency artifacts
 
@@ -449,8 +453,8 @@ and cold-start time and RSS on helix and nushell before and after.
 5. Memo eviction (item 5), sized by step 0.
 6. Item 1a, then 1b family by family, then 1c.
 7. The warm-start manifest (item 2), then salsa state with cold-start-2.
-8. zed measured again (its ready path fits since cold-start-2; its own base still passes the
-   bound with #55, #29);
+8. zed measured again (its ready path fits since cold-start-2; its own base finishes under
+   64 GB with #29 and is given up at the default bound, #188);
    item 6 if the numbers say so. Item 4 has its own lane (#42).
 
 ## Working with the other lanes
@@ -528,7 +532,7 @@ stops.
 
 ## Not checked
 
-- bevy and ripgrep with step 1; what zed's own base holds past 64 GB once `described` is
-  shared (#29).
+- bevy and ripgrep with step 1; zed's own base built in pieces under the default bound
+  (#188).
 - Whether `instance_path` and `home::Mentions`, which also walk types without a memo,
   grow the same way on other workspaces; on helix they were under 3% of the sample.
