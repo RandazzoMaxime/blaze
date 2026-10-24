@@ -683,9 +683,19 @@ pub(super) fn inline(
                 && name.bytes().all(|it| it.is_ascii_alphanumeric() || b"_.$".contains(&it))
         })
     };
+    // A block that reads the frame pointer expects the frame of the function it is in, which
+    // LLVM may not have set up yet where the block is: a call of the wrapper makes it.
+    let frame_pointer: &[&str] = match arch {
+        Arch::X86_64 => &["rbp", "ebp", "bp"],
+        _ => &["x29", "w29", "fp"],
+    };
+    let names_frame = |lit: &str| {
+        lit.split(|it: char| !it.is_ascii_alphanumeric())
+            .any(|word| frame_pointer.contains(&word.to_ascii_lowercase().as_str()))
+    };
     for piece in template {
         if let AsmPiece::Lit(lit) = piece
-            && lit.split(['\n', ';']).any(named_label)
+            && (lit.split(['\n', ';']).any(named_label) || names_frame(lit))
         {
             return None;
         }
