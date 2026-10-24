@@ -240,7 +240,9 @@ def main():
     args = [a for a in sys.argv[1:] if not a.startswith("--")]
     keep = "--keep" in sys.argv
     cases = {name: CASES[name] for name in (args or CASES)}
-    work = tempfile.mkdtemp(prefix="check-json-")
+    # Under /tmp on macOS: the checkers' sockets are in RA_JIT_HOME below, and under $TMPDIR
+    # (/var/folders/...) their paths pass the 104 bytes macOS has for one.
+    work = tempfile.mkdtemp(prefix="check-json-", dir="/tmp" if sys.platform == "darwin" else None)
     home = os.path.join(work, "home")
     tally = Tally()
     try:
@@ -250,6 +252,8 @@ def main():
                 theirs, their_err, their_status = run(at, [], fmt, home)
                 ours, our_err, our_status = run(at, ["ra-jit"], fmt, home)
                 tally.same(name, fmt, "status", our_status, their_status)
+                if our_status != their_status and our_err:
+                    print(f"{name} {fmt}: ra-jit exited {our_status}: {our_err[-1]}", flush=True)
                 tally.same(name, fmt, "checked without rustc", [l for l in our_err if "Checking probe" in l], [])
                 if fmt.startswith("json"):
                     compare_json(tally, name, fmt, ours, theirs)
