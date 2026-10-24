@@ -57,7 +57,10 @@ const DEPTH: u32 = 8;
 const BUDGET: usize = 40_000;
 /// The most instructions of Cranelift IR a body has that an export is built for, at each
 /// instruction of the most LLVM imports: what is larger is not built, as none would be.
-const CLIF_PER_IMPORTED: usize = 4;
+/// Cranelift's IR of small calls of `std` is many times LLVM's: SipHash's `d_rounds` is 1792
+/// of it and some 50 of LLVM's, so at 4 it was never imported and `words` ran 1.27x (x86) and
+/// 1.38x (aarch64) where at 16 it runs 1.14x and 1.23x; 64 imports no more.
+const CLIF_PER_IMPORTED: usize = 16;
 
 /// A function as the compiles that call it import it.
 pub(super) struct Export {
