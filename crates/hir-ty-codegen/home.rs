@@ -33,12 +33,20 @@ struct Mentions<'db> {
     bodies: Vec<DefWithBodyId>,
     /// It mentions something whose crate we can't tell.
     opaque: bool,
+    /// The types looked into so far. The type of a future holds those of the futures it
+    /// awaits, each of which holds its own, so the same few are reached along very many ways.
+    seen: FxHashSet<Ty<'db>>,
 }
 
 impl<'db> Mentions<'db> {
     fn of(db: &'db dyn HirDatabase, instance: &Instance) -> Mentions<'db> {
-        let mut mentions =
-            Mentions { db, crates: FxHashSet::default(), bodies: Vec::new(), opaque: false };
+        let mut mentions = Mentions {
+            db,
+            crates: FxHashSet::default(),
+            bodies: Vec::new(),
+            opaque: false,
+            seen: FxHashSet::default(),
+        };
         match instance.def {
             InstanceDef::Fn(func) | InstanceDef::VtableShim(func) => {
                 mentions.crates.insert(func.krate(db));
@@ -137,6 +145,9 @@ impl<'db> TypeVisitor<DbInterner<'db>> for Mentions<'db> {
     type Result = ();
 
     fn visit_ty(&mut self, ty: Ty<'db>) {
+        if !self.seen.insert(ty) {
+            return;
+        }
         match ty.kind() {
             TyKind::Adt(adt, _) => {
                 self.crates.insert(adt.def_id().module(self.db).krate(self.db));
