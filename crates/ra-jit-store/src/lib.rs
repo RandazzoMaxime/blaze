@@ -1523,10 +1523,16 @@ impl Store {
     }
 
     /// Runs `settle`, which ends a build's use of the store, beside what the build does
-    /// next. One at a time: the one before is waited for.
+    /// next. One at a time: it waits for the one before, and the build does not.
     pub fn settle_with(&self, settle: impl FnOnce() + Send + 'static) {
-        self.settled();
         let Ok(mut settling) = self.settling.lock() else { return settle() };
+        let before = settling.take();
+        let settle = move || {
+            if let Some(before) = before {
+                _ = before.join();
+            }
+            settle();
+        };
         match std::thread::Builder::new().name("ra-jit store settle".to_owned()).spawn(settle) {
             Ok(thread) => *settling = Some(thread),
             Err(e) => eprintln!("store: what this build added is not kept: {e}"),

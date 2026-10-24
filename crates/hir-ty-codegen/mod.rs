@@ -4382,7 +4382,10 @@ impl<'a, 'db> ObjectCodegen<'a, 'db> {
         // Without an identity for such a program, nothing of it is kept or found.
         let program = mixed.as_ref().map(|it| it.key);
         let store = store::Store::global().filter(|_| program != Some(None));
-        if let Some(store) = store {
+        // A patch calls the base's copy of what the last build kept, so it does not wait for
+        // the store to have it: after a build from nothing, writing it takes longer than the
+        // build's own compile.
+        if let Some(store) = store.filter(|_| base.is_none()) {
             store.settled();
         }
         let settled_at = start.elapsed();
