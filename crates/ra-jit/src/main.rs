@@ -3332,6 +3332,17 @@ impl Listed {
 
     /// Lists `crates` on every core, a crate to a thread at a time.
     fn of_all(&self, db: &RootDatabase, crates: &[Crate]) {
+        let unlisted: Vec<Crate> = {
+            let functions = lock(&self.functions);
+            crates.iter().copied().filter(|it| !functions.contains_key(it)).collect()
+        };
+        if unlisted.len() < 2 {
+            for krate in unlisted {
+                self.of(db, krate);
+            }
+            return;
+        }
+        let crates = &unlisted[..];
         let threads = std::thread::available_parallelism().map_or(1, |it| it.get());
         let next = std::sync::atomic::AtomicUsize::new(0);
         std::thread::scope(|scope| {
@@ -4056,8 +4067,13 @@ fn build(
     // is only here for what this one uses of it.
     let mut main = None;
     let mut local = Vec::new();
-    for (at, krate) in args.crates().enumerate() {
-        for krate in crates_to_build(db, table, krate, args)? {
+    let asked = args.crates().map(|it| crates_to_build(db, table, it, args));
+    let asked: Vec<Vec<Crate>> = asked.collect::<anyhow::Result<_>>()?;
+    // On every core: an edit to a crate others depend on has each of them listed again, and
+    // the build waits for all of it.
+    listed.of_all(db, &asked.iter().flatten().copied().collect::<Vec<_>>());
+    for (at, crates) in asked.into_iter().enumerate() {
+        for krate in crates {
             local.push(krate);
             let listed = listed.of(db, krate);
             // A program of tests starts in ra-jit's test harness, which calls every test, or
