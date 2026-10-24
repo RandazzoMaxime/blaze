@@ -20,7 +20,9 @@ impl<'db> InferenceContext<'db> {
 
     fn infer_mut_expr(&mut self, tgt_expr: ExprId, mutability: Mutability) {
         // An expression is walked within the one it is in: rustc's 5,204-arm `else if`.
-        crate::next_solver::ensure_sufficient_stack(|| self.infer_mut_expr_here(tgt_expr, mutability))
+        crate::next_solver::ensure_sufficient_stack(|| {
+            self.infer_mut_expr_here(tgt_expr, mutability)
+        })
     }
 
     fn infer_mut_expr_here(&mut self, tgt_expr: ExprId, mut mutability: Mutability) {

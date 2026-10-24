@@ -565,8 +565,12 @@ impl<'a, 'db> MirLowerCtx<'a, 'db> {
         // An expression is lowered within the one it is in: rustc's 5,204-arm `else if`.
         crate::next_solver::ensure_sufficient_stack(|| {
             if let Some(adjustments) = self.infer.expr_adjustments.get(&expr_id) {
-                return self
-                    .lower_expr_to_place_with_adjust(expr_id, place, prev_block, adjustments);
+                return self.lower_expr_to_place_with_adjust(
+                    expr_id,
+                    place,
+                    prev_block,
+                    adjustments,
+                );
             }
             self.lower_expr_to_place_without_adjust(expr_id, place, prev_block)
         })

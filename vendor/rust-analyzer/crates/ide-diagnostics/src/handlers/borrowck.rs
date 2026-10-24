@@ -156,8 +156,9 @@ fn tainted(x: NC) -> u32 {
     // past the stack.
     #[test]
     fn a_5204_arm_else_if_chain_is_diagnosed_in_linear_time() {
-        let mut fixture =
-            String::from("//- minicore: copy\npub fn banana(v: u32) -> u32 {\n    if v == 0 { 0 }\n");
+        let mut fixture = String::from(
+            "//- minicore: copy\npub fn banana(v: u32) -> u32 {\n    if v == 0 { 0 }\n",
+        );
         for arm in 1..5204 {
             fixture.push_str(&format!("    else if v == {arm} {{ {arm} }}\n"));
         }
