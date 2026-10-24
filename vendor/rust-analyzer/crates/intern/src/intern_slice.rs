@@ -51,9 +51,8 @@ impl<T: SliceInternable> InternedSlice<T> {
         // looking under a lock other readers share finds it without waiting on them.
         {
             let read = shard.read();
-            let found = read.find(hash, |(other, _)| {
-                other.header.header == header && other.slice == *slice
-            });
+            let found = read
+                .find(hash, |(other, _)| other.header.header == header && other.slice == *slice);
             if let Some(bucket) = found {
                 // SAFETY: The bucket is read while its shard is locked; a collection, which frees
                 // it, runs only when no reference to one is alive. The pointer is a `ThinArc`'s.
