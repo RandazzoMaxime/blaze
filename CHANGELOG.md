@@ -480,8 +480,13 @@ All notable changes to ra-jit are written here. The format follows
   (26 s); ide-diagnostics tests the 5,204-arm chain under 60 s.
 - A destructuring assignment that moves out of a reference (`S { b, .. } = *r`) is an error
   at `*r`, as rustc reports it, and one that copies is not an error.
-- ide-diagnostics's 24 failing tests pass (756 pass, 1 ignored), and CI's fast tier runs them
-  in the fork job.
+- `&[]` and `&mut []` are `'static` whatever their element type, as rustc promotes them: the
+  borrow checker asked the type, `[T; 0]`, whether it needs dropping or is mutable inside, and
+  reported `fn f<T>() -> &'static [T] { &[] }` as returning a reference to a local.
+- ide-diagnostics's 24 failing tests pass (761 pass, 1 ignored, slow tests included), and CI's
+  fast tier runs them in the fork job. Its `minicore_smoke_test`, which runs only under `CI` or
+  `RUN_SLOW_TESTS`, found the `&[]` above and minicore's `ptr::read`, which moved out of a raw
+  pointer as rustc refuses to and now calls `read_via_copy` as core does.
 
 - A function the daemon compiles ahead, while it reads the symbols rustc built, is given up on
   once they are read, where the worker used to finish it before it was ready. bevy's second
