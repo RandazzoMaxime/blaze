@@ -109,7 +109,8 @@ def main():
     if not os.path.exists(os.path.join(bin_dir, "cargo-ra-jit")):
         raise SystemExit(f"no cargo-ra-jit beside {os.environ['RA_JIT_BIN']}")
     root = tempfile.mkdtemp(prefix="ra-jit-testselect-")
-    ws, home = os.path.join(root, "tsel"), os.path.join(root, "home")
+    # The daemon's sockets are under its home, and a socket's path is short (104 bytes on macOS).
+    ws, home = os.path.join(root, "tsel"), tempfile.mkdtemp(prefix="rj-ts-", dir="/tmp")
     for path, text in FILES.items():
         os.makedirs(os.path.dirname(os.path.join(ws, path)), exist_ok=True)
         open(os.path.join(ws, path), "w").write(text)
@@ -119,7 +120,8 @@ def main():
         env.pop(name, None)
     wrong = 0
     try:
-        for _ in range(240):
+        deadline = time.monotonic() + 300
+        while time.monotonic() < deadline:
             code, said = test(ws, env, "affected")
             if code != 0:
                 raise SystemExit(f"the tests failed before any edit:\n{said[-3000:]}")
@@ -152,10 +154,11 @@ def main():
                 print(said[-4000:])
     finally:
         subprocess.run(["cargo", "ra-jit", "stop"], cwd=ws, env=env, capture_output=True, timeout=120)
-    print(f"{len(STEPS) - wrong} of {len(STEPS)} right; under {root}")
+    print(f"{len(STEPS) - wrong} of {len(STEPS)} right; under {root}, the daemon's home {home}")
     if wrong:
         sys.exit(1)
     shutil.rmtree(root, ignore_errors=True)
+    shutil.rmtree(home, ignore_errors=True)
 
 
 if __name__ == "__main__":
