@@ -19,6 +19,18 @@ All notable changes to ra-jit are written here. The format follows
   `.sd` and AVX's 256-bit ones give a lane of all ones where the immediate's predicate holds, as
   rustc's do. glam's `Vec4::cmpeq` and `is_finite_mask`, which bevy calls, were left to rustc;
   `harness/breakers` checks each predicate, NaN lanes included, against rustc's program.
+- `cargo ra-jit check --message-format=json` (and `short`, `json-diagnostic-short`,
+  `json-diagnostic-rendered-ansi`, `json-render-diagnostics`) writes the daemon's verdict as
+  `cargo check` does: each error a `compiler-message` with rustc's code, level, spans (bytes,
+  lines, columns counted as rustc counts them, the source lines and their highlights) and
+  `rendered`, cargo's package id and target, the failure notes, `build-finished` and the
+  `could not compile` lines. rust-analyzer's check-on-save and editors read it, so they show
+  ra-jit's verdict and not rustc's. `-Z`, `--exclude` and several `--target`s are the
+  checker's too (a checker for each target, four held at once), where they went to cargo.
+  `harness/check_json.py` compares it with `cargo check` on the same errors: 7 packages, every
+  format, every compared field the same; the labels, help and notes, other spans and
+  `code.explanation` are rustc's only, and the messages are rust-analyzer's wording.
+
 - `RA_JIT_UNITS=1` compiles a whole program's functions many to an LLVM module, as rustc
   compiles a crate's codegen units (#176): the functions are found from their IR before any
   is compiled, cut into units of about 20,000 instructions in the order they were found in,
@@ -450,6 +462,48 @@ All notable changes to ra-jit are written here. The format follows
 
 ### Fixed
 
+- The borrow checker no longer panics on rustc's UI tests (`lints_ui.py --deny unused_mut`
+  over all 20,450 files: 4 panics before, none now, and ra-jit's time from 67 s to 14 s). The
+  causes were in the trait solver and the lowering it reads: a trait object's projections
+  that become the same after substitution were deduplicated before being related, so
+  `dyn A<X = T> + B<X = T>` failed to relate to itself (rustc relates them all, #136458); the
+  `for<'b>` of an associated type's bound in a `for<'a>` was lowered as a binder of its own
+  instead of concatenated onto the outer one, as rustc does; and upcasting a higher-ranked
+  trait object built its supertraits outside the source's binder. Each has a regression test
+  in ide-diagnostics, which panicked as rustc's test did before the fix.
+- A 5,204-arm `else if` chain (rustc's `expr-stack-overflow.rs`, #206) is borrow checked in
+  4.5 s, where it took over 300 s and then overflowed the stack: finding each expression's
+  syntax walked down from the body's root, quadratic in the chain, and lowering, inference
+  and MIR building recursed once an arm. The walk now goes to the child that contains the
+  range, and the recursions grow their stack as rustc's `ensure_sufficient_stack` does
+  (`stdx::ensure_sufficient_stack`). 1,000 arms take 2.2 s (5.35 s before), 2,000 arms 2.5 s
+  (26 s); ide-diagnostics tests the 5,204-arm chain under 60 s.
+- A destructuring assignment that moves out of a reference (`S { b, .. } = *r`) is an error
+  at `*r`, as rustc reports it, and one that copies is not an error.
+- `&[]` and `&mut []` are `'static` whatever their element type, as rustc promotes them: the
+  borrow checker asked the type, `[T; 0]`, whether it needs dropping or is mutable inside, and
+  reported `fn f<T>() -> &'static [T] { &[] }` as returning a reference to a local.
+- ide-diagnostics's 24 failing tests pass (761 pass, 1 ignored, slow tests included), and CI's
+  fast tier runs them in the fork job. Its `minicore_smoke_test`, which runs only under `CI` or
+  `RUN_SLOW_TESTS`, found the `&[]` above and minicore's `ptr::read`, which moved out of a raw
+  pointer as rustc refuses to and now calls `read_via_copy` as core does.
+- The first build after one of cargo's is the daemon's where a proc macro or build script is
+  built on what a build script wrote to `OUT_DIR`, as biome's macros are on
+  `biome_aria_metadata`'s ARIA tables: the file was written while cargo built, after the build
+  began, so it counted as changed since, and the build went to cargo ("what runs during the
+  build: …/out/roles_and_attributes.rs changed"). Cargo's build replaced the worker, which built
+  the program in full again: biome's next edit after that took 130 s and 24 GB. Such a file is
+  only written again when the script runs again, which the script's own guards are for.
+  soakrows.py's `proc macro on generated code` has the proc macro `include!` its script's
+  output and checks that the first edit after the build is the daemon's.
+- On Linux the daemon's bounds on memory count what its control group allows, where they
+  counted the machine's: the workers' `RA_JIT_MEMORY_MAX` (half) and the own base's
+  `RA_JIT_OWN_BASE_MEMORY` (a quarter) were of the host's memory in a container, a CI job or a
+  systemd unit that allows less, so the kernel killed the worker before either was reached. It
+  is the least of `MemTotal` and the `memory.max` (version 2) or `memory.limit_in_bytes`
+  (version 1) of the process's group and those above it. soakrows.py's `control group's
+  memory` starts the daemon in a 6 GB scope and checks that its workers hold at most 3072 MB;
+  it said 96,021 MB on a 187 GB host before.
 - A function the daemon compiles ahead, while it reads the symbols rustc built, is given up on
   once they are read, where the worker used to finish it before it was ready. bevy's second
   warm-store run began its derived `release_state` of a read-only query struct, which the

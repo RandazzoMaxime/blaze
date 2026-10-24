@@ -50,7 +50,15 @@ programs of the build with the same flags, when it has that build loaded: the er
 would fail with, or `Finished`, and no rustc. Any other check is the daemon's too: it loads
 the workspace as a build of those flags would, builds nothing, and says what it finds in every
 file of the workspace's crates. The build scripts and proc macros are the ones cargo built
-before; a workspace that never had them built has rustc build them first. `status` prints what the daemon holds, and for every workspace how many builds
+before; a workspace that never had them built has rustc build them first. A check takes
+`--message-format` (each of cargo's values), `-Z`, `--exclude` and several `--target`s, a
+check for each; in JSON its errors are rustc's `compiler-message`s, with their spans,
+`rendered` and the failure notes, then `build-finished`, which is what rust-analyzer's
+check-on-save and other editors read, so they show the daemon's verdict. What only rustc writes
+is not there: the labels and the help and notes of an error, its other spans, and
+`code.explanation`; the message is rust-analyzer's, worded otherwise than rustc's. E0061's
+span is where the missing argument goes, not the function called. `harness/check_json.py`
+compares it with `cargo check` on the same errors. `status` prints what the daemon holds, and for every workspace how many builds
 the daemon served and how many went to cargo, with the reasons. `stop` ends the daemon. Any
 other subcommand is passed to cargo as typed.
 
@@ -81,7 +89,33 @@ a build took:
 
 `run` then runs the program and `test` runs the test executables the way cargo does: the
 same working directory, the variables cargo sets, cargo's `Running` lines and the same exit
-status.
+status. Every test runs, unless `RA_JIT_TESTS=affected` says otherwise.
+
+### Running only the tests an edit reached
+
+With `RA_JIT_TESTS=affected`, `cargo ra-jit test` runs, of each test executable the daemon
+built, the tests an edit could have changed the end of since they last passed:
+
+    Running unittests src/lib.rs (target/debug/deps/tsel-1f2e): 2 of 5 tests
+    Skipping tests/it.rs (target/debug/deps/it-9a8b): 2 tests, unchanged since the last pass
+    Skipped 5 tests, unchanged since the last pass; `RA_JIT_TESTS=all` runs every test
+
+At each build the daemon hashes every test's code with the code of every function it calls,
+directly or through others, in any crate of the workspace or its dependencies, and its
+attributes (`#[ignore]`, `#[should_panic]`). The standard library is named by the toolchain.
+A test runs again when that hash is not the one it last passed with, when it has not passed
+since it was added or failed, and every time when it reaches what its code does not decide:
+a file, the environment, another process, the network, or a function ra-jit can't compile.
+An integration test also runs again when a program of its package that cargo hands it as
+`CARGO_BIN_EXE_<name>` was built again.
+
+A test executable cargo built, a command that names tests or passes the harness other flags
+than `-q`, `--nocapture`, `--show-output`, `--test-threads` and `--color`, and one that runs
+the ignored tests run as asked: every test. Time, randomness and threads are not counted as
+outside the code, so a test that depends on them by chance is as flaky as it was. Unset, or
+`all`, runs every test, as cargo does; the daemon then hashes nothing. What is left (a hash
+that never compiles on a warm store, saying why a test runs, a watch mode) is
+[#227](https://github.com/indexable-inc/ra-jit/issues/227).
 
 While cargo builds, a spare worker already loads the workspace, resolves it and compiles the
 functions of each crate cargo is done with on a quarter of the cores, and reads the symbols of
@@ -136,10 +170,11 @@ is. It prints one line with the reason, `ra-jit: <reason>; building with cargo`,
 it in `cargo ra-jit status`. The build then behaves as cargo's because it is cargo's.
 
 A whole invocation goes to cargo when any of these hold (`Invocation::only_cargo` in
-`cargo/cli.rs`):
+`cargo/cli.rs`); for `check` only `--build-plan` and `--unit-graph` do:
 
 | Condition | Reason printed |
 |---|---|
+| `--build-plan` or `--unit-graph` | `--build-plan and --unit-graph are cargo's to answer` |
 | `--message-format` | `--message-format` is cargo's to answer |
 | a `-Z` flag | unstable cargo flags |
 | `--exclude` | `--exclude` is not loaded by the daemon yet |
@@ -155,8 +190,10 @@ A single build goes to cargo when:
   build script reads has changed since cargo last built. Cargo builds, and the daemon loads
   the workspace again afterwards. On a large workspace that reload is long: 36 to 51 s on
   nushell;
-- a `#[test]` function was added or removed, or its attributes changed. The list of tests in
-  a test executable is rustc's;
+- a `#[test]` function was added or removed, or its attributes changed, in a test executable
+  that keeps rustc's test harness: one with a `#[bench]`, or an `#[ignore]` whose message is
+  not a string. Elsewhere ra-jit writes the harness itself and the edit is a build like
+  another ([no-rustc.md](no-rustc.md), step H);
 - a library changed that unit tests are linked against as rustc built it;
 - rust-analyzer finds an error in the source. The daemon refuses it, cargo runs, and you get
   rustc's diagnostics and cargo's exit status. This costs 0.1 to 0.5 s over cargo alone.
@@ -211,7 +248,9 @@ two workers, because unit tests are built with `cfg(test)` and integration tests
 
 A worker for a large workspace holds a lot of memory: 1.3 GB for ripgrep and 9.4 GB for
 dioxus-cli at the end of the agent-style edit runs in [results.md](results.md). The workers
-together hold at most half of the machine's memory, or what `RA_JIT_MEMORY_MAX` says. Once a
+together hold at most half of the machine's memory, or what `RA_JIT_MEMORY_MAX` says. On
+Linux the machine's memory is the least of what it has and what the control group the daemon
+was started in allows (a container's, a CI job's, a systemd unit's). Once a
 second, over that, the daemon stops the worker asked longest ago, and the next build of its
 workspace is cargo's while a worker loads it again. A worker that is answering or loading is
 never stopped, nor is the one asked last, nor any while a program takes live edits.
@@ -259,6 +298,10 @@ build a command line is, so changing one starts from a cargo build again.
 | `RA_JIT_SPLICE` | `0` links in full after every edit instead of splicing | splice |
 | `RA_JIT_OTHER_TOOLCHAIN` | `1` builds with a rustc other than 1.99.0 instead of going to cargo, for a project pinned to a nightly near it ([support.md](support.md#toolchain)) | not set |
 
+`RA_JIT_TESTS` is read by each `cargo ra-jit test` alone and is not part of which build it
+is: `affected` runs the tests an edit reached
+([above](#running-only-the-tests-an-edit-reached)), `all` every test. The default is `all`.
+
 These are read by the daemon when it starts, from the environment of whichever command
 started it. To change one, run `cargo ra-jit stop` first.
 
@@ -266,9 +309,9 @@ started it. To change one, run `cargo ra-jit stop` first.
 |---|---|---|
 | `RA_JIT_HOME` | the daemon's directory (also read by every client) | see above |
 | `RA_JIT_IDLE_SECS` | seconds without a request before the daemon exits; 0 is never | 1800 |
-| `RA_JIT_MEMORY_MAX` | the most the workers hold together, a size such as `6G`, or `off` | half the machine's memory |
+| `RA_JIT_MEMORY_MAX` | the most the workers hold together, a size such as `6G`, or `off` | half the machine's memory (on Linux, or of what its control group allows) |
 | `RA_JIT_SPARE` | `ready` keeps a spare worker with the library loaded at all times, for the next project; `0` starts none, and a workspace loads once cargo has built it | a spare for each build of a new workspace, as it begins |
-| `RA_JIT_OWN_BASE_MEMORY` | the most a worker may hold while it builds its own base in the background, a size such as `40G`, past which it gives that base up and edits patch rustc's executable; `off` is no bound | a quarter of the machine's memory |
+| `RA_JIT_OWN_BASE_MEMORY` | the most a worker may hold while it builds its own base in the background, a size such as `40G`, past which it gives that base up and edits patch rustc's executable; `off` is no bound | a quarter of the machine's memory (on Linux, or of what its control group allows) |
 | `RA_JIT_CACHE` | directory of the disk store; without it nothing is kept on disk | not set |
 | `RA_JIT_REMOTE` and the other store variables | see [cache.md](cache.md) | not set |
 

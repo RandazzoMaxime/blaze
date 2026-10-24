@@ -40,6 +40,10 @@ back them is under [docs/upstream/](../upstream/), each with a `SOURCE.md`. Sear
   their imports, the build and run times on ripgrep, helix, nushell and bun against compiles
   of one function and cargo's release build, and why LLVM takes four times rustc's time for
   code of the same size. 2026-10-24.
+- [concurrent-reads.md](concurrent-reads.md): the store's cache of unpacked blocks measured on
+  helix's warm start (a block unpacked once for every thread that asks, 32 MiB to 1 GiB: no
+  gain, values read about one to a block), and bbtree's ordered map against papaya and
+  DashMap for ra-jit's shared maps. 2026-10-24.
 - [lean-frontend.md](lean-frontend.md): what of nushell's cold start, edits and heap goes to
   syntax, macro expansion, error tolerance, salsa's bookkeeping, inference, MIR and codegen;
   tolerance and lossless trees are small, salsa revalidating on wide edits is the largest;

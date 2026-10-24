@@ -11,6 +11,7 @@ use anyhow::Context as _;
 use crate::plan::Selection;
 
 use super::{
+    affected::{self, Pick},
     cli::Invocation,
     say,
     state::{Held, Kind, Program, State, as_built, cargo_path},
@@ -77,7 +78,9 @@ pub(crate) fn started(command: &mut Command) -> std::io::Result<std::process::Ch
 }
 
 /// Runs the test executables one after another, each in the directory of its package, and
-/// stops at the first that fails unless told not to. The result is cargo's exit status.
+/// stops at the first that fails unless told not to. The result is cargo's exit status. Under
+/// `RA_JIT_TESTS=affected` each runs only the tests an edit reached since they passed
+/// ([`affected`]).
 pub(crate) fn tests(
     asked: &Invocation,
     state: &State,
@@ -85,24 +88,51 @@ pub(crate) fn tests(
     mut held: Option<Held>,
 ) -> anyhow::Result<i32> {
     let mut failed = Vec::new();
+    let mut left = 0;
     for test in state.programs.iter().filter(|it| it.test) {
         let source = test.source.strip_prefix(&test.package_dir).unwrap_or(&test.source);
         let unit = if matches!(test.kind, Kind::Test | Kind::Bench) { "" } else { "unittests " };
         let shown = shown_path(&test.executable, cwd);
-        say::status(asked.flags.quiet, "Running", &format!("{unit}{} ({shown})", source.display()));
+        let mut running = format!("{unit}{} ({shown})", source.display());
+        let mut picked = Vec::new();
+        let pick = affected::pick(asked, state, test);
+        if let Pick::Some { names: Some(names), total, .. } = &pick {
+            left += total - names.len();
+            if names.is_empty() {
+                let unchanged = format!("{}, unchanged since the last pass", counted(*total));
+                say::status(asked.flags.quiet, "Skipping", &format!("{running}: {unchanged}"));
+                continue;
+            }
+            running.push_str(&format!(": {} of {}", names.len(), counted(*total)));
+            picked.push("--exact".to_owned());
+            picked.extend(names.iter().cloned());
+        }
+        say::status(asked.flags.quiet, "Running", &running);
         let mut command = Command::new(&test.executable);
         configured(&mut command, state);
-        command.args(asked.program_args()).envs(test.env.iter().cloned());
+        command.args(asked.program_args()).args(&picked).envs(test.env.iter().cloned());
         command.current_dir(&test.package_dir);
         as_built(&mut command)?;
         let status = ended(&mut command, held.take(), state)
             .with_context(|| format!("could not execute {shown}"))?;
+        match pick {
+            Pick::Some { passed, names, .. } if !status.success() => {
+                passed.failed(names.as_deref())
+            }
+            Pick::Some { passed, .. } => passed.passed(),
+            Pick::Asked => {}
+        }
         if !status.success() {
             failed.push(rerun_flags(test));
             if !asked.flags.no_fail_fast {
                 break;
             }
         }
+    }
+    if left > 0 {
+        let all = format!("`{}=all` runs every test", affected::VAR);
+        let unchanged = format!("{}, unchanged since the last pass; {all}", counted(left));
+        say::status(asked.flags.quiet, "Skipped", &unchanged);
     }
     match failed.as_slice() {
         [] => Ok(0),
@@ -148,6 +178,13 @@ pub(crate) fn only_doc_tests(asked: &Invocation, args: &[String]) -> anyhow::Res
     cargo.arg("test").args(args);
     as_built(&mut cargo)?;
     Ok(exit_code(cargo.status().context("running `cargo test --doc`")?))
+}
+
+fn counted(count: usize) -> String {
+    match count {
+        1 => "1 test".to_owned(),
+        _ => format!("{count} tests"),
+    }
 }
 
 /// The flags that have cargo run this test target alone.

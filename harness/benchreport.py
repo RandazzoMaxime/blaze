@@ -76,7 +76,7 @@ REPO = "https://github.com/indexable-inc/ra-jit"
 FLOOR_S = 0.05
 
 # The order of the projects and phases in the tables, and what the README calls each edit.
-PROJECTS = ["ripgrep", "fd", "bat", "hyperfine", "just", "axum", "nushell", "helix", "bevy", "zed", "cargo", "bun"]
+PROJECTS = ["ripgrep", "fd", "bat", "hyperfine", "just", "axum", "nushell", "helix", "bevy", "biome", "zed", "cargo", "bun"]
 # The projects measured on their own (`--name`): what to say of each under the tables.
 APART = {
     "bun": "It is the Rust port of [bun](https://github.com/oven-sh/bun), 1.25M lines of Rust in 103 crates on a nightly "

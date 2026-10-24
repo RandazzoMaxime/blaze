@@ -103,7 +103,7 @@ jobs:
           full=()
           [ "$FULL" = true ] && full=(--setups all --setups-on "ripgrep,nushell" --tests)
           nix develop .#bench -c env -u CARGO_INCREMENTAL -u RUSTC_WRAPPER python3 harness/bench.py \
-            ripgrep fd bat hyperfine just axum nushell helix bevy --runs 5 --cold-runs 5 "${full[@]}" \
+            ripgrep fd bat hyperfine just axum nushell helix bevy biome --runs 5 --cold-runs 5 "${full[@]}" \
             --work "$work" --reference "$BENCH_HOME/reference" --out "$RUNNER_TEMP/results/bench.json" \
             || { status=$?; [ "$status" = 3 ] || exit "$status"; echo "wrong=true" >> "$GITHUB_OUTPUT"; }
       # How fast the built programs run: harness/runbench.py, ra-jit's LLVM against

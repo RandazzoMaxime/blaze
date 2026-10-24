@@ -662,9 +662,9 @@ impl State {
 
     /// `said`, the errors the daemon found in the source, ended as cargo ends a build rustc
     /// turned down: with the program the build is of.
-    pub(crate) fn turned_down(&self, said: &str) -> String {
+    pub(crate) fn turned_down(&self, said: &crate::errors::Said) -> String {
         let Some(program) = self.programs.iter().find(|it| it.asked_as.is_some()) else {
-            return said.to_owned();
+            return said.to_string();
         };
         let name = &program.name;
         let target = match (program.kind, program.test) {
@@ -676,12 +676,16 @@ impl State {
             (Kind::Test, _) => format!("test \"{name}\""),
             (Kind::Bench, _) => format!("bench \"{name}\""),
         };
-        let errors = match crate::errors::count(said) {
+        let errors = match said.count() {
             0 | 1 => "1 previous error".to_owned(),
             n => format!("{n} previous errors"),
         };
         let package = &program.package;
-        format!("{said}\n\nerror: could not compile `{package}` ({target}) due to {errors}")
+        let mut notes = said.notes().join("\n");
+        if !notes.is_empty() {
+            notes.push('\n');
+        }
+        format!("{said}\n\n{notes}error: could not compile `{package}` ({target}) due to {errors}")
     }
 
     /// Counts a build that went to cargo.
@@ -778,6 +782,12 @@ impl State {
             std::fs::rename(&new, &program.cargos)?;
         }
         Ok(())
+    }
+
+    /// The directory the daemon builds `program` in, when it is asked for it.
+    pub(crate) fn plan_dir(&self, program: &Program) -> Option<&Path> {
+        let (checkout, at) = program.asked_as?;
+        self.checkouts.get(checkout)?.programs.get(at)?.object.parent()
     }
 
     /// Cargo's locks on the build directories of the programs, held until the programs this
@@ -1124,7 +1134,7 @@ fn rustc_path() -> OsString {
     beside.filter(|it| it.is_file()).map_or_else(|| "rustc".into(), PathBuf::into_os_string)
 }
 
-fn metadata(asked: &Invocation) -> anyhow::Result<Metadata> {
+pub(super) fn metadata(asked: &Invocation) -> anyhow::Result<Metadata> {
     let mut command = MetadataCommand::new();
     command.cargo_path(cargo_path()).no_deps();
     if let Some(manifest) = &asked.flags.manifest_path {
@@ -1381,7 +1391,12 @@ fn guards(
         Guard::files("the toolchain file", named_above(cwd, &TOOLCHAIN_FILES)),
     ];
     let in_build = runs_in_build(used);
-    let sources = in_build.iter().flat_map(|it| it.inputs().files);
+    // What a build script wrote to its `OUT_DIR` it wrote while cargo built, after the build
+    // began, and only cargo writes it again: when the script runs again, which its own guards
+    // are for.
+    let generated =
+        |file: &PathBuf| scripts.iter().any(|it| file.starts_with(it.out_dir.as_std_path()));
+    let sources = in_build.iter().flat_map(|it| it.inputs().files).filter(|it| !generated(it));
     guards.push(Guard::files("what runs during the build:", sources));
     // What cargo or a build script sets for rustc changes with the manifest or the script.
     let set_for_rustc = |name: &str| {

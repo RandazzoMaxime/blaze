@@ -249,6 +249,7 @@ impl Args {
         let mut all_features = false;
         let mut profile = None;
         let mut config = Vec::new();
+        let (mut excludes, mut unstable) = (Vec::new(), Vec::new());
         let mut asked_in = None;
         let mut also = Vec::new();
         let mut target = None;
@@ -294,6 +295,8 @@ impl Args {
                 "--no-default-features" => no_default_features = true,
                 "--package" | "-p" => packages.push(value()?),
                 "--workspace" => workspace = true,
+                "--exclude" => excludes.push(value()?),
+                "-Z" => unstable.push(value()?),
                 "--all-features" => all_features = true,
                 "--release" | "--profile" if profile.is_some() => {
                     bail!("the profile is given twice")
@@ -341,6 +344,8 @@ impl Args {
                 all_features,
                 packages,
                 workspace,
+                excludes,
+                unstable,
                 target,
                 dev_deps: cfg_test || dev_deps,
                 config,
@@ -3100,6 +3105,84 @@ fn harness_alone(args: &Args) -> Option<String> {
     std::fs::read_to_string(file).ok().filter(|it| !it.is_empty())
 }
 
+/// Writes [`cargo::plan::REACH`] beside the program of tests of `args` when a client asked for
+/// it, and takes away the one of an older build: `built` is whether this build is the program.
+fn write_reach(db: &RootDatabase, listed: &Listed, args: &Args, built: bool) {
+    let Some(dir) = args.out.parent() else { return };
+    let file = dir.join(cargo::plan::REACH);
+    if !built || !dir.join(cargo::plan::REACH_WANTED).is_file() {
+        _ = std::fs::remove_file(&file);
+        return;
+    }
+    let start = Instant::now();
+    let text = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| match of_tests(args) {
+        true => hir::attach_db(db, || reach_of_tests(db, listed, args)),
+        // A test target cargo builds without libtest's harness says what it runs itself.
+        false => "*\tit is not built with libtest's harness\n".to_owned(),
+    }));
+    let text = match text {
+        Ok(text) => text,
+        Err(panic) if panic.is::<ide_db::base_db::salsa::Cancelled>() => {
+            std::panic::resume_unwind(panic)
+        }
+        Err(panic) => format!("*\tra-jit panicked: {}\n", panic_message(&*panic)),
+    };
+    let writing = dir.join(format!("{}.writing", cargo::plan::REACH));
+    if std::fs::write(&writing, text).and_then(|()| std::fs::rename(&writing, &file)).is_err() {
+        _ = std::fs::remove_file(&file);
+    }
+    if std::env::var_os("RA_JIT_STATS").is_some() {
+        eprintln!("tests-reach-us: {}", start.elapsed().as_micros());
+    }
+}
+
+/// Whether the program whose object is `out` is to be built again for its
+/// [`cargo::plan::REACH`] alone: a client asked for it since the program was last built.
+fn reach_owed(out: &Path) -> bool {
+    out.parent().is_some_and(|dir| {
+        dir.join(cargo::plan::REACH_WANTED).is_file() && !dir.join(cargo::plan::REACH).is_file()
+    })
+}
+
+/// The text of [`cargo::plan::REACH`] for the program of tests of `args`. A test's hash is of
+/// its attributes, which say how it is to end, as well as its code and all it reaches.
+fn reach_of_tests(db: &RootDatabase, listed: &Listed, args: &Args) -> String {
+    use hir::HasSource as _;
+    use sha2::Digest as _;
+    use syntax::ast::HasAttrs as _;
+    let crates = crates_named(db, &args.krate, args).unwrap_or_default();
+    let Some(&krate) = crates.first() else { return String::new() };
+    let functions = &listed.of(db, krate).functions;
+    let tests: Vec<FunctionId> =
+        functions.iter().copied().filter(|&it| hir::Function::from(it).is_test(db)).collect();
+    // `cargo test` runs a `#[bench]` once as a test.
+    let benches = functions.iter().map(|&it| hir::Function::from(it)).filter(|it| it.is_bench(db));
+    let mut text = String::new();
+    for bench in benches {
+        let Some(name) = test_harness::name(db, krate, bench) else { continue };
+        text.push_str(&format!("-\t{name}\tit is a benchmark\n"));
+    }
+    for (&id, reach) in tests.iter().zip(hir_ty_codegen::tests_reach(db, &tests)) {
+        let function = hir::Function::from(id);
+        let Some(name) = test_harness::name(db, krate, function) else { continue };
+        let line = match reach {
+            Ok(hash) => {
+                let attrs = function.source(db).map(|it| {
+                    let attrs = it.value.attrs().map(|it| it.syntax().text().to_string());
+                    attrs.collect::<Vec<_>>().join("\n")
+                });
+                let identity = format!("{hash:032x}\n{}", attrs.unwrap_or_default());
+                let identity = sha2::Sha256::digest(identity.as_bytes());
+                let hex: String = identity.iter().map(|it| format!("{it:02x}")).collect();
+                format!("{hex}\t{name}\n")
+            }
+            Err(why) => format!("-\t{name}\t{}\n", why.replace(['\t', '\n'], " ")),
+        };
+        text.push_str(&line);
+    }
+    text
+}
+
 /// The text of the root file of the crate of each program of tests of `programs` with ra-jit's
 /// test harness as the tests are now at its end, or without it where ra-jit writes none, for
 /// those that differ from the text they have. Only the crates among `of` when it is given.
@@ -3249,6 +3332,17 @@ impl Listed {
 
     /// Lists `crates` on every core, a crate to a thread at a time.
     fn of_all(&self, db: &RootDatabase, crates: &[Crate]) {
+        let unlisted: Vec<Crate> = {
+            let functions = lock(&self.functions);
+            crates.iter().copied().filter(|it| !functions.contains_key(it)).collect()
+        };
+        if unlisted.len() < 2 {
+            for krate in unlisted {
+                self.of(db, krate);
+            }
+            return;
+        }
+        let crates = &unlisted[..];
         let threads = std::thread::available_parallelism().map_or(1, |it| it.get());
         let next = std::sync::atomic::AtomicUsize::new(0);
         std::thread::scope(|scope| {
@@ -3973,8 +4067,13 @@ fn build(
     // is only here for what this one uses of it.
     let mut main = None;
     let mut local = Vec::new();
-    for (at, krate) in args.crates().enumerate() {
-        for krate in crates_to_build(db, table, krate, args)? {
+    let asked = args.crates().map(|it| crates_to_build(db, table, it, args));
+    let asked: Vec<Vec<Crate>> = asked.collect::<anyhow::Result<_>>()?;
+    // On every core: an edit to a crate others depend on has each of them listed again, and
+    // the build waits for all of it.
+    listed.of_all(db, &asked.iter().flatten().copied().collect::<Vec<_>>());
+    for (at, crates) in asked.into_iter().enumerate() {
+        for krate in crates {
             local.push(krate);
             let listed = listed.of(db, krate);
             // A program of tests starts in ra-jit's test harness, which calls every test, or
@@ -4919,6 +5018,12 @@ fn selected(args: &Args) -> Vec<String> {
     if selection.workspace {
         selected.push("--workspace".to_owned());
     }
+    for package in &selection.excludes {
+        selected.extend(["--exclude".to_owned(), package.clone()]);
+    }
+    for unstable in &selection.unstable {
+        selected.extend(["-Z".to_owned(), unstable.clone()]);
+    }
     for config in &selection.config {
         selected.extend(["--config".to_owned(), config.clone()]);
     }
@@ -4974,9 +5079,9 @@ struct Sources {
 
 /// Why the daemon did not build a program.
 enum Refused {
-    /// The source has an error, written as rustc writes it: the build fails with it, as
-    /// rustc's would, and no rustc runs to say it again.
-    Error(String),
+    /// The source has errors: the build fails with them, as rustc's would, and no rustc runs
+    /// to say them again.
+    Error(errors::Said),
     /// The source is one ra-jit does not build as it is, or ra-jit failed to: cargo builds it.
     Cargos(String),
 }
@@ -4985,11 +5090,7 @@ impl Refused {
     /// The line that tells a client.
     fn reply(&self) -> String {
         match self {
-            Refused::Error(why) => {
-                let mut line = "error: ".to_owned();
-                ra_jit_live::format::escape(why, &mut line);
-                line
-            }
+            Refused::Error(said) => said.reply(),
             Refused::Cargos(why) => format!("cargo: {}", why.replace('\n', " ")),
         }
     }
@@ -4997,8 +5098,10 @@ impl Refused {
 
 impl std::fmt::Display for Refused {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let (Refused::Error(why) | Refused::Cargos(why)) = self;
-        f.write_str(why)
+        match self {
+            Refused::Error(said) => said.fmt(f),
+            Refused::Cargos(why) => f.write_str(why),
+        }
     }
 }
 
@@ -5010,11 +5113,11 @@ fn refusal(
     sources: &[vfs::FileId],
     watched: &Sources,
     root: &Path,
-    broken: Option<String>,
+    broken: Option<errors::Said>,
     out_of_date: Option<hir_ty_codegen::OutOfDate>,
 ) -> Option<Refused> {
     if let Some(unparsed) = unparsed(db, sources, watched, root) {
-        return Some(Refused::Error(unparsed));
+        return Some(Refused::Error(errors::Said::one(unparsed)));
     }
     if let Some(broken) = broken {
         return Some(Refused::Error(broken));
@@ -5038,7 +5141,8 @@ fn refusal(
     // that ra-jit takes for wrong is ra-jit's to fix, and not for rustc to build.
     if does_not_compile(&why) && !left_from_the_start {
         let message = format!("{name} has an error ra-jit cannot say more of: {why}");
-        return Some(Refused::Error(written_at(db, func, watched, root, &message)));
+        let said = errors::Said::one(written_at(db, func, watched, root, &message));
+        return Some(Refused::Error(said));
     }
     Some(Refused::Cargos(format!(
         "{name} is not compiled by ra-jit and rustc's copy is from before the edit: {why}"
@@ -5079,7 +5183,7 @@ fn written_at(
     watched: &Sources,
     root: &Path,
     message: &str,
-) -> String {
+) -> errors::Diagnostic {
     let at = func.and_then(|func| hir::HasSource::source(hir::Function::from(func), db)).and_then(
         |source| {
             let name = source.value.name()?;
@@ -5108,7 +5212,7 @@ fn unparsed(
     sources: &[vfs::FileId],
     watched: &Sources,
     root: &Path,
-) -> Option<String> {
+) -> Option<errors::Diagnostic> {
     let Sources { paths } = watched;
     for &file in sources {
         let path = paths.get(&file);
@@ -5185,8 +5289,8 @@ const DENIED: &[&str] = &[
 /// The lints of [`DENIED`]'s kind that the borrow checker gives, off with its errors.
 const DENIED_BORROWCK: &[&str] = &["unused_mut"];
 
-/// The errors written in the edited files, as rust-analyzer finds them, as rustc writes them
-/// with paths from `root`. Nothing may reach them, so the build never looks at them.
+/// The errors written in the edited files, as rust-analyzer finds them, with paths from
+/// `root` as rustc's are. Nothing may reach them, so the build never looks at them.
 fn broken_in(
     db: &RootDatabase,
     edited: &[vfs::FileId],
@@ -5194,7 +5298,7 @@ fn broken_in(
     root: &Path,
     within: Option<Arc<FxHashSet<ide_db::base_db::Crate>>>,
     lints: bool,
-) -> Option<String> {
+) -> Option<errors::Said> {
     let threads = std::thread::available_parallelism().map_or(1, |it| it.get());
     let config = ide_diagnostics::DiagnosticsConfig::test_sample();
     let refuse_borrowck = std::env::var_os("RA_JIT_BORROWCK_REFUSE").is_none_or(|it| it != "0");
@@ -5241,7 +5345,7 @@ fn broken_in(
         return None;
     }
     found.sort_by_key(|(at, ..)| (at.file_id, at.range.start()));
-    let said: Vec<_> = found
+    let said = found
         .iter()
         .map(|(at, code, message)| {
             let text = db.file_text(at.file_id).text(db);
@@ -5254,7 +5358,7 @@ fn broken_in(
             errors::at(code, message, &path, text, at.range)
         })
         .collect();
-    Some(said.join("\n\n"))
+    Some(errors::Said(said))
 }
 
 /// The text of the source file at `path` as the database has it.
@@ -5471,9 +5575,9 @@ fn build_batch(db: &RootDatabase, args: Args) -> anyhow::Result<()> {
 
 /// Leaves `said`, the errors in the source a worker found as it loaded the workspace, for
 /// the daemon to fail each build with.
-fn errors_for_the_daemon(args: &Args, said: &str) -> anyhow::Result<()> {
+fn errors_for_the_daemon(args: &Args, said: &errors::Said) -> anyhow::Result<()> {
     if let Some(socket) = &args.socket {
-        std::fs::write(cargo::daemon::errors_beside(socket), said)?;
+        std::fs::write(cargo::daemon::errors_beside(socket), serde_json::to_string(said)?)?;
     }
     Ok(())
 }
@@ -7429,7 +7533,7 @@ fn run_holding(
                 cold = build_unheld(&db, &table, &args, &mut known, &listed)?;
             }
             if let Some(unset) = &cold.unset {
-                errors_for_the_daemon(&args, &errors::of_none(unset))?;
+                errors_for_the_daemon(&args, &errors::Said::one(errors::of_none(unset)))?;
                 bail!("{unset}");
             }
             eprint!("cold: ");
@@ -7796,7 +7900,7 @@ fn run_holding(
                             && lock(&as_built)
                                 .get(&target.out)
                                 .is_some_and(|it| it.still(&files, &db, view, target, request));
-                        if unchanged {
+                        if unchanged && !reach_owed(&target.out) {
                             let _ = writeln!(&stream, "ok unchanged");
                             continue;
                         }
@@ -8217,6 +8321,9 @@ fn run_holding(
         for (at, (request, ..)) in &clients {
             let unbuilt = &mut programs[*at].unbuilt;
             unbuilt.stale |= unbuilt.unlinked && *request != Request::Patch;
+        }
+        for &at in &building {
+            programs[at].unbuilt.stale |= reach_owed(&programs[at].args.out);
         }
         // A program of tests asked for the first time is built with ra-jit's harness then, while
         // nobody edits: the first edit is a patch of it.
@@ -9032,8 +9139,10 @@ impl Program {
         let hold = || unparsed(db, &edited, paths, &args.checkout).is_some() || broken.is_some();
         let held = |known: &Rejections| {
             let why = refusal(db, &edited, paths, &args.checkout, broken.clone(), None);
-            let why = why
-                .unwrap_or_else(|| Refused::Error(errors::of_none("the source does not compile")));
+            let why = why.unwrap_or_else(|| {
+                let said = errors::of_none("the source does not compile");
+                Refused::Error(errors::Said::one(said))
+            });
             eprintln!(
                 "edit (apply {apply:.1?}): not built: no patch, and the source does not compile; \
                  the next edit is a patch of the last build"
@@ -9081,7 +9190,10 @@ impl Program {
         let mut failed = unnamed
             .map(Refused::Cargos)
             .or_else(|| refusal(db, &edited, paths, &args.checkout, broken, out_of_date))
-            .or_else(|| warm.unset.as_deref().map(|it| Refused::Error(errors::of_none(it))));
+            .or_else(|| {
+                let unset = warm.unset.as_deref()?;
+                Some(Refused::Error(errors::Said::one(errors::of_none(unset))))
+            });
         let refused = start.elapsed();
         failed = failed.or_else(|| stale_copies(db, table, args).map(Refused::Cargos));
         let copies = start.elapsed();
@@ -9212,6 +9324,7 @@ impl Program {
             );
         }
         eprintln!("edit-to-binary: {total:.1?}");
+        write_reach(db, listed, args, failed.is_none());
         if let Some(why) = failed {
             return Ok(Err(why));
         }

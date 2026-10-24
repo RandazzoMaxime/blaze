@@ -56,6 +56,7 @@ HARNESSES = [
     # `cargo ra-jit` hands Windows builds to cargo, so there the daemon links nothing to test.
     ("core", ["unreached.py"], {}, on("linux", "macos"), 1),
     ("core", ["loadedits.py"], {}, on("linux", "macos"), 2),
+    ("core", ["testselect.py"], {}, on("linux", "macos"), 2),
     ("core", ["asmedits.py"], {}, EVERYWHERE, 1),
     # The assembler of a build of ra-jit without LLVM, which is the release's.
     ("core", ["asmedits.py"], {"RA_JIT_ASSEMBLER": "cc"}, on("linux", "macos", backend="cranelift"), 1),
@@ -65,6 +66,8 @@ HARNESSES = [
     ("core", ["rustsrc.py"], {}, EVERYWHERE, 1),
     # Each scenario runs rustc and rustdoc no more often than norustc/baseline.json says.
     ("core", ["norustc.py"], {}, on("linux", "macos"), 2),
+    # `cargo ra-jit check`'s diagnostics, in each `--message-format`, against rustc's.
+    ("core", ["check_json.py"], {}, on("linux", "macos", backend="cranelift"), 2),
     # ra-jit answers what is asked of rustc as rustc answers it, on every target it knows.
     ("core", ["answers.py"], {}, on("linux", "macos", backend="cranelift"), 1),
     ("core", ["worktrees.py"], {}, EVERYWHERE, 2),
