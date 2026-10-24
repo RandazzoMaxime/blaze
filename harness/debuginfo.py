@@ -1433,6 +1433,30 @@ def cost(tally):
         tally.say(f"cost: types of variables at debug = {setting}",
                   ("worked out" if told else "not worked out") if (told is not None and bool(told) == typed) else "NOT FOLLOWED",
                   "no memory report" if told is None else f"{told} told of")
+    # The store is shared by the builds of every profile, and what a build of lines alone
+    # kept has no variables: a build that writes them is not to take it.
+    name = "cost: debug = true after line-tables-only, from one store"
+    if WINDOWS:
+        tally.say(name, "not run", "it counts DWARF's variables")
+    else:
+        def variables(settings, store):
+            before = os.environ.pop("RA_JIT_CACHE", None)
+            if store:
+                os.environ["RA_JIT_CACHE"] = tempfile.mkdtemp(prefix="debuginfo-store-")
+            try:
+                for setting in settings:
+                    os.environ["CARGO_PROFILE_DEV_DEBUG"] = setting
+                    fx.ra_jit_build()
+            finally:
+                if store:
+                    shutil.rmtree(os.environ.pop("RA_JIT_CACHE"), ignore_errors=True)
+                if before is not None:
+                    os.environ["RA_JIT_CACHE"] = before
+            dump = subprocess.run([DWARFDUMP, "--debug-info", fx.objects[0]], capture_output=True, text=True).stdout
+            return dump.count("DW_TAG_variable")
+        # Against a build at `true` from a store a build at `true` filled.
+        same, after = variables(["true", "true"], True), variables(["line-tables-only", "true"], True)
+        tally.say(name, "described" if after == same else "VARIABLES LOST", f"{after} variables, {same} after one at true")
     os.environ["CARGO_PROFILE_DEV_DEBUG"] = "true"
 
 

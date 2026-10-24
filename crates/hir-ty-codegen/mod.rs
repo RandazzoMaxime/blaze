@@ -130,9 +130,11 @@ pub use patch::{OutOfDate, Stale, StaleSteps};
 pub mod bench {
     use ra_jit_store::KEY;
 
-    /// The key of the entry for `name`, as a build asks for it.
+    /// The key of the entry for `name`, as a build asks for it: one that tells a debugger of
+    /// its variables when `debug`.
     pub fn entry_key(name: &str, debug: bool, program: &[u8; KEY]) -> Option<[u8; KEY]> {
-        super::cached::Entry::key(name, debug, Some(program))
+        let told = super::cached::Told::of(debug, debug);
+        super::cached::Entry::key(name, told, Some(program))
     }
 }
 mod type_id;
@@ -4420,7 +4422,7 @@ impl<'a, 'db> ObjectCodegen<'a, 'db> {
             )
             .map(debuginfo::Describer::new)
         });
-        let debugged = debug.is_some();
+        let debugged = cached::Told::of(debug.is_some(), symbols.describes_variables());
         let described = start.elapsed();
         let mixed = settled::Mixed::of(db, symbols, &own_statics.crates);
         let mixed_at = start.elapsed();
@@ -5361,7 +5363,8 @@ impl<'a, 'db> ObjectCodegen<'a, 'db> {
             self.kept.unnamed += 1;
             return;
         };
-        let key = cached::Entry::key(&name, debug.is_some(), program.flatten().as_ref());
+        let told = cached::Told::of(debug.is_some(), self.symbols.describes_variables());
+        let key = cached::Entry::key(&name, told, program.flatten().as_ref());
         let Some(key) = key else { return };
         let check = std::env::var_os("RA_JIT_CACHE_CHECK");
         let sets = || debug.iter().flat_map(|it| &it.types).cloned().collect::<Vec<_>>();
