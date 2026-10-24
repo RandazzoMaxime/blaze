@@ -780,6 +780,12 @@ impl State {
         Ok(())
     }
 
+    /// The directory the daemon builds `program` in, when it is asked for it.
+    pub(crate) fn plan_dir(&self, program: &Program) -> Option<&Path> {
+        let (checkout, at) = program.asked_as?;
+        self.checkouts.get(checkout)?.programs.get(at)?.object.parent()
+    }
+
     /// Cargo's locks on the build directories of the programs, held until the programs this
     /// command runs have started.
     pub(crate) fn hold(&self) -> Held {
@@ -1381,7 +1387,12 @@ fn guards(
         Guard::files("the toolchain file", named_above(cwd, &TOOLCHAIN_FILES)),
     ];
     let in_build = runs_in_build(used);
-    let sources = in_build.iter().flat_map(|it| it.inputs().files);
+    // What a build script wrote to its `OUT_DIR` it wrote while cargo built, after the build
+    // began, and only cargo writes it again: when the script runs again, which its own guards
+    // are for.
+    let generated =
+        |file: &PathBuf| scripts.iter().any(|it| file.starts_with(it.out_dir.as_std_path()));
+    let sources = in_build.iter().flat_map(|it| it.inputs().files).filter(|it| !generated(it));
     guards.push(Guard::files("what runs during the build:", sources));
     // What cargo or a build script sets for rustc changes with the manifest or the script.
     let set_for_rustc = |name: &str| {

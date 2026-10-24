@@ -174,6 +174,127 @@ pub(super) fn cache_code(
     Ok(u128::from(low) | u128::from(high) << 64)
 }
 
+/// For each of `roots`, the functions a test harness runs, a hash of the code of the function
+/// and of everything it reaches, as [`cache_code`] hashes a cached body, for a test to be run
+/// again only once that changed. `Err` says why what the test does is not all in its code: it
+/// reaches what ra-jit can't compile, or the world outside the program (files, the
+/// environment, processes, the network), and is run every time.
+///
+/// The nodes are hashed once for all the roots; each root then hashes, in the order it finds
+/// them, every node it reaches with where the node's edges go in that order, so that a hash
+/// does not depend on the other roots.
+pub fn tests_reach(
+    db: &dyn HirDatabase,
+    roots: &[FunctionId],
+) -> Vec<std::result::Result<u128, String>> {
+    let mut walk = Walk::new(db, false);
+    walk.tests = true;
+    let starts: Vec<u32> = roots.iter().map(|&it| walk.reach(Node::Root(it))).collect();
+    let mut next = 0;
+    while let Some(node) = walk.nodes.get(next).map(|it| it.node.clone()) {
+        walk.hash_node(next as u32, &node);
+        next += 1;
+    }
+    let header =
+        (FORMAT, "tests", super::target::Target::current().triple(), super::store::toolchain());
+    let mut local: FxHashMap<u32, u32> = FxHashMap::default();
+    let mut order: Vec<u32> = Vec::new();
+    starts
+        .into_iter()
+        .map(|start| {
+            local.clear();
+            order.clear();
+            local.insert(start, 0);
+            order.push(start);
+            let mut at = 0;
+            while let Some(&node) = order.get(at) {
+                at += 1;
+                if walk.uncompiled.contains(&node) {
+                    let what = describe(db, &walk.nodes[node as usize].node);
+                    return Err(format!("it reaches {what}, which ra-jit can't compile"));
+                }
+                if let Node::Leaf(name, _) = &walk.nodes[node as usize].node
+                    && let Some(what) = outside(name)
+                {
+                    return Err(format!("it reaches `{name}`, which {what}"));
+                }
+                for edge in &walk.nodes[node as usize].edges {
+                    if let std::collections::hash_map::Entry::Vacant(it) = local.entry(edge.to) {
+                        it.insert(order.len() as u32);
+                        order.push(edge.to);
+                    }
+                }
+            }
+            let mut hasher = rustc_stable_hash::StableSipHasher128::new();
+            header.hash(&mut hasher);
+            for &node in &order {
+                walk.segments[node as usize].hash(&mut hasher);
+                let edges = &walk.nodes[node as usize].edges;
+                edges.len().hash(&mut hasher);
+                for edge in edges {
+                    local[&edge.to].hash(&mut hasher);
+                }
+            }
+            let type_id::Fingerprint(low, high) = hasher.finish();
+            Ok(u128::from(low) | u128::from(high) << 64)
+        })
+        .collect()
+}
+
+/// What a foreign function or static a test reaches does that the test's code does not
+/// decide, by its symbol: `None` for what gives the same for the same input, as far as a test
+/// can tell. Time, randomness, threads and locks are left out: a test that turns on them is
+/// flaky whether it runs again or not.
+fn outside(symbol: &str) -> Option<&'static str> {
+    let name = symbol.trim_start_matches('_');
+    let name = name.split('$').next().unwrap_or(name);
+    let name = name.strip_suffix("64").unwrap_or(name);
+    Some(match name {
+        "open"
+        | "openat"
+        | "creat"
+        | "opendir"
+        | "fdopendir"
+        | "readdir"
+        | "stat"
+        | "lstat"
+        | "fstatat"
+        | "statx"
+        | "access"
+        | "faccessat"
+        | "faccessat2"
+        | "readlink"
+        | "readlinkat"
+        | "realpath"
+        | "getcwd"
+        | "mkdir"
+        | "mkdirat"
+        | "unlink"
+        | "unlinkat"
+        | "rename"
+        | "renameat"
+        | "renameat2"
+        | "rmdir"
+        | "statfs"
+        | "getattrlistbulk"
+        | "CreateFileW"
+        | "FindFirstFileW"
+        | "GetFileAttributesExW" => "reads or writes files",
+        "getenv"
+        | "secure_getenv"
+        | "environ"
+        | "NSGetEnviron"
+        | "GetEnvironmentVariableW"
+        | "GetEnvironmentStringsW" => "reads the environment",
+        "execve" | "execvp" | "execvpe" | "posix_spawn" | "posix_spawnp" | "fork" | "vfork"
+        | "clone3" | "system" | "popen" | "CreateProcessW" => "starts processes",
+        "socket" | "connect" | "bind" | "accept" | "accept4" | "getaddrinfo" | "WSASocketW" => {
+            "uses the network"
+        }
+        _ => return None,
+    })
+}
+
 /// The name of the function whose body `closure` is, as a backtrace has it.
 pub(super) fn cached_name(db: &dyn HirDatabase, closure: &Instance) -> String {
     let InstanceDef::Closure(id) = closure.def else { return "?".to_owned() };
@@ -254,6 +375,12 @@ struct Walk<'db> {
     index: FxHashMap<Node, u32>,
     /// What each node is when hashed, in the order the nodes were found.
     segments: Vec<u128>,
+    /// Hashing for [`tests_reach`]: nothing is told of purity, every function of a crate
+    /// that can change is gone into, and a segment leaves out where its edges go, which
+    /// each root hashes in an order of its own.
+    tests: bool,
+    /// The nodes ra-jit can't compile, whose code tells nothing of what they do.
+    uncompiled: FxHashSet<u32>,
     /// An argument holds a reference count, which what reads one gives and the key does not
     /// tell: two arguments can share a value or not.
     counted: bool,
@@ -276,6 +403,8 @@ impl<'db> Walk<'db> {
             nodes: Vec::new(),
             index: FxHashMap::default(),
             segments: Vec::new(),
+            tests: false,
+            uncompiled: FxHashSet::default(),
             counted,
             library: FxHashMap::default(),
         }
@@ -329,6 +458,23 @@ impl<'db> Walk<'db> {
             let why =
                 (!pure_foreign(&symbol)).then(|| format!("calls the foreign function `{symbol}`"));
             return (Node::Leaf(symbol, why), site, false);
+        }
+        if self.tests {
+            // What a test reaches is all that decides how it ends, so only the toolchain's
+            // code, which the hash has by its commit, is known by name.
+            let named = instance.args.as_ref().iter().all(|it| it.region().is_some());
+            if !named {
+                return (Node::Instance(instance.clone(), env.clone()), site, false);
+            }
+            return match func.krate(db).data(db).origin {
+                base_db::CrateOrigin::Lang(LangCrateOrigin::Core | LangCrateOrigin::Alloc) => {
+                    (Node::Leaf(name(), None), site, false)
+                }
+                base_db::CrateOrigin::Lang(_) if diverges(db, func) => {
+                    (Node::Leaf(name(), None), site, false)
+                }
+                _ => (Node::Root(func), site, false),
+            };
         }
         if diverges(db, func) {
             // A panic: what it prints is no result.
@@ -491,6 +637,7 @@ impl<'db> Walk<'db> {
 
     /// Notes that the node did not compile: nothing tells what it does then.
     fn cannot(&mut self, at: u32, hasher: &mut impl Hasher, e: &CodegenError) {
+        self.uncompiled.insert(at);
         self.nodes[at as usize].why = Why::own(format!("can't be compiled by ra-jit ({e})"));
         e.to_string().hash(hasher);
     }
@@ -562,7 +709,11 @@ impl<'db> Walk<'db> {
                 }
                 FuncTarget::Instance(instance, env) => {
                     let (node, site, codec) = self.function(at, instance, env);
-                    (3u8, self.edge(at, node, site, codec)).hash(hasher);
+                    let to = self.edge(at, node, site, codec);
+                    3u8.hash(hasher);
+                    if !self.tests {
+                        to.hash(hasher);
+                    }
                 }
             }
         }
@@ -593,7 +744,11 @@ impl<'db> Walk<'db> {
                 }
                 DataRequest::Static(id) => {
                     let node = self.static_node(*id);
-                    (2u8, self.edge(at, node, Site::Static(*id), false)).hash(hasher);
+                    let to = self.edge(at, node, Site::Static(*id), false);
+                    2u8.hash(hasher);
+                    if !self.tests {
+                        to.hash(hasher);
+                    }
                 }
                 // Where code is written, which the hash leaves out.
                 DataRequest::Location(_) => 3u8.hash(hasher),
@@ -634,7 +789,7 @@ impl<'db> Walk<'db> {
         owner: InferBodyId<'db>,
         closure: Option<InternedClosureId<'db>>,
     ) {
-        if !self.is_own(at) || self.nodes[at as usize].why.is_some() {
+        if self.tests || !self.is_own(at) || self.nodes[at as usize].why.is_some() {
             return;
         }
         let db = self.db;

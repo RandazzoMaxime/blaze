@@ -198,6 +198,27 @@ PROJECTS = {
         ),
         test=["-p", "helix-core"],
     ),
+    # A JavaScript toolchain: 1.24M lines in 104 crates, much of it generated syntax and rules.
+    # The program checks one file of its own (parsed, linted and its formatting compared) and
+    # reports with the GitHub reporter, which prints no timings. Its syntax, parsers and
+    # analyzers are built into its proc macros, so an edit to them is cargo's to build; the
+    # edits are in the formatter, the service and the CLI, which only the program is built on.
+    "biome": dict(
+        repo="biomejs/biome", tag="@biomejs/biome@2.6.3", rev="c5c3383d590d6e08b08d625d10d1d557577284d7",
+        build=["-p", "biome_cli", "--bin", "biome"],
+        run=["check", "--reporter=github", "--colors=off", "packages/@biomejs/js-api/src/common.ts"],
+        edits=dict(
+            body=body("crates/biome_cli/src/main.rs", "fn run_workspace(console: &mut EnvConsole, command: BiomeCommand) -> Result<(), CliDiagnostic> {"),
+            signature=parameter("crates/biome_service/src/workspace.rs", "supports_format", "bool", "crates/**/*.rs"),
+            leaf=body("crates/biome_js_formatter/src/context.rs", "    pub fn quote_style(&self) -> QuoteStyle {"),
+            # Instantiated for array expressions, array bindings and array assignment patterns.
+            generic=body("crates/biome_js_formatter/src/utils/array.rs", "    let trailing_separator = FormatTrailingCommas::ES5.trailing_separator(f.options());"),
+            struct=field("crates/biome_cli/src/lib.rs", "pub struct CliSession<'app> {",
+                         [("crates/biome_cli/src/lib.rs", "            app: App::new(console, WorkspaceRef::Borrowed(workspace)),"),
+                          ("crates/biome_cli/tests/main.rs", "let session = CliSession {")]),
+        ),
+        test=["-p", "biome_js_formatter", "--lib"],
+    ),
     # 1.7M lines in 249 crates. `--help` is answered before anything opens a window.
     "zed": dict(
         repo="zed-industries/zed", tag="v1.24.4", rev="aed37547d8543000494fb69101c05daec5891068",

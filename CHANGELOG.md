@@ -8,6 +8,13 @@ All notable changes to ra-jit are written here. The format follows
 
 ### Added
 
+- `vendor/proc-macro-srv`, the 1.99.0 release's proc-macro server with a loader that reads
+  the list of macros ra-jit writes into a proc-macro library, built by ra-jit with nothing of
+  rustc's. `RA_JIT_PROC_MACRO_COMPARE` and `RA_JIT_PROC_MACRO_LIBS` expand each call again
+  with it and ra-jit's library of the crate and compare the output with the toolchain's;
+  `harness/macroserver.py` holds serde_derive's, thiserror's, tokio's and clap's equal
+  ([no-rustc.md](docs/no-rustc.md), step J1). A proc-macro crate's `fn main` is no longer
+  taken for an entry point.
 - The SSE and AVX compares compile (#87): `llvm.x86.sse.cmp.ps` and `.ss`, `sse2.cmp.pd` and
   `.sd` and AVX's 256-bit ones give a lane of all ones where the immediate's predicate holds, as
   rustc's do. glam's `Vec4::cmpeq` and `is_finite_mask`, which bevy calls, were left to rustc;
@@ -454,6 +461,23 @@ All notable changes to ra-jit are written here. The format follows
   them keeps, so a `debug = true` build later takes none of it; the cost part builds at
   `line-tables-only` and then at `true` from one store and checks that it has every variable
   one at `true` after another at `true` has.
+- The first build after one of cargo's is the daemon's where a proc macro or build script is
+  built on what a build script wrote to `OUT_DIR`, as biome's macros are on
+  `biome_aria_metadata`'s ARIA tables: the file was written while cargo built, after the build
+  began, so it counted as changed since, and the build went to cargo ("what runs during the
+  build: …/out/roles_and_attributes.rs changed"). Cargo's build replaced the worker, which built
+  the program in full again: biome's next edit after that took 130 s and 24 GB. Such a file is
+  only written again when the script runs again, which the script's own guards are for.
+  soakrows.py's `proc macro on generated code` has the proc macro `include!` its script's
+  output and checks that the first edit after the build is the daemon's.
+- On Linux the daemon's bounds on memory count what its control group allows, where they
+  counted the machine's: the workers' `RA_JIT_MEMORY_MAX` (half) and the own base's
+  `RA_JIT_OWN_BASE_MEMORY` (a quarter) were of the host's memory in a container, a CI job or a
+  systemd unit that allows less, so the kernel killed the worker before either was reached. It
+  is the least of `MemTotal` and the `memory.max` (version 2) or `memory.limit_in_bytes`
+  (version 1) of the process's group and those above it. soakrows.py's `control group's
+  memory` starts the daemon in a 6 GB scope and checks that its workers hold at most 3072 MB;
+  it said 96,021 MB on a 187 GB host before.
 - A function the daemon compiles ahead, while it reads the symbols rustc built, is given up on
   once they are read, where the worker used to finish it before it was ready. bevy's second
   warm-store run began its derived `release_state` of a read-only query struct, which the

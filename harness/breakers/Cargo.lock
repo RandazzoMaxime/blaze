@@ -17,6 +17,7 @@ dependencies = [
  "breakers2021",
  "foreign",
  "literals",
+ "reactive",
 ]
 
 [[package]]
@@ -36,4 +37,8 @@ version = "0.0.0"
 
 [[package]]
 name = "literals"
+version = "0.0.0"
+
+[[package]]
+name = "reactive"
 version = "0.0.0"
