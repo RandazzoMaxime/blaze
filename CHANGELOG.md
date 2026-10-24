@@ -8,6 +8,18 @@ All notable changes to ra-jit are written here. The format follows
 
 ### Added
 
+- `cargo ra-jit check --message-format=json` (and `short`, `json-diagnostic-short`,
+  `json-diagnostic-rendered-ansi`, `json-render-diagnostics`) writes the daemon's verdict as
+  `cargo check` does: each error a `compiler-message` with rustc's code, level, spans (bytes,
+  lines, columns counted as rustc counts them, the source lines and their highlights) and
+  `rendered`, cargo's package id and target, the failure notes, `build-finished` and the
+  `could not compile` lines. rust-analyzer's check-on-save and editors read it, so they show
+  ra-jit's verdict and not rustc's. `-Z`, `--exclude` and several `--target`s are the
+  checker's too (a checker for each target, four held at once), where they went to cargo.
+  `harness/check_json.py` compares it with `cargo check` on the same errors: 7 packages, every
+  format, every compared field the same; the labels, help and notes, other spans and
+  `code.explanation` are rustc's only, and the messages are rust-analyzer's wording.
+
 - An edit that needs a build in full no longer links in full when the daemon has no base of
   its own (it gave it up, or hasn't built it yet) (#159): on Linux the program is built onto
   the executable rustc linked and spliced into it whole, and the edits after it are patches of
