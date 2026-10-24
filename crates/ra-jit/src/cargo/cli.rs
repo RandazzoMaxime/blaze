@@ -59,6 +59,10 @@ const DEV_TARGETS: &[&str] =
 /// The flags of `cargo test` that are about running and not about building.
 const RUNNING: &[&str] = &["--no-run", "--no-fail-fast"];
 
+/// The flags that change only what cargo prints, with `--color`'s value: the build is the
+/// same.
+const SHOWING: &[&str] = &["-v", "-vv", "--verbose", "-q", "--quiet", "--color"];
+
 /// The variables that change what cargo builds or what the daemon compiles with, by name
 /// or by what the name starts with. Their values are part of which build this is.
 const BUILD_ENV: &[&str] = &[
@@ -184,6 +188,7 @@ pub(crate) struct Flags {
     /// The values of `-Z`.
     pub(crate) unstable: Vec<String>,
     pub(crate) quiet: bool,
+    pub(crate) verbose: bool,
     pub(crate) no_run: bool,
     pub(crate) no_fail_fast: bool,
     pub(crate) doc: bool,
@@ -290,7 +295,14 @@ impl Invocation {
         let builds = if self.subcommand == Subcommand::Test { "test" } else { "build" };
         hash.update(builds);
         hash.update(cwd.as_os_str().as_encoded_bytes());
-        for arg in &self.build_args {
+        let mut args = self.build_args.iter();
+        while let Some(arg) = args.next() {
+            if SHOWING.contains(&arg.as_str()) {
+                if arg == "--color" {
+                    args.next();
+                }
+                continue;
+            }
             hash.update([0]);
             hash.update(arg);
         }
@@ -388,6 +400,7 @@ impl Flags {
             "--build-plan" | "--unit-graph" => self.cargos_plan = true,
             "-Z" => self.unstable.extend(owned()),
             "-q" | "--quiet" => self.quiet = true,
+            "-v" | "-vv" | "--verbose" => self.verbose = true,
             "--no-run" => self.no_run = true,
             "--no-fail-fast" => self.no_fail_fast = true,
             "--doc" => self.doc = true,
@@ -516,6 +529,9 @@ mod tests {
         assert_ne!(build("test", "--bin a").key(cwd), build("build", "--bin a").key(cwd));
         assert_ne!(build("build", "").key(cwd), build("build", "").key(Path::new("/other")));
         assert_ne!(build("build", "--features a").key(cwd), build("build", "").key(cwd));
+        let shown = build("test", "-v -p a --color never -q").key(cwd);
+        assert_eq!(shown, build("test", "-p a").key(cwd));
+        assert_eq!(build("test", "-p a --color=always").key(cwd), build("test", "-p a").key(cwd));
     }
 
     #[test]
