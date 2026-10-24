@@ -21,7 +21,12 @@ use rustc_type_ir::{
     inherent::{BoundExistentialPredicates as _, GenericArgs as _, IntoKind},
 };
 
+use std::sync::{Arc, Mutex};
+
+use intern::{Interned, Symbol};
+
 use super::super::vtable::{HEADER, VtableLayout};
+use super::set::{self, Made, Own};
 use super::{Aggregate, DebugType, Field, Tag, TypeIndex, TypeSet, Variant};
 use hir_ty::{
     InferenceResult, ParamEnvAndCrate,
@@ -43,16 +48,66 @@ use hir_ty::{
     traits::StoredParamEnvAndCrate,
 };
 
-/// [`Types::describe`] of one type, kept by the database: every build after an edit asks it
-/// again of the variables of each function it compiles, and what it is found from (layouts,
-/// names, captures, discriminants) mostly stays as it was.
+/// A type of the program, and how many more pointers are followed from it.
+pub(crate) type Key = (StoredTy, u32);
+
+/// [`Types::own`] of one type, kept by the database: every build after an edit asks it again
+/// of the types of the variables of each function it compiles, and what it is found from
+/// (layouts, names, captures, discriminants) mostly stays as it was. It is of the type alone,
+/// with the types it is made of by their keys, so that it is kept once for every type that is
+/// made of it, and depends on nothing of theirs.
 #[salsa::tracked(returns(clone))]
-pub(crate) fn described(
+pub(crate) fn told_type(
     db: &dyn HirDatabase,
     env: StoredParamEnvAndCrate,
     ty: StoredTy,
+    pointers: u32,
+) -> Option<Arc<Own<Key>>> {
+    Types::new(db, env.as_ref(db)).own(ty.as_ref(), pointers).map(Arc::new)
+}
+
+/// The sets put together so far, by their keys, for every thread: a set with a type shares
+/// its set.
+#[derive(Default)]
+pub(crate) struct Sets(
+    Mutex<rustc_hash::FxHashMap<(StoredParamEnvAndCrate, Key), Option<TypeSet>>>,
+);
+
+/// What a debugger is told of a variable of type `ty`: the type and every type it is made of,
+/// from [`told_type`] of each. `None` is a type that has no layout or no name rustc would
+/// spell.
+pub(crate) fn described(
+    db: &dyn HirDatabase,
+    env: &StoredParamEnvAndCrate,
+    ty: &StoredTy,
+    sets: &Sets,
 ) -> Option<TypeSet> {
-    Types::new(db, env.as_ref(db)).describe(ty.as_ref())
+    let key = Types::new(db, env.as_ref(db)).key(ty.as_ref());
+    set::resolve(&mut InDatabase { db, env, sets }, &key)
+}
+
+struct InDatabase<'a> {
+    db: &'a dyn HirDatabase,
+    env: &'a StoredParamEnvAndCrate,
+    sets: &'a Sets,
+}
+
+impl set::Found for InDatabase<'_> {
+    type Key = Key;
+
+    fn own(&mut self, (ty, pointers): &Key) -> Option<Arc<Own<Key>>> {
+        told_type(self.db, self.env.clone(), ty.clone(), *pointers)
+    }
+
+    fn set(&mut self, key: &Key) -> Option<Option<TypeSet>> {
+        let sets = self.sets.0.lock().unwrap_or_else(|e| e.into_inner());
+        sets.get(&(self.env.clone(), key.clone())).cloned()
+    }
+
+    fn keep(&mut self, key: &Key, set: Option<TypeSet>) {
+        let mut sets = self.sets.0.lock().unwrap_or_else(|e| e.into_inner());
+        sets.insert((self.env.clone(), key.clone()), set);
+    }
 }
 
 /// `DW_ATE_*`: how the bytes of a [`DebugType::Base`] are read.
@@ -68,25 +123,23 @@ mod encoding {
 /// unless it is told of anyway: a list is as long as it likes.
 const POINTERS: u32 = 2;
 
-/// The types of the variables of the functions of one environment. What a variable's type
-/// is told as depends on nothing but the type, so it is found once for every function with
-/// a variable of it: the layouts and the names are most of what telling of variables costs.
-pub(in super::super) struct Types<'db> {
+/// What one type of an environment is told as. What a variable's type is told as depends on
+/// nothing but the type, so it is found once for every function with a variable of it: the
+/// layouts and the names are most of what telling of variables costs.
+struct Types<'db> {
     db: &'db dyn HirDatabase,
     env: ParamEnvAndCrate<'db>,
     interner: DbInterner<'db>,
     infcx: InferCtxt<'db>,
-    /// What the type being described is made of so far, itself first.
-    told: Vec<DebugType>,
-    /// Where each type that is told of, or is being told of, is among `told`.
-    known: FxHashMap<Ty<'db>, TypeIndex>,
-    described: FxHashMap<Ty<'db>, Option<TypeSet>>,
+    /// The types the one being told of is made of so far, by the places the [`DebugType`] it
+    /// is told as names them by.
+    parts: Vec<Made<Key>>,
     names: FxHashMap<Ty<'db>, Option<String>>,
     normalized: FxHashMap<Ty<'db>, Ty<'db>>,
 }
 
 impl<'db> Types<'db> {
-    pub(in super::super) fn new(db: &'db dyn HirDatabase, env: ParamEnvAndCrate<'db>) -> Self {
+    fn new(db: &'db dyn HirDatabase, env: ParamEnvAndCrate<'db>) -> Self {
         let interner = DbInterner::new_with(db, env.krate);
         let infcx = interner.infer_ctxt().build(TypingMode::PostAnalysis);
         Types {
@@ -94,27 +147,39 @@ impl<'db> Types<'db> {
             env,
             interner,
             infcx,
-            told: Vec::new(),
-            known: FxHashMap::default(),
-            described: FxHashMap::default(),
+            parts: Vec::new(),
             names: FxHashMap::default(),
             normalized: FxHashMap::default(),
         }
     }
 
-    /// The type and every type it is made of, with the type itself first. `None` is a type
-    /// that has no layout or no name rustc would spell.
-    pub(in super::super) fn describe(&mut self, ty: Ty<'db>) -> Option<TypeSet> {
-        if let Some(described) = self.described.get(&ty) {
-            return described.clone();
-        }
-        self.told.clear();
-        self.known.clear();
-        let described = self.ty(ty, POINTERS).map(|_| TypeSet::from(self.told.as_slice()));
-        self.described.insert(ty, described.clone());
-        described
+    /// The key of a variable of type `ty`, as a type is made of it.
+    fn key(&mut self, ty: Ty<'db>) -> Key {
+        let ty = self.normalize(ty);
+        let ty = match ty.kind() {
+            TyKind::Pat(of, _) => self.normalize(of),
+            _ => ty,
+        };
+        (ty.store(), POINTERS)
     }
 
+    /// What `ty` is told as, followed `pointers` more pointers into. `None` is a type that has
+    /// no layout or no name rustc would spell.
+    fn own(&mut self, ty: Ty<'db>, pointers: u32) -> Option<Own<Key>> {
+        let layout = self.db.layout_of_ty(ty.store(), self.env.store()).ok()?;
+        let name = self.name(ty)?;
+        let told = self.told_as(ty, name, &layout, pointers)?;
+        Some(self.owned(&told))
+    }
+
+    /// `told`, made of the types it names among [`Self::parts`].
+    fn owned(&self, told: &DebugType) -> Own<Key> {
+        let mut of = Vec::new();
+        let told = Interned::new(set::shape(told, &mut of));
+        Own { told, of: of.into_iter().map(|at| self.parts[at as usize].clone()).collect() }
+    }
+
+    /// The place of `ty` among the types the one being told of is made of.
     fn ty(&mut self, ty: Ty<'db>, pointers: u32) -> Option<TypeIndex> {
         // A type narrowed to some of its values, as what a `NonNull` keeps is, is told as
         // the type itself.
@@ -123,25 +188,12 @@ impl<'db> Types<'db> {
             TyKind::Pat(of, _) => self.normalize(of),
             _ => ty,
         };
-        if let Some(&index) = self.known.get(&ty) {
-            return Some(index);
-        }
-        let layout = self.db.layout_of_ty(ty.store(), self.env.store()).ok()?;
-        let name = self.name(ty)?;
-        // A type that is made of itself finds its place here. What stands there until the
-        // type is told is what a type nothing more is known of is told as.
-        let index = self.told.len() as TypeIndex;
-        self.told.push(DebugType::Struct(Aggregate::opaque(name.clone(), layout.size.bytes())));
-        self.known.insert(ty, index);
-        match self.told_as(ty, name, &layout, pointers) {
-            Some(told) => self.told[index as usize] = told,
-            // What was told since is of no use to anything.
-            None => {
-                self.told.truncate(index as usize);
-                self.known.retain(|_, known| *known < index);
-            }
-        }
-        self.known.get(&ty).copied()
+        Some(self.part(Made::Key((ty.store(), pointers))))
+    }
+
+    fn part(&mut self, part: Made<Key>) -> TypeIndex {
+        self.parts.push(part);
+        (self.parts.len() - 1) as TypeIndex
     }
 
     /// What rustc calls the type, which is asked of every variable the type is part of.
@@ -422,8 +474,8 @@ impl<'db> Types<'db> {
 
     /// A type that is part of the one being told of and is no type of the program's.
     fn unnamed(&mut self, ty: DebugType) -> TypeIndex {
-        self.told.push(ty);
-        (self.told.len() - 1) as TypeIndex
+        let own = self.owned(&ty);
+        self.part(Made::Inline(Box::new(own)))
     }
 
     /// What a closure or an `async` block captured, each by the name rustc has for it: the
@@ -560,11 +612,16 @@ impl<'db> Types<'db> {
         Some(DebugType::Enum { of, tag: Some(Tag { offset, size, states: true }), variants: told })
     }
 
-    /// What a pointer points to, where that is told of.
+    /// What a pointer points to: past the last pointer followed, the type of its name where
+    /// a debugger is told of one.
     fn followed(&mut self, to: Ty<'db>, pointers: u32) -> Option<TypeIndex> {
         match pointers.checked_sub(1) {
             Some(pointers) => self.ty(to, pointers),
-            None => self.known.get(&to).copied(),
+            None => {
+                let to = self.normalize(to);
+                let name = self.name(to)?;
+                Some(self.part(Made::Named(Symbol::intern(&name))))
+            }
         }
     }
 

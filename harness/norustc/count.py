@@ -72,6 +72,14 @@ def main():
                RA_JIT_SKIPPED=f"{L}/logs/{name}.skipped", NR_LOG=log, **spec.get("env", {}))
     if base == "bun":
         env["RA_JIT_OTHER_TOOLCHAIN"] = "1"
+    # A release ships the standard library its builds start from (crates/ra-jit/src/shipped.rs):
+    # made here by the ra-jit under test as the release workflow makes it, from the toolchain
+    # the builds use, and fetched by the first build. NR_STD=build has the builds make it.
+    if os.environ.get("NR_STD") != "build":
+        toolchain = f"{L}/tc-{'nightly' if base == 'bun' else 'stable'}"
+        shipped = f"{L}/std-remote"
+        subprocess.run(["ra-jit", "std", shipped, toolchain], env=env, check=True)
+        env["RA_JIT_STD_FROM"] = shipped
     extra = json.loads(os.environ.get("NR_ENV", "{}"))
     env.update(extra)
     steps_out = f"{L}/logs/{name}.steps.jsonl"
