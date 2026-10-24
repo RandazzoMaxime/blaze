@@ -182,7 +182,7 @@ All notable changes to ra-jit are written here. The format follows
 - A borrow checker, the crate `hir-ty-borrowck` in the rust-analyzer subtree, written to give
   rustc's verdict: Polonius alpha by default as nightly rustc does, NLL with
   `RA_JIT_BORROWCK=nll`. It gives rustc's errors on
-  1523 of 1580 of rustc's own borrow-check tests that it can run, and none on any of the 245
+  1532 of 1581 of rustc's own borrow-check tests that it can run, and none on any of the 246
   rustc accepts, scored by `harness/borrowck_ui.py`, and finds nothing in ripgrep, fd, bat,
   hyperfine, just, axum, nushell, delta, eza, tokei, starship and cargo. Its errors, and rustc's
   `unused_mut` warning, are rust-analyzer diagnostics and `ra-jit borrowck` prints them ([docs/borrowck.md](docs/borrowck.md)).
@@ -421,6 +421,15 @@ All notable changes to ra-jit are written here. The format follows
   needs `'a: 'b` where it is a method's receiver. A trait object's associated type is held
   to the bounds its trait declares for it: `dyn Trait<Assoc = &'a ()>` with
   `type Assoc: 'static` needs `'a: 'static`. 1523 of 1580 of rustc's tests now (was 1520).
+- A match arm with a guard binds what it binds by value once the guard holds, as rustc does,
+  so `(mut long, ref short) if g => long.0 = &short` is accepted: `short` is declared first
+  and dropped last. In a `const` or `static` a mutable borrow is promoted only of `[]` and a
+  `const fn` call only where the item certainly runs it, so `helper(&mut 42)` gives E0716, as
+  does `&(ALL[i] + 1)` in a function. An `impl Trait` inside the return type,
+  `(impl Iterator, &'b str)`, gets the member constraints a returned one does, and the
+  lifetime chosen for its hidden type is applied, so what that needs of a type parameter is
+  checked (E0309). `borrowck_ui.py` reads each unit with its revision's `--cfg`, so
+  `#[cfg($rev)]` in a macro is set. 1532 of 1581 of rustc's tests now (was 1523).
 - A returned `impl Trait` hiding a type parameter is checked when the function's lifetimes
   are late-bound or elided: `fn f<T>(d: T, p: &mut ()) -> impl Sized + '_ { (d, p) }` gives
   rustc's E0311, and with `p: &'b mut ()` its E0309. The borrow checker relates the hidden

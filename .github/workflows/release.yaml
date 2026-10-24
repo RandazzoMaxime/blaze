@@ -53,6 +53,8 @@ jobs:
           - { target: x86_64-unknown-linux-gnu, os: ubuntu-22.04 }
           - { target: aarch64-unknown-linux-gnu, os: ubuntu-22.04-arm }
     env:
+      # `cargo binstall` finds the archive and its binaries by this name
+      # ([package.metadata.binstall] in crates/ra-jit/Cargo.toml).
       NAME: ra-jit-v${{ needs.notes.outputs.version }}-${{ matrix.target }}
     steps:
       - uses: actions/checkout@v7
@@ -93,7 +95,7 @@ jobs:
         continue-on-error: true
         run: |
           rustup component add rust-src --toolchain 1.99.0
-          RUSTC="$(rustup which --toolchain 1.99.0 rustc)" shipped/ra-jit std "$RUNNER_TEMP/std"
+          shipped/ra-jit std "$RUNNER_TEMP/std" "$(rustc +1.99.0 --print sysroot)"
           mkdir std-assets
           cd "$RUNNER_TEMP/std"
           find manifests packs keys -type f ! -name '*.lock' | while read -r file; do
