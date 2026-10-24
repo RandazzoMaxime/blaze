@@ -854,9 +854,14 @@ Where J stands (2026-10-24):
   thread-local included, is compiled with the program. `proc_macro` (and `test`) are not in
   the unit, so they are the program's when it links them; the unit of a program that links
   `proc_macro` has `rustc-literal-escaper` too, and is shared by every such program.
-- Next: a library ra-jit links with `cc -shared` (link.rs makes executables alone so far), the
-  list written into a proc-macro crate's root, and the release's server with the loader that
-  reads it, checked against the toolchain's server as above.
+- ra-jit links a shared library (`--exe` with `--shared`): the object carries the allocator
+  shim, the link is `-shared -Wl,-Bsymbolic`, and only the crate's `#[no_mangle]` and
+  `#[export_name]` items are exported, as rustc's `cdylib` is, so the rest is left out where
+  they do not reach it. `allrajit.py` loads one with `dlopen` and calls it as cargo's library
+  answers, whole, over the unit and stored.
+- Next: the list written into a proc-macro crate's root, which needs that crate's own build
+  (a proc-macro crate is left out of a program today), and the release's server with the
+  loader that reads it, checked against the toolchain's server as above.
 
 **K. The cold build is ra-jit's.** ([#91](https://github.com/indexable-inc/ra-jit/issues/91)) `cargo ra-jit build` with nothing built plans the units
 (plan.rs), and the daemon compiles them all, taking what the store and the remote have, links
