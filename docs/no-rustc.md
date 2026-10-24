@@ -10,6 +10,18 @@ it could not do, the build fails, and that failure is a bug to fix.
 
 Andrew, 2026-10-22: "Everything should all be us 100%."
 
+The goal behind the rule is to own every layer, never by accepting less Rust. ra-jit moves step
+by step toward owning everything from source to running code, because owning it is what makes
+it fast, and it stays a superset of Rust on the way: every program rustc 1.99.0 builds builds
+and behaves the same under ra-jit, with the real standard library, C dependencies, build
+scripts and proc macros, and what ra-jit adds (live edits, tiers) comes on top. The one
+difference allowed is that build scripts and proc macros run sandboxed
+([#147](https://github.com/indexable-inc/ra-jit/issues/147)); one that needs more than the
+sandbox allows is the only exception, and is made to work rather than refused where possible.
+
+Andrew, 2026-10-24: "we want to be a superset of Rust (i.e., any existing Rust program should
+work, minus a proc macro that isn't sandboxed, which it should be tbh)."
+
 This describes where ra-jit is going, not where it is. Today rustc still does much of the work:
 it builds every program once before the daemon takes over, it compiles the standard library,
 the build scripts and the proc macros, it has the last word on errors, and it keeps a copy of
@@ -116,8 +128,9 @@ all of it:
   each unit cargo asks for it writes the files cargo expects to find (the names
   `--print file-names` gave, and the dep-info), compiled through the daemon.
 - **What goes to cargo today** (`Invocation::only_cargo` in `cargo/cli.rs`: `--message-format`,
-  `-Z`, `--exclude`, several targets, an unknown triple) becomes supported, or refused with the
-  reason. None of it goes to cargo.
+  `-Z`, `--exclude`, several targets, an unknown triple, of a build; of a check only
+  `--build-plan` and `--unit-graph`) becomes supported, or refused with the reason. None of it
+  goes to cargo.
 
 Subcommands ra-jit does not claim (`cargo ra-jit doc`, `clippy`, `fmt`, `publish`) are passed
 to cargo as typed today. Producing HTML documentation and running clippy's lints are not
@@ -199,8 +212,8 @@ Paths are under `crates/`; line numbers are of 41e7906192.
 | Where | What it does | When |
 |---|---|---|
 | `ra-jit/src/cargo/mod.rs:305` `by_daemon`, `:300` `ToCargo`, `:395` `by_cargo` | sends the whole build to cargo | the source has an error (until D's first part: now it fails the build with ra-jit's error); rustc's copy of a refused function is stale; a build script's or proc macro's source changed; a manifest changed; the daemon did not build a program |
-| `ra-jit/src/cargo/cli.rs:297` `only_cargo` | sends the command to cargo untouched | `--message-format`, `-Z`, `--exclude`, several targets, an unknown triple |
-| `ra-jit/src/cargo/mod.rs:139` `plain_cargo` | runs cargo with nothing of ra-jit's but its answers to cargo's questions (since B) | subcommands ra-jit does not claim, and a check `only_cargo` sends to cargo (until 2026-10-23, every `cargo ra-jit check`) |
+| `ra-jit/src/cargo/cli.rs:297` `only_cargo` | sends the command to cargo untouched | of a build `--message-format`, `-Z`, `--exclude`, several targets, an unknown triple; of a check `--build-plan` and `--unit-graph` |
+| `ra-jit/src/cargo/mod.rs:139` `plain_cargo` | runs cargo with nothing of ra-jit's but its answers to cargo's questions (since B) | subcommands ra-jit does not claim, and a check with `--build-plan` or `--unit-graph` (until 2026-10-23, every `cargo ra-jit check`; until 2026-10-24, one with `--message-format`, `-Z`, `--exclude` or several targets) |
 
 **What rustc compiled, linked into ra-jit's programs** (steps E, F, G)
 
