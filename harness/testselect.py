@@ -5,12 +5,13 @@ reached since they last passed, and no others.
 usage: testselect.py    (RA_JIT_BIN names the ra-jit built; cargo-ra-jit is found next to it)
 
 A package has a library with unit tests and an integration test of it: tests that call one
-function or another of the library, one that reads a file, one that calls nothing. It is
-tested until the daemon serves the build, then edited a step at a time, and after each the
-tests that ran have to be the ones the step names: those whose code or what it calls changed,
-those added or given other attributes, the one that reads a file every time, the one that
-failed until it passes, and with `RA_JIT_TESTS=all` every test. A test that ran has to end as
-its source says.
+function or another of the library, one that downcasts a `dyn Any` of what one returns (a
+`TypeId`, which code generation takes from rustc), one that reads a file, one that calls
+nothing. It is tested until the daemon serves the build, then edited a step at a time, and
+after each the tests that ran have to be the ones the step names: those whose code or what it
+calls changed, those added or given other attributes, the one that reads a file every time,
+the one that failed until it passes, and with `RA_JIT_TESTS=all` every test. A test that ran
+has to end as its source says.
 
 Python 3, stdlib only.
 """
@@ -48,6 +49,12 @@ mod tests {
     }
 
     #[test]
+    fn uses_any() {
+        let value: Box<dyn std::any::Any> = Box::new(helper(1));
+        assert_eq!(value.downcast_ref::<u32>(), Some(&2));
+    }
+
+    #[test]
     fn reads_a_file() {
         assert!(std::fs::read_to_string("Cargo.toml").unwrap().contains("tsel"));
     }
@@ -72,13 +79,13 @@ fn it_other() {
 }
 """,
 }
-ALL = {"tests::uses_helper", "tests::uses_other", "tests::reads_a_file", "tests::plain", "it_helper", "it_other"}
+ALL = {"tests::uses_helper", "tests::uses_any", "tests::uses_other", "tests::reads_a_file", "tests::plain", "it_helper", "it_other"}
 FILE = "tests::reads_a_file"
 # (what the step is, [(file, old, new)], RA_JIT_TESTS, the tests that run, whether they pass)
 STEPS = [
     ("nothing edited", [], "affected", {FILE}, True),
     ("a function one test calls", [("src/lib.rs", "x + 1", "x + 2 - 1")], "affected",
-     {"tests::uses_helper", "it_helper", FILE}, True),
+     {"tests::uses_helper", "tests::uses_any", "it_helper", FILE}, True),
     ("a function another test calls", [("src/lib.rs", "x * 2", "x + x")], "affected",
      {"tests::uses_other", "it_other", FILE}, True),
     ("a test added", [("src/lib.rs", "    #[test]\n    fn plain()",

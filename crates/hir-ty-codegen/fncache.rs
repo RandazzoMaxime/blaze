@@ -459,6 +459,9 @@ impl<'db> Walk<'db> {
                 (!pure_foreign(&symbol)).then(|| format!("calls the foreign function `{symbol}`"));
             return (Node::Leaf(symbol, why), site, false);
         }
+        if taken_from_rustc(db, func) {
+            return (Node::Leaf(name(), None), site, false);
+        }
         if self.tests {
             // What a test reaches is all that decides how it ends, so only the toolchain's
             // code, which the hash has by its commit, is known by name.
@@ -1160,6 +1163,36 @@ fn holds_counts(db: &dyn HirDatabase, adt: AdtId) -> bool {
     let AdtId::StructId(id) = adt else { return false };
     matches!(id.krate(db).data(db).origin, base_db::CrateOrigin::Lang(LangCrateOrigin::Alloc))
         && matches!(StructSignature::of(db, id).name.as_str(), "RcInner" | "ArcInner")
+}
+
+/// Whether a call of `func` is to code the code generator takes from rustc, as `callee` does,
+/// and never compiles: `TypeId::of`, a hash only rustc computes, and the methods of `dyn Any`,
+/// which compare it. What they give is decided by the type they are instantiated with, which
+/// their name has.
+fn taken_from_rustc(db: &dyn HirDatabase, func: FunctionId) -> bool {
+    use rustc_type_ir::inherent::BoundExistentialPredicates as _;
+    if !matches!(func.krate(db).data(db).origin, base_db::CrateOrigin::Lang(LangCrateOrigin::Core))
+    {
+        return false;
+    }
+    let ItemContainerId::ImplId(id) = func.lookup(db).container else { return false };
+    if db.impl_trait(id).is_some() {
+        return false;
+    }
+    match db.impl_self_ty(id).skip_binder().kind() {
+        TyKind::Adt(def, _) => {
+            let interner = DbInterner::new_with(db, func.krate(db));
+            interner.lang_items().TypeId.is_some_and(|it| def.def_id() == AdtId::StructId(it))
+                && FunctionSignature::of(db, func).name.as_str() == "of"
+        }
+        TyKind::Dynamic(bounds, _) => bounds.principal_def_id().is_some_and(|it| {
+            matches!(
+                it.0.krate(db).data(db).origin,
+                base_db::CrateOrigin::Lang(LangCrateOrigin::Core)
+            ) && TraitSignature::of(db, it.0).name.as_str() == "Any"
+        }),
+        _ => false,
+    }
 }
 
 fn diverges(db: &dyn HirDatabase, func: FunctionId) -> bool {

@@ -118,7 +118,7 @@ with reasons. The daemon's log says `backend: llvm -O2 fast emit` when LLVM is i
 | `loadedits.py` | A file written while a worker loads, after the worker read it and before it took its timestamp (held there with `RA_JIT_LOAD_PAUSE_MS`), is built as written: the next build, and the one after an edit of another crate, print the new text ([#53](https://github.com/indexable-inc/ra-jit/issues/53)). Linux and macOS |
 | `agents.py` | Random edits of the kind coding agents make, on a real workspace |
 | `invalidation.py` | How much the database redoes after different kinds of edit |
-| `testselect.py` | `cargo ra-jit test` with `RA_JIT_TESTS=affected` on a library's unit tests and an integration test of it, edited a step at a time: the tests that run are those whose code or what it calls changed, one added, one given `#[ignore]`, one that reads a file (every time) and one that failed (until it passes); `RA_JIT_TESTS=all` runs every test. Linux and macOS |
+| `testselect.py` | `cargo ra-jit test` with `RA_JIT_TESTS=affected` on a library's unit tests and an integration test of it, edited a step at a time: the tests that run are those whose code or what it calls changed, one added, one given `#[ignore]`, one that reads a file (every time), one that downcasts a `dyn Any` (only when what it calls changed) and one that failed (until it passes); `RA_JIT_TESTS=all` runs every test. Linux and macOS |
 | `movedlines.py` | A panic reports its new line after lines are added above its function (seven ways to panic, each against cargo), and moving a function compiles nothing |
 | `buildmodel.py` | One small cargo project per feature of cargo's build model, under both backends, with steps that change one input at a time |
 | `cargo_ra_jit.py` | `cargo ra-jit` against plain cargo on seven real projects, 22 flag combinations, and 11 daemon lifecycle checks. Needs the network and about 20 minutes; not in CI |
@@ -151,7 +151,10 @@ with reasons. The daemon's log says `backend: llvm -O2 fast emit` when LLVM is i
 ### Timing
 
 `bench.py`, `editloop.py`, `edittimes.py`, `scaling.py`, `dxedits.py`, `linkbench.py`,
-`shapes.py`, `heap.py`, `heapfold.py`, `memsplit.py`, `fnincr.py`, `realbench.py`, `spare.py` and `live_latency.py` measure and do not gate.
+`shapes.py`, `heap.py`, `heapfold.py`, `memsplit.py`, `fnincr.py`, `realbench.py`, `spare.py`, `live_latency.py` and `testselectbench.py` measure and do not gate.
+`testselectbench.py` runs `bench.py`'s projects' tests under a daemon with `RA_JIT_TESTS=all` and
+`affected`, before and after `bench.py`'s `leaf` edit: the wall time, the tests run and skipped,
+and how many run every time and why, from what the daemon wrote beside each test program.
 `memsplit.py` says what each process of the daemon holds (the daemon, the project's worker, the
 spare) and of what kind of page, once ready, once the daemon has built its own base and after
 edits, with `--env` to try an allocator setting
