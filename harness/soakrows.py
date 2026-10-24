@@ -636,6 +636,24 @@ def in_a_control_group(row, allowed=6 << 30):
         raise Wrong(f"the build after a body was edited was not the daemon's: {how}")
 
 
+def generated_for_a_proc_macro(row):
+    """A proc macro that `include!`s what its build script wrote to `OUT_DIR`, as biome's
+    macros are built on `biome_aria_metadata`: the script writes it while cargo builds, after
+    the build began, and the first edit after the build is still the daemon's."""
+    open(row.path("gen/build.rs"), "w").write(
+        'fn main() {\n    println!("cargo:rerun-if-changed=build.rs");\n'
+        '    let out = std::path::Path::new(&std::env::var("OUT_DIR").unwrap()).join("pepper.rs");\n'
+        '    std::fs::write(out, "#[allow(dead_code)]\\nconst PEPPER: u64 = 3;\\n").unwrap();\n}\n')
+    with open(row.path("gen/src/lib.rs"), "a") as lib:
+        lib.write('\ninclude!(concat!(env!("OUT_DIR"), "/pepper.rs"));\n')
+    row.git("add", "."), row.git("commit", "-qm", "a build script for the proc macro")
+    row.warm()
+    row.edit()
+    how, _ = row.both("a body edited after the first build", want=f"mark {row.mark}")
+    if how != "daemon":
+        raise Wrong(f"the first edit after the build was not the daemon's: {how}")
+
+
 def proc_macro_tests(row):
     """The tests of every package, the proc macro's own among them, which link the
     toolchain's `libstd`."""
@@ -1054,6 +1072,7 @@ ROWS = {
     "no memory ceiling": (no_ceiling, {"RA_JIT_MEMORY_MAX": "off"}),
     "started in a control group that allows less memory": (in_a_control_group, {}),
     "tests of a proc macro": (proc_macro_tests, {}),
+    "a proc macro built on what its build script generated": (generated_for_a_proc_macro, {}),
     "a function that is another under test": (another_under_test, {}),
     "functions rustc keeps to an object": (kept_to_an_object, {"CARGO_INCREMENTAL": "0"}),
     "an item added beside a function left to rustc": (beside_one_left, {}),

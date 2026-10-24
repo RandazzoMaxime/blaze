@@ -443,6 +443,16 @@ All notable changes to ra-jit are written here. The format follows
 
 ### Fixed
 
+- The first build after one of cargo's is the daemon's where a proc macro or build script is
+  built on what a build script wrote to `OUT_DIR`, as biome's macros are on
+  `biome_aria_metadata`'s ARIA tables: the file was written while cargo built, after the build
+  began, so it counted as changed since, and the build went to cargo ("what runs during the
+  build: …/out/roles_and_attributes.rs changed"). Cargo's build replaced the worker, which built
+  the program in full again: biome's next edit after that took 130 s and 24 GB. Such a file is
+  only written again when the script runs again, which the script's own guards are for.
+  soakrows.py's `a proc macro built on what its build script generated` has the proc macro
+  `include!` its script's output and checks that the first edit after the build is the
+  daemon's.
 - On Linux the daemon's bounds on memory count what its control group allows, where they
   counted the machine's: the workers' `RA_JIT_MEMORY_MAX` (half) and the own base's
   `RA_JIT_OWN_BASE_MEMORY` (a quarter) were of the host's memory in a container, a CI job or a
