@@ -908,7 +908,12 @@ impl CodegenUnit {
             // can't bring our own.
             let mut split = false;
             let found = TheirStatics::of(db, from_rustc.iter().copied());
-            split |= found.statics.iter().any(|it| cg.statics.contains_key(it));
+            // Only one not known to be rustc's before: one that was and is ours still, as one
+            // rustc has no symbol for, is ours again however often the build starts over.
+            split |= found
+                .statics
+                .iter()
+                .any(|it| cg.statics.contains_key(it) && !own_statics.theirs.contains(it));
             own_statics.theirs.extend(found.statics);
             let before = own_statics.unknown.len();
             own_statics.unknown.extend(found.unknown);
