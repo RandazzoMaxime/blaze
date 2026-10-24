@@ -44,6 +44,11 @@ back them is under [docs/upstream/](../upstream/), each with a `SOURCE.md`. Sear
   helix's warm start (a block unpacked once for every thread that asks, 32 MiB to 1 GiB: no
   gain, values read about one to a block), and bbtree's ordered map against papaya and
   DashMap for ra-jit's shared maps. 2026-10-24.
+- [lean-frontend.md](lean-frontend.md): what of nushell's cold start, edits and heap goes to
+  syntax, macro expansion, error tolerance, salsa's bookkeeping, inference, MIR and codegen;
+  tolerance and lossless trees are small, salsa revalidating on wide edits is the largest;
+  durability experiments (negative) and interned arguments never collected; the lean path
+  ranked, and the crates of a build listed on every core. 2026-10-24.
 - [../architecture-split.md](../architecture-split.md): what of ra-jit belongs in the
   rust-analyzer subtree and what in `crates/`; ra-jit's changes to rust-analyzer by purpose,
   upstream's churn on the files they touch, rustc's crate split, and a migration plan.

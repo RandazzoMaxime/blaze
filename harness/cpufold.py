@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""cpufold.py SCRIPT [--comm NAME] [--dso PATH]: what share of a `perf` profile's CPU time parsing and lowering take.
+"""cpufold.py SCRIPT [--comm NAME] [--dso PATH] [--phases FILE]: what share of a `perf` profile's CPU time parsing and lowering take.
 
 SCRIPT is what `perf script` prints of a `perf record -g` of the daemon (frame pointers:
 `RUSTFLAGS=-Cforce-frame-pointers=yes`). Two tables. The first gives, for each kind of work,
@@ -8,9 +8,13 @@ item tree counts in both. The second gives each sample to one kind, that of its 
 frame that is of a kind: what the time was spent doing itself, which adds up to 100%.
 `--comm` keeps the samples of processes whose name starts with NAME (default `ra-jit`), and
 `--dso PATH` those with a frame in a binary whose path has PATH in it, for a profile of the
-whole machine (`perf record -a`) that other ra-jit builds ran beside.
+whole machine (`perf record -a`) that other ra-jit builds ran beside. `--phases FILE` reads the
+phases leanprof.py wrote (a profile recorded with `-k CLOCK_MONOTONIC`) and gives both tables
+for each phase, with a third: of the samples revalidating salsa's memos, which query's memo was
+being verified (the innermost `IngredientImpl<...>` on the stack) and which query asked
+(the outermost).
 """
-import collections, re, sys
+import collections, json, re, sys
 
 # Of what is on the stack.
 KINDS = [
@@ -27,7 +31,23 @@ KINDS = [
     ("name resolution", ("hir_def::nameres::collector",)),
     ("inference", ("hir_ty::infer::",)),
     ("MIR building", ("hir_ty::mir::lower",)),
+    ("MIR passes and monomorphization", ("hir_ty::mir::monomorphization", "hir_ty::mir::transform", "hir_ty::mir::optimize")),
+    ("borrow checking", ("hir_ty_borrowck::",)),
+    ("layout", ("hir_ty::layout",)),
     ("code generation", ("hir_ty_codegen::", "cranelift", "llvm")),
+    ("debug types described", ("hir_ty_codegen::debuginfo",)),
+    ("the store read and written", ("ra_jit_store::",)),
+    ("diagnostics collected", ("diagnostic", "Diagnostic")),
+    ("salsa revalidating memos", ("maybe_changed_after",)),
+    ("salsa interning", ("salsa::interned::",)),
+]
+
+# Of a sample in salsa, what salsa was doing: the first of these among its frames up to the
+# first frame of the compiler's own.
+SALSA = [
+    ("salsa: memos revalidated", ("maybe_changed_after", "deep_verify", "verify_memo", "shallow_verify", "validate_provisional", "mark_validated_output")),
+    ("salsa: values interned", ("salsa::interned::",)),
+    ("salsa: memos fetched, stored and the rest", ("salsa::",)),
 ]
 
 # What a frame itself does, the first that matches.
@@ -52,52 +72,138 @@ OWN = [
 ]
 
 
-def samples(path, comm, dso=None):
+def samples(path, comm, dso=None, timed=False):
     """Each sample's frames, innermost first: of processes named `comm`, and with `dso` in the
-    path of one of the frames' binaries when it is given."""
-    frames, keep, of_dso = [], False, dso is None
+    path of one of the frames' binaries when it is given. With `timed`, its time and frames."""
+    frames, keep, of_dso, at = [], False, dso is None, 0.0
     for line in open(path, errors="replace"):
         if not line.strip():
             if keep and of_dso and frames:
-                yield frames
+                yield (at, frames) if timed else frames
             frames, keep, of_dso = [], False, dso is None
         elif not line[0].isspace():
             keep = line.split()[0].startswith(comm)
+            stamp = re.search(r" (\d+\.\d+): ", line)
+            at = float(stamp[1]) if stamp else 0.0
         elif keep:
             # "    addr symbol+0xoff (dso)"
             parts = line.strip().split(" ", 1)
             of_dso = of_dso or dso in line
             frames.append(re.sub(r"\+0x[0-9a-f]+ \(.*\)$|\s\(.*\)$", "", parts[1]) if len(parts) > 1 else parts[0])
     if keep and of_dso and frames:
-        yield frames
+        yield (at, frames) if timed else frames
 
 
 def own(frames):
-    for frame in frames:
+    for at, frame in enumerate(frames):
         for label, needles in OWN:
             if any(it in frame for it in needles):
-                return label
+                return salsa_part(frames[at:]) if label == "salsa" else label
     return "other (allocator, kernel, std, unknown)"
+
+
+def salsa_part(frames):
+    """What salsa was doing in a sample whose innermost frame of a kind is salsa's."""
+    ours = [label for label, _ in OWN if label != "salsa"]
+    run = []
+    for frame in frames:
+        if any(any(it in frame for it in needles) for label, needles in OWN if label in ours):
+            break
+        run.append(frame)
+    for label, needles in SALSA:
+        if any(any(it in frame for it in needles) for frame in run):
+            return label
+    return SALSA[-1][0]
+
+
+QUERY = re.compile(r"IngredientImpl<(.+?)> as salsa::ingredient::Ingredient>::maybe_changed_after|IngredientImpl<(.+?)>>::fetch")
+NAMED = re.compile(r"(.*)::_::(\w+?)_*Configuration_$")
+CALLER = re.compile(r"\bra_jit::([\w:]+)")
+
+
+def query_of(frame):
+    """`Body::relative` for `IngredientImpl<<hir_def::...::Body>::relative::_::relative__Configuration_> as ...`."""
+    found = QUERY.search(frame)
+    if not found:
+        return None
+    named = NAMED.match(found[1] or found[2])
+    if not named:
+        return None
+    path, name = named.groups()
+    return f"{path[1:path.index('>')].rsplit('::', 1)[-1]}::{name}" if path.startswith("<") else name
+
+
+def caller_of(frames):
+    """The innermost frame of the ra-jit crate itself: the code that asked salsa."""
+    for frame in frames:
+        found = CALLER.search(frame)
+        if found:
+            return found[1]
+    return "?"
+
+
+class Fold:
+    """The tables of a set of samples, added one at a time."""
+
+    def __init__(self):
+        self.total = 0
+        self.on_stack, self.by_own = collections.Counter(), collections.Counter()
+        self.verified, self.asked = collections.Counter(), collections.Counter()
+        self.callers = collections.Counter()
+
+    def add(self, frames):
+        self.total += 1
+        joined = ";".join(frames)
+        for label, needles in KINDS:
+            if any(it in joined for it in needles):
+                self.on_stack[label] += 1
+        kind = own(frames)
+        self.by_own[kind] += 1
+        if kind == SALSA[0][0]:
+            queries = [it for it in map(query_of, frames) if it]
+            self.verified[queries[0] if queries else "?"] += 1
+            self.asked[queries[-1] if queries else "?"] += 1
+            self.callers[caller_of(frames)] += 1
+
+    def print(self):
+        share = lambda count: f"{100 * count / max(1, self.total):6.2f}%"
+        print(f"{self.total} samples\non the stack:")
+        for label, _ in KINDS:
+            print(f"{share(self.on_stack[label])}  {label}")
+        print("by what the innermost frame of a kind does:")
+        for label, count in self.by_own.most_common():
+            print(f"{share(count)}  {label}")
+        if self.verified:
+            print("revalidating, by the memo verified (innermost query), of all samples:")
+            for label, count in self.verified.most_common(15):
+                print(f"{share(count)}  {label}")
+            print("revalidating, by the query that asked (outermost), of all samples:")
+            for label, count in self.asked.most_common(15):
+                print(f"{share(count)}  {label}")
+            print("revalidating, by the ra-jit code that asked, of all samples:")
+            for label, count in self.callers.most_common(10):
+                print(f"{share(count)}  {label}")
 
 
 def main():
     comm = sys.argv[sys.argv.index("--comm") + 1] if "--comm" in sys.argv else "ra-jit"
     dso = sys.argv[sys.argv.index("--dso") + 1] if "--dso" in sys.argv else None
-    total = 0
-    on_stack, by_own = collections.Counter(), collections.Counter()
-    for frames in samples(sys.argv[1], comm, dso):
-        total += 1
-        joined = ";".join(frames)
-        for label, needles in KINDS:
-            if any(it in joined for it in needles):
-                on_stack[label] += 1
-        by_own[own(frames)] += 1
-    print(f"{total} samples\non the stack:")
-    for label, _ in KINDS:
-        print(f"{100 * on_stack[label] / max(1, total):6.2f}%  {label}")
-    print("by what the innermost frame of a kind does:")
-    for label, count in by_own.most_common():
-        print(f"{100 * count / max(1, total):6.2f}%  {label}")
+    if "--phases" not in sys.argv:
+        fold = Fold()
+        for frames in samples(sys.argv[1], comm, dso):
+            fold.add(frames)
+        fold.print()
+        return
+    phases = json.load(open(sys.argv[sys.argv.index("--phases") + 1]))["phases"]
+    folds = {it["phase"]: Fold() for it in phases}
+    for at, frames in samples(sys.argv[1], comm, dso, timed=True):
+        for it in phases:
+            if it["began"] <= at < it["ended"]:
+                folds[it["phase"]].add(frames)
+                break
+    for it in phases:
+        print(f"== {it['phase']} ({it['ended'] - it['began']:.1f} s)")
+        folds[it["phase"]].print()
 
 
 if __name__ == "__main__":
