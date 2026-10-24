@@ -75,6 +75,12 @@ CASES = {
     },
 }
 
+# Errors whose primary span rust-analyzer places otherwise than rustc, and why: only their
+# codes are compared, and they are counted.
+PLACED_OTHERWISE = {
+    "E0061": "rust-analyzer points at where the missing argument goes, rustc at the function called",
+}
+
 FORMATS = ["json", "json-diagnostic-rendered-ansi", "short", "human"]
 ANSI = re.compile(r"\x1b\[[0-9;]*m")
 
@@ -119,23 +125,31 @@ def key(message):
     d = message["message"]
     span = primary(d)
     code = d["code"] and d["code"]["code"]
+    if code in PLACED_OTHERWISE:
+        return (code, span and span["file_name"])
     return (code, span and (span["file_name"], span["line_start"], span["column_start"]))
 
 
 SPAN_FIELDS = ["file_name", "byte_start", "byte_end", "line_start", "line_end", "column_start", "column_end", "is_primary"]
 
 
-def frame(rendered):
+def frame(rendered, span):
     """The lines of `rendered` that ra-jit writes as rustc does: the header without the message,
-    the `-->` line, and each source line with its gutter."""
+    the first `-->` line, and the source lines of the primary `span` with their gutter, the
+    first time each is shown (rustc shows the lines of its other spans and suggestions too)."""
     lines = rendered.splitlines()
-    out = []
+    out, arrow, shown = [], False, set()
     if lines:
         out.append(re.sub(r":.*", ":", lines[0], count=1))
     for line in lines[1:]:
         plain = ANSI.sub("", line)
-        if "-->" in plain or re.match(r"^\s*\d+\s*\|", plain):
+        number = re.match(r"^\s*(\d+)\s*\|", plain)
+        if "-->" in plain and not arrow:
             out.append(line)
+            arrow = True
+        elif number and span["line_start"] <= int(number[1]) <= span["line_end"] and number[1] not in shown:
+            out.append(line)
+            shown.add(number[1])
     return out
 
 
@@ -143,6 +157,7 @@ class Tally:
     def __init__(self):
         self.differs = []
         self.compared = 0
+        self.placed_otherwise = 0
         self.rustc_only = {"worded otherwise": 0, "labels": 0, "children": 0, "explanation": 0, "other spans": 0}
 
     def same(self, case, fmt, what, ours, theirs):
@@ -174,10 +189,13 @@ def compare_json(tally, case, fmt, ours, theirs):
         tally.same(case, fmt, "$message_type", d.get("$message_type"), e.get("$message_type"))
         tally.same(case, fmt, "level", d["level"], e["level"])
         ps, pr = primary(d), primary(e)
+        if k[0] in PLACED_OTHERWISE:
+            tally.placed_otherwise += 1
+            continue
+        tally.same(case, fmt, "rendered frame", frame(d["rendered"], ps), frame(e["rendered"], pr))
         for field in SPAN_FIELDS:
             tally.same(case, fmt, f"span {field}", ps[field], pr[field])
         tally.same(case, fmt, "span text", ps["text"], pr["text"])
-        tally.same(case, fmt, "rendered frame", frame(d["rendered"]), frame(e["rendered"]))
         tally.same(case, fmt, "rendered ends", d["rendered"][-2:], e["rendered"][-2:])
         if d["message"] != e["message"]:
             tally.rustc_only["worded otherwise"] += 1
@@ -190,13 +208,25 @@ def compare_json(tally, case, fmt, ours, theirs):
 
 
 def compare_text(tally, case, fmt, ours, theirs):
+    def placed(code, at):
+        return at.rsplit(":", 2)[0] if code in PLACED_OTHERWISE else at
+
     if fmt == "short":
         def heads(lines):
-            return sorted(m.group(0) for m in (re.match(r"^\S+:\d+:\d+: error(\[E\d+\])?: ", ANSI.sub("", l)) for l in lines) if m)
+            found = (re.match(r"^(\S+:\d+:\d+): error(?:\[(E\d+)\])?: ", ANSI.sub("", l)) for l in lines)
+            return sorted((m[2], placed(m[2], m[1])) for m in found if m)
     else:
         def heads(lines):
-            plain = [ANSI.sub("", l) for l in lines]
-            return sorted(l for l in plain if re.match(r"^error\[E\d+\]: |^\s*--> ", l))
+            """Each error's code with the first `-->` after its header."""
+            out = []
+            for line in map(ANSI.sub, [""] * len(lines), lines):
+                head = re.match(r"^error(?:\[(E\d+)\])?: ", line)
+                arrow = re.match(r"^\s*--> (\S+)", line)
+                if head:
+                    out.append([head[1], None])
+                elif arrow and out and out[-1][1] is None:
+                    out[-1][1] = placed(out[-1][0], arrow[1])
+            return sorted(map(tuple, out), key=str)
     tally.same(case, fmt, "headers", heads(ours), heads(theirs))
 
     def tail(lines):
@@ -234,6 +264,7 @@ def main():
         else:
             print(f"kept {work}")
     print(f"\n{tally.compared - len(tally.differs)}/{tally.compared} compared fields the same as rustc's")
+    print(f"{tally.placed_otherwise} errors placed otherwise, their codes compared: " + "; ".join(f"{c}: {why}" for c, why in PLACED_OTHERWISE.items()))
     print("rustc's only: " + ", ".join(f"{n} {what}" for what, n in tally.rustc_only.items()))
     for line in tally.differs:
         print("  DIFFERS " + line)

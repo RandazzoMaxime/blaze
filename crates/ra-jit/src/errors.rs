@@ -375,7 +375,7 @@ mod tests {
         let said = unclosed.rendered();
         assert!(said.contains(" --> a.rs:10:2\n"), "{said}");
         assert!(said.ends_with("10 |     foo(\n   |     ^^^^"), "{said}");
-        let span = unclosed.span.unwrap();
+        let span = unclosed.span.as_ref().unwrap();
         assert_eq!(
             (span.line_start, span.column_start, span.line_end, span.column_end),
             (10, 2, 11, 6)
