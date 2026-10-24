@@ -86,13 +86,7 @@ pub(crate) fn module(
         if !function.is_test(db) {
             continue;
         }
-        // A test inside a function is none to rustc's harness either: it can't be named.
-        let modules = function.module(db).path_to_root(db);
-        let mut path = Vec::new();
-        for module in modules.iter().rev().skip(1) {
-            path.push(module.name(db)?.display(db, edition).to_string());
-        }
-        path.push(function.name(db).display(db, edition).to_string());
+        let path = path_of(db, function, edition)?;
         let source = function.source(db)?;
         let mut test = Test {
             path,
@@ -168,6 +162,32 @@ pub(crate) fn module(
         _ => "Unknown",
     };
     Some(Harness { text: text(&tests, test_type) })
+}
+
+/// The path of a test from its crate's root, which joined by `::` is the name libtest shows.
+/// `None` for a test inside a function, which is none to rustc's harness either: it can't be
+/// named.
+fn path_of(
+    db: &RootDatabase,
+    function: hir::Function,
+    edition: syntax::Edition,
+) -> Option<Vec<String>> {
+    let modules = function.module(db).path_to_root(db);
+    let mut path = Vec::new();
+    for module in modules.iter().rev().skip(1) {
+        path.push(module.name(db)?.display(db, edition).to_string());
+    }
+    path.push(function.name(db).display(db, edition).to_string());
+    Some(path)
+}
+
+/// The name libtest shows of a `#[test]` of `krate`, the one `--exact` picks it by.
+pub(crate) fn name(
+    db: &RootDatabase,
+    krate: hir::Crate,
+    function: hir::Function,
+) -> Option<String> {
+    Some(path_of(db, function, krate.edition(db))?.join("::"))
 }
 
 fn text(tests: &[Test], test_type: &str) -> String {

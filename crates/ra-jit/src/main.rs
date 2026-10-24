@@ -3105,6 +3105,84 @@ fn harness_alone(args: &Args) -> Option<String> {
     std::fs::read_to_string(file).ok().filter(|it| !it.is_empty())
 }
 
+/// Writes [`cargo::plan::REACH`] beside the program of tests of `args` when a client asked for
+/// it, and takes away the one of an older build: `built` is whether this build is the program.
+fn write_reach(db: &RootDatabase, listed: &Listed, args: &Args, built: bool) {
+    let Some(dir) = args.out.parent() else { return };
+    let file = dir.join(cargo::plan::REACH);
+    if !built || !dir.join(cargo::plan::REACH_WANTED).is_file() {
+        _ = std::fs::remove_file(&file);
+        return;
+    }
+    let start = Instant::now();
+    let text = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| match of_tests(args) {
+        true => hir::attach_db(db, || reach_of_tests(db, listed, args)),
+        // A test target cargo builds without libtest's harness says what it runs itself.
+        false => "*\tit is not built with libtest's harness\n".to_owned(),
+    }));
+    let text = match text {
+        Ok(text) => text,
+        Err(panic) if panic.is::<ide_db::base_db::salsa::Cancelled>() => {
+            std::panic::resume_unwind(panic)
+        }
+        Err(panic) => format!("*\tra-jit panicked: {}\n", panic_message(&*panic)),
+    };
+    let writing = dir.join(format!("{}.writing", cargo::plan::REACH));
+    if std::fs::write(&writing, text).and_then(|()| std::fs::rename(&writing, &file)).is_err() {
+        _ = std::fs::remove_file(&file);
+    }
+    if std::env::var_os("RA_JIT_STATS").is_some() {
+        eprintln!("tests-reach-us: {}", start.elapsed().as_micros());
+    }
+}
+
+/// Whether the program whose object is `out` is to be built again for its
+/// [`cargo::plan::REACH`] alone: a client asked for it since the program was last built.
+fn reach_owed(out: &Path) -> bool {
+    out.parent().is_some_and(|dir| {
+        dir.join(cargo::plan::REACH_WANTED).is_file() && !dir.join(cargo::plan::REACH).is_file()
+    })
+}
+
+/// The text of [`cargo::plan::REACH`] for the program of tests of `args`. A test's hash is of
+/// its attributes, which say how it is to end, as well as its code and all it reaches.
+fn reach_of_tests(db: &RootDatabase, listed: &Listed, args: &Args) -> String {
+    use hir::HasSource as _;
+    use sha2::Digest as _;
+    use syntax::ast::HasAttrs as _;
+    let crates = crates_named(db, &args.krate, args).unwrap_or_default();
+    let Some(&krate) = crates.first() else { return String::new() };
+    let functions = &listed.of(db, krate).functions;
+    let tests: Vec<FunctionId> =
+        functions.iter().copied().filter(|&it| hir::Function::from(it).is_test(db)).collect();
+    // `cargo test` runs a `#[bench]` once as a test.
+    let benches = functions.iter().map(|&it| hir::Function::from(it)).filter(|it| it.is_bench(db));
+    let mut text = String::new();
+    for bench in benches {
+        let Some(name) = test_harness::name(db, krate, bench) else { continue };
+        text.push_str(&format!("-\t{name}\tit is a benchmark\n"));
+    }
+    for (&id, reach) in tests.iter().zip(hir_ty_codegen::tests_reach(db, &tests)) {
+        let function = hir::Function::from(id);
+        let Some(name) = test_harness::name(db, krate, function) else { continue };
+        let line = match reach {
+            Ok(hash) => {
+                let attrs = function.source(db).map(|it| {
+                    let attrs = it.value.attrs().map(|it| it.syntax().text().to_string());
+                    attrs.collect::<Vec<_>>().join("\n")
+                });
+                let identity = format!("{hash:032x}\n{}", attrs.unwrap_or_default());
+                let identity = sha2::Sha256::digest(identity.as_bytes());
+                let hex: String = identity.iter().map(|it| format!("{it:02x}")).collect();
+                format!("{hex}\t{name}\n")
+            }
+            Err(why) => format!("-\t{name}\t{}\n", why.replace(['\t', '\n'], " ")),
+        };
+        text.push_str(&line);
+    }
+    text
+}
+
 /// The text of the root file of the crate of each program of tests of `programs` with ra-jit's
 /// test harness as the tests are now at its end, or without it where ra-jit writes none, for
 /// those that differ from the text they have. Only the crates among `of` when it is given.
@@ -7806,7 +7884,7 @@ fn run_holding(
                             && lock(&as_built)
                                 .get(&target.out)
                                 .is_some_and(|it| it.still(&files, &db, view, target, request));
-                        if unchanged {
+                        if unchanged && !reach_owed(&target.out) {
                             let _ = writeln!(&stream, "ok unchanged");
                             continue;
                         }
@@ -8227,6 +8305,9 @@ fn run_holding(
         for (at, (request, ..)) in &clients {
             let unbuilt = &mut programs[*at].unbuilt;
             unbuilt.stale |= unbuilt.unlinked && *request != Request::Patch;
+        }
+        for &at in &building {
+            programs[at].unbuilt.stale |= reach_owed(&programs[at].args.out);
         }
         // A program of tests asked for the first time is built with ra-jit's harness then, while
         // nobody edits: the first edit is a patch of it.
@@ -9227,6 +9308,7 @@ impl Program {
             );
         }
         eprintln!("edit-to-binary: {total:.1?}");
+        write_reach(db, listed, args, failed.is_none());
         if let Some(why) = failed {
             return Ok(Err(why));
         }

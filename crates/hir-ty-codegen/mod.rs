@@ -103,6 +103,7 @@ mod debuginfo;
 pub use debuginfo::Sidecar;
 mod float_pair;
 mod fncache;
+pub use fncache::tests_reach;
 mod fragment;
 mod home;
 pub use home::body_file;
@@ -6360,6 +6361,13 @@ impl<'a, 'db> ObjectCodegen<'a, 'db> {
                 && !symbol.starts_with("llvm.")
             {
                 return self.import(&symbol, sig);
+            }
+            if let InstanceDef::Fn(func) = def
+                && let ItemContainerId::TraitId(_) = func.lookup(self.db).container
+            {
+                let called =
+                    self.instance_path(func, args).unwrap_or_else(|| format!("{name}::<{args:?}>"));
+                unsupported!("call to `{called}`: no impl of the trait was selected for it");
             }
             unsupported!("call to `{name}`, which has no body and no rustc symbol");
         }

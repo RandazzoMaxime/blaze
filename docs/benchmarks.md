@@ -130,6 +130,7 @@ or the run stops.
 | nushell | 0.108.0 | `da141be11b3a` | `nu -n -c "[3 1 2] \| sort \| str join ','"` |
 | helix | 25.07.1 | `a05c151bb6e8` | `hx --version` (grammars are not built: `HELIX_DISABLE_AUTO_GRAMMAR_BUILD=1`) |
 | bevy | v0.20.0 | `b3bdd75becaf` | built (`--example breakout`), not run: it opens a window |
+| biome | @biomejs/biome@2.6.3 | `c5c3383d590d` | `biome check --reporter=github --colors=off packages/@biomejs/js-api/src/common.ts` (`-p biome_cli --bin biome`) |
 | zed | v1.24.4 | `aed37547d854` | `zed --help`; not in the CI run, see below |
 
 zed (1.7 million lines in 249 crates, 1,291 crates with its dependencies) is in `PROJECTS` and
