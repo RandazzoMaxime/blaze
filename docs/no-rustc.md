@@ -787,7 +787,7 @@ rust-analyzer: the toolchain's server (`rust-analyzer-proc-macro-srv` in the sys
 rustc metadata and will not, so a library ra-jit compiles needs a server of its own. The
 server's side of the bridge (`proc_macro::bridge::server`) is unstable and ra-jit is built
 on stable, so ra-jit cannot link it into itself; it can compile it, as it compiles any crate,
-from the toolchain's `library/proc_macro` and the vendored `proc-macro-srv`. A server and a
+from the toolchain's `library/proc_macro` and the release's `proc-macro-srv` (below). A server and a
 library both compiled by ra-jit from the one `proc_macro` source agree on the bridge by
 construction (its `Buffer`, `Closure` and `Client` are `repr(C)` with `extern "C"` functions,
 but each toolchain encodes the messages its own way). The stages, each lowering a count:
@@ -802,20 +802,47 @@ but each toolchain encodes the messages its own way). The stages, each lowering 
 - J1. ra-jit's proc-macro server: `proc-macro-srv` and `proc-macro-srv-cli` built by ra-jit
   with nothing of rustc's (G) over the toolchain's `proc_macro`, kept in the store by
   toolchain and shipped with the standard library (above), started by `load_config` in place of
-  the toolchain's. It opens a library with `dlopen` and finds its macros by a symbol, as
-  rust-analyzer did before it read metadata: rustc's `__rustc_proc_macro_decls_*__`, or
-  ra-jit's. It serves rustc's libraries too, which is how it is checked: the harness expands
-  every macro call of the bench apps with both servers and holds the outputs equal.
+  the toolchain's. It opens a library with `dlopen` and reads its macros from a static ra-jit
+  wrote (J2).
 - J2. Proc-macro crates compiled by ra-jit into a library for J1's server: the crate and its
   libraries from source as code that can be loaded (position-independent, the standard
-  library's unit built so too), the list of macros written as rustc's harness writes it (a
-  static of `proc_macro::bridge::client::ProcMacro::{custom_derive, attr, bang}` of each
-  `#[proc_macro*]` function) under ra-jit's symbol, linked with `cc -shared`. Used where every
-  crate that expands with the macro is ra-jit's: a build script's macros (J0's then need no
-  rustc library of their own when nothing else of rustc's names them) and the daemon's builds.
-  Count: the proc macros of scripts, and with K every proc macro and the libraries only they
-  link (syn, quote, proc-macro2, ...), which is most of what rustc compiles in a cold build of
-  a crate with derives.
+  library's unit built so too), the list of macros written into the crate's root as
+  `test_harness.rs` writes a test program's `main`: a `#[no_mangle]` static of each
+  `#[proc_macro*]` function's kind, name, helper attributes and
+  `proc_macro::bridge::client::Client::{expand1, expand2}`, linked with `cc -shared`. Used where
+  every crate that expands with the macro is ra-jit's: a build script's macros (J0's then need
+  no rustc library of their own when nothing else of rustc's names them) and the daemon's
+  builds. Count: the proc macros of scripts, and with K every proc macro and the libraries only
+  they link (syn, quote, proc-macro2, ...), which is most of what rustc compiles in a cold build
+  of a crate with derives.
+
+What 1.99.0 changes in that plan (read 2026-10-24 in its `library/proc_macro` and in
+rust-lang/rust at b940084d7, the commit `rustc 1.99.0 -vV` names):
+
+- A library rustc compiled cannot be served by any server but one that reads rustc's metadata.
+  1.99.0's `proc_macro::bridge::client::Client` is the `run` function and nothing else, and
+  there is no `ProcMacro` enum any more: the `__rustc_proc_macro_decls_<id>__` static is the
+  macros' clients alone, and their names, kinds and helper attributes are only in the
+  metadata, where `rustc_metadata::locator::get_proc_macros` pairs them up. rust-analyzer's
+  old loader (`libloading` and the symbol, upstream until 2025) worked because the static then
+  held them. Decoding rustc's metadata would mirror its private, per-release encoding, which
+  ra-jit does not do. So J1's server serves only libraries ra-jit compiled, whose list ra-jit
+  writes, and J1 and J2 land together. They are checked against the toolchain: every macro
+  call of the bench apps and of rust-analyzer's `proc-macro-test` is expanded by the
+  toolchain's server with rustc's library and by J1's with ra-jit's, and the outputs are held
+  equal.
+- The vendored `proc-macro-srv` follows rustc's development branch (it uses
+  `bridge::IdentKind`, which 1.99.0 does not have), so it does not compile against 1.99.0's
+  `proc_macro`. The server that does is the one the release ships, rust-lang/rust's
+  `src/tools/rust-analyzer` at the release's commit, whose loader is
+  `rustc_metadata`'s too. J1's source is that server pinned to the release, as
+  `vendor/rustc_abi` is rustc's crate from the 1.99.0 tag, with its loader replaced by the one
+  that reads ra-jit's static. Its protocol is the toolchain server's: rust-analyzer already
+  talks to that release's server today.
+- Building the server needs serde's derives expanded (`proc-macro-api`'s messages), so the
+  first server is built with what expands them today (rustc's `serde_derive` and the
+  toolchain's server), once per release when `ra-jit std` ships it; once J2 compiles
+  `serde_derive`, each server is built with the one before it.
 
 **K. The cold build is ra-jit's.** ([#91](https://github.com/indexable-inc/ra-jit/issues/91)) `cargo ra-jit build` with nothing built plans the units
 (plan.rs), and the daemon compiles them all, taking what the store and the remote have, links
