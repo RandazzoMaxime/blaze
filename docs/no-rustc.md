@@ -736,9 +736,8 @@ what it printed and the files it left in `OUT_DIR`, and the contents of each fil
 `rerun-if-changed`. A later run with the same key and those files unchanged prints and writes
 that without running; a script that names nothing it reads is not kept, since cargo runs it
 again for any change to its package. rustc still compiles a script, and ra-jit says why, when it
-links a proc macro (J), when a library it links was compiled before ra-jit described it, when its
-source uses `include!`, `include_str!`, `include_bytes!` or `env!` of a variable that is not
-cargo's (which the dep-info does not name), or when it calls a function ra-jit could not
+links a proc macro (J), when a library it links was compiled before ra-jit described it, when it
+reads a variable cargo sets for rustc alone, or when it calls a function ra-jit could not
 compile. `RA_JIT_SCRIPTS_BY_RUSTC=1` has rustc compile them all, for comparing.
 
 A script's compile needs the standard library's unit, which the store has once per toolchain
@@ -760,11 +759,63 @@ the F+G lane: the printed lines a library is linked with are where cargo keeps t
 compiles is one more crate of a `rust-project.json`, so the standard library's scripts can take
 the same path.
 
+Then (the `no-rustc-l3` lane, 2026-10-23) a script that uses `include!`, `include_str!`,
+`include_bytes!`, `env!` or `option_env!` is ra-jit's too. Its dep-info names what rustc's
+does: the files the macros read beside the modules' (`include!`'s from the macro calls,
+`include_str!`'s and `include_bytes!`'s as rust-analyzer reads them, recorded by crate), and a
+`# env-dep:NAME=VALUE` line for each variable read, as rust-analyzer read it for the crate,
+so cargo builds the script again when one changes. A crate's content id has the files its
+`include_str!` and `include_bytes!` read, so the store gives no code compiled from another
+version of one. Only a variable cargo sets for rustc alone (which the build ra-jit runs is not
+given, so it would read it otherwise) still sends a script to rustc. On dev-aws-11, against
+main cd48ca75f7 with the library shipped: ripgrep cold 39 -> 38 rustc runs (crossbeam-utils'
+script), 4.4 -> 4.6 s; nushell cold 493 -> 490 (crossbeam-utils', portable-atomic's and
+bigdecimal's), 27.7 -> 28.0 s.
+
 **J. Proc macros compiled and loaded by ra-jit.** ([#90](https://github.com/indexable-inc/ra-jit/issues/90)) The proc-macro crate and its dependencies are
 compiled by ra-jit into a library that rust-analyzer's proc-macro server, running inside ra-jit,
 loads. `proc_macro` is ra-jit's from F, so the bridge matches the server, which is built from the
 same rust-analyzer. [#38](https://github.com/indexable-inc/ra-jit/issues/38)'s expansion cache
 makes recompiling a macro rare. Risk: the bridge's ABI between the library and the server.
+
+The plan (the `no-rustc-l3` lane, 2026-10-23). What stands in the way, read in the vendored
+rust-analyzer: the toolchain's server (`rust-analyzer-proc-macro-srv` in the sysroot's
+`libexec`, which `ProcMacroServerChoice::Sysroot` starts) opens a library with
+`rustc_metadata::locator::get_proc_macros`, which reads rustc's metadata in the library's
+`.rustc` section: the rustc version it was compiled by and the stable crate id that names the
+`__rustc_proc_macro_decls_<id>__` static, the list of the crate's macros. ra-jit writes no
+rustc metadata and will not, so a library ra-jit compiles needs a server of its own. The
+server's side of the bridge (`proc_macro::bridge::server`) is unstable and ra-jit is built
+on stable, so ra-jit cannot link it into itself; it can compile it, as it compiles any crate,
+from the toolchain's `library/proc_macro` and the vendored `proc-macro-srv`. A server and a
+library both compiled by ra-jit from the one `proc_macro` source agree on the bridge by
+construction (its `Buffer`, `Closure` and `Client` are `repr(C)` with `extern "C"` functions,
+but each toolchain encodes the messages its own way). The stages, each lowering a count:
+
+- J0. A build script that links a proc macro is compiled by ra-jit, the macro expanded with
+  the library rustc compiled of it (cargo names it in `--extern`) by the toolchain's server, as
+  the daemon does. The wrapper describes a proc macro of a package outside the workspace as it
+  does a library, and the script's description has the macro and its libraries, so what the
+  store keeps of the script is keyed by them. Done: on dev-aws-11 nushell's cold build went
+  from 490 rustc runs to 488 (nu-cmd-lang's and oem_cp's scripts), 28.0 -> 27.5 s; the norustc
+  fixture's outer script now expands the workspace's proc macro and stays at 5 (6 without).
+- J1. ra-jit's proc-macro server: `proc-macro-srv` and `proc-macro-srv-cli` built by ra-jit
+  with nothing of rustc's (G) over the toolchain's `proc_macro`, kept in the store by
+  toolchain and shipped with the standard library (above), started by `load_config` in place of
+  the toolchain's. It opens a library with `dlopen` and finds its macros by a symbol, as
+  rust-analyzer did before it read metadata: rustc's `__rustc_proc_macro_decls_*__`, or
+  ra-jit's. It serves rustc's libraries too, which is how it is checked: the harness expands
+  every macro call of the bench apps with both servers and holds the outputs equal.
+- J2. Proc-macro crates compiled by ra-jit into a library for J1's server: the crate and its
+  libraries from source as code that can be loaded (position-independent, the standard
+  library's unit built so too), the list of macros written as rustc's harness writes it (a
+  static of `proc_macro::bridge::client::ProcMacro::{custom_derive, attr, bang}` of each
+  `#[proc_macro*]` function) under ra-jit's symbol, linked with `cc -shared`. Used where every
+  crate that expands with the macro is ra-jit's: a build script's macros (J0's then need no
+  rustc library of their own when nothing else of rustc's names them) and the daemon's builds.
+  Count: the proc macros of scripts, and with K every proc macro and the libraries only they
+  link (syn, quote, proc-macro2, ...), which is most of what rustc compiles in a cold build of
+  a crate with derives.
 
 **K. The cold build is ra-jit's.** ([#91](https://github.com/indexable-inc/ra-jit/issues/91)) `cargo ra-jit build` with nothing built plans the units
 (plan.rs), and the daemon compiles them all, taking what the store and the remote have, links
@@ -988,6 +1039,52 @@ helix is built with `HELIX_DISABLE_AUTO_GRAMMAR_BUILD=1` for cargo and ra-jit al
 script fetches the tree-sitter grammars, which the executable does not contain. bevy
 (`breakout`, cargo 78.2 s cold, 8.2 GB) does not build yet: its `main` is left to rustc
 (`UnresolvedMethod("chain")`), and the SSE compares glam calls are not lowered in this build.
+
+#### The standard library, shipped
+
+Build scripts by ra-jit (step I, #186) put the standard library on every cold build's path: a
+script is a program with nothing of rustc's, so the first one builds the unit and the frozen
+parts of the library's crates, 7.5 s on 96 cores, while the others wait on it. On an empty
+store ripgrep went from 4.5 to 11.2 s and nushell from 25.6 to 37.3 s. That cost is now
+paid once, by the release, instead of on a user's machine (`crates/ra-jit/src/shipped.rs`):
+
+- `ra-jit std REMOTE TOOLCHAIN` builds a script that does nothing over TOOLCHAIN (a sysroot)
+  into a store of its own, running no rustc, and pushes that store to REMOTE as the project `std-<target>-<build>`, where `<build>` is what the store keys
+  by: the ra-jit binary's bytes and the toolchain's commit and compiler name. Only that binary
+  with that toolchain can use it, and every key in it says so.
+- The release workflow runs it with each target's archived binary and the pinned 1.99.0, and
+  attaches the remote's files to the release with `.` for `/` (`manifests.std-…`, `packs.….pack.zst`,
+  `keys.…`). A remote can be a plain `https://` address now (`remote/https.rs`): read-only,
+  flat, redirects followed, which is what a release's download URL is.
+- A build with nothing of rustc's, before it first reads the store, fetches that project once
+  per store: from `RA_JIT_STD_FROM` when set (`off` for nowhere), otherwise from its own
+  release when it is one (`RA_JIT_RELEASE`, set by the workflow on a tag). Builds that start
+  together take a lock and fetch once; `fetched-<project>` in the store dir records that it is
+  done, and a failure is retried an hour later. A pack is used only once its bytes hash to the
+  name the manifest lists, as with any remote.
+- `push` now sends a pack zstd-compressed when that saves a quarter or more. A pack keeps
+  values over 1 MB uncompressed so they can be read in place, which the unit's 17 archive parts
+  are: the library's 65 MB of packs go over the wire as 18.6 MB.
+- Builds from crates.io or nix are other binaries, so nothing is shipped for them and they build
+  the unit locally, once per store.
+
+`harness/norustc/count.py` does what a release does by default: it runs `ra-jit std` with the
+binary under test into `$NR_ROOT/std-remote` and points `RA_JIT_STD_FROM` at it. `NR_STD=build`
+leaves every build to make the library itself.
+
+On dev-aws-11 (2026-10-23, against main cd48ca75f7), "cold" with an empty store: ripgrep 4.4 s
+(main 11.6 s; 4.5 s before step I), nushell 27.7 s (main 38.9 s; 25.6 s before step I); with
+`NR_STD=build`, 11.4 s and 36.8 s. The fetch and pull of the library take 0.1 to 0.2 s of that.
+The rustc counts are main's (ripgrep cold 39, nushell cold 493).
+
+Built here, the library is still 8 s of the cold build: resolving its 27 crates 1.9 s (core's
+def map alone 0.9 s, which the others wait on), compiling 5 s, then splitting, freezing and
+storing. The compile does not get faster past 16 cores (round 1 takes 4.5 s on 16, 3.9 s on 96):
+a profile has a fifth of its samples in rust-analyzer's interning of types, generic arguments
+and predicates, and the lock slow paths beside it, a contention the cores only add to. And a
+round is compiled twice: 78 generic instances of the library do not compile (SIMD intrinsics
+ra-jit has no lowering for), and the build starts over without them, 1.1 s. Cranelift now
+compiles `cmpxchg16b`'s 128-bit compare-and-swap, which was 5 more of them.
 
 The step K bar: with a warm remote, `cargo ra-jit build` from nothing is no slower than cargo's cold build;
 with an empty store, it is measured and published beside cargo's, and the gap is an issue of its

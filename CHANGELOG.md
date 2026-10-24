@@ -182,7 +182,7 @@ All notable changes to ra-jit are written here. The format follows
 - A borrow checker, the crate `hir-ty-borrowck` in the rust-analyzer subtree, written to give
   rustc's verdict: Polonius alpha by default as nightly rustc does, NLL with
   `RA_JIT_BORROWCK=nll`. It gives rustc's errors on
-  1532 of 1581 of rustc's own borrow-check tests that it can run, and none on any of the 246
+  1536 of 1581 of rustc's own borrow-check tests that it can run, and none on any of the 246
   rustc accepts, scored by `harness/borrowck_ui.py`, and finds nothing in ripgrep, fd, bat,
   hyperfine, just, axum, nushell, delta, eza, tokei, starship and cargo. Its errors, and rustc's
   `unused_mut` warning, are rust-analyzer diagnostics and `ra-jit borrowck` prints them ([docs/borrowck.md](docs/borrowck.md)).
@@ -214,6 +214,16 @@ All notable changes to ra-jit are written here. The format follows
 
 ### Changed
 
+- Each debug type is described once, by itself, and the types made of each other are kept
+  together as one group that every set of debug types reaching them shares
+  ([#29](https://github.com/indexable-inc/ra-jit/issues/29)); the DWARF is the same. On Linux
+  x86-64 (16 cores, `memsplit.py`, one run each) the daemon after its own base and edits holds
+  7.36 GB instead of 7.63 on nushell, 5.87 instead of 6.55 on helix and 14.47 instead of
+  15.97 on bun, at most 7.9, 6.1 and 15.8 GB at an edit instead of 11.7, 9.8 and 22.9, and the
+  first edit after the base takes 0.37 s instead of 2.06 on nushell, 0.19 instead of 1.71 on
+  helix and 1.51 instead of 7.23 on bun. zed's own base, which passed 64 GB, finishes with no
+  bound of its own at 62.6 GB in 662 s; at the default bound, a quarter of memory, it is still
+  given up (#188).
 - A whole program's compiles under LLVM import what they call, as ThinLTO's backends do,
   where each built its callees again from MIR and optimized them from scratch. Each function
   a compile calls is lowered and run through LLVM's pre-link pipeline once in the process,
@@ -412,6 +422,12 @@ All notable changes to ra-jit are written here. The format follows
 
 ### Fixed
 
+- A daemon's link that fails on names nothing defines, used only by code rustc's own link
+  takes out, is run again as rustc's line has it, with `--gc-sections` (or `-dead_strip`,
+  `/OPT:REF`). The daemon leaves those out so a patch can call what the executable's code no
+  longer reaches, and zed's webrtc then needs X11's `libXtst`, which nothing links: its own
+  base failed to link after 662 s ([#29](https://github.com/indexable-inc/ra-jit/issues/29)).
+  An executable linked so takes edits that call into what it left out as builds in full.
 - The borrow checker holds a struct or enum to what its fields need of its lifetimes,
   rustc's inferred outlives bounds, where it is named or built: `B(x)` with
   `struct B<'a, 'b>(&'b mut F<'a, 'b>)` needs `'a: 'b`. A closure passed for a bound with
@@ -430,6 +446,21 @@ All notable changes to ra-jit are written here. The format follows
   lifetime chosen for its hidden type is applied, so what that needs of a type parameter is
   checked (E0309). `borrowck_ui.py` reads each unit with its revision's `--cfg`, so
   `#[cfg($rev)]` in a macro is set. 1532 of 1581 of rustc's tests now (was 1523).
+- Assigning `x` in `x[1][{ x = y; 2 }]`, where `x[1]` indexes a slice, is rustc's E0510: the
+  bounds check already done must hold. A returned
+  `impl IntoIterator<Item = impl Cap<'a> + Cap<'b>>` gets its member constraints, so a
+  lifetime it does not capture gives E0700 with early-bound lifetimes as with late-bound
+  ones. A closure assigning `bx.0` of a `Box` it captured from a `bx` declared without `mut`
+  is rustc's E0594, which names the capture by the place it captured, `*bx.0`, as ra-jit now
+  does. 1535 of 1581 of rustc's tests now (was 1532).
+- A returned `impl Trait` holds the borrows of the lifetimes elided in its function's
+  parameters, so mutating `self` while the iterator of
+  `fn evens(&self) -> impl Iterator<Item = &i32> + '_` is live gives rustc's E0502; it was
+  missed. Edition 2024 captures every elided lifetime, earlier editions the one `'_` or an
+  elided lifetime in the bounds stands for (the lifetime of `&self`, else the parameters'
+  only one), and `use<'_>` that one too. Type lowering in rust-analyzer gives the
+  `impl Trait` a lifetime parameter for each, as rustc does (corpus `elided_captures`).
+  1536 of 1581 of rustc's tests now (was 1535).
 - A returned `impl Trait` hiding a type parameter is checked when the function's lifetimes
   are late-bound or elided: `fn f<T>(d: T, p: &mut ()) -> impl Sized + '_ { (d, p) }` gives
   rustc's E0311, and with `p: &'b mut ()` its E0309. The borrow checker relates the hidden

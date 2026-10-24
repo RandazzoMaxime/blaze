@@ -69,6 +69,12 @@ impl Trust {
         Ok(Trust { signer, trusted: trusted.collect::<anyhow::Result<_>>()?, unsigned })
     }
 
+    /// What takes any list and signs none, whatever the environment says: for a remote that
+    /// is as trusted as the program itself, its own release.
+    pub(crate) fn of_release() -> Trust {
+        Trust { signer: None, trusted: Vec::new(), unsigned: true }
+    }
+
     /// Whether lists are checked at all.
     pub(crate) fn checks(&self) -> bool {
         !self.trusted.is_empty()

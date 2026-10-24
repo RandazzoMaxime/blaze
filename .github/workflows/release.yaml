@@ -61,6 +61,10 @@ jobs:
       - run: rustup toolchain install 1.99.0 --profile minimal && rustup default 1.99.0
       # `ra-jit --version` names the commit, as the flake's build does.
       - run: echo "RA_JIT_GIT_SHA=${GITHUB_SHA::7}" >> "$GITHUB_ENV"
+      # A release's builds fetch the standard library from the release's assets (the step
+      # `Standard library` below; crates/ra-jit/src/shipped.rs).
+      - if: github.ref_type == 'tag'
+        run: echo "RA_JIT_RELEASE=$GITHUB_REF_NAME" >> "$GITHUB_ENV"
       # No build cache: release binaries come from a clean build. Without the `llvm` feature:
       # that one links libLLVM dynamically, which a machine that downloads the binary lacks.
       # The recipe the flake's build runs too, with the profile pgo/profiles.json pins; a
@@ -82,6 +86,26 @@ jobs:
           name: ${{ env.NAME }}
           path: ${{ env.NAME }}.tar.gz*
           if-no-files-found: error
+      # The standard library a build with nothing of rustc's starts from, made by the binary
+      # just archived for the toolchain the README pins, so that no user's first build makes
+      # it. The release's assets are the remote its builds fetch it from: each file of the
+      # remote under its path with `.` for `/`. A release without them builds it on the
+      # user's machine, so this does not hold the release up.
+      - name: Standard library
+        continue-on-error: true
+        run: |
+          rustup component add rust-src --toolchain 1.99.0
+          shipped/ra-jit std "$RUNNER_TEMP/std" "$(rustc +1.99.0 --print sysroot)"
+          mkdir std-assets
+          cd "$RUNNER_TEMP/std"
+          find manifests packs keys -type f ! -name '*.lock' | while read -r file; do
+            cp "$file" "$GITHUB_WORKSPACE/std-assets/${file//\//.}"
+          done
+      - uses: actions/upload-artifact@v7
+        with:
+          name: std-${{ matrix.target }}
+          path: std-assets/*
+          if-no-files-found: warn
 
   # ra-jit and the forks it depends on (`ra-jit-hir`, `ra-jit-rustc_abi`, ...) on crates.io, as
   # its own job so it can be rerun alone: versions already published are skipped. Each crate is
@@ -119,6 +143,8 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          shopt -s nullglob
           gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --verify-tag \
             --title "ra-jit $GITHUB_REF_NAME" --notes-file out/notes.md \
-            out/ra-jit-*.tar.gz out/ra-jit-*.tar.gz.sha256 out/SHA256SUMS
+            out/ra-jit-*.tar.gz out/ra-jit-*.tar.gz.sha256 out/SHA256SUMS \
+            out/manifests.* out/packs.* out/keys.*
