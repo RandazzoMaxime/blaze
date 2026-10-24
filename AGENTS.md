@@ -18,6 +18,11 @@ How to build, test and change ra-jit, including the vendored rust-analyzer, is
   run sandboxed ([#147](https://github.com/indexable-inc/ra-jit/issues/147)). One that needs
   more than the sandbox allows is the only exception, and is made to work rather than refused
   where possible: [docs/no-rustc.md](docs/no-rustc.md).
+- **Pick the best long-term design, not the least work.** Agents write most of ra-jit, so the
+  amount of code a design takes is not what limits it: own the layer, rewrite it or port
+  rustc's rule properly, rather than do the least work or what a small team could maintain.
+  What stays expensive is proving it right (differential tests against rustc, fuzzing, real
+  crates), so that is where the effort goes: [docs/contributing.md](docs/contributing.md#rules-for-code).
 - **Language semantics go in the rust-analyzer subtree.** MIR building and passes, borrow
   checking, const eval, layout and code-identity hashes as salsa queries (what rustc keeps in
   `rustc_middle`, `rustc_mir_transform`, `rustc_borrowck`) go in `vendor/rust-analyzer`, as a
