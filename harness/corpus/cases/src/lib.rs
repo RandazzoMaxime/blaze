@@ -8179,3 +8179,42 @@ pub mod returned_in_place {
         (first, chain, stopped, ran, caught, kept)
     }
 }
+
+/// What an `impl Trait` borrows of the arguments it captures, the lifetimes they leave out too:
+/// the borrow lasts while it is used, and `use<>` captures none.
+pub mod elided_captures {
+    pub struct Numbers(Vec<i32>);
+
+    impl Numbers {
+        pub fn evens(&self) -> impl Iterator<Item = &i32> + '_ {
+            self.0.iter().filter(|it| **it % 2 == 0)
+        }
+
+        pub fn odds(&self) -> impl Iterator<Item = &i32> {
+            self.0.iter().filter(|it| **it % 2 != 0)
+        }
+
+        pub fn len_of(&self) -> impl Fn() -> usize + use<> {
+            let len = self.0.len();
+            move || len
+        }
+    }
+
+    pub fn plus(v: &[i32], by: i32) -> impl Iterator<Item = i32> + '_ {
+        v.iter().map(move |it| it + by)
+    }
+
+    pub fn run() -> (usize, Option<i32>, usize, usize, Vec<i32>) {
+        let mut numbers = Numbers(vec![1, 2, 3, 4]);
+        let evens = numbers.evens().count();
+        numbers.0.push(6);
+        let first = numbers.odds().next().copied();
+        numbers.0.push(7);
+        let len = numbers.len_of();
+        numbers.0.push(8);
+        let mut v = vec![1, 2];
+        let sum = plus(&v, 10).sum::<i32>() as usize;
+        v.push(3);
+        (evens, first, len(), sum, v)
+    }
+}

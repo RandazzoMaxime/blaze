@@ -157,6 +157,17 @@ struct MirLowerCtx<'a, 'db> {
     /// common, so what is in scope in one never meets what is in scope in another.
     unwind_nodes: FxHashMap<(BasicBlockId, LocalId, bool), BasicBlockId>,
     unwind_resume: Option<BasicBlockId>,
+    /// rustc's exit drop trees: the way out of a `break`, `continue` or `return`, or of a
+    /// future dropped at an `await`, drops each value it leaves in a block keyed by the block
+    /// that comes after it, the local, and the locals whose storage ends between the two. Ways
+    /// out to the same place share the drops of what they both leave: a struct literal whose
+    /// fields each `?` drops what the fields before made once, not once for every field after
+    /// them.
+    exit_nodes: FxHashMap<(BasicBlockId, LocalId, Vec<LocalId>), BasicBlockId>,
+    /// The block every `return` goes to once it has dropped what it leaves.
+    returned: Option<BasicBlockId>,
+    /// The block a future dropped at an `await` ends in once what is in scope is dropped.
+    coroutine_dropped: Option<BasicBlockId>,
     /// The locals that hold an operand of an aggregate or a call lowered so far.
     operand_locals: FxHashSet<LocalId>,
     /// The temporaries an expression is being written to. rustc's `as_temp` schedules the drop
@@ -347,6 +358,9 @@ impl<'a, 'db> MirLowerCtx<'a, 'db> {
             undeclared: FxHashSet::default(),
             unwind_nodes: FxHashMap::default(),
             unwind_resume: None,
+            exit_nodes: FxHashMap::default(),
+            returned: None,
+            coroutine_dropped: None,
             operand_locals: FxHashSet::default(),
             unscheduled: FxHashSet::default(),
             arm_unreached: false,
@@ -552,7 +566,37 @@ impl<'a, 'db> MirLowerCtx<'a, 'db> {
                 );
                 Ok(Some(current))
             }
-            Expr::InlineAsm(asm) if asm.comment_only => Ok(Some(current)),
+            // A register only written to has no value the block could leave in it, so such an
+            // operand is lowered as assembly would be.
+            Expr::InlineAsm(asm)
+                if asm.comment_only
+                    && !asm
+                        .operands
+                        .iter()
+                        .any(|(_, it)| matches!(it, AsmOperand::Out { expr: Some(_), .. })) =>
+            {
+                // The block emits nothing, so a register it reads and writes keeps the value it
+                // was given: the borrow checker sees the write to the variable as a mutation.
+                for (_, operand) in &asm.operands {
+                    let (input, output) = match *operand {
+                        AsmOperand::InOut { expr, .. } => (expr, expr),
+                        AsmOperand::SplitInOut { in_expr, out_expr: Some(out_expr), .. } => {
+                            (in_expr, out_expr)
+                        }
+                        _ => continue,
+                    };
+                    let Some((value, next)) = self.lower_expr_to_some_operand(input, current)?
+                    else {
+                        return Ok(None);
+                    };
+                    let Some((place, next)) = self.lower_expr_as_place(next, output, true)? else {
+                        return Ok(None);
+                    };
+                    current = next;
+                    self.push_assignment(current, place, value.into(), expr_id.into());
+                }
+                Ok(Some(current))
+            }
             Expr::InlineAsm(asm) => {
                 let Some(template) = &asm.template else {
                     not_supported!("inline assembly whose template is not known");
@@ -910,6 +954,7 @@ impl<'a, 'db> MirLowerCtx<'a, 'db> {
                 let end_of_else = if let Some(else_branch) = else_branch {
                     self.lower_branch_to_place(*else_branch, place, else_block)?
                 } else {
+                    self.push_assign_unit(else_block, place, expr_id.into());
                     Some(else_block)
                 };
                 let end_of_else = if early {
@@ -1207,30 +1252,28 @@ impl<'a, 'db> MirLowerCtx<'a, 'db> {
                         .as_ref()
                         .ok_or(MirLowerError::ContinueWithoutLoop)?,
                 };
-                let begin = loop_data.begin;
-                current =
-                    self.drop_until_scope(loop_data.drop_scope_index, current, expr_id.into());
-                self.set_goto(current, begin, expr_id.into());
+                let (begin, scope) = (loop_data.begin, loop_data.drop_scope_index);
+                self.exit_to(scope, current, begin, expr_id.into());
                 Ok(None)
             }
             &Expr::Break { expr, label } => {
-                if let Some(expr) = expr {
-                    let loop_data = match label {
-                        Some(l) => self
-                            .labeled_loop_blocks
-                            .get(&l)
-                            .ok_or(MirLowerError::UnresolvedLabel)?,
-                        None => self
-                            .current_loop_blocks
-                            .as_ref()
-                            .ok_or(MirLowerError::BreakWithoutLoop)?,
-                    };
-                    let Some(c) =
-                        self.lower_expr_to_place(expr, loop_data.place.as_ref(), current)?
-                    else {
-                        return Ok(None);
-                    };
-                    current = c;
+                let loop_data = match label {
+                    Some(l) => {
+                        self.labeled_loop_blocks.get(&l).ok_or(MirLowerError::UnresolvedLabel)?
+                    }
+                    None => {
+                        self.current_loop_blocks.as_ref().ok_or(MirLowerError::BreakWithoutLoop)?
+                    }
+                };
+                let loop_place = loop_data.place.as_ref();
+                match expr {
+                    Some(expr) => {
+                        let Some(c) = self.lower_expr_to_place(expr, loop_place, current)? else {
+                            return Ok(None);
+                        };
+                        current = c;
+                    }
+                    None => self.push_assign_unit(current, loop_place, expr_id.into()),
                 }
                 let (end, drop_scope) = match label {
                     Some(l) => {
@@ -1248,8 +1291,7 @@ impl<'a, 'db> MirLowerCtx<'a, 'db> {
                         self.current_loop_blocks.as_ref().unwrap().drop_scope_index,
                     ),
                 };
-                current = self.drop_until_scope(drop_scope, current, expr_id.into());
-                self.set_goto(current, end, expr_id.into());
+                self.exit_to(drop_scope, current, end, expr_id.into());
                 Ok(None)
             }
             Expr::Return { expr } => {
@@ -1261,9 +1303,18 @@ impl<'a, 'db> MirLowerCtx<'a, 'db> {
                     } else {
                         return Ok(None);
                     }
+                } else {
+                    self.push_assign_unit(current, return_slot().into(), expr_id.into());
                 }
-                current = self.drop_until_scope(0, current, expr_id.into());
-                self.set_terminator(current, TerminatorKind::Return, expr_id.into());
+                let returned = match self.returned {
+                    Some(it) => it,
+                    None => {
+                        let block = self.new_basic_block();
+                        self.set_terminator(block, TerminatorKind::Return, expr_id.into());
+                        *self.returned.insert(block)
+                    }
+                };
+                self.exit_to(0, current, returned, expr_id.into());
                 Ok(None)
             }
             Expr::Become { .. } => not_supported!("tail-calls"),
@@ -1651,6 +1702,7 @@ impl<'a, 'db> MirLowerCtx<'a, 'db> {
                         rhs_op,
                     );
                     self.push_assignment(current, lhs_place, r_value, expr_id.into());
+                    self.push_assign_unit(current, place, expr_id.into());
                     return Ok(Some(current));
                 }
                 // Each side of `&&` and `||` drops its temporaries when it is done, unless it
@@ -1765,6 +1817,7 @@ impl<'a, 'db> MirLowerCtx<'a, 'db> {
                     self.resolver.update_to_inner_scope(self.db, self.store_owner, expr_id);
                 current = self.pattern_match_assignment(current, value, target)?;
                 self.resolver.reset_to_guard(resolver_guard);
+                self.push_assign_unit(current, place, expr_id.into());
                 Ok(Some(current))
             }
             Expr::Closure {
@@ -2481,7 +2534,48 @@ impl<'a, 'db> MirLowerCtx<'a, 'db> {
             return Ok(None);
         };
         self.declare_operands_last(call, declared, args.iter());
-        self.lower_call(func, args.into(), place, current, is_uninhabited, call.into())
+        let temps: Vec<LocalId> = args
+            .iter()
+            .filter_map(|arg| match &arg.kind {
+                OperandKind::Copy(place) | OperandKind::Move(place)
+                    if place.projection.as_slice().is_empty() =>
+                {
+                    Some(place.local)
+                }
+                _ => None,
+            })
+            .collect();
+        let after =
+            self.lower_call(func, args.into(), place, current, is_uninhabited, call.into())?;
+        if let Some(after) = after {
+            self.end_arguments(declared, &temps, after, call.into());
+        }
+        Ok(after)
+    }
+
+    /// Ends the storage of the temporaries a call that returned took as arguments, as rustc
+    /// ends the scope of the call's operands there. The call moved or copied what they held,
+    /// so a way out after it has nothing of theirs to drop: a struct literal whose fields each
+    /// `?` a call would otherwise leave through every argument of the fields before.
+    fn end_arguments(
+        &mut self,
+        declared: usize,
+        temps: &[LocalId],
+        after: BasicBlockId,
+        span: MirSpan,
+    ) {
+        let Some(scope) = self.drop_scopes.last_mut() else { return };
+        let Some(since) = scope.locals.get(declared..) else { return };
+        let (ended, kept): (Vec<LocalId>, Vec<LocalId>) =
+            since.iter().partition(|it| temps.contains(it));
+        if ended.is_empty() {
+            return;
+        }
+        scope.locals.truncate(declared);
+        scope.locals.extend(kept);
+        for local in ended.into_iter().rev() {
+            self.push_statement(after, StatementKind::StorageDead(local).with_span(span));
+        }
     }
 
     fn lower_call(
@@ -2804,20 +2898,22 @@ impl<'a, 'db> MirLowerCtx<'a, 'db> {
 
     /// The unwind drop tree's way out from where lowering is: every scope's drops.
     fn unwind_here(&mut self) -> Option<BasicBlockId> {
-        // rustc keeps the operands of an expression being lowered in that expression's own
-        // scope, inside the temporaries that live to the end of the statement: in
-        // `boom().extend(&String::from(..))` a panic in the deref drops `boom()` first.
-        let operands = &self.operand_locals;
-        let in_scope: Vec<LocalId> = self
-            .drop_scopes
-            .iter()
-            .flat_map(|it| {
-                let (pending, rest): (Vec<LocalId>, Vec<LocalId>) =
-                    it.in_order(operands).iter().partition(|it| operands.contains(it));
-                rest.into_iter().chain(pending)
-            })
-            .collect();
+        let in_scope: Vec<LocalId> =
+            (0..self.drop_scopes.len()).flat_map(|index| self.leaving_order(index)).collect();
         self.unwind_through(&in_scope, None)
+    }
+
+    /// The locals of the scope at `index` in the reverse of the order leaving it early drops
+    /// them in. rustc keeps the operands of an expression being lowered in that expression's
+    /// own scope, inside the temporaries that live to the end of the statement: in
+    /// `boom().extend(&String::from(..))` a panic in the deref drops `boom()` first, and a
+    /// `?` in a field of a struct literal drops the fields before it first.
+    fn leaving_order(&self, index: usize) -> Vec<LocalId> {
+        let operands = &self.operand_locals;
+        let (pending, mut rest): (Vec<LocalId>, Vec<LocalId>) =
+            self.drop_scopes[index].in_order(operands).iter().partition(|it| operands.contains(it));
+        rest.extend(pending);
+        rest
     }
 
     /// What every scope has declared, outermost first, in the order it was declared.
@@ -2921,6 +3017,16 @@ impl<'a, 'db> MirLowerCtx<'a, 'db> {
         });
         self.unwind_resume = Some(resume);
         resume
+    }
+
+    /// rustc's `push_assign_unit`: what an expression of type `()` that computes nothing gives
+    /// its place, as an assignment, a block without a tail or a `break` without a value. Zero
+    /// sized, but assigned, so that the borrow checker sees the place initialized and a second
+    /// write to it as one that needs its `mut`.
+    fn push_assign_unit(&mut self, block: BasicBlockId, place: Place<'db>, span: MirSpan) {
+        let unit = Ty::new_unit(self.interner());
+        let r = Rvalue::Aggregate(AggregateKind::Tuple(unit.store()), Box::default());
+        self.push_assignment(block, place, r, span);
     }
 
     /// A function item, or a tuple struct's or variant's constructor, written as a value: zero
@@ -3423,6 +3529,8 @@ impl<'a, 'db> MirLowerCtx<'a, 'db> {
             if !edition.at_least_2024() {
                 self.outlive_block(declared);
             }
+        } else if self.expr_ty_without_adjust(block).is_unit() {
+            self.push_assign_unit(current, place, span);
         }
         current = scope.pop_and_drop(self, current, span);
         Ok(Some(current))
@@ -3783,8 +3891,15 @@ impl<'a, 'db> MirLowerCtx<'a, 'db> {
         // A future dropped while it waits here drops what is in scope, innermost first, as
         // rustc's coroutine drop does.
         let dropped = self.new_basic_block();
-        let end = self.drop_until_scope(0, dropped, span);
-        self.set_terminator(end, TerminatorKind::CoroutineDrop, span);
+        let end = match self.coroutine_dropped {
+            Some(it) => it,
+            None => {
+                let block = self.new_basic_block();
+                self.set_terminator(block, TerminatorKind::CoroutineDrop, span);
+                *self.coroutine_dropped.insert(block)
+            }
+        };
+        self.exit_to(0, dropped, end, span);
         self.set_terminator(
             pending,
             TerminatorKind::Yield {
@@ -3816,20 +3931,100 @@ impl<'a, 'db> MirLowerCtx<'a, 'db> {
         current
     }
 
+    /// Has `current` leave the scopes from `scope_index` in, dropping what they hold innermost
+    /// first and ending its storage, and go on to `target`. As in rustc's drop tree, a drop of a
+    /// value is a block shared with every other way out to `target` that leaves the same
+    /// locals after it; the storage this way out alone ends is ended in `current`.
+    fn exit_to(
+        &mut self,
+        scope_index: usize,
+        current: BasicBlockId,
+        target: BasicBlockId,
+        span: MirSpan,
+    ) {
+        let mut at = target;
+        // The locals whose storage ends after the drop that comes next and before `at`, in the
+        // order they were declared, with their scope.
+        let mut storage: Vec<(usize, LocalId)> = Vec::new();
+        for index in scope_index..self.drop_scopes.len() {
+            let locals = self.leaving_order(index);
+            for (position, &local) in locals.iter().enumerate() {
+                if self.is_copy(self.result.locals[local].ty.as_ref()) {
+                    storage.push((index, local));
+                    continue;
+                }
+                let ended: Vec<LocalId> = storage.iter().map(|it| it.1).collect();
+                let key = (at, local, ended);
+                if let Some(&node) = self.exit_nodes.get(&key) {
+                    at = node;
+                    storage.clear();
+                    continue;
+                }
+                let (node, dropped) = (self.new_basic_block(), self.new_basic_block());
+                let mut before: Vec<LocalId> =
+                    (0..index).flat_map(|outer| self.leaving_order(outer)).collect();
+                before.extend_from_slice(&locals[..position]);
+                let unwind = self.unwind_through(&before, Some(local));
+                self.set_terminator(
+                    node,
+                    TerminatorKind::Drop {
+                        place: Place::from(local).store(),
+                        target: dropped,
+                        unwind,
+                    },
+                    span,
+                );
+                self.push_statement(dropped, StatementKind::StorageDead(local).with_span(span));
+                self.drop_scopes[index].exits.extend([node, dropped]);
+                self.end_storage(dropped, &mut storage, span);
+                self.set_goto(dropped, at, span);
+                self.exit_nodes.insert(key, node);
+                at = node;
+            }
+        }
+        self.end_storage(current, &mut storage, span);
+        self.set_goto(current, at, span);
+    }
+
+    /// Ends the storage of `storage`, the locals of an exit's scopes with their scope, in
+    /// `block`, the last declared first, and empties it.
+    fn end_storage(
+        &mut self,
+        block: BasicBlockId,
+        storage: &mut Vec<(usize, LocalId)>,
+        span: MirSpan,
+    ) {
+        let mut last_scope = None;
+        for (scope, local) in storage.drain(..).rev() {
+            self.push_statement(block, StatementKind::StorageDead(local).with_span(span));
+            if last_scope != Some(scope) {
+                self.drop_scopes[scope].exits.push(block);
+                last_scope = Some(scope);
+            }
+        }
+    }
+
     /// Writes the drops that left `scope` early at its `end`.
     fn exits_end_at(&mut self, scope: &DropScope, end: MirSpan) {
-        for &block in &scope.exits {
+        if scope.exits.is_empty() {
+            return;
+        }
+        let locals: FxHashSet<LocalId> = scope.locals.iter().copied().collect();
+        let mut exits = scope.exits.clone();
+        exits.sort_unstable_by_key(|it| it.into_raw());
+        exits.dedup();
+        for block in exits {
             let block = &mut self.result.basic_blocks[block];
             for statement in &mut block.statements {
                 if let StatementKind::StorageDead(local) = statement.kind
-                    && scope.locals.contains(&local)
+                    && locals.contains(&local)
                 {
                     statement.span = end;
                 }
             }
             if let Some(Terminator { span, kind: TerminatorKind::Drop { place, .. } }) =
                 &mut block.terminator
-                && scope.locals.contains(&place.local)
+                && locals.contains(&place.local)
             {
                 *span = end;
             }
