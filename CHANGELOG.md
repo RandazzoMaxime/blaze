@@ -439,6 +439,16 @@ All notable changes to ra-jit are written here. The format follows
 
 ### Fixed
 
+- A function the daemon compiles ahead, while it reads the symbols rustc built, is given up on
+  once they are read, where the worker used to finish it before it was ready. bevy's second
+  warm-store run began its derived `release_state` of a read-only query struct, which the
+  trait solver takes about two minutes over, and was ready 148 s after the build in place of
+  26 s; it is now ready in 26.5 s. A worker's own cancellation was not enough: salsa ignores it
+  inside a query that recovers from cycles, as inference and MIR building do, so the threads are
+  stopped as a write stops them, and the trait solver checks for that at each goal. A bin over
+  bevy_ecs with that struct stopped compiling ahead 9 to 20 s after its symbols were read, and now
+  within a second. `harness/aheadready.py` holds each function compiled ahead for ten minutes
+  and checks that the daemon is ready within two.
 - An expression of type `()` that computes nothing (an assignment, a block without a tail, a
   `break` or `return` without a value, an `if` without an `else`) gives its place the `()`, as
   rustc's MIR does: `let z: () = x = 1; let w = z;` was E0381, a build failed on code rustc
