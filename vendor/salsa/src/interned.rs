@@ -1107,6 +1107,28 @@ where
 
         let value = zalsa.table().get::<Value<C>>(input);
 
+        // A value already validated in this revision is the common case: every memo that read
+        // it asks again once per revision, from as many threads as verify memos. Its slot can't
+        // be reused before the next revision (reuse needs `last_interned_at` behind it), so its
+        // ID has no writer until then and is read without the shard's lock, and nothing is
+        // stored to the cache line the other threads are reading.
+        if C::REVISIONS == IMMORTAL || value.lru.last_interned_at.load() >= current_revision {
+            // SAFETY: The acquire load of `last_interned_at` (or, for immortal values, the
+            // database handle the value was interned through) makes the write of the ID visible,
+            // and the slot cannot be reused, so the ID is not written, until the next revision.
+            let id = unsafe { *value.lru.id.get() };
+            if id.generation() > input.generation() {
+                return VerifyResult::changed();
+            }
+            zalsa.event(&|| {
+                Event::new(EventKind::DidValidateInternedValue {
+                    key: self.database_key_index(input),
+                    revision: current_revision,
+                })
+            });
+            return VerifyResult::unchanged();
+        }
+
         // SAFETY: `value.shard` is guaranteed to be in-bounds for `self.shards`.
         let _shard = unsafe { self.shards.get_unchecked(value.shard as usize) }.lock();
 
