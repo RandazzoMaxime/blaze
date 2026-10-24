@@ -6,7 +6,8 @@ formatting, a file and an uncaught panic, one with a `#[global_allocator]` of it
 built with `panic = "abort"`, and one with a static of proc-macro clients as J2 writes it,
 are built by ra-jit with every crate its own, the standard library included, and linked by
 ra-jit (`--exe`): the native libraries are the ones the crates' `#[link]`s ask for, and
-nothing it could not compile may be left in the executable.
+nothing it could not compile may be left in the executable. A shared library is linked too
+(`--exe` with `--shared`), loaded with `dlopen` and called as cargo's `cdylib` of it is.
 Each is built three ways:
 
   - whole: the program and the standard library in one build, one object;
@@ -163,6 +164,27 @@ fn main() {
 PROGRAMS = [("hello", HELLO, [["a", "b"]], "unwind"), ("rich", RICH, [[], ["fail"]], "unwind"),
             ("counting", ALLOC, [[]], "unwind"), ("abort", ABORT, [[], ["fail"]], "abort"),
             ("macros", MACROS, [[]], "unwind")]
+# A shared library, as J2 links a proc macro's (`--exe` with `--shared`): its function
+# allocates, formats, keeps a thread-local and catches a panic, which the allocator shim, the
+# library's TLS and the unwinder have to be right for, loaded into a process ra-jit did not link.
+LIBRARY = r"""use std::cell::RefCell;
+use std::collections::BTreeMap;
+
+thread_local! {
+    static SEEN: RefCell<BTreeMap<u64, String>> = RefCell::new(BTreeMap::new());
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn allrajit_count(n: u64) -> u64 {
+    let text: String = (0..n).map(|i| format!("{i},")).collect();
+    SEEN.with(|seen| seen.borrow_mut().insert(n, text.clone()));
+    std::panic::set_hook(Box::new(|_| {}));
+    let caught = std::panic::catch_unwind(|| if n == 3 { panic!("three") } else { n });
+    let seen = SEEN.with(|seen| seen.borrow().len() as u64);
+    seen * 1000 + text.len() as u64 * 10 + caught.is_err() as u64
+}
+"""
+CALLS = [1, 3, 10, 3]
 # cargo's build of these needs the unstable features they name.
 UNSTABLE = {"macros"}
 # Crates of the standard library a program links that the library's unit leaves out. What
@@ -200,6 +222,28 @@ def package(work, name, source, panic):
     return root
 
 
+def library_package(work):
+    root = os.path.join(work, "shared")
+    os.makedirs(os.path.join(root, "src"))
+    with open(os.path.join(root, "Cargo.toml"), "w") as f:
+        f.write('[package]\nname = "shared"\nversion = "0.1.0"\nedition = "2021"\n'
+                '[lib]\ncrate-type = ["cdylib"]\n[workspace]\n')
+    with open(os.path.join(root, "src/lib.rs"), "w") as f:
+        f.write(LIBRARY)
+    subprocess.run(["cargo", "generate-lockfile", "-q"], cwd=root, check=True)
+    return root
+
+
+def calls(library):
+    """What the library's `allrajit_count` gives for each of CALLS, loaded by a process of its own."""
+    code = ("import ctypes, sys\n"
+            "f = ctypes.CDLL(sys.argv[1]).allrajit_count\n"
+            "f.argtypes, f.restype = [ctypes.c_uint64], ctypes.c_uint64\n"
+            f"print([f(n) for n in {CALLS!r}])\n")
+    ran = subprocess.run([sys.executable, "-c", code, library], capture_output=True, text=True)
+    return ran.returncode, ran.stdout, ran.stderr
+
+
 def ra_jit(root, crates, out, *extra, env=None):
     args = sum((["--crate", c] for c in crates), [])
     return run([RA_JIT, root, *args, "--out", out, *extra], root, f"ra-jit {' '.join(crates[:1])}", env)
@@ -234,6 +278,12 @@ def main():
                 {"RUSTC_BOOTSTRAP": "1"} if name in UNSTABLE else None)
             binary = os.path.join(root, "target/debug", name)
             expected[name] = [outcome(binary, args, root) for args in runs]
+        library = library_package(work)
+        run(["cargo", "build", "-q", "--target-dir", os.path.join(library, "target")], library,
+            "cargo build of the shared library")
+        expected_calls = calls(os.path.join(library, "target/debug/libshared.so"))
+        if expected_calls[0] != 0:
+            raise SystemExit(f"FAIL: cargo's shared library did not load: {expected_calls}")
         lines = []
         units = {}
         if "unit" in ways:
@@ -287,8 +337,28 @@ def main():
                                          f"cargo:  {want}\nra-jit: {got}")
                 lines.append(f"{name} ({way}): built and linked in {took:.2f} s{how}, the link "
                              f"{link_took}, {len(runs)} runs as cargo's")
+            obj, shared = (os.path.join(work, f"shared-{way}{ext}") for ext in (".o", ".so"))
+            exe = ["--exe", shared, "--shared"]
+            if way == "whole":
+                ran, took = ra_jit(library, ["shared", *std_of("unwind")], obj, *exe)
+            elif way == "unit":
+                ran, took = ra_jit(library, ["shared"], obj, "--prebuilt", units["unwind"], *exe)
+            else:
+                ran, took = ra_jit(library, ["shared"], obj, *exe, env=stores[0])
+                said = re.findall(r"^standard library: (.*)$", ran.stderr, re.M)
+                if not said or not said[0].startswith("from the store"):
+                    raise SystemExit(f"FAIL: the shared library (stored) should have taken the "
+                                     f"standard library from the store: {said}\n{ran.stderr}")
+            link_took = linked(ran, f"the shared library ({way})")
+            got = calls(shared)
+            if got != expected_calls:
+                raise SystemExit(f"FAIL: the shared library ({way}) differs from cargo's:\n"
+                                 f"cargo:  {expected_calls}\nra-jit: {got}")
+            lines.append(f"the shared library ({way}): built and linked in {took:.2f} s, the link "
+                         f"{link_took}, {len(CALLS)} calls as cargo's library answers them")
         print("\n".join(lines))
-        print(f"PASS: {len(PROGRAMS)} programs with nothing of rustc's, {' and '.join(ways)}")
+        print(f"PASS: {len(PROGRAMS)} programs and a shared library with nothing of rustc's, "
+              f"{' and '.join(ways)}")
         passed = True
     finally:
         if passed:

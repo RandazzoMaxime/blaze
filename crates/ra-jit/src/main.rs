@@ -137,6 +137,9 @@ struct Args {
     /// The executable to link `out` into, with the standard library's object and the native
     /// libraries the crates ask for, in a build with nothing of rustc's ([`link::executable`]).
     exe: Option<PathBuf>,
+    /// `exe` is a shared library of the crate asked for, as a proc macro's is
+    /// (docs/no-rustc.md, step J2), not an executable.
+    shared: bool,
     /// Where to write, after `exe` is linked, the dep-info rustc would have of the crate asked
     /// for: the files of its modules, as cargo reads them to know when to build it again.
     dep_info: Option<PathBuf>,
@@ -233,6 +236,7 @@ impl Args {
         let mut isolate = None;
         let mut prebuilt = None;
         let mut exe = None;
+        let mut shared = false;
         let mut dep_info = None;
         let mut cfg_test = false;
         let mut dev_deps = false;
@@ -275,6 +279,7 @@ impl Args {
                 "--isolate" => isolate = Some(PathBuf::from(value()?)),
                 "--prebuilt" => prebuilt = Some(PathBuf::from(value()?)),
                 "--exe" => exe = Some(PathBuf::from(value()?)),
+                "--shared" => shared = true,
                 "--dep-info" => dep_info = Some(PathBuf::from(value()?)),
                 "--watch" => watch = true,
                 "--socket" => socket = Some(PathBuf::from(value()?)),
@@ -300,6 +305,9 @@ impl Args {
                 _ => bail!("unexpected argument {arg}"),
             }
         }
+        if shared && exe.is_none() {
+            bail!("--shared says what --exe links, and there is no --exe");
+        }
         Ok(Args {
             project: project.context("missing project path")?,
             krate: krate.context("missing --crate")?,
@@ -319,6 +327,7 @@ impl Args {
             isolate,
             prebuilt,
             exe,
+            shared,
             dep_info,
             library: false,
             cfg_test,
@@ -3753,6 +3762,7 @@ fn std_unit(
         out: object.clone(),
         report: None,
         exe: None,
+        shared: false,
         library: true,
         debug,
         ..args.clone()
@@ -3798,6 +3808,7 @@ fn std_unit(
 fn link_executable(
     db: &RootDatabase,
     table: &SymbolTable,
+    listed: &Listed,
     args: &Args,
     sysroot: Option<&Path>,
     exe: &Path,
@@ -3811,7 +3822,22 @@ fn link_executable(
     }
     let objects: Vec<&Path> =
         std::iter::once(args.out.as_path()).chain(args.prebuilt.as_deref()).collect();
-    let took = link::executable(db, &program, &objects, sysroot, exe)?;
+    // A shared library exports what the crate asked for names with `#[no_mangle]` or
+    // `#[export_name]`.
+    let exports = args.shared.then(|| -> anyhow::Result<Vec<String>> {
+        let mut exports = Vec::new();
+        for krate in crates_named(db, &args.krate, args)? {
+            let of = listed.of(db, krate);
+            let functions = of.functions.iter().filter_map(|&it| exported_symbol(db, it));
+            let statics = of.statics.iter().filter_map(|&it| exported_static(db, it));
+            exports.extend(functions.chain(statics.map(|it| it.as_str().to_owned())));
+        }
+        exports.sort_unstable();
+        exports.dedup();
+        Ok(exports)
+    });
+    let exports = exports.transpose()?;
+    let took = link::executable(db, &program, &objects, sysroot, exe, exports.as_deref())?;
     let stand_ins = link::stand_ins(exe)?;
     eprintln!(
         "linked {} in {took:.1?}, {} functions in it ra-jit could not compile",
@@ -3991,6 +4017,7 @@ fn build(
         entries: &entries,
         on_demand: &on_demand,
         start: main.filter(|it| own(it).is_some() || in_harness(db, *it)),
+        shared: args.shared,
         whole: local.iter().all(|&krate| resolver.own_crate_id(krate.into()).is_some()),
         kept: &kept,
         offered: &offered,
@@ -4113,6 +4140,7 @@ fn build(
                     entries: &[func],
                     on_demand: &[],
                     start: None,
+                    shared: false,
                     whole: false,
                     kept: &[],
                     offered: &[],
@@ -5382,6 +5410,7 @@ fn build_batch(db: &RootDatabase, args: Args) -> anyhow::Result<()> {
             isolate: None,
             prebuilt: args.prebuilt.clone(),
             exe: args.exe.clone(),
+            shared: args.shared,
             dep_info: None,
             library: args.library,
             cfg_test: args.cfg_test,
@@ -7374,7 +7403,8 @@ fn run_holding(
             if let Some(exe) = &args.exe {
                 let workspace = checkouts.loaded.workspaces().first();
                 let sysroot = workspace.and_then(|it| it.sysroot.root());
-                link_executable(&db, &table, &args, sysroot.map(|it| it.as_ref()), exe)?;
+                let sysroot = sysroot.map(|it| it.as_ref());
+                link_executable(&db, &table, &listed, &args, sysroot, exe)?;
                 if let Some(path) = &args.dep_info {
                     write_dep_info(&db, &args, tree.vfs(), exe, path)?;
                 }
