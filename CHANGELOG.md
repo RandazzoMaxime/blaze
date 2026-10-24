@@ -8,6 +8,13 @@ All notable changes to ra-jit are written here. The format follows
 
 ### Added
 
+- `vendor/proc-macro-srv`, the 1.99.0 release's proc-macro server with a loader that reads
+  the list of macros ra-jit writes into a proc-macro library, built by ra-jit with nothing of
+  rustc's. `RA_JIT_PROC_MACRO_COMPARE` and `RA_JIT_PROC_MACRO_LIBS` expand each call again
+  with it and ra-jit's library of the crate and compare the output with the toolchain's;
+  `harness/macroserver.py` holds serde_derive's, thiserror's, tokio's and clap's equal
+  ([no-rustc.md](docs/no-rustc.md), step J1). A proc-macro crate's `fn main` is no longer
+  taken for an entry point.
 - The SSE and AVX compares compile (#87): `llvm.x86.sse.cmp.ps` and `.ss`, `sse2.cmp.pd` and
   `.sd` and AVX's 256-bit ones give a lane of all ones where the immediate's predicate holds, as
   rustc's do. glam's `Vec4::cmpeq` and `is_finite_mask`, which bevy calls, were left to rustc;
@@ -211,7 +218,7 @@ All notable changes to ra-jit are written here. The format follows
 - A borrow checker, the crate `hir-ty-borrowck` in the rust-analyzer subtree, written to give
   rustc's verdict: Polonius alpha by default as nightly rustc does, NLL with
   `RA_JIT_BORROWCK=nll`. It gives rustc's errors on
-  1539 of 1581 of rustc's own borrow-check tests that it can run, and none on any of the 246
+  1541 of 1581 of rustc's own borrow-check tests that it can run, and none on any of the 246
   rustc accepts, scored by `harness/borrowck_ui.py`, and finds nothing in ripgrep, fd, bat,
   hyperfine, just, axum, nushell, delta, eza, tokei, starship and cargo. Its errors, and rustc's
   `unused_mut` warning, are rust-analyzer diagnostics and `ra-jit borrowck` prints them ([docs/borrowck.md](docs/borrowck.md)).
@@ -536,6 +543,11 @@ All notable changes to ra-jit are written here. The format follows
   rustc's "higher-ranked lifetime error", as does a forwarding impl that needs
   `T: for<'a> Bar<&'a isize>` of a `T` that is only `Bar<&'b isize>`. They were missed
   (corpus `higher_ranked`). 1539 of 1581 of rustc's tests now (was 1536).
+- The borrow checker checks the constants of a signature: an array length or a const
+  generic's default written as a block, `[u8; { .. }]` or `struct X<const N: usize = { .. }>`,
+  which no item's body holds. `const N: usize = { let s: String; s.len() }` is rustc's E0381,
+  and a move out of a reference in an array length its E0507; both were missed. 1541 of 1581
+  of rustc's tests now (was 1539).
 - A returned `impl Trait` hiding a type parameter is checked when the function's lifetimes
   are late-bound or elided: `fn f<T>(d: T, p: &mut ()) -> impl Sized + '_ { (d, p) }` gives
   rustc's E0311, and with `p: &'b mut ()` its E0309. The borrow checker relates the hidden

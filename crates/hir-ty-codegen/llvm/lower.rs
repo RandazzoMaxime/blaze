@@ -36,10 +36,14 @@ use inkwell::{
     },
 };
 use rustc_hash::{FxHashMap, FxHashSet};
+use std::sync::Arc;
+
+use hir_def::hir::AsmOptions;
+use inkwell::InlineAsmDialect;
 
 use super::Unhandled;
 use crate::{
-    ObjectFormat,
+    ObjectFormat, asm,
     fragment::Pointee,
     unwind::{self, seh::ARRIVAL},
 };
@@ -116,6 +120,9 @@ pub(super) struct Lowering<'ctx, 'f> {
     /// The number in the name of `memcmp`, which is called by its own name: LLVM writes a
     /// comparison of the C library's of a few bytes it knows the number of as loads.
     memcmp: Option<u32>,
+    /// The `asm!` blocks whose wrappers are called, by the numbers in the wrappers' names, that
+    /// go where they are called as LLVM's inline assembly.
+    blocks_asm: &'f FxHashMap<u32, Arc<asm::Inline>>,
     pads: FxHashMap<Pad, BasicBlock<'ctx>>,
     /// The block the allocas are in.
     frame: Option<BasicBlock<'ctx>>,
@@ -583,6 +590,7 @@ impl<'ctx, 'f> Lowering<'ctx, 'f> {
         statics: &'f FxHashSet<u32>,
         resume: Option<u32>,
         memcmp: Option<u32>,
+        blocks_asm: &'f FxHashMap<u32, Arc<asm::Inline>>,
         shown: &'f FxHashMap<u32, FunctionValue<'ctx>>,
         debug: Option<&'f Debug<'ctx>>,
     ) -> Lowered<()> {
@@ -612,6 +620,7 @@ impl<'ctx, 'f> Lowering<'ctx, 'f> {
             statics,
             resume,
             memcmp,
+            blocks_asm,
             pads: FxHashMap::default(),
             frame: None,
             arrival: None,
@@ -1257,6 +1266,12 @@ impl<'ctx, 'f> Lowering<'ctx, 'f> {
                     && self.resumes(func_ref)
                 {
                     return self.resume(exception);
+                }
+                if let [slot] = *dfg.inst_args(inst)
+                    && dfg.inst_results(inst).is_empty()
+                    && let Some(block) = self.asm_block(func_ref)
+                {
+                    return self.inline_asm(&block, slot);
                 }
                 let callee = self.callee(func_ref)?;
                 let sig = &dfg.signatures[dfg.ext_funcs[func_ref].signature];
@@ -1928,6 +1943,87 @@ impl<'ctx, 'f> Lowering<'ctx, 'f> {
             }
             _ => Err(Unhandled::Shape("a name that is neither a request nor a library call")),
         }
+    }
+
+    /// The `asm!` block the call of `func_ref` runs, when it goes where it is called.
+    fn asm_block(&self, func_ref: ir::FuncRef) -> Option<Arc<asm::Inline>> {
+        let name = self.external_name(&self.func.dfg.ext_funcs[func_ref].name).ok()?;
+        match super::Symbol::parse(&name)? {
+            super::Symbol::Func(id) => self.blocks_asm.get(&id).cloned(),
+            super::Symbol::Data(_) => None,
+        }
+    }
+
+    /// `block` where its wrapper is called with `slot`: the inputs read from the slot, the
+    /// outputs written to it.
+    fn inline_asm(&mut self, block: &asm::Inline, slot: Value) -> Lowered<()> {
+        let base = self.pointer(slot)?;
+        let context = self.context;
+        let int = |size: u32| match size {
+            1 => Ok(context.i8_type()),
+            2 => Ok(context.i16_type()),
+            4 => Ok(context.i32_type()),
+            8 => Ok(context.i64_type()),
+            _ => Err(Unhandled::Shape("an `asm!` operand of an odd size")),
+        };
+        let at = |lowering: &Self, offset: u32| {
+            let offset = lowering.context.i64_type().const_int(offset.into(), false);
+            // SAFETY: the offset is within the slot, which the wrapper's offsets are of.
+            unsafe { lowering.builder.build_gep(lowering.context.i8_type(), base, &[offset], "") }
+        };
+        let mut args: Vec<BasicMetadataValueEnum<'ctx>> = Vec::new();
+        let mut params: Vec<BasicMetadataTypeEnum<'ctx>> = Vec::new();
+        for &(offset, size) in &block.inputs {
+            let address = at(self, offset)?;
+            args.push(self.builder.build_load(int(size)?, address, "")?.into());
+            params.push(int(size)?.into());
+        }
+        let outputs: Vec<BasicTypeEnum<'ctx>> =
+            block.outputs.iter().map(|&(_, size)| Ok(int(size)?.into())).collect::<Lowered<_>>()?;
+        let ty = match outputs.as_slice() {
+            [] => self.context.void_type().fn_type(&params, false),
+            [one] => one.fn_type(&params, false),
+            more => self.context.struct_type(more, false).fn_type(&params, false),
+        };
+        let options = block.options;
+        let intel = crate::Target::selected()
+            .is_ok_and(|it| it.arch == crate::target::Arch::X86_64)
+            && !options.contains(AsmOptions::ATT_SYNTAX);
+        let pure = options.contains(AsmOptions::PURE);
+        let code = self.context.create_inline_asm(
+            ty,
+            block.text.clone(),
+            block.constraints.clone(),
+            !pure,
+            !options.contains(AsmOptions::NOSTACK),
+            intel.then_some(InlineAsmDialect::Intel),
+            false,
+        );
+        let call = self.builder.build_indirect_call(ty, code, &args, "")?;
+        let nounwind = Attribute::get_named_enum_kind_id("nounwind");
+        call.add_attribute(AttributeLoc::Function, self.context.create_enum_attribute(nounwind, 0));
+        if options.contains(AsmOptions::NOMEM) {
+            let memory = Attribute::get_named_enum_kind_id("memory");
+            call.add_attribute(
+                AttributeLoc::Function,
+                self.context.create_enum_attribute(memory, 0),
+            );
+        }
+        let returned = call.try_as_basic_value().basic();
+        for (at_index, &(offset, size)) in block.outputs.iter().enumerate() {
+            let Some(offset) = offset else { continue };
+            let value = match (block.outputs.len(), returned) {
+                (1, Some(value)) => value,
+                (_, Some(BasicValueEnum::StructValue(all))) => {
+                    self.builder.build_extract_value(all, at_index as u32, "")?
+                }
+                _ => return Err(Unhandled::Shape("an `asm!` block without its outputs")),
+            };
+            debug_assert_eq!(value.get_type(), int(size)?.into());
+            let address = at(self, offset)?;
+            self.builder.build_store(address, value)?;
+        }
+        Ok(())
     }
 
     fn callee(&mut self, func_ref: ir::FuncRef) -> Lowered<FunctionValue<'ctx>> {
