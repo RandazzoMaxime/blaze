@@ -182,7 +182,7 @@ All notable changes to ra-jit are written here. The format follows
 - A borrow checker, the crate `hir-ty-borrowck` in the rust-analyzer subtree, written to give
   rustc's verdict: Polonius alpha by default as nightly rustc does, NLL with
   `RA_JIT_BORROWCK=nll`. It gives rustc's errors on
-  1535 of 1581 of rustc's own borrow-check tests that it can run, and none on any of the 246
+  1536 of 1581 of rustc's own borrow-check tests that it can run, and none on any of the 246
   rustc accepts, scored by `harness/borrowck_ui.py`, and finds nothing in ripgrep, fd, bat,
   hyperfine, just, axum, nushell, delta, eza, tokei, starship and cargo. Its errors, and rustc's
   `unused_mut` warning, are rust-analyzer diagnostics and `ra-jit borrowck` prints them ([docs/borrowck.md](docs/borrowck.md)).
@@ -453,6 +453,14 @@ All notable changes to ra-jit are written here. The format follows
   ones. A closure assigning `bx.0` of a `Box` it captured from a `bx` declared without `mut`
   is rustc's E0594, which names the capture by the place it captured, `*bx.0`, as ra-jit now
   does. 1535 of 1581 of rustc's tests now (was 1532).
+- A returned `impl Trait` holds the borrows of the lifetimes elided in its function's
+  parameters, so mutating `self` while the iterator of
+  `fn evens(&self) -> impl Iterator<Item = &i32> + '_` is live gives rustc's E0502; it was
+  missed. Edition 2024 captures every elided lifetime, earlier editions the one `'_` or an
+  elided lifetime in the bounds stands for (the lifetime of `&self`, else the parameters'
+  only one), and `use<'_>` that one too. Type lowering in rust-analyzer gives the
+  `impl Trait` a lifetime parameter for each, as rustc does (corpus `elided_captures`).
+  1536 of 1581 of rustc's tests now (was 1535).
 - A returned `impl Trait` hiding a type parameter is checked when the function's lifetimes
   are late-bound or elided: `fn f<T>(d: T, p: &mut ()) -> impl Sized + '_ { (d, p) }` gives
   rustc's E0311, and with `p: &'b mut ()` its E0309. The borrow checker relates the hidden
