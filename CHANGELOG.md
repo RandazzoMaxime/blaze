@@ -238,6 +238,17 @@ All notable changes to ra-jit are written here. The format follows
 
 ### Changed
 
+- A start on a warm store with nothing of rustc's (`RA_JIT_RUSTC_BASE=0`) is no longer held up
+  by the store and the interner (#41): each store entry and set of types is read once however
+  many threads ask for it, a value already interned is found under the shard's read lock, the
+  walk of the types an instance mentions goes into each type once (a future's type reached the
+  same few along exponentially many ways), and an edit does not wait for the store to have what
+  the build before it kept. `harness/warmstart.py helix` on Linux x86-64 (dev-aws-7,
+  c7i.16xlarge, 64 cores, one run each, main `c48ca3f800` against it with this change): a
+  restarted daemon's build on a store that has everything takes 38.3 s instead of 106.5, its
+  "store read" 130.8 s of thread time instead of 561.1, the first edit's rebuild 12.2 s instead
+  of 45.5, and a second checkout is ready 59.0 s after its build instead of 113.0; nushell's
+  takes 35.4 s instead of 37.8 ([research/warm-start.md](docs/research/warm-start.md)).
 - `unused_mut` a source denies fails the build, with the seven deny lints before it (#84).
   `harness/lints_ui.py --deny unused_mut` scores it on every rustc UI test: 51 right, 0 wrong,
   5 missed against the nightly, 49, 0, 5 against 1.99.0. `RA_JIT_BORROWCK_REFUSE=0` turns it
@@ -450,6 +461,9 @@ All notable changes to ra-jit are written here. The format follows
 
 ### Fixed
 
+- A daemon that stops lets its workers finish writing to the store what their last build kept,
+  a minute at most each, where it killed them (#41). A stop just after an edit lost it: the
+  next checkout of helix compiled 131,609 functions instead of 115,706.
 - A function the daemon compiles ahead, while it reads the symbols rustc built, is given up on
   once they are read, where the worker used to finish it before it was ready. bevy's second
   warm-store run began its derived `release_state` of a read-only query struct, which the

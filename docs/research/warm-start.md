@@ -68,6 +68,40 @@ helix's "again", from what its worker said (**read**):
 | the rebuild for the first edit | 46.2 s | 14.0 s |
 | its `resolve` | 11.8 s | 1.0 s |
 
+## Again, on main 81 commits later
+
+The branch merged with main at `c48ca3f800` (2026-10-24), measured at `954c75add0` against
+`c48ca3f800` itself, on the same dev-aws-7 (c7i.16xlarge, Xeon Platinum 8488C, 64 cores, Linux
+x86-64), Cranelift, release builds, one run each of `harness/warmstart.py helix` and
+`harness/warmstart.py nushell` (**read**). Every program's output was cargo's, and on the
+branch's build `frozenwarm.py` passed and `stress.py` had 100 of 100 edits right (**read**).
+
+| | helix before | helix after | nushell before | nushell after |
+|---|---|---|---|---|
+| first: build + ready | 48.4 + 60.7 | 49.5 + 25.7 | 55.8 + 25.2 | 56.4 + 25.0 |
+| warm: build + ready | 40.5 + 113.0 | 40.8 + 59.0 | 43.6 + 34.3 | 42.7 + 31.6 |
+| restart | 69.6 | 34.5 | 34.1 | 33.8 |
+| again | 106.5 | 38.3 | 37.8 | 35.4 |
+| edit after first | 3.57 | 0.18 | 1.07 | 0.37 |
+
+helix's "again", from what its worker said (**read**):
+
+| | before | after |
+|---|---|---|
+| first build's compile | 51.9 s | 17.0 s |
+| main thread's `resolve` | 11.4 s | 0.71 s |
+| "store read", thread time | 561.1 s | 130.8 s |
+| the rebuild for the first edit | 45.5 s | 12.3 s |
+| its `resolve` | 11.8 s | 1.1 s |
+
+nushell's "again" has little of what this change removes: "store read" 61.0 s of thread time
+before and 45.3 s after, its first build's compile 16.2 s and 14.4 s (**read**).
+
+So helix's gains held through main's 81 commits, among them compile-ahead giving up once symbols
+are read and the standard library fetched into an empty store (**read**). The counts in "not
+kept" and "not found" are the same before and after (1,615 and 24,769), as expected: this
+change reads the store faster, it does not keep more in it (**read**).
+
 ## What changed
 
 - `home::Mentions` and `returns_async_block`'s walk go into each type once. The other walks of
