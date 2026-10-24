@@ -780,6 +780,12 @@ impl State {
         Ok(())
     }
 
+    /// The directory the daemon builds `program` in, when it is asked for it.
+    pub(crate) fn plan_dir(&self, program: &Program) -> Option<&Path> {
+        let (checkout, at) = program.asked_as?;
+        self.checkouts.get(checkout)?.programs.get(at)?.object.parent()
+    }
+
     /// Cargo's locks on the build directories of the programs, held until the programs this
     /// command runs have started.
     pub(crate) fn hold(&self) -> Held {

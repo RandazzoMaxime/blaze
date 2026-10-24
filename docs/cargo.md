@@ -81,7 +81,33 @@ a build took:
 
 `run` then runs the program and `test` runs the test executables the way cargo does: the
 same working directory, the variables cargo sets, cargo's `Running` lines and the same exit
-status.
+status. Every test runs, unless `RA_JIT_TESTS=affected` says otherwise.
+
+### Running only the tests an edit reached
+
+With `RA_JIT_TESTS=affected`, `cargo ra-jit test` runs, of each test executable the daemon
+built, the tests an edit could have changed the end of since they last passed:
+
+    Running unittests src/lib.rs (target/debug/deps/tsel-1f2e): 2 of 5 tests
+    Skipping tests/it.rs (target/debug/deps/it-9a8b): 2 tests, unchanged since the last pass
+    Skipped 5 tests, unchanged since the last pass; `RA_JIT_TESTS=all` runs every test
+
+At each build the daemon hashes every test's code with the code of every function it calls,
+directly or through others, in any crate of the workspace or its dependencies, and its
+attributes (`#[ignore]`, `#[should_panic]`). The standard library is named by the toolchain.
+A test runs again when that hash is not the one it last passed with, when it has not passed
+since it was added or failed, and every time when it reaches what its code does not decide:
+a file, the environment, another process, the network, or a function ra-jit can't compile.
+An integration test also runs again when a program of its package that cargo hands it as
+`CARGO_BIN_EXE_<name>` was built again.
+
+A test executable cargo built, a command that names tests or passes the harness other flags
+than `-q`, `--nocapture`, `--show-output`, `--test-threads` and `--color`, and one that runs
+the ignored tests run as asked: every test. Time, randomness and threads are not counted as
+outside the code, so a test that depends on them by chance is as flaky as it was. Unset, or
+`all`, runs every test, as cargo does; the daemon then hashes nothing. What is left (a hash
+that never compiles on a warm store, saying why a test runs, a watch mode) is
+[#227](https://github.com/indexable-inc/ra-jit/issues/227).
 
 While cargo builds, a spare worker already loads the workspace, resolves it and compiles the
 functions of each crate cargo is done with on a quarter of the cores, and reads the symbols of
@@ -155,8 +181,10 @@ A single build goes to cargo when:
   build script reads has changed since cargo last built. Cargo builds, and the daemon loads
   the workspace again afterwards. On a large workspace that reload is long: 36 to 51 s on
   nushell;
-- a `#[test]` function was added or removed, or its attributes changed. The list of tests in
-  a test executable is rustc's;
+- a `#[test]` function was added or removed, or its attributes changed, in a test executable
+  that keeps rustc's test harness: one with a `#[bench]`, or an `#[ignore]` whose message is
+  not a string. Elsewhere ra-jit writes the harness itself and the edit is a build like
+  another ([no-rustc.md](no-rustc.md), step H);
 - a library changed that unit tests are linked against as rustc built it;
 - rust-analyzer finds an error in the source. The daemon refuses it, cargo runs, and you get
   rustc's diagnostics and cargo's exit status. This costs 0.1 to 0.5 s over cargo alone.
@@ -260,6 +288,10 @@ build a command line is, so changing one starts from a cargo build again.
 | `RA_JIT_INLINE` | With LLVM at level 2 or 3, a program built whole (`runbench.py`'s builds) has the functions it calls in any crate built into it or shown to LLVM, as a release build does; the standard library's only when they are generic or `#[inline]`, as rustc does across crates. `crate` keeps that to the function's own crate, `0` builds nothing in, `all` does it in other builds with LLVM at level 2 or 3 too (never the daemon's, whose store keeps each function by its own code alone) | across crates in a whole program, the function's own crate otherwise |
 | `RA_JIT_SPLICE` | `0` links in full after every edit instead of splicing | splice |
 | `RA_JIT_OTHER_TOOLCHAIN` | `1` builds with a rustc other than 1.99.0 instead of going to cargo, for a project pinned to a nightly near it ([support.md](support.md#toolchain)) | not set |
+
+`RA_JIT_TESTS` is read by each `cargo ra-jit test` alone and is not part of which build it
+is: `affected` runs the tests an edit reached
+([above](#running-only-the-tests-an-edit-reached)), `all` every test. The default is `all`.
 
 These are read by the daemon when it starts, from the environment of whichever command
 started it. To change one, run `cargo ra-jit stop` first.

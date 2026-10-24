@@ -230,6 +230,16 @@ fn calls_by_symbol(unit: &Record) -> bool {
 /// when it does: [`harness_alone`].
 pub(crate) const TESTS: &str = "tests";
 
+/// The file in a program of tests' directory that says `cargo ra-jit test` runs only the
+/// tests an edit reaches, for the daemon to write [`REACH`] at each build of it.
+pub(crate) const REACH_WANTED: &str = "tests-reach-wanted";
+
+/// What the daemon wrote of each test of the program at its last build, one a line: a hash of
+/// what decides how the test ends, a tab and libtest's name of it; or `-`, the name, a tab and
+/// why the test is run every time; or `*`, a tab and why every test is. Written whole, or not
+/// there.
+pub(crate) const REACH: &str = "tests-reach";
+
 /// Why the tests of `unit` are only right as rustc built them under rustc's harness, if they
 /// are. rustc's harness, where it stays in a test executable, calls the tests and their
 /// helpers, so each has to be a symbol the daemon's copy can take the place of, called the
