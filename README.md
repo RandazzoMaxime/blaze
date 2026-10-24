@@ -6,46 +6,205 @@
   ra-jit
 </h1>
 
-Edit Rust. See it change in milliseconds, in the program that is already running.
+ra-jit makes rebuilding a Rust project after an edit take milliseconds. It runs beside cargo,
+keeps your project compiled in memory, and after an edit compiles only the functions you changed
+and writes them into the program cargo already built. A program that opts in can take the new
+code while it keeps running.
+
+On real projects such as ripgrep, nushell, helix and bun, an edit builds <!-- benchheadline:start -->10× faster on macOS arm64, 17× faster on Linux aarch64 and 14× faster on Linux x86-64<!-- benchheadline:end --> than with an incremental `cargo build` (the average over the projects; [How fast](#how-fast) has every number).
+
+To try it on a project of yours, on macOS on Apple silicon or on Linux:
+
+```sh
+rustup toolchain install 1.99.0 --component rust-src
+cargo +1.99.0 install --locked ra-jit
+cd my-project
+rustup override set 1.99.0
+cargo ra-jit run
+```
+
+Wait a few seconds, change a function, and run `cargo ra-jit run` again: the `Finished` line now
+says `[ra-jit]`, which means ra-jit built it instead of cargo.
+
+## Install
+
+What you need:
+
+- **Rust 1.99.0 with its source code** (the `rust-src` component). ra-jit works with this one
+  version only: it links its code with code rustc 1.99.0 compiled, so the two have to agree on how
+  types are laid out and functions are called. Your project has to build with 1.99.0 too; on any
+  other version every build is plain cargo's.
+- **macOS on Apple silicon, or Linux on x86-64 or ARM64.** On Windows ra-jit installs and runs,
+  but hands every build to cargo. Intel Macs are not supported.
+- **Memory to spare.** ra-jit's background process holds a few GB for a small project and tens of
+  GB for the largest ([numbers](#how-fast)).
+
+### From crates.io
+
+```sh
+rustup toolchain install 1.99.0 --component rust-src
+cargo +1.99.0 install --locked ra-jit
+```
+
+This compiles ra-jit from source, which takes a few minutes, and puts four programs in
+`~/.cargo/bin`: `cargo-ra-jit` (what `cargo ra-jit` runs), `ra-jit`, `ra-jit-rustc` and
+`ra-jit-rustc-first`. They find each other by being in the same directory, so keep them together.
+
+### With Nix
+
+```sh
+nix profile install github:indexable-inc/ra-jit#ra-jit
+```
+
+Or try it without installing anything: in a project, `nix run github:indexable-inc/ra-jit#ra-jit -- build`
+is `cargo ra-jit build`. In a flake, take the package from the input:
+
+```nix
+{
+  inputs.ra-jit.url = "github:indexable-inc/ra-jit";
+  # ... then use ra-jit.packages.${system}.ra-jit in a dev shell or a profile.
+}
+```
+
+Nix compiles ra-jit from source; there is no binary cache yet. You still need Rust 1.99.0 with
+`rust-src` for your project, as above.
+
+### Prebuilt binaries
+
+Not yet: no release with binaries has been published. The first one will be on the
+[releases page](https://github.com/indexable-inc/ra-jit/releases), and `cargo binstall ra-jit`
+will install it.
+
+## Use it on your project
+
+```sh
+cd my-project
+rustup override set 1.99.0    # or a rust-toolchain.toml with channel = "1.99.0"
+cargo ra-jit build
+```
+
+The first build is cargo's, with cargo's usual output. When it is done, ra-jit starts a background
+process, the daemon, which loads your project: a few seconds for a small one, up to about a minute
+for a very large one. Until then builds are still cargo's, and each one says so:
 
 ```
-nix run github:indexable-inc/ra-jit
+ra-jit: the daemon is still loading the workspace (951ms so far); building with cargo
 ```
 
-That opens a Game of Life window you can edit while it runs (live on macOS Apple silicon).
+`cargo ra-jit status` says `ready` once it is done. From then on, an edit builds like this:
 
-![Editing the running Game of Life: rule, colours and speed change live](docs/demo.avif)
+```
+$ cargo ra-jit build
+    Finished `dev` profile [ra-jit] target(s) in 0.02s
+```
 
-<p align="center">
-  <a href="https://ra-jit.ix.dev/updates?src=readme">
-    <picture>
-      <source media="(prefers-color-scheme: dark)" srcset="docs/brand/signup-on-dark.svg">
-      <img alt="Tell us you use ra-jit" src="docs/brand/signup-on-light.svg" height="36">
-    </picture>
-  </a>
-</p>
+`[ra-jit]` means ra-jit built it. The program is where cargo would have put it, under `target/`.
 
-<p align="center">For release news: Watch → Custom → Releases on GitHub.</p>
+- `cargo ra-jit build`, `cargo ra-jit run` and `cargo ra-jit test` take cargo's flags and do what
+  cargo's commands do: `run` passes what follows `--` to your program, and `test` runs and reports
+  the tests as `cargo test` does.
+- `cargo ra-jit check` reports the errors a build would fail with.
+- `cargo ra-jit status` shows what the daemon has loaded, how many builds it did and how many it
+  left to cargo, and why.
+- `cargo ra-jit stop` stops the daemon. It also stops by itself after 30 minutes without a build.
 
-## What you get
+Any other subcommand goes to cargo unchanged. When ra-jit can't be sure its result would be the
+same as cargo's, it lets cargo do that build and prints one line saying why
+(`ra-jit: <reason>; building with cargo`). That happens after a change to `Cargo.toml`,
+`Cargo.lock` or what a build script reads, when a test is added or removed, and for a few flags
+such as `--message-format` and `-Z`. The full list is in [docs/cargo.md](docs/cargo.md).
 
-- **Live edits.** Save a file and the running program has the new code about a millisecond
-  later. Its state stays. ([docs/live.md](docs/live.md))
-- **Fast builds.** After the first build, an edit rebuilds only the functions you changed.
-  No `rustc`, no waiting.
-- **Same cargo.** `cargo ra-jit build|run|test|check` in any project.
+### Rebuild on every save
+
+ra-jit has no watch mode of its own; any file watcher can run it. With
+[watchexec](https://github.com/watchexec/watchexec):
+
+```sh
+watchexec -e rs -- cargo ra-jit build
+```
+
+### Make plain `cargo build` use ra-jit
+
+For editors, scripts and agents that run `cargo build` themselves:
+
+```sh
+ra-jit enable
+```
+
+From then on plain `cargo build`, `run`, `test` and `check` go through ra-jit, in every project of
+your user. It adds one setting to `~/.cargo/config.toml`, and `ra-jit disable` puts the file back
+as it was. Edits are slower this way than with `cargo ra-jit`, and on some projects slower than plain
+cargo ([why](docs/cargo.md#plain-cargo-switched-on-globally)).
+
+### Change a running program
+
+A program that links the `ra-jit-live` crate takes each edit while it runs, and keeps its state:
+useful for games, GUIs and anything slow to get back to where you were.
+
+```toml
+[dependencies]
+ra-jit-live = "0.1"
+```
+
+```rust
+let mut live = ra_jit_live::Live::start().ok();
+loop {
+    if let Some(outcome) = live.as_mut().and_then(|it| it.poll()) {
+        eprintln!("ra-jit: {outcome}");
+    }
+    // ...one frame of your program
+}
+```
+
+Start it with `cargo ra-jit run`. In another terminal, build after each edit with
+`cargo ra-jit build` (or the `watchexec` line above). The next `poll` swaps in the functions that
+changed, usually in under a millisecond, and prints
+`ra-jit: edit ... applied: 1 functions in 745.4µs`. An edit that changes a type the program is
+holding, such as a struct's fields, can't be applied to data that already exists, so `poll` asks
+for a restart instead.
+
+Live edits work on macOS on Apple silicon. Linux x86-64 support is on `main` and comes with the
+next release. More in [docs/live.md](docs/live.md).
+
+## What works and what doesn't yet
+
+- **Platforms.** macOS on Apple silicon, Linux x86-64 and Linux ARM64 are measured below. On
+  Windows every build is cargo's. Intel Macs are not supported.
+- **One Rust version.** 1.99.0 only (see [Install](#install)).
+- **Not every build is ra-jit's.** The changes listed above go to cargo, and so does code ra-jit
+  can't compile yet. `cargo ra-jit status` counts both; in the tables below, `(c)` marks an edit
+  that went to cargo.
+- **Errors.** An edit with a type error fails to build, as it would under cargo. The borrow checker
+  is new: 0.1.0 has none, so an edit with a borrow error builds and runs; the one on `main` finds
+  about two thirds of rustc's borrow errors. Keep `cargo check` or your CI as the final word.
+- **Memory and disk.** The daemon holds several times the memory cargo uses while building, and a
+  project's build keeps more on disk than cargo's does ([numbers](#how-fast)).
+- **Correctness.** Every change to ra-jit is checked by comparing what it builds with what rustc
+  builds, on rustc's own tests and on real projects, but it is young: if a program behaves
+  differently under ra-jit, that's a bug, and an
+  [issue](https://github.com/indexable-inc/ra-jit/issues) is welcome.
+
+What is supported in detail: [docs/support.md](docs/support.md). Everything about the cargo
+commands: [docs/cargo.md](docs/cargo.md).
+
+## How it works
+
+ra-jit keeps your project parsed and type-checked in memory with
+[rust-analyzer](https://github.com/rust-lang/rust-analyzer), the engine behind most Rust editor
+plugins, and generates machine code itself with [Cranelift](https://cranelift.dev). After an edit
+it compiles only the functions that changed, and writes them into the existing program instead of
+linking it again from scratch, which is where most of an incremental build's time goes. The first
+build is cargo's, and ra-jit's code is linked with what it produced. The whole design:
+[docs/architecture.md](docs/architecture.md).
 
 ## How fast
 
-Live edit to running code, Game of Life demo (median of 20 edits, one 96-core Linux machine):
-
-| Edit | incremental `cargo build` | ra-jit live | |
-|---|---:|---:|---:|
-| One function | 169 ms | 7 ms | **24x** |
-| One function, 300 new functions added | 282 ms | 60 ms | 4.7x |
+How long an edit takes to build, how much memory and disk ra-jit uses, and how fast the programs
+it builds run, against cargo. The tables are written by the benchmark harness
+([docs/benchmarks.md](docs/benchmarks.md)) and kept current by CI.
 
 <!-- bench:start -->
-<picture><source media="(prefers-color-scheme: dark)" srcset="docs/benchmarks/charts/edits-dark.svg"><img alt="How much faster an edit builds under ra-jit than under cargo, by platform: All projects (geometric mean): macOS arm64 10× faster, Linux aarch64 17× faster, Linux x86-64 14× faster; ripgrep 15.1.0: macOS arm64 8.1× faster, Linux aarch64 25× faster, Linux x86-64 13× faster; fd 10.3.0: macOS arm64 6.0× faster, Linux aarch64 27× faster, Linux x86-64 12× faster; bat 0.26.0: Linux aarch64 39× faster, Linux x86-64 18× faster; hyperfine 1.19.0: Linux aarch64 19× faster, Linux x86-64 11× faster; just 1.43.0: Linux aarch64 26× faster, Linux x86-64 17× faster; axum 0.8.6: Linux aarch64 16× faster, Linux x86-64 8.5× faster; nushell 0.108.0: macOS arm64 10× faster, Linux aarch64 40× faster, Linux x86-64 17× faster; helix 25.07.1: Linux aarch64 52× faster, Linux x86-64 25× faster; bevy 0.20.0: Linux aarch64 4.4× slower, Linux x86-64 4.8× faster; bun 1.4.3: macOS arm64 21× faster, Linux x86-64 23× faster" src="docs/benchmarks/charts/edits-light.svg" width="760"></picture>
+<picture><source media="(prefers-color-scheme: dark)" srcset="docs/benchmarks/charts/edits-dark.svg"><img alt="How much faster an edit builds under ra-jit than under cargo, by platform: All projects (geometric mean): macOS arm64 10× faster, Linux aarch64 17× faster, Linux x86-64 14× faster; ripgrep 15.1.0: macOS arm64 8.1× faster, Linux aarch64 25× faster, Linux x86-64 13× faster; fd 10.3.0: macOS arm64 6.0× faster, Linux aarch64 27× faster, Linux x86-64 12× faster; bat 0.26.0: Linux aarch64 39× faster, Linux x86-64 18× faster; hyperfine 1.19.0: Linux aarch64 19× faster, Linux x86-64 11× faster; just 1.43.0: Linux aarch64 26× faster, Linux x86-64 17× faster; axum 0.8.6: Linux aarch64 16× faster, Linux x86-64 8.5× faster; nushell 0.108.0: macOS arm64 10× faster, Linux aarch64 40× faster, Linux x86-64 17× faster; helix 25.07.1: Linux aarch64 52× faster, Linux x86-64 25× faster; bevy 0.20.0: Linux aarch64 4.4× slower, Linux x86-64 4.8× faster; bun 1.4.3: macOS arm64 21× faster, Linux aarch64 22× faster, Linux x86-64 22× faster" src="docs/benchmarks/charts/edits-light.svg" width="760"></picture>
 
 Edit, then build, on real projects at pinned commits: incremental `cargo build` → `cargo ra-jit build`, both warm, same linker, Cranelift, the median of each run's edits. Each platform is a machine of its own: compare numbers within a platform, not across.
 
@@ -62,12 +221,12 @@ An edit to one function, cargo → ra-jit:
 | nushell 0.108.0 | 1.81 s → **454 ms** (4.0x) | 7.50 s → **295 ms** (25x) | 1.26 s → **234 ms** (5.4x) |
 | helix 25.07.1 | - | 7.21 s → **78 ms** (92x) | 2.14 s → **76 ms** (28x) |
 | bevy 0.20.0 | - | 23.76 s → **105.76 s** (0.2x) | 3.15 s → **650 ms** (4.8x) |
-| bun 1.4.3 | 7.55 s → **362 ms** (21x) | - | 9.18 s → **441 ms** (21x) |
+| bun 1.4.3 | 7.55 s → **362 ms** (21x) | 10.63 s → **486 ms** (22x) | 9.11 s → **451 ms** (20x) |
 
 - **macOS arm64**: MacBook Pro (Mac17,6), macOS 27.0.1, with other work running (Apple M5 Max, 18 cores, 128 GiB), ra-jit [`84760c3f51`](https://github.com/indexable-inc/ra-jit/commit/84760c3f517a76f6e8a3aa41ccd81fc3f26b87c7) on 2026-10-21, median of 3 edits, load average 48 at the start, by hand.
 - **Linux aarch64**: AWS c8g.16xlarge, pinned to 16 cores with taskset (Neoverse-V2, 16 of its 64 cores, 124 GiB), ra-jit [`2cf189feb6`](https://github.com/indexable-inc/ra-jit/commit/2cf189feb641a25a8c0d26391756f9c217c56bc2) on 2026-10-22, median of 5 edits, load average 10 at the start, by hand.
 - **Linux x86-64**: AWS c8a.metal-24xl (dev-aws-3), pinned to 16 cores with taskset (AMD EPYC 9R45, 16 of its 96 cores, 188 GiB), ra-jit [`28f22ff4a8`](https://github.com/indexable-inc/ra-jit/commit/28f22ff4a884f6812c1dd9a20809edd396aad5bf) on 2026-10-23, median of 5 edits, load average 12 at the start, by hand.
-- **bun** is measured on its own, by the `bench-bun` workflow: macOS arm64 on one machine (Apple M5 Max, 18 cores, 128 GiB), ra-jit [`27077156cc`](https://github.com/indexable-inc/ra-jit/commit/27077156ccbd476079d261e529fc25b3225f0ace) on 2026-10-23, median of 3 edits, by hand; Linux x86-64 on AWS c8a.24xlarge (dev-aws-eph-rajit-bunperf) (AMD EPYC 9R45, 16 of its 96 cores, 185 GiB), ra-jit [`948d54e375`](https://github.com/indexable-inc/ra-jit/commit/948d54e375ef4f4685a932539d3a4118992a31c1) on 2026-10-23, median of 3 edits, by hand. It is the Rust port of [bun](https://github.com/oven-sh/bun), 1.25M lines of Rust in 103 crates on a nightly beside a JavaScript engine's C and C++, built with frame pointers as bun's own build is (`-C force-frame-pointers=yes`; [what it took](docs/research/bun.md)). Its test suites are not measured yet.
+- **bun** is measured on its own, by the `bench-bun` workflow: macOS arm64 on one machine (Apple M5 Max, 18 cores, 128 GiB), ra-jit [`27077156cc`](https://github.com/indexable-inc/ra-jit/commit/27077156ccbd476079d261e529fc25b3225f0ace) on 2026-10-23, median of 3 edits, by hand; Linux aarch64 on AWS c8g.24xlarge (dev-aws-eph-rajit-arm64bun), pinned to 16 cores with taskset (Neoverse-V2, 16 of its 96 cores, 185 GiB), ra-jit [`ac1ee2dd68`](https://github.com/indexable-inc/ra-jit/commit/ac1ee2dd682b7d321ba75a67924aaf95609572f0) on 2026-10-23, median of 3 edits, by hand; Linux x86-64 on AWS c8a.24xlarge (dev-aws-eph-rajit-x86edits), pinned to 16 cores with taskset (AMD EPYC 9R45, 16 of its 96 cores, 185 GiB), ra-jit [`961bb3105a`](https://github.com/indexable-inc/ra-jit/commit/961bb3105a8e90e0ac33488c803f5513f075bb87) on 2026-10-23, median of 3 edits, load average 12 at the start, by hand. It is the Rust port of [bun](https://github.com/oven-sh/bun), 1.25M lines of Rust in 103 crates on a nightly beside a JavaScript engine's C and C++, built with frame pointers as bun's own build is (`-C force-frame-pointers=yes`; [what it took](docs/research/bun.md)). Its test suites are not measured yet.
 
 <details><summary>Every kind of edit, by platform</summary>
 
@@ -93,6 +252,7 @@ An edit to one function, cargo → ra-jit:
 | nushell 0.108.0 | 7.50 s → **295 ms** (25x) | 11.86 s → **273 ms** (43x) | 11.75 s → **323 ms** (36x) | 198 ms → **22 ms** (9.0x) |
 | helix 25.07.1 | 7.21 s → **78 ms** (92x) | 8.58 s → **91 ms** (94x) | 8.00 s → **246 ms** (32x) | 96 ms → **19 ms** (5.1x) |
 | bevy 0.20.0 | 23.76 s → **105.76 s** (0.2x) | 33.52 s → **105.54 s** (0.3x) |  | 226 ms → **23 ms** (9.8x) |
+| bun 1.4.3 | 10.63 s → **486 ms** (22x) | 19.64 s → **477 ms** (41x) | 10.67 s → **629 ms** (17x) | 90 ms → **21 ms** (4.3x) |
 
 **Linux x86-64**
 
@@ -107,17 +267,17 @@ An edit to one function, cargo → ra-jit:
 | nushell 0.108.0 | 1.26 s → **234 ms** (5.4x) | 4.69 s → **254 ms** (18x) | 4.78 s → **294 ms** (16x) | 180 ms → **18 ms** (10x) |
 | helix 25.07.1 | 2.14 s → **76 ms** (28x) | 3.23 s → **89 ms** (36x) | 2.77 s → **216 ms** (13x) | 82 ms → **17 ms** (4.8x) |
 | bevy 0.20.0 | 3.15 s → **650 ms** (4.8x) | 10.69 s → **240 ms** (45x) |  | 194 ms → **20 ms** (9.7x) |
-| bun 1.4.3 | 9.18 s → **441 ms** (21x) | 16.52 s → **408 ms** (40x) | 9.26 s → **565 ms** (16x) | 73 ms → **18 ms** (4.1x) |
+| bun 1.4.3 | 9.11 s → **451 ms** (20x) | 16.51 s → **430 ms** (38x) | 9.22 s → **556 ms** (17x) | 72 ms → **18 ms** (4.0x) |
 
 </details>
 
-Measured by hand with `harness/bench.py`, or by the `bench-readme` workflow (a project measured on its own, by its own workflow) on each platform's benchmark machine once it is registered. The ra-jit measured is `cargo build --release`; the binaries a release ships are the `dist` profile with PGO, which start and edit faster ([how](https://github.com/indexable-inc/ra-jit/blob/main/docs/reports/RELEASE-BUILD.md)). Cold builds, the spread of every number, the LLVM tier and how fast the built programs run: [docs/benchmarks.md](docs/benchmarks.md). Raw JSON: [macOS arm64](docs/benchmarks/macos-arm64.json), [Linux aarch64](docs/benchmarks/linux-aarch64.json), [Linux x86-64](docs/benchmarks/linux-x86-64.json); bun: [macOS arm64](docs/benchmarks/bun-macos-arm64.json), [Linux x86-64](docs/benchmarks/bun-linux-x86-64.json).
+Measured by hand with `harness/bench.py`, or by the `bench-readme` workflow (a project measured on its own, by its own workflow) on each platform's benchmark machine once it is registered. The ra-jit measured is `cargo build --release`; the binaries a release ships are the `dist` profile with PGO, which start and edit faster ([how](https://github.com/indexable-inc/ra-jit/blob/main/docs/reports/RELEASE-BUILD.md)). Cold builds, the spread of every number, the LLVM tier and how fast the built programs run: [docs/benchmarks.md](docs/benchmarks.md). Raw JSON: [macOS arm64](docs/benchmarks/macos-arm64.json), [Linux aarch64](docs/benchmarks/linux-aarch64.json), [Linux x86-64](docs/benchmarks/linux-x86-64.json); bun: [macOS arm64](docs/benchmarks/bun-macos-arm64.json), [Linux aarch64](docs/benchmarks/bun-linux-aarch64.json), [Linux x86-64](docs/benchmarks/bun-linux-x86-64.json).
 <!-- bench:end -->
 
 <!-- benchmem:start -->
-<picture><source media="(prefers-color-scheme: dark)" srcset="docs/benchmarks/charts/memory-dark.svg"><img alt="Peak memory while an edit to one function builds, ra-jit against cargo, by platform: All projects (geometric mean): macOS arm64 12× more, Linux aarch64 7.7× more, Linux x86-64 5.1× more; ripgrep 15.1.0: macOS arm64 12× more · 2.9 GB vs cargo's 235 MB, Linux aarch64 7.9× more · 3.7 GB vs cargo's 463 MB, Linux x86-64 4.8× more · 2.2 GB vs cargo's 458 MB; fd 10.3.0: macOS arm64 12× more · 2.6 GB vs cargo's 212 MB, Linux aarch64 6.6× more · 3.4 GB vs cargo's 519 MB, Linux x86-64 3.6× more · 1.9 GB vs cargo's 533 MB; bat 0.26.0: Linux aarch64 6.0× more · 4.0 GB vs cargo's 672 MB, Linux x86-64 3.6× more · 2.4 GB vs cargo's 676 MB; hyperfine 1.19.0: Linux aarch64 10× more · 3.6 GB vs cargo's 360 MB, Linux x86-64 5.6× more · 1.9 GB vs cargo's 346 MB; just 1.43.0: Linux aarch64 9.5× more · 4.1 GB vs cargo's 434 MB, Linux x86-64 5.7× more · 2.6 GB vs cargo's 461 MB; axum 0.8.6: Linux aarch64 10× more · 4.0 GB vs cargo's 399 MB, Linux x86-64 6.2× more · 2.4 GB vs cargo's 391 MB; nushell 0.108.0: macOS arm64 12× more · 12.5 GB vs cargo's 1.1 GB, Linux aarch64 5.3× more · 12.7 GB vs cargo's 2.4 GB, Linux x86-64 4.1× more · 10.9 GB vs cargo's 2.7 GB; helix 25.07.1: Linux aarch64 7.9× more · 14.2 GB vs cargo's 1.8 GB, Linux x86-64 6.1× more · 12.3 GB vs cargo's 2.0 GB; bevy 0.20.0: Linux aarch64 7.5× more · 50.4 GB vs cargo's 6.7 GB, Linux x86-64 4.7× more · 39.7 GB vs cargo's 8.4 GB; bun 1.4.3: macOS arm64 12× more · 26.1 GB vs cargo's 2.1 GB, Linux x86-64 8.3× more · 27.3 GB vs cargo's 3.3 GB" src="docs/benchmarks/charts/memory-light.svg" width="760"></picture>
+<picture><source media="(prefers-color-scheme: dark)" srcset="docs/benchmarks/charts/memory-dark.svg"><img alt="Peak memory while an edit to one function builds, ra-jit against cargo, by platform: All projects (geometric mean): macOS arm64 12× more, Linux aarch64 7.7× more, Linux x86-64 5.0× more; ripgrep 15.1.0: macOS arm64 12× more · 2.9 GB vs cargo's 235 MB, Linux aarch64 7.9× more · 3.7 GB vs cargo's 463 MB, Linux x86-64 4.8× more · 2.2 GB vs cargo's 458 MB; fd 10.3.0: macOS arm64 12× more · 2.6 GB vs cargo's 212 MB, Linux aarch64 6.6× more · 3.4 GB vs cargo's 519 MB, Linux x86-64 3.6× more · 1.9 GB vs cargo's 533 MB; bat 0.26.0: Linux aarch64 6.0× more · 4.0 GB vs cargo's 672 MB, Linux x86-64 3.6× more · 2.4 GB vs cargo's 676 MB; hyperfine 1.19.0: Linux aarch64 10× more · 3.6 GB vs cargo's 360 MB, Linux x86-64 5.6× more · 1.9 GB vs cargo's 346 MB; just 1.43.0: Linux aarch64 9.5× more · 4.1 GB vs cargo's 434 MB, Linux x86-64 5.7× more · 2.6 GB vs cargo's 461 MB; axum 0.8.6: Linux aarch64 10× more · 4.0 GB vs cargo's 399 MB, Linux x86-64 6.2× more · 2.4 GB vs cargo's 391 MB; nushell 0.108.0: macOS arm64 12× more · 12.5 GB vs cargo's 1.1 GB, Linux aarch64 5.3× more · 12.7 GB vs cargo's 2.4 GB, Linux x86-64 4.1× more · 10.9 GB vs cargo's 2.7 GB; helix 25.07.1: Linux aarch64 7.9× more · 14.2 GB vs cargo's 1.8 GB, Linux x86-64 6.1× more · 12.3 GB vs cargo's 2.0 GB; bevy 0.20.0: Linux aarch64 7.5× more · 50.4 GB vs cargo's 6.7 GB, Linux x86-64 4.7× more · 39.7 GB vs cargo's 8.4 GB; bun 1.4.3: macOS arm64 12× more · 26.1 GB vs cargo's 2.1 GB, Linux aarch64 7.9× more · 27.7 GB vs cargo's 3.5 GB, Linux x86-64 7.4× more · 24.5 GB vs cargo's 3.3 GB" src="docs/benchmarks/charts/memory-light.svg" width="760"></picture>
 
-<picture><source media="(prefers-color-scheme: dark)" srcset="docs/benchmarks/charts/disk-dark.svg"><img alt="What a project's build keeps on disk, ra-jit against cargo, by platform: All projects (geometric mean): macOS arm64 1.5× more, Linux aarch64 1.5× more, Linux x86-64 1.4× more; ripgrep 15.1.0: macOS arm64 1.4× more · 598 MB vs cargo's 416 MB, Linux aarch64 1.6× more · 629 MB vs cargo's 404 MB, Linux x86-64 1.4× more · 553 MB vs cargo's 407 MB; fd 10.3.0: macOS arm64 1.3× more · 460 MB vs cargo's 355 MB, Linux aarch64 1.3× more · 976 MB vs cargo's 780 MB, Linux x86-64 1.3× more · 746 MB vs cargo's 571 MB; bat 0.26.0: Linux aarch64 1.4× more · 1.3 GB vs cargo's 980 MB, Linux x86-64 1.2× more · 1.2 GB vs cargo's 973 MB; hyperfine 1.19.0: Linux aarch64 1.4× more · 466 MB vs cargo's 340 MB, Linux x86-64 1.3× more · 439 MB vs cargo's 342 MB; just 1.43.0: Linux aarch64 1.5× more · 971 MB vs cargo's 664 MB, Linux x86-64 1.3× more · 848 MB vs cargo's 667 MB; axum 0.8.6: Linux aarch64 1.3× more · 511 MB vs cargo's 405 MB, Linux x86-64 1.1× more · 460 MB vs cargo's 404 MB; nushell 0.108.0: macOS arm64 1.3× more · 6.9 GB vs cargo's 5.3 GB, Linux aarch64 1.4× more · 7.5 GB vs cargo's 5.3 GB, Linux x86-64 1.2× more · 6.4 GB vs cargo's 5.3 GB; helix 25.07.1: Linux aarch64 2.1× more · 7.8 GB vs cargo's 3.7 GB, Linux x86-64 1.8× more · 6.7 GB vs cargo's 3.7 GB; bevy 0.20.0: Linux aarch64 2.2× more · 37.8 GB vs cargo's 17.5 GB, Linux x86-64 2.0× more · 35.5 GB vs cargo's 17.6 GB; bun 1.4.3: macOS arm64 1.9× more · 11.3 GB vs cargo's 6.0 GB, Linux x86-64 1.4× more · 7.9 GB vs cargo's 5.7 GB" src="docs/benchmarks/charts/disk-light.svg" width="760"></picture>
+<picture><source media="(prefers-color-scheme: dark)" srcset="docs/benchmarks/charts/disk-dark.svg"><img alt="What a project's build keeps on disk, ra-jit against cargo, by platform: All projects (geometric mean): macOS arm64 1.5× more, Linux aarch64 1.5× more, Linux x86-64 1.4× more; ripgrep 15.1.0: macOS arm64 1.4× more · 598 MB vs cargo's 416 MB, Linux aarch64 1.6× more · 629 MB vs cargo's 404 MB, Linux x86-64 1.4× more · 553 MB vs cargo's 407 MB; fd 10.3.0: macOS arm64 1.3× more · 460 MB vs cargo's 355 MB, Linux aarch64 1.3× more · 976 MB vs cargo's 780 MB, Linux x86-64 1.3× more · 746 MB vs cargo's 571 MB; bat 0.26.0: Linux aarch64 1.4× more · 1.3 GB vs cargo's 980 MB, Linux x86-64 1.2× more · 1.2 GB vs cargo's 973 MB; hyperfine 1.19.0: Linux aarch64 1.4× more · 466 MB vs cargo's 340 MB, Linux x86-64 1.3× more · 439 MB vs cargo's 342 MB; just 1.43.0: Linux aarch64 1.5× more · 971 MB vs cargo's 664 MB, Linux x86-64 1.3× more · 848 MB vs cargo's 667 MB; axum 0.8.6: Linux aarch64 1.3× more · 511 MB vs cargo's 405 MB, Linux x86-64 1.1× more · 460 MB vs cargo's 404 MB; nushell 0.108.0: macOS arm64 1.3× more · 6.9 GB vs cargo's 5.3 GB, Linux aarch64 1.4× more · 7.5 GB vs cargo's 5.3 GB, Linux x86-64 1.2× more · 6.4 GB vs cargo's 5.3 GB; helix 25.07.1: Linux aarch64 2.1× more · 7.8 GB vs cargo's 3.7 GB, Linux x86-64 1.8× more · 6.7 GB vs cargo's 3.7 GB; bevy 0.20.0: Linux aarch64 2.2× more · 37.8 GB vs cargo's 17.5 GB, Linux x86-64 2.0× more · 35.5 GB vs cargo's 17.6 GB; bun 1.4.3: macOS arm64 1.9× more · 11.3 GB vs cargo's 6.0 GB, Linux aarch64 1.2× more · 6.7 GB vs cargo's 5.6 GB, Linux x86-64 1.2× more · 6.7 GB vs cargo's 5.7 GB" src="docs/benchmarks/charts/disk-light.svg" width="760"></picture>
 
 Memory and disk, Cranelift, from the same runs as the build table. Peak: the most every process doing the work held at once, cargo → ra-jit. For ra-jit that is the daemon, its workers and what they run, and `cargo ra-jit build` with any cargo it ran; for plain cargo, cargo itself, rustc, build scripts and the linker. How it is measured: [docs/benchmarks.md](docs/benchmarks.md#memory-and-disk).
 
@@ -134,7 +294,7 @@ Peak while an edit to one function builds, cargo → ra-jit:
 | nushell 0.108.0 | 1.1 GB → **12.5 GB** | 2.4 GB → **12.7 GB** | 2.7 GB → **10.9 GB** |
 | helix 25.07.1 | - | 1.8 GB → **14.2 GB** | 2.0 GB → **12.3 GB** |
 | bevy 0.20.0 | - | 6.7 GB → **50.4 GB** | 8.4 GB → **39.7 GB** |
-| bun 1.4.3 | 2.1 GB → **26.1 GB** | - | 3.3 GB → **27.3 GB** |
+| bun 1.4.3 | 2.1 GB → **26.1 GB** | 3.5 GB → **27.7 GB** | 3.3 GB → **24.5 GB** |
 
 <details><summary>The daemon between edits, cold builds and disk, by platform</summary>
 
@@ -160,6 +320,7 @@ Peak while an edit to one function builds, cargo → ra-jit:
 | nushell 0.108.0 | 2.4 GB → **12.7 GB** | 5.8 GB ready, 12.6 GB after 65 builds | 4.6 GB → **8.3 GB** | 5.3 GB → 7.5 GB |
 | helix 25.07.1 | 1.8 GB → **14.2 GB** | 4.6 GB ready, 14.1 GB after 55 builds | 3.5 GB → **6.4 GB** | 3.7 GB → 7.8 GB |
 | bevy 0.20.0 | 6.7 GB → **50.4 GB** | 8.9 GB ready, 42.1 GB after 35 builds | 6.8 GB → **11.1 GB** | 17.5 GB → 37.8 GB |
+| bun 1.4.3 | 3.5 GB → **27.7 GB** | 12.3 GB ready, 27.7 GB after 33 builds | 4.5 GB → **15.8 GB** | 5.6 GB → 6.7 GB |
 
 **Linux x86-64**
 
@@ -174,7 +335,7 @@ Peak while an edit to one function builds, cargo → ra-jit:
 | nushell 0.108.0 | 2.7 GB → **10.9 GB** | 6.4 GB ready, 10.9 GB after 65 builds | 4.1 GB → **9.0 GB** | 5.3 GB → 6.4 GB |
 | helix 25.07.1 | 2.0 GB → **12.3 GB** | 4.6 GB ready, 12.2 GB after 55 builds | 3.1 GB → **6.5 GB** | 3.7 GB → 6.7 GB |
 | bevy 0.20.0 | 8.4 GB → **39.7 GB** | 8.6 GB ready, 44.1 GB after 35 builds | 8.4 GB → **8.5 GB** | 17.6 GB → 35.5 GB |
-| bun 1.4.3 | 3.3 GB → **27.3 GB** | 12.0 GB ready, 27.3 GB after 33 builds | 4.5 GB → **15.4 GB** | 5.7 GB → 7.9 GB |
+| bun 1.4.3 | 3.3 GB → **24.5 GB** | 10.5 GB ready, 24.5 GB after 33 builds | 4.5 GB → **14.1 GB** | 5.7 GB → 6.7 GB |
 
 On disk: cargo's target directory → ra-jit's target directory, store and home.
 
@@ -182,7 +343,7 @@ On disk: cargo's target directory → ra-jit's target directory, store and home.
 <!-- benchmem:end -->
 
 <!-- runbench:start -->
-<picture><source media="(prefers-color-scheme: dark)" srcset="docs/benchmarks/charts/runtime-dark.svg"><img alt="How fast each benchmark runs built by ra-jit, against cargo build --release, by platform: All benchmarks (geometric mean): macOS arm64 1.18× slower, Linux aarch64 1.14× slower, Linux x86-64 1.10× slower; sieve: macOS arm64 1.12× slower, Linux aarch64 1.07× slower, Linux x86-64 1.00×; collatz: macOS arm64 1.01× slower, Linux aarch64 1.00×, Linux x86-64 1.00×; fnv: macOS arm64 1.00×, Linux aarch64 1.01× slower, Linux x86-64 1.00×; qsort: macOS arm64 1.05× faster, Linux aarch64 1.08× slower, Linux x86-64 1.01× slower; matmul: macOS arm64 1.21× slower, Linux aarch64 1.04× slower, Linux x86-64 1.07× slower; nbody: macOS arm64 1.31× slower, Linux aarch64 1.04× slower, Linux x86-64 1.02× faster; mandelbrot: macOS arm64 1.01× slower, Linux aarch64 1.00×, Linux x86-64 1.03× faster; words: macOS arm64 1.37× slower, Linux aarch64 1.44× slower, Linux x86-64 1.13× slower; numeric: macOS arm64 1.31× slower, Linux aarch64 1.22× slower, Linux x86-64 1.02× faster; jsonrt: macOS arm64 ≈1.38× slower, Linux aarch64 1.42× slower, Linux x86-64 1.25× slower; ripgrep: macOS arm64 ≈1.50× slower, Linux aarch64 1.30× slower, Linux x86-64 1.21× slower; fd: macOS arm64 ≈1.12× slower, Linux aarch64 1.23× slower, Linux x86-64 1.27× slower; tokei: macOS arm64 1.29× slower, Linux aarch64 1.21× slower, Linux x86-64 1.32× slower; eza: macOS arm64 ≈1.06× slower, Linux aarch64 1.05× slower, Linux x86-64 1.08× slower; bat: macOS arm64 ≈1.16× slower, Linux aarch64 1.13× slower, Linux x86-64 1.17× slower; bun: macOS arm64 1.25× slower, Linux x86-64 1.26× slower" src="docs/benchmarks/charts/runtime-light.svg" width="760"></picture>
+<picture><source media="(prefers-color-scheme: dark)" srcset="docs/benchmarks/charts/runtime-dark.svg"><img alt="How fast each benchmark runs built by ra-jit, against cargo build --release, by platform: All benchmarks (geometric mean): macOS arm64 1.18× slower, Linux aarch64 1.14× slower, Linux x86-64 1.10× slower; sieve: macOS arm64 1.12× slower, Linux aarch64 1.07× slower, Linux x86-64 1.00×; collatz: macOS arm64 1.01× slower, Linux aarch64 1.00×, Linux x86-64 1.00×; fnv: macOS arm64 1.00×, Linux aarch64 1.01× slower, Linux x86-64 1.00×; qsort: macOS arm64 1.05× faster, Linux aarch64 1.08× slower, Linux x86-64 1.01× slower; matmul: macOS arm64 1.21× slower, Linux aarch64 1.04× slower, Linux x86-64 1.07× slower; nbody: macOS arm64 1.31× slower, Linux aarch64 1.04× slower, Linux x86-64 1.02× faster; mandelbrot: macOS arm64 1.01× slower, Linux aarch64 1.00×, Linux x86-64 1.03× faster; words: macOS arm64 1.37× slower, Linux aarch64 1.44× slower, Linux x86-64 1.13× slower; numeric: macOS arm64 1.31× slower, Linux aarch64 1.22× slower, Linux x86-64 1.02× faster; jsonrt: macOS arm64 ≈1.38× slower, Linux aarch64 1.42× slower, Linux x86-64 1.25× slower; ripgrep: macOS arm64 ≈1.50× slower, Linux aarch64 1.30× slower, Linux x86-64 1.21× slower; fd: macOS arm64 ≈1.12× slower, Linux aarch64 1.23× slower, Linux x86-64 1.27× slower; tokei: macOS arm64 1.29× slower, Linux aarch64 1.21× slower, Linux x86-64 1.32× slower; eza: macOS arm64 ≈1.06× slower, Linux aarch64 1.05× slower, Linux x86-64 1.08× slower; bat: macOS arm64 ≈1.16× slower, Linux aarch64 1.13× slower, Linux x86-64 1.17× slower; bun: macOS arm64 1.25× slower, Linux aarch64 1.17× slower, Linux x86-64 1.22× slower" src="docs/benchmarks/charts/runtime-light.svg" width="760"></picture>
 
 How fast the programs run. Each program is built by `cargo build --release` and by ra-jit with LLVM at `-O3`, every crate of it compiled by ra-jit, with the release profile; each benchmark is then run several times, the builds taking turns, median. A run is published only when every program did what the release build's did. Each platform is a machine of its own, and each number is ra-jit's time ÷ release's on it: 1x is as fast.
 
@@ -203,7 +364,7 @@ How fast the programs run. Each program is built by `cargo build --release` and 
 | tokei | 1.29x | 1.21x | 1.32x |
 | eza | ≈1.06x | 1.05x | 1.08x |
 | bat | ≈1.16x | 1.13x | 1.17x |
-| bun | 1.25x | - | 1.26x |
+| bun | 1.25x | 1.17x | 1.22x |
 | **All benchmarks (geometric mean)** | **1.18x** | **1.14x** | **1.10x** |
 
 ≈: that benchmark's runs varied by more than 1.5× from fastest to slowest on that machine; read it as rough.
@@ -211,7 +372,7 @@ How fast the programs run. Each program is built by `cargo build --release` and 
 - **macOS arm64**: GitHub-hosted macos-15 runner (a shared VM) (Apple M1 (Virtual), 3 cores, 7 GiB), ra-jit [`9c31e64d83`](https://github.com/indexable-inc/ra-jit/commit/9c31e64d83cd4cc2d0bbbd2e56b7e48d8a9326c6) on 2026-10-23, each benchmark run 5 times, load average 12 at the start, [by CI](https://github.com/indexable-inc/ra-jit/actions/runs/39876666206).
 - **Linux aarch64**: AWS c8g.8xlarge (Graviton4), pinned to 16 cores with taskset (Neoverse-V2, 16 of its 32 cores, 62 GiB), ra-jit [`e8d8a63da4`](https://github.com/indexable-inc/ra-jit/commit/e8d8a63da4) on 2026-10-23, each benchmark run 10 times, load average 11 at the start, by hand.
 - **Linux x86-64**: AWS c8a.8xlarge, pinned to 16 cores with taskset (AMD EPYC 9R45, 16 of its 32 cores, 62 GiB), ra-jit [`e8d8a63da4`](https://github.com/indexable-inc/ra-jit/commit/e8d8a63da4) on 2026-10-23, each benchmark run 10 times, load average 13 at the start, by hand.
-- **bun** is measured on its own, by the `bench-bun` workflow: macOS arm64 on one machine (Apple M5 Max, 18 cores, 128 GiB), ra-jit [`948d54e375`](https://github.com/indexable-inc/ra-jit/commit/948d54e375ef4f4685a932539d3a4118992a31c1) on 2026-10-23, each benchmark run 5 times, load average 29 at the start, by hand; Linux x86-64 on AWS c8a.8xlarge, pinned to 16 cores with taskset (AMD EPYC 9R45, 16 of its 32 cores, 62 GiB), ra-jit [`e8d8a63da4`](https://github.com/indexable-inc/ra-jit/commit/e8d8a63da4) on 2026-10-23, each benchmark run 5 times, load average 14 at the start, by hand.
+- **bun** is measured on its own, by the `bench-bun` workflow: macOS arm64 on one machine (Apple M5 Max, 18 cores, 128 GiB), ra-jit [`948d54e375`](https://github.com/indexable-inc/ra-jit/commit/948d54e375ef4f4685a932539d3a4118992a31c1) on 2026-10-23, each benchmark run 5 times, load average 29 at the start, by hand; Linux aarch64 on one machine (Neoverse-V2, 16 of its 96 cores, 185 GiB), ra-jit [`68c3558698`](https://github.com/indexable-inc/ra-jit/commit/68c3558698d1a050d728c592737766712fefae86) on 2026-10-23, each benchmark run 5 times, load average 12 at the start, by hand; Linux x86-64 on one machine (AMD EPYC 9R45, 16 of its 96 cores, 185 GiB), ra-jit [`68c3558698`](https://github.com/indexable-inc/ra-jit/commit/68c3558698d1a050d728c592737766712fefae86) on 2026-10-23, each benchmark run 5 times, load average 12 at the start, by hand.
 
 <details><summary>Times, memory and builds, by platform</summary>
 
@@ -270,6 +431,7 @@ What each program takes, release → ra-jit: its build from cold (for ra-jit, ca
 | tokei | 90 ms | **108 ms** | 1.21x | 1.00x | 50 MB → 52 MB |
 | eza | 231 ms | **243 ms** | 1.05x | 0.99x | 46 MB → 45 MB |
 | bat | 88 ms | **99 ms** | 1.13x | 1.04x | 30 MB → 30 MB |
+| bun | 535 ms | **624 ms** | 1.17x | 1.10x | 54 MB → 58 MB |
 | **All benchmarks (geometric mean)** | | | **1.14x** | 1.07x | |
 
 What each program takes, release → ra-jit: its build from cold (for ra-jit, cargo running the build scripts and proc macros, ra-jit's compile of every crate and the link), its size, and its build's memory (the most the build's processes held at once, and the largest one process: rustc or ra-jit, or the linker).
@@ -284,6 +446,7 @@ What each program takes, release → ra-jit: its build from cold (for ra-jit, ca
 | tokei | 14.50 s → 63.30 s | 5.43 MB → 5.55 MB | 3.4 GB → 4.5 GB | 539 MB → 4.5 GB |
 | eza | 37.90 s → 45.20 s | 2.38 MB → 3.17 MB | 3.4 GB → 4.0 GB | 573 MB → 3.9 GB |
 | bat | 53.70 s → 127.90 s | 6.99 MB → 8.51 MB | 3.7 GB → 6.2 GB | 1.3 GB → 6.2 GB |
+| bun | 167.40 s → 160.20 s | 318.66 MB → 301.54 MB | 6.5 GB → 16.0 GB | 3.7 GB → 16.0 GB |
 
 **Linux x86-64**
 
@@ -304,7 +467,7 @@ What each program takes, release → ra-jit: its build from cold (for ra-jit, ca
 | tokei | 63 ms | **83 ms** | 1.32x | 1.02x | 36 MB → 36 MB |
 | eza | 123 ms | **134 ms** | 1.08x | 1.05x | 30 MB → 30 MB |
 | bat | 54 ms | **63 ms** | 1.17x | 1.04x | 30 MB → 30 MB |
-| bun | 389 ms | **488 ms** | 1.26x | 1.09x | 58 MB → 64 MB |
+| bun | 389 ms | **476 ms** | 1.22x | 1.10x | 51 MB → 62 MB |
 | **All benchmarks (geometric mean)** | | | **1.10x** | 1.07x | |
 
 What each program takes, release → ra-jit: its build from cold (for ra-jit, cargo running the build scripts and proc macros, ra-jit's compile of every crate and the link), its size, and its build's memory (the most the build's processes held at once, and the largest one process: rustc or ra-jit, or the linker).
@@ -319,77 +482,45 @@ What each program takes, release → ra-jit: its build from cold (for ra-jit, ca
 | tokei | 9.30 s → 47.10 s | 5.51 MB → 6.49 MB | 3.8 GB → 4.7 GB | 516 MB → 4.6 GB |
 | eza | 25.40 s → 32.70 s | 2.68 MB → 3.4 MB | 3.8 GB → 3.9 GB | 509 MB → 3.8 GB |
 | bat | 38.70 s → 98.20 s | 7.56 MB → 9.34 MB | 4.1 GB → 6.2 GB | 730 MB → 6.1 GB |
-| bun | 135.50 s → 666.90 s | 314.01 MB → 315.21 MB | 6.2 GB → 21.1 GB | 3.7 GB → 21.0 GB |
+| bun | 135.60 s → 129.20 s | 314.01 MB → 297.55 MB | 6.2 GB → 15.9 GB | 3.7 GB → 15.8 GB |
 
 Release with dev checks: `cargo build --release` with `-C overflow-checks=on -C debug-assertions=on`.
 
 </details>
 
-Measured by hand with `harness/bench.py --runtime` (harness/runbench.py), or by the `bench-readme` workflow (a project measured on its own, by its own workflow) on each platform's benchmark machine once it is registered. Raw JSON: [macOS arm64](docs/benchmarks/runtime-macos-arm64.json), [Linux aarch64](docs/benchmarks/runtime-linux-aarch64.json), [Linux x86-64](docs/benchmarks/runtime-linux-x86-64.json); bun: [macOS arm64](docs/benchmarks/runtime-bun-macos-arm64.json), [Linux x86-64](docs/benchmarks/runtime-bun-linux-x86-64.json).
+Measured by hand with `harness/bench.py --runtime` (harness/runbench.py), or by the `bench-readme` workflow (a project measured on its own, by its own workflow) on each platform's benchmark machine once it is registered. Raw JSON: [macOS arm64](docs/benchmarks/runtime-macos-arm64.json), [Linux aarch64](docs/benchmarks/runtime-linux-aarch64.json), [Linux x86-64](docs/benchmarks/runtime-linux-x86-64.json); bun: [macOS arm64](docs/benchmarks/runtime-bun-macos-arm64.json), [Linux aarch64](docs/benchmarks/runtime-bun-linux-aarch64.json), [Linux x86-64](docs/benchmarks/runtime-bun-linux-x86-64.json).
 <!-- runbench:end -->
 
-## Try it on your project
+## Demo: a Game of Life you can edit
 
-```
-nix run github:indexable-inc/ra-jit#ra-jit -- build
-```
-
-No nix? Put the binaries from a [release](https://github.com/indexable-inc/ra-jit/releases)
-on your PATH, or build them with `cargo +1.99.0 install --locked --profile dist ra-jit`. Then
-use Rust 1.99.0 with its source:
-`rustup toolchain install 1.99.0 -c rust-src && rustup override set 1.99.0`.
-
-A release's binaries and nix build the same ra-jit: the `dist` profile (thin LTO), optimized
-with the profile of its own work that [pgo/profiles.json](pgo/profiles.json) pins
-([how](docs/reports/RELEASE-BUILD.md)). `cargo install` builds `dist` without that last step,
-which on Linux starts about 10% slower and edits about 3% slower than a release's binaries:
-cargo takes no compiler flags from a crate, and the crates it builds from crates.io are not
-the ones the profile was made of, so none could be handed to it either. (`--profile dist`
-comes with the first release after 0.1.0.)
-
-### Use it as your normal `cargo build`
-
-```
-nix profile install github:indexable-inc/ra-jit#ra-jit
-ra-jit enable
+```sh
+nix run github:indexable-inc/ra-jit
 ```
 
-From then on plain `cargo build`, `run`, `test` and `check` in any project go through ra-jit.
-`ra-jit disable` puts your cargo config back.
+This opens a Game of Life window. On macOS on Apple silicon you can change its rules, colours and
+speed while it runs; elsewhere the window runs without live edits. It needs Nix, and builds ra-jit
+from source the first time.
 
-### Live edits
+![Editing the running Game of Life: rule, colours and speed change live](docs/demo.avif)
 
-Add the crate and poll once per frame:
+## Updates
 
-```toml
-ra-jit-live = "0.1"
-```
+<p align="center">
+  <a href="https://ra-jit.ix.dev/updates?src=readme">
+    <picture>
+      <source media="(prefers-color-scheme: dark)" srcset="docs/brand/signup-on-dark.svg">
+      <img alt="Tell us you use ra-jit" src="docs/brand/signup-on-light.svg" height="36">
+    </picture>
+  </a>
+</p>
 
-```rust
-let mut live = ra_jit_live::Live::start().ok();
-loop {
-    if let Some(outcome) = live.as_mut().and_then(|it| it.poll()) {
-        eprintln!("ra-jit: {outcome}");
-    }
-    // ...your frame
-}
-```
+<p align="center">For release news: Watch → Custom → Releases on GitHub.</p>
 
-### Cached functions
+## Contributing
 
-`#[ra_jit::cache]` on a pure function keeps its results across runs, until an edit changes
-the code it reaches ([docs/fn-cache.md](docs/fn-cache.md)).
-
-## What to know
-
-- Live edits work on macOS Apple silicon only. Elsewhere you still get fast builds.
-- An edit with a borrow-check error is refused, but the borrow checker still misses about a
-  third of rustc's errors: `cargo check` stays the final word.
-- Rust 1.99.0 only.
-- Changing a struct the program is using asks for a restart.
-
-More: [how it works](docs/architecture.md), [full results](docs/results.md),
-[what is supported](docs/support.md).
+How to build ra-jit from a checkout, run its tests and send a change:
+[docs/contributing.md](docs/contributing.md). To report a security problem:
+[SECURITY.md](SECURITY.md).
 
 ## Credits
 

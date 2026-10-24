@@ -182,7 +182,7 @@ All notable changes to ra-jit are written here. The format follows
 - A borrow checker, the crate `hir-ty-borrowck` in the rust-analyzer subtree, written to give
   rustc's verdict: Polonius alpha by default as nightly rustc does, NLL with
   `RA_JIT_BORROWCK=nll`. It gives rustc's errors on
-  1517 of 1580 of rustc's own borrow-check tests that it can run, and none on any of the 245
+  1532 of 1581 of rustc's own borrow-check tests that it can run, and none on any of the 246
   rustc accepts, scored by `harness/borrowck_ui.py`, and finds nothing in ripgrep, fd, bat,
   hyperfine, just, axum, nushell, delta, eza, tokei, starship and cargo. Its errors, and rustc's
   `unused_mut` warning, are rust-analyzer diagnostics and `ra-jit borrowck` prints them ([docs/borrowck.md](docs/borrowck.md)).
@@ -224,6 +224,15 @@ All notable changes to ra-jit are written here. The format follows
   helix and 1.51 instead of 7.23 on bun. zed's own base, which passed 64 GB, finishes with no
   bound of its own at 62.6 GB in 662 s; at the default bound, a quarter of memory, it is still
   given up (#188).
+- A whole program's compiles under LLVM import what they call, as ThinLTO's backends do,
+  where each built its callees again from MIR and optimized them from scratch. Each function
+  a compile calls is lowered and run through LLVM's pre-link pipeline once in the process,
+  and a compile links in the bodies small enough to be built in (100 instructions, 300 for
+  `#[inline]`, the whole budget of 40 000 for `#[inline(always)]`), and those of what they
+  call with 0.7 of the room each call deeper, 8 deep, as `available_externally`; what LLVM
+  does not build in is dropped. Bun on 16 cores (c8a.24xlarge) builds in 118 s where it took
+  564 s, against 135 s for cargo's release build, and runs 1.244x cargo's where it ran 1.267x.
+  `RA_JIT_IMPORT=0` builds the callees in as before.
 - The daemon keeps what each debug type is told as once, rather than in every set of debug
   types it is in ([#55](https://github.com/indexable-inc/ra-jit/issues/55)); the DWARF it
   writes is the same. On Linux x86-64 (16 cores, `memsplit.py`, one run each) the daemon
@@ -419,11 +428,48 @@ All notable changes to ra-jit are written here. The format follows
   longer reaches, and zed's webrtc then needs X11's `libXtst`, which nothing links: its own
   base failed to link after 662 s ([#29](https://github.com/indexable-inc/ra-jit/issues/29)).
   An executable linked so takes edits that call into what it left out as builds in full.
+- The borrow checker holds a struct or enum to what its fields need of its lifetimes,
+  rustc's inferred outlives bounds, where it is named or built: `B(x)` with
+  `struct B<'a, 'b>(&'b mut F<'a, 'b>)` needs `'a: 'b`. A closure passed for a bound with
+  `for<'r>`, `impl FnOnce(&mut T)`, takes the bound's other lifetimes, so what it needs of
+  them reaches its creator. A function item's return type is well-formed but for what names
+  a late-bound lifetime, as rustc's: `foo` returning `(&'c (), PhantomData<&'b &'a ()>)`
+  needs `'a: 'b` where it is a method's receiver. A trait object's associated type is held
+  to the bounds its trait declares for it: `dyn Trait<Assoc = &'a ()>` with
+  `type Assoc: 'static` needs `'a: 'static`. 1523 of 1580 of rustc's tests now (was 1520).
+- A match arm with a guard binds what it binds by value once the guard holds, as rustc does,
+  so `(mut long, ref short) if g => long.0 = &short` is accepted: `short` is declared first
+  and dropped last. In a `const` or `static` a mutable borrow is promoted only of `[]` and a
+  `const fn` call only where the item certainly runs it, so `helper(&mut 42)` gives E0716, as
+  does `&(ALL[i] + 1)` in a function. An `impl Trait` inside the return type,
+  `(impl Iterator, &'b str)`, gets the member constraints a returned one does, and the
+  lifetime chosen for its hidden type is applied, so what that needs of a type parameter is
+  checked (E0309). `borrowck_ui.py` reads each unit with its revision's `--cfg`, so
+  `#[cfg($rev)]` in a macro is set. 1532 of 1581 of rustc's tests now (was 1523).
+- A returned `impl Trait` hiding a type parameter is checked when the function's lifetimes
+  are late-bound or elided: `fn f<T>(d: T, p: &mut ()) -> impl Sized + '_ { (d, p) }` gives
+  rustc's E0311, and with `p: &'b mut ()` its E0309. The borrow checker relates the hidden
+  type to an elided `+ '_` bound, so `dest: &mut T` returned behind `impl FnOnce() + '_ + 'a`
+  gives E0621. 1520 of 1580 of rustc's tests now (was 1517).
 - The borrow checker reports what normalizing a signature's associated type needs of its
   lifetimes (`-> <&'a () as Visitor<'d>>::Value` proven by `impl<'a, 'd: 'a>`), and relates
   an associated type through a where clause's projection (`T: Fun<F<'a> = [u8]>` borrowing for
   `'a`); item checking reports what the impl of an associated type in a field needs
   (`<T as Dummy<'a>>::Out` that `T: 'a`). 1517 of 1580 of rustc's tests now (was 1511).
+- A body imported through another was called with the importer's type for it: an export
+  declares what it calls with the types it calls it through, and one has as an integer what
+  another has as a pointer. LLVM takes a call of a body through a type it does not have to be
+  undefined, and of `ptr::write::<ForOf>` imported through a function that had the address as
+  an integer it kept nothing of what was written, so bun's parser crashed. Such a call is now
+  made through the callee's own type, the arguments converted (a unit test of `llvm.rs`).
+- On Linux AArch64, an `asm!` of a feature LLVM's assembler has no `.arch_extension` for was
+  refused: constant_time_eq's `mrs {}, dit` under `#[target_feature(enable = "dit")]`, which
+  failed bun's build there. Such a feature (`dit`, `bti`, `jsconv` and the others of a later
+  Armv8 or Armv9, and `v8.4a` and the like themselves) now starts the block with `.arch` of
+  the version that has it.
+- `runbench.py` runs cargo's release build from beside ra-jit's, in the workspace, where it ran
+  it from cargo's target directory. helix looks for its `runtime` next to itself, so only
+  cargo's build warned that there was none, and helix was reported as running differently.
 - The borrow checker panicked on the corpus's `release_state`, whose impl's where clauses
   name associated types of concrete types (`Option<&'static C>: QueryData<ReadOnly: ..>`), so
   every error in the corpus's main file went unreported. As rustc, it now normalizes those

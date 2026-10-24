@@ -7,7 +7,8 @@ usage: ci.py PART                 run the harnesses of PART for RA_JIT_BACKEND o
        ci.py --list               which harness runs in which part, on which hosts and backends
 
 The fast tier, of every pull request and push, is the harnesses that take a few minutes, in the
-parts quick-1 and quick-2 of about four minutes each on a hosted runner. The full tier, nightly
+parts quick-1 and quick-2 of about four minutes each on a hosted runner, and on Linux quick-3,
+the reduced programs fuzzing found built wrong. The full tier, nightly
 and by hand, is every harness, in the parts core, keys-N, buildmodel, store-kills, store and
 daemon.
 
@@ -74,6 +75,9 @@ HARNESSES = [
     # Only x86-64 Linux has been fuzzed so far.
     ("core", ["fuzz/fuzz.py", "smoke", "--backends", BACKEND], {}, on("linux-x86_64"), 2),
     ("core", ["fuzz/edits.py", "smoke", "--backends", BACKEND], {}, on("linux-x86_64"), 2),
+    # Every reduced program fuzzing found ra-jit building wrong, on both architectures they
+    # were found on; a part of its own, as it takes minutes.
+    ("core", ["fuzz/fuzz.py", "check", "--backends", BACKEND], {}, on("linux"), 3),
     # How much of the corpus LLVM compiled itself, and what it left to Cranelift and why.
     ("core", ["backends.py", "corpus", "runner", "cases", "--bin", "runner", "--levels", "2f"], {}, on(backend="llvm"), 2),
     # DWARF read by gdb out of an ELF executable, or a PDB read by cdb.

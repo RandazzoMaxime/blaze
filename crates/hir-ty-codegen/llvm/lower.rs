@@ -813,6 +813,19 @@ impl<'ctx, 'f> Lowering<'ctx, 'f> {
         {
             return Err(Unhandled::Shape("a 128-bit integer that finds one register left"));
         }
+        // On AArch64 LLVM takes the integer registers such an integer leaves out of use and
+        // Cranelift does not; the Rust ABI passes nothing in them.
+        let even = match sig.call_conv {
+            CallConv::AppleAarch64 => 1,
+            _ => 2,
+        };
+        if crate::Target::current().arch == crate::target::Arch::Aarch64
+            && crate::stranded_i128(&sig.params, even).is_some()
+        {
+            return Err(Unhandled::Shape(
+                "a 128-bit integer that goes to the stack beside free registers",
+            ));
+        }
         let pointer = context.ptr_type(AddressSpace::default());
         let mut params: Vec<BasicMetadataTypeEnum<'ctx>> = Vec::with_capacity(sig.params.len());
         for param in &sig.params {
@@ -876,7 +889,7 @@ impl<'ctx, 'f> Lowering<'ctx, 'f> {
 
     /// Whether `a` is `b` but for parameters that are pointers in one and integers of their
     /// width in the other, which are passed alike.
-    fn same_but_pointers(a: FunctionType<'ctx>, b: FunctionType<'ctx>) -> bool {
+    pub(super) fn same_but_pointers(a: FunctionType<'ctx>, b: FunctionType<'ctx>) -> bool {
         let (left, right) = (a.get_param_types(), b.get_param_types());
         let address = |ty: &BasicMetadataTypeEnum<'ctx>| match ty {
             BasicMetadataTypeEnum::PointerType(_) => true,

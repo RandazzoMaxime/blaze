@@ -22,7 +22,9 @@ any of:
     README names is never more than a day behind main
   - `--force`
 What a result of bench.py writes: the build table between `<!-- bench:start -->` and
-`<!-- bench:end -->` (README.md and, every number, docs/benchmarks.md), and memory and disk
+`<!-- bench:end -->` (README.md and, every number, docs/benchmarks.md), the README's opening numbers
+(the edits chart's first row, in words) between `<!-- benchheadline:start -->` and
+`<!-- benchheadline:end -->`, and memory and disk
 (bench.py's `memory`, `resident` and `disk_mb`, docs/benchmarks.md "Memory and disk") between
 `<!-- benchmem:start -->` and `<!-- benchmem:end -->` in the README.
 A result of `bench.py --runtime` (harness/runbench.py's numbers) writes the README's runtime table
@@ -66,6 +68,7 @@ DOC = os.path.join(ROOT, "docs/benchmarks.md")
 START, END = "<!-- bench:start -->", "<!-- bench:end -->"
 RUN_START, RUN_END = "<!-- runbench:start -->", "<!-- runbench:end -->"
 MEM_START, MEM_END = "<!-- benchmem:start -->", "<!-- benchmem:end -->"
+HEADLINE_START, HEADLINE_END = "<!-- benchheadline:start -->", "<!-- benchheadline:end -->"
 # Where a platform's result was stored before there were platforms: read when the new one is missing.
 LEGACY = {"linux-x86-64.json": "linux-x86_64.json", "macos-arm64.json": "memory-macos-arm64.json"}
 FLOOR_MB = 100
@@ -321,7 +324,8 @@ def edit_cell(phase):
             f"({speedup(phase['cargo_s'], phase['wall_s'])})"), fell_back
 
 
-def edits_chart(results, backend="cranelift"):
+def edit_speedups(results, backend):
+    """(project, {platform: cargo's time ÷ ra-jit's for each kind of edit}), the edits chart's rows."""
     rows = []
     for key in keys_of(results, backend):
         by = {}
@@ -331,7 +335,27 @@ def edits_chart(results, backend="cranelift"):
                 by[p] = [ph["cargo_s"] / ph["wall_s"] for label, ph in measured["phases"].items()
                          if label in EDITS and label != "no-op" and ph.get("cargo_s") and ph.get("wall_s")]
         rows.append((label_of(results, key), by))
-    return benchcharts.edits(rows, where(results))
+    return rows
+
+
+def edits_chart(results, backend="cranelift"):
+    return benchcharts.edits(edit_speedups(results, backend), where(results))
+
+
+def headline(results, backend="cranelift"):
+    """The README's opening numbers: the edits chart's first row (each platform's geometric mean over
+    the projects of the median over the kinds of edit), in words."""
+    rows = edit_speedups(results, backend)
+    said = []
+    for p in NAMES:
+        medians = [benchcharts.median(v) for _, by in rows if (v := by.get(p))]
+        if medians:
+            m = benchcharts.geomean(medians)
+            factor = m if m >= 1 else 1 / m
+            text = f"{factor:.0f}×" if factor >= 9.95 else f"{factor:.1f}×"
+            said.append(f"{text} {'faster' if m >= 1 else 'slower'} on {p}")
+    joined = ", ".join(said[:-1]) + f" and {said[-1]}" if len(said) > 1 else "".join(said)
+    return HEADLINE_START + joined + HEADLINE_END
 
 
 def edit_memory(measured):
@@ -918,6 +942,7 @@ def write_sections(kind="", override=None, name=None):
         if results := stored_all("runtime", override, name):
             splice(README, runtime_section(results), RUN_START, RUN_END)
     elif results := stored_all("", override, name):
+        splice(README, headline(results), HEADLINE_START, HEADLINE_END)
         splice(README, readme_section(results))
         splice(DOC, doc_section(results))
         splice(README, memory_readme(results), MEM_START, MEM_END)

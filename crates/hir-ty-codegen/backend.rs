@@ -243,6 +243,17 @@ impl Backend {
             store::Store,
         };
         let named: Vec<_> = recorder.named_slots().collect();
+        let imports = match super::imports::enabled() {
+            true => super::imports::chosen(recorder),
+            false => Vec::new(),
+        };
+        // Not stored: the code is of the bodies imported too.
+        if !imports.is_empty() {
+            let mut code =
+                super::llvm::emit(&mut recorder.wants, &named, func, optimization, None, &imports)?;
+            recorder.keep_referenced(&mut code);
+            return Ok(code);
+        }
         let recorder = &mut recorder.wants;
         // The key is of the function's own IR, which the bodies LLVM is shown are not part of.
         let store = Store::global().filter(|_| recorder.seen.is_empty());
@@ -253,7 +264,7 @@ impl Backend {
             recorder.constants(),
             &recorder.pointees,
         )) else {
-            return super::llvm::emit(recorder, &named, func, optimization, None);
+            return super::llvm::emit(recorder, &named, func, optimization, None, &[]);
         };
         match store.lookup(&key).and_then(|it| LlvmEntry::decode(&it)) {
             Some(LlvmEntry::Code(stored)) => {
@@ -265,7 +276,8 @@ impl Backend {
             None => {}
         }
         let mark = recorder.mark();
-        let (entry, out) = match super::llvm::emit(recorder, &named, func, optimization, None) {
+        let (entry, out) = match super::llvm::emit(recorder, &named, func, optimization, None, &[])
+        {
             Ok(code) => (StoredCode::of(&code, recorder, mark).map(LlvmEntry::Code), Ok(code)),
             Err(unhandled) => {
                 (Some(LlvmEntry::LeftToCranelift(unhandled.to_string())), Err(unhandled))
@@ -317,10 +329,15 @@ pub(super) struct Tally {
     steps: [AtomicU64; Step::COUNT],
     /// Where Cranelift's time went, summed over the threads, with `RA_JIT_STATS`.
     passes: Mutex<Option<cranelift_codegen::timing::PassTimes>>,
+    /// The exports built for compiles to import ([`super::imports`]), and how many bodies
+    /// and instructions those imported.
+    pub(super) exports: Produced,
+    pub(super) imported: AtomicUsize,
+    pub(super) imported_size: AtomicUsize,
 }
 
 #[derive(Default)]
-struct Produced {
+pub(super) struct Produced {
     functions: AtomicUsize,
     nanos: AtomicU64,
     bytes: AtomicUsize,
@@ -334,12 +351,14 @@ pub(super) enum Phase {
     Optimize,
     Emit,
     Read,
+    /// Building an export for compiles to import, all its steps.
+    Export,
 }
 
 impl Phase {
-    const COUNT: usize = 5;
+    const COUNT: usize = 6;
     const ALL: [Phase; Phase::COUNT] =
-        [Phase::Lower, Phase::Verify, Phase::Optimize, Phase::Emit, Phase::Read];
+        [Phase::Lower, Phase::Verify, Phase::Optimize, Phase::Emit, Phase::Read, Phase::Export];
 }
 
 /// The steps of compiling one function that are not the producer's.
@@ -375,7 +394,7 @@ impl Step {
 }
 
 impl Produced {
-    fn add(&self, took: Duration, bytes: usize) {
+    pub(super) fn add(&self, took: Duration, bytes: usize) {
         self.functions.fetch_add(1, Ordering::Relaxed);
         self.nanos.fetch_add(took.as_nanos() as u64, Ordering::Relaxed);
         self.bytes.fetch_add(bytes, Ordering::Relaxed);
@@ -484,6 +503,13 @@ impl Tally {
         }
         if large != 0 {
             eprintln!("backend: llvm compiled {large} large functions without optimization");
+        }
+        if let Some(exports) = self.exports.take() {
+            let imported = self.imported.swap(0, Ordering::Relaxed);
+            let size = self.imported_size.swap(0, Ordering::Relaxed);
+            eprintln!(
+                "backend: llvm built exports of {exports}; {imported} imported, {size} instructions"
+            );
         }
         if let Some(cranelift) = cranelift {
             eprintln!("backend: cranelift compiled {cranelift}");

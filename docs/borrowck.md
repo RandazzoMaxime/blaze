@@ -291,9 +291,10 @@ All of these are rustc's, written from `compiler/rustc_borrowck` at the pinned n
 `harness/borrowck_ui.py <rust checkout>` scores it against rustc's own UI tests at the
 pinned nightly's commit: everything under `tests/ui/borrowck` and `tests/ui/nll`, every test
 with a Polonius revision, and every other UI test whose expected output has a borrow-check
-error. Each revision of a test is a unit. What a unit should give is what the pinned nightly
-rustc gives on it, once with Polonius and once without; those runs are checked against the
-tests' own `//~ ERROR` annotations so that a harness mistake shows.
+error. Each revision of a test is a unit, read with the `--cfg`s rustc gets for it. What a
+unit should give is what the pinned nightly rustc gives on it, once with Polonius and once
+without; those runs are checked against the tests' own `//~ ERROR` annotations so that a
+harness mistake shows.
 
 A unit passes when ra-jit's set of borrow-check errors, as (error code, line), is rustc's
 set. Errors rustc gives no code are named by their message. A unit is out of scope, with a
@@ -301,14 +302,14 @@ counted reason, when it cannot say anything about the borrow checker: it needs a
 feature, an auxiliary crate or another file, a `-Z` flag other than Polonius, or rustc
 stops before borrow checking.
 
-With no borrow checker, the 245 units rustc accepts would pass. Now:
+With no borrow checker, the 246 units rustc accepts would pass. Now:
 
 | Mode | In scope | Pass | rustc accepts, ra-jit too | rustc rejects, same errors |
 |---|---|---|---|---|
-| Polonius | 1580 | 1517 (96.0%) | 245 of 245 | 1272 of 1335 |
-| NLL | 1578 | 1513 (95.9%) | 226 of 226 | 1287 of 1352 |
+| Polonius | 1581 | 1532 (96.9%) | 246 of 246 | 1286 of 1335 |
+| NLL | 1579 | 1528 (96.8%) | 227 of 227 | 1301 of 1352 |
 
-461 units are out of scope; 344 of them need a nightly feature. CI runs the scoring on Linux
+460 units are out of scope; 344 of them need a nightly feature. CI runs the scoring on Linux
 and fails below a floor a few units under the count there, on any error in a unit rustc
 accepts, and on any unit the checker panics on, as a panic hides every error in its file.
 
@@ -321,10 +322,10 @@ files, errors and files it panicked on; a panic makes it fail.
 ## What is left
 
 Every failing unit is one where rustc gives an error ra-jit does not, or gives it on another
-line or with another code. By what is wrong, most first: 10 "lifetime may not live long
-enough" not reported, 3 on another line or with another code, 2 with only an error rustc does
-not give, 6 of E0309 not reported, 5 each of E0507, E0310 and higher-ranked errors, 4 of
-E0716, 3 each of E0311, E0597 and E0700 not reported, then a long tail. The causes, grouped:
+line or with another code. By what is wrong, most first: 5 "lifetime may not live long
+enough" not reported, 3 on another line or with another code, 1 with only an error rustc does
+not give, 5 each of E0507, E0310 and higher-ranked errors, 3 each of E0309, E0311 and E0597,
+2 of E0700 not reported, then a long tail. The causes, grouped:
 
 - **Higher-ranked regions and placeholders** (`for<'a>` bounds, closures with higher-ranked
   signatures): rustc checks them with placeholders in universes; ra-jit does not yet, and

@@ -1821,6 +1821,7 @@ dependencies = [
  "hir-def",
  "hir-expand",
  "hir-ty",
+ "hir-ty-wfcheck",
  "la-arena",
  "ra-ap-rustc_ast_ir",
  "ra-ap-rustc_type_ir",

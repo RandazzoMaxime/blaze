@@ -16,10 +16,11 @@ program is built with ra-jit and runs the `ra-jit` executable in the same direct
 have to be installed side by side, with `ra-jit-rustc` and `ra-jit-rustc-first`. `cargo
 install` does that:
 
-    cargo +1.99.0 install --locked --profile dist ra-jit
+    cargo +1.99.0 install --locked ra-jit
 
-`dist` is the profile a release is built with, less the PGO a release adds (README). From a
-checkout, the release's own recipe builds all of it, with the profile
+From the release after 0.1.0, `--profile dist` builds the profile a release is built with, less
+the PGO a release adds ([reports/RELEASE-BUILD.md](reports/RELEASE-BUILD.md)); 0.1.0 has no such
+profile and fails with it. From a checkout, the release's own recipe builds all of it, with the profile
 [pgo/profiles.json](../pgo/profiles.json) pins:
 
     python3 .github/scripts/build_release.py --target $(rustc +1.99.0 -vV | sed -n 's/^host: //p') --out shipped
