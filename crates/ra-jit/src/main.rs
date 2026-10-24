@@ -4545,7 +4545,10 @@ impl LinkFailed {
 
     /// Whether the link failed on names nothing defines that only objects other than `ours`
     /// use: what is wrong with the daemon's own is never taken out of sight.
-    fn names_undefined_outside<'a>(&self, ours: impl IntoIterator<Item = Option<&'a Path>>) -> bool {
+    fn names_undefined_outside<'a>(
+        &self,
+        ours: impl IntoIterator<Item = Option<&'a Path>>,
+    ) -> bool {
         let mut ours = ours.into_iter().flatten().filter_map(Path::file_name);
         Self::UNDEFINED.iter().any(|it| self.said.contains(it))
             && !ours.any(|it| self.said.contains(&*it.to_string_lossy()))
