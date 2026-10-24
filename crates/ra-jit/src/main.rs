@@ -6608,6 +6608,9 @@ fn main() -> anyhow::Result<()> {
     syntax::set_green_trees(std::env::var_os("RA_JIT_GREEN_TREES").is_some());
     project_model::answer_toolchain_questions_with(answers::ask);
     let stands_in_for_rustc = std::env::var_os("RA_JIT_WRAPS_RUSTC").is_some();
+    if let Some(replayed) = doctest::replay() {
+        return replayed;
+    }
     match std::env::args().nth(1).as_deref() {
         _ if stands_in_for_rustc => {}
         None | Some("--help" | "-h" | "help") => {
@@ -7273,15 +7276,15 @@ fn process_wide() {
 }
 
 /// Loads the workspace `args` names and builds what they ask for, then serves it when they
-/// ask for that. With `doc` the build is of a library whose examples are then run.
-fn run(args: Args, doc: Option<&doctest::Asked>) -> anyhow::Result<()> {
+/// ask for that. With `doc` the build is of the libraries whose examples are then run.
+fn run(args: Args, doc: Option<&doctest::Libraries>) -> anyhow::Result<()> {
     run_holding(args, doc, None, false)
 }
 
 /// [`run`], with what a process started before its build was known has loaded already.
 fn run_holding(
     mut args: Args,
-    doc: Option<&doctest::Asked>,
+    doc: Option<&doctest::Libraries>,
     held: Option<Held>,
     ahead: bool,
 ) -> anyhow::Result<()> {
@@ -7508,8 +7511,7 @@ fn run_holding(
         );
         known.patching = args.patch.is_some();
     }
-    if let Some(asked) = doc {
-        let krate = *crates_named(&db, &args.krate, &args)?.first().context("no such crate")?;
+    if let Some(libraries) = doc {
         let workspace = checkouts.loaded.workspaces().first();
         let sysroot: Option<PathBuf> =
             workspace.and_then(|it| it.sysroot.root()).map(|it| AsRef::<Path>::as_ref(it).into());
@@ -7519,7 +7521,7 @@ fn run_holding(
             listed: &listed,
             sysroot: sysroot.as_deref(),
         };
-        let code = doctest::run(&mut db, &building, asked, krate, emits.triple())?;
+        let code = doctest::run_all(&mut db, &building, libraries, emits.triple());
         ra_jit_store::settled();
         std::process::exit(code);
     }

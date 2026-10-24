@@ -40,6 +40,14 @@ pub(crate) const ENABLED: &str = "RA_JIT_RUSTDOC";
 /// package shares with the others it selects, not with those of a build of the package alone.
 pub(crate) const BUILD: &str = "RA_JIT_DOCTEST_BUILD";
 
+/// The variable that has ra-jit as rustdoc write down how cargo ran it, in the directory it
+/// names, and end there: the runs are made once cargo is done, over one load of the workspace.
+pub(crate) const RECORD: &str = "RA_JIT_DOCTEST_RECORD";
+
+/// The argument that has ra-jit make the runs written down under [`RECORD`], before a
+/// [`Replay`] as JSON.
+const REPLAY: &str = "--replay-doctests";
+
 /// The code a test harness ends with when a test failed.
 const FAILED: i32 = 101;
 
@@ -49,6 +57,10 @@ pub(crate) struct Asked {
     /// The root file of the library, as cargo names it from the package's directory.
     source: PathBuf,
     edition: String,
+    /// Where rustdoc was run, and with what environment: what an example reads of either is
+    /// what it reads under rustdoc.
+    cwd: PathBuf,
+    env: Vec<(OsString, OsString)>,
     /// Where the examples run.
     run_in: PathBuf,
     /// The arguments rustc compiles every example with.
@@ -136,14 +148,15 @@ const UNUSED: [&str; 12] = [
 ];
 
 impl Asked {
-    /// Reads rustdoc's arguments. `Err` is why this run is rustdoc's.
-    fn read(all: &[OsString]) -> Result<Asked, String> {
-        let words: Vec<String> = all
+    /// Reads the arguments of a run of rustdoc. `Err` is why the run is rustdoc's.
+    fn read(recorded: &Recorded) -> Result<Asked, String> {
+        let words: Vec<String> = recorded
+            .args
             .iter()
             .map(|it| it.to_str().map(str::to_owned))
             .collect::<Option<_>>()
             .ok_or("an argument is not text")?;
-        let cwd = std::env::current_dir().map_err(|it| it.to_string())?;
+        let cwd = recorded.cwd.clone();
         let (mut test, mut source, mut crate_name) = (false, None, None);
         let (mut edition, mut run_in, mut target) = ("2015".to_owned(), cwd.clone(), None);
         let (mut rustc_args, mut test_args, mut features) = (Vec::new(), Vec::new(), Vec::new());
@@ -162,7 +175,7 @@ impl Asked {
                 "--test" => test = true,
                 "--edition" => edition = value()?,
                 "--crate-name" => crate_name = Some(value()?),
-                "--test-run-directory" => run_in = PathBuf::from(value()?),
+                "--test-run-directory" => run_in = cwd.join(value()?),
                 "--test-args" => {
                     let value = value()?;
                     test_args.extend(
@@ -192,14 +205,18 @@ impl Asked {
         }
         let wanted =
             Wanted::parse(&test_args).map_err(|arg| format!("the tests are run with `{arg}`"))?;
-        let build = match std::env::var(BUILD) {
-            Ok(build) => Some(serde_json::from_str(&build).map_err(|it| format!("{BUILD}: {it}"))?),
-            Err(_) => None,
+        let build = match recorded.var(BUILD) {
+            Some(build) => {
+                Some(serde_json::from_str(build).map_err(|it| format!("{BUILD}: {it}"))?)
+            }
+            None => None,
         };
         Ok(Asked {
             crate_name: crate_name.ok_or("rustdoc is not told the name of the crate")?,
             source: source.ok_or("rustdoc is given no source file")?,
             edition,
+            cwd,
+            env: recorded.env.clone(),
             run_in,
             rustc_args,
             target,
@@ -214,13 +231,12 @@ impl Asked {
     /// nothing of rustc's: the examples are built over the standard library's unit.
     fn build_args(&self) -> anyhow::Result<Vec<String>> {
         std::fs::create_dir_all(&self.dir)?;
-        let cwd = std::env::current_dir()?;
         // The package is where cargo runs the examples, not where it runs rustdoc: that is
         // the workspace's root, whose package is another one or none.
         let mut args = vec![
-            cwd.join(&self.run_in).display().to_string(),
+            self.run_in.display().to_string(),
             "--crate".to_owned(),
-            cwd.join(&self.source).display().to_string(),
+            self.root_file(),
             "--out".to_owned(),
             self.object().display().to_string(),
             "--dev-deps".to_owned(),
@@ -239,9 +255,9 @@ impl Asked {
             // would name a dependency of the root's, which this package need not be.
             None => {
                 args.push("--no-default-features".to_owned());
-                let package = std::env::var("CARGO_PKG_NAME").ok().filter(|it| !it.is_empty());
+                let package = self.var("CARGO_PKG_NAME").filter(|it| !it.is_empty());
                 if let Some(package) = package {
-                    args.extend(["--package".to_owned(), package]);
+                    args.extend(["--package".to_owned(), package.to_owned()]);
                 }
                 if !self.features.is_empty() {
                     args.extend(["--features".to_owned(), self.features.join(",")]);
@@ -254,10 +270,25 @@ impl Asked {
         Ok(args)
     }
 
+    /// The root file of the library in full, which names its crate to ra-jit.
+    fn root_file(&self) -> String {
+        self.cwd.join(&self.source).display().to_string()
+    }
+
     /// Where the run's `--out` is: nothing is built there, the standard library's unit is
     /// written beside it.
     fn object(&self) -> PathBuf {
         self.dir.join("ra-jit.o")
+    }
+
+    /// The variable of rustdoc's environment called `name`, when it is text.
+    fn var(&self, name: &str) -> Option<&str> {
+        var_in(&self.env, name)
+    }
+
+    /// A command that runs where rustdoc was run and with its environment.
+    fn command(&self, program: impl AsRef<std::ffi::OsStr>) -> Command {
+        in_place(as_asked(program), &self.cwd, &self.env)
     }
 
     /// Has rustc compile `source` into a program, or finds the program it compiled of it in an
@@ -273,7 +304,7 @@ impl Asked {
     ) -> anyhow::Result<(Compiled, PathBuf)> {
         let memo = self.memo().map(|memo| memo.join(self.key(source, edition, env, links)));
         if let Some(dir) = &memo {
-            if let Some(compiled) = Remembered::read(dir, env) {
+            if let Some(compiled) = Remembered::read(dir, env, self) {
                 return Ok((compiled, dir.clone()));
             }
             _ = std::fs::remove_dir_all(dir);
@@ -284,8 +315,8 @@ impl Asked {
         });
         let dir = memo.as_deref().unwrap_or(scratch);
         std::fs::create_dir_all(dir)?;
-        let rustc = std::env::var_os("RUSTC").unwrap_or_else(|| "rustc".into());
-        let mut rustc = as_asked(rustc);
+        let rustc = self.env.iter().find(|(name, _)| name == "RUSTC");
+        let mut rustc = self.command(rustc.map_or_else(|| "rustc".into(), |(_, it)| it.clone()));
         rustc.args(&self.rustc_args).args(["--edition", edition, "--color", "never"]);
         rustc.arg("--crate-type=bin").arg("--out-dir").arg(dir);
         // Each output is named: with `-o` and more than one, rustc warns that it names them.
@@ -314,8 +345,7 @@ impl Asked {
             true => it[1].strip_prefix("dependency="),
             false => None,
         })?;
-        let cwd = std::env::current_dir().ok()?;
-        Some(cwd.join(deps).parent()?.join("ra-jit-doctest"))
+        Some(self.cwd.join(deps).parent()?.join("ra-jit-doctest"))
     }
 
     /// What tells a program rustc compiles apart from another: everything it is given, and
@@ -330,7 +360,7 @@ impl Asked {
         };
         add(env!("CARGO_PKG_VERSION").as_bytes());
         for name in ["RUSTC", "RUSTUP_TOOLCHAIN"] {
-            add(std::env::var(name).unwrap_or_default().as_bytes());
+            add(self.var(name).unwrap_or_default().as_bytes());
         }
         for arg in &self.rustc_args {
             add(arg.as_bytes());
@@ -352,8 +382,7 @@ impl Asked {
 
     /// The path of `file` as rustdoc shows it: from the directory it runs in.
     fn shown(&self, file: &Path) -> String {
-        let cwd = std::env::current_dir().unwrap_or_default();
-        file.strip_prefix(&cwd).unwrap_or(file).display().to_string()
+        file.strip_prefix(&self.cwd).unwrap_or(file).display().to_string()
     }
 }
 
@@ -377,14 +406,14 @@ impl Remembered {
     const FILE: &str = "rustc.json";
 
     /// What rustc said of the program in `dir`, when it read nothing since that is not as it
-    /// was. `env` is what the program is compiled with beside ra-jit's environment.
-    fn read(dir: &Path, env: &[(&str, String)]) -> Option<Compiled> {
+    /// was. `env` is what the program is compiled with beside rustdoc's environment.
+    fn read(dir: &Path, env: &[(&str, String)], asked: &Asked) -> Option<Compiled> {
         let text = std::fs::read(dir.join(Self::FILE)).ok()?;
         let it: Remembered = serde_json::from_slice(&text).ok()?;
         let same_file = |(file, was): &(PathBuf, _)| stamp(file) == *was;
         let same_variable = |(name, was): &(String, Option<String>)| {
-            let given = env.iter().find(|(it, _)| it == name).map(|(_, value)| value.clone());
-            given.or_else(|| std::env::var(name).ok()) == *was
+            let given = env.iter().find(|(it, _)| it == name).map(|(_, value)| value.as_str());
+            given.or_else(|| asked.var(name)) == was.as_deref()
         };
         (it.files.iter().all(same_file) && it.env.iter().all(same_variable)).then_some(it.compiled)
     }
@@ -423,49 +452,244 @@ fn feature_of(flag: &str, value: &str) -> Option<String> {
     Some(name.trim_matches('"').to_owned())
 }
 
-/// A command that runs where ra-jit was asked and with its environment as it is: what an
-/// example reads of either is what it reads under rustdoc.
+/// A command that runs where ra-jit was asked and with its environment as it is.
 #[expect(clippy::disallowed_methods, reason = "`toolchain::command` adds to the environment")]
 pub(crate) fn as_asked(program: impl AsRef<std::ffi::OsStr>) -> Command {
     Command::new(program)
 }
 
-/// Says why and runs rustdoc as it was asked, ending as it does.
-pub(crate) fn leave_to_rustdoc(args: &[OsString], why: Option<&str>) -> ! {
-    if let Some(why) = why {
-        eprintln!("ra-jit: the doctests are left to rustdoc: {why}");
+/// `command`, run in `cwd` with `env` and nothing else of ra-jit's environment.
+fn in_place(mut command: Command, cwd: &Path, env: &[(OsString, OsString)]) -> Command {
+    command.current_dir(cwd).env_clear().envs(env.iter().map(|(name, value)| (name, value)));
+    command
+}
+
+/// The variable of `env` called `name`, when it is text.
+fn var_in<'a>(env: &'a [(OsString, OsString)], name: &str) -> Option<&'a str> {
+    env.iter().find(|(it, _)| it == name).and_then(|(_, value)| value.to_str())
+}
+
+/// A run of rustdoc as cargo asked for it: its arguments, where it ran and its environment.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct Recorded {
+    args: Vec<OsString>,
+    cwd: PathBuf,
+    env: Vec<(OsString, OsString)>,
+}
+
+impl Recorded {
+    /// The run this process is.
+    fn own(args: Vec<OsString>) -> anyhow::Result<Recorded> {
+        let env = std::env::vars_os().filter(|(name, _)| name != RECORD).collect();
+        Ok(Recorded { args, cwd: std::env::current_dir()?, env })
     }
-    let rustdoc = std::env::var_os(ENABLED).filter(|it| !it.is_empty());
-    let rustdoc = rustdoc.unwrap_or_else(|| "rustdoc".into());
-    let status = as_asked(rustdoc).args(args).status();
-    match status {
-        Ok(status) => std::process::exit(crate::cargo::run::exit_code(status)),
+
+    fn var(&self, name: &str) -> Option<&str> {
+        var_in(&self.env, name)
+    }
+
+    /// The crate the run tests the examples of, as cargo names it after `Doc-tests`.
+    fn crate_name(&self) -> &str {
+        let mut args = self.args.iter().filter_map(|it| it.to_str());
+        while let Some(arg) = args.next() {
+            match arg.strip_prefix("--crate-name") {
+                Some("") => return args.next().unwrap_or_default(),
+                Some(joined) if joined.starts_with('=') => return &joined[1..],
+                _ => {}
+            }
+        }
+        ""
+    }
+
+    /// Says why and has rustdoc make the run. The code it ended with.
+    fn to_rustdoc(&self, why: Option<&str>) -> i32 {
+        if let Some(why) = why {
+            eprintln!("ra-jit: the doctests are left to rustdoc: {why}");
+        }
+        let rustdoc = self.env.iter().find(|(name, _)| name == ENABLED).map(|(_, it)| it.clone());
+        let rustdoc = rustdoc.filter(|it| !it.is_empty()).unwrap_or_else(|| "rustdoc".into());
+        let mut rustdoc = in_place(as_asked(rustdoc), &self.cwd, &self.env);
+        match rustdoc.args(&self.args).status() {
+            Ok(status) => crate::cargo::run::exit_code(status),
+            Err(error) => {
+                eprintln!("error: rustdoc did not run: {error}");
+                1
+            }
+        }
+    }
+
+    /// Writes the run down in `dir`, under a name that sorts after those of the runs before.
+    fn write(&self, dir: &Path) -> anyhow::Result<()> {
+        let since = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?;
+        let file = dir.join(format!("{:039}-{}.json", since.as_nanos(), std::process::id()));
+        std::fs::write(file, serde_json::to_vec(self)?)?;
+        Ok(())
+    }
+
+    /// The runs written down in `dir`, in the order cargo asked for them.
+    fn all_in(dir: &Path) -> anyhow::Result<Vec<Recorded>> {
+        let mut files = Vec::new();
+        for entry in std::fs::read_dir(dir)? {
+            files.push(entry?.path());
+        }
+        files.retain(|it| it.extension().is_some_and(|it| it == "json"));
+        files.sort();
+        let read = |file: &PathBuf| Ok(serde_json::from_slice(&std::fs::read(file)?)?);
+        files.iter().map(read).collect()
+    }
+}
+
+/// Says why and runs rustdoc as it was asked, ending as it does.
+fn leave_to_rustdoc(args: &[OsString], why: Option<&str>) -> ! {
+    let code = match Recorded::own(args.to_vec()) {
+        Ok(recorded) => recorded.to_rustdoc(why),
         Err(error) => {
             eprintln!("error: rustdoc did not run: {error}");
-            std::process::exit(1)
+            1
+        }
+    };
+    std::process::exit(code)
+}
+
+/// The runs of rustdoc cargo had ra-jit write down in `dir`, and how cargo was asked to run
+/// them.
+#[derive(serde::Serialize, serde::Deserialize)]
+pub(crate) struct Replay {
+    pub(crate) dir: PathBuf,
+    /// Whether cargo was asked to go on past a library whose examples failed.
+    pub(crate) no_fail_fast: bool,
+    pub(crate) quiet: bool,
+}
+
+impl Replay {
+    /// The run of ra-jit that makes the runs, where cargo made the first and with its
+    /// environment. `None` when cargo made none.
+    pub(crate) fn command(&self) -> anyhow::Result<Option<Command>> {
+        let Some(first) = Recorded::all_in(&self.dir)?.into_iter().next() else {
+            return Ok(None);
+        };
+        let ra_jit = std::env::current_exe().context("finding ra-jit itself")?;
+        let mut ra_jit = in_place(as_asked(ra_jit), &first.cwd, &first.env);
+        ra_jit.arg(REPLAY).arg(serde_json::to_string(self)?);
+        Ok(Some(ra_jit))
+    }
+}
+
+/// The libraries whose examples a run of ra-jit tests over one load of their workspace, in
+/// the order cargo ran rustdoc for them.
+pub(crate) struct Libraries {
+    runs: Vec<(Recorded, Result<Asked, String>)>,
+    /// How cargo was asked to run them, when ra-jit runs them after cargo is done: cargo ran
+    /// rustdoc for none of them and said nothing of them.
+    replay: Option<Replay>,
+}
+
+impl Libraries {
+    /// Loads the workspace of the first library ra-jit can test the examples of and tests
+    /// them all, ending as cargo would after them. Each is rustdoc's when the workspace does
+    /// not load.
+    fn load(&self) -> anyhow::Result<()> {
+        let first = self.runs.iter().find_map(|(_, asked)| asked.as_ref().ok());
+        let loaded = match first {
+            Some(first) => first
+                .build_args()
+                .and_then(|args| crate::run(crate::Args::parse(args.into_iter())?, Some(self))),
+            None => Ok(()),
+        };
+        let why = match (first, loaded) {
+            (Some(_), Ok(())) => return Ok(()),
+            (None, _) => None,
+            (Some(_), Err(why)) => Some(format!("{why:#}")),
+        };
+        self.remove_dirs();
+        let code = self.each(|recorded, asked| {
+            recorded.to_rustdoc(Some(asked.err().or(why.as_deref()).unwrap_or_default()))
+        });
+        std::process::exit(code)
+    }
+
+    /// Tests each library with `test`, which is given its run and what ra-jit makes of it,
+    /// until one fails where cargo would stop. The code to end with.
+    fn each(&self, mut test: impl FnMut(&Recorded, Result<&Asked, &str>) -> i32) -> i32 {
+        let mut test = |(recorded, asked): &(Recorded, Result<Asked, String>)| {
+            test(recorded, asked.as_ref().map_err(String::as_str))
+        };
+        let Some(replay) = &self.replay else {
+            return self.runs.iter().map(&mut test).fold(0, |code, it| code.max(it));
+        };
+        use crate::cargo::say;
+        let mut failed = Vec::new();
+        for run in &self.runs {
+            say::status(replay.quiet, "Doc-tests", run.0.crate_name());
+            if test(run) == 0 {
+                continue;
+            }
+            let rerun = format!("-p {} --doc", run.0.var("CARGO_PKG_NAME").unwrap_or_default());
+            say::error(&format!("doctest failed, to rerun pass `{rerun}`"));
+            if !replay.no_fail_fast {
+                return FAILED;
+            }
+            failed.push(rerun);
+        }
+        if failed.is_empty() {
+            return 0;
+        }
+        // Cargo lists what failed again when it went on past the first.
+        let targets = if failed.len() == 1 { "target" } else { "targets" };
+        say::error(&format!("{} {targets} failed:", failed.len()));
+        failed.iter().for_each(|it| eprintln!("    `{it}`"));
+        FAILED
+    }
+
+    /// Removes the directories the programs of the examples were built in.
+    fn remove_dirs(&self) {
+        for (_, asked) in &self.runs {
+            if let Ok(asked) = asked {
+                _ = std::fs::remove_dir_all(&asked.dir);
+            }
         }
     }
 }
 
 /// ra-jit as rustdoc: runs the examples when that is what is asked and ra-jit can, and has
-/// rustdoc do as it was asked otherwise.
+/// rustdoc do as it was asked otherwise. Under [`RECORD`] the run is written down for
+/// [`replay`] instead.
 pub(crate) fn command(args: impl Iterator<Item = OsString>) -> anyhow::Result<()> {
     let all: Vec<OsString> = args.collect();
     if !all.iter().any(|it| it == "--test") {
         leave_to_rustdoc(&all, None);
     }
-    let asked = match Asked::read(&all) {
-        Ok(asked) => asked,
-        Err(why) => leave_to_rustdoc(&all, Some(&why)),
-    };
-    let built = asked
-        .build_args()
-        .and_then(|args| crate::run(crate::Args::parse(args.into_iter())?, Some(&asked)));
-    _ = std::fs::remove_dir_all(&asked.dir);
-    match built {
-        Ok(()) => Ok(()),
+    let recorded = match Recorded::own(all.clone()) {
+        Ok(recorded) => recorded,
         Err(why) => leave_to_rustdoc(&all, Some(&format!("{why:#}"))),
+    };
+    if let Some(dir) = std::env::var_os(RECORD) {
+        if let Err(why) = recorded.write(Path::new(&dir)) {
+            std::process::exit(recorded.to_rustdoc(Some(&format!("{why:#}"))));
+        }
+        return Ok(());
     }
+    let asked = Asked::read(&recorded);
+    Libraries { runs: vec![(recorded, asked)], replay: None }.load()
+}
+
+/// Makes the runs of rustdoc written down under [`RECORD`] when ra-jit is run with [`REPLAY`]:
+/// the examples of every library, over one load of their workspace.
+pub(crate) fn replay() -> Option<anyhow::Result<()>> {
+    let mut args = std::env::args().skip(1);
+    if args.next().as_deref() != Some(REPLAY) {
+        return None;
+    }
+    let replay: Replay = match serde_json::from_str(&args.next().unwrap_or_default()) {
+        Ok(replay) => replay,
+        Err(why) => return Some(Err(anyhow::anyhow!("{REPLAY}: {why}"))),
+    };
+    let runs = match Recorded::all_in(&replay.dir) {
+        Ok(runs) => runs,
+        Err(why) => return Some(Err(why)),
+    };
+    let runs = runs.into_iter().map(|it| (Asked::read(&it), it)).map(|(asked, it)| (it, asked));
+    Some(Libraries { runs: runs.collect(), replay: Some(replay) }.load())
 }
 
 /// What the crate asks of every example with `#![doc(test(..))]`.
@@ -691,7 +915,7 @@ impl Test {
                 }
             }
         };
-        let ran = match as_asked(&binary).current_dir(&asked.run_in).output() {
+        let ran = match asked.command(&binary).current_dir(&asked.run_in).output() {
             Ok(ran) => ran,
             Err(error) => return Ok(Ended::Failed(format!("Couldn't run the test: {error}"))),
         };
@@ -1012,11 +1236,10 @@ fn add_crates(
         library.cfg_options(db).clone(),
         library.env(db).clone(),
     );
-    let cwd = std::env::current_dir().unwrap_or_default();
     let (mut added, mut crates) = (Vec::new(), Vec::new());
     for (n, &at) in wanted.iter().enumerate() {
         let test = &tests[at];
-        let path = cwd.join(&test.shown_path);
+        let path = asked.cwd.join(&test.shown_path);
         let Ok(vfs_path) = AbsPathBuf::try_from(path.to_string_lossy().as_ref()) else {
             continue;
         };
@@ -1126,9 +1349,46 @@ pub(crate) struct Building<'a> {
     pub(crate) sysroot: Option<&'a Path>,
 }
 
+/// Runs the examples of each library for `target` over the workspace `building` loaded, as
+/// rustdoc would have one after another. The code to end with.
+pub(crate) fn run_all(
+    db: &mut RootDatabase,
+    building: &Building<'_>,
+    libraries: &Libraries,
+    target: &str,
+) -> i32 {
+    use ide_db::base_db::{self, salsa::Durability};
+    let code = libraries.each(|recorded, asked| {
+        let asked = match asked {
+            Ok(asked) => asked,
+            Err(why) => return recorded.to_rustdoc(Some(why)),
+        };
+        let args = crate::Args {
+            krate: asked.root_file(),
+            batch: Vec::new(),
+            widened: Vec::new(),
+            ..building.args.clone()
+        };
+        let building = Building { args: &args, ..*building };
+        let crates: Vec<base_db::Crate> = base_db::all_crates(db).iter().copied().collect();
+        let ran = crate::crates_named(db, &args.krate, &args).and_then(|found| {
+            let krate = *found.first().context("no such crate")?;
+            run(db, &building, asked, krate, target)
+        });
+        // The examples of the next library are crates of the same names.
+        base_db::set_all_crates_with_durability(db, crates, Durability::MEDIUM);
+        match ran {
+            Ok(code) => code,
+            Err(why) => recorded.to_rustdoc(Some(&format!("{why:#}"))),
+        }
+    });
+    libraries.remove_dirs();
+    code
+}
+
 /// Runs the examples of `krate` for `target` and says how they went as the test harness does.
 /// The code to end with.
-pub(crate) fn run(
+fn run(
     db: &mut RootDatabase,
     building: &Building<'_>,
     asked: &Asked,
@@ -1270,6 +1530,5 @@ pub(crate) fn run(
         failed.len(),
         start.elapsed().as_secs_f64(),
     )?;
-    _ = std::fs::remove_dir_all(&asked.dir);
     Ok(if failed.is_empty() { 0 } else { FAILED })
 }
