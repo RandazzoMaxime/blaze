@@ -6485,8 +6485,19 @@ fn requested(stream: UnixStream) -> Option<Event> {
 /// the other end for as long as it lives, however it dies.
 fn end_with_input() {
     while input_line().is_some() {}
-    // The executables on disk get the last edits before the worker goes.
+    // The executables on disk get the last edits before the worker goes, and the store what
+    // the last build kept.
     splicer::flush();
+    ra_jit_store::settled();
+    // What it started goes with it, as when the daemon kills it: the daemon started it in a
+    // group of its own.
+    #[cfg(unix)]
+    // SAFETY: neither takes a pointer.
+    unsafe {
+        if libc::getpgrp() == libc::getpid() {
+            libc::killpg(0, libc::SIGKILL);
+        }
+    }
     std::process::exit(0);
 }
 
