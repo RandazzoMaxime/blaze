@@ -48,6 +48,7 @@ mod tests {
     fn unit_expression_initializes_its_place() {
         check_diagnostics(
             r#"
+//- minicore: copy
 #![deny(unused_mut)]
 fn f() -> () {
     let mut x: i32;
