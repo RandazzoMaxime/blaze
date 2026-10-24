@@ -747,6 +747,7 @@ fn main() {
     case!(cases::returned_in_place::run());
     case!(cases::elided_captures::run());
     case!(cases::destructuring_assignment::run());
+    case!(cases::higher_ranked::run());
 }
 
 fn nest<T>(depth: u8, value: T) -> Option<Option<T>> {

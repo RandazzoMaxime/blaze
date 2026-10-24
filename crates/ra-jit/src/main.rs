@@ -2528,6 +2528,16 @@ fn pause_after_load() {
     }
 }
 
+/// Waits for `RA_JIT_SYMBOLS_PAUSE_MS` before the symbols rustc built are read, and says so:
+/// what `harness/aheadready.py` has functions compiled ahead in.
+fn pause_before_symbols() {
+    let pause = std::env::var("RA_JIT_SYMBOLS_PAUSE_MS").ok().and_then(|it| it.parse().ok());
+    if let Some(pause) = pause {
+        eprintln!("symbols: paused");
+        std::thread::sleep(Duration::from_millis(pause));
+    }
+}
+
 /// The directory cargo put the executables of the build in: the one its `deps`, where the
 /// libraries of the build are, is in.
 fn executables_of(symbol_files: &[PathBuf]) -> Option<AbsPathBuf> {
@@ -6532,17 +6542,18 @@ fn main() -> anyhow::Result<()> {
     run(Args::parse(std::env::args().skip(1))?, None)
 }
 
-/// Compiles the crates `args` names on `threads` threads until `done`: the symbols a build
-/// waits for are not needed for it. With `follow` the generic instances their functions
-/// reach are compiled too.
+/// Compiles the crates `args` names on `threads` threads until `done`, giving up on what is
+/// being compiled then: the symbols a build waits for are not needed for it. With `follow`
+/// the generic instances their functions reach are compiled too.
 fn lower_until(
-    db: &RootDatabase,
+    db: &mut RootDatabase,
     args: &Args,
     listed: &Listed,
     threads: usize,
     follow: bool,
     done: &(dyn Fn() -> bool + Sync),
 ) -> anyhow::Result<()> {
+    use ide_db::base_db::salsa::Database as _;
     if done() {
         return Ok(());
     }
@@ -6569,13 +6580,29 @@ fn lower_until(
         false => hir_ty_codegen::Unnamed::alone(functions),
     };
     std::thread::scope(|scope| {
-        for _ in 0..threads {
-            let (db, unnamed) = (db.clone(), &unnamed);
-            scope.spawn(move || {
-                hir::attach_db(&db, || hir_ty_codegen::compile_unnamed(&db, unnamed, done))
-            });
+        let compiling: Vec<_> = (0..threads)
+            .map(|_| {
+                let (db, unnamed) = (db.clone(), &unnamed);
+                scope.spawn(move || {
+                    let compile = || hir_ty_codegen::compile_unnamed(&db, unnamed, done);
+                    let compile = std::panic::AssertUnwindSafe(|| hir::attach_db(&db, compile));
+                    let _ = std::panic::catch_unwind(compile);
+                })
+            })
+            .collect();
+        // What is being compiled once the build stops waiting is given up on, not finished:
+        // one function can take minutes, and readiness would wait for it. A thread's own
+        // cancellation is not enough: salsa ignores it inside a query that recovers from
+        // cycles, as inference and MIR building do, and so for most of what takes long.
+        while compiling.iter().any(|thread| !thread.is_finished()) {
+            if done() {
+                db.trigger_cancellation();
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(5));
         }
     });
+    let db = &*db;
     // What the build lists of the crates to name what it keeps, while there is still time.
     let lower = |bodies: &[hir_def::DefWithBodyId]| {
         let next = std::sync::atomic::AtomicUsize::new(0);
@@ -7154,6 +7181,7 @@ fn run_holding(
         let whole = whole.map(|it| it.recv()?).transpose()?;
         let symbol_files = whole.as_ref().map_or(&symbol_files, |it| &it.symbol_files);
         let start = Instant::now();
+        pause_before_symbols();
         let table = SymbolTable::load(symbol_files, &root)?;
         eprintln!("symbols: {} in {:.1?}", table.len(), start.elapsed());
         Ok::<_, anyhow::Error>((table, whole))
@@ -7319,7 +7347,7 @@ fn run_holding(
     // Beside cargo the symbols were read as cargo wrote them, and are there a moment after
     // the names are resolved: a compile started now would hold up readiness past that.
     if !beside {
-        lower_until(&db, &args, &listed, cores(), true, &|| table.is_finished())?;
+        lower_until(&mut db, &args, &listed, cores(), true, &|| table.is_finished())?;
     }
     let (table, whole) =
         table.join().map_err(|_| anyhow::anyhow!("loading the symbols panicked"))??;
