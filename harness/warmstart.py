@@ -12,7 +12,8 @@ without rustc (docs/no-rustc.md, step K):
   again    the same once more, with the store holding all of that: what the issue is for
 After each, a body edit and its undoing, which the daemon is to patch, and the program's output,
 which has to be cargo's. For each step: the command's seconds, the wait until ready, the most
-memory held, and what the worker compiled and timed (all it said is in `WORK/said-STEP.txt`).
+memory held, and what the worker compiled and timed (all it said is in `WORK/said-STEP.txt`, and
+for the edit and its undoing in `WORK/said-STEP-edit.txt` and `-back.txt`).
 Writes the steps as JSON on stdout's last line. The projects are bench.py's, fetched as it fetches them.
 """
 import json, os, shutil, sys

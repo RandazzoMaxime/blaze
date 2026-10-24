@@ -31,6 +31,11 @@ back them is under [docs/upstream/](../upstream/), each with a `SOURCE.md`. Sear
 - [borrowck.md](borrowck.md): rustc's NLL borrow checker and Polonius (the nightly-default
   alpha, the legacy datalog analysis, stabilization status, the UI tests that tell them apart),
   rust-analyzer's removed borrowck, and what ra-jit builds. 2026-10-20.
+- [warm-start.md](warm-start.md): a daemon's start on a warm store with nothing of rustc's
+  (#41): where helix's 105 s went (a walk of future types exponential in their depth, store
+  reads waiting on each other and the interner, the rebuild for the first edit), what changed
+  (38.0 s), and why the last-linked executable cannot be adopted as a base as it stands.
+  2026-10-24.
 - [bun.md](bun.md): bun's Rust port (1.4.3, 1.25M lines in 103 crates on a nightly) built
   by ra-jit: how the harness builds it, what broke and was fixed, what is filed, and its edit
   and runtime numbers against cargo; why the whole program ran 5.9x slower than release and
