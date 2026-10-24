@@ -844,6 +844,20 @@ rust-lang/rust at b940084d7, the commit `rustc 1.99.0 -vV` names):
   toolchain's server), once per release when `ra-jit std` ships it; once J2 compiles
   `serde_derive`, each server is built with the one before it.
 
+Where J stands (2026-10-24):
+
+- The static J2 writes compiles. `harness/allrajit.py`'s `macros` program holds
+  `[Client::expand1(..), Client::expand2(..)]` in a `#[no_mangle]` static and is built with
+  nothing of rustc's whole, over the standard library's unit and from the store: const
+  evaluation reifies each client's closure into its `extern "C"` function as rustc does
+  (`bridge::selfless_reify`), and the bridge it reaches, `proc_macro`'s symbol interner and its
+  thread-local included, is compiled with the program. `proc_macro` (and `test`) are not in
+  the unit, so they are the program's when it links them; the unit of a program that links
+  `proc_macro` has `rustc-literal-escaper` too, and is shared by every such program.
+- Next: a library ra-jit links with `cc -shared` (link.rs makes executables alone so far), the
+  list written into a proc-macro crate's root, and the release's server with the loader that
+  reads it, checked against the toolchain's server as above.
+
 **K. The cold build is ra-jit's.** ([#91](https://github.com/indexable-inc/ra-jit/issues/91)) `cargo ra-jit build` with nothing built plans the units
 (plan.rs), and the daemon compiles them all, taking what the store and the remote have, links
 the program with G's line and patches its own executable from the first edit on. No `cargo

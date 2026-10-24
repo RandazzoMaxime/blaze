@@ -1333,8 +1333,10 @@ impl SymbolResolver for Resolver<'_> {
         if self.prebuilt(krate) {
             return true;
         }
+        // What the prebuilt unit leaves out ([`library_unit`]), `proc_macro` and `test`, is
+        // compiled with the program that links it.
         if krate.data(self.db).origin.is_lang() {
-            return !self.table.is_empty() || self.prebuilt.is_some();
+            return !self.table.is_empty();
         }
         if self.own_crate_id(krate).is_none() {
             return true;
@@ -3671,8 +3673,15 @@ fn std_unit(
     for named in args.crates() {
         program.extend(crates_named(db, named, args)?);
     }
-    let base = |it: &Crate| ide_db::base_db::Crate::from(*it);
-    if program.iter().any(|it| base(it).data(db).origin.is_lang()) {
+    // `proc_macro` and `test` are the program's when it links them: the unit leaves them out.
+    let of_library = |it: &Crate| {
+        use ide_db::base_db::LangCrateOrigin::{ProcMacro, Test};
+        match &ide_db::base_db::Crate::from(*it).data(db).origin {
+            CrateOrigin::Lang(ProcMacro | Test) => false,
+            origin => origin.is_lang(),
+        }
+    };
+    if program.iter().any(of_library) {
         return Ok(None);
     }
     let members = library_unit(db, &program);

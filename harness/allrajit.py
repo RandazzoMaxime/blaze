@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """allrajit.py: programs with nothing rustc built in them (docs/no-rustc.md, steps F and G).
 
-Four programs, a hello, one that uses collections, `catch_unwind`, threads, channels,
-formatting, a file and an uncaught panic, one with a `#[global_allocator]` of its own, and
-one built with `panic = "abort"`, are built by ra-jit with every crate its own, the standard
-library included, and linked by ra-jit (`--exe`): the native libraries are the ones the
-crates' `#[link]`s ask for, and nothing it could not compile may be left in the executable.
+Five programs, a hello, one that uses collections, `catch_unwind`, threads, channels,
+formatting, a file and an uncaught panic, one with a `#[global_allocator]` of its own, one
+built with `panic = "abort"`, and one with a static of proc-macro clients as J2 writes it,
+are built by ra-jit with every crate its own, the standard library included, and linked by
+ra-jit (`--exe`): the native libraries are the ones the crates' `#[link]`s ask for, and
+nothing it could not compile may be left in the executable.
 Each is built three ways:
 
   - whole: the program and the standard library in one build, one object;
@@ -135,9 +136,38 @@ ABORT = r"""fn main() {
     if std::env::args().count() > 1 { panic!("aborting {}", 3); }
 }
 """
+# What docs/no-rustc.md's J2 writes into a proc-macro crate: a static of each macro's client,
+# which reaches `proc_macro`'s own statics (its symbol interner's thread-local) through the
+# bridge it runs. The standard library's unit leaves `proc_macro` out, so the program has it.
+MACROS = r"""#![feature(proc_macro_internals)]
+#![allow(internal_features)]
+extern crate proc_macro;
+
+use proc_macro::TokenStream;
+use proc_macro::bridge::client::Client;
+
+fn derive_it(input: TokenStream) -> TokenStream { input }
+
+fn attr_it(_attr: TokenStream, item: TokenStream) -> TokenStream { item }
+
+#[unsafe(no_mangle)]
+pub static ALLRAJIT_MACROS: [Client; 2] = [Client::expand1(derive_it), Client::expand2(attr_it)];
+
+fn main() {
+    let words = std::hint::black_box(&ALLRAJIT_MACROS) as *const _ as *const usize;
+    let (first, second) = unsafe { (*words, *words.add(1)) };
+    println!("clients {} {}", first != 0 && second != 0, first != second);
+}
+"""
 # (program, its source, the runs to compare: the arguments of each, its panic strategy)
 PROGRAMS = [("hello", HELLO, [["a", "b"]], "unwind"), ("rich", RICH, [[], ["fail"]], "unwind"),
-            ("counting", ALLOC, [[]], "unwind"), ("abort", ABORT, [[], ["fail"]], "abort")]
+            ("counting", ALLOC, [[]], "unwind"), ("abort", ABORT, [[], ["fail"]], "abort"),
+            ("macros", MACROS, [[]], "unwind")]
+# cargo's build of these needs the unstable features they name.
+UNSTABLE = {"macros"}
+# Crates of the standard library a program links that the library's unit leaves out. What
+# they depend on (`rustc-literal-escaper` of `proc_macro`) makes the unit another one.
+LINKS = {"macros": ["proc_macro"]}
 
 
 def run(cmd, cwd, what, env=None):
@@ -200,7 +230,8 @@ def main():
         for name, _, runs, _ in PROGRAMS:
             root = roots[name]
             target = os.path.join(root, "target")
-            run(["cargo", "build", "-q", "--target-dir", target], root, f"cargo build of {name}")
+            run(["cargo", "build", "-q", "--target-dir", target], root, f"cargo build of {name}",
+                {"RUSTC_BOOTSTRAP": "1"} if name in UNSTABLE else None)
             binary = os.path.join(root, "target/debug", name)
             expected[name] = [outcome(binary, args, root) for args in runs]
         lines = []
@@ -220,7 +251,8 @@ def main():
             # The first program again once the store has the library, and the second on
             # another store.
             programs = PROGRAMS + PROGRAMS[:1] + PROGRAMS[1:2] if way == "stored" else PROGRAMS
-            # The panic strategies whose library some store or the remote has.
+            # The units, by panic strategy and what else of the library is linked, that some
+            # store or the remote has.
             compiled = set()
             for at, (name, _, runs, panic) in enumerate(programs):
                 root = roots[name]
@@ -228,20 +260,22 @@ def main():
                 binary = os.path.join(work, f"{name}-{way}")
                 exe = ["--exe", binary]
                 how = ""
+                own = [name, *LINKS.get(name, [])]
                 if way == "whole":
-                    ran, took = ra_jit(root, [name, *std_of(panic)], obj, *exe)
+                    ran, took = ra_jit(root, [*own, *std_of(panic)], obj, *exe)
                 elif way == "unit":
-                    ran, took = ra_jit(root, [name], obj, "--prebuilt", units[panic], *exe)
+                    ran, took = ra_jit(root, own, obj, "--prebuilt", units[panic], *exe)
                 else:
                     store = stores[at == len(programs) - 1]
-                    ran, took = ra_jit(root, [name], obj, *exe, env=store)
+                    ran, took = ra_jit(root, own, obj, *exe, env=store)
                     said = re.findall(r"^standard library: (.*)$", ran.stderr, re.M)
                     stored = bool(said) and said[0].startswith("from the store")
-                    if not said or stored != (panic in compiled):
+                    unit = (panic, *LINKS.get(name, []))
+                    if not said or stored != (unit in compiled):
                         raise SystemExit(f"FAIL: {name} ({way}, build {at + 1}) "
-                                         f"{'should have taken' if panic in compiled else 'took'} the "
+                                         f"{'should have taken' if unit in compiled else 'took'} the "
                                          f"standard library from the store: {said}\n{ran.stderr}")
-                    compiled.add(panic)
+                    compiled.add(unit)
                     how = (", the standard library from the remote" if store is stores[1]
                            else ", the standard library from the store" if stored
                            else ", the standard library compiled, stored and pushed")
