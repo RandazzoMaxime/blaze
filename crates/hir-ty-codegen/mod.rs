@@ -15590,6 +15590,25 @@ fn returned_in_place(
     eligible.then_some(local)
 }
 
+/// How many times each local is dropped by a terminator or read by a `FakeRead`, counted in one
+/// pass: a body of many blocks has many temporaries, and neither is a use of what one holds.
+fn drops_and_fake_reads(body: &MirBody<'_>) -> FxHashMap<LocalId, usize> {
+    let mut counted: FxHashMap<LocalId, usize> = FxHashMap::default();
+    for (_, block) in body.basic_blocks.iter() {
+        for statement in &block.statements {
+            if let StatementKind::FakeRead(place) = &statement.kind {
+                *counted.entry(place.local).or_default() += 1;
+            }
+        }
+        if let Some(TerminatorKind::Drop { place, .. }) =
+            block.terminator.as_ref().map(|it| &it.kind)
+        {
+            *counted.entry(place.local).or_default() += 1;
+        }
+    }
+    counted
+}
+
 /// The temporaries a call's argument is moved through, each with the local moved into it:
 /// `f(value)` moves `value` to a temporary and the temporary to `f`. The two can be one slot,
 /// nothing reading or writing `value` between the move and the call, and the callee then gets
@@ -15658,23 +15677,8 @@ fn moved_arguments(
     }
     let mut mentions: FxHashMap<LocalId, usize> = FxHashMap::default();
     body.visit_places(|place| *mentions.entry(place.local).or_default() += 1);
-    let dropped_or_read = |local: LocalId| {
-        let drops = body
-            .basic_blocks
-            .iter()
-            .filter_map(|(_, block)| block.terminator.as_ref())
-            .filter(
-                |it| matches!(&it.kind, TerminatorKind::Drop { place, .. } if place.local == local),
-            )
-            .count();
-        let fake_reads = body
-            .basic_blocks
-            .iter()
-            .flat_map(|(_, block)| &block.statements)
-            .filter(|it| matches!(&it.kind, StatementKind::FakeRead(place) if place.local == local))
-            .count();
-        drops + fake_reads
-    };
+    let not_uses = drops_and_fake_reads(body);
+    let dropped_or_read = |local: LocalId| not_uses.get(&local).copied().unwrap_or(0);
     let bound: rustc_hash::FxHashSet<LocalId> = body
         .binding_locals
         .values()
@@ -15760,24 +15764,10 @@ fn forwarded_temps(body: &MirBody<'_>) -> FxHashMap<LocalId, LocalId> {
     // Written once and read once, and by nothing else: the binding is not what it is made of.
     let mut mentions: FxHashMap<LocalId, usize> = FxHashMap::default();
     body.visit_places(|place| *mentions.entry(place.local).or_default() += 1);
-    let fake_reads = |local: LocalId| {
-        body.basic_blocks
-            .iter()
-            .flat_map(|(_, block)| &block.statements)
-            .filter(|it| matches!(&it.kind, StatementKind::FakeRead(place) if place.local == local))
-            .count()
-    };
     // A drop of the temporary is not a use: it holds a value only between the two statements,
     // which unwind to nowhere, and a drop of it then finds the slot holding its value.
-    let drops = |local: LocalId| {
-        body.basic_blocks
-            .iter()
-            .filter_map(|(_, block)| block.terminator.as_ref())
-            .filter(
-                |it| matches!(&it.kind, TerminatorKind::Drop { place, .. } if place.local == local),
-            )
-            .count()
-    };
+    let not_uses = drops_and_fake_reads(body);
+    let dropped_or_read = |local: LocalId| not_uses.get(&local).copied().unwrap_or(0);
     let bound: rustc_hash::FxHashSet<LocalId> = body
         .binding_locals
         .values()
@@ -15788,7 +15778,7 @@ fn forwarded_temps(body: &MirBody<'_>) -> FxHashMap<LocalId, LocalId> {
         .collect();
     forwarded.retain(|&temp, to| {
         !bound.contains(&temp)
-            && mentions[&temp] - fake_reads(temp) - drops(temp) == 2
+            && mentions[&temp] - dropped_or_read(temp) == 2
             && body.locals[temp].ty == body.locals[*to].ty
             && !body.promoted_locals.iter().any(|it| it.0 == *to)
             && *to != returned_local(body)
