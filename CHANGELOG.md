@@ -8,6 +8,10 @@ All notable changes to ra-jit are written here. The format follows
 
 ### Added
 
+- The SSE and AVX compares compile (#87): `llvm.x86.sse.cmp.ps` and `.ss`, `sse2.cmp.pd` and
+  `.sd` and AVX's 256-bit ones give a lane of all ones where the immediate's predicate holds, as
+  rustc's do. glam's `Vec4::cmpeq` and `is_finite_mask`, which bevy calls, were left to rustc;
+  `harness/breakers` checks each predicate, NaN lanes included, against rustc's program.
 - `RA_JIT_UNITS=1` compiles a whole program's functions many to an LLVM module, as rustc
   compiles a crate's codegen units (#176): the functions are found from their IR before any
   is compiled, cut into units of about 20,000 instructions in the order they were found in,
@@ -439,6 +443,16 @@ All notable changes to ra-jit are written here. The format follows
 
 ### Fixed
 
+- A function the daemon compiles ahead, while it reads the symbols rustc built, is given up on
+  once they are read, where the worker used to finish it before it was ready. bevy's second
+  warm-store run began its derived `release_state` of a read-only query struct, which the
+  trait solver takes about two minutes over, and was ready 148 s after the build in place of
+  26 s; it is now ready in 26.5 s. A worker's own cancellation was not enough: salsa ignores it
+  inside a query that recovers from cycles, as inference and MIR building do, so the threads are
+  stopped as a write stops them, and the trait solver checks for that at each goal. A bin over
+  bevy_ecs with that struct stopped compiling ahead 9 to 20 s after its symbols were read, and now
+  within a second. `harness/aheadready.py` holds each function compiled ahead for ten minutes
+  and checks that the daemon is ready within two.
 - An expression of type `()` that computes nothing (an assignment, a block without a tail, a
   `break` or `return` without a value, an `if` without an `else`) gives its place the `()`, as
   rustc's MIR does: `let z: () = x = 1; let w = z;` was E0381, a build failed on code rustc
