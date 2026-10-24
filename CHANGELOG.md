@@ -214,6 +214,16 @@ All notable changes to ra-jit are written here. The format follows
 
 ### Changed
 
+- Each debug type is described once, by itself, and the types made of each other are kept
+  together as one group that every set of debug types reaching them shares
+  ([#29](https://github.com/indexable-inc/ra-jit/issues/29)); the DWARF is the same. On Linux
+  x86-64 (16 cores, `memsplit.py`, one run each) the daemon after its own base and edits holds
+  7.36 GB instead of 7.63 on nushell, 5.87 instead of 6.55 on helix and 14.47 instead of
+  15.97 on bun, at most 7.9, 6.1 and 15.8 GB at an edit instead of 11.7, 9.8 and 22.9, and the
+  first edit after the base takes 0.37 s instead of 2.06 on nushell, 0.19 instead of 1.71 on
+  helix and 1.51 instead of 7.23 on bun. zed's own base, which passed 64 GB, finishes with no
+  bound of its own at 62.6 GB in 662 s; at the default bound, a quarter of memory, it is still
+  given up (#188).
 - A whole program's compiles under LLVM import what they call, as ThinLTO's backends do,
   where each built its callees again from MIR and optimized them from scratch. Each function
   a compile calls is lowered and run through LLVM's pre-link pipeline once in the process,
@@ -412,6 +422,12 @@ All notable changes to ra-jit are written here. The format follows
 
 ### Fixed
 
+- A daemon's link that fails on names nothing defines, used only by code rustc's own link
+  takes out, is run again as rustc's line has it, with `--gc-sections` (or `-dead_strip`,
+  `/OPT:REF`). The daemon leaves those out so a patch can call what the executable's code no
+  longer reaches, and zed's webrtc then needs X11's `libXtst`, which nothing links: its own
+  base failed to link after 662 s ([#29](https://github.com/indexable-inc/ra-jit/issues/29)).
+  An executable linked so takes edits that call into what it left out as builds in full.
 - The borrow checker holds a struct or enum to what its fields need of its lifetimes,
   rustc's inferred outlives bounds, where it is named or built: `B(x)` with
   `struct B<'a, 'b>(&'b mut F<'a, 'b>)` needs `'a: 'b`. A closure passed for a bound with
