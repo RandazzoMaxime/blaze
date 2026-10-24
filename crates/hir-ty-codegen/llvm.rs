@@ -137,9 +137,7 @@ pub(super) fn emit(
                 .collect();
             let function = Lowering::add(context, &module, &own)?;
             // Before the function's body: its calls of what is imported are of the bodies.
-            for import in imports {
-                link(context, &module, import)?;
-            }
+            link(context, &module, imports)?;
             if !imports.is_empty() {
                 agree_calls(context, &module)?;
             }
@@ -329,13 +327,51 @@ pub(super) fn export(
     })
 }
 
-/// Puts the body `import` has in `module`, `available_externally` under the name of the
-/// request it is of, with what it refers to under the names of the compile's requests.
+/// Puts the body each of `imports` has in `module`, `available_externally` under the name of
+/// the request it is of, with what it refers to under the names of the compile's requests.
+///
+/// LLVM's linker goes over all of the module it links into, so each linked into `module`,
+/// which every one makes larger, takes time of the square of their number. They are linked to
+/// each other two at a time instead, and into `module` at once.
 fn link<'ctx>(
     context: &'ctx Context,
     module: &Module<'ctx>,
-    import: &Import,
+    imports: &[Import],
 ) -> Result<(), Unhandled> {
+    let llvm = |e: inkwell::support::LLVMString| Unhandled::Llvm(e.to_string_lossy().into_owned());
+    let mut modules = Vec::with_capacity(imports.len());
+    for import in imports {
+        modules.push(imported(context, module, import)?);
+    }
+    while modules.len() > 1 {
+        let mut linked = Vec::with_capacity(modules.len().div_ceil(2));
+        let mut pairs = modules.into_iter();
+        while let Some(into) = pairs.next() {
+            if let Some(other) = pairs.next() {
+                into.link_in_module(other).map_err(llvm)?;
+            }
+            linked.push(into);
+        }
+        modules = linked;
+    }
+    let Some(all) = modules.pop() else { return Ok(()) };
+    module.link_in_module(all).map_err(llvm)?;
+    for import in imports {
+        let name = Symbol::Func(import.id).to_string();
+        let body = module.get_function(&name).ok_or(Unhandled::Shape("an import not linked"))?;
+        body.set_linkage(Linkage::AvailableExternally);
+    }
+    Ok(())
+}
+
+/// The module of the body `import` has, under the name of the request it is of, with what it
+/// refers to under the names of the compile's requests; and `module` with a declaration of
+/// it, for LLVM to link it to.
+fn imported<'ctx>(
+    context: &'ctx Context,
+    module: &Module<'ctx>,
+    import: &Import,
+) -> Result<Module<'ctx>, Unhandled> {
     let llvm = |e: inkwell::support::LLVMString| Unhandled::Llvm(e.to_string_lossy().into_owned());
     let buffer = MemoryBuffer::create_from_memory_range(&import.export.bitcode, "import");
     let imported = context.create_module_from_ir(buffer).map_err(llvm)?;
@@ -370,13 +406,13 @@ fn link<'ctx>(
     for (global, name) in &names {
         global.set_name(name);
     }
-    own.set_linkage(Linkage::AvailableExternally);
-    // LLVM links in a body that is only available externally only where the module it goes
-    // to has the function, and the compile's calls are lowered after.
+    // Only available externally once in `module`: LLVM links in such a body only where the
+    // module it goes to has the function, and the imports are linked to each other first.
+    own.set_linkage(Linkage::External);
     if module.get_function(&own_name).is_none() {
         module.add_function(&own_name, own.get_type(), Some(Linkage::External));
     }
-    module.link_in_module(imported).map_err(llvm)
+    Ok(imported)
 }
 
 /// Has each call in the bodies linked in ([`link`]) made through the type its callee has in
@@ -983,8 +1019,7 @@ define void @"ra-jit.own"(ptr %to, i64 %from) {
             context.void_type().fn_type(&[i64.into(), ptr.into()], false),
             None,
         );
-        link(&context, &module, &passes).unwrap();
-        link(&context, &module, &writes).unwrap();
+        link(&context, &module, &[passes, writes]).unwrap();
         agree_calls(&context, &module).unwrap();
         let builder = context.create_builder();
         builder.position_at_end(context.append_basic_block(own, ""));
@@ -1039,7 +1074,7 @@ define void @"ra-jit.own"(ptr %to, i64 %from) {
         let module = context.create_module("ra-jit");
         let i32 = context.i32_type();
         let own = module.add_function(OWN, i32.fn_type(&[], false), None);
-        link(&context, &module, &import).unwrap();
+        link(&context, &module, std::slice::from_ref(&import)).unwrap();
         let body = module.get_function("ra-jit.f.5").expect("the import, linked in");
         assert_eq!(body.get_linkage(), Linkage::AvailableExternally);
         let builder = context.create_builder();
@@ -1073,6 +1108,23 @@ define void @"ra-jit.own"(ptr %to, i64 %from) {
         assert!(text.contains("@ra-jit.f.7(") && text.contains("@ra-jit.d.3"), "{text}");
         assert!(!text.contains("ra-jit.f.5"), "{text}");
         assert!(module.get_function("ra-jit.f.5").is_none_or(|it| it.count_basic_blocks() == 0));
+    }
+
+    /// The imports of a compile are linked to each other before they are linked into its
+    /// module, and each is there, only available externally, however many there are.
+    #[test]
+    fn every_import_is_linked_in_available_externally() {
+        let context = Context::create();
+        let imports: Vec<Import> =
+            (4..7).map(|id| exported(&context, WRITES, vec![id], id)).collect();
+        let module = context.create_module("ra-jit");
+        link(&context, &module, &imports).unwrap();
+        module.verify().unwrap();
+        for id in 4..7 {
+            let body = module.get_function(&format!("ra-jit.f.{id}")).unwrap();
+            assert_eq!(body.get_linkage(), Linkage::AvailableExternally);
+            assert!(body.count_basic_blocks() > 0);
+        }
     }
 
     #[test]
