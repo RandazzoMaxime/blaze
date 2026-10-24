@@ -394,3 +394,34 @@ macro_rules! _impl_internable {
     )+ };
 }
 pub use crate::_impl_internable as impl_internable;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[derive(PartialEq, Eq, Hash, Debug)]
+    struct Name(u32);
+    impl_internable!(Name);
+
+    /// A value found under the shard's read lock is the one object of it while threads intern
+    /// and drop it at once: a drop that races the lookup does not take it out of the map.
+    #[test]
+    fn interned_from_many_threads() {
+        let held: Vec<_> = (0..64).map(|i| Interned::new(Name(i))).collect();
+        std::thread::scope(|scope| {
+            for _ in 0..16 {
+                scope.spawn(|| {
+                    for round in 0..20_000u32 {
+                        let found = Interned::new(Name(round % 64));
+                        assert!(found == held[(round % 64) as usize]);
+                        let churned = Interned::new(Name(1000 + round % 7));
+                        let again = Interned::new(Name(1000 + round % 7));
+                        assert!(churned == again);
+                    }
+                });
+            }
+        });
+        let after: Vec<_> = (0..64).map(|i| Interned::new(Name(i))).collect();
+        assert!(after == held);
+    }
+}
