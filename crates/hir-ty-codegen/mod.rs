@@ -6361,6 +6361,13 @@ impl<'a, 'db> ObjectCodegen<'a, 'db> {
             {
                 return self.import(&symbol, sig);
             }
+            if let InstanceDef::Fn(func) = def
+                && let ItemContainerId::TraitId(_) = func.lookup(self.db).container
+            {
+                let called =
+                    self.instance_path(func, args).unwrap_or_else(|| format!("{name}::<{args:?}>"));
+                unsupported!("call to `{called}`: no impl of the trait was selected for it");
+            }
             unsupported!("call to `{name}`, which has no body and no rustc symbol");
         }
         let from_store = self.entries.is_some() || self.base.is_some_and(|it| !it.found.is_empty());
