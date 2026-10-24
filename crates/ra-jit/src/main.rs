@@ -16,6 +16,7 @@ mod frozen;
 mod inputs;
 mod link;
 mod live;
+mod macro_list;
 mod memory;
 mod mirdump;
 mod outline;
@@ -3092,19 +3093,33 @@ fn harness_alone(args: &Args) -> Option<String> {
 /// The text of the root file of the crate of each program of tests of `programs` with ra-jit's
 /// test harness as the tests are now at its end, or without it where ra-jit writes none, for
 /// those that differ from the text they have. Only the crates among `of` when it is given.
+/// A proc-macro crate linked as a shared library has the list of its macros there instead
+/// ([`macro_list`]).
 fn harnesses<'a>(
     db: &RootDatabase,
     programs: impl IntoIterator<Item = &'a Args>,
     of: Option<&FxHashSet<Crate>>,
 ) -> Vec<(vfs::FileId, String)> {
     let mut texts: Vec<(vfs::FileId, String)> = Vec::new();
-    for args in programs.into_iter().filter(|it| of_tests(it)) {
+    for args in programs.into_iter().filter(|it| of_tests(it) || it.shared) {
         for krate in crates_named(db, &args.krate, args).unwrap_or_default().into_iter().take(1) {
             let file = krate.root_file(db);
             if of.is_some_and(|it| !it.contains(&krate)) || texts.iter().any(|it| it.0 == file) {
                 continue;
             }
             let text = db.file_text(file).text(db).clone();
+            if !of_tests(args) {
+                let data = ide_db::base_db::Crate::from(krate).data(db);
+                if !data.target_kind.is_proc_macro() {
+                    continue;
+                }
+                let module = hir::attach_db(db, || macro_list::module(db, krate));
+                let wanted = format!("{}{module}", test_harness::without(&text));
+                if *text != *wanted {
+                    texts.push((file, wanted));
+                }
+                continue;
+            }
             let module = hir::attach_db(db, || {
                 let functions = krate.modules(db).into_iter().flat_map(|it| it.declarations(db));
                 let functions = functions.filter_map(|it| match it {

@@ -7,7 +7,8 @@ built with `panic = "abort"`, and one with a static of proc-macro clients as J2 
 are built by ra-jit with every crate its own, the standard library included, and linked by
 ra-jit (`--exe`): the native libraries are the ones the crates' `#[link]`s ask for, and
 nothing it could not compile may be left in the executable. A shared library is linked too
-(`--exe` with `--shared`), loaded with `dlopen` and called as cargo's `cdylib` of it is.
+(`--exe` with `--shared`), loaded with `dlopen` and called as cargo's `cdylib` of it is, and
+a proc-macro crate's, whose list of macros ra-jit writes into it is read off the library.
 Each is built three ways:
 
   - whole: the program and the standard library in one build, one object;
@@ -24,7 +25,7 @@ thread ids aside.
     python3 allrajit.py            # every way
     python3 allrajit.py unit stored
 """
-import os, re, shutil, subprocess, sys, time
+import json, os, re, shutil, subprocess, sys, time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
@@ -185,6 +186,28 @@ pub extern "C" fn allrajit_count(n: u64) -> u64 {
 }
 """
 CALLS = [1, 3, 10, 3]
+# A proc-macro crate linked as J2 links one: the library has the list of its macros ra-jit
+# writes into the crate (crates/ra-jit/src/macro_list.rs) where rustc's metadata has it.
+PROC_MACROS = r"""extern crate proc_macro;
+use proc_macro::TokenStream;
+
+#[proc_macro_derive(Hello, attributes(hello, greet))]
+pub fn hello(_input: TokenStream) -> TokenStream {
+    "impl Hello for () {}".parse().unwrap()
+}
+
+#[proc_macro_attribute]
+pub fn same(_attr: TokenStream, item: TokenStream) -> TokenStream {
+    item
+}
+
+#[proc_macro]
+pub fn answer(_input: TokenStream) -> TokenStream {
+    "42".parse().unwrap()
+}
+"""
+# Kind (derive, attribute, function-like), name and helper attributes, by name.
+MACRO_LIST = [[0, "Hello", ["hello", "greet"]], [2, "answer", []], [1, "same", []]]
 # cargo's build of these needs the unstable features they name.
 UNSTABLE = {"macros"}
 # Crates of the standard library a program links that the library's unit leaves out. What
@@ -234,6 +257,37 @@ def library_package(work):
     return root
 
 
+def proc_macro_package(work):
+    root = os.path.join(work, "macros-crate")
+    os.makedirs(os.path.join(root, "src"))
+    with open(os.path.join(root, "Cargo.toml"), "w") as f:
+        f.write('[package]\nname = "allmacros"\nversion = "0.1.0"\nedition = "2021"\n'
+                '[lib]\nproc-macro = true\n[workspace]\n')
+    with open(os.path.join(root, "src/lib.rs"), "w") as f:
+        f.write(PROC_MACROS)
+    subprocess.run(["cargo", "generate-lockfile", "-q"], cwd=root, check=True)
+    return root
+
+
+def macro_list(library):
+    """The list of macros the library exports, each with whether its client is there, read by a
+    process of its own."""
+    code = ("import ctypes, json, sys\n"
+            "class Slice(ctypes.Structure):\n"
+            "    _fields_ = [('ptr', ctypes.c_void_p), ('len', ctypes.c_size_t)]\n"
+            "class Macro(ctypes.Structure):\n"
+            "    _fields_ = [('kind', ctypes.c_uint32), ('name', Slice), ('helpers', Slice),\n"
+            "                ('client', ctypes.c_void_p)]\n"
+            "text = lambda it: ctypes.string_at(it.ptr, it.len).decode()\n"
+            "listed = Slice.in_dll(ctypes.CDLL(sys.argv[1]), 'RA_JIT_PROC_MACROS')\n"
+            "macros = (Macro * listed.len).from_address(listed.ptr)\n"
+            "helpers = lambda it: [text(h) for h in (Slice * it.len).from_address(it.ptr or 1)]\n"
+            "print(json.dumps([[m.kind, text(m.name), helpers(m.helpers), bool(m.client)]\n"
+            "                  for m in macros]))\n")
+    ran = subprocess.run([sys.executable, "-c", code, library], capture_output=True, text=True)
+    return ran.returncode, ran.stdout, ran.stderr
+
+
 def calls(library):
     """What the library's `allrajit_count` gives for each of CALLS, loaded by a process of its own."""
     code = ("import ctypes, sys\n"
@@ -278,7 +332,7 @@ def main():
                 {"RUSTC_BOOTSTRAP": "1"} if name in UNSTABLE else None)
             binary = os.path.join(root, "target/debug", name)
             expected[name] = [outcome(binary, args, root) for args in runs]
-        library = library_package(work)
+        library, macros = library_package(work), proc_macro_package(work)
         run(["cargo", "build", "-q", "--target-dir", os.path.join(library, "target")], library,
             "cargo build of the shared library")
         expected_calls = calls(os.path.join(library, "target/debug/libshared.so"))
@@ -356,8 +410,26 @@ def main():
                                  f"cargo:  {expected_calls}\nra-jit: {got}")
             lines.append(f"the shared library ({way}): built and linked in {took:.2f} s, the link "
                          f"{link_took}, {len(CALLS)} calls as cargo's library answers them")
+            obj, shared = (os.path.join(work, f"allmacros-{way}{ext}") for ext in (".o", ".so"))
+            exe = ["--exe", shared, "--shared"]
+            if way == "whole":
+                ran, took = ra_jit(macros, ["allmacros", "proc_macro", *std_of("unwind")], obj, *exe)
+            elif way == "unit":
+                ran, took = ra_jit(macros, ["allmacros", "proc_macro"], obj,
+                                   "--prebuilt", units["unwind"], *exe)
+            else:
+                ran, took = ra_jit(macros, ["allmacros", "proc_macro"], obj, *exe, env=stores[0])
+            link_took = linked(ran, f"the proc-macro crate ({way})")
+            code, out, err = macro_list(shared)
+            want = [[*it, True] for it in MACRO_LIST]
+            if code != 0 or json.loads(out) != want:
+                raise SystemExit(f"FAIL: the proc-macro crate's library ({way}) lists other than "
+                                 f"its macros:\nwanted: {want}\ngot:    {code} {out}{err}")
+            lines.append(f"the proc-macro crate ({way}): built and linked in {took:.2f} s, the "
+                         f"link {link_took}, its {len(MACRO_LIST)} macros listed")
         print("\n".join(lines))
-        print(f"PASS: {len(PROGRAMS)} programs and a shared library with nothing of rustc's, "
+        print(f"PASS: {len(PROGRAMS)} programs, a shared library and a proc-macro crate's with "
+              f"nothing of rustc's, "
               f"{' and '.join(ways)}")
         passed = True
     finally:
