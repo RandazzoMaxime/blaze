@@ -76,8 +76,11 @@ def rustc_errors(toolchain, unit, cache, work):
     text = open(unit.path, errors="replace").read()
     args = [unit.path, "--edition", unit.edition, "--error-format=json", "--emit=metadata", "--crate-type", "lib",
             "-Zui-testing"]
+    # `-Zunpretty` prints the source and stops before any lint, so rustc checks it without.
+    dropped = ("--crate-type", "--edition", "--error-format", "--emit", "-Zpolonius", "-Z polonius", "-Zunpretty",
+               "-Z unpretty")
     for flag in unit.flags:
-        if not flag.startswith(("--crate-type", "--edition", "--error-format", "--emit", "-Zpolonius", "-Z polonius")):
+        if not flag.startswith(dropped):
             args += flag.split(" ", 1)
     key = hashlib.sha1(json.dumps([toolchain, args, text]).encode()).hexdigest()
     if key not in cache:

@@ -168,7 +168,8 @@ These are the places ra-jit still runs rustc or relies on what it wrote, as of m
   is no longer left to rustdoc for its features.
 - Under plain cargo after `ra-jit enable`, rustc builds every crate of the workspace except the
   programs the daemon has loaded, and writes the dep-info of those.
-- `cargo ra-jit check` is `cargo check`.
+- `cargo ra-jit check` was `cargo check`. Since 2026-10-23 it is the daemon's verdict, and
+  `cargo check` only where `only_cargo` sends the command to cargo (below).
 - Under Cranelift, every `asm!` block was assembled by running rustc (`hir-ty-codegen/asm.rs`).
   Since C, a build of ra-jit with LLVM assembles it in process and one without has clang or
   the host's `cc` assemble it; where there is neither, the build fails and says to install
@@ -199,7 +200,7 @@ Paths are under `crates/`; line numbers are of 41e7906192.
 |---|---|---|
 | `ra-jit/src/cargo/mod.rs:305` `by_daemon`, `:300` `ToCargo`, `:395` `by_cargo` | sends the whole build to cargo | the source has an error (until D's first part: now it fails the build with ra-jit's error); rustc's copy of a refused function is stale; a build script's or proc macro's source changed; a manifest changed; the daemon did not build a program |
 | `ra-jit/src/cargo/cli.rs:297` `only_cargo` | sends the command to cargo untouched | `--message-format`, `-Z`, `--exclude`, several targets, an unknown triple |
-| `ra-jit/src/cargo/mod.rs:139` `plain_cargo` | runs cargo with nothing of ra-jit's but its answers to cargo's questions (since B) | `cargo ra-jit check` and subcommands ra-jit does not claim |
+| `ra-jit/src/cargo/mod.rs:139` `plain_cargo` | runs cargo with nothing of ra-jit's but its answers to cargo's questions (since B) | subcommands ra-jit does not claim, and a check `only_cargo` sends to cargo (until 2026-10-23, every `cargo ra-jit check`) |
 
 **What rustc compiled, linked into ra-jit's programs** (steps E, F, G)
 
@@ -231,7 +232,7 @@ Paths are under `crates/`; line numbers are of 41e7906192.
 | `ra-jit/src/cargo/run.rs:136` | `cargo test --doc` with ra-jit as `RUSTDOC` | `cargo ra-jit test` of a library with doctests |
 | `ra-jit/src/doctest.rs` `compile` | rustc compiles or checks an example ra-jit does not build | `compile_fail`, an example rust-analyzer finds an error in or that links a second copy of the library, a build or link of ra-jit's that failed; except what is unchanged since the last run (L's first part). Since L's second part, no probe |
 | `ra-jit/src/doctest.rs:301` `leave_to_rustdoc` | hands the library to rustdoc | `-q`, a library ra-jit cannot load; until A, every package whose features `cargo build --unit-graph` rejected (below) |
-| `ra-jit/src/cargo/mod.rs:139` | `cargo ra-jit check` is `cargo check` | every check |
+| `ra-jit/src/cargo/mod.rs:48` | `cargo ra-jit check` is `cargo check` | a check with `--message-format`, unstable cargo flags, `--exclude`, several targets or an unknown triple; until 2026-10-23, every check |
 | `ra-jit/src/test_harness.rs` `module` returning `None` | leaves the test program's harness to rustc, and a test added to cargo | a bench, an `ignore` written as a token tree (H) |
 | `ra-jit/src/main.rs:5084`, `:5127` `RA_JIT_WRAPS_RUSTC` | ra-jit standing in for rustc for a whole build | the harness's "alone" builds |
 | `harness/apps.py:113` | the harness's "alone" mode: cargo with ra-jit as `RUSTC_WRAPPER`, linking the sysroot's rlibs | the harness only |
