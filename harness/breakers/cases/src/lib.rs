@@ -185,4 +185,5 @@ cases![
     deep_send_shared,
     type_name_of_values,
     trait_method_of_closure,
+    const_float_min_max,
 ];
