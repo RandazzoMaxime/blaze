@@ -70,6 +70,8 @@ def main():
             assert ran.returncode == 0, f"{label}: the edit: {ran.stderr[-3000:]}"
             built = bench.how_built(ran.stderr)
             said = daemon.said(1 if built == "daemon" else 0)
+            with open(os.path.join(work, f"said-{label}-{'back' if back else 'edit'}.txt"), "w") as kept:
+                kept.write(said)
             edits.append(dict(wall_s=round(took, 3), built=built, link=bench.link_kind(said),
                               peak_mb=used["peak_mb"]))
         row["edit"] = edits
