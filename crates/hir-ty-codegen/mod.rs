@@ -112,6 +112,8 @@ mod imports;
 mod llvm;
 mod patch;
 mod places;
+#[cfg(feature = "llvm")]
+mod units;
 use self::places::{row_location, source_location};
 mod promote;
 mod settled;
@@ -598,6 +600,9 @@ pub struct Roots<'a> {
     /// The `main` of a program rustc built nothing of: the `main` the C runtime calls is
     /// then ours to write as well.
     pub start: Option<FunctionId>,
+    /// The object is linked into a shared library of its own, which has the allocator shim
+    /// a program's `start` otherwise brings.
+    pub shared: bool,
     /// Whether rustc built nothing of any crate of the program but the standard library's,
     /// whatever its `main` is: bun's is C's, and every one of its functions is an entry.
     pub whole: bool,
@@ -821,7 +826,11 @@ impl CodegenUnit {
             let mut next = 0;
             if let Some(main) = start {
                 cg.define_start(main)?;
-                cg.define_allocator_shim(main)?;
+                cg.define_allocator_shim(main.krate(db))?;
+            } else if roots.shared
+                && let Some(first) = roots.entries.first()
+            {
+                cg.define_allocator_shim(first.krate(db))?;
             }
             for &id in roots.kept {
                 cg.static_data(id)?;
@@ -843,17 +852,22 @@ impl CodegenUnit {
                 cg.find_stored_roots(&ours);
                 // One without a symbol is not compiled, and is still lowered to be told why.
                 let (told, stored) = (cg.debug.is_some().then_some(&cg.told), &cg.stored_roots);
-                symbols.in_parallel(ours.len(), &|db, symbols, at| {
-                    if symbols.function(ours[at]).is_none() {
-                        _ = db.mir_body(ours[at].into());
-                    } else if stored.get(&ours[at]).is_some_and(Option::is_some) {
-                    } else if let (Ok(compiled), Some(told)) =
-                        (compiled_root(db, ours[at]).as_ref(), told)
-                    {
-                        told.ahead(db, compiled);
-                    }
-                });
-                cg.phases.compile += start.elapsed();
+                if cg.units() {
+                    #[cfg(feature = "llvm")]
+                    cg.compile_units(&ours, Vec::new());
+                } else {
+                    symbols.in_parallel(ours.len(), &|db, symbols, at| {
+                        if symbols.function(ours[at]).is_none() {
+                            _ = db.mir_body(ours[at].into());
+                        } else if stored.get(&ours[at]).is_some_and(Option::is_some) {
+                        } else if let (Ok(compiled), Some(told)) =
+                            (compiled_root(db, ours[at]).as_ref(), told)
+                        {
+                            told.ahead(db, compiled);
+                        }
+                    });
+                    cg.phases.compile += start.elapsed();
+                }
                 // The other threads go on to what the roots call while these are put in the
                 // object.
                 cg.compile_ahead(ours, &mut |cg, ahead| {
@@ -1817,6 +1831,11 @@ struct ObjectCodegen<'a, 'db> {
     homes: home::Homes,
     /// What [`Self::compile_ahead`] has compiled or tried to.
     ahead: FxHashSet<(Instance, StoredParamEnvAndCrate)>,
+    /// The code of the roots and instances compiled in units ([`units`]), yet to be put in
+    /// the object, and the roots units compiled or tried to.
+    unit_roots: FxHashMap<FunctionId, CompiledFunction>,
+    unit_instances: FxHashMap<Instance, CompiledFunction>,
+    unit_tried: FxHashSet<FunctionId>,
     /// The instances that call rustc's copy instead of having code of their own.
     forwarded: FxHashSet<Instance>,
     /// [`Rejections::futures`] as the round started.
@@ -2265,16 +2284,20 @@ pub fn compile_unnamed(db: &dyn HirDatabase, unnamed: &Unnamed, done: &dyn Fn() 
             std::thread::sleep(std::time::Duration::from_millis(1));
             continue;
         };
-        let compiled = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| match &job {
-            either::Either::Left(root) => {
-                root_rows(db, *root);
-                compiled_root(db, *root).as_ref().ok()
-            }
-            either::Either::Right((instance, env)) => {
-                instance_rows(db, instance.clone(), env.clone());
-                compiled_instance(db, instance.clone(), env.clone()).as_ref().ok()
+        let compiled = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            pause_ahead(db);
+            match &job {
+                either::Either::Left(root) => {
+                    root_rows(db, *root);
+                    compiled_root(db, *root).as_ref().ok()
+                }
+                either::Either::Right((instance, env)) => {
+                    instance_rows(db, instance.clone(), env.clone());
+                    compiled_instance(db, instance.clone(), env.clone()).as_ref().ok()
+                }
             }
         }));
+        let given_up = compiled.is_err() && done();
         let mut found = Vec::new();
         if let Ok(Some(compiled)) = compiled {
             unnamed.told.ahead(db, compiled);
@@ -2290,12 +2313,27 @@ pub fn compile_unnamed(db: &dyn HirDatabase, unnamed: &Unnamed, done: &dyn Fn() 
         }
         let mut state = unnamed.state.lock().unwrap_or_else(|e| e.into_inner());
         state.working -= 1;
-        state.compiled += 1;
+        state.compiled += usize::from(!given_up);
         for it in found {
             if state.seen.insert(it.clone()) {
                 state.queue.push(it);
             }
         }
+    }
+}
+
+/// Holds each job of [`compile_unnamed`] for `RA_JIT_AHEAD_PAUSE_MS`, asking the database
+/// whether it was cancelled as a query does: a function that takes that long to compile, for
+/// `harness/aheadready.py`.
+fn pause_ahead(db: &dyn HirDatabase) {
+    static PAUSE: LazyLock<Option<u64>> = LazyLock::new(|| {
+        std::env::var("RA_JIT_AHEAD_PAUSE_MS").ok().and_then(|it| it.parse().ok())
+    });
+    let Some(pause) = *PAUSE else { return };
+    let start = std::time::Instant::now();
+    while start.elapsed() < std::time::Duration::from_millis(pause) {
+        salsa::Database::unwind_if_revision_cancelled(db);
+        std::thread::sleep(std::time::Duration::from_millis(1));
     }
 }
 
@@ -2399,21 +2437,32 @@ fn compiled_instance<'db>(
     env: StoredParamEnvAndCrate,
 ) -> Result<CompiledFunction> {
     let _span = tracing::info_span!(target: "ra_jit", "compiled_instance").entered();
-    tier::for_build(|| instance_code(db, instance, env, false)).map(Produced::code)
+    tier::for_build(|| instance_code(db, instance, env, Detach::No)).map(Produced::code)
 }
 
-/// The code of an instance: Cranelift's, or, for a compile at a level above 1 (`tier`), its
-/// IR for LLVM, which only a function, closure or `async` block of the source is compiled at.
+/// Whether a compile leaves LLVM's part to later ([`Produced::Pending`]): not at all, for a
+/// compile at a level above 1, which only a function, closure or `async` block of the source
+/// is compiled at, or for a unit of a build ([`units`]), which takes shims too.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Detach {
+    No,
+    Tier,
+    #[cfg_attr(not(feature = "llvm"), expect(dead_code))]
+    Unit,
+}
+
+/// The code of an instance: Cranelift's, or, detached, its IR for LLVM.
 fn instance_code(
     db: &dyn HirDatabase,
     instance: Instance,
     env: StoredParamEnvAndCrate,
-    tier: bool,
+    detach: Detach,
 ) -> Result<Produced> {
     let stored_env = env.clone();
     let env = env.as_ref(db);
     let ty = || instance.args.as_ref().type_at(0);
-    if tier
+    let (tier, shim) = (detach != Detach::No, detach == Detach::Unit);
+    if detach == Detach::Tier
         && !matches!(
             instance.def,
             InstanceDef::Fn(_)
@@ -2426,7 +2475,7 @@ fn instance_code(
     }
     let body = match instance.def {
         InstanceDef::DropGlue => {
-            return compile_as(db, env, None, false, instance.checked, false, |fx| {
+            return compile_as(db, env, None, false, instance.checked, shim, |fx| {
                 let ty = ty();
                 fx.drop_glue(ty)?;
                 if std::env::var_os("RA_JIT_DUMP_CLIF").is_some() {
@@ -2437,7 +2486,7 @@ fn instance_code(
         }
         InstanceDef::CallOnceShim => {
             let args = instance.args.as_ref();
-            return compile_as(db, env, None, false, instance.checked, false, |fx| {
+            return compile_as(db, env, None, false, instance.checked, shim, |fx| {
                 match args.len() {
                     1 => fx.call_once_shim(ty()),
                     _ => fx.call_once_by_pointer(args),
@@ -2446,17 +2495,17 @@ fn instance_code(
         }
         InstanceDef::VtableShim(func) => {
             let args = instance.args.as_ref();
-            return compile_as(db, env, None, false, instance.checked, false, |fx| {
+            return compile_as(db, env, None, false, instance.checked, shim, |fx| {
                 fx.vtable_shim(func, args)
             });
         }
         InstanceDef::FnPointerShim => {
-            return compile_as(db, env, None, false, instance.checked, false, |fx| {
+            return compile_as(db, env, None, false, instance.checked, shim, |fx| {
                 fx.fn_pointer_shim(ty())
             });
         }
         InstanceDef::ReifyShim { receiver } => {
-            return compile_as(db, env, None, false, instance.checked, false, |fx| {
+            return compile_as(db, env, None, false, instance.checked, shim, |fx| {
                 fx.reify_shim(ty(), receiver)
             });
         }
@@ -4416,6 +4465,9 @@ impl<'a, 'db> ObjectCodegen<'a, 'db> {
             envs: Vec::new(),
             homes: home::Homes::default(),
             ahead: FxHashSet::default(),
+            unit_roots: FxHashMap::default(),
+            unit_instances: FxHashMap::default(),
+            unit_tried: FxHashSet::default(),
             forwarded: FxHashSet::default(),
             rustc_futures: FxHashSet::default(),
             patching: false,
@@ -4623,9 +4675,11 @@ impl<'a, 'db> ObjectCodegen<'a, 'db> {
         let start = stdx::time::Instant::now();
         let tiers = self.tiers;
         let tiered = tiers.and_then(|it| it.code(db, &tier::Node(tier::Kind::Root(func))));
-        let compiled = match tiered {
-            Some(code) => code,
-            None => compiled_root(db, func).as_ref().map_err(Clone::clone)?,
+        let unit = self.unit_roots.remove(&func).filter(|_| tiered.is_none());
+        let compiled = match (tiered, &unit) {
+            (Some(code), _) => code,
+            (None, Some(unit)) => unit,
+            (None, None) => compiled_root(db, func).as_ref().map_err(Clone::clone)?,
         };
         let took = start.elapsed();
         self.phases.compile += took;
@@ -4643,7 +4697,11 @@ impl<'a, 'db> ObjectCodegen<'a, 'db> {
             .unwrap_or_else(|| FunctionSignature::of(db, func).name.as_str().to_owned());
         let declared = self.debug_declaration_at(func);
         // The rows of the Cranelift code are not those of LLVM's.
-        let rows = self.debug.as_ref().filter(|_| tiered.is_none()).map(|_| root_rows(db, func));
+        let unit_rows = unit.as_ref().filter(|_| self.debug.is_some()).map(|it| rows_of(db, it));
+        let rows = match &unit_rows {
+            Some(rows) => Some(rows),
+            None => self.debug.as_ref().filter(|_| tiered.is_none()).map(|_| root_rows(db, func)),
+        };
         let debug =
             self.describe(id, compiled, rows, FunctionDebug::new(name, symbol.clone()), declared);
         if tiered.is_none() && self.roots_from_store() {
@@ -4652,6 +4710,14 @@ impl<'a, 'db> ObjectCodegen<'a, 'db> {
             tally.step(Step::StoreWrite, || self.keep(&instance, compiled, &ids, debug));
         }
         Ok(symbol)
+    }
+
+    /// Whether the functions of the build are compiled in units ([`units`]).
+    fn units(&self) -> bool {
+        #[cfg(feature = "llvm")]
+        return self.base.is_none() && units::enabled();
+        #[cfg(not(feature = "llvm"))]
+        false
     }
 
     /// Whether the checkout's own functions are kept in the store and put in the object from
@@ -4741,13 +4807,14 @@ impl<'a, 'db> ObjectCodegen<'a, 'db> {
     /// What rustc's allocator shim puts in a program: the entries of the global allocator
     /// that `alloc` calls by name, going to the `#[global_allocator]`'s (the functions its
     /// expansion exports) or else to std's defaults. Only in a program with nothing of
-    /// rustc's: one linked with rustc's `alloc` has rustc's shim.
-    fn define_allocator_shim(&mut self, main: FunctionId) -> Result<()> {
+    /// rustc's: one linked with rustc's `alloc` has rustc's shim. `krate` is one of the
+    /// program's, whose lang items are every crate's.
+    fn define_allocator_shim(&mut self, krate: Crate) -> Result<()> {
         let db = self.db;
         if !self.symbols.nothing_of_rustc() {
             return Ok(());
         }
-        let Some(boxed) = DbInterner::new_with(db, main.krate(db)).lang_items().OwnedBox else {
+        let Some(boxed) = DbInterner::new_with(db, krate).lang_items().OwnedBox else {
             return Ok(());
         };
         let program = linked_crates(db, self.own_statics.crates.iter().copied());
@@ -4873,6 +4940,15 @@ impl<'a, 'db> ObjectCodegen<'a, 'db> {
             let wave = match &mut ahead {
                 Some(ahead) => ahead.take(&mut self.pending),
                 None if self.pending.is_empty() => Vec::new(),
+                #[cfg(feature = "llvm")]
+                None if self.units() => {
+                    let wave = std::mem::take(&mut self.pending);
+                    let fresh = wave.iter().filter(|it| !self.unit_instances.contains_key(&it.0));
+                    let fresh = fresh.map(|(instance, env, _)| (instance.clone(), env.clone()));
+                    let fresh = fresh.collect();
+                    self.compile_units(&[], fresh);
+                    wave
+                }
                 None => {
                     let wave = std::mem::take(&mut self.pending);
                     let start = stdx::time::Instant::now();
@@ -4924,8 +5000,9 @@ impl<'a, 'db> ObjectCodegen<'a, 'db> {
         roots: Vec<FunctionId>,
         beside: &mut dyn FnMut(&mut Self, Option<&mut Ready<'_>>),
     ) {
-        // A patch calls the base's copy of most of what it reaches.
-        if self.base.is_some() || (self.pending.is_empty() && roots.is_empty()) {
+        // A patch calls the base's copy of most of what it reaches. Units are compiled
+        // before they are put in the object.
+        if self.base.is_some() || self.units() || (self.pending.is_empty() && roots.is_empty()) {
             return beside(self, None);
         }
         /// Tells the threads that wait when the one compiling is stopped.
@@ -5084,9 +5161,11 @@ impl<'a, 'db> ObjectCodegen<'a, 'db> {
         let tiers = self.tiers;
         let node = tier::Node(tier::Kind::Instance(instance.clone(), env.clone()));
         let tiered = tiers.and_then(|it| it.code(self.db, &node));
-        let compiled = match tiered {
-            Some(code) => code,
-            None => compiled_instance(self.db, instance.clone(), env.clone())
+        let unit = self.unit_instances.remove(instance).filter(|_| tiered.is_none());
+        let compiled = match (tiered, &unit) {
+            (Some(code), _) => code,
+            (None, Some(unit)) => unit,
+            (None, None) => compiled_instance(self.db, instance.clone(), env.clone())
                 .as_ref()
                 .map_err(Clone::clone)?,
         };
@@ -5129,11 +5208,16 @@ impl<'a, 'db> ObjectCodegen<'a, 'db> {
             _ => None,
         };
         let known = known.unwrap_or_else(|| name.clone());
-        let rows = self
-            .debug
-            .as_ref()
-            .filter(|_| tiered.is_none())
-            .map(|_| instance_rows(self.db, instance.clone(), env.clone()));
+        let unit_rows =
+            unit.as_ref().filter(|_| self.debug.is_some()).map(|it| rows_of(self.db, it));
+        let rows = match &unit_rows {
+            Some(rows) => Some(rows),
+            None => self
+                .debug
+                .as_ref()
+                .filter(|_| tiered.is_none())
+                .map(|_| instance_rows(self.db, instance.clone(), env.clone())),
+        };
         let debug = self.describe(id, compiled, rows, FunctionDebug::new(known, name), declared);
         // Code of a level above 1 is of a profile, which is no key of the store.
         if tiered.is_none() {
@@ -9828,7 +9912,7 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
             });
             operands.push(match operand {
                 AsmOperand::Sym(_) => asm::Operand::Sym,
-                AsmOperand::Reg { reg, input, output } => {
+                AsmOperand::Reg { reg, input, output, written } => {
                     let mut size = None;
                     let tys = [
                         input.as_ref().map(|it| self.operand_ty(it)).transpose()?,
@@ -9848,6 +9932,7 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
                         size,
                         input: input.is_some(),
                         output: output.is_some(),
+                        written: *written,
                     }
                 }
                 AsmOperand::Const(value) => {
@@ -9898,7 +9983,19 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
         }
         let mut wrapper = asm::wrapper(&self.cg.target, &block.template, block.options, &operands)
             .map_err(CodegenError::Unsupported)?;
+        // LLVM is not given the features `extensions` has the assembler take.
+        let inline = extensions.is_empty().then(|| {
+            asm::inline(
+                arch,
+                &block.template,
+                block.options,
+                &operands,
+                &wrapper.offsets,
+                block.clobber_abi,
+            )
+        });
         wrapper.text.insert_str(0, &extensions);
+        asm::keep_inline(&wrapper.text, inline.flatten());
         let slot = self.builder.create_sized_stack_slot(StackSlotData::new(
             StackSlotKind::ExplicitSlot,
             wrapper.slot_size,
@@ -13890,6 +13987,68 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
 
     /// The signed `wide` lanes of two vectors, each saturated to half its width, signed or
     /// not: every 16 bytes of the result are those of `a` and then those of `b`.
+    /// `cmpps` and its kin: each lane of `a` against the same of `b` by the predicate of the
+    /// immediate, as `vcmpps` reads its low five bits (SSE's eight are the first eight), all
+    /// ones where it holds. One that signals and one that does not answer alike. A scalar
+    /// compare does the first lane alone and keeps the others of `a`.
+    fn compare_lanes(
+        &mut self,
+        a: &Operand,
+        b: &Operand,
+        predicate: u8,
+        dst: Value,
+        lane: Type,
+        scalar: bool,
+    ) -> Result<()> {
+        let (a, ty) = self.operand(a)?;
+        let (b, _) = self.operand(b)?;
+        let size = self.layout(ty)?.size;
+        let int = Type::int(lane.bits() as u16).expect("a lane of 32 or 64 bits");
+        let cc = match predicate & 0xf {
+            0 => Ok(FloatCC::Equal),
+            1 => Ok(FloatCC::LessThan),
+            2 => Ok(FloatCC::LessThanOrEqual),
+            3 => Ok(FloatCC::Unordered),
+            4 => Ok(FloatCC::NotEqual),
+            5 => Ok(FloatCC::UnorderedOrGreaterThanOrEqual),
+            6 => Ok(FloatCC::UnorderedOrGreaterThan),
+            7 => Ok(FloatCC::Ordered),
+            8 => Ok(FloatCC::UnorderedOrEqual),
+            9 => Ok(FloatCC::UnorderedOrLessThan),
+            10 => Ok(FloatCC::UnorderedOrLessThanOrEqual),
+            11 => Err(0),
+            12 => Ok(FloatCC::OrderedNotEqual),
+            13 => Ok(FloatCC::GreaterThanOrEqual),
+            14 => Ok(FloatCC::GreaterThan),
+            _ => Err(-1),
+        };
+        let lanes = if scalar { 1 } else { size.bytes() / u64::from(lane.bytes()) };
+        let values: Vec<Value> = (0..lanes as i32)
+            .map(|i| {
+                let at = i * lane.bytes() as i32;
+                let ones = self.builder.ins().iconst(int, -1);
+                let zero = self.builder.ins().iconst(int, 0);
+                match cc {
+                    Ok(cc) => {
+                        let l = self.builder.ins().load(lane, MEM, a, at);
+                        let r = self.builder.ins().load(lane, MEM, b, at);
+                        let holds = self.builder.ins().fcmp(cc, l, r);
+                        self.builder.ins().select(holds, ones, zero)
+                    }
+                    Err(0) => zero,
+                    Err(_) => ones,
+                }
+            })
+            .collect();
+        if scalar {
+            self.copy(dst, a, size);
+        }
+        for (i, value) in values.into_iter().enumerate() {
+            self.builder.ins().store(MEM, value, dst, i as i32 * lane.bytes() as i32);
+        }
+        Ok(())
+    }
+
     fn pack_lanes(
         &mut self,
         a: &Operand,
@@ -14150,6 +14309,19 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
             return Ok(());
         }
         match (name, args) {
+            (
+                "x86.sse.cmp.ps" | "x86.sse2.cmp.pd" | "x86.avx.cmp.ps.256" | "x86.avx.cmp.pd.256"
+                | "x86.sse.cmp.ss" | "x86.sse2.cmp.sd",
+                [a, b, predicate],
+            ) => {
+                let Some(predicate) = self.const_bits(predicate) else {
+                    unsupported!("`llvm.{name}` with a predicate that is not a constant");
+                };
+                let double = name.contains(".pd") || name.ends_with(".sd");
+                let lane = if double { types::F64 } else { types::F32 };
+                let scalar = name.ends_with(".ss") || name.ends_with(".sd");
+                self.compare_lanes(a, b, predicate as u8, dst, lane, scalar)?
+            }
             ("x86.sse3.ldu.dq" | "x86.avx.ldu.dq.256", [ptr]) => {
                 let (ptr, _) = self.load_scalar(ptr)?;
                 let size = self.layout(dst_ty)?.size;
