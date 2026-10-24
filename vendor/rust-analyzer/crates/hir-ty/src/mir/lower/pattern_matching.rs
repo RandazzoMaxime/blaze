@@ -233,12 +233,15 @@ impl<'db> MirLowerCtx<'_, 'db> {
         &mut self,
         current: BasicBlockId,
         value: Place<'db>,
+        value_span: MirSpan,
         pattern: PatId,
     ) -> Result<'db, BasicBlockId> {
         // Every part is read before any is assigned, so that `(t.1, t.0) = t` swaps.
         let outer = std::mem::take(&mut self.assigned);
+        let outer_from = std::mem::replace(&mut self.assigned_from, value_span);
         let matched = self.pattern_match_inner(current, None, value, pattern, MatchingMode::Assign);
         let assigned = std::mem::replace(&mut self.assigned, outer);
+        self.assigned_from = outer_from;
         let (mut current, _) = matched?;
         for Assigned { target, part, span } in assigned {
             let (place, ty) = match target {
@@ -272,7 +275,7 @@ impl<'db> MirLowerCtx<'_, 'db> {
         span: MirSpan,
     ) -> Result<'db, ()> {
         let part = self.temp(ty, current, span)?;
-        self.push_assignment(current, part.into(), value, span);
+        self.push_assignment(current, part.into(), value, self.assigned_from);
         self.assigned.push(Assigned { target, part, span });
         Ok(())
     }

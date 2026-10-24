@@ -201,8 +201,10 @@ struct MirLowerCtx<'a, 'db> {
     guarded_moves: Option<Vec<GuardedMove<'db>>>,
     /// The reference a guard reads each binding of `guarded_moves` through.
     guard_refs: FxHashMap<BindingId, LocalId>,
-    /// While the pattern of a destructuring assignment is lowered: what it assigns.
+    /// While the pattern of a destructuring assignment is lowered: what it assigns, and the
+    /// value it destructures, where a part that cannot be moved out of it is reported.
     assigned: Vec<Assigned>,
+    assigned_from: MirSpan,
     /// Whether each type asked about is `Copy`. Every statement that may panic asks of every
     /// local in scope, which in a long body is the most of lowering it.
     copy: FxHashMap<Ty<'db>, bool>,
@@ -384,6 +386,7 @@ impl<'a, 'db> MirLowerCtx<'a, 'db> {
             guarded_moves: None,
             guard_refs: FxHashMap::default(),
             assigned: Vec::new(),
+            assigned_from: MirSpan::Unknown,
             copy: FxHashMap::default(),
             env,
             infcx,
@@ -559,10 +562,14 @@ impl<'a, 'db> MirLowerCtx<'a, 'db> {
         place: Place<'db>,
         prev_block: BasicBlockId,
     ) -> Result<'db, Option<BasicBlockId>> {
-        if let Some(adjustments) = self.infer.expr_adjustments.get(&expr_id) {
-            return self.lower_expr_to_place_with_adjust(expr_id, place, prev_block, adjustments);
-        }
-        self.lower_expr_to_place_without_adjust(expr_id, place, prev_block)
+        // An expression is lowered within the one it is in: rustc's 5,204-arm `else if`.
+        crate::next_solver::ensure_sufficient_stack(|| {
+            if let Some(adjustments) = self.infer.expr_adjustments.get(&expr_id) {
+                return self
+                    .lower_expr_to_place_with_adjust(expr_id, place, prev_block, adjustments);
+            }
+            self.lower_expr_to_place_without_adjust(expr_id, place, prev_block)
+        })
     }
 
     fn lower_expr_to_place_without_adjust(
@@ -1785,17 +1792,17 @@ impl<'a, 'db> MirLowerCtx<'a, 'db> {
                 );
                 Ok(Some(current))
             }
-            &Expr::Assignment { target, value } => {
+            &Expr::Assignment { target, value: rhs } => {
                 // What the pattern takes of a place is all that is moved out of it, as a
                 // `let` of the pattern moves: `_ = place` moves nothing.
-                let Some((value, mut current)) = self.lower_expr_as_place(current, value, true)?
+                let Some((value, mut current)) = self.lower_expr_as_place(current, rhs, true)?
                 else {
                     return Ok(None);
                 };
                 self.push_fake_read(current, value, expr_id.into());
                 let resolver_guard =
                     self.resolver.update_to_inner_scope(self.db, self.store_owner, expr_id);
-                current = self.pattern_match_assignment(current, value, target)?;
+                current = self.pattern_match_assignment(current, value, rhs.into(), target)?;
                 self.resolver.reset_to_guard(resolver_guard);
                 Ok(Some(current))
             }
