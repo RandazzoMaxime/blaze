@@ -28,18 +28,19 @@ pub(crate) enum Format {
 impl Format {
     /// The format `values` ask for, read as cargo reads them, or cargo's error for them.
     pub(crate) fn of(values: &[String]) -> Result<Format, String> {
-        let two = || "cannot specify two kinds of `message-format` arguments".to_owned();
+        fn two() -> String {
+            "cannot specify two kinds of `message-format` arguments".to_owned()
+        }
+        fn json(format: &mut Option<Format>) -> Result<(&mut bool, &mut bool, &mut bool), String> {
+            let json = Format::Json { short: false, ansi: false, render: false };
+            match format.get_or_insert(json) {
+                Format::Json { short, ansi, render } => Ok((short, ansi, render)),
+                _ => Err(two()),
+            }
+        }
         let mut format = None;
         for value in values.iter().flat_map(|it| it.split(',')) {
             let value = value.to_ascii_lowercase();
-            let json = |format: &mut Option<Format>| match format.get_or_insert(Format::Json {
-                short: false,
-                ansi: false,
-                render: false,
-            }) {
-                Format::Json { short, ansi, render } => Ok((short, ansi, render)),
-                _ => Err(two()),
-            };
             match value.as_str() {
                 "human" | "short" | "json" if format.is_some() => return Err(two()),
                 "human" => format = Some(Format::Human),

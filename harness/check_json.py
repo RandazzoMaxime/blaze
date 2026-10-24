@@ -106,8 +106,7 @@ def run(at, command, fmt, home):
     args = ["cargo", *command, "check", f"--message-format={fmt}"]
     done = subprocess.run(args, cwd=at, env=env(home), capture_output=True, text=True, timeout=600)
     messages = [json.loads(line) for line in done.stdout.splitlines() if line.startswith("{")]
-    stderr = [line for line in done.stderr.splitlines() if not re.match(r"^\s*(Checking|Finished|Compiling|Locking|Adding|Blocking)\b|^ra-jit:", line)]
-    return messages, stderr, done.returncode
+    return messages, done.stderr.splitlines(), done.returncode
 
 
 def primary(message):
@@ -221,6 +220,7 @@ def main():
                 theirs, their_err, their_status = run(at, [], fmt, home)
                 ours, our_err, our_status = run(at, ["ra-jit"], fmt, home)
                 tally.same(name, fmt, "status", our_status, their_status)
+                tally.same(name, fmt, "checked without rustc", [l for l in our_err if "Checking probe" in l], [])
                 if fmt.startswith("json"):
                     compare_json(tally, name, fmt, ours, theirs)
                     tally.same(name, fmt, "could not compile", [l for l in our_err if "could not compile" in l], [l for l in their_err if "could not compile" in l])
