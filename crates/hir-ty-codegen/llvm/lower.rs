@@ -24,8 +24,8 @@ use inkwell::{
     builder::{Builder, BuilderError},
     context::Context,
     debug_info::{
-        AsDIScope, DIFile, DIFlags, DIFlagsConstants, DISubprogram, DWARFEmissionKind,
-        DWARFSourceLanguage, DebugInfoBuilder, debug_metadata_version,
+        AsDIScope, DICompileUnit, DIFile, DIFlags, DIFlagsConstants, DISubprogram,
+        DWARFEmissionKind, DWARFSourceLanguage, DebugInfoBuilder, debug_metadata_version,
     },
     intrinsics::Intrinsic,
     module::{FlagBehavior, Linkage, Module},
@@ -41,7 +41,7 @@ use std::sync::Arc;
 use hir_def::hir::AsmOptions;
 use inkwell::InlineAsmDialect;
 
-use super::{OWN, Unhandled};
+use super::Unhandled;
 use crate::{
     ObjectFormat, asm,
     fragment::Pointee,
@@ -129,7 +129,7 @@ pub(super) struct Lowering<'ctx, 'f> {
     /// Where a guarded call that unwound leaves its exception (see `unwind::seh`).
     arrival: Option<PointerValue<'ctx>>,
     /// What the line table LLVM writes is told through, where one is read back.
-    marks: Option<Marks<'ctx>>,
+    marks: Option<Marks<'ctx, 'f>>,
     /// How often each branch went each way while code of the function ran.
     weights: Option<&'f crate::tier::Weights>,
     /// The values that are addresses, which are pointers in LLVM: see [`addresses`].
@@ -442,14 +442,20 @@ const STATIC: &str = "ra-jit.static";
 /// `DW_ATE_unsigned`: the bytes of a slot are told to LLVM as one number.
 const DW_ATE_UNSIGNED: u32 = 0x07;
 
-struct Marks<'ctx> {
+/// The unit of debug information of a module, which every function of it that is marked
+/// ([`Defined::marked`]) is a subprogram of. `None` where no line table is read back.
+pub(super) struct Debug<'ctx> {
     builder: DebugInfoBuilder<'ctx>,
-    function: DISubprogram<'ctx>,
-    file: DIFile<'ctx>,
+    unit: DICompileUnit<'ctx>,
 }
 
-impl<'ctx> Marks<'ctx> {
-    fn new(module: &Module<'ctx>, function: FunctionValue<'ctx>) -> Marks<'ctx> {
+impl<'ctx> Debug<'ctx> {
+    pub(super) fn of(module: &Module<'ctx>) -> Lowered<Option<Debug<'ctx>>> {
+        // Without a flag that asks for CodeView, the table is DWARF in a COFF object too.
+        let target = crate::Target::selected().map_err(Unhandled::Llvm)?;
+        if !matches!(target.object_format, ObjectFormat::Elf | ObjectFormat::Coff) {
+            return Ok(None);
+        }
         let context = module.get_context();
         let version = context.i32_type().const_int(debug_metadata_version().into(), false);
         module.add_basic_value_flag("Debug Info Version", FlagBehavior::Warning, version);
@@ -473,11 +479,32 @@ impl<'ctx> Marks<'ctx> {
             "",
             "",
         );
-        let file = unit.get_file();
+        Ok(Some(Debug { builder, unit }))
+    }
+
+    /// Ends the unit, once every function of the module is lowered.
+    pub(super) fn finish(&self) {
+        self.builder.finalize();
+    }
+}
+
+struct Marks<'ctx, 'f> {
+    debug: &'f Debug<'ctx>,
+    function: DISubprogram<'ctx>,
+    /// The file of the function's lines, named as the function is: the lines of a function
+    /// LLVM built into another of the module are of the other's, and are told apart by it.
+    file: DIFile<'ctx>,
+}
+
+impl<'ctx, 'f> Marks<'ctx, 'f> {
+    fn new(debug: &'f Debug<'ctx>, function: FunctionValue<'ctx>) -> Marks<'ctx, 'f> {
+        let Debug { builder, unit } = debug;
+        let name = function.get_name().to_string_lossy();
+        let file = builder.create_file(&name, "");
         let ty = builder.create_subroutine_type(file, None, &[], DIFlags::ZERO);
         let subprogram = builder.create_function(
             unit.as_debug_info_scope(),
-            OWN,
+            &name,
             None,
             file,
             0,
@@ -489,7 +516,7 @@ impl<'ctx> Marks<'ctx> {
             false,
         );
         function.set_subprogram(subprogram);
-        Marks { builder, function: subprogram, file }
+        Marks { debug, function: subprogram, file }
     }
 }
 
@@ -565,6 +592,7 @@ impl<'ctx, 'f> Lowering<'ctx, 'f> {
         memcmp: Option<u32>,
         blocks_asm: &'f FxHashMap<u32, Arc<asm::Inline>>,
         shown: &'f FxHashMap<u32, FunctionValue<'ctx>>,
+        debug: Option<&'f Debug<'ctx>>,
     ) -> Lowered<()> {
         let func = defined.func;
         let flow = Flow::of(func);
@@ -575,7 +603,6 @@ impl<'ctx, 'f> Lowering<'ctx, 'f> {
             pointers.iter().filter_map(|&at| params.get(at as usize).copied()).collect()
         });
         let pointerish = pointerish(func, &flow, &addresses, &pointer_values);
-        let target = crate::Target::selected().map_err(Unhandled::Llvm)?;
         let mut lowering = Lowering {
             context,
             module,
@@ -597,10 +624,7 @@ impl<'ctx, 'f> Lowering<'ctx, 'f> {
             pads: FxHashMap::default(),
             frame: None,
             arrival: None,
-            // Without a flag that asks for CodeView, the table is DWARF in a COFF object too.
-            marks: (defined.marked
-                && matches!(target.object_format, ObjectFormat::Elf | ObjectFormat::Coff))
-            .then(|| Marks::new(module, function)),
+            marks: debug.filter(|_| defined.marked).map(|debug| Marks::new(debug, function)),
             weights: defined.weights,
             addresses,
             pointer_params: FxHashMap::default(),
@@ -609,11 +633,7 @@ impl<'ctx, 'f> Lowering<'ctx, 'f> {
             shown,
         };
         lowering.pointer_params = lowering.pointer_params(&lowering.pointerish);
-        lowering.body(defined.named)?;
-        if let Some(marks) = &lowering.marks {
-            marks.builder.finalize();
-        }
-        Ok(())
+        lowering.body(defined.named)
     }
 
     /// Has what is built next be of the source location `inst` has.
@@ -621,7 +641,8 @@ impl<'ctx, 'f> Lowering<'ctx, 'f> {
         let Some(marks) = &self.marks else { return };
         let scope = marks.function.as_debug_info_scope();
         let line = unwind::seh::unguarded(self.func.srcloc(inst)).bits();
-        let location = marks.builder.create_debug_location(self.context, line, 0, scope, None);
+        let location =
+            marks.debug.builder.create_debug_location(self.context, line, 0, scope, None);
         self.builder.set_current_debug_location(location);
     }
 
@@ -652,11 +673,12 @@ impl<'ctx, 'f> Lowering<'ctx, 'f> {
         let Some(marks) = &self.marks else { return Ok(()) };
         let name = slot.as_u32().to_string();
         let ty = marks
+            .debug
             .builder
             .create_basic_type(&name, u64::from(size) * 8, DW_ATE_UNSIGNED, DIFlags::ZERO)
             .map_err(|e| Unhandled::Llvm(e.to_string()))?;
         let scope = marks.function.as_debug_info_scope();
-        let variable = marks.builder.create_auto_variable(
+        let variable = marks.debug.builder.create_auto_variable(
             scope,
             &name,
             marks.file,
@@ -666,8 +688,8 @@ impl<'ctx, 'f> Lowering<'ctx, 'f> {
             DIFlags::ZERO,
             0,
         );
-        let location = marks.builder.create_debug_location(self.context, 0, 0, scope, None);
-        marks.builder.insert_declare_at_end(alloca, Some(variable), None, location, block);
+        let location = marks.debug.builder.create_debug_location(self.context, 0, 0, scope, None);
+        marks.debug.builder.insert_declare_at_end(alloca, Some(variable), None, location, block);
         Ok(())
     }
 
