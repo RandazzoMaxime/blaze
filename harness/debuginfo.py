@@ -16,8 +16,9 @@ held against the cargo build's by the last part of each, which the two spell dif
 (`pick::<u8>` for `pick<u8>`). A splice leaves the PDB as it was, and that is what is checked
 of it: the old lines stay true, and the code that was added has no line rather than a wrong one.
 
-Then the cost: the time and the size of the corpus's object with and without debug info, and
-whether ra-jit leaves it out when the profile says `debug = false`.
+Then the cost: the time and the size of the corpus's object with and without debug info,
+whether ra-jit leaves it out when the profile says `debug = false`, and whether it works out
+the types of variables only when the profile asks for variables.
 
 RA_JIT_BACKEND=llvm   the same of LLVM's code. Its optimizer turns calls in tail position into
                      jumps, so a frame the cargo build prints may be missing: those are counted.
@@ -1415,12 +1416,34 @@ def cost(tally):
     tally.say("cost: the corpus's object without debug info", "measured", f"{t0:.2f} s to compile and link, object {s0} bytes, binary {b0} bytes")
     tally.say("cost: with it", "measured" if d1 and not d0 else "NO DIFFERENCE",
               f"{t1:.2f} s ({(t1 / t0 - 1) * 100:+.1f}%), object {s1} bytes ({(s1 / s0 - 1) * 100:+.1f}%, {told}), binary {b1} bytes")
-    for setting, expected in (("false", False), ("true", True), ("line-tables-only", True)):
+    for setting, expected, typed in (("false", False, False), ("true", True, True), ("line-tables-only", True, False)):
         os.environ["CARGO_PROFILE_DEV_DEBUG"] = setting
-        fx.ra_jit_build()
+        os.environ["RA_JIT_MEMORY"] = memory = tempfile.mkdtemp(prefix="debuginfo-memory-")
+        try:
+            fx.ra_jit_build()
+        finally:
+            del os.environ["RA_JIT_MEMORY"]
         has = sections(fx.objects[0])[1] > 0
         tally.say(f"cost: the profile says debug = {setting}", ("described" if has else "left out") if has == expected else "NOT FOLLOWED")
+        # The types of variables are worked out only for a build that writes the variables:
+        # at `line-tables-only` they are thrown away, which on a large workspace was most of
+        # the cold build's memory.
+        told = told_types(memory)
+        shutil.rmtree(memory, ignore_errors=True)
+        tally.say(f"cost: types of variables at debug = {setting}",
+                  ("worked out" if told else "not worked out") if (told is not None and bool(told) == typed) else "NOT FOLLOWED",
+                  "no memory report" if told is None else f"{told} told of")
     os.environ["CARGO_PROFILE_DEV_DEBUG"] = "true"
+
+
+def told_types(memory):
+    """How many types of variables the build told of, from the report `RA_JIT_MEMORY` has it write."""
+    reports = glob.glob(os.path.join(memory, "*.tsv"))
+    if not reports:
+        return None
+    counts = [int(row[1]) for path in reports for row in (l.rstrip("\n").split("\t") for l in open(path))
+              if len(row) > 5 and row[0] == "query" and row[5] == "told_type"]
+    return max(counts, default=0)
 
 
 def main():

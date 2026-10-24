@@ -851,7 +851,7 @@ impl CodegenUnit {
                 let start = stdx::time::Instant::now();
                 cg.find_stored_roots(&ours);
                 // One without a symbol is not compiled, and is still lowered to be told why.
-                let (told, stored) = (cg.debug.is_some().then_some(&cg.told), &cg.stored_roots);
+                let (told, stored) = (cg.tells_variables().then_some(&cg.told), &cg.stored_roots);
                 if cg.units() {
                     #[cfg(feature = "llvm")]
                     cg.compile_units(&ours, Vec::new());
@@ -4705,6 +4705,12 @@ impl<'a, 'db> ObjectCodegen<'a, 'db> {
         Ok(symbol)
     }
 
+    /// Whether the types of variables are told of. A build that tells a debugger of its lines
+    /// alone writes none of them, so describing them would be work thrown away.
+    fn tells_variables(&self) -> bool {
+        self.debug.is_some() && self.symbols.describes_variables()
+    }
+
     /// Whether the functions of the build are compiled in units ([`units`]).
     fn units(&self) -> bool {
         #[cfg(feature = "llvm")]
@@ -4945,7 +4951,7 @@ impl<'a, 'db> ObjectCodegen<'a, 'db> {
                 None => {
                     let wave = std::mem::take(&mut self.pending);
                     let start = stdx::time::Instant::now();
-                    let told = self.debug.is_some().then_some(&self.told);
+                    let told = self.tells_variables().then_some(&self.told);
                     self.symbols.in_parallel(wave.len(), &|db, _, at| {
                         let (instance, env, _) = &wave[at];
                         let compiled = compiled_instance(db, instance.clone(), env.clone());
@@ -5030,7 +5036,7 @@ impl<'a, 'db> ObjectCodegen<'a, 'db> {
         let threads = std::thread::available_parallelism().map_or(1, |it| it.get());
         let (entries, owned) = (self.entries.clone(), &self.own_statics.crates.clone());
         let entries = entries.as_deref();
-        let told = self.debug.is_some().then(|| self.told.clone());
+        let told = self.tells_variables().then(|| self.told.clone());
         let told = told.as_ref();
         let on_demand = self.on_demand;
         let (stored, roots_from_store) = (&self.stored_roots.clone(), self.roots_from_store());
@@ -5299,6 +5305,7 @@ impl<'a, 'db> ObjectCodegen<'a, 'db> {
         }
         if let Some((owner, _)) = &compiled.source
             && let Some((env, variables)) = &compiled.variables
+            && self.tells_variables()
         {
             let places = &compiled.code.slots;
             let db = self.db;

@@ -443,6 +443,13 @@ All notable changes to ra-jit are written here. The format follows
 
 ### Fixed
 
+- A profile with `debug = "line-tables-only"` (or `1`, or `"limited"`) no longer has the type
+  of every variable worked out. Only the lines were written, but the types were described for
+  each function compiled and then thrown away. On Biome (`biome_cli`, 518 crates, whose dev
+  profile is `line-tables-only`), 0.1.0's worker went past 44 GB in its cold build and was
+  killed before it was ready. On main, the cold build's peak goes from 40.4 GB to 30.6 GB and
+  its time from 139.5 s to 98.8 s, with 726,516 `told_type` memos down to none.
+  `harness/debuginfo.py`'s cost part checks that no type is told of at `line-tables-only`.
 - A function the daemon compiles ahead, while it reads the symbols rustc built, is given up on
   once they are read, where the worker used to finish it before it was ready. bevy's second
   warm-store run began its derived `release_state` of a read-only query struct, which the
