@@ -214,6 +214,10 @@ All notable changes to ra-jit are written here. The format follows
 
 ### Changed
 
+- `unused_mut` a source denies fails the build, with the seven deny lints before it (#84).
+  `harness/lints_ui.py --deny unused_mut` scores it on every rustc UI test: 51 right, 0 wrong,
+  5 missed against the nightly, 49, 0, 5 against 1.99.0. `RA_JIT_BORROWCK_REFUSE=0` turns it
+  off with the borrow checker's errors. `fn f(mut self)` gets it too, where none was given.
 - A whole program's compiles under LLVM import what they call, as ThinLTO's backends do,
   where each built its callees again from MIR and optimized them from scratch. Each function
   a compile calls is lowered and run through LLVM's pre-link pipeline once in the process,
@@ -412,6 +416,11 @@ All notable changes to ra-jit are written here. The format follows
 
 ### Fixed
 
+- An expression of type `()` that computes nothing (an assignment, a block without a tail, a
+  `break` or `return` without a value, an `if` without an `else`) gives its place the `()`, as
+  rustc's MIR does: `let z: () = x = 1; let w = z;` was E0381, a build failed on code rustc
+  accepts. A comment-only `asm!` writes its `inout` registers back, so the variable is
+  mutated.
 - The borrow checker holds a struct or enum to what its fields need of its lifetimes,
   rustc's inferred outlives bounds, where it is named or built: `B(x)` with
   `struct B<'a, 'b>(&'b mut F<'a, 'b>)` needs `'a: 'b`. A closure passed for a bound with

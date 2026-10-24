@@ -530,7 +530,7 @@ enable`. What stays with cargo for now: what the frontend turns down as unsuppor
 link that failed). An error in a file written before the worker loaded the workspace is ra-jit's
 too since 2026-10-23: the worker leaves it beside its socket and every build of the checkout
 fails with it until a source is written. The lints followed: a lint the source denies fails the
-build for the seven lints `harness/lints_ui.py` finds rust-analyzer reports only where rustc does
+build for the eight lints `harness/lints_ui.py` finds rust-analyzer reports only where rustc does
 (on rustc's UI tests that deny or forbid a lint, 2026-10-23: non_snake_case 31 right, 0 wrong,
 9 missed; non_camel_case_types 22, 0, 2; unused_must_use 14, 0, 30; non_upper_case_globals 9,
 0, 4; deprecated_safe_2024 3, 0, 0; elided_lifetimes_in_paths 1, 0, 0; unsafe_op_in_unsafe_fn
@@ -542,7 +542,19 @@ units with the brace lints): elided_lifetimes_in_paths 25, 0, 6; unsafe_op_in_un
 rustc's of an old commit, its `unused_must_use` looked into `if` and `match` arms and took
 `Result<(), Never>` for one to use, and it took a deprecated-safe call (`std::env::set_var`
 before 2024) in an `unsafe fn` for the lint, which rustc reports there only where
-`unsafe_op_in_unsafe_fn` is not allowed. None of the seven is denied by default, so the level
+`unsafe_op_in_unsafe_fn` is not allowed. The eighth, since 2026-10-24, is `unused_mut`, which
+the borrow checker gives and `RA_JIT_BORROWCK_REFUSE=0` turns off with its errors. Few UI tests
+deny it, so `lints_ui.py --deny unused_mut` scores it on every UI test, each read with
+`#![deny(unused_mut)]` first: 51 right, 0 wrong, 5 missed against the nightly of 2026-10-09
+(6,446 units in scope), 49, 0, 5 against 1.99.0, and 71, 0, 3 on its 25 units in
+`harness/lints_probes` (closures, `mut self`, patterns, `ref mut`, later assignment, autoref,
+compound and field assignment, `Box`, `FnMut`, macros, `async`, shadowing, `asm!`). Seven had
+been wrong first: an assignment, a block without a tail or a `break` without a value gave its
+place no `()`, so `let mut z: () = x = 1; z = x = 2;` took the second write for the first (and
+`let z: () = x = 1; let w = z;` was E0381), a comment-only `asm!` was lowered to nothing, so
+its `inout` registers were not mutated, and a body whose array length fails to evaluate was
+linted, which rustc's is not. The misses are in macro expansions and that body's length.
+None of the eight is denied by default, so the level
 is the source's, which only `--cap-lints` and `--force-warn` undo; with either among the flags
 no lint fails a build. A lint in what a macro expands to does not, and `lints_ui.py` does not
 count one (rustc reports it in the macro's definition). The other lints are not ra-jit's
