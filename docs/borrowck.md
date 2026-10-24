@@ -247,6 +247,10 @@ All of these are rustc's, written from `compiler/rustc_borrowck` at the pinned n
   the function evaluates it (`const { InvariantRef::<'a>::NEW }` compared with a borrow of a
   local needs the local to outlive `'a`). What its value borrows becomes part of the value,
   as for a `const` item, but no call in it is promoted.
+- Constants of a signature: an array length or a const generic's default written as a
+  block, `[u8; { .. }]` or `struct X<const N: usize = { .. }>`, has a body no item owns,
+  checked as rustc checks an anonymous constant, by itself, with its errors in the item
+  (`const N: usize = { let x; x }` is E0381).
 - `async` blocks and `async fn` bodies: checked as rustc checks a coroutine, as a closure
   of the body that makes it, for moves, initialization and loans across `.await`. Every
   region of the future's type is its creator's, and an `async fn` relates the future's
