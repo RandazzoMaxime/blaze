@@ -796,7 +796,9 @@ but each toolchain encodes the messages its own way). The stages, each lowering 
   the library rustc compiled of it (cargo names it in `--extern`) by the toolchain's server, as
   the daemon does. The wrapper describes a proc macro of a package outside the workspace as it
   does a library, and the script's description has the macro and its libraries, so what the
-  store keeps of the script is keyed by them. Count: nushell's nu-cmd-lang and oem_cp scripts.
+  store keeps of the script is keyed by them. Done: on dev-aws-11 nushell's cold build went
+  from 490 rustc runs to 488 (nu-cmd-lang's and oem_cp's scripts), 28.0 -> 27.5 s; the norustc
+  fixture's outer script now expands the workspace's proc macro and stays at 5 (6 without).
 - J1. ra-jit's proc-macro server: `proc-macro-srv` and `proc-macro-srv-cli` built by ra-jit
   with nothing of rustc's (G) over the toolchain's `proc_macro`, kept in the store by
   toolchain and shipped with the standard library (above), started by `load_config` in place of
