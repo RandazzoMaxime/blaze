@@ -859,9 +859,16 @@ Where J stands (2026-10-24):
   `#[export_name]` items are exported, as rustc's `cdylib` is, so the rest is left out where
   they do not reach it. `allrajit.py` loads one with `dlopen` and calls it as cargo's library
   answers, whole, over the unit and stored.
-- Next: the list written into a proc-macro crate's root, which needs that crate's own build
-  (a proc-macro crate is left out of a program today), and the release's server with the
-  loader that reads it, checked against the toolchain's server as above.
+- A proc-macro crate linked with `--shared` has the list of its macros: ra-jit adds a module
+  to its root as it does a test harness (`crates/ra-jit/src/macro_list.rs`), with an exported
+  `static RA_JIT_PROC_MACROS: &[Macro]` of each macro's kind (0 derive, 1 attribute, 2
+  function-like, as ra-jit-expand numbers them), name, helper attributes and `Client`, a
+  `#[repr(C)]` record. `allrajit.py` reads it off the library. rust-analyzer had taken a
+  proc-macro function out of its crate's value namespace, so `crate::derive_fn` did not
+  resolve; it is a function in its crate now, and a path from another crate sees only the
+  macros.
+- Next: the release's server with a loader that reads the list and calls each `Client` over
+  the bridge, checked against the toolchain's server as above.
 
 **K. The cold build is ra-jit's.** ([#91](https://github.com/indexable-inc/ra-jit/issues/91)) `cargo ra-jit build` with nothing built plans the units
 (plan.rs), and the daemon compiles them all, taking what the store and the remote have, links
