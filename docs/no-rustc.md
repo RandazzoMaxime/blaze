@@ -736,9 +736,8 @@ what it printed and the files it left in `OUT_DIR`, and the contents of each fil
 `rerun-if-changed`. A later run with the same key and those files unchanged prints and writes
 that without running; a script that names nothing it reads is not kept, since cargo runs it
 again for any change to its package. rustc still compiles a script, and ra-jit says why, when it
-links a proc macro (J), when a library it links was compiled before ra-jit described it, when its
-source uses `include!`, `include_str!`, `include_bytes!` or `env!` of a variable that is not
-cargo's (which the dep-info does not name), or when it calls a function ra-jit could not
+links a proc macro (J), when a library it links was compiled before ra-jit described it, when it
+reads a variable cargo sets for rustc alone, or when it calls a function ra-jit could not
 compile. `RA_JIT_SCRIPTS_BY_RUSTC=1` has rustc compile them all, for comparing.
 
 A script's compile needs the standard library's unit, which the store has once per toolchain
@@ -759,6 +758,19 @@ the F+G lane: the printed lines a library is linked with are where cargo keeps t
 (`cargo::script::printed`), whether ra-jit compiled the script or not, and a script ra-jit
 compiles is one more crate of a `rust-project.json`, so the standard library's scripts can take
 the same path.
+
+Then (the `no-rustc-l3` lane, 2026-10-23) a script that uses `include!`, `include_str!`,
+`include_bytes!`, `env!` or `option_env!` is ra-jit's too. Its dep-info names what rustc's
+does: the files the macros read beside the modules' (`include!`'s from the macro calls,
+`include_str!`'s and `include_bytes!`'s as rust-analyzer reads them, recorded by crate), and a
+`# env-dep:NAME=VALUE` line for each variable read, as rust-analyzer read it for the crate,
+so cargo builds the script again when one changes. A crate's content id has the files its
+`include_str!` and `include_bytes!` read, so the store gives no code compiled from another
+version of one. Only a variable cargo sets for rustc alone (which the build ra-jit runs is not
+given, so it would read it otherwise) still sends a script to rustc. On dev-aws-11, against
+main cd48ca75f7 with the library shipped: ripgrep cold 39 -> 38 rustc runs (crossbeam-utils'
+script), 4.4 -> 4.6 s; nushell cold 493 -> 490 (crossbeam-utils', portable-atomic's and
+bigdecimal's), 27.7 -> 28.0 s.
 
 **J. Proc macros compiled and loaded by ra-jit.** ([#90](https://github.com/indexable-inc/ra-jit/issues/90)) The proc-macro crate and its dependencies are
 compiled by ra-jit into a library that rust-analyzer's proc-macro server, running inside ra-jit,

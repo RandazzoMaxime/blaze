@@ -76,6 +76,11 @@ pub(crate) fn escaped(path: &str) -> String {
     path.replace(' ', "\\ ")
 }
 
+/// A variable's name or value as rustc writes it after `# env-dep:`.
+pub(crate) fn escaped_variable(text: &str) -> String {
+    text.replace('\\', "\\\\").replace('\n', "\\n").replace('\r', "\\r")
+}
+
 /// A variable's name or value as it was before rustc escaped it. A backslash before anything
 /// else is kept.
 fn unescaped_variable(text: &str) -> String {
@@ -115,6 +120,15 @@ mod tests {
             info.env,
             [("RJ".to_owned(), Some("x\\y\nz".to_owned())), ("UNSET".to_owned(), None)]
         );
+    }
+
+    #[test]
+    fn a_variable_reads_back() {
+        let value = "x\\y\nz\r";
+        assert_eq!(escaped_variable(value), "x\\\\y\\nz\\r");
+        let info =
+            DepInfo::parse(&format!("a: /b.rs\n\n# env-dep:V={}\n", escaped_variable(value)));
+        assert_eq!(info.env, [("V".to_owned(), Some(value.to_owned()))]);
     }
 
     #[test]
