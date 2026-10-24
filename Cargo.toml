@@ -55,6 +55,10 @@ rowan = { path = "vendor/rust-analyzer/lib/rowan" }
 # The trait solver, with fixes of rustc's backported.
 ra-ap-rustc_type_ir = { path = "vendor/rustc_type_ir" }
 ra-ap-rustc_next_trait_solver = { path = "vendor/rustc_next_trait_solver" }
+# The incremental engine.
+salsa = { path = "vendor/salsa" }
+salsa-macros = { path = "vendor/salsa-macros" }
+salsa-macro-rules = { path = "vendor/salsa-macro-rules" }
 
 # line-index = { path = "lib/line-index" }
 # la-arena = { path = "lib/la-arena" }
