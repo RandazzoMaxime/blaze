@@ -168,7 +168,8 @@ These are the places ra-jit still runs rustc or relies on what it wrote, as of m
   is no longer left to rustdoc for its features.
 - Under plain cargo after `ra-jit enable`, rustc builds every crate of the workspace except the
   programs the daemon has loaded, and writes the dep-info of those.
-- `cargo ra-jit check` is `cargo check`.
+- `cargo ra-jit check` was `cargo check`. Since 2026-10-23 it is the daemon's verdict, and
+  `cargo check` only where `only_cargo` sends the command to cargo (below).
 - Under Cranelift, every `asm!` block was assembled by running rustc (`hir-ty-codegen/asm.rs`).
   Since C, a build of ra-jit with LLVM assembles it in process and one without has clang or
   the host's `cc` assemble it; where there is neither, the build fails and says to install
@@ -199,7 +200,7 @@ Paths are under `crates/`; line numbers are of 41e7906192.
 |---|---|---|
 | `ra-jit/src/cargo/mod.rs:305` `by_daemon`, `:300` `ToCargo`, `:395` `by_cargo` | sends the whole build to cargo | the source has an error (until D's first part: now it fails the build with ra-jit's error); rustc's copy of a refused function is stale; a build script's or proc macro's source changed; a manifest changed; the daemon did not build a program |
 | `ra-jit/src/cargo/cli.rs:297` `only_cargo` | sends the command to cargo untouched | `--message-format`, `-Z`, `--exclude`, several targets, an unknown triple |
-| `ra-jit/src/cargo/mod.rs:139` `plain_cargo` | runs cargo with nothing of ra-jit's but its answers to cargo's questions (since B) | `cargo ra-jit check` and subcommands ra-jit does not claim |
+| `ra-jit/src/cargo/mod.rs:139` `plain_cargo` | runs cargo with nothing of ra-jit's but its answers to cargo's questions (since B) | subcommands ra-jit does not claim, and a check `only_cargo` sends to cargo (until 2026-10-23, every `cargo ra-jit check`) |
 
 **What rustc compiled, linked into ra-jit's programs** (steps E, F, G)
 
@@ -231,7 +232,7 @@ Paths are under `crates/`; line numbers are of 41e7906192.
 | `ra-jit/src/cargo/run.rs:136` | `cargo test --doc` with ra-jit as `RUSTDOC` | `cargo ra-jit test` of a library with doctests |
 | `ra-jit/src/doctest.rs` `compile` | rustc compiles or checks an example ra-jit does not build | `compile_fail`, an example rust-analyzer finds an error in or that links a second copy of the library, a build or link of ra-jit's that failed; except what is unchanged since the last run (L's first part). Since L's second part, no probe |
 | `ra-jit/src/doctest.rs:301` `leave_to_rustdoc` | hands the library to rustdoc | `-q`, a library ra-jit cannot load; until A, every package whose features `cargo build --unit-graph` rejected (below) |
-| `ra-jit/src/cargo/mod.rs:139` | `cargo ra-jit check` is `cargo check` | every check |
+| `ra-jit/src/cargo/mod.rs:48` | `cargo ra-jit check` is `cargo check` | a check with `--message-format`, unstable cargo flags, `--exclude`, several targets or an unknown triple; until 2026-10-23, every check |
 | `ra-jit/src/test_harness.rs` `module` returning `None` | leaves the test program's harness to rustc, and a test added to cargo | a bench, an `ignore` written as a token tree (H) |
 | `ra-jit/src/main.rs:5084`, `:5127` `RA_JIT_WRAPS_RUSTC` | ra-jit standing in for rustc for a whole build | the harness's "alone" builds |
 | `harness/apps.py:113` | the harness's "alone" mode: cargo with ra-jit as `RUSTC_WRAPPER`, linking the sysroot's rlibs | the harness only |
@@ -529,7 +530,7 @@ enable`. What stays with cargo for now: what the frontend turns down as unsuppor
 link that failed). An error in a file written before the worker loaded the workspace is ra-jit's
 too since 2026-10-23: the worker leaves it beside its socket and every build of the checkout
 fails with it until a source is written. The lints followed: a lint the source denies fails the
-build for the seven lints `harness/lints_ui.py` finds rust-analyzer reports only where rustc does
+build for the eight lints `harness/lints_ui.py` finds rust-analyzer reports only where rustc does
 (on rustc's UI tests that deny or forbid a lint, 2026-10-23: non_snake_case 31 right, 0 wrong,
 9 missed; non_camel_case_types 22, 0, 2; unused_must_use 14, 0, 30; non_upper_case_globals 9,
 0, 4; deprecated_safe_2024 3, 0, 0; elided_lifetimes_in_paths 1, 0, 0; unsafe_op_in_unsafe_fn
@@ -541,7 +542,19 @@ units with the brace lints): elided_lifetimes_in_paths 25, 0, 6; unsafe_op_in_un
 rustc's of an old commit, its `unused_must_use` looked into `if` and `match` arms and took
 `Result<(), Never>` for one to use, and it took a deprecated-safe call (`std::env::set_var`
 before 2024) in an `unsafe fn` for the lint, which rustc reports there only where
-`unsafe_op_in_unsafe_fn` is not allowed. None of the seven is denied by default, so the level
+`unsafe_op_in_unsafe_fn` is not allowed. The eighth, since 2026-10-24, is `unused_mut`, which
+the borrow checker gives and `RA_JIT_BORROWCK_REFUSE=0` turns off with its errors. Few UI tests
+deny it, so `lints_ui.py --deny unused_mut` scores it on every UI test, each read with
+`#![deny(unused_mut)]` first: 51 right, 0 wrong, 5 missed against the nightly of 2026-10-09
+(6,446 units in scope), 49, 0, 5 against 1.99.0, and 71, 0, 3 on its 25 units in
+`harness/lints_probes` (closures, `mut self`, patterns, `ref mut`, later assignment, autoref,
+compound and field assignment, `Box`, `FnMut`, macros, `async`, shadowing, `asm!`). Seven had
+been wrong first: an assignment, a block without a tail or a `break` without a value gave its
+place no `()`, so `let mut z: () = x = 1; z = x = 2;` took the second write for the first (and
+`let z: () = x = 1; let w = z;` was E0381), a comment-only `asm!` was lowered to nothing, so
+its `inout` registers were not mutated, and a body whose array length fails to evaluate was
+linted, which rustc's is not. The misses are in macro expansions and that body's length.
+None of the eight is denied by default, so the level
 is the source's, which only `--cap-lints` and `--force-warn` undo; with either among the flags
 no lint fails a build. A lint in what a macro expands to does not, and `lints_ui.py` does not
 count one (rustc reports it in the macro's definition). The other lints are not ra-jit's

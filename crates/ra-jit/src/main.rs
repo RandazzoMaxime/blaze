@@ -5120,6 +5120,9 @@ const DENIED: &[&str] = &[
     "unsafe_op_in_unsafe_fn",
 ];
 
+/// The lints of [`DENIED`]'s kind that the borrow checker gives, off with its errors.
+const DENIED_BORROWCK: &[&str] = &["unused_mut"];
+
 /// The errors written in the edited files, as rust-analyzer finds them, as rustc writes them
 /// with paths from `root`. Nothing may reach them, so the build never looks at them.
 fn broken_in(
@@ -5158,7 +5161,11 @@ fn broken_in(
                                 it.severity == ide_db::Severity::Error
                                     && (SURE.contains(&code)
                                         || refuse_borrowck && BORROWCK.contains(&code)
-                                        || lints && !expanded && DENIED.contains(&code))
+                                        || lints
+                                            && !expanded
+                                            && (DENIED.contains(&code)
+                                                || refuse_borrowck
+                                                    && DENIED_BORROWCK.contains(&code)))
                             })
                             .map(|it| (it.range, it.code.as_str(), it.message))
                             .collect::<Vec<_>>()
