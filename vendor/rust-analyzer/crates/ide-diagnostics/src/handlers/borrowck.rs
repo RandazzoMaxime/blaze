@@ -111,4 +111,43 @@ fn user(mut s: S) {
 "#,
         );
     }
+
+    #[test]
+    fn destructuring_assignment_moves_what_it_takes() {
+        check_diagnostics(
+            r#"
+//- minicore: copy
+struct NC;
+struct S { a: u8, b: NC }
+union U { field: u8 }
+fn copies(r: &S, u: &U, mut a: u8, mut field: u8) {
+    S { a, .. } = *r;
+    S { a: _, .. } = *r;
+    unsafe { U { field } = *u };
+    let _ = (a, field);
+}
+fn moves(r: &S, mut b: NC) {
+    S { b, .. } = *r;
+                //^^ error: cannot move out of `r.b` which is behind a shared reference
+    let _ = b;
+}
+"#,
+        );
+    }
+
+    #[test]
+    fn a_body_with_an_error_is_not_borrow_checked() {
+        check_diagnostics(
+            r#"
+//- minicore: copy
+struct NC;
+fn tainted(x: NC) -> u32 {
+    let _y = x;
+    let _z = x;
+    NC as u32
+  //^^^^^^^^^ error: non-primitive cast: `NC` as `u32`
+}
+"#,
+        );
+    }
 }

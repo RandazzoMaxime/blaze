@@ -500,6 +500,7 @@ trait Trait {}
 
 fn assert_static<'a>(ptr: *mut (dyn Trait + 'a)) -> *mut (dyn Trait + 'static) {
     ptr as _
+  //^^^^^^^^ error: lifetime may not live long enough
 }
 
 fn main() {
@@ -561,10 +562,12 @@ fn remove_auto<'a>(x: *mut (dyn Trait<'a> + Send)) -> *mut dyn Trait<'a> {
 
 fn cast_inherent_lt<'a, 'b>(x: *mut (dyn Trait<'static> + 'a)) -> *mut (dyn Trait<'static> + 'b) {
     x as _
+  //^^^^^^ error: lifetime may not live long enough
 }
 
 fn unprincipled<'a, 'b>(x: *mut (dyn Send + 'a)) -> *mut (dyn Sync + 'b) {
     x as _
+  //^^^^^^ error: lifetime may not live long enough
 }
 "#,
         );

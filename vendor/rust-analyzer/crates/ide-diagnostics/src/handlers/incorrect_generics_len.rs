@@ -195,11 +195,16 @@ struct Foo<'c, C> {
     _v: &'c C,
 }
 trait WithSignals: Sized {
-    type SignalCollection<'c, C>;
+    type SignalCollection<'c, C>
+    where
+        Self: 'c,
+        C: 'c;
     fn __signals_from_external(&self) -> Self::SignalCollection<'_, Self>;
 }
 impl WithSignals for Player {
-    type SignalCollection<'c, C> = Foo<'c, C>;
+    type SignalCollection<'c, C> = Foo<'c, C>
+    where
+        C: 'c;
     fn __signals_from_external(&self) -> Self::SignalCollection<'_, Self> {
         Self::SignalCollection { _v: self }
     }

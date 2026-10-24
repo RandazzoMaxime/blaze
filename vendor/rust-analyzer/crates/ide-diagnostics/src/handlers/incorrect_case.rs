@@ -85,6 +85,7 @@ pub fn some_fn(val: TestStruct) -> TestStruct {
 
         check_fix(
             r#"
+//- minicore: copy
 pub fn some_fn(NonSnakeCase$0: u8) -> u8 {
     NonSnakeCase
 }
@@ -98,6 +99,7 @@ pub fn some_fn(non_snake_case: u8) -> u8 {
 
         check_fix(
             r#"
+//- minicore: copy
 pub fn SomeFn$0(val: u8) -> u8 {
     if val != 0 { SomeFn(val - 1) } else { val }
 }
@@ -111,6 +113,7 @@ pub fn some_fn(val: u8) -> u8 {
 
         check_fix_with_disabled(
             r#"
+//- minicore: copy
 fn some_fn() {
     let whatAWeird_Formatting$0 = 10;
     another_func(whatAWeird_Formatting);
@@ -127,6 +130,7 @@ fn some_fn() {
 
         check_fix(
             r#"
+//- minicore: copy
 static S: i32 = M::A;
 
 mod $0M {
@@ -948,6 +952,7 @@ fn func() {
 
         check_diagnostics(
             r#"
+//- minicore: copy
 struct Foo(u8);
 
 fn func() {
@@ -961,6 +966,7 @@ fn func() {
 
         check_diagnostics(
             r#"
+//- minicore: copy
 fn main() {
     match 1 {
         _Bad1 @ _Bad2 => {}
@@ -972,6 +978,7 @@ fn main() {
         );
         check_diagnostics(
             r#"
+//- minicore: copy
 fn main() {
     match 1 { _Bad1 => () }
            // ^^^^^ 💡 warn: Variable `_Bad1` should have snake_case name, e.g. `_bad1`
@@ -981,6 +988,7 @@ fn main() {
 
         check_diagnostics(
             r#"
+//- minicore: copy
 enum Foo { V1, V2 }
 use Foo::V1;
 

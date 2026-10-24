@@ -1063,7 +1063,7 @@ fn test(x: Result<i32, !>) {
         );
         check_diagnostics(
             r#"
-//- minicore: result
+//- minicore: result, copy
 fn test(ptr: *const Result<i32, !>) {
     unsafe {
         match *ptr {
@@ -1076,7 +1076,7 @@ fn test(ptr: *const Result<i32, !>) {
         );
         check_diagnostics(
             r#"
-//- minicore: result
+//- minicore: result, copy
 fn test(x: Result<i32, &'static !>) {
     match x {
         //^ error: missing match arm: `Err(_)` not covered

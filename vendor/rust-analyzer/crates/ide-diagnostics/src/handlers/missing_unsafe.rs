@@ -914,7 +914,8 @@ fn bar(mut v: Union2) {
             r#"
 //- minicore: copy
 fn main() {
-    let ptr: *mut i32;
+    let mut local = 1;
+    let ptr: *mut i32 = &raw mut local;
     let _addr = &raw const *ptr;
 
     let local = 1;

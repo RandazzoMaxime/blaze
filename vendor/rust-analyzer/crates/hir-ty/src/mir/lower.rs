@@ -120,6 +120,20 @@ struct GuardedMove<'db> {
     span: MirSpan,
 }
 
+/// What a destructuring assignment assigns once it has read every part: `target`, from the
+/// temporary `part` holds the part in, as rustc's desugaring to a `let` of the parts and an
+/// assignment of each after it does.
+struct Assigned {
+    target: AssignTarget,
+    part: LocalId,
+    span: MirSpan,
+}
+
+enum AssignTarget {
+    Local(LocalId),
+    Place(ExprId),
+}
+
 struct MirLowerCtx<'a, 'db> {
     result: MirBody<'db>,
     owner: InferBodyId<'db>,
@@ -187,6 +201,8 @@ struct MirLowerCtx<'a, 'db> {
     guarded_moves: Option<Vec<GuardedMove<'db>>>,
     /// The reference a guard reads each binding of `guarded_moves` through.
     guard_refs: FxHashMap<BindingId, LocalId>,
+    /// While the pattern of a destructuring assignment is lowered: what it assigns.
+    assigned: Vec<Assigned>,
     /// Whether each type asked about is `Copy`. Every statement that may panic asks of every
     /// local in scope, which in a long body is the most of lowering it.
     copy: FxHashMap<Ty<'db>, bool>,
@@ -367,6 +383,7 @@ impl<'a, 'db> MirLowerCtx<'a, 'db> {
             or_choices: FxHashMap::default(),
             guarded_moves: None,
             guard_refs: FxHashMap::default(),
+            assigned: Vec::new(),
             copy: FxHashMap::default(),
             env,
             infcx,
@@ -1769,13 +1786,10 @@ impl<'a, 'db> MirLowerCtx<'a, 'db> {
                 Ok(Some(current))
             }
             &Expr::Assignment { target, value } => {
-                // `_ = place` moves nothing out of the place, as `let _ = place` does not.
-                let lowered = if matches!(self.store[target], Pat::Wild) {
-                    self.lower_expr_as_place(current, value, true)?
-                } else {
-                    self.lower_expr_to_fresh_place(value, current)?
-                };
-                let Some((value, mut current)) = lowered else {
+                // What the pattern takes of a place is all that is moved out of it, as a
+                // `let` of the pattern moves: `_ = place` moves nothing.
+                let Some((value, mut current)) = self.lower_expr_as_place(current, value, true)?
+                else {
                     return Ok(None);
                 };
                 self.push_fake_read(current, value, expr_id.into());
