@@ -330,8 +330,8 @@ With no borrow checker, the 246 units rustc accepts would pass. Now:
 
 | Mode | In scope | Pass | rustc accepts, ra-jit too | rustc rejects, same errors |
 |---|---|---|---|---|
-| Polonius | 1581 | 1539 (97.3%) | 246 of 246 | 1293 of 1335 |
-| NLL | 1579 | 1535 (97.2%) | 227 of 227 | 1308 of 1352 |
+| Polonius | 1581 | 1541 (97.5%) | 246 of 246 | 1295 of 1335 |
+| NLL | 1579 | 1537 (97.3%) | 227 of 227 | 1310 of 1352 |
 
 460 units are out of scope; 344 of them need a nightly feature. CI runs the scoring on Linux
 and fails below a floor a few units under the count there, on any error in a unit rustc
@@ -348,8 +348,8 @@ files, errors and files it panicked on; a panic makes it fail.
 Every failing unit is one where rustc gives an error ra-jit does not, or gives it on another
 line or with another code. By what is wrong, most first: 15 with an error on another line or
 with another code, then, of the errors not reported, 5 "lifetime may not live long enough",
-4 E0507, 3 each of E0309, E0310, E0311 and higher-ranked errors, 2 each of E0716 and E0597,
-then one each of six more. The causes, grouped:
+3 each of E0507, E0309, E0310, E0311 and higher-ranked errors, 2 each of E0716 and E0597,
+then one each of five more. The causes, grouped:
 
 - **Higher-ranked regions and placeholders**: trait bounds are proven for placeholders, but a
   function pointer or closure related to a `for<'a> fn` type is not (rustc's higher-ranked
