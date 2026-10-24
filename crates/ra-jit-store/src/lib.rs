@@ -119,6 +119,14 @@ pub fn toolchain() -> Option<&'static str> {
     TOOLCHAIN.get().map(String::as_str)
 }
 
+/// Sixteen hex digits of what the store keys this process's values by: the bytes of its
+/// executable and the toolchain [`compiles_against`] was told of. What a process of another
+/// name stored is of no use to this one. `None` before it is told.
+pub fn build_name() -> Option<String> {
+    let identity = Identity::current().ok()?;
+    Some(identity.0[..8].iter().map(|byte| format!("{byte:02x}")).collect())
+}
+
 /// What the bytes of this process's executable come to.
 fn program() -> Option<[u8; KEY]> {
     static PROGRAM: OnceLock<Option<[u8; KEY]>> = OnceLock::new();

@@ -441,6 +441,15 @@ enum PassMode {
         offset: Size,
         spilled: [Option<bool>; 2],
     },
+    /// A `Pair` with a 128-bit integer half that AAPCS64 puts on the stack while integer
+    /// registers are left: `skipped[i]` integer registers go unused before half `i`, which
+    /// the convention takes out of use (see `wide_ints_after_registers`).
+    SkippingPair {
+        a: AbiScalar,
+        b: AbiScalar,
+        offset: Size,
+        skipped: [u8; 2],
+    },
 }
 
 impl PassMode {
@@ -488,6 +497,34 @@ pub(crate) fn lone_register_i128(params: &[AbiParam]) -> Option<(usize, u32)> {
             ints += 1;
         } else {
             stack += 8;
+        }
+    }
+    None
+}
+
+/// The first 128-bit integer parameter that AAPCS64 puts on the stack while an integer
+/// register is still free, and how many are, as Cranelift places the parameters: such an
+/// integer starts at a register that is a multiple of `even` (2, or 1 on Apple's platforms).
+/// The convention takes the registers that are left out of use, as LLVM (so rustc) does, but
+/// Cranelift gives them to the integer parameters after it, so the two place those
+/// differently.
+pub(crate) fn stranded_i128(params: &[AbiParam], even: usize) -> Option<(usize, u8)> {
+    const REGS: usize = 8;
+    let mut ints = 0;
+    for (at, param) in params.iter().enumerate() {
+        let ty = param.value_type;
+        if param.purpose == ArgumentPurpose::StructReturn || ty.is_float() || ty.is_vector() {
+            continue;
+        }
+        if ty == types::I128 {
+            let start = ints + ints % even;
+            if start + 2 <= REGS {
+                ints = start + 2;
+            } else if ints < REGS {
+                return Some((at, (REGS - ints) as u8));
+            }
+        } else if ints < REGS {
+            ints += 1;
         }
     }
     None
@@ -3331,12 +3368,17 @@ impl Ready<'_> {
 /// find it ahead of the one that puts the functions in the object, which has it to wait
 /// for otherwise.
 #[derive(Default, Clone)]
-struct ToldTypes(
+struct ToldTypes(std::sync::Arc<TypesTold>);
+
+#[derive(Default)]
+struct TypesTold {
+    /// What the type of each variable is told as.
     #[allow(clippy::type_complexity)]
-    std::sync::Arc<
+    roots:
         std::sync::Mutex<FxHashMap<(StoredParamEnvAndCrate, StoredTy), Option<debuginfo::TypeSet>>>,
-    >,
-);
+    /// The sets of the types they are made of, which are shared.
+    sets: debuginfo::Sets,
+}
 
 impl ToldTypes {
     fn told(
@@ -3346,12 +3388,12 @@ impl ToldTypes {
         ty: &StoredTy,
     ) -> Option<debuginfo::TypeSet> {
         let key = (env.clone(), ty.clone());
-        if let Some(told) = self.0.lock().unwrap_or_else(|e| e.into_inner()).get(&key) {
+        if let Some(told) = self.0.roots.lock().unwrap_or_else(|e| e.into_inner()).get(&key) {
             return told.clone();
         }
-        let told = debuginfo::described(db, env.clone(), ty.clone());
+        let told = debuginfo::described(db, env, ty, &self.0.sets);
         // Another thread may have told of it meanwhile, and the functions share one set.
-        self.0.lock().unwrap_or_else(|e| e.into_inner()).entry(key).or_insert(told).clone()
+        self.0.roots.lock().unwrap_or_else(|e| e.into_inner()).entry(key).or_insert(told).clone()
     }
 
     /// Tells of the types of the variables of `compiled`, for [`describe_variables`] to find.
@@ -7286,6 +7328,7 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
                 .collect::<Result<_>>()?;
             let mut abi = FnAbi { ret, args };
             self.wide_ints_on_stack(&mut abi)?;
+            self.wide_ints_after_registers(&mut abi)?;
             return Ok(abi);
         }
         if self.cg.target.call_conv == isa::CallConv::WindowsFastcall {
@@ -7364,6 +7407,47 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
         Ok(())
     }
 
+    /// Has the integer registers that a 128-bit integer going to the stack leaves go unused.
+    ///
+    /// By AAPCS64 such an integer takes every integer register that is left out of use, and
+    /// LLVM (so rustc) does so, where Cranelift gives them to the integer arguments after it.
+    /// Passed to nobody first, they are where neither backend puts anything else.
+    fn wide_ints_after_registers(&self, abi: &mut FnAbi) -> Result<()> {
+        let target = &self.cg.target;
+        if target.arch != Arch::Aarch64 {
+            return Ok(());
+        }
+        let even = if target.call_conv == isa::CallConv::AppleAarch64 { 1 } else { 2 };
+        while let Some((at, skipped)) =
+            stranded_i128(&self.signature(&abi.args, abi.ret).params, even)
+        {
+            let mut first = usize::from(matches!(abi.ret, PassMode::Indirect));
+            let arg = abi
+                .args
+                .iter()
+                .position(|&mode| {
+                    let mut these = Vec::new();
+                    self.push_abi_params(mode, &mut these);
+                    if first + these.len() > at {
+                        return true;
+                    }
+                    first += these.len();
+                    false
+                })
+                .expect("every parameter comes from an argument");
+            abi.args[arg] = match abi.args[arg] {
+                PassMode::Direct(_) => PassMode::Uniform { unit: types::I128, count: 1, skipped },
+                PassMode::Pair(a, b, offset) => {
+                    let mut gaps = [0; 2];
+                    gaps[usize::from(at > first)] = skipped;
+                    PassMode::SkippingPair { a, b, offset, skipped: gaps }
+                }
+                mode => unreachable!("a 128-bit integer passed as {mode:?}"),
+            };
+        }
+        Ok(())
+    }
+
     /// The C convention of the System V x86-64 psABI, as rustc's `callconv/x86_64.rs` has it.
     fn sysv_x86_64_abi(
         &self,
@@ -7398,6 +7482,7 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
                 PassMode::CastPair(a, b) => self.count_regs(&[a, b]),
                 PassMode::Uniform { .. } => unreachable!("x86-64 has no uniform aggregate"),
                 PassMode::SpilledPair { .. } => unreachable!("only the stack spills a pair"),
+                PassMode::SkippingPair { .. } => unreachable!("only AAPCS64 skips registers"),
             };
             let aggregate = matches!(mode, PassMode::Cast(_) | PassMode::CastPair(..));
             let in_registers = match (int_regs.checked_sub(ints), sse_regs.checked_sub(sses)) {
@@ -7853,6 +7938,12 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
                     }
                 }
             }
+            PassMode::SkippingPair { a, b, skipped, .. } => {
+                for (half, skipped) in [a, b].into_iter().zip(skipped) {
+                    params.extend((0..skipped).map(|_| AbiParam::new(types::I64)));
+                    params.push(half.param());
+                }
+            }
         }
     }
 
@@ -7946,6 +8037,14 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
                     }
                 }
             }
+            PassMode::SkippingPair { a, b, offset, skipped } => {
+                for (half, at, skipped) in [(a, 0, skipped[0]), (b, offset.bytes(), skipped[1])] {
+                    for _ in 0..skipped {
+                        values.push(self.zero(types::I64));
+                    }
+                    values.push(self.builder.ins().load(half.ty, MEM, addr, at as i32));
+                }
+            }
         }
     }
 
@@ -8003,6 +8102,15 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
                             self.builder.ins().load(half.ty, MEM, copy, 0)
                         }
                     };
+                    self.builder.ins().store(MEM, value, addr, at as i32);
+                }
+            }
+            PassMode::SkippingPair { offset, skipped, .. } => {
+                for (at, skipped) in [(0, skipped[0]), (offset.bytes(), skipped[1])] {
+                    for _ in 0..skipped {
+                        next();
+                    }
+                    let value = next();
                     self.builder.ins().store(MEM, value, addr, at as i32);
                 }
             }
@@ -11903,13 +12011,15 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
         if fn_sig.c_variadic() {
             unsupported!("shim for a variadic function");
         }
-        // A vtable is called as a Rust function, whatever the function behind it is.
+        // A vtable is called as a Rust function, whatever the function behind it is, and its
+        // receiver is an argument like the rest: where it goes moves where they do.
         let abi = if receiver { ExternAbi::Rust } else { fn_sig.abi() };
-        let abi = self.fn_abi(abi, fn_sig.output(), fn_sig.inputs().iter().copied())?;
-        let mut sig = self.signature(&abi.args, abi.ret);
+        let pointer = receiver.then(|| Ty::new_imm_ptr(self.interner, Ty::new_unit(self.interner)));
+        let inputs = pointer.into_iter().chain(fn_sig.inputs().iter().copied());
+        let mut abi = self.fn_abi(abi, fn_sig.output(), inputs)?;
+        let sig = self.signature(&abi.args, abi.ret);
         if receiver {
-            let sret = matches!(abi.ret, PassMode::Indirect);
-            sig.params.insert(sret as usize, AbiParam::new(ptr()));
+            abi.args.remove(0);
         }
         Ok((fn_sig, sig, abi))
     }
@@ -12058,21 +12168,29 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
         };
         let parent_args = GenericArgs::new_from_slice(generic_args.as_closure().parent_args());
         let body = self.body_types(InstanceDef::Closure(id.0.as_id()), parent_args)?;
-        let mut sig = self.body_signature(body)?;
         let Some(receiver) = body.params.first() else {
             unsupported!("closure without a receiver");
         };
         if receiver.as_ref().as_reference().is_none() {
             // Taken by value, a closure without captures is not passed at all.
+            let sig = self.body_signature(body)?;
             return self.cg.callee(InstanceDef::Closure(id.0.as_id()), parent_args, self.env, &sig);
         }
-        let sret = sig.params.first().is_some_and(|it| it.purpose == ArgumentPurpose::StructReturn);
-        sig.params.remove(sret as usize);
+        let abi = self.closure_pointer_abi(body)?;
+        let sig = self.signature(&abi.args, abi.ret);
         let args = GenericArgs::new_from_slice(&[ty.into()]);
         self.cg.callee(InstanceDef::FnPointerShim, args, self.env, &sig)
     }
 
-    /// The body of a `FnPointerShim`: the signature of the closure body less its receiver.
+    /// How a fn pointer made of a closure that takes itself by reference is called: as the
+    /// closure body without its receiver.
+    fn closure_pointer_abi(&self, body: &BodyTypes) -> Result<FnAbi> {
+        let params = body.params.iter().skip(1).map(|ty| ty.as_ref());
+        self.fn_abi(ExternAbi::Rust, body.returned.as_ref(), params)
+    }
+
+    /// The body of a `FnPointerShim`: calls the closure body with a receiver, passing on the
+    /// arguments, which go elsewhere when the receiver moves them along the registers.
     fn fn_pointer_shim(&mut self, ty: Ty<'db>) -> Result<()> {
         let TyKind::Closure(id, generic_args) = ty.kind() else {
             unsupported!("fn pointer shim for {ty:?}");
@@ -12080,20 +12198,53 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
         let parent_args = GenericArgs::new_from_slice(generic_args.as_closure().parent_args());
         let body = self.body_types(InstanceDef::Closure(id.0.as_id()), parent_args)?;
         let sig = self.body_signature(body)?;
-        let sret = sig.params.first().is_some_and(|it| it.purpose == ArgumentPurpose::StructReturn);
-        let mut shim = sig.clone();
-        shim.params.remove(sret as usize);
-        self.builder.func.signature = shim;
+        let abi = self.closure_pointer_abi(body)?;
+        let shim = self.signature(&abi.args, abi.ret);
+        let sret = matches!(abi.ret, PassMode::Indirect);
+        let mut forwarded = sig.clone();
+        forwarded.params.remove(sret as usize);
+        self.builder.func.signature = shim.clone();
         let entry = self.builder.create_block();
         self.builder.append_block_params_for_function_params(entry);
         self.builder.switch_to_block(entry);
-        let mut params = self.builder.block_params(entry).to_vec();
+        let params = self.builder.block_params(entry).to_vec();
         let receiver = self.builder.ins().iconst(ptr(), 1);
-        params.insert(sret as usize, receiver);
+        let values = if forwarded.params == shim.params {
+            let mut values = params;
+            values.insert(sret as usize, receiver);
+            values
+        } else {
+            let to = self.fn_abi(
+                ExternAbi::Rust,
+                body.returned.as_ref(),
+                body.params.iter().map(|ty| ty.as_ref()),
+            )?;
+            let mut incoming = params.into_iter();
+            let mut values = Vec::new();
+            if sret {
+                values.push(incoming.next().expect("sret param"));
+            }
+            values.push(receiver);
+            for ((ty, mode), &to) in body.params.iter().skip(1).zip(abi.args).zip(&to.args[1..]) {
+                let layout = self.layout(ty.as_ref())?;
+                let addr = match mode {
+                    PassMode::OnStack { padded: true, .. } => {
+                        incoming.nth(1).expect("a parameter in memory after its padding")
+                    }
+                    PassMode::Indirect | PassMode::OnStack { .. } => {
+                        incoming.next().expect("indirect param")
+                    }
+                    _ => self.stack_slot(&layout),
+                };
+                self.receive(mode, &mut incoming, addr, &layout);
+                self.pass(to, addr, &layout, &mut values);
+            }
+            values
+        };
         let callee =
             self.cg.callee(InstanceDef::Closure(id.0.as_id()), parent_args, self.env, &sig)?;
         let callee = self.cg.declare_func_in_func(callee, self.builder.func);
-        let results = self.invoke(callee, &params);
+        let results = self.invoke(callee, &values);
         self.builder.ins().return_(&results);
         Ok(())
     }
@@ -12227,6 +12378,10 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
             PassMode::SpilledPair { spilled, .. } => {
                 spilled.iter().map(|it| it.map_or(1, |padded| 1 + usize::from(padded))).sum()
             }
+            PassMode::SkippingPair { skipped, .. } => {
+                2 + skipped.into_iter().map(usize::from).sum::<usize>()
+            }
+            PassMode::Uniform { count, skipped, .. } => usize::from(count) + usize::from(skipped),
             _ => 1,
         };
         let mut sig = sig.clone();
@@ -15647,6 +15802,25 @@ fn returned_in_place(
     eligible.then_some(local)
 }
 
+/// How many times each local is dropped by a terminator or read by a `FakeRead`, counted in one
+/// pass: a body of many blocks has many temporaries, and neither is a use of what one holds.
+fn drops_and_fake_reads(body: &MirBody<'_>) -> FxHashMap<LocalId, usize> {
+    let mut counted: FxHashMap<LocalId, usize> = FxHashMap::default();
+    for (_, block) in body.basic_blocks.iter() {
+        for statement in &block.statements {
+            if let StatementKind::FakeRead(place) = &statement.kind {
+                *counted.entry(place.local).or_default() += 1;
+            }
+        }
+        if let Some(TerminatorKind::Drop { place, .. }) =
+            block.terminator.as_ref().map(|it| &it.kind)
+        {
+            *counted.entry(place.local).or_default() += 1;
+        }
+    }
+    counted
+}
+
 /// The temporaries a call's argument is moved through, each with the local moved into it:
 /// `f(value)` moves `value` to a temporary and the temporary to `f`. The two can be one slot,
 /// nothing reading or writing `value` between the move and the call, and the callee then gets
@@ -15715,23 +15889,8 @@ fn moved_arguments(
     }
     let mut mentions: FxHashMap<LocalId, usize> = FxHashMap::default();
     body.visit_places(|place| *mentions.entry(place.local).or_default() += 1);
-    let dropped_or_read = |local: LocalId| {
-        let drops = body
-            .basic_blocks
-            .iter()
-            .filter_map(|(_, block)| block.terminator.as_ref())
-            .filter(
-                |it| matches!(&it.kind, TerminatorKind::Drop { place, .. } if place.local == local),
-            )
-            .count();
-        let fake_reads = body
-            .basic_blocks
-            .iter()
-            .flat_map(|(_, block)| &block.statements)
-            .filter(|it| matches!(&it.kind, StatementKind::FakeRead(place) if place.local == local))
-            .count();
-        drops + fake_reads
-    };
+    let not_uses = drops_and_fake_reads(body);
+    let dropped_or_read = |local: LocalId| not_uses.get(&local).copied().unwrap_or(0);
     let bound: rustc_hash::FxHashSet<LocalId> = body
         .binding_locals
         .values()
@@ -15817,24 +15976,10 @@ fn forwarded_temps(body: &MirBody<'_>) -> FxHashMap<LocalId, LocalId> {
     // Written once and read once, and by nothing else: the binding is not what it is made of.
     let mut mentions: FxHashMap<LocalId, usize> = FxHashMap::default();
     body.visit_places(|place| *mentions.entry(place.local).or_default() += 1);
-    let fake_reads = |local: LocalId| {
-        body.basic_blocks
-            .iter()
-            .flat_map(|(_, block)| &block.statements)
-            .filter(|it| matches!(&it.kind, StatementKind::FakeRead(place) if place.local == local))
-            .count()
-    };
     // A drop of the temporary is not a use: it holds a value only between the two statements,
     // which unwind to nowhere, and a drop of it then finds the slot holding its value.
-    let drops = |local: LocalId| {
-        body.basic_blocks
-            .iter()
-            .filter_map(|(_, block)| block.terminator.as_ref())
-            .filter(
-                |it| matches!(&it.kind, TerminatorKind::Drop { place, .. } if place.local == local),
-            )
-            .count()
-    };
+    let not_uses = drops_and_fake_reads(body);
+    let dropped_or_read = |local: LocalId| not_uses.get(&local).copied().unwrap_or(0);
     let bound: rustc_hash::FxHashSet<LocalId> = body
         .binding_locals
         .values()
@@ -15845,7 +15990,7 @@ fn forwarded_temps(body: &MirBody<'_>) -> FxHashMap<LocalId, LocalId> {
         .collect();
     forwarded.retain(|&temp, to| {
         !bound.contains(&temp)
-            && mentions[&temp] - fake_reads(temp) - drops(temp) == 2
+            && mentions[&temp] - dropped_or_read(temp) == 2
             && body.locals[temp].ty == body.locals[*to].ty
             && !body.promoted_locals.iter().any(|it| it.0 == *to)
             && *to != returned_local(body)

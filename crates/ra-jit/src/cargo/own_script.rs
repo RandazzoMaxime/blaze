@@ -3,7 +3,9 @@
 //! the arguments cargo gave and the records of those libraries, as a `rust-project.json`, and
 //! ra-jit builds it as it builds any program with nothing of rustc's: every crate from source,
 //! over the standard library's unit from the store, linked by `cc`. It writes the executable
-//! and the dep-info where rustc would have, and cargo runs the script as it would rustc's.
+//! and the dep-info where rustc would have, with the files `include!` and its kin read and
+//! the variables `env!` and `option_env!` read, and cargo runs the script as it would rustc's.
+//! A script that read a variable cargo sets for rustc alone is left to rustc.
 
 use std::{
     collections::BTreeMap,
@@ -21,10 +23,6 @@ pub(crate) const BY_RUSTC: &str = "RA_JIT_SCRIPTS_BY_RUSTC";
 
 /// The name of the script's crate in the description: the one ra-jit is asked to build.
 const SCRIPT: &str = "build_script_build";
-
-/// What a crate's source can read and cargo would have rustc know of: a change cargo fingerprints
-/// on its own, or one a dep-info has no rule for.
-const READS: [&str; 3] = ["include!", "include_str!", "include_bytes!"];
 
 /// The variables cargo sets for rustc that a crate's source reads with `env!`: those of its
 /// package and the `OUT_DIR` of its build script.
@@ -119,7 +117,6 @@ pub(crate) fn compile(
     dir: &Path,
 ) -> Result<(), String> {
     let asked = Asked { args, cwd };
-    unread(&source.display().to_string())?;
     let rustc = crate::answers::toolchain_rustc_of(rustc).ok_or("its toolchain is not known")?;
     let sysroot = rustc.parent().and_then(Path::parent).ok_or("its toolchain is not known")?;
     let library = sysroot.join("lib/rustlib/src/rust/library");
@@ -143,11 +140,34 @@ pub(crate) fn compile(
     let deps =
         deps.iter().map(|(name, path)| Ok((name.clone(), add(&mut crates, &mut linked, path)?)));
     crates[0].deps = deps.collect::<Result<_, String>>()?;
+    let said = build(sysroot, &crates, dir, exe, super::daemon::store(), true)?;
+    if let Some(line) =
+        said.lines().find(|it| it.contains(" functions in it ra-jit could not compile"))
+        && !line.ends_with(", 0 functions in it ra-jit could not compile")
+    {
+        return Err(format!("it calls functions ra-jit could not compile ({line})"));
+    }
+    let read = std::fs::read_to_string(exe.with_extension("d")).map_err(|it| it.to_string())?;
+    read_otherwise(&crate::dep_info::DepInfo::parse(&read), |name| std::env::var(name).ok())
+}
+
+/// Builds the first of `crates` over the standard library of `sysroot` into `exe` with its
+/// dep-info beside it, describing them in `dir`, with `store` as the store: what the build
+/// said, or why it did not build. With `shipped` it fetches the standard library as builds do
+/// (`shipped.rs`).
+fn build(
+    sysroot: &Path,
+    crates: &[Described],
+    dir: &Path,
+    exe: &Path,
+    store: Option<PathBuf>,
+    shipped: bool,
+) -> Result<String, String> {
     std::fs::create_dir_all(dir).map_err(|it| it.to_string())?;
     let project = dir.join("rust-project.json");
     let described = json!({
         "sysroot": sysroot,
-        "sysroot_src": library,
+        "sysroot_src": sysroot.join("lib/rustlib/src/rust/library"),
         "crates": crates.iter().enumerate().map(|(at, it)| described(it, at == 0)).collect::<Vec<_>>(),
     });
     std::fs::write(&project, described.to_string()).map_err(|it| it.to_string())?;
@@ -164,57 +184,58 @@ pub(crate) fn compile(
             ra_jit.env_remove(&name);
         }
     }
-    for kept in ["RA_JIT_HOME", "RA_JIT_BACKEND"] {
+    for kept in ["RA_JIT_HOME", "RA_JIT_BACKEND", "RA_JIT_STD_FROM"] {
         if let Some(value) = std::env::var_os(kept) {
             ra_jit.env(kept, value);
         }
     }
-    if let Some(store) = super::daemon::store() {
+    if let Some(store) = store {
         ra_jit.env("RA_JIT_CACHE", store);
+    }
+    if !shipped {
+        ra_jit.env("RA_JIT_STD_FROM", "off");
     }
     ra_jit.current_dir(dir).stdin(Stdio::null()).stdout(Stdio::null());
     let built = ra_jit.output().map_err(|it| format!("ra-jit did not run: {it}"))?;
-    let said = String::from_utf8_lossy(&built.stderr);
-    std::fs::write(dir.join("ra-jit.log"), &*said).map_err(|it| it.to_string())?;
+    let said = String::from_utf8_lossy(&built.stderr).into_owned();
+    std::fs::write(dir.join("ra-jit.log"), &said).map_err(|it| it.to_string())?;
     if !built.status.success() {
         let last = said.lines().rev().find(|it| !it.trim().is_empty()).unwrap_or("");
         return Err(format!("ra-jit did not build it ({}): {last}", built.status));
     }
-    if let Some(line) =
-        said.lines().find(|it| it.contains(" functions in it ra-jit could not compile"))
-        && !line.ends_with(", 0 functions in it ra-jit could not compile")
-    {
-        return Err(format!("it calls functions ra-jit could not compile ({line})"));
-    }
-    let read = std::fs::read_to_string(&dep_info).map_err(|it| it.to_string())?;
-    crate::dep_info::DepInfo::parse(&read).files.iter().try_for_each(|it| unread(it))
+    Ok(said)
 }
 
-/// Whether the file reads nothing a dep-info of its modules alone leaves out, and if it does,
-/// why rustc is to compile it.
-fn unread(file: &str) -> Result<(), String> {
-    let text = std::fs::read_to_string(file).map_err(|it| format!("{file}: {it}"))?;
-    match unrecorded_read(&text) {
-        Some(why) => Err(format!("{file} {why}, which ra-jit's dep-info does not name")),
+/// Builds a script that does nothing over the standard library of `sysroot` in `dir`, into
+/// the store `store`: what the store then has is what any build script's build takes from
+/// it before its own crates, the standard library's unit and the frozen maps of its crates.
+pub(crate) fn build_nothing(sysroot: &Path, dir: &Path, store: &Path) -> Result<String, String> {
+    let source = dir.join("build.rs");
+    std::fs::create_dir_all(dir).map_err(|it| it.to_string())?;
+    std::fs::write(&source, "fn main() {}\n").map_err(|it| it.to_string())?;
+    let script = Described {
+        name: SCRIPT.to_owned(),
+        root: source,
+        edition: "2021".to_owned(),
+        cfg: vec!["debug_assertions".to_owned()],
+        env: BTreeMap::new(),
+        deps: Vec::new(),
+    };
+    let exe = dir.join("build-script-build");
+    build(sysroot, &[script], dir, &exe, Some(store.to_owned()), false)
+}
+
+/// Why rustc is to compile the script when it read a variable as another than rustc would,
+/// `rustc_has` saying what rustc would: one cargo sets for rustc alone, which ra-jit's build
+/// is not given (`RUSTC_*` and the like).
+fn read_otherwise(
+    info: &crate::dep_info::DepInfo,
+    rustc_has: impl Fn(&str) -> Option<String>,
+) -> Result<(), String> {
+    match info.env.iter().find(|(name, value)| rustc_has(name) != *value) {
+        Some((name, _)) => Err(format!("it reads `{name}`, which ra-jit's build is not given")),
         None => Ok(()),
     }
-}
-
-/// What the text reads while it is compiled that a dep-info of its modules alone leaves out:
-/// a file it includes, or a variable that is not one of cargo's.
-fn unrecorded_read(text: &str) -> Option<String> {
-    if let Some(read) = READS.iter().find(|it| text.contains(*it)) {
-        return Some(format!("uses `{read}`"));
-    }
-    let mut rest = text;
-    while let Some(at) = rest.find("env!(") {
-        rest = &rest[at + "env!(".len()..];
-        let named = rest.trim_start().trim_start_matches('"');
-        if !named.starts_with("CARGO_") && !named.starts_with("OUT_DIR") {
-            return Some("reads a variable with `env!`".to_owned());
-        }
-    }
-    None
 }
 
 /// Adds the library rustc wrote at `path`, and what it links, to `crates` from their records:
@@ -277,12 +298,17 @@ mod tests {
     use super::*;
 
     #[test]
-    fn reads_a_dep_info_does_not_name() {
-        assert_eq!(unrecorded_read("fn main() { println!(\"{}\", env!(\"OUT_DIR\")); }"), None);
-        assert_eq!(unrecorded_read("const V: &str = env!( \"CARGO_PKG_VERSION\");"), None);
-        assert!(unrecorded_read("const V: &str = env!(\"TARGET\");").is_some());
-        assert!(unrecorded_read("const V: Option<&str> = option_env!(\"CC\");").is_some());
-        assert!(unrecorded_read("include!(concat!(env!(\"OUT_DIR\"), \"/a.rs\"));").is_some());
+    fn a_variable_read_as_rustc_would_read_it() {
+        let info = crate::dep_info::DepInfo {
+            files: Vec::new(),
+            env: vec![("A".to_owned(), Some("1".to_owned())), ("B".to_owned(), None)],
+        };
+        let rustc_has = |a: Option<&'static str>| {
+            move |name: &str| if name == "A" { a.map(str::to_owned) } else { None }
+        };
+        assert_eq!(read_otherwise(&info, rustc_has(Some("1"))), Ok(()));
+        assert!(read_otherwise(&info, rustc_has(Some("2"))).is_err());
+        assert!(read_otherwise(&info, rustc_has(None)).is_err());
     }
 
     #[test]

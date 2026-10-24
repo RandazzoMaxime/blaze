@@ -258,7 +258,7 @@ it rebuilds quickly after a change. What users get is one other build: the `dist
 (thin LTO) optimized with the PGO profile `pgo/profiles.json` pins, built by
 `.github/scripts/build_release.py`. The release workflow runs that script, and the flake's
 `dist` runs it inside its derivation with the same profile fetched by its sha256.
-`cargo install --profile dist` builds the same profile without PGO (README).
+`cargo install --profile dist` builds the same profile without PGO, from the release after 0.1.0.
 [reports/RELEASE-BUILD.md](reports/RELEASE-BUILD.md) has the numbers.
 
 The PGO profiles are trained by the `pgo` workflow, one per target on the runner its release

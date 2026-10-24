@@ -1,5 +1,7 @@
 //! `ra-jit borrowck [--edition E]`: the diagnostics of single-file crates, one per line of
-//! standard input, each a path, written as one JSON object per line on standard output.
+//! standard input, each a path, written as one JSON object per line on standard output. A
+//! tab after the path starts the `cfg`s the file is read with, as rustc's `--cfg`: `name`
+//! or `name="value"`, separated by spaces.
 //!
 //! The standard library is loaded once; each file then takes the place of the one before as
 //! the root of a library crate of the given edition, so what is checked again is only what
@@ -64,9 +66,33 @@ pub(crate) fn command(mut args: impl Iterator<Item = String>) -> anyhow::Result<
         .map(|(file, _)| file)
         .context("the crate root is not loaded")?;
     let config = ide_diagnostics::DiagnosticsConfig::test_sample();
+    let krate = *ide_db::base_db::relevant_crates(&db, file)
+        .first()
+        .context("the crate root is in no crate")?;
+    let base_cfg = krate.cfg_options(&db).clone();
+    let mut cfgs = String::new();
     let stdout = std::io::stdout();
     for line in std::io::stdin().lock().lines() {
-        let test = line?;
+        let line = line?;
+        let (test, wanted) = match line.split_once('\t') {
+            Some((test, wanted)) => (test.to_owned(), wanted.to_owned()),
+            None => (line, String::new()),
+        };
+        if wanted != cfgs {
+            use ide_db::base_db::salsa::Setter as _;
+            let mut options = base_cfg.clone();
+            for cfg in wanted.split_whitespace() {
+                match cfg.split_once('=') {
+                    Some((key, value)) => options.insert_key_value(
+                        intern::Symbol::intern(key),
+                        intern::Symbol::intern(value.trim_matches('"')),
+                    ),
+                    None => options.insert_atom(intern::Symbol::intern(cfg)),
+                }
+            }
+            krate.set_cfg_options(&mut db).to(options);
+            cfgs = wanted;
+        }
         let started = Instant::now();
         let text = std::fs::read_to_string(&test).unwrap_or_default();
         let mut change = ChangeWithProcMacros::default();
