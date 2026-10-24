@@ -3176,7 +3176,11 @@ fn reach_of_tests(db: &RootDatabase, listed: &Listed, args: &Args) -> String {
                 let hex: String = identity.iter().map(|it| format!("{it:02x}")).collect();
                 format!("{hex}\t{name}\n")
             }
-            Err(why) => format!("-\t{name}\t{}\n", why.replace(['\t', '\n'], " ")),
+            Err(always) => {
+                let field = |it: &str| it.replace(['\t', '\n'], " ");
+                let path: Vec<String> = always.path.iter().map(|it| field(it)).collect();
+                format!("-\t{name}\t{}\t{}\n", field(&always.why), path.join(" -> "))
+            }
         };
         text.push_str(&line);
     }
