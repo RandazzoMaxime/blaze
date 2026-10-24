@@ -58,12 +58,14 @@ def logs(daemon):
 
 def wait_own_base(daemon, sampler, timeout=3600):
     """Waits until the build of the daemon's own base is over: the line it starts with, then the
-    `stats:` line of its end, or the worker's memory still for a minute when nothing says."""
+    `edit-to-binary:` line once it is linked (or the line that says it was interrupted or given
+    up), or the worker's memory still for a minute when nothing says. An edit before the link is
+    over interrupts it, and is built on top of all the base holds."""
     began, still, last = time.time(), time.time(), 0
     while time.time() - began < timeout:
         text = logs(daemon)
         at = text.rfind("compiling the program for edits to patch")
-        if at >= 0 and re.search(r"^(stats: |interrupted: |not compiling the program)", text[at:], re.M):
+        if at >= 0 and re.search(r"^(edit-to-binary: |interrupted: |not compiling the program)", text[at:], re.M):
             return time.time() - began, text[at:].splitlines()[0]
         now = daemon.resident_mb()
         if abs(now - last) > 64:

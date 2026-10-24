@@ -288,6 +288,7 @@ fn changes_nothing(flag: &str) -> bool {
 }
 
 /// The line rustc ran the linker with: the variables it set, the driver, the arguments.
+#[derive(Clone)]
 pub(crate) struct LinkLine {
     /// What the line starts with to run the driver without some variables: `env -u NAME`.
     without: Vec<String>,
@@ -404,7 +405,8 @@ impl LinkLine {
 
     /// The command that links `binary` with the objects `ahead` before everything rustc
     /// built, with its arguments in the file at `response`: a line with all of them is longer
-    /// than a process may be given.
+    /// than a process may be given. Next to it is the file of the line that takes out the
+    /// code nothing reaches, as rustc's does ([`reached_only`]).
     pub(crate) fn command(
         mut self,
         ahead: &[&Path],
@@ -414,7 +416,12 @@ impl LinkLine {
         if self.flavor == Flavor::Msvc {
             self.args.retain(|it| !it.eq_ignore_ascii_case(WARNINGS_FAIL));
         }
+        self.clone().command_of(ahead, binary, &reached_file(response))?;
         self.keep_unreached();
+        self.command_of(ahead, binary, response)
+    }
+
+    fn command_of(self, ahead: &[&Path], binary: &Path, response: &Path) -> anyhow::Result<String> {
         let first = self
             .args
             .iter()
@@ -572,6 +579,28 @@ fn is_rustc_file(arg: &str) -> bool {
 /// which comes before the standard library that calls it.
 pub(crate) fn is_symbols(arg: &str) -> bool {
     arg.ends_with("symbols.o")
+}
+
+/// The response file next to the link's at `response` of the line that takes out the code
+/// nothing reaches, as rustc's does.
+fn reached_file(response: &Path) -> PathBuf {
+    response.with_extension("reached.args")
+}
+
+/// The link command `cmd` with the response file that takes out the code nothing reaches, as
+/// rustc's line does, when [`LinkLine::command`] wrote one. The link that keeps it fails when
+/// some of it uses what nothing defines, as zed's `webrtc` does what X11's `libXtst` would,
+/// which rustc's line never asks for. The executable is linked without that code then, and
+/// an edit that calls into what was taken out is linked in full.
+pub(crate) fn reached_only(cmd: &str) -> Option<String> {
+    let args = shlex::split(cmd)?;
+    let (response, reached) = args.iter().find_map(|it| {
+        let response = Path::new(it.strip_prefix('@')?);
+        let reached = reached_file(response);
+        reached.is_file().then_some((response.display().to_string(), reached))
+    })?;
+    let response = format!("@{response}");
+    cmd.contains(&response).then(|| cmd.replacen(&response, &format!("@{}", reached.display()), 1))
 }
 
 /// The file the link of the Apple executable at `binary` reads the room after its load
@@ -844,6 +873,25 @@ mod tests {
         let opt: Vec<&str> =
             msvc.lines().filter(|it| it.to_ascii_uppercase().contains("/OPT:")).collect();
         assert_eq!(opt, [r#""/OPT:NOREF,NOICF""#, r#""/OPT:NOREF""#]);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// The line as rustc had it, which takes out what nothing reaches, is next to the one that
+    /// keeps it, for a link that fails on what only that code uses.
+    #[test]
+    fn the_line_without_what_nothing_reaches_is_kept_too() {
+        let dir = std::env::temp_dir().join(format!("ra-jit-plan-reached-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let (response, binary) = (dir.join("link.args"), dir.join("bin"));
+        let line = r#""cc" "/t/a.1.rcgu.o" "-Wl,--gc-sections" "-o" "/t/a-1""#;
+        let command = LinkLine::parse(line).unwrap().command(&[], &binary, &response).unwrap();
+        let reached = reached_only(&command).unwrap();
+        assert_eq!(reached, command.replace("link.args", "link.reached.args"));
+        let args = std::fs::read_to_string(reached_file(&response)).unwrap();
+        assert!(args.contains("--gc-sections") && args.contains(FIRST_DEFINITION_STAYS), "{args}");
+        assert!(!std::fs::read_to_string(&response).unwrap().contains("--gc-sections"));
+        std::fs::remove_file(reached_file(&response)).unwrap();
+        assert_eq!(reached_only(&command), None);
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
