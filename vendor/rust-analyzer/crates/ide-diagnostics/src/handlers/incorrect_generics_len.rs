@@ -188,7 +188,7 @@ fn main() {
     fn generic_assoc_type_infer_lifetime_in_expr_position() {
         check_diagnostics(
             r#"
-//- minicore: sized
+//- minicore: sized, copy
 struct Player;
 
 struct Foo<'c, C> {

@@ -770,6 +770,7 @@ fn main() {
 
         check_diagnostics(
             r#"
+//- minicore: copy
 struct S { a: char}
 fn main(v: S) {
     match v { S{ a }      => { _ = a; } }
@@ -1052,7 +1053,7 @@ fn f() {
     fn min_exhaustive() {
         check_diagnostics(
             r#"
-//- minicore: result
+//- minicore: result, copy
 fn test(x: Result<i32, !>) {
     match x {
         Ok(_y) => {}

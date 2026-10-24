@@ -67,6 +67,7 @@ mod change_case {
     fn test_rename_incorrect_case() {
         check_fix(
             r#"
+//- minicore: copy
 pub struct test_struct$0 { one: i32 }
 
 pub fn some_fn(val: test_struct) -> test_struct {
@@ -933,6 +934,7 @@ fn func(Foo { _nonSnake }: Foo) {}
     fn test_match() {
         check_diagnostics(
             r#"
+//- minicore: copy
 enum Foo { Variant { nonSnake1: u8 } }
                   // ^^^^^^^^^ 💡 warn: Field `nonSnake1` should have snake_case name, e.g. `non_snake1`
 fn func() {
