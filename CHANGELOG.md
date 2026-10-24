@@ -8,6 +8,10 @@ All notable changes to ra-jit are written here. The format follows
 
 ### Added
 
+- The SSE and AVX compares compile (#87): `llvm.x86.sse.cmp.ps` and `.ss`, `sse2.cmp.pd` and
+  `.sd` and AVX's 256-bit ones give a lane of all ones where the immediate's predicate holds, as
+  rustc's do. glam's `Vec4::cmpeq` and `is_finite_mask`, which bevy calls, were left to rustc;
+  `harness/breakers` checks each predicate, NaN lanes included, against rustc's program.
 - An edit that needs a build in full no longer links in full when the daemon has no base of
   its own (it gave it up, or hasn't built it yet) (#159): on Linux the program is built onto
   the executable rustc linked and spliced into it whole, and the edits after it are patches of
