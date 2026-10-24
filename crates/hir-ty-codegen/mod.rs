@@ -598,6 +598,9 @@ pub struct Roots<'a> {
     /// The `main` of a program rustc built nothing of: the `main` the C runtime calls is
     /// then ours to write as well.
     pub start: Option<FunctionId>,
+    /// The object is linked into a shared library of its own, which has the allocator shim
+    /// a program's `start` otherwise brings.
+    pub shared: bool,
     /// Whether rustc built nothing of any crate of the program but the standard library's,
     /// whatever its `main` is: bun's is C's, and every one of its functions is an entry.
     pub whole: bool,
@@ -821,7 +824,11 @@ impl CodegenUnit {
             let mut next = 0;
             if let Some(main) = start {
                 cg.define_start(main)?;
-                cg.define_allocator_shim(main)?;
+                cg.define_allocator_shim(main.krate(db))?;
+            } else if roots.shared
+                && let Some(first) = roots.entries.first()
+            {
+                cg.define_allocator_shim(first.krate(db))?;
             }
             for &id in roots.kept {
                 cg.static_data(id)?;
@@ -4734,13 +4741,14 @@ impl<'a, 'db> ObjectCodegen<'a, 'db> {
     /// What rustc's allocator shim puts in a program: the entries of the global allocator
     /// that `alloc` calls by name, going to the `#[global_allocator]`'s (the functions its
     /// expansion exports) or else to std's defaults. Only in a program with nothing of
-    /// rustc's: one linked with rustc's `alloc` has rustc's shim.
-    fn define_allocator_shim(&mut self, main: FunctionId) -> Result<()> {
+    /// rustc's: one linked with rustc's `alloc` has rustc's shim. `krate` is one of the
+    /// program's, whose lang items are every crate's.
+    fn define_allocator_shim(&mut self, krate: Crate) -> Result<()> {
         let db = self.db;
         if !self.symbols.nothing_of_rustc() {
             return Ok(());
         }
-        let Some(boxed) = DbInterner::new_with(db, main.krate(db)).lang_items().OwnedBox else {
+        let Some(boxed) = DbInterner::new_with(db, krate).lang_items().OwnedBox else {
             return Ok(());
         };
         let program = linked_crates(db, self.own_statics.crates.iter().copied());
