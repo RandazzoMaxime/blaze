@@ -658,6 +658,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "blaze-items"
+version = "0.1.0"
+dependencies = [
+ "base-db",
+ "blake3",
+ "hir",
+ "hir-def",
+ "hir-expand",
+ "hir-ty",
+ "ra-ap-rustc_type_ir",
+ "rustc-hash 2.1.2",
+ "syntax",
+]
+
+[[package]]
 name = "blaze-vfs"
 version = "0.1.0"
 dependencies = [
@@ -3216,6 +3231,7 @@ dependencies = [
  "aws-smithy-http-client",
  "blaze-api",
  "blaze-core",
+ "blaze-items",
  "blaze-vfs",
  "cargo-platform",
  "cargo_metadata",
@@ -3227,6 +3243,7 @@ dependencies = [
  "getrandom 0.3.4",
  "hir",
  "hir-def",
+ "hir-expand",
  "hir-ty",
  "hir-ty-codegen",
  "http-body-util",
@@ -3261,6 +3278,7 @@ dependencies = [
  "serde_json",
  "sha2 0.10.9",
  "shlex",
+ "span",
  "syntax",
  "tar",
  "test-fixture",
