@@ -8,6 +8,9 @@ All notable changes to ra-jit are written here. The format follows
 
 ### Added
 
+- `crates/blaze-build-script`: the environment cargo 1.99.0 gives a build script, computed
+  from a plain description of the run with no cargo, ported from cargo's own rules and tests
+  (no-rustc step I, #89; #298). Nothing uses it yet; blaze's own runs of scripts come next.
 - blaze needs no Rust and no rustup installed (#298). With neither, it downloads Rust 1.99.0
   once into `~/.blaze/toolchains` (rustc, cargo, the standard library and its source: 97 MB on
   macOS, 133 MB on Linux x86-64), laid out as rustup lays out a toolchain, and builds with it.
