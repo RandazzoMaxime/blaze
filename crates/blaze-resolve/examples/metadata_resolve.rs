@@ -1,7 +1,8 @@
 //! Reads the JSON of `cargo metadata --format-version 1` on stdin and prints the `resolve` that
 //! blaze-resolve makes of its packages: the members resolved with their default features, as
-//! `cargo metadata` resolves them, against a registry of the packages listed. `harness/
-//! resolve_graph.py` compares it with cargo's.
+//! `cargo metadata` resolves them, against a registry of the packages listed, with the
+//! `[patch]` tables of the workspace's root manifest applied as cargo's `PackageRegistry` does.
+//! `harness/resolve_graph.py` compares it with cargo's.
 
 use std::collections::BTreeMap;
 use std::io::{Read, Write};
@@ -14,8 +15,8 @@ use blaze_resolve::resolver::{
     features::RequestedFeatures,
 };
 use blaze_resolve::{
-    DepKind, Dependency, InternedString, MemRegistry, PackageId, Platform, ResolveVersion,
-    SourceId, Summary,
+    CanonicalUrl, DepKind, Dependency, IndexSummary, InternedString, MemRegistry, PackageId,
+    Platform, QueryKind, Registry, ResolveVersion, SourceId, Summary,
 };
 use serde_json::Value;
 
@@ -57,6 +58,60 @@ fn dependency(dep: &Value) -> Result<Dependency> {
         d.set_platform(Some(target.parse::<Platform>()?));
     }
     Ok(d)
+}
+
+/// A registry with `[patch]`: a dependency on a patched source that a patch matches gets the
+/// patch, and nothing else.
+struct Patched {
+    registry: MemRegistry,
+    patches: Vec<(CanonicalUrl, Summary)>,
+}
+
+impl Registry for Patched {
+    async fn query(
+        &self,
+        dep: &Dependency,
+        kind: QueryKind,
+        f: &mut dyn FnMut(IndexSummary),
+    ) -> Result<()> {
+        let mut patched = false;
+        for (url, summary) in &self.patches {
+            if url == dep.source_id().canonical_url()
+                && dep.matches_ignoring_source(summary.package_id())
+            {
+                f(IndexSummary::Candidate(summary.clone()));
+                patched = true;
+            }
+        }
+        if patched { Ok(()) } else { self.registry.query(dep, kind, f).await }
+    }
+
+    fn describe_source(&self, source: SourceId) -> String {
+        self.registry.describe_source(source)
+    }
+
+    fn is_replaced(&self, source: SourceId) -> bool {
+        self.registry.is_replaced(source)
+    }
+}
+
+/// The patches of the root manifest: the URL each patches, and the name of the package.
+fn patch_tables(workspace_root: &str) -> Result<Vec<(CanonicalUrl, String)>> {
+    let text = std::fs::read_to_string(Path::new(workspace_root).join("Cargo.toml"))?;
+    let manifest: toml::Table = toml::from_str(&text)?;
+    let mut patches = Vec::new();
+    for (key, table) in manifest.get("patch").and_then(|p| p.as_table()).into_iter().flatten() {
+        let url = if key == "crates-io" {
+            SourceId::crates_io().canonical_url().clone()
+        } else {
+            CanonicalUrl::new(&key.parse()?)?
+        };
+        for (name, dep) in table.as_table().into_iter().flatten() {
+            let package = dep.get("package").and_then(|p| p.as_str()).unwrap_or(name);
+            patches.push((url.clone(), package.to_owned()));
+        }
+    }
+    Ok(patches)
 }
 
 struct Packages {
@@ -126,8 +181,22 @@ fn main() -> Result<()> {
             lib_names.insert(id, InternedString::new(&str_of(lib, "name")?.replace('-', "_")));
         }
         by_spec.insert(str_of(package, "id")?.to_owned(), summary.clone());
-        registry.add(blaze_resolve::IndexSummary::Candidate(summary));
+        registry.add(IndexSummary::Candidate(summary));
     }
+
+    let patch_names = patch_tables(str_of(&metadata, "workspace_root")?)?;
+    let patches = by_spec
+        .values()
+        .flat_map(|summary| {
+            patch_names
+                .iter()
+                .filter(move |(url, name)| {
+                    summary.name() == name.as_str() && summary.source_id().canonical_url() != url
+                })
+                .map(move |(url, _)| (url.clone(), summary.clone()))
+        })
+        .collect();
+    let registry = Patched { registry, patches };
 
     let member = |spec: &Value| -> Result<Summary> {
         let spec = spec.as_str().context("a member's id")?;
