@@ -5988,7 +5988,8 @@ impl Tests {
         let which = differs(now, self).or_else(|| differs(self, now)).unwrap_or_default();
         Some(format!(
             "the test `{which}` was added, removed or given other attributes, and the list of \
-             tests is rustc's to write"
+             tests is rustc's to write: ra-jit wrote no test harness for the program (no-rustc H, \
+             #88)"
         ))
     }
 }
@@ -9359,6 +9360,7 @@ impl Program {
         if let Some(why) = harness_alone(args)
             && !harnessed
         {
+            let why = format!("{why}, and ra-jit wrote no test harness for it (no-rustc H, #88)");
             failed = failed.or(Some(Refused::Cargos(why)));
         }
         match tests {

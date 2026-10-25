@@ -1,5 +1,5 @@
 //! The `main` of a test executable, as rustc's `--test` writes it: a description of each
-//! `#[test]` of the crate for libtest, and `test_main_static` over them. ra-jit adds it to
+//! `#[test]` and `#[bench]` of the crate for libtest, and `test_main_static` over them. ra-jit adds it to
 //! the root file of a crate it builds with `cfg(test)`, as a module of its own, and the
 //! program starts there instead of in rustc's: a test added, removed or marked otherwise is
 //! a build like another.
@@ -50,6 +50,8 @@ struct Test {
     /// The function from the crate's root, and the name libtest shows: the same path
     /// without `crate::`.
     path: Vec<String>,
+    /// A `#[bench]`, which libtest calls with a `Bencher`.
+    bench: bool,
     ignore: bool,
     ignore_message: Option<String>,
     should_panic: ShouldPanic,
@@ -67,8 +69,9 @@ enum ShouldPanic {
     WithMessage(String),
 }
 
-/// The module for the tests of `krate`, `None` when it has what the harness rustc writes
-/// has and this one does not: a benchmark, or an `ignore` with a list after it.
+/// The module for the tests of `krate`, `None` when a test is not one the module can say as
+/// rustc's harness does (its source or its name is not there, or its `should_panic` names no
+/// string), which is a bug to fix (no-rustc H, #88).
 /// `file_name` is what rustc is told a file is called.
 pub(crate) fn module(
     db: &RootDatabase,
@@ -80,16 +83,15 @@ pub(crate) fn module(
     let edition = krate.edition(db);
     let mut tests = Vec::new();
     for function in functions {
-        if function.is_bench(db) {
-            return None;
-        }
-        if !function.is_test(db) {
+        let bench = function.is_bench(db);
+        if !bench && !function.is_test(db) {
             continue;
         }
-        let path = path_of(db, function, edition)?;
+        let Some(path) = path_of(db, function, edition) else { continue };
         let source = function.source(db)?;
         let mut test = Test {
             path,
+            bench,
             ignore: false,
             ignore_message: None,
             should_panic: ShouldPanic::No,
@@ -130,8 +132,10 @@ pub(crate) fn module(
                         _ => {}
                     }
                 }
+                // rustc reads no message from `ignore` with a list after it, and ignores the
+                // test.
                 ast::Meta::TokenTreeMeta(meta) => match named(meta.path()).as_deref() {
-                    Some("ignore") => return None,
+                    Some("ignore") => test.ignore = true,
                     Some("should_panic") => {
                         test.should_panic =
                             ShouldPanic::WithMessage(expected(&meta.token_tree()?)?);
@@ -166,7 +170,7 @@ pub(crate) fn module(
 }
 
 /// The path of a test from its crate's root, which joined by `::` is the name libtest shows.
-/// `None` for a test inside a function, which is none to rustc's harness either: it can't be
+/// `None` for a test inside a function, which rustc's harness leaves out too: it can't be
 /// named.
 fn path_of(
     db: &RootDatabase,
@@ -241,10 +245,16 @@ fn text(tests: &[Test], test_type: &str, tested: bool) -> String {
              no_run: false,\n            \
              test_type: test::TestType::{test_type},\n        \
              }},\n        \
-             testfn: test::StaticTestFn(|| test::assert_test_result(crate::{name}())),\n    \
+             testfn: {testfn},\n    \
              }};\n",
             ignore = test.ignore,
             file = test.file,
+            testfn = match test.bench {
+                true =>
+                    format!("test::StaticBenchFn(|b| test::assert_test_result(crate::{name}(b)))"),
+                false =>
+                    format!("test::StaticTestFn(|| test::assert_test_result(crate::{name}()))"),
+            },
         );
     }
     text.push_str("}\n");

@@ -226,10 +226,6 @@ A single build goes to cargo when:
   before cargo runs rustc on it, as biome's do, has not). Cargo builds, and the daemon loads
   the workspace again afterwards. On a large workspace that reload is long: 36 to 51 s on
   nushell;
-- a `#[test]` function was added or removed, or its attributes changed, in a test executable
-  that keeps rustc's test harness: one with a `#[bench]`, or an `#[ignore]` whose message is
-  not a string. Elsewhere ra-jit writes the harness itself and the edit is a build like
-  another ([no-rustc.md](no-rustc.md), step H);
 - rust-analyzer finds an error in the source. The daemon refuses it, cargo runs, and you get
   rustc's diagnostics and cargo's exit status. This costs 0.1 to 0.5 s over cargo alone.
   Errors rust-analyzer does not find are not caught here; see "Known problems";
