@@ -146,6 +146,8 @@ pub(super) struct StableNames<'a, 'db> {
     /// How each crate and each type is written, or why it has no name.
     crate_names: RefCell<FxHashMap<Crate, Result<Box<str>, &'static str>>>,
     tys: RefCell<FxHashMap<Ty<'db>, Result<Box<str>, &'static str>>>,
+    /// What each closure asked about is written as, by a hash of its source.
+    written: RefCell<FxHashMap<InternedClosure<'db>, Option<Box<str>>>>,
     /// The ids crates of the checkout are named by in place of what is written in them now:
     /// those of a base, whose names an edit leaves to the code they are of.
     frozen: FxHashMap<Crate, super::ContentId>,
@@ -174,6 +176,7 @@ impl<'a, 'db> StableNames<'a, 'db> {
             listed: RefCell::default(),
             crate_names: RefCell::default(),
             tys: RefCell::default(),
+            written: RefCell::default(),
             frozen: FxHashMap::default(),
             missed: std::cell::Cell::new(""),
             misses: RefCell::default(),
@@ -500,9 +503,12 @@ impl<'a, 'db> StableNames<'a, 'db> {
         self.item(out, trait_.krate(self.db), id.file_id, id.value.erase())
     }
 
-    /// A closure or an `async` block by the body it is written in and its place among the
-    /// closures there, as it is interned: an edit of the body before it leaves its name, and
-    /// the names of what is generic over it, as they were.
+    /// A closure or an `async` block by the body it is written in, its place among the
+    /// closures there, as it is interned, and what is written of it: an edit of the body
+    /// before it leaves its name, and the names of what is generic over it, as they were.
+    /// What calls a closure does not say what it takes, so one that takes the place of another
+    /// has to be named apart from it. One the body has no source for, as the coroutine of an
+    /// `async fn`, is named by the place of its expression in the body.
     fn closure(&self, out: &mut String, closure: InternedClosure<'db>) -> Option<()> {
         let db = self.db;
         let InferBodyId::DefWithBodyId(owner) = closure.owner else {
@@ -523,7 +529,27 @@ impl<'a, 'db> StableNames<'a, 'db> {
                 self.item(out, it.krate(db), id.file_id, id.value.erase())?
             }
         }
-        write!(out, "@{}", ClosureKey::nth(db, closure)).ok()
+        match self.written(owner, closure) {
+            Some(written) => write!(out, "@{}:{written}", ClosureKey::nth(db, closure)).ok(),
+            None => write!(out, "@x{}", closure.expr.into_raw().into_u32()).ok(),
+        }
+    }
+
+    /// A hash of the source of a closure, `None` when the body has none for it.
+    fn written(&self, owner: DefWithBodyId, closure: InternedClosure<'db>) -> Option<Box<str>> {
+        if let Some(written) = self.written.borrow().get(&closure) {
+            return written.clone();
+        }
+        let source = Body::with_source_map(self.db, owner).1.expr_syntax(closure.expr).ok();
+        let written = source.map(|source| {
+            use sha2::{Digest, Sha256};
+            let root = source.file_id.parse_or_expand(self.db);
+            let text = source.value.syntax_node_ptr().to_node(&root).text().to_string();
+            let digest = Sha256::digest(text.as_bytes());
+            digest[..8].iter().map(|byte| format!("{byte:02x}")).collect::<String>().into()
+        });
+        self.written.borrow_mut().insert(closure, written.clone());
+        written
     }
 
     fn args(&self, out: &mut String, args: GenericArgs<'db>) -> Option<()> {

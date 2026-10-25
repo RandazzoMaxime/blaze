@@ -98,22 +98,25 @@ STEPS = [
     # The same of a recursive function's instance, which calls itself.
     ("a line above a closure a recursive function takes", [(LIB, "    walk(v", "    let _ = 1u64;\n    walk(v")],
      "a 8 5 10 6 7"),
+    # A closure added above one takes its place, and is named apart from it by what is
+    # written of it: the one that was there and the instances generic over it get new names,
+    # and the ones from the store are called no more.
+    ("a closure above a closure", [(LIB, "    let _ = 0u64;\n", "    let _ = (|| 0u64)();\n")], "a 8 5 10 6 7"),
     ("a closure's body", [(LIB, "x.into() + 1", "x.into() + 2")], "a 8 7 10 6 7"),
     ("a static's value", [(LIB, "BASE: u64 = 10", "BASE: u64 = 12")], "a 8 7 12 6 7"),
     ("the program's own text", [(APP, '"a"', '"b"')], "b 8 7 12 6 7"),
     # Its callers from the store call rustc's copy of it in the program's crate (#216).
     ("a function rustc copies into its callers", [(LIB, "        self.start\n", "        self.start + 1\n")],
      "b 8 7 12 6 9"),
-    # A closure added above one gives it a new place, and it and the instances generic over
-    # it new names: the ones from the store are called no more.
-    ("a closure above a closure", [(LIB, "    let _ = 0u64;\n", "    let _ = (|| 0u64)();\n")], "b 8 7 12 6 9"),
     ("all of it taken back", [(LIB, "x.into() * 4", "x.into() * 3"), (LIB, "    let _ = (|| 0u64)();\n", ""),
                               (LIB, "    let _ = 1u64;\n", ""), (LIB, "x.into() + 2", "x.into() + 1"),
                               (LIB, "BASE: u64 = 12", "BASE: u64 = 10"), (APP, '"b"', '"a"'),
                               (LIB, "        self.start + 1\n", "        self.start\n")], FIRST),
 ]
 REBUILT = "compiling what the store had of the checkout"
-# The steps that rename code the base has, whose patch compiles it under the new names.
+# The steps whose patch compiles only code the base has, by the names it had, and the one
+# that renames some of it, whose patch compiles that under the new names.
+KEEPING = {"a generic function's body", "a line above a closure", "a line above a closure a recursive function takes"}
 RENAMING = {"a closure above a closure"}
 # What a call of rustc's copy of a function of the checkout was left out of the store as (#216).
 UNKEPT = "rustc's copy of a function of the checkout"
@@ -213,8 +216,7 @@ def restart(ws, env, label, steps):
             verdict = "NOT SERVED BY THE DAEMON"
         elif not how.startswith("spliced"):
             verdict = "NOT SPLICED"
-        # What a patch compiles but for a renaming is code the base has, by its name.
-        elif what not in RENAMING and (not anew or anew[-1]):
+        elif what in KEEPING and (not anew or anew[-1]):
             verdict = "NEW CODE"
         elif what in RENAMING and not (anew and anew[-1]):
             verdict = "NOTHING RENAMED"
