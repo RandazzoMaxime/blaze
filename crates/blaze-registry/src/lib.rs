@@ -7,6 +7,7 @@
 
 pub mod directory;
 pub mod download;
+pub mod git;
 pub mod http;
 pub mod index;
 pub mod registry;

@@ -16,8 +16,8 @@ use std::{
 
 use anyhow::{Context as _, bail};
 use blaze_registry::{
-    Context, Locked, Package, SourceConfig, SourceDef, SourceId, SourceKind, Sources,
-    download::From, http::HyperHttp,
+    Context, Locked, Package, SourceConfig, SourceDef, SourceId, Sources, download::From,
+    http::HyperHttp,
 };
 use semver::Version;
 
@@ -67,10 +67,6 @@ fn main() -> anyhow::Result<()> {
             checksum: checksum.unwrap_or_default().to_owned(),
         };
         let from = sources.map().replacement(&source, precise.is_some())?;
-        if matches!(from.kind(), SourceKind::Git(_)) {
-            *counts.entry("git").or_default() += 1;
-            continue;
-        }
         if from.is_remote_registry() && !from.is_sparse() {
             *counts.entry("git index").or_default() += 1;
             continue;
@@ -90,6 +86,7 @@ fn main() -> anyhow::Result<()> {
             From::CargoCache => "cargo-cache",
             From::Network => "network",
             From::Vendored => "vendored",
+            From::Git => "git",
         };
         *counts.entry(from).or_default() += 1;
     }

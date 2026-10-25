@@ -305,9 +305,24 @@ impl Sources {
                         roots[at] = (directory.fetch(&locked[at].package)?, From::Vendored);
                     }
                 }
-                SourceKind::Git(_) | SourceKind::Path => {
-                    bail!("fetching from {from} is not supported yet")
+                SourceKind::Git(_) => {
+                    let _lock = crate::PackageCacheLock::acquire(&self.context.cargo_home)?;
+                    let mut checkouts: FxHashMap<Option<&str>, crate::git::Checkout> =
+                        FxHashMap::default();
+                    for &at in &at {
+                        let precise = locked[at].precise.as_deref();
+                        let checkout = match checkouts.get(&precise) {
+                            Some(it) => it,
+                            None => {
+                                let checkout = crate::git::fetch(&self.context, &from, precise)?;
+                                checkouts.entry(precise).or_insert(checkout)
+                            }
+                        };
+                        let package = &locked[at].package;
+                        roots[at] = (checkout.package(&package.name, &package.version)?, From::Git);
+                    }
                 }
+                SourceKind::Path => bail!("{from} is read where it is, not fetched"),
             }
         }
         Ok(roots)
@@ -328,12 +343,12 @@ mod tests {
     }
 
     fn map(sources: Vec<(&str, SourceDef)>) -> anyhow::Result<SourceMap> {
-        let mut config = SourceConfig::default();
-        config.sources = sources.into_iter().map(|(name, def)| (name.to_owned(), def)).collect();
-        config
-            .registries
-            .insert("mine".to_owned(), "sparse+https://mine.example.com/index/".to_owned());
-        SourceMap::new(&config)
+        let mine = ("mine".to_owned(), "sparse+https://mine.example.com/index/".to_owned());
+        SourceMap::new(&SourceConfig {
+            sources: sources.into_iter().map(|(name, def)| (name.to_owned(), def)).collect(),
+            registries: [mine].into_iter().collect(),
+            crates_io_git: false,
+        })
     }
 
     fn error<T>(result: anyhow::Result<T>) -> String {

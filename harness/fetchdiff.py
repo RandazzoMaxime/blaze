@@ -7,7 +7,8 @@ usage: fetchdiff.py [--work DIR] [--popular N] [--projects NAME,...] [--vendor N
 The lock files are the bench projects' (bench.py's PROJECTS, each at its pinned revision: its
 Cargo.lock, or the one cargo makes when it has none; not bun's, whose tree bunprep.py makes),
 one for each of the N most downloaded crates of crates.io (default 300: a project depending on
-its newest version, locked by cargo), and one of a few crates from a second sparse registry,
+its newest version, locked by cargo), one of git dependencies of every kind of reference, and
+one of a few crates from a second sparse registry,
 which this script serves on 127.0.0.1 from crates.io's index and files under a `dl` with no
 markers. cargo 1.99 fetches every lock file (`cargo fetch --locked`) into a CARGO_HOME of its
 own, and blaze-registry's `fetch` example (FETCH, or built here) into another. Every package
@@ -22,9 +23,11 @@ Then the same of a project whose .cargo/config.toml replaces crates.io with that
 vendored by `cargo vendor`, which blaze has to read where cargo vendored them, every file
 checked against `.cargo-checksum.json`, downloading nothing.
 
-Prints the counts and writes every difference to WORK/fetchdiff.json. Git packages that are not
-vendored are counted apart: blaze-registry does not fetch them yet. Network-heavy: run it on a
-dev host.
+Git dependencies are compared by checkout: the names of the directories in git/db and
+git/checkouts, and the tree of every checkout but `.git` and mtimes.
+
+Prints the counts and writes every difference to WORK/fetchdiff.json. Network-heavy: run it on
+a dev host.
 """
 import argparse, ast, hashlib, http.server, json, os, shutil, stat, subprocess, sys, threading, time
 import urllib.error, urllib.request
@@ -36,6 +39,12 @@ AGENT = "blaze harness/fetchdiff.py (https://github.com/indexable-inc/blaze)"
 MIRROR_PORT = 48273
 MIRROR = f"sparse+http://127.0.0.1:{MIRROR_PORT}/index/"
 MIRROR_CRATES = {"serde": "1", "regex": "1", "tokio": "1", "clap": "4", "rand": "0.9"}
+GIT_DEPS = [
+    'curl-sys = { git = "https://github.com/alexcrichton/curl-rust", branch = "main" }',
+    'anyhow = { git = "https://github.com/dtolnay/anyhow", tag = "1.0.80" }',
+    'ryu = { git = "https://github.com/dtolnay/ryu", rev = "1.0.17" }',
+    'itoa = { git = "https://github.com/dtolnay/itoa" }',
+]
 
 
 def projects():
@@ -83,15 +92,18 @@ class Mirror(http.server.BaseHTTPRequestHandler):
         except OSError:
             return self.send_error(502)
         etag = '"' + hashlib.sha256(body).hexdigest() + '"'
-        if self.headers.get("if-none-match") == etag:
-            self.send_response(304)
+        try:
+            if self.headers.get("if-none-match") == etag:
+                self.send_response(304)
+                self.end_headers()
+                return
+            self.send_response(200)
+            self.send_header("content-length", str(len(body)))
+            self.send_header("etag", etag)
             self.end_headers()
-            return
-        self.send_response(200)
-        self.send_header("content-length", str(len(body)))
-        self.send_header("etag", etag)
-        self.end_headers()
-        self.wfile.write(body)
+            self.wfile.write(body)
+        except (BrokenPipeError, ConnectionResetError):
+            pass
 
     def log_message(self, *args):
         pass
@@ -162,10 +174,14 @@ def packages(lock):
     return registry, git
 
 
-def tree(root):
-    """Every path under `root` with what has to be equal of it."""
+def tree(root, checkout=False):
+    """Every path under `root` with what has to be equal of it; of a git checkout, not `.git`
+    and not mtimes, which are when it was checked out."""
     found = {}
     for dirpath, dirnames, filenames in os.walk(root):
+        if checkout:
+            dirnames[:] = [it for it in dirnames if it != ".git"]
+            filenames = [it for it in filenames if it != ".git"]
         dirnames.sort()
         for name in dirnames + filenames:
             path = os.path.join(dirpath, name)
@@ -176,10 +192,10 @@ def tree(root):
                 found[rel] = ("link", os.readlink(path))
             elif stat.S_ISDIR(st.st_mode):
                 found[rel] = ("dir", oct(mode))
-            elif name == ".cargo-ok" and dirpath == root:
+            elif name == ".cargo-ok" and (dirpath == root or checkout):
                 found[rel] = ("file", oct(mode), open(path, "rb").read().decode(errors="replace"))
             else:
-                found[rel] = ("file", oct(mode), st.st_size, sha256(path), int(st.st_mtime))
+                found[rel] = ("file", oct(mode), st.st_size, sha256(path), None if checkout else int(st.st_mtime))
     return found
 
 
@@ -191,9 +207,28 @@ def sha256(path):
     return digest.hexdigest()
 
 
-def listing(home, *parts):
-    dir = os.path.join(home, "registry", *parts)
+def listing(home, *parts, under="registry"):
+    dir = os.path.join(home, under, *parts)
     return sorted(os.listdir(dir)) if os.path.isdir(dir) else []
+
+
+def compare_git(cargo_home, blaze_home):
+    """Every checkout under git/checkouts of either home, and the names of git/db's and
+    git/checkouts' directories."""
+    unequal, total = {}, 0
+    for ident in sorted(set(listing(cargo_home, "checkouts", under="git")) | set(listing(blaze_home, "checkouts", under="git"))):
+        both = [os.path.join(home, "git", "checkouts", ident) for home in (cargo_home, blaze_home)]
+        for short in sorted(set(listing(cargo_home, "checkouts", ident, under="git")) | set(listing(blaze_home, "checkouts", ident, under="git"))):
+            total += 1
+            left, right = (os.path.join(it, short) for it in both)
+            if not os.path.isdir(left) or not os.path.isdir(right):
+                unequal[f"{ident}/{short}"] = [f"only {'blaze' if os.path.isdir(right) else 'cargo'} has it"]
+                continue
+            a, b = tree(left, checkout=True), tree(right, checkout=True)
+            if found := [f"{rel}: cargo {a.get(rel)}, blaze {b.get(rel)}" for rel in sorted(a.keys() | b.keys()) if a.get(rel) != b.get(rel)]:
+                unequal[f"{ident}/{short}"] = found
+    dirs = {part: (listing(cargo_home, part, under="git"), listing(blaze_home, part, under="git")) for part in ("db", "checkouts")}
+    return total, unequal, dirs
 
 
 def differences(cargo_home, blaze_home, dir, package):
@@ -355,6 +390,19 @@ def main():
     else:
         locks["mirror"] = dir
 
+    # Git dependencies of every kind of reference: a branch (with a submodule), a tag, a tag
+    # named as `rev`, the default branch, and a repository on no forge (a file URL), which
+    # GitHub's fast path does not answer for.
+    repo = os.path.join(work, "gitrepos", "semver.git")
+    if not os.path.exists(repo):
+        subprocess.run(["git", "clone", "-q", "--bare", "https://github.com/dtolnay/semver", repo], check=True)
+    dir = os.path.join(work, "gitdeps")
+    deps = "".join(f"{line}\n" for line in GIT_DEPS) + f'semver-file = {{ package = "semver", git = "file://{repo}" }}\n'
+    if error := project(dir, deps, cargo):
+        run.failed["gitdeps"] = error
+    else:
+        locks["gitdeps"] = dir
+
     registry, git = set(), set()
     for name, dir in locks.items():
         if run.both(name, dir, cargo, blaze_home):
@@ -362,6 +410,8 @@ def main():
             registry |= found
             git |= from_git
     total, unequal, dirs = compare(cargo_home, blaze_home)
+    git_total, git_unequal, git_dirs = compare_git(cargo_home, blaze_home)
+    dirs.update({f"git/{part}": it for part, it in git_dirs.items()})
 
     # crates.io replaced by the mirror, in the project's own .cargo/config.toml: both unpack
     # under the mirror's directory.
@@ -388,6 +438,7 @@ def main():
     result = {
         "locks": len(locks), "lock_packages": len(registry), "git": len(git),
         "packages": total, "equal": total - len(unequal), "dirs": dirs,
+        "checkouts": git_total, "checkouts_equal": git_total - len(git_unequal), "checkouts_unequal": git_unequal,
         "replaced": {**replaced, "equal": replaced["total"] - len(replaced["unequal"])},
         "vendored": vendor, "dirs_equal": dirs_equal, "blaze": run.blaze, "seconds": run.seconds,
         "unequal": unequal, "failed": run.failed,
@@ -396,16 +447,18 @@ def main():
         json.dump(result, f, indent=1)
     print(f"{len(locks)} lock files, {len(run.failed)} not fetched (fetchdiff.json says why)")
     print(f"{total - len(unequal)}/{total} unpacked packages equal ({len(registry)} registry packages in the "
-          f"lock files; {len(git)} git packages not compared)")
+          f"lock files)")
+    print(f"{git_total - len(git_unequal)}/{git_total} git checkouts equal ({len(git)} git packages in the lock files)")
     print(f"crates.io replaced by a mirror: {result['replaced']['equal']}/{replaced['total']} equal")
     for name, (count, equal) in vendor.items():
         print(f"vendored {name}: {equal}/{count} read where cargo vendor put them, every file checked")
     for part, (a, b) in dirs.items():
-        print(f"registry/{part}: {'equal' if a == b else 'cargo ' + ', '.join(a) + '; blaze ' + ', '.join(b)}")
+        name = part if part.startswith("git/") else f"registry/{part}"
+        print(f"{name}: {'equal' if a == b else 'cargo ' + ', '.join(a) + '; blaze ' + ', '.join(b)}")
     print(f"cargo {run.seconds['cargo']:.1f} s, blaze {run.seconds['blaze']:.1f} s")
-    for package, found in [*unequal.items(), *replaced["unequal"].items()][:20]:
+    for package, found in [*unequal.items(), *git_unequal.items(), *replaced["unequal"].items()][:20]:
         print(f"  {package}: {found[0]}" + (f" (and {len(found) - 1} more)" if len(found) > 1 else ""))
-    bad = unequal or replaced["unequal"] or not dirs_equal or any(c != e for c, e in vendor.values())
+    bad = unequal or git_unequal or replaced["unequal"] or not dirs_equal or any(c != e for c, e in vendor.values())
     sys.exit(1 if bad else 0)
 
 
