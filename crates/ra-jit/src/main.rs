@@ -1909,11 +1909,9 @@ fn crates_named(db: &RootDatabase, krate: &str, args: &Args) -> anyhow::Result<V
     // One of the crates after the first is one the first links: a binary of another package
     // may have the name too, as bun's `bun-sema` has the library `bun_sema`'s.
     if let Some(first) = args.crates().next().filter(|&it| it != krate) {
-        let program: FxHashSet<ide_db::base_db::Crate> = crates_named(db, first, args)?
-            .into_iter()
-            .flat_map(|it| ide_db::base_db::Crate::from(it).transitive_deps(db))
-            .collect();
-        let linked = |krate: &Crate| program.contains(&(*krate).into());
+        let program = crates_named(db, first, args)?;
+        let program: Vec<_> = program.into_iter().map(|it| deps_of(db, it.into())).collect();
+        let linked = |krate: &Crate| program.iter().any(|it| it.contains(&(*krate).into()));
         if found.iter().any(linked) {
             found.retain(linked);
         }
@@ -2007,17 +2005,56 @@ fn crates_called(db: &RootDatabase, krate: &str, args: &Args) -> Vec<Crate> {
     // A path that is written as its parts are ends the text of every path it is the end of,
     // which is all that most crates have to be asked.
     let plain = !krate.contains("//") && !krate.contains("./");
+    named_crates(db)
+        .iter()
+        .filter(|it| match (is_file, &it.root) {
+            (true, Some(root)) if plain && !root.ends_with(krate) => false,
+            // Named from the checkout, or in full.
+            (true, Some(root)) => {
+                let root = Path::new(&**root);
+                root == Path::new(krate) || args.inside(root) == Some(Path::new(krate))
+            }
+            (true, None) => false,
+            (false, _) => it.name.as_deref() == Some(krate),
+        })
+        .map(|it| it.krate)
+        .collect()
+}
+
+/// A crate of the graph as naming one finds it.
+#[derive(PartialEq, Eq)]
+struct Named {
+    krate: Crate,
+    /// What code calls it by.
+    name: Option<Box<str>>,
+    /// The text of the path of its root file.
+    root: Option<Box<str>>,
+}
+
+/// Every crate of the graph, in its order, as naming one finds it: a build names its crates
+/// many times, and the graph is asked once until it changes.
+#[salsa::tracked(returns(ref))]
+fn named_crates(db: &dyn HirDatabase) -> Vec<Named> {
+    let root = |krate: Crate| {
+        let file = krate.root_file(db);
+        let source_root = db.file_source_root(file).source_root_id(db);
+        let source_root = db.source_root(source_root).source_root(db);
+        Some(source_root.path_for_file(&file)?.as_path()?.as_str().into())
+    };
+    let name = |krate: Crate| Some(krate.display_name(db)?.crate_name().as_str().into());
     Crate::all(db)
         .into_iter()
-        .filter(|it| match is_file {
-            _ if is_file && plain && !root_file_ends_with(db, *it, krate) => false,
-            // Named from the checkout, or in full.
-            true => crate_root_file(db, *it).is_some_and(|root| {
-                root == Path::new(krate) || args.inside(&root) == Some(Path::new(krate))
-            }),
-            false => it.display_name(db).is_some_and(|name| name.crate_name().as_str() == krate),
-        })
+        .map(|krate| Named { krate, name: name(krate), root: root(krate) })
         .collect()
+}
+
+/// The crates `krate` depends on, itself and all, from the graph.
+#[salsa::tracked(returns(ref))]
+fn deps_of(
+    db: &dyn HirDatabase,
+    krate: ide_db::base_db::Crate,
+) -> FxHashSet<ide_db::base_db::Crate> {
+    krate.transitive_deps(db).into_iter().collect()
 }
 
 /// The crates called `krate` to build: the ones rustc built into this program, when it built
@@ -2039,15 +2076,6 @@ fn links(db: &RootDatabase, table: &SymbolTable, krate: Crate) -> bool {
     let name = krate.display_name(db);
     let root = crate_root_file(db, krate);
     name.zip(root).is_some_and(|(name, root)| table.links(name.crate_name().as_str(), &root))
-}
-
-/// Whether the text of the path of the crate's root file ends with `end`.
-fn root_file_ends_with(db: &RootDatabase, krate: Crate, end: &str) -> bool {
-    let file = krate.root_file(db);
-    let source_root = db.file_source_root(file).source_root_id(db);
-    let source_root = db.source_root(source_root).source_root(db);
-    let path = source_root.path_for_file(&file).and_then(|it| it.as_path());
-    path.is_some_and(|it| Path::new(it.as_str()).ends_with(end))
 }
 
 fn crate_root_file(db: &RootDatabase, krate: Crate) -> Option<PathBuf> {

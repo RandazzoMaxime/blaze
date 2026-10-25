@@ -3208,6 +3208,7 @@ dependencies = [
  "rustc-demangle",
  "rustc-hash 2.1.2",
  "rustls",
+ "salsa",
  "same-file",
  "serde",
  "serde_derive",
