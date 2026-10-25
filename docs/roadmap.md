@@ -48,8 +48,13 @@ results, and lints run in the same pipeline, per function.
   129 s of "store read" thread time is decoding and interning, not syscalls (**read**). io_uring
   pays where IO is on the critical path with a cold page cache (a fresh ix fork, CI, VFS group
   commit). The main gain of sans-IO is deterministic simulation of the daemon.
-- **No MCP.** The agent API is one versioned schema over a Unix domain socket and HTTP;
-  `cargo blaze` is a client of it and den wraps it as hub tools.
+- **Two concurrency planes.** Control and IO: shared-nothing state machines and messages,
+  sharded by workspace. Compute: immutable snapshots read lock-free by a work-stealing pool, one
+  committer for each new revision, since a front-end memo is about 8 ns of work and a message
+  costs more than that ([below](#the-concurrency-model)).
+- **No MCP.** The agent API is one versioned schema in deterministic CBOR over a Unix domain
+  socket and HTTP; `cargo blaze` is a client of it and den wraps it as hub tools. One value has
+  one encoding, so requests and results can be hashed and stored like everything else.
 - **Delivery.** One integration branch, `blaze-next`, with one draft pull request, workstreams
   merged into it and main merged in often; it lands when the full gate and every differential
   harness pass on it ([below](#11-delivery-and-order)).
@@ -336,6 +341,54 @@ So io_uring is built because the core makes it cheap and because ix forks and CI
 it is measured against the threads backend on the same Linux host before it is the default
 there. It does not speed up anything on today's critical path.
 
+### The concurrency model
+
+Andrew asked whether everything should be thread-per-core with message passing. Not
+everything: two planes, each with the model its work wants.
+
+**The control and IO plane** (socket requests, VFS transactions, the store's and the VFS's
+persistence, spawning processes): shared-nothing state machines, each owning its state, talking
+by messages, with one io_uring ring per IO thread on Linux. This is where sans-IO and determinism
+come cheap. How many such threads is decided by load, not fixed at one per core: a transaction is
+135 us (**read**), so one thread takes about 7,000 a second, and a few agents make tens
+(**unverified** rate). The state is sharded by workspace from the start, so it spreads over cores
+when a harness shows one thread saturated (an ix seed serving many forks, CI), and runs as one
+shard on a Mac.
+
+**The compute plane** (inference, MIR, codegen, lints, per item and per function): not
+shared-nothing. The work is an irregular graph of very uneven tasks over a large database that is
+read far more than written, and the measurements say why messages per unit of work would lose:
+
+| | measured | what it means |
+|---|---|---|
+| a compiled function | nushell's own base: 21.2 s on 16 cores for about 165,752 functions, about 2 ms of thread time each (**read** for the inputs, **unverified** arithmetic) | a message per function (a few hundred ns across cores, **unverified**) is noise |
+| a front-end memo | a signature edit walks 30.6M edges in about 245 ms of revalidation, about 8 ns an edge (**read** for the inputs) | a message per query or per memo would be tens of times the work |
+| shared reads under a lock | helix's warm start: 571 s of "store read" thread time with the interner taking a shard's write lock to look up; 131 s once lookups took the read lock (**read**, warm-start.md); #244 found an interned value's shard lock the hottest of a signature edit | the cost is writes to shared lines, not sharing: reads must write nothing shared |
+| one task holding the others | the first type check verified `TraitImpls::for_crate` crate after crate while other threads waited, 37-75 ms of a 258 ms edit (**read**, lean-frontend.md) | the scheduler must see tasks, not one thread's call stack |
+
+So the compute plane is MVCC-shaped: message passing for mutation, shared immutable data for
+reads.
+
+- **A revision is an immutable snapshot.** The root, the item and instance tables and the results
+  of the revision before are persistent structures that every worker reads without locks or
+  reference-count traffic (ids into arenas, not `Arc`s on the hot path).
+- **Work-stealing over per-item tasks.** The push from the diff makes tasks (lower an item, infer a
+  body, build MIR, compile an instance, lint); a work-stealing scheduler of blaze's own runs them,
+  each task declaring its inputs so the scheduler orders and cancels them (a newer root cancels
+  what the older one no longer needs). rayon's pool is the baseline it must beat on the same tasks.
+- **Results go to per-worker append-only buffers** and are published by message to one committer,
+  which makes the next revision. Nothing writes shared state in place.
+- **Interning** goes to per-worker arenas whose ids are globally stable (a worker's prefix and an
+  index), with a sharded table that is read without writing for lookups of values that already
+  exist, as the interner's fix and #244 did by hand.
+- **A deterministic mode.** The same tasks run on a single-threaded seeded scheduler with the
+  simulation backend; its results (code, diagnostics, test outcomes, hashed) must equal the
+  parallel run's, as a harness step. Laying out functions in completion order (#200) is the kind of
+  nondeterminism this makes a test failure.
+- **Numbers to gather before the boundary is fixed** (a dev host, perf on nushell's edits): lock
+  contention and queue time today, the cost of a cross-core message on the hosts, and the
+  distribution of task sizes, so tasks smaller than a message stay inside their parent.
+
 ## 4. Push invalidation, per function
 
 [#273](https://github.com/indexable-inc/blaze/issues/273). Today salsa pulls: at a new revision
@@ -420,14 +473,43 @@ refuse and link, 14 ms of it the link (**read**).
 like a Unix socket or HTTP."
 
 - **Transport.** A Unix domain socket per user, permissioned by the socket file as today
-  (`socket.rs`), and HTTP for remote use and ix forks. One documented, versioned schema; JSON
-  on both at first. A binary framing on the socket only if it measurably matters: a JSON reply of
-  a few KB costs microseconds against a build's milliseconds (**unverified** until measured).
+  (`socket.rs`), and HTTP for remote use and ix forks. One documented, versioned schema.
+- **Encoding: deterministic CBOR** (Andrew's decision), RFC 8949 section 4.2's core
+  deterministic encoding: integers and lengths in their shortest form, definite lengths only,
+  map keys sorted bytewise by their encoding, no floats where an integer will do (durations in
+  nanoseconds) and the shortest float otherwise. The same bytes on the socket and over HTTP
+  (`application/cbor`); JSON is only a rendering for people (`Accept: application/json`, the
+  CLI's `--json`), never the wire. Why:
+  - one value has one encoding, so a request, a transaction, a set of diagnostics or a test
+    result can be hashed and kept in the content-addressed store under that hash, beside roots
+    and compiled functions, and two daemons agree on it byte for byte;
+  - byte strings carry hashes and file contents as they are, without base64;
+  - it is compact and fast to parse.
+- **The implementation.** minicbor, with structs encoded as maps keyed by small unsigned
+  integers declared in ascending order: its encoder always writes integers and lengths in the
+  shortest form (**read**, `minicbor` 2.3.0 `encoder.rs`), but it encodes a `HashMap` in
+  iteration order and a `BTreeMap` in Rust's order, which for text keys is not RFC 8949's
+  bytewise order of the encoded keys ("b" sorts before "aa" there), and writes every `f64` in
+  eight bytes (**read**, same source). So the schema has no maps keyed by strings or hash
+  iteration and no floats, and a small validator of blaze's own checks every message against
+  section 4.2 (shortest heads, definite lengths, strictly increasing map keys, no
+  non-shortest float). The daemon refuses a message that fails it, naming the first offence,
+  rather than canonicalizing it, so a client that encodes wrong finds out. Tests: every
+  message type round-trips decode to encode byte-identically, and the validator accepts
+  everything the encoder writes, on random values. ciborium (serde) was not chosen: serde's
+  maps and floats give no such control (**unverified** beyond the above); an encoder of our
+  own stays possible behind the same validator.
+- **Framing on the socket.** Each message is a length (four bytes, big-endian, at most 16 MiB
+  as `socket::LONGEST_REQUEST` today) and then one CBOR item, a map of a request id, the schema
+  version and the body. Request ids let a client pipeline several requests on one connection;
+  replies and progress events (a test finished, a build stage done) carry the id they answer
+  and may come in any order.
 - **Calls.** `apply(base, ops) -> root` (an atomic multi-file transaction), `head(workspace)`,
   `check(root)`, `build(root)`, `test(root, filter)`, `run(root, args)`, `what_if(base, ops,
   then)` (apply on a root that is not the head, then check, build or test it), `drop(root)`,
   and queries: diagnostics, tests and why each ran or was skipped, callers of an item.
-- **Results.** Diagnostics as rustc's JSON shape (#222 already writes it) with machine-applicable
+- **Results.** Diagnostics with rustc's fields (#222 writes them as rustc's JSON for cargo; the
+  API carries the same fields in CBOR) with machine-applicable
   fixes as `ops` an agent can pass to `apply`; tests with outcome, duration, the reason a test was
   skipped (unchanged reach, #227) and output only for failures; run results with exit status and a
   bounded tail; timings per stage.
@@ -502,6 +584,7 @@ The order inside the branch, by what the floor needs and what depends on what:
 | 1 | the sans-IO core crate, the simulation and threads backends, and the Merkle VFS on it (roots, transactions, diffs, persistence) | nothing | simulation finds no lost or half-applied transaction over 10^6 seeds; a transaction under 1 ms on nushell |
 | 2 | the daemon takes transactions (socket and CLI), disk watching becomes one input producing them, builds pin roots | 1 | every edit harness passes with the watcher as the only input; notice to apply under 1 ms on the socket path |
 | 3 | invalidation driven by root diffs: changed items from the diff, the push layer in front of salsa | 2 | a body edit's revalidation share from 38% to under 5%; a signature edit's instances asked from 106k to its callers |
+| 3b | the compute plane: revisions as immutable snapshots, a work-stealing scheduler over per-item tasks with one committer, per-worker interning, the deterministic scheduler | 3 | beats rayon on the same tasks; the deterministic run's hashes equal the parallel run's; lock and queue time on an edit under 5% |
 | 4 | the agent API: check, build, test, run and what-if on a root, structured results; `cargo blaze` a client | 2 | edit-to-result end to end on nushell; best-of-4 candidates in under twice one |
 | 5 | diagnostics off the critical path with rollback; the patch path without a link on the reply | 3 | build-rest from 35-76 ms to 0; refuse-and-link from 28 ms to under 3 |
 | 6 | the image: graph, VFS arena, code index, marks by stable name | 3 | nushell warm restart under 1 s; no rebuild before the first edit |

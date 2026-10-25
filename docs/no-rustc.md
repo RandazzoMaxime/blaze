@@ -715,12 +715,19 @@ to it still goes to cargo. A test program built without incremental compilation 
 which rustc's harness calls private or inlined copies of the tests in, was cargo's; it is now the
 daemon's when ra-jit wrote its harness (the plan leaves the reason in the program's directory,
 `tests`, for the daemon to refuse with when it wrote none). A library's file a unit test is linked with as rustc built it (without
-`cfg(test)`) is now guarded by its text without the items marked `#[test]` or `#[cfg(test)]`,
-every other token at its line and column: a change to its tests alone keeps rustc's library,
-and cargo's dep-info of it is made newer than the file so cargo does not build it again. On the
+`cfg(test)`) was guarded by its text without the items marked `#[test]` or `#[cfg(test)]`,
+every other token at its line and column: a change to its tests alone kept rustc's library,
+and cargo's dep-info of it was made newer than the file so cargo did not build it again. On the
 fixture "a test added" went from 5 rustc runs to none, so tests went from 12 to 7. The 7 are
 the first `test --no-run`, cargo building the test programs and the libraries an edit before
-changed, and the proc macro the worker's load compiles: the cold build's (K). An edit to a crate
+changed, and the proc macro the worker's load compiles: the cold build's (K). Since
+2026-10-25 any other change to such a file is no longer cargo's: the unit tests' worker loads
+each library of the workspace as two crates, the library without `cfg(test)` and its unit tests
+with it, so an edit to a library a unit test links is the daemon's like any other, which takes
+the library over from rustc (`widen`) built as rustc built it. A change to its tests alone still
+has cargo's dep-info made newer, so a later `cargo test --doc` does not have rustc build the
+library again. On ripgrep an edit to `grep-matcher` went from cargo
+running all 1168 tests to the daemon. An edit to a crate
 an integration test's package depends on but the test does not link no longer takes that crate
 over from rustc (`widen` keeps to the crates rustc linked): its functions were named as ra-jit's
 and never compiled, and the link failed. On the bench apps (`harness/norustc/count.py`, dev-aws-11,
