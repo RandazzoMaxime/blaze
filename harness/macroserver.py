@@ -18,11 +18,18 @@ each of them (crates/ra-jit/src/cargo/own_macro.rs) and that server expands with
 program has to print what cargo's does, and the proc-macro libraries in the target directory
 have to be all rustc's, then all ra-jit's.
 
-With the names of bench apps (nushell, helix) it measures those instead: each is built whole
-by ra-jit into its own target directory, without the server named and with it, and timed.
+With the names of bench apps (`APPS`, or `all` for each of them) it holds those instead. Each
+is built whole by ra-jit into its own target directory twice, from an empty store each time:
+with the server named, where ra-jit links every proc macro the load's cargo asks for and its
+server expands with them, and without, where rustc's libraries are expanded by the toolchain's
+server and every call is expanded again by ra-jit's server with ra-jit's library of the same
+unit. Every call has to expand the same, every proc macro has to be ra-jit's, and the two
+programs have to print the same. It says how many calls it compared and names each macro that
+expanded otherwise or was not compared.
 
     python3 macroserver.py
     python3 macroserver.py nushell helix
+    python3 macroserver.py all
 """
 import glob, json, os, platform, re, shutil, subprocess, sys, time
 
@@ -166,7 +173,8 @@ MACRO_CRATES = {"serde_derive", "thiserror-impl", "tokio-macros", "clap_derive"}
 # The name of the static ra-jit lists a proc-macro library's macros in.
 LIST = b"RA_JIT_PROC_MACROS"
 # The bench apps it measures: the crate ra-jit is asked for and the program it links.
-APPS = {"nushell": ("nu", "nu"), "helix": ("hx", "hx")}
+APPS = {"fd": ("fd", "fd"), "bat": ("bat", "bat"), "hyperfine": ("hyperfine", "hyperfine"),
+        "just": ("just", "just"), "nushell": ("nu", "nu"), "helix": ("hx", "hx")}
 
 
 def run(cmd, cwd, what, env=None):
@@ -314,51 +322,81 @@ def wired(work, root, meta, server):
 
 
 def app(name, work, server):
-    """A bench app of bench.py built whole by ra-jit into its own target directory, from
-    nothing on a store it filled before, twice without the server named and twice with it:
-    how long each took, what the load's cargo built by rustc, and what the program prints."""
+    """A bench app of bench.py built whole by ra-jit into its own target directory, twice,
+    each from an empty store. First with the server named, so the load's cargo has ra-jit link
+    every proc macro and ra-jit's server expands with them; then without it, rustc's libraries
+    expanded by the toolchain's server, and every call expanded again by ra-jit's server with
+    the library ra-jit linked of the same unit (`RA_JIT_PROC_MACRO_COMPARE`). Both programs
+    have to print the same. What each build took and what the comparison found, and the
+    comparison's counts."""
     import bench
     spec, (crate, program) = bench.PROJECTS[name], APPS[name]
     root = os.path.join(work, name)
     run(["git", "clone", "-q", "--filter=blob:none", f"https://github.com/{spec['repo']}", root],
         work, f"git clone of {name}")
     run(["git", "-C", root, "checkout", "-q", "--detach", spec["rev"]], work, f"checkout of {name}")
-    binary = os.path.join(work, program)
-    lines = []
-    for named in (False, False, True, True):
+    own = os.path.join(root, "target", "rust-analyzer")
+    libs = os.path.join(work, f"{name}-libs")
+    os.makedirs(libs)
+    lines, printed, counts = [], [], None
+    for named in (True, False):
         shutil.rmtree(os.path.join(root, "target"), ignore_errors=True)
-        env = {**spec.get("env", {}), "RA_JIT_CACHE": os.path.join(work, "store")}
+        store = os.path.join(work, f"{name}-store-{'ours' if named else 'theirs'}")
+        env = {**spec.get("env", {}), "RA_JIT_CACHE": store}
         if named:
             env["RA_JIT_PROC_MACRO_SERVER"] = server
+        else:
+            env.update(RA_JIT_PROC_MACRO_COMPARE=server, RA_JIT_PROC_MACRO_LIBS=libs)
+        binary = os.path.join(work, f"{program}-{'ours' if named else 'theirs'}")
         ran, took = ra_jit(root, [crate], os.path.join(work, f"{name}.o"), "--own-target",
                            "--exe", binary, env=env)
         left = re.search(r"(\d+) functions in it ra-jit could not compile$", ran.stderr, re.M)
-        own = os.path.join(root, "target", "rust-analyzer")
         ours, theirs = built_macros(own)
-        rlibs = glob.glob(os.path.join(own, "**", "deps", "lib*.rlib"), recursive=True)
-        scripts = glob.glob(os.path.join(own, "**", "build", "*", "build-script-build"),
-                            recursive=True)
+        if named:
+            for lib in glob.glob(os.path.join(own, "**", "deps", "lib*.so"), recursive=True):
+                if LIST in open(lib, "rb").read():
+                    shutil.copy(lib, libs)
         said = subprocess.run([binary, *spec["run"]], cwd=root, capture_output=True, text=True,
                               timeout=60, env={**os.environ, **spec.get("env", {})})
-        load = re.search(r"^load workspace: (\S+)$", ran.stderr, re.M)
+        printed.append((said.returncode, said.stdout))
         start = len(lines)
-        lines.append(f"{name}, {'with' if named else 'without'} the server: {took:.1f} s, the "
-                     f"load {load.group(1) if load else '?'}; the load's cargo built "
-                     f"{len(theirs)} proc macros by rustc and {len(ours)} by ra-jit, "
-                     f"{len(rlibs)} libraries and {len(scripts)} build scripts; "
-                     f"{left.group(1) if left else '?'} functions left; `{program} "
-                     f"{' '.join(spec['run'])}` exited {said.returncode}: "
-                     f"{said.stdout.strip()[:80]!r}")
-        lines += [f"  left: {it[:300]}" for it in re.findall(r"^  left to rustc: (.*)$", ran.stderr, re.M)
-                  if "no rustc symbol" not in it and "calling convention Custom" not in it]
-        lines += [f"  {it[:300]}" for it in re.findall(
-            r"^((?:resolve|frozen|proc macros|standard library|stats|phases|cold|warm):.*)$",
-            ran.stderr, re.M)]
+        lines.append(f"{name}, {'with' if named else 'without'} the server: {took:.1f} s; the "
+                     f"load's cargo built {len(theirs)} proc macros by rustc and {len(ours)} by "
+                     f"ra-jit; {left.group(1) if left else '?'} functions left; `{program} "
+                     f"{' '.join(spec['run'])}` exited {said.returncode}")
         if named:
-            lines += [f"  {it}" for it in fallbacks(own, theirs)]
+            lines += [f"  rustc's: {it}" for it in fallbacks(own, theirs)]
+        else:
+            counts = compared(ran.stderr)
+            lines.append(f"  {counts['line']}")
+            lines += [f"  {it[:600]}" for it in re.findall(r"^proc macros: (`[^`]*`: .*)$",
+                                                          ran.stderr, re.M)]
         print("\n".join(lines[start:]), flush=True)
+    if printed[0] != printed[1]:
+        lines.append(f"{name}: the program with ra-jit's proc macros printed otherwise:\n"
+                     f"  ra-jit's: {printed[0]}\n  rustc's:  {printed[1]}")
+        counts["printed otherwise"] = True
     shutil.rmtree(root, ignore_errors=True)
-    return lines
+    return lines, counts
+
+
+def compared(stderr):
+    """What `RA_JIT_PROC_MACRO_COMPARE` found, from the build's report."""
+    said = re.findall(r"compared with ra-jit's server: (\d+) calls \((\d+) derives, "
+                      r"(\d+) attributes, (\d+) function-like\), (\d+) expanded otherwise, "
+                      r"(\d+) failed by both, (\d+) not compared"
+                      r"(?: \(expanded otherwise: ([^)]*)\))?(?: \(not compared: ([^)]*)\))?",
+                      stderr)
+    if not said:
+        raise SystemExit(f"FAIL: the build compared nothing:\n{stderr[-8000:]}")
+    *numbers, otherwise, unloaded = said[-1]
+    calls, derives, attrs, bangs, differed, failed, unloaded_calls = map(int, numbers)
+    line = (f"{calls} calls compared ({derives} derives, {attrs} attributes, {bangs} "
+            f"function-like): {calls - differed} the same, {differed} otherwise"
+            f"{f' ({otherwise})' if otherwise else ''}, {failed} failed by both; "
+            f"{unloaded_calls} not compared{f' ({unloaded})' if unloaded else ''}")
+    return dict(calls=calls, derives=derives, attrs=attrs, bangs=bangs, differed=differed,
+                failed=failed, unloaded=unloaded_calls, line=line)
 
 
 def fallbacks(own, theirs):
@@ -394,9 +432,29 @@ def main():
         server, said = built_server(work)
         lines = [said]
         if sys.argv[1:]:
-            for name in sys.argv[1:]:
-                lines.extend(app(name, work, server))
+            names = list(APPS) if sys.argv[1:] == ["all"] else sys.argv[1:]
+            total, wrong = dict.fromkeys(("calls", "differed", "failed", "unloaded"), 0), []
+            for name in names:
+                try:
+                    said, counts = app(name, work, server)
+                except SystemExit as failed:
+                    print(failed, flush=True)
+                    lines.append(f"{name}: {str(failed)[:2000]}")
+                    wrong.append(name)
+                    continue
+                lines.extend(said)
+                for key in total:
+                    total[key] += counts[key]
+                if counts["differed"] or counts["unloaded"] or counts.get("printed otherwise"):
+                    wrong.append(name)
             print("\n".join(lines))
+            print(f"over {', '.join(names)}: {total['calls']} calls compared, "
+                  f"{total['calls'] - total['differed']} the same, {total['differed']} otherwise, "
+                  f"{total['failed']} failed by both, {total['unloaded']} not compared")
+            if wrong:
+                raise SystemExit(f"FAIL: ra-jit's server and libraries did not expand as the "
+                                 f"toolchain's in {', '.join(wrong)}")
+            print("PASS: every call expanded by ra-jit's server and libraries as the toolchain's")
             passed = True
             return
 
@@ -431,12 +489,10 @@ def main():
         # With its tests, whose `#[tokio::test]` is another attribute.
         ran, took = ra_jit(root, ["macrouse"], os.path.join(work, "macrouse.o"), "--cfg-test",
                            env=env)
-        said = re.findall(r"compared with ra-jit's server: (\d+) calls \((\d+) derives, "
-                          r"(\d+) attributes, (\d+) function-like\), (\d+) expanded otherwise, "
-                          r"(\d+) failed by both, (\d+) not compared", ran.stderr)
-        if not said:
-            raise SystemExit(f"FAIL: the build compared nothing:\n{ran.stderr[-8000:]}")
-        calls, derives, attrs, bangs, differed, failed, unloaded = map(int, said[-1])
+        counts = compared(ran.stderr)
+        calls, derives, attrs, bangs, differed, failed, unloaded = (
+            counts[it] for it in ("calls", "derives", "attrs", "bangs", "differed", "failed",
+                                  "unloaded"))
         if differed or failed or unloaded or not (derives and attrs > 1 and bangs):
             raise SystemExit(f"FAIL: {calls} calls compared, {derives} derives, {attrs} "
                              f"attributes, {bangs} function-like, {differed} expanded "
