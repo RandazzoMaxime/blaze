@@ -39,6 +39,9 @@ Each claim is **read** (measured, or read in a source), **reported** (someone sa
 - Landed: the crates a build asks for are listed on every core, not one after another: a
   signature edit's `roots` stage 53 to 30 ms and its edit-to-binary 410 to 373 ms (−9%)
   ([below](#slice-1-crates-listed-on-every-core)).
+- Landed after it, slices 2 to 4 and two fixes the edit's critical path showed: on nushell a
+  body edit 315 to 258 ms (−18%) and a signature edit 403 to 277 ms (−31%), the cold start and
+  the peaks as they were; on ripgrep 2 to 3% ([below](#slices-2-to-4-and-where-a-body-edits-time-goes)).
 
 ## How it was measured
 
@@ -271,7 +274,7 @@ by about 46 ms and which `build` waits for; then the link, 14 ms.
 | **patch marks** (#243): signature edit | 394 / 397 ms | 338 / 326 ms |
 | its `check` stage | 245 / 254 ms | 194 / 185 ms |
 | **salsa vendored, interned values verified without a lock** (#244): signature edit | 394 / 397 ms | 382 / 386 ms |
-| **crates named through a query** (crates branch): body edit | 304 / 312 ms | 279 / 270 ms |
+| **crates named through a query** (#252): body edit | 304 / 312 ms | 279 / 270 ms |
 | signature edit | 395 / 390 ms | 340 / 355 ms |
 | **impls verified on every core** (#245): body edit | 317 / 313 ms | 302 / 300 ms |
 | signature edit | 399 / 406 ms | 379 / 381 ms |
@@ -286,7 +289,7 @@ by about 46 ms and which `build` waits for; then the link, 14 ms.
 | peak during body / signature edits | 7.5-7.6 / 6.9-7.0 GB | 7.5-7.6 / 7.0 GB |
 
 All **read**. No branch moves the cold start or the peaks beyond the runs' spread, but for one:
-the own base peaked at 13.9 to 14.1 GB in both runs of the crates branch alone and in one of the
+the own base peaked at 13.9 to 14.1 GB in both runs of #252 alone and in one of the
 impls branch, as it did once for slice 1, and never with all the branches (**read**; what it is
 was not found, **unverified** that it is not a change's).
 
@@ -310,7 +313,7 @@ marks most of those of `row_place` are gone, and the rest were not measured agai
 **The crates of a build named through queries.** `crates_named` and `crates_called` walked the
 crate graph and the path of every crate's root for every name a build gave, several times a
 build. The graph's names and roots are one query (`named_crates`), and a crate's dependencies
-another (`deps_of`), both asked again only when the graph changes (crates branch).
+another (`deps_of`), both asked again only when the graph changes (#252).
 
 **Slice 3, diagnostics off a body edit's critical path.** The diagnostics are not what the edit
 waits for: borrow checking the edited function is, on the diagnostics thread, and within it
