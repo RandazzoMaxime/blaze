@@ -20,9 +20,10 @@ checkout, and a third on a copy of it elsewhere with a home of its own, start on
 each has to take the checkout's functions from it, compile none of them again, and splice
 every edit after: a generic function's body, whose instance is the checkout's and was found
 in the store, a closure's, a static's value, the program's own text, an `#[inline]` function
-whose callers from the store call rustc's copy of it in the program's crate, and all of it
-taken back. The program has to print what the source says, and no call of rustc's copy of a
-function of the checkout may be left out of the store (#216).
+whose callers from the store call rustc's copy of it in the program's crate, the closure an
+`impl Trait` is, whose drop glue from the store names none of it, and all of it taken back.
+The program has to print what the source says, and no call of rustc's copy of a function of
+the checkout may be left out of the store (#216).
 
 An edit of one body takes the other code from the store of that file as it was, by the items
 each entry names reading as they did then, without compiling it to tell: the second daemon has
@@ -84,39 +85,51 @@ impl Span {
 pub fn starts<T: Copy + Into<u64>>(v: &[T]) -> u64 {
     v.iter().map(|&x| Span { start: x.into() }.start()).sum()
 }
+
+// Its caller drops what it gives, whose drop glue's name says `impl Fn` and not the closure.
+pub fn label(n: u64) -> impl Fn() -> usize {
+    let s = "x".repeat(n as usize);
+    move || s.len()
+}
 """,
     "app/Cargo.toml": '[package]\nname = "tapp"\nversion = "0.1.0"\nedition = "2021"\n\n'
                       '[dependencies]\ntlib = { path = "../lib" }\n',
     APP: """fn main() {
-    println!("{} {} {} {} {} {}", "a", tlib::scale(2u8), tlib::each(&[1u32, 2]), tlib::BASE, tlib::total(&[1, 2]),
-             tlib::starts(&[3u16, 4]));
+    println!("{} {} {} {} {} {} {}", "a", tlib::scale(2u8), tlib::each(&[1u32, 2]), tlib::BASE,
+             tlib::total(&[1, 2]), tlib::starts(&[3u16, 4]), tlib::label(3)());
 }
 """,
 }
-FIRST = "a 6 5 10 6 7"
+FIRST = "a 6 5 10 6 7 3"
 # (what the step is, [(file, old, new)], what the program prints after it)
 STEPS = [
-    ("a generic function's body", [(LIB, "x.into() * 3", "x.into() * 4")], "a 8 5 10 6 7"),
+    ("a generic function's body", [(LIB, "x.into() * 3", "x.into() * 4")], "a 8 5 10 6 7 3"),
     # A closure is named by its place among the closures of its body, which a line above it
     # leaves: the instances generic over it are the base's, from the store, as they were.
-    ("a line above a closure", [(LIB, "    v.iter()", "    let _ = 0u64;\n    v.iter()")], "a 8 5 10 6 7"),
+    ("a line above a closure", [(LIB, "    v.iter()", "    let _ = 0u64;\n    v.iter()")], "a 8 5 10 6 7 3"),
     # The same of a recursive function's instance, which calls itself.
     ("a line above a closure a recursive function takes", [(LIB, "    walk(v", "    let _ = 1u64;\n    walk(v")],
-     "a 8 5 10 6 7"),
+     "a 8 5 10 6 7 3"),
     # A closure added above one takes its place, and is named apart from it by what is
     # written of it: the one that was there and the instances generic over it get new names,
     # and the ones from the store are called no more.
-    ("a closure above a closure", [(LIB, "    let _ = 0u64;\n", "    let _ = (|| 0u64)();\n")], "a 8 5 10 6 7"),
-    ("a closure's body", [(LIB, "x.into() + 1", "x.into() + 2")], "a 8 7 10 6 7"),
-    ("a static's value", [(LIB, "BASE: u64 = 10", "BASE: u64 = 12")], "a 8 7 12 6 7"),
-    ("the program's own text", [(APP, '"a"', '"b"')], "b 8 7 12 6 7"),
+    ("a closure above a closure", [(LIB, "    let _ = 0u64;\n", "    let _ = (|| 0u64)();\n")], "a 8 5 10 6 7 3"),
+    ("a closure's body", [(LIB, "x.into() + 1", "x.into() + 2")], "a 8 7 10 6 7 3"),
+    ("a static's value", [(LIB, "BASE: u64 = 10", "BASE: u64 = 12")], "a 8 7 12 6 7 3"),
+    ("the program's own text", [(APP, '"a"', '"b"')], "b 8 7 12 6 7 3"),
     # Its callers from the store call rustc's copy of it in the program's crate (#216).
     ("a function rustc copies into its callers", [(LIB, "        self.start\n", "        self.start + 1\n")],
-     "b 8 7 12 6 9"),
+     "b 8 7 12 6 9 3"),
+    # The closure an `impl Trait` is captures more, and the drop glue that drops it from the
+    # store is not the code it was, though no name it mentions changed.
+    ("what an impl Trait is", [(LIB, "    move || s.len()\n", "    let t = s.clone();\n    move || s.len() + t.len()\n")],
+     "b 8 7 12 6 9 6"),
     ("all of it taken back", [(LIB, "x.into() * 4", "x.into() * 3"), (LIB, "    let _ = (|| 0u64)();\n", ""),
                               (LIB, "    let _ = 1u64;\n", ""), (LIB, "x.into() + 2", "x.into() + 1"),
                               (LIB, "BASE: u64 = 12", "BASE: u64 = 10"), (APP, '"b"', '"a"'),
-                              (LIB, "        self.start + 1\n", "        self.start\n")], FIRST),
+                              (LIB, "        self.start + 1\n", "        self.start\n"),
+                              (LIB, "    let t = s.clone();\n    move || s.len() + t.len()\n", "    move || s.len()\n")],
+     FIRST),
 ]
 REBUILT = "compiling what the store had of the checkout"
 # The steps whose patch compiles only code the base has, by the names it had, and the one
