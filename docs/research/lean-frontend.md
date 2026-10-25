@@ -280,7 +280,7 @@ by about 46 ms and which `build` waits for; then the link, 14 ms.
 | signature edit | 399 / 406 ms | 379 / 381 ms |
 | **borrowck's drops liveness** (#246): body edit | 308 / 306 ms | 295 / 294 ms |
 | its `build-rest` stage | 74 / 74 ms | 62 / 64 ms |
-| **interned arguments kept** (interned-arguments branch, against salsa vendored): signature edit | 384 / 382 ms | 367 / 377 ms |
+| **interned arguments kept** (six functions, see below; against salsa vendored): signature edit | 384 / 382 ms | 367 / 377 ms |
 | **all of them**: body edit | 317 / 313 ms | 257 / 259 ms (−18%) |
 | signature edit | 399 / 406 ms | 268 / 285 ms (−31%) |
 | the harness's wall time, body / signature | 0.36 / 0.45 s | 0.31 / 0.33 s |
@@ -340,10 +340,13 @@ ids and syntax contexts among them, is declared `revisions = usize::MAX`; types,
 and clauses are `intern` crate values, reference counted and never collected (the crate's
 `gc` is only called by the proc-macro server's copy); `Crate` is a salsa input. So no blanket
 change: `ModuleScope::name` and many others take a `ModuleId` or a tracked struct. salsa-macros
-now takes `revisions` on a tracked function, for its interned arguments, and six hot ones whose
-arguments hold none of the collected types keep theirs for good: `row_place`, `source_place`,
-`compiled_instance`, `instance_serial`, `layout_of_ty_query` and
-`TraitImpls::in_crate_and_deps_for_trait_and_self_ty` (interned-arguments branch). salsa's own
+now takes `revisions` on a tracked function, for its interned arguments, and four hot ones of
+ra-jit's own whose arguments hold none of the collected types keep theirs for good: `row_place`,
+`source_place`, `compiled_instance` and `instance_serial` (#253). Two more of the fork's, whose
+arguments qualify too, were measured with them: `layout_of_ty_query` and
+`TraitImpls::in_crate_and_deps_for_trait_and_self_ty`. They stay as they were, as CI builds the
+fork alone against crates.io's salsa, which takes no `revisions` there; the numbers below are of
+all six (**unverified** how much of them the four keep). salsa's own
 tests pass with it (126 test binaries), and its compile-fail test of a single salsa struct's
 function given `revisions` now says why; four other compile-fail expectations differ from rustc
 1.99's output in rustc's own wording, which this does not touch (**read**). The −39 MB of salsa metadata measured earlier on a fork was not
