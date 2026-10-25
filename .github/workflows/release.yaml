@@ -82,7 +82,8 @@ jobs:
           cp LICENSE-APACHE LICENSE-MIT README.md CHANGELOG.md "$NAME"
           cp shipped/* "$NAME"
           "$NAME/ra-jit" --version | tee /dev/stderr | grep -F "blaze ${{ needs.notes.outputs.version }} "
-          # What cargo runs for `cargo blaze`, and the name it had before, run the one beside them.
+          # `blaze`, what cargo runs for `cargo blaze`, and the name it had before, run the one beside them.
+          "$NAME/blaze" --version | grep -F "blaze ${{ needs.notes.outputs.version }} "
           "$NAME/cargo-blaze" blaze --version | grep -F "blaze ${{ needs.notes.outputs.version }} "
           "$NAME/cargo-ra-jit" ra-jit --version | grep -F "blaze ${{ needs.notes.outputs.version }} "
           if [ "$RUNNER_OS" = Linux ]; then

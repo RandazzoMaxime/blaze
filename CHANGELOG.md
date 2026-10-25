@@ -8,6 +8,20 @@ All notable changes to ra-jit are written here. The format follows
 
 ### Added
 
+- `crates/blaze-registry` fetches every kind of source a lock file names, as cargo 1.99
+  does (#298): `[source]` replacement as cargo's `SourceConfigMap` (`replace-with` chains to a
+  registry, a local registry, a directory, a git repository or a `[registries]` name, and
+  cargo's refusals); vendored directories, each file checked against `.cargo-checksum.json`;
+  and git dependencies with the `git` command, a database per repository at
+  `$CARGO_HOME/git/db/<name>-<hash>` and a checkout per commit at
+  `git/checkouts/<name>-<hash>/<short id>`, branch, tag, rev and locked commits, GitHub's fast
+  path, submodules from databases of their own, offline. `harness/fetchdiff.py` holds it to
+  `cargo fetch` and `cargo vendor` on dev-aws-8 over 314 lock files (the bench projects at
+  their pins but bun, the 300 most downloaded crates, git dependencies of every kind of
+  reference, a second sparse registry): 3684/3684 unpacked packages and 38/38 git checkouts
+  the same as cargo's, file by file, with the same directory names; crates.io replaced by a
+  mirror 42/42; ripgrep and zed vendored, 51/51 and 1533/1533 read where cargo vendor put
+  them.
 - `cargo blaze` reads the workspace with `blaze-manifest`, as cargo 1.99.0 reads it, where it
   ran `cargo metadata --no-deps` for every command (#298): equal to cargo on 385 of 385
   workspaces of `harness/resolve.py`'s corpus. The command's `--config` arguments now count,
@@ -31,6 +45,21 @@ All notable changes to ra-jit are written here. The format follows
   script that the port had missed: a `cargo check` puts no `target/debug` in the library path,
   and on Linux cargo's libgit2 hands every script the `SSL_CERT_FILE` and `SSL_CERT_DIR` it
   found.
+- blaze needs no Rust and no rustup installed (#298). With neither, it downloads Rust 1.99.0
+  once into `~/.blaze/toolchains` (rustc, cargo, the standard library and its source: 97 MB on
+  macOS, 133 MB on Linux x86-64), laid out as rustup lays out a toolchain, and builds with it.
+  Each file's sha256 is built into blaze from the release's published manifest, and a file
+  with other bytes is refused. Downloads run together over blaze's own HTTPS client, unpack
+  into a directory beside the toolchain's and are renamed into place, concurrent builds
+  download once, and a download that stopped goes on from where it stopped. rustup's 1.99.0,
+  when installed, is still the one used. `blaze build`, `run`, `test`, `check` and `stop` are
+  `cargo blaze`'s commands without cargo; `blaze toolchain` says which Rust blaze builds with.
+- install.sh installs blaze on a machine with no Rust (#298). It no longer runs rustup: after
+  installing, blaze downloads its own Rust (none when rustup has 1.99.0), `--no-toolchain`
+  leaves that to the first build, it says what to install when there is no C compiler to link
+  with, and its last line is `blaze run`. `BLAZE_ARCHIVE` installs an archive from a file.
+  install.yaml installs this commit's build in a Debian container with no Rust and runs
+  `blaze run` in a project written by hand.
 - `crates/blaze-resolve`, cargo's resolver owned by blaze (#298), starts with cargo 1.99.0's package
   model, used by nothing yet: `SourceId` (path, git and sparse registries, git at a branch, tag or
   rev with its commit, directory, local registry) compared by cargo's canonical URL and written as
@@ -335,6 +364,13 @@ All notable changes to ra-jit are written here. The format follows
 
 ### Changed
 
+- Proc macros are blaze's by default where its server is beside `ra-jit`: the daemon's
+  loads, `--check` and build scripts expand with libraries ra-jit makes from each crate's
+  record, kept in the store by what they were linked from, so another target directory takes
+  them from there (#90). `RA_JIT_PROC_MACRO_SERVER=0` goes back to rustc's libraries and the
+  toolchain's server. `macroserver.py all` builds each app again over the first store: no
+  library linked again, the same 3,465 calls.
+||||||| 0858e8535d
 - The first `cargo blaze build` of a workspace is blaze's, not cargo's: once cargo's build
   succeeds it waits for the daemon to load the workspace ("Waiting for blaze to load the
   workspace") and build the programs, where it handed back cargo's and the next build was the
