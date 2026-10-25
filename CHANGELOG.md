@@ -476,6 +476,14 @@ All notable changes to ra-jit are written here. The format follows
 - A daemon that stops lets its workers finish writing to the store what their last build kept,
   a minute at most each, where it killed them (#41). A stop just after an edit lost it: the
   next checkout of helix compiled 131,609 functions instead of 115,706.
+- helix builds again: since #212 the borrow checker said "higher-ranked lifetime error" of
+  `v.sort_by(match .. { a => |x: &T, y: &T| .., b => |x: &T, y: &T| .. })` and of
+  `match .. { a => render_mode, b => render_spinner }` returned as an `impl Fn(&mut ..)`.
+  rust-analyzer gives the lifetimes a signature elides as errors, where rustc makes each
+  late-bound, so the fn pointer such a `match` makes of fn items or closures had no
+  `for<'a>`; the placeholders of the bound were then held to those lifetimes. The checker
+  now takes them for the lifetimes rustc would bind. The corpus's `higher_ranked` case does
+  both (three errors before), and ide-diagnostics has a test.
 - The borrow checker no longer panics on rustc's UI tests (`lints_ui.py --deny unused_mut`
   over all 20,450 files: 4 panics before, none now, and ra-jit's time from 67 s to 14 s). The
   causes were in the trait solver and the lowering it reads: a trait object's projections

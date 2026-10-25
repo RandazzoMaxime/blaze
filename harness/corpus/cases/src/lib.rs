@@ -8343,7 +8343,54 @@ pub mod higher_ranked {
         out
     }
 
-    pub fn run() -> (String, usize, usize, usize, u32, String) {
+    fn ascending(a: &String, b: &String) -> std::cmp::Ordering {
+        a.cmp(b)
+    }
+
+    fn descending(a: &String, b: &String) -> std::cmp::Ordering {
+        b.cmp(a)
+    }
+
+    struct Line<'a>(Vec<&'a str>);
+
+    fn mode<'a, F: Fn(&mut Line<'a>, &'a str) + Copy>(line: &mut Line<'a>, write: F) {
+        write(line, "NOR")
+    }
+
+    fn name<'a, F: Fn(&mut Line<'a>, &'a str) + Copy>(line: &mut Line<'a>, write: F) {
+        write(line, "main.rs")
+    }
+
+    /// helix's status line: two fn items that elide a lifetime, one fn pointer.
+    fn element<'a, F>(first: bool) -> impl Fn(&mut Line<'a>, F)
+    where
+        F: Fn(&mut Line<'a>, &'a str) + Copy,
+    {
+        match first {
+            true => mode,
+            false => name,
+        }
+    }
+
+    /// Two fn items, or two closures, made one fn pointer: `for<'a, 'b> fn(&'a String, &'b
+    /// String)`, as rustc gives the lifetimes they elide.
+    fn sorted(reverse: bool) -> (Vec<String>, String) {
+        let mut words: Vec<String> = ["pear", "fig", "apple"].map(String::from).into();
+        words.sort_by(if reverse { descending } else { ascending });
+        let mut lengths = words.clone();
+        lengths.sort_by(match reverse {
+            true => |a: &String, b: &String| b.len().cmp(&a.len()),
+            false => |a: &String, b: &String| a.len().cmp(&b.len()),
+        });
+        let mut line = Line(Vec::new());
+        for first in [true, false] {
+            element(first)(&mut line, |line: &mut Line<'_>, text| line.0.push(text));
+        }
+        words.extend(lengths);
+        (words, line.0.join(" "))
+    }
+
+    pub fn run() -> (String, usize, usize, usize, u32, String, (Vec<String>, String)) {
         let text = String::from(" abc ");
         let copy: String = owned(&text);
         let view: &str = borrowed(&text);
@@ -8353,6 +8400,7 @@ pub mod higher_ranked {
         let trimmed = apply(|it| it.trim(), &text);
         let sum = total(&vec![1, 2, 3]);
         let handled = with_handler(report);
-        (copy, first, second, trimmed, sum, handled)
+        let sorted = sorted(std::hint::black_box(true));
+        (copy, first, second, trimmed, sum, handled, sorted)
     }
 }
