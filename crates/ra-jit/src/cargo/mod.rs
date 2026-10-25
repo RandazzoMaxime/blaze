@@ -9,6 +9,7 @@ mod ancestor;
 mod cli;
 mod client;
 mod messages;
+pub(crate) mod metadata;
 pub(crate) mod own_macro;
 pub(crate) mod own_script;
 mod package;
@@ -202,11 +203,7 @@ fn fn_cache_dir() -> anyhow::Result<std::path::PathBuf> {
     Ok(match std::env::var_os("RA_JIT_FN_CACHE_DIR") {
         Some(dir) => std::path::PathBuf::from(dir),
         None => {
-            let metadata = cargo_metadata::MetadataCommand::new()
-                .cargo_path(state::cargo_path())
-                .no_deps()
-                .exec()
-                .context("running `cargo metadata`")?;
+            let metadata = metadata::no_deps(None, &[]);
             metadata.target_directory.as_std_path().join("ra-jit").join("fn-cache")
         }
     })
@@ -345,7 +342,7 @@ fn check(asked: &Invocation) -> anyhow::Result<i32> {
         messages::passed(format);
     };
     let turned_down = |said: &[crate::errors::Said]| -> anyhow::Result<i32> {
-        messages::turned_down(format, said, &state::metadata(asked)?);
+        messages::turned_down(format, said, &state::metadata(asked));
         toolchain::note_failed();
         Ok(FAILED)
     };

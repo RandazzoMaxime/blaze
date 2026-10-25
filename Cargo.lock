@@ -3387,6 +3387,7 @@ dependencies = [
  "aws-config",
  "aws-sdk-s3",
  "aws-smithy-http-client",
+ "blaze-manifest",
  "cargo-platform",
  "cargo_metadata",
  "cfg",
