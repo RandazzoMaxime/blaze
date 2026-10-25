@@ -6999,14 +6999,18 @@ fn cargo_config(args: &Args) -> CargoConfig {
         // built there can be ra-jit's (`cargo/own_macro.rs`), for the server the load found.
         extra_env: [("CARGO_UNSTABLE_CHECKSUM_FRESHNESS".to_owned(), Some("false".to_owned()))]
             .into_iter()
-            .chain(args.own_target.then(|| {
-                let server = cargo::own_macro::server().map(|it| it.display().to_string());
-                [
-                    (cargo::own_macro::OWN_TARGET.to_owned(), Some("1".to_owned())),
-                    (cargo::own_macro::SERVER.to_owned(), server),
-                ]
-            }))
-            .flatten()
+            .chain(
+                args.own_target
+                    .then(|| {
+                        let server = cargo::own_macro::server().map(|it| it.display().to_string());
+                        [
+                            (cargo::own_macro::OWN_TARGET.to_owned(), Some("1".to_owned())),
+                            (cargo::own_macro::SERVER.to_owned(), server),
+                        ]
+                    })
+                    .into_iter()
+                    .flatten(),
+            )
             .collect(),
         ..Default::default()
     }
