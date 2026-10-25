@@ -182,14 +182,50 @@ def config_env(ws):
     return list(found.values())
 
 
-def config_rustflags(ws, host):
-    """The flags cargo gives rustc for the host when RUSTFLAGS is not set: `target.<host>.rustflags`,
-    else `build.rustflags`, each list joined across the files, the nearer later."""
+def cfg_matches(expr, cfgs):
+    """Whether a `cfg(..)` expression holds of rustc's `--print cfg` lines."""
+    tokens = re.findall(r'"[^"]*"|[A-Za-z_][A-Za-z0-9_]*|[(),=]', expr)
+    pos = 0
+
+    def take():
+        nonlocal pos
+        pos += 1
+        return tokens[pos - 1]
+
+    def predicate():
+        name = take()
+        if name in ("all", "any", "not") and pos < len(tokens) and tokens[pos] == "(":
+            take()
+            args = []
+            while tokens[pos] != ")":
+                args.append(predicate())
+                if tokens[pos] == ",":
+                    take()
+            take()
+            return all(args) if name == "all" else any(args) if name == "any" else not args[0]
+        if pos < len(tokens) and tokens[pos] == "=":
+            take()
+            return f"{name}={take()}" in cfgs
+        return name in cfgs
+
+    return predicate()
+
+
+def config_rustflags(ws, host, cfgs):
+    """The flags cargo gives rustc for the host when RUSTFLAGS is not set: those of
+    `target.<host>` and of each `target.'cfg(..)'` that holds, else `build.rustflags`, each
+    list joined across the files, the nearer later."""
     def flags(value):
         return value.split() if isinstance(value, str) else list(value)
 
     tables = [table for _, table in configs(ws)]
-    target = [f for table in tables for f in flags(table.get("target", {}).get(host, {}).get("rustflags", []))]
+    target = []
+    for table in tables:
+        targets = table.get("target", {})
+        target += flags(targets.get(host, {}).get("rustflags", []))
+        for key in sorted(targets):
+            if key.startswith("cfg(") and key.endswith(")") and cfg_matches(key[4:-1], cfgs):
+                target += flags(targets[key].get("rustflags", []))
     if target:
         return target
     return [f for table in tables for f in flags(table.get("build", {}).get("rustflags", []))]
@@ -255,7 +291,7 @@ def project(name, spec, work, t, blaze, jobs, clean):
     units = graph["units"]
     host_root = os.path.join(target_dir, "debug")
     configured = config_env(ws)
-    rustflags = config_rustflags(ws, t["host"])
+    rustflags = config_rustflags(ws, t["host"], set(sh([t["rustc"], "--print", "cfg"], ws, None).splitlines()))
     target_cfgs = sh([t["rustc"], "--print", "cfg", *rustflags], ws, None).splitlines()
 
     recordings = []
