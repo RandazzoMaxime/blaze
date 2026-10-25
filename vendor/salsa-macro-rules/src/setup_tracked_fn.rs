@@ -55,6 +55,9 @@ macro_rules! setup_tracked_fn {
         // If true, the input needs an interner (because it has >1 argument).
         needs_interner: $needs_interner:tt,
 
+        // The minimum number of revisions to keep the interned arguments, when given.
+        revisions: $($revisions:expr)?,
+
         // The function used to implement `C::heap_size`.
         heap_size_fn: $($heap_size_fn:path)?,
 
@@ -218,6 +221,9 @@ macro_rules! setup_tracked_fn {
                         };
                         const DEBUG_NAME: &'static str = concat!($(stringify!($self_ty), "::",)? stringify!($fn_name), "::interned_arguments");
                         const PERSIST: bool = $persist;
+                        $(
+                            const REVISIONS: ::core::num::NonZeroUsize = ::core::num::NonZeroUsize::new($revisions).unwrap();
+                        )?
 
                         type Fields<$db_lt> = ($($interned_input_ty),*);
 
