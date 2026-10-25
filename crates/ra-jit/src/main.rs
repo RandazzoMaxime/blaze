@@ -2021,7 +2021,7 @@ fn crates_called(db: &RootDatabase, krate: &str, args: &Args) -> Vec<Crate> {
     // A path that is written as its parts are ends the text of every path it is the end of,
     // which is all that most crates have to be asked.
     let plain = !krate.contains("//") && !krate.contains("./");
-    named_crates(db)
+    let mut found: Vec<Crate> = named_crates(db)
         .iter()
         .filter(|it| match (is_file, &it.root) {
             (true, Some(root)) if plain && !root.ends_with(krate) => false,
@@ -2034,7 +2034,18 @@ fn crates_called(db: &RootDatabase, krate: &str, args: &Args) -> Vec<Crate> {
             (false, _) => it.name.as_deref() == Some(krate),
         })
         .map(|it| it.krate)
-        .collect()
+        .collect();
+    // Built as `cargo test` builds them, a library and its unit tests are two crates of one
+    // root file, the tests alone with `cfg(test)`: the crate asked for first is the program's,
+    // and the others are what it links.
+    if args.cfg_test {
+        let tests = |it: &Crate| it.cfg(db).check_atom(&cfg::CfgAtom::Flag(intern::sym::test));
+        let first = *krate == args.krate;
+        if found.iter().any(|it| tests(it) == first) {
+            found.retain(|it| tests(it) == first);
+        }
+    }
+    found
 }
 
 /// A crate of the graph as naming one finds it.
@@ -5393,13 +5404,32 @@ fn broken_in(
                     hir::attach_db(&db, || {
                         files
                             .flat_map(|&file| {
-                                ide_diagnostics::semantic_diagnostics_within(
-                                    &db,
-                                    config,
-                                    &ide_db::assists::AssistResolveStrategy::None,
-                                    file,
-                                    within.clone(),
-                                )
+                                // A library's files are its unit tests' too, with what is
+                                // under `cfg(test)`: each crate built of them says what it
+                                // finds, where rust-analyzer would ask the first.
+                                let crates: Vec<_> = ide_db::base_db::relevant_crates(&db, file)
+                                    .iter()
+                                    .copied()
+                                    .filter(|it| within.as_ref().is_none_or(|w| w.contains(it)))
+                                    .collect();
+                                let each: Vec<_> = match crates.len() {
+                                    0 | 1 => vec![within.clone()],
+                                    _ => crates
+                                        .into_iter()
+                                        .map(|it| Some(Arc::new(FxHashSet::from_iter([it]))))
+                                        .collect(),
+                                };
+                                let db = &db;
+                                let each = each.into_iter().flat_map(move |within| {
+                                    ide_diagnostics::semantic_diagnostics_within(
+                                        db,
+                                        config,
+                                        &ide_db::assists::AssistResolveStrategy::None,
+                                        file,
+                                        within,
+                                    )
+                                });
+                                each.collect::<Vec<_>>()
                             })
                             .filter(|it| {
                                 let code = it.code.as_str();
@@ -5426,7 +5456,16 @@ fn broken_in(
     if found.is_empty() {
         return None;
     }
-    found.sort_by_key(|(at, ..)| (at.file_id, at.range.start()));
+    found.sort_by(|(a, a_code, a_said), (b, b_code, b_said)| {
+        (a.file_id, a.range.start(), a.range.end(), a_code, a_said).cmp(&(
+            b.file_id,
+            b.range.start(),
+            b.range.end(),
+            b_code,
+            b_said,
+        ))
+    });
+    found.dedup();
     let said = found
         .iter()
         .map(|(at, code, message)| {
@@ -6614,22 +6653,23 @@ fn input_line() -> Option<String> {
 }
 
 const HELP: &str = "\
-ra-jit: a daemon that keeps Rust workspaces compiled and builds edits from memory
+blaze's engine: a daemon that keeps Rust workspaces compiled and builds edits from memory.
+`cargo blaze <command>` is what to run; this program is what it runs.
 
 usage: ra-jit <command>
 
-  enable            plain `cargo build|run|test|check` go through ra-jit from now on
+  enable            plain `cargo build|run|test|check` go through blaze from now on
   disable           cargo's configuration is put back as it was
-  status            whether ra-jit is enabled, what the daemon has loaded, what fell back
+  status            whether blaze is enabled, what the daemon has loaded, what fell back
   stop              ends the daemon; the next build starts one
-  cargo <command>   what `cargo ra-jit <command>` runs: build, run, test, check
+  cargo <command>   what `cargo blaze <command>` runs: build, run, test, check
   cache <verb>      the disk store: stats, gc, verify, push, pull, keygen
-                    (`cargo ra-jit cache clear` forgets what `#[ra_jit::cache]` kept)
+                    (`cargo blaze cache clear` forgets what `#[ra_jit::cache]` kept)
   mir <dir> --crate <name> [--level 0|1|2] [--time]
-                    a crate's MIR as ra-jit compiles it, written as rustc's -Zunpretty=mir
+                    a crate's MIR as blaze compiles it, written as rustc's -Zunpretty=mir
   --help, --version
 
-`cargo ra-jit build|run|test|check` takes cargo's flags. CARGO.md is the guide.";
+`cargo blaze build|run|test|check` takes cargo's flags. The guide: https://github.com/indexable-inc/blaze/blob/main/docs/cargo.md";
 
 /// Has a command that prints for a reader end quietly when the reader stops reading,
 /// instead of failing on the closed pipe. Not for a process that writes to sockets.
@@ -6641,13 +6681,26 @@ pub(crate) fn end_with_reader() {
     }
 }
 
-/// `ra-jit 0.1.0 (abc123def456)`: the crate's version, and the commit when the build was
+/// Takes each `BLAZE_<NAME>` for the `RA_JIT_<NAME>` the code reads, over it when both are
+/// set: the settings are named for blaze from its rename on, and keep their old names too.
+/// The programs this one starts see both.
+fn take_blaze_names() {
+    for (name, value) in std::env::vars_os() {
+        let Some(rest) = name.to_str().and_then(|it| it.strip_prefix("BLAZE_")) else {
+            continue;
+        };
+        // SAFETY: before any thread is started.
+        unsafe { std::env::set_var(format!("RA_JIT_{rest}"), value) };
+    }
+}
+
+/// `blaze 0.1.0 (abc123def456)`: the crate's version, and the commit when the build was
 /// told it in `RA_JIT_GIT_SHA` (the release workflow and the flake set it).
 pub(crate) fn version() -> String {
     let version = env!("CARGO_PKG_VERSION");
     match option_env!("RA_JIT_GIT_SHA") {
-        Some(sha) if !sha.is_empty() => format!("ra-jit {version} ({sha})"),
-        _ => format!("ra-jit {version}"),
+        Some(sha) if !sha.is_empty() => format!("blaze {version} ({sha})"),
+        _ => format!("blaze {version}"),
     }
 }
 
@@ -6657,6 +6710,7 @@ fn main() -> anyhow::Result<()> {
         sandbox::command(std::env::args_os().skip(2));
     }
     trace::began();
+    take_blaze_names();
     syntax::set_green_trees(std::env::var_os("RA_JIT_GREEN_TREES").is_some());
     project_model::answer_toolchain_questions_with(answers::ask);
     let stands_in_for_rustc = std::env::var_os("RA_JIT_WRAPS_RUSTC").is_some();

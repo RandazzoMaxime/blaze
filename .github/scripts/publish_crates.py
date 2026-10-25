@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
-"""Publish ra-jit and the forked crates it depends on to crates.io.
+"""Publish blaze (the crate `cargo-blaze`) and the forked crates it depends on to crates.io.
 
   publish_crates.py --stage DIR          # write the crates to publish into DIR, nothing else
   publish_crates.py --dry-run            # stage, then `cargo package --workspace` (builds each)
   publish_crates.py --publish            # stage, verify as above, then publish what is missing
 
-ra-jit depends by path on rust-analyzer's crates (the fork in vendor/rust-analyzer) and on
+blaze's crate, `crates/ra-jit` in the repository, is published as `cargo-blaze`, so that
+`cargo install cargo-blaze` installs it; its binaries keep their names. It depends by path on
+rust-analyzer's crates (the fork in vendor/rust-analyzer) and on
 rustc's rustc_abi (vendor/rustc_abi), which crates.io does not have in this form. Each one in
 ra-jit's dependency closure is published as `ra-jit-<name>` at the workspace version, without
 touching vendor/: every crate is copied into a staging workspace and its manifest is
@@ -45,8 +47,10 @@ import tomllib
 
 ROOT = Path(__file__).resolve().parents[2]
 ROOT_CRATE = ROOT / "crates" / "ra-jit"
-REPOSITORY = "https://github.com/indexable-inc/ra-jit"
-USER_AGENT = "ra-jit-publish (https://github.com/indexable-inc/ra-jit)"
+# The root crate's name on crates.io.
+ROOT_NAME = "cargo-blaze"
+REPOSITORY = "https://github.com/indexable-inc/blaze"
+USER_AGENT = "blaze-publish (https://github.com/indexable-inc/blaze)"
 DEP_TABLES = ("dependencies", "build-dependencies")
 UPSTREAM = "upstream"  # where crates from crates.io that are forked too are unpacked
 SKIPPED_DIRS = {"tests", "benches", "examples", "test_data", "target"}
@@ -208,7 +212,10 @@ class Repo:
             if fork:
                 name, version = "ra-jit-" + orig.removeprefix("ra-ap-"), self.version
             else:
-                name = orig if orig.startswith("ra-jit") else "ra-jit-" + orig
+                if d == ROOT_CRATE.resolve():
+                    name = ROOT_NAME
+                else:
+                    name = orig if orig.startswith("ra-jit") else "ra-jit-" + orig
                 version = package["version"]
                 if isinstance(version, dict):
                     version = self.version
@@ -366,8 +373,8 @@ def fork_readme(c: Crate) -> str:
         )
     return (
         f"# {c.name}\n\n"
-        f"A fork of {upstream}, published only so that [ra-jit]({REPOSITORY}) can be installed "
-        "with `cargo install ra-jit`. It is not a supported API and follows ra-jit's version, "
+        f"A fork of {upstream}, published only so that [blaze]({REPOSITORY}) can be installed "
+        "with `cargo install cargo-blaze`. It is not a supported API and follows blaze's version, "
         "not upstream's. For rust-analyzer's crates as a library, use the `ra_ap_*` crates.\n\n"
         "Licensed under MIT or Apache-2.0, as upstream.\n"
     )
@@ -385,15 +392,16 @@ def staged_manifest(c: Crate, by_dir: dict[Path, Crate], stage: Path) -> dict[st
             upstream = "rustc's rustc_abi"
         elif c.dir in REPO.upstream.values():
             upstream = f"{c.orig} {REPO.lock[c.orig]['version']} on ra-jit-rustc_abi"
-        package["description"] = f"Fork of {upstream}, used by ra-jit"
+        package["description"] = f"Fork of {upstream}, used by blaze"
         package["repository"] = REPOSITORY
-        package["authors"] = ["rust-analyzer team", "ra-jit contributors"]
+        package["authors"] = ["rust-analyzer team", "blaze contributors"]
         package["readme"] = "README.md"
         package["license"] = "MIT OR Apache-2.0"
         for key in ("homepage", "documentation", "keywords", "categories"):
             package.pop(key, None)
-    if c.name != c.orig:
-        # Its crate name stays the original one, which is what the code that uses it says.
+    if c.name != c.orig and c.orig != "ra-jit":
+        # Its crate name stays the original one, which is what the code that uses it says. The
+        # root crate has no library, and its binaries are named in its manifest.
         lib = m.setdefault("lib", {})
         lib.setdefault("name", c.orig.replace("-", "_"))
     package["autotests"] = False

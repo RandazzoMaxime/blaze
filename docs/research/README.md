@@ -59,6 +59,11 @@ back them is under [docs/upstream/](../upstream/), each with a `SOURCE.md`. Sear
   and a fork per branch, REAPI against no protocol on the hot path (gRPC unary latency, the
   action cache's missing batch lookup), the per-test sandbox and flakes by key, GC by live
   roots, latency against nushell's and ripgrep's GitHub Actions runs (#264). 2026-10-24.
+- [../roadmap.md](../roadmap.md): blaze-next, the floor of an edit for coding agents: the VFS as
+  a content-addressed Merkle tree (BLAKE3 write, hash and diff costs measured on nushell), ix VM
+  forks against roots, a sans-IO core and where io_uring pays (IO costs measured), push
+  invalidation, state as an image, patching in place, the agent API over a socket, lints in
+  blaze's pipeline (clippy's lints counted), and the order of the work (#279). 2026-10-24.
 - [../architecture-split.md](../architecture-split.md): what of ra-jit belongs in the
   rust-analyzer subtree and what in `crates/`; ra-jit's changes to rust-analyzer by purpose,
   upstream's churn on the files they touch, rustc's crate split, and a migration plan.

@@ -1,6 +1,6 @@
 name: release
 
-# A pushed tag `vX.Y.Z` builds ra-jit for Linux (x86_64, aarch64) and macOS (aarch64) and makes
+# A pushed tag `vX.Y.Z` builds blaze for Linux (x86_64, aarch64) and macOS (aarch64) and makes
 # a GitHub release of that name: one tarball per target, a `.sha256` per tarball, SHA256SUMS,
 # and the tag's CHANGELOG.md section as the notes. The tag must match the workspace version.
 # A manual run builds and checks the same archives without releasing anything.
@@ -53,13 +53,13 @@ jobs:
           - { target: x86_64-unknown-linux-gnu, os: ubuntu-22.04 }
           - { target: aarch64-unknown-linux-gnu, os: ubuntu-22.04-arm }
     env:
-      # `cargo binstall` finds the archive and its binaries by this name
+      # `cargo binstall` and install.sh find the archive and its binaries by this name
       # ([package.metadata.binstall] in crates/ra-jit/Cargo.toml).
-      NAME: ra-jit-v${{ needs.notes.outputs.version }}-${{ matrix.target }}
+      NAME: blaze-v${{ needs.notes.outputs.version }}-${{ matrix.target }}
     steps:
       - uses: actions/checkout@v7
       - run: rustup toolchain install 1.99.0 --profile minimal && rustup default 1.99.0
-      # `ra-jit --version` names the commit, as the flake's build does.
+      # `cargo blaze --version` names the commit, as the flake's build does.
       - run: echo "RA_JIT_GIT_SHA=${GITHUB_SHA::7}" >> "$GITHUB_ENV"
       # A release's builds fetch the standard library from the release's assets (the step
       # `Standard library` below; crates/ra-jit/src/shipped.rs).
@@ -78,7 +78,10 @@ jobs:
           mkdir "$NAME"
           cp LICENSE-APACHE LICENSE-MIT README.md CHANGELOG.md "$NAME"
           cp shipped/* "$NAME"
-          "$NAME/ra-jit" --version | tee /dev/stderr | grep -F "ra-jit ${{ needs.notes.outputs.version }} "
+          "$NAME/ra-jit" --version | tee /dev/stderr | grep -F "blaze ${{ needs.notes.outputs.version }} "
+          # What cargo runs for `cargo blaze`, and the name it had before, run the one beside them.
+          "$NAME/cargo-blaze" blaze --version | grep -F "blaze ${{ needs.notes.outputs.version }} "
+          "$NAME/cargo-ra-jit" ra-jit --version | grep -F "blaze ${{ needs.notes.outputs.version }} "
           tar czf "$NAME.tar.gz" "$NAME"
           shasum -a 256 "$NAME.tar.gz" > "$NAME.tar.gz.sha256"
       - uses: actions/upload-artifact@v7
@@ -107,7 +110,7 @@ jobs:
           path: std-assets/*
           if-no-files-found: warn
 
-  # ra-jit and the forks it depends on (`ra-jit-hir`, `ra-jit-rustc_abi`, ...) on crates.io, as
+  # cargo-blaze and the forks it depends on (`ra-jit-hir`, `ra-jit-rustc_abi`, ...) on crates.io, as
   # its own job so it can be rerun alone: versions already published are skipped. Each crate is
   # built first; crates.io's limit on new crates is waited out (a first release takes hours).
   crates:
@@ -138,13 +141,13 @@ jobs:
           merge-multiple: true
       - name: Checksums
         working-directory: out
-        run: sha256sum ra-jit-*.tar.gz | tee SHA256SUMS
+        run: sha256sum blaze-*.tar.gz | tee SHA256SUMS
       - name: Release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           shopt -s nullglob
           gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --verify-tag \
-            --title "ra-jit $GITHUB_REF_NAME" --notes-file out/notes.md \
-            out/ra-jit-*.tar.gz out/ra-jit-*.tar.gz.sha256 out/SHA256SUMS \
+            --title "blaze $GITHUB_REF_NAME" --notes-file out/notes.md \
+            out/blaze-*.tar.gz out/blaze-*.tar.gz.sha256 out/SHA256SUMS \
             out/manifests.* out/packs.* out/keys.*

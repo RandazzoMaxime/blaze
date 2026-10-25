@@ -18,7 +18,7 @@ layout code is rustc's own `rustc_abi` crate from the 1.99.0 tag. Nothing has be
 another stable version. Some reports were measured on `nightly-2026-05-10` before the move
 to stable; those are marked where they are used.
 
-`cargo ra-jit` on another toolchain goes to cargo. `RA_JIT_OTHER_TOOLCHAIN=1` builds with it
+`cargo blaze` on another toolchain goes to cargo. `RA_JIT_OTHER_TOOLCHAIN=1` builds with it
 anyway, for a project pinned to a nightly of the next release, which rustc 1.99.0 can't build
 even with `RUSTC_BOOTSTRAP=1` when the project uses library features 1.99.0 does not have.
 Nothing checks that the other rustc lays out, mangles and passes values as 1.99.0 does: bun's
@@ -34,7 +34,7 @@ pinned `nightly-2026-09-15` does for what the harness runs of bun
 | Full link | yes (1) | yes (1) | yes (1) | yes (1) | yes, older branch (2) |
 | Splice | yes (3) | yes (3) | yes (4) | yes, with a limit (5) | yes, older branch (2) |
 | Debug info | yes (6) | yes (6) | lines only (7) | unverified (7) | no |
-| `cargo ra-jit` | yes (8) | unverified (9) | no: goes to cargo (9) | yes, by hand (9) | no |
+| `cargo blaze` | yes (8) | unverified (9) | no: goes to cargo (9) | yes, by hand (9) | no |
 | Disk store | yes (10) | yes (10) | yes (10) | yes (10) | unverified |
 | Remote store | yes, not real AWS (11) | unverified | unverified | unverified | unverified |
 | Fuzzed | yes (12) | no | no | no | no |
@@ -73,7 +73,7 @@ pinned `nightly-2026-09-15` does for what the harness runs of bun
    cargo, 66 of 66 flag steps, 11 of 11 lifecycle checks
    ([reports/CARGO.md](reports/CARGO.md)). Not in CI. Run by hand for these docs on a new
    project and on ripgrep 15.1.0.
-9. `cargo ra-jit` links ELF and Mach-O executables and hands any other target (Windows'
+9. `cargo blaze` links ELF and Mach-O executables and hands any other target (Windows'
    PE) to cargo (`unsupported_target` in `cargo/cli.rs`). On macOS arm64 it was run by hand
    on bun 1.4.3's dev loop ([research/bun.md](research/bun.md)).
    Nobody recorded running it on Linux AArch64.
@@ -202,7 +202,7 @@ is the first row above. Nearly every full-size run found something, so expect th
 exist.
 
 The daemon refuses source in which rust-analyzer finds an error (a type mismatch, an
-unresolved name, a missing field), and under `cargo ra-jit` cargo then runs and rustc
+unresolved name, a missing field), and under `cargo blaze` cargo then runs and rustc
 reports it. An error rust-analyzer does not find is not refused, and a crate ra-jit compiles
 without rustc, as it does a whole program's, is then built and run: one that calls a macro of
 several statements in the parentheses of another macro's call, say
@@ -210,7 +210,7 @@ several statements in the parentheses of another macro's call, say
 Borrow-check errors are the main case: ra-jit's borrow checker ([borrowck.md](borrowck.md)) refuses what it finds, and it
 finds nothing rustc accepts in rustc's tests or in seven real projects, but it misses about a
 third of the errors rustc gives (67% of rustc's borrow-check tests get rustc's verdict), and
-an edit with one it misses builds and runs. Run `cargo ra-jit check` or `cargo check` to get
+an edit with one it misses builds and runs. Run `cargo blaze check` or `cargo check` to get
 rustc's verdict. `RA_JIT_BORROWCK_REFUSE=0` stops the daemon refusing borrow-check errors.
 
 ## Cargo's build model
@@ -224,10 +224,10 @@ native AArch64, where four rows that need an x86-64 host are not run (CI on `513
 [reports/BUILDMODEL.md](reports/BUILDMODEL.md) has the table at 97 cases per backend, of
 which 92 were supported and 5 refused.
 
-`cargo ra-jit` is narrower. It serves the dev and test profiles and hands the rest to
+`cargo blaze` is narrower. It serves the dev and test profiles and hands the rest to
 cargo, as [cargo.md](cargo.md) lists.
 
-| Feature | Daemon (`buildmodel.py`) | `cargo ra-jit` |
+| Feature | Daemon (`buildmodel.py`) | `cargo blaze` |
 |---|---|---|
 | dev and test profiles | supported | served |
 | release and custom profiles, `opt-level`, `debug-assertions`, `overflow-checks`, `codegen-units`, `strip`, per-package overrides | supported | handed to cargo for `--release` and `--profile`; unverified for profile settings changed in the manifest |
@@ -238,7 +238,7 @@ cargo, as [cargo.md](cargo.md) lists.
 | proc macros (attribute, derive, function-like) | supported: rustc's build of the macro is loaded and its expansion is compiled by ra-jit | served; an edit to the proc-macro crate itself is cargo's |
 | build scripts (`rerun-if-changed`, `rerun-if-env-changed`, `rustc-cfg`, `rustc-env`, `rustc-link-lib`, `OUT_DIR`, `links`) | supported | served; a change to a script or its inputs is cargo's, then the daemon reloads |
 | unit tests, integration tests, examples, benches | supported | served; adding or removing a `#[test]` is cargo's |
-| doctests | supported through `cargo ra-jit test --doc` (`doctests.py`, 30 crates); documentation behind `cfg(doc)` is not seen | served; an example ra-jit cannot build is left to rustdoc with the reason |
+| doctests | supported through `cargo blaze test --doc` (`doctests.py`, 30 crates); documentation behind `cfg(doc)` is not seen | served; an example ra-jit cannot build is left to rustdoc with the reason |
 | features, optional and weak dependencies, feature unification under resolvers 1, 2 and 3 | supported | `--features` served; `--all-features` and `--no-default-features` handed to cargo |
 | path, git, registry, renamed, vendored, `[patch]` and `[replace]` dependencies | supported | served |
 | an edit to a path dependency the daemon was not asked to build | refused with a reason | cargo |

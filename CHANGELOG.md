@@ -263,6 +263,21 @@ All notable changes to ra-jit are written here. The format follows
 
 ### Changed
 
+- ra-jit is now **blaze**. The command is `cargo blaze` (`cargo blaze build`, `test`, `run`,
+  `check`, `status`, `stop`); `cargo ra-jit` keeps working and, on a terminal, says once per run
+  that it was renamed. The crate on crates.io is `cargo-blaze` (`cargo install cargo-blaze`),
+  release archives are `blaze-v<version>-<target>.tar.gz`, and the flake's package and app are
+  `blaze` (`ra-jit` stays as another name for them). Every setting can be given as `BLAZE_<NAME>`
+  as well as `RA_JIT_<NAME>`, and the `BLAZE_` one wins. `--version` says `blaze`. The engine
+  binary, the crates it is made of, the daemon's directory and the store keep their names, so an
+  upgrade keeps what the store holds.
+- `install.sh` installs blaze on macOS (Apple silicon) and Linux (x86-64, ARM64) with one line,
+  `curl -fsSL https://raw.githubusercontent.com/indexable-inc/blaze/main/install.sh | sh`: the
+  newest release (or `--version`), checked against its SHA256SUMS, into `~/.cargo/bin`, with Rust
+  1.99.0 and `rust-src` through rustup. The README starts with it; the `install` workflow runs it
+  on each platform.
+- A build with a toolchain other than 1.99.0 says how to switch the project to it
+  (`rustup override set 1.99.0`).
 - A start on a warm store with nothing of rustc's (`RA_JIT_RUSTC_BASE=0`) is no longer held up
   by the store and the interner (#41): each store entry and set of types is read once however
   many threads ask for it, a value already interned is found under the shard's read lock, the
@@ -497,6 +512,15 @@ All notable changes to ra-jit are written here. The format follows
   them keeps, so a `debug = true` build later takes none of it; the cost part builds at
   `line-tables-only` and then at `true` from one store and checks that it has every variable
   one at `true` after another at `true` has.
+- A registry crate with a build script has the same frozen def map in every checkout (#105).
+  Its key held the absolute `OUT_DIR`, so another checkout of nushell took 221 of 478 crates
+  frozen where a restart of the first took 374, and of ripgrep 41 of 51; both now take all of
+  them (374 and 51). The key holds `OUT_DIR` from cargo's build directory on and the files
+  written there, and the bytes name a file below the `OUT_DIR` of any crate of the closure,
+  and a literal such as the path `include!(concat!(env!("OUT_DIR"), ..))` reads, from that
+  `OUT_DIR`, so another checkout reads what its own build scripts wrote; bytes that still name
+  a target directory are not written. `frozenwarm.py` builds a second checkout with such a
+  crate, the first's target directory put away.
 - The first start of a daemon after a cold `cargo ra-jit build` finds what that build stored
   (#41). The two named the toolchain differently (the sysroot's libstd alone, or rustc's link
   line with libcore and liballoc too) and the store hashes that name into every key: on
