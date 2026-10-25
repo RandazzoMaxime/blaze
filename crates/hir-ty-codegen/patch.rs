@@ -1176,7 +1176,6 @@ impl Base {
                 note(Node::Root(root), &compiled_root(db, root).as_ref().ok()?.requests);
             }
         }
-        edges.extend(from_store.root_edges.iter().cloned());
         for (instance, known) in &instances {
             if let Ok(compiled) = compiled_instance(db, instance.clone(), known.env.clone()) {
                 note(Node::Instance(instance.clone()), &compiled.requests);
@@ -1185,6 +1184,7 @@ impl Base {
         for &id in statics.keys() {
             note(Node::Static(id), &compiled_static(db, id).as_ref().ok()?.requests);
         }
+        edges.extend(from_store.root_edges.iter().cloned());
         for (child, parent) in edges {
             let parents = match &child {
                 Node::Root(_) => None,
