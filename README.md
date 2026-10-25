@@ -95,8 +95,8 @@ cargo blaze build
 ```
 
 The first build runs cargo, with cargo's usual output, while a background process, the daemon,
-loads your project beside it. The build then waits for the daemon to build your program, a few
-seconds after cargo on a small project and more on a very large one:
+loads your project beside it. The build then waits for the daemon to build your program, under
+a second after cargo on ripgrep and about 4 seconds on nushell:
 
 ```
      Waiting for blaze to load the workspace

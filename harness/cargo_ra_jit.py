@@ -166,7 +166,7 @@ SMALL = ["ripgrep", "fd", "hyperfine"]
 MODES = {"ra-jit": "`cargo ra-jit`", "plain": "plain cargo after `ra-jit enable`"}
 
 # What cargo and `cargo ra-jit` print about the build, which is not the program's output.
-STATUS = re.compile(r"^\s*((Compiling|Checking|Finished|Running|Downloading|Downloaded|Blocking|Locking|Updating|Adding|Fresh|Dirty|Doc-tests)\b|ra-jit:|warning:)")
+STATUS = re.compile(r"^\s*((Compiling|Checking|Finished|Running|Downloading|Downloaded|Blocking|Waiting|Locking|Updating|Adding|Fresh|Dirty|Doc-tests)\b|ra-jit:|warning:)")
 
 
 def base_env(home):
