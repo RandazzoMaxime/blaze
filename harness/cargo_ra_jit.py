@@ -28,7 +28,9 @@ through, cold and after an edit, and compared with cargo the same way.
 
 Daemon. Started on demand, reused, shared by a git worktree, alive after its client is
 killed, replaced when the client is another build of ra-jit, gone when idle, and its workers
-gone with it.
+gone with it. A project whose rust-toolchain file names an older stable or a nightly is built
+and edited by the daemon, under the toolchain ra-jit compiles, and a `#![feature]` of the
+nightly fails with rustc's error and a note naming both releases.
 
 Plain cargo. `ra-jit enable` and `ra-jit disable` over a cargo configuration that is there,
 that is not, and that is edited in between; a wrapper the user had; what a project's own
