@@ -8,6 +8,9 @@ All notable changes to ra-jit are written here. The format follows
 
 ### Added
 
+- `crates/blaze-build-script`: the environment cargo 1.99.0 gives a build script, computed
+  from a plain description of the run with no cargo, ported from cargo's own rules and tests
+  (no-rustc step I, #89; #298). Nothing uses it yet; blaze's own runs of scripts come next.
 - `crates/blaze-resolve`, cargo's resolver owned by blaze (#298), starts with cargo 1.99.0's package
   model, used by nothing yet: `SourceId` (path, git and sparse registries, git at a branch, tag or
   rev with its commit, directory, local registry) compared by cargo's canonical URL and written as
@@ -299,6 +302,26 @@ All notable changes to ra-jit are written here. The format follows
 
 ### Changed
 
+- `cargo blaze` builds with Rust 1.99.0, the release it compiles, whatever toolchain the
+  project names (#269). A project pinned to another release, or on a machine whose default
+  is another, no longer has every build go to cargo: cargo, rustc and the daemon run under
+  1.99.0 (`RUSTUP_TOOLCHAIN` and `CARGO` name it), and plain `cargo` keeps the project's
+  toolchain in the same target directory, which cargo keys by the rustc. Code that only the
+  project's own toolchain builds (a nightly's `#![feature]`, a newer release's library) fails
+  with rustc's error and a note naming both releases. Without 1.99.0 or its `rust-src`, the
+  build fails saying the `rustup` command that installs it, where it went to cargo. A
+  changed toolchain file no longer sends the next build to cargo. `BLAZE_OTHER_TOOLCHAIN=1`
+  still builds with the project's toolchain. `cargo_ra_jit.py` builds and edits projects
+  pinned to an older stable and to a nightly, through toolchains whose rustc compiles nothing.
+- A daemon that links what rustc built beside its own code (every cargo daemon) takes the
+  checkout's roots from the store too, where only a build with nothing of rustc's did. A
+  build spliced into rustc's executable still compiles them. ripgrep's `restart`
+  (warmstart.py, dev-aws-7, three interleaved rounds) compiles 2,377 functions where it
+  compiled 3,618 and takes 4.96 s where it took 5.09 s; nushell's compiles 25,843 where it
+  compiled 30,039 and takes the same 25.7 s, as finding its roots in the store (0.8 s) costs
+  what it saves while most are refused for calling rustc's copy of a function of the checkout
+  ([#216](https://github.com/indexable-inc/blaze/issues/216)). `harness/storetracked.py` checks
+  that a start found roots.
 - A daemon that starts on a store holding the checkout's code no longer compiles that code
   again before the first edit can be patched ([#105](https://github.com/indexable-inc/blaze/issues/105)).
   Each function of the checkout goes into the store with a mark of its code and of what it
