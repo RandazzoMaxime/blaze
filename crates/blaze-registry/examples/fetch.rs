@@ -55,7 +55,14 @@ fn main() -> anyhow::Result<()> {
         let (id, _) = SourceId::from_url(&source)?;
         // cargo's own `[source.crates-io]`: the git index's packages come from the sparse one.
         let id = if id.is_crates_io() { SourceId::crates_io() } else { id };
-        let registry = Registry::remote(id, context.clone())?;
+        let registry = match Registry::remote(id, context.clone()) {
+            Ok(registry) => registry,
+            Err(err) => {
+                eprintln!("{source}: {err:#}");
+                *counts.entry("unsupported").or_default() += packages.len();
+                continue;
+            }
+        };
         let mut wanted = Vec::with_capacity(packages.len());
         for (mut package, locked) in packages {
             if !locked {
