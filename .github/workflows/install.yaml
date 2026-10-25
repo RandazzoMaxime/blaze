@@ -46,12 +46,14 @@ jobs:
       matrix:
         os: [ubuntu-24.04, ubuntu-24.04-arm, macos-15]
     env:
-      CARGO_HOME: ${{ runner.temp }}/cargo
       BLAZE_REPO: ${{ github.repository }}
       # A release the workflow was started for, or the one just published.
       BLAZE_VERSION: ${{ inputs.version || (github.event_name == 'release' && github.event.release.tag_name) || '' }}
     steps:
       - uses: actions/checkout@v7
+      # Here and not in the job's env, which has no runner context.
+      - name: a CARGO_HOME of its own
+        run: echo "CARGO_HOME=$RUNNER_TEMP/cargo" >> "$GITHUB_ENV"
       # Piped, as the README has it: no terminal, nothing asked. dash is Ubuntu's /bin/sh.
       - name: install
         run: sh < install.sh

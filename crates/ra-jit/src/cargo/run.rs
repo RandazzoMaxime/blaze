@@ -13,7 +13,7 @@ use crate::plan::Selection;
 use super::{
     affected::{self, Pick},
     cli::Invocation,
-    say,
+    sandboxed, say,
     state::{Held, Kind, Program, State, as_built, cargo_path},
 };
 
@@ -173,13 +173,27 @@ pub(crate) fn tests(
 ) -> anyhow::Result<i32> {
     let mut failed = Vec::new();
     let (mut left, mut always_run) = (0, 0);
+    let sandbox = sandboxed::wanted(affected::on());
+    if let Some(Err(why)) = &sandbox {
+        say::fallback(
+            &format!("tests run outside a sandbox: {why}"),
+            "those that reach files, the environment, processes or the network run every time",
+        );
+    }
     for test in state.programs.iter().filter(|it| it.test) {
         let source = test.source.strip_prefix(&test.package_dir).unwrap_or(&test.source);
         let unit = if matches!(test.kind, Kind::Test | Kind::Bench) { "" } else { "unittests " };
         let shown = shown_path(&test.executable, cwd);
         let mut running = format!("{unit}{} ({shown})", source.display());
         let mut picked = Vec::new();
-        let pick = affected::pick(asked, state, test);
+        let mut command = Command::new(&test.executable);
+        configured(&mut command, state);
+        command.envs(test.env.iter().cloned());
+        command.current_dir(&test.package_dir);
+        as_built(&mut command)?;
+        let sandbox_env = matches!(sandbox, Some(Ok(()))).then(|| sandboxed::env(&command));
+        let identity = sandbox_env.as_deref().map(sandboxed::identity_of);
+        let pick = affected::pick(asked, state, test, identity.as_deref());
         if let Pick::Some { names: Some(names), total, .. } = &pick {
             left += total - names.len();
             if names.is_empty() {
@@ -192,7 +206,7 @@ pub(crate) fn tests(
             picked.extend(names.iter().cloned());
         }
         say::status(asked.flags.quiet, "Running", &running);
-        if let Pick::Some { always, .. } = &pick {
+        if let Pick::Some { always, apart, .. } = &pick {
             always_run += always.len();
             for test in always.iter().filter(|_| asked.flags.verbose) {
                 let by = test.path.as_ref().map(|it| format!(", by {it}")).unwrap_or_default();
@@ -202,12 +216,18 @@ pub(crate) fn tests(
                     &format!("{}: {}{by}", test.name, test.why),
                 );
             }
+            for (name, why) in apart.iter().filter(|_| asked.flags.verbose) {
+                say::status(asked.flags.quiet, "Sandboxed", &format!("{name}: {why}"));
+            }
+            let names: Vec<String> = apart.iter().map(|(name, _)| name.clone()).collect();
+            if let (Some(env), Some(dir), false) =
+                (sandbox_env, state.plan_dir(test), names.is_empty())
+            {
+                sandboxed::prepare(state, test, dir, &mut command, env, &names)
+                    .context("writing what the sandbox of the tests is")?;
+            }
         }
-        let mut command = Command::new(&test.executable);
-        configured(&mut command, state);
-        command.args(asked.program_args()).args(&picked).envs(test.env.iter().cloned());
-        command.current_dir(&test.package_dir);
-        as_built(&mut command)?;
+        command.args(asked.program_args()).args(&picked);
         let ran = match &pick {
             Pick::Some { .. } => listing_failures(&mut command, held.take(), state),
             Pick::Asked => ended(&mut command, held.take(), state).map(|it| (it, None)),
@@ -270,20 +290,78 @@ pub(crate) fn doc_tests(asked: &Invocation) -> anyhow::Result<i32> {
 
 /// Runs `cargo test` with `args`, which ask for the doc tests alone, with ra-jit in
 /// rustdoc's place. ra-jit is told the build `asked` is, whose features cargo builds the
-/// libraries with.
+/// libraries with. Cargo's run of rustdoc for each library is only written down, and they are
+/// made once cargo is done, by one run of ra-jit that loads the workspace once for them all.
 pub(crate) fn only_doc_tests(asked: &Invocation, args: &[String]) -> anyhow::Result<i32> {
+    use std::io::{BufRead as _, IsTerminal as _, Write as _};
     let rustdoc = std::env::var_os("RUSTDOC").unwrap_or_else(|| "rustdoc".into());
     let cwd = std::env::current_dir()?;
     let asked_in = asked.flags.manifest_path.as_ref().map_or(cwd.clone(), |it| cwd.join(it));
     let build = Selection { asked_in: Some(asked_in), ..asked.selection() };
+    let replay = crate::doctest::Replay {
+        dir: std::env::temp_dir().join(format!("ra-jit-doctests-{}", std::process::id())),
+        no_fail_fast: asked.flags.no_fail_fast,
+        quiet: asked.flags.quiet,
+    };
+    std::fs::create_dir_all(&replay.dir)?;
     let mut cargo = crate::doctest::as_asked(cargo_path());
     cargo
         .env("RUSTDOC", std::env::current_exe().context("finding ra-jit itself")?)
         .env(crate::doctest::ENABLED, rustdoc)
-        .env(crate::doctest::BUILD, serde_json::to_string(&build)?);
+        .env(crate::doctest::BUILD, serde_json::to_string(&build)?)
+        .env(crate::doctest::RECORD, &replay.dir);
+    // The daemon's store, as its workers have it: what the examples link of the standard
+    // library is compiled once, not for each library each run.
+    match super::daemon::store() {
+        Some(store) => cargo.env("RA_JIT_CACHE", store),
+        None => cargo.env_remove("RA_JIT_CACHE"),
+    };
+    // Cargo says `Doc-tests` of every library before any of them runs: the run that makes
+    // them says it of each as it does. Its colors stay as they are on a terminal.
+    cargo.stderr(std::process::Stdio::piped());
+    let terminal = std::io::stderr().is_terminal() && std::env::var_os("NO_COLOR").is_none();
+    if terminal && std::env::var_os("CARGO_TERM_COLOR").is_none() {
+        cargo.env("CARGO_TERM_COLOR", "always");
+    }
     cargo.arg("test").args(args);
     as_built(&mut cargo)?;
-    Ok(exit_code(cargo.status().context("running `cargo test --doc`")?))
+    let mut cargo = cargo.spawn().context("running `cargo test --doc`")?;
+    let said = cargo.stderr.take().context("cargo's standard error is not read")?;
+    let mut stderr = std::io::stderr().lock();
+    for line in std::io::BufReader::new(said).split(b'\n') {
+        let line = line?;
+        if !says_doc_tests(&line) {
+            stderr.write_all(&line)?;
+            stderr.write_all(b"\n")?;
+        }
+    }
+    drop(stderr);
+    let code = exit_code(cargo.wait().context("running `cargo test --doc`")?);
+    let replayed = match code {
+        0 => replay.command().and_then(|ra_jit| {
+            ra_jit
+                .map(|mut it| Ok(exit_code(it.status().context("running the doctests")?)))
+                .transpose()
+        }),
+        _ => Ok(None),
+    };
+    _ = std::fs::remove_dir_all(&replay.dir);
+    Ok(replayed?.unwrap_or(code))
+}
+
+/// Whether cargo's line is the `Doc-tests <crate>` it says as it runs rustdoc for a library.
+fn says_doc_tests(line: &[u8]) -> bool {
+    let (text, mut plain) = (String::from_utf8_lossy(line), String::new());
+    let mut chars = text.chars();
+    while let Some(char) = chars.next() {
+        match char {
+            // A color: `ESC [ ... m`.
+            '\x1b' => _ = chars.by_ref().find(char::is_ascii_alphabetic),
+            _ => plain.push(char),
+        }
+    }
+    let name = plain.trim().strip_prefix("Doc-tests ");
+    name.is_some_and(|it| !it.is_empty() && !it.contains(' '))
 }
 
 fn counted(count: usize) -> String {
