@@ -427,7 +427,7 @@ the counts of [How often](#how-often) lower, measured by step A's check, and non
 | [H](https://github.com/indexable-inc/ra-jit/issues/88). ra-jit writes the test harness | the fallback when a test is added | G | medium | medium | the `no-rustc-hl` lane: done; the `no-rustc-l2` lane: ra-jit's harness always, done |
 | [I](https://github.com/indexable-inc/ra-jit/issues/89). Build scripts compiled and run by ra-jit | build scripts and their probes by rustc | B, G | medium | medium | the `no-rustc-l2` lane: first part done (scripts compiled and linked by ra-jit, their runs kept in the store); the F+G lane consumes it for the standard library's scripts |
 | [J](https://github.com/indexable-inc/ra-jit/issues/90). Proc macros compiled and loaded by ra-jit | proc macros by rustc, the toolchain's proc-macro server | F, G | large | high | the self-contained lane ([#298](https://github.com/indexable-inc/blaze/issues/298)): plan, and J then K first |
-| [K](https://github.com/indexable-inc/ra-jit/issues/91). The cold build is ra-jit's | cargo's first build, the rustc base (#11) | G, I, J | medium | high | the self-contained lane, with 54301ec5's first-build lane (#310) |
+| [K](https://github.com/indexable-inc/ra-jit/issues/91). The cold build is ra-jit's | cargo's first build, the rustc base (#11) | G, I, J | medium | high | the self-contained lane, with 54301ec5's first-build lane (#310); `RA_JIT_WHOLE_BUILD=1`: the build from nothing is G's whole build, no `cargo build` |
 | [L](https://github.com/indexable-inc/ra-jit/issues/92). Doctests by the daemon (#28) | probe and examples by rustc, rustdoc | B, G, D | medium | medium | the `no-rustc-hl` lane: first part done; the `no-rustc-l2` lane: second part (examples by ra-jit) done |
 | [M](https://github.com/indexable-inc/ra-jit/issues/93). Remove the wrapper and the fallback | `ra-jit-rustc`, `ra-jit-rustc-first`, stand-ins, dep-info, settle, `by_cargo`, `only_cargo` | all | medium | low | the self-contained lane |
 
@@ -1045,6 +1045,19 @@ of its 132 MB on Linux x86-64) go only once all three are in.
 (plan.rs), and the daemon compiles them all, taking what the store and the remote have, links
 the program with G's line and patches its own executable from the first edit on. No `cargo
 build`, no rustc base. See [the cold start](#the-cold-start-without-rustc).
+
+- Done (2026-10-25, the K lane): with `RA_JIT_WHOLE_BUILD=1`, `cargo ra-jit build` and `run`
+  from nothing take the programs from cargo's unit graph and build each with G's whole build,
+  putting it where cargo does; no `cargo build` runs, and a function the program can reach that
+  ra-jit cannot compile fails the build with which and why ([cargo.md](cargo.md#what-a-build-does)).
+  `harness/coldbuild.py` holds a fixture's programs, an example and a build script's output equal
+  to cargo's. Measured on the bench projects ([self-contained.md](self-contained.md)): ripgrep,
+  fd, hyperfine, just, bat and nushell build whole and run as cargo's builds; axum and biome miss
+  a build script's variable. Build scripts and proc macros are still built by rustc for the
+  load, and no daemon is started.
+- Next: the shipped standard library for the dev and release program units; axum's and
+  biome's build-script output; the daemon taking the build over, so the edit after it splices;
+  then the flip.
 
 **L. Doctests by the daemon.** ([#92](https://github.com/indexable-inc/ra-jit/issues/92)) [#28](https://github.com/indexable-inc/ra-jit/issues/28): the
 examples are compiled by the daemon that has the workspace loaded, linked with G's line; no probe
