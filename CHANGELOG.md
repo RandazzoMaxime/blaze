@@ -37,6 +37,19 @@ All notable changes to ra-jit are written here. The format follows
   directory of lock files (24 releases of twelve projects, zed's 70 git sources among them,
   write back byte for byte). A registry read from a lock file before its manifest is now named
   as cargo names it.
+- `crates/blaze-registry`, registries read and packages fetched as cargo 1.99 does, with no
+  cargo, used by nothing yet (`docs/self-contained.md`, #298). The sparse
+  index (crates.io's and any other's): `config.json` and its `dl` templates, the index paths,
+  each line read as cargo reads it (schema `v`, `features2`, `rust_version`, `pubtime`,
+  `yanked`, `links`, renamed and other-registry dependencies, unknown fields, and the lines
+  cargo skips as invalid or unsupported), with cargo's cache of each file in cargo's format and
+  its `If-None-Match` / `If-Modified-Since` requests, so cargo and blaze share
+  `$CARGO_HOME/registry/index`. A `.crate` file is checked against its sha256, kept in the
+  store by that hash and in cargo's cache, and unpacked where cargo unpacks it
+  (`registry/src/index.crates.io-1949cf8c6b5b557f/<name>-<version>/`, the directory named by
+  cargo's hash of the source), with cargo's checks (entries under `<name>-<version>/` only, no
+  links, the size limit, the umask, `.cargo-ok`), several at once, retried as `net.retry`
+  says, under cargo's package cache lock.
 - `cargo ra-jit test` with `RA_JIT_TESTS=affected` runs, on Linux, each test that reaches a
   file, the environment, a process or the network in a sandbox of its own (#257): a process
   in new user, mount, network, IPC and PID namespaces, the machine's files read-only, the

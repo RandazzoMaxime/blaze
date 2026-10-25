@@ -649,6 +649,20 @@ name = "blaze-resolve"
  "unicode-ident",
  "url",
 
+name = "blaze-registry"
+ "filetime",
+ "flate2",
+ "http-body-util",
+ "hyper",
+ "hyper-rustls",
+ "hyper-util",
+ "libc",
+ "ra-jit-store",
+ "rustc-stable-hash",
+ "sha2 0.10.9",
+ "tar",
+ "tokio",
+
 name = "block-buffer"
 version = "0.10.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
