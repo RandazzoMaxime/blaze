@@ -5,13 +5,15 @@
 //! by pushing [`Effect`]s, each with a [`Tag`], and is told how each went by a [`Completion`]
 //! with the same tag. A [`Driver`] runs the effects: [`sim::Sim`] in one thread under a seeded
 //! scheduler that reorders, fails and crashes (deterministic simulation tests), and
-//! [`threads::Threads`] on the real file system. An io_uring driver is the same trait on Linux.
+//! [`threads::Threads`] on the real file system, and on Linux [`uring::Uring`], on one io_uring.
 //!
 //! Files are named relative to the driver's root, so the same state machine runs in a
 //! simulation, a temporary directory or the daemon's state directory unchanged.
 
 pub mod sim;
 pub mod threads;
+#[cfg(target_os = "linux")]
+pub mod uring;
 
 use std::{fmt, time::Duration};
 
