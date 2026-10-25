@@ -966,6 +966,8 @@ struct FromStore {
     root_edges: Vec<(Node, Node)>,
     /// What the rest of it refers to.
     reached: FxHashSet<Node>,
+    /// How many of the untracked were told of.
+    untracked_seen: usize,
 }
 
 impl FromStore {
@@ -1001,8 +1003,17 @@ impl FromStore {
             let entry = entries.get(name);
             let tracked = entry.as_ref().and_then(|it| it.tracked.clone());
             let krate = tracked.as_ref().and_then(|it| crate_of.get(&ContentId(it.home)));
+            let why = match (&entry, &tracked) {
+                (None, _) => "no entry",
+                (_, None) => "no mark",
+                _ => "its crate is not of the checkout",
+            };
             let (Some(entry), Some(tracked), Some(&krate)) = (entry, tracked, krate) else {
                 from.untracked = true;
+                if std::env::var_os("RA_JIT_STATS").is_some() && from.untracked_seen < 3 {
+                    from.untracked_seen += 1;
+                    eprintln!("base from the store: `{name}` untracked: {why}");
+                }
                 continue;
             };
             let at = from.hydrated.len() as u32;

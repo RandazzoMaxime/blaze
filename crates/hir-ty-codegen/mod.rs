@@ -1939,9 +1939,15 @@ struct Kept {
     unkept: FxHashMap<&'static str, usize>,
     /// Why instances with a name were compiled.
     unfound: FxHashMap<&'static str, usize>,
+    /// Why entries of the checkout were kept with no mark, and the first of each.
+    untracked: FxHashMap<&'static str, (usize, Arc<str>)>,
 }
 
 impl Kept {
+    fn untracked(&mut self, name: &Arc<str>, why: &'static str) {
+        self.untracked.entry(why).or_insert_with(|| (0, name.clone())).0 += 1;
+    }
+
     fn written(&mut self, written: cached::Written) {
         self.added += written.added;
         if written.of_cargo != 0 {
@@ -1960,8 +1966,20 @@ impl Kept {
     }
 
     fn report(&self) {
-        let Kept { added, found, unnamed, unnamed_requests, differing, same, unkept, unfound } =
-            self;
+        let Kept {
+            added,
+            found,
+            unnamed,
+            unnamed_requests,
+            differing,
+            same,
+            unkept,
+            unfound,
+            untracked,
+        } = self;
+        for (why, (count, first)) in untracked {
+            eprintln!("kept with no mark: {count}, {why}, as `{first}`");
+        }
         if added + found + unnamed + unnamed_requests + differing + same != 0 {
             eprintln!(
                 "entries: {found} found, {added} added, {same} as stored, {differing} not as stored, \
@@ -5395,8 +5413,13 @@ impl<'a, 'db> ObjectCodegen<'a, 'db> {
             self.kept.unnamed_requests += 1;
             return;
         };
-        if stable::StableNames::of_checkout(&name) {
-            entry.tracked = self.tracked(instance, home, compiled, described);
+        // A unit's code is not what the query gives, which is what an edit is compared with.
+        let markable = self.mixed.is_none() && !self.units();
+        if markable && stable::StableNames::of_checkout(&name) {
+            match self.tracked(instance, home, compiled, described) {
+                Ok(tracked) => entry.tracked = Some(tracked),
+                Err(why) => self.kept.untracked(&name, why),
+            }
         }
         let mut entry = Box::new(entry);
         let Some(check) = check else {
@@ -5438,21 +5461,19 @@ impl<'a, 'db> ObjectCodegen<'a, 'db> {
         home: Crate,
         compiled: &CompiledFunction,
         described: bool,
-    ) -> Option<cached::Tracked> {
-        // A unit's code is not what the query gives, which is what an edit is compared with.
-        if self.mixed.is_some() || self.units() {
-            return None;
-        }
+    ) -> std::result::Result<cached::Tracked, &'static str> {
         if let InstanceDef::Fn(func) = instance.def
             && fncache::cached_closure(self.db, func).is_some()
         {
-            return None;
+            return Err("a `#[ra_jit::cache]` function");
         }
-        let mark = patch::stable_mark(self.db, &self.names, compiled, described)?;
+        let mark = patch::stable_mark(self.db, &self.names, compiled, described)
+            .ok_or("what it refers to has no stable name")?;
         let files = home::body_files(self.db, instance).and_then(|files| {
             files.iter().map(|&file| self.names.file_path(file)).collect::<Option<Vec<_>>>()
         });
-        Some(cached::Tracked { mark, home: self.names.content_id(home)?.0, files })
+        let home = self.names.content_id(home).ok_or("its crate has no content id")?.0;
+        Ok(cached::Tracked { mark, home, files })
     }
 
     fn writer(&mut self, store: &'static store::Store) -> &mut cached::Writer {
