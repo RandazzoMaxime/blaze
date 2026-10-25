@@ -1940,12 +1940,12 @@ struct Kept {
     /// Why instances with a name were compiled.
     unfound: FxHashMap<&'static str, usize>,
     /// Why entries of the checkout were kept with no mark, and the first of each.
-    untracked: FxHashMap<&'static str, (usize, Arc<str>)>,
+    untracked: FxHashMap<&'static str, (usize, Box<str>)>,
 }
 
 impl Kept {
-    fn untracked(&mut self, name: &Arc<str>, why: &'static str) {
-        self.untracked.entry(why).or_insert_with(|| (0, name.clone())).0 += 1;
+    fn untracked(&mut self, name: &str, why: &'static str) {
+        self.untracked.entry(why).or_insert_with(|| (0, name.into())).0 += 1;
     }
 
     fn written(&mut self, written: cached::Written) {
