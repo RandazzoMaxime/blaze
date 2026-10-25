@@ -69,6 +69,16 @@ pub(crate) fn command(args: impl Iterator<Item = String>) -> anyhow::Result<()> 
         Asked::Stop => stop()?,
         Asked::Enable => switch::enable()?,
         Asked::Disable => switch::disable()?,
+        Asked::Toolchain => match toolchain::settle() {
+            Ok(chosen) => {
+                println!("blaze builds with {chosen}");
+                0
+            }
+            Err(why) => {
+                say::error(&why);
+                FAILED
+            }
+        },
         Asked::Help => {
             println!("{HELP}");
             0
@@ -82,9 +92,9 @@ pub(crate) fn command(args: impl Iterator<Item = String>) -> anyhow::Result<()> 
 }
 
 const HELP: &str = "\
-cargo blaze: cargo's build, run, test and check, from a daemon that keeps the workspace compiled
+blaze: cargo's build, run, test and check, from a daemon that keeps the workspace compiled
 
-usage: cargo blaze <command> [cargo's flags]
+usage: blaze <command> [cargo's flags]    (or cargo blaze <command>)
 
   build, run, test   by the daemon when it has the workspace loaded, by cargo otherwise
   check              what the daemon's build of the same flags says, when it has one loaded;
@@ -92,6 +102,7 @@ usage: cargo blaze <command> [cargo's flags]
   status             whether blaze is enabled, what the daemon has loaded, what fell back
   stop               ends the daemon; the next build starts one
   enable, disable    plain `cargo build|run|test|check` through blaze, and back
+  toolchain          which Rust blaze builds with, downloaded once if it has none
   cache              what the `#[ra_jit::cache]` functions kept, by function
   cache clear        forgets it; `--stale`, all but what each function's code computed
 

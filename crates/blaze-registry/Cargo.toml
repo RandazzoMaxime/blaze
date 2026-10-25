@@ -30,6 +30,7 @@ flate2 = "1"
 tar = { version = "0.4.46", default-features = false }
 filetime = "0.2.29"
 ra-jit-store.workspace = true
+toml.workspace = true
 # The HTTP stack the rest of blaze uses (crates/ra-jit/Cargo.toml): hyper 1 over rustls with ring.
 hyper = { version = "1", default-features = false, features = ["client", "http1"] }
 hyper-util = { version = "0.1", default-features = false, features = ["client-legacy", "http1", "tokio"] }
@@ -40,8 +41,6 @@ tokio = { version = "1.47", features = ["rt-multi-thread", "time"] }
 [target.'cfg(unix)'.dependencies]
 libc.workspace = true
 
-[dev-dependencies]
-toml.workspace = true
 
 [lints]
 workspace = true
