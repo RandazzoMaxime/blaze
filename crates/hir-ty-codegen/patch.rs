@@ -2484,6 +2484,15 @@ impl Base {
                 return Ok(Err("a function now shares an `async` block with one left to rustc"));
             }
         }
+        if std::env::var_os("RA_JIT_STATS").is_some() {
+            let decls = cg.module.declarations();
+            let anew = (cg.instances.values())
+                .filter(|&&id| {
+                    decls.get_function_decl(id).linkage_name(id).starts_with("ra-jit.patch::")
+                })
+                .count();
+            eprintln!("patch: {anew} instances the base has no code for");
+        }
         let (bodies, mut phases) = (cg.bodies, cg.phases);
         let start = stdx::time::Instant::now();
         let (object, _) = cg.finish()?;

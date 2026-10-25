@@ -24,7 +24,7 @@ use super::{Instance, InstanceDef, SymbolResolver};
 use hir_ty::{
     ImplTraitId, InferBodyId,
     consteval::try_const_usize,
-    db::{HirDatabase, InternedClosure, InternedClosureId, InternedCoroutineId},
+    db::{ClosureKey, HirDatabase, InternedClosure, InternedClosureId, InternedCoroutineId},
     next_solver::{GenericArgs, Region, TermId, Ty, TyKind},
 };
 
@@ -500,7 +500,9 @@ impl<'a, 'db> StableNames<'a, 'db> {
         self.item(out, trait_.krate(self.db), id.file_id, id.value.erase())
     }
 
-    /// A closure or an `async` block by the body it is written in and where.
+    /// A closure or an `async` block by the body it is written in and its place among the
+    /// closures there, as it is interned: an edit of the body before it leaves its name, and
+    /// the names of what is generic over it, as they were.
     fn closure(&self, out: &mut String, closure: InternedClosure<'db>) -> Option<()> {
         let db = self.db;
         let InferBodyId::DefWithBodyId(owner) = closure.owner else {
@@ -521,7 +523,7 @@ impl<'a, 'db> StableNames<'a, 'db> {
                 self.item(out, it.krate(db), id.file_id, id.value.erase())?
             }
         }
-        write!(out, "@{}", closure.expr.into_raw().into_u32()).ok()
+        write!(out, "@{}", ClosureKey::nth(db, closure)).ok()
     }
 
     fn args(&self, out: &mut String, args: GenericArgs<'db>) -> Option<()> {

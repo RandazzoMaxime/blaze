@@ -146,6 +146,10 @@ class Logs:
     def links(self):
         return re.findall(r"^link: \S+ \((.*)\)$", self.text(), re.M)
 
+    def anew(self):
+        """How many instances each patch compiled that the base had no code for."""
+        return [int(n) for n in re.findall(r"^patch: (\d+) instances the base has no code for$", self.text(), re.M)]
+
 
 def program(ws):
     return subprocess.run([os.path.join(ws, "target", "debug", "tapp")], capture_output=True, text=True,
@@ -191,10 +195,11 @@ def restart(ws, env, label, steps):
             text = open(path).read()
             assert old in text, (what, old)
             open(path, "w").write(text.replace(old, new, 1))
-        seen = len(logs.links())
+        seen, seen_anew = len(logs.links()), len(logs.anew())
         said = build(ws, env, what)
         printed = program(ws)
         made = logs.links()[seen:]
+        anew = logs.anew()[seen_anew:]
         how = made[-1] if made else "no link"
         verdict = "ok"
         if printed != expected:
@@ -204,7 +209,7 @@ def restart(ws, env, label, steps):
         elif not how.startswith("spliced"):
             verdict = "NOT SPLICED"
         wrong += verdict != "ok"
-        print(f"{label + ': ' + what:48} {verdict:12} {how[:120]}", flush=True)
+        print(f"{label + ': ' + what:48} {verdict:12} {how[:100]}; {anew[-1] if anew else '?'} anew", flush=True)
     if REBUILT in logs.text():
         print(f"{label}: NOT the store's code taken as it is: the daemon said `{REBUILT}`", flush=True)
         wrong += 1
