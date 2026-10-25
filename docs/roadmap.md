@@ -328,7 +328,66 @@ and whatever depends on items the form does not name is recorded and checked.
 
 ### Measured
 
-FIXME-MEASURED
+`ra-jit items` on both sides of 15 real commits of nushell, ripgrep and helix, picked by their
+messages as renames, moves, rustfmt and refactors, with a fix or two as controls; dev-aws-8,
+16 cores pinned, release build of `blaze-next-items` at `062d38fc52` (**read**). An item counts
+when its crate has a changed file, or depends on such a crate in the checkout: the crates whose
+keys today's store gives new names. "New" is a hash found nowhere among the parent's.
+
+| commit | items counted | new code hashes | interface kept | deep kept | today: names kept | today: store keys kept | edit to result today |
+|---|---|---|---|---|---|---|---|
+| ripgrep `bb8172f` rustfmt, 40 files | 4,705 | 1 | 100% | 99.8% | 100% | 0% | 0.35-0.52 s |
+| ripgrep `861f6d3` inline format args, 5 files | 1,691 | 1 | 100% | 99.4% | 100% | 0% | 1.9-2.1 s (`build.rs` changed: cargo) |
+| ripgrep `756a945` `Cargo.toml` only, 10 files | 4,805 | 1 | 100% | 99.8% | 100% | 0% | |
+| ripgrep `626b895` refactor `is_hidden` | 2,174 | 1 | 100% | 99.4% | 99.9% | 0% | |
+| ripgrep `d47663b` a fix (control) | 2,760 | 2 | 100% | 99.0% | 100% | 0% | 0.18-0.22 s |
+| helix `7fccb499d` cargo fmt | 2,902 | 0 | 100% | 100% | 100% | 0% | 0.09 s (0.48 s the first) |
+| helix `5f5c5a30e` a dependency moved to the workspace | 5,687 | 0 | 100% | 100% | 100% | 0% | |
+| helix `bd1b25b5c` `once_cell` to std, 22 files | 23,482 | 1,325 | 92.0% | 91.6% | 100% | 0% | 9.1-31.9 s (manifests: cargo) |
+| helix `e19c0ea02` a `Debug` bound dropped | 5,848 | 1 | 100% | 100% | 100% | 0% | |
+| helix `59f323140` `IndexMap` in `KeyTrieNode` | 2,109 | 115 | 92.4% | 91.6% | 98.5% | 0% | |
+| nushell `f97cd76f2` std's `fetch_update` to `try_update` | 37,828 | 2 | 100% | 99.5% | 100% | 0% | 20.8-27.4 s (manifest: cargo) |
+| nushell `f70ed723c` the parser split into 16 files | 10,543 | 46 | 100% | 96.7% | 98.0% | 0% | 0.88-1.39 s |
+| nushell `728b88abf` `merge` moved to another crate | 7,626 | 8 | 99.8% | 99.7% | 99.6% | 0% | 0.45-3.68 s |
+| nushell `686de561b` spread checks consolidated | 10,574 | 12 | 100% | 96.9% | 100% | 0% | |
+| nushell `2529074fc` a fix (control) | 37,785 | 10 | 100% | 96.6% | 100% | 0% | (the parent's build failed) |
+
+What changed, read item by item (**read**):
+
+- **Pure layout changes keep every hash** but one: rustfmt of 40 files, `cargo fmt`, a `Cargo.toml`
+  edit and a dependency moved to the workspace. The one is ripgrep's `generate_digits`, which
+  reads the git revision `build.rs` passes, so it is new at every commit: a real input.
+- **The parser split** (16 new files, 10,543 items) changed 46 code hashes: 38 call `log::trace!`,
+  whose `module_path!()` is a string literal that a move changes (the table above makes it a
+  request); 2 call `str::from_utf8`, which the old file resolved to `core::str::from_utf8` through
+  `use std::str` and the new ones to `str`'s inherent function, a different item; 6 were edited
+  by the commit. None changed for having moved.
+- **The renames** of `fetch_update` are of a std function: the 2 callers now call another item.
+- **Refactors that change types** (`once_cell` to std, `IndexMap`) change what uses those types,
+  and nothing else: 88% and 91% of the code hashes kept.
+- **Before normalizing the body's order**, ripgrep's rustfmt changed `hiargs::printer`: `return x`
+  became `return x;`, which gives lowering one more local of type `!` and its storage marks. Bodies
+  are now written in the order a walk from the start block reaches them, leaving out blocks it
+  does not reach and the marks of locals nothing else uses.
+- **Today's names already survive most of this inside one daemon**: an item's name is its file and
+  its place in the file's table of items, which rustfmt and reorders keep; moves to another file
+  lose them (the split: 2.0%). Today's store keys are all new in every crate counted, whatever the
+  edit, because they name crates by their sources.
+- **Missed forms**: nushell's newest commits have 3,952 items (10%) whose types have an error
+  in blaze's front end, the June ones 1,994 without MIR and 1,359 with errors; ripgrep 28,
+  helix 18. Their hashes are pinned to their place, so they never share wrongly and miss on a
+  move. They are what the front end does not yet check, not the hash.
+
+**Cost** (**read**): hashing is 3.2-4.2 us an item, 15-17 ms for ripgrep's 4,800 items, 80-103 ms
+for helix's 25,000 and 120-157 ms for nushell's 34,000-41,000, on one thread: 0.13-0.25% of
+computing the forms (8.2-8.5 s, 33-35 s and 79-94 s, the MIR of every item from nothing, on one
+thread). On an edit only the edited files' items and the dependents whose interfaces changed are
+hashed. **Size**: four 32-byte hashes an item, 5.2 MB for nushell's 40,605; the code hashes
+alone, which are the store's keys, 1.3 MB.
+
+The edit-to-result times are today's daemon, warm, with each commit applied and taken back
+twice (`harness/commits.py`). Times with item keys wait for step 3 below; the commits whose
+manifests or build scripts change go through cargo today and are not this layer's to speed up.
 
 ### The store's key, and main's keys
 
