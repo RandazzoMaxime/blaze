@@ -6,9 +6,10 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context as _, bail};
+use cargo_util_schemas::manifest::TomlProfiles;
 use rustc_hash::{FxHashMap, FxHashSet};
 
-use crate::features::{Edition, ResolveBehavior};
+use crate::features::{Edition, Features, ResolveBehavior};
 use crate::manifest::{
     Context, EitherManifest, Manifest, WorkspaceConfig, WorkspaceRootConfig, read_manifest,
 };
@@ -175,6 +176,26 @@ impl<'c> Workspace<'c> {
 
     pub fn resolve_behavior(&self) -> ResolveBehavior {
         self.resolve_behavior
+    }
+
+    /// The root manifest's `[profile]` tables, the only ones cargo reads.
+    pub fn profiles(&self) -> Option<&TomlProfiles> {
+        match self.get(self.root_manifest()) {
+            EitherManifest::Real(m) => m.normalized_toml.profile.as_ref(),
+            EitherManifest::Virtual(vm) => vm.normalized_toml.profile.as_ref(),
+        }
+    }
+
+    /// The root manifest's `cargo-features`.
+    pub fn unstable_features(&self) -> &Features {
+        match self.get(self.root_manifest()) {
+            EitherManifest::Real(m) => &m.unstable_features,
+            EitherManifest::Virtual(vm) => &vm.unstable_features,
+        }
+    }
+
+    pub fn is_member(&self, manifest_path: &Path) -> bool {
+        self.member_set.contains(manifest_path)
     }
 
     /// The member packages with their manifest paths, in cargo's order.

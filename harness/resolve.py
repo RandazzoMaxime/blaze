@@ -16,6 +16,11 @@ The parts of the corpus (harness/resolve/corpus.json) are
               example, each of CONFIG_RUNS and its case's runs, on the trees of
               crates/blaze-manifest/tests/config-fixtures and the roots of the bench and
               workspace repositories: exit code, stdout and stderr compared as text
+  profiles    the `profile` of every unit of `cargo <run> --unit-graph -Zunstable-options`
+              against the `profiles` example's for that graph, each of PROFILE_RUNS and its
+              case's runs, on the trees of crates/blaze-manifest/tests/profile-fixtures and
+              the bench and workspace repositories: the profiles, the warnings about profiles
+              and cargo's error when it refuses the profiles
 and every part runs when none is named. Each is fetched under `--work` (default
 $TMPDIR/blaze-resolve) with a CARGO_HOME of its own there, then `cargo metadata --no-deps
 --format-version 1` and the `metadata` example of blaze-manifest are run on it from its root.
@@ -28,7 +33,8 @@ JSON; the counts are docs/resolve.md's.
 `--fixtures` runs cargo on each fixture of crates/blaze-manifest/tests/fixtures, copied into a
 directory of its own, from the directory its `fixture.json` names in `cwd` (its root if none),
 and writes what it printed, normalized, as the fixture's `expected.json`, or `{"error": ...}`
-with the error's lines when cargo refused it, and each config tree's runs as its `expected.json`:
+with the error's lines when cargo refused it, and each config and profile tree's runs as its
+`expected.json` (a profile tree's with the unit graph cargo printed and the host it ran on):
 the crate's tests compare against those without cargo or the network. The cargo is `cargo
 +1.99.0` unless CARGO says otherwise; the blaze-manifest example is built with it unless
 `--blaze` names one.
@@ -40,11 +46,15 @@ ROOT = os.path.dirname(HERE)
 CORPUS = os.path.join(HERE, "resolve", "corpus.json")
 FIXTURES = os.path.join(ROOT, "crates", "blaze-manifest", "tests", "fixtures")
 CONFIG_FIXTURES = os.path.join(ROOT, "crates", "blaze-manifest", "tests", "config-fixtures")
+PROFILE_FIXTURES = os.path.join(ROOT, "crates", "blaze-manifest", "tests", "profile-fixtures")
 CARGO = os.environ.get("CARGO_ORACLE", "cargo +1.99.0").split()
 USER_AGENT = "blaze resolve.py (https://github.com/indexable-inc/blaze)"
-PARTS = ["bench", "crates", "workspaces", "config"]
+PARTS = ["bench", "crates", "workspaces", "config", "profiles"]
 # The `config get` arguments every config case runs, before those of its case.json.
 CONFIG_RUNS = [[], ["--show-origin"], ["--merged", "no"], ["--merged", "no", "--show-origin"], ["--format", "json"], ["--format", "json-value"], ["--format", "json", "--show-origin"]]
+# The commands every profiles case runs, before those of its case.json; `--target` names a
+# triple that is not the host's (see profile_runs).
+PROFILE_RUNS = [["build"], ["build", "--release"], ["test", "--no-run"], ["bench", "--no-run"], ["check"], ["build", "--target", "$OTHER"]]
 BENCH_PROJECT = re.compile(r'^    "([\w.-]+)": dict\(\s*repo="([^"]+)",[^\n]*?rev="([0-9a-f]{40})"', re.M)
 # A repository two parts share is fetched by one of them at a time.
 FETCH_LOCKS = collections.defaultdict(threading.Lock)
@@ -194,6 +204,105 @@ def compare_config(case, blaze, cargo_home):
     return result
 
 
+def rustc_host():
+    rustc = ["rustc", CARGO[1]] if len(CARGO) > 1 and CARGO[1].startswith("+") else ["rustc"]
+    out = subprocess.run(rustc + ["-vV"], capture_output=True, text=True, check=True).stdout
+    return next(l.split(": ", 1)[1] for l in out.splitlines() if l.startswith("host: "))
+
+
+def profile_case(directory):
+    """A profile fixture's case.json, its defaults filled in; a repository's are the defaults."""
+    path = directory and os.path.join(directory, "case.json")
+    case = json.load(open(path)) if path and os.path.exists(path) else {}
+    return dict(cwd=case.get("cwd", ""), runs=[dict(args=a) for a in PROFILE_RUNS] + case.get("runs", []))
+
+
+def profile_warnings(stderr):
+    return [l for l in stderr.splitlines() if l.startswith("warning: ") and "profile" in l]
+
+
+def reduce_graph(graph):
+    """The parts of a unit graph the profiles example reads, and the profiles to compare."""
+    keep = lambda u: dict(pkg_id=u["pkg_id"], target=dict(kind=u["target"]["kind"], name=u["target"]["name"]), profile=u["profile"], platform=u["platform"], mode=u["mode"], features=u["features"], dependencies=[dict(index=d["index"]) for d in u["dependencies"]])
+    return dict(units=[keep(u) for u in graph["units"]], roots=graph["roots"])
+
+
+def profile_runs(root, case, blaze, cargo_home, host):
+    """Each run on the tree at root: (run, cargo's, blaze's), both as {code, profiles or error, warnings}."""
+    other = "x86_64-unknown-linux-gnu" if "-apple-" in host else "aarch64-apple-darwin"
+    base = {k: v for k, v in clean_env(cargo_home).items() if k != "CARGO_ORACLE"}
+    base["RUSTC_BOOTSTRAP"] = "1"
+    cwd = os.path.join(root, case["cwd"])
+
+    def norm(text):
+        for path, name in ((os.path.realpath(cargo_home), "$CARGO_HOME"), (cargo_home, "$CARGO_HOME"), (os.path.realpath(root), "$ROOT"), (root, "$ROOT")):
+            text = text.replace(path, name)
+        return text
+
+    for spec in case["runs"]:
+        args = [a.replace("$OTHER", other) for a in spec["args"]]
+        env = dict(base, **{k: v.replace("$ROOT", root) for k, v in spec.get("env", {}).items()})
+        code, out, err = run(CARGO + args + ["--unit-graph", "-Zunstable-options"], cwd, env)
+        cargo = dict(code=code, warnings=norm("\n".join(profile_warnings(err))).splitlines())
+        if code:
+            cargo["error"] = norm(error_text(err))
+        else:
+            graph = json.loads(out)
+            cargo["profiles"] = [u["profile"] for u in graph["units"]]
+            cargo["graph"] = json.loads(norm(json.dumps(reduce_graph(graph))))
+        mine = None
+        if blaze:
+            proc = subprocess.run([blaze, "--host", host, *args], cwd=cwd, env=env, input=out if not code else "", capture_output=True, text=True)
+            mine = dict(code=proc.returncode, warnings=norm("\n".join(profile_warnings(proc.stderr))).splitlines())
+            if proc.returncode:
+                mine["error"] = norm(error_text(proc.stderr))
+            else:
+                mine["profiles"] = json.loads(proc.stdout)
+        yield dict(spec, args=args), cargo, mine
+
+
+def compare_profiles(case, blaze, cargo_home, host):
+    """Runs each profiles run on case["dir"], copied away from the trees above it for a fixture."""
+    result = dict(name=case["name"], part=case["part"])
+    work = tempfile.mkdtemp(prefix="blaze-profiles-")
+    try:
+        if case.get("fixture"):
+            root = os.path.join(os.path.realpath(work), case["name"])
+            shutil.copytree(case["dir"], root, ignore=shutil.ignore_patterns("case.json", "expected.json"))
+            spec = profile_case(case["dir"])
+        else:
+            root, spec = case["dir"], profile_case(None)
+        runs = list(profile_runs(root, spec, blaze, cargo_home, host))
+    finally:
+        shutil.rmtree(work)
+    units = 0
+    for run_spec, c, b in runs:
+        what = " ".join(run_spec["args"])
+        if c["code"] and b["code"]:
+            if c["error"] != b["error"]:
+                result.update(cls="different", difference=f"{what}: error {json.dumps(b['error'][:300])}, cargo's {json.dumps(c['error'][:300])}")
+                return result
+            continue
+        if c["code"] or b["code"]:
+            result.update(cls="cargo-failed" if c["code"] else "blaze-failed", difference=f"{what}: {(c.get('error') or b.get('error'))[:300]}")
+            return result
+        for i, (x, y) in enumerate(zip(b["profiles"], c["profiles"])):
+            if x != y:
+                unit = c["graph"]["units"][i]
+                where = f"{unit['pkg_id'].split('#')[-1]} {unit['target']['name']} {unit['mode']}"
+                result.update(cls="different", difference=f"{what}: unit {i} ({where}): {first_difference(x, y)}")
+                return result
+        if len(b["profiles"]) != len(c["profiles"]):
+            result.update(cls="different", difference=f"{what}: {len(b['profiles'])} profiles, cargo {len(c['profiles'])}")
+            return result
+        if b["warnings"] != c["warnings"]:
+            result.update(cls="different", difference=f"{what}: warnings {b['warnings']}, cargo's {c['warnings']}")
+            return result
+        units += len(c["profiles"])
+    result.update(cls="equal", runs=len(runs), units=units)
+    return result
+
+
 def fetch_git(repo, rev, dest):
     with FETCH_LOCKS[dest]:
         fetch_git_unlocked(repo, rev, dest)
@@ -234,9 +343,10 @@ def fetch_crate_unlocked(name, version, dest):
 def cases_of(part, corpus, work, limit):
     """The workspaces of a part, fetched: (name, directory) each."""
     cases = []
-    if part == "config":
-        for name in sorted(os.listdir(CONFIG_FIXTURES)):
-            cases.append(dict(name=name, part=part, dir=os.path.join(CONFIG_FIXTURES, name), fetch=lambda: None, fixture=True))
+    if part in ("config", "profiles"):
+        fixtures = CONFIG_FIXTURES if part == "config" else PROFILE_FIXTURES
+        for name in sorted(os.listdir(fixtures)):
+            cases.append(dict(name=name, part=part, dir=os.path.join(fixtures, name), fetch=lambda: None, fixture=True))
         for repos in ("bench", "workspaces"):
             cases += [dict(c, part=part, name=f"{repos}/{c['name']}") for c in cases_of(repos, corpus, work, limit)]
         return cases
@@ -261,16 +371,16 @@ def cases_of(part, corpus, work, limit):
 
 
 def build_blaze():
-    """The metadata and config examples, by name."""
-    command = CARGO + ["build", "--release", "-p", "blaze-manifest", "--example", "metadata", "--example", "config", "--message-format", "json"]
+    """The metadata, config and profiles examples, by name."""
+    command = CARGO + ["build", "--release", "-p", "blaze-manifest", "--example", "metadata", "--example", "config", "--example", "profiles", "--message-format", "json"]
     proc = subprocess.run(command, cwd=ROOT, capture_output=True, text=True, check=True)
     built = {}
     for line in proc.stdout.splitlines():
         message = json.loads(line)
         if message.get("reason") == "compiler-artifact" and message.get("executable"):
             built[message["target"]["name"]] = message["executable"]
-    if set(built) != {"metadata", "config"}:
-        raise SystemExit(f"cargo built {sorted(built)}, not the metadata and config examples")
+    if set(built) != {"metadata", "config", "profiles"}:
+        raise SystemExit(f"cargo built {sorted(built)}, not the metadata, config and profiles examples")
     return built
 
 
@@ -305,6 +415,21 @@ def write_fixtures():
             f.write("\n")
         print(f"config/{name}: {len(expected)} runs")
         shutil.rmtree(work)
+    host = rustc_host()
+    for name in sorted(os.listdir(PROFILE_FIXTURES)):
+        source = os.path.join(PROFILE_FIXTURES, name)
+        work = os.path.realpath(tempfile.mkdtemp(prefix="blaze-fixture-"))
+        root = os.path.join(work, name)
+        shutil.copytree(source, root, ignore=shutil.ignore_patterns("case.json", "expected.json"))
+        runs = []
+        for spec, cargo, _ in profile_runs(root, profile_case(source), None, cargo_home, host):
+            cargo.pop("profiles", None)
+            runs.append(dict(spec, **cargo))
+        with open(os.path.join(source, "expected.json"), "w") as f:
+            json.dump(dict(host=host, runs=runs), f, indent=1, ensure_ascii=False)
+            f.write("\n")
+        print(f"profiles/{name}: {len(runs)} runs")
+        shutil.rmtree(work)
     shutil.rmtree(cargo_home)
 
 
@@ -338,7 +463,8 @@ def main():
     out = option(argv, "--out")
     limit = int(option(argv, "--limit", "1000000"))
     blaze = option(argv, "--blaze")
-    built = dict(metadata=blaze, config=os.path.join(os.path.dirname(blaze), "config")) if blaze else build_blaze()
+    built = dict(metadata=blaze, config=os.path.join(os.path.dirname(blaze), "config"), profiles=os.path.join(os.path.dirname(blaze), "profiles")) if blaze else build_blaze()
+    host = rustc_host()
     cargo_home = os.path.join(work, "cargo-home")
     os.makedirs(cargo_home, exist_ok=True)
 
@@ -356,6 +482,8 @@ def main():
             return dict(name=case["name"], part=case["part"], cls="fetch-failed", error=str(e)[:300])
         if case["part"] == "config":
             return compare_config(case, built["config"], cargo_home)
+        if case["part"] == "profiles":
+            return compare_profiles(case, built["profiles"], cargo_home, host)
         return compare(case, built["metadata"], cargo_home)
 
     results = []
