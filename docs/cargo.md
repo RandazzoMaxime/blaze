@@ -106,6 +106,10 @@ attributes (`#[ignore]`, `#[should_panic]`). The standard library is named by th
 A test runs again when that hash is not the one it last passed with, when it has not passed
 since it was added or failed, and every time when it reaches what its code does not decide:
 a file, the environment, another process, the network, or a function ra-jit can't compile.
+Of a test executable that fails, the tests libtest's summary lists as failed run again, and
+the others that ran are remembered as passed; one that ends with no summary (a crash, or a
+test that exits the process) has every test it ran run again. Its output is passed on through
+a pipe as it comes, colored as libtest would color it on the terminal.
 An integration test also runs again when a program of its package that cargo hands it as
 `CARGO_BIN_EXE_<name>` was built again. `cargo ra-jit test -v` says, under each test
 executable, why each test it runs every time does, by the fewest calls from the test to it:

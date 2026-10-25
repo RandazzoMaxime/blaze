@@ -69,6 +69,90 @@ fn ended(command: &mut Command, held: Option<Held>, state: &State) -> std::io::R
     started?.wait()
 }
 
+/// The most of what a program of tests printed last that is kept to read its failures from:
+/// one whose list of them is longer is taken to have said none.
+const PRINTED_KEPT: usize = 4 << 20;
+
+/// Runs `command` as [`ended`] does, with what it prints passed on as it comes, and the tests
+/// libtest's summary at its end says failed: `None` when it says none, as a program that
+/// crashed, or exited in a test, does not. libtest colors its output as it would on this
+/// terminal, which it does not see through the pipe.
+fn listing_failures(
+    command: &mut Command,
+    held: Option<Held>,
+    state: &State,
+) -> std::io::Result<(ExitStatus, Option<Vec<String>>)> {
+    use std::io::{IsTerminal as _, Read as _, Write as _};
+    let out = std::io::stdout();
+    let colored = command.get_args().any(|it| {
+        let it = it.to_string_lossy();
+        it == "--color" || it.starts_with("--color=")
+    });
+    if !colored && out.is_terminal() {
+        command.arg("--color=always");
+    }
+    command.stdout(std::process::Stdio::piped());
+    let held = held.unwrap_or_else(|| state.hold());
+    let child = started(command);
+    drop(held);
+    let mut child = child?;
+    let mut printed = Vec::new();
+    if let Some(mut from) = child.stdout.take() {
+        let mut chunk = [0; 8192];
+        loop {
+            let read = match from.read(&mut chunk) {
+                Ok(0) => break,
+                Ok(read) => read,
+                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(_) => break,
+            };
+            // A reader that went away does not stop the tests, as it would not under cargo.
+            let mut out = out.lock();
+            _ = out.write_all(&chunk[..read]).and_then(|()| out.flush());
+            printed.extend_from_slice(&chunk[..read]);
+            if printed.len() > PRINTED_KEPT {
+                printed.drain(..printed.len() - PRINTED_KEPT);
+            }
+        }
+    }
+    let status = child.wait()?;
+    Ok((status, failures(&String::from_utf8_lossy(&printed))))
+}
+
+/// The tests libtest's summary lists as failed in what a program of tests printed: the names
+/// under the last `failures:` before `test result: FAILED`.
+fn failures(printed: &str) -> Option<Vec<String>> {
+    let plain = without_colors(printed);
+    let end = plain.rfind("\ntest result: FAILED")?;
+    let start = plain[..end].rfind("\nfailures:\n")? + "\nfailures:\n".len();
+    let names: Vec<String> = plain[start..end]
+        .lines()
+        .filter_map(|it| it.strip_prefix("    "))
+        .map(str::to_owned)
+        .collect();
+    (!names.is_empty()).then_some(names)
+}
+
+/// `text` without the escapes that color a terminal's text.
+fn without_colors(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut chars = text.chars();
+    while let Some(c) = chars.next() {
+        if c != '\x1b' {
+            out.push(c);
+            continue;
+        }
+        if chars.next() == Some('[') {
+            for c in chars.by_ref() {
+                if c.is_ascii_alphabetic() {
+                    break;
+                }
+            }
+        }
+    }
+    out
+}
+
 /// Starts `command` once the daemon is not writing its program (`splice::unwritten`): one
 /// started while the file is open for writing is refused ("text file busy").
 pub(crate) fn started(command: &mut Command) -> std::io::Result<std::process::Child> {
@@ -124,11 +208,14 @@ pub(crate) fn tests(
         command.args(asked.program_args()).args(&picked).envs(test.env.iter().cloned());
         command.current_dir(&test.package_dir);
         as_built(&mut command)?;
-        let status = ended(&mut command, held.take(), state)
-            .with_context(|| format!("could not execute {shown}"))?;
+        let ran = match &pick {
+            Pick::Some { .. } => listing_failures(&mut command, held.take(), state),
+            Pick::Asked => ended(&mut command, held.take(), state).map(|it| (it, None)),
+        };
+        let (status, failures) = ran.with_context(|| format!("could not execute {shown}"))?;
         match pick {
             Pick::Some { passed, names, .. } if !status.success() => {
-                passed.failed(names.as_deref())
+                passed.failed(names.as_deref(), failures.as_deref())
             }
             Pick::Some { passed, .. } => passed.passed(),
             Pick::Asked => {}
@@ -231,4 +318,26 @@ pub(crate) fn exit_code(status: ExitStatus) -> i32 {
         return 128 + signal;
     }
     status.code().unwrap_or(1)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::failures;
+
+    #[test]
+    fn the_summary_names_the_failures() {
+        let pretty = "\nrunning 3 tests\ntest a ... ok\ntest b ... FAILED\ntest c::d ... FAILED\n\n\
+            failures:\n\n---- b stdout ----\nfailures:\n    not_a_test\n\n---- c::d stdout ----\n\n\
+            failures:\n    b\n    c::d\n\ntest result: FAILED. 1 passed; 2 failed; 0 ignored\n\n";
+        assert_eq!(failures(pretty), Some(vec!["b".to_owned(), "c::d".to_owned()]));
+        let colored =
+            "\nfailures:\n    b\n\ntest result: \x1b[31mFAILED\x1b[0m. 0 passed; 1 failed\n";
+        assert_eq!(failures(colored), Some(vec!["b".to_owned()]));
+        assert_eq!(
+            failures("\nrunning 1 test\ntest a ... ok\n\ntest result: ok. 1 passed\n"),
+            None
+        );
+        // A program that stopped in a test has no summary.
+        assert_eq!(failures("\nrunning 2 tests\ntest a ... ok\n"), None);
+    }
 }
