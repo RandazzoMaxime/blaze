@@ -191,6 +191,12 @@ fn strip_url_protocol(url: &Url) -> Url {
     raw.split_once('+').unwrap().1.parse().unwrap()
 }
 
+impl serde::Serialize for PackageIdSpec {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> std::result::Result<S::Ok, S::Error> {
+        self.to_string().serialize(s)
+    }
+}
+
 impl fmt::Display for PackageIdSpec {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let mut printed_name = false;
