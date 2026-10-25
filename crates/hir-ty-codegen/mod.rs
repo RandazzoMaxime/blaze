@@ -131,9 +131,11 @@ pub use patch::{OutOfDate, Stale, StaleSteps};
 pub mod bench {
     use ra_jit_store::KEY;
 
-    /// The key of the entry for `name`, as a build asks for it.
+    /// The key of the entry for `name`, as a build asks for it: one that tells a debugger of
+    /// its variables when `debug`.
     pub fn entry_key(name: &str, debug: bool, program: &[u8; KEY]) -> Option<[u8; KEY]> {
-        super::cached::Entry::key(name, debug, Some(program))
+        let told = super::cached::Told::of(debug, debug);
+        super::cached::Entry::key(name, told, Some(program))
     }
 }
 mod type_id;
@@ -683,7 +685,7 @@ impl CodegenUnit {
             let statics = start.elapsed();
             let mut stale = std::mem::take(&mut known.stale);
             if stale.is_empty() {
-                stale.push(base.stale(db, 0, 1));
+                stale.push(base.stale(db, Some(symbols), 0, 1));
             }
             let patch = loop {
                 let patch = base.patch(
@@ -852,7 +854,7 @@ impl CodegenUnit {
                 let start = stdx::time::Instant::now();
                 cg.find_stored_roots(&ours);
                 // One without a symbol is not compiled, and is still lowered to be told why.
-                let (told, stored) = (cg.debug.is_some().then_some(&cg.told), &cg.stored_roots);
+                let (told, stored) = (cg.tells_variables().then_some(&cg.told), &cg.stored_roots);
                 if cg.units() {
                     #[cfg(feature = "llvm")]
                     cg.compile_units(&ours, Vec::new());
@@ -1270,8 +1272,15 @@ impl Rejections {
 
     /// Looks at one part in `parts` of what the last full build compiled for what an edit
     /// changed, which threads can do a part each. `None` when no patch is to be made.
-    pub fn stale(&self, db: &dyn HirDatabase, part: usize, parts: usize) -> Option<Stale> {
-        Some(self.patched()?.stale(db, part, parts))
+    /// `symbols` names what the last build had from the store.
+    pub fn stale(
+        &self,
+        db: &dyn HirDatabase,
+        symbols: Option<&dyn SymbolResolver>,
+        part: usize,
+        parts: usize,
+    ) -> Option<Stale> {
+        Some(self.patched()?.stale(db, symbols, part, parts))
     }
 
     /// What the next build is a patch of, if it is one.
@@ -1932,9 +1941,15 @@ struct Kept {
     unkept: FxHashMap<&'static str, usize>,
     /// Why instances with a name were compiled.
     unfound: FxHashMap<&'static str, usize>,
+    /// Why entries of the checkout were kept with no mark, and the first of each.
+    untracked: FxHashMap<&'static str, (usize, Box<str>)>,
 }
 
 impl Kept {
+    fn untracked(&mut self, name: &str, why: &'static str) {
+        self.untracked.entry(why).or_insert_with(|| (0, name.into())).0 += 1;
+    }
+
     fn written(&mut self, written: cached::Written) {
         self.added += written.added;
         if written.of_cargo != 0 {
@@ -1953,8 +1968,20 @@ impl Kept {
     }
 
     fn report(&self) {
-        let Kept { added, found, unnamed, unnamed_requests, differing, same, unkept, unfound } =
-            self;
+        let Kept {
+            added,
+            found,
+            unnamed,
+            unnamed_requests,
+            differing,
+            same,
+            unkept,
+            unfound,
+            untracked,
+        } = self;
+        for (why, (count, first)) in untracked {
+            eprintln!("kept with no mark: {count}, {why}, as `{first}`");
+        }
         if added + found + unnamed + unnamed_requests + differing + same != 0 {
             eprintln!(
                 "entries: {found} found, {added} added, {same} as stored, {differing} not as stored, \
@@ -4430,7 +4457,7 @@ impl<'a, 'db> ObjectCodegen<'a, 'db> {
             )
             .map(debuginfo::Describer::new)
         });
-        let debugged = debug.is_some();
+        let debugged = cached::Told::of(debug.is_some(), symbols.describes_variables());
         let described = start.elapsed();
         let mixed = settled::Mixed::of(db, symbols, &own_statics.crates);
         let mixed_at = start.elapsed();
@@ -4444,7 +4471,12 @@ impl<'a, 'db> ObjectCodegen<'a, 'db> {
             store.settled();
         }
         let settled_at = start.elapsed();
-        let names = stable::StableNames::new(db, symbols, own_statics.crates.clone(), hydrate);
+        // A patch names what its base has from the store as the base did, to call it there.
+        let names = match base.and_then(|it| it.frozen_ids()) {
+            Some(ids) => stable::StableNames::new(db, symbols, own_statics.crates.clone(), true)
+                .frozen(ids.clone()),
+            None => stable::StableNames::new(db, symbols, own_statics.crates.clone(), hydrate),
+        };
         if std::env::var_os("RA_JIT_STATS").is_some() {
             let us = |it: std::time::Duration| it.as_micros();
             eprintln!(
@@ -4713,9 +4745,17 @@ impl<'a, 'db> ObjectCodegen<'a, 'db> {
         if tiered.is_none() && self.roots_from_store() {
             let instance = root_instance(db, func);
             let tally = backend::Tally::global();
-            tally.step(Step::StoreWrite, || self.keep(&instance, compiled, &ids, debug));
+            tally.step(Step::StoreWrite, || {
+                self.keep(&instance, func.krate(db), compiled, &ids, debug)
+            });
         }
         Ok(symbol)
+    }
+
+    /// Whether the types of variables are told of. A build that tells a debugger of its lines
+    /// alone writes none of them, so describing them would be work thrown away.
+    fn tells_variables(&self) -> bool {
+        self.debug.is_some() && self.symbols.describes_variables()
     }
 
     /// Whether the functions of the build are compiled in units ([`units`]).
@@ -4958,7 +4998,7 @@ impl<'a, 'db> ObjectCodegen<'a, 'db> {
                 None => {
                     let wave = std::mem::take(&mut self.pending);
                     let start = stdx::time::Instant::now();
-                    let told = self.debug.is_some().then_some(&self.told);
+                    let told = self.tells_variables().then_some(&self.told);
                     self.symbols.in_parallel(wave.len(), &|db, _, at| {
                         let (instance, env, _) = &wave[at];
                         let compiled = compiled_instance(db, instance.clone(), env.clone());
@@ -5043,7 +5083,7 @@ impl<'a, 'db> ObjectCodegen<'a, 'db> {
         let threads = std::thread::available_parallelism().map_or(1, |it| it.get());
         let (entries, owned) = (self.entries.clone(), &self.own_statics.crates.clone());
         let entries = entries.as_deref();
-        let told = self.debug.is_some().then(|| self.told.clone());
+        let told = self.tells_variables().then(|| self.told.clone());
         let told = told.as_ref();
         let on_demand = self.on_demand;
         let (stored, roots_from_store) = (&self.stored_roots.clone(), self.roots_from_store());
@@ -5228,7 +5268,7 @@ impl<'a, 'db> ObjectCodegen<'a, 'db> {
         // Code of a level above 1 is of a profile, which is no key of the store.
         if tiered.is_none() {
             let tally = backend::Tally::global();
-            tally.step(Step::StoreWrite, || self.keep(instance, compiled, &ids, debug));
+            tally.step(Step::StoreWrite, || self.keep(instance, env.krate, compiled, &ids, debug));
         }
         Ok(())
     }
@@ -5312,6 +5352,7 @@ impl<'a, 'db> ObjectCodegen<'a, 'db> {
         }
         if let Some((owner, _)) = &compiled.source
             && let Some((env, variables)) = &compiled.variables
+            && self.tells_variables()
         {
             let places = &compiled.code.slots;
             let db = self.db;
@@ -5354,6 +5395,7 @@ impl<'a, 'db> ObjectCodegen<'a, 'db> {
     fn keep(
         &mut self,
         instance: &Instance,
+        home: Crate,
         compiled: &CompiledFunction,
         ids: &Resolved,
         debug: Option<FunctionDebug>,
@@ -5367,7 +5409,8 @@ impl<'a, 'db> ObjectCodegen<'a, 'db> {
             self.kept.unnamed += 1;
             return;
         };
-        let key = cached::Entry::key(&name, debug.is_some(), program.flatten().as_ref());
+        let told = cached::Told::of(debug.is_some(), self.symbols.describes_variables());
+        let key = cached::Entry::key(&name, told, program.flatten().as_ref());
         let Some(key) = key else { return };
         let check = std::env::var_os("RA_JIT_CACHE_CHECK");
         let sets = || debug.iter().flat_map(|it| &it.types).cloned().collect::<Vec<_>>();
@@ -5375,10 +5418,19 @@ impl<'a, 'db> ObjectCodegen<'a, 'db> {
             let kept = cached::Kept::Types(sets());
             return self.writer(store).keep(kept);
         }
-        let Some(entry) = self.entry(instance, compiled, ids, debug) else {
+        let described = debug.is_some();
+        let Some(mut entry) = self.entry(instance, compiled, ids, debug) else {
             self.kept.unnamed_requests += 1;
             return;
         };
+        // A unit's code is not what the query gives, which is what an edit is compared with.
+        let markable = self.mixed.is_none() && !self.units();
+        if markable && stable::StableNames::of_checkout(&name) {
+            match self.tracked(instance, home, compiled, described) {
+                Ok(tracked) => entry.tracked = Some(tracked),
+                Err(why) => self.kept.untracked(&name, why),
+            }
+        }
         let mut entry = Box::new(entry);
         let Some(check) = check else {
             return self.writer(store).keep(cached::Kept::Entry { key, entry });
@@ -5407,6 +5459,34 @@ impl<'a, 'db> ObjectCodegen<'a, 'db> {
                 }
             }
         }
+    }
+
+    /// What a patch base that has the code of `instance` from the store tells an edit of it by.
+    /// `None` for code the base has to compile to tell: in a program with code of rustc's,
+    /// which settles what an instance is by its build, or of a `#[ra_jit::cache]` function,
+    /// whose code holds a hash of everything it reaches.
+    fn tracked(
+        &self,
+        instance: &Instance,
+        home: Crate,
+        compiled: &CompiledFunction,
+        described: bool,
+    ) -> std::result::Result<cached::Tracked, &'static str> {
+        if let InstanceDef::Fn(func) = instance.def
+            && fncache::cached_closure(self.db, func).is_some()
+        {
+            return Err("a `#[ra_jit::cache]` function");
+        }
+        let mark = patch::stable_mark(self.db, &self.names, compiled, described)
+            .ok_or("what it refers to has no stable name")?;
+        let files = home::body_files(self.db, instance).and_then(|files| {
+            files.iter().map(|&file| self.names.file_path(file)).collect::<Option<Vec<_>>>()
+        });
+        let home = match self.names.of_the_checkout(home) {
+            true => Some(self.names.content_id(home).ok_or("its crate has no content id")?.0),
+            false => None,
+        };
+        Ok(cached::Tracked { mark, home, files })
     }
 
     fn writer(&mut self, store: &'static store::Store) -> &mut cached::Writer {
@@ -5680,6 +5760,7 @@ impl<'a, 'db> ObjectCodegen<'a, 'db> {
             datas,
             code: cached::CachedCode::from(&compiled.code),
             debug,
+            tracked: None,
         })
     }
 

@@ -299,12 +299,12 @@ class Side:
 
 def by_rustc(stderr):
     """Whether cargo built any of it: ra-jit said it fell back, or cargo compiled a crate."""
-    return bool(re.search(r"; building with cargo$|^\s*Compiling ", stderr, re.M))
+    return bool(re.search(r"; building with cargo(, which .*)?$|^\s*Compiling ", stderr, re.M))
 
 
 def how_built(stderr):
     """Whether the daemon built it, or why cargo did."""
-    reason = re.search(r"^ra-jit: (.*); (building with cargo|this is `cargo \w+`)$", stderr, re.M)
+    reason = re.search(r"^ra-jit: (?:bug: )?(.*?); (building with cargo|this is `cargo \w+`)(?:, which .*)?$", stderr, re.M)
     if reason:
         return "cargo: " + reason[1]
     kept = re.search(r"^ra-jit: (.*); nothing has changed since cargo built$", stderr, re.M)

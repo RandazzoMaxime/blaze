@@ -30,6 +30,16 @@ dependencies, their generic instances, and the untouched crates of the workspace
 one running daemon, unchanged functions of an edited crate are kept by the database
 instead.
 
+An entry of the checkout also holds its mark: a hash of its code and of what it calls and
+reads, by the same stable names, with the crates of the checkout named as they were when
+the daemon took it. The base an edit is patched against compares the mark of the code now
+with it, so a daemon that starts on a store holding the checkout's code takes that code as
+it is, and the first edit recompiles only what it touched. Before, those marks hashed ids
+of one process, and a started daemon compiled all it took of the checkout again before the
+first edit could be a patch (nushell: 73,586 functions, 9.4 s). A program that links
+rustc's code beside ra-jit's, an LLVM build and `#[ra_jit::cache]` functions keep no mark
+and still take that build ([#105](https://github.com/indexable-inc/ra-jit/issues/105)).
+
 Before a record is written, the store hashes that key together with the store format, a
 hash of the ra-jit executable and the toolchain's commit. An entry is therefore only ever
 found by the same ra-jit binary, for the same toolchain. Upgrading ra-jit makes the old

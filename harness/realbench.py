@@ -121,7 +121,7 @@ async def run(argv, cwd, env, step, timeout=STEP_SECS, check=True):
 
 def how_built(stderr):
     """Whether the daemon built it, or why cargo did (as `cargo_ra_jit.py` reads it)."""
-    reason = re.search(r"^ra-jit: (.*); (building with cargo|this is `cargo \w+`)$", stderr, re.M)
+    reason = re.search(r"^ra-jit: (?:bug: )?(.*?); (building with cargo|this is `cargo \w+`)(?:, which .*)?$", stderr, re.M)
     if reason:
         return "cargo: " + reason[1]
     kept = re.search(r"^ra-jit: (.*); nothing has changed since cargo built$", stderr, re.M)
