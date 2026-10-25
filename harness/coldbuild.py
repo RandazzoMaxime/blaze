@@ -16,7 +16,7 @@ A program that reaches a function blaze cannot compile fails its build with what
 arguments, and says how long blaze's cold build took against cargo's. The standard library
 comes from a remote `ra-jit std` made once, as a release's does.
 
-RA_JIT_BIN names the ra-jit built; cargo-ra-jit is found next to it. Linux and macOS.
+RA_JIT_BIN names the ra-jit built; cargo-ra-jit is found next to it. Linux, as allrajit.py.
 """
 import os, re, shutil, subprocess, sys, tempfile, time
 

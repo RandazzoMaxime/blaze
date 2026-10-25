@@ -120,9 +120,10 @@ nothing is handed to cargo:
        Compiling kapp v0.3.1 (/src/k/app)
         Finished `dev` profile [ra-jit] target(s) in 18.40s
 
-       Compiling kbad v0.1.0 (/src/k/bad)
-    error: `kbad` has functions blaze could not compile, so it is not built:
-      kbad::main: unsupported: f16 and f128
+       Compiling kuses v0.1.0 (/src/k/uses)
+    error: `kuses` can reach functions blaze could not compile, so it is not built:
+      `khalf::halved`: unsupported: f16 and f128
+    (what blaze said is in target/ra-jit/whole/kuses.log)
 
 Build scripts and proc macros are still built and run as the daemon's load does
 (`target/rust-analyzer`). A build of libraries alone and `test` are as without the setting.

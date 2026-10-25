@@ -41,6 +41,8 @@ HARNESSES = [
     ("core", ["unwinds.py"], {}, EVERYWHERE, 1),
     ("core", ["growth.py"], {}, on(backend="cranelift"), 1),
     ("core", ["wholeprogram.py"], {}, on("linux", "macos"), 2),
+    # `cargo blaze build` from nothing with RA_JIT_WHOLE_BUILD=1: G's whole build, no cargo build.
+    ("core", ["coldbuild.py"], {}, on("linux"), 2),
     ("core", ["splices.py"], {}, EVERYWHERE, 2),
     ("core", ["live_e2e.py"], {}, on("linux-x86_64"), 1),
     # Apple's linker leaves no more room than it is told, and gives a newer macOS chained fixups.
