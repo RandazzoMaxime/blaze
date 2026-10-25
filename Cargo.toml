@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/ra-jit", "crates/blaze-build-script", "crates/hir-ty-codegen", "crates/ra-jit-store", "crates/ra-jit-expand", "crates/ra-jit-fuzz", "crates/ra-jit-live", "crates/ra-jit-bench", "crates/ra-jit-cache", "crates/ra-jit-cache-macros", "vendor/rust-analyzer/lib/rowan"]
+members = ["crates/*", "vendor/rust-analyzer/lib/rowan"]
 # `ra-jit-wasm` turns on a feature of `hir-ty-codegen` that swaps the code generator's output, which
 # must not be unified into a build of the native crates.
 exclude = ["crates/ra-jit-wasm", "demo", "harness", "vendor/proc-macro-srv"]
@@ -83,6 +83,7 @@ hir-ty-wfcheck = { path = "vendor/rust-analyzer/crates/hir-ty-wfcheck", version 
 hir-ty-codegen = { path = "crates/hir-ty-codegen" }
 ra-jit-expand = { path = "crates/ra-jit-expand" }
 ra-jit-store = { path = "crates/ra-jit-store" }
+blaze-manifest = { path = "crates/blaze-manifest" }
 ra-jit-fuzz = { path = "crates/ra-jit-fuzz" }
 hir-ide = { path = "vendor/rust-analyzer/crates/hir-ide", version = "0.0.0" }
 ide = { path = "vendor/rust-analyzer/crates/ide", version = "0.0.0" }

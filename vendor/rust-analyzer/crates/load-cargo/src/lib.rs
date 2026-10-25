@@ -8,7 +8,9 @@
 #[cfg(feature = "in-rust-tree")]
 extern crate rustc_driver as _;
 
+mod listed;
 mod wrap;
+pub use listed::{is_listed, serve_listed_with};
 pub use wrap::{Wrap, asked, wrap_expanders};
 
 use std::{any::Any, collections::hash_map::Entry, mem, path::Path, sync};
@@ -139,6 +141,9 @@ pub struct Loaded {
     /// The crates of each workspace. One that is the same in two of them is of both.
     crates: Vec<Vec<Crate>>,
     proc_macro_server: Option<Result<ProcMacroClient, ProcMacroLoadingError>>,
+    /// The server of the libraries that list their macros ([`serve_listed_with`]), started
+    /// when the first of them is loaded.
+    listed_server: Option<Result<ProcMacroClient, ProcMacroLoadingError>>,
 }
 
 impl Loaded {
@@ -169,9 +174,6 @@ impl Loaded {
         self.workspaces.extend(workspaces);
         let known: FxHashSet<vfs::FileId> = vfs.iter().map(|(file, _)| file).collect();
         let ws = self.workspaces.first().ok_or_else(|| anyhow::anyhow!("no workspace to load"))?;
-        if self.proc_macro_server.is_none() {
-            self.proc_macro_server = spawn_proc_macro_server(ws, extra_env, load_config);
-        }
         let (sender, receiver) = unbounded();
         let mut loader = Box::new(vfs_notify::NotifyHandle::spawn(sender));
 
@@ -198,23 +200,60 @@ impl Loaded {
             members.push(ids.into_values().collect::<Vec<_>>());
             proc_macros.extend(paths);
         }
+        let listed: FxHashSet<AbsPathBuf> = match listed::server() {
+            Some(_) => proc_macros
+                .values()
+                .filter_map(|it| it.as_ref().ok())
+                .map(|(_, path)| path.clone())
+                .filter(|path| is_listed(path))
+                .collect(),
+            None => FxHashSet::default(),
+        };
+        // The toolchain's server is started for the libraries the other does not serve only,
+        // so a load whose proc macros are all listed starts none of the toolchain's.
+        let unlisted = proc_macros.values().any(|it| match it {
+            Ok((_, path)) => !listed.contains(path),
+            Err(_) => false,
+        });
+        if self.proc_macro_server.is_none() && unlisted {
+            self.proc_macro_server = spawn_proc_macro_server(ws, extra_env, load_config);
+        }
+        if let Some(server) = listed::server().filter(|_| !listed.is_empty())
+            && self.listed_server.is_none()
+        {
+            let spawned =
+                ProcMacroClient::spawn(server, extra_env, None, load_config.proc_macro_processes);
+            self.listed_server = Some(spawned.map_err(|e| {
+                ProcMacroLoadingError::ProcMacroSrvError(e.to_string().into_boxed_str())
+            }));
+        }
         let proc_macros = {
-            let proc_macro_server = match &self.proc_macro_server {
-                Some(Ok(it)) => Ok(it),
-                Some(Err(e)) => Err(e.clone()),
-                None => Err(ProcMacroLoadingError::ProcMacroSrvError(
-                    "proc-macro-srv is not running, workspace is missing a sysroot".into(),
-                )),
-            };
+            fn running(
+                server: &Option<Result<ProcMacroClient, ProcMacroLoadingError>>,
+            ) -> Result<&ProcMacroClient, ProcMacroLoadingError> {
+                match server {
+                    Some(Ok(it)) => Ok(it),
+                    Some(Err(e)) => Err(e.clone()),
+                    None => Err(ProcMacroLoadingError::ProcMacroSrvError(
+                        "proc-macro-srv is not running, workspace is missing a sysroot".into(),
+                    )),
+                }
+            }
+            let (proc_macro_server, listed_server) =
+                (running(&self.proc_macro_server), running(&self.listed_server));
             proc_macros
                 .into_iter()
                 .map(|(crate_id, path)| {
                     (
                         crate_id,
                         path.and_then(|(_, path)| {
-                            proc_macro_server.as_ref().map_err(Clone::clone).and_then(
-                                |proc_macro_server| load_proc_macro(proc_macro_server, &path, &[]),
-                            )
+                            let server = match listed.contains(&path) {
+                                true => &listed_server,
+                                false => &proc_macro_server,
+                            };
+                            server.as_ref().map_err(Clone::clone).and_then(|proc_macro_server| {
+                                load_proc_macro(proc_macro_server, &path, &[])
+                            })
                         }),
                     )
                 })
