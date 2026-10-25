@@ -332,3 +332,42 @@ by the second the samples fall in (**read**):
 So the next costs are the debugger's types read whole for every entry while the roots are
 looked for, which only stitching needs; the debug info of all 155,843 functions written again
 when nothing changed; and the link of an executable the target directory already has.
+
+## The first edit after a restart: code from the store told unchanged by its items (2026-10-25)
+
+Each store entry now names the items of the checkout its code comes from, as they were written
+when it was compiled: the body it is written in, the bodies whose places it tells (a panic's
+location, a `#[track_caller]` declaration) with the line and column each begins on, and the
+bodies it mentions a coroutine of, by a hash of the text of each. After an edit of nothing but
+bodies, code from the store whose items in the edited files read as they did is taken as it
+was, not compiled again to compare its mark. A closure or function an instance is generic over
+is not one of its items: its stable name prints it whole, what a closure captures with it, so
+the same name is the same code and a changed one leaves the old code uncalled. Before is
+`origin/main` (`e9d3ae6`), after is the branch; "old" is main before #360 compiled everything at
+the start (`2be2c76`). dev-aws-7, warmstart.py, quiet host, main and the branch interleaved
+(**read**):
+
+| | old | main | after |
+|---|---|---|---|
+| ripgrep first edit after the restart | 0.09, 0.10 s | 0.31, 0.30 s | 0.23, 0.23 s |
+| ripgrep: functions asked, "check" | 382 (warm), 25 ms | 382, 198 ms | 17, 112 ms |
+| nushell first edit after the restart | 0.37, 0.36 s | 0.59 to 0.69 s | 0.48 to 0.53 s |
+| nushell: functions asked, "check" | 156 (warm), 216 ms | 156, 438 ms | 105, 346 ms |
+| ripgrep / nushell `restart` build | 4.78 / 25.7 s | 4.73 / 20.3 to 21.7 s | 4.79 / 22.0 to 22.6 s |
+
+- What ripgrep still asks is what changed: the 17 functions below the edit whose panic
+  locations moved a line, each patched. They cost what they do because nothing they reach is
+  compiled yet: `perf record -g` of the edit (frame pointers) puts 27 % of the daemon's time in
+  `inlinable`/`small_body`, the MIR of every callee a recompiled function might inline, each
+  on a cold body of another crate (its file parsed, 14 %; inferred, 23 %), and most of the
+  rest in the instance's own inference, layouts and macro expansions. The revert after it
+  ("back", 0.10 s) finds them warm (**read**).
+- nushell's check is the edited function itself, compiled cold (297 ms, against 140 ms warm),
+  and 87 drop glues of types with an `impl Trait` in them, whose hidden type a body says and
+  no name does, so they have no items and are compiled to tell (**read**, `RJ_DBG` run).
+- Compiling the store's code of the checkout at the end of the restart instead, as main did
+  before #360, was tried: ripgrep's check fell to 26 ms, but the restart took 1.1 s longer and
+  the edit then wrote the 8,155 functions it compiled, 0.18 to 0.20 s in all (**read**). The
+  rest of the gap is work that only a warm database or a persisted answer saves: which
+  callees are small enough to inline, kept by the callee's content, would take the largest
+  share (**unverified**).
