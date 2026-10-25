@@ -250,7 +250,7 @@ Paths are under `crates/`; line numbers are of 41e7906192.
 | `ra-jit/src/plan.rs:475` | `cargo build --unit-graph`, which asks rustc about the target | every load, and every doctest run per library |
 | `ra-jit/src/main.rs:2314`, `ra-jit/src/inputs.rs:282` `run_build_scripts` | rust-analyzer's `cargo check --compile-time-deps`: rustc compiles every build script and proc macro and their dependencies, and the scripts run | a load that is neither beside nor after a cargo build of the workspace (a worker after one reads what cargo said, `cargo/state.rs` `kept_said`), whose target directory does not have them yet; after an edit to a proc macro or build script |
 | `ra-jit/src/main.rs:5287`, `ra-jit/src/borrowck.rs:113` `ProcMacroServerChoice::Sysroot` | expands with the toolchain's `rust-analyzer-proc-macro-srv` loading rustc's proc-macro libraries | every load that has a proc macro |
-| `ra-jit/src/cargo/state.rs:948` `metadata`, `:1013` `other_toolchain`, `ra-jit/src/cargo/mod.rs:122` | `cargo metadata --no-deps` (no rustc), `rustc --version`, `--print=sysroot` | every client command |
+| `ra-jit/src/cargo/state.rs` `other_toolchain` | `rustc --version`, `--print=sysroot` | every client command; its `cargo metadata --no-deps` is blaze-manifest's reading since 2026-10-25 ([resolve.md](resolve.md)) |
 
 **Tests, doctests, check, assembly** (steps C, H, L, D)
 
@@ -985,7 +985,14 @@ Where J stands (2026-10-24):
   same, and the programs print the same. Left: `pest_consume_macros` (nushell, 12 calls),
   which ra-jit cannot compile
   ([#327](https://github.com/indexable-inc/blaze/issues/327)).
-- Next: the server shipped beside ra-jit, then ra-jit's libraries by default.
+- Shipped (2026-10-25): on Linux the release workflow's ra-jit builds the server
+  (`build_release.py --server`, `--exe` with `proc_macro` compiled into it) into the archive
+  as `blaze-proc-macro-srv`, beside `ra-jit`, which `RA_JIT_PROC_MACRO_SERVER=1` names. The
+  load gives its cargo the server it found, or takes the variable away when none is there
+  (and says so), so the wrapper links a proc macro only for a server there is. The
+  toolchain's server is started only when a library is not ra-jit's: a load of fd starts
+  none.
+- Next: ra-jit's libraries by default, kept in the store.
 
 J, K and M are planned together in [self-contained.md](self-contained.md#j-k-and-m), since
 what they remove is most of the toolchain blaze still keeps: rustc and the sysroot's rlibs (116
