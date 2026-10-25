@@ -654,6 +654,8 @@ dependencies = [
 name = "blaze-build-script"
 version = "0.1.0"
 dependencies = [
+ "jobserver",
+ "libc",
  "rustc-hash 2.1.2",
  "serde",
  "serde_derive",

@@ -51,6 +51,14 @@ All notable changes to ra-jit are written here. The format follows
   `cargo:` and `cargo::`, the `rust-version` rule of the latter, every directive and cargo's
   errors for each) and says who receives it: the scripts each unit is linked with, the `-L`,
   `-l`, link arguments, cfgs and variables of each target, and when a script runs again.
+- `blaze-build-script` runs a build script as cargo 1.99.0 does (its package's directory, no
+  input, `OUT_DIR` made first, a failed exit or a `cargo::error=` line failing the build,
+  cargo's `output`, `stderr` and `root-output` files beside `OUT_DIR`), and
+  `harness/scripts.py` holds it to cargo over 463 script runs of the benchmark applications and
+  crates whose scripts build C or read others' metadata. It found two things cargo gives a
+  script that the port had missed: a `cargo check` puts no `target/debug` in the library path,
+  and on Linux cargo's libgit2 hands every script the `SSL_CERT_FILE` and `SSL_CERT_DIR` it
+  found.
 - blaze needs no Rust and no rustup installed (#298). With neither, it downloads Rust 1.99.0
   once into `~/.blaze/toolchains` (rustc, cargo, the standard library and its source: 97 MB on
   macOS, 133 MB on Linux x86-64), laid out as rustup lays out a toolchain, and builds with it.

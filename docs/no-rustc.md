@@ -857,6 +857,36 @@ from its dependencies too; cfgs and variables for every target), and when a scri
 again (newer files below what it watches, a variable whose value changed in cargo's
 environment or `[env]`, any file of the package when it named nothing).
 
+Its `run` runs a script as cargo's `build_work` does: in the package's directory with no
+input, `OUT_DIR` and the directory around it made first, `invoked.timestamp` written; the build
+fails on a failed exit (in cargo's words, with the script's outputs) or a line that starts with
+`cargo::error=` as it streams by (one indented is shown and fails nothing, as in cargo), and
+once it succeeds cargo's `output` (dated when the run began), `stderr` and `root-output` are
+written beside `OUT_DIR`, where cargo and ra-jit read a run back from. `Invocation` is the
+program, directory and environment, for a sandbox to run the same; the jobserver is the
+caller's (`Client::configure`). `env::cargo_started` is cargo's environment once it has
+started: on Linux cargo's libgit2 sets `SSL_CERT_FILE` and `SSL_CERT_DIR` to the certificates
+openssl-probe finds, and every script inherits them.
+
+`harness/scripts.py` holds the crate to cargo. cargo 1.99.0 checks each project with the
+harness as its `RUSTC_WRAPPER`, which puts the crate's program where rustc wrote each build
+script, so that cargo's run records what cargo gave it and then becomes the script. Each run
+is described from `cargo metadata`, `cargo check --unit-graph` and the configuration, and the
+crate computes the environment (against what cargo gave), reads cargo's `output` (against
+cargo's `build-script-executed` message) and runs the script again into an `OUT_DIR` of its
+own (against cargo's run: both fail, or both come to the same output). Status on dev-aws-8,
+2026-10-25, at a3bc9d6e01, over the applications of `apps/apps.json` and `harness/scripts/`
+(openssl-sys, zstd-sys, libz-sys, libgit2-sys, ring, rustix, num-traits, and openssl,
+zstd-safe and libgit2-sys reading their metadata): 463 runs of 22 projects, environment 463/463, reading
+460/460, runs 463/463, the same bytes 455/460 (cc prints the variables it looked up as often as
+its threads happen to look). Three scripts fail under cargo for want of a system library
+(openssl-sys twice, yeslogic-fontconfig-sys) and fail the same under blaze. The harness found
+two things the port missed: a `cargo check` has no artifact directory, so `target/debug` is
+not in the library path, and the certificates above. Not yet: the description filled by
+blaze's own manifest reader and resolver (the harness fills it from cargo), the run inside
+`ra-jit sandbox`, keeping runs in the store under the keys of #105, and `cargo/script.rs`,
+`inputs.rs` and `link.rs` reading output with this crate.
+
 **J. Proc macros compiled and loaded by ra-jit.** ([#90](https://github.com/indexable-inc/ra-jit/issues/90)) The proc-macro crate and its dependencies are
 compiled by ra-jit into a library that rust-analyzer's proc-macro server, running inside ra-jit,
 loads. `proc_macro` is ra-jit's from F, so the bridge matches the server, which is built from the
