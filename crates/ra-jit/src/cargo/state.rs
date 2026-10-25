@@ -1226,8 +1226,8 @@ fn other_toolchain() -> Option<String> {
     let ours = TOOLCHAIN.trim();
     if version != ours && !other_toolchain_allowed() {
         return Some(format!(
-            "rustc {version} is not the {ours} this ra-jit compiles for \
-             (RA_JIT_OTHER_TOOLCHAIN=1 builds with it anyway)"
+            "rustc {version} is not the {ours} blaze compiles for; `rustup override set {ours}` \
+             in the project switches it (BLAZE_OTHER_TOOLCHAIN=1 builds with {version} anyway)"
         ));
     }
     let library = Path::new(&said("--print=sysroot")?).join("lib/rustlib/src/rust/library");

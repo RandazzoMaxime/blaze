@@ -23,6 +23,7 @@ mod outline;
 mod plan;
 mod process;
 mod remote;
+mod sandbox;
 mod shipped;
 mod socket;
 mod splice;
@@ -1076,17 +1077,32 @@ fn commit_of_sources(built: &[u8]) -> Option<String> {
 /// a hash of the toolchain in it, and what the metadata of its `core`, `alloc` and `std`
 /// says of each (`metadata_hash`). `None` when it has none of them.
 fn toolchain_identity(vfs: &vfs::Vfs, symbol_files: &[PathBuf]) -> Option<String> {
-    let mut identity: Vec<String> = symbol_files
+    let mut identity = library_identity(symbol_files);
+    if let Some(toolchain) = &loaded_toolchain(vfs) {
+        identity.extend(installed_identity(toolchain));
+    }
+    identity.sort_unstable();
+    (!identity.is_empty()).then(|| identity.join(" "))
+}
+
+/// The rlibs of the standard library whose metadata [`toolchain_identity`] reads. rustc's link
+/// line has all of them, and a build told ahead of cargo's finds the same in the toolchain
+/// ([`built_library`]): one toolchain is then one identity whichever way a daemon starts, and
+/// a daemon started after cargo's build finds what the one told ahead of it stored.
+const LIBRARY: [&str; 3] = ["libcore-", "liballoc-", "libstd-"];
+
+/// What of [`toolchain_identity`] the library's rlibs among `files` say: the name of `std`'s
+/// and what the metadata of each of [`LIBRARY`] says.
+fn library_identity(files: &[PathBuf]) -> Vec<String> {
+    let mut identity: Vec<String> = files
         .iter()
         .filter_map(|it| it.file_name()?.to_str())
         .filter(|it| it.starts_with("libstd-"))
         .map(str::to_owned)
         .collect();
-    for rlib in symbol_files {
+    for rlib in files {
         let Some(name) = rlib.file_name().and_then(|it| it.to_str()) else { continue };
-        if !["libcore-", "liballoc-", "libstd-"].iter().any(|it| name.starts_with(it))
-            || !name.ends_with(".rlib")
-        {
+        if !LIBRARY.iter().any(|it| name.starts_with(it)) || !name.ends_with(".rlib") {
             continue;
         }
         let Ok(file) = std::fs::File::open(rlib) else { continue };
@@ -1097,16 +1113,16 @@ fn toolchain_identity(vfs: &vfs::Vfs, symbol_files: &[PathBuf]) -> Option<String
             identity.push(format!("{name}={hash}"));
         }
     }
-    let toolchain = vfs.iter().find_map(|(_, path)| {
+    identity
+}
+
+/// The toolchain whose library sources were loaded, with a `/` at its end.
+fn loaded_toolchain(vfs: &vfs::Vfs) -> Option<String> {
+    vfs.iter().find_map(|(_, path)| {
         let path = path.as_path()?.as_str().replace('\\', "/");
         let (toolchain, _) = path.split_once("lib/rustlib/src/rust/")?;
         Some(toolchain.to_owned())
-    });
-    if let Some(toolchain) = &toolchain {
-        identity.extend(installed_identity(toolchain));
-    }
-    identity.sort_unstable();
-    (!identity.is_empty()).then(|| identity.join(" "))
+    })
 }
 
 /// What of [`toolchain_identity`] the toolchain installed at `toolchain` (with a `/` at its
@@ -1152,17 +1168,17 @@ fn metadata_hash(archive: &[u8]) -> Option<String> {
     Some(hash[..8].iter().map(|it| format!("{it:02x}")).collect())
 }
 
-/// The built `std` of the toolchain whose library was loaded, for `triple`.
+/// The built rlibs of [`LIBRARY`] of the toolchain whose library was loaded, for `triple`.
 fn built_library(vfs: &vfs::Vfs, triple: &str) -> Vec<PathBuf> {
-    let toolchain = vfs.iter().find_map(|(_, path)| {
-        let path = path.as_path()?.as_str().replace('\\', "/");
-        let (toolchain, _) = path.split_once("lib/rustlib/src/rust/")?;
-        Some(toolchain.to_owned())
-    });
-    let Some(toolchain) = toolchain else { return Vec::new() };
-    let dir = PathBuf::from(format!("{toolchain}lib/rustlib/{triple}/lib"));
-    let Ok(entries) = std::fs::read_dir(&dir) else { return Vec::new() };
-    let named = |name: &str| name.starts_with("libstd-") && name.ends_with(".rlib");
+    let Some(toolchain) = loaded_toolchain(vfs) else { return Vec::new() };
+    library_in(&PathBuf::from(format!("{toolchain}lib/rustlib/{triple}/lib")))
+}
+
+/// The rlibs of [`LIBRARY`] in the directory of a toolchain's built library.
+fn library_in(dir: &Path) -> Vec<PathBuf> {
+    let Ok(entries) = std::fs::read_dir(dir) else { return Vec::new() };
+    let named =
+        |name: &str| LIBRARY.iter().any(|it| name.starts_with(it)) && name.ends_with(".rlib");
     let names = entries.filter_map(|it| it.ok()?.file_name().into_string().ok());
     names.filter(|it| named(it)).map(|it| dir.join(it)).collect()
 }
@@ -3223,22 +3239,26 @@ fn reach_of_tests(db: &RootDatabase, listed: &Listed, args: &Args) -> String {
     for (&id, reach) in tests.iter().zip(hir_ty_codegen::tests_reach(db, &tests)) {
         let function = hir::Function::from(id);
         let Some(name) = test_harness::name(db, krate, function) else { continue };
+        let field = |it: &str| it.replace(['\t', '\n'], " ");
+        let why = |it: &hir_ty_codegen::AlwaysRun| {
+            let path: Vec<String> = it.path.iter().map(|it| field(it)).collect();
+            format!("{}\t{}", field(&it.why), path.join(" -> "))
+        };
         let line = match reach {
-            Ok(hash) => {
+            Ok(reach) => {
                 let attrs = function.source(db).map(|it| {
                     let attrs = it.value.attrs().map(|it| it.syntax().text().to_string());
                     attrs.collect::<Vec<_>>().join("\n")
                 });
-                let identity = format!("{hash:032x}\n{}", attrs.unwrap_or_default());
+                let identity = format!("{:032x}\n{}", reach.hash, attrs.unwrap_or_default());
                 let identity = sha2::Sha256::digest(identity.as_bytes());
                 let hex: String = identity.iter().map(|it| format!("{it:02x}")).collect();
-                format!("{hex}\t{name}\n")
+                match &reach.outside {
+                    None => format!("{hex}\t{name}\n"),
+                    Some(outside) => format!("~{hex}\t{name}\t{}\n", why(outside)),
+                }
             }
-            Err(always) => {
-                let field = |it: &str| it.replace(['\t', '\n'], " ");
-                let path: Vec<String> = always.path.iter().map(|it| field(it)).collect();
-                format!("-\t{name}\t{}\t{}\n", field(&always.why), path.join(" -> "))
-            }
+            Err(always) => format!("-\t{name}\t{}\n", why(&always)),
         };
         text.push_str(&line);
     }
@@ -6594,22 +6614,23 @@ fn input_line() -> Option<String> {
 }
 
 const HELP: &str = "\
-ra-jit: a daemon that keeps Rust workspaces compiled and builds edits from memory
+blaze's engine: a daemon that keeps Rust workspaces compiled and builds edits from memory.
+`cargo blaze <command>` is what to run; this program is what it runs.
 
 usage: ra-jit <command>
 
-  enable            plain `cargo build|run|test|check` go through ra-jit from now on
+  enable            plain `cargo build|run|test|check` go through blaze from now on
   disable           cargo's configuration is put back as it was
-  status            whether ra-jit is enabled, what the daemon has loaded, what fell back
+  status            whether blaze is enabled, what the daemon has loaded, what fell back
   stop              ends the daemon; the next build starts one
-  cargo <command>   what `cargo ra-jit <command>` runs: build, run, test, check
+  cargo <command>   what `cargo blaze <command>` runs: build, run, test, check
   cache <verb>      the disk store: stats, gc, verify, push, pull, keygen
-                    (`cargo ra-jit cache clear` forgets what `#[ra_jit::cache]` kept)
+                    (`cargo blaze cache clear` forgets what `#[ra_jit::cache]` kept)
   mir <dir> --crate <name> [--level 0|1|2] [--time]
-                    a crate's MIR as ra-jit compiles it, written as rustc's -Zunpretty=mir
+                    a crate's MIR as blaze compiles it, written as rustc's -Zunpretty=mir
   --help, --version
 
-`cargo ra-jit build|run|test|check` takes cargo's flags. CARGO.md is the guide.";
+`cargo blaze build|run|test|check` takes cargo's flags. The guide: https://github.com/indexable-inc/blaze/blob/main/docs/cargo.md";
 
 /// Has a command that prints for a reader end quietly when the reader stops reading,
 /// instead of failing on the closed pipe. Not for a process that writes to sockets.
@@ -6621,18 +6642,36 @@ pub(crate) fn end_with_reader() {
     }
 }
 
-/// `ra-jit 0.1.0 (abc123def456)`: the crate's version, and the commit when the build was
+/// Takes each `BLAZE_<NAME>` for the `RA_JIT_<NAME>` the code reads, over it when both are
+/// set: the settings are named for blaze from its rename on, and keep their old names too.
+/// The programs this one starts see both.
+fn take_blaze_names() {
+    for (name, value) in std::env::vars_os() {
+        let Some(rest) = name.to_str().and_then(|it| it.strip_prefix("BLAZE_")) else {
+            continue;
+        };
+        // SAFETY: before any thread is started.
+        unsafe { std::env::set_var(format!("RA_JIT_{rest}"), value) };
+    }
+}
+
+/// `blaze 0.1.0 (abc123def456)`: the crate's version, and the commit when the build was
 /// told it in `RA_JIT_GIT_SHA` (the release workflow and the flake set it).
 pub(crate) fn version() -> String {
     let version = env!("CARGO_PKG_VERSION");
     match option_env!("RA_JIT_GIT_SHA") {
-        Some(sha) if !sha.is_empty() => format!("ra-jit {version} ({sha})"),
-        _ => format!("ra-jit {version}"),
+        Some(sha) if !sha.is_empty() => format!("blaze {version} ({sha})"),
+        _ => format!("blaze {version}"),
     }
 }
 
 fn main() -> anyhow::Result<()> {
+    // Before anything that could start a thread: the sandbox forks.
+    if std::env::args_os().nth(1).is_some_and(|it| it == sandbox::COMMAND) {
+        sandbox::command(std::env::args_os().skip(2));
+    }
     trace::began();
+    take_blaze_names();
     syntax::set_green_trees(std::env::var_os("RA_JIT_GREEN_TREES").is_some());
     project_model::answer_toolchain_questions_with(answers::ask);
     let stands_in_for_rustc = std::env::var_os("RA_JIT_WRAPS_RUSTC").is_some();
@@ -9517,6 +9556,39 @@ mod tests {
         let long = |end| metadata([1; 16], &[[0; 512].as_slice(), &[end]].concat());
         assert_eq!(metadata_hash(&rlib(&long(1))), metadata_hash(&rlib(&long(2))));
         assert_eq!(metadata_hash(&rlib(b"not metadata")), None);
+    }
+
+    /// A build told ahead of cargo's finds the library in the toolchain; the daemon started
+    /// once cargo built is given rustc's link line. Both have to key the store alike, or the
+    /// daemon's first start after a build finds nothing that build stored (#41).
+    #[test]
+    fn the_toolchain_is_named_alike_ahead_of_cargo_and_from_rustcs_link_line() {
+        let dir = std::env::temp_dir().join(format!("ra-jit-library-{}", std::process::id()));
+        let library = dir.join("lib/rustlib/x86_64-unknown-linux-gnu/lib");
+        let deps = dir.join("target/debug/deps");
+        std::fs::create_dir_all(&library).unwrap();
+        std::fs::create_dir_all(&deps).unwrap();
+        let mut written = |at: &Path, name: &str, svh: u8| {
+            let path = at.join(name);
+            std::fs::write(&path, rlib(&metadata([svh; 16], &[0; 8]))).unwrap();
+            path
+        };
+        let core = written(&library, "libcore-1a.rlib", 1);
+        let alloc = written(&library, "liballoc-2b.rlib", 2);
+        let std = written(&library, "libstd-3c.rlib", 3);
+        let unwind = written(&library, "libpanic_unwind-4d.rlib", 4);
+        written(&library, "libtest-5e.rlib", 5);
+        std::fs::write(library.join("libstd-3c.so"), b"a dynamic std").unwrap();
+        let dep = written(&deps, "libdep-6f.rlib", 6);
+
+        let link_line = [dep, std, unwind, alloc, core];
+        let mut ahead = library_identity(&library_in(&library));
+        let mut linked = library_identity(&link_line);
+        ahead.sort_unstable();
+        linked.sort_unstable();
+        std::fs::remove_dir_all(&dir).unwrap();
+        assert_eq!(ahead, linked);
+        assert_eq!(ahead.iter().filter(|it| it.contains(".rlib=")).count(), LIBRARY.len());
     }
 
     /// A file of a package is in the source root of each of its targets, and a program reads

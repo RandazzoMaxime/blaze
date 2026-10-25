@@ -8,6 +8,19 @@ All notable changes to ra-jit are written here. The format follows
 
 ### Added
 
+- `cargo ra-jit test` with `RA_JIT_TESTS=affected` runs, on Linux, each test that reaches a
+  file, the environment, a process or the network in a sandbox of its own (#257): a process
+  in new user, mount, network, IPC and PID namespaces, the machine's files read-only, the
+  workspace and target directory overlaid so its writes vanish, an empty `/tmp`, loopback
+  only, and a fixed environment. A seccomp supervisor records every path it touches; once it
+  passes, what was there is kept, and it runs again only when its code, its environment or one
+  of those changed, where it ran every time. `-v` names the file. Its output, panics,
+  `#[should_panic]` and exit status stay libtest's, as ra-jit writes the harness. On ripgrep
+  the tests run with no edit go from 493 to 24 of 1,168 (the 469 that ran every time are
+  sandboxed and skipped); the first run, which runs those 469 sandboxed, takes 85.5 s where it
+  took 83.6 s. `ra-jit sandbox` is the command, for build scripts and proc macros next (#147).
+  `RA_JIT_SANDBOX=off` runs them every time as before; where no sandbox can be made (macOS and
+  Windows for now, Ubuntu's AppArmor userns restriction) the command says why once.
 - `vendor/proc-macro-srv`, the 1.99.0 release's proc-macro server with a loader that reads
   the list of macros ra-jit writes into a proc-macro library, built by ra-jit with nothing of
   rustc's. `RA_JIT_PROC_MACRO_COMPARE` and `RA_JIT_PROC_MACRO_LIBS` expand each call again
@@ -250,6 +263,16 @@ All notable changes to ra-jit are written here. The format follows
 
 ### Changed
 
+- ra-jit is now **blaze**. The command is `cargo blaze` (`cargo blaze build`, `test`, `run`,
+  `check`, `status`, `stop`); `cargo ra-jit` keeps working and, on a terminal, says once per run
+  that it was renamed. The crate on crates.io is `cargo-blaze` (`cargo install cargo-blaze`),
+  release archives are `blaze-v<version>-<target>.tar.gz`, and the flake's package and app are
+  `blaze` (`ra-jit` stays as another name for them). Every setting can be given as `BLAZE_<NAME>`
+  as well as `RA_JIT_<NAME>`, and the `BLAZE_` one wins. `--version` says `blaze`. The engine
+  binary, the crates it is made of, the daemon's directory and the store keep their names, so an
+  upgrade keeps what the store holds.
+- A build with a toolchain other than 1.99.0 says how to switch the project to it
+  (`rustup override set 1.99.0`).
 - A start on a warm store with nothing of rustc's (`RA_JIT_RUSTC_BASE=0`) is no longer held up
   by the store and the interner (#41): each store entry and set of types is read once however
   many threads ask for it, a value already interned is found under the shard's read lock, the
@@ -473,6 +496,13 @@ All notable changes to ra-jit are written here. The format follows
 
 ### Fixed
 
+- The first start of a daemon after a cold `cargo ra-jit build` finds what that build stored
+  (#41). The two named the toolchain differently (the sysroot's libstd alone, or rustc's link
+  line with libcore and liballoc too) and the store hashes that name into every key: on
+  nushell the restart found 0 functions, took no frozen def map and expanded every proc macro
+  again. It now finds 103,750 functions, 374 frozen crates and 1,586 expansions, and its cold
+  compile is 11.9 s where it was 17.9 s. `warmstart.py` fails when the restart takes nothing.
+  docs/cargo.md no longer says the store is off unless `RA_JIT_CACHE` is set.
 - A daemon that stops lets its workers finish writing to the store what their last build kept,
   a minute at most each, where it killed them (#41). A stop just after an edit lost it: the
   next checkout of helix compiled 131,609 functions instead of 115,706.

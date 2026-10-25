@@ -25,7 +25,7 @@ use anyhow::Context;
 use crate::{cargo::own_script, remote};
 
 /// Where the assets of the releases are.
-const RELEASES: &str = "https://github.com/indexable-inc/ra-jit/releases/download";
+const RELEASES: &str = "https://github.com/indexable-inc/blaze/releases/download";
 
 /// How long after a fetch that failed the next one is tried.
 const AGAIN_AFTER: Duration = Duration::from_secs(60 * 60);

@@ -60,7 +60,7 @@ async def build(step: str, cwd: Path, env: dict[str, str]) -> str:
 
 # What `cargo ra-jit` says when the toolchain is one the daemon never compiles for, which no
 # wait changes: another release than ra-jit's, or one without the standard library's source.
-OTHER_TOOLCHAIN = ("this ra-jit compiles for", "rust-src")
+OTHER_TOOLCHAIN = ("compiles for", "rust-src")
 
 
 async def serving(project: Path, env: dict[str, str]) -> None:

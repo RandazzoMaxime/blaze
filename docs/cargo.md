@@ -116,6 +116,31 @@ executable, why each test it runs every time does, by the fewest calls from the 
 
     Always tests::reads_a_file: it reaches `statx`, which reads or writes files, by tsel::tests::reads_a_file -> std::fs::read_to_string::<…> -> std::fs::read_to_string::inner -> <std::fs::File>::metadata -> … -> statx
 
+On Linux such a test, when ra-jit compiled all of its code, runs in a sandbox instead of every
+time: alone, in a process of its own, with the machine's files read-only, the workspace and
+target directory as they are but what it writes kept to itself and gone when it ends, an empty
+`/tmp`, `/var/tmp` and `/dev/shm`, no network but its own loopback, and a fixed environment:
+the variables cargo sets for a test, `PATH`, `HOME`, `USER`, `LOGNAME`, `LANG`, `LANGUAGE`,
+`LC_*`, `TZ`, `CARGO`, `CARGO_HOME`, `RUSTUP_HOME`, `RUSTUP_TOOLCHAIN`, `LD_LIBRARY_PATH`,
+`NIX_LD`, `NIX_LD_LIBRARY_PATH`, `RUST_BACKTRACE`, `RUST_LIB_BACKTRACE`, `RUST_MIN_STACK`, and
+those `RA_JIT_TEST_ENV` names, by commas. The sandbox records every path it opens, looks at,
+lists or runs. Once it passes, what was at each (a file's contents, a directory's names,
+nothing) is kept beside its program, and the test runs again when its code, its environment
+or one of those changed; otherwise it is skipped like any other. `-v` says why one runs:
+
+    Sandboxed tests::reads_a_file: it read `/home/me/tsel/data.txt`, which changed
+
+It ends as it would have in the program: its output, a panic and `#[should_panic]` are
+libtest's, and a test that ends or crashes its process ends the program with the same status.
+A test that writes outside the workspace, the target directory and the empty directories
+gets the error a read-only file system gives. The sandbox needs namespaces a user can make;
+where it can't be made (Ubuntu's AppArmor stops it unless
+`kernel.apparmor_restrict_unprivileged_userns` is 0, and macOS and Windows have none yet) the
+command says why once and those tests run every time. `RA_JIT_SANDBOX=off` does that on
+purpose. A sandboxed test costs a process: about 16 ms on Linux x86-64. The time a test
+reads, the randomness it draws and the threads it starts are its own still; what is left,
+macOS's sandbox among it, is [#257](https://github.com/indexable-inc/ra-jit/issues/257).
+
 `-v`, `-q` and `--color` only change what cargo prints, and are the same build to the daemon.
 
 A test executable cargo built, a command that names tests or passes the harness other flags
@@ -315,6 +340,9 @@ build a command line is, so changing one starts from a cargo build again.
 `RA_JIT_TESTS` is read by each `cargo ra-jit test` alone and is not part of which build it
 is: `affected` runs the tests an edit reached
 ([above](#running-only-the-tests-an-edit-reached)), `all` every test. The default is `all`.
+`RA_JIT_SANDBOX=off` runs the tests that reach outside their code every time instead of
+sandboxed, and `RA_JIT_TEST_ENV` names more variables a sandboxed test is given, by commas;
+both are read the same way.
 
 These are read by the daemon when it starts, from the environment of whichever command
 started it. To change one, run `cargo ra-jit stop` first.
@@ -326,11 +354,13 @@ started it. To change one, run `cargo ra-jit stop` first.
 | `RA_JIT_MEMORY_MAX` | the most the workers hold together, a size such as `6G`, or `off` | half the machine's memory (on Linux, or of what its control group allows) |
 | `RA_JIT_SPARE` | `ready` keeps a spare worker with the library loaded at all times, for the next project; `0` starts none, and a workspace loads once cargo has built it | a spare for each build of a new workspace, as it begins |
 | `RA_JIT_OWN_BASE_MEMORY` | the most a worker may hold while it builds its own base in the background, a size such as `40G`, past which it gives that base up and edits patch rustc's executable; `off` is no bound | a quarter of the machine's memory (on Linux, or of what its control group allows) |
-| `RA_JIT_CACHE` | directory of the disk store; without it nothing is kept on disk | not set |
+| `RA_JIT_CACHE` | directory of the disk store, or `off` for none | `ra-jit/store` in the user's cache directory ([cache.md](cache.md)) |
 | `RA_JIT_REMOTE` and the other store variables | see [cache.md](cache.md) | not set |
 
-The disk store is off unless `RA_JIT_CACHE` is set. That is easy to miss: a daemon started by
-a shell without the variable keeps no store, whatever later shells have set.
+The disk store is on by default and shared by every daemon and checkout of the user. The
+daemon reads `RA_JIT_CACHE` once, when it starts: a daemon started by a shell without the
+variable keeps the default store whatever later shells have set, so run `cargo ra-jit stop`
+before changing it.
 
 ## Known problems
 
