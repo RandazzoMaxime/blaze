@@ -111,6 +111,7 @@ pub use home::body_file;
 mod imports;
 #[cfg(feature = "llvm")]
 mod llvm;
+mod naming;
 mod patch;
 mod places;
 #[cfg(feature = "llvm")]
@@ -1488,6 +1489,29 @@ impl Rejections {
         }
         if let Some(rustc) = &mut self.rustc {
             rustc.touch_added(db, crates, files);
+        }
+        self.forget();
+    }
+
+    /// Notes that a file of `crates` changed in the signatures of the functions named `names`
+    /// and in bodies alone: functions of its modules and plain `impl`s, not generic, and none of
+    /// which the rest of the program sees into. Only what names them is looked at again, and
+    /// what rustc linked is of before, as of any edit that is more than bodies.
+    pub fn touch_signatures(
+        &mut self,
+        db: &dyn HirDatabase,
+        crates: &[Crate],
+        file: base_db::FileId,
+        names: &[&str],
+    ) {
+        self.frozen.edit(crates.iter().flat_map(|it| it.transitive_rev_deps(db)));
+        let names: Vec<intern::Symbol> =
+            names.iter().map(|it| intern::Symbol::intern(it)).collect();
+        if let Some(base) = &mut self.base {
+            base.touch_signatures(db, crates, file, &names);
+        }
+        if let Some(rustc) = &mut self.rustc {
+            rustc.touch(db, Some(crates));
         }
         self.forget();
     }

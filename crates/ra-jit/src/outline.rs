@@ -42,7 +42,7 @@ const INERT: &[&str] = &[
 /// Each file as it was when last looked at.
 #[derive(Default)]
 pub(crate) struct Outlines {
-    files: FxHashMap<FileId, Option<u64>>,
+    files: FxHashMap<FileId, Option<Outline>>,
     /// The types each file defines, as [`types`] has them.
     types: FxHashMap<FileId, FxHashMap<String, u64>>,
     /// What [`copied`] found in each file before its first edit: as rustc compiled it.
@@ -66,6 +66,46 @@ struct Adding {
     files: Vec<FileId>,
 }
 
+/// A file's [`outline`], and its [`Signatures`] when it has them.
+#[derive(Clone, PartialEq, Eq, Debug)]
+struct Outline {
+    hash: u64,
+    signatures: Option<Signatures>,
+}
+
+/// The signatures of the functions of a file that nothing else sees into, and the rest of
+/// its [`outline`]: an edit that leaves the rest as it was changed only those signatures and
+/// bodies. They are the functions of its modules and of `impl`s of no trait, none of them
+/// generic, with a body that declares no items.
+#[derive(Clone, PartialEq, Eq, Debug)]
+struct Signatures {
+    rest: u64,
+    /// By the modules, the type of the `impl` and the name: the name and a hash of the
+    /// parameters, the return type and the `where` clause.
+    of: FxHashMap<String, (String, u64)>,
+}
+
+impl Signatures {
+    /// The names of the functions whose signatures changed, when nothing else did but those
+    /// and bodies.
+    fn changed(was: &Signatures, now: &Signatures) -> Option<Vec<String>> {
+        if was.rest != now.rest || was.of.len() != now.of.len() {
+            return None;
+        }
+        let mut changed = Vec::new();
+        for (key, (name, hash)) in &now.of {
+            match was.of.get(key) {
+                Some((_, was)) if was == hash => {}
+                Some(_) => changed.push(name.clone()),
+                None => return None,
+            }
+        }
+        changed.sort_unstable();
+        changed.dedup();
+        Some(changed)
+    }
+}
+
 /// What an edit just applied changed of a file.
 pub(crate) struct Changed {
     pub(crate) file: FileId,
@@ -85,6 +125,9 @@ pub(crate) struct Changed {
     /// nothing else sees into, and is one [`Outlines::adding`] took: the crates the file is a
     /// module of, and their files, whose code is all that can see the functions.
     pub(crate) added: Option<(Vec<ide_db::base_db::Crate>, Vec<FileId>)>,
+    /// When the edit changed nothing but bodies and the signatures of functions that nothing
+    /// else sees into ([`Signatures`]): the names of those functions.
+    pub(crate) signatures: Vec<String>,
 }
 
 impl Outlines {
@@ -163,19 +206,29 @@ impl Outlines {
             .into_iter()
             .zip(outlines)
             .map(|(file, now)| {
-                let was = self.files.insert(file, now);
-                let bodies_only = !off && now.is_some() && was == Some(now);
+                let was = self.files.insert(file, now.clone());
+                let (was, now) = (was.flatten(), now);
+                let hash = |it: &Option<Outline>| it.as_ref().map(|it| it.hash);
+                let bodies_only = !off && now.is_some() && hash(&was) == hash(&now);
                 let added = self.adding.remove(&file).filter(|adding| {
                     !off && !bodies_only
                         && match adding.away {
-                            Some(away) => now == Some(away),
+                            Some(away) => hash(&now) == Some(away),
                             None => {
-                                was.flatten().is_some()
+                                was.is_some()
                                     && outline_without(db, listed, file, &adding.functions)
-                                        == was.flatten()
+                                        == hash(&was)
                             }
                         }
                 });
+                let signatures = match (&was, &now) {
+                    _ if off || bodies_only || added.is_some() => None,
+                    (Some(was), Some(now)) => was.signatures.as_ref().zip(now.signatures.as_ref()),
+                    _ => None,
+                };
+                let signatures = signatures
+                    .and_then(|(was, now)| Signatures::changed(was, now))
+                    .unwrap_or_default();
                 let (copied, generics, inline) = match self.copied.get(&file) {
                     Some(was) => {
                         let now = copied(db, file);
@@ -200,6 +253,7 @@ impl Outlines {
                     generics,
                     inline,
                     added: added.map(|it| (it.crates, it.files)),
+                    signatures,
                 }
             })
             .collect();
@@ -316,7 +370,7 @@ fn copied_in(tree: &SyntaxNode) -> Copied {
 
 /// The [`outline`] of each file. A wide edit is of thousands of files: their bodies are
 /// lowered together and the files are hashed on all threads.
-fn outlines(db: &RootDatabase, listed: &Listed, files: &[FileId]) -> Vec<Option<u64>> {
+fn outlines(db: &RootDatabase, listed: &Listed, files: &[FileId]) -> Vec<Option<Outline>> {
     let stats = std::env::var_os("RA_JIT_STATS").is_some();
     if files.len() > 1 {
         let mut crates: Vec<_> =
@@ -450,7 +504,7 @@ fn types(db: &RootDatabase, file: FileId) -> FxHashMap<String, u64> {
 
 /// A hash of everything in the file but the bodies nothing else sees into, or `None` when
 /// the file is not read as a file of its own. `functions` are those written in it.
-fn outline(db: &RootDatabase, file: FileId, functions: &[FunctionId]) -> Option<u64> {
+fn outline(db: &RootDatabase, file: FileId, functions: &[FunctionId]) -> Option<Outline> {
     let Some(seen) = Written::of(db, functions) else {
         if std::env::var_os("RA_JIT_STATS").is_some() {
             eprintln!("outline: {file:?} is included in another file");
@@ -461,9 +515,10 @@ fn outline(db: &RootDatabase, file: FileId, functions: &[FunctionId]) -> Option<
     let edition =
         relevant_crates(db, file).first().map_or(Edition::CURRENT, |it| it.data(db).edition);
     let tree = EditionedFileId::new(db, file, edition).parse(db).syntax_node();
-    let (hash, found) = hash_outside_bodies(&tree, &seen.declaring, &FxHashSet::default());
+    let (hash, found, signatures) =
+        hash_outside(&tree, &seen.declaring, &FxHashSet::default(), true);
     // Each of them has to be one of the bodies that were kept in.
-    (found == seen.declaring.len()).then_some(hash)
+    (found == seen.declaring.len()).then_some(Outline { hash, signatures })
 }
 
 /// The [`outline`] of the file as if the functions at `added` were not written in it, when
@@ -713,7 +768,25 @@ fn hash_outside_bodies(
     declaring: &FxHashSet<TextRange>,
     skipped: &FxHashSet<TextRange>,
 ) -> (u64, usize) {
+    let (hash, found, _) = hash_outside(file, declaring, skipped, false);
+    (hash, found)
+}
+
+/// [`hash_outside_bodies`], and with `signatures` the file's [`Signatures`], or `None` when two
+/// of those functions have one key.
+fn hash_outside(
+    file: &SyntaxNode,
+    declaring: &FxHashSet<TextRange>,
+    skipped: &FxHashSet<TextRange>,
+    signatures: bool,
+) -> (u64, usize, Option<Signatures>) {
     let mut hasher = FxHasher::default();
+    let mut rest = FxHasher::default();
+    let mut of: FxHashMap<String, (String, u64)> = FxHashMap::default();
+    let mut owners: FxHashMap<String, Option<TextRange>> = FxHashMap::default();
+    let mut twice = false;
+    // The part of a signature the walk is in, the key of its function and its hash so far.
+    let mut signature: Option<(SyntaxNode, String, FxHasher)> = None;
     let mut found = 0;
     let mut walk = file.preorder_with_tokens();
     while let Some(event) = walk.next() {
@@ -725,6 +798,20 @@ fn hash_outside_bodies(
             }
             WalkEvent::Enter(syntax::NodeOrToken::Node(node)) => {
                 node.kind().hash(&mut hasher);
+                let part = matches!(
+                    node.kind(),
+                    SyntaxKind::PARAM_LIST | SyntaxKind::RET_TYPE | SyntaxKind::WHERE_CLAUSE
+                );
+                if signatures && signature.is_none() && part {
+                    let func = node.parent().and_then(ast::Fn::cast);
+                    if let Some(key) = func.and_then(|it| plain_key(&it, declaring)) {
+                        signature = Some((node.clone(), key, FxHasher::default()));
+                    }
+                }
+                match &mut signature {
+                    Some((_, _, it)) => node.kind().hash(it),
+                    None => node.kind().hash(&mut rest),
+                }
                 if node.kind() == SyntaxKind::FN && declaring.contains(&node.text_range()) {
                     found += 1;
                 } else if is_unseen_body(&node)
@@ -741,12 +828,73 @@ fn hash_outside_bodies(
                 if !blank {
                     token.kind().hash(&mut hasher);
                     token.text().hash(&mut hasher);
+                    let into = match &mut signature {
+                        Some((_, _, it)) => it,
+                        None => &mut rest,
+                    };
+                    token.kind().hash(into);
+                    token.text().hash(into);
+                }
+            }
+            WalkEvent::Leave(syntax::NodeOrToken::Node(node)) => {
+                if signature.as_ref().is_some_and(|(part, ..)| *part == node) {
+                    let (part, key, hash) = signature.take().unwrap_or_else(|| unreachable!());
+                    let func = part.parent().and_then(ast::Fn::cast);
+                    let at = func.as_ref().map(|it| it.syntax().text_range());
+                    let name = func.and_then(|it| it.name()).map(|it| it.text().to_string());
+                    let name = name.unwrap_or_default().trim_start_matches("r#").to_owned();
+                    // Two functions of one key are told apart by a `#[cfg]`.
+                    twice |= *owners.entry(key.clone()).or_insert(at) != at;
+                    // The parts of one function are hashed one after another, in order.
+                    let entry = of.entry(key).or_insert_with(|| (name, 0));
+                    entry.1 = entry.1.rotate_left(5) ^ hash.finish();
                 }
             }
             WalkEvent::Leave(_) => {}
         }
     }
-    (hasher.finish(), found)
+    let signatures = (signatures && !twice).then(|| Signatures { rest: rest.finish(), of });
+    (hasher.finish(), found, signatures)
+}
+
+/// The key a function has in [`Signatures`], when it is one of them.
+fn plain_key(func: &ast::Fn, declaring: &FxHashSet<TextRange>) -> Option<String> {
+    let body = func.body()?;
+    if !is_unseen_body(body.syntax()) || declaring.contains(&func.syntax().text_range()) {
+        return None;
+    }
+    let impl_trait_parameter = func.param_list().is_some_and(|it| {
+        it.syntax().descendants().any(|it| it.kind() == SyntaxKind::IMPL_TRAIT_TYPE)
+    });
+    if func.generic_param_list().is_some() || impl_trait_parameter {
+        return None;
+    }
+    let mut key = Vec::new();
+    for it in func.syntax().ancestors().skip(1) {
+        match it.kind() {
+            SyntaxKind::SOURCE_FILE | SyntaxKind::ITEM_LIST | SyntaxKind::ASSOC_ITEM_LIST => {}
+            SyntaxKind::MODULE => key.push(ast::Module::cast(it)?.name()?.text().to_string()),
+            SyntaxKind::IMPL => {
+                let of = ast::Impl::cast(it)?;
+                if of.trait_().is_some() || of.generic_param_list().is_some() {
+                    return None;
+                }
+                let ty = of.self_ty()?;
+                let tokens = ty.syntax().descendants_with_tokens().filter_map(|it| it.into_token());
+                key.push(format!(
+                    "impl {}",
+                    tokens
+                        .filter(|it| !it.kind().is_trivia())
+                        .map(|it| it.text().to_string())
+                        .collect::<String>()
+                ));
+            }
+            _ => return None,
+        }
+    }
+    key.reverse();
+    key.push(func.name()?.text().to_string());
+    Some(key.join("::"))
 }
 
 /// Whether the node is the body of a function that nothing else sees into, going by how the
@@ -956,6 +1104,62 @@ mod tests {
 
     fn copies(text: &str) -> Copied {
         copied_in(&SourceFile::parse(text, Edition::CURRENT).syntax_node())
+    }
+
+    fn signatures_changed(before: &str, after: &str) -> Option<Vec<String>> {
+        let of = |text: &str| {
+            let tree = SourceFile::parse(text, Edition::CURRENT).syntax_node();
+            let none = FxHashSet::default();
+            let (hash, _, signatures) = hash_outside(&tree, &none, &none, true);
+            assert_eq!(hash, hash_outside_bodies(&tree, &none, &none).0);
+            signatures
+        };
+        Signatures::changed(&of(before)?, &of(after)?).filter(|it| !it.is_empty())
+    }
+
+    #[test]
+    fn edits_of_signatures_alone_are_told() {
+        let told = |before: &str, after: &str, names: &[&str]| {
+            let names: Vec<String> = names.iter().map(|it| it.to_string()).collect();
+            assert_eq!(signatures_changed(before, after), Some(names), "{before:?} to {after:?}");
+        };
+        let not = |before: &str, after: &str| {
+            assert_eq!(signatures_changed(before, after), None, "{before:?} to {after:?}");
+        };
+        told("fn f(x: u8) -> u8 { x }", "fn f(x: u16) -> u16 { x }", &["f"]);
+        told(
+            "fn f(x: u8) {}\nfn g() { f(1); }",
+            "fn f(x: u8, y: u8) {}\nfn g() { f(1, 2); }",
+            &["f"],
+        );
+        told(
+            "struct S;\nimpl S { fn f(&self) {} }",
+            "struct S;\nimpl S { fn f(&mut self) {} }",
+            &["f"],
+        );
+        told("mod m { fn f() {} }\nfn f() {}", "mod m { fn f() -> u8 { 1 } }\nfn f() {}", &["f"]);
+        told("fn f() where u8: Copy {}", "fn f() {}", &["f"]);
+        // Renamed, added, generic, of a trait, seen into, or with other attributes.
+        not("fn f() {}", "fn g() {}");
+        not("fn f() {}", "fn f() {}\nfn g() {}");
+        not("fn f<T>(x: T) {}", "fn f<T>(x: T, y: u8) {}");
+        not("fn f(x: u8) {}", "fn f(x: impl Copy) {}");
+        not("struct S;\nimpl<T> S { fn f() {} }", "struct S;\nimpl<T> S { fn f(x: u8) {} }");
+        not("trait T { fn f(&self); }", "trait T { fn f(&mut self); }");
+        not(
+            "struct S;\nimpl Clone for S { fn clone(&self) -> S { S } }",
+            "struct S;\nimpl Clone for S { fn clone(&self) -> Self { S } }",
+        );
+        not("async fn f() {}", "async fn f(x: u8) {}");
+        not("const fn f() {}", "const fn f(x: u8) {}");
+        not("fn f() -> impl Copy { 1 }", "fn f() -> impl Clone { 1 }");
+        not("fn f() {}", "#[cfg(test)] fn f() {}");
+        not("fn f() {}", "pub fn f() {}");
+        not(
+            "#[cfg(a)] fn f() {}\n#[cfg(b)] fn f() {}",
+            "#[cfg(a)] fn f(x: u8) {}\n#[cfg(b)] fn f() {}",
+        );
+        not("struct S(u8);\nfn f() {}", "struct S(u16);\nfn f(x: u8) {}");
     }
 
     #[test]
