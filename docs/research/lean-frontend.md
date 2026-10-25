@@ -290,6 +290,11 @@ the own base peaked at 13.9 to 14.1 GB in both runs of the crates branch alone a
 impls branch, as it did once for slice 1, and never with all the branches (**read**; what it is
 was not found, **unverified** that it is not a change's).
 
+On ripgrep 15.1.0 (all the branches against `08924cadc8`, the same runs) edits were already short
+and move little: a body edit 47.5 / 47.1 to 46.5 / 45.4 ms, a signature edit 89.6 / 90.8 to
+86.0 / 87.9 ms; the cold start stays 7.4 s and the own base's peak 2.2 GB (**read**). Noticing
+an edit, 38 ms, is about 45% of its wall time there.
+
 **Slice 2, the patch base asked about fewer instances.** With debug info on, the patch built
 against the base asked a `Mark` of every row it placed, each an interned call of `row_place` and
 a walk of its edges. `root_mark` and `instance_mark` are now tracked queries that return the mark
@@ -343,8 +348,8 @@ measured again here (**unverified** for these six).
 
 **The first edit after the own base** took 12.3 s at the client while the daemon answered it in
 335 ms: in its log the next request came 12 s after that reply, and the second edit's wall was
-0.31 s (**read**). The time is the client's, or work that is not a request; it was not looked
-into (**unverified** where it goes).
+0.31 s (**read**). On ripgrep the first edit's wall is 0.16 s. The time is the client's, or
+work that is not a request; it was not looked into (**unverified** where it goes).
 
 ## Not checked
 
