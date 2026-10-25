@@ -4,7 +4,6 @@
 
 #![allow(dead_code)]
 
-use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Debug;
 use std::sync::OnceLock;
@@ -299,9 +298,25 @@ pub(crate) fn resolve_raw(
     root_pkg_id: PackageId,
     ordering: VersionOrdering,
 ) -> CargoResult<Resolve> {
+    let root_summary =
+        Summary::new(root_pkg_id, deps, &BTreeMap::new(), None::<&String>, None).unwrap();
+    let start = Instant::now();
+    let resolve =
+        resolve_summaries(&[(root_summary, ResolveOpts::everything())], registry, ordering);
+    // The largest test in our suite takes less then 30 secs.
+    // So let's fail the test if we have been running for more than 60 secs.
+    assert!(start.elapsed().as_secs() < 60);
+    resolve
+}
+
+/// Resolves the workspace members `roots` against `registry`.
+pub(crate) fn resolve_summaries(
+    roots: &[(Summary, ResolveOpts)],
+    registry: &[Summary],
+    ordering: VersionOrdering,
+) -> CargoResult<Resolve> {
     struct MyRegistry<'a> {
         list: &'a [Summary],
-        used: RefCell<BTreeSet<PackageId>>,
     }
     impl Registry for MyRegistry<'_> {
         async fn query(
@@ -318,7 +333,6 @@ pub(crate) fn resolve_raw(
                     QueryKind::Normalized => true,
                 };
                 if matched {
-                    self.used.borrow_mut().insert(summary.package_id());
                     f(IndexSummary::Candidate(summary.clone()));
                 }
             }
@@ -333,28 +347,17 @@ pub(crate) fn resolve_raw(
             false
         }
     }
-    let registry = MyRegistry { list: registry, used: RefCell::new(BTreeSet::new()) };
+    let registry = MyRegistry { list: registry };
 
-    let root_summary =
-        Summary::new(root_pkg_id, deps, &BTreeMap::new(), None::<&String>, None).unwrap();
-
-    let opts = ResolveOpts::everything();
-
-    let start = Instant::now();
     let mut version_prefs = VersionPreferences::default();
     version_prefs.version_ordering(ordering);
 
-    let resolve = resolver::resolve(
-        &[(root_summary, opts)],
+    resolver::resolve(
+        roots,
         &[],
         &registry,
         &version_prefs,
         ResolveVersion::with_rust_version(None),
         &ResolveSettings::default(),
-    );
-
-    // The largest test in our suite takes less then 30 secs.
-    // So let's fail the test if we have been running for more than 60 secs.
-    assert!(start.elapsed().as_secs() < 60);
-    resolve
+    )
 }

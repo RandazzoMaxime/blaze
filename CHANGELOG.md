@@ -35,6 +35,15 @@ All notable changes to ra-jit are written here. The format follows
   Its tests are cargo's `resolver-tests`, the 37 of `resolve.rs` and the 20 of `validated.rs`
   (whose check against a SAT solver is left out). cargo's unstable `-Zdirect-minimal-versions`
   and publish-age policy are not ported.
+- `blaze-resolve` picks features as cargo 1.99.0 does (#298): the members `-p`, `--features`,
+  `--all-features` and `--no-default-features` select, by resolver 1's rules (`--features` for
+  the package in the current directory, `member/feat` for another) or resolver 2's, with
+  cargo's errors and suggestions; and cargo's feature resolver, which under resolver 2 keeps the
+  features of build dependencies and proc macros apart from the rest, leaves out those of
+  dev-dependencies when nothing is tested, and of dependencies for platforms not built for, and
+  enables `dep?/feat` once `dep` is. A package's targets and the platforms' `cfg` come from
+  whoever calls it. Tests take cases of cargo's `features2`, `weak_dep_features` and
+  `package_features` tests.
 - `cargo ra-jit test` with `RA_JIT_TESTS=affected` runs, on Linux, each test that reaches a
   file, the environment, a process or the network in a sandbox of its own (#257): a process
   in new user, mount, network, IPC and PID namespaces, the machine's files read-only, the

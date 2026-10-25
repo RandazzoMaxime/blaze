@@ -82,7 +82,11 @@ use self::types::{ConflictMap, ConflictReason, DepsFrame};
 use self::types::{FeaturesSet, RcVecIter, RemainingDeps, ResolverProgress};
 
 pub use self::errors::{ActivateError, ActivateResult, ResolveError};
-pub use self::features::{CliFeatures, ForceAllTargets, HasDevUnits};
+pub use self::features::{
+    CliFeatures, CompileKind, FeatureOpts, FeatureResolver, FeaturesFor, ForceAllTargets,
+    HasDevUnits, PackageTargets, ResolvedFeatures,
+};
+pub use self::members::{Members, members_with_features};
 pub use self::types::{ResolveBehavior, ResolveOpts};
 pub use self::version_prefs::VersionOrdering;
 pub use self::version_prefs::VersionPreferences;
@@ -96,6 +100,7 @@ mod context;
 mod dep_cache;
 pub(crate) mod errors;
 pub mod features;
+mod members;
 mod types;
 mod version_prefs;
 
