@@ -5,7 +5,7 @@
   </picture>
 </p>
 
-<h3 align="center">Rebuild Rust in milliseconds, not seconds.</h3>
+<h3 align="center">Rebuild Rust in milliseconds.</h3>
 
 <p align="center">The same commands as cargo, with <code>blaze</code> in front.<br>Blazingly fast Rust, literally.</p>
 
