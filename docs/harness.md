@@ -104,11 +104,13 @@ with reasons. The daemon's log says `backend: llvm -O2 fast emit` when LLVM is i
 | Script | What it checks |
 |---|---|
 | `resolve.py [bench\|crates\|workspaces]` | `crates/blaze-manifest` against cargo 1.99 on `cargo metadata --no-deps --format-version 1`: the projects of `bench.py`, 300 crates.io crates and 72 workspace repositories at pinned commits (`resolve/corpus.json`), the JSON compared as text after the root and `CARGO_HOME` are replaced, key order included, and the error text when both refuse a workspace. Prints the first difference of each workspace and the counts per part; [resolve.md](resolve.md) has them. `resolve.py DIR...` compares the workspaces at DIR... only. Needs the network |
+| `resolve.py config` | The configuration as cargo 1.99 merges it: `cargo -Zunstable-options config get` against blaze-manifest's `config` example, seven ways each, on the trees of `crates/blaze-manifest/tests/config-fixtures` and the root of every bench project and workspace repository; exit code, stdout and stderr compared as text |
 
 The workspaces of `crates/blaze-manifest/tests/fixtures` (inheritance, members and targets
-discovered, a package outside its workspace's members, config and manifest errors) have cargo's
-output committed next to them, so `cargo test -p blaze-manifest` checks them without cargo or
-the network; `resolve.py --fixtures` writes them again.
+discovered, a package outside its workspace's members, config and manifest errors) and the
+config trees of `tests/config-fixtures` have cargo's output committed next to them, so
+`cargo test -p blaze-manifest` checks them without cargo or the network; `resolve.py --fixtures`
+writes them again.
 
 ### The daemon following edits
 

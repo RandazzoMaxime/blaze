@@ -1,7 +1,7 @@
 {
  "dir": ".",
  "inputs": {
-  "Cargo.lock": "3f0f168888287b44b003208e3a4c7efe992629d24e5a1f3b2dbcdc6a57473370",
+  "Cargo.lock": "2af025e19095d4fffd26ef7b041b12bfe75531b9e4ccc9d7a324af1b61c1ec53",
   "Cargo.toml": "8f55aef5b1f18d5d40be7aade333bccce294cb9d9debec1416cd3eb385de414a"
  },
  "packages": {
@@ -5972,6 +5972,23 @@
    },
    "version": "0.12.4"
   },
+  "shell-escape@0.1.5": {
+   "authors": "Steven Fackler <sfackler@gmail.com>",
+   "description": "Escape characters that may have a special meaning in a shell",
+   "homepage": "",
+   "license": "MIT/Apache-2.0",
+   "license_file": "",
+   "links": null,
+   "name": "shell-escape",
+   "readme": "README.md",
+   "repository": "https://github.com/sfackler/shell-escape",
+   "rust_version": "",
+   "source": {
+    "checksum": "45bb67a18fa91266cc7807181f62f9178a6873bfad7dc788c42e6430db40184f",
+    "kind": "registry"
+   },
+   "version": "0.1.5"
+  },
   "shlex@2.0.1": {
    "authors": "comex <comexk@gmail.com>:Fenhl <fenhl@fenhl.net>:Adrian Taylor <adetaylor@chromium.org>:Alex Touchet <alextouchet@outlook.com>:Daniel Parks <dp+git@oxidized.org>:Garrett Berg <googberg@gmail.com>",
    "description": "Split a string into shell words, like Python's shlex.",
@@ -6770,6 +6787,23 @@
     "kind": "registry"
    },
    "version": "1.1.1+spec-1.1.0"
+  },
+  "toml_edit@0.25.12+spec-1.1.0": {
+   "authors": "",
+   "description": "Yet another format-preserving TOML parser.",
+   "homepage": "",
+   "license": "MIT OR Apache-2.0",
+   "license_file": "",
+   "links": null,
+   "name": "toml_edit",
+   "readme": "README.md",
+   "repository": "https://github.com/toml-rs/toml",
+   "rust_version": "1.85",
+   "source": {
+    "checksum": "d2153edc6955a6c354fad8f5efd38b6a8769bdccf9fe50f8e1329f81b0baa5d7",
+    "kind": "registry"
+   },
+   "version": "0.25.12+spec-1.1.0"
   },
   "toml_parser@1.1.2+spec-1.1.0": {
    "authors": "",

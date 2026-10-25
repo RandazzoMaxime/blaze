@@ -22,18 +22,35 @@ cargo rejects is rejected with cargo's message. Part of the self-contained blaze
 - `cargo-features`: the stable ones accepted, the unstable ones refused with cargo's message on
   the stable channel, the removed ones refused.
 - `.cargo/config.toml` files from the current directory up and in `CARGO_HOME`, merged as cargo
-  merges them, with `include`, `--config` (files and dotted keys) and `CARGO_*` variables:
-  enough for `build.target-dir`, `build.build-dir` and the crates.io and alternate registry
-  indexes so far. As in cargo, the files are read at the first value something asks for, so a
-  broken one is an error only where configuration is read.
+  merges them, with `include`, `--config` (files and dotted keys) and `CARGO_*` variables. As in
+  cargo, the files are read at the first value something asks for, so a broken one is an error
+  only where configuration is read, and `Config::start` does what cargo does on start (the
+  `alias.<command>` lookup and its warning, then `--config`).
+- Typed values through a port of cargo's config deserializer (`Config::get::<T>(key)`), so a
+  table read into cargo's own types takes each field from the files or its variable and fails
+  or warns of an unused key with cargo's text: `[build]` (`target`, `target-dir`, `build-dir`,
+  `jobs`, rustflags, …), `[net]`, `[http]`, `[env]` (relative and forced values, the variables
+  it refuses), `[target.<triple>]` and `[target.'cfg(..)']` (rustflags in cargo's precedence,
+  `RUSTFLAGS` and `CARGO_ENCODED_RUSTFLAGS` over the target tables over `build.rustflags`; the
+  runner and the linker, one matching `cfg` at most), `[registry]` and `[registries]`,
+  `[source]` with each source's location checked and `replace-with` followed, `[resolver]`, and
+  `[profile.<name>]` read as cargo's `TomlProfile`. The `cfg` of a target and the host triple
+  are the caller's, from rustc.
+- `cargo config get` as cargo 1.99 prints it (`blaze_manifest::config::get`, the `config`
+  example): `toml` with and without `--show-origin`, `json`, `json-value`, `--merged no`, the
+  variables that may affect a table, and the warnings of old and doubled config files. It is how
+  the harness sees the merged configuration.
 - A manifest that does not parse or fit the schema is shown as cargo shows it, a snippet with
   the place marked (`blaze_manifest::diagnostic`).
 
 Not yet: dependencies resolved (the `resolve` of `cargo metadata`, with the lock file, waits
-for `crates/blaze-resolve`), the rest of the config keys (`build.target`, rustflags, `[env]`,
-linkers and runners, `[source]` replacement, `[net]`), profiles, and the warnings cargo prints
-for unused manifest keys and lints. `{workspace-path-hash}` in `build.build-dir` is refused
-until cargo's hash is ported.
+for `crates/blaze-resolve`), profiles as units get them (validated and merged with the
+manifest's), `links` overrides in `[target.<triple>]`, a source defined twice under two names
+(blaze-registry's, which has the `SourceId` display it names), and the warnings cargo prints for
+unused manifest keys and lints. `{workspace-path-hash}` in `build.build-dir` is refused until
+cargo's hash is ported. cargo checks a list against the lists that do not merge (`target.*.runner`,
+`registry.credential-provider`, …) by a key path it never pops, so whether such a list merges
+across files depends on the keys merged before it in `FxHashMap` order; blaze does the same.
 
 ## Parity
 
@@ -56,6 +73,25 @@ do not parse, members that are missing).
 The workspaces of `crates/blaze-manifest/tests/fixtures` are the fast tier: cargo's output for
 each is committed, and `cargo test -p blaze-manifest` compares without cargo or the network.
 
+The `config` part runs `cargo -Zunstable-options config get` (with `RUSTC_BOOTSTRAP=1`, the
+command being unstable) and the `config` example with the same arguments, seven ways each
+(`toml`, `--show-origin`, `--merged no` with and without it, `json`, `json-value`, and `json`
+with `--show-origin`, which both refuse), on the trees of
+`crates/blaze-manifest/tests/config-fixtures` (each its own `case.json` of variables, current
+directory and further runs: layered files with `include`, `--config` files and keys, variables
+alone, quoting, lists that do not merge, and broken files of every kind) and the root of every
+bench project and workspace repository, comparing exit code, stdout and stderr as text.
+
+On dev-aws-8, 2026-10-25, at commit 2e59bae97b: 103 of 103 equal, 767 runs, none different:
+the 18 trees, the 13 bench projects and the 72 workspace repositories, 47 of whose roots have
+a `.cargo/config` or `.cargo/config.toml` of their own. The other parts gave the same counts as
+above.
+
+The trees' runs and cargo's output for them are committed (`expected.json`, written by
+`resolve.py --fixtures`); `tests/config_get.rs` compares them offline, and
+`tests/config_typed.rs` checks the typed tables, the rustflags order and `[env]` values as
+`cargo build -v` and `cargo run` showed them.
+
 ## Decisions
 
 **cargo's schema crate, pinned.** `cargo-util-schemas = "=0.14.3"` is the version cargo 1.99.0
@@ -72,3 +108,10 @@ blaze ever needs to change one of its types, it is vendored then.
 
 **cargo's renderer, pinned.** `annotate-snippets = "=0.12.16"`, the version cargo 1.99.0 renders
 manifest diagnostics with, so that a manifest error reads character for character as cargo's.
+
+**cargo's config deserializer, ported.** The typed config layer is cargo's `de.rs`, `value.rs`,
+`key.rs`, `path.rs`, `error.rs` and `schema.rs` ported onto blaze-manifest's `Config`, not a
+schema of blaze's own over `toml::Value`: what a table reads and every message it fails with
+come from the same serde walk as cargo's, `Value<T>` keeps where each value was defined, and a
+type cargo reads (cargo-util-schemas' `TomlProfile`) reads here unchanged. `cargo config get`
+prints with the `toml_edit` (`=0.25.12`) and `shell-escape` (`=0.1.5`) cargo 1.99 prints with.

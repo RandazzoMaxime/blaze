@@ -14,6 +14,13 @@ All notable changes to ra-jit are written here. The format follows
   (`cargo-util-schemas` 0.14.3) ([resolve.md](docs/resolve.md)). `harness/resolve.py` compares
   it with cargo on the bench projects, 300 crates.io crates and 72 workspace repositories at
   pinned commits: all 385 equal, key order included. Nothing in blaze uses it yet.
+- blaze-manifest reads `.cargo/config.toml` into cargo's own config types through a port of
+  cargo's config deserializer: `[build]`, `[net]`, `[http]`, `[env]`, `[target]` (rustflags in
+  cargo's precedence, runners and linkers), `[registry]`, `[registries]`, `[source]`
+  replacement, `[resolver]` and `[profile]`, each field from its file or its `CARGO_*`
+  variable, with cargo's errors and unused-key warnings. Its `config` example is
+  `cargo config get`, and `harness/resolve.py config` compares the two on config trees and
+  every corpus repository: 103 of 103 equal over 767 runs ([resolve.md](docs/resolve.md)).
 - `cargo ra-jit test` with `RA_JIT_TESTS=affected` runs, on Linux, each test that reaches a
   file, the environment, a process or the network in a sandbox of its own (#257): a process
   in new user, mount, network, IPC and PID namespaces, the machine's files read-only, the

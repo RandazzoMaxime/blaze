@@ -12,6 +12,10 @@ The parts of the corpus (harness/resolve/corpus.json) are
   bench       the projects of harness/bench.py at their pinned revisions
   crates      crates.io crates, each its `.crate` unpacked as a package of its own
   workspaces  workspace repositories at pinned commits
+  config      `cargo -Zunstable-options config get` (RUSTC_BOOTSTRAP=1) against the `config`
+              example, each of CONFIG_RUNS and its case's runs, on the trees of
+              crates/blaze-manifest/tests/config-fixtures and the roots of the bench and
+              workspace repositories: exit code, stdout and stderr compared as text
 and every part runs when none is named. Each is fetched under `--work` (default
 $TMPDIR/blaze-resolve) with a CARGO_HOME of its own there, then `cargo metadata --no-deps
 --format-version 1` and the `metadata` example of blaze-manifest are run on it from its root.
@@ -24,8 +28,8 @@ JSON; the counts are docs/resolve.md's.
 `--fixtures` runs cargo on each fixture of crates/blaze-manifest/tests/fixtures, copied into a
 directory of its own, from the directory its `fixture.json` names in `cwd` (its root if none),
 and writes what it printed, normalized, as the fixture's `expected.json`, or `{"error": ...}`
-with the error's lines when cargo refused it: the crate's tests compare against those without
-cargo or the network. The cargo is `cargo
+with the error's lines when cargo refused it, and each config tree's runs as its `expected.json`:
+the crate's tests compare against those without cargo or the network. The cargo is `cargo
 +1.99.0` unless CARGO says otherwise; the blaze-manifest example is built with it unless
 `--blaze` names one.
 """
