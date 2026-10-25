@@ -147,15 +147,25 @@ fn whole(asked: &Invocation, cwd: &Path, program: &Program, dir: &Path) -> Resul
         .map_err(|it| format!("installing {}: {it}", program.executable.display()))
 }
 
-/// `name` with the `[0123456789abcdef]` after each crate's name taken out.
+/// `name` with the `[0123456789abcdef]` after each crate's name, and the `ra-jit.<hash>.` of
+/// a symbol, taken out.
 fn without_hashes(name: &str) -> String {
+    let is_hash = |it: &str| it.len() == 16 && it.bytes().all(|it| it.is_ascii_hexdigit());
+    let mut name = name.to_owned();
+    while let Some(at) = name.find("ra-jit.")
+        && let Some(hash) = name.get(at + 7..at + 23)
+        && is_hash(hash)
+        && name[at + 23..].starts_with('.')
+    {
+        name.replace_range(at..at + 24, "");
+    }
     let mut out = String::with_capacity(name.len());
-    let mut rest = name;
+    let mut rest = name.as_str();
     while let Some(at) = rest.find('[') {
         let hash = rest[at + 1..].split_once(']').map(|(it, _)| it);
         out.push_str(&rest[..at]);
         match hash {
-            Some(hash) if hash.len() == 16 && hash.bytes().all(|it| it.is_ascii_hexdigit()) => {
+            Some(hash) if is_hash(hash) => {
                 rest = &rest[at + hash.len() + 2..];
             }
             _ => {
