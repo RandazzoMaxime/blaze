@@ -32,15 +32,16 @@ builds with once (about 100 to 135 MB), or uses rustup's. Rather use crates.io o
 
 In any Rust project:
 
-```sh
+```text
 blaze run     # like cargo run
 blaze test    # like cargo test
 blaze build   # like cargo build
 ```
 
-The first build is cargo's. Then change a function and build again: it's back in milliseconds,
-and the `Finished` line says `[ra-jit]` (blaze's engine). Every other cargo command passes
-straight through to cargo. Where cargo is installed, `cargo blaze run` is the same as `blaze run`.
+The first build runs cargo, then waits a few seconds for blaze to load your project. Then change
+a function and build again: it's back in milliseconds, and the `Finished` line says `[ra-jit]`
+(blaze's engine). Every other cargo command passes straight through to cargo. Where cargo is
+installed, `cargo blaze run` is the same as `blaze run`.
 
 ## How fast
 

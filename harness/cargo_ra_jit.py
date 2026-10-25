@@ -169,7 +169,7 @@ SMALL = ["ripgrep", "fd", "hyperfine"]
 MODES = {"ra-jit": "`cargo ra-jit`", "plain": "plain cargo after `ra-jit enable`"}
 
 # What cargo and `cargo ra-jit` print about the build, which is not the program's output.
-STATUS = re.compile(r"^\s*((Compiling|Checking|Finished|Running|Downloading|Downloaded|Blocking|Locking|Updating|Adding|Fresh|Dirty|Doc-tests)\b|ra-jit:|warning:)")
+STATUS = re.compile(r"^\s*((Compiling|Checking|Finished|Running|Downloading|Downloaded|Blocking|Waiting|Locking|Updating|Adding|Fresh|Dirty|Doc-tests)\b|ra-jit:|warning:)")
 
 
 def base_env(home):
@@ -305,7 +305,7 @@ def by_rustc(stderr):
 
 def how_built(stderr):
     """Whether the daemon built it, or why cargo did."""
-    reason = re.search(r"^ra-jit: (?:bug: )?(.*?); (building with cargo|this is `cargo \w+`)(?:, which .*)?$", stderr, re.M)
+    reason = re.search(r"^ra-jit: (?:bug: )?(.*?); (building with cargo|this build is cargo's|this is `cargo \w+`)(?:, which .*)?$", stderr, re.M)
     if reason:
         return "cargo: " + reason[1]
     kept = re.search(r"^ra-jit: (.*); nothing has changed since cargo built$", stderr, re.M)
@@ -712,6 +712,8 @@ def daemon(work):
     _, first = here.cargo("build")
     pid, workers, _ = status()
     check("the first build starts one", first.returncode == 0 and pid is not None, f"pid {pid}")
+    waited = first.stderr.count("Waiting for blaze to load the workspace")
+    check("and waits for it: the first build's program is the daemon's", how_built(first.stderr) == "daemon" and waited == 1, f"{how_built(first.stderr)}, {waited} waiting lines")
     wait_warm(here, ws)
     # A program that runs plain `cargo build` on its own checkout, as a test suite may, after
     # the daemon built it: cargo's own artifacts are behind the sources, so cargo builds

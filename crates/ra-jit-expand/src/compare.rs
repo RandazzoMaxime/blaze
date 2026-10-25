@@ -1,12 +1,13 @@
 //! The toolchain's proc-macro server held against ra-jit's (docs/no-rustc.md, step J1): with
 //! `RA_JIT_PROC_MACRO_COMPARE` naming the server built from `vendor/proc-macro-srv` and
-//! `RA_JIT_PROC_MACRO_LIBS` a directory of the libraries ra-jit linked (`lib<crate>` and the
-//! platform's suffix, with the list of their macros in them), each call the toolchain's server
+//! `RA_JIT_PROC_MACRO_LIBS` a directory of the libraries ra-jit linked (named as rustc's, or
+//! `lib<crate>` and the platform's suffix, with the list of their macros in them), each call the toolchain's server
 //! expands with rustc's library of a crate is expanded again by that server with ra-jit's
 //! library of the crate, given the same input, and the outputs, spans and all, are compared.
 
 use std::{
     cell::Cell,
+    collections::BTreeMap,
     path::PathBuf,
     sync::{
         Mutex, OnceLock,
@@ -69,13 +70,17 @@ fn crate_of(path: &AbsPath) -> Option<&str> {
 }
 
 impl Compare {
-    /// ra-jit's library of the crate of rustc's at `dylib`, loaded into ra-jit's server.
+    /// ra-jit's library of rustc's at `dylib`, loaded into ra-jit's server: the one of the
+    /// same file name, as ra-jit links it into a target directory where cargo asked rustc for
+    /// it, which tells two versions of a crate apart, or else the one of its crate.
     fn macro_of(&self, dylib: &AbsPath, name: &str) -> Result<ProcMacro, String> {
         let mut loaded = self.loaded.lock().unwrap_or_else(|it| it.into_inner());
         let macros = loaded.entry(dylib.to_path_buf()).or_insert_with(|| -> Result<_, String> {
             let krate = crate_of(dylib).ok_or_else(|| format!("{dylib} names no crate"))?;
             let file = format!("lib{krate}{}", std::env::consts::DLL_SUFFIX);
-            let path = std::path::absolute(self.libs.join(file)).map_err(|e| e.to_string())?;
+            let same = dylib.file_name().map(|it| self.libs.join(it)).filter(|it| it.exists());
+            let path = same.unwrap_or_else(|| self.libs.join(file));
+            let path = std::path::absolute(path).map_err(|e| e.to_string())?;
             if !path.exists() {
                 return Err(format!("ra-jit linked no {}", path.display()));
             }
@@ -106,11 +111,12 @@ pub(crate) fn again(
     toolchain: &Result<tt::TopSubtree, hir_expand::proc_macro::ProcMacroExpansionError>,
 ) {
     let Some(compare) = compare() else { return };
+    let label = format!("{}::{name}", crate_of(dylib).unwrap_or("?"));
     let mac = match compare.macro_of(dylib, name) {
         Ok(it) => it,
         Err(why) => {
             COUNTS.unloaded.fetch_add(1, Ordering::Relaxed);
-            say_once(name, &format!("not compared: {why}"));
+            noted(&label, NOT_COMPARED, &format!("not compared: {why}"));
             return;
         }
     };
@@ -141,8 +147,9 @@ pub(crate) fn again(
             Ok(tree) => format!("{tree:?}"),
             Err(e) => format!("error: {e:?}"),
         };
-        say_once(
-            name,
+        noted(
+            &label,
+            OTHERWISE,
             &format!(
                 "ra-jit's server and library expanded otherwise than the toolchain's:\n\
                  toolchain's: {}\nra-jit's:    {}",
@@ -153,12 +160,19 @@ pub(crate) fn again(
     }
 }
 
-/// Says `what` of the macro `name` the first time only.
-fn say_once(name: &str, what: &str) {
-    static SAID: Mutex<Option<FxHashMap<String, ()>>> = Mutex::new(None);
-    let mut said = SAID.lock().unwrap_or_else(|it| it.into_inner());
-    if said.get_or_insert_default().insert(name.to_owned(), ()).is_none() {
-        eprintln!("proc macros: `{name}`: {what}");
+const OTHERWISE: usize = 0;
+const NOT_COMPARED: usize = 1;
+
+/// The calls of each macro, `crate::name`, expanded otherwise and not compared.
+static NAMED: Mutex<BTreeMap<String, [u64; 2]>> = Mutex::new(BTreeMap::new());
+
+/// Counts a call of the macro `label` as `which`, and says `what` of the first.
+fn noted(label: &str, which: usize, what: &str) {
+    let mut named = NAMED.lock().unwrap_or_else(|it| it.into_inner());
+    let calls = named.entry(label.to_owned()).or_default();
+    calls[which] += 1;
+    if calls[which] == 1 {
+        eprintln!("proc macros: `{label}`: {what}");
     }
 }
 
@@ -184,7 +198,12 @@ pub(crate) fn report() -> Option<String> {
     let kinds = ["derives", "attributes", "function-like"];
     let kinds: Vec<_> =
         kinds.iter().zip(&compared).map(|(what, calls)| format!("{calls} {what}")).collect();
-    Some(format!(
+    let named = NAMED.lock().unwrap_or_else(|it| it.into_inner());
+    let of = |which: usize| -> Vec<String> {
+        let calls = named.iter().filter(|(_, calls)| calls[which] != 0);
+        calls.map(|(label, calls)| format!("{label} {}", calls[which])).collect()
+    };
+    let mut said = format!(
         "compared with ra-jit's server: {} calls ({}), {} expanded otherwise, {} failed by both, \
          {} not compared",
         compared.iter().sum::<u64>(),
@@ -192,5 +211,12 @@ pub(crate) fn report() -> Option<String> {
         COUNTS.differed.load(Ordering::Relaxed),
         COUNTS.failed.load(Ordering::Relaxed),
         COUNTS.unloaded.load(Ordering::Relaxed),
-    ))
+    );
+    for (which, what) in [(OTHERWISE, "expanded otherwise"), (NOT_COMPARED, "not compared")] {
+        let calls = of(which);
+        if !calls.is_empty() {
+            said += &format!(" ({what}: {})", calls.join(", "));
+        }
+    }
+    Some(said)
 }
