@@ -1977,9 +1977,10 @@ impl Base {
 
     /// Whether nothing calls one of [`Self::hydrated`] as the base did: no caller calls it by
     /// its name any more, so each changed, and a caller from the store that is not found is
-    /// left uncalled itself. A closure is named by where in its body it is written, so an edit
-    /// above it in that body gives it and what is generic over it new names, and the code
-    /// under the old ones is left uncalled, as an instance no caller reaches any more is.
+    /// left uncalled itself. A closure is named by its place among the closures of its body
+    /// and by its source, so a closure added above it in that body, or an edit of it, gives it
+    /// and what is generic over it new names, and the code under the old ones is left
+    /// uncalled, as an instance no caller reaches any more is.
     /// Each changed caller is compiled again, and what it calls now with it.
     fn dropped(
         &self,
@@ -2517,6 +2518,15 @@ impl Base {
             if queue.iter().copied().any(shares) {
                 return Ok(Err("a function now shares an `async` block with one left to rustc"));
             }
+        }
+        if std::env::var_os("RA_JIT_STATS").is_some() {
+            let decls = cg.module.declarations();
+            let anew = (cg.instances.values())
+                .filter(|&&id| {
+                    decls.get_function_decl(id).linkage_name(id).starts_with("ra-jit.patch::")
+                })
+                .count();
+            eprintln!("patch: {anew} instances the base has no code for");
         }
         let (bodies, mut phases) = (cg.bodies, cg.phases);
         let start = stdx::time::Instant::now();

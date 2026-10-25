@@ -92,24 +92,32 @@ FIRST = "a 6 5 10 6 7"
 # (what the step is, [(file, old, new)], what the program prints after it)
 STEPS = [
     ("a generic function's body", [(LIB, "x.into() * 3", "x.into() * 4")], "a 8 5 10 6 7"),
-    # A closure is named by where in its body it is written: this one, and the instances
-    # generic over it, get new names, and the ones from the store are called no more.
+    # A closure is named by its place among the closures of its body, which a line above it
+    # leaves: the instances generic over it are the base's, from the store, as they were.
     ("a line above a closure", [(LIB, "    v.iter()", "    let _ = 0u64;\n    v.iter()")], "a 8 5 10 6 7"),
     # The same of a recursive function's instance, which calls itself.
     ("a line above a closure a recursive function takes", [(LIB, "    walk(v", "    let _ = 1u64;\n    walk(v")],
      "a 8 5 10 6 7"),
+    # A closure added above one takes its place, and is named apart from it by what is
+    # written of it: the one that was there and the instances generic over it get new names,
+    # and the ones from the store are called no more.
+    ("a closure above a closure", [(LIB, "    let _ = 0u64;\n", "    let _ = (|| 0u64)();\n")], "a 8 5 10 6 7"),
     ("a closure's body", [(LIB, "x.into() + 1", "x.into() + 2")], "a 8 7 10 6 7"),
     ("a static's value", [(LIB, "BASE: u64 = 10", "BASE: u64 = 12")], "a 8 7 12 6 7"),
     ("the program's own text", [(APP, '"a"', '"b"')], "b 8 7 12 6 7"),
     # Its callers from the store call rustc's copy of it in the program's crate (#216).
     ("a function rustc copies into its callers", [(LIB, "        self.start\n", "        self.start + 1\n")],
      "b 8 7 12 6 9"),
-    ("all of it taken back", [(LIB, "x.into() * 4", "x.into() * 3"), (LIB, "    let _ = 0u64;\n", ""),
+    ("all of it taken back", [(LIB, "x.into() * 4", "x.into() * 3"), (LIB, "    let _ = (|| 0u64)();\n", ""),
                               (LIB, "    let _ = 1u64;\n", ""), (LIB, "x.into() + 2", "x.into() + 1"),
                               (LIB, "BASE: u64 = 12", "BASE: u64 = 10"), (APP, '"b"', '"a"'),
                               (LIB, "        self.start + 1\n", "        self.start\n")], FIRST),
 ]
 REBUILT = "compiling what the store had of the checkout"
+# The steps whose patch compiles only code the base has, by the names it had, and the one
+# that renames some of it, whose patch compiles that under the new names.
+KEEPING = {"a generic function's body", "a line above a closure", "a line above a closure a recursive function takes"}
+RENAMING = {"a closure above a closure"}
 # What a call of rustc's copy of a function of the checkout was left out of the store as (#216).
 UNKEPT = "rustc's copy of a function of the checkout"
 
@@ -145,6 +153,10 @@ class Logs:
 
     def links(self):
         return re.findall(r"^link: \S+ \((.*)\)$", self.text(), re.M)
+
+    def anew(self):
+        """How many instances each patch compiled that the base had no code for."""
+        return [int(n) for n in re.findall(r"^patch: (\d+) instances the base has no code for$", self.text(), re.M)]
 
 
 def program(ws):
@@ -191,10 +203,11 @@ def restart(ws, env, label, steps):
             text = open(path).read()
             assert old in text, (what, old)
             open(path, "w").write(text.replace(old, new, 1))
-        seen = len(logs.links())
+        seen, seen_anew = len(logs.links()), len(logs.anew())
         said = build(ws, env, what)
         printed = program(ws)
         made = logs.links()[seen:]
+        anew = logs.anew()[seen_anew:]
         how = made[-1] if made else "no link"
         verdict = "ok"
         if printed != expected:
@@ -203,8 +216,12 @@ def restart(ws, env, label, steps):
             verdict = "NOT SERVED BY THE DAEMON"
         elif not how.startswith("spliced"):
             verdict = "NOT SPLICED"
+        elif what in KEEPING and (not anew or anew[-1]):
+            verdict = "NEW CODE"
+        elif what in RENAMING and not (anew and anew[-1]):
+            verdict = "NOTHING RENAMED"
         wrong += verdict != "ok"
-        print(f"{label + ': ' + what:48} {verdict:12} {how[:120]}", flush=True)
+        print(f"{label + ': ' + what:48} {verdict:12} {how[:100]}; {anew[-1] if anew else '?'} anew", flush=True)
     if REBUILT in logs.text():
         print(f"{label}: NOT the store's code taken as it is: the daemon said `{REBUILT}`", flush=True)
         wrong += 1

@@ -277,5 +277,58 @@ interleaved, two rounds each:
   written in `search` (`filter_map`, `sort_by`, `attach_timestamps`), which the edit renamed: a
   closure's stable name is the index of its expression in the body, which the added statement
   moves (**read**, a temporary print of what a patch compiles). Main compiled those instances
-  at the start, and its patch is 21 functions (**read**); that it reuses them because it
-  knows them by instance where the store knows them by name is **unverified**.
+  at the start, and its patch is 21 functions (**read**): rust-analyzer interns a closure by
+  its place among the closures of its body (`ClosureKey` in `hir-ty/src/db.rs`), which the
+  added statement leaves, so the instances the base compiled are the patch's (**read**).
+
+## Closures named by their place and their source (2026-10-25)
+
+The stable name of a closure is now its place among the closures of its body, as it is
+interned (`ClosureKey::nth`), and the first 8 bytes of the SHA-256 of its source text, where it
+was the index of its expression. Before is `store-copies`, after is `closure-names`; dev-aws-5,
+warmstart.py, the two interleaved on a quiet host (a second round ran under another lane's
+load of 97 and is left out):
+
+| | before | after |
+|---|---|---|
+| ripgrep first edit after the restart | 0.29, 0.29 s, 176 functions patched | 0.26, 0.26 s, 19 |
+| nushell first edit after the restart | 0.57, 0.58 s, 66 functions patched | 0.54, 0.56 s, 17 |
+| ripgrep / nushell `restart` build | 4.33 / 20.40 s | 4.41 / 19.81 s |
+
+- The place alone is not enough (**read**, storetracked.py's step "a closure above a
+  closure"). A closure's instance name prints the arguments of its parent and not its
+  signature or what it captures, so a closure added above another took the other's name. The
+  patch found base code for that name and called it with what the new closure takes: the
+  program printed nothing. The hash of the source names the two apart; that step now compiles
+  11 instances the base has no code for, where the steps that edit a generic function's body
+  or a line above a closure compile none.
+- The hash is of the closure's text alone, so it moves with neither the file's path nor the
+  lines around it, which keeps it content-only as the store's keys are (#226), and it is the
+  kind of key item content hashes (#344) would give a closure.
+- What is left of the edit is the look for what it made stale: 166 ms on ripgrep ("check" in
+  the timeline), where main took 21 ms. Each function from the store in the edited file, and
+  what calls it, is compiled again to compare its mark with the store's: 382 functions on
+  ripgrep, 411 on nushell ("stats"), where the build that compiled them at its start had them
+  at hand (**read**).
+
+## What the nushell restart spends its 20 s on (profile, 2026-10-25)
+
+`perf record -F 499` of the worker through warmstart.py's nushell restart on dev-aws-5 (branch
+`closure-names`, release build without frame pointers, so by function only), cut into windows
+by the second the samples fall in (**read**):
+
+- Seconds 2 to 9 (the symbols of rustc's libraries, name resolution): SHA-256 5 %, SipHash
+  2 %, demangling, the parser; nothing above 6 %.
+- Seconds 10 to 12, the stored roots, on every core: `Symbol::intern` 33 %, zstd unpacking
+  13 %, `Interned<Told>::new` 3 %, `Search<Listed>::own` 2 %. Reading an entry turns its
+  debugger's types back into a set (`TypeSet::from` in `Entries::types`), interning every
+  name of every type, which 64 threads ask of one interner, the popular names counted on one
+  cache line.
+- Seconds 12 to 20, on one or two cores: the entries stitched (`Entries::get`,
+  `found_callee`), the debug info written with gimli (its string table's `insert_full` 6 %,
+  `calculate_offsets` 6 %), and lld's link. What the build read is freed on another thread
+  already (`finish`).
+
+So the next costs are the debugger's types read whole for every entry while the roots are
+looked for, which only stitching needs; the debug info of all 155,843 functions written again
+when nothing changed; and the link of an executable the target directory already has.
