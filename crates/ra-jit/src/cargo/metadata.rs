@@ -14,7 +14,11 @@ use cargo_metadata::Metadata;
 /// its message, status 101.
 pub(crate) fn no_deps(manifest_path: Option<&Path>, config: &[String]) -> Metadata {
     let cwd = std::env::current_dir().unwrap_or_default();
-    match Config::from_process(config).and_then(|config| read(config, manifest_path)) {
+    let config = Config::from_process().and_then(|mut process| {
+        process.start("metadata", config)?;
+        Ok(process)
+    });
+    match config.and_then(|config| read(config, manifest_path)) {
         Ok(metadata) => metadata,
         Err(err) => {
             refused(&err, &cwd);
