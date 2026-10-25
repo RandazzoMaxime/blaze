@@ -8,10 +8,12 @@
 //! [#269]: https://github.com/indexable-inc/blaze/issues/269
 
 use std::{
+    ffi::OsStr,
     path::{Path, PathBuf},
-    process::Command,
     sync::OnceLock,
 };
+
+use super::state::rustc_says;
 
 /// The release blaze compiles.
 pub(crate) const OURS: &str = include_str!("../../../../harness/toolchain");
@@ -28,13 +30,13 @@ pub(crate) fn settle() -> Result<(), String> {
     let ours = OURS.trim();
     let other = super::state::other_toolchain_allowed();
     let rustc = super::state::rustc_path();
-    let version = version_of(Path::new(&rustc));
+    let version = version_of(&rustc);
     let version = version.as_deref().unwrap_or("of no release it says");
     if other {
-        return with_library(&sysroot_of(Path::new(&rustc)), version);
+        return with_library(&sysroot_of(&rustc), version);
     }
     if version == ours {
-        let sysroot = sysroot_of(Path::new(&rustc));
+        let sysroot = sysroot_of(&rustc);
         with_library(&sysroot, ours)?;
         // One name for it however it was named (`1.99.0`, `1.99.0-<host>`, a path), since the
         // name is part of which build this is.
@@ -50,7 +52,7 @@ pub(crate) fn settle() -> Result<(), String> {
         return Ok(());
     }
     let named = named_by();
-    if std::env::var_os("RUSTC").is_some() {
+    if super::state::rustc_named().is_some() {
         return Err(format!(
             "`RUSTC` names rustc {version}, and blaze builds with Rust {ours}, the release it \
              compiles: without `RUSTC` it builds with {ours} (`BLAZE_OTHER_TOOLCHAIN=1` builds \
@@ -101,17 +103,12 @@ pub(crate) fn note_failed() {
 }
 
 /// The release `rustc` says it is, as `1.99.0` or `1.101.0-nightly`.
-fn version_of(rustc: &Path) -> Option<String> {
-    said(rustc, "--version")?.split_whitespace().nth(1).map(str::to_owned)
+fn version_of(rustc: &OsStr) -> Option<String> {
+    rustc_says(rustc, "--version")?.split_whitespace().nth(1).map(str::to_owned)
 }
 
-fn sysroot_of(rustc: &Path) -> PathBuf {
-    PathBuf::from(said(rustc, "--print=sysroot").unwrap_or_default().trim())
-}
-
-fn said(rustc: &Path, flag: &str) -> Option<String> {
-    let output = crate::answers::answer(Command::new(rustc).arg(flag), &[]).ok()?;
-    output.status.success().then(|| String::from_utf8_lossy(&output.stdout).into_owned())
+fn sysroot_of(rustc: &OsStr) -> PathBuf {
+    PathBuf::from(rustc_says(rustc, "--print=sysroot").unwrap_or_default())
 }
 
 /// What chose the project's toolchain, as rustup tells the programs its proxies start.

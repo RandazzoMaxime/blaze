@@ -4,7 +4,7 @@
 
 use std::{
     collections::BTreeMap,
-    ffi::OsString,
+    ffi::{OsStr, OsString},
     fs::OpenOptions,
     io::{BufReader, Write as _},
     path::{Path, PathBuf},
@@ -1135,12 +1135,23 @@ pub(crate) fn cargo_path() -> PathBuf {
 /// this command, which is the toolchain's and not the rustup proxy on the path that would
 /// pick it again.
 pub(super) fn rustc_path() -> OsString {
-    if let Some(rustc) = std::env::var_os("RUSTC") {
+    if let Some(rustc) = rustc_named() {
         return rustc;
     }
     let rustc = format!("rustc{}", std::env::consts::EXE_SUFFIX);
     let beside = std::env::var_os("CARGO").map(|it| PathBuf::from(it).with_file_name(rustc));
     beside.filter(|it| it.is_file()).map_or_else(|| "rustc".into(), PathBuf::into_os_string)
+}
+
+/// The rustc `RUSTC` names, when it names one.
+pub(super) fn rustc_named() -> Option<OsString> {
+    std::env::var_os("RUSTC")
+}
+
+/// What `rustc` prints for `flag` (`--version`, `--print=sysroot`), when it starts.
+pub(super) fn rustc_says(rustc: &OsStr, flag: &str) -> Option<String> {
+    let output = crate::answers::answer(Command::new(rustc).arg(flag), &[]).ok()?;
+    Some(String::from_utf8_lossy(&output.stdout).trim().to_owned())
 }
 
 pub(super) fn metadata(asked: &Invocation) -> anyhow::Result<Metadata> {
@@ -1211,10 +1222,7 @@ fn project(asked: &Invocation, cwd: &Path, metadata: &Metadata) -> Result<PathBu
 /// `TypeId`s are still 1.99.0's, and nothing checks that the other rustc agrees with them.
 fn other_toolchain() -> Option<String> {
     let rustc = rustc_path();
-    let said = |flag: &str| {
-        let output = crate::answers::answer(Command::new(&rustc).arg(flag), &[]).ok()?;
-        Some(String::from_utf8_lossy(&output.stdout).trim().to_owned())
-    };
+    let said = |flag: &str| rustc_says(&rustc, flag);
     let version = said("--version")?;
     let version = version.split_whitespace().nth(1).unwrap_or_default();
     let ours = super::toolchain::OURS.trim();
