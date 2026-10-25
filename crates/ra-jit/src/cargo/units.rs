@@ -239,6 +239,25 @@ impl Record {
     /// Cargo's own copies of the unit's dep-info, in its fingerprint directory: a source
     /// written after one of them is a change to cargo, which builds the unit again.
     pub(crate) fn cargo_dep_info(&self) -> Vec<PathBuf> {
+        let files = self
+            .fingerprints()
+            .into_iter()
+            .flat_map(|it| std::fs::read_dir(it).into_iter().flatten().flatten());
+        files
+            .filter(|it| it.file_name().to_string_lossy().starts_with("dep-"))
+            .map(|it| it.path())
+            .collect()
+    }
+
+    /// When cargo last ran rustc for the unit, by the file it writes to its fingerprint
+    /// directory just before: a source written after it is a change to cargo.
+    pub(crate) fn cargo_ran_at(&self) -> Option<SystemTime> {
+        let stamps = self.fingerprints().into_iter().map(|it| it.join("invoked.timestamp"));
+        stamps.filter_map(|it| std::fs::metadata(it).and_then(|it| it.modified()).ok()).min()
+    }
+
+    /// The unit's directories in cargo's fingerprint directory.
+    fn fingerprints(&self) -> Vec<PathBuf> {
         let extra = self.extra_filename();
         let Some(profile) = self.out_dir().and_then(|it| it.parent().map(Path::to_path_buf)) else {
             return Vec::new();
@@ -247,12 +266,7 @@ impl Record {
         let units = units
             .flatten()
             .filter(|it| !extra.is_empty() && it.file_name().to_string_lossy().ends_with(extra));
-        let files =
-            units.flat_map(|it| std::fs::read_dir(it.path()).into_iter().flatten().flatten());
-        files
-            .filter(|it| it.file_name().to_string_lossy().starts_with("dep-"))
-            .map(|it| it.path())
-            .collect()
+        units.map(|it| it.path()).collect()
     }
 
     /// The copy of `original`, when it is a file of this unit.
