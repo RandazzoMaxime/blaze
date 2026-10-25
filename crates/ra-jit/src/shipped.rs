@@ -99,6 +99,37 @@ pub(crate) fn fetched(ahead: Option<JoinHandle<()>>) {
     }
 }
 
+/// Builds a program that prints a line, whole, with `profile` and the toolchain at `sysroot`,
+/// in `dir` and into `store`: a program keys the standard library's unit by the debug info
+/// its profile asks for, which a build script's does not ask for, so the shipped store has
+/// the unit of each profile a build from nothing (`RA_JIT_WHOLE_BUILD`) takes.
+fn program_unit(sysroot: &Path, dir: &Path, store: &Path, profile: &str) -> anyhow::Result<String> {
+    std::fs::create_dir_all(dir.join("src"))?;
+    let manifest =
+        "[package]\nname = \"hello\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[workspace]\n";
+    std::fs::write(dir.join("Cargo.toml"), manifest)?;
+    std::fs::write(dir.join("src/main.rs"), "fn main() {\n    println!(\"hello\");\n}\n")?;
+    let path = std::env::var_os("PATH").unwrap_or_default();
+    let path = std::env::join_paths(
+        std::iter::once(sysroot.join("bin")).chain(std::env::split_paths(&path)),
+    )?;
+    let mut ra_jit = std::process::Command::new(std::env::current_exe()?);
+    ra_jit.arg(dir).arg("--own-target").args(["--profile", profile, "--crate", "src/main.rs"]);
+    ra_jit.arg("--out").arg(dir.join(format!("{profile}.o")));
+    ra_jit.arg("--exe").arg(dir.join(format!("hello-{profile}")));
+    ra_jit.env("PATH", path).env("RA_JIT_CACHE", store).env("RA_JIT_STD_FROM", "off");
+    ra_jit.env_remove("RUSTUP_TOOLCHAIN").env_remove("CARGO_TARGET_DIR");
+    ra_jit.current_dir(dir).stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null());
+    let built = ra_jit.output().context("running ra-jit")?;
+    let said = String::from_utf8_lossy(&built.stderr).into_owned();
+    std::fs::write(dir.join(format!("ra-jit-{profile}.log")), &said)?;
+    if !built.status.success() {
+        let last = said.lines().rev().find(|it| !it.trim().is_empty()).unwrap_or("");
+        anyhow::bail!("ra-jit did not build a `{profile}` program ({}): {last}", built.status);
+    }
+    Ok(said)
+}
+
 const USAGE: &str = "usage: ra-jit std REMOTE TOOLCHAIN\n\n\
                      Builds the standard library of TOOLCHAIN (the directory `rustc --print \
                      sysroot` names) for a build with nothing of rustc's, and sends it to \
@@ -136,6 +167,13 @@ pub(crate) fn command(mut args: impl Iterator<Item = String>) -> anyhow::Result<
     let said = built.map_err(|e| anyhow::anyhow!("{e} (the log is in {})", dir.display()))?;
     let unit = said.lines().find(|it| it.starts_with("standard library:")).unwrap_or_default();
     eprintln!("{unit}; built in {:.1?}", start.elapsed());
+    for profile in ["dev", "release"] {
+        let start = Instant::now();
+        let built = program_unit(sysroot, &dir.join("program"), &store, profile);
+        let said = built.map_err(|e| anyhow::anyhow!("{e} (the log is in {})", dir.display()))?;
+        let unit = said.lines().find(|it| it.starts_with("standard library:")).unwrap_or_default();
+        eprintln!("{unit}, for a `{profile}` program; built in {:.1?}", start.elapsed());
+    }
     let start = Instant::now();
     let sent = runtime.block_on(remote::push(&store, &remote, &project))?;
     std::fs::remove_dir_all(&dir).with_context(|| format!("removing {}", dir.display()))?;
