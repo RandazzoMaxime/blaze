@@ -153,13 +153,12 @@ last; cargo (11 MB) goes with the switches of [resolution](#resolution-and-fetch
 blaze's proc-macro server (`vendor/proc-macro-srv`, the release's own server with a loader that
 reads blaze's list of macros), proc-macro crates linked by blaze as shared libraries with that
 list (`macro_list.rs`, `--exe --shared`), and `harness/macroserver.py` holding the expansions of
-serde_derive, thiserror-impl, tokio-macros and clap_derive equal to the toolchain's. What is
-not: any build using them. In order:
+serde_derive, thiserror-impl, tokio-macros and clap_derive equal to the toolchain's. In order:
 
-1. J1's wiring (branch `no-rustc-j1-wire`, 2026-10-24, not landed): when rust-analyzer loads
-   a workspace, each proc macro cargo asks for is linked by blaze, and blaze's server expands
-   with it, behind `RA_JIT_PROC_MACRO_SERVER`. Land it with macroserver.py's comparison over
-   every macro call of the bench projects.
+1. J1's wiring (landed 2026-10-25): when rust-analyzer loads a workspace, each proc macro
+   cargo asks for is linked by blaze, and blaze's server expands with it, behind
+   `RA_JIT_PROC_MACRO_SERVER`. macroserver.py compares every macro call of the bench apps
+   ([Status](#status)).
 2. The server ships with blaze: built by the release workflow with blaze (`--exe`) beside the
    standard library's unit, in the archive, so no machine builds it and the toolchain's
    `libexec/rust-analyzer-proc-macro-srv` is never started. That is blaze's own executable,
@@ -213,10 +212,17 @@ with the system's `cc` and an lld it finds, a choice for that step, measured on 
 2026-10-25: this plan. Lanes: the toolchain (2), the manifest and the harness, the registry,
 the resolver, build scripts. Counts and pull requests are added here as they land.
 
+2026-10-25, J (proc macros): with `RA_JIT_PROC_MACRO_SERVER`, a load into ra-jit's own
+target directory has ra-jit link the proc macros and its server expand them; over fd, bat,
+hyperfine, just, nushell and helix, 3,465 calls expanded the same as the toolchain's server
+with rustc's libraries, 12 not compared (`pest_consume_macros`,
+[#327](https://github.com/indexable-inc/blaze/issues/327)).
+
 2026-10-25, the resolver (`crates/blaze-resolve`): the package model (#305), `Cargo.lock`
-(#309), the async `Registry` (#312), cargo's resolver with its tests (#331), features and the
-members `-p` and `--features` choose (#332), the `resolve` of `cargo metadata` (#333), and a
-workspace's two resolves with `[patch]` and the lock file's locks (#339).
+(#309) and the async `Registry` (#312), landed together in #314; cargo's resolver with its
+tests (#331), features and the members `-p` and `--features` choose (#332), the `resolve` of
+`cargo metadata` (#333), and a workspace's two resolves with `[patch]` and the lock file's
+locks (#339).
 `harness/resolve_graph.py` compares the `resolve` blaze-resolve makes of the packages cargo
 lists with cargo's, over the corpus of `harness/resolve` (dev-aws-8, at 6e4bbe91): with the
 lock file each project ships, 322 of 324 equal; with none, 381 of 385. The rest are those
