@@ -683,7 +683,7 @@ impl CodegenUnit {
             let statics = start.elapsed();
             let mut stale = std::mem::take(&mut known.stale);
             if stale.is_empty() {
-                stale.push(base.stale(db, 0, 1));
+                stale.push(base.stale(db, Some(symbols), 0, 1));
             }
             let patch = loop {
                 let patch = base.patch(
@@ -1270,8 +1270,15 @@ impl Rejections {
 
     /// Looks at one part in `parts` of what the last full build compiled for what an edit
     /// changed, which threads can do a part each. `None` when no patch is to be made.
-    pub fn stale(&self, db: &dyn HirDatabase, part: usize, parts: usize) -> Option<Stale> {
-        Some(self.patched()?.stale(db, part, parts))
+    /// `symbols` names what the last build had from the store.
+    pub fn stale(
+        &self,
+        db: &dyn HirDatabase,
+        symbols: Option<&dyn SymbolResolver>,
+        part: usize,
+        parts: usize,
+    ) -> Option<Stale> {
+        Some(self.patched()?.stale(db, symbols, part, parts))
     }
 
     /// What the next build is a patch of, if it is one.
@@ -4444,7 +4451,12 @@ impl<'a, 'db> ObjectCodegen<'a, 'db> {
             store.settled();
         }
         let settled_at = start.elapsed();
-        let names = stable::StableNames::new(db, symbols, own_statics.crates.clone(), hydrate);
+        // A patch names what its base has from the store as the base did, to call it there.
+        let names = match base.and_then(|it| it.frozen_ids()) {
+            Some(ids) => stable::StableNames::new(db, symbols, own_statics.crates.clone(), true)
+                .frozen(ids.clone()),
+            None => stable::StableNames::new(db, symbols, own_statics.crates.clone(), hydrate),
+        };
         if std::env::var_os("RA_JIT_STATS").is_some() {
             let us = |it: std::time::Duration| it.as_micros();
             eprintln!(
@@ -4713,7 +4725,9 @@ impl<'a, 'db> ObjectCodegen<'a, 'db> {
         if tiered.is_none() && self.roots_from_store() {
             let instance = root_instance(db, func);
             let tally = backend::Tally::global();
-            tally.step(Step::StoreWrite, || self.keep(&instance, compiled, &ids, debug));
+            tally.step(Step::StoreWrite, || {
+                self.keep(&instance, func.krate(db), compiled, &ids, debug)
+            });
         }
         Ok(symbol)
     }
@@ -5228,7 +5242,7 @@ impl<'a, 'db> ObjectCodegen<'a, 'db> {
         // Code of a level above 1 is of a profile, which is no key of the store.
         if tiered.is_none() {
             let tally = backend::Tally::global();
-            tally.step(Step::StoreWrite, || self.keep(instance, compiled, &ids, debug));
+            tally.step(Step::StoreWrite, || self.keep(instance, env.krate, compiled, &ids, debug));
         }
         Ok(())
     }
@@ -5354,6 +5368,7 @@ impl<'a, 'db> ObjectCodegen<'a, 'db> {
     fn keep(
         &mut self,
         instance: &Instance,
+        home: Crate,
         compiled: &CompiledFunction,
         ids: &Resolved,
         debug: Option<FunctionDebug>,
@@ -5375,10 +5390,14 @@ impl<'a, 'db> ObjectCodegen<'a, 'db> {
             let kept = cached::Kept::Types(sets());
             return self.writer(store).keep(kept);
         }
-        let Some(entry) = self.entry(instance, compiled, ids, debug) else {
+        let described = debug.is_some();
+        let Some(mut entry) = self.entry(instance, compiled, ids, debug) else {
             self.kept.unnamed_requests += 1;
             return;
         };
+        if stable::StableNames::of_checkout(&name) {
+            entry.tracked = self.tracked(instance, home, compiled, described);
+        }
         let mut entry = Box::new(entry);
         let Some(check) = check else {
             return self.writer(store).keep(cached::Kept::Entry { key, entry });
@@ -5407,6 +5426,33 @@ impl<'a, 'db> ObjectCodegen<'a, 'db> {
                 }
             }
         }
+    }
+
+    /// What a patch base that has the code of `instance` from the store tells an edit of it by.
+    /// `None` for code the base has to compile to tell: in a program with code of rustc's,
+    /// which settles what an instance is by its build, or of a `#[ra_jit::cache]` function,
+    /// whose code holds a hash of everything it reaches.
+    fn tracked(
+        &self,
+        instance: &Instance,
+        home: Crate,
+        compiled: &CompiledFunction,
+        described: bool,
+    ) -> Option<cached::Tracked> {
+        // A unit's code is not what the query gives, which is what an edit is compared with.
+        if self.mixed.is_some() || self.units() {
+            return None;
+        }
+        if let InstanceDef::Fn(func) = instance.def
+            && fncache::cached_closure(self.db, func).is_some()
+        {
+            return None;
+        }
+        let mark = patch::stable_mark(self.db, &self.names, compiled, described)?;
+        let files = home::body_files(self.db, instance).and_then(|files| {
+            files.iter().map(|&file| self.names.file_path(file)).collect::<Option<Vec<_>>>()
+        });
+        Some(cached::Tracked { mark, home: self.names.content_id(home)?.0, files })
     }
 
     fn writer(&mut self, store: &'static store::Store) -> &mut cached::Writer {
@@ -5680,6 +5726,7 @@ impl<'a, 'db> ObjectCodegen<'a, 'db> {
             datas,
             code: cached::CachedCode::from(&compiled.code),
             debug,
+            tracked: None,
         })
     }
 

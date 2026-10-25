@@ -146,6 +146,9 @@ pub(super) struct StableNames<'a, 'db> {
     /// How each crate and each type is written, or why it has no name.
     crate_names: RefCell<FxHashMap<Crate, Result<Box<str>, &'static str>>>,
     tys: RefCell<FxHashMap<Ty<'db>, Result<Box<str>, &'static str>>>,
+    /// The ids crates of the checkout are named by in place of what is written in them now:
+    /// those of a base, whose names an edit leaves to the code they are of.
+    frozen: FxHashMap<Crate, super::ContentId>,
     /// Why the last name that could not be written could not.
     missed: std::cell::Cell<&'static str>,
     /// How often each thing kept an instance from having a name.
@@ -171,9 +174,26 @@ impl<'a, 'db> StableNames<'a, 'db> {
             listed: RefCell::default(),
             crate_names: RefCell::default(),
             tys: RefCell::default(),
+            frozen: FxHashMap::default(),
             missed: std::cell::Cell::new(""),
             misses: RefCell::default(),
         }
+    }
+
+    /// Names each crate of `frozen` by its id there, whatever is written in it now.
+    pub(super) fn frozen(mut self, frozen: FxHashMap<Crate, super::ContentId>) -> Self {
+        self.frozen = frozen;
+        self
+    }
+
+    /// The id a crate of the checkout is named by.
+    pub(super) fn content_id(&self, krate: Crate) -> Option<super::ContentId> {
+        self.frozen.get(&krate).copied().or_else(|| self.symbols.content_id(krate))
+    }
+
+    /// The name of a file as every machine has it, as panic locations name it in an entry.
+    pub(super) fn file_path(&self, file: base_db::FileId) -> Option<String> {
+        self.stored(self.symbols.source_path(file)?)
     }
 
     /// Whether a name is of anything of a crate of the checkout, which is only what the
@@ -321,7 +341,8 @@ impl<'a, 'db> StableNames<'a, 'db> {
         found
     }
 
-    fn static_name(&self, id: StaticId) -> Option<String> {
+    /// The name of a static whether or not [`Self::static_named`] finds it again.
+    pub(super) fn static_name(&self, id: StaticId) -> Option<String> {
         let mut out = String::from("static ");
         let at = id.lookup(self.db).id;
         self.item(&mut out, id.krate(self.db), at.file_id, at.value.erase())?;
@@ -405,7 +426,7 @@ impl<'a, 'db> StableNames<'a, 'db> {
             if !self.by_content {
                 return self.miss("of the checkout, in a patch");
             }
-            let Some(id) = self.symbols.content_id(krate) else {
+            let Some(id) = self.content_id(krate) else {
                 return self.miss("no content id");
             };
             write!(out, "{OF_CHECKOUT}{id}:").ok()?;

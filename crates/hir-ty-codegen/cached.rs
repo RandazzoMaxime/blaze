@@ -39,6 +39,21 @@ pub(super) struct Entry {
     pub(super) code: CachedCode,
     /// What a debugger is told about the function, when the build that kept it told one.
     pub(super) debug: Option<FunctionDebug>,
+    /// For code of the checkout: what a patch base that has it from the store tells an edit
+    /// of it by, without compiling it.
+    pub(super) tracked: Option<Tracked>,
+}
+
+/// What a patch base knows of an entry of the checkout. See [`super::patch::stable_mark`].
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub(super) struct Tracked {
+    /// The stable mark of the code.
+    pub(super) mark: u128,
+    /// The crate it is compiled as, by the id it is named by.
+    pub(super) home: [u8; 32],
+    /// The files its code comes from, as [`super::stable::StableNames::file_path`] names
+    /// them; `None` when any file can be one.
+    pub(super) files: Option<Vec<String>>,
 }
 
 #[derive(Debug, Serialize, Deserialize, PartialEq)]
@@ -366,7 +381,7 @@ impl Entry {
             hasher.update((bytes.len() as u64).to_le_bytes());
             hasher.update(bytes);
         };
-        field(b"ra-jit entry 9");
+        field(b"ra-jit entry 10");
         field(program.map_or(&[][..], |it| it));
         // Code of one producer is not what another would have given.
         field(super::Backend::from_env().ok()?.to_string().as_bytes());
@@ -947,6 +962,11 @@ mod tests {
             datas,
             code: code(vec![reloc(4, 0, 4), reloc(12, 1, 5)]),
             debug: Some(debug(nested(6))),
+            tracked: Some(Tracked {
+                mark: 7 << 100 | 3,
+                home: [5; 32],
+                files: Some(vec!["src/lib.rs".to_owned()]),
+            }),
         }
     }
 
