@@ -271,6 +271,15 @@ All notable changes to ra-jit are written here. The format follows
 
 ### Changed
 
+- The first `cargo blaze build` of a workspace is blaze's, not cargo's: once cargo's build
+  succeeds it waits for the daemon to load the workspace ("Waiting for blaze to load the
+  workspace") and build the programs, where it handed back cargo's and the next build was the
+  first the daemon made. On a dev host (16 cores, 2 runs) it ends at 6.1–6.7 s on ripgrep,
+  where cargo's ended at 5.4–6.7 s and the daemon was ready at 5.9–7.5 s, and at 41.0–41.9 s on
+  nushell, where cargo's ended at 36.6–37.9 s and the daemon was ready at 41.6–42.5 s. The
+  daemon still patches what rustc linked by default: building its own base instead
+  (`RA_JIT_RUSTC_BASE=0`) has it ready at 7.5–10.3 s on ripgrep and 58.0–58.5 s on nushell,
+  as it compiles every function of the program again after cargo.
 - `cargo blaze` builds with Rust 1.99.0, the release it compiles, whatever toolchain the
   project names (#269). A project pinned to another release, or on a machine whose default
   is another, no longer has every build go to cargo: cargo, rustc and the daemon run under

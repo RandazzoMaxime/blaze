@@ -36,8 +36,9 @@ cargo blaze test    # like cargo test
 cargo blaze build   # like cargo build
 ```
 
-The first build is cargo's. Then change a function and build again: it's back in milliseconds,
-and the `Finished` line says `[ra-jit]` (blaze's engine). Every other cargo command passes
+The first build runs cargo, then waits a few seconds for blaze to load your project. Then change
+a function and build again: it's back in milliseconds, and the `Finished` line says `[ra-jit]`
+(blaze's engine). Every other cargo command passes
 straight through to cargo.
 
 ## How fast
