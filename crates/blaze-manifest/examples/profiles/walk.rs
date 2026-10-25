@@ -15,6 +15,7 @@ use blaze_manifest::profiles::{Profile, ProfilePackage, Profiles, UnitFor, reque
 use blaze_manifest::source::SourceId;
 use blaze_manifest::{Config, Context, Workspace};
 use cargo_util_schemas::core::{PackageIdSpec, SourceKind};
+use cargo_util_schemas::lockfile::TomlLockfile;
 use rustc_hash::FxHashMap;
 use serde_json::Value;
 
@@ -31,8 +32,8 @@ struct Command {
     /// `build`, `check`, `test`, `bench`.
     name: String,
     requested_profile: String,
-    /// Whether `--target` was given, which keeps host units apart from target units.
-    target_given: bool,
+    /// The first `--target`, which keeps host units apart from target units.
+    target: Option<String>,
     config: Vec<String>,
     manifest_path: Option<PathBuf>,
 }
@@ -42,7 +43,7 @@ fn parse_args(args: &[String]) -> anyhow::Result<Command> {
     let Some(name) = args.next() else { bail!("no cargo command given") };
     let mut command = Command {
         requested_profile: String::new(),
-        target_given: false,
+        target: None,
         config: Vec::new(),
         manifest_path: None,
         name,
@@ -64,8 +65,8 @@ fn parse_args(args: &[String]) -> anyhow::Result<Command> {
             "--release" | "-r" => release = true,
             "--profile" => profile = Some(value()?),
             "--target" => {
-                value()?;
-                command.target_given = true;
+                let target = value()?;
+                command.target.get_or_insert(target);
             }
             "--config" => command.config.push(value()?),
             "--manifest-path" => command.manifest_path = Some(PathBuf::from(value()?)),
@@ -187,9 +188,48 @@ fn package(pkg_id: &str) -> anyhow::Result<Pkg> {
     Ok(Pkg { name: spec.name().to_owned(), version, source_id })
 }
 
+/// The packages of the workspace's `Cargo.lock`, which cargo checks the package overrides
+/// against: every package of the resolve, built or not. A path package's directory is that of
+/// the unit or member of its name and version.
+fn lock_packages(ws: &Workspace<'_>, units: &[Unit]) -> anyhow::Result<Option<Vec<Pkg>>> {
+    let path = ws.root().join("Cargo.lock");
+    let Ok(text) = std::fs::read_to_string(&path) else { return Ok(None) };
+    let lock: TomlLockfile =
+        toml::from_str(&text).with_context(|| format!("failed to parse `{}`", path.display()))?;
+    let mut packages = Vec::new();
+    for package in lock.package.into_iter().flatten() {
+        let version: semver::Version = package.version.parse()?;
+        let source_id = match &package.source {
+            Some(source) => SourceId {
+                kind: source.kind().clone(),
+                url: source.url().clone(),
+                registry_key: None,
+            },
+            None => {
+                let unit = units.iter().find(|u| {
+                    u.pkg.name == package.name
+                        && u.pkg.version == version
+                        && matches!(u.pkg.source_id.kind, SourceKind::Path)
+                });
+                let member = ws.members().find(|(_, m)| {
+                    m.package_id.name == package.name && m.package_id.version == version
+                });
+                match (unit, member) {
+                    (Some(u), _) => u.pkg.source_id.clone(),
+                    (None, Some((_, m))) => m.package_id.source_id.clone(),
+                    (None, None) => SourceId::for_path(ws.root())?,
+                }
+            }
+        };
+        packages.push(Pkg { name: package.name, version, source_id });
+    }
+    Ok(Some(packages))
+}
+
 struct Unit {
     pkg: Pkg,
     is_member: bool,
+    kinds: Vec<String>,
     custom_build: bool,
     proc_macro: bool,
     mode: String,
@@ -208,14 +248,24 @@ impl Unit {
     }
 }
 
-/// A way cargo reached a unit: what it was built for, its profile before the graph was
-/// shared, and whether its kind is the host's own (`CompileKind::Host`).
-struct Visit {
+/// A unit as cargo interns it before it shares the graph: the graph's unit, whether its kind
+/// is the host's own (`CompileKind::Host`), the profile it was first interned with, and its
+/// dependencies, computed the first time it was reached.
+struct Interned {
     unit: usize,
-    edge_for_host: bool,
     kind_host: bool,
     profile: Profile,
-    edges: Vec<usize>,
+    deps: Option<Vec<Edge>>,
+}
+
+#[derive(Clone, Copy)]
+enum Edge {
+    To {
+        to: usize,
+        unit_for: UnitFor,
+    },
+    /// The run of a `links` dependency's build script, by the graph's unit.
+    Links(usize),
 }
 
 /// The profiles of `graph`'s units, in its order, and the warnings of the package overrides
@@ -250,6 +300,7 @@ fn profiles_of(
         parsed.push(Unit {
             pkg,
             is_member,
+            kinds: kinds.iter().map(|k| (*k).to_owned()).collect(),
             custom_build: kinds.contains(&"custom-build"),
             proc_macro: kinds.contains(&"proc-macro"),
             mode: unit["mode"].as_str().unwrap_or_default().to_owned(),
@@ -261,11 +312,16 @@ fn profiles_of(
                 .unwrap_or_default(),
         });
     }
+    let locked = lock_packages(ws, &parsed)?;
     let mut packages: Vec<&dyn ProfilePackage> = Vec::new();
-    let mut seen = rustc_hash::FxHashSet::default();
-    for (unit, value) in parsed.iter().zip(units) {
-        if seen.insert(value["pkg_id"].as_str()) {
-            packages.push(&unit.pkg);
+    if let Some(locked) = &locked {
+        packages.extend(locked.iter().map(|p| p as &dyn ProfilePackage));
+    } else {
+        let mut seen = rustc_hash::FxHashSet::default();
+        for (unit, value) in parsed.iter().zip(units) {
+            if seen.insert(value["pkg_id"].as_str()) {
+                packages.push(&unit.pkg);
+            }
         }
     }
     let mut warnings = Vec::new();
@@ -274,9 +330,14 @@ fn profiles_of(
         let _ = writeln!(stderr, "warning: {warning}");
     }
     let mut walk =
-        Walk { units: &parsed, profiles, visits: Vec::new(), by_key: FxHashMap::default() };
+        Walk { units: &parsed, profiles, interned: Vec::new(), by_unit: FxHashMap::default() };
     let roots = graph["roots"].as_array().ok_or_else(|| anyhow!("no `roots` in the unit graph"))?;
     let is_test_command = matches!(command.name.as_str(), "test" | "bench");
+    let requested = match &command.target {
+        Some(t) => CompileKind::Target(t.clone()),
+        None => CompileKind::Host,
+    };
+    let mut root_units = Vec::new();
     for root in roots {
         let i = root.as_u64().ok_or_else(|| anyhow!("a root is not an index"))? as usize;
         let unit = parsed.get(i).ok_or_else(|| anyhow!("root {i} is not a unit"))?;
@@ -298,22 +359,31 @@ fn profiles_of(
         } else {
             UnitFor::new_normal()
         };
-        let profile = walk.profile(i, profile_for);
-        walk.visit(i, deps_for, false, unit.for_host(), profile)?;
+        let profile = walk.profile(i, profile_for, &requested);
+        root_units.push((walk.intern(i, unit.for_host(), profile), deps_for));
     }
-    let to_host = !command.target_given;
-    let mut finals: Vec<Option<Profile>> = vec![None; walk.visits.len()];
-    for v in 0..walk.visits.len() {
-        walk.finalize(v, to_host, &mut finals);
+    for &(n, deps_for) in &root_units {
+        walk.deps_of(n, deps_for);
+    }
+    let to_host = command.target.is_none();
+    let mut shared: Vec<Option<Profile>> = vec![None; walk.interned.len()];
+    for &(n, _) in &root_units {
+        walk.share(n, false, to_host, &mut shared);
     }
     let mut out: Vec<Option<Profile>> = vec![None; parsed.len()];
-    for (v, visit) in walk.visits.iter().enumerate() {
-        let profile = finals[v].take().unwrap();
-        match &out[visit.unit] {
+    for (n, interned) in walk.interned.iter().enumerate() {
+        let Some(profile) = shared[n].take() else { continue };
+        match &out[interned.unit] {
             Some(prev) if serde_json::to_string(prev)? != serde_json::to_string(&profile)? => {
-                bail!("unit {} gets two profiles: {prev:?} and {profile:?}", visit.unit)
+                bail!(
+                    "unit {} ({}) gets two profiles:\n{}\n{}",
+                    interned.unit,
+                    parsed[interned.unit].identity,
+                    serde_json::to_string(prev)?,
+                    serde_json::to_string(&profile)?
+                )
             }
-            _ => out[visit.unit] = Some(profile),
+            _ => out[interned.unit] = Some(profile),
         }
     }
     out.into_iter()
@@ -325,96 +395,119 @@ fn profiles_of(
 struct Walk<'a> {
     units: &'a [Unit],
     profiles: &'a Profiles,
-    visits: Vec<Visit>,
-    by_key: FxHashMap<(usize, String), usize>,
+    interned: Vec<Interned>,
+    by_unit: FxHashMap<usize, Vec<usize>>,
 }
 
 impl Walk<'_> {
-    fn profile(&self, i: usize, unit_for: UnitFor) -> Profile {
+    fn profile(&self, i: usize, unit_for: UnitFor, kind: &CompileKind) -> Profile {
         let unit = &self.units[i];
         let is_local = matches!(unit.pkg.source_id.kind, SourceKind::Path);
-        let kind = if unit_for.is_for_host() { CompileKind::Host } else { unit.kind.clone() };
-        self.profiles.get_profile(&unit.pkg, unit.is_member, is_local, unit_for, &kind)
+        self.profiles.get_profile(&unit.pkg, unit.is_member, is_local, unit_for, kind)
     }
 
-    fn visit(
-        &mut self,
-        i: usize,
-        unit_for: UnitFor,
-        edge_for_host: bool,
-        kind_host: bool,
-        profile: Profile,
-    ) -> anyhow::Result<usize> {
-        let key = (i, format!("{unit_for:?} {edge_for_host} {kind_host} {profile:?}"));
-        if let Some(&v) = self.by_key.get(&key) {
-            return Ok(v);
-        }
-        let v = self.visits.len();
-        self.visits.push(Visit {
-            unit: i,
-            edge_for_host,
-            kind_host,
-            profile: profile.clone(),
-            edges: Vec::new(),
+    /// cargo's interner: a unit equal to one interned before is that one, its profile included,
+    /// and profiles compare without whether their debuginfo is deferred.
+    fn intern(&mut self, unit: usize, kind_host: bool, profile: Profile) -> usize {
+        let same = self.by_unit.get(&unit).and_then(|ns| {
+            ns.iter().copied().find(|&n| {
+                self.interned[n].kind_host == kind_host && self.interned[n].profile == profile
+            })
         });
-        self.by_key.insert(key, v);
+        if let Some(n) = same {
+            return n;
+        }
+        let n = self.interned.len();
+        self.interned.push(Interned { unit, kind_host, profile, deps: None });
+        self.by_unit.entry(unit).or_default().push(n);
+        n
+    }
+
+    /// cargo's `deps_of`: a unit's dependencies all interned, then each walked, once per unit.
+    fn deps_of(&mut self, n: usize, unit_for: UnitFor) {
+        if self.interned[n].deps.is_some() {
+            return;
+        }
+        let i = self.interned[n].unit;
+        let kind_host = self.interned[n].kind_host;
+        let profile = self.interned[n].profile.clone();
         let unit = &self.units[i];
         let mut edges = Vec::new();
         for &d in &unit.deps {
             let dep = &self.units[d];
             let (dep_for, dep_profile, dep_kind_host) = if dep.mode == "run-custom-build" {
                 if unit.mode == "run-custom-build" {
-                    // The run of a `links` dependency's script, walked from its own package.
+                    edges.push(Edge::Links(d));
                     continue;
                 }
                 let dep_for = unit_for.for_custom_build();
                 (dep_for, self.profiles.get_profile_run_custom_build(&profile), kind_host)
             } else if unit.mode == "run-custom-build" {
                 let dep_for = unit_for.for_custom_build();
-                (dep_for, self.profile(d, dep_for), true)
+                (dep_for, self.profile(d, dep_for, &CompileKind::Host), true)
             } else {
-                let dep_for =
-                    unit_for.with_dependency(unit.custom_build, dep.for_host(), dep.proc_macro);
-                (dep_for, self.profile(d, dep_for), kind_host || dep.for_host())
+                let dep_for = if unit.mode == "test"
+                    && unit.kinds.iter().any(|k| k == "test" || k == "bench")
+                    && dep.kinds.iter().any(|k| k == "bin")
+                {
+                    // The binaries an integration test runs, built as the user would build them.
+                    UnitFor::new_normal()
+                } else {
+                    unit_for.with_dependency(unit.custom_build, dep.for_host(), dep.proc_macro)
+                };
+                let dep_kind_host = kind_host || dep.for_host();
+                let kind = if dep_kind_host { CompileKind::Host } else { dep.kind.clone() };
+                (dep_for, self.profile(d, dep_for, &kind), dep_kind_host)
             };
-            edges.push(self.visit(
-                d,
-                dep_for,
-                dep_for.is_for_host(),
-                dep_kind_host,
-                dep_profile,
-            )?);
+            let to = self.intern(d, dep_kind_host, dep_profile);
+            edges.push(Edge::To { to, unit_for: dep_for });
         }
-        self.visits[v].edges = edges;
-        Ok(v)
+        self.interned[n].deps = Some(edges.clone());
+        for edge in edges {
+            if let Edge::To { to, unit_for } = edge {
+                self.deps_of(to, unit_for);
+            }
+        }
     }
 
-    fn finalize(&self, v: usize, to_host: bool, finals: &mut Vec<Option<Profile>>) {
-        if finals[v].is_some() {
+    /// cargo's `traverse_and_share` as far as profiles go: `strip` lowered to debuginfo when
+    /// neither the unit nor its dependencies have any, and the deferred debuginfo of a unit
+    /// for the host lowered to none unless the same unit is built for the target too. The first
+    /// way a unit is reached decides.
+    fn share(&self, n: usize, for_host: bool, to_host: bool, shared: &mut Vec<Option<Profile>>) {
+        if shared[n].is_some() {
             return;
         }
-        let edges = self.visits[v].edges.clone();
-        for &e in &edges {
-            self.finalize(e, to_host, finals);
+        let mut deps = Vec::new();
+        for edge in self.interned[n].deps.iter().flatten() {
+            let (to, unit_for) = match *edge {
+                Edge::To { to, unit_for } => (to, unit_for),
+                Edge::Links(d) => match self.by_unit.get(&d).and_then(|ns| ns.first()) {
+                    Some(&to) => (to, UnitFor::new_host(false)),
+                    None => continue,
+                },
+            };
+            self.share(to, unit_for.is_for_host(), to_host, shared);
+            deps.push(to);
         }
-        let visit = &self.visits[v];
-        let mut profile = visit.profile.clone();
+        let interned = &self.interned[n];
+        let mut profile = interned.profile.clone();
         if profile.strip.is_deferred()
             && !profile.debuginfo.is_turned_on()
-            && edges.iter().all(|&e| !finals[e].as_ref().unwrap().debuginfo.is_turned_on())
+            && deps.iter().all(|&d| !shared[d].as_ref().is_some_and(|p| p.debuginfo.is_turned_on()))
         {
             profile.strip = profile.strip.strip_debuginfo();
         }
-        if visit.edge_for_host && to_host && profile.debuginfo.is_deferred() {
+        if for_host && to_host && profile.debuginfo.is_deferred() {
             let canonical = profile.debuginfo.finalize();
             let mut probe = profile.clone();
             probe.debuginfo = canonical;
-            let identity = &self.units[visit.unit].identity;
-            let shared = self.visits.iter().any(|w| {
-                !w.kind_host && self.units[w.unit].identity == *identity && w.profile == probe
+            let identity = &self.units[interned.unit].identity;
+            let exists = self.interned.iter().any(|m| {
+                !m.kind_host && self.units[m.unit].identity == *identity && m.profile == probe
             });
-            profile.debuginfo = if shared { canonical } else { canonical.weaken() };
+            profile.debuginfo = if exists { canonical } else { canonical.weaken() };
         }
-        finals[v] = Some(profile);
+        shared[n] = Some(profile);
     }
 }

@@ -40,12 +40,27 @@ cargo rejects is rejected with cargo's message. Part of the self-contained blaze
   example): `toml` with and without `--show-origin`, `json`, `json-value`, `--merged no`, the
   variables that may affect a table, and the warnings of old and doubled config files. It is how
   the harness sees the merged configuration.
+- Profiles as cargo 1.99 gives them to units (`blaze_manifest::profiles`, a port of cargo's
+  `profiles.rs`): the root manifest's `[profile]` tables with the configuration's
+  (`[profile]` in config files, `--config`, `CARGO_PROFILE_*`) merged over them, the built-in
+  `dev`, `release`, `test`, `bench` and `debug`, `inherits` chains and their errors, and for a
+  unit its package overrides (`[profile.x.package.<spec>]`, `"*"` for non-members),
+  `build-override` for the host, `panic` cleared for tests and the host, `split-debuginfo` on
+  Apple targets, `incremental` from `CARGO_INCREMENTAL`, `build.incremental` or `CI`, and the
+  warnings of package specs that match no package. Each manifest's profiles are checked as
+  cargo checks them reading it. What a unit is built for (`UnitFor`) is the unit graph's to
+  compute; a package is anything with a name, a version and a `SourceId` (`ProfilePackage`),
+  so blaze-resolve's package ids fit it. The `profiles` example takes the unit graph cargo
+  printed and prints every unit's `profile` as blaze computes it, deriving what each unit is
+  built for from the graph's edges as cargo's `unit_dependencies` does and applying the strip
+  and host debuginfo adjustments of cargo's `rebuild_unit_graph_shared`.
 - A manifest that does not parse or fit the schema is shown as cargo shows it, a snippet with
   the place marked (`blaze_manifest::diagnostic`).
 
 Not yet: dependencies resolved (the `resolve` of `cargo metadata`, with the lock file, waits
-for `crates/blaze-resolve`), profiles as units get them (validated and merged with the
-manifest's), `links` overrides in `[target.<triple>]`, a source defined twice under two names
+for `crates/blaze-resolve`), the unit graph itself (the `profiles` example walks cargo's),
+the unstable profile keys (`trim-paths`, `rustflags`, `codegen-backend`, which need nightly
+`cargo-features`), `links` overrides in `[target.<triple>]`, a source defined twice under two names
 (blaze-registry's, which has the `SourceId` display it names), and the warnings cargo prints for
 unused manifest keys and lints. `{workspace-path-hash}` in `build.build-dir` is refused until
 cargo's hash is ported. cargo checks a list against the lists that do not merge (`target.*.runner`,

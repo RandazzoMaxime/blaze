@@ -275,9 +275,13 @@ def compare_profiles(case, blaze, cargo_home, host):
         runs = list(profile_runs(root, spec, blaze, cargo_home, host))
     finally:
         shutil.rmtree(work)
-    units = 0
+    units = skipped = 0
     for run_spec, c, b in runs:
         what = " ".join(run_spec["args"])
+        if c["code"] and b["code"] and b["error"].startswith("error: cargo's unit graph"):
+            # cargo refused the workspace past its profiles, which blaze read.
+            skipped += 1
+            continue
         if c["code"] and b["code"]:
             if c["error"] != b["error"]:
                 result.update(cls="different", difference=f"{what}: error {json.dumps(b['error'][:300])}, cargo's {json.dumps(c['error'][:300])}")
@@ -299,7 +303,10 @@ def compare_profiles(case, blaze, cargo_home, host):
             result.update(cls="different", difference=f"{what}: warnings {b['warnings']}, cargo's {c['warnings']}")
             return result
         units += len(c["profiles"])
-    result.update(cls="equal", runs=len(runs), units=units)
+    if skipped == len(runs):
+        result.update(cls="cargo-failed", cargo=first_line(runs[0][1]["error"]))
+    else:
+        result.update(cls="equal", runs=len(runs) - skipped, units=units)
     return result
 
 

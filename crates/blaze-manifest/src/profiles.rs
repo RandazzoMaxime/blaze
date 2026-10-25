@@ -441,8 +441,8 @@ pub enum ProfileRoot {
     Debug,
 }
 
-/// The compiler settings of a unit.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+/// The compiler settings of a unit. Two are equal as cargo's are, whatever their name.
+#[derive(Clone, Debug, Eq, Serialize)]
 pub struct Profile {
     pub name: String,
     pub opt_level: String,
@@ -491,7 +491,30 @@ impl Default for Profile {
     }
 }
 
+impl PartialEq for Profile {
+    fn eq(&self, other: &Profile) -> bool {
+        self.comparable() == other.comparable()
+    }
+}
+
 impl Profile {
+    fn comparable(&self) -> impl Eq + '_ {
+        (
+            &self.opt_level,
+            &self.lto,
+            &self.codegen_backend,
+            self.codegen_units,
+            self.debuginfo,
+            &self.split_debuginfo,
+            self.debug_assertions,
+            self.overflow_checks,
+            self.rpath,
+            (self.incremental, self.panic, &self.strip),
+            &self.rustflags,
+            &self.trim_paths,
+        )
+    }
+
     fn default_dev() -> Profile {
         Profile {
             name: "dev".to_owned(),
