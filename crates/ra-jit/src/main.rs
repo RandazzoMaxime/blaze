@@ -7467,9 +7467,9 @@ fn process_wide() {
         load_cargo::serve_listed_with(server);
         // A proc macro rustc compiled, as cargo's builds do, is expanded with ra-jit's.
         load_cargo::own_libraries_with(Box::new(|sysroot, libraries| {
-            let libraries: Vec<PathBuf> =
-                libraries.iter().map(|it| it.as_ref().to_owned()).collect();
-            let made = cargo::own_macro::libraries_of(sysroot.map(AsRef::as_ref), &libraries);
+            let libraries: Vec<PathBuf> = libraries.iter().map(|it| it.clone().into()).collect();
+            let sysroot = sysroot.map(AsRef::<Path>::as_ref);
+            let made = cargo::own_macro::libraries_of(sysroot, &libraries);
             let made = made.into_iter().map(|it| it?.to_str().map(AbsPathBuf::try_from)?.ok());
             made.collect()
         }));

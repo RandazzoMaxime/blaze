@@ -153,8 +153,9 @@ fn library_of(sysroot: &Path, library: &Path) -> Result<Option<PathBuf>, String>
     let unit = unit.ok_or("not a library")?;
     let dir = library.parent().ok_or("a library without a directory")?;
     // One ra-jit's own target directory was seeded with is recorded in cargo's.
-    let cargos = dir.components().rposition(|it| it.as_os_str() == "rust-analyzer").map(|at| {
-        let parts = dir.components().enumerate().filter(|(it, _)| *it != at);
+    let parts: Vec<_> = dir.components().collect();
+    let cargos = parts.iter().rposition(|it| it.as_os_str() == "rust-analyzer").map(|at| {
+        let parts = parts.iter().enumerate().filter(|(it, _)| *it != at);
         parts.map(|(_, it)| it).collect::<PathBuf>()
     });
     let found = [Some(dir.to_owned()), cargos].into_iter().flatten().find_map(|dir| {
@@ -229,7 +230,7 @@ pub(crate) fn keep<'a>(
         return;
     };
     let mut files = BTreeMap::new();
-    let mut read = |info: &[u8], from: &Path| {
+    let read = |files: &mut BTreeMap<PathBuf, Option<Vec<u8>>>, info: &[u8], from: &Path| {
         let info = crate::dep_info::DepInfo::parse(&String::from_utf8_lossy(info));
         for file in info.files {
             let path = from.join(&file);
@@ -238,11 +239,11 @@ pub(crate) fn keep<'a>(
         }
     };
     let parent = made.dep_info.parent().unwrap_or(Path::new(""));
-    read(&dep_info, parent);
+    read(&mut files, &dep_info, parent);
     for (info, from) in inputs {
         let Ok(bytes) = std::fs::read(info) else { return };
         files.insert(info.to_owned(), Some(Sha256::digest(&bytes).to_vec()));
-        read(&bytes, from);
+        read(&mut files, &bytes, from);
     }
     let Some(files) = files.into_iter().map(|(path, it)| Some((path, it?))).collect() else {
         return;
