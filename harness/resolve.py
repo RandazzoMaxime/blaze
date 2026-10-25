@@ -22,12 +22,14 @@ text or not), and the first difference of each that is not equal is printed. `--
 JSON; the counts are docs/resolve.md's.
 
 `--fixtures` runs cargo on each fixture of crates/blaze-manifest/tests/fixtures, copied into a
-directory of its own, and writes what it printed, normalized, as the fixture's `expected.json`:
-the crate's tests compare against those without cargo or the network. The cargo is `cargo
+directory of its own, from the directory its `fixture.json` names in `cwd` (its root if none),
+and writes what it printed, normalized, as the fixture's `expected.json`, or `{"error": ...}`
+with the error's lines when cargo refused it: the crate's tests compare against those without
+cargo or the network. The cargo is `cargo
 +1.99.0` unless CARGO says otherwise; the blaze-manifest example is built with it unless
 `--blaze` names one.
 """
-import concurrent.futures, json, os, shutil, subprocess, sys, tarfile, tempfile, urllib.request
+import concurrent.futures, json, os, re, shutil, subprocess, sys, tarfile, tempfile, urllib.request
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
@@ -36,6 +38,7 @@ FIXTURES = os.path.join(ROOT, "crates", "blaze-manifest", "tests", "fixtures")
 CARGO = os.environ.get("CARGO_ORACLE", "cargo +1.99.0").split()
 USER_AGENT = "blaze resolve.py (https://github.com/indexable-inc/blaze)"
 PARTS = ["bench", "crates", "workspaces"]
+BENCH_PROJECT = re.compile(r'^    "([\w.-]+)": dict\(\s*repo="([^"]+)",[^\n]*?rev="([0-9a-f]{40})"', re.M)
 CLASSES = ["equal", "different", "blaze-failed", "cargo-failed", "both-failed"]
 
 
@@ -96,12 +99,15 @@ def error_text(stderr):
     return "\n".join(l.rstrip() for l in lines[start:] if l.strip())
 
 
+def clean_env(cargo_home):
+    env = {k: v for k, v in os.environ.items() if not k.startswith("CARGO_") or k == "CARGO_ORACLE"}
+    return {**env, "CARGO_HOME": cargo_home}
+
+
 def compare(case, blaze, cargo_home):
     """Runs both on the workspace at case["dir"] and classifies the result."""
     root = case["dir"]
-    env = {**os.environ, "CARGO_HOME": cargo_home}
-    for k in ("CARGO_TARGET_DIR", "CARGO_BUILD_TARGET_DIR", "RUSTFLAGS", "CARGO_MANIFEST_DIR"):
-        env.pop(k, None)
+    env = clean_env(cargo_home)
     args = ["metadata", "--no-deps", "--format-version", "1", "--offline"]
     c_code, c_out, c_err = run(CARGO + args, root, env)
     b_code, b_out, b_err = run([blaze, *args[1:]], root, env)
@@ -155,11 +161,9 @@ def cases_of(part, corpus, work, limit):
     """The workspaces of a part, fetched: (name, directory) each."""
     cases = []
     if part == "bench":
-        sys.path.insert(0, HERE)
-        import bench
-
-        entries = [(name, spec["repo"], spec["rev"]) for name, spec in bench.PROJECTS.items()]
-        entries = [dict(name=n, repo=r, rev=v) for n, r, v in entries]
+        # Read, not imported: bench.py imports what needs a built ra-jit.
+        source = open(os.path.join(HERE, "bench.py")).read()
+        entries = [dict(name=n, repo=r, rev=v) for n, r, v in BENCH_PROJECT.findall(source)]
     else:
         entries = corpus[part]
     for entry in entries[:limit]:
@@ -192,14 +196,14 @@ def write_fixtures():
         source = os.path.join(FIXTURES, name)
         work = os.path.realpath(tempfile.mkdtemp(prefix="blaze-fixture-"))
         root = os.path.join(work, name)
-        shutil.copytree(source, root, ignore=shutil.ignore_patterns("expected.json"))
+        shutil.copytree(source, root, ignore=shutil.ignore_patterns("expected.json", "fixture.json"))
         manifest = json.load(open(os.path.join(source, "fixture.json"))) if os.path.exists(os.path.join(source, "fixture.json")) else {}
         cwd = os.path.join(root, manifest.get("cwd", ""))
-        env = {**os.environ, "CARGO_HOME": cargo_home}
+        env = clean_env(cargo_home)
         code, out, err = run(CARGO + ["metadata", "--no-deps", "--format-version", "1"], cwd, env)
         if code:
-            expected = {"error": first_line(err)}
-            text = json.dumps(expected, indent=1)
+            error = error_text(err).replace(os.path.realpath(root), "$ROOT").replace(root, "$ROOT")
+            text = json.dumps({"error": error}, indent=1)
         else:
             text = normalize(out, root, cargo_home)
         with open(os.path.join(source, "expected.json"), "w") as f:
@@ -269,8 +273,8 @@ def main():
         rows = [r for r in results if r["part"] == part]
         counts = {c: sum(r["cls"] == c for r in rows) for c in CLASSES + ["fetch-failed"]}
         same = sum(r.get("same_error", False) for r in rows)
-        line = f"{part}: {counts['equal']}/{len(rows)} equal, " + ", ".join(f"{v} {k}" for k, v in counts.items() if v and k != "equal")
-        print(line + (f" ({same} with cargo's error text)" if counts["both-failed"] else ""))
+        others = [f"{v} {k}" + (f" ({same} with cargo's error text)" if k == "both-failed" else "") for k, v in counts.items() if v and k != "equal"]
+        print(f"{part}: {counts['equal']}/{len(rows)} equal" + "".join(", " + o for o in others))
     if out:
         with open(out, "w") as f:
             json.dump(results, f, indent=1)
