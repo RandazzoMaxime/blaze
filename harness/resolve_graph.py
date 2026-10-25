@@ -2,7 +2,7 @@
 """resolve_graph.py: the resolve blaze-resolve makes of a workspace's packages against the one
 cargo makes, over a corpus. cargo is the oracle; blaze never runs it outside this harness.
 
-usage: resolve_graph.py CORPUS [PART...] [--work DIR] [--jobs N] [--out FILE] [--limit N]
+usage: resolve_graph.py CORPUS [PART...] [--work DIR] [--jobs N] [--out FILE] [--limit N] [--keep]
 
 CORPUS is harness/resolve/corpus.json (its parts `bench`, `crates` and `workspaces`, as
 harness/resolve.py reads them). Each case is fetched under `--work` (default
@@ -12,8 +12,9 @@ one are skipped), and `fresh`, with none. The `metadata_resolve` example of blaz
 reads each output, resolves the members from the packages listed, and prints its `resolve`,
 which is compared with cargo's, key order included. So this checks the resolver's graph, its
 feature unification and the JSON; not which versions are chosen, as the registry holds only
-the versions cargo chose. A case is equal, different, blaze-failed or cargo-failed; the first
-difference or error of each that is not equal is printed, and `--out` writes them all as JSON.
+the versions cargo chose. Each checkout is deleted once compared, unless `--keep`. A case is
+equal, different, blaze-failed or cargo-failed; the first difference or error of each that is
+not equal is printed, and `--out` writes them all as JSON.
 """
 import concurrent.futures, json, os, shutil, subprocess, sys, tarfile, tempfile, urllib.request
 
@@ -109,22 +110,24 @@ def first_difference(a, b, at="$"):
 
 
 def one(case, mode, blaze, cargo_home):
-    work = case["dir"] + "-" + mode
-    shutil.rmtree(work, ignore_errors=True)
-    shutil.copytree(case["dir"], work, symlinks=True)
-    lock = os.path.join(work, "Cargo.lock")
+    """Runs cargo and blaze on the checkout in place; `fresh` moves its Cargo.lock aside for the
+    run and puts it back."""
+    lock = os.path.join(case["dir"], "Cargo.lock")
     if mode == "fresh" and os.path.exists(lock):
-        os.remove(lock)
+        os.rename(lock, lock + ".shipped")
     env = {k: v for k, v in os.environ.items() if not k.startswith("CARGO_") or k == "CARGO_ORACLE"}
     env["CARGO_HOME"] = cargo_home
-    cargo = subprocess.run([*CARGO, "metadata", "--format-version", "1"], cwd=work, env=env,
-                           capture_output=True, text=True, errors="replace")
+    try:
+        cargo = subprocess.run([*CARGO, "metadata", "--format-version", "1"], cwd=case["dir"],
+                               env=env, capture_output=True, text=True, errors="replace")
+    finally:
+        if os.path.exists(lock + ".shipped"):
+            os.replace(lock + ".shipped", lock)
     out = {"part": case["part"], "name": case["name"], "mode": mode}
     if cargo.returncode:
         lines = [l for l in cargo.stderr.splitlines() if l.startswith("error")]
         return {**out, "class": "cargo-failed", "why": (lines or [cargo.stderr.strip()])[0][:300]}
     ours = subprocess.run([blaze], input=cargo.stdout, capture_output=True, text=True)
-    shutil.rmtree(work, ignore_errors=True)
     if ours.returncode:
         return {**out, "class": "blaze-failed", "why": ours.stderr.strip().splitlines()[0][:300]}
     theirs = json.loads(cargo.stdout)["resolve"]
@@ -139,6 +142,7 @@ def main():
     out_file = option(argv, "--out")
     limit = option(argv, "--limit")
     limit = int(limit) if limit else None
+    keep = "--keep" in argv and not argv.remove("--keep")
     corpus = json.load(open(argv.pop(0)))
     parts = argv or PARTS
     blaze = build_blaze()
@@ -153,8 +157,11 @@ def main():
         except Exception as e:
             return [{"part": case["part"], "name": case["name"], "mode": "fetch",
                      "class": "cargo-failed", "why": f"fetch: {e}"[:300]}]
-        modes = ["locked", "fresh"] if os.path.exists(os.path.join(case["dir"], "Cargo.lock")) else ["fresh"]
-        return [one(case, mode, blaze, cargo_home) for mode in modes]
+        shipped = os.path.exists(os.path.join(case["dir"], "Cargo.lock"))
+        results = [one(case, mode, blaze, cargo_home) for mode in ["locked", "fresh"][not shipped:]]
+        if not keep:
+            shutil.rmtree(case["dir"], ignore_errors=True)
+        return results
 
     results = []
     with concurrent.futures.ThreadPoolExecutor(jobs) as pool:
