@@ -403,6 +403,95 @@ struct Resolver<'a> {
     library: bool,
 }
 
+/// A [`Resolver`] without its database, to be taken to another thread and put over that
+/// thread's.
+struct ResolverParts<'a> {
+    table: &'a SymbolTable,
+    root: PathBuf,
+    base: Option<PathBuf>,
+    contents: &'a content::Contents,
+    debug: plan::Described,
+    apart: Option<PathBuf>,
+    listed: &'a Listed,
+    shared_paths: SharedPaths,
+    named: Arc<std::sync::Mutex<FxHashMap<FunctionId, Option<String>>>>,
+    linked: Option<Arc<symbols::Linked>>,
+    in_full: Arc<std::sync::atomic::AtomicBool>,
+    onto: bool,
+    prebuilt: Option<Arc<Prebuilt>>,
+    members: Arc<FxHashSet<ide_db::base_db::Crate>>,
+    programs: Option<Arc<FxHashSet<ide_db::base_db::Crate>>>,
+    library: bool,
+}
+
+impl<'a> Resolver<'a> {
+    fn parts(&self) -> ResolverParts<'a> {
+        ResolverParts {
+            table: self.table,
+            root: self.root.clone(),
+            base: self.base.clone(),
+            contents: self.contents,
+            debug: self.debug,
+            apart: self.apart.clone(),
+            listed: self.listed,
+            shared_paths: self.shared_paths.clone(),
+            named: self.named.clone(),
+            linked: self.linked.clone(),
+            in_full: self.in_full.clone(),
+            onto: self.onto,
+            prebuilt: self.prebuilt.clone(),
+            members: self.members.clone(),
+            programs: self.programs.clone(),
+            library: self.library,
+        }
+    }
+}
+
+impl<'a> ResolverParts<'a> {
+    fn over<'b>(self, db: &'b RootDatabase) -> Resolver<'b>
+    where
+        'a: 'b,
+    {
+        let ResolverParts {
+            table,
+            root,
+            base,
+            contents,
+            debug,
+            apart,
+            listed,
+            shared_paths,
+            named,
+            linked,
+            in_full,
+            onto,
+            prebuilt,
+            members,
+            programs,
+            library,
+        } = self;
+        Resolver {
+            db,
+            table,
+            root,
+            base,
+            contents,
+            debug,
+            apart,
+            listed,
+            shared_paths,
+            named,
+            linked,
+            in_full,
+            onto,
+            prebuilt,
+            members,
+            programs,
+            library,
+        }
+    }
+}
+
 /// The standard library ra-jit built before the program ([`std_unit`]).
 struct Prebuilt {
     /// What its object defines for others to link to.
@@ -1193,36 +1282,9 @@ impl SymbolResolver for Resolver<'_> {
         let next = std::sync::atomic::AtomicUsize::new(0);
         std::thread::scope(|scope| {
             for _ in 0..threads {
-                let db = self.db.clone();
-                let (next, table, root) = (&next, self.table, self.root.clone());
-                let base = self.base.clone();
-                let contents = self.contents;
-                let (debug, apart) = (self.debug, self.apart.clone());
-                let (listed, named) = (self.listed, self.named.clone());
-                let (shared_paths, linked) = (self.shared_paths.clone(), self.linked.clone());
-                let (in_full, prebuilt) = (self.in_full.clone(), self.prebuilt.clone());
-                let (members, onto) = (self.members.clone(), self.onto);
-                let (programs, library) = (self.programs.clone(), self.library);
+                let (db, next, parts) = (self.db.clone(), &next, self.parts());
                 scope.spawn(move || {
-                    let resolver = Resolver {
-                        db: &db,
-                        table,
-                        root,
-                        base,
-                        contents,
-                        debug,
-                        apart,
-                        listed,
-                        shared_paths,
-                        named,
-                        linked,
-                        in_full,
-                        onto,
-                        prebuilt,
-                        members,
-                        programs,
-                        library,
-                    };
+                    let resolver = parts.over(&db);
                     hir::attach_db(&db, || {
                         loop {
                             let at = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -4262,8 +4324,10 @@ fn build(
         let parts: Vec<_> = (0..threads)
             .map(|part| {
                 let (db, known, local, next) = (db.clone(), &*known, &local, &next);
+                let parts = resolver.parts();
                 scope.spawn(move || {
                     PROBING.set(true);
+                    let resolver = parts.over(&db);
                     hir::attach_db(&db, || {
                         while let Some(&krate) =
                             local.get(next.fetch_add(1, std::sync::atomic::Ordering::Relaxed))
@@ -4271,7 +4335,7 @@ fn build(
                             hir_ty::method_resolution::TraitImpls::for_crate(&db, krate.into());
                             hir_ty::method_resolution::InherentImpls::for_crate(&db, krate.into());
                         }
-                        known.stale(&db, part, threads)
+                        known.stale(&db, Some(&resolver), part, threads)
                     })
                 })
             })

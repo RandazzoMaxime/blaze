@@ -166,8 +166,39 @@ stable names, so nothing is rebuilt for the first edit (**unverified** that it r
   entries call one of them, so they are compiled again on every start (**read**).
 - The rebuild for the first edit (14.0 s on helix) is there because a patch's marks hash
   compiled code that holds salsa ids, which a new process does not share, so the marks cannot be
-  stored (**read**, `patch.rs`). Marks from stable names would let a started daemon patch what
-  it read from the store with no rebuild (**unverified**).
+  stored (**read**, `patch.rs`). Done 2026-10-25, below.
+
+## Marks by stable names (2026-10-25)
+
+dev-aws-5, `warmstart.py`, main at `b26f32ee88` against the stable-marks branch on it
+(**read**, each number):
+
+| | main | stable marks |
+|---|---|---|
+| nushell `restart` build | 30.76 s | 21.41 s |
+| nushell `again` build | 30.82 s | 21.52 s |
+| nushell `warm` ready | 25.29 s | 15.39 s |
+| nushell first edit after `restart` | 0.23 s spliced | 0.30 s spliced |
+| ripgrep `restart` build | 5.67 s | 4.63 s |
+| ripgrep first edit after `restart` | 0.07 s spliced | 0.08 s spliced |
+
+- An entry of the checkout holds a `stable_mark`: its code, and what it calls and reads by
+  stable names, with the checkout's crates named by the content ids they had when the base was
+  built. The base finds what each one from the store is an instance of from what its callers
+  call now, at each look (**read**, `patch.rs`).
+- A closure's stable name holds the index of its expression in its body. ripgrep's body edit
+  puts a line at the top of `search`, which renumbers the closure `search` passes to
+  `HiArgs::sort`, and so names every instance generic over it anew. The old ones are called by
+  nothing, recursive sort functions by themselves only, and are left uncalled (**read**: the
+  declines before that, "nothing calls ... as it did").
+- An instance compiled as another checkout's crate carries that crate's content id, which can
+  differ by path; nushell had one, and it made the whole base untracked before such code was
+  looked at for any edit (**read**, "untracked: its crate is not of the checkout").
+- What is left of nushell's 21.4 s: load 1.0 s, resolve 3.4 s, compile 12.1 s, link 1.8 s
+  (main's steps; **read**). No root of the checkout comes from the store: the daemon's symbol
+  table has rustc's libraries, so `roots_from_store` is off ("base from the store: 0 roots"),
+  and every start compiles 3,618 functions of ripgrep and 30,040 of nushell (**read**, the
+  `compiled` column; that those are the roots is **unverified**).
 - Adopting the executable ra-jit linked last as a base, as `Base::of_rustc` adopts rustc's,
   needs the symbols as linked. A function's symbol in a build with nothing of rustc's is
   `ra-jit.{crate id}.{path}`, and the crate's id changes with its contents, so an edit renames
