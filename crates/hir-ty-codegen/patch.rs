@@ -2019,7 +2019,10 @@ impl Base {
                 (Some(Some(true)), _) => {}
                 _ if !touched => eprintln!("check-all: MISSED `{}` from the store", was.name),
                 _ if unchanged => {
-                    eprintln!("check-all: MISSED `{}` from the store, its items unchanged", was.name)
+                    eprintln!(
+                        "check-all: MISSED `{}` from the store, its items unchanged",
+                        was.name
+                    )
                 }
                 (Some(Some(false)), Some((instance, env))) => {
                     stale.hydrated.push((i as u32, instance, env))
