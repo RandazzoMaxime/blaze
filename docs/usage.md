@@ -7,7 +7,6 @@ Not installed yet: [install.md](install.md). Every command and setting in detail
 
 ```sh
 cd my-project
-rustup override set 1.99.0    # or a rust-toolchain.toml with channel = "1.99.0"
 cargo blaze build
 ```
 
@@ -101,7 +100,9 @@ next release. How it works, and how fast from a keystroke to the running program
 
 - **Platforms.** macOS on Apple silicon, Linux x86-64 and Linux ARM64 are measured in
   [benchmarks.md](benchmarks.md). On Windows every build is cargo's. Intel Macs are not supported.
-- **One Rust version.** 1.99.0 only (see [install.md](install.md#what-you-need)).
+- **One Rust version.** blaze builds with 1.99.0 whatever toolchain the project pins; code that
+  needs a nightly's features fails (see [install.md](install.md#what-you-need) and
+  [support.md](support.md#toolchain)).
 - **Not every build is blaze's.** The changes listed above go to cargo, and so does code blaze
   can't compile yet. `cargo blaze status` counts both; in the benchmark tables, `(c)` marks an
   edit that went to cargo.

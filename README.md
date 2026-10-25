@@ -31,10 +31,9 @@ For macOS on Apple silicon and Linux. Rather use crates.io or Nix? [Other ways t
 In any Rust project:
 
 ```sh
-rustup override set 1.99.0   # blaze is built for Rust 1.99.0
-cargo blaze run              # like cargo run
-cargo blaze test             # like cargo test
-cargo blaze build            # like cargo build
+cargo blaze run     # like cargo run
+cargo blaze test    # like cargo test
+cargo blaze build   # like cargo build
 ```
 
 The first build is cargo's. Then change a function and build again: it's back in milliseconds,
@@ -68,7 +67,8 @@ it again from scratch. A program that opts in can take the new code while it kee
 ## Good to know
 
 - **macOS on Apple silicon and Linux.** On Windows every build is cargo's.
-- **Rust 1.99.0 only**, for now.
+- **Stable Rust.** blaze builds your project with Rust 1.99.0 whatever toolchain it pins, so
+  code that needs a nightly's features isn't for blaze yet.
 - **It trades memory for speed:** a few GB for a small project.
 - **It's young.** Keep `cargo check` or your CI as the final word, and
   [tell us](https://github.com/indexable-inc/blaze/issues) when something differs from cargo.

@@ -8,7 +8,6 @@ curl -fsSL https://raw.githubusercontent.com/indexable-inc/blaze/main/install.sh
 Then, in a project of yours:
 
 ```sh
-rustup override set 1.99.0
 cargo blaze run
 ```
 
@@ -23,8 +22,9 @@ Change a function and run `cargo blaze run` again: the `Finished` line now says 
 - **Rust 1.99.0 with its source code** (the `rust-src` component), which the installer adds
   through rustup. blaze works with this one version only: it links its code with code rustc
   1.99.0 compiled, so the two have to agree on how types are laid out and functions are called.
-  Your project has to build with 1.99.0 too (`rustup override set 1.99.0` in it, or a
-  `rust-toolchain.toml`); on any other version every build is plain cargo's, and says so.
+  `cargo blaze` builds your project with 1.99.0 whatever its `rust-toolchain.toml` says, so a
+  project on an older stable builds as it is; code that needs a nightly's features fails with
+  rustc's error and a note saying so.
 - **Memory to spare.** blaze's background process holds a few GB for a small project and tens of
   GB for the largest ([numbers](benchmarks.md#how-much-memory-and-disk-it-takes)).
 
