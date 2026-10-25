@@ -18,9 +18,11 @@ layout code is rustc's own `rustc_abi` crate from the 1.99.0 tag. Nothing has be
 another stable version. Some reports were measured on `nightly-2026-05-10` before the move
 to stable; those are marked where they are used.
 
-`cargo blaze` on another toolchain goes to cargo. `RA_JIT_OTHER_TOOLCHAIN=1` builds with it
-anyway, for a project pinned to a nightly of the next release, which rustc 1.99.0 can't build
-even with `RUSTC_BOOTSTRAP=1` when the project uses library features 1.99.0 does not have.
+`cargo blaze` builds every project with 1.99.0, whatever toolchain the project names
+([cargo.md](cargo.md)), and a project that needs its own fails with rustc's error and a note
+naming both. `RA_JIT_OTHER_TOOLCHAIN=1` builds with the project's toolchain instead, for a
+project pinned to a nightly of the next release, which rustc 1.99.0 can't build even with
+`RUSTC_BOOTSTRAP=1` when the project uses library features 1.99.0 does not have.
 Nothing checks that the other rustc lays out, mangles and passes values as 1.99.0 does: bun's
 pinned `nightly-2026-09-15` does for what the harness runs of bun
 ([research/bun.md](research/bun.md)).
