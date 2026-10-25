@@ -1213,6 +1213,9 @@ enum Named {
 struct Defined {
     address: u64,
     size: u64,
+    /// What a jump written at `address` may cover: `size`, and for a function the padding
+    /// the linker filled with traps or `nop`s up to whatever is next.
+    room: u64,
     kind: SymbolKind,
     /// Where the file has its entry of the symbol table, or [`Defined::NO_ENTRY`] for what a
     /// splice of all of a program added ([`Baseline::spliced_whole`]).
@@ -1265,18 +1268,51 @@ impl Image {
         let mut symbols = FxHashMap::<Box<[u8]>, Named>::default();
         let (table, _) = (file.section_by_name(".symtab").and_then(|it| it.file_range()))
             .context("the executable has no symbol table")?;
+        let code = |section| {
+            let section = file.section_by_index(section).ok()?;
+            let object::SectionFlags::Elf { sh_flags } = section.flags() else { return None };
+            (sh_flags & u64::from(elf::SHF_EXECINSTR) != 0).then_some(section)
+        };
+        // Where each symbol of code starts, and each section of it ends: what is between a
+        // function's end and the next is the linker's padding, or code no symbol names.
+        let mut starts: Vec<u64> = (file.symbols())
+            .filter(|it| it.section_index().and_then(code).is_some())
+            .map(|it| it.address())
+            .chain(
+                file.sections()
+                    .filter(|it| code(it.index()).is_some())
+                    .map(|it| it.address() + it.size()),
+            )
+            .collect();
+        starts.sort_unstable();
+        let padding: &[u8] = match machine {
+            Machine::X86_64 => &[0xcc, 0x90],
+            Machine::Aarch64 => &[],
+        };
+        let room = |address: u64, size: u64, section| -> u64 {
+            let Some(section) = code(section) else { return size };
+            let end = address + size;
+            let next = starts[starts.partition_point(|it| *it < end)..].first().copied();
+            let Some(next) = next.filter(|it| *it > end) else { return size };
+            let gap = (section.data_range(end, next - end).ok().flatten()).unwrap_or_default();
+            match gap.len() as u64 == next - end && gap.iter().all(|it| padding.contains(it)) {
+                true => next - address,
+                false => size,
+            }
+        };
         for symbol in file.symbols() {
             // A global label of assembly, of no type and no size, which `object` counts as
             // no definition, is one to the linker.
             let label = symbol.kind() == SymbolKind::Unknown && symbol.is_global();
             let defines = symbol.is_definition() || label || symbol.kind() == SymbolKind::Tls;
-            if !defines || symbol.section_index().is_none() {
-                continue;
-            }
+            let Some(section) = symbol.section_index().filter(|_| defines) else { continue };
             let name = symbol.name_bytes()?;
+            let (address, size) = (symbol.address(), symbol.size());
+            let short = symbol.kind() == SymbolKind::Text && size < machine.jump() as u64;
             let defined = Defined {
-                address: symbol.address(),
-                size: symbol.size(),
+                address,
+                size,
+                room: if short { room(address, size, section) } else { size },
                 kind: symbol.kind(),
                 entry: table + (symbol.index().0 * size_of::<elf::Sym64<Endianness>>()) as u64,
             };
@@ -1873,7 +1909,7 @@ impl<'a> Patch<'a> {
                     if whole
                         && old.kind == SymbolKind::Text
                         && code.contains(&section)
-                        && old.size < image.machine.jump() as u64 =>
+                        && old.room < image.machine.jump() as u64 =>
                 {
                     None
                 }
@@ -1882,7 +1918,7 @@ impl<'a> Patch<'a> {
                     if old.kind == SymbolKind::Text && code.contains(&section) =>
                 {
                     ensure!(
-                        old.size >= image.machine.jump() as u64,
+                        old.room >= image.machine.jump() as u64,
                         "{} is too short to jump from",
                         String::from_utf8_lossy(name)
                     );
@@ -2380,7 +2416,7 @@ impl<'a> Patch<'a> {
         for replaced in &self.replaced {
             let Some(old) = replaced.old.filter(|it| it.kind == SymbolKind::Text) else { continue };
             let new = base + placed[&replaced.section] + replaced.offset;
-            let jump = machine.redirect(new, old.address, old.size).with_context(|| {
+            let jump = machine.redirect(new, old.address, old.room).with_context(|| {
                 format!("{} cannot be jumped from", String::from_utf8_lossy(replaced.name))
             })?;
             overwritten.push((image.offset_of(old.address)?, jump));
@@ -2497,6 +2533,7 @@ impl<'a> Patch<'a> {
                         it.address
                     }),
                     size: replaced.size,
+                    room: replaced.size,
                     kind: match code.contains(&replaced.section) {
                         true => SymbolKind::Text,
                         false => SymbolKind::Data,
