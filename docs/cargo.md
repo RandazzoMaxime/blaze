@@ -214,8 +214,11 @@ Doc tests go through ra-jit in rustdoc's place. An example ra-jit cannot build i
 rustdoc, with a line saying why. Of the test harness's flags, `-q`, `--format pretty`,
 `--format terse`, `--color never`, `--exact`, `--skip`, `--test-threads` and test filters
 are handled, and the results are shown as libtest shows them; any other flag leaves the
-library's doctests to rustdoc. Each library's doctests load the workspace again in a
-process of their own, about 2 s each on ripgrep, which the daemon does not do for them yet.
+library's doctests to rustdoc. Cargo's run of rustdoc for each library is only written
+down; once cargo is done, one run of ra-jit loads the workspace and tests the libraries'
+examples in the order cargo asked, each in the directory and with the variables cargo gave
+its rustdoc, and says `Doc-tests` and what failed as cargo does. The daemon does not run
+doctests yet.
 
 The fallback is per invocation or per program, not per crate. If one program of an
 invocation cannot be the daemon's, cargo builds the invocation.
