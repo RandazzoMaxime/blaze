@@ -75,6 +75,10 @@ pub(crate) fn rustc_first(rustc: &OsStr, args: &[String], cwd: &Path) -> anyhow:
         if !load_cargo::is_listed(listed) {
             continue;
         }
+        // Kept beside its record, for `RA_JIT_PROC_MACRO_LIBS` to compare with rustc's.
+        let kept = records.join(unit).join(library.file_name().context("a library unnamed")?);
+        std::fs::copy(&library, &kept)
+            .with_context(|| format!("copying {} to {}", library.display(), kept.display()))?;
         let mut compile = Command::new(rustc);
         for (name, _) in std::env::vars().filter(|(name, _)| own_script::read_by_crates(name)) {
             compile.env_remove(name);

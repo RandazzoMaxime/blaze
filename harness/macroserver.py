@@ -357,7 +357,11 @@ def app(name, work, server):
         left = re.search(r"(\d+) functions in it ra-jit could not compile$", ran.stderr, re.M)
         ours, theirs = built_macros(own)
         if named:
-            for lib in glob.glob(os.path.join(own, "**", "deps", "lib*.so"), recursive=True):
+            # A proc macro rustc compiled again, for a crate of rustc's that links it, left
+            # ra-jit's library beside its record.
+            for lib in [*glob.glob(os.path.join(own, "**", "deps", "lib*.so"), recursive=True),
+                        *glob.glob(os.path.join(own, "**", ".ra-jit-units", "*", "lib*.so"),
+                                   recursive=True)]:
                 if LIST in open(lib, "rb").read():
                     shutil.copy(lib, libs)
         said = subprocess.run([binary, *spec["run"]], cwd=root, capture_output=True, text=True,
