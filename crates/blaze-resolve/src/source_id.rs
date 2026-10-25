@@ -2,7 +2,7 @@
 //! `src/util/canonical_url.rs` and `cargo-util-schemas`' `core/source_kind.rs` of cargo 1.99.0
 //! (5f94df4789).
 
-use rustc_hash::FxHashSet;
+use rustc_hash::{FxHashMap, FxHashSet};
 use std::cmp::{self, Ordering};
 use std::fmt;
 use std::hash::{Hash, Hasher};
@@ -251,6 +251,12 @@ impl PartialEq for SourceIdInner {
 
 static SOURCE_ID_CACHE: OnceLock<Mutex<FxHashSet<&'static SourceIdInner>>> = OnceLock::new();
 
+/// The first name each registry was given. An id interned before its named twin (a lock
+/// file's registry read before the manifest's) has no name of its own; cargo always makes the
+/// named one first, and its messages name the registry.
+static REGISTRY_NAMES: OnceLock<Mutex<FxHashMap<(SourceKind, CanonicalUrl), KeyOf>>> =
+    OnceLock::new();
+
 /// What pins a source: a lock file's entry, a `cargo update --precise` request, or a git
 /// commit.
 #[derive(Eq, PartialEq, Clone, Debug, Hash)]
@@ -300,9 +306,14 @@ impl SourceId {
         if kind == SourceKind::SparseRegistry {
             assert!(url.as_str().starts_with("sparse+"));
         }
+        let canonical_url = CanonicalUrl::new(&url)?;
+        if let Some(key) = &key {
+            let mut names = REGISTRY_NAMES.get_or_init(Default::default).lock().unwrap();
+            names.entry((kind.clone(), canonical_url.clone())).or_insert_with(|| key.clone());
+        }
         Ok(SourceId::wrap(SourceIdInner {
             kind,
-            canonical_url: CanonicalUrl::new(&url)?,
+            canonical_url,
             url,
             precise: None,
             registry_key: key,
@@ -449,12 +460,12 @@ impl SourceId {
     /// The registry's name if it has one, else its URL.
     pub fn display_registry_name(self) -> String {
         if let Some(key) = self.inner.registry_key.as_ref().map(|k| k.key()) {
-            key.into()
-        } else if self.has_precise() {
-            // The id without the precise may be the one created with the name.
-            self.without_precise().display_registry_name()
-        } else {
-            url_display(self.url())
+            return key.into();
+        }
+        let names = REGISTRY_NAMES.get_or_init(Default::default).lock().unwrap();
+        match names.get(&(self.inner.kind.clone(), self.inner.canonical_url.clone())) {
+            Some(key) => key.key().to_owned(),
+            None => url_display(self.url()),
         }
     }
 
@@ -822,6 +833,12 @@ mod tests {
         assert_eq!(locked.to_string(), "registry `crates-io`");
         assert!(SourceId::crates_io_sparse().is_crates_io());
         assert_ne!(SourceId::crates_io_sparse(), crates_io);
+
+        // A registry read before its named twin is made still shows the name.
+        let early = SourceId::from_url("registry+https://named-late.example/index").unwrap();
+        SourceId::for_alt_registry(&url("https://named-late.example/index"), "late").unwrap();
+        assert_eq!(early.to_string(), "registry `late`");
+        assert_eq!(early.without_precise().to_string(), "registry `late`");
 
         let alt = SourceId::from_url("registry+https://example.com/index").unwrap();
         assert_eq!(alt.to_string(), "registry `https://example.com/index`");

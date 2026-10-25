@@ -1,8 +1,8 @@
 {
  "dir": ".",
  "inputs": {
-  "Cargo.lock": "84e7d3c79de55fe4a254d4b59709153dde6928a52ca6f2e1d1aaf314dc405ff2",
-  "Cargo.toml": "2ae9ee0a93e07924a08c9be79d73fa3ba00d85c32247f9d3ed5345be2fe7098a"
+  "Cargo.lock": "fead73f87bf9c377df7af95f93b3910cb39b336c96ec70826284b2e3a7e7b296",
+  "Cargo.toml": "8dc12f7fe1a5c0be921177640588e345cb9ef91712d4a3abede375a087730cad"
  },
  "packages": {
   "adler2@2.0.1": {
@@ -735,6 +735,23 @@
     "kind": "registry"
    },
    "version": "2.12.1"
+  },
+  "blaze-resolve@0.1.0": {
+   "authors": "blaze contributors",
+   "description": "cargo's resolver, owned by blaze: the package model, Cargo.lock, version selection and feature unification",
+   "homepage": "",
+   "license": "MIT OR Apache-2.0",
+   "license_file": "",
+   "links": null,
+   "name": "blaze-resolve",
+   "readme": "",
+   "repository": "https://github.com/indexable-inc/blaze",
+   "rust_version": "1.99",
+   "source": {
+    "dir": "crates/blaze-resolve",
+    "kind": "path"
+   },
+   "version": "0.1.0"
   },
   "block-buffer@0.10.4": {
    "authors": "RustCrypto Developers",
