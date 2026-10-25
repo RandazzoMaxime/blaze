@@ -426,10 +426,10 @@ the counts of [How often](#how-often) lower, measured by step A's check, and non
 | [G](https://github.com/indexable-inc/ra-jit/issues/87). Every crate compiled and linked by ra-jit | rustc's rlibs, objects, symbols and link line, "no rustc symbol" | E, F | large | high | the no-rustc F+G lane |
 | [H](https://github.com/indexable-inc/ra-jit/issues/88). ra-jit writes the test harness | the fallback when a test is added | G | medium | medium | the `no-rustc-hl` lane: done; the `no-rustc-l2` lane: ra-jit's harness always, done |
 | [I](https://github.com/indexable-inc/ra-jit/issues/89). Build scripts compiled and run by ra-jit | build scripts and their probes by rustc | B, G | medium | medium | the `no-rustc-l2` lane: first part done (scripts compiled and linked by ra-jit, their runs kept in the store); the F+G lane consumes it for the standard library's scripts |
-| [J](https://github.com/indexable-inc/ra-jit/issues/90). Proc macros compiled and loaded by ra-jit | proc macros by rustc, the toolchain's proc-macro server | F, G | large | high | none yet |
-| [K](https://github.com/indexable-inc/ra-jit/issues/91). The cold build is ra-jit's | cargo's first build, the rustc base (#11) | G, I, J | medium | high | none yet |
+| [J](https://github.com/indexable-inc/ra-jit/issues/90). Proc macros compiled and loaded by ra-jit | proc macros by rustc, the toolchain's proc-macro server | F, G | large | high | the self-contained lane ([#298](https://github.com/indexable-inc/blaze/issues/298)): plan, and J then K first |
+| [K](https://github.com/indexable-inc/ra-jit/issues/91). The cold build is ra-jit's | cargo's first build, the rustc base (#11) | G, I, J | medium | high | the self-contained lane, with 54301ec5's first-build lane (#310) |
 | [L](https://github.com/indexable-inc/ra-jit/issues/92). Doctests by the daemon (#28) | probe and examples by rustc, rustdoc | B, G, D | medium | medium | the `no-rustc-hl` lane: first part done; the `no-rustc-l2` lane: second part (examples by ra-jit) done |
-| [M](https://github.com/indexable-inc/ra-jit/issues/93). Remove the wrapper and the fallback | `ra-jit-rustc`, `ra-jit-rustc-first`, stand-ins, dep-info, settle, `by_cargo`, `only_cargo` | all | medium | low | none yet |
+| [M](https://github.com/indexable-inc/ra-jit/issues/93). Remove the wrapper and the fallback | `ra-jit-rustc`, `ra-jit-rustc-first`, stand-ins, dep-info, settle, `by_cargo`, `only_cargo` | all | medium | low | the self-contained lane |
 
 A, B and C landed on 2026-10-22. D and E run alongside everything: they are
 correctness work whose bar rises as the others land. F, G, I and J are the core and go in that
@@ -823,6 +823,24 @@ main cd48ca75f7 with the library shipped: ripgrep cold 39 -> 38 rustc runs (cros
 script), 4.4 -> 4.6 s; nushell cold 493 -> 490 (crossbeam-utils', portable-atomic's and
 bigdecimal's), 27.7 -> 28.0 s.
 
+Running scripts without cargo (the `blaze-scripts` lane, 2026-10-25, for K and
+[#298](https://github.com/indexable-inc/blaze/issues/298)) starts with
+`crates/blaze-build-script`, a crate that knows nothing of ra-jit and asks no cargo. Its
+`env` gives the whole environment cargo 1.99.0 runs a script with, ported from cargo's
+`custom_build.rs` and `compilation.rs` at 5f94df478 (the commit `cargo 1.99.0 -vV` names):
+cargo's own environment with `OUT_DIR`, `TARGET`, `HOST`, `NUM_JOBS`, `OPT_LEVEL`, `DEBUG`,
+`PROFILE`, `RUSTC`, `RUSTDOC`, `RUSTC_LINKER`, the wrappers (the workspace's for members
+alone, taken away when cargo uses none), `CARGO`, `CARGO_MANIFEST_*`, `CARGO_PKG_*`,
+`CARGO_FEATURE_*`, `CARGO_CFG_*` (values joined by commas, `CARGO_CFG_FEATURE` always,
+`debug_assertions` from the profile and not from rustc), `CARGO_ENCODED_RUSTFLAGS` with
+`RUSTFLAGS` taken away, `DEP_<links>_<key>` from the direct dependencies with `links`, `[env]`
+(never over what cargo sets, nor over cargo's environment unless forced), the jobserver's
+`CARGO_MAKEFLAGS`, and the host's dynamic library path as cargo builds it. A script is not
+given `CARGO_CRATE_NAME`, `CARGO_BIN_NAME`, `CARGO_PRIMARY_PACKAGE` or `CARGO_TARGET_TMPDIR`,
+which are rustc's. What it is computed from is a plain description of the run (`unit::Unit`:
+the package's fields, features, profile, the target's cfgs, the dependencies' metadata), for
+blaze's manifest reader and resolver to fill.
+
 **J. Proc macros compiled and loaded by ra-jit.** ([#90](https://github.com/indexable-inc/ra-jit/issues/90)) The proc-macro crate and its dependencies are
 compiled by ra-jit into a library that rust-analyzer's proc-macro server, running inside ra-jit,
 loads. `proc_macro` is ra-jit's from F, so the bridge matches the server, which is built from the
@@ -937,6 +955,10 @@ Where J stands (2026-10-24):
   `#[proc_macro_attribute] pub fn main` for one.
 - Next: ra-jit's server and libraries where every crate that expands with them is ra-jit's,
   in place of a rustc build of the macro crates.
+
+J, K and M are planned together in [self-contained.md](self-contained.md#j-k-and-m), since
+what they remove is most of the toolchain blaze still keeps: rustc and the sysroot's rlibs (116
+of its 132 MB on Linux x86-64) go only once all three are in.
 
 **K. The cold build is ra-jit's.** ([#91](https://github.com/indexable-inc/ra-jit/issues/91)) `cargo ra-jit build` with nothing built plans the units
 (plan.rs), and the daemon compiles them all, taking what the store and the remote have, links
