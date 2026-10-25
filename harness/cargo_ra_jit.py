@@ -949,14 +949,22 @@ def own_toolchain(work, check):
     # BLAZE_HOME is the daemon's directory too, which RA_JIT_HOME names in the other steps.
     env["BLAZE_HOME"] = home
     env["RUSTUP_HOME"] = os.path.join(work, "no-rustup")
-    rust = ("cargo" + EXE, "rustc" + EXE, "rustup" + EXE)
-    dirs = [d for d in env["PATH"].split(os.pathsep) if d and not any(os.path.exists(os.path.join(d, it)) for it in rust)]
-    cc = shutil.which("cc")
-    if cc and not any(os.path.exists(os.path.join(d, "cc")) for d in dirs):
-        os.makedirs(os.path.join(work, "cc-only"))
-        os.symlink(cc, os.path.join(work, "cc-only", "cc"))
-        dirs.append(os.path.join(work, "cc-only"))
-    env["PATH"] = os.pathsep.join([os.path.dirname(RA_JIT), *dirs])
+    # A directory with Rust's programs in it is replaced by one with the rest of them: the C
+    # compiler can be a script of the shell beside them (Nix).
+    rusts = re.compile(r"^(cargo|rustc|rustdoc|rustup|rustfmt|rust-\w+|clippy-driver|cargo-.*)$")
+    rid = os.path.join(work, "path-without-rust")
+    os.makedirs(rid)
+    dirs = []
+    for d in env["PATH"].split(os.pathsep):
+        if not d or not os.path.isdir(d):
+            continue
+        if not any(os.path.exists(os.path.join(d, it + EXE)) for it in ("cargo", "rustc", "rustup")):
+            dirs.append(d)
+            continue
+        for name in os.listdir(d):
+            if not rusts.match(name) and not os.path.lexists(os.path.join(rid, name)):
+                os.symlink(os.path.join(d, name), os.path.join(rid, name))
+    env["PATH"] = os.pathsep.join([os.path.dirname(RA_JIT), *dirs, rid])
 
     ws = os.path.join(work, "own-toolchain")
     os.makedirs(os.path.join(ws, "src"))
@@ -970,6 +978,9 @@ def own_toolchain(work, check):
     _, cold = side.cargo("run")
     check("and `blaze run` builds and runs the program with it", cold.returncode == 0 and "own 42" in cold.stdout,
           f"exit {cold.returncode}, {cold.stderr.strip()[-300:]!r}")
+    if cold.returncode:
+        side.cargo("stop")
+        return
     wait_warm(side, ws)
     rewrite(os.path.join(ws, "src/main.rs"), "6 * 7", "6 * 8")
     _, edited = side.cargo("run")
