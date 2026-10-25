@@ -84,7 +84,6 @@ def tools():
         "rustc": rustc,
         "rustdoc": os.path.join(bin_dir, "rustdoc"),
         "host": re.search(r"^host: (\S+)", verbose, re.M).group(1),
-        "cfgs": sh([rustc, "--print", "cfg"], ROOT, None).splitlines(),
         "libdir": sh([rustc, "--print", "target-libdir"], ROOT, None).strip(),
     }
 
@@ -144,10 +143,10 @@ def cargo_env(t, target_dir, blaze, spec):
     return env
 
 
-def config_env(ws):
-    """`[env]` of cargo's configuration files (CARGO_HOME's, then those of the directories
-    down to the workspace's, the nearer winning): a list of what blaze-build-script takes."""
-    found = {}
+def configs(ws):
+    """cargo's configuration files that apply in `ws`, lowest precedence first (CARGO_HOME's,
+    then those of the directories down to the workspace's): (the directory a relative path is
+    of, the file's table)."""
     dirs = []
     d = os.path.abspath(ws)
     while True:
@@ -158,22 +157,42 @@ def config_env(ws):
         d = parent
     cargo_home = os.environ.get("CARGO_HOME") or os.path.join(os.path.expanduser("~"), ".cargo")
     places = [(os.path.dirname(cargo_home), cargo_home)] + [(d, os.path.join(d, ".cargo")) for d in reversed(dirs)]
+    found = []
     for d, config_dir in places:
         for name in ("config", "config.toml"):
             path = os.path.join(config_dir, name)
-            if not os.path.isfile(path):
-                continue
-            with open(path, "rb") as f:
-                table = tomllib.load(f).get("env", {})
-            for key, value in table.items():
-                if isinstance(value, dict):
-                    text = value.get("value", "")
-                    if value.get("relative"):
-                        text = os.path.join(d, text)
-                    found[key] = {"name": key, "value": text, "force": bool(value.get("force"))}
-                else:
-                    found[key] = {"name": key, "value": str(value), "force": False}
+            if os.path.isfile(path):
+                with open(path, "rb") as f:
+                    found.append((d, tomllib.load(f)))
+    return found
+
+
+def config_env(ws):
+    """`[env]`, the nearer file winning: a list of what blaze-build-script takes."""
+    found = {}
+    for d, table in configs(ws):
+        for key, value in table.get("env", {}).items():
+            if isinstance(value, dict):
+                text = value.get("value", "")
+                if value.get("relative"):
+                    text = os.path.join(d, text)
+                found[key] = {"name": key, "value": text, "force": bool(value.get("force"))}
+            else:
+                found[key] = {"name": key, "value": str(value), "force": False}
     return list(found.values())
+
+
+def config_rustflags(ws, host):
+    """The flags cargo gives rustc for the host when RUSTFLAGS is not set: `target.<host>.rustflags`,
+    else `build.rustflags`, each list joined across the files, the nearer later."""
+    def flags(value):
+        return value.split() if isinstance(value, str) else list(value)
+
+    tables = [table for _, table in configs(ws)]
+    target = [f for table in tables for f in flags(table.get("target", {}).get(host, {}).get("rustflags", []))]
+    if target:
+        return target
+    return [f for table in tables for f in flags(table.get("build", {}).get("rustflags", []))]
 
 
 def envify(name):
@@ -236,6 +255,8 @@ def project(name, spec, work, t, blaze, jobs, clean):
     units = graph["units"]
     host_root = os.path.join(target_dir, "debug")
     configured = config_env(ws)
+    rustflags = config_rustflags(ws, t["host"])
+    target_cfgs = sh([t["rustc"], "--print", "cfg", *rustflags], ws, None).splitlines()
 
     recordings = []
     build_dir = os.path.join(host_root, "build")
@@ -330,8 +351,8 @@ def project(name, spec, work, t, blaze, jobs, clean):
             },
             "target": t["host"],
             "host": t["host"],
-            "target_cfgs": t["cfgs"],
-            "rustflags": [],
+            "target_cfgs": target_cfgs,
+            "rustflags": rustflags,
             "jobs": jobs,
             "script": real,
             "out_dir": out_dir,
