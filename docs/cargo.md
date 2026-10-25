@@ -38,9 +38,17 @@ pins ([which LLVM](contributing.md#llvm-for---features-llvm)); with it the crate
 so. `cargo build -p ra-jit --release` is the quicker build the harnesses and CI use while
 working on blaze; it is not what ships.
 
-The project you build must use Rust 1.99.0, the toolchain blaze is pinned to. Use a
-`rust-toolchain.toml`, `rustup override set 1.99.0`, or `RUSTUP_TOOLCHAIN=1.99.0`. On another
-toolchain every build is cargo's, and each says how to switch.
+`cargo blaze` builds with Rust 1.99.0, the release blaze compiles, whatever toolchain the
+project names (a `rust-toolchain.toml`, `rustup override`, `+toolchain`, `RUSTUP_TOOLCHAIN` or
+rustup's default): it runs cargo, rustc and the daemon under 1.99.0 by naming it in
+`RUSTUP_TOOLCHAIN` and `CARGO`. Rust 1.99.0 builds what older releases built, so a project on
+an older stable builds as it is. Code only the project's own toolchain builds (a nightly's
+`#![feature]`, a newer release's library) fails with rustc's error and a note naming both
+releases. 1.99.0 has to be installed with its `rust-src`; the error says the `rustup` command
+when it is not. Plain `cargo` still builds with the project's toolchain, in the same target
+directory: cargo keys what it builds by the rustc, so neither rebuilds the other's.
+`BLAZE_OTHER_TOOLCHAIN=1` builds with the project's toolchain instead
+([support.md](support.md#toolchain)).
 
 Every setting below named `RA_JIT_<NAME>` can be given as `BLAZE_<NAME>` too; when both are
 set, the `BLAZE_` one wins.
@@ -241,7 +249,7 @@ A whole invocation goes to cargo when any of these hold (`Invocation::only_cargo
 
 A single build goes to cargo when:
 
-- a manifest, `Cargo.lock`, a cargo configuration file, the toolchain file, or something a
+- a manifest, `Cargo.lock`, a cargo configuration file, or something a
   build script reads has changed since cargo last built (a source a build script makes newer
   before cargo runs rustc on it, as biome's do, has not). Cargo builds, and the daemon loads
   the workspace again afterwards. On a large workspace that reload is long: 36 to 51 s on
@@ -350,7 +358,7 @@ build a command line is, so changing one starts from a cargo build again.
 | `RA_JIT_EMIT` | LLVM instruction selection: `optimized` or `fast` | `optimized`; `fast` at level 0 |
 | `RA_JIT_INLINE` | With LLVM at level 2 or 3, a program built whole (`runbench.py`'s builds) has the functions it calls in any crate built into it or shown to LLVM, as a release build does; the standard library's only when they are generic or `#[inline]`, as rustc does across crates. `crate` keeps that to the function's own crate, `0` builds nothing in, `all` does it in other builds with LLVM at level 2 or 3 too (never the daemon's, whose store keeps each function by its own code alone) | across crates in a whole program, the function's own crate otherwise |
 | `RA_JIT_SPLICE` | `0` links in full after every edit instead of splicing | splice |
-| `RA_JIT_OTHER_TOOLCHAIN` | `1` builds with a rustc other than 1.99.0 instead of going to cargo, for a project pinned to a nightly near it ([support.md](support.md#toolchain)) | not set |
+| `RA_JIT_OTHER_TOOLCHAIN` | `1` builds with the project's toolchain when it is not 1.99.0, rather than with 1.99.0, for a project pinned to a nightly near it ([support.md](support.md#toolchain)) | not set |
 
 `RA_JIT_TESTS` is read by each `cargo ra-jit test` alone and is not part of which build it
 is: `affected` runs the tests an edit reached
