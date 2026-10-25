@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Live edits end to end (macOS on AArch64, Linux on x86-64): edit a function of a running
+"""Live edits end to end (macOS on AArch64, Linux and Windows on x86-64): edit a function of a running
 program, and the running program must run the new code, applied by ra-jit-live from the
 daemon's patch.
 

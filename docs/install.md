@@ -17,8 +17,9 @@ Change a function and run `cargo blaze run` again: the `Finished` line now says 
 
 ## What you need
 
-- **macOS on Apple silicon, or Linux on x86-64 or ARM64.** On Windows blaze installs and runs,
-  but hands every build to cargo. Intel Macs are not supported.
+- **macOS on Apple silicon, or Linux on x86-64 or ARM64.** On Windows x86-64 (MSVC) blaze
+  installs and builds through its engine, but live edits of a running program are not there
+  yet. Intel Macs are not supported.
 - **Rust 1.99.0 with its source code** (the `rust-src` component), which the installer adds
   through rustup. blaze works with this one version only: it links its code with code rustc
   1.99.0 compiled, so the two have to agree on how types are laid out and functions are called.

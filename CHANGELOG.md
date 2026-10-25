@@ -16,6 +16,15 @@ All notable changes to ra-jit are written here. The format follows
   script's: a whole build of a dev program from an empty store (step K, #91) fetches it where
   it compiled the library again, about 10 s.
 
+- Live edits on Windows x86-64: `ra-jit-live` takes patches in a running PE program, named by
+  the GUID of its PDB, and registers their unwind tables, and the daemon lays a patch of a PE
+  executable out for it. An executable a program runs is spliced through a copy put in its
+  place, as on Unix, instead of being linked again; the daemon wakes the program through a
+  named event; and `ra_jit_live::edit` reaches the daemon, so `demo/life`'s editor builds as you
+  type. life's edit to running is 26.6 ms at p50 (`socket`) on a Windows 11 desktop
+  ([live.md](docs/live.md#latency-under-typing)). A static with another value still asks for a
+  restart.
+
 - `crates/blaze-build-script`: the environment cargo 1.99.0 gives a build script, computed
   from a plain description of the run with no cargo, ported from cargo's own rules and tests
   (no-rustc step I, #89; #298). Nothing uses it yet; blaze's own runs of scripts come next.
@@ -623,6 +632,11 @@ All notable changes to ra-jit are written here. The format follows
 - A patch asks rustc's executable whether it has a function of a name once per name, where
   each asking searched every symbol of it. biome's body edits after the first take 1.6–1.7 s,
   where they took 2.2–2.8 s (cargo 2.3 s).
+- On Windows x86-64 (MSVC), `cargo blaze build` and `run` rebuild through the daemon and print
+  `[ra-jit]` instead of handing every build to cargo. The daemon takes COFF programs (also with
+  `--target x86_64-pc-windows-msvc`), links them with the `rust-lld` the repository's cargo
+  configuration names, and closes an existing directory of its own that others can enter, as
+  on Unix. Live edits of a running program are still macOS and Linux only.
 - A profile with `debug = "line-tables-only"` (or `1`, or `"limited"`) no longer has the type
   of every variable worked out. Only the lines were written, but the types were described for
   each function compiled and then thrown away. On Biome (`biome_cli`, 518 crates, whose dev
