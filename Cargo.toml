@@ -10,9 +10,9 @@ version = "0.1.0"
 rust-version = "1.99"
 edition = "2024"
 license = "MIT OR Apache-2.0"
-authors = ["ra-jit contributors"]
-repository = "https://github.com/indexable-inc/ra-jit"
-homepage = "https://ra-jit.ix.dev"
+authors = ["blaze contributors"]
+repository = "https://github.com/indexable-inc/blaze"
+homepage = "https://ix.dev/blaze"
 keywords = ["compiler", "jit", "hot-reload", "rust-analyzer", "cargo"]
 categories = ["development-tools", "development-tools::build-utils"]
 
