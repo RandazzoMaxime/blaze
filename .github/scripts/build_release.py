@@ -323,6 +323,8 @@ def main():
         parser.error("--target is required")
     if args.server and not args.out:
         parser.error("--server builds into --out")
+    # The server is built from its own directory, where a relative `--out` names nothing.
+    args.out = args.out and args.out.resolve()
     if args.train:
         return train(args.target, args.train)
     if args.show:
