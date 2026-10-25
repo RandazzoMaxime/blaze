@@ -1,8 +1,8 @@
 {
  "dir": ".",
  "inputs": {
-  "Cargo.lock": "fead73f87bf9c377df7af95f93b3910cb39b336c96ec70826284b2e3a7e7b296",
-  "Cargo.toml": "8dc12f7fe1a5c0be921177640588e345cb9ef91712d4a3abede375a087730cad"
+  "Cargo.lock": "92273b48d3120c0e5e7c71039f8ff315a07109b1b302fbb7f3dfb78fe1875a9b",
+  "Cargo.toml": "5e49bcb28b50d4742a2bc7ce5c03a850b245246cb1008f0eae5e55325ebfffeb"
  },
  "packages": {
   "adler2@2.0.1": {
@@ -735,6 +735,23 @@
     "kind": "registry"
    },
    "version": "2.12.1"
+  },
+  "blaze-build-script@0.1.0": {
+   "authors": "blaze contributors",
+   "description": "Build scripts run as cargo runs them: the environment cargo 1.99 gives a script, what it prints read as cargo reads it, and who receives what",
+   "homepage": "",
+   "license": "MIT OR Apache-2.0",
+   "license_file": "",
+   "links": null,
+   "name": "blaze-build-script",
+   "readme": "",
+   "repository": "https://github.com/indexable-inc/blaze",
+   "rust_version": "1.99",
+   "source": {
+    "dir": "crates/blaze-build-script",
+    "kind": "path"
+   },
+   "version": "0.1.0"
   },
   "blaze-resolve@0.1.0": {
    "authors": "blaze contributors",
