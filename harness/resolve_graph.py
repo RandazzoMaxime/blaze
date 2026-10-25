@@ -9,15 +9,16 @@ harness/resolve.py reads them). Each case is fetched under `--work` (default
 $TMPDIR/blaze-resolve-graph) with a CARGO_HOME of its own there, and `cargo metadata
 --format-version 1` is run on it twice: `locked`, with the Cargo.lock it ships (cases without
 one are skipped), and `fresh`, with none. The `metadata_resolve` example of blaze-resolve
-reads each output, with the packages `--all-features` lists too, resolves the workspace as
-cargo does (in `locked`, from the lock file shipped), and prints its `resolve`, which is
-compared with cargo's, key order included. So this checks the resolver's graph, its feature
-unification, its locking and the JSON, but not which versions a registry offers, as it holds
-only the versions cargo chose. Each checkout is deleted once compared, unless `--keep`. A case is
+reads each output, with the packages `--all-features` lists too (and those of the lock file
+listed in neither, read from their manifests), resolves the workspace as cargo does (in
+`locked`, from the lock file shipped), and prints its `resolve`, which is compared with
+cargo's, key order included. So this checks the resolver's graph, its feature unification,
+its locking and the JSON, but not which versions a registry offers, as it holds only the
+versions cargo chose. Each checkout is deleted once compared, unless `--keep`. A case is
 equal, different, blaze-failed or cargo-failed; the first difference or error of each that is
 not equal is printed, and `--out` writes them all as JSON.
 """
-import concurrent.futures, json, os, shutil, subprocess, sys, tarfile, tempfile, urllib.request
+import concurrent.futures, glob, json, os, shutil, subprocess, sys, tarfile, tempfile, tomllib, urllib.request
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
@@ -110,6 +111,34 @@ def first_difference(a, b, at="$"):
     return None if a == b else f"{at}: {json.dumps(a)[:300]} != {json.dumps(b)[:300]}"
 
 
+def unlisted_packages(lock, listed, cargo_home, metadata):
+    """The registry packages of the lock file that `cargo metadata` resolves but does not list,
+    as it lists only what is reached through dependencies with a library (a bin-only crate
+    such as cxxbridge-cmd is not): each read from its manifest, which cargo unpacked."""
+    if not os.path.exists(lock):
+        return []
+    have = {(p["name"], p["version"], p["source"]) for p in listed}
+    out = []
+    for p in tomllib.load(open(lock, "rb")).get("package", []):
+        source = p.get("source", "")
+        if not source.startswith(("registry+", "sparse+")):
+            continue
+        if (p["name"], p["version"], source) in have:
+            continue
+        unpacked = f"{p['name']}-{p['version']}"
+        found = glob.glob(os.path.join(cargo_home, "registry", "src", "*", unpacked, "Cargo.toml"))
+        if not found:
+            continue
+        read = metadata("--no-deps", "--offline", "--manifest-path", found[0])
+        if read.returncode:
+            continue
+        package = json.loads(read.stdout)["packages"][0]
+        package["source"] = source
+        package["id"] = f"{source}#{p['name']}@{p['version']}"
+        out.append(package)
+    return out
+
+
 def one(case, mode, blaze, cargo_home):
     """Runs cargo and blaze on the checkout in place. The Cargo.lock shipped is kept aside for
     the runs (cargo may rewrite it) and put back; `fresh` runs cargo without one."""
@@ -135,8 +164,10 @@ def one(case, mode, blaze, cargo_home):
             failed = cargo if cargo.returncode else everything
             lines = [l for l in failed.stderr.splitlines() if l.startswith("error")]
             return {**out, "class": "cargo-failed", "why": (lines or [failed.stderr.strip()])[0][:300]}
+        listed = json.loads(everything.stdout)["packages"] + json.loads(cargo.stdout)["packages"]
+        listed += unlisted_packages(lock, listed, cargo_home, metadata)
         with open(all_features, "w") as f:
-            f.write(everything.stdout)
+            json.dump({"packages": listed}, f)
         args = ["--packages", all_features]
         if mode == "locked":
             args += ["--lock", shipped]
