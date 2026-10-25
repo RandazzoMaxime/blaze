@@ -44,6 +44,11 @@ All notable changes to ra-jit are written here. The format follows
   `harness/macroserver.py` holds serde_derive's, thiserror's, tokio's and clap's equal
   ([no-rustc.md](docs/no-rustc.md), step J1). A proc-macro crate's `fn main` is no longer
   taken for an entry point.
+- `RA_JIT_PROC_MACRO_SERVER` naming that server has a load into ra-jit's own target directory
+  link its proc macros with ra-jit and expand them with the server, the toolchain's server
+  and rustc's libraries left for what ra-jit did not link (#90). `macroserver.py all` builds
+  fd, bat, hyperfine, just, nushell and helix both ways: 3,465 calls the same, 12 of
+  `pest_consume_macros` not compared, as ra-jit cannot compile it yet (#327).
 - The SSE and AVX compares compile (#87): `llvm.x86.sse.cmp.ps` and `.ss`, `sse2.cmp.pd` and
   `.sd` and AVX's 256-bit ones give a lane of all ones where the immediate's predicate holds, as
   rustc's do. glam's `Vec4::cmpeq` and `is_finite_mask`, which bevy calls, were left to rustc;
