@@ -22,6 +22,34 @@ All notable changes to ra-jit are written here. The format follows
   the same as cargo's, file by file, with the same directory names; crates.io replaced by a
   mirror 42/42; ripgrep and zed vendored, 51/51 and 1533/1533 read where cargo vendor put
   them.
+- `crates/blaze-build-script`: the environment cargo 1.99.0 gives a build script, computed
+  from a plain description of the run with no cargo, ported from cargo's own rules and tests
+  (no-rustc step I, #89; #298). Nothing uses it yet; blaze's own runs of scripts come next.
+- `blaze-build-script` reads what a build script prints as cargo 1.99.0 does (both
+  `cargo:` and `cargo::`, the `rust-version` rule of the latter, every directive and cargo's
+  errors for each) and says who receives it: the scripts each unit is linked with, the `-L`,
+  `-l`, link arguments, cfgs and variables of each target, and when a script runs again.
+- `crates/blaze-resolve`, cargo's resolver owned by blaze (#298), starts with cargo 1.99.0's package
+  model, used by nothing yet: `SourceId` (path, git and sparse registries, git at a branch, tag or
+  rev with its commit, directory, local registry) compared by cargo's canonical URL and written as
+  lock files, package ids and messages write it; `PackageId`, `PackageIdSpec` (`-p` and
+  `cargo metadata`'s ids), `Dependency` with renames, kinds, targets and its locked or `--precise`
+  requirement; `Summary` and its feature map, with the implicit features of optional dependencies
+  and cargo's errors for features; and the `Registry` the resolver asks, with yanked and offline
+  versions marked. Its tests include cargo's own for these types.
+- `blaze-resolve`'s `Registry` is cargo 1.99.0's: `query(&self, ..)` is an `async fn` that
+  awaits what it fetches, in place of answering `Poll::Pending` and a `block_until_ready` (#298).
+- `blaze-resolve` reads and writes `Cargo.lock` as cargo 1.99.0 does (#298): every encoding
+  from 1 (checksums in `[metadata]`) to 4 (git references URL-encoded), `[[patch.unused]]` and
+  `[replace]`, the comments above cargo's header kept, and a lock file written back byte for
+  byte. As in cargo, an unchanged lock file keeps its encoding, a changed one is raised to the
+  workspace's default (from its lowest `rust-version`), under `--locked` or `--frozen` a change
+  is an error, and the checksums of the old file must agree with the new resolve. Its tests write
+  back the lock files of ripgrep and fd releases and of git workspaces cargo generated, one of
+  each encoding, and port cargo's `lockfile_compat` tests; `BLAZE_RESOLVE_LOCKFILES=dir` adds a
+  directory of lock files (24 releases of twelve projects, zed's 70 git sources among them,
+  write back byte for byte). A registry read from a lock file before its manifest is now named
+  as cargo names it.
 - `crates/blaze-registry`, registries read and packages fetched as cargo 1.99 does, with no
   cargo, used by nothing yet (`docs/self-contained.md`, #298). The sparse
   index (crates.io's and any other's): `config.json` and its `dl` templates, the index paths,
@@ -35,6 +63,12 @@ All notable changes to ra-jit are written here. The format follows
   cargo's hash of the source), with cargo's checks (entries under `<name>-<version>/` only, no
   links, the size limit, the umask, `.cargo-ok`), several at once, retried as `net.retry`
   says, under cargo's package cache lock.
+- `crates/blaze-manifest`, `Cargo.toml` and `.cargo/config.toml` read as cargo 1.99.0 reads
+  them, without running cargo: `cargo metadata --no-deps` computed by blaze (its `metadata`
+  example prints the same JSON, warnings and errors), on cargo's own manifest schema
+  (`cargo-util-schemas` 0.14.3) ([resolve.md](docs/resolve.md)). `harness/resolve.py` compares
+  it with cargo on the bench projects, 300 crates.io crates and 72 workspace repositories at
+  pinned commits: all 385 equal, key order included. Nothing in blaze uses it yet.
 - `cargo ra-jit test` with `RA_JIT_TESTS=affected` runs, on Linux, each test that reaches a
   file, the environment, a process or the network in a sandbox of its own (#257): a process
   in new user, mount, network, IPC and PID namespaces, the machine's files read-only, the
