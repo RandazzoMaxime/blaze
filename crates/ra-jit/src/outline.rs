@@ -217,8 +217,8 @@ impl Outlines {
 /// each starts. A panic in a copy says the line and column rustc compiled it at.
 #[derive(Clone, PartialEq, Eq, Debug)]
 struct Copied {
-    /// Generic functions of the file's modules, not `#[inline]`, by name: rustc's symbols
-    /// name each copy by the types it is of.
+    /// Generic functions of the file's modules and of their `impl`s that are not generic, not
+    /// `#[inline]`, by name: rustc's symbols name each copy by the types it is of.
     generics: FxHashMap<String, u64>,
     /// `#[inline]` functions that are not generic, of the file's modules and their `impl`s,
     /// by name: rustc copies one into each crate that calls it.
@@ -242,6 +242,10 @@ fn copied_in(tree: &SyntaxNode) -> Copied {
         })
     };
     let is_copied = |func: &ast::Fn| {
+        // A trait's method declared without a body has no code to copy.
+        if func.body().is_none() {
+            return false;
+        }
         let impl_trait_parameter = func.param_list().is_some_and(|it| {
             it.syntax().descendants().any(|it| it.kind() == SyntaxKind::IMPL_TRAIT_TYPE)
         });
@@ -258,12 +262,18 @@ fn copied_in(tree: &SyntaxNode) -> Copied {
     let inline = |func: &ast::Fn| {
         func.attrs().any(|attr| attr.syntax().text().to_string().contains("inline"))
     };
+    // Of the file's modules or an `impl` of them that is not generic, where the function's
+    // path names it alone.
     let of_modules = |func: &ast::Fn| {
-        let in_modules = func.syntax().ancestors().skip(1).all(|it| {
-            matches!(
-                it.kind(),
-                SyntaxKind::SOURCE_FILE | SyntaxKind::MODULE | SyntaxKind::ITEM_LIST
-            )
+        let in_modules = func.syntax().ancestors().skip(1).all(|it| match it.kind() {
+            SyntaxKind::SOURCE_FILE
+            | SyntaxKind::MODULE
+            | SyntaxKind::ITEM_LIST
+            | SyntaxKind::ASSOC_ITEM_LIST => true,
+            SyntaxKind::IMPL => {
+                !generic(ast::Impl::cast(it).and_then(|it| it.generic_param_list()))
+            }
+            _ => false,
         });
         in_modules && !inline(func)
     };
@@ -981,6 +991,9 @@ mod tests {
         told("fn g() {} fn f<T>() {}", "fn g() { } fn f<T>() {}");
         told("/* ab */ fn f<T>() {}", "/* é */ fn f<T>() {}");
         same("fn f<T>() {}\nfn g() {}", "fn f<T>() {}\nfn g() {\n}");
+        // A trait's method without a body has no code, wherever it is.
+        same("fn g() {}\ntrait T { fn f(&self); }", "fn g() {\n}\ntrait T { fn f(&self); }");
+        told("fn g() {}\ntrait T { fn f(&self) {} }", "fn g() {\n}\ntrait T { fn f(&self) {} }");
     }
 
     #[test]
@@ -993,6 +1006,8 @@ mod tests {
             ("fn g() {}\nfn f<T>() {}", "fn g() {\n}\nfn f<T>() {}"),
             ("mod m { fn f(x: impl Fn()) { 1; } }", "mod m { fn f(x: impl Fn()) { 2; } }"),
             ("fn f<T>() {}\nfn g<T>() {}", "fn f<T>() { }\nfn g<T>() {}"),
+            ("impl S { fn f<T>(&self) { 1; } }", "impl S { fn f<T>(&self) { 2; } }"),
+            ("impl T for S { fn f<U>(&self) { 1; } }", "impl T for S { fn f<U>(&self) { 2; } }"),
         ] {
             assert!(generics(before, after) && !others(before, after), "{before:?}");
         }

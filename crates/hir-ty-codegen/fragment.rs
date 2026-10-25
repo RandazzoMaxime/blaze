@@ -251,14 +251,26 @@ pub(super) struct Inlinable {
 
 impl Inlinable {
     /// `func` with `requests`, if a caller can ask for the same: each blob points only at
-    /// what was asked for before it.
+    /// what was asked for before it, and none has a `TypeId` to hash. A hash that can't be
+    /// had fails the function that has it, whose callers then call rustc's copy of it.
     pub(super) fn of(
         func: ir::Function,
         requests: Requests,
         pointees: Vec<(u32, Pointee)>,
         seen: Vec<Seen>,
     ) -> Option<Inlinable> {
-        requests.ordered().then_some(Inlinable { func, requests, pointees, seen })
+        let hashed_later = requests.datas.iter().any(|it| match it {
+            DataRequest::Blob { blob, .. } | DataRequest::Vtable { blob, .. } => {
+                !blob.type_ids.is_empty()
+            }
+            _ => false,
+        });
+        (requests.ordered() && !hashed_later).then_some(Inlinable {
+            func,
+            requests,
+            pointees,
+            seen,
+        })
     }
 }
 
@@ -855,6 +867,7 @@ impl<'db> Recorder<'db> {
                     .map(|&(offset, target)| (offset, funcs[target.as_u32() as usize]))
                     .collect(),
                 align: blob.align,
+                type_ids: blob.type_ids.clone(),
             };
             let id = match request {
                 DataRequest::Blob { blob, identity } => self.define_data_as(moved(blob), *identity),

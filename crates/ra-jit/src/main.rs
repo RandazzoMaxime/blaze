@@ -1632,6 +1632,30 @@ impl SymbolResolver for Resolver<'_> {
         let item = ModuleDef::from(item);
         self.item_path(item.module(self.db)?, item.name(self.db)?.as_str())
     }
+
+    fn adt_at(&self, path: &str) -> Option<hir_def::AdtId> {
+        let db = self.db;
+        let mut segments = path.split("::");
+        let krate = segments.next()?;
+        let mut segments: Vec<&str> = segments.collect();
+        let name = segments.pop()?;
+        Crate::all(db)
+            .into_iter()
+            .filter(|&it| self.crate_path(it).as_deref() == Some(krate))
+            .find_map(|it| {
+                let mut module = it.root_module(db);
+                for segment in &segments {
+                    let child = |it: &Module| it.name(db).is_some_and(|it| it.as_str() == *segment);
+                    module = module.children(db).find(child)?;
+                }
+                let adt = module.declarations(db).into_iter().find_map(|it| match it {
+                    ModuleDef::Adt(adt) if adt.name(db).as_str() == name => Some(adt),
+                    _ => None,
+                })?;
+                let id = hir_def::AdtId::from(adt);
+                (self.item(id.into()).as_deref() == Some(path)).then_some(id)
+            })
+    }
 }
 
 /// Whether what the module declares is written in a body.
@@ -1901,9 +1925,9 @@ impl Count<'_, '_> {
         (home == here || home.origin(self.sema.db).is_lang()).then_some(Turn::Now)
     }
 
-    /// Whether a path finds the macro with no import: any but a `macro_rules!` one of this
-    /// crate that is not exported, which is in no module but by an import of it, and
-    /// whether that import is a late one is not known.
+    /// Whether a path finds the macro with no late import: any but a `macro_rules!` one of
+    /// this crate that is not exported, which is in no module but by an import of it, and is
+    /// found at once only through an import written in the module the path names.
     fn reached_by_path(&self, call: &ast::MacroCall) -> bool {
         let sema = self.sema;
         let Some(found) = sema.resolve_macro_call(call) else { return true };
@@ -1912,10 +1936,52 @@ impl Count<'_, '_> {
             return true;
         }
         match sema.source(found).and_then(|it| it.value.left()) {
-            Some(ast::Macro::MacroRules(rules)) => ast::HasAttrs::attrs(&rules)
-                .any(|it| it.simple_name().is_some_and(|name| name == "macro_export")),
+            Some(ast::Macro::MacroRules(rules)) => {
+                ast::HasAttrs::attrs(&rules)
+                    .any(|it| it.simple_name().is_some_and(|name| name == "macro_export"))
+                    || self.imported_where_written(call)
+            }
             _ => true,
         }
+    }
+
+    /// Whether the module that the path of `call` names imports the macro by a `use` written
+    /// in it, which no macro made: rustc resolves those before it expands any macro, as
+    /// `crate::tracing::debug!` finds salsa's `pub(crate) use debug;`.
+    fn imported_where_written(&self, call: &ast::MacroCall) -> bool {
+        let sema = self.sema;
+        let Some(path) = call.path() else { return false };
+        let (Some(qualifier), Some(name)) =
+            (path.qualifier(), path.segment().and_then(|it| it.name_ref()))
+        else {
+            return false;
+        };
+        let Some(hir::PathResolution::Def(ModuleDef::Module(module))) =
+            sema.resolve_path(&qualifier)
+        else {
+            return false;
+        };
+        let mut around = Some(module);
+        while let Some(it) = around {
+            if it.declaration_source(sema.db).is_some_and(|it| it.file_id.is_macro()) {
+                return false;
+            }
+            around = it.parent(sema.db);
+        }
+        let written = sema.module_definition_node(module);
+        if written.file_id.is_macro() {
+            return false;
+        }
+        let items = match ast::Module::cast(written.value.clone()) {
+            Some(inline) => inline.item_list().map(|it| it.syntax().clone()),
+            None => ast::SourceFile::can_cast(written.value.kind()).then_some(written.value),
+        };
+        let uses = items.iter().flat_map(|it| it.children()).filter_map(ast::Use::cast);
+        uses.filter(|it| !has_attribute_macro(sema, &ast::Item::Use(it.clone()))).any(|it| {
+            let mut imported = LateImports::default();
+            it.use_tree().into_iter().for_each(|tree| imported.add(&tree, None));
+            imported.names.contains(&*name.text())
+        })
     }
 
     /// Whether the macro is a `macro_rules!` one found by where it is written, which is
@@ -3730,10 +3796,18 @@ fn home_in_rustcs(
             })
             .collect();
         let homing = |file: vfs::FileId| programs.iter().any(|it| it.known.homes_file(file));
+        let found: Vec<_> = found
+            .into_iter()
+            .map(|(file, functions, statics)| {
+                let callers =
+                    if homing(file) { callers_of_generic(db, &functions) } else { vec![] };
+                (file, functions, statics, callers)
+            })
+            .collect();
         let written: Vec<FunctionId> = found
             .iter()
             .filter(|(file, ..)| homing(*file))
-            .flat_map(|(_, functions, _)| functions.iter().copied())
+            .flat_map(|(_, functions, _, callers)| functions.iter().chain(callers).copied())
             .collect();
         let next = std::sync::atomic::AtomicUsize::new(0);
         std::thread::scope(|scope| {
@@ -3752,12 +3826,69 @@ fn home_in_rustcs(
         for program in programs.iter_mut().filter(|it| it.known.homes()) {
             let Program { args, table, known, .. } = program;
             let resolver = Resolver::of(db, table, args, known, &contents, listed);
-            for (file, functions, statics) in &found {
-                known.home(db, &resolver, *file, functions, statics);
+            for (file, functions, statics, callers) in &found {
+                known.home(db, &resolver, *file, functions, statics, callers);
             }
         }
     });
 }
+
+/// The functions written elsewhere that call the generic functions among `functions`, or call
+/// a generic one that does, as far as [`CALLERS_SEARCHED`] and [`CALLERS_COMPILED`] go: rustc
+/// copied those into them. A method of a trait's impl is called through the trait's method as
+/// well. A call outside a function's body is left out, as are the callers past the bound; the
+/// copies they have are then ones no patch is known to reach.
+fn callers_of_generic(db: &RootDatabase, functions: &[FunctionId]) -> Vec<FunctionId> {
+    let sema = hir::Semantics::new(db);
+    let of_trait = |func: FunctionId| {
+        let container = hir::Function::from(func).as_assoc_item(db).map(|it| it.container(db));
+        matches!(container, Some(hir::AssocItemContainer::Trait(_)))
+    };
+    let named = |func: FunctionId| {
+        let func = hir::Function::from(func);
+        let trait_ = func.as_assoc_item(db).and_then(|it| it.implemented_trait(db));
+        std::iter::once(func).chain(trait_.and_then(|it| it.function(db, func.name(db))))
+    };
+    let mut seen: FxHashSet<FunctionId> = functions.iter().copied().collect();
+    let mut queue: Vec<FunctionId> = functions
+        .iter()
+        .copied()
+        .filter(|&it| !of_trait(it) && hir_ty_codegen::copied_by_rustc(db, it))
+        .collect();
+    let (mut callers, mut searched) = (Vec::new(), 0);
+    while let Some(func) = queue.pop() {
+        searched += 1;
+        if searched > CALLERS_SEARCHED || callers.len() > CALLERS_COMPILED {
+            break;
+        }
+        let usages =
+            named(func).flat_map(|it| ide_db::defs::Definition::Function(it).usages(&sema).all());
+        for reference in usages.flat_map(|(_, references)| references) {
+            if reference.category.contains(ide_db::search::ReferenceCategory::IMPORT) {
+                continue;
+            }
+            let ide_db::search::FileReferenceNode::NameRef(name) = reference.name else { continue };
+            let caller = sema.ancestors_with_macros(name.syntax().clone()).find_map(ast::Fn::cast);
+            let caller = caller.and_then(|it| sema.to_def(&it));
+            let Some(caller) = caller.and_then(|it| FunctionId::try_from(it).ok()) else {
+                continue;
+            };
+            if !seen.insert(caller) {
+                continue;
+            }
+            callers.push(caller);
+            if hir_ty_codegen::copied_by_rustc(db, caller) {
+                queue.push(caller);
+            }
+        }
+    }
+    callers
+}
+
+/// How many generic functions [`callers_of_generic`] finds the callers of, and about how many
+/// callers it finds, which are compiled before the edit.
+const CALLERS_SEARCHED: usize = 16;
+const CALLERS_COMPILED: usize = 512;
 
 /// Whether the executable `program`'s edits patch has no copy of the functions written in
 /// `file` with one of the `names`, which rustc would have copied into each crate that calls

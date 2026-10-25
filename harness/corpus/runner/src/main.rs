@@ -727,6 +727,8 @@ fn main() {
         case!(inlined::instances(n as u8, -(n as i64), "moved"));
     }
     case!(cases::opaque_of_trait_method::run(4), cases::opaque_of_trait_method::run(90));
+    case!(cases::async_fn_item_of_trait::run(5));
+    case!(cases::type_id_in_constant::run());
     case!(cases::pointer_relations::run(7));
     case!(cases::static_places::run());
     case!(cases::associated_type_returns::run(&["a".into(), "bcd".into()]));

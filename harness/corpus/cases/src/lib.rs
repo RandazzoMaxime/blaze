@@ -3638,6 +3638,39 @@ pub mod closure_clone {
     }
 }
 
+/// A constant holds a `TypeId`, as the vtable boa's garbage collector keeps of each type does
+/// (`vtable_of`): rustc's hash of the type, one with a binder of its own too.
+pub mod type_id_in_constant {
+    use std::any::TypeId;
+
+    pub struct VTable {
+        pub id: TypeId,
+        pub size: usize,
+    }
+
+    trait HasVTable: Sized + 'static {
+        const VTABLE: &'static VTable;
+    }
+
+    impl<T: 'static> HasVTable for T {
+        const VTABLE: &'static VTable = &VTable { id: TypeId::of::<T>(), size: size_of::<T>() };
+    }
+
+    fn vtable_of<T: 'static>() -> &'static VTable {
+        T::VTABLE
+    }
+
+    pub fn run() -> Vec<(TypeId, usize, bool)> {
+        let of = |it: &'static VTable, runtime: TypeId| (it.id, it.size, it.id == runtime);
+        vec![
+            of(vtable_of::<u32>(), TypeId::of::<u32>()),
+            of(vtable_of::<String>(), TypeId::of::<String>()),
+            of(vtable_of::<fn(&u8) -> &u8>(), TypeId::of::<for<'a> fn(&'a u8) -> &'a u8>()),
+            of(vtable_of::<Box<dyn for<'a> Fn(&'a str)>>(), TypeId::of::<Box<dyn Fn(&str)>>()),
+        ]
+    }
+}
+
 /// `TypeId`s are rustc's hash of the type, which its own code compares ours against.
 pub mod type_id_hashes {
     use std::any::{Any, TypeId};
@@ -8402,5 +8435,194 @@ pub mod higher_ranked {
         let handled = with_handler(report);
         let sorted = sorted(std::hint::black_box(true));
         (copy, first, second, trimmed, sum, handled, sorted)
+    }
+}
+
+/// The future of a trait's `async fn` handed on as a function item, to code that names it as
+/// an associated type of what the item implements, as boa's `#[dynify]` does: the solver
+/// reveals that as the trait method's coroutine, which has no code, and the impl's is the
+/// future once `Self` is known.
+pub mod async_fn_item_of_trait {
+    use std::{
+        future::Future,
+        pin::{Pin, pin},
+        task::{Context, Poll, Waker},
+    };
+
+    #[allow(async_fn_in_trait)]
+    pub trait Load {
+        async fn load(self, by: u32) -> u32;
+    }
+
+    pub struct Doubled(pub u32);
+
+    impl Load for Doubled {
+        async fn load(self, by: u32) -> u32 {
+            std::future::ready(self.0 * 2).await + by
+        }
+    }
+
+    pub struct Ready(pub u32);
+
+    impl Load for Ready {
+        fn load(self, by: u32) -> impl Future<Output = u32> {
+            std::future::ready(self.0 + by)
+        }
+    }
+
+    trait Handed<T> {
+        type Fut: Future<Output = u32>;
+        fn call(self, it: T) -> Self::Fut;
+    }
+
+    impl<T, F: FnOnce(T, u32) -> R, R: Future<Output = u32>> Handed<T> for F {
+        type Fut = R;
+        fn call(self, it: T) -> R {
+            self(it, 3)
+        }
+    }
+
+    fn handed<T, F: Handed<T>>(f: F, it: T) -> F::Fut {
+        f.call(it)
+    }
+
+    fn loaded<T: Load>(it: T) -> u32 {
+        block_on(pin!(async move { handed(T::load, it).await + 1 }))
+    }
+
+    fn block_on<F: Future + ?Sized>(mut future: Pin<&mut F>) -> F::Output {
+        let mut cx = Context::from_waker(Waker::noop());
+        loop {
+            if let Poll::Ready(it) = future.as_mut().poll(&mut cx) {
+                return it;
+            }
+        }
+    }
+
+    pub trait Serve {
+        fn serve(&self, by: u32) -> impl Future<Output = u32> + Send;
+    }
+
+    impl Serve for Doubled {
+        async fn serve(&self, by: u32) -> u32 {
+            std::future::ready(self.0 * 2).await + by
+        }
+    }
+
+    trait Method<S, P> {
+        type Future: Future<Output = u32> + Send;
+        fn invoke(&self, server: S, params: P) -> Self::Future;
+    }
+
+    impl<F, S, P, Fut> Method<S, (P,)> for F
+    where
+        F: Fn(S, P) -> Fut,
+        Fut: Future<Output = u32> + Send,
+    {
+        type Future = Fut;
+        fn invoke(&self, server: S, params: (P,)) -> Fut {
+            self(server, params.0)
+        }
+    }
+
+    fn invoked<S, P, M: Method<S, P>>(method: &M, server: S, params: P) -> u32 {
+        block_on(pin!(method.invoke(server, params)))
+    }
+
+    fn served<T: Serve>(it: &T) -> u32 {
+        invoked(&T::serve, it, (4,))
+    }
+
+    pub trait Server: Send + Sync + 'static {
+        fn hello(&self, params: u32) -> impl Future<Output = u32> + Send;
+        fn bye(&self) -> impl Future<Output = u32> + Send {
+            async { 7 }
+        }
+    }
+
+    trait Routed<S, P, R> {
+        type Future: Future<Output = R> + Send;
+        fn invoke(&self, server: S, params: P) -> Self::Future;
+    }
+
+    impl<F, S, R, Fut> Routed<S, (), R> for F
+    where
+        F: Fn(S) -> Fut,
+        Fut: Future<Output = R> + Send,
+    {
+        type Future = Fut;
+        fn invoke(&self, server: S, (): ()) -> Fut {
+            self(server)
+        }
+    }
+
+    impl<F, S, P, R, Fut> Routed<S, (P,), R> for F
+    where
+        F: Fn(S, P) -> Fut,
+        Fut: Future<Output = R> + Send,
+    {
+        type Future = Fut;
+        fn invoke(&self, server: S, params: (P,)) -> Fut {
+            self(server, params.0)
+        }
+    }
+
+    trait FromParams {
+        fn from_params(n: u32) -> Self;
+    }
+
+    impl FromParams for () {
+        fn from_params(_: u32) {}
+    }
+
+    impl FromParams for (u32,) {
+        fn from_params(n: u32) -> Self {
+            (n,)
+        }
+    }
+
+    type Handler = Box<dyn Fn(u32) -> Pin<Box<dyn Future<Output = u32> + Send>>>;
+
+    struct Router<S> {
+        server: std::sync::Arc<S>,
+        methods: Vec<Handler>,
+    }
+
+    impl<S: Send + Sync + 'static> Router<S> {
+        fn method<P, R, F>(&mut self, callback: F) -> &mut Self
+        where
+            P: FromParams + Send + 'static,
+            R: Into<u32> + 'static,
+            F: for<'a> Routed<&'a S, P, R> + Clone + Send + Sync + 'static,
+        {
+            let server = self.server.clone();
+            self.methods.push(Box::new(move |n| {
+                let (callback, server) = (callback.clone(), server.clone());
+                Box::pin(async move { callback.invoke(&*server, P::from_params(n)).await.into() })
+            }));
+            self
+        }
+    }
+
+    fn register<S: Server>(router: &mut Router<S>) {
+        router.method(S::hello).method(S::bye);
+    }
+
+    struct Lsp(u32);
+
+    impl Server for Lsp {
+        async fn hello(&self, params: u32) -> u32 {
+            std::future::ready(self.0).await + params
+        }
+    }
+
+    fn routed(n: u32) -> (u32, u32) {
+        let mut router = Router { server: std::sync::Arc::new(Lsp(n)), methods: Vec::new() };
+        register(&mut router);
+        (block_on(router.methods[0](3).as_mut()), block_on(router.methods[1](0).as_mut()))
+    }
+
+    pub fn run(n: u32) -> (u32, u32, u32, (u32, u32)) {
+        (loaded(Doubled(n)), loaded(Ready(n)), served(&Doubled(n)), routed(n))
     }
 }

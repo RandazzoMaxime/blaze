@@ -460,7 +460,12 @@ impl Linked {
                 return None;
             }
             let Some(args) = demangled.strip_prefix(&prefix) else { continue };
-            if !closes_at_end(args) {
+            let Some(after) = args_closed(args).map(|at| &args[at..]) else { return None };
+            // A closure of the instance is compiled with it.
+            if !after.is_empty() {
+                if closures_only(after) {
+                    continue;
+                }
                 return None;
             }
             if found.get(&demangled).is_some_and(|it| it != symbol) {
@@ -472,9 +477,9 @@ impl Linked {
     }
 }
 
-/// Whether the arguments of an instance, as a demangled symbol has them after the `<` that
-/// opens them, are all that follows.
-fn closes_at_end(args: &str) -> bool {
+/// Where the arguments of an instance end, as a demangled symbol has them after the `<` that
+/// opens them.
+fn args_closed(args: &str) -> Option<usize> {
     let mut depth = 1;
     let mut last = ' ';
     for (at, it) in args.char_indices() {
@@ -486,11 +491,23 @@ fn closes_at_end(args: &str) -> bool {
             _ => {}
         }
         if depth == 0 {
-            return at + 1 == args.len();
+            return Some(at + 1);
         }
         last = it;
     }
-    false
+    None
+}
+
+/// Whether `path` is `::{closure#N}` once or more, a closure in the body of what it follows.
+fn closures_only(mut path: &str) -> bool {
+    while let Some(rest) = path.strip_prefix("::{closure#") {
+        let Some((number, rest)) = rest.split_once('}') else { return false };
+        if number.is_empty() || !number.bytes().all(|it| it.is_ascii_digit()) {
+            return false;
+        }
+        path = rest;
+    }
+    path.is_empty()
 }
 
 /// The indices of the symbols of a Mach-O executable that were private externals, hidden

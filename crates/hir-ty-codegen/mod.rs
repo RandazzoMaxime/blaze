@@ -249,6 +249,10 @@ pub trait SymbolResolver {
     fn path(&self, path: &str) -> Option<String>;
     /// The path of an item, e.g. `core::any::TypeId`.
     fn item(&self, item: hir_def::ModuleDefId) -> Option<String>;
+    /// The struct, enum or union [`Self::item`] spells `path`, when one of a module does.
+    fn adt_at(&self, _path: &str) -> Option<hir_def::AdtId> {
+        None
+    }
     /// The name rustc gives a source file in panic messages.
     fn source_path(&self, file: base_db::FileId) -> Option<String>;
     /// The directory the names of [`Self::source_path`] are relative to, when the build is
@@ -923,17 +927,29 @@ impl CodegenUnit {
             let from_rustc: FxHashSet<FunctionId> = left_to_rustc(db, symbols, &skipped).collect();
             // A function left to rustc keeps using rustc's copy of a private static, so we
             // can't bring our own.
-            let mut split = false;
             let found = TheirStatics::of(db, from_rustc.iter().copied());
-            split |= found.statics.iter().any(|it| cg.statics.contains_key(it));
+            let mut split: Vec<StaticId> =
+                found.statics.iter().copied().filter(|it| cg.statics.contains_key(it)).collect();
             own_statics.theirs.extend(found.statics);
             let before = own_statics.unknown.len();
-            own_statics.unknown.extend(found.unknown);
+            own_statics.unknown.extend(found.unknown.iter().copied());
             if own_statics.unknown.len() != before {
-                split |= cg.statics.keys().any(|&it| !own_statics.owns(db, it));
+                split.extend(cg.statics.keys().copied().filter(|&it| !own_statics.owns(db, it)));
             }
-            if split {
-                start_over("a static is used by a function left to rustc");
+            if !split.is_empty() {
+                let named = split.iter().take(4).map(|&it| {
+                    let name = StaticSignature::of(db, it).name.as_str().to_owned();
+                    format!("`{name}` of {}", fncache::crate_name(db, it.krate(db)))
+                });
+                let named = named.collect::<Vec<_>>().join(", ");
+                let unknown = found.unknown.iter().map(|&it| fncache::crate_name(db, it));
+                let unknown = unknown.collect::<Vec<_>>().join(", ");
+                start_over(&format!(
+                    "{} statics are used by a function left to rustc: {named}; \
+                     crates of functions left to rustc that refer to what is not known: [{unknown}]",
+                    split.len()
+                ));
+                cg.reject(&mut failed, &compiled, &from_rustc, &mut own_statics);
                 rejected.extend(failed);
                 continue;
             }
@@ -1063,12 +1079,36 @@ impl CodegenUnit {
                     instances,
                 }));
             }
-            let first = failed.first().map_or("", |it| it.1.why.as_str());
-            start_over(&format!("{} instances did not compile, the first: {first}", failed.len()));
-            cg.poison_callers(&mut failed);
+            start_over(&format!(
+                "{} instances did not compile: {}",
+                failed.len(),
+                why_most(&failed)
+            ));
+            cg.reject(&mut failed, &compiled, &from_rustc, &mut own_statics);
             rejected.extend(failed);
         }
     }
+}
+
+/// The reasons the most of `failed` did not compile, with how many each: what they called that
+/// failed is left out, so one function that fails is one reason for all its callers.
+fn why_most<T>(failed: &[(T, Rejected)]) -> String {
+    let mut counts: FxHashMap<&str, usize> = FxHashMap::default();
+    for (_, rejected) in failed {
+        let mut why = rejected.why.as_str();
+        while let Some((_, rest)) = why
+            .strip_prefix("unsupported: ")
+            .unwrap_or(why)
+            .strip_prefix("callee `")
+            .and_then(|it| it.split_once("`: "))
+        {
+            why = rest;
+        }
+        *counts.entry(why.get(..200).unwrap_or(why)).or_default() += 1;
+    }
+    let mut counts: Vec<_> = counts.into_iter().collect();
+    counts.sort_unstable_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(b.0)));
+    counts.iter().take(6).map(|(why, n)| format!("{n} × {why}")).collect::<Vec<_>>().join("; ")
 }
 
 /// Which statics we define ourselves rather than use rustc's. A function left to rustc uses
@@ -1361,6 +1401,8 @@ impl Rejections {
 
     /// Notes what rustc compiled of `file`, which is about to change: the functions written
     /// in it and the statics declared there and in their bodies. Asked before the edit.
+    /// `callers` are functions written elsewhere that call the generic ones of `file`, or
+    /// call others that do: what rustc copied those into.
     pub fn home(
         &mut self,
         db: &dyn HirDatabase,
@@ -1368,11 +1410,12 @@ impl Rejections {
         file: base_db::FileId,
         functions: &[FunctionId],
         statics: &[StaticId],
+        callers: &[FunctionId],
     ) {
         if self.base.is_none()
             && let Some(rustc) = &mut self.rustc
         {
-            rustc.home(db, symbols, file, functions, statics);
+            rustc.home(db, symbols, file, functions, statics, callers);
         }
     }
 
@@ -1716,6 +1759,130 @@ impl<'db> Spelling<'_, 'db> {
         Some(path)
     }
 
+    /// The arguments of the instance of `func` that [`Self::instance_path`] spells `path`, for
+    /// a function whose parent has no types for parameters: rustc's copy says what it is of.
+    /// Lifetimes are erased; a type this does not read back declines.
+    fn instance_args(&self, func: FunctionId, path: &str) -> Option<GenericArgs<'db>> {
+        let (_, own) = path.strip_suffix('>')?.rsplit_once("::<")?;
+        let mut own = split_top(own).into_iter().map(|it| self.read_type(it));
+        let interner = DbInterner::new_no_crate(self.db);
+        let erased = Region::new_erased(interner);
+        let mut read = true;
+        let parent = hir_ty::generics::generics(self.db, func.into()).len_parent();
+        let args = GenericArgs::for_item(interner, func.into(), |at, param, _, _| {
+            match (param, at as usize >= parent) {
+                (hir_def::GenericParamId::LifetimeParamId(_), _) => return erased.into(),
+                (hir_def::GenericParamId::TypeParamId(_), true) => {
+                    if let Some(Some(ty)) = own.next() {
+                        return ty.into();
+                    }
+                }
+                _ => {}
+            }
+            read = false;
+            erased.into()
+        });
+        let all = read && own.next().is_none();
+        (all && self.instance_path(func, args).as_deref() == Some(path)).then_some(args)
+    }
+
+    /// A type as [`Self::symbol_type`] spells it, of those that are not `dyn`, closures or
+    /// function pointers.
+    fn read_type(&self, text: &str) -> Option<Ty<'db>> {
+        let interner = DbInterner::new_no_crate(self.db);
+        let erased = Region::new_erased(interner);
+        let builtin = match text {
+            "bool" => Some(TyKind::Bool),
+            "char" => Some(TyKind::Char),
+            "str" => Some(TyKind::Str),
+            "!" => Some(TyKind::Never),
+            _ => None,
+        };
+        if let Some(kind) = builtin {
+            return Some(Ty::new(interner, kind));
+        }
+        let numbers = [
+            ("i8", TyKind::Int(rustc_type_ir::IntTy::I8)),
+            ("i16", TyKind::Int(rustc_type_ir::IntTy::I16)),
+            ("i32", TyKind::Int(rustc_type_ir::IntTy::I32)),
+            ("i64", TyKind::Int(rustc_type_ir::IntTy::I64)),
+            ("i128", TyKind::Int(rustc_type_ir::IntTy::I128)),
+            ("isize", TyKind::Int(rustc_type_ir::IntTy::Isize)),
+            ("u8", TyKind::Uint(UintTy::U8)),
+            ("u16", TyKind::Uint(UintTy::U16)),
+            ("u32", TyKind::Uint(UintTy::U32)),
+            ("u64", TyKind::Uint(UintTy::U64)),
+            ("u128", TyKind::Uint(UintTy::U128)),
+            ("usize", TyKind::Uint(UintTy::Usize)),
+            ("f16", TyKind::Float(rustc_type_ir::FloatTy::F16)),
+            ("f32", TyKind::Float(rustc_type_ir::FloatTy::F32)),
+            ("f64", TyKind::Float(rustc_type_ir::FloatTy::F64)),
+            ("f128", TyKind::Float(rustc_type_ir::FloatTy::F128)),
+        ];
+        if let Some((_, kind)) = numbers.into_iter().find(|(name, _)| *name == text) {
+            return Some(Ty::new(interner, kind));
+        }
+        let pointers = [
+            ("&mut ", None, Mutability::Mut),
+            ("&", None, Mutability::Not),
+            ("*mut ", Some(()), Mutability::Mut),
+            ("*const ", Some(()), Mutability::Not),
+        ];
+        for (prefix, raw, mutability) in pointers {
+            if let Some(pointee) = text.strip_prefix(prefix) {
+                let pointee = self.read_type(pointee)?;
+                return Some(match raw {
+                    Some(()) => Ty::new_ptr(interner, pointee, mutability),
+                    None => Ty::new_ref(interner, erased, pointee, mutability),
+                });
+            }
+        }
+        if let Some(inner) = text.strip_prefix('[').and_then(|it| it.strip_suffix(']')) {
+            return match split_top_on(inner, "; ").as_slice() {
+                [element] => Some(Ty::new_slice(interner, self.read_type(element)?)),
+                [element, len] => {
+                    Some(Ty::new_array(interner, self.read_type(element)?, len.parse().ok()?))
+                }
+                _ => None,
+            };
+        }
+        if let Some(inner) = text.strip_prefix('(').and_then(|it| it.strip_suffix(')')) {
+            let inner = inner.strip_suffix(',').unwrap_or(inner);
+            let tys = split_top(inner).into_iter().map(|it| self.read_type(it));
+            return Some(Ty::new_tup(interner, &tys.collect::<Option<Vec<_>>>()?));
+        }
+        if text.starts_with(['<', '{']) || text.starts_with("fn(") || text.starts_with("dyn ") {
+            return None;
+        }
+        let (path, args) = match text.split_once('<') {
+            Some((path, args)) => (path, split_top(args.strip_suffix('>')?)),
+            None => (text, Vec::new()),
+        };
+        let adt = self.symbols.adt_at(path)?;
+        let mut spelled = args.into_iter().map(|it| self.read_type(it));
+        let defaults = self.db.generic_defaults(adt.into());
+        let mut read = true;
+        let args = GenericArgs::for_item(interner, adt.into(), |at, param, _, before| {
+            match param {
+                hir_def::GenericParamId::LifetimeParamId(_) => return erased.into(),
+                hir_def::GenericParamId::TypeParamId(_) => match spelled.next() {
+                    Some(Some(ty)) => return ty.into(),
+                    Some(None) => {}
+                    // rustc leaves out the arguments that say what the default says.
+                    None => {
+                        if let Some(default) = defaults.get(at as usize) {
+                            return default.instantiate(interner, before).skip_norm_wip();
+                        }
+                    }
+                },
+                hir_def::GenericParamId::ConstParamId(_) => {}
+            }
+            read = false;
+            erased.into()
+        });
+        (read && spelled.next().is_none()).then(|| Ty::new_adt(interner, adt, args))
+    }
+
     /// A type or a `usize` an instance is instantiated with, as rustc's symbols spell it.
     fn symbol_arg(&self, arg: hir_ty::next_solver::GenericArg<'db>) -> Option<String> {
         match (arg.ty(), arg.konst()) {
@@ -1816,6 +1983,33 @@ impl<'db> Spelling<'_, 'db> {
             _ => return None,
         })
     }
+}
+
+/// The parts of a list of types that `, ` separates outside of brackets.
+fn split_top(text: &str) -> Vec<&str> {
+    if text.is_empty() { Vec::new() } else { split_top_on(text, ", ") }
+}
+
+fn split_top_on<'t>(text: &'t str, separator: &str) -> Vec<&'t str> {
+    let (mut parts, mut depth, mut start) = (Vec::new(), 0i32, 0);
+    let bytes = text.as_bytes();
+    let mut at = 0;
+    while at < bytes.len() {
+        match bytes[at] {
+            b'<' | b'(' | b'[' => depth += 1,
+            b'>' | b')' | b']' => depth -= 1,
+            _ if depth == 0 && text[at..].starts_with(separator) => {
+                parts.push(&text[start..at]);
+                at += separator.len();
+                start = at;
+                continue;
+            }
+            _ => {}
+        }
+        at += 1;
+    }
+    parts.push(&text[start..]);
+    parts
 }
 
 /// Stitches compiled functions into one object: gives every function and data object they
@@ -2024,6 +2218,7 @@ impl Resolved {
                 .map(|&(offset, target)| (offset, self.funcs[target.as_u32() as usize]))
                 .collect(),
             align: blob.align,
+            type_ids: blob.type_ids.clone(),
         }
     }
 
@@ -2274,6 +2469,12 @@ impl Unnamed {
     pub fn compiled(&self) -> usize {
         self.state.lock().unwrap_or_else(|e| e.into_inner()).compiled
     }
+}
+
+/// Whether rustc copies `func` into each crate that calls it, for a type or constant it is
+/// given.
+pub fn copied_by_rustc(db: &dyn HirDatabase, func: FunctionId) -> bool {
+    patch::copied_by_rustc(db, func)
 }
 
 /// Compiles a function written in a file [`Rejections::home`] notes next, which compiles them
@@ -5709,16 +5910,23 @@ impl<'a, 'db> ObjectCodegen<'a, 'db> {
                     return self.kept.unkept("data with the place of the library's sources");
                 }
             }
+            let mut hashed = match request {
+                DataRequest::Blob { blob, .. } | DataRequest::Vtable { blob, .. } => blob.clone(),
+                _ => ConstBlob::default(),
+            };
+            if self.hash_type_ids(&mut hashed).is_err() {
+                return self.kept.unkept("a `TypeId` not hashed");
+            }
             datas.push(match request {
-                DataRequest::Blob { blob, identity } => {
-                    CachedData::Blob { blob: blob.clone(), identity: *identity }
+                DataRequest::Blob { identity, .. } => {
+                    CachedData::Blob { blob: hashed, identity: *identity }
                 }
-                DataRequest::Vtable { ty, trait_ref, blob } => {
+                DataRequest::Vtable { ty, trait_ref, .. } => {
                     let trait_ref = trait_ref.as_ref().map(|(id, args)| (*id, args.as_ref()));
                     let Some(key) = self.names.vtable(ty.as_ref(), trait_ref) else {
                         return self.kept.unkept("unnamed vtable");
                     };
-                    CachedData::Vtable { key, blob: blob.clone() }
+                    CachedData::Vtable { key, blob: hashed }
                 }
                 DataRequest::Static(of) => {
                     let decl = self.module.declarations().get_data_decl(id);
@@ -6119,12 +6327,14 @@ impl<'a, 'db> ObjectCodegen<'a, 'db> {
             relocs: Vec::new(),
             fn_relocs: Vec::new(),
             align: 1,
+            type_ids: Vec::new(),
         })?;
         let mut fat = ConstBlob {
             bytes: vec![0; 2 * word()],
             relocs: Vec::new(),
             fn_relocs: Vec::new(),
             align: word() as u64,
+            type_ids: Vec::new(),
         };
         fat.point_to(0, path, 0);
         fat.bytes[word()..].copy_from_slice(&(len as u64).to_le_bytes()[..word()]);
@@ -6262,6 +6472,7 @@ impl<'a, 'db> ObjectCodegen<'a, 'db> {
                     relocs: Vec::new(),
                     fn_relocs: Vec::new(),
                     align: 1,
+                    type_ids: Vec::new(),
                 };
                 self.fill_data(data, nothing, section)?;
                 Err(e)
@@ -6307,9 +6518,15 @@ impl<'a, 'db> ObjectCodegen<'a, 'db> {
             relocs: Vec::new(),
             fn_relocs: Vec::new(),
             align: 1,
+            type_ids: Vec::new(),
         })?;
-        let mut location =
-            ConstBlob { bytes, relocs: Vec::new(), fn_relocs: Vec::new(), align: word() as u64 };
+        let mut location = ConstBlob {
+            bytes,
+            relocs: Vec::new(),
+            fn_relocs: Vec::new(),
+            align: word() as u64,
+            type_ids: Vec::new(),
+        };
         location.point_to(0, name, 0);
         self.define_const(location)
     }
@@ -6585,17 +6802,64 @@ impl<'a, 'db> ObjectCodegen<'a, 'db> {
             let why = format!("callee `{}`: {why}", self.callee_name(callee.def));
             for &at in callers.get(callee).into_iter().flatten() {
                 let (caller, env) = &self.envs[at];
-                // rustc's copy stands in for one of these, which its callers then call.
-                let forwarded = self.forwarded.contains(caller)
-                    || matches!(caller.def, InstanceDef::Fn(func) if self
-                        .instance_path(func, caller.args.as_ref())
-                        .and_then(|path| self.symbols.path(&path))
-                        .is_some_and(|it| self.rustc_copy(it, caller.checked).is_some()));
-                if !forwarded && seen.insert(caller.clone()) {
+                if !self.stands_in(caller) && seen.insert(caller.clone()) {
                     failed.push((caller.clone(), Rejected { env: env.clone(), why: why.clone() }));
                 }
             }
         }
+    }
+
+    /// Makes `failed` what the next round rejects, with their callers, and the statics of the
+    /// roots it then leaves to rustc theirs from its start: found in it, they would start it
+    /// over again.
+    fn reject(
+        &self,
+        failed: &mut Vec<(Instance, Rejected)>,
+        compiled: &[(FunctionId, String)],
+        from_rustc: &FxHashSet<FunctionId>,
+        own_statics: &mut OwnStatics,
+    ) {
+        if failed.is_empty() {
+            return;
+        }
+        self.poison_callers(failed);
+        let left = self.left_after(compiled, failed);
+        let found = TheirStatics::of(self.db, from_rustc.iter().copied().chain(left));
+        own_statics.theirs.extend(found.statics);
+        own_statics.unknown.extend(found.unknown);
+    }
+
+    /// Whether rustc's copy of `instance` stands in for it when it is not compiled, which its
+    /// callers then call.
+    fn stands_in(&self, instance: &Instance) -> bool {
+        self.forwarded.contains(instance)
+            || matches!(instance.def, InstanceDef::Fn(func) if self
+                .instance_path(func, instance.args.as_ref())
+                .and_then(|path| self.symbols.path(&path))
+                .is_some_and(|it| self.rustc_copy(it, instance.checked).is_some()))
+    }
+
+    /// The roots of `compiled` that the next round leaves to rustc, `failed` being rejected
+    /// and their callers poisoned: those that call one rustc has no copy of.
+    fn left_after(
+        &self,
+        compiled: &[(FunctionId, String)],
+        failed: &[(Instance, Rejected)],
+    ) -> Vec<FunctionId> {
+        let lost: FxHashSet<&Instance> =
+            failed.iter().map(|it| &it.0).filter(|it| !self.stands_in(it)).collect();
+        let calls_lost = |root: FunctionId| {
+            compiled_root(self.db, root).as_ref().is_ok_and(|it| {
+                it.requests.funcs.iter().any(|request| {
+                    matches!(&request.target, FuncTarget::Instance(callee, _) if lost.contains(callee))
+                })
+            })
+        };
+        compiled
+            .iter()
+            .map(|it| it.0)
+            .filter(|&root| self.symbols.rustc_built(root.krate(self.db)) && calls_lost(root))
+            .collect()
     }
 
     /// Whether `instance` is the poll or the drop of a future rustc's code makes. Everything
@@ -6814,7 +7078,24 @@ impl<'a, 'db> ObjectCodegen<'a, 'db> {
     }
 
     /// Defines `id` as `blob`, in a section of its own named `section` when there is one.
-    fn fill_data(&mut self, id: DataId, blob: ConstBlob, section: Option<&str>) -> Result<()> {
+    /// Writes rustc's hash of each type in `blob.type_ids` at its place in the bytes.
+    fn hash_type_ids(&self, blob: &mut ConstBlob) -> Result<()> {
+        for (offset, of) in std::mem::take(&mut blob.type_ids) {
+            let of = of.as_ref();
+            let mut hasher =
+                type_id::TypeIdHasher::new(self.db, self.symbols, &self.own_statics.crates);
+            let Some(hash) = hasher.type_id(of) else {
+                let stuck = hasher.stuck.unwrap_or_default();
+                unsupported!("`TypeId` of `{of:?}` in a constant, not hashed (at `{stuck}`)");
+            };
+            let at = offset as usize;
+            blob.bytes[at..at + 16].copy_from_slice(&hash.to_le_bytes());
+        }
+        Ok(())
+    }
+
+    fn fill_data(&mut self, id: DataId, mut blob: ConstBlob, section: Option<&str>) -> Result<()> {
+        self.hash_type_ids(&mut blob)?;
         let mut data = DataDescription::new();
         if let Some(section) = section {
             data.set_custom_section(section);
@@ -6886,12 +7167,19 @@ enum DataIdentity {
 }
 
 /// Read-only data whose pointers refer to other data objects.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, serde_derive::Serialize, serde_derive::Deserialize)]
+#[derive(
+    Debug, Default, Clone, PartialEq, Eq, Hash, serde_derive::Serialize, serde_derive::Deserialize,
+)]
 struct ConstBlob {
     bytes: Vec<u8>,
     relocs: Vec<(u32, DataId, i64)>,
     fn_relocs: Vec<(u32, FuncId)>,
     align: u64,
+    /// The `TypeId`s in `bytes` by offset, which hold the ids const eval gave their types
+    /// until [`ObjectCodegen::fill_data`] writes rustc's hashes there. A blob is kept with
+    /// the hashes in it.
+    #[serde(skip)]
+    type_ids: Vec<(u32, StoredTy)>,
 }
 
 impl ConstBlob {
@@ -8298,6 +8586,7 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
             relocs: Vec::new(),
             fn_relocs: Vec::new(),
             align,
+            type_ids: Vec::new(),
         };
         let data = self.cg.define_data(blob, true)?;
         let data = self.cg.declare_data_in_func(data, self.builder.func);
@@ -9549,7 +9838,13 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
             | TyKind::RawPtr(..) => {
                 let bits = valtree.inner().to_leaf().to_bits(layout.size);
                 let bytes = bits.to_le_bytes()[..layout.size.bytes_usize()].to_vec();
-                return Ok(ConstBlob { bytes, relocs: Vec::new(), fn_relocs: Vec::new(), align });
+                return Ok(ConstBlob {
+                    bytes,
+                    relocs: Vec::new(),
+                    fn_relocs: Vec::new(),
+                    align,
+                    type_ids: Vec::new(),
+                });
             }
             TyKind::Ref(_, pointee, _) => pointee,
             TyKind::Adt(..) | TyKind::Tuple(_) | TyKind::Array(..) => {
@@ -9565,6 +9860,7 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
                     relocs: Vec::new(),
                     fn_relocs: Vec::new(),
                     align: 1,
+                    type_ids: Vec::new(),
                 };
                 let items = valtree.inner().to_branch();
                 for item in items.iter() {
@@ -9586,7 +9882,13 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
             _ => self.valtree_blob(pointee, valtree)?,
         };
         let target = self.cg.define_const(target)?;
-        Ok(ConstBlob { bytes, relocs: vec![(0, target, 0)], fn_relocs: Vec::new(), align })
+        Ok(ConstBlob {
+            bytes,
+            relocs: vec![(0, target, 0)],
+            fn_relocs: Vec::new(),
+            align,
+            type_ids: Vec::new(),
+        })
     }
 
     /// A struct, enum, tuple or array that a const generic argument is (`adt_const_params`):
@@ -9598,6 +9900,7 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
             relocs: Vec::new(),
             fn_relocs: Vec::new(),
             align: layout.align.abi.bytes(),
+            type_ids: Vec::new(),
         };
         let items = valtree.inner().to_branch();
         let (shape, fields) = match ty.kind() {
@@ -9666,6 +9969,7 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
             relocs: Vec::new(),
             fn_relocs: Vec::new(),
             align: layout.align.abi.bytes(),
+            type_ids: Vec::new(),
         };
         let mut map = Relocations {
             map: memory_map,
@@ -9747,6 +10051,7 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
                     relocs: Vec::new(),
                     fn_relocs: Vec::new(),
                     align: map.align_of(start),
+                    type_ids: Vec::new(),
                 };
                 let at = addr - start;
                 match pointee.kind() {
@@ -9790,6 +10095,21 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
                 let target = self.fn_item(fn_ty)?;
                 blob.bytes[offset..offset + word()].fill(0);
                 blob.fn_relocs.push((offset as u32, target));
+            }
+            // Const eval gives a `TypeId` as an id into its table of types, which the hash rustc
+            // gives the type replaces once the object is stitched.
+            TyKind::Adt(def, _)
+                if self
+                    .interner
+                    .lang_items()
+                    .TypeId
+                    .is_some_and(|it| def.def_id() == AdtId::StructId(it)) =>
+            {
+                let id = blob.bytes.get(offset..offset + 16).and_then(|it| it.try_into().ok());
+                let Some(of) = id.and_then(|it| map.map.type_id_ty(u128::from_le_bytes(it))) else {
+                    unsupported!("a `TypeId` in a constant that const eval did not make");
+                };
+                blob.type_ids.push((offset as u32, of.store()));
             }
             TyKind::Adt(def, args) => {
                 let layout = self.layout(ty)?;
@@ -9943,6 +10263,7 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
                     relocs: Vec::new(),
                     fn_relocs: Vec::new(),
                     align: map.align_of(start),
+                    type_ids: Vec::new(),
                 };
                 // What the allocation is of is not known here, so as in a union, every word
                 // of it that is the address of something const eval kept is taken to be one,
@@ -11960,8 +12281,13 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
         bytes[word()..2 * word()].copy_from_slice(&layout.size.bytes().to_le_bytes()[..word()]);
         bytes[2 * word()..3 * word()]
             .copy_from_slice(&layout.align.abi.bytes().to_le_bytes()[..word()]);
-        let mut blob =
-            ConstBlob { bytes, relocs: Vec::new(), fn_relocs: Vec::new(), align: word() as u64 };
+        let mut blob = ConstBlob {
+            bytes,
+            relocs: Vec::new(),
+            fn_relocs: Vec::new(),
+            align: word() as u64,
+            type_ids: Vec::new(),
+        };
         if self.glue_of(ty) != DropGlue::None {
             let mut sig = self.cg.make_signature();
             sig.params.push(AbiParam::new(ptr()));
@@ -13104,6 +13430,7 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
                     relocs: Vec::new(),
                     fn_relocs: Vec::new(),
                     align: 1,
+                    type_ids: Vec::new(),
                 })?;
                 let data = self.cg.declare_data_in_func(data, self.builder.func);
                 let ptr = self.builder.ins().symbol_value(ptr(), data);
