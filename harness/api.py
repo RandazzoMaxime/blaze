@@ -19,105 +19,23 @@ same source:
   pipelined  on one connection, a Hello sent after an Apply that builds is answered first
   http       RA_JIT_HTTP: refused without the token, answered as JSON with it
 
-The calls of this file are encoded by the small codec below, of its own, which is a second
+The calls of this file are encoded by cbor.py, a codec of the harness's own, which is a second
 reading of the encoding: its bytes have to be what the daemon decodes.
 
 Python 3, stdlib only.
 """
-import glob, json, os, re, shutil, socket, struct, subprocess, sys, tempfile, time, urllib.error, urllib.request
+import glob, json, os, re, shutil, socket, subprocess, sys, tempfile, time, urllib.error, urllib.request
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 import cargo_ra_jit
 from cargo_ra_jit import Side, wait_warm
-
-SCHEMA = 1
+from cbor import SCHEMA, call, encode, framed, read_frame
 FILES = {
     "Cargo.toml": '[package]\nname = "app"\nversion = "0.1.0"\nedition = "2021"\n\n[workspace]\n',
     "src/main.rs": "".join(f"pub fn part_{i}() -> u32 {{\n    {i}\n}}\n\n" for i in range(8))
                    + 'fn main() {\n    println!("{}", part_3() + part_5());\n}\n',
 }
-
-
-def head(major, n):
-    if n < 24:
-        return bytes([major << 5 | n])
-    for extra, size in ((24, 1), (25, 2), (26, 4), (27, 8)):
-        if n < 1 << (8 * size):
-            return bytes([major << 5 | extra]) + n.to_bytes(size, "big")
-    raise ValueError(n)
-
-
-def encode(value):
-    if value is None:
-        return b"\xf6"
-    if value is True or value is False:
-        return b"\xf5" if value else b"\xf4"
-    if isinstance(value, int):
-        return head(0, value) if value >= 0 else head(1, -1 - value)
-    if isinstance(value, bytes):
-        return head(2, len(value)) + value
-    if isinstance(value, str):
-        text = value.encode()
-        return head(3, len(text)) + text
-    if isinstance(value, list):
-        return head(4, len(value)) + b"".join(map(encode, value))
-    if isinstance(value, dict):
-        entries = sorted((encode(k), encode(v)) for k, v in value.items())
-        return head(5, len(entries)) + b"".join(k + v for k, v in entries)
-    raise TypeError(value)
-
-
-def decode(data, at=0):
-    """The value at `at`, and where it ends."""
-    first = data[at]
-    major, extra = first >> 5, first & 31
-    at += 1
-    if major == 7:
-        return {20: False, 21: True, 22: None}[extra], at
-    if extra < 24:
-        n = extra
-    else:
-        size = 1 << (extra - 24)
-        n, at = int.from_bytes(data[at:at + size], "big"), at + size
-    if major == 0:
-        return n, at
-    if major == 1:
-        return -1 - n, at
-    if major in (2, 3):
-        chunk = data[at:at + n]
-        return (bytes(chunk) if major == 2 else chunk.decode()), at + n
-    items = []
-    for _ in range(n * (2 if major == 5 else 1)):
-        item, at = decode(data, at)
-        items.append(item)
-    if major == 4:
-        return items, at
-    return {items[i] if not isinstance(items[i], list) else tuple(items[i]): items[i + 1] for i in range(0, len(items), 2)}, at
-
-
-def framed(message):
-    return struct.pack(">I", len(message)) + message
-
-
-def read_frame(conn):
-    def exactly(n):
-        got = b""
-        while len(got) < n:
-            chunk = conn.recv(n - len(got))
-            if not chunk:
-                raise SystemExit("the daemon hung up mid-frame")
-            got += chunk
-        return got
-    (length,) = struct.unpack(">I", exactly(4))
-    value, end = decode(exactly(length))
-    if end != length:
-        raise SystemExit(f"an answer of {length} bytes ends at {end}")
-    return value
-
-
-def call(conn, id, body):
-    conn.sendall(framed(encode({"id": id, "schema": SCHEMA, "body": body})))
 
 
 def tails(home, lines=40):
