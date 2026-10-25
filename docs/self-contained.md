@@ -155,3 +155,9 @@ each saw and what each produced.
 
 2026-10-25: this plan. Lanes: the toolchain (2), the manifest and the harness, the registry,
 the resolver, build scripts. Counts and pull requests are added here as they land.
+
+2026-10-25, J (proc macros): with `RA_JIT_PROC_MACRO_SERVER`, a load into ra-jit's own
+target directory has ra-jit link the proc macros and its server expand them; over fd, bat,
+hyperfine, just, nushell and helix, 3,465 calls expanded the same as the toolchain's server
+with rustc's libraries, 12 not compared (`pest_consume_macros`,
+[#327](https://github.com/indexable-inc/blaze/issues/327)).
