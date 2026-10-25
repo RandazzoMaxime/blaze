@@ -41,6 +41,13 @@ impl fmt::Display for Hash {
     }
 }
 
+impl fmt::LowerHex for Hash {
+    /// All 64 hex digits.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.iter().try_for_each(|byte| write!(f, "{byte:02x}"))
+    }
+}
+
 /// A node of a [`Tree`]. Only meaningful for the tree that made it.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Debug)]
 pub struct NodeId(u32);

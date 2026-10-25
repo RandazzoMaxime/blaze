@@ -161,6 +161,14 @@ impl Notices {
         self.watched.extend(new);
     }
 
+    /// Files the daemon wrote or deleted itself, as read on disk: the next look has them and
+    /// their directories without waiting for the system to tell.
+    pub(crate) fn wrote(&mut self, files: impl IntoIterator<Item = PathBuf>) {
+        let files: FxHashSet<PathBuf> = files.into_iter().collect();
+        let dirs = files.iter().filter_map(|it| it.parent().map(Path::to_owned)).collect();
+        self.pending.add(Changed::Some { files, dirs });
+    }
+
     /// What changed since the last call.
     pub(crate) fn take(&mut self) -> Changed {
         self.woke.store(false, Ordering::SeqCst);

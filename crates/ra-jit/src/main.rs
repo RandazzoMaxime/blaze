@@ -6136,6 +6136,8 @@ enum Event {
     OverBudget(usize),
     /// A file changed on disk.
     Noticed,
+    /// An agent's transaction of files.
+    Applied(Applied),
 }
 
 /// The functions of a program compiled at a higher level, for its next patch.
@@ -6154,6 +6156,47 @@ struct Edited {
     client: Client,
     /// When it was read.
     at: Instant,
+}
+
+/// The files of one transaction an agent asks for: all of them or none are what the next build
+/// reads. A file `None` is deleted.
+struct Applied {
+    files: Vec<(PathBuf, Option<String>)>,
+    /// Whether the programs that have the files are built, and answered for as of an edit.
+    build: bool,
+    /// Whether the files are written to disk too.
+    disk: bool,
+    client: Client,
+}
+
+impl Applied {
+    /// The request line of `apply`: its flags, then each file's path and `w` with the text or
+    /// `d`, escaped as an edit's are.
+    fn parse(rest: &str) -> Option<(Vec<(PathBuf, Option<String>)>, bool, bool)> {
+        let mut fields = rest.split('\t');
+        let flags = fields.next()?;
+        let (build, disk) = (flags.contains('b'), flags.contains('d'));
+        let mut files = Vec::new();
+        while let Some(path) = fields.next() {
+            let path = PathBuf::from(ra_jit_live::format::unescape(path));
+            let op = fields.next()?;
+            let text = match op.strip_prefix('w') {
+                Some(text) => Some(ra_jit_live::format::unescape(text)),
+                None if op == "d" => None,
+                None => return None,
+            };
+            files.push((path, text));
+        }
+        Some((files, build, disk))
+    }
+}
+
+/// Writes `text` to `path` whole or not at all: a reader sees the file before or after.
+fn write_whole(path: &Path, text: &str) -> std::io::Result<()> {
+    let name = path.file_name().map(|it| it.to_string_lossy()).unwrap_or_default();
+    let temporary = path.with_file_name(format!(".{name}.blaze-{}", std::process::id()));
+    std::fs::write(&temporary, text)?;
+    std::fs::rename(&temporary, path).inspect_err(|_| _ = std::fs::remove_file(&temporary))
 }
 
 /// How long the daemon waits for more of a save it was told of, when no client asked for a
@@ -6247,6 +6290,8 @@ struct Builds {
     /// The edits that wait, the newest of each file: one typed over before it was built is
     /// answered as superseded.
     edits: Vec<Edited>,
+    /// The transactions that wait, in the order they came.
+    applied: Vec<Applied>,
     /// What the tier watcher asked for that waits for its program's build to be over.
     tier_asks: Vec<tier::Ask>,
     /// Compiled functions that wait for their program's build to be over, and the programs
@@ -6321,6 +6366,10 @@ impl Builds {
                 return Ok(false);
             }
             Event::Noticed => return Ok(false),
+            Event::Applied(applied) => {
+                self.applied.push(applied);
+                return Ok(false);
+            }
             Event::Edited(edited) => {
                 if let Some(older) = self.edits.iter_mut().find(|it| it.path == edited.path) {
                     let _ = writeln!(&older.client, "ok superseded");
@@ -6558,6 +6607,14 @@ fn requested(stream: UnixStream) -> Option<Event> {
         let text = ra_jit_live::format::unescape(text);
         let client = Client { stream, env: process::decode(&env) };
         return Some(Event::Edited(Edited { path, text, client, at: Instant::now() }));
+    }
+    if name == "apply" {
+        let Some((files, build, disk)) = Applied::parse(rest) else {
+            let _ = writeln!(&stream, "failed: an apply that can't be read");
+            return None;
+        };
+        let client = Client { stream, env: process::decode(&env) };
+        return Some(Event::Applied(Applied { files, build, disk, client }));
     }
     let fields: Vec<&str> = request.split('\t').collect();
     let target = Target::parse(&fields[1..]);
@@ -7781,6 +7838,7 @@ fn run_holding(
         waiting: Default::default(),
         stuck: false,
         edits: Vec::new(),
+        applied: Vec::new(),
         tier_asks: Vec::new(),
         tiered: Vec::new(),
         unasked: Vec::new(),
@@ -7851,6 +7909,7 @@ fn run_holding(
                 let mut later = Vec::new();
                 let idle = builds.waiting.is_empty()
                     && builds.edits.is_empty()
+                    && builds.applied.is_empty()
                     && builds.tier_asks.is_empty()
                     && builds.unasked.is_empty();
                 // A base of its own is built in the background, which edits interrupt.
@@ -8286,6 +8345,135 @@ fn run_holding(
                     }
                     outputs.insert(owners[0], Outputs::of(&programs[owners[0]].args));
                     clients.push((owners[0], (Request::Edit, target(owners[0]), edited.client)));
+                }
+                // An agent's transaction: every file of it is in the next build or none is.
+                for mut applied in std::mem::take(&mut builds.applied) {
+                    let source_of = |path: &Path| {
+                        let path = dunce::canonicalize(path).unwrap_or_else(|_| path.to_owned());
+                        files.iter().find_map(|it| match it.file {
+                            Watched::Source(id)
+                                if it.path == path
+                                    || dunce::canonicalize(&it.path).is_ok_and(|it| it == path) =>
+                            {
+                                Some((id, it.path.clone()))
+                            }
+                            _ => None,
+                        })
+                    };
+                    let sources: Vec<_> =
+                        applied.files.iter().map(|(path, _)| source_of(path)).collect();
+                    if let Some((path, _)) = applied
+                        .files
+                        .iter()
+                        .find(|(path, _)| viewed.keys().any(|base| path.starts_with(base)))
+                    {
+                        let shown = path.display();
+                        let _ = writeln!(
+                            &applied.client.stream,
+                            "error: {shown} is read from elsewhere"
+                        );
+                        continue;
+                    }
+                    let mut owners: Vec<usize> = (0..programs.len())
+                        .filter(|&at| {
+                            programs[at].wrote.is_some() || builds.running.contains_key(&at)
+                        })
+                        .filter(|&at| {
+                            sources
+                                .iter()
+                                .flatten()
+                                .any(|(id, path)| programs[at].args.owns(&db, *id, path))
+                        })
+                        .collect();
+                    owners.sort_unstable();
+                    let busy = owners.iter().any(|at| {
+                        builds.running.contains_key(at)
+                            || outputs
+                                .get(at)
+                                .is_some_and(|it| *it != Outputs::of(&programs[*at].args))
+                    });
+                    if busy {
+                        interrupt |= owners
+                            .iter()
+                            .any(|at| builds.running.get(at).is_some_and(|it| it.own_base));
+                        builds.applied.push(applied);
+                        continue;
+                    }
+                    // A file that is no source yet is one once the disk has it and a module
+                    // names it.
+                    let new: Vec<PathBuf> = (applied.files.iter().zip(&sources))
+                        .filter(|(_, source)| source.is_none())
+                        .map(|((path, _), _)| path.clone())
+                        .collect();
+                    if let Some(path) = new.first().filter(|_| !applied.disk) {
+                        let shown = path.display();
+                        let _ = writeln!(
+                            &applied.client.stream,
+                            "error: {shown} is no source of the workspace yet, and a file is made \
+                             or deleted on disk"
+                        );
+                        continue;
+                    }
+                    let ops: Vec<blaze_vfs::Op> = (applied.files.iter().zip(&sources))
+                        .filter_map(|((path, text), source)| {
+                            let path = match source {
+                                Some((_, path)) => path,
+                                None if text.is_none() && held.read(path).is_none() => return None,
+                                None => path,
+                            };
+                            let path = path.to_string_lossy().into_owned();
+                            Some(match text {
+                                Some(text) => {
+                                    blaze_vfs::Op::Write { path, bytes: text.as_bytes().into() }
+                                }
+                                None => blaze_vfs::Op::Delete { path },
+                            })
+                        })
+                        .collect();
+                    if let Err(error) = held.commit(None, &ops) {
+                        let _ = writeln!(&applied.client.stream, "error: {error}");
+                        continue;
+                    }
+                    let now = Instant::now();
+                    for (_, path) in sources.iter().flatten() {
+                        edited_at.insert(path.clone(), now);
+                    }
+                    if applied.disk {
+                        let written =
+                            applied.files.iter().try_for_each(|(path, text)| match text {
+                                Some(text) => write_whole(path, text),
+                                None => std::fs::remove_file(path).or_else(|it| match it.kind() {
+                                    std::io::ErrorKind::NotFound => Ok(()),
+                                    _ => Err(it),
+                                }),
+                            });
+                        if let Err(error) = written {
+                            let _ = writeln!(
+                                &applied.client.stream,
+                                "error: writing the files: {error}"
+                            );
+                            continue;
+                        }
+                        notices.wrote(new);
+                    }
+                    let _ = writeln!(&applied.client.stream, "root {:x}", held.head());
+                    if !applied.build || owners.is_empty() {
+                        let _ = writeln!(&applied.client.stream, "ok applied");
+                        continue;
+                    }
+                    applied.client.env = ide_db::base_db::ProcessEnv::try_get(&db)
+                        .map(|it| it.vars(&db).clone())
+                        .unwrap_or_default();
+                    let target = |at: usize| (at != 0).then(|| Target::of(&programs[at].args));
+                    for &at in &owners[1..] {
+                        outputs.insert(at, Outputs::of(&programs[at].args));
+                        if let Ok(stream) = applied.client.stream.try_clone() {
+                            let client = Client { stream, env: applied.client.env.clone() };
+                            clients.push((at, (Request::Sync, target(at), client)));
+                        }
+                    }
+                    outputs.insert(owners[0], Outputs::of(&programs[owners[0]].args));
+                    clients.push((owners[0], (Request::Sync, target(owners[0]), applied.client)));
                 }
                 if interrupt {
                     builds.settle(&mut db, &mut programs)?;

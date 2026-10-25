@@ -644,6 +644,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "blaze-api"
+version = "0.1.0"
+dependencies = [
+ "serde",
+]
+
+[[package]]
 name = "blaze-core"
 version = "0.1.0"
 
@@ -3204,6 +3211,7 @@ dependencies = [
  "aws-config",
  "aws-sdk-s3",
  "aws-smithy-http-client",
+ "blaze-api",
  "blaze-core",
  "blaze-vfs",
  "cargo-platform",
