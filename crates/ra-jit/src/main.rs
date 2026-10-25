@@ -3015,6 +3015,36 @@ fn warm_impls(
     on_idle_threads(db, &work, 64, helping, threads, |db, work| work.run(db));
 }
 
+/// Asks for the impls of each of `crates` on every core, without waiting for it. After an edit
+/// the first type check asks for those of every crate it sees, one crate after another, and
+/// the other threads wait for it: an impl may be written in a body, so each crate's must be
+/// verified again.
+fn verify_impls<'scope>(
+    scope: &'scope std::thread::Scope<'scope, '_>,
+    db: &RootDatabase,
+    crates: &FxHashSet<ide_db::base_db::Crate>,
+) {
+    use hir_ty::method_resolution::{InherentImpls, TraitImpls};
+    let crates: Arc<[ide_db::base_db::Crate]> = crates.iter().copied().collect();
+    let next = Arc::new(AtomicUsize::new(0));
+    let threads = std::thread::available_parallelism().map_or(1, |it| it.get());
+    for _ in 0..threads.min(crates.len()) {
+        let (db, crates, next) = (db.clone(), crates.clone(), next.clone());
+        scope.spawn(move || {
+            // A query that is cancelled unwinds, and those that wait for it see that.
+            _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                hir::attach_db(&db, || {
+                    let at = || next.fetch_add(1, Ordering::Relaxed);
+                    while let Some(&krate) = crates.get(at()) {
+                        _ = TraitImpls::for_crate(&db, krate);
+                        _ = InherentImpls::for_crate(&db, krate);
+                    }
+                })
+            }));
+        });
+    }
+}
+
 /// Parses the files of the modules of `krate`, whose names and impls were read rather than
 /// found, with the threads no other crate has: a signature or body of the crate that a build
 /// lowers parses its whole file first, one file after another.
@@ -3204,7 +3234,11 @@ fn reach_of_tests(db: &RootDatabase, listed: &Listed, args: &Args) -> String {
                 let hex: String = identity.iter().map(|it| format!("{it:02x}")).collect();
                 format!("{hex}\t{name}\n")
             }
-            Err(why) => format!("-\t{name}\t{}\n", why.replace(['\t', '\n'], " ")),
+            Err(always) => {
+                let field = |it: &str| it.replace(['\t', '\n'], " ");
+                let path: Vec<String> = always.path.iter().map(|it| field(it)).collect();
+                format!("-\t{name}\t{}\t{}\n", field(&always.why), path.join(" -> "))
+            }
         };
         text.push_str(&line);
     }
@@ -6513,8 +6547,19 @@ fn requested(stream: UnixStream) -> Option<Event> {
 /// the other end for as long as it lives, however it dies.
 fn end_with_input() {
     while input_line().is_some() {}
-    // The executables on disk get the last edits before the worker goes.
+    // The executables on disk get the last edits before the worker goes, and the store what
+    // the last build kept.
     splicer::flush();
+    ra_jit_store::settled();
+    // What it started goes with it, as when the daemon kills it: the daemon started it in a
+    // group of its own.
+    #[cfg(unix)]
+    // SAFETY: neither takes a pointer.
+    unsafe {
+        if libc::getpgrp() == libc::getpid() {
+            libc::killpg(0, libc::SIGKILL);
+        }
+    }
     std::process::exit(0);
 }
 
@@ -9142,9 +9187,13 @@ impl Program {
         // built whole: what it would make of the program is not what runs, and the next edit
         // that compiles is to be a patch of what does.
         let (warm, broken) = std::thread::scope(|scope| {
+            let within = listed.programs(db);
+            if let Some(crates) = &within {
+                verify_impls(scope, db, crates);
+            }
             let check = {
                 let (db, edited, root) = (db.clone(), &edited, &args.checkout);
-                let (within, lints) = (listed.programs(&db), !args.lints_capped);
+                let lints = !args.lints_capped;
                 scope.spawn(move || {
                     let start = Instant::now();
                     let broken = broken_in(&db, edited, paths, root, within, lints);

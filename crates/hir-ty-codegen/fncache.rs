@@ -176,7 +176,8 @@ pub(super) fn cache_code(
 
 /// For each of `roots`, the functions a test harness runs, a hash of the code of the function
 /// and of everything it reaches, as [`cache_code`] hashes a cached body, for a test to be run
-/// again only once that changed. `Err` says why what the test does is not all in its code: it
+/// again only once that changed. `Err` says why what the test does is not all in its code, and
+/// by what calls: it
 /// reaches what ra-jit can't compile, or the world outside the program (files, the
 /// environment, processes, the network), and is run every time.
 ///
@@ -186,7 +187,7 @@ pub(super) fn cache_code(
 pub fn tests_reach(
     db: &dyn HirDatabase,
     roots: &[FunctionId],
-) -> Vec<std::result::Result<u128, String>> {
+) -> Vec<std::result::Result<u128, AlwaysRun>> {
     let mut walk = Walk::new(db, false);
     walk.tests = true;
     let starts: Vec<u32> = roots.iter().map(|&it| walk.reach(Node::Root(it))).collect();
@@ -199,31 +200,48 @@ pub fn tests_reach(
         (FORMAT, "tests", super::target::Target::current().triple(), super::store::toolchain());
     let mut local: FxHashMap<u32, u32> = FxHashMap::default();
     let mut order: Vec<u32> = Vec::new();
+    // Where in `order` the node that first reached each one is.
+    let mut from: Vec<u32> = Vec::new();
     starts
         .into_iter()
         .map(|start| {
             local.clear();
             order.clear();
+            from.clear();
             local.insert(start, 0);
             order.push(start);
+            from.push(0);
             let mut at = 0;
             while let Some(&node) = order.get(at) {
-                at += 1;
-                if walk.uncompiled.contains(&node) {
+                let why = if walk.uncompiled.contains(&node) {
                     let what = describe(db, &walk.nodes[node as usize].node);
-                    return Err(format!("it reaches {what}, which ra-jit can't compile"));
-                }
-                if let Node::Leaf(name, _) = &walk.nodes[node as usize].node
+                    Some(format!("it reaches {what}, which ra-jit can't compile"))
+                } else if let Node::Leaf(name, _) = &walk.nodes[node as usize].node
                     && let Some(what) = outside(name)
                 {
-                    return Err(format!("it reaches `{name}`, which {what}"));
+                    Some(format!("it reaches `{name}`, which {what}"))
+                } else {
+                    None
+                };
+                if let Some(why) = why {
+                    let mut path = vec![at];
+                    while path.last().is_some_and(|&it| it != 0) {
+                        path.push(from[path[path.len() - 1]] as usize);
+                    }
+                    let path = path.iter().rev().map(|&it| {
+                        let what = describe(db, &walk.nodes[order[it] as usize].node);
+                        without_arguments(what.trim_matches('`'))
+                    });
+                    return Err(AlwaysRun { why, path: path.collect() });
                 }
                 for edge in &walk.nodes[node as usize].edges {
                     if let std::collections::hash_map::Entry::Vacant(it) = local.entry(edge.to) {
                         it.insert(order.len() as u32);
                         order.push(edge.to);
+                        from.push(at as u32);
                     }
                 }
+                at += 1;
             }
             let mut hasher = rustc_stable_hash::StableSipHasher128::new();
             header.hash(&mut hasher);
@@ -239,6 +257,36 @@ pub fn tests_reach(
             Ok(u128::from(low) | u128::from(high) << 64)
         })
         .collect()
+}
+
+/// Why a test [`tests_reach`] hashes is run every time.
+pub struct AlwaysRun {
+    /// What it reaches, and what that does.
+    pub why: String,
+    /// The fewest calls that take the test to it: the test, what it calls and so on, each by
+    /// its name without the types it is instantiated with.
+    pub path: Vec<String>,
+}
+
+/// `name` with each list of generic arguments after a `::` left out, as `…`.
+fn without_arguments(name: &str) -> String {
+    let mut out = String::with_capacity(name.len());
+    let mut depth = 0usize;
+    let mut previous = '\0';
+    for c in name.chars() {
+        match c {
+            '<' if depth > 0 => depth += 1,
+            '<' if out.ends_with("::") => {
+                depth = 1;
+                out.push_str("<…>");
+            }
+            '>' if depth > 0 && previous != '-' => depth -= 1,
+            _ if depth > 0 => {}
+            _ => out.push(c),
+        }
+        previous = c;
+    }
+    out
 }
 
 /// What a foreign function or static a test reaches does that the test's code does not
@@ -463,6 +511,12 @@ impl<'db> Walk<'db> {
             return (Node::Leaf(name(), None), site, false);
         }
         if self.tests {
+            // A seed is randomness, which is no more outside a test than the time is. A
+            // backtrace is shown, not a result: what it reads of the environment and the
+            // working directory changes what a failure prints.
+            if makes_seed(db, func) || of_backtrace(db, func) {
+                return (Node::Leaf(name(), None), site, false);
+            }
             // What a test reaches is all that decides how it ends, so only the toolchain's
             // code, which the hash has by its commit, is known by name.
             let named = instance.args.as_ref().iter().all(|it| it.region().is_some());
@@ -1125,6 +1179,15 @@ fn hasher_of<'db>(db: &dyn HirDatabase, ty: Ty<'db>) -> Option<Ty<'db>> {
         _ => return None,
     };
     args.as_slice().get(at)?.ty()
+}
+
+/// Whether `func` is a method of std's `Backtrace`, or of a trait for it.
+fn of_backtrace(db: &dyn HirDatabase, func: FunctionId) -> bool {
+    if !matches!(func.krate(db).data(db).origin, base_db::CrateOrigin::Lang(LangCrateOrigin::Std)) {
+        return false;
+    }
+    let ItemContainerId::ImplId(id) = func.lookup(db).container else { return false };
+    is_std_struct(db, db.impl_self_ty(id).skip_binder(), "Backtrace")
 }
 
 fn is_std_struct(db: &dyn HirDatabase, ty: Ty<'_>, name: &str) -> bool {

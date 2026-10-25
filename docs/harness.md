@@ -181,7 +181,12 @@ edit, from an empty or a filled store, with every line the daemon logged and the
 along the way: the readiness check of [#11](https://github.com/indexable-inc/ra-jit/issues/11),
 whose numbers are in [cargo.md](cargo.md#what-a-build-does). With `--max-wait S` it fails when
 the daemon was ready more than S seconds after the command returned; `--until TEXT` waits for a
-line the daemon logs, and `--memory` follows what its processes hold. Their docstrings say how to run them.
+line the daemon logs, and `--memory` follows what its processes hold. `warmstart.py PROJECT`
+times a start on a warm store with nothing of rustc's (`RA_JIT_RUSTC_BASE=0`, [#41](https://github.com/indexable-inc/ra-jit/issues/41)):
+a first checkout on an empty store, a second on the store it filled, that daemon stopped and
+started, and once more, each followed by a body edit and its undoing; it keeps what each worker
+said in `WORK/said-STEP.txt` and exits 1 when a program's output is not cargo's
+([research/warm-start.md](research/warm-start.md)). Their docstrings say how to run them.
 `bench.py` on real projects, with `benchreport.py`, is also what writes the README's build
 table: [benchmarks.md](benchmarks.md). Besides the edits `bench.py` times repeated cold builds
 against fresh cargo with an empty and with a warm store (`--cold-runs`), the same steps under

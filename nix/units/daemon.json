@@ -1,8 +1,8 @@
 {
  "dir": ".",
  "inputs": {
-  "Cargo.lock": "929c914f485676610a8cad9dd68cb32be5336f93007da688fc0f1f164e2a95b2",
-  "Cargo.toml": "e87399a1affd2eed8be10f9c4fd6786d0cf30ed62b16e08a1d240c90a09c298c"
+  "Cargo.lock": "84e7d3c79de55fe4a254d4b59709153dde6928a52ca6f2e1d1aaf314dc405ff2",
+  "Cargo.toml": "0ca34247b1ae7cbc5d94a9f3a80d6a384df42b2c2328a909278330c62e1228df"
  },
  "packages": {
   "adler2@2.0.1": {
@@ -5355,8 +5355,8 @@
    "repository": "https://github.com/salsa-rs/salsa",
    "rust_version": "1.88",
    "source": {
-    "checksum": "baf90a551c38f25ed8489111d3d5827aa18e1b85963f5e6a298505b1d1e2cb7e",
-    "kind": "registry"
+    "dir": "vendor/salsa-macro-rules",
+    "kind": "path"
    },
    "version": "0.28.5"
   },
@@ -5372,8 +5372,8 @@
    "repository": "https://github.com/salsa-rs/salsa",
    "rust_version": "1.88",
    "source": {
-    "checksum": "69dd77f86ec10e72e314f4ddf7c44c8d349e73cdff1aad524ba9668603fb0549",
-    "kind": "registry"
+    "dir": "vendor/salsa-macros",
+    "kind": "path"
    },
    "version": "0.28.5"
   },
@@ -5389,8 +5389,8 @@
    "repository": "https://github.com/salsa-rs/salsa",
    "rust_version": "1.88",
    "source": {
-    "checksum": "27d2e6e19e39591cd99c01ac4141544b4d012cfd0831348629b8187fa9fe6d34",
-    "kind": "registry"
+    "dir": "vendor/salsa",
+    "kind": "path"
    },
    "version": "0.28.5"
   },

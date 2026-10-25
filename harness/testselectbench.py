@@ -12,7 +12,8 @@ ones twice, the first recording what passed; the affected ones after bench.py's 
 (the first build after it may be cargo's), after a second edit of the same function, and every
 test after it. A row has the wall time, whether the daemon built it, how many tests ran and how
 many were skipped, and, from what the daemon wrote beside each test program, how many tests
-are run every time and the leading reasons. `--keep` writes what each step printed in DIR.
+are run every time and the leading reasons. `--keep` writes what each step printed in DIR, and
+under DIR/reach the files the daemon wrote beside each test program after the run with no edit.
 """
 import collections
 import glob
@@ -127,6 +128,13 @@ def project(name, args):
         rows.append(row(ws, env, args, "all", "every test"))
         rows.append(row(ws, env, args, "affected", "affected, first"))
         rows.append(row(ws, env, args, "affected", "affected, no edit"))
+        if KEEP:
+            # What the daemon wrote beside each program, before a run of every test removes it.
+            for top in (os.path.join(ws, "target"), home):
+                for path in glob.glob(os.path.join(top, "**", "tests-reach*"), recursive=True):
+                    kept = os.path.join(KEEP, "reach", os.path.basename(top), os.path.relpath(path, top))
+                    os.makedirs(os.path.dirname(kept), exist_ok=True)
+                    shutil.copy(path, kept)
         leaf = spec["edits"]["leaf"]
         edit(ws, leaf)
         rows.append(row(ws, env, args, "affected", "affected, leaf edit"))
