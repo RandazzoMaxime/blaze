@@ -136,6 +136,7 @@ where
                 database_key_index,
                 &mut completed_query.revisions,
                 &value,
+                revision,
             );
             old_memo
                 .header

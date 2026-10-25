@@ -89,6 +89,7 @@ where
                 database_key_index,
                 &mut completed_query.revisions,
                 &new_value,
+                zalsa.current_revision(),
             );
 
             // Diff the new outputs with the old, to discard any no-longer-emitted
