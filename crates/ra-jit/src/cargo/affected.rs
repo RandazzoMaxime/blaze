@@ -84,12 +84,14 @@ pub(crate) struct Passed {
 }
 
 impl Passed {
-    /// Forgets that the tests `ran` passed, all of them when `None`, as one of them failed: each
-    /// runs until it passes again, even as its code goes back to what passed before.
-    pub(crate) fn failed(mut self, ran: Option<&[String]>) {
-        match ran {
-            Some(ran) => ran.iter().for_each(|it| _ = self.tests.remove(it)),
-            None => self.tests.clear(),
+    /// Forgets that the tests `failed` passed, or, when the program did not say which failed,
+    /// all the tests `ran` (all of them when `None`): each runs until it passes again, even
+    /// as its code goes back to what passed before. The others that ran passed.
+    pub(crate) fn failed(mut self, ran: Option<&[String]>, failed: Option<&[String]>) {
+        match (failed, ran) {
+            (Some(failed), _) => failed.iter().for_each(|it| _ = self.tests.remove(it)),
+            (None, Some(ran)) => ran.iter().for_each(|it| _ = self.tests.remove(it)),
+            (None, None) => self.tests.clear(),
         }
         self.passed();
     }
