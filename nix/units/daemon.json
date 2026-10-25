@@ -1,8 +1,8 @@
 {
  "dir": ".",
  "inputs": {
-  "Cargo.lock": "84e7d3c79de55fe4a254d4b59709153dde6928a52ca6f2e1d1aaf314dc405ff2",
-  "Cargo.toml": "2ae9ee0a93e07924a08c9be79d73fa3ba00d85c32247f9d3ed5345be2fe7098a"
+  "Cargo.lock": "a54be79ac010da5bb43e31e0d5b87842c7942c7ca6c45f6c444fe33cdc7735b9",
+  "Cargo.toml": "ccdd6c2549a7450fafafa423ec0b1baea7a8aea38f2d746b2305a5ad977b6d27"
  },
  "packages": {
   "adler2@2.0.1": {
@@ -735,6 +735,23 @@
     "kind": "registry"
    },
    "version": "2.12.1"
+  },
+  "blaze-registry@0.1.0": {
+   "authors": "blaze contributors",
+   "description": "blaze's reading of registries and fetching of sources as cargo 1.99 does them, into cargo's directories and blaze's store, with no cargo",
+   "homepage": "",
+   "license": "MIT OR Apache-2.0",
+   "license_file": "",
+   "links": null,
+   "name": "blaze-registry",
+   "readme": "",
+   "repository": "https://github.com/indexable-inc/blaze",
+   "rust_version": "1.99",
+   "source": {
+    "dir": "crates/blaze-registry",
+    "kind": "path"
+   },
+   "version": "0.1.0"
   },
   "block-buffer@0.10.4": {
    "authors": "RustCrypto Developers",
