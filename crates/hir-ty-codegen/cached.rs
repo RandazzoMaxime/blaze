@@ -921,7 +921,7 @@ mod tests {
     }
 
     fn blob(relocs: Vec<(u32, DataId, i64)>, fn_relocs: Vec<(u32, FuncId)>) -> ConstBlob {
-        ConstBlob { bytes: vec![0; 24], relocs, fn_relocs, align: 8 }
+        ConstBlob { bytes: vec![0; 24], relocs, fn_relocs, align: 8, type_ids: Vec::new() }
     }
 
     /// Types each inside the one before, `depth` of them, by way of each kind of type that

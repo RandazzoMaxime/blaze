@@ -122,6 +122,9 @@ pub(super) struct TypeIdHasher<'a, 'db> {
     ours: bool,
     /// Whether the type names something of a crate rustc compiled nothing of.
     unbuilt: bool,
+    /// Whether the type names a closure of a crate whose code is ours, whose `TypeId` only
+    /// code instantiated with it asks for: see [`Self::closure`].
+    own_closure: bool,
     /// The innermost type that could not be hashed.
     pub(super) stuck: Option<String>,
 }
@@ -140,25 +143,26 @@ impl<'a, 'db> TypeIdHasher<'a, 'db> {
             owned,
             ours: false,
             unbuilt: false,
+            own_closure: false,
             stuck: None,
         }
     }
 
     /// rustc's hash of the type, or one of our own for a type that names something of a crate
-    /// rustc compiled nothing of: only code instantiated with such a type can ask for its
-    /// `TypeId`, and that code is all ours, so there is no hash of rustc's to agree with. Ours
-    /// stands on what the type is written in rather than on where, so that it is the same in
-    /// every build.
+    /// rustc compiled nothing of, or a closure of a crate whose code is ours: only code
+    /// instantiated with such a type can ask for its `TypeId`, and that code is all ours, so
+    /// there is no hash of rustc's to agree with. Ours stands on what the type is written in
+    /// rather than on where, so that it is the same in every build.
     pub(super) fn type_id(&mut self, ty: Ty<'db>) -> Option<u128> {
         let mut hasher = StableSipHasher128::new();
         if self.ty(&mut hasher, ty).is_none() {
-            (self.ours, self.unbuilt, self.stuck) = (true, false, None);
+            (self.ours, self.unbuilt, self.own_closure, self.stuck) = (true, false, false, None);
             self.binders.clear();
             self.signatures = 0;
             hasher = StableSipHasher128::new();
             hasher.write(b"ra-jit type");
             self.ty(&mut hasher, ty)?;
-            if !self.unbuilt {
+            if !self.unbuilt && !self.own_closure {
                 return None;
             }
         }
@@ -356,8 +360,12 @@ impl<'a, 'db> TypeIdHasher<'a, 'db> {
         let InferBodyId::DefWithBodyId(DefWithBodyId::FunctionId(func)) = owner else {
             return None;
         };
-        if !self.owned.contains(&func.krate(db)) {
-            return None;
+        // One of another crate is hashed as ours are when what it is instantiated with makes
+        // the type one only our code has, as a closure of ours does.
+        match self.owned.contains(&func.krate(db)) {
+            true => self.own_closure = true,
+            false if !self.ours => return None,
+            false => {}
         }
         let loc = func.lookup(db);
         let parent = match loc.container {

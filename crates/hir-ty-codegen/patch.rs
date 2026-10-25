@@ -1405,6 +1405,7 @@ impl Base {
         file: FileId,
         functions: &[FunctionId],
         statics: &[StaticId],
+        callers: &[FunctionId],
     ) {
         if !self.homed.insert(file) {
             return;
@@ -1458,7 +1459,7 @@ impl Base {
             };
             self.statics.insert(id, known);
         }
-        let homed = self.home_copies(db, symbols, functions);
+        let homed = self.home_copies(db, symbols, functions, callers);
         self.copies_homed.insert(file, homed);
         self.homes = Homes::new(&self.compiled, &self.crates, &self.files, &self.instances);
     }
@@ -1476,18 +1477,28 @@ impl Base {
     }
 
     /// Takes in rustc's copies of the generic functions of a file's modules, `functions` being
-    /// what is written in it: the instances its other functions reach, and those reach in turn,
-    /// that rustc's executable has. A patch replaces one under rustc's symbol, as it does a
-    /// closure. Whether those are all the copies the executable has of the functions of each
-    /// name: rustc also copies one for a caller elsewhere, of which nothing here knows.
+    /// what is written in it: the instances its other functions and `callers` reach, through
+    /// the generic ones of `callers` too, and those reach in turn, that rustc's executable
+    /// has, and the rest whose arguments rustc's path of them spells in types read back. A
+    /// patch replaces one under rustc's symbol, as it does a closure. Whether those are all
+    /// the copies the executable has of the functions of each name.
     fn home_copies(
         &mut self,
         db: &dyn HirDatabase,
         symbols: &dyn SymbolResolver,
         functions: &[FunctionId],
+        callers: &[FunctionId],
     ) -> FxHashMap<String, bool> {
-        let of_modules = |func: FunctionId| {
-            matches!(func.lookup(db).container, hir_def::ItemContainerId::ModuleId(_))
+        // Of a module or an `impl` that is not generic, as the outline of a file tells them.
+        let of_modules = |func: FunctionId| match func.lookup(db).container {
+            hir_def::ItemContainerId::ModuleId(_) => true,
+            hir_def::ItemContainerId::ImplId(imp) => {
+                let generics = hir_ty::generics::generics(db, imp.into());
+                !generics
+                    .iter(false)
+                    .any(|(id, _)| !matches!(id, hir_def::GenericParamId::LifetimeParamId(_)))
+            }
+            _ => false,
         };
         let generic: FxHashSet<FunctionId> = functions
             .iter()
@@ -1512,18 +1523,24 @@ impl Base {
                 }
             }
         }
+        let through: FxHashSet<FunctionId> = generic
+            .iter()
+            .copied()
+            .chain(callers.iter().copied().filter(|&it| copied_by_rustc(db, it)))
+            .collect();
         let note = |requests: &Requests, queue: &mut Vec<(Instance, StoredParamEnvAndCrate)>| {
             for request in &requests.funcs {
                 if let FuncTarget::Instance(instance, env) = &request.target
                     && let InstanceDef::Fn(func) = instance.def
-                    && generic.contains(&func)
+                    && through.contains(&func)
                 {
                     queue.push((instance.clone(), env.clone()));
                 }
             }
         };
         let mut queue = Vec::new();
-        for &root in functions.iter().filter(|&&it| !copied_by_rustc(db, it)) {
+        let roots = functions.iter().chain(callers).copied().filter(|&it| !copied_by_rustc(db, it));
+        for root in roots {
             let Ok(compiled) = compiled_root(db, root) else { continue };
             note(&compiled.requests, &mut queue);
             let env = closure_env(db, root);
@@ -1546,6 +1563,7 @@ impl Base {
             found.insert(instance, env);
         }
         let spelling = super::Spelling { db, symbols };
+        let mut homed_ones = Vec::new();
         for (instance, env) in found {
             let InstanceDef::Fn(func) = instance.def else { continue };
             // One the executable has no copy of under its path is left to what calls it.
@@ -1553,6 +1571,22 @@ impl Base {
                 continue;
             };
             let Some((_, symbol)) = copies.remove(&path) else { continue };
+            homed_ones.push((instance, env, symbol));
+        }
+        // One reached only through a `dyn`, or a generic caller past the search, is read off
+        // rustc's path of it.
+        copies.retain(|path, (func, symbol)| {
+            if unknown.contains(func) {
+                return true;
+            }
+            let Some(args) = spelling.instance_args(*func, path) else { return true };
+            let checked = super::crate_checks_overflow(db, func.krate(db)).unwrap_or(false);
+            let instance = Instance { def: InstanceDef::Fn(*func), args: args.store(), checked };
+            homed_ones.push((instance, closure_env(db, *func), std::mem::take(symbol)));
+            false
+        });
+        for (instance, env, symbol) in homed_ones {
+            let InstanceDef::Fn(func) = instance.def else { continue };
             let mark = closure_mark(db, &instance, &env, self.debug);
             if mark.is_none() {
                 unknown.insert(func);
