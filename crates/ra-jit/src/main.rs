@@ -4575,14 +4575,21 @@ fn rustc_symbols(binary: &Path) -> Option<Arc<symbols::Linked>> {
     let mut all = lock(&RUSTC_SYMBOLS);
     let names = match all.remove(binary)? {
         LinkedNames::Read(names) => names,
-        LinkedNames::Reading(thread) => match thread.join() {
-            Ok(Ok(names)) => Arc::new(names),
-            Ok(Err(error)) => {
-                eprintln!("reading the symbols of what rustc linked: {error:#}");
-                return None;
+        LinkedNames::Reading(thread) => {
+            let start = Instant::now();
+            let read = thread.join();
+            if std::env::var_os("RA_JIT_STATS").is_some() {
+                eprintln!("rustc-symbols-us: waited={}", start.elapsed().as_micros());
             }
-            Err(_) => return None,
-        },
+            match read {
+                Ok(Ok(names)) => Arc::new(names),
+                Ok(Err(error)) => {
+                    eprintln!("reading the symbols of what rustc linked: {error:#}");
+                    return None;
+                }
+                Err(_) => return None,
+            }
+        }
     };
     all.insert(binary.to_owned(), LinkedNames::Read(names.clone()));
     Some(names)
