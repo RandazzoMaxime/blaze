@@ -783,8 +783,8 @@ fn try_complete_cycle_head(
 
     // It's important to force a re-execution of the cycle if `changed_at` or `durability` has changed
     // to ensure the reduced durability and changed propagates to all queries depending on this head.
-    let metadata_converged = last_provisional_revisions.durability
-        == completed_query.revisions.durability
+    let metadata_converged = last_provisional_revisions.durability.load()
+        == completed_query.revisions.durability.load()
         && last_provisional_revisions.changed_at == completed_query.revisions.changed_at
         && last_provisional_revisions.is_derived_untracked()
             == completed_query.revisions.is_derived_untracked();

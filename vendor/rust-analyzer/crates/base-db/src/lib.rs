@@ -136,7 +136,11 @@ impl Files {
             Entry::Occupied(mut occupied) => {
                 occupied.get_mut().set_text(db).with_durability(durability).to(Arc::from(text));
             }
+            // A file's first text is as durable as the files of its root: an edit then verifies
+            // only what read the files edited since the program was loaded, each of which is
+            // set at the durability asked for from its first edit on.
             Entry::Vacant(vacant) => {
+                let durability = durability.max(Durability::MEDIUM);
                 let text =
                     FileText::builder(Arc::from(text), file_id).durability(durability).new(db);
                 vacant.insert(text);

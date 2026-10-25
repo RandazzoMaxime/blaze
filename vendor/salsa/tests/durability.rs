@@ -48,3 +48,38 @@ fn durable_to_less_durable() {
 
     assert_eq!(add3(&db, a, b, c), 77);
 }
+
+static SUMS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+#[salsa::tracked(returns(copy))]
+fn counted_add3(db: &dyn Database, a: N, b: N, c: N) -> u32 {
+    SUMS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    add(db, a, b) + c.value(db)
+}
+
+/// A value that became less durable but is the same is backdated: what read it is verified
+/// rather than run again, and takes the lower durability, so a change after reaches it.
+#[test]
+fn less_durable_is_backdated() {
+    let mut db = salsa::DatabaseImpl::new();
+    let runs = || SUMS.load(std::sync::atomic::Ordering::Relaxed);
+
+    let a = N::builder(11).value_durability(Durability::HIGH).new(&db);
+    let b = N::builder(22).value_durability(Durability::HIGH).new(&db);
+    let c = N::builder(33).value_durability(Durability::HIGH).new(&db);
+    assert_eq!(counted_add3(&db, a, b, c), 66);
+    assert_eq!(runs(), 1);
+
+    a.set_value(&mut db).with_durability(Durability::LOW).to(11);
+    assert_eq!(counted_add3(&db, a, b, c), 66);
+    assert_eq!(runs(), 1);
+
+    a.set_value(&mut db).to(22);
+    assert_eq!(counted_add3(&db, a, b, c), 77);
+    assert_eq!(runs(), 2);
+
+    // Only what is of low durability changed: the sum is verified without walking to `a`.
+    db.synthetic_write(Durability::LOW);
+    assert_eq!(counted_add3(&db, a, b, c), 77);
+    assert_eq!(runs(), 2);
+}

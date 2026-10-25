@@ -36,7 +36,7 @@ where
         let revisions = &memo.header.revisions;
         zalsa_local.report_tracked_read(
             database_key_index,
-            revisions.durability,
+            revisions.durability.load(),
             revisions.changed_at,
             memo.header.cycle_heads(),
             #[cfg(feature = "accumulator")]
