@@ -36,7 +36,7 @@ kept, with the error in `failed`) and the run goes on. Either way the run ends w
 after writing the result.
 The result also names the commit of ra-jit, the date and the machine
 (`RA_JIT_BENCH_MACHINE` names it, for example the instance type); `benchreport.py` turns it
-into the README's table and docs/benchmarks.md.
+into docs/benchmarks.md's tables and the README's numbers.
 
 For every phase the result has the wall time of the command, cargo's time for the same
 step, the memory of both sides (`memory`: the most every process doing the work held at once,

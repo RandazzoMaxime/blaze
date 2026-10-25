@@ -79,13 +79,15 @@ class Row:
         _, states = wait_warm(side, os.path.realpath(ws or self.ws))
         return states
 
-    def both(self, label, command="run", ws=None, env=None, args=(), want=None):
-        """Compares `cargo ra-jit COMMAND` with a cold `cargo COMMAND` of the tree."""
+    def both(self, label, command="run", ws=None, env=None, args=(), want=None, reference_env=None):
+        """Compares `cargo ra-jit COMMAND` with a cold `cargo COMMAND` of the tree, the latter
+        with `reference_env` over `env`."""
         ws, env = ws or self.ws, dict(self.env, **(env or {}))
         _, ours = Side(ws, env, True).cargo(command, *args, timeout=1800)
         reference = self.path("target-ref", ws=os.path.realpath(ws))
         shutil.rmtree(reference, ignore_errors=True)
-        _, theirs = Side(ws, dict(env, CARGO_TARGET_DIR=reference), False).cargo(command, *args, timeout=1800)
+        theirs_env = dict(env, CARGO_TARGET_DIR=reference, **(reference_env or {}))
+        _, theirs = Side(ws, theirs_env, False).cargo(command, *args, timeout=1800)
         read = test_results if command == "test" else program_output
         differs = difference(read(ours), read(theirs))
         how = how_built(ours.stderr)
@@ -428,9 +430,9 @@ def says_its_rustc(row):
 
 def toolchain_switched(row):
     """The toolchain file of the directory changes under a live daemon, as `rustup
-    override` or a checkout does."""
+    override` or a checkout does. `cargo ra-jit` builds with the release it compiles whatever
+    the file says (#269), so what it builds is cargo's under that release, and the daemon's."""
     says_its_rustc(row)
-    env = {"RUSTUP_TOOLCHAIN": ""}
     file = row.path("rust-toolchain.toml")
     ours = lambda version: in_place(file, f'[toolchain]\nchannel = "{version}"\n')
     ours(row.env["RUSTUP_TOOLCHAIN"])
@@ -438,32 +440,33 @@ def toolchain_switched(row):
     row.warm()
     row.both("the toolchain ra-jit is built for", want=f"rustc {TOOLCHAIN}")
     ours(OTHER_TOOLCHAIN)
-    how, _ = row.both(f"the file now says {OTHER_TOOLCHAIN}", want=f"rustc {OTHER_TOOLCHAIN}")
-    if how == "daemon":
-        raise Wrong("the daemon built for a toolchain it does not compile for")
+    as_ours = {"RUSTUP_TOOLCHAIN": TOOLCHAIN}
+    row.both(f"the file now says {OTHER_TOOLCHAIN}", reference_env=as_ours, want=f"rustc {TOOLCHAIN}")
     row.edit()
-    row.both(f"edited under {OTHER_TOOLCHAIN}", want=f"mark {row.mark}")
+    how, _ = row.both(f"edited under {OTHER_TOOLCHAIN}", reference_env=as_ours, want=f"mark {row.mark}")
+    if how != "daemon":
+        raise Wrong(f"an edit under a file naming {OTHER_TOOLCHAIN} was not the daemon's: {how}")
     ours(TOOLCHAIN)
     row.edit()
     row.both("the file says the first again", want=f"rustc {TOOLCHAIN}")
-    wait_warm(Side(row.ws, row.env, True), row.ws)
     row.edit()
     row.both("edited after that", want=f"mark {row.mark}")
 
 
 def toolchains_in_turn(row):
-    """Two toolchains named by the environment of the client, turn by turn."""
+    """Two toolchains named by the environment of the client, turn by turn: `cargo ra-jit`
+    builds with the release it compiles under both (#269)."""
     says_its_rustc(row)
     row.warm()
     for round in range(3):
         for version in (OTHER_TOOLCHAIN, TOOLCHAIN):
             row.edit()
-            how, ran = row.both(f"{version}, {round}", env={"RUSTUP_TOOLCHAIN": version}, want=f"rustc {version}")
+            how, ran = row.both(f"{version}, {round}", env={"RUSTUP_TOOLCHAIN": version},
+                                reference_env={"RUSTUP_TOOLCHAIN": TOOLCHAIN}, want=f"rustc {TOOLCHAIN}")
             if f"mark {row.mark}" not in ran.stdout:
                 raise Wrong(f"{version}, {round}: not the edit")
-            if how == "daemon" and version == OTHER_TOOLCHAIN:
-                raise Wrong("the daemon built for a toolchain it does not compile for")
-        wait_warm(Side(row.ws, row.env, True), row.ws)
+            if how != "daemon":
+                raise Wrong(f"{version}, {round}: not the daemon's: {how}")
 
 
 def pinned_to_a_nightly(row):

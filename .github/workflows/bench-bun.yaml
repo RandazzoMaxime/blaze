@@ -2,7 +2,7 @@
 # platform's dedicated benchmark machine, nightly: the edits of harness/bench.py and the runtime
 # of harness/runbench.py, stored as docs/benchmarks/bun-<platform>.json and
 # runtime-bun-<platform>.json (`benchreport.py --name bun`) and shown as a project like the others
-# in the README's tables and charts, which benchreport.py writes again from every stored result
+# in the tables and charts of docs/benchmarks.md, which benchreport.py writes again from every stored result
 # (docs/research/bun.md says what it is). The platforms and their runners are bench-readme's
 # (harness/benchplatforms.py, BENCH_RUNNERS); one whose runner is not registered is skipped and
 # keeps its last numbers. Too slow for every push: bun's own build of its C and C++ (once per

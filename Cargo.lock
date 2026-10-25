@@ -651,6 +651,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "blaze-build-script"
+version = "0.1.0"
+dependencies = [
+ "rustc-hash 2.1.2",
+ "serde",
+ "serde_derive",
+ "serde_json",
+]
+
+[[package]]
 name = "blaze-core"
 version = "0.1.0"
 dependencies = [

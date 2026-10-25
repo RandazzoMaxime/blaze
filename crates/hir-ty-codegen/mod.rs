@@ -4792,14 +4792,15 @@ impl<'a, 'db> ObjectCodegen<'a, 'db> {
     }
 
     /// Whether the checkout's own functions are kept in the store and put in the object from
-    /// it: in a build with nothing of rustc's that is no patch, where every one is a root under
-    /// a symbol of ours and nothing an edit changes is told by the code being compiled here.
+    /// it: in a build that is no patch, with what rustc built linked beside it or not, where
+    /// every one is a root under a symbol of ours. A build spliced into rustc's executable
+    /// names what only that one has.
     fn roots_from_store(&self) -> bool {
         self.hydrate
             && self.base.is_none()
             && self.tiers.is_none()
             && self.entries.is_some()
-            && self.symbols.nothing_of_rustc()
+            && !self.symbols.onto_rustcs()
     }
 
     /// The name of `func` when the store has its code whole, for a root no round asked about.

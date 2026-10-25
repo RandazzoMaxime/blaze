@@ -534,6 +534,23 @@ impl Frozen {
             || self.edited_bodies.contains(&body_file(db, root.into()))
     }
 
+    /// Whether an edit since the daemon started can have changed what rustc compiled of a
+    /// function of `krate` that is generic over nothing: an edit of the crate, or of what it
+    /// depends on, which is in `edited` too; or of the bodies of a file of the crate or of one
+    /// it depends on, whose generic and inline functions rustc copies into it.
+    fn touched_from(&self, db: &dyn HirDatabase, krate: Crate) -> bool {
+        if self.edited.contains(&krate) {
+            return true;
+        }
+        if self.edited_bodies.is_empty() {
+            return false;
+        }
+        let crates: FxHashSet<Crate> = krate.transitive_deps(db).into_iter().collect();
+        self.edited_bodies
+            .iter()
+            .any(|&file| base_db::relevant_crates(db, file).iter().any(|it| crates.contains(it)))
+    }
+
     fn touched(&self, db: &dyn HirDatabase, reached: &Reached) -> bool {
         let bodies = match &reached.files {
             // What it calls is of its crates or of what they depend on: rustc copies the
@@ -583,7 +600,10 @@ impl Frozen {
                 // Nothing to tell a change by: any edit that it can see may be one.
                 Some(Some(Left { code: None, .. })) => !self.touched_root(db, root),
                 Some(Some(was)) => probe(|| Left::of(db, root)).as_ref() == Some(was),
-                Some(None) | None => false,
+                Some(None) => false,
+                // Not left at first, as one compiled then: rustc's copy is still of the source
+                // the daemon started with, when no edit since reaches it.
+                None => !self.touched_from(db, root.krate(db)),
             };
             (!fresh).then(|| OutOfDate {
                 func: Some(root),
@@ -625,8 +645,18 @@ impl Frozen {
         let mut forwarded = base.instances.iter().filter(|it| edited && it.1.forwarded);
         forwarded.find_map(|(it, known)| {
             let (crates, files) = (mentioned_crates(db, it), known.files.as_deref());
-            let untouched = crates.is_some_and(|it| it.is_disjoint(&self.edited))
-                && files.is_some_and(|it| it.iter().all(|it| !self.edited_bodies.contains(it)));
+            let untouched = match (crates, files) {
+                (Some(crates), Some(files)) => {
+                    crates.is_disjoint(&self.edited)
+                        && files.iter().all(|it| !self.edited_bodies.contains(it))
+                }
+                // Of a function generic over nothing, rustc's copy has only what its crate
+                // and those below it wrote.
+                _ if it.args.as_ref().iter().all(|arg| arg.region().is_some()) => {
+                    written_in(db, it).is_some_and(|func| !self.touched_from(db, func.krate(db)))
+                }
+                _ => false,
+            };
             (!untouched).then(|| OutOfDate {
                 func: written_in(db, it),
                 why: "an instance of it does not compile".to_owned(),
