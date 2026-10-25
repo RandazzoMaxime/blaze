@@ -31,10 +31,10 @@ daemon (`daemon.sock`) one line, `edit\t<path>\t<text>` with backslash, newline,
 carriage return escaped, the way an editor tells a language server `didChange`. The daemon
 hands it to the worker that has the file's checkout loaded; the worker sets the text into
 rust-analyzer's database, builds the programs that have the file from it, publishes the patch
-and answers as it answers `cargo ra-jit build` (`ok patch=... ms=N`, `ok unchanged`, `error:
+and answers as it answers `cargo blaze build` (`ok patch=... ms=N`, `ok unchanged`, `error:
 ...`). An edit that comes while the last one of the file is being built waits, and one typed
 over before it was built is answered `ok superseded`. The editor writes the file afterwards;
-the worker sees the same text it built and builds nothing for the write. `cargo ra-jit build`
+the worker sees the same text it built and builds nothing for the write. `cargo blaze build`
 is still the first build and link, and works as before. The Game of Life demo
 (`demo/life`) does this on every key, and `harness/live_latency.py socket` times it.
 
@@ -130,7 +130,7 @@ time edits ([#9](https://github.com/indexable-inc/ra-jit/issues/9)):
   a word, with a typo and its backspace now and then, the whole file sent on each key with one
   edit in flight. Most texts in between do not compile; n is the keys whose text does. A key
   is run by a patch, or by a restart: a program told to restart, or whose executable the daemon
-  linked again, is built (`cargo ra-jit build`) and started again as a launcher would, and the
+  linked again, is built (`cargo blaze build`) and started again as a launcher would, and the
   keys up to the text built are timed to it.
 
 Measured on 2026-10-20 on a MacBook Pro (Mac17,6, Apple M5 Max, 18 cores, 128 GiB, macOS
@@ -171,7 +171,7 @@ A key that is typed over before it is sent is not sent; whether its text compile
 the daemon after the round, off the clock. One probe key was never run.
 
 **Restarts.** `restart` sends a session of edits one at a time, mostly bodies and a few type
-changes, and times each restart (the edit, `cargo ra-jit build`, the program to its first
+changes, and times each restart (the edit, `cargo blaze build`, the program to its first
 answer) against plain incremental `cargo build` of the same source and its start (`cargo
 run`), in a target directory of its own:
 
@@ -180,7 +180,7 @@ run`), in a target directory of its own:
 | probe | 16 | 4 of 4 type changes | 186 (202) | 370 (401) |
 | life | 24 | 4 of 6 type changes | 451 (484) | 1,424 (2,014) |
 | egui | 20 | 6 of 6 type changes | 405 (524) | 1,136 (1,275) |
-| bevy | 6 | none: refused | `cargo ra-jit build` fails | 2,303 and 1,631 |
+| bevy | 6 | none: refused | `cargo blaze build` fails | 2,303 and 1,631 |
 
 Every body edit of a session was applied live (probe 4 to 9 ms, life 11 to 29, egui 13 to 78).
 life's two type changes that did not restart add a struct no running code has values of.
@@ -210,11 +210,11 @@ ms to its first answer (it reserves its patch room and reads its executable firs
   rustc symbol`). Every edit that reaches it is answered `` error: `main` is not compiled by
   ra-jit`` though the text compiles: 108 of its 180 compiling keys, run only by the restart
   after the next key ra-jit takes. A type change its systems use (a field of `Ship`) makes
-  `cargo ra-jit build` itself fail with the same error, so the program cannot be started again
+  `cargo blaze build` itself fail with the same error, so the program cannot be started again
   through ra-jit at all; the session stops there, and plain cargo builds the same source in 1.3
   to 2.0 s.
 - `error: no program built has <file>` answered 22 keys on probe and 15 on egui, right after a
-  relink, while the restart's `cargo ra-jit build` and the next edits arrived together
+  relink, while the restart's `cargo blaze build` and the next edits arrived together
   ([#32](https://github.com/indexable-inc/ra-jit/issues/32)). The program was being built
   for that build, in the background, and an edit asked meanwhile saw it as never built; now
   it waits for that build. The passes above went from 4 such answers on probe and 1 on egui
