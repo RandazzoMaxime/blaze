@@ -809,6 +809,24 @@ main cd48ca75f7 with the library shipped: ripgrep cold 39 -> 38 rustc runs (cros
 script), 4.4 -> 4.6 s; nushell cold 493 -> 490 (crossbeam-utils', portable-atomic's and
 bigdecimal's), 27.7 -> 28.0 s.
 
+Running scripts without cargo (the `blaze-scripts` lane, 2026-10-25, for K and
+[#298](https://github.com/indexable-inc/blaze/issues/298)) starts with
+`crates/blaze-build-script`, a crate that knows nothing of ra-jit and asks no cargo. Its
+`env` gives the whole environment cargo 1.99.0 runs a script with, ported from cargo's
+`custom_build.rs` and `compilation.rs` at 5f94df478 (the commit `cargo 1.99.0 -vV` names):
+cargo's own environment with `OUT_DIR`, `TARGET`, `HOST`, `NUM_JOBS`, `OPT_LEVEL`, `DEBUG`,
+`PROFILE`, `RUSTC`, `RUSTDOC`, `RUSTC_LINKER`, the wrappers (the workspace's for members
+alone, taken away when cargo uses none), `CARGO`, `CARGO_MANIFEST_*`, `CARGO_PKG_*`,
+`CARGO_FEATURE_*`, `CARGO_CFG_*` (values joined by commas, `CARGO_CFG_FEATURE` always,
+`debug_assertions` from the profile and not from rustc), `CARGO_ENCODED_RUSTFLAGS` with
+`RUSTFLAGS` taken away, `DEP_<links>_<key>` from the direct dependencies with `links`, `[env]`
+(never over what cargo sets, nor over cargo's environment unless forced), the jobserver's
+`CARGO_MAKEFLAGS`, and the host's dynamic library path as cargo builds it. A script is not
+given `CARGO_CRATE_NAME`, `CARGO_BIN_NAME`, `CARGO_PRIMARY_PACKAGE` or `CARGO_TARGET_TMPDIR`,
+which are rustc's. What it is computed from is a plain description of the run (`unit::Unit`:
+the package's fields, features, profile, the target's cfgs, the dependencies' metadata), for
+blaze's manifest reader and resolver to fill.
+
 **J. Proc macros compiled and loaded by ra-jit.** ([#90](https://github.com/indexable-inc/ra-jit/issues/90)) The proc-macro crate and its dependencies are
 compiled by ra-jit into a library that rust-analyzer's proc-macro server, running inside ra-jit,
 loads. `proc_macro` is ra-jit's from F, so the bridge matches the server, which is built from the
