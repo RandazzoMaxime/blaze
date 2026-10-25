@@ -515,6 +515,14 @@ All notable changes to ra-jit are written here. The format follows
 
 ### Fixed
 
+- On x86-64, an edit that replaces a function shorter than a jump (5 bytes) is spliced
+  instead of built in full ([#242](https://github.com/indexable-inc/blaze/issues/242)).
+  The jump goes over the `int3`s and `nop`s the linker padded the function with. When there
+  is no padding, as for a getter packed against the next function, the function gets a
+  2-byte `jmp` to a run of `int3`s within 127 bytes, which jumps on. biome's leaf edit
+  (`JsFormatOptions::quote_style`, whose patch also replaces `line_ending` and
+  `trailing_commas`, 4 bytes each) goes from 360.7 s and a 26.4 GB peak to 0.50 s (dev-aws-5,
+  16 cores, cranelift, 1 run; cargo 12.1 s). `harness/rustcbase.py` `short` and `hop` hold it.
 - A profile with `debug = "line-tables-only"` (or `1`, or `"limited"`) no longer has the type
   of every variable worked out. Only the lines were written, but the types were described for
   each function compiled and then thrown away. On Biome (`biome_cli`, 518 crates, whose dev

@@ -348,8 +348,11 @@ patch is (`splice::Baseline::spliced_whole`): each of its functions that rustc's
 redirected, the rest are new, and a function too short for the jump or a name rustc's has
 more than one of is one of the new. On x86-64 a function's room for the jump runs over the
 `int3`s and `nop`s the linker padded it with up to the next symbol, which is what a getter of
-one field needs (`mov`, `ret`: 4 bytes); a patch that has to redirect a function with no room
-is built in full. The executable is read again in the background with the
+one field needs (`mov`, `ret`: 4 bytes). A patch's function of 2 bytes or more with no such
+room hops: a 2-byte `jmp` to 5 bytes of a run of `int3`s between two functions within 127
+bytes of it (`Image::pads`), and a `jmp` on from there, both undone with the patch;
+`RA_JIT_SPLICE_HOPS` has every short function hop, for `rustcbase.py hop`. One of a single
+byte, or with no run near it, is built in full. The executable is read again in the background with the
 object's symbols in it, the base of the patches after, which name against rustc's symbols too
 and are spliced onto what the whole splice left, an `#[inline]` function's edit too, since that
 object has marks to compare with.
