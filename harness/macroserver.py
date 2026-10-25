@@ -299,7 +299,11 @@ def wired(work, root, meta, server):
     for named in (False, True):
         # A target directory of its own is seeded from cargo's, whose proc macros are rustc's.
         shutil.rmtree(os.path.join(root, "target"), ignore_errors=True)
-        env = {"RA_JIT_PROC_MACRO_SERVER": server} if named else {}
+        # A store of its own: one the libraries were built into serves code over symbols of
+        # the standard library this build, which names its crates, does not link.
+        env = {"RA_JIT_CACHE": os.path.join(work, f"store-wired-{named}")}
+        if named:
+            env["RA_JIT_PROC_MACRO_SERVER"] = server
         ran, took = ra_jit(root, crates, os.path.join(work, "wired.o"), "--own-target",
                            "--exe", program, env=env)
         how = "with the server named" if named else "without it"
