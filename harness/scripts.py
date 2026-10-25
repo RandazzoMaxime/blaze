@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """scripts.py: build scripts run by blaze (crates/blaze-build-script) against cargo's runs of them.
 
-usage: scripts.py [--work DIR] [--json OUT] [--jobs N] [name ...]
+usage: scripts.py [--work DIR] [--json OUT] [--jobs N] [--clean] [name ...]
 
 The corpus is the applications of apps/apps.json (bun aside, whose build needs its own C++
 first) and scripts/, a package that depends on crates whose scripts those do not run
@@ -214,7 +214,7 @@ def linkable(target):
     return any(k in ("lib", "rlib", "dylib", "proc-macro") for k in target["kind"])
 
 
-def project(name, spec, work, t, blaze, jobs):
+def project(name, spec, work, t, blaze, jobs, clean):
     ws = checkout(name, spec, work)
     target_dir = os.path.join(work, "target", name)
     # Every script runs, under the environment of this run of the harness.
@@ -464,6 +464,9 @@ def project(name, spec, work, t, blaze, jobs):
     with concurrent.futures.ThreadPoolExecutor(max_workers=max(1, jobs // 8)) as pool:
         rows = list(pool.map(blaze_run, runs))
     unmatched = len(recordings) - len(run_of)
+    if clean:
+        shutil.rmtree(target_dir, ignore_errors=True)
+        shutil.rmtree(blaze_dir, ignore_errors=True)
     return rows, unmatched, checked.returncode
 
 
@@ -474,6 +477,7 @@ def main():
     parser.add_argument("names", nargs="*")
     parser.add_argument("--work", default=os.path.join(HERE, "vendor", "scripts"))
     parser.add_argument("--json")
+    parser.add_argument("--clean", action="store_true", help="remove each project's builds once compared")
     parser.add_argument("--jobs", type=int, default=len(os.sched_getaffinity(0)) if hasattr(os, "sched_getaffinity")
                         else os.cpu_count())
     a = parser.parse_args()
@@ -485,7 +489,7 @@ def main():
     all_rows = []
     totals = [0] * 7
     for name in names:
-        rows, unmatched, status = project(name, specs[name], work, t, blaze, a.jobs)
+        rows, unmatched, status = project(name, specs[name], work, t, blaze, a.jobs, a.clean)
         all_rows += rows
         env_eq = sum(r["env_equal"] for r in rows)
         parse_rows = [r for r in rows if "parse_equal" in r]
