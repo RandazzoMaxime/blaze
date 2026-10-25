@@ -1587,6 +1587,8 @@ impl Rejections {
             left: longest(|it| it.left),
             roots_asked: self.stale.iter().map(|it| it.steps.roots_asked).sum(),
             instances_asked: self.stale.iter().map(|it| it.steps.instances_asked).sum(),
+            roots_unchanged: self.stale.iter().map(|it| it.steps.roots_unchanged).sum(),
+            instances_unchanged: self.stale.iter().map(|it| it.steps.instances_unchanged).sum(),
             slowest: longest(|it| it.slowest),
         }
     }
@@ -5684,11 +5686,12 @@ impl<'a, 'db> ObjectCodegen<'a, 'db> {
         let files = home::body_files(self.db, instance).and_then(|files| {
             files.iter().map(|&file| self.names.file_path(file)).collect::<Option<Vec<_>>>()
         });
+        let items = patch::written_items(self.db, &self.names, instance, compiled);
         let home = match self.names.of_the_checkout(home) {
             true => Some(self.names.content_id(home).ok_or("its crate has no content id")?.0),
             false => None,
         };
-        Ok(cached::Tracked { mark, home, files })
+        Ok(cached::Tracked { mark, home, files, items })
     }
 
     fn writer(&mut self, store: &'static store::Store) -> &mut cached::Writer {

@@ -9733,11 +9733,14 @@ impl Program {
                 steps.iter().map(|(name, took)| format!("{name}={}", took.as_micros())).collect();
             eprintln!("timeline-us: {}", steps.join(" "));
             eprintln!(
-                "asked: {} roots, {} instances, slowest {:.1?}; longest on a thread: roots {:.1?}, \
-                 instances {:.1?}, statics {:.1?}, left {:.1?}",
+                "asked: {} roots, {} instances, slowest {:.1?}; unchanged by their items: {} roots, \
+                 {} instances; longest on a thread: roots {:.1?}, instances {:.1?}, statics \
+                 {:.1?}, left {:.1?}",
                 warm.looked.roots_asked,
                 warm.looked.instances_asked,
                 warm.looked.slowest,
+                warm.looked.roots_unchanged,
+                warm.looked.instances_unchanged,
                 warm.looked.roots,
                 warm.looked.instances,
                 warm.looked.statics,

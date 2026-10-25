@@ -130,6 +130,27 @@ pub fn body_files(db: &dyn HirDatabase, instance: &Instance) -> Option<Box<[File
     Some(files.into())
 }
 
+/// The bodies of [`body_files`]: the one the code of an instance is written in, when it has
+/// one, and those it mentions a type of. `None` when that can't be told.
+pub(super) fn bodies_of(
+    db: &dyn HirDatabase,
+    instance: &Instance,
+) -> Option<(Option<DefWithBodyId>, Vec<DefWithBodyId>)> {
+    let mut mentions = Mentions::of(db, instance);
+    if mentions.opaque {
+        return None;
+    }
+    let written = match instance.def {
+        InstanceDef::Fn(_)
+        | InstanceDef::VtableShim(_)
+        | InstanceDef::Closure(_)
+        | InstanceDef::Coroutine(_)
+        | InstanceDef::CoroutineByMove(_) => Some(mentions.bodies.remove(0)),
+        _ => None,
+    };
+    Some((written, mentions.bodies))
+}
+
 /// The file a body is written in, which for one a macro makes is where the macro is called.
 pub fn body_file(db: &dyn HirDatabase, body: DefWithBodyId) -> FileId {
     let file = match body {
