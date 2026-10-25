@@ -7,8 +7,8 @@
    ],
    "code": 0,
    "warnings": [
-    "warning: Cargo.toml: profile `doc` is deprecated and has no effect",
     "warning: Cargo.toml: `panic` setting is ignored for `test` profile",
+    "warning: Cargo.toml: profile `doc` is deprecated and has no effect",
     "warning: profile package spec `e@9` in profile `dev` has a version or URL that does not match any of the packages: e v0.1.0 ($ROOT)",
     "warning: profile package spec `nomatch` in profile `dev` did not match any packages"
    ],
@@ -57,8 +57,8 @@
    ],
    "code": 0,
    "warnings": [
-    "warning: Cargo.toml: profile `doc` is deprecated and has no effect",
     "warning: Cargo.toml: `panic` setting is ignored for `test` profile",
+    "warning: Cargo.toml: profile `doc` is deprecated and has no effect",
     "warning: profile package spec `e@9` in profile `dev` has a version or URL that does not match any of the packages: e v0.1.0 ($ROOT)",
     "warning: profile package spec `nomatch` in profile `dev` did not match any packages"
    ],
@@ -109,8 +109,8 @@
    ],
    "code": 0,
    "warnings": [
-    "warning: Cargo.toml: profile `doc` is deprecated and has no effect",
     "warning: Cargo.toml: `panic` setting is ignored for `test` profile",
+    "warning: Cargo.toml: profile `doc` is deprecated and has no effect",
     "warning: profile package spec `e@9` in profile `dev` has a version or URL that does not match any of the packages: e v0.1.0 ($ROOT)",
     "warning: profile package spec `nomatch` in profile `dev` did not match any packages"
    ],
@@ -224,8 +224,8 @@
    ],
    "code": 0,
    "warnings": [
-    "warning: Cargo.toml: profile `doc` is deprecated and has no effect",
     "warning: Cargo.toml: `panic` setting is ignored for `test` profile",
+    "warning: Cargo.toml: profile `doc` is deprecated and has no effect",
     "warning: profile package spec `e@9` in profile `dev` has a version or URL that does not match any of the packages: e v0.1.0 ($ROOT)",
     "warning: profile package spec `nomatch` in profile `dev` did not match any packages"
    ],
@@ -275,8 +275,8 @@
    ],
    "code": 0,
    "warnings": [
-    "warning: Cargo.toml: profile `doc` is deprecated and has no effect",
     "warning: Cargo.toml: `panic` setting is ignored for `test` profile",
+    "warning: Cargo.toml: profile `doc` is deprecated and has no effect",
     "warning: profile package spec `e@9` in profile `dev` has a version or URL that does not match any of the packages: e v0.1.0 ($ROOT)",
     "warning: profile package spec `nomatch` in profile `dev` did not match any packages"
    ],
@@ -326,8 +326,8 @@
    ],
    "code": 0,
    "warnings": [
-    "warning: Cargo.toml: profile `doc` is deprecated and has no effect",
     "warning: Cargo.toml: `panic` setting is ignored for `test` profile",
+    "warning: Cargo.toml: profile `doc` is deprecated and has no effect",
     "warning: profile package spec `e@9` in profile `dev` has a version or URL that does not match any of the packages: e v0.1.0 ($ROOT)",
     "warning: profile package spec `nomatch` in profile `dev` did not match any packages"
    ],
@@ -377,8 +377,8 @@
    ],
    "code": 101,
    "warnings": [
-    "warning: Cargo.toml: profile `doc` is deprecated and has no effect",
-    "warning: Cargo.toml: `panic` setting is ignored for `test` profile"
+    "warning: Cargo.toml: `panic` setting is ignored for `test` profile",
+    "warning: Cargo.toml: profile `doc` is deprecated and has no effect"
    ],
    "error": "error: profile `nope` is not defined"
   },
@@ -414,8 +414,8 @@
    ],
    "code": 101,
    "warnings": [
-    "warning: Cargo.toml: profile `doc` is deprecated and has no effect",
-    "warning: Cargo.toml: `panic` setting is ignored for `test` profile"
+    "warning: Cargo.toml: `panic` setting is ignored for `test` profile",
+    "warning: Cargo.toml: profile `doc` is deprecated and has no effect"
    ],
    "error": "error: profile inheritance loop detected with profile `loop2` inheriting `loop1`"
   },
@@ -430,8 +430,8 @@
    },
    "code": 101,
    "warnings": [
-    "warning: Cargo.toml: profile `doc` is deprecated and has no effect",
-    "warning: Cargo.toml: `panic` setting is ignored for `test` profile"
+    "warning: Cargo.toml: `panic` setting is ignored for `test` profile",
+    "warning: Cargo.toml: profile `doc` is deprecated and has no effect"
    ],
    "error": "error: profile `noinherits` is missing an `inherits` directive (`inherits` is required for all profiles except `dev` or `release`)"
   },
@@ -445,8 +445,8 @@
    ],
    "code": 101,
    "warnings": [
-    "warning: Cargo.toml: profile `doc` is deprecated and has no effect",
-    "warning: Cargo.toml: `panic` setting is ignored for `test` profile"
+    "warning: Cargo.toml: `panic` setting is ignored for `test` profile",
+    "warning: Cargo.toml: profile `doc` is deprecated and has no effect"
    ],
    "error": "error: profile `missing` inherits from `zz`, but that profile is not defined"
   },
@@ -459,8 +459,8 @@
    },
    "code": 101,
    "warnings": [
-    "warning: Cargo.toml: profile `doc` is deprecated and has no effect",
-    "warning: Cargo.toml: `panic` setting is ignored for `test` profile"
+    "warning: Cargo.toml: `panic` setting is ignored for `test` profile",
+    "warning: Cargo.toml: profile `doc` is deprecated and has no effect"
    ],
    "error": "error: config profile `dev` is not valid (defined in `environment variable `CARGO_PROFILE_DEV``)\nCaused by:\n  `panic` setting of `bogus` is not a valid setting, must be `unwind`, `abort`, or `immediate-abort`."
   },
@@ -473,8 +473,8 @@
    },
    "code": 101,
    "warnings": [
-    "warning: Cargo.toml: profile `doc` is deprecated and has no effect",
-    "warning: Cargo.toml: `panic` setting is ignored for `test` profile"
+    "warning: Cargo.toml: `panic` setting is ignored for `test` profile",
+    "warning: Cargo.toml: profile `doc` is deprecated and has no effect"
    ],
    "error": "error: `inherits` must not be specified in root profile `dev`"
   },
@@ -486,8 +486,8 @@
    ],
    "code": 101,
    "warnings": [
-    "warning: Cargo.toml: profile `doc` is deprecated and has no effect",
-    "warning: Cargo.toml: `panic` setting is ignored for `test` profile"
+    "warning: Cargo.toml: `panic` setting is ignored for `test` profile",
+    "warning: Cargo.toml: profile `doc` is deprecated and has no effect"
    ],
    "error": "error: config profile `dev` is not valid (defined in `--config cli option`)\nCaused by:\n  `panic` may not be specified in a `package` profile"
   },
@@ -500,8 +500,8 @@
    ],
    "code": 101,
    "warnings": [
-    "warning: Cargo.toml: profile `doc` is deprecated and has no effect",
-    "warning: Cargo.toml: `panic` setting is ignored for `test` profile"
+    "warning: Cargo.toml: `panic` setting is ignored for `test` profile",
+    "warning: Cargo.toml: profile `doc` is deprecated and has no effect"
    ],
    "error": "error: config profile `release` is not valid (defined in `--config cli option`)\nCaused by:\n  `lto` setting of string `\"true\"` for `release` profile is not a valid setting, must be a boolean (`true`/`false`) or a string (`\"thin\"`/`\"fat\"`/`\"off\"`) or omitted."
   },
@@ -513,8 +513,8 @@
    ],
    "code": 101,
    "warnings": [
-    "warning: Cargo.toml: profile `doc` is deprecated and has no effect",
-    "warning: Cargo.toml: `panic` setting is ignored for `test` profile"
+    "warning: Cargo.toml: `panic` setting is ignored for `test` profile",
+    "warning: Cargo.toml: profile `doc` is deprecated and has no effect"
    ],
    "error": "error: config profile `dev` is not valid (defined in `--config cli option`)\nCaused by:\n  dir-name=\"x\" in profile `dev` is not currently allowed, directory names are tied to the profile name for custom profiles"
   }

@@ -134,9 +134,11 @@ fn run(
 ) -> anyhow::Result<String> {
     let root = root_manifest(command.manifest_path.as_deref(), ctx)?;
     let ws = Workspace::new(&root, ctx)?;
+    for warning in ws.workspace_warnings() {
+        let _ = writeln!(stderr, "warning: {warning}");
+    }
     for (path, warning) in ws.warnings() {
-        let rel = path.strip_prefix(ctx.config.cwd()).unwrap_or(path);
-        let _ = writeln!(stderr, "warning: {}: {warning}", rel.display());
+        let _ = writeln!(stderr, "warning: {}: {warning}", path.display());
     }
     let profiles = Profiles::new(
         ws.profiles(),

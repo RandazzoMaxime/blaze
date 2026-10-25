@@ -218,7 +218,9 @@ def profile_case(directory):
 
 
 def profile_warnings(stderr):
-    return [l for l in stderr.splitlines() if l.startswith("warning: ") and "profile" in l]
+    """The warnings about profiles, sorted: cargo prints those of manifests in `HashMap` order."""
+    message = lambda l: re.sub(r"^warning: \S*Cargo\.toml: ", "", l)
+    return sorted(l for l in stderr.splitlines() if l.startswith("warning: ") and "profile" in message(l) and "(manifest) generated" not in l)
 
 
 def reduce_graph(graph):

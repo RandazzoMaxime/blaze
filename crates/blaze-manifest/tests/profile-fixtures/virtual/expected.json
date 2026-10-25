@@ -6,7 +6,10 @@
     "build"
    ],
    "code": 0,
-   "warnings": [],
+   "warnings": [
+    "warning: Cargo.toml: `panic` setting is ignored for `bench` profile",
+    "warning: profiles for the non root package will be ignored, specify profiles at the workspace root:"
+   ],
    "graph": {
     "units": [
      {
@@ -190,7 +193,10 @@
     "--release"
    ],
    "code": 0,
-   "warnings": [],
+   "warnings": [
+    "warning: Cargo.toml: `panic` setting is ignored for `bench` profile",
+    "warning: profiles for the non root package will be ignored, specify profiles at the workspace root:"
+   ],
    "graph": {
     "units": [
      {
@@ -408,7 +414,10 @@
     "--no-run"
    ],
    "code": 0,
-   "warnings": [],
+   "warnings": [
+    "warning: Cargo.toml: `panic` setting is ignored for `bench` profile",
+    "warning: profiles for the non root package will be ignored, specify profiles at the workspace root:"
+   ],
    "graph": {
     "units": [
      {
@@ -592,7 +601,10 @@
     "--no-run"
    ],
    "code": 0,
-   "warnings": [],
+   "warnings": [
+    "warning: Cargo.toml: `panic` setting is ignored for `bench` profile",
+    "warning: profiles for the non root package will be ignored, specify profiles at the workspace root:"
+   ],
    "graph": {
     "units": [
      {
@@ -809,7 +821,10 @@
     "check"
    ],
    "code": 0,
-   "warnings": [],
+   "warnings": [
+    "warning: Cargo.toml: `panic` setting is ignored for `bench` profile",
+    "warning: profiles for the non root package will be ignored, specify profiles at the workspace root:"
+   ],
    "graph": {
     "units": [
      {
@@ -1024,7 +1039,10 @@
     "x86_64-unknown-linux-gnu"
    ],
    "code": 0,
-   "warnings": [],
+   "warnings": [
+    "warning: Cargo.toml: `panic` setting is ignored for `bench` profile",
+    "warning: profiles for the non root package will be ignored, specify profiles at the workspace root:"
+   ],
    "graph": {
     "units": [
      {
@@ -1239,7 +1257,10 @@
     "--no-run"
    ],
    "code": 0,
-   "warnings": [],
+   "warnings": [
+    "warning: Cargo.toml: `panic` setting is ignored for `bench` profile",
+    "warning: profiles for the non root package will be ignored, specify profiles at the workspace root:"
+   ],
    "graph": {
     "units": [
      {
@@ -1459,7 +1480,10 @@
     "../b/Cargo.toml"
    ],
    "code": 0,
-   "warnings": [],
+   "warnings": [
+    "warning: Cargo.toml: `panic` setting is ignored for `bench` profile",
+    "warning: profiles for the non root package will be ignored, specify profiles at the workspace root:"
+   ],
    "graph": {
     "units": [
      {
@@ -1614,7 +1638,10 @@
     "CARGO_INCREMENTAL": "1"
    },
    "code": 0,
-   "warnings": [],
+   "warnings": [
+    "warning: Cargo.toml: `panic` setting is ignored for `bench` profile",
+    "warning: profiles for the non root package will be ignored, specify profiles at the workspace root:"
+   ],
    "graph": {
     "units": [
      {

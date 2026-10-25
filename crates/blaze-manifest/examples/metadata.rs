@@ -63,9 +63,11 @@ fn run() -> anyhow::Result<()> {
     let ctx = Context::new(config);
     let root = root_manifest(manifest_path.as_deref(), &ctx)?;
     let ws = Workspace::new(&root, &ctx)?;
+    for warning in ws.workspace_warnings() {
+        eprintln!("warning: {warning}");
+    }
     for (path, warning) in ws.warnings() {
-        let rel = path.strip_prefix(ctx.config.cwd()).unwrap_or(path);
-        eprintln!("warning: {}: {warning}", rel.display());
+        eprintln!("warning: {}: {warning}", path.display());
     }
     let version = match format_version.as_deref() {
         None => {

@@ -38,6 +38,15 @@ fn error_text(stderr: &str) -> String {
         .join("\n")
 }
 
+/// A warning less the manifest it is about, as `harness/resolve.py`'s `profile_warnings` takes it.
+fn message(line: &str) -> &str {
+    let rest = &line["warning: ".len()..];
+    match rest.split_once(": ") {
+        Some((path, message)) if !path.contains(' ') && path.ends_with("Cargo.toml") => message,
+        _ => rest,
+    }
+}
+
 fn strings(value: &serde_json::Value) -> Vec<String> {
     value.as_array().unwrap().iter().map(|a| a.as_str().unwrap().to_owned()).collect()
 }
@@ -78,12 +87,13 @@ fn check(fixture: &Path, scratch: &Path) -> (usize, Vec<String>) {
         };
         let output = walk::main(&cwd, env, host, &args, &graph);
         let what = format!("{name} `{}`", args.join(" "));
-        let warnings: Vec<String> = output
+        let mut warnings: Vec<String> = output
             .stderr
             .lines()
-            .filter(|l| l.starts_with("warning: ") && l.contains("profile"))
+            .filter(|l| l.starts_with("warning: ") && message(l).contains("profile"))
             .map(normalize)
             .collect();
+        warnings.sort();
         if warnings != strings(&run["warnings"]) {
             failed.push(format!("{what}: warnings {warnings:?}, cargo's {}", run["warnings"]));
         }

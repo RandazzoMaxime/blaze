@@ -395,6 +395,7 @@ pub fn read_manifest(
         } else if normalized_toml.workspace.is_some() {
             to_virtual_manifest(normalized_toml, features, workspace_config, source_id, path, ctx)
                 .map(|mut m| {
+                    warnings.append(&mut m.warnings);
                     m.warnings = std::mem::take(&mut warnings);
                     EitherManifest::Virtual(Box::new(m))
                 })

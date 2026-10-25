@@ -21,6 +21,12 @@ All notable changes to ra-jit are written here. The format follows
   variable, with cargo's errors and unused-key warnings. Its `config` example is
   `cargo config get`, and `harness/resolve.py config` compares the two on config trees and
   every corpus repository: 103 of 103 equal over 767 runs ([resolve.md](docs/resolve.md)).
+- blaze-manifest computes profiles as cargo 1.99 gives them to units (`blaze_manifest::profiles`,
+  a port of cargo's): `dev`, `release`, `test`, `bench` and custom profiles through `inherits`,
+  package overrides, `build-override`, profiles from config files, `--config` and
+  `CARGO_PROFILE_*`, `CARGO_INCREMENTAL` and `CI`, with cargo's errors and warnings, and checks
+  each manifest's profiles as cargo does reading it. `harness/resolve.py profiles` compares
+  every unit's profile with cargo's `--unit-graph` (PROFILES_COUNTS) ([resolve.md](docs/resolve.md)).
 - `cargo ra-jit test` with `RA_JIT_TESTS=affected` runs, on Linux, each test that reaches a
   file, the environment, a process or the network in a sandbox of its own (#257): a process
   in new user, mount, network, IPC and PID namespaces, the machine's files read-only, the
