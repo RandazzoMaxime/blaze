@@ -127,6 +127,7 @@ fn main() {
     println!("dep {}", dep::value(2));
     dep::noop();
     println!("one {}", dep::one());
+    dep::enable();
     println!("enabled {}", dep::is_enabled());
     println!("asset {}", ASSET.trim());
     if args.first().is_some_and(|it| it == "panic") {
@@ -149,7 +150,10 @@ FILES = {
                       "#[inline(never)]\npub fn one() -> u8 {\n    1\n}\n\n"
                       "static ENABLED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);\n\n"
                       "#[inline(never)]\npub fn is_enabled() -> bool {\n"
-                      "    ENABLED.load(std::sync::atomic::Ordering::Relaxed)\n}\n",
+                      "    ENABLED.load(std::sync::atomic::Ordering::Relaxed)\n}\n\n"
+                      # An `asm!` with a `sym` is left to rustc, and with it `ENABLED`.
+                      "pub fn enable() {\n    unsafe { std::arch::asm!(\"/* {0} */\", sym one) };\n"
+                      "    ENABLED.store(true, std::sync::atomic::Ordering::Relaxed);\n}\n",
 }
 
 M = "app/src/main.rs"
@@ -252,10 +256,11 @@ SCENARIOS = {
     "generic-moved": ([[edit(M, '        "world".to_owned()\n', '        let it = "world";\n        it.to_owned()\n')]],
                       ["full"], 0, {}),
     "inline": ([[edit(M, "    x + 1\n}\n\nfn counted", "    x + 2\n}\n\nfn counted")]], ["full"], 0, {}),
-    # Builds in full leave dep's `is_enabled` to rustc (its private static has no symbol the new
-    # link can name), and no edit of app reaches rustc's copy: the builds stay the daemon's.
+    # A build in full leaves dep's `enable` to rustc, and with it `is_enabled`, whose static has
+    # no symbol a new link can name. No edit of app reaches rustc's copies: the builds stay the
+    # daemon's.
     "left-static": ([[edit(M, "    x + 1\n}\n\nfn counted", "    x + 2\n}\n\nfn counted")],
-                     [edit(M, "    x + 2\n}\n\nfn counted", "    x + 3\n}\n\nfn counted")]], ["full", "full"], 0, {}),
+                     [edit(M, "    x + 2\n}\n\nfn counted", "    x + 3\n}\n\nfn counted")]], ["full", "patch"], 0, {}),
     # Neither has a copy in rustc's executable, nothing there calls them: a patch has the one
     # copy, which the second edit calls.
     "inline-uncopied": ([[edit(D, "    x + 7\n", "    x + 70\n")],
