@@ -97,6 +97,7 @@ HARNESSES = [
     ("store", ["storefull.py"], {}, on("linux", "windows"), 2),
     ("store", ["storeshared.py"], {}, EVERYWHERE, None),
     ("store", ["storeguards.py"], {}, on("linux"), None),
+    ("store", ["storetracked.py"], {}, on("linux", "macos"), 2),
     ("daemon", ["stress.py"], {}, EVERYWHERE, 2),
     ("daemon", ["selects.py"], {}, on("linux"), 2),
     # MinIO as one program in ~/s3tools, which CI puts there on Linux.
