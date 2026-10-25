@@ -29,6 +29,12 @@ All notable changes to ra-jit are written here. The format follows
   directory of lock files (24 releases of twelve projects, zed's 70 git sources among them,
   write back byte for byte). A registry read from a lock file before its manifest is now named
   as cargo names it.
+- `blaze-resolve` resolves as cargo 1.99.0 does (#298): its resolver is cargo's, ported, with
+  backtracking, the conflict cache, `links`, prereleases, yanked versions only when locked,
+  `[replace]`, and versions preferred by `rust-version` or lowest first; the errors are cargo's.
+  Its tests are cargo's `resolver-tests`, the 37 of `resolve.rs` and the 20 of `validated.rs`
+  (whose check against a SAT solver is left out). cargo's unstable `-Zdirect-minimal-versions`
+  and publish-age policy are not ported.
 - `cargo ra-jit test` with `RA_JIT_TESTS=affected` runs, on Linux, each test that reaches a
   file, the environment, a process or the network in a sandbox of its own (#257): a process
   in new user, mount, network, IPC and PID namespaces, the machine's files read-only, the
