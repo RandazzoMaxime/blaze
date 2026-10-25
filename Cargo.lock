@@ -631,6 +631,33 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "84d7ced0ae9557296835c32bf1b1e02b44c746701f898460fb000d7eaa84f00a"
 
 [[package]]
+name = "blaze-registry"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "cargo-platform",
+ "filetime",
+ "flate2",
+ "http-body-util",
+ "hyper",
+ "hyper-rustls",
+ "hyper-util",
+ "libc",
+ "ra-jit-store",
+ "rustc-hash 2.1.2",
+ "rustc-stable-hash",
+ "semver",
+ "serde",
+ "serde_derive",
+ "serde_json",
+ "sha2 0.10.9",
+ "tar",
+ "tokio",
+ "toml",
+ "url",
+]
+
+[[package]]
 name = "block-buffer"
 version = "0.10.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
