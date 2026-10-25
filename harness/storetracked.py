@@ -49,27 +49,41 @@ pub fn scale<T: Into<u64>>(x: T) -> u64 {
 pub fn each<T: Copy + Into<u64>>(v: &[T]) -> u64 {
     v.iter().map(|&x| x.into() + 1).sum()
 }
+
+pub fn total(v: &[u64]) -> u64 {
+    walk(v, &|x| x * 2)
+}
+
+fn walk<F: Fn(u64) -> u64>(v: &[u64], f: &F) -> u64 {
+    match v {
+        [] => 0,
+        [x, rest @ ..] => f(*x) + walk(rest, f),
+    }
+}
 """,
     "app/Cargo.toml": '[package]\nname = "tapp"\nversion = "0.1.0"\nedition = "2021"\n\n'
                       '[dependencies]\ntlib = { path = "../lib" }\n',
     APP: """fn main() {
-    println!("{} {} {} {}", "a", tlib::scale(2u8), tlib::each(&[1u32, 2]), tlib::BASE);
+    println!("{} {} {} {} {}", "a", tlib::scale(2u8), tlib::each(&[1u32, 2]), tlib::BASE, tlib::total(&[1, 2]));
 }
 """,
 }
-FIRST = "a 6 5 10"
+FIRST = "a 6 5 10 6"
 # (what the step is, [(file, old, new)], what the program prints after it)
 STEPS = [
-    ("a generic function's body", [(LIB, "x.into() * 3", "x.into() * 4")], "a 8 5 10"),
+    ("a generic function's body", [(LIB, "x.into() * 3", "x.into() * 4")], "a 8 5 10 6"),
     # A closure is named by where in its body it is written: this one, and the instances
     # generic over it, get new names, and the ones from the store are called no more.
-    ("a line above a closure", [(LIB, "    v.iter()", "    let _ = 0u64;\n    v.iter()")], "a 8 5 10"),
-    ("a closure's body", [(LIB, "x.into() + 1", "x.into() + 2")], "a 8 7 10"),
-    ("a static's value", [(LIB, "BASE: u64 = 10", "BASE: u64 = 12")], "a 8 7 12"),
-    ("the program's own text", [(APP, '"a"', '"b"')], "b 8 7 12"),
+    ("a line above a closure", [(LIB, "    v.iter()", "    let _ = 0u64;\n    v.iter()")], "a 8 5 10 6"),
+    # The same of a recursive function's instance, which calls itself.
+    ("a line above a closure a recursive function takes", [(LIB, "    walk(v", "    let _ = 1u64;\n    walk(v")],
+     "a 8 5 10 6"),
+    ("a closure's body", [(LIB, "x.into() + 1", "x.into() + 2")], "a 8 7 10 6"),
+    ("a static's value", [(LIB, "BASE: u64 = 10", "BASE: u64 = 12")], "a 8 7 12 6"),
+    ("the program's own text", [(APP, '"a"', '"b"')], "b 8 7 12 6"),
     ("all of it taken back", [(LIB, "x.into() * 4", "x.into() * 3"), (LIB, "    let _ = 0u64;\n", ""),
-                              (LIB, "x.into() + 2", "x.into() + 1"), (LIB, "BASE: u64 = 12", "BASE: u64 = 10"),
-                              (APP, '"b"', '"a"')], FIRST),
+                              (LIB, "    let _ = 1u64;\n", ""), (LIB, "x.into() + 2", "x.into() + 1"),
+                              (LIB, "BASE: u64 = 12", "BASE: u64 = 10"), (APP, '"b"', '"a"')], FIRST),
 ]
 REBUILT = "compiling what the store had of the checkout"
 
