@@ -2083,7 +2083,7 @@ fn crates_called(db: &RootDatabase, krate: &str, args: &Args) -> Vec<Crate> {
     // A path that is written as its parts are ends the text of every path it is the end of,
     // which is all that most crates have to be asked.
     let plain = !krate.contains("//") && !krate.contains("./");
-    named_crates(db)
+    let mut found: Vec<Crate> = named_crates(db)
         .iter()
         .filter(|it| match (is_file, &it.root) {
             (true, Some(root)) if plain && !root.ends_with(krate) => false,
@@ -2096,7 +2096,18 @@ fn crates_called(db: &RootDatabase, krate: &str, args: &Args) -> Vec<Crate> {
             (false, _) => it.name.as_deref() == Some(krate),
         })
         .map(|it| it.krate)
-        .collect()
+        .collect();
+    // Built as `cargo test` builds them, a library and its unit tests are two crates of one
+    // root file, the tests alone with `cfg(test)`: the crate asked for first is the program's,
+    // and the others are what it links.
+    if args.cfg_test {
+        let tests = |it: &Crate| it.cfg(db).check_atom(&cfg::CfgAtom::Flag(intern::sym::test));
+        let first = *krate == args.krate;
+        if found.iter().any(|it| tests(it) == first) {
+            found.retain(|it| tests(it) == first);
+        }
+    }
+    found
 }
 
 /// A crate of the graph as naming one finds it.
@@ -5457,13 +5468,32 @@ fn broken_in(
                     hir::attach_db(&db, || {
                         files
                             .flat_map(|&file| {
-                                ide_diagnostics::semantic_diagnostics_within(
-                                    &db,
-                                    config,
-                                    &ide_db::assists::AssistResolveStrategy::None,
-                                    file,
-                                    within.clone(),
-                                )
+                                // A library's files are its unit tests' too, with what is
+                                // under `cfg(test)`: each crate built of them says what it
+                                // finds, where rust-analyzer would ask the first.
+                                let crates: Vec<_> = ide_db::base_db::relevant_crates(&db, file)
+                                    .iter()
+                                    .copied()
+                                    .filter(|it| within.as_ref().is_none_or(|w| w.contains(it)))
+                                    .collect();
+                                let each: Vec<_> = match crates.len() {
+                                    0 | 1 => vec![within.clone()],
+                                    _ => crates
+                                        .into_iter()
+                                        .map(|it| Some(Arc::new(FxHashSet::from_iter([it]))))
+                                        .collect(),
+                                };
+                                let db = &db;
+                                let each = each.into_iter().flat_map(move |within| {
+                                    ide_diagnostics::semantic_diagnostics_within(
+                                        db,
+                                        config,
+                                        &ide_db::assists::AssistResolveStrategy::None,
+                                        file,
+                                        within,
+                                    )
+                                });
+                                each.collect::<Vec<_>>()
                             })
                             .filter(|it| {
                                 let code = it.code.as_str();
@@ -5490,7 +5520,16 @@ fn broken_in(
     if found.is_empty() {
         return None;
     }
-    found.sort_by_key(|(at, ..)| (at.file_id, at.range.start()));
+    found.sort_by(|(a, a_code, a_said), (b, b_code, b_said)| {
+        (a.file_id, a.range.start(), a.range.end(), a_code, a_said).cmp(&(
+            b.file_id,
+            b.range.start(),
+            b.range.end(),
+            b_code,
+            b_said,
+        ))
+    });
+    found.dedup();
     let said = found
         .iter()
         .map(|(at, code, message)| {
