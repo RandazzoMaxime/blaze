@@ -13,7 +13,7 @@ use crate::plan::Selection;
 use super::{
     affected::{self, Pick},
     cli::Invocation,
-    say,
+    sandboxed, say,
     state::{Held, Kind, Program, State, as_built, cargo_path},
 };
 
@@ -173,13 +173,27 @@ pub(crate) fn tests(
 ) -> anyhow::Result<i32> {
     let mut failed = Vec::new();
     let (mut left, mut always_run) = (0, 0);
+    let sandbox = sandboxed::wanted(affected::on());
+    if let Some(Err(why)) = &sandbox {
+        say::fallback(
+            &format!("tests run outside a sandbox: {why}"),
+            "those that reach files, the environment, processes or the network run every time",
+        );
+    }
     for test in state.programs.iter().filter(|it| it.test) {
         let source = test.source.strip_prefix(&test.package_dir).unwrap_or(&test.source);
         let unit = if matches!(test.kind, Kind::Test | Kind::Bench) { "" } else { "unittests " };
         let shown = shown_path(&test.executable, cwd);
         let mut running = format!("{unit}{} ({shown})", source.display());
         let mut picked = Vec::new();
-        let pick = affected::pick(asked, state, test);
+        let mut command = Command::new(&test.executable);
+        configured(&mut command, state);
+        command.envs(test.env.iter().cloned());
+        command.current_dir(&test.package_dir);
+        as_built(&mut command)?;
+        let sandbox_env = matches!(sandbox, Some(Ok(()))).then(|| sandboxed::env(&command));
+        let identity = sandbox_env.as_deref().map(sandboxed::identity_of);
+        let pick = affected::pick(asked, state, test, identity.as_deref());
         if let Pick::Some { names: Some(names), total, .. } = &pick {
             left += total - names.len();
             if names.is_empty() {
@@ -192,7 +206,7 @@ pub(crate) fn tests(
             picked.extend(names.iter().cloned());
         }
         say::status(asked.flags.quiet, "Running", &running);
-        if let Pick::Some { always, .. } = &pick {
+        if let Pick::Some { always, apart, .. } = &pick {
             always_run += always.len();
             for test in always.iter().filter(|_| asked.flags.verbose) {
                 let by = test.path.as_ref().map(|it| format!(", by {it}")).unwrap_or_default();
@@ -202,12 +216,18 @@ pub(crate) fn tests(
                     &format!("{}: {}{by}", test.name, test.why),
                 );
             }
+            for (name, why) in apart.iter().filter(|_| asked.flags.verbose) {
+                say::status(asked.flags.quiet, "Sandboxed", &format!("{name}: {why}"));
+            }
+            let names: Vec<String> = apart.iter().map(|(name, _)| name.clone()).collect();
+            if let (Some(env), Some(dir), false) =
+                (sandbox_env, state.plan_dir(test), names.is_empty())
+            {
+                sandboxed::prepare(state, test, dir, &mut command, env, &names)
+                    .context("writing what the sandbox of the tests is")?;
+            }
         }
-        let mut command = Command::new(&test.executable);
-        configured(&mut command, state);
-        command.args(asked.program_args()).args(&picked).envs(test.env.iter().cloned());
-        command.current_dir(&test.package_dir);
-        as_built(&mut command)?;
+        command.args(asked.program_args()).args(&picked);
         let ran = match &pick {
             Pick::Some { .. } => listing_failures(&mut command, held.take(), state),
             Pick::Asked => ended(&mut command, held.take(), state).map(|it| (it, None)),
