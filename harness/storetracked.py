@@ -84,7 +84,8 @@ class Logs:
     the spare's log."""
 
     def __init__(self, home):
-        self.home, self.seen = home, {path: os.path.getsize(path) for path in self.paths()}
+        self.home = home
+        self.seen = {path: os.path.getsize(path) for path in self.paths()}
 
     def paths(self):
         return sorted(glob.glob(os.path.join(self.home, "*", "*", "log")))
