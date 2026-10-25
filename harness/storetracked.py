@@ -24,6 +24,11 @@ whose callers from the store call rustc's copy of it in the program's crate, and
 taken back. The program has to print what the source says, and no call of rustc's copy of a
 function of the checkout may be left out of the store (#216).
 
+An edit of one body takes the other code from the store of that file as it was, by the items
+each entry names reading as they did then, without compiling it to tell: the second daemon has
+to take some so on those edits, and the third, which compiles everything to check
+(`RA_JIT_CHECK_ALL`), must find none of what it would have taken changed.
+
 Python 3, stdlib only.
 """
 import glob
@@ -118,6 +123,12 @@ REBUILT = "compiling what the store had of the checkout"
 # that renames some of it, whose patch compiles that under the new names.
 KEEPING = {"a generic function's body", "a line above a closure", "a line above a closure a recursive function takes"}
 RENAMING = {"a closure above a closure"}
+# The steps that edit one body of a file whose other code the store had: the patch takes that
+# code as it was by its items, which read as they did, and compiles none of it to tell.
+UNCHANGED = {"a generic function's body", "a closure's body"}
+# What the daemon says under RA_JIT_CHECK_ALL of code it would have taken as it was by its
+# items and that changed.
+MISSED = "its items unchanged"
 # What a call of rustc's copy of a function of the checkout was left out of the store as (#216).
 UNKEPT = "rustc's copy of a function of the checkout"
 
@@ -157,6 +168,11 @@ class Logs:
     def anew(self):
         """How many instances each patch compiled that the base had no code for."""
         return [int(n) for n in re.findall(r"^patch: (\d+) instances the base has no code for$", self.text(), re.M)]
+
+    def unchanged(self):
+        """How much code each patch took as it was, its items reading as they did."""
+        return [int(r) + int(i) for r, i in
+                re.findall(r"unchanged by their items: (\d+) roots, (\d+) instances", self.text())]
 
 
 def program(ws):
@@ -203,11 +219,12 @@ def restart(ws, env, label, steps):
             text = open(path).read()
             assert old in text, (what, old)
             open(path, "w").write(text.replace(old, new, 1))
-        seen, seen_anew = len(logs.links()), len(logs.anew())
+        seen, seen_anew, seen_unchanged = len(logs.links()), len(logs.anew()), len(logs.unchanged())
         said = build(ws, env, what)
         printed = program(ws)
         made = logs.links()[seen:]
         anew = logs.anew()[seen_anew:]
+        unchanged = logs.unchanged()[seen_unchanged:]
         how = made[-1] if made else "no link"
         verdict = "ok"
         if printed != expected:
@@ -220,13 +237,19 @@ def restart(ws, env, label, steps):
             verdict = "NEW CODE"
         elif what in RENAMING and not (anew and anew[-1]):
             verdict = "NOTHING RENAMED"
+        elif what in UNCHANGED and "RA_JIT_CHECK_ALL" not in env and not (unchanged and unchanged[-1]):
+            verdict = "NONE BY ITEMS"
         wrong += verdict != "ok"
-        print(f"{label + ': ' + what:48} {verdict:12} {how[:100]}; {anew[-1] if anew else '?'} anew", flush=True)
+        print(f"{label + ': ' + what:48} {verdict:12} {how[:100]}; {anew[-1] if anew else '?'} anew, "
+              f"{unchanged[-1] if unchanged else '?'} by items", flush=True)
     if REBUILT in logs.text():
         print(f"{label}: NOT the store's code taken as it is: the daemon said `{REBUILT}`", flush=True)
         wrong += 1
     if UNKEPT in logs.text():
         print(f"{label}: NOT every call kept: the daemon said `{UNKEPT}`", flush=True)
+        wrong += 1
+    if MISSED in logs.text():
+        print(f"{label}: NOT the code taken by its items the code it was: the daemon said `{MISSED}`", flush=True)
         wrong += 1
     return wrong
 
@@ -258,7 +281,7 @@ def main():
         shutil.copytree(ws, copy, ignore=shutil.ignore_patterns("target"))
         wrong += restart(ws, here, "restart", STEPS)
         subprocess.run(["cargo", "ra-jit", "stop"], cwd=ws, env=here, capture_output=True, timeout=120)
-        wrong += restart(copy, there, "another checkout", STEPS[:1])
+        wrong += restart(copy, dict(there, RA_JIT_CHECK_ALL="1"), "another checkout", STEPS)
     finally:
         for at, env in ((ws, here), (copy, there)):
             if os.path.isdir(at):
