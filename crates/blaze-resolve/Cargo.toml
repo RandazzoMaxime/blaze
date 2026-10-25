@@ -18,6 +18,8 @@ anyhow.workspace = true
 rustc-hash.workspace = true
 cargo-platform = "0.3.3"
 semver.workspace = true
+serde = { workspace = true, features = ["derive"] }
+toml.workspace = true
 unicode-ident.workspace = true
 url.workspace = true
 

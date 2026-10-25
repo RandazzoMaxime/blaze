@@ -638,6 +638,8 @@ dependencies = [
  "cargo-platform",
  "rustc-hash 2.1.2",
  "semver",
+ "serde",
+ "toml",
  "unicode-ident",
  "url",
 ]

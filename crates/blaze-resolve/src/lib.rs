@@ -16,25 +16,32 @@
 //! - [`Dependency`]: what a manifest or index entry asks for.
 //! - [`Summary`]: one version of a package, with its [`FeatureMap`] of [`FeatureValue`]s.
 //! - [`Registry`]: what the resolver asks of the sources.
+//!
+//! [`Resolve`] is a resolved graph, and [`lockfile`] reads and writes it as `Cargo.lock`.
 
 mod dependency;
 mod edit_distance;
+mod graph;
 mod interning;
+pub mod lockfile;
 mod names;
 mod package_id;
 mod package_id_spec;
 mod registry;
+mod resolve;
 mod source_id;
 mod summary;
 mod version;
 
 pub use dependency::{DepKind, Dependency};
 pub use edit_distance::{closest, closest_msg, edit_distance};
+pub use graph::Graph;
 pub use interning::InternedString;
 pub use names::{validate_feature_name, validate_package_name, validate_registry_name};
 pub use package_id::PackageId;
 pub use package_id_spec::PackageIdSpec;
 pub use registry::{IndexSummary, MemRegistry, QueryKind, Registry};
+pub use resolve::{LockfileMetadata, Resolve, ResolveVersion};
 pub use source_id::{
     CRATES_IO_DOMAIN, CRATES_IO_HTTP_INDEX, CRATES_IO_INDEX, CRATES_IO_REGISTRY, CanonicalUrl,
     GitReference, Precise, SourceId, SourceIdAsUrl, SourceKind,
