@@ -56,6 +56,7 @@ pub(crate) fn command(args: impl Iterator<Item = String>) -> anyhow::Result<()> 
         Asked::Cargo(args) => plain_cargo(args)?,
         Asked::Cache(args) => cache(args)?,
         Asked::Status => status()?,
+        Asked::Apply(args) => daemon::api::run(&args)?,
         Asked::Stop => stop()?,
         Asked::Enable => switch::enable()?,
         Asked::Disable => switch::disable()?,
@@ -81,6 +82,9 @@ usage: cargo blaze <command> [cargo's flags]
                      otherwise what the daemon finds loading the workspace as it, with no rustc
   status             whether blaze is enabled, what the daemon has loaded, what fell back
   stop               ends the daemon; the next build starts one
+  apply PATH[=FROM]  files as one change of the loaded workspace: PATH as it is on disk, as the
+                     file FROM is, or deleted (`PATH=`); `--build` builds what has them,
+                     `--memory` writes none to disk, `--json` shows the daemon's answer
   enable, disable    plain `cargo build|run|test|check` through blaze, and back
   cache              what the `#[ra_jit::cache]` functions kept, by function
   cache clear        forgets it; `--stale`, all but what each function's code computed

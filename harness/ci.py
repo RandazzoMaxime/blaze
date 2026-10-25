@@ -98,6 +98,8 @@ HARNESSES = [
     ("store", ["storeshared.py"], {}, EVERYWHERE, None),
     ("store", ["storeguards.py"], {}, on("linux"), None),
     ("daemon", ["stress.py"], {}, EVERYWHERE, 2),
+    # The agent API: calls framed on the socket and over HTTP, transactions of files.
+    ("daemon", ["api.py"], {}, on("linux", "macos"), 1),
     ("daemon", ["selects.py"], {}, on("linux"), 2),
     # MinIO as one program in ~/s3tools, which CI puts there on Linux.
     ("daemon", ["remote.py"], {}, on("linux"), None),
