@@ -5,7 +5,8 @@ reached since they last passed, and no others.
 usage: testselect.py    (RA_JIT_BIN names the ra-jit built; cargo-ra-jit is found next to it)
 
 A package has a library with unit tests and an integration test of it: tests that call one
-function or another of the library, one that downcasts a `dyn Any` of what one returns (a
+function or another of the library, one in a private module named as a public function beside
+it, one that downcasts a `dyn Any` of what one returns (a
 `TypeId`, which code generation takes from rustc), one that keeps it in a `HashMap` (seeded at
 random), one that prints a backtrace (which reads the environment and the working directory),
 one that reads a file, one that calls nothing. It is tested until the daemon serves the build,
@@ -36,6 +37,28 @@ LIB = """pub fn helper(x: u32) -> u32 {
 
 pub fn other(x: u32) -> u32 {
     x * 2
+}
+
+// A private module and a public function of one name, the test reached through the module, as
+// helix-core's `increment::date_time`.
+pub mod shapes {
+    mod twice {
+        pub fn twice(x: u32) -> u32 {
+            2 * x
+        }
+
+        #[cfg(test)]
+        mod tests {
+            #[test]
+            fn doubles() {
+                assert_eq!(super::twice(2), 4);
+            }
+        }
+    }
+
+    pub fn twice(x: u32) -> u32 {
+        twice::twice(x)
+    }
 }
 
 #[cfg(test)]
@@ -97,7 +120,8 @@ fn it_other() {
 """,
 }
 CALL_HELPER = {"tests::uses_helper", "tests::uses_any", "tests::uses_a_map", "tests::shows_a_backtrace", "it_helper"}
-ALL = CALL_HELPER | {"tests::uses_other", "tests::reads_a_file", "tests::plain", "it_helper", "it_other"}
+ALL = CALL_HELPER | {"tests::uses_other", "tests::reads_a_file", "tests::plain", "it_helper", "it_other",
+                     "shapes::twice::tests::doubles"}
 FILE = "tests::reads_a_file"
 # (what the step is, [(file, old, new)], RA_JIT_TESTS, the tests that run, whether they pass)
 STEPS = [
