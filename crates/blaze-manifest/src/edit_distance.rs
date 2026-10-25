@@ -49,8 +49,10 @@ pub(crate) fn edit_distance(a: &str, b: &str, limit: usize) -> Option<usize> {
         for j in 1..=b.len() {
             let b_idx = j - 1;
             let substitution_cost = if a[a_idx] == b[b_idx] { 0 } else { 1 };
-            current[j] =
-                cmp::min(prev[j] + 1, cmp::min(current[j - 1] + 1, prev[j - 1] + substitution_cost));
+            current[j] = cmp::min(
+                prev[j] + 1,
+                cmp::min(current[j - 1] + 1, prev[j - 1] + substitution_cost),
+            );
             if (i > 1) && (j > 1) && (a[a_idx] == b[b_idx - 1]) && (a[a_idx - 1] == b[b_idx]) {
                 current[j] = cmp::min(current[j], prev_prev[j - 2] + 1);
             }
@@ -68,7 +70,9 @@ pub(crate) fn closest<'a, T>(
     iter: impl Iterator<Item = T>,
     key: impl Fn(&T) -> &'a str,
 ) -> Option<T> {
-    iter.filter_map(|e| Some((edit_distance(choice, key(&e), 3)?, e))).min_by_key(|t| t.0).map(|t| t.1)
+    iter.filter_map(|e| Some((edit_distance(choice, key(&e), 3)?, e)))
+        .min_by_key(|t| t.0)
+        .map(|t| t.1)
 }
 
 /// `closest` as the "help: a ... with a similar name exists" line cargo appends.

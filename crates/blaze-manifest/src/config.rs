@@ -3,11 +3,12 @@
 //! cargo's rules (`src/context/mod.rs` and `config_value.rs` there).
 
 use std::cell::OnceCell;
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::BTreeMap;
 use std::fmt;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context as _, anyhow, bail};
+use rustc_hash::{FxHashMap, FxHashSet};
 use url::Url;
 
 use crate::paths;
@@ -74,7 +75,7 @@ pub enum ConfigValue {
     Integer(i64, Definition),
     String(String, Definition),
     List(Vec<ConfigValue>, Definition),
-    Table(HashMap<String, ConfigValue>, Definition),
+    Table(FxHashMap<String, ConfigValue>, Definition),
     Boolean(bool, Definition),
 }
 
@@ -274,7 +275,7 @@ pub struct Config {
     env: BTreeMap<String, String>,
     /// The files are read at the first value asked for, and again at the next while they fail:
     /// a broken config file is an error only to what reads configuration, as in cargo.
-    values: OnceCell<HashMap<String, ConfigValue>>,
+    values: OnceCell<FxHashMap<String, ConfigValue>>,
 }
 
 impl Config {
@@ -294,7 +295,7 @@ impl Config {
         Ok(config)
     }
 
-    fn values(&self) -> anyhow::Result<&HashMap<String, ConfigValue>> {
+    fn values(&self) -> anyhow::Result<&FxHashMap<String, ConfigValue>> {
         if let Some(values) = self.values.get() {
             return Ok(values);
         }
@@ -304,7 +305,8 @@ impl Config {
 
     /// The configuration this process sees: its current directory and environment.
     pub fn from_process(cli: &[String]) -> anyhow::Result<Config> {
-        let cwd = std::env::current_dir().context("couldn't get the current directory of the process")?;
+        let cwd =
+            std::env::current_dir().context("couldn't get the current directory of the process")?;
         Config::load(&cwd, std::env::vars(), cli)
     }
 
@@ -321,10 +323,10 @@ impl Config {
         self.env.get(key).map(String::as_str)
     }
 
-    fn load_values(&self) -> anyhow::Result<HashMap<String, ConfigValue>> {
-        let mut cfg = CV::Table(HashMap::new(), Definition::BuiltIn);
+    fn load_values(&self) -> anyhow::Result<FxHashMap<String, ConfigValue>> {
+        let mut cfg = CV::Table(FxHashMap::default(), Definition::BuiltIn);
         self.walk_tree(&self.cwd, &self.home, |path| {
-            let value = self.load_file(path, &mut HashSet::new(), true, false)?;
+            let value = self.load_file(path, &mut FxHashSet::default(), true, false)?;
             cfg.merge(value, false)
                 .with_context(|| format!("failed to merge configuration at `{}`", path.display()))
         })
@@ -343,7 +345,7 @@ impl Config {
         home: &Path,
         mut walk: impl FnMut(&Path) -> anyhow::Result<()>,
     ) -> anyhow::Result<()> {
-        let mut seen_dir = HashSet::new();
+        let mut seen_dir = FxHashSet::default();
         let stop = self.env("__CARGO_TEST_ROOT").map(PathBuf::from);
         for current in paths::ancestors(pwd, stop.as_deref()) {
             let config_root = current.join(".cargo");
@@ -354,10 +356,11 @@ impl Config {
             seen_dir.insert(canonical_root);
         }
         let canonical_home = home.canonicalize().unwrap_or(home.to_path_buf());
-        if !seen_dir.contains(&canonical_home) && !seen_dir.contains(home) {
-            if let Some(path) = get_file_path(home, "config") {
-                walk(&path)?;
-            }
+        if !seen_dir.contains(&canonical_home)
+            && !seen_dir.contains(home)
+            && let Some(path) = get_file_path(home, "config")
+        {
+            walk(&path)?;
         }
         Ok(())
     }
@@ -365,7 +368,7 @@ impl Config {
     fn load_file(
         &self,
         path: &Path,
-        seen: &mut HashSet<PathBuf>,
+        seen: &mut FxHashSet<PathBuf>,
         includes: bool,
         cli: bool,
     ) -> anyhow::Result<ConfigValue> {
@@ -374,9 +377,9 @@ impl Config {
         }
         let contents = std::fs::read_to_string(path)
             .with_context(|| format!("failed to read configuration file `{}`", path.display()))?;
-        let toml: toml::Table = contents
-            .parse()
-            .with_context(|| format!("could not parse TOML configuration in `{}`", path.display()))?;
+        let toml: toml::Table = contents.parse().with_context(|| {
+            format!("could not parse TOML configuration in `{}`", path.display())
+        })?;
         let def =
             if cli { Definition::Cli(Some(path.into())) } else { Definition::Path(path.into()) };
         let value = CV::from_toml(def, toml::Value::Table(toml)).with_context(|| {
@@ -388,11 +391,11 @@ impl Config {
     fn load_includes(
         &self,
         mut value: ConfigValue,
-        seen: &mut HashSet<PathBuf>,
+        seen: &mut FxHashSet<PathBuf>,
         cli: bool,
     ) -> anyhow::Result<ConfigValue> {
         let includes = include_paths(&mut value)?;
-        let mut root = CV::Table(HashMap::new(), value.definition().clone());
+        let mut root = CV::Table(FxHashMap::default(), value.definition().clone());
         for include in includes {
             let base = match &include.def {
                 Definition::Path(p) | Definition::Cli(Some(p)) => p.parent().unwrap(),
@@ -417,18 +420,20 @@ impl Config {
     }
 
     fn merge_cli_args(&mut self, cli: &[String]) -> anyhow::Result<()> {
-        let mut loaded = CV::Table(HashMap::new(), Definition::Cli(None));
+        let mut loaded = CV::Table(FxHashMap::default(), Definition::Cli(None));
         for arg in cli {
             let arg_as_path = self.cwd.join(arg);
             let table = if !arg.is_empty() && arg_as_path.exists() {
-                self.load_file(&arg_as_path, &mut HashSet::new(), true, true).with_context(
+                self.load_file(&arg_as_path, &mut FxHashSet::default(), true, true).with_context(
                     || format!("failed to load config from `{}`", arg_as_path.display()),
                 )?
             } else {
                 let doc = cli_dotted_keys(arg)?;
                 for secret in ["token", "secret-key"] {
                     if doc.get("registry").and_then(|v| v.get(secret)).is_some() {
-                        bail!("registry.{secret} cannot be set through --config for security reasons");
+                        bail!(
+                            "registry.{secret} cannot be set through --config for security reasons"
+                        );
                     }
                     if let Some((k, _)) = doc
                         .get("registries")
@@ -442,7 +447,7 @@ impl Config {
                 }
                 let value = CV::from_toml(Definition::Cli(None), toml::Value::Table(doc))
                     .with_context(|| format!("failed to convert --config argument `{arg}`"))?;
-                self.load_includes(value, &mut HashSet::new(), true)
+                self.load_includes(value, &mut FxHashSet::default(), true)
                     .context("failed to load --config include")?
             };
             loaded
@@ -511,7 +516,7 @@ impl Config {
                     self.env_list(key, &mut list);
                     Ok(Some(CV::List(list, def)))
                 }
-                _ => Ok(Some(CV::String(env.to_string(), env_def))),
+                _ => Ok(Some(CV::String(env.to_owned(), env_def))),
             }
         }
     }
@@ -527,7 +532,8 @@ impl Config {
             }
             output.clear();
         }
-        output.extend(env_val.split_whitespace().map(|s| CV::String(s.to_string(), env_def.clone())));
+        output
+            .extend(env_val.split_whitespace().map(|s| CV::String(s.to_owned(), env_def.clone())));
         output.sort_by_key(|v| v.definition().rank());
     }
 
@@ -575,7 +581,10 @@ impl Config {
         let Some(val) = self.get_file_relative_path("build.build-dir")? else { return Ok(None) };
         let root = workspace_manifest_path.parent().unwrap();
         let replacements = [
-            ("{workspace-root}", root.to_str().context("workspace root was not valid utf-8")?.to_owned()),
+            (
+                "{workspace-root}",
+                root.to_str().context("workspace root was not valid utf-8")?.to_owned(),
+            ),
             (
                 "{cargo-cache-home}",
                 self.home.to_str().context("cargo home was not valid utf-8")?.to_owned(),
@@ -592,29 +601,29 @@ impl Config {
         for (from, to) in &replacements {
             value = value.replace(from, to);
         }
-        if let (Some(open), Some(close)) = (value.find('{'), value.rfind('}')) {
-            if open < close {
-                let variable = &value[open + 1..close];
-                let names = ["workspace-root", "cargo-cache-home", "workspace-path-hash"];
-                let suggestion = crate::edit_distance::closest_msg(
-                    variable,
-                    names.iter(),
-                    |k| k,
-                    "template variable",
-                );
-                let suggestion = if suggestion.is_empty() {
-                    format!(
-                        "\n\nhelp: available template variables are {}",
-                        names.iter().map(|v| format!("`{{{v}}}`")).collect::<Vec<_>>().join(", ")
-                    )
-                } else {
-                    suggestion
-                };
-                bail!(
-                    "unexpected variable `{variable}` in build.build-dir path `{}`{suggestion}",
-                    val.raw_value()
-                );
-            }
+        if let (Some(open), Some(close)) = (value.find('{'), value.rfind('}'))
+            && open < close
+        {
+            let variable = &value[open + 1..close];
+            let names = ["workspace-root", "cargo-cache-home", "workspace-path-hash"];
+            let suggestion = crate::edit_distance::closest_msg(
+                variable,
+                names.iter(),
+                |k| k,
+                "template variable",
+            );
+            let suggestion = if suggestion.is_empty() {
+                format!(
+                    "\n\nhelp: available template variables are {}",
+                    names.iter().map(|v| format!("`{{{v}}}`")).collect::<Vec<_>>().join(", ")
+                )
+            } else {
+                suggestion
+            };
+            bail!(
+                "unexpected variable `{variable}` in build.build-dir path `{}`{suggestion}",
+                val.raw_value()
+            );
         }
         if value.contains('{') {
             bail!("unexpected opening bracket `{{` in build.build-dir path `{}`", val.raw_value());
@@ -647,9 +656,10 @@ impl Config {
         let base = index.definition.root(&self.cwd).join("truncated-by-url_with_base");
         crate::source::into_url(&index.val)?;
         let base = Url::from_file_path(&base).ok();
-        let url = Url::options().base_url(base.as_ref()).parse(&index.val).map_err(|e| {
-            anyhow!("invalid url `{}`: {}", index.val, e)
-        })?;
+        let url = Url::options()
+            .base_url(base.as_ref())
+            .parse(&index.val)
+            .map_err(|e| anyhow!("invalid url `{}`: {}", index.val, e))?;
         if url.password().is_some() {
             bail!("registry URLs may not contain passwords");
         }
@@ -777,7 +787,8 @@ fn get_file_path(dir: &Path, name: &str) -> Option<PathBuf> {
 
 /// A `--config KEY=VALUE` argument, which must be one dotted key and a value.
 fn cli_dotted_keys(arg: &str) -> anyhow::Result<toml::Table> {
-    const HELP: &str = "--config argument `{arg}` was not a TOML dotted key expression (such as `build.jobs = 2`)";
+    const HELP: &str =
+        "--config argument `{arg}` was not a TOML dotted key expression (such as `build.jobs = 2`)";
     let fail = || anyhow!(HELP.replace("{arg}", arg));
     let table: toml::Table = arg.parse().map_err(|e: toml::de::Error| {
         anyhow!("failed to parse value from --config argument `{arg}` as a dotted key expression")
@@ -816,7 +827,10 @@ fn cargo_home(cwd: &Path, env: &BTreeMap<String, String>) -> anyhow::Result<Path
 
 fn home_dir(env: &BTreeMap<String, String>) -> Option<PathBuf> {
     if cfg!(windows) {
-        env.get("USERPROFILE").filter(|h| !h.is_empty()).map(PathBuf::from).or_else(std::env::home_dir)
+        env.get("USERPROFILE")
+            .filter(|h| !h.is_empty())
+            .map(PathBuf::from)
+            .or_else(std::env::home_dir)
     } else {
         env.get("HOME").filter(|h| !h.is_empty()).map(PathBuf::from).or_else(std::env::home_dir)
     }

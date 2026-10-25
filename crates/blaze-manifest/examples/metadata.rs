@@ -2,6 +2,8 @@
 //! cargo's: `cargo run -p blaze-manifest --example metadata -- --no-deps --manifest-path X`.
 //! Takes cargo's arguments and prints cargo's JSON, warnings and errors.
 
+#![allow(clippy::print_stderr, clippy::print_stdout, reason = "a command line program")]
+
 use std::path::PathBuf;
 use std::process::ExitCode;
 

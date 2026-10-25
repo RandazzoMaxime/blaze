@@ -1,13 +1,14 @@
 //! A dependency as a manifest declares it (cargo's `Dependency`), and the feature map of a
 //! package (cargo's `build_feature_map`), with cargo's checks and messages.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::BTreeMap;
 use std::fmt;
 use std::path::PathBuf;
 
 use anyhow::{Context as _, bail};
 use cargo_platform::Platform;
 use cargo_util_schemas::manifest::FeatureName;
+use rustc_hash::{FxHashMap, FxHashSet};
 use semver::VersionReq;
 use serde::Serialize;
 
@@ -199,17 +200,19 @@ pub fn build_summary_features(
         }
     }
 
-    let mut dep_map: HashMap<&str, bool> = HashMap::new();
+    let mut dep_map: FxHashMap<&str, bool> = FxHashMap::default();
     for dep in dependencies {
         *dep_map.entry(dep.name_in_toml()).or_insert(false) |= dep.optional;
     }
 
     let mut map: FeatureMap = features
         .iter()
-        .map(|(feature, list)| (feature.clone(), list.iter().map(|v| FeatureValue::new(v)).collect()))
+        .map(|(feature, list)| {
+            (feature.clone(), list.iter().map(|v| FeatureValue::new(v)).collect())
+        })
         .collect();
 
-    let explicitly_listed: HashSet<String> =
+    let explicitly_listed: FxHashSet<String> =
         map.values().flatten().filter_map(|fv| fv.explicit_dep_name()).map(str::to_owned).collect();
 
     for dep in dependencies {
@@ -311,7 +314,7 @@ pub fn build_summary_features(
         }
     }
 
-    let used: HashSet<&str> = map
+    let used: FxHashSet<&str> = map
         .values()
         .flatten()
         .filter_map(|fv| match fv {

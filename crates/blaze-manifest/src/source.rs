@@ -92,10 +92,10 @@ impl fmt::Display for SourceIdAsUrl<'_> {
             write!(f, "{protocol}+")?;
         }
         write!(f, "{}", self.id.url)?;
-        if let SourceKind::Git(reference) = &self.id.kind {
-            if let Some(pretty) = reference.pretty_ref(self.encoded) {
-                write!(f, "?{pretty}")?;
-            }
+        if let SourceKind::Git(reference) = &self.id.kind
+            && let Some(pretty) = reference.pretty_ref(self.encoded)
+        {
+            write!(f, "?{pretty}")?;
         }
         Ok(())
     }

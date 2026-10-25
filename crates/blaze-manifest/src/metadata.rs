@@ -104,7 +104,10 @@ pub fn export_no_deps<'a>(ws: &'a Workspace<'_>) -> ExportInfo<'a> {
     ExportInfo {
         packages: ws.members().map(|(path, m)| serialize_package(path, m)).collect(),
         workspace_members: ws.members().map(|(_, m)| m.package_id.to_spec()).collect(),
-        workspace_default_members: ws.default_members().map(|(_, m)| m.package_id.to_spec()).collect(),
+        workspace_default_members: ws
+            .default_members()
+            .map(|(_, m)| m.package_id.to_spec())
+            .collect(),
         resolve: None,
         target_directory: ws.target_dir(),
         build_directory: ws.build_dir(),

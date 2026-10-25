@@ -275,7 +275,9 @@ impl Features {
              The package requires the Cargo feature called `{name}`, but that feature is not \
              stabilized in this version of Cargo ({CARGO_VERSION}).\n"
         );
-        msg.push_str("Consider trying a newer version of Cargo (this may require the nightly release).\n");
+        msg.push_str(
+            "Consider trying a newer version of Cargo (this may require the nightly release).\n",
+        );
         msg.push_str(&format!(
             "See https://doc.rust-lang.org/nightly/cargo/{} for more information about the status of this feature.\n",
             feature.docs

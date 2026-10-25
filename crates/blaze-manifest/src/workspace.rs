@@ -2,10 +2,11 @@
 //! walking up from the current manifest; its members, from `members` globs and path
 //! dependencies, less `exclude`; its default members; and cargo's checks that they agree.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context as _, bail};
+use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::features::{Edition, ResolveBehavior};
 use crate::manifest::{
@@ -34,10 +35,10 @@ fn find_workspace_root_with_loader(
     {
         let roots = ctx.ws_roots.borrow();
         for current in manifest_path.ancestors().skip(1) {
-            if let Some(ws_config) = roots.get(current) {
-                if !ws_config.is_excluded(manifest_path) {
-                    return Ok(Some(current.join("Cargo.toml")));
-                }
+            if let Some(ws_config) = roots.get(current)
+                && !ws_config.is_excluded(manifest_path)
+            {
+                return Ok(Some(current.join("Cargo.toml")));
             }
         }
     }
@@ -64,7 +65,10 @@ fn find_workspace_root_with_loader(
 
 /// The `Cargo.toml` files above `manifest_path`, nearest first, stopping at `target/package`
 /// and after `CARGO_HOME`.
-fn find_root_iter<'a>(manifest_path: &'a Path, ctx: &'a Context) -> impl Iterator<Item = PathBuf> + 'a {
+fn find_root_iter<'a>(
+    manifest_path: &'a Path,
+    ctx: &'a Context,
+) -> impl Iterator<Item = PathBuf> + 'a {
     let home = ctx.config.home();
     let mut last: Option<&Path> = None;
     ancestors(manifest_path, None)
@@ -83,13 +87,13 @@ fn find_root_iter<'a>(manifest_path: &'a Path, ctx: &'a Context) -> impl Iterato
 pub struct Workspace<'c> {
     ctx: &'c Context,
     current_manifest: PathBuf,
-    packages: HashMap<PathBuf, EitherManifest>,
+    packages: FxHashMap<PathBuf, EitherManifest>,
     root_manifest: Option<PathBuf>,
     target_dir: Option<PathBuf>,
     build_dir: Option<PathBuf>,
     /// In the order cargo finds them, which is the order `cargo metadata` prints them.
     members: Vec<PathBuf>,
-    member_set: HashSet<PathBuf>,
+    member_set: FxHashSet<PathBuf>,
     default_members: Vec<PathBuf>,
     resolve_behavior: ResolveBehavior,
     custom_metadata: Option<toml::Value>,
@@ -100,12 +104,12 @@ impl<'c> Workspace<'c> {
         let mut ws = Workspace {
             ctx,
             current_manifest: manifest_path.to_owned(),
-            packages: HashMap::new(),
+            packages: FxHashMap::default(),
             root_manifest: None,
             target_dir: None,
             build_dir: None,
             members: Vec::new(),
-            member_set: HashSet::new(),
+            member_set: FxHashSet::default(),
             default_members: Vec::new(),
             resolve_behavior: ResolveBehavior::V1,
             custom_metadata: None,
@@ -159,7 +163,10 @@ impl<'c> Workspace<'c> {
     }
 
     pub fn build_dir(&self) -> PathBuf {
-        self.build_dir.clone().or_else(|| self.target_dir.clone()).unwrap_or_else(|| self.target_dir())
+        self.build_dir
+            .clone()
+            .or_else(|| self.target_dir.clone())
+            .unwrap_or_else(|| self.target_dir())
     }
 
     pub fn custom_metadata(&self) -> Option<&toml::Value> {
@@ -201,14 +208,16 @@ impl<'c> Workspace<'c> {
             return Ok(None);
         };
         match self.load(&root_path)?.workspace_config() {
-            WorkspaceConfig::Root(root_config) => Ok(Some(root_config.clone())),
+            WorkspaceConfig::Root(root_config) => Ok(Some((**root_config).clone())),
             _ => bail!("root of a workspace inferred but wasn't a root: {}", root_path.display()),
         }
     }
 
     fn find_root(&mut self, manifest_path: &Path) -> anyhow::Result<Option<PathBuf>> {
         let current = self.load(manifest_path)?;
-        if let Some(root_path) = current.workspace_config().get_ws_root(manifest_path, manifest_path) {
+        if let Some(root_path) =
+            current.workspace_config().get_ws_root(manifest_path, manifest_path)
+        {
             return Ok(Some(root_path));
         }
         let ctx = self.ctx;
@@ -232,8 +241,8 @@ impl<'c> Workspace<'c> {
         };
         let root_manifest_path = self.root_manifest.clone().unwrap();
 
-        let members_paths =
-            workspace_config.members_paths(workspace_config.members.as_deref().unwrap_or_default())?;
+        let members_paths = workspace_config
+            .members_paths(workspace_config.members.as_deref().unwrap_or_default())?;
         let default_members_paths = if root_manifest_path == self.current_manifest {
             match &workspace_config.default_members {
                 Some(default) => Some(workspace_config.members_paths(default)?),
@@ -244,8 +253,8 @@ impl<'c> Workspace<'c> {
         };
 
         for (path, glob) in &members_paths {
-            self.find_path_deps(&path.join("Cargo.toml"), &root_manifest_path, false).with_context(
-                || {
+            self.find_path_deps(&path.join("Cargo.toml"), &root_manifest_path, false)
+                .with_context(|| {
                     format!(
                         "failed to load manifest for workspace member `{}`\n\
                          referenced{} by workspace at `{}`",
@@ -253,8 +262,7 @@ impl<'c> Workspace<'c> {
                         glob.map(|g| format!(" via `{g}`")).unwrap_or_default(),
                         root_manifest_path.display(),
                     )
-                },
-            )?;
+                })?;
         }
 
         self.find_path_deps(&root_manifest_path, &root_manifest_path, false)?;
@@ -304,10 +312,10 @@ impl<'c> Workspace<'c> {
             }
         }
 
-        if let WorkspaceConfig::Root(root_config) = self.load(root_manifest)?.workspace_config() {
-            if root_config.is_excluded(&manifest_path) {
-                return Ok(());
-            }
+        if let WorkspaceConfig::Root(root_config) = self.load(root_manifest)?.workspace_config()
+            && root_config.is_excluded(&manifest_path)
+        {
+            return Ok(());
         }
 
         self.insert_member(manifest_path.clone());
@@ -316,7 +324,9 @@ impl<'c> Workspace<'c> {
             EitherManifest::Real(pkg) => pkg
                 .dependencies
                 .iter()
-                .filter_map(|d| Some((d.source_id.local_path()?.join("Cargo.toml"), d.name.clone())))
+                .filter_map(|d| {
+                    Some((d.source_id.local_path()?.join("Cargo.toml"), d.name.clone()))
+                })
                 .collect::<Vec<_>>(),
             EitherManifest::Virtual(_) => return Ok(()),
         };
@@ -372,7 +382,9 @@ impl<'c> Workspace<'c> {
         let roots: Vec<PathBuf> = self
             .members
             .iter()
-            .filter(|member| matches!(self.get(member).workspace_config(), WorkspaceConfig::Root(_)))
+            .filter(|member| {
+                matches!(self.get(member).workspace_config(), WorkspaceConfig::Root(_))
+            })
             .map(|member| member.parent().unwrap().to_path_buf())
             .collect();
         match roots.len() {
@@ -508,15 +520,14 @@ impl<'c> Workspace<'c> {
                 max_member_edition = max_member_edition.max(Some(m.edition));
             }
         }
-        if let Some(EitherManifest::Virtual(vm)) = self.packages.get_mut(&root_manifest) {
-            if vm.resolve_behavior.is_none() {
-                if let Some(edition) = max_member_edition {
-                    let resolver = edition.default_resolve_behavior().to_manifest();
-                    vm.warnings.push(format!(
+        if let Some(EitherManifest::Virtual(vm)) = self.packages.get_mut(&root_manifest)
+            && vm.resolve_behavior.is_none()
+            && let Some(edition) = max_member_edition
+        {
+            let resolver = edition.default_resolve_behavior().to_manifest();
+            vm.warnings.push(format!(
                         "virtual workspace defaulting to `resolver = \"1\"` despite one or more workspace members being on edition {edition} which implies `resolver = \"{resolver}\"`"
                     ));
-                }
-            }
         }
     }
 }

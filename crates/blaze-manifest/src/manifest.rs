@@ -3,7 +3,7 @@
 //! discovered, dependencies and features checked.
 
 use std::cell::{OnceCell, RefCell};
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context as _, anyhow, bail};
@@ -14,11 +14,12 @@ use cargo_util_schemas::manifest::{
     TomlDependency, TomlDetailedDependency, TomlInheritedDependency, TomlLints, TomlManifest,
     TomlPackage, TomlPackageBuild, TomlWorkspace, VecStringOrBool,
 };
+use rustc_hash::FxHashMap;
 use url::Url;
 
 use crate::config::Config;
-use crate::diagnostic::ManifestDiagnostic;
 use crate::dependency::{DepKind, Dependency, FeatureMap, build_summary_features};
+use crate::diagnostic::ManifestDiagnostic;
 use crate::edit_distance::closest_msg;
 use crate::features::{Edition, Feature, Features, ResolveBehavior};
 use crate::paths::normalize_path;
@@ -30,12 +31,12 @@ use crate::workspace::find_workspace_root;
 /// cargo consults before walking up the file system (its `GlobalContext::ws_roots`).
 pub struct Context {
     pub config: Config,
-    pub(crate) ws_roots: RefCell<HashMap<PathBuf, WorkspaceRootConfig>>,
+    pub(crate) ws_roots: RefCell<FxHashMap<PathBuf, WorkspaceRootConfig>>,
 }
 
 impl Context {
     pub fn new(config: Config) -> Context {
-        Context { config, ws_roots: RefCell::new(HashMap::new()) }
+        Context { config, ws_roots: RefCell::new(FxHashMap::default()) }
     }
 }
 
@@ -60,7 +61,7 @@ impl PackageId {
 #[derive(Clone, Debug)]
 pub enum WorkspaceConfig {
     /// `[workspace]`.
-    Root(WorkspaceRootConfig),
+    Root(Box<WorkspaceRootConfig>),
     /// No `[workspace]`; `root` is `package.workspace`.
     Member { root: Option<String> },
 }
@@ -159,8 +160,7 @@ fn expand_member_path(path: &Path) -> anyhow::Result<Vec<PathBuf>> {
         return Ok(Vec::new());
     };
     let res = glob::glob(path).with_context(|| format!("could not parse pattern `{path}`"))?;
-    res.map(|p| p.with_context(|| format!("unable to match path to pattern `{path}`")))
-        .collect()
+    res.map(|p| p.with_context(|| format!("unable to match path to pattern `{path}`"))).collect()
 }
 
 /// What `[workspace]` offers its members to inherit.
@@ -211,13 +211,12 @@ impl InheritableFields {
             bail!("`dependency.{name}` was not found in `workspace.dependencies`");
         };
         let mut dep = dep.clone();
-        if let TomlDependency::Detailed(detailed) = &mut dep {
-            if detailed.base.is_none() {
-                if let Some(rel_path) = &detailed.path {
-                    detailed.path =
-                        Some(resolve_relative_path(name, &self.ws_root, package_root, rel_path)?);
-                }
-            }
+        if let TomlDependency::Detailed(detailed) = &mut dep
+            && detailed.base.is_none()
+            && let Some(rel_path) = &detailed.path
+        {
+            detailed.path =
+                Some(resolve_relative_path(name, &self.ws_root, package_root, rel_path)?);
         }
         Ok(dep)
     }
@@ -301,7 +300,7 @@ pub struct Manifest {
     pub custom_metadata: Option<toml::Value>,
     pub publish: Option<Vec<String>>,
     pub replace: Vec<(PackageIdSpec, Dependency)>,
-    pub patch: HashMap<Url, Vec<Dependency>>,
+    pub patch: FxHashMap<Url, Vec<Dependency>>,
     pub workspace: WorkspaceConfig,
     pub unstable_features: Features,
     pub edition: Edition,
@@ -317,7 +316,7 @@ pub struct Manifest {
 #[derive(Debug)]
 pub struct VirtualManifest {
     pub replace: Vec<(PackageIdSpec, Dependency)>,
-    pub patch: HashMap<Url, Vec<Dependency>>,
+    pub patch: FxHashMap<Url, Vec<Dependency>>,
     pub workspace: WorkspaceConfig,
     pub unstable_features: Features,
     pub resolve_behavior: Option<ResolveBehavior>,
@@ -350,11 +349,12 @@ pub fn read_manifest(
     if ext.is_none() || ext == Some(std::ffi::OsStr::new("rs")) {
         bail!("parsing `{}` requires `-Zscript`", path.display());
     }
-    let bytes = std::fs::read(path).with_context(|| format!("failed to read `{}`", path.display()))?;
+    let bytes =
+        std::fs::read(path).with_context(|| format!("failed to read `{}`", path.display()))?;
     let contents = String::from_utf8(bytes)
         .map_err(|_| anyhow!("path at `{}` was not valid utf-8", path.display()))?;
-    let original_toml: TomlManifest = toml::from_str(&contents)
-        .map_err(|e| ManifestDiagnostic::from_toml(e, &contents, path))?;
+    let original_toml: TomlManifest =
+        toml::from_str(&contents).map_err(|e| ManifestDiagnostic::from_toml(e, &contents, path))?;
 
     let mut warnings = Vec::new();
     let mut errors = Vec::new();
@@ -365,7 +365,7 @@ pub fn read_manifest(
         let workspace_config = to_workspace_config(&original_toml, path, &mut warnings)?;
         if let WorkspaceConfig::Root(ws_root_config) = &workspace_config {
             let package_root = path.parent().unwrap();
-            ctx.ws_roots.borrow_mut().insert(package_root.to_owned(), ws_root_config.clone());
+            ctx.ws_roots.borrow_mut().insert(package_root.to_owned(), (**ws_root_config).clone());
         }
         let normalized_toml = normalize_toml(
             &original_toml,
@@ -409,8 +409,10 @@ fn to_workspace_config(
     manifest_file: &Path,
     warnings: &mut Vec<String>,
 ) -> anyhow::Result<WorkspaceConfig> {
-    match (original_toml.workspace.as_ref(), original_toml.package().and_then(|p| p.workspace.as_ref()))
-    {
+    match (
+        original_toml.workspace.as_ref(),
+        original_toml.package().and_then(|p| p.workspace.as_ref()),
+    ) {
         (Some(toml_config), None) => {
             verify_lints(toml_config.lints.as_ref(), warnings)?;
             if let Some(ws_deps) = &toml_config.dependencies {
@@ -423,7 +425,10 @@ fn to_workspace_config(
                     }
                 }
             }
-            Ok(WorkspaceConfig::Root(WorkspaceRootConfig::new(toml_config, manifest_file)))
+            Ok(WorkspaceConfig::Root(Box::new(WorkspaceRootConfig::new(
+                toml_config,
+                manifest_file,
+            ))))
         }
         (None, root) => Ok(WorkspaceConfig::Member { root: root.cloned() }),
         (Some(..), Some(..)) => bail!(
@@ -469,7 +474,8 @@ fn normalize_toml(
     if let Some(original_package) = original_toml.package() {
         let normalized_package =
             normalize_package_toml(original_package, manifest_file, &inherit, features)?;
-        let package_name = normalized_package.normalized_name().expect("previously normalized").clone();
+        let package_name =
+            normalized_package.normalized_name().expect("previously normalized").clone();
         let edition = normalized_package
             .normalized_edition()
             .expect("previously normalized")
@@ -640,7 +646,9 @@ fn normalize_toml(
         } else {
             ""
         };
-        bail!("this virtual manifest specifies a `{field}` section, which is not allowed{suggestion}");
+        bail!(
+            "this virtual manifest specifies a `{field}` section, which is not allowed{suggestion}"
+        );
     }
 
     Ok(normalized_toml)
@@ -889,7 +897,10 @@ fn load_inheritable_fields(
     }
 }
 
-fn inheritable_from_path(ctx: &Context, workspace_path: PathBuf) -> anyhow::Result<InheritableFields> {
+fn inheritable_from_path(
+    ctx: &Context,
+    workspace_path: PathBuf,
+) -> anyhow::Result<InheritableFields> {
     let workspace_path_root = workspace_path.parent().unwrap();
     if let Some(ws_root) = ctx.ws_roots.borrow().get(workspace_path_root) {
         return Ok(ws_root.inheritable.clone());
@@ -898,7 +909,7 @@ fn inheritable_from_path(ctx: &Context, workspace_path: PathBuf) -> anyhow::Resu
     let man = read_manifest(&workspace_path, source_id, ctx)?;
     match man.workspace_config() {
         WorkspaceConfig::Root(root) => {
-            ctx.ws_roots.borrow_mut().insert(workspace_path, root.clone());
+            ctx.ws_roots.borrow_mut().insert(workspace_path, (**root).clone());
             Ok(root.inheritable.clone())
         }
         _ => bail!("root of a workspace inferred but wasn't a root: {}", workspace_path.display()),
@@ -950,7 +961,9 @@ fn inner_dependency_inherit_with(
         }
     }
     merged_dep.features = match (merged_dep.features.clone(), pkg_dep.features.clone()) {
-        (Some(dep_feat), Some(inherit_feat)) => Some(dep_feat.into_iter().chain(inherit_feat).collect()),
+        (Some(dep_feat), Some(inherit_feat)) => {
+            Some(dep_feat.into_iter().chain(inherit_feat).collect())
+        }
         (Some(dep_fet), None) => Some(dep_fet),
         (None, Some(inherit_feat)) => Some(inherit_feat),
         (None, None) => None,
@@ -960,7 +973,11 @@ fn inner_dependency_inherit_with(
     Ok(TomlDependency::Detailed(merged_dep))
 }
 
-fn deprecated_ws_default_features(label: &str, ws_def_feat: Option<bool>, warnings: &mut Vec<String>) {
+fn deprecated_ws_default_features(
+    label: &str,
+    ws_def_feat: Option<bool>,
+    warnings: &mut Vec<String>,
+) {
     let ws_def_feat = match ws_def_feat {
         Some(true) => "true",
         Some(false) => "false",
@@ -1017,26 +1034,28 @@ fn to_real_manifest(
         bail!("package root '{}' is not a directory", package_root.display());
     }
 
-    let normalized_package = normalized_toml.package().expect("previously verified to have a `[package]`");
+    let normalized_package =
+        normalized_toml.package().expect("previously verified to have a `[package]`");
     let package_name = normalized_package.normalized_name().expect("previously normalized");
     if package_name.contains(':') {
         features.require(Feature::open_namespaces)?;
     }
-    let rust_version = normalized_package.normalized_rust_version().expect("previously normalized").cloned();
+    let rust_version =
+        normalized_package.normalized_rust_version().expect("previously normalized").cloned();
 
     let edition = if let Some(edition) =
         normalized_package.normalized_edition().expect("previously normalized")
     {
         let edition: Edition = edition.parse().context("failed to parse the `edition` key")?;
-        if let Some(pkg_msrv) = &rust_version {
-            if let Some(edition_msrv) = edition.first_version() {
-                let edition_msrv = RustVersion::try_from(edition_msrv).unwrap();
-                if !edition_msrv.is_compatible_with(&pkg_msrv.to_partial()) {
-                    bail!(
-                        "rust-version {pkg_msrv} is incompatible with the version ({edition_msrv}) required by \
+        if let Some(pkg_msrv) = &rust_version
+            && let Some(edition_msrv) = edition.first_version()
+        {
+            let edition_msrv = RustVersion::try_from(edition_msrv).unwrap();
+            if !edition_msrv.is_compatible_with(&pkg_msrv.to_partial()) {
+                bail!(
+                    "rust-version {pkg_msrv} is incompatible with the version ({edition_msrv}) required by \
                          the specified edition ({edition})",
-                    )
-                }
+                )
             }
         }
         edition
@@ -1047,7 +1066,9 @@ fn to_real_manifest(
                 .filter(|e| {
                     e.first_version()
                         .map(|e| {
-                            RustVersion::try_from(e).unwrap().is_compatible_with(&pkg_msrv.to_partial())
+                            RustVersion::try_from(e)
+                                .unwrap()
+                                .is_compatible_with(&pkg_msrv.to_partial())
                         })
                         .unwrap_or_default()
                 })
@@ -1077,7 +1098,9 @@ fn to_real_manifest(
             .expect("previously normalized")
             .map(|v| format!("@{v}"))
             .unwrap_or_default();
-        let hint = rust_version.as_ref().map(|rv| format!("help: {package_name}{version} requires rust {rv}"));
+        let hint = rust_version
+            .as_ref()
+            .map(|rv| format!("help: {package_name}{version} requires rust {rv}"));
         features.require_with_hint(Feature::unstable_editions, hint.as_deref())?;
     }
 
@@ -1122,12 +1145,12 @@ fn to_real_manifest(
         )
     }
 
-    if let Some(links) = &normalized_package.links {
-        if !targets.iter().any(|t| t.is_custom_build()) {
-            bail!(
-                "package specifies that it links to `{links}` but does not have a custom build script"
-            )
-        }
+    if let Some(links) = &normalized_package.links
+        && !targets.iter().any(|t| t.is_custom_build())
+    {
+        bail!(
+            "package specifies that it links to `{links}` but does not have a custom build script"
+        )
     }
 
     for (name, _) in original_toml.target.iter().flatten() {
@@ -1146,13 +1169,29 @@ fn to_real_manifest(
         file: manifest_file,
     };
     gather_dependencies(&mut manifest_ctx, normalized_toml.dependencies.as_ref(), None)?;
-    gather_dependencies(&mut manifest_ctx, normalized_toml.dev_dependencies(), Some(DepKind::Development))?;
-    gather_dependencies(&mut manifest_ctx, normalized_toml.build_dependencies(), Some(DepKind::Build))?;
+    gather_dependencies(
+        &mut manifest_ctx,
+        normalized_toml.dev_dependencies(),
+        Some(DepKind::Development),
+    )?;
+    gather_dependencies(
+        &mut manifest_ctx,
+        normalized_toml.build_dependencies(),
+        Some(DepKind::Build),
+    )?;
     for (name, platform) in normalized_toml.target.iter().flatten() {
         manifest_ctx.platform = Some(name.parse()?);
         gather_dependencies(&mut manifest_ctx, platform.dependencies.as_ref(), None)?;
-        gather_dependencies(&mut manifest_ctx, platform.build_dependencies(), Some(DepKind::Build))?;
-        gather_dependencies(&mut manifest_ctx, platform.dev_dependencies(), Some(DepKind::Development))?;
+        gather_dependencies(
+            &mut manifest_ctx,
+            platform.build_dependencies(),
+            Some(DepKind::Build),
+        )?;
+        gather_dependencies(
+            &mut manifest_ctx,
+            platform.dev_dependencies(),
+            Some(DepKind::Development),
+        )?;
     }
     let replace = replace(&normalized_toml, &mut manifest_ctx)?;
     let patch = patch(&normalized_toml, &mut manifest_ctx)?;
@@ -1175,15 +1214,35 @@ fn to_real_manifest(
     verify_lints(normalized_toml.normalized_lints().expect("previously normalized"), warnings)?;
 
     let metadata = ManifestMetadata {
-        description: normalized_package.normalized_description().expect("previously normalized").cloned(),
+        description: normalized_package
+            .normalized_description()
+            .expect("previously normalized")
+            .cloned(),
         homepage: normalized_package.normalized_homepage().expect("previously normalized").cloned(),
-        documentation: normalized_package.normalized_documentation().expect("previously normalized").cloned(),
+        documentation: normalized_package
+            .normalized_documentation()
+            .expect("previously normalized")
+            .cloned(),
         readme: normalized_package.normalized_readme().expect("previously normalized").cloned(),
-        authors: normalized_package.normalized_authors().expect("previously normalized").cloned().unwrap_or_default(),
+        authors: normalized_package
+            .normalized_authors()
+            .expect("previously normalized")
+            .cloned()
+            .unwrap_or_default(),
         license: normalized_package.normalized_license().expect("previously normalized").cloned(),
-        license_file: normalized_package.normalized_license_file().expect("previously normalized").cloned(),
-        repository: normalized_package.normalized_repository().expect("previously normalized").cloned(),
-        keywords: normalized_package.normalized_keywords().expect("previously normalized").cloned().unwrap_or_default(),
+        license_file: normalized_package
+            .normalized_license_file()
+            .expect("previously normalized")
+            .cloned(),
+        repository: normalized_package
+            .normalized_repository()
+            .expect("previously normalized")
+            .cloned(),
+        keywords: normalized_package
+            .normalized_keywords()
+            .expect("previously normalized")
+            .cloned()
+            .unwrap_or_default(),
         categories: normalized_package
             .normalized_categories()
             .expect("previously normalized")
@@ -1225,12 +1284,12 @@ note: only a feature named `default` will be enabled by default"
         )
     }
 
-    if let Some(run) = &normalized_package.default_run {
-        if !targets.iter().filter(|t| t.is_bin()).any(|t| t.name == *run) {
-            let suggestion =
-                closest_msg(run, targets.iter().filter(|t| t.is_bin()), |t| t.name.as_str(), "target");
-            bail!("default-run target `{run}` not found{suggestion}");
-        }
+    if let Some(run) = &normalized_package.default_run
+        && !targets.iter().filter(|t| t.is_bin()).any(|t| t.name == *run)
+    {
+        let suggestion =
+            closest_msg(run, targets.iter().filter(|t| t.is_bin()), |t| t.name.as_str(), "target");
+        bail!("default-run target `{run}` not found{suggestion}");
     }
 
     if normalized_package.im_a_teapot.is_some() {
@@ -1390,8 +1449,8 @@ fn replace(
 fn patch(
     me: &TomlManifest,
     manifest_ctx: &mut ManifestContext<'_, '_>,
-) -> anyhow::Result<HashMap<Url, Vec<Dependency>>> {
-    let mut patch = HashMap::new();
+) -> anyhow::Result<FxHashMap<Url, Vec<Dependency>>> {
+    let mut patch = FxHashMap::default();
     for (toml_url, deps) in me.patch.iter().flatten() {
         let url = match &toml_url[..] {
             CRATES_IO_REGISTRY => CRATES_IO_INDEX.parse().unwrap(),
@@ -1428,7 +1487,8 @@ fn dep_to_dependency(
     let simple;
     let orig = match orig {
         TomlDependency::Simple(version) => {
-            simple = TomlDetailedDependency { version: Some(version.clone()), ..Default::default() };
+            simple =
+                TomlDetailedDependency { version: Some(version.clone()), ..Default::default() };
             &simple
         }
         TomlDependency::Detailed(details) => details,
@@ -1442,14 +1502,14 @@ fn dep_to_dependency(
         );
     }
 
-    if let Some(version) = &orig.version {
-        if version.contains('+') {
-            manifest_ctx.warnings.push(format!(
-                "version requirement `{version}` for dependency `{name_in_toml}` \
+    if let Some(version) = &orig.version
+        && version.contains('+')
+    {
+        manifest_ctx.warnings.push(format!(
+            "version requirement `{version}` for dependency `{name_in_toml}` \
                  includes semver metadata which will be ignored, removing the \
                  metadata is recommended to avoid confusion"
-            ));
-        }
+        ));
     }
 
     if orig.git.is_none() {
@@ -1513,7 +1573,9 @@ fn dep_to_dependency(
         bail!("`artifact = …` requires `-Z bindeps` ({name_in_toml})");
     } else if orig.lib.is_some() || orig.target.is_some() {
         let specifier = if orig.lib.is_some() { "lib" } else { "target" };
-        bail!("'{specifier}' specifier cannot be used without an 'artifact = …' value ({name_in_toml})")
+        bail!(
+            "'{specifier}' specifier cannot be used without an 'artifact = …' value ({name_in_toml})"
+        )
     }
     Ok(dep)
 }
@@ -1523,7 +1585,12 @@ fn to_dependency_source_id(
     name_in_toml: &str,
     manifest_ctx: &mut ManifestContext<'_, '_>,
 ) -> anyhow::Result<SourceId> {
-    match (orig.git.as_ref(), orig.path.as_ref(), orig.registry.as_deref(), orig.registry_index.as_ref()) {
+    match (
+        orig.git.as_ref(),
+        orig.path.as_ref(),
+        orig.registry.as_deref(),
+        orig.registry_index.as_ref(),
+    ) {
         (Some(_git), Some(_path), _, _) => bail!(
             "dependency ({name_in_toml}) specification is ambiguous. \
              Only one of `git` or `path` is allowed.",
@@ -1533,7 +1600,8 @@ fn to_dependency_source_id(
              Only one of `registry` or `registry-index` is allowed.",
         ),
         (Some(git), None, _, _) => {
-            let n_details = [&orig.branch, &orig.tag, &orig.rev].iter().filter(|d| d.is_some()).count();
+            let n_details =
+                [&orig.branch, &orig.tag, &orig.rev].iter().filter(|d| d.is_some()).count();
             if n_details > 1 {
                 bail!(
                     "dependency ({name_in_toml}) specification is ambiguous. \
@@ -1591,7 +1659,9 @@ supported tools: {}",
         for name in lints.keys() {
             if let Some((prefix, suffix)) = name.split_once("::") {
                 if tool == prefix || (tool == "rust" && supported.contains(&prefix)) {
-                    bail!("`lints.{tool}.{name}` is not valid lint name; try `lints.{prefix}.{suffix}`")
+                    bail!(
+                        "`lints.{tool}.{name}` is not valid lint name; try `lints.{prefix}.{suffix}`"
+                    )
                 } else {
                     bail!("`lints.{tool}.{name}` is not a valid lint name")
                 }

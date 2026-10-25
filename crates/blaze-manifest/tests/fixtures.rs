@@ -28,7 +28,13 @@ fn copy_dir(from: &Path, to: &Path) {
 /// The error as cargo prints it, blank lines dropped as `harness/resolve.py` drops them.
 fn error_text(err: &anyhow::Error, cwd: &Path) -> String {
     if let Some(diagnostic) = err.downcast_ref::<ManifestDiagnostic>() {
-        return diagnostic.render(cwd).lines().map(str::trim_end).filter(|l| !l.is_empty()).collect::<Vec<_>>().join("\n");
+        return diagnostic
+            .render(cwd)
+            .lines()
+            .map(str::trim_end)
+            .filter(|l| !l.is_empty())
+            .collect::<Vec<_>>()
+            .join("\n");
     }
     let mut lines = Vec::new();
     for (i, cause) in err.chain().enumerate() {
@@ -37,7 +43,9 @@ fn error_text(err: &anyhow::Error, cwd: &Path) -> String {
             lines.extend(text.lines().filter(|l| !l.is_empty()).map(str::to_owned));
         } else {
             lines.push("Caused by:".to_owned());
-            lines.extend(cause.to_string().lines().filter(|l| !l.is_empty()).map(|l| format!("  {l}")));
+            lines.extend(
+                cause.to_string().lines().filter(|l| !l.is_empty()).map(|l| format!("  {l}")),
+            );
         }
     }
     lines.join("\n")
@@ -64,7 +72,8 @@ fn read(fixture: &Path, scratch: &Path) -> String {
         let ws = Workspace::new(&manifest, &ctx)?;
         let mut out = Vec::new();
         let formatter = serde_json::ser::PrettyFormatter::with_indent(b" ");
-        export_no_deps(&ws).serialize(&mut serde_json::Serializer::with_formatter(&mut out, formatter))?;
+        export_no_deps(&ws)
+            .serialize(&mut serde_json::Serializer::with_formatter(&mut out, formatter))?;
         anyhow::Ok(String::from_utf8(out)?)
     })();
     let root = root.display().to_string();
@@ -75,7 +84,9 @@ fn read(fixture: &Path, scratch: &Path) -> String {
             let mut out = Vec::new();
             let error = serde_json::json!({ "error": error_text(&err, &cwd) });
             let formatter = serde_json::ser::PrettyFormatter::with_indent(b" ");
-            error.serialize(&mut serde_json::Serializer::with_formatter(&mut out, formatter)).unwrap();
+            error
+                .serialize(&mut serde_json::Serializer::with_formatter(&mut out, formatter))
+                .unwrap();
             String::from_utf8(out).unwrap()
         }
     };
@@ -85,8 +96,10 @@ fn read(fixture: &Path, scratch: &Path) -> String {
 #[test]
 fn fixtures_read_as_cargo_reads_them() {
     let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
-    let scratch = std::env::temp_dir().join(format!("blaze-manifest-fixtures-{}", std::process::id()));
-    let mut names: Vec<_> = std::fs::read_dir(&dir).unwrap().map(|e| e.unwrap().file_name()).collect();
+    let scratch =
+        std::env::temp_dir().join(format!("blaze-manifest-fixtures-{}", std::process::id()));
+    let mut names: Vec<_> =
+        std::fs::read_dir(&dir).unwrap().map(|e| e.unwrap().file_name()).collect();
     names.sort();
     let mut failed = Vec::new();
     for name in &names {

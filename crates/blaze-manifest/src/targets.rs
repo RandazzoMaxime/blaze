@@ -2,7 +2,6 @@
 //! `examples/`, `tests/`, `benches/`, `build.rs`) merged with what the manifest declares, as
 //! cargo's `targets.rs` does it.
 
-use std::collections::{HashMap, HashSet};
 use std::fmt::{self, Write as _};
 use std::fs::{self, DirEntry};
 use std::path::{Path, PathBuf};
@@ -11,6 +10,7 @@ use anyhow::{Context as _, bail};
 use cargo_util_schemas::manifest::{
     PathValue, StringOrVec, TomlManifest, TomlPackageBuild, TomlTarget,
 };
+use rustc_hash::{FxHashMap, FxHashSet};
 use serde::Serialize;
 
 use crate::edit_distance::closest_msg;
@@ -177,7 +177,12 @@ impl Target {
         }
     }
 
-    fn lib_target(name: &str, crate_types: Vec<CrateType>, path: PathBuf, edition: Edition) -> Target {
+    fn lib_target(
+        name: &str,
+        crate_types: Vec<CrateType>,
+        path: PathBuf,
+        edition: Edition,
+    ) -> Target {
         let mut t = Target::new(Some(path), TargetKind::Lib(crate_types), name, edition);
         t.doctest = true;
         t.doc = true;
@@ -273,9 +278,9 @@ impl Target {
 
     pub fn doctestable(&self) -> bool {
         match &self.kind {
-            TargetKind::Lib(kinds) => kinds
-                .iter()
-                .any(|k| *k == CrateType::Rlib || *k == CrateType::Lib || *k == CrateType::ProcMacro),
+            TargetKind::Lib(kinds) => kinds.iter().any(|k| {
+                *k == CrateType::Rlib || *k == CrateType::Lib || *k == CrateType::ProcMacro
+            }),
             _ => false,
         }
     }
@@ -373,7 +378,11 @@ pub(crate) fn to_targets(
                 "build-script-{}",
                 script_path.file_stem().and_then(|s| s.to_str()).expect("previously normalized")
             );
-            targets.push(Target::custom_build_target(&name, package_root.join(script_path), edition));
+            targets.push(Target::custom_build_target(
+                &name,
+                package_root.join(script_path),
+                edition,
+            ));
         }
     }
     if let Some(metabuild) = metabuild {
@@ -749,8 +758,12 @@ fn to_bench_targets(
     let mut result = Vec::with_capacity(targets.len());
     for toml in targets {
         let path = package_root.join(&toml.path.as_ref().expect("previously normalized").0);
-        let mut target =
-            Target::bench_target(name_or_panic(toml), path, toml.required_features.clone(), edition);
+        let mut target = Target::bench_target(
+            name_or_panic(toml),
+            path,
+            toml.required_features.clone(),
+            edition,
+        );
         configure(toml, &mut target, TARGET_KIND_HUMAN_BENCH, warnings)?;
         result.push(target);
     }
@@ -921,8 +934,8 @@ fn toml_targets_and_inferred(
             let target_path =
                 |target: &TomlTarget| target.path.clone().map(|p| package_root.join(p.0));
 
-            let mut seen_names = HashSet::new();
-            let mut seen_paths = HashSet::new();
+            let mut seen_names = FxHashSet::default();
+            let mut seen_paths = FxHashSet::default();
             for target in targets.iter() {
                 seen_names.insert(target.name.clone());
                 seen_paths.insert(target_path(target));
@@ -994,7 +1007,7 @@ fn inferred_to_toml_targets(inferred: &[(String, PathBuf)]) -> Vec<TomlTarget> {
 }
 
 fn validate_unique_names(targets: &[TomlTarget], target_kind: &str) -> anyhow::Result<()> {
-    let mut seen = HashSet::new();
+    let mut seen = FxHashSet::default();
     for name in targets.iter().map(name_or_panic) {
         if !seen.insert(name) {
             bail!(
@@ -1007,9 +1020,10 @@ fn validate_unique_names(targets: &[TomlTarget], target_kind: &str) -> anyhow::R
 }
 
 fn validate_unique_build_scripts(scripts: &[String]) -> anyhow::Result<()> {
-    let mut seen: HashMap<&str, Vec<&str>> = HashMap::new();
+    let mut seen: FxHashMap<&str, Vec<&str>> = FxHashMap::default();
     for script in scripts {
-        let stem = Path::new(script).file_stem().and_then(|s| s.to_str()).expect("previously normalized");
+        let stem =
+            Path::new(script).file_stem().and_then(|s| s.to_str()).expect("previously normalized");
         seen.entry(stem).or_default().push(script.as_str());
     }
     let mut conflict_file_stem = false;
@@ -1046,7 +1060,8 @@ fn configure(
 
     if let Some(edition) = toml.edition.clone() {
         let name = &target.name;
-        warnings.push(format!("`edition` is set on {target_kind_human} `{name}` which is deprecated"));
+        warnings
+            .push(format!("`edition` is set on {target_kind_human} `{name}` which is deprecated"));
         target.edition = edition.parse().context("failed to parse the `edition` key")?;
     }
     Ok(())
@@ -1118,18 +1133,18 @@ fn target_path(
     match (first, second) {
         (Some(path), None) => Ok(path),
         (None, None) => {
-            if edition == Edition::Edition2015 {
-                if let Some(path) = legacy_path(target) {
-                    return Ok(path);
-                }
+            if edition == Edition::Edition2015
+                && let Some(path) = legacy_path(target)
+            {
+                return Ok(path);
             }
             Err(target_path_not_found_error_message(package_root, target, target_kind, inferred))
         }
         (Some(p0), Some(p1)) => {
-            if edition == Edition::Edition2015 {
-                if let Some(path) = legacy_path(target) {
-                    return Ok(path);
-                }
+            if edition == Edition::Edition2015
+                && let Some(path) = legacy_path(target)
+            {
+                return Ok(path);
             }
             Err(format!(
                 "\
