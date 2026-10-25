@@ -126,6 +126,18 @@ crates.io, with and without a lock file and over feature and target selections, 
 the projects whose normalized output is the same. It runs where cargo is installed, as the
 oracle only.
 
+2026-10-25, the resolver (`crates/blaze-resolve`): the package model (#305), `Cargo.lock`
+(#309) and the async `Registry` (#312), landed together in #314; cargo's resolver with its
+tests (#331), features and the members `-p` and `--features` choose (#332), the `resolve` of
+`cargo metadata` (#333), and a workspace's two resolves with `[patch]` and the lock file's
+locks (#339).
+`harness/resolve_graph.py` compares the `resolve` blaze-resolve makes of the packages cargo
+lists with cargo's, over the corpus of `harness/resolve` (dev-aws-8, at 6e4bbe91): with the
+lock file each project ships, 322 of 324 equal; with none, 381 of 385. The rest are those
+cargo 1.99.0 does not resolve there (bun, swc, rust-clippy, embassy). Its registry holds the
+versions cargo chose; choosing among all of the index's waits on #321, cargo's SAT-checked
+resolver tests on #337, `cargo update` and path overrides on #338.
+
 ## Build scripts
 
 blaze compiles build scripts (step I) and keeps their runs in the store; cargo still runs
@@ -166,7 +178,8 @@ serde_derive, thiserror-impl, tokio-macros and clap_derive equal to the toolchai
    is blaze's own executable, which the rule allows to be built with rustc (its serde
    derives); each later release builds its server with the one before.
 3. On by default for the daemon's loads, the checker and the build scripts that link a proc
-   macro (J0); a proc macro's library kept in the store by its content, as any other crate's.
+   macro (J0); a proc macro's library kept in the store by its content, as any other crate's
+   (landed 2026-10-25).
    rustc then compiles no proc macro and none of `syn`, `quote` and `proc-macro2` for one: most
    of what rustc compiles in the cold build of a crate with derives.
 
@@ -268,13 +281,40 @@ All **read**. What stands between this and replacing `cargo build`:
 2026-10-25: this plan. Lanes: the toolchain (2), the manifest and the harness, the registry,
 the resolver, build scripts. Counts and pull requests are added here as they land.
 
+2026-10-25, the registry: `crates/blaze-registry` reads the sparse index and its cache as cargo
+1.99 does, fetches `.crate` files into the store by their sha256 and unpacks them where cargo
+does (#307, landed with #314), and replaces sources, reads vendored directories and checks
+out git dependencies with the `git` command at cargo's paths. `harness/fetchdiff.py` on
+dev-aws-8, against `cargo fetch` and `cargo vendor` over 314 lock files (the bench projects
+at their pins but bun, the 300 most downloaded crates, git dependencies of every kind of
+reference, a second sparse registry): 3684/3684 unpacked packages and 38/38 git checkouts
+equal, file by file, and every directory name; crates.io replaced by a mirror 42/42; ripgrep's
+and zed's vendored packages 51/51 and 1533/1533. Not yet: blaze-resolve's `Registry` over it (#321),
+registries that need credentials (#315), git indexes (#316), cargo's last-use record (#317),
+a path package's file list (#318).
+
 2026-10-25, J (proc macros): with `RA_JIT_PROC_MACRO_SERVER`, a load into ra-jit's own
 target directory has ra-jit link the proc macros and its server expand them; over fd, bat,
 hyperfine, just, nushell and helix, 3,465 calls expanded the same as the toolchain's server
 with rustc's libraries, 12 not compared (`pest_consume_macros`,
 [#327](https://github.com/indexable-inc/blaze/issues/327)). The Linux archive has the server
 beside `ra-jit` (built by it in 30 s on dev-aws-8), and `RA_JIT_PROC_MACRO_SERVER=1` takes it
-from there: a load of fd starts no toolchain server.
+from there: a load of fd starts no toolchain server. It is the default: the daemon's loads,
+the checker's and build scripts' expand with blaze's libraries, made from each crate's record
+and kept in the store; built again over that store, the six apps link none again and expand
+the same 3,465 calls.
+
+2026-10-25, no rustup: `cargo blaze` reads the workspace with blaze-manifest where it ran
+`cargo metadata --no-deps` (#319; 385 of 385 workspaces equal, [resolve.md](resolve.md)), and
+install.sh installs blaze on a machine with no Rust: blaze downloads its own 1.99.0 (#322 and
+#340, landed together in #340). Measured on dev-aws-8 in a Debian 13 container with curl and
+gcc and no rustup, cargo or rustc, the archive served from the host and Rust from
+static.rust-lang.org over AWS's network: install.sh 5.5 s, the first `blaze run` of a new
+project 3.8 s (the daemon's load; `Finished ... [ra-jit]`), 9.2 s from the first `curl` to
+`Hello, world!`. On disk: 88 MB in `~/.cargo/bin`, 672 MB in `~/.blaze/toolchains`, 17 MB in
+`~/.cache`, no `~/.rustup`. The same install through rustup before (Debian 12, 2026-10-25):
+10.7 s, 91 MB and 672 MB in `~/.rustup`. All **read**. The Linux release needs glibc 2.39, so
+Debian 12 cannot run it ([#351](https://github.com/indexable-inc/blaze/issues/351)).
 
 2026-10-25, K's first part: with `RA_JIT_WHOLE_BUILD=1`, `cargo blaze build` and `run` from
 nothing are the whole build above, no `cargo build` ([cargo.md](cargo.md#what-a-build-does));
