@@ -73,7 +73,20 @@ pub fn run(unit: &Unit, mut command: Command) -> Result<Ran, Error> {
     })?;
     let failed = |err: std::io::Error| Error(format!("{}: {err}", run_dir(unit).display()));
     let began = invocation_time(run_dir(unit)).map_err(failed)?;
-    let output = command.stdin(Stdio::null()).output().map_err(|err| {
+    command.stdin(Stdio::null());
+    // A script this process just wrote stays busy while a child another thread forked holds
+    // it open, until that child execs.
+    let mut output = command.output();
+    for wait in 1..10 {
+        match &output {
+            Err(err) if err.kind() == std::io::ErrorKind::ExecutableFileBusy => {
+                std::thread::sleep(std::time::Duration::from_millis(10 * wait));
+                output = command.output();
+            }
+            _ => break,
+        }
+    }
+    let output = output.map_err(|err| {
         Error(format!(
             "failed to run custom build command for `{}`\n\nCaused by:\n  could not execute \
              process `{}` (never executed)\n\nCaused by:\n  {err}",
