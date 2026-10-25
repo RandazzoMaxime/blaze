@@ -756,6 +756,8 @@ struct HydratedHomes {
     /// By the names [`StableNames::file_path`] gives the files.
     of_file: FxHashMap<Box<str>, Vec<u32>>,
     of_any_file: Vec<u32>,
+    /// The code whose crate is not one of the checkout's, which any edit can reach.
+    of_any_crate: Vec<u32>,
 }
 
 /// The closures rustc compiled of the body of a function of a file an edit changes. rustc's
@@ -1010,17 +1012,11 @@ impl FromStore {
             let entry = entries.get(name);
             let tracked = entry.as_ref().and_then(|it| it.tracked.clone());
             // One compiled as a crate from outside the checkout is of it by its generic
-            // arguments, which no edit of a crate reaches, only of the files they are from.
-            let krate = tracked.as_ref().map(|it| match it.home {
-                Some(id) => crate_of.get(&ContentId(id)).map(|&krate| Some(krate)),
-                None => Some(None),
-            });
-            let why = match (&entry, &tracked) {
-                (None, _) => "no entry",
-                (_, None) => "no mark",
-                _ => "its crate is not of the checkout",
-            };
-            let (Some(entry), Some(tracked), Some(Some(krate))) = (entry, tracked, krate) else {
+            // arguments, and one compiled as a crate of another checkout, whose id is of that
+            // one's paths, by a crate its name need not say: any edit is looked at it for.
+            let krate = tracked.as_ref().and_then(|it| crate_of.get(&ContentId(it.home?)));
+            let why = if entry.is_none() { "no entry" } else { "no mark" };
+            let (Some(entry), Some(tracked)) = (entry, tracked) else {
                 from.untracked = true;
                 if std::env::var_os("RA_JIT_STATS").is_some() && from.untracked_seen < 3 {
                     from.untracked_seen += 1;
@@ -1029,8 +1025,9 @@ impl FromStore {
                 continue;
             };
             let at = from.hydrated.len() as u32;
-            if let Some(krate) = krate {
-                from.homes.of_crate.entry(krate).or_default().push(at);
+            match krate {
+                Some(&krate) => from.homes.of_crate.entry(krate).or_default().push(at),
+                None => from.homes.of_any_crate.push(at),
             }
             match &tracked.files {
                 Some(files) => {
@@ -1045,7 +1042,7 @@ impl FromStore {
                 name: name.clone(),
                 symbol: decls.get_function_decl(*id).linkage_name(*id).into_owned(),
                 mark: tracked.mark,
-                krate,
+                krate: krate.copied(),
                 files: tracked.files.map(|it| it.into_iter().map(Box::from).collect()),
                 callers: Vec::new(),
                 known: cg.found_instances.get(id).cloned(),
@@ -1766,6 +1763,9 @@ impl Base {
         if !touched.bodies.is_empty() {
             asked.extend(&homes.of_any_file);
         }
+        if touched.edited() {
+            asked.extend(&homes.of_any_crate);
+        }
         asked.extend(&touched.hydrated);
         Box::new(part_of(asked, part, parts))
     }
@@ -1798,7 +1798,7 @@ impl Base {
                         .as_ref()
                         .is_none_or(|files| files.iter().any(|it| edited_paths.contains(&**it)))
             };
-            let touched = was.krate.map_or(self.touched.any, |it| self.touched.reaches(it))
+            let touched = was.krate.map_or(self.touched.edited(), |it| self.touched.reaches(it))
                 || self.touched.hydrated.contains(&(i as u32))
                 || !self.touched.bodies.is_empty() && in_edited();
             if !touched && !check_all {
