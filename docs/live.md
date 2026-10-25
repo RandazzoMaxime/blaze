@@ -339,25 +339,20 @@ with a daemon and home of its own and no store. All times in ms; the samples are
 
 | program, mode | n | p50 | p90 | p95 | p99 | max |
 |---|---|---|---|---|---|---|
-| life, socket | 10 | 51.0 | 542 | 542 | 542 | 542 |
-| life, burst | 60 | 67.3 | 561 | 698 | 790 | 790 |
-| life, replay | 77 | 15,526 | 17,980 | 18,217 | 18,368 | 18,368 |
-| life, cargo | 10 | 186 | 195 | 195 | 195 | 195 |
+| life, socket | 10 | 26.6 | 52.6 | 52.6 | 52.6 | 52.6 |
+| life, burst | 60 | 27.4 | 33.1 | 33.2 | 38.4 | 38.4 |
+| life, replay | 77 | 89.3 | 493 | 10,440 | 12,760 | 12,760 |
+| life, cargo | 10 | 148 | 157 | 157 | 157 | 157 |
 
-Restarts: 3 of 12 session edits, 2,083 (max 2,312) against 2,837 (3,425) for `cargo run`; the
-9 body edits were applied live, p50 54 (42 to 72).
+Restarts: 3 of 12 session edits, 244 (max 260) against 1,526 (1,534) for `cargo run` (the build
+138 against 1,502, the start 69 against 24); the 9 body edits were applied live, p50 34 (26
+to 36). In replay 50 of the 77 compiling keys were run by a patch (p50 30.0, p90 237) and 27 by
+one of 13 restarts (p50 390), the tail being keys queued behind restarts as on macOS.
 
-- The tails are the splice. Defender scans an executable the first time it is opened after it
-  is written, about half a second for life's 50 MB (the first 4 KB of a fresh copy read in 530
-  ms, the whole file again in 15). The worker copies the executable a program runs to splice
-  it (`worker.splice.copy` p50 529 in socket), and an edit that comes during that splice waits
-  for it.
-- `delivery` (17 to 20 at p50) is the program looking for a patch every 30 ms: the daemon has
-  no way to wake it on Windows.
-- replay's p50 is the queue behind 3 restarts (`cargo ra-jit build` to the program running in
-  2.3 to 4.9 s: the build 0.6 to 1.1 s, the start 0.7 to 1.1 s) that 43 keys waited for. The
-  34 keys run by a patch: p50 64.7, p90 725.
-- In `cargo`, 116 of the 186 are cargo starting and asking the daemon.
+- The daemon sets a named event once it wrote a patch, which the program waits on: `delivery`
+  is 0.2. Before, the program looked every 30 ms, and socket's p50 was about 50.
+- Of socket's 26.6, about 25 is the worker building the edit.
+- In `cargo`, about 115 of the 148 are cargo starting and asking the daemon.
 
 Not measured yet: keystroke to changed pixels, and these modes on the CI runner
 (`.github/workflows/live-latency.yaml` runs `socket burst replay` on all four programs).

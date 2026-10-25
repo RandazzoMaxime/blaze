@@ -1,7 +1,7 @@
 {
  "program": "life",
- "date": "2026-10-25T13:06:10Z",
- "commit": "526be65016974cf082e758557f13c1842171de2c",
+ "date": "2026-10-25T13:28:27Z",
+ "commit": "ed427d8c2e3b6faa4d4f8b793b8eb433b0f7d4e9",
  "run_url": null,
  "host": {
   "name": "windows-x86-64",
@@ -14,1155 +14,1173 @@
  "modes": {
   "socket": [
    {
-    "to-worker": 1.667,
-    "worker": 26.593,
-    "delivery": 12.4086,
-    "wait": 0.0188,
-    "apply": 0.43860000000000005,
-    "total": 41.126,
-    "reply": 28.451,
-    "worker.apply.change": 0.076,
-    "worker.apply.outlines": 1.212,
-    "worker.apply.rest": 0.06,
-    "worker.publish": 0.551,
-    "worker.notice": 0.0,
-    "worker.settle": 1.013,
-    "worker.read": 0.02,
-    "worker.apply": 1.35,
-    "worker.roots": 0.102,
-    "worker.check": 2.906,
-    "worker.reach": 0.005,
-    "worker.resolve": 0.008,
-    "worker.define": 0.001,
-    "worker.object": 0.077,
-    "worker.discarded": 0.0,
-    "worker.statics": 0.342,
-    "worker.setup": 0.386,
-    "worker.compile-rest": 0.441,
-    "worker.write": 0.0,
-    "worker.build-rest": 10.073,
-    "worker.report": 0.114,
-    "worker.refuse": 9.159,
-    "worker.link": 0.697,
-    "worker.edit-to-binary": 25.7
-   },
-   {
-    "to-worker": 1.49,
-    "worker": 26.339,
-    "delivery": 17.7543,
-    "wait": 0.0202,
-    "apply": 0.5215,
-    "total": 46.125,
-    "reply": 27.962,
+    "to-worker": 1.077,
+    "worker": 24.512,
+    "delivery": 0.19049999999999995,
+    "wait": 0.0198,
+    "apply": 0.3837,
+    "total": 26.183,
+    "reply": 26.398,
     "worker.apply.change": 0.058,
-    "worker.apply.outlines": 0.769,
-    "worker.apply.rest": 0.028,
-    "worker.publish": 0.737,
+    "worker.apply.outlines": 0.759,
+    "worker.apply.rest": 0.029,
+    "worker.publish": 0.646,
     "worker.notice": 0.0,
-    "worker.settle": 1.006,
+    "worker.settle": 1.192,
     "worker.read": 0.014,
-    "worker.apply": 0.856,
-    "worker.roots": 0.128,
-    "worker.check": 2.074,
-    "worker.reach": 0.008,
-    "worker.resolve": 0.011,
-    "worker.define": 0.003,
-    "worker.object": 0.074,
-    "worker.discarded": 0.0,
-    "worker.statics": 0.507,
-    "worker.setup": 0.466,
-    "worker.compile-rest": 0.5,
-    "worker.write": 0.0,
-    "worker.build-rest": 10.493,
-    "worker.report": 0.116,
-    "worker.refuse": 9.294,
-    "worker.link": 582.3,
-    "worker.edit-to-binary": 25.4,
-    "worker.splice.place": 0.859,
-    "worker.splice.copy": 580.576,
-    "worker.splice.append": 0.201,
-    "worker.splice.write": 0.009,
-    "worker.splice.redirect": 0.018,
-    "worker.splice.close": 0.554
-   },
-   {
-    "to-worker": 1.713,
-    "worker": 31.16,
-    "delivery": 16.835500000000003,
-    "wait": 0.020300000000000002,
-    "apply": 0.4792,
-    "total": 50.208,
-    "reply": 33.605,
-    "worker.apply.change": 0.184,
-    "worker.apply.outlines": 1.778,
-    "worker.apply.rest": 0.087,
-    "worker.publish": 0.52,
-    "worker.notice": 0.0,
-    "worker.settle": 1.835,
-    "worker.read": 0.051,
-    "worker.apply": 2.049,
-    "worker.roots": 0.152,
-    "worker.check": 2.359,
-    "worker.reach": 0.006,
-    "worker.resolve": 0.012,
-    "worker.define": 0.003,
-    "worker.object": 0.156,
-    "worker.discarded": 0.0,
-    "worker.statics": 0.596,
-    "worker.setup": 0.446,
-    "worker.compile-rest": 0.504,
-    "worker.write": 0.0,
-    "worker.build-rest": 13.301,
-    "worker.report": 0.113,
-    "worker.refuse": 8.973,
-    "worker.link": 375.0,
-    "worker.edit-to-binary": 29.3,
-    "worker.splice.place": 1.371,
-    "worker.splice.copy": 373.408,
-    "worker.splice.append": 0.137,
-    "worker.splice.write": 0.009,
-    "worker.splice.redirect": 0.016,
-    "worker.splice.close": 0.06
-   },
-   {
-    "to-worker": 1.253,
-    "worker": 26.448,
-    "delivery": 9.985,
-    "wait": 0.0182,
-    "apply": 0.4178,
-    "total": 38.122,
-    "reply": 28.378,
-    "worker.apply.change": 0.073,
-    "worker.apply.outlines": 0.828,
-    "worker.apply.rest": 0.041,
-    "worker.publish": 0.501,
-    "worker.notice": 0.0,
-    "worker.settle": 1.359,
-    "worker.read": 0.02,
-    "worker.apply": 0.943,
-    "worker.roots": 0.133,
-    "worker.check": 2.453,
-    "worker.reach": 0.004,
-    "worker.resolve": 0.012,
-    "worker.define": 0.002,
-    "worker.object": 0.074,
-    "worker.discarded": 0.0,
-    "worker.statics": 0.309,
-    "worker.setup": 0.395,
-    "worker.compile-rest": 0.488,
-    "worker.write": 0.001,
-    "worker.build-rest": 9.794,
-    "worker.report": 0.114,
-    "worker.refuse": 9.791,
-    "worker.link": 0.607,
-    "worker.edit-to-binary": 25.1
-   },
-   {
-    "to-worker": 1.055,
-    "worker": 26.221,
-    "delivery": 28.3787,
-    "wait": 0.0209,
-    "apply": 0.4604,
-    "total": 56.136,
-    "reply": 27.899,
-    "worker.apply.change": 0.057,
-    "worker.apply.outlines": 0.778,
-    "worker.apply.rest": 0.029,
-    "worker.splice.place": 0.714,
-    "worker.splice.copy": 542.182,
-    "worker.splice.append": 0.274,
-    "worker.splice.write": 0.009,
-    "worker.splice.redirect": 0.027,
-    "worker.splice.close": 0.116,
-    "worker.link": 0.859,
-    "worker.publish": 0.745,
-    "worker.notice": 0.0,
-    "worker.settle": 1.063,
-    "worker.read": 0.015,
-    "worker.apply": 0.864,
-    "worker.roots": 0.139,
-    "worker.check": 2.357,
-    "worker.reach": 0.008,
-    "worker.resolve": 0.018,
-    "worker.define": 0.003,
-    "worker.object": 0.094,
-    "worker.discarded": 0.0,
-    "worker.statics": 0.41,
-    "worker.setup": 0.471,
-    "worker.compile-rest": 0.477,
-    "worker.write": 0.0,
-    "worker.build-rest": 10.068,
-    "worker.report": 0.119,
-    "worker.refuse": 9.322,
-    "worker.edit-to-binary": 25.2
-   },
-   {
-    "to-worker": 2.206,
-    "worker": 25.613,
-    "delivery": 22.9665,
-    "wait": 0.0259,
-    "apply": 0.5996,
-    "total": 51.411,
-    "reply": 28.735,
-    "worker.apply.change": 0.056,
-    "worker.apply.outlines": 0.797,
-    "worker.apply.rest": 0.029,
-    "worker.publish": 0.84,
-    "worker.notice": 0.0,
-    "worker.settle": 0.995,
-    "worker.read": 0.014,
-    "worker.apply": 0.883,
-    "worker.roots": 0.09,
-    "worker.check": 2.065,
-    "worker.reach": 0.005,
-    "worker.resolve": 0.01,
-    "worker.define": 0.003,
-    "worker.object": 0.068,
-    "worker.discarded": 0.0,
-    "worker.statics": 0.311,
-    "worker.setup": 0.382,
-    "worker.compile-rest": 0.455,
-    "worker.write": 0.0,
-    "worker.build-rest": 10.582,
-    "worker.report": 0.145,
-    "worker.refuse": 8.717,
-    "worker.link": 514.8,
-    "worker.edit-to-binary": 24.7,
-    "worker.splice.place": 0.761,
-    "worker.splice.copy": 513.66,
-    "worker.splice.append": 0.215,
-    "worker.splice.write": 0.007,
-    "worker.splice.redirect": 0.018,
-    "worker.splice.close": 0.069
-   },
-   {
-    "to-worker": 1.937,
-    "worker": 25.018,
-    "delivery": 6.6599,
-    "wait": 0.0309,
-    "apply": 0.6162000000000001,
-    "total": 34.262,
-    "reply": 27.297,
-    "worker.apply.change": 0.067,
-    "worker.apply.outlines": 0.819,
-    "worker.apply.rest": 0.029,
-    "worker.publish": 0.518,
-    "worker.notice": 0.0,
-    "worker.settle": 1.091,
-    "worker.read": 0.018,
-    "worker.apply": 0.917,
-    "worker.roots": 0.137,
-    "worker.check": 1.711,
+    "worker.apply": 0.847,
+    "worker.roots": 0.077,
+    "worker.check": 2.287,
     "worker.reach": 0.004,
     "worker.resolve": 0.008,
-    "worker.define": 0.001,
-    "worker.object": 0.061,
+    "worker.define": 0.002,
+    "worker.object": 0.073,
     "worker.discarded": 0.0,
-    "worker.statics": 0.256,
-    "worker.setup": 0.337,
-    "worker.compile-rest": 0.434,
+    "worker.statics": 0.257,
+    "worker.setup": 0.355,
+    "worker.compile-rest": 0.496,
     "worker.write": 0.0,
-    "worker.build-rest": 10.193,
-    "worker.report": 0.176,
-    "worker.refuse": 9.094,
-    "worker.link": 530.4,
-    "worker.edit-to-binary": 24.0,
-    "worker.splice.place": 0.797,
-    "worker.splice.copy": 529.256,
-    "worker.splice.append": 0.14,
+    "worker.build-rest": 9.61,
+    "worker.report": 0.112,
+    "worker.refuse": 8.485,
+    "worker.link": 1.0,
+    "worker.edit-to-binary": 23.4,
+    "worker.splice.place": 0.582,
+    "worker.splice.copy": 0.179,
+    "worker.splice.append": 0.111,
     "worker.splice.write": 0.008,
-    "worker.splice.redirect": 0.015,
-    "worker.splice.close": 0.065
+    "worker.splice.redirect": 0.014,
+    "worker.splice.close": 0.061
    },
    {
-    "to-worker": 1.458,
-    "worker": 27.626,
-    "delivery": 21.4053,
-    "wait": 0.0182,
-    "apply": 0.4485,
-    "total": 50.956,
-    "reply": 30.264,
-    "worker.apply.change": 0.079,
-    "worker.apply.outlines": 0.854,
-    "worker.apply.rest": 0.034,
-    "worker.publish": 0.718,
+    "to-worker": 1.706,
+    "worker": 50.271,
+    "delivery": 0.18479999999999996,
+    "wait": 0.0187,
+    "apply": 0.4385,
+    "total": 52.619,
+    "reply": 52.726,
+    "worker.apply.change": 0.068,
+    "worker.apply.outlines": 0.926,
+    "worker.apply.rest": 0.032,
+    "worker.publish": 0.546,
     "worker.notice": 0.0,
-    "worker.settle": 1.255,
-    "worker.read": 0.025,
-    "worker.apply": 0.968,
-    "worker.roots": 0.145,
-    "worker.check": 2.399,
-    "worker.reach": 0.003,
+    "worker.settle": 1.71,
+    "worker.read": 0.017,
+    "worker.apply": 1.026,
+    "worker.roots": 0.084,
+    "worker.check": 1.912,
+    "worker.reach": 0.004,
+    "worker.resolve": 0.008,
+    "worker.define": 0.002,
+    "worker.object": 0.071,
+    "worker.discarded": 0.0,
+    "worker.statics": 0.246,
+    "worker.setup": 0.327,
+    "worker.compile-rest": 0.419,
+    "worker.write": 0.0,
+    "worker.build-rest": 35.153,
+    "worker.report": 0.169,
+    "worker.refuse": 8.505,
+    "worker.link": 5.4,
+    "worker.edit-to-binary": 48.6,
+    "worker.splice.place": 4.632,
+    "worker.splice.copy": 0.369,
+    "worker.splice.append": 0.188,
+    "worker.splice.write": 0.014,
+    "worker.splice.redirect": 0.032,
+    "worker.splice.close": 0.122
+   },
+   {
+    "to-worker": 1.946,
+    "worker": 25.746,
+    "delivery": 0.22099999999999997,
+    "wait": 0.0207,
+    "apply": 0.4373,
+    "total": 28.371,
+    "reply": 28.317,
+    "worker.apply.change": 0.057,
+    "worker.apply.outlines": 0.729,
+    "worker.apply.rest": 0.027,
+    "worker.publish": 0.594,
+    "worker.notice": 0.0,
+    "worker.settle": 1.231,
+    "worker.read": 0.015,
+    "worker.apply": 0.814,
+    "worker.roots": 0.119,
+    "worker.check": 3.295,
+    "worker.reach": 0.004,
+    "worker.resolve": 0.007,
+    "worker.define": 0.002,
+    "worker.object": 0.087,
+    "worker.discarded": 0.0,
+    "worker.statics": 0.259,
+    "worker.setup": 0.323,
+    "worker.compile-rest": 0.497,
+    "worker.write": 0.0,
+    "worker.build-rest": 10.094,
+    "worker.report": 0.112,
+    "worker.refuse": 8.249,
+    "worker.link": 1.3,
+    "worker.edit-to-binary": 24.6,
+    "worker.splice.place": 0.904,
+    "worker.splice.copy": 0.178,
+    "worker.splice.append": 0.108,
+    "worker.splice.write": 0.009,
+    "worker.splice.redirect": 0.014,
+    "worker.splice.close": 0.061
+   },
+   {
+    "to-worker": 1.185,
+    "worker": 24.462,
+    "delivery": 0.2078000000000001,
+    "wait": 0.0193,
+    "apply": 0.44989999999999997,
+    "total": 26.324,
+    "reply": 26.472,
+    "worker.apply.change": 0.055,
+    "worker.apply.outlines": 0.775,
+    "worker.apply.rest": 0.062,
+    "worker.publish": 0.506,
+    "worker.notice": 0.0,
+    "worker.settle": 1.144,
+    "worker.read": 0.014,
+    "worker.apply": 0.894,
+    "worker.roots": 0.089,
+    "worker.check": 2.603,
+    "worker.reach": 0.004,
+    "worker.resolve": 0.007,
+    "worker.define": 0.001,
+    "worker.object": 0.066,
+    "worker.discarded": 0.0,
+    "worker.statics": 0.289,
+    "worker.setup": 0.342,
+    "worker.compile-rest": 0.432,
+    "worker.write": 0.0,
+    "worker.build-rest": 9.612,
+    "worker.report": 0.112,
+    "worker.refuse": 8.297,
+    "worker.link": 1.2,
+    "worker.edit-to-binary": 23.4,
+    "worker.splice.place": 0.84,
+    "worker.splice.copy": 0.142,
+    "worker.splice.append": 0.108,
+    "worker.splice.write": 0.007,
+    "worker.splice.redirect": 0.014,
+    "worker.splice.close": 0.081
+   },
+   {
+    "to-worker": 1.69,
+    "worker": 25.235,
+    "delivery": 0.18300000000000005,
+    "wait": 0.027,
+    "apply": 1.0,
+    "total": 28.135,
+    "reply": 27.48,
+    "worker.apply.change": 0.057,
+    "worker.apply.outlines": 0.825,
+    "worker.apply.rest": 0.032,
+    "worker.publish": 0.451,
+    "worker.notice": 0.0,
+    "worker.settle": 1.116,
+    "worker.read": 0.015,
+    "worker.apply": 0.915,
+    "worker.roots": 0.074,
+    "worker.check": 3.096,
+    "worker.reach": 0.004,
     "worker.resolve": 0.007,
     "worker.define": 0.002,
     "worker.object": 0.064,
     "worker.discarded": 0.0,
-    "worker.statics": 0.276,
-    "worker.setup": 0.361,
-    "worker.compile-rest": 0.499,
-    "worker.write": 0.001,
-    "worker.build-rest": 11.314,
-    "worker.report": 0.173,
-    "worker.refuse": 9.357,
-    "worker.link": 0.906,
-    "worker.edit-to-binary": 26.5
+    "worker.statics": 0.338,
+    "worker.setup": 0.326,
+    "worker.compile-rest": 0.479,
+    "worker.write": 0.0,
+    "worker.build-rest": 9.75,
+    "worker.report": 0.111,
+    "worker.refuse": 8.444,
+    "worker.link": 1.6,
+    "worker.edit-to-binary": 24.2,
+    "worker.splice.place": 1.124,
+    "worker.splice.copy": 0.164,
+    "worker.splice.append": 0.133,
+    "worker.splice.write": 0.008,
+    "worker.splice.redirect": 0.013,
+    "worker.splice.close": 0.06
    },
    {
-    "to-worker": 1.146,
-    "worker": 26.212,
-    "delivery": 26.9976,
-    "wait": 0.0177,
-    "apply": 0.4527,
-    "total": 54.826,
-    "reply": 28.206,
-    "worker.apply.change": 0.107,
-    "worker.apply.outlines": 0.842,
-    "worker.apply.rest": 0.046,
-    "worker.publish": 0.501,
+    "to-worker": 1.048,
+    "worker": 24.365,
+    "delivery": 0.23799999999999993,
+    "wait": 0.0169,
+    "apply": 0.36110000000000003,
+    "total": 26.029,
+    "reply": 25.838,
+    "worker.apply.change": 0.057,
+    "worker.apply.outlines": 0.768,
+    "worker.apply.rest": 0.028,
+    "worker.publish": 0.717,
     "worker.notice": 0.0,
-    "worker.settle": 1.225,
-    "worker.read": 0.032,
-    "worker.apply": 0.996,
-    "worker.roots": 0.108,
-    "worker.check": 2.311,
-    "worker.reach": 0.004,
+    "worker.settle": 1.173,
+    "worker.read": 0.016,
+    "worker.apply": 0.854,
+    "worker.roots": 0.117,
+    "worker.check": 1.647,
+    "worker.reach": 0.003,
     "worker.resolve": 0.008,
-    "worker.define": 0.001,
+    "worker.define": 0.002,
+    "worker.object": 0.077,
+    "worker.discarded": 0.0,
+    "worker.statics": 0.251,
+    "worker.setup": 0.326,
+    "worker.compile-rest": 0.428,
+    "worker.write": 0.0,
+    "worker.build-rest": 10.176,
+    "worker.report": 0.111,
+    "worker.refuse": 8.412,
+    "worker.link": 2.8,
+    "worker.edit-to-binary": 23.3,
+    "worker.splice.place": 1.893,
+    "worker.splice.copy": 0.371,
+    "worker.splice.append": 0.208,
+    "worker.splice.write": 0.015,
+    "worker.splice.redirect": 0.033,
+    "worker.splice.close": 0.19
+   },
+   {
+    "to-worker": 0.912,
+    "worker": 23.694,
+    "delivery": 0.20740000000000003,
+    "wait": 0.0143,
+    "apply": 0.5043,
+    "total": 25.332,
+    "reply": 24.997,
+    "worker.apply.change": 0.057,
+    "worker.apply.outlines": 0.791,
+    "worker.apply.rest": 0.028,
+    "worker.publish": 0.438,
+    "worker.notice": 0.0,
+    "worker.settle": 1.124,
+    "worker.read": 0.014,
+    "worker.apply": 0.878,
+    "worker.roots": 0.105,
+    "worker.check": 2.355,
+    "worker.reach": 0.003,
+    "worker.resolve": 0.008,
+    "worker.define": 0.002,
     "worker.object": 0.069,
     "worker.discarded": 0.0,
-    "worker.statics": 0.261,
-    "worker.setup": 0.346,
-    "worker.compile-rest": 0.423,
+    "worker.statics": 0.253,
+    "worker.setup": 0.315,
+    "worker.compile-rest": 0.492,
     "worker.write": 0.0,
-    "worker.build-rest": 10.454,
-    "worker.report": 0.136,
-    "worker.refuse": 9.284,
-    "worker.link": 567.7,
-    "worker.edit-to-binary": 25.0,
-    "worker.splice.place": 0.511,
-    "worker.splice.copy": 566.782,
-    "worker.splice.append": 0.125,
-    "worker.splice.write": 0.006,
-    "worker.splice.redirect": 0.015,
-    "worker.splice.close": 0.066
+    "worker.build-rest": 9.307,
+    "worker.report": 0.113,
+    "worker.refuse": 8.171,
+    "worker.link": 1.0,
+    "worker.edit-to-binary": 22.7,
+    "worker.splice.place": 0.647,
+    "worker.splice.copy": 0.166,
+    "worker.splice.append": 0.103,
+    "worker.splice.write": 0.005,
+    "worker.splice.redirect": 0.013,
+    "worker.splice.close": 0.05
    },
    {
-    "to-worker": 1.174,
-    "worker": 534.747,
-    "delivery": 5.3532,
-    "wait": 0.06620000000000001,
-    "apply": 0.6556000000000001,
-    "total": 541.996,
-    "reply": 537.617,
+    "to-worker": 1.43,
+    "worker": 25.212,
+    "delivery": 0.14690000000000003,
+    "wait": 0.0167,
+    "apply": 0.3454,
+    "total": 27.151,
+    "reply": 27.313,
     "worker.apply.change": 0.058,
-    "worker.apply.outlines": 1.054,
-    "worker.apply.rest": 0.034,
-    "worker.splice.place": 1.359,
-    "worker.splice.copy": 131.848,
-    "worker.splice.append": 0.356,
-    "worker.splice.write": 0.009,
-    "worker.splice.redirect": 0.023,
-    "worker.splice.close": 0.139,
-    "worker.link": 133.8,
-    "worker.publish": 0.535,
+    "worker.apply.outlines": 1.171,
+    "worker.apply.rest": 0.03,
+    "worker.publish": 0.444,
     "worker.notice": 0.0,
-    "worker.settle": 1.111,
-    "worker.read": 0.016,
-    "worker.apply": 1.147,
-    "worker.roots": 0.129,
-    "worker.check": 2.256,
+    "worker.settle": 1.16,
+    "worker.read": 0.014,
+    "worker.apply": 1.259,
+    "worker.roots": 0.107,
+    "worker.check": 2.329,
     "worker.reach": 0.004,
     "worker.resolve": 0.009,
     "worker.define": 0.002,
-    "worker.object": 0.083,
+    "worker.object": 0.084,
     "worker.discarded": 0.0,
-    "worker.statics": 0.295,
-    "worker.setup": 0.467,
-    "worker.compile-rest": 0.452,
+    "worker.statics": 0.261,
+    "worker.setup": 0.391,
+    "worker.compile-rest": 0.489,
     "worker.write": 0.0,
-    "worker.build-rest": 233.684,
-    "worker.report": 0.114,
-    "worker.refuse": 294.399,
-    "worker.edit-to-binary": 533.8
+    "worker.build-rest": 10.391,
+    "worker.report": 0.111,
+    "worker.refuse": 8.112,
+    "worker.link": 4.8,
+    "worker.edit-to-binary": 24.1,
+    "worker.splice.place": 3.456,
+    "worker.splice.copy": 0.573,
+    "worker.splice.append": 0.376,
+    "worker.splice.write": 0.025,
+    "worker.splice.redirect": 0.054,
+    "worker.splice.close": 0.209
+   },
+   {
+    "to-worker": 1.329,
+    "worker": 24.667,
+    "delivery": 0.20989999999999998,
+    "wait": 0.0309,
+    "apply": 0.36719999999999997,
+    "total": 26.604,
+    "reply": 26.996,
+    "worker.apply.change": 0.057,
+    "worker.apply.outlines": 0.864,
+    "worker.apply.rest": 0.028,
+    "worker.publish": 0.495,
+    "worker.notice": 0.0,
+    "worker.settle": 1.107,
+    "worker.read": 0.015,
+    "worker.apply": 0.949,
+    "worker.roots": 0.074,
+    "worker.check": 2.739,
+    "worker.reach": 0.004,
+    "worker.resolve": 0.007,
+    "worker.define": 0.002,
+    "worker.object": 0.061,
+    "worker.discarded": 0.0,
+    "worker.statics": 0.233,
+    "worker.setup": 0.335,
+    "worker.compile-rest": 0.478,
+    "worker.write": 0.0,
+    "worker.build-rest": 9.469,
+    "worker.report": 0.111,
+    "worker.refuse": 8.542,
+    "worker.link": 2.0,
+    "worker.edit-to-binary": 23.6,
+    "worker.splice.place": 1.508,
+    "worker.splice.copy": 0.228,
+    "worker.splice.append": 0.116,
+    "worker.splice.write": 0.006,
+    "worker.splice.redirect": 0.016,
+    "worker.splice.close": 0.07
+   },
+   {
+    "to-worker": 1.014,
+    "worker": 24.69,
+    "delivery": 0.14390000000000003,
+    "wait": 0.019600000000000003,
+    "apply": 0.4655,
+    "total": 26.333,
+    "reply": 26.45,
+    "worker.apply.change": 0.057,
+    "worker.apply.outlines": 0.739,
+    "worker.apply.rest": 0.027,
+    "worker.publish": 0.538,
+    "worker.notice": 0.0,
+    "worker.settle": 1.376,
+    "worker.read": 0.018,
+    "worker.apply": 0.824,
+    "worker.roots": 0.236,
+    "worker.check": 1.943,
+    "worker.reach": 0.004,
+    "worker.resolve": 0.007,
+    "worker.define": 0.002,
+    "worker.object": 0.068,
+    "worker.discarded": 0.0,
+    "worker.statics": 0.247,
+    "worker.setup": 0.312,
+    "worker.compile-rest": 0.435,
+    "worker.write": 0.0,
+    "worker.build-rest": 10.126,
+    "worker.report": 0.138,
+    "worker.refuse": 8.374,
+    "worker.link": 3.9,
+    "worker.edit-to-binary": 23.4,
+    "worker.splice.place": 2.582,
+    "worker.splice.copy": 0.625,
+    "worker.splice.append": 0.273,
+    "worker.splice.write": 0.024,
+    "worker.splice.redirect": 0.05,
+    "worker.splice.close": 0.176
    }
   ],
   "burst": [
    {
-    "total": 57.434,
+    "total": 27.8,
     "queued": 0.0
    },
    {
-    "total": 55.009,
+    "total": 30.24,
     "queued": 0.0
    },
    {
-    "total": 42.437,
+    "total": 27.117,
     "queued": 0.0
    },
    {
-    "total": 60.266,
+    "total": 25.46,
     "queued": 0.0
    },
    {
-    "total": 61.461,
+    "total": 27.334,
     "queued": 0.0
    },
    {
-    "total": 61.41,
+    "total": 26.275,
     "queued": 0.0
    },
    {
-    "total": 457.527,
+    "total": 29.104,
     "queued": 0.0
    },
    {
-    "total": 604.862,
-    "queued": 335.27
-   },
-   {
-    "total": 557.636,
-    "queued": 288.044
-   },
-   {
-    "total": 510.511,
-    "queued": 240.919
-   },
-   {
-    "total": 416.988,
-    "queued": 147.396
-   },
-   {
-    "total": 341.271,
-    "queued": 71.679
-   },
-   {
-    "total": 554.25,
-    "queued": 243.369
-   },
-   {
-    "total": 508.258,
-    "queued": 197.377
-   },
-   {
-    "total": 431.455,
-    "queued": 120.574
-   },
-   {
-    "total": 338.685,
-    "queued": 27.804
-   },
-   {
-    "total": 335.807,
-    "queued": 298.619
-   },
-   {
-    "total": 228.177,
-    "queued": 190.989
-   },
-   {
-    "total": 133.327,
-    "queued": 96.139
-   },
-   {
-    "total": 86.429,
-    "queued": 49.241
-   },
-   {
-    "total": 67.309,
+    "total": 27.969,
     "queued": 0.0
    },
    {
-    "total": 60.454,
+    "total": 26.11,
     "queued": 0.0
    },
    {
-    "total": 47.528,
+    "total": 25.469,
     "queued": 0.0
    },
    {
-    "total": 43.637,
+    "total": 29.698,
     "queued": 0.0
    },
    {
-    "total": 42.057,
+    "total": 29.0,
     "queued": 0.0
    },
    {
-    "total": 790.363,
+    "total": 26.339,
     "queued": 0.0
    },
    {
-    "total": 744.405,
-    "queued": 712.229
-   },
-   {
-    "total": 698.269,
-    "queued": 666.093
-   },
-   {
-    "total": 637.234,
-    "queued": 605.058
-   },
-   {
-    "total": 560.51,
-    "queued": 528.334
-   },
-   {
-    "total": 498.249,
-    "queued": 466.073
-   },
-   {
-    "total": 436.517,
-    "queued": 404.341
-   },
-   {
-    "total": 388.685,
-    "queued": 356.509
-   },
-   {
-    "total": 311.672,
-    "queued": 279.496
-   },
-   {
-    "total": 249.797,
-    "queued": 217.621
-   },
-   {
-    "total": 202.535,
-    "queued": 170.359
-   },
-   {
-    "total": 108.344,
-    "queued": 76.168
-   },
-   {
-    "total": 64.411,
-    "queued": 27.899
-   },
-   {
-    "total": 61.541,
+    "total": 26.073,
     "queued": 0.0
    },
    {
-    "total": 58.33,
+    "total": 26.424,
     "queued": 0.0
    },
    {
-    "total": 52.485,
+    "total": 32.938,
     "queued": 0.0
    },
    {
-    "total": 40.127,
+    "total": 25.265,
     "queued": 0.0
    },
    {
-    "total": 39.043,
+    "total": 38.44,
     "queued": 0.0
    },
    {
-    "total": 62.674,
+    "total": 26.678,
     "queued": 0.0
    },
    {
-    "total": 39.414,
+    "total": 26.516,
     "queued": 0.0
    },
    {
-    "total": 52.805,
+    "total": 27.273,
     "queued": 0.0
    },
    {
-    "total": 270.08,
+    "total": 27.417,
     "queued": 0.0
    },
    {
-    "total": 206.804,
-    "queued": 170.737
-   },
-   {
-    "total": 112.779,
-    "queued": 76.712
-   },
-   {
-    "total": 65.365,
-    "queued": 27.529
-   },
-   {
-    "total": 41.179,
+    "total": 29.388,
     "queued": 0.0
    },
    {
-    "total": 43.981,
+    "total": 29.156,
     "queued": 0.0
    },
    {
-    "total": 61.016,
-    "queued": 0.504
-   },
-   {
-    "total": 57.96,
+    "total": 25.794,
     "queued": 0.0
    },
    {
-    "total": 35.67,
+    "total": 30.499,
     "queued": 0.0
    },
    {
-    "total": 45.147,
+    "total": 25.353,
+    "queued": 0.62
+   },
+   {
+    "total": 26.085,
     "queued": 0.0
    },
    {
-    "total": 42.777,
+    "total": 25.779,
     "queued": 0.0
    },
    {
-    "total": 61.538,
+    "total": 25.974,
     "queued": 0.0
    },
    {
-    "total": 40.927,
+    "total": 25.353,
     "queued": 0.0
    },
    {
-    "total": 54.974,
+    "total": 25.157,
+    "queued": 0.0
+   },
+   {
+    "total": 25.383,
+    "queued": 0.0
+   },
+   {
+    "total": 33.154,
+    "queued": 0.0
+   },
+   {
+    "total": 27.154,
+    "queued": 0.0
+   },
+   {
+    "total": 25.159,
+    "queued": 0.0
+   },
+   {
+    "total": 33.702,
+    "queued": 0.0
+   },
+   {
+    "total": 25.092,
+    "queued": 0.0
+   },
+   {
+    "total": 27.737,
+    "queued": 0.0
+   },
+   {
+    "total": 28.559,
+    "queued": 0.0
+   },
+   {
+    "total": 28.367,
+    "queued": 0.0
+   },
+   {
+    "total": 28.191,
+    "queued": 0.0
+   },
+   {
+    "total": 28.587,
+    "queued": 2.918
+   },
+   {
+    "total": 25.088,
+    "queued": 0.0
+   },
+   {
+    "total": 31.656,
+    "queued": 0.0
+   },
+   {
+    "total": 33.023,
+    "queued": 0.0
+   },
+   {
+    "total": 33.207,
+    "queued": 0.0
+   },
+   {
+    "total": 31.877,
+    "queued": 0.0
+   },
+   {
+    "total": 31.585,
+    "queued": 0.0
+   },
+   {
+    "total": 33.077,
+    "queued": 0.0
+   },
+   {
+    "total": 25.748,
+    "queued": 0.0
+   },
+   {
+    "total": 29.429,
+    "queued": 0.0
+   },
+   {
+    "total": 32.924,
+    "queued": 0.0
+   },
+   {
+    "total": 25.141,
+    "queued": 0.0
+   },
+   {
+    "total": 30.547,
+    "queued": 0.0
+   },
+   {
+    "total": 26.699,
+    "queued": 0.0
+   },
+   {
+    "total": 25.167,
+    "queued": 0.0
+   },
+   {
+    "total": 24.681,
+    "queued": 0.0
+   },
+   {
+    "total": 33.153,
+    "queued": 0.0
+   },
+   {
+    "total": 32.829,
     "queued": 0.0
    }
   ],
   "replay": [
    {
-    "total": 40.705,
+    "total": 26.694,
     "queued": 0.0,
     "by": "patch",
     "script": "next_age: HighLife",
     "refused": false
    },
    {
-    "total": 76.817,
+    "total": 30.553,
     "queued": 0.0,
     "by": "patch",
     "script": "next_age: HighLife",
     "refused": false
    },
    {
-    "total": 44.707,
-    "queued": 2.795,
-    "by": "patch",
-    "script": "color: retype a colour",
-    "refused": false
-   },
-   {
-    "total": 43.016,
+    "total": 31.463,
     "queued": 0.0,
     "by": "patch",
     "script": "color: retype a colour",
     "refused": false
    },
    {
-    "total": 40.353,
+    "total": 28.664,
     "queued": 0.0,
     "by": "patch",
     "script": "color: retype a colour",
     "refused": false
    },
    {
-    "total": 41.247,
+    "total": 25.058,
     "queued": 0.0,
     "by": "patch",
     "script": "color: retype a colour",
     "refused": false
    },
    {
-    "total": 68.001,
+    "total": 26.389,
     "queued": 0.0,
     "by": "patch",
     "script": "color: retype a colour",
     "refused": false
    },
    {
-    "total": 49.37,
+    "total": 29.488,
     "queued": 0.0,
     "by": "patch",
     "script": "color: retype a colour",
     "refused": false
    },
    {
-    "total": 36.578,
+    "total": 26.823,
     "queued": 0.0,
     "by": "patch",
     "script": "color: retype a colour",
     "refused": false
    },
    {
-    "total": 44.702,
+    "total": 25.974,
     "queued": 0.0,
     "by": "patch",
     "script": "color: retype a colour",
     "refused": false
    },
    {
-    "total": 58.558,
+    "total": 29.425,
     "queued": 0.0,
     "by": "patch",
     "script": "color: retype a colour",
     "refused": false
    },
    {
-    "total": 52.6,
+    "total": 31.897,
     "queued": 0.0,
     "by": "patch",
     "script": "color: retype a colour",
     "refused": false
    },
    {
-    "total": 61.471,
+    "total": 29.609,
     "queued": 0.0,
     "by": "patch",
     "script": "color: retype a colour",
     "refused": false
    },
    {
-    "total": 61.323,
+    "total": 25.148,
+    "queued": 0.0,
+    "by": "patch",
+    "script": "color: retype a colour",
+    "refused": false
+   },
+   {
+    "total": 28.485,
     "queued": 0.0,
     "by": "patch",
     "script": "count_above<T>: typed, then called from step",
     "refused": false
    },
    {
-    "total": 47.491,
+    "total": 29.058,
     "queued": 0.0,
     "by": "patch",
     "script": "count_above<T>: typed, then called from step",
     "refused": false
    },
    {
-    "total": 5000.476,
-    "queued": 61.216,
-    "by": "restart",
-    "script": "count_above<T>: typed, then called from step",
-    "refused": false
-   },
-   {
-    "total": 18368.291,
-    "queued": 16102.523,
-    "by": "restart",
-    "script": "count_above<T>: typed, then called from step",
-    "refused": false
-   },
-   {
-    "total": 18307.853,
-    "queued": 16042.085,
-    "by": "restart",
-    "script": "count_above<T>: typed, then called from step",
-    "refused": false
-   },
-   {
-    "total": 18269.062,
-    "queued": 16003.294,
-    "by": "restart",
-    "script": "count_above<T>: typed, then called from step",
-    "refused": false
-   },
-   {
-    "total": 18216.566,
-    "queued": 15950.798,
-    "by": "restart",
-    "script": "count_above<T>: typed, then called from step",
-    "refused": false
-   },
-   {
-    "total": 18166.189,
-    "queued": 15900.421,
-    "by": "restart",
-    "script": "count_above<T>: typed, then called from step",
-    "refused": false
-   },
-   {
-    "total": 18103.547,
-    "queued": 15837.779,
-    "by": "restart",
-    "script": "count_above<T>: typed, then called from step",
-    "refused": false
-   },
-   {
-    "total": 18041.807,
-    "queued": 15776.039,
-    "by": "restart",
-    "script": "count_above<T>: typed, then called from step",
-    "refused": false
-   },
-   {
-    "total": 17980.291,
-    "queued": 15714.523,
-    "by": "restart",
-    "script": "count_above<T>: typed, then called from step",
-    "refused": false
-   },
-   {
-    "total": 17933.681,
-    "queued": 15667.913,
-    "by": "restart",
-    "script": "count_above<T>: typed, then called from step",
-    "refused": false
-   },
-   {
-    "total": 17872.752,
-    "queued": 15606.984,
-    "by": "restart",
-    "script": "count_above<T>: typed, then called from step",
-    "refused": false
-   },
-   {
-    "total": 17780.583,
-    "queued": 15514.815,
-    "by": "restart",
-    "script": "count_above<T>: typed, then called from step",
-    "refused": false
-   },
-   {
-    "total": 17693.674,
-    "queued": 15427.906,
-    "by": "restart",
-    "script": "count_above<T>: typed, then called from step",
-    "refused": false
-   },
-   {
-    "total": 17594.186,
-    "queued": 15328.418,
-    "by": "restart",
-    "script": "count_above<T>: typed, then called from step",
-    "refused": false
-   },
-   {
-    "total": 17530.77,
-    "queued": 15265.002,
-    "by": "restart",
-    "script": "count_above<T>: typed, then called from step",
-    "refused": false
-   },
-   {
-    "total": 17483.574,
-    "queued": 15217.806,
-    "by": "restart",
-    "script": "count_above<T>: typed, then called from step",
-    "refused": false
-   },
-   {
-    "total": 17436.011,
-    "queued": 15170.243,
-    "by": "restart",
-    "script": "count_above<T>: typed, then called from step",
-    "refused": false
-   },
-   {
-    "total": 17264.967,
-    "queued": 14999.199,
-    "by": "restart",
-    "script": "count_above<T>: typed, then called from step",
-    "refused": false
-   },
-   {
-    "total": 17218.141,
-    "queued": 14952.373,
-    "by": "restart",
-    "script": "count_above<T>: typed, then called from step",
-    "refused": false
-   },
-   {
-    "total": 17155.958,
-    "queued": 14890.19,
-    "by": "restart",
-    "script": "count_above<T>: typed, then called from step",
-    "refused": false
-   },
-   {
-    "total": 17108.949,
-    "queued": 14843.181,
-    "by": "restart",
-    "script": "count_above<T>: typed, then called from step",
-    "refused": false
-   },
-   {
-    "total": 17083.034,
-    "queued": 14817.266,
-    "by": "restart",
-    "script": "count_above<T>: typed, then called from step",
-    "refused": false
-   },
-   {
-    "total": 17030.45,
-    "queued": 14764.682,
-    "by": "restart",
-    "script": "count_above<T>: typed, then called from step",
-    "refused": false
-   },
-   {
-    "total": 16989.605,
-    "queued": 14723.837,
-    "by": "restart",
-    "script": "count_above<T>: typed, then called from step",
-    "refused": false
-   },
-   {
-    "total": 16937.454,
-    "queued": 14671.686,
-    "by": "restart",
-    "script": "count_above<T>: typed, then called from step",
-    "refused": false
-   },
-   {
-    "total": 16907.118,
-    "queued": 14641.35,
-    "by": "restart",
-    "script": "count_above<T>: typed, then called from step",
-    "refused": false
-   },
-   {
-    "total": 16860.364,
-    "queued": 14594.596,
-    "by": "restart",
-    "script": "count_above<T>: typed, then called from step",
-    "refused": false
-   },
-   {
-    "total": 16768.335,
-    "queued": 14502.567,
-    "by": "restart",
-    "script": "count_above<T>: typed, then called from step",
-    "refused": false
-   },
-   {
-    "total": 16737.135,
-    "queued": 14471.367,
-    "by": "restart",
-    "script": "count_above<T>: typed, then called from step",
-    "refused": false
-   },
-   {
-    "total": 16656.813,
-    "queued": 14391.045,
-    "by": "restart",
-    "script": "count_above<T>: typed, then called from step",
-    "refused": false
-   },
-   {
-    "total": 16651.17,
-    "queued": 14385.402,
-    "by": "restart",
-    "script": "count_above<T>: typed, then called from step",
-    "refused": false
-   },
-   {
-    "total": 16131.973,
-    "queued": 13866.205,
-    "by": "restart",
-    "script": "count_above<T>: typed, then called from step",
-    "refused": false
-   },
-   {
-    "total": 16053.954,
-    "queued": 13788.186,
-    "by": "restart",
-    "script": "count_above<T>: typed, then called from step",
-    "refused": false
-   },
-   {
-    "total": 15976.877,
-    "queued": 13711.109,
-    "by": "restart",
-    "script": "count_above<T>: typed, then called from step",
-    "refused": false
-   },
-   {
-    "total": 15868.579,
-    "queued": 13602.811,
-    "by": "restart",
-    "script": "count_above<T>: typed, then called from step",
-    "refused": false
-   },
-   {
-    "total": 15790.833,
-    "queued": 13525.065,
-    "by": "restart",
-    "script": "count_above<T>: typed, then called from step",
-    "refused": false
-   },
-   {
-    "total": 15698.249,
-    "queued": 13432.481,
-    "by": "restart",
-    "script": "count_above<T>: typed, then called from step",
-    "refused": false
-   },
-   {
-    "total": 15642.205,
-    "queued": 13376.437,
-    "by": "restart",
-    "script": "count_above<T>: typed, then called from step",
-    "refused": false
-   },
-   {
-    "total": 15589.134,
-    "queued": 13323.366,
-    "by": "restart",
-    "script": "count_above<T>: typed, then called from step",
-    "refused": false
-   },
-   {
-    "total": 15525.601,
-    "queued": 13259.833,
-    "by": "restart",
-    "script": "count_above<T>: typed, then called from step",
-    "refused": false
-   },
-   {
-    "total": 12473.358,
-    "queued": 10207.59,
-    "by": "restart",
-    "script": "count_above<T>: typed, then called from step",
-    "refused": false
-   },
-   {
-    "total": 12434.283,
-    "queued": 10168.515,
-    "by": "restart",
-    "script": "count_above<T>: typed, then called from step",
-    "refused": false
-   },
-   {
-    "total": 2339.877,
-    "queued": 74.109,
-    "by": "restart",
-    "script": "count_above<T>: typed, then called from step",
-    "refused": false
-   },
-   {
-    "total": 3648.0,
-    "queued": 3597.75,
+    "total": 241.552,
+    "queued": 210.837,
     "by": "patch",
     "script": "count_above<T>: typed, then called from step",
     "refused": false
    },
    {
-    "total": 50.25,
+    "total": 148.92,
+    "queued": 118.205,
+    "by": "patch",
+    "script": "count_above<T>: typed, then called from step",
+    "refused": false
+   },
+   {
+    "total": 81.044,
+    "queued": 50.329,
+    "by": "patch",
+    "script": "count_above<T>: typed, then called from step",
+    "refused": false
+   },
+   {
+    "total": 30.715,
     "queued": 0.0,
     "by": "patch",
     "script": "count_above<T>: typed, then called from step",
     "refused": false
    },
    {
-    "total": 140.737,
-    "queued": 95.616,
+    "total": 450.608,
+    "queued": 216.781,
+    "by": "restart",
+    "script": "count_above<T>: typed, then called from step",
+    "refused": false
+   },
+   {
+    "total": 424.269,
+    "queued": 190.442,
+    "by": "restart",
+    "script": "count_above<T>: typed, then called from step",
+    "refused": false
+   },
+   {
+    "total": 339.524,
+    "queued": 105.697,
+    "by": "restart",
+    "script": "count_above<T>: typed, then called from step",
+    "refused": false
+   },
+   {
+    "total": 260.277,
+    "queued": 26.45,
+    "by": "restart",
+    "script": "count_above<T>: typed, then called from step",
+    "refused": false
+   },
+   {
+    "total": 415.566,
+    "queued": 199.123,
+    "by": "restart",
+    "script": "count_above<T>: typed, then called from step",
+    "refused": false
+   },
+   {
+    "total": 389.513,
+    "queued": 173.07,
+    "by": "restart",
+    "script": "count_above<T>: typed, then called from step",
+    "refused": false
+   },
+   {
+    "total": 324.029,
+    "queued": 107.586,
+    "by": "restart",
+    "script": "count_above<T>: typed, then called from step",
+    "refused": false
+   },
+   {
+    "total": 245.022,
+    "queued": 28.579,
+    "by": "restart",
+    "script": "count_above<T>: typed, then called from step",
+    "refused": false
+   },
+   {
+    "total": 390.244,
+    "queued": 151.965,
+    "by": "restart",
+    "script": "count_above<T>: typed, then called from step",
+    "refused": false
+   },
+   {
+    "total": 313.231,
+    "queued": 74.952,
+    "by": "restart",
+    "script": "count_above<T>: typed, then called from step",
+    "refused": false
+   },
+   {
+    "total": 265.094,
+    "queued": 26.815,
+    "by": "restart",
+    "script": "count_above<T>: typed, then called from step",
+    "refused": false
+   },
+   {
+    "total": 240.47,
+    "queued": 210.086,
+    "by": "patch",
+    "script": "count_above<T>: typed, then called from step",
+    "refused": false
+   },
+   {
+    "total": 212.87,
+    "queued": 182.486,
+    "by": "patch",
+    "script": "count_above<T>: typed, then called from step",
+    "refused": false
+   },
+   {
+    "total": 30.384,
+    "queued": 0.0,
+    "by": "patch",
+    "script": "count_above<T>: typed, then called from step",
+    "refused": false
+   },
+   {
+    "total": 613.317,
+    "queued": 393.052,
+    "by": "restart",
+    "script": "count_above<T>: typed, then called from step",
+    "refused": false
+   },
+   {
+    "total": 522.966,
+    "queued": 302.701,
+    "by": "restart",
+    "script": "count_above<T>: typed, then called from step",
+    "refused": false
+   },
+   {
+    "total": 446.2,
+    "queued": 225.935,
+    "by": "restart",
+    "script": "count_above<T>: typed, then called from step",
+    "refused": false
+   },
+   {
+    "total": 399.838,
+    "queued": 179.573,
+    "by": "restart",
+    "script": "count_above<T>: typed, then called from step",
+    "refused": false
+   },
+   {
+    "total": 337.709,
+    "queued": 117.444,
+    "by": "restart",
+    "script": "count_above<T>: typed, then called from step",
+    "refused": false
+   },
+   {
+    "total": 289.89,
+    "queued": 69.625,
+    "by": "restart",
+    "script": "count_above<T>: typed, then called from step",
+    "refused": false
+   },
+   {
+    "total": 221.446,
+    "queued": 194.147,
+    "by": "patch",
+    "script": "count_above<T>: typed, then called from step",
+    "refused": false
+   },
+   {
+    "total": 194.214,
+    "queued": 166.915,
+    "by": "patch",
+    "script": "count_above<T>: typed, then called from step",
+    "refused": false
+   },
+   {
+    "total": 167.191,
+    "queued": 139.892,
+    "by": "patch",
+    "script": "count_above<T>: typed, then called from step",
+    "refused": false
+   },
+   {
+    "total": 89.284,
+    "queued": 61.985,
+    "by": "patch",
+    "script": "count_above<T>: typed, then called from step",
+    "refused": false
+   },
+   {
+    "total": 27.299,
+    "queued": 0.0,
+    "by": "patch",
+    "script": "count_above<T>: typed, then called from step",
+    "refused": false
+   },
+   {
+    "total": 302.758,
+    "queued": 159.145,
+    "by": "restart",
+    "script": "count_above<T>: typed, then called from step",
+    "refused": false
+   },
+   {
+    "total": 256.118,
+    "queued": 112.505,
+    "by": "restart",
+    "script": "count_above<T>: typed, then called from step",
+    "refused": false
+   },
+   {
+    "total": 492.877,
+    "queued": 284.113,
+    "by": "restart",
+    "script": "count_above<T>: typed, then called from step",
+    "refused": false
+   },
+   {
+    "total": 414.631,
+    "queued": 205.867,
+    "by": "restart",
+    "script": "count_above<T>: typed, then called from step",
+    "refused": false
+   },
+   {
+    "total": 338.091,
+    "queued": 129.327,
+    "by": "restart",
+    "script": "count_above<T>: typed, then called from step",
+    "refused": false
+   },
+   {
+    "total": 237.354,
+    "queued": 210.352,
+    "by": "patch",
+    "script": "count_above<T>: typed, then called from step",
+    "refused": false
+   },
+   {
+    "total": 153.048,
+    "queued": 126.046,
+    "by": "patch",
+    "script": "count_above<T>: typed, then called from step",
+    "refused": false
+   },
+   {
+    "total": 75.874,
+    "queued": 48.872,
+    "by": "patch",
+    "script": "count_above<T>: typed, then called from step",
+    "refused": false
+   },
+   {
+    "total": 28.006,
+    "queued": 1.004,
+    "by": "patch",
+    "script": "count_above<T>: typed, then called from step",
+    "refused": false
+   },
+   {
+    "total": 12760.277,
+    "queued": 12546.694,
+    "by": "restart",
+    "script": "count_above<T>: typed, then called from step",
+    "refused": false
+   },
+   {
+    "total": 12697.011,
+    "queued": 12483.428,
+    "by": "restart",
+    "script": "count_above<T>: typed, then called from step",
+    "refused": false
+   },
+   {
+    "total": 10473.406,
+    "queued": 10259.823,
+    "by": "restart",
+    "script": "count_above<T>: typed, then called from step",
+    "refused": false
+   },
+   {
+    "total": 10439.567,
+    "queued": 10225.984,
+    "by": "restart",
+    "script": "count_above<T>: typed, then called from step",
+    "refused": false
+   },
+   {
+    "total": 274.635,
+    "queued": 61.052,
+    "by": "restart",
+    "script": "count_above<T>: typed, then called from step",
+    "refused": false
+   },
+   {
+    "total": 29.15,
+    "queued": 0.0,
+    "by": "patch",
+    "script": "count_above<T>: typed, then called from step",
+    "refused": false
+   },
+   {
+    "total": 34.442,
+    "queued": 0.0,
+    "by": "patch",
+    "script": "count_above<T>: typed, then called from step",
+    "refused": false
+   },
+   {
+    "total": 36.476,
+    "queued": 0.0,
     "by": "patch",
     "script": "next_age: back to Conway",
     "refused": false
    },
    {
-    "total": 94.857,
-    "queued": 49.736,
+    "total": 26.616,
+    "queued": 0.0,
     "by": "patch",
     "script": "next_age: back to Conway",
     "refused": false
    },
    {
-    "total": 75.554,
-    "queued": 32.609,
-    "by": "patch",
-    "script": "color: back as it was",
-    "refused": false
-   },
-   {
-    "total": 60.924,
+    "total": 32.276,
     "queued": 0.0,
     "by": "patch",
     "script": "color: back as it was",
     "refused": false
    },
    {
-    "total": 392.295,
+    "total": 33.995,
     "queued": 0.0,
     "by": "patch",
     "script": "color: back as it was",
     "refused": false
    },
    {
-    "total": 818.724,
-    "queued": 774.78,
+    "total": 33.691,
+    "queued": 0.0,
     "by": "patch",
     "script": "color: back as it was",
     "refused": false
    },
    {
-    "total": 725.248,
-    "queued": 681.304,
+    "total": 25.841,
+    "queued": 0.0,
     "by": "patch",
     "script": "color: back as it was",
     "refused": false
    },
    {
-    "total": 567.87,
-    "queued": 523.926,
+    "total": 28.12,
+    "queued": 0.0,
     "by": "patch",
     "script": "color: back as it was",
     "refused": false
    },
    {
-    "total": 537.776,
-    "queued": 493.832,
+    "total": 33.175,
+    "queued": 0.0,
     "by": "patch",
     "script": "color: back as it was",
     "refused": false
    },
    {
-    "total": 428.654,
-    "queued": 384.71,
+    "total": 26.307,
+    "queued": 0.0,
     "by": "patch",
     "script": "color: back as it was",
     "refused": false
    },
    {
-    "total": 381.527,
-    "queued": 337.583,
+    "total": 27.768,
+    "queued": 0.0,
     "by": "patch",
     "script": "color: back as it was",
     "refused": false
    },
    {
-    "total": 289.217,
-    "queued": 245.273,
+    "total": 26.283,
+    "queued": 0.0,
     "by": "patch",
     "script": "color: back as it was",
     "refused": false
    },
    {
-    "total": 258.812,
-    "queued": 214.868,
+    "total": 29.108,
+    "queued": 0.0,
     "by": "patch",
     "script": "color: back as it was",
     "refused": false
    },
    {
-    "total": 2988.279,
-    "queued": 2944.817,
+    "total": 26.738,
+    "queued": 0.0,
+    "by": "patch",
+    "script": "color: back as it was",
+    "refused": false
+   },
+   {
+    "total": 2948.334,
+    "queued": 2919.616,
     "by": "patch",
     "script": "count_above<T>: step as it was, the helper deleted",
     "refused": true
    },
    {
-    "total": 498.355,
-    "queued": 454.893,
+    "total": 483.536,
+    "queued": 454.818,
     "by": "patch",
     "script": "count_above<T>: step as it was, the helper deleted",
     "refused": true
    },
    {
-    "total": 43.462,
+    "total": 28.718,
     "queued": 0.0,
     "by": "patch",
     "script": "count_above<T>: step as it was, the helper deleted",
     "refused": false
    },
    {
-    "total": 51.493,
+    "total": 28.529,
     "queued": 0.0,
     "by": "patch",
     "script": "count_above<T>: step as it was, the helper deleted",
@@ -1172,636 +1190,547 @@
   "cargo-run": [
    {
     "edit": "color: an old cell's blue",
-    "total": 2752.283,
-    "build": 2343.342,
-    "start": 408.941
+    "total": 1379.887,
+    "build": 1354.772,
+    "start": 25.115
    },
    {
     "edit": "Life: a field added",
-    "total": 3425.173,
-    "build": 3012.751,
-    "start": 412.422
+    "total": 1526.269,
+    "build": 1501.942,
+    "start": 24.327
    },
    {
     "edit": "Life: two fields swapped",
-    "total": 2836.6,
-    "build": 2426.862,
-    "start": 409.738
+    "total": 1534.412,
+    "build": 1510.869,
+    "start": 23.543
    }
   ],
   "restart": [
    {
     "edit": "color: an old cell's blue",
-    "total": 1354.068,
-    "edit-reply": 33.575,
-    "build": 612.019,
-    "start": 680.088
+    "total": 190.736,
+    "edit-reply": 25.862,
+    "build": 130.181,
+    "start": 34.19
    },
    {
     "edit": "Life: a field added",
-    "total": 2312.269,
-    "edit-reply": 66.975,
-    "build": 1148.34,
-    "start": 1081.323
+    "total": 260.228,
+    "edit-reply": 48.314,
+    "build": 141.598,
+    "start": 69.313
    },
    {
     "edit": "Life: two fields swapped",
-    "total": 2082.497,
-    "edit-reply": 53.83,
-    "build": 1144.558,
-    "start": 866.87
+    "total": 244.326,
+    "edit-reply": 36.289,
+    "build": 137.673,
+    "start": 70.364
    }
   ],
   "cargo": [
    {
-    "to-worker": 113.879,
-    "worker": 47.0,
-    "delivery": 21.3948,
-    "wait": 0.023,
-    "apply": 0.7142000000000001,
-    "total": 183.011,
-    "reply": 682.676,
-    "worker.apply.change": 0.069,
-    "worker.apply.outlines": 1.047,
-    "worker.apply.rest": 0.035,
-    "worker.publish": 0.621,
-    "worker.splice.place": 1.127,
-    "worker.splice.copy": 0.173,
-    "worker.splice.append": 0.27,
-    "worker.splice.write": 0.007,
-    "worker.splice.redirect": 0.068,
-    "worker.splice.close": 0.083,
-    "worker.link": 2.538,
-    "worker.notice": 121.568,
-    "worker.settle": 0.588,
-    "worker.read": 0.063,
-    "worker.apply": 1.152,
-    "worker.roots": 0.208,
-    "worker.check": 2.475,
-    "worker.reach": 0.659,
-    "worker.resolve": 1.002,
-    "worker.define": 0.205,
-    "worker.object": 0.264,
+    "to-worker": 105.387,
+    "worker": 39.332,
+    "delivery": 0.20399999999999996,
+    "wait": 0.0233,
+    "apply": 0.4717,
+    "total": 145.418,
+    "reply": 151.787,
+    "worker.apply.change": 0.062,
+    "worker.apply.outlines": 0.781,
+    "worker.apply.rest": 0.03,
+    "worker.publish": 0.549,
+    "worker.splice.place": 0.931,
+    "worker.splice.copy": 0.132,
+    "worker.splice.append": 0.118,
+    "worker.splice.write": 0.004,
+    "worker.splice.redirect": 0.058,
+    "worker.splice.close": 0.051,
+    "worker.link": 1.997,
+    "worker.notice": 113.99,
+    "worker.settle": 0.708,
+    "worker.read": 0.065,
+    "worker.apply": 0.874,
+    "worker.roots": 0.115,
+    "worker.check": 2.169,
+    "worker.reach": 0.489,
+    "worker.resolve": 0.782,
+    "worker.define": 0.194,
+    "worker.object": 0.167,
     "worker.discarded": 0.0,
-    "worker.statics": 0.249,
-    "worker.setup": 0.349,
-    "worker.compile-rest": 7.4,
+    "worker.statics": 0.248,
+    "worker.setup": 0.325,
+    "worker.compile-rest": 6.394,
     "worker.write": 0.0,
-    "worker.build-rest": 14.408,
-    "worker.report": 0.134,
-    "worker.refuse": 8.501,
-    "worker.edit-to-binary": 39.6
+    "worker.build-rest": 9.517,
+    "worker.report": 0.113,
+    "worker.refuse": 7.993,
+    "worker.edit-to-binary": 31.4
    },
    {
-    "to-worker": 116.274,
-    "worker": 48.654,
-    "delivery": 24.66,
-    "wait": 0.019899999999999998,
-    "apply": 0.7011000000000001,
-    "total": 190.309,
-    "reply": 661.126,
-    "worker.apply.change": 0.066,
-    "worker.apply.outlines": 0.945,
-    "worker.apply.rest": 0.031,
-    "worker.publish": 0.638,
-    "worker.splice.place": 1.795,
-    "worker.splice.copy": 0.165,
-    "worker.splice.append": 0.122,
+    "to-worker": 109.559,
+    "worker": 46.682,
+    "delivery": 0.18309999999999993,
+    "wait": 0.0224,
+    "apply": 0.5035000000000001,
+    "total": 156.95,
+    "reply": 163.351,
+    "worker.apply.change": 0.061,
+    "worker.apply.outlines": 0.762,
+    "worker.apply.rest": 0.028,
+    "worker.publish": 0.539,
+    "worker.splice.place": 1.086,
+    "worker.splice.copy": 0.133,
+    "worker.splice.append": 0.11,
+    "worker.splice.write": 0.005,
+    "worker.splice.redirect": 0.061,
+    "worker.splice.close": 0.052,
+    "worker.link": 2.142,
+    "worker.notice": 123.551,
+    "worker.settle": 0.708,
+    "worker.read": 0.068,
+    "worker.apply": 0.852,
+    "worker.roots": 0.121,
+    "worker.check": 2.377,
+    "worker.reach": 0.536,
+    "worker.resolve": 0.76,
+    "worker.define": 0.199,
+    "worker.object": 0.161,
+    "worker.discarded": 0.0,
+    "worker.statics": 0.239,
+    "worker.setup": 0.355,
+    "worker.compile-rest": 6.387,
+    "worker.write": 0.0,
+    "worker.build-rest": 9.52,
+    "worker.report": 0.113,
+    "worker.refuse": 8.206,
+    "worker.edit-to-binary": 32.0
+   },
+   {
+    "to-worker": 108.584,
+    "worker": 38.771,
+    "delivery": 0.19419999999999993,
+    "wait": 0.0219,
+    "apply": 0.5279,
+    "total": 148.099,
+    "reply": 155.112,
+    "worker.apply.change": 0.057,
+    "worker.apply.outlines": 0.74,
+    "worker.apply.rest": 0.028,
+    "worker.publish": 0.545,
+    "worker.splice.place": 0.906,
+    "worker.splice.copy": 0.135,
+    "worker.splice.append": 0.111,
+    "worker.splice.write": 0.005,
+    "worker.splice.redirect": 0.06,
+    "worker.splice.close": 0.051,
+    "worker.link": 1.966,
+    "worker.notice": 116.729,
+    "worker.settle": 0.68,
+    "worker.read": 0.06,
+    "worker.apply": 0.826,
+    "worker.roots": 0.065,
+    "worker.check": 2.359,
+    "worker.reach": 0.458,
+    "worker.resolve": 0.757,
+    "worker.define": 0.187,
+    "worker.object": 0.183,
+    "worker.discarded": 0.0,
+    "worker.statics": 0.242,
+    "worker.setup": 0.321,
+    "worker.compile-rest": 6.653,
+    "worker.write": 0.0,
+    "worker.build-rest": 9.172,
+    "worker.report": 0.117,
+    "worker.refuse": 7.977,
+    "worker.edit-to-binary": 31.3
+   },
+   {
+    "to-worker": 110.954,
+    "worker": 38.849,
+    "delivery": 0.2000999999999999,
+    "wait": 0.0187,
+    "apply": 0.4922,
+    "total": 150.514,
+    "reply": 156.954,
+    "worker.apply.change": 0.059,
+    "worker.apply.outlines": 0.761,
+    "worker.apply.rest": 0.027,
+    "worker.publish": 0.576,
+    "worker.splice.place": 1.095,
+    "worker.splice.copy": 0.131,
+    "worker.splice.append": 0.111,
     "worker.splice.write": 0.006,
-    "worker.splice.redirect": 0.063,
-    "worker.splice.close": 0.066,
-    "worker.link": 3.035,
-    "worker.notice": 127.639,
-    "worker.settle": 0.623,
-    "worker.read": 0.07,
-    "worker.apply": 1.043,
-    "worker.roots": 0.202,
-    "worker.check": 1.801,
-    "worker.reach": 0.473,
-    "worker.resolve": 0.93,
-    "worker.define": 0.198,
-    "worker.object": 0.229,
+    "worker.splice.redirect": 0.059,
+    "worker.splice.close": 0.052,
+    "worker.link": 2.191,
+    "worker.notice": 119.041,
+    "worker.settle": 0.702,
+    "worker.read": 0.064,
+    "worker.apply": 0.849,
+    "worker.roots": 0.152,
+    "worker.check": 2.341,
+    "worker.reach": 0.479,
+    "worker.resolve": 0.744,
+    "worker.define": 0.185,
+    "worker.object": 0.16,
+    "worker.discarded": 0.0,
+    "worker.statics": 0.265,
+    "worker.setup": 0.337,
+    "worker.compile-rest": 6.344,
+    "worker.write": 0.001,
+    "worker.build-rest": 9.281,
+    "worker.report": 0.109,
+    "worker.refuse": 8.15,
+    "worker.edit-to-binary": 31.6
+   },
+   {
+    "to-worker": 108.91,
+    "worker": 38.708,
+    "delivery": 0.1682999999999999,
+    "wait": 0.021,
+    "apply": 0.5027,
+    "total": 148.31,
+    "reply": 155.448,
+    "worker.apply.change": 0.06,
+    "worker.apply.outlines": 0.767,
+    "worker.apply.rest": 0.03,
+    "worker.publish": 0.674,
+    "worker.splice.place": 1.245,
+    "worker.splice.copy": 0.153,
+    "worker.splice.append": 0.171,
+    "worker.splice.write": 0.008,
+    "worker.splice.redirect": 0.067,
+    "worker.splice.close": 0.059,
+    "worker.link": 2.602,
+    "worker.notice": 117.157,
+    "worker.settle": 0.714,
+    "worker.read": 0.064,
+    "worker.apply": 0.858,
+    "worker.roots": 0.07,
+    "worker.check": 2.214,
+    "worker.reach": 0.386,
+    "worker.resolve": 0.75,
+    "worker.define": 0.19,
+    "worker.object": 0.158,
+    "worker.discarded": 0.0,
+    "worker.statics": 0.246,
+    "worker.setup": 0.316,
+    "worker.compile-rest": 6.26,
+    "worker.write": 0.0,
+    "worker.build-rest": 9.323,
+    "worker.report": 0.124,
+    "worker.refuse": 8.091,
+    "worker.edit-to-binary": 31.6
+   },
+   {
+    "to-worker": 106.141,
+    "worker": 39.238,
+    "delivery": 0.25429999999999986,
+    "wait": 0.0217,
+    "apply": 0.538,
+    "total": 146.193,
+    "reply": 152.527,
+    "worker.apply.change": 0.06,
+    "worker.apply.outlines": 0.758,
+    "worker.apply.rest": 0.027,
+    "worker.publish": 0.611,
+    "worker.splice.place": 0.969,
+    "worker.splice.copy": 0.143,
+    "worker.splice.append": 0.117,
+    "worker.splice.write": 0.007,
+    "worker.splice.redirect": 0.062,
+    "worker.splice.close": 0.056,
+    "worker.link": 2.137,
+    "worker.notice": 113.701,
+    "worker.settle": 0.684,
+    "worker.read": 0.064,
+    "worker.apply": 0.847,
+    "worker.roots": 0.123,
+    "worker.check": 2.307,
+    "worker.reach": 0.555,
+    "worker.resolve": 0.754,
+    "worker.define": 0.19,
+    "worker.object": 0.165,
+    "worker.discarded": 0.0,
+    "worker.statics": 0.257,
+    "worker.setup": 0.331,
+    "worker.compile-rest": 6.216,
+    "worker.write": 0.0,
+    "worker.build-rest": 9.549,
+    "worker.report": 0.132,
+    "worker.refuse": 8.351,
+    "worker.edit-to-binary": 31.9
+   },
+   {
+    "to-worker": 110.893,
+    "worker": 40.191,
+    "delivery": 0.17850000000000005,
+    "wait": 0.0185,
+    "apply": 0.459,
+    "total": 151.74,
+    "reply": 158.713,
+    "worker.apply.change": 0.084,
+    "worker.apply.outlines": 0.771,
+    "worker.apply.rest": 0.028,
+    "worker.publish": 0.578,
+    "worker.splice.place": 1.114,
+    "worker.splice.copy": 0.144,
+    "worker.splice.append": 0.109,
+    "worker.splice.write": 0.005,
+    "worker.splice.redirect": 0.062,
+    "worker.splice.close": 0.055,
+    "worker.link": 2.243,
+    "worker.notice": 118.24,
+    "worker.settle": 0.679,
+    "worker.read": 0.062,
+    "worker.apply": 0.884,
+    "worker.roots": 0.134,
+    "worker.check": 2.363,
+    "worker.reach": 0.491,
+    "worker.resolve": 0.822,
+    "worker.define": 0.194,
+    "worker.object": 0.161,
+    "worker.discarded": 0.0,
+    "worker.statics": 0.289,
+    "worker.setup": 0.344,
+    "worker.compile-rest": 6.644,
+    "worker.write": 0.0,
+    "worker.build-rest": 9.741,
+    "worker.report": 0.112,
+    "worker.refuse": 8.308,
+    "worker.edit-to-binary": 32.7
+   },
+   {
+    "to-worker": 110.011,
+    "worker": 38.543,
+    "delivery": 0.19910000000000005,
+    "wait": 0.0426,
+    "apply": 0.6133,
+    "total": 149.409,
+    "reply": 155.674,
+    "worker.apply.change": 0.059,
+    "worker.apply.outlines": 0.778,
+    "worker.apply.rest": 0.035,
+    "worker.publish": 0.584,
+    "worker.splice.place": 0.873,
+    "worker.splice.copy": 0.154,
+    "worker.splice.append": 0.108,
+    "worker.splice.write": 0.004,
+    "worker.splice.redirect": 0.059,
+    "worker.splice.close": 0.052,
+    "worker.link": 1.991,
+    "worker.notice": 117.912,
+    "worker.settle": 0.742,
+    "worker.read": 0.065,
+    "worker.apply": 0.873,
+    "worker.roots": 0.108,
+    "worker.check": 1.958,
+    "worker.reach": 0.415,
+    "worker.resolve": 0.752,
+    "worker.define": 0.193,
+    "worker.object": 0.158,
+    "worker.discarded": 0.0,
+    "worker.statics": 0.264,
+    "worker.setup": 0.34,
+    "worker.compile-rest": 6.526,
+    "worker.write": 0.0,
+    "worker.build-rest": 9.056,
+    "worker.report": 0.114,
+    "worker.refuse": 7.962,
+    "worker.edit-to-binary": 30.7
+   },
+   {
+    "to-worker": 107.778,
+    "worker": 39.07,
+    "delivery": 0.22519999999999996,
+    "wait": 0.025,
+    "apply": 0.4938,
+    "total": 147.592,
+    "reply": 154.45,
+    "worker.apply.change": 0.062,
+    "worker.apply.outlines": 0.769,
+    "worker.apply.rest": 0.028,
+    "worker.publish": 0.578,
+    "worker.splice.place": 1.084,
+    "worker.splice.copy": 0.143,
+    "worker.splice.append": 0.108,
+    "worker.splice.write": 0.019,
+    "worker.splice.redirect": 0.06,
+    "worker.splice.close": 0.051,
+    "worker.link": 2.195,
+    "worker.notice": 114.487,
+    "worker.settle": 0.661,
+    "worker.read": 0.059,
+    "worker.apply": 0.86,
+    "worker.roots": 0.066,
+    "worker.check": 2.362,
+    "worker.reach": 0.516,
+    "worker.resolve": 0.787,
+    "worker.define": 0.189,
+    "worker.object": 0.152,
     "worker.discarded": 0.0,
     "worker.statics": 0.254,
-    "worker.setup": 0.341,
-    "worker.compile-rest": 7.716,
+    "worker.setup": 0.326,
+    "worker.compile-rest": 6.557,
     "worker.write": 0.0,
-    "worker.build-rest": 14.349,
-    "worker.report": 0.119,
-    "worker.refuse": 8.275,
-    "worker.edit-to-binary": 39.0
+    "worker.build-rest": 9.576,
+    "worker.report": 0.12,
+    "worker.refuse": 8.264,
+    "worker.edit-to-binary": 32.2
    },
    {
-    "to-worker": 113.546,
-    "worker": 47.861,
-    "delivery": 4.7585,
-    "wait": 0.032,
-    "apply": 0.8825000000000001,
-    "total": 167.08,
-    "reply": 691.089,
-    "worker.apply.change": 0.064,
-    "worker.apply.outlines": 0.783,
-    "worker.apply.rest": 0.028,
-    "worker.publish": 0.825,
-    "worker.splice.place": 1.153,
-    "worker.splice.copy": 0.183,
-    "worker.splice.append": 0.134,
-    "worker.splice.write": 0.006,
-    "worker.splice.redirect": 0.061,
-    "worker.splice.close": 0.067,
-    "worker.link": 2.623,
-    "worker.notice": 122.103,
-    "worker.settle": 0.709,
-    "worker.read": 0.072,
-    "worker.apply": 0.876,
-    "worker.roots": 0.119,
-    "worker.check": 2.459,
-    "worker.reach": 0.596,
-    "worker.resolve": 1.006,
-    "worker.define": 0.211,
-    "worker.object": 0.222,
-    "worker.discarded": 0.0,
-    "worker.statics": 0.269,
-    "worker.setup": 0.347,
-    "worker.compile-rest": 7.561,
-    "worker.write": 0.0,
-    "worker.build-rest": 15.289,
-    "worker.report": 0.188,
-    "worker.refuse": 8.523,
-    "worker.edit-to-binary": 40.3
-   },
-   {
-    "to-worker": 118.993,
-    "worker": 48.028,
-    "delivery": 18.016299999999998,
-    "wait": 0.0359,
-    "apply": 0.8658,
-    "total": 185.939,
-    "reply": 660.066,
-    "worker.apply.change": 0.07,
-    "worker.apply.outlines": 1.032,
-    "worker.apply.rest": 0.034,
-    "worker.publish": 0.638,
-    "worker.splice.place": 1.314,
-    "worker.splice.copy": 0.211,
-    "worker.splice.append": 0.278,
-    "worker.splice.write": 0.007,
-    "worker.splice.redirect": 0.068,
-    "worker.splice.close": 0.087,
-    "worker.link": 2.779,
-    "worker.notice": 125.997,
-    "worker.settle": 0.616,
-    "worker.read": 0.073,
-    "worker.apply": 1.137,
-    "worker.roots": 0.1,
-    "worker.check": 2.566,
-    "worker.reach": 0.548,
-    "worker.resolve": 1.018,
-    "worker.define": 0.217,
-    "worker.object": 0.239,
-    "worker.discarded": 0.0,
-    "worker.statics": 0.276,
-    "worker.setup": 0.381,
-    "worker.compile-rest": 8.307,
-    "worker.write": 0.001,
-    "worker.build-rest": 14.677,
-    "worker.report": 0.128,
-    "worker.refuse": 8.507,
-    "worker.edit-to-binary": 40.9
-   },
-   {
-    "to-worker": 113.773,
-    "worker": 49.063,
-    "delivery": 26.3428,
-    "wait": 0.0293,
-    "apply": 0.6678999999999999,
-    "total": 189.876,
-    "reply": 653.396,
-    "worker.apply.change": 0.065,
-    "worker.apply.outlines": 0.84,
-    "worker.apply.rest": 0.029,
-    "worker.publish": 0.644,
-    "worker.splice.place": 1.003,
-    "worker.splice.copy": 0.2,
-    "worker.splice.append": 0.303,
-    "worker.splice.write": 0.006,
-    "worker.splice.redirect": 0.07,
-    "worker.splice.close": 0.089,
-    "worker.link": 2.509,
-    "worker.notice": 122.355,
-    "worker.settle": 0.579,
-    "worker.read": 0.063,
-    "worker.apply": 0.935,
-    "worker.roots": 0.116,
-    "worker.check": 2.063,
-    "worker.reach": 0.441,
-    "worker.resolve": 0.969,
-    "worker.define": 0.221,
-    "worker.object": 0.174,
-    "worker.discarded": 0.0,
-    "worker.statics": 0.297,
-    "worker.setup": 0.344,
-    "worker.compile-rest": 7.397,
-    "worker.write": 0.0,
-    "worker.build-rest": 17.541,
-    "worker.report": 0.135,
-    "worker.refuse": 8.537,
-    "worker.edit-to-binary": 41.7
-   },
-   {
-    "to-worker": 114.086,
-    "worker": 47.041,
-    "delivery": 16.735200000000003,
-    "wait": 0.020100000000000003,
-    "apply": 0.6987000000000001,
-    "total": 178.581,
-    "reply": 676.082,
-    "worker.apply.change": 0.074,
-    "worker.apply.outlines": 1.126,
-    "worker.apply.rest": 0.038,
-    "worker.publish": 0.606,
-    "worker.splice.place": 1.192,
-    "worker.splice.copy": 0.2,
-    "worker.splice.append": 0.268,
-    "worker.splice.write": 0.007,
-    "worker.splice.redirect": 0.069,
-    "worker.splice.close": 0.088,
-    "worker.link": 2.613,
-    "worker.notice": 120.926,
-    "worker.settle": 0.609,
-    "worker.read": 0.067,
-    "worker.apply": 1.239,
-    "worker.roots": 0.125,
-    "worker.check": 3.192,
-    "worker.reach": 0.523,
-    "worker.resolve": 0.939,
-    "worker.define": 0.2,
-    "worker.object": 0.225,
-    "worker.discarded": 0.0,
-    "worker.statics": 0.262,
-    "worker.setup": 0.371,
-    "worker.compile-rest": 7.669,
-    "worker.write": 0.0,
-    "worker.build-rest": 13.838,
-    "worker.report": 0.213,
-    "worker.refuse": 8.547,
-    "worker.edit-to-binary": 40.0
-   },
-   {
-    "to-worker": 118.091,
-    "worker": 47.781,
-    "delivery": 28.4045,
-    "wait": 0.020399999999999998,
-    "apply": 0.6901,
-    "total": 194.987,
-    "reply": 651.423,
-    "worker.apply.change": 0.059,
-    "worker.apply.outlines": 0.819,
-    "worker.apply.rest": 0.029,
-    "worker.publish": 0.613,
-    "worker.splice.place": 0.827,
-    "worker.splice.copy": 0.157,
-    "worker.splice.append": 0.12,
-    "worker.splice.write": 0.006,
-    "worker.splice.redirect": 0.064,
-    "worker.splice.close": 0.061,
-    "worker.link": 2.021,
-    "worker.notice": 127.801,
-    "worker.settle": 0.579,
-    "worker.read": 0.066,
-    "worker.apply": 0.908,
-    "worker.roots": 0.128,
-    "worker.check": 2.255,
-    "worker.reach": 0.546,
-    "worker.resolve": 0.865,
-    "worker.define": 0.196,
+    "to-worker": 106.702,
+    "worker": 38.853,
+    "delivery": 0.2052,
+    "wait": 0.027,
+    "apply": 0.4388,
+    "total": 146.226,
+    "reply": 152.554,
+    "worker.apply.change": 0.057,
+    "worker.apply.outlines": 0.751,
+    "worker.apply.rest": 0.027,
+    "worker.publish": 0.608,
+    "worker.splice.place": 0.799,
+    "worker.splice.copy": 0.126,
+    "worker.splice.append": 0.118,
+    "worker.splice.write": 0.005,
+    "worker.splice.redirect": 0.06,
+    "worker.splice.close": 0.05,
+    "worker.link": 1.928,
+    "worker.notice": 114.24,
+    "worker.settle": 0.685,
+    "worker.read": 0.06,
+    "worker.apply": 0.835,
+    "worker.roots": 0.122,
+    "worker.check": 2.443,
+    "worker.reach": 0.402,
+    "worker.resolve": 0.737,
+    "worker.define": 0.202,
     "worker.object": 0.177,
     "worker.discarded": 0.0,
-    "worker.statics": 0.438,
-    "worker.setup": 0.443,
-    "worker.compile-rest": 7.814,
+    "worker.statics": 0.241,
+    "worker.setup": 0.32,
+    "worker.compile-rest": 6.437,
     "worker.write": 0.0,
-    "worker.build-rest": 14.342,
-    "worker.report": 0.127,
-    "worker.refuse": 8.55,
-    "worker.edit-to-binary": 38.8
-   },
-   {
-    "to-worker": 119.287,
-    "worker": 49.423,
-    "delivery": 7.4241,
-    "wait": 0.019600000000000003,
-    "apply": 0.6703,
-    "total": 176.824,
-    "reply": 669.664,
-    "worker.apply.change": 0.06,
-    "worker.apply.outlines": 0.809,
-    "worker.apply.rest": 0.029,
-    "worker.publish": 0.869,
-    "worker.splice.place": 1.077,
-    "worker.splice.copy": 0.141,
-    "worker.splice.append": 0.117,
-    "worker.splice.write": 0.006,
-    "worker.splice.redirect": 0.062,
-    "worker.splice.close": 0.068,
-    "worker.link": 2.557,
-    "worker.notice": 130.299,
-    "worker.settle": 0.575,
-    "worker.read": 0.065,
-    "worker.apply": 0.898,
-    "worker.roots": 0.134,
-    "worker.check": 2.439,
-    "worker.reach": 0.524,
-    "worker.resolve": 0.945,
-    "worker.define": 0.194,
-    "worker.object": 0.171,
-    "worker.discarded": 0.0,
-    "worker.statics": 0.255,
-    "worker.setup": 0.35,
-    "worker.compile-rest": 8.054,
-    "worker.write": 0.0,
-    "worker.build-rest": 14.206,
-    "worker.report": 0.121,
-    "worker.refuse": 8.58,
-    "worker.edit-to-binary": 39.4
-   },
-   {
-    "to-worker": 115.464,
-    "worker": 49.415,
-    "delivery": 5.3267999999999995,
-    "wait": 0.033100000000000004,
-    "apply": 0.9211,
-    "total": 171.16,
-    "reply": 666.294,
-    "worker.apply.change": 0.059,
-    "worker.apply.outlines": 0.813,
-    "worker.apply.rest": 0.039,
-    "worker.publish": 0.819,
-    "worker.splice.place": 1.179,
-    "worker.splice.copy": 0.154,
-    "worker.splice.append": 0.162,
-    "worker.splice.write": 0.005,
-    "worker.splice.redirect": 0.064,
-    "worker.splice.close": 0.065,
-    "worker.link": 2.646,
-    "worker.notice": 126.324,
-    "worker.settle": 0.734,
-    "worker.read": 0.07,
-    "worker.apply": 0.912,
-    "worker.roots": 0.076,
-    "worker.check": 2.153,
-    "worker.reach": 0.503,
-    "worker.resolve": 0.853,
-    "worker.define": 0.197,
-    "worker.object": 0.174,
-    "worker.discarded": 0.0,
-    "worker.statics": 0.243,
-    "worker.setup": 0.345,
-    "worker.compile-rest": 7.798,
-    "worker.write": 0.0,
-    "worker.build-rest": 15.089,
-    "worker.report": 0.118,
-    "worker.refuse": 8.443,
-    "worker.edit-to-binary": 39.6
-   },
-   {
-    "to-worker": 116.56,
-    "worker": 48.116,
-    "delivery": 27.5593,
-    "wait": 0.0216,
-    "apply": 0.6901,
-    "total": 192.947,
-    "reply": 663.861,
-    "worker.apply.change": 0.065,
-    "worker.apply.outlines": 0.792,
-    "worker.apply.rest": 0.029,
-    "worker.publish": 0.609,
-    "worker.splice.place": 1.134,
-    "worker.splice.copy": 0.156,
-    "worker.splice.append": 0.131,
-    "worker.splice.write": 0.006,
-    "worker.splice.redirect": 0.066,
-    "worker.splice.close": 0.063,
-    "worker.link": 2.335,
-    "worker.notice": 125.702,
-    "worker.settle": 0.622,
-    "worker.read": 0.064,
-    "worker.apply": 0.887,
-    "worker.roots": 0.144,
-    "worker.check": 2.157,
-    "worker.reach": 0.463,
-    "worker.resolve": 0.991,
-    "worker.define": 0.203,
-    "worker.object": 0.191,
-    "worker.discarded": 0.0,
-    "worker.statics": 0.27,
-    "worker.setup": 0.336,
-    "worker.compile-rest": 7.93,
-    "worker.write": 0.0,
-    "worker.build-rest": 14.983,
-    "worker.report": 0.12,
-    "worker.refuse": 8.974,
-    "worker.edit-to-binary": 40.0
+    "worker.build-rest": 9.326,
+    "worker.report": 0.111,
+    "worker.refuse": 8.079,
+    "worker.edit-to-binary": 31.4
    }
   ]
  },
  "counts": {
   "replay": {
-   "answer error": 205,
-   "answer patch": 53,
-   "asked after": 30,
+   "answer error": 213,
+   "answer patch": 73,
+   "asked after": 5,
    "keys": 291,
-   "keys run by a patch": 34,
-   "keys run by a restart": 43,
+   "keys run by a patch": 50,
+   "keys run by a restart": 27,
    "keys that compile": 77,
    "keys that compile and ra-jit refused": 2,
    "keys that do not compile": 214,
-   "patch that asked for a restart": 30,
+   "patch for no program (the executable was linked again)": 9,
+   "patch that asked for a restart": 28,
    "restarts": [
     {
-     "key": 25,
-     "started": 1792933596859106,
-     "running": 1792933601798366,
-     "total": 4939.26
+     "key": 24,
+     "started": 1792935000090192,
+     "running": 1792935000305934,
+     "total": 215.742
+    },
+    {
+     "key": 27,
+     "started": 1792935000305449,
+     "running": 1792935000579582,
+     "total": 274.133
+    },
+    {
+     "key": 32,
+     "started": 1792935000578691,
+     "running": 1792935000812518,
+     "total": 233.827
+    },
+    {
+     "key": 36,
+     "started": 1792935000812705,
+     "running": 1792935001029148,
+     "total": 216.443
+    },
+    {
+     "key": 39,
+     "started": 1792935001028647,
+     "running": 1792935001266926,
+     "total": 238.279
+    },
+    {
+     "key": 41,
+     "started": 1792935001266632,
+     "running": 1792935001660290,
+     "total": 393.658
+    },
+    {
+     "key": 48,
+     "started": 1792935001659684,
+     "running": 1792935001879949,
+     "total": 220.265
+    },
+    {
+     "key": 52,
+     "started": 1792935001879867,
+     "running": 1792935002092044,
+     "total": 212.177
+    },
+    {
+     "key": 55,
+     "started": 1792935002092065,
+     "running": 1792935002235678,
+     "total": 143.613
+    },
+    {
+     "key": 55,
+     "started": 1792935002546186,
+     "running": 1792935002790950,
+     "total": 244.764
+    },
+    {
+     "key": 58,
+     "started": 1792935002790642,
+     "running": 1792935002999406,
+     "total": 208.764
     },
     {
      "key": 194,
-     "started": 1792933612992805,
-     "running": 1792933615258573,
-     "total": 2265.768
+     "started": 1792935015581097,
+     "running": 1792935015794680,
+     "total": 213.583
     },
     {
-     "key": 231,
-     "started": 1792933617595694,
-     "running": 1792933621112584,
-     "total": 3516.89
+     "key": 194,
+     "started": 1792935015794662,
+     "running": 1792935016007433,
+     "total": 212.771
     }
    ],
-   "restarts asked by the program": 30,
-   "restarts the program was told": 30,
-   "sent": 258,
+   "restarts asked by the program": 28,
+   "restarts the program was told": 28,
+   "sent": 286,
    "answers": [
     {
      "round": 0,
-     "key": 30,
+     "key": 45,
      "asked after": true,
-     "answer": "ok patch=ra-jit\\049b53d3036e6104\\programs\\life\\patch.o functions=10 files=1 ms=26"
+     "answer": "ok patch=ra-jit\\0d868935ef68b949\\programs\\life\\patch.o functions=10 files=1 ms=24"
     },
     {
      "round": 0,
-     "key": 31,
+     "key": 46,
      "asked after": true,
-     "answer": "ok patch=ra-jit\\049b53d3036e6104\\programs\\life\\patch.o functions=10 files=1 ms=24"
-    },
-    {
-     "round": 0,
-     "key": 32,
-     "asked after": true,
-     "answer": "ok patch=ra-jit\\049b53d3036e6104\\programs\\life\\patch.o functions=10 files=1 ms=26"
-    },
-    {
-     "round": 0,
-     "key": 33,
-     "asked after": true,
-     "answer": "ok patch=ra-jit\\049b53d3036e6104\\programs\\life\\patch.o functions=10 files=1 ms=24"
-    },
-    {
-     "round": 0,
-     "key": 34,
-     "asked after": true,
-     "answer": "ok patch=ra-jit\\049b53d3036e6104\\programs\\life\\patch.o functions=10 files=1 ms=24"
-    },
-    {
-     "round": 0,
-     "key": 35,
-     "asked after": true,
-     "answer": "ok patch=ra-jit\\049b53d3036e6104\\programs\\life\\patch.o functions=10 files=1 ms=24"
-    },
-    {
-     "round": 0,
-     "key": 36,
-     "asked after": true,
-     "answer": "ok patch=ra-jit\\049b53d3036e6104\\programs\\life\\patch.o functions=10 files=1 ms=24"
-    },
-    {
-     "round": 0,
-     "key": 37,
-     "asked after": true,
-     "answer": "ok patch=ra-jit\\049b53d3036e6104\\programs\\life\\patch.o functions=10 files=1 ms=25"
-    },
-    {
-     "round": 0,
-     "key": 38,
-     "asked after": true,
-     "answer": "ok patch=ra-jit\\049b53d3036e6104\\programs\\life\\patch.o functions=10 files=1 ms=24"
-    },
-    {
-     "round": 0,
-     "key": 39,
-     "asked after": true,
-     "answer": "ok patch=ra-jit\\049b53d3036e6104\\programs\\life\\patch.o functions=10 files=1 ms=24"
-    },
-    {
-     "round": 0,
-     "key": 40,
-     "asked after": true,
-     "answer": "ok patch=ra-jit\\049b53d3036e6104\\programs\\life\\patch.o functions=10 files=1 ms=25"
-    },
-    {
-     "round": 0,
-     "key": 41,
-     "asked after": true,
-     "answer": "ok patch=ra-jit\\049b53d3036e6104\\programs\\life\\patch.o functions=10 files=1 ms=25"
-    },
-    {
-     "round": 0,
-     "key": 43,
-     "asked after": true,
-     "answer": "ok patch=ra-jit\\049b53d3036e6104\\programs\\life\\patch.o functions=10 files=1 ms=24"
-    },
-    {
-     "round": 0,
-     "key": 86,
-     "asked after": true,
-     "answer": "error: error: expected a name\\n  --> src\\\\main.rs:59:3\\n   |\\n59 | fn \\n   |   ^"
-    },
-    {
-     "round": 0,
-     "key": 224,
-     "asked after": true,
-     "answer": "error: error: expected a block\\n  --> src\\\\main.rs:38:6\\n   |\\n38 |     } else {\\n   |      ^"
-    },
-    {
-     "round": 0,
-     "key": 225,
-     "asked after": true,
-     "answer": "error: error[E0308]: expected bool, found u32\\n  --> src\\\\main.rs:36:25\\n   |\\n36 |     } else if n == 3 || n  {\\n   |                         ^"
-    },
-    {
-     "round": 0,
-     "key": 226,
-     "asked after": true,
-     "answer": "error: error[E0308]: expected bool, found u32\\n  --> src\\\\main.rs:36:25\\n   |\\n36 |     } else if n == 3 || n {\\n   |                         ^"
-    },
-    {
-     "round": 0,
-     "key": 227,
-     "asked after": true,
-     "answer": "error: error: expected a block\\n  --> src\\\\main.rs:38:6\\n   |\\n38 |     } else {\\n   |      ^"
-    },
-    {
-     "round": 0,
-     "key": 228,
-     "asked after": true,
-     "answer": "error: error: expected a block\\n  --> src\\\\main.rs:38:6\\n   |\\n38 |     } else {\\n   |      ^"
-    },
-    {
-     "round": 0,
-     "key": 229,
-     "asked after": true,
-     "answer": "error: error: expected a block\\n  --> src\\\\main.rs:38:6\\n   |\\n38 |     } else {\\n   |      ^"
-    },
-    {
-     "round": 0,
-     "key": 230,
-     "asked after": true,
-     "answer": "ok patch=ra-jit\\049b53d3036e6104\\programs\\life\\patch.o functions=25 files=1 ms=26"
-    },
-    {
-     "round": 0,
-     "key": 235,
-     "asked after": true,
-     "answer": "ok patch=ra-jit\\049b53d3036e6104\\programs\\life\\patch.o functions=25 files=1 ms=32"
-    },
-    {
-     "round": 0,
-     "key": 236,
-     "asked after": true,
-     "answer": "ok patch=ra-jit\\049b53d3036e6104\\programs\\life\\patch.o functions=25 files=1 ms=29"
-    },
-    {
-     "round": 0,
-     "key": 237,
-     "asked after": true,
-     "answer": "error: error: Missing digits after the integer base prefix\\n  --> src\\\\main.rs:49:9\\n   |\\n49 |         0x\\n   |         ^"
-    },
-    {
-     "round": 0,
-     "key": 240,
-     "asked after": true,
-     "answer": "ok patch=ra-jit\\049b53d3036e6104\\programs\\life\\patch.o functions=25 files=1 ms=29"
-    },
-    {
-     "round": 0,
-     "key": 241,
-     "asked after": true,
-     "answer": "ok patch=ra-jit\\049b53d3036e6104\\programs\\life\\patch.o functions=25 files=1 ms=29"
-    },
-    {
-     "round": 0,
-     "key": 242,
-     "asked after": true,
-     "answer": "ok patch=ra-jit\\049b53d3036e6104\\programs\\life\\patch.o functions=25 files=1 ms=31"
+     "answer": "ok patch=ra-jit\\0d868935ef68b949\\programs\\life\\patch.o functions=10 files=1 ms=23"
     },
     {
      "round": 0,
@@ -1824,1550 +1753,1718 @@
     {
      "round": 0,
      "key": 0,
-     "ms": 29.845,
-     "answer": "ok patch=ra-jit\\049b53d3036e6104\\programs\\life\\patch.o functions=1 files=1 ms=26"
+     "ms": 26.656,
+     "answer": "ok patch=ra-jit\\0d868935ef68b949\\programs\\life\\patch.o functions=1 files=1 ms=23"
     },
     {
      "round": 0,
      "key": 1,
-     "ms": 18.049,
+     "ms": 26.156,
      "answer": "error: error: expected a block\\n  --> src\\\\main.rs:38:6\\n   |\\n38 |     } else {\\n   |      ^"
     },
     {
      "round": 0,
      "key": 2,
-     "ms": 16.994,
+     "ms": 14.833,
      "answer": "error: error: expected a block\\n  --> src\\\\main.rs:38:6\\n   |\\n38 |     } else {\\n   |      ^"
     },
     {
      "round": 0,
      "key": 3,
-     "ms": 19.037,
+     "ms": 18.07,
      "answer": "error: error: expected a block\\n  --> src\\\\main.rs:38:6\\n   |\\n38 |     } else {\\n   |      ^"
     },
     {
      "round": 0,
      "key": 4,
-     "ms": 34.623,
+     "ms": 21.486,
      "answer": "error: error[E0308]: expected bool, found u32\\n  --> src\\\\main.rs:36:25\\n   |\\n36 |     } else if n == 3 || n {\\n   |                         ^"
     },
     {
      "round": 0,
      "key": 5,
-     "ms": 18.896,
+     "ms": 20.239,
      "answer": "error: error[E0308]: expected bool, found u32\\n  --> src\\\\main.rs:36:25\\n   |\\n36 |     } else if n == 3 || n  {\\n   |                         ^"
     },
     {
      "round": 0,
      "key": 6,
-     "ms": 18.56,
+     "ms": 16.715,
      "answer": "error: error: expected a block\\n  --> src\\\\main.rs:38:6\\n   |\\n38 |     } else {\\n   |      ^"
     },
     {
      "round": 0,
      "key": 7,
-     "ms": 18.195,
+     "ms": 16.338,
      "answer": "error: error: expected a block\\n  --> src\\\\main.rs:38:6\\n   |\\n38 |     } else {\\n   |      ^"
     },
     {
      "round": 0,
      "key": 8,
-     "ms": 17.356,
+     "ms": 18.558,
      "answer": "error: error: expected a block\\n  --> src\\\\main.rs:38:6\\n   |\\n38 |     } else {\\n   |      ^"
     },
     {
      "round": 0,
      "key": 9,
-     "ms": 65.005,
-     "answer": "ok patch=ra-jit\\049b53d3036e6104\\programs\\life\\patch.o functions=2 files=1 ms=61"
+     "ms": 30.286,
+     "answer": "ok patch=ra-jit\\0d868935ef68b949\\programs\\life\\patch.o functions=2 files=1 ms=23"
     },
     {
      "round": 0,
      "key": 10,
-     "ms": 33.287,
-     "answer": "ok patch=ra-jit\\049b53d3036e6104\\programs\\life\\patch.o functions=3 files=1 ms=31"
+     "ms": 30.66,
+     "answer": "ok patch=ra-jit\\0d868935ef68b949\\programs\\life\\patch.o functions=3 files=1 ms=24"
     },
     {
      "round": 0,
      "key": 11,
-     "ms": 36.002,
-     "answer": "ok patch=ra-jit\\049b53d3036e6104\\programs\\life\\patch.o functions=3 files=1 ms=32"
+     "ms": 28.475,
+     "answer": "ok patch=ra-jit\\0d868935ef68b949\\programs\\life\\patch.o functions=3 files=1 ms=24"
     },
     {
      "round": 0,
      "key": 12,
-     "ms": 32.159,
-     "answer": "ok patch=ra-jit\\049b53d3036e6104\\programs\\life\\patch.o functions=3 files=1 ms=29"
+     "ms": 25.239,
+     "answer": "ok patch=ra-jit\\0d868935ef68b949\\programs\\life\\patch.o functions=3 files=1 ms=22"
     },
     {
      "round": 0,
      "key": 13,
-     "ms": 34.439,
-     "answer": "ok patch=ra-jit\\049b53d3036e6104\\programs\\life\\patch.o functions=3 files=1 ms=31"
+     "ms": 26.27,
+     "answer": "ok patch=ra-jit\\0d868935ef68b949\\programs\\life\\patch.o functions=3 files=1 ms=22"
     },
     {
      "round": 0,
      "key": 14,
-     "ms": 37.575,
-     "answer": "ok patch=ra-jit\\049b53d3036e6104\\programs\\life\\patch.o functions=3 files=1 ms=33"
+     "ms": 29.452,
+     "answer": "ok patch=ra-jit\\0d868935ef68b949\\programs\\life\\patch.o functions=3 files=1 ms=24"
     },
     {
      "round": 0,
      "key": 15,
-     "ms": 24.4,
+     "ms": 17.398,
      "answer": "error: error: Missing digits after the integer base prefix\\n  --> src\\\\main.rs:49:9\\n   |\\n49 |         0x\\n   |         ^"
     },
     {
      "round": 0,
      "key": 16,
-     "ms": 28.965,
-     "answer": "ok patch=ra-jit\\049b53d3036e6104\\programs\\life\\patch.o functions=3 files=1 ms=26"
+     "ms": 26.173,
+     "answer": "ok patch=ra-jit\\0d868935ef68b949\\programs\\life\\patch.o functions=3 files=1 ms=23"
     },
     {
      "round": 0,
      "key": 17,
-     "ms": 28.375,
-     "answer": "ok patch=ra-jit\\049b53d3036e6104\\programs\\life\\patch.o functions=3 files=1 ms=25"
+     "ms": 25.344,
+     "answer": "ok patch=ra-jit\\0d868935ef68b949\\programs\\life\\patch.o functions=3 files=1 ms=22"
     },
     {
      "round": 0,
      "key": 18,
-     "ms": 34.234,
-     "answer": "ok patch=ra-jit\\049b53d3036e6104\\programs\\life\\patch.o functions=3 files=1 ms=31"
+     "ms": 28.589,
+     "answer": "ok patch=ra-jit\\0d868935ef68b949\\programs\\life\\patch.o functions=3 files=1 ms=23"
     },
     {
      "round": 0,
      "key": 19,
-     "ms": 36.803,
-     "answer": "ok patch=ra-jit\\049b53d3036e6104\\programs\\life\\patch.o functions=3 files=1 ms=34"
+     "ms": 29.449,
+     "answer": "ok patch=ra-jit\\0d868935ef68b949\\programs\\life\\patch.o functions=3 files=1 ms=25"
     },
     {
      "round": 0,
      "key": 20,
-     "ms": 33.522,
-     "answer": "ok patch=ra-jit\\049b53d3036e6104\\programs\\life\\patch.o functions=3 files=1 ms=29"
+     "ms": 29.614,
+     "answer": "ok patch=ra-jit\\0d868935ef68b949\\programs\\life\\patch.o functions=3 files=1 ms=24"
     },
     {
      "round": 0,
      "key": 21,
-     "ms": 31.584,
-     "answer": "ok patch=ra-jit\\049b53d3036e6104\\programs\\life\\patch.o functions=3 files=1 ms=28"
+     "ms": 24.774,
+     "answer": "ok patch=ra-jit\\0d868935ef68b949\\programs\\life\\patch.o functions=3 files=1 ms=22"
     },
     {
      "round": 0,
      "key": 22,
-     "ms": 35.368,
-     "answer": "ok patch=ra-jit\\049b53d3036e6104\\programs\\life\\patch.o functions=10 files=1 ms=33"
+     "ms": 28.41,
+     "answer": "ok patch=ra-jit\\0d868935ef68b949\\programs\\life\\patch.o functions=10 files=1 ms=24"
     },
     {
      "round": 0,
      "key": 23,
-     "ms": 52.781,
+     "ms": 38.214,
      "answer": "error: error: expected an item\\n  --> src\\\\main.rs:57:1\\n   |\\n57 | /\\n   | ^"
     },
     {
      "round": 0,
      "key": 24,
-     "ms": 36.473,
-     "answer": "ok patch=ra-jit\\049b53d3036e6104\\programs\\life\\patch.o functions=10 files=1 ms=33"
+     "ms": 28.797,
+     "answer": "ok patch=ra-jit\\0d868935ef68b949\\programs\\life\\patch.o functions=10 files=1 ms=24"
     },
     {
      "round": 0,
      "key": 25,
-     "ms": 43.507,
-     "answer": "ok patch=ra-jit\\049b53d3036e6104\\programs\\life\\patch.o functions=10 files=1 ms=40"
+     "ms": 30.824,
+     "answer": "ok patch=ra-jit\\0d868935ef68b949\\programs\\life\\patch.o functions=10 files=1 ms=23"
     },
     {
      "round": 0,
      "key": 26,
-     "ms": 36.805,
-     "answer": "ok patch=ra-jit\\049b53d3036e6104\\programs\\life\\patch.o functions=10 files=1 ms=33"
+     "ms": 27.453,
+     "answer": "ok patch=ra-jit\\0d868935ef68b949\\programs\\life\\patch.o functions=10 files=1 ms=24"
     },
     {
      "round": 0,
      "key": 27,
-     "ms": 38.791,
-     "answer": "ok patch=ra-jit\\049b53d3036e6104\\programs\\life\\patch.o functions=10 files=1 ms=35"
+     "ms": 50.329,
+     "answer": "ok patch=ra-jit\\0d868935ef68b949\\programs\\life\\patch.o functions=10 files=1 ms=23"
     },
     {
      "round": 0,
      "key": 28,
-     "ms": 38.305,
-     "answer": "ok patch=ra-jit\\049b53d3036e6104\\programs\\life\\patch.o functions=10 files=1 ms=35"
+     "ms": 34.278,
+     "answer": "ok patch=ra-jit\\0d868935ef68b949\\programs\\life\\patch.o functions=10 files=1 ms=27"
     },
     {
      "round": 0,
      "key": 29,
-     "ms": 1077.539,
-     "answer": "ok patch=ra-jit\\049b53d3036e6104\\programs\\life\\patch.o functions=10 files=1 ms=598"
+     "ms": 26.339,
+     "answer": "ok patch=ra-jit\\0d868935ef68b949\\programs\\life\\patch.o functions=10 files=1 ms=23"
+    },
+    {
+     "round": 0,
+     "key": 30,
+     "ms": 42.021,
+     "answer": "ok patch=ra-jit\\0d868935ef68b949\\programs\\life\\patch.o functions=10 files=1 ms=23"
+    },
+    {
+     "round": 0,
+     "key": 31,
+     "ms": 28.955,
+     "answer": "ok patch=ra-jit\\0d868935ef68b949\\programs\\life\\patch.o functions=10 files=1 ms=25"
+    },
+    {
+     "round": 0,
+     "key": 32,
+     "ms": 26.45,
+     "answer": "ok patch=ra-jit\\0d868935ef68b949\\programs\\life\\patch.o functions=10 files=1 ms=24"
+    },
+    {
+     "round": 0,
+     "key": 33,
+     "ms": 26.053,
+     "answer": "ok patch=ra-jit\\0d868935ef68b949\\programs\\life\\patch.o functions=10 files=1 ms=23"
+    },
+    {
+     "round": 0,
+     "key": 34,
+     "ms": 25.684,
+     "answer": "ok patch=ra-jit\\0d868935ef68b949\\programs\\life\\patch.o functions=10 files=1 ms=23"
+    },
+    {
+     "round": 0,
+     "key": 35,
+     "ms": 27.96,
+     "answer": "ok patch=ra-jit\\0d868935ef68b949\\programs\\life\\patch.o functions=10 files=1 ms=24"
+    },
+    {
+     "round": 0,
+     "key": 36,
+     "ms": 27.573,
+     "answer": "ok patch=ra-jit\\0d868935ef68b949\\programs\\life\\patch.o functions=10 files=1 ms=24"
+    },
+    {
+     "round": 0,
+     "key": 37,
+     "ms": 25.99,
+     "answer": "ok patch=ra-jit\\0d868935ef68b949\\programs\\life\\patch.o functions=10 files=1 ms=24"
+    },
+    {
+     "round": 0,
+     "key": 38,
+     "ms": 48.137,
+     "answer": "ok patch=ra-jit\\0d868935ef68b949\\programs\\life\\patch.o functions=10 files=1 ms=22"
+    },
+    {
+     "round": 0,
+     "key": 39,
+     "ms": 26.815,
+     "answer": "ok patch=ra-jit\\0d868935ef68b949\\programs\\life\\patch.o functions=10 files=1 ms=23"
+    },
+    {
+     "round": 0,
+     "key": 40,
+     "ms": 27.6,
+     "answer": "ok patch=ra-jit\\0d868935ef68b949\\programs\\life\\patch.o functions=10 files=1 ms=24"
+    },
+    {
+     "round": 0,
+     "key": 41,
+     "ms": 26.117,
+     "answer": "ok patch=ra-jit\\0d868935ef68b949\\programs\\life\\patch.o functions=10 files=1 ms=23"
+    },
+    {
+     "round": 0,
+     "key": 42,
+     "ms": 33.17,
+     "answer": "ok patch=ra-jit\\0d868935ef68b949\\programs\\life\\patch.o functions=10 files=1 ms=26"
+    },
+    {
+     "round": 0,
+     "key": 43,
+     "ms": 27.158,
+     "answer": "ok patch=ra-jit\\0d868935ef68b949\\programs\\life\\patch.o functions=10 files=1 ms=23"
     },
     {
      "round": 0,
      "key": 44,
-     "ms": 36.673,
-     "answer": "ok patch=ra-jit\\049b53d3036e6104\\programs\\life\\patch.o functions=10 files=1 ms=32"
-    },
-    {
-     "round": 0,
-     "key": 45,
-     "ms": 36.98,
-     "answer": "ok patch=ra-jit\\049b53d3036e6104\\programs\\life\\patch.o functions=10 files=1 ms=33"
-    },
-    {
-     "round": 0,
-     "key": 46,
-     "ms": 35.929,
-     "answer": "ok patch=ra-jit\\049b53d3036e6104\\programs\\life\\patch.o functions=10 files=1 ms=32"
+     "ms": 195.207,
+     "answer": "ok patch=ra-jit\\0d868935ef68b949\\programs\\life\\patch.o functions=10 files=1 ms=24"
     },
     {
      "round": 0,
      "key": 47,
-     "ms": 38.831,
-     "answer": "ok patch=ra-jit\\049b53d3036e6104\\programs\\life\\patch.o functions=10 files=1 ms=36"
+     "ms": 28.416,
+     "answer": "ok patch=ra-jit\\0d868935ef68b949\\programs\\life\\patch.o functions=10 files=1 ms=25"
     },
     {
      "round": 0,
      "key": 48,
-     "ms": 37.296,
-     "answer": "ok patch=ra-jit\\049b53d3036e6104\\programs\\life\\patch.o functions=10 files=1 ms=34"
+     "ms": 43.337,
+     "answer": "ok patch=ra-jit\\0d868935ef68b949\\programs\\life\\patch.o functions=10 files=1 ms=23"
     },
     {
      "round": 0,
      "key": 49,
-     "ms": 36.51,
-     "answer": "ok patch=ra-jit\\049b53d3036e6104\\programs\\life\\patch.o functions=10 files=1 ms=33"
+     "ms": 27.232,
+     "answer": "ok patch=ra-jit\\0d868935ef68b949\\programs\\life\\patch.o functions=10 files=1 ms=24"
     },
     {
      "round": 0,
      "key": 50,
-     "ms": 43.123,
-     "answer": "ok patch=ra-jit\\049b53d3036e6104\\programs\\life\\patch.o functions=10 files=1 ms=40"
+     "ms": 27.023,
+     "answer": "ok patch=ra-jit\\0d868935ef68b949\\programs\\life\\patch.o functions=10 files=1 ms=23"
     },
     {
      "round": 0,
      "key": 51,
-     "ms": 37.559,
-     "answer": "ok patch=ra-jit\\049b53d3036e6104\\programs\\life\\patch.o functions=10 files=1 ms=34"
+     "ms": 25.812,
+     "answer": "ok patch=ra-jit\\0d868935ef68b949\\programs\\life\\patch.o functions=10 files=1 ms=23"
     },
     {
      "round": 0,
      "key": 52,
-     "ms": 59.593,
-     "answer": "ok patch=ra-jit\\049b53d3036e6104\\programs\\life\\patch.o functions=10 files=1 ms=53"
+     "ms": 60.983,
+     "answer": "ok patch=ra-jit\\0d868935ef68b949\\programs\\life\\patch.o functions=10 files=1 ms=22"
     },
     {
      "round": 0,
      "key": 53,
-     "ms": 50.416,
-     "answer": "ok patch=ra-jit\\049b53d3036e6104\\programs\\life\\patch.o functions=10 files=1 ms=46"
+     "ms": 30.077,
+     "answer": "ok patch=ra-jit\\0d868935ef68b949\\programs\\life\\patch.o functions=10 files=1 ms=24"
     },
     {
      "round": 0,
      "key": 54,
-     "ms": 50.952,
-     "answer": "ok patch=ra-jit\\049b53d3036e6104\\programs\\life\\patch.o functions=10 files=1 ms=47"
+     "ms": 25.848,
+     "answer": "ok patch=ra-jit\\0d868935ef68b949\\programs\\life\\patch.o functions=10 files=1 ms=23"
     },
     {
      "round": 0,
      "key": 55,
-     "ms": 39.308,
-     "answer": "ok patch=ra-jit\\049b53d3036e6104\\programs\\life\\patch.o functions=10 files=1 ms=36"
+     "ms": 27.937,
+     "answer": "ok patch=ra-jit\\0d868935ef68b949\\programs\\life\\patch.o functions=10 files=1 ms=25"
     },
     {
      "round": 0,
      "key": 56,
-     "ms": 36.587,
-     "answer": "ok patch=ra-jit\\049b53d3036e6104\\programs\\life\\patch.o functions=10 files=1 ms=33"
+     "ms": 42.891,
+     "answer": "ok patch=ra-jit\\0d868935ef68b949\\programs\\life\\patch.o functions=10 files=1 ms=29"
     },
     {
      "round": 0,
      "key": 57,
-     "ms": 35.921,
-     "answer": "ok patch=ra-jit\\049b53d3036e6104\\programs\\life\\patch.o functions=10 files=1 ms=32"
+     "ms": 27.14,
+     "answer": "ok patch=ra-jit\\0d868935ef68b949\\programs\\life\\patch.o functions=10 files=1 ms=24"
     },
     {
      "round": 0,
      "key": 58,
-     "ms": 35.032,
-     "answer": "ok patch=ra-jit\\049b53d3036e6104\\programs\\life\\patch.o functions=10 files=1 ms=32"
+     "ms": 51.723,
+     "answer": "ok patch=ra-jit\\0d868935ef68b949\\programs\\life\\patch.o functions=10 files=1 ms=36"
     },
     {
      "round": 0,
      "key": 59,
-     "ms": 34.453,
-     "answer": "ok patch=ra-jit\\049b53d3036e6104\\programs\\life\\patch.o functions=10 files=1 ms=32"
+     "ms": 29.853,
+     "answer": "ok patch=ra-jit\\0d868935ef68b949\\programs\\life\\patch.o functions=10 files=1 ms=24"
     },
     {
      "round": 0,
      "key": 60,
-     "ms": 33.639,
-     "answer": "ok patch=ra-jit\\049b53d3036e6104\\programs\\life\\patch.o functions=10 files=1 ms=31"
+     "ms": 26.698,
+     "answer": "ok patch=ra-jit\\0d868935ef68b949\\programs\\life\\patch.o functions=10 files=1 ms=24"
     },
     {
      "round": 0,
      "key": 61,
-     "ms": 34.774,
-     "answer": "ok patch=ra-jit\\049b53d3036e6104\\programs\\life\\patch.o functions=10 files=1 ms=31"
+     "ms": 47.868,
+     "answer": "ok patch=ra-jit\\0d868935ef68b949\\programs\\life\\patch.o functions=10 files=1 ms=23"
     },
     {
      "round": 0,
      "key": 62,
-     "ms": 33.988,
-     "answer": "ok patch=ra-jit\\049b53d3036e6104\\programs\\life\\patch.o functions=10 files=1 ms=31"
+     "ms": 30.072,
+     "answer": "ok patch=ra-jit\\0d868935ef68b949\\programs\\life\\patch.o functions=10 files=1 ms=24"
     },
     {
      "round": 0,
      "key": 63,
-     "ms": 38.815,
-     "answer": "ok patch=ra-jit\\049b53d3036e6104\\programs\\life\\patch.o functions=10 files=1 ms=35"
+     "ms": 26.444,
+     "answer": "ok patch=ra-jit\\0d868935ef68b949\\programs\\life\\patch.o functions=10 files=1 ms=23"
     },
     {
      "round": 0,
      "key": 64,
-     "ms": 33.855,
-     "answer": "ok patch=ra-jit\\049b53d3036e6104\\programs\\life\\patch.o functions=10 files=1 ms=31"
+     "ms": 194.318,
+     "answer": "ok patch=ra-jit\\0d868935ef68b949\\programs\\life\\patch.o functions=10 files=1 ms=25"
     },
     {
      "round": 0,
      "key": 65,
-     "ms": 25.742,
+     "ms": 26.084,
      "answer": "error: error: expected L_BRACK\\n  --> src\\\\main.rs:58:2\\n   |\\n58 | #\\n   |  ^"
     },
     {
      "round": 0,
      "key": 66,
-     "ms": 73.407,
+     "ms": 55.081,
      "answer": "error: error: expected identifier, `self`, `super`, `crate`, or `Self`\\n  --> src\\\\main.rs:61:1\\n   |\\n61 | struct Life {\\n   | ^"
     },
     {
      "round": 0,
      "key": 67,
-     "ms": 67.822,
+     "ms": 46.461,
      "answer": "error: error: expected R_BRACK\\n  --> src\\\\main.rs:58:4\\n   |\\n58 | #[i\\n   |    ^"
     },
     {
      "round": 0,
      "key": 68,
-     "ms": 68.776,
+     "ms": 45.675,
      "answer": "error: error: expected identifier, `self`, `super`, `crate`, or `Self`\\n  --> src\\\\main.rs:58:3\\n   |\\n58 | #[in\\n   |   ^"
     },
     {
      "round": 0,
      "key": 69,
-     "ms": 72.405,
+     "ms": 46.928,
      "answer": "error: error: expected R_BRACK\\n  --> src\\\\main.rs:58:6\\n   |\\n58 | #[inl\\n   |      ^"
     },
     {
      "round": 0,
      "key": 70,
-     "ms": 69.456,
+     "ms": 47.979,
      "answer": "error: error: expected R_BRACK\\n  --> src\\\\main.rs:58:7\\n   |\\n58 | #[inli\\n   |       ^"
     },
     {
      "round": 0,
      "key": 71,
-     "ms": 69.572,
+     "ms": 55.861,
      "answer": "error: error: expected R_BRACK\\n  --> src\\\\main.rs:58:8\\n   |\\n58 | #[inlib\\n   |        ^"
     },
     {
      "round": 0,
      "key": 72,
-     "ms": 996.272,
+     "ms": 48.368,
      "answer": "error: error: expected R_BRACK\\n  --> src\\\\main.rs:58:7\\n   |\\n58 | #[inli\\n   |       ^"
     },
     {
      "round": 0,
      "key": 73,
-     "ms": 66.975,
+     "ms": 45.711,
      "answer": "error: error: expected R_BRACK\\n  --> src\\\\main.rs:58:8\\n   |\\n58 | #[inlin\\n   |        ^"
     },
     {
      "round": 0,
      "key": 74,
-     "ms": 64.139,
+     "ms": 44.727,
      "answer": "error: error: expected R_BRACK\\n  --> src\\\\main.rs:58:9\\n   |\\n58 | #[inline\\n   |         ^"
     },
     {
      "round": 0,
      "key": 75,
-     "ms": 51.222,
+     "ms": 46.969,
      "answer": "error: error: expected R_PAREN\\n   --> src\\\\main.rs:120:2\\n    |\\n120 | }\\n    |  ^"
     },
     {
      "round": 0,
      "key": 76,
-     "ms": 16.839,
+     "ms": 22.465,
      "answer": "error: error: expected R_PAREN\\n   --> src\\\\main.rs:120:2\\n    |\\n120 | }\\n    |  ^"
     },
     {
      "round": 0,
      "key": 77,
-     "ms": 15.394,
+     "ms": 21.24,
      "answer": "error: error: expected R_PAREN\\n   --> src\\\\main.rs:120:2\\n    |\\n120 | }\\n    |  ^"
     },
     {
      "round": 0,
      "key": 78,
-     "ms": 17.401,
+     "ms": 22.944,
      "answer": "error: error: expected R_PAREN\\n   --> src\\\\main.rs:120:2\\n    |\\n120 | }\\n    |  ^"
     },
     {
      "round": 0,
      "key": 79,
-     "ms": 16.186,
+     "ms": 17.652,
      "answer": "error: error: expected R_PAREN\\n   --> src\\\\main.rs:120:2\\n    |\\n120 | }\\n    |  ^"
     },
     {
      "round": 0,
      "key": 80,
-     "ms": 17.355,
+     "ms": 16.475,
      "answer": "error: error: expected R_PAREN\\n   --> src\\\\main.rs:120:2\\n    |\\n120 | }\\n    |  ^"
     },
     {
      "round": 0,
      "key": 81,
-     "ms": 64.525,
+     "ms": 46.171,
      "answer": "error: error: expected R_BRACK\\n  --> src\\\\main.rs:58:16\\n   |\\n58 | #[inline(never)\\n   |                ^"
     },
     {
      "round": 0,
      "key": 82,
-     "ms": 34.289,
-     "answer": "ok patch=ra-jit\\049b53d3036e6104\\programs\\life\\patch.o functions=10 files=1 ms=31"
+     "ms": 29.807,
+     "answer": "ok patch=ra-jit\\0d868935ef68b949\\programs\\life\\patch.o functions=10 files=1 ms=25"
     },
     {
      "round": 0,
      "key": 83,
-     "ms": 36.875,
-     "answer": "ok patch=ra-jit\\049b53d3036e6104\\programs\\life\\patch.o functions=10 files=1 ms=33"
+     "ms": 27.279,
+     "answer": "ok patch=ra-jit\\0d868935ef68b949\\programs\\life\\patch.o functions=10 files=1 ms=23"
     },
     {
      "round": 0,
      "key": 84,
-     "ms": 30.079,
+     "ms": 34.764,
      "answer": "error: error: expected an item\\n  --> src\\\\main.rs:59:2\\n   |\\n59 | f\\n   |  ^"
     },
     {
      "round": 0,
      "key": 85,
-     "ms": 513.54,
+     "ms": 29.548,
      "answer": "error: error: expected a name\\n  --> src\\\\main.rs:59:3\\n   |\\n59 | fn\\n   |   ^"
     },
     {
      "round": 0,
+     "key": 86,
+     "ms": 16.921,
+     "answer": "error: error: expected a name\\n  --> src\\\\main.rs:59:3\\n   |\\n59 | fn \\n   |   ^"
+    },
+    {
+     "round": 0,
      "key": 87,
-     "ms": 25.122,
+     "ms": 19.757,
      "answer": "error: error: expected function arguments\\n  --> src\\\\main.rs:59:5\\n   |\\n59 | fn c\\n   |     ^"
     },
     {
      "round": 0,
      "key": 88,
-     "ms": 25.167,
+     "ms": 27.508,
      "answer": "error: error: expected function arguments\\n  --> src\\\\main.rs:59:6\\n   |\\n59 | fn co\\n   |      ^"
     },
     {
      "round": 0,
      "key": 89,
-     "ms": 24.657,
+     "ms": 24.272,
      "answer": "error: error: expected function arguments\\n  --> src\\\\main.rs:59:7\\n   |\\n59 | fn cou\\n   |       ^"
     },
     {
      "round": 0,
      "key": 90,
-     "ms": 26.54,
+     "ms": 27.282,
      "answer": "error: error: expected function arguments\\n  --> src\\\\main.rs:59:8\\n   |\\n59 | fn coun\\n   |        ^"
     },
     {
      "round": 0,
      "key": 91,
-     "ms": 26.328,
+     "ms": 18.361,
      "answer": "error: error: expected function arguments\\n  --> src\\\\main.rs:59:9\\n   |\\n59 | fn count\\n   |         ^"
     },
     {
      "round": 0,
      "key": 92,
-     "ms": 25.57,
+     "ms": 19.871,
      "answer": "error: error: expected function arguments\\n  --> src\\\\main.rs:59:10\\n   |\\n59 | fn count_\\n   |          ^"
     },
     {
      "round": 0,
      "key": 93,
-     "ms": 24.841,
+     "ms": 18.72,
      "answer": "error: error: expected function arguments\\n  --> src\\\\main.rs:59:11\\n   |\\n59 | fn count_a\\n   |           ^"
     },
     {
      "round": 0,
      "key": 94,
-     "ms": 23.313,
+     "ms": 24.951,
      "answer": "error: error: expected function arguments\\n  --> src\\\\main.rs:59:12\\n   |\\n59 | fn count_ab\\n   |            ^"
     },
     {
      "round": 0,
      "key": 95,
-     "ms": 25.477,
+     "ms": 18.085,
      "answer": "error: error: expected function arguments\\n  --> src\\\\main.rs:59:13\\n   |\\n59 | fn count_abo\\n   |             ^"
     },
     {
      "round": 0,
      "key": 96,
-     "ms": 25.773,
+     "ms": 18.741,
      "answer": "error: error: expected function arguments\\n  --> src\\\\main.rs:59:14\\n   |\\n59 | fn count_abov\\n   |              ^"
     },
     {
      "round": 0,
      "key": 97,
-     "ms": 27.47,
+     "ms": 22.671,
      "answer": "error: error: expected function arguments\\n  --> src\\\\main.rs:59:15\\n   |\\n59 | fn count_above\\n   |               ^"
     },
     {
      "round": 0,
      "key": 98,
-     "ms": 53.529,
+     "ms": 50.121,
      "answer": "error: error: expected generic parameter\\n  --> src\\\\main.rs:62:1\\n   |\\n62 | struct Life {\\n   | ^"
     },
     {
      "round": 0,
      "key": 99,
-     "ms": 65.781,
+     "ms": 45.712,
      "answer": "error: error: expected R_ANGLE\\n  --> src\\\\main.rs:59:17\\n   |\\n59 | fn count_above<T\\n   |                 ^"
     },
     {
      "round": 0,
      "key": 100,
-     "ms": 26.1,
+     "ms": 18.448,
      "answer": "error: error: expected R_ANGLE\\n  --> src\\\\main.rs:62:1\\n   |\\n62 | struct Life {\\n   | ^"
     },
     {
      "round": 0,
      "key": 101,
-     "ms": 29.697,
+     "ms": 16.752,
      "answer": "error: error: expected R_ANGLE\\n  --> src\\\\main.rs:62:1\\n   |\\n62 | struct Life {\\n   | ^"
     },
     {
      "round": 0,
      "key": 102,
-     "ms": 24.109,
+     "ms": 21.656,
      "answer": "error: error: expected R_ANGLE\\n  --> src\\\\main.rs:59:20\\n   |\\n59 | fn count_above<T: P\\n   |                    ^"
     },
     {
      "round": 0,
      "key": 103,
-     "ms": 30.743,
+     "ms": 18.418,
      "answer": "error: error: expected R_ANGLE\\n  --> src\\\\main.rs:59:21\\n   |\\n59 | fn count_above<T: Pa\\n   |                     ^"
     },
     {
      "round": 0,
      "key": 104,
-     "ms": 23.646,
+     "ms": 23.584,
      "answer": "error: error: expected R_ANGLE\\n  --> src\\\\main.rs:59:22\\n   |\\n59 | fn count_above<T: Par\\n   |                      ^"
     },
     {
      "round": 0,
      "key": 105,
-     "ms": 29.176,
+     "ms": 21.027,
      "answer": "error: error: expected R_ANGLE\\n  --> src\\\\main.rs:59:23\\n   |\\n59 | fn count_above<T: Part\\n   |                       ^"
     },
     {
      "round": 0,
      "key": 106,
-     "ms": 23.38,
+     "ms": 21.777,
      "answer": "error: error: expected R_ANGLE\\n  --> src\\\\main.rs:59:24\\n   |\\n59 | fn count_above<T: Parti\\n   |                        ^"
     },
     {
      "round": 0,
      "key": 107,
-     "ms": 26.98,
+     "ms": 25.203,
      "answer": "error: error: expected R_ANGLE\\n  --> src\\\\main.rs:59:25\\n   |\\n59 | fn count_above<T: Partia\\n   |                         ^"
     },
     {
      "round": 0,
      "key": 108,
-     "ms": 30.984,
+     "ms": 19.722,
      "answer": "error: error: expected R_ANGLE\\n  --> src\\\\main.rs:59:26\\n   |\\n59 | fn count_above<T: Partial\\n   |                          ^"
     },
     {
      "round": 0,
      "key": 109,
-     "ms": 29.938,
+     "ms": 21.556,
      "answer": "error: error: expected R_ANGLE\\n  --> src\\\\main.rs:59:27\\n   |\\n59 | fn count_above<T: PartialO\\n   |                           ^"
     },
     {
      "round": 0,
      "key": 110,
-     "ms": 29.585,
+     "ms": 17.749,
      "answer": "error: error: expected R_ANGLE\\n  --> src\\\\main.rs:59:28\\n   |\\n59 | fn count_above<T: PartialOr\\n   |                            ^"
     },
     {
      "round": 0,
      "key": 111,
-     "ms": 31.736,
+     "ms": 23.928,
      "answer": "error: error: expected R_ANGLE\\n  --> src\\\\main.rs:59:29\\n   |\\n59 | fn count_above<T: PartialOrd\\n   |                             ^"
     },
     {
      "round": 0,
      "key": 112,
-     "ms": 22.04,
+     "ms": 23.876,
      "answer": "error: error: expected R_ANGLE\\n  --> src\\\\main.rs:59:29\\n   |\\n59 | fn count_above<T: PartialOrd \\n   |                             ^"
     },
     {
      "round": 0,
      "key": 113,
-     "ms": 23.122,
+     "ms": 16.824,
      "answer": "error: error: expected R_ANGLE\\n  --> src\\\\main.rs:59:31\\n   |\\n59 | fn count_above<T: PartialOrd +\\n   |                               ^"
     },
     {
      "round": 0,
      "key": 114,
-     "ms": 23.618,
+     "ms": 19.62,
      "answer": "error: error: expected R_ANGLE\\n  --> src\\\\main.rs:59:31\\n   |\\n59 | fn count_above<T: PartialOrd + \\n   |                               ^"
     },
     {
      "round": 0,
      "key": 115,
-     "ms": 23.2,
+     "ms": 25.203,
      "answer": "error: error: expected R_ANGLE\\n  --> src\\\\main.rs:59:33\\n   |\\n59 | fn count_above<T: PartialOrd + C\\n   |                                 ^"
     },
     {
      "round": 0,
      "key": 116,
-     "ms": 25.048,
+     "ms": 18.114,
      "answer": "error: error: expected R_ANGLE\\n  --> src\\\\main.rs:59:34\\n   |\\n59 | fn count_above<T: PartialOrd + Co\\n   |                                  ^"
     },
     {
      "round": 0,
      "key": 117,
-     "ms": 25.312,
+     "ms": 19.036,
      "answer": "error: error: expected R_ANGLE\\n  --> src\\\\main.rs:59:35\\n   |\\n59 | fn count_above<T: PartialOrd + Cop\\n   |                                   ^"
     },
     {
      "round": 0,
      "key": 118,
-     "ms": 32.191,
+     "ms": 23.67,
      "answer": "error: error: expected R_ANGLE\\n  --> src\\\\main.rs:59:36\\n   |\\n59 | fn count_above<T: PartialOrd + Copy\\n   |                                    ^"
     },
     {
      "round": 0,
      "key": 119,
-     "ms": 28.903,
+     "ms": 19.142,
      "answer": "error: error: expected function arguments\\n  --> src\\\\main.rs:59:37\\n   |\\n59 | fn count_above<T: PartialOrd + Copy>\\n   |                                     ^"
     },
     {
      "round": 0,
      "key": 120,
-     "ms": 27.41,
+     "ms": 24.728,
      "answer": "error: error: expected value parameter\\n  --> src\\\\main.rs:59:38\\n   |\\n59 | fn count_above<T: PartialOrd + Copy>(\\n   |                                      ^"
     },
     {
      "round": 0,
      "key": 121,
-     "ms": 23.551,
+     "ms": 18.258,
      "answer": "error: error: missing type for function parameter\\n  --> src\\\\main.rs:59:39\\n   |\\n59 | fn count_above<T: PartialOrd + Copy>(x\\n   |                                       ^"
     },
     {
      "round": 0,
      "key": 122,
-     "ms": 24.235,
+     "ms": 19.464,
      "answer": "error: error: missing type for function parameter\\n  --> src\\\\main.rs:59:40\\n   |\\n59 | fn count_above<T: PartialOrd + Copy>(xs\\n   |                                        ^"
     },
     {
      "round": 0,
      "key": 123,
-     "ms": 53.309,
+     "ms": 51.057,
      "answer": "error: error: expected type\\n  --> src\\\\main.rs:62:1\\n   |\\n62 | struct Life {\\n   | ^"
     },
     {
      "round": 0,
      "key": 124,
-     "ms": 26.288,
+     "ms": 22.649,
      "answer": "error: error: expected type\\n  --> src\\\\main.rs:62:1\\n   |\\n62 | struct Life {\\n   | ^"
     },
     {
      "round": 0,
      "key": 125,
-     "ms": 18.67,
+     "ms": 23.866,
      "answer": "error: error: expected type\\n  --> src\\\\main.rs:62:1\\n   |\\n62 | struct Life {\\n   | ^"
     },
     {
      "round": 0,
      "key": 126,
-     "ms": 16.855,
+     "ms": 23.517,
      "answer": "error: error: expected type\\n  --> src\\\\main.rs:62:1\\n   |\\n62 | struct Life {\\n   | ^"
     },
     {
      "round": 0,
      "key": 127,
-     "ms": 65.371,
+     "ms": 47.886,
      "answer": "error: error: expected `;` or `]`\\n  --> src\\\\main.rs:59:45\\n   |\\n59 | fn count_above<T: PartialOrd + Copy>(xs: &[T\\n   |                                             ^"
     },
     {
      "round": 0,
      "key": 128,
-     "ms": 32.319,
+     "ms": 18.101,
      "answer": "error: error: expected R_PAREN\\n  --> src\\\\main.rs:59:46\\n   |\\n59 | fn count_above<T: PartialOrd + Copy>(xs: &[T]\\n   |                                              ^"
     },
     {
      "round": 0,
      "key": 129,
-     "ms": 23.423,
+     "ms": 20.092,
      "answer": "error: error: expected value parameter\\n  --> src\\\\main.rs:59:47\\n   |\\n59 | fn count_above<T: PartialOrd + Copy>(xs: &[T],\\n   |                                               ^"
     },
     {
      "round": 0,
      "key": 130,
-     "ms": 34.196,
+     "ms": 17.3,
      "answer": "error: error: expected value parameter\\n  --> src\\\\main.rs:59:47\\n   |\\n59 | fn count_above<T: PartialOrd + Copy>(xs: &[T], \\n   |                                               ^"
     },
     {
      "round": 0,
      "key": 131,
-     "ms": 23.448,
+     "ms": 28.282,
      "answer": "error: error: missing type for function parameter\\n  --> src\\\\main.rs:59:49\\n   |\\n59 | fn count_above<T: PartialOrd + Copy>(xs: &[T], f\\n   |                                                 ^"
     },
     {
      "round": 0,
      "key": 132,
-     "ms": 25.152,
+     "ms": 22.776,
      "answer": "error: error: missing type for function parameter\\n  --> src\\\\main.rs:59:50\\n   |\\n59 | fn count_above<T: PartialOrd + Copy>(xs: &[T], fl\\n   |                                                  ^"
     },
     {
      "round": 0,
      "key": 133,
-     "ms": 31.784,
+     "ms": 27.608,
      "answer": "error: error: missing type for function parameter\\n  --> src\\\\main.rs:59:51\\n   |\\n59 | fn count_above<T: PartialOrd + Copy>(xs: &[T], flo\\n   |                                                   ^"
     },
     {
      "round": 0,
      "key": 134,
-     "ms": 28.574,
+     "ms": 18.715,
      "answer": "error: error: missing type for function parameter\\n  --> src\\\\main.rs:59:52\\n   |\\n59 | fn count_above<T: PartialOrd + Copy>(xs: &[T], floo\\n   |                                                    ^"
     },
     {
      "round": 0,
      "key": 135,
-     "ms": 27.11,
+     "ms": 25.427,
      "answer": "error: error: missing type for function parameter\\n  --> src\\\\main.rs:59:53\\n   |\\n59 | fn count_above<T: PartialOrd + Copy>(xs: &[T], floor\\n   |                                                     ^"
     },
     {
      "round": 0,
      "key": 136,
-     "ms": 52.148,
+     "ms": 44.943,
      "answer": "error: error: expected type\\n  --> src\\\\main.rs:62:1\\n   |\\n62 | struct Life {\\n   | ^"
     },
     {
      "round": 0,
      "key": 137,
-     "ms": 24.245,
+     "ms": 30.833,
      "answer": "error: error: expected type\\n  --> src\\\\main.rs:62:1\\n   |\\n62 | struct Life {\\n   | ^"
     },
     {
      "round": 0,
      "key": 138,
-     "ms": 65.229,
+     "ms": 59.817,
      "answer": "error: error: expected R_PAREN\\n  --> src\\\\main.rs:59:56\\n   |\\n59 | fn count_above<T: PartialOrd + Copy>(xs: &[T], floor: T\\n   |                                                        ^"
     },
     {
      "round": 0,
      "key": 139,
-     "ms": 27.832,
+     "ms": 18.854,
      "answer": "error: error: expected a block\\n  --> src\\\\main.rs:59:57\\n   |\\n59 | fn count_above<T: PartialOrd + Copy>(xs: &[T], floor: T)\\n   |                                                         ^"
     },
     {
      "round": 0,
      "key": 140,
-     "ms": 23.941,
+     "ms": 19.077,
      "answer": "error: error: expected a block\\n  --> src\\\\main.rs:59:57\\n   |\\n59 | fn count_above<T: PartialOrd + Copy>(xs: &[T], floor: T) \\n   |                                                         ^"
     },
     {
      "round": 0,
      "key": 141,
-     "ms": 25.58,
+     "ms": 26.654,
      "answer": "error: error: expected a block\\n  --> src\\\\main.rs:59:57\\n   |\\n59 | fn count_above<T: PartialOrd + Copy>(xs: &[T], floor: T) -\\n   |                                                         ^"
     },
     {
      "round": 0,
      "key": 142,
-     "ms": 52.44,
+     "ms": 51.218,
      "answer": "error: error: expected type\\n  --> src\\\\main.rs:62:1\\n   |\\n62 | struct Life {\\n   | ^"
     },
     {
      "round": 0,
      "key": 143,
-     "ms": 23.554,
+     "ms": 32.953,
      "answer": "error: error: expected type\\n  --> src\\\\main.rs:62:1\\n   |\\n62 | struct Life {\\n   | ^"
     },
     {
      "round": 0,
      "key": 144,
-     "ms": 60.61,
+     "ms": 45.934,
      "answer": "error: error: expected a block\\n  --> src\\\\main.rs:59:62\\n   |\\n59 | fn count_above<T: PartialOrd + Copy>(xs: &[T], floor: T) -> u\\n   |                                                              ^"
     },
     {
      "round": 0,
      "key": 145,
-     "ms": 26.544,
+     "ms": 18.081,
      "answer": "error: error: expected a block\\n  --> src\\\\main.rs:59:63\\n   |\\n59 | fn count_above<T: PartialOrd + Copy>(xs: &[T], floor: T) -> us\\n   |                                                               "
     },
     {
      "round": 0,
      "key": 146,
-     "ms": 28.681,
+     "ms": 21.41,
      "answer": "error: error: expected a block\\n  --> src\\\\main.rs:59:64\\n   |\\n59 | fn count_above<T: PartialOrd + Copy>(xs: &[T], floor: T) -> usi\\n   |                                                              "
     },
     {
      "round": 0,
      "key": 147,
-     "ms": 23.666,
+     "ms": 25.379,
      "answer": "error: error: expected a block\\n  --> src\\\\main.rs:59:65\\n   |\\n59 | fn count_above<T: PartialOrd + Copy>(xs: &[T], floor: T) -> usiz\\n   |                                                             "
     },
     {
      "round": 0,
      "key": 148,
-     "ms": 26.163,
+     "ms": 20.221,
      "answer": "error: error: expected a block\\n  --> src\\\\main.rs:59:66\\n   |\\n59 | fn count_above<T: PartialOrd + Copy>(xs: &[T], floor: T) -> usize\\n   |                                                            "
     },
     {
      "round": 0,
      "key": 149,
-     "ms": 28.812,
+     "ms": 15.739,
      "answer": "error: error: expected a block\\n  --> src\\\\main.rs:59:66\\n   |\\n59 | fn count_above<T: PartialOrd + Copy>(xs: &[T], floor: T) -> usize \\n   |                                                           "
     },
     {
      "round": 0,
      "key": 150,
-     "ms": 46.689,
+     "ms": 42.698,
      "answer": "error: error: expected R_CURLY\\n   --> src\\\\main.rs:121:2\\n    |\\n121 | }\\n    |  ^"
     },
     {
      "round": 0,
      "key": 151,
-     "ms": 25.186,
+     "ms": 23.275,
      "answer": "error: error: expected R_CURLY\\n   --> src\\\\main.rs:122:2\\n    |\\n122 | }\\n    |  ^"
     },
     {
      "round": 0,
      "key": 152,
-     "ms": 17.464,
+     "ms": 18.13,
      "answer": "error: error: expected SEMICOLON\\n  --> src\\\\main.rs:60:6\\n   |\\n60 |     x\\n   |      ^"
     },
     {
      "round": 0,
      "key": 153,
-     "ms": 18.444,
+     "ms": 23.507,
      "answer": "error: error: expected SEMICOLON\\n  --> src\\\\main.rs:60:7\\n   |\\n60 |     xs\\n   |       ^"
     },
     {
      "round": 0,
      "key": 154,
-     "ms": 18.949,
+     "ms": 20.164,
      "answer": "error: error: expected field name or number\\n  --> src\\\\main.rs:60:8\\n   |\\n60 |     xs.\\n   |        ^"
     },
     {
      "round": 0,
      "key": 155,
-     "ms": 17.958,
+     "ms": 35.19,
      "answer": "error: error: expected SEMICOLON\\n  --> src\\\\main.rs:60:9\\n   |\\n60 |     xs.i\\n   |         ^"
     },
     {
      "round": 0,
      "key": 156,
-     "ms": 20.694,
+     "ms": 21.9,
      "answer": "error: error: expected SEMICOLON\\n  --> src\\\\main.rs:60:10\\n   |\\n60 |     xs.it\\n   |          ^"
     },
     {
      "round": 0,
      "key": 157,
-     "ms": 19.358,
+     "ms": 26.039,
      "answer": "error: error: expected SEMICOLON\\n  --> src\\\\main.rs:60:11\\n   |\\n60 |     xs.ite\\n   |           ^"
     },
     {
      "round": 0,
      "key": 158,
-     "ms": 18.055,
+     "ms": 21.811,
      "answer": "error: error: expected SEMICOLON\\n  --> src\\\\main.rs:60:12\\n   |\\n60 |     xs.iter\\n   |            ^"
     },
     {
      "round": 0,
      "key": 159,
-     "ms": 20.43,
+     "ms": 23.794,
      "answer": "error: error: expected expression\\n  --> src\\\\main.rs:63:1\\n   |\\n63 | struct Life {\\n   | ^"
     },
     {
      "round": 0,
      "key": 160,
-     "ms": 22.284,
+     "ms": 23.436,
      "answer": "error: error: expected SEMICOLON\\n  --> src\\\\main.rs:60:14\\n   |\\n60 |     xs.iter()\\n   |              ^"
     },
     {
      "round": 0,
      "key": 161,
-     "ms": 18.883,
+     "ms": 17.573,
      "answer": "error: error: expected field name or number\\n  --> src\\\\main.rs:60:15\\n   |\\n60 |     xs.iter().\\n   |               ^"
     },
     {
      "round": 0,
      "key": 162,
-     "ms": 17.982,
+     "ms": 23.76,
      "answer": "error: error: expected SEMICOLON\\n  --> src\\\\main.rs:60:16\\n   |\\n60 |     xs.iter().f\\n   |                ^"
     },
     {
      "round": 0,
      "key": 163,
-     "ms": 18.835,
+     "ms": 19.37,
      "answer": "error: error: expected SEMICOLON\\n  --> src\\\\main.rs:60:17\\n   |\\n60 |     xs.iter().fi\\n   |                 ^"
     },
     {
      "round": 0,
      "key": 164,
-     "ms": 17.883,
+     "ms": 23.181,
      "answer": "error: error: expected SEMICOLON\\n  --> src\\\\main.rs:60:18\\n   |\\n60 |     xs.iter().fil\\n   |                  ^"
     },
     {
      "round": 0,
      "key": 165,
-     "ms": 17.66,
+     "ms": 23.203,
      "answer": "error: error: expected SEMICOLON\\n  --> src\\\\main.rs:60:19\\n   |\\n60 |     xs.iter().filt\\n   |                   ^"
     },
     {
      "round": 0,
      "key": 166,
-     "ms": 17.593,
+     "ms": 16.459,
      "answer": "error: error: expected SEMICOLON\\n  --> src\\\\main.rs:60:20\\n   |\\n60 |     xs.iter().filte\\n   |                    ^"
     },
     {
      "round": 0,
      "key": 167,
-     "ms": 18.459,
+     "ms": 21.203,
      "answer": "error: error: expected SEMICOLON\\n  --> src\\\\main.rs:60:21\\n   |\\n60 |     xs.iter().filter\\n   |                     ^"
     },
     {
      "round": 0,
      "key": 168,
-     "ms": 19.819,
+     "ms": 28.59,
      "answer": "error: error: expected expression\\n  --> src\\\\main.rs:63:1\\n   |\\n63 | struct Life {\\n   | ^"
     },
     {
      "round": 0,
      "key": 169,
-     "ms": 23.343,
+     "ms": 27.931,
      "answer": "error: error: expected value parameter\\n  --> src\\\\main.rs:60:23\\n   |\\n60 |     xs.iter().filter(|\\n   |                       ^"
     },
     {
      "round": 0,
      "key": 170,
-     "ms": 18.273,
+     "ms": 21.257,
      "answer": "error: error: expected PIPE\\n  --> src\\\\main.rs:60:24\\n   |\\n60 |     xs.iter().filter(|x\\n   |                        ^"
     },
     {
      "round": 0,
      "key": 171,
-     "ms": 18.525,
+     "ms": 19.525,
      "answer": "error: error: expected expression\\n  --> src\\\\main.rs:60:25\\n   |\\n60 |     xs.iter().filter(|x|\\n   |                         ^"
     },
     {
      "round": 0,
      "key": 172,
-     "ms": 17.623,
+     "ms": 23.605,
      "answer": "error: error: expected expression\\n  --> src\\\\main.rs:60:25\\n   |\\n60 |     xs.iter().filter(|x| \\n   |                         ^"
     },
     {
      "round": 0,
      "key": 173,
-     "ms": 20.985,
+     "ms": 18.013,
      "answer": "error: error: expected expression\\n  --> src\\\\main.rs:63:1\\n   |\\n63 | struct Life {\\n   | ^"
     },
     {
      "round": 0,
      "key": 174,
-     "ms": 15.389,
+     "ms": 15.792,
      "answer": "error: error: expected expression\\n  --> src\\\\main.rs:63:1\\n   |\\n63 | struct Life {\\n   | ^"
     },
     {
      "round": 0,
      "key": 175,
-     "ms": 23.874,
+     "ms": 37.712,
      "answer": "error: error: expected R_PAREN\\n  --> src\\\\main.rs:60:29\\n   |\\n60 |     xs.iter().filter(|x| **x\\n   |                             ^"
     },
     {
      "round": 0,
      "key": 176,
-     "ms": 19.725,
+     "ms": 17.018,
      "answer": "error: error: expected R_PAREN\\n  --> src\\\\main.rs:60:29\\n   |\\n60 |     xs.iter().filter(|x| **x \\n   |                             ^"
     },
     {
      "round": 0,
      "key": 177,
-     "ms": 19.128,
+     "ms": 27.446,
      "answer": "error: error: expected expression\\n  --> src\\\\main.rs:63:1\\n   |\\n63 | struct Life {\\n   | ^"
     },
     {
      "round": 0,
      "key": 178,
-     "ms": 16.9,
+     "ms": 15.883,
      "answer": "error: error: expected expression\\n  --> src\\\\main.rs:63:1\\n   |\\n63 | struct Life {\\n   | ^"
     },
     {
      "round": 0,
      "key": 179,
-     "ms": 22.569,
+     "ms": 21.201,
      "answer": "error: error: expected R_PAREN\\n  --> src\\\\main.rs:60:33\\n   |\\n60 |     xs.iter().filter(|x| **x > f\\n   |                                 ^"
     },
     {
      "round": 0,
      "key": 180,
-     "ms": 18.742,
+     "ms": 21.285,
      "answer": "error: error: expected R_PAREN\\n  --> src\\\\main.rs:60:34\\n   |\\n60 |     xs.iter().filter(|x| **x > fl\\n   |                                  ^"
     },
     {
      "round": 0,
      "key": 181,
-     "ms": 18.872,
+     "ms": 18.158,
      "answer": "error: error: expected R_PAREN\\n  --> src\\\\main.rs:60:35\\n   |\\n60 |     xs.iter().filter(|x| **x > flo\\n   |                                   ^"
     },
     {
      "round": 0,
      "key": 182,
-     "ms": 19.347,
+     "ms": 22.2,
      "answer": "error: error: expected R_PAREN\\n  --> src\\\\main.rs:60:36\\n   |\\n60 |     xs.iter().filter(|x| **x > floo\\n   |                                    ^"
     },
     {
      "round": 0,
      "key": 183,
-     "ms": 20.188,
+     "ms": 22.602,
      "answer": "error: error: expected R_PAREN\\n  --> src\\\\main.rs:60:37\\n   |\\n60 |     xs.iter().filter(|x| **x > floor\\n   |                                     ^"
     },
     {
      "round": 0,
      "key": 184,
-     "ms": 16.866,
+     "ms": 24.574,
      "answer": "error: error: expected SEMICOLON\\n  --> src\\\\main.rs:60:38\\n   |\\n60 |     xs.iter().filter(|x| **x > floor)\\n   |                                      ^"
     },
     {
      "round": 0,
      "key": 185,
-     "ms": 20.299,
+     "ms": 23.205,
      "answer": "error: error: expected field name or number\\n  --> src\\\\main.rs:60:39\\n   |\\n60 |     xs.iter().filter(|x| **x > floor).\\n   |                                       ^"
     },
     {
      "round": 0,
      "key": 186,
-     "ms": 20.56,
+     "ms": 20.641,
      "answer": "error: error: expected SEMICOLON\\n  --> src\\\\main.rs:60:40\\n   |\\n60 |     xs.iter().filter(|x| **x > floor).c\\n   |                                        ^"
     },
     {
      "round": 0,
      "key": 187,
-     "ms": 20.017,
+     "ms": 28.674,
      "answer": "error: error: expected SEMICOLON\\n  --> src\\\\main.rs:60:41\\n   |\\n60 |     xs.iter().filter(|x| **x > floor).co\\n   |                                         ^"
     },
     {
      "round": 0,
      "key": 188,
-     "ms": 18.816,
+     "ms": 21.649,
      "answer": "error: error: expected SEMICOLON\\n  --> src\\\\main.rs:60:42\\n   |\\n60 |     xs.iter().filter(|x| **x > floor).cou\\n   |                                          ^"
     },
     {
      "round": 0,
      "key": 189,
-     "ms": 20.983,
+     "ms": 22.456,
      "answer": "error: error: expected SEMICOLON\\n  --> src\\\\main.rs:60:43\\n   |\\n60 |     xs.iter().filter(|x| **x > floor).coun\\n   |                                           ^"
     },
     {
      "round": 0,
      "key": 190,
-     "ms": 19.721,
+     "ms": 18.506,
      "answer": "error: error: expected SEMICOLON\\n  --> src\\\\main.rs:60:44\\n   |\\n60 |     xs.iter().filter(|x| **x > floor).count\\n   |                                            ^"
     },
     {
      "round": 0,
      "key": 191,
-     "ms": 20.806,
+     "ms": 25.053,
      "answer": "error: error: expected expression\\n  --> src\\\\main.rs:63:1\\n   |\\n63 | struct Life {\\n   | ^"
     },
     {
      "round": 0,
      "key": 192,
-     "ms": 22.491,
+     "ms": 30.031,
      "answer": "error: error: expected SEMICOLON\\n  --> src\\\\main.rs:60:46\\n   |\\n60 |     xs.iter().filter(|x| **x > floor).count()\\n   |                                              ^"
     },
     {
      "round": 0,
      "key": 193,
-     "ms": 17.717,
+     "ms": 22.128,
      "answer": "error: error: expected SEMICOLON\\n  --> src\\\\main.rs:60:46\\n   |\\n60 |     xs.iter().filter(|x| **x > floor).count()\\n   |                                              ^"
     },
     {
      "round": 0,
      "key": 194,
-     "ms": 74.109,
-     "answer": "ok patch=ra-jit\\049b53d3036e6104\\programs\\life\\patch.o functions=10 files=1 ms=71"
+     "ms": 61.052,
+     "answer": "ok patch=ra-jit\\0d868935ef68b949\\programs\\life\\patch.o functions=10 files=1 ms=54"
     },
     {
      "round": 0,
      "key": 195,
-     "ms": 34.002,
-     "answer": "ok patch=ra-jit\\049b53d3036e6104\\programs\\life\\patch.o functions=10 files=1 ms=30"
+     "ms": 29.163,
+     "answer": "ok patch=ra-jit\\0d868935ef68b949\\programs\\life\\patch.o functions=10 files=1 ms=25"
     },
     {
      "round": 0,
      "key": 196,
-     "ms": 15.928,
+     "ms": 24.861,
      "answer": "error: error: expected type\\n   --> src\\\\main.rs:116:15\\n    |\\n116 |         if  < 25 {\\n    |               ^"
     },
     {
      "round": 0,
      "key": 197,
-     "ms": 16.425,
+     "ms": 21.243,
      "answer": "error: error[E0425]: no such value in this scope\\n   --> src\\\\main.rs:116:12\\n    |\\n116 |         if c < 25 {\\n    |            ^"
     },
     {
      "round": 0,
      "key": 198,
-     "ms": 15.858,
+     "ms": 24.685,
      "answer": "error: error[E0425]: no such value in this scope\\n   --> src\\\\main.rs:116:12\\n    |\\n116 |         if co < 25 {\\n    |            ^^"
     },
     {
      "round": 0,
      "key": 199,
-     "ms": 16.421,
+     "ms": 17.637,
      "answer": "error: error[E0425]: no such value in this scope\\n   --> src\\\\main.rs:116:12\\n    |\\n116 |         if cou < 25 {\\n    |            ^^^"
     },
     {
      "round": 0,
      "key": 200,
-     "ms": 15.333,
+     "ms": 21.906,
      "answer": "error: error[E0425]: no such value in this scope\\n   --> src\\\\main.rs:116:12\\n    |\\n116 |         if coun < 25 {\\n    |            ^^^^"
     },
     {
      "round": 0,
      "key": 201,
-     "ms": 15.943,
+     "ms": 25.584,
      "answer": "error: error[E0425]: no such value in this scope\\n   --> src\\\\main.rs:116:12\\n    |\\n116 |         if count < 25 {\\n    |            ^^^^^"
     },
     {
      "round": 0,
      "key": 202,
-     "ms": 15.352,
+     "ms": 21.157,
      "answer": "error: error[E0425]: no such value in this scope\\n   --> src\\\\main.rs:116:12\\n    |\\n116 |         if count_ < 25 {\\n    |            ^^^^^^"
     },
     {
      "round": 0,
      "key": 203,
-     "ms": 17.13,
+     "ms": 18.168,
      "answer": "error: error[E0425]: no such value in this scope\\n   --> src\\\\main.rs:116:12\\n    |\\n116 |         if count_a < 25 {\\n    |            ^^^^^^^"
     },
     {
      "round": 0,
      "key": 204,
-     "ms": 19.277,
+     "ms": 17.908,
      "answer": "error: error[E0425]: no such value in this scope\\n   --> src\\\\main.rs:116:12\\n    |\\n116 |         if count_ab < 25 {\\n    |            ^^^^^^^^"
     },
     {
      "round": 0,
      "key": 205,
-     "ms": 17.579,
+     "ms": 20.666,
      "answer": "error: error[E0425]: no such value in this scope\\n   --> src\\\\main.rs:116:12\\n    |\\n116 |         if count_abo < 25 {\\n    |            ^^^^^^^^^"
     },
     {
      "round": 0,
      "key": 206,
-     "ms": 16.418,
+     "ms": 19.679,
      "answer": "error: error[E0425]: no such value in this scope\\n   --> src\\\\main.rs:116:12\\n    |\\n116 |         if count_abov < 25 {\\n    |            ^^^^^^^^^^"
     },
     {
      "round": 0,
      "key": 207,
-     "ms": 17.445,
+     "ms": 18.46,
      "answer": "error: error[E0308]: expected fn count_above<{unknown}>(&[{unknown}], {unknown}) -> usize, found i32\\n   --> src\\\\main.rs:116:12\\n    |\\n116 |         if count_above < 25 {\\n    |            ^^^^^^^^^"
     },
     {
      "round": 0,
      "key": 208,
-     "ms": 14.163,
+     "ms": 18.276,
      "answer": "error: error: expected type\\n   --> src\\\\main.rs:116:27\\n    |\\n116 |         if count_above( < 25 {\\n    |                           ^"
     },
     {
      "round": 0,
      "key": 209,
-     "ms": 17.456,
+     "ms": 28.986,
      "answer": "error: error: expected type\\n   --> src\\\\main.rs:116:28\\n    |\\n116 |         if count_above(& < 25 {\\n    |                            ^"
     },
     {
      "round": 0,
      "key": 210,
-     "ms": 17.931,
+     "ms": 25.299,
      "answer": "error: error: expected COMMA\\n   --> src\\\\main.rs:116:31\\n    |\\n116 |         if count_above(&s < 25 {\\n    |                               ^"
     },
     {
      "round": 0,
      "key": 211,
-     "ms": 16.257,
+     "ms": 16.643,
      "answer": "error: error: expected COMMA\\n   --> src\\\\main.rs:116:32\\n    |\\n116 |         if count_above(&se < 25 {\\n    |                                ^"
     },
     {
      "round": 0,
      "key": 212,
-     "ms": 16.958,
+     "ms": 21.162,
      "answer": "error: error: expected COMMA\\n   --> src\\\\main.rs:116:33\\n    |\\n116 |         if count_above(&sel < 25 {\\n    |                                 ^"
     },
     {
      "round": 0,
      "key": 213,
-     "ms": 17.133,
+     "ms": 22.829,
      "answer": "error: error: expected COMMA\\n   --> src\\\\main.rs:116:34\\n    |\\n116 |         if count_above(&self < 25 {\\n    |                                  ^"
     },
     {
      "round": 0,
      "key": 214,
-     "ms": 17.707,
+     "ms": 26.634,
      "answer": "error: error: expected field name or number\\n   --> src\\\\main.rs:116:30\\n    |\\n116 |         if count_above(&self. < 25 {\\n    |                              ^"
     },
     {
      "round": 0,
      "key": 215,
-     "ms": 17.912,
+     "ms": 19.515,
      "answer": "error: error: expected COMMA\\n   --> src\\\\main.rs:116:36\\n    |\\n116 |         if count_above(&self.a < 25 {\\n    |                                    ^"
     },
     {
      "round": 0,
      "key": 216,
-     "ms": 18.104,
+     "ms": 14.128,
      "answer": "error: error: expected COMMA\\n   --> src\\\\main.rs:116:37\\n    |\\n116 |         if count_above(&self.ag < 25 {\\n    |                                     ^"
     },
     {
      "round": 0,
      "key": 217,
-     "ms": 16.257,
+     "ms": 15.96,
      "answer": "error: error: expected COMMA\\n   --> src\\\\main.rs:116:38\\n    |\\n116 |         if count_above(&self.age < 25 {\\n    |                                      ^"
     },
     {
      "round": 0,
      "key": 218,
-     "ms": 15.698,
+     "ms": 14.47,
      "answer": "error: error: expected type\\n   --> src\\\\main.rs:116:37\\n    |\\n116 |         if count_above(&self.age, < 25 {\\n    |                                     ^"
     },
     {
      "round": 0,
      "key": 219,
-     "ms": 15.7,
+     "ms": 20.736,
      "answer": "error: error: expected type\\n   --> src\\\\main.rs:116:38\\n    |\\n116 |         if count_above(&self.age,  < 25 {\\n    |                                      ^"
     },
     {
      "round": 0,
      "key": 220,
-     "ms": 17.531,
+     "ms": 27.425,
      "answer": "error: error: expected COMMA\\n   --> src\\\\main.rs:116:41\\n    |\\n116 |         if count_above(&self.age, 0 < 25 {\\n    |                                         ^"
     },
     {
      "round": 0,
      "key": 221,
-     "ms": 43.193,
-     "answer": "ok patch=ra-jit\\049b53d3036e6104\\programs\\life\\patch.o functions=26 files=1 ms=40"
+     "ms": 34.562,
+     "answer": "ok patch=ra-jit\\0d868935ef68b949\\programs\\life\\patch.o functions=26 files=1 ms=31"
     },
     {
      "round": 0,
      "key": 222,
-     "ms": 18.872,
+     "ms": 23.537,
      "answer": "error: error: expected a block\\n  --> src\\\\main.rs:38:6\\n   |\\n38 |     } else {\\n   |      ^"
     },
     {
      "round": 0,
      "key": 223,
-     "ms": 532.65,
+     "ms": 20.632,
      "answer": "error: error: expected a block\\n  --> src\\\\main.rs:38:6\\n   |\\n38 |     } else {\\n   |      ^"
     },
     {
      "round": 0,
+     "key": 224,
+     "ms": 17.503,
+     "answer": "error: error: expected a block\\n  --> src\\\\main.rs:38:6\\n   |\\n38 |     } else {\\n   |      ^"
+    },
+    {
+     "round": 0,
+     "key": 225,
+     "ms": 16.924,
+     "answer": "error: error[E0308]: expected bool, found u32\\n  --> src\\\\main.rs:36:25\\n   |\\n36 |     } else if n == 3 || n  {\\n   |                         ^"
+    },
+    {
+     "round": 0,
+     "key": 226,
+     "ms": 21.141,
+     "answer": "error: error[E0308]: expected bool, found u32\\n  --> src\\\\main.rs:36:25\\n   |\\n36 |     } else if n == 3 || n {\\n   |                         ^"
+    },
+    {
+     "round": 0,
+     "key": 227,
+     "ms": 18.081,
+     "answer": "error: error: expected a block\\n  --> src\\\\main.rs:38:6\\n   |\\n38 |     } else {\\n   |      ^"
+    },
+    {
+     "round": 0,
+     "key": 228,
+     "ms": 19.305,
+     "answer": "error: error: expected a block\\n  --> src\\\\main.rs:38:6\\n   |\\n38 |     } else {\\n   |      ^"
+    },
+    {
+     "round": 0,
+     "key": 229,
+     "ms": 20.732,
+     "answer": "error: error: expected a block\\n  --> src\\\\main.rs:38:6\\n   |\\n38 |     } else {\\n   |      ^"
+    },
+    {
+     "round": 0,
+     "key": 230,
+     "ms": 33.877,
+     "answer": "ok patch=ra-jit\\0d868935ef68b949\\programs\\life\\patch.o functions=25 files=1 ms=27"
+    },
+    {
+     "round": 0,
      "key": 231,
-     "ms": 32.609,
-     "answer": "ok patch=ra-jit\\049b53d3036e6104\\programs\\life\\patch.o functions=25 files=1 ms=30"
+     "ms": 25.585,
+     "answer": "ok patch=ra-jit\\0d868935ef68b949\\programs\\life\\patch.o functions=25 files=1 ms=23"
     },
     {
      "round": 0,
      "key": 232,
-     "ms": 33.723,
-     "answer": "ok patch=ra-jit\\049b53d3036e6104\\programs\\life\\patch.o functions=25 files=1 ms=30"
+     "ms": 32.043,
+     "answer": "ok patch=ra-jit\\0d868935ef68b949\\programs\\life\\patch.o functions=25 files=1 ms=26"
     },
     {
      "round": 0,
      "key": 233,
-     "ms": 33.959,
-     "answer": "ok patch=ra-jit\\049b53d3036e6104\\programs\\life\\patch.o functions=25 files=1 ms=31"
+     "ms": 33.505,
+     "answer": "ok patch=ra-jit\\0d868935ef68b949\\programs\\life\\patch.o functions=25 files=1 ms=25"
     },
     {
      "round": 0,
      "key": 234,
-     "ms": 836.467,
-     "answer": "ok patch=ra-jit\\049b53d3036e6104\\programs\\life\\patch.o functions=25 files=1 ms=493"
+     "ms": 33.386,
+     "answer": "ok patch=ra-jit\\0d868935ef68b949\\programs\\life\\patch.o functions=25 files=1 ms=27"
+    },
+    {
+     "round": 0,
+     "key": 235,
+     "ms": 25.105,
+     "answer": "ok patch=ra-jit\\0d868935ef68b949\\programs\\life\\patch.o functions=25 files=1 ms=23"
+    },
+    {
+     "round": 0,
+     "key": 236,
+     "ms": 27.831,
+     "answer": "ok patch=ra-jit\\0d868935ef68b949\\programs\\life\\patch.o functions=25 files=1 ms=24"
+    },
+    {
+     "round": 0,
+     "key": 237,
+     "ms": 27.017,
+     "answer": "error: error: Missing digits after the integer base prefix\\n  --> src\\\\main.rs:49:9\\n   |\\n49 |         0x\\n   |         ^"
+    },
+    {
+     "round": 0,
+     "key": 238,
+     "ms": 33.035,
+     "answer": "ok patch=ra-jit\\0d868935ef68b949\\programs\\life\\patch.o functions=25 files=1 ms=26"
+    },
+    {
+     "round": 0,
+     "key": 239,
+     "ms": 25.111,
+     "answer": "ok patch=ra-jit\\0d868935ef68b949\\programs\\life\\patch.o functions=25 files=1 ms=23"
+    },
+    {
+     "round": 0,
+     "key": 240,
+     "ms": 27.3,
+     "answer": "ok patch=ra-jit\\0d868935ef68b949\\programs\\life\\patch.o functions=25 files=1 ms=24"
+    },
+    {
+     "round": 0,
+     "key": 241,
+     "ms": 25.846,
+     "answer": "ok patch=ra-jit\\0d868935ef68b949\\programs\\life\\patch.o functions=25 files=1 ms=23"
+    },
+    {
+     "round": 0,
+     "key": 242,
+     "ms": 28.579,
+     "answer": "ok patch=ra-jit\\0d868935ef68b949\\programs\\life\\patch.o functions=25 files=1 ms=24"
     },
     {
      "round": 0,
      "key": 243,
-     "ms": 35.9,
-     "answer": "ok patch=ra-jit\\049b53d3036e6104\\programs\\life\\patch.o functions=24 files=1 ms=32"
+     "ms": 24.978,
+     "answer": "ok patch=ra-jit\\0d868935ef68b949\\programs\\life\\patch.o functions=24 files=1 ms=24"
     },
     {
      "round": 0,
      "key": 244,
-     "ms": 15.877,
+     "ms": 23.144,
      "answer": "error: error: expected type\\n   --> src\\\\main.rs:116:15\\n    |\\n116 |         if  < 25 {\\n    |               ^"
     },
     {
      "round": 0,
      "key": 245,
-     "ms": 16.038,
+     "ms": 25.097,
      "answer": "error: error[E0425]: no such value in this scope\\n   --> src\\\\main.rs:116:12\\n    |\\n116 |         if s < 25 {\\n    |            ^"
     },
     {
      "round": 0,
      "key": 246,
-     "ms": 15.486,
+     "ms": 23.448,
      "answer": "error: error[E0425]: no such value in this scope\\n   --> src\\\\main.rs:116:12\\n    |\\n116 |         if se < 25 {\\n    |            ^^"
     },
     {
      "round": 0,
      "key": 247,
-     "ms": 15.245,
+     "ms": 17.216,
      "answer": "error: error[E0425]: no such value in this scope\\n   --> src\\\\main.rs:116:12\\n    |\\n116 |         if sel < 25 {\\n    |            ^^^"
     },
     {
      "round": 0,
      "key": 248,
-     "ms": 16.334,
+     "ms": 23.192,
      "answer": "error: error[E0382]: borrow of moved value: `*self`\\n   --> src\\\\main.rs:117:13\\n    |\\n117 |             self.reseed();\\n    |             ^^^^"
     },
     {
      "round": 0,
      "key": 249,
-     "ms": 16.083,
+     "ms": 15.955,
      "answer": "error: error: expected field name or number\\n   --> src\\\\main.rs:116:17\\n    |\\n116 |         if self. < 25 {\\n    |                 ^"
     },
     {
      "round": 0,
      "key": 250,
-     "ms": 14.114,
+     "ms": 21.167,
      "answer": "error: error[E0559]: no field `a` on type `&mut Life`\\n   --> src\\\\main.rs:116:17\\n    |\\n116 |         if self.a < 25 {\\n    |                 ^"
     },
     {
      "round": 0,
      "key": 251,
-     "ms": 16.573,
+     "ms": 23.028,
      "answer": "error: error[E0559]: no field `ag` on type `&mut Life`\\n   --> src\\\\main.rs:116:17\\n    |\\n116 |         if self.ag < 25 {\\n    |                 ^^"
     },
     {
      "round": 0,
      "key": 252,
-     "ms": 15.421,
+     "ms": 19.861,
      "answer": "error: error[E0308]: expected Vec<u32, {unknown}>, found i32\\n   --> src\\\\main.rs:116:23\\n    |\\n116 |         if self.age < 25 {\\n    |                       ^^"
     },
     {
      "round": 0,
      "key": 253,
-     "ms": 16.043,
+     "ms": 20.735,
      "answer": "error: error: expected field name or number\\n   --> src\\\\main.rs:116:21\\n    |\\n116 |         if self.age. < 25 {\\n    |                     ^"
     },
     {
      "round": 0,
      "key": 254,
-     "ms": 15.881,
+     "ms": 22.677,
      "answer": "error: error[E0559]: no field `i` on type `Vec<u32, Global>`\\n   --> src\\\\main.rs:116:21\\n    |\\n116 |         if self.age.i < 25 {\\n    |                     ^"
     },
     {
      "round": 0,
      "key": 255,
-     "ms": 16.405,
+     "ms": 24.447,
      "answer": "error: error[E0559]: no field `it` on type `Vec<u32, Global>`\\n   --> src\\\\main.rs:116:21\\n    |\\n116 |         if self.age.it < 25 {\\n    |                     ^^"
     },
     {
      "round": 0,
      "key": 256,
-     "ms": 17.983,
+     "ms": 21.437,
      "answer": "error: error[E0559]: no field `ite` on type `Vec<u32, Global>`\\n   --> src\\\\main.rs:116:21\\n    |\\n116 |         if self.age.ite < 25 {\\n    |                     ^^^"
     },
     {
      "round": 0,
      "key": 257,
-     "ms": 59.514,
+     "ms": 63.277,
      "answer": "error: error[E0559]: no field `iter` on type `Vec<u32, Global>`, but a method with a similar name exists\\n   --> src\\\\main.rs:116:21\\n    |\\n116 |         if self.age.iter < 25 {\\n    |               "
     },
     {
      "round": 0,
      "key": 258,
-     "ms": 16.36,
+     "ms": 16.059,
      "answer": "error: error: expected type\\n   --> src\\\\main.rs:116:29\\n    |\\n116 |         if self.age.iter( < 25 {\\n    |                             ^"
     },
     {
      "round": 0,
      "key": 259,
-     "ms": 251.647,
+     "ms": 243.236,
      "answer": "cargo: `step` is not compiled by ra-jit and rustc's copy is from before the edit: unsupported: expected scalar, got Iter<'{region error}, u32> (no-rustc E, #85)"
     },
     {
      "round": 0,
      "key": 262,
-     "ms": 19.665,
+     "ms": 14.655,
      "answer": "error: error[E0559]: no field `fi` on type `Iter<'_, u32>`\\n   --> src\\\\main.rs:116:28\\n    |\\n116 |         if self.age.iter().fi < 25 {\\n    |                            ^^"
     },
     {
      "round": 0,
      "key": 263,
-     "ms": 15.888,
+     "ms": 14.521,
      "answer": "error: error[E0559]: no field `fil` on type `Iter<'_, u32>`\\n   --> src\\\\main.rs:116:28\\n    |\\n116 |         if self.age.iter().fil < 25 {\\n    |                            ^^^"
     },
     {
      "round": 0,
      "key": 264,
-     "ms": 16.157,
+     "ms": 23.725,
      "answer": "error: error[E0559]: no field `filt` on type `Iter<'_, u32>`\\n   --> src\\\\main.rs:116:28\\n    |\\n116 |         if self.age.iter().filt < 25 {\\n    |                            ^^^^"
     },
     {
      "round": 0,
      "key": 265,
-     "ms": 14.56,
+     "ms": 22.837,
      "answer": "error: error[E0559]: no field `filte` on type `Iter<'_, u32>`\\n   --> src\\\\main.rs:116:28\\n    |\\n116 |         if self.age.iter().filte < 25 {\\n    |                            ^^^^^"
     },
     {
      "round": 0,
      "key": 266,
-     "ms": 16.957,
+     "ms": 15.007,
      "answer": "error: error[E0061]: expected 1 argument, found 0\\n   --> src\\\\main.rs:116:12\\n    |\\n116 |         if self.age.iter().filter < 25 {\\n    |            ^^^^^^^^^^^^^^^^^^^^^^\\n\\nerror[E0559]: no field "
     },
     {
      "round": 0,
      "key": 267,
-     "ms": 18.567,
+     "ms": 19.7,
      "answer": "error: error: expected type\\n   --> src\\\\main.rs:116:38\\n    |\\n116 |         if self.age.iter().filter( < 25 {\\n    |                                      ^"
     },
     {
      "round": 0,
      "key": 268,
-     "ms": 16.134,
+     "ms": 15.52,
      "answer": "error: error: expected type\\n   --> src\\\\main.rs:116:39\\n    |\\n116 |         if self.age.iter().filter(| < 25 {\\n    |                                       ^"
     },
     {
      "round": 0,
      "key": 269,
-     "ms": 17.502,
+     "ms": 21.985,
      "answer": "error: error: expected `,`\\n   --> src\\\\main.rs:116:37\\n    |\\n116 |         if self.age.iter().filter(|a < 25 {\\n    |                                     ^"
     },
     {
      "round": 0,
      "key": 270,
-     "ms": 18.833,
+     "ms": 23.779,
      "answer": "error: error: expected type\\n   --> src\\\\main.rs:116:41\\n    |\\n116 |         if self.age.iter().filter(|a| < 25 {\\n    |                                         ^"
     },
     {
      "round": 0,
      "key": 271,
-     "ms": 17.79,
+     "ms": 14.43,
      "answer": "error: error: expected type\\n   --> src\\\\main.rs:116:42\\n    |\\n116 |         if self.age.iter().filter(|a|  < 25 {\\n    |                                          ^"
     },
     {
      "round": 0,
      "key": 272,
-     "ms": 19.124,
+     "ms": 25.417,
      "answer": "error: error: expected type\\n   --> src\\\\main.rs:116:43\\n    |\\n116 |         if self.age.iter().filter(|a| * < 25 {\\n    |                                           ^"
     },
     {
      "round": 0,
      "key": 273,
-     "ms": 16.852,
+     "ms": 14.34,
      "answer": "error: error: expected type\\n   --> src\\\\main.rs:116:44\\n    |\\n116 |         if self.age.iter().filter(|a| ** < 25 {\\n    |                                            ^"
     },
     {
      "round": 0,
      "key": 274,
-     "ms": 18.214,
+     "ms": 18.525,
      "answer": "error: error: expected COMMA\\n   --> src\\\\main.rs:116:47\\n    |\\n116 |         if self.age.iter().filter(|a| **s < 25 {\\n    |                                               ^"
     },
     {
      "round": 0,
      "key": 275,
-     "ms": 19.104,
+     "ms": 22.71,
      "answer": "error: error: expected type\\n   --> src\\\\main.rs:116:44\\n    |\\n116 |         if self.age.iter().filter(|a| ** < 25 {\\n    |                                            ^"
     },
     {
      "round": 0,
      "key": 276,
-     "ms": 18.342,
+     "ms": 26.701,
      "answer": "error: error: expected COMMA\\n   --> src\\\\main.rs:116:47\\n    |\\n116 |         if self.age.iter().filter(|a| **a < 25 {\\n    |                                               ^"
     },
     {
      "round": 0,
      "key": 277,
-     "ms": 15.861,
+     "ms": 24.918,
      "answer": "error: error: expected COMMA\\n   --> src\\\\main.rs:116:48\\n    |\\n116 |         if self.age.iter().filter(|a| **a  < 25 {\\n    |                                                ^"
     },
     {
      "round": 0,
      "key": 278,
-     "ms": 17.543,
+     "ms": 17.014,
      "answer": "error: error: expected type\\n   --> src\\\\main.rs:116:47\\n    |\\n116 |         if self.age.iter().filter(|a| **a > < 25 {\\n    |                                               ^"
     },
     {
      "round": 0,
      "key": 279,
-     "ms": 17.001,
+     "ms": 23.039,
      "answer": "error: error: expected type\\n   --> src\\\\main.rs:116:48\\n    |\\n116 |         if self.age.iter().filter(|a| **a >  < 25 {\\n    |                                                ^"
     },
     {
      "round": 0,
      "key": 280,
-     "ms": 18.085,
+     "ms": 21.872,
      "answer": "error: error: expected COMMA\\n   --> src\\\\main.rs:116:51\\n    |\\n116 |         if self.age.iter().filter(|a| **a > 0 < 25 {\\n    |                                                   ^"
     },
     {
      "round": 0,
      "key": 281,
-     "ms": 175.604,
+     "ms": 178.931,
      "answer": "cargo: `step` is not compiled by ra-jit and rustc's copy is from before the edit: unsupported: expected scalar, got Filter<Iter<'{region error}, u32>, Closure(InternedClosureId(InternedClosureId { key"
     },
     {
      "round": 0,
      "key": 283,
-     "ms": 17.762,
+     "ms": 15.727,
      "answer": "error: error[E0559]: no field `c` on type `Filter<Iter<'_, u32>, impl FnMut(&&u32) -> bool>`\\n   --> src\\\\main.rs:116:48\\n    |\\n116 |         if self.age.iter().filter(|a| **a > 0).c < 25 {\\n    |   "
     },
     {
      "round": 0,
      "key": 284,
-     "ms": 15.394,
+     "ms": 15.925,
      "answer": "error: error[E0559]: no field `co` on type `Filter<Iter<'_, u32>, impl FnMut(&&u32) -> bool>`\\n   --> src\\\\main.rs:116:48\\n    |\\n116 |         if self.age.iter().filter(|a| **a > 0).co < 25 {\\n    | "
     },
     {
      "round": 0,
      "key": 285,
-     "ms": 16.088,
+     "ms": 15.384,
      "answer": "error: error[E0559]: no field `cou` on type `Filter<Iter<'_, u32>, impl FnMut(&&u32) -> bool>`\\n   --> src\\\\main.rs:116:48\\n    |\\n116 |         if self.age.iter().filter(|a| **a > 0).cou < 25 {\\n    "
     },
     {
      "round": 0,
      "key": 286,
-     "ms": 17.644,
+     "ms": 25.35,
      "answer": "error: error[E0559]: no field `coun` on type `Filter<Iter<'_, u32>, impl FnMut(&&u32) -> bool>`\\n   --> src\\\\main.rs:116:48\\n    |\\n116 |         if self.age.iter().filter(|a| **a > 0).coun < 25 {\\n  "
     },
     {
      "round": 0,
      "key": 287,
-     "ms": 16.531,
+     "ms": 18.208,
      "answer": "error: error[E0559]: no field `count` on type `Filter<Iter<'_, u32>, impl FnMut(&&u32) -> bool>`, but a method with a similar name exists\\n   --> src\\\\main.rs:116:48\\n    |\\n116 |         if self.age."
     },
     {
      "round": 0,
      "key": 288,
-     "ms": 17.153,
+     "ms": 15.001,
      "answer": "error: error: expected type\\n   --> src\\\\main.rs:116:57\\n    |\\n116 |         if self.age.iter().filter(|a| **a > 0).count( < 25 {\\n    |                                                         ^"
     },
     {
      "round": 0,
      "key": 289,
-     "ms": 35.456,
-     "answer": "ok patch=ra-jit\\049b53d3036e6104\\programs\\life\\patch.o functions=8 files=1 ms=32"
+     "ms": 28.275,
+     "answer": "ok patch=ra-jit\\0d868935ef68b949\\programs\\life\\patch.o functions=8 files=1 ms=25"
     },
     {
      "round": 0,
      "key": 290,
-     "ms": 28.579,
-     "answer": "ok patch=ra-jit\\049b53d3036e6104\\programs\\life\\patch.o functions=1 files=1 ms=26"
+     "ms": 27.98,
+     "answer": "ok patch=ra-jit\\0d868935ef68b949\\programs\\life\\patch.o functions=1 files=1 ms=25"
     }
    ]
   },
@@ -3381,104 +3478,104 @@
     {
      "edit": "color: an old cell's blue",
      "kind": "body",
-     "reply": 33.575,
-     "answer": "ok patch=ra-jit",
+     "reply": 25.862,
+     "answer": "ok patch=ra-ji",
      "outcome": "restart",
      "why": "the edit changes `struct Life`, which the running program may have values of",
-     "restart": 1354.068,
-     "cargo run": 2752.283
+     "restart": 190.736,
+     "cargo run": 1379.887
     },
     {
      "edit": "rand: another increment",
      "kind": "body",
-     "reply": 34.61,
-     "answer": "ok patch=ra-jit",
+     "reply": 25.547,
+     "answer": "ok patch=ra-ji",
      "outcome": "applied",
-     "total": 41.745
+     "total": 26.343
     },
     {
      "edit": "Life: a field added",
      "kind": "type",
-     "reply": 66.975,
-     "answer": "ok patch=ra-jit",
+     "reply": 48.314,
+     "answer": "ok patch=ra-ji",
      "outcome": "restart",
      "why": "the edit changes `struct Life`, which the running program may have values of",
-     "restart": 2312.269,
-     "cargo run": 3425.173
+     "restart": 260.228,
+     "cargo run": 1526.269
     },
     {
      "edit": "step: counts births",
      "kind": "body",
-     "reply": 43.144,
-     "answer": "ok patch=ra-jit",
+     "reply": 35.657,
+     "answer": "ok patch=ra-ji",
      "outcome": "applied",
-     "total": 72.272
+     "total": 35.844
     },
     {
      "edit": "reseed: denser",
      "kind": "body",
-     "reply": 42.066,
-     "answer": "ok patch=ra-jit",
+     "reply": 32.986,
+     "answer": "ok patch=ra-ji",
      "outcome": "applied",
-     "total": 54.135
+     "total": 34.463
     },
     {
      "edit": "step: reseed sooner",
      "kind": "body",
-     "reply": 44.107,
-     "answer": "ok patch=ra-jit",
+     "reply": 34.349,
+     "answer": "ok patch=ra-ji",
      "outcome": "applied",
-     "total": 54.122
+     "total": 35.863
     },
     {
      "edit": "Stats: a new struct",
      "kind": "type",
-     "reply": 43.65,
-     "answer": "ok patch=ra-jit",
+     "reply": 33.062,
+     "answer": "ok patch=ra-ji",
      "outcome": "applied",
-     "total": 53.231
+     "total": 33.249
     },
     {
      "edit": "color: a younger threshold",
      "kind": "body",
-     "reply": 44.618,
-     "answer": "ok patch=ra-jit",
+     "reply": 32.017,
+     "answer": "ok patch=ra-ji",
      "outcome": "applied",
-     "total": 53.697
+     "total": 32.748
     },
     {
      "edit": "neighbours: the same, written out",
      "kind": "body",
-     "reply": 42.731,
-     "answer": "ok patch=ra-jit",
+     "reply": 33.549,
+     "answer": "ok patch=ra-ji",
      "outcome": "applied",
-     "total": 53.947
+     "total": 34.149
     },
     {
      "edit": "Life: two fields swapped",
      "kind": "type",
-     "reply": 53.83,
-     "answer": "ok patch=ra-jit",
+     "reply": 36.289,
+     "answer": "ok patch=ra-ji",
      "outcome": "restart",
      "why": "the edit changes `struct Life`, which the running program may have values of",
-     "restart": 2082.497,
-     "cargo run": 2836.6
+     "restart": 244.326,
+     "cargo run": 1534.412
     },
     {
      "edit": "color: blue as it was",
      "kind": "body",
-     "reply": 40.186,
-     "answer": "ok patch=ra-jit",
+     "reply": 33.472,
+     "answer": "ok patch=ra-ji",
      "outcome": "applied",
-     "total": 57.038
+     "total": 33.831
     },
     {
      "edit": "reseed: as it was",
      "kind": "body",
-     "reply": 42.255,
-     "answer": "ok patch=ra-jit",
+     "reply": 32.153,
+     "answer": "ok patch=ra-ji",
      "outcome": "applied",
-     "total": 53.407
+     "total": 33.547
     }
    ]
   }
