@@ -7451,8 +7451,7 @@ fn process_wide() {
     hir_def::nameres::EXPAND_BUILTIN_DERIVES.store(true, std::sync::atomic::Ordering::Relaxed);
     project_model::SYSROOT_AS_BUILT.store(true, std::sync::atomic::Ordering::Relaxed);
     ra_jit_expand::install();
-    let server = std::env::var_os(cargo::own_macro::SERVER).map(PathBuf::from);
-    let server = server.and_then(|it| std::env::current_dir().ok().map(|cwd| cwd.join(it)));
+    let server = cargo::own_macro::server();
     if let Some(Ok(server)) = server.as_deref().and_then(Path::to_str).map(AbsPathBuf::try_from) {
         load_cargo::serve_listed_with(server);
     }
