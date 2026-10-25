@@ -161,7 +161,8 @@ pub(crate) fn module(
         Some(it) if it.parent().is_some_and(|it| it.ends_with("tests")) => "IntegrationTest",
         _ => "Unknown",
     };
-    Some(Harness { text: text(&tests, test_type) })
+    let tested = krate.cfg(db).check_atom(&cfg::CfgAtom::Flag(intern::sym::test));
+    Some(Harness { text: text(&tests, test_type, tested) })
 }
 
 /// The path of a test from its crate's root, which joined by `::` is the name libtest shows.
@@ -190,8 +191,13 @@ pub(crate) fn name(
     Some(path_of(db, function, krate.edition(db))?.join("::"))
 }
 
-fn text(tests: &[Test], test_type: &str) -> String {
+/// `tested` is whether the crate has `cfg(test)`, which the module then asks for: a library
+/// built with it for its unit tests has its root file in common with the library others link.
+fn text(tests: &[Test], test_type: &str, tested: bool) -> String {
     let mut text = String::from(MARK);
+    if tested {
+        text.push_str("#[cfg(test)]\n");
+    }
     text.push_str("#[doc(hidden)]\n#[allow(warnings, clippy::all)]\npub mod ");
     text.push_str(MODULE);
     text.push_str(
