@@ -158,6 +158,14 @@ jobs:
         uses: ./.github/actions/apt
         with:
           packages: ${{ matrix.part == 'buildmodel' && 'gcc-aarch64-linux-gnu musl-tools qemu-user' || 'valgrind gdb' }}
+      # `cargo ra-jit test` sandboxes tests in namespaces a user makes, which Ubuntu's AppArmor
+      # keeps users from making unless told otherwise (`testselect.py` needs the sandbox).
+      - name: user namespaces
+        if: runner.os == 'Linux'
+        run: |
+          if [ -e /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]; then
+            sudo sysctl kernel.apparmor_restrict_unprivileged_userns=0
+          fi
       # `debuginfo.py` has perf unwind what ra-jit built, which it says it did not run where
       # there is no perf or the kernel does not let this user sample.
       - name: perf
