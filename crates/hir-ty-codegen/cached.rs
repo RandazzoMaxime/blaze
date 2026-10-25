@@ -349,17 +349,38 @@ impl LlvmEntry {
     }
 }
 
+/// What a debugger is told of a function, which the entry of it kept has.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Told {
+    Nothing,
+    /// Its lines alone: no variables, nor the scopes that hold them.
+    Lines,
+    /// Its variables and their types too.
+    Variables,
+}
+
+impl Told {
+    pub(super) fn of(debug: bool, variables: bool) -> Told {
+        match (debug, variables) {
+            (false, _) => Told::Nothing,
+            (true, false) => Told::Lines,
+            (true, true) => Told::Variables,
+        }
+    }
+}
+
 impl Entry {
     /// The key of the entry for `name`. The store tells the entries of this build of the
     /// compiler from another's.
     ///
-    /// An entry kept with what a debugger is told is not the one kept without.
+    /// An entry kept with what a debugger is told is not the one kept without, nor one kept
+    /// with its lines alone the one kept with its variables too.
     ///
     /// Whether the code checks arithmetic for overflow is in the name.
     ///
     /// `program` is the one program the entry is of, where what the calls of an entry reach
     /// is not the same in every program that has a function of its name.
-    pub(super) fn key(name: &str, debug: bool, program: Option<&[u8; 32]>) -> Option<[u8; KEY]> {
+    pub(super) fn key(name: &str, debug: Told, program: Option<&[u8; 32]>) -> Option<[u8; KEY]> {
         let mut hasher = Sha256::new();
         // Each with its length, so that no two lists of them are the same bytes.
         let mut field = |bytes: &[u8]| {
@@ -381,7 +402,11 @@ impl Entry {
         if super::backend::frame_pointers() {
             field(b"frame pointers");
         }
-        field(&[debug as u8]);
+        field(&[(debug != Told::Nothing) as u8]);
+        // The keys of the other two stay what they were.
+        if debug == Told::Lines {
+            field(b"lines alone");
+        }
         field(name.as_bytes());
         Some(hasher.finalize().into())
     }
@@ -516,8 +541,8 @@ impl Entry {
 /// The entries of the store that one program was asked about.
 pub(super) struct Entries {
     store: &'static Store,
-    /// Whether the entries asked for are the ones with what a debugger is told.
-    debug: bool,
+    /// What a debugger is told by the entries asked for.
+    debug: Told,
     /// The one program the entries are of, when they are not of any: see [`Entry::key`].
     program: Option<[u8; 32]>,
     /// Where cargo keeps the sources it fetched on this machine.
@@ -698,7 +723,7 @@ struct Visit {
 impl Entries {
     pub(super) fn new(
         store: &'static Store,
-        debug: bool,
+        debug: Told,
         program: Option<[u8; 32]>,
         cargo_home: Option<String>,
         library: Option<super::LibrarySources>,
@@ -1046,10 +1071,15 @@ mod tests {
         assert_eq!(one.to_string().len(), 64);
         assert_ne!(one.to_string(), other.to_string());
         let key = |name: &str, debug| Entry::key(name, debug, None).unwrap();
-        let named = |id: &super::super::ContentId| key(&format!("~{id}:run"), false);
+        let named = |id: &super::super::ContentId| key(&format!("~{id}:run"), Told::Nothing);
         assert_ne!(named(&one), named(&other));
         let name = format!("~{one}:run");
-        let keys = [key(&name, false), key(&name, true), key(&format!("{name}\0"), false)];
+        let keys = [
+            key(&name, Told::Nothing),
+            key(&name, Told::Lines),
+            key(&name, Told::Variables),
+            key(&format!("{name}\0"), Told::Nothing),
+        ];
         let distinct: std::collections::HashSet<_> = keys.iter().collect();
         assert_eq!(distinct.len(), keys.len());
     }
