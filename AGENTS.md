@@ -51,3 +51,13 @@ How to build, test and change ra-jit, including the vendored rust-analyzer, is
   workaround or patch from an issue, review or discussion gets a
   `Co-authored-by: Name <id+login@users.noreply.github.com>` trailer for each of them, and names
   where it came from: [docs/contributing.md](docs/contributing.md#credit).
+- **The site's narration is a podcast script, not the article read aloud.** Each page in
+  `site/content/` has its own spoken version, written for the ear: an `Intro`, one `Say` per
+  top-level Section or Issue (a `Say` on a container replaces its whole subtree; a long section
+  splits into `Say`s on its sub-blocks, the rest `Silent`) and an `Outro`. Talk to the listener,
+  say why before what, describe code by what it shows and never read symbols out, keep each `Say`
+  under about 90 seconds, and steer the voice with Fish Audio Drama 3 directions (`[warm]`,
+  `[curious]`, `[pause]`, `[laughs]`, `<emphasis>...</emphasis>`). It must stay accurate to the
+  article: a change to a page changes its script in the same commit. Pronunciations go in
+  `site/audio/lexicon.toml`, which never touches text inside `[ ]`:
+  [site/audio/README.md](site/audio/README.md).
