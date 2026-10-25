@@ -122,7 +122,7 @@ pub(super) fn written_items(
         }
     }
     let item = |body: DefWithBodyId, places: bool| {
-        let (file, id, hash, at) = *body_print(db, body);
+        let (file, id, hash, at) = (*body_print(db, body))?;
         let file = names.file_path(file.file_id(db))?;
         Some(WrittenItem { file, id, hash, at: places.then_some(at) })
     };
