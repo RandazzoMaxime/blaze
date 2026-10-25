@@ -12,24 +12,30 @@ use std::{
 
 use anyhow::Context as _;
 use cargo_metadata::{Metadata, Package};
-use serde::Deserialize;
+
+use crate::plan::Plan;
 
 use super::{
     FAILED,
     cli::{Invocation, Subcommand},
     run, say,
-    state::{
-        as_built, cargo_path, configured_env, library_path, place, run_env, sysroot_libraries,
-    },
+    state::{as_built, configured_env, library_path, place, run_env, sysroot_libraries},
 };
 
 /// The setting that has a build from nothing be blaze's whole build.
 const VARIABLE: &str = "RA_JIT_WHOLE_BUILD";
 
-/// Whether the build `asked` for, from nothing, is blaze's whole build.
+/// Whether the build `asked` for, from nothing, is blaze's whole build: `build` or `run`, of
+/// the programs a build picks by default or one named with `--bin` or `--example`, for one
+/// target at most.
 pub(super) fn asked_for(asked: &Invocation) -> bool {
     let on = std::env::var_os(VARIABLE).is_some_and(|it| !it.is_empty() && it != "0");
+    let flags = &asked.flags;
+    let named = flags.bin.is_some() || flags.example.is_some();
     on && matches!(asked.subcommand, Subcommand::Build | Subcommand::Run)
+        && (!flags.selects_targets || named)
+        && !flags.cargos_plan
+        && flags.targets.len() <= 1
 }
 
 /// A program of the build, as cargo plans it.
@@ -219,82 +225,47 @@ fn ran(asked: &Invocation, cwd: &Path, programs: &[Program]) -> anyhow::Result<i
 
 /// The programs `asked` builds, as cargo's unit graph has them: each executable root.
 fn planned(asked: &Invocation, cwd: &Path, metadata: &Metadata) -> anyhow::Result<Vec<Program>> {
-    let mut cargo = Command::new(cargo_path());
-    cargo.args(["build", "--unit-graph", "-Z", "unstable-options"]).args(&asked.build_args);
-    // The unit graph is not stable yet.
-    cargo.env("RUSTC_BOOTSTRAP", "1").current_dir(cwd).stdin(Stdio::null());
-    crate::answers::ready_cargo(&mut cargo);
-    let output = cargo.output().context("running `cargo build --unit-graph`")?;
-    anyhow::ensure!(
-        output.status.success(),
-        "`cargo build --unit-graph` failed: {}",
-        String::from_utf8_lossy(&output.stderr).trim()
-    );
-    let graph: Graph =
-        serde_json::from_slice(&output.stdout).context("reading cargo's unit graph")?;
+    let manifest = asked.flags.manifest_path.as_ref().map(|it| cwd.join(it));
+    let dir = manifest.as_deref().and_then(Path::parent).unwrap_or(cwd);
+    let mut targets = Vec::new();
+    if let Some(bin) = &asked.flags.bin {
+        targets.extend(["--bin".to_owned(), bin.clone()]);
+    }
+    if let Some(example) = &asked.flags.example {
+        targets.extend(["--example".to_owned(), example.clone()]);
+    }
+    let selection = asked.selection();
+    let planned = Plan::programs(dir, manifest.as_deref(), &selection, &targets)?;
+    // cargo's directory of a profile: `dev`'s is `debug`.
+    let profile = match selection.profile.as_str() {
+        "dev" => "debug",
+        other => other,
+    };
     let target = metadata.target_directory.as_std_path();
     let mut programs = Vec::new();
-    for unit in graph.roots.iter().filter_map(|&it| graph.units.get(it)) {
-        let example = unit.target.kind.iter().any(|it| it == "example");
-        let bin = unit.target.kind.iter().any(|it| it == "bin");
-        let executable = unit.target.crate_types.iter().all(|it| it == "bin");
-        if !(bin || example) || !executable || unit.mode != "build" {
-            continue;
-        }
-        let Some(package) = metadata.packages.iter().find(|it| it.id.repr == unit.pkg_id) else {
+    for program in planned {
+        let Some(package) = metadata.packages.iter().find(|it| it.id.repr == program.package)
+        else {
             anyhow::bail!(
                 "cargo's unit graph names {}, which `cargo metadata` does not",
-                unit.pkg_id
+                program.package
             );
         };
-        let profile = match unit.profile.name.as_str() {
-            "dev" | "test" => "debug",
-            "bench" => "release",
-            other => other,
-        };
         let mut dir = target.to_owned();
-        if let Some(triple) = &unit.platform {
+        if let Some(triple) = &program.platform {
             dir.push(triple);
         }
         dir.push(profile);
-        if example {
+        if program.example {
             dir.push("examples");
         }
-        let name = format!("{}{}", unit.target.name, std::env::consts::EXE_SUFFIX);
+        let name = format!("{}{}", program.name, std::env::consts::EXE_SUFFIX);
         programs.push(Program {
             executable: dir.join(&name),
-            name: unit.target.name.clone(),
-            root: PathBuf::from(&unit.target.src_path),
+            name: program.name,
+            root: program.root,
             package: package.clone(),
         });
     }
     Ok(programs)
-}
-
-#[derive(Deserialize)]
-struct Graph {
-    units: Vec<Unit>,
-    roots: Vec<usize>,
-}
-
-#[derive(Deserialize)]
-struct Unit {
-    pkg_id: String,
-    target: UnitTarget,
-    profile: UnitProfile,
-    platform: Option<String>,
-    mode: String,
-}
-
-#[derive(Deserialize)]
-struct UnitTarget {
-    kind: Vec<String>,
-    crate_types: Vec<String>,
-    name: String,
-    src_path: String,
-}
-
-#[derive(Deserialize)]
-struct UnitProfile {
-    name: String,
 }
