@@ -10,11 +10,11 @@ error: `db` option not allowed here
 13 | #[salsa::tracked(db = Db)]
    |                  ^^
 
-error: `revisions` option not allowed here
-  --> tests/compile-fail/tracked_fn_incompatibles.rs:18:18
+error: `revisions` is for the arguments a function interns, and one whose only argument is a salsa struct interns none
+  --> tests/compile-fail/tracked_fn_incompatibles.rs:18:30
    |
 18 | #[salsa::tracked(revisions = 12)]
-   |                  ^^^^^^^^^
+   |                              ^^
 
 error: `constructor` option not allowed here
   --> tests/compile-fail/tracked_fn_incompatibles.rs:23:18

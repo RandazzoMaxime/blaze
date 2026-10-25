@@ -13,6 +13,11 @@ phases leanprof.py wrote (a profile recorded with `-k CLOCK_MONOTONIC`) and give
 for each phase, with a third: of the samples revalidating salsa's memos, which query's memo was
 being verified (the innermost `IngredientImpl<...>` on the stack) and which query asked
 (the outermost).
+
+Each sample counts for its period, the events (cycles) it stands for: perf's sampling at a
+frequency adapts the period to the rate it aims at, so a sample of a thread that just woke
+stands for far fewer cycles than one of a thread that has run all along, and counting samples
+gives short bursts on many cores, an edit's, more than their share.
 """
 import collections, json, re, sys
 
@@ -72,26 +77,32 @@ OWN = [
 ]
 
 
-def samples(path, comm, dso=None, timed=False):
-    """Each sample's frames, innermost first: of processes named `comm`, and with `dso` in the
-    path of one of the frames' binaries when it is given. With `timed`, its time and frames."""
-    frames, keep, of_dso, at = [], False, dso is None, 0.0
+# "comm pid/tid [cpu] time: period event:"
+HEAD = re.compile(r" (\d+\.\d+):\s+(?:(\d+)\s+\S+:)?")
+
+
+def samples(path, comm, dso=None):
+    """Each sample's time, period and frames, innermost first: of processes named `comm`, and
+    with `dso` in the path of one of the frames' binaries when it is given. A sample whose line
+    gives no period counts for one."""
+    frames, keep, of_dso, at, period = [], False, dso is None, 0.0, 1
     for line in open(path, errors="replace"):
         if not line.strip():
             if keep and of_dso and frames:
-                yield (at, frames) if timed else frames
+                yield at, period, frames
             frames, keep, of_dso = [], False, dso is None
         elif not line[0].isspace():
             keep = line.split()[0].startswith(comm)
-            stamp = re.search(r" (\d+\.\d+): ", line)
-            at = float(stamp[1]) if stamp else 0.0
+            head = HEAD.search(line)
+            at = float(head[1]) if head else 0.0
+            period = int(head[2]) if head and head[2] else 1
         elif keep:
             # "    addr symbol+0xoff (dso)"
             parts = line.strip().split(" ", 1)
             of_dso = of_dso or dso in line
             frames.append(re.sub(r"\+0x[0-9a-f]+ \(.*\)$|\s\(.*\)$", "", parts[1]) if len(parts) > 1 else parts[0])
     if keep and of_dso and frames:
-        yield (at, frames) if timed else frames
+        yield at, period, frames
 
 
 def own(frames):
@@ -146,28 +157,30 @@ class Fold:
     """The tables of a set of samples, added one at a time."""
 
     def __init__(self):
-        self.total = 0
+        self.total, self.count = 0, 0
         self.on_stack, self.by_own = collections.Counter(), collections.Counter()
         self.verified, self.asked = collections.Counter(), collections.Counter()
         self.callers = collections.Counter()
 
-    def add(self, frames):
-        self.total += 1
+    def add(self, period, frames):
+        self.total += period
+        self.count += 1
         joined = ";".join(frames)
         for label, needles in KINDS:
             if any(it in joined for it in needles):
-                self.on_stack[label] += 1
+                self.on_stack[label] += period
         kind = own(frames)
-        self.by_own[kind] += 1
+        self.by_own[kind] += period
         if kind == SALSA[0][0]:
             queries = [it for it in map(query_of, frames) if it]
-            self.verified[queries[0] if queries else "?"] += 1
-            self.asked[queries[-1] if queries else "?"] += 1
-            self.callers[caller_of(frames)] += 1
+            self.verified[queries[0] if queries else "?"] += period
+            self.asked[queries[-1] if queries else "?"] += period
+            self.callers[caller_of(frames)] += period
 
     def print(self):
         share = lambda count: f"{100 * count / max(1, self.total):6.2f}%"
-        print(f"{self.total} samples\non the stack:")
+        print(f"{self.count} samples, {self.total / 1e9:.1f} G events (cycles) in their periods")
+        print("on the stack:")
         for label, _ in KINDS:
             print(f"{share(self.on_stack[label])}  {label}")
         print("by what the innermost frame of a kind does:")
@@ -190,16 +203,16 @@ def main():
     dso = sys.argv[sys.argv.index("--dso") + 1] if "--dso" in sys.argv else None
     if "--phases" not in sys.argv:
         fold = Fold()
-        for frames in samples(sys.argv[1], comm, dso):
-            fold.add(frames)
+        for _, period, frames in samples(sys.argv[1], comm, dso):
+            fold.add(period, frames)
         fold.print()
         return
     phases = json.load(open(sys.argv[sys.argv.index("--phases") + 1]))["phases"]
     folds = {it["phase"]: Fold() for it in phases}
-    for at, frames in samples(sys.argv[1], comm, dso, timed=True):
+    for at, period, frames in samples(sys.argv[1], comm, dso):
         for it in phases:
             if it["began"] <= at < it["ended"]:
-                folds[it["phase"]].add(frames)
+                folds[it["phase"]].add(period, frames)
                 break
     for it in phases:
         print(f"== {it['phase']} ({it['ended'] - it['began']:.1f} s)")
