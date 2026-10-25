@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""benchreport.py: the README's benchmark tables and docs/benchmarks.md, from results of bench.py.
+"""benchreport.py: docs/benchmarks.md's tables and the README's numbers, from results of bench.py.
 
     benchreport.py RESULT [--name NAME] [--stored FILE] [--noise PERCENT] [--max-age HOURS] [--force] [--check]
     benchreport.py --render
@@ -19,16 +19,18 @@ any of:
   - a project or backend is new or gone
   - a peak of either side moved by more than noise and 100 MB
   - the stored result is older than `--max-age` hours (default 24), so that the commit the
-    README names is never more than a day behind main
+    tables name is never more than a day behind main
   - `--force`
-What a result of bench.py writes: the build table between `<!-- bench:start -->` and
-`<!-- bench:end -->` (README.md and, every number, docs/benchmarks.md), the README's opening numbers
-(the edits chart's first row, in words) between `<!-- benchheadline:start -->` and
-`<!-- benchheadline:end -->`, and memory and disk
-(bench.py's `memory`, `resident` and `disk_mb`, docs/benchmarks.md "Memory and disk") between
-`<!-- benchmem:start -->` and `<!-- benchmem:end -->` in the README.
-A result of `bench.py --runtime` (harness/runbench.py's numbers) writes the README's runtime table
-instead, between `<!-- runbench:start -->` and `<!-- runbench:end -->`: how fast each
+What a result of bench.py writes: in the README, its opening numbers (the edits chart's first
+row, in words) between `<!-- benchheadline:start -->` and `<!-- benchheadline:end -->`, and a
+small table of a few projects on one platform (PICK) between `<!-- benchpick:start -->` and
+`<!-- benchpick:end -->`; in docs/benchmarks.md, the build table between
+`<!-- benchsummary:start -->` and `<!-- benchsummary:end -->`, memory and disk (bench.py's
+`memory`, `resident` and `disk_mb`, docs/benchmarks.md "Memory and disk") between
+`<!-- benchmem:start -->` and `<!-- benchmem:end -->`, and every number between
+`<!-- bench:start -->` and `<!-- bench:end -->`.
+A result of `bench.py --runtime` (harness/runbench.py's numbers) writes docs/benchmarks.md's
+runtime table instead, between `<!-- runbench:start -->` and `<!-- runbench:end -->`: how fast each
 benchmark's program runs built by ra-jit's LLVM against `cargo build --release`, and the
 geometric mean. It is stored in docs/benchmarks/runtime-<platform>.json, and differs when a
 median of any build moved by more than noise, a benchmark is new or gone, or the stored run is
@@ -46,7 +48,7 @@ tests table says how, and the workflow fails after writing. `--check` writes not
 when it would have written. `--memory`, from before there were platforms, is the same as no flag:
 a platform's memory is its result's.
 
-Every table of the README comes with its chart (benchcharts.py), written to
+Every summary table comes with its chart (benchcharts.py), written to
 docs/benchmarks/charts/ by the same call that writes the table: the edit speed-ups with the
 build table, memory and disk with the memory table, the runtime ratios with the runtime table,
 each ra-jit against cargo with a bar per platform and each platform's geometric mean. `--render` writes every table and chart again from the stored results, and
@@ -69,6 +71,12 @@ START, END = "<!-- bench:start -->", "<!-- bench:end -->"
 RUN_START, RUN_END = "<!-- runbench:start -->", "<!-- runbench:end -->"
 MEM_START, MEM_END = "<!-- benchmem:start -->", "<!-- benchmem:end -->"
 HEADLINE_START, HEADLINE_END = "<!-- benchheadline:start -->", "<!-- benchheadline:end -->"
+SUM_START, SUM_END = "<!-- benchsummary:start -->", "<!-- benchsummary:end -->"
+PICK_START, PICK_END = "<!-- benchpick:start -->", "<!-- benchpick:end -->"
+# The README's small table: an edit to one function of these projects, as the README names them, on
+# PICK_ON, the platform that measures every project.
+PICK = {"ripgrep": "ripgrep", "nushell": "nushell", "helix": "helix", "bun": "bun (1.25M lines of Rust)"}
+PICK_ON = "Linux x86-64"
 # Where a platform's result was stored before there were platforms: read when the new one is missing.
 LEGACY = {"linux-x86-64.json": "linux-x86_64.json", "macos-arm64.json": "memory-macos-arm64.json"}
 FLOOR_MB = 100
@@ -353,7 +361,7 @@ def headline(results, backend="cranelift"):
             m = benchcharts.geomean(medians)
             factor = m if m >= 1 else 1 / m
             text = f"{factor:.0f}×" if factor >= 9.95 else f"{factor:.1f}×"
-            said.append(f"{text} {'faster' if m >= 1 else 'slower'} on {p}")
+            said.append(f"**{text} {'faster' if m >= 1 else 'slower'}** on {p}")
     joined = ", ".join(said[:-1]) + f" and {said[-1]}" if len(said) > 1 else "".join(said)
     return HEADLINE_START + joined + HEADLINE_END
 
@@ -397,11 +405,33 @@ def disk_chart(results, backend):
                                          if any(on_disk(m) for k, m in r["results"].items() if k.endswith("/" + backend))}))
 
 
-def readme_section(results):
-    """The README's build table: an edit to one function of each project on each platform, then
-    every kind of edit by platform."""
+def pick_section(results, backend="cranelift"):
+    """The README's small table: an edit to one function of each project of PICK on PICK_ON."""
+    lines = [PICK_START, f"| Edit one function, then build ({PICK_ON}) | `cargo build` | `cargo blaze build` |", "|---|---:|---:|"]
+    measured = (results.get(PICK_ON) or {"results": {}})["results"]
+    for key in keys_of(results, backend):
+        name = key.split("/")[0]
+        phase = (measured.get(key) or {"phases": {}})["phases"].get("body")
+        if name in PICK and phase and phase.get("cargo_s") and phase.get("wall_s") and not cargo_built(phase):
+            lines.append(f"| {PICK[name]} | {seconds(phase['cargo_s'])} | "
+                         f"**{seconds(phase['wall_s'])}** ({speedup(phase['cargo_s'], phase['wall_s']).replace('x', '×')} faster) |")
+    lines.append(PICK_END)
+    return "\n".join(lines)
+
+
+def for_docs(section):
+    """A section whose links are written from the repository's root, with them made relative to
+    docs/, for docs/benchmarks.md."""
+    section = section.replace("[docs/benchmarks.md](docs/benchmarks.md)", "[every number below](#results)")
+    section = re.sub(r'(\]\(|src="|srcset=")docs/benchmarks\.md(#[^)"]*)?', lambda m: m[1] + (m[2] or "#results"), section)
+    return re.sub(r'(\]\(|src="|srcset=")docs/', r"\1", section)
+
+
+def summary_section(results):
+    """docs/benchmarks.md's build table: an edit to one function of each project on each platform,
+    then every kind of edit by platform."""
     backend = "cranelift"
-    lines = [START]
+    lines = [SUM_START]
     if summary := edits_chart(results, backend):
         lines += [benchcharts.picture("edits", f"How much faster an edit builds under ra-jit than under cargo, by platform: {summary}"), ""]
     lines += ["Edit, then build, on real projects at pinned commits: incremental `cargo build` → `cargo ra-jit build`, both "
@@ -446,12 +476,12 @@ def readme_section(results):
                  "its own workflow) on each platform's benchmark machine once it is registered." + built + " Cold builds, the "
                  "spread of every number, the LLVM tier and how fast the built programs run: [docs/benchmarks.md](docs/benchmarks.md)."
                  + f" Raw JSON: {raw_links(results)}.")
-    lines.append(END)
+    lines.append(SUM_END)
     return "\n".join(lines)
 
 
-def memory_readme(results):
-    """The README's memory table: what an edit held at its peak on each platform, then by platform
+def memory_section(results):
+    """docs/benchmarks.md's memory table: what an edit held at its peak on each platform, then by platform
     what the daemon holds between edits, what a cold build held and what each side keeps on disk."""
     measured = {p: r for p, r in results.items() if has_memory(r)}
     backend = memory_backend(measured)
@@ -879,7 +909,7 @@ def rounds(result):
 
 
 def runtime_section(results):
-    """The README's table of how fast what ra-jit's LLVM builds runs, against cargo's release
+    """docs/benchmarks.md's table of how fast what ra-jit's LLVM builds runs, against cargo's release
     build: ra-jit's time ÷ release's of each benchmark on each platform, then by platform the
     times, memory and builds."""
     lines = [RUN_START]
@@ -941,12 +971,13 @@ def write_sections(kind="", override=None, name=None):
     with `override` (of project `name`, when it is measured on its own) in place of its stored one."""
     if kind == "runtime":
         if results := stored_all("runtime", override, name):
-            splice(README, runtime_section(results), RUN_START, RUN_END)
+            splice(DOC, for_docs(runtime_section(results)), RUN_START, RUN_END)
     elif results := stored_all("", override, name):
         splice(README, headline(results), HEADLINE_START, HEADLINE_END)
-        splice(README, readme_section(results))
+        splice(README, pick_section(results), PICK_START, PICK_END)
+        splice(DOC, for_docs(summary_section(results)), SUM_START, SUM_END)
         splice(DOC, doc_section(results))
-        splice(README, memory_readme(results), MEM_START, MEM_END)
+        splice(DOC, for_docs(memory_section(results)), MEM_START, MEM_END)
 
 
 def render():
