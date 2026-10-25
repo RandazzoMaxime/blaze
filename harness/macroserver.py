@@ -408,13 +408,23 @@ def compared(stderr):
 
 
 def fallbacks(own, theirs):
-    """Why each proc macro of `theirs` is rustc's: the last line ra-jit's build of it said."""
+    """Why each proc macro of `theirs` is rustc's: rustc compiled it again for a crate of
+    rustc's that links it, or what ra-jit's build of it could not compile, or else the last
+    line that build said."""
     said = []
     for name in theirs:
-        logs = glob.glob(os.path.join(own, "**", ".ra-jit-units", f"{name}-*", "*", "ra-jit.log"),
-                         recursive=True)
-        last = [l for log in logs for l in open(log).read().splitlines() if l.strip()][-1:]
-        said.append(f"{name}: {last[0][:300] if last else 'ra-jit did not build it'}")
+        units = os.path.join(own, "**", ".ra-jit-units", f"{name}-*")
+        if glob.glob(os.path.join(units, "lib*.so"), recursive=True):
+            said.append(f"{name}: ra-jit linked it, and rustc compiled it again for a crate of "
+                        "rustc's that links it")
+            continue
+        logs = glob.glob(os.path.join(units, "*", "ra-jit.log"), recursive=True)
+        lines = [l for log in logs for l in open(log).read().splitlines() if l.strip()]
+        line = next((l for l in lines if "could not compile `" in l), lines[-1] if lines else None)
+        # A chain of callees ends at what ra-jit could not compile.
+        if line and len(line) > 600:
+            line = f"{line[:200]} ... {line[-400:]}"
+        said.append(f"{name}: {line or 'ra-jit did not build it'}")
     return said
 
 
