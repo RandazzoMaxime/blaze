@@ -69,7 +69,7 @@ pub(super) fn stable_mark(
                 (3u8, place(at)).hash(&mut hasher)
             }
             DataRequest::Declaration(func) => {
-                (4u8, place(declaration_location(db, *func))).hash(&mut hasher)
+                (4u8, place(*declaration_location(db, *func))).hash(&mut hasher)
             }
             DataRequest::FilePath(file) => (5u8, names.file_path(*file)).hash(&mut hasher),
             DataRequest::Text(parts) => {
