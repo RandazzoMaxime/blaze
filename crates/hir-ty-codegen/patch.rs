@@ -804,6 +804,16 @@ pub struct StaleSteps {
     pub instances_asked: usize,
     /// The longest any one of them took to answer.
     pub slowest: std::time::Duration,
+    /// How many took how long: the `n`th counts those under 2^n ns and not under half that.
+    pub sizes: [u32; 32],
+}
+
+impl StaleSteps {
+    fn asked(&mut self, took: std::time::Duration) {
+        self.slowest = self.slowest.max(took);
+        let ns = u64::try_from(took.as_nanos()).unwrap_or(u64::MAX);
+        self.sizes[(64 - ns.leading_zeros() as usize).min(31)] += 1;
+    }
 }
 
 impl Stale {
@@ -1521,7 +1531,7 @@ impl Base {
             let asked = stdx::time::Instant::now();
             let mark = probe(|| Mark::of_root(db, root, self.debug));
             stale.steps.roots_asked += 1;
-            stale.steps.slowest = stale.steps.slowest.max(asked.elapsed());
+            stale.steps.asked(asked.elapsed());
             match mark {
                 Some(Some(mark)) if mark == self.marks[i] => {}
                 _ if !touched => {
@@ -1596,7 +1606,7 @@ impl Base {
             let asked = stdx::time::Instant::now();
             let mark = probe(|| Mark::of_instance(db, instance, &was.env, self.debug));
             stale.steps.instances_asked += 1;
-            stale.steps.slowest = stale.steps.slowest.max(asked.elapsed());
+            stale.steps.asked(asked.elapsed());
             stale.their_walk_changed |= touched
                 && was.theirs
                 && mark.flatten().map(|it| it.serial) != was.mark.map(|it| it.serial);
