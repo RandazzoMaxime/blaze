@@ -1560,6 +1560,7 @@ impl Rejections {
             roots_asked: self.stale.iter().map(|it| it.steps.roots_asked).sum(),
             instances_asked: self.stale.iter().map(|it| it.steps.instances_asked).sum(),
             slowest: longest(|it| it.slowest),
+            sizes: std::array::from_fn(|n| self.stale.iter().map(|it| it.steps.sizes[n]).sum()),
         }
     }
 }

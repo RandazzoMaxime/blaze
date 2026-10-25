@@ -4259,12 +4259,14 @@ fn build(
     // What every question about a crate's code comes down to first, asked one crate to a
     // thread: left to the questions, whichever gets there has the others wait for all of it.
     let next = std::sync::atomic::AtomicUsize::new(0);
+    let mut spent = Vec::new();
     let stale: Option<Vec<_>> = std::thread::scope(|scope| {
         let parts: Vec<_> = (0..threads)
             .map(|part| {
                 let (db, known, local, next) = (db.clone(), &*known, &local, &next);
                 scope.spawn(move || {
                     PROBING.set(true);
+                    let (start, cpu) = (Instant::now(), thread_cpu());
                     hir::attach_db(&db, || {
                         while let Some(&krate) =
                             local.get(next.fetch_add(1, std::sync::atomic::Ordering::Relaxed))
@@ -4272,15 +4274,28 @@ fn build(
                             hir_ty::method_resolution::TraitImpls::for_crate(&db, krate.into());
                             hir_ty::method_resolution::InherentImpls::for_crate(&db, krate.into());
                         }
-                        known.stale(&db, part, threads)
+                        let impls = start.elapsed();
+                        let stale = known.stale(&db, part, threads);
+                        (stale, Spent { impls, wall: start.elapsed(), cpu: thread_cpu() - cpu })
                     })
                 })
             })
             .collect();
-        parts.into_iter().map(|it| it.join().ok().flatten()).collect()
+        let parts: Vec<_> = parts.into_iter().map(|it| it.join().ok()).collect();
+        parts
+            .into_iter()
+            .map(|it| {
+                let (stale, it) = it?;
+                spent.push(it);
+                stale
+            })
+            .collect()
     });
     hir::attach_db(db, || known.set_stale(hir_db, stale.unwrap_or_default()));
     let looked = known.stale_steps();
+    if std::env::var_os("RA_JIT_STATS").is_some() {
+        report_spread(&spent, &looked);
+    }
     let revalidate = start.elapsed();
     // Salsa attaches the database for the duration of the closure; the solver needs it.
     let undoable = hold.is_some();
@@ -9826,6 +9841,65 @@ fn worker_spans(
 #[allow(dead_code)]
 fn abs(path: &Path) -> anyhow::Result<VfsPath> {
     Ok(VfsPath::from(AbsPathBuf::assert_utf8(dunce::canonicalize(path)?)))
+}
+
+/// How long one thread spent looking for what an edit left stale, and of that on a CPU.
+struct Spent {
+    /// Making the crates' tables of impls first, which all the threads share.
+    impls: Duration,
+    wall: Duration,
+    cpu: Duration,
+}
+
+/// The CPU time the calling thread has had.
+fn thread_cpu() -> Duration {
+    #[cfg(unix)]
+    {
+        let mut it = libc::timespec { tv_sec: 0, tv_nsec: 0 };
+        // SAFETY: the call writes the timespec it is handed, and nothing else.
+        let read = unsafe { libc::clock_gettime(libc::CLOCK_THREAD_CPUTIME_ID, &mut it) };
+        if read == 0 {
+            return Duration::new(it.tv_sec as u64, it.tv_nsec as u32);
+        }
+    }
+    Duration::ZERO
+}
+
+/// How evenly the threads that looked for what is stale shared the work, how much of their
+/// time they ran rather than waited, and how long each question took.
+fn report_spread(spent: &[Spent], looked: &hir_ty_codegen::StaleSteps) {
+    let Some(longest) = spent.iter().map(|it| it.wall).max() else { return };
+    let wall: Duration = spent.iter().map(|it| it.wall).sum();
+    let cpu: Duration = spent.iter().map(|it| it.cpu).sum();
+    let impls = spent.iter().map(|it| it.impls).max().unwrap_or_default();
+    let share = |part: Duration, of: Duration| {
+        100.0 * part.as_secs_f64() / of.as_secs_f64().max(f64::MIN_POSITIVE)
+    };
+    let threads = u32::try_from(spent.len()).unwrap_or(u32::MAX);
+    eprintln!(
+        "spread: {threads} threads, longest {longest:.1?} (impls {impls:.1?}), busy {:.0}% of \
+         threads by longest, on a CPU {:.0}% of their time",
+        share(wall, longest * threads),
+        share(cpu, wall),
+    );
+    let asked: u64 = looked.sizes.iter().map(|&it| u64::from(it)).sum();
+    if asked == 0 {
+        return;
+    }
+    let (mut seen, mut quantiles, mut buckets) = (0, [(50, None), (90, None), (99, None)], vec![]);
+    for (n, &count) in looked.sizes.iter().enumerate().filter(|it| *it.1 != 0) {
+        seen += u64::from(count);
+        let under = Duration::from_nanos(1 << n);
+        buckets.push(format!("<{under:.0?} {count}"));
+        for (quantile, at) in &mut quantiles {
+            if at.is_none() && seen * 100 >= asked * *quantile {
+                *at = Some(under);
+            }
+        }
+    }
+    let quantiles: Vec<String> =
+        quantiles.iter().filter_map(|(it, at)| Some(format!("p{it} <{:.0?}", (*at)?))).collect();
+    eprintln!("asks by time: {}; {}", quantiles.join(", "), buckets.join(", "));
 }
 
 fn report_stats(stats: &hir_ty_codegen::BuildStats) {
