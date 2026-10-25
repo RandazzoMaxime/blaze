@@ -60,7 +60,8 @@ jobs:
         run: |
           # The image has clang-18; llvm-ar-18 is in llvm-18 (a no-op when both are there).
           sudo apt-get update -qq && sudo apt-get install -y -qq --no-install-recommends clang-18 llvm-18
-          cargo fmt --manifest-path renderer/Cargo.toml --check
+          # From inside renderer/: `cargo fmt --manifest-path` from site/ fails with "Failed to find targets".
+          (cd renderer && cargo fmt --all --check)
           uv run --script renderer/build.py
         env:
           # Flecs's C for wasm32 (flecs-c's build.rs): the runner's clang has the wasm32 backend.
