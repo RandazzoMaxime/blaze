@@ -4,17 +4,20 @@ no `cargo build` (docs/no-rustc.md, step K, #91), under `RA_JIT_WHOLE_BUILD=1`.
 
     python3 coldbuild.py                 # the fixtures
     python3 coldbuild.py bench [names]   # bench.py's projects: ripgrep fd hyperfine by default
+    python3 coldbuild.py bench --keep    # and what they built, with the daemon's logs, kept
 
 The fixtures are a workspace of a program, an example and a library with a build script,
 built from nothing by `cargo blaze build` (dev, then release) and `cargo blaze run --example`:
 each executable has to be where cargo puts it and print what cargo's build of the same source
 does, and no `cargo build` may run (cargo would leave `.fingerprint` in the target directory).
-A program that reaches a function blaze cannot compile fails its build with what it is, exit
+An edit to a body after the first build is built by the daemon on what it loaded. A program that reaches a function blaze cannot compile fails its build with what it is, exit
 101, and leaves no executable and no cargo build behind.
 
 `bench` does the same for bench.py's projects, the program run with bench.py's `run`
-arguments, and says how long blaze's cold build took against cargo's. The standard library
-comes from a remote `ra-jit std` made once, as a release's does.
+arguments, and says how long blaze's cold build took against cargo's, then its body and
+signature edits (bench.py's) against cargo's incremental build of each. The edits are built
+by the daemon's worker on what it loaded for the cold build. The standard library comes from
+a remote `ra-jit std` made once, as a release's does.
 
 RA_JIT_BIN names the ra-jit built; cargo-ra-jit is found next to it. Linux, as allrajit.py.
 """
@@ -157,6 +160,23 @@ def fixtures():
         ours = printed(program) if os.path.exists(program) else None
         check(f"  ... target/{profile}/kapp prints what cargo's does", ours == printed(os.path.join(root, "ref", profile, "kapp")),
               f"blaze's printed {ours!r}")
+        if profile == "debug":
+            # The daemon's worker has the workspace loaded: an edit is built on what it has.
+            main = os.path.join(ws, "app", "src", "main.rs")
+            with open(main) as f:
+                source = f.read()
+            with open(main, "w") as f:
+                f.write(source.replace('println!("debug")', 'println!("debug, edited")'))
+            ran, again = blaze(ws, env, "build")
+            said = ran.stdout + ran.stderr
+            check("  ... an edit to a body then builds", ran.returncode == 0, said)
+            check("  ... on what the daemon has loaded", "building with cargo" not in said and not cargo_built(os.path.join(ws, "target"))
+                  and again < took, f"{said}\nfrom nothing {took:.1f}s, the edit {again:.1f}s")
+            edited = printed(program) if os.path.exists(program) else None
+            check("  ... and target/debug/kapp prints the edit", edited is not None and "debug, edited" in edited[1],
+                  f"blaze's printed {edited!r}")
+            with open(main, "w") as f:
+                f.write(source)
     shutil.rmtree(os.path.join(ws, "target"))
     ran, _ = blaze(ws, env, "run", "-q", "--example", "kex", "--", "a", "b", "a")
     reference, _ = cargo(ws, env, os.path.join(root, "ref"), "run", "-q", "--example", "kex", "--", "a", "b", "a")
@@ -178,7 +198,39 @@ def fixtures():
     shutil.rmtree(root, ignore_errors=True)
 
 
-def bench(names):
+# The edits of bench.py's projects a whole build is measured on, after its cold build: the
+# daemon's worker builds them on what it loaded and links the program again.
+EDITS = ("body", "signature")
+
+
+def edited(ws, root, name, env, build, changes, spec):
+    """How long blaze's build of the edit `changes` took, then cargo's, and what was wrong with
+    blaze's, if anything. Each side builds the source as it was again after."""
+    import bench as benchpy
+    benchpy.write_edit(ws, changes, False)
+    ours, took = blaze(ws, env, "build", *build)
+    said = ours.stdout + ours.stderr
+    why = None
+    if ours.returncode != 0:
+        why = "FAILS: " + (said.strip().splitlines() or [""])[-1][:160]
+    elif "building with cargo" in said or cargo_built(os.path.join(ws, "target")):
+        why = "CARGO BUILT IT"
+    elif spec.get("run") is not None:
+        debug = os.path.join(ws, "target", "debug")
+        reference = os.path.join(root, f"{name}-ref", "debug")
+        bins = [b for b in os.listdir(debug) if os.path.isfile(os.path.join(debug, b)) and os.access(os.path.join(debug, b), os.X_OK)]
+        if not all(printed(os.path.join(debug, b), spec["run"], ws, env) == printed(os.path.join(reference, b), spec["run"], ws, env)
+                   for b in bins):
+            why = "OUTPUT DIFFERS"
+    target = os.path.join(root, f"{name}-ref")
+    _, cargo_took = cargo(ws, env, target, "build", *build)
+    benchpy.write_edit(ws, changes, True)
+    blaze(ws, env, "build", *build)
+    cargo(ws, env, target, "build", *build)
+    return took, cargo_took, why
+
+
+def bench(names, keep=False):
     import bench as benchpy
     root = tempfile.mkdtemp(prefix="ra-jit-coldbuild-bench-", dir="/tmp")
     remote, made = benchpy.shipped_std(RA_JIT, "cranelift", root)
@@ -207,20 +259,34 @@ def bench(names):
             same = all(printed(os.path.join(debug, b), spec["run"], ws, env)
                        == printed(os.path.join(root, f"{name}-ref", "debug", b), spec["run"], ws, env) for b in bins)
             verdict = "same output" if same and bins else "OUTPUT DIFFERS"
+        edits = ""
+        if verdict in ("same output", "builds"):
+            for kind in EDITS:
+                changes = spec.get("edits", {}).get(kind)
+                if changes is None:
+                    continue
+                ours_took, cargos_took, why = edited(ws, root, name, env, build, changes, spec)
+                edits += f"  {kind} blaze {ours_took:6.2f}s cargo {cargos_took:6.2f}s"
+                if why:
+                    verdict = f"{kind} edit {why}"
+                    break
+        subprocess.run(["cargo", "ra-jit", "stop"], cwd=ws, env=env, capture_output=True, timeout=120)
         wrong += verdict not in ("same output", "builds", "cargo's build fails")
         rows.append((name, verdict, took, cargo_took))
-        print(f"{name:12} {verdict:40} blaze {took:7.1f}s  cargo {cargo_took:7.1f}s", flush=True)
+        print(f"{name:12} {verdict:40} blaze {took:7.1f}s  cargo {cargo_took:7.1f}s{edits}", flush=True)
     print(f"standard library made once in {made:.1f}s; under {root}")
     if wrong:
         sys.exit(1)
-    shutil.rmtree(root, ignore_errors=True)
+    if not keep:
+        shutil.rmtree(root, ignore_errors=True)
 
 
 def main():
     if not shutil.which("cargo-ra-jit", path=os.path.dirname(RA_JIT)):
         sys.exit(f"no cargo-ra-jit beside {RA_JIT}")
     if sys.argv[1:2] == ["bench"]:
-        bench(sys.argv[2:] or ["ripgrep", "fd", "hyperfine"])
+        names = [it for it in sys.argv[2:] if it != "--keep"]
+        bench(names or ["ripgrep", "fd", "hyperfine"], "--keep" in sys.argv)
     else:
         fixtures()
 

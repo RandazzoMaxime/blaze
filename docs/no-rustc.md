@@ -1057,10 +1057,21 @@ build`, no rustc base. See [the cold start](#the-cold-start-without-rustc).
   resolution ([resolve.md](resolve.md), 2026-10-25): axum then builds, and biome reaches 9
   functions the frontend turns down (two LLVM intrinsics of `num-bigint`, `HasErrors` and
   unresolved methods in `boa_engine`, `boa_interner` and a derive of `biome_deserialize`). Build scripts and proc macros are still built by rustc for the
-  load, and no daemon is started.
-- Next: the shipped standard library for the dev and release program units; biome's 9
-  functions; the daemon taking the build over, so the edit after it splices;
-  then the flip.
+  load.
+- Done (2026-10-25): the whole build is a request to the daemon (#91's design). Its worker
+  loads the workspace with the build's own resolution, compiles and links each program, and
+  answers only once the executable is linked; the next `cargo blaze build` asks the same
+  worker, which builds what was edited since on what it has loaded and links the program
+  again. No spare worker is started for it: the build asks at once, and a spare loads its
+  library first (ripgrep's cold build 7.3 s with one, 4.5 s without). The objects of a whole
+  build keep each function in a section of its own, as a build of no daemon's does, so that
+  the link leaves out what the program does not reach; a daemon's links that edits are
+  spliced into keep everything, and the store keys the standard library by which it is.
+  ripgrep on dev-aws-14 (shared): an edit to a body 2.3 s, cargo's 0.47 s. The edit compiles
+  2 functions, and the rest of the 2 s is the full object written again and the link.
+- Next: edits spliced into the executable as patches, as the daemon's edits of cargo's builds
+  are; the shipped standard library for the dev and release program units; biome's 9
+  functions; then the flip.
 
 **L. Doctests by the daemon.** ([#92](https://github.com/indexable-inc/ra-jit/issues/92)) [#28](https://github.com/indexable-inc/ra-jit/issues/28): the
 examples are compiled by the daemon that has the workspace loaded, linked with G's line; no probe

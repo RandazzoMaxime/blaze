@@ -4146,6 +4146,10 @@ fn std_unit(
     };
     field(b"ra-jit standard library 2");
     field(format!("{:?} {debug:?}", args.selection.target).as_bytes());
+    // An object of one section is linked whole, with what the program never reaches.
+    if !hir_ty_codegen::sections_of_their_own() {
+        field(b"one section");
+    }
     // A crate that is not the library's own is told by where its source is.
     let mut described: Vec<String> = members
         .iter()
@@ -4234,6 +4238,10 @@ fn std_unit(
     }
     Ok(Some(path))
 }
+
+/// The sysroot of the workspace loaded first, which an executable with nothing of rustc's
+/// is linked against.
+static SYSROOT: std::sync::OnceLock<Option<PathBuf>> = std::sync::OnceLock::new();
 
 /// Links the executable of a build with nothing of rustc's: `--out` and the standard
 /// library's object, with the native libraries the crates ask for.
@@ -5977,6 +5985,9 @@ struct Target {
     patch: Option<PathBuf>,
     link_cmd: Option<String>,
     splice: Option<PathBuf>,
+    /// The executable blaze links the program into itself, with nothing of rustc's: a build
+    /// from nothing (docs/no-rustc.md, step K).
+    exe: Option<PathBuf>,
     /// What its link takes that rustc compiled. Code rustc instantiated for one program is in
     /// that program's own objects, so another has to be told where its copies are. Empty for
     /// the files the daemon was started with.
@@ -5994,6 +6005,7 @@ impl Target {
             patch: args.patch.clone(),
             link_cmd: args.link_cmd.clone(),
             splice: args.splice.clone(),
+            exe: args.exe.clone(),
             symbol_files: args.symbol_files.clone(),
         }
     }
@@ -6004,7 +6016,8 @@ impl Target {
 
     /// The daemon's arguments, were it started for this program.
     fn args(self, daemon: &Args, checkouts: &Checkouts) -> anyhow::Result<Args> {
-        let Target { project, krate, batch, out, patch, link_cmd, splice, symbol_files } = self;
+        let Target { project, krate, batch, out, patch, link_cmd, splice, exe, symbol_files } =
+            self;
         let project = project.unwrap_or_else(|| daemon.project.clone());
         let Parts { root: checkout, base, members, debug, lints_capped } =
             checkouts.parts(&project)?;
@@ -6028,6 +6041,7 @@ impl Target {
             patch,
             link_cmd,
             splice,
+            exe,
             symbol_files,
             rustc_binary: None,
             by_symbol: Vec::new(),
@@ -6038,7 +6052,7 @@ impl Target {
     /// From what follows the socket on the command line of a client.
     fn from_flags(mut flags: impl Iterator<Item = String>) -> anyhow::Result<Option<Target>> {
         let (mut krate, mut out, mut patch, mut link_cmd) = (None, None, None, None);
-        let (mut project, mut splice) = (None, None);
+        let (mut project, mut splice, mut exe) = (None, None, None);
         let mut symbol_files = Vec::new();
         while let Some(flag) = flags.next() {
             let value = flags.next().with_context(|| format!("{flag} needs a value"))?;
@@ -6049,6 +6063,7 @@ impl Target {
                 "--patch" => patch = Some(PathBuf::from(value)),
                 "--link-cmd" => link_cmd = Some(value),
                 "--binary" | "--splice" => splice = Some(PathBuf::from(value)),
+                "--exe" => exe = Some(PathBuf::from(value)),
                 "--symbols" => symbol_files.push(PathBuf::from(value)),
                 _ => bail!("unexpected argument {flag}"),
             }
@@ -6064,6 +6079,7 @@ impl Target {
                     patch,
                     link_cmd,
                     splice,
+                    exe,
                     symbol_files,
                 }))
             }
@@ -6071,6 +6087,7 @@ impl Target {
                 if patch.is_none()
                     && link_cmd.is_none()
                     && splice.is_none()
+                    && exe.is_none()
                     && symbol_files.is_empty()
                     && project.is_none() =>
             {
@@ -6082,7 +6099,8 @@ impl Target {
 
     /// The fields after the request's name on its line, each after a tab. Empty is absent.
     fn parse(fields: &[&str]) -> Option<Target> {
-        let &[project, krate, out, patch, link_cmd, splice, ref symbol_files @ ..] = fields else {
+        let &[project, krate, out, patch, link_cmd, splice, exe, ref symbol_files @ ..] = fields
+        else {
             return None;
         };
         let given = |it: &str| (!it.is_empty()).then(|| it.to_owned());
@@ -6095,6 +6113,7 @@ impl Target {
             patch: given(patch).map(PathBuf::from),
             link_cmd: given(link_cmd),
             splice: given(splice).map(PathBuf::from),
+            exe: given(exe).map(PathBuf::from),
             symbol_files: symbol_files.iter().map(PathBuf::from).collect(),
         })
     }
@@ -6117,13 +6136,14 @@ impl Target {
             None => self.krate.clone(),
         };
         let mut fields = format!(
-            "\t{}\t{}\t{}\t{}\t{}\t{}",
+            "\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
             self.project.as_ref().map(|it| it.display().to_string()).unwrap_or_default(),
             crates,
             self.out.display(),
             self.patch.as_ref().map(|it| it.display().to_string()).unwrap_or_default(),
             self.link_cmd.as_deref().unwrap_or_default(),
-            self.splice.as_ref().map(|it| it.display().to_string()).unwrap_or_default()
+            self.splice.as_ref().map(|it| it.display().to_string()).unwrap_or_default(),
+            self.exe.as_ref().map(|it| it.display().to_string()).unwrap_or_default()
         );
         for file in &self.symbol_files {
             fields.push('\t');
@@ -7679,6 +7699,9 @@ fn run_holding(
     if args.socket.is_some() || args.watch {
         hir_ty_codegen::builds_edits();
     }
+    if args.exe.is_some() {
+        hir_ty_codegen::links_own();
+    }
     // Nothing asks for a symbol before the first build, so they load next to the workspace.
     let (symbol_files, root) = (args.symbol_files.clone(), args.root()?);
     let (said, whole) = match ahead {
@@ -7916,6 +7939,8 @@ fn run_holding(
             bail!("{why}");
         }
     }
+    let sysroot = checkouts.loaded.workspaces().first().and_then(|it| it.sysroot.root());
+    let _ = SYSROOT.set(sysroot.map(|it| AsRef::<Path>::as_ref(it).to_owned()));
     let cold = match rustcs_to_patch(&args, written.is_empty() && !harnessed) {
         Some(rustcs) => {
             let start = Instant::now();
@@ -7972,9 +7997,7 @@ fn run_holding(
                 packs_whole(&args),
             )?;
             if let Some(exe) = &args.exe {
-                let workspace = checkouts.loaded.workspaces().first();
-                let sysroot = workspace.and_then(|it| it.sysroot.root());
-                let sysroot = sysroot.map(|it| it.as_ref());
+                let sysroot = SYSROOT.get().and_then(Option::as_deref);
                 link_executable(&db, &table, &listed, &args, sysroot, exe)?;
                 if let Some(path) = &args.dep_info {
                     write_dep_info(&db, &args, tree.vfs(), exe, path)?;
@@ -8651,6 +8674,8 @@ fn run_holding(
         for (&at, wanted) in &outputs {
             let program = &mut programs[at];
             program.unbuilt.stale |= program.wrote.as_ref() != Some(&wanted.out);
+            // An executable of its own that was taken away is linked again.
+            program.unbuilt.stale |= program.args.exe.as_ref().is_some_and(|it| !it.exists());
             // The files a link reads and writes are not written again under it.
             if let Some(link) = links.remove(&wanted.out) {
                 _ = link.join();
@@ -9682,6 +9707,11 @@ impl Program {
                 return self.sync(db, listed, paths, edit, wanted, link_it, defer);
             }
             failed = failed.or(unlinked.map(|it| Refused::Cargos(it.to_string())));
+            if let Some(exe) = args.exe.as_deref().filter(|_| failed.is_none() && link_it) {
+                let sysroot = SYSROOT.get().and_then(Option::as_deref);
+                let linked = link_executable(db, table, listed, args, sysroot, exe);
+                failed = linked.err().map(|it| Refused::Cargos(format!("{it:#}")));
+            }
         }
         if let Some(why) = &failed {
             eprintln!("refused: {why}");
