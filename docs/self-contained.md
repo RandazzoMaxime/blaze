@@ -194,7 +194,8 @@ K replaces cargo's build in that flow, keeping 54301ec5's lane on the rest of it
    the proc macros are J's. What blaze cannot compile and the program reaches fails the build
    with the reason: there is no build by cargo to go to. While it is shown equal on the bench
    apps (each program's runs printing what cargo's does, as `allrajit.py` checks), it is behind
-   a setting, then the default.
+   a setting, then the default. Behind `RA_JIT_WHOLE_BUILD=1` since 2026-10-25, with the build
+   scripts and proc macros still the load's ([Status](#status)).
 2. The first edits patch blaze's own executable, not rustc's (#11): no rustc base.
 3. `cargo blaze test` from nothing the same, with blaze's harness (H).
 
@@ -208,6 +209,60 @@ enable` names blaze as `build.rustc`; the count of [no-rustc.md](no-rustc.md#how
 Then blaze's own toolchain loses `rustc` and `rust-std`. The link still needs an lld on ELF
 targets (rustc's `rust-lld` today, through `gcc-ld`): blaze ships one in its release, or links
 with the system's `cc` and an lld it finds, a choice for that step, measured on the bench apps.
+
+## The whole build in place of `cargo build`: what stands between them (2026-10-25)
+
+Step G's whole build (`ra-jit <package> --crate <root> --out --exe`, every crate compiled by
+blaze over the shipped standard library and linked by blaze) run on bench.py's projects from an
+empty store, then again on the store it filled, against cargo's own cold build into a target
+directory of its own, on dev-aws-8 (Cranelift, main at 3e03d4298a, the host shared at a load
+of 20-56, nothing pinned: the times are rough). rustc and cargo were stand-ins that log each
+run, in a copy of 1.99.0. Each claim: **read** (measured or read in the code), **reported**,
+**unverified**.
+
+| Project | Whole? | Same output | blaze, empty store | blaze, warm store | cargo cold |
+|---|---|---|---|---|---|
+| ripgrep | yes, 0 stand-ins | yes | 19.4 s | 7.9 s | 6.0 s |
+| fd | yes | yes | 49.8 s | 13.4 s | 28.7 s |
+| hyperfine | yes | yes | 22.2 s | 7.7 s | 5.9 s |
+| just | yes | yes | 29.9 s | 13.0 s | 8.6 s |
+| bat | yes | yes | 32.5 s | 16.7 s | 11.2 s |
+| nushell | yes | yes | 95.9 s | 77.1 s | 36.9 s |
+| axum (`example-hello-world`) | no: `env!("MIME_TYPES_GENERATED_PATH")` in mime_guess is not set | | fails at 30.7 s | | 9.5 s |
+| biome | no: `env!("OUT_DIR")` in htmlize is not set | | fails at 355 s, 38 GB | | 91.0 s |
+| cargo, bevy, zed | not here: cargo's own build fails too (openssl, libudev and wayland, x11 not on the host) | | | | |
+| helix | not measured: the measuring script failed (a file not found) | | | | |
+| bun | not measured: it needs bench.py's `prepare` | | | | |
+
+All **read**. What stands between this and replacing `cargo build`:
+
+- **Build scripts and proc macros are still rustc's.** rust-analyzer's load runs
+  `cargo check --compile-time-deps`, and that cargo builds them with rustc: ripgrep 7 build
+  scripts and 1 library for them, fd 8 and clap_derive, hyperfine 18 and 3 proc macros,
+  nushell 50 and 30 (179 rustc runs, 17 of them questions), against cargo's 551. **read**. The
+  build-scripts lane (#304, #306) and J (proc macros) take those. On the warm store the load
+  found its target directory built: 1 rustc run, a question. **read**
+- **Two crates' build-script output is missing.** axum and biome fail on an `env!` of a
+  variable a build script sets. Why the load has no output for them is **unverified**.
+- **No stand-ins** were left in any program that linked: every function those programs reach
+  blaze compiled. **read**
+- **Time.** On an empty store blaze is 1.7-3.7 times cargo's cold build (fd is the exception,
+  where cargo's is slow), and 2.6 times on nushell. Part is the standard library: the remote
+  `ra-jit std` makes has only the unit of the do-nothing build script, at no debug info, and a
+  program's dev build keys its unit at line tables, so every build compiled the library again
+  (about 10 s, 22,920 of 39,232 functions). **read**. `ra-jit std` now ships the dev program's
+  unit too ([#330](https://github.com/indexable-inc/blaze/pull/330)): ripgrep from an empty store
+  went from 19.4 s to 9.9 s. **read**. The warm store is not yet as warm as it can be: nushell's second
+  build found 88,116 entries that "call what cannot be used" and compiled 95,813 functions
+  again (77 s), ripgrep's 6,818 (7.9 s). **read**; why is **unverified**.
+- **cargo still runs** 12-14 times a build (`metadata` four times, the unit graph,
+  `config get`, `check --compile-time-deps`, `locate-project`, `rustc --print`, `--version`).
+  That is M's and the resolver's. **read**
+- biome's load expanded 13,548 proc-macro calls in 167 s, 5,478 function-like ones in 136 s,
+  and the build held 38 GB. **read**
+- `harness/allrajit.py`'s set (five programs, a shared library, a proc-macro crate, built whole,
+  over the unit and stored) passes on the same host: each built and linked in 1.6-17.5 s and
+  ran as cargo's build does. **read**
 
 ## Order
 
@@ -260,3 +315,11 @@ project 3.8 s (the daemon's load; `Finished ... [ra-jit]`), 9.2 s from the first
 `~/.cache`, no `~/.rustup`. The same install through rustup before (Debian 12, 2026-10-25):
 10.7 s, 91 MB and 672 MB in `~/.rustup`. All **read**. The Linux release needs glibc 2.39, so
 Debian 12 cannot run it ([#351](https://github.com/indexable-inc/blaze/issues/351)).
+
+2026-10-25, K's first part: with `RA_JIT_WHOLE_BUILD=1`, `cargo blaze build` and `run` from
+nothing are the whole build above, no `cargo build` ([cargo.md](cargo.md#what-a-build-does));
+`harness/coldbuild.py` holds its fixtures to cargo's, and with `bench` does bench.py's projects:
+`cargo blaze build` from nothing against `cargo build`, each program's output the same, on
+dev-aws-8 (loaded): ripgrep 22.2 s against 6.0 s, fd 48.4 against 28.6, hyperfine 24.5 against
+5.8, just 29.2 against 8.3, bat 33.2 against 10.5, nushell 102.4 against 36.2. **read**. Off by
+default until axum's and biome's builds are whole and the cold times are near cargo's.

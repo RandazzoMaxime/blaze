@@ -127,6 +127,27 @@ a build took:
 
 `[ra-jit]` means the daemon built it. A cargo build prints cargo's usual line.
 
+With `RA_JIT_WHOLE_BUILD=1` (or `BLAZE_WHOLE_BUILD=1`), `build` and `run` from nothing are
+blaze's own instead of cargo's ([no-rustc.md](no-rustc.md), step K): each program the build
+asks for is built whole, every crate it depends on compiled by blaze over the shipped standard
+library and linked by blaze, and put where cargo puts it (`target/debug/<name>`,
+`target/release/<name>`, `examples/` for an example). No `cargo build` runs. A function the
+program can reach that blaze cannot compile yet fails the build, which says which and why;
+nothing is handed to cargo:
+
+       Compiling kapp v0.3.1 (/src/k/app)
+        Finished `dev` profile [ra-jit] target(s) in 18.40s
+
+       Compiling kuses v0.1.0 (/src/k/uses)
+    error: `kuses` can reach functions blaze could not compile, so it is not built:
+      `khalf::halved`: unsupported: f16 and f128
+    (what blaze said is in target/ra-jit/whole/kuses.log)
+
+Build scripts and proc macros are still built and run as the daemon's load does
+(`target/rust-analyzer`). A build of libraries alone and `test` are as without the setting.
+The daemon is not started, so each such build is a whole build again, quick where the store
+has its functions.
+
 `run` then runs the program and `test` runs the test executables the way cargo does: the
 same working directory, the variables cargo sets, cargo's `Running` lines and the same exit
 status. Every test runs, unless `RA_JIT_TESTS=affected` says otherwise.
@@ -376,6 +397,7 @@ build a command line is, so changing one starts from a cargo build again.
 | `RA_JIT_EMIT` | LLVM instruction selection: `optimized` or `fast` | `optimized`; `fast` at level 0 |
 | `RA_JIT_INLINE` | With LLVM at level 2 or 3, a program built whole (`runbench.py`'s builds) has the functions it calls in any crate built into it or shown to LLVM, as a release build does; the standard library's only when they are generic or `#[inline]`, as rustc does across crates. `crate` keeps that to the function's own crate, `0` builds nothing in, `all` does it in other builds with LLVM at level 2 or 3 too (never the daemon's, whose store keeps each function by its own code alone) | across crates in a whole program, the function's own crate otherwise |
 | `RA_JIT_SPLICE` | `0` links in full after every edit instead of splicing | splice |
+| `RA_JIT_WHOLE_BUILD` | `1` has `build` and `run` from nothing build each program whole with blaze, with no `cargo build` ([above](#what-a-build-does)) | cargo builds first |
 | `RA_JIT_OTHER_TOOLCHAIN` | `1` builds with the project's toolchain when it is not 1.99.0, rather than with 1.99.0, for a project pinned to a nightly near it ([support.md](support.md#toolchain)) | not set |
 
 `RA_JIT_TESTS` is read by each `cargo ra-jit test` alone and is not part of which build it
