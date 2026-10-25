@@ -6811,6 +6811,9 @@ fn main() -> anyhow::Result<()> {
     }
     match std::env::args().nth(1).as_deref() {
         Some("rustc-wrapper") => return cargo::wrapper::command(std::env::args_os().skip(2)),
+        Some(cargo::own_macro::COMMAND) => {
+            return cargo::own_macro::command(std::env::args_os().skip(2));
+        }
         Some("cargo") => return cargo::command(std::env::args().skip(2)),
         Some("enable" | "disable" | "status" | "stop") => {
             return cargo::command(std::env::args().skip(1));
@@ -7462,6 +7465,14 @@ fn process_wide() {
     let server = cargo::own_macro::server();
     if let Some(Ok(server)) = server.and_then(Path::to_str).map(AbsPathBuf::try_from) {
         load_cargo::serve_listed_with(server);
+        // A proc macro rustc compiled, as cargo's builds do, is expanded with ra-jit's.
+        load_cargo::own_libraries_with(Box::new(|sysroot, libraries| {
+            let libraries: Vec<PathBuf> = libraries.iter().map(|it| it.clone().into()).collect();
+            let sysroot = sysroot.map(AsRef::<Path>::as_ref);
+            let made = cargo::own_macro::libraries_of(sysroot, &libraries);
+            let made = made.into_iter().map(|it| it?.to_str().map(AbsPathBuf::try_from)?.ok());
+            made.collect()
+        }));
     }
 }
 

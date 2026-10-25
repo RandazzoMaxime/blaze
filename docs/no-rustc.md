@@ -992,7 +992,20 @@ Where J stands (2026-10-24):
   (and says so), so the wrapper links a proc macro only for a server there is. The
   toolchain's server is started only when a library is not ra-jit's: a load of fd starts
   none.
-- Next: ra-jit's libraries by default, kept in the store.
+- The default (2026-10-25): with the server beside `ra-jit`, every load uses it with no
+  variable (`RA_JIT_PROC_MACRO_SERVER=0` turns it off). A load whose proc macros cargo built
+  with rustc, the daemon's from cargo's messages, the checker's and a build script's (J0),
+  has ra-jit make each library from the crate's record (`ra-jit proc-macro-library`, four at
+  once) and expands with that; one ra-jit cannot make is said and left to rustc's library
+  and the toolchain's server. A library is kept in the store by the description of what it
+  was linked from and the digests of the files its dep-info names, so a second target
+  directory takes it from there. `macroserver.py all` builds each app a third time, into an
+  empty target directory over the first build's store, and fails if a library is linked
+  again: 3,465 calls the same on all three, every library from the store the third time
+  (hyperfine 35.1 s to 9.5 s, nushell 123.0 s to 79.3 s). On fd, the daemon's load started
+  blaze's server and no other, and made `clap_derive` in 19 s from an empty store, then took
+  it from the store when it was deleted. Left: #327, and the key names the target
+  directory's paths, so another checkout of the same crates links again.
 
 J, K and M are planned together in [self-contained.md](self-contained.md#j-k-and-m), since
 what they remove is most of the toolchain blaze still keeps: rustc and the sysroot's rlibs (116

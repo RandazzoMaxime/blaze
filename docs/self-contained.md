@@ -166,7 +166,8 @@ serde_derive, thiserror-impl, tokio-macros and clap_derive equal to the toolchai
    is blaze's own executable, which the rule allows to be built with rustc (its serde
    derives); each later release builds its server with the one before.
 3. On by default for the daemon's loads, the checker and the build scripts that link a proc
-   macro (J0); a proc macro's library kept in the store by its content, as any other crate's.
+   macro (J0); a proc macro's library kept in the store by its content, as any other crate's
+   (landed 2026-10-25).
    rustc then compiles no proc macro and none of `syn`, `quote` and `proc-macro2` for one: most
    of what rustc compiles in the cold build of a crate with derives.
 
@@ -219,4 +220,7 @@ hyperfine, just, nushell and helix, 3,465 calls expanded the same as the toolcha
 with rustc's libraries, 12 not compared (`pest_consume_macros`,
 [#327](https://github.com/indexable-inc/blaze/issues/327)). The Linux archive has the server
 beside `ra-jit` (built by it in 30 s on dev-aws-8), and `RA_JIT_PROC_MACRO_SERVER=1` takes it
-from there: a load of fd starts no toolchain server.
+from there: a load of fd starts no toolchain server. It is the default: the daemon's loads,
+the checker's and build scripts' expand with blaze's libraries, made from each crate's record
+and kept in the store; built again over that store, the six apps link none again and expand
+the same 3,465 calls.
