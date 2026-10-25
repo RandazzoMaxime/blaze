@@ -163,9 +163,10 @@ fn fetch_from(
 ) -> Result<(), String> {
     let failed = |e: &dyn std::fmt::Display| {
         format!(
-            "blaze builds with Rust {0}, which it downloads once, and the download failed: {e}. \
-             Running the command again goes on with it; with no network, rustup's \
-             `rustup toolchain install {0} --component rust-src` gives blaze the same Rust",
+            "blaze builds with Rust {0}, which it downloads once, and the download failed. \
+             Running the command again tries again, going on from where a download stopped; on \
+             a machine with no network, `rustup toolchain install {0} --component rust-src` \
+             gives blaze the same Rust.\n  {e}",
             release.version
         )
     };
