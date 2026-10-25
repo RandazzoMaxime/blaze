@@ -6,7 +6,8 @@
 //! registry's or git checkout's, and every crate it depends on is frozen too. Its key is a
 //! Merkle hash: where the source is below the toolchain, registry or checkout, its edition,
 //! kind, crate attributes, cfg, environment, and the names and keys of its dependencies; the store adds the toolchain
-//! and ra-jit's own build.
+//! and ra-jit's own build. `OUT_DIR` counts by its place below the target directory and by what
+//! the build script wrote there, so the same crate in another checkout has the same key.
 //!
 //! `RA_JIT_FROZEN` says what is done with what the store has: by default it is served;
 //! `check` resolves and finds as well and fails the build on any difference, `verify` writes
@@ -48,6 +49,17 @@ fn immutable(path: &str) -> Option<&str> {
         .find_map(|marker| path.find(marker).map(|at| &path[at + marker.len()..]))
 }
 
+/// What stands for the directory a build script wrote to in a frozen crate's key: the part of
+/// it from cargo's `build` directory on, whose `<package>-<hash>` cargo names by the package,
+/// its features, profile and target, and not by where the checkout is.
+fn build_output(out: &str) -> String {
+    let path = out.replace('\\', "/");
+    match path.rfind("/build/") {
+        Some(at) => format!("<target>{}", &path[at..]),
+        None => "<out>".to_owned(),
+    }
+}
+
 /// The key of `krate`, when it and every crate it depends on cannot change.
 fn key(
     db: &ide_db::RootDatabase,
@@ -80,23 +92,39 @@ fn key_of(
         hasher.update((bytes.len() as u64).to_le_bytes());
         hasher.update(bytes);
     };
-    field(b"ra-jit frozen def map 4");
+    field(b"ra-jit frozen def map 5");
     field(source.as_bytes());
     field(format!("{:?} {:?} {:?}", data.edition, data.target_kind, data.crate_attrs).as_bytes());
     let mut cfgs: Vec<String> =
         krate.cfg_options(db).into_iter().map(|it| it.to_string()).collect();
     cfgs.sort_unstable();
     field(cfgs.join("\n").as_bytes());
+    // A build script writes below the target directory of the checkout that ran it, so what it
+    // wrote stands for where: two checkouts share the crate when its script wrote the same.
+    let env = krate.env(db);
+    let out = env.get("OUT_DIR");
+    let out_stands_for = out.as_deref().map(build_output);
     // `CARGO` is wherever the cargo found on `PATH` is, which differs between a build script's
     // compile and the daemon's, and no crate's names are resolved by it.
-    let mut env: Vec<String> = krate
-        .env(db)
+    let mut vars: Vec<String> = env
         .iter()
         .filter(|(name, _)| *name != "CARGO")
-        .map(|(name, value)| format!("{name}={}", value.replace(package, "<source>/")))
+        .map(|(name, value)| {
+            let value = match (&out, &out_stands_for) {
+                (Some(out), Some(stands_for)) => value.replace(out.as_str(), stands_for),
+                _ => value.to_owned(),
+            };
+            format!("{name}={}", value.replace(package, "<source>/"))
+        })
         .collect();
-    env.sort_unstable();
-    field(env.join("\n").as_bytes());
+    vars.sort_unstable();
+    field(vars.join("\n").as_bytes());
+    if let Some(out) = &out {
+        for (path, hash) in crate::content::written_to(db, krate, out) {
+            field(path.as_bytes());
+            field(&hash);
+        }
+    }
     let deps: Vec<_> =
         data.dependencies.iter().map(|it| (it.crate_id, it.name.to_string())).collect();
     for (dep, name) in deps {
