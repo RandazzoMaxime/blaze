@@ -239,6 +239,7 @@ impl Checker {
         let broken = crate::broken_in(
             db,
             &self.checked,
+            &FxHashMap::default(),
             &self.sources,
             &self.root,
             None,

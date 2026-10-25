@@ -1139,6 +1139,235 @@ impl Listed {
     }
 }
 
+/// Each file as it was when the check for errors last found none in it, or before its first
+/// edit, which rustc built: the next check of it looks at the functions that changed since, and
+/// at those of the file that name one whose signature changed.
+#[derive(Default)]
+pub(crate) struct Checked {
+    files: FxHashMap<FileId, Option<Functions>>,
+}
+
+/// A file by the functions written among its items.
+struct Functions {
+    /// Everything but those functions, with the keys of the functions where they are.
+    rest: u64,
+    of: FxHashMap<String, Function>,
+    /// What a `#[cfg]` takes out, which names nothing that is compiled.
+    off: Vec<TextRange>,
+}
+
+struct Function {
+    /// All of the function but its body, attributes too.
+    signature: u64,
+    body: u64,
+    at: TextRange,
+    name: String,
+    /// Not in a trait or an impl of one, whose items are checked against each other.
+    alone: bool,
+}
+
+impl Checked {
+    /// Takes note of the files about to change that are not known yet. Those `edited` since the
+    /// program was last built are as no check has seen them, and are checked whole.
+    pub(crate) fn before_edit(
+        &mut self,
+        db: &RootDatabase,
+        listed: &Listed,
+        files: &[FileId],
+        edited: &[FileId],
+    ) {
+        for &file in files {
+            if !self.files.contains_key(&file) {
+                let off = Off::of(db, listed, file);
+                let functions = match edited.contains(&file) {
+                    true => None,
+                    false => functions_of(&tree_of(db, file), &off),
+                };
+                self.files.insert(file, functions);
+            }
+        }
+    }
+
+    /// The files were checked and found to have no error.
+    pub(crate) fn passed(&mut self, db: &RootDatabase, listed: &Listed, files: &[FileId]) {
+        for &file in files {
+            let off = Off::of(db, listed, file);
+            self.files.insert(file, functions_of(&tree_of(db, file), &off));
+        }
+    }
+
+    /// Where the functions are that the check of `file` has to look at, or `None` when it has
+    /// to look at all of the file.
+    pub(crate) fn to_check(
+        &self,
+        db: &RootDatabase,
+        listed: &Listed,
+        file: FileId,
+    ) -> Option<Vec<TextRange>> {
+        let was = self.files.get(&file)?.as_ref()?;
+        let tree = tree_of(db, file);
+        let now = functions_of(&tree, &Off::of(db, listed, file))?;
+        asked_of(was, &tree, &now)
+    }
+}
+
+/// Where the functions of `tree` are that changed since `was`, and those that name one whose
+/// signature changed, or `None` when anything else changed.
+fn asked_of(was: &Functions, tree: &SyntaxNode, now: &Functions) -> Option<Vec<TextRange>> {
+    if was.rest != now.rest || was.of.len() != now.of.len() {
+        return None;
+    }
+    let (mut asked, mut named) = (Vec::new(), FxHashSet::default());
+    for (key, it) in &now.of {
+        let before = was.of.get(key)?;
+        if before.signature != it.signature {
+            if !it.alone {
+                return None;
+            }
+            named.insert(it.name.as_str());
+        }
+        if before.signature != it.signature || before.body != it.body {
+            asked.push(it.at);
+        }
+    }
+    if named.is_empty() {
+        return Some(asked);
+    }
+    // What names a function whose signature changed is to be checked again: a function
+    // alone, or all of the file when something else does.
+    let names = |token: &syntax::SyntaxToken| {
+        token.kind() == SyntaxKind::IDENT && named.contains(token.text().trim_start_matches("r#"))
+    };
+    let tokens = tree.descendants_with_tokens().filter_map(|it| it.into_token());
+    for token in tokens.filter(names) {
+        let at = token.text_range();
+        if now.off.iter().any(|it| it.contains_range(at)) {
+            continue;
+        }
+        let func = now.of.values().find(|it| it.at.contains_range(at))?;
+        if !asked.contains(&func.at) {
+            asked.push(func.at);
+        }
+    }
+    Some(asked)
+}
+
+fn tree_of(db: &RootDatabase, file: FileId) -> SyntaxNode {
+    let edition =
+        relevant_crates(db, file).first().map_or(Edition::CURRENT, |it| it.data(db).edition);
+    EditionedFileId::new(db, file, edition).parse(db).syntax_node()
+}
+
+/// The file by its functions, or `None` when two of them have one key, or one has none.
+fn functions_of(tree: &SyntaxNode, off: &Off) -> Option<Functions> {
+    let (mut rest, mut of, mut taken_out) = (FxHasher::default(), FxHashMap::default(), vec![]);
+    let mut walk = tree.preorder_with_tokens();
+    while let Some(event) = walk.next() {
+        match event {
+            WalkEvent::Enter(syntax::NodeOrToken::Node(node)) => {
+                node.kind().hash(&mut rest);
+                if off.takes_out(&node) {
+                    taken_out.push(node.text_range());
+                    let attrs = ast::AnyHasAttrs::cast(node).into_iter().flat_map(|it| it.attrs());
+                    for attr in attrs {
+                        hash_tokens(attr.syntax(), None, &mut rest);
+                    }
+                    walk.skip_subtree();
+                    continue;
+                }
+                let Some(func) = ast::Fn::cast(node).filter(among_items) else { continue };
+                let (key, alone) = key_of(&func)?;
+                key.hash(&mut rest);
+                let body = func.body().map(|it| it.syntax().text_range());
+                let (mut signature, mut hashed) = (FxHasher::default(), FxHasher::default());
+                hash_tokens(func.syntax(), body, &mut signature);
+                if let Some(body) = func.body() {
+                    hash_tokens(body.syntax(), None, &mut hashed);
+                }
+                let function = Function {
+                    signature: signature.finish(),
+                    body: hashed.finish(),
+                    at: func.syntax().text_range(),
+                    name: func.name()?.text().trim_start_matches("r#").to_owned(),
+                    alone,
+                };
+                if of.insert(key, function).is_some() {
+                    return None;
+                }
+                walk.skip_subtree();
+            }
+            WalkEvent::Enter(syntax::NodeOrToken::Token(token)) if !token.kind().is_trivia() => {
+                token.kind().hash(&mut rest);
+                token.text().hash(&mut rest);
+            }
+            _ => {}
+        }
+    }
+    Some(Functions { rest: rest.finish(), of, off: taken_out })
+}
+
+/// Hashes the tokens of `node` that say something, but those in `but`.
+fn hash_tokens(node: &SyntaxNode, but: Option<TextRange>, into: &mut FxHasher) {
+    let tokens = node.descendants_with_tokens().filter_map(|it| it.into_token());
+    for token in tokens.filter(|it| !it.kind().is_trivia()) {
+        if but.is_some_and(|it| it.contains_range(token.text_range())) {
+            continue;
+        }
+        token.kind().hash(into);
+        token.text().hash(into);
+    }
+}
+
+/// Whether the function is an item of a module, a trait or an impl, not of a body.
+fn among_items(func: &ast::Fn) -> bool {
+    func.syntax().ancestors().skip(1).all(|it| {
+        matches!(
+            it.kind(),
+            SyntaxKind::SOURCE_FILE
+                | SyntaxKind::ITEM_LIST
+                | SyntaxKind::ASSOC_ITEM_LIST
+                | SyntaxKind::MODULE
+                | SyntaxKind::IMPL
+                | SyntaxKind::TRAIT
+        )
+    })
+}
+
+/// The function's modules, impl or trait and name, and whether it is alone: in no trait or
+/// impl of one.
+fn key_of(func: &ast::Fn) -> Option<(String, bool)> {
+    let mut key = vec![func.name()?.text().to_string()];
+    let mut alone = true;
+    for it in func.syntax().ancestors().skip(1) {
+        match it.kind() {
+            SyntaxKind::MODULE => key.push(ast::Module::cast(it)?.name()?.text().to_string()),
+            SyntaxKind::TRAIT => {
+                alone = false;
+                key.push(format!("trait {}", ast::Trait::cast(it)?.name()?.text()));
+            }
+            SyntaxKind::IMPL => {
+                let of = ast::Impl::cast(it)?;
+                alone &= of.trait_().is_none();
+                // The impl by what is written before its items.
+                let items = of.assoc_item_list().map(|it| it.syntax().text_range());
+                let mut header = String::from("impl");
+                let tokens = of.syntax().descendants_with_tokens().filter_map(|it| it.into_token());
+                for token in tokens.filter(|it| !it.kind().is_trivia()) {
+                    if items.is_some_and(|it| it.contains_range(token.text_range())) {
+                        break;
+                    }
+                    header.push(' ');
+                    header.push_str(token.text());
+                }
+                key.push(header);
+            }
+            _ => {}
+        }
+    }
+    key.reverse();
+    Some((key.join("::"), alone))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1198,6 +1427,57 @@ mod tests {
         assert_ne!(hash(&tests(""), &built), hash(&on, &built));
         let doc = tests("").replace("#[cfg(test)]", "#[doc = \"x\"]\n#[cfg(test)]");
         assert_ne!(hash(&tests(""), &built), hash(&doc, &built));
+    }
+
+    #[test]
+    fn a_check_looks_at_what_changed() {
+        let built = Off(vec![cfg::CfgOptions::default()]);
+        let asked = |before: &str, after: &str| {
+            let parse = |text: &str| SourceFile::parse(text, Edition::CURRENT).syntax_node();
+            let (was, tree) = (parse(before), parse(after));
+            let (was, now) = (functions_of(&was, &built)?, functions_of(&tree, &built)?);
+            let asked = asked_of(&was, &tree, &now)?;
+            let mut names: Vec<String> = asked
+                .iter()
+                .map(|&at| {
+                    let node = tree.covering_element(at).into_node().unwrap();
+                    let func = node.ancestors().find_map(ast::Fn::cast).unwrap();
+                    func.name().unwrap().text().to_string()
+                })
+                .collect();
+            names.sort();
+            Some(names)
+        };
+        let file = |sig: &str, call: &str, extra: &str| {
+            format!(
+                "pub struct V(u8);\nimpl V {{\n    pub fn get(&self{sig}) -> u8 {{ self.0 }}\n}}\n\
+                 pub fn user(v: &V) -> u8 {{ v.get({call}) }}\n\
+                 pub fn other() -> u8 {{ 1 }}\n{extra}\
+                 #[cfg(test)]\nmod tests {{\n    #[test]\n    fn t() {{ super::V(1).get({call}); }}\n}}\n"
+            )
+        };
+        let base = file("", "", "");
+        assert_eq!(asked(&base, &base), Some(vec![]));
+        let body = base.replace("{ 1 }", "{ 2 }");
+        assert_eq!(asked(&base, &body), Some(vec!["other".to_owned()]));
+        // The signature, its callers, and none of what a `#[cfg]` takes out.
+        let signature = file(", _: ()", "()", "");
+        assert_eq!(asked(&base, &signature), Some(vec!["get".to_owned(), "user".to_owned()]));
+        let named = file(", _: ()", "", "pub fn more(v: &V) -> u8 { v.get() }\n");
+        let was = file("", "", "pub fn more(v: &V) -> u8 { v.get() }\n");
+        assert_eq!(
+            asked(&was, &named),
+            Some(vec!["get".to_owned(), "more".to_owned(), "user".to_owned()])
+        );
+        // Named by what is no function, a trait's item, or anything else that changed.
+        let constant = |sig: &str| file(sig, "", "const C: fn(&V) -> u8 = V::get;\n");
+        assert_eq!(asked(&constant(""), &constant(", _: ()")), None);
+        let traits = |sig: &str| {
+            format!("trait T {{ fn f(&self{sig}); }}\nimpl T for u8 {{ fn f(&self{sig}) {{}} }}\n")
+        };
+        assert_eq!(asked(&traits(""), &traits(", _: u8")), None);
+        assert_eq!(asked(&base, &base.replace("V(u8)", "V(u16)")), None);
+        assert_eq!(asked(&base, &base.replace("pub fn other", "pub fn another")), None);
     }
 
     #[test]
