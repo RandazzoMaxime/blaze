@@ -107,6 +107,45 @@ The trees' runs and cargo's output for them are committed (`expected.json`, writ
 `tests/config_typed.rs` checks the typed tables, the rustflags order and `[env]` values as
 `cargo build -v` and `cargo run` showed them.
 
+The `profiles` part runs `cargo <command> --unit-graph -Zunstable-options` (with
+`RUSTC_BOOTSTRAP=1`, the flag being unstable) for `build`, `build --release`, `test --no-run`,
+`bench --no-run`, `check` and `build --target` a triple that is not the host's (so that host
+and target units stay apart, and Apple's `split-debuginfo` shows from Linux), and gives the
+graph cargo printed to the `profiles` example, which computes every unit's `profile` with
+blaze-manifest. Each profile is compared with cargo's as JSON, with the warnings about
+profiles (sorted: cargo prints those of manifests in `HashMap` order) and, when cargo refuses
+the profiles, its error. The trees of `crates/blaze-manifest/tests/profile-fixtures` cover
+package overrides and `"*"`, `build-override`, build scripts and proc macros shared between the
+host and the target, custom profiles through `inherits` chains, config profiles from files,
+`--config` and `CARGO_PROFILE_*`, `CARGO_INCREMENTAL`, `build.incremental` and `CI`, a virtual
+workspace run from a member, and every error and warning of cargo's about profiles.
+
+On dev-aws-8, 2026-10-25, at commit 2d1b0a3: 86 of 89 equal, 546 runs and 235,924 units, none
+with a different profile:
+
+| Part | Equal | Total |
+|---|---|---|
+| profile trees of `tests/profile-fixtures` (54 runs, 219 units) | 4 | 4 |
+| bench projects (72 runs, 31,949 units) | 12 | 13 |
+| workspace repositories (420 runs, 203,756 units) | 70 | 72 |
+
+bun and agave are refused by cargo past their profiles (bun's vendored `lol_html` is not
+checked out, agave needs rustc 1.99.1), so there is no graph to compare. rust-clippy turns
+`profile-rustflags` on in its `.cargo/config.toml`'s `[unstable]` table, which cargo reads only
+on nightly: the harness's cargo accepts it through `RUSTC_BOOTSTRAP`, and blaze, which reads
+configuration as the stable channel does, refuses it with cargo's stable error (stable cargo
+refuses the workspace too, its `build.rustflags` passing `-Z`). The other parts gave the counts
+above again.
+
+What each unit is built for comes from the graph's edges, so the part checks the profiles, not
+the unit graph: blaze's own unit graph is its own work. The walk reproduces cargo's order where
+it decides a profile: the roots are interned before their dependencies and all of a unit's
+dependencies before any is walked, a unit equal to one interned earlier is that one (profiles
+compare without whether their debuginfo is deferred), and the first way a unit is reached in
+the sharing pass decides whether the debuginfo of a host unit is lowered. Package overrides are
+checked against the packages of `Cargo.lock`, as cargo checks them against the workspace's
+resolve.
+
 ## Decisions
 
 **cargo's schema crate, pinned.** `cargo-util-schemas = "=0.14.3"` is the version cargo 1.99.0
