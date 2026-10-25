@@ -8,6 +8,20 @@ All notable changes to ra-jit are written here. The format follows
 
 ### Added
 
+- `crates/blaze-registry` fetches every kind of source a lock file names, as cargo 1.99
+  does (#298): `[source]` replacement as cargo's `SourceConfigMap` (`replace-with` chains to a
+  registry, a local registry, a directory, a git repository or a `[registries]` name, and
+  cargo's refusals); vendored directories, each file checked against `.cargo-checksum.json`;
+  and git dependencies with the `git` command, a database per repository at
+  `$CARGO_HOME/git/db/<name>-<hash>` and a checkout per commit at
+  `git/checkouts/<name>-<hash>/<short id>`, branch, tag, rev and locked commits, GitHub's fast
+  path, submodules from databases of their own, offline. `harness/fetchdiff.py` holds it to
+  `cargo fetch` and `cargo vendor` on dev-aws-8 over 314 lock files (the bench projects at
+  their pins but bun, the 300 most downloaded crates, git dependencies of every kind of
+  reference, a second sparse registry): 3684/3684 unpacked packages and 38/38 git checkouts
+  the same as cargo's, file by file, with the same directory names; crates.io replaced by a
+  mirror 42/42; ripgrep and zed vendored, 51/51 and 1533/1533 read where cargo vendor put
+  them.
 - `cargo blaze` reads the workspace with `blaze-manifest`, as cargo 1.99.0 reads it, where it
   ran `cargo metadata --no-deps` for every command (#298): equal to cargo on 385 of 385
   workspaces of `harness/resolve.py`'s corpus. The command's `--config` arguments now count,

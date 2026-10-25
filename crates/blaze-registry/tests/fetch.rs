@@ -8,7 +8,7 @@ use std::{
 };
 
 use blaze_registry::{
-    Blobs, Context, Package, Registry, SourceId,
+    Blobs, Context, Locked, Package, Registry, SourceConfig, SourceDef, SourceId, Sources,
     download::{From, checksum, crate_url},
     http::{Http, Response},
     index::Status,
@@ -341,4 +341,134 @@ fn download_urls() {
         format!("https://x/Ab/Cd/ab/cd/AbCd/AbCd-0.1.0.crate?{sum}")
     );
     assert_eq!(crate_url("https://x/{crate}", "abc", "1.0.0", &sum), "https://x/abc");
+}
+
+/// A vendored package as `cargo vendor` writes it: its files and a `.cargo-checksum.json`.
+fn vendor(dir: &Path, name: &str, version: &str, package: Option<&str>, files: &[(&str, &[u8])]) {
+    let root = dir.join(name);
+    let mut sums = Vec::new();
+    for (path, data) in files {
+        std::fs::create_dir_all(root.join(path).parent().unwrap()).unwrap();
+        std::fs::write(root.join(path), data).unwrap();
+        sums.push(format!("{path:?}:{:?}", checksum(data)));
+    }
+    let manifest = format!("[package]\nname = \"{name}\"\nversion = \"{version}\"\n");
+    std::fs::write(root.join("Cargo.toml"), &manifest).unwrap();
+    sums.push(format!("\"Cargo.toml\":{:?}", checksum(manifest.as_bytes())));
+    let package = package.map_or("null".to_owned(), |it| format!("{it:?}"));
+    let json = format!(r#"{{"files":{{{}}},"package":{package}}}"#, sums.join(","));
+    std::fs::write(root.join(".cargo-checksum.json"), json).unwrap();
+}
+
+fn locked(name: &str, version: &str, checksum: &str) -> Locked {
+    Locked {
+        source: SourceId::crates_io_git(),
+        precise: None,
+        package: Package {
+            name: name.to_owned(),
+            version: Version::parse(version).unwrap(),
+            checksum: checksum.to_owned(),
+        },
+    }
+}
+
+#[test]
+fn reads_vendored_directories_as_cargo() {
+    let fixture = Fixture::new("vendored");
+    let dir = fixture.home.join("vendor");
+    vendor(&dir, "alpha", "1.2.3", Some(&"a".repeat(64)), &[("src/lib.rs", b"pub fn a() {}\n")]);
+    vendor(&dir, "beta", "0.1.0", None, &[("src/lib.rs", b"")]);
+    std::fs::create_dir_all(dir.join(".git/x")).unwrap();
+    std::fs::write(dir.join(".git/x/Cargo.toml"), "not toml [").unwrap();
+    std::fs::create_dir_all(dir.join("leftover")).unwrap();
+    std::fs::write(dir.join("README"), "").unwrap();
+
+    let config = SourceConfig {
+        sources: vec![
+            (
+                "crates-io".to_owned(),
+                SourceDef { replace_with: Some("v".to_owned()), ..SourceDef::default() },
+            ),
+            ("v".to_owned(), SourceDef { directory: Some(dir.clone()), ..SourceDef::default() }),
+        ],
+        ..SourceConfig::default()
+    };
+    let context = Arc::new(Context::new(fixture.home.clone(), fixture.server.clone()));
+    let sources = Sources::new(&config, context).unwrap();
+    let directory = sources.directory(&SourceId::for_directory(&dir).unwrap()).unwrap();
+    let mut names: Vec<_> =
+        directory.packages().unwrap().iter().map(|it| it.name.clone()).collect();
+    names.sort();
+    assert_eq!(names, ["alpha", "beta"]);
+    assert_eq!(directory.query("alpha", &VersionReq::parse("^1.2").unwrap()).unwrap().len(), 1);
+
+    let roots = sources
+        .fetch(&[locked("alpha", "1.2.3", &"a".repeat(64)), locked("beta", "0.1.0", "")])
+        .unwrap();
+    assert_eq!(roots, [(dir.join("alpha"), From::Vendored), (dir.join("beta"), From::Vendored)]);
+    assert!(fixture.server.take_asked().is_empty());
+
+    let error = |it: Locked| format!("{:#}", sources.fetch(&[it]).unwrap_err());
+    assert!(
+        error(locked("alpha", "1.2.3", &"b".repeat(64)))
+            .starts_with("checksum for `alpha v1.2.3` changed between lock files")
+    );
+    assert!(error(locked("beta", "0.1.0", &"b".repeat(64))).starts_with(
+        "checksum for `beta v0.1.0` could not be calculated, but a checksum is listed"
+    ));
+    assert!(
+        error(locked("gamma", "1.0.0", ""))
+            .starts_with("failed to find package with id: gamma v1.0.0")
+    );
+    std::fs::write(dir.join("alpha/src/lib.rs"), "pub fn edited() {}\n").unwrap();
+    let edited = error(locked("alpha", "1.2.3", &"a".repeat(64)));
+    assert!(edited.starts_with("the listed checksum of `"), "{edited}");
+    assert!(edited.contains("directory sources are not intended to be edited"), "{edited}");
+
+    std::fs::remove_file(dir.join("beta/.cargo-checksum.json")).unwrap();
+    let missing =
+        Sources::new(&config, Arc::new(Context::new(fixture.home.clone(), fixture.server.clone())))
+            .unwrap()
+            .fetch(&[locked("alpha", "1.2.3", "")])
+            .unwrap_err();
+    assert!(
+        format!("{missing}")
+            .starts_with("failed to load checksum `.cargo-checksum.json` of beta v0.1.0: ")
+    );
+}
+
+#[test]
+fn replaced_registries_unpack_under_the_replacement() {
+    let fixture = Fixture::new("mirror");
+    let package = fixture.publish("Mirrored", &[("Mirrored-1.0.0/src/lib.rs", b"", 0o644)]);
+    let config = SourceConfig {
+        sources: vec![
+            (
+                "crates-io".to_owned(),
+                SourceDef { replace_with: Some("m".to_owned()), ..SourceDef::default() },
+            ),
+            (
+                "m".to_owned(),
+                SourceDef { registry: Some(format!("sparse+{BASE}")), ..SourceDef::default() },
+            ),
+        ],
+        ..SourceConfig::default()
+    };
+    let context = Arc::new(Context::new(fixture.home.clone(), fixture.server.clone()));
+    let sources = Sources::new(&config, context).unwrap();
+    let roots = sources
+        .fetch(&[Locked {
+            source: SourceId::crates_io_git(),
+            precise: None,
+            package: package.clone(),
+        }])
+        .unwrap();
+    let dir = fixture.source.registry_dir_name();
+    assert!(dir.starts_with("index.example.com-"), "{dir}");
+    assert_eq!(
+        roots,
+        [(fixture.home.join("registry/src").join(&dir).join("Mirrored-1.0.0"), From::Network)]
+    );
+    assert!(roots[0].0.join(".cargo-ok").exists());
+    assert!(!fixture.home.join("registry/src/index.crates.io-1949cf8c6b5b557f").exists());
 }
