@@ -8,7 +8,7 @@
 //! rustc compiles there that links such a library has rustc compile the proc macro first,
 //! over ra-jit's library, as rustc loads only its own.
 
-use std::{ffi::OsStr, path::Path, process::Command};
+use std::{ffi::OsStr, path::Path};
 
 use anyhow::Context as _;
 use paths::AbsPathBuf;
@@ -79,7 +79,7 @@ pub(crate) fn rustc_first(rustc: &OsStr, args: &[String], cwd: &Path) -> anyhow:
         let kept = records.join(unit).join(library.file_name().context("a library unnamed")?);
         std::fs::copy(&library, &kept)
             .with_context(|| format!("copying {} to {}", library.display(), kept.display()))?;
-        let mut compile = Command::new(rustc);
+        let mut compile = super::wrapper::rustc_of(rustc);
         for (name, _) in std::env::vars().filter(|(name, _)| own_script::read_by_crates(name)) {
             compile.env_remove(name);
         }

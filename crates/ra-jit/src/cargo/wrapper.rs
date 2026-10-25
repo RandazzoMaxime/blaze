@@ -6,7 +6,7 @@
 //! and one it has not is rustc's, after which the daemon loads the build.
 
 use std::{
-    ffi::OsString,
+    ffi::{OsStr, OsString},
     fs::OpenOptions,
     io::Write as _,
     path::{Path, PathBuf},
@@ -94,7 +94,7 @@ pub(crate) fn command(mut args: impl Iterator<Item = OsString>) -> anyhow::Resul
             command.arg(&rustc);
             command
         }
-        _ => Command::new(&rustc),
+        _ => rustc_of(&rustc),
     };
     compiler.args(&args);
     if only_asks {
@@ -167,6 +167,13 @@ pub(crate) fn command(mut args: impl Iterator<Item = OsString>) -> anyhow::Resul
         }
     }
     std::process::exit(status.code().unwrap_or(1));
+}
+
+/// The compiler cargo named, `rustc`, for a crate cargo asked it for: run then, or, for a
+/// proc macro ra-jit linked, when a crate of rustc's that links it is compiled
+/// ([`own_macro::rustc_first`]).
+pub(crate) fn rustc_of(rustc: &OsStr) -> Command {
+    Command::new(rustc)
 }
 
 /// Builds a crate of a package outside the workspace as cargo asked: its build script by
