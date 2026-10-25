@@ -5,7 +5,7 @@
   </picture>
 </p>
 
-<h3 align="center">Rebuild Rust in milliseconds, not seconds.</h3>
+<h3 align="center">Rebuild Rust in milliseconds.</h3>
 
 <p align="center">The same commands as cargo, with <code>blaze</code> in front.<br>Blazingly fast Rust, literally.</p>
 
@@ -30,14 +30,15 @@ For macOS on Apple silicon and Linux. Rather use crates.io or Nix? [Other ways t
 
 In any Rust project:
 
-```sh
+```text
 cargo blaze run     # like cargo run
 cargo blaze test    # like cargo test
 cargo blaze build   # like cargo build
 ```
 
-The first build is cargo's. Then change a function and build again: it's back in milliseconds,
-and the `Finished` line says `[ra-jit]` (blaze's engine). Every other cargo command passes
+The first build runs cargo, then waits a few seconds for blaze to load your project. Then change
+a function and build again: it's back in milliseconds, and the `Finished` line says `[ra-jit]`
+(blaze's engine). Every other cargo command passes
 straight through to cargo.
 
 ## How fast

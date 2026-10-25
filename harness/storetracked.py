@@ -154,9 +154,11 @@ def restart(ws, env, label, steps):
              re.findall(r"^store: (\d+) functions found, (\d+) compiled and added$", logs.text(), re.M)]
     wrong = 0
     took = sum(f for f, _ in found)
-    verdict = "ok" if took and program(ws) == FIRST else f"FOUND {took}, PRINTED {program(ws)!r}"
+    roots = sum(int(n) for n in re.findall(r"^base from the store: (\d+) roots", logs.text(), re.M))
+    verdict = "ok" if took and roots and program(ws) == FIRST else \
+        f"FOUND {took}, {roots} ROOTS, PRINTED {program(ws)!r}"
     wrong += verdict != "ok"
-    print(f"{label + ': the start':48} {verdict:12} store {found}", flush=True)
+    print(f"{label + ': the start':48} {verdict:12} store {found}, {roots} roots", flush=True)
     for what, edits, expected in steps:
         for file, old, new in edits:
             path = os.path.join(ws, file)
