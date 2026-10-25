@@ -1109,6 +1109,11 @@ pub(crate) fn place(from: &Path, to: &Path) -> std::io::Result<()> {
 /// program that is running.
 pub(crate) fn as_built(command: &mut Command) -> std::io::Result<()> {
     command.env(switch::VARIABLE, switch::wrapper_path()?).env(wrapper::DRIVEN, "1");
+    // The project's own wrapper still runs rustc, from inside ra-jit's.
+    match switch::project_wrapper(&std::env::current_dir()?) {
+        Some(theirs) => command.env(switch::CHAINED, theirs),
+        None => command.env_remove(switch::CHAINED),
+    };
     every_crate(command)
 }
 
