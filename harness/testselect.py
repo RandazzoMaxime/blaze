@@ -6,12 +6,15 @@ usage: testselect.py    (RA_JIT_BIN names the ra-jit built; cargo-ra-jit is foun
 
 A package has a library with unit tests and an integration test of it: tests that call one
 function or another of the library, one that downcasts a `dyn Any` of what one returns (a
-`TypeId`, which code generation takes from rustc), one that reads a file, one that calls
-nothing. It is tested until the daemon serves the build, then edited a step at a time, and
-after each the tests that ran have to be the ones the step names: those whose code or what it
-calls changed, those added or given other attributes, the one that reads a file every time,
-the one that failed until it passes, and with `RA_JIT_TESTS=all` every test. A test that ran
-has to end as its source says.
+`TypeId`, which code generation takes from rustc), one that keeps it in a `HashMap` (seeded at
+random), one that prints a backtrace (which reads the environment and the working directory),
+one that reads a file, one that calls nothing. It is tested until the daemon serves the build,
+then edited a step at a time, and after each the tests that ran have to be the ones the step
+names: those whose code or what it calls changed, those added or given other attributes, the
+one that reads a file every time, the one that failed until it passes, and with
+`RA_JIT_TESTS=all` every test. A test that ran has to end as its source says. With `-v` the
+output says why the one that reads a file runs, by the calls from it to the file system, and
+how many tests run every time.
 
 Python 3, stdlib only.
 """
@@ -55,6 +58,19 @@ mod tests {
     }
 
     #[test]
+    fn uses_a_map() {
+        let mut map = std::collections::HashMap::new();
+        map.insert(helper(1), "two");
+        assert_eq!(map.get(&2), Some(&"two"));
+    }
+
+    #[test]
+    fn shows_a_backtrace() {
+        let shown = std::backtrace::Backtrace::capture().to_string();
+        assert_eq!(helper(shown.len().min(0) as u32), 1);
+    }
+
+    #[test]
     fn reads_a_file() {
         assert!(std::fs::read_to_string("Cargo.toml").unwrap().contains("tsel"));
     }
@@ -79,13 +95,14 @@ fn it_other() {
 }
 """,
 }
-ALL = {"tests::uses_helper", "tests::uses_any", "tests::uses_other", "tests::reads_a_file", "tests::plain", "it_helper", "it_other"}
+CALL_HELPER = {"tests::uses_helper", "tests::uses_any", "tests::uses_a_map", "tests::shows_a_backtrace", "it_helper"}
+ALL = CALL_HELPER | {"tests::uses_other", "tests::reads_a_file", "tests::plain", "it_helper", "it_other"}
 FILE = "tests::reads_a_file"
 # (what the step is, [(file, old, new)], RA_JIT_TESTS, the tests that run, whether they pass)
 STEPS = [
     ("nothing edited", [], "affected", {FILE}, True),
     ("a function one test calls", [("src/lib.rs", "x + 1", "x + 2 - 1")], "affected",
-     {"tests::uses_helper", "tests::uses_any", "it_helper", FILE}, True),
+     CALL_HELPER | {FILE}, True),
     ("a function another test calls", [("src/lib.rs", "x * 2", "x + x")], "affected",
      {"tests::uses_other", "it_other", FILE}, True),
     ("a test added", [("src/lib.rs", "    #[test]\n    fn plain()",
@@ -101,12 +118,22 @@ STEPS = [
      {"tests::uses_other", FILE}, True),
     ("every test asked for", [], "all", ALL | {"tests::added"}, True),
     ("nothing edited again", [], "affected", {FILE}, True),
+    ("why a test runs every time", [], "affected -v", {FILE}, True),
 ]
+# What a step's output has to say, beside the tests it runs.
+SAYS = {
+    "why a test runs every time": [
+        r"Always tests::reads_a_file: it reaches `\w+`, which reads or writes files, by "
+        r"tsel::tests::reads_a_file -> std::fs::read_to_string::<…> -> .* -> \w+$",
+        r"Skipped \d+ tests, unchanged since the last pass; 1 test run every time \(said above\);",
+    ],
+}
 RAN = re.compile(r"^test (\S+) \.\.\. (ok|ignored|FAILED)", re.M)
 
 
 def test(ws, env, mode):
-    ran = subprocess.run(["cargo", "ra-jit", "test"], cwd=ws, env=dict(env, RA_JIT_TESTS=mode),
+    mode, *args = mode.split()
+    ran = subprocess.run(["cargo", "ra-jit", "test", *args], cwd=ws, env=dict(env, RA_JIT_TESTS=mode),
                          capture_output=True, text=True, timeout=TIMEOUT)
     return ran.returncode, ran.stdout + ran.stderr
 
@@ -155,6 +182,8 @@ def main():
                 verdict = f"RAN {', '.join(extra) or 'nothing more'}; DID NOT RUN {', '.join(missing) or '-'}"
             elif (code == 0) != passes or (failed == set()) != passes:
                 verdict = f"ENDED {code} WITH {', '.join(sorted(failed)) or 'no test'} FAILED"
+            elif unsaid := [it for it in SAYS.get(what, []) if not re.search(it, said, re.M)]:
+                verdict = f"DID NOT SAY {' NOR '.join(unsaid)}"
             wrong += verdict != "ok"
             print(f"{what:34} {verdict}", flush=True)
             if verdict != "ok" and os.environ.get("TESTSELECT_VERBOSE"):

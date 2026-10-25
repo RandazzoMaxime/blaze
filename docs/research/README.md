@@ -31,6 +31,11 @@ back them is under [docs/upstream/](../upstream/), each with a `SOURCE.md`. Sear
 - [borrowck.md](borrowck.md): rustc's NLL borrow checker and Polonius (the nightly-default
   alpha, the legacy datalog analysis, stabilization status, the UI tests that tell them apart),
   rust-analyzer's removed borrowck, and what ra-jit builds. 2026-10-20.
+- [warm-start.md](warm-start.md): a daemon's start on a warm store with nothing of rustc's
+  (#41): where helix's 105 s went (a walk of future types exponential in their depth, store
+  reads waiting on each other and the interner, the rebuild for the first edit), what changed
+  (38.0 s), and why the last-linked executable cannot be adopted as a base as it stands.
+  2026-10-24. Again on main `c48ca3f800`: helix 106.5 s to 38.3 s, store reads 561 s to 131 s.
 - [bun.md](bun.md): bun's Rust port (1.4.3, 1.25M lines in 103 crates on a nightly) built
   by ra-jit: how the harness builds it, what broke and was fixed, what is filed, and its edit
   and runtime numbers against cargo; why the whole program ran 5.9x slower than release and
@@ -44,6 +49,11 @@ back them is under [docs/upstream/](../upstream/), each with a `SOURCE.md`. Sear
   helix's warm start (a block unpacked once for every thread that asks, 32 MiB to 1 GiB: no
   gain, values read about one to a block), and bbtree's ordered map against papaya and
   DashMap for ra-jit's shared maps. 2026-10-24.
+- [lean-frontend.md](lean-frontend.md): what of nushell's cold start, edits and heap goes to
+  syntax, macro expansion, error tolerance, salsa's bookkeeping, inference, MIR and codegen;
+  tolerance and lossless trees are small, salsa revalidating on wide edits is the largest;
+  durability experiments (negative) and interned arguments never collected; the lean path
+  ranked, and the crates of a build listed on every core. 2026-10-24.
 - [../architecture-split.md](../architecture-split.md): what of ra-jit belongs in the
   rust-analyzer subtree and what in `crates/`; ra-jit's changes to rust-analyzer by purpose,
   upstream's churn on the files they touch, rustc's crate split, and a migration plan.

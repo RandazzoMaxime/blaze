@@ -98,7 +98,7 @@ built, the tests an edit could have changed the end of since they last passed:
 
     Running unittests src/lib.rs (target/debug/deps/tsel-1f2e): 2 of 5 tests
     Skipping tests/it.rs (target/debug/deps/it-9a8b): 2 tests, unchanged since the last pass
-    Skipped 5 tests, unchanged since the last pass; `RA_JIT_TESTS=all` runs every test
+    Skipped 5 tests, unchanged since the last pass; 1 test run every time (`-v` says why); `RA_JIT_TESTS=all` runs every test
 
 At each build the daemon hashes every test's code with the code of every function it calls,
 directly or through others, in any crate of the workspace or its dependencies, and its
@@ -107,15 +107,21 @@ A test runs again when that hash is not the one it last passed with, when it has
 since it was added or failed, and every time when it reaches what its code does not decide:
 a file, the environment, another process, the network, or a function ra-jit can't compile.
 An integration test also runs again when a program of its package that cargo hands it as
-`CARGO_BIN_EXE_<name>` was built again.
+`CARGO_BIN_EXE_<name>` was built again. `cargo ra-jit test -v` says, under each test
+executable, why each test it runs every time does, by the fewest calls from the test to it:
+
+    Always tests::reads_a_file: it reaches `statx`, which reads or writes files, by tsel::tests::reads_a_file -> std::fs::read_to_string::<…> -> std::fs::read_to_string::inner -> <std::fs::File>::metadata -> … -> statx
+
+`-v`, `-q` and `--color` only change what cargo prints, and are the same build to the daemon.
 
 A test executable cargo built, a command that names tests or passes the harness other flags
 than `-q`, `--nocapture`, `--show-output`, `--test-threads` and `--color`, and one that runs
-the ignored tests run as asked: every test. Time, randomness and threads are not counted as
-outside the code, so a test that depends on them by chance is as flaky as it was. Unset, or
-`all`, runs every test, as cargo does; the daemon then hashes nothing. What is left (a hash
-that never compiles on a warm store, saying why a test runs, a watch mode) is
-[#227](https://github.com/indexable-inc/ra-jit/issues/227).
+the ignored tests run as asked: every test. Time, randomness (a `HashMap`'s seed too) and
+threads are not counted as outside the code, so a test that depends on them by chance is as
+flaky as it was; nor is a backtrace, whose capture reads `RUST_BACKTRACE` and whose text the
+working directory, for what a failure prints. Unset, or `all`, runs every test, as cargo does;
+the daemon then hashes nothing. What is left (a hash that never compiles on a warm store, a
+watch mode) is [#227](https://github.com/indexable-inc/ra-jit/issues/227).
 
 While cargo builds, a spare worker already loads the workspace, resolves it and compiles the
 functions of each crate cargo is done with on a quarter of the cores, and reads the symbols of
