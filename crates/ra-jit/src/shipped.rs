@@ -167,12 +167,18 @@ pub(crate) fn command(mut args: impl Iterator<Item = String>) -> anyhow::Result<
     let said = built.map_err(|e| anyhow::anyhow!("{e} (the log is in {})", dir.display()))?;
     let unit = said.lines().find(|it| it.starts_with("standard library:")).unwrap_or_default();
     eprintln!("{unit}; built in {:.1?}", start.elapsed());
+    // Without them a program's build compiles its unit itself, as before: what a build
+    // script's build takes is still sent.
     for profile in ["dev", "release"] {
         let start = Instant::now();
-        let built = program_unit(sysroot, &dir.join("program"), &store, profile);
-        let said = built.map_err(|e| anyhow::anyhow!("{e} (the log is in {})", dir.display()))?;
-        let unit = said.lines().find(|it| it.starts_with("standard library:")).unwrap_or_default();
-        eprintln!("{unit}, for a `{profile}` program; built in {:.1?}", start.elapsed());
+        match program_unit(sysroot, &dir.join("program"), &store, profile) {
+            Ok(said) => {
+                let unit = said.lines().find(|it| it.starts_with("standard library:"));
+                let unit = unit.unwrap_or_default();
+                eprintln!("{unit}, for a `{profile}` program; built in {:.1?}", start.elapsed());
+            }
+            Err(e) => eprintln!("standard library for a `{profile}` program: not built: {e:#}"),
+        }
     }
     let start = Instant::now();
     let sent = runtime.block_on(remote::push(&store, &remote, &project))?;
