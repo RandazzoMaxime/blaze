@@ -11,6 +11,10 @@ All notable changes to ra-jit are written here. The format follows
 - `crates/blaze-build-script`: the environment cargo 1.99.0 gives a build script, computed
   from a plain description of the run with no cargo, ported from cargo's own rules and tests
   (no-rustc step I, #89; #298). Nothing uses it yet; blaze's own runs of scripts come next.
+- `blaze-build-script` reads what a build script prints as cargo 1.99.0 does (both
+  `cargo:` and `cargo::`, the `rust-version` rule of the latter, every directive and cargo's
+  errors for each) and says who receives it: the scripts each unit is linked with, the `-L`,
+  `-l`, link arguments, cfgs and variables of each target, and when a script runs again.
 
 - `cargo ra-jit test` with `RA_JIT_TESTS=affected` runs, on Linux, each test that reaches a
   file, the environment, a process or the network in a sandbox of its own (#257): a process
