@@ -473,6 +473,13 @@ All notable changes to ra-jit are written here. The format follows
 
 ### Fixed
 
+- The first start of a daemon after a cold `cargo ra-jit build` finds what that build stored
+  (#41). The two named the toolchain differently (the sysroot's libstd alone, or rustc's link
+  line with libcore and liballoc too) and the store hashes that name into every key: on
+  nushell the restart found 0 functions, took no frozen def map and expanded every proc macro
+  again. It now finds 103,750 functions, 374 frozen crates and 1,586 expansions, and its cold
+  compile is 11.9 s where it was 17.9 s. `warmstart.py` fails when the restart takes nothing.
+  docs/cargo.md no longer says the store is off unless `RA_JIT_CACHE` is set.
 - A daemon that stops lets its workers finish writing to the store what their last build kept,
   a minute at most each, where it killed them (#41). A stop just after an edit lost it: the
   next checkout of helix compiled 131,609 functions instead of 115,706.

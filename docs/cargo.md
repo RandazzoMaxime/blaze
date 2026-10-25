@@ -326,11 +326,13 @@ started it. To change one, run `cargo ra-jit stop` first.
 | `RA_JIT_MEMORY_MAX` | the most the workers hold together, a size such as `6G`, or `off` | half the machine's memory (on Linux, or of what its control group allows) |
 | `RA_JIT_SPARE` | `ready` keeps a spare worker with the library loaded at all times, for the next project; `0` starts none, and a workspace loads once cargo has built it | a spare for each build of a new workspace, as it begins |
 | `RA_JIT_OWN_BASE_MEMORY` | the most a worker may hold while it builds its own base in the background, a size such as `40G`, past which it gives that base up and edits patch rustc's executable; `off` is no bound | a quarter of the machine's memory (on Linux, or of what its control group allows) |
-| `RA_JIT_CACHE` | directory of the disk store; without it nothing is kept on disk | not set |
+| `RA_JIT_CACHE` | directory of the disk store, or `off` for none | `ra-jit/store` in the user's cache directory ([cache.md](cache.md)) |
 | `RA_JIT_REMOTE` and the other store variables | see [cache.md](cache.md) | not set |
 
-The disk store is off unless `RA_JIT_CACHE` is set. That is easy to miss: a daemon started by
-a shell without the variable keeps no store, whatever later shells have set.
+The disk store is on by default and shared by every daemon and checkout of the user. The
+daemon reads `RA_JIT_CACHE` once, when it starts: a daemon started by a shell without the
+variable keeps the default store whatever later shells have set, so run `cargo ra-jit stop`
+before changing it.
 
 ## Known problems
 

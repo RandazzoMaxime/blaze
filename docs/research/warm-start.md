@@ -122,6 +122,41 @@ change reads the store faster, it does not keep more in it (**read**).
   and the daemon gives each a minute. Without that, a stop just after an edit lost what the
   build before it kept: helix's `warm` compiled 131,609 functions instead of 115,706 (**read**).
 
+## Why "restart" reused nothing (2026-10-25)
+
+Measured on dev-aws-5 (c8i.16xlarge, 64 vCPUs, Linux x86-64), each run pinned to 16 cores with
+`taskset -c 32-47`, Cranelift, one run each of `harness/warmstart.py`. Before is main at
+`d4f6027e82`, after is the warm-store-1024 branch on it (**read**).
+
+- The store hashes the toolchain's name into every key. A build told ahead of cargo's (`first`,
+  `warm`) named it by the sysroot's libstd rlib; a daemon's own start (`restart`, `again`) named
+  it by rustc's link line, which has libcore and liballoc as well. So `restart`, the first
+  daemon-own start after cold builds, read a keyspace nobody had written: 0 functions, 0 frozen
+  def maps, 0 proc-macro expansions. `again` found what `restart` had written (**read**: the
+  two strings in `toolchain_identity`, and what the workers said).
+- Both now name core, alloc and std by their metadata hashes (**read**).
+
+| nushell `restart` | before | after |
+|---|---|---|
+| functions found / compiled and added | 0 / 157,057 | 103,750 / 0 |
+| frozen crates from the store / written | 0 / 1,297 parts | 374 / 0 |
+| proc macros expanded / from the store | 1,605 / 0 | 16 / 1,586 |
+| cold compile | 17.9 s | 11.9 s |
+| `cargo ra-jit build`, ready included | 31.3 s | 30.7 s |
+
+ripgrep's `restart` went from 0 found and 16,826 added to 9,640 found and 0 added, and from 0
+of 51 frozen crates to 51 (5.47 s and 5.55 s) (**read**).
+
+The wall time stays because what came from the store is of no use to the first edit: once the
+cold build has answered, the worker compiles all it took of the checkout again ("compiling what
+the store had of the checkout, for the first edit to patch", 73,586 functions in 8.0 s on
+nushell), and the `sync` that `cargo ra-jit build` sends when the worker is ready waits for it:
+it arrived as that build began and was answered 9.4 s later. A restart that found nothing
+compiled the checkout with marks the first time and had no such build (**read**, the
+`request: sync` lines in the worker's log). So the next lever is the one below: marks from
+stable names, so nothing is rebuilt for the first edit (**unverified** that it removes those
+9 s whole).
+
 ## What is left
 
 - "store read" is still 129 s of thread time in helix's "again". The 64 threads ask for the same
