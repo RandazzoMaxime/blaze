@@ -98,7 +98,8 @@ pub struct Items {
 }
 
 /// Each item of `crates`, and each item of theirs that one of them refers to. `external` names
-/// an item of any other crate: it is the same item wherever and whenever that name is.
+/// an item by where it is written: an item of any other crate is the same item wherever and
+/// whenever that name is, and an item of `crates` whose form missed something is hashed with it.
 pub fn of_crates(
     db: &dyn HirDatabase,
     crates: &[Crate],
@@ -119,7 +120,16 @@ pub fn of_crates(
             continue;
         }
         index.insert(id, nodes.len());
-        let node = cx.node(id);
+        let mut node = cx.node(id);
+        // What a form could not write could differ between two items whose forms are the
+        // same: such a form is this item's alone, by where it is written.
+        for sub in std::iter::once(&mut node.interface).chain(node.body.as_mut()) {
+            if sub.missed.is_some() {
+                let mut hasher = blake3::Hasher::new();
+                hasher.update(&sub.digest).update(b"missed").update(external(id).as_bytes());
+                sub.digest = *hasher.finalize().as_bytes();
+            }
+        }
         let body_refs = node.body.iter().flat_map(|it| &it.refs);
         for &r in node.interface.refs.iter().chain(body_refs) {
             if !index.contains_key(&r) && ours.contains(&r.krate(db)) {
