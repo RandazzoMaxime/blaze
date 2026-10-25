@@ -8390,6 +8390,7 @@ fn run_holding(
         if !switched.is_empty() {
             changed = sources::Changed::All;
         }
+        let (looking, mut looked) = (Instant::now(), 0usize);
         loop {
             if tree.relisted(&db, &changed) {
                 builds.settle(&mut db, &mut programs)?;
@@ -8412,6 +8413,7 @@ fn run_holding(
                 if !fresh && !changed.file(&on_disk) {
                     continue;
                 }
+                looked += 1;
                 let Ok(now) = std::fs::metadata(&on_disk).and_then(|m| m.modified()) else {
                     if matches!(file.file, Watched::Source(_)) {
                         let kept = held.read_on_disk(&file.path, None);
@@ -8455,6 +8457,14 @@ fn run_holding(
                 break;
             }
             changed = notices.take();
+        }
+        if std::env::var_os("RA_JIT_STATS").is_some() {
+            let all = if notices.watching() { "notices" } else { "every file" };
+            eprintln!(
+                "looked: {looked} of {} files ({all}) in {}us",
+                files.len(),
+                looking.elapsed().as_micros()
+            );
         }
         // The source files whose text the sources hold otherwise than the last build.
         let changes = held.changed();
