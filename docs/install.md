@@ -42,7 +42,7 @@ blaze's own proc-macro server, which a build from crates.io (below) does not hav
 to upgrade. To install a given release, end the line with `| sh -s -- --version 0.2.0`;
 `--no-toolchain` leaves the download to the first build, and `--help` says what else it takes.
 `cargo blaze <command>` is the same as `blaze <command>`. Until the first release under the name
-blaze, it installs the newest nightly build, which still builds with rustup's 1.99.0.
+blaze, it installs the newest nightly build.
 
 ## From crates.io
 
