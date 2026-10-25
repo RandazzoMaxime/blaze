@@ -1,7 +1,7 @@
 <h1 align="center">
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="docs/brand/ix-mark-on-dark.svg">
-    <img alt="ix" src="docs/brand/ix-mark-on-light.svg" height="40" align="absmiddle">
+    <img alt="ix" src="docs/brand/ix-mark-on-light.svg" height="46" align="absmiddle">
   </picture>
   blaze
 </h1>
