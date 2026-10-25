@@ -152,16 +152,44 @@ pub(crate) fn compile_as(
     made: &Made<'_>,
     dir: &Path,
 ) -> Result<(), String> {
-    let asked = Asked { args, cwd };
     let rustc = crate::answers::toolchain_rustc_of(rustc).ok_or("its toolchain is not known")?;
     let sysroot = rustc.parent().and_then(Path::parent).ok_or("its toolchain is not known")?;
+    let env: BTreeMap<String, String> =
+        std::env::vars().filter(|(name, _)| read_by_crates(name)).collect();
+    let asked = Asked { args, cwd };
+    compile_in(sysroot, &asked, source, env, made, dir, &|name| std::env::var(name).ok())
+}
+
+/// [`compile_as`] of the crate rustc compiled as `record` says, over the standard library of
+/// `sysroot`, with the variables cargo set for it then.
+pub(crate) fn compile_record(
+    sysroot: &Path,
+    record: &Record,
+    made: &Made<'_>,
+    dir: &Path,
+) -> Result<(), String> {
+    let asked = Asked { args: &record.args, cwd: &record.cwd };
+    let env = record.crate_env.clone();
+    let rustc_had = |name: &str| record.crate_env.get(name).cloned().or(std::env::var(name).ok());
+    compile_in(sysroot, &asked, &record.source, env, made, dir, &rustc_had)
+}
+
+/// [`compile_as`] of the crate rustc was `asked` for, the variables its source reads by `env!`
+/// being `env` and the others what `rustc_had` says.
+fn compile_in(
+    sysroot: &Path,
+    asked: &Asked<'_>,
+    source: &Path,
+    env: BTreeMap<String, String>,
+    made: &Made<'_>,
+    dir: &Path,
+    rustc_had: &dyn Fn(&str) -> Option<String>,
+) -> Result<(), String> {
     let library = sysroot.join("lib/rustlib/src/rust/library");
     if !library.is_dir() {
         return Err("the toolchain has no source of the standard library".to_owned());
     }
     let mut crates = Vec::new();
-    let env: BTreeMap<String, String> =
-        std::env::vars().filter(|(name, _)| read_by_crates(name)).collect();
     let first = Described {
         name: made.name.to_owned(),
         root: source.to_owned(),
@@ -196,7 +224,7 @@ pub(crate) fn compile_as(
         }
     }
     let read = std::fs::read_to_string(&made.dep_info).map_err(|it| it.to_string())?;
-    read_otherwise(&crate::dep_info::DepInfo::parse(&read), |name| std::env::var(name).ok())
+    read_otherwise(&crate::dep_info::DepInfo::parse(&read), rustc_had)
 }
 
 /// The `rust-project.json` of `crates` over the standard library of `sysroot`.

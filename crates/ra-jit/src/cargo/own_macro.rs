@@ -73,6 +73,108 @@ fn find() -> Option<PathBuf> {
     None
 }
 
+/// `ra-jit proc-macro-library <sysroot> <library>`: makes ra-jit's library of the proc macro
+/// rustc compiled at `<library>` and prints where it is ([`libraries_of`]).
+pub(crate) const COMMAND: &str = "proc-macro-library";
+
+/// The directory, in the record of a proc macro rustc compiled, of ra-jit's library of it.
+const OWN: &str = "ra-jit";
+
+/// How many libraries are made at once: each is a build that uses every core itself.
+const AT_ONCE: usize = 4;
+
+/// ra-jit's library of each of `libraries`, proc macros rustc compiled in a build through the
+/// wrapper, which recorded them (`units.rs`): the store's, or linked from source over the
+/// standard library of `sysroot`, each in a process of its own. `None` for one ra-jit could
+/// not make, which is said, and whose library of rustc's the load then expands with.
+pub(crate) fn libraries_of(sysroot: Option<&Path>, libraries: &[PathBuf]) -> Vec<Option<PathBuf>> {
+    let (Some(sysroot), Ok(exe)) = (sysroot, std::env::current_exe()) else {
+        return vec![None; libraries.len()];
+    };
+    let next = std::sync::atomic::AtomicUsize::new(0);
+    let made = std::sync::Mutex::new(vec![None; libraries.len()]);
+    std::thread::scope(|scope| {
+        for _ in 0..AT_ONCE.min(libraries.len()) {
+            scope.spawn(|| {
+                loop {
+                    let at = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    let Some(library) = libraries.get(at) else { break };
+                    let mut command = std::process::Command::new(&exe);
+                    command.arg(COMMAND).arg(sysroot).arg(library);
+                    let ran = command.stdin(std::process::Stdio::null()).output();
+                    let found = match ran {
+                        Ok(ran) if ran.status.success() => {
+                            let said = String::from_utf8_lossy(&ran.stdout).trim_end().to_owned();
+                            Ok((!said.is_empty()).then(|| PathBuf::from(said)))
+                        }
+                        Ok(ran) => Err(String::from_utf8_lossy(&ran.stderr).trim_end().to_owned()),
+                        Err(error) => Err(error.to_string()),
+                    };
+                    let name = library.file_name().unwrap_or_default().to_string_lossy();
+                    match found {
+                        Ok(it) => made.lock().unwrap()[at] = it,
+                        Err(why) => say::fallback(
+                            &format!("ra-jit did not make the proc macro {name}: {why}"),
+                            "rustc's library of it is expanded by the toolchain's server",
+                        ),
+                    }
+                }
+            });
+        }
+    });
+    made.into_inner().unwrap()
+}
+
+/// [`COMMAND`]. It prints nothing for a library rustc compiled in a build that did not go
+/// through the wrapper, which recorded nothing of it.
+pub(crate) fn command(mut args: impl Iterator<Item = std::ffi::OsString>) -> anyhow::Result<()> {
+    let sysroot = PathBuf::from(args.next().context("the sysroot is named first")?);
+    let library = PathBuf::from(args.next().context("then rustc's library")?);
+    match library_of(&sysroot, &library) {
+        Ok(own) => {
+            if let Some(own) = own {
+                println!("{}", own.display());
+            }
+            Ok(())
+        }
+        Err(why) => {
+            eprintln!("{why}");
+            std::process::exit(1)
+        }
+    }
+}
+
+/// ra-jit's library of the proc macro rustc compiled at `library`, made from its record over
+/// the standard library of `sysroot`, in that record. `None` when it has no record.
+fn library_of(sysroot: &Path, library: &Path) -> Result<Option<PathBuf>, String> {
+    let (prefix, suffix) = (std::env::consts::DLL_PREFIX, std::env::consts::DLL_SUFFIX);
+    let file = library.file_name().and_then(OsStr::to_str).ok_or("a library unnamed")?;
+    let unit = file.strip_prefix(prefix).and_then(|it| it.strip_suffix(suffix));
+    let unit = unit.ok_or("not a library")?;
+    let dir = library.parent().ok_or("a library without a directory")?;
+    // One ra-jit's own target directory was seeded with is recorded in cargo's.
+    let cargos = dir.components().rposition(|it| it.as_os_str() == "rust-analyzer").map(|at| {
+        let parts = dir.components().enumerate().filter(|(it, _)| *it != at);
+        parts.map(|(_, it)| it).collect::<PathBuf>()
+    });
+    let found = [Some(dir.to_owned()), cargos].into_iter().flatten().find_map(|dir| {
+        let records = Record::dir_for(&dir);
+        Some((Record::described(&records, unit)?, records))
+    });
+    let Some((record, records)) = found else { return Ok(None) };
+    let dir = records.join(unit).join(OWN);
+    let extra = record.codegen("extra-filename").unwrap_or_default();
+    let made = Made {
+        name: &record.crate_name,
+        proc_macro: true,
+        exe: dir.join(file),
+        dep_info: dir.join(format!("{}{extra}.d", record.crate_name)),
+    };
+    std::fs::create_dir_all(&dir).map_err(|it| it.to_string())?;
+    own_script::compile_record(sysroot, &record, &made, &dir)?;
+    Ok(Some(made.exe))
+}
+
 /// What the store keeps ra-jit's proc-macro libraries under in place of a toolchain: a
 /// library is told by its description, which its key has.
 const LIBRARIES: &str = "proc-macro libraries 1";
