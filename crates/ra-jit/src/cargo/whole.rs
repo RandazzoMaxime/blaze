@@ -94,6 +94,17 @@ fn whole(asked: &Invocation, cwd: &Path, program: &Program, dir: &Path) -> Resul
     std::fs::write(&log, said.as_bytes())
         .map_err(|it| format!("writing {}: {it}", log.display()))?;
     let shown = log.strip_prefix(cwd).unwrap_or(&log).display().to_string();
+    // A function of the program's own crates blaze cannot compile is left out of the object,
+    // and the link then fails on what it would have defined.
+    let unsupported: Vec<&str> =
+        said.lines().filter_map(|it| it.trim().strip_prefix("left to rustc: ")).collect();
+    if !output.status.success() && !unsupported.is_empty() {
+        return Err(format!(
+            "`{}` has functions blaze could not compile, so it is not built:\n  {}\n(what blaze said is in {shown})",
+            program.name,
+            unsupported.join("\n  ")
+        ));
+    }
     if !output.status.success() {
         let last = said.lines().rev().find(|it| !it.trim().is_empty()).unwrap_or("");
         let last = last.strip_prefix("Error: ").unwrap_or(last);
