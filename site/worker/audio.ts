@@ -40,6 +40,7 @@ function serve(bytes: ArrayBuffer, request: Request, etag: string): Response {
 	const r = range(request.headers.get('range'), size);
 	if (r === 'bad') {
 		headers.set('content-range', `bytes */${size}`);
+		headers.set('cache-control', 'no-store');
 		return new Response(null, { status: 416, headers });
 	}
 	if (request.headers.get('if-none-match') === etag && !r) return new Response(null, { status: 304, headers });
@@ -57,7 +58,7 @@ export async function handleAudio(request: Request, env: Env, url: URL): Promise
 	const m = FILE.exec(url.pathname);
 	if (!m) return env.ASSETS.fetch(request);
 	const etag = `"${m[1]}"`;
-	// Files are a few tens of kilobytes (one spoken line each), so they are read whole and sliced here.
+	// One spoken line each, up to a few hundred kilobytes (about 90 s at 32 kb/s), so they are read whole and sliced here.
 	if (env.AUDIO) {
 		const obj = await env.AUDIO.get(`${m[1]}.webm`);
 		if (!obj) return plain('Not found.', 404);

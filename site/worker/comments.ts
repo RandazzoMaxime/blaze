@@ -167,6 +167,8 @@ async function createForm(request: Request, env: Env): Promise<Response> {
 
 /** Validates and stores one comment, under the rate limit. */
 async function insert(env: Env, me: User, docName: unknown, block: unknown, rawBody: unknown): Promise<Created> {
+	// Sign-in off (no client id) means commenting off too, including for sessions started before it was turned off.
+	if (!env.GITHUB_CLIENT_ID) return { status: 403, error: 'Comments are off.', code: null };
 	const name = typeof docName === 'string' ? docName : '';
 	const page = doc(name);
 	if (!page) return { status: 400, error: 'No such page.', code: null };
