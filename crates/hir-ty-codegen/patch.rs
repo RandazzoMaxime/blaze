@@ -49,7 +49,9 @@ pub(super) fn stable_mark(
     debug: bool,
 ) -> Option<u128> {
     let mut hasher = rustc_stable_hash::StableSipHasher128::new();
-    compiled.code.hash(&mut hasher);
+    // Left out with the variables below: a full build and a later compile of the same code
+    // can give different named locals a slot of their own.
+    compiled.code.hash_with(&mut hasher, false);
     for request in &compiled.requests.funcs {
         request.sig.hash(&mut hasher);
         match &request.target {
@@ -2018,6 +2020,9 @@ impl Base {
             match (same, instance) {
                 (Some(Some(true)), _) => {}
                 _ if !touched => eprintln!("check-all: MISSED `{}` from the store", was.name),
+                (None, _)
+                    if unchanged
+                        && self.dropped(db, names, &mut homes, &mut found, i, &mut Vec::new()) => {}
                 _ if unchanged => {
                     eprintln!(
                         "check-all: MISSED `{}` from the store, its items unchanged",

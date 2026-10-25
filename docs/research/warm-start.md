@@ -378,3 +378,10 @@ and the branch 21.44 and 21.61 s, its compile of the roots 9.7 s where main's to
   rest of the gap is work that only a warm database or a persisted answer saves: which
   callees are small enough to inline, kept by the callee's content, would take the largest
   share (**unverified**).
+- A stored mark hashed where the named locals of the code are kept for a debugger, and a full
+  build and a later compile of the same code differ there: std's `map_fold` over the
+  fixture's closures, whose two zero-sized parameters `f` and `g` have a slot each in the
+  full build and none in the later compile, the machine code byte for byte the same. Every
+  edit after a restart found such code changed and compiled it again; the mark now leaves
+  the slots out with the variables (**read**, storetracked.py under `RA_JIT_CHECK_ALL`). Why
+  the two compiles give them slots differently is not known (**unverified**).
