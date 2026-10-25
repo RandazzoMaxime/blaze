@@ -174,7 +174,8 @@ $releases/download/$tag/$asset"
 fi
 
 mkdir "$tmp/unpacked"
-tar -xzf "$tmp/$asset" -C "$tmp/unpacked" 2>"$tmp/error" ||
+# -o: as root, tar gives files the archive's owner, which a container's user namespace may not have.
+tar -xzof "$tmp/$asset" -C "$tmp/unpacked" 2>"$tmp/error" ||
     fail "the downloaded archive could not be unpacked." "$(cat "$tmp/error")"
 unpacked="$tmp/unpacked/${asset%.tar.gz}"
 [ -x "$unpacked/ra-jit" ] || fail "the archive does not have the files blaze needs." "$asset has no ${asset%.tar.gz}/ra-jit"
