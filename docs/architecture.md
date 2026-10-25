@@ -346,7 +346,10 @@ built onto rustc's executable: its names are rustc's where the program has no ot
 (`Resolver::onto`), and the object, all of the program, is spliced into that executable as a
 patch is (`splice::Baseline::spliced_whole`): each of its functions that rustc's has is
 redirected, the rest are new, and a function too short for the jump or a name rustc's has
-more than one of is one of the new. The executable is read again in the background with the
+more than one of is one of the new. On x86-64 a function's room for the jump runs over the
+`int3`s and `nop`s the linker padded it with up to the next symbol, which is what a getter of
+one field needs (`mov`, `ret`: 4 bytes); a patch that has to redirect a function with no room
+is built in full. The executable is read again in the background with the
 object's symbols in it, the base of the patches after, which name against rustc's symbols too
 and are spliced onto what the whole splice left, an `#[inline]` function's edit too, since that
 object has marks to compare with.
