@@ -11,6 +11,7 @@
 use std::{
     ffi::OsStr,
     path::{Path, PathBuf},
+    sync::OnceLock,
 };
 
 use anyhow::Context as _;
@@ -40,7 +41,14 @@ pub(crate) fn wanted() -> bool {
 
 /// The server that expands with the libraries ra-jit links, as [`SERVER`] says, relative to
 /// the current directory: `None` when it names none, or `1` and no server is beside ra-jit.
-pub(crate) fn server() -> Option<PathBuf> {
+/// A load names it to its cargo, or takes the variable away, so the wrapper links a proc
+/// macro only for a server there is.
+pub(crate) fn server() -> Option<&'static Path> {
+    static FOUND: OnceLock<Option<PathBuf>> = OnceLock::new();
+    FOUND.get_or_init(find).as_deref()
+}
+
+fn find() -> Option<PathBuf> {
     let named = std::env::var_os(SERVER)?;
     if named == "1" {
         let exe = std::env::current_exe().ok()?;

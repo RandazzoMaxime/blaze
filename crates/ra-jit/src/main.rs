@@ -6996,13 +6996,17 @@ fn cargo_config(args: &Args) -> CargoConfig {
         // configuration at its word, and `checksum-freshness` hands rustc a `-Z` flag the
         // stable rustc refuses, so that no build script runs. The wrapper is told when the
         // target directory is ra-jit's own, which cargo's builds do not read: the proc macros
-        // built there can be ra-jit's (`cargo/own_macro.rs`).
+        // built there can be ra-jit's (`cargo/own_macro.rs`), for the server the load found.
         extra_env: [("CARGO_UNSTABLE_CHECKSUM_FRESHNESS".to_owned(), Some("false".to_owned()))]
             .into_iter()
-            .chain(
-                args.own_target
-                    .then(|| (cargo::own_macro::OWN_TARGET.to_owned(), Some("1".to_owned()))),
-            )
+            .chain(args.own_target.then(|| {
+                let server = cargo::own_macro::server().map(|it| it.display().to_string());
+                [
+                    (cargo::own_macro::OWN_TARGET.to_owned(), Some("1".to_owned())),
+                    (cargo::own_macro::SERVER.to_owned(), server),
+                ]
+            }))
+            .flatten()
             .collect(),
         ..Default::default()
     }
@@ -7452,7 +7456,7 @@ fn process_wide() {
     project_model::SYSROOT_AS_BUILT.store(true, std::sync::atomic::Ordering::Relaxed);
     ra_jit_expand::install();
     let server = cargo::own_macro::server();
-    if let Some(Ok(server)) = server.as_deref().and_then(Path::to_str).map(AbsPathBuf::try_from) {
+    if let Some(Ok(server)) = server.and_then(Path::to_str).map(AbsPathBuf::try_from) {
         load_cargo::serve_listed_with(server);
     }
 }
