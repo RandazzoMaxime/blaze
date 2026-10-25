@@ -32,10 +32,14 @@ def counts(daemon):
 def another_build(exe, at):
     """A copy of `exe` whose bytes are not its: what a rebuild of the same sources is to the store."""
     shutil.copy2(exe, at)
-    with open(at, "ab") as copy:
-        copy.write(b"\0another build of the same sources\0")
+    # A Mach-O with bytes past its signature fails codesign's checks, so on macOS the signature
+    # is what differs.
     if sys.platform == "darwin":
-        subprocess.run(["codesign", "--force", "--sign", "-", at], check=True, capture_output=True)
+        subprocess.run(["codesign", "--force", "--sign", "-", "--identifier", "another-build", at],
+                       check=True, capture_output=True)
+    else:
+        with open(at, "ab") as copy:
+            copy.write(b"\0another build of the same sources\0")
     return at
 
 
