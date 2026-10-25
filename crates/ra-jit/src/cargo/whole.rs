@@ -54,7 +54,7 @@ struct Program {
 pub(super) fn build(asked: &Invocation) -> anyhow::Result<Option<i32>> {
     let started = Instant::now();
     let cwd = std::env::current_dir()?;
-    let metadata = super::state::metadata(asked)?;
+    let metadata = super::state::metadata(asked);
     let programs = planned(asked, &cwd, &metadata)?;
     if programs.is_empty() {
         return Ok(None);
