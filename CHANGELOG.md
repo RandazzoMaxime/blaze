@@ -11,25 +11,7 @@ All notable changes to ra-jit are written here. The format follows
 - `crates/blaze-build-script`: the environment cargo 1.99.0 gives a build script, computed
   from a plain description of the run with no cargo, ported from cargo's own rules and tests
   (no-rustc step I, #89; #298). Nothing uses it yet; blaze's own runs of scripts come next.
-- `crates/blaze-resolve`, cargo's resolver owned by blaze (#298), starts with cargo 1.99.0's package
-  model, used by nothing yet: `SourceId` (path, git and sparse registries, git at a branch, tag or
-  rev with its commit, directory, local registry) compared by cargo's canonical URL and written as
-  lock files, package ids and messages write it; `PackageId`, `PackageIdSpec` (`-p` and
-  `cargo metadata`'s ids), `Dependency` with renames, kinds, targets and its locked or `--precise`
-  requirement; `Summary` and its feature map, with the implicit features of optional dependencies
-  and cargo's errors for features; and the `Registry` the resolver asks, with yanked and offline
-  versions marked. Its tests include cargo's own for these types.
-- `blaze-resolve` reads and writes `Cargo.lock` as cargo 1.99.0 does (#298): every encoding
-  from 1 (checksums in `[metadata]`) to 4 (git references URL-encoded), `[[patch.unused]]` and
-  `[replace]`, the comments above cargo's header kept, and a lock file written back byte for
-  byte. As in cargo, an unchanged lock file keeps its encoding, a changed one is raised to the
-  workspace's default (from its lowest `rust-version`), under `--locked` or `--frozen` a change
-  is an error, and the checksums of the old file must agree with the new resolve. Its tests write
-  back the lock files of ripgrep and fd releases and of git workspaces cargo generated, one of
-  each encoding, and port cargo's `lockfile_compat` tests; `BLAZE_RESOLVE_LOCKFILES=dir` adds a
-  directory of lock files (24 releases of twelve projects, zed's 70 git sources among them,
-  write back byte for byte). A registry read from a lock file before its manifest is now named
-  as cargo names it.
+
 - `cargo ra-jit test` with `RA_JIT_TESTS=affected` runs, on Linux, each test that reaches a
   file, the environment, a process or the network in a sandbox of its own (#257): a process
   in new user, mount, network, IPC and PID namespaces, the machine's files read-only, the
@@ -282,6 +264,25 @@ All notable changes to ra-jit are written here. The format follows
   Commit 99cbb902ad's message
   says the levels alone turned it on; until b460bbe327 they did not, and it took
   `RA_JIT_INLINE=all`.
+- `crates/blaze-resolve`, cargo's resolver owned by blaze (#298), starts with cargo 1.99.0's package
+  model, used by nothing yet: `SourceId` (path, git and sparse registries, git at a branch, tag or
+  rev with its commit, directory, local registry) compared by cargo's canonical URL and written as
+  lock files, package ids and messages write it; `PackageId`, `PackageIdSpec` (`-p` and
+  `cargo metadata`'s ids), `Dependency` with renames, kinds, targets and its locked or `--precise`
+  requirement; `Summary` and its feature map, with the implicit features of optional dependencies
+  and cargo's errors for features; and the `Registry` the resolver asks, with yanked and offline
+  versions marked. Its tests include cargo's own for these types.
+- `blaze-resolve` reads and writes `Cargo.lock` as cargo 1.99.0 does (#298): every encoding
+  from 1 (checksums in `[metadata]`) to 4 (git references URL-encoded), `[[patch.unused]]` and
+  `[replace]`, the comments above cargo's header kept, and a lock file written back byte for
+  byte. As in cargo, an unchanged lock file keeps its encoding, a changed one is raised to the
+  workspace's default (from its lowest `rust-version`), under `--locked` or `--frozen` a change
+  is an error, and the checksums of the old file must agree with the new resolve. Its tests write
+  back the lock files of ripgrep and fd releases and of git workspaces cargo generated, one of
+  each encoding, and port cargo's `lockfile_compat` tests; `BLAZE_RESOLVE_LOCKFILES=dir` adds a
+  directory of lock files (24 releases of twelve projects, zed's 70 git sources among them,
+  write back byte for byte). A registry read from a lock file before its manifest is now named
+  as cargo names it.
 
 ### Changed
 
