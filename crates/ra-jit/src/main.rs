@@ -6134,6 +6134,8 @@ enum Event {
     Tiered(usize, Tiered),
     /// The daemon's own base of the program at the index holds more memory than it may.
     OverBudget(usize),
+    /// A file changed on disk.
+    Noticed,
 }
 
 /// The functions of a program compiled at a higher level, for its next patch.
@@ -6318,6 +6320,7 @@ impl Builds {
                 self.waiting.push_back(asked);
                 return Ok(false);
             }
+            Event::Noticed => return Ok(false),
             Event::Edited(edited) => {
                 if let Some(older) = self.edits.iter_mut().find(|it| it.path == edited.path) {
                     let _ = writeln!(&older.client, "ok superseded");
@@ -7811,7 +7814,11 @@ fn run_holding(
     let mut harnessed: FxHashSet<PathBuf> = FxHashSet::default();
     // The source files as the builds read them, and the disk's notices of changes to them.
     let mut held = sources::Sources::new();
-    let mut notices = sources::Notices::new();
+    // A change on disk is taken in when it comes, before the build that asks for it.
+    let mut notices = {
+        let sender = sender.clone();
+        sources::Notices::new(move || _ = sender.send(Event::Noticed))
+    };
     // How many files and directories were watched when the watch was last made.
     let mut watched_len = (usize::MAX, usize::MAX);
     loop {
@@ -8293,7 +8300,9 @@ fn run_holding(
                 }
                 // What waited for the build that was interrupted is asked again at once.
                 builds.stuck = clients.is_empty() && !interrupt;
-                if clients.is_empty() {
+                // A change on disk is read and applied without a client, so that the build a
+                // client asks for next has it already.
+                if clients.is_empty() && !notices.pending() {
                     continue;
                 }
                 // A package that was the same in two checkouts may have been edited in one.

@@ -14,7 +14,11 @@
 
 use std::{
     path::{Path, PathBuf},
-    sync::{Arc, mpsc},
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+        mpsc,
+    },
     time::Duration,
 };
 
@@ -80,19 +84,30 @@ pub(crate) struct Notices {
     known: FxHashSet<PathBuf>,
     /// Gathered by [`Notices::wait`] and not taken yet.
     pending: Changed,
+    /// Whether the watcher woke the daemon since the last [`Notices::take`].
+    woke: Arc<AtomicBool>,
 }
 
 impl Notices {
     /// A watcher, unless `RA_JIT_POLL` asks for the look at every file instead or the system
-    /// has none to give: then every [`Notices::take`] is [`Changed::All`].
-    pub(crate) fn new() -> Notices {
+    /// has none to give: then every [`Notices::take`] is [`Changed::All`]. `wake` is called
+    /// when a change comes, once until the next [`Notices::take`].
+    pub(crate) fn new(wake: impl Fn() + Send + 'static) -> Notices {
         let (sender, events) = mpsc::channel();
         let polled = std::env::var_os("RA_JIT_POLL").is_some_and(|it| it != "0");
+        let woke = Arc::new(AtomicBool::new(false));
         let watcher = if polled {
             None
         } else {
-            notify::recommended_watcher(move |event| {
+            let woke = woke.clone();
+            notify::recommended_watcher(move |event: notify::Result<notify::Event>| {
+                // The daemon's own reads of the files are no change.
+                let read =
+                    event.as_ref().is_ok_and(|it| matches!(it.kind, notify::EventKind::Access(_)));
                 let _ = sender.send(event);
+                if !read && !woke.swap(true, Ordering::SeqCst) {
+                    wake();
+                }
             })
             .inspect_err(|error| {
                 eprintln!("notices: no watcher ({error}); every file is looked at")
@@ -106,7 +121,14 @@ impl Notices {
             watched: FxHashMap::default(),
             known: FxHashSet::default(),
             pending: Changed::All,
+            woke,
         }
+    }
+
+    /// Whether a change came that was not taken yet.
+    pub(crate) fn pending(&mut self) -> bool {
+        self.gather();
+        self.watcher.is_some() && !self.pending.is_empty()
     }
 
     pub(crate) fn watching(&self) -> bool {
@@ -141,6 +163,7 @@ impl Notices {
 
     /// What changed since the last call.
     pub(crate) fn take(&mut self) -> Changed {
+        self.woke.store(false, Ordering::SeqCst);
         self.gather();
         let empty = Changed::Some { files: FxHashSet::default(), dirs: FxHashSet::default() };
         let taken = std::mem::replace(&mut self.pending, empty);
@@ -387,7 +410,7 @@ mod tests {
     fn notices_name_the_changed_file_and_its_directory() {
         let dir = std::env::temp_dir().join(format!("ra-jit-notices-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
-        let mut notices = Notices::new();
+        let mut notices = Notices::new(|| {});
         if !notices.watching() {
             return;
         }
