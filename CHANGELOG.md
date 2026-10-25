@@ -48,7 +48,9 @@ All notable changes to ra-jit are written here. The format follows
   package reached from the members, its dependencies by the name its code uses, their kinds and
   platforms, and its features, filtered by `--filter-platform`. The test compares the JSON with
   cargo's for a workspace with a renamed dependency, one used as both normal and dev, a build
-  dependency and a `cfg(unix)` one.
+  dependency and a `cfg(unix)` one. `harness/resolve_graph.py` compares, over the corpus of
+  `harness/resolve`, the `resolve` blaze-resolve makes of the packages cargo lists with cargo's,
+  with each project's lock file and with none.
 - `cargo ra-jit test` with `RA_JIT_TESTS=affected` runs, on Linux, each test that reaches a
   file, the environment, a process or the network in a sandbox of its own (#257): a process
   in new user, mount, network, IPC and PID namespaces, the machine's files read-only, the
