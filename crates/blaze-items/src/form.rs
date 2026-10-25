@@ -15,12 +15,12 @@ use hir_ty::{
     GenericPredicates, ImplTraitId, InferBodyId, TyDefId,
     db::{GeneralConstId, HirDatabase, InternedClosure},
     mir::{
-        AggregateKind, AsmOperand, AssertKind, MirBody, Operand, OperandKind, ProjectionElem,
-        Rvalue, StatementKind, StoredPlace, TerminatorKind,
+        AggregateKind, AsmOperand, AssertKind, BasicBlockId, LocalId, MirBody, Operand,
+        OperandKind, ProjectionElem, Rvalue, StatementKind, StoredPlace, TerminatorKind,
     },
     next_solver::{Clause, Const, ConstKind, GenericArgs, Region, TermId, Ty, TyKind},
 };
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 use rustc_type_ir::{
     AliasTermKind, AliasTy, AliasTyKind, BoundVarIndexKind, ClauseKind, ExistentialPredicate,
     GenericArgKind, OutlivesPredicate, RegionKind,
@@ -657,31 +657,13 @@ impl<'db> Cx<'db> {
         }
     }
 
-    /// A body as the code generator is given it: locals by number, no names, no spans.
+    /// A body as the code generator is given it: no names, no spans, blocks and locals by
+    /// number in the order a walk from the start block reaches them.
     pub(crate) fn mir(&self, f: &mut Form, body: &MirBody<'db>) {
-        f.len(body.locals.len());
-        for (_, local) in body.locals.iter() {
-            self.ty(f, local.ty.as_ref());
-        }
-        f.len(body.param_locals.len());
-        for local in &body.param_locals {
-            f.u32(local.into_raw().into_u32());
-        }
-        f.u32(body.start_block.into_raw().into_u32());
-        f.u8(body.inherits_overflow_checks as u8);
-        f.u8(body.coroutine.is_some() as u8);
-        f.len(body.basic_blocks.len());
-        for (_, block) in body.basic_blocks.iter() {
-            f.u8(block.is_cleanup as u8);
-            f.len(block.statements.len());
-            for statement in &block.statements {
-                self.statement(f, &statement.kind);
-            }
-            match &block.terminator {
-                Some(terminator) => self.terminator(f, &terminator.kind),
-                None => f.u8(0xfe),
-            }
-        }
+        let mut canon = Canon::new(body);
+        self.walk(&mut Form::new(""), &canon);
+        canon.collecting = false;
+        self.walk(f, &canon);
         // A closure is part of the body it is written in.
         f.len(body.closures.len());
         for &closure in &body.closures {
@@ -692,12 +674,99 @@ impl<'db> Cx<'db> {
         }
     }
 
-    fn local(&self, f: &mut Form, local: hir_ty::mir::LocalId) {
-        f.u32(local.into_raw().into_u32());
+    fn walk(&self, f: &mut Form, c: &Canon<'_, 'db>) {
+        let body = c.body;
+        self.local(f, c, LocalId::from_raw(0.into()));
+        f.len(body.param_locals.len());
+        for &local in &body.param_locals {
+            self.local(f, c, local);
+        }
+        f.u8(body.inherits_overflow_checks as u8);
+        f.debug(&body.phase);
+        match body.coroutine {
+            Some(coroutine) => {
+                f.u8(1);
+                self.local(f, c, coroutine.poll);
+                self.local(f, c, coroutine.context);
+            }
+            None => f.u8(0),
+        }
+        f.len(c.order.len());
+        for &id in &c.order {
+            let block = &body.basic_blocks[id];
+            f.u8(block.is_cleanup as u8);
+            for (at, statement) in block.statements.iter().enumerate() {
+                if let StatementKind::StorageLive(local) | StatementKind::StorageDead(local) =
+                    statement.kind
+                    && !c.used(local)
+                {
+                    continue;
+                }
+                if let StatementKind::Nop = statement.kind {
+                    continue;
+                }
+                self.statement(f, c, &statement.kind);
+                if let Some(&unwind) = c.unwinds.get(&(id, at)) {
+                    f.u8(0xfd);
+                    self.block(f, c, Some(unwind));
+                }
+            }
+            match &block.terminator {
+                Some(terminator) => self.terminator(f, c, &terminator.kind),
+                None => f.u8(0xfe),
+            }
+        }
+        // What lowering keeps beside the blocks, which the code generator reads: the order
+        // scopes drop their locals in, the temporaries promoted to constants, the captures of an
+        // `async` body used in place, and the blocks no test leads to.
+        let locals = |f: &mut Form, locals: &mut dyn Iterator<Item = LocalId>| {
+            let used: Vec<_> = locals.filter(|&it| c.used(it)).collect();
+            f.len(used.len());
+            for local in used {
+                self.local(f, c, local);
+            }
+        };
+        locals(f, &mut body.scope_ends.iter().copied());
+        locals(f, &mut body.promoted_constants.iter().copied());
+        f.len(body.promoted_locals.len());
+        for &(local, expr) in &body.promoted_locals {
+            self.local(f, c, local);
+            f.u32(expr.into_raw().into_u32());
+        }
+        f.len(body.upvars_in_place.len());
+        for &(local, field) in &body.upvars_in_place {
+            self.local(f, c, local);
+            f.u32(field);
+        }
+        let unreached: Vec<_> = body.unreached.iter().filter_map(|it| c.blocks.get(it)).collect();
+        f.len(unreached.len());
+        for &block in unreached {
+            f.u32(block);
+        }
     }
 
-    fn place(&self, f: &mut Form, place: &StoredPlace) {
-        self.local(f, place.local);
+    /// A local by the order the walk first meets it, with its type the first time: what
+    /// lowering numbers it does not matter.
+    fn local(&self, f: &mut Form, c: &Canon<'_, 'db>, local: LocalId) {
+        if c.collecting {
+            c.uses.borrow_mut().insert(local);
+            return;
+        }
+        let mut numbers = c.numbers.borrow_mut();
+        let next = numbers.len() as u32;
+        let number = *numbers.entry(local).or_insert(next);
+        drop(numbers);
+        if number == next {
+            f.u8(0);
+            self.ty(f, c.body.locals[local].ty.as_ref());
+        } else {
+            f.u8(1);
+            f.u32(number);
+        }
+    }
+
+    fn place(&self, f: &mut Form, c: &Canon<'_, 'db>, place: &StoredPlace) {
+        self.local(f, c, place.local);
         let projection = place.projection.as_slice();
         f.len(projection.len());
         for elem in projection {
@@ -709,7 +778,7 @@ impl<'db> Cx<'db> {
                 }
                 ProjectionElem::Index(local) => {
                     f.u8(2);
-                    self.local(f, local);
+                    self.local(f, c, local);
                 }
                 ProjectionElem::ConstantIndex { offset, min_length, from_end } => {
                     f.u8(3);
@@ -730,15 +799,15 @@ impl<'db> Cx<'db> {
         }
     }
 
-    fn operand(&self, f: &mut Form, operand: &Operand) {
+    fn operand(&self, f: &mut Form, c: &Canon<'_, 'db>, operand: &Operand) {
         match &operand.kind {
             OperandKind::Copy(place) => {
                 f.u8(0);
-                self.place(f, place);
+                self.place(f, c, place);
             }
             OperandKind::Move(place) => {
                 f.u8(1);
-                self.place(f, place);
+                self.place(f, c, place);
             }
             OperandKind::Constant { konst, ty } => {
                 f.u8(2);
@@ -776,42 +845,42 @@ impl<'db> Cx<'db> {
         }
     }
 
-    fn operands(&self, f: &mut Form, operands: &[Operand]) {
+    fn operands(&self, f: &mut Form, c: &Canon<'_, 'db>, operands: &[Operand]) {
         f.len(operands.len());
         for operand in operands {
-            self.operand(f, operand);
+            self.operand(f, c, operand);
         }
     }
 
-    fn rvalue(&self, f: &mut Form, rvalue: &Rvalue) {
+    fn rvalue(&self, f: &mut Form, c: &Canon<'_, 'db>, rvalue: &Rvalue) {
         f.debug(&std::mem::discriminant(rvalue));
         match rvalue {
             Rvalue::Use(operand) | Rvalue::UnaryOp(_, operand) => {
                 if let Rvalue::UnaryOp(op, _) = rvalue {
                     f.debug(op);
                 }
-                self.operand(f, operand);
+                self.operand(f, c, operand);
             }
             Rvalue::Repeat(operand, len) => {
-                self.operand(f, operand);
+                self.operand(f, c, operand);
                 self.konst(f, len.as_ref());
             }
             Rvalue::Ref(kind, place) => {
                 f.debug(kind);
-                self.place(f, place);
+                self.place(f, c, place);
             }
             Rvalue::Len(place) | Rvalue::Discriminant(place) | Rvalue::CopyForDeref(place) => {
-                self.place(f, place)
+                self.place(f, c, place)
             }
             Rvalue::Cast(kind, operand, ty) => {
                 f.debug(kind);
-                self.operand(f, operand);
+                self.operand(f, c, operand);
                 self.ty(f, ty.as_ref());
             }
             Rvalue::BinaryOp(op, a, b) | Rvalue::CheckedBinaryOp(op, a, b) => {
                 f.debug(op);
-                self.operand(f, a);
-                self.operand(f, b);
+                self.operand(f, c, a);
+                self.operand(f, c, b);
             }
             Rvalue::Aggregate(kind, operands) => {
                 match kind {
@@ -834,7 +903,7 @@ impl<'db> Cx<'db> {
                         f.u32(field.local_id.into_raw().into_u32());
                     }
                 }
-                self.operands(f, operands);
+                self.operands(f, c, operands);
             }
             Rvalue::ThreadLocalRef(never) | Rvalue::AddressOf(never) | Rvalue::NullaryOp(never) => {
                 match *never {}
@@ -842,16 +911,18 @@ impl<'db> Cx<'db> {
         }
     }
 
-    fn statement(&self, f: &mut Form, statement: &StatementKind) {
+    fn statement(&self, f: &mut Form, c: &Canon<'_, 'db>, statement: &StatementKind) {
         f.debug(&std::mem::discriminant(statement));
         match statement {
             StatementKind::Assign(place, rvalue) => {
-                self.place(f, place);
-                self.rvalue(f, rvalue);
+                self.place(f, c, place);
+                self.rvalue(f, c, rvalue);
             }
-            StatementKind::FakeRead(place) | StatementKind::Deinit(place) => self.place(f, place),
+            StatementKind::FakeRead(place) | StatementKind::Deinit(place) => {
+                self.place(f, c, place)
+            }
             StatementKind::StorageLive(local) | StatementKind::StorageDead(local) => {
-                self.local(f, *local)
+                self.local(f, c, *local)
             }
             StatementKind::InlineAsm(asm) => {
                 f.debug(&asm.template);
@@ -866,46 +937,46 @@ impl<'db> Cx<'db> {
                             f.debug(reg);
                             f.u8(*written as u8);
                             if let Some(input) = input {
-                                self.operand(f, input);
+                                self.operand(f, c, input);
                             }
                             if let Some(output) = output {
-                                self.place(f, output);
+                                self.place(f, c, output);
                             }
                         }
                         AsmOperand::Const(operand) => {
                             f.u8(1);
-                            self.operand(f, operand);
+                            self.operand(f, c, operand);
                         }
                         AsmOperand::Label => f.u8(2),
                         AsmOperand::Sym(operand) => {
                             f.u8(3);
-                            self.operand(f, operand);
+                            self.operand(f, c, operand);
                         }
                     }
                 }
                 if let Some(taken) = &asm.taken {
-                    self.place(f, taken);
+                    self.place(f, c, taken);
                 }
             }
             StatementKind::Nop => {}
         }
     }
 
-    fn block(&self, f: &mut Form, block: Option<hir_ty::mir::BasicBlockId>) {
-        f.u32(block.map_or(u32::MAX, |it| it.into_raw().into_u32()));
+    fn block(&self, f: &mut Form, c: &Canon<'_, 'db>, block: Option<BasicBlockId>) {
+        f.u32(block.map_or(u32::MAX, |it| c.blocks[&it]));
     }
 
-    fn terminator(&self, f: &mut Form, terminator: &TerminatorKind) {
+    fn terminator(&self, f: &mut Form, c: &Canon<'_, 'db>, terminator: &TerminatorKind) {
         f.debug(&std::mem::discriminant(terminator));
         match terminator {
-            TerminatorKind::Goto { target } => self.block(f, Some(*target)),
+            TerminatorKind::Goto { target } => self.block(f, c, Some(*target)),
             TerminatorKind::SwitchInt { discr, targets } => {
-                self.operand(f, discr);
+                self.operand(f, c, discr);
                 for (value, target) in targets.iter() {
                     f.u128(value);
-                    self.block(f, Some(target));
+                    self.block(f, c, Some(target));
                 }
-                self.block(f, Some(targets.otherwise()));
+                self.block(f, c, Some(targets.otherwise()));
             }
             TerminatorKind::UnwindResume
             | TerminatorKind::Abort
@@ -913,60 +984,141 @@ impl<'db> Cx<'db> {
             | TerminatorKind::Unreachable
             | TerminatorKind::CoroutineDrop => {}
             TerminatorKind::Drop { place, target, unwind } => {
-                self.place(f, place);
-                self.block(f, Some(*target));
-                self.block(f, *unwind);
+                self.place(f, c, place);
+                self.block(f, c, Some(*target));
+                self.block(f, c, *unwind);
             }
             TerminatorKind::DropAndReplace { place, value, target, unwind } => {
-                self.place(f, place);
-                self.operand(f, value);
-                self.block(f, Some(*target));
-                self.block(f, *unwind);
+                self.place(f, c, place);
+                self.operand(f, c, value);
+                self.block(f, c, Some(*target));
+                self.block(f, c, *unwind);
             }
             TerminatorKind::Call { func, args, destination, target, cleanup, from_hir_call } => {
-                self.operand(f, func);
-                self.operands(f, args);
-                self.place(f, destination);
-                self.block(f, *target);
-                self.block(f, *cleanup);
+                self.operand(f, c, func);
+                self.operands(f, c, args);
+                self.place(f, c, destination);
+                self.block(f, c, *target);
+                self.block(f, c, *cleanup);
                 f.u8(*from_hir_call as u8);
             }
             TerminatorKind::Assert { cond, expected, msg, target, cleanup } => {
-                self.operand(f, cond);
+                self.operand(f, c, cond);
                 f.u8(*expected as u8);
                 f.debug(&std::mem::discriminant(msg));
                 match msg {
                     AssertKind::BoundsCheck { len, index } => {
-                        self.operand(f, len);
-                        self.operand(f, index);
+                        self.operand(f, c, len);
+                        self.operand(f, c, index);
                     }
                     AssertKind::Overflow(op, a, b) => {
                         f.debug(op);
-                        self.operand(f, a);
-                        self.operand(f, b);
+                        self.operand(f, c, a);
+                        self.operand(f, c, b);
                     }
                     AssertKind::OverflowNeg(it)
                     | AssertKind::DivisionByZero(it)
-                    | AssertKind::RemainderByZero(it) => self.operand(f, it),
+                    | AssertKind::RemainderByZero(it) => self.operand(f, c, it),
                 }
-                self.block(f, Some(*target));
-                self.block(f, *cleanup);
+                self.block(f, c, Some(*target));
+                self.block(f, c, *cleanup);
             }
             TerminatorKind::Yield { value, resume, resume_arg, drop } => {
-                self.operand(f, value);
-                self.block(f, Some(*resume));
-                self.place(f, resume_arg);
-                self.block(f, *drop);
+                self.operand(f, c, value);
+                self.block(f, c, Some(*resume));
+                self.place(f, c, resume_arg);
+                self.block(f, c, *drop);
             }
             TerminatorKind::FalseEdge { real_target, imaginary_target } => {
-                self.block(f, Some(*real_target));
-                self.block(f, Some(*imaginary_target));
+                self.block(f, c, Some(*real_target));
+                self.block(f, c, Some(*imaginary_target));
             }
             TerminatorKind::FalseUnwind { real_target, unwind } => {
-                self.block(f, Some(*real_target));
-                self.block(f, *unwind);
+                self.block(f, c, Some(*real_target));
+                self.block(f, c, *unwind);
             }
         }
+    }
+}
+
+/// The order a body is written in. Blocks no walk from the start reaches, and the storage
+/// marks of a local nothing else uses (`return 5;` has one where `return 5` has none), change
+/// nothing the code does and are left out.
+struct Canon<'b, 'db> {
+    body: &'b MirBody<'db>,
+    order: Vec<BasicBlockId>,
+    blocks: FxHashMap<BasicBlockId, u32>,
+    unwinds: FxHashMap<(BasicBlockId, usize), BasicBlockId>,
+    /// The first walk only finds which locals are used.
+    collecting: bool,
+    uses: RefCell<FxHashSet<LocalId>>,
+    numbers: RefCell<FxHashMap<LocalId, u32>>,
+}
+
+impl<'b, 'db> Canon<'b, 'db> {
+    fn new(body: &'b MirBody<'db>) -> Self {
+        let mut order = Vec::new();
+        let mut blocks = FxHashMap::default();
+        let mut stack = vec![body.start_block];
+        while let Some(id) = stack.pop() {
+            if blocks.contains_key(&id) {
+                continue;
+            }
+            blocks.insert(id, order.len() as u32);
+            order.push(id);
+            if let Some(terminator) = &body.basic_blocks[id].terminator {
+                let next = successors(&terminator.kind);
+                stack.extend(next.into_iter().rev());
+            }
+        }
+        let unwinds = body
+            .panic_unwinds
+            .iter()
+            .filter(|it| blocks.contains_key(&it.0) && blocks.contains_key(&it.2))
+            .map(|&(block, at, to)| ((block, at), to))
+            .collect();
+        Canon {
+            body,
+            order,
+            blocks,
+            unwinds,
+            collecting: true,
+            uses: RefCell::default(),
+            numbers: RefCell::default(),
+        }
+    }
+
+    fn used(&self, local: LocalId) -> bool {
+        self.uses.borrow().contains(&local)
+    }
+}
+
+fn successors(kind: &TerminatorKind) -> Vec<BasicBlockId> {
+    match kind {
+        TerminatorKind::Goto { target } => vec![*target],
+        TerminatorKind::SwitchInt { targets, .. } => targets.all_targets().to_vec(),
+        TerminatorKind::Drop { target, unwind, .. }
+        | TerminatorKind::DropAndReplace { target, unwind, .. }
+        | TerminatorKind::FalseUnwind { real_target: target, unwind } => {
+            std::iter::once(*target).chain(*unwind).collect()
+        }
+        TerminatorKind::Call { target, cleanup, .. } => {
+            target.iter().chain(cleanup).copied().collect()
+        }
+        TerminatorKind::Assert { target, cleanup, .. } => {
+            std::iter::once(*target).chain(*cleanup).collect()
+        }
+        TerminatorKind::Yield { resume, drop, .. } => {
+            std::iter::once(*resume).chain(*drop).collect()
+        }
+        TerminatorKind::FalseEdge { real_target, imaginary_target } => {
+            vec![*real_target, *imaginary_target]
+        }
+        TerminatorKind::UnwindResume
+        | TerminatorKind::Abort
+        | TerminatorKind::Return
+        | TerminatorKind::Unreachable
+        | TerminatorKind::CoroutineDrop => Vec::new(),
     }
 }
 
