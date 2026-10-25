@@ -272,6 +272,20 @@ All notable changes to ra-jit are written here. The format follows
   daemon still patches what rustc linked by default: building its own base instead
   (`RA_JIT_RUSTC_BASE=0`) has it ready at 7.5–10.3 s on ripgrep and 58.0–58.5 s on nushell,
   as it compiles every function of the program again after cargo.
+- A daemon that starts on a store holding the checkout's code no longer compiles that code
+  again before the first edit can be patched ([#105](https://github.com/indexable-inc/blaze/issues/105)).
+  Each function of the checkout goes into the store with a mark of its code and of what it
+  calls and reads, by stable names, so the patch base takes what it found as it is and an
+  edit recompiles only what it touched; what an edit leaves no caller of (a closure renamed by
+  a line above it, and what is generic over it) is left uncalled, as an instance is. nushell's
+  `restart` (warmstart.py, dev-aws-5, `RA_JIT_RUSTC_BASE=0`) goes from 30.8 s to 21.4 s, the
+  73,586 functions and 9.4 s of "compiling what the store had of the checkout" gone, and its
+  `warm` step is ready in 15.4 s where it took 25.3 s; ripgrep's `restart` from 5.67 s to
+  4.63 s. The first edit after is a patch as before (nushell 0.30 s, was 0.23 s; ripgrep
+  0.08 s). A program linked with rustc's code, an LLVM build in units and
+  `#[ra_jit::cache]` functions keep no marks and still take that build. `harness/storetracked.py`
+  holds it.
+
 - ra-jit is now **blaze**. The command is `cargo blaze` (`cargo blaze build`, `test`, `run`,
   `check`, `status`, `stop`); `cargo ra-jit` keeps working and, on a terminal, says once per run
   that it was renamed. The crate on crates.io is `cargo-blaze` (`cargo install cargo-blaze`),

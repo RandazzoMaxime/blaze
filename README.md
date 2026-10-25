@@ -1,7 +1,7 @@
 <h1 align="center">
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="docs/brand/ix-mark-on-dark.svg">
-    <img alt="ix" src="docs/brand/ix-mark-on-light.svg" height="40" align="absmiddle">
+    <img alt="ix" src="docs/brand/ix-mark-on-light.svg" height="46" align="absmiddle">
   </picture>
   blaze
 </h1>
@@ -122,7 +122,9 @@ $ cargo blaze build
 
 Any other subcommand goes to cargo unchanged. When blaze can't be sure its result would be the
 same as cargo's, it lets cargo do that build and prints one line saying why
-(`ra-jit: <reason>; building with cargo`). That happens after a change to `Cargo.toml`,
+(`ra-jit: bug: <reason>; building with cargo, ...`). Each is a bug: ra-jit is never to build
+with cargo ([#84](https://github.com/indexable-inc/ra-jit/issues/84)), and the line names the
+step of [the plan](docs/no-rustc.md) that removes it. That happens after a change to `Cargo.toml`,
 `Cargo.lock` or what a build script reads, when a test is added or removed, and for a few flags
 such as `--message-format` and `-Z`. The full list is in [docs/cargo.md](docs/cargo.md).
 
