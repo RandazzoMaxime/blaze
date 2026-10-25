@@ -4707,12 +4707,10 @@ fn link(
     }
     let start = Instant::now();
     let mut declined = String::new();
-    let running = splice.map_or(Ok(false), set_aside)?;
     let into_rustcs = into_rustcs.filter(|_| patch.is_some());
     let tried = into_rustcs.is_some();
     if let (Some(binary), Some(patch), Some(old)) = (splice, patch, into_rustcs) {
         let spliced = match old {
-            _ if running => Err(anyhow::anyhow!("the executable is running")),
             Ok(old) if old.is_of(binary) => {
                 let _reading = whole::read(object)?;
                 old.spliced_whole(object, patch)
@@ -4749,7 +4747,6 @@ fn link(
         }
         let spliced = match known {
             _ if rewritten => Err(anyhow::anyhow!("the whole object was written again")),
-            _ if running => Err(anyhow::anyhow!("the executable is running")),
             Some(Ok(mut baseline)) if baseline.is_of(binary) => match std::fs::read(patch) {
                 // The program has the edit: the executable on disk is for its next start,
                 // and is spliced once the edits stop (see `splicer`).
@@ -4809,6 +4806,7 @@ fn link(
     }
     let reading = whole::read(object)?;
     if let Some(binary) = splice {
+        set_aside(binary)?;
         headerpad_ahead(binary)?;
     }
     let reached = cargo::plan::reached_only(cmd);
@@ -4945,40 +4943,23 @@ fn headerpad_short(binary: &Path) -> Option<u64> {
     (pad > kept).then_some(pad)
 }
 
-/// Whether the executable at `binary` runs, in which case Windows lets nothing write it, and
-/// it is moved aside: it runs on there, and the link writes a new one. It is deleted once it
-/// has exited, by the first link to come after.
+/// Moves the executable at `binary` aside when a program runs it, which Windows lets nothing
+/// write: it runs on there, and the link writes a new one ([`splice::move_aside`]).
 #[cfg(windows)]
-fn set_aside(binary: &Path) -> anyhow::Result<bool> {
+fn set_aside(binary: &Path) -> anyhow::Result<()> {
     const SHARING_VIOLATION: i32 = 32;
-    let name = binary.file_name().context("an executable without a name")?.to_owned();
-    let siblings = binary.parent().map(std::fs::read_dir).transpose()?.into_iter().flatten();
-    for sibling in siblings {
-        let sibling = sibling?;
-        let is_aside = sibling.path().extension() == Some("running".as_ref())
-            && sibling.file_name().as_encoded_bytes().starts_with(name.as_encoded_bytes());
-        if is_aside {
-            // The one that still runs stays.
-            let _ = std::fs::remove_file(sibling.path());
-        }
-    }
     match std::fs::OpenOptions::new().write(true).open(binary) {
-        Err(e) if e.raw_os_error() == Some(SHARING_VIOLATION) => {}
-        _ => return Ok(false),
+        Err(e) if e.raw_os_error() == Some(SHARING_VIOLATION) => {
+            splice::move_aside(binary).context("moving the running executable aside")
+        }
+        _ => Ok(()),
     }
-    static ASIDE: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
-    let aside = ASIDE.fetch_add(1, Ordering::Relaxed);
-    let mut moved = binary.as_os_str().to_owned();
-    moved.push(format!(".{}-{aside}.running", std::process::id()));
-    std::fs::rename(binary, &moved).context("moving the running executable aside")?;
-    Ok(true)
 }
 
-/// Whether the executable at `binary` runs, which is nothing to a link on Unix: the linker
-/// writes a new file in its place.
+/// Nothing on Unix: the linker writes a new file in place of one a program runs.
 #[cfg(unix)]
-fn set_aside(_: &Path) -> anyhow::Result<bool> {
-    Ok(false)
+fn set_aside(_: &Path) -> anyhow::Result<()> {
+    Ok(())
 }
 
 /// The last `count` lines of `text` that say something, on one line: what a linker that

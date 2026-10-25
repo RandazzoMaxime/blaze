@@ -493,8 +493,14 @@ impl Baseline {
                     patch.place_live_simple(image, &self.copies, &self.originals, base)?;
                 Ok((uuid, code, moved))
             }
-            _ => bail!(
-                "edits are applied to running programs on macOS AArch64 and Linux x86-64 only"
+            Executable::Pe(image) => {
+                let patch = pe::Patch::read(patch, image)?;
+                self.has_baked(patch.defined())?;
+                let (code, moved) = patch.place_live(image, base)?;
+                Ok((image.guid, code, moved))
+            }
+            Executable::Wasm(_) => bail!(
+                "edits are applied to running programs on macOS AArch64, Linux x86-64 and Windows x86-64 only"
             ),
         }
     }
@@ -519,12 +525,14 @@ impl Baseline {
         })
     }
 
-    /// The `LC_UUID` of the executable, when it is one that has it.
+    /// The `LC_UUID` of the executable, when it is one that has it: the GNU build ID of an
+    /// ELF one, the GUID of the PDB of a PE one.
     pub(crate) fn uuid(&self) -> Option<[u8; 16]> {
         match &*self.image {
             Executable::MachO(image) => macho::uuid(image),
             Executable::Elf(image) => image.id,
-            _ => None,
+            Executable::Pe(image) => Some(image.guid),
+            Executable::Wasm(_) => None,
         }
     }
 
@@ -736,14 +744,17 @@ struct Writing {
 }
 
 impl Writing {
-    /// The executable at `path`, or a copy of it when a program runs it, which on Unix nothing
-    /// may write: the program runs on from the file it was started from, and the copy is put
-    /// at `path` for the next start.
+    /// The executable at `path`, or a copy of it when a program runs it, which nothing may
+    /// write: the program runs on from the file it was started from, and the copy is put at
+    /// `path` for the next start.
     fn open(path: &Path) -> std::io::Result<Writing> {
+        #[cfg(unix)]
+        const BUSY: i32 = libc::ETXTBSY;
+        #[cfg(windows)]
+        const BUSY: i32 = 32; // ERROR_SHARING_VIOLATION
         let lock = Writing::lock(path)?;
         match OpenOptions::new().read(true).write(true).open(path) {
-            #[cfg(unix)]
-            Err(busy) if busy.raw_os_error() == Some(libc::ETXTBSY) => {
+            Err(busy) if busy.raw_os_error() == Some(BUSY) => {
                 let mut copy = path.as_os_str().to_owned();
                 copy.push(".splicing");
                 let copy = PathBuf::from(copy);
@@ -761,10 +772,15 @@ impl Writing {
         }
     }
 
-    /// Puts the copy written, if it is one, in place of the executable.
+    /// Puts the copy written, if it is one, in place of the executable: on Windows, where a
+    /// file a program runs cannot be written over, behind the executable moved aside.
     fn done(mut self) -> std::io::Result<()> {
         match self.copy.take() {
-            Some((copy, path)) => std::fs::rename(copy, path),
+            Some((copy, path)) => {
+                #[cfg(windows)]
+                move_aside(&path)?;
+                std::fs::rename(copy, path)
+            }
             None => Ok(()),
         }
     }
@@ -804,6 +820,30 @@ impl Drop for Writing {
             _ = std::fs::remove_file(copy);
         }
     }
+}
+
+/// Moves the executable at `path` aside, which a program runs and Windows lets nothing write
+/// or replace: it runs on there. It is deleted once it has exited, by the first move to come
+/// after.
+#[cfg(windows)]
+pub(crate) fn move_aside(path: &Path) -> std::io::Result<()> {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let name = path.file_name().unwrap_or_default().to_owned();
+    let siblings = path.parent().map(std::fs::read_dir).transpose()?.into_iter().flatten();
+    for sibling in siblings {
+        let sibling = sibling?;
+        let is_aside = sibling.path().extension() == Some("running".as_ref())
+            && sibling.file_name().as_encoded_bytes().starts_with(name.as_encoded_bytes());
+        if is_aside {
+            // The one that still runs stays.
+            let _ = std::fs::remove_file(sibling.path());
+        }
+    }
+    static ASIDE: AtomicUsize = AtomicUsize::new(0);
+    let aside = ASIDE.fetch_add(1, Ordering::Relaxed);
+    let mut moved = path.as_os_str().to_owned();
+    moved.push(format!(".{}-{aside}.running", std::process::id()));
+    std::fs::rename(path, &moved)
 }
 
 /// Waits until the daemon is through writing the executable at `path` in place: one it

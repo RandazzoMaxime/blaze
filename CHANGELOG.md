@@ -16,6 +16,13 @@ All notable changes to ra-jit are written here. The format follows
   script's: a whole build of a dev program from an empty store (step K, #91) fetches it where
   it compiled the library again, about 10 s.
 
+- Live edits on Windows x86-64: `ra-jit-live` takes patches in a running PE program, named by
+  the GUID of its PDB, and registers their unwind tables, and the daemon lays a patch of a PE
+  executable out for it. An executable a program runs is spliced through a copy put in its
+  place, as on Unix, instead of being linked again, and `ra_jit_live::edit` reaches the daemon,
+  so `demo/life`'s editor builds as you type (about 80 ms from a keystroke to the running
+  window). A static with another value still asks for a restart.
+
 - `crates/blaze-build-script`: the environment cargo 1.99.0 gives a build script, computed
   from a plain description of the run with no cargo, ported from cargo's own rules and tests
   (no-rustc step I, #89; #298). Nothing uses it yet; blaze's own runs of scripts come next.
