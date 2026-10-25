@@ -1,7 +1,7 @@
 {
  "dir": ".",
  "inputs": {
-  "Cargo.lock": "00ec5851e6c8fd3a8397452a10c28bb75e4f59f8cf061b3239385801580421f6",
+  "Cargo.lock": "583acb7006d8170ac1f914020748f23a211931c403a3fa66a2030b165bd0bfa1",
   "Cargo.toml": "d3d3953657d5f24c8c1f71a528a63be9a2b63b6cb91feb1c52e50e90717da224"
  },
  "packages": {
@@ -752,6 +752,23 @@
     "kind": "registry"
    },
    "version": "2.12.1"
+  },
+  "bitmaps@2.1.0": {
+   "authors": "Bodil Stokke <bodil@bodil.org>",
+   "description": "Fixed size boolean arrays",
+   "homepage": "",
+   "license": "MPL-2.0+",
+   "license_file": "",
+   "links": null,
+   "name": "bitmaps",
+   "readme": "./README.md",
+   "repository": "https://github.com/bodil/bitmaps",
+   "rust_version": "",
+   "source": {
+    "checksum": "031043d04099746d8db04daf1fa424b2bc8bd69d92b25962dcde24da39ab64a2",
+    "kind": "registry"
+   },
+   "version": "2.1.0"
   },
   "blaze-build-script@0.1.0": {
    "authors": "blaze contributors",
@@ -3269,6 +3286,23 @@
    },
    "version": "1.2.2"
   },
+  "im-rc@15.1.0": {
+   "authors": "Bodil Stokke <bodil@bodil.org>",
+   "description": "Immutable collection datatypes (the fast but not thread safe version)",
+   "homepage": "http://immutable.rs/",
+   "license": "MPL-2.0+",
+   "license_file": "",
+   "links": null,
+   "name": "im-rc",
+   "readme": "../../README.md",
+   "repository": "https://github.com/bodil/im-rs",
+   "rust_version": "1.46.0",
+   "source": {
+    "checksum": "af1955a75fa080c677d3972822ec4bad316169ab1cfc6c257a942c2265dbe5fe",
+    "kind": "registry"
+   },
+   "version": "15.1.0"
+  },
   "indexmap@2.14.0": {
    "authors": "",
    "description": "A hash table with consistent order and fast iteration.",
@@ -5275,6 +5309,23 @@
    },
    "version": "0.6.4"
   },
+  "rand_xoshiro@0.6.0": {
+   "authors": "The Rand Project Developers",
+   "description": "Xoshiro, xoroshiro and splitmix64 random number generators",
+   "homepage": "https://rust-random.github.io/book",
+   "license": "MIT OR Apache-2.0",
+   "license_file": "",
+   "links": null,
+   "name": "rand_xoshiro",
+   "readme": "README.md",
+   "repository": "https://github.com/rust-random/rngs",
+   "rust_version": "",
+   "source": {
+    "checksum": "6f97cdb2a36ed4183de61b2f824cc45c9f1037f28afe0a322e9fff4c108b5aaa",
+    "kind": "registry"
+   },
+   "version": "0.6.0"
+  },
   "rayon-core@1.13.0": {
    "authors": "",
    "description": "Core APIs for Rayon",
@@ -6107,6 +6158,23 @@
     "kind": "registry"
    },
    "version": "0.3.9"
+  },
+  "sized-chunks@0.6.5": {
+   "authors": "Bodil Stokke <bodil@bodil.org>",
+   "description": "Efficient sized chunk datatypes",
+   "homepage": "",
+   "license": "MPL-2.0+",
+   "license_file": "",
+   "links": null,
+   "name": "sized-chunks",
+   "readme": "./README.md",
+   "repository": "https://github.com/bodil/sized-chunks",
+   "rust_version": "",
+   "source": {
+    "checksum": "16d69225bde7a69b235da73377861095455d298f2b970996eec25ddbb42b3d1e",
+    "kind": "registry"
+   },
+   "version": "0.6.5"
   },
   "slab@0.4.12": {
    "authors": "Carl Lerche <me@carllerche.com>",

@@ -353,6 +353,36 @@ All notable changes to ra-jit are written here. The format follows
   Commit 99cbb902ad's message
   says the levels alone turned it on; until b460bbe327 they did not, and it took
   `RA_JIT_INLINE=all`.
+- `blaze-resolve` resolves as cargo 1.99.0 does (#298): its resolver is cargo's, ported, with
+  backtracking, the conflict cache, `links`, prereleases, yanked versions only when locked,
+  `[replace]`, and versions preferred by `rust-version` or lowest first; the errors are cargo's.
+  Its tests are cargo's `resolver-tests`, the 37 of `resolve.rs` and the 20 of `validated.rs`
+  (whose check against a SAT solver is left out). cargo's unstable `-Zdirect-minimal-versions`
+  and publish-age policy are not ported.
+- `blaze-resolve` picks features as cargo 1.99.0 does (#298): the members `-p`, `--features`,
+  `--all-features` and `--no-default-features` select, by resolver 1's rules (`--features` for
+  the package in the current directory, `member/feat` for another) or resolver 2's, with
+  cargo's errors and suggestions; and cargo's feature resolver, which under resolver 2 keeps the
+  features of build dependencies and proc macros apart from the rest, leaves out those of
+  dev-dependencies when nothing is tested, and of dependencies for platforms not built for, and
+  enables `dep?/feat` once `dep` is. A package's targets and the platforms' `cfg` come from
+  whoever calls it. Tests take cases of cargo's `features2`, `weak_dep_features` and
+  `package_features` tests.
+- `blaze-resolve` writes the `resolve` of `cargo metadata` as cargo 1.99.0 does (#298): each
+  package reached from the members, its dependencies by the name its code uses, their kinds and
+  platforms, and its features, filtered by `--filter-platform`. The test compares the JSON with
+  cargo's for a workspace with a renamed dependency, one used as both normal and dev, a build
+  dependency and a `cfg(unix)` one. `harness/resolve_graph.py` compares, over the corpus of
+  `harness/resolve`, the `resolve` blaze-resolve makes of the packages cargo lists with cargo's,
+  with each project's lock file and with none.
+- `blaze-resolve` resolves a workspace as cargo 1.99.0 does around its resolver (#298): the
+  resolve `Cargo.lock` is written from (every member, every feature), guided by the lock file,
+  then the one asked for, guided by the first, with cargo's `PackageRegistry` applying
+  `[patch]` and locking each summary to the previous resolve. So a lock file keeps the versions
+  it names, and the graph is cargo's where the two resolves differ, as when a patched member
+  is reached both as itself and as the patch. `harness/resolve_graph.py` resolves each
+  project so, from the lock file it ships or none: 322 of 324 equal with it and 381 of 385
+  without (from 292 and 362), the rest projects cargo itself does not resolve there.
 
 ### Changed
 
