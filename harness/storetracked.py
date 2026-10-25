@@ -80,12 +80,14 @@ def build(ws, env, step):
 
 
 class Logs:
-    """What the daemon's workers logged since this was made. A worker that was a spare keeps
-    the spare's log."""
+    """What the workers of a daemon about to start log. A worker that was a spare keeps the
+    spare's log, and a worker of the same build as one before it writes the same file anew,
+    so what the daemons before logged is moved aside."""
 
     def __init__(self, home):
         self.home = home
-        self.seen = {path: os.path.getsize(path) for path in self.paths()}
+        for path in self.paths():
+            os.replace(path, f"{path}.before")
 
     def paths(self):
         return sorted(glob.glob(os.path.join(self.home, "*", "*", "log")))
@@ -94,7 +96,6 @@ class Logs:
         said = ""
         for path in self.paths():
             with open(path, errors="replace") as log:
-                log.seek(self.seen.get(path, 0))
                 said += log.read()
         return said
 
