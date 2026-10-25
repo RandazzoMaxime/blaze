@@ -735,11 +735,13 @@ struct Hydrated {
 /// The instances of [`Base::hydrated`] one look found, by their index there.
 type FoundHydrated = FxHashMap<usize, (Instance, StoredParamEnvAndCrate)>;
 
-/// A root by its index in [`Base::compiled`], or another of [`Base::hydrated`].
-#[derive(Clone, Copy)]
+/// A root from the store by its index in [`Base::compiled`], another of [`Base::hydrated`],
+/// or what the build compiled.
+#[derive(Clone)]
 enum Caller {
     Root(u32),
     Hydrated(u32),
+    Base(Node),
 }
 
 /// Where in [`Base::hydrated`] the code of each crate and of each file is.
@@ -1183,7 +1185,7 @@ impl Base {
                 }
             }
         };
-        let from_store = FromStore::new(db, cg, compiled, &stored_marks);
+        let mut from_store = FromStore::new(db, cg, compiled, &stored_marks);
         if std::env::var_os("RA_JIT_STATS").is_some() {
             let known = from_store.hydrated.iter().filter(|it| it.known.is_some()).count();
             eprintln!(
@@ -1208,6 +1210,20 @@ impl Base {
             note(Node::Static(id), &compiled_static(db, id).as_ref().ok()?.requests);
         }
         edges.extend(from_store.root_edges.iter().cloned());
+        let known_at: FxHashMap<&Instance, u32> = (from_store.hydrated.iter().enumerate())
+            .filter_map(|(at, it)| Some((&it.known.as_ref()?.0, at as u32)))
+            .collect();
+        let mut called = Vec::new();
+        for (child, parent) in &edges {
+            if let Node::Instance(instance) = child
+                && let Some(&at) = known_at.get(instance)
+            {
+                called.push((at, parent.clone()));
+            }
+        }
+        for (at, parent) in called {
+            from_store.hydrated[at as usize].callers.push(Caller::Base(parent));
+        }
         for (child, parent) in edges {
             let parents = match &child {
                 Node::Root(_) => None,
@@ -1800,6 +1816,7 @@ impl Base {
                 (None, _)
                     if self.dropped(db, names, &mut homes, &mut found, i, &mut Vec::new()) => {}
                 (None, _) => {
+                    eprintln!("patch: nothing calls `{}` from the store as it did", was.name);
                     return Err("code of the checkout from the store is not called as it was");
                 }
             }
@@ -1807,8 +1824,8 @@ impl Base {
         Ok(())
     }
 
-    /// What the code from the store at `i` is an instance of, from the code of what calls it.
-    /// `None` when nothing that called it does any more.
+    /// What the code from the store at `i` is an instance of, from the code of what calls it
+    /// now. `None` when nothing that called it does any more.
     fn found_instance(
         &self,
         db: &dyn HirDatabase,
@@ -1819,8 +1836,12 @@ impl Base {
         asking: &mut Vec<usize>,
     ) -> Option<(Instance, StoredParamEnvAndCrate)> {
         let was = &self.hydrated[i];
-        if let Some(known) = was.known.as_ref().or_else(|| found.get(&i)) {
-            return Some(known.clone());
+        if let Some(found) = found.get(&i) {
+            return Some(found.clone());
+        }
+        // What only the build's own code calls, by nothing a caller says: a vtable's slot.
+        if was.callers.is_empty() {
+            return was.known.clone();
         }
         if asking.contains(&i) {
             return None;
@@ -1828,21 +1849,9 @@ impl Base {
         asking.push(i);
         let mut instance = None;
         for caller in &was.callers {
-            let compiled = match *caller {
-                Caller::Root(at) => {
-                    let root = self.compiled[at as usize].0;
-                    probe(|| compiled_root(db, root).as_ref().ok()).flatten()
-                }
-                Caller::Hydrated(at) => {
-                    let Some((instance, env)) =
-                        self.found_instance(db, names, homes, found, at as usize, asking)
-                    else {
-                        continue;
-                    };
-                    probe(|| compiled_instance(db, instance, env).as_ref().ok()).flatten()
-                }
+            let Some(compiled) = self.caller_code(db, names, homes, found, caller, asking) else {
+                continue;
             };
-            let Some(compiled) = compiled else { continue };
             instance = compiled.requests.funcs.iter().find_map(|request| {
                 let FuncTarget::Instance(callee, env) = &request.target else { return None };
                 let named = names.instance(callee)?;
@@ -1859,10 +1868,42 @@ impl Base {
         instance
     }
 
-    /// Whether nothing calls one of [`Self::hydrated`] as the base did: every caller changed,
-    /// or is gone itself. A closure is named by where in its body it is written, so an edit
+    /// The code of a caller of one of [`Self::hydrated`] as it compiles now.
+    fn caller_code<'q>(
+        &self,
+        db: &'q dyn HirDatabase,
+        names: &StableNames<'_, '_>,
+        homes: &mut super::home::Homes,
+        found: &mut FoundHydrated,
+        caller: &Caller,
+        asking: &mut Vec<usize>,
+    ) -> Option<&'q CompiledFunction> {
+        let compiled = match caller {
+            Caller::Root(at) => {
+                let root = self.compiled[*at as usize].0;
+                probe(|| compiled_root(db, root).as_ref().ok())
+            }
+            Caller::Base(Node::Root(root)) => probe(|| compiled_root(db, *root).as_ref().ok()),
+            Caller::Base(Node::Instance(instance)) => {
+                let env = self.instances.get(instance)?.env.clone();
+                probe(|| compiled_instance(db, instance.clone(), env).as_ref().ok())
+            }
+            Caller::Base(Node::Static(_)) => None,
+            Caller::Hydrated(at) => {
+                let (instance, env) =
+                    self.found_instance(db, names, homes, found, *at as usize, asking)?;
+                probe(|| compiled_instance(db, instance, env).as_ref().ok())
+            }
+        };
+        compiled.flatten()
+    }
+
+    /// Whether nothing calls one of [`Self::hydrated`] as the base did: no caller calls it by
+    /// its name any more, so each changed, and a caller from the store that is not found is
+    /// left uncalled itself. A closure is named by where in its body it is written, so an edit
     /// above it in that body gives it and what is generic over it new names, and the code
     /// under the old ones is left uncalled, as an instance no caller reaches any more is.
+    /// Each changed caller is compiled again, and what it calls now with it.
     fn dropped(
         &self,
         db: &dyn HirDatabase,
@@ -1877,29 +1918,13 @@ impl Base {
             return false;
         }
         asking.push(i);
-        let dropped = was.callers.iter().all(|&caller| match caller {
-            Caller::Root(at) => {
-                let root = self.compiled[at as usize].0;
-                let same = self.stored_marks.get(&at).and_then(|&was| {
-                    probe(|| {
-                        let compiled = compiled_root(db, root).as_ref().ok()?;
-                        Some(stable_mark(db, names, compiled, self.debug) == Some(was))
-                    })
-                });
-                same.flatten() != Some(true)
-            }
+        let dropped = was.callers.iter().all(|caller| match *caller {
             Caller::Hydrated(at) => {
-                match self.found_instance(db, names, homes, found, at as usize, &mut Vec::new()) {
-                    Some((instance, env)) => {
-                        let mark = probe(|| {
-                            let compiled = compiled_instance(db, instance, env).as_ref().ok()?;
-                            stable_mark(db, names, compiled, self.debug)
-                        });
-                        mark.flatten() != Some(self.hydrated[at as usize].mark)
-                    }
-                    None => self.dropped(db, names, homes, found, at as usize, asking),
-                }
+                let at = at as usize;
+                self.found_instance(db, names, homes, found, at, &mut Vec::new()).is_some()
+                    || self.dropped(db, names, homes, found, at, asking)
             }
+            Caller::Root(_) | Caller::Base(_) => true,
         });
         asking.pop();
         dropped
