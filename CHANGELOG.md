@@ -312,8 +312,9 @@ All notable changes to ra-jit are written here. The format follows
   then the one asked for, guided by the first, with cargo's `PackageRegistry` applying
   `[patch]` and locking each summary to the previous resolve. So a lock file keeps the versions
   it names, and the graph is cargo's where the two resolves differ, as when a patched member
-  is reached both as itself and as the patch. A path or git dependency without a version now
-  matches a prerelease in `harness/resolve_graph.py`, as cargo's does.
+  is reached both as itself and as the patch. `harness/resolve_graph.py` resolves each
+  project so, from the lock file it ships or none: 322 of 324 equal with it and 381 of 385
+  without (from 292 and 362), the rest projects cargo itself does not resolve there.
 
 ### Changed
 

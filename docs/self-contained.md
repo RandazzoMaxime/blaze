@@ -212,3 +212,14 @@ with the system's `cc` and an lld it finds, a choice for that step, measured on 
 
 2026-10-25: this plan. Lanes: the toolchain (2), the manifest and the harness, the registry,
 the resolver, build scripts. Counts and pull requests are added here as they land.
+
+2026-10-25, the resolver (`crates/blaze-resolve`): the package model (#305), `Cargo.lock`
+(#309), the async `Registry` (#312), cargo's resolver with its tests (#331), features and the
+members `-p` and `--features` choose (#332), the `resolve` of `cargo metadata` (#333), and a
+workspace's two resolves with `[patch]` and the lock file's locks (#339).
+`harness/resolve_graph.py` compares the `resolve` blaze-resolve makes of the packages cargo
+lists with cargo's, over the corpus of `harness/resolve` (dev-aws-8, at 6e4bbe91): with the
+lock file each project ships, 322 of 324 equal; with none, 381 of 385. The rest are those
+cargo 1.99.0 does not resolve there (bun, swc, rust-clippy, embassy). Its registry holds the
+versions cargo chose; choosing among all of the index's waits on #321, cargo's SAT-checked
+resolver tests on #337, `cargo update` and path overrides on #338.
