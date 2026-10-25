@@ -158,13 +158,7 @@ fn layout_of_simd_ty<'db>(
     Ok(Arc::new(cx.calc.simd_type(e_ly, e_len, repr_packed)?))
 }
 
-// Nothing in its arguments is collected by salsa (no tracked struct, no interned value with
-// fewer revisions), so they stay interned and are never verified.
-#[salsa::tracked(
-    cycle_result = layout_of_ty_cycle_result,
-    returns(clone),
-    revisions = usize::MAX
-)]
+#[salsa::tracked(cycle_result = layout_of_ty_cycle_result, returns(clone))]
 pub fn layout_of_ty_query(
     db: &dyn HirDatabase,
     ty: StoredTy,

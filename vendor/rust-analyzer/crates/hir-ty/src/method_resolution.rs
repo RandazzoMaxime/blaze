@@ -1084,9 +1084,7 @@ impl<'db> TraitImpls<'db> {
 
     /// The impls of one trait for one type in `krate` and its dependencies. An impl added for
     /// another trait or type changes `for_crate()`, and leaves this as it was.
-    // Nothing in its arguments is collected by salsa (no tracked struct, no interned value with
-    // fewer revisions), so they stay interned and are never verified.
-    #[salsa::tracked(returns(deref), revisions = usize::MAX)]
+    #[salsa::tracked(returns(deref))]
     pub fn in_crate_and_deps_for_trait_and_self_ty(
         db: &'db dyn HirDatabase,
         krate: Crate,
