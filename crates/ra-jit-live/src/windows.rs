@@ -23,6 +23,12 @@ unsafe extern "system" {
     fn RtlAddFunctionTable(table: *const u8, count: u32, base: u64) -> u8;
     fn OpenProcess(access: u32, inherit: i32, pid: u32) -> *mut c_void;
     fn WaitForSingleObject(handle: *mut c_void, milliseconds: u32) -> u32;
+    fn CreateEventW(
+        attributes: *const c_void,
+        manual: i32,
+        set: i32,
+        name: *const u16,
+    ) -> *mut c_void;
     fn CloseHandle(handle: *mut c_void) -> i32;
 }
 
@@ -34,6 +40,7 @@ const PAGE_EXECUTE_READ: u32 = 0x20;
 const PAGE_EXECUTE_READWRITE: u32 = 0x40;
 const SYNCHRONIZE: u32 = 0x0010_0000;
 const WAIT_TIMEOUT: u32 = 0x102;
+const WAIT_OBJECT_0: u32 = 0;
 const IMAGE_DEBUG_TYPE_CODEVIEW: u32 = 2;
 /// A `RUNTIME_FUNCTION`: where a function starts, ends, and has its unwind information.
 const FUNCTION: u64 = 12;
@@ -428,14 +435,19 @@ fn running(pid: u32) -> bool {
     running
 }
 
-/// Watches for patches: the daemon has no way to wake the program on Windows, which looks
-/// every [`LOOK_EVERY`]. Whether the executable was linked again is looked at on a thread of
-/// its own: the first read of an executable just written waits for the scan of it, half a
-/// second, which the patch that came with it is not to wait for.
+/// Watches for patches: the daemon sets an event once it wrote one ([`format::wake_event`]),
+/// and a daemon that does not is looked for every [`LOOK_EVERY`]. Whether the executable was
+/// linked again is looked at on a thread of its own: the first read of an executable just
+/// written waits for the scan of it, half a second, which the patch that came with it is not
+/// to wait for.
 fn watch(dir: &Path, id: [u8; 16]) -> Receiver<(Patch, Instant)> {
     let (send, receive) = std::sync::mpsc::channel();
     let path = dir.join("patch");
     let mut seen = stamp(&path);
+    let name: Vec<u16> = format::wake_event(dir).encode_utf16().chain([0]).collect();
+    // SAFETY: the name ends with a zero. The event is never closed: the thread below waits on
+    // it as long as the program runs. A handle is not `Send`, its value is.
+    let wake = unsafe { CreateEventW(std::ptr::null(), 0, 0, name.as_ptr()) } as usize;
     if let Some(executable) = std::env::current_exe().ok() {
         let send = send.clone();
         let mut linked = stamp(&executable);
@@ -472,9 +484,16 @@ fn watch(dir: &Path, id: [u8; 16]) -> Receiver<(Patch, Instant)> {
         .name("ra-jit-live".to_owned())
         .spawn(move || {
             loop {
-                std::thread::sleep(LOOK_EVERY);
+                let woke = if wake == 0 {
+                    std::thread::sleep(LOOK_EVERY);
+                    false
+                } else {
+                    let wait = LOOK_EVERY.as_millis() as u32;
+                    // SAFETY: the event is open for as long as the program runs.
+                    unsafe { WaitForSingleObject(wake as *mut c_void, wait) == WAIT_OBJECT_0 }
+                };
                 let now = stamp(&path);
-                if now.is_none() || now == seen {
+                if now.is_none() || (now == seen && !woke) {
                     continue;
                 }
                 seen = now;

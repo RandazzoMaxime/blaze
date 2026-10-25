@@ -28,6 +28,12 @@ const MAGIC: &[u8; 8] = b"RAJITLV1";
 /// The socket in [`dir`] that the daemon wakes the program on once it wrote a patch.
 pub const WAKE: &str = "wake";
 
+/// The event the daemon sets on Windows once it wrote a patch in `dir`, where it has no socket
+/// to wake the program on: named after the directory, which is named after the executable.
+pub fn wake_event(dir: &Path) -> String {
+    format!("Local\\ra-jit-live-{}", dir.file_name().unwrap_or_default().to_string_lossy())
+}
+
 /// The directory that holds one for each executable that runs: in the daemon's home, which
 /// is in `USERPROFILE` on Windows when nothing says `HOME`.
 pub fn root() -> Option<PathBuf> {

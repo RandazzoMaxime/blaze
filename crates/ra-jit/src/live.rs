@@ -203,5 +203,25 @@ fn wake(dir: &std::path::Path) {
     }
 }
 
-#[cfg(not(unix))]
+/// The same on Windows, through the event the program waits on ([`format::wake_event`]).
+#[cfg(windows)]
+fn wake(dir: &std::path::Path) {
+    use windows_sys::Win32::{
+        Foundation::CloseHandle,
+        System::Threading::{EVENT_MODIFY_STATE, OpenEventW, SetEvent},
+    };
+    let name: Vec<u16> = format::wake_event(dir).encode_utf16().chain([0]).collect();
+    // SAFETY: the name ends with a zero; the handle is closed below.
+    let event = unsafe { OpenEventW(EVENT_MODIFY_STATE, 0, name.as_ptr()) };
+    if event.is_null() {
+        return;
+    }
+    // SAFETY: the handle is open and this one's.
+    unsafe {
+        SetEvent(event);
+        CloseHandle(event);
+    }
+}
+
+#[cfg(not(any(unix, windows)))]
 fn wake(_: &std::path::Path) {}

@@ -124,12 +124,11 @@ What is specific to the port:
   links a new file, or splices a copy and puts it in its place.
 - Live edits (`ra-jit-live`): the program is named by the GUID of its PDB, reserves room
   within 2 GB behind its image with `VirtualAlloc`, and registers each patch's `.pdata` with
-  `RtlAddFunctionTable`, so a panic unwinds through patched code. The daemon cannot wake it, so
-  it looks for a patch every 30 ms. A static with another value asks for a restart (the splice
-  writes it in place). `ra_jit_live::edit`, which the demo's editor sends each keystroke
-  with, talks to the daemon's AF_UNIX socket through Winsock. Run by hand on `demo/life`, headless and in its window: edits applied in
-  about 0.5 to 3 ms, an edit put back, a restart from the executable spliced while it ran, a
-  panic through a patch. Not in CI, and `harness/live_e2e.py` is not run on Windows.
+  `RtlAddFunctionTable`, so a panic unwinds through patched code. The daemon wakes it through a
+  named event where Unix has a datagram socket. A static with another value asks for a restart
+  (the splice writes it in place). `ra_jit_live::edit`, which the demo's editor sends each
+  keystroke with, talks to the daemon's AF_UNIX socket through Winsock. `harness/live_e2e.py`
+  passes, by hand, not in CI; life's latency is in [live.md](live.md#latency-under-typing).
 - The daemon's socket is an AF_UNIX socket. The check that only the user can reach it is
   not implemented on Windows.
 
