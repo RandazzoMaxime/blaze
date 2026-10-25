@@ -625,7 +625,7 @@ pub(super) struct Written {
     pub(super) of_cargo: usize,
 }
 
-/// Gives the store what is compiled on a thread of its own, so that the thread that
+/// Gives the store what is compiled on threads of its own, so that the thread that
 /// compiles does not wait for an entry to be written before it stitches the next.
 pub(super) struct Writer {
     store: &'static Store,
@@ -633,7 +633,7 @@ pub(super) struct Writer {
     library: Option<super::LibrarySources>,
     types: KeptTypes,
     written: Written,
-    thread: Option<(std::sync::mpsc::Sender<Kept>, std::thread::JoinHandle<Written>)>,
+    threads: Option<(std::sync::mpsc::Sender<Kept>, Vec<std::thread::JoinHandle<Written>>)>,
     /// Whether there is no thread to be had, and the entries are written where they are kept.
     alone: bool,
 }
@@ -656,24 +656,39 @@ impl Writer {
         library: Option<super::LibrarySources>,
     ) -> Self {
         let (types, written) = Default::default();
-        Writer { store, cargo_home, library, types, written, thread: None, alone: true }
+        Writer { store, cargo_home, library, types, written, threads: None, alone: true }
     }
 
     pub(super) fn keep(&mut self, kept: Kept) {
-        if self.thread.is_none() && !self.alone {
+        if self.threads.is_none() && !self.alone {
             let (jobs, queued) = std::sync::mpsc::channel::<Kept>();
-            let mut writer =
-                Writer::alone(self.store, self.cargo_home.clone(), self.library.clone());
-            let work = move || {
-                queued.into_iter().for_each(|kept| writer.write(kept));
-                std::mem::take(&mut writer.written)
-            };
-            match std::thread::Builder::new().name("ra-jit store".to_owned()).spawn(work) {
-                Ok(thread) => self.thread = Some((jobs, thread)),
-                Err(_) => self.alone = true,
+            let queued = Arc::new(Mutex::new(queued));
+            // A whole build hands over most of its entries at once, when its last wave is
+            // compiled: one thread would write them after the link.
+            let count =
+                std::thread::available_parallelism().map_or(1, |it| it.get() / 8).clamp(1, 8);
+            let threads: Vec<_> = (0..count)
+                .map_while(|_| {
+                    let mut writer =
+                        Writer::alone(self.store, self.cargo_home.clone(), self.library.clone());
+                    let queued = queued.clone();
+                    let work = move || {
+                        loop {
+                            let next = queued.lock().unwrap_or_else(|e| e.into_inner()).recv();
+                            let Ok(kept) = next else { break };
+                            writer.write(kept);
+                        }
+                        std::mem::take(&mut writer.written)
+                    };
+                    std::thread::Builder::new().name("ra-jit store".to_owned()).spawn(work).ok()
+                })
+                .collect();
+            match threads.is_empty() {
+                true => self.alone = true,
+                false => self.threads = Some((jobs, threads)),
             }
         }
-        match &self.thread {
+        match &self.threads {
             Some((jobs, _)) => _ = jobs.send(kept),
             None => self.write(kept),
         }
@@ -710,9 +725,9 @@ impl Writer {
     /// since the last time.
     pub(super) fn finish(&mut self) -> Written {
         let mut written = std::mem::take(&mut self.written);
-        if let Some((jobs, thread)) = self.thread.take() {
+        if let Some((jobs, threads)) = self.threads.take() {
             drop(jobs);
-            if let Ok(theirs) = thread.join() {
+            for theirs in threads.into_iter().filter_map(|it| it.join().ok()) {
                 written.added += theirs.added;
                 written.of_cargo += theirs.of_cargo;
             }

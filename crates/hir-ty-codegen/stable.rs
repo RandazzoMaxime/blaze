@@ -122,6 +122,17 @@ fn declared(
     }
 }
 
+/// The crates by what a name starts with, and what the ones asked about declare, for every
+/// [`StableNames`] of a build: to list a crate is to go through every body of it.
+#[derive(Default, Clone)]
+pub(super) struct Listings(std::sync::Arc<std::sync::Mutex<Listing>>);
+
+#[derive(Default)]
+struct Listing {
+    crates: Option<FxHashMap<String, Vec<Crate>>>,
+    listed: FxHashMap<String, Listed>,
+}
+
 /// The statics and the functions without type parameters that one build of a crate declares.
 #[derive(Default)]
 struct Listed {
@@ -141,8 +152,7 @@ pub(super) struct StableNames<'a, 'db> {
     library: Option<super::LibrarySources>,
     files: RefCell<FxHashMap<HirFileId, Option<String>>>,
     /// The crates by what a name starts with, and what the ones asked about declare.
-    crates: RefCell<Option<FxHashMap<String, Vec<Crate>>>>,
-    listed: RefCell<FxHashMap<String, Listed>>,
+    listings: Listings,
     /// How each crate and each type is written, or why it has no name.
     crate_names: RefCell<FxHashMap<Crate, Result<Box<str>, &'static str>>>,
     tys: RefCell<FxHashMap<Ty<'db>, Result<Box<str>, &'static str>>>,
@@ -172,8 +182,7 @@ impl<'a, 'db> StableNames<'a, 'db> {
             cargo_home: symbols.cargo_home(),
             library: symbols.library_sources(),
             files: RefCell::default(),
-            crates: RefCell::default(),
-            listed: RefCell::default(),
+            listings: Listings::default(),
             crate_names: RefCell::default(),
             tys: RefCell::default(),
             written: RefCell::default(),
@@ -181,6 +190,16 @@ impl<'a, 'db> StableNames<'a, 'db> {
             missed: std::cell::Cell::new(""),
             misses: RefCell::default(),
         }
+    }
+
+    /// Lists the crates with `listings`, which other names of the build share.
+    pub(super) fn listing(mut self, listings: Listings) -> Self {
+        self.listings = listings;
+        self
+    }
+
+    pub(super) fn listings(&self) -> Listings {
+        self.listings.clone()
     }
 
     /// Names each crate of `frozen` by its id there, whatever is written in it now.
@@ -295,11 +314,11 @@ impl<'a, 'db> StableNames<'a, 'db> {
     fn listed<T>(&self, name: &str, of: impl FnOnce(&Listed) -> Option<T>) -> Option<T> {
         let (_, rest) = name.split_once(' ')?;
         let krate = &rest[..=rest.find(':')?];
-        let mut listed = self.listed.borrow_mut();
+        let mut listing = self.listings.0.lock().unwrap_or_else(|e| e.into_inner());
+        let Listing { crates, listed } = &mut *listing;
         if !listed.contains_key(krate) {
             // One build of a crate can be several crates here, which differ in what the
             // daemon is told of them and not in what they declare.
-            let mut crates = self.crates.borrow_mut();
             let crates = crates.get_or_insert_with(|| {
                 let mut crates = FxHashMap::<String, Vec<Crate>>::default();
                 // What is built names only what it depends on, and to name a crate of the

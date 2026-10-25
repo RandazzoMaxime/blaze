@@ -106,6 +106,7 @@ mod fncache;
 pub use fncache::{AlwaysRun, Reach, tests_reach};
 mod fragment;
 mod home;
+mod later;
 pub use home::body_file;
 #[cfg(feature = "llvm")]
 mod imports;
@@ -877,9 +878,30 @@ impl CodegenUnit {
                 }
                 // The other threads go on to what the roots call while these are put in the
                 // object.
-                cg.compile_ahead(ours, &mut |cg, ahead| {
-                    while let Some(&root) = queue.get(next) {
-                        next += 1;
+                cg.compile_ahead(ours, &mut |cg, mut ahead| {
+                    // A root still being compiled waits for those compiled after it.
+                    let mut held = std::collections::VecDeque::new();
+                    loop {
+                        let root = match (queue.get(next), &ahead) {
+                            (Some(&root), Some(ahead))
+                                if !denied.contains(&root)
+                                    && !left.contains(&root)
+                                    && !ahead.root_ready(root) =>
+                            {
+                                next += 1;
+                                held.push_back(root);
+                                continue;
+                            }
+                            (Some(&root), _) => {
+                                next += 1;
+                                root
+                            }
+                            (None, _) if held.is_empty() => break,
+                            (None, ahead) => {
+                                let at = ahead.as_ref().map_or(0, |it| it.ready_root(&held));
+                                held.remove(at).expect("one of those held")
+                            }
+                        };
                         let result = if denied.contains(&root) {
                             Err(CodegenError::Unsupported("left to rustc on request".to_owned()))
                         } else if left.contains(&root) {
@@ -903,7 +925,14 @@ impl CodegenUnit {
                                 skipped.push((root, e));
                             }
                         }
+                        let found = queue.len();
                         queue.extend(cg.wanted.drain(..).filter(|&func| queued.insert(func)));
+                        if let Some(ahead) = &mut ahead {
+                            let found = queue[found..].iter().copied();
+                            ahead.root(
+                                found.filter(|it| !denied.contains(it) && !left.contains(it)),
+                            );
+                        }
                     }
                     failed.extend(cg.define_waves(ahead));
                 });
@@ -912,6 +941,7 @@ impl CodegenUnit {
                     break;
                 }
             }
+            cg.make_later();
             if cg.misfit {
                 start_over("an entry of the store did not fit");
                 rejected.extend(failed);
@@ -2091,6 +2121,9 @@ struct ObjectCodegen<'a, 'db> {
     hydrate: bool,
     stable_names: FxHashMap<Instance, Option<StableName>>,
     kept: Kept,
+    /// The functions in the object whose description and entry of the store are still to
+    /// be made ([`later`]).
+    later: Vec<later::Later<'db>>,
     /// The entries of the store to build from in place of compiling, if any.
     entries: Option<std::sync::Arc<cached::Entries>>,
     /// The functions of this object by their stable names.
@@ -2140,6 +2173,35 @@ struct Kept {
 }
 
 impl Kept {
+    fn merge(&mut self, other: Kept) {
+        let Kept {
+            added,
+            found,
+            unnamed,
+            unnamed_requests,
+            differing,
+            same,
+            unkept,
+            unfound,
+            untracked,
+        } = other;
+        self.added += added;
+        self.found += found;
+        self.unnamed += unnamed;
+        self.unnamed_requests += unnamed_requests;
+        self.differing += differing;
+        self.same += same;
+        for (why, count) in unkept {
+            *self.unkept.entry(why).or_default() += count;
+        }
+        for (why, count) in unfound {
+            *self.unfound.entry(why).or_default() += count;
+        }
+        for (why, (count, first)) in untracked {
+            self.untracked.entry(why).or_insert((0, first)).0 += count;
+        }
+    }
+
     fn untracked(&mut self, name: &str, why: &'static str) {
         self.untracked.entry(why).or_insert_with(|| (0, name.into())).0 += 1;
     }
@@ -2611,6 +2673,111 @@ fn root_instance(db: &dyn HirDatabase, func: FunctionId) -> Instance {
         args: GenericArgs::new_from_slice(&[]).store(),
         checked: crate_checks_overflow(db, func.krate(db)).unwrap_or(false),
     }
+}
+
+/// Whether the instance is compiled with the flags of the crate its function is written
+/// in, as the copy under the symbol of the function is. A crate that uses an `#[inline]`
+/// function of another compiles a copy with its own.
+fn as_its_crate_compiles(
+    db: &dyn HirDatabase,
+    symbols: &dyn SymbolResolver,
+    instance: &Instance,
+) -> bool {
+    let InstanceDef::Fn(func) = instance.def else { return false };
+    match crate_checks_overflow(db, func.krate(db)) {
+        Some(written_with) => written_with == instance.checked,
+        // The standard library is built without the checks. rustc compiles an `#[inline]`
+        // function of it in each crate that calls it, where what it calls that takes the
+        // checks from its caller (`#[rustc_inherit_overflow_checks]`) has that crate's:
+        // the copy ra-jit's build of the standard library exports has none.
+        None => {
+            !instance.checked
+                || !symbols.nothing_of_rustc()
+                || !AttrFlags::query(db, func.into()).contains(AttrFlags::IS_INLINE)
+        }
+    }
+}
+
+/// The last name of what an instance is of.
+fn callee_name(db: &dyn HirDatabase, def: InstanceDef) -> &str {
+    match def {
+        InstanceDef::Fn(func) => FunctionSignature::of(db, func).name.as_str(),
+        InstanceDef::Closure(_) => "{closure}",
+        InstanceDef::Coroutine(_) | InstanceDef::CoroutineByMove(_) => "{async}",
+        InstanceDef::DropGlue => "drop_in_place",
+        InstanceDef::CallOnceShim => "call_once",
+        InstanceDef::VtableShim(_) => "{vtable}",
+        InstanceDef::FnPointerShim => "{closure}::fn_pointer",
+        InstanceDef::ReifyShim { .. } => "{reify}",
+    }
+}
+
+/// Writes into `blob` the `TypeId`s it has the places of.
+fn hash_type_ids(
+    db: &dyn HirDatabase,
+    symbols: &dyn SymbolResolver,
+    crates: &FxHashSet<Crate>,
+    blob: &mut ConstBlob,
+) -> Result<()> {
+    for (offset, of) in std::mem::take(&mut blob.type_ids) {
+        let of = of.as_ref();
+        let mut hasher = type_id::TypeIdHasher::new(db, symbols, crates);
+        let Some(hash) = hasher.type_id(of) else {
+            let stuck = hasher.stuck.unwrap_or_default();
+            unsupported!("`TypeId` of `{of:?}` in a constant, not hashed (at `{stuck}`)");
+        };
+        let at = offset as usize;
+        blob.bytes[at..at + 16].copy_from_slice(&hash.to_le_bytes());
+    }
+    Ok(())
+}
+
+/// What a debugger of a rustc build calls the code of a closure of `instance`.
+fn debug_closure<'db>(
+    db: &'db dyn HirDatabase,
+    instance: &Instance,
+    owner: InferBodyId<'db>,
+    expr: ExprId,
+) -> Option<String> {
+    let InferBodyId::DefWithBodyId(DefWithBodyId::FunctionId(func)) = owner else {
+        return None;
+    };
+    let args = instance.args.as_ref();
+    hir_ty::mir::type_name::rustc_debug_closure(db, func, args.as_slice(), expr)
+}
+
+/// What a backtrace of a rustc build calls the instance, as far as that is reproduced:
+/// the last name of it otherwise.
+fn backtrace_name(db: &dyn HirDatabase, instance: &Instance) -> String {
+    let args = instance.args.as_ref();
+    let ty = || args.as_slice().first().and_then(|arg| arg.ty());
+    let of_closure = |owner: InferBodyId<'_>, expr| match owner {
+        InferBodyId::DefWithBodyId(DefWithBodyId::FunctionId(func)) => {
+            hir_ty::mir::type_name::rustc_closure_name(db, func, args.as_slice(), expr)
+        }
+        _ => None,
+    };
+    let name = match instance.def {
+        InstanceDef::Fn(func) => {
+            hir_ty::mir::type_name::rustc_function_name(db, func, args.as_slice())
+        }
+        InstanceDef::Closure(id) => {
+            let at = InternedClosureId::from_id(id).loc(db);
+            of_closure(at.owner, at.expr)
+        }
+        InstanceDef::Coroutine(id) | InstanceDef::CoroutineByMove(id) => {
+            let at = InternedCoroutineId::from_id(id).loc(db);
+            of_closure(at.owner, at.expr)
+        }
+        InstanceDef::DropGlue => ty()
+            .and_then(|ty| hir_ty::mir::type_name::rustc_symbol_type(db, ty))
+            .map(|ty| format!("core::ptr::drop_glue::<{ty}>")),
+        InstanceDef::CallOnceShim
+        | InstanceDef::VtableShim(_)
+        | InstanceDef::FnPointerShim
+        | InstanceDef::ReifyShim { .. } => None,
+    };
+    name.unwrap_or_else(|| callee_name(db, instance.def).to_owned())
 }
 
 /// The code of a non-generic function: Cranelift's, or, for a compile at a level above 1
@@ -3565,10 +3732,12 @@ fn compiled_static<'db>(db: &'db dyn HirDatabase, id: StaticId) -> Result<Compil
 
 /// What the threads that compile ahead have to do and have done.
 struct Ahead {
-    /// Compiled functions whose calls are still to be looked through.
-    roots: Vec<FunctionId>,
-    /// Every function that has been one of `roots`.
+    /// Compiled functions whose calls are still to be looked through, in the order the
+    /// object is given them.
+    roots: std::collections::VecDeque<FunctionId>,
+    /// Every function that has been one of `roots`, and those a thread is through with.
     rooted: FxHashSet<FunctionId>,
+    rooted_done: FxHashSet<FunctionId>,
     queue: Vec<(Instance, StoredParamEnvAndCrate)>,
     seen: FxHashSet<(Instance, StoredParamEnvAndCrate)>,
     done: FxHashSet<(Instance, StoredParamEnvAndCrate)>,
@@ -3578,6 +3747,12 @@ struct Ahead {
     /// A thread was stopped in the middle of an instance, as a write to the database
     /// does: the others are not to wait for what it would have found.
     stopped: bool,
+    /// Whether the thread that puts functions in the object can still find roots, which
+    /// the threads that run out of work wait for.
+    open: bool,
+    /// How many threads compile ahead: with none, the one that puts functions in the
+    /// object compiles them.
+    alive: usize,
 }
 
 /// What the threads that compile ahead are through with, for the one that puts the
@@ -3598,16 +3773,26 @@ impl Ready<'_> {
     ) -> Vec<(Instance, StoredParamEnvAndCrate, FuncId)> {
         let mut ready = Vec::new();
         let mut state = self.ahead.lock().unwrap_or_else(|e| e.into_inner());
+        let mut queued = false;
         for (instance, env, id) in pending.drain(..) {
             let it = (instance, env);
-            if state.done.contains(&it) || !state.seen.contains(&it) {
+            if state.done.contains(&it) || (state.alive == 0 && !state.seen.contains(&it)) {
                 ready.push((it.0, it.1, id));
             } else {
+                // One the threads did not come to, as one only data asks for.
+                if state.seen.insert(it.clone()) {
+                    state.queue.push(it.clone());
+                    queued = true;
+                }
                 self.waiting.entry(it).or_default().push(id);
             }
         }
+        if queued {
+            self.idle.notify_all();
+        }
         loop {
             let ended = state.stopped
+                || state.alive == 0
                 || (state.roots.is_empty() && state.queue.is_empty() && state.working == 0);
             let done: Vec<_> = if ended {
                 state.fresh.clear();
@@ -3624,6 +3809,43 @@ impl Ready<'_> {
             }
             state = self.idle.wait(state).unwrap_or_else(|e| e.into_inner());
         }
+    }
+
+    /// Which of `held` no thread is still to compile, waiting until one is. The first when
+    /// the threads are through with everything.
+    fn ready_root(&self, held: &std::collections::VecDeque<FunctionId>) -> usize {
+        let mut state = self.ahead.lock().unwrap_or_else(|e| e.into_inner());
+        loop {
+            let found = held.iter().position(|it| Self::through(&state, *it));
+            let ended = state.stopped
+                || state.alive == 0
+                || (state.roots.is_empty() && state.queue.is_empty() && state.working == 0);
+            match found {
+                Some(at) => return at,
+                None if ended => return 0,
+                None => state = self.idle.wait(state).unwrap_or_else(|e| e.into_inner()),
+            }
+        }
+    }
+
+    /// Whether no thread is still to compile `root`.
+    fn root_ready(&self, root: FunctionId) -> bool {
+        Self::through(&self.ahead.lock().unwrap_or_else(|e| e.into_inner()), root)
+    }
+
+    fn through(state: &Ahead, root: FunctionId) -> bool {
+        state.stopped || !state.rooted.contains(&root) || state.rooted_done.contains(&root)
+    }
+
+    /// Has the threads compile `roots` too, which putting the others in the object found.
+    fn root(&mut self, roots: impl IntoIterator<Item = FunctionId>) {
+        let mut state = self.ahead.lock().unwrap_or_else(|e| e.into_inner());
+        for root in roots {
+            if state.rooted.insert(root) {
+                state.roots.push_back(root);
+            }
+        }
+        self.idle.notify_all();
     }
 }
 
@@ -4648,6 +4870,7 @@ impl<'a, 'db> ObjectCodegen<'a, 'db> {
         let built = start.elapsed();
         // A patch is added to a program that is linked already, and is read with it.
         let apart = symbols.debug_apart().filter(|_| base.is_none());
+        let elf = module.isa().triple().binary_format == target_lexicon::BinaryFormat::Elf;
         let debug = symbols.debug_directory().and_then(|directory| {
             DebugContext::new(
                 module.isa(),
@@ -4656,7 +4879,7 @@ impl<'a, 'db> ObjectCodegen<'a, 'db> {
                 apart,
                 sections && symbols.debug_grouped(),
             )
-            .map(debuginfo::Describer::new)
+            .map(|context| debuginfo::Describer::new(context, elf))
         });
         let debugged = cached::Told::of(debug.is_some(), symbols.describes_variables());
         let described = start.elapsed();
@@ -4741,6 +4964,7 @@ impl<'a, 'db> ObjectCodegen<'a, 'db> {
             hydrate,
             stable_names: FxHashMap::default(),
             kept: Kept::default(),
+            later: Vec::new(),
             // A patch gets these from its base, and a check compiles them to compare.
             entries: store
                 .filter(|_| base.is_none() && std::env::var_os("RA_JIT_CACHE_CHECK").is_none())
@@ -4776,6 +5000,7 @@ impl<'a, 'db> ObjectCodegen<'a, 'db> {
 
     /// The object, and the files of what a debugger reads that is kept apart from it.
     fn finish(mut self) -> Result<(Vec<u8>, Vec<Sidecar>)> {
+        self.make_later();
         if Target::current().writes_wasm_objects() {
             return Ok((self.finish_wasm()?, Vec::new()));
         }
@@ -4932,23 +5157,18 @@ impl<'a, 'db> ObjectCodegen<'a, 'db> {
                 return Err(e);
             }
         };
-        let name = hir_ty::mir::type_name::rustc_debug_function(db, func, &[])
-            .unwrap_or_else(|| FunctionSignature::of(db, func).name.as_str().to_owned());
-        let declared = self.debug_declaration_at(func);
+        let of = later::Of::Root { func, symbol: symbol.clone() };
+        let mut later = later::Later::new(&self.module, id, of, compiled, ids);
         // The rows of the Cranelift code are not those of LLVM's.
-        let unit_rows = unit.as_ref().filter(|_| self.debug.is_some()).map(|it| rows_of(db, it));
-        let rows = match &unit_rows {
-            Some(rows) => Some(rows),
-            None => self.debug.as_ref().filter(|_| tiered.is_none()).map(|_| root_rows(db, func)),
-        };
-        let debug =
-            self.describe(id, compiled, rows, FunctionDebug::new(name, symbol.clone()), declared);
-        if tiered.is_none() && self.roots_from_store() {
-            let instance = root_instance(db, func);
-            let tally = backend::Tally::global();
-            tally.step(Step::StoreWrite, || {
-                self.keep(&instance, func.krate(db), compiled, &ids, debug)
-            });
+        later.unit_rows = unit.as_ref().filter(|_| self.debug.is_some()).map(|it| rows_of(db, it));
+        (later.tiered, later.keeps) =
+            (tiered.is_some(), tiered.is_none() && self.roots_from_store());
+        match (tiered, &unit) {
+            (None, None) if self.defers() => {
+                let compiled = compiled_root(db, func).as_ref().map_err(Clone::clone)?;
+                self.later.push(later::Later { compiled, ..later });
+            }
+            _ => self.make_now(&later),
         }
         Ok(symbol)
     }
@@ -5217,7 +5437,8 @@ impl<'a, 'db> ObjectCodegen<'a, 'db> {
                 break;
             }
             for (instance, env, id) in wave {
-                if let Err(e) = self.define_instance(&instance, &env, id) {
+                let defined = self.define_instance(&instance, &env, id);
+                if let Err(e) = defined {
                     if self.forward_to_rustc(&instance, id).is_some() {
                         self.forwarded.insert(instance);
                     } else {
@@ -5272,13 +5493,16 @@ impl<'a, 'db> ObjectCodegen<'a, 'db> {
             .collect();
         let ahead = std::sync::Mutex::new(Ahead {
             rooted: roots.iter().copied().collect(),
-            roots,
+            rooted_done: FxHashSet::default(),
+            roots: roots.into(),
             queue,
             seen,
             done: FxHashSet::default(),
             fresh: Vec::new(),
             working: 0,
             stopped: false,
+            open: true,
+            alive: 0,
         });
         let idle = std::sync::Condvar::new();
         let (rejected, hydrate) = (self.rejected, self.hydrate);
@@ -5289,7 +5513,7 @@ impl<'a, 'db> ObjectCodegen<'a, 'db> {
         let told = told.as_ref();
         let on_demand = self.on_demand;
         let (stored, roots_from_store) = (&self.stored_roots.clone(), self.roots_from_store());
-        let work = |db: &dyn HirDatabase, symbols: &dyn SymbolResolver, _: usize| {
+        let run = |db: &dyn HirDatabase, symbols: &dyn SymbolResolver| {
             let names = stable::StableNames::new(db, symbols, owned.clone(), hydrate);
             let usable = |name: &str| {
                 let Some(entries) = entries else { return false };
@@ -5313,11 +5537,11 @@ impl<'a, 'db> ObjectCodegen<'a, 'db> {
                 if state.stopped {
                     return;
                 }
-                let job = match state.roots.pop() {
+                let job = match state.roots.pop_front() {
                     Some(root) => either::Either::Left(root),
                     None => match state.queue.pop() {
                         Some(it) => either::Either::Right(it),
-                        None if state.working == 0 => {
+                        None if state.working == 0 && !state.open => {
                             idle.notify_all();
                             return;
                         }
@@ -5377,6 +5601,9 @@ impl<'a, 'db> ObjectCodegen<'a, 'db> {
                 drop(working);
                 state = ahead.lock().unwrap_or_else(|e| e.into_inner());
                 state.working -= 1;
+                if let either::Either::Left(root) = job {
+                    state.rooted_done.insert(root);
+                }
                 if let either::Either::Right(it) = job {
                     state.done.insert(it.clone());
                     state.fresh.push(it);
@@ -5388,14 +5615,31 @@ impl<'a, 'db> ObjectCodegen<'a, 'db> {
                 }
                 for root in called {
                     if state.rooted.insert(root) {
-                        state.roots.push(root);
+                        state.roots.push_back(root);
                     }
                 }
                 idle.notify_all();
             }
         };
+        let work = |db: &dyn HirDatabase, symbols: &dyn SymbolResolver, _: usize| {
+            ahead.lock().unwrap_or_else(|e| e.into_inner()).alive += 1;
+            /// Counts the thread out however it stops.
+            struct Leaving<'a>(&'a std::sync::Mutex<Ahead>, &'a std::sync::Condvar);
+            impl Drop for Leaving<'_> {
+                fn drop(&mut self) {
+                    self.0.lock().unwrap_or_else(|e| e.into_inner()).alive -= 1;
+                    self.1.notify_all();
+                }
+            }
+            let _leaving = Leaving(&ahead, &idle);
+            run(db, symbols);
+        };
         let mut ready = Ready { ahead: &ahead, idle: &idle, waiting: FxHashMap::default() };
-        self.symbols.in_parallel_beside(threads, &work, &mut || beside(self, Some(&mut ready)));
+        self.symbols.in_parallel_beside(threads, &work, &mut || {
+            beside(self, Some(&mut ready));
+            ahead.lock().unwrap_or_else(|e| e.into_inner()).open = false;
+            idle.notify_all();
+        });
         self.ahead = ahead.into_inner().unwrap_or_else(|e| e.into_inner()).seen;
     }
 
@@ -5437,150 +5681,20 @@ impl<'a, 'db> ObjectCodegen<'a, 'db> {
             );
         }
         let ids = self.stitch(id, compiled)?;
-        let name = self.backtrace_name(instance);
-        let declared = self.written_at(instance, env.krate);
-        let known = match instance.def {
-            InstanceDef::Fn(func) => hir_ty::mir::type_name::rustc_debug_function(
-                self.db,
-                func,
-                instance.args.as_ref().as_slice(),
-            ),
-            InstanceDef::Closure(id) => {
-                let at = InternedClosureId::from_id(id).loc(self.db);
-                self.debug_closure(instance, at.owner, at.expr)
-            }
-            InstanceDef::Coroutine(id) | InstanceDef::CoroutineByMove(id) => {
-                let at = InternedCoroutineId::from_id(id).loc(self.db);
-                self.debug_closure(instance, at.owner, at.expr)
-            }
-            _ => None,
-        };
-        let known = known.unwrap_or_else(|| name.clone());
-        let unit_rows =
+        let of = later::Of::Instance { instance: instance.clone(), env: env.clone() };
+        let mut later = later::Later::new(&self.module, id, of, compiled, ids);
+        later.unit_rows =
             unit.as_ref().filter(|_| self.debug.is_some()).map(|it| rows_of(self.db, it));
-        let rows = match &unit_rows {
-            Some(rows) => Some(rows),
-            None => self
-                .debug
-                .as_ref()
-                .filter(|_| tiered.is_none())
-                .map(|_| instance_rows(self.db, instance.clone(), env.clone())),
-        };
-        let debug = self.describe(id, compiled, rows, FunctionDebug::new(known, name), declared);
-        // Code of a level above 1 is of a profile, which is no key of the store.
-        if tiered.is_none() {
-            let tally = backend::Tally::global();
-            tally.step(Step::StoreWrite, || self.keep(instance, env.krate, compiled, &ids, debug));
+        (later.tiered, later.keeps) = (tiered.is_some(), tiered.is_none());
+        match (tiered, &unit) {
+            (None, None) if self.defers() => {
+                let compiled = compiled_instance(self.db, instance.clone(), env.clone());
+                let compiled = compiled.as_ref().map_err(Clone::clone)?;
+                self.later.push(later::Later { compiled, ..later });
+            }
+            _ => self.make_now(&later),
         }
         Ok(())
-    }
-
-    /// Where what `instance` is the code of is written, which is the line of whatever of its
-    /// code is of no statement: a function where it is declared, a closure or an `async`
-    /// block where it stands, and a shim where the function it stands in for is declared, as
-    /// rustc has it.
-    fn written_at(&mut self, instance: &Instance, krate: Crate) -> Option<(String, u32, u32)> {
-        self.debug.as_ref()?;
-        let db = self.db;
-        let lang_items = DbInterner::new_with(db, krate).lang_items();
-        let ty = || instance.args.as_ref().as_slice().first().and_then(|arg| arg.ty());
-        let of_expr = |owner: InferBodyId<'db>, expr| match owner {
-            InferBodyId::DefWithBodyId(owner) => Some((owner, MirSpan::ExprId(expr))),
-            _ => None,
-        };
-        let func = match instance.def {
-            InstanceDef::Fn(func) => Some(func),
-            InstanceDef::Closure(id) => {
-                let at = InternedClosureId::from_id(id).loc(db);
-                return self.location_at(of_expr(at.owner, at.expr));
-            }
-            InstanceDef::Coroutine(id) | InstanceDef::CoroutineByMove(id) => {
-                let at = InternedCoroutineId::from_id(id).loc(db);
-                return self.location_at(of_expr(at.owner, at.expr));
-            }
-            InstanceDef::DropGlue => lang_items.DropInPlace.or(lang_items.DropGlue),
-            InstanceDef::CallOnceShim => lang_items.FnOnce_call_once,
-            InstanceDef::VtableShim(func) => Some(func),
-            InstanceDef::FnPointerShim => match ty()?.kind() {
-                TyKind::Closure(id, _) => {
-                    let at = id.0.loc(db);
-                    return self.location_at(of_expr(at.owner, at.expr));
-                }
-                _ => None,
-            },
-            InstanceDef::ReifyShim { .. } => match ty()?.kind() {
-                TyKind::FnDef(def, _) => match def.0 {
-                    CallableDefId::FunctionId(func) => Some(func),
-                    constructor => {
-                        return constructor_location(db, constructor).and_then(
-                            |(file, line, col)| Some((self.source_path(file)?, line, col)),
-                        );
-                    }
-                },
-                _ => lang_items.FnOnce_call_once,
-            },
-        };
-        self.debug_declaration_at(func?)
-    }
-
-    /// Tells the debugger about the compiled function `id`: what it is called, as `debug`
-    /// has it, and which line each of its instructions is of, as `rows` have it. `None`
-    /// when no debugger is told anything, which is when there are no `rows`.
-    fn describe(
-        &mut self,
-        id: FuncId,
-        compiled: &CompiledFunction,
-        rows: Option<&Vec<Row>>,
-        mut debug: FunctionDebug,
-        declared: Option<(String, u32, u32)>,
-    ) -> Option<FunctionDebug> {
-        let rows = rows?;
-        let start = stdx::time::Instant::now();
-        if let Some((file, line, column)) = declared {
-            debug.declared = Some(debug.place(file, line, column));
-        }
-        for &(offset, file, line, column) in rows {
-            let Some(file) = self.source_path(file) else { continue };
-            let place = debug.place(file, line, column);
-            debug.row(offset, place);
-        }
-        // Compiled code of no statement with a place is of where the function is written
-        // throughout. A function that is its assembly has no lines, as rustc gives it none.
-        if let Some(declared) = debug.declared
-            && debug.rows.is_empty()
-            && compiled.code.unwind.is_some()
-        {
-            debug.row(0, declared);
-        }
-        if let Some((owner, _)) = &compiled.source
-            && let Some((env, variables)) = &compiled.variables
-            && self.tells_variables()
-        {
-            let places = &compiled.code.slots;
-            let db = self.db;
-            let len = compiled.code.bytes.len() as u32;
-            let mut rows: Vec<(u32, MirSpan)> = match &compiled.source {
-                Some((_, spans)) => (compiled.code.lines.iter())
-                    .filter_map(|row| Some((row.offset, *spans.get(row.span as usize)?)))
-                    .collect(),
-                None => Vec::new(),
-            };
-            rows.sort_by_key(|row| row.0);
-            let scopes = describe_scopes(db, *owner, variables, &rows, len, &mut debug);
-            describe_variables(
-                db,
-                *owner,
-                (&self.told, env),
-                variables,
-                places,
-                &scopes,
-                &mut debug,
-            );
-        }
-        let len = compiled.code.bytes.len() as u32;
-        self.debug.as_ref()?.add_function(id, len, debug.clone());
-        backend::Tally::global().add(Step::Describe, start.elapsed());
-        Some(debug)
     }
 
     fn stable_name(&mut self, instance: &Instance) -> Option<StableName> {
@@ -5592,103 +5706,144 @@ impl<'a, 'db> ObjectCodegen<'a, 'db> {
         name
     }
 
-    /// Adds a stitched instance to the store, when everything it is and refers to has a name
-    /// that another run of the daemon can find it by.
-    fn keep(
-        &mut self,
-        instance: &Instance,
-        home: Crate,
-        compiled: &CompiledFunction,
-        ids: &Resolved,
-        debug: Option<FunctionDebug>,
-    ) {
-        // What a patch refers to is in its base under names of that one object.
+    /// Whether what is made of a function once it is in the object waits for every function
+    /// to be in it ([`later`]): not in a program with code of rustc's, which settles what it
+    /// refers to by the build, nor in a patch, nor for units, nor when entries are checked.
+    fn defers(&self) -> bool {
+        self.mixed.is_none()
+            && self.base.is_none()
+            && !self.units()
+            && std::env::var_os("RA_JIT_CACHE_CHECK").is_none()
+    }
+
+    fn keeper(&mut self, settled: Option<Vec<Option<Instance>>>) -> later::Keeper<'_, 'db> {
         let program = self.mixed.as_ref().map(|it| it.key);
-        let own = self.base.is_none() && program != Some(None) && !self.symbols.onto_rustcs();
-        let store = store::Store::global().filter(|_| own);
-        let Some(store) = store else { return };
-        let Some(name) = self.stable_name(instance) else {
-            self.kept.unnamed += 1;
-            return;
-        };
-        let told = cached::Told::of(debug.is_some(), self.symbols.describes_variables());
-        let key = cached::Entry::key(&name, told, program.flatten().as_ref());
-        let Some(key) = key else { return };
-        let check = std::env::var_os("RA_JIT_CACHE_CHECK");
-        let sets = || debug.iter().flat_map(|it| &it.types).cloned().collect::<Vec<_>>();
-        if check.is_none() && store.has(&key) {
-            let kept = cached::Kept::Types(sets());
-            return self.writer(store).keep(kept);
-        }
-        let described = debug.is_some();
-        let Some(mut entry) = self.entry(instance, compiled, ids, debug) else {
-            self.kept.unnamed_requests += 1;
-            return;
-        };
-        // A unit's code is not what the query gives, which is what an edit is compared with.
         let markable = self.mixed.is_none() && !self.units();
-        if markable && stable::StableNames::of_checkout(&name) {
-            match self.tracked(instance, home, compiled, described) {
-                Ok(tracked) => entry.tracked = Some(tracked),
-                Err(why) => self.kept.untracked(&name, why),
-            }
-        }
-        let mut entry = Box::new(entry);
-        let Some(check) = check else {
-            return self.writer(store).keep(cached::Kept::Entry { key, entry });
-        };
-        // The entry as it would be written is set against the one that is there.
-        let stored = store.get(&key);
-        let mut alone =
-            cached::Writer::alone(store, self.symbols.cargo_home(), self.symbols.library_sources());
-        let Some(bytes) = alone.encoded(&mut entry) else {
-            let _: Option<()> = self.kept.unkept(OF_CARGO);
-            return;
-        };
-        match stored {
-            None => {
-                store.insert(&key, &bytes);
-                self.kept.added += 1;
-            }
-            Some(stored) if stored == bytes => self.kept.same += 1,
-            Some(stored) => {
-                self.kept.differing += 1;
-                eprintln!("entry of `{name}` is not what was compiled");
-                if check != "1" {
-                    let at = std::path::Path::new(&check).join(self.kept.differing.to_string());
-                    let was = cached::Entry::decode(&stored);
-                    _ = std::fs::write(at, format!("{name}\n{was:#?}\n{entry:#?}"));
-                }
-            }
+        later::Keeper {
+            db: self.db,
+            symbols: self.symbols,
+            names: &self.names,
+            stable_names: &mut self.stable_names,
+            source_paths: &mut self.source_paths,
+            kept: &mut self.kept,
+            declarations: self.module.declarations(),
+            type_ids: &self.type_ids,
+            root_names: &self.root_names,
+            own_crates: &self.own_statics.crates,
+            told: &self.told,
+            debug: self.debug.is_some(),
+            variables: self.symbols.describes_variables(),
+            program,
+            own: self.base.is_none() && program != Some(None) && !self.symbols.onto_rustcs(),
+            markable,
+            settled,
         }
     }
 
-    /// What a patch base that has the code of `instance` from the store tells an edit of it by.
-    /// `None` for code the base has to compile to tell: in a program with code of rustc's,
-    /// which settles what an instance is by its build, or of a `#[ra_jit::cache]` function,
-    /// whose code holds a hash of everything it reaches.
-    fn tracked(
-        &self,
-        instance: &Instance,
-        home: Crate,
-        compiled: &CompiledFunction,
-        described: bool,
-    ) -> std::result::Result<cached::Tracked, &'static str> {
-        if let InstanceDef::Fn(func) = instance.def
-            && fncache::cached_closure(self.db, func).is_some()
-        {
-            return Err("a `#[ra_jit::cache]` function");
-        }
-        let mark = patch::stable_mark(self.db, &self.names, compiled, described)
-            .ok_or("what it refers to has no stable name")?;
-        let files = home::body_files(self.db, instance).and_then(|files| {
-            files.iter().map(|&file| self.names.file_path(file)).collect::<Option<Vec<_>>>()
+    /// Makes what is made of a function once it is in the object, here and now.
+    fn make_now(&mut self, later: &later::Later<'_>) {
+        let settled = self.mixed.is_some().then(|| {
+            let funcs = later.compiled.requests.funcs.iter();
+            let settled = funcs.map(|request| match &request.target {
+                FuncTarget::Instance(callee, _) => self.settled(callee).ok(),
+                _ => None,
+            });
+            settled.collect()
         });
-        let home = match self.names.of_the_checkout(home) {
-            true => Some(self.names.content_id(home).ok_or("its crate has no content id")?.0),
-            false => None,
-        };
-        Ok(cached::Tracked { mark, home, files })
+        let made = self.keeper(settled).make(later);
+        self.apply(later, made);
+    }
+
+    fn apply(&mut self, later: &later::Later<'_>, made: later::Made) {
+        if let (Some(debug), Some(describer)) = (made.debug, &self.debug) {
+            describer.add_function(later.id, later.compiled.code.bytes.len() as u32, debug);
+        }
+        if let Some(kept) = made.kept
+            && let Some(store) = store::Store::global()
+        {
+            self.writer(store).keep(kept);
+        }
+    }
+
+    /// Makes what is made of the functions in the object that waited for it ([`later`]),
+    /// on every core, and tells the debugger and the store of them in the order they were
+    /// put in the object.
+    fn make_later(&mut self) {
+        let later = std::mem::take(&mut self.later);
+        if later.is_empty() {
+            return;
+        }
+        const AT_ONCE: usize = 64;
+        let parts: Vec<_> = later.chunks(AT_ONCE).collect();
+        type Part = (Vec<later::Made>, Kept, FxHashMap<&'static str, usize>);
+        let made: Vec<std::sync::Mutex<Option<Part>>> =
+            parts.iter().map(|_| Default::default()).collect();
+        {
+            let (owned, hydrate) = (&self.own_statics.crates, self.hydrate);
+            let (declarations, type_ids, root_names) =
+                (self.module.declarations(), &self.type_ids, &self.root_names);
+            let program = self.mixed.as_ref().map(|it| it.key);
+            let (debug, told) = (self.debug.is_some(), &self.told);
+            // Each thread names what it makes with names of its own, which it asks the same
+            // of over and over: they are not made again for each part.
+            let next = std::sync::atomic::AtomicUsize::new(0);
+            let listings = self.names.listings();
+            let work = |db: &dyn HirDatabase, symbols: &dyn SymbolResolver, _: usize| {
+                let names = stable::StableNames::new(db, symbols, owned.clone(), hydrate)
+                    .listing(listings.clone());
+                let (mut stable_names, mut source_paths) = Default::default();
+                let mut kept = Kept::default();
+                let mut keeper = later::Keeper {
+                    db,
+                    symbols,
+                    names: &names,
+                    stable_names: &mut stable_names,
+                    source_paths: &mut source_paths,
+                    kept: &mut kept,
+                    declarations,
+                    type_ids,
+                    root_names,
+                    own_crates: owned,
+                    told,
+                    debug,
+                    variables: symbols.describes_variables(),
+                    program,
+                    own: program != Some(None) && !symbols.onto_rustcs(),
+                    markable: true,
+                    settled: None,
+                };
+                loop {
+                    let at = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    let Some(part) = parts.get(at) else { break };
+                    let part = part.iter().map(|it| keeper.make(it)).collect();
+                    let kept = std::mem::take(&mut *keeper.kept);
+                    let misses = names.misses.take();
+                    *made[at].lock().unwrap_or_else(|e| e.into_inner()) =
+                        Some((part, kept, misses));
+                }
+            };
+            let threads = std::thread::available_parallelism().map_or(1, |it| it.get());
+            self.symbols.in_parallel(threads.min(parts.len()), &work);
+        }
+        for (part, made) in parts.iter().zip(made) {
+            let made = made.into_inner().unwrap_or_else(|e| e.into_inner());
+            // A resolver without threads leaves the work to whoever asks for it.
+            let Some((part_made, kept, misses)) = made else {
+                for it in part.iter() {
+                    let made = self.keeper(None).make(it);
+                    self.apply(it, made);
+                }
+                continue;
+            };
+            for (it, made) in part.iter().zip(part_made) {
+                self.apply(it, made);
+            }
+            self.kept.merge(kept);
+            let mut ours = self.names.misses.borrow_mut();
+            for (why, count) in misses {
+                *ours.entry(why).or_default() += count;
+            }
+        }
     }
 
     fn writer(&mut self, store: &'static store::Store) -> &mut cached::Writer {
@@ -5702,19 +5857,7 @@ impl<'a, 'db> ObjectCodegen<'a, 'db> {
     /// in, as the copy under the symbol of the function is. A crate that uses an `#[inline]`
     /// function of another compiles a copy with its own.
     fn as_its_crate_compiles(&self, instance: &Instance) -> bool {
-        let InstanceDef::Fn(func) = instance.def else { return false };
-        match crate_checks_overflow(self.db, func.krate(self.db)) {
-            Some(written_with) => written_with == instance.checked,
-            // The standard library is built without the checks. rustc compiles an `#[inline]`
-            // function of it in each crate that calls it, where what it calls that takes the
-            // checks from its caller (`#[rustc_inherit_overflow_checks]`) has that crate's:
-            // the copy ra-jit's build of the standard library exports has none.
-            None => {
-                !instance.checked
-                    || !self.symbols.nothing_of_rustc()
-                    || !AttrFlags::query(self.db, func.into()).contains(AttrFlags::IS_INLINE)
-            }
-        }
+        as_its_crate_compiles(self.db, self.symbols, instance)
     }
 
     /// The instance as the crate rustc had compile it does: `instance` is as the crate that
@@ -5820,177 +5963,6 @@ impl<'a, 'db> ObjectCodegen<'a, 'db> {
         }
         let of = self.names.functions_named(name);
         of.into_iter().find_map(|it| Some((it, self.symbols.function(it)?)))
-    }
-
-    fn entry(
-        &mut self,
-        instance: &Instance,
-        compiled: &CompiledFunction,
-        ids: &Resolved,
-        debug: Option<FunctionDebug>,
-    ) -> Option<cached::Entry> {
-        use cached::{CachedData, CachedFunc, CachedTarget};
-        let mut funcs = Vec::with_capacity(ids.funcs.len());
-        for (request, &id) in compiled.requests.funcs.iter().zip(&ids.funcs) {
-            let decl = self.module.declarations().get_function_decl(id);
-            let target = if let Some(&hash) = self.type_ids.get(&id) {
-                CachedTarget::TypeId(hash)
-            } else if decl.linkage == Linkage::Import {
-                // rustc's copy of a function of the checkout is of the checkout as rustc
-                // built it, and uses rustc's copies of the statics.
-                let symbol = decl.linkage_name(id).into_owned();
-                let checked = self.symbols.defines(&symbol);
-                // An item of an `extern` block is the symbol it links to, whoever declares it.
-                let foreign = |callee: &Instance| match callee.def {
-                    InstanceDef::Fn(func) => link_name(self.db, func).is_some(),
-                    _ => false,
-                };
-                let mut copied = None;
-                let callee = match &request.target {
-                    FuncTarget::Instance(callee, _) if !foreign(callee) => {
-                        let Ok(callee) = self.settled(callee) else {
-                            return self.kept.unkept("unsettled callee");
-                        };
-                        copied = match callee.def {
-                            InstanceDef::Fn(func)
-                                if callee.args.as_ref().iter().all(|it| it.region().is_some()) =>
-                            {
-                                Some(func)
-                            }
-                            _ => None,
-                        };
-                        Some(self.stable_name(&callee))
-                    }
-                    _ => None,
-                };
-                match callee {
-                    // Ours to compile, though under a symbol: rustc built nothing of its crate.
-                    Some(Some(name)) if !checked && stable::StableNames::of_checkout(&name) => {
-                        if self.root_named(&name).is_none() {
-                            return self.kept.unkept("unlisted function of the checkout");
-                        }
-                        CachedTarget::Root(name.as_ref().to_owned())
-                    }
-                    // A function of the checkout without generic arguments, which `callee`
-                    // has called as rustc's copy: what decides that is in the names the entry
-                    // is kept under, but for whether the program has the copy and the future
-                    // a function returns, which rustc lays out its own way.
-                    Some(Some(name))
-                        if stable::StableNames::of_checkout(&name)
-                            && copied.is_some_and(|func| !returns_async_block(self.db, func))
-                            && self.root_named(&name).is_some() =>
-                    {
-                        CachedTarget::Copy { name: name.as_ref().to_owned(), symbol }
-                    }
-                    Some(name)
-                        if name.as_ref().is_none_or(|it| stable::StableNames::of_checkout(it)) =>
-                    {
-                        return self.kept.unkept("rustc's copy of a function of the checkout");
-                    }
-                    _ => CachedTarget::Import { symbol, checked },
-                }
-            } else if let FuncTarget::Instance(callee, _) = &request.target {
-                let Ok(callee) = &self.settled(callee) else {
-                    return self.kept.unkept("unsettled callee");
-                };
-                let Some(name) = self.stable_name(callee) else {
-                    return self.kept.unkept("unnamed callee");
-                };
-                // A function the program is built from has no entry: it is compiled anew.
-                if stable::StableNames::of_checkout(&name)
-                    && self.as_its_crate_compiles(callee)
-                    && self.root_named(&name).is_some()
-                {
-                    CachedTarget::Root(name.as_ref().to_owned())
-                } else {
-                    CachedTarget::Named(name.as_ref().to_owned())
-                }
-            } else if let FuncTarget::Asm(text) = &request.target {
-                CachedTarget::Asm(text.clone())
-            } else {
-                return self.kept.unkept("call of no instance");
-            };
-            funcs.push(CachedFunc { target, sig: request.sig.clone() });
-        }
-        // Only a crate of the checkout is compiled with where the checkout is.
-        let placed =
-            self.stable_name(instance).is_some_and(|it| stable::StableNames::of_checkout(&it));
-        let home = self.symbols.cargo_home();
-        let library = self.symbols.library_sources();
-        let mut datas = Vec::with_capacity(ids.datas.len());
-        for (request, &id) in compiled.requests.datas.iter().zip(&ids.datas) {
-            if let DataRequest::Blob { blob, .. } | DataRequest::Vtable { blob, .. } = request {
-                if placed && self.symbols.names_place(&blob.bytes) {
-                    return self.kept.unkept("data with the place of the checkout");
-                }
-                if home.as_deref().is_some_and(|home| cached::holds(&blob.bytes, home)) {
-                    return self.kept.unkept("data with the place of cargo's directory");
-                }
-                if library.as_ref().is_some_and(|it| cached::holds(&blob.bytes, &it.here)) {
-                    return self.kept.unkept("data with the place of the library's sources");
-                }
-            }
-            let mut hashed = match request {
-                DataRequest::Blob { blob, .. } | DataRequest::Vtable { blob, .. } => blob.clone(),
-                _ => ConstBlob::default(),
-            };
-            if self.hash_type_ids(&mut hashed).is_err() {
-                return self.kept.unkept("a `TypeId` not hashed");
-            }
-            datas.push(match request {
-                DataRequest::Blob { identity, .. } => {
-                    CachedData::Blob { blob: hashed, identity: *identity }
-                }
-                DataRequest::Vtable { ty, trait_ref, .. } => {
-                    let trait_ref = trait_ref.as_ref().map(|(id, args)| (*id, args.as_ref()));
-                    let Some(key) = self.names.vtable(ty.as_ref(), trait_ref) else {
-                        return self.kept.unkept("unnamed vtable");
-                    };
-                    CachedData::Vtable { key, blob: hashed }
-                }
-                DataRequest::Static(of) => {
-                    let decl = self.module.declarations().get_data_decl(id);
-                    // Whether a static of the checkout is rustc's or ours is up to the build.
-                    let krate = of.krate(self.db);
-                    let of_checkout = self.own_statics.crates.contains(&krate)
-                        || krate.data(self.db).origin.is_local();
-                    let foreign = static_link_name(self.db, *of).is_some();
-                    if !foreign && (decl.linkage != Linkage::Import || of_checkout) {
-                        let Some(name) = self.names.static_(*of) else {
-                            return self.kept.unkept("unnamed static");
-                        };
-                        CachedData::OwnStatic(name)
-                    } else {
-                        CachedData::Static {
-                            symbol: decl.linkage_name(id).into_owned(),
-                            thread_local: decl.tls,
-                        }
-                    }
-                }
-                DataRequest::Location(at) => CachedData::Location(self.location_at(*at)),
-                DataRequest::Declaration(func) => CachedData::Location(self.declaration_at(*func)),
-                DataRequest::FilePath(file) => {
-                    let Some(path) = self.source_path(*file) else {
-                        return self.kept.unkept("file without a path");
-                    };
-                    CachedData::FilePath(path)
-                }
-                DataRequest::Text(parts) => {
-                    let Some(text) = self.text(parts) else {
-                        return self.kept.unkept("file without a path");
-                    };
-                    CachedData::FilePath(text)
-                }
-            });
-        }
-        Some(cached::Entry {
-            label: self.callee_name(instance.def).to_owned(),
-            funcs,
-            datas,
-            code: cached::CachedCode::from(&compiled.code),
-            debug,
-            tracked: None,
-        })
     }
 
     /// The function of an entry and everything it calls, declared here and to be defined from
@@ -6524,12 +6496,6 @@ impl<'a, 'db> ObjectCodegen<'a, 'db> {
             .and_then(|(file, line, col)| Some((self.source_path(file)?, line, col)))
     }
 
-    /// Where a debugger is told `func` is declared: [`debug_declaration_location`].
-    fn debug_declaration_at(&mut self, func: FunctionId) -> Option<(String, u32, u32)> {
-        debug_declaration_location(self.db, func)
-            .and_then(|(file, line, col)| Some((self.source_path(file)?, line, col)))
-    }
-
     /// A `core::panic::Location`, of no place in particular when the place is not known.
     fn define_location(&mut self, found: Option<(String, u32, u32)>) -> Result<DataId> {
         let (file, line, col) = found.unwrap_or_else(|| ("<ra-jit>".to_owned(), 0u32, 0u32));
@@ -6741,66 +6707,8 @@ impl<'a, 'db> ObjectCodegen<'a, 'db> {
         Ok(id)
     }
 
-    /// What a debugger of a rustc build calls the code of a closure of `instance`.
-    fn debug_closure(
-        &self,
-        instance: &Instance,
-        owner: InferBodyId<'db>,
-        expr: ExprId,
-    ) -> Option<String> {
-        let InferBodyId::DefWithBodyId(DefWithBodyId::FunctionId(func)) = owner else {
-            return None;
-        };
-        let args = instance.args.as_ref();
-        hir_ty::mir::type_name::rustc_debug_closure(self.db, func, args.as_slice(), expr)
-    }
-
-    /// What a backtrace of a rustc build calls the instance, as far as that is reproduced:
-    /// the last name of it otherwise.
-    fn backtrace_name(&self, instance: &Instance) -> String {
-        let db = self.db;
-        let args = instance.args.as_ref();
-        let ty = || args.as_slice().first().and_then(|arg| arg.ty());
-        let of_closure = |owner: InferBodyId<'db>, expr| match owner {
-            InferBodyId::DefWithBodyId(DefWithBodyId::FunctionId(func)) => {
-                hir_ty::mir::type_name::rustc_closure_name(db, func, args.as_slice(), expr)
-            }
-            _ => None,
-        };
-        let name = match instance.def {
-            InstanceDef::Fn(func) => {
-                hir_ty::mir::type_name::rustc_function_name(db, func, args.as_slice())
-            }
-            InstanceDef::Closure(id) => {
-                let at = InternedClosureId::from_id(id).loc(db);
-                of_closure(at.owner, at.expr)
-            }
-            InstanceDef::Coroutine(id) | InstanceDef::CoroutineByMove(id) => {
-                let at = InternedCoroutineId::from_id(id).loc(db);
-                of_closure(at.owner, at.expr)
-            }
-            InstanceDef::DropGlue => ty()
-                .and_then(|ty| hir_ty::mir::type_name::rustc_symbol_type(db, ty))
-                .map(|ty| format!("core::ptr::drop_glue::<{ty}>")),
-            InstanceDef::CallOnceShim
-            | InstanceDef::VtableShim(_)
-            | InstanceDef::FnPointerShim
-            | InstanceDef::ReifyShim { .. } => None,
-        };
-        name.unwrap_or_else(|| self.callee_name(instance.def).to_owned())
-    }
-
     fn callee_name(&self, def: InstanceDef) -> &'db str {
-        match def {
-            InstanceDef::Fn(func) => FunctionSignature::of(self.db, func).name.as_str(),
-            InstanceDef::Closure(_) => "{closure}",
-            InstanceDef::Coroutine(_) | InstanceDef::CoroutineByMove(_) => "{async}",
-            InstanceDef::DropGlue => "drop_in_place",
-            InstanceDef::CallOnceShim => "call_once",
-            InstanceDef::VtableShim(_) => "{vtable}",
-            InstanceDef::FnPointerShim => "{closure}::fn_pointer",
-            InstanceDef::ReifyShim { .. } => "{reify}",
-        }
+        callee_name(self.db, def)
     }
 
     /// Adds to `failed` the instances that call one of them, and so on up: the next round
@@ -7107,18 +7015,7 @@ impl<'a, 'db> ObjectCodegen<'a, 'db> {
     /// Defines `id` as `blob`, in a section of its own named `section` when there is one.
     /// Writes rustc's hash of each type in `blob.type_ids` at its place in the bytes.
     fn hash_type_ids(&self, blob: &mut ConstBlob) -> Result<()> {
-        for (offset, of) in std::mem::take(&mut blob.type_ids) {
-            let of = of.as_ref();
-            let mut hasher =
-                type_id::TypeIdHasher::new(self.db, self.symbols, &self.own_statics.crates);
-            let Some(hash) = hasher.type_id(of) else {
-                let stuck = hasher.stuck.unwrap_or_default();
-                unsupported!("`TypeId` of `{of:?}` in a constant, not hashed (at `{stuck}`)");
-            };
-            let at = offset as usize;
-            blob.bytes[at..at + 16].copy_from_slice(&hash.to_le_bytes());
-        }
-        Ok(())
+        hash_type_ids(self.db, self.symbols, &self.own_statics.crates, blob)
     }
 
     fn fill_data(&mut self, id: DataId, mut blob: ConstBlob, section: Option<&str>) -> Result<()> {

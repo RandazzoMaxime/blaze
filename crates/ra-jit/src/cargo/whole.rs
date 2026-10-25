@@ -94,11 +94,13 @@ fn whole(asked: &Invocation, cwd: &Path, program: &Program, dir: &Path) -> Resul
     blaze.args(asked.selection().flags()).arg("--crate").arg(&program.root);
     blaze.arg("--asked-in").arg(asked_in);
     blaze.arg("--out").arg(built.with_extension("o")).arg("--exe").arg(&built);
-    blaze.current_dir(cwd).stdin(Stdio::null()).stdout(Stdio::null());
+    // What blaze says goes to the log as it says it, so a long build can be followed there.
+    let writing =
+        std::fs::File::create(&log).map_err(|it| format!("writing {}: {it}", log.display()))?;
+    blaze.current_dir(cwd).stdin(Stdio::null()).stdout(Stdio::null()).stderr(writing);
     let output = blaze.output().map_err(|it| format!("blaze did not start: {it}"))?;
-    let said = String::from_utf8_lossy(&output.stderr);
-    std::fs::write(&log, said.as_bytes())
-        .map_err(|it| format!("writing {}: {it}", log.display()))?;
+    let said = std::fs::read(&log).map_err(|it| format!("reading {}: {it}", log.display()))?;
+    let said = String::from_utf8_lossy(&said);
     let shown = log.strip_prefix(cwd).unwrap_or(&log).display().to_string();
     // A function of the program's own crates blaze cannot compile is left out of the object,
     // and the link then fails on what it would have defined.
