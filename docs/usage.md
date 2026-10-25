@@ -10,15 +10,16 @@ cd my-project
 cargo blaze build
 ```
 
-The first build is cargo's, with cargo's usual output. When it is done, blaze starts a background
-process, the daemon, which loads your project: a few seconds for a small one, up to about a minute
-for a very large one. Until then builds are still cargo's, and each one says so:
+The first build runs cargo, with cargo's usual output, while a background process, the daemon,
+loads your project beside it. The build then waits for the daemon to build your program, under
+a second after cargo on ripgrep and about 4 seconds on nushell:
 
 ```
-ra-jit: bug: the daemon is still loading the workspace (951ms so far); building with cargo, which ra-jit is never to do (no-rustc M, #93, and #84)
+     Waiting for blaze to load the workspace
+    Finished `dev` profile [ra-jit] target(s) in 41.20s
 ```
 
-`cargo blaze status` says `ready` once it is done. From then on, an edit builds like this:
+From then on, an edit builds like this:
 
 ```
 $ cargo blaze build
