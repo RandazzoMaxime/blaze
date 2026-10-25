@@ -11,7 +11,8 @@ random), one that prints a backtrace (which reads the environment and the workin
 one that reads a file, one that calls nothing. It is tested until the daemon serves the build,
 then edited a step at a time, and after each the tests that ran have to be the ones the step
 names: those whose code or what it calls changed, those added or given other attributes, the
-one that reads a file every time, the one that failed until it passes, and with
+one that reads a file every time, the one that failed until it passes (and not the others that
+ran and passed beside it), and with
 `RA_JIT_TESTS=all` every test. A test that ran has to end as its source says. With `-v` the
 output says why the one that reads a file runs, by the calls from it to the file system, and
 how many tests run every time.
@@ -116,6 +117,13 @@ STEPS = [
     ("nothing edited after it failed", [], "affected", {"tests::uses_other", FILE}, False),
     ("the test fixed", [("src/lib.rs", "other(2), 5", "other(2), 4")], "affected",
      {"tests::uses_other", FILE}, True),
+    # The unit tests fail, so cargo runs no integration test after them.
+    ("one of several reached failing", [("src/lib.rs", "x + 2 - 1", "x + 3 - 2"),
+                                         ("src/lib.rs", "assert_eq!(helper(1), 2);", "assert_eq!(helper(1), 3);")],
+     "affected", CALL_HELPER - {"it_helper"} | {"tests::added", FILE}, False),
+    ("nothing edited after one failed", [], "affected", {"tests::uses_helper", FILE}, False),
+    ("that one fixed", [("src/lib.rs", "assert_eq!(helper(1), 3);", "assert_eq!(helper(1), 2);")],
+     "affected", {"tests::uses_helper", "it_helper", FILE}, True),
     ("every test asked for", [], "all", ALL | {"tests::added"}, True),
     ("nothing edited again", [], "affected", {FILE}, True),
     ("why a test runs every time", [], "affected -v", {FILE}, True),
