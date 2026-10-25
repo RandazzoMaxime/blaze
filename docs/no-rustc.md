@@ -1210,7 +1210,15 @@ paid once, by the release, instead of on a user's machine (`crates/ra-jit/src/sh
 - `ra-jit std REMOTE TOOLCHAIN` builds a script that does nothing over TOOLCHAIN (a sysroot)
   into a store of its own, running no rustc, and pushes that store to REMOTE as the project `std-<target>-<build>`, where `<build>` is what the store keys
   by: the ra-jit binary's bytes and the toolchain's commit and compiler name. Only that binary
-  with that toolchain can use it, and every key in it says so.
+  with that toolchain can use it, and every key in it says so. It then builds a program that
+  prints a line, whole, with the `dev` and the `release` profile: a program keys the unit by the
+  debug info its profile asks for, line tables for `dev` where a script asks for none, so
+  without it every whole build of a dev program compiled the library again (about 10 s, step K).
+  The `release` program takes the script's unit. It then builds a program that
+  prints a line, whole, with the `dev` and the `release` profile: a program keys the unit by the
+  debug info its profile asks for, line tables for `dev` where a script asks for none, so
+  without it every whole build of a dev program compiled the library again (about 10 s, step K).
+  The `release` program takes the script's unit.
 - The release workflow runs it with each target's archived binary and the pinned 1.99.0, and
   attaches the remote's files to the release with `.` for `/` (`manifests.std-…`, `packs.….pack.zst`,
   `keys.…`). A remote can be a plain `https://` address now (`remote/https.rs`): read-only,
