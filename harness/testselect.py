@@ -15,7 +15,8 @@ one that reads a file, one that calls nothing. It is tested until the daemon ser
 then edited a step at a time, and after each the tests that ran have to be the ones the step
 names: those whose code or what it calls changed, those added or given other attributes, the
 one that reads a file every time, the one that failed until it passes (and not the others that
-ran and passed beside it), and with
+ran and passed beside it), one added to a program with an `ignore` with a list, one added to a library with a bench (in
+a package of its own, built with RUSTC_BOOTSTRAP=1), and with
 `RA_JIT_TESTS=all` every test. A test that ran has to end as its source says. With `-v` the
 output says why the one that reads a file runs, by the calls from it to the file system, and
 how many tests run every time.
@@ -143,7 +144,14 @@ FILES = {
     # `cfg(test)`, as ripgrep's crates are each other's.
     "tbase/Cargo.toml": '[package]\nname = "tbase"\nversion = "0.1.0"\nedition = "2021"\n',
     "tbase/src/lib.rs": BASE,
-    "tests/it.rs": """#[test]
+    # An `ignore` with a list after it, which rustc reads as one without a message.
+    "tests/it.rs": """#![allow(ill_formed_attribute_input)]
+
+#[test]
+#[ignore(not_yet)]
+fn it_listed() {}
+
+#[test]
 fn it_helper() {
     assert_eq!(tsel::helper(0), 1);
 }
@@ -162,7 +170,7 @@ fn it_base() {
 CALL_HELPER = {"tests::uses_helper", "tests::uses_any", "tests::uses_a_map", "tests::shows_a_backtrace", "it_helper"}
 CALL_BASE = {"tests::uses_base", "it_base"}
 ALL = CALL_HELPER | CALL_BASE | {"tests::uses_other", "tests::reads_a_file", "tests::plain", "it_helper", "it_other",
-                                 "shapes::twice::tests::doubles"}
+                                 "shapes::twice::tests::doubles", "it_listed"}
 FILE = "tests::reads_a_file"
 WRITES = "tests::writes_a_file"
 SANDBOXED = sys.platform == "linux" and os.environ.get("RA_JIT_SANDBOX") not in ("off", "0")
@@ -184,6 +192,9 @@ STEPS = [
                        "    #[test]\n    fn added() {\n        assert_eq!(helper(2), 3);\n    }\n\n"
                        "    #[test]\n    fn plain()")], "affected",
      {"tests::added"} | F, True),
+    ("a test added beside an ignore with a list",
+     [("tests/it.rs", "#[test]\nfn it_base()", "#[test]\nfn it_added() {\n    assert_eq!(1 + 1, 2);\n}\n\n#[test]\nfn it_base()")],
+     "affected", {"it_added"} | F, True),
     ("a test ignored", [("src/lib.rs", "    #[test]\n    fn plain()", "    #[test]\n    #[ignore]\n    fn plain()")],
      "affected", {"tests::plain"} | F, True),
     ("a test that fails", [("src/lib.rs", "other(2), 4", "other(2), 5")], "affected",
@@ -198,7 +209,7 @@ STEPS = [
     ("nothing edited after one failed", [], "affected", {"tests::uses_helper"} | F, False),
     ("that one fixed", [("src/lib.rs", "assert_eq!(helper(1), 3);", "assert_eq!(helper(1), 2);")],
      "affected", {"tests::uses_helper", "it_helper"} | F, True),
-    ("every test asked for", [], "all", ALL | {"tests::added"}, True),
+    ("every test asked for", [], "all", ALL | {"tests::added", "it_added"}, True),
     ("nothing edited again", [], "affected", F, True),
     ("why a test runs every time", [], "affected -v", F, True),
 ]
@@ -236,6 +247,57 @@ AFTER = {
         and not os.path.exists(os.path.join(ws, "written.txt"))) or "IT WROTE INTO THE PACKAGE",
 }
 RAN = re.compile(r"^test (\S+) \.\.\. (ok|ignored|FAILED)", re.M)
+# A library with a `#[bench]`, which is nightly's: built with RUSTC_BOOTSTRAP=1.
+BENCHED = {
+    "Cargo.toml": '[package]\nname = "benched"\nversion = "0.1.0"\nedition = "2021"\n',
+    "src/lib.rs": """#![feature(test)]
+extern crate test;
+
+pub fn add(x: u32) -> u32 {
+    x + 1
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[bench]
+    fn bench_add(b: &mut test::Bencher) {
+        b.iter(|| add(1))
+    }
+
+    #[test]
+    fn adds() {
+        assert_eq!(add(1), 2);
+    }
+}
+""",
+}
+BENCHED_ADDED = ("src/lib.rs", "    #[test]\n    fn adds()",
+                 "    #[test]\n    fn added() {\n        assert_eq!(add(2), 3);\n    }\n\n    #[test]\n    fn adds()")
+
+
+def benched(root, env):
+    """A test added to a program with a bench: what the step's line says."""
+    ws, env = os.path.join(root, "benched"), dict(env, RUSTC_BOOTSTRAP="1", CARGO_UNSTABLE_CHECKSUM_FRESHNESS="false")
+    for path, text in BENCHED.items():
+        os.makedirs(os.path.dirname(os.path.join(ws, path)), exist_ok=True)
+        open(os.path.join(ws, path), "w").write(text)
+    deadline = time.monotonic() + 300
+    while "[ra-jit]" not in test(ws, env, "all")[1]:
+        if time.monotonic() > deadline:
+            return "NEVER SERVED BY THE DAEMON"
+        time.sleep(0.5)
+    path, old, new = BENCHED_ADDED
+    text = open(os.path.join(ws, path)).read()
+    open(os.path.join(ws, path), "w").write(text.replace(old, new, 1))
+    code, said = test(ws, env, "all")
+    ran = {name for name, _ in RAN.findall(said)}
+    if "[ra-jit]" not in said:
+        return "NOT SERVED BY THE DAEMON"
+    if ran != {"tests::added", "tests::adds", "tests::bench_add"} or code != 0:
+        return f"ENDED {code} HAVING RUN {', '.join(sorted(ran)) or 'nothing'}"
+    return "ok"
 
 
 def test(ws, env, mode):
@@ -302,9 +364,12 @@ def main():
             print(f"{what:34} {verdict}", flush=True)
             if verdict != "ok" and os.environ.get("TESTSELECT_VERBOSE"):
                 print(said[-4000:])
+        verdict = benched(root, env)
+        wrong += verdict != "ok"
+        print(f"{'a test added beside a bench':34} {verdict}", flush=True)
     finally:
         subprocess.run(["cargo", "ra-jit", "stop"], cwd=ws, env=env, capture_output=True, timeout=120)
-    print(f"{len(STEPS) - wrong} of {len(STEPS)} right; under {root}, the daemon's home {home}")
+    print(f"{len(STEPS) + 1 - wrong} of {len(STEPS) + 1} right; under {root}, the daemon's home {home}")
     if wrong:
         sys.exit(1)
     shutil.rmtree(root, ignore_errors=True)

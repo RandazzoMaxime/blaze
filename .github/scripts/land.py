@@ -21,7 +21,7 @@ again, and starts it again if it is gone; running land.py again on the same bran
 """
 import json, os, signal, subprocess, sys, time
 
-REPO = "indexable-inc/ra-jit"
+REPO = "indexable-inc/blaze"
 POLL = 20
 GIVE_UP = 3 * 3600
 # A `gh` call that fails this many times in a row (the network, GitHub) ends the waiting.
@@ -48,7 +48,7 @@ def gh(*args):
 
 
 def state(number):
-    query = """query($number: Int!) { repository(owner: "indexable-inc", name: "ra-jit") {
+    query = """query($number: Int!) { repository(owner: "indexable-inc", name: "blaze") {
       pullRequest(number: $number) { state mergeable isInMergeQueue url headRefName
         mergeQueueEntry { position state } autoMergeRequest { enabledAt } mergeCommit { oid } } } }"""
     out = gh("api", "graphql", "-f", f"query={query}", "-F", f"number={number}")

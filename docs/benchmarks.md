@@ -256,12 +256,12 @@ runs it at boot (on Linux as user `andrew` from a user systemd unit,
 
 ```
 scp harness/benchrunner.sh HOST:
-gh api -X POST repos/indexable-inc/ra-jit/actions/runners/registration-token --jq .token \
+gh api -X POST repos/indexable-inc/blaze/actions/runners/registration-token --jq .token \
   | ssh HOST bash benchrunner.sh linux-aarch64 "'AWS m8g.4xlarge (dev-aws-bench-arm64)'"
 ```
 
 Then name the platform in the repository variable `BENCH_RUNNERS`, comma-separated, which turns
-its jobs on: `gh variable set BENCH_RUNNERS -R indexable-inc/ra-jit -b linux-x86-64,linux-aarch64,macos-arm64`.
+its jobs on: `gh variable set BENCH_RUNNERS -R indexable-inc/blaze -b linux-x86-64,linux-aarch64,macos-arm64`.
 A platform it does not name is skipped by every run rather than left waiting for a runner that
 is not there, and the README keeps its last numbers, under their machine, date and commit.
 (`BENCH_RUNNER=true`, from before there were platforms, still means Linux x86-64.)
@@ -283,7 +283,7 @@ shared virtual M1 with 3 cores and 7 GiB, whose runs of a benchmark have varied 
 
 `.github/workflows/bench-readme.yaml` runs on every push to main that touches code (not docs,
 the site or the README), every night at 09:17 UTC, and by hand (`gh workflow run bench-readme
---repo indexable-inc/ra-jit`, with `-f force=true` to write the README even when nothing moved).
+--repo indexable-inc/blaze`, with `-f force=true` to write the README even when nothing moved).
 One run at a time; a push during a run waits, and a newer push replaces the waiting one. A run
 has a job per registered platform, on its runner, at the same time, and then one job that
 publishes them all.
@@ -1095,7 +1095,7 @@ The same command run by the program ra-jit linked and by cargo's debug and relea
 
 ### Linux x86-64
 
-ra-jit [`42cb85270f`](https://github.com/indexable-inc/ra-jit/commit/42cb85270f3822819deed0d8788b6f1180b4137a), 2026-10-24T02:03:22Z, Rust 1.99.0, 5 runs of each edit, measured by hand. Raw: [benchmarks/linux-x86-64.json](benchmarks/linux-x86-64.json).
+ra-jit [`1a005421b7`](https://github.com/indexable-inc/ra-jit/commit/1a005421b7a47fa3968bc5de6645e25a50dfd855), 2026-10-25T02:46:55Z, Rust 1.99.0, 5 runs of each edit, measured by hand. Raw: [benchmarks/linux-x86-64.json](benchmarks/linux-x86-64.json).
 
 | Machine | |
 |---|---|
@@ -1111,7 +1111,7 @@ ra-jit [`42cb85270f`](https://github.com/indexable-inc/ra-jit/commit/42cb85270f3
 | LLVM | 20.1.8 |
 | Incremental | profile default (on for dev) |
 | Compiler cache | none |
-| Load average at the start | 1.8, 14.6, 17.4 |
+| Load average at the start | 7.8, 2.9, 1.1 |
 
 #### Edits, Cranelift, Linux x86-64
 
@@ -1119,58 +1119,65 @@ Median, then the fastest and slowest run. Built: who built the edit (daemon, or 
 
 | Project | Edit | cargo | ra-jit | | cargo runs | ra-jit runs | Built | Link |
 |---|---|---:|---:|---:|---|---|---|---|
-| ripgrep 15.1.0 | Edit a function | 497 ms | 56 ms | 8.9x | 492 ms to 499 ms | 54 ms to 64 ms | daemon | spliced |
-| ripgrep 15.1.0 | Edit a widely used function | 758 ms | 50 ms | 15x | 740 ms to 771 ms | 50 ms to 84 ms | daemon | spliced |
-| ripgrep 15.1.0 | Change a signature | 611 ms | 88 ms | 6.9x | 605 ms to 615 ms | 88 ms to 124 ms | daemon | spliced |
-| ripgrep 15.1.0 | Edit a generic function | 746 ms | 50 ms | 15x | 730 ms to 759 ms | 49 ms to 50 ms | daemon | spliced |
-| ripgrep 15.1.0 | Add a function | 487 ms | 66 ms | 7.4x | 475 ms to 491 ms | 64 ms to 68 ms | daemon | spliced |
-| ripgrep 15.1.0 | Add a struct field | 878 ms | 60 ms | 15x | 872 ms to 922 ms | 58 ms to 73 ms | daemon | spliced |
+| ripgrep 15.1.0 | Edit a function | 508 ms | 56 ms | 9.1x | 504 ms to 516 ms | 55 ms to 66 ms | daemon | spliced |
+| ripgrep 15.1.0 | Edit a widely used function | 781 ms | 53 ms | 15x | 778 ms to 784 ms | 52 ms to 88 ms | daemon | spliced |
+| ripgrep 15.1.0 | Change a signature | 625 ms | 88 ms | 7.1x | 623 ms to 627 ms | 85 ms to 126 ms | daemon | spliced |
+| ripgrep 15.1.0 | Edit a generic function | 754 ms | 51 ms | 15x | 750 ms to 757 ms | 51 ms to 52 ms | daemon | spliced |
+| ripgrep 15.1.0 | Add a function | 512 ms | 60 ms | 8.5x | 509 ms to 513 ms | 58 ms to 61 ms | daemon | spliced |
+| ripgrep 15.1.0 | Add a struct field | 896 ms | 56 ms | 16x | 891 ms to 923 ms | 55 ms to 85 ms | daemon | spliced |
 | ripgrep 15.1.0 | Nothing changed | 22 ms | 16 ms | 1.4x | 22 ms to 23 ms | 15 ms to 16 ms | daemon |  |
-| fd 10.3.0 | Edit a function | 490 ms | 52 ms | 9.4x | 480 ms to 495 ms | 51 ms to 63 ms | daemon | spliced |
-| fd 10.3.0 | Edit a widely used function | 465 ms | 35 ms | 13x | 459 ms to 480 ms | 34 ms to 36 ms | daemon | spliced |
-| fd 10.3.0 | Change a signature | 505 ms | 56 ms | 9.0x | 496 ms to 531 ms | 55 ms to 138 ms | daemon | spliced |
-| fd 10.3.0 | Add a function | 482 ms | 54 ms | 8.9x | 480 ms to 488 ms | 54 ms to 58 ms | daemon | spliced |
-| fd 10.3.0 | Add a struct field | 684 ms | 46 ms | 15x | 668 ms to 708 ms | 45 ms to 68 ms | daemon | spliced |
-| fd 10.3.0 | Nothing changed | 31 ms | 15 ms | 2.1x | 30 ms to 32 ms | 15 ms to 15 ms | daemon |  |
-| bat 0.26.0 | Edit a function | 490 ms | 49 ms | 10x | 481 ms to 497 ms | 49 ms to 67 ms | daemon | spliced |
-| bat 0.26.0 | Edit a widely used function | 723 ms | 48 ms | 15x | 692 ms to 758 ms | 47 ms to 49 ms | daemon | spliced |
-| bat 0.26.0 | Change a signature | 689 ms | 50 ms | 14x | 650 ms to 695 ms | 49 ms to 74 ms | daemon | spliced |
-| bat 0.26.0 | Add a function | 497 ms | 56 ms | 8.9x | 492 ms to 507 ms | 55 ms to 57 ms | daemon | spliced |
-| bat 0.26.0 | Add a struct field | 940 ms | 55 ms | 17x | 923 ms to 990 ms | 54 ms to 57 ms | daemon | spliced |
-| bat 0.26.0 | Nothing changed | 59 ms | 15 ms | 3.9x | 59 ms to 60 ms | 15 ms to 16 ms | daemon |  |
-| hyperfine 1.19.0 | Edit a function | 370 ms | 34 ms | 11x | 366 ms to 377 ms | 33 ms to 34 ms | daemon | spliced |
-| hyperfine 1.19.0 | Edit a widely used function | 404 ms | 49 ms | 8.2x | 395 ms to 409 ms | 49 ms to 50 ms | daemon | spliced |
-| hyperfine 1.19.0 | Change a signature | 418 ms | 75 ms | 5.6x | 417 ms to 420 ms | 73 ms to 82 ms | daemon | spliced |
-| hyperfine 1.19.0 | Add a function | 375 ms | 36 ms | 10x | 369 ms to 381 ms | 35 ms to 42 ms | daemon | spliced |
-| hyperfine 1.19.0 | Add a struct field | 480 ms | 63 ms | 7.6x | 466 ms to 484 ms | 59 ms to 65 ms | daemon | spliced |
-| hyperfine 1.19.0 | Nothing changed | 41 ms | 15 ms | 2.7x | 41 ms to 41 ms | 14 ms to 15 ms | daemon |  |
-| just 1.43.0 | Edit a function | 697 ms | 40 ms | 17x | 684 ms to 710 ms | 40 ms to 45 ms | daemon | spliced |
-| just 1.43.0 | Edit a widely used function | 712 ms | 62 ms | 11x | 696 ms to 725 ms | 61 ms to 63 ms | daemon | spliced |
-| just 1.43.0 | Change a signature | 706 ms | 74 ms | 9.5x | 674 ms to 710 ms | 73 ms to 78 ms | daemon | spliced |
-| just 1.43.0 | Add a function | 788 ms | 59 ms | 13x | 774 ms to 800 ms | 58 ms to 60 ms | daemon | spliced |
-| just 1.43.0 | Add a struct field | 1.82 s | 129 ms | 14x | 1.77 s to 1.94 s | 121 ms to 173 ms | daemon | spliced |
-| just 1.43.0 | Nothing changed | 40 ms | 15 ms | 2.7x | 40 ms to 41 ms | 14 ms to 15 ms | daemon |  |
-| axum 0.8.6 | Edit a function | 418 ms | 50 ms | 8.4x | 415 ms to 420 ms | 48 ms to 53 ms | daemon | spliced |
-| axum 0.8.6 | Edit a widely used function | 864 ms | 44 ms | 20x | 818 ms to 875 ms | 43 ms to 47 ms | daemon | spliced |
-| axum 0.8.6 | Add a function | 407 ms | 50 ms | 8.1x | 404 ms to 419 ms | 49 ms to 52 ms | daemon | spliced |
-| axum 0.8.6 | Nothing changed | 72 ms | 16 ms | 4.5x | 70 ms to 75 ms | 15 ms to 20 ms | daemon |  |
-| nushell 0.108.0 | Edit a function | 1.23 s | 262 ms | 4.7x | 1.19 s to 1.27 s | 253 ms to 281 ms | daemon | spliced |
-| nushell 0.108.0 | Edit a widely used function | 4.74 s | 271 ms | 17x | 4.71 s to 4.77 s | 267 ms to 275 ms | daemon | spliced |
-| nushell 0.108.0 | Change a signature | 4.77 s | 350 ms | 14x | 4.73 s to 4.81 s | 342 ms to 540 ms | daemon | spliced |
-| nushell 0.108.0 | Edit a generic function | 6.37 s | 265 ms | 24x | 6.32 s to 6.65 s | 264 ms to 280 ms | daemon | spliced |
-| nushell 0.108.0 | Add a function | 1.24 s | 266 ms | 4.7x | 1.19 s to 1.29 s | 253 ms to 293 ms | daemon | spliced |
-| nushell 0.108.0 | Add a struct field | 8.11 s | 355 ms | 23x | 8.00 s to 8.22 s | 348 ms to 386 ms | daemon | spliced |
-| nushell 0.108.0 | Nothing changed | 171 ms | 18 ms | 9.5x | 166 ms to 173 ms | 17 ms to 20 ms | daemon |  |
-| helix 25.07.1 | Edit a function | 2.12 s | 79 ms | 27x | 2.11 s to 2.16 s | 78 ms to 78.08 s | daemon | full link: no executable to add to |
-| helix 25.07.1 | Edit a widely used function | 3.25 s | 116 ms | 28x | 3.18 s to 3.30 s | 112 ms to 118 ms | daemon | spliced |
-| helix 25.07.1 | Change a signature | 2.75 s | 275 ms | 10.0x | 2.70 s to 2.83 s | 262 ms to 640 ms | daemon | spliced |
-| helix 25.07.1 | Add a function | 2.11 s | 144 ms | 15x | 2.06 s to 2.18 s | 132 ms to 148 ms | daemon | spliced |
-| helix 25.07.1 | Add a struct field | 8.80 s | 253 ms | 35x | 8.57 s to 9.16 s | 238 ms to 259 ms | daemon | spliced |
-| helix 25.07.1 | Nothing changed | 81 ms | 16 ms | 5.1x | 80 ms to 82 ms | 16 ms to 203 ms | daemon |  |
-| bevy 0.20.0 | Edit a function | 3.09 s | 914 ms | 3.4x | 2.88 s to 3.16 s | 879 ms to 979 ms | daemon | spliced |
-| bevy 0.20.0 | Edit a widely used function | 11.53 s | 726 ms | 16x | 11.05 s to 11.64 s | 618 ms to 746 ms | daemon | spliced |
-| bevy 0.20.0 | Add a function | 3.17 s | 966 ms | 3.3x | 3.12 s to 3.25 s | 952 ms to 1.18 s | daemon | spliced |
-| bevy 0.20.0 | Nothing changed | 178 ms | 19 ms | 9.4x | 177 ms to 185 ms | 19 ms to 523 ms | daemon |  |
+| fd 10.3.0 | Edit a function | 494 ms | 53 ms | 9.3x | 489 ms to 500 ms | 52 ms to 64 ms | daemon | spliced |
+| fd 10.3.0 | Edit a widely used function | 459 ms | 33 ms | 14x | 457 ms to 467 ms | 33 ms to 36 ms | daemon | spliced |
+| fd 10.3.0 | Change a signature | 498 ms | 57 ms | 8.7x | 495 ms to 503 ms | 56 ms to 124 ms | daemon | spliced |
+| fd 10.3.0 | Add a function | 491 ms | 55 ms | 8.9x | 490 ms to 493 ms | 55 ms to 57 ms | daemon | spliced |
+| fd 10.3.0 | Add a struct field | 683 ms | 45 ms | 15x | 681 ms to 706 ms | 43 ms to 45 ms | daemon | spliced |
+| fd 10.3.0 | Nothing changed | 33 ms | 15 ms | 2.2x | 31 ms to 33 ms | 15 ms to 16 ms | daemon |  |
+| bat 0.26.0 | Edit a function | 502 ms | 49 ms | 10x | 498 ms to 506 ms | 48 ms to 63 ms | daemon | spliced |
+| bat 0.26.0 | Edit a widely used function | 730 ms | 49 ms | 15x | 720 ms to 732 ms | 48 ms to 50 ms | daemon | spliced |
+| bat 0.26.0 | Change a signature | 689 ms | 51 ms | 14x | 680 ms to 699 ms | 50 ms to 77 ms | daemon | spliced |
+| bat 0.26.0 | Add a function | 502 ms | 53 ms | 9.5x | 498 ms to 505 ms | 53 ms to 55 ms | daemon | spliced |
+| bat 0.26.0 | Add a struct field | 958 ms | 56 ms | 17x | 953 ms to 988 ms | 55 ms to 57 ms | daemon | spliced |
+| bat 0.26.0 | Nothing changed | 60 ms | 15 ms | 4.0x | 59 ms to 61 ms | 15 ms to 16 ms | daemon |  |
+| hyperfine 1.19.0 | Edit a function | 385 ms | 35 ms | 11x | 381 ms to 387 ms | 34 ms to 37 ms | daemon | spliced |
+| hyperfine 1.19.0 | Edit a widely used function | 417 ms | 52 ms | 8.0x | 414 ms to 438 ms | 51 ms to 52 ms | daemon | spliced |
+| hyperfine 1.19.0 | Change a signature | 423 ms | 76 ms | 5.6x | 419 ms to 426 ms | 74 ms to 80 ms | daemon | spliced |
+| hyperfine 1.19.0 | Add a function | 384 ms | 37 ms | 10x | 384 ms to 385 ms | 37 ms to 43 ms | daemon | spliced |
+| hyperfine 1.19.0 | Add a struct field | 485 ms | 62 ms | 7.8x | 480 ms to 490 ms | 62 ms to 84 ms | daemon | spliced |
+| hyperfine 1.19.0 | Nothing changed | 41 ms | 15 ms | 2.7x | 41 ms to 42 ms | 15 ms to 16 ms | daemon |  |
+| just 1.43.0 | Edit a function | 707 ms | 41 ms | 17x | 699 ms to 711 ms | 40 ms to 42 ms | daemon | spliced |
+| just 1.43.0 | Edit a widely used function | 729 ms | 60 ms | 12x | 722 ms to 733 ms | 60 ms to 61 ms | daemon | spliced |
+| just 1.43.0 | Change a signature | 711 ms | 71 ms | 10x | 702 ms to 716 ms | 71 ms to 76 ms | daemon | spliced |
+| just 1.43.0 | Add a function | 795 ms | 55 ms | 14x | 783 ms to 801 ms | 54 ms to 56 ms | daemon | spliced |
+| just 1.43.0 | Add a struct field | 1.83 s | 113 ms | 16x | 1.82 s to 1.93 s | 112 ms to 172 ms | daemon | spliced |
+| just 1.43.0 | Nothing changed | 41 ms | 15 ms | 2.7x | 40 ms to 41 ms | 14 ms to 15 ms | daemon |  |
+| axum 0.8.6 | Edit a function | 427 ms | 42 ms | 10x | 415 ms to 433 ms | 41 ms to 43 ms | daemon | spliced |
+| axum 0.8.6 | Edit a widely used function | 865 ms | 35 ms | 25x | 865 ms to 870 ms | 35 ms to 49 ms | daemon | spliced |
+| axum 0.8.6 | Add a function | 423 ms | 43 ms | 9.8x | 419 ms to 429 ms | 41 ms to 43 ms | daemon | spliced |
+| axum 0.8.6 | Nothing changed | 74 ms | 16 ms | 4.6x | 73 ms to 75 ms | 16 ms to 20 ms | daemon |  |
+| nushell 0.108.0 | Edit a function | 1.25 s | 236 ms | 5.3x | 1.25 s to 1.27 s | 227 ms to 250 ms | daemon | spliced |
+| nushell 0.108.0 | Edit a widely used function | 4.75 s | 200 ms | 24x | 4.74 s to 4.80 s | 196 ms to 230 ms | daemon | spliced |
+| nushell 0.108.0 | Change a signature | 4.83 s | 278 ms | 17x | 4.82 s to 4.86 s | 271 ms to 519 ms | daemon | spliced |
+| nushell 0.108.0 | Edit a generic function | 6.46 s | 256 ms | 25x | 6.43 s to 6.65 s | 251 ms to 269 ms | daemon | spliced |
+| nushell 0.108.0 | Add a function | 1.26 s | 240 ms | 5.2x | 1.26 s to 1.27 s | 235 ms to 244 ms | daemon | spliced |
+| nushell 0.108.0 | Add a struct field | 8.23 s | 292 ms | 28x | 8.15 s to 8.41 s | 280 ms to 368 ms | daemon | spliced |
+| nushell 0.108.0 | Nothing changed | 180 ms | 18 ms | 10x | 177 ms to 183 ms | 18 ms to 19 ms | daemon |  |
+| helix 25.07.1 | Edit a function | 2.15 s | 116 ms | 19x | 2.15 s to 2.19 s | 114 ms to 116 ms | daemon | spliced |
+| helix 25.07.1 | Edit a widely used function | 3.29 s | 67 ms | 49x | 3.25 s to 3.32 s | 63 ms to 68 ms | daemon | spliced |
+| helix 25.07.1 | Change a signature | 2.80 s | 217 ms | 13x | 2.78 s to 2.82 s | 216 ms to 587 ms | daemon | spliced |
+| helix 25.07.1 | Add a function | 2.16 s | 157 ms | 14x | 2.15 s to 2.18 s | 150 ms to 161 ms | daemon | spliced |
+| helix 25.07.1 | Add a struct field | 8.72 s | 229 ms | 38x | 8.68 s to 9.18 s | 221 ms to 230 ms | daemon | spliced |
+| helix 25.07.1 | Nothing changed | 83 ms | 16 ms | 5.2x | 82 ms to 85 ms | 15 ms to 16 ms | daemon |  |
+| bevy 0.20.0 | Edit a function | 3.20 s | 874 ms | 3.7x | 3.02 s to 3.22 s | 817 ms to 879 ms | daemon | spliced |
+| bevy 0.20.0 | Edit a widely used function | 11.60 s | 699 ms | 17x | 11.32 s to 11.69 s | 584 ms to 728 ms | daemon | spliced |
+| bevy 0.20.0 | Add a function | 3.16 s | 941 ms | 3.4x | 3.12 s to 3.20 s | 902 ms to 1.17 s | daemon | spliced |
+| bevy 0.20.0 | Nothing changed | 183 ms | 19 ms | 9.6x | 179 ms to 197 ms | 19 ms to 550 ms | daemon |  |
+| biome @biomejs/biome@2.6.3 | Edit a function | 2.12 s | 2.38 s | 0.9x | 2.04 s to 2.17 s | 2.13 s to 4.78 s | daemon | spliced |
+| biome @biomejs/biome@2.6.3 | Edit a widely used function | 9.86 s | 381 ms | 26x | 9.76 s to 10.25 s | 374 ms to 210.60 s | daemon | full link: no executable to add to |
+| biome @biomejs/biome@2.6.3 | Change a signature | 8.06 s | 108.75 s | 0.1x | 8.06 s to 8.06 s | 108.75 s to 108.75 s | cargo: `field` is not compiled by ra-jit and rustc's copy is from before the edi |  |
+| biome @biomejs/biome@2.6.3 | Edit a generic function | 9.55 s | 385 ms | 25x | 9.49 s to 9.63 s | 378 ms to 392 ms | daemon | spliced |
+| biome @biomejs/biome@2.6.3 | Add a function | 1.95 s | 472 ms | 4.1x | 1.94 s to 1.95 s | 461 ms to 477 ms | daemon | spliced |
+| biome @biomejs/biome@2.6.3 | Add a struct field | 4.07 s | 542 ms | 7.5x | 4.03 s to 4.11 s | 540 ms to 577 ms | daemon | spliced |
+| biome @biomejs/biome@2.6.3 | Nothing changed | 205 ms | 32 ms | 6.4x | 203 ms to 320 ms | 31 ms to 13.02 s | daemon |  |
 
 #### Cold, Cranelift, Linux x86-64
 
@@ -1178,15 +1185,16 @@ From an empty target directory, crates already downloaded, median of 5 runs, eac
 
 | Project | `cargo build` | `cargo ra-jit build` | Daemon ready, empty store | Daemon ready, warm store | Functions compiled | Daemon memory | Store |
 |---|---:|---:|---:|---:|---:|---:|---:|
-| ripgrep 15.1.0 | 4.65 s (4.59 s to 4.72 s) | 5.07 s (5.06 s to 5.12 s) | 5.62 s (5.61 s to 5.67 s) | 5.31 s (5.24 s to 5.38 s) | 0 | 2,051 MB | 92 MB |
-| fd 10.3.0 | 25.77 s (25.60 s to 25.88 s) | 26.21 s (26.08 s to 26.27 s) | 26.77 s (26.63 s to 26.82 s) | 26.24 s (26.21 s to 26.71 s) | 0 | 1,677 MB | 92 MB |
-| bat 0.26.0 | 9.89 s (9.80 s to 9.96 s) | 13.01 s (12.93 s to 13.04 s) | 14.09 s (14.00 s to 14.11 s) | 12.70 s (12.51 s to 12.96 s) | 0 | 2,158 MB | 243 MB |
-| hyperfine 1.19.0 | 4.63 s (4.59 s to 4.70 s) | 7.20 s (7.09 s to 7.29 s) | 8.01 s (7.90 s to 8.10 s) | 6.57 s (6.52 s to 6.97 s) | 0 | 1,952 MB | 90 MB |
-| just 1.43.0 | 6.64 s (6.55 s to 6.68 s) | 9.13 s (8.88 s to 9.22 s) | 10.20 s (9.95 s to 10.30 s) | 9.02 s (8.93 s to 9.31 s) | 0 | 2,381 MB | 99 MB |
-| axum 0.8.6 | 6.92 s (6.88 s to 6.95 s) | 8.55 s (8.51 s to 8.69 s) | 9.89 s (9.85 s to 10.03 s) | 8.82 s (8.66 s to 9.33 s) | 0 | 2,194 MB | 94 MB |
-| nushell 0.108.0 | 34.66 s (33.86 s to 35.07 s) | 35.09 s (34.70 s to 35.40 s) | 39.02 s (38.41 s to 39.38 s) | 36.21 s (35.84 s to 37.46 s) | 0 | 11,002 MB | 290 MB |
-| helix 25.07.1 | 29.70 s (29.48 s to 30.05 s) | 30.72 s (30.44 s to 30.79 s) | 33.91 s (33.62 s to 34.23 s) | 34.62 s (34.45 s to 35.52 s) | 0 | 9,504 MB | 554 MB |
-| bevy 0.20.0 | 82.40 s (81.28 s to 83.34 s) | 70.78 s (70.33 s to 71.22 s) | 89.54 s (89.18 s to 95.03 s) | 98.10 s (97.87 s to 98.40 s) | 0 | 27,046 MB | 1,682 MB |
+| ripgrep 15.1.0 | 4.67 s (4.63 s to 4.71 s) | 5.20 s (5.19 s to 5.23 s) | 5.75 s (5.74 s to 5.78 s) | 5.38 s (5.33 s to 5.45 s) | 0 | 2,034 MB | 93 MB |
+| fd 10.3.0 | 26.10 s (25.95 s to 26.14 s) | 29.57 s (29.45 s to 29.63 s) | 30.13 s (30.00 s to 30.18 s) | 29.77 s (29.60 s to 30.25 s) | 0 | 1,735 MB | 1,470 MB |
+| bat 0.26.0 | 9.95 s (9.80 s to 10.04 s) | 13.44 s (13.38 s to 13.52 s) | 14.56 s (14.51 s to 14.87 s) | 13.20 s (12.74 s to 13.32 s) | 0 | 2,150 MB | 243 MB |
+| hyperfine 1.19.0 | 4.70 s (4.68 s to 4.71 s) | 7.64 s (7.53 s to 7.65 s) | 8.99 s (8.87 s to 9.20 s) | 7.62 s (7.58 s to 7.89 s) | 0 | 1,774 MB | 92 MB |
+| just 1.43.0 | 6.69 s (6.63 s to 6.85 s) | 9.24 s (9.19 s to 9.31 s) | 10.32 s (10.27 s to 10.38 s) | 9.25 s (9.06 s to 9.44 s) | 0 | 2,287 MB | 99 MB |
+| axum 0.8.6 | 6.99 s (6.95 s to 7.04 s) | 8.60 s (8.54 s to 8.65 s) | 9.94 s (9.88 s to 9.99 s) | 8.91 s (8.79 s to 9.44 s) | 0 | 2,315 MB | 93 MB |
+| nushell 0.108.0 | 34.74 s (34.59 s to 35.46 s) | 36.44 s (35.94 s to 36.87 s) | 40.42 s (39.92 s to 40.86 s) | 37.15 s (36.78 s to 38.56 s) | 0 | 11,040 MB | 295 MB |
+| helix 25.07.1 | 30.11 s (29.91 s to 30.32 s) | 31.17 s (31.13 s to 31.48 s) | 34.62 s (34.31 s to 34.91 s) | 34.11 s (33.92 s to 34.15 s) | 0 | 10,648 MB | 169 MB |
+| bevy 0.20.0 | 83.95 s (82.52 s to 84.68 s) | 71.12 s (70.35 s to 71.99 s) | 90.24 s (88.95 s to 93.76 s) | 96.46 s (96.09 s to 104.93 s) | 0 | 27,938 MB | 1,551 MB |
+| biome @biomejs/biome@2.6.3 | 90.11 s (89.08 s to 90.89 s) | 81.32 s (80.78 s to 81.63 s) | 98.47 s (98.08 s to 99.98 s) | 240.50 s (237.38 s to 240.87 s) | 0 | 21,105 MB | 26,281 MB |
 
 #### Memory and disk, Cranelift, Linux x86-64
 
@@ -1194,81 +1202,90 @@ Peak: the most every process doing the work held at once, sampled every 10 ms an
 
 | Project | Step | cargo, peak | ra-jit, peak | cargo, largest process | ra-jit, largest process | Daemon after |
 |---|---|---:|---:|---:|---:|---:|
-| ripgrep 15.1.0 | Cold, until the daemon is ready | 2.4 GB | 4.6 GB | 423 MB | 1.7 GB | 1.6 GB |
-| ripgrep 15.1.0 | Edit a function | 529 MB | 1.8 GB | 295 MB | 1.7 GB | 1.8 GB |
-| ripgrep 15.1.0 | Edit a widely used function | 536 MB | 1.8 GB | 306 MB | 1.6 GB | 1.7 GB |
-| ripgrep 15.1.0 | Change a signature | 527 MB | 1.8 GB | 291 MB | 1.7 GB | 1.8 GB |
-| ripgrep 15.1.0 | Edit a generic function | 532 MB | 1.8 GB | 299 MB | 1.6 GB | 1.7 GB |
-| ripgrep 15.1.0 | Add a function | 529 MB | 1.8 GB | 295 MB | 1.6 GB | 1.7 GB |
-| ripgrep 15.1.0 | Add a struct field | 555 MB | 1.8 GB | 350 MB | 1.6 GB | 1.7 GB |
-| ripgrep 15.1.0 | Nothing changed | 29 MB | 1.9 GB | 29 MB | 1.8 GB | 1.9 GB |
-| fd 10.3.0 | Cold, until the daemon is ready | 2.7 GB | 5.2 GB | 554 MB | 1.7 GB | 1.6 GB |
-| fd 10.3.0 | Edit a function | 606 MB | 1.6 GB | 373 MB | 1.4 GB | 1.5 GB |
-| fd 10.3.0 | Edit a widely used function | 598 MB | 1.5 GB | 372 MB | 1.4 GB | 1.5 GB |
-| fd 10.3.0 | Change a signature | 610 MB | 1.6 GB | 371 MB | 1.4 GB | 1.5 GB |
-| fd 10.3.0 | Add a function | 604 MB | 1.6 GB | 370 MB | 1.4 GB | 1.5 GB |
-| fd 10.3.0 | Add a struct field | 634 MB | 1.5 GB | 372 MB | 1.4 GB | 1.5 GB |
-| fd 10.3.0 | Nothing changed | 101 MB | 1.6 GB | 101 MB | 1.5 GB | 1.6 GB |
-| bat 0.26.0 | Cold, until the daemon is ready | 3.8 GB | 7.9 GB | 518 MB | 2.0 GB | 1.9 GB |
-| bat 0.26.0 | Edit a function | 751 MB | 2.0 GB | 521 MB | 1.8 GB | 2.0 GB |
-| bat 0.26.0 | Edit a widely used function | 742 MB | 2.0 GB | 514 MB | 1.8 GB | 1.9 GB |
-| bat 0.26.0 | Change a signature | 740 MB | 2.0 GB | 518 MB | 1.8 GB | 2.0 GB |
-| bat 0.26.0 | Add a function | 750 MB | 2.0 GB | 518 MB | 1.8 GB | 2.0 GB |
-| bat 0.26.0 | Add a struct field | 765 MB | 2.0 GB | 518 MB | 1.8 GB | 2.0 GB |
-| bat 0.26.0 | Nothing changed | 136 MB | 2.1 GB | 136 MB | 1.9 GB | 2.1 GB |
-| hyperfine 1.19.0 | Cold, until the daemon is ready | 2.6 GB | 9.8 GB | 362 MB | 1.9 GB | 1.9 GB |
-| hyperfine 1.19.0 | Edit a function | 425 MB | 1.7 GB | 245 MB | 1.6 GB | 1.7 GB |
-| hyperfine 1.19.0 | Edit a widely used function | 427 MB | 1.6 GB | 260 MB | 1.5 GB | 1.6 GB |
-| hyperfine 1.19.0 | Change a signature | 434 MB | 1.6 GB | 265 MB | 1.5 GB | 1.6 GB |
-| hyperfine 1.19.0 | Add a function | 421 MB | 1.6 GB | 248 MB | 1.5 GB | 1.6 GB |
-| hyperfine 1.19.0 | Add a struct field | 451 MB | 1.6 GB | 295 MB | 1.5 GB | 1.6 GB |
-| hyperfine 1.19.0 | Nothing changed | 146 MB | 1.7 GB | 146 MB | 1.6 GB | 1.7 GB |
-| just 1.43.0 | Cold, until the daemon is ready | 3.4 GB | 8.7 GB | 628 MB | 2.1 GB | 1.8 GB |
-| just 1.43.0 | Edit a function | 538 MB | 1.9 GB | 355 MB | 1.8 GB | 1.9 GB |
-| just 1.43.0 | Edit a widely used function | 525 MB | 1.9 GB | 362 MB | 1.8 GB | 1.9 GB |
-| just 1.43.0 | Change a signature | 531 MB | 1.9 GB | 359 MB | 1.8 GB | 1.9 GB |
-| just 1.43.0 | Add a function | 542 MB | 1.9 GB | 379 MB | 1.8 GB | 1.9 GB |
-| just 1.43.0 | Add a struct field | 648 MB | 1.9 GB | 617 MB | 1.8 GB | 1.9 GB |
-| just 1.43.0 | Nothing changed | 146 MB | 2.0 GB | 146 MB | 1.9 GB | 2.0 GB |
-| axum 0.8.6 | Cold, until the daemon is ready | 2.5 GB | 5.6 GB | 504 MB | 2.2 GB | 2.0 GB |
-| axum 0.8.6 | Edit a function | 466 MB | 1.9 GB | 253 MB | 1.7 GB | 1.9 GB |
-| axum 0.8.6 | Edit a widely used function | 450 MB | 1.9 GB | 338 MB | 1.7 GB | 1.9 GB |
-| axum 0.8.6 | Add a function | 466 MB | 1.9 GB | 258 MB | 1.7 GB | 1.9 GB |
-| axum 0.8.6 | Nothing changed | 172 MB | 2.0 GB | 172 MB | 1.9 GB | 2.0 GB |
-| nushell 0.108.0 | Cold, until the daemon is ready | 4.7 GB | 8.8 GB | 2.4 GB | 5.5 GB | 5.3 GB |
-| nushell 0.108.0 | Edit a function | 2.7 GB | 7.2 GB | 2.4 GB | 7.1 GB | 7.2 GB |
-| nushell 0.108.0 | Edit a widely used function | 2.7 GB | 7.2 GB | 2.4 GB | 7.0 GB | 7.2 GB |
-| nushell 0.108.0 | Change a signature | 2.7 GB | 7.2 GB | 2.4 GB | 7.0 GB | 7.2 GB |
-| nushell 0.108.0 | Edit a generic function | 2.7 GB | 7.2 GB | 2.4 GB | 7.0 GB | 7.2 GB |
-| nushell 0.108.0 | Add a function | 2.7 GB | 7.2 GB | 2.4 GB | 7.0 GB | 7.2 GB |
-| nushell 0.108.0 | Add a struct field | 2.7 GB | 7.2 GB | 2.4 GB | 7.0 GB | 7.2 GB |
-| nushell 0.108.0 | Nothing changed | 175 MB | 7.7 GB | 175 MB | 7.5 GB | 7.7 GB |
-| helix 25.07.1 | Cold, until the daemon is ready | 3.9 GB | 8.7 GB | 1.8 GB | 4.1 GB | 3.9 GB |
-| helix 25.07.1 | Edit a function | 2.1 GB | 6.0 GB | 1.8 GB | 5.9 GB | 6.0 GB |
-| helix 25.07.1 | Edit a widely used function | 2.1 GB | 6.0 GB | 1.8 GB | 5.8 GB | 5.9 GB |
-| helix 25.07.1 | Change a signature | 2.1 GB | 6.0 GB | 1.8 GB | 5.8 GB | 5.9 GB |
-| helix 25.07.1 | Add a function | 2.1 GB | 6.0 GB | 1.8 GB | 5.8 GB | 5.9 GB |
-| helix 25.07.1 | Add a struct field | 2.1 GB | 6.0 GB | 1.8 GB | 5.8 GB | 5.9 GB |
-| helix 25.07.1 | Nothing changed | 177 MB | 9.3 GB | 177 MB | 9.1 GB | 9.3 GB |
-| bevy 0.20.0 | Cold, until the daemon is ready | 8.5 GB | 9.6 GB | 8.1 GB | 9.4 GB | 8.4 GB |
-| bevy 0.20.0 | Edit a function | 8.5 GB | 28.2 GB | 8.1 GB | 27.9 GB | 15.0 GB |
-| bevy 0.20.0 | Edit a widely used function | 8.5 GB | 20.0 GB | 8.1 GB | 19.8 GB | 20.0 GB |
+| ripgrep 15.1.0 | Cold, until the daemon is ready | 2.4 GB | 5.2 GB | 421 MB | 1.7 GB | 1.6 GB |
+| ripgrep 15.1.0 | Edit a function | 528 MB | 1.7 GB | 294 MB | 1.5 GB | 1.6 GB |
+| ripgrep 15.1.0 | Edit a widely used function | 533 MB | 1.7 GB | 306 MB | 1.5 GB | 1.6 GB |
+| ripgrep 15.1.0 | Change a signature | 527 MB | 1.7 GB | 291 MB | 1.5 GB | 1.6 GB |
+| ripgrep 15.1.0 | Edit a generic function | 537 MB | 1.7 GB | 299 MB | 1.5 GB | 1.6 GB |
+| ripgrep 15.1.0 | Add a function | 535 MB | 1.7 GB | 298 MB | 1.5 GB | 1.6 GB |
+| ripgrep 15.1.0 | Add a struct field | 550 MB | 1.7 GB | 350 MB | 1.5 GB | 1.6 GB |
+| ripgrep 15.1.0 | Nothing changed | 29 MB | 1.8 GB | 29 MB | 1.7 GB | 1.8 GB |
+| fd 10.3.0 | Cold, until the daemon is ready | 2.6 GB | 6.1 GB | 555 MB | 1.8 GB | 1.6 GB |
+| fd 10.3.0 | Edit a function | 605 MB | 1.5 GB | 371 MB | 1.3 GB | 1.4 GB |
+| fd 10.3.0 | Edit a widely used function | 597 MB | 1.5 GB | 372 MB | 1.3 GB | 1.4 GB |
+| fd 10.3.0 | Change a signature | 609 MB | 1.5 GB | 370 MB | 1.3 GB | 1.4 GB |
+| fd 10.3.0 | Add a function | 602 MB | 1.5 GB | 369 MB | 1.3 GB | 1.4 GB |
+| fd 10.3.0 | Add a struct field | 633 MB | 1.5 GB | 371 MB | 1.3 GB | 1.4 GB |
+| fd 10.3.0 | Nothing changed | 111 MB | 1.5 GB | 111 MB | 1.4 GB | 1.5 GB |
+| bat 0.26.0 | Cold, until the daemon is ready | 3.7 GB | 7.9 GB | 534 MB | 2.1 GB | 1.9 GB |
+| bat 0.26.0 | Edit a function | 747 MB | 2.0 GB | 534 MB | 1.8 GB | 2.0 GB |
+| bat 0.26.0 | Edit a widely used function | 748 MB | 2.0 GB | 534 MB | 1.8 GB | 2.0 GB |
+| bat 0.26.0 | Change a signature | 740 MB | 2.0 GB | 534 MB | 1.8 GB | 2.0 GB |
+| bat 0.26.0 | Add a function | 749 MB | 2.0 GB | 534 MB | 1.8 GB | 2.0 GB |
+| bat 0.26.0 | Add a struct field | 766 MB | 2.0 GB | 534 MB | 1.8 GB | 2.0 GB |
+| bat 0.26.0 | Nothing changed | 534 MB | 2.1 GB | 534 MB | 2.0 GB | 2.1 GB |
+| hyperfine 1.19.0 | Cold, until the daemon is ready | 2.6 GB | 9.6 GB | 534 MB | 1.9 GB | 1.8 GB |
+| hyperfine 1.19.0 | Edit a function | 534 MB | 1.6 GB | 534 MB | 1.5 GB | 1.6 GB |
+| hyperfine 1.19.0 | Edit a widely used function | 534 MB | 1.6 GB | 534 MB | 1.4 GB | 1.5 GB |
+| hyperfine 1.19.0 | Change a signature | 534 MB | 1.6 GB | 534 MB | 1.4 GB | 1.5 GB |
+| hyperfine 1.19.0 | Add a function | 534 MB | 1.6 GB | 534 MB | 1.4 GB | 1.5 GB |
+| hyperfine 1.19.0 | Add a struct field | 534 MB | 1.6 GB | 534 MB | 1.4 GB | 1.5 GB |
+| hyperfine 1.19.0 | Nothing changed | 534 MB | 1.7 GB | 534 MB | 1.5 GB | 1.6 GB |
+| just 1.43.0 | Cold, until the daemon is ready | 3.5 GB | 8.6 GB | 635 MB | 2.0 GB | 1.8 GB |
+| just 1.43.0 | Edit a function | 535 MB | 1.9 GB | 534 MB | 1.8 GB | 1.9 GB |
+| just 1.43.0 | Edit a widely used function | 534 MB | 1.9 GB | 534 MB | 1.8 GB | 1.9 GB |
+| just 1.43.0 | Change a signature | 534 MB | 1.9 GB | 534 MB | 1.8 GB | 1.9 GB |
+| just 1.43.0 | Add a function | 541 MB | 1.9 GB | 534 MB | 1.8 GB | 1.9 GB |
+| just 1.43.0 | Add a struct field | 655 MB | 1.9 GB | 620 MB | 1.8 GB | 1.9 GB |
+| just 1.43.0 | Nothing changed | 534 MB | 2.1 GB | 534 MB | 1.9 GB | 2.0 GB |
+| axum 0.8.6 | Cold, until the daemon is ready | 2.5 GB | 5.8 GB | 534 MB | 2.2 GB | 2.0 GB |
+| axum 0.8.6 | Edit a function | 534 MB | 1.9 GB | 534 MB | 1.7 GB | 1.8 GB |
+| axum 0.8.6 | Edit a widely used function | 534 MB | 1.8 GB | 534 MB | 1.7 GB | 1.8 GB |
+| axum 0.8.6 | Add a function | 534 MB | 1.8 GB | 534 MB | 1.7 GB | 1.8 GB |
+| axum 0.8.6 | Nothing changed | 534 MB | 2.0 GB | 534 MB | 1.8 GB | 2.0 GB |
+| nushell 0.108.0 | Cold, until the daemon is ready | 4.8 GB | 9.1 GB | 2.4 GB | 5.4 GB | 5.2 GB |
+| nushell 0.108.0 | Edit a function | 2.7 GB | 7.2 GB | 2.4 GB | 7.0 GB | 7.2 GB |
+| nushell 0.108.0 | Edit a widely used function | 2.7 GB | 7.1 GB | 2.4 GB | 6.9 GB | 7.1 GB |
+| nushell 0.108.0 | Change a signature | 2.7 GB | 7.2 GB | 2.4 GB | 7.0 GB | 7.1 GB |
+| nushell 0.108.0 | Edit a generic function | 2.7 GB | 7.1 GB | 2.4 GB | 7.0 GB | 7.1 GB |
+| nushell 0.108.0 | Add a function | 2.7 GB | 7.2 GB | 2.4 GB | 7.0 GB | 7.1 GB |
+| nushell 0.108.0 | Add a struct field | 2.7 GB | 7.2 GB | 2.4 GB | 7.0 GB | 7.1 GB |
+| nushell 0.108.0 | Nothing changed | 534 MB | 7.7 GB | 534 MB | 7.5 GB | 7.6 GB |
+| helix 25.07.1 | Cold, until the daemon is ready | 3.8 GB | 8.4 GB | 1.8 GB | 4.1 GB | 4.2 GB |
+| helix 25.07.1 | Edit a function | 2.1 GB | 5.8 GB | 1.8 GB | 5.6 GB | 5.7 GB |
+| helix 25.07.1 | Edit a widely used function | 2.1 GB | 5.7 GB | 1.8 GB | 5.6 GB | 5.7 GB |
+| helix 25.07.1 | Change a signature | 2.1 GB | 5.8 GB | 1.8 GB | 5.6 GB | 5.7 GB |
+| helix 25.07.1 | Add a function | 2.1 GB | 5.7 GB | 1.8 GB | 5.6 GB | 5.7 GB |
+| helix 25.07.1 | Add a struct field | 2.1 GB | 5.8 GB | 1.8 GB | 5.6 GB | 5.7 GB |
+| helix 25.07.1 | Nothing changed | 534 MB | 6.2 GB | 534 MB | 6.1 GB | 6.2 GB |
+| bevy 0.20.0 | Cold, until the daemon is ready | 8.5 GB | 9.7 GB | 8.1 GB | 9.4 GB | 8.2 GB |
+| bevy 0.20.0 | Edit a function | 8.5 GB | 28.9 GB | 8.1 GB | 28.6 GB | 15.0 GB |
+| bevy 0.20.0 | Edit a widely used function | 8.5 GB | 20.4 GB | 8.1 GB | 20.1 GB | 20.3 GB |
 | bevy 0.20.0 | Add a function | 8.5 GB | 15.2 GB | 8.1 GB | 15.0 GB | 15.2 GB |
-| bevy 0.20.0 | Nothing changed | 259 MB | 27.5 GB | 259 MB | 27.2 GB | 28.0 GB |
+| bevy 0.20.0 | Nothing changed | 534 MB | 28.3 GB | 534 MB | 28.0 GB | 28.7 GB |
+| biome @biomejs/biome@2.6.3 | Cold, until the daemon is ready | 8.6 GB | 9.6 GB | 2.6 GB | 7.1 GB | 6.9 GB |
+| biome @biomejs/biome@2.6.3 | Edit a function | 3.0 GB | 7.6 GB | 2.6 GB | 7.4 GB | 8.6 GB |
+| biome @biomejs/biome@2.6.3 | Edit a widely used function | 3.0 GB | 20.9 GB | 2.6 GB | 20.7 GB | 19.3 GB |
+| biome @biomejs/biome@2.6.3 | Change a signature | 2.9 GB | 24.3 GB | 2.6 GB | 24.1 GB | 6.2 GB |
+| biome @biomejs/biome@2.6.3 | Edit a generic function | 3.0 GB | 19.4 GB | 2.6 GB | 19.1 GB | 19.3 GB |
+| biome @biomejs/biome@2.6.3 | Add a function | 3.0 GB | 19.3 GB | 2.6 GB | 19.1 GB | 19.3 GB |
+| biome @biomejs/biome@2.6.3 | Add a struct field | 3.0 GB | 19.3 GB | 2.6 GB | 19.1 GB | 19.3 GB |
+| biome @biomejs/biome@2.6.3 | Nothing changed | 534 MB | 6.3 GB | 534 MB | 6.1 GB | 6.3 GB |
 
 The daemon between builds, and what each side keeps on disk once the edits are done (each block once, [how](#memory-and-disk)). After the first build: once the step after the cold build (nothing changed) is done; growth is from then to the end, over every edit made and taken back. Warm store: the cold start of another checkout with the store the first one filled.
 
 | Project | Daemon ready | After the first build | At the end | Growth | Warm store: peak, ready | cargo target | ra-jit target | Store | Home |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
-| ripgrep 15.1.0 | 1.6 GB | 1.9 GB | 1.7 GB after 65 builds | −162 MB | 4.5 GB, 1.7 GB | 407 MB | 724 MB | 91 MB | 0 MB |
-| fd 10.3.0 | 1.6 GB | 1.6 GB | 1.5 GB after 55 builds | −58 MB | 5.2 GB, 1.6 GB | 571 MB | 940 MB | 90 MB | 0 MB |
-| bat 0.26.0 | 1.9 GB | 2.1 GB | 2.0 GB after 55 builds | −120 MB | 7.9 GB, 1.8 GB | 973 MB | 1.8 GB | 129 MB | 0 MB |
-| hyperfine 1.19.0 | 1.9 GB | 1.7 GB | 1.6 GB after 55 builds | −135 MB | 8.2 GB, 1.8 GB | 342 MB | 1.0 GB | 88 MB | 0 MB |
-| just 1.43.0 | 1.8 GB | 2.0 GB | 1.9 GB after 55 builds | −135 MB | 7.5 GB, 1.8 GB | 667 MB | 1.4 GB | 97 MB | 0 MB |
-| axum 0.8.6 | 2.0 GB | 2.0 GB | 1.9 GB after 35 builds | −107 MB | 5.1 GB, 2.0 GB | 404 MB | 733 MB | 91 MB | 1 MB |
-| nushell 0.108.0 | 5.3 GB | 7.7 GB | 7.2 GB after 65 builds | −504 MB | 8.3 GB, 5.1 GB | 5.3 GB | 7.5 GB | 185 MB | 1 MB |
-| helix 25.07.1 | 3.9 GB | 9.3 GB | 5.9 GB after 55 builds | −3.4 GB | 8.0 GB, 3.8 GB | 3.7 GB | 5.5 GB | 543 MB | 1 MB |
-| bevy 0.20.0 | 8.4 GB | 28.0 GB | 15.2 GB after 35 builds | −12.8 GB | 11.2 GB, 10.1 GB | 17.5 GB | 17.7 GB | 1.5 GB | 1 MB |
+| ripgrep 15.1.0 | 1.6 GB | 1.8 GB | 1.6 GB after 65 builds | −137 MB | 4.9 GB, 1.7 GB | 407 MB | 760 MB | 91 MB | 1 MB |
+| fd 10.3.0 | 1.6 GB | 1.5 GB | 1.4 GB after 55 builds | −93 MB | 6.5 GB, 1.4 GB | 571 MB | 1.0 GB | 321 MB | 0 MB |
+| bat 0.26.0 | 1.9 GB | 2.1 GB | 2.0 GB after 55 builds | −133 MB | 7.5 GB, 1.8 GB | 973 MB | 1.9 GB | 130 MB | 0 MB |
+| hyperfine 1.19.0 | 1.8 GB | 1.6 GB | 1.5 GB after 55 builds | −96 MB | 8.2 GB, 1.8 GB | 342 MB | 1.1 GB | 91 MB | 0 MB |
+| just 1.43.0 | 1.8 GB | 2.0 GB | 1.9 GB after 55 builds | −144 MB | 7.8 GB, 1.8 GB | 667 MB | 1.4 GB | 97 MB | 0 MB |
+| axum 0.8.6 | 2.0 GB | 2.0 GB | 1.8 GB after 35 builds | −140 MB | 5.2 GB, 2.0 GB | 404 MB | 733 MB | 91 MB | 1 MB |
+| nushell 0.108.0 | 5.2 GB | 7.6 GB | 7.1 GB after 65 builds | −540 MB | 8.7 GB, 5.0 GB | 5.3 GB | 7.6 GB | 187 MB | 1 MB |
+| helix 25.07.1 | 4.2 GB | 6.2 GB | 5.7 GB after 55 builds | −502 MB | 7.7 GB, 3.8 GB | 3.7 GB | 5.6 GB | 155 MB | 1 MB |
+| bevy 0.20.0 | 8.2 GB | 28.7 GB | 15.2 GB after 35 builds | −13.5 GB | 11.1 GB, 9.9 GB | 17.5 GB | 17.7 GB | 1.5 GB | 1 MB |
+| biome @biomejs/biome@2.6.3 | 6.9 GB | 6.3 GB | 19.3 GB after 57 builds | +13.0 GB | 15.0 GB, 6.4 GB | 11.0 GB | 17.5 GB | 25.1 GB | 2 MB |
 
 #### How fast the program runs, Cranelift, Linux x86-64
 
@@ -1276,7 +1293,7 @@ The same command run by the program ra-jit linked and by cargo's debug and relea
 
 | Project | Command | ra-jit | cargo debug | cargo release |
 |---|---|---:|---:|---:|
-| ripgrep 15.1.0 | `rg -uuu --sort path -c \w+_unchecked\(\|unsafe \{ <the toolchain's library source>` | 1.08 s (1.08 s to 1.09 s); 101 MB, 200.7 MB | 1.07 s (1.07 s to 1.08 s); 101 MB, 53.2 MB | 27 ms (26 ms to 29 ms); 101 MB, 30.7 MB |
+| ripgrep 15.1.0 | `rg -uuu --sort path -c \w+_unchecked\(\|unsafe \{ <the toolchain's library source>` | 1.09 s (1.09 s to 1.09 s); 111 MB, 200.8 MB | 1.07 s (1.07 s to 1.07 s); 111 MB, 53.2 MB | 30 ms (29 ms to 30 ms); 111 MB, 30.7 MB |
 
 #### Edits, LLVM, Linux x86-64
 
@@ -1284,58 +1301,65 @@ Median, then the fastest and slowest run. Built: who built the edit (daemon, or 
 
 | Project | Edit | cargo | ra-jit | | cargo runs | ra-jit runs | Built | Link |
 |---|---|---:|---:|---:|---|---|---|---|
-| ripgrep 15.1.0 | Edit a function | 504 ms | 64 ms | 7.9x | 499 ms to 510 ms | 64 ms to 78 ms | daemon | spliced |
-| ripgrep 15.1.0 | Edit a widely used function | 772 ms | 58 ms | 13x | 762 ms to 779 ms | 57 ms to 93 ms | daemon | spliced |
-| ripgrep 15.1.0 | Change a signature | 623 ms | 101 ms | 6.2x | 619 ms to 628 ms | 99 ms to 138 ms | daemon | spliced |
-| ripgrep 15.1.0 | Edit a generic function | 746 ms | 65 ms | 11x | 733 ms to 756 ms | 64 ms to 66 ms | daemon | spliced |
-| ripgrep 15.1.0 | Add a function | 504 ms | 71 ms | 7.1x | 498 ms to 509 ms | 71 ms to 73 ms | daemon | spliced |
-| ripgrep 15.1.0 | Add a struct field | 889 ms | 73 ms | 12x | 879 ms to 929 ms | 71 ms to 79 ms | daemon | spliced |
-| ripgrep 15.1.0 | Nothing changed | 23 ms | 24 ms | 1.0x | 23 ms to 24 ms | 23 ms to 24 ms | daemon |  |
-| fd 10.3.0 | Edit a function | 484 ms | 59 ms | 8.2x | 482 ms to 587 ms | 58 ms to 70 ms | daemon | spliced |
-| fd 10.3.0 | Edit a widely used function | 450 ms | 43 ms | 10x | 439 ms to 453 ms | 43 ms to 44 ms | daemon | spliced |
-| fd 10.3.0 | Change a signature | 487 ms | 64 ms | 7.6x | 484 ms to 496 ms | 63 ms to 146 ms | daemon | spliced |
-| fd 10.3.0 | Add a function | 488 ms | 63 ms | 7.7x | 486 ms to 513 ms | 62 ms to 69 ms | daemon | spliced |
-| fd 10.3.0 | Add a struct field | 672 ms | 52 ms | 13x | 668 ms to 690 ms | 52 ms to 54 ms | daemon | spliced |
-| fd 10.3.0 | Nothing changed | 32 ms | 23 ms | 1.4x | 32 ms to 33 ms | 22 ms to 23 ms | daemon |  |
-| bat 0.26.0 | Edit a function | 484 ms | 57 ms | 8.5x | 472 ms to 496 ms | 56 ms to 75 ms | daemon | spliced |
-| bat 0.26.0 | Edit a widely used function | 704 ms | 56 ms | 13x | 691 ms to 726 ms | 55 ms to 56 ms | daemon | spliced |
-| bat 0.26.0 | Change a signature | 684 ms | 58 ms | 12x | 652 ms to 706 ms | 57 ms to 81 ms | daemon | spliced |
-| bat 0.26.0 | Add a function | 484 ms | 62 ms | 7.8x | 480 ms to 498 ms | 60 ms to 64 ms | daemon | spliced |
-| bat 0.26.0 | Add a struct field | 952 ms | 63 ms | 15x | 923 ms to 994 ms | 62 ms to 66 ms | daemon | spliced |
-| bat 0.26.0 | Nothing changed | 60 ms | 23 ms | 2.6x | 59 ms to 61 ms | 22 ms to 23 ms | daemon |  |
-| hyperfine 1.19.0 | Edit a function | 378 ms | 49 ms | 7.7x | 371 ms to 386 ms | 49 ms to 52 ms | daemon | spliced |
-| hyperfine 1.19.0 | Edit a widely used function | 402 ms | 57 ms | 7.1x | 399 ms to 417 ms | 56 ms to 58 ms | daemon | spliced |
-| hyperfine 1.19.0 | Change a signature | 418 ms | 85 ms | 4.9x | 412 ms to 423 ms | 84 ms to 94 ms | daemon | spliced |
-| hyperfine 1.19.0 | Add a function | 375 ms | 52 ms | 7.2x | 366 ms to 395 ms | 51 ms to 53 ms | daemon | spliced |
-| hyperfine 1.19.0 | Add a struct field | 478 ms | 72 ms | 6.6x | 468 ms to 488 ms | 69 ms to 91 ms | daemon | spliced |
-| hyperfine 1.19.0 | Nothing changed | 41 ms | 23 ms | 1.8x | 40 ms to 42 ms | 22 ms to 26 ms | daemon |  |
-| just 1.43.0 | Edit a function | 691 ms | 49 ms | 14x | 687 ms to 702 ms | 47 ms to 52 ms | daemon | spliced |
-| just 1.43.0 | Edit a widely used function | 716 ms | 70 ms | 10x | 697 ms to 722 ms | 67 ms to 72 ms | daemon | spliced |
-| just 1.43.0 | Change a signature | 708 ms | 91 ms | 7.8x | 679 ms to 719 ms | 91 ms to 92 ms | daemon | spliced |
-| just 1.43.0 | Add a function | 773 ms | 65 ms | 12x | 760 ms to 803 ms | 62 ms to 70 ms | daemon | spliced |
-| just 1.43.0 | Add a struct field | 1.80 s | 135 ms | 13x | 1.78 s to 1.92 s | 128 ms to 187 ms | daemon | spliced |
-| just 1.43.0 | Nothing changed | 42 ms | 22 ms | 1.9x | 40 ms to 42 ms | 21 ms to 26 ms | daemon |  |
-| axum 0.8.6 | Edit a function | 413 ms | 60 ms | 6.9x | 405 ms to 419 ms | 59 ms to 61 ms | daemon | spliced |
-| axum 0.8.6 | Edit a widely used function | 845 ms | 52 ms | 16x | 832 ms to 865 ms | 52 ms to 56 ms | daemon | spliced |
-| axum 0.8.6 | Add a function | 413 ms | 61 ms | 6.8x | 398 ms to 420 ms | 58 ms to 63 ms | daemon | spliced |
-| axum 0.8.6 | Nothing changed | 73 ms | 24 ms | 3.0x | 71 ms to 74 ms | 23 ms to 26 ms | daemon |  |
-| nushell 0.108.0 | Edit a function | 1.23 s | 269 ms | 4.6x | 1.17 s to 1.26 s | 264 ms to 281 ms | daemon | spliced |
-| nushell 0.108.0 | Edit a widely used function | 4.66 s | 264 ms | 18x | 4.62 s to 4.75 s | 263 ms to 289 ms | daemon | spliced |
-| nushell 0.108.0 | Change a signature | 4.68 s | 323 ms | 14x | 4.67 s to 4.73 s | 321 ms to 540 ms | daemon | spliced |
-| nushell 0.108.0 | Edit a generic function | 6.41 s | 470 ms | 14x | 6.25 s to 6.45 s | 463 ms to 522 ms | daemon | spliced |
-| nushell 0.108.0 | Add a function | 1.24 s | 281 ms | 4.4x | 1.21 s to 1.26 s | 275 ms to 311 ms | daemon | spliced |
-| nushell 0.108.0 | Add a struct field | 8.13 s | 350 ms | 23x | 8.06 s to 8.35 s | 340 ms to 392 ms | daemon | spliced |
-| nushell 0.108.0 | Nothing changed | 172 ms | 25 ms | 6.9x | 168 ms to 173 ms | 24 ms to 9.76 s | daemon |  |
-| helix 25.07.1 | Edit a function | 2.16 s | 86 ms | 25x | 2.09 s to 2.74 s | 86 ms to 74.39 s | daemon | full link: no executable to add to |
-| helix 25.07.1 | Edit a widely used function | 3.22 s | 125 ms | 26x | 3.17 s to 3.31 s | 124 ms to 128 ms | daemon | spliced |
-| helix 25.07.1 | Change a signature | 2.77 s | 270 ms | 10x | 2.71 s to 2.81 s | 267 ms to 592 ms | daemon | spliced |
-| helix 25.07.1 | Add a function | 2.16 s | 142 ms | 15x | 2.12 s to 2.17 s | 141 ms to 150 ms | daemon | spliced |
-| helix 25.07.1 | Add a struct field | 8.72 s | 257 ms | 34x | 8.56 s to 9.11 s | 243 ms to 267 ms | daemon | spliced |
-| helix 25.07.1 | Nothing changed | 77 ms | 24 ms | 3.2x | 75 ms to 83 ms | 23 ms to 203 ms | daemon |  |
-| bevy 0.20.0 | Edit a function | 3.21 s | 891 ms | 3.6x | 3.03 s to 3.55 s | 862 ms to 930 ms | daemon | spliced |
-| bevy 0.20.0 | Edit a widely used function | 11.79 s | 700 ms | 17x | 11.49 s to 13.77 s | 589 ms to 730 ms | daemon | spliced |
-| bevy 0.20.0 | Add a function | 3.23 s | 986 ms | 3.3x | 3.19 s to 3.28 s | 951 ms to 1.21 s | daemon | spliced |
-| bevy 0.20.0 | Nothing changed | 192 ms | 28 ms | 6.9x | 189 ms to 214 ms | 26 ms to 311 ms | daemon |  |
+| ripgrep 15.1.0 | Edit a function | 502 ms | 64 ms | 7.8x | 500 ms to 508 ms | 63 ms to 74 ms | daemon | spliced |
+| ripgrep 15.1.0 | Edit a widely used function | 781 ms | 62 ms | 13x | 779 ms to 783 ms | 61 ms to 96 ms | daemon | spliced |
+| ripgrep 15.1.0 | Change a signature | 622 ms | 111 ms | 5.6x | 620 ms to 626 ms | 110 ms to 138 ms | daemon | spliced |
+| ripgrep 15.1.0 | Edit a generic function | 753 ms | 66 ms | 11x | 750 ms to 757 ms | 66 ms to 67 ms | daemon | spliced |
+| ripgrep 15.1.0 | Add a function | 507 ms | 69 ms | 7.3x | 505 ms to 515 ms | 69 ms to 71 ms | daemon | spliced |
+| ripgrep 15.1.0 | Add a struct field | 894 ms | 67 ms | 13x | 881 ms to 918 ms | 63 ms to 73 ms | daemon | spliced |
+| ripgrep 15.1.0 | Nothing changed | 23 ms | 24 ms | 1.0x | 22 ms to 24 ms | 24 ms to 26 ms | daemon |  |
+| fd 10.3.0 | Edit a function | 493 ms | 62 ms | 8.0x | 485 ms to 514 ms | 60 ms to 74 ms | daemon | spliced |
+| fd 10.3.0 | Edit a widely used function | 461 ms | 44 ms | 10x | 455 ms to 462 ms | 44 ms to 45 ms | daemon | spliced |
+| fd 10.3.0 | Change a signature | 498 ms | 65 ms | 7.7x | 496 ms to 506 ms | 64 ms to 127 ms | daemon | spliced |
+| fd 10.3.0 | Add a function | 493 ms | 65 ms | 7.6x | 491 ms to 497 ms | 63 ms to 68 ms | daemon | spliced |
+| fd 10.3.0 | Add a struct field | 681 ms | 52 ms | 13x | 676 ms to 704 ms | 52 ms to 54 ms | daemon | spliced |
+| fd 10.3.0 | Nothing changed | 33 ms | 23 ms | 1.4x | 32 ms to 33 ms | 23 ms to 25 ms | daemon |  |
+| bat 0.26.0 | Edit a function | 498 ms | 57 ms | 8.7x | 490 ms to 501 ms | 56 ms to 75 ms | daemon | spliced |
+| bat 0.26.0 | Edit a widely used function | 727 ms | 57 ms | 13x | 718 ms to 732 ms | 57 ms to 58 ms | daemon | spliced |
+| bat 0.26.0 | Change a signature | 691 ms | 59 ms | 12x | 689 ms to 695 ms | 58 ms to 84 ms | daemon | spliced |
+| bat 0.26.0 | Add a function | 502 ms | 62 ms | 8.1x | 500 ms to 508 ms | 61 ms to 65 ms | daemon | spliced |
+| bat 0.26.0 | Add a struct field | 958 ms | 63 ms | 15x | 951 ms to 1.02 s | 62 ms to 65 ms | daemon | spliced |
+| bat 0.26.0 | Nothing changed | 60 ms | 24 ms | 2.5x | 58 ms to 62 ms | 23 ms to 25 ms | daemon |  |
+| hyperfine 1.19.0 | Edit a function | 383 ms | 47 ms | 8.1x | 381 ms to 385 ms | 46 ms to 47 ms | daemon | spliced |
+| hyperfine 1.19.0 | Edit a widely used function | 417 ms | 56 ms | 7.4x | 411 ms to 419 ms | 55 ms to 57 ms | daemon | spliced |
+| hyperfine 1.19.0 | Change a signature | 421 ms | 84 ms | 5.0x | 417 ms to 424 ms | 80 ms to 87 ms | daemon | spliced |
+| hyperfine 1.19.0 | Add a function | 384 ms | 50 ms | 7.7x | 381 ms to 386 ms | 48 ms to 50 ms | daemon | spliced |
+| hyperfine 1.19.0 | Add a struct field | 484 ms | 66 ms | 7.3x | 480 ms to 486 ms | 65 ms to 92 ms | daemon | spliced |
+| hyperfine 1.19.0 | Nothing changed | 42 ms | 24 ms | 1.8x | 41 ms to 43 ms | 23 ms to 26 ms | daemon |  |
+| just 1.43.0 | Edit a function | 703 ms | 51 ms | 14x | 700 ms to 710 ms | 47 ms to 56 ms | daemon | spliced |
+| just 1.43.0 | Edit a widely used function | 726 ms | 70 ms | 10x | 719 ms to 729 ms | 68 ms to 71 ms | daemon | spliced |
+| just 1.43.0 | Change a signature | 709 ms | 89 ms | 8.0x | 703 ms to 717 ms | 88 ms to 90 ms | daemon | spliced |
+| just 1.43.0 | Add a function | 792 ms | 65 ms | 12x | 791 ms to 799 ms | 64 ms to 66 ms | daemon | spliced |
+| just 1.43.0 | Add a struct field | 1.85 s | 122 ms | 15x | 1.83 s to 1.94 s | 120 ms to 175 ms | daemon | spliced |
+| just 1.43.0 | Nothing changed | 41 ms | 23 ms | 1.8x | 41 ms to 42 ms | 23 ms to 23 ms | daemon |  |
+| axum 0.8.6 | Edit a function | 421 ms | 51 ms | 8.3x | 420 ms to 423 ms | 50 ms to 54 ms | daemon | spliced |
+| axum 0.8.6 | Edit a widely used function | 861 ms | 45 ms | 19x | 857 ms to 873 ms | 44 ms to 57 ms | daemon | spliced |
+| axum 0.8.6 | Add a function | 422 ms | 51 ms | 8.3x | 420 ms to 432 ms | 49 ms to 53 ms | daemon | spliced |
+| axum 0.8.6 | Nothing changed | 74 ms | 25 ms | 3.0x | 73 ms to 77 ms | 24 ms to 27 ms | daemon |  |
+| nushell 0.108.0 | Edit a function | 1.25 s | 240 ms | 5.2x | 1.24 s to 1.31 s | 237 ms to 426 ms | daemon | spliced |
+| nushell 0.108.0 | Edit a widely used function | 4.80 s | 203 ms | 24x | 4.76 s to 4.84 s | 199 ms to 241 ms | daemon | spliced |
+| nushell 0.108.0 | Change a signature | 4.82 s | 284 ms | 17x | 4.77 s to 4.83 s | 261 ms to 537 ms | daemon | spliced |
+| nushell 0.108.0 | Edit a generic function | 6.46 s | 455 ms | 14x | 6.41 s to 6.56 s | 445 ms to 488 ms | daemon | spliced |
+| nushell 0.108.0 | Add a function | 1.25 s | 248 ms | 5.0x | 1.25 s to 1.27 s | 239 ms to 267 ms | daemon | spliced |
+| nushell 0.108.0 | Add a struct field | 8.19 s | 287 ms | 29x | 8.14 s to 8.54 s | 279 ms to 373 ms | daemon | spliced |
+| nushell 0.108.0 | Nothing changed | 179 ms | 28 ms | 6.4x | 175 ms to 180 ms | 26 ms to 1.07 s | daemon |  |
+| helix 25.07.1 | Edit a function | 2.16 s | 113 ms | 19x | 2.14 s to 2.18 s | 112 ms to 135 ms | daemon | spliced |
+| helix 25.07.1 | Edit a widely used function | 3.29 s | 74 ms | 45x | 3.27 s to 3.31 s | 73 ms to 76 ms | daemon | spliced |
+| helix 25.07.1 | Change a signature | 2.80 s | 228 ms | 12x | 2.78 s to 2.81 s | 225 ms to 604 ms | daemon | spliced |
+| helix 25.07.1 | Add a function | 2.15 s | 165 ms | 13x | 2.15 s to 2.17 s | 160 ms to 169 ms | daemon | spliced |
+| helix 25.07.1 | Add a struct field | 8.68 s | 230 ms | 38x | 8.66 s to 9.18 s | 227 ms to 234 ms | daemon | spliced |
+| helix 25.07.1 | Nothing changed | 81 ms | 26 ms | 3.1x | 81 ms to 83 ms | 25 ms to 22.54 s | daemon |  |
+| bevy 0.20.0 | Edit a function | 3.14 s | 866 ms | 3.6x | 3.09 s to 3.25 s | 769 ms to 880 ms | daemon | spliced |
+| bevy 0.20.0 | Edit a widely used function | 11.34 s | 717 ms | 16x | 11.19 s to 13.66 s | 611 ms to 775 ms | daemon | spliced |
+| bevy 0.20.0 | Add a function | 3.15 s | 934 ms | 3.4x | 3.10 s to 3.22 s | 907 ms to 1.12 s | daemon | spliced |
+| bevy 0.20.0 | Nothing changed | 197 ms | 27 ms | 7.3x | 195 ms to 226 ms | 26 ms to 355 ms | daemon |  |
+| biome @biomejs/biome@2.6.3 | Edit a function | 2.10 s | 2.08 s | 1.0x | 2.01 s to 2.14 s | 2.03 s to 5.47 s | daemon | spliced |
+| biome @biomejs/biome@2.6.3 | Edit a widely used function | 9.89 s | 382 ms | 26x | 9.72 s to 9.90 s | 380 ms to 325.03 s | daemon | full link: no executable to add to |
+| biome @biomejs/biome@2.6.3 | Change a signature | 8.06 s | 119.02 s | 0.1x | 8.06 s to 8.06 s | 119.02 s to 119.02 s | cargo: `field` is not compiled by ra-jit and rustc's copy is from before the edi |  |
+| biome @biomejs/biome@2.6.3 | Edit a generic function | 9.60 s | 400 ms | 24x | 9.57 s to 9.99 s | 395 ms to 887 ms | daemon | spliced |
+| biome @biomejs/biome@2.6.3 | Add a function | 1.94 s | 471 ms | 4.1x | 1.93 s to 1.97 s | 466 ms to 485 ms | daemon | spliced |
+| biome @biomejs/biome@2.6.3 | Add a struct field | 4.06 s | 541 ms | 7.5x | 4.04 s to 4.15 s | 536 ms to 577 ms | daemon | spliced |
+| biome @biomejs/biome@2.6.3 | Nothing changed | 200 ms | 40 ms | 5.0x | 199 ms to 244 ms | 40 ms to 14.85 s | daemon |  |
 
 #### Cold, LLVM, Linux x86-64
 
@@ -1343,15 +1367,16 @@ From an empty target directory, crates already downloaded, median of 5 runs, eac
 
 | Project | `cargo build` | `cargo ra-jit build` | Daemon ready, empty store | Daemon ready, warm store | Functions compiled | Daemon memory | Store |
 |---|---:|---:|---:|---:|---:|---:|---:|
-| ripgrep 15.1.0 | 5.17 s (5.13 s to 5.20 s) | 5.44 s (5.29 s to 5.53 s) | 6.02 s (5.87 s to 6.11 s) | 5.64 s (5.55 s to 5.77 s) | 0 | 2,028 MB | 63 MB |
-| fd 10.3.0 | 26.53 s (26.32 s to 27.07 s) | 26.57 s (26.52 s to 27.06 s) | 27.14 s (27.10 s to 27.64 s) | 26.64 s (26.51 s to 26.68 s) | 0 | 1,763 MB | 63 MB |
-| bat 0.26.0 | 10.90 s (10.87 s to 10.98 s) | 18.53 s (18.20 s to 18.55 s) | 19.65 s (19.31 s to 19.67 s) | 18.82 s (18.76 s to 19.12 s) | 0 | 2,266 MB | 212 MB |
-| hyperfine 1.19.0 | 4.89 s (4.84 s to 4.90 s) | 8.72 s (8.60 s to 8.84 s) | 9.57 s (9.45 s to 9.69 s) | 8.84 s (8.72 s to 9.15 s) | 0 | 1,894 MB | 61 MB |
-| just 1.43.0 | 7.76 s (7.66 s to 7.94 s) | 10.70 s (10.61 s to 10.94 s) | 11.81 s (11.73 s to 12.06 s) | 11.07 s (10.99 s to 11.36 s) | 0 | 2,309 MB | 69 MB |
-| axum 0.8.6 | 7.11 s (7.03 s to 7.12 s) | 9.37 s (9.25 s to 9.55 s) | 10.76 s (10.64 s to 10.94 s) | 9.93 s (9.88 s to 10.44 s) | 0 | 2,238 MB | 64 MB |
-| nushell 0.108.0 | 41.94 s (41.76 s to 42.10 s) | 43.84 s (43.38 s to 44.45 s) | 47.69 s (47.22 s to 48.30 s) | 54.79 s (54.54 s to 56.17 s) | 0 | 10,743 MB | 251 MB |
-| helix 25.07.1 | 35.05 s (34.29 s to 35.44 s) | 33.78 s (33.59 s to 33.95 s) | 37.06 s (36.88 s to 37.25 s) | 38.30 s (37.73 s to 38.66 s) | 0 | 9,389 MB | 730 MB |
-| bevy 0.20.0 | 94.40 s (92.39 s to 95.08 s) | 76.84 s (76.40 s to 77.06 s) | 95.68 s (95.26 s to 97.95 s) | 99.87 s (98.97 s to 99.96 s) | 0 | 13,047 MB | 811 MB |
+| ripgrep 15.1.0 | 5.17 s (5.13 s to 5.26 s) | 5.65 s (5.62 s to 5.75 s) | 6.24 s (6.21 s to 6.33 s) | 5.84 s (5.80 s to 5.89 s) | 0 | 2,041 MB | 63 MB |
+| fd 10.3.0 | 26.88 s (26.84 s to 27.00 s) | 31.80 s (31.79 s to 31.84 s) | 32.39 s (32.36 s to 32.43 s) | 32.69 s (32.41 s to 32.96 s) | 0 | 1,773 MB | 1,440 MB |
+| bat 0.26.0 | 11.00 s (10.83 s to 11.04 s) | 19.60 s (19.40 s to 19.73 s) | 20.72 s (20.52 s to 20.86 s) | 19.86 s (19.65 s to 20.07 s) | 0 | 2,205 MB | 212 MB |
+| hyperfine 1.19.0 | 4.93 s (4.86 s to 5.03 s) | 11.36 s (11.02 s to 11.69 s) | 12.76 s (12.42 s to 13.09 s) | 21.16 s (20.82 s to 21.34 s) | 0 | 1,933 MB | 62 MB |
+| just 1.43.0 | 8.04 s (7.88 s to 8.11 s) | 11.22 s (10.98 s to 11.35 s) | 12.35 s (12.11 s to 12.48 s) | 11.36 s (11.25 s to 11.65 s) | 0 | 2,295 MB | 68 MB |
+| axum 0.8.6 | 7.13 s (7.11 s to 7.14 s) | 9.59 s (9.48 s to 9.62 s) | 10.98 s (10.88 s to 11.02 s) | 10.07 s (9.99 s to 10.60 s) | 0 | 2,264 MB | 64 MB |
+| nushell 0.108.0 | 42.05 s (42.01 s to 42.70 s) | 47.78 s (47.40 s to 49.00 s) | 51.64 s (51.27 s to 52.88 s) | 59.40 s (58.97 s to 60.42 s) | 0 | 10,656 MB | 255 MB |
+| helix 25.07.1 | 35.17 s (35.01 s to 35.22 s) | 35.30 s (35.00 s to 35.52 s) | 38.61 s (38.31 s to 38.81 s) | 55.86 s (40.43 s to 56.09 s) | 0 | 9,789 MB | 566 MB |
+| bevy 0.20.0 | 97.82 s (96.02 s to 98.94 s) | 77.24 s (76.83 s to 77.61 s) | 95.73 s (95.30 s to 99.05 s) | 103.81 s (102.98 s to 104.75 s) | 0 | 13,336 MB | 1,443 MB |
+| biome @biomejs/biome@2.6.3 | 106.07 s (104.46 s to 107.33 s) | 87.76 s (86.77 s to 88.22 s) | 104.97 s (104.21 s to 106.04 s) | 292.04 s (291.12 s to 313.65 s) | 0 | 16,038 MB | 33,824 MB |
 
 #### Memory and disk, LLVM, Linux x86-64
 
@@ -1359,81 +1384,90 @@ Peak: the most every process doing the work held at once, sampled every 10 ms an
 
 | Project | Step | cargo, peak | ra-jit, peak | cargo, largest process | ra-jit, largest process | Daemon after |
 |---|---|---:|---:|---:|---:|---:|
-| ripgrep 15.1.0 | Cold, until the daemon is ready | 2.4 GB | 5.2 GB | 434 MB | 1.7 GB | 1.7 GB |
-| ripgrep 15.1.0 | Edit a function | 531 MB | 1.8 GB | 295 MB | 1.6 GB | 1.7 GB |
-| ripgrep 15.1.0 | Edit a widely used function | 537 MB | 1.8 GB | 306 MB | 1.6 GB | 1.7 GB |
-| ripgrep 15.1.0 | Change a signature | 532 MB | 1.8 GB | 296 MB | 1.6 GB | 1.7 GB |
-| ripgrep 15.1.0 | Edit a generic function | 534 MB | 1.8 GB | 300 MB | 1.6 GB | 1.7 GB |
-| ripgrep 15.1.0 | Add a function | 528 MB | 1.8 GB | 295 MB | 1.6 GB | 1.7 GB |
-| ripgrep 15.1.0 | Add a struct field | 551 MB | 1.8 GB | 349 MB | 1.6 GB | 1.7 GB |
-| ripgrep 15.1.0 | Nothing changed | 101 MB | 1.9 GB | 101 MB | 1.7 GB | 1.8 GB |
-| fd 10.3.0 | Cold, until the daemon is ready | 2.6 GB | 5.8 GB | 554 MB | 1.7 GB | 1.7 GB |
-| fd 10.3.0 | Edit a function | 606 MB | 1.6 GB | 372 MB | 1.4 GB | 1.6 GB |
-| fd 10.3.0 | Edit a widely used function | 594 MB | 1.6 GB | 368 MB | 1.4 GB | 1.6 GB |
-| fd 10.3.0 | Change a signature | 611 MB | 1.6 GB | 372 MB | 1.4 GB | 1.6 GB |
-| fd 10.3.0 | Add a function | 606 MB | 1.6 GB | 372 MB | 1.4 GB | 1.6 GB |
-| fd 10.3.0 | Add a struct field | 632 MB | 1.6 GB | 371 MB | 1.4 GB | 1.6 GB |
-| fd 10.3.0 | Nothing changed | 136 MB | 1.7 GB | 136 MB | 1.5 GB | 1.7 GB |
-| bat 0.26.0 | Cold, until the daemon is ready | 3.8 GB | 8.9 GB | 520 MB | 2.1 GB | 2.0 GB |
-| bat 0.26.0 | Edit a function | 750 MB | 2.2 GB | 520 MB | 1.9 GB | 2.1 GB |
-| bat 0.26.0 | Edit a widely used function | 746 MB | 2.2 GB | 517 MB | 1.9 GB | 2.1 GB |
-| bat 0.26.0 | Change a signature | 742 MB | 2.2 GB | 521 MB | 1.9 GB | 2.1 GB |
-| bat 0.26.0 | Add a function | 750 MB | 2.2 GB | 520 MB | 1.9 GB | 2.1 GB |
-| bat 0.26.0 | Add a struct field | 764 MB | 2.2 GB | 517 MB | 1.9 GB | 2.1 GB |
-| bat 0.26.0 | Nothing changed | 146 MB | 2.3 GB | 146 MB | 2.0 GB | 2.2 GB |
-| hyperfine 1.19.0 | Cold, until the daemon is ready | 2.6 GB | 11.7 GB | 360 MB | 2.0 GB | 1.9 GB |
-| hyperfine 1.19.0 | Edit a function | 421 MB | 1.8 GB | 246 MB | 1.6 GB | 1.7 GB |
-| hyperfine 1.19.0 | Edit a widely used function | 426 MB | 1.7 GB | 259 MB | 1.5 GB | 1.7 GB |
-| hyperfine 1.19.0 | Change a signature | 429 MB | 1.7 GB | 264 MB | 1.5 GB | 1.7 GB |
-| hyperfine 1.19.0 | Add a function | 422 MB | 1.7 GB | 248 MB | 1.5 GB | 1.7 GB |
-| hyperfine 1.19.0 | Add a struct field | 450 MB | 1.7 GB | 293 MB | 1.5 GB | 1.7 GB |
-| hyperfine 1.19.0 | Nothing changed | 146 MB | 1.8 GB | 146 MB | 1.6 GB | 1.8 GB |
-| just 1.43.0 | Cold, until the daemon is ready | 3.4 GB | 10.7 GB | 631 MB | 2.1 GB | 1.8 GB |
-| just 1.43.0 | Edit a function | 539 MB | 2.0 GB | 356 MB | 1.8 GB | 2.0 GB |
-| just 1.43.0 | Edit a widely used function | 534 MB | 2.0 GB | 360 MB | 1.8 GB | 2.0 GB |
-| just 1.43.0 | Change a signature | 530 MB | 2.0 GB | 360 MB | 1.8 GB | 2.0 GB |
-| just 1.43.0 | Add a function | 542 MB | 2.0 GB | 378 MB | 1.8 GB | 2.0 GB |
-| just 1.43.0 | Add a struct field | 663 MB | 2.0 GB | 623 MB | 1.8 GB | 2.0 GB |
-| just 1.43.0 | Nothing changed | 172 MB | 2.1 GB | 172 MB | 1.9 GB | 2.1 GB |
-| axum 0.8.6 | Cold, until the daemon is ready | 2.5 GB | 6.3 GB | 508 MB | 2.4 GB | 2.2 GB |
-| axum 0.8.6 | Edit a function | 468 MB | 2.0 GB | 253 MB | 1.8 GB | 1.9 GB |
-| axum 0.8.6 | Edit a widely used function | 454 MB | 2.0 GB | 338 MB | 1.8 GB | 1.9 GB |
-| axum 0.8.6 | Add a function | 468 MB | 2.0 GB | 255 MB | 1.8 GB | 1.9 GB |
-| axum 0.8.6 | Nothing changed | 175 MB | 2.1 GB | 175 MB | 1.9 GB | 2.1 GB |
-| nushell 0.108.0 | Cold, until the daemon is ready | 4.7 GB | 10.2 GB | 2.4 GB | 5.6 GB | 5.4 GB |
-| nushell 0.108.0 | Edit a function | 2.7 GB | 7.5 GB | 2.4 GB | 7.2 GB | 7.4 GB |
-| nushell 0.108.0 | Edit a widely used function | 2.7 GB | 7.4 GB | 2.4 GB | 7.1 GB | 7.3 GB |
-| nushell 0.108.0 | Change a signature | 2.7 GB | 7.4 GB | 2.4 GB | 7.1 GB | 7.3 GB |
-| nushell 0.108.0 | Edit a generic function | 2.7 GB | 7.4 GB | 2.4 GB | 7.1 GB | 7.3 GB |
-| nushell 0.108.0 | Add a function | 2.7 GB | 7.4 GB | 2.4 GB | 7.2 GB | 7.3 GB |
-| nushell 0.108.0 | Add a struct field | 2.8 GB | 7.4 GB | 2.4 GB | 7.1 GB | 7.3 GB |
-| nushell 0.108.0 | Nothing changed | 177 MB | 7.9 GB | 177 MB | 7.6 GB | 7.8 GB |
-| helix 25.07.1 | Cold, until the daemon is ready | 3.9 GB | 9.8 GB | 1.8 GB | 4.1 GB | 3.9 GB |
-| helix 25.07.1 | Edit a function | 2.1 GB | 6.1 GB | 1.8 GB | 5.8 GB | 6.0 GB |
-| helix 25.07.1 | Edit a widely used function | 2.1 GB | 6.0 GB | 1.8 GB | 5.8 GB | 5.9 GB |
-| helix 25.07.1 | Change a signature | 2.1 GB | 6.0 GB | 1.8 GB | 5.8 GB | 6.0 GB |
-| helix 25.07.1 | Add a function | 2.1 GB | 6.0 GB | 1.8 GB | 5.8 GB | 5.9 GB |
-| helix 25.07.1 | Add a struct field | 2.1 GB | 6.0 GB | 1.8 GB | 5.8 GB | 5.9 GB |
-| helix 25.07.1 | Nothing changed | 238 MB | 9.4 GB | 238 MB | 9.1 GB | 9.4 GB |
-| bevy 0.20.0 | Cold, until the daemon is ready | 8.5 GB | 9.7 GB | 8.1 GB | 9.4 GB | 8.3 GB |
-| bevy 0.20.0 | Edit a function | 8.5 GB | 12.3 GB | 8.1 GB | 12.0 GB | 12.4 GB |
-| bevy 0.20.0 | Edit a widely used function | 8.5 GB | 19.4 GB | 8.1 GB | 19.1 GB | 19.8 GB |
-| bevy 0.20.0 | Add a function | 8.5 GB | 15.0 GB | 8.1 GB | 14.7 GB | 15.0 GB |
-| bevy 0.20.0 | Nothing changed | 344 MB | 12.7 GB | 344 MB | 12.3 GB | 12.6 GB |
+| ripgrep 15.1.0 | Cold, until the daemon is ready | 2.4 GB | 5.7 GB | 448 MB | 1.7 GB | 1.7 GB |
+| ripgrep 15.1.0 | Edit a function | 529 MB | 1.8 GB | 294 MB | 1.6 GB | 1.7 GB |
+| ripgrep 15.1.0 | Edit a widely used function | 538 MB | 1.8 GB | 304 MB | 1.6 GB | 1.7 GB |
+| ripgrep 15.1.0 | Change a signature | 530 MB | 1.8 GB | 294 MB | 1.6 GB | 1.7 GB |
+| ripgrep 15.1.0 | Edit a generic function | 537 MB | 1.8 GB | 300 MB | 1.6 GB | 1.7 GB |
+| ripgrep 15.1.0 | Add a function | 534 MB | 1.8 GB | 297 MB | 1.6 GB | 1.7 GB |
+| ripgrep 15.1.0 | Add a struct field | 545 MB | 1.8 GB | 350 MB | 1.6 GB | 1.7 GB |
+| ripgrep 15.1.0 | Nothing changed | 111 MB | 1.8 GB | 111 MB | 1.6 GB | 1.8 GB |
+| fd 10.3.0 | Cold, until the daemon is ready | 2.6 GB | 7.0 GB | 554 MB | 1.8 GB | 1.6 GB |
+| fd 10.3.0 | Edit a function | 605 MB | 1.7 GB | 534 MB | 1.4 GB | 1.6 GB |
+| fd 10.3.0 | Edit a widely used function | 595 MB | 1.6 GB | 534 MB | 1.4 GB | 1.6 GB |
+| fd 10.3.0 | Change a signature | 610 MB | 1.6 GB | 534 MB | 1.4 GB | 1.6 GB |
+| fd 10.3.0 | Add a function | 604 MB | 1.6 GB | 534 MB | 1.4 GB | 1.6 GB |
+| fd 10.3.0 | Add a struct field | 634 MB | 1.6 GB | 534 MB | 1.4 GB | 1.6 GB |
+| fd 10.3.0 | Nothing changed | 534 MB | 1.7 GB | 534 MB | 1.5 GB | 1.7 GB |
+| bat 0.26.0 | Cold, until the daemon is ready | 3.9 GB | 9.5 GB | 534 MB | 2.1 GB | 1.9 GB |
+| bat 0.26.0 | Edit a function | 749 MB | 2.1 GB | 534 MB | 1.9 GB | 2.0 GB |
+| bat 0.26.0 | Edit a widely used function | 748 MB | 2.1 GB | 534 MB | 1.9 GB | 2.1 GB |
+| bat 0.26.0 | Change a signature | 741 MB | 2.1 GB | 534 MB | 1.9 GB | 2.1 GB |
+| bat 0.26.0 | Add a function | 749 MB | 2.1 GB | 534 MB | 1.9 GB | 2.1 GB |
+| bat 0.26.0 | Add a struct field | 766 MB | 2.1 GB | 534 MB | 1.9 GB | 2.1 GB |
+| bat 0.26.0 | Nothing changed | 534 MB | 2.2 GB | 534 MB | 2.0 GB | 2.2 GB |
+| hyperfine 1.19.0 | Cold, until the daemon is ready | 2.6 GB | 11.6 GB | 534 MB | 1.9 GB | 1.8 GB |
+| hyperfine 1.19.0 | Edit a function | 534 MB | 1.8 GB | 534 MB | 1.6 GB | 1.8 GB |
+| hyperfine 1.19.0 | Edit a widely used function | 534 MB | 1.8 GB | 534 MB | 1.6 GB | 1.7 GB |
+| hyperfine 1.19.0 | Change a signature | 534 MB | 1.8 GB | 534 MB | 1.6 GB | 1.7 GB |
+| hyperfine 1.19.0 | Add a function | 534 MB | 1.8 GB | 534 MB | 1.6 GB | 1.8 GB |
+| hyperfine 1.19.0 | Add a struct field | 534 MB | 1.8 GB | 534 MB | 1.6 GB | 1.8 GB |
+| hyperfine 1.19.0 | Nothing changed | 534 MB | 1.9 GB | 534 MB | 1.7 GB | 1.8 GB |
+| just 1.43.0 | Cold, until the daemon is ready | 3.4 GB | 10.9 GB | 631 MB | 2.0 GB | 1.8 GB |
+| just 1.43.0 | Edit a function | 539 MB | 2.0 GB | 534 MB | 1.8 GB | 2.0 GB |
+| just 1.43.0 | Edit a widely used function | 534 MB | 2.0 GB | 534 MB | 1.8 GB | 2.0 GB |
+| just 1.43.0 | Change a signature | 534 MB | 2.0 GB | 534 MB | 1.8 GB | 2.0 GB |
+| just 1.43.0 | Add a function | 538 MB | 2.0 GB | 534 MB | 1.8 GB | 2.0 GB |
+| just 1.43.0 | Add a struct field | 654 MB | 2.0 GB | 620 MB | 1.8 GB | 2.0 GB |
+| just 1.43.0 | Nothing changed | 534 MB | 2.2 GB | 534 MB | 1.9 GB | 2.1 GB |
+| axum 0.8.6 | Cold, until the daemon is ready | 2.5 GB | 6.1 GB | 534 MB | 2.3 GB | 2.2 GB |
+| axum 0.8.6 | Edit a function | 534 MB | 2.0 GB | 534 MB | 1.8 GB | 1.9 GB |
+| axum 0.8.6 | Edit a widely used function | 534 MB | 2.0 GB | 534 MB | 1.8 GB | 1.9 GB |
+| axum 0.8.6 | Add a function | 534 MB | 2.0 GB | 534 MB | 1.8 GB | 1.9 GB |
+| axum 0.8.6 | Nothing changed | 534 MB | 2.1 GB | 534 MB | 1.9 GB | 2.1 GB |
+| nushell 0.108.0 | Cold, until the daemon is ready | 4.8 GB | 12.3 GB | 2.4 GB | 5.5 GB | 5.3 GB |
+| nushell 0.108.0 | Edit a function | 2.7 GB | 7.2 GB | 2.4 GB | 7.0 GB | 7.1 GB |
+| nushell 0.108.0 | Edit a widely used function | 2.7 GB | 7.1 GB | 2.4 GB | 6.8 GB | 7.0 GB |
+| nushell 0.108.0 | Change a signature | 2.7 GB | 7.1 GB | 2.4 GB | 6.9 GB | 7.1 GB |
+| nushell 0.108.0 | Edit a generic function | 2.7 GB | 7.2 GB | 2.4 GB | 6.9 GB | 7.1 GB |
+| nushell 0.108.0 | Add a function | 2.7 GB | 7.2 GB | 2.4 GB | 6.9 GB | 7.1 GB |
+| nushell 0.108.0 | Add a struct field | 2.7 GB | 7.2 GB | 2.4 GB | 6.9 GB | 7.1 GB |
+| nushell 0.108.0 | Nothing changed | 534 MB | 8.0 GB | 534 MB | 7.8 GB | 8.0 GB |
+| helix 25.07.1 | Cold, until the daemon is ready | 3.9 GB | 9.9 GB | 1.8 GB | 4.0 GB | 3.8 GB |
+| helix 25.07.1 | Edit a function | 2.1 GB | 6.2 GB | 1.8 GB | 5.9 GB | 5.9 GB |
+| helix 25.07.1 | Edit a widely used function | 2.1 GB | 6.0 GB | 1.8 GB | 5.7 GB | 5.9 GB |
+| helix 25.07.1 | Change a signature | 2.1 GB | 6.0 GB | 1.8 GB | 5.7 GB | 5.9 GB |
+| helix 25.07.1 | Add a function | 2.1 GB | 6.0 GB | 1.8 GB | 5.7 GB | 5.9 GB |
+| helix 25.07.1 | Add a struct field | 2.1 GB | 6.0 GB | 1.8 GB | 5.7 GB | 5.9 GB |
+| helix 25.07.1 | Nothing changed | 534 MB | 6.7 GB | 534 MB | 6.5 GB | 6.7 GB |
+| bevy 0.20.0 | Cold, until the daemon is ready | 8.5 GB | 9.7 GB | 8.1 GB | 9.5 GB | 8.5 GB |
+| bevy 0.20.0 | Edit a function | 8.5 GB | 12.9 GB | 8.1 GB | 12.6 GB | 12.9 GB |
+| bevy 0.20.0 | Edit a widely used function | 8.5 GB | 19.6 GB | 8.1 GB | 19.3 GB | 19.7 GB |
+| bevy 0.20.0 | Add a function | 8.5 GB | 14.9 GB | 8.1 GB | 14.6 GB | 14.8 GB |
+| bevy 0.20.0 | Nothing changed | 534 MB | 13.3 GB | 534 MB | 12.9 GB | 13.2 GB |
+| biome @biomejs/biome@2.6.3 | Cold, until the daemon is ready | 8.1 GB | 11.1 GB | 2.6 GB | 7.1 GB | 6.9 GB |
+| biome @biomejs/biome@2.6.3 | Edit a function | 3.0 GB | 7.8 GB | 2.6 GB | 7.5 GB | 9.4 GB |
+| biome @biomejs/biome@2.6.3 | Edit a widely used function | 3.0 GB | 21.1 GB | 2.6 GB | 20.8 GB | 20.7 GB |
+| biome @biomejs/biome@2.6.3 | Change a signature | 3.0 GB | 24.0 GB | 2.6 GB | 23.2 GB | 6.3 GB |
+| biome @biomejs/biome@2.6.3 | Edit a generic function | 3.0 GB | 19.7 GB | 2.6 GB | 19.4 GB | 19.6 GB |
+| biome @biomejs/biome@2.6.3 | Add a function | 3.0 GB | 19.7 GB | 2.6 GB | 19.4 GB | 19.6 GB |
+| biome @biomejs/biome@2.6.3 | Add a struct field | 3.0 GB | 19.7 GB | 2.6 GB | 19.4 GB | 19.6 GB |
+| biome @biomejs/biome@2.6.3 | Nothing changed | 809 MB | 6.4 GB | 809 MB | 6.1 GB | 6.3 GB |
 
 The daemon between builds, and what each side keeps on disk once the edits are done (each block once, [how](#memory-and-disk)). After the first build: once the step after the cold build (nothing changed) is done; growth is from then to the end, over every edit made and taken back. Warm store: the cold start of another checkout with the store the first one filled.
 
 | Project | Daemon ready | After the first build | At the end | Growth | Warm store: peak, ready | cargo target | ra-jit target | Store | Home |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
-| ripgrep 15.1.0 | 1.7 GB | 1.8 GB | 1.7 GB after 65 builds | −137 MB | 5.3 GB, 1.7 GB | 407 MB | 599 MB | 61 MB | 0 MB |
-| fd 10.3.0 | 1.7 GB | 1.7 GB | 1.6 GB after 55 builds | −76 MB | 5.8 GB, 1.7 GB | 571 MB | 784 MB | 61 MB | 1 MB |
-| bat 0.26.0 | 2.0 GB | 2.2 GB | 2.1 GB after 55 builds | −92 MB | 9.0 GB, 1.9 GB | 973 MB | 1.3 GB | 98 MB | 0 MB |
-| hyperfine 1.19.0 | 1.9 GB | 1.8 GB | 1.7 GB after 55 builds | −77 MB | 11.5 GB, 2.0 GB | 342 MB | 595 MB | 59 MB | 0 MB |
-| just 1.43.0 | 1.8 GB | 2.1 GB | 2.0 GB after 55 builds | −119 MB | 10.8 GB, 1.9 GB | 667 MB | 947 MB | 66 MB | 0 MB |
-| axum 0.8.6 | 2.2 GB | 2.1 GB | 1.9 GB after 35 builds | −132 MB | 6.2 GB, 2.1 GB | 404 MB | 525 MB | 62 MB | 1 MB |
-| nushell 0.108.0 | 5.4 GB | 7.8 GB | 7.3 GB after 65 builds | −493 MB | 10.6 GB, 5.0 GB | 5.3 GB | 5.6 GB | 146 MB | 1 MB |
-| helix 25.07.1 | 3.9 GB | 9.4 GB | 5.9 GB after 55 builds | −3.4 GB | 10.0 GB, 3.8 GB | 3.7 GB | 4.8 GB | 718 MB | 1 MB |
-| bevy 0.20.0 | 8.3 GB | 12.6 GB | 15.0 GB after 35 builds | +2.4 GB | 10.8 GB, 10.1 GB | 17.5 GB | 16.3 GB | 717 MB | 1 MB |
+| ripgrep 15.1.0 | 1.7 GB | 1.8 GB | 1.7 GB after 65 builds | −86 MB | 5.6 GB, 1.7 GB | 407 MB | 608 MB | 61 MB | 0 MB |
+| fd 10.3.0 | 1.6 GB | 1.7 GB | 1.6 GB after 55 builds | −124 MB | 7.7 GB, 1.7 GB | 571 MB | 804 MB | 290 MB | 1 MB |
+| bat 0.26.0 | 1.9 GB | 2.2 GB | 2.1 GB after 55 builds | −92 MB | 9.3 GB, 1.9 GB | 973 MB | 1.3 GB | 100 MB | 1 MB |
+| hyperfine 1.19.0 | 1.8 GB | 1.8 GB | 1.8 GB after 55 builds | −90 MB | 11.6 GB, 1.8 GB | 342 MB | 604 MB | 59 MB | 0 MB |
+| just 1.43.0 | 1.8 GB | 2.1 GB | 2.0 GB after 55 builds | −145 MB | 10.8 GB, 1.9 GB | 667 MB | 956 MB | 66 MB | 0 MB |
+| axum 0.8.6 | 2.2 GB | 2.1 GB | 1.9 GB after 35 builds | −115 MB | 6.2 GB, 2.0 GB | 404 MB | 524 MB | 61 MB | 1 MB |
+| nushell 0.108.0 | 5.3 GB | 8.0 GB | 7.1 GB after 65 builds | −863 MB | 12.0 GB, 5.1 GB | 5.3 GB | 6.3 GB | 147 MB | 1 MB |
+| helix 25.07.1 | 3.8 GB | 6.7 GB | 5.9 GB after 55 builds | −850 MB | 10.1 GB, 3.7 GB | 3.7 GB | 4.8 GB | 552 MB | 1 MB |
+| bevy 0.20.0 | 8.5 GB | 13.2 GB | 14.8 GB after 35 builds | +1.6 GB | 11.0 GB, 9.9 GB | 17.5 GB | 16.3 GB | 1.3 GB | 1 MB |
+| biome @biomejs/biome@2.6.3 | 6.9 GB | 6.3 GB | 19.6 GB after 57 builds | +13.3 GB | 17.6 GB, 6.4 GB | 11.0 GB | 15.9 GB | 34.3 GB | 2 MB |
 
 #### How fast the program runs, LLVM, Linux x86-64
 
@@ -1441,7 +1475,7 @@ The same command run by the program ra-jit linked and by cargo's debug and relea
 
 | Project | Command | ra-jit | cargo debug | cargo release |
 |---|---|---:|---:|---:|
-| ripgrep 15.1.0 | `rg -uuu --sort path -c \w+_unchecked\(\|unsafe \{ <the toolchain's library source>` | 1.08 s (1.08 s to 1.08 s); 101 MB, 199.8 MB | 1.08 s (1.08 s to 1.08 s); 101 MB, 53.2 MB | 27 ms (26 ms to 28 ms); 101 MB, 30.7 MB |
+| ripgrep 15.1.0 | `rg -uuu --sort path -c \w+_unchecked\(\|unsafe \{ <the toolchain's library source>` | 1.08 s (1.07 s to 1.08 s); 111 MB, 199.8 MB | 1.08 s (1.07 s to 1.08 s); 111 MB, 53.2 MB | 30 ms (28 ms to 31 ms); 111 MB, 30.7 MB |
 
 ### Linux x86-64, bun
 

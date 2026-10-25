@@ -6,7 +6,7 @@ The long version, with the rules for code and how to change the vendored rust-an
 ## Build
 
 ```
-git clone https://github.com/indexable-inc/ra-jit
+git clone https://github.com/indexable-inc/blaze
 cd ra-jit
 nix develop            # rustup at 1.99.0, Python, and the LLVM 20 of `--features llvm`
 rustup component add rust-src

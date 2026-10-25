@@ -1,26 +1,26 @@
 {
   "toolchain": "1.99.0",
-  "release": "https://github.com/indexable-inc/ra-jit/releases/download/pgo-profiles",
+  "release": "https://github.com/indexable-inc/blaze/releases/download/pgo-profiles",
   "targets": {
     "aarch64-apple-darwin": {
-      "name": "ra-jit-1.99.0-aarch64-apple-darwin-c9d3542bac821944.profdata",
-      "sha256": "c9d3542bac82194424dbbf25ec644439c8dd222732e551eda34f86e1c827c9c3",
-      "commit": "69c8fda3b186d0081fa6a521d8c28235dd17b768",
-      "count": 294111144553,
+      "name": "ra-jit-1.99.0-aarch64-apple-darwin-6a7748d653f347e5.profdata",
+      "sha256": "6a7748d653f347e5f06edf948448406e4d5b9571c49bd06be019a64cb919347f",
+      "commit": "f21dc57a22002ed9954cc57889bb5c08dc772e00",
+      "count": 293086823903,
       "crate": "g7nrAs7FGFb"
     },
     "aarch64-unknown-linux-gnu": {
-      "name": "ra-jit-1.99.0-aarch64-unknown-linux-gnu-64676de95a5c88d2.profdata",
-      "sha256": "64676de95a5c88d25c7c404ea10d2bd7cd6881ef219e7a572740b9516881acc7",
-      "commit": "69c8fda3b186d0081fa6a521d8c28235dd17b768",
-      "count": 215594848429,
+      "name": "ra-jit-1.99.0-aarch64-unknown-linux-gnu-d198c1a1433f99e0.profdata",
+      "sha256": "d198c1a1433f99e0495c9cf13760a944b70f741286d37e491e76e79ea09189e3",
+      "commit": "f21dc57a22002ed9954cc57889bb5c08dc772e00",
+      "count": 216231513808,
       "crate": "7GDiCq12wkq"
     },
     "x86_64-unknown-linux-gnu": {
-      "name": "ra-jit-1.99.0-x86_64-unknown-linux-gnu-5abffaf3361830fc.profdata",
-      "sha256": "5abffaf3361830fcf68b1eedba9c6f25ca9354ef2fbc78bd9bdcb169edaa3a35",
-      "commit": "69c8fda3b186d0081fa6a521d8c28235dd17b768",
-      "count": 179332487170,
+      "name": "ra-jit-1.99.0-x86_64-unknown-linux-gnu-5792df4ec6ed01a1.profdata",
+      "sha256": "5792df4ec6ed01a1b17365d61fc8b16707dda1cda197e46a417f922b427ae701",
+      "commit": "f21dc57a22002ed9954cc57889bb5c08dc772e00",
+      "count": 179430380814,
       "crate": "4UJZ8hTlUxZ"
     }
   }

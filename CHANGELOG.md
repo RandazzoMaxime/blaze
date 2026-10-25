@@ -263,6 +263,20 @@ All notable changes to ra-jit are written here. The format follows
 
 ### Changed
 
+- A daemon that starts on a store holding the checkout's code no longer compiles that code
+  again before the first edit can be patched ([#105](https://github.com/indexable-inc/blaze/issues/105)).
+  Each function of the checkout goes into the store with a mark of its code and of what it
+  calls and reads, by stable names, so the patch base takes what it found as it is and an
+  edit recompiles only what it touched; what an edit leaves no caller of (a closure renamed by
+  a line above it, and what is generic over it) is left uncalled, as an instance is. nushell's
+  `restart` (warmstart.py, dev-aws-5, `RA_JIT_RUSTC_BASE=0`) goes from 30.8 s to 21.4 s, the
+  73,586 functions and 9.4 s of "compiling what the store had of the checkout" gone, and its
+  `warm` step is ready in 15.4 s where it took 25.3 s; ripgrep's `restart` from 5.67 s to
+  4.63 s. The first edit after is a patch as before (nushell 0.30 s, was 0.23 s; ripgrep
+  0.08 s). A program linked with rustc's code, an LLVM build in units and
+  `#[ra_jit::cache]` functions keep no marks and still take that build. `harness/storetracked.py`
+  holds it.
+
 - ra-jit is now **blaze**. The command is `cargo blaze` (`cargo blaze build`, `test`, `run`,
   `check`, `status`, `stop`); `cargo ra-jit` keeps working and, on a terminal, says once per run
   that it was renamed. The crate on crates.io is `cargo-blaze` (`cargo install cargo-blaze`),
@@ -501,6 +515,17 @@ All notable changes to ra-jit are written here. The format follows
 
 ### Fixed
 
+- A profile with `debug = "line-tables-only"` (or `1`, or `"limited"`) no longer has the type
+  of every variable worked out. Only the lines were written, but the types were described for
+  each function compiled and then thrown away. On Biome (`biome_cli`, 518 crates, whose dev
+  profile is `line-tables-only`), 0.1.0's worker went past 44 GB in its cold build and was
+  killed before it was ready. On main, the cold build's peak goes from 40.4 GB to 30.6 GB and
+  its time from 139.5 s to 98.8 s, with 726,516 `told_type` memos down to none.
+  `harness/debuginfo.py`'s cost part checks that no type is told of at `line-tables-only`. What
+  such a build keeps in the store, which has no variables, is kept apart from what a build with
+  them keeps, so a `debug = true` build later takes none of it; the cost part builds at
+  `line-tables-only` and then at `true` from one store and checks that it has every variable
+  one at `true` after another at `true` has.
 - A registry crate with a build script has the same frozen def map in every checkout (#105).
   Its key held the absolute `OUT_DIR`, so another checkout of nushell took 221 of 478 crates
   frozen where a restart of the first took 374, and of ripgrep 41 of 51; both now take all of

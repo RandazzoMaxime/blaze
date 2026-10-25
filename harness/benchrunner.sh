@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# benchrunner.sh: makes this machine the self-hosted runner of indexable-inc/ra-jit that the
+# benchrunner.sh: makes this machine the self-hosted runner of indexable-inc/blaze that the
 # bench-readme and bench-bun workflows run one platform on (harness/benchplatforms.py):
 #
 #   linux-x86-64    labels self-hosted, linux, x64, bench-x86
@@ -7,7 +7,7 @@
 #   macos-arm64     labels self-hosted, macOS, ARM64, bench-macos
 #
 #   scp harness/benchrunner.sh HOST:
-#   gh api -X POST repos/indexable-inc/ra-jit/actions/runners/registration-token --jq .token \
+#   gh api -X POST repos/indexable-inc/blaze/actions/runners/registration-token --jq .token \
 #     | ssh HOST bash benchrunner.sh linux-aarch64 "'AWS m8g.4xlarge'"
 #
 # Reads the registration token (valid one hour, needs repo admin) from stdin; the arguments are
@@ -42,7 +42,7 @@ if [ ! -x ./run.sh ] || [ "$(cat .version 2>/dev/null)" != "$version" ]; then
 fi
 # The runner is .NET: without ICU on the host it has to be told to do without.
 export DOTNET_SYSTEM_GLOBALIZATION_INVARIANT=1
-./config.sh --unattended --replace --url https://github.com/indexable-inc/ra-jit --token "$token" \
+./config.sh --unattended --replace --url https://github.com/indexable-inc/blaze --token "$token" \
   --name "$(hostname -s)" --labels "$label" --work _work
 cat > .env <<EOF
 RA_JIT_BENCH_MACHINE=$machine

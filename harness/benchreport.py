@@ -72,7 +72,7 @@ HEADLINE_START, HEADLINE_END = "<!-- benchheadline:start -->", "<!-- benchheadli
 # Where a platform's result was stored before there were platforms: read when the new one is missing.
 LEGACY = {"linux-x86-64.json": "linux-x86_64.json", "macos-arm64.json": "memory-macos-arm64.json"}
 FLOOR_MB = 100
-REPO = "https://github.com/indexable-inc/ra-jit"
+REPO = "https://github.com/indexable-inc/blaze"
 FLOOR_S = 0.05
 
 # The order of the projects and phases in the tables, and what the README calls each edit.

@@ -97,6 +97,7 @@ HARNESSES = [
     ("store", ["storefull.py"], {}, on("linux", "windows"), 2),
     ("store", ["storeshared.py"], {}, EVERYWHERE, None),
     ("store", ["storeguards.py"], {}, on("linux"), None),
+    ("store", ["storetracked.py"], {}, on("linux", "macos"), 2),
     ("daemon", ["stress.py"], {}, EVERYWHERE, 2),
     # The agent API: calls framed on the socket and over HTTP, transactions of files.
     ("daemon", ["api.py"], {}, on("linux", "macos"), 1),

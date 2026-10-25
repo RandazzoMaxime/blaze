@@ -1,7 +1,7 @@
 <h1 align="center">
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="docs/brand/ix-mark-on-dark.svg">
-    <img alt="ix" src="docs/brand/ix-mark-on-light.svg" height="40" align="absmiddle">
+    <img alt="ix" src="docs/brand/ix-mark-on-light.svg" height="46" align="absmiddle">
   </picture>
   blaze
 </h1>
@@ -27,7 +27,7 @@ blaze runs beside cargo, keeps your project compiled in memory, and after an edi
 the functions you changed and writes them into the program cargo already built. A program that
 opts in can take the new code while it keeps running.
 
-On real projects such as ripgrep, nushell, helix and bun, an edit builds <!-- benchheadline:start -->10× faster on macOS arm64, 24× faster on Linux aarch64 and 12× faster on Linux x86-64<!-- benchheadline:end --> than with an incremental `cargo build` (the average over the projects; [How fast](#how-fast) has every number).
+On real projects such as ripgrep, nushell, helix and bun, an edit builds <!-- benchheadline:start -->10× faster on macOS arm64, 24× faster on Linux aarch64 and 11× faster on Linux x86-64<!-- benchheadline:end --> than with an incremental `cargo build` (the average over the projects; [How fast](#how-fast) has every number).
 
 blaze was called ra-jit until 2026-10-24. `cargo ra-jit` keeps working as another name for
 `cargo blaze`, and its settings work as `BLAZE_*` and as `RA_JIT_*`.
@@ -99,7 +99,7 @@ process, the daemon, which loads your project: a few seconds for a small one, up
 for a very large one. Until then builds are still cargo's, and each one says so:
 
 ```
-ra-jit: the daemon is still loading the workspace (951ms so far); building with cargo
+ra-jit: bug: the daemon is still loading the workspace (951ms so far); building with cargo, which ra-jit is never to do (no-rustc M, #93, and #84)
 ```
 
 `cargo blaze status` says `ready` once it is done. From then on, an edit builds like this:
@@ -121,7 +121,9 @@ $ cargo blaze build
 
 Any other subcommand goes to cargo unchanged. When blaze can't be sure its result would be the
 same as cargo's, it lets cargo do that build and prints one line saying why
-(`ra-jit: <reason>; building with cargo`). That happens after a change to `Cargo.toml`,
+(`ra-jit: bug: <reason>; building with cargo, ...`). Each is a bug: ra-jit is never to build
+with cargo ([#84](https://github.com/indexable-inc/ra-jit/issues/84)), and the line names the
+step of [the plan](docs/no-rustc.md) that removes it. That happens after a change to `Cargo.toml`,
 `Cargo.lock` or what a build script reads, when a test is added or removed, and for a few flags
 such as `--message-format` and `-Z`. The full list is in [docs/cargo.md](docs/cargo.md).
 
@@ -215,7 +217,7 @@ it builds run, against cargo. The tables are written by the benchmark harness
 ([docs/benchmarks.md](docs/benchmarks.md)) and kept current by CI.
 
 <!-- bench:start -->
-<picture><source media="(prefers-color-scheme: dark)" srcset="docs/benchmarks/charts/edits-dark.svg"><img alt="How much faster an edit builds under ra-jit than under cargo, by platform: All projects (geometric mean): macOS arm64 10× faster, Linux aarch64 24× faster, Linux x86-64 12× faster; ripgrep 15.1.0: macOS arm64 8.1× faster, Linux aarch64 23× faster, Linux x86-64 11× faster; fd 10.3.0: macOS arm64 6.0× faster, Linux aarch64 22× faster, Linux x86-64 9.4× faster; bat 0.26.0: Linux aarch64 33× faster, Linux x86-64 14× faster; hyperfine 1.19.0: Linux aarch64 14× faster, Linux x86-64 8.2× faster; just 1.43.0: Linux aarch64 22× faster, Linux x86-64 13× faster; axum 0.8.6: Linux aarch64 16× faster, Linux x86-64 8.4× faster; nushell 0.108.0: macOS arm64 10× faster, Linux aarch64 34× faster, Linux x86-64 15× faster; helix 25.07.1: Linux aarch64 48× faster, Linux x86-64 27× faster; bevy 0.20.0: Linux aarch64 26× faster, Linux x86-64 3.4× faster; bun 1.4.3: macOS arm64 21× faster, Linux aarch64 22× faster, Linux x86-64 22× faster" src="docs/benchmarks/charts/edits-light.svg" width="760"></picture>
+<picture><source media="(prefers-color-scheme: dark)" srcset="docs/benchmarks/charts/edits-dark.svg"><img alt="How much faster an edit builds under ra-jit than under cargo, by platform: All projects (geometric mean): macOS arm64 10× faster, Linux aarch64 24× faster, Linux x86-64 11× faster; ripgrep 15.1.0: macOS arm64 8.1× faster, Linux aarch64 23× faster, Linux x86-64 12× faster; fd 10.3.0: macOS arm64 6.0× faster, Linux aarch64 22× faster, Linux x86-64 9.3× faster; bat 0.26.0: Linux aarch64 33× faster, Linux x86-64 14× faster; hyperfine 1.19.0: Linux aarch64 14× faster, Linux x86-64 8.0× faster; just 1.43.0: Linux aarch64 22× faster, Linux x86-64 14× faster; axum 0.8.6: Linux aarch64 16× faster, Linux x86-64 10× faster; nushell 0.108.0: macOS arm64 10× faster, Linux aarch64 34× faster, Linux x86-64 20× faster; helix 25.07.1: Linux aarch64 48× faster, Linux x86-64 19× faster; bevy 0.20.0: Linux aarch64 26× faster, Linux x86-64 3.7× faster; biome @biomejs/biome@2.6.3: Linux x86-64 5.6× faster; bun 1.4.3: macOS arm64 21× faster, Linux aarch64 22× faster, Linux x86-64 22× faster" src="docs/benchmarks/charts/edits-light.svg" width="760"></picture>
 
 Edit, then build, on real projects at pinned commits: incremental `cargo build` → `cargo ra-jit build`, both warm, same linker, Cranelift, the median of each run's edits. Each platform is a machine of its own: compare numbers within a platform, not across.
 
@@ -223,20 +225,21 @@ An edit to one function, cargo → ra-jit:
 
 | Project | macOS arm64 | Linux aarch64 | Linux x86-64 |
 |---|---:|---:|---:|
-| ripgrep 15.1.0 | 993 ms → **126 ms** (7.9x) | 1.18 s → **62 ms** (19x) | 497 ms → **56 ms** (8.9x) |
-| fd 10.3.0 | 630 ms → **109 ms** (5.8x) | 1.27 s → **58 ms** (22x) | 490 ms → **52 ms** (9.4x) |
-| bat 0.26.0 | - | 1.62 s → **56 ms** (29x) | 490 ms → **49 ms** (10x) |
-| hyperfine 1.19.0 | - | 753 ms → **38 ms** (20x) | 370 ms → **34 ms** (11x) |
-| just 1.43.0 | - | 1.51 s → **43 ms** (35x) | 697 ms → **40 ms** (17x) |
-| axum 0.8.6 | - | 803 ms → **51 ms** (16x) | 418 ms → **50 ms** (8.4x) |
-| nushell 0.108.0 | 1.81 s → **454 ms** (4.0x) | 7.20 s → **323 ms** (22x) | 1.23 s → **262 ms** (4.7x) |
-| helix 25.07.1 | - | 6.84 s → **82 ms** (83x) | 2.12 s → **79 ms** (27x) |
-| bevy 0.20.0 | - | 22.81 s → **884 ms** (26x) | 3.09 s → **914 ms** (3.4x) |
+| ripgrep 15.1.0 | 993 ms → **126 ms** (7.9x) | 1.18 s → **62 ms** (19x) | 508 ms → **56 ms** (9.1x) |
+| fd 10.3.0 | 630 ms → **109 ms** (5.8x) | 1.27 s → **58 ms** (22x) | 494 ms → **53 ms** (9.3x) |
+| bat 0.26.0 | - | 1.62 s → **56 ms** (29x) | 502 ms → **49 ms** (10x) |
+| hyperfine 1.19.0 | - | 753 ms → **38 ms** (20x) | 385 ms → **35 ms** (11x) |
+| just 1.43.0 | - | 1.51 s → **43 ms** (35x) | 707 ms → **41 ms** (17x) |
+| axum 0.8.6 | - | 803 ms → **51 ms** (16x) | 427 ms → **42 ms** (10x) |
+| nushell 0.108.0 | 1.81 s → **454 ms** (4.0x) | 7.20 s → **323 ms** (22x) | 1.25 s → **236 ms** (5.3x) |
+| helix 25.07.1 | - | 6.84 s → **82 ms** (83x) | 2.15 s → **116 ms** (19x) |
+| bevy 0.20.0 | - | 22.81 s → **884 ms** (26x) | 3.20 s → **874 ms** (3.7x) |
+| biome @biomejs/biome@2.6.3 | - | - | 2.12 s → **2.38 s** (0.9x) |
 | bun 1.4.3 | 7.55 s → **362 ms** (21x) | 10.63 s → **486 ms** (22x) | 9.11 s → **451 ms** (20x) |
 
 - **macOS arm64**: MacBook Pro (Mac17,6), macOS 27.0.1, with other work running (Apple M5 Max, 18 cores, 128 GiB), ra-jit [`84760c3f51`](https://github.com/indexable-inc/ra-jit/commit/84760c3f517a76f6e8a3aa41ccd81fc3f26b87c7) on 2026-10-21, median of 3 edits, load average 48 at the start, by hand.
 - **Linux aarch64**: AWS c8g.16xlarge, pinned to 16 cores with taskset (Neoverse-V2, 16 of its 64 cores, 124 GiB), ra-jit [`c93e530e47`](https://github.com/indexable-inc/ra-jit/commit/c93e530e474c4de2d67a7a9ec49fd5581894efb8) on 2026-10-23, median of 5 edits, by hand.
-- **Linux x86-64**: AWS c8a.metal-24xl (dev-aws-3), pinned to 16 cores with taskset (AMD EPYC 9R45, 16 of its 96 cores, 188 GiB), ra-jit [`42cb85270f`](https://github.com/indexable-inc/ra-jit/commit/42cb85270f3822819deed0d8788b6f1180b4137a) on 2026-10-24, median of 5 edits, by hand.
+- **Linux x86-64**: AWS c8a.metal-24xl (dev-aws-3), pinned to 16 cores with taskset (AMD EPYC 9R45, 16 of its 96 cores, 188 GiB), ra-jit [`1a005421b7`](https://github.com/indexable-inc/ra-jit/commit/1a005421b7a47fa3968bc5de6645e25a50dfd855) on 2026-10-25, median of 5 edits, by hand.
 - **bun** is measured on its own, by the `bench-bun` workflow: macOS arm64 on one machine (Apple M5 Max, 18 cores, 128 GiB), ra-jit [`27077156cc`](https://github.com/indexable-inc/ra-jit/commit/27077156ccbd476079d261e529fc25b3225f0ace) on 2026-10-23, median of 3 edits, by hand; Linux aarch64 on AWS c8g.24xlarge (dev-aws-eph-rajit-arm64bun), pinned to 16 cores with taskset (Neoverse-V2, 16 of its 96 cores, 185 GiB), ra-jit [`ac1ee2dd68`](https://github.com/indexable-inc/ra-jit/commit/ac1ee2dd682b7d321ba75a67924aaf95609572f0) on 2026-10-23, median of 3 edits, by hand; Linux x86-64 on AWS c8a.24xlarge (dev-aws-eph-rajit-x86edits), pinned to 16 cores with taskset (AMD EPYC 9R45, 16 of its 96 cores, 185 GiB), ra-jit [`961bb3105a`](https://github.com/indexable-inc/ra-jit/commit/961bb3105a8e90e0ac33488c803f5513f075bb87) on 2026-10-23, median of 3 edits, load average 12 at the start, by hand. It is the Rust port of [bun](https://github.com/oven-sh/bun), 1.25M lines of Rust in 103 crates on a nightly beside a JavaScript engine's C and C++, built with frame pointers as bun's own build is (`-C force-frame-pointers=yes`; [what it took](docs/research/bun.md)). Its test suites are not measured yet.
 
 <details><summary>Every kind of edit, by platform</summary>
@@ -269,26 +272,29 @@ An edit to one function, cargo → ra-jit:
 
 | Project | Edit a function | Edit a widely used function | Change a signature | Nothing changed |
 |---|---:|---:|---:|---:|
-| ripgrep 15.1.0 | 497 ms → **56 ms** (8.9x) | 758 ms → **50 ms** (15x) | 611 ms → **88 ms** (6.9x) | 22 ms → **16 ms** (1.4x) |
-| fd 10.3.0 | 490 ms → **52 ms** (9.4x) | 465 ms → **35 ms** (13x) | 505 ms → **56 ms** (9.0x) | 31 ms → **15 ms** (2.1x) |
-| bat 0.26.0 | 490 ms → **49 ms** (10x) | 723 ms → **48 ms** (15x) | 689 ms → **50 ms** (14x) | 59 ms → **15 ms** (3.9x) |
-| hyperfine 1.19.0 | 370 ms → **34 ms** (11x) | 404 ms → **49 ms** (8.2x) | 418 ms → **75 ms** (5.6x) | 41 ms → **15 ms** (2.7x) |
-| just 1.43.0 | 697 ms → **40 ms** (17x) | 712 ms → **62 ms** (11x) | 706 ms → **74 ms** (9.5x) | 40 ms → **15 ms** (2.7x) |
-| axum 0.8.6 | 418 ms → **50 ms** (8.4x) | 864 ms → **44 ms** (20x) |  | 72 ms → **16 ms** (4.5x) |
-| nushell 0.108.0 | 1.23 s → **262 ms** (4.7x) | 4.74 s → **271 ms** (17x) | 4.77 s → **350 ms** (14x) | 171 ms → **18 ms** (9.5x) |
-| helix 25.07.1 | 2.12 s → **79 ms** (27x) | 3.25 s → **116 ms** (28x) | 2.75 s → **275 ms** (10.0x) | 81 ms → **16 ms** (5.1x) |
-| bevy 0.20.0 | 3.09 s → **914 ms** (3.4x) | 11.53 s → **726 ms** (16x) |  | 178 ms → **19 ms** (9.4x) |
+| ripgrep 15.1.0 | 508 ms → **56 ms** (9.1x) | 781 ms → **53 ms** (15x) | 625 ms → **88 ms** (7.1x) | 22 ms → **16 ms** (1.4x) |
+| fd 10.3.0 | 494 ms → **53 ms** (9.3x) | 459 ms → **33 ms** (14x) | 498 ms → **57 ms** (8.7x) | 33 ms → **15 ms** (2.2x) |
+| bat 0.26.0 | 502 ms → **49 ms** (10x) | 730 ms → **49 ms** (15x) | 689 ms → **51 ms** (14x) | 60 ms → **15 ms** (4.0x) |
+| hyperfine 1.19.0 | 385 ms → **35 ms** (11x) | 417 ms → **52 ms** (8.0x) | 423 ms → **76 ms** (5.6x) | 41 ms → **15 ms** (2.7x) |
+| just 1.43.0 | 707 ms → **41 ms** (17x) | 729 ms → **60 ms** (12x) | 711 ms → **71 ms** (10x) | 41 ms → **15 ms** (2.7x) |
+| axum 0.8.6 | 427 ms → **42 ms** (10x) | 865 ms → **35 ms** (25x) |  | 74 ms → **16 ms** (4.6x) |
+| nushell 0.108.0 | 1.25 s → **236 ms** (5.3x) | 4.75 s → **200 ms** (24x) | 4.83 s → **278 ms** (17x) | 180 ms → **18 ms** (10x) |
+| helix 25.07.1 | 2.15 s → **116 ms** (19x) | 3.29 s → **67 ms** (49x) | 2.80 s → **217 ms** (13x) | 83 ms → **16 ms** (5.2x) |
+| bevy 0.20.0 | 3.20 s → **874 ms** (3.7x) | 11.60 s → **699 ms** (17x) |  | 183 ms → **19 ms** (9.6x) |
+| biome @biomejs/biome@2.6.3 | 2.12 s → **2.38 s** (0.9x) | 9.86 s → **381 ms** (26x) | 8.06 s → **108.75 s** (c) (0.1x) | 205 ms → **32 ms** (6.4x) |
 | bun 1.4.3 | 9.11 s → **451 ms** (20x) | 16.51 s → **430 ms** (38x) | 9.22 s → **556 ms** (17x) | 72 ms → **18 ms** (4.0x) |
 
 </details>
+
+(c): the daemon handed this edit to cargo (a fallback, so about cargo's time).
 
 Measured by hand with `harness/bench.py`, or by the `bench-readme` workflow (a project measured on its own, by its own workflow) on each platform's benchmark machine once it is registered. The ra-jit measured is `cargo build --release`; the binaries a release ships are the `dist` profile with PGO, which start and edit faster ([how](https://github.com/indexable-inc/ra-jit/blob/main/docs/reports/RELEASE-BUILD.md)). Cold builds, the spread of every number, the LLVM tier and how fast the built programs run: [docs/benchmarks.md](docs/benchmarks.md). Raw JSON: [macOS arm64](docs/benchmarks/macos-arm64.json), [Linux aarch64](docs/benchmarks/linux-aarch64.json), [Linux x86-64](docs/benchmarks/linux-x86-64.json); bun: [macOS arm64](docs/benchmarks/bun-macos-arm64.json), [Linux aarch64](docs/benchmarks/bun-linux-aarch64.json), [Linux x86-64](docs/benchmarks/bun-linux-x86-64.json).
 <!-- bench:end -->
 
 <!-- benchmem:start -->
-<picture><source media="(prefers-color-scheme: dark)" srcset="docs/benchmarks/charts/memory-dark.svg"><img alt="Peak memory while an edit to one function builds, ra-jit against cargo, by platform: All projects (geometric mean): macOS arm64 12× more, Linux aarch64 3.9× more, Linux x86-64 3.5× more; ripgrep 15.1.0: macOS arm64 12× more · 2.9 GB vs cargo's 235 MB, Linux aarch64 3.6× more · 1.7 GB vs cargo's 464 MB, Linux x86-64 3.4× more · 1.8 GB vs cargo's 529 MB; fd 10.3.0: macOS arm64 12× more · 2.6 GB vs cargo's 212 MB, Linux aarch64 2.9× more · 1.5 GB vs cargo's 520 MB, Linux x86-64 2.6× more · 1.6 GB vs cargo's 606 MB; bat 0.26.0: Linux aarch64 2.9× more · 2.0 GB vs cargo's 672 MB, Linux x86-64 2.6× more · 2.0 GB vs cargo's 751 MB; hyperfine 1.19.0: Linux aarch64 4.9× more · 1.8 GB vs cargo's 361 MB, Linux x86-64 4.0× more · 1.7 GB vs cargo's 425 MB; just 1.43.0: Linux aarch64 4.7× more · 2.1 GB vs cargo's 434 MB, Linux x86-64 3.6× more · 1.9 GB vs cargo's 538 MB; axum 0.8.6: Linux aarch64 4.8× more · 1.9 GB vs cargo's 399 MB, Linux x86-64 4.0× more · 1.9 GB vs cargo's 466 MB; nushell 0.108.0: macOS arm64 12× more · 12.5 GB vs cargo's 1.1 GB, Linux aarch64 3.2× more · 7.6 GB vs cargo's 2.4 GB, Linux x86-64 2.7× more · 7.2 GB vs cargo's 2.7 GB; helix 25.07.1: Linux aarch64 3.7× more · 6.6 GB vs cargo's 1.8 GB, Linux x86-64 2.9× more · 6.0 GB vs cargo's 2.1 GB; bevy 0.20.0: Linux aarch64 2.6× more · 17.8 GB vs cargo's 6.7 GB, Linux x86-64 3.3× more · 28.2 GB vs cargo's 8.5 GB; bun 1.4.3: macOS arm64 12× more · 26.1 GB vs cargo's 2.1 GB, Linux aarch64 7.9× more · 27.7 GB vs cargo's 3.5 GB, Linux x86-64 7.4× more · 24.5 GB vs cargo's 3.3 GB" src="docs/benchmarks/charts/memory-light.svg" width="760"></picture>
+<picture><source media="(prefers-color-scheme: dark)" srcset="docs/benchmarks/charts/memory-dark.svg"><img alt="Peak memory while an edit to one function builds, ra-jit against cargo, by platform: All projects (geometric mean): macOS arm64 12× more, Linux aarch64 3.9× more, Linux x86-64 3.2× more; ripgrep 15.1.0: macOS arm64 12× more · 2.9 GB vs cargo's 235 MB, Linux aarch64 3.6× more · 1.7 GB vs cargo's 464 MB, Linux x86-64 3.1× more · 1.7 GB vs cargo's 528 MB; fd 10.3.0: macOS arm64 12× more · 2.6 GB vs cargo's 212 MB, Linux aarch64 2.9× more · 1.5 GB vs cargo's 520 MB, Linux x86-64 2.4× more · 1.5 GB vs cargo's 605 MB; bat 0.26.0: Linux aarch64 2.9× more · 2.0 GB vs cargo's 672 MB, Linux x86-64 2.7× more · 2.0 GB vs cargo's 747 MB; hyperfine 1.19.0: Linux aarch64 4.9× more · 1.8 GB vs cargo's 361 MB, Linux x86-64 3.0× more · 1.6 GB vs cargo's 534 MB; just 1.43.0: Linux aarch64 4.7× more · 2.1 GB vs cargo's 434 MB, Linux x86-64 3.6× more · 1.9 GB vs cargo's 535 MB; axum 0.8.6: Linux aarch64 4.8× more · 1.9 GB vs cargo's 399 MB, Linux x86-64 3.5× more · 1.9 GB vs cargo's 534 MB; nushell 0.108.0: macOS arm64 12× more · 12.5 GB vs cargo's 1.1 GB, Linux aarch64 3.2× more · 7.6 GB vs cargo's 2.4 GB, Linux x86-64 2.7× more · 7.2 GB vs cargo's 2.7 GB; helix 25.07.1: Linux aarch64 3.7× more · 6.6 GB vs cargo's 1.8 GB, Linux x86-64 2.7× more · 5.8 GB vs cargo's 2.1 GB; bevy 0.20.0: Linux aarch64 2.6× more · 17.8 GB vs cargo's 6.7 GB, Linux x86-64 3.4× more · 28.9 GB vs cargo's 8.5 GB; biome @biomejs/biome@2.6.3: Linux x86-64 2.5× more · 7.6 GB vs cargo's 3.0 GB; bun 1.4.3: macOS arm64 12× more · 26.1 GB vs cargo's 2.1 GB, Linux aarch64 7.9× more · 27.7 GB vs cargo's 3.5 GB, Linux x86-64 7.4× more · 24.5 GB vs cargo's 3.3 GB" src="docs/benchmarks/charts/memory-light.svg" width="760"></picture>
 
-<picture><source media="(prefers-color-scheme: dark)" srcset="docs/benchmarks/charts/disk-dark.svg"><img alt="What a project's build keeps on disk, ra-jit against cargo, by platform: All projects (geometric mean): macOS arm64 1.5× more, Linux aarch64 1.2× more, Linux x86-64 1.8× more; ripgrep 15.1.0: macOS arm64 1.4× more · 598 MB vs cargo's 416 MB, Linux aarch64 1.3× more · 518 MB vs cargo's 404 MB, Linux x86-64 2.0× more · 815 MB vs cargo's 407 MB; fd 10.3.0: macOS arm64 1.3× more · 460 MB vs cargo's 355 MB, Linux aarch64 1.2× more · 801 MB vs cargo's 678 MB, Linux x86-64 1.8× more · 1.0 GB vs cargo's 571 MB; bat 0.26.0: Linux aarch64 1.2× more · 1.2 GB vs cargo's 980 MB, Linux x86-64 2.0× more · 2.0 GB vs cargo's 973 MB; hyperfine 1.19.0: Linux aarch64 1.3× more · 432 MB vs cargo's 340 MB, Linux x86-64 3.2× more · 1.1 GB vs cargo's 342 MB; just 1.43.0: Linux aarch64 1.2× more · 784 MB vs cargo's 664 MB, Linux x86-64 2.2× more · 1.5 GB vs cargo's 667 MB; axum 0.8.6: Linux aarch64 1.1× more · 454 MB vs cargo's 405 MB, Linux x86-64 2.0× more · 825 MB vs cargo's 404 MB; nushell 0.108.0: macOS arm64 1.3× more · 6.9 GB vs cargo's 5.3 GB, Linux aarch64 1.0× · 5.6 GB vs cargo's 5.3 GB, Linux x86-64 1.4× more · 7.6 GB vs cargo's 5.3 GB; helix 25.07.1: Linux aarch64 1.3× more · 4.6 GB vs cargo's 3.7 GB, Linux x86-64 1.6× more · 6.0 GB vs cargo's 3.7 GB; bevy 0.20.0: Linux aarch64 1.1× less · 16.0 GB vs cargo's 17.5 GB, Linux x86-64 1.1× more · 19.2 GB vs cargo's 17.5 GB; bun 1.4.3: macOS arm64 1.9× more · 11.3 GB vs cargo's 6.0 GB, Linux aarch64 1.2× more · 6.7 GB vs cargo's 5.6 GB, Linux x86-64 1.2× more · 6.7 GB vs cargo's 5.7 GB" src="docs/benchmarks/charts/disk-light.svg" width="760"></picture>
+<picture><source media="(prefers-color-scheme: dark)" srcset="docs/benchmarks/charts/disk-dark.svg"><img alt="What a project's build keeps on disk, ra-jit against cargo, by platform: All projects (geometric mean): macOS arm64 1.5× more, Linux aarch64 1.2× more, Linux x86-64 2.0× more; ripgrep 15.1.0: macOS arm64 1.4× more · 598 MB vs cargo's 416 MB, Linux aarch64 1.3× more · 518 MB vs cargo's 404 MB, Linux x86-64 2.1× more · 852 MB vs cargo's 407 MB; fd 10.3.0: macOS arm64 1.3× more · 460 MB vs cargo's 355 MB, Linux aarch64 1.2× more · 801 MB vs cargo's 678 MB, Linux x86-64 2.3× more · 1.3 GB vs cargo's 571 MB; bat 0.26.0: Linux aarch64 1.2× more · 1.2 GB vs cargo's 980 MB, Linux x86-64 2.1× more · 2.0 GB vs cargo's 973 MB; hyperfine 1.19.0: Linux aarch64 1.3× more · 432 MB vs cargo's 340 MB, Linux x86-64 3.4× more · 1.2 GB vs cargo's 342 MB; just 1.43.0: Linux aarch64 1.2× more · 784 MB vs cargo's 664 MB, Linux x86-64 2.3× more · 1.5 GB vs cargo's 667 MB; axum 0.8.6: Linux aarch64 1.1× more · 454 MB vs cargo's 405 MB, Linux x86-64 2.0× more · 825 MB vs cargo's 404 MB; nushell 0.108.0: macOS arm64 1.3× more · 6.9 GB vs cargo's 5.3 GB, Linux aarch64 1.0× · 5.6 GB vs cargo's 5.3 GB, Linux x86-64 1.5× more · 7.8 GB vs cargo's 5.3 GB; helix 25.07.1: Linux aarch64 1.3× more · 4.6 GB vs cargo's 3.7 GB, Linux x86-64 1.6× more · 5.8 GB vs cargo's 3.7 GB; bevy 0.20.0: Linux aarch64 1.1× less · 16.0 GB vs cargo's 17.5 GB, Linux x86-64 1.1× more · 19.2 GB vs cargo's 17.5 GB; biome @biomejs/biome@2.6.3: Linux x86-64 3.9× more · 42.5 GB vs cargo's 11.0 GB; bun 1.4.3: macOS arm64 1.9× more · 11.3 GB vs cargo's 6.0 GB, Linux aarch64 1.2× more · 6.7 GB vs cargo's 5.6 GB, Linux x86-64 1.2× more · 6.7 GB vs cargo's 5.7 GB" src="docs/benchmarks/charts/disk-light.svg" width="760"></picture>
 
 Memory and disk, Cranelift, from the same runs as the build table. Peak: the most every process doing the work held at once, cargo → ra-jit. For ra-jit that is the daemon, its workers and what they run, and `cargo ra-jit build` with any cargo it ran; for plain cargo, cargo itself, rustc, build scripts and the linker. How it is measured: [docs/benchmarks.md](docs/benchmarks.md#memory-and-disk).
 
@@ -296,15 +302,16 @@ Peak while an edit to one function builds, cargo → ra-jit:
 
 | Project | macOS arm64 | Linux aarch64 | Linux x86-64 |
 |---|---:|---:|---:|
-| ripgrep 15.1.0 | 235 MB → **2.9 GB** | 464 MB → **1.7 GB** | 529 MB → **1.8 GB** |
-| fd 10.3.0 | 212 MB → **2.6 GB** | 520 MB → **1.5 GB** | 606 MB → **1.6 GB** |
-| bat 0.26.0 | - | 672 MB → **2.0 GB** | 751 MB → **2.0 GB** |
-| hyperfine 1.19.0 | - | 361 MB → **1.8 GB** | 425 MB → **1.7 GB** |
-| just 1.43.0 | - | 434 MB → **2.1 GB** | 538 MB → **1.9 GB** |
-| axum 0.8.6 | - | 399 MB → **1.9 GB** | 466 MB → **1.9 GB** |
+| ripgrep 15.1.0 | 235 MB → **2.9 GB** | 464 MB → **1.7 GB** | 528 MB → **1.7 GB** |
+| fd 10.3.0 | 212 MB → **2.6 GB** | 520 MB → **1.5 GB** | 605 MB → **1.5 GB** |
+| bat 0.26.0 | - | 672 MB → **2.0 GB** | 747 MB → **2.0 GB** |
+| hyperfine 1.19.0 | - | 361 MB → **1.8 GB** | 534 MB → **1.6 GB** |
+| just 1.43.0 | - | 434 MB → **2.1 GB** | 535 MB → **1.9 GB** |
+| axum 0.8.6 | - | 399 MB → **1.9 GB** | 534 MB → **1.9 GB** |
 | nushell 0.108.0 | 1.1 GB → **12.5 GB** | 2.4 GB → **7.6 GB** | 2.7 GB → **7.2 GB** |
-| helix 25.07.1 | - | 1.8 GB → **6.6 GB** | 2.1 GB → **6.0 GB** |
-| bevy 0.20.0 | - | 6.7 GB → **17.8 GB** | 8.5 GB → **28.2 GB** |
+| helix 25.07.1 | - | 1.8 GB → **6.6 GB** | 2.1 GB → **5.8 GB** |
+| bevy 0.20.0 | - | 6.7 GB → **17.8 GB** | 8.5 GB → **28.9 GB** |
+| biome @biomejs/biome@2.6.3 | - | - | 3.0 GB → **7.6 GB** |
 | bun 1.4.3 | 2.1 GB → **26.1 GB** | 3.5 GB → **27.7 GB** | 3.3 GB → **24.5 GB** |
 
 <details><summary>The daemon between edits, cold builds and disk, by platform</summary>
@@ -337,15 +344,16 @@ Peak while an edit to one function builds, cargo → ra-jit:
 
 | Project | Edit a function, peak | Daemon between edits | Cold until ready, peak | On disk |
 |---|---:|---:|---:|---:|
-| ripgrep 15.1.0 | 529 MB → **1.8 GB** | 1.6 GB ready, 1.7 GB after 65 builds | 2.4 GB → **4.6 GB** | 407 MB → 815 MB |
-| fd 10.3.0 | 606 MB → **1.6 GB** | 1.6 GB ready, 1.5 GB after 55 builds | 2.7 GB → **5.2 GB** | 571 MB → 1.0 GB |
-| bat 0.26.0 | 751 MB → **2.0 GB** | 1.9 GB ready, 2.0 GB after 55 builds | 3.8 GB → **7.9 GB** | 973 MB → 2.0 GB |
-| hyperfine 1.19.0 | 425 MB → **1.7 GB** | 1.9 GB ready, 1.6 GB after 55 builds | 2.6 GB → **9.8 GB** | 342 MB → 1.1 GB |
-| just 1.43.0 | 538 MB → **1.9 GB** | 1.8 GB ready, 1.9 GB after 55 builds | 3.4 GB → **8.7 GB** | 667 MB → 1.5 GB |
-| axum 0.8.6 | 466 MB → **1.9 GB** | 2.0 GB ready, 1.9 GB after 35 builds | 2.5 GB → **5.6 GB** | 404 MB → 825 MB |
-| nushell 0.108.0 | 2.7 GB → **7.2 GB** | 5.3 GB ready, 7.2 GB after 65 builds | 4.7 GB → **8.8 GB** | 5.3 GB → 7.6 GB |
-| helix 25.07.1 | 2.1 GB → **6.0 GB** | 3.9 GB ready, 5.9 GB after 55 builds | 3.9 GB → **8.7 GB** | 3.7 GB → 6.0 GB |
-| bevy 0.20.0 | 8.5 GB → **28.2 GB** | 8.4 GB ready, 15.2 GB after 35 builds | 8.5 GB → **9.6 GB** | 17.5 GB → 19.2 GB |
+| ripgrep 15.1.0 | 528 MB → **1.7 GB** | 1.6 GB ready, 1.6 GB after 65 builds | 2.4 GB → **5.2 GB** | 407 MB → 852 MB |
+| fd 10.3.0 | 605 MB → **1.5 GB** | 1.6 GB ready, 1.4 GB after 55 builds | 2.6 GB → **6.1 GB** | 571 MB → 1.3 GB |
+| bat 0.26.0 | 747 MB → **2.0 GB** | 1.9 GB ready, 2.0 GB after 55 builds | 3.7 GB → **7.9 GB** | 973 MB → 2.0 GB |
+| hyperfine 1.19.0 | 534 MB → **1.6 GB** | 1.8 GB ready, 1.5 GB after 55 builds | 2.6 GB → **9.6 GB** | 342 MB → 1.2 GB |
+| just 1.43.0 | 535 MB → **1.9 GB** | 1.8 GB ready, 1.9 GB after 55 builds | 3.5 GB → **8.6 GB** | 667 MB → 1.5 GB |
+| axum 0.8.6 | 534 MB → **1.9 GB** | 2.0 GB ready, 1.8 GB after 35 builds | 2.5 GB → **5.8 GB** | 404 MB → 825 MB |
+| nushell 0.108.0 | 2.7 GB → **7.2 GB** | 5.2 GB ready, 7.1 GB after 65 builds | 4.8 GB → **9.1 GB** | 5.3 GB → 7.8 GB |
+| helix 25.07.1 | 2.1 GB → **5.8 GB** | 4.2 GB ready, 5.7 GB after 55 builds | 3.8 GB → **8.4 GB** | 3.7 GB → 5.8 GB |
+| bevy 0.20.0 | 8.5 GB → **28.9 GB** | 8.2 GB ready, 15.2 GB after 35 builds | 8.5 GB → **9.7 GB** | 17.5 GB → 19.2 GB |
+| biome @biomejs/biome@2.6.3 | 3.0 GB → **7.6 GB** | 6.9 GB ready, 19.3 GB after 57 builds | 8.6 GB → **9.6 GB** | 11.0 GB → 42.5 GB |
 | bun 1.4.3 | 3.3 GB → **24.5 GB** | 10.5 GB ready, 24.5 GB after 33 builds | 4.5 GB → **14.1 GB** | 5.7 GB → 6.7 GB |
 
 On disk: cargo's target directory → ra-jit's target directory, store and home.

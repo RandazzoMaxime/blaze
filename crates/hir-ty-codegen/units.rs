@@ -300,7 +300,7 @@ impl<'a, 'db> ObjectCodegen<'a, 'db> {
         let mut wave = Vec::new();
         tried.add(self.symbols, Found { instances, roots: roots.to_vec() }, &mut wave);
         let threads = std::thread::available_parallelism().map_or(1, |it| it.get());
-        let told = self.debug.is_some().then(|| self.told.clone());
+        let told = self.tells_variables().then(|| self.told.clone());
         let entries = self.entries.as_deref();
         let ctx = Context {
             stored: &self.stored_roots,
