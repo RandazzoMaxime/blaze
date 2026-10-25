@@ -1,5 +1,5 @@
-//! `cargo ra-jit build|run|test|check`: cargo's commands, with the daemon building what
-//! changed since cargo last built. `CARGO.md` at the root of the repository is the design.
+//! `cargo blaze build|run|test|check`: cargo's commands, with the daemon building what
+//! changed since cargo last built. `docs/cargo.md` is the design.
 
 pub(crate) mod daemon;
 pub(crate) mod wrapper;
@@ -72,20 +72,21 @@ pub(crate) fn command(args: impl Iterator<Item = String>) -> anyhow::Result<()> 
 }
 
 const HELP: &str = "\
-cargo ra-jit: builds with the ra-jit daemon, with cargo's flags
+cargo blaze: cargo's build, run, test and check, from a daemon that keeps the workspace compiled
 
-usage: cargo ra-jit <command> [cargo's flags]
+usage: cargo blaze <command> [cargo's flags]
 
   build, run, test   by the daemon when it has the workspace loaded, by cargo otherwise
   check              what the daemon's build of the same flags says, when it has one loaded;
                      otherwise what the daemon finds loading the workspace as it, with no rustc
-  status             whether ra-jit is enabled, what the daemon has loaded, what fell back
+  status             whether blaze is enabled, what the daemon has loaded, what fell back
   stop               ends the daemon; the next build starts one
-  enable, disable    plain `cargo build|run|test|check` through ra-jit, and back
+  enable, disable    plain `cargo build|run|test|check` through blaze, and back
   cache              what the `#[ra_jit::cache]` functions kept, by function
   cache clear        forgets it; `--stale`, all but what each function's code computed
 
-Any other command is cargo's own. CARGO.md is the guide.";
+The daemon starts on the first build and stops after 30 minutes without one. Any other
+command is cargo's own. The guide: https://github.com/indexable-inc/blaze/blob/main/docs/cargo.md";
 
 /// What a wrapper runs ra-jit with once rustc has linked a program under plain cargo.
 pub(super) const SETTLE: &str = "settle";

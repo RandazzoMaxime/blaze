@@ -6614,22 +6614,23 @@ fn input_line() -> Option<String> {
 }
 
 const HELP: &str = "\
-ra-jit: a daemon that keeps Rust workspaces compiled and builds edits from memory
+blaze's engine: a daemon that keeps Rust workspaces compiled and builds edits from memory.
+`cargo blaze <command>` is what to run; this program is what it runs.
 
 usage: ra-jit <command>
 
-  enable            plain `cargo build|run|test|check` go through ra-jit from now on
+  enable            plain `cargo build|run|test|check` go through blaze from now on
   disable           cargo's configuration is put back as it was
-  status            whether ra-jit is enabled, what the daemon has loaded, what fell back
+  status            whether blaze is enabled, what the daemon has loaded, what fell back
   stop              ends the daemon; the next build starts one
-  cargo <command>   what `cargo ra-jit <command>` runs: build, run, test, check
+  cargo <command>   what `cargo blaze <command>` runs: build, run, test, check
   cache <verb>      the disk store: stats, gc, verify, push, pull, keygen
-                    (`cargo ra-jit cache clear` forgets what `#[ra_jit::cache]` kept)
+                    (`cargo blaze cache clear` forgets what `#[ra_jit::cache]` kept)
   mir <dir> --crate <name> [--level 0|1|2] [--time]
-                    a crate's MIR as ra-jit compiles it, written as rustc's -Zunpretty=mir
+                    a crate's MIR as blaze compiles it, written as rustc's -Zunpretty=mir
   --help, --version
 
-`cargo ra-jit build|run|test|check` takes cargo's flags. CARGO.md is the guide.";
+`cargo blaze build|run|test|check` takes cargo's flags. The guide: https://github.com/indexable-inc/blaze/blob/main/docs/cargo.md";
 
 /// Has a command that prints for a reader end quietly when the reader stops reading,
 /// instead of failing on the closed pipe. Not for a process that writes to sockets.
@@ -6641,13 +6642,26 @@ pub(crate) fn end_with_reader() {
     }
 }
 
-/// `ra-jit 0.1.0 (abc123def456)`: the crate's version, and the commit when the build was
+/// Takes each `BLAZE_<NAME>` for the `RA_JIT_<NAME>` the code reads, over it when both are
+/// set: the settings are named for blaze from its rename on, and keep their old names too.
+/// The programs this one starts see both.
+fn take_blaze_names() {
+    for (name, value) in std::env::vars_os() {
+        let Some(rest) = name.to_str().and_then(|it| it.strip_prefix("BLAZE_")) else {
+            continue;
+        };
+        // SAFETY: before any thread is started.
+        unsafe { std::env::set_var(format!("RA_JIT_{rest}"), value) };
+    }
+}
+
+/// `blaze 0.1.0 (abc123def456)`: the crate's version, and the commit when the build was
 /// told it in `RA_JIT_GIT_SHA` (the release workflow and the flake set it).
 pub(crate) fn version() -> String {
     let version = env!("CARGO_PKG_VERSION");
     match option_env!("RA_JIT_GIT_SHA") {
-        Some(sha) if !sha.is_empty() => format!("ra-jit {version} ({sha})"),
-        _ => format!("ra-jit {version}"),
+        Some(sha) if !sha.is_empty() => format!("blaze {version} ({sha})"),
+        _ => format!("blaze {version}"),
     }
 }
 
@@ -6657,6 +6671,7 @@ fn main() -> anyhow::Result<()> {
         sandbox::command(std::env::args_os().skip(2));
     }
     trace::began();
+    take_blaze_names();
     syntax::set_green_trees(std::env::var_os("RA_JIT_GREEN_TREES").is_some());
     project_model::answer_toolchain_questions_with(answers::ask);
     let stands_in_for_rustc = std::env::var_os("RA_JIT_WRAPS_RUSTC").is_some();
