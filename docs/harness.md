@@ -89,7 +89,7 @@ with reasons. The daemon's log says `backend: llvm -O2 fast emit` when LLVM is i
 | `bintest.py <name>` | A real program from `breakers/bins.json`: the same command lines given to cargo's binary and ra-jit's |
 | `alone.py` | A program whose workspace crates rustc compiles nothing of, so no refused function can hide behind rustc's copy |
 | `allrajit.py [whole] [unit] [stored]` | Programs with nothing rustc built in them, the standard library compiled by ra-jit ([no-rustc.md](no-rustc.md), steps F and G): a hello and one of collections, panics, threads and channels, each built with the library in the same build, over the library built alone (`--prebuilt`), and on a store and a remote that start empty, where the first build compiles and keeps the library and the later ones, one on a second store, take it. Each has to print and exit as cargo's build does. Linux |
-| `macroserver.py` | The release's proc-macro server (`vendor/proc-macro-srv`) built by ra-jit, and the libraries ra-jit links of serde_derive, thiserror-impl, tokio-macros and clap_derive ([no-rustc.md](no-rustc.md), step J1): every call of a package's derives (with helper attributes), attributes and function-like macros is expanded by the toolchain's server with rustc's library and by ra-jit's with ra-jit's, and the outputs have to be equal, spans included. Needs crates.io. Linux |
+| `macroserver.py` | The release's proc-macro server (`vendor/proc-macro-srv`) built by ra-jit, and the libraries ra-jit links of serde_derive, thiserror-impl, tokio-macros and clap_derive ([no-rustc.md](no-rustc.md), step J1): every call of a package's derives (with helper attributes), attributes and function-like macros is expanded by the toolchain's server with rustc's library and by ra-jit's with ra-jit's, and the outputs have to be equal, spans included; the package is then built whole with its proc macros by rustc and by ra-jit. `macroserver.py <app>` (or `all`) builds a bench app (fd, bat, hyperfine, just, nushell, helix) whole with `RA_JIT_PROC_MACRO_SERVER`, so ra-jit links every proc macro, and again without, expanding every call by both servers; the counts, the calls not compared and why each proc macro was rustc's are printed, and both programs have to print the same. Needs crates.io. Linux |
 | `frozenwarm.py` | Frozen def maps (#40, #161) of a dependency whose items, and a `macro_rules!` it exports, are in files `include!` reads and the VFS does not load at first, as the icu `*_data` crates': built on one store cold, warm twice, warm with `RA_JIT_FROZEN=check` and `=verify`, and warm after an included file changed at the same path, which has its def map refused. Each has to print what cargo's build does. Linux |
 | `wholeprogram.py` | Programs ra-jit builds whole, with its own `main` (as `runbench.py` builds them): one on the default allocator, one with a `#[global_allocator]` of its own, one with a library's, one whose allocator is under a `#[cfg]` that is false. Each has to print and exit as cargo's build does; `--release` builds both in the release profile |
 | `bun_repros.py` | Nightly fixtures, one per thing bun's whole-program build found ra-jit doing wrong (`harness/bun-repros/`: `adt_const_params`, `core::mem::type_info`, macros, exported statics, frame pointers, …). Each compares output with cargo's binary and checks the report's refusals against the case's. A case can set its own `rustflags` and `env` (the frame-pointer case runs LLVM), and `alone` builds it as runbench builds bun, the link taking only ra-jit's objects. It uses `nightly-2026-09-15` and sets `RA_JIT_OTHER_TOOLCHAIN=1`. |
@@ -201,13 +201,13 @@ a first checkout on an empty store, a second on the store it filled, that daemon
 started, and once more, each followed by a body edit and its undoing; it keeps what each worker
 said in `WORK/said-STEP.txt` and exits 1 when a program's output is not cargo's
 ([research/warm-start.md](research/warm-start.md)). Their docstrings say how to run them.
-`bench.py` on real projects, with `benchreport.py`, is also what writes the README's build
-table: [benchmarks.md](benchmarks.md). Besides the edits `bench.py` times repeated cold builds
+`bench.py` on real projects, with `benchreport.py`, is also what writes the benchmark
+tables and the README's numbers: [benchmarks.md](benchmarks.md). Besides the edits `bench.py` times repeated cold builds
 against fresh cargo with an empty and with a warm store (`--cold-runs`), the same steps under
 the fastest cargo setups (`--setups`: mold, wild, `-Zthreads=8`, cg_clif and `cargo check`) and
 the test suites under both (`--tests`). `bench.py --runtime` runs `runbench.py`, which times
 programs ra-jit builds whole with LLVM against `cargo build --release`, and `benchreport.py`
-writes that result to the README's runtime table, refusing it when any program's output differs
+writes that result to the runtime table in benchmarks.md, refusing it when any program's output differs
 from cargo's. `abbench.py` runs two or more builds of ra-jit against each other on `bench.py`'s
 edits, in interleaved rounds: an edit's wall time, the daemon's own time and (macOS) its
 workers' cycles, the cold start, and the workers' peak memory. It is how the release build's
@@ -221,12 +221,12 @@ time with the exact peak of its largest process (`wait4`) and the peak of its wh
 (sampled), `memory.Sampler` follows a long-lived process such as the daemon with its workers,
 and `memory.in_child` measures a function that runs commands itself
 ([benchmarks.md](benchmarks.md#memory-and-disk)); a harness that reports memory uses it rather
-than a way of its own. Every README benchmark is a matrix over the platforms of
+than a way of its own. Every published benchmark is a matrix over the platforms of
 `benchplatforms.py` (macOS arm64, Linux aarch64, Linux x86-64): it names a result's platform from
 its host, files it as `docs/benchmarks/<platform>.json`, and gives the workflows the platforms
 whose runner is registered. `benchreport.py` writes each table from the newest stored result of
 every platform, so one that did not run keeps its last numbers. `benchcharts.py` draws the
-README's charts (SVG, a light and a dark version, a bar per platform) from the same results;
+benchmark charts (SVG, a light and a dark version, a bar per platform) from the same results;
 `benchreport.py` regenerates them whenever it writes a table, `--charts` on its own, and
 `--render` every table and chart.
 `live_latency.py` times live edits on macOS on AArch64, per keystroke under typing (`replay`,
@@ -388,7 +388,7 @@ out right, it fails the run until it is taken off the list:
   host (`{"linux": "why"}`).
 
 The other workflows: `bench-readme.yaml` measures real projects on each platform's dedicated
-benchmark machine and commits the README's numbers to main. It runs a platform only once the
+benchmark machine and commits the tables and the README's numbers to main. It runs a platform only once the
 repository variable `BENCH_RUNNERS` names it ([benchmarks.md](benchmarks.md#the-machines)). `bench.yaml` (the store's
 microbenchmarks, two minutes) runs on pull requests and pushes too. `claims.yaml` (all of
 rustc's `tests/ui`, both backends, and the scoreboard) and `nix-live.yaml` (the flake, the demo

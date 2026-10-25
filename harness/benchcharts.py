@@ -1,8 +1,8 @@
-"""benchcharts.py: the README's benchmark charts, as SVG, from the results benchreport.py writes.
+"""benchcharts.py: the benchmark charts of docs/benchmarks.md, as SVG, from the results benchreport.py writes.
 
-benchreport.py is the one caller: every time it writes a table into the README it writes the
+benchreport.py is the one caller: every time it writes a table it writes the
 chart of the same numbers next to it, so a chart is never older than its table. Each chart is
-two files, `NAME-light.svg` and `NAME-dark.svg` under docs/benchmarks/charts, which the README
+two files, `NAME-light.svg` and `NAME-dark.svg` under docs/benchmarks/charts, which the page
 shows with `<picture>` by the reader's colour scheme. Hand-written SVG, standard library only:
 nothing to pin, and a change of numbers is a readable diff. The two files of a chart differ only
 in their `<style>`, and the same numbers always give the same bytes.
@@ -26,7 +26,7 @@ is comparable with the bars of its own colour.
 
 The colours: a hue per platform, the same in every chart (blue, orange, teal: Okabe and Ito's
 palette, apart under the common colour blindnesses), each tuned for the page it is drawn on. The
-rest is GitHub's own greys, so a chart sits in the README like its tables do.
+rest is GitHub's own greys, so a chart sits on a GitHub page like its tables do.
 """
 import math, os
 
@@ -219,7 +219,7 @@ def compare(name, title, subtitle, rows, everything, words, same, hints, notes, 
 
 
 def picture(name, alt, prefix="docs/benchmarks/charts"):
-    """The README's markup for a chart: the dark file for a dark scheme, the light one otherwise."""
+    """The markup for a chart: the dark file for a dark scheme, the light one otherwise."""
     return (f'<picture><source media="(prefers-color-scheme: dark)" srcset="{prefix}/{name}-dark.svg">'
             f'<img alt="{esc(alt)}" src="{prefix}/{name}-light.svg" width="{WIDTH}"></picture>')
 

@@ -271,6 +271,8 @@ pub(crate) struct Linked {
     /// The symbols of the functions left out of the others, being private to an object
     /// whose crate calls them its own way, a line each.
     unkept: String,
+    /// What [`Linked::has_no_function_named`] found for each name, each a search of both.
+    unnamed: std::sync::Mutex<FxHashMap<String, bool>>,
 }
 
 impl Linked {
@@ -297,6 +299,7 @@ impl Linked {
             private: FxHashMap::default(),
             functions: String::new(),
             unkept: String::new(),
+            unnamed: Default::default(),
         };
         let mut local = Vec::new();
         for symbol in object.symbols().chain(object.dynamic_symbols()) {
@@ -357,6 +360,10 @@ impl Linked {
         if name.is_empty() || !name.is_ascii() {
             return false;
         }
+        let unnamed = || self.unnamed.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(&found) = unnamed().get(name) {
+            return found;
+        }
         // Both manglings write a name after its length; v0 puts a `_` between them when the
         // name starts with one or with a digit.
         let written = [format!("{}{name}", name.len()), format!("{}_{name}", name.len())];
@@ -365,7 +372,9 @@ impl Linked {
             finder.find(self.functions.as_bytes()).is_some()
                 || finder.find(self.unkept.as_bytes()).is_some()
         };
-        !written.iter().any(has)
+        let found = !written.iter().any(has);
+        unnamed().insert(name.to_owned(), found);
+        found
     }
 
     /// The copies of the instances of the generic function at `path`, each by its path, as
