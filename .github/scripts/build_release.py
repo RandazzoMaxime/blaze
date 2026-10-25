@@ -46,6 +46,11 @@ built whole by ra-jit (`--exe`), over the standard library ra-jit compiles, so i
 bridge of the libraries that ra-jit compiles; its own serde derives are expanded by the
 toolchain's server with rustc's libraries, as blaze's own executable may be built with rustc.
 Linux only, where ra-jit links proc-macro libraries so far.
+
+On Linux every binary in DIR, the server's included, is refused when it asks for a glibc newer
+than `GLIBC` (RHEL 9's; Debian 12 and Ubuntu 22.04 have newer): the release builds on the
+oldest hosted Ubuntu, and a binary linked on a newer system asks for that system's glibc
+(GitHub issue #351). install.sh says the same floor to a system below it.
 """
 
 import argparse
@@ -85,6 +90,10 @@ STALE = re.compile(r"function control flow change detected \(hash mismatch\)")
 # profile by its symbol, so a build whose hash is not the profile's finds next to nothing in it
 # (the crates that did not change below, none of the workspace's), and says nothing.
 CRATE = re.compile(rb"Cs([0-9A-Za-z]+)_6ra_jit")
+# The newest glibc a Linux binary of a release may ask for (install.sh's `glibc_floor`), and
+# how a binary names the versions it asks for (in its dynamic string table).
+GLIBC = (2, 34)
+GLIBC_VERSION = re.compile(rb"GLIBC_(\d+)\.(\d+)(?:\.\d+)?\x00")
 
 
 def run(argv, **kwargs):
@@ -275,6 +284,27 @@ def proc_macro_server(ra_jit, out):
     return exe
 
 
+def glibc_asked(binary):
+    """The newest glibc `binary` asks for, as (major, minor), or None for one that asks for none."""
+    found = {(int(major), int(minor)) for major, minor in GLIBC_VERSION.findall(binary.read_bytes())}
+    return max(found, default=None)
+
+
+def check_glibc(out):
+    """Refuses the build when a binary in `out` asks for a glibc newer than `GLIBC`."""
+    shown = ".".join(map(str, GLIBC))
+    newer = []
+    for binary in sorted(out.iterdir()):
+        if binary.is_file() and binary.read_bytes()[:4] == b"\x7fELF":
+            asked = glibc_asked(binary)
+            if asked and asked > GLIBC:
+                newer.append(f"{binary.name} asks for glibc {'.'.join(map(str, asked))}")
+    if newer:
+        sys.exit(f"error: build_release: {'; '.join(newer)}, newer than RHEL 9's {shown}, so it does not start "
+                 "there: build on Ubuntu 22.04, as the release does")
+    print(f"build_release: the binaries in {out} ask for glibc {shown} or older", flush=True)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     parser.add_argument("--target")
@@ -293,6 +323,8 @@ def main():
         parser.error("--target is required")
     if args.server and not args.out:
         parser.error("--server builds into --out")
+    # The server is built from its own directory, where a relative `--out` names nothing.
+    args.out = args.out and args.out.resolve()
     if args.train:
         return train(args.target, args.train)
     if args.show:
@@ -318,6 +350,8 @@ def main():
             shutil.copy2(binary, args.out / binary.name)
         if args.server:
             proc_macro_server(args.out / "ra-jit", args.out)
+        if "linux" in args.target:
+            check_glibc(args.out)
     shown = args.out or binaries[0].parent
     print(f"build_release: {', '.join(b.name for b in binaries)} in {shown}, with the profile trained at "
           f"{chosen['commit'][:10]}; {stale} functions changed since and are not optimized by it", flush=True)
