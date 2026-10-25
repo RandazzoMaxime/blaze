@@ -31,7 +31,7 @@ use super::{
 };
 
 /// What a compiled function or static was when the base took it in.
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 struct Mark {
     serial: u128,
     /// The source locations it reports, which stitching fills in.
@@ -74,11 +74,56 @@ impl Mark {
         Mark { lines: hasher.finish(), ..Mark::new(db, serial, &compiled.requests) }
     }
 
+    /// The mark of a root, `None` when it does not compile.
+    fn of_root(db: &dyn HirDatabase, root: FunctionId, debug: bool) -> Option<Mark> {
+        if debug {
+            return root_mark(db, root);
+        }
+        let compiled = compiled_root(db, root).as_ref().ok()?;
+        Some(Mark::of_function(db, root_serial(db, root), compiled, false))
+    }
+
+    /// The mark of an instance, `None` when it does not compile.
+    fn of_instance(
+        db: &dyn HirDatabase,
+        instance: &Instance,
+        env: &StoredParamEnvAndCrate,
+        debug: bool,
+    ) -> Option<Mark> {
+        if debug {
+            return instance_mark(db, instance.clone(), env.clone());
+        }
+        let compiled = compiled_instance(db, instance.clone(), env.clone()).as_ref().ok()?;
+        let serial = instance_serial(db, instance.clone(), env.clone());
+        Some(Mark::of_function(db, serial, compiled, false))
+    }
+
     /// Whether the code is the same, wherever in the file it is: a copy of rustc's that no
     /// patch reaches does what it did, and only a debugger is told the lines it was at.
     fn same_code(self, other: Mark) -> bool {
         Mark { lines: 0, ..self } == Mark { lines: 0, ..other }
     }
+}
+
+/// The mark of a root with the lines of its code. Every edit asks it of every root the edit
+/// can reach, and found again it would ask where each row of the code is; kept, asking again
+/// verifies the places it read, which instances of one function share.
+#[salsa::tracked(returns(copy))]
+fn root_mark(db: &dyn HirDatabase, root: FunctionId) -> Option<Mark> {
+    let compiled = compiled_root(db, root).as_ref().ok()?;
+    Some(Mark::of_function(db, root_serial(db, root), compiled, true))
+}
+
+/// [`root_mark`], of an instance.
+#[salsa::tracked(returns(copy))]
+fn instance_mark(
+    db: &dyn HirDatabase,
+    instance: Instance,
+    env: StoredParamEnvAndCrate,
+) -> Option<Mark> {
+    let compiled = compiled_instance(db, instance.clone(), env.clone()).as_ref().ok()?;
+    let serial = instance_serial(db, instance, env);
+    Some(Mark::of_function(db, serial, compiled, true))
 }
 
 /// Something in the base that an edit can change or take away.
@@ -137,9 +182,7 @@ fn closure_mark(
     env: &StoredParamEnvAndCrate,
     debug: bool,
 ) -> Option<Mark> {
-    let compiled = compiled_instance(db, instance.clone(), env.clone()).as_ref().ok()?;
-    let serial = instance_serial(db, instance.clone(), env.clone());
-    Some(Mark::of_function(db, serial, compiled, debug))
+    Mark::of_instance(db, instance, env, debug)
 }
 
 #[derive(Clone)]
@@ -797,18 +840,10 @@ impl Base {
     ) -> Option<Base> {
         let decls = cg.module.declarations();
         let debug = cg.debug.is_some();
-        let root_mark = |db: &dyn HirDatabase, root| {
-            let compiled = compiled_root(db, root).as_ref().ok()?;
-            Some(Mark::of_function(db, root_serial(db, root), compiled, debug))
-        };
+        let root_mark = |db: &dyn HirDatabase, root| Mark::of_root(db, root, debug);
         let instance_mark =
             |db: &dyn HirDatabase, (instance, env): &(Instance, StoredParamEnvAndCrate)| {
-                let compiled = compiled_instance(db, instance.clone(), env.clone()).as_ref().ok();
-                let mark = compiled.map(|it| {
-                    let serial = instance_serial(db, instance.clone(), env.clone());
-                    Mark::of_function(db, serial, it, debug)
-                });
-                (mark, body_files(db, instance))
+                (Mark::of_instance(db, instance, env, debug), body_files(db, instance))
             };
         // The marks are a hash of each function's code and of its lines, which every thread
         // works out: the object waits for this.
@@ -1033,20 +1068,14 @@ impl Base {
             }
             self.home_closures(db, symbols, root);
             let Some(symbol) = symbols.function(root) else {
-                let mark = compiled_root(db, root).as_ref().ok().map(|compiled| {
-                    Mark::of_function(db, root_serial(db, root), compiled, self.debug)
-                });
+                let mark = Mark::of_root(db, root, self.debug);
                 self.unnamed.push((root, mark, body_file(db, root.into())));
                 continue;
             };
             match compiled_root(db, root) {
-                Ok(compiled) => {
-                    self.marks.push(Mark::of_function(
-                        db,
-                        root_serial(db, root),
-                        compiled,
-                        self.debug,
-                    ));
+                Ok(_) => {
+                    let mark = Mark::of_root(db, root, self.debug);
+                    self.marks.push(mark.expect("a root that compiles has a mark"));
                     self.compiled.push((root, symbol));
                     self.crates.push(root.krate(db));
                     self.files.push(body_file(db, root.into()));
@@ -1418,10 +1447,7 @@ impl Base {
                 continue;
             }
             let asked = stdx::time::Instant::now();
-            let mark = probe(|| {
-                let compiled = compiled_root(db, root).as_ref().ok()?;
-                Some(Mark::of_function(db, root_serial(db, root), compiled, self.debug))
-            });
+            let mark = probe(|| Mark::of_root(db, root, self.debug));
             stale.steps.roots_asked += 1;
             stale.steps.slowest = stale.steps.slowest.max(asked.elapsed());
             match mark {
@@ -1441,10 +1467,7 @@ impl Base {
             if !touched {
                 continue;
             }
-            let mark = probe(|| {
-                let compiled = compiled_root(db, *root).as_ref().ok()?;
-                Some(Mark::of_function(db, root_serial(db, *root), compiled, self.debug))
-            });
+            let mark = probe(|| Mark::of_root(db, *root, self.debug));
             let Some(mark) = mark else {
                 stale.gone.push(*root);
                 continue;
@@ -1498,13 +1521,7 @@ impl Base {
                 continue;
             }
             let asked = stdx::time::Instant::now();
-            let mark = probe(|| {
-                let compiled = compiled_instance(db, instance.clone(), was.env.clone());
-                compiled.as_ref().ok().map(|it| {
-                    let serial = instance_serial(db, instance.clone(), was.env.clone());
-                    Mark::of_function(db, serial, it, self.debug)
-                })
-            });
+            let mark = probe(|| Mark::of_instance(db, instance, &was.env, self.debug));
             stale.steps.instances_asked += 1;
             stale.steps.slowest = stale.steps.slowest.max(asked.elapsed());
             stale.their_walk_changed |= touched
