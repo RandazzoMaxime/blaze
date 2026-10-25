@@ -1,7 +1,7 @@
 {
  "dir": ".",
  "inputs": {
-  "Cargo.lock": "36353a81ea1da063763b85f25a1d1d58e5a17cfb38a00ebe43e33796f68ab9ab",
+  "Cargo.lock": "7f3532f31c3381cc001d50dc248445707408f74bb95a79f40425effb0fc123fe",
   "Cargo.toml": "b24ee63f2d4e7a5d69d48f9bfcda5dc3185e15da03a4abcf17f1a73a9823620f"
  },
  "packages": {
@@ -772,7 +772,7 @@
   },
   "blaze-core@0.1.0": {
    "authors": "blaze contributors",
-   "description": "blaze's sans-IO core: effects a state machine asks for, completions it is given, and the drivers that run them (a deterministic simulation, threads)",
+   "description": "blaze's sans-IO core: effects a state machine asks for, completions it is given, and the drivers that run them (a deterministic simulation, threads, io_uring)",
    "homepage": "",
    "license": "MIT OR Apache-2.0",
    "license_file": "",
@@ -28567,7 +28567,12 @@
     },
     {
      "crate_type": "lib",
-     "deps": [],
+     "deps": [
+      {
+       "i": 207,
+       "name": "libc"
+      }
+     ],
      "edition": "2024",
      "features": [],
      "kind": "lib",
@@ -64381,7 +64386,12 @@
     },
     {
      "crate_type": "lib",
-     "deps": [],
+     "deps": [
+      {
+       "i": 208,
+       "name": "libc"
+      }
+     ],
      "edition": "2024",
      "features": [],
      "kind": "lib",
