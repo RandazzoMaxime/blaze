@@ -43,7 +43,7 @@ the need for it ([no-rustc.md](no-rustc.md#the-plan)).
 
 | Piece | Size (xz, Linux x86-64) | What uses it | Removed by |
 |---|---|---|---|
-| `cargo` | 11.0 MB | the first build (`cargo/state.rs` `Built::by`); `cargo metadata` for every load (rust-analyzer's project model, `cargo/state.rs` `metadata`); `cargo build --unit-graph` (`plan.rs`); rust-analyzer's `cargo check --compile-time-deps`; fetching crates into `~/.cargo/registry` | blaze's resolver and fetcher ([below](#resolution-and-fetching)), then K and M |
+| `cargo` | 11.0 MB | the first build (`cargo/state.rs` `Built::by`); `cargo metadata` for every load (rust-analyzer's project model; the client's `--no-deps` reading is blaze-manifest's since 2026-10-25, `cargo/metadata.rs`); `cargo build --unit-graph` (`plan.rs`); rust-analyzer's `cargo check --compile-time-deps`; fetching crates into `~/.cargo/registry` | blaze's resolver and fetcher ([below](#resolution-and-fetching)), then K and M |
 | `rustc` (with `librustc_driver`, LLVM) | 84.0 MB, with the next two | the first build of every workspace, proc macros, the build scripts blaze does not compile yet, the functions left to rustc, the rustc base of the first edits | K, J, E, M |
 | `rust-lld` (`lib/rustlib/<host>/bin/gcc-ld`) | in `rustc` | blaze's own link on ELF targets (`link.rs`), as rustc links | blaze shipping its own lld, or the system linker |
 | `rust-analyzer-proc-macro-srv` (`libexec`) | in `rustc` | expanding proc macros with the libraries rustc built | J1 and J2 |

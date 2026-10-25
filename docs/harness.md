@@ -99,6 +99,17 @@ with reasons. The daemon's log says `backend: llvm -O2 fast emit` when LLVM is i
 | `scoreboard.py` | Runs the targets in `targets.json` and fails when behaviour differs or coverage drops below the committed `scoreboard.json` |
 | `mirparity.py <workspace> --crate <name> [--level N] [--rustc-level 1\|2]` | ra-jit's MIR (`ra-jit mir`, at `RA_JIT_MIR_OPT` level N) against rustc's `-Zunpretty=mir`, function by function: the share that match in shape, statement counts, statements and types, and the most frequent differences. Not a gate: the numbers are in [research/mir-gap.md](research/mir-gap.md) |
 
+### Reading the workspace as cargo does
+
+| Script | What it checks |
+|---|---|
+| `resolve.py [bench\|crates\|workspaces]` | `crates/blaze-manifest` against cargo 1.99 on `cargo metadata --no-deps --format-version 1`: the projects of `bench.py`, 300 crates.io crates and 72 workspace repositories at pinned commits (`resolve/corpus.json`), the JSON compared as text after the root and `CARGO_HOME` are replaced, key order included, and the error text when both refuse a workspace. Prints the first difference of each workspace and the counts per part; [resolve.md](resolve.md) has them. `resolve.py DIR...` compares the workspaces at DIR... only. Needs the network |
+
+The workspaces of `crates/blaze-manifest/tests/fixtures` (inheritance, members and targets
+discovered, a package outside its workspace's members, config and manifest errors) have cargo's
+output committed next to them, so `cargo test -p blaze-manifest` checks them without cargo or
+the network; `resolve.py --fixtures` writes them again.
+
 ### The daemon following edits
 
 | Script | What it checks |
