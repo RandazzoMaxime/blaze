@@ -102,8 +102,9 @@ pub(super) fn stable_mark(
 }
 
 /// The items of the checkout the code of an instance comes from, as they are written now:
-/// the one its code is written in, and those of what it tells the place of, with where each
-/// begins; those of the bodies it mentions a coroutine of, by their text alone (see
+/// the one its code is written in, with where it begins when `lines` (its mark has the lines
+/// of its code then), and those of what it tells the place of, with where each begins; those
+/// of the bodies it mentions a coroutine of, by their text alone (see
 /// [`super::home::bodies_of`]). `None` when one is of no file of the checkout or a macro
 /// wrote it. While nothing but bodies changes, code whose items read the same is the code it
 /// was, or code nothing calls by its name any more.
@@ -112,9 +113,10 @@ pub(super) fn written_items(
     names: &StableNames<'_, '_>,
     instance: &Instance,
     compiled: &CompiledFunction,
+    lines: bool,
 ) -> Option<Vec<WrittenItem>> {
     let (written, mentioned) = super::home::bodies_of(db, instance)?;
-    let mut placed: Vec<DefWithBodyId> = written.into_iter().collect();
+    let mut placed = Vec::new();
     for request in &compiled.requests.datas {
         match request {
             DataRequest::Location(Some((owner, _))) => placed.push(*owner),
@@ -128,8 +130,10 @@ pub(super) fn written_items(
         Some(WrittenItem { file, id, hash, at: places.then_some(at) })
     };
     let placed = placed.into_iter().map(|it| item(it, true));
+    let written = written.into_iter().map(|it| item(it, lines));
+    let mentioned = mentioned.into_iter().map(|it| item(it, false));
     let mut items: Vec<WrittenItem> =
-        placed.chain(mentioned.into_iter().map(|it| item(it, false))).collect::<Option<_>>()?;
+        placed.chain(written).chain(mentioned).collect::<Option<_>>()?;
     items.sort_unstable();
     items.dedup();
     Some(items)
