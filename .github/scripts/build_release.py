@@ -265,8 +265,9 @@ def proc_macro_server(ra_jit, out):
         env = dict(os.environ, RUSTUP_TOOLCHAIN=TOOLCHAIN, RA_JIT_CACHE=str(Path(work) / "store"),
                    RA_JIT_STD_FROM="off", RUST_BACKTRACE="0")
         start = time.monotonic()
-        run([str(ra_jit), str(SERVER), "--crate", SERVER_CRATE, "--out", str(Path(work) / "server.o"),
-             "--exe", str(exe)], cwd=SERVER, env=env)
+        # `proc_macro` is not in the standard library's unit: the program that links it has it.
+        run([str(ra_jit), str(SERVER), "--crate", SERVER_CRATE, "--crate", "proc_macro",
+             "--out", str(Path(work) / "server.o"), "--exe", str(exe)], cwd=SERVER, env=env)
     said = subprocess.run([str(exe), "--version"], capture_output=True, text=True, check=True,
                           env=dict(os.environ, RUST_ANALYZER_INTERNALS_DO_NOT_USE="this is unstable"))
     print(f"build_release: {said.stdout.strip()} as {exe}, built by ra-jit in {time.monotonic() - start:.1f} s",
