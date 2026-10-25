@@ -298,3 +298,25 @@ interleaved:
   what calls it, is compiled again to compare its mark with the store's: 382 functions on
   ripgrep, 411 on nushell ("stats"), where the build that compiled them at its start had them
   at hand (**read**).
+
+## What the nushell restart spends its 20 s on (profile, 2026-10-25)
+
+`perf record -F 499` of the worker through warmstart.py's nushell restart on dev-aws-5 (branch
+`closure-names`, release build without frame pointers, so by function only), cut into windows
+by the second the samples fall in (**read**):
+
+- Seconds 2 to 9 (the symbols of rustc's libraries, name resolution): SHA-256 5 %, SipHash
+  2 %, demangling, the parser; nothing above 6 %.
+- Seconds 10 to 12, the stored roots, on every core: `Symbol::intern` 33 %, zstd unpacking
+  13 %, `Interned<Told>::new` 3 %, `Search<Listed>::own` 2 %. Reading an entry turns its
+  debugger's types back into a set (`TypeSet::from` in `Entries::types`), interning every
+  name of every type, which 64 threads ask of one interner, the popular names counted on one
+  cache line.
+- Seconds 12 to 20, on one or two cores: the entries stitched (`Entries::get`,
+  `found_callee`), the debug info written with gimli (its string table's `insert_full` 6 %,
+  `calculate_offsets` 6 %), and lld's link. What the build read is freed on another thread
+  already (`finish`).
+
+So the next costs are the debugger's types read whole for every entry while the roots are
+looked for, which only stitching needs; the debug info of all 155,843 functions written again
+when nothing changed; and the link of an executable the target directory already has.
