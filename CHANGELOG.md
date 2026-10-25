@@ -496,6 +496,15 @@ All notable changes to ra-jit are written here. The format follows
 
 ### Fixed
 
+- A registry crate with a build script has the same frozen def map in every checkout (#105).
+  Its key held the absolute `OUT_DIR`, so another checkout of nushell took 221 of 478 crates
+  frozen where a restart of the first took 374, and of ripgrep 41 of 51; both now take all of
+  them (374 and 51). The key holds `OUT_DIR` from cargo's build directory on and the files
+  written there, and the bytes name a file below the `OUT_DIR` of any crate of the closure,
+  and a literal such as the path `include!(concat!(env!("OUT_DIR"), ..))` reads, from that
+  `OUT_DIR`, so another checkout reads what its own build scripts wrote; bytes that still name
+  a target directory are not written. `frozenwarm.py` builds a second checkout with such a
+  crate, the first's target directory put away.
 - The first start of a daemon after a cold `cargo ra-jit build` finds what that build stored
   (#41). The two named the toolchain differently (the sysroot's libstd alone, or rustc's link
   line with libcore and liballoc too) and the store hashes that name into every key: on
