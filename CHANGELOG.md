@@ -8,6 +8,16 @@ All notable changes to ra-jit are written here. The format follows
 
 ### Added
 
+- The daemon's loads read the workspace with blaze's own resolution (`crates/blaze-metadata`),
+  not `cargo locate-project` and `cargo metadata`: every locked package fetched by
+  blaze-registry, and the graph of the build the load is for, with the features `cargo build`
+  of its selection would have, not those of every member unified. A load of axum's example
+  no longer reaches crates whose build scripts its build never ran (`env!` of `mime_guess`'s
+  variable), and its whole build (`RA_JIT_WHOLE_BUILD=1`) builds. What blaze does not read yet
+  (no lock file or a stale one, `[replace]`, a git index) goes to cargo with the reason;
+  `RA_JIT_OWN_RESOLVE=0` sends every load there. `harness/own_metadata.py` holds the output
+  equal to `cargo metadata --filter-platform` and to `cargo build --unit-graph`'s packages,
+  features and edges.
 - blaze on Linux needs glibc 2.34 or newer (RHEL 9, Debian 12, Ubuntu 22.04), and the release
   holds it there (#351): `build_release.py` refuses a Linux binary, the proc-macro server's
   included, that asks for a newer glibc; install.sh says what a system below it lacks instead

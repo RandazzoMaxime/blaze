@@ -138,6 +138,17 @@ cargo 1.99.0 does not resolve there (bun, swc, rust-clippy, embassy). Its regist
 versions cargo chose; choosing among all of the index's waits on #321, cargo's SAT-checked
 resolver tests on #337, `cargo update` and path overrides on #338.
 
+2026-10-25, the first switch: the daemon's loads read the workspace with `crates/blaze-metadata`
+instead of `cargo locate-project` and `cargo metadata` ([resolve.md](resolve.md)): the root,
+every locked package fetched by blaze-registry, and the graph of the build the load is for.
+`harness/own_metadata.py` on dev-aws-14 over the corpus and the bench projects, each with the
+lock file it ships, blaze fetching into a `CARGO_HOME` of its own: `cargo metadata
+--filter-platform` 321 of 321 equal as JSON, and the packages, features and edges of `cargo
+build --unit-graph` 321 of 321 equal. yew's lock file is one cargo rewrites, which blaze
+leaves to cargo (#321); bun, swc and agave cargo 1.99.0 does not resolve there. With it axum's
+whole build builds (5.9 and 6.5 s in two runs, cargo's 6.2 and 6.1 s, on a shared host): its example no longer reaches `mime_guess`, whose
+build script its build never ran. Left: the unit graph (#335), choosing versions (#321).
+
 ## Build scripts
 
 blaze compiles build scripts (step I) and keeps their runs in the store; cargo still runs

@@ -1052,11 +1052,14 @@ build`, no rustc base. See [the cold start](#the-cold-start-without-rustc).
   ra-jit cannot compile fails the build with which and why ([cargo.md](cargo.md#what-a-build-does)).
   `harness/coldbuild.py` holds a fixture's programs, an example and a build script's output equal
   to cargo's. Measured on the bench projects ([self-contained.md](self-contained.md)): ripgrep,
-  fd, hyperfine, just, bat and nushell build whole and run as cargo's builds; axum and biome miss
-  a build script's variable. Build scripts and proc macros are still built by rustc for the
+  fd, hyperfine, just, bat and nushell build whole and run as cargo's builds; axum and biome missed
+  a build script's variable, until the loads read the graph of the build with blaze's own
+  resolution ([resolve.md](resolve.md), 2026-10-25): axum then builds, and biome reaches 9
+  functions the frontend turns down (two LLVM intrinsics of `num-bigint`, `HasErrors` and
+  unresolved methods in `boa_engine`, `boa_interner` and a derive of `biome_deserialize`). Build scripts and proc macros are still built by rustc for the
   load, and no daemon is started.
-- Next: the shipped standard library for the dev and release program units; axum's and
-  biome's build-script output; the daemon taking the build over, so the edit after it splices;
+- Next: the shipped standard library for the dev and release program units; biome's 9
+  functions; the daemon taking the build over, so the edit after it splices;
   then the flip.
 
 **L. Doctests by the daemon.** ([#92](https://github.com/indexable-inc/ra-jit/issues/92)) [#28](https://github.com/indexable-inc/ra-jit/issues/28): the
