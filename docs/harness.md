@@ -203,13 +203,13 @@ a first checkout on an empty store, a second on the store it filled, that daemon
 started, and once more, each followed by a body edit and its undoing; it keeps what each worker
 said in `WORK/said-STEP.txt` and exits 1 when a program's output is not cargo's
 ([research/warm-start.md](research/warm-start.md)). Their docstrings say how to run them.
-`bench.py` on real projects, with `benchreport.py`, is also what writes the README's build
-table: [benchmarks.md](benchmarks.md). Besides the edits `bench.py` times repeated cold builds
+`bench.py` on real projects, with `benchreport.py`, is also what writes the benchmark
+tables and the README's numbers: [benchmarks.md](benchmarks.md). Besides the edits `bench.py` times repeated cold builds
 against fresh cargo with an empty and with a warm store (`--cold-runs`), the same steps under
 the fastest cargo setups (`--setups`: mold, wild, `-Zthreads=8`, cg_clif and `cargo check`) and
 the test suites under both (`--tests`). `bench.py --runtime` runs `runbench.py`, which times
 programs ra-jit builds whole with LLVM against `cargo build --release`, and `benchreport.py`
-writes that result to the README's runtime table, refusing it when any program's output differs
+writes that result to the runtime table in benchmarks.md, refusing it when any program's output differs
 from cargo's. `abbench.py` runs two or more builds of ra-jit against each other on `bench.py`'s
 edits, in interleaved rounds: an edit's wall time, the daemon's own time and (macOS) its
 workers' cycles, the cold start, and the workers' peak memory. It is how the release build's
@@ -223,12 +223,12 @@ time with the exact peak of its largest process (`wait4`) and the peak of its wh
 (sampled), `memory.Sampler` follows a long-lived process such as the daemon with its workers,
 and `memory.in_child` measures a function that runs commands itself
 ([benchmarks.md](benchmarks.md#memory-and-disk)); a harness that reports memory uses it rather
-than a way of its own. Every README benchmark is a matrix over the platforms of
+than a way of its own. Every published benchmark is a matrix over the platforms of
 `benchplatforms.py` (macOS arm64, Linux aarch64, Linux x86-64): it names a result's platform from
 its host, files it as `docs/benchmarks/<platform>.json`, and gives the workflows the platforms
 whose runner is registered. `benchreport.py` writes each table from the newest stored result of
 every platform, so one that did not run keeps its last numbers. `benchcharts.py` draws the
-README's charts (SVG, a light and a dark version, a bar per platform) from the same results;
+benchmark charts (SVG, a light and a dark version, a bar per platform) from the same results;
 `benchreport.py` regenerates them whenever it writes a table, `--charts` on its own, and
 `--render` every table and chart.
 `live_latency.py` times live edits on macOS on AArch64, per keystroke under typing (`replay`,
@@ -390,7 +390,7 @@ out right, it fails the run until it is taken off the list:
   host (`{"linux": "why"}`).
 
 The other workflows: `bench-readme.yaml` measures real projects on each platform's dedicated
-benchmark machine and commits the README's numbers to main. It runs a platform only once the
+benchmark machine and commits the tables and the README's numbers to main. It runs a platform only once the
 repository variable `BENCH_RUNNERS` names it ([benchmarks.md](benchmarks.md#the-machines)). `bench.yaml` (the store's
 microbenchmarks, two minutes) runs on pull requests and pushes too. `claims.yaml` (all of
 rustc's `tests/ui`, both backends, and the scoreboard) and `nix-live.yaml` (the flake, the demo
