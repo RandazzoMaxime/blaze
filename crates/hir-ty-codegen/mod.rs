@@ -113,6 +113,7 @@ mod imports;
 mod llvm;
 mod naming;
 mod patch;
+pub use patch::Handout;
 mod places;
 #[cfg(feature = "llvm")]
 mod units;
@@ -684,7 +685,7 @@ impl CodegenUnit {
             let statics = start.elapsed();
             let mut stale = std::mem::take(&mut known.stale);
             if stale.is_empty() {
-                stale.push(base.stale(db, 0, 1));
+                stale.push(base.stale(db, &base.handout(1)));
             }
             let patch = loop {
                 let patch = base.patch(
@@ -1269,10 +1270,16 @@ impl Rejections {
         total - std::mem::replace(&mut self.counted, total)
     }
 
-    /// Looks at one part in `parts` of what the last full build compiled for what an edit
-    /// changed, which threads can do a part each. `None` when no patch is to be made.
-    pub fn stale(&self, db: &dyn HirDatabase, part: usize, parts: usize) -> Option<Stale> {
-        Some(self.patched()?.stale(db, part, parts))
+    /// What of the last full build an edit changed, for `parts` threads to look at together
+    /// with [`Self::stale`]. `None` when no patch is to be made.
+    pub fn handout(&self, parts: usize) -> Option<patch::Handout<'_>> {
+        Some(self.patched()?.handout(parts))
+    }
+
+    /// Looks at what this thread takes from the handout of what the last full build compiled,
+    /// for what an edit changed.
+    pub fn stale(&self, db: &dyn HirDatabase, handout: &patch::Handout<'_>) -> Option<Stale> {
+        Some(self.patched()?.stale(db, handout))
     }
 
     /// What the next build is a patch of, if it is one.

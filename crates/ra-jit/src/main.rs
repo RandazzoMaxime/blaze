@@ -21,6 +21,7 @@ mod memory;
 mod mirdump;
 mod outline;
 mod plan;
+mod pool;
 mod process;
 mod remote;
 mod sandbox;
@@ -4260,37 +4261,32 @@ fn build(
     // thread: left to the questions, whichever gets there has the others wait for all of it.
     let next = std::sync::atomic::AtomicUsize::new(0);
     let mut spent = Vec::new();
-    let stale: Option<Vec<_>> = std::thread::scope(|scope| {
-        let parts: Vec<_> = (0..threads)
-            .map(|part| {
-                let (db, known, local, next) = (db.clone(), &*known, &local, &next);
-                scope.spawn(move || {
-                    PROBING.set(true);
-                    let (start, cpu) = (Instant::now(), thread_cpu());
-                    hir::attach_db(&db, || {
-                        while let Some(&krate) =
-                            local.get(next.fetch_add(1, std::sync::atomic::Ordering::Relaxed))
-                        {
-                            hir_ty::method_resolution::TraitImpls::for_crate(&db, krate.into());
-                            hir_ty::method_resolution::InherentImpls::for_crate(&db, krate.into());
-                        }
-                        let impls = start.elapsed();
-                        let stale = known.stale(&db, part, threads);
-                        (stale, Spent { impls, wall: start.elapsed(), cpu: thread_cpu() - cpu })
-                    })
-                })
-            })
-            .collect();
-        let parts: Vec<_> = parts.into_iter().map(|it| it.join().ok()).collect();
-        parts
-            .into_iter()
-            .map(|it| {
-                let (stale, it) = it?;
-                spent.push(it);
-                stale
-            })
-            .collect()
+    let handout = known.handout(threads);
+    // A thread asks of a database of its own.
+    let dbs: Vec<_> = (0..threads).map(|_| std::sync::Mutex::new(Some(db.clone()))).collect();
+    let parts = pool::on_all(threads, |part| {
+        let db = lock(&dbs[part]).take().expect("a database for each part");
+        let _probing = Probing::new();
+        let (start, cpu) = (Instant::now(), thread_cpu());
+        hir::attach_db(&db, || {
+            while let Some(&krate) = local.get(next.fetch_add(1, Ordering::Relaxed)) {
+                hir_ty::method_resolution::TraitImpls::for_crate(&db, krate.into());
+                hir_ty::method_resolution::InherentImpls::for_crate(&db, krate.into());
+            }
+            let impls = start.elapsed();
+            let stale = handout.as_ref().and_then(|it| known.stale(&db, it));
+            (stale, Spent { impls, wall: start.elapsed(), cpu: thread_cpu() - cpu })
+        })
     });
+    let stale: Option<Vec<_>> = parts
+        .into_iter()
+        .map(|it| {
+            let (stale, it) = it?;
+            spent.push(it);
+            stale
+        })
+        .collect();
+    drop(handout);
     hir::attach_db(db, || known.set_stale(hir_db, stale.unwrap_or_default()));
     let looked = known.stale_steps();
     if std::env::var_os("RA_JIT_STATS").is_some() {
