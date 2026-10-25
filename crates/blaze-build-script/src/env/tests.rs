@@ -335,3 +335,44 @@ fn jobserver_and_versions() {
     assert_eq!(var(&env, "CARGO_PKG_VERSION_PRE"), Some("beta.1"));
     assert_eq!(var(&env, "CARGO_PKG_AUTHORS"), Some("a:b <b@x>"));
 }
+
+/// cargo on Linux gives its scripts the certificates libgit2 found for it (found by
+/// harness/scripts.py on dev-aws-8, where cargo's scripts had `SSL_CERT_FILE` and
+/// `SSL_CERT_DIR` and blaze's did not).
+#[test]
+fn certificates_libgit2_finds() {
+    let dir = std::env::temp_dir().join(format!("blaze-build-script-certs-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let (empty, pki, ssl) = (dir.join("empty"), dir.join("pki"), dir.join("ssl"));
+    std::fs::create_dir_all(&empty).unwrap();
+    std::fs::create_dir_all(pki.join("certs")).unwrap();
+    std::fs::write(pki.join("certs/ca-bundle.crt"), "").unwrap();
+    std::fs::create_dir_all(ssl.join("certs")).unwrap();
+    std::fs::write(ssl.join("cert.pem"), "").unwrap();
+    let dirs = [dir.join("missing"), empty, pki.clone(), ssl.clone()];
+    let dirs: Vec<&Path> = dirs.iter().map(PathBuf::as_path).collect();
+    let linux = "x86_64-unknown-linux-gnu";
+    let started = os(&[("PATH", "/bin")]);
+
+    let env = cargo_started_in(&started, linux, &dirs);
+    let mut expected = started.clone();
+    expected.push(("SSL_CERT_FILE".into(), pki.join("certs/ca-bundle.crt").into()));
+    expected.push(("SSL_CERT_DIR".into(), pki.join("certs").into()));
+    assert_eq!(env, expected);
+
+    // What names a file and a directory that exist stays; what names none is replaced.
+    let file = ssl.join("cert.pem");
+    let started = os(&[("SSL_CERT_FILE", file.to_str().unwrap()), ("SSL_CERT_DIR", "/nowhere")]);
+    let env = cargo_started_in(&started, linux, &dirs);
+    assert_eq!(
+        env,
+        [("SSL_CERT_FILE".into(), file.into()), ("SSL_CERT_DIR".into(), pki.join("certs").into())]
+    );
+
+    for host in ["aarch64-apple-darwin", "x86_64-pc-windows-msvc"] {
+        assert_eq!(
+            cargo_started_in(&os(&[("PATH", "/bin")]), host, &dirs),
+            os(&[("PATH", "/bin")])
+        );
+    }
+}

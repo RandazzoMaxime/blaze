@@ -1,5 +1,5 @@
 //! The crate as `harness/scripts.py` drives it, cargo being the oracle there. `UNIT` is a
-//! [`Unit`] and `CARGO_ENV` the environment cargo ran with, both JSON files.
+//! [`Unit`] and `CARGO_ENV` the environment cargo was started with, both JSON files.
 //!
 //! - `run UNIT CARGO_ENV` runs the script as blaze runs it and prints the environment it was
 //!   given, its outputs and what cargo makes of them.
@@ -122,8 +122,11 @@ fn read<T: serde::de::DeserializeOwned>(path: &str) -> Result<T, Error> {
 
 fn inputs(unit: &str, cargo_env: &str) -> Result<(Unit, Vec<(OsString, OsString)>), Error> {
     let cargo_env: BTreeMap<String, String> = read(cargo_env)?;
-    let cargo_env = cargo_env.into_iter().map(|(name, value)| (name.into(), value.into()));
-    Ok((read(unit)?, cargo_env.collect()))
+    let cargo_env: Vec<_> =
+        cargo_env.into_iter().map(|(name, value)| (name.into(), value.into())).collect();
+    let unit: Unit = read(unit)?;
+    let cargo_env = blaze_build_script::env::cargo_started(&cargo_env, &unit.host);
+    Ok((unit, cargo_env))
 }
 
 fn json(value: &impl serde::Serialize) -> Result<String, Error> {
