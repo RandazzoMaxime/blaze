@@ -8,6 +8,14 @@ All notable changes to ra-jit are written here. The format follows
 
 ### Added
 
+- `RA_JIT_WHOLE_BUILD=1` (or `BLAZE_WHOLE_BUILD=1`): `cargo blaze build` and `run` from nothing
+  build each program whole with blaze, every crate compiled by blaze over the shipped standard
+  library and linked by blaze, and put it where cargo does, with no `cargo build`
+  ([no-rustc.md](docs/no-rustc.md), step K, #91). A function the program can reach that blaze
+  cannot compile fails the build with which and why, and nothing goes to cargo.
+  `harness/coldbuild.py` holds the programs of a fixture equal to cargo's, and with `bench`
+  does bench.py's projects.
+
 - `cargo ra-jit test` with `RA_JIT_TESTS=affected` runs, on Linux, each test that reaches a
   file, the environment, a process or the network in a sandbox of its own (#257): a process
   in new user, mount, network, IPC and PID namespaces, the machine's files read-only, the

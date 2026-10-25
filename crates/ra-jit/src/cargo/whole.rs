@@ -96,8 +96,11 @@ fn whole(asked: &Invocation, cwd: &Path, program: &Program, dir: &Path) -> Resul
     let shown = log.strip_prefix(cwd).unwrap_or(&log).display().to_string();
     // A function of the program's own crates blaze cannot compile is left out of the object,
     // and the link then fails on what it would have defined.
-    let unsupported: Vec<&str> =
-        said.lines().filter_map(|it| it.trim().strip_prefix("left to rustc: ")).collect();
+    let unsupported: Vec<String> = said
+        .lines()
+        .filter_map(|it| it.trim().strip_prefix("left to rustc: "))
+        .map(without_hashes)
+        .collect();
     if !output.status.success() && !unsupported.is_empty() {
         return Err(format!(
             "`{}` has functions blaze could not compile, so it is not built:\n  {}\n(what blaze said is in {shown})",
@@ -117,8 +120,11 @@ fn whole(asked: &Invocation, cwd: &Path, program: &Program, dir: &Path) -> Resul
     match left.next() {
         Some(linked) if !linked.ends_with(", 0 functions in it ra-jit could not compile") => {
             // The link names the first few of them, each on a line of its own.
-            let reached: Vec<&str> =
-                left.map_while(|it| it.strip_prefix("  ")).map(str::trim).collect();
+            let reached: Vec<String> = left
+                .map_while(|it| it.strip_prefix("  "))
+                .map(|it| it.trim().trim_start_matches(hir_ty_codegen::STAND_IN_SAYS))
+                .map(without_hashes)
+                .collect();
             return Err(format!(
                 "`{}` can reach functions blaze could not compile, so it is not built:\n  {}\n(what blaze said is in {shown})",
                 program.name,
@@ -139,6 +145,27 @@ fn whole(asked: &Invocation, cwd: &Path, program: &Program, dir: &Path) -> Resul
     }
     place(&built, &program.executable)
         .map_err(|it| format!("installing {}: {it}", program.executable.display()))
+}
+
+/// `name` with the `[0123456789abcdef]` after each crate's name taken out.
+fn without_hashes(name: &str) -> String {
+    let mut out = String::with_capacity(name.len());
+    let mut rest = name;
+    while let Some(at) = rest.find('[') {
+        let hash = rest[at + 1..].split_once(']').map(|(it, _)| it);
+        out.push_str(&rest[..at]);
+        match hash {
+            Some(hash) if hash.len() == 16 && hash.bytes().all(|it| it.is_ascii_hexdigit()) => {
+                rest = &rest[at + hash.len() + 2..];
+            }
+            _ => {
+                out.push('[');
+                rest = &rest[at + 1..];
+            }
+        }
+    }
+    out.push_str(rest);
+    out
 }
 
 fn is_linked(line: &str) -> bool {
