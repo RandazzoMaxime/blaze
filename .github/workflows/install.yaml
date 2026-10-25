@@ -140,6 +140,10 @@ jobs:
           - { system: Ubuntu 22.04, image: "ubuntu:22.04", packages: apt }
           - { system: RHEL 9, image: "registry.access.redhat.com/ubi9/ubi", packages: dnf }
     container: ${{ matrix.image }}
+    # As in `docker run`: the runner's /github/home belongs to its own user, and the daemon
+    # keeps nothing in a directory another user can replace things in.
+    env:
+      HOME: /root
     steps:
       - if: matrix.packages == 'apt'
         run: apt-get update -qq && apt-get install -y -qq --no-install-recommends curl ca-certificates gcc libc6-dev
@@ -165,10 +169,13 @@ jobs:
           cd "$RUNNER_TEMP/hello"
           printf '[package]\nname = "hello"\nversion = "0.1.0"\nedition = "2021"\n' > Cargo.toml
           printf 'fn main() {\n    println!("Hello, world!");\n}\n' > src/main.rs
-          blaze run > out.txt
+          blaze run > out.txt 2> err.txt || { cat err.txt; exit 1; }
           ended=$(date +%s.%N)
-          cat out.txt
+          cat err.txt out.txt
           grep -Fx "Hello, world!" out.txt
+          if grep -e "ra-jit: bug:" -e "the daemon has no part" err.txt; then
+            echo "::error::the build was not blaze's"; exit 1
+          fi
           echo "${{ matrix.system }}, from install.sh to Hello, world!: $(echo "$ended - $began" | awk '{ printf "%.1f s", $1 - $3 }')" | tee -a "$GITHUB_STEP_SUMMARY"
           du -sh "$HOME/.blaze/toolchains" "$HOME/.cargo/bin" | tee -a "$GITHUB_STEP_SUMMARY"
           for tool in rustup cargo rustc; do
@@ -194,7 +201,7 @@ jobs:
           RA_JIT_PROC_MACRO_SERVER=1 blaze run > out.txt 2>> err.txt || { cat err.txt; exit 1; }
           cat err.txt out.txt
           grep -Fx "derived 2" out.txt
-          if grep -e "ra-jit: bug:" -e "did not make the proc macro" -e "no proc-macro server" err.txt; then
+          if grep -e "ra-jit: bug:" -e "the daemon has no part" -e "did not make the proc macro" -e "no proc-macro server" err.txt; then
             echo "::error::the proc macros were not blaze's"; exit 1
           fi
           blaze stop
