@@ -250,6 +250,16 @@ All notable changes to ra-jit are written here. The format follows
 
 ### Changed
 
+- ra-jit is now **blaze**. The command is `cargo blaze` (`cargo blaze build`, `test`, `run`,
+  `check`, `status`, `stop`); `cargo ra-jit` keeps working and, on a terminal, says once per run
+  that it was renamed. The crate on crates.io is `cargo-blaze` (`cargo install cargo-blaze`),
+  release archives are `blaze-v<version>-<target>.tar.gz`, and the flake's package and app are
+  `blaze` (`ra-jit` stays as another name for them). Every setting can be given as `BLAZE_<NAME>`
+  as well as `RA_JIT_<NAME>`, and the `BLAZE_` one wins. `--version` says `blaze`. The engine
+  binary, the crates it is made of, the daemon's directory and the store keep their names, so an
+  upgrade keeps what the store holds.
+- A build with a toolchain other than 1.99.0 says how to switch the project to it
+  (`rustup override set 1.99.0`).
 - A start on a warm store with nothing of rustc's (`RA_JIT_RUSTC_BASE=0`) is no longer held up
   by the store and the interner (#41): each store entry and set of types is read once however
   many threads ask for it, a value already interned is found under the shard's read lock, the

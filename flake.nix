@@ -1,5 +1,5 @@
 {
-  description = "ra-jit: a compiler daemon and code generator, with live edits";
+  description = "blaze: cargo build, test and run from a daemon that keeps your workspace compiled, with live edits";
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-unstable";
@@ -113,17 +113,17 @@
         # What `nix profile install` puts on PATH: the same binaries, with the toolchain.
         daemon = pkgs.runCommand "ra-jit-${version}" {
           nativeBuildInputs = [ pkgs.makeWrapper ];
-          meta.mainProgram = "cargo-ra-jit";
+          meta.mainProgram = "cargo-blaze";
         } ''
           mkdir -p $out/bin
           for bin in ${dist}/bin/*; do
             makeWrapper $bin $out/bin/$(basename $bin) --prefix PATH : ${rust}/bin
           done
         '';
-        # `nix run github:indexable-inc/ra-jit -- build` is `cargo ra-jit build`.
-        run = pkgs.writeShellScriptBin "ra-jit" ''
+        # `nix run github:indexable-inc/blaze#blaze -- build` is `cargo blaze build`.
+        run = pkgs.writeShellScriptBin "blaze" ''
           export PATH=${daemon}/bin:${rust}/bin:$PATH
-          exec ${daemon}/bin/cargo-ra-jit ra-jit "$@"
+          exec ${daemon}/bin/cargo-blaze blaze "$@"
         '';
 
         # eframe/winit dlopen these at run time.
@@ -170,7 +170,7 @@
           fileset = pkgs.lib.fileset.unions [ ./demo/life ./crates/ra-jit-live ];
         };
         lifeVendor = pkgs.rustPlatform.importCargoLock { lockFile = ./demo/life/Cargo.lock; };
-        # `nix run github:indexable-inc/ra-jit`: the Game of Life window. On macOS on AArch64 the
+        # `nix run github:indexable-inc/blaze`: the Game of Life window. On macOS on AArch64 the
         # daemon builds the copy and edits to it show up live; elsewhere the prebuilt window runs.
         life = pkgs.writeShellScriptBin "ra-jit-life" ''
           export RA_JIT_LIFE_SOURCE=${lifeSource} RA_JIT_LIFE_VENDOR=${lifeVendor}
@@ -182,8 +182,9 @@
       in {
         packages = {
           default = life;
-          # `nix profile install github:indexable-inc/ra-jit#ra-jit`: ra-jit, cargo-ra-jit and
-          # ra-jit-rustc, so `ra-jit enable` and `cargo ra-jit` both work.
+          # `nix profile install github:indexable-inc/blaze#blaze`: cargo-blaze and the programs it
+          # runs, so `cargo blaze` and `cargo blaze enable` work. `ra-jit` is its name from before.
+          blaze = daemon;
           ra-jit = daemon;
           inherit dist daemon run life daemon-units life-bin;
           # The pinned LLVM's tools, with the libLLVM a build of the `llvm` feature loads: what CI
@@ -194,9 +195,13 @@
           type = "app";
           program = "${life}/bin/ra-jit-life";
         };
+        apps.blaze = {
+          type = "app";
+          program = "${run}/bin/blaze";
+        };
         apps.ra-jit = {
           type = "app";
-          program = "${run}/bin/ra-jit";
+          program = "${run}/bin/blaze";
         };
         # `nix develop`: the pinned LLVM (LLVM_SYS_201_PREFIX, its tools on PATH) and the C
         # toolchain it was built with, so `cargo build --features llvm` links against it. Rust is
