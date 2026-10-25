@@ -60,6 +60,9 @@ fn memory_max() -> Result<Option<u64>, String> {
     }
 }
 
+/// The setting of when the daemon has a spare worker.
+pub(crate) const SPARE: &str = "RA_JIT_SPARE";
+
 /// When the daemon has a spare worker, from `RA_JIT_SPARE`.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Spares {
@@ -75,7 +78,7 @@ enum Spares {
 }
 
 fn spares() -> Result<Spares, String> {
-    match std::env::var("RA_JIT_SPARE") {
+    match std::env::var(SPARE) {
         Err(_) => Ok(Spares::Asked),
         Ok(text) if text == "0" => Ok(Spares::Never),
         Ok(text) if text == "ready" => Ok(Spares::Ready),
@@ -261,6 +264,9 @@ pub(crate) struct WorkerConfig {
     pub(crate) selection: crate::plan::Selection,
     /// The variables the worker runs with that decide what it compiles and with what.
     pub(crate) env: BTreeMap<String, String>,
+    /// Whether its programs are built whole, with nothing of rustc's ([`Plan::whole`]).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub(crate) whole: bool,
 }
 
 impl WorkerConfig {
@@ -283,6 +289,9 @@ impl WorkerConfig {
         }
         if self.selection.dev_deps {
             args.push("--dev-deps".into());
+        }
+        if let Some(asked_in) = &self.selection.asked_in {
+            args.extend(["--asked-in".into(), asked_in.into()]);
         }
         for krate in crates {
             args.push("--crate".into());
@@ -345,14 +354,20 @@ impl Checkout {
             |path: &PathBuf| path.strip_prefix(&self.root).unwrap_or(path).display().to_string();
         // Each with a comma after it: the program is of these crates and no others.
         let crates: String = plan.crates.iter().map(|it| named(it) + ",").collect();
+        // A program built whole is linked by blaze into `binary`: no executable of rustc's
+        // is patched.
+        let (patch, splice, exe) = match plan.whole {
+            true => (String::new(), String::new(), plan.binary.display().to_string()),
+            false => {
+                (plan.patch.display().to_string(), plan.binary.display().to_string(), String::new())
+            }
+        };
         let mut line = format!(
-            "sync\t{}\t{}\t{}\t{}\t{}\t{}",
+            "sync\t{}\t{}\t{}\t{patch}\t{}\t{splice}\t{exe}",
             self.project().display(),
             crates,
             plan.object.display(),
-            plan.patch.display(),
             plan.link_cmd,
-            plan.binary.display()
         );
         for file in &plan.symbol_files {
             line.push('\t');
@@ -439,14 +454,17 @@ impl Worker {
         let _ = std::fs::remove_file(errors_beside(&socket));
         let config = &checkout.config;
         let mut args = config.args(&checkout.root, &first.crates);
-        let named: [(&str, &Path); 5] = [
+        let rustcs: [(&str, &Path); 5] = [
             ("--out", &first.object),
             ("--patch", &first.patch),
             ("--link-cmd", Path::new(&first.link_cmd)),
             ("--splice", &first.binary),
             ("--socket", &socket),
         ];
-        for (flag, path) in named {
+        let whole: [(&str, &Path); 3] =
+            [("--out", &first.object), ("--exe", &first.binary), ("--socket", &socket)];
+        let named: &[(&str, &Path)] = if first.whole { &whole } else { &rustcs };
+        for &(flag, path) in named {
             args.push(flag.into());
             args.push(path.into());
         }
@@ -1283,7 +1301,12 @@ impl Daemon {
             old.stop();
         }
         let ahead = lock(&self.ahead).remove(&id);
-        let spare = ahead.or_else(|| lock(&self.spare).take());
+        // A spare loads its library before it is told the build, which a whole build that
+        // asks at once would wait for.
+        let spare = match checkout.config.whole {
+            true => ahead,
+            false => ahead.or_else(|| lock(&self.spare).take()),
+        };
         let worker =
             Arc::new(Worker::start(&checkout, self.home.join("workers").join(&id), spare)?);
         eprintln!(

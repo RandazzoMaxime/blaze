@@ -5,25 +5,34 @@
 //! reaches fails the build, with what it is.
 
 use std::{
+    collections::BTreeMap,
     path::{Path, PathBuf},
-    process::{Command, Stdio},
+    process::Command,
     time::Instant,
 };
 
 use anyhow::Context as _;
 use cargo_metadata::{Metadata, Package};
 
-use crate::plan::Plan;
+use crate::plan::{Plan, Selection};
 
 use super::{
     FAILED,
-    cli::{Invocation, Subcommand},
+    cli::{Invocation, Subcommand, worker_env},
+    client::{self, Start},
+    daemon::{Checkout, Reply, Request, WorkerConfig},
+    plan::Plan as Linked,
     run, say,
-    state::{as_built, configured_env, library_path, place, run_env, sysroot_libraries},
+    state::{
+        as_built, configured_env, library_path, place, repository, run_env, sysroot_libraries,
+    },
 };
 
 /// The setting that has a build from nothing be blaze's whole build.
 const VARIABLE: &str = "RA_JIT_WHOLE_BUILD";
+
+/// How many of the functions blaze could not compile a failed build names.
+const SHOWN: usize = 8;
 
 /// Whether the build `asked` for, from nothing, is blaze's whole build: `build` or `run`, of
 /// the programs a build picks by default or one named with `--bin` or `--example`, for one
@@ -69,10 +78,10 @@ pub(super) fn build(asked: &Invocation) -> anyhow::Result<Option<i32>> {
             "Compiling",
             &format!("{} v{} ({})", package.name, package.version, at.display()),
         );
-        if let Err(why) = whole(asked, &cwd, program, &dir) {
-            say::error(&why);
-            return Ok(Some(FAILED));
-        }
+    }
+    if let Err(why) = whole(asked, &cwd, &metadata, &programs, &dir) {
+        say::error(&why);
+        return Ok(Some(FAILED));
     }
     let took = started.elapsed().as_secs_f64();
     let profile = asked.profile();
@@ -84,23 +93,151 @@ pub(super) fn build(asked: &Invocation) -> anyhow::Result<Option<i32>> {
     ran(asked, &cwd, &programs).map(Some)
 }
 
-/// Builds `program` whole into `dir` and puts it where cargo would. `Err` says why not.
-fn whole(asked: &Invocation, cwd: &Path, program: &Program, dir: &Path) -> Result<(), String> {
-    let built = dir.join(&program.name);
-    let log = dir.join(format!("{}.log", program.name));
+/// Has the daemon build `programs` whole into `dir`, and puts each where cargo would. A
+/// worker of the daemon loads the workspace and links each program before it answers, and
+/// builds them again on what it has loaded when asked next. `Err` says why not.
+fn whole(
+    asked: &Invocation,
+    cwd: &Path,
+    metadata: &Metadata,
+    programs: &[Program],
+    dir: &Path,
+) -> Result<(), String> {
+    let checkout = checkout(asked, cwd, metadata, programs, dir);
+    let reply = client::ask(Request::Build(super::asking(&checkout)), Start::IfMissing)
+        .map_err(|it| format!("{it:#}"))?;
+    let built = match reply {
+        Some(Reply::Synced { programs, .. }) => programs,
+        Some(Reply::Cold { reason }) => return Err(not_loaded(cwd, &checkout, &reason)),
+        None => return Err(client::why_none()),
+        Some(other) => return Err(format!("the daemon answered {other:?}")),
+    };
+    for ((program, plan), built) in std::iter::zip(programs, &checkout.programs).zip(built) {
+        if let Err(why) = built {
+            return Err(format!("could not build `{}`: {}", program.name, why.why()));
+        }
+        let stand_ins = crate::link::stand_ins(&plan.binary).map_err(|it| format!("{it:#}"))?;
+        if !stand_ins.is_empty() {
+            let mut reached: Vec<String> = stand_ins
+                .iter()
+                .take(SHOWN)
+                .map(|it| it.trim().trim_start_matches(hir_ty_codegen::STAND_IN_SAYS))
+                .map(without_hashes)
+                .collect();
+            if stand_ins.len() > SHOWN {
+                reached.push(format!("and {} more", stand_ins.len() - SHOWN));
+            }
+            return Err(format!(
+                "`{}` can reach functions blaze could not compile, so it is not built:\n  {}",
+                program.name,
+                reached.join("\n  ")
+            ));
+        }
+        if let Some(parent) = program.executable.parent() {
+            std::fs::create_dir_all(parent)
+                .map_err(|it| format!("creating {}: {it}", parent.display()))?;
+        }
+        place(&plan.binary, &program.executable)
+            .map_err(|it| format!("installing {}: {it}", program.executable.display()))?;
+    }
+    Ok(())
+}
+
+/// The daemon's checkout of a whole build of `programs`, each linked into `dir`.
+fn checkout(
+    asked: &Invocation,
+    cwd: &Path,
+    metadata: &Metadata,
+    programs: &[Program],
+    dir: &Path,
+) -> Checkout {
+    let root = metadata.workspace_root.as_std_path();
     let asked_in = asked.flags.manifest_path.as_ref().map_or(cwd.to_owned(), |it| cwd.join(it));
-    let mut blaze = Command::new(std::env::current_exe().map_err(|it| it.to_string())?);
-    blaze.arg(super::state::package_dir(&program.package)).arg("--own-target");
-    blaze.args(asked.selection().flags()).arg("--crate").arg(&program.root);
-    blaze.arg("--asked-in").arg(asked_in);
-    blaze.arg("--out").arg(built.with_extension("o")).arg("--exe").arg(&built);
-    // What blaze says goes to the log as it says it, so a long build can be followed there.
-    let writing =
-        std::fs::File::create(&log).map_err(|it| format!("writing {}: {it}", log.display()))?;
-    blaze.current_dir(cwd).stdin(Stdio::null()).stdout(Stdio::null()).stderr(writing);
-    let output = blaze.output().map_err(|it| format!("blaze did not start: {it}"))?;
-    let said = std::fs::read(&log).map_err(|it| format!("reading {}: {it}", log.display()))?;
-    let said = String::from_utf8_lossy(&said);
+    let project = programs.first().map(|it| super::state::package_dir(&it.package));
+    let project = project.as_deref().unwrap_or(root);
+    let config = WorkerConfig {
+        repository: repository(root),
+        project: project.strip_prefix(root).unwrap_or(Path::new("")).to_owned(),
+        cfg_test: false,
+        selection: Selection { asked_in: Some(asked_in), ..asked.selection() },
+        env: worker_env(),
+        whole: true,
+    };
+    let plans = programs.iter().map(|program| Linked {
+        crates: vec![program.root.clone()],
+        object: dir.join(format!("{}.o", program.name)),
+        patch: dir.join(format!("{}.patch.o", program.name)),
+        binary: dir.join(&program.name),
+        rustc_binary: None,
+        link_cmd: String::new(),
+        symbol_files: Vec::new(),
+        unit_test: false,
+        linked_as_built: Vec::new(),
+        copies: Vec::new(),
+        package: None,
+        stamp: 0,
+        whole: true,
+    });
+    let members = metadata.workspace_packages();
+    let manifests = members.iter().map(|it| it.manifest_path.as_std_path().to_owned());
+    let lock = root.join("Cargo.lock");
+    // A worker that loaded other manifests loads them again; one with the same is asked to
+    // build again what was edited since.
+    let generation = manifests.clone().chain([lock]).filter_map(|it| written_at(&it)).max();
+    let sources = members.iter().flat_map(|it| sources_in(&super::state::package_dir(it)));
+    Checkout {
+        key: format!("{}-whole", asked.key(cwd)),
+        generation: generation.unwrap_or(0),
+        built_at: 0,
+        config,
+        root: root.to_owned(),
+        programs: plans.collect(),
+        sources: manifests.chain(sources).collect(),
+        env: BTreeMap::new(),
+        scripts: None,
+    }
+}
+
+/// When `file` was last written, as a stamp.
+fn written_at(file: &Path) -> Option<u128> {
+    let written = std::fs::metadata(file).and_then(|it| it.modified()).ok()?;
+    Some(written.duration_since(std::time::UNIX_EPOCH).ok()?.as_nanos())
+}
+
+/// The Rust files of the package in `dir`, but not those of a target directory or of a
+/// package within it.
+fn sources_in(dir: &Path) -> Vec<PathBuf> {
+    let mut found = Vec::new();
+    let mut left = vec![dir.to_owned()];
+    while let Some(dir) = left.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else { continue };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let name = entry.file_name();
+            let Ok(kind) = entry.file_type() else { continue };
+            if kind.is_dir() {
+                let hidden = name.to_string_lossy().starts_with('.');
+                if !hidden && name != "target" && !path.join("Cargo.toml").exists() {
+                    left.push(path);
+                }
+            } else if path.extension().is_some_and(|it| it == "rs") {
+                found.push(path);
+            }
+        }
+    }
+    found
+}
+
+/// Why the daemon did not load the workspace, from what its worker said: the functions blaze
+/// could not compile, or its last error.
+fn not_loaded(cwd: &Path, checkout: &Checkout, reason: &str) -> String {
+    let named = checkout.programs.iter().map(|it| it.binary.file_name().unwrap_or_default());
+    let named: Vec<String> = named.map(|it| format!("`{}`", it.to_string_lossy())).collect();
+    let named = named.join(", ");
+    let Some(log) = worker_log(&checkout.root.join(&checkout.config.project)) else {
+        return format!("could not build {named}: {reason}");
+    };
+    let said = std::fs::read_to_string(&log).unwrap_or_default();
     let shown = log.strip_prefix(cwd).unwrap_or(&log).display().to_string();
     // A function of the program's own crates blaze cannot compile is left out of the object,
     // and the link then fails on what it would have defined.
@@ -109,50 +246,23 @@ fn whole(asked: &Invocation, cwd: &Path, program: &Program, dir: &Path) -> Resul
         .filter_map(|it| it.trim().strip_prefix("left to rustc: "))
         .map(without_hashes)
         .collect();
-    if !output.status.success() && !unsupported.is_empty() {
-        return Err(format!(
-            "`{}` has functions blaze could not compile, so it is not built:\n  {}\n(what blaze said is in {shown})",
-            program.name,
+    if !unsupported.is_empty() {
+        return format!(
+            "{named} has functions blaze could not compile, so it is not built:\n  {}\n(what blaze said is in {shown})",
             unsupported.join("\n  ")
-        ));
+        );
     }
-    if !output.status.success() {
-        let last = said.lines().rev().find(|it| !it.trim().is_empty()).unwrap_or("");
-        let last = last.strip_prefix("Error: ").unwrap_or(last);
-        return Err(format!(
-            "could not build `{}`: {last} (what blaze said is in {shown})",
-            program.name
-        ));
-    }
-    let mut left = said.lines().skip_while(|it| !is_linked(it));
-    match left.next() {
-        Some(linked) if !linked.ends_with(", 0 functions in it ra-jit could not compile") => {
-            // The link names the first few of them, each on a line of its own.
-            let reached: Vec<String> = left
-                .map_while(|it| it.strip_prefix("  "))
-                .map(|it| it.trim().trim_start_matches(hir_ty_codegen::STAND_IN_SAYS))
-                .map(without_hashes)
-                .collect();
-            return Err(format!(
-                "`{}` can reach functions blaze could not compile, so it is not built:\n  {}\n(what blaze said is in {shown})",
-                program.name,
-                reached.join("\n  ")
-            ));
-        }
-        Some(_) => {}
-        None => {
-            return Err(format!(
-                "blaze did not link `{}` (what it said is in {shown})",
-                program.name
-            ));
-        }
-    }
-    if let Some(parent) = program.executable.parent() {
-        std::fs::create_dir_all(parent)
-            .map_err(|it| format!("creating {}: {it}", parent.display()))?;
-    }
-    place(&built, &program.executable)
-        .map_err(|it| format!("installing {}: {it}", program.executable.display()))
+    let last = said.lines().rev().find(|it| it.starts_with("Error"));
+    let last = last.map_or(reason, |it| it.strip_prefix("Error: ").unwrap_or(it));
+    format!("could not build {named}: {last} (what blaze said is in {shown})")
+}
+
+/// The log of the daemon's worker for the package in `project`.
+fn worker_log(project: &Path) -> Option<PathBuf> {
+    let Ok(Some(Reply::Status(status))) = client::ask(Request::Status, Start::Never) else {
+        return None;
+    };
+    status.workers.into_iter().find(|it| it.project == project).map(|it| it.log)
 }
 
 /// `name` with the `[0123456789abcdef]` after each crate's name, and the `ra-jit.<hash>.` of
@@ -184,10 +294,6 @@ fn without_hashes(name: &str) -> String {
     }
     out.push_str(rest);
     out
-}
-
-fn is_linked(line: &str) -> bool {
-    line.starts_with("linked ") && line.ends_with(" functions in it ra-jit could not compile")
 }
 
 /// Runs the program `asked` names, as `cargo run` does.

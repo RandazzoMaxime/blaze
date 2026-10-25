@@ -97,7 +97,7 @@ use hir_ty::mir::{
 mod asm;
 mod backend;
 use backend::Step;
-pub use backend::{Backend, builds_edits};
+pub use backend::{Backend, builds_edits, links_own, sections_of_their_own};
 mod cached;
 mod debuginfo;
 pub use debuginfo::Sidecar;
@@ -4861,7 +4861,7 @@ impl<'a, 'db> ObjectCodegen<'a, 'db> {
         // rustc's objects, and what only that refers to need be defined nowhere: bun's calls of
         // Windows on Linux. The daemon's links keep everything for edits to be spliced into.
         // Apple's linker takes out symbols, and has room for 255 sections.
-        let sections = !backend::edits_follow()
+        let sections = backend::sections_of_their_own()
             && isa.triple().binary_format == target_lexicon::BinaryFormat::Elf;
         let mut builder = ObjectBuilder::new(isa, "ra-jit", default_libcall_names())?;
         builder.per_function_section(sections).per_data_object_section(sections);

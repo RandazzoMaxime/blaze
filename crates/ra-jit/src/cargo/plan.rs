@@ -100,6 +100,10 @@ pub(crate) struct Plan {
     pub(crate) package: Option<PathBuf>,
     /// The newest record the plan was made from.
     pub(crate) stamp: u128,
+    /// Whether the program is built whole by the daemon, every crate of it compiled and
+    /// `binary` linked by blaze, with nothing of rustc's (docs/no-rustc.md, step K).
+    #[serde(default)]
+    pub(crate) whole: bool,
 }
 
 /// The library of the workspace among `records` that wrote the file a link line names. The
@@ -148,6 +152,7 @@ impl Plan {
                 .then(|| link.output().map(|it| package::beside(Path::new(it))))
                 .flatten(),
             stamp: unit.stamp,
+            whole: false,
         };
         // rustc's object of the names the program keeps is moved to its copy, which stays when
         // the target directory is cleaned. GNU ld takes the panic runtime by it.
@@ -924,6 +929,7 @@ mod tests {
             copies: Vec::new(),
             stamp: 0,
             package: None,
+            whole: false,
         };
         let response = dir.join("link.args");
         let link = LinkLine::parse(LINE).unwrap().present();
@@ -973,6 +979,7 @@ mod tests {
             copies: Vec::new(),
             package: None,
             stamp: 0,
+            whole: false,
         };
         let response = dir.join("link.args");
         let command = LinkLine::parse(LINE)

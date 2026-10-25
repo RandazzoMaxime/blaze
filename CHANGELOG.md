@@ -8,6 +8,11 @@ All notable changes to ra-jit are written here. The format follows
 
 ### Added
 
+- `RA_JIT_WHOLE_BUILD=1`: the whole build runs in the daemon. Its worker loads the workspace,
+  builds and links each program, and answers once they are linked; the next build asks the
+  same worker, which builds the edits since on what it has loaded and links again, with no
+  load and no `cargo build`. A whole build starts no spare worker, and its objects keep each
+  function in a section of its own, so the link leaves out what the program never reaches.
 - The daemon's loads read the workspace with blaze's own resolution (`crates/blaze-metadata`),
   not `cargo locate-project` and `cargo metadata`: every locked package fetched by
   blaze-registry, and the graph of the build the load is for, with the features `cargo build`

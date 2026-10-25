@@ -141,12 +141,13 @@ nothing is handed to cargo:
        Compiling kuses v0.1.0 (/src/k/uses)
     error: `kuses` can reach functions blaze could not compile, so it is not built:
       `khalf::halved`: unsupported: f16 and f128
-    (what blaze said is in target/ra-jit/whole/kuses.log)
 
 Build scripts and proc macros are still built and run as the daemon's load does
 (`target/rust-analyzer`). A build of libraries alone and `test` are as without the setting.
-The daemon is not started, so each such build is a whole build again, quick where the store
-has its functions.
+The build is the daemon's: its worker loads the workspace, builds and links the programs, and
+answers once they are linked. The next build asks the same worker, which builds what was
+edited since on what it loaded and links the programs again; a changed manifest or lock file
+has a new worker load the workspace.
 
 `run` then runs the program and `test` runs the test executables the way cargo does: the
 same working directory, the variables cargo sets, cargo's `Running` lines and the same exit
