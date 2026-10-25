@@ -103,7 +103,7 @@ mod debuginfo;
 pub use debuginfo::Sidecar;
 mod float_pair;
 mod fncache;
-pub use fncache::tests_reach;
+pub use fncache::{AlwaysRun, tests_reach};
 mod fragment;
 mod home;
 pub use home::body_file;
@@ -2944,14 +2944,18 @@ fn futures_kept_apart() -> bool {
 /// to come from the compiler that compiles what holds and polls it.
 #[salsa::tracked]
 fn returns_async_block<'db>(db: &'db dyn HirDatabase, func: FunctionId) -> bool {
-    struct Finder {
+    struct Finder<'db> {
         opaque: bool,
         coroutine: bool,
+        seen: FxHashSet<Ty<'db>>,
     }
-    impl<'db> rustc_type_ir::TypeVisitor<DbInterner<'db>> for Finder {
+    impl<'db> rustc_type_ir::TypeVisitor<DbInterner<'db>> for Finder<'db> {
         type Result = ();
 
         fn visit_ty(&mut self, ty: Ty<'db>) {
+            if !self.seen.insert(ty) {
+                return;
+            }
             match ty.kind() {
                 TyKind::Coroutine(..) => self.coroutine = true,
                 TyKind::Alias(..) => self.opaque = true,
@@ -2960,7 +2964,7 @@ fn returns_async_block<'db>(db: &'db dyn HirDatabase, func: FunctionId) -> bool 
             rustc_type_ir::TypeSuperVisitable::super_visit_with(&ty, self)
         }
     }
-    let mut finder = Finder { opaque: false, coroutine: false };
+    let mut finder = Finder { opaque: false, coroutine: false, seen: FxHashSet::default() };
     // The declared type names a future only as an `impl Trait`, which the body's own does not.
     let declared = db.callable_item_signature(func.into()).skip_binder().skip_binder().output();
     rustc_type_ir::TypeVisitable::visit_with(&declared, &mut finder);
@@ -4430,7 +4434,10 @@ impl<'a, 'db> ObjectCodegen<'a, 'db> {
         // Without an identity for such a program, nothing of it is kept or found.
         let program = mixed.as_ref().map(|it| it.key);
         let store = store::Store::global().filter(|_| program != Some(None));
-        if let Some(store) = store {
+        // A patch calls the base's copy of what the last build kept, so it does not wait for
+        // the store to have it: after a build from nothing, writing it takes longer than the
+        // build's own compile.
+        if let Some(store) = store.filter(|_| base.is_none()) {
             store.settled();
         }
         let settled_at = start.elapsed();
@@ -4560,13 +4567,13 @@ impl<'a, 'db> ObjectCodegen<'a, 'db> {
                 .map_err(CodegenError::Backend)?,
             None => Vec::new(),
         };
-        // Freeing every type told of takes as long as writing the object: another thread does
-        // it, where there is one to start.
-        let told = std::mem::take(&mut self.told);
+        // Freeing every type told of, and every entry read from the store, takes as long as
+        // writing the object: another thread does it, where there is one to start.
+        let freed = (std::mem::take(&mut self.told), self.entries.take());
         if cfg!(target_family = "wasm") {
-            drop(told);
+            drop(freed);
         } else {
-            std::thread::spawn(move || drop(told));
+            std::thread::spawn(move || drop(freed));
         }
         let macho = product.object.format() == cranelift_object::object::BinaryFormat::MachO;
         let mut object = product.emit().map_err(|e| CodegenError::Backend(e.to_string()))?;

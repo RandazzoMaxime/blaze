@@ -88,7 +88,7 @@ pub(crate) fn tests(
     mut held: Option<Held>,
 ) -> anyhow::Result<i32> {
     let mut failed = Vec::new();
-    let mut left = 0;
+    let (mut left, mut always_run) = (0, 0);
     for test in state.programs.iter().filter(|it| it.test) {
         let source = test.source.strip_prefix(&test.package_dir).unwrap_or(&test.source);
         let unit = if matches!(test.kind, Kind::Test | Kind::Bench) { "" } else { "unittests " };
@@ -108,6 +108,17 @@ pub(crate) fn tests(
             picked.extend(names.iter().cloned());
         }
         say::status(asked.flags.quiet, "Running", &running);
+        if let Pick::Some { always, .. } = &pick {
+            always_run += always.len();
+            for test in always.iter().filter(|_| asked.flags.verbose) {
+                let by = test.path.as_ref().map(|it| format!(", by {it}")).unwrap_or_default();
+                say::status(
+                    asked.flags.quiet,
+                    "Always",
+                    &format!("{}: {}{by}", test.name, test.why),
+                );
+            }
+        }
         let mut command = Command::new(&test.executable);
         configured(&mut command, state);
         command.args(asked.program_args()).args(&picked).envs(test.env.iter().cloned());
@@ -129,10 +140,18 @@ pub(crate) fn tests(
             }
         }
     }
+    let why = if asked.flags.verbose { "said above" } else { "`-v` says why" };
+    let always = format!("{} run every time ({why})", counted(always_run));
     if left > 0 {
         let all = format!("`{}=all` runs every test", affected::VAR);
-        let unchanged = format!("{}, unchanged since the last pass; {all}", counted(left));
+        let unchanged = format!("{}, unchanged since the last pass", counted(left));
+        let unchanged = match always_run {
+            0 => format!("{unchanged}; {all}"),
+            _ => format!("{unchanged}; {always}; {all}"),
+        };
         say::status(asked.flags.quiet, "Skipped", &unchanged);
+    } else if always_run > 0 {
+        say::status(asked.flags.quiet, "Skipped", &format!("no test; {always}"));
     }
     match failed.as_slice() {
         [] => Ok(0),

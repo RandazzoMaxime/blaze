@@ -63,8 +63,17 @@ pub(crate) enum Pick {
     /// What the command asks, every test unless it names some: nothing is known of what an
     /// edit reached, or the command picks the tests itself.
     Asked,
-    /// The tests `names` names, of the `total` the program has, or all of them when `None`.
-    Some { names: Option<Vec<String>>, total: usize, passed: Passed },
+    /// The tests `names` names, of the `total` the program has, or all of them when `None`;
+    /// `always` are those of them run every time.
+    Some { names: Option<Vec<String>>, total: usize, always: Vec<Always>, passed: Passed },
+}
+
+/// A test that is run every time, and why.
+pub(crate) struct Always {
+    pub(crate) name: String,
+    pub(crate) why: String,
+    /// The calls that take the test to what it reaches, from the test on, joined by ` -> `.
+    pub(crate) path: Option<String>,
 }
 
 /// What is remembered of a program of tests once it passed.
@@ -116,7 +125,8 @@ pub(crate) fn pick(asked: &Invocation, state: &State, test: &Program) -> Pick {
         .map(|(identity, name)| (name, identity))
         .collect();
     let programs = programs_run_by(state, test);
-    let (mut names, mut tests, mut total) = (Vec::new(), BTreeMap::new(), 0);
+    let (mut names, mut tests, mut always, mut total) =
+        (Vec::new(), BTreeMap::new(), Vec::new(), 0);
     for line in reach.lines() {
         let mut parts = line.split('\t');
         let (Some(hash), Some(name)) = (parts.next(), parts.next()) else { continue };
@@ -126,6 +136,9 @@ pub(crate) fn pick(asked: &Invocation, state: &State, test: &Program) -> Pick {
         total += 1;
         if hash == "-" {
             names.push(name.to_owned());
+            let why = parts.next().unwrap_or_default().to_owned();
+            let path = parts.next().map(str::to_owned);
+            always.push(Always { name: name.to_owned(), why, path });
             continue;
         }
         let identity = format!("{hash}{programs}");
@@ -136,7 +149,7 @@ pub(crate) fn pick(asked: &Invocation, state: &State, test: &Program) -> Pick {
     }
     let long = names.iter().map(|it| it.len() + 1).sum::<usize>() > NAMES_AT_MOST;
     let names = (names.len() != total && !long).then_some(names);
-    Pick::Some { names, total, passed: Passed { file, tests } }
+    Pick::Some { names, total, always, passed: Passed { file, tests } }
 }
 
 /// Whether what follows `--` leaves the tests to the program to pick and says nothing of how

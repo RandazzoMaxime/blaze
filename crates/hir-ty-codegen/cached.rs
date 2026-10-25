@@ -553,10 +553,12 @@ pub(super) struct Entries {
 
 #[derive(Default)]
 struct Known {
-    entries: FxHashMap<Arc<str>, Option<Arc<Entry>>>,
+    /// Each read once however many threads ask for it at the same time: the callees of the
+    /// functions being built are mostly the same few, and the threads come to them together.
+    entries: FxHashMap<Arc<str>, Arc<OnceLock<Option<Arc<Entry>>>>>,
     /// Whether the program can be built from an entry and everything it calls.
     usable: FxHashMap<Arc<str>, bool>,
-    types: FxHashMap<[u8; KEY], Option<TypeSet>>,
+    types: FxHashMap<[u8; KEY], Arc<OnceLock<Option<TypeSet>>>>,
 }
 
 /// The sets of types that were given to the store, each when the first entry with a
@@ -744,10 +746,13 @@ impl Entries {
     }
 
     pub(super) fn get(&self, name: &str) -> Option<Arc<Entry>> {
-        if let Some(known) = self.known().entries.get(name) {
-            return known.clone();
-        }
-        let banned = Self::banned().lock().unwrap_or_else(|e| e.into_inner()).contains(name);
+        let cell = {
+            let mut known = self.known();
+            match known.entries.get(name) {
+                Some(cell) => cell.clone(),
+                None => known.entries.entry(Arc::from(name)).or_default().clone(),
+            }
+        };
         let read = || {
             let key = Entry::key(name, self.debug, self.program.as_ref())?;
             let mut entry = Entry::decode(&self.store.get(&key)?)?;
@@ -757,25 +762,24 @@ impl Entries {
             }
             entry.arrived(self.cargo_home.as_deref(), self.library.as_ref())
         };
-        let tally = super::backend::Tally::global();
-        let entry = (!banned)
-            .then(|| tally.step(super::backend::Step::StoreRead, read))
-            .flatten()
-            .map(Arc::new);
-        self.known().entries.insert(Arc::from(name), entry.clone());
-        entry
+        cell.get_or_init(|| {
+            let banned = Self::banned().lock().unwrap_or_else(|e| e.into_inner()).contains(name);
+            let tally = super::backend::Tally::global();
+            let entry = (!banned).then(|| tally.step(super::backend::Step::StoreRead, read));
+            entry.flatten().map(Arc::new)
+        })
+        .clone()
     }
 
     /// The set of types kept under `key`, which every entry with a variable of the type
     /// shares.
     fn types(&self, key: &[u8; KEY]) -> Option<TypeSet> {
-        if let Some(known) = self.known().types.get(key) {
-            return known.clone();
-        }
-        let types = self.store.get(key).and_then(|it| postcard::from_bytes::<Vec<_>>(&it).ok());
-        let types = types.map(TypeSet::from);
-        self.known().types.insert(*key, types.clone());
-        types
+        let cell = self.known().types.entry(*key).or_default().clone();
+        cell.get_or_init(|| {
+            let types = self.store.get(key).and_then(|it| postcard::from_bytes::<Vec<_>>(&it).ok());
+            types.map(TypeSet::from)
+        })
+        .clone()
     }
 
     fn settle(&self, name: Arc<str>, usable: bool) {

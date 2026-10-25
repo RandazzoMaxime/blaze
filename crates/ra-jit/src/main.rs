@@ -3176,7 +3176,11 @@ fn reach_of_tests(db: &RootDatabase, listed: &Listed, args: &Args) -> String {
                 let hex: String = identity.iter().map(|it| format!("{it:02x}")).collect();
                 format!("{hex}\t{name}\n")
             }
-            Err(why) => format!("-\t{name}\t{}\n", why.replace(['\t', '\n'], " ")),
+            Err(always) => {
+                let field = |it: &str| it.replace(['\t', '\n'], " ");
+                let path: Vec<String> = always.path.iter().map(|it| field(it)).collect();
+                format!("-\t{name}\t{}\t{}\n", field(&always.why), path.join(" -> "))
+            }
         };
         text.push_str(&line);
     }
@@ -6485,8 +6489,19 @@ fn requested(stream: UnixStream) -> Option<Event> {
 /// the other end for as long as it lives, however it dies.
 fn end_with_input() {
     while input_line().is_some() {}
-    // The executables on disk get the last edits before the worker goes.
+    // The executables on disk get the last edits before the worker goes, and the store what
+    // the last build kept.
     splicer::flush();
+    ra_jit_store::settled();
+    // What it started goes with it, as when the daemon kills it: the daemon started it in a
+    // group of its own.
+    #[cfg(unix)]
+    // SAFETY: neither takes a pointer.
+    unsafe {
+        if libc::getpgrp() == libc::getpid() {
+            libc::killpg(0, libc::SIGKILL);
+        }
+    }
     std::process::exit(0);
 }
 

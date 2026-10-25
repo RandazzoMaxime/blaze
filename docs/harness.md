@@ -151,7 +151,7 @@ with reasons. The daemon's log says `backend: llvm -O2 fast emit` when LLVM is i
 ### Timing
 
 `bench.py`, `editloop.py`, `edittimes.py`, `scaling.py`, `dxedits.py`, `linkbench.py`,
-`shapes.py`, `heap.py`, `heapfold.py`, `memsplit.py`, `fnincr.py`, `realbench.py`, `spare.py`, `live_latency.py` and `testselectbench.py` measure and do not gate.
+`shapes.py`, `heap.py`, `heapfold.py`, `leanprof.py`, `cpufold.py`, `memsplit.py`, `fnincr.py`, `realbench.py`, `spare.py`, `live_latency.py` and `testselectbench.py` measure and do not gate.
 `testselectbench.py` runs `bench.py`'s projects' tests under a daemon with `RA_JIT_TESTS=all` and
 `affected`, before and after `bench.py`'s `leaf` edit: the wall time, the tests run and skipped,
 and how many run every time and why, from what the daemon wrote beside each test program.
@@ -168,7 +168,10 @@ after, which is how the spare worker's default was chosen ([cargo.md](cargo.md#w
 ra-jit's own structures; `heapfold.py` makes of a profile on macOS what `jeprof --collapsed` makes
 of it on Linux, for `heap.py` to read ([research/daemon-memory.md](research/daemon-memory.md)); `heap.py --syntax`
 says what of it is syntax trees, of which kind and from which query, and `cpufold.py` folds a
-`perf script` the same way for time ([flat-syntax.md](flat-syntax.md)). `fnincr.py` counts
+`perf script` the same way for time ([flat-syntax.md](flat-syntax.md)). `leanprof.py` runs a
+project's cold start, own base, edits and warm start as phases with the times they began and
+ended, and `cpufold.py --phases` cuts a `perf` profile of the run by them, with what salsa was
+revalidating and who asked ([research/lean-frontend.md](research/lean-frontend.md)). `fnincr.py` counts
 the queries an edit inside one function of a big file runs (the file comes from `genbig.py`),
 against the same functions in many small files ([reports/INCREMENTAL.md](reports/INCREMENTAL.md)). `realbench.py` times
 `cargo ra-jit build` against `cargo build` on ripgrep, just and nushell (cold, no-op and
@@ -178,7 +181,12 @@ edit, from an empty or a filled store, with every line the daemon logged and the
 along the way: the readiness check of [#11](https://github.com/indexable-inc/ra-jit/issues/11),
 whose numbers are in [cargo.md](cargo.md#what-a-build-does). With `--max-wait S` it fails when
 the daemon was ready more than S seconds after the command returned; `--until TEXT` waits for a
-line the daemon logs, and `--memory` follows what its processes hold. Their docstrings say how to run them.
+line the daemon logs, and `--memory` follows what its processes hold. `warmstart.py PROJECT`
+times a start on a warm store with nothing of rustc's (`RA_JIT_RUSTC_BASE=0`, [#41](https://github.com/indexable-inc/ra-jit/issues/41)):
+a first checkout on an empty store, a second on the store it filled, that daemon stopped and
+started, and once more, each followed by a body edit and its undoing; it keeps what each worker
+said in `WORK/said-STEP.txt` and exits 1 when a program's output is not cargo's
+([research/warm-start.md](research/warm-start.md)). Their docstrings say how to run them.
 `bench.py` on real projects, with `benchreport.py`, is also what writes the README's build
 table: [benchmarks.md](benchmarks.md). Besides the edits `bench.py` times repeated cold builds
 against fresh cargo with an empty and with a warm store (`--cold-runs`), the same steps under
