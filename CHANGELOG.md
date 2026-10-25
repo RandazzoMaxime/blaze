@@ -8,6 +8,15 @@ All notable changes to ra-jit are written here. The format follows
 
 ### Added
 
+- blaze needs no Rust and no rustup installed (#298). With neither, it downloads Rust 1.99.0
+  once into `~/.blaze/toolchains` (rustc, cargo, the standard library and its source: 97 MB on
+  macOS, 133 MB on Linux x86-64), laid out as rustup lays out a toolchain, and builds with it.
+  Each file's sha256 is built into blaze from the release's published manifest, and a file
+  with other bytes is refused. Downloads run together over blaze's own HTTPS client, unpack
+  into a directory beside the toolchain's and are renamed into place, concurrent builds
+  download once, and a download that stopped goes on from where it stopped. rustup's 1.99.0,
+  when installed, is still the one used. `blaze build`, `run`, `test`, `check` and `stop` are
+  `cargo blaze`'s commands without cargo; `blaze toolchain` says which Rust blaze builds with.
 - `cargo ra-jit test` with `RA_JIT_TESTS=affected` runs, on Linux, each test that reaches a
   file, the environment, a process or the network in a sandbox of its own (#257): a process
   in new user, mount, network, IPC and PID namespaces, the machine's files read-only, the

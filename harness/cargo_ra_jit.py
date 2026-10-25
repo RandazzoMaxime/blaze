@@ -30,7 +30,8 @@ Daemon. Started on demand, reused, shared by a git worktree, alive after its cli
 killed, replaced when the client is another build of ra-jit, gone when idle, and its workers
 gone with it. A project whose rust-toolchain file names an older stable or a nightly is built
 and edited by the daemon, under the toolchain ra-jit compiles, and a `#![feature]` of the
-nightly fails with rustc's error and a note naming both releases.
+nightly fails with rustc's error and a note naming both releases. With no rustup and no Rust on
+the path, `blaze run` builds with blaze's own copy of its release and the edit is the daemon's.
 
 Plain cargo. `ra-jit enable` and `ra-jit disable` over a cargo configuration that is there,
 that is not, and that is edited in between; a wrapper the user had; what a project's own
@@ -861,6 +862,7 @@ def daemon(work):
     in_place(work, check)
     through_link(work, check)
     pinned(work, check)
+    own_toolchain(work, check)
     return checks
 
 
@@ -912,6 +914,68 @@ def pinned(work, check):
     _, featured = side.cargo("build")
     said = "E0554" in featured.stderr and "in place of 1.101.0-nightly, which the project's rust-toolchain file names" in featured.stderr
     check("a nightly's `#![feature]` fails with rustc's error and a note naming both releases, and no cargo", featured.returncode == 101 and said and "building with cargo" not in featured.stderr, f"exit {featured.returncode}, {featured.stderr.strip()[-400:]!r}")
+    side.cargo("stop")
+
+
+class Bare(Side):
+    """`blaze` itself, where there is no cargo to run `cargo blaze`: the same commands."""
+
+    def argv(self, command, *args):
+        return [os.path.join(os.path.dirname(RA_JIT), "blaze" + EXE), command, *args]
+
+
+def own_toolchain(work, check):
+    """A machine with no rustup and no Rust on the path (docs/self-contained.md): blaze builds
+    with its own copy of its release, laid out in `BLAZE_HOME` as rustup lays one out (here a
+    copy of rustup's, so nothing is downloaded), runs cargo and rustc from it, and the edit
+    after the first build is the daemon's."""
+    sysroot = subprocess.run(["rustup", "run", TOOLCHAIN, "rustc", "--print", "sysroot"], capture_output=True, text=True).stdout.strip() if shutil.which("rustup") else ""
+    if WINDOWS or not os.path.exists(os.path.join(sysroot, "lib/rustlib/multirust-channel-manifest.toml")):
+        return
+    home = os.path.join(work, "home-own")
+    os.makedirs(home, mode=0o700)
+    host = subprocess.run([os.path.join(sysroot, "bin", "rustc"), "-vV"], capture_output=True, text=True).stdout.split("host: ")[1].split()[0]
+    own = os.path.join(home, "toolchains", f"{TOOLCHAIN}-{host}")
+
+    def link(source, target):
+        try:
+            os.link(source, target)
+        except OSError:
+            shutil.copy2(source, target)
+    shutil.copytree(sysroot, own, symlinks=True, copy_function=link)
+    env = base_env(home)
+    for name in ("RUSTUP_TOOLCHAIN", "RUSTC", "RUSTDOC", "CARGO"):
+        env.pop(name, None)
+    # BLAZE_HOME is the daemon's directory too, which RA_JIT_HOME names in the other steps.
+    env["BLAZE_HOME"] = home
+    env["RUSTUP_HOME"] = os.path.join(work, "no-rustup")
+    rust = ("cargo" + EXE, "rustc" + EXE, "rustup" + EXE)
+    dirs = [d for d in env["PATH"].split(os.pathsep) if d and not any(os.path.exists(os.path.join(d, it)) for it in rust)]
+    cc = shutil.which("cc")
+    if cc and not any(os.path.exists(os.path.join(d, "cc")) for d in dirs):
+        os.makedirs(os.path.join(work, "cc-only"))
+        os.symlink(cc, os.path.join(work, "cc-only", "cc"))
+        dirs.append(os.path.join(work, "cc-only"))
+    env["PATH"] = os.pathsep.join([os.path.dirname(RA_JIT), *dirs])
+
+    ws = os.path.join(work, "own-toolchain")
+    os.makedirs(os.path.join(ws, "src"))
+    open(os.path.join(ws, "Cargo.toml"), "w").write('[package]\nname = "own"\nversion = "0.1.0"\nedition = "2021"\n')
+    open(os.path.join(ws, "src/main.rs"), "w").write('fn main() {\n    println!("own {}", 6 * 7);\n}\n')
+    side = Bare(ws, env, True)
+    _, said = side.cargo("toolchain")
+    check("with no rustup and no Rust on the path, blaze builds with its own copy of its release",
+          said.returncode == 0 and f"blaze's own copy at {own}" in said.stdout and "Downloading" not in said.stderr,
+          f"exit {said.returncode}, {said.stdout.strip()!r} {said.stderr.strip()[-300:]!r}")
+    _, cold = side.cargo("run")
+    check("and `blaze run` builds and runs the program with it", cold.returncode == 0 and "own 42" in cold.stdout,
+          f"exit {cold.returncode}, {cold.stderr.strip()[-300:]!r}")
+    wait_warm(side, ws)
+    rewrite(os.path.join(ws, "src/main.rs"), "6 * 7", "6 * 8")
+    _, edited = side.cargo("run")
+    how = how_built(edited.stderr)
+    check("and its edit is the daemon's", edited.returncode == 0 and how == "daemon" and "own 48" in edited.stdout,
+          f"{how[:90]}; {edited.stderr.strip()[-300:]!r}")
     side.cargo("stop")
 
 

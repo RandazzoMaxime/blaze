@@ -2457,6 +2457,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "lzma-rust2"
+version = "0.23.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f1c46f3fcd2e888afdb01a07efc071cb21300e07c68d32c3e8b01b5c8cb1fcaa"
+dependencies = [
+ "sha2 0.11.1",
+]
+
+[[package]]
 name = "macros"
 version = "0.0.0"
 dependencies = [
@@ -3193,6 +3202,7 @@ dependencies = [
  "intern",
  "libc",
  "load-cargo",
+ "lzma-rust2",
  "memchr",
  "memmap2",
  "mimalloc",
@@ -3217,6 +3227,7 @@ dependencies = [
  "shlex",
  "syntax",
  "tar",
+ "tempfile",
  "test-fixture",
  "thorin-dwp",
  "tikv-jemalloc-ctl",
