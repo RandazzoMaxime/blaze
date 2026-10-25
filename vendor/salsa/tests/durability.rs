@@ -83,3 +83,48 @@ fn less_durable_is_backdated() {
     assert_eq!(counted_add3(&db, a, b, c), 77);
     assert_eq!(runs(), 2);
 }
+
+#[salsa::tracked]
+struct Sum<'db> {
+    #[tracked]
+    #[returns(copy)]
+    value: u32,
+}
+
+#[salsa::tracked(returns(copy))]
+fn sum<'db>(db: &'db dyn Database, a: N, b: N) -> Sum<'db> {
+    Sum::new(db, a.value(db) + b.value(db))
+}
+
+static READS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+#[salsa::tracked(returns(copy))]
+fn read_sum(db: &dyn Database, a: N, b: N) -> u32 {
+    READS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    sum(db, a, b).value(db)
+}
+
+/// A field of a tracked struct made again less durable but the same keeps its revision: what
+/// read it is verified rather than run again, and a change after reaches it.
+#[test]
+fn less_durable_field_is_kept() {
+    let mut db = salsa::DatabaseImpl::new();
+    let runs = || READS.load(std::sync::atomic::Ordering::Relaxed);
+
+    let a = N::builder(11).value_durability(Durability::HIGH).new(&db);
+    let b = N::builder(22).value_durability(Durability::HIGH).new(&db);
+    assert_eq!(read_sum(&db, a, b), 33);
+    assert_eq!(runs(), 1);
+
+    a.set_value(&mut db).with_durability(Durability::LOW).to(11);
+    assert_eq!(read_sum(&db, a, b), 33);
+    assert_eq!(runs(), 1);
+
+    a.set_value(&mut db).to(22);
+    assert_eq!(read_sum(&db, a, b), 44);
+    assert_eq!(runs(), 2);
+
+    db.synthetic_write(Durability::LOW);
+    assert_eq!(read_sum(&db, a, b), 44);
+    assert_eq!(runs(), 2);
+}
