@@ -351,7 +351,9 @@ def app(name, work, server):
             env["RA_JIT_PROC_MACRO_SERVER"] = server
         else:
             env.update(RA_JIT_PROC_MACRO_COMPARE=server, RA_JIT_PROC_MACRO_LIBS=libs)
-        binary = os.path.join(work, f"{program}-{'ours' if named else 'theirs'}")
+        # The same file name in both, which a program's usage line prints.
+        binary = os.path.join(work, f"{name}-{'ours' if named else 'theirs'}", program)
+        os.makedirs(os.path.dirname(binary), exist_ok=True)
         ran, took = ra_jit(root, [crate], os.path.join(work, f"{name}.o"), "--own-target",
                            "--exe", binary, env=env)
         left = re.search(r"(\d+) functions in it ra-jit could not compile$", ran.stderr, re.M)
