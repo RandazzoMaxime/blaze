@@ -19,8 +19,10 @@ A daemon builds the workspace into an empty store and stops. A second one on the
 checkout, and a third on a copy of it elsewhere with a home of its own, start on that store:
 each has to take the checkout's functions from it, compile none of them again, and splice
 every edit after: a generic function's body, whose instance is the checkout's and was found
-in the store, a closure's, a static's value, the program's own text, and all of it taken
-back. The program has to print what the source says.
+in the store, a closure's, a static's value, the program's own text, an `#[inline]` function
+whose callers from the store call rustc's copy of it in the program's crate, and all of it
+taken back. The program has to print what the source says, and no call of rustc's copy of a
+function of the checkout may be left out of the store (#216).
 
 Python 3, stdlib only.
 """
@@ -60,32 +62,56 @@ fn walk<F: Fn(u64) -> u64>(v: &[u64], f: &F) -> u64 {
         [x, rest @ ..] => f(*x) + walk(rest, f),
     }
 }
+
+pub struct Span {
+    pub start: u64,
+}
+
+impl Span {
+    // rustc copies it into each crate that calls it, and a generic function's instance of
+    // another crate calls that copy.
+    #[inline]
+    pub fn start(&self) -> u64 {
+        self.start
+    }
+}
+
+pub fn starts<T: Copy + Into<u64>>(v: &[T]) -> u64 {
+    v.iter().map(|&x| Span { start: x.into() }.start()).sum()
+}
 """,
     "app/Cargo.toml": '[package]\nname = "tapp"\nversion = "0.1.0"\nedition = "2021"\n\n'
                       '[dependencies]\ntlib = { path = "../lib" }\n',
     APP: """fn main() {
-    println!("{} {} {} {} {}", "a", tlib::scale(2u8), tlib::each(&[1u32, 2]), tlib::BASE, tlib::total(&[1, 2]));
+    println!("{} {} {} {} {} {}", "a", tlib::scale(2u8), tlib::each(&[1u32, 2]), tlib::BASE, tlib::total(&[1, 2]),
+             tlib::starts(&[3u16, 4]));
 }
 """,
 }
-FIRST = "a 6 5 10 6"
+FIRST = "a 6 5 10 6 7"
 # (what the step is, [(file, old, new)], what the program prints after it)
 STEPS = [
-    ("a generic function's body", [(LIB, "x.into() * 3", "x.into() * 4")], "a 8 5 10 6"),
+    ("a generic function's body", [(LIB, "x.into() * 3", "x.into() * 4")], "a 8 5 10 6 7"),
     # A closure is named by where in its body it is written: this one, and the instances
     # generic over it, get new names, and the ones from the store are called no more.
-    ("a line above a closure", [(LIB, "    v.iter()", "    let _ = 0u64;\n    v.iter()")], "a 8 5 10 6"),
+    ("a line above a closure", [(LIB, "    v.iter()", "    let _ = 0u64;\n    v.iter()")], "a 8 5 10 6 7"),
     # The same of a recursive function's instance, which calls itself.
     ("a line above a closure a recursive function takes", [(LIB, "    walk(v", "    let _ = 1u64;\n    walk(v")],
-     "a 8 5 10 6"),
-    ("a closure's body", [(LIB, "x.into() + 1", "x.into() + 2")], "a 8 7 10 6"),
-    ("a static's value", [(LIB, "BASE: u64 = 10", "BASE: u64 = 12")], "a 8 7 12 6"),
-    ("the program's own text", [(APP, '"a"', '"b"')], "b 8 7 12 6"),
+     "a 8 5 10 6 7"),
+    ("a closure's body", [(LIB, "x.into() + 1", "x.into() + 2")], "a 8 7 10 6 7"),
+    ("a static's value", [(LIB, "BASE: u64 = 10", "BASE: u64 = 12")], "a 8 7 12 6 7"),
+    ("the program's own text", [(APP, '"a"', '"b"')], "b 8 7 12 6 7"),
+    # Its callers from the store call rustc's copy of it in the program's crate (#216).
+    ("a function rustc copies into its callers", [(LIB, "        self.start\n", "        self.start + 1\n")],
+     "b 8 7 12 6 9"),
     ("all of it taken back", [(LIB, "x.into() * 4", "x.into() * 3"), (LIB, "    let _ = 0u64;\n", ""),
                               (LIB, "    let _ = 1u64;\n", ""), (LIB, "x.into() + 2", "x.into() + 1"),
-                              (LIB, "BASE: u64 = 12", "BASE: u64 = 10"), (APP, '"b"', '"a"')], FIRST),
+                              (LIB, "BASE: u64 = 12", "BASE: u64 = 10"), (APP, '"b"', '"a"'),
+                              (LIB, "        self.start + 1\n", "        self.start\n")], FIRST),
 ]
 REBUILT = "compiling what the store had of the checkout"
+# What a call of rustc's copy of a function of the checkout was left out of the store as (#216).
+UNKEPT = "rustc's copy of a function of the checkout"
 
 
 def build(ws, env, step):
@@ -181,6 +207,9 @@ def restart(ws, env, label, steps):
         print(f"{label + ': ' + what:48} {verdict:12} {how[:120]}", flush=True)
     if REBUILT in logs.text():
         print(f"{label}: NOT the store's code taken as it is: the daemon said `{REBUILT}`", flush=True)
+        wrong += 1
+    if UNKEPT in logs.text():
+        print(f"{label}: NOT every call kept: the daemon said `{UNKEPT}`", flush=True)
         wrong += 1
     return wrong
 

@@ -75,6 +75,9 @@ pub(super) enum CachedTarget {
     TypeId(u128),
     /// The function an `asm!` block is assembled as, by its assembly.
     Asm(String),
+    /// rustc's copy `symbol` of the function of the checkout named `name`, which the build
+    /// wants compiled too, as a call of it in a build that links rustc's code has it.
+    Copy { name: String, symbol: String },
 }
 
 #[derive(Debug, Serialize, Deserialize, PartialEq)]
@@ -456,6 +459,7 @@ impl Entry {
     pub(super) fn links(&self, defines: &dyn Fn(&str) -> bool) -> bool {
         let funcs = self.funcs.iter().all(|it| match &it.target {
             CachedTarget::Import { symbol, checked } => !checked || defines(symbol),
+            CachedTarget::Copy { symbol, .. } => defines(symbol),
             CachedTarget::Named(_)
             | CachedTarget::Root(_)
             | CachedTarget::TypeId(_)
@@ -472,6 +476,7 @@ impl Entry {
         self.funcs.iter().filter_map(|it| match &it.target {
             CachedTarget::Named(name) => Some(name.as_str()),
             CachedTarget::Import { .. }
+            | CachedTarget::Copy { .. }
             | CachedTarget::Root(_)
             | CachedTarget::TypeId(_)
             | CachedTarget::Asm(_) => None,
@@ -966,6 +971,10 @@ mod tests {
             CachedTarget::Root("case::edited".to_owned()),
             CachedTarget::TypeId(7 << 100),
             CachedTarget::Asm("nop".to_owned()),
+            CachedTarget::Copy {
+                name: "case::small".to_owned(),
+                symbol: "_RNvCs1_4case5small".to_owned(),
+            },
         ];
         let datas = vec![
             CachedData::Static { symbol: "ENVIRON".to_owned(), thread_local: false },
