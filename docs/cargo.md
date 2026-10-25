@@ -79,14 +79,18 @@ The first build of a workspace is cargo's own, run with ra-jit as the
 each crate of the workspace, the arguments, the files rustc wrote and, for a program, the
 line the linker was run with. Diagnostics, progress and the exit status are cargo's.
 
-When that build succeeds, the command tells the daemon to load the workspace and returns
-without waiting. The daemon is started if it is not running. It loads the workspace with what
-cargo said of the build scripts it ran and the proc macros it built, kept in
+The daemon is started before cargo, if it is not running, and loads the workspace while cargo
+builds, with what cargo says of the build scripts it runs and the proc macros it builds, kept in
 `target/ra-jit/<build>/scripts`: none of them is built or run again for it, in
-`target/rust-analyzer` or anywhere else. Until the workspace is loaded,
-builds are cargo's, and each one says so:
+`target/rust-analyzer` or anywhere else. When cargo's build succeeds, the command waits for the
+daemon to have the workspace loaded and to build the programs from it, and those are the build's,
+as they are of every build after it:
 
-    ra-jit: the daemon is still loading the workspace (951ms so far); building with cargo
+         Waiting for blaze to load the workspace
+        Finished `dev` profile [ra-jit] target(s) in 41.20s
+
+A program the daemon does not build then stays cargo's, and the build says why. A build asked
+for while the daemon is still loading, as after it was stopped, waits for it the same way.
 
 Once the daemon is ready, a build after an edit does not start cargo at all. The daemon
 compiles the functions that changed and either splices them into the executable or links
@@ -230,7 +234,6 @@ A whole invocation goes to cargo when any of these hold (`Invocation::only_cargo
 
 A single build goes to cargo when:
 
-- the daemon is still loading the workspace;
 - a manifest, `Cargo.lock`, a cargo configuration file, the toolchain file, or something a
   build script reads has changed since cargo last built (a source a build script makes newer
   before cargo runs rustc on it, as biome's do, has not). Cargo builds, and the daemon loads
