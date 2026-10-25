@@ -127,9 +127,10 @@ What is specific to the port:
 
 Debug info is CodeView procedures and line tables: backtraces and breakpoints by line work,
 a debugger shows no types, parameters or locals. The PDB is stale after a splice until the
-next full link. `cargo ra-jit`
-hands every build to cargo, because its link step is written for ELF, and has not been run
-on Windows. `remote.py` and the fuzzer are not run. The GNU and ARM64 Windows targets have nothing implemented.
+next full link. `cargo blaze` builds through the daemon (`[ra-jit]`) and links with `rust-lld`
+as the repository's cargo configuration names it. That was run by hand on one machine, on a toy
+crate and `demo/life`, not in CI; `harness/cargo_ra_jit.py` and the fuzzer are not run there.
+The GNU and ARM64 Windows targets have nothing implemented.
 
 ## macOS arm64
 
