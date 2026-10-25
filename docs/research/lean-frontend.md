@@ -244,8 +244,111 @@ numbers, **unverified** that it was noise). The signature edit's 19 listings sum
 after another, but each takes 8 to 18 ms beside the others, verifying the same memos of
 nu-protocol: what is left of the stage is that and the exported functions (**read**).
 
+## Slices 2 to 4, and where a body edit's time goes
+
+2026-10-25. As for slice 1, but on cores 120 to 135 with builds on 136 to 191,
+`leanprof.py nushell --no-warm --env RA_JIT_STATS=1 --rounds 6`, two interleaved runs per build
+and medians of the 25 edits of each kind after the first. Each branch is measured against main at
+its own base: `81648d0a9c` (#239) for the patch marks, salsa and borrowck branches and the crates
+lookup, `08924cadc8` (#241, which brings #235) for the impls branch and for all of them together.
+Profiles are `cpufold.py`'s, which now counts each sample for its period: at `-F 199` a thread
+that just woke is sampled with a short period, and counting samples gave an edit's short bursts
+on many cores more than their share (**read**).
+
+**Where a nushell body edit's 300 ms went** on main, from the stage timeline and the stacks of
+each thread over one edit (**read**): noticing it, 35 ms, most of which is the cargo client
+starting and asking; applying it, 23 ms; naming the build's crates, about 40 ms, a walk of the
+crate graph and of each root's path for every name; the first type check verifying
+`TraitImpls::for_crate` of every crate it reaches, one after another through
+`for_crate_and_deps` (an impl may be written in a body, so each crate's memo is verified again:
+about 275M cycles an edit), 37 to 75 ms while the other threads wait for its claim; inferring
+`main` (nushell's `main.rs` is one function of 507 lines and two small ones), about 70 ms; and
+on the diagnostics thread borrow checking `main`, about 100 ms, which outlasted code generation
+by about 46 ms and which `build` waits for; then the link, 14 ms.
+
+| nushell | main | branch |
+|---|---|---|
+| **patch marks** (#243): signature edit | 394 / 397 ms | 338 / 326 ms |
+| its `check` stage | 245 / 254 ms | 194 / 185 ms |
+| **salsa vendored, interned values verified without a lock** (#244): signature edit | 394 / 397 ms | 382 / 386 ms |
+| **crates named through a query** (crates branch): body edit | 304 / 312 ms | 279 / 270 ms |
+| signature edit | 395 / 390 ms | 340 / 355 ms |
+| **impls verified on every core** (#245): body edit | 317 / 313 ms | 302 / 300 ms |
+| signature edit | 399 / 406 ms | 379 / 381 ms |
+| **borrowck's drops liveness** (#246): body edit | 308 / 306 ms | 295 / 294 ms |
+| its `build-rest` stage | 74 / 74 ms | 62 / 64 ms |
+| **interned arguments kept** (interned-arguments branch, against salsa vendored): signature edit | 384 / 382 ms | 367 / 377 ms |
+| **all of them**: body edit | 317 / 313 ms | 257 / 259 ms (−18%) |
+| signature edit | 399 / 406 ms | 268 / 285 ms (−31%) |
+| the harness's wall time, body / signature | 0.36 / 0.45 s | 0.31 / 0.33 s |
+| cold start | 61.5 / 61.4 s | 62.7 / 61.7 s |
+| peak during the own base | 11.0 / 11.1 GB | 11.0 / 11.0 GB |
+| peak during body / signature edits | 7.5-7.6 / 6.9-7.0 GB | 7.5-7.6 / 7.0 GB |
+
+All **read**. No branch moves the cold start or the peaks beyond the runs' spread, but for one:
+the own base peaked at 13.9 to 14.1 GB in both runs of the crates branch alone and in one of the
+impls branch, as it did once for slice 1, and never with all the branches (**read**; what it is
+was not found, **unverified** that it is not a change's).
+
+**Slice 2, the patch base asked about fewer instances.** With debug info on, the patch built
+against the base asked a `Mark` of every row it placed, each an interned call of `row_place` and
+a walk of its edges. `root_mark` and `instance_mark` are now tracked queries that return the mark
+by value, so they are the firewall per instance the issue proposed: a signature edit verifies one
+memo per instance and backdates it when the lines did not move (#243). The other half of a
+signature edit's verification was salsa taking each interned value's shard lock to verify it;
+an interned value that is immortal, or was already verified in this revision, is now answered
+from its generation without the lock (#244, with salsa, salsa-macros and salsa-macro-rules
+vendored as published). Asking only about instances that mention a changed item was not built.
+The 27.6M edges to memos already verified are each a lookup and a revision compare; with the
+marks most of those of `row_place` are gone, and the rest were not measured again (**unverified**).
+
+**The crates of a build named through queries.** `crates_named` and `crates_called` walked the
+crate graph and the path of every crate's root for every name a build gave, several times a
+build. The graph's names and roots are one query (`named_crates`), and a crate's dependencies
+another (`deps_of`), both asked again only when the graph changes (crates branch).
+
+**Slice 3, diagnostics off a body edit's critical path.** The diagnostics are not what the edit
+waits for: borrow checking the edited function is, on the diagnostics thread, and within it
+`maybe_initialized_at_drops`, which for every local walked all the move paths below it at every
+block. A local is initialized in part where one of its paths is, so the set is now the locals of
+the initialized paths (#246). `borrowck_ui.py --mode both` gives the same counts before and after
+(polonius 1540 of 1581, NLL 1536 of 1579 in scope). The impls the type check verifies one crate
+after another are now asked for on every core beside the stale check (#245). Splitting one file's
+diagnostics by definition was not built: on nushell the edited file is one large function, whose
+borrow check is the long pole, so it would gain little there (**unverified**). Left in borrowck:
+`regions::build` (84M cycles an edit) and `liveness::region_liveness` (79M), and checking a
+body's closures in parallel (**read** for the cycles).
+
+**Slice 4, implicit interned arguments kept.** A tracked function of more than one argument
+interns its arguments as a tuple, which salsa keeps for 3 revisions after it was last asked for and
+then may collect and reuse. Each call of it records the tuple's read, an edge, and its LRU. A tuple
+can be kept for good only if nothing in it is collected (a value it holds, freed and its slot
+reused, would make the tuple name another value). What salsa collects in ra-jit (**read**, by
+search of every `#[salsa::interned]` and `#[salsa::tracked]` struct): the tracked structs
+`ModuleIdLt`, `BlockIdLt`, `Modules`, `ModuleScope` and `DefMapPair` (hir-def), and the interned
+`InternedFileId` (ide-db) and `InternedSourceRootId` (base-db). Every other interned type,
+the ids of `impl_intern_key!` (functions, impls, traits, closures and the rest), the solver's def
+ids and syntax contexts among them, is declared `revisions = usize::MAX`; types, generic arguments
+and clauses are `intern` crate values, reference counted and never collected (the crate's
+`gc` is only called by the proc-macro server's copy); `Crate` is a salsa input. So no blanket
+change: `ModuleScope::name` and many others take a `ModuleId` or a tracked struct. salsa-macros
+now takes `revisions` on a tracked function, for its interned arguments, and six hot ones whose
+arguments hold none of the collected types keep theirs for good: `row_place`, `source_place`,
+`compiled_instance`, `instance_serial`, `layout_of_ty_query` and
+`TraitImpls::in_crate_and_deps_for_trait_and_self_ty` (interned-arguments branch). salsa's own
+tests pass with it (126 test binaries), and its compile-fail test of a single salsa struct's
+function given `revisions` now says why; four other compile-fail expectations differ from rustc
+1.99's output in rustc's own wording, which this does not touch (**read**). The −39 MB of salsa metadata measured earlier on a fork was not
+measured again here (**unverified** for these six).
+
+**The first edit after the own base** took 12.3 s at the client while the daemon answered it in
+335 ms: in its log the next request came 12 s after that reply, and the second edit's wall was
+0.31 s (**read**). The time is the client's, or work that is not a request; it was not looked
+into (**unverified** where it goes).
+
 ## Not checked
 
-- helix was not measured; nushell is the only project here.
+- helix was not measured; slices 2 to 4 were also measured on ripgrep, all together only.
+- The interned-arguments change was measured against vendored salsa, not against main.
 - The counters' build was a different binary (patched salsa), so its counts and the timings
   come from different runs of the same commit.
