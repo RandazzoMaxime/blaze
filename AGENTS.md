@@ -15,7 +15,7 @@ How to build, test and change ra-jit, including the vendored rust-analyzer, is
   every program rustc 1.99.0 builds must build and behave the same under ra-jit, with the real
   std, C dependencies, build scripts and proc macros. What ra-jit adds, such as live edits and
   tiers, comes on top. The one allowed difference is sandboxing: build scripts and proc macros
-  run sandboxed ([#147](https://github.com/indexable-inc/ra-jit/issues/147)). One that needs
+  run sandboxed ([#147](https://github.com/indexable-inc/blaze/issues/147)). One that needs
   more than the sandbox allows is the only exception, and is made to work rather than refused
   where possible: [docs/no-rustc.md](docs/no-rustc.md).
 - **Pick the best long-term design, not the least work.** Agents write most of ra-jit, so the

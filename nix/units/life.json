@@ -3091,7 +3091,7 @@
    "links": null,
    "name": "ra-jit-live",
    "readme": "README.md",
-   "repository": "https://github.com/indexable-inc/ra-jit",
+   "repository": "https://github.com/indexable-inc/blaze",
    "rust_version": "",
    "source": {
     "dir": "crates/ra-jit-live",

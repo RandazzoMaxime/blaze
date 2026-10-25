@@ -59,7 +59,7 @@ HARNESS = ROOT / "harness"
 TOOLCHAIN = (HARNESS / "toolchain").read_text().strip()
 PINS = ROOT / "pgo" / "profiles.json"
 # Where pgo/profiles.json says its files are, when it is first written.
-RELEASE = "https://github.com/indexable-inc/ra-jit/releases/download/pgo-profiles"
+RELEASE = "https://github.com/indexable-inc/blaze/releases/download/pgo-profiles"
 # A training run that reached the workers counts tens of billions; one that lost them a few
 # million (the client's own short runs).
 MIN_COUNT = 1_000_000_000

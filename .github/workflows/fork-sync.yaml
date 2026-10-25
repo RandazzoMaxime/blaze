@@ -37,7 +37,7 @@ jobs:
           FORK_PUSH_TOKEN: ${{ secrets.FORK_PUSH_TOKEN }}
         run: |
           if [ -z "$FORK_PUSH_TOKEN" ]; then
-            echo "::error::The secret FORK_PUSH_TOKEN is not set: add a token with Contents read and write on indexable-inc/rust-analyzer and indexable-inc/rustc_abi to indexable-inc/ra-jit's Actions secrets."
+            echo "::error::The secret FORK_PUSH_TOKEN is not set: add a token with Contents read and write on indexable-inc/rust-analyzer and indexable-inc/rustc_abi to indexable-inc/blaze's Actions secrets."
             exit 1
           fi
           git config --local http.https://github.com/.extraheader \

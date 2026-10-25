@@ -11,7 +11,7 @@ pin=()
 [ -n "${NR_CPUS:-}" ] && pin=(taskset -c "$NR_CPUS")
 mkdir -p "$L/logs" "$L/apps"
 cd "$L"
-[ -d src ] || git clone -q https://github.com/indexable-inc/ra-jit src
+[ -d src ] || git clone -q https://github.com/indexable-inc/blaze src
 git -C src fetch -q origin
 git -C src checkout -q --detach "$REV"
 

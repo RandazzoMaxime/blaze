@@ -1,6 +1,6 @@
 // Numbers as the README writes them (harness/benchreport.py `seconds` and `speedup`).
 
-export const REPO = 'https://github.com/indexable-inc/ra-jit';
+export const REPO = 'https://github.com/indexable-inc/blaze';
 
 export const commitUrl = (commit: string) => `${REPO}/commit/${commit}`;
 export const short = (commit: string | undefined) => (commit ?? 'unknown').slice(0, 10);
