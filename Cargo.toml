@@ -83,6 +83,7 @@ hir-ty-wfcheck = { path = "vendor/rust-analyzer/crates/hir-ty-wfcheck", version 
 hir-ty-codegen = { path = "crates/hir-ty-codegen" }
 ra-jit-expand = { path = "crates/ra-jit-expand" }
 ra-jit-store = { path = "crates/ra-jit-store" }
+blaze-manifest = { path = "crates/blaze-manifest" }
 ra-jit-fuzz = { path = "crates/ra-jit-fuzz" }
 hir-ide = { path = "vendor/rust-analyzer/crates/hir-ide", version = "0.0.0" }
 ide = { path = "vendor/rust-analyzer/crates/ide", version = "0.0.0" }

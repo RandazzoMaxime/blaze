@@ -8,14 +8,14 @@ All notable changes to ra-jit are written here. The format follows
 
 ### Added
 
+- `cargo blaze` reads the workspace with `blaze-manifest`, as cargo 1.99.0 reads it, where it
+  ran `cargo metadata --no-deps` for every command (#298): equal to cargo on 385 of 385
+  workspaces of `harness/resolve.py`'s corpus. The command's `--config` arguments now count,
+  and a manifest cargo refuses ends the command with cargo's message and status. The daemon's
+  loads still ask cargo.
 - `ra-jit std` ships the standard library's unit for a `dev` program too, not only a build
   script's: a whole build of a dev program from an empty store (step K, #91) fetches it where
   it compiled the library again: ripgrep from nothing 19.4 s to 9.9 s on dev-aws-8.
-
-- `ra-jit std` ships the standard library's unit for a `dev` program too, not only a build
-  script's: a whole build of a dev program from an empty store (step K, #91) fetches it where
-  it compiled the library again, about 10 s.
-
 - `crates/blaze-build-script`: the environment cargo 1.99.0 gives a build script, computed
   from a plain description of the run with no cargo, ported from cargo's own rules and tests
   (no-rustc step I, #89; #298). Nothing uses it yet; blaze's own runs of scripts come next.
