@@ -251,14 +251,26 @@ pub(super) struct Inlinable {
 
 impl Inlinable {
     /// `func` with `requests`, if a caller can ask for the same: each blob points only at
-    /// what was asked for before it.
+    /// what was asked for before it, and none has a `TypeId` to hash. A hash that can't be
+    /// had fails the function that has it, whose callers then call rustc's copy of it.
     pub(super) fn of(
         func: ir::Function,
         requests: Requests,
         pointees: Vec<(u32, Pointee)>,
         seen: Vec<Seen>,
     ) -> Option<Inlinable> {
-        requests.ordered().then_some(Inlinable { func, requests, pointees, seen })
+        let hashed_later = requests.datas.iter().any(|it| match it {
+            DataRequest::Blob { blob, .. } | DataRequest::Vtable { blob, .. } => {
+                !blob.type_ids.is_empty()
+            }
+            _ => false,
+        });
+        (requests.ordered() && !hashed_later).then_some(Inlinable {
+            func,
+            requests,
+            pointees,
+            seen,
+        })
     }
 }
 
@@ -372,21 +384,20 @@ impl Wants {
     /// by its place among the requests: what a load from it is known to give.
     #[cfg(feature = "llvm")]
     pub(super) fn constants(&self) -> impl Iterator<Item = (u32, &[u8])> + '_ {
-        self.requests.datas.iter().enumerate().filter_map(|(index, data)| match data {
-            DataRequest::Blob { blob, identity }
-                if blob.points_nowhere() && *identity != DataIdentity::Writable =>
-            {
-                Some((index as u32, blob.bytes()))
-            }
-            _ => None,
-        })
+        self.readonly()
+            .filter(|it| it.1.points_nowhere())
+            .map(|(index, blob)| (index, blob.bytes()))
     }
 
     /// Each data object asked for so far that is read-only, by its place among the requests.
+    /// One with a `TypeId` is left out: its bytes are const eval's ids until the object's data
+    /// has the hashes written in their place.
     #[cfg(feature = "llvm")]
     pub(super) fn readonly(&self) -> impl Iterator<Item = (u32, &ConstBlob)> + '_ {
         self.requests.datas.iter().enumerate().filter_map(|(index, data)| match data {
-            DataRequest::Blob { blob, identity } if *identity != DataIdentity::Writable => {
+            DataRequest::Blob { blob, identity }
+                if *identity != DataIdentity::Writable && blob.type_ids.is_empty() =>
+            {
                 Some((index as u32, blob))
             }
             _ => None,
@@ -855,6 +866,7 @@ impl<'db> Recorder<'db> {
                     .map(|&(offset, target)| (offset, funcs[target.as_u32() as usize]))
                     .collect(),
                 align: blob.align,
+                type_ids: blob.type_ids.clone(),
             };
             let id = match request {
                 DataRequest::Blob { blob, identity } => self.define_data_as(moved(blob), *identity),

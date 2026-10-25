@@ -124,8 +124,10 @@ privates (read).
   hash and `vtable.rs` rustc's vtable entries, while the interpreter in `hir-ty` numbers
   `TypeId`s by the order it meets types (read: `mir/eval.rs:230`, `eval/shim.rs:785-797`) and
   keeps its own `VTableMap`. These are rustc semantics (`rustc_middle`'s `type_id_hash` and
-  `vtable_entries`) and would belong in `hir-ty` if the interpreter used them; whether a
-  constant holding a `TypeId` can reach codegen from the interpreter today is unverified.
+  `vtable_entries`) and would belong in `hir-ty` if the interpreter used them. A constant
+  holding a `TypeId` does reach codegen: its memory map keeps the type of each id it gave
+  (`ComplexMemoryMap::type_ids`), and the object's data gets `type_id.rs`'s hash of it there
+  (read: the corpus' `type_id_in_constant`).
 - **`doctest/extract.rs`** finds doc examples as rustdoc does. rust-analyzer's runnables find
   doctests for the IDE with looser rules; ra-jit needs rustdoc's exactly, so this is not a
   duplicate to remove (unverified judgment).

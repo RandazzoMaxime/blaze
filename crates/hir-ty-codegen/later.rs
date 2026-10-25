@@ -428,10 +428,19 @@ impl<'db> Keeper<'_, 'db> {
                     InstanceDef::Fn(func) => link_name(db, func).is_some(),
                     _ => false,
                 };
+                let mut copied = None;
                 let callee = match &request.target {
                     FuncTarget::Instance(callee, _) if !foreign(callee) => {
                         let Some(callee) = self.settled(at, callee) else {
                             return self.kept.unkept("unsettled callee");
+                        };
+                        copied = match callee.def {
+                            InstanceDef::Fn(func)
+                                if callee.args.as_ref().iter().all(|it| it.region().is_some()) =>
+                            {
+                                Some(func)
+                            }
+                            _ => None,
                         };
                         Some(self.stable_name(&callee))
                     }
@@ -444,6 +453,17 @@ impl<'db> Keeper<'_, 'db> {
                             return self.kept.unkept("unlisted function of the checkout");
                         }
                         CachedTarget::Root(name.as_ref().to_owned())
+                    }
+                    // A function of the checkout without generic arguments, which `callee`
+                    // has called as rustc's copy: what decides that is in the names the entry
+                    // is kept under, but for whether the program has the copy and the future
+                    // a function returns, which rustc lays out its own way.
+                    Some(Some(name))
+                        if stable::StableNames::of_checkout(&name)
+                            && copied.is_some_and(|func| !returns_async_block(db, func))
+                            && self.root_named(&name).is_some() =>
+                    {
+                        CachedTarget::Copy { name: name.as_ref().to_owned(), symbol }
                     }
                     Some(name)
                         if name.as_ref().is_none_or(|it| stable::StableNames::of_checkout(it)) =>
@@ -494,16 +514,23 @@ impl<'db> Keeper<'_, 'db> {
                     return self.kept.unkept("data with the place of the library's sources");
                 }
             }
+            let mut hashed = match request {
+                DataRequest::Blob { blob, .. } | DataRequest::Vtable { blob, .. } => blob.clone(),
+                _ => ConstBlob::default(),
+            };
+            if hash_type_ids(db, self.symbols, self.own_crates, &mut hashed).is_err() {
+                return self.kept.unkept("a `TypeId` not hashed");
+            }
             datas.push(match request {
-                DataRequest::Blob { blob, identity } => {
-                    CachedData::Blob { blob: blob.clone(), identity: *identity }
+                DataRequest::Blob { identity, .. } => {
+                    CachedData::Blob { blob: hashed, identity: *identity }
                 }
-                DataRequest::Vtable { ty, trait_ref, blob } => {
+                DataRequest::Vtable { ty, trait_ref, .. } => {
                     let trait_ref = trait_ref.as_ref().map(|(id, args)| (*id, args.as_ref()));
                     let Some(key) = self.names.vtable(ty.as_ref(), trait_ref) else {
                         return self.kept.unkept("unnamed vtable");
                     };
-                    CachedData::Vtable { key, blob: blob.clone() }
+                    CachedData::Vtable { key, blob: hashed }
                 }
                 DataRequest::Static(of) => {
                     let decl = self.declarations.get_data_decl(id);

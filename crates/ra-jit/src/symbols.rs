@@ -346,6 +346,8 @@ pub(crate) struct Linked {
     unkept: String,
     /// The names in the symbols of both, as [`names_in_symbols`] has them.
     named: FxHashSet<u64>,
+    /// Whether it has thread-local data of the objects of `by_symbol`.
+    own_thread_locals: bool,
 }
 
 impl Linked {
@@ -374,6 +376,7 @@ impl Linked {
             functions: String::new(),
             unkept: String::new(),
             named: FxHashSet::default(),
+            own_thread_locals: false,
         };
         let mut local = Vec::new();
         for symbol in object.symbols().chain(object.dynamic_symbols()) {
@@ -394,6 +397,9 @@ impl Linked {
             let function = (name.starts_with("_R") || name.starts_with("_ZN"))
                 && symbol.kind() == SymbolKind::Text
                 && symbol.section_index().is_some();
+            linked.own_thread_locals |= symbol.kind() == SymbolKind::Tls
+                && symbol.section_index().is_some()
+                && own.contains(&hashed(name));
             if internal && !own.contains(&hashed(name)) {
                 if function {
                     linked.unkept.push_str(name);
@@ -429,6 +435,13 @@ impl Linked {
         self.names.contains(&hashed(symbol))
     }
 
+    /// Whether the crates rustc compiled with a symbol for each function have thread-locals
+    /// of their own here. A build in full has its own copies of those, and an executable has
+    /// all the thread-local data it ever will: nothing of the build can be spliced into it.
+    pub(crate) fn has_own_thread_locals(&self) -> bool {
+        self.own_thread_locals
+    }
+
     /// The one private symbol of the function or static at `path`.
     pub(crate) fn private(&self, path: &str) -> Option<&str> {
         self.private.get(path)?.as_ref().map(|it| &*it.0)
@@ -460,7 +473,12 @@ impl Linked {
                 return None;
             }
             let Some(args) = demangled.strip_prefix(&prefix) else { continue };
-            if !closes_at_end(args) {
+            let Some(after) = args_closed(args).map(|at| &args[at..]) else { return None };
+            // A closure of the instance is compiled with it.
+            if !after.is_empty() {
+                if closures_only(after) {
+                    continue;
+                }
                 return None;
             }
             if found.get(&demangled).is_some_and(|it| it != symbol) {
@@ -472,9 +490,9 @@ impl Linked {
     }
 }
 
-/// Whether the arguments of an instance, as a demangled symbol has them after the `<` that
-/// opens them, are all that follows.
-fn closes_at_end(args: &str) -> bool {
+/// Where the arguments of an instance end, as a demangled symbol has them after the `<` that
+/// opens them.
+fn args_closed(args: &str) -> Option<usize> {
     let mut depth = 1;
     let mut last = ' ';
     for (at, it) in args.char_indices() {
@@ -486,11 +504,23 @@ fn closes_at_end(args: &str) -> bool {
             _ => {}
         }
         if depth == 0 {
-            return at + 1 == args.len();
+            return Some(at + 1);
         }
         last = it;
     }
-    false
+    None
+}
+
+/// Whether `path` is `::{closure#N}` once or more, a closure in the body of what it follows.
+fn closures_only(mut path: &str) -> bool {
+    while let Some(rest) = path.strip_prefix("::{closure#") {
+        let Some((number, rest)) = rest.split_once('}') else { return false };
+        if number.is_empty() || !number.bytes().all(|it| it.is_ascii_digit()) {
+            return false;
+        }
+        path = rest;
+    }
+    path.is_empty()
 }
 
 /// The indices of the symbols of a Mach-O executable that were private externals, hidden
@@ -1336,6 +1366,7 @@ mod tests {
             functions,
             unkept: String::new(),
             named,
+            own_thread_locals: false,
         };
         for name in ["sha256", "foo", "core", "u8", "add", "app", "_bar", "unkept"] {
             assert!(!linked.has_no_function_named(name), "{name}");
