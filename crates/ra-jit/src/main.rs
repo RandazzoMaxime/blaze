@@ -23,6 +23,7 @@ mod outline;
 mod plan;
 mod process;
 mod remote;
+mod sandbox;
 mod shipped;
 mod socket;
 mod splice;
@@ -1076,17 +1077,32 @@ fn commit_of_sources(built: &[u8]) -> Option<String> {
 /// a hash of the toolchain in it, and what the metadata of its `core`, `alloc` and `std`
 /// says of each (`metadata_hash`). `None` when it has none of them.
 fn toolchain_identity(vfs: &vfs::Vfs, symbol_files: &[PathBuf]) -> Option<String> {
-    let mut identity: Vec<String> = symbol_files
+    let mut identity = library_identity(symbol_files);
+    if let Some(toolchain) = &loaded_toolchain(vfs) {
+        identity.extend(installed_identity(toolchain));
+    }
+    identity.sort_unstable();
+    (!identity.is_empty()).then(|| identity.join(" "))
+}
+
+/// The rlibs of the standard library whose metadata [`toolchain_identity`] reads. rustc's link
+/// line has all of them, and a build told ahead of cargo's finds the same in the toolchain
+/// ([`built_library`]): one toolchain is then one identity whichever way a daemon starts, and
+/// a daemon started after cargo's build finds what the one told ahead of it stored.
+const LIBRARY: [&str; 3] = ["libcore-", "liballoc-", "libstd-"];
+
+/// What of [`toolchain_identity`] the library's rlibs among `files` say: the name of `std`'s
+/// and what the metadata of each of [`LIBRARY`] says.
+fn library_identity(files: &[PathBuf]) -> Vec<String> {
+    let mut identity: Vec<String> = files
         .iter()
         .filter_map(|it| it.file_name()?.to_str())
         .filter(|it| it.starts_with("libstd-"))
         .map(str::to_owned)
         .collect();
-    for rlib in symbol_files {
+    for rlib in files {
         let Some(name) = rlib.file_name().and_then(|it| it.to_str()) else { continue };
-        if !["libcore-", "liballoc-", "libstd-"].iter().any(|it| name.starts_with(it))
-            || !name.ends_with(".rlib")
-        {
+        if !LIBRARY.iter().any(|it| name.starts_with(it)) || !name.ends_with(".rlib") {
             continue;
         }
         let Ok(file) = std::fs::File::open(rlib) else { continue };
@@ -1097,16 +1113,16 @@ fn toolchain_identity(vfs: &vfs::Vfs, symbol_files: &[PathBuf]) -> Option<String
             identity.push(format!("{name}={hash}"));
         }
     }
-    let toolchain = vfs.iter().find_map(|(_, path)| {
+    identity
+}
+
+/// The toolchain whose library sources were loaded, with a `/` at its end.
+fn loaded_toolchain(vfs: &vfs::Vfs) -> Option<String> {
+    vfs.iter().find_map(|(_, path)| {
         let path = path.as_path()?.as_str().replace('\\', "/");
         let (toolchain, _) = path.split_once("lib/rustlib/src/rust/")?;
         Some(toolchain.to_owned())
-    });
-    if let Some(toolchain) = &toolchain {
-        identity.extend(installed_identity(toolchain));
-    }
-    identity.sort_unstable();
-    (!identity.is_empty()).then(|| identity.join(" "))
+    })
 }
 
 /// What of [`toolchain_identity`] the toolchain installed at `toolchain` (with a `/` at its
@@ -1152,17 +1168,17 @@ fn metadata_hash(archive: &[u8]) -> Option<String> {
     Some(hash[..8].iter().map(|it| format!("{it:02x}")).collect())
 }
 
-/// The built `std` of the toolchain whose library was loaded, for `triple`.
+/// The built rlibs of [`LIBRARY`] of the toolchain whose library was loaded, for `triple`.
 fn built_library(vfs: &vfs::Vfs, triple: &str) -> Vec<PathBuf> {
-    let toolchain = vfs.iter().find_map(|(_, path)| {
-        let path = path.as_path()?.as_str().replace('\\', "/");
-        let (toolchain, _) = path.split_once("lib/rustlib/src/rust/")?;
-        Some(toolchain.to_owned())
-    });
-    let Some(toolchain) = toolchain else { return Vec::new() };
-    let dir = PathBuf::from(format!("{toolchain}lib/rustlib/{triple}/lib"));
-    let Ok(entries) = std::fs::read_dir(&dir) else { return Vec::new() };
-    let named = |name: &str| name.starts_with("libstd-") && name.ends_with(".rlib");
+    let Some(toolchain) = loaded_toolchain(vfs) else { return Vec::new() };
+    library_in(&PathBuf::from(format!("{toolchain}lib/rustlib/{triple}/lib")))
+}
+
+/// The rlibs of [`LIBRARY`] in the directory of a toolchain's built library.
+fn library_in(dir: &Path) -> Vec<PathBuf> {
+    let Ok(entries) = std::fs::read_dir(dir) else { return Vec::new() };
+    let named =
+        |name: &str| LIBRARY.iter().any(|it| name.starts_with(it)) && name.ends_with(".rlib");
     let names = entries.filter_map(|it| it.ok()?.file_name().into_string().ok());
     names.filter(|it| named(it)).map(|it| dir.join(it)).collect()
 }
@@ -1909,11 +1925,9 @@ fn crates_named(db: &RootDatabase, krate: &str, args: &Args) -> anyhow::Result<V
     // One of the crates after the first is one the first links: a binary of another package
     // may have the name too, as bun's `bun-sema` has the library `bun_sema`'s.
     if let Some(first) = args.crates().next().filter(|&it| it != krate) {
-        let program: FxHashSet<ide_db::base_db::Crate> = crates_named(db, first, args)?
-            .into_iter()
-            .flat_map(|it| ide_db::base_db::Crate::from(it).transitive_deps(db))
-            .collect();
-        let linked = |krate: &Crate| program.contains(&(*krate).into());
+        let program = crates_named(db, first, args)?;
+        let program: Vec<_> = program.into_iter().map(|it| deps_of(db, it.into())).collect();
+        let linked = |krate: &Crate| program.iter().any(|it| it.contains(&(*krate).into()));
         if found.iter().any(linked) {
             found.retain(linked);
         }
@@ -2007,17 +2021,56 @@ fn crates_called(db: &RootDatabase, krate: &str, args: &Args) -> Vec<Crate> {
     // A path that is written as its parts are ends the text of every path it is the end of,
     // which is all that most crates have to be asked.
     let plain = !krate.contains("//") && !krate.contains("./");
+    named_crates(db)
+        .iter()
+        .filter(|it| match (is_file, &it.root) {
+            (true, Some(root)) if plain && !root.ends_with(krate) => false,
+            // Named from the checkout, or in full.
+            (true, Some(root)) => {
+                let root = Path::new(&**root);
+                root == Path::new(krate) || args.inside(root) == Some(Path::new(krate))
+            }
+            (true, None) => false,
+            (false, _) => it.name.as_deref() == Some(krate),
+        })
+        .map(|it| it.krate)
+        .collect()
+}
+
+/// A crate of the graph as naming one finds it.
+#[derive(PartialEq, Eq)]
+struct Named {
+    krate: Crate,
+    /// What code calls it by.
+    name: Option<Box<str>>,
+    /// The text of the path of its root file.
+    root: Option<Box<str>>,
+}
+
+/// Every crate of the graph, in its order, as naming one finds it: a build names its crates
+/// many times, and the graph is asked once until it changes.
+#[salsa::tracked(returns(ref))]
+fn named_crates(db: &dyn HirDatabase) -> Vec<Named> {
+    let root = |krate: Crate| {
+        let file = krate.root_file(db);
+        let source_root = db.file_source_root(file).source_root_id(db);
+        let source_root = db.source_root(source_root).source_root(db);
+        Some(source_root.path_for_file(&file)?.as_path()?.as_str().into())
+    };
+    let name = |krate: Crate| Some(krate.display_name(db)?.crate_name().as_str().into());
     Crate::all(db)
         .into_iter()
-        .filter(|it| match is_file {
-            _ if is_file && plain && !root_file_ends_with(db, *it, krate) => false,
-            // Named from the checkout, or in full.
-            true => crate_root_file(db, *it).is_some_and(|root| {
-                root == Path::new(krate) || args.inside(&root) == Some(Path::new(krate))
-            }),
-            false => it.display_name(db).is_some_and(|name| name.crate_name().as_str() == krate),
-        })
+        .map(|krate| Named { krate, name: name(krate), root: root(krate) })
         .collect()
+}
+
+/// The crates `krate` depends on, itself and all, from the graph.
+#[salsa::tracked(returns(ref))]
+fn deps_of(
+    db: &dyn HirDatabase,
+    krate: ide_db::base_db::Crate,
+) -> FxHashSet<ide_db::base_db::Crate> {
+    krate.transitive_deps(db).into_iter().collect()
 }
 
 /// The crates called `krate` to build: the ones rustc built into this program, when it built
@@ -2039,15 +2092,6 @@ fn links(db: &RootDatabase, table: &SymbolTable, krate: Crate) -> bool {
     let name = krate.display_name(db);
     let root = crate_root_file(db, krate);
     name.zip(root).is_some_and(|(name, root)| table.links(name.crate_name().as_str(), &root))
-}
-
-/// Whether the text of the path of the crate's root file ends with `end`.
-fn root_file_ends_with(db: &RootDatabase, krate: Crate, end: &str) -> bool {
-    let file = krate.root_file(db);
-    let source_root = db.file_source_root(file).source_root_id(db);
-    let source_root = db.source_root(source_root).source_root(db);
-    let path = source_root.path_for_file(&file).and_then(|it| it.as_path());
-    path.is_some_and(|it| Path::new(it.as_str()).ends_with(end))
 }
 
 fn crate_root_file(db: &RootDatabase, krate: Crate) -> Option<PathBuf> {
@@ -2987,6 +3031,36 @@ fn warm_impls(
     on_idle_threads(db, &work, 64, helping, threads, |db, work| work.run(db));
 }
 
+/// Asks for the impls of each of `crates` on every core, without waiting for it. After an edit
+/// the first type check asks for those of every crate it sees, one crate after another, and
+/// the other threads wait for it: an impl may be written in a body, so each crate's must be
+/// verified again.
+fn verify_impls<'scope>(
+    scope: &'scope std::thread::Scope<'scope, '_>,
+    db: &RootDatabase,
+    crates: &FxHashSet<ide_db::base_db::Crate>,
+) {
+    use hir_ty::method_resolution::{InherentImpls, TraitImpls};
+    let crates: Arc<[ide_db::base_db::Crate]> = crates.iter().copied().collect();
+    let next = Arc::new(AtomicUsize::new(0));
+    let threads = std::thread::available_parallelism().map_or(1, |it| it.get());
+    for _ in 0..threads.min(crates.len()) {
+        let (db, crates, next) = (db.clone(), crates.clone(), next.clone());
+        scope.spawn(move || {
+            // A query that is cancelled unwinds, and those that wait for it see that.
+            _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                hir::attach_db(&db, || {
+                    let at = || next.fetch_add(1, Ordering::Relaxed);
+                    while let Some(&krate) = crates.get(at()) {
+                        _ = TraitImpls::for_crate(&db, krate);
+                        _ = InherentImpls::for_crate(&db, krate);
+                    }
+                })
+            }));
+        });
+    }
+}
+
 /// Parses the files of the modules of `krate`, whose names and impls were read rather than
 /// found, with the threads no other crate has: a signature or body of the crate that a build
 /// lowers parses its whole file first, one file after another.
@@ -3165,22 +3239,26 @@ fn reach_of_tests(db: &RootDatabase, listed: &Listed, args: &Args) -> String {
     for (&id, reach) in tests.iter().zip(hir_ty_codegen::tests_reach(db, &tests)) {
         let function = hir::Function::from(id);
         let Some(name) = test_harness::name(db, krate, function) else { continue };
+        let field = |it: &str| it.replace(['\t', '\n'], " ");
+        let why = |it: &hir_ty_codegen::AlwaysRun| {
+            let path: Vec<String> = it.path.iter().map(|it| field(it)).collect();
+            format!("{}\t{}", field(&it.why), path.join(" -> "))
+        };
         let line = match reach {
-            Ok(hash) => {
+            Ok(reach) => {
                 let attrs = function.source(db).map(|it| {
                     let attrs = it.value.attrs().map(|it| it.syntax().text().to_string());
                     attrs.collect::<Vec<_>>().join("\n")
                 });
-                let identity = format!("{hash:032x}\n{}", attrs.unwrap_or_default());
+                let identity = format!("{:032x}\n{}", reach.hash, attrs.unwrap_or_default());
                 let identity = sha2::Sha256::digest(identity.as_bytes());
                 let hex: String = identity.iter().map(|it| format!("{it:02x}")).collect();
-                format!("{hex}\t{name}\n")
+                match &reach.outside {
+                    None => format!("{hex}\t{name}\n"),
+                    Some(outside) => format!("~{hex}\t{name}\t{}\n", why(outside)),
+                }
             }
-            Err(always) => {
-                let field = |it: &str| it.replace(['\t', '\n'], " ");
-                let path: Vec<String> = always.path.iter().map(|it| field(it)).collect();
-                format!("-\t{name}\t{}\t{}\n", field(&always.why), path.join(" -> "))
-            }
+            Err(always) => format!("-\t{name}\t{}\n", why(&always)),
         };
         text.push_str(&line);
     }
@@ -6574,10 +6652,17 @@ pub(crate) fn version() -> String {
 }
 
 fn main() -> anyhow::Result<()> {
+    // Before anything that could start a thread: the sandbox forks.
+    if std::env::args_os().nth(1).is_some_and(|it| it == sandbox::COMMAND) {
+        sandbox::command(std::env::args_os().skip(2));
+    }
     trace::began();
     syntax::set_green_trees(std::env::var_os("RA_JIT_GREEN_TREES").is_some());
     project_model::answer_toolchain_questions_with(answers::ask);
     let stands_in_for_rustc = std::env::var_os("RA_JIT_WRAPS_RUSTC").is_some();
+    if let Some(replayed) = doctest::replay() {
+        return replayed;
+    }
     match std::env::args().nth(1).as_deref() {
         _ if stands_in_for_rustc => {}
         None | Some("--help" | "-h" | "help") => {
@@ -7243,15 +7328,15 @@ fn process_wide() {
 }
 
 /// Loads the workspace `args` names and builds what they ask for, then serves it when they
-/// ask for that. With `doc` the build is of a library whose examples are then run.
-fn run(args: Args, doc: Option<&doctest::Asked>) -> anyhow::Result<()> {
+/// ask for that. With `doc` the build is of the libraries whose examples are then run.
+fn run(args: Args, doc: Option<&doctest::Libraries>) -> anyhow::Result<()> {
     run_holding(args, doc, None, false)
 }
 
 /// [`run`], with what a process started before its build was known has loaded already.
 fn run_holding(
     mut args: Args,
-    doc: Option<&doctest::Asked>,
+    doc: Option<&doctest::Libraries>,
     held: Option<Held>,
     ahead: bool,
 ) -> anyhow::Result<()> {
@@ -7478,8 +7563,7 @@ fn run_holding(
         );
         known.patching = args.patch.is_some();
     }
-    if let Some(asked) = doc {
-        let krate = *crates_named(&db, &args.krate, &args)?.first().context("no such crate")?;
+    if let Some(libraries) = doc {
         let workspace = checkouts.loaded.workspaces().first();
         let sysroot: Option<PathBuf> =
             workspace.and_then(|it| it.sysroot.root()).map(|it| AsRef::<Path>::as_ref(it).into());
@@ -7489,7 +7573,7 @@ fn run_holding(
             listed: &listed,
             sysroot: sysroot.as_deref(),
         };
-        let code = doctest::run(&mut db, &building, asked, krate, emits.triple())?;
+        let code = doctest::run_all(&mut db, &building, libraries, emits.triple());
         ra_jit_store::settled();
         std::process::exit(code);
     }
@@ -9129,9 +9213,13 @@ impl Program {
         // built whole: what it would make of the program is not what runs, and the next edit
         // that compiles is to be a patch of what does.
         let (warm, broken) = std::thread::scope(|scope| {
+            let within = listed.programs(db);
+            if let Some(crates) = &within {
+                verify_impls(scope, db, crates);
+            }
             let check = {
                 let (db, edited, root) = (db.clone(), &edited, &args.checkout);
-                let (within, lints) = (listed.programs(&db), !args.lints_capped);
+                let lints = !args.lints_capped;
                 scope.spawn(move || {
                     let start = Instant::now();
                     let broken = broken_in(&db, edited, paths, root, within, lints);
@@ -9453,6 +9541,39 @@ mod tests {
         let long = |end| metadata([1; 16], &[[0; 512].as_slice(), &[end]].concat());
         assert_eq!(metadata_hash(&rlib(&long(1))), metadata_hash(&rlib(&long(2))));
         assert_eq!(metadata_hash(&rlib(b"not metadata")), None);
+    }
+
+    /// A build told ahead of cargo's finds the library in the toolchain; the daemon started
+    /// once cargo built is given rustc's link line. Both have to key the store alike, or the
+    /// daemon's first start after a build finds nothing that build stored (#41).
+    #[test]
+    fn the_toolchain_is_named_alike_ahead_of_cargo_and_from_rustcs_link_line() {
+        let dir = std::env::temp_dir().join(format!("ra-jit-library-{}", std::process::id()));
+        let library = dir.join("lib/rustlib/x86_64-unknown-linux-gnu/lib");
+        let deps = dir.join("target/debug/deps");
+        std::fs::create_dir_all(&library).unwrap();
+        std::fs::create_dir_all(&deps).unwrap();
+        let mut written = |at: &Path, name: &str, svh: u8| {
+            let path = at.join(name);
+            std::fs::write(&path, rlib(&metadata([svh; 16], &[0; 8]))).unwrap();
+            path
+        };
+        let core = written(&library, "libcore-1a.rlib", 1);
+        let alloc = written(&library, "liballoc-2b.rlib", 2);
+        let std = written(&library, "libstd-3c.rlib", 3);
+        let unwind = written(&library, "libpanic_unwind-4d.rlib", 4);
+        written(&library, "libtest-5e.rlib", 5);
+        std::fs::write(library.join("libstd-3c.so"), b"a dynamic std").unwrap();
+        let dep = written(&deps, "libdep-6f.rlib", 6);
+
+        let link_line = [dep, std, unwind, alloc, core];
+        let mut ahead = library_identity(&library_in(&library));
+        let mut linked = library_identity(&link_line);
+        ahead.sort_unstable();
+        linked.sort_unstable();
+        std::fs::remove_dir_all(&dir).unwrap();
+        assert_eq!(ahead, linked);
+        assert_eq!(ahead.iter().filter(|it| it.contains(".rlib=")).count(), LIBRARY.len());
     }
 
     /// A file of a package is in the source root of each of its targets, and a program reads

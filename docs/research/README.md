@@ -54,6 +54,11 @@ back them is under [docs/upstream/](../upstream/), each with a `SOURCE.md`. Sear
   tolerance and lossless trees are small, salsa revalidating on wide edits is the largest;
   durability experiments (negative) and interned arguments never collected; the lean path
   ranked, and the crates of a build listed on every core. 2026-10-24.
+- [../ci-runner.md](../ci-runner.md): a CI runner of our own on ix (indexable's VM product):
+  what ix's snapshots and copy-on-write forks give and cost, a warm ra-jit seed per repository
+  and a fork per branch, REAPI against no protocol on the hot path (gRPC unary latency, the
+  action cache's missing batch lookup), the per-test sandbox and flakes by key, GC by live
+  roots, latency against nushell's and ripgrep's GitHub Actions runs (#264). 2026-10-24.
 - [../architecture-split.md](../architecture-split.md): what of ra-jit belongs in the
   rust-analyzer subtree and what in `crates/`; ra-jit's changes to rust-analyzer by purpose,
   upstream's churn on the files they touch, rustc's crate split, and a migration plan.

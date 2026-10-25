@@ -162,6 +162,14 @@ enum Guard {
         #[serde(default)]
         cargo: Vec<PathBuf>,
     },
+    /// Files as rustc read them: there or not, and each not written since cargo last ran
+    /// rustc for the first unit that read it, when that is known, or since cargo built.
+    /// What runs during the build writes sources of units cargo builds after it: biome's
+    /// build scripts touch a file of their crate's, which is no change to cargo.
+    Read {
+        what: String,
+        files: Vec<(PathBuf, bool, Option<u128>)>,
+    },
     /// A directory with nothing in it written since cargo built.
     Tree {
         what: String,
@@ -211,6 +219,14 @@ impl Guard {
                         Err(_) => *was_there,
                     }
                 })?;
+                Some(format!("{what} {} changed", changed.0.display()))
+            }
+            Guard::Read { what, files } => {
+                let changed =
+                    files.iter().find(|(file, was_there, read_at)| match written_at(file) {
+                        Some(written) => !was_there || written > read_at.unwrap_or(built_at),
+                        None => *was_there,
+                    })?;
                 Some(format!("{what} {} changed", changed.0.display()))
             }
             Guard::BesideTests { what, files, cargo } => {
@@ -1396,8 +1412,17 @@ fn guards(
     // are for.
     let generated =
         |file: &PathBuf| scripts.iter().any(|it| file.starts_with(it.out_dir.as_std_path()));
-    let sources = in_build.iter().flat_map(|it| it.inputs().files).filter(|it| !generated(it));
-    guards.push(Guard::files("what runs during the build:", sources));
+    let mut read_at: std::collections::BTreeMap<PathBuf, Option<u128>> = Default::default();
+    for unit in &in_build {
+        let ran_at = unit.cargo_ran_at().map(stamp_of);
+        for file in unit.inputs().files.into_iter().filter(|it| !generated(it)) {
+            let at = read_at.entry(file).or_insert(ran_at);
+            *at = at.zip(ran_at).map(|(a, b)| a.min(b));
+        }
+    }
+    let files = read_at.into_iter().map(|(file, at)| (file.exists(), file, at));
+    let files = files.map(|(there, file, at)| (file, there, at)).collect();
+    guards.push(Guard::Read { what: "what runs during the build:".to_owned(), files });
     // What cargo or a build script sets for rustc changes with the manifest or the script.
     let set_for_rustc = |name: &str| {
         name.starts_with("CARGO_")

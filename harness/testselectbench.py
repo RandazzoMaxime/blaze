@@ -12,7 +12,8 @@ ones twice, the first recording what passed; the affected ones after bench.py's 
 (the first build after it may be cargo's), after a second edit of the same function, and every
 test after it. A row has the wall time, whether the daemon built it, how many tests ran and how
 many were skipped, and, from what the daemon wrote beside each test program, how many tests
-are run every time and the leading reasons. `--keep` writes what each step printed in DIR.
+are run every time and the leading reasons. `--keep` writes what each step printed in DIR, and
+under DIR/reach the files the daemon wrote beside each test program after the run with no edit.
 """
 import collections
 import glob
@@ -41,20 +42,22 @@ STD = ("std::", "<std::", "core::", "<core::", "alloc::", "<alloc::")
 def reach(dirs):
     """How many tests the daemon's `tests-reach` files list, how many of them are run every
     time, and why: by the call each names, and by the first function of the standard library
-    on the calls that take it there, with what it reaches."""
-    listed, always, by = 0, collections.Counter(), collections.Counter()
+    on the calls that take it there, with what it reaches. And how many reach the world outside
+    their code but are known, to run sandboxed where there is a sandbox and every time where not."""
+    listed, sandboxed, always, by = 0, 0, collections.Counter(), collections.Counter()
     paths = {path for dir in dirs for path in glob.glob(os.path.join(dir, "**", "tests-reach"), recursive=True)}
     for path in sorted(paths):
         for line in open(path).read().splitlines():
             parts = line.split("\t")
             listed += 1
+            sandboxed += parts[0].startswith("~")
             if parts[0] in ("-", "*"):
                 why = parts[2] if parts[0] == "-" and len(parts) > 2 else parts[-1]
                 always[re.sub(r"::<.*>", "::<…>", why)] += 1
                 path = parts[3].split(" -> ") if parts[0] == "-" and len(parts) > 3 else []
                 first = next((it for it in path if it.startswith(STD)), "-")
                 by[(first, path[-1] if path else "-")] += 1
-    return listed, always, by
+    return listed, sandboxed, always, by
 
 
 def row(ws, env, args, mode, what):
@@ -65,11 +68,11 @@ def row(ws, env, args, mode, what):
         name = re.sub(r"\W+", "-", f"{os.path.basename(ws)} {what}")
         open(os.path.join(KEEP, f"{name}.log"), "w").write(said)
     skipped = sum(int(n) for n in SKIPPED.findall(said))
-    listed, always, by = reach([os.path.join(ws, "target"), env["RA_JIT_HOME"]])
+    listed, sandboxed, always, by = reach([os.path.join(ws, "target"), env["RA_JIT_HOME"]])
     # Why a build was cargo's, as `cargo ra-jit` says it; not the doc tests rustc builds.
     fell = [it for it in dict.fromkeys(FELL.findall(ran.stderr)) if "is rustc's" not in it and "rustdoc" not in it]
     return dict(step=what, mode=mode, exit=ran.returncode, seconds=round(took, 1), served="[ra-jit]" in said, fell=fell[:3],
-                ran=len(RAN.findall(ran.stdout)), skipped=skipped, listed=listed, always=sum(always.values()),
+                ran=len(RAN.findall(ran.stdout)), skipped=skipped, listed=listed, always=sum(always.values()), sandboxed=sandboxed,
                 why=always.most_common(8), by=[(f"{first} … {leaf}", n) for (first, leaf), n in by.most_common(12)])
 
 
@@ -84,7 +87,8 @@ def edit(ws, changes):
 def show(name, it):
     why = "; ".join(f"{n} {w}" for w, n in it["why"][:3])
     print(f"{name:9} {it['step']:24} {it['seconds']:7.1f}s exit {it['exit']} {'daemon' if it['served'] else 'cargo ':6} "
-          f"ran {it['ran']:5} skipped {it['skipped']:5} always {it['always']:5}/{it['listed']:<5} {why}", flush=True)
+          f"ran {it['ran']:5} skipped {it['skipped']:5} always {it['always']:5}/{it['listed']:<5} "
+          f"sandboxed {it.get('sandboxed', 0):5} {why}", flush=True)
     if not it["served"] and it["fell"]:
         print("    cargo's:", " | ".join(it["fell"]), flush=True)
     if it["step"] == "affected, no edit" and it["by"] and it["by"][0][0] != "- … -":
@@ -127,6 +131,13 @@ def project(name, args):
         rows.append(row(ws, env, args, "all", "every test"))
         rows.append(row(ws, env, args, "affected", "affected, first"))
         rows.append(row(ws, env, args, "affected", "affected, no edit"))
+        if KEEP:
+            # What the daemon wrote beside each program, before a run of every test removes it.
+            for top in (os.path.join(ws, "target"), home):
+                for path in glob.glob(os.path.join(top, "**", "tests-reach*"), recursive=True):
+                    kept = os.path.join(KEEP, "reach", os.path.basename(top), os.path.relpath(path, top))
+                    os.makedirs(os.path.dirname(kept), exist_ok=True)
+                    shutil.copy(path, kept)
         leaf = spec["edits"]["leaf"]
         edit(ws, leaf)
         rows.append(row(ws, env, args, "affected", "affected, leaf edit"))

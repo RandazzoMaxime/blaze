@@ -8,6 +8,19 @@ All notable changes to ra-jit are written here. The format follows
 
 ### Added
 
+- `cargo ra-jit test` with `RA_JIT_TESTS=affected` runs, on Linux, each test that reaches a
+  file, the environment, a process or the network in a sandbox of its own (#257): a process
+  in new user, mount, network, IPC and PID namespaces, the machine's files read-only, the
+  workspace and target directory overlaid so its writes vanish, an empty `/tmp`, loopback
+  only, and a fixed environment. A seccomp supervisor records every path it touches; once it
+  passes, what was there is kept, and it runs again only when its code, its environment or one
+  of those changed, where it ran every time. `-v` names the file. Its output, panics,
+  `#[should_panic]` and exit status stay libtest's, as ra-jit writes the harness. On ripgrep
+  the tests run with no edit go from 493 to 24 of 1,168 (the 469 that ran every time are
+  sandboxed and skipped); the first run, which runs those 469 sandboxed, takes 85.5 s where it
+  took 83.6 s. `ra-jit sandbox` is the command, for build scripts and proc macros next (#147).
+  `RA_JIT_SANDBOX=off` runs them every time as before; where no sandbox can be made (macOS and
+  Windows for now, Ubuntu's AppArmor userns restriction) the command says why once.
 - `vendor/proc-macro-srv`, the 1.99.0 release's proc-macro server with a loader that reads
   the list of macros ra-jit writes into a proc-macro library, built by ra-jit with nothing of
   rustc's. `RA_JIT_PROC_MACRO_COMPARE` and `RA_JIT_PROC_MACRO_LIBS` expand each call again
@@ -484,9 +497,24 @@ All notable changes to ra-jit are written here. The format follows
   them keeps, so a `debug = true` build later takes none of it; the cost part builds at
   `line-tables-only` and then at `true` from one store and checks that it has every variable
   one at `true` after another at `true` has.
+- The first start of a daemon after a cold `cargo ra-jit build` finds what that build stored
+  (#41). The two named the toolchain differently (the sysroot's libstd alone, or rustc's link
+  line with libcore and liballoc too) and the store hashes that name into every key: on
+  nushell the restart found 0 functions, took no frozen def map and expanded every proc macro
+  again. It now finds 103,750 functions, 374 frozen crates and 1,586 expansions, and its cold
+  compile is 11.9 s where it was 17.9 s. `warmstart.py` fails when the restart takes nothing.
+  docs/cargo.md no longer says the store is off unless `RA_JIT_CACHE` is set.
 - A daemon that stops lets its workers finish writing to the store what their last build kept,
   a minute at most each, where it killed them (#41). A stop just after an edit lost it: the
   next checkout of helix compiled 131,609 functions instead of 115,706.
+- helix builds again: since #212 the borrow checker said "higher-ranked lifetime error" of
+  `v.sort_by(match .. { a => |x: &T, y: &T| .., b => |x: &T, y: &T| .. })` and of
+  `match .. { a => render_mode, b => render_spinner }` returned as an `impl Fn(&mut ..)`.
+  rust-analyzer gives the lifetimes a signature elides as errors, where rustc makes each
+  late-bound, so the fn pointer such a `match` makes of fn items or closures had no
+  `for<'a>`; the placeholders of the bound were then held to those lifetimes. The checker
+  now takes them for the lifetimes rustc would bind. The corpus's `higher_ranked` case does
+  both (three errors before), and ide-diagnostics has a test.
 - The borrow checker no longer panics on rustc's UI tests (`lints_ui.py --deny unused_mut`
   over all 20,450 files: 4 panics before, none now, and ra-jit's time from 67 s to 14 s). The
   causes were in the trait solver and the lowering it reads: a trait object's projections
@@ -519,6 +547,14 @@ All notable changes to ra-jit are written here. The format follows
   build: …/out/roles_and_attributes.rs changed"). Cargo's build replaced the worker, which built
   the program in full again: biome's next edit after that took 130 s and 24 GB. Such a file is
   only written again when the script runs again, which the script's own guards are for.
+- The first build after one of cargo's is the daemon's where a build script makes a source of
+  its crate newer, as biome's analyzer crates touch `src/lint/nursery.rs` for cargo to build
+  them again when a rule is added: the build still went to cargo ("what runs during the build:
+  …/biome_yaml_analyze/src/lint/nursery.rs changed") and its worker built the program in full
+  again, 232 s at a 27 GB peak. A source that runs during the build is now changed when it is
+  newer than cargo's last run of rustc on it, as cargo has it, not than the build's start.
+  Every edit of memsplit.py's biome is now the daemon's, the first body edit 0.7 s and the
+  ones after it 0.4 to 0.5 s (16 cores). soakrows.py's `proc macro its script touches` does it.
   soakrows.py's `proc macro on generated code` has the proc macro `include!` its script's
   output and checks that the first edit after the build is the daemon's.
 - On Linux the daemon's bounds on memory count what its control group allows, where they

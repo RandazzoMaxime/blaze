@@ -57,6 +57,7 @@ HARNESSES = [
     ("core", ["unreached.py"], {}, on("linux", "macos"), 1),
     ("core", ["loadedits.py"], {}, on("linux", "macos"), 2),
     ("core", ["testselect.py"], {}, on("linux", "macos"), 2),
+    ("core", ["doctestonce.py"], {}, on("linux", "macos"), 1),
     ("core", ["asmedits.py"], {}, EVERYWHERE, 1),
     # The assembler of a build of ra-jit without LLVM, which is the release's.
     ("core", ["asmedits.py"], {"RA_JIT_ASSEMBLER": "cc"}, on("linux", "macos", backend="cranelift"), 1),

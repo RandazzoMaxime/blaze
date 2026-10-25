@@ -654,6 +654,23 @@ def generated_for_a_proc_macro(row):
         raise Wrong(f"the first edit after the build was not the daemon's: {how}")
 
 
+def script_touches_its_source(row):
+    """A proc macro whose build script makes a file of its crate's newer, as biome's analyzer
+    crates touch `src/lint/nursery.rs` for cargo to build the crate again: the script runs
+    after the build began and before rustc reads the file, which is no change to cargo, and
+    the first edit after the build is still the daemon's."""
+    open(row.path("gen/build.rs"), "w").write(
+        'fn main() {\n    println!("cargo:rerun-if-changed=build.rs");\n'
+        '    let lib = std::fs::File::options().write(true).open("src/lib.rs").unwrap();\n'
+        '    lib.set_modified(std::time::SystemTime::now()).unwrap();\n}\n')
+    row.git("add", "."), row.git("commit", "-qm", "a build script that touches the proc macro")
+    row.warm()
+    row.edit()
+    how, _ = row.both("a body edited after the first build", want=f"mark {row.mark}")
+    if how != "daemon":
+        raise Wrong(f"the first edit after the build was not the daemon's: {how}")
+
+
 def proc_macro_tests(row):
     """The tests of every package, the proc macro's own among them, which link the
     toolchain's `libstd`."""
@@ -1073,6 +1090,7 @@ ROWS = {
     "control group's memory": (in_a_control_group, {}),
     "tests of a proc macro": (proc_macro_tests, {}),
     "proc macro on generated code": (generated_for_a_proc_macro, {}),
+    "proc macro its script touches": (script_touches_its_source, {}),
     "a function that is another under test": (another_under_test, {}),
     "functions rustc keeps to an object": (kept_to_an_object, {"CARGO_INCREMENTAL": "0"}),
     "an item added beside a function left to rustc": (beside_one_left, {}),

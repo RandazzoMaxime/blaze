@@ -106,11 +106,40 @@ attributes (`#[ignore]`, `#[should_panic]`). The standard library is named by th
 A test runs again when that hash is not the one it last passed with, when it has not passed
 since it was added or failed, and every time when it reaches what its code does not decide:
 a file, the environment, another process, the network, or a function ra-jit can't compile.
+Of a test executable that fails, the tests libtest's summary lists as failed run again, and
+the others that ran are remembered as passed; one that ends with no summary (a crash, or a
+test that exits the process) has every test it ran run again. Its output is passed on through
+a pipe as it comes, colored as libtest would color it on the terminal.
 An integration test also runs again when a program of its package that cargo hands it as
 `CARGO_BIN_EXE_<name>` was built again. `cargo ra-jit test -v` says, under each test
 executable, why each test it runs every time does, by the fewest calls from the test to it:
 
     Always tests::reads_a_file: it reaches `statx`, which reads or writes files, by tsel::tests::reads_a_file -> std::fs::read_to_string::<…> -> std::fs::read_to_string::inner -> <std::fs::File>::metadata -> … -> statx
+
+On Linux such a test, when ra-jit compiled all of its code, runs in a sandbox instead of every
+time: alone, in a process of its own, with the machine's files read-only, the workspace and
+target directory as they are but what it writes kept to itself and gone when it ends, an empty
+`/tmp`, `/var/tmp` and `/dev/shm`, no network but its own loopback, and a fixed environment:
+the variables cargo sets for a test, `PATH`, `HOME`, `USER`, `LOGNAME`, `LANG`, `LANGUAGE`,
+`LC_*`, `TZ`, `CARGO`, `CARGO_HOME`, `RUSTUP_HOME`, `RUSTUP_TOOLCHAIN`, `LD_LIBRARY_PATH`,
+`NIX_LD`, `NIX_LD_LIBRARY_PATH`, `RUST_BACKTRACE`, `RUST_LIB_BACKTRACE`, `RUST_MIN_STACK`, and
+those `RA_JIT_TEST_ENV` names, by commas. The sandbox records every path it opens, looks at,
+lists or runs. Once it passes, what was at each (a file's contents, a directory's names,
+nothing) is kept beside its program, and the test runs again when its code, its environment
+or one of those changed; otherwise it is skipped like any other. `-v` says why one runs:
+
+    Sandboxed tests::reads_a_file: it read `/home/me/tsel/data.txt`, which changed
+
+It ends as it would have in the program: its output, a panic and `#[should_panic]` are
+libtest's, and a test that ends or crashes its process ends the program with the same status.
+A test that writes outside the workspace, the target directory and the empty directories
+gets the error a read-only file system gives. The sandbox needs namespaces a user can make;
+where it can't be made (Ubuntu's AppArmor stops it unless
+`kernel.apparmor_restrict_unprivileged_userns` is 0, and macOS and Windows have none yet) the
+command says why once and those tests run every time. `RA_JIT_SANDBOX=off` does that on
+purpose. A sandboxed test costs a process: about 16 ms on Linux x86-64. The time a test
+reads, the randomness it draws and the threads it starts are its own still; what is left,
+macOS's sandbox among it, is [#257](https://github.com/indexable-inc/ra-jit/issues/257).
 
 `-v`, `-q` and `--color` only change what cargo prints, and are the same build to the daemon.
 
@@ -193,7 +222,8 @@ A single build goes to cargo when:
 
 - the daemon is still loading the workspace;
 - a manifest, `Cargo.lock`, a cargo configuration file, the toolchain file, or something a
-  build script reads has changed since cargo last built. Cargo builds, and the daemon loads
+  build script reads has changed since cargo last built (a source a build script makes newer
+  before cargo runs rustc on it, as biome's do, has not). Cargo builds, and the daemon loads
   the workspace again afterwards. On a large workspace that reload is long: 36 to 51 s on
   nushell;
 - a `#[test]` function was added or removed, or its attributes changed, in a test executable
@@ -210,8 +240,11 @@ Doc tests go through ra-jit in rustdoc's place. An example ra-jit cannot build i
 rustdoc, with a line saying why. Of the test harness's flags, `-q`, `--format pretty`,
 `--format terse`, `--color never`, `--exact`, `--skip`, `--test-threads` and test filters
 are handled, and the results are shown as libtest shows them; any other flag leaves the
-library's doctests to rustdoc. Each library's doctests load the workspace again in a
-process of their own, about 2 s each on ripgrep, which the daemon does not do for them yet.
+library's doctests to rustdoc. Cargo's run of rustdoc for each library is only written
+down; once cargo is done, one run of ra-jit loads the workspace and tests the libraries'
+examples in the order cargo asked, each in the directory and with the variables cargo gave
+its rustdoc, and says `Doc-tests` and what failed as cargo does. The daemon does not run
+doctests yet.
 
 The fallback is per invocation or per program, not per crate. If one program of an
 invocation cannot be the daemon's, cargo builds the invocation.
@@ -307,6 +340,9 @@ build a command line is, so changing one starts from a cargo build again.
 `RA_JIT_TESTS` is read by each `cargo ra-jit test` alone and is not part of which build it
 is: `affected` runs the tests an edit reached
 ([above](#running-only-the-tests-an-edit-reached)), `all` every test. The default is `all`.
+`RA_JIT_SANDBOX=off` runs the tests that reach outside their code every time instead of
+sandboxed, and `RA_JIT_TEST_ENV` names more variables a sandboxed test is given, by commas;
+both are read the same way.
 
 These are read by the daemon when it starts, from the environment of whichever command
 started it. To change one, run `cargo ra-jit stop` first.
@@ -318,11 +354,13 @@ started it. To change one, run `cargo ra-jit stop` first.
 | `RA_JIT_MEMORY_MAX` | the most the workers hold together, a size such as `6G`, or `off` | half the machine's memory (on Linux, or of what its control group allows) |
 | `RA_JIT_SPARE` | `ready` keeps a spare worker with the library loaded at all times, for the next project; `0` starts none, and a workspace loads once cargo has built it | a spare for each build of a new workspace, as it begins |
 | `RA_JIT_OWN_BASE_MEMORY` | the most a worker may hold while it builds its own base in the background, a size such as `40G`, past which it gives that base up and edits patch rustc's executable; `off` is no bound | a quarter of the machine's memory (on Linux, or of what its control group allows) |
-| `RA_JIT_CACHE` | directory of the disk store; without it nothing is kept on disk | not set |
+| `RA_JIT_CACHE` | directory of the disk store, or `off` for none | `ra-jit/store` in the user's cache directory ([cache.md](cache.md)) |
 | `RA_JIT_REMOTE` and the other store variables | see [cache.md](cache.md) | not set |
 
-The disk store is off unless `RA_JIT_CACHE` is set. That is easy to miss: a daemon started by
-a shell without the variable keeps no store, whatever later shells have set.
+The disk store is on by default and shared by every daemon and checkout of the user. The
+daemon reads `RA_JIT_CACHE` once, when it starts: a daemon started by a shell without the
+variable keeps the default store whatever later shells have set, so run `cargo ra-jit stop`
+before changing it.
 
 ## Known problems
 
