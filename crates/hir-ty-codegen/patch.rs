@@ -727,8 +727,13 @@ struct Hydrated {
     files: Option<Box<[Box<str>]>>,
     /// What calls it in the base, which its instance is found through.
     callers: Vec<Caller>,
-    found: std::sync::OnceLock<Option<(Instance, StoredParamEnvAndCrate)>>,
+    /// Its instance, when code the build compiled called it. Else it is found again at each
+    /// look: an edit can give what its callers call the same name and another meaning.
+    known: Option<(Instance, StoredParamEnvAndCrate)>,
 }
+
+/// The instances of [`Base::hydrated`] one look found, by their index there.
+type FoundHydrated = FxHashMap<usize, (Instance, StoredParamEnvAndCrate)>;
 
 /// A root by its index in [`Base::compiled`], or another of [`Base::hydrated`].
 #[derive(Clone, Copy)]
@@ -855,7 +860,7 @@ impl Touched {
             self.roots.extend(&stale.roots);
             self.instances.extend(stale.instances.iter().cloned());
             self.statics.extend(&stale.statics);
-            self.hydrated.extend(&stale.hydrated);
+            self.hydrated.extend(stale.hydrated.iter().map(|(at, ..)| *at));
             for (node, _) in &stale.broken {
                 match node {
                     Node::Instance(instance) => _ = self.instances.insert(instance.clone()),
@@ -879,8 +884,8 @@ impl Touched {
 pub struct Stale {
     roots: Vec<FunctionId>,
     instances: Vec<Instance>,
-    /// By their index in [`Base::hydrated`].
-    hydrated: Vec<u32>,
+    /// By their index in [`Base::hydrated`], with the instance each was found to be.
+    hydrated: Vec<(u32, Instance, StoredParamEnvAndCrate)>,
     /// The statics with another value, which a patch defines again under their name.
     statics: Vec<StaticId>,
     /// What a patch can't replace, and why. That only matters for what the program still
@@ -1010,10 +1015,6 @@ impl FromStore {
                 }
                 None => from.homes.of_any_file.push(at),
             }
-            let found = std::sync::OnceLock::new();
-            if let Some(known) = cg.found_instances.get(id) {
-                _ = found.set(Some(known.clone()));
-            }
             index.insert(name, at);
             from.hydrated.push(Hydrated {
                 name: name.clone(),
@@ -1022,7 +1023,7 @@ impl FromStore {
                 krate,
                 files: tracked.files.map(|it| it.into_iter().map(Box::from).collect()),
                 callers: Vec::new(),
-                found,
+                known: cg.found_instances.get(id).cloned(),
             });
             kept.push(entry);
         }
@@ -1172,6 +1173,16 @@ impl Base {
             }
         };
         let from_store = FromStore::new(db, cg, compiled, &stored_marks);
+        if std::env::var_os("RA_JIT_STATS").is_some() {
+            let known = from_store.hydrated.iter().filter(|it| it.known.is_some()).count();
+            eprintln!(
+                "base from the store: {} roots, {} other functions of the checkout ({known} called \
+                 by code compiled here){}",
+                stored_marks.len(),
+                from_store.hydrated.len(),
+                if from_store.untracked { ", some untracked" } else { "" },
+            );
+        }
         for (i, &(root, _)) in compiled.iter().enumerate() {
             if !stored(i) {
                 note(Node::Root(root), &compiled_root(db, root).as_ref().ok()?.requests);
@@ -1738,6 +1749,7 @@ impl Base {
             self.touched.bodies.iter().map(|&file| names.file_path(file)).collect();
         let edited_paths: FxHashSet<&str> = edited.iter().flatten().map(String::as_str).collect();
         let mut homes = super::home::Homes::default();
+        let mut found = FoundHydrated::default();
         for i in self.hydrated_to_ask(check_all, edited.as_deref(), part, parts) {
             let was = &self.hydrated[i];
             let in_edited = || {
@@ -1754,8 +1766,9 @@ impl Base {
                 continue;
             }
             let asked = stdx::time::Instant::now();
-            let found = self.found_instance(db, names, &mut homes, i, &mut Vec::new());
-            let same = found.and_then(|(instance, env)| {
+            let instance =
+                self.found_instance(db, names, &mut homes, &mut found, i, &mut Vec::new());
+            let same = instance.clone().and_then(|(instance, env)| {
                 probe(|| {
                     let compiled = compiled_instance(db, instance, env).as_ref().ok()?;
                     Some(stable_mark(db, names, compiled, self.debug) == Some(was.mark))
@@ -1763,14 +1776,21 @@ impl Base {
             });
             stale.steps.instances_asked += 1;
             stale.steps.slowest = stale.steps.slowest.max(asked.elapsed());
-            match same {
-                Some(Some(true)) => {}
+            match (same, instance) {
+                (Some(Some(true)), _) => {}
                 _ if !touched => eprintln!("check-all: MISSED `{}` from the store", was.name),
-                Some(Some(false)) => stale.hydrated.push(i as u32),
-                Some(None) => return Err("code of the checkout from the store no longer compiles"),
+                (Some(Some(false)), Some((instance, env))) => {
+                    stale.hydrated.push((i as u32, instance, env))
+                }
+                (Some(_), _) => {
+                    return Err("code of the checkout from the store no longer compiles");
+                }
                 // Its callers changed, and what they call now is compiled as new code.
-                None if self.dropped(db, names, &mut homes, i, &mut Vec::new()) => {}
-                None => return Err("code of the checkout from the store is not called as it was"),
+                (None, _)
+                    if self.dropped(db, names, &mut homes, &mut found, i, &mut Vec::new()) => {}
+                (None, _) => {
+                    return Err("code of the checkout from the store is not called as it was");
+                }
             }
         }
         Ok(())
@@ -1783,18 +1803,19 @@ impl Base {
         db: &dyn HirDatabase,
         names: &StableNames<'_, '_>,
         homes: &mut super::home::Homes,
+        found: &mut FoundHydrated,
         i: usize,
         asking: &mut Vec<usize>,
     ) -> Option<(Instance, StoredParamEnvAndCrate)> {
         let was = &self.hydrated[i];
-        if let Some(found) = was.found.get() {
-            return found.clone();
+        if let Some(known) = was.known.as_ref().or_else(|| found.get(&i)) {
+            return Some(known.clone());
         }
         if asking.contains(&i) {
             return None;
         }
         asking.push(i);
-        let mut found = None;
+        let mut instance = None;
         for caller in &was.callers {
             let compiled = match *caller {
                 Caller::Root(at) => {
@@ -1803,7 +1824,7 @@ impl Base {
                 }
                 Caller::Hydrated(at) => {
                     let Some((instance, env)) =
-                        self.found_instance(db, names, homes, at as usize, asking)
+                        self.found_instance(db, names, homes, found, at as usize, asking)
                     else {
                         continue;
                     };
@@ -1811,21 +1832,20 @@ impl Base {
                 }
             };
             let Some(compiled) = compiled else { continue };
-            found = compiled.requests.funcs.iter().find_map(|request| {
+            instance = compiled.requests.funcs.iter().find_map(|request| {
                 let FuncTarget::Instance(callee, env) = &request.target else { return None };
                 let named = names.instance(callee)?;
                 (*named == *was.name).then(|| (callee.clone(), homes.home(db, callee, env)))
             });
-            if found.is_some() {
+            if instance.is_some() {
                 break;
             }
         }
         asking.pop();
-        // One not found now can be once an edit has changed its callers back.
-        if found.is_some() {
-            _ = was.found.set(found.clone());
+        if let Some(instance) = &instance {
+            found.insert(i, instance.clone());
         }
-        found
+        instance
     }
 
     /// Whether nothing calls one of [`Self::hydrated`] as the base did: every caller changed,
@@ -1837,6 +1857,7 @@ impl Base {
         db: &dyn HirDatabase,
         names: &StableNames<'_, '_>,
         homes: &mut super::home::Homes,
+        found: &mut FoundHydrated,
         i: usize,
         asking: &mut Vec<usize>,
     ) -> bool {
@@ -1857,7 +1878,7 @@ impl Base {
                 same.flatten() != Some(true)
             }
             Caller::Hydrated(at) => {
-                match self.found_instance(db, names, homes, at as usize, &mut Vec::new()) {
+                match self.found_instance(db, names, homes, found, at as usize, &mut Vec::new()) {
                     Some((instance, env)) => {
                         let mark = probe(|| {
                             let compiled = compiled_instance(db, instance, env).as_ref().ok()?;
@@ -1865,7 +1886,7 @@ impl Base {
                         });
                         mark.flatten() != Some(self.hydrated[at as usize].mark)
                     }
-                    None => self.dropped(db, names, homes, at as usize, asking),
+                    None => self.dropped(db, names, homes, found, at as usize, asking),
                 }
             }
         });
@@ -2306,11 +2327,8 @@ impl Base {
             cg.pending.push((instance.clone(), was.env.clone(), id));
         }
         // What calls code from the store calls it by the base's symbol, which the patch takes.
-        for &i in &changed_hydrated {
+        for (i, instance, env) in changed_hydrated {
             let was = &self.hydrated[i as usize];
-            let Some(Some((instance, env))) = was.found.get().cloned() else {
-                return Ok(Err("code of the checkout from the store is not called as it was"));
-            };
             let Ok(compiled) = compiled_instance(db, instance.clone(), env.clone()).as_ref() else {
                 return Ok(Err("code of the checkout from the store no longer compiles"));
             };
