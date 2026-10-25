@@ -30,7 +30,7 @@ For macOS on Apple silicon and Linux. Rather use crates.io or Nix? [Other ways t
 
 In any Rust project:
 
-```sh
+```text
 cargo blaze run     # like cargo run
 cargo blaze test    # like cargo test
 cargo blaze build   # like cargo build
