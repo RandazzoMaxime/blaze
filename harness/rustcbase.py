@@ -128,7 +128,7 @@ fn main() {
     dep::noop();
     println!("one {}", dep::one());
     dep::enable();
-    println!("enabled {}", dep::is_enabled());
+    println!("enabled {} made {}", dep::is_enabled(), dep::made());
     println!("asset {}", ASSET.trim());
     if args.first().is_some_and(|it| it == "panic") {
         fails(1);
@@ -153,7 +153,11 @@ FILES = {
                       "    ENABLED.load(std::sync::atomic::Ordering::Relaxed)\n}\n\n"
                       # An `asm!` with a `sym` is left to rustc, and with it `ENABLED`.
                       "pub fn enable() {\n    unsafe { std::arch::asm!(\"/* {0} */\", sym one) };\n"
-                      "    ENABLED.store(true, std::sync::atomic::Ordering::Relaxed);\n}\n",
+                      "    ENABLED.store(true, std::sync::atomic::Ordering::Relaxed);\n}\n\n"
+                      # The daemon takes in what an `include!` names once a build expands it.
+                      'include!(concat!(env!("OUT_DIR"), "/made.rs"));\n',
+    "dep/build.rs": 'fn main() {\n    let out = std::env::var("OUT_DIR").unwrap();\n'
+                    '    std::fs::write(format!("{out}/made.rs"), "pub fn made() -> u32 { 11 }\\n").unwrap();\n}\n',
 }
 
 M = "app/src/main.rs"
@@ -257,8 +261,8 @@ SCENARIOS = {
                       ["full"], 0, {}),
     "inline": ([[edit(M, "    x + 1\n}\n\nfn counted", "    x + 2\n}\n\nfn counted")]], ["full"], 0, {}),
     # A build in full leaves dep's `enable` to rustc, and with it `is_enabled`, whose static has
-    # no symbol a new link can name. No edit of app reaches rustc's copies: the builds stay the
-    # daemon's.
+    # no symbol a new link can name. Taking in the file dep includes from `OUT_DIR` is no edit,
+    # and no edit of app reaches rustc's copies: the builds stay the daemon's.
     "left-static": ([[edit(M, "    x + 1\n}\n\nfn counted", "    x + 2\n}\n\nfn counted")],
                      [edit(M, "    x + 2\n}\n\nfn counted", "    x + 3\n}\n\nfn counted")]], ["full", "patch"], 0, {}),
     # Neither has a copy in rustc's executable, nothing there calls them: a patch has the one
