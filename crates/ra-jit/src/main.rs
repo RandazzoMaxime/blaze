@@ -940,8 +940,9 @@ impl Resolver<'_> {
             return Some(short_hash(&format!("ra-jit crate {}", name.crate_name())));
         }
         let root = self.crate_root(krate.into())?;
-        let root = self.inside(&root).unwrap_or(&root);
-        let named = format!("ra-jit crate {} {}", name.crate_name(), root.display());
+        let home = self.contents.cargo_home(self.db);
+        let place = crate_place(&root, self.inside(&root), home.as_deref());
+        let named = format!("ra-jit crate {} {place}", name.crate_name());
         Some(short_hash(&named))
     }
 
@@ -1636,6 +1637,22 @@ impl SymbolResolver for Resolver<'_> {
 /// Whether what the module declares is written in a body.
 fn is_in_body(db: &RootDatabase, module: Module) -> bool {
     module.nearest_non_block_module(db) != module
+}
+
+/// What names the crate whose root is `root` in the id ra-jit gives it, the same on every
+/// machine: its path in the checkout (`inside`), or below where cargo keeps what it fetched
+/// (`cargo_home`), or else where it is.
+fn crate_place(root: &Path, inside: Option<&Path>, cargo_home: Option<&str>) -> String {
+    if let Some(inside) = inside {
+        return inside.display().to_string();
+    }
+    let fetched = root.to_str().zip(cargo_home);
+    match fetched
+        .and_then(|(root, home)| hir_ty_codegen::moved(root, home, hir_ty_codegen::CARGO_HOME))
+    {
+        Some(moved) => moved,
+        None => root.display().to_string(),
+    }
 }
 
 /// The first eight bytes of the SHA-256 of a text.
@@ -6777,6 +6794,9 @@ fn main() -> anyhow::Result<()> {
     }
     trace::began();
     take_blaze_names();
+    if let Some(sources) = option_env!("RA_JIT_SOURCES") {
+        ra_jit_store::built_from(sources);
+    }
     syntax::set_green_trees(std::env::var_os("RA_JIT_GREEN_TREES").is_some());
     project_model::answer_toolchain_questions_with(answers::ask);
     let stands_in_for_rustc = std::env::var_os("RA_JIT_WRAPS_RUSTC").is_some();
@@ -9624,6 +9644,22 @@ fn report_stats(stats: &hir_ty_codegen::BuildStats) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_fetched_crate_is_named_the_same_wherever_cargo_keeps_it() {
+        let fetched = "registry/src/index.crates.io-1949cf8c6b5b557f/memchr-2.7.4/src/lib.rs";
+        let at =
+            |home: &str| crate_place(Path::new(&format!("{home}/{fetched}")), None, Some(home));
+        assert_eq!(at("/home/one/.cargo"), at("/Users/other/.cargo"));
+        assert_eq!(at("/home/one/.cargo"), format!("/cargo/{fetched}"));
+        let elsewhere = Path::new("/opt/crates/lib.rs");
+        assert_eq!(crate_place(elsewhere, None, Some("/home/one/.cargo")), "/opt/crates/lib.rs");
+        let inside = Path::new("/ws/app/src/main.rs");
+        assert_eq!(
+            crate_place(inside, Some(Path::new("app/src/main.rs")), None),
+            "app/src/main.rs"
+        );
+    }
 
     /// An rlib whose `lib.rmeta` is `metadata`, as an archive of one member.
     fn rlib(metadata: &[u8]) -> Vec<u8> {

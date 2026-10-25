@@ -287,6 +287,22 @@ All notable changes to ra-jit are written here. The format follows
   what it saves while most are refused for calling rustc's copy of a function of the checkout
   ([#216](https://github.com/indexable-inc/blaze/issues/216)). `harness/storetracked.py` checks
   that a start found roots.
+- The store is keyed by what ra-jit was built from, not by the bytes of its executable
+  ([#105](https://github.com/indexable-inc/blaze/issues/105)): `crates/ra-jit/build.rs`
+  hashes the workspace's crates, the vendored ones, the manifest, lock file, cargo config and
+  `harness/toolchain`, the features, the target and whether debug assertions
+  are on. Another build of the same sources, on another machine or after a commit that
+  changes only harnesses or docs, finds what the first kept: `harness/storebuilds.py` builds
+  its workspace into an empty store, then starts a copy of ra-jit with other bytes, which
+  finds 66 entries and compiles 0 of the 701 the first added, where a build keyed by its bytes
+  found 0 and compiled all 701. A ra-jit built outside the workspace keys by its bytes as
+  before. A crate fetched by cargo is named by its place below `CARGO_HOME`, not by where
+  `CARGO_HOME` is, so its frozen def map and functions are found from another home. A build
+  script's run is keyed with its package's directory and the target directory apart, and
+  what it printed and wrote is put back with this checkout's; the key still hashes the
+  script's executable, which differs between target directories, so a second checkout still
+  runs its scripts (none restored in warmstart's `warm` step on ripgrep or nushell) until a
+  script is keyed by what it was built from.
 - A daemon that starts on a store holding the checkout's code no longer compiles that code
   again before the first edit can be patched ([#105](https://github.com/indexable-inc/blaze/issues/105)).
   Each function of the checkout goes into the store with a mark of its code and of what it
