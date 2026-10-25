@@ -1,4 +1,4 @@
-# The README's benchmark tables, measured on real projects (docs/benchmarks.md), as a matrix over
+# The benchmark tables of docs/benchmarks.md and the README's numbers, measured on real projects, as a matrix over
 # the platforms of harness/benchplatforms.py: macOS arm64, Linux aarch64 and Linux x86-64. Each
 # runs on its own dedicated benchmark machine (a self-hosted runner labelled bench-macos,
 # bench-arm64 or bench-x86; docs/benchmarks.md "The machines"), never on a shared GitHub runner:
@@ -107,7 +107,7 @@ jobs:
             --work "$work" --reference "$BENCH_HOME/reference" --out "$RUNNER_TEMP/results/bench.json" \
             || { status=$?; [ "$status" = 3 ] || exit "$status"; echo "wrong=true" >> "$GITHUB_OUTPUT"; }
       # How fast the built programs run: harness/runbench.py, ra-jit's LLVM against
-      # `cargo build --release`, into the README's runtime table.
+      # `cargo build --release`, into the runtime table.
       - name: Runtime bench
         continue-on-error: true
         run: |
