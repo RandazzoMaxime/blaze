@@ -164,6 +164,6 @@ dev-aws-8, against `cargo fetch` and `cargo vendor` over 314 lock files (the ben
 at their pins but bun, the 300 most downloaded crates, git dependencies of every kind of
 reference, a second sparse registry): 3684/3684 unpacked packages and 38/38 git checkouts
 equal, file by file, and every directory name; crates.io replaced by a mirror 42/42; ripgrep's
-and zed's vendored packages 51/51 and 1533/1533. Not yet: blaze-resolve's `Registry` over it,
+and zed's vendored packages 51/51 and 1533/1533. Not yet: blaze-resolve's `Registry` over it (#321),
 registries that need credentials (#315), git indexes (#316), cargo's last-use record (#317),
 a path package's file list (#318).
