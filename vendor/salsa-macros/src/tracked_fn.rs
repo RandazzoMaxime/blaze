@@ -57,7 +57,7 @@ impl AllowedOptions for TrackedFn {
 
     const ID: bool = false;
 
-    const REVISIONS: bool = false;
+    const REVISIONS: bool = true;
 
     const HEAP_SIZE: bool = true;
 
@@ -162,6 +162,16 @@ impl Macro {
             FunctionType::Constant | FunctionType::RequiresInterning => true,
             FunctionType::SalsaStruct => false,
         };
+        // How long the arguments stay interned once nothing asks for them: there are none to
+        // intern when the one argument is a salsa struct.
+        if let (Some(revisions), false) = (&self.args.revisions, needs_interner) {
+            return Err(syn::Error::new_spanned(
+                revisions,
+                "`revisions` is for the arguments a function interns, and one whose only argument \
+                 is a salsa struct interns none",
+            ));
+        }
+        let revisions = self.args.revisions.iter();
 
         let lru = Literal::usize_unsuffixed(self.args.lru.unwrap_or(0));
 
@@ -231,6 +241,7 @@ impl Macro {
                 is_specifiable: #is_specifiable,
                 values_equal: {#eq},
                 needs_interner: #needs_interner,
+                revisions: #(#revisions)*,
                 heap_size_fn: #(#heap_size_fn)*,
                 eviction: #eviction_type,
                 lru: #lru,
