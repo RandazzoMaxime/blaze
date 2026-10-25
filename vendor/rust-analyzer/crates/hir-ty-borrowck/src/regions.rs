@@ -1156,6 +1156,15 @@ impl<'db> Builder<'_, '_, 'db> {
                         self.const_positions += 1;
                         region
                     }
+                    // What a fn pointer in the hidden type elides is its own, as in the one
+                    // `match k { a => mode, b => name }` coerces fn items to. An argument of
+                    // the hidden type itself is not, and is 'static as the rest.
+                    _ if opaque
+                        && depth != rustc_type_ir::INNERMOST
+                        && matches!(region.kind(), RegionKind::ReError(_)) =>
+                    {
+                        self.fresh_elided()
+                    }
                     _ if hidden_static => self.static_region(),
                     _ if opaque => self.fresh(),
                     (Some(it), _) => it,
