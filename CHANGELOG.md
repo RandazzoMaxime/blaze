@@ -8,6 +8,14 @@ All notable changes to ra-jit are written here. The format follows
 
 ### Added
 
+- `crates/blaze-resolve`, cargo's resolver owned by blaze (#298), starts with cargo 1.99.0's package
+  model, used by nothing yet: `SourceId` (path, git and sparse registries, git at a branch, tag or
+  rev with its commit, directory, local registry) compared by cargo's canonical URL and written as
+  lock files, package ids and messages write it; `PackageId`, `PackageIdSpec` (`-p` and
+  `cargo metadata`'s ids), `Dependency` with renames, kinds, targets and its locked or `--precise`
+  requirement; `Summary` and its feature map, with the implicit features of optional dependencies
+  and cargo's errors for features; and the `Registry` the resolver asks, with yanked and offline
+  versions marked. Its tests include cargo's own for these types.
 - `cargo ra-jit test` with `RA_JIT_TESTS=affected` runs, on Linux, each test that reaches a
   file, the environment, a process or the network in a sandbox of its own (#257): a process
   in new user, mount, network, IPC and PID namespaces, the machine's files read-only, the
