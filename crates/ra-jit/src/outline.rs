@@ -393,7 +393,7 @@ fn outlines(db: &RootDatabase, listed: &Listed, files: &[FileId]) -> Vec<Option<
             }
             return None;
         };
-        outline(db, file, functions)
+        outline(db, listed, file, functions)
     };
     if let ([file], [functions]) = (files, &functions[..]) {
         // One file, the usual edit: hashed here rather than on a thread of its own.
@@ -430,7 +430,7 @@ fn outlines(db: &RootDatabase, listed: &Listed, files: &[FileId]) -> Vec<Option<
                                     }
                                     return (at, None);
                                 };
-                                (at, outline(&db, file, functions))
+                                (at, outline(&db, listed, file, functions))
                             })
                             .collect::<Vec<_>>()
                     })
@@ -504,7 +504,12 @@ fn types(db: &RootDatabase, file: FileId) -> FxHashMap<String, u64> {
 
 /// A hash of everything in the file but the bodies nothing else sees into, or `None` when
 /// the file is not read as a file of its own. `functions` are those written in it.
-fn outline(db: &RootDatabase, file: FileId, functions: &[FunctionId]) -> Option<Outline> {
+fn outline(
+    db: &RootDatabase,
+    listed: &Listed,
+    file: FileId,
+    functions: &[FunctionId],
+) -> Option<Outline> {
     let Some(seen) = Written::of(db, functions) else {
         if std::env::var_os("RA_JIT_STATS").is_some() {
             eprintln!("outline: {file:?} is included in another file");
@@ -515,8 +520,9 @@ fn outline(db: &RootDatabase, file: FileId, functions: &[FunctionId]) -> Option<
     let edition =
         relevant_crates(db, file).first().map_or(Edition::CURRENT, |it| it.data(db).edition);
     let tree = EditionedFileId::new(db, file, edition).parse(db).syntax_node();
+    let off = Off::of(db, listed, file);
     let (hash, found, signatures) =
-        hash_outside(&tree, &seen.declaring, &FxHashSet::default(), true);
+        hash_outside(&tree, &seen.declaring, &FxHashSet::default(), &off, true);
     // Each of them has to be one of the bodies that were kept in.
     (found == seen.declaring.len()).then_some(Outline { hash, signatures })
 }
@@ -537,7 +543,8 @@ fn outline_without(
     let edition =
         relevant_crates(db, file).first().map_or(Edition::CURRENT, |it| it.data(db).edition);
     let tree = EditionedFileId::new(db, file, edition).parse(db).syntax_node();
-    let (hash, found) = hash_outside_bodies(&tree, &seen.declaring, added);
+    let (hash, found) =
+        hash_outside_bodies(&tree, &seen.declaring, added, &Off::of(db, listed, file));
     (found == seen.declaring.len()).then_some(hash)
 }
 
@@ -613,9 +620,9 @@ fn added_functions(was: &SyntaxNode, now: &SyntaxNode) -> Option<Vec<ast::Fn>> {
         return None;
     }
     let skipped: FxHashSet<TextRange> = added.iter().map(|it| it.syntax().text_range()).collect();
-    let none = FxHashSet::default();
-    let same =
-        hash_outside_bodies(was, &none, &none).0 == hash_outside_bodies(now, &none, &skipped).0;
+    let (none, off) = (FxHashSet::default(), Off::default());
+    let same = hash_outside_bodies(was, &none, &none, &off).0
+        == hash_outside_bodies(now, &none, &skipped, &off).0;
     same.then_some(added)
 }
 
@@ -758,7 +765,35 @@ fn skeleton_of(tree: &SyntaxNode) -> Option<u64> {
             return None;
         }
     }
-    Some(hash_outside_bodies(tree, &FxHashSet::default(), &FxHashSet::default()).0)
+    let none = FxHashSet::default();
+    Some(hash_outside_bodies(tree, &none, &none, &Off::default()).0)
+}
+
+/// What a `#[cfg]` takes out of every crate that is built with the file as a module of it. None
+/// of it is compiled, and only the attributes of what it is written on can change that. The
+/// crates of the file's source root are more: a package's tests are crates of its own, that
+/// have `cfg(test)` and no module of the library's.
+#[derive(Default)]
+struct Off(Vec<cfg::CfgOptions>);
+
+impl Off {
+    fn of(db: &RootDatabase, listed: &Listed, file: FileId) -> Off {
+        Off(listed.crates_of(db, file).iter().map(|it| it.cfg_options(db).clone()).collect())
+    }
+
+    fn takes_out(&self, node: &SyntaxNode) -> bool {
+        if self.0.is_empty() {
+            return false;
+        }
+        let Some(item) = ast::AnyHasAttrs::cast(node.clone()) else { return false };
+        item.attrs().any(|attr| match attr.meta() {
+            Some(ast::Meta::CfgMeta(meta)) => meta.cfg_predicate().is_some_and(|predicate| {
+                let cfg = cfg::CfgExpr::parse_from_ast(predicate);
+                self.0.iter().all(|options| options.check(&cfg) == Some(false))
+            }),
+            _ => false,
+        })
+    }
 }
 
 /// The hash, and how many of the `declaring` functions were come by. The functions at
@@ -767,8 +802,9 @@ fn hash_outside_bodies(
     file: &SyntaxNode,
     declaring: &FxHashSet<TextRange>,
     skipped: &FxHashSet<TextRange>,
+    off: &Off,
 ) -> (u64, usize) {
-    let (hash, found, _) = hash_outside(file, declaring, skipped, false);
+    let (hash, found, _) = hash_outside(file, declaring, skipped, off, false);
     (hash, found)
 }
 
@@ -778,6 +814,7 @@ fn hash_outside(
     file: &SyntaxNode,
     declaring: &FxHashSet<TextRange>,
     skipped: &FxHashSet<TextRange>,
+    off: &Off,
     signatures: bool,
 ) -> (u64, usize, Option<Signatures>) {
     let mut hasher = FxHasher::default();
@@ -794,6 +831,26 @@ fn hash_outside(
             WalkEvent::Enter(syntax::NodeOrToken::Node(node))
                 if node.kind() == SyntaxKind::FN && skipped.contains(&node.text_range()) =>
             {
+                walk.skip_subtree();
+            }
+            WalkEvent::Enter(syntax::NodeOrToken::Node(node)) if off.takes_out(&node) => {
+                let into = match &mut signature {
+                    Some((_, _, it)) => it,
+                    None => &mut rest,
+                };
+                node.kind().hash(&mut hasher);
+                node.kind().hash(into);
+                let attrs =
+                    ast::AnyHasAttrs::cast(node.clone()).into_iter().flat_map(|it| it.attrs());
+                let tokens = attrs.flat_map(|attr| {
+                    attr.syntax().descendants_with_tokens().filter_map(|it| it.into_token())
+                });
+                for token in tokens.filter(|it| !it.kind().is_trivia()) {
+                    token.kind().hash(&mut hasher);
+                    token.text().hash(&mut hasher);
+                    token.kind().hash(into);
+                    token.text().hash(into);
+                }
                 walk.skip_subtree();
             }
             WalkEvent::Enter(syntax::NodeOrToken::Node(node)) => {
@@ -1089,7 +1146,7 @@ mod tests {
 
     fn hash(text: &str) -> u64 {
         let tree = SourceFile::parse(text, Edition::CURRENT).syntax_node();
-        hash_outside_bodies(&tree, &FxHashSet::default(), &FxHashSet::default()).0
+        hash_outside_bodies(&tree, &FxHashSet::default(), &FxHashSet::default(), &Off::default()).0
     }
 
     #[track_caller]
@@ -1110,11 +1167,37 @@ mod tests {
         let of = |text: &str| {
             let tree = SourceFile::parse(text, Edition::CURRENT).syntax_node();
             let none = FxHashSet::default();
-            let (hash, _, signatures) = hash_outside(&tree, &none, &none, true);
-            assert_eq!(hash, hash_outside_bodies(&tree, &none, &none).0);
+            let (hash, _, signatures) = hash_outside(&tree, &none, &none, &Off::default(), true);
+            assert_eq!(hash, hash_outside_bodies(&tree, &none, &none, &Off::default()).0);
             signatures
         };
         Signatures::changed(&of(before)?, &of(after)?).filter(|it| !it.is_empty())
+    }
+
+    #[test]
+    fn what_a_cfg_takes_out_is_not_seen() {
+        let hash = |text: &str, off: &Off| {
+            let tree = SourceFile::parse(text, Edition::CURRENT).syntax_node();
+            let none = FxHashSet::default();
+            hash_outside_bodies(&tree, &none, &none, off).0
+        };
+        let tests = |call: &str| {
+            format!(
+                "pub fn f() {{}}\n#[cfg(test)]\nmod tests {{\n    #[test]\n    fn t() {{ super::f({call}); }}\n}}\n"
+            )
+        };
+        let built = Off(vec![cfg::CfgOptions::default()]);
+        assert_eq!(hash(&tests(""), &built), hash(&tests("()"), &built));
+        let mut tested = cfg::CfgOptions::default();
+        tested.insert_atom(intern::Symbol::intern("test"));
+        let both = Off(vec![cfg::CfgOptions::default(), tested]);
+        assert_ne!(hash(&tests(""), &both), hash(&tests("()"), &both));
+        assert_ne!(hash(&tests(""), &Off::default()), hash(&tests("()"), &Off::default()));
+        // The `#[cfg]` itself is seen, and what is written before the item it takes out.
+        let on = tests("").replace("cfg(test)", "cfg(not(test))");
+        assert_ne!(hash(&tests(""), &built), hash(&on, &built));
+        let doc = tests("").replace("#[cfg(test)]", "#[doc = \"x\"]\n#[cfg(test)]");
+        assert_ne!(hash(&tests(""), &built), hash(&doc, &built));
     }
 
     #[test]
@@ -1344,7 +1427,7 @@ mod tests {
             let tree = SourceFile::parse(text, Edition::CURRENT).syntax_node();
             let declaring = tree.descendants().find(|it| it.kind() == SyntaxKind::FN).unwrap();
             let declaring = FxHashSet::from_iter([declaring.text_range()]);
-            hash_outside_bodies(&tree, &declaring, &FxHashSet::default())
+            hash_outside_bodies(&tree, &declaring, &FxHashSet::default(), &Off::default())
         };
         let (one, found) = hash(&text(1));
         assert_eq!(found, 1);
