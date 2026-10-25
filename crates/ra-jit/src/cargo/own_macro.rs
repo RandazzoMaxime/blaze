@@ -208,11 +208,15 @@ pub(crate) fn restored(key: &[u8; 32], made: &Made<'_>) -> bool {
     if !kept.still() {
         return false;
     }
-    let write = |path: &Path, bytes: &[u8]| {
+    let write = |path: &Path, bytes: &[u8], executable: bool| {
         let new = path.with_extension(format!("{}.new", std::process::id()));
-        std::fs::write(&new, bytes).and_then(|()| std::fs::rename(&new, path))
+        std::fs::write(&new, bytes)
+            .and_then(|()| if executable { super::script::make_executable(&new) } else { Ok(()) })
+            .and_then(|()| std::fs::rename(&new, path))
     };
-    write(&made.exe, &kept.library).and_then(|()| write(&made.dep_info, &kept.dep_info)).is_ok()
+    write(&made.exe, &kept.library, true)
+        .and_then(|()| write(&made.dep_info, &kept.dep_info, false))
+        .is_ok()
 }
 
 /// Keeps the library ra-jit linked as `made` says under `key`, with what each file it was
