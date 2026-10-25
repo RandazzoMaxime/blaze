@@ -267,9 +267,27 @@ fn build(asked: &Invocation) -> anyhow::Result<i32> {
                     if let Some(why) = why {
                         say::cargo_builds(&why, "building with cargo", say::COLD);
                     }
-                    match by_cargo(asked, &cwd, &key, Counts::default(), ahead)? {
+                    let state = match by_cargo(asked, &cwd, &key, Counts::default(), ahead)? {
                         Ok(state) => state,
                         Err(code) => return Ok(code),
+                    };
+                    match after_cargo(asked, state) {
+                        Ok((state, settled)) => {
+                            finished(&state);
+                            served = true;
+                            held = Some(settled);
+                            state
+                        }
+                        Err(NotServed::Error(_, written)) => {
+                            eprintln!("{written}");
+                            return Ok(FAILED);
+                        }
+                        Err(NotServed::Cargo(ToCargo(state, reason))) => {
+                            say::cargo_builds(&reason, "this build is cargo's", say::COLD);
+                            let mut state = *state;
+                            state.count_cargo(&reason);
+                            state
+                        }
                     }
                 }
             }
@@ -448,6 +466,16 @@ fn first_by_daemon(
     state.keep_daemons().map_err(|why| format!("{why:#}"))?;
     state.counts.served += 1;
     Ok((state, held))
+}
+
+/// The first build of a workspace, once cargo has built all of it: the daemon, which loaded
+/// the workspace while cargo built, builds the programs from what cargo built, and they are
+/// the build's, as they are of every build after it.
+fn after_cargo(asked: &Invocation, state: State) -> Result<(State, Held), NotServed> {
+    if state.refusal.is_none() && state.checkouts.iter().any(|it| !it.programs.is_empty()) {
+        say::status(asked.flags.quiet, "Waiting", "for blaze to load the workspace");
+    }
+    by_daemon(state)
 }
 
 /// The variable that has the first build of a workspace be the daemon's too.
