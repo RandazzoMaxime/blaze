@@ -361,6 +361,36 @@ All notable changes to ra-jit are written here. The format follows
   Commit 99cbb902ad's message
   says the levels alone turned it on; until b460bbe327 they did not, and it took
   `RA_JIT_INLINE=all`.
+- `blaze-resolve` resolves as cargo 1.99.0 does (#298): its resolver is cargo's, ported, with
+  backtracking, the conflict cache, `links`, prereleases, yanked versions only when locked,
+  `[replace]`, and versions preferred by `rust-version` or lowest first; the errors are cargo's.
+  Its tests are cargo's `resolver-tests`, the 37 of `resolve.rs` and the 20 of `validated.rs`
+  (whose check against a SAT solver is left out). cargo's unstable `-Zdirect-minimal-versions`
+  and publish-age policy are not ported.
+- `blaze-resolve` picks features as cargo 1.99.0 does (#298): the members `-p`, `--features`,
+  `--all-features` and `--no-default-features` select, by resolver 1's rules (`--features` for
+  the package in the current directory, `member/feat` for another) or resolver 2's, with
+  cargo's errors and suggestions; and cargo's feature resolver, which under resolver 2 keeps the
+  features of build dependencies and proc macros apart from the rest, leaves out those of
+  dev-dependencies when nothing is tested, and of dependencies for platforms not built for, and
+  enables `dep?/feat` once `dep` is. A package's targets and the platforms' `cfg` come from
+  whoever calls it. Tests take cases of cargo's `features2`, `weak_dep_features` and
+  `package_features` tests.
+- `blaze-resolve` writes the `resolve` of `cargo metadata` as cargo 1.99.0 does (#298): each
+  package reached from the members, its dependencies by the name its code uses, their kinds and
+  platforms, and its features, filtered by `--filter-platform`. The test compares the JSON with
+  cargo's for a workspace with a renamed dependency, one used as both normal and dev, a build
+  dependency and a `cfg(unix)` one. `harness/resolve_graph.py` compares, over the corpus of
+  `harness/resolve`, the `resolve` blaze-resolve makes of the packages cargo lists with cargo's,
+  with each project's lock file and with none.
+- `blaze-resolve` resolves a workspace as cargo 1.99.0 does around its resolver (#298): the
+  resolve `Cargo.lock` is written from (every member, every feature), guided by the lock file,
+  then the one asked for, guided by the first, with cargo's `PackageRegistry` applying
+  `[patch]` and locking each summary to the previous resolve. So a lock file keeps the versions
+  it names, and the graph is cargo's where the two resolves differ, as when a patched member
+  is reached both as itself and as the patch. `harness/resolve_graph.py` resolves each
+  project so, from the lock file it ships or none: 322 of 324 equal with it and 381 of 385
+  without (from 292 and 362), the rest projects cargo itself does not resolve there.
 
 ### Changed
 
@@ -400,6 +430,22 @@ All notable changes to ra-jit are written here. The format follows
   what it saves while most are refused for calling rustc's copy of a function of the checkout
   ([#216](https://github.com/indexable-inc/blaze/issues/216)). `harness/storetracked.py` checks
   that a start found roots.
+- The store is keyed by what ra-jit was built from, not by the bytes of its executable
+  ([#105](https://github.com/indexable-inc/blaze/issues/105)): `crates/ra-jit/build.rs`
+  hashes the workspace's crates, the vendored ones, the manifest, lock file, cargo config and
+  `harness/toolchain`, the features, the target and whether debug assertions
+  are on. Another build of the same sources, on another machine or after a commit that
+  changes only harnesses or docs, finds what the first kept: `harness/storebuilds.py` builds
+  its workspace into an empty store, then starts a copy of ra-jit with other bytes, which
+  finds 66 entries and compiles 0 of the 701 the first added, where a build keyed by its bytes
+  found 0 and compiled all 701. A ra-jit built outside the workspace keys by its bytes as
+  before. A crate fetched by cargo is named by its place below `CARGO_HOME`, not by where
+  `CARGO_HOME` is, so its frozen def map and functions are found from another home. A build
+  script's run is keyed with its package's directory and the target directory apart, and
+  what it printed and wrote is put back with this checkout's; the key still hashes the
+  script's executable, which differs between target directories, so a second checkout still
+  runs its scripts (none restored in warmstart's `warm` step on ripgrep or nushell) until a
+  script is keyed by what it was built from.
 - A daemon that starts on a store holding the checkout's code no longer compiles that code
   again before the first edit can be patched ([#105](https://github.com/indexable-inc/blaze/issues/105)).
   Each function of the checkout goes into the store with a mark of its code and of what it

@@ -126,6 +126,18 @@ crates.io, with and without a lock file and over feature and target selections, 
 the projects whose normalized output is the same. It runs where cargo is installed, as the
 oracle only.
 
+2026-10-25, the resolver (`crates/blaze-resolve`): the package model (#305), `Cargo.lock`
+(#309) and the async `Registry` (#312), landed together in #314; cargo's resolver with its
+tests (#331), features and the members `-p` and `--features` choose (#332), the `resolve` of
+`cargo metadata` (#333), and a workspace's two resolves with `[patch]` and the lock file's
+locks (#339).
+`harness/resolve_graph.py` compares the `resolve` blaze-resolve makes of the packages cargo
+lists with cargo's, over the corpus of `harness/resolve` (dev-aws-8, at 6e4bbe91): with the
+lock file each project ships, 322 of 324 equal; with none, 381 of 385. The rest are those
+cargo 1.99.0 does not resolve there (bun, swc, rust-clippy, embassy). Its registry holds the
+versions cargo chose; choosing among all of the index's waits on #321, cargo's SAT-checked
+resolver tests on #337, `cargo update` and path overrides on #338.
+
 ## Build scripts
 
 blaze compiles build scripts (step I) and keeps their runs in the store; cargo still runs
@@ -236,3 +248,15 @@ from there: a load of fd starts no toolchain server. It is the default: the daem
 the checker's and build scripts' expand with blaze's libraries, made from each crate's record
 and kept in the store; built again over that store, the six apps link none again and expand
 the same 3,465 calls.
+
+2026-10-25, no rustup: `cargo blaze` reads the workspace with blaze-manifest where it ran
+`cargo metadata --no-deps` (#319; 385 of 385 workspaces equal, [resolve.md](resolve.md)), and
+install.sh installs blaze on a machine with no Rust: blaze downloads its own 1.99.0 (#322 and
+#340, landed together in #340). Measured on dev-aws-8 in a Debian 13 container with curl and
+gcc and no rustup, cargo or rustc, the archive served from the host and Rust from
+static.rust-lang.org over AWS's network: install.sh 5.5 s, the first `blaze run` of a new
+project 3.8 s (the daemon's load; `Finished ... [ra-jit]`), 9.2 s from the first `curl` to
+`Hello, world!`. On disk: 88 MB in `~/.cargo/bin`, 672 MB in `~/.blaze/toolchains`, 17 MB in
+`~/.cache`, no `~/.rustup`. The same install through rustup before (Debian 12, 2026-10-25):
+10.7 s, 91 MB and 672 MB in `~/.rustup`. All **read**. The Linux release needs glibc 2.39, so
+Debian 12 cannot run it ([#351](https://github.com/indexable-inc/blaze/issues/351)).
