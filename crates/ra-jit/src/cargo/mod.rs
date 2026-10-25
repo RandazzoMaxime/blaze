@@ -13,6 +13,7 @@ pub(crate) mod own_script;
 mod package;
 pub(crate) mod plan;
 pub(crate) mod run;
+mod sandboxed;
 pub(crate) mod say;
 pub(crate) mod script;
 mod state;
