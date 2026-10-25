@@ -307,6 +307,13 @@ All notable changes to ra-jit are written here. The format follows
   dependency and a `cfg(unix)` one. `harness/resolve_graph.py` compares, over the corpus of
   `harness/resolve`, the `resolve` blaze-resolve makes of the packages cargo lists with cargo's,
   with each project's lock file and with none.
+- `blaze-resolve` resolves a workspace as cargo 1.99.0 does around its resolver (#298): the
+  resolve `Cargo.lock` is written from (every member, every feature), guided by the lock file,
+  then the one asked for, guided by the first, with cargo's `PackageRegistry` applying
+  `[patch]` and locking each summary to the previous resolve. So a lock file keeps the versions
+  it names, and the graph is cargo's where the two resolves differ, as when a patched member
+  is reached both as itself and as the patch. A path or git dependency without a version now
+  matches a prerelease in `harness/resolve_graph.py`, as cargo's does.
 
 ### Changed
 

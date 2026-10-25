@@ -9,10 +9,11 @@ harness/resolve.py reads them). Each case is fetched under `--work` (default
 $TMPDIR/blaze-resolve-graph) with a CARGO_HOME of its own there, and `cargo metadata
 --format-version 1` is run on it twice: `locked`, with the Cargo.lock it ships (cases without
 one are skipped), and `fresh`, with none. The `metadata_resolve` example of blaze-resolve
-reads each output, resolves the members from the packages listed, and prints its `resolve`,
-which is compared with cargo's, key order included. So this checks the resolver's graph, its
-feature unification and the JSON; not which versions are chosen, as the registry holds only
-the versions cargo chose. Each checkout is deleted once compared, unless `--keep`. A case is
+reads each output, with the packages `--all-features` lists too, resolves the workspace as
+cargo does (in `locked`, from the lock file shipped), and prints its `resolve`, which is
+compared with cargo's, key order included. So this checks the resolver's graph, its feature
+unification, its locking and the JSON, but not which versions a registry offers, as it holds
+only the versions cargo chose. Each checkout is deleted once compared, unless `--keep`. A case is
 equal, different, blaze-failed or cargo-failed; the first difference or error of each that is
 not equal is printed, and `--out` writes them all as JSON.
 """
@@ -110,24 +111,41 @@ def first_difference(a, b, at="$"):
 
 
 def one(case, mode, blaze, cargo_home):
-    """Runs cargo and blaze on the checkout in place; `fresh` moves its Cargo.lock aside for the
-    run and puts it back."""
+    """Runs cargo and blaze on the checkout in place. The Cargo.lock shipped is kept aside for
+    the runs (cargo may rewrite it) and put back; `fresh` runs cargo without one."""
     lock = os.path.join(case["dir"], "Cargo.lock")
-    if mode == "fresh" and os.path.exists(lock):
-        os.rename(lock, lock + ".shipped")
+    shipped = lock + ".shipped"
+    all_features = os.path.join(case["dir"], "..", f"{os.path.basename(case['dir'])}.all.json")
+    if os.path.exists(lock):
+        shutil.copyfile(lock, shipped)
+        if mode == "fresh":
+            os.remove(lock)
     env = {k: v for k, v in os.environ.items() if not k.startswith("CARGO_") or k == "CARGO_ORACLE"}
     env["CARGO_HOME"] = cargo_home
-    try:
-        cargo = subprocess.run([*CARGO, "metadata", "--format-version", "1"], cwd=case["dir"],
-                               env=env, capture_output=True, text=True, errors="replace")
-    finally:
-        if os.path.exists(lock + ".shipped"):
-            os.replace(lock + ".shipped", lock)
+    metadata = lambda *a: subprocess.run([*CARGO, "metadata", "--format-version", "1", *a],
+                                         cwd=case["dir"], env=env, capture_output=True,
+                                         text=True, errors="replace")
     out = {"part": case["part"], "name": case["name"], "mode": mode}
-    if cargo.returncode:
-        lines = [l for l in cargo.stderr.splitlines() if l.startswith("error")]
-        return {**out, "class": "cargo-failed", "why": (lines or [cargo.stderr.strip()])[0][:300]}
-    ours = subprocess.run([blaze], input=cargo.stdout, capture_output=True, text=True)
+    try:
+        cargo = metadata()
+        # The packages of the resolve with every feature, which blaze makes first, as cargo
+        # does: the output asked for lists only those of the second.
+        everything = metadata("--all-features") if not cargo.returncode else cargo
+        if cargo.returncode or everything.returncode:
+            failed = cargo if cargo.returncode else everything
+            lines = [l for l in failed.stderr.splitlines() if l.startswith("error")]
+            return {**out, "class": "cargo-failed", "why": (lines or [failed.stderr.strip()])[0][:300]}
+        with open(all_features, "w") as f:
+            f.write(everything.stdout)
+        args = ["--packages", all_features]
+        if mode == "locked":
+            args += ["--lock", shipped]
+        ours = subprocess.run([blaze, *args], input=cargo.stdout, capture_output=True, text=True)
+    finally:
+        if os.path.exists(shipped):
+            os.replace(shipped, lock)
+        if os.path.exists(all_features):
+            os.remove(all_features)
     if ours.returncode:
         return {**out, "class": "blaze-failed", "why": ours.stderr.strip().splitlines()[0][:300]}
     theirs = json.loads(cargo.stdout)["resolve"]

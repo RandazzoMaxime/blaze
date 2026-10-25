@@ -35,6 +35,7 @@ pub mod resolver;
 mod source_id;
 mod summary;
 mod version;
+pub mod workspace_resolve;
 
 pub use dependency::{DepKind, Dependency};
 pub use edit_distance::{closest, closest_msg, edit_distance};

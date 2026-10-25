@@ -298,6 +298,14 @@ unable to verify that `{0}` is the same as when the lockfile was generated
         &self.unused_patches
     }
 
+    /// Records the `[patch]` entries the graph did not use.
+    pub fn register_used_patches<'a>(&mut self, patches: impl Iterator<Item = &'a Summary>) {
+        self.unused_patches = patches
+            .filter(|p| !self.graph.contains(&p.package_id()))
+            .map(|p| p.package_id())
+            .collect();
+    }
+
     pub fn checksums(&self) -> &FxHashMap<PackageId, Option<String>> {
         &self.checksums
     }
