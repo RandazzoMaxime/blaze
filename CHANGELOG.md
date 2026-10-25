@@ -508,6 +508,14 @@ All notable changes to ra-jit are written here. The format follows
   build: …/out/roles_and_attributes.rs changed"). Cargo's build replaced the worker, which built
   the program in full again: biome's next edit after that took 130 s and 24 GB. Such a file is
   only written again when the script runs again, which the script's own guards are for.
+- The first build after one of cargo's is the daemon's where a build script makes a source of
+  its crate newer, as biome's analyzer crates touch `src/lint/nursery.rs` for cargo to build
+  them again when a rule is added: the build still went to cargo ("what runs during the build:
+  …/biome_yaml_analyze/src/lint/nursery.rs changed") and its worker built the program in full
+  again, 232 s at a 27 GB peak. A source that runs during the build is now changed when it is
+  newer than cargo's last run of rustc on it, as cargo has it, not than the build's start.
+  Every edit of memsplit.py's biome is now the daemon's, the first body edit 0.7 s and the
+  ones after it 0.4 to 0.5 s (16 cores). soakrows.py's `proc macro its script touches` does it.
   soakrows.py's `proc macro on generated code` has the proc macro `include!` its script's
   output and checks that the first edit after the build is the daemon's.
 - On Linux the daemon's bounds on memory count what its control group allows, where they

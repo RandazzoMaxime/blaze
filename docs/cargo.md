@@ -193,7 +193,8 @@ A single build goes to cargo when:
 
 - the daemon is still loading the workspace;
 - a manifest, `Cargo.lock`, a cargo configuration file, the toolchain file, or something a
-  build script reads has changed since cargo last built. Cargo builds, and the daemon loads
+  build script reads has changed since cargo last built (a source a build script makes newer
+  before cargo runs rustc on it, as biome's do, has not). Cargo builds, and the daemon loads
   the workspace again afterwards. On a large workspace that reload is long: 36 to 51 s on
   nushell;
 - a `#[test]` function was added or removed, or its attributes changed, in a test executable
