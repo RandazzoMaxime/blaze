@@ -3,87 +3,98 @@
     <source media="(prefers-color-scheme: dark)" srcset="docs/brand/ix-mark-on-dark.svg">
     <img alt="ix" src="docs/brand/ix-mark-on-light.svg" height="40" align="absmiddle">
   </picture>
-  ra-jit
+  blaze
 </h1>
 
-ra-jit makes rebuilding a Rust project after an edit take milliseconds. It runs beside cargo,
-keeps your project compiled in memory, and after an edit compiles only the functions you changed
-and writes them into the program cargo already built. A program that opts in can take the new
-code while it keeps running.
+blaze rebuilds a Rust project after an edit in milliseconds: blazingly fast Rust, literally.
+
+<!-- Once https://ix.dev/blaze/install.sh serves install.sh, it is the line to show here. -->
+```sh
+curl -fsSL https://raw.githubusercontent.com/indexable-inc/blaze/main/install.sh | sh
+```
+
+Then, in a project of yours:
+
+```sh
+rustup override set 1.99.0
+cargo blaze run
+```
+
+Change a function and run `cargo blaze run` again: the `Finished` line now says `[ra-jit]`
+(blaze's engine), which means blaze built it instead of cargo.
+
+blaze runs beside cargo, keeps your project compiled in memory, and after an edit compiles only
+the functions you changed and writes them into the program cargo already built. A program that
+opts in can take the new code while it keeps running.
 
 On real projects such as ripgrep, nushell, helix and bun, an edit builds <!-- benchheadline:start -->10× faster on macOS arm64, 24× faster on Linux aarch64 and 12× faster on Linux x86-64<!-- benchheadline:end --> than with an incremental `cargo build` (the average over the projects; [How fast](#how-fast) has every number).
 
-To try it on a project of yours, on macOS on Apple silicon or on Linux:
-
-```sh
-rustup toolchain install 1.99.0 --component rust-src
-cargo +1.99.0 install --locked ra-jit
-cd my-project
-rustup override set 1.99.0
-cargo ra-jit run
-```
-
-Wait a few seconds, change a function, and run `cargo ra-jit run` again: the `Finished` line now
-says `[ra-jit]`, which means ra-jit built it instead of cargo.
+blaze was called ra-jit until 2026-10-24. `cargo ra-jit` keeps working as another name for
+`cargo blaze`, and its settings work as `BLAZE_*` and as `RA_JIT_*`.
 
 ## Install
 
 What you need:
 
-- **Rust 1.99.0 with its source code** (the `rust-src` component). ra-jit works with this one
-  version only: it links its code with code rustc 1.99.0 compiled, so the two have to agree on how
-  types are laid out and functions are called. Your project has to build with 1.99.0 too; on any
-  other version every build is plain cargo's.
-- **macOS on Apple silicon, or Linux on x86-64 or ARM64.** On Windows ra-jit installs and runs,
+- **macOS on Apple silicon, or Linux on x86-64 or ARM64.** On Windows blaze installs and runs,
   but hands every build to cargo. Intel Macs are not supported.
-- **Memory to spare.** ra-jit's background process holds a few GB for a small project and tens of
+- **Rust 1.99.0 with its source code** (the `rust-src` component), which the installer adds
+  through rustup. blaze works with this one version only: it links its code with code rustc
+  1.99.0 compiled, so the two have to agree on how types are laid out and functions are called.
+  Your project has to build with 1.99.0 too (`rustup override set 1.99.0` in it, or a
+  `rust-toolchain.toml`); on any other version every build is plain cargo's, and says so.
+- **Memory to spare.** blaze's background process holds a few GB for a small project and tens of
   GB for the largest ([numbers](#how-fast)).
+
+The installer downloads the build for your machine from the
+[releases](https://github.com/indexable-inc/blaze/releases), checks it against the checksums
+published with it, and puts `cargo-blaze` and the programs it runs in `~/.cargo/bin`. It asks
+nothing. Run it again to upgrade. To install a given release, end the line with
+`| sh -s -- --version 0.2.0`; `--help` says what else it takes. Until the first release under the name blaze, it installs
+the newest nightly build.
 
 ### From crates.io
 
 ```sh
 rustup toolchain install 1.99.0 --component rust-src
-cargo +1.99.0 install --locked ra-jit
+cargo +1.99.0 install --locked cargo-blaze
 ```
 
-This compiles ra-jit from source, which takes a few minutes, and puts four programs in
-`~/.cargo/bin`: `cargo-ra-jit` (what `cargo ra-jit` runs), `ra-jit`, `ra-jit-rustc` and
-`ra-jit-rustc-first`. They find each other by being in the same directory, so keep them together.
+This compiles blaze from source, which takes a few minutes, and puts five programs in
+`~/.cargo/bin`: `cargo-blaze` (what `cargo blaze` runs), `ra-jit` (blaze's engine), `ra-jit-rustc`,
+`ra-jit-rustc-first` and `cargo-ra-jit` (the old name). They find each other by being in the same
+directory, so keep them together. If you installed `ra-jit` with cargo before, run
+`cargo uninstall ra-jit` first: cargo does not replace programs another package installed.
+`cargo binstall cargo-blaze` installs a release's build instead of compiling it.
 
 ### With Nix
 
 ```sh
-nix profile install github:indexable-inc/ra-jit#ra-jit
+nix profile install github:indexable-inc/blaze#blaze
 ```
 
-Or try it without installing anything: in a project, `nix run github:indexable-inc/ra-jit#ra-jit -- build`
-is `cargo ra-jit build`. In a flake, take the package from the input:
+Or try it without installing anything: in a project, `nix run github:indexable-inc/blaze#blaze -- build`
+is `cargo blaze build`. In a flake, take the package from the input:
 
 ```nix
 {
-  inputs.ra-jit.url = "github:indexable-inc/ra-jit";
-  # ... then use ra-jit.packages.${system}.ra-jit in a dev shell or a profile.
+  inputs.blaze.url = "github:indexable-inc/blaze";
+  # ... then use blaze.packages.${system}.blaze in a dev shell or a profile.
 }
 ```
 
-Nix compiles ra-jit from source; there is no binary cache yet. You still need Rust 1.99.0 with
+Nix compiles blaze from source; there is no binary cache yet. You still need Rust 1.99.0 with
 `rust-src` for your project, as above.
-
-### Prebuilt binaries
-
-Not yet: no release with binaries has been published. The first one will be on the
-[releases page](https://github.com/indexable-inc/ra-jit/releases), and `cargo binstall ra-jit`
-will install it.
 
 ## Use it on your project
 
 ```sh
 cd my-project
 rustup override set 1.99.0    # or a rust-toolchain.toml with channel = "1.99.0"
-cargo ra-jit build
+cargo blaze build
 ```
 
-The first build is cargo's, with cargo's usual output. When it is done, ra-jit starts a background
+The first build is cargo's, with cargo's usual output. When it is done, blaze starts a background
 process, the daemon, which loads your project: a few seconds for a small one, up to about a minute
 for a very large one. Until then builds are still cargo's, and each one says so:
 
@@ -91,24 +102,24 @@ for a very large one. Until then builds are still cargo's, and each one says so:
 ra-jit: the daemon is still loading the workspace (951ms so far); building with cargo
 ```
 
-`cargo ra-jit status` says `ready` once it is done. From then on, an edit builds like this:
+`cargo blaze status` says `ready` once it is done. From then on, an edit builds like this:
 
 ```
-$ cargo ra-jit build
+$ cargo blaze build
     Finished `dev` profile [ra-jit] target(s) in 0.02s
 ```
 
-`[ra-jit]` means ra-jit built it. The program is where cargo would have put it, under `target/`.
+`[ra-jit]` means blaze built it. The program is where cargo would have put it, under `target/`.
 
-- `cargo ra-jit build`, `cargo ra-jit run` and `cargo ra-jit test` take cargo's flags and do what
+- `cargo blaze build`, `cargo blaze run` and `cargo blaze test` take cargo's flags and do what
   cargo's commands do: `run` passes what follows `--` to your program, and `test` runs and reports
   the tests as `cargo test` does.
-- `cargo ra-jit check` reports the errors a build would fail with.
-- `cargo ra-jit status` shows what the daemon has loaded, how many builds it did and how many it
+- `cargo blaze check` reports the errors a build would fail with.
+- `cargo blaze status` shows what the daemon has loaded, how many builds it did and how many it
   left to cargo, and why.
-- `cargo ra-jit stop` stops the daemon. It also stops by itself after 30 minutes without a build.
+- `cargo blaze stop` stops the daemon. It also stops by itself after 30 minutes without a build.
 
-Any other subcommand goes to cargo unchanged. When ra-jit can't be sure its result would be the
+Any other subcommand goes to cargo unchanged. When blaze can't be sure its result would be the
 same as cargo's, it lets cargo do that build and prints one line saying why
 (`ra-jit: <reason>; building with cargo`). That happens after a change to `Cargo.toml`,
 `Cargo.lock` or what a build script reads, when a test is added or removed, and for a few flags
@@ -116,24 +127,24 @@ such as `--message-format` and `-Z`. The full list is in [docs/cargo.md](docs/ca
 
 ### Rebuild on every save
 
-ra-jit has no watch mode of its own; any file watcher can run it. With
+blaze has no watch mode of its own; any file watcher can run it. With
 [watchexec](https://github.com/watchexec/watchexec):
 
 ```sh
-watchexec -e rs -- cargo ra-jit build
+watchexec -e rs -- cargo blaze build
 ```
 
-### Make plain `cargo build` use ra-jit
+### Make plain `cargo build` use blaze
 
 For editors, scripts and agents that run `cargo build` themselves:
 
 ```sh
-ra-jit enable
+cargo blaze enable
 ```
 
-From then on plain `cargo build`, `run`, `test` and `check` go through ra-jit, in every project of
-your user. It adds one setting to `~/.cargo/config.toml`, and `ra-jit disable` puts the file back
-as it was. Edits are slower this way than with `cargo ra-jit`, and on some projects slower than plain
+From then on plain `cargo build`, `run`, `test` and `check` go through blaze, in every project of
+your user. It adds one setting to `~/.cargo/config.toml`, and `cargo blaze disable` puts the file back
+as it was. Edits are slower this way than with `cargo blaze`, and on some projects slower than plain
 cargo ([why](docs/cargo.md#plain-cargo-switched-on-globally)).
 
 ### Change a running program
@@ -156,8 +167,8 @@ loop {
 }
 ```
 
-Start it with `cargo ra-jit run`. In another terminal, build after each edit with
-`cargo ra-jit build` (or the `watchexec` line above). The next `poll` swaps in the functions that
+Start it with `cargo blaze run`. In another terminal, build after each edit with
+`cargo blaze build` (or the `watchexec` line above). The next `poll` swaps in the functions that
 changed, usually in under a millisecond, and prints
 `ra-jit: edit ... applied: 1 functions in 745.4µs`. An edit that changes a type the program is
 holding, such as a struct's fields, can't be applied to data that already exists, so `poll` asks
@@ -171,35 +182,35 @@ next release. More in [docs/live.md](docs/live.md).
 - **Platforms.** macOS on Apple silicon, Linux x86-64 and Linux ARM64 are measured below. On
   Windows every build is cargo's. Intel Macs are not supported.
 - **One Rust version.** 1.99.0 only (see [Install](#install)).
-- **Not every build is ra-jit's.** The changes listed above go to cargo, and so does code ra-jit
-  can't compile yet. `cargo ra-jit status` counts both; in the tables below, `(c)` marks an edit
+- **Not every build is blaze's.** The changes listed above go to cargo, and so does code blaze
+  can't compile yet. `cargo blaze status` counts both; in the tables below, `(c)` marks an edit
   that went to cargo.
 - **Errors.** An edit with a type error fails to build, as it would under cargo. The borrow checker
   is new: 0.1.0 has none, so an edit with a borrow error builds and runs; the one on `main` finds
   about two thirds of rustc's borrow errors. Keep `cargo check` or your CI as the final word.
 - **Memory and disk.** The daemon holds several times the memory cargo uses while building, and a
   project's build keeps more on disk than cargo's does ([numbers](#how-fast)).
-- **Correctness.** Every change to ra-jit is checked by comparing what it builds with what rustc
+- **Correctness.** Every change to blaze is checked by comparing what it builds with what rustc
   builds, on rustc's own tests and on real projects, but it is young: if a program behaves
-  differently under ra-jit, that's a bug, and an
-  [issue](https://github.com/indexable-inc/ra-jit/issues) is welcome.
+  differently under blaze, that's a bug, and an
+  [issue](https://github.com/indexable-inc/blaze/issues) is welcome.
 
 What is supported in detail: [docs/support.md](docs/support.md). Everything about the cargo
 commands: [docs/cargo.md](docs/cargo.md).
 
 ## How it works
 
-ra-jit keeps your project parsed and type-checked in memory with
+blaze keeps your project parsed and type-checked in memory with
 [rust-analyzer](https://github.com/rust-lang/rust-analyzer), the engine behind most Rust editor
 plugins, and generates machine code itself with [Cranelift](https://cranelift.dev). After an edit
 it compiles only the functions that changed, and writes them into the existing program instead of
 linking it again from scratch, which is where most of an incremental build's time goes. The first
-build is cargo's, and ra-jit's code is linked with what it produced. The whole design:
+build is cargo's, and blaze's code is linked with what it produced. The whole design:
 [docs/architecture.md](docs/architecture.md).
 
 ## How fast
 
-How long an edit takes to build, how much memory and disk ra-jit uses, and how fast the programs
+How long an edit takes to build, how much memory and disk blaze uses, and how fast the programs
 it builds run, against cargo. The tables are written by the benchmark harness
 ([docs/benchmarks.md](docs/benchmarks.md)) and kept current by CI.
 
@@ -494,11 +505,11 @@ Measured by hand with `harness/bench.py --runtime` (harness/runbench.py), or by 
 ## Demo: a Game of Life you can edit
 
 ```sh
-nix run github:indexable-inc/ra-jit
+nix run github:indexable-inc/blaze
 ```
 
 This opens a Game of Life window. On macOS on Apple silicon you can change its rules, colours and
-speed while it runs; elsewhere the window runs without live edits. It needs Nix, and builds ra-jit
+speed while it runs; elsewhere the window runs without live edits. It needs Nix, and builds blaze
 from source the first time.
 
 ![Editing the running Game of Life: rule, colours and speed change live](docs/demo.avif)
@@ -509,7 +520,7 @@ from source the first time.
   <a href="https://ra-jit.ix.dev/updates?src=readme">
     <picture>
       <source media="(prefers-color-scheme: dark)" srcset="docs/brand/signup-on-dark.svg">
-      <img alt="Tell us you use ra-jit" src="docs/brand/signup-on-light.svg" height="36">
+      <img alt="Tell us you use blaze" src="docs/brand/signup-on-light.svg" height="36">
     </picture>
   </a>
 </p>
@@ -518,22 +529,22 @@ from source the first time.
 
 ## Contributing
 
-How to build ra-jit from a checkout, run its tests and send a change:
+How to build blaze from a checkout, run its tests and send a change:
 [docs/contributing.md](docs/contributing.md). To report a security problem:
 [SECURITY.md](SECURITY.md).
 
 ## Credits
 
-ra-jit stands on the shoulders of giants. Thank you to the people who built:
+blaze stands on the shoulders of giants. Thank you to the people who built:
 
-- [rust-analyzer](https://github.com/rust-lang/rust-analyzer), whose analysis and MIR ra-jit compiles from
+- [rust-analyzer](https://github.com/rust-lang/rust-analyzer), whose analysis and MIR blaze compiles from
 - [Cranelift](https://cranelift.dev) (Bytecode Alliance), the fast code generator
 - [LLVM](https://llvm.org) and [inkwell](https://github.com/TheDan64/inkwell), for the optimised tiers
 - [salsa](https://github.com/salsa-rs/salsa), the incremental engine underneath
 - [object](https://github.com/gimli-rs/object), for reading and writing executables
 - [Rust](https://github.com/rust-lang/rust) and its compiler crates
-- [rustd](https://github.com/DioxusLabs/rustd) (DioxusLabs), whose code ra-jit includes
+- [rustd](https://github.com/DioxusLabs/rustd) (DioxusLabs), whose code blaze includes
 
-None of these projects endorses ra-jit.
+None of these projects endorses blaze.
 
 Made at [ix](https://ix.dev) for den's native app. MIT or Apache-2.0.

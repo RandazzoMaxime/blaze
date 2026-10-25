@@ -271,6 +271,11 @@ All notable changes to ra-jit are written here. The format follows
   as well as `RA_JIT_<NAME>`, and the `BLAZE_` one wins. `--version` says `blaze`. The engine
   binary, the crates it is made of, the daemon's directory and the store keep their names, so an
   upgrade keeps what the store holds.
+- `install.sh` installs blaze on macOS (Apple silicon) and Linux (x86-64, ARM64) with one line,
+  `curl -fsSL https://raw.githubusercontent.com/indexable-inc/blaze/main/install.sh | sh`: the
+  newest release (or `--version`), checked against its SHA256SUMS, into `~/.cargo/bin`, with Rust
+  1.99.0 and `rust-src` through rustup. The README starts with it; the `install` workflow runs it
+  on each platform.
 - A build with a toolchain other than 1.99.0 says how to switch the project to it
   (`rustup override set 1.99.0`).
 - A start on a warm store with nothing of rustc's (`RA_JIT_RUSTC_BASE=0`) is no longer held up

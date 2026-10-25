@@ -1,0 +1,83 @@
+name: install
+
+# install.sh, run as a user runs it, on each platform it installs on: from the newest release
+# (the nightly build before the first), into a CARGO_HOME of its own, toolchain included; then
+# `cargo blaze` in a new project. On a change to the script, on each release once it is
+# published, weekly (a release's assets or GitHub's redirects can change under it) and by hand.
+# Not a check the merge queue requires.
+on:
+  push:
+    branches: [main]
+    paths: ["install.sh", ".github/workflows/install.yaml"]
+  pull_request:
+    paths: ["install.sh", ".github/workflows/install.yaml"]
+  release:
+    types: [published]
+  schedule:
+    - cron: "41 7 * * 1"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "a release to install (empty: the newest)"
+        default: ""
+
+permissions:
+  contents: read
+
+concurrency:
+  group: install-${{ github.event_name == 'pull_request' && github.ref || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  shellcheck:
+    name: shellcheck
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v7
+      - run: shellcheck -s sh install.sh
+
+  install:
+    name: ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, ubuntu-24.04-arm, macos-15]
+    env:
+      BLAZE_REPO: ${{ github.repository }}
+      # A release the workflow was started for, or the one just published.
+      BLAZE_VERSION: ${{ inputs.version || (github.event_name == 'release' && github.event.release.tag_name) || '' }}
+    steps:
+      - uses: actions/checkout@v7
+      # Here and not in the job's env, which has no runner context.
+      - name: a CARGO_HOME of its own
+        run: echo "CARGO_HOME=$RUNNER_TEMP/cargo" >> "$GITHUB_ENV"
+      # Piped, as the README has it: no terminal, nothing asked. dash is Ubuntu's /bin/sh.
+      - name: install
+        run: sh < install.sh
+      - name: what it installed runs
+        run: |
+          export PATH="$CARGO_HOME/bin:$PATH"
+          for bin in cargo-blaze ra-jit cargo-ra-jit ra-jit-rustc; do test -x "$CARGO_HOME/bin/$bin"; done
+          cargo blaze --help | head -n 3
+          rustup run 1.99.0 rustc --version
+          rustup component list --toolchain 1.99.0 --installed | grep -q '^rust-src'
+      - name: again, which upgrades in place
+        run: sh install.sh --verbose
+      - name: cargo blaze in a new project
+        run: |
+          export PATH="$CARGO_HOME/bin:$PATH"
+          cd "$RUNNER_TEMP"
+          cargo new --quiet hello
+          cd hello
+          rustup override set 1.99.0
+          cargo blaze build
+          cargo blaze run | grep -F "Hello, world!"
+          cargo blaze stop
+      - name: a release that is not there says so
+        run: |
+          if sh install.sh --version 0.0.0-none > out.txt 2>&1; then cat out.txt; exit 1; fi
+          cat out.txt
+          grep -F "there is no blaze release 0.0.0-none" out.txt

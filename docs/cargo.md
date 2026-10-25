@@ -1,8 +1,12 @@
-# Using ra-jit with cargo
+# Using blaze with cargo
 
-There are two ways to use ra_jit from cargo. `cargo ra-jit <command>` is an explicit
-subcommand, described here. The second, switching ra-jit on globally so that plain `cargo`
+There are two ways to use blaze from cargo. `cargo blaze <command>` is an explicit
+subcommand, described here. The second, switching blaze on globally so that plain `cargo`
 goes through it, has its own section at the end.
+
+blaze was called ra-jit until 2026-10-24. Below this section the guide still says
+`cargo ra-jit`, which is the same command as `cargo blaze` and keeps working; the programs and
+the daemon's messages keep the name ra-jit for now.
 
 Everything in this file was checked against the code in `crates/ra-jit/src/cargo/` and run on
 Linux x86-64. On macOS arm64 `harness/cargo_ra_jit.py --small` was run, and what is known of
@@ -11,12 +15,14 @@ it is under [macOS arm64](#macos-arm64). The design notes it was written from ar
 
 ## Install
 
-`cargo ra-jit` is cargo's way of running a program called `cargo-ra-jit` on your `PATH`. That
-program is built with ra-jit and runs the `ra-jit` executable in the same directory, so the two
-have to be installed side by side, with `ra-jit-rustc` and `ra-jit-rustc-first`. `cargo
-install` does that:
+`cargo blaze` is cargo's way of running a program called `cargo-blaze` on your `PATH`. That
+program is built with blaze and runs the `ra-jit` executable in the same directory, blaze's
+engine, so the two have to be installed side by side, with `ra-jit-rustc` and
+`ra-jit-rustc-first` (and `cargo-ra-jit`, the old name of `cargo-blaze`). The
+[installer](../install.sh) and `cargo install` both do that:
 
-    cargo +1.99.0 install --locked ra-jit
+    curl -fsSL https://raw.githubusercontent.com/indexable-inc/blaze/main/install.sh | sh
+    cargo +1.99.0 install --locked cargo-blaze
 
 From the release after 0.1.0, `--profile dist` builds the profile a release is built with, less
 the PGO a release adds ([reports/RELEASE-BUILD.md](reports/RELEASE-BUILD.md)); 0.1.0 has no such
@@ -26,23 +32,27 @@ profile and fails with it. From a checkout, the release's own recipe builds all 
     python3 .github/scripts/build_release.py --target $(rustc +1.99.0 -vV | sed -n 's/^host: //p') --out shipped
     cp shipped/* ~/.cargo/bin/
 
-That build has the Cranelift backend only. The LLVM one (`RA_JIT_BACKEND=llvm`) is
+That build has the Cranelift backend only. The LLVM one (`BLAZE_BACKEND=llvm`) is
 `--features llvm` on either command, run inside `nix develop`, which has the LLVM 20 the flake
 pins ([which LLVM](contributing.md#llvm-for---features-llvm)); with it the crates are not the ones the profile was trained on, and the script says
 so. `cargo build -p ra-jit --release` is the quicker build the harnesses and CI use while
-working on ra-jit; it is not what ships.
+working on blaze; it is not what ships.
 
-The project you build must use Rust 1.99.0, the toolchain ra-jit is pinned to. Use a
-`rust-toolchain.toml`, `rustup override set 1.99.0`, or `RUSTUP_TOOLCHAIN=1.99.0`.
+The project you build must use Rust 1.99.0, the toolchain blaze is pinned to. Use a
+`rust-toolchain.toml`, `rustup override set 1.99.0`, or `RUSTUP_TOOLCHAIN=1.99.0`. On another
+toolchain every build is cargo's, and each says how to switch.
+
+Every setting below named `RA_JIT_<NAME>` can be given as `BLAZE_<NAME>` too; when both are
+set, the `BLAZE_` one wins.
 
 ## Commands
 
-    cargo ra-jit build [cargo's flags]
-    cargo ra-jit run   [cargo's flags] [-- program arguments]
-    cargo ra-jit test  [cargo's flags] [test names] [-- test arguments]
-    cargo ra-jit check [cargo's flags]
-    cargo ra-jit status
-    cargo ra-jit stop
+    cargo blaze build [cargo's flags]
+    cargo blaze run   [cargo's flags] [-- program arguments]
+    cargo blaze test  [cargo's flags] [test names] [-- test arguments]
+    cargo blaze check [cargo's flags]
+    cargo blaze status
+    cargo blaze stop
 
 `build`, `run` and `test` take the flags cargo takes and leave the same files in the same
 places under `target/`. `check` is what the daemon says of the source as it builds the
