@@ -1,22 +1,30 @@
 #!/usr/bin/env python3
 """fetchdiff.py: blaze-registry's fetching against cargo's, package by package.
 
-usage: fetchdiff.py [--work DIR] [--popular N] [--projects NAME,...] [--blaze FETCH]
+usage: fetchdiff.py [--work DIR] [--popular N] [--projects NAME,...] [--vendor NAME,...]
+                    [--blaze FETCH]
 
 The lock files are the bench projects' (bench.py's PROJECTS, each at its pinned revision: its
-Cargo.lock, or the one cargo makes when it has none; not bun's, whose tree bunprep.py makes), one for each of the N most downloaded
-crates of crates.io (default 300: a project depending on its newest version, locked by cargo),
-and one of a few crates from a second sparse registry, which this script serves on 127.0.0.1
-from crates.io's index and files under a `dl` with no markers. cargo 1.99 fetches every lock
-file (`cargo fetch --locked`) into a CARGO_HOME of its own, and blaze-registry's `fetch` example
-(FETCH, or built here) into another. A package is equal when its directory in registry/src has
-the same name in both and the same tree (every path, its kind and mode, a file's size, sha256
-and mtime, a link's target; the mtime of `.cargo-ok` and of directories is when they were
-made), and its .crate file in registry/cache the same bytes. The names of the directories in
-registry/index, registry/cache and registry/src have to be the same too.
+Cargo.lock, or the one cargo makes when it has none; not bun's, whose tree bunprep.py makes),
+one for each of the N most downloaded crates of crates.io (default 300: a project depending on
+its newest version, locked by cargo), and one of a few crates from a second sparse registry,
+which this script serves on 127.0.0.1 from crates.io's index and files under a `dl` with no
+markers. cargo 1.99 fetches every lock file (`cargo fetch --locked`) into a CARGO_HOME of its
+own, and blaze-registry's `fetch` example (FETCH, or built here) into another. Every package
+either unpacked into registry/src is compared: equal when it has the same directory in both and
+the same tree (every path, its kind and mode, a file's size, sha256 and mtime, a link's target;
+the mtime of `.cargo-ok` and of directories is when they were made), and its .crate file in
+registry/cache the same bytes. The names of the directories in registry/index, registry/cache
+and registry/src have to be the same too.
 
-Prints equal/total and writes every difference to WORK/fetchdiff.json. Git packages are counted
-apart: blaze-registry does not fetch them yet. Network-heavy: run it on a dev host.
+Then the same of a project whose .cargo/config.toml replaces crates.io with that registry
+(`[source]`), in two more homes; and of the projects of --vendor (default ripgrep and zed)
+vendored by `cargo vendor`, which blaze has to read where cargo vendored them, every file
+checked against `.cargo-checksum.json`, downloading nothing.
+
+Prints the counts and writes every difference to WORK/fetchdiff.json. Git packages that are not
+vendored are counted apart: blaze-registry does not fetch them yet. Network-heavy: run it on a
+dev host.
 """
 import argparse, ast, hashlib, http.server, json, os, shutil, stat, subprocess, sys, threading, time
 import urllib.error, urllib.request
@@ -72,6 +80,8 @@ class Mirror(http.server.BaseHTTPRequestHandler):
                 return self.send_error(404)
         except urllib.error.HTTPError as err:
             return self.send_error(err.code)
+        except OSError:
+            return self.send_error(502)
         etag = '"' + hashlib.sha256(body).hexdigest() + '"'
         if self.headers.get("if-none-match") == etag:
             self.send_response(304)
@@ -181,26 +191,12 @@ def sha256(path):
     return digest.hexdigest()
 
 
-def listing(home, part):
-    dir = os.path.join(home, "registry", part)
+def listing(home, *parts):
+    dir = os.path.join(home, "registry", *parts)
     return sorted(os.listdir(dir)) if os.path.isdir(dir) else []
 
 
-def source_dir(home, source):
-    """The directory cargo named for `source` in registry/src: the one of its host."""
-    url = source.split("+", 1)[1]
-    host = url.split("://", 1)[1].split("/", 1)[0].split(":")[0]
-    if url == "https://github.com/rust-lang/crates.io-index":
-        host = "index.crates.io"
-    named = [it for it in listing(home, "src") if it.rsplit("-", 1)[0] == host]
-    return named[0] if len(named) == 1 else None
-
-
-def differences(cargo_home, blaze_home, source, name, version):
-    dir = source_dir(cargo_home, source)
-    if dir is None:
-        return ["cargo has no single directory for its source"]
-    package = f"{name}-{version}"
+def differences(cargo_home, blaze_home, dir, package):
     left = os.path.join(cargo_home, "registry", "src", dir, package)
     right = os.path.join(blaze_home, "registry", "src", dir, package)
     if not os.path.isdir(right):
@@ -220,6 +216,25 @@ def differences(cargo_home, blaze_home, source, name, version):
     return found
 
 
+def compare(cargo_home, blaze_home):
+    """Every package unpacked under registry/src of either home, and the names of the
+    directories registry/index, registry/cache and registry/src have."""
+    unequal, total = {}, 0
+    for dir in sorted(set(listing(cargo_home, "src")) | set(listing(blaze_home, "src"))):
+        for package in sorted(set(listing(cargo_home, "src", dir)) | set(listing(blaze_home, "src", dir))):
+            total += 1
+            if found := differences(cargo_home, blaze_home, dir, package):
+                unequal[f"{dir}/{package}"] = found
+    dirs = {part: (listing(cargo_home, part), listing(blaze_home, part)) for part in ("index", "cache", "src")}
+    return total, unequal, dirs
+
+
+def fresh(*homes):
+    for home in homes:
+        shutil.rmtree(home, ignore_errors=True)
+        os.makedirs(home)
+
+
 def blaze_fetch(given):
     if given:
         return given
@@ -229,99 +244,169 @@ def blaze_fetch(given):
     return os.path.join(target, "release", "examples", "fetch")
 
 
+class Run:
+    def __init__(self, fetch):
+        self.fetch = fetch
+        self.failed = {}
+        self.seconds = {"cargo": 0.0, "blaze": 0.0}
+        self.blaze = {}
+
+    def both(self, name, dir, cargo, blaze_home, config=()):
+        """`cargo fetch --locked` of the project at `dir`, then blaze's of its lock file. Returns
+        whether both did."""
+        start = time.monotonic()
+        ran = cargo.run(["fetch", "--locked"], dir)
+        self.seconds["cargo"] += time.monotonic() - start
+        if ran.returncode:
+            self.failed[name] = "cargo fetch: " + ran.stderr.strip()[-2000:]
+            return False
+        return self.blaze_fetch(name, dir, blaze_home, config) is not None
+
+    def blaze_fetch(self, name, dir, blaze_home, config=(), roots=False):
+        start = time.monotonic()
+        command = [self.fetch, os.path.join(dir, "Cargo.lock"), blaze_home]
+        for it in config:
+            command += ["--config", it]
+        ran = subprocess.run(command + (["--roots"] if roots else []), capture_output=True, text=True)
+        self.seconds["blaze"] += time.monotonic() - start
+        if ran.returncode:
+            self.failed[name] = "blaze fetch: " + ran.stderr.strip()[-2000:]
+            return None
+        lines = ran.stdout.strip().splitlines()
+        for kind, count in json.loads(lines[-1]).items():
+            self.blaze[kind] = self.blaze.get(kind, 0) + count
+        return lines[:-1]
+
+
+def vendored(run, name, dir, cargo, work):
+    """`cargo vendor` of the project at `dir`, and blaze's fetch of its lock file from what that
+    vendored: (packages, how many blaze read where cargo vendored them, once their files were
+    checked)."""
+    out = os.path.join(work, "vendored", name)
+    shutil.rmtree(out, ignore_errors=True)
+    made = cargo.run(["vendor", "--locked", "--versioned-dirs", os.path.join(out, "vendor")], dir)
+    if made.returncode:
+        run.failed[f"vendor {name}"] = "cargo vendor: " + made.stderr.strip()[-2000:]
+        return 0, 0
+    config = os.path.join(out, ".cargo", "config.toml")
+    write(config, made.stdout)
+    home = os.path.join(work, "blaze-home-vendored")
+    fresh(home)
+    roots = run.blaze_fetch(f"vendor {name}", dir, home, [config], roots=True)
+    if roots is None:
+        return 0, 0
+    total = equal = 0
+    for line in roots:
+        package, root = line.rsplit(" ", 1)
+        name_, version = package.split(" v", 1)
+        total += 1
+        equal += root == os.path.join(out, "vendor", f"{name_}-{version}")
+    if listing(home, "src"):
+        run.failed[f"vendor {name}"] = "blaze unpacked packages it had vendored"
+    return total, equal
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     parser.add_argument("--work", default=os.path.abspath("fetchdiff-work"))
     parser.add_argument("--popular", type=int, default=300)
     parser.add_argument("--projects", help="names of bench.py's PROJECTS, all of them without")
+    parser.add_argument("--vendor", default="ripgrep,zed", help="the projects vendored too")
     parser.add_argument("--blaze", help="blaze-registry's `fetch` example, built here without")
     args = parser.parse_args()
     work = os.path.abspath(args.work)
-    fetch = blaze_fetch(args.blaze)
+    run = Run(blaze_fetch(args.blaze))
     cargo_home, blaze_home = os.path.join(work, "cargo-home"), os.path.join(work, "blaze-home")
-    for home in (cargo_home, blaze_home):
-        shutil.rmtree(home, ignore_errors=True)
-        os.makedirs(home)
+    fresh(cargo_home, blaze_home)
     write(os.path.join(cargo_home, "config.toml"), f'[registries.mirror]\nindex = "{MIRROR}"\n')
     cargo = Cargo(cargo_home)
     server = http.server.ThreadingHTTPServer(("127.0.0.1", MIRROR_PORT), Mirror)
     threading.Thread(target=server.serve_forever, daemon=True).start()
 
-    locks, failed = {}, {}
+    locks = {}
     names = args.projects.split(",") if args.projects is not None else None
     for name, (repo, rev, prepare) in projects().items():
         if names is not None and name not in names:
             continue
         if prepare:
-            failed[name] = f"fetches from the tree {prepare}.py makes"
+            run.failed[name] = f"fetches from the tree {prepare}.py makes"
             continue
         dir = os.path.join(work, "projects", name)
         clone(dir, repo, rev)
         if not os.path.exists(os.path.join(dir, "Cargo.toml")):
-            failed[name] = "no Cargo.toml at the root"
+            run.failed[name] = "no Cargo.toml at the root"
             continue
         if not os.path.exists(os.path.join(dir, "Cargo.lock")):
             made = cargo.run(["generate-lockfile"], dir)
             if made.returncode:
-                failed[name] = made.stderr.strip()[-2000:]
+                run.failed[name] = made.stderr.strip()[-2000:]
                 continue
         locks[name] = dir
     for name, version in popular(args.popular) if args.popular else ():
         dir = os.path.join(work, "popular", name)
         if error := project(dir, f'{name} = "={version}"\n', cargo):
-            failed[f"{name} {version}"] = error
+            run.failed[f"{name} {version}"] = error
         else:
             locks[f"{name} {version}"] = dir
     dir = os.path.join(work, "mirror")
     deps = "".join(f'{name} = {{ version = "{req}", registry = "mirror" }}\n' for name, req in MIRROR_CRATES.items())
     if error := project(dir, deps, cargo):
-        failed["mirror"] = error
+        run.failed["mirror"] = error
     else:
         locks["mirror"] = dir
 
-    seconds = {"cargo": 0.0, "blaze": 0.0}
-    registry, git, fetched = set(), set(), {}
+    registry, git = set(), set()
     for name, dir in locks.items():
-        start = time.monotonic()
-        ran = cargo.run(["fetch", "--locked"], dir)
-        seconds["cargo"] += time.monotonic() - start
-        if ran.returncode:
-            failed[name] = "cargo fetch: " + ran.stderr.strip()[-2000:]
-            continue
-        start = time.monotonic()
-        ran = subprocess.run([fetch, os.path.join(dir, "Cargo.lock"), blaze_home], capture_output=True, text=True)
-        seconds["blaze"] += time.monotonic() - start
-        if ran.returncode:
-            failed[name] = "blaze fetch: " + ran.stderr.strip()[-2000:]
-            continue
-        for kind, count in json.loads(ran.stdout.strip().splitlines()[-1]).items():
-            fetched[kind] = fetched.get(kind, 0) + count
-        found, from_git = packages(os.path.join(dir, "Cargo.lock"))
-        registry |= found
-        git |= from_git
+        if run.both(name, dir, cargo, blaze_home):
+            found, from_git = packages(os.path.join(dir, "Cargo.lock"))
+            registry |= found
+            git |= from_git
+    total, unequal, dirs = compare(cargo_home, blaze_home)
+
+    # crates.io replaced by the mirror, in the project's own .cargo/config.toml: both unpack
+    # under the mirror's directory.
+    replaced = {"total": 0, "unequal": {}, "dirs": {}}
+    dir = os.path.join(work, "replaced")
+    config = os.path.join(dir, ".cargo", "config.toml")
+    write(config, f'[source.crates-io]\nreplace-with = "m"\n\n[source.m]\nregistry = "{MIRROR}"\n')
+    homes = os.path.join(work, "cargo-home-replaced"), os.path.join(work, "blaze-home-replaced")
+    fresh(*homes)
+    other = Cargo(homes[0])
+    deps = "".join(f'{name} = "{req}"\n' for name, req in MIRROR_CRATES.items())
+    if error := project(dir, deps, other):
+        run.failed["replaced"] = error
+    elif run.both("replaced", dir, other, homes[1], [config]):
+        replaced["total"], replaced["unequal"], replaced["dirs"] = compare(*homes)
+
+    vendor = {}
+    for name in args.vendor.split(",") if args.vendor else ():
+        if name in locks:
+            vendor[name] = vendored(run, name, locks[name], cargo, work)
     server.shutdown()
 
-    unequal = {}
-    for source, name, version in sorted(registry):
-        if found := differences(cargo_home, blaze_home, source, name, version):
-            unequal[f"{name} {version} ({source})"] = found
-    dirs = {part: (listing(cargo_home, part), listing(blaze_home, part)) for part in ("index", "cache", "src")}
-    dirs_equal = all(a == b for a, b in dirs.values())
+    dirs_equal = all(a == b for a, b in [*dirs.values(), *replaced["dirs"].values()])
     result = {
-        "locks": len(locks), "packages": len(registry), "equal": len(registry) - len(unequal), "git": len(git),
-        "dirs": dirs, "dirs_equal": dirs_equal, "blaze": fetched, "seconds": seconds,
-        "unequal": unequal, "failed": failed,
+        "locks": len(locks), "lock_packages": len(registry), "git": len(git),
+        "packages": total, "equal": total - len(unequal), "dirs": dirs,
+        "replaced": {**replaced, "equal": replaced["total"] - len(replaced["unequal"])},
+        "vendored": vendor, "dirs_equal": dirs_equal, "blaze": run.blaze, "seconds": run.seconds,
+        "unequal": unequal, "failed": run.failed,
     }
     with open(os.path.join(work, "fetchdiff.json"), "w") as f:
         json.dump(result, f, indent=1)
-    print(f"{len(locks)} lock files, {len(failed)} not fetched (fetchdiff.json says why)")
-    print(f"{result['equal']}/{len(registry)} registry packages equal; {len(git)} git packages not compared")
+    print(f"{len(locks)} lock files, {len(run.failed)} not fetched (fetchdiff.json says why)")
+    print(f"{total - len(unequal)}/{total} unpacked packages equal ({len(registry)} registry packages in the "
+          f"lock files; {len(git)} git packages not compared)")
+    print(f"crates.io replaced by a mirror: {result['replaced']['equal']}/{replaced['total']} equal")
+    for name, (count, equal) in vendor.items():
+        print(f"vendored {name}: {equal}/{count} read where cargo vendor put them, every file checked")
     for part, (a, b) in dirs.items():
         print(f"registry/{part}: {'equal' if a == b else 'cargo ' + ', '.join(a) + '; blaze ' + ', '.join(b)}")
-    print(f"cargo fetch {seconds['cargo']:.1f} s, blaze {seconds['blaze']:.1f} s")
-    for package, found in list(unequal.items())[:20]:
+    print(f"cargo {run.seconds['cargo']:.1f} s, blaze {run.seconds['blaze']:.1f} s")
+    for package, found in [*unequal.items(), *replaced["unequal"].items()][:20]:
         print(f"  {package}: {found[0]}" + (f" (and {len(found) - 1} more)" if len(found) > 1 else ""))
-    sys.exit(1 if unequal or not dirs_equal else 0)
+    bad = unequal or replaced["unequal"] or not dirs_equal or any(c != e for c, e in vendor.values())
+    sys.exit(1 if bad else 0)
 
 
 if __name__ == "__main__":
