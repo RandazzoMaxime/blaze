@@ -969,8 +969,23 @@ Where J stands (2026-10-24):
   function-like macros equal (on dev-aws-11: the server linked in 10.6 s, each library in
   11-14 s). A proc-macro crate has no entry point: rust-analyzer took tokio's
   `#[proc_macro_attribute] pub fn main` for one.
-- Next: ra-jit's server and libraries where every crate that expands with them is ra-jit's,
-  in place of a rustc build of the macro crates.
+- In a load (2026-10-25, the `blaze-j1` lane, behind `RA_JIT_PROC_MACRO_SERVER`, which names
+  the server): rust-analyzer's `cargo check --compile-time-deps` into ra-jit's own target
+  directory (`--own-target`) asks the wrapper for each proc macro, and ra-jit links it there
+  (`crates/ra-jit/src/cargo/own_macro.rs`), as `own_script.rs` does a build script, with the
+  dep-info cargo reads; the load expands what ra-jit listed with that server
+  (`load_cargo::listed`), and a build script that links one is expanded with it (J0). A
+  library ra-jit links names libc, as rustc's does. A crate rustc compiles there that links
+  one (a proc macro that uses another, as `serde_with_macros` uses `darling_macro`, or a
+  build script's dependency) has rustc compile the proc macro again over ra-jit's, as rustc
+  loads only its own; ra-jit's is kept beside its record. `macroserver.py all` builds fd,
+  bat, hyperfine, just, nushell and helix whole that way and again with rustc's proc macros
+  and the toolchain's server, each from an empty store, and expands every call with both
+  (on dev-aws-8): 3,465 calls (3,192 derives, 149 attributes, 124 function-like), all the
+  same, and the programs print the same. Left: `pest_consume_macros` (nushell, 12 calls),
+  which ra-jit cannot compile
+  ([#327](https://github.com/indexable-inc/blaze/issues/327)).
+- Next: the server shipped beside ra-jit, then ra-jit's libraries by default.
 
 J, K and M are planned together in [self-contained.md](self-contained.md#j-k-and-m), since
 what they remove is most of the toolchain blaze still keeps: rustc and the sysroot's rlibs (116
@@ -1210,7 +1225,15 @@ paid once, by the release, instead of on a user's machine (`crates/ra-jit/src/sh
 - `ra-jit std REMOTE TOOLCHAIN` builds a script that does nothing over TOOLCHAIN (a sysroot)
   into a store of its own, running no rustc, and pushes that store to REMOTE as the project `std-<target>-<build>`, where `<build>` is what the store keys
   by: the ra-jit binary's bytes and the toolchain's commit and compiler name. Only that binary
-  with that toolchain can use it, and every key in it says so.
+  with that toolchain can use it, and every key in it says so. It then builds a program that
+  prints a line, whole, with the `dev` and the `release` profile: a program keys the unit by the
+  debug info its profile asks for, line tables for `dev` where a script asks for none, so
+  without it every whole build of a dev program compiled the library again (about 10 s, step K).
+  The `release` program takes the script's unit. It then builds a program that
+  prints a line, whole, with the `dev` and the `release` profile: a program keys the unit by the
+  debug info its profile asks for, line tables for `dev` where a script asks for none, so
+  without it every whole build of a dev program compiled the library again (about 10 s, step K).
+  The `release` program takes the script's unit.
 - The release workflow runs it with each target's archived binary and the pinned 1.99.0, and
   attaches the remote's files to the release with `.` for `/` (`manifests.std-…`, `packs.….pack.zst`,
   `keys.…`). A remote can be a plain `https://` address now (`remote/https.rs`): read-only,

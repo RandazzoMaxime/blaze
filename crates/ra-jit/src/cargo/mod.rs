@@ -10,6 +10,7 @@ mod cli;
 mod client;
 mod messages;
 pub(crate) mod metadata;
+pub(crate) mod own_macro;
 pub(crate) mod own_script;
 mod package;
 pub(crate) mod plan;

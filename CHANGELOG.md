@@ -13,6 +13,9 @@ All notable changes to ra-jit are written here. The format follows
   workspaces of `harness/resolve.py`'s corpus. The command's `--config` arguments now count,
   and a manifest cargo refuses ends the command with cargo's message and status. The daemon's
   loads still ask cargo.
+- `ra-jit std` ships the standard library's unit for a `dev` program too, not only a build
+  script's: a whole build of a dev program from an empty store (step K, #91) fetches it where
+  it compiled the library again: ripgrep from nothing 19.4 s to 9.9 s on dev-aws-8.
 - `crates/blaze-build-script`: the environment cargo 1.99.0 gives a build script, computed
   from a plain description of the run with no cargo, ported from cargo's own rules and tests
   (no-rustc step I, #89; #298). Nothing uses it yet; blaze's own runs of scripts come next.
@@ -80,6 +83,11 @@ All notable changes to ra-jit are written here. The format follows
   `harness/macroserver.py` holds serde_derive's, thiserror's, tokio's and clap's equal
   ([no-rustc.md](docs/no-rustc.md), step J1). A proc-macro crate's `fn main` is no longer
   taken for an entry point.
+- `RA_JIT_PROC_MACRO_SERVER` naming that server has a load into ra-jit's own target directory
+  link its proc macros with ra-jit and expand them with the server, the toolchain's server
+  and rustc's libraries left for what ra-jit did not link (#90). `macroserver.py all` builds
+  fd, bat, hyperfine, just, nushell and helix both ways: 3,465 calls the same, 12 of
+  `pest_consume_macros` not compared, as ra-jit cannot compile it yet (#327).
 - The SSE and AVX compares compile (#87): `llvm.x86.sse.cmp.ps` and `.ss`, `sse2.cmp.pd` and
   `.sd` and AVX's 256-bit ones give a lane of all ones where the immediate's predicate holds, as
   rustc's do. glam's `Vec4::cmpeq` and `is_finite_mask`, which bevy calls, were left to rustc;
