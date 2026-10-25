@@ -4300,8 +4300,9 @@ fn emit(ctx: &mut cranelift_codegen::Context) -> Result<Code> {
         let Some(compiled) = ctx.compiled_code() else {
             return Err("no compiled code".to_owned());
         };
-        // Relocations against the function itself get its id when it is stitched.
-        let own = FuncId::from_u32(u32::MAX);
+        // Relocations against the function itself get its id when it is stitched. One below
+        // `u32::MAX` — `from_u32(u32::MAX)` asserts the reserved value away in debug builds.
+        let own = FuncId::from_u32(u32::MAX - 1);
         Ok(Code {
             signature: ctx.func.signature.clone(),
             bytes: compiled.buffer.data().to_vec(),
