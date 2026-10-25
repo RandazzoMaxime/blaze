@@ -4,7 +4,7 @@
 //! resolve_graph.py` compares it with cargo's.
 
 use std::collections::BTreeMap;
-use std::io::Read;
+use std::io::{Read, Write};
 use std::path::Path;
 
 use anyhow::{Context, Result, anyhow};
@@ -162,6 +162,6 @@ fn main() -> Result<()> {
     };
     let graph =
         resolve_graph(&resolve, &member_ids, root, &Packages { lib_names }, &[CompileKind::Host])?;
-    println!("{}", serde_json::to_string(&graph)?);
+    writeln!(std::io::stdout(), "{}", serde_json::to_string(&graph)?)?;
     Ok(())
 }
