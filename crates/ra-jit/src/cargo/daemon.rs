@@ -33,6 +33,8 @@ use crate::socket::{self, NotServed, Served, private_dir, private_file, read_req
 /// How long the daemon and each worker live without being asked, unless
 /// `RA_JIT_IDLE_SECS` says otherwise.
 const IDLE: Duration = Duration::from_secs(1800);
+/// How long a worker that is stopped has to finish writing to the store.
+const SETTLE: Duration = Duration::from_secs(60);
 
 /// How often the daemon looks for what is idle.
 const TICK: Duration = Duration::from_secs(1);
@@ -558,6 +560,28 @@ impl Worker {
         self.note_end();
         kill(&mut lock(&self.child));
         let _ = std::fs::remove_file(&self.socket);
+    }
+
+    /// Ends its input, which ends it once the store has what its last build kept. After a
+    /// build from nothing that takes a while, helix's about 20 s, and what is lost the next
+    /// daemon compiles again.
+    fn let_go(&self) {
+        // Its end is then not news.
+        self.note_end();
+        self.noted.store(true, Relaxed);
+        drop(lock(&self.child).stdin.take());
+    }
+
+    /// Stops it once it has gone by itself after [`Self::let_go`], or [`SETTLE`] after.
+    fn finish(&self) {
+        {
+            let mut child = lock(&self.child);
+            let given_up = Instant::now() + SETTLE;
+            while matches!(child.try_wait(), Ok(None)) && Instant::now() < given_up {
+                std::thread::sleep(Duration::from_millis(20));
+            }
+        }
+        self.stop();
     }
 
     fn set(&self, key: &str, warmth: Warmth) {
@@ -1465,7 +1489,10 @@ impl Daemon {
             spare.stop();
         }
         for worker in workers.values() {
-            worker.stop();
+            worker.let_go();
+        }
+        for worker in workers.values() {
+            worker.finish();
         }
         let _ = std::fs::remove_file(socket_in(&self.home));
         eprintln!("daemon of pid {} ends at {:?}", std::process::id(), SystemTime::now());
