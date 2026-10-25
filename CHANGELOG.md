@@ -438,6 +438,23 @@ All notable changes to ra-jit are written here. The format follows
 
 ### Changed
 
+- The first edit after a daemon starts on the store no longer compiles every function from
+  the store in the edited file to tell what changed. Each entry names the items of the
+  checkout its code comes from, by a hash of their text: the body it is written in, the
+  bodies whose places it tells (with where each begins), those it mentions a coroutine of,
+  and those that give an `impl Trait` in it its type. After an edit of nothing but bodies,
+  code whose items read as they did is taken as it was (the timeline's `asked:` line says how
+  much). warmstart.py's restart of ripgrep, dev-aws-7: the patch asks 17 functions where it
+  asked 382, and the edit takes 0.22 to 0.23 s where it took 0.30 to 0.32 s. nushell's asks
+  18 where 156 and takes as long, 0.53 to 0.70 s: what is left on both is the code that
+  changed, compiled on a cold database (main before #360 compiled everything at the start and
+  took 0.09 s and 0.37 s, its start 4.8 s longer on nushell)
+  ([warm-start.md](docs/research/warm-start.md)). A stored mark no longer hashes where the
+  named locals are kept for a debugger, which a full build and a later compile of the same
+  code can tell apart, and which had every edit after a restart compile such code again.
+  Entries are kept under new keys. `storetracked.py` has the edits of one body take some
+  code by its items, a daemon that checks everything find none of it changed, and the
+  closure an `impl Trait` is change.
 - A closure's stable name is its place among the closures of its body, as rust-analyzer
   interns it, and a hash of its source, where it was the index of its expression, which an
   edit above it moved (one with no source, as an `async fn`'s coroutine, keeps that). What
