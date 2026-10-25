@@ -15,7 +15,6 @@ All notable changes to ra-jit are written here. The format follows
   `cargo:` and `cargo::`, the `rust-version` rule of the latter, every directive and cargo's
   errors for each) and says who receives it: the scripts each unit is linked with, the `-L`,
   `-l`, link arguments, cfgs and variables of each target, and when a script runs again.
-
 - `crates/blaze-resolve`, cargo's resolver owned by blaze (#298), starts with cargo 1.99.0's package
   model, used by nothing yet: `SourceId` (path, git and sparse registries, git at a branch, tag or
   rev with its commit, directory, local registry) compared by cargo's canonical URL and written as
