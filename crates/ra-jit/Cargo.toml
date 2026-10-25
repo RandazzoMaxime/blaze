@@ -98,6 +98,11 @@ url.workspace = true
 tar = "0.4.44"
 zstd = "0.13.3"
 ra-jit-live = { path = "../ra-jit-live" }
+blaze-core.workspace = true
+blaze-vfs.workspace = true
+# The operating system's notices of changed files (FSEvents, inotify); in the tree already for
+# rust-analyzer's `vfs-notify`.
+notify = "8.2.0"
 
 [target.'cfg(unix)'.dependencies]
 libc.workspace = true
