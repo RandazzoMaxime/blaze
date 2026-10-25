@@ -5,11 +5,13 @@
 //! `$CARGO_HOME`. What is ported from where is said at the top of each module; the plan is
 //! `docs/self-contained.md`.
 
+pub mod directory;
 pub mod download;
 pub mod http;
 pub mod index;
 pub mod registry;
 mod source_id;
+pub mod sources;
 pub mod sparse;
 
 use std::{
@@ -25,6 +27,7 @@ pub use source_id::{
     CRATES_IO_HTTP_INDEX, CRATES_IO_INDEX, CRATES_IO_REGISTRY, GitReference, SourceId, SourceKind,
     short_hash,
 };
+pub use sources::{Locked, SourceConfig, SourceDef, SourceMap, Sources};
 
 /// What fetching reads of cargo's configuration (`[net]`, `[http]`, `--offline`), as a plain
 /// struct: `crates/blaze-manifest` fills it from `.cargo/config.toml`, `CARGO_*` variables and

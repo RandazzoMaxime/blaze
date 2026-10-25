@@ -68,6 +68,8 @@ pub enum From {
     Store,
     CargoCache,
     Network,
+    /// Read where it is vendored, from a directory source.
+    Vendored,
 }
 
 /// The 32 bytes of a checksum written in hex.
