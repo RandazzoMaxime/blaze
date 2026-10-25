@@ -730,9 +730,10 @@ struct Hydrated {
     found: std::sync::OnceLock<Option<(Instance, StoredParamEnvAndCrate)>>,
 }
 
+/// A root by its index in [`Base::compiled`], or another of [`Base::hydrated`].
 #[derive(Clone, Copy)]
 enum Caller {
-    Root(FunctionId),
+    Root(u32),
     Hydrated(u32),
 }
 
@@ -1061,7 +1062,7 @@ impl FromStore {
             let Some(entry) = name.and_then(|it| entries.get(&it)) else { continue };
             let (callees, nodes) = refers(&entry);
             for callee in callees {
-                from.hydrated[callee as usize].callers.push(Caller::Root(root));
+                from.hydrated[callee as usize].callers.push(Caller::Root(i));
             }
             from.root_edges.extend(nodes.into_iter().map(|it| (it, Node::Root(root))));
         }
@@ -1767,14 +1768,9 @@ impl Base {
                 _ if !touched => eprintln!("check-all: MISSED `{}` from the store", was.name),
                 Some(Some(false)) => stale.hydrated.push(i as u32),
                 Some(None) => return Err("code of the checkout from the store no longer compiles"),
-                None => {
-                    eprintln!(
-                        "patch: `{}` from the store, of {} callers, is not called as it was",
-                        was.name,
-                        was.callers.len()
-                    );
-                    return Err("code of the checkout from the store is not called as it was");
-                }
+                // Its callers changed, and what they call now is compiled as new code.
+                None if self.dropped(db, names, &mut homes, i, &mut Vec::new()) => {}
+                None => return Err("code of the checkout from the store is not called as it was"),
             }
         }
         Ok(())
@@ -1801,7 +1797,10 @@ impl Base {
         let mut found = None;
         for caller in &was.callers {
             let compiled = match *caller {
-                Caller::Root(root) => probe(|| compiled_root(db, root).as_ref().ok()).flatten(),
+                Caller::Root(at) => {
+                    let root = self.compiled[at as usize].0;
+                    probe(|| compiled_root(db, root).as_ref().ok()).flatten()
+                }
                 Caller::Hydrated(at) => {
                     let Some((instance, env)) =
                         self.found_instance(db, names, homes, at as usize, asking)
@@ -1827,6 +1826,51 @@ impl Base {
             _ = was.found.set(found.clone());
         }
         found
+    }
+
+    /// Whether nothing calls one of [`Self::hydrated`] as the base did: every caller changed,
+    /// or is gone itself. A closure is named by where in its body it is written, so an edit
+    /// above it in that body gives it and what is generic over it new names, and the code
+    /// under the old ones is left uncalled, as an instance no caller reaches any more is.
+    fn dropped(
+        &self,
+        db: &dyn HirDatabase,
+        names: &StableNames<'_, '_>,
+        homes: &mut super::home::Homes,
+        i: usize,
+        asking: &mut Vec<usize>,
+    ) -> bool {
+        let was = &self.hydrated[i];
+        if was.callers.is_empty() || asking.contains(&i) {
+            return false;
+        }
+        asking.push(i);
+        let dropped = was.callers.iter().all(|&caller| match caller {
+            Caller::Root(at) => {
+                let root = self.compiled[at as usize].0;
+                let same = self.stored_marks.get(&at).and_then(|&was| {
+                    probe(|| {
+                        let compiled = compiled_root(db, root).as_ref().ok()?;
+                        Some(stable_mark(db, names, compiled, self.debug) == Some(was))
+                    })
+                });
+                same.flatten() != Some(true)
+            }
+            Caller::Hydrated(at) => {
+                match self.found_instance(db, names, homes, at as usize, &mut Vec::new()) {
+                    Some((instance, env)) => {
+                        let mark = probe(|| {
+                            let compiled = compiled_instance(db, instance, env).as_ref().ok()?;
+                            stable_mark(db, names, compiled, self.debug)
+                        });
+                        mark.flatten() != Some(self.hydrated[at as usize].mark)
+                    }
+                    None => self.dropped(db, names, homes, at as usize, asking),
+                }
+            }
+        });
+        asking.pop();
+        dropped
     }
 
     /// What one part in `parts` of the base no longer is what it was. Looking is most of the

@@ -61,11 +61,15 @@ FIRST = "a 6 5 10"
 # (what the step is, [(file, old, new)], what the program prints after it)
 STEPS = [
     ("a generic function's body", [(LIB, "x.into() * 3", "x.into() * 4")], "a 8 5 10"),
+    # A closure is named by where in its body it is written: this one, and the instances
+    # generic over it, get new names, and the ones from the store are called no more.
+    ("a line above a closure", [(LIB, "    v.iter()", "    let _ = 0u64;\n    v.iter()")], "a 8 5 10"),
     ("a closure's body", [(LIB, "x + 1", "x + 2")], "a 8 7 10"),
     ("a static's value", [(LIB, "BASE: u64 = 10", "BASE: u64 = 12")], "a 8 7 12"),
     ("the program's own text", [(APP, '"a"', '"b"')], "b 8 7 12"),
-    ("all of it taken back", [(LIB, "x.into() * 4", "x.into() * 3"), (LIB, "x + 2", "x + 1"),
-                              (LIB, "BASE: u64 = 12", "BASE: u64 = 10"), (APP, '"b"', '"a"')], FIRST),
+    ("all of it taken back", [(LIB, "x.into() * 4", "x.into() * 3"), (LIB, "    let _ = 0u64;\n", ""),
+                              (LIB, "x + 2", "x + 1"), (LIB, "BASE: u64 = 12", "BASE: u64 = 10"),
+                              (APP, '"b"', '"a"')], FIRST),
 ]
 REBUILT = "compiling what the store had of the checkout"
 
