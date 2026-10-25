@@ -204,3 +204,35 @@ dev-aws-5, `warmstart.py`, main at `b26f32ee88` against the stable-marks branch 
   `ra-jit.{crate id}.{path}`, and the crate's id changes with its contents, so an edit renames
   the symbols of its crate. Generic instances are named per build (**read**, `main.rs`
   `function_named_in`).
+
+## Roots from the store with rustc's libraries linked beside (2026-10-25)
+
+`roots_from_store` was off in every cargo daemon, as rustc's libraries are in its symbol
+table. It now asks only that the build is not spliced into rustc's executable. Before is main
+after #295 (`stable-marks`), after is the branch; dev-aws-7 (64 vCPUs, nothing else running),
+`harness/warmstart.py`, the two interleaved, three rounds of ripgrep and two of nushell:
+
+| | before | after |
+|---|---|---|
+| ripgrep `restart` build | 5.11, 5.11, 5.06 s | 5.00, 4.90, 4.98 s |
+| ripgrep `again` build | 5.01, 4.99, 5.16 s | 4.91, 4.92, 4.84 s |
+| ripgrep functions `compiled` at `restart` | 3,618 | 2,377 |
+| nushell `restart` build | 25.83, 25.61 s | 26.49, 25.36 s |
+| nushell `again` build | 25.75, 26.18 s | 25.84, 25.94 s |
+| nushell functions `compiled` at `restart` | 30,039 | 25,843 |
+
+- ripgrep's start is about 0.13 s shorter; nushell's is the same within its noise. Finding the
+  stored roots takes 0.28 s on ripgrep (1,396 of 2,560 found) and 0.78 to 0.82 s on nushell
+  (4,888 of 12,559), about what compiling the found ones took (**read**, "stored roots").
+- Most roots are not found because of what #216 reports: "rustc's copy of a function of the
+  checkout", 964 on ripgrep and 5,380 on nushell, and 1,353 and 18,249 entries refused for
+  calling them, as before (**read**). With every callee printed on ripgrep, each is a small
+  function of the checkout that is not generic, which rustc copied into the crate that calls
+  it (its symbol ends with that crate, `...Cs9BsQQwRKzFW_2rg`): `FlagValue::unwrap_switch`
+  (69 callers), `Match::start`, `Match::new`, `BinaryDetection::quit_byte`, `Stats::clone`.
+  The callers are generic instances (`update`, `map_err`, `sink_*`) and closures, which the
+  fresh build points at rustc's copy (**read**). An entry may call that copy only where a
+  fresh build would pick it too, so the store needs the rule that picks it, or a stable name
+  for rustc's copy that says which build of the checkout it is of (**unverified** which).
+- So the cold compile at a nushell restart is still 6,401 functions and 51,413 instances in
+  14.4 s, as before (**read**, "cold:").

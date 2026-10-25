@@ -6,6 +6,7 @@ use std::io::IsTerminal as _;
 const GREEN: &str = "\x1b[1m\x1b[92m";
 const YELLOW: &str = "\x1b[1m\x1b[93m";
 const RED: &str = "\x1b[1m\x1b[91m";
+const BOLD: &str = "\x1b[1m";
 const RESET: &str = "\x1b[0m";
 
 fn painted(color: &str, word: &str) -> String {
@@ -50,4 +51,8 @@ pub(crate) const COLD: &str = "no-rustc K, #91";
 
 pub(crate) fn error(text: &str) {
     eprintln!("{}: {text}", painted(RED, "error"));
+}
+
+pub(crate) fn note(text: &str) {
+    eprintln!("{}: {text}", painted(BOLD, "note"));
 }
