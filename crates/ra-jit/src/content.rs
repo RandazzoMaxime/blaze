@@ -145,13 +145,7 @@ impl Contents {
             } else {
                 continue;
             };
-            // One that is not UTF-8 has no text: it is hashed as it is on disk, where an
-            // `include_bytes!` reads it from.
-            let hash = if db.has_file_text(file) {
-                FileHashes::of(db, file)
-            } else {
-                Sha256::digest(std::fs::read(path).unwrap_or_default()).into()
-            };
+            let hash = file_hash(db, file, path);
             files.push((by, relative.to_string_lossy().into_owned(), hash));
         }
         files.sort_unstable();
@@ -288,6 +282,33 @@ impl Contents {
         let extra = krate.extra_data(db);
         let name = extra.display_name.as_ref().map(|it| it.to_string());
         format!("{name:?} {:?}", extra.version)
+    }
+}
+
+/// What a build script wrote to `out` that the source root of `krate` holds: the path of each
+/// file below `out` and the hash of what is in it, in the order of their paths.
+pub(crate) fn written_to(db: &RootDatabase, krate: Crate, out: &str) -> Vec<(String, Hash)> {
+    let root = db.file_source_root(krate.data(db).root_file_id).source_root_id(db);
+    let root = db.source_root(root).source_root(db);
+    let mut files: Vec<(String, Hash)> = root
+        .iter()
+        .filter_map(|file| {
+            let path = root.path_for_file(&file)?.as_path()?.to_string();
+            let relative = Path::new(&path).strip_prefix(out).ok()?;
+            Some((relative.to_string_lossy().into_owned(), file_hash(db, file, Path::new(&path))))
+        })
+        .collect();
+    files.sort_unstable();
+    files
+}
+
+/// The hash of the file `file` at `path`. One that is not UTF-8 has no text: it is hashed as
+/// it is on disk, where an `include_bytes!` reads it from.
+fn file_hash(db: &RootDatabase, file: vfs::FileId, path: &Path) -> Hash {
+    if db.has_file_text(file) {
+        FileHashes::of(db, file)
+    } else {
+        Sha256::digest(std::fs::read(path).unwrap_or_default()).into()
     }
 }
 

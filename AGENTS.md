@@ -30,7 +30,8 @@ How to build, test and change ra-jit, including the vendored rust-analyzer, is
   object writing, the splice, the daemon, cargo integration, the store, tiers, the live runtime
   and the harnesses stay in `crates/`: [docs/contributing.md](docs/contributing.md#where-new-code-goes).
 - **No MCP.** MCP is cringe and outdated; agent-facing interfaces are a Unix socket (local) or
-  HTTP (remote) with one documented, versioned schema, and the CLI is a client of the same API:
+  HTTP (remote) with one documented, versioned schema in deterministic CBOR (JSON only as a
+  rendering for people), and the CLI is a client of the same API:
   [docs/roadmap.md](docs/roadmap.md#8-the-agent-api).
 - **Heavy work runs on a dev host, the Mac does quick checks.** Release builds, harness sweeps
   and benchmarks run on an AWS dev host claimed in the host ledger (`fleet-ops` skill), with a

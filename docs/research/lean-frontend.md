@@ -280,7 +280,10 @@ by about 46 ms and which `build` waits for; then the link, 14 ms.
 | signature edit | 399 / 406 ms | 379 / 381 ms |
 | **borrowck's drops liveness** (#246): body edit | 308 / 306 ms | 295 / 294 ms |
 | its `build-rest` stage | 74 / 74 ms | 62 / 64 ms |
-| **interned arguments kept** (six functions, see below; against salsa vendored): signature edit | 384 / 382 ms | 367 / 377 ms |
+| **interned arguments kept**, six functions against salsa vendored: signature edit | 384 / 382 ms | 367 / 377 ms |
+| the four that landed (#253), alone against main before it: body edit | 272 / 263 ms | 248 / 246 ms |
+| signature edit | 320 / 365 ms | 294 / 280 ms |
+| its `check` stage | 216 / 246 ms | 186 / 185 ms |
 | **all of them**: body edit | 317 / 313 ms | 257 / 259 ms (−18%) |
 | signature edit | 399 / 406 ms | 268 / 285 ms (−31%) |
 | the harness's wall time, body / signature | 0.36 / 0.45 s | 0.31 / 0.33 s |
@@ -345,21 +348,37 @@ ra-jit's own whose arguments hold none of the collected types keep theirs for go
 `source_place`, `compiled_instance` and `instance_serial` (#253). Two more of the fork's, whose
 arguments qualify too, were measured with them: `layout_of_ty_query` and
 `TraitImpls::in_crate_and_deps_for_trait_and_self_ty`. They stay as they were, as CI builds the
-fork alone against crates.io's salsa, which takes no `revisions` there; the numbers below are of
-all six (**unverified** how much of them the four keep). salsa's own
+fork alone against crates.io's salsa, which takes no `revisions` there. The table's first slice 4
+row is of all six against vendored salsa; the second is of the four that landed, main at #253's
+merge (`d4f6027e82`) against its first parent (`82fb05c1eb`), measured after it merged. One run
+before was out of line with the other (365 against 320 ms), so the size is uncertain; the
+direction held in all four pairs of runs, and the cold starts of both builds were about 4 s longer
+than earlier that day (**read**; the host busier, **unverified**). salsa's own
 tests pass with it (126 test binaries), and its compile-fail test of a single salsa struct's
 function given `revisions` now says why; four other compile-fail expectations differ from rustc
 1.99's output in rustc's own wording, which this does not touch (**read**). The −39 MB of salsa metadata measured earlier on a fork was not
-measured again here (**unverified** for these six).
+measured again here (**unverified** for these functions).
 
 **The first edit after the own base** took 12.3 s at the client while the daemon answered it in
 335 ms: in its log the next request came 12 s after that reply, and the second edit's wall was
 0.31 s (**read**). On ripgrep the first edit's wall is 0.16 s. The time is the client's, or
 work that is not a request; it was not looked into (**unverified** where it goes).
 
+## What is left, superseded
+
+The rest of #236 is not going to be built on salsa: push-based invalidation, replacing salsa, is
+being built on the `blaze-next` branch, and with it what an edit verifies changes. Left as found,
+for that work to measure against: the first edit after the own base (12 s at the client on
+nushell, above), `regions::build` and `liveness::region_liveness` in borrowck (84M and 79M
+cycles an edit), the own base's occasional 14 GB peak, noticing an edit (35 to 48 ms, mostly the
+cargo client starting, **unverified**), the per-definition split of diagnostics, the two fork
+functions of slice 4, and slices 5 to 7 of the issue.
+
 ## Not checked
 
 - helix was not measured; slices 2 to 4 were also measured on ripgrep, all together only.
-- The interned-arguments change was measured against vendored salsa, not against main.
+- `debuginfo.py` did not run on the union of the branches (the dev shell has no gdb); the patch
+  marks' lines rest on `splices.py`, the gate and CI's fast tier.
+- The "all of them" rows include the two fork functions #253 left out.
 - The counters' build was a different binary (patched salsa), so its counts and the timings
   come from different runs of the same commit.

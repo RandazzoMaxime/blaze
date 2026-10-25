@@ -4,7 +4,9 @@ reached since they last passed, and no others.
 
 usage: testselect.py    (RA_JIT_BIN names the ra-jit built; cargo-ra-jit is found next to it)
 
-A package has a library with unit tests and an integration test of it: tests that call one
+A package has a library with unit tests and an integration test of it, and a library of the
+workspace beside it that both link, which says under `cfg(test)` what it does not otherwise
+(an edit to it is the daemon's, built as rustc built it for the tests): tests that call one
 function or another of the library, one in a private module named as a public function beside
 it, one that downcasts a `dyn Any` of what one returns (a
 `TypeId`, which code generation takes from rustc), one that keeps it in a `HashMap` (seeded at
@@ -65,6 +67,10 @@ pub mod shapes {
     }
 }
 
+pub fn based(x: u32) -> u32 {
+    tbase::base(x)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -77,6 +83,11 @@ mod tests {
     #[test]
     fn uses_other() {
         assert_eq!(other(2), 4);
+    }
+
+    #[test]
+    fn uses_base() {
+        assert_eq!(based(1), 3);
     }
 
     #[test]
@@ -109,10 +120,29 @@ mod tests {
     }
 }
 """
+BASE = """pub fn base(x: u32) -> u32 {
+    x + 2 + offset()
+}
+
+#[cfg(not(test))]
+fn offset() -> u32 {
+    0
+}
+
+#[cfg(test)]
+fn offset() -> u32 {
+    100
+}
+"""
 FILES = {
-    "Cargo.toml": '[package]\nname = "tsel"\nversion = "0.1.0"\nedition = "2021"\n',
+    "Cargo.toml": '[package]\nname = "tsel"\nversion = "0.1.0"\nedition = "2021"\n\n'
+                  '[dependencies]\ntbase = { path = "tbase" }\n\n[workspace]\nmembers = ["tbase"]\n',
     "src/lib.rs": LIB,
     "data.txt": "tsel\n",
+    # A library of the workspace the unit tests are linked with as rustc built it, without
+    # `cfg(test)`, as ripgrep's crates are each other's.
+    "tbase/Cargo.toml": '[package]\nname = "tbase"\nversion = "0.1.0"\nedition = "2021"\n',
+    "tbase/src/lib.rs": BASE,
     "tests/it.rs": """#[test]
 fn it_helper() {
     assert_eq!(tsel::helper(0), 1);
@@ -122,11 +152,17 @@ fn it_helper() {
 fn it_other() {
     assert_eq!(tsel::other(0), 0);
 }
+
+#[test]
+fn it_base() {
+    assert_eq!(tsel::based(0), 2);
+}
 """,
 }
 CALL_HELPER = {"tests::uses_helper", "tests::uses_any", "tests::uses_a_map", "tests::shows_a_backtrace", "it_helper"}
-ALL = CALL_HELPER | {"tests::uses_other", "tests::reads_a_file", "tests::plain", "it_helper", "it_other",
-                     "shapes::twice::tests::doubles"}
+CALL_BASE = {"tests::uses_base", "it_base"}
+ALL = CALL_HELPER | CALL_BASE | {"tests::uses_other", "tests::reads_a_file", "tests::plain", "it_helper", "it_other",
+                                 "shapes::twice::tests::doubles"}
 FILE = "tests::reads_a_file"
 WRITES = "tests::writes_a_file"
 SANDBOXED = sys.platform == "linux" and os.environ.get("RA_JIT_SANDBOX") not in ("off", "0")
@@ -140,6 +176,10 @@ STEPS = [
      CALL_HELPER | F, True),
     ("a function another test calls", [("src/lib.rs", "x * 2", "x + x")], "affected",
      {"tests::uses_other", "it_other"} | F, True),
+    ("a library the unit tests link", [("tbase/src/lib.rs", "x + 2", "x + 3 - 1")], "affected",
+     CALL_BASE | F, True),
+    ("that library again", [("tbase/src/lib.rs", "x + 3 - 1", "x + 4 - 2")], "affected",
+     CALL_BASE | F, True),
     ("a test added", [("src/lib.rs", "    #[test]\n    fn plain()",
                        "    #[test]\n    fn added() {\n        assert_eq!(helper(2), 3);\n    }\n\n"
                        "    #[test]\n    fn plain()")], "affected",
