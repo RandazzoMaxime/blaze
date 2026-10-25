@@ -26,6 +26,7 @@ mod remote;
 mod sandbox;
 mod shipped;
 mod socket;
+mod sources;
 mod splice;
 mod splicer;
 mod stub;
@@ -6153,6 +6154,10 @@ struct Edited {
     at: Instant,
 }
 
+/// How long the daemon waits for more of a save it was told of, when no client asked for a
+/// build: an editor writes the files of one save within this of each other.
+const SETTLE: Duration = Duration::from_millis(5);
+
 /// Set while the builds under way are told to stop for a change to the source.
 static INTERRUPTING: AtomicBool = AtomicBool::new(false);
 
@@ -7804,6 +7809,11 @@ fn run_holding(
     let mut placed = Placed::default();
     // The programs whose tests ra-jit's harness lists, by their object.
     let mut harnessed: FxHashSet<PathBuf> = FxHashSet::default();
+    // The source files as the builds read them, and the disk's notices of changes to them.
+    let mut held = sources::Sources::new();
+    let mut notices = sources::Notices::new();
+    // How many files and directories were watched when the watch was last made.
+    let mut watched_len = (usize::MAX, usize::MAX);
     loop {
         if WatchedFile::unwatched(&files, &db) || tree.includes_more(&db) {
             builds.settle(&mut db, &mut programs)?;
@@ -7827,8 +7837,8 @@ fn run_holding(
         let mut outputs: FxHashMap<usize, Outputs> = FxHashMap::default();
         // The checkout each loaded one has to be read from for them.
         let mut looked: FxHashMap<PathBuf, PathBuf> = FxHashMap::default();
-        // The text editors sent of files they have not written yet, and when it came.
-        let mut sent: FxHashMap<vfs::FileId, (String, Instant)> = FxHashMap::default();
+        // When the text of each file an editor sent came.
+        let mut edited_at: FxHashMap<PathBuf, Instant> = FxHashMap::default();
         match serving {
             true => {
                 let mut later = Vec::new();
@@ -8243,12 +8253,17 @@ fn run_holding(
                         builds.edits.push(edited);
                         continue;
                     }
-                    let rust = path.extension().is_some_and(|it| it == "rs");
+                    // The text is what the next build reads; the editor writes it after.
                     let text = std::mem::take(&mut edited.text);
-                    let text = if rust { load_cargo::source_text(text) } else { text };
-                    if *text != **db.file_text(id).text(&db) {
-                        sent.insert(id, (text, edited.at));
+                    let write = blaze_vfs::Op::Write {
+                        path: path.to_string_lossy().into_owned(),
+                        bytes: text.into_bytes().into(),
+                    };
+                    if let Err(error) = held.commit(None, &[write]) {
+                        let _ = writeln!(&edited.client, "error: {error}");
+                        continue;
                     }
+                    edited_at.insert(path.clone(), edited.at);
                     // Built for the process the last build was for.
                     edited.client.env = ide_db::base_db::ProcessEnv::try_get(&db)
                         .map(|it| it.vars(&db).clone())
@@ -8300,7 +8315,14 @@ fn run_holding(
                     eprintln!("split again: {:.1?}", start.elapsed());
                 }
             }
-            false => std::thread::sleep(Duration::from_millis(5)),
+            // Without clients a change on disk is what starts a build.
+            false => {
+                notices.wait(if notices.watching() {
+                    Duration::from_secs(1)
+                } else {
+                    Duration::from_millis(5)
+                });
+            }
         }
         // The checkouts that are read from somewhere else than for the last build. Their files
         // have the times of another checkout, so they are compared by what is in them.
@@ -8340,77 +8362,123 @@ fn run_holding(
             lock(&as_built).remove(&wanted.out);
         }
         let mut noticed = None;
-        // Keep scanning until a pass finds nothing new, so one save of several files is one build.
-        // Files are read after that: a timestamp can be that of a write still under way, and
-        // the rest of that write may not change it again. Whoever asks for a build has finished
-        // writing, so one pass is enough then.
+        // Keep looking until a look finds nothing new, so one save of several files is one
+        // build. Whoever asks for a build has finished writing, so one look is enough then.
+        // The disk is one input of the sources: what it says is committed to them, and the
+        // source files to read again are what the sources hold otherwise than the last build.
         let mut touched = FxHashSet::default();
         // Source files that are no longer there.
         let mut gone = FxHashSet::default();
-        for (index, file) in files.iter().enumerate() {
-            if let Watched::Source(id) = file.file
-                && let Some((_, at)) = sent.get(&id)
-            {
-                touched.insert(index);
-                noticed.get_or_insert((*at, Duration::ZERO));
-            }
+        if files.len() != watched_len.0 || tree.directories(&db).count() != watched_len.1 {
+            watched_len = (files.len(), tree.directories(&db).count());
+            let texts: Vec<(PathBuf, triomphe::Arc<str>)> = files
+                .iter()
+                .filter_map(|it| match it.file {
+                    Watched::Source(id) => {
+                        Some((it.path.clone(), db.file_text(id).text(&db).clone()))
+                    }
+                    Watched::Included(_) => None,
+                })
+                .collect();
+            held.hold(texts.iter().map(|(path, text)| (&**path, &**text)));
+            let parents =
+                files.iter().filter_map(|it| db.on_disk(&it.path).parent().map(Path::to_owned));
+            let dirs: Vec<PathBuf> = tree.directories(&db).chain(parents).collect();
+            notices.watch(dirs);
+        }
+        let mut changed = notices.take();
+        if !switched.is_empty() {
+            changed = sources::Changed::All;
         }
         loop {
-            if tree.relisted(&db) {
+            if tree.relisted(&db, &changed) {
                 builds.settle(&mut db, &mut programs)?;
             }
             // A new file has no timestamp yet, so the pass below takes it for a changed one.
-            for (file, path) in tree.added(&mut db).added {
+            for (file, path) in tree.added(&mut db, &changed).added {
                 files.push(WatchedFile {
                     file: Watched::Source(file),
                     path,
                     mtime: SystemTime::UNIX_EPOCH,
                 });
             }
-            let before = touched.len() + gone.len();
+            let before = (touched.len() + gone.len(), held.head());
+            let named = |on_disk: &Path| {
+                matches!(&changed, sources::Changed::Some { .. }) && changed.file(on_disk)
+            };
             for (index, file) in files.iter_mut().enumerate() {
                 let on_disk = db.on_disk(&file.path);
+                let fresh = file.mtime == SystemTime::UNIX_EPOCH;
+                if !fresh && !changed.file(&on_disk) {
+                    continue;
+                }
                 let Ok(now) = std::fs::metadata(&on_disk).and_then(|m| m.modified()) else {
-                    if matches!(file.file, Watched::Source(_)) && gone.insert(index) {
-                        touched.remove(&index);
-                        noticed.get_or_insert((Instant::now(), Duration::ZERO));
+                    if matches!(file.file, Watched::Source(_)) {
+                        let kept = held.read_on_disk(&file.path, None);
+                        if !kept && gone.insert(index) {
+                            touched.remove(&index);
+                        }
                     }
                     continue;
                 };
                 gone.remove(&index);
-                if switched.iter().any(|base| file.path.starts_with(base)) {
-                    file.mtime = now;
-                    let same = match file.file {
-                        Watched::Source(id) => source_on_disk(&on_disk)
-                            .is_ok_and(|text| *text == **db.file_text(id).text(&db)),
-                        Watched::Included(ref path) => db.included_is_read(path),
-                    };
-                    if !same {
-                        touched.insert(index);
-                        noticed.get_or_insert((Instant::now(), Duration::ZERO));
-                    }
-                } else if now != file.mtime {
-                    let was = std::mem::replace(&mut file.mtime, now);
-                    // An editor that sent its text writes it after: the same text again.
-                    let built = match file.file {
-                        Watched::Source(id) if was != SystemTime::UNIX_EPOCH => {
-                            !sent.contains_key(&id)
-                                && source_on_disk(&on_disk)
-                                    .is_ok_and(|text| *text == **db.file_text(id).text(&db))
+                let switch = switched.iter().any(|base| file.path.starts_with(base));
+                if !switch && now == file.mtime && !named(&on_disk) {
+                    continue;
+                }
+                let age = if switch { Duration::ZERO } else { now.elapsed().unwrap_or_default() };
+                file.mtime = now;
+                match &file.file {
+                    // What the sources hold already (the text an editor sent before it wrote
+                    // it, the daemon's own write) is no change.
+                    Watched::Source(_) => {
+                        let head = held.head();
+                        let bytes = std::fs::read(&on_disk).ok();
+                        if !held.read_on_disk(&file.path, bytes) {
+                            touched.insert(index);
+                            noticed.get_or_insert((Instant::now(), age));
+                        } else if held.head() != head {
+                            noticed.get_or_insert((Instant::now(), age));
                         }
-                        _ => false,
-                    };
-                    if !built {
-                        touched.insert(index);
-                        noticed.get_or_insert((Instant::now(), now.elapsed().unwrap_or_default()));
+                    }
+                    Watched::Included(path) => {
+                        if !switch || !db.included_is_read(path) {
+                            touched.insert(index);
+                            noticed.get_or_insert((Instant::now(), age));
+                        }
                     }
                 }
             }
             switched.clear();
-            if touched.len() + gone.len() == before || !clients.is_empty() {
+            let quiet = !clients.is_empty() || !notices.wait(SETTLE);
+            if (touched.len() + gone.len(), held.head()) == before || quiet {
                 break;
             }
-            std::thread::sleep(Duration::from_millis(20));
+            changed = notices.take();
+        }
+        // The source files whose text the sources hold otherwise than the last build.
+        let changes = held.changed();
+        if !changes.is_empty() {
+            let at: FxHashMap<&Path, usize> = files
+                .iter()
+                .enumerate()
+                .filter(|(_, it)| matches!(it.file, Watched::Source(_)))
+                .map(|(index, it)| (&*it.path, index))
+                .collect();
+            for (path, bytes) in &changes {
+                let Some(&index) = at.get(&**path) else { continue };
+                if let Some(at) = edited_at.remove(path) {
+                    noticed.get_or_insert((at, Duration::ZERO));
+                }
+                noticed.get_or_insert((Instant::now(), Duration::ZERO));
+                if bytes.is_some() {
+                    touched.insert(index);
+                    gone.remove(&index);
+                } else {
+                    gone.insert(index);
+                    touched.remove(&index);
+                }
+            }
         }
         // Without clients, the first program is built whenever a file changes.
         let building: FxHashSet<usize> = match serving {
@@ -8462,8 +8530,13 @@ fn run_holding(
             let WatchedFile { file, path, .. } = &files[index];
             match file {
                 Watched::Source(id) => {
-                    let text = match sent.remove(id) {
-                        Some((text, _)) => text,
+                    let text = match held.read(path) {
+                        Some(bytes) => {
+                            let text = String::from_utf8(bytes.to_vec())
+                                .with_context(|| format!("{} is not UTF-8", path.display()))?;
+                            let rust = path.extension().is_some_and(|it| it == "rs");
+                            if rust { load_cargo::source_text(text) } else { text }
+                        }
                         None => source_on_disk(&db.on_disk(path))?,
                     };
                     let text = test_harness::kept(&db.file_text(*id).text(&db), text);
@@ -8499,6 +8572,7 @@ fn run_holding(
         if changed != 0 || !background {
             db.apply_change(change);
         }
+        held.built_head();
         // The tests of a crate an edited file is of are listed again after the edit, and those
         // of a program asked for the first time; a root file the edit did not touch is noted
         // as it was before its harness is written.
