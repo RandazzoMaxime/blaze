@@ -78,7 +78,8 @@ def main():
     if os.environ.get("NR_STD") != "build":
         toolchain = f"{L}/tc-{'nightly' if base == 'bun' else 'stable'}"
         shipped = f"{L}/std-remote"
-        subprocess.run(["ra-jit", "std", shipped, toolchain], env=env, check=True)
+        # What the toolchain runs for it is the release's, not the build's: counted apart.
+        subprocess.run(["ra-jit", "std", shipped, toolchain], env=dict(env, NR_LOG=f"{L}/logs/std.log"), check=True)
         env["RA_JIT_STD_FROM"] = shipped
     extra = json.loads(os.environ.get("NR_ENV", "{}"))
     env.update(extra)
