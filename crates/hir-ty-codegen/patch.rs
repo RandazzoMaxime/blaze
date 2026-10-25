@@ -732,8 +732,13 @@ struct Hydrated {
     known: Option<(Instance, StoredParamEnvAndCrate)>,
 }
 
-/// The instances of [`Base::hydrated`] one look found, by their index there.
-type FoundHydrated = FxHashMap<usize, (Instance, StoredParamEnvAndCrate)>;
+/// What one look found of [`Base::hydrated`], by the index there: the instance each is, or
+/// that none is, and whether each is left uncalled.
+#[derive(Default)]
+struct FoundHydrated {
+    instances: FxHashMap<usize, Option<(Instance, StoredParamEnvAndCrate)>>,
+    dropped: FxHashMap<usize, bool>,
+}
 
 /// A root from the store by its index in [`Base::compiled`], another of [`Base::hydrated`],
 /// or what the build compiled.
@@ -1836,8 +1841,8 @@ impl Base {
         asking: &mut Vec<usize>,
     ) -> Option<(Instance, StoredParamEnvAndCrate)> {
         let was = &self.hydrated[i];
-        if let Some(found) = found.get(&i) {
-            return Some(found.clone());
+        if let Some(found) = found.instances.get(&i) {
+            return found.clone();
         }
         // What only the build's own code calls, by nothing a caller says: a vtable's slot.
         if was.callers.is_empty() {
@@ -1862,8 +1867,9 @@ impl Base {
             }
         }
         asking.pop();
-        if let Some(instance) = &instance {
-            found.insert(i, instance.clone());
+        // One not found while a caller is being looked for can be found once that is.
+        if instance.is_some() || asking.is_empty() {
+            found.instances.insert(i, instance.clone());
         }
         instance
     }
@@ -1914,8 +1920,15 @@ impl Base {
         asking: &mut Vec<usize>,
     ) -> bool {
         let was = &self.hydrated[i];
-        if was.callers.is_empty() || asking.contains(&i) {
+        if was.callers.is_empty() {
             return false;
+        }
+        // Code that only calls itself, as a recursive sort does, is left uncalled with it.
+        if asking.contains(&i) {
+            return true;
+        }
+        if let Some(&dropped) = found.dropped.get(&i) {
+            return dropped;
         }
         asking.push(i);
         let dropped = was.callers.iter().all(|caller| match *caller {
@@ -1927,6 +1940,10 @@ impl Base {
             Caller::Root(_) | Caller::Base(_) => true,
         });
         asking.pop();
+        // What took a caller still being looked at as uncalled is known only once that is.
+        if !dropped || asking.is_empty() {
+            found.dropped.insert(i, dropped);
+        }
         dropped
     }
 
