@@ -276,6 +276,12 @@ All notable changes to ra-jit are written here. The format follows
 
 ### Changed
 
+- Proc macros are blaze's by default where its server is beside `ra-jit`: the daemon's
+  loads, `--check` and build scripts expand with libraries ra-jit makes from each crate's
+  record, kept in the store by what they were linked from, so another target directory takes
+  them from there (#90). `RA_JIT_PROC_MACRO_SERVER=0` goes back to rustc's libraries and the
+  toolchain's server. `macroserver.py all` builds each app again over the first store: no
+  library linked again, the same 3,465 calls.
 - `cargo blaze` builds with Rust 1.99.0, the release it compiles, whatever toolchain the
   project names (#269). A project pinned to another release, or on a machine whose default
   is another, no longer has every build go to cargo: cargo, rustc and the daemon run under
