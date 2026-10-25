@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
-"""testselectbench.py: what `RA_JIT_TESTS=affected` saves on real projects. Measures; checks
-nothing.
+"""testselectbench.py: what `RA_JIT_TESTS=affected` saves on real projects. Measures, and fails
+when a build after the daemon first served one went to cargo, which ra-jit is never to do (#84):
+an edit's tests are the daemon's to build.
 
 usage: testselectbench.py [--json FILE] [--keep DIR] [--args ARG,ARG...] [project ...]
-       (RA_JIT_BIN names the ra-jit built; the projects are bench.py's, ripgrep and nushell by
-       default, at their pinned revisions, tested with bench.py's `test` arguments)
+       (RA_JIT_BIN names the ra-jit built; the projects are bench.py's, ripgrep, helix and
+       nushell by default, at their pinned revisions and on harness/toolchain, tested with
+       bench.py's `test` arguments)
 
 Each project is copied to a scratch directory and tested with `cargo ra-jit test` until the
 daemon serves the build. Then, each a row: every test (`RA_JIT_TESTS=all`); the affected
@@ -27,7 +29,7 @@ import tempfile
 import time
 
 import bench
-from cargo_ra_jit import RA_JIT, fetch, timed
+from cargo_ra_jit import RA_JIT, TOOLCHAIN, fetch, timed
 
 TIMEOUT = 7200
 KEEP = None
@@ -116,7 +118,7 @@ def project(name, args):
     shutil.copytree(source, ws, symlinks=True, ignore=shutil.ignore_patterns("target"))
     bin_dir = os.path.dirname(os.path.abspath(RA_JIT))
     env = dict(os.environ, PATH=f"{bin_dir}{os.pathsep}{os.environ['PATH']}", RA_JIT_HOME=home,
-               RUST_BACKTRACE="0", **spec.get("env", {}))
+               RUST_BACKTRACE="0", RUSTUP_TOOLCHAIN=TOOLCHAIN, **spec.get("env", {}))
     for var in ("CARGO_TARGET_DIR", "CARGO_INCREMENTAL", "RUSTFLAGS", "CARGO_ENCODED_RUSTFLAGS", "RA_JIT_TESTS"):
         env.pop(var, None)
     args = args if args is not None else spec.get("test", [])
@@ -164,10 +166,14 @@ def main():
         at = argv.index("--args")
         args, argv = re.split(r"[ ,]+", argv[at + 1].strip()), argv[:at] + argv[at + 2:]
     results = {}
-    for name in argv or ["ripgrep", "nushell"]:
+    for name in argv or ["ripgrep", "helix", "nushell"]:
         results[name] = project(name, args)
     if out:
         json.dump(results, open(out, "w"), indent=1)
+    cargos = [(name, it) for name, rows in results.items() for it in rows if not it["served"]]
+    for name, it in cargos:
+        print(f"NOT SERVED BY THE DAEMON: {name} {it['step']}: {' | '.join(it['fell']) or 'no reason said'}")
+    sys.exit(1 if cargos else 0)
 
 
 if __name__ == "__main__":

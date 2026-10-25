@@ -5226,7 +5226,7 @@ fn refusal(
         };
         return Some(Refused::Cargos(format!(
             "{name} is not compiled by ra-jit, and rustc's copy of it {calls} from before the \
-             edit: {why}"
+             edit: {why} (no-rustc E, #85)"
         )));
     }
     // What the frontend turns down as code that does not compile, rustc would too, unless
@@ -5238,7 +5238,8 @@ fn refusal(
         return Some(Refused::Error(said));
     }
     Some(Refused::Cargos(format!(
-        "{name} is not compiled by ra-jit and rustc's copy is from before the edit: {why}"
+        "{name} is not compiled by ra-jit and rustc's copy is from before the edit: {why} \
+         (no-rustc E, #85)"
     )))
 }
 
