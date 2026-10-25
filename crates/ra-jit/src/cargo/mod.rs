@@ -9,6 +9,8 @@ mod ancestor;
 mod cli;
 mod client;
 mod messages;
+pub(crate) mod metadata;
+pub(crate) mod own_macro;
 pub(crate) mod own_script;
 mod package;
 pub(crate) mod plan;
@@ -67,6 +69,16 @@ pub(crate) fn command(args: impl Iterator<Item = String>) -> anyhow::Result<()> 
         Asked::Stop => stop()?,
         Asked::Enable => switch::enable()?,
         Asked::Disable => switch::disable()?,
+        Asked::Toolchain => match toolchain::settle() {
+            Ok(chosen) => {
+                println!("blaze builds with {chosen}");
+                0
+            }
+            Err(why) => {
+                say::error(&why);
+                FAILED
+            }
+        },
         Asked::Help => {
             println!("{HELP}");
             0
@@ -80,9 +92,9 @@ pub(crate) fn command(args: impl Iterator<Item = String>) -> anyhow::Result<()> 
 }
 
 const HELP: &str = "\
-cargo blaze: cargo's build, run, test and check, from a daemon that keeps the workspace compiled
+blaze: cargo's build, run, test and check, from a daemon that keeps the workspace compiled
 
-usage: cargo blaze <command> [cargo's flags]
+usage: blaze <command> [cargo's flags]    (or cargo blaze <command>)
 
   build, run, test   by the daemon when it has the workspace loaded, by cargo otherwise
   check              what the daemon's build of the same flags says, when it has one loaded;
@@ -90,6 +102,7 @@ usage: cargo blaze <command> [cargo's flags]
   status             whether blaze is enabled, what the daemon has loaded, what fell back
   stop               ends the daemon; the next build starts one
   enable, disable    plain `cargo build|run|test|check` through blaze, and back
+  toolchain          which Rust blaze builds with, downloaded once if it has none
   cache              what the `#[ra_jit::cache]` functions kept, by function
   cache clear        forgets it; `--stale`, all but what each function's code computed
 
@@ -190,11 +203,7 @@ fn fn_cache_dir() -> anyhow::Result<std::path::PathBuf> {
     Ok(match std::env::var_os("RA_JIT_FN_CACHE_DIR") {
         Some(dir) => std::path::PathBuf::from(dir),
         None => {
-            let metadata = cargo_metadata::MetadataCommand::new()
-                .cargo_path(state::cargo_path())
-                .no_deps()
-                .exec()
-                .context("running `cargo metadata`")?;
+            let metadata = metadata::no_deps(None, &[]);
             metadata.target_directory.as_std_path().join("ra-jit").join("fn-cache")
         }
     })
@@ -267,9 +276,27 @@ fn build(asked: &Invocation) -> anyhow::Result<i32> {
                     if let Some(why) = why {
                         say::cargo_builds(&why, "building with cargo", say::COLD);
                     }
-                    match by_cargo(asked, &cwd, &key, Counts::default(), ahead)? {
+                    let state = match by_cargo(asked, &cwd, &key, Counts::default(), ahead)? {
                         Ok(state) => state,
                         Err(code) => return Ok(code),
+                    };
+                    match after_cargo(asked, state) {
+                        Ok((state, settled)) => {
+                            finished(&state);
+                            served = true;
+                            held = Some(settled);
+                            state
+                        }
+                        Err(NotServed::Error(_, written)) => {
+                            eprintln!("{written}");
+                            return Ok(FAILED);
+                        }
+                        Err(NotServed::Cargo(ToCargo(state, reason))) => {
+                            say::cargo_builds(&reason, "this build is cargo's", say::COLD);
+                            let mut state = *state;
+                            state.count_cargo(&reason);
+                            state
+                        }
                     }
                 }
             }
@@ -315,7 +342,7 @@ fn check(asked: &Invocation) -> anyhow::Result<i32> {
         messages::passed(format);
     };
     let turned_down = |said: &[crate::errors::Said]| -> anyhow::Result<i32> {
-        messages::turned_down(format, said, &state::metadata(asked)?);
+        messages::turned_down(format, said, &state::metadata(asked));
         toolchain::note_failed();
         Ok(FAILED)
     };
@@ -448,6 +475,16 @@ fn first_by_daemon(
     state.keep_daemons().map_err(|why| format!("{why:#}"))?;
     state.counts.served += 1;
     Ok((state, held))
+}
+
+/// The first build of a workspace, once cargo has built all of it: the daemon, which loaded
+/// the workspace while cargo built, builds the programs from what cargo built, and they are
+/// the build's, as they are of every build after it.
+fn after_cargo(asked: &Invocation, state: State) -> Result<(State, Held), NotServed> {
+    if state.refusal.is_none() && state.checkouts.iter().any(|it| !it.programs.is_empty()) {
+        say::status(asked.flags.quiet, "Waiting", "for blaze to load the workspace");
+    }
+    by_daemon(state)
 }
 
 /// The variable that has the first build of a workspace be the daemon's too.

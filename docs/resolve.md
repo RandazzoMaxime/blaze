@@ -57,6 +57,11 @@ cargo rejects is rejected with cargo's message. Part of the self-contained blaze
 - A manifest that does not parse or fit the schema is shown as cargo shows it, a snippet with
   the place marked (`blaze_manifest::diagnostic`).
 
+`cargo blaze` reads the workspace with it (`crates/ra-jit/src/cargo/metadata.rs`): every
+command's `cargo metadata --no-deps`, with `--manifest-path` and `--config` as the command was
+given them. A manifest cargo refuses ends the command with cargo's message and status 101. The
+daemon's loads still go through rust-analyzer's project model and cargo's full `cargo metadata`.
+
 Not yet: dependencies resolved (the `resolve` of `cargo metadata`, with the lock file, waits
 for `crates/blaze-resolve`), the unit graph itself (the `profiles` example walks cargo's),
 the unstable profile keys (`trim-paths`, `rustflags`, `codegen-backend`, which need nightly

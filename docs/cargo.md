@@ -44,11 +44,25 @@ rustup's default): it runs cargo, rustc and the daemon under 1.99.0 by naming it
 `RUSTUP_TOOLCHAIN` and `CARGO`. Rust 1.99.0 builds what older releases built, so a project on
 an older stable builds as it is. Code only the project's own toolchain builds (a nightly's
 `#![feature]`, a newer release's library) fails with rustc's error and a note naming both
-releases. 1.99.0 has to be installed with its `rust-src`; the error says the `rustup` command
-when it is not. Plain `cargo` still builds with the project's toolchain, in the same target
+releases. Plain `cargo` still builds with the project's toolchain, in the same target
 directory: cargo keys what it builds by the rustc, so neither rebuilds the other's.
 `BLAZE_OTHER_TOOLCHAIN=1` builds with the project's toolchain instead
 ([support.md](support.md#toolchain)).
+
+Where 1.99.0 comes from, in this order: `RUSTC` naming a rustc of 1.99.0 with its library's
+source; rustup's 1.99.0 with `rust-src`, when rustup has it; else blaze's own copy in
+`~/.blaze/toolchains/1.99.0-<host>` (`BLAZE_HOME` moves `~/.blaze`), laid out as rustup lays
+out a toolchain. blaze downloads its copy the first time it needs it, once, with a line on
+stderr while it does: rustc, cargo, the standard library and its source from the Rust project's
+own servers, 97 MB on macOS, 133 MB on Linux x86-64 and 118 MB on Linux ARM64 (530 MB on macOS
+and 690 MB on Linux x86-64 once unpacked). Each file's sha256 is built into blaze, from Rust 1.99.0's published manifest
+(`harness/toolchain_pins.py` writes them), and a file with other bytes is refused. Concurrent
+builds download it once; a download that stopped goes on from where it stopped the next time.
+Building with blaze's copy, blaze names its cargo, rustc and rustdoc in `CARGO`, `RUSTC` and
+`RUSTDOC` and puts its `bin` first on `PATH`, for the commands it runs and not for your shell.
+`RA_JIT_RUST_DIST` names a mirror of `https://static.rust-lang.org/dist` (or a directory with
+the files), for a machine that cannot reach it. `cargo blaze toolchain` (or `blaze toolchain`)
+says which Rust blaze builds with, downloading its copy first when there is none.
 
 Every setting below named `RA_JIT_<NAME>` can be given as `BLAZE_<NAME>` too; when both are
 set, the `BLAZE_` one wins.
@@ -61,6 +75,10 @@ set, the `BLAZE_` one wins.
     cargo blaze check [cargo's flags]
     cargo blaze status
     cargo blaze stop
+    cargo blaze toolchain
+
+`blaze <command>` is the same as `cargo blaze <command>`, for a machine where blaze brought
+its own Rust and there is no `cargo` on the path.
 
 `build`, `run` and `test` take the flags cargo takes and leave the same files in the same
 places under `target/`. `check` is what the daemon says of the source as it builds the
@@ -87,14 +105,18 @@ The first build of a workspace is cargo's own, run with ra-jit as the
 each crate of the workspace, the arguments, the files rustc wrote and, for a program, the
 line the linker was run with. Diagnostics, progress and the exit status are cargo's.
 
-When that build succeeds, the command tells the daemon to load the workspace and returns
-without waiting. The daemon is started if it is not running. It loads the workspace with what
-cargo said of the build scripts it ran and the proc macros it built, kept in
+The daemon is started before cargo, if it is not running, and loads the workspace while cargo
+builds, with what cargo says of the build scripts it runs and the proc macros it builds, kept in
 `target/ra-jit/<build>/scripts`: none of them is built or run again for it, in
-`target/rust-analyzer` or anywhere else. Until the workspace is loaded,
-builds are cargo's, and each one says so:
+`target/rust-analyzer` or anywhere else. When cargo's build succeeds, the command waits for the
+daemon to have the workspace loaded and to build the programs from it, and those are the build's,
+as they are of every build after it:
 
-    ra-jit: bug: the daemon is still loading the workspace (951ms so far); building with cargo, which ra-jit is never to do (no-rustc M, #93, and #84)
+         Waiting for blaze to load the workspace
+        Finished `dev` profile [ra-jit] target(s) in 41.20s
+
+A program the daemon does not build then stays cargo's, and the build says why. A build asked
+for while the daemon is still loading, as after it was stopped, waits for it the same way.
 
 Once the daemon is ready, a build after an edit does not start cargo at all. The daemon
 compiles the functions that changed and either splices them into the executable or links
@@ -245,7 +267,6 @@ A whole invocation goes to cargo when any of these hold (`Invocation::only_cargo
 
 A single build goes to cargo when:
 
-- the daemon is still loading the workspace;
 - a manifest, `Cargo.lock`, a cargo configuration file, or something a
   build script reads has changed since cargo last built (a source a build script makes newer
   before cargo runs rustc on it, as biome's do, has not). Cargo builds, and the daemon loads

@@ -250,7 +250,7 @@ Paths are under `crates/`; line numbers are of 41e7906192.
 | `ra-jit/src/plan.rs:475` | `cargo build --unit-graph`, which asks rustc about the target | every load, and every doctest run per library |
 | `ra-jit/src/main.rs:2314`, `ra-jit/src/inputs.rs:282` `run_build_scripts` | rust-analyzer's `cargo check --compile-time-deps`: rustc compiles every build script and proc macro and their dependencies, and the scripts run | a load that is neither beside nor after a cargo build of the workspace (a worker after one reads what cargo said, `cargo/state.rs` `kept_said`), whose target directory does not have them yet; after an edit to a proc macro or build script |
 | `ra-jit/src/main.rs:5287`, `ra-jit/src/borrowck.rs:113` `ProcMacroServerChoice::Sysroot` | expands with the toolchain's `rust-analyzer-proc-macro-srv` loading rustc's proc-macro libraries | every load that has a proc macro |
-| `ra-jit/src/cargo/state.rs:948` `metadata`, `:1013` `other_toolchain`, `ra-jit/src/cargo/mod.rs:122` | `cargo metadata --no-deps` (no rustc), `rustc --version`, `--print=sysroot` | every client command |
+| `ra-jit/src/cargo/state.rs` `other_toolchain` | `rustc --version`, `--print=sysroot` | every client command; its `cargo metadata --no-deps` is blaze-manifest's reading since 2026-10-25 ([resolve.md](resolve.md)) |
 
 **Tests, doctests, check, assembly** (steps C, H, L, D)
 
@@ -969,8 +969,43 @@ Where J stands (2026-10-24):
   function-like macros equal (on dev-aws-11: the server linked in 10.6 s, each library in
   11-14 s). A proc-macro crate has no entry point: rust-analyzer took tokio's
   `#[proc_macro_attribute] pub fn main` for one.
-- Next: ra-jit's server and libraries where every crate that expands with them is ra-jit's,
-  in place of a rustc build of the macro crates.
+- In a load (2026-10-25, the `blaze-j1` lane, behind `RA_JIT_PROC_MACRO_SERVER`, which names
+  the server): rust-analyzer's `cargo check --compile-time-deps` into ra-jit's own target
+  directory (`--own-target`) asks the wrapper for each proc macro, and ra-jit links it there
+  (`crates/ra-jit/src/cargo/own_macro.rs`), as `own_script.rs` does a build script, with the
+  dep-info cargo reads; the load expands what ra-jit listed with that server
+  (`load_cargo::listed`), and a build script that links one is expanded with it (J0). A
+  library ra-jit links names libc, as rustc's does. A crate rustc compiles there that links
+  one (a proc macro that uses another, as `serde_with_macros` uses `darling_macro`, or a
+  build script's dependency) has rustc compile the proc macro again over ra-jit's, as rustc
+  loads only its own; ra-jit's is kept beside its record. `macroserver.py all` builds fd,
+  bat, hyperfine, just, nushell and helix whole that way and again with rustc's proc macros
+  and the toolchain's server, each from an empty store, and expands every call with both
+  (on dev-aws-8): 3,465 calls (3,192 derives, 149 attributes, 124 function-like), all the
+  same, and the programs print the same. Left: `pest_consume_macros` (nushell, 12 calls),
+  which ra-jit cannot compile
+  ([#327](https://github.com/indexable-inc/blaze/issues/327)).
+- Shipped (2026-10-25): on Linux the release workflow's ra-jit builds the server
+  (`build_release.py --server`, `--exe` with `proc_macro` compiled into it) into the archive
+  as `blaze-proc-macro-srv`, beside `ra-jit`, which `RA_JIT_PROC_MACRO_SERVER=1` names. The
+  load gives its cargo the server it found, or takes the variable away when none is there
+  (and says so), so the wrapper links a proc macro only for a server there is. The
+  toolchain's server is started only when a library is not ra-jit's: a load of fd starts
+  none.
+- The default (2026-10-25): with the server beside `ra-jit`, every load uses it with no
+  variable (`RA_JIT_PROC_MACRO_SERVER=0` turns it off). A load whose proc macros cargo built
+  with rustc, the daemon's from cargo's messages, the checker's and a build script's (J0),
+  has ra-jit make each library from the crate's record (`ra-jit proc-macro-library`, four at
+  once) and expands with that; one ra-jit cannot make is said and left to rustc's library
+  and the toolchain's server. A library is kept in the store by the description of what it
+  was linked from and the digests of the files its dep-info names, so a second target
+  directory takes it from there. `macroserver.py all` builds each app a third time, into an
+  empty target directory over the first build's store, and fails if a library is linked
+  again: 3,465 calls the same on all three, every library from the store the third time
+  (hyperfine 35.1 s to 9.5 s, nushell 123.0 s to 79.3 s). On fd, the daemon's load started
+  blaze's server and no other, and made `clap_derive` in 19 s from an empty store, then took
+  it from the store when it was deleted. Left: #327, and the key names the target
+  directory's paths, so another checkout of the same crates links again.
 
 J, K and M are planned together in [self-contained.md](self-contained.md#j-k-and-m), since
 what they remove is most of the toolchain blaze still keeps: rustc and the sysroot's rlibs (116
@@ -1210,7 +1245,15 @@ paid once, by the release, instead of on a user's machine (`crates/ra-jit/src/sh
 - `ra-jit std REMOTE TOOLCHAIN` builds a script that does nothing over TOOLCHAIN (a sysroot)
   into a store of its own, running no rustc, and pushes that store to REMOTE as the project `std-<target>-<build>`, where `<build>` is what the store keys
   by: the ra-jit binary's bytes and the toolchain's commit and compiler name. Only that binary
-  with that toolchain can use it, and every key in it says so.
+  with that toolchain can use it, and every key in it says so. It then builds a program that
+  prints a line, whole, with the `dev` and the `release` profile: a program keys the unit by the
+  debug info its profile asks for, line tables for `dev` where a script asks for none, so
+  without it every whole build of a dev program compiled the library again (about 10 s, step K).
+  The `release` program takes the script's unit. It then builds a program that
+  prints a line, whole, with the `dev` and the `release` profile: a program keys the unit by the
+  debug info its profile asks for, line tables for `dev` where a script asks for none, so
+  without it every whole build of a dev program compiled the library again (about 10 s, step K).
+  The `release` program takes the script's unit.
 - The release workflow runs it with each target's archived binary and the pinned 1.99.0, and
   attaches the remote's files to the release with `.` for `/` (`manifests.std-…`, `packs.….pack.zst`,
   `keys.…`). A remote can be a plain `https://` address now (`remote/https.rs`): read-only,
