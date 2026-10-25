@@ -263,6 +263,17 @@ All notable changes to ra-jit are written here. The format follows
 
 ### Changed
 
+- `cargo blaze` builds with Rust 1.99.0, the release it compiles, whatever toolchain the
+  project names (#269). A project pinned to another release, or on a machine whose default
+  is another, no longer has every build go to cargo: cargo, rustc and the daemon run under
+  1.99.0 (`RUSTUP_TOOLCHAIN` and `CARGO` name it), and plain `cargo` keeps the project's
+  toolchain in the same target directory, which cargo keys by the rustc. Code that only the
+  project's own toolchain builds (a nightly's `#![feature]`, a newer release's library) fails
+  with rustc's error and a note naming both releases. Without 1.99.0 or its `rust-src`, the
+  build fails saying the `rustup` command that installs it, where it went to cargo. A
+  changed toolchain file no longer sends the next build to cargo. `BLAZE_OTHER_TOOLCHAIN=1`
+  still builds with the project's toolchain. `cargo_ra_jit.py` builds and edits projects
+  pinned to an older stable and to a nightly, through toolchains whose rustc compiles nothing.
 - ra-jit is now **blaze**. The command is `cargo blaze` (`cargo blaze build`, `test`, `run`,
   `check`, `status`, `stop`); `cargo ra-jit` keeps working and, on a terminal, says once per run
   that it was renamed. The crate on crates.io is `cargo-blaze` (`cargo install cargo-blaze`),

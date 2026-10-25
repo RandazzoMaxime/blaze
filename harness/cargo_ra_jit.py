@@ -858,7 +858,59 @@ def daemon(work):
     abuse(work, ws, tree, env, check, status, alive)
     in_place(work, check)
     through_link(work, check)
+    pinned(work, check)
     return checks
+
+
+def fake_toolchain(dir, version):
+    """A toolchain a project's rust-toolchain file names by its path, whose rustc says it is
+    `version` and compiles nothing, so that a build with it fails. Its cargo is the real one,
+    copied: cargo names itself to what it runs by where it is."""
+    os.makedirs(os.path.join(dir, "bin"))
+    cargo = subprocess.run(["rustup", "which", "--toolchain", TOOLCHAIN, "cargo"], capture_output=True, text=True, check=True).stdout.strip()
+    shutil.copy(cargo, os.path.join(dir, "bin", "cargo"))
+    rustc = os.path.join(dir, "bin", "rustc")
+    with open(rustc, "w") as script:
+        script.write(f'#!/bin/sh\ncase "$1" in --version|-V) echo "rustc {version} (0000000 2026-01-01)"; exit 0;; esac\n'
+                     'echo "error: the toolchain the project pins was asked to compile: $*" >&2\nexit 1\n')
+    os.chmod(rustc, 0o755)
+
+
+def pinned(work, check):
+    """Projects whose rust-toolchain file names another toolchain than blaze's release (#269):
+    an older stable and a nightly. `cargo ra-jit` builds them with its own release, and their
+    edits are the daemon's; a nightly's `#![feature]` fails with rustc's error and a note
+    naming both releases, and no build is cargo's."""
+    if WINDOWS or not shutil.which("rustup"):
+        return
+    env = base_env(os.path.join(work, "home-pinned"))
+    # rustup takes the variable over the project's file.
+    env.pop("RUSTUP_TOOLCHAIN")
+
+    def project(name, version, main):
+        ws = os.path.join(work, f"pinned-{name}")
+        fake_toolchain(os.path.join(ws, "toolchain"), version)
+        os.makedirs(os.path.join(ws, "src"))
+        open(os.path.join(ws, "Cargo.toml"), "w").write(f'[package]\nname = "{name}"\nversion = "0.1.0"\nedition = "2021"\n')
+        open(os.path.join(ws, "rust-toolchain.toml"), "w").write(f'[toolchain]\npath = "{os.path.join(ws, "toolchain")}"\n')
+        open(os.path.join(ws, "src/main.rs"), "w").write(main)
+        return Side(ws, env, True)
+
+    plain = 'fn main() {\n    println!("pinned {}", 6 * 7);\n}\n'
+    for label, name, version in (("an older stable", "older", "1.98.1"), ("a nightly", "nightly", "1.101.0-nightly")):
+        side = project(name, version, plain)
+        _, cold = side.cargo("run")
+        check(f"a project pinned to {label} ({version}) builds with blaze's release", cold.returncode == 0 and "pinned 42" in cold.stdout, f"exit {cold.returncode}, {cold.stderr.strip()[-300:]!r}")
+        wait_warm(side, side.ws)
+        rewrite(os.path.join(side.ws, "src/main.rs"), "6 * 7", "6 * 8")
+        _, edited = side.cargo("run")
+        how = how_built(edited.stderr)
+        check("and its edit is the daemon's", edited.returncode == 0 and how == "daemon" and "pinned 48" in edited.stdout, f"{how[:90]}; {edited.stderr.strip()[-300:]!r}")
+    side = project("featured", "1.101.0-nightly", "#![feature(never_type)]\nfn main() {\n    let _: Option<!> = None;\n}\n")
+    _, featured = side.cargo("build")
+    said = "E0554" in featured.stderr and "in place of 1.101.0-nightly, which the project's rust-toolchain file names" in featured.stderr
+    check("a nightly's `#![feature]` fails with rustc's error and a note naming both releases, and no cargo", featured.returncode == 101 and said and "building with cargo" not in featured.stderr, f"exit {featured.returncode}, {featured.stderr.strip()[-400:]!r}")
+    side.cargo("stop")
 
 
 THROUGH_LINK = {

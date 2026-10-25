@@ -31,12 +31,6 @@ use super::{
     wrapper,
 };
 
-/// The toolchain whose layouts and symbol names this ra-jit has: `harness/toolchain`.
-const TOOLCHAIN: &str = include_str!("../../../../harness/toolchain");
-
-/// The names rustup reads the toolchain of a directory from.
-const TOOLCHAIN_FILES: [&str; 2] = ["rust-toolchain.toml", "rust-toolchain"];
-
 /// The state of one build of a checkout: one command with one set of flags.
 #[derive(Serialize, Deserialize)]
 pub(crate) struct State {
@@ -551,6 +545,9 @@ impl Built {
         drop(tell);
         let _ = telling.join();
         let status = cargo.wait()?;
+        if !status.success() {
+            super::toolchain::note_failed();
+        }
         Ok(if status.success() { Ok(built) } else { Err(status.code().unwrap_or(101)) })
     }
 }
@@ -693,7 +690,11 @@ impl State {
         if !notes.is_empty() {
             notes.push('\n');
         }
-        format!("{said}\n\n{notes}error: could not compile `{package}` ({target}) due to {errors}")
+        let toolchain =
+            super::toolchain::failed_note().map_or(String::new(), |it| format!("\nnote: {it}"));
+        format!(
+            "{said}\n\n{notes}error: could not compile `{package}` ({target}) due to {errors}{toolchain}"
+        )
     }
 
     /// Counts a build that went to cargo.
@@ -1133,7 +1134,7 @@ pub(crate) fn cargo_path() -> PathBuf {
 /// The rustc cargo builds with: the one it is told, else the one beside the cargo that ran
 /// this command, which is the toolchain's and not the rustup proxy on the path that would
 /// pick it again.
-fn rustc_path() -> OsString {
+pub(super) fn rustc_path() -> OsString {
     if let Some(rustc) = std::env::var_os("RUSTC") {
         return rustc;
     }
@@ -1202,7 +1203,8 @@ fn project(asked: &Invocation, cwd: &Path, metadata: &Metadata) -> Result<PathBu
 
 /// Why the toolchain cargo builds with is not one ra-jit compiles for, when it is not: it
 /// is another release than the one ra-jit has the layouts of, or the source of its standard
-/// library, which the daemon compiles from, is not installed.
+/// library, which the daemon compiles from, is not installed. `cargo blaze` has made it
+/// blaze's (`toolchain::settle`); plain cargo after `blaze enable` builds with the project's.
 ///
 /// `RA_JIT_OTHER_TOOLCHAIN=1` takes another release anyway, for a project pinned to a
 /// toolchain near ours (a nightly of the next release): the layouts, symbol names, ABI and
@@ -1215,11 +1217,11 @@ fn other_toolchain() -> Option<String> {
     };
     let version = said("--version")?;
     let version = version.split_whitespace().nth(1).unwrap_or_default();
-    let ours = TOOLCHAIN.trim();
+    let ours = super::toolchain::OURS.trim();
     if version != ours && !other_toolchain_allowed() {
         return Some(format!(
-            "rustc {version} is not the {ours} blaze compiles for; `rustup override set {ours}` \
-             in the project switches it (BLAZE_OTHER_TOOLCHAIN=1 builds with {version} anyway)"
+            "rustc {version} is not the {ours} blaze compiles, and plain cargo builds with the \
+             project's toolchain; `cargo blaze` builds with {ours}"
         ));
     }
     let library = Path::new(&said("--print=sysroot")?).join("lib/rustlib/src/rust/library");
@@ -1230,7 +1232,7 @@ fn other_toolchain() -> Option<String> {
     })
 }
 
-fn other_toolchain_allowed() -> bool {
+pub(super) fn other_toolchain_allowed() -> bool {
     std::env::var_os("RA_JIT_OTHER_TOOLCHAIN").is_some_and(|it| it == "1")
 }
 
@@ -1396,7 +1398,6 @@ fn guards(
             "cargo's configuration",
             named_above(cwd, &switch::CONFIGS).chain(switch::home_configs()),
         ),
-        Guard::files("the toolchain file", named_above(cwd, &TOOLCHAIN_FILES)),
     ];
     let in_build = runs_in_build(used);
     // What a build script wrote to its `OUT_DIR` it wrote while cargo built, after the build

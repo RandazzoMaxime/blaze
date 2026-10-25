@@ -18,6 +18,7 @@ pub(crate) mod say;
 pub(crate) mod script;
 mod state;
 pub(crate) mod switch;
+mod toolchain;
 mod units;
 
 use std::{collections::BTreeMap, path::Path, process::Command, time::Instant};
@@ -41,6 +42,12 @@ pub(crate) fn command(args: impl Iterator<Item = String>) -> anyhow::Result<()> 
     let asked = Asked::parse(args);
     if !matches!(asked, Asked::Build(_) | Asked::Cargo(_)) {
         crate::end_with_reader();
+    }
+    if let Asked::Build(_) = asked
+        && let Err(why) = toolchain::settle()
+    {
+        say::error(&why);
+        std::process::exit(FAILED);
     }
     let code = match asked {
         Asked::Build(asked) => match asked.only_cargo() {
@@ -308,6 +315,7 @@ fn check(asked: &Invocation) -> anyhow::Result<i32> {
     };
     let turned_down = |said: &[crate::errors::Said]| -> anyhow::Result<i32> {
         messages::turned_down(format, said, &state::metadata(asked)?);
+        toolchain::note_failed();
         Ok(FAILED)
     };
     if let Ok(state) = State::read(&asked.key(&cwd))
