@@ -89,9 +89,9 @@ pub(crate) struct Plan {
     /// Whether the program's own crate is compiled with `cfg(test)` and is not a test target:
     /// the unit tests of a library or a binary.
     pub(crate) unit_test: bool,
-    /// Source rustc compiled into the program that ra-jit does not: a change to one of these
-    /// is cargo's to build.
-    pub(crate) left_to_rustc: Vec<PathBuf>,
+    /// The source of the libraries of the workspace a unit test is linked with as rustc built
+    /// them, without `cfg(test)`: a change to their tests alone leaves rustc's copy as it is.
+    pub(crate) linked_as_built: Vec<PathBuf>,
     /// The copies of rustc's output the plan names, which have to stay.
     pub(crate) copies: Vec<PathBuf>,
     /// The package rustc wrote of what a debugger reads of the program it linked, when the
@@ -142,7 +142,7 @@ impl Plan {
             link_cmd: String::new(),
             symbol_files: Vec::new(),
             unit_test,
-            left_to_rustc: Vec::new(),
+            linked_as_built: Vec::new(),
             copies: Vec::new(),
             package: (unit.codegen("split-debuginfo") == Some("packed"))
                 .then(|| link.output().map(|it| package::beside(Path::new(it))))
@@ -173,12 +173,11 @@ impl Plan {
                 continue;
             }
             patched_as_built &= calls_by_symbol(owner);
-            // With `cfg(test)` the daemon has it on every crate of the workspace, and rustc
-            // built the libraries of a unit test without it.
-            if unit_test {
-                plan.left_to_rustc.extend(owner.inputs().files);
-            } else {
-                plan.crates.push(owner.source.clone());
+            // The libraries of a unit test are rustc's until an edit reaches one, which the
+            // daemon then takes over, built as rustc built it, without `cfg(test)`.
+            match unit_test {
+                true => plan.linked_as_built.extend(owner.inputs().files),
+                false => plan.crates.push(owner.source.clone()),
             }
         }
         plan.symbol_files = link.rustc_files();
@@ -919,7 +918,7 @@ mod tests {
             link_cmd: String::new(),
             symbol_files: Vec::new(),
             unit_test: false,
-            left_to_rustc: Vec::new(),
+            linked_as_built: Vec::new(),
             copies: Vec::new(),
             stamp: 0,
             package: None,
@@ -968,7 +967,7 @@ mod tests {
             link_cmd: String::new(),
             symbol_files: Vec::new(),
             unit_test: false,
-            left_to_rustc: Vec::new(),
+            linked_as_built: Vec::new(),
             copies: Vec::new(),
             package: None,
             stamp: 0,

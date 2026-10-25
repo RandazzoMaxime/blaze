@@ -205,7 +205,6 @@ A single build goes to cargo when:
   that keeps rustc's test harness: one with a `#[bench]`, or an `#[ignore]` whose message is
   not a string. Elsewhere ra-jit writes the harness itself and the edit is a build like
   another ([no-rustc.md](no-rustc.md), step H);
-- a library changed that unit tests are linked against as rustc built it;
 - rust-analyzer finds an error in the source. The daemon refuses it, cargo runs, and you get
   rustc's diagnostics and cargo's exit status. This costs 0.1 to 0.5 s over cargo alone.
   Errors rust-analyzer does not find are not caught here; see "Known problems";

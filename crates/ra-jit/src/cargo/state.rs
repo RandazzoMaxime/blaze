@@ -150,16 +150,13 @@ enum Guard {
         what: String,
         files: Vec<(PathBuf, bool)>,
     },
-    /// Files that are to be as they were when cargo built but for their tests: what rustc
-    /// built of them without `cfg(test)` holds while the rest is, every token where it was.
-    /// Each is there or not, and when it was there, when it was written and its
-    /// [`without_tests`].
-    /// `cargo` is cargo's dep-info of what rustc built from them, made newer than a file only
-    /// its tests changed in, so cargo doesn't build it again either.
+    /// The files of the libraries a unit test is linked with as rustc built them, without
+    /// `cfg(test)`, each there or not, and when it was there, when it was written and its
+    /// [`without_tests`]. Never why a build is cargo's: an edit to one is the daemon's. One in
+    /// which only the tests changed leaves what rustc built of it as it is, so `cargo` (cargo's
+    /// dep-info of that) is made newer than the file, and cargo does not build it again.
     BesideTests {
-        what: String,
         files: Vec<(PathBuf, Option<(u128, String)>)>,
-        #[serde(default)]
         cargo: Vec<PathBuf>,
     },
     /// Files as rustc read them: there or not, and each not written since cargo last ran
@@ -229,27 +226,22 @@ impl Guard {
                     })?;
                 Some(format!("{what} {} changed", changed.0.display()))
             }
-            Guard::BesideTests { what, files, cargo } => {
+            Guard::BesideTests { files, cargo } => {
                 let mut tests_only = None;
-                let changed = files.iter().find(|(file, was)| {
-                    let written = written_at(file);
-                    match (written, was) {
-                        (None, None) => false,
-                        (Some(_), None) | (None, Some(_)) => true,
-                        // Written while cargo built or after: what it was then is not known.
-                        (Some(_), Some((then, _))) if *then > built_at => true,
-                        (Some(now), Some(_)) if now <= built_at => false,
-                        (Some(now), Some((_, print))) => {
-                            tests_only = tests_only.max(Some(now));
-                            without_tests(file).as_ref() != Some(print)
+                for (file, was) in files.iter() {
+                    match (written_at(file), was) {
+                        (Some(now), Some((then, print))) if *then <= built_at && now > built_at => {
+                            match without_tests(file).as_ref() == Some(print) {
+                                true => tests_only = tests_only.max(Some(now)),
+                                false => return None,
+                            }
                         }
+                        (None, None) => {}
+                        (Some(now), Some(_)) if now <= built_at => {}
+                        _ => return None,
                     }
-                });
-                if let Some((file, _)) = changed {
-                    return Some(format!("{what} {} changed", file.display()));
                 }
-                let stale = cargo.iter().filter(|it| written_at(it) < tests_only);
-                for file in stale {
+                for file in cargo.iter().filter(|it| written_at(it) < tests_only) {
                     let file = std::fs::File::options().write(true).open(file);
                     _ = file.and_then(|it| it.set_modified(std::time::SystemTime::now()));
                 }
@@ -275,12 +267,12 @@ impl Guard {
         Guard::Files { what: what.to_owned(), files: files.collect() }
     }
 
-    fn beside_tests(what: &str, files: Vec<PathBuf>, cargo: Vec<PathBuf>) -> Guard {
+    fn beside_tests(files: Vec<PathBuf>, cargo: Vec<PathBuf>) -> Guard {
         let files = files.into_iter().map(|it| {
             let was = written_at(&it).zip(without_tests(&it));
             (it, was)
         });
-        Guard::BesideTests { what: what.to_owned(), files: files.collect(), cargo }
+        Guard::BesideTests { files: files.collect(), cargo }
     }
 }
 
@@ -1438,15 +1430,14 @@ fn guards(
         let package = metadata.packages.iter().find(|it| it.id == script.package_id);
         guards.extend(package.map(|it| rerun_guards(it, script)).into_iter().flatten());
     }
-    let left = checkouts.iter().flat_map(|it| &it.programs).flat_map(|it| it.left_to_rustc.clone());
-    let mut left: Vec<PathBuf> = left.collect();
-    left.sort();
-    left.dedup();
+    let linked = checkouts.iter().flat_map(|it| &it.programs);
+    let mut linked: Vec<PathBuf> = linked.flat_map(|it| it.linked_as_built.clone()).collect();
+    linked.sort();
+    linked.dedup();
     let built = used.iter().filter(|it| !it.is_test());
-    let built = built.filter(|it| it.inputs().files.iter().any(|file| left.contains(file)));
+    let built = built.filter(|it| it.inputs().files.iter().any(|file| linked.contains(file)));
     let cargo = built.flat_map(Record::cargo_dep_info).collect();
-    let what = "a library its unit tests are linked with as rustc built it:";
-    guards.push(Guard::beside_tests(what, left, cargo));
+    guards.push(Guard::beside_tests(linked, cargo));
     guards
 }
 
