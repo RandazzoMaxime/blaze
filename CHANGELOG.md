@@ -422,11 +422,11 @@ All notable changes to ra-jit are written here. The format follows
   place apart from it. An edit above a closure renamed it and every instance generic over
   it, and a patch compiled again each of those that came from the store: the first edit
   after warmstart.py's restart of ripgrep patches 19 functions where it patched 176 (nushell
-  17 where 66), and takes 0.26 s
-  where it took 0.29 s (nushell 0.51 to 0.54 s where 0.58 to 0.61 s). A patch says how many
-  instances it compiled that the base had no code for. `storetracked.py` holds the edits of a
-  generic function's body and of a line above a closure to none, and has a closure added above
-  another, which took that one's name and was called with its code until the hash, rename it.
+  17 where 66), and takes 0.26 s where it took 0.28 to 0.29 s (nushell 0.54 to 0.56 s where
+  0.57 to 0.58 s). A patch says how many instances it compiled that the base had no code
+  for. `storetracked.py` holds the edits of a generic function's body and of a line above a
+  closure to none, and has a closure added above another, which took that one's name and was
+  called with its code until the hash, rename it.
 - A function whose code calls rustc's copy of a function of the checkout is kept in the
   store, and so is what calls it (#216). Such a copy is of a small function that is not
   generic, which rustc compiled into the crate that calls it, as ripgrep's `Match::start`

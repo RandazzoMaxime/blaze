@@ -281,18 +281,30 @@ interleaved, two rounds each:
   its place among the closures of its body (`ClosureKey` in `hir-ty/src/db.rs`), which the
   added statement leaves, so the instances the base compiled are the patch's (**read**).
 
-## Closures named by their place (2026-10-25)
+## Closures named by their place and their source (2026-10-25)
 
 The stable name of a closure is now its place among the closures of its body, as it is
-interned. Before is `store-copies`, after is `closure-names`; dev-aws-5, warmstart.py, the two
-interleaved:
+interned (`ClosureKey::nth`), and the first 8 bytes of the SHA-256 of its source text, where it
+was the index of its expression. Before is `store-copies`, after is `closure-names`; dev-aws-5,
+warmstart.py, the two interleaved on a quiet host (a second round ran under another lane's
+load of 97 and is left out):
 
 | | before | after |
 |---|---|---|
-| ripgrep first edit after the restart | 0.29 s, 176 functions patched | 0.26 s, 19 |
-| nushell first edit after the restart | 0.58, 0.61 s, 66 functions patched | 0.51, 0.54 s, 17 |
-| ripgrep / nushell `restart` build | 4.31 / 20.02 s | 4.34 / 19.91 s |
+| ripgrep first edit after the restart | 0.29, 0.29 s, 176 functions patched | 0.26, 0.26 s, 19 |
+| nushell first edit after the restart | 0.57, 0.58 s, 66 functions patched | 0.54, 0.56 s, 17 |
+| ripgrep / nushell `restart` build | 4.33 / 20.40 s | 4.41 / 19.81 s |
 
+- The place alone is not enough (**read**, storetracked.py's step "a closure above a
+  closure"). A closure's instance name prints the arguments of its parent and not its
+  signature or what it captures, so a closure added above another took the other's name. The
+  patch found base code for that name and called it with what the new closure takes: the
+  program printed nothing. The hash of the source names the two apart; that step now compiles
+  11 instances the base has no code for, where the steps that edit a generic function's body
+  or a line above a closure compile none.
+- The hash is of the closure's text alone, so it moves with neither the file's path nor the
+  lines around it, which keeps it content-only as the store's keys are (#226), and it is the
+  kind of key item content hashes (#344) would give a closure.
 - What is left of the edit is the look for what it made stale: 166 ms on ripgrep ("check" in
   the timeline), where main took 21 ms. Each function from the store in the edited file, and
   what calls it, is compiled again to compare its mark with the store's: 382 functions on
