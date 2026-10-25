@@ -393,7 +393,7 @@ fn outlines(db: &RootDatabase, listed: &Listed, files: &[FileId]) -> Vec<Option<
             }
             return None;
         };
-        outline(db, file, functions)
+        outline(db, listed, file, functions)
     };
     if let ([file], [functions]) = (files, &functions[..]) {
         // One file, the usual edit: hashed here rather than on a thread of its own.
@@ -430,7 +430,7 @@ fn outlines(db: &RootDatabase, listed: &Listed, files: &[FileId]) -> Vec<Option<
                                     }
                                     return (at, None);
                                 };
-                                (at, outline(&db, file, functions))
+                                (at, outline(&db, listed, file, functions))
                             })
                             .collect::<Vec<_>>()
                     })
@@ -504,7 +504,12 @@ fn types(db: &RootDatabase, file: FileId) -> FxHashMap<String, u64> {
 
 /// A hash of everything in the file but the bodies nothing else sees into, or `None` when
 /// the file is not read as a file of its own. `functions` are those written in it.
-fn outline(db: &RootDatabase, file: FileId, functions: &[FunctionId]) -> Option<Outline> {
+fn outline(
+    db: &RootDatabase,
+    listed: &Listed,
+    file: FileId,
+    functions: &[FunctionId],
+) -> Option<Outline> {
     let Some(seen) = Written::of(db, functions) else {
         if std::env::var_os("RA_JIT_STATS").is_some() {
             eprintln!("outline: {file:?} is included in another file");
@@ -515,7 +520,7 @@ fn outline(db: &RootDatabase, file: FileId, functions: &[FunctionId]) -> Option<
     let edition =
         relevant_crates(db, file).first().map_or(Edition::CURRENT, |it| it.data(db).edition);
     let tree = EditionedFileId::new(db, file, edition).parse(db).syntax_node();
-    let off = Off::of(db, file);
+    let off = Off::of(db, listed, file);
     let (hash, found, signatures) =
         hash_outside(&tree, &seen.declaring, &FxHashSet::default(), &off, true);
     // Each of them has to be one of the bodies that were kept in.
@@ -538,7 +543,8 @@ fn outline_without(
     let edition =
         relevant_crates(db, file).first().map_or(Edition::CURRENT, |it| it.data(db).edition);
     let tree = EditionedFileId::new(db, file, edition).parse(db).syntax_node();
-    let (hash, found) = hash_outside_bodies(&tree, &seen.declaring, added, &Off::of(db, file));
+    let (hash, found) =
+        hash_outside_bodies(&tree, &seen.declaring, added, &Off::of(db, listed, file));
     (found == seen.declaring.len()).then_some(hash)
 }
 
@@ -763,14 +769,16 @@ fn skeleton_of(tree: &SyntaxNode) -> Option<u64> {
     Some(hash_outside_bodies(tree, &none, &none, &Off::default()).0)
 }
 
-/// What a `#[cfg]` takes out of every crate a file is a module of. None of it is compiled, and
-/// only the attributes of what it is written on can change that.
+/// What a `#[cfg]` takes out of every crate that is built with the file as a module of it. None
+/// of it is compiled, and only the attributes of what it is written on can change that. The
+/// crates of the file's source root are more: a package's tests are crates of its own, that
+/// have `cfg(test)` and no module of the library's.
 #[derive(Default)]
 struct Off(Vec<cfg::CfgOptions>);
 
 impl Off {
-    fn of(db: &RootDatabase, file: FileId) -> Off {
-        Off(relevant_crates(db, file).iter().map(|it| it.cfg_options(db).clone()).collect())
+    fn of(db: &RootDatabase, listed: &Listed, file: FileId) -> Off {
+        Off(listed.crates_of(db, file).iter().map(|it| it.cfg_options(db).clone()).collect())
     }
 
     fn takes_out(&self, node: &SyntaxNode) -> bool {
