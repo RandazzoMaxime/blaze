@@ -50,6 +50,12 @@ All notable changes to ra-jit are written here. The format follows
   cargo's hash of the source), with cargo's checks (entries under `<name>-<version>/` only, no
   links, the size limit, the umask, `.cargo-ok`), several at once, retried as `net.retry`
   says, under cargo's package cache lock.
+- `crates/blaze-manifest`, `Cargo.toml` and `.cargo/config.toml` read as cargo 1.99.0 reads
+  them, without running cargo: `cargo metadata --no-deps` computed by blaze (its `metadata`
+  example prints the same JSON, warnings and errors), on cargo's own manifest schema
+  (`cargo-util-schemas` 0.14.3) ([resolve.md](docs/resolve.md)). `harness/resolve.py` compares
+  it with cargo on the bench projects, 300 crates.io crates and 72 workspace repositories at
+  pinned commits: all 385 equal, key order included. Nothing in blaze uses it yet.
 - `cargo ra-jit test` with `RA_JIT_TESTS=affected` runs, on Linux, each test that reaches a
   file, the environment, a process or the network in a sandbox of its own (#257): a process
   in new user, mount, network, IPC and PID namespaces, the machine's files read-only, the
