@@ -1,8 +1,8 @@
 {
  "dir": ".",
  "inputs": {
-  "Cargo.lock": "2af025e19095d4fffd26ef7b041b12bfe75531b9e4ccc9d7a324af1b61c1ec53",
-  "Cargo.toml": "8f55aef5b1f18d5d40be7aade333bccce294cb9d9debec1416cd3eb385de414a"
+  "Cargo.lock": "8bbfd2f7f61127f399c4a5131f9ff7e8fbedd2cf4fb2f84f610e8b0d07a60ed5",
+  "Cargo.toml": "0c0fb40369164a477d4547f32a4f0269707c1a24082e86ab213120e384f5e8db"
  },
  "packages": {
   "adler2@2.0.1": {
@@ -753,6 +753,23 @@
    },
    "version": "2.12.1"
   },
+  "blaze-build-script@0.1.0": {
+   "authors": "blaze contributors",
+   "description": "Build scripts run as cargo runs them: the environment cargo 1.99 gives a script, what it prints read as cargo reads it, and who receives what",
+   "homepage": "",
+   "license": "MIT OR Apache-2.0",
+   "license_file": "",
+   "links": null,
+   "name": "blaze-build-script",
+   "readme": "",
+   "repository": "https://github.com/indexable-inc/blaze",
+   "rust_version": "1.99",
+   "source": {
+    "dir": "crates/blaze-build-script",
+    "kind": "path"
+   },
+   "version": "0.1.0"
+  },
   "blaze-manifest@0.1.0": {
    "authors": "blaze contributors",
    "description": "Cargo.toml and .cargo/config.toml read as cargo 1.99 reads them",
@@ -766,6 +783,40 @@
    "rust_version": "1.99",
    "source": {
     "dir": "crates/blaze-manifest",
+    "kind": "path"
+   },
+   "version": "0.1.0"
+  },
+  "blaze-registry@0.1.0": {
+   "authors": "blaze contributors",
+   "description": "blaze's reading of registries and fetching of sources as cargo 1.99 does them, into cargo's directories and blaze's store, with no cargo",
+   "homepage": "",
+   "license": "MIT OR Apache-2.0",
+   "license_file": "",
+   "links": null,
+   "name": "blaze-registry",
+   "readme": "",
+   "repository": "https://github.com/indexable-inc/blaze",
+   "rust_version": "1.99",
+   "source": {
+    "dir": "crates/blaze-registry",
+    "kind": "path"
+   },
+   "version": "0.1.0"
+  },
+  "blaze-resolve@0.1.0": {
+   "authors": "blaze contributors",
+   "description": "cargo's resolver, owned by blaze: the package model, Cargo.lock, version selection and feature unification",
+   "homepage": "",
+   "license": "MIT OR Apache-2.0",
+   "license_file": "",
+   "links": null,
+   "name": "blaze-resolve",
+   "readme": "",
+   "repository": "https://github.com/indexable-inc/blaze",
+   "rust_version": "1.99",
+   "source": {
+    "dir": "crates/blaze-resolve",
     "kind": "path"
    },
    "version": "0.1.0"
