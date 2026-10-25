@@ -1,9 +1,9 @@
 //! Registries read and sources fetched as cargo 1.99 reads and fetches them, with no cargo:
 //! the sparse index with cargo's cache of it, `.crate` files checked by their sha256, kept in
-//! blaze's store by that hash and unpacked where cargo unpacks them, so that the paths a
-//! build sees (`file!()`, panics, `CARGO_MANIFEST_DIR`) are cargo's and cargo and blaze share
-//! `$CARGO_HOME`. What is ported from where is said at the top of each module; the plan is
-//! `docs/self-contained.md`.
+//! blaze's store by that hash and unpacked where cargo unpacks them, `[source]` replacement,
+//! vendored directories and git checkouts, so that the paths a build sees (`file!()`, panics,
+//! `CARGO_MANIFEST_DIR`) are cargo's and cargo and blaze share `$CARGO_HOME`. What is ported
+//! from where is said at the top of each module; the plan is `docs/self-contained.md`.
 
 pub mod directory;
 pub mod download;

@@ -155,3 +155,15 @@ each saw and what each produced.
 
 2026-10-25: this plan. Lanes: the toolchain (2), the manifest and the harness, the registry,
 the resolver, build scripts. Counts and pull requests are added here as they land.
+
+2026-10-25, the registry: `crates/blaze-registry` reads the sparse index and its cache as cargo
+1.99 does, fetches `.crate` files into the store by their sha256 and unpacks them where cargo
+does (#307, landing with #314), and replaces sources, reads vendored directories and checks
+out git dependencies with the `git` command at cargo's paths. `harness/fetchdiff.py` on
+dev-aws-8, against `cargo fetch` and `cargo vendor` over 314 lock files (the bench projects
+at their pins but bun, the 300 most downloaded crates, git dependencies of every kind of
+reference, a second sparse registry): 3684/3684 unpacked packages and 38/38 git checkouts
+equal, file by file, and every directory name; crates.io replaced by a mirror 42/42; ripgrep's
+and zed's vendored packages 51/51 and 1533/1533. Not yet: blaze-resolve's `Registry` over it,
+registries that need credentials (#315), git indexes (#316), cargo's last-use record (#317),
+a path package's file list (#318).
