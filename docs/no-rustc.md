@@ -841,6 +841,22 @@ which are rustc's. What it is computed from is a plain description of the run (`
 the package's fields, features, profile, the target's cfgs, the dependencies' metadata), for
 blaze's manifest reader and resolver to fill.
 
+Its `output::parse` reads what a script prints as cargo's `BuildOutput::parse` does, with
+cargo's error messages: `cargo:` and `cargo::` (the latter refused, with cargo's suggestion,
+for a package whose `rust-version` is older than 1.77), an unknown `cargo:` key as metadata
+(`cargo:error=` among them, which only `cargo::` makes an error) and an unknown `cargo::` one
+refused, `rustc-flags` with `-l` and `-L` alone, `rustc-link-lib`, `rustc-link-search` (those
+in `OUT_DIR` passed first), `rustc-link-arg` and its forms for bins, one bin, tests, benches,
+examples and cdylibs (refused for a target the package lacks, a cdylib's only warned),
+`rustc-cfg`, `rustc-check-cfg`, `rustc-env` (`RUSTC_BOOTSTRAP` refused unless cargo's
+environment allows it), `rerun-if-changed`, `rerun-if-env-changed`, `warning`, `error` and
+`metadata`. `apply` says who receives it: which scripts each unit is linked with (cargo's
+`build_map`), what rustc is given for each target (`-l` for the package's library, or its
+programs when it has none; link arguments for their targets and the package's own, a cdylib's
+from its dependencies too; cfgs and variables for every target), and when a script runs
+again (newer files below what it watches, a variable whose value changed in cargo's
+environment or `[env]`, any file of the package when it named nothing).
+
 **J. Proc macros compiled and loaded by ra-jit.** ([#90](https://github.com/indexable-inc/ra-jit/issues/90)) The proc-macro crate and its dependencies are
 compiled by ra-jit into a library that rust-analyzer's proc-macro server, running inside ra-jit,
 loads. `proc_macro` is ra-jit's from F, so the bridge matches the server, which is built from the
@@ -1216,7 +1232,15 @@ paid once, by the release, instead of on a user's machine (`crates/ra-jit/src/sh
 - `ra-jit std REMOTE TOOLCHAIN` builds a script that does nothing over TOOLCHAIN (a sysroot)
   into a store of its own, running no rustc, and pushes that store to REMOTE as the project `std-<target>-<build>`, where `<build>` is what the store keys
   by: the ra-jit binary's bytes and the toolchain's commit and compiler name. Only that binary
-  with that toolchain can use it, and every key in it says so.
+  with that toolchain can use it, and every key in it says so. It then builds a program that
+  prints a line, whole, with the `dev` and the `release` profile: a program keys the unit by the
+  debug info its profile asks for, line tables for `dev` where a script asks for none, so
+  without it every whole build of a dev program compiled the library again (about 10 s, step K).
+  The `release` program takes the script's unit. It then builds a program that
+  prints a line, whole, with the `dev` and the `release` profile: a program keys the unit by the
+  debug info its profile asks for, line tables for `dev` where a script asks for none, so
+  without it every whole build of a dev program compiled the library again (about 10 s, step K).
+  The `release` program takes the script's unit.
 - The release workflow runs it with each target's archived binary and the pinned 1.99.0, and
   attaches the remote's files to the release with `.` for `/` (`manifests.std-…`, `packs.….pack.zst`,
   `keys.…`). A remote can be a plain `https://` address now (`remote/https.rs`): read-only,
