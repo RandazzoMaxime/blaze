@@ -426,10 +426,10 @@ the counts of [How often](#how-often) lower, measured by step A's check, and non
 | [G](https://github.com/indexable-inc/ra-jit/issues/87). Every crate compiled and linked by ra-jit | rustc's rlibs, objects, symbols and link line, "no rustc symbol" | E, F | large | high | the no-rustc F+G lane |
 | [H](https://github.com/indexable-inc/ra-jit/issues/88). ra-jit writes the test harness | the fallback when a test is added | G | medium | medium | the `no-rustc-hl` lane: done; the `no-rustc-l2` lane: ra-jit's harness always, done |
 | [I](https://github.com/indexable-inc/ra-jit/issues/89). Build scripts compiled and run by ra-jit | build scripts and their probes by rustc | B, G | medium | medium | the `no-rustc-l2` lane: first part done (scripts compiled and linked by ra-jit, their runs kept in the store); the F+G lane consumes it for the standard library's scripts |
-| [J](https://github.com/indexable-inc/ra-jit/issues/90). Proc macros compiled and loaded by ra-jit | proc macros by rustc, the toolchain's proc-macro server | F, G | large | high | none yet |
-| [K](https://github.com/indexable-inc/ra-jit/issues/91). The cold build is ra-jit's | cargo's first build, the rustc base (#11) | G, I, J | medium | high | none yet |
+| [J](https://github.com/indexable-inc/ra-jit/issues/90). Proc macros compiled and loaded by ra-jit | proc macros by rustc, the toolchain's proc-macro server | F, G | large | high | the self-contained lane ([#298](https://github.com/indexable-inc/blaze/issues/298)): plan, and J then K first |
+| [K](https://github.com/indexable-inc/ra-jit/issues/91). The cold build is ra-jit's | cargo's first build, the rustc base (#11) | G, I, J | medium | high | the self-contained lane, with 54301ec5's first-build lane (#310) |
 | [L](https://github.com/indexable-inc/ra-jit/issues/92). Doctests by the daemon (#28) | probe and examples by rustc, rustdoc | B, G, D | medium | medium | the `no-rustc-hl` lane: first part done; the `no-rustc-l2` lane: second part (examples by ra-jit) done |
-| [M](https://github.com/indexable-inc/ra-jit/issues/93). Remove the wrapper and the fallback | `ra-jit-rustc`, `ra-jit-rustc-first`, stand-ins, dep-info, settle, `by_cargo`, `only_cargo` | all | medium | low | none yet |
+| [M](https://github.com/indexable-inc/ra-jit/issues/93). Remove the wrapper and the fallback | `ra-jit-rustc`, `ra-jit-rustc-first`, stand-ins, dep-info, settle, `by_cargo`, `only_cargo` | all | medium | low | the self-contained lane |
 
 A, B and C landed on 2026-10-22. D and E run alongside everything: they are
 correctness work whose bar rises as the others land. F, G, I and J are the core and go in that
@@ -970,6 +970,10 @@ Where J stands (2026-10-24):
   which ra-jit cannot compile
   ([#327](https://github.com/indexable-inc/blaze/issues/327)).
 - Next: the server shipped beside ra-jit, then ra-jit's libraries by default.
+
+J, K and M are planned together in [self-contained.md](self-contained.md#j-k-and-m), since
+what they remove is most of the toolchain blaze still keeps: rustc and the sysroot's rlibs (116
+of its 132 MB on Linux x86-64) go only once all three are in.
 
 **K. The cold build is ra-jit's.** ([#91](https://github.com/indexable-inc/ra-jit/issues/91)) `cargo ra-jit build` with nothing built plans the units
 (plan.rs), and the daemon compiles them all, taking what the store and the remote have, links

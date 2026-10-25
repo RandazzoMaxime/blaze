@@ -283,6 +283,15 @@ All notable changes to ra-jit are written here. The format follows
   changed toolchain file no longer sends the next build to cargo. `BLAZE_OTHER_TOOLCHAIN=1`
   still builds with the project's toolchain. `cargo_ra_jit.py` builds and edits projects
   pinned to an older stable and to a nightly, through toolchains whose rustc compiles nothing.
+- A daemon that links what rustc built beside its own code (every cargo daemon) takes the
+  checkout's roots from the store too, where only a build with nothing of rustc's did. A
+  build spliced into rustc's executable still compiles them. ripgrep's `restart`
+  (warmstart.py, dev-aws-7, three interleaved rounds) compiles 2,377 functions where it
+  compiled 3,618 and takes 4.96 s where it took 5.09 s; nushell's compiles 25,843 where it
+  compiled 30,039 and takes the same 25.7 s, as finding its roots in the store (0.8 s) costs
+  what it saves while most are refused for calling rustc's copy of a function of the checkout
+  ([#216](https://github.com/indexable-inc/blaze/issues/216)). `harness/storetracked.py` checks
+  that a start found roots.
 - A daemon that starts on a store holding the checkout's code no longer compiles that code
   again before the first edit can be patched ([#105](https://github.com/indexable-inc/blaze/issues/105)).
   Each function of the checkout goes into the store with a mark of its code and of what it
