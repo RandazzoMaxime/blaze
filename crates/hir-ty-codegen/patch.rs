@@ -1767,7 +1767,14 @@ impl Base {
                 _ if !touched => eprintln!("check-all: MISSED `{}` from the store", was.name),
                 Some(Some(false)) => stale.hydrated.push(i as u32),
                 Some(None) => return Err("code of the checkout from the store no longer compiles"),
-                None => return Err("code of the checkout from the store is not called as it was"),
+                None => {
+                    eprintln!(
+                        "patch: `{}` from the store, of {} callers, is not called as it was",
+                        was.name,
+                        was.callers.len()
+                    );
+                    return Err("code of the checkout from the store is not called as it was");
+                }
             }
         }
         Ok(())
