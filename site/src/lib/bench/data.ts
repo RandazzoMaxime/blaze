@@ -95,7 +95,7 @@ const ENTRY_NUMBERS = ['store_mb', 'resident_ready_mb', 'resident_end_mb', 'buil
 // The platforms each benchmark runs on, in the README's order (harness/benchplatforms.py PLATFORMS).
 export const PLATFORMS = ['macOS arm64', 'Linux aarch64', 'Linux x86-64'];
 // The README's order of projects (harness/benchreport.py PROJECTS) and of backends.
-const PROJECTS = ['ripgrep', 'fd', 'bat', 'hyperfine', 'just', 'axum', 'nushell', 'helix', 'bevy', 'zed', 'cargo'];
+const PROJECTS = ['ripgrep', 'fd', 'bat', 'hyperfine', 'just', 'axum', 'nushell', 'helix', 'bevy', 'biome', 'zed', 'cargo', 'bun'];
 const BACKENDS = ['cranelift', 'llvm'];
 const PROGRAMS = ['probe', 'life'];
 const MODES = ['socket', 'burst', 'replay', 'cargo'];
