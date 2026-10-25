@@ -861,7 +861,7 @@ is described from `cargo metadata`, `cargo check --unit-graph` and the configura
 crate computes the environment (against what cargo gave), reads cargo's `output` (against
 cargo's `build-script-executed` message) and runs the script again into an `OUT_DIR` of its
 own (against cargo's run: both fail, or both come to the same output). Status on dev-aws-8,
-2026-10-25, over the applications of `apps/apps.json` and `harness/scripts/` (openssl-sys,
+2026-10-25, at a3bc9d6e01, over the applications of `apps/apps.json` and `harness/scripts/` (openssl-sys,
 zstd-sys, libz-sys, libgit2-sys, ring, rustix, num-traits, and openssl, zstd-safe and
 libgit2-sys reading their metadata): 463 runs of 22 projects, environment 463/463, reading
 460/460, runs 463/463, the same bytes 455/460 (cc prints the variables it looked up as often as
