@@ -602,11 +602,16 @@ impl<'a> Resolver<'a> {
         listed: &'a Listed,
     ) -> Resolver<'a> {
         let over_rustc = known.homes() && !known.builds_base();
+        // A build with thread-locals of its own is linked in full: building it for a splice
+        // that can't be made would only build it again.
         let onto = !known.builds_base()
             && *SPLICING
             && args.patch.is_some()
             && args.link_cmd.is_some()
-            && args.splice.as_deref().is_some_and(onto_rustcs);
+            && args.splice.as_deref().is_some_and(|binary| {
+                onto_rustcs(binary)
+                    && !rustc_symbols(binary).is_some_and(|it| it.has_own_thread_locals())
+            });
         let linked = args.splice.as_deref().filter(|_| over_rustc || onto).and_then(rustc_symbols);
         let (root, base) = (args.checkout.clone(), args.base.clone());
         let debug = args.debug;
@@ -1523,6 +1528,11 @@ impl SymbolResolver for Resolver<'_> {
         let mut earlier = 0;
         for other in it.module(db).impl_defs(db) {
             let other = other.source(db)?;
+            // rustc numbers what a module has written out before what its macros and derives
+            // make, which it only has once they are expanded.
+            if other.file_id.is_macro() {
+                continue;
+            }
             if other.file_id != source.file_id {
                 return None;
             }

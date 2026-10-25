@@ -3669,6 +3669,31 @@ pub mod type_id_in_constant {
             of(vtable_of::<Box<dyn for<'a> Fn(&'a str)>>(), TypeId::of::<Box<dyn Fn(&str)>>()),
         ]
     }
+
+    fn vtable_of_value<T: 'static>(_: &T) -> &'static VTable {
+        vtable_of::<T>()
+    }
+
+    fn type_id_of_value<T: 'static>(_: &T) -> TypeId {
+        TypeId::of::<T>()
+    }
+
+    /// A closure's and one another crate's generic function wraps it in, as boa's
+    /// `NativeFunction::from_copy_closure_with_captures` does: rustc's hash of them is not one
+    /// to match, only the ones the program's own code computes.
+    pub fn closures() -> Vec<(usize, bool, bool)> {
+        let seed = 4u8;
+        let own = move || seed;
+        let wrapped = old_macros::wrapped(own);
+        let of = |it: &'static VTable, runtime: TypeId| {
+            (it.size, it.id == runtime, it.id == TypeId::of::<u8>())
+        };
+        vec![
+            of(vtable_of_value(&own), type_id_of_value(&own)),
+            of(vtable_of_value(&wrapped), type_id_of_value(&wrapped)),
+            (wrapped() as usize, vtable_of_value(&own).id != vtable_of_value(&wrapped).id, false),
+        ]
+    }
 }
 
 /// `TypeId`s are rustc's hash of the type, which its own code compares ours against.
@@ -3866,6 +3891,36 @@ pub mod type_id_hashes {
 
     fn generic_item<T, const N: usize>(_: T) {}
 
+    /// `impl`s written after ones that derives and a macro make, which rustc numbers after
+    /// the written ones.
+    pub mod derived {
+        macro_rules! made {
+            ($name:ident) => {
+                impl $name {
+                    pub fn made(&self) -> u8 {
+                        1
+                    }
+                }
+            };
+        }
+        #[derive(Clone, Debug, Default, PartialEq)]
+        pub struct Node(pub u8);
+        made!(Node);
+        impl super::Shape for Node {}
+        impl Node {
+            pub fn get(&self) -> u8 {
+                self.0
+            }
+        }
+        #[derive(Clone, Copy)]
+        pub struct Field(pub u8);
+        impl Field {
+            pub fn new() -> Field {
+                Field(0)
+            }
+        }
+    }
+
     /// Function items, which are named by their path and what they were instantiated with.
     pub fn function_items() -> Vec<TypeId> {
         vec![
@@ -3877,6 +3932,8 @@ pub mod type_id_hashes {
             of_value(&std::mem::drop::<String>),
             of_value(&<u8 as Clone>::clone),
             of_value(&<Vec<u8> as Default>::default),
+            of_value(&derived::Node::get),
+            of_value(&derived::Field::new),
             id::<Option<Generic<u8, 1>>>(),
         ]
     }

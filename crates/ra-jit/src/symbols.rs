@@ -346,6 +346,8 @@ pub(crate) struct Linked {
     unkept: String,
     /// The names in the symbols of both, as [`names_in_symbols`] has them.
     named: FxHashSet<u64>,
+    /// Whether it has thread-local data of the objects of `by_symbol`.
+    own_thread_locals: bool,
 }
 
 impl Linked {
@@ -374,6 +376,7 @@ impl Linked {
             functions: String::new(),
             unkept: String::new(),
             named: FxHashSet::default(),
+            own_thread_locals: false,
         };
         let mut local = Vec::new();
         for symbol in object.symbols().chain(object.dynamic_symbols()) {
@@ -394,6 +397,9 @@ impl Linked {
             let function = (name.starts_with("_R") || name.starts_with("_ZN"))
                 && symbol.kind() == SymbolKind::Text
                 && symbol.section_index().is_some();
+            linked.own_thread_locals |= symbol.kind() == SymbolKind::Tls
+                && symbol.section_index().is_some()
+                && own.contains(&hashed(name));
             if internal && !own.contains(&hashed(name)) {
                 if function {
                     linked.unkept.push_str(name);
@@ -427,6 +433,13 @@ impl Linked {
 
     pub(crate) fn has(&self, symbol: &str) -> bool {
         self.names.contains(&hashed(symbol))
+    }
+
+    /// Whether the crates rustc compiled with a symbol for each function have thread-locals
+    /// of their own here. A build in full has its own copies of those, and an executable has
+    /// all the thread-local data it ever will: nothing of the build can be spliced into it.
+    pub(crate) fn has_own_thread_locals(&self) -> bool {
+        self.own_thread_locals
     }
 
     /// The one private symbol of the function or static at `path`.
@@ -1353,6 +1366,7 @@ mod tests {
             functions,
             unkept: String::new(),
             named,
+            own_thread_locals: false,
         };
         for name in ["sha256", "foo", "core", "u8", "add", "app", "_bar", "unkept"] {
             assert!(!linked.has_no_function_named(name), "{name}");

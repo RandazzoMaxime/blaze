@@ -498,8 +498,25 @@ STATICS_SCENARIOS = {
                       {"RA_JIT_STATS": "1"}),
 }
 SCENARIOS.update(STATICS_SCENARIOS)
-# Scenarios whose builds in full are one round: a line of a round that started over fails them.
-ONE_ROUND = set(STATICS_SCENARIOS)
+# A program with a thread-local of its own, as nearly every real one has: a build in full has
+# its own copy of it, which nothing can add to what rustc linked, so it is linked in full at
+# once rather than built for a splice that can't be made and then built again (#299).
+TLS_FILES = {
+    **FILES,
+    "app/src/main.rs": MAIN.replace('    println!("dep {}", dep::value(2));\n',
+                                    '    println!("dep {}", dep::value(2));\n'
+                                    '    println!("hits {} {}", hit(), hit());\n')
+    + "\nthread_local! {\n    static HITS: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };\n}\n\n"
+      "fn hit() -> u32 {\n    HITS.with(|it| {\n        it.set(it.get() + 1);\n        it.get()\n    })\n}\n",
+}
+TLS_SCENARIOS = {
+    "thread-local-full": ([[edit(M, "    x + 1\n}\n\nfn counted", "    x + 2\n}\n\nfn counted")]], ["linked"], 0,
+                          {"RA_JIT_STATS": "1"}),
+}
+SCENARIOS.update(TLS_SCENARIOS)
+# Scenarios whose builds in full are one round: a line of a round that started over fails them,
+# as does a build thrown away for one that is linked in full.
+ONE_ROUND = set(STATICS_SCENARIOS) | set(TLS_SCENARIOS)
 
 # How the daemon's own base is to go before the first edit, in the scenarios that say.
 OWN_BASE = {"unbuilt-member": "built", "own-base-budget": "given up", "own-base-budget-full": "given up"}
@@ -556,7 +573,10 @@ def how_built(lines):
 
 
 def wanted(want):
-    """What a scenario's `full` is on this platform: only an ELF executable is spliced whole."""
+    """What a scenario's `full` is on this platform: only an ELF executable is spliced whole.
+    `linked` is a build in full that is linked in full everywhere."""
+    if want == "linked":
+        return "full"
     return "whole" if want == "full" and sys.platform == "linux" else want
 
 
@@ -591,6 +611,8 @@ def main():
             files = SAME_NAME_FILES
         elif name in STATICS_SCENARIOS:
             files = STATICS_FILES
+        elif name in TLS_SCENARIOS:
+            files = TLS_FILES
         write_workspace(ws, files)
         home, target, store = (os.path.join(work, it) for it in ("home", "target", "store"))
         for path in (home, target, store, fn_cache):
@@ -661,7 +683,8 @@ def main():
                     failed.append(f"{name} edit {step}: {how}, not {want}")
                     for it in lines[-60:]:
                         print(f"      | {it[:240]}", flush=True)
-                over = [it for it in lines if re.match(r"round \d+: .*started over", it)]
+                over = [it for it in lines if re.match(r"round \d+: .*started over", it)
+                        or "was not spliced into it" in it]
                 if name in ONE_ROUND and over:
                     failed.append(f"{name} edit {step}: {over[0][:400]}")
         except Exception as e:
