@@ -5403,6 +5403,7 @@ const DENIED_BORROWCK: &[&str] = &["unused_mut"];
 fn broken_in(
     db: &RootDatabase,
     edited: &[vfs::FileId],
+    scoped: &FxHashMap<vfs::FileId, Vec<syntax::TextRange>>,
     watched: &Sources,
     root: &Path,
     within: Option<Arc<FxHashSet<ide_db::base_db::Crate>>>,
@@ -5417,6 +5418,7 @@ fn broken_in(
                 let (db, config, within) = (db.clone(), &config, &within);
                 scope.spawn(move || {
                     let files = edited.iter().skip(part).step_by(threads);
+                    let files = files.filter(|it| scoped.get(it).is_none_or(|it| !it.is_empty()));
                     hir::attach_db(&db, || {
                         files
                             .flat_map(|&file| {
@@ -5437,12 +5439,13 @@ fn broken_in(
                                 };
                                 let db = &db;
                                 let each = each.into_iter().flat_map(move |within| {
-                                    ide_diagnostics::semantic_diagnostics_within(
+                                    ide_diagnostics::semantic_diagnostics_of(
                                         db,
                                         config,
                                         &ide_db::assists::AssistResolveStrategy::None,
                                         file,
                                         within,
+                                        scoped.get(&file).map(Vec::as_slice),
                                     )
                                 });
                                 each.collect::<Vec<_>>()
@@ -5939,6 +5942,8 @@ struct Program {
     /// The tests last found, with the listings of the crates they were found in. A listing
     /// stays until an edit to more than bodies, which is all that changes a test.
     tests_now: Option<(Vec<Arc<ListedCrate>>, Tests)>,
+    /// The edited files as its last check for errors found them, which the next looks past.
+    checked: outline::Checked,
 }
 
 /// The functions of a program's own crate that a test harness runs, each with its
@@ -7722,7 +7727,9 @@ fn run_holding(
         let mut edited: Vec<_> = paths.keys().copied().collect();
         edited.sort_unstable();
         let sources = Sources { paths };
-        let broken = broken_in(&db, &edited, &sources, &args.checkout, None, !args.lints_capped);
+        let none = FxHashMap::default();
+        let broken =
+            broken_in(&db, &edited, &none, &sources, &args.checkout, None, !args.lints_capped);
         let why =
             hir::attach_db(&db, || refusal(&db, &edited, &sources, &args.checkout, broken, None));
         if let Some(why) = why {
@@ -7895,6 +7902,7 @@ fn run_holding(
         whole,
         interrupted: 0,
         moved: false,
+        checked: outline::Checked::default(),
     }];
     let overlay = match std::env::var("RA_JIT_OVERLAY").as_deref() {
         Ok("0") => Overlay::Never,
@@ -8281,6 +8289,7 @@ fn run_holding(
                                 whole: None,
                                 interrupted: 0,
                                 moved: false,
+                                checked: outline::Checked::default(),
                             };
                             if let Some(built) =
                                 programs.iter().find(|it| it.same_as(&db, &program))
@@ -8830,6 +8839,9 @@ fn run_holding(
         homed.dedup();
         home_in_rustcs(&db, &listed, &mut programs, &homed);
         outlines.before_edit(&db, &listed, &editing);
+        for program in &mut programs {
+            program.checked.before_edit(&db, &listed, &editing, &program.unbuilt.edited);
+        }
         for &index in &gone {
             if let Watched::Source(id) = files[index].file {
                 change.change_file(id, None);
@@ -8868,6 +8880,9 @@ fn run_holding(
             untouched = roots.iter().copied().filter(|it| !editing.contains(it)).collect();
             home_in_rustcs(&db, &listed, &mut programs, &untouched);
             outlines.before_edit(&db, &listed, &untouched);
+            for program in &mut programs {
+                program.checked.before_edit(&db, &listed, &untouched, &program.unbuilt.edited);
+            }
             for file in write_harnesses(&mut db, texts) {
                 if !sources.contains(&file) {
                     sources.push(file);
@@ -9011,6 +9026,7 @@ fn run_holding(
                     moved: program.moved,
                     tests: None,
                     tests_now: None,
+                    checked: outline::Checked::default(),
                 };
                 let mut program = Box::new(std::mem::replace(program, away));
                 builds.running.insert(at, Running { clients, kept, own_base });
@@ -9549,7 +9565,18 @@ impl Program {
         let named_anew = std::mem::take(&mut self.unbuilt.named_anew);
         let unnamed = if named_anew { None } else { self.widen(db) };
         self.read_copies_again(db)?;
-        let Program { args, table, known, unbuilt, wrote, whole, tests, tests_now, .. } = self;
+        let Program {
+            args,
+            table,
+            known,
+            unbuilt,
+            wrote,
+            whole,
+            tests,
+            tests_now,
+            checked: last_checked,
+            ..
+        } = self;
         let Outputs { out, patch, link_cmd, splice } =
             wanted.cloned().unwrap_or_else(|| Outputs::of(args));
         let args = &Args { out, patch, link_cmd, splice, ..args.clone() };
@@ -9576,17 +9603,30 @@ impl Program {
         // build that can't be a patch waits for it, and a text that does not compile is not
         // built whole: what it would make of the program is not what runs, and the next edit
         // that compiles is to be a patch of what does.
+        // Of a file the last check found no error in, it looks at what changed since.
+        let scoped: FxHashMap<vfs::FileId, Vec<syntax::TextRange>> = edited
+            .iter()
+            .filter_map(|&file| Some((file, last_checked.to_check(db, listed, file)?)))
+            .collect();
+        if std::env::var_os("RA_JIT_STATS").is_some() {
+            let functions: usize = scoped.values().map(Vec::len).sum();
+            eprintln!(
+                "check-scope: {} files whole, {functions} functions of {} others",
+                edited.len() - scoped.len(),
+                scoped.len()
+            );
+        }
         let (warm, broken) = std::thread::scope(|scope| {
             let within = listed.programs(db);
             if let Some(crates) = &within {
                 verify_impls(scope, db, crates);
             }
             let check = {
-                let (db, edited, root) = (db.clone(), &edited, &args.checkout);
+                let (db, edited, root, scoped) = (db.clone(), &edited, &args.checkout, &scoped);
                 let lints = !args.lints_capped;
                 scope.spawn(move || {
                     let start = Instant::now();
-                    let broken = broken_in(&db, edited, paths, root, within, lints);
+                    let broken = broken_in(&db, edited, scoped, paths, root, within, lints);
                     if std::env::var_os("RA_JIT_STATS").is_some() {
                         eprintln!("check-us: {}", start.elapsed().as_micros());
                     }
@@ -9604,6 +9644,9 @@ impl Program {
             (warm, broken())
         });
         let hold = || unparsed(db, &edited, paths, &args.checkout).is_some() || broken.is_some();
+        if !hold() {
+            last_checked.passed(db, listed, &edited);
+        }
         let held = |known: &Rejections| {
             let why = refusal(db, &edited, paths, &args.checkout, broken.clone(), None);
             let why = why.unwrap_or_else(|| {
