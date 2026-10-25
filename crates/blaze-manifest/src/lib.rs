@@ -12,6 +12,7 @@ pub mod features;
 pub mod manifest;
 pub mod metadata;
 pub mod paths;
+pub mod profiles;
 pub mod source;
 pub mod targets;
 pub mod workspace;

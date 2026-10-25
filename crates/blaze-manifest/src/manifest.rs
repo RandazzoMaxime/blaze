@@ -23,6 +23,7 @@ use crate::diagnostic::ManifestDiagnostic;
 use crate::edit_distance::closest_msg;
 use crate::features::{Edition, Feature, Features, ResolveBehavior};
 use crate::paths::normalize_path;
+use crate::profiles::validate_profiles;
 use crate::source::{CRATES_IO_INDEX, CRATES_IO_REGISTRY, SourceId, into_url};
 use crate::targets::{self, Target};
 use crate::workspace::find_workspace_root;
@@ -394,6 +395,7 @@ pub fn read_manifest(
         } else if normalized_toml.workspace.is_some() {
             to_virtual_manifest(normalized_toml, features, workspace_config, source_id, path, ctx)
                 .map(|mut m| {
+                    warnings.append(&mut m.warnings);
                     m.warnings = std::mem::take(&mut warnings);
                     EitherManifest::Virtual(Box::new(m))
                 })
@@ -1252,6 +1254,10 @@ fn to_real_manifest(
         rust_version,
     };
 
+    if let Some(profiles) = &normalized_toml.profile {
+        validate_profiles(profiles, &features, warnings)?;
+    }
+
     let version = normalized_package.normalized_version().expect("previously normalized");
     let publish = match normalized_package.normalized_publish().expect("previously normalized") {
         Some(VecStringOrBool::VecString(vecstring)) => Some(vecstring.clone()),
@@ -1359,6 +1365,9 @@ fn to_virtual_manifest(
         };
         (replace(&normalized_toml, &mut manifest_ctx)?, patch(&normalized_toml, &mut manifest_ctx)?)
     };
+    if let Some(profiles) = &normalized_toml.profile {
+        validate_profiles(profiles, &features, &mut warnings)?;
+    }
     let resolve_behavior = normalized_toml
         .workspace
         .as_ref()

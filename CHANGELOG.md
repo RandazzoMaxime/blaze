@@ -8,6 +8,13 @@ All notable changes to ra-jit are written here. The format follows
 
 ### Added
 
+- blaze on Linux needs glibc 2.34 or newer (RHEL 9, Debian 12, Ubuntu 22.04), and the release
+  holds it there (#351): `build_release.py` refuses a Linux binary, the proc-macro server's
+  included, that asks for a newer glibc; install.sh says what a system below it lacks instead
+  of a program that does not start; and the install workflow builds this commit as the release
+  does, on Ubuntu 22.04 with the server, and installs it with no Rust in Debian 13, Debian 12,
+  Ubuntu 22.04 and RHEL 9 (UBI 9) containers, each running `blaze run` and a derive from
+  crates.io expanded by blaze's server, edited once.
 - `RA_JIT_WHOLE_BUILD=1` (or `BLAZE_WHOLE_BUILD=1`): `cargo blaze build` and `run` from nothing
   build each program whole with blaze, every crate compiled by blaze over the shipped standard
   library and linked by blaze, and put it where cargo does, with no `cargo build`
@@ -107,6 +114,21 @@ All notable changes to ra-jit are written here. The format follows
   (`cargo-util-schemas` 0.14.3) ([resolve.md](docs/resolve.md)). `harness/resolve.py` compares
   it with cargo on the bench projects, 300 crates.io crates and 72 workspace repositories at
   pinned commits: all 385 equal, key order included. Nothing in blaze uses it yet.
+- blaze-manifest reads `.cargo/config.toml` into cargo's own config types through a port of
+  cargo's config deserializer: `[build]`, `[net]`, `[http]`, `[env]`, `[target]` (rustflags in
+  cargo's precedence, runners and linkers), `[registry]`, `[registries]`, `[source]`
+  replacement, `[resolver]` and `[profile]`, each field from its file or its `CARGO_*`
+  variable, with cargo's errors and unused-key warnings. Its `config` example is
+  `cargo config get`, and `harness/resolve.py config` compares the two on config trees and
+  every corpus repository: 103 of 103 equal over 767 runs ([resolve.md](docs/resolve.md)).
+- blaze-manifest computes profiles as cargo 1.99 gives them to units (`blaze_manifest::profiles`,
+  a port of cargo's): `dev`, `release`, `test`, `bench` and custom profiles through `inherits`,
+  package overrides, `build-override`, profiles from config files, `--config` and
+  `CARGO_PROFILE_*`, `CARGO_INCREMENTAL` and `CI`, with cargo's errors and warnings, and checks
+  each manifest's profiles as cargo does reading it. `harness/resolve.py profiles` compares
+  every unit's profile with cargo's `--unit-graph`: 86 of 89 trees and repositories equal over
+  546 runs and 235,924 units, none with a different profile, the other three refused by
+  cargo or nightly-only ([resolve.md](docs/resolve.md)).
 - `cargo ra-jit test` with `RA_JIT_TESTS=affected` runs, on Linux, each test that reaches a
   file, the environment, a process or the network in a sandbox of its own (#257): a process
   in new user, mount, network, IPC and PID namespaces, the machine's files read-only, the
@@ -401,6 +423,20 @@ All notable changes to ra-jit are written here. The format follows
 
 ### Changed
 
+- A function whose code calls rustc's copy of a function of the checkout is kept in the
+  store, and so is what calls it (#216). Such a copy is of a small function that is not
+  generic, which rustc compiled into the crate that calls it, as ripgrep's `Match::start`
+  in `rg`; the entry names the function and the copy, and the build that takes it from the
+  store calls the copy as one that compiled the caller would. A restart of nushell with
+  nothing changed (warmstart.py, dev-aws-5, two interleaved rounds) compiles 17 functions
+  where it compiled 25,844, finds 7,622 of its 12,559 roots in the store where it found
+  4,888, and takes 19.7 to 19.9 s where it took 22.8 to 22.9 s; ripgrep's compiles none
+  where it compiled 2,375 and takes 4.25 to 4.33 s where it took 4.61 to 4.68 s. The first
+  edit after such a start takes longer (nushell 0.58 s where 0.33 s, ripgrep 0.29 s where
+  0.08 s): a closure is named by where in its body it is written, so an edit above it
+  renames it and what is generic over it, which a patch compiles again when it came from the
+  store. `storetracked.py` checks that a restart keeps such calls and that an edit of the
+  copied function reaches the callers from the store.
 - Proc macros are blaze's by default where its server is beside `ra-jit`: the daemon's
   loads, `--check` and build scripts expand with libraries ra-jit makes from each crate's
   record, kept in the store by what they were linked from, so another target directory takes

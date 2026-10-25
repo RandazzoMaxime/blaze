@@ -5644,10 +5644,19 @@ impl<'a, 'db> ObjectCodegen<'a, 'db> {
                     InstanceDef::Fn(func) => link_name(self.db, func).is_some(),
                     _ => false,
                 };
+                let mut copied = None;
                 let callee = match &request.target {
                     FuncTarget::Instance(callee, _) if !foreign(callee) => {
                         let Ok(callee) = self.settled(callee) else {
                             return self.kept.unkept("unsettled callee");
+                        };
+                        copied = match callee.def {
+                            InstanceDef::Fn(func)
+                                if callee.args.as_ref().iter().all(|it| it.region().is_some()) =>
+                            {
+                                Some(func)
+                            }
+                            _ => None,
                         };
                         Some(self.stable_name(&callee))
                     }
@@ -5660,6 +5669,17 @@ impl<'a, 'db> ObjectCodegen<'a, 'db> {
                             return self.kept.unkept("unlisted function of the checkout");
                         }
                         CachedTarget::Root(name.as_ref().to_owned())
+                    }
+                    // A function of the checkout without generic arguments, which `callee`
+                    // has called as rustc's copy: what decides that is in the names the entry
+                    // is kept under, but for whether the program has the copy and the future
+                    // a function returns, which rustc lays out its own way.
+                    Some(Some(name))
+                        if stable::StableNames::of_checkout(&name)
+                            && copied.is_some_and(|func| !returns_async_block(self.db, func))
+                            && self.root_named(&name).is_some() =>
+                    {
+                        CachedTarget::Copy { name: name.as_ref().to_owned(), symbol }
                     }
                     Some(name)
                         if name.as_ref().is_none_or(|it| stable::StableNames::of_checkout(it)) =>
@@ -5824,6 +5844,13 @@ impl<'a, 'db> ObjectCodegen<'a, 'db> {
                     };
                     self.want(of);
                     self.import(&symbol, &func.sig)?
+                }
+                CachedTarget::Copy { name: callee, symbol } => {
+                    let Some((of, _)) = self.root_named(callee) else {
+                        unsupported!("an entry calls `{callee}`, which no crate declares");
+                    };
+                    self.want(of);
+                    self.import(symbol, &func.sig)?
                 }
                 CachedTarget::Named(callee) => {
                     let Some(id) = self.found_callee(callee, None)? else {
