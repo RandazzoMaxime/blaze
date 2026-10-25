@@ -5332,8 +5332,10 @@ fn unparsed(
         let edition = ide_db::base_db::relevant_crates(db, file)
             .first()
             .map_or(syntax::Edition::CURRENT, |it| it.data(db).edition);
-        let parse = ide_db::base_db::EditionedFileId::new(db, file, edition).parse(db);
-        if let Some(error) = parse.errors().first() {
+        // The errors as the check of the edit found them: validating the tree again is
+        // milliseconds of a file of thousands of lines.
+        let errors = ide_db::base_db::EditionedFileId::new(db, file, edition).parse_errors(db);
+        if let Some(error) = errors.and_then(|it| it.first()) {
             let text = db.file_text(file).text(db);
             // A file that is included where an expression goes is not one of items.
             if syntax::ast::Expr::parse(text, edition).errors().is_empty() {
