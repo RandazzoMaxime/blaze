@@ -730,6 +730,7 @@ fn main() {
     case!(cases::async_fn_item_of_trait::run(5));
     case!(cases::type_id_in_constant::run());
     case!(cases::type_id_in_constant::closures());
+    case!(cases::type_id_in_constant::read_in_place());
     case!(cases::pointer_relations::run(7));
     case!(cases::static_places::run());
     case!(cases::associated_type_returns::run(&["a".into(), "bcd".into()]));

@@ -8,10 +8,7 @@ use hir_def::{
     signatures::{FunctionSignature, StructSignature, UnionSignature},
 };
 use rustc_abi::ExternAbi;
-use rustc_type_ir::{
-    TypeVisitableExt,
-    inherent::{GenericArgs as _, IntoKind, SliceLike, Ty as _},
-};
+use rustc_type_ir::inherent::{GenericArgs as _, IntoKind, SliceLike, Ty as _};
 use stdx::never;
 
 use crate::{

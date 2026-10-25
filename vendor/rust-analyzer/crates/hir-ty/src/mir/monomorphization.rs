@@ -8,7 +8,7 @@
 //! So the monomorphization should be called even if the substitution is empty.
 
 use rustc_next_trait_solver::placeholder::BoundVarReplacer;
-use rustc_type_ir::inherent::{GenericArgs as _, IntoKind, Ty as _};
+use rustc_type_ir::inherent::{IntoKind, Ty as _};
 use rustc_type_ir::{
     FallibleTypeFolder, TypeFlags, TypeFoldable, TypeSuperFoldable, TypeVisitableExt, UniverseIndex,
 };

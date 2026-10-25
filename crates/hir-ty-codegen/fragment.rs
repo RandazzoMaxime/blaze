@@ -384,21 +384,20 @@ impl Wants {
     /// by its place among the requests: what a load from it is known to give.
     #[cfg(feature = "llvm")]
     pub(super) fn constants(&self) -> impl Iterator<Item = (u32, &[u8])> + '_ {
-        self.requests.datas.iter().enumerate().filter_map(|(index, data)| match data {
-            DataRequest::Blob { blob, identity }
-                if blob.points_nowhere() && *identity != DataIdentity::Writable =>
-            {
-                Some((index as u32, blob.bytes()))
-            }
-            _ => None,
-        })
+        self.readonly()
+            .filter(|it| it.1.points_nowhere())
+            .map(|(index, blob)| (index, blob.bytes()))
     }
 
     /// Each data object asked for so far that is read-only, by its place among the requests.
+    /// One with a `TypeId` is left out: its bytes are const eval's ids until the object's data
+    /// has the hashes written in their place.
     #[cfg(feature = "llvm")]
     pub(super) fn readonly(&self) -> impl Iterator<Item = (u32, &ConstBlob)> + '_ {
         self.requests.datas.iter().enumerate().filter_map(|(index, data)| match data {
-            DataRequest::Blob { blob, identity } if *identity != DataIdentity::Writable => {
+            DataRequest::Blob { blob, identity }
+                if *identity != DataIdentity::Writable && blob.type_ids.is_empty() =>
+            {
                 Some((index as u32, blob))
             }
             _ => None,

@@ -3670,6 +3670,19 @@ pub mod type_id_in_constant {
         ]
     }
 
+    const U8: TypeId = TypeId::of::<u8>();
+
+    fn own_id<T: 'static>() -> bool {
+        T::VTABLE.id == TypeId::of::<T>()
+    }
+
+    /// Read where the constant is, which a backend that knows the constant's bytes folds:
+    /// those have to be the hashes, not const eval's ids.
+    pub fn read_in_place() -> Vec<bool> {
+        let u8 = [U8 == TypeId::of::<u8>(), U8 == TypeId::of::<u16>()];
+        vec![own_id::<u32>(), own_id::<String>(), u8[0], u8[1]]
+    }
+
     fn vtable_of_value<T: 'static>(_: &T) -> &'static VTable {
         vtable_of::<T>()
     }
