@@ -31,6 +31,8 @@ struct Mentions<'db> {
     crates: FxHashSet<Crate>,
     /// The bodies it has the code of or mentions a type of.
     bodies: Vec<DefWithBodyId>,
+    /// Of those, the ones it mentions a coroutine of, whose layout is of the whole body.
+    coroutines: Vec<DefWithBodyId>,
     /// It mentions something whose crate we can't tell.
     opaque: bool,
     /// The types looked into so far. The type of a future holds those of the futures it
@@ -44,6 +46,7 @@ impl<'db> Mentions<'db> {
             db,
             crates: FxHashSet::default(),
             bodies: Vec::new(),
+            coroutines: Vec::new(),
             opaque: false,
             seen: FxHashSet::default(),
         };
@@ -130,13 +133,15 @@ pub fn body_files(db: &dyn HirDatabase, instance: &Instance) -> Option<Box<[File
     Some(files.into())
 }
 
-/// The bodies of [`body_files`]: the one the code of an instance is written in, when it has
-/// one, and those it mentions a type of. `None` when that can't be told.
+/// The bodies of [`body_files`] the code of an instance depends on beyond its name: the one it
+/// is written in, when it has one, and those it mentions a coroutine of, whose layout is of
+/// the whole body. A closure or function it mentions is in its name whole, with what the
+/// closure captures. `None` when that can't be told.
 pub(super) fn bodies_of(
     db: &dyn HirDatabase,
     instance: &Instance,
 ) -> Option<(Option<DefWithBodyId>, Vec<DefWithBodyId>)> {
-    let mut mentions = Mentions::of(db, instance);
+    let mentions = Mentions::of(db, instance);
     if mentions.opaque {
         return None;
     }
@@ -145,10 +150,10 @@ pub(super) fn bodies_of(
         | InstanceDef::VtableShim(_)
         | InstanceDef::Closure(_)
         | InstanceDef::Coroutine(_)
-        | InstanceDef::CoroutineByMove(_) => Some(mentions.bodies.remove(0)),
+        | InstanceDef::CoroutineByMove(_) => mentions.bodies.first().copied(),
         _ => None,
     };
-    Some((written, mentions.bodies))
+    Some((written, mentions.coroutines))
 }
 
 /// The file a body is written in, which for one a macro makes is where the macro is called.
@@ -185,8 +190,14 @@ impl<'db> TypeVisitor<DbInterner<'db>> for Mentions<'db> {
                 self.crates.insert(krate);
             }
             TyKind::Closure(id, _) => self.owner(id.0.loc(self.db).owner),
-            TyKind::CoroutineClosure(id, _) => self.owner(id.0.loc(self.db).owner),
-            TyKind::Coroutine(id, _) => self.owner(id.0.loc(self.db).owner),
+            TyKind::CoroutineClosure(id, _) => {
+                self.owner(id.0.loc(self.db).owner);
+                self.coroutines.extend(self.bodies.last().copied());
+            }
+            TyKind::Coroutine(id, _) => {
+                self.owner(id.0.loc(self.db).owner);
+                self.coroutines.extend(self.bodies.last().copied());
+            }
             TyKind::Dynamic(bounds, _) => {
                 if let Some(principal) = bounds.principal() {
                     self.crates.insert(principal.skip_binder().def_id.0.krate(self.db));

@@ -70,7 +70,7 @@ pub(super) struct WrittenItem {
     /// Of its text.
     pub(super) hash: u64,
     /// The line and column it begins on, for one the code is written in, whose places the
-    /// code tells; `None` for one whose types alone it mentions.
+    /// code tells; `None` for one it mentions a coroutine of.
     pub(super) at: Option<(u32, u32)>,
 }
 

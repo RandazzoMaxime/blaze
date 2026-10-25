@@ -103,9 +103,10 @@ pub(super) fn stable_mark(
 
 /// The items of the checkout the code of an instance comes from, as they are written now:
 /// the one its code is written in, and those of what it tells the place of, with where each
-/// begins; those of the bodies whose types it mentions, by their text alone. `None` when one
-/// is of no file of the checkout or a macro wrote it. While nothing but bodies changes, code
-/// whose items read the same is the same code.
+/// begins; those of the bodies it mentions a coroutine of, by their text alone (see
+/// [`super::home::bodies_of`]). `None` when one is of no file of the checkout or a macro
+/// wrote it. While nothing but bodies changes, code whose items read the same is the code it
+/// was, or code nothing calls by its name any more.
 pub(super) fn written_items(
     db: &dyn HirDatabase,
     names: &StableNames<'_, '_>,
