@@ -523,6 +523,17 @@ All notable changes to ra-jit are written here. The format follows
   (`JsFormatOptions::quote_style`, whose patch also replaces `line_ending` and
   `trailing_commas`, 4 bytes each) goes from 360.7 s and a 26.4 GB peak to 0.50 s (dev-aws-5,
   16 cores, cranelift, 1 run; cargo 12.1 s). `harness/rustcbase.py` `short` and `hop` hold it.
+- A function a build left to rustc, and an instance of a function generic over nothing that
+  did not compile, keep rustc's copy when no edit since the daemon started reached its crate
+  or the crates below it. Each was taken for stale when a build in full left it to rustc for
+  the first time, and the build went to cargo ([#242](https://github.com/indexable-inc/blaze/issues/242)).
+  With the jumps above, biome's generic edit (`format_array_node`) is the daemon's (204.5 s;
+  it went to cargo after 190.9 s, refused on `biome_analyze::profiling::is_enabled`) and its
+  struct edit is spliced in 0.51 s, where it went to cargo after 176.7 s (dev-aws-5, 16 cores,
+  cranelift, 1 run).
+- A patch asks rustc's executable whether it has a function of a name once per name, where
+  each asking searched every symbol of it. biome's body edits after the first take 1.6–1.7 s,
+  where they took 2.2–2.8 s (cargo 2.3 s).
 - A profile with `debug = "line-tables-only"` (or `1`, or `"limited"`) no longer has the type
   of every variable worked out. Only the lines were written, but the types were described for
   each function compiled and then thrown away. On Biome (`biome_cli`, 518 crates, whose dev
