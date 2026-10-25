@@ -641,6 +641,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "blaze-resolve"
+ "anyhow",
+ "cargo-platform",
+ "semver",
+ "toml",
+ "unicode-ident",
+ "url",
+
 name = "block-buffer"
 version = "0.10.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
