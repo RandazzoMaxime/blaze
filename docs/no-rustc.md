@@ -138,6 +138,20 @@ builds of the program; whether they stay cargo's is an open question for Andrew.
 `ra-jit enable` the global wrapper also sees those commands' rustc runs; it must then only
 pass them by, never add a rustc run of its own.
 
+## Self-contained: no rustup, no cargo
+
+The same goal seen from the machine blaze is installed on
+([self-contained.md](self-contained.md), [#298](https://github.com/indexable-inc/blaze/issues/298)):
+installing is one `curl`, with no rustup, no toolchain pin and no cargo, and blaze resolves a
+project exactly as cargo does. Until K, J and M land, blaze keeps a toolchain of its own,
+private to it: Rust 1.99.0's `rustc`, `cargo`, `rust-std` and `rust-src` as the Rust project
+publishes them (96 to 133 MB), each piece removed as the step that ends its use lands. A
+project's own pin does not change which Rust blaze builds with
+([#269](https://github.com/indexable-inc/blaze/issues/269)). blaze's manifest reader, registry
+and resolver (`crates/blaze-manifest`, `blaze-registry`, `blaze-resolve`) replace `cargo
+metadata`, `cargo build --unit-graph` and cargo's fetching, held equal to cargo's by
+`harness/resolve.py`; with them K needs no cargo to plan a build.
+
 ## While the paths remain
 
 - A remaining path may be fixed where it is wrong: it must not miscompile while it exists. It
