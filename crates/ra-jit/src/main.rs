@@ -14,6 +14,7 @@ mod doctest;
 mod errors;
 mod frozen;
 mod inputs;
+mod items;
 mod link;
 mod live;
 mod macro_list;
@@ -4324,16 +4325,16 @@ fn build(
     let next = std::sync::atomic::AtomicUsize::new(0);
     let mut spent = Vec::new();
     // A thread asks of a database of its own.
-    let slots: Vec<_> = (0..threads)
-        .map(|_| std::sync::Mutex::new(Some((db.clone(), resolver.parts()))))
-        .collect();
+    let slots: Vec<_> =
+        (0..threads).map(|_| std::sync::Mutex::new(Some((db.clone(), resolver.parts())))).collect();
     let parts = pool::on_all(threads, |part| {
         let (db, parts) = lock(&slots[part]).take().expect("a database for each part");
         let _probing = Probing::new();
         let (start, cpu) = (Instant::now(), thread_cpu());
         let resolver = parts.over(&db);
         hir::attach_db(&db, || {
-            while let Some(&krate) = local.get(next.fetch_add(1, std::sync::atomic::Ordering::Relaxed))
+            while let Some(&krate) =
+                local.get(next.fetch_add(1, std::sync::atomic::Ordering::Relaxed))
             {
                 hir_ty::method_resolution::TraitImpls::for_crate(&db, krate.into());
                 hir_ty::method_resolution::InherentImpls::for_crate(&db, krate.into());
@@ -6926,6 +6927,9 @@ fn main() -> anyhow::Result<()> {
     }
     if std::env::args().nth(1).as_deref() == Some("mir") {
         return mirdump::command(std::env::args().skip(2));
+    }
+    if std::env::args().nth(1).as_deref() == Some("items") {
+        return items::command(std::env::args().skip(2));
     }
     if let Some((request, socket)) =
         std::env::args().nth(1).and_then(|it| Request::parse(&it)).zip(std::env::args().nth(2))
