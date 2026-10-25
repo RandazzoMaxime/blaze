@@ -720,8 +720,8 @@ struct Hydrated {
     symbol: String,
     /// Its [`stable_mark`], as the build that kept it computed it.
     mark: u128,
-    /// The crate it is compiled as.
-    krate: Crate,
+    /// The crate it is compiled as, when that is of the checkout.
+    krate: Option<Crate>,
     /// The files its code comes from, by the names [`StableNames::file_path`] gives them, or
     /// `None` when any file can be one.
     files: Option<Box<[Box<str>]>>,
@@ -1009,13 +1009,18 @@ impl FromStore {
         for (name, id) in of_checkout {
             let entry = entries.get(name);
             let tracked = entry.as_ref().and_then(|it| it.tracked.clone());
-            let krate = tracked.as_ref().and_then(|it| crate_of.get(&ContentId(it.home)));
+            // One compiled as a crate from outside the checkout is of it by its generic
+            // arguments, which no edit of a crate reaches, only of the files they are from.
+            let krate = tracked.as_ref().map(|it| match it.home {
+                Some(id) => crate_of.get(&ContentId(id)).map(|&krate| Some(krate)),
+                None => Some(None),
+            });
             let why = match (&entry, &tracked) {
                 (None, _) => "no entry",
                 (_, None) => "no mark",
                 _ => "its crate is not of the checkout",
             };
-            let (Some(entry), Some(tracked), Some(&krate)) = (entry, tracked, krate) else {
+            let (Some(entry), Some(tracked), Some(Some(krate))) = (entry, tracked, krate) else {
                 from.untracked = true;
                 if std::env::var_os("RA_JIT_STATS").is_some() && from.untracked_seen < 3 {
                     from.untracked_seen += 1;
@@ -1024,7 +1029,9 @@ impl FromStore {
                 continue;
             };
             let at = from.hydrated.len() as u32;
-            from.homes.of_crate.entry(krate).or_default().push(at);
+            if let Some(krate) = krate {
+                from.homes.of_crate.entry(krate).or_default().push(at);
+            }
             match &tracked.files {
                 Some(files) => {
                     for file in files {
@@ -1791,7 +1798,7 @@ impl Base {
                         .as_ref()
                         .is_none_or(|files| files.iter().any(|it| edited_paths.contains(&**it)))
             };
-            let touched = self.touched.reaches(was.krate)
+            let touched = was.krate.map_or(self.touched.any, |it| self.touched.reaches(it))
                 || self.touched.hydrated.contains(&(i as u32))
                 || !self.touched.bodies.is_empty() && in_edited();
             if !touched && !check_all {

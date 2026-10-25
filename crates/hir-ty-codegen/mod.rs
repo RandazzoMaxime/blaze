@@ -5472,7 +5472,10 @@ impl<'a, 'db> ObjectCodegen<'a, 'db> {
         let files = home::body_files(self.db, instance).and_then(|files| {
             files.iter().map(|&file| self.names.file_path(file)).collect::<Option<Vec<_>>>()
         });
-        let home = self.names.content_id(home).ok_or("its crate has no content id")?.0;
+        let home = match self.names.of_the_checkout(home) {
+            true => Some(self.names.content_id(home).ok_or("its crate has no content id")?.0),
+            false => None,
+        };
         Ok(cached::Tracked { mark, home, files })
     }
 

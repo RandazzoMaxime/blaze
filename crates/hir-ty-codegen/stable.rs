@@ -420,9 +420,14 @@ impl<'a, 'db> StableNames<'a, 'db> {
         self.memo(out, &self.crate_names, krate, |out| self.spell_crate(out, krate))
     }
 
+    /// Whether the crate is named by its content: its source changes under the daemon.
+    pub(super) fn of_the_checkout(&self, krate: Crate) -> bool {
+        self.owned.contains(&krate) || krate.data(self.db).origin.is_local()
+    }
+
     fn spell_crate(&self, out: &mut String, krate: Crate) -> Option<()> {
         // The source of a crate of the workspace changes too, built by the daemon or not.
-        if self.owned.contains(&krate) || krate.data(self.db).origin.is_local() {
+        if self.of_the_checkout(krate) {
             if !self.by_content {
                 return self.miss("of the checkout, in a patch");
             }

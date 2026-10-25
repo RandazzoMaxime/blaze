@@ -49,8 +49,8 @@ pub(super) struct Entry {
 pub(super) struct Tracked {
     /// The stable mark of the code.
     pub(super) mark: u128,
-    /// The crate it is compiled as, by the id it is named by.
-    pub(super) home: [u8; 32],
+    /// The crate it is compiled as, by the id it is named by, when that is of the checkout.
+    pub(super) home: Option<[u8; 32]>,
     /// The files its code comes from, as [`super::stable::StableNames::file_path`] names
     /// them; `None` when any file can be one.
     pub(super) files: Option<Vec<String>>,
@@ -964,7 +964,7 @@ mod tests {
             debug: Some(debug(nested(6))),
             tracked: Some(Tracked {
                 mark: 7 << 100 | 3,
-                home: [5; 32],
+                home: Some([5; 32]),
                 files: Some(vec!["src/lib.rs".to_owned()]),
             }),
         }
