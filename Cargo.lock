@@ -640,6 +640,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "blaze-build-script"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_derive",
+ "serde_json",
+]
+
+[[package]]
 name = "blaze-resolve"
 version = "0.1.0"
 dependencies = [
