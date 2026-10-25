@@ -1,7 +1,8 @@
-//! `ra-jit items <project> [--out <file>]`: every item of the checkout's crates by what it is
+//! `ra-jit items <project> [--out <file>] [--refs]`: every item of the checkout's crates by what it is
 //! (`blaze-items`), one JSON object a line: its kind, crate and path, the name the daemon's
 //! patch base knows it by today (its file and its place in the file's table of items), and its
 //! `local`, `interface`, `code` and `deep` hashes. `harness/items.py` compares two commits by it.
+//! `--refs` adds what each item's slots refer to, with the hash its code hash takes of each.
 
 use std::{fmt::Write as _, io::Write as _, path::Path};
 
@@ -18,14 +19,16 @@ use crate::{Args, Parts, cargo_config, load, load_config, process_wide};
 pub(crate) fn command(mut args: impl Iterator<Item = String>) -> anyhow::Result<()> {
     let mut project = None;
     let mut out = None;
+    let mut refs = false;
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--out" => out = Some(args.next().context("--out needs a file")?),
+            "--refs" => refs = true,
             _ if project.is_none() => project = Some(arg),
             _ => anyhow::bail!("unexpected argument {arg}"),
         }
     }
-    let project = project.context("usage: ra-jit items <project> [--out <file>]")?;
+    let project = project.context("usage: ra-jit items <project> [--out <file>] [--refs]")?;
     let asked = [project.clone(), "--crate".into(), "items".into(), "--out".into(), "none".into()];
     let mut args = Args::parse(asked.into_iter())?;
     process_wide();
@@ -86,6 +89,15 @@ pub(crate) fn command(mut args: impl Iterator<Item = String>) -> anyhow::Result<
                 "deep": hex(&item.deep),
                 "missed": item.missed,
             });
+            let mut line = line;
+            if refs {
+                let named: Vec<_> = item
+                    .refs
+                    .iter()
+                    .map(|(id, hash)| format!("{} {}", names.place(*id), &hex(hash)[..12]))
+                    .collect();
+                line["refs"] = named.into();
+            }
             writeln!(text, "{line}").ok();
         }
         match &out {

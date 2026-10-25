@@ -86,6 +86,9 @@ pub struct Item {
     pub deep: Hash,
     /// Why part of the item could not be written: its hashes then say less than it is.
     pub missed: Option<&'static str>,
+    /// What its slots refer to, its signature's then its body's, each with the hash its code
+    /// hash takes of it.
+    pub refs: Vec<(ItemId, Hash)>,
 }
 
 pub struct Items {
@@ -188,6 +191,10 @@ pub fn of_crates(
         Target::Ours(at) => interface[at],
         Target::Fixed(hash) => hash,
     };
+    let target_of = |id: ItemId| match index.get(&id) {
+        Some(&at) => Target::Ours(at),
+        None => Target::Fixed(externals[&id]),
+    };
     let items = (0..nodes.len())
         .map(|at| {
             let code = nodes[at].body.as_ref().map(|_| {
@@ -206,6 +213,13 @@ pub fn of_crates(
                 .interface
                 .missed
                 .or_else(|| nodes[at].body.as_ref().and_then(|it| it.missed));
+            let refs = nodes[at]
+                .interface
+                .refs
+                .iter()
+                .chain(nodes[at].body.iter().flat_map(|it| &it.refs))
+                .map(|&r| (r, filled(target_of(r))))
+                .collect();
             Item {
                 id: ids[at],
                 local: local[at],
@@ -213,6 +227,7 @@ pub fn of_crates(
                 code,
                 deep: deep[at],
                 missed,
+                refs,
             }
         })
         .collect();
