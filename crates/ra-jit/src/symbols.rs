@@ -257,6 +257,79 @@ pub(crate) fn hashed(symbol: &str) -> u64 {
     rustc_hash::FxBuildHasher.hash_one(symbol)
 }
 
+fn hashed_bytes(bytes: &[u8]) -> u64 {
+    use std::hash::BuildHasher;
+    rustc_hash::FxBuildHasher.hash_one(bytes)
+}
+
+/// Every name a symbol of `texts` (a symbol a line) may have in its path, [`hashed_bytes`]:
+/// as many bytes as each decimal number in it says, after it, and after a `_` after it too.
+/// Both manglings write a name after its length, and v0 puts a `_` between them when the name
+/// starts with one or with a digit. A number is read from each of its digits, as one name
+/// can end in digits right before the length of the next. Some of what is found is no name
+/// (the digits of a hash, say), but no name is missed.
+fn names_in_symbols(texts: &[&str]) -> FxHashSet<u64> {
+    let chunks: Vec<&str> = texts.iter().flat_map(|text| chunks_of_lines(text, 1 << 20)).collect();
+    let next = std::sync::atomic::AtomicUsize::new(0);
+    let threads = std::thread::available_parallelism().map_or(1, |it| it.get()).min(chunks.len());
+    let found: Vec<FxHashSet<u64>> = std::thread::scope(|scope| {
+        let work = || {
+            let mut found = FxHashSet::default();
+            loop {
+                let at = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                let Some(chunk) = chunks.get(at) else { break found };
+                for line in chunk.lines() {
+                    names_in_symbol(line.as_bytes(), &mut found);
+                }
+            }
+        };
+        let threads: Vec<_> = (0..threads).map(|_| scope.spawn(work)).collect();
+        threads.into_iter().map(|it| it.join().expect("indexing names panicked")).collect()
+    });
+    let mut found = found.into_iter();
+    let mut all = found.next().unwrap_or_default();
+    found.for_each(|it| all.extend(it));
+    all
+}
+
+fn names_in_symbol(symbol: &[u8], found: &mut FxHashSet<u64>) {
+    for start in 0..symbol.len() {
+        let (mut end, mut length) = (start, 0usize);
+        while let Some(digit) = symbol.get(end).filter(|it| it.is_ascii_digit()) {
+            length = length.saturating_mul(10).saturating_add(usize::from(digit - b'0'));
+            end += 1;
+        }
+        if end == start || length == 0 {
+            continue;
+        }
+        for from in [end, end + 1] {
+            if let Some(name) = symbol.get(from..from.saturating_add(length)) {
+                found.insert(hashed_bytes(name));
+            }
+            if symbol.get(end) != Some(&b'_') {
+                break;
+            }
+        }
+    }
+}
+
+/// `text` cut after a line near every `size` bytes.
+fn chunks_of_lines(text: &str, size: usize) -> impl Iterator<Item = &str> {
+    let mut rest = text;
+    std::iter::from_fn(move || {
+        if rest.is_empty() {
+            return None;
+        }
+        let cut = match rest.get(size..).and_then(|it| it.find('\n')) {
+            Some(at) => size + at + 1,
+            None => rest.len(),
+        };
+        let (chunk, after) = rest.split_at(cut);
+        rest = after;
+        Some(chunk)
+    })
+}
+
 /// The symbols of an executable rustc linked, which a patch is spliced into.
 pub(crate) struct Linked {
     /// What it defines or takes from a library, [`hashed`].
@@ -271,8 +344,8 @@ pub(crate) struct Linked {
     /// The symbols of the functions left out of the others, being private to an object
     /// whose crate calls them its own way, a line each.
     unkept: String,
-    /// What [`Linked::has_no_function_named`] found for each name, each a search of both.
-    unnamed: std::sync::Mutex<FxHashMap<String, bool>>,
+    /// The names in the symbols of both, as [`names_in_symbols`] has them.
+    named: FxHashSet<u64>,
 }
 
 impl Linked {
@@ -285,6 +358,7 @@ impl Linked {
         by_symbol: &[PathBuf],
         shared: &FxHashSet<String>,
     ) -> anyhow::Result<Linked> {
+        let start = std::time::Instant::now();
         let file =
             std::fs::File::open(path).with_context(|| format!("reading {}", path.display()))?;
         // Only its symbols are read of it, which are a little of a program with debug info.
@@ -299,7 +373,7 @@ impl Linked {
             private: FxHashMap::default(),
             functions: String::new(),
             unkept: String::new(),
-            unnamed: Default::default(),
+            named: FxHashSet::default(),
         };
         let mut local = Vec::new();
         for symbol in object.symbols().chain(object.dynamic_symbols()) {
@@ -342,6 +416,12 @@ impl Linked {
             local.push((with_ids, path, name.to_owned(), symbol.address()));
         }
         linked.private = by_path(local, shared);
+        let read = start.elapsed();
+        linked.named = names_in_symbols(&[&linked.functions, &linked.unkept]);
+        if std::env::var_os("RA_JIT_STATS").is_some() {
+            let (read, named) = (read.as_micros(), (start.elapsed() - read).as_micros());
+            eprintln!("rustc-symbols-us: read={read} named={named}");
+        }
         Ok(linked)
     }
 
@@ -357,24 +437,7 @@ impl Linked {
     /// Whether no function in the executable has `name` anywhere in its symbol: it then has
     /// no copy of a function of that name, nor of a closure or instance of one.
     pub(crate) fn has_no_function_named(&self, name: &str) -> bool {
-        if name.is_empty() || !name.is_ascii() {
-            return false;
-        }
-        let unnamed = || self.unnamed.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some(&found) = unnamed().get(name) {
-            return found;
-        }
-        // Both manglings write a name after its length; v0 puts a `_` between them when the
-        // name starts with one or with a digit.
-        let written = [format!("{}{name}", name.len()), format!("{}_{name}", name.len())];
-        let has = |it: &String| {
-            let finder = memchr::memmem::Finder::new(it.as_bytes());
-            finder.find(self.functions.as_bytes()).is_some()
-                || finder.find(self.unkept.as_bytes()).is_some()
-        };
-        let found = !written.iter().any(has);
-        unnamed().insert(name.to_owned(), found);
-        found
+        !name.is_empty() && name.is_ascii() && !self.named.contains(&hashed_bytes(name.as_bytes()))
     }
 
     /// The copies of the instances of the generic function at `path`, each by its path, as
@@ -1187,7 +1250,7 @@ impl V0<'_> {
 mod tests {
     use std::path::PathBuf;
 
-    use rustc_hash::FxHashMap;
+    use rustc_hash::{FxHashMap, FxHashSet};
 
     use object::{
         Architecture, BinaryFormat, Endianness, SymbolFlags, SymbolKind, SymbolScope,
@@ -1195,8 +1258,8 @@ mod tests {
     };
 
     use super::{
-        Linked, SymbolTable, V0, by_path, crate_sources, function_name, names_of_object,
-        without_ids,
+        Linked, SymbolTable, V0, by_path, crate_sources, function_name, names_in_symbols,
+        names_of_object, without_ids,
     };
 
     #[test]
@@ -1253,6 +1316,33 @@ mod tests {
         assert!(!linked.has("_RNvCs5678_3dep6helper"));
         assert_eq!(linked.private("dep::helper"), None);
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn every_name_of_a_symbol_is_found() {
+        let functions = [
+            // v0, a name that ends in digits right before the next one's length.
+            "_RNvNtCs1234_6sha2563foo",
+            // Legacy, the same.
+            "_ZN4core2u83add17h0123456789abcdefE",
+            // v0 puts a `_` after the length of a name that starts with one.
+            "_RNvCs1234_3app4__bar",
+        ]
+        .join("\n");
+        let named = names_in_symbols(&[&functions, "_RNvCs1234_3app6unkept"]);
+        let linked = Linked {
+            names: FxHashSet::default(),
+            private: FxHashMap::default(),
+            functions,
+            unkept: String::new(),
+            named,
+        };
+        for name in ["sha256", "foo", "core", "u8", "add", "app", "_bar", "unkept"] {
+            assert!(!linked.has_no_function_named(name), "{name}");
+        }
+        for name in ["oo", "sha", "bar", "absent"] {
+            assert!(linked.has_no_function_named(name), "{name}");
+        }
     }
 
     #[test]
