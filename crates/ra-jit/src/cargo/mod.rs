@@ -20,6 +20,7 @@ mod state;
 pub(crate) mod switch;
 mod toolchain;
 mod units;
+mod whole;
 
 use std::{collections::BTreeMap, path::Path, process::Command, time::Instant};
 
@@ -253,6 +254,11 @@ fn build(asked: &Invocation) -> anyhow::Result<i32> {
             }
         }
         Err(unread) => {
+            if whole::asked_for(asked)
+                && let Some(code) = whole::build(asked)?
+            {
+                return Ok(code);
+            }
             if let Some(why) = unread {
                 say::cargo_builds(why, "building with cargo", say::COLD);
             }

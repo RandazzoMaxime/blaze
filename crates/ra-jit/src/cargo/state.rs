@@ -1163,7 +1163,7 @@ pub(super) fn metadata(asked: &Invocation) -> anyhow::Result<Metadata> {
     command.exec().context("running `cargo metadata`")
 }
 
-fn package_dir(package: &Package) -> PathBuf {
+pub(super) fn package_dir(package: &Package) -> PathBuf {
     package.manifest_path.parent().map(|it| it.as_std_path().to_owned()).unwrap_or_default()
 }
 
@@ -1275,7 +1275,7 @@ const LIBRARY_PATH: &str = if cfg!(windows) {
 
 /// Where the toolchain cargo builds with has the libraries of the host, `libstd` as a
 /// dynamic library among them. `None` when rustc does not say.
-fn sysroot_libraries() -> Option<PathBuf> {
+pub(super) fn sysroot_libraries() -> Option<PathBuf> {
     let rustc = rustc_path();
     let output =
         crate::answers::answer(Command::new(rustc).arg("--print=target-libdir"), &[]).ok()?;
@@ -1286,7 +1286,7 @@ fn sysroot_libraries() -> Option<PathBuf> {
 /// Where cargo has the dynamic linker look when it runs `executable`: the dependencies of
 /// the profile, the profile's own directory, the toolchain's libraries, and then wherever
 /// it looked already. A test of a proc macro is linked with the toolchain's `libstd`.
-fn library_path(executable: &Path, sysroot: Option<&Path>) -> Option<(String, String)> {
+pub(super) fn library_path(executable: &Path, sysroot: Option<&Path>) -> Option<(String, String)> {
     let inside = |it: &&Path| it.file_name().is_some_and(|it| it == "deps" || it == "examples");
     let dir = executable.parent()?;
     let profile = if inside(&dir) { dir.parent()? } else { dir };
@@ -1299,7 +1299,7 @@ fn library_path(executable: &Path, sysroot: Option<&Path>) -> Option<(String, St
 }
 
 /// The variables cargo sets for a program of `package` when it runs it.
-fn run_env(package: &Package, scripts: &[BuildScript]) -> Vec<(String, String)> {
+pub(super) fn run_env(package: &Package, scripts: &[BuildScript]) -> Vec<(String, String)> {
     let version = &package.version;
     let text = |it: &Option<String>| it.clone().unwrap_or_default();
     let mut env = vec![
@@ -1341,7 +1341,7 @@ fn run_env(package: &Package, scripts: &[BuildScript]) -> Vec<(String, String)> 
 /// directory of each directory up from it, the nearest first, then from cargo's home. Of two
 /// files in one directory cargo reads `config`, not `config.toml`. A `relative` value is a
 /// path from the directory its `.cargo` is in.
-fn configured_env(cwd: &Path) -> Vec<Configured> {
+pub(super) fn configured_env(cwd: &Path) -> Vec<Configured> {
     let in_dir = |dir: &Path| {
         ["config", "config.toml"].map(|it| dir.join(it)).into_iter().find(|it| it.is_file())
     };
