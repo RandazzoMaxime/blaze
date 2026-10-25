@@ -1136,7 +1136,7 @@ mod tests {
     #[test]
     fn an_entry_that_names_what_it_lacks_is_no_entry() {
         let broken: [fn(&mut Entry); 7] = [
-            |it| it.code.relocs.push(reloc(0, 0, 5)),
+            |it| it.code.relocs.push(reloc(0, 0, 6)),
             |it| it.code.relocs.push(reloc(0, 1, 6)),
             |it| it.code.relocs.push(reloc(32, 0, 0)),
             |it| it.code.align = 3,
@@ -1149,7 +1149,7 @@ mod tests {
             },
             |it| {
                 it.datas[1] = CachedData::Blob {
-                    blob: blob(Vec::new(), vec![(0, FuncId::from_u32(5))]),
+                    blob: blob(Vec::new(), vec![(0, FuncId::from_u32(6))]),
                     identity: DataIdentity::Own,
                 }
             },
