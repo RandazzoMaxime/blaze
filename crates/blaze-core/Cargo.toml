@@ -1,0 +1,19 @@
+[package]
+name = "blaze-core"
+description = "blaze's sans-IO core: effects a state machine asks for, completions it is given, and the drivers that run them (a deterministic simulation, threads)"
+publish = false
+
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+
+[lib]
+doctest = false
+
+[dependencies]
+
+[lints]
+workspace = true
