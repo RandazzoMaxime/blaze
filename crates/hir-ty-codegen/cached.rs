@@ -69,8 +69,8 @@ pub(super) struct WrittenItem {
     pub(super) id: u32,
     /// Of its text.
     pub(super) hash: u64,
-    /// The line and column it begins on, for one the code is written in, whose places the
-    /// code tells; `None` for one it mentions a coroutine of.
+    /// The line and column it begins on, for one whose place the code tells, or the one it is
+    /// written in when its mark has its lines; `None` for the others.
     pub(super) at: Option<(u32, u32)>,
 }
 
@@ -423,7 +423,7 @@ impl Entry {
             hasher.update((bytes.len() as u64).to_le_bytes());
             hasher.update(bytes);
         };
-        field(b"ra-jit entry 10");
+        field(b"ra-jit entry 11");
         field(program.map_or(&[][..], |it| it));
         // Code of one producer is not what another would have given.
         field(super::Backend::from_env().ok()?.to_string().as_bytes());
