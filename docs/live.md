@@ -331,5 +331,33 @@ ms to its first answer (it reserves its patch room and reads its executable firs
   changes what the rest of the program sees") for texts that never build (9 to 11 times a pass). Keys queue
   behind those answers.
 
+**On Windows x86-64.** life only, one pass, on 2026-10-25 on a desktop (Intel, 24 threads,
+Windows 11, Windows Defender on as installed), at the commit that brings live edits to Windows,
+with a daemon and home of its own and no store. All times in ms; the samples are in
+[benchmarks/live/windows-life.json](benchmarks/live/windows-life.json), the run is a line in
+`benchmarks/history/windows-x86-64-live.jsonl`.
+
+| program, mode | n | p50 | p90 | p95 | p99 | max |
+|---|---|---|---|---|---|---|
+| life, socket | 10 | 51.0 | 542 | 542 | 542 | 542 |
+| life, burst | 60 | 67.3 | 561 | 698 | 790 | 790 |
+| life, replay | 77 | 15,526 | 17,980 | 18,217 | 18,368 | 18,368 |
+| life, cargo | 10 | 186 | 195 | 195 | 195 | 195 |
+
+Restarts: 3 of 12 session edits, 2,083 (max 2,312) against 2,837 (3,425) for `cargo run`; the
+9 body edits were applied live, p50 54 (42 to 72).
+
+- The tails are the splice. Defender scans an executable the first time it is opened after it
+  is written, about half a second for life's 50 MB (the first 4 KB of a fresh copy read in 530
+  ms, the whole file again in 15). The worker copies the executable a program runs to splice
+  it (`worker.splice.copy` p50 529 in socket), and an edit that comes during that splice waits
+  for it.
+- `delivery` (17 to 20 at p50) is the program looking for a patch every 30 ms: the daemon has
+  no way to wake it on Windows.
+- replay's p50 is the queue behind 3 restarts (`cargo ra-jit build` to the program running in
+  2.3 to 4.9 s: the build 0.6 to 1.1 s, the start 0.7 to 1.1 s) that 43 keys waited for. The
+  34 keys run by a patch: p50 64.7, p90 725.
+- In `cargo`, 116 of the 186 are cargo starting and asking the daemon.
+
 Not measured yet: keystroke to changed pixels, and these modes on the CI runner
 (`.github/workflows/live-latency.yaml` runs `socket burst replay` on all four programs).
