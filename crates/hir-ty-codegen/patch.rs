@@ -16,9 +16,10 @@ use cranelift_object::{ObjectBuilder, ObjectModule};
 use hir_def::{FunctionId, HasModule, Lookup, StaticId, signatures::FunctionSignature};
 use rustc_hash::{FxBuildHasher, FxHashMap, FxHashSet};
 
-type FxIndexMap<K, V> = indexmap::IndexMap<K, V, FxBuildHasher>;
+pub(super) type FxIndexMap<K, V> = indexmap::IndexMap<K, V, FxBuildHasher>;
 
 use hir_ty::{db::HirDatabase, traits::StoredParamEnvAndCrate};
+use intern::Symbol;
 
 use super::{
     CodegenError, Instance, InstanceDef, ObjectCodegen, OwnStatics, Phases, Rejections, Result,
@@ -26,8 +27,9 @@ use super::{
     compiled_static, declaration_location,
     fragment::{CompiledFunction, DataRequest, FuncTarget, Requests},
     home::{body_file, body_files, mentioned_crates, written_in},
-    instance_serial, is_thread_local, left_to_rustc, root_serial, row_location, source_location,
-    static_serial, target,
+    instance_serial, is_thread_local, left_to_rustc,
+    naming::Naming,
+    root_serial, row_location, source_location, static_serial, target,
 };
 
 /// What a compiled function or static was when the base took it in.
@@ -592,6 +594,8 @@ pub(super) struct Base {
     reached: Vec<Reached>,
     pub(super) instances: FxIndexMap<Instance, BaseInstance>,
     homes: Homes,
+    /// What the bodies of `compiled` and `instances` name.
+    naming: Naming,
     pub(super) statics: FxHashMap<StaticId, BaseStatic>,
     /// The symbols of the functions built from entries of the store, by their stable names.
     /// No edit reaches what those are compiled from.
@@ -709,6 +713,12 @@ struct Touched {
     bodies: FxHashSet<FileId>,
     /// A file changed that we can't tell the crates of.
     any: bool,
+    /// The crates that see a file of which only the signatures of functions changed that
+    /// nothing else sees into, and the roots and instances of those whose bodies name one of
+    /// them, by their index in the base. Of what else those crates have, everything.
+    around: FxHashSet<Crate>,
+    named_roots: FxHashSet<u32>,
+    named_instances: FxHashSet<u32>,
     /// What the last look found changed.
     roots: FxHashSet<FunctionId>,
     instances: FxHashSet<Instance>,
@@ -720,9 +730,14 @@ impl Touched {
         self.any || self.crates.contains(&krate)
     }
 
+    /// [`Touched::reaches`], or one of the crates around signatures that changed.
+    fn reaches_around(&self, krate: Crate) -> bool {
+        self.reaches(krate) || self.around.contains(&krate)
+    }
+
     /// Whether a file changed since the last look.
     fn edited(&self) -> bool {
-        self.any || !self.crates.is_empty() || !self.bodies.is_empty()
+        self.any || !self.crates.is_empty() || !self.bodies.is_empty() || !self.around.is_empty()
     }
 
     /// Starts over from what a look at the whole base found: the edits before it can have
@@ -963,6 +978,14 @@ impl Base {
             compiled: compiled.to_vec(),
             marks,
             homes: Homes::new(compiled, &crates, &files, &instances),
+            naming: {
+                let start = std::time::Instant::now();
+                let naming = Naming::new(db, compiled, &instances);
+                if std::env::var_os("RA_JIT_STATS").is_some() {
+                    eprintln!("naming-us: {}", start.elapsed().as_micros());
+                }
+                naming
+            },
             crates,
             files,
             touched: Touched::default(),
@@ -1025,6 +1048,7 @@ impl Base {
             reached: Vec::new(),
             instances: FxIndexMap::default(),
             homes: Homes::default(),
+            naming: Naming::default(),
             statics: FxHashMap::default(),
             found: FxHashMap::default(),
             found_instances: FxHashMap::default(),
@@ -1318,6 +1342,51 @@ impl Base {
             self.hydrated && self.crates.iter().any(|it| self.touched.crates.contains(it));
     }
 
+    /// Notes that a file of `crates` changed in the signatures of the functions named `names`
+    /// and in bodies alone: functions of its modules and plain `impl`s, not generic, and none of
+    /// which the rest of the program sees into. What can have changed is their own code and
+    /// that of what names them, and of what is seen into that names them, and so on.
+    pub(super) fn touch_signatures(
+        &mut self,
+        db: &dyn HirDatabase,
+        crates: &[Crate],
+        file: FileId,
+        names: &[Symbol],
+    ) {
+        let reached = self.naming.made.then(|| self.naming.reach(names)).flatten();
+        let Some(reached) = reached.filter(|_| !self.rustc) else {
+            return self.touch(db, Some(crates));
+        };
+        // Its bodies too, as a body edit's.
+        self.touched.bodies.insert(file);
+        for &krate in crates {
+            if !self.touched.around.contains(&krate) {
+                self.touched.around.extend(krate.transitive_rev_deps(db));
+            }
+        }
+        let around = &self.touched.around;
+        let roots =
+            self.naming.roots(&reached).filter(|&i| around.contains(&self.crates[i as usize]));
+        self.touched.named_roots.extend(roots.collect::<Vec<_>>());
+        let instances = self.naming.instances(&reached).filter(|&i| {
+            self.instances
+                .get_index(i as usize)
+                .is_some_and(|(_, was)| around.contains(&was.env.krate))
+        });
+        self.touched.named_instances.extend(instances.collect::<Vec<_>>());
+        if std::env::var_os("RA_JIT_STATS").is_some() {
+            eprintln!(
+                "signatures: {} names reach {} names, {} roots and {} instances",
+                names.len(),
+                reached.len(),
+                self.touched.named_roots.len(),
+                self.touched.named_instances.len()
+            );
+        }
+        self.outdated |=
+            self.hydrated && self.crates.iter().any(|it| self.touched.around.contains(it));
+    }
+
     /// Notes that a file changed in the bodies of functions alone, none of which the rest of
     /// the program sees into.
     pub(super) fn touch_bodies(&mut self, db: &dyn HirDatabase, file: FileId) {
@@ -1384,6 +1453,7 @@ impl Base {
         let of_files = touched.bodies.iter().filter_map(|it| homes.roots_of_file.get(it));
         let mut asked: Vec<u32> = of_crates.chain(of_files).flatten().copied().collect();
         asked.extend(touched.roots.iter().filter_map(|it| homes.root.get(it)));
+        asked.extend(&touched.named_roots);
         if touched.edited() {
             asked.extend(&self.cached_roots);
         }
@@ -1408,6 +1478,7 @@ impl Base {
         if !touched.bodies.is_empty() {
             asked.extend(&homes.instances_of_any_file);
         }
+        asked.extend(&touched.named_instances);
         if touched.edited() {
             asked.extend(&self.cached_instances);
         }
@@ -1442,6 +1513,7 @@ impl Base {
             let touched = self.touched.reaches(self.crates[i])
                 || self.touched.reaches_bodies(Some(&[self.files[i]]))
                 || self.touched.roots.contains(&root)
+                || self.touched.named_roots.contains(&(i as u32))
                 || self.touched.edited() && self.cached_roots.binary_search(&(i as u32)).is_ok();
             if !touched && !check_all {
                 continue;
@@ -1462,8 +1534,8 @@ impl Base {
             }
         }
         for (root, was, file) in self.unnamed.iter().skip(part).step_by(parts) {
-            let touched =
-                self.touched.reaches(root.krate(db)) || self.touched.reaches_bodies(Some(&[*file]));
+            let touched = self.touched.reaches_around(root.krate(db))
+                || self.touched.reaches_bodies(Some(&[*file]));
             if !touched {
                 continue;
             }
@@ -1478,7 +1550,7 @@ impl Base {
             }
         }
         for homed in self.closures.iter().skip(part).step_by(parts) {
-            let touched = self.touched.reaches(homed.root.krate(db))
+            let touched = self.touched.reaches_around(homed.root.krate(db))
                 || self.touched.reaches_bodies(Some(&[homed.file]));
             if !touched {
                 continue;
@@ -1515,6 +1587,7 @@ impl Base {
             let touched = self.touched.reaches(was.env.krate)
                 || self.touched.reaches_bodies(was.files.as_deref())
                 || self.touched.instances.contains(instance)
+                || self.touched.named_instances.contains(&(i as u32))
                 || self.touched.edited()
                     && self.cached_instances.binary_search(&(i as u32)).is_ok();
             if !touched && !check_all {
@@ -1543,7 +1616,7 @@ impl Base {
         }
         stale.steps.instances = start.elapsed() - stale.steps.roots;
         for (&id, was) in self.statics.iter().skip(part).step_by(parts) {
-            let touched = self.touched.reaches(was.krate)
+            let touched = self.touched.reaches_around(was.krate)
                 || self.touched.reaches_bodies(Some(&[was.file]))
                 || self.touched.statics.contains(&id);
             if !touched && !check_all {
@@ -1577,7 +1650,7 @@ impl Base {
         for i in every(self.skipped.len()) {
             let Some(was) = &self.left[i] else { continue };
             let root = self.skipped[i].0;
-            let touched = self.touched.reaches(root.krate(db))
+            let touched = self.touched.reaches_around(root.krate(db))
                 || self.touched.reaches_bodies(Some(&[body_file(db, root.into())]));
             if !touched && !check_all {
                 continue;
@@ -1597,7 +1670,7 @@ impl Base {
         }
         for i in every(self.their_walk.instances.len()) {
             let was = &self.their_walk.instances[i];
-            if !self.touched.reaches(was.env.krate)
+            if !self.touched.reaches_around(was.env.krate)
                 && !self.touched.reaches_bodies(was.files.as_deref())
             {
                 continue;
@@ -1613,7 +1686,9 @@ impl Base {
         }
         for i in every(self.their_walk.statics.len()) {
             let was = &self.their_walk.statics[i];
-            if !self.touched.reaches(was.krate) && !self.touched.reaches_bodies(Some(&[was.file])) {
+            if !self.touched.reaches_around(was.krate)
+                && !self.touched.reaches_bodies(Some(&[was.file]))
+            {
                 continue;
             }
             let serial = probe(|| {

@@ -95,6 +95,16 @@ pub(super) fn mentioned_crates(
     (!mentions.opaque).then_some(mentions.crates)
 }
 
+/// The bodies an instance has the code of or mentions a type of, or `None` when that can't be
+/// told.
+pub(super) fn mentioned_bodies(
+    db: &dyn HirDatabase,
+    instance: &Instance,
+) -> Option<Vec<DefWithBodyId>> {
+    let mentions = Mentions::of(db, instance);
+    (!mentions.opaque).then_some(mentions.bodies)
+}
+
 /// The function the code of an instance is written in: its own, or the one a closure or an
 /// `async` block is in. The symbol of every copy of the instance has its name.
 pub(super) fn written_in(db: &dyn HirDatabase, instance: &Instance) -> Option<FunctionId> {

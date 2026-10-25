@@ -8659,7 +8659,9 @@ fn run_holding(
         let before_outlines = start.elapsed();
         let sources = outlines.after_edit(&db, &listed, sources);
         let outlined = start.elapsed();
-        for outline::Changed { file, bodies_only, copied, generics, inline, added } in sources {
+        for outline::Changed { file, bodies_only, copied, generics, inline, added, signatures } in
+            sources
+        {
             if copied || !generics.is_empty() || !inline.is_empty() {
                 let why = "an edit of a generic, inline or default trait function, which rustc copies into its callers";
                 let inline_unlinked = |program: &Program| {
@@ -8690,6 +8692,18 @@ fn run_holding(
             }
             let crates = ide_db::base_db::relevant_crates(&db, file);
             let crates = (!crates.is_empty()).then_some(crates);
+            if let Some(crates) = crates.filter(|_| !signatures.is_empty()) {
+                if std::env::var_os("RA_JIT_STATS").is_some() {
+                    eprintln!("signatures only: {file:?} {}", signatures.join(" "));
+                }
+                let names: Vec<&str> = signatures.iter().map(String::as_str).collect();
+                for program in &mut programs {
+                    program.known.touch_signatures(&db, crates, file, &names);
+                }
+                // Which functions and statics each crate has, and their attributes, are as
+                // they were.
+                continue;
+            }
             programs.iter_mut().for_each(|it| it.known.touch(&db, crates));
             listed.touch(&db, crates);
         }
