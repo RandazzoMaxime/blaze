@@ -8,6 +8,14 @@ All notable changes to ra-jit are written here. The format follows
 
 ### Added
 
+- blaze on Linux needs glibc 2.34 or newer (RHEL 9, Debian 12, Ubuntu 22.04), and the release
+  holds it there (#351): `build_release.py` refuses a Linux binary, the proc-macro server's
+  included, that asks for a newer glibc; install.sh says what a system below it lacks instead
+  of a program that does not start; and the install workflow builds this commit as the release
+  does, on Ubuntu 22.04 with the server, and installs it with no Rust in Debian 13, Debian 12,
+  Ubuntu 22.04 and RHEL 9 (UBI 9) containers, each running `blaze run` and a derive from
+  crates.io expanded by blaze's server, edited once.
+
 - `crates/blaze-registry` fetches every kind of source a lock file names, as cargo 1.99
   does (#298): `[source]` replacement as cargo's `SourceConfigMap` (`replace-with` chains to a
   registry, a local registry, a directory, a git repository or a `[registries]` name, and
