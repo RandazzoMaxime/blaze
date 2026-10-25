@@ -277,5 +277,24 @@ interleaved, two rounds each:
   written in `search` (`filter_map`, `sort_by`, `attach_timestamps`), which the edit renamed: a
   closure's stable name is the index of its expression in the body, which the added statement
   moves (**read**, a temporary print of what a patch compiles). Main compiled those instances
-  at the start, and its patch is 21 functions (**read**); that it reuses them because it
-  knows them by instance where the store knows them by name is **unverified**.
+  at the start, and its patch is 21 functions (**read**): rust-analyzer interns a closure by
+  its place among the closures of its body (`ClosureKey` in `hir-ty/src/db.rs`), which the
+  added statement leaves, so the instances the base compiled are the patch's (**read**).
+
+## Closures named by their place (2026-10-25)
+
+The stable name of a closure is now its place among the closures of its body, as it is
+interned. Before is `store-copies`, after is `closure-names`; dev-aws-5, warmstart.py, the two
+interleaved:
+
+| | before | after |
+|---|---|---|
+| ripgrep first edit after the restart | 0.29 s, 176 functions patched | 0.26 s, 19 |
+| nushell first edit after the restart | 0.58, 0.61 s, 66 functions patched | 0.51, 0.54 s, 17 |
+| ripgrep / nushell `restart` build | 4.31 / 20.02 s | 4.34 / 19.91 s |
+
+- What is left of the edit is the look for what it made stale: 166 ms on ripgrep ("check" in
+  the timeline), where main took 21 ms. Each function from the store in the edited file, and
+  what calls it, is compiled again to compare its mark with the store's: 382 functions on
+  ripgrep, 411 on nushell ("stats"), where the build that compiled them at its start had them
+  at hand (**read**).
