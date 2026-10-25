@@ -59,11 +59,21 @@ cargo rejects is rejected with cargo's message. Part of the self-contained blaze
 
 `cargo blaze` reads the workspace with it (`crates/ra-jit/src/cargo/metadata.rs`): every
 command's `cargo metadata --no-deps`, with `--manifest-path` and `--config` as the command was
-given them. A manifest cargo refuses ends the command with cargo's message and status 101. The
-daemon's loads still go through rust-analyzer's project model and cargo's full `cargo metadata`.
+given them. A manifest cargo refuses ends the command with cargo's message and status 101.
 
-Not yet: dependencies resolved (the `resolve` of `cargo metadata`, with the lock file, waits
-for `crates/blaze-resolve`), the unit graph itself (the `profiles` example walks cargo's),
+The daemon's loads read the workspace with `crates/blaze-metadata` (2026-10-25): the root found
+without `cargo locate-project`, every package the lock file locks fetched by blaze-registry
+where cargo keeps it, and the graph of the build the load is for, not `cargo metadata`'s: the
+features and edges `cargo build` with the load's `-p`, `--workspace`, `--exclude` and
+`--features` would build, for the load's target, and the packages it reaches. `cargo metadata`
+unifies features over every member, so a load of one member used to have edges to crates only
+another member's features reach (axum's examples to `mime_guess` through `tower-http/fs`) whose
+build scripts the build never ran, and `env!` of their variables failed. What it does not read
+yet goes to cargo's `cargo metadata` with the reason printed: no lock file, or one the
+manifests no longer agree with (#321), `[replace]`, a registry with a git index.
+`RA_JIT_OWN_RESOLVE=0` sends every load to cargo.
+
+Not yet: the unit graph itself (the `profiles` example walks cargo's),
 the unstable profile keys (`trim-paths`, `rustflags`, `codegen-backend`, which need nightly
 `cargo-features`), `links` overrides in `[target.<triple>]`, a source defined twice under two names
 (blaze-registry's, which has the `SourceId` display it names), and the warnings cargo prints for

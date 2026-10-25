@@ -7158,6 +7158,7 @@ fn cargo_config(args: &Args) -> CargoConfig {
         extra_args: selected(&args),
         only_manifest_package: true,
         executables: executables_of(&args.symbol_files),
+        own_metadata: cargo::metadata::own(&args.selection),
         target_dir_config: match args.own_target {
             true => TargetDirectoryConfig::UseSubdirectory,
             false => TargetDirectoryConfig::None,
