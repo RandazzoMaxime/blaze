@@ -46,7 +46,8 @@ pub(crate) fn command(args: impl Iterator<Item = String>) -> anyhow::Result<()> 
         Asked::Build(asked) => match asked.only_cargo() {
             None if asked.flags.doc => run::only_doc_tests(&asked, &asked.typed)?,
             Some(reason) => {
-                say::fallback(&reason, &format!("this is `cargo {}`", asked.subcommand.name()));
+                let then = format!("this is `cargo {}`", asked.subcommand.name());
+                say::cargo_builds(&reason, &then, say::EDIT);
                 let typed = std::iter::once(asked.subcommand.name().to_owned()).chain(asked.typed);
                 plain_cargo(typed.collect())?
             }
@@ -235,7 +236,7 @@ fn build(asked: &Invocation) -> anyhow::Result<i32> {
             return Ok(FAILED);
         }
         Ok(Err(NotServed::Cargo(ToCargo(state, reason)))) => {
-            say::fallback(&reason, "building with cargo");
+            say::cargo_builds(&reason, "building with cargo", say::EDIT);
             let mut counts = state.counts;
             *counts.cargo.entry(reason).or_default() += 1;
             match by_cargo(asked, &cwd, &key, counts, None)? {
@@ -245,7 +246,7 @@ fn build(asked: &Invocation) -> anyhow::Result<i32> {
         }
         Err(unread) => {
             if let Some(why) = unread {
-                say::fallback(why, "building with cargo");
+                say::cargo_builds(why, "building with cargo", say::COLD);
             }
             match staged(asked, &cwd, &key)? {
                 Ok((state, settled)) => {
@@ -256,7 +257,7 @@ fn build(asked: &Invocation) -> anyhow::Result<i32> {
                 Err(NotStaged::Failed(code)) => return Ok(code),
                 Err(NotStaged::Cargos(why, ahead)) => {
                     if let Some(why) = why {
-                        say::fallback(&why, "building with cargo");
+                        say::cargo_builds(&why, "building with cargo", say::COLD);
                     }
                     match by_cargo(asked, &cwd, &key, Counts::default(), ahead)? {
                         Ok(state) => state,

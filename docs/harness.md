@@ -155,7 +155,9 @@ with reasons. The daemon's log says `backend: llvm -O2 fast emit` when LLVM is i
 `shapes.py`, `heap.py`, `heapfold.py`, `leanprof.py`, `cpufold.py`, `memsplit.py`, `fnincr.py`, `realbench.py`, `spare.py`, `live_latency.py` and `testselectbench.py` measure and do not gate.
 `testselectbench.py` runs `bench.py`'s projects' tests under a daemon with `RA_JIT_TESTS=all` and
 `affected`, before and after `bench.py`'s `leaf` edit: the wall time, the tests run and skipped,
-and how many run every time and why, from what the daemon wrote beside each test program.
+and how many run every time and why, from what the daemon wrote beside each test program. It
+exits 1 when a build after the daemon first served one went to cargo (#84): ripgrep's and
+helix-core's edits are the daemon's to build.
 `memsplit.py` says what each process of the daemon holds (the daemon, the project's worker, the
 spare) and of what kind of page, once ready, once the daemon has built its own base and after
 edits, with `--env` to try an allocator setting

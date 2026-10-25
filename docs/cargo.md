@@ -76,7 +76,7 @@ cargo said of the build scripts it ran and the proc macros it built, kept in
 `target/rust-analyzer` or anywhere else. Until the workspace is loaded,
 builds are cargo's, and each one says so:
 
-    ra-jit: the daemon is still loading the workspace (951ms so far); building with cargo
+    ra-jit: bug: the daemon is still loading the workspace (951ms so far); building with cargo, which ra-jit is never to do (no-rustc M, #93, and #84)
 
 Once the daemon is ready, a build after an edit does not start cargo at all. The daemon
 compiles the functions that changed and either splices them into the executable or links
@@ -201,8 +201,15 @@ warm one is quicker (2.14 s, 6.83 s).
 ## When cargo builds instead
 
 ra-jit hands a build to cargo whenever it cannot be sure its own result would be what cargo's
-is. It prints one line with the reason, `ra-jit: <reason>; building with cargo`, and counts
-it in `cargo ra-jit status`. The build then behaves as cargo's because it is cargo's.
+is. It prints one line with the reason, `ra-jit: bug: <reason>; building with cargo, which
+ra-jit is never to do (<step>, and #84)`, and counts it in `cargo ra-jit status`. Each is a bug:
+ra-jit is never to build with cargo
+([#84](https://github.com/indexable-inc/ra-jit/issues/84)); the line names the step of
+[no-rustc.md](no-rustc.md) that removes it, M ([#93](https://github.com/indexable-inc/ra-jit/issues/93))
+for an edit's build and K ([#91](https://github.com/indexable-inc/ra-jit/issues/91)) for a first
+build; a reason of the test harness names H ([#88](https://github.com/indexable-inc/ra-jit/issues/88)), and a
+function ra-jit does not compile whose rustc copy is from before the edit names E
+([#85](https://github.com/indexable-inc/ra-jit/issues/85)). The build then behaves as cargo's because it is cargo's.
 
 A whole invocation goes to cargo when any of these hold (`Invocation::only_cargo` in
 `cargo/cli.rs`); for `check` only `--build-plan` and `--unit-graph` do:
