@@ -2,10 +2,8 @@
 //! (`src/workspace/registry.rs`), `QueryKind` (`src/sources/source.rs`) and `IndexSummary`
 //! (`src/sources/registry/index/mod.rs`).
 
-use rustc_hash::FxHashMap;
-use std::task::Poll;
-
 use anyhow::Result;
+use rustc_hash::FxHashMap;
 
 use crate::dependency::Dependency;
 use crate::interning::InternedString;
@@ -90,25 +88,23 @@ impl IndexSummary {
 /// The sources as the resolver sees them, with `[patch]`, `[replace]` and source replacement
 /// already applied by whoever implements it.
 ///
-/// A query that needs the network may answer `Poll::Pending` and fetch in the background;
-/// the resolver then asks everything else it can, calls [`Registry::block_until_ready`] and
-/// starts again, so a whole graph's index files are fetched at once.
+/// A query that needs the network awaits it. The resolver asks for everything it can, runs
+/// what is pending at once and starts again, so a graph's index files are fetched together.
+/// It polls on one thread, so the futures need not be `Send`.
+#[allow(async_fn_in_trait)]
 pub trait Registry {
     /// Calls `f` with each summary of `dep`'s name that matches it as `kind` says.
-    fn query(
-        &mut self,
+    async fn query(
+        &self,
         dep: &Dependency,
         kind: QueryKind,
         f: &mut dyn FnMut(IndexSummary),
-    ) -> Poll<Result<()>>;
+    ) -> Result<()>;
 
-    fn query_vec(&mut self, dep: &Dependency, kind: QueryKind) -> Poll<Result<Vec<IndexSummary>>> {
+    async fn query_vec(&self, dep: &Dependency, kind: QueryKind) -> Result<Vec<IndexSummary>> {
         let mut ret = Vec::new();
-        self.query(dep, kind, &mut |s| ret.push(s)).map_ok(|()| ret)
+        self.query(dep, kind, &mut |s| ret.push(s)).await.map(|()| ret)
     }
-
-    /// Waits for every query that answered `Pending`.
-    fn block_until_ready(&mut self) -> Result<()>;
 
     /// How to name the source in messages.
     fn describe_source(&self, source: SourceId) -> String;
@@ -144,12 +140,12 @@ impl FromIterator<Summary> for MemRegistry {
 }
 
 impl Registry for MemRegistry {
-    fn query(
-        &mut self,
+    async fn query(
+        &self,
         dep: &Dependency,
         kind: QueryKind,
         f: &mut dyn FnMut(IndexSummary),
-    ) -> Poll<Result<()>> {
+    ) -> Result<()> {
         let normalized = |s: &str| s.replace('-', "_");
         for (name, summaries) in &self.packages {
             let name_matches = match kind {
@@ -174,10 +170,6 @@ impl Registry for MemRegistry {
                 }
             }
         }
-        Poll::Ready(Ok(()))
-    }
-
-    fn block_until_ready(&mut self) -> Result<()> {
         Ok(())
     }
 
@@ -201,8 +193,10 @@ mod tests {
         Summary::new(id, vec![], &BTreeMap::new(), None::<&str>, None).unwrap()
     }
 
-    fn versions(r: &mut MemRegistry, dep: &Dependency, kind: QueryKind) -> Vec<String> {
-        let Poll::Ready(Ok(found)) = r.query_vec(dep, kind) else { panic!() };
+    fn versions(r: &MemRegistry, dep: &Dependency, kind: QueryKind) -> Vec<String> {
+        let mut query = std::pin::pin!(r.query_vec(dep, kind));
+        let cx = &mut std::task::Context::from_waker(std::task::Waker::noop());
+        let std::task::Poll::Ready(Ok(found)) = query.as_mut().poll(cx) else { panic!() };
         let mut found: Vec<_> = found
             .iter()
             .map(|s| {
@@ -226,14 +220,56 @@ mod tests {
         r.add(IndexSummary::Candidate(summary("foo", "2.0.0")));
         r.add(IndexSummary::Candidate(summary("foo_bar", "1.0.0")));
         let dep = Dependency::parse("foo", Some("1"), SourceId::crates_io()).unwrap();
-        assert_eq!(versions(&mut r, &dep, QueryKind::Exact), ["1.0.0", "1.1.0 yanked"]);
+        assert_eq!(versions(&r, &dep, QueryKind::Exact), ["1.0.0", "1.1.0 yanked"]);
         assert_eq!(
-            versions(&mut r, &dep, QueryKind::RejectedVersions),
+            versions(&r, &dep, QueryKind::RejectedVersions),
             ["1.0.0", "1.1.0 yanked", "1.2.0"]
         );
 
         let dep = Dependency::parse("foo-bar", Some("1"), SourceId::crates_io()).unwrap();
-        assert!(versions(&mut r, &dep, QueryKind::Exact).is_empty());
-        assert_eq!(versions(&mut r, &dep, QueryKind::AlternativeNames), ["1.0.0"]);
+        assert!(versions(&r, &dep, QueryKind::Exact).is_empty());
+        assert_eq!(versions(&r, &dep, QueryKind::AlternativeNames), ["1.0.0"]);
+    }
+
+    /// A registry that waits once before it answers, as one fetching an index file does.
+    struct Fetching(MemRegistry);
+
+    impl Registry for Fetching {
+        async fn query(
+            &self,
+            dep: &Dependency,
+            kind: QueryKind,
+            f: &mut dyn FnMut(IndexSummary),
+        ) -> Result<()> {
+            let mut fetched = false;
+            std::future::poll_fn(|_| {
+                if std::mem::replace(&mut fetched, true) {
+                    std::task::Poll::Ready(())
+                } else {
+                    std::task::Poll::Pending
+                }
+            })
+            .await;
+            self.0.query(dep, kind, f).await
+        }
+
+        fn describe_source(&self, source: SourceId) -> String {
+            self.0.describe_source(source)
+        }
+
+        fn is_replaced(&self, source: SourceId) -> bool {
+            self.0.is_replaced(source)
+        }
+    }
+
+    #[test]
+    fn a_query_may_wait() {
+        let r = Fetching([summary("foo", "1.0.0")].into_iter().collect());
+        let dep = Dependency::parse("foo", Some("1"), SourceId::crates_io()).unwrap();
+        let mut query = std::pin::pin!(r.query_vec(&dep, QueryKind::Exact));
+        let cx = &mut std::task::Context::from_waker(std::task::Waker::noop());
+        assert!(query.as_mut().poll(cx).is_pending());
+        let std::task::Poll::Ready(Ok(found)) = query.as_mut().poll(cx) else { panic!() };
+        assert_eq!(found.len(), 1);
     }
 }

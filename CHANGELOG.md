@@ -16,6 +16,8 @@ All notable changes to ra-jit are written here. The format follows
   requirement; `Summary` and its feature map, with the implicit features of optional dependencies
   and cargo's errors for features; and the `Registry` the resolver asks, with yanked and offline
   versions marked. Its tests include cargo's own for these types.
+- `blaze-resolve`'s `Registry` is cargo 1.99.0's: `query(&self, ..)` is an `async fn` that
+  awaits what it fetches, in place of answering `Poll::Pending` and a `block_until_ready` (#298).
 - `blaze-resolve` reads and writes `Cargo.lock` as cargo 1.99.0 does (#298): every encoding
   from 1 (checksums in `[metadata]`) to 4 (git references URL-encoded), `[[patch.unused]]` and
   `[replace]`, the comments above cargo's header kept, and a lock file written back byte for
