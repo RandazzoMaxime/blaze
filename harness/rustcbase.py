@@ -125,6 +125,8 @@ fn main() {
     println!("later {}", block_on(later(5)));
     println!("mapped {:?}", mapped(&[1, 2]));
     println!("dep {}", dep::value(2));
+    dep::noop();
+    println!("one {}", dep::one());
     println!("asset {}", ASSET.trim());
     if args.first().is_some_and(|it| it == "panic") {
         fails(1);
@@ -141,7 +143,9 @@ FILES = {
     "dep/Cargo.toml": '[package]\nname = "dep"\nversion = "0.1.0"\nedition = "2024"\n',
     "dep/src/lib.rs": "pub fn value(x: u64) -> u64 {\n    x + 100\n}\n\n"
                       "#[inline]\npub fn spare_inline(x: u64) -> u64 {\n    x + 7\n}\n\n"
-                      "#[allow(dead_code)]\nfn never_called(x: u64) -> u64 {\n    x + 8\n}\n",
+                      "#[allow(dead_code)]\nfn never_called(x: u64) -> u64 {\n    x + 8\n}\n\n"
+                      "#[inline(never)]\npub fn noop() {}\n\n"
+                      "#[inline(never)]\npub fn one() -> u8 {\n    1\n}\n",
 }
 
 M = "app/src/main.rs"
@@ -229,6 +233,13 @@ SCENARIOS = {
     "new-fn-named": ([[edit(M, "    x * 3\n}\n", "    value(x) * 3\n}\n\nfn value(x: u64) -> u64 {\n    x + 2\n}\n")]],
                      ["full"], 0, {}),
     "dep": ([[edit("dep/src/lib.rs", "x + 100", "x + 200")]], ["patch"], 0, {}),
+    # rustc's `noop` is a `ret`, shorter than a jump: the jump goes over the padding after it.
+    "short": ([[edit(D, "pub fn noop() {}\n", "pub fn noop() {\n    std::hint::black_box(1u8);\n}\n")]],
+              ["patch"], 0, {}),
+    # rustc's `one` is shorter than a jump too, and told the padding is not there it hops: two
+    # bytes of jump to the linker's traps near it, and a jump on from there.
+    "hop": ([[edit(D, "pub fn one() -> u8 {\n    1\n", "pub fn one() -> u8 {\n    2\n")]],
+            ["patch"], 0, {"RA_JIT_SPLICE_HOPS": "1"}),
     "counted-body": ([[edit(M, "Ordering::Relaxed) + 1", "Ordering::Relaxed) + 2")]], ["patch"], 0, {}),
     "unused-std": ([[edit(M, "    x * 3\n", "    let _ = std::os::unix::process::parent_id();\n    x * 3\n")]],
                    [None], 0, {}),
