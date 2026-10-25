@@ -393,6 +393,20 @@ All notable changes to ra-jit are written here. The format follows
 
 ### Changed
 
+- A function whose code calls rustc's copy of a function of the checkout is kept in the
+  store, and so is what calls it (#216). Such a copy is of a small function that is not
+  generic, which rustc compiled into the crate that calls it, as ripgrep's `Match::start`
+  in `rg`; the entry names the function and the copy, and the build that takes it from the
+  store calls the copy as one that compiled the caller would. A restart of nushell with
+  nothing changed (warmstart.py, dev-aws-5, two interleaved rounds) compiles 17 functions
+  where it compiled 25,844, finds 7,622 of its 12,559 roots in the store where it found
+  4,888, and takes 19.7 to 19.9 s where it took 22.8 to 22.9 s; ripgrep's compiles none
+  where it compiled 2,375 and takes 4.25 to 4.33 s where it took 4.61 to 4.68 s. The first
+  edit after such a start takes longer (nushell 0.58 s where 0.33 s, ripgrep 0.29 s where
+  0.08 s): a closure is named by where in its body it is written, so an edit above it
+  renames it and what is generic over it, which a patch compiles again when it came from the
+  store. `storetracked.py` checks that a restart keeps such calls and that an edit of the
+  copied function reaches the callers from the store.
 - Proc macros are blaze's by default where its server is beside `ra-jit`: the daemon's
   loads, `--check` and build scripts expand with libraries ra-jit makes from each crate's
   record, kept in the store by what they were linked from, so another target directory takes

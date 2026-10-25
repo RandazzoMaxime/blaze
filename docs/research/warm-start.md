@@ -236,3 +236,46 @@ after #295 (`stable-marks`), after is the branch; dev-aws-7 (64 vCPUs, nothing e
   for rustc's copy that says which build of the checkout it is of (**unverified** which).
 - So the cold compile at a nushell restart is still 6,401 functions and 51,413 instances in
   14.4 s, as before (**read**, "cold:").
+
+## Calls of rustc's copies kept in the store (#216, 2026-10-25)
+
+An entry whose function called rustc's copy of a function of the checkout was not kept ("rustc's
+copy of a function of the checkout"), and every entry that called it was not found ("an entry
+that calls what cannot be used"). The entry now names the function and the copy
+(`CachedTarget::Copy`): the build that takes it wants the function compiled and calls the copy,
+as `callee` does in a build that compiles the caller. What `callee` decides by is in the names
+the entry is kept under (the crate's content and ` checked` in the stable name, the program in
+the key) but for whether the program links the copy, which `links` asks, and for a function
+that returns a future, which stays refused. Before is main at 820c02e20b, after is the branch;
+dev-aws-5 (64 vCPUs, one other lane's tests running beside), `harness/warmstart.py`, the two
+interleaved, two rounds each:
+
+| | before | after |
+|---|---|---|
+| ripgrep `restart` build | 4.68, 4.61 s | 4.33, 4.25 s |
+| ripgrep functions compiled at `restart` | 2,375 | 0 |
+| ripgrep roots found in the store | 1,397 of 2,560 | 1,743 of 2,560 |
+| nushell `restart` build | 22.87, 22.75 s | 19.90, 19.68 s |
+| nushell `again` build | 22.86, 22.89 s | 19.53, 19.93 s |
+| nushell functions compiled at `restart` | 25,844 | 17 |
+| nushell roots found in the store | 4,888 of 12,559 | 7,622 of 12,559 |
+| nushell "not kept" / "not found" | 6,736 / 23,629 | 6 / 5 |
+| nushell first edit after the restart | 0.33 s | 0.58 s |
+| ripgrep first edit after the restart | 0.08 s | 0.29 s |
+
+- Where the nushell restart's 19.9 s go now (**read**, `said-restart.txt`): the spare worker's
+  crates 2.3 s and the workspace 1.1 s, rustc's symbols 2.2 s, name resolution 4.3 s (69 def
+  maps with a procedural macro are not frozen), then the code: finding the stored roots 3.9 s,
+  defining 1.4 s, writing the object 2.6 s, 9.9 s in all, and the link 0.8 s.
+- Finding the stored roots reads every entry whole, 155,843 of them, about 58 s summed over the
+  cores ("store read"), where the build before read 130,019 while it compiled. The blocks the
+  store unpacked lately are 32 MB; with 4 GB the reads take 46.5 s and the restart 19.1 s
+  (**read**, one run each), so unpacking a block again is not most of it.
+- The first edit after the restart is slower: warmstart's edit adds a line at the top of
+  `search` in ripgrep's `crates/core/main.rs`. 18 functions of that file from the store are
+  stale, as their lines moved, and the patch compiles 158 instances generic over closures
+  written in `search` (`filter_map`, `sort_by`, `attach_timestamps`), which the edit renamed: a
+  closure's stable name is the index of its expression in the body, which the added statement
+  moves (**read**, a temporary print of what a patch compiles). Main compiled those instances
+  at the start, and its patch is 21 functions (**read**); that it reuses them because it
+  knows them by instance where the store knows them by name is **unverified**.
