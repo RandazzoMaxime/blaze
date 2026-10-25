@@ -17,6 +17,10 @@ ran and passed beside it), and with
 output says why the one that reads a file runs, by the calls from it to the file system, and
 how many tests run every time.
 
+Where tests that reach the world outside their code run sandboxed (Linux, unless
+`RA_JIT_SANDBOX=off`), the one that reads a file runs again only when the file changed, `-v`
+says which file, and a test that writes into the package changes nothing of it outside its run.
+
 Python 3, stdlib only.
 """
 import os
@@ -73,7 +77,7 @@ mod tests {
 
     #[test]
     fn reads_a_file() {
-        assert!(std::fs::read_to_string("Cargo.toml").unwrap().contains("tsel"));
+        assert!(std::fs::read_to_string("data.txt").unwrap().contains("tsel"));
     }
 
     #[test]
@@ -85,6 +89,7 @@ mod tests {
 FILES = {
     "Cargo.toml": '[package]\nname = "tsel"\nversion = "0.1.0"\nedition = "2021"\n',
     "src/lib.rs": LIB,
+    "data.txt": "tsel\n",
     "tests/it.rs": """#[test]
 fn it_helper() {
     assert_eq!(tsel::helper(0), 1);
@@ -99,42 +104,72 @@ fn it_other() {
 CALL_HELPER = {"tests::uses_helper", "tests::uses_any", "tests::uses_a_map", "tests::shows_a_backtrace", "it_helper"}
 ALL = CALL_HELPER | {"tests::uses_other", "tests::reads_a_file", "tests::plain", "it_helper", "it_other"}
 FILE = "tests::reads_a_file"
+WRITES = "tests::writes_a_file"
+SANDBOXED = sys.platform == "linux" and os.environ.get("RA_JIT_SANDBOX") not in ("off", "0")
+# The test that reads a file, in a step that did not change the file: where it runs sandboxed,
+# it is skipped like any other unchanged test.
+F = set() if SANDBOXED else {FILE}
 # (what the step is, [(file, old, new)], RA_JIT_TESTS, the tests that run, whether they pass)
 STEPS = [
-    ("nothing edited", [], "affected", {FILE}, True),
+    ("nothing edited", [], "affected", F, True),
     ("a function one test calls", [("src/lib.rs", "x + 1", "x + 2 - 1")], "affected",
-     CALL_HELPER | {FILE}, True),
+     CALL_HELPER | F, True),
     ("a function another test calls", [("src/lib.rs", "x * 2", "x + x")], "affected",
-     {"tests::uses_other", "it_other", FILE}, True),
+     {"tests::uses_other", "it_other"} | F, True),
     ("a test added", [("src/lib.rs", "    #[test]\n    fn plain()",
                        "    #[test]\n    fn added() {\n        assert_eq!(helper(2), 3);\n    }\n\n"
                        "    #[test]\n    fn plain()")], "affected",
-     {"tests::added", FILE}, True),
+     {"tests::added"} | F, True),
     ("a test ignored", [("src/lib.rs", "    #[test]\n    fn plain()", "    #[test]\n    #[ignore]\n    fn plain()")],
-     "affected", {"tests::plain", FILE}, True),
+     "affected", {"tests::plain"} | F, True),
     ("a test that fails", [("src/lib.rs", "other(2), 4", "other(2), 5")], "affected",
-     {"tests::uses_other", FILE}, False),
-    ("nothing edited after it failed", [], "affected", {"tests::uses_other", FILE}, False),
+     {"tests::uses_other"} | F, False),
+    ("nothing edited after it failed", [], "affected", {"tests::uses_other"} | F, False),
     ("the test fixed", [("src/lib.rs", "other(2), 5", "other(2), 4")], "affected",
-     {"tests::uses_other", FILE}, True),
+     {"tests::uses_other"} | F, True),
     # The unit tests fail, so cargo runs no integration test after them.
     ("one of several reached failing", [("src/lib.rs", "x + 2 - 1", "x + 3 - 2"),
                                          ("src/lib.rs", "assert_eq!(helper(1), 2);", "assert_eq!(helper(1), 3);")],
-     "affected", CALL_HELPER - {"it_helper"} | {"tests::added", FILE}, False),
-    ("nothing edited after one failed", [], "affected", {"tests::uses_helper", FILE}, False),
+     "affected", CALL_HELPER - {"it_helper"} | {"tests::added"} | F, False),
+    ("nothing edited after one failed", [], "affected", {"tests::uses_helper"} | F, False),
     ("that one fixed", [("src/lib.rs", "assert_eq!(helper(1), 3);", "assert_eq!(helper(1), 2);")],
-     "affected", {"tests::uses_helper", "it_helper", FILE}, True),
+     "affected", {"tests::uses_helper", "it_helper"} | F, True),
     ("every test asked for", [], "all", ALL | {"tests::added"}, True),
-    ("nothing edited again", [], "affected", {FILE}, True),
-    ("why a test runs every time", [], "affected -v", {FILE}, True),
+    ("nothing edited again", [], "affected", F, True),
+    ("why a test runs every time", [], "affected -v", F, True),
 ]
+if SANDBOXED:
+    STEPS += [
+        ("the file a test reads edited", [("data.txt", "tsel", "tsel tsel")], "affected -v", {FILE}, True),
+        ("nothing edited after the file", [], "affected", set(), True),
+        ("a test that writes into the package", [
+            ("src/lib.rs", "    #[test]\n    fn added()",
+             "    #[test]\n    fn writes_a_file() {\n"
+             "        std::fs::write(\"data.txt\", \"written\").unwrap();\n"
+             "        std::fs::write(\"written.txt\", \"written\").unwrap();\n"
+             "        assert_eq!(std::fs::read_to_string(\"data.txt\").unwrap(), \"written\");\n"
+             "    }\n\n    #[test]\n    fn added()")], "affected", {WRITES}, True),
+        ("nothing edited after it wrote", [], "affected", set(), True),
+    ]
 # What a step's output has to say, beside the tests it runs.
-SAYS = {
+SAYS = {} if SANDBOXED else {
     "why a test runs every time": [
         r"Always tests::reads_a_file: it reaches `\w+`, which reads or writes files, by "
         r"tsel::tests::reads_a_file -> std::fs::read_to_string::<…> -> .* -> \w+$",
         r"Skipped \d+ tests, unchanged since the last pass; 1 test run every time \(said above\);",
     ],
+}
+if SANDBOXED:
+    SAYS = {
+        "the file a test reads edited": [
+            r"Sandboxed tests::reads_a_file: it read `[^`]*/data\.txt`, which changed$",
+        ],
+    }
+# What has to be so of the package after a step, beside what it says.
+AFTER = {
+    "a test that writes into the package": lambda ws: (
+        open(os.path.join(ws, "data.txt")).read() == "tsel tsel\n"
+        and not os.path.exists(os.path.join(ws, "written.txt"))) or "IT WROTE INTO THE PACKAGE",
 }
 RAN = re.compile(r"^test (\S+) \.\.\. (ok|ignored|FAILED)", re.M)
 
@@ -150,6 +185,11 @@ def main():
     bin_dir = os.path.dirname(os.path.abspath(os.environ["RA_JIT_BIN"]))
     if not os.path.exists(os.path.join(bin_dir, "cargo-ra-jit")):
         raise SystemExit(f"no cargo-ra-jit beside {os.environ['RA_JIT_BIN']}")
+    if SANDBOXED:
+        probe = subprocess.run([os.environ["RA_JIT_BIN"], "sandbox", "--probe"], capture_output=True, text=True)
+        if probe.returncode != 0:
+            raise SystemExit(f"there is no sandbox for the tests here (`RA_JIT_SANDBOX=off` tests without):\n"
+                             f"{probe.stderr.strip()}")
     root = tempfile.mkdtemp(prefix="ra-jit-testselect-")
     # The daemon's sockets are under its home, and a socket's path is short (104 bytes on macOS).
     ws, home = os.path.join(root, "tsel"), tempfile.mkdtemp(prefix="rj-ts-", dir="/tmp")
@@ -192,6 +232,8 @@ def main():
                 verdict = f"ENDED {code} WITH {', '.join(sorted(failed)) or 'no test'} FAILED"
             elif unsaid := [it for it in SAYS.get(what, []) if not re.search(it, said, re.M)]:
                 verdict = f"DID NOT SAY {' NOR '.join(unsaid)}"
+            elif what in AFTER and (after := AFTER[what](ws)) is not True:
+                verdict = after
             wrong += verdict != "ok"
             print(f"{what:34} {verdict}", flush=True)
             if verdict != "ok" and os.environ.get("TESTSELECT_VERBOSE"):

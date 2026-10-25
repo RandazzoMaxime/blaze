@@ -23,6 +23,7 @@ mod outline;
 mod plan;
 mod process;
 mod remote;
+mod sandbox;
 mod shipped;
 mod socket;
 mod splice;
@@ -3223,22 +3224,26 @@ fn reach_of_tests(db: &RootDatabase, listed: &Listed, args: &Args) -> String {
     for (&id, reach) in tests.iter().zip(hir_ty_codegen::tests_reach(db, &tests)) {
         let function = hir::Function::from(id);
         let Some(name) = test_harness::name(db, krate, function) else { continue };
+        let field = |it: &str| it.replace(['\t', '\n'], " ");
+        let why = |it: &hir_ty_codegen::AlwaysRun| {
+            let path: Vec<String> = it.path.iter().map(|it| field(it)).collect();
+            format!("{}\t{}", field(&it.why), path.join(" -> "))
+        };
         let line = match reach {
-            Ok(hash) => {
+            Ok(reach) => {
                 let attrs = function.source(db).map(|it| {
                     let attrs = it.value.attrs().map(|it| it.syntax().text().to_string());
                     attrs.collect::<Vec<_>>().join("\n")
                 });
-                let identity = format!("{hash:032x}\n{}", attrs.unwrap_or_default());
+                let identity = format!("{:032x}\n{}", reach.hash, attrs.unwrap_or_default());
                 let identity = sha2::Sha256::digest(identity.as_bytes());
                 let hex: String = identity.iter().map(|it| format!("{it:02x}")).collect();
-                format!("{hex}\t{name}\n")
+                match &reach.outside {
+                    None => format!("{hex}\t{name}\n"),
+                    Some(outside) => format!("~{hex}\t{name}\t{}\n", why(outside)),
+                }
             }
-            Err(always) => {
-                let field = |it: &str| it.replace(['\t', '\n'], " ");
-                let path: Vec<String> = always.path.iter().map(|it| field(it)).collect();
-                format!("-\t{name}\t{}\t{}\n", field(&always.why), path.join(" -> "))
-            }
+            Err(always) => format!("-\t{name}\t{}\n", why(&always)),
         };
         text.push_str(&line);
     }
@@ -6632,6 +6637,10 @@ pub(crate) fn version() -> String {
 }
 
 fn main() -> anyhow::Result<()> {
+    // Before anything that could start a thread: the sandbox forks.
+    if std::env::args_os().nth(1).is_some_and(|it| it == sandbox::COMMAND) {
+        sandbox::command(std::env::args_os().skip(2));
+    }
     trace::began();
     syntax::set_green_trees(std::env::var_os("RA_JIT_GREEN_TREES").is_some());
     project_model::answer_toolchain_questions_with(answers::ask);
