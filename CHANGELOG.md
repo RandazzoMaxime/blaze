@@ -11,7 +11,50 @@ All notable changes to ra-jit are written here. The format follows
 - `crates/blaze-build-script`: the environment cargo 1.99.0 gives a build script, computed
   from a plain description of the run with no cargo, ported from cargo's own rules and tests
   (no-rustc step I, #89; #298). Nothing uses it yet; blaze's own runs of scripts come next.
-
+- `blaze-build-script` reads what a build script prints as cargo 1.99.0 does (both
+  `cargo:` and `cargo::`, the `rust-version` rule of the latter, every directive and cargo's
+  errors for each) and says who receives it: the scripts each unit is linked with, the `-L`,
+  `-l`, link arguments, cfgs and variables of each target, and when a script runs again.
+- `crates/blaze-resolve`, cargo's resolver owned by blaze (#298), starts with cargo 1.99.0's package
+  model, used by nothing yet: `SourceId` (path, git and sparse registries, git at a branch, tag or
+  rev with its commit, directory, local registry) compared by cargo's canonical URL and written as
+  lock files, package ids and messages write it; `PackageId`, `PackageIdSpec` (`-p` and
+  `cargo metadata`'s ids), `Dependency` with renames, kinds, targets and its locked or `--precise`
+  requirement; `Summary` and its feature map, with the implicit features of optional dependencies
+  and cargo's errors for features; and the `Registry` the resolver asks, with yanked and offline
+  versions marked. Its tests include cargo's own for these types.
+- `blaze-resolve`'s `Registry` is cargo 1.99.0's: `query(&self, ..)` is an `async fn` that
+  awaits what it fetches, in place of answering `Poll::Pending` and a `block_until_ready` (#298).
+- `blaze-resolve` reads and writes `Cargo.lock` as cargo 1.99.0 does (#298): every encoding
+  from 1 (checksums in `[metadata]`) to 4 (git references URL-encoded), `[[patch.unused]]` and
+  `[replace]`, the comments above cargo's header kept, and a lock file written back byte for
+  byte. As in cargo, an unchanged lock file keeps its encoding, a changed one is raised to the
+  workspace's default (from its lowest `rust-version`), under `--locked` or `--frozen` a change
+  is an error, and the checksums of the old file must agree with the new resolve. Its tests write
+  back the lock files of ripgrep and fd releases and of git workspaces cargo generated, one of
+  each encoding, and port cargo's `lockfile_compat` tests; `BLAZE_RESOLVE_LOCKFILES=dir` adds a
+  directory of lock files (24 releases of twelve projects, zed's 70 git sources among them,
+  write back byte for byte). A registry read from a lock file before its manifest is now named
+  as cargo names it.
+- `crates/blaze-registry`, registries read and packages fetched as cargo 1.99 does, with no
+  cargo, used by nothing yet (`docs/self-contained.md`, #298). The sparse
+  index (crates.io's and any other's): `config.json` and its `dl` templates, the index paths,
+  each line read as cargo reads it (schema `v`, `features2`, `rust_version`, `pubtime`,
+  `yanked`, `links`, renamed and other-registry dependencies, unknown fields, and the lines
+  cargo skips as invalid or unsupported), with cargo's cache of each file in cargo's format and
+  its `If-None-Match` / `If-Modified-Since` requests, so cargo and blaze share
+  `$CARGO_HOME/registry/index`. A `.crate` file is checked against its sha256, kept in the
+  store by that hash and in cargo's cache, and unpacked where cargo unpacks it
+  (`registry/src/index.crates.io-1949cf8c6b5b557f/<name>-<version>/`, the directory named by
+  cargo's hash of the source), with cargo's checks (entries under `<name>-<version>/` only, no
+  links, the size limit, the umask, `.cargo-ok`), several at once, retried as `net.retry`
+  says, under cargo's package cache lock.
+- `crates/blaze-manifest`, `Cargo.toml` and `.cargo/config.toml` read as cargo 1.99.0 reads
+  them, without running cargo: `cargo metadata --no-deps` computed by blaze (its `metadata`
+  example prints the same JSON, warnings and errors), on cargo's own manifest schema
+  (`cargo-util-schemas` 0.14.3) ([resolve.md](docs/resolve.md)). `harness/resolve.py` compares
+  it with cargo on the bench projects, 300 crates.io crates and 72 workspace repositories at
+  pinned commits: all 385 equal, key order included. Nothing in blaze uses it yet.
 - `cargo ra-jit test` with `RA_JIT_TESTS=affected` runs, on Linux, each test that reaches a
   file, the environment, a process or the network in a sandbox of its own (#257): a process
   in new user, mount, network, IPC and PID namespaces, the machine's files read-only, the
@@ -264,27 +307,6 @@ All notable changes to ra-jit are written here. The format follows
   Commit 99cbb902ad's message
   says the levels alone turned it on; until b460bbe327 they did not, and it took
   `RA_JIT_INLINE=all`.
-- `crates/blaze-resolve`, cargo's resolver owned by blaze (#298), starts with cargo 1.99.0's package
-  model, used by nothing yet: `SourceId` (path, git and sparse registries, git at a branch, tag or
-  rev with its commit, directory, local registry) compared by cargo's canonical URL and written as
-  lock files, package ids and messages write it; `PackageId`, `PackageIdSpec` (`-p` and
-  `cargo metadata`'s ids), `Dependency` with renames, kinds, targets and its locked or `--precise`
-  requirement; `Summary` and its feature map, with the implicit features of optional dependencies
-  and cargo's errors for features; and the `Registry` the resolver asks, with yanked and offline
-  versions marked. Its tests include cargo's own for these types.
-- `blaze-resolve` reads and writes `Cargo.lock` as cargo 1.99.0 does (#298): every encoding
-  from 1 (checksums in `[metadata]`) to 4 (git references URL-encoded), `[[patch.unused]]` and
-  `[replace]`, the comments above cargo's header kept, and a lock file written back byte for
-  byte. As in cargo, an unchanged lock file keeps its encoding, a changed one is raised to the
-  workspace's default (from its lowest `rust-version`), under `--locked` or `--frozen` a change
-  is an error, and the checksums of the old file must agree with the new resolve. Its tests write
-  back the lock files of ripgrep and fd releases and of git workspaces cargo generated, one of
-  each encoding, and port cargo's `lockfile_compat` tests; `BLAZE_RESOLVE_LOCKFILES=dir` adds a
-  directory of lock files (24 releases of twelve projects, zed's 70 git sources among them,
-  write back byte for byte). A registry read from a lock file before its manifest is now named
-  as cargo names it.
-- `blaze-resolve`'s `Registry` is cargo 1.99.0's: `query(&self, ..)` is an `async fn` that
-  awaits what it fetches, in place of answering `Poll::Pending` and a `block_until_ready` (#298).
 - `blaze-resolve` resolves as cargo 1.99.0 does (#298): its resolver is cargo's, ported, with
   backtracking, the conflict cache, `links`, prereleases, yanked versions only when locked,
   `[replace]`, and versions preferred by `rust-version` or lowest first; the errors are cargo's.
@@ -310,6 +332,15 @@ All notable changes to ra-jit are written here. The format follows
 
 ### Changed
 
+- The first `cargo blaze build` of a workspace is blaze's, not cargo's: once cargo's build
+  succeeds it waits for the daemon to load the workspace ("Waiting for blaze to load the
+  workspace") and build the programs, where it handed back cargo's and the next build was the
+  first the daemon made. On a dev host (16 cores, 2 runs) it ends at 6.1–6.7 s on ripgrep,
+  where cargo's ended at 5.4–6.7 s and the daemon was ready at 5.9–7.5 s, and at 41.0–41.9 s on
+  nushell, where cargo's ended at 36.6–37.9 s and the daemon was ready at 41.6–42.5 s. The
+  daemon still patches what rustc linked by default: building its own base instead
+  (`RA_JIT_RUSTC_BASE=0`) has it ready at 7.5–10.3 s on ripgrep and 58.0–58.5 s on nushell,
+  as it compiles every function of the program again after cargo.
 - `cargo blaze` builds with Rust 1.99.0, the release it compiles, whatever toolchain the
   project names (#269). A project pinned to another release, or on a machine whose default
   is another, no longer has every build go to cargo: cargo, rustc and the daemon run under
@@ -582,6 +613,25 @@ All notable changes to ra-jit are written here. The format follows
 
 ### Fixed
 
+- On x86-64, an edit that replaces a function shorter than a jump (5 bytes) is spliced
+  instead of built in full ([#242](https://github.com/indexable-inc/blaze/issues/242)).
+  The jump goes over the `int3`s and `nop`s the linker padded the function with. When there
+  is no padding, as for a getter packed against the next function, the function gets a
+  2-byte `jmp` to a run of `int3`s within 127 bytes, which jumps on. biome's leaf edit
+  (`JsFormatOptions::quote_style`, whose patch also replaces `line_ending` and
+  `trailing_commas`, 4 bytes each) goes from 360.7 s and a 26.4 GB peak to 0.50 s (dev-aws-5,
+  16 cores, cranelift, 1 run; cargo 12.1 s). `harness/rustcbase.py` `short` and `hop` hold it.
+- A function a build left to rustc, and an instance of a function generic over nothing that
+  did not compile, keep rustc's copy when no edit since the daemon started reached its crate
+  or the crates below it. Each was taken for stale when a build in full left it to rustc for
+  the first time, and the build went to cargo ([#242](https://github.com/indexable-inc/blaze/issues/242)).
+  With the jumps above, biome's generic edit (`format_array_node`) is the daemon's (204.5 s;
+  it went to cargo after 190.9 s, refused on `biome_analyze::profiling::is_enabled`) and its
+  struct edit is spliced in 0.51 s, where it went to cargo after 176.7 s (dev-aws-5, 16 cores,
+  cranelift, 1 run).
+- A patch asks rustc's executable whether it has a function of a name once per name, where
+  each asking searched every symbol of it. biome's body edits after the first take 1.6–1.7 s,
+  where they took 2.2–2.8 s (cargo 2.3 s).
 - A profile with `debug = "line-tables-only"` (or `1`, or `"limited"`) no longer has the type
   of every variable worked out. Only the lines were written, but the types were described for
   each function compiled and then thrown away. On Biome (`biome_cli`, 518 crates, whose dev

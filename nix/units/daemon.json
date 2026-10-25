@@ -1,8 +1,8 @@
 {
  "dir": ".",
  "inputs": {
-  "Cargo.lock": "27adba3339ea6a192fdf69d993bf7adafb3cbe825f5197fef700b8b388ebdff5",
-  "Cargo.toml": "5e49bcb28b50d4742a2bc7ce5c03a850b245246cb1008f0eae5e55325ebfffeb"
+  "Cargo.lock": "72518eadc2be946b14447b0f142c6f7f8eed8a6792f80c3cab2d66cfe68df813",
+  "Cargo.toml": "0c0fb40369164a477d4547f32a4f0269707c1a24082e86ab213120e384f5e8db"
  },
  "packages": {
   "adler2@2.0.1": {
@@ -38,6 +38,23 @@
     "kind": "registry"
    },
    "version": "0.2.21"
+  },
+  "annotate-snippets@0.12.16": {
+   "authors": "",
+   "description": "Format diagnostic reports, including highlighting snippets of text",
+   "homepage": "",
+   "license": "MIT OR Apache-2.0",
+   "license_file": "",
+   "links": null,
+   "name": "annotate-snippets",
+   "readme": "README.md",
+   "repository": "https://github.com/rust-lang/annotate-snippets-rs",
+   "rust_version": "1.85.0",
+   "source": {
+    "checksum": "f211a51805bc641f3ad5b7664c77d2547af685cc33b4cd8d31964027a46f13f1",
+    "kind": "registry"
+   },
+   "version": "0.12.16"
   },
   "anstream@1.0.0": {
    "authors": "",
@@ -770,6 +787,40 @@
    },
    "version": "0.1.0"
   },
+  "blaze-manifest@0.1.0": {
+   "authors": "blaze contributors",
+   "description": "Cargo.toml and .cargo/config.toml read as cargo 1.99 reads them",
+   "homepage": "",
+   "license": "MIT OR Apache-2.0",
+   "license_file": "",
+   "links": null,
+   "name": "blaze-manifest",
+   "readme": "",
+   "repository": "https://github.com/indexable-inc/blaze",
+   "rust_version": "1.99",
+   "source": {
+    "dir": "crates/blaze-manifest",
+    "kind": "path"
+   },
+   "version": "0.1.0"
+  },
+  "blaze-registry@0.1.0": {
+   "authors": "blaze contributors",
+   "description": "blaze's reading of registries and fetching of sources as cargo 1.99 does them, into cargo's directories and blaze's store, with no cargo",
+   "homepage": "",
+   "license": "MIT OR Apache-2.0",
+   "license_file": "",
+   "links": null,
+   "name": "blaze-registry",
+   "readme": "",
+   "repository": "https://github.com/indexable-inc/blaze",
+   "rust_version": "1.99",
+   "source": {
+    "dir": "crates/blaze-registry",
+    "kind": "path"
+   },
+   "version": "0.1.0"
+  },
   "blaze-resolve@0.1.0": {
    "authors": "blaze contributors",
    "description": "cargo's resolver, owned by blaze: the package model, Cargo.lock, version selection and feature unification",
@@ -939,6 +990,23 @@
     "kind": "registry"
    },
    "version": "0.3.3"
+  },
+  "cargo-util-schemas@0.14.3": {
+   "authors": "",
+   "description": "Deserialization schemas for Cargo",
+   "homepage": "",
+   "license": "MIT OR Apache-2.0",
+   "license_file": "",
+   "links": null,
+   "name": "cargo-util-schemas",
+   "readme": "README.md",
+   "repository": "https://github.com/rust-lang/cargo",
+   "rust_version": "1.97",
+   "source": {
+    "checksum": "292e4a141b9c1ecfe5e6e960edc81a6ea3358a5440e030da848d0269376abeaf",
+    "kind": "registry"
+   },
+   "version": "0.14.3"
   },
   "cargo_metadata@0.23.1": {
    "authors": "Oliver Schneider <git-spam-no-reply9815368754983@oli-obk.de>",
@@ -1756,6 +1824,57 @@
    },
    "version": "6.2.1"
   },
+  "defmt-macros@1.2.0": {
+   "authors": "The Knurling-rs developers",
+   "description": "defmt macros",
+   "homepage": "",
+   "license": "MIT OR Apache-2.0",
+   "license_file": "",
+   "links": null,
+   "name": "defmt-macros",
+   "readme": "README.md",
+   "repository": "https://github.com/knurling-rs/defmt",
+   "rust_version": "",
+   "source": {
+    "checksum": "840bb056bd99c495c9188198a258ab787c79f306d864db3e6e8451442d6d8366",
+    "kind": "registry"
+   },
+   "version": "1.2.0"
+  },
+  "defmt-parser@1.1.0": {
+   "authors": "The Knurling-rs developers",
+   "description": "Parsing library for defmt format strings",
+   "homepage": "",
+   "license": "MIT OR Apache-2.0",
+   "license_file": "",
+   "links": null,
+   "name": "defmt-parser",
+   "readme": "README.md",
+   "repository": "https://github.com/knurling-rs/defmt",
+   "rust_version": "1.81",
+   "source": {
+    "checksum": "71958f69fb2de856c5dd51ac9377e986ca1aa5919f931bf5395a807277f889a0",
+    "kind": "registry"
+   },
+   "version": "1.1.0"
+  },
+  "defmt@1.2.0": {
+   "authors": "The Knurling-rs developers",
+   "description": "A highly efficient logging framework that targets resource-constrained devices, like microcontrollers",
+   "homepage": "https://knurling.ferrous-systems.com/",
+   "license": "MIT OR Apache-2.0",
+   "license_file": "",
+   "links": "defmt",
+   "name": "defmt",
+   "readme": "README.md",
+   "repository": "https://github.com/knurling-rs/defmt",
+   "rust_version": "1.81",
+   "source": {
+    "checksum": "e4a0795ac740cb54d7b3775c9c17345f6aaecf884c01733b39d6017738e0e3e1",
+    "kind": "registry"
+   },
+   "version": "1.2.0"
+  },
   "der@0.7.10": {
    "authors": "RustCrypto Developers",
    "description": "Pure Rust embedded-friendly implementation of the Distinguished Encoding Rules\n(DER) for Abstract Syntax Notation One (ASN.1) as described in ITU X.690 with\nfull support for heapless no_std targets\n",
@@ -2061,6 +2180,23 @@
     "kind": "registry"
    },
    "version": "1.0.2"
+  },
+  "erased-serde@0.4.11": {
+   "authors": "David Tolnay <dtolnay@gmail.com>",
+   "description": "Type-erased Serialize and Serializer traits",
+   "homepage": "",
+   "license": "MIT OR Apache-2.0",
+   "license_file": "",
+   "links": null,
+   "name": "erased-serde",
+   "readme": "README.md",
+   "repository": "https://github.com/dtolnay/erased-serde",
+   "rust_version": "1.68",
+   "source": {
+    "checksum": "1e59b668157f32d3459d4bd634861a06ffa2503a461ca5f0916b9f0252605e66",
+    "kind": "registry"
+   },
+   "version": "0.4.11"
   },
   "errno@0.3.14": {
    "authors": "Chris Wong <lambda.fairy@gmail.com>:Dan Gohman <dev@sunfishcode.online>",
@@ -2503,6 +2639,23 @@
     "kind": "registry"
    },
    "version": "0.2.1"
+  },
+  "glob@0.3.4": {
+   "authors": "The Rust Project Developers",
+   "description": "Support for matching file paths against Unix shell style patterns.\n",
+   "homepage": "https://github.com/rust-lang/glob",
+   "license": "MIT OR Apache-2.0",
+   "license_file": "",
+   "links": null,
+   "name": "glob",
+   "readme": "README.md",
+   "repository": "https://github.com/rust-lang/glob",
+   "rust_version": "1.63.0",
+   "source": {
+    "checksum": "e4eba85ea1d0a966a983acd07deee566e67395d2d96b6fb39e62b5a833f1eb0b",
+    "kind": "registry"
+   },
+   "version": "0.3.4"
   },
   "h2@0.4.20": {
    "authors": "Carl Lerche <me@carllerche.com>:Sean McArthur <sean@seanmonstar.com>",
@@ -3320,6 +3473,57 @@
    },
    "version": "1.0.18"
   },
+  "jiff-core@0.1.1": {
+   "authors": "Andrew Gallant <jamslam@gmail.com>",
+   "description": "Low level datetime primitives for the Jiff library.",
+   "homepage": "https://github.com/BurntSushi/jiff/tree/master/crates/jiff-core",
+   "license": "Unlicense OR MIT",
+   "license_file": "",
+   "links": null,
+   "name": "jiff-core",
+   "readme": "README.md",
+   "repository": "https://github.com/BurntSushi/jiff",
+   "rust_version": "1.70",
+   "source": {
+    "checksum": "5e52fe76043ccecc9005d2305ebaadf7d7fc0cc89ca6baa10a94d6bc68c7128c",
+    "kind": "registry"
+   },
+   "version": "0.1.1"
+  },
+  "jiff-static@0.2.38": {
+   "authors": "Andrew Gallant <jamslam@gmail.com>",
+   "description": "Create static TimeZone values for Jiff (useful in core-only environments).",
+   "homepage": "https://github.com/BurntSushi/jiff/tree/master/crates/jiff-static",
+   "license": "Unlicense OR MIT",
+   "license_file": "",
+   "links": null,
+   "name": "jiff-static",
+   "readme": "README.md",
+   "repository": "https://github.com/BurntSushi/jiff",
+   "rust_version": "1.70",
+   "source": {
+    "checksum": "2cc9817253cf7c7ee4684451bd327e88d6f3658014e54a29198625590650695c",
+    "kind": "registry"
+   },
+   "version": "0.2.38"
+  },
+  "jiff@0.2.38": {
+   "authors": "Andrew Gallant <jamslam@gmail.com>",
+   "description": "A date-time library that encourages you to jump into the pit of success.\n\nThis library is heavily inspired by the Temporal project.\n",
+   "homepage": "",
+   "license": "Unlicense OR MIT",
+   "license_file": "",
+   "links": null,
+   "name": "jiff",
+   "readme": "README.md",
+   "repository": "https://github.com/BurntSushi/jiff",
+   "rust_version": "1.70",
+   "source": {
+    "checksum": "b2b005715dcbeb0089a3c0dab99f2ff1cc3b2525323552703d648585d342a383",
+    "kind": "registry"
+   },
+   "version": "0.2.38"
+  },
   "jobserver@0.1.35": {
    "authors": "Alex Crichton <alex@alexcrichton.com>",
    "description": "An implementation of the GNU Make jobserver for Rust.\n",
@@ -4119,6 +4323,23 @@
    },
    "version": "0.2.1"
   },
+  "ordered-float@2.10.1": {
+   "authors": "Jonathan Reem <jonathan.reem@gmail.com>:Matt Brubeck <mbrubeck@limpet.net>",
+   "description": "Wrappers for total ordering on floats",
+   "homepage": "",
+   "license": "MIT",
+   "license_file": "",
+   "links": null,
+   "name": "ordered-float",
+   "readme": "README.md",
+   "repository": "https://github.com/reem/rust-ordered-float",
+   "rust_version": "",
+   "source": {
+    "checksum": "68f19d67e5a2795c94e73e0bb1cc1a7edeb2e28efd39e2e1c9b7a40c1108b11c",
+    "kind": "registry"
+   },
+   "version": "2.10.1"
+  },
   "outref@0.5.2": {
    "authors": "",
    "description": "Out reference",
@@ -4203,6 +4424,23 @@
     "kind": "registry"
    },
    "version": "1.0.15"
+  },
+  "pathdiff@0.2.3": {
+   "authors": "Manish Goregaokar <manishsmail@gmail.com>",
+   "description": "Library for diffing paths to obtain relative paths",
+   "homepage": "",
+   "license": "MIT/Apache-2.0",
+   "license_file": "",
+   "links": null,
+   "name": "pathdiff",
+   "readme": "",
+   "repository": "https://github.com/Manishearth/pathdiff",
+   "rust_version": "",
+   "source": {
+    "checksum": "df94ce210e5bc13cb6651479fa48d14f601d9858cfe0467f43ae157023b938d3",
+    "kind": "registry"
+   },
+   "version": "0.2.3"
   },
   "paths@0.0.0": {
    "authors": "blaze contributors",
@@ -4373,6 +4611,23 @@
     "kind": "registry"
    },
    "version": "0.3.34"
+  },
+  "portable-atomic-util@0.2.8": {
+   "authors": "",
+   "description": "Synchronization primitives built with portable-atomic.\n",
+   "homepage": "",
+   "license": "Apache-2.0 OR MIT",
+   "license_file": "",
+   "links": null,
+   "name": "portable-atomic-util",
+   "readme": "README.md",
+   "repository": "https://github.com/taiki-e/portable-atomic-util",
+   "rust_version": "1.36",
+   "source": {
+    "checksum": "10ab3eb7f3becc3a1cbc4f2c6f20267996cfc1a6467a873763411b136a122715",
+    "kind": "registry"
+   },
+   "version": "0.2.8"
   },
   "portable-atomic@1.13.1": {
    "authors": "",
@@ -5597,6 +5852,40 @@
     "kind": "registry"
    },
    "version": "1.0.28"
+  },
+  "serde-untagged@0.1.9": {
+   "authors": "David Tolnay <dtolnay@gmail.com>",
+   "description": "Serde `Visitor` implementation for deserializing untagged enums",
+   "homepage": "",
+   "license": "MIT OR Apache-2.0",
+   "license_file": "",
+   "links": null,
+   "name": "serde-untagged",
+   "readme": "README.md",
+   "repository": "https://github.com/dtolnay/serde-untagged",
+   "rust_version": "1.61",
+   "source": {
+    "checksum": "f9faf48a4a2d2693be24c6289dbe26552776eb7737074e6722891fadbe6c5058",
+    "kind": "registry"
+   },
+   "version": "0.1.9"
+  },
+  "serde-value@0.7.0": {
+   "authors": "arcnmx",
+   "description": "Serialization value trees",
+   "homepage": "",
+   "license": "MIT",
+   "license_file": "",
+   "links": null,
+   "name": "serde-value",
+   "readme": "README.md",
+   "repository": "https://github.com/arcnmx/serde-value",
+   "rust_version": "",
+   "source": {
+    "checksum": "f3a1a3341211875ef120e117ea7fd5228530ae7e7036a779fdc9117be6b3282c",
+    "kind": "registry"
+   },
+   "version": "0.7.0"
   },
   "serde@1.0.228": {
    "authors": "Erick Tryzelaar <erick.tryzelaar@gmail.com>:David Tolnay <dtolnay@gmail.com>",
