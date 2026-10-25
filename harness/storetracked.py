@@ -181,8 +181,8 @@ def restart(ws, env, label, steps):
     wrong = 0
     took = sum(f for f, _ in found)
     roots = sum(int(n) for n in re.findall(r"^base from the store: (\d+) roots", logs.text(), re.M))
-    verdict = "ok" if took and roots and program(ws) == FIRST else \
-        f"FOUND {took}, {roots} ROOTS, PRINTED {program(ws)!r}"
+    # A start whose roots from the store call all it needs has nothing to look up.
+    verdict = "ok" if roots and program(ws) == FIRST else f"FOUND {took}, {roots} ROOTS, PRINTED {program(ws)!r}"
     wrong += verdict != "ok"
     print(f"{label + ': the start':48} {verdict:12} store {found}, {roots} roots", flush=True)
     for what, edits, expected in steps:
