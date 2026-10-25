@@ -4300,8 +4300,9 @@ fn emit(ctx: &mut cranelift_codegen::Context) -> Result<Code> {
         let Some(compiled) = ctx.compiled_code() else {
             return Err("no compiled code".to_owned());
         };
-        // Relocations against the function itself get its id when it is stitched.
-        let own = FuncId::from_u32(u32::MAX);
+        // Relocations against the function itself get its id when it is stitched. One below
+        // `u32::MAX` — `from_u32(u32::MAX)` asserts the reserved value away in debug builds.
+        let own = FuncId::from_u32(u32::MAX - 1);
         Ok(Code {
             signature: ctx.func.signature.clone(),
             bytes: compiled.buffer.data().to_vec(),
@@ -16140,5 +16141,33 @@ fn operands_of(rvalue: &Rvalue) -> Vec<&Operand> {
         Rvalue::CheckedBinaryOp(_, left, right) => vec![left, right],
         Rvalue::Aggregate(_, operands) => operands.iter().collect(),
         _ => Vec::new(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use cranelift_codegen::ir::{self, AbiParam, InstBuilder, types};
+    use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext};
+
+    /// `emit` names the function itself by a placeholder id until it is stitched, and
+    /// `FuncId::from_u32` asserts `u32::MAX` away where debug assertions are on, as in
+    /// `cargo test`: a placeholder of `u32::MAX` refused every function as a backend panic.
+    #[test]
+    fn emit_compiles_a_function_with_debug_assertions_on() {
+        let isa = super::target().unwrap();
+        let mut sig = ir::Signature::new(isa.default_call_conv());
+        sig.returns.push(AbiParam::new(types::I32));
+        let mut func = ir::Function::with_name_signature(ir::UserFuncName::default(), sig);
+        let mut builder_ctx = FunctionBuilderContext::new();
+        let mut builder = FunctionBuilder::new(&mut func, &mut builder_ctx);
+        let entry = builder.create_block();
+        builder.switch_to_block(entry);
+        builder.seal_block(entry);
+        let zero = builder.ins().iconst(types::I32, 0);
+        builder.ins().return_(&[zero]);
+        builder.finalize(isa.frontend_config());
+        let mut ctx = cranelift_codegen::Context::for_function(func);
+        let code = super::emit(&mut ctx).unwrap();
+        assert!(!code.bytes.is_empty());
     }
 }
