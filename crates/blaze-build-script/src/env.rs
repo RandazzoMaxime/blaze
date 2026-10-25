@@ -194,8 +194,11 @@ pub fn env(unit: &Unit, inherited: &[(OsString, OsString)]) -> Result<Env, Error
 
     // `fill_env`, for a process on the host.
     let search = &unit.dylib_search;
-    let mut search_path = below(&[], &search.host_root);
-    search_path.push(search.host_root.clone());
+    let mut search_path = Vec::new();
+    if let Some(host_root) = &search.host_root {
+        search_path.extend(below(&[], host_root));
+        search_path.push(host_root.clone());
+    }
     search_path.extend(search.host_deps.iter().cloned());
     search_path.push(search.sysroot_libdir.clone());
     let dylib_path =
@@ -306,10 +309,12 @@ pub fn env(unit: &Unit, inherited: &[(OsString, OsString)]) -> Result<Env, Error
         }
     }
     // `add_plugin_deps`.
-    let mut search_path =
-        cmd.get(host.dylib_var).map(|it| host.split_paths(it)).unwrap_or_default();
-    search_path.extend(below(&search.plugin_search, &search.host_root));
-    cmd.set(host.dylib_var, host.join_paths(&search_path, host.dylib_var)?);
+    if let Some(host_root) = &search.host_root {
+        let mut search_path =
+            cmd.get(host.dylib_var).map(|it| host.split_paths(it)).unwrap_or_default();
+        search_path.extend(below(&search.plugin_search, host_root));
+        cmd.set(host.dylib_var, host.join_paths(&search_path, host.dylib_var)?);
+    }
     // The jobserver's `Client::configure`.
     if let Some(auth) = &unit.jobserver {
         cmd.set("CARGO_MAKEFLAGS", format!("-j --jobserver-fds={auth} --jobserver-auth={auth}"));

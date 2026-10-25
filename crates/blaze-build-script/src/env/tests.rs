@@ -62,7 +62,7 @@ fn bar() -> Unit {
             ..Tools::default()
         },
         dylib_search: DylibSearch {
-            host_root: "/p/foo/target/debug".into(),
+            host_root: Some("/p/foo/target/debug".into()),
             host_deps: vec!["/p/foo/target/debug/deps".into()],
             sysroot_libdir: "/t/lib/rustlib/x86_64-unknown-linux-gnu/lib".into(),
             plugin_search: Vec::new(),
@@ -266,6 +266,14 @@ fn dynamic_libraries_on_linux() {
     let outer = "/p/foo/target/debug:/p/foo/target/debug/deps:/t/lib/rustlib/x86_64-unknown-linux-gnu/lib:/x";
     let env = super::env(&bar(), &os(&[("LD_LIBRARY_PATH", outer)])).unwrap();
     assert_eq!(var(&env, "LD_LIBRARY_PATH"), Some(outer));
+    // `cargo check` writes nothing to `target/debug`, which is then neither searched nor what
+    // the host-only dependencies' directories are kept below (found by harness/scripts.py).
+    unit.dylib_search.host_root = None;
+    let env = super::env(&unit, &os(&[("LD_LIBRARY_PATH", "/opt/lib")])).unwrap();
+    assert_eq!(
+        var(&env, "LD_LIBRARY_PATH"),
+        Some("/p/foo/target/debug/deps:/t/lib/rustlib/x86_64-unknown-linux-gnu/lib:/opt/lib")
+    );
 }
 
 /// On macOS dyld's defaults follow, since setting the variable takes them away.
@@ -290,7 +298,7 @@ fn dynamic_libraries_on_macos() {
 fn dynamic_libraries_on_windows() {
     let mut unit = bar();
     unit.host = "x86_64-pc-windows-msvc".into();
-    unit.dylib_search.host_root = r"C:\p\target\debug".into();
+    unit.dylib_search.host_root = Some(r"C:\p\target\debug".into());
     unit.dylib_search.host_deps = vec![r"C:\p\target\debug\deps".into()];
     unit.dylib_search.sysroot_libdir = r"C:\t;x\lib".into();
     let env = env(&unit, &os(&[("PATH", r#"C:\bin;"C:\a;b""#)])).unwrap();
@@ -304,7 +312,7 @@ fn dynamic_libraries_on_windows() {
 #[test]
 fn a_path_with_the_separator() {
     let mut unit = bar();
-    unit.dylib_search.host_root = "/p/a:b/target/debug".into();
+    unit.dylib_search.host_root = Some("/p/a:b/target/debug".into());
     let error = env(&unit, &[]).unwrap_err();
     assert!(
         error.0.starts_with("failed to join paths from `$LD_LIBRARY_PATH` together"),
