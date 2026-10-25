@@ -23,6 +23,21 @@ All notable changes to ra-jit are written here. The format follows
   `cargo:` and `cargo::`, the `rust-version` rule of the latter, every directive and cargo's
   errors for each) and says who receives it: the scripts each unit is linked with, the `-L`,
   `-l`, link arguments, cfgs and variables of each target, and when a script runs again.
+- blaze needs no Rust and no rustup installed (#298). With neither, it downloads Rust 1.99.0
+  once into `~/.blaze/toolchains` (rustc, cargo, the standard library and its source: 97 MB on
+  macOS, 133 MB on Linux x86-64), laid out as rustup lays out a toolchain, and builds with it.
+  Each file's sha256 is built into blaze from the release's published manifest, and a file
+  with other bytes is refused. Downloads run together over blaze's own HTTPS client, unpack
+  into a directory beside the toolchain's and are renamed into place, concurrent builds
+  download once, and a download that stopped goes on from where it stopped. rustup's 1.99.0,
+  when installed, is still the one used. `blaze build`, `run`, `test`, `check` and `stop` are
+  `cargo blaze`'s commands without cargo; `blaze toolchain` says which Rust blaze builds with.
+- install.sh installs blaze on a machine with no Rust (#298). It no longer runs rustup: after
+  installing, blaze downloads its own Rust (none when rustup has 1.99.0), `--no-toolchain`
+  leaves that to the first build, it says what to install when there is no C compiler to link
+  with, and its last line is `blaze run`. `BLAZE_ARCHIVE` installs an archive from a file.
+  install.yaml installs this commit's build in a Debian container with no Rust and runs
+  `blaze run` in a project written by hand.
 - `crates/blaze-resolve`, cargo's resolver owned by blaze (#298), starts with cargo 1.99.0's package
   model, used by nothing yet: `SourceId` (path, git and sparse registries, git at a branch, tag or
   rev with its commit, directory, local registry) compared by cargo's canonical URL and written as
