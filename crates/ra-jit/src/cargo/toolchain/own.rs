@@ -108,7 +108,7 @@ impl Release {
     /// What the download comes to, in megabytes as people count them.
     pub(crate) fn megabytes(&self) -> u64 {
         let bytes: u64 = self.components.iter().map(|it| it.pin.bytes).sum();
-        (bytes + self.manifest.bytes).div_ceil(1_000_000)
+        (bytes + self.manifest.bytes + 500_000) / 1_000_000
     }
 
     /// Where blaze keeps this release.

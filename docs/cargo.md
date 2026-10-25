@@ -54,8 +54,8 @@ source; rustup's 1.99.0 with `rust-src`, when rustup has it; else blaze's own co
 `~/.blaze/toolchains/1.99.0-<host>` (`BLAZE_HOME` moves `~/.blaze`), laid out as rustup lays
 out a toolchain. blaze downloads its copy the first time it needs it, once, with a line on
 stderr while it does: rustc, cargo, the standard library and its source from the Rust project's
-own servers, 97 MB on macOS, 133 MB on Linux x86-64 and 118 MB on Linux ARM64 (about 550 MB once
-unpacked). Each file's sha256 is built into blaze, from Rust 1.99.0's published manifest
+own servers, 97 MB on macOS, 133 MB on Linux x86-64 and 118 MB on Linux ARM64 (530 MB on macOS
+and 690 MB on Linux x86-64 once unpacked). Each file's sha256 is built into blaze, from Rust 1.99.0's published manifest
 (`harness/toolchain_pins.py` writes them), and a file with other bytes is refused. Concurrent
 builds download it once; a download that stopped goes on from where it stopped the next time.
 Building with blaze's copy, blaze names its cargo, rustc and rustdoc in `CARGO`, `RUSTC` and
