@@ -20,7 +20,7 @@ loop {
 	<h1>ra-jit</h1>
 	<p class="lede">Edit Rust. See it change in milliseconds, in the program that is already running.</p>
 
-	<Copy text="nix run github:indexable-inc/ra-jit" />
+	<Copy text="nix run github:indexable-inc/blaze" />
 
 	<img src="/demo.avif" width="2560" height="1440" alt="Editing the running Game of Life: rule, colours and speed change live" />
 
@@ -45,12 +45,12 @@ loop {
 	<p class="dim"><a href="/bench">Benchmark history</a>: every run on real projects, next to plain cargo.</p>
 
 	<h2>Try it</h2>
-	<Code lang="bash" text="nix run github:indexable-inc/ra-jit -- build" />
+	<Code lang="bash" text="nix run github:indexable-inc/blaze#blaze -- build" />
 	<h3>Use it as your normal cargo build</h3>
-	<Code lang="bash" text={'nix profile install github:indexable-inc/ra-jit\nra-jit enable'} />
+	<Code lang="bash" text={'nix profile install github:indexable-inc/blaze#blaze\ncargo blaze enable'} />
 	<p class="dim">Plain <code>cargo build</code>, <code>run</code>, <code>test</code> and <code>check</code> then go through ra-jit. <code>ra-jit disable</code> undoes it.</p>
 	<h3>Live edits</h3>
-	<Code lang="toml" text={'ra-jit-live = { git = "https://github.com/indexable-inc/ra-jit" }'} />
+	<Code lang="toml" text={'ra-jit-live = { git = "https://github.com/indexable-inc/blaze" }'} />
 	<Code lang="rust" text={poll} />
 
 	<h2>What to know</h2>
@@ -61,10 +61,10 @@ loop {
 		<li>Changing a struct the program is using asks for a restart.</li>
 	</ul>
 	<p>
-		More: <a href="https://github.com/indexable-inc/ra-jit/blob/main/docs/architecture.md">how it works</a>,
-		<a href="https://github.com/indexable-inc/ra-jit/blob/main/docs/results.md">full results</a>,
-		<a href="https://github.com/indexable-inc/ra-jit/blob/main/docs/support.md">what is supported</a>,
-		<a href="https://github.com/indexable-inc/ra-jit">GitHub</a>.
+		More: <a href="https://github.com/indexable-inc/blaze/blob/main/docs/architecture.md">how it works</a>,
+		<a href="https://github.com/indexable-inc/blaze/blob/main/docs/results.md">full results</a>,
+		<a href="https://github.com/indexable-inc/blaze/blob/main/docs/support.md">what is supported</a>,
+		<a href="https://github.com/indexable-inc/blaze">GitHub</a>.
 	</p>
 
 	<h2>Credits</h2>

@@ -2,7 +2,7 @@
 
 Edit Rust and the running program has the new code about a millisecond later. Its state stays.
 
-The runtime half of [ra-jit](https://github.com/indexable-inc/ra-jit): link it, poll once per
+The runtime half of [ra-jit](https://github.com/indexable-inc/blaze): link it, poll once per
 frame, and run your program under the ra-jit daemon.
 
 ```toml

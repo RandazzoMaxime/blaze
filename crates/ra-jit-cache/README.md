@@ -1,12 +1,12 @@
 # ra-jit-cache
 
 `#[ra_jit::cache]` keeps the results of a pure function across runs of a program built by
-[ra-jit](https://github.com/indexable-inc/ra-jit), and drops them when the code the function reaches
+[ra-jit](https://github.com/indexable-inc/blaze), and drops them when the code the function reaches
 changes.
 
 ```toml
 [dependencies]
-ra-jit-cache = { git = "https://github.com/indexable-inc/ra-jit" }
+ra-jit-cache = { git = "https://github.com/indexable-inc/blaze" }
 ```
 
 ```rust
@@ -22,4 +22,4 @@ A function that reads a static, does I/O, calls foreign code or takes something 
 behind a shared reference is refused, with the place that made it so, and runs as written.
 
 Under plain `cargo build` the attribute does nothing. See
-[docs/fn-cache.md](https://github.com/indexable-inc/ra-jit/blob/main/docs/fn-cache.md).
+[docs/fn-cache.md](https://github.com/indexable-inc/blaze/blob/main/docs/fn-cache.md).

@@ -54,7 +54,7 @@ the MIR passes that make rust-analyzer's MIR like rustc's on top
 there). The fork stays the public home of those changes and the place upstream is merged
 in; ra-jit carries the files themselves, so a plain clone builds:
 
-    git clone https://github.com/indexable-inc/ra-jit
+    git clone https://github.com/indexable-inc/blaze
     cargo +1.99.0 build -p ra-jit --release
 
 `vendor/rustc_abi` is a subtree of [indexable-inc/rustc_abi](https://github.com/indexable-inc/rustc_abi)

@@ -1,6 +1,6 @@
 {
   "toolchain": "1.99.0",
-  "release": "https://github.com/indexable-inc/ra-jit/releases/download/pgo-profiles",
+  "release": "https://github.com/indexable-inc/blaze/releases/download/pgo-profiles",
   "targets": {
     "aarch64-apple-darwin": {
       "name": "ra-jit-1.99.0-aarch64-apple-darwin-c9d3542bac821944.profdata",

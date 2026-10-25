@@ -256,12 +256,12 @@ runs it at boot (on Linux as user `andrew` from a user systemd unit,
 
 ```
 scp harness/benchrunner.sh HOST:
-gh api -X POST repos/indexable-inc/ra-jit/actions/runners/registration-token --jq .token \
+gh api -X POST repos/indexable-inc/blaze/actions/runners/registration-token --jq .token \
   | ssh HOST bash benchrunner.sh linux-aarch64 "'AWS m8g.4xlarge (dev-aws-bench-arm64)'"
 ```
 
 Then name the platform in the repository variable `BENCH_RUNNERS`, comma-separated, which turns
-its jobs on: `gh variable set BENCH_RUNNERS -R indexable-inc/ra-jit -b linux-x86-64,linux-aarch64,macos-arm64`.
+its jobs on: `gh variable set BENCH_RUNNERS -R indexable-inc/blaze -b linux-x86-64,linux-aarch64,macos-arm64`.
 A platform it does not name is skipped by every run rather than left waiting for a runner that
 is not there, and the README keeps its last numbers, under their machine, date and commit.
 (`BENCH_RUNNER=true`, from before there were platforms, still means Linux x86-64.)
@@ -283,7 +283,7 @@ shared virtual M1 with 3 cores and 7 GiB, whose runs of a benchmark have varied 
 
 `.github/workflows/bench-readme.yaml` runs on every push to main that touches code (not docs,
 the site or the README), every night at 09:17 UTC, and by hand (`gh workflow run bench-readme
---repo indexable-inc/ra-jit`, with `-f force=true` to write the README even when nothing moved).
+--repo indexable-inc/blaze`, with `-f force=true` to write the README even when nothing moved).
 One run at a time; a push during a run waits, and a newer push replaces the waiting one. A run
 has a job per registered platform, on its runner, at the same time, and then one job that
 publishes them all.
