@@ -7740,8 +7740,10 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
         if !matches!(target.arch, Arch::X86_64 | Arch::Aarch64) || size > 16 {
             return Ok(PassMode::Indirect);
         }
-        // LLVM makes a vector of one lane its scalar, in that scalar's register.
-        if count.as_u64() == 1 {
+        // LLVM makes a vector of one lane its scalar, in that scalar's register, except where
+        // the one-lane type is legal: AArch64's `v1i64` and `v1f64` (NEON's `*x1_t` of 64-bit
+        // lanes) are in a D register, as the 64-bit vectors below are.
+        if count.as_u64() == 1 && !(target.arch == Arch::Aarch64 && size == 8) {
             unsupported!("a SIMD vector of one lane by value in the Rust ABI");
         }
         if target.call_conv == isa::CallConv::WindowsFastcall {
