@@ -6426,9 +6426,21 @@ impl<'a, 'db> ObjectCodegen<'a, 'db> {
         if let Some(&data) = known.into_iter().find_map(|it| it.get(&id)) {
             return Ok(data);
         }
-        // rustc's copy when ours has no value to give.
-        let ours = self.own_statics.replaces(db, id) && compiled_static(db, id).is_ok();
-        let rustcs = (!ours).then(|| self.symbols.static_(id)).flatten();
+        // rustc's copy when ours has no value to give. A static whose value changes as the
+        // program runs (a thread-local, or one written through a cell) stays rustc's wherever
+        // rustc linked one: rustc's code that no walk sees writes it too, as its allocator shim
+        // does with what the `#[global_allocator]` inlines, and a copy of ours would split the
+        // state in two (`docs/live.md#statics`). What an edit makes of its first value is lost,
+        // as it is for any static of rustc's.
+        let symbol = self.symbols.static_(id);
+        let stateful = || {
+            is_thread_local(db, id) || compiled_static(db, id).as_ref().is_ok_and(|it| it.writable)
+        };
+        let shared = !self.symbols.nothing_of_rustc()
+            && symbol.as_ref().is_some_and(|it| self.symbols.linked(it))
+            && stateful();
+        let ours = !shared && self.own_statics.replaces(db, id) && compiled_static(db, id).is_ok();
+        let rustcs = symbol.filter(|_| !ours);
         // One the linker left out of what rustc linked is used by none of rustc's code there.
         let unlinked = rustcs.as_ref().is_some_and(|it| !self.symbols.linked(it));
         let theirs = || rustcs.filter(|_| !unlinked);

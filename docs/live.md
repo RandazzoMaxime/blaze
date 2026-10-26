@@ -60,6 +60,24 @@ In the splice and in a live patch, a call or an address taken of a function the 
 already has goes to its original entry, never to a copy a previous splice appended. The entry
 is where the jump is written, so a later edit of that function reaches every caller.
 
+## Statics
+
+A program the daemon links mixes its code with rustc's: functions it left to rustc, rustc's
+copies of instances it could not compile (which callers of ours call instead), and rustc's
+allocator shim with the `#[global_allocator]` inlined into it. A static with state has to be
+one object for both, or each half reads its own copy: a thread-local that rustc's code sets
+reads as never set in ours, and a counter the allocator bumps reads zero. So:
+
+- a thread-local, or a static written at run time, stays rustc's wherever rustc linked it
+  under a symbol, and an edit to its first value takes effect only at the next cargo build;
+- not yet handled: a stateful static that rustc made local to one codegen unit has no symbol
+  to import, so ours is a private copy (`ra_jit::static::N`). If one of its users ends up as
+  rustc's copy anyway (a failed instance forwarded to rustc's, or a caller left to rustc that
+  reaches a callee we never compiled), the two halves split. A program can avoid it by giving
+  such a static a name rustc always exports (`#[unsafe(no_mangle)]`, with `#[thread_local]`
+  for a thread-local); a general fix would make weaken.rs promote rustc's local static to a
+  private external symbol the daemon can import.
+
 ## What is refused
 
 The program is told to start again (`Outcome::Restart`) when:
