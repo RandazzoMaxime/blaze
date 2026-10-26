@@ -11,7 +11,9 @@
 //! This file is what every platform shares: the spec, the command, the probe, the record's
 //! format and the marker a test harness gives the name of the test a thread runs by. Each
 //! platform's sandbox is a module of its own with one entry, `run(spec, program)`: on Linux
-//! namespaces, overlayfs and seccomp's user notification ([`linux`]); on macOS its own.
+//! namespaces, overlayfs and seccomp's user notification ([`linux`]); on macOS Seatbelt and a
+//! library every process of the sandbox loads, which keeps the overlays' writes and records
+//! (`sandbox/macos.rs`).
 //!
 //! [docs/cargo.md]: https://github.com/indexable-inc/blaze/blob/main/docs/cargo.md
 //! [#147]: https://github.com/indexable-inc/blaze/issues/147
@@ -27,15 +29,8 @@ use serde::{Deserialize, Serialize};
 #[cfg(target_os = "linux")]
 mod linux;
 
-// STUB until the macOS lane's `sandbox/macos.rs` lands: replace this block with
-// `#[cfg(target_os = "macos")] mod macos;`. Until then macOS has no sandbox, and a command that
-// wants one says so and stops.
 #[cfg(target_os = "macos")]
-mod macos {
-    pub(super) fn run(_: &super::Spec, _: Option<&[std::ffi::OsString]>) -> Result<i32, String> {
-        Err("this build of ra-jit has no sandbox for macOS yet".to_owned())
-    }
-}
+mod macos;
 
 /// The subcommand of `ra-jit` that runs a program in a sandbox.
 pub(crate) const COMMAND: &str = "sandbox";
