@@ -388,10 +388,16 @@ impl<'db> Keeper<'_, 'db> {
 
     /// The function of the program that an instance without arguments is of, and its symbol.
     fn root_named(&self, name: &str) -> Option<(FunctionId, String)> {
-        if let Some(&Some(func)) = self.root_names.get(name)
-            && let Some(symbol) = self.symbols.function(func)
-        {
-            return Some((func, symbol));
+        // A call names the lifetimes its callee has, which the root is named without.
+        let erased = stable::StableNames::lifetimes_erased(name);
+        if let Some(&Some(func)) = self.root_names.get(&*erased) {
+            let symbol = self.symbols.function(func);
+            // The one root of its name is what listing its crate would find again. In a
+            // program with nothing of rustc's, a function without a symbol is so by what is
+            // written, and no other build of its crate has one either.
+            if symbol.is_some() || self.program.is_none() {
+                return Some((func, symbol?));
+            }
         }
         let of = self.names.functions_named(name);
         of.into_iter().find_map(|it| Some((it, self.symbols.function(it)?)))

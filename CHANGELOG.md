@@ -452,6 +452,22 @@ All notable changes to ra-jit are written here. The format follows
 
 ### Changed
 
+- A whole build's cold compile no longer waits on itself where a hundred threads meet. What
+  the store is given of a function names each function and static it reaches by a name its
+  crate is listed to find again: each crate is listed once, by the first thread to ask and
+  outside the lock the others take, a name with types for arguments is not looked for in any
+  listing, a name that is exactly one root of the program is taken as that root (a callee's
+  lifetimes erased), and the statics are listed by the threads compiling, beside the compile,
+  not by every thread at once after it. The threads compiling ahead also warm the values of the
+  statics and the places of the panics the object thread asks for, are woken one for each new
+  job rather than all for each, and the object thread waits on a condvar of its own. A crate's
+  content id is hashed once, the type sets debuginfo tells of are sharded by environment, each
+  thread keeps the values it interned in front of the shared shards, and the frozen parts are
+  encoded on every core (their line says how long writing took). nushell on dev-aws-14,
+  `harness/coldbuild.py bench`: the store's entries are made in 0.84 s where they took 1.6 to
+  1.8 s (the threads' wall in them 48 s where 310 s), the frozen parts written in 1.3 s; the
+  cold build is 47.9 s (cargo 24.0 s), still waiting on single long jobs and on roots found one
+  after another, which [no-rustc.md](docs/no-rustc.md) (K) records.
 - blaze builds with one Rust, the latest nightly: `nightly-2026-10-25` (rust-lang/rust
   12433c307), pinned in `harness/toolchain` and moved with `harness/toolchain_bump.py`, in
   place of stable 1.99.0. `vendor/rustc_abi` and the proc-macro server are taken from that
@@ -462,7 +478,6 @@ All notable changes to ra-jit are written here. The format follows
   nightly is ignored, modelled or refused by one table (`-Zthreads` is ignored); and cargo's
   second build-directory layout (`build/<pkg>/<hash>/{out,fingerprint,run}`) is followed
   beside the first.
-
 - The first edit after a daemon starts on the store no longer compiles every function from
   the store in the edited file to tell what changed. Each entry names the items of the
   checkout its code comes from, by a hash of their text: the body it is written in, the
@@ -1452,6 +1467,11 @@ All notable changes to ra-jit are written here. The format follows
 - The thread that compiles at a higher level has a stack of 64 MiB, and the bodies a body
   built in shows are ten deep at most: a deep chain of them overflowed the 2 MiB default and
   took the worker down.
+- `RA_JIT_RUSTC_BASE=0` reaches the worker of the build that sets it, which is a worker of its
+  own: it reached one only when the build that set it had started the daemon, so behind a
+  daemon another build started the first edits were patches of rustc's executable, and an edit
+  that adds a type asked for a restart (`live_types.py` in the gate, after the other live
+  tests).
 
 ## [0.1.0] - 2026-10-20
 

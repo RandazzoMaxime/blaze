@@ -1097,6 +1097,15 @@ build`, no rustc base. See [the cold start](#the-cold-start-without-rustc).
   cargo builds beside the crates; biome expands its proc macros in 149 s and reaches 17
   functions the frontend turns down. Then the shipped standard library for the dev and
   release program units, and the flip.
+- nushell's cold compile (2026-10-26, dev-aws-14, `RA_JIT_STATS=1`): the store's entries no
+  longer list a crate per thread (each crate once, outside the lock, a name of exactly one
+  root taken as it, statics listed beside the compile), and their threads' wall went from
+  310 s to 48 s. What is left of the 24 s compile is the object thread's ~6.4 s of waiting for
+  roots: `main` alone takes 568 ms first, many small functions 300 to 900 ms each as they wait
+  on queries they share, and from 4.25 s to 5.9 s one worker runs `add_default_context` and
+  `add_extra_command_context` (bodies of 1389 calls, 0.87 s, and 1155, 0.81 s) before the 673 roots
+  they name arrive; from 8.5 s to 12 s a few workers finish the tail. Finding those callees
+  before a function is translated needs them read off its MIR first, which is not cheap.
 
 **L. Doctests by the daemon.** ([#92](https://github.com/indexable-inc/ra-jit/issues/92)) [#28](https://github.com/indexable-inc/ra-jit/issues/28): the
 examples are compiled by the daemon that has the workspace loaded, linked with G's line; no probe

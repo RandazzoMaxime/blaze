@@ -3814,7 +3814,11 @@ struct Ahead {
 /// instances in the object: it would wait for one of them on each it asked for too early.
 struct Ready<'a> {
     ahead: &'a std::sync::Mutex<Ahead>,
-    idle: &'a std::sync::Condvar,
+    /// What the threads that compile ahead wait on for work, and the one that puts the
+    /// instances in the object for them to be through with some: each of a hundred threads
+    /// woken whenever one is through with a function has them take turns at the lock.
+    work: &'a std::sync::Condvar,
+    progress: &'a std::sync::Condvar,
     /// The instances to put in the object that a thread is still to compile.
     waiting: FxHashMap<(Instance, StoredParamEnvAndCrate), Vec<FuncId>>,
 }
@@ -3843,7 +3847,7 @@ impl Ready<'_> {
             }
         }
         if queued {
-            self.idle.notify_all();
+            self.work.notify_all();
         }
         loop {
             let ended = state.stopped
@@ -3862,7 +3866,7 @@ impl Ready<'_> {
             if !ready.is_empty() || self.waiting.is_empty() {
                 return ready;
             }
-            state = self.idle.wait(state).unwrap_or_else(|e| e.into_inner());
+            state = self.progress.wait(state).unwrap_or_else(|e| e.into_inner());
         }
     }
 
@@ -3878,7 +3882,7 @@ impl Ready<'_> {
             match found {
                 Some(at) => return at,
                 None if ended => return 0,
-                None => state = self.idle.wait(state).unwrap_or_else(|e| e.into_inner()),
+                None => state = self.progress.wait(state).unwrap_or_else(|e| e.into_inner()),
             }
         }
     }
@@ -3900,7 +3904,7 @@ impl Ready<'_> {
                 state.roots.push_back(root);
             }
         }
-        self.idle.notify_all();
+        self.work.notify_all();
     }
 }
 
@@ -3913,9 +3917,7 @@ struct ToldTypes(std::sync::Arc<TypesTold>);
 #[derive(Default)]
 struct TypesTold {
     /// What the type of each variable is told as.
-    #[allow(clippy::type_complexity)]
-    roots:
-        std::sync::Mutex<FxHashMap<(StoredParamEnvAndCrate, StoredTy), Option<debuginfo::TypeSet>>>,
+    roots: debuginfo::ByEnv<StoredTy, Option<debuginfo::TypeSet>>,
     /// The sets of the types they are made of, which are shared.
     sets: debuginfo::Sets,
 }
@@ -3927,13 +3929,12 @@ impl ToldTypes {
         env: &StoredParamEnvAndCrate,
         ty: &StoredTy,
     ) -> Option<debuginfo::TypeSet> {
-        let key = (env.clone(), ty.clone());
-        if let Some(told) = self.0.roots.lock().unwrap_or_else(|e| e.into_inner()).get(&key) {
-            return told.clone();
+        if let Some(told) = self.0.roots.get(env, ty) {
+            return told;
         }
         let told = debuginfo::described(db, env, ty, &self.0.sets);
         // Another thread may have told of it meanwhile, and the functions share one set.
-        self.0.roots.lock().unwrap_or_else(|e| e.into_inner()).entry(key).or_insert(told).clone()
+        self.0.roots.or_insert(env, ty, told)
     }
 
     /// Tells of the types of the variables of `compiled`, for [`describe_variables`] to find.
@@ -5531,13 +5532,15 @@ impl<'a, 'db> ObjectCodegen<'a, 'db> {
         if self.base.is_some() || self.units() || (self.pending.is_empty() && roots.is_empty()) {
             return beside(self, None);
         }
+        type Waits = (std::sync::Condvar, std::sync::Condvar);
         /// Tells the threads that wait when the one compiling is stopped.
-        struct Working<'a>(&'a std::sync::Mutex<Ahead>, &'a std::sync::Condvar);
+        struct Working<'a>(&'a std::sync::Mutex<Ahead>, &'a Waits);
         impl Drop for Working<'_> {
             fn drop(&mut self) {
                 if std::thread::panicking() {
                     self.0.lock().unwrap_or_else(|e| e.into_inner()).stopped = true;
-                    self.1.notify_all();
+                    self.1.0.notify_all();
+                    self.1.1.notify_all();
                 }
             }
         }
@@ -5561,7 +5564,9 @@ impl<'a, 'db> ObjectCodegen<'a, 'db> {
             open: true,
             alive: 0,
         });
-        let idle = std::sync::Condvar::new();
+        // Work for the threads, and what they are through with for the one beside them.
+        let waits: Waits = Default::default();
+        let (work_to_do, progress) = (&waits.0, &waits.1);
         let (rejected, hydrate) = (self.rejected, self.hydrate);
         let threads = std::thread::available_parallelism().map_or(1, |it| it.get());
         let (entries, owned) = (self.entries.clone(), &self.own_statics.crates.clone());
@@ -5570,8 +5575,13 @@ impl<'a, 'db> ObjectCodegen<'a, 'db> {
         let told = told.as_ref();
         let on_demand = self.on_demand;
         let (stored, roots_from_store) = (&self.stored_roots.clone(), self.roots_from_store());
+        // What the store is given of a function names each static it refers to by a name its
+        // crate is listed to find again: listed here, beside the compiling, and not by every
+        // thread at once after it.
+        let (listings, keeps) = (self.names.listings(), self.defers() && entries.is_some());
         let run = |db: &dyn HirDatabase, symbols: &dyn SymbolResolver| {
-            let names = stable::StableNames::new(db, symbols, owned.clone(), hydrate);
+            let names = stable::StableNames::new(db, symbols, owned.clone(), hydrate)
+                .listing(listings.clone());
             let usable = |name: &str| {
                 let Some(entries) = entries else { return false };
                 entries.usable(name, &|symbol| symbols.provides(symbol) && symbols.linked(symbol))
@@ -5599,18 +5609,19 @@ impl<'a, 'db> ObjectCodegen<'a, 'db> {
                     None => match state.queue.pop() {
                         Some(it) => either::Either::Right(it),
                         None if state.working == 0 && !state.open => {
-                            idle.notify_all();
+                            work_to_do.notify_all();
+                            progress.notify_all();
                             return;
                         }
                         None => {
-                            state = idle.wait(state).unwrap_or_else(|e| e.into_inner());
+                            state = work_to_do.wait(state).unwrap_or_else(|e| e.into_inner());
                             continue;
                         }
                     },
                 };
                 state.working += 1;
                 drop(state);
-                let working = Working(&ahead, &idle);
+                let working = Working(&ahead, &waits);
                 let (mut found, mut called) = (Vec::new(), Vec::new());
                 let compiled = match &job {
                     // One without a symbol is left to rustc, and so is what only it calls.
@@ -5631,6 +5642,34 @@ impl<'a, 'db> ObjectCodegen<'a, 'db> {
                         compiled
                     }
                 };
+                // The thread that puts the function in the object asks for the value of each
+                // static it names and the place of each panic: it would find them one by one.
+                let mut statics = Vec::new();
+                for request in compiled.iter().flat_map(|it| &it.requests.datas) {
+                    match request {
+                        DataRequest::Static(id) => statics.push(*id),
+                        &DataRequest::Location(Some((owner, span))) => {
+                            _ = source_location(db, owner, span);
+                        }
+                        _ => {}
+                    }
+                }
+                let mut warmed = FxHashSet::default();
+                while let Some(id) = statics.pop() {
+                    if !warmed.insert(id) {
+                        continue;
+                    }
+                    if keeps {
+                        _ = names.static_(id);
+                    }
+                    if let Ok(value) = compiled_static(db, id) {
+                        let named = value.requests.datas.iter().filter_map(|it| match it {
+                            DataRequest::Static(id) => Some(*id),
+                            _ => None,
+                        });
+                        statics.extend(named);
+                    }
+                }
                 for request in compiled.iter().flat_map(|it| &it.requests.funcs) {
                     let FuncTarget::Instance(callee, asked) = &request.target else {
                         continue;
@@ -5665,17 +5704,26 @@ impl<'a, 'db> ObjectCodegen<'a, 'db> {
                     state.done.insert(it.clone());
                     state.fresh.push(it);
                 }
+                let mut added = 0;
                 for it in found {
                     if state.seen.insert(it.clone()) {
                         state.queue.push(it);
+                        added += 1;
                     }
                 }
                 for root in called {
                     if state.rooted.insert(root) {
                         state.roots.push_back(root);
+                        added += 1;
                     }
                 }
-                idle.notify_all();
+                // A thread for each new one, and every thread once there is nothing to do.
+                if state.working == 0 && state.queue.is_empty() && state.roots.is_empty() {
+                    work_to_do.notify_all();
+                } else {
+                    (0..added.min(threads)).for_each(|_| work_to_do.notify_one());
+                }
+                progress.notify_all();
             }
         };
         let work = |db: &dyn HirDatabase, symbols: &dyn SymbolResolver, _: usize| {
@@ -5688,14 +5736,16 @@ impl<'a, 'db> ObjectCodegen<'a, 'db> {
                     self.1.notify_all();
                 }
             }
-            let _leaving = Leaving(&ahead, &idle);
+            let _leaving = Leaving(&ahead, progress);
             run(db, symbols);
         };
-        let mut ready = Ready { ahead: &ahead, idle: &idle, waiting: FxHashMap::default() };
+        let waiting = FxHashMap::default();
+        let mut ready = Ready { ahead: &ahead, work: work_to_do, progress, waiting };
         self.symbols.in_parallel_beside(threads, &work, &mut || {
             beside(self, Some(&mut ready));
             ahead.lock().unwrap_or_else(|e| e.into_inner()).open = false;
-            idle.notify_all();
+            work_to_do.notify_all();
+            progress.notify_all();
         });
         self.ahead = ahead.into_inner().unwrap_or_else(|e| e.into_inner()).seen;
     }
