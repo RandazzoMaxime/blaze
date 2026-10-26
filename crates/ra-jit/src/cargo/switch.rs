@@ -236,7 +236,7 @@ fn wrapper_for(dir: &Path, set: Option<String>, home: &[PathBuf]) -> Option<std:
         Some(set) => (dir.to_owned(), set),
         None => {
             let nearer = dir.ancestors().flat_map(|it| CONFIGS.map(|name| it.join(name)));
-            let configs = nearer.filter(|it| !home.contains(it)).chain(home.iter().cloned());
+            let mut configs = nearer.filter(|it| !home.contains(it)).chain(home.iter().cloned());
             configs.find_map(|config| {
                 let named = wrapper_in(&config)?;
                 Some((config.parent()?.parent()?.to_owned(), named))
