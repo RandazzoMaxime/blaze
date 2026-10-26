@@ -203,11 +203,6 @@ pub(super) fn run(spec: &Spec, program: Option<&[OsString]>) -> Result<i32, Stri
         .iter()
         .map(|(name, value)| CString::new(format!("{name}={value}")).unwrap_or_default())
         .collect();
-    let recorded = program.is_some() && spec.record.is_some();
-    let filter = match recorded {
-        true => Some(filter_program(spec.record_reads)),
-        false => None,
-    };
     let mut sockets = [0; 2];
     // SAFETY: two descriptors are written into `sockets`.
     if unsafe {
@@ -221,6 +216,11 @@ pub(super) fn run(spec: &Spec, program: Option<&[OsString]>) -> Result<i32, Stri
     {
         return Err(os("socketpair"));
     }
+    let recorded = program.is_some() && spec.record.is_some();
+    let filter = match recorded {
+        true => Some(filter_program(spec.record_reads, sockets[1])),
+        false => None,
+    };
     let (uid, gid) = unsafe { (libc::getuid(), libc::getgid()) };
     // SAFETY: the process is one thread; the child only makes system calls and exits.
     let first = unsafe { libc::fork() };
@@ -558,8 +558,11 @@ fn exec(made: &Made<'_>) -> String {
 
 /// The seccomp filter that has the kernel ask the supervisor about the calls of [`CALLS`] the
 /// record needs: all of them when `reads`, otherwise those that can write, the network's and
-/// `access` with `F_OK` (the test marker).
-fn filter_program(reads: bool) -> Vec<libc::sock_filter> {
+/// `access` with `F_OK` (the test marker). A `sendmsg` on `socket` is never asked about: it
+/// is how the filter's own descriptor reaches the supervisor, after the filter is installed
+/// and before anything listens. (A program that later has a socket of the same number sends
+/// on it unrecorded; the network namespace has only the loopback, so it reaches nothing.)
+fn filter_program(reads: bool, socket: libc::c_int) -> Vec<libc::sock_filter> {
     const LD_W_ABS: u16 = 0x20;
     const JEQ_K: u16 = 0x15;
     const JSET_K: u16 = 0x45;
@@ -579,7 +582,10 @@ fn filter_program(reads: bool) -> Vec<libc::sock_filter> {
     ];
     for call in CALLS {
         let block = match (reads, call.does) {
-            (true, _) | (false, Does::Change | Does::Address | Does::SendMsg) => vec![notify],
+            (_, Does::SendMsg) => {
+                vec![insn(LD_W_ABS, 0, 0, low(0)), insn(JEQ_K, 0, 1, socket as u32), allow, notify]
+            }
+            (true, _) | (false, Does::Change | Does::Address) => vec![notify],
             (false, Does::Look) => continue,
             (false, Does::Open(flags)) => {
                 vec![insn(LD_W_ABS, 0, 0, low(flags)), insn(JSET_K, 0, 1, WRITES), notify, allow]

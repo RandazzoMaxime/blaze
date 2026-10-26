@@ -202,8 +202,9 @@ impl Recorder {
 
     /// `thread` read `path`, made whole: recorded when reads are and it is an input.
     pub(crate) fn read(&mut self, thread: u64, path: &str) {
-        let input = self.overlays.iter().any(|it| under(path, it))
-            || !self.own.iter().any(|it| under(path, it)) && !self.not_inputs.contains(path);
+        let input = !self.not_inputs.contains(path)
+            && (self.overlays.iter().any(|it| under(path, it))
+                || !self.own.iter().any(|it| under(path, it)));
         if self.reads && input {
             self.note(Reached::Read, thread, path);
         }

@@ -175,6 +175,14 @@ pub(crate) fn pick(
         }
         total += 1;
         let reaches = hash.strip_prefix('~');
+        // A test that reaches outside and runs every time this command keeps what it passed
+        // with in the sandbox: a command in the sandbox again skips it if nothing it read
+        // changed. (A run outside that fails forgets it as any failure does.)
+        if let (Some(_), Some(then)) = (reaches, before.get(name))
+            && (sandbox.is_none() || outside.contains(name))
+        {
+            tests.insert(name.to_owned(), (*then).to_owned());
+        }
         if reaches.is_some() && sandbox.is_some() && outside.contains(name) {
             names.push(name.to_owned());
             let why = format!("its package takes it out of the sandbox ({})", manifest.display());
