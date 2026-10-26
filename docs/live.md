@@ -64,10 +64,12 @@ is where the jump is written, so a later edit of that function reaches every cal
 
 The program is told to start again (`Outcome::Restart`) when:
 
-- an edit changes a type the rest of the program sees: the daemon hashes each file's type
-  definitions (structs, enums, unions, aliases, traits without default bodies, and `repr`)
-  before and after, and a program started before the change can't have its live data
-  relaid;
+- an edit changes the definition of a type that keeps its name: the daemon hashes each
+  file's type definitions (structs, enums, unions, aliases, traits without default bodies,
+  and `repr`; not comments, doc comments or other attributes) before and after, and a
+  program started before the change can't have its live data relaid. The restart names the
+  type. A type added or taken away is no change, and neither is one taken away and added
+  again as it was ([Types](#types));
 - the edit wrote the whole object again, which the daemon does when it has no compiled base
   to patch against (the first edit after it starts);
 - the executable was linked again: the daemon says so for a program it knew, and the program
@@ -75,6 +77,47 @@ The program is told to start again (`Outcome::Restart`) when:
   plain `cargo build`.
 
 A patch that can't be applied (`Outcome::Declined`) leaves the program as it was.
+
+## Types
+
+A type is never changed in place under a running program: a new one is added beside it under
+a name of its own, the code moved to it with the values converted, and the old one deleted,
+each edit a patch. On the daemon's own base (`RA_JIT_RUSTC_BASE=0`, or once it has built one)
+an edit that adds a struct, an enum, a derive, a trait impl or a `macro_rules!` call that
+writes them, anywhere in a file with other types, is a patch of the functions it adds and the
+generic instances over the new type; taking a type away is a patch of the code that no longer
+names it. Over rustc's executable an edit that is more than bodies still takes a build in full
+and a restart ([architecture.md](architecture.md)).
+
+A static new since the base, as the `static INDEX: AtomicU32` that `#[derive(Component)]`
+writes in a function for each type, interior mutability or not, is in every patch after the
+one it is new in, since a patch holds all that differs from the base. It has to stay the one
+static: the program writes to it (a component's id, a counter, a cache), and the next patch's
+code has to read what it wrote. So the codegen names it `ra_jit::static::lasting::<print>`,
+the print of its path (a crate of the checkout by its root file, a macro call by its text,
+which an edit above it leaves alone), its declaration and its first value
+(`hir_ty_codegen::LASTING_STATIC`), the same in every patch while it stays the same. The
+daemon gives each such name, per running process, a place of its own at the top of the room
+the program set aside, below the last (`splice::Lasting`), points every patch's references at
+that place, and sends with each patch the first value of each one it refers to
+(`format::Code::lasting`). The program writes a first value only the first time it sees the
+place, mapping the page then, and never again; a patch it never took (one written over by the
+next before it read it) changes nothing, since no patch's code refers to a static in another
+patch. The program lowers the `end` it publishes below them, so a daemon started again places
+nothing over them. A static of the executable keeps its address and its value; one whose
+declaration or first value an edit changes is another static, which starts from the new value.
+A lasting name already in the executable (one a splice of the whole object left there) is
+that executable's copy. A static that points into itself is refused (its first value would
+point into a patch), and so are two statics written the same in one place.
+
+`harness/live_types.py` runs a program that keeps values in a world that erases their type,
+each type with an id handed out from a shared pool and kept in a static of its own, as
+flecs_ecs does, and gives it four edits: add `V2` with its derive, id static and trait impl;
+move the code to `V2`, converting the values, with a static new in the edit; delete `V1`;
+change a field of `V2`. The first three are patches whose answers match rustc's build of the
+same text (`V2` keeps id 1 through all three), and the fourth restarts naming `struct V2`.
+On Linux x86-64 on the daemon's own base each takes about 90 to 190 ms from the build's start
+to applied.
 
 ## Tiers
 
