@@ -47,6 +47,8 @@ pub(crate) struct Release {
     channel: &'static str,
     date: &'static str,
     /// What its `rustc --version` says after `rustc `: `1.101.0-nightly (12433c307 2026-10-24)`.
+    /// Pins without it are refused; the daemon reads it on every host ([`rustc_version`]).
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) rustc: &'static str,
     host: &'static str,
     manifest: Pin,
