@@ -69,7 +69,16 @@ one object for both, or each half reads its own copy: a thread-local that rustc'
 reads as never set in ours, and a counter the allocator bumps reads zero. So:
 
 - a thread-local, or a static written at run time, stays rustc's wherever rustc linked it
-  under a symbol, and an edit to its first value takes effect only at the next cargo build;
+  under a symbol, as long as its first value is the one rustc gave it. The daemon keeps that
+  value (`patch::RustcValues`), taken the first time a build asks, when no edit since the
+  daemon started can have reached the static, and a patch's base marks such a static shared.
+  An edit to the first value of a shared static is not a patch: rustc's copy holds what the
+  program wrote from the old value, and no copy beside it can start from the new one. The
+  build is in full, the program is told to restart, and the full build has its own copy with
+  the new value, which rustc's code does not share until cargo builds again (`harness/stress.py`
+  steps 58 and 84, `harness/splices.py` "a thread-local's initial value"). A static whose
+  value rustc's copy can't be told for (one an edit reached before the daemon first asked) is
+  ours, as before;
 - not yet handled: a stateful static that rustc made local to one codegen unit has no symbol
   to import, so ours is a private copy (`ra_jit::static::N`). If one of its users ends up as
   rustc's copy anyway (a failed instance forwarded to rustc's, or a caller left to rustc that
@@ -88,6 +97,9 @@ The program is told to start again (`Outcome::Restart`) when:
   program started before the change can't have its live data relaid. The restart names the
   type. A type added or taken away is no change, and neither is one taken away and added
   again as it was ([Types](#types));
+- an edit changes the first value of a thread-local or a static written at run time that
+  stays rustc's ([Statics](#statics)): the build is in full, with a copy of ours that starts
+  from the new value;
 - the edit wrote the whole object again, which the daemon does when it has no compiled base
   to patch against (the first edit after it starts);
 - the executable was linked again: the daemon says so for a program it knew, and the program

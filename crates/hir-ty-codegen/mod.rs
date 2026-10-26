@@ -826,7 +826,7 @@ impl CodegenUnit {
             patching: _,
             counted,
             stale: _,
-            frozen: _,
+            frozen,
             used_by_rustc: _,
             tiers,
             undo,
@@ -872,6 +872,7 @@ impl CodegenUnit {
             )?;
             cg.patching = patching;
             cg.rustc_futures = futures.clone();
+            cg.rustc_values = frozen.rustc_values();
             let mut compiled = Vec::new();
             let mut skipped = Vec::new();
             let mut failed = Vec::new();
@@ -2160,6 +2161,12 @@ struct ObjectCodegen<'a, 'db> {
     /// Statics nothing exports and nothing can write to, which we give a copy of the value.
     frozen_statics: FxHashMap<StaticId, DataId>,
     imported_statics: FxHashMap<StaticId, DataId>,
+    /// Those of `imported_statics` that are rustc's for their state alone, which a base
+    /// keeps to tell an edit to their first value by.
+    shared_statics: FxHashMap<StaticId, DataId>,
+    /// rustc's first values of statics with state, to tell whether rustc's copy is still
+    /// of the source.
+    rustc_values: patch::RustcValues,
     consts: FxHashMap<ConstBlob, DataId>,
     source_paths: FxHashMap<base_db::FileId, Option<String>>,
     builder_ctx: FunctionBuilderContext,
@@ -5004,6 +5011,8 @@ impl<'a, 'db> ObjectCodegen<'a, 'db> {
             statics: FxHashMap::default(),
             frozen_statics: FxHashMap::default(),
             imported_statics: FxHashMap::default(),
+            shared_statics: FxHashMap::default(),
+            rustc_values: patch::RustcValues::default(),
             consts: FxHashMap::default(),
             source_paths: FxHashMap::default(),
             builder_ctx: FunctionBuilderContext::new(),
@@ -6430,15 +6439,19 @@ impl<'a, 'db> ObjectCodegen<'a, 'db> {
         // program runs (a thread-local, or one written through a cell) stays rustc's wherever
         // rustc linked one: rustc's code that no walk sees writes it too, as its allocator shim
         // does with what the `#[global_allocator]` inlines, and a copy of ours would split the
-        // state in two (`docs/live.md#statics`). What an edit makes of its first value is lost,
-        // as it is for any static of rustc's.
+        // state in two (`docs/live.md#statics`). That holds while rustc's copy starts from the
+        // first value the source gives it now: after an edit to that value, ours is the one
+        // with the program's value. A patch keeps what its base chose, and declines an edit
+        // to the first value of one the base shares (`Base::stale`).
         let symbol = self.symbols.static_(id);
         let stateful = || {
             is_thread_local(db, id) || compiled_static(db, id).as_ref().is_ok_and(|it| it.writable)
         };
+        let in_base = self.base.and_then(|base| base.statics.get(&id));
         let shared = !self.symbols.nothing_of_rustc()
             && symbol.as_ref().is_some_and(|it| self.symbols.linked(it))
-            && stateful();
+            && stateful()
+            && in_base.map_or_else(|| self.rustc_values.kept(db, id), |it| it.shared);
         let ours = !shared && self.own_statics.replaces(db, id) && compiled_static(db, id).is_ok();
         let rustcs = symbol.filter(|_| !ours);
         // One the linker left out of what rustc linked is used by none of rustc's code there.
@@ -6458,6 +6471,9 @@ impl<'a, 'db> ObjectCodegen<'a, 'db> {
                 is_thread_local(db, id),
             )?;
             self.imported_statics.insert(id, data);
+            if shared {
+                self.shared_statics.insert(id, data);
+            }
             // rustc's value of the static points to rustc's copies of functions.
             if self.on_demand_crates.contains(&id.krate(db))
                 && let Ok(compiled) = compiled_static(db, id).as_ref()
