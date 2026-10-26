@@ -324,6 +324,7 @@ fn sandbox(
     // made read-only or hidden, and bound back in place after: they stay the directories
     // outside, written for real.
     let writable = spec.writable.iter().map(|it| opened(it)).collect::<Result<Vec<_>, _>>()?;
+    let readable = spec.readable.iter().map(|it| opened(it)).collect::<Result<Vec<_>, _>>()?;
     let attr = MountAttr { attr_set: MOUNT_ATTR_RDONLY, attr_clr: 0, propagation: 0, userns_fd: 0 };
     // SAFETY: `attr` is a `struct mount_attr` of the size given.
     if unsafe {
@@ -378,6 +379,16 @@ fn sandbox(
             (by_fd(&staged, &format!("/{at}/upper")), by_fd(&staged, &format!("/{at}/work")));
         overlay(dir, &by_fd(lower, ""), &upper, &work)?;
     }
+    // The readable directories are bound back in place, read-only as their mount now is, where
+    // an empty directory hid them; the writable ones go on top.
+    for (dir, fd) in spec.readable.iter().zip(&readable) {
+        std::fs::create_dir_all(dir).map_err(|error| format!("{}: {error}", dir.display()))?;
+        let (from, to) = (c(&by_fd(fd, "")), c(dir));
+        let flags = libc::MS_BIND | libc::MS_REC;
+        if unsafe { libc::mount(from.as_ptr(), to.as_ptr(), none, flags, std::ptr::null()) } < 0 {
+            return Err(os(&format!("{} seen read-only", dir.display())));
+        }
+    }
     for (dir, fd) in spec.writable.iter().zip(&writable) {
         std::fs::create_dir_all(dir).map_err(|error| format!("{}: {error}", dir.display()))?;
         let (from, to) = (c(&by_fd(fd, "")), c(dir));
@@ -403,7 +414,7 @@ fn sandbox(
             return Err(os(&format!("{} written for real (mount_setattr)", dir.display())));
         }
     }
-    drop((lowers, staged, writable));
+    drop((lowers, staged, writable, readable));
     // A `TMPDIR` in one of the empty directories is there, empty as they are.
     let tmp = spec.env.iter().find(|(name, _)| name == "TMPDIR").map(|(_, it)| Path::new(it));
     if let Some(tmp) =

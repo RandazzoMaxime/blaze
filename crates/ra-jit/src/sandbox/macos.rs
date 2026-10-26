@@ -217,6 +217,13 @@ pub(super) fn run(spec: &Spec, program: Option<&[OsString]>) -> Result<i32, Stri
             writes.push(it);
         }
     }
+    // A readable directory is passed through as it is, not answered from an empty one: the
+    // library takes it as it takes a writable one, and Seatbelt still refuses its writes.
+    for readable in &spec.readable {
+        for it in spellings(readable) {
+            config.push_str(&format!("W\t{it}\n"));
+        }
+    }
     if recording {
         config.push_str("L\n");
         if spec.record_reads {

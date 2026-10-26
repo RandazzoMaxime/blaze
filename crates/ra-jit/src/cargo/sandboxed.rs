@@ -85,6 +85,9 @@ pub(crate) struct OptOut {
     pub(crate) all: bool,
     /// `unsandboxed-tests`: the tests, by libtest's names, that run outside.
     pub(crate) tests: BTreeSet<String>,
+    /// `build-script = false`: its build script runs outside, when the package is a member of
+    /// the workspace being built (a dependency can't take itself out).
+    pub(crate) build_script_outside: bool,
 }
 
 /// What the manifest of the package in `package_dir` says of its tests and the sandbox. A
@@ -116,14 +119,91 @@ pub(crate) fn opt_out(package_dir: &Path) -> anyhow::Result<OptOut> {
                     out.tests.insert(name.to_owned());
                 }
             }
+            "build-script" => {
+                out.build_script_outside =
+                    !value.as_bool().ok_or_else(|| wrong("`build-script` is true or false"))?
+            }
             other => {
                 return Err(wrong(&format!(
-                    "`{other}` is not known (`tests` and `unsandboxed-tests` are)"
+                    "`{other}` is not known (`tests`, `unsandboxed-tests` and `build-script` are)"
                 )));
             }
         }
     }
     Ok(out)
+}
+
+/// The table of the workspace's root manifest that takes packages' build scripts and proc
+/// macros out of the sandbox: the only place a dependency from a registry can be named.
+pub(crate) const WORKSPACE_TABLE: &str = "[workspace.metadata.blaze.sandbox]";
+
+/// What the workspace's root manifest says of build scripts, proc macros and the sandbox, in
+/// [`WORKSPACE_TABLE`].
+#[derive(Default, Debug)]
+pub(crate) struct WorkspaceOptOut {
+    pub(crate) manifest: PathBuf,
+    /// `unsandboxed-build-scripts`: the packages, by name, whose build scripts run outside.
+    pub(crate) build_scripts: BTreeSet<String>,
+    /// `unsandboxed-proc-macros`: the packages, by name, whose proc macros are expanded by a
+    /// server outside.
+    pub(crate) proc_macros: BTreeSet<String>,
+}
+
+impl WorkspaceOptOut {
+    /// Whether the proc macro of the crate `name` (a package's name with `-` as `_`, as the
+    /// crate is named) is expanded outside.
+    pub(crate) fn macro_outside(&self, name: &str) -> bool {
+        self.proc_macros.iter().any(|it| it.replace('-', "_") == name.replace('-', "_"))
+    }
+}
+
+/// What the root manifest of the workspace at `root` says in [`WORKSPACE_TABLE`]: nothing when
+/// it has no such table or no manifest. A table that says it otherwise than as its keys are
+/// is an error.
+pub(crate) fn workspace_opt_out(root: &Path) -> anyhow::Result<WorkspaceOptOut> {
+    let manifest = root.join("Cargo.toml");
+    let mut out = WorkspaceOptOut { manifest: manifest.clone(), ..WorkspaceOptOut::default() };
+    let Ok(text) = std::fs::read_to_string(&manifest) else { return Ok(out) };
+    let value: toml::Table =
+        toml::from_str(&text).with_context(|| format!("reading {}", manifest.display()))?;
+    let table = ["workspace", "metadata", "blaze", "sandbox"]
+        .iter()
+        .try_fold(&value, |table, key| table.get(*key)?.as_table());
+    let Some(table) = table else { return Ok(out) };
+    let wrong =
+        |what: &str| anyhow::anyhow!("{} in {}: {what}", WORKSPACE_TABLE, manifest.display());
+    for (key, value) in table {
+        let into = match key.as_str() {
+            "unsandboxed-build-scripts" => &mut out.build_scripts,
+            "unsandboxed-proc-macros" => &mut out.proc_macros,
+            other => {
+                return Err(wrong(&format!(
+                    "`{other}` is not known (`unsandboxed-build-scripts` and \
+                     `unsandboxed-proc-macros` are)"
+                )));
+            }
+        };
+        let names = value.as_array().ok_or_else(|| wrong(&format!("`{key}` is a list")))?;
+        for name in names {
+            let name = name
+                .as_str()
+                .ok_or_else(|| wrong(&format!("`{key}` lists packages by their names")))?;
+            into.insert(name.to_owned());
+        }
+    }
+    Ok(out)
+}
+
+/// The root of the workspace `dir` is in, as cargo finds it: the nearest directory at or above
+/// it whose manifest has a `[workspace]` table.
+pub(crate) fn workspace_root(dir: &Path) -> Option<PathBuf> {
+    dir.ancestors()
+        .find(|it| {
+            let text = std::fs::read_to_string(it.join("Cargo.toml")).unwrap_or_default();
+            text.contains("workspace")
+                && toml::from_str::<toml::Table>(&text).is_ok_and(|it| it.contains_key("workspace"))
+        })
+        .map(Path::to_owned)
 }
 
 /// The environment the test `command` runs would have, cut down to what a test keeps under
@@ -216,6 +296,7 @@ impl Scratch {
             env,
             overlays,
             writable: Vec::new(),
+            readable: Vec::new(),
             record: Some(record.clone()),
             record_reads: reads,
             not_inputs,
@@ -298,7 +379,7 @@ pub(crate) fn diagnose(lines: &[Line], failed: Option<&[String]>, shown: &str, o
 }
 
 /// `writing `a` and `b` (the machine is read-only in a sandbox) and connecting to `c` (...)`.
-fn what_was_refused(them: &[&Line]) -> String {
+pub(crate) fn what_was_refused(them: &[&Line]) -> String {
     const SHOWN: usize = 3;
     let listed = |reached: Reached| {
         let all: Vec<String> = them
@@ -457,7 +538,7 @@ impl Kept {
 
 /// What is quick to tell of what is at `path`: whether it is there, its size and its last
 /// change. Where that is the same, what is there is taken to be.
-fn stat(path: &Path) -> String {
+pub(crate) fn stat(path: &Path) -> String {
     let Ok(meta) = std::fs::metadata(path) else { return "-".to_owned() };
     let at = meta.modified().ok().and_then(|it| it.duration_since(std::time::UNIX_EPOCH).ok());
     #[cfg(unix)]
@@ -469,7 +550,7 @@ fn stat(path: &Path) -> String {
 
 /// What is at `path`: nothing, a file's bytes, a directory's names, or something else (a
 /// device, a socket), by a hash.
-fn digest(path: &Path) -> String {
+pub(crate) fn digest(path: &Path) -> String {
     let Ok(meta) = std::fs::metadata(path) else { return "-".to_owned() };
     let mut hash = Sha256::new();
     if meta.is_dir() {
@@ -536,6 +617,33 @@ mod tests {
         assert!(out.all && out.tests.contains("tests::x"));
         write("[package]\nname = \"a\"\n[package.metadata.blaze.sandbox]\ntest = false\n");
         assert!(opt_out(&dir).is_err());
+        write("[package]\nname = \"a\"\n[package.metadata.blaze.sandbox]\nbuild-script = false\n");
+        assert!(opt_out(&dir).unwrap().build_script_outside);
+        _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_workspace_takes_build_scripts_and_proc_macros_out_by_its_root_manifest() {
+        let dir = std::env::temp_dir().join(format!("ra-jit-ws-opt-out-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("member/src")).unwrap();
+        let write = |text: &str| std::fs::write(dir.join("Cargo.toml"), text).unwrap();
+        std::fs::write(dir.join("member/Cargo.toml"), "[package]\nname = \"m\"\n").unwrap();
+        write("[workspace]\nmembers = [\"member\"]\n");
+        assert_eq!(workspace_root(&dir.join("member/src")), Some(dir.clone()));
+        let out = workspace_opt_out(&dir).unwrap();
+        assert!(out.build_scripts.is_empty() && out.proc_macros.is_empty());
+        write(
+            "[workspace]\n[workspace.metadata.blaze.sandbox]\n\
+             unsandboxed-build-scripts = [\"llama-cpp-sys-2\"]\n\
+             unsandboxed-proc-macros = [\"my-derive\"]\n",
+        );
+        let out = workspace_opt_out(&dir).unwrap();
+        assert!(out.build_scripts.contains("llama-cpp-sys-2"));
+        assert!(out.macro_outside("my_derive") && !out.macro_outside("serde_derive"));
+        write("[workspace]\n[workspace.metadata.blaze.sandbox]\nunsandboxed-scripts = []\n");
+        assert!(workspace_opt_out(&dir).is_err());
+        write("[workspace]\n[workspace.metadata.blaze.sandbox]\nunsandboxed-proc-macros = \"x\"\n");
+        assert!(workspace_opt_out(&dir).is_err());
         _ = std::fs::remove_dir_all(&dir);
     }
 }

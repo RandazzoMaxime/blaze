@@ -43,7 +43,7 @@ pub(crate) const MARK: &str = "/.ra-jit-test/";
 
 /// The status a sandbox that could not be made ends with, as `env` ends when it can't run
 /// what it is given.
-const COULD_NOT: i32 = 125;
+pub(crate) const COULD_NOT: i32 = 125;
 
 /// What a program is run with.
 #[derive(Serialize, Deserialize, Default, Clone)]
@@ -59,6 +59,11 @@ pub(crate) struct Spec {
     /// Directories it writes for real.
     #[serde(default)]
     pub(crate) writable: Vec<PathBuf>,
+    /// Directories it sees as they are and may not write, though they are below one of the
+    /// sandbox's empty directories (a workspace or target directory under `/tmp`): the rest of
+    /// the machine is seen read-only anyway.
+    #[serde(default)]
+    pub(crate) readable: Vec<PathBuf>,
     /// The file written as it ends with what it reached outside ([`Line`]), or nothing.
     pub(crate) record: Option<PathBuf>,
     /// Whether the record has the paths it read, which costs: every call that names a path
@@ -155,6 +160,9 @@ impl Recorder {
         let mut written = overlays.clone();
         written.extend(tidied(&spec.writable));
         written.extend(own.iter().map(|it| (*it).to_owned()));
+        // What is read there is an input, as what is read in an overlay is.
+        let mut overlays = overlays;
+        overlays.extend(tidied(&spec.readable));
         Recorder {
             lines: BTreeSet::new(),
             threads: HashMap::new(),
