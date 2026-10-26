@@ -162,18 +162,13 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: ./.github/actions/toolchain
-      # vendor/rustc_abi too: the fork's rustc_abi (its git dependency) gets this tree's only once
-      # main's fork sync pushes it, so a change to both builds against this one.
       - run: cp -r vendor/rust-analyzer vendor/rustc_type_ir vendor/rustc_next_trait_solver vendor/rustc_abi "$RUNNER_TEMP/"
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: ${{ runner.temp }}/rust-analyzer
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - working-directory: ${{ runner.temp }}/rust-analyzer
-        run: |
-          patch='patch."https://github.com/indexable-inc/rustc_abi".ra-ap-rustc_abi.path="../rustc_abi"'
-          cargo --config "$patch" test -p hir-ty -p hir-ty-borrowck -p hir-ty-wfcheck -p ide-diagnostics
-          cargo --config "$patch" check -p hir
+        run: cargo test -p hir-ty -p hir-ty-borrowck -p hir-ty-wfcheck -p ide-diagnostics && cargo check -p hir
 
   ci:
     name: ci
