@@ -9,6 +9,16 @@ How to build, test and change ra-jit, including the vendored rust-analyzer, is
   rustc, rustdoc or a cargo that runs them, and there is no "fall back to cargo" path. Each place
   that still does is a bug with a `no-rustc` issue, to be removed, never extended or added to:
   [docs/no-rustc.md](docs/no-rustc.md).
+- **No fallback, ever. Fail fast with a clear error.** "No fallback EVER, no rustc, prefer
+  quick error so bug can be fixed" (Andrew, 2026-10-26). When ra-jit can't do something
+  (an unsupported construct, a refused patch, a missing TypeId, a static it can't place), it
+  stops with an error that names what and where, at the point it is first seen. It never
+  quietly takes another path: not cargo or rustc, not rustc's copy of a function or static, not
+  a whole build instead of a patch to hide a refusal, not a slower backend or an older cached
+  result. A silent fallback hides the bug and turns it into wrong output (#386, #392); an error
+  gets it fixed. New code adds no fallback. A change that touches an existing one turns it into
+  an error in the same change, and where that would break a harness, it fixes the bug behind it
+  instead.
 - **Own the whole stack, and stay a superset of Rust.** ra-jit moves step by step toward
   owning every layer from source to running code (front end, std, codegen, linking, loading),
   because owning it is what makes it fast. It never gets there by narrowing what it accepts:

@@ -461,6 +461,14 @@ All notable changes to ra-jit are written here. The format follows
 
 ### Changed
 
+- No `cargo blaze` command is passed to cargo any more (Andrew, 2026-10-26: commands that are
+  no builds "should go to us and not cargo"). `metadata`, `locate-project`, `verify-project`,
+  `version` and `help` are blaze's own, from blaze-manifest, blaze-registry and blaze-resolve
+  with no cargo or rustc started; every other command of cargo's (`fmt`, `clippy`, `doc`,
+  `tree`, `publish` ...) fails with status 101, saying blaze has none yet and that nothing was
+  done, and a command cargo does not have is `no such command` rather than a cargo plugin run.
+  `cargo blaze --list` and the table in docs/cargo.md ("Every subcommand") say which is which;
+  flags typed before the command are read after it.
 - A whole build's cold compile no longer waits on itself where a hundred threads meet. What
   the store is given of a function names each function and static it reaches by a name its
   crate is listed to find again: each crate is listed once, by the first thread to ask and
@@ -831,6 +839,18 @@ All notable changes to ra-jit are written here. The format follows
   `mul`) are compiled, which `vaddv_u8` and AVX-512's `_mm512_reduce_add_epi32` are, and
   `simd_masked_load` and `simd_masked_store` (AVX-512's `_mm512_mask_loadu_epi8`, in fff_search
   under nushell): a lane the mask leaves out is not read or written (corpus `crypto_lanes`).
+- A daemon started on a filled store finds the functions it has stored faster: looking an
+  entry up takes a lock of its own shard rather than one for all of them, and the types of an
+  entry's variables are read when the function is described for a debugger, on the threads
+  that describe, rather than when the entry is looked up. nushell's restart on dev-aws-14
+  (64 cores, shared), five rounds each, interleaved with main's: 15.6 s (15.5 to 15.7) on main, 14.7 s (14.5 to 14.7)
+  with this; the stored roots take 1.3 s, from 3.5 s, and the object 1.8 s, from 1.0 s.
+- The def maps and impls of crates that use procedural macros, and those of the crates of
+  procedural macros, are frozen in the store like any other dependency's, so a build reads
+  them rather than resolving their names again. A macro whose library is not loaded, or is
+  turned off, is so only in that process, and its crate is not frozen. nushell's restart
+  resolves all 434 of its dependencies' def maps from the store, in 1.8 s rather than 3.1 s,
+  and takes 12.6 s (12.5 to 12.7) with the entry above, against main's 15.6 s.
 
 ### Fixed
 
@@ -1481,6 +1501,15 @@ All notable changes to ra-jit are written here. The format follows
   daemon another build started the first edits were patches of rustc's executable, and an edit
   that adds a type asked for a restart (`live_types.py` in the gate, after the other live
   tests).
+- The first edit after the daemon is ready, while it is still rustc's executable that edits
+  patch, is faster when it is a build in full, as one that moves an `async` body is (reth's
+  `fn main`, [#259](https://github.com/indexable-inc/blaze/issues/259), by @gakonst): the
+  pass that puts the code in the object, which runs on one thread, wanted every function
+  compiled on demand again for each static rustc's code has, and walked a whole definition with
+  its macros for each closure and each static in a body (tracing's `META` and `__CALLSITE` in
+  every event). Each crate's on-demand functions are wanted once, and each definition is
+  walked once for all its closures or all its statics of a name. reth's first edit on 48 cores:
+  64.4 s and 64.3 s before, 58.0 s and 57.5 s after.
 
 ## [0.1.0] - 2026-10-20
 

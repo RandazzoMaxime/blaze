@@ -1624,6 +1624,14 @@ impl Store {
         self.place(&self.identity.key(key)).is_some()
     }
 
+    /// Whether a sealed pack has a value for the key, which is kept as if it were read: one
+    /// that what is read needs, and that is itself read only later or not at all.
+    pub fn has_used(&self, key: &[u8; KEY]) -> bool {
+        let Some(place) = self.place(&self.identity.key(key)) else { return false };
+        place.pack.used.store(true, Ordering::Relaxed);
+        true
+    }
+
     /// The value of a key, if a sealed pack has it as it was written.
     pub fn get(&self, key: &[u8; KEY]) -> Option<Vec<u8>> {
         let key = self.identity.key(key);

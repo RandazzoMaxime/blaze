@@ -383,6 +383,9 @@ struct Resolver<'a> {
     /// The symbols of the functions asked about, for every thread of the build: the threads
     /// that compile find them ahead of the one that puts the functions in the object.
     named: Arc<std::sync::Mutex<FxHashMap<FunctionId, Option<String>>>>,
+    /// The places of the closures and statics of the definitions gone through, for every
+    /// thread of the build.
+    places: Places,
     /// The symbols of what rustc linked, when the patch goes into it.
     linked: Option<Arc<symbols::Linked>>,
     /// Set once the build turns out to be one in full, which `linked` is not for.
@@ -416,6 +419,7 @@ struct ResolverParts<'a> {
     listed: &'a Listed,
     shared_paths: SharedPaths,
     named: Arc<std::sync::Mutex<FxHashMap<FunctionId, Option<String>>>>,
+    places: Places,
     linked: Option<Arc<symbols::Linked>>,
     in_full: Arc<std::sync::atomic::AtomicBool>,
     onto: bool,
@@ -437,6 +441,7 @@ impl<'a> Resolver<'a> {
             listed: self.listed,
             shared_paths: self.shared_paths.clone(),
             named: self.named.clone(),
+            places: self.places.clone(),
             linked: self.linked.clone(),
             in_full: self.in_full.clone(),
             onto: self.onto,
@@ -463,6 +468,7 @@ impl<'a> ResolverParts<'a> {
             listed,
             shared_paths,
             named,
+            places,
             linked,
             in_full,
             onto,
@@ -482,6 +488,7 @@ impl<'a> ResolverParts<'a> {
             listed,
             shared_paths,
             named,
+            places,
             linked,
             in_full,
             onto,
@@ -641,6 +648,7 @@ impl<'a> Resolver<'a> {
             listed,
             shared_paths: Default::default(),
             named: Default::default(),
+            places: Places::default(),
             linked,
             in_full: Arc::default(),
             onto,
@@ -1026,7 +1034,7 @@ impl Resolver<'_> {
         let mut owner = None;
         for node in sema.ancestors_with_macros(block) {
             if is_closure(&node) {
-                inner.push(format!("{{closure#{}}}", closure_number(&sema, &node)?));
+                inner.push(format!("{{closure#{}}}", closure_number(&sema, &self.places, &node)?));
                 continue;
             }
             if let Some(func) = ast::Fn::cast(node.clone()) {
@@ -1396,7 +1404,7 @@ impl SymbolResolver for Resolver<'_> {
         let mut inner = Vec::new();
         for node in sema.ancestors_with_macros(node.syntax().clone()) {
             if is_closure(&node) {
-                inner.push(format!("{{closure#{}}}", closure_number(&sema, &node)?));
+                inner.push(format!("{{closure#{}}}", closure_number(&sema, &self.places, &node)?));
                 continue;
             }
             if let Some(func) = ast::Fn::cast(node) {
@@ -1550,6 +1558,10 @@ impl SymbolResolver for Resolver<'_> {
         self.table.is_empty().then(|| self.own_static_name(id)).flatten()
     }
 
+    fn static_copy(&self, symbol: &str) -> Option<hir_ty_codegen::RustcStaticCopy> {
+        self.table.static_copy(symbol).cloned()
+    }
+
     fn static_(&self, id: StaticId) -> Option<String> {
         if self.prebuilt(hir_def::HasModule::krate(&id, self.db)) {
             return self.in_prebuilt(self.own_static_name(id)?);
@@ -1573,7 +1585,7 @@ impl SymbolResolver for Resolver<'_> {
         let mut owner = None;
         for node in sema.ancestors_with_macros(source.value.syntax().clone()).skip(1) {
             if is_closure(&node) {
-                closures.push(closure_number(&sema, &node)?);
+                closures.push(closure_number(&sema, &self.places, &node)?);
                 continue;
             }
             if let Some(func) = ast::Fn::cast(node.clone()) {
@@ -1608,7 +1620,9 @@ impl SymbolResolver for Resolver<'_> {
             ast::Static::cast(node.clone())
                 .is_some_and(|it| it.name().is_some_and(|it| it.text() == name.as_str()))
         };
-        let place = place_in_definition(&sema, source.value.syntax(), &named)?.into();
+        let counted = Counted::Statics(name.as_str().to_owned());
+        let place =
+            place_counted(&sema, &self.places, counted, source.value.syntax(), &named)?.into();
         let symbol = self
             .table
             .get_nested(&path, &closures, place, &around)
@@ -1722,21 +1736,126 @@ fn place_in_definition(
     counts: &dyn Fn(&SyntaxNode) -> bool,
 ) -> Option<u32> {
     let along: Vec<_> = sema.ancestors_with_macros(target.clone()).collect();
+    let owner = owner_of(&along)?;
+    let mut count = Count::new(sema, Some(target), along, counts, &owner);
+    count.all_in(&owner)?;
+    count.waiting_ones()?;
+    count.earlier
+}
+
+/// The definition a node is written in, as [`place_in_definition`] counts in: the first of
+/// `along` but the node that is one, or the last.
+fn owner_of(along: &[SyntaxNode]) -> Option<SyntaxNode> {
     let mut root = None;
     let owner = along.iter().skip(1).cloned().find(|node| {
         root = Some(node.clone());
         is_definition(node)
     });
-    let owner = owner.or(root)?;
-    let late = LateImports::around(sema, &owner);
-    let mut count =
-        Count { sema, target, along, counts, late, seen: 0, earlier: None, waiting: Vec::new() };
-    count.all_in(&owner)?;
-    while let Some(call) = count.waiting.pop() {
-        count.expansion_of(&call)?;
-    }
-    count.earlier
+    owner.or(root)
 }
+
+/// [`place_in_definition`] of what `counted` names, every node of the definition counted
+/// once and kept in `places`: a definition with many closures, or a macro used many times
+/// that declares a static each time (tracing's `META` and `__CALLSITE`), is gone through
+/// once instead of once a node, which made a build in full of a large program wait on one
+/// thread (#259). A node whose place the count does not find is counted alone as before.
+fn place_counted(
+    sema: &hir::Semantics<'_, RootDatabase>,
+    places: &Places,
+    counted: Counted,
+    target: &SyntaxNode,
+    counts: &dyn Fn(&SyntaxNode) -> bool,
+) -> Option<u32> {
+    let along: Vec<_> = sema.ancestors_with_macros(target.clone()).collect();
+    let owner = owner_of(&along)?;
+    if let Some(spot) = spot_in(&along, &owner) {
+        let of = PlacesOf {
+            file: sema.hir_file_for(&owner),
+            range: owner.text_range(),
+            kind: owner.kind(),
+            counted,
+        };
+        let known = places.0.lock().unwrap_or_else(|e| e.into_inner()).get(&of).cloned();
+        let all = known.unwrap_or_else(|| {
+            let all = all_places(sema, &owner, counts).map(Arc::new);
+            places.0.lock().unwrap_or_else(|e| e.into_inner()).insert(of, all.clone());
+            all
+        });
+        if let Some(&place) = all.as_ref().and_then(|all| all.get(&spot)) {
+            return Some(place);
+        }
+    }
+    place_in_definition(sema, target, counts)
+}
+
+/// The places of all the nodes of the definition `owner` that `counts` holds of, by where
+/// each is ([`Spot`]), or none when the order rustc numbers them in is not known.
+fn all_places(
+    sema: &hir::Semantics<'_, RootDatabase>,
+    owner: &SyntaxNode,
+    counts: &dyn Fn(&SyntaxNode) -> bool,
+) -> Option<FxHashMap<Spot, u32>> {
+    let mut count = Count::new(sema, None, Vec::new(), counts, owner);
+    count.places = Some(FxHashMap::default());
+    count.all_in(owner)?;
+    count.waiting_ones()?;
+    let mut places = count.places?;
+    // Two nodes in one spot are told apart by nothing a spot has.
+    for spot in count.twice {
+        places.remove(&spot);
+    }
+    Some(places)
+}
+
+/// Where `along`'s first node is in the definition `owner`, which `along` goes up to: the
+/// macros it is expanded from and the expansion of each, or none when an attribute or a
+/// derive made a node on the way, which the count does not go into.
+fn spot_in(along: &[SyntaxNode], owner: &SyntaxNode) -> Option<Spot> {
+    let at_owner = along.iter().position(|it| it == owner)?;
+    let mut calls = Vec::new();
+    for at in (1..at_owner).rev() {
+        let node = &along[at];
+        if ast::MacroCall::can_cast(node.kind()) {
+            let root = &along[at - 1];
+            if root.parent().is_some() {
+                return None;
+            }
+            calls.push((node.text_range(), root.kind()));
+        } else if node.parent().is_none() && !ast::MacroCall::can_cast(along[at + 1].kind()) {
+            // An expansion that no macro call along is of.
+            return None;
+        }
+    }
+    if along.first()?.parent().is_none() {
+        return None;
+    }
+    Some((calls, along.first()?.text_range()))
+}
+
+/// The places of the counted nodes of the definitions gone through ([`place_counted`]).
+#[derive(Clone, Default)]
+struct Places(Arc<std::sync::Mutex<FxHashMap<PlacesOf, Option<Arc<FxHashMap<Spot, u32>>>>>>);
+
+/// A definition, and what is counted in it.
+#[derive(Clone, PartialEq, Eq, Hash)]
+struct PlacesOf {
+    file: hir::HirFileId,
+    range: syntax::TextRange,
+    kind: syntax::SyntaxKind,
+    counted: Counted,
+}
+
+#[derive(Clone, PartialEq, Eq, Hash)]
+enum Counted {
+    Closures,
+    /// The statics of a name.
+    Statics(String),
+}
+
+/// Where a node is in a definition: the macros it is expanded from, the outermost first,
+/// each by where it is used and what it is expanded to (a macro used in a body is expanded
+/// both to items and to statements, of the same text), and the node's range in the last.
+type Spot = (Vec<(syntax::TextRange, syntax::SyntaxKind)>, syntax::TextRange);
 
 /// The imports of the scope of a definition that rustc has not resolved when it first comes
 /// to the macros used in the definition: those a macro expanded to. It resolves the imports
@@ -1837,17 +1956,55 @@ enum Turn {
 
 struct Count<'a, 'db> {
     sema: &'a hir::Semantics<'db, RootDatabase>,
-    target: &'a SyntaxNode,
+    target: Option<&'a SyntaxNode>,
     /// The target and what it is in, the macros it is expanded from with their expansions.
     along: Vec<SyntaxNode>,
     counts: &'a dyn Fn(&SyntaxNode) -> bool,
     late: LateImports,
     seen: u32,
     earlier: Option<u32>,
-    waiting: Vec<ast::MacroCall>,
+    /// The macros to expand after the others, each with the macros it is in.
+    waiting: Vec<(ast::MacroCall, Vec<(syntax::TextRange, syntax::SyntaxKind)>)>,
+    /// The macros the nodes being counted are in, as a [`Spot`] has them.
+    calls: Vec<(syntax::TextRange, syntax::SyntaxKind)>,
+    /// The place of every counted node, when they are all wanted.
+    places: Option<FxHashMap<Spot, u32>>,
+    twice: Vec<Spot>,
 }
 
-impl Count<'_, '_> {
+impl<'a, 'db> Count<'a, 'db> {
+    fn new(
+        sema: &'a hir::Semantics<'db, RootDatabase>,
+        target: Option<&'a SyntaxNode>,
+        along: Vec<SyntaxNode>,
+        counts: &'a dyn Fn(&SyntaxNode) -> bool,
+        owner: &SyntaxNode,
+    ) -> Self {
+        let late = LateImports::around(sema, owner);
+        Count {
+            sema,
+            target,
+            along,
+            counts,
+            late,
+            seen: 0,
+            earlier: None,
+            waiting: Vec::new(),
+            calls: Vec::new(),
+            places: None,
+            twice: Vec::new(),
+        }
+    }
+
+    /// Expands the macros that wait for the others, the last come to first.
+    fn waiting_ones(&mut self) -> Option<()> {
+        while let Some((call, calls)) = self.waiting.pop() {
+            self.calls = calls;
+            self.expansion_of(&call)?;
+        }
+        Some(())
+    }
+
     /// Counts the nodes of the definition `node` is of, or none when the order rustc numbers
     /// them in is not known.
     ///
@@ -1859,7 +2016,7 @@ impl Count<'_, '_> {
         for call in calls {
             match self.turn(&call) {
                 Some(Turn::Now) => self.expansion_of(&call)?,
-                Some(Turn::Later) => self.waiting.push(call),
+                Some(Turn::Later) => self.waiting.push((call, self.calls.clone())),
                 None => self.nothing_in(&call)?,
             }
         }
@@ -1870,15 +2027,18 @@ impl Count<'_, '_> {
         // A macro used in a body is expanded twice, to items and to statements, and of the
         // same text: the target is in one of them, which need not be the one sema gives.
         let at = self.along.iter().position(|it| it == call.syntax());
-        if let Some(root) = at.and_then(|at| at.checked_sub(1)).map(|at| self.along[at].clone())
-            && root.parent().is_none()
-        {
-            return self.all_in(&root);
-        }
-        match self.sema.expand_macro_call(call) {
-            Some(expansion) => self.all_in(&expansion.value),
-            None => Some(()),
-        }
+        let along = at.and_then(|at| at.checked_sub(1)).map(|at| self.along[at].clone());
+        let root = match along.filter(|root| root.parent().is_none()) {
+            Some(root) => root,
+            None => match self.sema.expand_macro_call(call) {
+                Some(expansion) => expansion.value,
+                None => return Some(()),
+            },
+        };
+        self.calls.push((call.syntax().text_range(), root.kind()));
+        self.all_in(&root)?;
+        self.calls.pop();
+        Some(())
     }
 
     /// That the macro expands to nothing that is counted, so that when it is expanded is
@@ -1896,11 +2056,18 @@ impl Count<'_, '_> {
                 calls.push(call);
                 continue;
             }
-            let target = child == *self.target;
+            let target = self.target == Some(&child);
             if target {
                 self.earlier = Some(self.seen);
             }
-            if target || (self.counts)(&child) {
+            let counted = (self.counts)(&child);
+            if counted && let Some(places) = &mut self.places {
+                let spot = (self.calls.clone(), child.text_range());
+                if places.insert(spot.clone(), self.seen).is_some() {
+                    self.twice.push(spot);
+                }
+            }
+            if target || counted {
                 self.seen += 1;
             }
             if !target && !is_definition(&child) {
@@ -2053,8 +2220,12 @@ impl Count<'_, '_> {
 
 /// The `n` of the `{closure#n}` rustc names a closure: its place among the closures of the
 /// definition it is written in, a closure's own closures being counted apart.
-fn closure_number(sema: &hir::Semantics<'_, RootDatabase>, closure: &SyntaxNode) -> Option<u32> {
-    place_in_definition(sema, closure, &is_closure)
+fn closure_number(
+    sema: &hir::Semantics<'_, RootDatabase>,
+    places: &Places,
+    closure: &SyntaxNode,
+) -> Option<u32> {
+    place_counted(sema, places, Counted::Closures, closure, &is_closure)
 }
 
 /// The crates called `krate` that a build of the checkout at `checkout` compiles: a package's
@@ -4669,7 +4840,10 @@ fn with_failed_macro(
     let frontend = match &error {
         CodegenError::Frontend(_) => true,
         CodegenError::Unsupported(why) => why.contains("frontend:"),
-        CodegenError::Backend(_) | CodegenError::NoSymbol | CodegenError::Private => false,
+        CodegenError::Backend(_)
+        | CodegenError::NoSymbol
+        | CodegenError::Private
+        | CodegenError::Refused(_) => false,
     };
     if !frontend {
         return error;
