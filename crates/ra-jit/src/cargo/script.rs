@@ -174,8 +174,7 @@ pub(crate) fn run_as_cargo_does(
     script_sandbox::keep_reads(&out_dir, reads.as_deref());
     if output.status.success()
         && let Some(((shared, here), store)) = keys
-        && let Some(kept) =
-            Kept::of(output.stdout, output.stderr, &out_dir, &cwd, reads.as_deref())
+        && let Some(kept) = Kept::of(output.stdout, output.stderr, &out_dir, &cwd, reads.as_deref())
     {
         store.settled();
         match kept.unplaced(&places) {
@@ -372,10 +371,9 @@ impl Kept {
         // the sandbox saw it read, all of it, is what a run depends on.
         let reads = match (says_what_it_reads, reads) {
             (true, _) => Vec::new(),
-            (false, Some(reads)) => reads
-                .iter()
-                .map(|it| (it.clone(), sandboxed::digest(Path::new(it))))
-                .collect(),
+            (false, Some(reads)) => {
+                reads.iter().map(|it| (it.clone(), sandboxed::digest(Path::new(it)))).collect()
+            }
             (false, None) => return None,
         };
         let mut files = Vec::new();
@@ -720,8 +718,7 @@ pub(crate) fn same_run(out_dir: &Path, other: &Path) -> bool {
 /// is as it was ([`script_sandbox::reads_unchanged`]), is not run: a run now would read the
 /// same and so print and write the same.
 pub(crate) fn rerun_matches(out_dir: &Path, other: &Path) -> Result<(), String> {
-    if script_sandbox::reads_unchanged(out_dir) && (out_dir == other || same_run(out_dir, other))
-    {
+    if script_sandbox::reads_unchanged(out_dir) && (out_dir == other || same_run(out_dir, other)) {
         return Ok(());
     }
     let run_dir = out_dir.parent().ok_or("a build script without a directory")?;
@@ -772,7 +769,8 @@ fn rerun_into(
         scratch,
     };
     let plan = script_sandbox::plan(&script).map_err(|it| format!("{it:#}"))?;
-    let again = script_sandbox::run(&script, &plan, Stdio::null()).map_err(|it| format!("{it:#}"))?;
+    let again =
+        script_sandbox::run(&script, &plan, Stdio::null()).map_err(|it| format!("{it:#}"))?;
     let again = again.output;
     if !again.status.success() {
         return Err(format!("failed ({})", again.status));

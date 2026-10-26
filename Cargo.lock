@@ -3359,6 +3359,7 @@ dependencies = [
  "object 0.37.3",
  "paths",
  "pdb",
+ "proc-macro-api",
  "project-model",
  "pulldown-cmark",
  "ra-jit-cache",

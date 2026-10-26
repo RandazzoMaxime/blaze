@@ -104,9 +104,11 @@ fn spec_of(server: &Command) -> anyhow::Result<PathBuf> {
     for name in ["CARGO_TARGET_DIR", "CARGO_HOME"] {
         readable.extend(env.get(name).map(PathBuf::from));
     }
-    readable.extend(std::fs::canonicalize(server.get_program()).ok().and_then(|it| {
-        it.parent().map(Path::to_owned)
-    }));
+    readable.extend(
+        std::fs::canonicalize(server.get_program())
+            .ok()
+            .and_then(|it| it.parent().map(Path::to_owned)),
+    );
     // The innermost is enough: a directory is seen with what is below it.
     let all: Vec<PathBuf> = readable.iter().cloned().collect();
     readable.retain(|it| !all.iter().any(|other| other != it && it.starts_with(other)));
@@ -124,10 +126,7 @@ fn spec_of(server: &Command) -> anyhow::Result<PathBuf> {
     let dir = crate::cargo::daemon::home()?.join("sandbox");
     std::fs::create_dir_all(&dir)?;
     #[cfg(unix)]
-    std::fs::set_permissions(
-        &dir,
-        std::os::unix::fs::PermissionsExt::from_mode(0o700),
-    )?;
+    std::fs::set_permissions(&dir, std::os::unix::fs::PermissionsExt::from_mode(0o700))?;
     let file = dir.join(format!("proc-macro-{:x}.json", Sha256::digest(&bytes)));
     if !file.exists() {
         let writing = file.with_extension(format!("{}", std::process::id()));

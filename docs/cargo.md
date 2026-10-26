@@ -237,8 +237,89 @@ whose overlay has been written.
 What is left: doctests run in rustdoc's process and are not sandboxed; Linux does not stop a
 connection to a Unix socket outside, `io_uring` gets past seccomp, and `openat2` always counts
 as a write; Windows has no sandbox yet (its CI runs with `RA_JIT_SANDBOX=off`). The plan is
-[#257](https://github.com/indexable-inc/blaze/issues/257); build scripts and proc macros are
-[#147](https://github.com/indexable-inc/blaze/issues/147).
+[#257](https://github.com/indexable-inc/blaze/issues/257). Build scripts and proc macros run
+in the same sandbox, below.
+
+### Build scripts and proc macros run in a sandbox
+
+Every build script blaze's cargo runs, the workspace's and its dependencies', whoever compiled
+it (ra-jit or rustc), and the daemon's own reruns of one, runs in the sandbox tests run in
+([#147](https://github.com/indexable-inc/blaze/issues/147)): `cargo/script_sandbox.rs` is the
+one place a script is run. A script's environment is the whole of what cargo gave it (`PATH`,
+`CC`, `TARGET`, the jobserver's descriptors and the rest); the machine is read-only; it writes
+its `OUT_DIR` for real, which is the one directory the Cargo book lets a script write ("Scripts
+should not modify any files outside of that directory"); the temporary directories start empty;
+there is no network but the sandbox's own loopback. Its package's directory, the workspace and
+the target directory are seen as they are, even below `/tmp` or `/dev/shm`. On macOS the
+per-user cache directory (`getconf DARWIN_USER_CACHE_DIR`, `/var/folders/../C`) is writable
+too: clang's module cache, `xcrun`'s and the Metal compiler's live there, are found by
+`confstr` and not by a variable a private one could be named in, and check what they cache.
+Cargo's own rules for running a script again are unchanged.
+
+A script that fails having been refused a write or a connection says so under its output:
+
+    note: the build script of `sys-crate` failed in the sandbox, which refused it writing `/home/me/ws/sys-crate/src/bindings.rs` (the machine is read-only in a sandbox); if it needs that, run it outside: `unsandboxed-build-scripts = ["sys-crate"]` under `[workspace.metadata.blaze.sandbox]` in /home/me/ws/Cargo.toml (or `build-script = false` under `[package.metadata.blaze.sandbox]` in its own manifest, for a package of the workspace), or `RA_JIT_SANDBOX=off` for every build script and test of the command
+
+The ways out, in the workspace's root manifest, which is the only one a dependency from a
+registry can be named in:
+
+```toml
+[workspace.metadata.blaze.sandbox]
+unsandboxed-build-scripts = ["hegeltest", "flecs_ecs_sys"]   # by package name
+unsandboxed-proc-macros = ["sqlx-macros"]                    # by package name
+```
+
+and, for a package of the workspace, in its own manifest:
+
+```toml
+[package.metadata.blaze.sandbox]
+build-script = false
+```
+
+Any other key in either table is an error, and so is a value that is not a list of names (a
+`bool` for `build-script`). A package from a registry or git can't take itself out with its own
+manifest. `RA_JIT_SANDBOX=off` runs every build script, proc macro and test outside, as cargo
+does. Where no sandbox can be made, the script fails with why and the same way out, as a test
+run does; Windows has no sandbox yet and runs scripts outside.
+
+What a script read is recorded, and decides one thing only. Cargo runs a script again when a
+file of its `rerun-if-changed` changed, when a variable of `rerun-if-env-changed` did, and,
+when it named neither, when any file of its package did. In that last case a run whose record
+is whole (macOS records nothing of a program it protects, such as `/bin/sh` or `/usr/bin/cc`,
+and the record then says it is not whole) and whose every read path is as it was stands for a
+run now: the store keeps it with what it read, and cargo's rerun is answered from the store
+without running it; the daemon's check of the script (`ra-jit-reads` beside its `OUT_DIR`)
+needs no run either. A script that named what it reads runs again exactly when cargo says, and
+one whose record is not whole whenever cargo would run it.
+
+Every proc-macro server a load starts, the toolchain's and ra-jit's own, runs in the sandbox
+too, writing nothing: no `OUT_DIR`, only the empty temporary directories. A server is started
+once, when a load first needs it, and serves every expansion after, so the sandbox costs its
+start (about 8 ms on Linux, 25 ms on macOS) and nothing per expansion. The packages of
+`unsandboxed-proc-macros` are expanded by servers of their own, started outside. The hook is
+`proc_macro_api::wrap` (the command a server is started with) and
+`load_cargo::unsandboxed_macros_with` (which libraries get the outside servers).
+
+What it costs, measured on 2026-10-26 (cold builds with an empty store and target
+directory, `RA_JIT_SANDBOX=off` against the default; a server's start is its start and exit with
+stdin closed, the median of 20):
+
+| | Linux x86-64 (dev host, 16 cores) | macOS (M5 Max, loaded) |
+|---|---|---|
+| a proc-macro server's start, outside | 6.7 ms | 30 ms |
+| the same, in the sandbox | 14.9 ms | 54 ms |
+| a 4-package workspace with `ring`, `cc` and `serde`, cold, outside | 27.3 s | 15.3 s |
+| the same, in the sandbox | 23.4 s | 15.0 s |
+| the game's `space-server` (72 build scripts, 6 of them C or toolchain ones), cold, outside | | 441 s |
+| the same, in the sandbox | | 415 s |
+
+A build script's sandbox costs one launch (8 ms on Linux, 38 ms on macOS, as for a test
+executable), which is lost in a cold build's noise.
+
+What is left: the server's `--version` question runs outside (it loads no macro); a server
+sees the directories of the libraries of the loads before it started, so a workspace below
+`/tmp` loaded later by the same daemon is not seen by it on Linux; doctests and the
+`blaze-build-script` crate's own runner (`harness/scripts.py` only) are not sandboxed.
 
 ### Running only the tests an edit reached
 

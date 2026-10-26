@@ -278,7 +278,10 @@ fn for_load(mut compiler: Command, rustc: &OsString, args: &[OsString]) -> anyho
 /// Has cargo run a build script rustc linked, `unit` when it is one and `status` says rustc
 /// did, through `ra-jit build-script` as one of ra-jit's is ([`Unit::record`]): every build
 /// script runs in the sandbox, whoever compiled it.
-fn stand_in_front_of_rustcs(unit: Option<&Unit>, status: std::process::ExitStatus) -> anyhow::Result<()> {
+fn stand_in_front_of_rustcs(
+    unit: Option<&Unit>,
+    status: std::process::ExitStatus,
+) -> anyhow::Result<()> {
     let Some(unit) = unit.filter(|it| it.script && status.success()) else { return Ok(()) };
     let record = unit.as_record(0, Vec::new(), None);
     match record.outputs().first() {

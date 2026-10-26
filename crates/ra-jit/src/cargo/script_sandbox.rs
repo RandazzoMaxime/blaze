@@ -107,7 +107,7 @@ fn on_in(env: &[(String, String)]) -> bool {
 
 /// The workspace a script's run is part of: the one the shell that ran cargo was in, else the
 /// one around the target directory its `OUT_DIR` is in.
-fn workspace_of(script: &Script) -> Option<PathBuf> {
+fn workspace_of(script: &Script<'_>) -> Option<PathBuf> {
     let pwd = script.var("PWD").map(PathBuf::from);
     pwd.and_then(|it| sandboxed::workspace_root(&it))
         .or_else(|| sandboxed::workspace_root(target_of(script.out_dir)?.parent()?))
@@ -121,7 +121,7 @@ fn target_of(out_dir: &Path) -> Option<&Path> {
 
 /// Where `script` runs: outside when sandboxes are off or its package is taken out, else the
 /// sandbox's spec. `Err` is a manifest that says it wrongly.
-pub(crate) fn plan(script: &Script) -> anyhow::Result<Plan> {
+pub(crate) fn plan(script: &Script<'_>) -> anyhow::Result<Plan> {
     let package = script.package();
     if !on_in(script.env) {
         return Ok(Plan::Outside(format!("{}=off", sandboxed::VAR)));
@@ -154,6 +154,13 @@ pub(crate) fn plan(script: &Script) -> anyhow::Result<Plan> {
     let mut readable = vec![script.cwd.to_owned()];
     readable.extend(root.clone());
     readable.extend(target_of(script.out_dir).map(Path::to_owned));
+    // The programs cargo names, and the directories of `PATH`, where a sandbox has empty
+    // directories: cargo's `RUSTC` is ra-jit's own, which may be built below `/dev/shm`.
+    let programs = ["RUSTC", "RUSTC_WRAPPER", "RUSTC_WORKSPACE_WRAPPER", "RUSTDOC", "CARGO"];
+    let programs = programs.into_iter().filter_map(|it| script.var(it)).filter(|it| !it.is_empty());
+    let programs = programs.filter_map(|it| Path::new(it).parent().map(Path::to_owned));
+    let path = script.var("PATH").unwrap_or_default().split(':').map(PathBuf::from);
+    readable.extend(programs.chain(path).filter(|it| emptied(it) && it.is_dir()));
     readable.sort();
     readable.dedup();
     // The innermost is enough: a directory is seen with what is below it.
@@ -172,6 +179,14 @@ pub(crate) fn plan(script: &Script) -> anyhow::Result<Plan> {
         not_inputs,
     };
     Ok(Plan::Sandboxed { spec, root_manifest: root.map(|it| it.join("Cargo.toml")) })
+}
+
+/// Whether `dir` is below a directory a sandbox starts empty: what is there is not seen unless
+/// it is readable.
+fn emptied(dir: &Path) -> bool {
+    let temps = ["/tmp", "/var/tmp", "/dev/shm", "/private/tmp", "/private/var/tmp"];
+    dir.is_absolute()
+        && (temps.iter().any(|it| dir.starts_with(it)) || dir.starts_with(std::env::temp_dir()))
 }
 
 /// The per-user cache directory of macOS, `None` elsewhere.
@@ -198,9 +213,12 @@ fn user_cache() -> Option<PathBuf> {
 /// Runs `script` as `plan` says, with `stdin`, its outputs kept. A failed run in the sandbox
 /// has a note after what it printed to stderr, naming the package, what the sandbox refused
 /// it and how to take it out; a sandbox that could not be made, why and how to fix it.
-pub(crate) fn run(script: &Script, plan: &Plan, stdin: Stdio) -> anyhow::Result<Ran> {
+pub(crate) fn run(script: &Script<'_>, plan: &Plan, stdin: Stdio) -> anyhow::Result<Ran> {
     let (spec, root_manifest) = match plan {
-        Plan::Outside(_) => {
+        Plan::Outside(why) => {
+            if std::env::var_os("RA_JIT_STATS").is_some() {
+                eprintln!("ra-jit: the build script of `{}` runs outside: {why}", script.package());
+            }
             let mut command = Command::new(script.real);
             command.args(script.args).env_clear().envs(script.env.iter().map(|(k, v)| (k, v)));
             command.current_dir(script.cwd).stdin(stdin);
@@ -246,7 +264,7 @@ pub(crate) fn run(script: &Script, plan: &Plan, stdin: Stdio) -> anyhow::Result<
     Ok(Ran { output, reads })
 }
 
-fn running(script: &Script) -> String {
+fn running(script: &Script<'_>) -> String {
     format!("running the build script of `{}` ({})", script.package(), script.real.display())
 }
 
@@ -260,8 +278,8 @@ fn refused_note(lines: &[Line], package: &str, root_manifest: Option<&Path>) -> 
     }
     them.sort_by(|a, b| (a.reached, &a.what).cmp(&(b.reached, &b.what)));
     them.dedup_by(|a, b| a.reached == b.reached && a.what == b.what);
-    let root =
-        root_manifest.map_or("the workspace's root manifest".to_owned(), |it| it.display().to_string());
+    let root = root_manifest
+        .map_or("the workspace's root manifest".to_owned(), |it| it.display().to_string());
     Some(format!(
         "the build script of `{package}` failed in the sandbox, which refused it {}; if it \
          needs that, run it outside: `unsandboxed-build-scripts = [{package:?}]` under `{}` in \
@@ -276,22 +294,28 @@ fn refused_note(lines: &[Line], package: &str, root_manifest: Option<&Path>) -> 
 
 /// The paths of `lines` that are inputs of the run: not what it wrote (`OUT_DIR`, the
 /// writable cache), not the temporary directories and the kernel's views, which are empty or
-/// the run's own, and not the script itself, which the run's key has.
-fn inputs(lines: &[Line], script: &Script, spec: &Spec) -> Vec<String> {
-    let mut not_below: Vec<PathBuf> = spec.writable.clone();
-    not_below.extend(["/dev", "/proc", "/sys", "/tmp", "/private/tmp", "/var/tmp"].map(Into::into));
-    not_below.extend(["/private/var/tmp", "/private/var/folders", "/var/folders"].map(Into::into));
-    not_below.push(script.scratch.to_owned());
-    not_below.push(std::env::temp_dir());
+/// the run's own, unless a readable directory is there (a workspace below `/dev/shm`), and not
+/// the script itself, which the run's key has.
+fn inputs(lines: &[Line], script: &Script<'_>, spec: &Spec) -> Vec<String> {
+    let mut written: Vec<PathBuf> = spec.writable.clone();
+    written.push(script.scratch.to_owned());
+    let mut own: Vec<PathBuf> =
+        ["/dev", "/proc", "/sys", "/tmp", "/private/tmp", "/var/tmp"].map(PathBuf::from).into();
+    own.extend(["/private/var/tmp", "/private/var/folders", "/var/folders"].map(PathBuf::from));
+    own.push(std::env::temp_dir());
+    let input = |path: &Path| {
+        if written.iter().any(|it| path.starts_with(it))
+            || spec.not_inputs.iter().any(|it| it == path)
+        {
+            return false;
+        }
+        spec.readable.iter().any(|it| path.starts_with(it))
+            || !own.iter().any(|it| path.starts_with(it))
+    };
     let mut paths: Vec<String> = lines
         .iter()
-        .filter(|it| it.reached == Reached::Read)
+        .filter(|it| it.reached == Reached::Read && input(Path::new(&it.what)))
         .map(|it| it.what.clone())
-        .filter(|it| {
-            let path = Path::new(it);
-            !not_below.iter().any(|dir| path.starts_with(dir))
-                && !spec.not_inputs.iter().any(|it| it == path)
-        })
         .collect();
     paths.sort();
     paths.dedup();
@@ -386,7 +410,10 @@ mod tests {
             Line { reached: Reached::Read, test: String::new(), what: "/src/x".into() },
         ];
         let note = refused_note(&lines, "sys-crate", Some(Path::new("/ws/Cargo.toml"))).unwrap();
-        assert!(note.starts_with("the build script of `sys-crate` failed in the sandbox"), "{note}");
+        assert!(
+            note.starts_with("the build script of `sys-crate` failed in the sandbox"),
+            "{note}"
+        );
         assert!(note.contains("writing `/src/gen.rs`") && note.contains("`1.2.3.4:443`"), "{note}");
         assert!(note.contains("`unsandboxed-build-scripts = [\"sys-crate\"]`"), "{note}");
         assert!(note.contains("/ws/Cargo.toml"), "{note}");
@@ -394,10 +421,39 @@ mod tests {
     }
 
     #[test]
+    fn what_a_workspace_below_dev_shm_read_is_an_input() {
+        let read =
+            |what: &str| Line { reached: Reached::Read, test: String::new(), what: what.into() };
+        let lines = [
+            read("/dev/shm/ws/pkg/VERSION"),
+            read("/dev/shm/ws/target/debug/build/pkg-1/out/made.rs"),
+            read("/dev/null"),
+            read("/tmp/x"),
+            read("/usr/lib/libc.so"),
+        ];
+        let out_dir = Path::new("/dev/shm/ws/target/debug/build/pkg-1/out");
+        let script = Script {
+            real: Path::new("/dev/shm/ws/target/debug/build/pkg-0/build_script_build.real"),
+            args: &[],
+            cwd: Path::new("/dev/shm/ws/pkg"),
+            env: &[],
+            out_dir,
+            scratch: Path::new("/dev/shm/ws/target/debug/build/pkg-1"),
+        };
+        let spec = Spec {
+            writable: vec![out_dir.to_owned()],
+            readable: vec!["/dev/shm/ws".into()],
+            ..Spec::default()
+        };
+        assert_eq!(inputs(&lines, &script, &spec), ["/dev/shm/ws/pkg/VERSION", "/usr/lib/libc.so"]);
+    }
+
+    #[test]
     fn the_target_directory_is_above_the_profile_of_build() {
         let out = Path::new("/w/target/debug/build/x-0123/out");
         assert_eq!(target_of(out), Some(Path::new("/w/target")));
-        let out = Path::new("/w/target/x86_64-unknown-linux-gnu/debug/build/x/0123456789abcdef/out");
+        let out =
+            Path::new("/w/target/x86_64-unknown-linux-gnu/debug/build/x/0123456789abcdef/out");
         assert_eq!(target_of(out), Some(Path::new("/w/target/x86_64-unknown-linux-gnu")));
     }
 }

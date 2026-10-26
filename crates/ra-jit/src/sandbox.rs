@@ -146,6 +146,9 @@ pub(crate) struct Recorder {
     /// sandbox's own.
     #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     written: Vec<String>,
+    /// The readable directories: below one of the sandbox's own, but not written there.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    readable: Vec<String>,
     overlays: Vec<String>,
     /// The sandbox's own directories, whose paths are no inputs: the kernel's views and the
     /// empty directories.
@@ -160,15 +163,17 @@ impl Recorder {
         let mut written = overlays.clone();
         written.extend(tidied(&spec.writable));
         written.extend(own.iter().map(|it| (*it).to_owned()));
+        let readable = tidied(&spec.readable);
         // What is read there is an input, as what is read in an overlay is.
         let mut overlays = overlays;
-        overlays.extend(tidied(&spec.readable));
+        overlays.extend(readable.iter().cloned());
         Recorder {
             lines: BTreeSet::new(),
             threads: HashMap::new(),
             reads: spec.record_reads,
             not_inputs: spec.not_inputs.iter().map(|it| tidy(it)).collect(),
             written,
+            readable,
             overlays,
             own: own.iter().map(|it| (*it).to_owned()).collect(),
         }
@@ -247,7 +252,14 @@ impl Recorder {
 
     /// Whether a write to `path` is the program's to make.
     pub(crate) fn may_write(&self, path: &str) -> bool {
-        self.written.iter().any(|it| under(path, it))
+        self.written.iter().any(|it| under(path, it) && !self.only_read(path, it))
+    }
+
+    /// Whether `path` is in a readable directory that is below `dir`, one of the sandbox's
+    /// own: it is seen there read-only.
+    fn only_read(&self, path: &str, dir: &str) -> bool {
+        self.readable.iter().any(|it| under(it, dir) && it != dir && under(path, it))
+            && !self.written.iter().any(|it| under(it, dir) && it != dir && under(path, it))
     }
 
     /// The sandbox refused `thread` a write to `path`.
