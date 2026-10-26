@@ -9,7 +9,9 @@ mod empty_enums;
 mod format;
 mod get_first;
 mod io_other_error;
+mod map_clone;
 mod map_unwrap_or;
+mod match_like_matches_macro;
 mod needless_bool;
 mod needless_borrow;
 mod needless_borrows_for_generic_args;
@@ -59,7 +61,9 @@ const IMPLEMENTED: &[(&str, Pass)] = &[
     ("empty_enums", Pass::Late),
     ("get_first", Pass::Late),
     ("io_other_error", Pass::Late),
+    ("map_clone", Pass::Late),
     ("map_unwrap_or", Pass::Late),
+    ("match_like_matches_macro", Pass::Late),
     ("needless_bool", Pass::Late),
     ("needless_borrow", Pass::Late),
     ("needless_borrows_for_generic_args", Pass::Late),
@@ -164,8 +168,13 @@ pub(crate) fn check_node(cx: &mut Cx<'_, '_, '_>, node: &SyntaxNode) {
         if let ast::Expr::IfExpr(it) = &it {
             needless_bool::check_if(cx, it);
             collapsible_if::check(cx, it);
+            match_like_matches_macro::check_if_let(cx, it);
+        }
+        if let ast::Expr::MatchExpr(it) = &it {
+            match_like_matches_macro::check_match(cx, it);
         }
         io_other_error::check(cx, &it);
+        map_clone::check(cx, &it);
         map_unwrap_or::check(cx, &it);
         needless_borrow::check(cx, &it);
         needless_borrows_for_generic_args::check(cx, &it);

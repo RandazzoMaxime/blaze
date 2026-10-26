@@ -129,6 +129,29 @@ macro_rules! here {
     };
 }
 
+pub fn is_word(b: u8, kind: Option<&Encoding>) -> bool {
+    let latin = if let Some(Encoding::Latin) = kind { true } else { false };
+    latin
+        || match b {
+            b'a'..=b'z' | b'_' => true,
+            _ => false,
+        }
+}
+
+pub fn copies(names: &[u32], words: &[String], first: Option<&String>) -> (Vec<u32>, Vec<u32>, Vec<String>, Option<String>) {
+    let a = names.iter().map(|&n| n).collect();
+    let b = names.iter().map(|n| *n).collect();
+    let c = words.iter().map(|w| w.clone()).collect();
+    (a, b, c, first.map(|w| w.clone()))
+}
+
+pub fn refs(words: &[&str]) -> usize {
+    match words.first() {
+        Some(ref word) => word.len(),
+        None => 0,
+    }
+}
+
 #[deny(clippy::bool_assert_comparison)]
 pub fn denied() {
     assert_eq!(braces().is_empty(), false);

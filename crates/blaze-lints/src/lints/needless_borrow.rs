@@ -10,7 +10,10 @@
 //! dereferences is linted too, as clippy's `check_pat` does.
 
 use hir::{Adjust, AutoBorrow, Mutability};
-use syntax::{AstNode, SyntaxNode, TextRange, ast};
+use syntax::{
+    AstNode, SyntaxNode, TextRange,
+    ast::{self, HasName as _},
+};
 
 use super::utils;
 use crate::{check::Cx, diag::Applicability, sugg::has_enclosing_paren};
