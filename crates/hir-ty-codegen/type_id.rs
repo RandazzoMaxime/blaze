@@ -76,12 +76,14 @@ impl Fingerprint {
     fn child_at(self, data: DefPathData<'_>, earlier: u32) -> Self {
         let mut hasher = StableSipHasher128::new();
         hasher.write_u64(self.1);
+        // The variant's index in rustc's `DefPathData`, where `TestBinderConstraints` comes
+        // between `Closure` (9) and `Ctor`.
         let (discriminant, name) = match data {
             DefPathData::Impl => (1, None),
             DefPathData::TypeNs(name) => (5, Some(name)),
             DefPathData::ValueNs(name) => (6, Some(name)),
-            DefPathData::Ctor => (10, None),
-            DefPathData::AnonConst => (11, None),
+            DefPathData::Ctor => (11, None),
+            DefPathData::AnonConst => (12, None),
         };
         hasher.write_isize(discriminant);
         if let Some(name) = name {

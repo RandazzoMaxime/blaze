@@ -223,6 +223,14 @@ All notable changes to ra-jit are written here. The format follows
   of bun's functions to rustc; `harness/bun-repros/type_info` asks what it does and now
   compiles. A constant that holds a `TypeId` is still refused: the evaluator's ids are not
   rustc's hashes.
+- Const eval answers every reflection intrinsic the pinned nightly's core declares
+  (`core::intrinsics::reflection`), as rustc's const eval does: `type_id_size_of` and
+  `type_id_variant_name` under their new names, and `type_id_type_of` (`Type::of`'s kind, a
+  `dyn`'s principal and auto traits), `type_id_generics`, `type_id_function_ptr`,
+  `type_id_non_exhaustive` and `type_id_variant_non_exhaustive`. `type_id_vtable` answers
+  `None` where the solver rules the trait out and is refused otherwise: rustc proves it in a
+  typing mode the solver here does not have. The `Type` of a tuple is refused, as rustc at
+  the pinned nightly ICEs on it.
 - The daemon's workers hold at most half of the machine's memory together, or what
   `RA_JIT_MEMORY_MAX` says (a size, or `off`). Over it, the worker asked longest ago is
   stopped; `cargo ra-jit status` shows the limit and what each worker holds. `docs/reports/SOAK.md`
@@ -443,6 +451,17 @@ All notable changes to ra-jit are written here. The format follows
   without (from 292 and 362), the rest projects cargo itself does not resolve there.
 
 ### Changed
+
+- blaze builds with one Rust, the latest nightly: `nightly-2026-10-25` (rust-lang/rust
+  12433c307), pinned in `harness/toolchain` and moved with `harness/toolchain_bump.py`, in
+  place of stable 1.99.0. `vendor/rustc_abi` and the proc-macro server are taken from that
+  commit, the answers to rustc's questions are that nightly's, and `TypeId` hashes, the abort
+  intrinsic and the `core::arch` LLVM intrinsics follow it. A crate with `#![feature(...)]`
+  builds like any other (`harness/live-alloc` runs a program on `allocator_api` with live
+  edits); deref patterns are lowered as `rustc_mir_build` lowers them; every `-Z` flag of the
+  nightly is ignored, modelled or refused by one table (`-Zthreads` is ignored); and cargo's
+  second build-directory layout (`build/<pkg>/<hash>/{out,fingerprint,run}`) is followed
+  beside the first.
 
 - The first edit after a daemon starts on the store no longer compiles every function from
   the store in the edited file to tell what changed. Each entry names the items of the
@@ -791,6 +810,10 @@ All notable changes to ra-jit are written here. The format follows
 
 ### Fixed
 
+- An integration test or benchmark the daemon runs has `CARGO_BIN_EXE_<name>` of each program
+  of its package set, as cargo sets it since rust-lang/cargo#16421. With cargo's second layout
+  the test is no longer beside the programs, so hyperfine's and bat's tests (assert_cmd's
+  `cargo_bin`) found none and every one failed under ra-jit.
 - On x86-64, an edit that replaces a function shorter than a jump (5 bytes) is spliced
   instead of built in full ([#242](https://github.com/indexable-inc/blaze/issues/242)).
   The jump goes over the `int3`s and `nop`s the linker padded the function with. When there

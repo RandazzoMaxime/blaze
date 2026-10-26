@@ -162,7 +162,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: ./.github/actions/toolchain
-      - run: cp -r vendor/rust-analyzer vendor/rustc_type_ir vendor/rustc_next_trait_solver "$RUNNER_TEMP/"
+      - run: cp -r vendor/rust-analyzer vendor/rustc_type_ir vendor/rustc_next_trait_solver vendor/rustc_abi "$RUNNER_TEMP/"
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: ${{ runner.temp }}/rust-analyzer

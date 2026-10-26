@@ -305,6 +305,19 @@ def check_glibc(out):
     print(f"build_release: the binaries in {out} ask for glibc {shown} or older", flush=True)
 
 
+def ship(args, binaries):
+    """The binaries copied into `--out`, with blaze's proc-macro server for `--server`."""
+    if not args.out:
+        return
+    args.out.mkdir(parents=True, exist_ok=True)
+    for binary in binaries:
+        shutil.copy2(binary, args.out / binary.name)
+    if args.server:
+        proc_macro_server(args.out / "ra-jit", args.out)
+    if "linux" in args.target:
+        check_glibc(args.out)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     parser.add_argument("--target")
@@ -332,9 +345,19 @@ def main():
         env, argv = recipe(args.target, f"-Cprofile-use=<{chosen['url']}, sha256 {chosen['sha256']}>", "-fno-profile-use", args.features)
         print(" ".join(f"{k}={shlex.quote(v)}" for k, v in env.items()), " ".join(argv))
         return
+    target_dir = Path(os.environ.get("CARGO_TARGET_DIR", ROOT / "target"))
+    if pins()["toolchain"] != TOOLCHAIN and not args.strict:
+        # The toolchain moved and the pgo workflow has not trained on it yet (it runs when
+        # harness/toolchain changes on main): a build that is not a release goes without PGO.
+        print(f"warning: build_release: {PINS} has profiles of Rust {pins()['toolchain']}, ra-jit builds with "
+              f"{TOOLCHAIN}: built without PGO until the pgo workflow trains on {TOOLCHAIN}", file=sys.stderr, flush=True)
+        binaries, _ = build(args.target, target_dir, "", "", args.features)
+        ship(args, binaries)
+        print(f"build_release: {', '.join(b.name for b in binaries)} in {args.out or binaries[0].parent}, "
+              "without PGO", flush=True)
+        return
     path, chosen = profile(args.target, args.profdata)
-    binaries, stale = build(args.target, Path(os.environ.get("CARGO_TARGET_DIR", ROOT / "target")),
-                            f"-Cprofile-use={path}", "-fno-profile-use", args.features)
+    binaries, stale = build(args.target, target_dir, f"-Cprofile-use={path}", "-fno-profile-use", args.features)
     crate = crate_hash(binaries)
     if crate != chosen.get("crate"):
         said = (f"build_release: this build's crates are not the ones the profile was trained on (ra-jit is crate "
@@ -344,14 +367,7 @@ def main():
         if args.strict:
             sys.exit(f"error: {said}")
         print(f"warning: {said}", file=sys.stderr, flush=True)
-    if args.out:
-        args.out.mkdir(parents=True, exist_ok=True)
-        for binary in binaries:
-            shutil.copy2(binary, args.out / binary.name)
-        if args.server:
-            proc_macro_server(args.out / "ra-jit", args.out)
-        if "linux" in args.target:
-            check_glibc(args.out)
+    ship(args, binaries)
     shown = args.out or binaries[0].parent
     print(f"build_release: {', '.join(b.name for b in binaries)} in {shown}, with the profile trained at "
           f"{chosen['commit'][:10]}; {stale} functions changed since and are not optimized by it", flush=True)

@@ -34,6 +34,7 @@ mod test_harness;
 mod tier;
 mod trace;
 mod tree;
+mod unstable;
 mod weaken;
 mod whole;
 
@@ -2748,12 +2749,19 @@ fn pause_before_symbols() {
     }
 }
 
-/// The directory cargo put the executables of the build in: the one its `deps`, where the
-/// libraries of the build are, is in.
+/// The directory cargo put the executables of the build in: the profile's directory the
+/// libraries of the build are written below, `deps` in cargo's first layout and
+/// `build/<package>/<hash>/out` in its second (`cargo::layout`). The standard library's,
+/// in the toolchain, are below neither.
 fn executables_of(symbol_files: &[PathBuf]) -> Option<AbsPathBuf> {
-    let deps = symbol_files.iter().filter_map(|file| file.parent());
-    let deps = deps.filter(|deps| deps.file_name().is_some_and(|name| name == "deps"));
-    let built = deps.filter_map(Path::parent).next()?;
+    let built = symbol_files.iter().find_map(|file| {
+        let dir = file.parent()?;
+        let first = dir.file_name().is_some_and(|name| name == "deps");
+        match first {
+            true => dir.parent(),
+            false => cargo::layout::unit_dir(dir).filter(|it| it.dir.join("out") == dir)?.profile(),
+        }
+    })?;
     AbsPathBuf::try_from(built.to_str()?).ok()
 }
 
@@ -3261,7 +3269,7 @@ fn on_idle_threads<T: Sync>(
     use std::sync::atomic::Ordering::Relaxed;
     let wanted = (work.len() / per).min(threads - 1);
     let mut helpers = 0;
-    _ = helping.fetch_update(Relaxed, Relaxed, |busy| {
+    _ = helping.try_update(Relaxed, Relaxed, |busy| {
         helpers = wanted.min(threads.saturating_sub(busy + 1));
         Some(busy + helpers)
     });

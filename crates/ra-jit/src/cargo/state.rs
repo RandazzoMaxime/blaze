@@ -954,6 +954,7 @@ impl State {
                 inputs: inputs.into_iter().collect(),
                 env: run_env(package, &built.scripts)
                     .into_iter()
+                    .chain(programs_named(kind, unit))
                     .chain(library_path(executable.as_std_path(), sysroot_libraries.as_deref()))
                     .collect(),
             });
@@ -1020,9 +1021,11 @@ impl Program {
 /// locks from putting its programs in place until they have started. A directory cargo
 /// keeps no lock in, on NFS, has none to hold.
 fn build_locks<'a>(executables: impl Iterator<Item = &'a Path>) -> Vec<std::fs::File> {
-    // `debug/app`, `debug/examples/app` and `debug/deps/app-…` are all of `debug`.
+    // `debug/app`, `debug/examples/app`, `debug/deps/app-…` and, in cargo's second layout,
+    // `debug/build/app/<hash>/out/app-…` are all of `debug`.
     let lock_of = |executable: &Path| {
-        let above = executable.ancestors().skip(1).take(2);
+        let profile = super::layout::unit_dir(executable).and_then(|it| it.profile());
+        let above = profile.into_iter().chain(executable.ancestors().skip(1).take(2));
         above.map(|dir| dir.join(".cargo-lock")).find(|it| it.is_file())
     };
     let mut locks: Vec<PathBuf> = executables.filter_map(lock_of).collect();
@@ -1219,16 +1222,17 @@ fn project(asked: &Invocation, cwd: &Path, metadata: &Metadata) -> Result<PathBu
 /// library, which the daemon compiles from, is not installed. `cargo blaze` has made it
 /// blaze's (`toolchain::settle`); plain cargo after `blaze enable` builds with the project's.
 ///
-/// `RA_JIT_OTHER_TOOLCHAIN=1` takes another release anyway, for a project pinned to a
-/// toolchain near ours (a nightly of the next release): the layouts, symbol names, ABI and
-/// `TypeId`s are still 1.99.0's, and nothing checks that the other rustc agrees with them.
+/// `RA_JIT_OTHER_TOOLCHAIN=1` takes another toolchain anyway, for a project pinned to a
+/// nightly near ours: the layouts, symbol names, ABI and `TypeId`s are still the pinned
+/// nightly's, and nothing checks that the other rustc agrees with them.
 fn other_toolchain() -> Option<String> {
     let rustc = rustc_path();
     let said = |flag: &str| rustc_says(&rustc, &[flag]);
     let version = said("--version")?;
-    let version = version.split_whitespace().nth(1).unwrap_or_default();
+    let version = version.lines().next().unwrap_or_default().trim();
+    let version = version.strip_prefix("rustc ").unwrap_or(version);
     let ours = super::toolchain::OURS.trim();
-    if version != ours && !other_toolchain_allowed() {
+    if version != super::toolchain::ours_says() && !other_toolchain_allowed() {
         return Some(format!(
             "rustc {version} is not the {ours} blaze compiles, and plain cargo builds with the \
              project's toolchain; `cargo blaze` builds with {ours}"
@@ -1287,17 +1291,42 @@ pub(super) fn sysroot_libraries() -> Option<PathBuf> {
 
 /// Where cargo has the dynamic linker look when it runs `executable`: the dependencies of
 /// the profile, the profile's own directory, the toolchain's libraries, and then wherever
-/// it looked already. A test of a proc macro is linked with the toolchain's `libstd`.
+/// it looked already. A test of a proc macro is linked with the toolchain's `libstd`. The
+/// dependencies are `deps` in cargo's first layout and, in its second, the directory of each
+/// unit that is a `dylib` ([`super::layout::dylib_dirs`]).
 pub(super) fn library_path(executable: &Path, sysroot: Option<&Path>) -> Option<(String, String)> {
     let inside = |it: &&Path| it.file_name().is_some_and(|it| it == "deps" || it == "examples");
     let dir = executable.parent()?;
-    let profile = if inside(&dir) { dir.parent()? } else { dir };
+    let profile = match super::layout::unit_dir(dir) {
+        Some(unit) => unit.profile()?,
+        None if inside(&dir) => dir.parent()?,
+        None => dir,
+    };
     let already = std::env::var_os(LIBRARY_PATH);
     let already = already.iter().flat_map(std::env::split_paths);
-    let dirs =
-        [profile.join("deps"), profile.to_owned()].into_iter().chain(sysroot.map(Path::to_owned));
+    let deps = match profile.join("deps").is_dir() || !profile.join("build").is_dir() {
+        true => vec![profile.join("deps")],
+        false => super::layout::dylib_dirs(profile),
+    };
+    let dirs = deps.into_iter().chain([profile.to_owned()]).chain(sysroot.map(Path::to_owned));
     let joined = std::env::join_paths(dirs.chain(already)).ok()?;
     Some((LIBRARY_PATH.to_owned(), joined.into_string().ok()?))
+}
+
+/// The variables a cargo since rust-lang/cargo#16421 also sets when it runs an integration
+/// test or a benchmark: `CARGO_BIN_EXE_<name>` for each program of its package, as it gave
+/// them to rustc for the unit. A test that looks for a program by them at run time (assert_cmd's
+/// `cargo_bin`) finds none beside it in cargo's second layout, where the test is in its unit's
+/// own directory and not in the profile's.
+fn programs_named(kind: Kind, unit: Option<&Record>) -> Vec<(String, String)> {
+    if !matches!(kind, Kind::Test | Kind::Bench) {
+        return Vec::new();
+    }
+    let named = unit.into_iter().flat_map(|it| &it.env);
+    named
+        .filter(|(name, _)| name.starts_with("CARGO_BIN_EXE_"))
+        .map(|(n, v)| (n.clone(), v.clone()))
+        .collect()
 }
 
 /// The variables cargo sets for a program of `package` when it runs it.
@@ -1539,6 +1568,17 @@ mod tests {
         assert_eq!(dirs("/t/debug/deps/unit-0123"), expected);
         assert_eq!(dirs("/t/debug/app"), expected);
         assert_eq!(dirs("/t/debug/examples/one"), expected);
+        // cargo's second layout, with no `deps`: a test in its unit's directory.
+        let second = std::env::temp_dir().join(format!("ra-jit-state-{}", std::process::id()));
+        let unit = second.join("debug/build/app/0123456789abcdef/out");
+        std::fs::create_dir_all(&unit).unwrap();
+        let test = unit.join("app-0123456789abcdef");
+        let dirs = |executable: &Path| {
+            let (_, value) = library_path(executable, Some(sysroot)).unwrap();
+            std::env::split_paths(&value).take(2).collect::<Vec<PathBuf>>()
+        };
+        assert_eq!(dirs(&test), [second.join("debug"), sysroot.to_owned()]);
+        let _ = std::fs::remove_dir_all(&second);
     }
 
     #[test]

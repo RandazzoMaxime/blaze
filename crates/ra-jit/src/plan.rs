@@ -183,6 +183,10 @@ pub(crate) struct Profile {
     debuginfo: DebugLevel,
     split_debuginfo: Option<String>,
     strip: Strip,
+    /// The profile's own `rustflags` (cargo's `-Z profile-rustflags`), which come after the
+    /// others.
+    #[serde(default)]
+    rustflags: Vec<String>,
 }
 
 /// A `debug` setting as cargo passes it on: a level by its number or by its name.
@@ -384,10 +388,10 @@ impl Flags {
     /// for and `[build]` of the configuration that has any.
     fn of(dir: &Path, asked: &Asked<'_>) -> anyhow::Result<Flags> {
         if let Some(encoded) = asked.var("CARGO_ENCODED_RUSTFLAGS") {
-            return Ok(Flags::parse(encoded.split('\u{1f}')));
+            return Flags::parse(encoded.split('\u{1f}'));
         }
         if let Some(flags) = asked.var("RUSTFLAGS") {
-            return Ok(Flags::parse(flags.split_whitespace()));
+            return Flags::parse(flags.split_whitespace());
         }
         let mut command = asked.cargo(dir);
         // `cargo config get` is how cargo says what its configuration files and variables
@@ -410,12 +414,19 @@ impl Flags {
             .flat_map(Words::words)
             .collect();
         if !of_target.is_empty() {
-            return Ok(Flags::parse(of_target.into_iter()));
+            return Flags::parse(of_target.into_iter());
         }
-        Ok(Flags::parse(config.build.rustflags.iter().flat_map(Words::words)))
+        Flags::parse(config.build.rustflags.iter().flat_map(Words::words))
     }
 
-    fn parse<'a>(mut words: impl Iterator<Item = &'a str>) -> Flags {
+    /// The flags of `words`. `Err` names a `-Z` flag ra-jit does not build code with
+    /// ([`crate::unstable`]); the others it ignores, or what they ask is what it does.
+    fn parse<'a>(words: impl Iterator<Item = &'a str>) -> anyhow::Result<Flags> {
+        let words: Vec<&str> = words.collect();
+        if let Some(why) = crate::unstable::refusal(&words) {
+            anyhow::bail!("the flags for rustc have {why}; ra-jit does not build with it");
+        }
+        let mut words = words.into_iter();
         let mut flags = Flags::default();
         while let Some(word) = words.next() {
             if ["--cap-lints", "--force-warn"].iter().any(|it| {
@@ -462,7 +473,7 @@ impl Flags {
                 _ => {}
             }
         }
-        flags
+        Ok(flags)
     }
 }
 
@@ -732,6 +743,14 @@ impl UnitGraph {
             "`-C lto` is among the flags: rustc compiles the whole program again as it links \
              it and leaves no library on the link line for ra-jit's functions to be linked against"
         );
+        for unit in &self.units {
+            if let Some(why) = crate::unstable::refusal(&unit.profile.rustflags) {
+                anyhow::bail!(
+                    "the profile's rustflags for `{}` have {why}; ra-jit does not build with it",
+                    unit.target.name
+                );
+            }
+        }
         let lto = for_target.iter().any(|&it| self.units[it].profile.links_from_bitcode());
         if lto {
             eprintln!("{LTO_ACCEPTED}");
@@ -771,7 +790,7 @@ mod tests {
 
     #[test]
     fn force_frame_pointers_is_read_in_each_spelling() {
-        let kept = |flags: &str| Flags::parse(flags.split_whitespace()).frame_pointers;
+        let kept = |flags: &str| Flags::parse(flags.split_whitespace()).unwrap().frame_pointers;
         assert!(kept("-Cforce-frame-pointers=yes"));
         assert!(kept("--cap-lints allow -C force-frame-pointers"));
         assert!(kept("-C force_frame_pointers=always"));
@@ -782,11 +801,19 @@ mod tests {
 
     #[test]
     fn the_flags_that_cap_lints_are_read() {
-        let capped = |flags: &str| Flags::parse(flags.split_whitespace()).lints_capped;
+        let capped = |flags: &str| Flags::parse(flags.split_whitespace()).unwrap().lints_capped;
         assert!(capped("--cap-lints warn"));
         assert!(capped("-C opt-level=1 --cap-lints=allow"));
         assert!(capped("--force-warn non_snake_case"));
         assert!(!capped("-D warnings -A dead_code"));
         assert!(!capped("--cap-lintsx"));
+    }
+
+    #[test]
+    fn unstable_flags_are_ignored_or_refused_by_name() {
+        let flags = Flags::parse("-Zthreads=8 -Z time-passes -Copt-level=1".split_whitespace());
+        assert_eq!(flags.unwrap().opt_level.as_deref(), Some("1"));
+        let refused = Flags::parse("-Zthreads=8 -Z location-detail=none".split_whitespace());
+        assert!(refused.unwrap_err().to_string().contains("-Z location-detail=none"));
     }
 }

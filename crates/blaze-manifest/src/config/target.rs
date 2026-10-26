@@ -1,6 +1,7 @@
-//! `[target]` as cargo 1.99 reads it (`src/context/target.rs`, and the runner, linker and
-//! rustflags it picks in `compilation.rs` and `target_info.rs`), on the stable channel: no
-//! `[host]` table, `target-applies-to-host` always true. The `cfg` a target has is the
+//! `[target]` as the pinned nightly's cargo reads it (`src/context/target.rs`, and the runner,
+//! linker and rustflags it picks in `compilation.rs` and `target_info.rs`), without its `-Z`
+//! flags: no `[host]` table (`-Zhost-config`), `target-applies-to-host` always true
+//! (`-Ztarget-applies-to-host`). The `cfg` a target has is the
 //! caller's, from rustc's `--print cfg` answers.
 
 use std::collections::BTreeMap;

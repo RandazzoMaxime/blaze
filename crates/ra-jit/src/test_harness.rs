@@ -1,5 +1,5 @@
 //! The `main` of a test executable, as rustc's `--test` writes it: a description of each
-//! `#[test]` and `#[bench]` of the crate for libtest, and `test_main_static` over them. ra-jit adds it to
+//! `#[test]` and `#[bench]` of the crate for libtest, and `test_main_env_args` over them. ra-jit adds it to
 //! the root file of a crate it builds with `cfg(test)`, as a module of its own, and the
 //! program starts there instead of in rustc's: a test added, removed or marked otherwise is
 //! a build like another.
@@ -205,14 +205,16 @@ fn text(tests: &[Test], test_type: &str, tested: bool) -> String {
     text.push_str("#[doc(hidden)]\n#[allow(warnings, clippy::all)]\npub mod ");
     text.push_str(MODULE);
     text.push_str(
-        " {\n    extern crate test;\n\n    pub fn main() {\n        \
+        " {\n    extern crate test;\n\n    pub fn main() -> test::ExitCode {\n        \
          const TESTS: &[&test::TestDescAndFn] = &[",
     );
     for at in 0..tests.len() {
         _ = write!(text, "&T{at}, ");
     }
     text.push_str(
-        "];\n        if !sandbox::ran(TESTS) {\n            test::test_main_static(TESTS)\n        \
+        "];\n        match sandbox::ran(TESTS) {\n            \
+         ::core::option::Option::Some(code) => code,\n            \
+         ::core::option::Option::None => test::test_main_env_args(TESTS),\n        \
          }\n    }\n",
     );
     text.push_str(SANDBOX);
@@ -279,8 +281,8 @@ pub(crate) const SANDBOXED: &str = "RA_JIT_TEST_SANDBOX";
 const SANDBOX: &str = r#"
     #[cfg(not(unix))]
     mod sandbox {
-        pub fn ran(_: &[&super::test::TestDescAndFn]) -> bool {
-            false
+        pub fn ran(_: &[&super::test::TestDescAndFn]) -> ::core::option::Option<super::test::ExitCode> {
+            ::core::option::Option::None
         }
     }
 
@@ -301,11 +303,11 @@ const SANDBOX: &str = r#"
         const ONE: &str = "__RA_JIT_TEST";
         const CAPTURE: &str = "__RA_JIT_TEST_CAPTURE";
 
-        pub fn ran(tests: &[&test::TestDescAndFn]) -> bool {
+        pub fn ran(tests: &[&test::TestDescAndFn]) -> ::core::option::Option<test::ExitCode> {
             if let Some(name) = ::std::env::var_os(ONE) {
                 one(tests, &name.to_string_lossy());
             }
-            let Some(spec) = ::std::env::var_os(SPEC) else { return false };
+            let Some(spec) = ::std::env::var_os(SPEC) else { return None };
             unsafe { ::std::env::remove_var(SPEC) };
             let text = ::std::fs::read_to_string(&spec).unwrap_or_default();
             let mut lines = text.lines();
@@ -330,7 +332,7 @@ const SANDBOX: &str = r#"
                     match &exe {
                         Some(exe) if apart.contains(name.as_str()) => {
                             let (command, exe) = (command.clone(), exe.clone());
-                            let testfn = test::DynTestFn(::std::boxed::Box::new(move || {
+                            let testfn = test::DynTestFn(::std::sync::Arc::new(move || {
                                 apart_run(&command, &exe, &name)
                             }));
                             test::TestDescAndFn { desc, testfn }
@@ -338,10 +340,10 @@ const SANDBOX: &str = r#"
                         _ => test::TestDescAndFn { desc, testfn: test::StaticTestFn(run) },
                     }
                 })
-                .collect();
+                .collect::<::std::vec::Vec<_>>();
+            let listed: ::std::vec::Vec<&test::TestDescAndFn> = owned.iter().collect();
             let args: ::std::vec::Vec<::std::string::String> = ::std::env::args().collect();
-            test::test_main(&args, owned, None);
-            true
+            Some(test::test_main(&args, &listed))
         }
 
         fn apart_run(

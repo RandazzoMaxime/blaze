@@ -18,23 +18,29 @@ outside the rule of [no-rustc.md](no-rustc.md#what-counts-as-running-rustc).
 
 ## Which Rust a project gets
 
-blaze compiles one release of Rust, the one in `harness/toolchain` (1.99.0): its standard
-library, its layouts and its answers to rustc's questions. Which toolchain the project names
-(`rust-toolchain.toml`, `rustup override`, `+toolchain`, rustup's default) does not change
-that. Since [#296](https://github.com/indexable-inc/blaze/pull/296) a pin to another release
-no longer sends the build to cargo: blaze builds with 1.99.0 and says so when the build fails.
+blaze compiles one toolchain of Rust, the dated nightly in `harness/toolchain`
+(`nightly-2026-10-25`, `rustc 1.101.0-nightly (12433c307 2026-10-24)`): its standard library,
+its layouts and its answers to rustc's questions. It follows the latest nightly, moved by
+`harness/toolchain_bump.py`. Which toolchain the project names (`rust-toolchain.toml`,
+`rustup override`, `+toolchain`, rustup's default) does not change that. Since
+[#296](https://github.com/indexable-inc/blaze/pull/296) a pin to another toolchain no longer
+sends the build to cargo: blaze builds with its nightly and says so when the build fails.
 
-A project builds under blaze when its code builds under Rust 1.99.0. Rust keeps building old
-code, so a project pinned to an older stable release builds the same. What a project can need
-that blaze's Rust lacks, said plainly when it happens:
+A project builds under blaze when its code builds under that nightly. Rust keeps building old
+code, so a project pinned to a stable release or an older nightly builds the same, and
+`#![feature(...)]` code builds since the toolchain is a nightly
+([support.md](support.md#nightly-features)). What a project can need that blaze's Rust lacks,
+said plainly when it happens:
 
-- **A nightly feature** (`#![feature(...)]`, `-Z` flags): 1.99.0 is a stable release and
-  refuses them, as rustc 1.99.0 does. blaze's error says the project's toolchain is a nightly
-  and blaze builds with 1.99.0.
-- **A newer release's library or language** (an API stabilized after 1.99.0): the error is
-  rustc's, with the same note. It goes away when blaze moves to that release.
-- **`rust-version` above 1.99**: cargo refuses such a package, and so does blaze, with
-  cargo's message.
+- **A feature the nightly removed or changed** (`box` patterns, gone upstream for
+  `deref_patterns`): rustc's error, with a note that the project's toolchain is another and
+  blaze builds with its nightly.
+- **A newer nightly's library or language**: the same error and note. It goes away when blaze
+  moves to that nightly.
+- **`rust-version` above the nightly's release (1.101)**: cargo refuses such a package, and so
+  does blaze, with cargo's message.
+
+`-Z` flags are covered in [support.md](support.md).
 
 ## What blaze takes from a Rust toolchain today
 
@@ -49,7 +55,7 @@ the need for it ([no-rustc.md](no-rustc.md#the-plan)).
 | `rust-analyzer-proc-macro-srv` (`libexec`) | in `rustc` | expanding proc macros with the libraries rustc built | J1 and J2 |
 | `rust-std-<host>` (the sysroot's rlibs) | 31.6 MB | linking what cargo and rustc built; `libstd`'s dynamic library for a proc macro's tests | F and G as the only build |
 | `rust-src` | 5.9 MB | the standard library's source, which blaze compiles (and which the shipped std unit is keyed by) | stays: it is source. Later shipped with blaze |
-| rustup | | finding 1.99.0 and its `rust-src` (`cargo/toolchain.rs`, #296), `multirust-channel-manifest.toml` for the release and commit (`answers/own.rs`, `main.rs`) | blaze's own toolchain ([below](#blazes-own-toolchain-the-stopgap)) |
+| rustup | | finding the pinned nightly and its `rust-src` (`cargo/toolchain.rs`, #296), `multirust-channel-manifest.toml` for the release and commit (`answers/own.rs`, `main.rs`) | blaze's own toolchain ([below](#blazes-own-toolchain-the-stopgap)) |
 
 On macOS the same pieces are 50.3, 9.0, 30.7 and 5.9 MB (95.8 MB); on Linux AArch64 117.3 MB.
 blaze's own archive is 18 to 21 MB.
@@ -60,19 +66,20 @@ Until K, J and M land, blaze still runs cargo and rustc for the first build and 
 macros. So that installing needs no rustup now, blaze keeps a toolchain of its own, private
 to it, that no project's pin or `PATH` changes:
 
-- **What:** Rust 1.99.0's `rustc`, `cargo`, `rust-std-<host>` and `rust-src` components, as
+- **What:** the pinned nightly's `rustc`, `cargo`, `rust-std-<host>` and `rust-src` components, as
   the Rust project publishes them on static.rust-lang.org, unchanged. Not `rustfmt`, `clippy`,
   `rust-docs` or `rust-analyzer`.
 - **Size:** 132.5 MB to download on Linux x86-64, 117.3 MB on Linux AArch64, 95.8 MB on
   macOS, the same bytes rustup's `minimal` profile and `rust-src` download today.
-- **Where:** `~/.blaze/toolchains/1.99.0-<host>/` (`BLAZE_HOME` moves it), laid out as rustup
+- **Where:** `~/.blaze/toolchains/nightly-2026-10-25-<host>/` (`BLAZE_HOME` moves it), laid out as rustup
   lays out a toolchain, with its channel manifest, so that blaze's sysroot rules read it
   unchanged.
 - **Checked:** the sha256 of each component is compiled into blaze, from the channel
-  manifest of the release; a download whose bytes differ is not used.
+  manifest of the nightly (`crates/ra-jit/src/cargo/toolchain/pins.txt`); a download whose
+  bytes differ is not used.
 - **When:** install.sh fetches it after installing blaze, and blaze fetches it itself on the
   first build that needs it and finds no other copy (a `cargo install` of blaze, a deleted
-  directory). A rustup that already has 1.99.0 with `rust-src` is used as it is, rather than
+  directory). A rustup that already has `nightly-2026-10-25` with `rust-src` is used as it is, rather than
   downloading the same bytes again.
 - **Who sees it:** nobody. cargo, rustc and the daemon blaze starts run from it (`CARGO`,
   `RUSTC`, `RUSTDOC` and `PATH` for the processes it starts); the user's own `cargo` and
