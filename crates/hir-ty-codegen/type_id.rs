@@ -480,12 +480,28 @@ impl<'a, 'db> TypeIdHasher<'a, 'db> {
             }
             TyKind::FnDef(def, args) => {
                 hasher.write_isize(13);
-                let CallableDefId::FunctionId(func) = def.0 else { return None };
-                // A lifetime of a function is mostly late bound, and then no argument to rustc.
-                if args.iter().any(|arg| matches!(arg.kind(), GenericArgKind::Lifetime(_))) {
-                    return None;
-                }
-                self.function_path(func)?.hash(hasher);
+                let path = match def.0 {
+                    CallableDefId::FunctionId(func) => {
+                        // A lifetime of a function is mostly late bound, and then no argument
+                        // to rustc.
+                        if args.iter().any(|arg| matches!(arg.kind(), GenericArgKind::Lifetime(_)))
+                        {
+                            return None;
+                        }
+                        self.function_path(func)?
+                    }
+                    // A constructor (`Some`, `Ok`, `Tuple`) is the `Ctor` child of its variant
+                    // or struct, with the ADT's own parameters, which are all early bound.
+                    CallableDefId::EnumVariantId(variant) => {
+                        let loc = variant.lookup(self.db);
+                        let adt = self.adt_path(loc.parent.into())?;
+                        adt.child(DefPathData::TypeNs(loc.name.as_str())).child(DefPathData::Ctor)
+                    }
+                    CallableDefId::StructId(it) => {
+                        self.adt_path(it.into())?.child(DefPathData::Ctor)
+                    }
+                };
+                path.hash(hasher);
                 // The arguments are under a binder, which binds nothing.
                 self.binder(hasher, |this, hasher| {
                     this.args(args)?.hash(hasher);

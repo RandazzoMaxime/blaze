@@ -3951,6 +3951,28 @@ pub mod type_id_hashes {
         ]
     }
 
+    /// Constructors used as functions (`.map(Ok)`): a `FnDef` of the variant's or the struct's
+    /// `Ctor`, with the ADT's parameters. axum's `Body::from_stream` and tonic's client ask for
+    /// the `TypeId` of a stream mapped through one (blaze #369).
+    pub fn constructors() -> Vec<TypeId> {
+        vec![
+            of_value(&Some::<u8>),
+            of_value(&Ok::<u8, String>),
+            of_value(&Err::<u8, String>),
+            of_value(&Tuple),
+            of_value(&Payload::Tuple),
+            of_value(&Generic::<u16, 2>),
+            of_value(&Borrowed),
+            any_of(std::iter::once(1u8).map(Some)),
+            any_of(std::iter::once(1u8).map(Ok::<u8, ()>)),
+        ]
+    }
+
+    fn any_of<T: 'static>(value: T) -> TypeId {
+        let value = Some(value);
+        (&value as &dyn Any).type_id()
+    }
+
     struct Holder<F>(F, u8);
 
     fn two_closures<T: 'static>(seed: T) -> (impl Fn() -> u8 + 'static, impl Fn(&str) -> usize) {
