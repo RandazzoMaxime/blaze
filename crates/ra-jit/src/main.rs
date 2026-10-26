@@ -34,6 +34,7 @@ mod test_harness;
 mod tier;
 mod trace;
 mod tree;
+mod unstable;
 mod weaken;
 mod whole;
 

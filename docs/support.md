@@ -279,3 +279,59 @@ cargo, as [cargo.md](cargo.md) lists.
 "Supported" for a release profile means the program printed the same as cargo's. It does
 not mean the code is as fast: ra-jit's code is not optimised across functions under either
 backend.
+
+## `-Z` flags for rustc
+
+The `-Z` flags cargo gives rustc, from `RUSTFLAGS`, `CARGO_ENCODED_RUSTFLAGS`, `[build]` or
+`[target]` `rustflags` and a profile's `rustflags`, still reach rustc for what rustc compiles,
+and build scripts see them in `CARGO_ENCODED_RUSTFLAGS`. What ra-jit does with each in its own
+code is one table, `crates/ra-jit/src/unstable.rs`, which the daemon's plan, the plan of a
+program linked against rustc's libraries, the build scripts and proc macros ra-jit compiles and
+ra-jit's own answers to rustc's questions all read:
+
+- **ignored**: it changes how rustc works (speed, what it prints, its own checks, how its
+  backend lays out code) and nothing a program does or how ra-jit's code links with rustc's;
+- **modelled**: it changes what a program does, and ra-jit's code already does that;
+- **refused**: ra-jit does not build code with it. A crate built with it is left to rustc and
+  the reason names the flag (`` `zf` is built with -Z location-detail=none: it changes what
+  `Location::caller()` says ``, in the line `cargo blaze` prints and in `cargo blaze status`);
+  in the daemon's plan of a whole build it fails the load with the same words. A flag not in
+  the table is refused as one ra-jit does not know.
+
+The names are those of `rustc -Z help` of the pinned nightly, every one of them, spelled
+`-Zname=value`, `-Z name=value`, `-Zname` or with `_` for `-`.
+
+| What | Why | Flags |
+|---|---|---|
+| ignored | how fast rustc compiles | `cache-proc-macros`, `disable-fast-paths`, `disable-incr-comp-backend-caching`, `incremental-ignore-spans`, `no-parallel-backend`, `no-steal-thir`, `threads` |
+| ignored | how rustc reads its own argument files | `shell-argfiles` |
+| ignored | how rustc's backend optimizes or lays out its own code; the program does the same | `box-noalias`, `codegen-source-order`, `fewer-names`, `function-sections`, `human-readable-cgu-names`, `inline-llvm`, `llvm-writable`, `merge-functions`, `no-unique-section-names`, `plt`, `relax-elf-relocations`, `trap-unreachable`, `tune-cpu` |
+| ignored | it lets other unstable options be given, and changes nothing | `unstable-options` |
+| ignored | what rustc checks of itself while it compiles | `assert-incr-state`, `eagerly-emit-delayed-bugs`, `extra-const-ub-checks`, `incremental-verify-ich`, `lint-llvm-ir`, `lint-mir`, `query-dep-graph`, `treat-err-as-bug`, `validate-mir`, `verify-llvm-ir` |
+| ignored | what rustc prints or writes beside its output | `binary-dep-depinfo`, `check-cfg-all-expected`, `checksum-hash-algorithm`, `deduplicate-diagnostics`, `dep-info-omit-d-target`, `dump-dep-graph`, `dump-mir`, `dump-mir-dataflow`, `dump-mir-dir`, `dump-mir-exclude-alloc-bytes`, `dump-mir-exclude-pass-number`, `dump-mir-graphviz`, `dump-mono-stats`, `dump-mono-stats-format`, `future-incompat-test`, `graphviz-dark-mode`, `graphviz-font`, `hint-msrv`, `identify-regions`, `ignore-directory-in-diagnostics-source-blocks`, `incremental-info`, `input-stats`, `llvm-time-trace`, `macro-backtrace`, `macro-stats`, `meta-stats`, `metrics-dir`, `mir-include-spans`, `move-size-limit`, `nll-facts`, `nll-facts-dir`, `print-codegen-stats`, `print-codegen-stats-json`, `print-llvm-passes`, `print-mono-items`, `print-type-sizes`, `proc-macro-backtrace`, `profile-closures`, `remark-dir`, `self-profile`, `self-profile-counter`, `self-profile-events`, `span-free-formats`, `teach`, `temps-dir`, `terminal-urls`, `time-llvm-passes`, `time-passes`, `time-passes-format`, `trace-macros`, `track-diagnostics`, `trim-diagnostic-paths`, `ui-testing`, `verbose-asm`, `verbose-internals`, `write-long-types-to-disk` |
+| ignored | what rustc's own objects tell a debugger; ra-jit writes its own debug info | `annotate-moves`, `debug-info-type-line-numbers`, `debuginfo-compression`, `debuginfo-for-profiling`, `dwarf-version`, `embed-source`, `inline-mir-preserve-debug`, `mir-strip-debuginfo`, `no-generate-arange-section`, `split-dwarf-inlining`, `split-dwarf-kind`, `split-dwarf-out-dir`, `src-hash-algorithm` |
+| ignored | what rustdoc documents | `normalize-docs` |
+| ignored | where rustc puts a library's metadata; the objects are the same | `embed-metadata` |
+| ignored | which programs rustc's type checker accepts, not the code of one it accepts | `assumptions-on-binders`, `disable-param-env-normalization-hack`, `enforce-type-length-limit`, `higher-ranked-assumptions`, `min-recursion-limit`, `next-solver`, `no-implied-bounds-compat`, `polonius`, `renormalize-rigid-aliases` |
+| modelled when off, refused when on | ra-jit compiles `contract_checks()` as false | `contract-checks` |
+| modelled when off, refused when on | ra-jit compiles `ub_checks()` as false | `ub-checks` |
+| refused | it changes how rustc links, which ra-jit's link does not do | `export-executable-symbols`, `external-clangrt`, `implicit-sysroot-deps`, `link-directives`, `link-native-libraries`, `link-only`, `no-link`, `no-profiler-runtime`, `osx-rpath-install-name`, `packed-bundled-libs`, `pre-link-arg`, `pre-link-args`, `profiler-runtime`, `staticlib-allow-rdylib-deps`, `staticlib-hide-internal-symbols`, `staticlib-prefer-dynamic`, `staticlib-rename-internal-symbols`, `use-ctors-section`, `wasi-exec-model` |
+| refused | it changes the ABI or symbols rustc's code has, which ra-jit's code must match | `allow-partial-mitigations`, `default-visibility`, `deny-partial-mitigations`, `direct-access-external-data`, `fixed-x18`, `llvm-target-feature`, `metadata-crate-hash`, `packed-stack`, `pointer-authentication`, `reg-struct-return`, `regparm`, `tls-model`, `wasm-c-abi` |
+| refused | it changes the code rustc generates, which ra-jit's code generator does not do | `autodiff`, `autodiff-post-passes`, `branch-protection`, `cf-protection`, `ehcont-guard`, `emit-stack-sizes`, `flatten-format-args`, `force-intrinsic-fallback`, `function-return`, `indirect-branch-cs-prefix`, `large-data-threshold`, `llvm-module-flag`, `llvm-plugins`, `min-function-alignment`, `mir-enable-passes`, `mir-move-elimination`, `mir-opt-bisect-limit`, `mir-preserve-ub`, `offload`, `patchable-function-entry`, `precise-enum-drop-elaboration`, `retpoline`, `retpoline-external-thunk`, `small-data-threshold`, `stack-protector`, `uninit-const-chunk-threshold`, `unsound-mir-opts`, `use-sync-unwind` |
+| refused | it changes the layout of types | `layout-seed`, `randomize-layout` |
+| refused | it changes the layout of vtables | `no-trait-vptr` |
+| refused | it changes the paths `file!()` and panics name | `remap-cwd-prefix` |
+| refused | it changes the paths panics name | `simulate-remapped-rust-src-base`, `translate-remapped-path-to-local-path` |
+| refused | it changes what `#[derive(Debug)]` prints | `fmt-debug` |
+| refused | it changes what `Location::caller()` says | `location-detail` |
+| refused | it changes what `cfg(target_thread_local)` says | `has-thread-local` |
+| refused | it changes what `cfg(version)` says | `assume-incomplete-release` |
+| refused | it changes what the program does, which ra-jit does not model | `async-panic`, `experimental-default-bounds`, `force-unstable-if-unmarked`, `internal-testing-features`, `namespaced-crates`, `no-leak-check`, `on-broken-pipe`, `panic-in-drop`, `span-debug`, `strict-init-checks`, `tiny-const-eval-limit`, `unleash-the-miri-inside-of-you` |
+| refused | it changes which functions rustc's libraries export, which ra-jit links against | `always-encode-mir`, `cross-crate-inline-threshold`, `dylib-lto`, `hint-mostly-unused`, `inline-mir`, `inline-mir-forwarder-threshold`, `inline-mir-hint-threshold`, `inline-mir-threshold`, `mir-opt-level`, `share-generics`, `split-lto-unit`, `thinlto`, `virtual-function-elimination` |
+| refused | it instruments the code, which ra-jit's code generator does not do | `codegen-emit-retag`, `coverage-options`, `instrument-mcount`, `instrument-xray`, `maximal-hir-to-mir-coverage`, `sanitizer`, `sanitizer-cfi-canonical-jump-tables`, `sanitizer-cfi-diag`, `sanitizer-cfi-generalize-pointers`, `sanitizer-cfi-minimal-runtime`, `sanitizer-cfi-normalize-integers`, `sanitizer-cfi-recover`, `sanitizer-dataflow-abilist`, `sanitizer-ignorelist`, `sanitizer-kcfi-arity`, `sanitizer-memory-track-origins`, `sanitizer-recover` |
+| refused | ra-jit does not check which features a crate enables | `allow-features` |
+| refused | ra-jit links against what rustc's LLVM backend builds, not another backend's | `codegen-backend` |
+| refused | ra-jit runs proc macros its own way | `proc-macro-execution-strategy` |
+| refused | ra-jit's front end does not see the attribute it adds | `crate-attr` |
+| refused | ra-jit's test harness does not run tests built with panic=abort | `panic-abort-tests` |
+| refused | rustc does not build the crate's code with it | `build-sdylib-interface`, `dual-proc-macros`, `help`, `ls`, `no-analysis`, `no-codegen`, `parse-crate-root-only`, `unpretty`, `wasm-proc-macros` |
