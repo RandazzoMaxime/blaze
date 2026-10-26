@@ -825,6 +825,11 @@ All notable changes to ra-jit are written here. The format follows
 
 ### Fixed
 
+- `RA_JIT_RUSTC_BASE=0` reaches the worker of the build that sets it, which is a worker of its
+  own: it reached one only when the build that set it had started the daemon, so behind a
+  daemon another build started the first edits were patches of rustc's executable, and an edit
+  that adds a type asked for a restart (`live_types.py` in the gate, after the other live
+  tests).
 - An integration test or benchmark the daemon runs has `CARGO_BIN_EXE_<name>` of each program
   of its package set, as cargo sets it since rust-lang/cargo#16421. With cargo's second layout
   the test is no longer beside the programs, so hyperfine's and bat's tests (assert_cmd's

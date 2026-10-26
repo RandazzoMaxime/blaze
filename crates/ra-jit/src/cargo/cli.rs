@@ -84,7 +84,8 @@ const BUILD_ENV: &[&str] = &[
 ];
 
 /// The variables a worker is started with: the ones that pick its toolchain and its backend,
-/// and the ones cargo reads flags and profiles from.
+/// what its first build is made over, and the ones cargo reads flags and profiles from. One
+/// left out reaches a worker only from whoever started the daemon.
 const WORKER_ENV: &[&str] = &[
     "RUSTFLAGS",
     "CARGO_ENCODED_RUSTFLAGS",
@@ -99,6 +100,7 @@ const WORKER_ENV: &[&str] = &[
     "RA_JIT_MIR_OPT",
     "RA_JIT_EMIT",
     "RA_JIT_SPLICE",
+    "RA_JIT_RUSTC_BASE",
 ];
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
