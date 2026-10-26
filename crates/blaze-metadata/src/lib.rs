@@ -36,7 +36,7 @@ use blaze_resolve::{
 };
 use rustc_hash::FxHashMap;
 
-use crate::summary::Read;
+pub use crate::summary::Read;
 
 /// What is asked of the workspace, as `cargo metadata` or `cargo build` is asked.
 pub struct Asked<'a> {
@@ -188,8 +188,103 @@ pub fn programs(asked: &Asked<'_>, targets: Targets<'_>) -> Result<(String, Vec<
     Ok((json, programs))
 }
 
+/// The workspace of an [`Asked`] resolved as cargo's `resolve_ws_with_opts` resolves it, before
+/// the feature resolver: what `cargo metadata` and `cargo tree` print from.
+pub struct Resolved<'a> {
+    pub ws: &'a Workspace<'a>,
+    /// The resolve of the packages `specs` select, guided by the lock file.
+    pub resolve: &'a blaze_resolve::Resolve,
+    pub members: Members<'a>,
+    /// The members' ids, in the workspace's order.
+    pub member_ids: &'a [PackageId],
+    pub specs: &'a [PackageIdSpec],
+    pub cli_features: &'a CliFeatures,
+    pub behavior: ResolveBehavior,
+    pub has_dev_units: HasDevUnits,
+    /// What was read of every package the lock file names.
+    pub packages: &'a FxHashMap<PackageId, Read>,
+}
+
+/// The packages a command selects of the workspace, from its members' ids.
+pub type Pick<'a> = &'a dyn Fn(&Workspace<'_>, &[PackageId]) -> Result<Vec<PackageIdSpec>>;
+
+/// Resolves the workspace of `asked` for the packages `pick` selects (none: as `asked.build`
+/// selects them, or every member), and hands it to `then`.
+pub fn resolved<R>(
+    asked: &Asked<'_>,
+    pick: Option<Pick<'_>>,
+    then: impl FnOnce(Resolved<'_>) -> Result<R>,
+) -> Result<R> {
+    resolving(asked, pick, |it, _, _| then(it))
+}
+
+/// The packages the workspace's lock file names, read with nothing fetched, and the member
+/// whose manifest is the current one (none in a virtual workspace's root): what `cargo pkgid`
+/// reads. None when there is no lock file.
+pub struct Locked {
+    pub ids: Vec<PackageId>,
+    pub current: Option<PackageId>,
+}
+
+pub fn locked(asked: &Asked<'_>) -> Result<Option<Locked>> {
+    with_lock(asked, "pkgid", |_, ws, lock| {
+        let current = ws.members().find(|(path, _)| *path == ws.current_manifest());
+        let current = current.map(|(_, m)| {
+            let dir = m.package_id.source_id.local_path().context("a member's directory")?;
+            let version = m.package_id.version.to_string();
+            PackageId::try_new(m.package_id.name.as_str(), &version, SourceId::for_path(&dir)?)
+        });
+        Ok(Locked { ids: lock.iter().collect(), current: current.transpose()? })
+    })
+}
+
+/// Fetches every package the workspace's lock file names that is not a path package, where
+/// cargo would have it: `cargo fetch` for every platform. Returns how many there are; none
+/// when there is no lock file.
+pub fn fetch_locked(asked: &Asked<'_>) -> Result<Option<usize>> {
+    with_lock(asked, "fetch", |ctx, _, lock| {
+        let offline = asked.offline || ctx.config.net_config()?.offline.unwrap_or(false);
+        Ok(fetch(lock, ctx, offline, asked.store.clone())?.len())
+    })
+}
+
+/// The workspace of `asked` and its lock file read, as `command` reads them, handed to `then`;
+/// none when there is no lock file.
+fn with_lock<R>(
+    asked: &Asked<'_>,
+    command: &str,
+    then: impl FnOnce(&Context, &Workspace<'_>, &blaze_resolve::Resolve) -> Result<R>,
+) -> Result<Option<R>> {
+    let mut config = Config::load(asked.cwd, asked.env.clone(), &[])?;
+    config.start(command, asked.config)?;
+    let ctx = Context::new(config);
+    let ws = Workspace::new(&root_manifest(asked.manifest_path, &ctx)?, &ctx)?;
+    let root = ws.root().to_owned();
+    let Ok(lock_text) = std::fs::read_to_string(root.join("Cargo.lock")) else {
+        return Ok(None);
+    };
+    let path_packages = path_packages(&ws, &root, &ctx)?;
+    let mut path_deps = PathDeps::default();
+    let members = ws.members().map(|(_, m)| m);
+    for m in members.chain(path_packages.iter().map(|it| &*it.manifest)) {
+        let dir = m.package_id.source_id.local_path().context("a path package's directory")?;
+        let entry = path_deps.entry(m.package_id.name.clone()).or_default();
+        entry.insert(m.package_id.version.clone(), SourceId::for_path(&dir)?);
+    }
+    let lock = lockfile::into_resolve(lockfile::parse(&lock_text)?, &lock_text, &path_deps)?;
+    then(&ctx, &ws, &lock).map(Some)
+}
+
 /// The metadata of `asked`, and the ids of the members its build selects.
 fn made(asked: &Asked<'_>) -> Result<(String, Vec<String>)> {
+    resolving(asked, None, |resolved, serialized, ids| described(asked, &resolved, serialized, ids))
+}
+
+fn resolving<R>(
+    asked: &Asked<'_>,
+    pick: Option<Pick<'_>>,
+    then: impl FnOnce(Resolved<'_>, Vec<SerializedPackage<'_>>, &[PackageId]) -> Result<R>,
+) -> Result<R> {
     let mut config = Config::load(asked.cwd, asked.env.clone(), &[])?;
     config.start("metadata", asked.config)?;
     let offline = asked.offline || config.net_config()?.offline.unwrap_or(false);
@@ -267,9 +362,10 @@ fn made(asked: &Asked<'_>) -> Result<(String, Vec<String>)> {
         rust_versions: None,
         resolve_version: ResolveVersion::default(),
     };
-    let specs: Vec<PackageIdSpec> = match &asked.build {
-        None => member_ids.iter().map(|id| id.to_spec()).collect(),
-        Some(build) => selected(&ws, member_ids, build)?,
+    let specs: Vec<PackageIdSpec> = match (pick, &asked.build) {
+        (Some(pick), _) => pick(&ws, member_ids)?,
+        (None, None) => member_ids.iter().map(|id| id.to_spec()).collect(),
+        (None, Some(build)) => selected(&ws, member_ids, build)?,
     };
     let cli_features = CliFeatures::from_command_line(
         asked.features,
@@ -291,28 +387,63 @@ fn made(asked: &Asked<'_>) -> Result<(String, Vec<String>)> {
     if lockfile::lockfile_to_write(&mut whole, Some(&lock_text), None, None)?.is_some() {
         bail!("{} would change: the manifests no longer agree with it", lock_path.display());
     }
+    let resolved = Resolved {
+        ws: &ws,
+        resolve: &targeted,
+        members: members_of(),
+        member_ids,
+        specs: &specs,
+        cli_features: &cli_features,
+        behavior,
+        has_dev_units,
+        packages: &reads,
+    };
+    then(resolved, serialized, &ids)
+}
+
+/// The JSON `cargo metadata` prints of `resolved`, and the ids of the members its build
+/// selects.
+fn described(
+    asked: &Asked<'_>,
+    resolved: &Resolved<'_>,
+    serialized: Vec<SerializedPackage<'_>>,
+    ids: &[PackageId],
+) -> Result<(String, Vec<String>)> {
+    let Resolved {
+        ws,
+        resolve: targeted,
+        member_ids,
+        specs,
+        cli_features,
+        behavior,
+        has_dev_units,
+        packages: reads,
+        ..
+    } = *resolved;
+    let current = resolved.members.current;
+    let members_of = || resolved.members;
 
     let kinds = match &asked.platform {
         Some(platform) => vec![CompileKind::Target(InternedString::new(platform.triple))],
         None => vec![CompileKind::Host],
     };
-    let packages = Packages { reads: &reads, platform: asked.platform.as_ref() };
+    let packages = Packages { reads, platform: asked.platform.as_ref() };
     let mut roots = Vec::new();
     let resolve = match &asked.build {
-        None => resolve_graph(&targeted, member_ids, current, &packages, &kinds)?,
+        None => resolve_graph(targeted, member_ids, current, &packages, &kinds)?,
         Some(build) => {
-            let member_features = members_with_features(&members_of(), &specs, &cli_features)?;
+            let member_features = members_with_features(&members_of(), specs, cli_features)?;
             let opts = FeatureOpts::new(behavior, has_dev_units, ForceAllTargets::No);
             let features =
-                FeatureResolver::resolve(&packages, &targeted, &member_features, &kinds, opts)?;
+                FeatureResolver::resolve(&packages, targeted, &member_features, &kinds, opts)?;
             roots = member_features.iter().map(|(it, _)| it.package_id()).collect();
             let activated = |platform: &Platform| packages.activates(platform);
             graph::of_build(
-                &targeted,
+                targeted,
                 &features,
                 &roots,
                 build.dev_units,
-                &reads,
+                reads,
                 &activated,
                 current,
             )?
@@ -332,7 +463,7 @@ fn made(asked: &Asked<'_>) -> Result<(String, Vec<String>)> {
     let mut slots: Vec<Option<SerializedPackage<'_>>> = serialized.into_iter().map(Some).collect();
     let packages: Vec<SerializedPackage<'_>> =
         listed.iter().filter_map(|(_, at)| slots[*at].take()).collect();
-    let json = serde_json::to_string(&export(&ws, packages, Some(resolve)))?;
+    let json = serde_json::to_string(&export(ws, packages, Some(resolve)))?;
     Ok((json, roots.iter().map(|it| it.to_spec().to_string()).collect()))
 }
 

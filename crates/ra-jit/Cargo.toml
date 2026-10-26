@@ -74,10 +74,14 @@ ra-jit-expand.workspace = true
 ra-jit-store.workspace = true
 blaze-manifest.workspace = true
 blaze-metadata.workspace = true
+blaze-new.workspace = true
+blaze-tree.workspace = true
+blaze-resolve = { path = "../blaze-resolve" }
 ide-db.workspace = true
 ide-diagnostics.workspace = true
 pulldown-cmark.workspace = true
 load-cargo.workspace = true
+proc-macro-api.workspace = true
 project-model.workspace = true
 vfs.workspace = true
 triomphe.workspace = true

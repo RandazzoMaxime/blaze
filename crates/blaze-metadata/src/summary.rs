@@ -20,16 +20,19 @@ fn str_of<'a>(value: &'a Value, key: &str) -> Result<&'a str> {
 }
 
 /// What the resolve and its graph read of one package.
-pub(crate) struct Read {
-    pub(crate) summary: Summary,
+pub struct Read {
+    pub summary: Summary,
     /// The crate name of its library, `-` as `_`.
-    pub(crate) lib: Option<InternedString>,
-    pub(crate) proc_macro_lib: bool,
-    pub(crate) any_proc_macro: bool,
+    pub lib: Option<InternedString>,
+    pub proc_macro_lib: bool,
+    pub any_proc_macro: bool,
     /// Whether it has a build script, without which its build dependencies are not built.
-    pub(crate) build_script: bool,
+    pub build_script: bool,
     /// The `required-features` of each of its binaries.
-    pub(crate) bins: Vec<Vec<String>>,
+    pub bins: Vec<Vec<String>>,
+    /// `package.license` and `package.repository`.
+    pub license: Option<String>,
+    pub repository: Option<String>,
 }
 
 pub(crate) fn package_source(package: &Value) -> Result<SourceId> {
@@ -120,6 +123,8 @@ pub(crate) fn read(package: &Value) -> Result<Read> {
                 required.filter_map(Value::as_str).map(str::to_owned).collect()
             })
             .collect(),
+        license: package["license"].as_str().map(str::to_owned),
+        repository: package["repository"].as_str().map(str::to_owned),
     })
 }
 

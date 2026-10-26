@@ -60,7 +60,16 @@ pub struct SerializedPackage<'a> {
     default_run: Option<&'a str>,
     rust_version: Option<&'a RustVersion>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    hints: Option<&'a Hints>,
+    hints: Option<SerializedHints<'a>>,
+}
+
+/// `[hints]` as cargo 1.101.0 prints it: every hint it knows, null when not given.
+/// cargo-util-schemas 0.14.3 reads no `min-opt-level`.
+#[derive(Serialize)]
+#[serde(rename_all = "kebab-case")]
+struct SerializedHints<'a> {
+    min_opt_level: Option<&'a toml::Value>,
+    mostly_unused: Option<&'a toml::Value>,
 }
 
 impl SerializedPackage<'_> {
@@ -111,7 +120,10 @@ pub fn export_package<'a>(manifest_path: &'a Path, m: &'a Manifest) -> Serialize
         metabuild: m.metabuild.as_deref(),
         default_run: m.default_run.as_deref(),
         rust_version: meta.rust_version.as_ref(),
-        hints: m.hints.as_ref(),
+        hints: m.hints.as_ref().map(|it: &Hints| SerializedHints {
+            min_opt_level: None,
+            mostly_unused: it.mostly_unused.as_ref(),
+        }),
     }
 }
 
