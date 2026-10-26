@@ -132,11 +132,12 @@ all of it:
   `--build-plan` and `--unit-graph`) becomes supported, or refused with the reason. None of it
   goes to cargo.
 
-Subcommands ra-jit does not claim (`cargo ra-jit doc`, `clippy`, `fmt`, `publish`) are passed
-to cargo as typed today. Producing HTML documentation and running clippy's lints are not
-builds of the program; whether they stay cargo's is an open question for Andrew. Under
-`ra-jit enable` the global wrapper also sees those commands' rustc runs; it must then only
-pass them by, never add a rustc run of its own.
+Every other subcommand is blaze's own, Andrew, 2026-10-26: those that are no builds "should go
+to us and not cargo". `cargo blaze fmt`, `clippy`, `doc` and the rest start no cargo, rustc,
+rustdoc, clippy-driver or rustfmt; one blaze has not written yet fails, saying so, and is not
+handed to cargo ([cargo.md](cargo.md#every-subcommand)). Under `ra-jit enable` the global
+wrapper still sees the rustc runs of a plain `cargo doc` or `cargo clippy`; it must only pass
+them by, never add a rustc run of its own.
 
 ## Self-contained: no rustup, no cargo
 

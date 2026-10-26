@@ -168,7 +168,7 @@ fn platform_cfg(atom: &cfg::CfgAtom) -> Option<cargo_platform::Cfg> {
 }
 
 /// `err` as cargo prints it.
-fn refused(err: &anyhow::Error, cwd: &Path) {
+pub(super) fn refused(err: &anyhow::Error, cwd: &Path) {
     if let Some(diagnostic) = err.downcast_ref::<ManifestDiagnostic>() {
         eprintln!("{}", diagnostic.render(cwd));
         return;

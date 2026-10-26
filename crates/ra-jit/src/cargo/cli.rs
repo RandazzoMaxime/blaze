@@ -137,8 +137,9 @@ impl Subcommand {
 #[derive(Debug, PartialEq)]
 pub(crate) enum Asked {
     Build(Box<Invocation>),
-    /// A subcommand that is cargo's alone, with its arguments.
-    Cargo(Vec<String>),
+    /// A subcommand that is not a build, with its arguments: blaze's own, or one it has not
+    /// written yet, which fails saying so (`own`). None is cargo's.
+    Own(Vec<String>),
     /// `cache` and its arguments: the kept results of `#[ra_jit::cache]` functions, or the
     /// disk store.
     Cache(Vec<String>),
@@ -218,7 +219,7 @@ impl Asked {
             ("enable", _) => Asked::Enable,
             ("disable", _) => Asked::Disable,
             ("toolchain", _) => Asked::Toolchain,
-            _ => Asked::Cargo(args),
+            _ => Asked::Own(args),
         }
     }
 }
@@ -504,7 +505,7 @@ mod tests {
 
     #[test]
     fn what_is_cargos_alone() {
-        assert_eq!(Asked::parse(vec!["doc".to_owned()]), Asked::Cargo(vec!["doc".to_owned()]));
+        assert_eq!(Asked::parse(vec!["doc".to_owned()]), Asked::Own(vec!["doc".to_owned()]));
         assert_eq!(Asked::parse(Vec::new()), Asked::Help);
         assert_eq!(Asked::parse(vec!["--help".to_owned()]), Asked::Help);
         for args in ["--message-format json", "--exclude a", "--target mips-unknown-none", "-Zx"] {

@@ -53,6 +53,10 @@ pub(crate) fn error(text: &str) {
     eprintln!("{}: {text}", painted(RED, "error"));
 }
 
+pub(crate) fn warning(text: &str) {
+    eprintln!("{}: {text}", painted(YELLOW, "warning"));
+}
+
 pub(crate) fn note(text: &str) {
     eprintln!("{}: {text}", painted(BOLD, "note"));
 }

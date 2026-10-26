@@ -99,8 +99,9 @@ is not there: the labels and the help and notes of an error, its other spans, an
 `code.explanation`; the message is rust-analyzer's, worded otherwise than rustc's. E0061's
 span is where the missing argument goes, not the function called. `harness/check_json.py`
 compares it with `cargo check` on the same errors. `status` prints what the daemon holds, and for every workspace how many builds
-the daemon served and how many went to cargo, with the reasons. `stop` ends the daemon. Any
-other subcommand is passed to cargo as typed.
+the daemon served and how many went to cargo, with the reasons. `stop` ends the daemon. Every
+other subcommand of cargo's is blaze's own, or fails saying blaze has none yet: none is passed
+to cargo, and no cargo plugin is run ([Every subcommand](#every-subcommand)).
 
 ## What a build does
 
@@ -667,3 +668,35 @@ daemon has loaded").
 
 Not run on macOS: the projects of the harness other than those three, `cargo ra-jit` with
 debug info looked at in a debugger, and anything on x86-64.
+
+## Every subcommand
+
+Andrew, 2026-10-26: blaze never runs rustc or cargo for anything, and the commands that are no
+builds "should go to us and not cargo". So every `cargo blaze <command>` (and `blaze <command>`)
+is blaze's own: no process of cargo, rustc, rustdoc, clippy-driver or rustfmt is started for it.
+A command blaze has not written yet fails, says so and does nothing, with status 101:
+
+    error: blaze has no `cargo publish` yet (blaze has no client of a registry's web API yet); it hands nothing to cargo, so nothing was done
+    note: what blaze has of each cargo command: https://github.com/indexable-inc/blaze/blob/main/docs/cargo.md#every-subcommand
+
+A command cargo does not have is refused the same way (`error: no such command`): cargo would
+run a plugin, `cargo-<name>`, from the path, and blaze runs none. `cargo blaze --list` prints
+the table below; flags typed before the command (`cargo blaze -v fmt`) are read after it, as
+cargo reads them. The table is `SUBCOMMANDS` in `crates/ra-jit/src/cargo/own/mod.rs`.
+
+| Command | blaze's | What it is, and what it waits for |
+|---|---|---|
+| `build` (`b`), `run` (`r`), `test` (`t`), `check` (`c`) | the build | [above](#commands) |
+| `metadata` | yes | `crates/blaze-metadata`: the workspace read by blaze-manifest, every locked package fetched by blaze-registry, resolved by blaze-resolve; `--no-deps`, `--features`, `--all-features`, `--no-default-features`, one `--filter-platform` (its `cfg` as blaze answers `rustc --print cfg` itself), `--manifest-path`, `--offline`. Held equal to cargo's by `harness/own_metadata.py`; against the pinned nightly's cargo, ripgrep, fd, helix and nushell print the same JSON for each form except nushell's full metadata, where cargo 1.101 adds `"min-opt-level": null` to a package's `hints` (blaze-manifest reads as cargo 1.99.0 does). Several `--filter-platform`s, and a workspace whose lock file is missing or stale, fail with the reason (choosing versions is #321) |
+| `locate-project` | yes | `--workspace`, `--message-format plain\|json`, `--manifest-path` |
+| `verify-project` | yes | `{"success":"true"}`, or `{"invalid":...}` and status 1 |
+| `version`, `help` | yes | blaze's version and help |
+| `fmt` | not yet | blaze's formatter, rustfmt's rules ported onto rust-analyzer's syntax trees, is being written |
+| `clippy` | not yet | blaze's lints, run by the daemon from its analysis, are being written |
+| `doc` (`d`) | not yet | HTML documentation from rust-analyzer's HIR is being written; doctests are blaze's already (`cargo blaze test --doc`) |
+| `tree`, `fetch`, `clean`, `new`, `init`, `pkgid`, `vendor`, `remove` (`rm`) | not yet | not written yet: each needs only blaze's manifest reader, registry and resolve |
+| `add`, `update`, `generate-lockfile` | not yet | they choose versions, which blaze-resolve does not do yet ([#321](https://github.com/indexable-inc/blaze/issues/321)) |
+| `bench`, `rustc`, `rustdoc`, `fix`, `install`, `package` | not yet | builds blaze does not do yet ([no-rustc.md](no-rustc.md)) |
+| `publish`, `search`, `info`, `owner`, `yank`, `login`, `logout` | not yet | blaze has no client of a registry's web API yet |
+| `uninstall`, `report`, `config`, `read-manifest` | not yet | not written yet |
+| any other | no | `error: no such command`; blaze runs no cargo plugin |
