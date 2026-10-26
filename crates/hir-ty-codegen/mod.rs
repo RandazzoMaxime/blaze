@@ -5477,13 +5477,15 @@ impl<'a, 'db> ObjectCodegen<'a, 'db> {
         if self.base.is_some() || self.units() || (self.pending.is_empty() && roots.is_empty()) {
             return beside(self, None);
         }
+        type Waits = (std::sync::Condvar, std::sync::Condvar);
         /// Tells the threads that wait when the one compiling is stopped.
-        struct Working<'a>(&'a std::sync::Mutex<Ahead>, &'a std::sync::Condvar);
+        struct Working<'a>(&'a std::sync::Mutex<Ahead>, &'a Waits);
         impl Drop for Working<'_> {
             fn drop(&mut self) {
                 if std::thread::panicking() {
                     self.0.lock().unwrap_or_else(|e| e.into_inner()).stopped = true;
-                    self.1.notify_all();
+                    self.1.0.notify_all();
+                    self.1.1.notify_all();
                 }
             }
         }
@@ -5507,7 +5509,9 @@ impl<'a, 'db> ObjectCodegen<'a, 'db> {
             open: true,
             alive: 0,
         });
-        let idle = std::sync::Condvar::new();
+        // Work for the threads, and what they are through with for the one beside them.
+        let waits: Waits = Default::default();
+        let (work_to_do, progress) = (&waits.0, &waits.1);
         let (rejected, hydrate) = (self.rejected, self.hydrate);
         let threads = std::thread::available_parallelism().map_or(1, |it| it.get());
         let (entries, owned) = (self.entries.clone(), &self.own_statics.crates.clone());
@@ -5583,6 +5587,34 @@ impl<'a, 'db> ObjectCodegen<'a, 'db> {
                         compiled
                     }
                 };
+                // The thread that puts the function in the object asks for the value of each
+                // static it names and the place of each panic: it would find them one by one.
+                let mut statics = Vec::new();
+                for request in compiled.iter().flat_map(|it| &it.requests.datas) {
+                    match request {
+                        DataRequest::Static(id) => statics.push(*id),
+                        &DataRequest::Location(Some((owner, span))) => {
+                            _ = source_location(db, owner, span);
+                        }
+                        _ => {}
+                    }
+                }
+                let mut warmed = FxHashSet::default();
+                while let Some(id) = statics.pop() {
+                    if !warmed.insert(id) {
+                        continue;
+                    }
+                    if keeps {
+                        _ = names.static_(id);
+                    }
+                    if let Ok(value) = compiled_static(db, id) {
+                        let named = value.requests.datas.iter().filter_map(|it| match it {
+                            DataRequest::Static(id) => Some(*id),
+                            _ => None,
+                        });
+                        statics.extend(named);
+                    }
+                }
                 for request in compiled.iter().flat_map(|it| &it.requests.funcs) {
                     let FuncTarget::Instance(callee, asked) = &request.target else {
                         continue;
@@ -5649,14 +5681,16 @@ impl<'a, 'db> ObjectCodegen<'a, 'db> {
                     self.1.notify_all();
                 }
             }
-            let _leaving = Leaving(&ahead, &idle);
+            let _leaving = Leaving(&ahead, progress);
             run(db, symbols);
         };
-        let mut ready = Ready { ahead: &ahead, idle: &idle, waiting: FxHashMap::default() };
+        let waiting = FxHashMap::default();
+        let mut ready = Ready { ahead: &ahead, work: work_to_do, progress, waiting };
         self.symbols.in_parallel_beside(threads, &work, &mut || {
             beside(self, Some(&mut ready));
             ahead.lock().unwrap_or_else(|e| e.into_inner()).open = false;
-            idle.notify_all();
+            work_to_do.notify_all();
+            progress.notify_all();
         });
         self.ahead = ahead.into_inner().unwrap_or_else(|e| e.into_inner()).seen;
     }

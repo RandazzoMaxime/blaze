@@ -2,7 +2,11 @@
 //! that code compiled by one run can be found by the next. A crate of the checkout is named
 //! by what is written in it, so an edit makes other names of everything in it.
 
-use std::{cell::RefCell, fmt::Write};
+use std::{
+    cell::RefCell,
+    fmt::Write,
+    sync::{Arc, Mutex, OnceLock},
+};
 
 use hir_def::{
     AdtId, AssocItemId, CallableDefId, DefWithBodyId, FunctionId, HasModule, Lookup, ModuleDefId,
@@ -125,13 +129,18 @@ fn declared(
 /// The crates by what a name starts with, and what the ones asked about declare, for every
 /// [`StableNames`] of a build: to list a crate is to go through every body of it.
 #[derive(Default, Clone)]
-pub(super) struct Listings(std::sync::Arc<std::sync::Mutex<Listing>>);
+pub(super) struct Listings(Arc<Listing>);
 
+/// Each crate is listed once, by the first to ask, while the threads that ask of the others
+/// go on: the whole build's threads ask at once when it gives the store its entries.
 #[derive(Default)]
 struct Listing {
-    crates: Option<FxHashMap<String, Vec<Crate>>>,
-    listed: FxHashMap<String, Listed>,
+    crates: OnceLock<FxHashMap<String, Vec<Crate>>>,
+    listed: Mutex<FxHashMap<String, ListedCell>>,
 }
+
+/// What a crate declares, or `None` for a name of no crate the build depends on.
+type ListedCell = Arc<OnceLock<Option<Listed>>>;
 
 /// The statics and the functions without type parameters that one build of a crate declares.
 #[derive(Default)]
@@ -153,6 +162,8 @@ pub(super) struct StableNames<'a, 'db> {
     files: RefCell<FxHashMap<HirFileId, Option<String>>>,
     /// The crates by what a name starts with, and what the ones asked about declare.
     listings: Listings,
+    /// Those of `listings` this has asked about, which it asks about again without a lock.
+    listed: RefCell<FxHashMap<Box<str>, ListedCell>>,
     /// How each crate and each type is written, or why it has no name.
     crate_names: RefCell<FxHashMap<Crate, Result<Box<str>, &'static str>>>,
     tys: RefCell<FxHashMap<Ty<'db>, Result<Box<str>, &'static str>>>,
@@ -183,6 +194,7 @@ impl<'a, 'db> StableNames<'a, 'db> {
             library: symbols.library_sources(),
             files: RefCell::default(),
             listings: Listings::default(),
+            listed: RefCell::default(),
             crate_names: RefCell::default(),
             tys: RefCell::default(),
             written: RefCell::default(),
@@ -195,6 +207,7 @@ impl<'a, 'db> StableNames<'a, 'db> {
     /// Lists the crates with `listings`, which other names of the build share.
     pub(super) fn listing(mut self, listings: Listings) -> Self {
         self.listings = listings;
+        self.listed.get_mut().clear();
         self
     }
 
@@ -286,6 +299,25 @@ impl<'a, 'db> StableNames<'a, 'db> {
         self.listed(name, |it| it.statics.get(name).copied())
     }
 
+    /// `name` with the arguments of an instance of lifetimes alone erased, as its function
+    /// is named as a root: it is one function whatever they are.
+    pub(super) fn lifetimes_erased(name: &str) -> std::borrow::Cow<'_, str> {
+        let (bare, checked) = match name.strip_suffix(CHECKED) {
+            Some(bare) => (bare, CHECKED),
+            None => (name, ""),
+        };
+        let erased = bare.rfind('<').filter(|&at| {
+            let args = bare[at + 1..].strip_suffix('>');
+            args.is_some_and(|it| it.split(',').all(|arg| arg.is_empty() || arg == "'_"))
+        });
+        match erased {
+            Some(at) if &bare[at..] != "<>" => {
+                std::borrow::Cow::Owned(format!("{}<>{checked}", &bare[..at]))
+            }
+            _ => std::borrow::Cow::Borrowed(name),
+        }
+    }
+
     /// The functions an instance without arguments can be of: one for each crate that the
     /// one build of its crate is here.
     pub(super) fn functions_named(&self, name: &str) -> Vec<FunctionId> {
@@ -296,16 +328,12 @@ impl<'a, 'db> StableNames<'a, 'db> {
         if !of_checkout {
             return Vec::new();
         }
-        // A function with lifetime parameters alone is one function whatever they are: its
-        // instance has them all erased.
-        let erased = name.rfind('<').filter(|&at| {
-            let args = name[at + 1..].strip_suffix('>');
-            args.is_some_and(|it| it.split(',').all(|arg| arg.is_empty() || arg == "'_"))
-        });
-        let name = match erased {
-            Some(at) => std::borrow::Cow::Owned(format!("{}<>", &name[..at])),
-            None => std::borrow::Cow::Borrowed(name),
-        };
+        let name = Self::lifetimes_erased(name);
+        // An instance with types for arguments is of no function a crate lists, and listing
+        // its crate for it would go through every body there for nothing.
+        if !name.ends_with("<>") {
+            return Vec::new();
+        }
         self.listed(&name, |it| it.functions.get(&*name).cloned()).unwrap_or_default()
     }
 
@@ -314,12 +342,18 @@ impl<'a, 'db> StableNames<'a, 'db> {
     fn listed<T>(&self, name: &str, of: impl FnOnce(&Listed) -> Option<T>) -> Option<T> {
         let (_, rest) = name.split_once(' ')?;
         let krate = &rest[..=rest.find(':')?];
-        let mut listing = self.listings.0.lock().unwrap_or_else(|e| e.into_inner());
-        let Listing { crates, listed } = &mut *listing;
-        if !listed.contains_key(krate) {
+        let cell = self.listed.borrow().get(krate).cloned();
+        let cell = cell.unwrap_or_else(|| {
+            let mut listed = self.listings.0.listed.lock().unwrap_or_else(|e| e.into_inner());
+            let cell = listed.entry(krate.to_owned()).or_default().clone();
+            drop(listed);
+            self.listed.borrow_mut().insert(krate.into(), cell.clone());
+            cell
+        });
+        let listed = cell.get_or_init(|| {
             // One build of a crate can be several crates here, which differ in what the
             // daemon is told of them and not in what they declare.
-            let crates = crates.get_or_insert_with(|| {
+            let crates = self.listings.0.crates.get_or_init(|| {
                 let mut crates = FxHashMap::<String, Vec<Crate>>::default();
                 // What is built names only what it depends on, and to name a crate of the
                 // checkout is to go through every body of it: not of one that is not built.
@@ -334,10 +368,9 @@ impl<'a, 'db> StableNames<'a, 'db> {
                 }
                 crates
             });
-            let found = self.list(crates.get(krate)?);
-            listed.insert(krate.to_owned(), found);
-        }
-        of(&listed[krate])
+            crates.get(krate).map(|it| self.list(it))
+        });
+        of(listed.as_ref()?)
     }
 
     fn list(&self, crates: &[Crate]) -> Listed {
