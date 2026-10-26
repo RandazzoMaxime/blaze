@@ -1,6 +1,6 @@
 [package]
 name = "blaze-manifest"
-description = "Cargo.toml and .cargo/config.toml read as cargo 1.99 reads them"
+description = "Cargo.toml and .cargo/config.toml read as the pinned nightly's cargo reads them"
 publish = false
 
 version.workspace = true

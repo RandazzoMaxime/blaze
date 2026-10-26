@@ -1,5 +1,5 @@
-//! Profiles as cargo 1.99 computes them (`src/workspace/profiles.rs` and `validate_profile` in
-//! its manifest parser), on the stable channel: the root manifest's `[profile]` tables with the
+//! Profiles as the pinned nightly's cargo computes them (`src/workspace/profiles.rs` and
+//! `validate_profile` in its manifest parser), its `-Z` flags not read: the root manifest's `[profile]` tables with the
 //! configuration's merged over them, the built-in ones, `inherits` chains, and the `Profile` of
 //! a unit from its package, whether it is built for the host and its target, serialized as
 //! `cargo build --unit-graph` prints it.
@@ -13,7 +13,7 @@ use anyhow::{Context as _, bail};
 use cargo_util_schemas::core::PackageIdSpec;
 use cargo_util_schemas::manifest::{
     ProfileName, ProfilePackageSpec, StringOrBool, TomlDebugInfo, TomlProfile, TomlProfiles,
-    TomlTrimPaths, TomlTrimPathsValue,
+    TomlTrimPaths,
 };
 use rustc_hash::{FxHashMap, FxHashSet};
 use serde::Serialize;
@@ -87,8 +87,6 @@ impl Profiles {
             requested_profile: requested_profile.to_owned(),
             rustc_host: rustc_host.to_owned(),
         };
-        // `trim-paths` is unstable: no manifest blaze reads enables it.
-        let trim_paths_enabled = false;
         makers.by_name.insert(
             "dev".to_owned(),
             ProfileMaker { default: Profile::default_dev(), toml: profiles.get("dev").cloned() },
@@ -96,7 +94,7 @@ impl Profiles {
         makers.by_name.insert(
             "release".to_owned(),
             ProfileMaker {
-                default: Profile::default_release(trim_paths_enabled),
+                default: Profile::default_release(),
                 toml: profiles.get("release").cloned(),
             },
         );
@@ -527,12 +525,11 @@ impl Profile {
         }
     }
 
-    fn default_release(trim_paths_enabled: bool) -> Profile {
+    fn default_release() -> Profile {
         Profile {
             name: "release".to_owned(),
             root: ProfileRoot::Release,
             opt_level: "3".to_owned(),
-            trim_paths: trim_paths_enabled.then(|| TomlTrimPathsValue::Object.into()),
             ..Profile::default()
         }
     }
@@ -860,8 +857,10 @@ pub fn validate_profiles(
     Ok(())
 }
 
-/// A profile checked as cargo's `validate_profile` does, the unstable keys refused unless the
-/// manifest's `cargo-features` allow them.
+/// A profile checked as nightly cargo's `validate_profile` does, the unstable keys
+/// (`codegen-backend`, `rustflags`, `panic = "immediate-abort"`) refused unless the manifest's
+/// `cargo-features` list them. cargo also takes the matching `-Z` flag (`-Zprofile-rustflags`,
+/// or `[unstable]` in the configuration) in place of the manifest's; blaze does not read those.
 pub fn validate_profile(
     root: &TomlProfile,
     name: &str,
@@ -920,9 +919,6 @@ fn validate_profile_layer(profile: &TomlProfile, features: &Features) -> anyhow:
     }
     if profile.rustflags.is_some() {
         features.require(Feature::profile_rustflags)?;
-    }
-    if profile.trim_paths.is_some() {
-        features.require(Feature::trim_paths)?;
     }
     if profile.panic.as_deref() == Some("immediate-abort") {
         features.require(Feature::panic_immediate_abort)?;
