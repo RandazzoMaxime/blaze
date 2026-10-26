@@ -657,6 +657,12 @@ language_item_table! { LangItems =>
     FutureOutput,            sym::future_output,       TypeAliasId;
 
     TypeId,                  sym::type_id,             StructId;
+    /// `core::mem::type_info::Type`, what reflection's `type_id_type_of` makes.
+    TypeInfo,                sym::type_info,           StructId;
+    /// `core::mem::type_info::Generic`, an element of what `type_id_generics` makes.
+    TypeInfoGeneric,         sym::type_info_generic,   EnumId;
+    /// `core::mem::type_info::FnPtr`, what `type_id_function_ptr` makes.
+    TypeInfoFnPtr,           sym::FnPtr,               StructId;
 
     Option,                  sym::Option,              EnumId;
     OptionSome,              sym::Some,                EnumVariantId;

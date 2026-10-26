@@ -223,6 +223,14 @@ All notable changes to ra-jit are written here. The format follows
   of bun's functions to rustc; `harness/bun-repros/type_info` asks what it does and now
   compiles. A constant that holds a `TypeId` is still refused: the evaluator's ids are not
   rustc's hashes.
+- Const eval answers every reflection intrinsic the pinned nightly's core declares
+  (`core::intrinsics::reflection`), as rustc's const eval does: `type_id_size_of` and
+  `type_id_variant_name` under their new names, and `type_id_type_of` (`Type::of`'s kind, a
+  `dyn`'s principal and auto traits), `type_id_generics`, `type_id_function_ptr`,
+  `type_id_non_exhaustive` and `type_id_variant_non_exhaustive`. `type_id_vtable` answers
+  `None` where the solver rules the trait out and is refused otherwise: rustc proves it in a
+  typing mode the solver here does not have. The `Type` of a tuple is refused, as rustc at
+  the pinned nightly ICEs on it.
 - The daemon's workers hold at most half of the machine's memory together, or what
   `RA_JIT_MEMORY_MAX` says (a size, or `off`). Over it, the worker asked longest ago is
   stopped; `cargo ra-jit status` shows the limit and what each worker holds. `docs/reports/SOAK.md`
