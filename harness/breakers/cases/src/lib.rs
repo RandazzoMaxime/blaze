@@ -18,6 +18,7 @@ cases![
     niche_eq,
     simd_cast,
     big_frame,
+    guard_page,
     big_promoted,
     future_size,
     await_left_in_generic,
