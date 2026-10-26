@@ -71,14 +71,18 @@ reads as never set in ours, and a counter the allocator bumps reads zero. So:
 - a thread-local, or a static written at run time, stays rustc's wherever rustc linked it
   under a symbol, as long as its first value is the one rustc gave it. The daemon keeps that
   value (`patch::RustcValues`), taken the first time a build asks, when no edit since the
-  daemon started can have reached the static, and a patch's base marks such a static shared.
+  daemon started can have reached any crate the static's crate is or depends on (an edit of
+  function bodies alone changes no first value), and a patch's base records which copy it
+  has, which its patches keep.
   An edit to the first value of a shared static is not a patch: rustc's copy holds what the
   program wrote from the old value, and no copy beside it can start from the new one. The
   build is in full, the program is told to restart, and the full build has its own copy with
   the new value, which rustc's code does not share until cargo builds again (`harness/stress.py`
   steps 58 and 84, `harness/splices.py` "a thread-local's initial value"). A static whose
   value rustc's copy can't be told for (one an edit reached before the daemon first asked) is
-  ours, as before;
+  ours, as before. Not yet handled: one ours can't replace (`#[no_mangle]`, `#[export_name]`,
+  or one a function left to rustc refers to) stays rustc's after an edit to its first value,
+  in the full build too, with the old value, as any such static of rustc's does;
 - not yet handled: a stateful static that rustc made local to one codegen unit has no symbol
   to import, so ours is a private copy (`ra_jit::static::N`). If one of its users ends up as
   rustc's copy anyway (a failed instance forwarded to rustc's, or a caller left to rustc that

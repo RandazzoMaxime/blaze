@@ -6448,11 +6448,16 @@ impl<'a, 'db> ObjectCodegen<'a, 'db> {
             is_thread_local(db, id) || compiled_static(db, id).as_ref().is_ok_and(|it| it.writable)
         };
         let in_base = self.base.and_then(|base| base.statics.get(&id));
-        let shared = !self.symbols.nothing_of_rustc()
+        let stateful_linked = !self.symbols.nothing_of_rustc()
             && symbol.as_ref().is_some_and(|it| self.symbols.linked(it))
-            && stateful()
+            && stateful();
+        let shared = stateful_linked
             && in_base.map_or_else(|| self.rustc_values.kept(db, id), |it| it.shared);
-        let ours = !shared && self.own_statics.replaces(db, id) && compiled_static(db, id).is_ok();
+        // The program has the base's copy, and what it wrote there.
+        let base_owns = stateful_linked && in_base.is_some_and(|it| !it.shared);
+        let ours = !shared
+            && (base_owns || self.own_statics.replaces(db, id))
+            && compiled_static(db, id).is_ok();
         let rustcs = symbol.filter(|_| !ours);
         // One the linker left out of what rustc linked is used by none of rustc's code there.
         let unlinked = rustcs.as_ref().is_some_and(|it| !self.symbols.linked(it));
@@ -6471,7 +6476,7 @@ impl<'a, 'db> ObjectCodegen<'a, 'db> {
                 is_thread_local(db, id),
             )?;
             self.imported_statics.insert(id, data);
-            if shared {
+            if stateful_linked {
                 self.shared_statics.insert(id, data);
             }
             // rustc's value of the static points to rustc's copies of functions.
