@@ -810,6 +810,15 @@ All notable changes to ra-jit are written here. The format follows
 
 ### Fixed
 
+- `cargo install --git https://github.com/indexable-inc/blaze ra-jit` builds ra-jit
+  ([#242](https://github.com/indexable-inc/blaze/issues/242), #293, by @gakonst). It failed
+  before compiling anything: for a git source cargo checks that every package is a member of
+  the workspace above it, and the root claimed `vendor/rust-analyzer`'s crates and rowan, which
+  are members of the fork's own workspace. The root now excludes `vendor/rust-analyzer`, so the
+  fork's crates are tested there (`--manifest-path vendor/rust-analyzer/Cargo.toml`, as
+  `harness/unittests.py` does), and that workspace patches salsa to `vendor/salsa*` as the root
+  does.
+
 - An integration test or benchmark the daemon runs has `CARGO_BIN_EXE_<name>` of each program
   of its package set, as cargo sets it since rust-lang/cargo#16421. With cargo's second layout
   the test is no longer beside the programs, so hyperfine's and bat's tests (assert_cmd's

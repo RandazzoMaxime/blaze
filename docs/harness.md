@@ -43,7 +43,11 @@ A part runs all of its harnesses even when one fails, then names the ones that f
 long each took. Alongside the harnesses, CI runs `cargo fmt --all -- --check`,
 `python3 harness/imports.py`, which imports every script of the harness, and
 `python3 harness/unittests.py`, which runs the Rust unit tests and holds them to its `OPEN`
-list (below).
+list (below). It runs cargo twice: the root workspace's crates, then the rust-analyzer fork's
+(`hir-ty`, `hir-def`, `hir-ide` and the rest) with `--manifest-path vendor/rust-analyzer/Cargo.toml`,
+since the root excludes `vendor/rust-analyzer` so that `cargo install --git` builds ra-jit
+(#293) and cargo only tests a member of the workspace it runs in. That workspace patches salsa
+to `vendor/salsa*` as the root does, so the fork's tests run against the same salsa.
 
 ### Under Cranelift
 

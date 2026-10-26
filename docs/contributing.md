@@ -251,8 +251,11 @@ did about it in one line.
 - The LLVM backend builds in the flake's dev shell, against the LLVM it pins:
   `nix develop -c cargo build -p ra-jit --release --features llvm`
   ([LLVM for `--features llvm`](#llvm-for---features-llvm)).
-- `cargo fmt --all -- --check` and
-  `cargo test --release -p hir-ty -p hir-def -p parser -p syntax -p ra-jit`.
+- `cargo fmt --all -- --check`, `cargo test --release -p ra-jit` and
+  `cargo test --release --manifest-path vendor/rust-analyzer/Cargo.toml -p hir-ty -p hir-def -p parser -p syntax`
+  (or `python3 harness/unittests.py`, which runs both as CI does). The fork's crates are tested
+  in `vendor/rust-analyzer`'s own workspace: the root excludes it so that `cargo install --git`
+  can build ra-jit (#293), and cargo only tests a member of the workspace it runs in.
 - For anything that changes numbers in [results.md](results.md): the command, the commit
   and the machine, so the entry can be replaced and not just appended to.
 
