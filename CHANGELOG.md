@@ -928,6 +928,10 @@ each one's section: what `[Unreleased]` had, and the title of each change merged
 
 ### Fixed
 
+- A guarded match nested inside another match arm's guard preserves the enclosing guard's
+  binding references, including with or-patterns. Later reads in the outer guard no longer
+  use uninitialized by-value bindings, which could produce wrong results or a crash.
+
 - The borrow checker reports nothing on helix (14 false errors before) or biome (534), as
   rustc does; ripgrep, fd and nushell stay at none, and the UI scores are unchanged (Polonius
   1545 of 1585, NLL 1542 of 1583). It follows rustc where it did not: the outlives
