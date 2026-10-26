@@ -125,8 +125,14 @@ pub(crate) fn prepare(
     }
     let mut not_inputs = vec![test.executable.clone()];
     not_inputs.extend(std::fs::canonicalize(&test.executable).ok());
-    let spec =
-        Spec { cwd: test.package_dir.clone(), env, overlays, record: Some(records), not_inputs };
+    let spec = Spec {
+        cwd: test.package_dir.clone(),
+        env,
+        overlays,
+        record: Some(records),
+        not_inputs,
+        ..Spec::default()
+    };
     let spec_file = dir.join("tests-sandbox.json");
     std::fs::write(&spec_file, serde_json::to_string(&spec)?)?;
     let exe = std::env::current_exe()?;

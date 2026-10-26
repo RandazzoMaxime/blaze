@@ -8,8 +8,9 @@
 //! and proc macros are to run in the same ([#147]).
 //!
 //! On Linux it is user, mount, network, IPC and PID namespaces, overlayfs and seccomp's user
-//! notification, all of which an unprivileged user may use. Elsewhere [`available`] says why
-//! there is none yet.
+//! notification, all of which an unprivileged user may use. On macOS it is Seatbelt and a
+//! library every process of the sandbox loads, which keeps the overlays' writes and records
+//! (`sandbox/macos.rs`). Elsewhere [`available`] says why there is none yet.
 //!
 //! [docs/cargo.md]: https://github.com/indexable-inc/ra-jit/blob/main/docs/cargo.md
 //! [#147]: https://github.com/indexable-inc/ra-jit/issues/147
@@ -45,6 +46,12 @@ pub(crate) struct Spec {
     /// Directories it sees as they are and may change, its changes seen by it alone and gone
     /// when it ends.
     pub(crate) overlays: Vec<PathBuf>,
+    /// Directories it writes for real.
+    #[serde(default)]
+    pub(crate) writable: Vec<PathBuf>,
+    /// Whether what it reads is recorded too, not only what the sandbox refused it.
+    #[serde(default)]
+    pub(crate) record_reads: bool,
     /// The directory where what the program touched is written as it ends, in a file named by
     /// [`record_name`] of the value of [`RUN`]: one path a line, those of the machine's own
     /// (`/proc`, `/sys`, `/dev`), of what is the program's own (`/tmp`), and of `not_inputs`
@@ -110,7 +117,7 @@ pub(crate) fn available() -> Result<(), String> {
     static AVAILABLE: std::sync::OnceLock<Result<(), String>> = std::sync::OnceLock::new();
     AVAILABLE
         .get_or_init(|| {
-            if !cfg!(target_os = "linux") {
+            if !cfg!(any(target_os = "linux", target_os = "macos")) {
                 return Err(format!("there is no sandbox on {} yet", std::env::consts::OS));
             }
             let exe =
@@ -151,7 +158,21 @@ fn probe() -> Result<(), String> {
     }
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(target_os = "macos")]
+fn probe() -> Result<(), String> {
+    let dir = std::env::temp_dir().join(format!("ra-jit-sandbox-probe-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).map_err(|it| format!("{}: {it}", dir.display()))?;
+    let spec = Spec { cwd: dir.clone(), overlays: vec![dir.clone()], ..Spec::default() };
+    let ended = macos::run(&spec, None);
+    _ = std::fs::remove_dir_all(&dir);
+    match ended {
+        Ok(0) => Ok(()),
+        Ok(_) => Err("the sandbox could not be made (it said why above)".to_owned()),
+        Err(error) => Err(error),
+    }
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
 fn probe() -> Result<(), String> {
     Err(format!("there is no sandbox on {} yet", std::env::consts::OS))
 }
@@ -160,20 +181,27 @@ fn probe() -> Result<(), String> {
 /// the signal that ended it.
 fn run(spec: &Spec, program: &[OsString]) -> i32 {
     #[cfg(target_os = "linux")]
-    match linux::run(spec, Some(program)) {
+    let ended = linux::run(spec, Some(program));
+    #[cfg(target_os = "macos")]
+    let ended = macos::run(spec, Some(program));
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    match ended {
         Ok(code) => code,
         Err(error) => {
             eprintln!("ra-jit: the sandbox could not be made: {error}");
             COULD_NOT
         }
     }
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     {
         _ = (spec, program);
         eprintln!("ra-jit: there is no sandbox on {} yet", std::env::consts::OS);
         COULD_NOT
     }
 }
+
+#[cfg(target_os = "macos")]
+mod macos;
 
 /// `path` with `.` and empty parts left out.
 fn tidy(path: &Path) -> String {
