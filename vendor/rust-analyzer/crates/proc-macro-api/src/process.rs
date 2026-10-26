@@ -425,7 +425,7 @@ fn mk_child<'a>(
         cmd.arg(format);
     }
     cmd.env("RUST_ANALYZER_INTERNALS_DO_NOT_USE", "this is unstable");
-    let mut cmd = crate::wrap::wrapped(cmd);
+    let mut cmd = crate::wrap::wrapped(cmd)?;
     cmd.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::inherit());
     if cfg!(windows) {
         let mut path_var = std::ffi::OsString::new();

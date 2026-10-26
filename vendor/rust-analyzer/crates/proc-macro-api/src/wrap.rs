@@ -2,14 +2,15 @@
 //! caller can start every server in a sandbox (ra-jit's `ra-jit sandbox SPEC -- SERVER`). The
 //! server's own `--version` question runs no macro and is not wrapped.
 
-use std::{process::Command, sync::OnceLock};
+use std::{io, process::Command, sync::OnceLock};
 
 /// What a server is started with when the caller asked for it to run outside a wrapper: the
 /// wrapper is given the command with it set, and leaves such a command as it is.
 pub const UNSANDBOXED: &str = "RA_JIT_PROC_MACROS_UNSANDBOXED";
 
-/// Makes the command a server is started with of the one it would be started with.
-pub type Wrap = fn(Command) -> Command;
+/// Makes the command a server is started with of the one it would be started with, or says
+/// why it can't: the server then does not start (there is no starting it unwrapped instead).
+pub type Wrap = fn(Command) -> io::Result<Command>;
 
 static WRAP: OnceLock<Wrap> = OnceLock::new();
 
@@ -19,9 +20,9 @@ pub fn wrap_servers_with(wrap: Wrap) {
     _ = WRAP.set(wrap);
 }
 
-pub(crate) fn wrapped(command: Command) -> Command {
+pub(crate) fn wrapped(command: Command) -> io::Result<Command> {
     match WRAP.get() {
         Some(wrap) => wrap(command),
-        None => command,
+        None => Ok(command),
     }
 }

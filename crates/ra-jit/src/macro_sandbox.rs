@@ -48,25 +48,32 @@ pub(crate) fn install() {
     }));
 }
 
-/// Whether servers run in a sandbox: unless `RA_JIT_SANDBOX` (or `BLAZE_SANDBOX`) is `off`
-/// ([`sandbox::on`]), on a system that has one.
-fn on() -> bool {
-    sandbox::on() && cfg!(any(target_os = "linux", target_os = "macos"))
-}
-
 /// `server`, the command a proc-macro server is started with, as `ra-jit sandbox SPEC --
 /// SERVER`. When the sandbox can't be made the server does not start, and the load says why
-/// (`ra-jit sandbox` prints it).
-fn wrapped(server: Command) -> Command {
+/// (`ra-jit sandbox` prints it); when the command can't be made either, this says why. A server
+/// never starts outside instead: only a package taken out, or `RA_JIT_SANDBOX=off`, runs one
+/// outside.
+fn wrapped(server: Command) -> std::io::Result<Command> {
     let outside = server
         .get_envs()
         .any(|(name, value)| name == proc_macro_api::wrap::UNSANDBOXED && value.is_some());
-    if outside || !on() {
-        return server;
+    if outside || !sandbox::on() {
+        return Ok(server);
+    }
+    let refused = |why: String| {
+        std::io::Error::other(format!(
+            "a proc-macro server runs in a sandbox, which can't be made for it: {why}; `{}=off` \
+             runs proc-macro servers, build scripts and tests outside a sandbox",
+            sandboxed::VAR
+        ))
+    };
+    if !cfg!(any(target_os = "linux", target_os = "macos")) {
+        return Err(refused(format!("there is no sandbox on {} yet (#257)", std::env::consts::OS)));
     }
     match spec_of(&server) {
         Ok(spec) => {
-            let Ok(exe) = std::env::current_exe() else { return server };
+            let exe = std::env::current_exe()
+                .map_err(|why| refused(format!("finding ra-jit itself: {why}")))?;
             let mut command = Command::new(exe);
             // The server by where it is: the path it was named by may go through a link in a
             // directory the sandbox has empty (a toolchain linked into `/tmp`), and the
@@ -78,12 +85,9 @@ fn wrapped(server: Command) -> Command {
             if let Some(cwd) = server.get_current_dir() {
                 command.current_dir(cwd);
             }
-            command
+            Ok(command)
         }
-        Err(why) => {
-            eprintln!("ra-jit: a proc-macro server runs outside the sandbox: {why:#}");
-            server
-        }
+        Err(why) => Err(refused(format!("{why:#}"))),
     }
 }
 

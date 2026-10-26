@@ -140,7 +140,13 @@ pub(crate) fn plan(script: &Script<'_>) -> anyhow::Result<Plan> {
         return Ok(Plan::Outside(format!("{}=off", sandboxed::VAR)));
     }
     if !cfg!(any(target_os = "linux", target_os = "macos")) {
-        return Ok(Plan::Outside(format!("there is no sandbox on {} yet", std::env::consts::OS)));
+        // No running it outside instead: a build that can't keep its promise stops.
+        anyhow::bail!(
+            "the build script of `{package}` runs in a sandbox, and there is none on {} yet \
+             (#257); `{}=off` runs build scripts and tests outside a sandbox, as cargo does",
+            std::env::consts::OS,
+            sandboxed::VAR
+        );
     }
     let root = workspace_of(script)?;
     if let Some(root) = &root {

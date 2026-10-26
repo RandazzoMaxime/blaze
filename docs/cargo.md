@@ -328,7 +328,9 @@ Any other key in either table is an error, and so is a value that is not a list 
 `bool` for `build-script`). A package from a registry or git can't take itself out with its own
 manifest. `RA_JIT_SANDBOX=off` runs every build script, proc macro and test outside, as cargo
 does. Where no sandbox can be made, the script fails with why and the same way out, as a test
-run does; Windows has no sandbox yet and runs scripts outside.
+run does, and a proc-macro server does not start and the load says why: nothing ever runs
+outside instead, nor goes to cargo or rustc. Windows has no sandbox yet, so there a build with
+build scripts or proc macros needs `RA_JIT_SANDBOX=off`.
 
 What a script read is recorded, and decides one thing only. Cargo runs a script again when a
 file of its `rerun-if-changed` changed, when a variable of `rerun-if-env-changed` did, and,
