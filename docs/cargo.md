@@ -218,18 +218,19 @@ network rule; a sandbox inside the sandbox fails with `EPERM`.
 What it costs, measured with `harness/sandboxbench.py` (one sandbox per executable against a
 process per test, which ra-jit used before and dropped):
 
-| | Linux x86-64 (dev host, 16 cores) | macOS (M5 Max, loaded, debug ra-jit) |
+| | Linux x86-64 (dev host, 16 cores) | macOS (M5 Max, 8 at a time, loaded) |
 |---|---|---|
-| a trivial program, bare | 0.86 ms | 6.6 ms |
-| in a sandbox | 8.0 ms | 38 ms |
-| in a sandbox, recording reads | 9.3 ms | 40 ms |
-| 600-test library, test phase, `RA_JIT_SANDBOX=off` | 18 ms | |
-| the same, sandboxed, `all` | 37 ms | |
-| the same, sandboxed, `affected` (every test forced to run) | 80 ms | |
-| the same, a sandbox per test, 16 at a time | 0.68 s | |
+| a trivial program, bare | 0.86 ms | 5.2 ms |
+| in a sandbox | 8.0 ms | 29 ms |
+| in a sandbox, recording reads | 9.3 ms | 25 ms |
+| 600-test library, test phase, `RA_JIT_SANDBOX=off` | 18 ms | 20 ms |
+| the same, sandboxed, `all` | 37 ms | 68 ms |
+| the same, sandboxed, `affected` (every test forced to run) | 80 ms | 100 ms |
+| the same, a sandbox per test (16 at a time on Linux, 8 on macOS) | 0.68 s | 2.26 s |
 
 A sandbox per test executable costs one launch, about 8 ms on Linux, whatever its number of
-tests; a sandbox per test cost the 600-test library ten times as much, so there is none. On
+tests, and about 25 ms on macOS (mostly the fork, Seatbelt and dyld); a sandbox per test cost
+the 600-test library ten to thirty times as much, so there is none. On
 macOS a stat under the interposer goes from 0.8 to 1.1 µs, and to 3 to 5 µs on a workspace
 whose overlay has been written.
 
