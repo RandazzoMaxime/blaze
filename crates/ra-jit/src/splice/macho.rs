@@ -1337,6 +1337,13 @@ impl<'a> Patch<'a> {
         }
 
         let (mut slots, mut stubs) = (FxHashSet::default(), FxHashSet::default());
+        // A call of a function of the patch that replaces one of the executable goes to the
+        // executable's entry of it (`lay_out`'s `entry`), which can be out of a branch's reach
+        // of where the patch is put: in a large executable, patches go on past its end.
+        let replacing: FxHashSet<(SectionIndex, u64)> = (patch.replaced.iter())
+            .filter(|it| it.old.is_some_and(|old| old.kind == SymbolKind::Text))
+            .map(|it| (it.section, it.offset))
+            .collect();
         let mut targets = FxHashMap::default();
         for relocation in patch.relocations.values().flatten() {
             let symbols = match relocation.fixup {
@@ -1367,6 +1374,13 @@ impl<'a> Patch<'a> {
                     bail!("{}, which the executable does not call", shown())
                 }
                 (Fixup::Branch, Target::Theirs(_) | Target::Import(_)) => {
+                    if stubs.insert(relocation.symbol) {
+                        patch.stubs.push(relocation.symbol);
+                    }
+                }
+                (Fixup::Branch, Target::Ours(section, at))
+                    if relocation.addend == 0 && replacing.contains(&(section, at)) =>
+                {
                     if stubs.insert(relocation.symbol) {
                         patch.stubs.push(relocation.symbol);
                     }
