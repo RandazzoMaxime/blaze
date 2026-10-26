@@ -8434,6 +8434,25 @@ fn run_holding(
                             later.push((request, asked, stream));
                             continue;
                         }
+                        // rustc linked the program again since it was built here, as cargo
+                        // does of one the daemon did not build while it builds the others,
+                        // which the daemon keeps (`Checkout::kept`): what was built of it is
+                        // of rustc's copies from before.
+                        if let Some(target) = &target
+                            && target.is(&programs[at].args)
+                            && !target.symbol_files.is_empty()
+                            && target.symbol_files != programs[at].args.symbol_files
+                        {
+                            let again =
+                                checkouts.parts(&programs[at].args.project).and_then(|parts| {
+                                    programs[at].start_over(&db, parts, Some(target), &[], &files)
+                                });
+                            if let Err(error) = again {
+                                let _ = writeln!(&stream, "failed: {error:#}");
+                                continue;
+                            }
+                            eprintln!("rustc linked {} again: built over", programs[at].args.krate);
+                        }
                         outputs.insert(at, wanted);
                         if let Some(view) = view {
                             looked.insert(view.base, view.over);

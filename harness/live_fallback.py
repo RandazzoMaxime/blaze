@@ -14,6 +14,8 @@ daemon serves it and `probe` runs:
             (rustc's copy of what it calls is of before the edit): `probe` is not told to
             restart, and `stale` prints the new answer
   own       an edit of `probe`'s own code after that is a patch too, with no restart
+  stale     an edit of `stale`, which rustc linked again: it prints the new answer, and
+            `probe` is still not told to restart
 
 Python 3.13, stdlib only. Every step has a timeout; a failure names the step.
 """
@@ -46,15 +48,28 @@ async def applied(probe: Running, step: str, answer: int, since: int) -> None:
     if "applied" not in outcome:
         raise StepError(f"{step}: the program did not take the edit as a patch: {outcome}")
     await probe.wait_for(f"{step}: the new code runs", f"answer {answer}", since)
+    await quiet(probe, step, len(probe.log))
+
+
+def restarts(line: str) -> bool:
+    """Whether the program was told something other than a patch it applied: a restart."""
+    return line.startswith("outcome:") and " applied" not in line
+
+
+async def quiet(probe: Running, step: str, since: int) -> None:
+    """The program is told to restart by nothing from line `since` on."""
+    told = [it for it in probe.log[since:] if restarts(it)]
     try:
         async with asyncio.timeout(RESTART_HEARD):
-            while True:
+            while not told:
                 line = await probe.lines.get()
                 probe.log.append(line)
-                if line.startswith("outcome:"):
-                    raise StepError(f"{step}: the program was told more after the patch: {line}")
+                if restarts(line):
+                    told.append(line)
     except TimeoutError:
         pass
+    if told:
+        raise StepError(f"{step}: the running program was told: {told[0]}")
 
 
 async def main() -> None:
@@ -101,6 +116,21 @@ async def main() -> None:
         await build("own", project, env)
         await applied(probe, "own", 22, since)
         print("the next edit of the probe's own code was a patch too")
+
+        stale_source = project / "stale" / "src" / "main.rs"
+        text = stale_source.read_text()
+        if "    shared::answer()\n}" not in text:
+            raise StepError(f"stale: `shared::answer()` is not the end of `left` in {stale_source}")
+        stale_source.write_text(text.replace("    shared::answer()\n}", "    shared::answer() + 100\n}"))
+        since = len(probe.log)
+        await build("stale", project, env)
+        stale = await asyncio.create_subprocess_exec(str(target / "debug" / "stale"), stdout=asyncio.subprocess.PIPE)
+        async with asyncio.timeout(APPLY_TIMEOUT):
+            out, _ = await stale.communicate()
+        if out.decode().strip() != "stale 102":
+            raise StepError(f"stale: `stale` printed {out.decode().strip()!r} after its edit, not 'stale 102'")
+        await quiet(probe, "stale", since)
+        print("an edit of the program rustc linked again is built, and the probe runs on")
     finally:
         if probe is not None:
             await probe.stop()

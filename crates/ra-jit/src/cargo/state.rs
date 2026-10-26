@@ -467,8 +467,8 @@ pub(crate) fn checked(asked: &Invocation) -> anyhow::Result<daemon::Ahead> {
 pub(crate) struct Daemons {
     /// The directory of the record of the unit cargo links it from.
     pub(crate) unit: PathBuf,
-    /// The daemon's executable.
-    pub(crate) binary: PathBuf,
+    /// What the daemon built it by.
+    pub(crate) plan: Plan,
     /// Where cargo has the executable, which a program may be running from.
     pub(crate) places: Vec<PathBuf>,
 }
@@ -517,8 +517,8 @@ impl Built {
             cargo.env(wrapper::STAGED, std::env::join_paths(&staged.roots)?);
         }
         if !daemons.is_empty() {
-            let paths = daemons.iter().flat_map(|it| [&it.unit, &it.binary]);
-            cargo.env(wrapper::DAEMONS, std::env::join_paths(paths)?);
+            let units = daemons.iter().map(|it| &it.unit);
+            cargo.env(wrapper::DAEMONS, std::env::join_paths(units)?);
         }
         cargo.stdout(Stdio::piped());
         let mut cargo = cargo.spawn().context("running cargo")?;
@@ -809,11 +809,28 @@ impl State {
         let built = |program: &Program| {
             let (checkout, at) = program.asked_as?;
             answers.get(checkout)?.get(at)?.as_ref().ok()?;
-            let binary = self.checkouts[checkout].programs[at].binary.clone();
+            let plan = self.checkouts[checkout].programs[at].clone();
             let places = program.places().map(Path::to_owned).collect();
-            Some(Daemons { unit: program.unit.clone()?, binary, places })
+            Some(Daemons { unit: program.unit.clone()?, plan, places })
         };
         self.programs.iter().filter_map(built).collect()
+    }
+
+    /// Has each program of `daemons`, which cargo was given the daemon's executable of, keep
+    /// the plan it had: rustc linked none of them again, so what the daemon's worker built
+    /// of each is what runs, and its checkout is [`Checkout::kept`].
+    pub(crate) fn keep(&mut self, daemons: &[Daemons]) {
+        for program in &self.programs {
+            let Some((checkout, at)) = program.asked_as else { continue };
+            let kept = daemons.iter().find(|it| program.unit.as_ref() == Some(&it.unit));
+            let Some(kept) = kept else { continue };
+            let checkout = &mut self.checkouts[checkout];
+            checkout.programs[at] = kept.plan.clone();
+            checkout.kept = true;
+        }
+        for checkout in self.checkouts.iter_mut().filter(|it| it.kept) {
+            checkout.generation = checkout.programs.iter().map(|it| it.stamp).max().unwrap_or(0);
+        }
     }
 
     /// Has each program be, where cargo's own is kept, a copy of the one the daemon
@@ -917,6 +934,7 @@ impl State {
         let checkout = |unit_test: bool| Checkout {
             key: format!("{key}{}", if unit_test { "-unit" } else { "" }),
             generation: 0,
+            kept: false,
             built_at: built.started,
             config: config(unit_test),
             root: root.clone(),

@@ -533,6 +533,17 @@ fn by_daemon(mut state: State) -> Result<(State, Held), NotServed> {
         }
         Err(why) => return Err(to_cargo(state, why.why())),
     };
+    // A program the daemon was asked for and did not build is cargo's, whatever its source:
+    // what the daemon did build is given to cargo as it is.
+    let refused = state.programs.iter().find_map(|program| {
+        let (checkout, at) = program.asked_as?;
+        let why = answers.get(checkout)?.get(at)?.as_ref().err()?;
+        Some(format!("`{}`: {why}", program.name))
+    });
+    if let Some(why) = refused {
+        let daemons = state.daemons(&answers);
+        return Err(NotServed::Cargo(ToCargo(Box::new(state), why, daemons)));
+    }
     let settling = Instant::now();
     let held = state.hold();
     let cargos = match state.settle(&answers, &held) {
@@ -650,6 +661,7 @@ fn loaded_by_cargo(
         Err(code) => return Ok(Err(code)),
     };
     let mut state = State::after(asked, cwd, key, built, counts)?;
+    state.keep(daemons);
     if state.refusal.is_none() {
         let asked = state.checkouts.iter().filter(|it| !it.programs.is_empty());
         let cold: Vec<String> = asked.filter_map(|it| warmed(it).err()).collect();

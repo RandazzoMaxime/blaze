@@ -40,8 +40,9 @@ pub(crate) const DRIVEN: &str = "RA_JIT_CARGO_DRIVES";
 pub(crate) const STAGED: &str = "RA_JIT_STAGED_CRATES";
 
 /// The variable `cargo ra-jit` sets for a cargo that builds what the daemon did not, while
-/// it did build others: the directory of each one's unit record, then its executable, as a
-/// list of paths. rustc links none of those again ([`super::state::Daemons`]).
+/// it did build others: the directory of each one's unit record, as a list of paths. The
+/// daemon is asked for those as under plain cargo, and rustc links them only when it does not
+/// build them ([`super::state::Daemons`]).
 pub(crate) const DAEMONS: &str = "RA_JIT_DAEMONS_BUILT";
 
 /// The variable that says cargo runs every crate's rustc through this wrapper, and the
@@ -126,24 +127,20 @@ pub(crate) fn command(mut args: impl Iterator<Item = OsString>) -> anyhow::Resul
             Err(why) => eprintln!("warning: rustc compiles `{}`: {why:#}", unit.id),
         }
     }
-    if unit.linked
-        && let Some(binary) = daemons_built(&dir)
-    {
-        let deps = unit.dep_info(&rustc);
-        let read = deps.join().map_err(|_| "rustc did not run".to_owned());
-        match unit.put(&binary, read) {
-            Ok(()) => std::process::exit(0),
-            Err(why) => eprintln!("warning: rustc links `{}` again: {why}", unit.id),
-        }
-    }
-    let known = if plain { State::of_unit(&dir) } else { Vec::new() };
+    // A program the daemon built while cargo builds another is the daemon's as under plain
+    // cargo: asked for now, it is the source as rustc reads it.
+    let daemons = unit.linked && daemons_built(&dir);
+    let known = if plain || daemons { State::of_unit(&dir) } else { Vec::new() };
     if !known.is_empty() {
         match unit.by_daemon(&dir, &known, &rustc) {
             Ok(()) => {
-                tally("daemon", &unit.crate_name);
+                if plain {
+                    tally("daemon", &unit.crate_name);
+                }
                 std::process::exit(0);
             }
-            Err(why) => unit.left_to_rustc(&why),
+            Err(why) if plain => unit.left_to_rustc(&why),
+            Err(why) => say::fallback(&why, &format!("rustc links `{}`", unit.crate_name)),
         }
     }
     let stamp = stamp_now();
@@ -693,15 +690,9 @@ impl Unit {
     }
 }
 
-/// The daemon's executable of the program whose unit is recorded in `dir`, when the cargo
-/// running this is to be given it rather than have rustc link it ([`DAEMONS`]).
-fn daemons_built(dir: &Path) -> Option<PathBuf> {
-    let listed = std::env::var_os(DAEMONS)?;
-    let mut paths = std::env::split_paths(&listed);
-    while let (Some(unit), Some(binary)) = (paths.next(), paths.next()) {
-        if unit == dir {
-            return Some(binary);
-        }
-    }
-    None
+/// Whether the program whose unit is recorded in `dir` is one the daemon built, which the
+/// cargo running this is to be given rather than have rustc link it ([`DAEMONS`]).
+fn daemons_built(dir: &Path) -> bool {
+    let listed = std::env::var_os(DAEMONS).unwrap_or_default();
+    std::env::split_paths(&listed).any(|unit| unit == dir)
 }
