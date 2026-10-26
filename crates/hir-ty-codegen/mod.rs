@@ -3761,7 +3761,11 @@ struct Ahead {
 /// instances in the object: it would wait for one of them on each it asked for too early.
 struct Ready<'a> {
     ahead: &'a std::sync::Mutex<Ahead>,
-    idle: &'a std::sync::Condvar,
+    /// What the threads that compile ahead wait on for work, and the one that puts the
+    /// instances in the object for them to be through with some: each of a hundred threads
+    /// woken whenever one is through with a function has them take turns at the lock.
+    work: &'a std::sync::Condvar,
+    progress: &'a std::sync::Condvar,
     /// The instances to put in the object that a thread is still to compile.
     waiting: FxHashMap<(Instance, StoredParamEnvAndCrate), Vec<FuncId>>,
 }
@@ -3790,7 +3794,7 @@ impl Ready<'_> {
             }
         }
         if queued {
-            self.idle.notify_all();
+            self.work.notify_all();
         }
         loop {
             let ended = state.stopped
@@ -3809,7 +3813,7 @@ impl Ready<'_> {
             if !ready.is_empty() || self.waiting.is_empty() {
                 return ready;
             }
-            state = self.idle.wait(state).unwrap_or_else(|e| e.into_inner());
+            state = self.progress.wait(state).unwrap_or_else(|e| e.into_inner());
         }
     }
 
@@ -3825,7 +3829,7 @@ impl Ready<'_> {
             match found {
                 Some(at) => return at,
                 None if ended => return 0,
-                None => state = self.idle.wait(state).unwrap_or_else(|e| e.into_inner()),
+                None => state = self.progress.wait(state).unwrap_or_else(|e| e.into_inner()),
             }
         }
     }
@@ -3847,7 +3851,7 @@ impl Ready<'_> {
                 state.roots.push_back(root);
             }
         }
-        self.idle.notify_all();
+        self.work.notify_all();
     }
 }
 
@@ -5512,8 +5516,13 @@ impl<'a, 'db> ObjectCodegen<'a, 'db> {
         let told = told.as_ref();
         let on_demand = self.on_demand;
         let (stored, roots_from_store) = (&self.stored_roots.clone(), self.roots_from_store());
+        // What the store is given of a function names each static it refers to by a name its
+        // crate is listed to find again: listed here, beside the compiling, and not by every
+        // thread at once after it.
+        let (listings, keeps) = (self.names.listings(), self.defers() && entries.is_some());
         let run = |db: &dyn HirDatabase, symbols: &dyn SymbolResolver| {
-            let names = stable::StableNames::new(db, symbols, owned.clone(), hydrate);
+            let names = stable::StableNames::new(db, symbols, owned.clone(), hydrate)
+                .listing(listings.clone());
             let usable = |name: &str| {
                 let Some(entries) = entries else { return false };
                 entries.usable(name, &|symbol| symbols.provides(symbol) && symbols.linked(symbol))
@@ -5541,18 +5550,19 @@ impl<'a, 'db> ObjectCodegen<'a, 'db> {
                     None => match state.queue.pop() {
                         Some(it) => either::Either::Right(it),
                         None if state.working == 0 && !state.open => {
-                            idle.notify_all();
+                            work_to_do.notify_all();
+                            progress.notify_all();
                             return;
                         }
                         None => {
-                            state = idle.wait(state).unwrap_or_else(|e| e.into_inner());
+                            state = work_to_do.wait(state).unwrap_or_else(|e| e.into_inner());
                             continue;
                         }
                     },
                 };
                 state.working += 1;
                 drop(state);
-                let working = Working(&ahead, &idle);
+                let working = Working(&ahead, &waits);
                 let (mut found, mut called) = (Vec::new(), Vec::new());
                 let compiled = match &job {
                     // One without a symbol is left to rustc, and so is what only it calls.
@@ -5607,17 +5617,26 @@ impl<'a, 'db> ObjectCodegen<'a, 'db> {
                     state.done.insert(it.clone());
                     state.fresh.push(it);
                 }
+                let mut added = 0;
                 for it in found {
                     if state.seen.insert(it.clone()) {
                         state.queue.push(it);
+                        added += 1;
                     }
                 }
                 for root in called {
                     if state.rooted.insert(root) {
                         state.roots.push_back(root);
+                        added += 1;
                     }
                 }
-                idle.notify_all();
+                // A thread for each new one, and every thread once there is nothing to do.
+                if state.working == 0 && state.queue.is_empty() && state.roots.is_empty() {
+                    work_to_do.notify_all();
+                } else {
+                    (0..added.min(threads)).for_each(|_| work_to_do.notify_one());
+                }
+                progress.notify_all();
             }
         };
         let work = |db: &dyn HirDatabase, symbols: &dyn SymbolResolver, _: usize| {
