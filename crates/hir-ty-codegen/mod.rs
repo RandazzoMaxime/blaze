@@ -6184,10 +6184,11 @@ impl<'a, 'db> ObjectCodegen<'a, 'db> {
         let code = entry.code.code();
         let relocs: Vec<_> = code.relocs.iter().map(|it| ids.reloc(it, id)).collect();
         self.define_code(id, &code, &relocs)?;
-        if let (Some(debug), Some(of)) = (&self.debug, &entry.debug) {
+        if let (Some(debug), Some(of), Some(entries)) = (&self.debug, &entry.debug, &self.entries) {
             let len = code.bytes.len() as u32;
+            let entries = entries.clone();
             backend::Tally::global()
-                .step(Step::Describe, || debug.add_function(id, len, of.clone()));
+                .step(Step::Describe, || debug.add_stored(id, len, of.clone(), entries));
         }
         self.bodies += 1;
         self.kept.found += 1;

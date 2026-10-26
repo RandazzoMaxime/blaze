@@ -586,17 +586,35 @@ pub(super) struct Entries {
     /// Where cargo keeps the sources it fetched on this machine.
     cargo_home: Option<String>,
     library: Option<super::LibrarySources>,
-    known: Mutex<Known>,
-}
-
-#[derive(Default)]
-struct Known {
     /// Each read once however many threads ask for it at the same time: the callees of the
     /// functions being built are mostly the same few, and the threads come to them together.
-    entries: FxHashMap<Arc<str>, Arc<OnceLock<Option<Arc<Entry>>>>>,
+    entries: Sharded<Arc<str>, Arc<OnceLock<Option<Arc<Entry>>>>>,
     /// Whether the program can be built from an entry and everything it calls.
-    usable: FxHashMap<Arc<str>, bool>,
-    types: FxHashMap<[u8; KEY], Arc<OnceLock<Option<TypeSet>>>>,
+    usable: Sharded<Arc<str>, bool>,
+    types: Sharded<[u8; KEY], Arc<OnceLock<Option<TypeSet>>>>,
+}
+
+/// A map behind a lock for each of its shards: a restart has every thread look up the stored
+/// roots at once, an entry and each of its sets of types, and one lock had them take turns.
+struct Sharded<K, V>(Box<[Mutex<FxHashMap<K, V>>]>);
+
+impl<K: std::hash::Hash + Eq, V> Default for Sharded<K, V> {
+    fn default() -> Self {
+        Sharded((0..64).map(|_| Mutex::default()).collect())
+    }
+}
+
+impl<K: std::hash::Hash + Eq, V> Sharded<K, V> {
+    fn shard<Q: std::hash::Hash + ?Sized>(
+        &self,
+        key: &Q,
+    ) -> std::sync::MutexGuard<'_, FxHashMap<K, V>> {
+        use std::hash::BuildHasher;
+        let hash = rustc_hash::FxBuildHasher.hash_one(key);
+        // The high bits: the low ones also pick the bucket inside the shard's map.
+        let at = (hash >> 58) as usize % self.0.len();
+        self.0[at].lock().unwrap_or_else(|e| e.into_inner())
+    }
 }
 
 /// The sets of types that were given to the store, each when the first entry with a
@@ -781,7 +799,8 @@ impl Entries {
         cargo_home: Option<String>,
         library: Option<super::LibrarySources>,
     ) -> Entries {
-        Entries { store, debug, program, cargo_home, library, known: Mutex::default() }
+        let (entries, usable, types) = Default::default();
+        Entries { store, debug, program, cargo_home, library, entries, usable, types }
     }
 
     /// Never use the entry again in this process: it did not fit the object it was read for.
@@ -794,24 +813,23 @@ impl Entries {
         BANNED.get_or_init(Mutex::default)
     }
 
-    fn known(&self) -> std::sync::MutexGuard<'_, Known> {
-        self.known.lock().unwrap_or_else(|e| e.into_inner())
-    }
-
     pub(super) fn get(&self, name: &str) -> Option<Arc<Entry>> {
         let cell = {
-            let mut known = self.known();
-            match known.entries.get(name) {
+            let mut entries = self.entries.shard(name);
+            match entries.get(name) {
                 Some(cell) => cell.clone(),
-                None => known.entries.entry(Arc::from(name)).or_default().clone(),
+                None => entries.entry(Arc::from(name)).or_default().clone(),
             }
         };
         let read = || {
             let key = Entry::key(name, self.debug, self.program.as_ref())?;
-            let mut entry = Entry::decode(&self.store.get(&key)?)?;
-            if let Some(debug) = &mut entry.debug {
-                let types = debug.stored_types.iter().map(|key| self.types(key));
-                debug.types = types.collect::<Option<_>>()?;
+            let entry = Entry::decode(&self.store.get(&key)?)?;
+            // The types are read when the function is described (`describe`), which a build
+            // whose object is the one it has already never does.
+            let stored = |key: &[u8; KEY]| self.store.has_used(key) || self.types(key).is_some();
+            let debug = entry.debug.as_ref();
+            if !debug.is_none_or(|it| it.stored_types.iter().all(stored)) {
+                return None;
             }
             entry.arrived(self.cargo_home.as_deref(), self.library.as_ref())
         };
@@ -824,10 +842,20 @@ impl Entries {
         .clone()
     }
 
+    /// Gives what an entry tells a debugger the types of its variables, which [`Entries::get`]
+    /// leaves to be read. A set the store no longer has leaves them all untold.
+    pub(super) fn describe(&self, debug: &mut FunctionDebug) {
+        if !debug.types.is_empty() || debug.stored_types.is_empty() {
+            return;
+        }
+        let types = debug.stored_types.iter().map(|key| self.types(key));
+        debug.types = types.collect::<Option<_>>().unwrap_or_default();
+    }
+
     /// The set of types kept under `key`, which every entry with a variable of the type
     /// shares.
     fn types(&self, key: &[u8; KEY]) -> Option<TypeSet> {
-        let cell = self.known().types.entry(*key).or_default().clone();
+        let cell = self.types.shard(key).entry(*key).or_default().clone();
         cell.get_or_init(|| {
             let types = self.store.get(key).and_then(|it| postcard::from_bytes::<Vec<_>>(&it).ok());
             types.map(TypeSet::from)
@@ -836,13 +864,13 @@ impl Entries {
     }
 
     fn settle(&self, name: Arc<str>, usable: bool) {
-        self.known().usable.insert(name, usable);
+        self.usable.shard(&*name).insert(name, usable);
     }
 
     /// Whether there is an entry for `name` and for everything it calls, and what they import
     /// is in the program, as `defines` tells.
     pub(super) fn usable(&self, name: &str, defines: &dyn Fn(&str) -> bool) -> bool {
-        let settled = |name: &str| self.known().usable.get(name).copied();
+        let settled = |name: &str| self.usable.shard(name).get(name).copied();
         if let Some(usable) = settled(name) {
             return usable;
         }
