@@ -9,7 +9,7 @@ use hir::{Adjust, AsAssocItem as _, Mutability};
 use ide_db::famous_defs::FamousDefs;
 use syntax::{
     AstNode,
-    ast::{self, HasArgList as _, HasName as _},
+    ast::{self, HasArgList as _, HasGenericArgs as _, HasName as _},
 };
 
 use super::utils;

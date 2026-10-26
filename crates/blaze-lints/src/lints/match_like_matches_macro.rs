@@ -7,7 +7,10 @@
 //! `redundant_pattern_matching` as clippy leaves it when that lint is not allowed, which is
 //! taken to be always.
 
-use syntax::{AstNode, ast};
+use syntax::{
+    AstNode,
+    ast::{self, HasAttrs as _},
+};
 
 use super::utils;
 use crate::{
