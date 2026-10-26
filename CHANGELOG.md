@@ -8,6 +8,15 @@ All notable changes to ra-jit are written here. The format follows
 
 ### Added
 
+- `crates/blaze-fmt`: blaze's own formatter, rustfmt and cargo-fmt at rust-lang/rust 12433c307
+  ported onto a syntax tree of blaze's own, which rust-analyzer's parser fills with the spans
+  rustc would give each node. It runs in process and starts no rustfmt; what it cannot
+  lower yet (nightly syntax rust-analyzer does not parse, a `macro` with parameters, the
+  `ignore` option) is refused with the reason, never formatted differently.
+  `harness/fmtdiff.py` holds it to stock rustfmt byte for byte: ripgrep, nushell, fd, helix
+  and biome with their own rustfmt.toml (6068 of 6068 files, `--check` exit codes and diffs
+  too), the same with `max_width = 60` (6068 of 6068), and rustfmt's `tests/source` (773 of
+  793; the rest are those refusals).
 - `RA_JIT_WHOLE_BUILD=1`: the whole build runs in the daemon. Its worker loads the workspace,
   builds and links each program, and answers once they are linked; the next build asks the
   same worker, which builds the edits since on what it has loaded and links again, with no

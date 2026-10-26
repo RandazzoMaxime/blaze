@@ -19,8 +19,8 @@ impl fmt::Display for IgnoreUnsupported {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "the `ignore` option (here `{}`) is not supported by blaze fmt yet; remove it or format \
-             with rustfmt",
+            "the `ignore` option (here `{}`) is not supported by blaze fmt yet; remove it from \
+             rustfmt.toml",
             self.first
         )
     }
