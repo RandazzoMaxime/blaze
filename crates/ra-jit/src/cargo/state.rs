@@ -954,6 +954,7 @@ impl State {
                 inputs: inputs.into_iter().collect(),
                 env: run_env(package, &built.scripts)
                     .into_iter()
+                    .chain(programs_named(kind, unit))
                     .chain(library_path(executable.as_std_path(), sysroot_libraries.as_deref()))
                     .collect(),
             });
@@ -1310,6 +1311,22 @@ pub(super) fn library_path(executable: &Path, sysroot: Option<&Path>) -> Option<
     let dirs = deps.into_iter().chain([profile.to_owned()]).chain(sysroot.map(Path::to_owned));
     let joined = std::env::join_paths(dirs.chain(already)).ok()?;
     Some((LIBRARY_PATH.to_owned(), joined.into_string().ok()?))
+}
+
+/// The variables a cargo since rust-lang/cargo#16421 also sets when it runs an integration
+/// test or a benchmark: `CARGO_BIN_EXE_<name>` for each program of its package, as it gave
+/// them to rustc for the unit. A test that looks for a program by them at run time (assert_cmd's
+/// `cargo_bin`) finds none beside it in cargo's second layout, where the test is in its unit's
+/// own directory and not in the profile's.
+fn programs_named(kind: Kind, unit: Option<&Record>) -> Vec<(String, String)> {
+    if !matches!(kind, Kind::Test | Kind::Bench) {
+        return Vec::new();
+    }
+    let named = unit.into_iter().flat_map(|it| &it.env);
+    named
+        .filter(|(name, _)| name.starts_with("CARGO_BIN_EXE_"))
+        .map(|(n, v)| (n.clone(), v.clone()))
+        .collect()
 }
 
 /// The variables cargo sets for a program of `package` when it runs it.

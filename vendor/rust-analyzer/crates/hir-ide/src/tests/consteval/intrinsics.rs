@@ -380,7 +380,7 @@ fn type_info_generics_and_fn_ptrs() {
                     }}
                     None => 0,
                 }};
-                let not_fn = type_id_function_ptr(type_id::<u8>()).is_none() as usize;
+                let not_fn = match type_id_function_ptr(type_id::<u8>()) {{ Some(_) => 0, None => 1 }};
                 generics + none * 10 + f * 100 + not_fn * 1000
             }};"
         ),
