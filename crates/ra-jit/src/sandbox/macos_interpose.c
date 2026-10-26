@@ -675,6 +675,13 @@ static void fork_after(void) {
     os_unfair_lock_unlock(&seen_lock);
 }
 
+// The child's thread is another Mach thread than the one that took the locks, and an unfair
+// lock aborts the process that unlocks one it does not own: the child starts them afresh.
+static void fork_child(void) {
+    cwd_lock = OS_UNFAIR_LOCK_INIT;
+    seen_lock = OS_UNFAIR_LOCK_INIT;
+}
+
 static void image_added(const struct mach_header *header, intptr_t slide) {
     (void)slide;
     Dl_info info;
@@ -786,7 +793,7 @@ __attribute__((constructor)) static void start(void) {
     else if (theirs) unsetenv("DYLD_INSERT_LIBRARIES");
     unsetenv("__RA_JIT_SANDBOX");
     unsetenv("__RA_JIT_SANDBOX_EXEC");
-    pthread_atfork(fork_prepare, fork_after, fork_after);
+    pthread_atfork(fork_prepare, fork_after, fork_child);
     alive = 1;
     if (record_reads) _dyld_register_func_for_add_image(image_added);
     busy = 0;
