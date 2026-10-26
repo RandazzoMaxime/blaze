@@ -3860,9 +3860,7 @@ struct ToldTypes(std::sync::Arc<TypesTold>);
 #[derive(Default)]
 struct TypesTold {
     /// What the type of each variable is told as.
-    #[allow(clippy::type_complexity)]
-    roots:
-        std::sync::Mutex<FxHashMap<(StoredParamEnvAndCrate, StoredTy), Option<debuginfo::TypeSet>>>,
+    roots: debuginfo::ByEnv<StoredTy, Option<debuginfo::TypeSet>>,
     /// The sets of the types they are made of, which are shared.
     sets: debuginfo::Sets,
 }
@@ -3874,13 +3872,12 @@ impl ToldTypes {
         env: &StoredParamEnvAndCrate,
         ty: &StoredTy,
     ) -> Option<debuginfo::TypeSet> {
-        let key = (env.clone(), ty.clone());
-        if let Some(told) = self.0.roots.lock().unwrap_or_else(|e| e.into_inner()).get(&key) {
-            return told.clone();
+        if let Some(told) = self.0.roots.get(env, ty) {
+            return told;
         }
         let told = debuginfo::described(db, env, ty, &self.0.sets);
         // Another thread may have told of it meanwhile, and the functions share one set.
-        self.0.roots.lock().unwrap_or_else(|e| e.into_inner()).entry(key).or_insert(told).clone()
+        self.0.roots.or_insert(env, ty, told)
     }
 
     /// Tells of the types of the variables of `compiled`, for [`describe_variables`] to find.

@@ -19,7 +19,7 @@ mod types;
 use codeview::CodeView;
 pub(super) use set::TypeSet;
 use set::{Of, Told};
-pub(super) use types::{Sets, described};
+pub(super) use types::{ByEnv, Sets, described};
 
 use cranelift_codegen::{
     binemit::CodeOffset,
