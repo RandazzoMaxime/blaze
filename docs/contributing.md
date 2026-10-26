@@ -36,8 +36,8 @@ you send them, including fixes you find here and want to upstream.
                               the borrow checker, a crate next to hir-ty (borrowck.md)
     vendor/rust-analyzer/lib/rowan/
                               rowan 0.17.0 with a flat kind of tree behind its cursor (flat-syntax.md)
-    vendor/rustc_abi/         rustc's layout crate, copied from the 1.99.0 tag, a git subtree
-    vendor/proc-macro-srv/    the 1.99.0 release's proc-macro server, built by ra-jit to load
+    vendor/rustc_abi/         rustc's layout crate at the pinned nightly's commit, a git subtree
+    vendor/proc-macro-srv/    the pinned nightly's proc-macro server, built by ra-jit to load
                               the proc-macro libraries ra-jit links (no-rustc.md, step J1)
     vendor/subtree.py         moves vendor/ changes to the forks, and the forks and upstream into vendor/
     vendor/source.rev         the commit of the old development branch this tree last took from
@@ -57,8 +57,8 @@ the MIR passes that make rust-analyzer's MIR like rustc's on top
 there). The fork stays the public home of those changes and the place upstream is merged
 in; ra-jit carries the files themselves, so a plain clone builds:
 
-    git clone https://github.com/indexable-inc/blaze
-    cargo +1.99.0 build -p ra-jit --release
+    git clone https://github.com/indexable-inc/blaze && cd blaze
+    cargo +"$(cat harness/toolchain)" build -p ra-jit --release   # cargo +nightly-2026-10-25
 
 `vendor/rustc_abi` is a subtree of [indexable-inc/rustc_abi](https://github.com/indexable-inc/rustc_abi)
 (`main`) the same way.
@@ -163,11 +163,63 @@ API change ra-jit had to follow was `CrateData::is_proc_macro` becoming `target_
 with ra-jit's changes made in place. That branch and its history are kept as
 `ra-jit-collate` and `ra-jit-spike`. `publish/split.py` there is what wrote this layout.
 
-The toolchain is a separate pin. ra-jit is built for Rust 1.99.0 and `vendor/rustc_abi` is
-rustc's crate from that tag. Moving to another Rust version means taking the new
-`rustc_abi`, rechecking everything that mirrors rustc (the Rust ABI in the code generator,
-`vtable.rs`, `type_id.rs`, symbol names in `symbols.rs`), and running rustc's own test
-suites through `uitest.py` and `libsuite.py` again.
+## The toolchain
+
+ra-jit supports one toolchain, the latest nightly, pinned by date in `harness/toolchain`
+(`nightly-2026-10-25`, which says `rustc 1.101.0-nightly (12433c307 2026-10-24)`). Stable
+Rust is not a separate target: what a stable release builds, the nightly builds. ra-jit
+itself is built with that nightly (`cargo +"$(cat harness/toolchain)"`; in `nix develop`
+plain `cargo` is it), and so are the harnesses' reference builds. The pin is written in that
+one file; everything else reads it or is written from it:
+
+- `crates/ra-jit/src/cargo/toolchain/pins.txt` (by `harness/toolchain_pins.py --write`): the
+  sha256 and size of each file blaze downloads as its own toolchain, the nightly's `rustc -V`
+  line and its rust-lang/rust commit. A rustc is taken for the pinned one by that whole line,
+  since every nightly of a release has the same number.
+- What mirrors rustc, all from that commit: `vendor/rustc_abi` (rustc's `compiler/rustc_abi`),
+  `vendor/proc-macro-srv` (the nightly's proc-macro server with ra-jit's J1 changes and its
+  `RUSTC_VERSION_STRING`), the answers to rustc's questions
+  (`crates/ra-jit/src/answers/rustc.json`), and the code written by hand to agree with rustc:
+  the Rust ABI in the code generator, `vtable.rs`, `type_id.rs`, symbol names (v0) in
+  `symbols.rs`, the intrinsics and lang items, the test harness's call into libtest.
+- `install.sh`'s `TOOLCHAIN`, the flake (`rust-bin.nightly.<date>`, for the dev shells and the
+  bench nightly alike) and `Cargo.toml`'s `rust-version`.
+
+### Moving to a newer nightly
+
+    python3 harness/toolchain_bump.py                    # the newest nightly blaze can use
+    python3 harness/toolchain_bump.py --date 2026-11-02  # or a given one
+
+picks the nightly (the newest of the last two weeks whose manifest has every component blaze
+needs on every host it ships for, or the date given), writes `harness/toolchain` and
+`pins.txt`, re-vendors `vendor/rustc_abi` and `vendor/proc-macro-srv` from rust-lang/rust at
+the new commit (ra-jit's changes to the server carried over by a three-way apply; a conflict
+stops it and names the files), moves the pin where else it is written (`install.sh`, the
+server's version string and manifest, `Cargo.toml`, the flake's rust-overlay input) and
+installs the nightly with rustup. Each step names itself when it fails.
+
+What it leaves to a person, and prints at the end:
+
+1. `python3 harness/answers.py --write` on x86-64 Linux, AArch64 Linux and arm64 macOS, each
+   with that host's release build of ra-jit, since the target specs depend on the host rustc
+   was built for; commit `crates/ra-jit/src/answers/rustc.json`.
+2. `cargo build -p ra-jit --release`, fixing what the new `rustc_abi` and standard library
+   ask for, and mirroring by hand what changed in rustc: the Rust ABI, vtables, `TypeId`,
+   symbol names, new intrinsics and lang items. The move to `nightly-2026-10-25` needed
+   `rustc_abi`'s renamed layout calls, vectors of at most 128 bits passed in registers on
+   x86-64 and AArch64, Windows x64's rule for zero-sized types, the `f16b` and `ppcf128`
+   layouts, libtest's new entry `test_main_env_args` and the intrinsic `abort_immediate`.
+3. `python3 harness/toolchain_bump.py --checks` on a dev host, under Cranelift and under LLVM
+   (in `nix develop`, with `RA_JIT_BACKEND=llvm RA_JIT_OPT=2 RA_JIT_EMIT=fast`). It builds
+   ra-jit and runs, in parallel, what proves ra-jit and the nightly agree: `toolchain_pins.py`,
+   `answers.py`, `macroserver.py`, the corpus with its `nightly` feature and `--layouts`, and
+   the gate's quick parts.
+4. The full tier re-measured at the new commit: `uitest.py`, `libsuite.py` and
+   `borrowck_ui.py` against rustc's own tests.
+5. One commit for the bump, landed like any other change.
+
+A ra-jit built before the bump refuses the new nightly until it is rebuilt, since the two
+match by the whole version line.
 
 ## Rules for code
 
@@ -197,7 +249,7 @@ did about it in one line.
   you did not run. CI's fast tier covers Linux x86-64, Linux AArch64 and macOS on every
   change; Windows and the slow harnesses run nightly ([harness.md](harness.md#ci)).
 - The LLVM backend builds in the flake's dev shell, against the LLVM it pins:
-  `nix develop -c cargo +1.99.0 build -p ra-jit --release --features llvm`
+  `nix develop -c cargo build -p ra-jit --release --features llvm`
   ([LLVM for `--features llvm`](#llvm-for---features-llvm)).
 - `cargo fmt --all -- --check` and
   `cargo test --release -p hir-ty -p hir-def -p parser -p syntax -p ra-jit`.
@@ -282,7 +334,7 @@ few thousand and before a release after large changes to the daemon.
 The LLVM backend builds against one LLVM, the 20.1.8 the flake pins (`flake.lock`), on macOS
 and on Linux alike, in the flake's dev shell:
 
-    nix develop -c cargo +1.99.0 build -p ra-jit --release --features llvm
+    nix develop -c cargo build -p ra-jit --release --features llvm
 
 CI builds it the same way (`.github/actions/toolchain`). Outside the shell the build stops and
 says to enter it: neither Homebrew's LLVM nor a distribution's is a source. A build without the

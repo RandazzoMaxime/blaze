@@ -7,7 +7,7 @@ The corpus is the applications of apps/apps.json (bun aside, whose build needs i
 first) and scripts/, a package that depends on crates whose scripts those do not run
 (openssl-sys, zstd-sys, libz-sys, ring, rustix, num-traits through autocfg). With no name, all.
 
-cargo 1.99.0 checks each with this file as its RUSTC_WRAPPER, which puts blaze-build-script
+The pinned nightly's cargo checks each with this file as its RUSTC_WRAPPER, which puts blaze-build-script
 where rustc wrote each build script: run by cargo, it writes what cargo gave it beside
 `OUT_DIR` and becomes the script. Then each run is described from `cargo metadata`, `cargo
 check --unit-graph` and rustc, as blaze's resolver will describe it, and blaze-build-script
@@ -28,7 +28,8 @@ import argparse, concurrent.futures, json, os, re, shutil, subprocess, sys, toml
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
 SPECS = os.path.join(HERE, "apps", "apps.json")
-TOOLCHAIN = "1.99.0"
+PIN = open(os.path.join(HERE, "toolchain")).read().strip()
+TOOLCHAIN = PIN
 # Set in cargo's environment: the wrapper's cue, and the program it puts in place of scripts.
 WRAP = "BLAZE_SCRIPTS_WRAP"
 LEFT_OUT = {"bun"}

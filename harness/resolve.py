@@ -35,8 +35,8 @@ directory of its own, from the directory its `fixture.json` names in `cwd` (its 
 and writes what it printed, normalized, as the fixture's `expected.json`, or `{"error": ...}`
 with the error's lines when cargo refused it, and each config and profile tree's runs as its
 `expected.json` (a profile tree's with the unit graph cargo printed and the host it ran on):
-the crate's tests compare against those without cargo or the network. The cargo is `cargo
-+1.99.0` unless CARGO says otherwise; the blaze-manifest example is built with it unless
+the crate's tests compare against those without cargo or the network. The cargo is the pinned
+nightly from `harness/toolchain` unless CARGO says otherwise; the blaze-manifest example is built with it unless
 `--blaze` names one.
 """
 import collections, concurrent.futures, json, os, re, shutil, subprocess, sys, tarfile, tempfile, threading, urllib.request
@@ -47,7 +47,8 @@ CORPUS = os.path.join(HERE, "resolve", "corpus.json")
 FIXTURES = os.path.join(ROOT, "crates", "blaze-manifest", "tests", "fixtures")
 CONFIG_FIXTURES = os.path.join(ROOT, "crates", "blaze-manifest", "tests", "config-fixtures")
 PROFILE_FIXTURES = os.path.join(ROOT, "crates", "blaze-manifest", "tests", "profile-fixtures")
-CARGO = os.environ.get("CARGO_ORACLE", "cargo +1.99.0").split()
+PIN = open(os.path.join(HERE, "toolchain")).read().strip()
+CARGO = os.environ.get("CARGO_ORACLE", f"cargo +{PIN}").split()
 USER_AGENT = "blaze resolve.py (https://github.com/indexable-inc/blaze)"
 PARTS = ["bench", "crates", "workspaces", "config", "profiles"]
 # The `config get` arguments every config case runs, before those of its case.json.

@@ -1219,16 +1219,17 @@ fn project(asked: &Invocation, cwd: &Path, metadata: &Metadata) -> Result<PathBu
 /// library, which the daemon compiles from, is not installed. `cargo blaze` has made it
 /// blaze's (`toolchain::settle`); plain cargo after `blaze enable` builds with the project's.
 ///
-/// `RA_JIT_OTHER_TOOLCHAIN=1` takes another release anyway, for a project pinned to a
-/// toolchain near ours (a nightly of the next release): the layouts, symbol names, ABI and
-/// `TypeId`s are still 1.99.0's, and nothing checks that the other rustc agrees with them.
+/// `RA_JIT_OTHER_TOOLCHAIN=1` takes another toolchain anyway, for a project pinned to a
+/// nightly near ours: the layouts, symbol names, ABI and `TypeId`s are still the pinned
+/// nightly's, and nothing checks that the other rustc agrees with them.
 fn other_toolchain() -> Option<String> {
     let rustc = rustc_path();
     let said = |flag: &str| rustc_says(&rustc, &[flag]);
     let version = said("--version")?;
-    let version = version.split_whitespace().nth(1).unwrap_or_default();
+    let version = version.lines().next().unwrap_or_default().trim();
+    let version = version.strip_prefix("rustc ").unwrap_or(version);
     let ours = super::toolchain::OURS.trim();
-    if version != ours && !other_toolchain_allowed() {
+    if version != super::toolchain::ours_says() && !other_toolchain_allowed() {
         return Some(format!(
             "rustc {version} is not the {ours} blaze compiles, and plain cargo builds with the \
              project's toolchain; `cargo blaze` builds with {ours}"

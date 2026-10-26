@@ -34,6 +34,7 @@ mod test_harness;
 mod tier;
 mod trace;
 mod tree;
+mod unstable;
 mod weaken;
 mod whole;
 
@@ -3261,7 +3262,7 @@ fn on_idle_threads<T: Sync>(
     use std::sync::atomic::Ordering::Relaxed;
     let wanted = (work.len() / per).min(threads - 1);
     let mut helpers = 0;
-    _ = helping.fetch_update(Relaxed, Relaxed, |busy| {
+    _ = helping.try_update(Relaxed, Relaxed, |busy| {
         helpers = wanted.min(threads.saturating_sub(busy + 1));
         Some(busy + helpers)
     });

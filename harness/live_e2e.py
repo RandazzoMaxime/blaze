@@ -5,6 +5,9 @@ daemon's patch.
 
 usage: live_e2e.py          (RA_JIT_BIN names the ra-jit built; cargo-ra-jit and ra-jit-rustc
                              are found next to it)
+       LIVE_PROGRAM=live-alloc live_e2e.py
+                            the same steps on harness/live-alloc, the program on the nightly's
+                            `allocator_api` (a bump arena through `Vec<T, A>` and `Box<T, A>`)
 
 A copy of harness/live (a program that polls ra-jit-live and prints `answer()`) is built by the
 daemon until the daemon serves the build, edited once (the first edit after a daemon starts
@@ -35,6 +38,8 @@ BUILD_TIMEOUT = 900
 APPLY_TIMEOUT = 60
 # How many edits the running program takes one after another.
 LIVE_EDITS = int(os.environ.get("LIVE_EDITS", "5"))
+# The program under harness/ that is edited: `live`, or another with the same `answer()`.
+PROGRAM = os.environ.get("LIVE_PROGRAM", "live")
 
 
 class StepError(Exception):
@@ -144,7 +149,7 @@ async def main() -> None:
     started: list[Running] = []
     try:
         shutil.copytree(ROOT / "crates" / "ra-jit-live", work / "crates" / "ra-jit-live")
-        shutil.copytree(HERE / "live", work / "harness" / "live", ignore=shutil.ignore_patterns("target"))
+        shutil.copytree(HERE / PROGRAM, work / "harness" / "live", ignore=shutil.ignore_patterns("target"))
         project = work / "harness" / "live"
         source = project / "src" / "main.rs"
         executable = work / "target" / "debug" / "liveprobe"
@@ -183,7 +188,7 @@ async def main() -> None:
         print(f"live edits: answer {chain} in a running program, each applied by ra-jit-live")
 
         # Another program, built and edited while this one runs, has its edits on disk.
-        shutil.copytree(HERE / "live", work / "harness" / "other", ignore=shutil.ignore_patterns("target"))
+        shutil.copytree(HERE / PROGRAM, work / "harness" / "other", ignore=shutil.ignore_patterns("target"))
         other = work / "harness" / "other"
         other_env = dict(env, CARGO_TARGET_DIR=str(work / "target-other"))
         await build("other: first build", other, other_env)

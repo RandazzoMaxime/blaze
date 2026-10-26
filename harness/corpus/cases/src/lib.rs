@@ -2,9 +2,10 @@
 //! rustc-built `runner`; the output must match an all-rustc build.
 //!
 //! One module per backend feature area, so a bisected culprit names the area.
-// `box` patterns and 128-bit variable arguments are unstable: the cases are for a nightly
+// Deref patterns and 128-bit variable arguments are unstable: the cases are for a nightly
 // toolchain only.
-#![cfg_attr(feature = "nightly", feature(box_patterns, c_variadic_int128))]
+#![cfg_attr(feature = "nightly", feature(deref_patterns, c_variadic_int128))]
+#![cfg_attr(feature = "nightly", allow(incomplete_features))]
 
 pub mod stabilized;
 
@@ -3234,8 +3235,10 @@ pub mod array_map {
 }
 
 #[cfg(feature = "nightly")]
-pub mod box_patterns {
-    pub struct Noisy(pub &'static str, pub std::rc::Rc<std::cell::RefCell<Vec<String>>>);
+pub mod deref_patterns {
+    use std::{cell::RefCell, rc::Rc};
+
+    pub struct Noisy(pub &'static str, pub Rc<RefCell<Vec<String>>>);
     impl Drop for Noisy {
         fn drop(&mut self) {
             self.1.borrow_mut().push(format!("drop {}", self.0));
@@ -3248,41 +3251,128 @@ pub mod box_patterns {
     fn sum(list: &List) -> u32 {
         match list {
             List::Nil => 0,
-            List::Cons(value, box rest) => *value + sum(rest),
+            List::Cons(value, deref!(rest)) => *value + sum(rest),
         }
     }
+    // Moves the first out of the box and drops the rest, in rustc's order.
     fn take(pair: Box<(Noisy, Noisy)>) -> Noisy {
-        let box (first, _second) = pair;
+        let deref!((first, _second)) = pair;
         first.1.borrow_mut().push("taken".to_owned());
         first
     }
+    fn by_value(option: Box<Option<u32>>) -> u32 {
+        match option {
+            deref!(Some(x)) => x,
+            deref!(None) => 0,
+        }
+    }
     fn by_ref(option: &Box<Option<String>>) -> usize {
         match option {
-            box Some(text) => text.len(),
-            box None => 0,
+            deref!(Some(text)) => text.len(),
+            deref!(None) => 0,
         }
     }
     fn mutate(pair: &mut Box<(u8, String)>) {
-        let box (_, ref mut text) = *pair;
+        let deref!((_, ref mut text)) = *pair;
         text.push('!');
     }
     fn nested(inner: Box<Box<Noisy>>) -> &'static str {
-        let box box noisy = inner;
+        let deref!(deref!(noisy)) = inner;
         noisy.0
+    }
+    // Without `deref!`, inference peels the box itself.
+    fn implicit(option: Box<Option<u32>>) -> u32 {
+        match option {
+            Some(x) => x + 1,
+            None => 0,
+        }
+    }
+    fn implicit_ref(option: &Box<Option<String>>) -> String {
+        match option {
+            Some(text) => text.clone() + "?",
+            None => String::new(),
+        }
+    }
+    fn implicit_moved(option: Box<Option<Noisy>>) -> &'static str {
+        match option {
+            Some(noisy) => noisy.0,
+            None => "none",
+        }
+    }
+    // Through smart pointers that are not boxes, `Deref::deref` is called on a borrow.
+    fn shared(option: &Rc<Option<String>>) -> usize {
+        match option {
+            Some(text) if text.is_empty() => 100,
+            Some(text) => text.len(),
+            None => 0,
+        }
+    }
+    fn explicit_rc(option: Rc<Option<u8>>) -> u8 {
+        match option {
+            deref!(Some(n)) => n,
+            deref!(None) => 7,
+        }
+    }
+    fn word(text: String) -> u8 {
+        match text {
+            "zero" => 0,
+            "one" => 1,
+            deref!("two") => 2,
+            _ => 3,
+        }
+    }
+    fn bytes(data: Vec<u8>) -> u8 {
+        match data {
+            deref!(b"ab") => 1,
+            deref!([b'c', ..]) => 2,
+            _ => 3,
+        }
+    }
+    // A `ref mut` inside calls `DerefMut::deref_mut`.
+    fn shout(mut text: String) -> String {
+        let deref!(ref mut inner) = text;
+        inner.make_ascii_uppercase();
+        text
+    }
+    fn first_byte(mut data: Vec<u8>) -> Vec<u8> {
+        if let [first, ..] = &mut data {
+            *first += 1;
+        }
+        data
     }
 
     pub fn run() -> Vec<String> {
-        let log = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let log = Rc::new(RefCell::new(Vec::new()));
         let list = List::Cons(1, Box::new(List::Cons(2, Box::new(List::Nil))));
         let mut out = vec![sum(&list).to_string()];
         let kept = take(Box::new((Noisy("a", log.clone()), Noisy("b", log.clone()))));
         out.push(kept.0.to_owned());
+        out.push(by_value(Box::new(Some(5))).to_string());
+        out.push(by_value(Box::new(None)).to_string());
         out.push(by_ref(&Box::new(Some("hey".to_owned()))).to_string());
         out.push(by_ref(&Box::new(None)).to_string());
         let mut pair = Box::new((1, "x".to_owned()));
         mutate(&mut pair);
         out.push(pair.1.clone());
         out.push(nested(Box::new(Box::new(Noisy("n", log.clone())))).to_owned());
+        out.push(implicit(Box::new(Some(41))).to_string());
+        out.push(implicit(Box::new(None)).to_string());
+        out.push(implicit_ref(&Box::new(Some("why".to_owned()))));
+        out.push(implicit_ref(&Box::new(None)));
+        out.push(implicit_moved(Box::new(Some(Noisy("m", log.clone())))).to_owned());
+        out.push(shared(&Rc::new(Some("four".to_owned()))).to_string());
+        out.push(shared(&Rc::new(Some(String::new()))).to_string());
+        out.push(shared(&Rc::new(None)).to_string());
+        out.push(explicit_rc(Rc::new(Some(9))).to_string());
+        out.push(explicit_rc(Rc::new(None)).to_string());
+        for text in ["zero", "one", "two", "three"] {
+            out.push(word(text.to_owned()).to_string());
+        }
+        for data in [&b"ab"[..], b"cd", b"c", b"", b"abc"] {
+            out.push(bytes(data.to_vec()).to_string());
+        }
+        out.push(shout("loud".to_owned()));
+        out.push(format!("{:?}", first_byte(vec![1, 2])));
         drop(kept);
         out.extend(log.borrow().iter().cloned());
         out

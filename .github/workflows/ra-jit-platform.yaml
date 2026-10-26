@@ -224,7 +224,6 @@ jobs:
       - uses: ./.github/actions/toolchain
         with:
           llvm: run
-          nightly: nightly-2026-09-15
       - uses: actions/download-artifact@v8
         with:
           name: ra-jit-${{ inputs.platform }}
@@ -249,7 +248,6 @@ jobs:
       - uses: ./.github/actions/toolchain
         with:
           llvm: run
-      - run: rustup toolchain install nightly-2026-10-09 --profile minimal
       - uses: actions/download-artifact@v8
         with:
           name: ra-jit-${{ inputs.platform }}
@@ -258,13 +256,14 @@ jobs:
         working-directory: target/release
       - name: rustc's tests
         run: |
+          commit=$(awk '/^commit /{print $2}' crates/ra-jit/src/cargo/toolchain/pins.txt)
           git init -q "$RUNNER_TEMP/rust"
           cd "$RUNNER_TEMP/rust"
           git remote add origin https://github.com/rust-lang/rust
           git sparse-checkout set tests/ui
-          git fetch -q --depth 1 --filter=blob:none origin a30aa9064df6a504b6a323c6884a2f4cfbfff666
+          git fetch -q --depth 1 --filter=blob:none origin "$commit"
           git checkout -q FETCH_HEAD
-      - run: python3 harness/borrowck_ui.py "$RUNNER_TEMP/rust" --bin target/release/ra-jit --jobs 4 --mode both --min-pass 1538
+      - run: python3 harness/borrowck_ui.py "$RUNNER_TEMP/rust" --bin target/release/ra-jit --jobs 4 --mode both --min-pass 1538  # TODO(rjn): re-measure at the new pin
       # Crates rustc accepts: an error is a false one, and a file the checker panics on (which
       # fails `ra-jit borrowck`) would have none of its errors reported.
       - name: the corpus and mixfutures
@@ -302,12 +301,18 @@ jobs:
       - name: pinned run-pass tests
         run: |
           dirs=$(sed 's/#.*//' harness/ui-pinned.txt | xargs -n1 dirname | sed 's|^|tests/ui/|' | sort -u)
-          git clone -q --depth 1 --branch 1.99.0 --filter=blob:none --sparse https://github.com/rust-lang/rust "$RUNNER_TEMP/rust-1.99"
-          git -C "$RUNNER_TEMP/rust-1.99" sparse-checkout set tests/auxiliary $dirs
+          commit=$(awk '/^commit /{print $2}' crates/ra-jit/src/cargo/toolchain/pins.txt)
+          git init -q "$RUNNER_TEMP/rust-pin"
+          cd "$RUNNER_TEMP/rust-pin"
+          git remote add origin https://github.com/rust-lang/rust
+          git sparse-checkout set tests/auxiliary $dirs
+          git fetch -q --depth 1 --filter=blob:none origin "$commit"
+          git checkout -q FETCH_HEAD
           mkdir "$RUNNER_TEMP/ui-real"
           ln -s "$RUNNER_TEMP/ui-real" "$RUNNER_TEMP/ui"
+          cd "$GITHUB_WORKSPACE"
           cd harness
-          RA_JIT_BIN="$GITHUB_WORKSPACE/target/release/ra-jit" python3 uitest.py "$RUNNER_TEMP/rust-1.99" --tests ui-pinned.txt --jobs 4 --work "$RUNNER_TEMP/ui"
+          RA_JIT_BIN="$GITHUB_WORKSPACE/target/release/ra-jit" python3 uitest.py "$RUNNER_TEMP/rust-pin" --tests ui-pinned.txt --jobs 4 --work "$RUNNER_TEMP/ui"
 
   # `cargo ra-jit` in place of cargo on projects at pinned commits, and the flags, the daemon's
   # life and plain cargo after `ra-jit enable`. Incremental compilation is left to the profile,

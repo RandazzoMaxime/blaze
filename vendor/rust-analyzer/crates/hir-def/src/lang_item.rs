@@ -534,6 +534,8 @@ language_item_table! { LangItems =>
     UnsafeCell,              sym::unsafe_cell,         StructId;
     UnsafePinned,            sym::unsafe_pinned,       StructId;
     VaList,                  sym::va_list,             StructId;
+    F16B,                    sym::f16b,                StructId;
+    PpcF128,                 sym::ppcf128,             StructId;
 
     Deref,                   sym::deref,               TraitId;
     DerefMut,                sym::deref_mut,           TraitId;
