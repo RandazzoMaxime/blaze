@@ -76,6 +76,7 @@ jobs:
       - name: blaze in a new project
         run: |
           export PATH="$CARGO_HOME/bin:$PATH"
+          tc=$(cat harness/toolchain)
           cd "$RUNNER_TEMP"
           cargo new --quiet hello
           cd hello
@@ -85,7 +86,7 @@ jobs:
             cargo blaze run | grep -F "Hello, world!"
             blaze stop
           else
-            rustup override set "$(cat harness/toolchain)"
+            rustup override set "$tc"
             cargo blaze build
             cargo blaze run | grep -F "Hello, world!"
             cargo blaze stop

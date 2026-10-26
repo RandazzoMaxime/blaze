@@ -2,7 +2,7 @@
  "dir": ".",
  "inputs": {
   "Cargo.lock": "a217d789f06995d7f242444c60d01430cbafd11593928c5770799317a0134b5b",
-  "Cargo.toml": "b223b758fd1433d368ef3378e9ebb45b57e7eb8571a6ff3085e4d5bb032b4255"
+  "Cargo.toml": "967ca5e3b088bbbe5e1b1049a1406062c879ef14bf016336da0b72b5908da1d3"
  },
  "packages": {
   "adler2@2.0.1": {
@@ -661,7 +661,7 @@
    "name": "base-db",
    "readme": "",
    "repository": "https://github.com/indexable-inc/blaze",
-   "rust_version": "1.99",
+   "rust_version": "1.101",
    "source": {
     "dir": "vendor/rust-analyzer/crates/base-db",
     "kind": "path"
@@ -780,7 +780,7 @@
    "name": "blaze-build-script",
    "readme": "",
    "repository": "https://github.com/indexable-inc/blaze",
-   "rust_version": "1.99",
+   "rust_version": "1.101",
    "source": {
     "dir": "crates/blaze-build-script",
     "kind": "path"
@@ -789,7 +789,7 @@
   },
   "blaze-manifest@0.1.0": {
    "authors": "blaze contributors",
-   "description": "Cargo.toml and .cargo/config.toml read as cargo 1.99 reads them",
+   "description": "Cargo.toml and .cargo/config.toml read as the pinned nightly's cargo reads them",
    "homepage": "",
    "license": "MIT OR Apache-2.0",
    "license_file": "",
@@ -797,7 +797,7 @@
    "name": "blaze-manifest",
    "readme": "",
    "repository": "https://github.com/indexable-inc/blaze",
-   "rust_version": "1.99",
+   "rust_version": "1.101",
    "source": {
     "dir": "crates/blaze-manifest",
     "kind": "path"
@@ -814,7 +814,7 @@
    "name": "blaze-metadata",
    "readme": "",
    "repository": "https://github.com/indexable-inc/blaze",
-   "rust_version": "1.99",
+   "rust_version": "1.101",
    "source": {
     "dir": "crates/blaze-metadata",
     "kind": "path"
@@ -831,7 +831,7 @@
    "name": "blaze-registry",
    "readme": "",
    "repository": "https://github.com/indexable-inc/blaze",
-   "rust_version": "1.99",
+   "rust_version": "1.101",
    "source": {
     "dir": "crates/blaze-registry",
     "kind": "path"
@@ -848,7 +848,7 @@
    "name": "blaze-resolve",
    "readme": "",
    "repository": "https://github.com/indexable-inc/blaze",
-   "rust_version": "1.99",
+   "rust_version": "1.101",
    "source": {
     "dir": "crates/blaze-resolve",
     "kind": "path"
@@ -1086,7 +1086,7 @@
    "name": "cfg",
    "readme": "",
    "repository": "https://github.com/indexable-inc/blaze",
-   "rust_version": "1.99",
+   "rust_version": "1.101",
    "source": {
     "dir": "vendor/rust-analyzer/crates/cfg",
     "kind": "path"
@@ -2106,7 +2106,7 @@
    "name": "edition",
    "readme": "",
    "repository": "https://github.com/indexable-inc/blaze",
-   "rust_version": "1.99",
+   "rust_version": "1.101",
    "source": {
     "dir": "vendor/rust-analyzer/crates/edition",
     "kind": "path"
@@ -2820,7 +2820,7 @@
    "name": "hir-def",
    "readme": "",
    "repository": "https://github.com/indexable-inc/blaze",
-   "rust_version": "1.99",
+   "rust_version": "1.101",
    "source": {
     "dir": "vendor/rust-analyzer/crates/hir-def",
     "kind": "path"
@@ -2837,7 +2837,7 @@
    "name": "hir-expand",
    "readme": "",
    "repository": "https://github.com/indexable-inc/blaze",
-   "rust_version": "1.99",
+   "rust_version": "1.101",
    "source": {
     "dir": "vendor/rust-analyzer/crates/hir-expand",
     "kind": "path"
@@ -2854,7 +2854,7 @@
    "name": "hir-ide",
    "readme": "",
    "repository": "https://github.com/indexable-inc/blaze",
-   "rust_version": "1.99",
+   "rust_version": "1.101",
    "source": {
     "dir": "vendor/rust-analyzer/crates/hir-ide",
     "kind": "path"
@@ -2871,7 +2871,7 @@
    "name": "hir-ty-borrowck",
    "readme": "",
    "repository": "https://github.com/indexable-inc/blaze",
-   "rust_version": "1.99",
+   "rust_version": "1.101",
    "source": {
     "dir": "vendor/rust-analyzer/crates/hir-ty-borrowck",
     "kind": "path"
@@ -2888,7 +2888,7 @@
    "name": "hir-ty-codegen",
    "readme": "",
    "repository": "https://github.com/indexable-inc/blaze",
-   "rust_version": "1.99",
+   "rust_version": "1.101",
    "source": {
     "dir": "crates/hir-ty-codegen",
     "kind": "path"
@@ -2905,7 +2905,7 @@
    "name": "hir-ty-wfcheck",
    "readme": "",
    "repository": "https://github.com/indexable-inc/blaze",
-   "rust_version": "1.99",
+   "rust_version": "1.101",
    "source": {
     "dir": "vendor/rust-analyzer/crates/hir-ty-wfcheck",
     "kind": "path"
@@ -2922,7 +2922,7 @@
    "name": "hir-ty",
    "readme": "",
    "repository": "https://github.com/indexable-inc/blaze",
-   "rust_version": "1.99",
+   "rust_version": "1.101",
    "source": {
     "dir": "vendor/rust-analyzer/crates/hir-ty",
     "kind": "path"
@@ -2939,7 +2939,7 @@
    "name": "hir",
    "readme": "",
    "repository": "https://github.com/indexable-inc/blaze",
-   "rust_version": "1.99",
+   "rust_version": "1.101",
    "source": {
     "dir": "vendor/rust-analyzer/crates/hir",
     "kind": "path"
@@ -3245,7 +3245,7 @@
    "name": "ide-db",
    "readme": "",
    "repository": "https://github.com/indexable-inc/blaze",
-   "rust_version": "1.99",
+   "rust_version": "1.101",
    "source": {
     "dir": "vendor/rust-analyzer/crates/ide-db",
     "kind": "path"
@@ -3262,7 +3262,7 @@
    "name": "ide-diagnostics",
    "readme": "",
    "repository": "https://github.com/indexable-inc/blaze",
-   "rust_version": "1.99",
+   "rust_version": "1.101",
    "source": {
     "dir": "vendor/rust-analyzer/crates/ide-diagnostics",
     "kind": "path"
@@ -3381,7 +3381,7 @@
    "name": "intern",
    "readme": "",
    "repository": "https://github.com/indexable-inc/blaze",
-   "rust_version": "1.99",
+   "rust_version": "1.101",
    "source": {
     "dir": "vendor/rust-analyzer/crates/intern",
     "kind": "path"
@@ -3806,7 +3806,7 @@
    "name": "load-cargo",
    "readme": "",
    "repository": "https://github.com/indexable-inc/blaze",
-   "rust_version": "1.99",
+   "rust_version": "1.101",
    "source": {
     "dir": "vendor/rust-analyzer/crates/load-cargo",
     "kind": "path"
@@ -3891,7 +3891,7 @@
    "name": "macros",
    "readme": "",
    "repository": "https://github.com/indexable-inc/blaze",
-   "rust_version": "1.99",
+   "rust_version": "1.101",
    "source": {
     "dir": "vendor/rust-analyzer/crates/macros",
     "kind": "path"
@@ -3908,7 +3908,7 @@
    "name": "mbe",
    "readme": "",
    "repository": "https://github.com/indexable-inc/blaze",
-   "rust_version": "1.99",
+   "rust_version": "1.101",
    "source": {
     "dir": "vendor/rust-analyzer/crates/mbe",
     "kind": "path"
@@ -4435,7 +4435,7 @@
    "name": "parser",
    "readme": "",
    "repository": "https://github.com/indexable-inc/blaze",
-   "rust_version": "1.99",
+   "rust_version": "1.101",
    "source": {
     "dir": "vendor/rust-analyzer/crates/parser",
     "kind": "path"
@@ -4486,7 +4486,7 @@
    "name": "paths",
    "readme": "",
    "repository": "https://github.com/indexable-inc/blaze",
-   "rust_version": "1.99",
+   "rust_version": "1.101",
    "source": {
     "dir": "vendor/rust-analyzer/crates/paths",
     "kind": "path"
@@ -4775,7 +4775,7 @@
    "name": "proc-macro-api",
    "readme": "",
    "repository": "https://github.com/indexable-inc/blaze",
-   "rust_version": "1.99",
+   "rust_version": "1.101",
    "source": {
     "dir": "vendor/rust-analyzer/crates/proc-macro-api",
     "kind": "path"
@@ -4792,7 +4792,7 @@
    "name": "proc-macro-srv",
    "readme": "",
    "repository": "https://github.com/indexable-inc/blaze",
-   "rust_version": "1.99",
+   "rust_version": "1.101",
    "source": {
     "dir": "vendor/rust-analyzer/crates/proc-macro-srv",
     "kind": "path"
@@ -4843,7 +4843,7 @@
    "name": "profile",
    "readme": "",
    "repository": "https://github.com/indexable-inc/blaze",
-   "rust_version": "1.99",
+   "rust_version": "1.101",
    "source": {
     "dir": "vendor/rust-analyzer/crates/profile",
     "kind": "path"
@@ -4860,7 +4860,7 @@
    "name": "project-model",
    "readme": "",
    "repository": "https://github.com/indexable-inc/blaze",
-   "rust_version": "1.99",
+   "rust_version": "1.101",
    "source": {
     "dir": "vendor/rust-analyzer/crates/project-model",
     "kind": "path"
@@ -5149,7 +5149,7 @@
    "name": "ra-jit-bench",
    "readme": "",
    "repository": "",
-   "rust_version": "1.99",
+   "rust_version": "1.101",
    "source": {
     "dir": "crates/ra-jit-bench",
     "kind": "path"
@@ -5200,7 +5200,7 @@
    "name": "ra-jit-expand",
    "readme": "",
    "repository": "https://github.com/indexable-inc/blaze",
-   "rust_version": "1.99",
+   "rust_version": "1.101",
    "source": {
     "dir": "crates/ra-jit-expand",
     "kind": "path"
@@ -5217,7 +5217,7 @@
    "name": "ra-jit-fuzz",
    "readme": "",
    "repository": "https://github.com/indexable-inc/blaze",
-   "rust_version": "1.99",
+   "rust_version": "1.101",
    "source": {
     "dir": "crates/ra-jit-fuzz",
     "kind": "path"
@@ -5251,7 +5251,7 @@
    "name": "ra-jit-store",
    "readme": "",
    "repository": "https://github.com/indexable-inc/blaze",
-   "rust_version": "1.99",
+   "rust_version": "1.101",
    "source": {
     "dir": "crates/ra-jit-store",
     "kind": "path"
@@ -5268,7 +5268,7 @@
    "name": "ra-jit",
    "readme": "",
    "repository": "https://github.com/indexable-inc/blaze",
-   "rust_version": "1.99",
+   "rust_version": "1.101",
    "source": {
     "dir": "crates/ra-jit",
     "kind": "path"
@@ -6288,7 +6288,7 @@
    "name": "span",
    "readme": "",
    "repository": "https://github.com/indexable-inc/blaze",
-   "rust_version": "1.99",
+   "rust_version": "1.101",
    "source": {
     "dir": "vendor/rust-analyzer/crates/span",
     "kind": "path"
@@ -6373,7 +6373,7 @@
    "name": "stdx",
    "readme": "",
    "repository": "https://github.com/indexable-inc/blaze",
-   "rust_version": "1.99",
+   "rust_version": "1.101",
    "source": {
     "dir": "vendor/rust-analyzer/crates/stdx",
     "kind": "path"
@@ -6475,7 +6475,7 @@
    "name": "syntax-bridge",
    "readme": "",
    "repository": "https://github.com/indexable-inc/blaze",
-   "rust_version": "1.99",
+   "rust_version": "1.101",
    "source": {
     "dir": "vendor/rust-analyzer/crates/syntax-bridge",
     "kind": "path"
@@ -6492,7 +6492,7 @@
    "name": "syntax",
    "readme": "",
    "repository": "https://github.com/indexable-inc/blaze",
-   "rust_version": "1.99",
+   "rust_version": "1.101",
    "source": {
     "dir": "vendor/rust-analyzer/crates/syntax",
     "kind": "path"
@@ -6577,7 +6577,7 @@
    "name": "test-fixture",
    "readme": "",
    "repository": "",
-   "rust_version": "1.99",
+   "rust_version": "1.101",
    "source": {
     "dir": "vendor/rust-analyzer/crates/test-fixture",
     "kind": "path"
@@ -6594,7 +6594,7 @@
    "name": "test-utils",
    "readme": "",
    "repository": "https://github.com/indexable-inc/blaze",
-   "rust_version": "1.99",
+   "rust_version": "1.101",
    "source": {
     "dir": "vendor/rust-analyzer/crates/test-utils",
     "kind": "path"
@@ -7002,7 +7002,7 @@
    "name": "toolchain",
    "readme": "",
    "repository": "https://github.com/indexable-inc/blaze",
-   "rust_version": "1.99",
+   "rust_version": "1.101",
    "source": {
     "dir": "vendor/rust-analyzer/crates/toolchain",
     "kind": "path"
@@ -7206,7 +7206,7 @@
    "name": "tt",
    "readme": "",
    "repository": "https://github.com/indexable-inc/blaze",
-   "rust_version": "1.99",
+   "rust_version": "1.101",
    "source": {
     "dir": "vendor/rust-analyzer/crates/tt",
     "kind": "path"
@@ -7529,7 +7529,7 @@
    "name": "vfs-notify",
    "readme": "",
    "repository": "https://github.com/indexable-inc/blaze",
-   "rust_version": "1.99",
+   "rust_version": "1.101",
    "source": {
     "dir": "vendor/rust-analyzer/crates/vfs-notify",
     "kind": "path"
@@ -7546,7 +7546,7 @@
    "name": "vfs",
    "readme": "",
    "repository": "https://github.com/indexable-inc/blaze",
-   "rust_version": "1.99",
+   "rust_version": "1.101",
    "source": {
     "dir": "vendor/rust-analyzer/crates/vfs",
     "kind": "path"
