@@ -60,7 +60,7 @@ lays out, mangles and passes values as the pinned nightly does.
    generation. [reports/WASM32.md](reports/WASM32.md) measured `wasm32-wasip1` under
    wasmtime on the `ra-jit-wasm32-target` branch with `nightly-2026-05-10`: corpus MATCH with
    655 of 656 functions from ra-jit, stress 99 of 99, splices 71 of 71 with 62 spliced. wasm
-   is not in CI and nobody has recorded a run since the move to 1.99.0. No unwinding is
+   is not in CI and nobody has recorded a run since the move to 1.99.0, nor on the pinned nightly. No unwinding is
    emitted; the wasm targets are `panic=abort`. `wasm32-unknown-unknown` was only exercised
    through one Dioxus page.
 3. `splices.py` 71 of 71 in CI on both Linux architectures; `farsplices.py` 6 of 6 on

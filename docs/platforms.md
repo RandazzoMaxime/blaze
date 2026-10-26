@@ -187,7 +187,7 @@ module again with new function bodies under the same indices.
 This was measured once, on an earlier branch with `nightly-2026-05-10`, for `wasm32-wasip1`
 under wasmtime: corpus MATCH with 655 of 656 functions from ra-jit, stress 99 of 99, splices
 71 of 71 with 62 spliced ([reports/WASM32.md](reports/WASM32.md)). It is not in CI and has
-not been rerun on Rust 1.99.0, so treat it as unverified at the current commit.
+not been rerun since, on 1.99.0 or the pinned nightly, so treat it as unverified at the current commit.
 
 Limits stated in that report: no unwinding is emitted (the wasm targets are
 `panic=abort`), threads are not supported, `v128` and some wide-integer operations are

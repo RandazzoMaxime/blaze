@@ -444,6 +444,17 @@ All notable changes to ra-jit are written here. The format follows
 
 ### Changed
 
+- blaze builds with one Rust, the latest nightly: `nightly-2026-10-25` (rust-lang/rust
+  12433c307), pinned in `harness/toolchain` and moved with `harness/toolchain_bump.py`, in
+  place of stable 1.99.0. `vendor/rustc_abi` and the proc-macro server are taken from that
+  commit, the answers to rustc's questions are that nightly's, and `TypeId` hashes, the abort
+  intrinsic and the `core::arch` LLVM intrinsics follow it. A crate with `#![feature(...)]`
+  builds like any other (`harness/live-alloc` runs a program on `allocator_api` with live
+  edits); deref patterns are lowered as `rustc_mir_build` lowers them; every `-Z` flag of the
+  nightly is ignored, modelled or refused by one table (`-Zthreads` is ignored); and cargo's
+  second build-directory layout (`build/<pkg>/<hash>/{out,fingerprint,run}`) is followed
+  beside the first.
+
 - The first edit after a daemon starts on the store no longer compiles every function from
   the store in the edited file to tell what changed. Each entry names the items of the
   checkout its code comes from, by a hash of their text: the body it is written in, the
