@@ -9072,6 +9072,7 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
                 }
             }
         }
+        let unmentioned = unmentioned_locals(body);
         for (local, data) in body.locals.iter() {
             if self.locals.contains_idx(local)
                 || forwarded.contains_key(&local)
@@ -9080,6 +9081,16 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
                 continue;
             }
             let layout = self.layout(data.ty.as_ref())?;
+            // Nothing reads or writes it, so it needs no memory: a closure's body has a local
+            // for each capture and for each binding of the function it is written in, and a
+            // closure that captures a large value by move would otherwise have room for it
+            // twice in every call's frame (bug D: two such frames overflowed CoreAudio's
+            // 512 KB thread). The address is as a value of no size has it.
+            if frame.is_none() && unmentioned.contains(&local) && !layout.is_unsized() {
+                let addr = self.builder.ins().iconst(ptr(), layout.align.abi.bytes() as i64);
+                self.locals.insert(local, LocalSlot { addr, borrowed: false });
+                continue;
+            }
             // A capture an `async` body uses in place is the future's field.
             if let Some((_, frame_layout, frame_addr, ..)) = &frame
                 && let Some(&(_, field)) = body.upvars_in_place.iter().find(|it| it.0 == local)
@@ -16406,6 +16417,28 @@ fn register_locals(body: &MirBody<'_>, forwarded: &FxHashMap<LocalId, LocalId>) 
         .map(|(local, _)| local)
         .filter(|local| {
             !bound.contains(local) && mentions.get(local).is_none_or(|(all, plain)| all == plain)
+        })
+        .collect()
+}
+
+/// The locals of `body` that no place mentions, which hold nothing the body ever reads: their
+/// storage markers are all there is of them. The parameters, the return slot and the promoted
+/// locals are not among them, whatever mentions them: they are written from outside the body,
+/// or read by it.
+fn unmentioned_locals(body: &MirBody<'_>) -> FxHashSet<LocalId> {
+    let mut mentioned = FxHashSet::default();
+    body.visit_places(|place| {
+        mentioned.insert(place.local);
+    });
+    body.locals
+        .iter()
+        .map(|(local, _)| local)
+        .filter(|local| {
+            !mentioned.contains(local)
+                && !body.param_locals.contains(local)
+                && *local != returned_local(body)
+                && !body.promoted_locals.iter().any(|it| it.0 == *local)
+                && !body.upvars_in_place.iter().any(|it| it.0 == *local)
         })
         .collect()
 }

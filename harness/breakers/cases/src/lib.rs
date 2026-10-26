@@ -152,6 +152,7 @@ cases![
     const_format_args,
     assert_long_expression,
     frame_of_array,
+    captured_frames,
     frame_of_results,
     const_black_box,
     frame_of_tables,
