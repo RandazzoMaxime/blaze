@@ -185,6 +185,9 @@ fn compile_in(
     dir: &Path,
     rustc_had: &dyn Fn(&str) -> Option<String>,
 ) -> Result<(), String> {
+    if let Some(why) = crate::unstable::refusal(asked.args) {
+        return Err(format!("it is built with {why}"));
+    }
     let library = sysroot.join("lib/rustlib/src/rust/library");
     if !library.is_dir() {
         return Err("the toolchain has no source of the standard library".to_owned());

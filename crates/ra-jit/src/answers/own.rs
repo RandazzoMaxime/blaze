@@ -200,8 +200,10 @@ impl<'a> Given<'a> {
                         _ => return None,
                     }
                 }
-                "-Z" => match value()? {
-                    "unstable-options" => given.unstable_options = true,
+                "-Z" => match crate::unstable::flag(value()?) {
+                    flag if flag.name == "unstable-options" => given.unstable_options = true,
+                    // One that changes only how rustc works changes no answer.
+                    flag if matches!(flag.treatment(), crate::unstable::Treatment::Ignored(_)) => {}
                     _ => return None,
                 },
                 _ if LINTS.contains(&flag) || IGNORED_VALUED.contains(&flag) => {
@@ -418,5 +420,6 @@ mod tests {
         assert!(Given::of(&["-C", "target-cpu=native", "--print", "cfg"]).is_none());
         assert!(Given::of(&["-Ctarget-feature=+avx2", "--print", "cfg"]).is_none());
         assert!(Given::of(&["-Z", "ub-checks", "--print", "cfg"]).is_none());
+        assert!(Given::of(&["-Zthreads=8", "--print", "cfg"]).is_some());
     }
 }

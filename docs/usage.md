@@ -42,7 +42,9 @@ same as cargo's, it lets cargo do that build and prints one line saying why
 with cargo ([#84](https://github.com/indexable-inc/ra-jit/issues/84)), and the line names the
 step of [the plan](no-rustc.md) that removes it. That happens after a change to `Cargo.toml`,
 `Cargo.lock` or what a build script reads, when a test is added or removed, and for a few flags
-such as `--message-format` and `-Z`. The full list is in [cargo.md](cargo.md#when-cargo-builds-instead).
+such as `--message-format` and cargo's own `-Z`. The full list is in [cargo.md](cargo.md#when-cargo-builds-instead).
+rustc's `-Z` flags in `RUSTFLAGS` or `rustflags`, such as `-Zthreads=8`, are another matter: rustc
+still gets them, and what blaze does with each is in [support.md](support.md#-z-flags-for-rustc).
 
 ## Rebuild on every save
 
