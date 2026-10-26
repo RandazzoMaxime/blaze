@@ -19,6 +19,15 @@ How to build, test and change ra-jit, including the vendored rust-analyzer, is
   run sandboxed ([#147](https://github.com/indexable-inc/blaze/issues/147)). One that needs
   more than the sandbox allows is the only exception, and is made to work rather than refused
   where possible: [docs/no-rustc.md](docs/no-rustc.md).
+- **Every test runs in a sandbox, by default, on every platform.** "Everything should by
+  default be in sandbox and yea it should have sandbox support macos" (Andrew, 2026-10-26).
+  `cargo ra-jit test` runs each test executable in one sandbox (Linux namespaces and seccomp,
+  macOS Seatbelt and the interposer) under `all` and `affected` alike. Where none can be made
+  it stops, rather than run outside; the only ways out are a package's
+  `[package.metadata.blaze.sandbox]` (`tests = false`, `unsandboxed-tests`) and
+  `RA_JIT_SANDBOX=off`, never a silent fallback. Nothing new that runs user code (tests, build
+  scripts, proc macros) runs outside it by default:
+  [docs/cargo.md](docs/cargo.md#every-test-runs-in-a-sandbox).
 - **Pick the best long-term design, not the least work.** Agents write most of ra-jit, so the
   amount of code a design takes is not what limits it: own the layer, rewrite it or port
   rustc's rule properly, rather than do the least work or what a small team could maintain.
