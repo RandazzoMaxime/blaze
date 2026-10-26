@@ -169,7 +169,7 @@ fn type_name() {
 }
 
 const TYPE_INFO: &str = r#"
-    //- minicore: option, send, slice
+    //- minicore: option, send, slice, matches
     #![feature(lang_items)]
     #[lang = "type_id"]
     pub struct TypeId { t: (u64, u64) }
