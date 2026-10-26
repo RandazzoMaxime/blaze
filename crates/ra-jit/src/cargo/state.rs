@@ -1188,8 +1188,11 @@ pub(crate) fn place(from: &Path, to: &Path) -> std::io::Result<()> {
 /// program that is running.
 pub(crate) fn as_built(command: &mut Command) -> std::io::Result<()> {
     command.env(switch::VARIABLE, switch::wrapper_path()?).env(wrapper::DRIVEN, "1");
-    // The project's own wrapper still runs rustc, from inside ra-jit's.
-    match switch::project_wrapper(&std::env::current_dir()?) {
+    // The project's own wrapper still runs rustc, from inside ra-jit's, as cargo finds it from
+    // the directory it runs in.
+    let dir =
+        command.get_current_dir().map_or_else(std::env::current_dir, |it| Ok(it.to_owned()))?;
+    match switch::project_wrapper(&dir) {
         Some(theirs) => command.env(switch::CHAINED, theirs),
         None => command.env_remove(switch::CHAINED),
     };

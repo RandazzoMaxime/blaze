@@ -609,6 +609,7 @@ fn asking(checkout: &Checkout) -> Checkout {
             || name == wrapper::STAGED
             || name == wrapper::EVERY_CRATE
             || name == switch::VARIABLE
+            || name == switch::CHAINED
             || name == "RA_JIT_STATS"
             || name == "RA_JIT_TRACE"
     };

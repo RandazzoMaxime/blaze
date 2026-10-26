@@ -97,9 +97,11 @@ pub(crate) fn command(mut args: impl Iterator<Item = OsString>) -> anyhow::Resul
     // The wrapper the user had for the workspace's crates still runs rustc.
     // Under `cargo ra-jit`, the one the project's configuration names, which ra-jit's took the
     // place of; under plain cargo, the one `ra-jit enable` found in the user's configuration.
-    let chained = std::env::var_os(super::switch::CHAINED)
-        .filter(|it| !it.is_empty())
-        .or_else(|| Enabled::read().and_then(|it| it.chained).map(OsString::from));
+    // Set but empty, the project has cargo run rustc through no wrapper, and so does this.
+    let chained = match std::env::var_os(super::switch::CHAINED) {
+        Some(theirs) => Some(theirs).filter(|it| !it.is_empty()),
+        None => Enabled::read().and_then(|it| it.chained).map(OsString::from),
+    };
     let mut compiler = match chained {
         // What a cargo that only asks through ra-jit compiles is compiled as it would be
         // without it, by the workspace's wrapper when there is one.
