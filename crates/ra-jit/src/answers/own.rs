@@ -13,8 +13,9 @@ use std::{
 
 use serde_derive::Deserialize;
 
-/// What each release of rustc ra-jit has the answers of says.
-const RELEASES: [&str; 1] = [include_str!("rustc-1.99.0.json")];
+/// What the rustc of the toolchain in `harness/toolchain` says (`harness/answers.py --write`
+/// writes it when the toolchain moves).
+const RELEASES: [&str; 1] = [include_str!("rustc.json")];
 
 #[derive(Deserialize)]
 struct Release {
