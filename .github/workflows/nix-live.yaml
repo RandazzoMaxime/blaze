@@ -104,7 +104,7 @@ jobs:
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v7
-      - run: rustup toolchain install 1.99.0 --profile minimal -c rust-src && rustup default 1.99.0
+      - run: tc=$(cat harness/toolchain) && rustup toolchain install "$tc" --profile minimal -c rust-src && rustup default "$tc"
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: |
@@ -135,7 +135,7 @@ jobs:
     continue-on-error: true
     steps:
       - uses: actions/checkout@v7
-      - run: rustup toolchain install 1.99.0 --profile minimal -c rust-src && rustup default 1.99.0
+      - run: tc=$(cat harness/toolchain) && rustup toolchain install "$tc" --profile minimal -c rust-src && rustup default "$tc"
       - uses: Swatinem/rust-cache@v2
       # Where it is real code: the whole of macos.rs and the patch format.
       - run: cargo test --release -p ra-jit-live

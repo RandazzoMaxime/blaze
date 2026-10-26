@@ -461,17 +461,34 @@ pub(crate) fn checked(asked: &Invocation) -> anyhow::Result<daemon::Ahead> {
     Ok(daemon::Ahead { config, crates, root })
 }
 
+/// A program the daemon built for the source as it is, while cargo builds another: the
+/// executable rustc would link of it is the daemon's, which may be running with edits
+/// applied, and one rustc linked again would have it start again for nothing.
+pub(crate) struct Daemons {
+    /// The directory of the record of the unit cargo links it from.
+    pub(crate) unit: PathBuf,
+    /// What the daemon built it by.
+    pub(crate) plan: Plan,
+    /// Where cargo has the executable, which a program may be running from.
+    pub(crate) places: Vec<PathBuf>,
+    /// The key of the build the daemon built it for.
+    pub(crate) key: String,
+}
+
 impl Built {
     /// Runs cargo on what `asked` builds, with ra-jit as the wrapper of the workspace's
     /// crates. Progress and diagnostics are cargo's own. `Err` is cargo's exit status when
     /// it failed.
     /// `ahead` is what the daemon was told of the build before cargo started, for the
     /// worker that loads it meanwhile to hear what the scripts said.
+    /// `daemons` are the programs the daemon built for the source as it is, which cargo
+    /// is given rather than have rustc link them again.
     pub(crate) fn by_cargo(
         asked: &Invocation,
         ahead: Option<&daemon::Ahead>,
+        daemons: &[Daemons],
     ) -> anyhow::Result<Result<Built, i32>> {
-        Built::by(asked, None, ahead)
+        Built::by(asked, None, ahead, daemons)
     }
 
     /// The same, with rustc building of the crates rooted at `staged` only what stands in
@@ -480,13 +497,14 @@ impl Built {
         asked: &Invocation,
         staged: &Staged,
     ) -> anyhow::Result<Result<Built, i32>> {
-        Built::by(asked, Some(staged), staged.ahead.as_ref())
+        Built::by(asked, Some(staged), staged.ahead.as_ref(), &[])
     }
 
     fn by(
         asked: &Invocation,
         staged: Option<&Staged>,
         ahead: Option<&daemon::Ahead>,
+        daemons: &[Daemons],
     ) -> anyhow::Result<Result<Built, i32>> {
         let started = stamp_now();
         let mut cargo = Command::new(cargo_path());
@@ -499,6 +517,16 @@ impl Built {
         if let Some(staged) = staged {
             cargo.env(switch::VARIABLE, switch::first_wrapper_path()?);
             cargo.env(wrapper::STAGED, std::env::join_paths(&staged.roots)?);
+        }
+        // A unit the wrapper did not say it placed this time is rustc's ([`State::keep`]).
+        for daemon in daemons {
+            let _ = std::fs::remove_file(daemon.unit.join(wrapper::PLACED));
+        }
+        // Units no list can hold are linked by rustc, as they would be without the daemon.
+        if let Some(first) = daemons.first()
+            && let Ok(units) = std::env::join_paths(daemons.iter().map(|it| &it.unit))
+        {
+            cargo.env(wrapper::DAEMONS, units).env(wrapper::DAEMONS_KEY, &first.key);
         }
         cargo.stdout(Stdio::piped());
         let mut cargo = cargo.spawn().context("running cargo")?;
@@ -711,13 +739,15 @@ impl State {
     }
 
     /// Puts the executables rustc linked back where cargo has them, for cargo to find what
-    /// it built. One whose link is gone is deleted, and cargo links it again.
-    pub(crate) fn give_back(key: &str) {
+    /// it built. One whose link is gone is deleted, and cargo links it again. Those of
+    /// `daemons` stay the daemon's: cargo is given the daemon's again if it links them.
+    pub(crate) fn give_back(key: &str, daemons: &[Daemons]) {
         let kept = State::kept_path(key).ok().and_then(|it| std::fs::read(it).ok());
         let kept: Vec<(PathBuf, PathBuf)> =
             kept.and_then(|it| serde_json::from_slice(&it).ok()).unwrap_or_default();
         let _held = build_locks(kept.iter().map(|(executable, _)| &**executable));
-        for (executable, cargos) in kept {
+        let daemons = |it: &PathBuf| daemons.iter().any(|daemon| daemon.places.contains(it));
+        for (executable, cargos) in kept.into_iter().filter(|(it, _)| !daemons(it)) {
             // Whatever goes wrong here, cargo finds a file that is not its own or none,
             // and builds the program again.
             let _ = if is_placed(&cargos, &executable) {
@@ -780,6 +810,43 @@ impl State {
             }
         }
         Ok(cargos)
+    }
+
+    /// The programs the daemon built, by `answers`, for the source as it is now.
+    pub(crate) fn daemons(&self, answers: &[Vec<Result<(), String>>]) -> Vec<Daemons> {
+        let built = |program: &Program| {
+            let (checkout, at) = program.asked_as?;
+            answers.get(checkout)?.get(at)?.as_ref().ok()?;
+            let plan = self.checkouts[checkout].programs[at].clone();
+            let places = program.places().map(Path::to_owned).collect();
+            Some(Daemons { unit: program.unit.clone()?, plan, places, key: self.key.clone() })
+        };
+        self.programs.iter().filter_map(built).collect()
+    }
+
+    /// Has each program of `daemons`, which cargo was given the daemon's executable of, keep
+    /// the plan it had: rustc linked none of them again, so what the daemon's worker built
+    /// of each is what runs, and its checkout is [`Checkout::kept`].
+    pub(crate) fn keep(&mut self, daemons: &[Daemons]) {
+        for program in &self.programs {
+            let Some((checkout, at)) = program.asked_as else { continue };
+            let kept = daemons.iter().find(|it| program.unit.as_ref() == Some(&it.unit));
+            let Some(kept) = kept else { continue };
+            // Only a program the wrapper gave cargo the daemon's executable of is the daemon's:
+            // one rustc linked has the plan cargo's build made of it.
+            let placed = kept.unit.join(wrapper::PLACED);
+            let by_this = std::fs::read_to_string(&placed).is_ok_and(|it| it == self.key);
+            let _ = std::fs::remove_file(&placed);
+            if !by_this {
+                continue;
+            }
+            let checkout = &mut self.checkouts[checkout];
+            checkout.programs[at] = kept.plan.clone();
+            checkout.kept = true;
+        }
+        for checkout in self.checkouts.iter_mut().filter(|it| it.kept) {
+            checkout.generation = checkout.programs.iter().map(|it| it.stamp).max().unwrap_or(0);
+        }
     }
 
     /// Has each program be, where cargo's own is kept, a copy of the one the daemon
@@ -883,6 +950,7 @@ impl State {
         let checkout = |unit_test: bool| Checkout {
             key: format!("{key}{}", if unit_test { "-unit" } else { "" }),
             generation: 0,
+            kept: false,
             built_at: built.started,
             config: config(unit_test),
             root: root.clone(),
@@ -954,6 +1022,7 @@ impl State {
                 inputs: inputs.into_iter().collect(),
                 env: run_env(package, &built.scripts)
                     .into_iter()
+                    .chain(programs_named(kind, unit))
                     .chain(library_path(executable.as_std_path(), sysroot_libraries.as_deref()))
                     .collect(),
             });
@@ -1020,9 +1089,11 @@ impl Program {
 /// locks from putting its programs in place until they have started. A directory cargo
 /// keeps no lock in, on NFS, has none to hold.
 fn build_locks<'a>(executables: impl Iterator<Item = &'a Path>) -> Vec<std::fs::File> {
-    // `debug/app`, `debug/examples/app` and `debug/deps/app-…` are all of `debug`.
+    // `debug/app`, `debug/examples/app`, `debug/deps/app-…` and, in cargo's second layout,
+    // `debug/build/app/<hash>/out/app-…` are all of `debug`.
     let lock_of = |executable: &Path| {
-        let above = executable.ancestors().skip(1).take(2);
+        let profile = super::layout::unit_dir(executable).and_then(|it| it.profile());
+        let above = profile.into_iter().chain(executable.ancestors().skip(1).take(2));
         above.map(|dir| dir.join(".cargo-lock")).find(|it| it.is_file())
     };
     let mut locks: Vec<PathBuf> = executables.filter_map(lock_of).collect();
@@ -1219,16 +1290,17 @@ fn project(asked: &Invocation, cwd: &Path, metadata: &Metadata) -> Result<PathBu
 /// library, which the daemon compiles from, is not installed. `cargo blaze` has made it
 /// blaze's (`toolchain::settle`); plain cargo after `blaze enable` builds with the project's.
 ///
-/// `RA_JIT_OTHER_TOOLCHAIN=1` takes another release anyway, for a project pinned to a
-/// toolchain near ours (a nightly of the next release): the layouts, symbol names, ABI and
-/// `TypeId`s are still 1.99.0's, and nothing checks that the other rustc agrees with them.
+/// `RA_JIT_OTHER_TOOLCHAIN=1` takes another toolchain anyway, for a project pinned to a
+/// nightly near ours: the layouts, symbol names, ABI and `TypeId`s are still the pinned
+/// nightly's, and nothing checks that the other rustc agrees with them.
 fn other_toolchain() -> Option<String> {
     let rustc = rustc_path();
     let said = |flag: &str| rustc_says(&rustc, &[flag]);
     let version = said("--version")?;
-    let version = version.split_whitespace().nth(1).unwrap_or_default();
+    let version = version.lines().next().unwrap_or_default().trim();
+    let version = version.strip_prefix("rustc ").unwrap_or(version);
     let ours = super::toolchain::OURS.trim();
-    if version != ours && !other_toolchain_allowed() {
+    if version != super::toolchain::ours_says() && !other_toolchain_allowed() {
         return Some(format!(
             "rustc {version} is not the {ours} blaze compiles, and plain cargo builds with the \
              project's toolchain; `cargo blaze` builds with {ours}"
@@ -1287,17 +1359,42 @@ pub(super) fn sysroot_libraries() -> Option<PathBuf> {
 
 /// Where cargo has the dynamic linker look when it runs `executable`: the dependencies of
 /// the profile, the profile's own directory, the toolchain's libraries, and then wherever
-/// it looked already. A test of a proc macro is linked with the toolchain's `libstd`.
+/// it looked already. A test of a proc macro is linked with the toolchain's `libstd`. The
+/// dependencies are `deps` in cargo's first layout and, in its second, the directory of each
+/// unit that is a `dylib` ([`super::layout::dylib_dirs`]).
 pub(super) fn library_path(executable: &Path, sysroot: Option<&Path>) -> Option<(String, String)> {
     let inside = |it: &&Path| it.file_name().is_some_and(|it| it == "deps" || it == "examples");
     let dir = executable.parent()?;
-    let profile = if inside(&dir) { dir.parent()? } else { dir };
+    let profile = match super::layout::unit_dir(dir) {
+        Some(unit) => unit.profile()?,
+        None if inside(&dir) => dir.parent()?,
+        None => dir,
+    };
     let already = std::env::var_os(LIBRARY_PATH);
     let already = already.iter().flat_map(std::env::split_paths);
-    let dirs =
-        [profile.join("deps"), profile.to_owned()].into_iter().chain(sysroot.map(Path::to_owned));
+    let deps = match profile.join("deps").is_dir() || !profile.join("build").is_dir() {
+        true => vec![profile.join("deps")],
+        false => super::layout::dylib_dirs(profile),
+    };
+    let dirs = deps.into_iter().chain([profile.to_owned()]).chain(sysroot.map(Path::to_owned));
     let joined = std::env::join_paths(dirs.chain(already)).ok()?;
     Some((LIBRARY_PATH.to_owned(), joined.into_string().ok()?))
+}
+
+/// The variables a cargo since rust-lang/cargo#16421 also sets when it runs an integration
+/// test or a benchmark: `CARGO_BIN_EXE_<name>` for each program of its package, as it gave
+/// them to rustc for the unit. A test that looks for a program by them at run time (assert_cmd's
+/// `cargo_bin`) finds none beside it in cargo's second layout, where the test is in its unit's
+/// own directory and not in the profile's.
+fn programs_named(kind: Kind, unit: Option<&Record>) -> Vec<(String, String)> {
+    if !matches!(kind, Kind::Test | Kind::Bench) {
+        return Vec::new();
+    }
+    let named = unit.into_iter().flat_map(|it| &it.env);
+    named
+        .filter(|(name, _)| name.starts_with("CARGO_BIN_EXE_"))
+        .map(|(n, v)| (n.clone(), v.clone()))
+        .collect()
 }
 
 /// The variables cargo sets for a program of `package` when it runs it.
@@ -1539,6 +1636,17 @@ mod tests {
         assert_eq!(dirs("/t/debug/deps/unit-0123"), expected);
         assert_eq!(dirs("/t/debug/app"), expected);
         assert_eq!(dirs("/t/debug/examples/one"), expected);
+        // cargo's second layout, with no `deps`: a test in its unit's directory.
+        let second = std::env::temp_dir().join(format!("ra-jit-state-{}", std::process::id()));
+        let unit = second.join("debug/build/app/0123456789abcdef/out");
+        std::fs::create_dir_all(&unit).unwrap();
+        let test = unit.join("app-0123456789abcdef");
+        let dirs = |executable: &Path| {
+            let (_, value) = library_path(executable, Some(sysroot)).unwrap();
+            std::env::split_paths(&value).take(2).collect::<Vec<PathBuf>>()
+        };
+        assert_eq!(dirs(&test), [second.join("debug"), sysroot.to_owned()]);
+        let _ = std::fs::remove_dir_all(&second);
     }
 
     #[test]

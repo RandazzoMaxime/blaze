@@ -549,6 +549,9 @@ pub(super) struct BaseStatic {
     parents: Vec<Node>,
     /// The functions left to rustc reach it.
     theirs: bool,
+    /// rustc's copy, which has state that rustc's code shares with ours: a patch can't give
+    /// it another first value.
+    pub(super) shared: bool,
 }
 
 /// What a function left to rustc keeps the rest of the build from doing.
@@ -604,9 +607,48 @@ pub(crate) struct Frozen {
     /// The crates rustc compiled from other source than the daemon first saw them with: no
     /// copy of a function of theirs is good.
     distrusted: FxHashSet<Crate>,
+    /// The first value rustc gave each static with state that a build asked about
+    /// ([`RustcValues`]).
+    statics: Arc<std::sync::Mutex<FxHashMap<StaticId, Option<Mark>>>>,
+}
+
+/// The first value rustc gave each static with state (a thread-local, or one written at run
+/// time), as rustc compiled it: such a static stays rustc's copy only while its first value
+/// is still that one (`docs/live.md#statics`). Taken the first time a build asks, when no
+/// edit since the daemon started can have reached the static; `None` when one had, and
+/// rustc's value is not known.
+#[derive(Clone, Default)]
+pub(crate) struct RustcValues {
+    known: Arc<std::sync::Mutex<FxHashMap<StaticId, Option<Mark>>>>,
+    /// The crates an edit since the start can have changed a value of: those edited and
+    /// what depends on them, and those rustc compiled from other source.
+    touched: Arc<FxHashSet<Crate>>,
+}
+
+impl RustcValues {
+    /// Whether rustc's copy of `id` still starts from the value the source gives it now. One
+    /// that does not compile has nothing of ours to tell by, and is rustc's.
+    ///
+    /// An edit of bodies alone is no edit of a value: those are bodies of functions that are
+    /// not `const` ([`Rejections::touch_bodies`]), which no value is evaluated through.
+    pub(crate) fn kept(&self, db: &dyn HirDatabase, id: StaticId) -> bool {
+        let Ok(compiled) = compiled_static(db, id).as_ref() else { return true };
+        let now = Mark::new(db, static_serial(db, id), &compiled.requests);
+        let touched = self.touched.contains(&id.krate(db));
+        let mut known = self.known.lock().unwrap_or_else(|e| e.into_inner());
+        let was = *known.entry(id).or_insert((!touched).then_some(now));
+        was == Some(now)
+    }
 }
 
 impl Frozen {
+    /// What a build asks of [`RustcValues`]: the values taken so far, shared with it, and the
+    /// edits as they are now.
+    pub(crate) fn rustc_values(&self) -> RustcValues {
+        let touched = self.edited.iter().chain(&self.distrusted).copied().collect();
+        RustcValues { known: self.statics.clone(), touched: Arc::new(touched) }
+    }
+
     pub(crate) fn distrust(&mut self, crates: impl IntoIterator<Item = Crate>) {
         self.distrusted.extend(crates);
     }
@@ -1300,24 +1342,35 @@ impl Base {
                 (known.mark.is_some() || known.forwarded).then(|| (instance.clone(), known))
             })
             .collect::<Option<FxIndexMap<_, _>>>()?;
+        // One that does not compile is never what it was: a change to the file declines.
+        let nothing = Mark { serial: 0, locations: 0, lines: 0 };
+        let base_static = |id: StaticId,
+                           data,
+                           compiled: Option<&super::fragment::CompiledStatic>,
+                           shared| BaseStatic {
+            symbol: decls.get_data_decl(data).linkage_name(data).into_owned(),
+            writable: compiled.is_some_and(|it| it.writable),
+            mark: compiled.map_or(nothing, |it| Mark::new(db, static_serial(db, id), &it.requests)),
+            krate: id.krate(db),
+            file: body_file(db, id.into()),
+            parents: Vec::new(),
+            theirs: false,
+            shared,
+        };
         let mut statics = cg
             .statics
             .iter()
             .chain(&cg.frozen_statics)
             .map(|(&id, &data)| {
                 let compiled = compiled_static(db, id).as_ref().ok()?;
-                let known = BaseStatic {
-                    symbol: decls.get_data_decl(data).linkage_name(data).into_owned(),
-                    writable: compiled.writable,
-                    mark: Mark::new(db, static_serial(db, id), &compiled.requests),
-                    krate: id.krate(db),
-                    file: body_file(db, id.into()),
-                    parents: Vec::new(),
-                    theirs: false,
-                };
-                Some((id, known))
+                Some((id, base_static(id, data, Some(compiled), false)))
             })
             .collect::<Option<FxHashMap<_, _>>>()?;
+        // rustc's copies with state, so that an edit to a first value is seen.
+        for (&id, &data) in &cg.shared_statics {
+            let compiled = compiled_static(db, id).as_ref().ok();
+            statics.insert(id, base_static(id, data, compiled, true));
+        }
         let mut edges = Vec::new();
         let mut note = |parent: Node, requests: &Requests| {
             for request in &requests.funcs {
@@ -1565,6 +1618,8 @@ impl Base {
                 file: body_file(db, id.into()),
                 parents: Vec::new(),
                 theirs: false,
+                // rustc's copy, which rustc's code writes when the static has state.
+                shared: is_thread_local(db, id) || compiled.is_some_and(|it| it.writable),
             };
             self.statics.insert(id, known);
         }
@@ -2343,6 +2398,13 @@ impl Base {
             if self.rustc {
                 return stale.declined("a static changed, and rustc's copy is the program's");
             }
+            // rustc's copy holds what the program wrote, from the first value it had: one of
+            // ours beside it would split the state, and it can't start again from another.
+            if was.shared {
+                return stale.declined(
+                    "the first value changed of a static with state that rustc's code shares",
+                );
+            }
             stale.their_walk_changed |= was.theirs;
             // rustc's code has rustc's copy, and a thread's copy is laid out by the linker.
             let writable = probe(|| compiled_static(db, id).as_ref().ok().map(|it| it.writable));
@@ -2590,6 +2652,7 @@ impl Base {
         cg.phases.compile = verify;
         cg.phases.setup = start.elapsed() - verify;
         cg.rustc_futures = known.futures.clone();
+        cg.rustc_values = known.frozen.rustc_values();
         cg.tiers = Some(&known.tiers);
         // What nothing reached any more can be reached again by the code compiled now.
         cg.replaced = unchanged;

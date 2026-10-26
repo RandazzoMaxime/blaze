@@ -404,6 +404,23 @@ impl<'a, 'db> StableNames<'a, 'db> {
         Some(out)
     }
 
+    /// A name of a static that stays the same across edits of the checkout while the
+    /// daemon runs, for [`super::LASTING_STATIC`]: [`Self::static_name`] names a crate of the
+    /// checkout by its content and a macro call by its place among the calls of its file,
+    /// which an edit above it changes. Not for the store.
+    pub(super) fn static_across_edits(&self, id: StaticId) -> Option<String> {
+        let krate = id.krate(self.db);
+        if !self.of_the_checkout(krate) {
+            return self.static_name(id);
+        }
+        let at = id.lookup(self.db).id;
+        let root = krate.data(self.db).root_file_id;
+        let mut out = format!("static {OF_CHECKOUT}{root:?}:");
+        file_across_edits(self.db, &mut out, at.file_id)?;
+        write!(out, "#{}", at.value.erase().into_raw()).ok()?;
+        Some(out)
+    }
+
     /// The name of a file as every machine has it: one of the standard library is where it
     /// was built, and one that cargo fetched is under [`super::CARGO_HOME`] whoever fetched
     /// it. `None` for a file that is already named so and is not one of those.
@@ -867,6 +884,35 @@ fn file_name(
         },
     }
     Some(())
+}
+
+/// [`file_name`] for [`StableNames::static_across_edits`]: a file by its id, and a call of a
+/// macro written as one (`name!(...)`) by its text, the same wherever the call moves in its
+/// file. A derive's or an attribute's call is the item's, which its name stands for.
+fn file_across_edits(db: &dyn HirDatabase, out: &mut String, file: HirFileId) -> Option<()> {
+    match file {
+        HirFileId::FileId(file) => write!(out, "{:?}", file.file_id(db)).ok(),
+        HirFileId::MacroFile(call) => {
+            let loc = call.loc(db);
+            match &loc.kind {
+                MacroCallKind::FnLike { ast_id, .. } => {
+                    file_across_edits(db, out, ast_id.file_id)?;
+                    let text = loc.to_node(db).value.text().to_string();
+                    write!(out, "#{:032x}!", super::print_of(&text)).ok()
+                }
+                MacroCallKind::Derive { ast_id, derive_attr_index, derive_index, .. } => {
+                    file_across_edits(db, out, ast_id.file_id)?;
+                    let at = ast_id.value.erase().into_raw();
+                    write!(out, "#{at}!derive {derive_attr_index:?} {derive_index}").ok()
+                }
+                MacroCallKind::Attr { ast_id, censored_attr_ids, .. } => {
+                    file_across_edits(db, out, ast_id.file_id)?;
+                    let at = ast_id.value.erase().into_raw();
+                    write!(out, "#{at}!attr {censored_attr_ids:?}").ok()
+                }
+            }
+        }
+    }
 }
 
 fn hashed(spelled: &str) -> String {

@@ -45,6 +45,12 @@ HARNESSES = [
     ("core", ["coldbuild.py"], {}, on("linux"), 2),
     ("core", ["splices.py"], {}, EVERYWHERE, 2),
     ("core", ["live_e2e.py"], {}, on("linux-x86_64"), 1),
+    # Cargo builds one program of two: the other runs on, taking edits, with no restart.
+    ("core", ["live_fallback.py"], {}, on("linux-x86_64"), 1),
+    # A type added beside another, the code moved to it and the old one deleted, each a patch.
+    ("core", ["live_types.py"], {}, on("linux-x86_64"), 1),
+    # A program on a nightly feature (allocator_api) builds and takes live edits the same way.
+    ("core", ["live_e2e.py"], {"LIVE_PROGRAM": "live-alloc"}, on("linux-x86_64"), 1),
     # Apple's linker leaves no more room than it is told, and gives a newer macOS chained fixups.
     ("core", ["headerpad.py"], {}, on("macos"), 1),
     # bun links with `-no_compact_unwind`, which leaves `__eh_frame` alone to the unwinder.
@@ -57,6 +63,7 @@ HARNESSES = [
     ("core", ["bigbinary.py"], {}, on("linux", "macos"), None),
     # `cargo ra-jit` hands Windows builds to cargo, so there the daemon links nothing to test.
     ("core", ["unreached.py"], {}, on("linux", "macos"), 1),
+    ("core", ["anonstatics.py"], {}, on("linux", "macos"), 1),
     ("core", ["loadedits.py"], {}, on("linux", "macos"), 2),
     ("core", ["testselect.py"], {}, on("linux", "macos"), 2),
     ("core", ["doctestonce.py"], {}, on("linux", "macos"), 1),

@@ -17,14 +17,17 @@
           inherit system;
           overlays = [ rust-overlay.overlays.default ];
         };
-        # The one toolchain ra-jit is pinned to (harness/toolchain); rust-src is the sysroot
-        # source rust-analyzer reads `core` from.
-        rust = pkgs.rust-bin.stable."1.99.0".default.override {
+        # The one toolchain ra-jit is pinned to: the dated nightly in harness/toolchain
+        # (`nightly-YYYY-MM-DD`, moved by harness/toolchain_bump.py, which also moves the
+        # rust-overlay input to one that has it). rust-src is the sysroot source rust-analyzer
+        # reads `core` from.
+        pin = pkgs.lib.removePrefix "nightly-" (pkgs.lib.fileContents ./harness/toolchain);
+        rust = pkgs.rust-bin.nightly.${pin}.default.override {
           extensions = [ "rust-src" ];
         };
-        # The nightly of the setups bench.py compares with (`--setups`, docs/benchmarks.md):
-        # rustc_codegen_cranelift ships only with nightlies.
-        nightly = pkgs.rust-bin.nightly."2026-10-09".default.override {
+        # The same nightly with rustc_codegen_cranelift, for the setups bench.py compares with
+        # (`--setups`, docs/benchmarks.md).
+        nightly = pkgs.rust-bin.nightly.${pin}.default.override {
           extensions = [ "rust-src" "rustc-codegen-cranelift-preview" ];
         };
         # The one LLVM the `llvm` feature builds against, for every build of it: the dev shells
@@ -205,7 +208,7 @@
         };
         # `nix develop`: the pinned LLVM (LLVM_SYS_201_PREFIX, its tools on PATH) and the C
         # toolchain it was built with, so `cargo build --features llvm` links against it. Rust is
-        # rustup at the pinned toolchain: plain `cargo` is 1.99.0 and `cargo +<toolchain>` works.
+        # rustup at the pinned nightly: plain `cargo` is harness/toolchain's and `cargo +<toolchain>` works.
         devShells.default = pkgs.mkShell (llvmEnv // {
           packages = [ pkgs.rustup pkgs.python3 llvm llvm.dev ];
           RUSTUP_TOOLCHAIN = pkgs.lib.fileContents ./harness/toolchain;
@@ -220,7 +223,7 @@
         });
         devShells.bench = pkgs.mkShell bench;
         # What harness/bench.py and runbench.py measure bun in (bunprep.py, docs/research/bun.md):
-        # bun's pinned nightly in place of 1.99.0 (rust-src, which ra-jit reads `core` from), and
+        # bun's own pinned nightly in place of ra-jit's (rust-src, which ra-jit reads `core` from), and
         # what bun's own build of its C and C++ needs, as its flake.nix has it: LLVM 23 as the
         # C and C++ compiler, cmake, ninja, nasm (x86), go, a bun to run its build scripts, and on Linux lld.
         # ra-jit itself is built in the bench shell.

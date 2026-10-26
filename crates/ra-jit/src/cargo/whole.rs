@@ -189,6 +189,7 @@ fn checkout(
     Checkout {
         key: format!("{}-whole", asked.key(cwd)),
         generation: generation.unwrap_or(0),
+        kept: false,
         built_at: 0,
         config,
         root: root.to_owned(),

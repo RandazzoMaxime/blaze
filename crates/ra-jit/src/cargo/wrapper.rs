@@ -39,6 +39,20 @@ pub(crate) const DRIVEN: &str = "RA_JIT_CARGO_DRIVES";
 /// crates that are the daemon's to compile, as a list of paths.
 pub(crate) const STAGED: &str = "RA_JIT_STAGED_CRATES";
 
+/// The variable `cargo ra-jit` sets for a cargo that builds what the daemon did not, while
+/// it did build others: the directory of each one's unit record, as a list of paths. The
+/// daemon is asked for those as under plain cargo, and rustc links them only when it does not
+/// build them ([`super::state::Daemons`]).
+pub(crate) const DAEMONS: &str = "RA_JIT_DAEMONS_BUILT";
+
+/// The key of the build whose daemon built the programs of [`DAEMONS`]: the wrapper asks that
+/// build's daemon only, never another build that shares the unit.
+pub(crate) const DAEMONS_KEY: &str = "RA_JIT_DAEMONS_KEY";
+
+/// The file in a unit's record directory that says the wrapper gave cargo the daemon's
+/// executable of it, by the key of the build it did that for ([`DAEMONS_KEY`]).
+pub(crate) const PLACED: &str = "daemons.placed";
+
 /// The variable that says cargo runs every crate's rustc through this wrapper, and the
 /// workspace's through it twice.
 pub(crate) const EVERY_CRATE: &str = "RA_JIT_EVERY_CRATE";
@@ -121,14 +135,24 @@ pub(crate) fn command(mut args: impl Iterator<Item = OsString>) -> anyhow::Resul
             Err(why) => eprintln!("warning: rustc compiles `{}`: {why:#}", unit.id),
         }
     }
-    let known = if plain { State::of_unit(&dir) } else { Vec::new() };
+    // A program the daemon built while cargo builds another is the daemon's as under plain
+    // cargo: asked for now, it is the source as rustc reads it.
+    let daemons = if unit.linked { daemons_built(&dir) } else { None };
+    let known = match &daemons {
+        Some(key) => vec![key.clone()],
+        None if plain => State::of_unit(&dir),
+        None => Vec::new(),
+    };
     if !known.is_empty() {
-        match unit.by_daemon(&dir, &known, &rustc) {
+        match unit.by_daemon(&dir, &known, &rustc, daemons.is_some()) {
             Ok(()) => {
-                tally("daemon", &unit.crate_name);
+                if plain {
+                    tally("daemon", &unit.crate_name);
+                }
                 std::process::exit(0);
             }
-            Err(why) => unit.left_to_rustc(&why),
+            Err(why) if plain => unit.left_to_rustc(&why),
+            Err(why) => say::fallback(&why, &format!("rustc links `{}`", unit.crate_name)),
         }
     }
     let stamp = stamp_now();
@@ -353,7 +377,7 @@ impl Unit {
             id: String::new(),
             crate_name,
             source: cwd.join(&args[source]),
-            records: Record::dir_for(&cwd.join(out_dir)),
+            records: Record::dir_for(&cwd.join(&out_dir)),
             args,
             cwd,
             linked: false,
@@ -369,15 +393,23 @@ impl Unit {
         }
         unit.script = record.is_build_script();
         unit.linked = record.is_linked() && !record.runs_in_build();
-        unit.id =
-            format!("{}{}", unit.crate_name, record.codegen("extra-filename").unwrap_or_default());
+        let extra = record.codegen("extra-filename").unwrap_or_default();
+        unit.id = Record::id_of(&unit.crate_name, extra, &unit.cwd.join(&out_dir));
         Some(unit)
     }
 
     /// Has the daemon build the program and puts it where rustc would have, with the
     /// dep-info rustc would have written. `known` are the builds that have the program, and
     /// `dir` is where the unit is recorded. `Err` is why the program is rustc's to link.
-    fn by_daemon(&self, dir: &Path, known: &[String], rustc: &OsString) -> Result<(), String> {
+    /// `only` is that `known` is the one build of a `cargo ra-jit` that has cargo build
+    /// another program ([`DAEMONS`]): what the other builds kept is theirs to keep.
+    fn by_daemon(
+        &self,
+        dir: &Path,
+        known: &[String],
+        rustc: &OsString,
+        only: bool,
+    ) -> Result<(), String> {
         let mut read = known.iter().map(|key| State::read(key).map_err(|why| (key, why)));
         let mut state = match read.find_map(Result::ok) {
             Some(state) => state,
@@ -408,20 +440,37 @@ impl Unit {
             }
             Err(why) => return Err(why.why()),
         }
+        let binary = &checkout.programs[at].binary;
+        self.put(binary, read)?;
+        state.cargo_has(dir, binary).map_err(|it| format!("keeping {}: {it}", binary.display()))?;
+        if only {
+            // The build that ran cargo keeps the daemon's plan of the program on this alone.
+            std::fs::write(dir.join(PLACED), &state.key)
+                .map_err(|it| format!("saying {} was placed: {it}", binary.display()))?;
+        } else {
+            // Every other build with the program kept the one cargo had before.
+            State::forget(known.iter().filter(|it| **it != state.key));
+        }
+        Ok(())
+    }
+
+    /// Puts `binary`, the daemon's build of the program, where rustc would have linked it,
+    /// with the dep-info rustc wrote of it (`read`, rustc run by [`Self::dep_info`]).
+    fn put(
+        &self,
+        binary: &Path,
+        read: Result<std::io::Result<Output>, String>,
+    ) -> Result<(), String> {
         let read = read?.map_err(|it| format!("rustc did not run: {it}"))?;
         if !read.status.success() {
             let _ = std::io::stderr().write_all(&read.stderr);
             std::process::exit(super::FAILED);
         }
-        let binary = &checkout.programs[at].binary;
         // Cargo starts the program with no word to the daemon, which may still be writing it.
         let _unwritten = crate::splice::unwritten(binary);
         let record = self.as_record(0, Vec::new(), None);
         let linked = record.outputs().into_iter().next().ok_or("rustc names no executable")?;
         place(binary, &linked).map_err(|it| format!("installing {}: {it}", linked.display()))?;
-        state.cargo_has(dir, binary).map_err(|it| format!("keeping {}: {it}", linked.display()))?;
-        // Every other build with the program kept the one cargo had before.
-        State::forget(known.iter().filter(|it| **it != state.key));
         let _ = std::io::stderr().write_all(&read.stderr);
         Ok(())
     }
@@ -565,8 +614,7 @@ impl Unit {
     /// value is the metadata of a crate that has one.
     fn standing_in(&self, named: &str) -> Option<String> {
         let (name, path) = named.split_once('=')?;
-        let stem = Path::new(path).file_name()?.to_str()?.strip_suffix(".rmeta")?;
-        let id = stem.strip_prefix("lib")?;
+        let id = Record::id_of_file(&self.cwd.join(path), "lib", ".rmeta")?;
         self.records
             .join(id)
             .join(STANDS_IN)
@@ -578,8 +626,7 @@ impl Unit {
     /// the value is the library that stands in for one.
     fn checked_against(&self, named: &str) -> Option<String> {
         let (name, path) = named.split_once('=')?;
-        let stem = Path::new(path).file_name()?.to_str()?.strip_suffix(".rlib")?;
-        let id = stem.strip_prefix("lib")?;
+        let id = Record::id_of_file(&self.cwd.join(path), "lib", ".rlib")?;
         self.records
             .join(id)
             .join(STANDS_IN)
@@ -667,4 +714,12 @@ impl Unit {
         }
         self.as_record(stamp, copies, link_line).write(&self.records)
     }
+}
+
+/// The key of the build whose daemon built the program whose unit is recorded in `dir`, when
+/// the cargo running this is to be given that rather than have rustc link it ([`DAEMONS`]).
+fn daemons_built(dir: &Path) -> Option<String> {
+    let listed = std::env::var_os(DAEMONS)?;
+    let key = std::env::var(DAEMONS_KEY).ok()?;
+    std::env::split_paths(&listed).any(|unit| unit == dir).then_some(key)
 }

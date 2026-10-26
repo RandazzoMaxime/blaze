@@ -22,14 +22,14 @@ engine, so the two have to be installed side by side, with `ra-jit-rustc` and
 [installer](../install.sh) and `cargo install` both do that:
 
     curl -fsSL https://raw.githubusercontent.com/indexable-inc/blaze/main/install.sh | sh
-    cargo +1.99.0 install --locked cargo-blaze
+    cargo +nightly-2026-10-25 install --locked cargo-blaze
 
 From the release after 0.1.0, `--profile dist` builds the profile a release is built with, less
 the PGO a release adds ([reports/RELEASE-BUILD.md](reports/RELEASE-BUILD.md)); 0.1.0 has no such
 profile and fails with it. From a checkout, the release's own recipe builds all of it, with the profile
 [pgo/profiles.json](../pgo/profiles.json) pins:
 
-    python3 .github/scripts/build_release.py --target $(rustc +1.99.0 -vV | sed -n 's/^host: //p') --out shipped
+    python3 .github/scripts/build_release.py --target $(rustc +"$(cat harness/toolchain)" -vV | sed -n 's/^host: //p') --out shipped
     cp shipped/* ~/.cargo/bin/
 
 That build has the Cranelift backend only. The LLVM one (`BLAZE_BACKEND=llvm`) is
@@ -38,25 +38,29 @@ pins ([which LLVM](contributing.md#llvm-for---features-llvm)); with it the crate
 so. `cargo build -p ra-jit --release` is the quicker build the harnesses and CI use while
 working on blaze; it is not what ships.
 
-`cargo blaze` builds with Rust 1.99.0, the release blaze compiles, whatever toolchain the
-project names (a `rust-toolchain.toml`, `rustup override`, `+toolchain`, `RUSTUP_TOOLCHAIN` or
-rustup's default): it runs cargo, rustc and the daemon under 1.99.0 by naming it in
-`RUSTUP_TOOLCHAIN` and `CARGO`. Rust 1.99.0 builds what older releases built, so a project on
-an older stable builds as it is. Code only the project's own toolchain builds (a nightly's
-`#![feature]`, a newer release's library) fails with rustc's error and a note naming both
-releases. Plain `cargo` still builds with the project's toolchain, in the same target
+`cargo blaze` builds with the one toolchain blaze compiles, the dated nightly in
+`harness/toolchain` (`nightly-2026-10-25`), whatever toolchain the project names (a
+`rust-toolchain.toml`, `rustup override`, `+toolchain`, `RUSTUP_TOOLCHAIN` or rustup's
+default): it runs cargo, rustc and the daemon under that nightly by naming it in
+`RUSTUP_TOOLCHAIN` and `CARGO`. The nightly builds what older releases built, so a project on a
+stable release or an older nightly builds as it is, `#![feature(...)]` included. Code only the
+project's own toolchain builds (a feature the pinned nightly removed, a newer nightly's
+library) fails with rustc's error and a note naming both toolchains. Plain `cargo` still builds with the project's toolchain, in the same target
 directory: cargo keys what it builds by the rustc, so neither rebuilds the other's.
 `BLAZE_OTHER_TOOLCHAIN=1` builds with the project's toolchain instead
 ([support.md](support.md#toolchain)).
 
-Where 1.99.0 comes from, in this order: `RUSTC` naming a rustc of 1.99.0 with its library's
-source; rustup's 1.99.0 with `rust-src`, when rustup has it; else blaze's own copy in
-`~/.blaze/toolchains/1.99.0-<host>` (`BLAZE_HOME` moves `~/.blaze`), laid out as rustup lays
+Where the nightly comes from, in this order: `RUSTC` naming a rustc whose `rustc -V` line is
+the pinned one's (`rustc 1.101.0-nightly (12433c307 2026-10-24)`: the whole line, since every
+nightly of a release says `1.101.0`) with its library's source; rustup's `nightly-2026-10-25`
+with `rust-src`, when rustup has it; else blaze's own copy in
+`~/.blaze/toolchains/nightly-2026-10-25-<host>` (`BLAZE_HOME` moves `~/.blaze`), laid out as rustup lays
 out a toolchain. blaze downloads its copy the first time it needs it, once, with a line on
 stderr while it does: rustc, cargo, the standard library and its source from the Rust project's
 own servers, 97 MB on macOS, 133 MB on Linux x86-64 and 118 MB on Linux ARM64 (530 MB on macOS
-and 690 MB on Linux x86-64 once unpacked). Each file's sha256 is built into blaze, from Rust 1.99.0's published manifest
-(`harness/toolchain_pins.py` writes them), and a file with other bytes is refused. Concurrent
+and 690 MB on Linux x86-64 once unpacked, measured with 1.99.0's). Each file's sha256 is built
+into blaze, from the nightly's published manifest (`harness/toolchain_pins.py` writes them into
+`crates/ra-jit/src/cargo/toolchain/pins.txt`), and a file with other bytes is refused. Concurrent
 builds download it once; a download that stopped goes on from where it stopped the next time.
 Building with blaze's copy, blaze names its cargo, rustc and rustdoc in `CARGO`, `RUSTC` and
 `RUSTDOC` and puts its `bin` first on `PATH`, for the commands it runs and not for your shell.
@@ -399,7 +403,7 @@ build a command line is, so changing one starts from a cargo build again.
 | `RA_JIT_INLINE` | With LLVM at level 2 or 3, a program built whole (`runbench.py`'s builds) has the functions it calls in any crate built into it or shown to LLVM, as a release build does; the standard library's only when they are generic or `#[inline]`, as rustc does across crates. `crate` keeps that to the function's own crate, `0` builds nothing in, `all` does it in other builds with LLVM at level 2 or 3 too (never the daemon's, whose store keeps each function by its own code alone) | across crates in a whole program, the function's own crate otherwise |
 | `RA_JIT_SPLICE` | `0` links in full after every edit instead of splicing | splice |
 | `RA_JIT_WHOLE_BUILD` | `1` has `build` and `run` from nothing build each program whole with blaze, with no `cargo build` ([above](#what-a-build-does)) | cargo builds first |
-| `RA_JIT_OTHER_TOOLCHAIN` | `1` builds with the project's toolchain when it is not 1.99.0, rather than with 1.99.0, for a project pinned to a nightly near it ([support.md](support.md#toolchain)) | not set |
+| `RA_JIT_OTHER_TOOLCHAIN` | `1` builds with the project's toolchain when it is not the pinned nightly, rather than with the pinned nightly, for a project pinned to a nightly near it; nothing checks that it agrees ([support.md](support.md#toolchain)) | not set |
 
 `RA_JIT_TESTS` is read by each `cargo ra-jit test` alone and is not part of which build it
 is: `affected` runs the tests an edit reached

@@ -12,9 +12,9 @@ Andrew, 2026-10-22: "Everything should all be us 100%."
 
 The goal behind the rule is to own every layer, never by accepting less Rust. ra-jit moves step
 by step toward owning everything from source to running code, because owning it is what makes
-it fast, and it stays a superset of Rust on the way: every program rustc 1.99.0 builds builds
-and behaves the same under ra-jit, with the real standard library, C dependencies, build
-scripts and proc macros, and what ra-jit adds (live edits, tiers) comes on top. The one
+it fast, and it stays a superset of Rust on the way: every program the pinned nightly's rustc
+(`harness/toolchain`) builds builds and behaves the same under ra-jit, with the real standard
+library, C dependencies, build scripts and proc macros, and what ra-jit adds (live edits, tiers) comes on top. The one
 difference allowed is that build scripts and proc macros run sandboxed
 ([#147](https://github.com/indexable-inc/ra-jit/issues/147)); one that needs more than the
 sandbox allows is the only exception, and is made to work rather than refused where possible.
@@ -57,8 +57,8 @@ What it does not cover:
 - The platform's linker and C toolchain: `cc`, `ld`, `lld`, `link.exe`, and the C or C++ a
   build script compiles with the `cc` crate. They are not rustc. ra-jit runs the linker with a
   line it works out itself, not with rustc's.
-- ra-jit's own executable, which is built with cargo and rustc 1.99.0. Building ra-jit with
-  ra-jit is a later goal, not part of this rule.
+- ra-jit's own executable, which is built with cargo and the pinned nightly's rustc. Building
+  ra-jit with ra-jit is a later goal, not part of this rule.
 - The standard library's source (`rust-src`). It is source, and stays an input.
 - Tools cargo runs that compile no Rust: rustfmt, the resolver, fetching.
 
@@ -75,7 +75,7 @@ What "100%" means, piece by piece. Each piece is where one of today's uses goes.
    rust-analyzer's proc-macro server, running inside ra-jit, loads. Not the toolchain's
    `rust-analyzer-proc-macro-srv`, and not a library rustc built.
 3. **Build scripts are compiled, linked and run by ra-jit.** `RUSTC` names ra-jit while they
-   run, so that their own probes are answered by ra-jit, the way rustc 1.99.0 answers them.
+   run, so that their own probes are answered by ra-jit, the way the pinned rustc answers them.
 4. **The cold build is entirely ra-jit's.** No first build by cargo and rustc, no executable
    of rustc's as the base of the first edits ([#11](https://github.com/indexable-inc/ra-jit/issues/11)):
    the first edits patch ra-jit's own executable, and the store and the remote store are what
@@ -144,7 +144,7 @@ The same goal seen from the machine blaze is installed on
 ([self-contained.md](self-contained.md), [#298](https://github.com/indexable-inc/blaze/issues/298)):
 installing is one `curl`, with no rustup, no toolchain pin and no cargo, and blaze resolves a
 project exactly as cargo does. Until K, J and M land, blaze keeps a toolchain of its own,
-private to it: Rust 1.99.0's `rustc`, `cargo`, `rust-std` and `rust-src` as the Rust project
+private to it: the pinned nightly's `rustc`, `cargo`, `rust-std` and `rust-src` as the Rust project
 publishes them (96 to 133 MB), each piece removed as the step that ends its use lands. A
 project's own pin does not change which Rust blaze builds with
 ([#269](https://github.com/indexable-inc/blaze/issues/269)). blaze's manifest reader, registry
@@ -185,9 +185,9 @@ These are the places ra-jit still runs rustc or relies on what it wrote, as of m
 - rust-analyzer loads a workspace with `cargo metadata`, `cargo check --compile-time-deps` (which
   compiles the build scripts and proc macros with rustc and runs the scripts) and rustc's
   answers to `--print`; proc macros are rustc's libraries run by the toolchain's proc-macro
-  server. Since B, ra-jit answers rustc's questions itself for the releases and targets it has
-  the answers of (1.99.0, the targets of `harness/answers.py`); another release is asked each
-  question once per toolchain and the answer kept.
+  server. Since B, ra-jit answers rustc's questions itself for the toolchain and targets it has
+  the answers of (the pinned nightly, the targets of `harness/answers.py`); another toolchain is
+  asked each question once and the answer kept.
 - Doctest examples are compiled by rustc when ra-jit does not build them (`compile_fail`, an
   error, a second copy of the library; since L's second part ra-jit builds the rest), and a
   library whose doctests ra-jit cannot take is left to rustdoc
@@ -472,7 +472,7 @@ package turns on.
 
 **B. ra-jit answers rustc's questions.** ([#82](https://github.com/indexable-inc/ra-jit/issues/82)) `-vV`, `--print cfg`, `sysroot`, `target-libdir`,
 `target-spec-json`, `file-names`, `split-debuginfo` and the rest are answered by ra-jit from
-its own targets, byte for byte as rustc 1.99.0 answers them. rust-analyzer's `toolchain_info`
+its own targets, byte for byte as the pinned rustc answers them. rust-analyzer's `toolchain_info`
 asks ra-jit in process. `cargo metadata`, `cargo rustc --print` and `cargo build --unit-graph`
 run with `RUSTC` naming ra-jit, and a load asks them once, not once per worker and spare. Risk:
 a wrong `cfg` builds the wrong code without a word; the harness compares every answer with
@@ -494,21 +494,23 @@ the fixture's cold build and 17 on ripgrep's, which answering from ra-jit's own 
 `cargo check --compile-time-deps`'s probes (I) and plain `cargo check`'s (D).
 
 Done (the `no-rustc-hl` lane, 2026-10-23): ra-jit answers from its own data, and even the first
-ask runs no rustc. `crates/ra-jit/src/answers/rustc-1.99.0.json` has what rustc 1.99.0 says of
+ask runs no rustc. `crates/ra-jit/src/answers/rustc.json` has what the pinned rustc says of
 itself (`-vV`) and of each of twelve targets (Linux GNU and musl, macOS and Windows on x86-64 and
 AArch64, wasm32 unknown, WASI 1 and 2): its cfgs, those unstable features add, the default panic
 strategy, the names of each kind of crate's file, the split-debuginfo kinds and the target spec
 of each host (x86-64 Linux's rustc links with its own lld, so its specs differ). `answers/own.rs`
 knows the release by rustup's manifest in the sysroot, and adds what the arguments decide, as
 rustc does: `debug_assertions` from `-C debug-assertions` or the optimization level,
-`overflow_checks` and `ub_checks` under `RUSTC_BOOTSTRAP=1`, `-C panic`, `--cfg`, `proc_macro`,
+`overflow_checks` and `ub_checks` as a nightly prints them (`RUSTC_BOOTSTRAP=-1` makes it
+answer as a stable release), `-C panic`, `--cfg`, `proc_macro`,
 the sysroot and target libdir from where the toolchain is. A question with anything it does not
 model (`-C target-cpu`, `-C target-feature`, other `-Z` flags, a deployment target or SDK in the
 environment, a JSON target, another release, a host whose target specs it lacks) is asked of rustc
 once per toolchain as before. `harness/answers.py`, in the fast tier on Linux and macOS, compares
 238 questions with rustc's answers, byte for byte, on the toolchain rustup installed and on a copy
-laid out as norustc.py's; `--write` regenerates the data after a toolchain bump, on each host CI
-has. cargos ra-jit does not drive (rust-analyzer's `cargo check --compile-time-deps`, `cargo
+laid out as norustc.py's; `--write` regenerates the data after a toolchain bump, on each of x86-64
+Linux, AArch64 Linux and arm64 macOS (written for 1.99.0 on 2026-10-23, for `nightly-2026-10-25`
+since). cargos ra-jit does not drive (rust-analyzer's `cargo check --compile-time-deps`, `cargo
 ra-jit check` and the subcommands ra-jit does not claim) ask through ra-jit as `RUSTC_WRAPPER`
 with `RA_JIT_ONLY_ASKS=1`, which answers questions and leaves every compile as it was. On the
 fixture: the cold build 18 rustc runs to 6 (its 12 questions to none), check 8 to 5, and the
@@ -826,8 +828,9 @@ bigdecimal's), 27.7 -> 28.0 s.
 Running scripts without cargo (the `blaze-scripts` lane, 2026-10-25, for K and
 [#298](https://github.com/indexable-inc/blaze/issues/298)) starts with
 `crates/blaze-build-script`, a crate that knows nothing of ra-jit and asks no cargo. Its
-`env` gives the whole environment cargo 1.99.0 runs a script with, ported from cargo's
-`custom_build.rs` and `compilation.rs` at 5f94df478 (the commit `cargo 1.99.0 -vV` names):
+`env` gives the whole environment cargo runs a script with, ported from cargo's
+`custom_build.rs` and `compilation.rs` at 5f94df478 (the commit `cargo 1.99.0 -vV` names, the
+pin then; `harness/scripts.py` holds it to the pinned nightly's cargo now):
 cargo's own environment with `OUT_DIR`, `TARGET`, `HOST`, `NUM_JOBS`, `OPT_LEVEL`, `DEBUG`,
 `PROFILE`, `RUSTC`, `RUSTDOC`, `RUSTC_LINKER`, the wrappers (the workspace's for members
 alone, taken away when cargo uses none), `CARGO`, `CARGO_MANIFEST_*`, `CARGO_PKG_*`,
@@ -868,7 +871,7 @@ caller's (`Client::configure`). `env::cargo_started` is cargo's environment once
 started: on Linux cargo's libgit2 sets `SSL_CERT_FILE` and `SSL_CERT_DIR` to the certificates
 openssl-probe finds, and every script inherits them.
 
-`harness/scripts.py` holds the crate to cargo. cargo 1.99.0 checks each project with the
+`harness/scripts.py` holds the crate to cargo. The pinned nightly's cargo checks each project with the
 harness as its `RUSTC_WRAPPER`, which puts the crate's program where rustc wrote each build
 script, so that cargo's run records what cargo gave it and then becomes the script. Each run
 is described from `cargo metadata`, `cargo check --unit-graph` and the configuration, and the
@@ -931,8 +934,9 @@ but each toolchain encodes the messages its own way). The stages, each lowering 
   they link (syn, quote, proc-macro2, ...), which is most of what rustc compiles in a cold build
   of a crate with derives.
 
-What 1.99.0 changes in that plan (read 2026-10-24 in its `library/proc_macro` and in
-rust-lang/rust at b940084d7, the commit `rustc 1.99.0 -vV` names):
+What the pinned toolchain changes in that plan (read 2026-10-24 in 1.99.0's `library/proc_macro`
+and in rust-lang/rust at b940084d7, the commit `rustc 1.99.0 -vV` names, while 1.99.0 was the
+pin; what changed with the move to `nightly-2026-10-25` follows the list):
 
 - A library rustc compiled cannot be served by any server but one that reads rustc's metadata.
   1.99.0's `proc_macro::bridge::client::Client` is the `run` function and nothing else, and
@@ -951,13 +955,20 @@ rust-lang/rust at b940084d7, the commit `rustc 1.99.0 -vV` names):
   `proc_macro`. The server that does is the one the release ships, rust-lang/rust's
   `src/tools/rust-analyzer` at the release's commit, whose loader is
   `rustc_metadata`'s too. J1's source is that server pinned to the release, as
-  `vendor/rustc_abi` is rustc's crate from the 1.99.0 tag, with its loader replaced by the one
+  `vendor/rustc_abi` is rustc's crate at the pinned commit, with its loader replaced by the one
   that reads ra-jit's static. Its protocol is the toolchain server's: rust-analyzer already
   talks to that release's server today.
 - Building the server needs serde's derives expanded (`proc-macro-api`'s messages), so the
   first server is built with what expands them today (rustc's `serde_derive` and the
   toolchain's server), once per release when `ra-jit std` ships it; once J2 compiles
   `serde_derive`, each server is built with the one before it.
+
+With the pin a nightly (2026-10-25), the rule behind the second point is the same and simpler:
+a server and a library agree on the bridge only when both are built from one
+`library/proc_macro`, so `vendor/proc-macro-srv` is `src/tools/rust-analyzer`'s crates and
+`compiler/rustc_lexer` at the pinned nightly's commit (12433c307), which has
+`bridge::IdentKind`, with ra-jit's changes carried over, and `harness/toolchain_bump.py` takes
+it again at each bump.
 
 Where J stands (2026-10-24):
 
@@ -984,7 +995,8 @@ Where J stands (2026-10-24):
   macros.
 - The release's server is `vendor/proc-macro-srv`: rust-lang/rust's `src/tools/rust-analyzer`
   crates the release's `rust-analyzer-proc-macro-srv` is built from, and `compiler/rustc_lexer`,
-  at 1.99.0, with the release's `Cargo.lock`. What rustc's tree gave it is replaced, as its
+  at the pinned nightly's commit (12433c307 since 2026-10-25; 1.99.0's before), with that
+  commit's `Cargo.lock` cut to these crates. What rustc's tree gave it is replaced, as its
   manifest's header lists: the loader `dlopen`s a library and reads ra-jit's list where the
   release reads rustc's metadata, `rustc_proc_macro` is the standard library's `proc_macro`,
   `rustc_lexer` is the vendored crate, and the version string and the commit are written down
@@ -1333,7 +1345,7 @@ paid once, by the release, instead of on a user's machine (`crates/ra-jit/src/sh
   debug info its profile asks for, line tables for `dev` where a script asks for none, so
   without it every whole build of a dev program compiled the library again (about 10 s, step K).
   The `release` program takes the script's unit.
-- The release workflow runs it with each target's archived binary and the pinned 1.99.0, and
+- The release workflow runs it with each target's archived binary and the pinned nightly, and
   attaches the remote's files to the release with `.` for `/` (`manifests.std-…`, `packs.….pack.zst`,
   `keys.…`). A remote can be a plain `https://` address now (`remote/https.rs`): read-only,
   flat, redirects followed, which is what a release's download URL is.

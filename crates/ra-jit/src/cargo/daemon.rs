@@ -317,8 +317,14 @@ pub(crate) struct Checkout {
     /// The build this is: the checkout, the command and its flags.
     pub(crate) key: String,
     /// The newest of rustc's output the programs are linked against. A worker that loaded
-    /// the checkout with another one starts again.
+    /// the checkout with another one starts again, unless it is `kept`.
     pub(crate) generation: u128,
+    /// Whether cargo built only programs the daemon did not, given the daemon's executables
+    /// of the others, whose plans are the ones the worker built them by: a running worker
+    /// loads the checkout again in place, keeping what it built of those, rather than start
+    /// again and link every program anew under the programs running them.
+    #[serde(default)]
+    pub(crate) kept: bool,
     /// When cargo started, as a stamp: source newer than this is not what rustc compiled.
     pub(crate) built_at: u128,
     pub(crate) config: WorkerConfig,
@@ -605,8 +611,11 @@ impl Worker {
         self.stop();
     }
 
-    fn set(&self, key: &str, warmth: Warmth) {
-        if let Some(loaded) = lock(&self.checkouts).get_mut(key) {
+    /// Says how loading `checkout` went, unless another generation of it is loading since.
+    fn set(&self, checkout: &Checkout, warmth: Warmth) {
+        if let Some(loaded) = lock(&self.checkouts).get_mut(&checkout.key)
+            && loaded.generation == checkout.generation
+        {
             loaded.warmth = warmth;
         }
     }
@@ -625,7 +634,7 @@ impl Worker {
             },
         };
         eprintln!("{}: {}", checkout.root.display(), warmth.describe());
-        self.set(&checkout.key, warmth);
+        self.set(checkout, warmth);
         // Nobody could ask it for a build until now.
         *lock(&self.asked) = Instant::now();
     }
@@ -642,14 +651,21 @@ impl Worker {
         // every function and static of the workspace from what it reads. The program the
         // worker was started on is built already, and is asked for too: what the worker then
         // compiles again by itself, for the first edit to be a patch, is part of warming up.
+        // A program the worker does not build is cargo's, and the others are still its own:
+        // the checkout failed to load only when it builds none.
+        let mut not_built = None;
+        let mut built = false;
         for plan in &checkout.programs {
             match self.ask(checkout, plan)? {
-                Ok(_) => {}
+                Ok(_) => built = true,
                 Err(NotBuilt::Error(said)) => return Ok(Some(said)),
-                Err(why) => anyhow::bail!(why.why()),
+                Err(why) => _ = not_built.get_or_insert(why),
             }
         }
-        Ok(None)
+        match not_built {
+            Some(why) if !built => anyhow::bail!(why.why()),
+            _ => Ok(None),
+        }
     }
 
     /// A connection to the process, once it has loaded the workspace and listens.
@@ -1285,9 +1301,15 @@ impl Daemon {
             let mut checkouts = lock(&worker.checkouts);
             match checkouts.get(&checkout.key) {
                 Some(loaded) if loaded.generation == checkout.generation => return Ok(()),
-                // What it linked against is not what cargo has now.
-                Some(_) => {}
-                None => {
+                // What it linked against is not what cargo has now, and one it could not load
+                // is started again.
+                Some(Loaded { warmth: Warmth::Failed(..), .. }) => {}
+                Some(_) if !checkout.kept => {}
+                // rustc built only what the daemon did not: the worker keeps the programs it
+                // built, the executables running programs take edits into, and starts over
+                // with the others (`Program::start_over`). A new worker would link each
+                // program again, and every program running would be told to restart.
+                _ => {
                     let loading = Loaded {
                         generation: checkout.generation,
                         root: checkout.root.clone(),

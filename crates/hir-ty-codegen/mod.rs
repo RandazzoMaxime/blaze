@@ -204,6 +204,11 @@ impl fmt::Display for ContentId {
 /// it: the same on every machine, whoever's home the directory is in.
 pub const CARGO_HOME: &str = "/cargo";
 
+/// What the name of a static a patch defines anew starts with, which is the same in every
+/// patch after for the same static and value: a running program keeps the copy the first gave
+/// it (`docs/live.md#types`).
+pub const LASTING_STATIC: &str = "ra_jit::static::lasting::";
+
 /// `path` with the directory `to` in place of the directory `from` it is under.
 pub fn moved(path: &str, from: &str, to: &str) -> Option<String> {
     let rest = path.strip_prefix(from)?;
@@ -394,6 +399,47 @@ pub trait SymbolResolver {
 type StableName = std::sync::Arc<str>;
 
 pub type ParallelWork<'a> = dyn Fn(&dyn HirDatabase, &dyn SymbolResolver, usize) + Sync + 'a;
+
+/// An x86 operation on two vectors that `FunctionCx::lanewise` does lane by lane.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Lanewise {
+    Average,
+    MulHigh { signed: bool },
+    ShiftLeft,
+    ShiftRight,
+    ShiftRightArithmetic,
+}
+
+/// The lane-by-lane operation and lane type of an LLVM x86 intrinsic `name` (without
+/// `llvm.`): `x86.{sse2,avx2,avx512}.{pavg,pmulh,pmulhu,psllv,psrlv,psrav}.{b,w,d,q}[.width]`.
+fn x86_lanewise(name: &str) -> Option<(Lanewise, Type)> {
+    let mut parts = name.split('.');
+    let (Some("x86"), Some("sse2" | "avx2" | "avx512"), Some(op), Some(lane)) =
+        (parts.next(), parts.next(), parts.next(), parts.next())
+    else {
+        return None;
+    };
+    if !matches!(parts.next(), None | Some("128" | "256" | "512")) || parts.next().is_some() {
+        return None;
+    }
+    let lane = match lane {
+        "b" => types::I8,
+        "w" => types::I16,
+        "d" => types::I32,
+        "q" => types::I64,
+        _ => return None,
+    };
+    let op = match op {
+        "pavg" if lane.bits() <= 16 => Lanewise::Average,
+        "pmulh" if lane == types::I16 => Lanewise::MulHigh { signed: true },
+        "pmulhu" if lane == types::I16 => Lanewise::MulHigh { signed: false },
+        "psllv" if lane.bits() >= 16 => Lanewise::ShiftLeft,
+        "psrlv" if lane.bits() >= 16 => Lanewise::ShiftRight,
+        "psrav" if lane.bits() >= 16 => Lanewise::ShiftRightArithmetic,
+        _ => return None,
+    };
+    Some((op, lane))
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 enum OverflowOp {
@@ -780,7 +826,7 @@ impl CodegenUnit {
             patching: _,
             counted,
             stale: _,
-            frozen: _,
+            frozen,
             used_by_rustc: _,
             tiers,
             undo,
@@ -826,6 +872,7 @@ impl CodegenUnit {
             )?;
             cg.patching = patching;
             cg.rustc_futures = futures.clone();
+            cg.rustc_values = frozen.rustc_values();
             let mut compiled = Vec::new();
             let mut skipped = Vec::new();
             let mut failed = Vec::new();
@@ -2114,6 +2161,12 @@ struct ObjectCodegen<'a, 'db> {
     /// Statics nothing exports and nothing can write to, which we give a copy of the value.
     frozen_statics: FxHashMap<StaticId, DataId>,
     imported_statics: FxHashMap<StaticId, DataId>,
+    /// Those of `imported_statics` that are rustc's for their state alone, which a base
+    /// keeps to tell an edit to their first value by.
+    shared_statics: FxHashMap<StaticId, DataId>,
+    /// rustc's first values of statics with state, to tell whether rustc's copy is still
+    /// of the source.
+    rustc_values: patch::RustcValues,
     consts: FxHashMap<ConstBlob, DataId>,
     source_paths: FxHashMap<base_db::FileId, Option<String>>,
     builder_ctx: FunctionBuilderContext,
@@ -4959,6 +5012,8 @@ impl<'a, 'db> ObjectCodegen<'a, 'db> {
             statics: FxHashMap::default(),
             frozen_statics: FxHashMap::default(),
             imported_statics: FxHashMap::default(),
+            shared_statics: FxHashMap::default(),
+            rustc_values: patch::RustcValues::default(),
             consts: FxHashMap::default(),
             source_paths: FxHashMap::default(),
             builder_ctx: FunctionBuilderContext::new(),
@@ -6412,15 +6467,48 @@ impl<'a, 'db> ObjectCodegen<'a, 'db> {
         Ok(Some(name.unwrap_or_else(|| signature.name.symbol().clone())))
     }
 
+    /// The name of a static a patch defines that the executable has no copy of: the same for
+    /// the same static with the same type and value in every patch after, so that a program
+    /// that took an earlier patch goes on with the one it has (its address and what was
+    /// written to it), and another for one whose declaration or value changed, which starts
+    /// from the new value. `None` for one with no path to name it by.
+    fn lasting_static_name(&self, id: StaticId, bytes: &[u8], writable: bool) -> Option<String> {
+        let path = self.names.static_across_edits(id)?;
+        let declared = id.lookup(self.db).source(self.db).value.syntax().text().to_string();
+        let print = print_of(&(path, declared, bytes, writable));
+        Some(format!("{LASTING_STATIC}{print:032x}"))
+    }
+
     fn static_data(&mut self, id: StaticId) -> Result<DataId> {
         let db = self.db;
         let known = [&self.imported_statics, &self.statics, &self.frozen_statics];
         if let Some(&data) = known.into_iter().find_map(|it| it.get(&id)) {
             return Ok(data);
         }
-        // rustc's copy when ours has no value to give.
-        let ours = self.own_statics.replaces(db, id) && compiled_static(db, id).is_ok();
-        let rustcs = (!ours).then(|| self.symbols.static_(id)).flatten();
+        // rustc's copy when ours has no value to give. A static whose value changes as the
+        // program runs (a thread-local, or one written through a cell) stays rustc's wherever
+        // rustc linked one: rustc's code that no walk sees writes it too, as its allocator shim
+        // does with what the `#[global_allocator]` inlines, and a copy of ours would split the
+        // state in two (`docs/live.md#statics`). That holds while rustc's copy starts from the
+        // first value the source gives it now: after an edit to that value, ours is the one
+        // with the program's value. A patch keeps what its base chose, and declines an edit
+        // to the first value of one the base shares (`Base::stale`).
+        let symbol = self.symbols.static_(id);
+        let stateful = || {
+            is_thread_local(db, id) || compiled_static(db, id).as_ref().is_ok_and(|it| it.writable)
+        };
+        let in_base = self.base.and_then(|base| base.statics.get(&id));
+        let stateful_linked = !self.symbols.nothing_of_rustc()
+            && symbol.as_ref().is_some_and(|it| self.symbols.linked(it))
+            && stateful();
+        let shared = stateful_linked
+            && in_base.map_or_else(|| self.rustc_values.kept(db, id), |it| it.shared);
+        // The program has the base's copy, and what it wrote there.
+        let base_owns = stateful_linked && in_base.is_some_and(|it| !it.shared);
+        let ours = !shared
+            && (base_owns || self.own_statics.replaces(db, id))
+            && compiled_static(db, id).is_ok();
+        let rustcs = symbol.filter(|_| !ours);
         // One the linker left out of what rustc linked is used by none of rustc's code there.
         let unlinked = rustcs.as_ref().is_some_and(|it| !self.symbols.linked(it));
         let theirs = || rustcs.filter(|_| !unlinked);
@@ -6438,6 +6526,9 @@ impl<'a, 'db> ObjectCodegen<'a, 'db> {
                 is_thread_local(db, id),
             )?;
             self.imported_statics.insert(id, data);
+            if stateful_linked {
+                self.shared_statics.insert(id, data);
+            }
             // rustc's value of the static points to rustc's copies of functions.
             if self.on_demand_crates.contains(&id.krate(db))
                 && let Ok(compiled) = compiled_static(db, id).as_ref()
@@ -6483,6 +6574,17 @@ impl<'a, 'db> ObjectCodegen<'a, 'db> {
         let exported = exported_static(db, id).filter(|_| !self.patching);
         let data = if let Some(known) = again {
             self.module.declare_data(&known.symbol, Linkage::Hidden, compiled.writable, false)?
+        } else if let Some(name) = (self.base.is_some() && !thread_local && exported.is_none())
+            .then(|| self.lasting_static_name(id, &compiled.blob.bytes, compiled.writable))
+            .flatten()
+        {
+            // A patch's own static is named after itself and its value, so that the running
+            // program keeps the one an earlier patch gave it under the name (`live.md#types`).
+            if self.module.declarations().get_name(&name).is_some() {
+                let name = StaticSignature::of(db, id).name.as_str();
+                unsupported!("a static `{name}` written as another is in the same place");
+            }
+            self.module.declare_data(&name, Linkage::Hidden, compiled.writable, false)?
         } else if let Some(name) = own.or_else(|| exported.map(|it| it.as_str().to_owned())) {
             // Nothing rustc built defines it: what finds it by name finds ours.
             self.module.declare_data(&name, Linkage::Export, compiled.writable, thread_local)?
@@ -7655,7 +7757,7 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
             Primitive::Pointer(_) => AbiScalar { ty: ptr(), signed: false },
             Primitive::Float(rustc_abi::Float::F32) => AbiScalar { ty: types::F32, signed: true },
             Primitive::Float(rustc_abi::Float::F64) => AbiScalar { ty: types::F64, signed: true },
-            Primitive::Float(_) => unsupported!("f16 and f128"),
+            Primitive::Float(_) => unsupported!("f16, f16b, f128 and ppcf128"),
         })
     }
 
@@ -7698,10 +7800,49 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
                     _ => PassMode::Cast(types::I64),
                 }
             }
-            // rustc passes vectors in memory so that callers and callees built with different
-            // target features agree.
-            BackendRepr::SimdVector { .. } => PassMode::Indirect,
+            BackendRepr::SimdVector { count, .. } => {
+                self.rust_simd_pass_mode(layout, count, is_ret)?
+            }
             _ => unsupported!("abi of {:?}", layout.backend_repr),
+        })
+    }
+
+    /// How the Rust ABI passes a SIMD vector. Mirrors rustc's `adjust_for_rust_abi`
+    /// (`can_pass_simd_directly`): on x86-64 and AArch64, whose every target has the vector
+    /// registers, a vector of at most 128 bits is an immediate of LLVM's, in what register LLVM
+    /// gives that vector type; any other goes in memory, so that callers and callees built with
+    /// different target features agree.
+    fn rust_simd_pass_mode(
+        &self,
+        layout: &Layout,
+        count: rustc_abi::BackendLaneCount,
+        is_ret: bool,
+    ) -> Result<PassMode> {
+        let target = &self.cg.target;
+        let size = layout.size.bytes();
+        if !matches!(target.arch, Arch::X86_64 | Arch::Aarch64) || size > 16 {
+            return Ok(PassMode::Indirect);
+        }
+        // LLVM makes a vector of one lane its scalar, in that scalar's register, except where
+        // the one-lane type is legal: AArch64's `v1i64` and `v1f64` (NEON's `*x1_t` of 64-bit
+        // lanes) are in a D register, as the 64-bit vectors below are.
+        if count.as_u64() == 1 && !(target.arch == Arch::Aarch64 && size == 8) {
+            unsupported!("a SIMD vector of one lane by value in the Rust ABI");
+        }
+        if target.call_conv == isa::CallConv::WindowsFastcall {
+            // LLVM's Windows convention passes an argument of vector type by reference and
+            // returns it in `xmm0`, widened to 128 bits.
+            return Ok(if is_ret { PassMode::Cast(types::I64X2) } else { PassMode::Indirect });
+        }
+        Ok(match (target.arch, size) {
+            // A whole vector register, whatever its lanes.
+            (_, 16) => PassMode::Cast(types::I64X2),
+            // x86-64 widens a shorter vector to 128 bits, its lanes at the bottom.
+            (Arch::X86_64, _) => PassMode::Cast(types::I64X2),
+            // AArch64 has a 64-bit vector in the low half of a vector register, as an `f64`.
+            (Arch::Aarch64, 8) => PassMode::Cast(types::F64),
+            // AArch64 widens the lanes of a shorter one, which is not a copy of its bytes.
+            _ => unsupported!("a SIMD vector of {size} bytes by value in the Rust ABI"),
         })
     }
 
@@ -8147,8 +8288,10 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
     fn win64_pass_mode(&self, ty: Ty<'db>, is_ret: bool) -> Result<PassMode> {
         let layout = self.layout(ty)?;
         if layout.is_zst() {
-            // MSVC passes an argument of no size by reference.
-            return Ok(if is_ret { PassMode::Ignore } else { PassMode::Indirect });
+            // As clang and gcc on windows-gnu, a `repr(C)` value of no size (or a transparent
+            // wrapper around one) goes by reference, as an argument and as a return value; a
+            // `repr(Rust)` one, such as `()`, takes no place, so that `()` matches C's `void`.
+            return Ok(if layout.is_repr_c() { PassMode::Indirect } else { PassMode::Ignore });
         }
         if !is_ret && self.decays_in_c(ty)? {
             return Ok(PassMode::Indirect);
@@ -8176,6 +8319,10 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
     fn decays_in_c(&self, ty: Ty<'db>) -> Result<bool> {
         let TyKind::Adt(def, subst) = ty.kind() else { return Ok(false) };
         let AdtId::StructId(id) = def.def_id() else { return Ok(false) };
+        // rustc makes the attribute do nothing on a 1-ZST, whose wrappers it cannot peel.
+        if self.layout(ty)?.is_1zst() {
+            return Ok(false);
+        }
         let db = self.cg.db;
         if AttrFlags::query(db, id.into())
             .contains(AttrFlags::RUSTC_PASS_INDIRECTLY_IN_NON_RUSTIC_ABIS)
@@ -8359,7 +8506,7 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
         if u64::from(ty.bytes()) == size.bytes() {
             return self.builder.ins().load(ty, MEM, addr, 0);
         }
-        let tmp = self.scratch();
+        let tmp = if ty.bytes() > 8 { self.scratch_wide() } else { self.scratch() };
         self.copy(tmp, addr, size);
         self.builder.ins().load(ty, MEM, tmp, 0)
     }
@@ -8370,7 +8517,7 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
             self.builder.ins().store(MEM, value, addr, 0);
             return;
         }
-        let tmp = self.scratch();
+        let tmp = if ty.bytes() > 8 { self.scratch_wide() } else { self.scratch() };
         self.builder.ins().store(MEM, value, tmp, 0);
         self.copy(addr, tmp, size);
     }
@@ -13698,7 +13845,7 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
                 | "assert_mem_uninitialized_valid",
                 _,
             ) => (),
-            ("unreachable" | "abort" | "breakpoint", _) => {
+            ("unreachable" | "abort" | "abort_immediate" | "breakpoint", _) => {
                 self.builder.ins().trap(TrapCode::user(2).expect("non-zero trap code"));
                 return Ok(Intrinsic::Diverges);
             }
@@ -14483,6 +14630,69 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
         Ok(())
     }
 
+    /// `dst`'s lanes of type `lane`, each `op` of the lanes of `a` and `b` in its place.
+    fn lanewise(
+        &mut self,
+        a: &Operand,
+        b: &Operand,
+        dst: Value,
+        op: Lanewise,
+        lane: Type,
+    ) -> Result<()> {
+        let (a, ty) = self.operand(a)?;
+        let (b, _) = self.operand(b)?;
+        let bytes = lane.bytes() as i32;
+        let bits = i64::from(lane.bits());
+        for at in (0..self.layout(ty)?.size.bytes() as i32).step_by(bytes as usize) {
+            let l = self.builder.ins().load(lane, MEM, a, at);
+            let r = self.builder.ins().load(lane, MEM, b, at);
+            let value = match op {
+                // `(l + r + 1) >> 1` of the unsigned lanes, in twice their width.
+                Lanewise::Average => {
+                    let wide = lane.double_width().expect("a lane of 8 or 16 bits");
+                    let l = self.builder.ins().uextend(wide, l);
+                    let r = self.builder.ins().uextend(wide, r);
+                    let sum = self.builder.ins().iadd(l, r);
+                    let sum = self.builder.ins().iadd_imm(sum, 1);
+                    let half = self.builder.ins().ushr_imm(sum, 1);
+                    self.builder.ins().ireduce(lane, half)
+                }
+                // The high half of the product, the lanes signed or not.
+                Lanewise::MulHigh { signed } => {
+                    let wide = lane.double_width().expect("a lane of 16 bits");
+                    let (l, r) = if signed {
+                        (self.builder.ins().sextend(wide, l), self.builder.ins().sextend(wide, r))
+                    } else {
+                        (self.builder.ins().uextend(wide, l), self.builder.ins().uextend(wide, r))
+                    };
+                    let product = self.builder.ins().imul(l, r);
+                    let high = self.builder.ins().ushr_imm(product, bits);
+                    self.builder.ins().ireduce(lane, high)
+                }
+                // A count of the lane's width or more shifts every bit out: 0, or for the
+                // arithmetic shift the sign in every bit. Cranelift's shifts take the count
+                // modulo the width, so the count is checked first.
+                Lanewise::ShiftLeft | Lanewise::ShiftRight => {
+                    let shifted = match op {
+                        Lanewise::ShiftLeft => self.builder.ins().ishl(l, r),
+                        _ => self.builder.ins().ushr(l, r),
+                    };
+                    let out =
+                        self.builder.ins().icmp_imm(IntCC::UnsignedGreaterThanOrEqual, r, bits);
+                    let zero = self.builder.ins().iconst(lane, 0);
+                    self.builder.ins().select(out, zero, shifted)
+                }
+                Lanewise::ShiftRightArithmetic => {
+                    let most = self.builder.ins().iconst(lane, bits - 1);
+                    let count = self.builder.ins().umin(r, most);
+                    self.builder.ins().sshr(l, count)
+                }
+            };
+            self.builder.ins().store(MEM, value, dst, at);
+        }
+        Ok(())
+    }
+
     /// Calls a function of one instruction on two vectors, with where it reads a third
     /// operand and writes its result.
     fn vector_assembly(
@@ -14820,6 +15030,12 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
                     let sum = self.builder.ins().ireduce(types::I16, sum);
                     self.builder.ins().store(MEM, sum, dst, lane);
                 }
+            }
+            // Lane by lane: the rounded average, the high half of the product and the shifts
+            // by a count per lane (the toolchain's `core::arch` calls LLVM for these since
+            // nightly-2026-10-25, where 1.99.0's wrote them with `simd_*`).
+            (_, [a, b]) if let Some((op, lane)) = x86_lanewise(name) => {
+                self.lanewise(a, b, dst, op, lane)?
             }
             ("x86.sse2.packsswb.128" | "x86.avx2.packsswb" | "x86.avx512.packsswb.512", [a, b]) => {
                 self.pack_lanes(a, b, dst, types::I16, true)?

@@ -34,6 +34,7 @@ mod test_harness;
 mod tier;
 mod trace;
 mod tree;
+mod unstable;
 mod weaken;
 mod whole;
 
@@ -1583,26 +1584,10 @@ impl SymbolResolver for Resolver<'_> {
                 owner = Some(self.path(func.try_into().ok()?)?);
                 break;
             }
-            let name = match_ast! {
-                match node {
-                    ast::Const(it) => it.name(),
-                    ast::Static(it) => it.name(),
-                    _ => None,
-                }
-            };
-            if let Some(name) = name {
-                let named = |other: &SyntaxNode| {
-                    let other = match_ast! {
-                        match other {
-                            ast::Const(it) => it.name(),
-                            ast::Static(it) => it.name(),
-                            _ => None,
-                        }
-                    };
-                    other.is_some_and(|it| it.text() == name.text())
-                };
+            if let Some(name) = name_in_path(&node) {
+                let named = |other: &SyntaxNode| name_in_path(other).as_ref() == Some(&name);
                 around.push(place_in_definition(&sema, &node, &named)?.into());
-                names.push(name.text().to_string());
+                names.push(name);
             }
         }
         let owner = match owner {
@@ -1665,6 +1650,23 @@ impl SymbolResolver for Resolver<'_> {
                 let id = hir_def::AdtId::from(adt);
                 (self.item(id.into()).as_deref() == Some(path)).then_some(id)
             })
+    }
+}
+
+/// The segment a constant or static that items are written in adds to their path, as rustc
+/// prints it: its name, or `_` for an unnamed constant. objc2's `declare_class!` keeps a
+/// class's ivar offsets in statics in a `const _: () = { .. }`, which rustc exports as
+/// `<module>::_::__OBJC2_IVAR_OFFSET`.
+fn name_in_path(node: &SyntaxNode) -> Option<String> {
+    match_ast! {
+        match node {
+            ast::Const(it) => it
+                .name()
+                .map(|it| it.text().to_string())
+                .or_else(|| it.underscore_token().map(|_| "_".to_owned())),
+            ast::Static(it) => it.name().map(|it| it.text().to_string()),
+            _ => None,
+        }
     }
 }
 
@@ -2748,12 +2750,19 @@ fn pause_before_symbols() {
     }
 }
 
-/// The directory cargo put the executables of the build in: the one its `deps`, where the
-/// libraries of the build are, is in.
+/// The directory cargo put the executables of the build in: the profile's directory the
+/// libraries of the build are written below, `deps` in cargo's first layout and
+/// `build/<package>/<hash>/out` in its second (`cargo::layout`). The standard library's,
+/// in the toolchain, are below neither.
 fn executables_of(symbol_files: &[PathBuf]) -> Option<AbsPathBuf> {
-    let deps = symbol_files.iter().filter_map(|file| file.parent());
-    let deps = deps.filter(|deps| deps.file_name().is_some_and(|name| name == "deps"));
-    let built = deps.filter_map(Path::parent).next()?;
+    let built = symbol_files.iter().find_map(|file| {
+        let dir = file.parent()?;
+        let first = dir.file_name().is_some_and(|name| name == "deps");
+        match first {
+            true => dir.parent(),
+            false => cargo::layout::unit_dir(dir).filter(|it| it.dir.join("out") == dir)?.profile(),
+        }
+    })?;
     AbsPathBuf::try_from(built.to_str()?).ok()
 }
 
@@ -3261,7 +3270,7 @@ fn on_idle_threads<T: Sync>(
     use std::sync::atomic::Ordering::Relaxed;
     let wanted = (work.len() / per).min(threads - 1);
     let mut helpers = 0;
-    _ = helping.fetch_update(Relaxed, Relaxed, |busy| {
+    _ = helping.try_update(Relaxed, Relaxed, |busy| {
         helpers = wanted.min(threads.saturating_sub(busy + 1));
         Some(busy + helpers)
     });
@@ -8370,7 +8379,13 @@ fn run_holding(
                             && lock(&as_built)
                                 .get(&target.out)
                                 .is_some_and(|it| it.still(&files, &db, view, target, request));
-                        if unchanged && !reach_owed(&target.out) {
+                        // Nor is it unchanged when rustc linked the program again since.
+                        let relinked = programs.iter().any(|it| {
+                            target.is(&it.args)
+                                && !target.symbol_files.is_empty()
+                                && target.symbol_files != it.args.symbol_files
+                        });
+                        if unchanged && !relinked && !reach_owed(&target.out) {
                             let _ = writeln!(&stream, "ok unchanged");
                             continue;
                         }
@@ -8425,6 +8440,25 @@ fn run_holding(
                             interrupt |= builds.running.get(&at).is_some_and(|it| it.own_base);
                             later.push((request, asked, stream));
                             continue;
+                        }
+                        // rustc linked the program again since it was built here, as cargo
+                        // does of one the daemon did not build while it builds the others,
+                        // which the daemon keeps (`Checkout::kept`): what was built of it is
+                        // of rustc's copies from before.
+                        if let Some(target) = &target
+                            && target.is(&programs[at].args)
+                            && !target.symbol_files.is_empty()
+                            && target.symbol_files != programs[at].args.symbol_files
+                        {
+                            let again =
+                                checkouts.parts(&programs[at].args.project).and_then(|parts| {
+                                    programs[at].start_over(&db, parts, Some(target), &[], &files)
+                                });
+                            if let Err(error) = again {
+                                let _ = writeln!(&stream, "failed: {error:#}");
+                                continue;
+                            }
+                            eprintln!("rustc linked {} again: built over", programs[at].args.krate);
                         }
                         outputs.insert(at, wanted);
                         if let Some(view) = view {
@@ -9443,6 +9477,8 @@ impl Program {
                 self.distrust_rustc(db, files, None);
                 self.unbuilt.named_anew = true;
                 self.args.widened.clear();
+                // The tests listed were of the program rustc linked before.
+                (self.tests, self.tests_now) = (None, None);
             }
             None => {
                 self.known.start_again();

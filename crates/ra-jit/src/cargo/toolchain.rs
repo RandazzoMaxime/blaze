@@ -1,9 +1,10 @@
-//! The Rust release `cargo blaze` builds with: the one blaze compiles, whatever toolchain the
-//! project names. blaze lays out types, names symbols and links as that release does, so cargo,
-//! rustc and the daemon all run under it. Rust builds today what an older release built, so a
-//! project pinned to an older stable builds the same; one that needs its own toolchain (a
-//! nightly's features, a newer release's) fails with rustc's error and a line saying which
-//! release built it, and never goes to cargo for it ([#269]).
+//! The Rust nightly `cargo blaze` builds with: the one blaze compiles, whatever toolchain the
+//! project names. blaze lays out types, names symbols and links as that nightly does, so cargo,
+//! rustc and the daemon all run under it. blaze supports the latest nightly only, pinned by date
+//! in `harness/toolchain` (`harness/toolchain_bump.py` moves it): a project pinned to a stable
+//! release or an older nightly builds with it, since Rust builds today what an older release
+//! built; one that needs what the pinned nightly lacks fails with rustc's error and a line saying
+//! which toolchain built it, and never goes to cargo for it ([#269]).
 //!
 //! The release comes from, in order: what `RUSTC` names, or the rustc cargo would run when it
 //! is that release; rustup's copy of it; blaze's own copy (`own.rs`), downloaded the first
@@ -21,8 +22,13 @@ use std::{
 
 use super::state::rustc_says;
 
-/// The release blaze compiles.
+/// The toolchain blaze compiles, as rustup names it: `nightly-2026-10-25`.
 pub(crate) const OURS: &str = include_str!("../../../../harness/toolchain");
+
+/// What that toolchain's rustc says it is after `rustc `: `1.101.0-nightly (12433c307 2026-10-24)`.
+pub(crate) fn ours_says() -> &'static str {
+    own::rustc_version()
+}
 
 /// The project's own toolchain, as a failure names it, when blaze builds with its release in
 /// its place.
@@ -65,7 +71,7 @@ pub(crate) fn settle() -> Result<Chosen, String> {
         return Ok(Chosen::Given(sysroot));
     }
     let named = super::state::rustc_named().is_some();
-    if version.as_deref() == Some(ours) {
+    if version.as_deref() == Some(ours_says()) {
         let sysroot = sysroot_of(&rustc);
         match with_library(&sysroot, ours) {
             Ok(()) => {
@@ -84,7 +90,7 @@ pub(crate) fn settle() -> Result<Chosen, String> {
              with {shown} anyway, laying its types out as {ours} does)"
         ));
     }
-    if let Some(version) = version.filter(|it| it != ours) {
+    if let Some(version) = version.filter(|it| it != ours_says()) {
         let _ = IN_PLACE_OF.set((version, named_by()));
     }
     let rustup = rustup_home().and_then(|home| installed(&home, ours));
@@ -138,8 +144,8 @@ fn use_own(dir: &Path) {
     }
 }
 
-/// Names rustup's toolchain at `sysroot` one way however it was named (`1.99.0`,
-/// `1.99.0-<host>`, a path), since the name is part of which build this is.
+/// Names rustup's toolchain at `sysroot` one way however it was named (`nightly-2026-10-25`,
+/// `nightly-2026-10-25-<host>`, a path), since the name is part of which build this is.
 fn rustup_named(sysroot: &Path) {
     let home = rustup_home().and_then(|it| dunce::canonicalize(it.join("toolchains")).ok());
     let dir = dunce::canonicalize(sysroot).ok();
@@ -169,9 +175,11 @@ pub(crate) fn note_failed() {
     }
 }
 
-/// The release `rustc` says it is, as `1.99.0` or `1.101.0-nightly`.
+/// What `rustc` says it is after `rustc `, as `1.101.0-nightly (12433c307 2026-10-24)`: the
+/// whole line, since every nightly of a release has the same number.
 fn version_of(rustc: &OsStr) -> Option<String> {
-    rustc_says(rustc, &["--version"])?.split_whitespace().nth(1).map(str::to_owned)
+    let said = rustc_says(rustc, &["--version"])?;
+    said.lines().next()?.trim().strip_prefix("rustc ").map(str::to_owned)
 }
 
 fn sysroot_of(rustc: &OsStr) -> PathBuf {
@@ -198,7 +206,8 @@ fn rustup_home() -> Option<PathBuf> {
     Some(PathBuf::from(home).join(".rustup")).filter(|it| it.is_dir())
 }
 
-/// The directory rustup installed `release` for this host in: `1.99.0-aarch64-apple-darwin`.
+/// The directory rustup installed `release` for this host in:
+/// `nightly-2026-10-25-aarch64-apple-darwin`.
 fn installed(home: &Path, release: &str) -> Option<PathBuf> {
     let prefix = format!("{release}-");
     let cargo = format!("cargo{}", std::env::consts::EXE_SUFFIX);
