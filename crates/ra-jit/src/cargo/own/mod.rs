@@ -4,8 +4,11 @@
 //! is the table of what each one is.
 
 mod args;
+mod clean;
 mod clippy;
 mod manifest;
+mod new;
+mod tree;
 
 use args::Args;
 
@@ -73,12 +76,12 @@ pub(crate) const SUBCOMMANDS: &[Subcommand] = &[
     sub("verify-project", Status::Own, "whether the manifest reads"),
     sub("version", Status::Own, "blaze's version"),
     sub("help", Status::Own, "this list, or what a command does"),
-    sub("tree", Status::Not("not written yet"), "the dependency graph as a tree"),
-    sub("fetch", Status::Not("not written yet"), "download what the lock file names"),
-    sub("clean", Status::Not("not written yet"), "remove what builds wrote"),
-    sub("new", Status::Not("not written yet"), "make a package in a new directory"),
-    sub("init", Status::Not("not written yet"), "make a package in this directory"),
-    sub("pkgid", Status::Not("not written yet"), "the full id of a package"),
+    sub("tree", Status::Own, "the dependency graph as a tree"),
+    sub("fetch", Status::Own, "download what the lock file names"),
+    sub("clean", Status::Own, "remove what builds wrote"),
+    sub("new", Status::Own, "make a package in a new directory"),
+    sub("init", Status::Own, "make a package in this directory"),
+    sub("pkgid", Status::Own, "the full id of a package"),
     sub("vendor", Status::Not("not written yet"), "copy every dependency into the workspace"),
     aka("remove", &["rm"], Status::Not("not written yet"), "remove dependencies from the manifest"),
     sub("add", CHOOSES_VERSIONS, "add dependencies to the manifest"),
@@ -128,6 +131,11 @@ pub(crate) fn command(args: Vec<String>) -> anyhow::Result<i32> {
         "metadata" => manifest::metadata(Args::new(rest)),
         "locate-project" => manifest::locate_project(Args::new(rest)),
         "verify-project" => manifest::verify_project(Args::new(rest)),
+        "tree" => tree::command(Args::new(rest)),
+        "pkgid" => manifest::pkgid(Args::new(rest)),
+        "fetch" => manifest::fetch(Args::new(rest)),
+        "clean" => clean::command(Args::new(rest)),
+        "new" | "init" => new::command(subcommand.name, Args::new(rest)),
         "version" => {
             println!("{}", crate::version());
             Ok(0)

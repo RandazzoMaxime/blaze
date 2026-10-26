@@ -818,16 +818,43 @@ cargo reads them. The table is `SUBCOMMANDS` in `crates/ra-jit/src/cargo/own/mod
 | Command | blaze's | What it is, and what it waits for |
 |---|---|---|
 | `build` (`b`), `run` (`r`), `test` (`t`), `check` (`c`) | the build | [above](#commands) |
-| `metadata` | yes | `crates/blaze-metadata`: the workspace read by blaze-manifest, every locked package fetched by blaze-registry, resolved by blaze-resolve; `--no-deps`, `--features`, `--all-features`, `--no-default-features`, one `--filter-platform` (its `cfg` as blaze answers `rustc --print cfg` itself), `--manifest-path`, `--offline`. Held equal to cargo's by `harness/own_metadata.py`; against the pinned nightly's cargo, ripgrep, fd, helix and nushell print the same JSON for each form except nushell's full metadata, where cargo 1.101 adds `"min-opt-level": null` to a package's `hints` (blaze-manifest reads as cargo 1.99.0 does). Several `--filter-platform`s, and a workspace whose lock file is missing or stale, fail with the reason (choosing versions is #321) |
+| `metadata` | yes | `crates/blaze-metadata`: the workspace read by blaze-manifest, every locked package fetched by blaze-registry, resolved by blaze-resolve; `--no-deps`, `--features`, `--all-features`, `--no-default-features`, one `--filter-platform` (its `cfg` as blaze answers `rustc --print cfg` itself), `--manifest-path`, `--offline`. Held equal to cargo's by `harness/own_metadata.py`; against the pinned nightly's cargo, ripgrep, fd, helix, nushell and biome print the same JSON for each form (`harness/own_commands.py`, with `locate-project`, `verify-project`, `pkgid`, `fetch` and `clean`: 120 of 120 cases over the five). A package's `hints` has cargo 1.101's `"min-opt-level"`, always `null`: blaze-manifest does not read a value of it yet. Several `--filter-platform`s, and a workspace whose lock file is missing or stale, fail with the reason (choosing versions is #321) |
 | `locate-project` | yes | `--workspace`, `--message-format plain\|json`, `--manifest-path` |
 | `verify-project` | yes | `{"success":"true"}`, or `{"invalid":...}` and status 1 |
 | `version`, `help` | yes | blaze's version and help |
 | `fmt` | not yet | blaze's formatter, rustfmt's rules ported onto rust-analyzer's syntax trees, is being written |
 | `clippy` | not yet | blaze's lints, run by the daemon from its analysis, are being written |
 | `doc` (`d`) | not yet | HTML documentation from rust-analyzer's HIR is being written; doctests are blaze's already (`cargo blaze test --doc`) |
-| `tree`, `fetch`, `clean`, `new`, `init`, `pkgid`, `vendor`, `remove` (`rm`) | not yet | not written yet: each needs only blaze's manifest reader, registry and resolve |
+| `tree` | yes | `crates/blaze-tree`, cargo 1.101's `cargo tree` ported onto blaze-resolve: every flag (`-p`, `--workspace`, `--exclude`, `-e`, `-i`, `--prune`, `--depth`, `--prefix`, `--no-dedupe`, `-d`, `-f`, `--target`, `--charset`, `--color`, the feature flags). Held equal to cargo's by `harness/own_tree.py`: 26 forms over ripgrep, fd, helix, nushell and biome, 130 of 130 byte-equal. Package patterns with globs (`-p 'serde*'`) and `-i` with no value are refused |
+| `pkgid` | yes | the package's full spec from `Cargo.lock`, with cargo's errors for none or several matches |
+| `fetch` | yes | every package `Cargo.lock` names, downloaded by blaze-registry. `--target` fetches every platform's, and with no lock file it fails (choosing versions is #321) |
+| `clean` | yes | the target and build directories, one profile's (`--release`, `--profile`), or `--doc`, with `--target-dir`, `--dry-run` and cargo's `Removed` summary. `-p` and `--workspace` (one package's files) are refused |
+| `new`, `init` | yes | `crates/blaze-new`, cargo 1.101's `ops/cargo_new.rs`: the manifest, source file, ignore file and repository, the workspace's `members`, and cargo's checks of the name. The repository is made by `git init` (or `hg`, `pijul`, `fossil`, as cargo runs them). Cargo runs rustfmt on the file it writes; blaze does not, so a `rustfmt.toml` above the package that would change the template is not applied. Held equal to cargo's by `harness/own_new.py`: 50 of 50 cases, what each prints and every file it leaves |
+| `vendor`, `remove` (`rm`) | not yet | not written yet: each needs only blaze's manifest reader, registry and resolve |
 | `add`, `update`, `generate-lockfile` | not yet | they choose versions, which blaze-resolve does not do yet ([#321](https://github.com/indexable-inc/blaze/issues/321)) |
 | `bench`, `rustc`, `rustdoc`, `fix`, `install`, `package` | not yet | builds blaze does not do yet ([no-rustc.md](no-rustc.md)) |
 | `publish`, `search`, `info`, `owner`, `yank`, `login`, `logout` | not yet | blaze has no client of a registry's web API yet |
 | `uninstall`, `report`, `config`, `read-manifest` | not yet | not written yet |
 | any other | no | `error: no such command`; blaze runs no cargo plugin |
+
+### Plain `cargo <command>` after `enable`
+
+`enable` changes one key, `build.rustc-workspace-wrapper`, so plain `cargo build` and `cargo
+test` are still cargo's process: cargo plans the build and starts the wrapper for each workspace
+crate, and the wrapper's first build is rustc's ([What a build does](#what-a-build-does)). The
+other commands stay cargo's entirely. Here is what each way of sending them to blaze needs:
+
+- **`fmt` and `clippy`** are not built into cargo (they are rustup's `cargo-fmt` and
+  `cargo-clippy`), so an `[alias]` in the same config file can take them over: `fmt = "blaze
+  fmt"`, `clippy = "blaze clippy"`. cargo still starts, and warns that the alias shadows an
+  external command, then runs `cargo-blaze`. `enable` should write these once blaze's own `fmt`
+  and `clippy` land. Until then such an alias would make `cargo fmt` fail.
+- **Built-in commands** (`build`, `test`, `check`, `doc`, `tree`, `new`, ...) cannot be aliased:
+  cargo ignores an alias that shadows a built-in. Two ways remain. `build.rustc` set to blaze
+  keeps cargo's process but answers every rustc that cargo starts (`-vV`, `--print`, each
+  compile), which is no-rustc.md's step M. Or `rustup toolchain link blaze <dir>`, with
+  `<dir>/bin/cargo` being blaze and the project's toolchain named `blaze`, so that rustup's
+  `cargo` proxy starts blaze and no cargo process at all. The second way changes the
+  toolchain that editors and rust-analyzer see (their `cargo metadata` and `rustc --print
+  sysroot` would be blaze's, which it answers). It is not written; it touches `switch.rs`,
+  which is the build lane's.
