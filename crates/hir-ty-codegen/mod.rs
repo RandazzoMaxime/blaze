@@ -204,6 +204,11 @@ impl fmt::Display for ContentId {
 /// it: the same on every machine, whoever's home the directory is in.
 pub const CARGO_HOME: &str = "/cargo";
 
+/// What the name of a static a patch defines anew starts with, which is the same in every
+/// patch after for the same static and value: a running program keeps the copy the first gave
+/// it (`docs/live.md#types`).
+pub const LASTING_STATIC: &str = "ra_jit::static::lasting::";
+
 /// `path` with the directory `to` in place of the directory `from` it is under.
 pub fn moved(path: &str, from: &str, to: &str) -> Option<String> {
     let rest = path.strip_prefix(from)?;
@@ -6362,6 +6367,18 @@ impl<'a, 'db> ObjectCodegen<'a, 'db> {
         Ok(Some(name.unwrap_or_else(|| signature.name.symbol().clone())))
     }
 
+    /// The name of a static a patch defines that the executable has no copy of: the same for
+    /// the same static with the same type and value in every patch after, so that a program
+    /// that took an earlier patch goes on with the one it has (its address and what was
+    /// written to it), and another for one whose declaration or value changed, which starts
+    /// from the new value. `None` for one with no path to name it by.
+    fn lasting_static_name(&self, id: StaticId, bytes: &[u8], writable: bool) -> Option<String> {
+        let path = self.names.static_across_edits(id)?;
+        let declared = id.lookup(self.db).source(self.db).value.syntax().text().to_string();
+        let print = print_of(&(path, declared, bytes, writable));
+        Some(format!("{LASTING_STATIC}{print:032x}"))
+    }
+
     fn static_data(&mut self, id: StaticId) -> Result<DataId> {
         let db = self.db;
         let known = [&self.imported_statics, &self.statics, &self.frozen_statics];
@@ -6433,6 +6450,17 @@ impl<'a, 'db> ObjectCodegen<'a, 'db> {
         let exported = exported_static(db, id).filter(|_| !self.patching);
         let data = if let Some(known) = again {
             self.module.declare_data(&known.symbol, Linkage::Hidden, compiled.writable, false)?
+        } else if let Some(name) = (self.base.is_some() && !thread_local && exported.is_none())
+            .then(|| self.lasting_static_name(id, &compiled.blob.bytes, compiled.writable))
+            .flatten()
+        {
+            // A patch's own static is named after itself and its value, so that the running
+            // program keeps the one an earlier patch gave it under the name (`live.md#types`).
+            if self.module.declarations().get_name(&name).is_some() {
+                let name = StaticSignature::of(db, id).name.as_str();
+                unsupported!("a static `{name}` written as another is in the same place");
+            }
+            self.module.declare_data(&name, Linkage::Hidden, compiled.writable, false)?
         } else if let Some(name) = own.or_else(|| exported.map(|it| it.as_str().to_owned())) {
             // Nothing rustc built defines it: what finds it by name finds ours.
             self.module.declare_data(&name, Linkage::Export, compiled.writable, thread_local)?
