@@ -1584,26 +1584,10 @@ impl SymbolResolver for Resolver<'_> {
                 owner = Some(self.path(func.try_into().ok()?)?);
                 break;
             }
-            let name = match_ast! {
-                match node {
-                    ast::Const(it) => it.name(),
-                    ast::Static(it) => it.name(),
-                    _ => None,
-                }
-            };
-            if let Some(name) = name {
-                let named = |other: &SyntaxNode| {
-                    let other = match_ast! {
-                        match other {
-                            ast::Const(it) => it.name(),
-                            ast::Static(it) => it.name(),
-                            _ => None,
-                        }
-                    };
-                    other.is_some_and(|it| it.text() == name.text())
-                };
+            if let Some(name) = name_in_path(&node) {
+                let named = |other: &SyntaxNode| name_in_path(other).as_ref() == Some(&name);
                 around.push(place_in_definition(&sema, &node, &named)?.into());
-                names.push(name.text().to_string());
+                names.push(name);
             }
         }
         let owner = match owner {
@@ -1666,6 +1650,23 @@ impl SymbolResolver for Resolver<'_> {
                 let id = hir_def::AdtId::from(adt);
                 (self.item(id.into()).as_deref() == Some(path)).then_some(id)
             })
+    }
+}
+
+/// The segment a constant or static that items are written in adds to their path, as rustc
+/// prints it: its name, or `_` for an unnamed constant. objc2's `declare_class!` keeps a
+/// class's ivar offsets in statics in a `const _: () = { .. }`, which rustc exports as
+/// `<module>::_::__OBJC2_IVAR_OFFSET`.
+fn name_in_path(node: &SyntaxNode) -> Option<String> {
+    match_ast! {
+        match node {
+            ast::Const(it) => it
+                .name()
+                .map(|it| it.text().to_string())
+                .or_else(|| it.underscore_token().map(|_| "_".to_owned())),
+            ast::Static(it) => it.name().map(|it| it.text().to_string()),
+            _ => None,
+        }
     }
 }
 
