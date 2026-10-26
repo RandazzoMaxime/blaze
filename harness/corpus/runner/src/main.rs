@@ -544,7 +544,7 @@ fn main() {
     println!("const_patterns {:?}", cases::const_patterns::run());
     println!("array_map {:?}", cases::array_map::run());
     #[cfg(feature = "nightly")]
-    println!("box_patterns {:?}", cases::box_patterns::run());
+    println!("deref_patterns {:?}", cases::deref_patterns::run());
     println!("promoted_call {:?}", cases::promoted_call::run());
     println!("type_ids {:?}", cases::type_ids::run());
     #[cfg(panic = "unwind")]
