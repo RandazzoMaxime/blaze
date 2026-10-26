@@ -46,11 +46,6 @@ pub use ast_traits::HasAttrs;
 /// rustc keeps these short vectors in a `ThinVec`; here they are plain vectors.
 pub type ThinVec<T> = Vec<T>;
 
-macro_rules! thin_vec {
-    ($($t:tt)*) => { vec![$($t)*] };
-}
-pub(crate) use thin_vec;
-
 /// A "Label" is an identifier of some point in sources,
 /// e.g. in the following code:
 ///

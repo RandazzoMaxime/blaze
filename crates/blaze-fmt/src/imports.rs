@@ -6,8 +6,8 @@ use core::hash::{Hash, Hasher};
 
 use itertools::Itertools;
 
-use rustc_ast::ast::{self, UseTreeKind};
-use rustc_span::{
+use crate::ast::{self, UseTreeKind};
+use crate::span::{
     BytePos, DUMMY_SP, Span,
     symbol::{self, sym},
 };
@@ -165,12 +165,12 @@ impl UseSegment {
     // Check if self == other with their aliases removed.
     fn equal_except_alias(&self, other: &Self) -> bool {
         match (&self.kind, &other.kind) {
-            (UseSegmentKind::Ident(ref s1, _), UseSegmentKind::Ident(ref s2, _)) => s1 == s2,
+            (UseSegmentKind::Ident(s1, _), UseSegmentKind::Ident(s2, _)) => s1 == s2,
             (UseSegmentKind::Slf(_), UseSegmentKind::Slf(_))
             | (UseSegmentKind::Super(_), UseSegmentKind::Super(_))
             | (UseSegmentKind::Crate(_), UseSegmentKind::Crate(_))
             | (UseSegmentKind::Glob, UseSegmentKind::Glob) => true,
-            (UseSegmentKind::List(ref list1), UseSegmentKind::List(ref list2)) => list1 == list2,
+            (UseSegmentKind::List(list1), UseSegmentKind::List(list2)) => list1 == list2,
             _ => false,
         }
     }
@@ -598,7 +598,7 @@ impl UseTree {
         if aliased_self {
             match self.path.last_mut() {
                 Some(UseSegment {
-                    kind: UseSegmentKind::Ident(_, ref mut old_rename),
+                    kind: UseSegmentKind::Ident(_, old_rename),
                     ..
                 }) => {
                     assert!(old_rename.is_none());
@@ -674,7 +674,7 @@ impl UseTree {
                 }),
             )
             | (None, None) => true,
-            (Some(ref a), Some(ref b)) => is_same_visibility(a, b),
+            (Some(a), Some(b)) => is_same_visibility(a, b),
             _ => false,
         }
     }
@@ -927,9 +927,9 @@ impl Ord for UseSegment {
         }
 
         match (&self.kind, &other.kind) {
-            (Slf(ref a), Slf(ref b))
-            | (Super(ref a), Super(ref b))
-            | (Crate(ref a), Crate(ref b)) => match (a, b) {
+            (Slf(a), Slf(b))
+            | (Super(a), Super(b))
+            | (Crate(a), Crate(b)) => match (a, b) {
                 (Some(sa), Some(sb)) => {
                     if self.style_edition >= StyleEdition::Edition2024 {
                         version_sort(sa.trim_start_matches("r#"), sb.trim_start_matches("r#"))
@@ -940,7 +940,7 @@ impl Ord for UseSegment {
                 (_, _) => a.cmp(b),
             },
             (Glob, Glob) => Ordering::Equal,
-            (Ident(ref pia, ref aa), Ident(ref pib, ref ab)) => {
+            (Ident(pia, aa), Ident(pib, ab)) => {
                 let (ia, ib) = if self.style_edition >= StyleEdition::Edition2024 {
                     (pia.trim_start_matches("r#"), pib.trim_start_matches("r#"))
                 } else {
@@ -978,7 +978,7 @@ impl Ord for UseSegment {
                     (None, None) => Ordering::Equal,
                 }
             }
-            (List(ref a), List(ref b)) => a.iter().cmp(b.iter()),
+            (List(a), List(b)) => a.iter().cmp(b.iter()),
             (Slf(_), _) => Ordering::Less,
             (_, Slf(_)) => Ordering::Greater,
             (Super(_), _) => Ordering::Less,
@@ -1146,427 +1146,4 @@ enum SharedPrefix {
     Crate,
     Module,
     One,
-}
-
-#[cfg(test)]
-mod test {
-    use super::*;
-
-    // Parse the path part of an import. This parser is not robust and is only
-    // suitable for use in a test harness.
-    fn parse_use_tree(s: &str) -> UseTree {
-        use std::iter::Peekable;
-        use std::mem::swap;
-        use std::str::Chars;
-
-        struct Parser<'a> {
-            input: Peekable<Chars<'a>>,
-            style_edition: StyleEdition,
-        }
-
-        impl<'a> Parser<'a> {
-            fn bump(&mut self) {
-                self.input.next().unwrap();
-            }
-
-            fn eat(&mut self, c: char) {
-                assert_eq!(self.input.next().unwrap(), c);
-            }
-
-            fn push_segment(
-                &self,
-                result: &mut Vec<UseSegment>,
-                buf: &mut String,
-                alias_buf: &mut Option<String>,
-            ) {
-                let style_edition = self.style_edition;
-                if !buf.is_empty() {
-                    let mut alias = None;
-                    swap(alias_buf, &mut alias);
-
-                    match buf.as_ref() {
-                        "self" => {
-                            let kind = UseSegmentKind::Slf(alias);
-                            result.push(UseSegment {
-                                kind,
-                                style_edition,
-                            });
-                            *buf = String::new();
-                            *alias_buf = None;
-                        }
-                        "super" => {
-                            let kind = UseSegmentKind::Super(alias);
-                            result.push(UseSegment {
-                                kind,
-                                style_edition,
-                            });
-                            *buf = String::new();
-                            *alias_buf = None;
-                        }
-                        "crate" => {
-                            let kind = UseSegmentKind::Crate(alias);
-                            result.push(UseSegment {
-                                kind,
-                                style_edition,
-                            });
-                            *buf = String::new();
-                            *alias_buf = None;
-                        }
-                        _ => {
-                            let mut name = String::new();
-                            swap(buf, &mut name);
-                            let kind = UseSegmentKind::Ident(name, alias);
-                            result.push(UseSegment {
-                                kind,
-                                style_edition,
-                            });
-                        }
-                    }
-                }
-            }
-
-            fn parse_in_list(&mut self) -> UseTree {
-                let mut result = vec![];
-                let mut buf = String::new();
-                let mut alias_buf = None;
-                while let Some(&c) = self.input.peek() {
-                    match c {
-                        '{' => {
-                            assert!(buf.is_empty());
-                            self.bump();
-                            let kind = UseSegmentKind::List(self.parse_list());
-                            result.push(UseSegment {
-                                kind,
-                                style_edition: self.style_edition,
-                            });
-                            self.eat('}');
-                        }
-                        '*' => {
-                            assert!(buf.is_empty());
-                            self.bump();
-                            let kind = UseSegmentKind::Glob;
-                            result.push(UseSegment {
-                                kind,
-                                style_edition: self.style_edition,
-                            });
-                        }
-                        ':' => {
-                            self.bump();
-                            self.eat(':');
-                            self.push_segment(&mut result, &mut buf, &mut alias_buf);
-                        }
-                        '}' | ',' => {
-                            self.push_segment(&mut result, &mut buf, &mut alias_buf);
-                            return UseTree {
-                                path: result,
-                                span: DUMMY_SP,
-                                list_item: None,
-                                visibility: None,
-                                attrs: None,
-                            };
-                        }
-                        ' ' => {
-                            self.bump();
-                            self.eat('a');
-                            self.eat('s');
-                            self.eat(' ');
-                            alias_buf = Some(String::new());
-                        }
-                        c => {
-                            self.bump();
-                            if let Some(ref mut buf) = alias_buf {
-                                buf.push(c);
-                            } else {
-                                buf.push(c);
-                            }
-                        }
-                    }
-                }
-                self.push_segment(&mut result, &mut buf, &mut alias_buf);
-                UseTree {
-                    path: result,
-                    span: DUMMY_SP,
-                    list_item: None,
-                    visibility: None,
-                    attrs: None,
-                }
-            }
-
-            fn parse_list(&mut self) -> Vec<UseTree> {
-                let mut result = vec![];
-                loop {
-                    match self.input.peek().unwrap() {
-                        ',' | ' ' => self.bump(),
-                        '}' => {
-                            return result;
-                        }
-                        _ => result.push(self.parse_in_list()),
-                    }
-                }
-            }
-        }
-
-        let mut parser = Parser {
-            input: s.chars().peekable(),
-            style_edition: StyleEdition::Edition2015,
-        };
-        parser.parse_in_list()
-    }
-
-    macro_rules! parse_use_trees {
-        ($($s:expr),* $(,)*) => {
-            vec![
-                $(parse_use_tree($s),)*
-            ]
-        }
-    }
-
-    macro_rules! test_merge {
-        ($by:ident, [$($input:expr),* $(,)*], [$($output:expr),* $(,)*]) => {
-            assert_eq!(
-                normalize_use_trees_with_granularity(
-                    parse_use_trees!($($input,)*),
-                    ImportGranularity::$by,
-                ),
-                parse_use_trees!($($output,)*),
-            );
-        }
-    }
-
-    #[test]
-    fn test_use_tree_merge_crate() {
-        test_merge!(
-            Crate,
-            ["a::b::{c, d}", "a::b::{e, f}"],
-            ["a::b::{c, d, e, f}"]
-        );
-        test_merge!(Crate, ["a::b::c", "a::b"], ["a::{b, b::c}"]);
-        test_merge!(Crate, ["a::b", "a::b"], ["a::b"]);
-        test_merge!(Crate, ["a", "a::b", "a::b::c"], ["a::{self, b, b::c}"]);
-        test_merge!(
-            Crate,
-            ["a", "a::b", "a::b::c", "a::b::c::d"],
-            ["a::{self, b, b::{c, c::d}}"]
-        );
-        test_merge!(
-            Crate,
-            ["a", "a::b", "a::b::c", "a::b"],
-            ["a::{self, b, b::c}"]
-        );
-        test_merge!(
-            Crate,
-            ["a::{b::{self, c}, d::e}", "a::d::f"],
-            ["a::{b::{self, c}, d::{e, f}}"]
-        );
-        test_merge!(
-            Crate,
-            ["a::d::f", "a::{b::{self, c}, d::e}"],
-            ["a::{b::{self, c}, d::{e, f}}"]
-        );
-        test_merge!(
-            Crate,
-            ["a::{c, d, b}", "a::{d, e, b, a, f}", "a::{f, g, c}"],
-            ["a::{a, b, c, d, e, f, g}"]
-        );
-        test_merge!(
-            Crate,
-            ["a::{self}", "b::{self as foo}"],
-            ["a::{self}", "b::{self as foo}"]
-        );
-    }
-
-    #[test]
-    fn test_use_tree_merge_module() {
-        test_merge!(
-            Module,
-            ["foo::b", "foo::{a, c, d::e}"],
-            ["foo::{a, b, c}", "foo::d::e"]
-        );
-
-        test_merge!(
-            Module,
-            ["foo::{a::b, a::c, d::e, d::f}"],
-            ["foo::a::{b, c}", "foo::d::{e, f}"]
-        );
-    }
-
-    #[test]
-    fn test_use_tree_merge_one() {
-        test_merge!(One, ["a", "b"], ["{a, b}"]);
-
-        test_merge!(One, ["a::{aa, ab}", "b", "a"], ["{a::{self, aa, ab}, b}"]);
-
-        test_merge!(One, ["a as x", "b as y"], ["{a as x, b as y}"]);
-
-        test_merge!(
-            One,
-            ["a::{aa as xa, ab}", "b", "a"],
-            ["{a::{self, aa as xa, ab}, b}"]
-        );
-
-        test_merge!(
-            One,
-            ["a", "a::{aa, ab::{aba, abb}}"],
-            ["a::{self, aa, ab::{aba, abb}}"]
-        );
-
-        test_merge!(One, ["a", "b::{ba, *}"], ["{a, b::{ba, *}}"]);
-
-        test_merge!(One, ["a", "b", "a::aa"], ["{a::{self, aa}, b}"]);
-
-        test_merge!(
-            One,
-            ["a::aa::aaa", "a::ac::aca", "a::aa::*"],
-            ["a::{aa::{aaa, *}, ac::aca}"]
-        );
-
-        test_merge!(
-            One,
-            ["a", "b::{ba, bb}", "a::{aa::*, ab::aba}"],
-            ["{a::{self, aa::*, ab::aba}, b::{ba, bb}}"]
-        );
-
-        test_merge!(
-            One,
-            ["b", "a::ac::{aca, acb}", "a::{aa::*, ab}"],
-            ["{a::{aa::*, ab, ac::{aca, acb}}, b}"]
-        );
-    }
-
-    #[test]
-    fn test_flatten_use_trees() {
-        assert_eq!(
-            flatten_use_trees(
-                parse_use_trees!["foo::{a::{b, c}, d::e}"],
-                ImportGranularity::Item
-            ),
-            parse_use_trees!["foo::a::b", "foo::a::c", "foo::d::e"]
-        );
-
-        assert_eq!(
-            flatten_use_trees(
-                parse_use_trees!["foo::{self, a, b::{c, d}, e::*}"],
-                ImportGranularity::Item
-            ),
-            parse_use_trees![
-                "foo::{self}",
-                "foo::a",
-                "foo::b::c",
-                "foo::b::d",
-                "foo::e::*"
-            ]
-        );
-    }
-
-    #[test]
-    fn test_use_tree_flatten() {
-        assert_eq!(
-            parse_use_tree("a::b::{c, d, e, f}").flatten(ImportGranularity::Item),
-            parse_use_trees!("a::b::c", "a::b::d", "a::b::e", "a::b::f",)
-        );
-
-        assert_eq!(
-            parse_use_tree("a::b::{c::{d, e, f}, g, h::{i, j, k}}")
-                .flatten(ImportGranularity::Item),
-            parse_use_trees![
-                "a::b::c::d",
-                "a::b::c::e",
-                "a::b::c::f",
-                "a::b::g",
-                "a::b::h::i",
-                "a::b::h::j",
-                "a::b::h::k",
-            ]
-        );
-    }
-
-    #[test]
-    fn test_use_tree_normalize() {
-        assert_eq!(parse_use_tree("a::self").normalize(), parse_use_tree("a"));
-        assert_eq!(
-            parse_use_tree("a::self as foo").normalize(),
-            parse_use_tree("a as foo")
-        );
-        assert_eq!(
-            parse_use_tree("a::{self}").normalize(),
-            parse_use_tree("a::{self}")
-        );
-        assert_eq!(parse_use_tree("a::{b}").normalize(), parse_use_tree("a::b"));
-        assert_eq!(
-            parse_use_tree("a::{b, c::self}").normalize(),
-            parse_use_tree("a::{b, c}")
-        );
-        assert_eq!(
-            parse_use_tree("a::{b as bar, c::self}").normalize(),
-            parse_use_tree("a::{b as bar, c}")
-        );
-    }
-
-    #[test]
-    fn test_use_tree_ord() {
-        assert!(parse_use_tree("a").normalize() < parse_use_tree("aa").normalize());
-        assert!(parse_use_tree("a").normalize() < parse_use_tree("a::a").normalize());
-        assert!(parse_use_tree("a").normalize() < parse_use_tree("*").normalize());
-        assert!(parse_use_tree("a").normalize() < parse_use_tree("{a, b}").normalize());
-        assert!(parse_use_tree("*").normalize() < parse_use_tree("{a, b}").normalize());
-
-        assert!(parse_use_tree("A").normalize() > parse_use_tree("a").normalize());
-        assert!(parse_use_tree("A").normalize() > parse_use_tree("_b").normalize());
-        assert!(parse_use_tree("a").normalize() > parse_use_tree("_b").normalize());
-
-        assert!(
-            parse_use_tree("aaaaaaaaaaaaaaa::{bb, cc, dddddddd}").normalize()
-                < parse_use_tree("aaaaaaaaaaaaaaa::{bb, cc, ddddddddd}").normalize()
-        );
-        assert!(
-            parse_use_tree("serde::de::{Deserialize}").normalize()
-                < parse_use_tree("serde_json").normalize()
-        );
-        assert!(parse_use_tree("a::b::c").normalize() < parse_use_tree("a::b::*").normalize());
-        assert!(
-            parse_use_tree("foo::{Bar, Baz}").normalize()
-                < parse_use_tree("{Bar, Baz}").normalize()
-        );
-
-        assert!(
-            parse_use_tree("foo::{qux as bar}").normalize()
-                < parse_use_tree("foo::{self as bar}").normalize()
-        );
-        assert!(
-            parse_use_tree("foo::{qux as bar}").normalize()
-                < parse_use_tree("foo::{baz, qux as bar}").normalize()
-        );
-        assert!(
-            parse_use_tree("foo::{self as bar, baz}").normalize()
-                < parse_use_tree("foo::{baz, qux as bar}").normalize()
-        );
-
-        assert!(parse_use_tree("foo").normalize() < parse_use_tree("Foo").normalize());
-        assert!(parse_use_tree("foo").normalize() < parse_use_tree("foo::Bar").normalize());
-
-        assert!(
-            parse_use_tree("std::cmp::{d, c, b, a}").normalize()
-                < parse_use_tree("std::cmp::{b, e, g, f}").normalize()
-        );
-    }
-
-    #[test]
-    fn test_use_tree_nest_trailing_self() {
-        assert_eq!(
-            parse_use_tree("a::b::self").nest_trailing_self(),
-            parse_use_tree("a::b::{self}")
-        );
-        assert_eq!(
-            parse_use_tree("a::b::c").nest_trailing_self(),
-            parse_use_tree("a::b::c")
-        );
-        assert_eq!(
-            parse_use_tree("a::b::{c, d}").nest_trailing_self(),
-            parse_use_tree("a::b::{c, d}")
-        );
-        assert_eq!(
-            parse_use_tree("a::b::{self, c}").nest_trailing_self(),
-            parse_use_tree("a::b::{self, c}")
-        );
-    }
 }

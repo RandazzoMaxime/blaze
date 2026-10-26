@@ -1,6 +1,5 @@
-use rustc_ast::{Label, ast};
-use rustc_span::Span;
-use thin_vec::thin_vec;
+use crate::ast::{Label, self};
+use crate::span::Span;
 use tracing::debug;
 
 use crate::attr::get_attrs_from_stmt;
@@ -171,7 +170,7 @@ fn rewrite_closure_with_block(
     // `body.attrs` may hold inner attributes from a nested block, e.g. `while cond { #![attr] }`.
     let outer_attrs = outer_attributes(&body.attrs);
     let block = ast::Block {
-        stmts: thin_vec![ast::Stmt {
+        stmts: vec![ast::Stmt {
             id: ast::NodeId::root(),
             kind: ast::StmtKind::Expr(Box::new(body.clone())),
             span: body.span,

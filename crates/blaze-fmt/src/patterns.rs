@@ -1,5 +1,5 @@
-use rustc_ast::ast::{self, BindingMode, ByRef, Pat, PatField, PatKind};
-use rustc_span::{BytePos, Span};
+use crate::ast::{self, BindingMode, ByRef, Pat, PatField, PatKind};
+use crate::span::{BytePos, Span};
 
 use crate::comment::{FindUncommented, combine_strs_with_missing_comments};
 use crate::config::StyleEdition;
@@ -59,21 +59,21 @@ fn is_short_pattern_inner(context: &RewriteContext<'_>, pat: &ast::Pat) -> bool 
             }
             _ => unreachable!(),
         },
-        ast::PatKind::Ident(_, _, ref pat) => pat.is_none(),
+        ast::PatKind::Ident(_, _, pat) => pat.is_none(),
         ast::PatKind::Struct(..)
         | ast::PatKind::MacCall(..)
         | ast::PatKind::Slice(..)
         | ast::PatKind::Path(..)
         | ast::PatKind::Range(..)
         | ast::PatKind::Guard(..) => false,
-        ast::PatKind::Tuple(ref subpats) => subpats.len() <= 1,
-        ast::PatKind::TupleStruct(_, ref path, ref subpats) => {
+        ast::PatKind::Tuple(subpats) => subpats.len() <= 1,
+        ast::PatKind::TupleStruct(_, path, subpats) => {
             path.segments.len() <= 1 && subpats.len() <= 1
         }
-        PatKind::Deref(ref p) | ast::PatKind::Ref(ref p, _, _) | ast::PatKind::Paren(ref p) => {
+        PatKind::Deref(p) | ast::PatKind::Ref(p, _, _) | ast::PatKind::Paren(p) => {
             is_short_pattern_inner(context, &*p)
         }
-        PatKind::Or(ref pats) => pats.iter().all(|p| is_short_pattern_inner(context, p)),
+        PatKind::Or(pats) => pats.iter().all(|p| is_short_pattern_inner(context, p)),
     }
 }
 

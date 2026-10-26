@@ -3,7 +3,7 @@
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
-use rustc_span::Span;
+use crate::span::Span;
 use thiserror::Error;
 
 use crate::FormatReport;

@@ -8,8 +8,8 @@
 
 use std::cmp::Ordering;
 
-use rustc_ast::{ast, attr};
-use rustc_span::{Span, symbol::sym};
+use crate::ast::{self, attr};
+use crate::span::{Span, symbol::sym};
 
 use crate::StyleEdition;
 use crate::config::{Config, GroupImportsTactic};

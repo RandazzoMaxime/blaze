@@ -2,11 +2,11 @@ use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use rustc_ast::ast;
-use rustc_ast::visit::Visitor;
-use rustc_span::Span;
-use rustc_span::symbol::{self, Symbol, sym};
-use thin_vec::ThinVec;
+use crate::ast;
+use crate::ast::visit::Visitor;
+use crate::span::Span;
+use crate::span::symbol::{self, Symbol, sym};
+use crate::ast::ThinVec;
 use thiserror::Error;
 
 use crate::attr::MetaVisitor;
@@ -72,7 +72,7 @@ pub struct ModuleResolutionError {
     pub(crate) kind: ModuleResolutionErrorKind,
 }
 
-/// Defines variants similar to those of [rustc_expand::module::ModError]
+/// Defines variants similar to those of [crate::expand_module::ModError]
 #[derive(Debug, Error)]
 pub(crate) enum ModuleResolutionErrorKind {
     /// Find a file that cannot be parsed.
@@ -158,7 +158,7 @@ impl<'ast, 'psess, 'c> ModResolver<'ast, 'psess> {
                     Module::new(
                         module_item.item.span,
                         Some(Cow::Owned(sub_mod_kind.clone())),
-                        Cow::Owned(ThinVec::new()),
+                        Cow::Owned(Vec::new()),
                         Cow::Owned(ast::AttrVec::new()),
                     ),
                 )?;
@@ -180,7 +180,7 @@ impl<'ast, 'psess, 'c> ModResolver<'ast, 'psess> {
                     Module::new(
                         module_item.item.span,
                         Some(Cow::Owned(sub_mod_kind.clone())),
-                        Cow::Owned(ThinVec::new()),
+                        Cow::Owned(Vec::new()),
                         Cow::Owned(ast::AttrVec::new()),
                     ),
                 )?;
@@ -212,7 +212,7 @@ impl<'ast, 'psess, 'c> ModResolver<'ast, 'psess> {
                     Module::new(
                         span,
                         Some(Cow::Owned(sub_mod_kind.clone())),
-                        Cow::Owned(ThinVec::new()),
+                        Cow::Owned(Vec::new()),
                         Cow::Owned(ast::AttrVec::new()),
                     ),
                 )?;
@@ -242,7 +242,7 @@ impl<'ast, 'psess, 'c> ModResolver<'ast, 'psess> {
                     Module::new(
                         span,
                         Some(Cow::Borrowed(sub_mod_kind)),
-                        Cow::Owned(ThinVec::new()),
+                        Cow::Owned(Vec::new()),
                         Cow::Borrowed(&item.attrs),
                     ),
                 )?;
@@ -467,14 +467,11 @@ impl<'ast, 'psess, 'c> ModResolver<'ast, 'psess> {
                     }
                 }
             }
-            Err(mod_err) if !mods_outside_ast.is_empty() => {
-                if let ModError::ParserError(e) = mod_err {
-                    e.cancel();
-                }
+            Err(_) if !mods_outside_ast.is_empty() => {
                 Ok(Some(SubModKind::MultiExternal(mods_outside_ast)))
             }
             Err(e) => match e {
-                ModError::FileNotFound(_, default_path, _secondary_path) => {
+                ModError::FileNotFound(default_path, _secondary_path) => {
                     if contains_custom_attributes(attrs) {
                         // It's possible that at least one of the attributes is a custom proc macro
                         // that takes the module tokens as an input. It's hard to know for sure
@@ -490,7 +487,7 @@ impl<'ast, 'psess, 'c> ModResolver<'ast, 'psess> {
                         kind: ModuleResolutionErrorKind::NotFound { file: default_path },
                     })
                 }
-                ModError::MultipleCandidates(_, default_path, secondary_path) => {
+                ModError::MultipleCandidates(default_path, secondary_path) => {
                     Err(ModuleResolutionError {
                         module: mod_name.to_string(),
                         kind: ModuleResolutionErrorKind::MultipleCandidates {
@@ -499,14 +496,6 @@ impl<'ast, 'psess, 'c> ModResolver<'ast, 'psess> {
                         },
                     })
                 }
-                ModError::ParserError(_)
-                | ModError::CircularInclusion(_)
-                | ModError::ModInBlock(_) => Err(ModuleResolutionError {
-                    module: mod_name.to_string(),
-                    kind: ModuleResolutionErrorKind::ParseError {
-                        file: self.directory.path.clone(),
-                    },
-                }),
             },
         }
     }

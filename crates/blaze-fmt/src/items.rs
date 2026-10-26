@@ -3,10 +3,9 @@
 use std::borrow::Cow;
 use std::cmp::{Ordering, max, min};
 
-use regex::Regex;
-use rustc_ast::ast;
-use rustc_ast::visit;
-use rustc_span::{BytePos, DUMMY_SP, Ident, Span, symbol};
+use crate::ast;
+use crate::ast::visit;
+use crate::span::{BytePos, DUMMY_SP, Ident, Span, symbol};
 use tracing::debug;
 
 use crate::attr::filter_inline_attrs;
@@ -3636,7 +3635,7 @@ pub(crate) fn rewrite_extern_crate(
         new_str.to_owned()
     } else {
         let no_whitespace = &new_str.split_whitespace().collect::<Vec<&str>>().join(" ");
-        String::from(&*Regex::new(r"\s;").unwrap().replace(no_whitespace, ";"))
+        String::from(&*replace_first_space_semi(no_whitespace))
     };
     rewrite_attrs(context, item, &item_str, attrs_shape)
 }
@@ -3655,4 +3654,16 @@ pub(crate) fn is_use_item(item: &ast::Item) -> bool {
 
 pub(crate) fn is_extern_crate(item: &ast::Item) -> bool {
     matches!(item.kind, ast::ItemKind::ExternCrate(..))
+}
+
+/// `Regex::new(r"\s;").replace(s, ";")`: the first whitespace character followed by `;` loses
+/// the whitespace.
+fn replace_first_space_semi(s: &str) -> Cow<'_, str> {
+    let mut chars = s.char_indices().peekable();
+    while let Some((i, c)) = chars.next() {
+        if c.is_whitespace() && chars.peek().is_some_and(|&(_, next)| next == ';') {
+            return Cow::Owned(format!("{}{}", &s[..i], &s[i + c.len_utf8()..]));
+        }
+    }
+    Cow::Borrowed(s)
 }

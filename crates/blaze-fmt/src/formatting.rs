@@ -5,8 +5,8 @@ use std::io::{self, Write};
 use std::ops::Range;
 use std::time::{Duration, Instant};
 
-use rustc_ast::ast;
-use rustc_span::Span;
+use crate::ast;
+use crate::span::Span;
 use tracing::debug;
 
 use self::newline_style::apply_newline_style;
@@ -37,7 +37,7 @@ impl<'b, T: Write + 'b> Session<'b, T> {
             return Err(ErrorKind::VersionMismatch);
         }
 
-        rustc_span::create_session_if_not_set_then(self.config.edition().into(), |_| {
+        crate::span::create_session_if_not_set_then(self.config.edition().into(), |_| {
             if self.config.disable_all_formatting() {
                 // When the input is from stdin, echo back the input.
                 return match input {

@@ -7,9 +7,9 @@
 
 use std::borrow::Cow;
 
-use rustc_ast as ast;
-use rustc_span::Span;
-use rustc_span::symbol::Ident;
+use crate::ast;
+use crate::span::Span;
+use crate::span::symbol::Ident;
 use tracing::debug;
 
 use crate::comment::{combine_strs_with_missing_comments, contains_comment};

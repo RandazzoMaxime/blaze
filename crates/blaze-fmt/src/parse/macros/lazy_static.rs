@@ -1,8 +1,8 @@
-use rustc_ast::ast;
-use rustc_ast::token;
-use rustc_ast::tokenstream::TokenStream;
-use rustc_parse::exp;
-use rustc_span::symbol;
+use crate::ast;
+use crate::ast::token;
+use crate::ast::tokenstream::TokenStream;
+use crate::parse::stream::{FollowedByType, exp};
+use crate::span::symbol;
 
 use crate::rewrite::RewriteContext;
 
@@ -16,8 +16,8 @@ pub(crate) fn parse_lazy_static(
         ($method:ident $(,)* $($arg:expr),* $(,)*) => {
             match parser.$method($($arg,)*) {
                 Ok(val) => {
-                    if parser.psess.dcx().has_errors().is_some() {
-                        parser.psess.dcx().reset_err_count();
+                    if parser.dcx().has_errors().is_some() {
+                        parser.dcx().reset_err_count();
                         return None;
                     } else {
                         val
@@ -25,7 +25,7 @@ pub(crate) fn parse_lazy_static(
                 }
                 Err(err) => {
                     err.cancel();
-                    parser.psess.dcx().reset_err_count();
+                    parser.dcx().reset_err_count();
                     return None;
                 }
             }
@@ -35,7 +35,7 @@ pub(crate) fn parse_lazy_static(
         // Parse a `lazy_static!` item.
         // FIXME: These `eat_*` calls should be converted to `parse_or` to avoid
         // silently formatting malformed lazy-statics.
-        let vis = parse_or!(parse_visibility, rustc_parse::parser::FollowedByType::No);
+        let vis = parse_or!(parse_visibility, FollowedByType::No);
         let _ = parser.eat_keyword(exp!(Static));
         let _ = parser.eat_keyword(exp!(Ref));
         let id = parse_or!(parse_ident);

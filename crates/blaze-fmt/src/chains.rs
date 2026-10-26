@@ -58,8 +58,8 @@
 use std::borrow::Cow;
 use std::cmp::min;
 
-use rustc_ast::ast;
-use rustc_span::{BytePos, Span, symbol};
+use crate::ast;
+use crate::span::{BytePos, Span, symbol};
 use tracing::debug;
 
 use crate::comment::{CharClasses, FullCodeCharKind, RichChar, rewrite_comment};
@@ -77,7 +77,7 @@ use crate::utils::{
     rewrite_ident, trimmed_last_line_width, wrap_str,
 };
 
-use thin_vec::ThinVec;
+use crate::ast::ThinVec;
 
 /// Provides the original input contents from the span
 /// of a chain element with trailing spaces trimmed.

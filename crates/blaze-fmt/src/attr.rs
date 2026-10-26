@@ -1,8 +1,8 @@
 //! Format attributes and meta items.
 
-use rustc_ast::HasAttrs;
-use rustc_ast::ast;
-use rustc_span::{Span, symbol::sym};
+use crate::ast::HasAttrs;
+use crate::ast;
+use crate::span::{Span, symbol::sym};
 use tracing::debug;
 
 use self::doc_comment::DocCommentFormatter;
@@ -249,8 +249,8 @@ impl Rewrite for ast::MetaItemInner {
 
     fn rewrite_result(&self, context: &RewriteContext<'_>, shape: Shape) -> RewriteResult {
         match self {
-            ast::MetaItemInner::MetaItem(ref meta_item) => meta_item.rewrite_result(context, shape),
-            ast::MetaItemInner::Lit(ref l) => {
+            ast::MetaItemInner::MetaItem(meta_item) => meta_item.rewrite_result(context, shape),
+            ast::MetaItemInner::Lit(l) => {
                 rewrite_literal(context, l.as_token_lit(), l.span, shape)
             }
         }
@@ -546,8 +546,8 @@ pub(crate) trait MetaVisitor<'ast> {
 
     fn visit_meta_item_inner(&mut self, nm: &'ast ast::MetaItemInner) {
         match nm {
-            ast::MetaItemInner::MetaItem(ref meta_item) => self.visit_meta_item(meta_item),
-            ast::MetaItemInner::Lit(ref lit) => self.visit_meta_item_lit(lit),
+            ast::MetaItemInner::MetaItem(meta_item) => self.visit_meta_item(meta_item),
+            ast::MetaItemInner::Lit(lit) => self.visit_meta_item_lit(lit),
         }
     }
 

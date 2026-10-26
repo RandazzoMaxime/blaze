@@ -6,9 +6,8 @@
 
 use std::borrow::Cow;
 use std::hash::Hash;
-use std::ops::Range;
+use std::mem;
 use std::sync::{Arc, LazyLock};
-use std::{cmp, fmt, iter, mem};
 
 use crate::ast::token::{self, Delimiter, Token, TokenKind};
 use crate::span::{DUMMY_SP, Span};

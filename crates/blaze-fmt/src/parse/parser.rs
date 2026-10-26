@@ -1,20 +1,25 @@
+//! Follows `src/tools/rustfmt/src/parse/parser.rs` at rust-lang/rust 12433c307 (MIT or
+//! Apache-2.0). A file is lexed by rustc's rules (`parse::lexer`), parsed by rust-analyzer and
+//! lowered to rustc's AST with rustc's spans (`parse::lower`); a lexer error, a parse error, or
+//! a construct the lowering does not cover yet is a parse error, and rustfmt leaves the file
+//! alone.
+
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
-use rustc_ast::{ast, attr};
-use rustc_errors::Diag;
-use rustc_parse::lexer::StripTokens;
-use rustc_parse::parser::Parser as RawParser;
-use rustc_parse::{exp, new_parser_from_file, new_parser_from_source_str, unwrap_or_emit_fatal};
-use rustc_span::{Span, sym};
-use thin_vec::ThinVec;
+use crate::ast::ThinVec;
+use crate::ast::{self, attr};
+use crate::parse::lexer::{self, StripTokens};
+use crate::parse::lower::{DelimIndex, Lower};
+use crate::span::{BytePos, SourceFile, Span, sym};
 
 use crate::Input;
 use crate::parse::session::ParseSess;
 
-pub(crate) type DirectoryOwnership = rustc_expand::module::DirOwnership;
-pub(crate) type ModulePathSuccess = rustc_expand::module::ModulePathSuccess;
-pub(crate) type ModError<'a> = rustc_expand::module::ModError<'a>;
+pub(crate) type DirectoryOwnership = crate::expand_module::DirOwnership;
+pub(crate) type ModulePathSuccess = crate::expand_module::ModulePathSuccess;
+pub(crate) type ModError = crate::expand_module::ModError;
 
 #[derive(Clone)]
 pub(crate) struct Directory {
@@ -24,7 +29,8 @@ pub(crate) struct Directory {
 
 /// A parser for Rust source code.
 pub(crate) struct Parser<'a> {
-    parser: RawParser<'a>,
+    psess: &'a ParseSess,
+    file: Arc<SourceFile>,
 }
 
 /// A builder for the `Parser`.
@@ -49,31 +55,25 @@ impl<'a> ParserBuilder<'a> {
         let psess = self.psess.ok_or(ParserError::NoParseSess)?;
         let input = self.input.ok_or(ParserError::NoInput)?;
 
-        let parser = match Self::parser(psess.inner(), input) {
-            Ok(p) => p,
-            Err(diagnostics) => {
-                psess.emit_diagnostics(diagnostics);
-                return Err(ParserError::ParserCreationError);
-            }
+        let file = match input {
+            Input::File(ref path) => load_file(psess, path, None)?,
+            Input::Text(text) => psess
+                .source_map()
+                .new_source_file(crate::span::FileName::Custom("stdin".to_owned()), text),
         };
-
-        Ok(Parser { parser })
+        Ok(Parser { psess, file })
     }
+}
 
-    fn parser(
-        psess: &'a rustc_session::parse::ParseSess,
-        input: Input,
-    ) -> Result<RawParser<'a>, Vec<Diag<'a>>> {
-        match input {
-            Input::File(ref file) => {
-                new_parser_from_file(psess, file, StripTokens::ShebangAndFrontmatter, None)
-            }
-            Input::Text(text) => new_parser_from_source_str(
-                psess,
-                rustc_span::FileName::Custom("stdin".to_owned()),
-                text,
-                StripTokens::ShebangAndFrontmatter,
-            ),
+/// rustc's `new_parser_from_file`: a file that cannot be read is an error at `sp`, the `mod`
+/// item that named it.
+fn load_file(psess: &ParseSess, path: &Path, sp: Option<Span>) -> Result<Arc<SourceFile>, ParserError> {
+    match psess.source_map().load_file(path) {
+        Ok(file) => Ok(file),
+        Err(e) => {
+            let span = sp.unwrap_or_default();
+            psess.emit_error(span, format!("couldn't read `{}`: {e}", path.display()));
+            Err(ParserError::ParserCreationError)
         }
     }
 }
@@ -85,6 +85,43 @@ pub(crate) enum ParserError {
     ParserCreationError,
     ParseError,
     ParsePanicError,
+}
+
+/// A file parsed and lowered: rustc's `parse_mod(Eof)`.
+fn parse_mod(psess: &ParseSess, file: &SourceFile) -> Option<ast::Crate> {
+    let src = file.src.as_ref()?;
+    let base = file.start_pos;
+    let edition = psess.edition();
+    let stream = match lexer::lex_token_trees(src, base, edition, StripTokens::ShebangAndFrontmatter) {
+        Ok(stream) => stream,
+        Err(err) => {
+            psess.emit_error(err.span, err.message);
+            return None;
+        }
+    };
+    let delims = DelimIndex::new(&stream);
+    let parse = syntax::SourceFile::parse(src, edition.to_ra());
+    if let Some(err) = parse.errors().first() {
+        let range = err.range();
+        let span = Span::with_root_ctxt(
+            base + BytePos(u32::from(range.start())),
+            base + BytePos(u32::from(range.end())),
+        );
+        psess.emit_error(span, err.to_string());
+        return None;
+    }
+    let lower = Lower::new(base, edition, &delims);
+    let krate = lower.krate(&parse.tree());
+    match lower.finish() {
+        Ok(()) => Some(krate),
+        Err(unsupported) => {
+            psess.emit_error(
+                unsupported.span,
+                format!("blaze fmt cannot format this file yet: {}", unsupported.message),
+            );
+            None
+        }
+    }
 }
 
 impl<'a> Parser<'a> {
@@ -108,16 +145,10 @@ impl<'a> Parser<'a> {
         span: Span,
     ) -> Result<(ast::AttrVec, ThinVec<Box<ast::Item>>, Span), ParserError> {
         let result = catch_unwind(AssertUnwindSafe(|| {
-            let mut parser = unwrap_or_emit_fatal(new_parser_from_file(
-                psess.inner(),
-                path,
-                StripTokens::ShebangAndFrontmatter,
-                Some(span),
-            ));
-            match parser.parse_mod(exp!(Eof)) {
-                Ok((a, i, spans)) => Some((a, i, spans.inner_span)),
-                Err(e) => {
-                    e.emit();
+            let file = load_file(psess, path, Some(span)).ok()?;
+            match parse_mod(psess, &file) {
+                Some(krate) => Some((krate.attrs, krate.items, krate.spans.inner_span)),
+                None => {
                     if psess.can_reset_errors() {
                         psess.reset_errors();
                     }
@@ -163,15 +194,11 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_crate_mod(&mut self) -> Result<ast::Crate, ParserError> {
-        let mut parser = AssertUnwindSafe(&mut self.parser);
-        let err = Err(ParserError::ParsePanicError);
-        match catch_unwind(move || parser.parse_crate_mod()) {
-            Ok(Ok(k)) => Ok(k),
-            Ok(Err(db)) => {
-                db.emit();
-                err
-            }
-            Err(_) => err,
+        let (psess, file) = (self.psess, &self.file);
+        match catch_unwind(AssertUnwindSafe(|| parse_mod(psess, file))) {
+            Ok(Some(k)) => Ok(k),
+            Ok(None) => Err(ParserError::ParseError),
+            Err(_) => Err(ParserError::ParsePanicError),
         }
     }
 }

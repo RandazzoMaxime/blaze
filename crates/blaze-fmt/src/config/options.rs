@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
 use itertools::Itertools;
-use rustfmt_config_proc_macro::config_type;
+use crate::config::config_type_macro::config_type;
 use serde::de::{SeqAccess, Visitor};
 use serde::ser::SerializeSeq;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
@@ -16,7 +16,7 @@ use crate::config::file_lines::FileLines;
 use crate::config::lists::*;
 use crate::config::macro_names::MacroSelectors;
 
-#[config_type]
+config_type! {
 pub enum NewlineStyle {
     /// Auto-detect based on the raw source input.
     Auto,
@@ -27,8 +27,9 @@ pub enum NewlineStyle {
     /// `\r\n` in Windows, `\n` on other platforms.
     Native,
 }
+}
 
-#[config_type]
+config_type! {
 /// Where to put the opening brace of items (`fn`, `impl`, etc.).
 pub enum BraceStyle {
     /// Put the opening brace on the next line.
@@ -39,8 +40,9 @@ pub enum BraceStyle {
     /// case force the brace to be put on the next line.
     SameLineWhere,
 }
+}
 
-#[config_type]
+config_type! {
 /// Where to put the opening brace of conditional expressions (`if`, `match`, etc.).
 pub enum ControlBraceStyle {
     /// K&R style, Rust community default
@@ -50,8 +52,9 @@ pub enum ControlBraceStyle {
     /// Allman style
     AlwaysNextLine,
 }
+}
 
-#[config_type]
+config_type! {
 /// How to indent.
 pub enum IndentStyle {
     /// First line on the same line as the opening brace, all lines aligned with
@@ -60,8 +63,9 @@ pub enum IndentStyle {
     /// First line is on a new line and all lines align with **block** indent.
     Block,
 }
+}
 
-#[config_type]
+config_type! {
 /// How to place a list-like items.
 /// FIXME: Issue-3581: this should be renamed to ItemsLayout when publishing 2.0
 pub enum Density {
@@ -72,8 +76,9 @@ pub enum Density {
     /// Place every item on a separate line.
     Vertical,
 }
+}
 
-#[config_type]
+config_type! {
 /// Spacing around type combinators.
 pub enum TypeDensity {
     /// No spaces around "=" and "+"
@@ -81,8 +86,9 @@ pub enum TypeDensity {
     /// Spaces around " = " and " + "
     Wide,
 }
+}
 
-#[config_type]
+config_type! {
 /// Heuristic settings that can be used to simply
 /// the configuration of the granular width configurations
 /// like `struct_lit_width`, `array_width`, etc.
@@ -94,8 +100,9 @@ pub enum Heuristics {
     /// Use scaled values based on the value of `max_width`
     Default,
 }
+}
 
-#[config_type]
+config_type! {
 /// Heuristic settings for doc comments. Same as `Heuristics`, but `Inherit` will inherit the value
 /// from the top-level configuration.
 pub enum DocCodeHeuristics {
@@ -107,6 +114,7 @@ pub enum DocCodeHeuristics {
     Max,
     /// Use scaled values based on the value of `max_width`
     Default,
+}
 }
 
 impl DocCodeHeuristics {
@@ -137,7 +145,7 @@ impl Density {
     }
 }
 
-#[config_type]
+config_type! {
 /// Configuration for import groups, i.e. sets of imports separated by newlines.
 pub enum GroupImportsTactic {
     /// Keep groups as they are.
@@ -150,8 +158,9 @@ pub enum GroupImportsTactic {
     /// Discard existing groups, and create a single group for everything
     One,
 }
+}
 
-#[config_type]
+config_type! {
 /// How to merge imports.
 pub enum ImportGranularity {
     /// Do not merge imports.
@@ -165,9 +174,10 @@ pub enum ImportGranularity {
     /// Use one `use` statement including all items.
     One,
 }
+}
 
+config_type! {
 /// Controls how rustfmt should handle case in hexadecimal literals.
-#[config_type]
 pub enum HexLiteralCase {
     /// Leave the literal as-is
     Preserve,
@@ -176,9 +186,10 @@ pub enum HexLiteralCase {
     /// Ensure all literals use lowercase lettering
     Lower,
 }
+}
 
+config_type! {
 /// How to treat trailing zeros in floating-point literals.
-#[config_type]
 pub enum FloatLiteralTrailingZero {
     /// Leave the literal as-is.
     Preserve,
@@ -191,17 +202,11 @@ pub enum FloatLiteralTrailingZero {
     /// period is also removed.
     Never,
 }
-
-#[config_type]
-pub enum ReportTactic {
-    Always,
-    Unnumbered,
-    Never,
 }
 
+config_type! {
 /// What Rustfmt should emit. Mostly corresponds to the `--emit` command line
 /// option.
-#[config_type]
 pub enum EmitMode {
     /// Emits to files.
     Files,
@@ -222,9 +227,10 @@ pub enum EmitMode {
     /// non-standard code formatting. Used for `--check`.
     Diff,
 }
+}
 
+config_type! {
 /// Client-preference for coloured output.
-#[config_type]
 pub enum Color {
     /// Always use color, whether it is a piped or terminal output
     Always,
@@ -233,14 +239,16 @@ pub enum Color {
     /// Automatically use color, if supported by terminal
     Auto,
 }
+}
 
-#[config_type]
+config_type! {
 /// rustfmt format style version.
 pub enum Version {
     /// 1.x.y. When specified, rustfmt will format in the same style as 1.0.0.
     One,
     /// 2.x.y. When specified, rustfmt will format in the latest style.
     Two,
+}
 }
 
 impl Color {
@@ -253,8 +261,8 @@ impl Color {
     }
 }
 
+config_type! {
 /// How chatty should Rustfmt be?
-#[config_type]
 pub enum Verbosity {
     /// Emit more.
     Verbose,
@@ -262,6 +270,7 @@ pub enum Verbosity {
     Normal,
     /// Emit as little as possible.
     Quiet,
+}
 }
 
 #[derive(Deserialize, Serialize, Clone, Debug, PartialEq)]
@@ -470,8 +479,8 @@ pub trait CliOptions {
     fn version(&self) -> Option<Version>;
 }
 
+config_type! {
 /// The edition of the syntax and semantics of code (RFC 2052).
-#[config_type]
 pub enum Edition {
     #[value = "2015"]
     #[doc_hint = "2015"]
@@ -490,6 +499,7 @@ pub enum Edition {
     /// Edition 2024.
     Edition2024,
 }
+}
 
 impl Default for Edition {
     fn default() -> Edition {
@@ -497,7 +507,7 @@ impl Default for Edition {
     }
 }
 
-impl From<Edition> for rustc_span::edition::Edition {
+impl From<Edition> for crate::span::edition::Edition {
     fn from(edition: Edition) -> Self {
         match edition {
             Edition::Edition2015 => Self::Edition2015,
@@ -521,12 +531,12 @@ impl From<Edition> for StyleEdition {
 
 impl PartialOrd for Edition {
     fn partial_cmp(&self, other: &Edition) -> Option<std::cmp::Ordering> {
-        rustc_span::edition::Edition::partial_cmp(&(*self).into(), &(*other).into())
+        crate::span::edition::Edition::partial_cmp(&(*self).into(), &(*other).into())
     }
 }
 
+config_type! {
 /// Controls how rustfmt should handle leading pipes on match arms.
-#[config_type]
 pub enum MatchArmLeadingPipe {
     /// Place leading pipes on all match arms
     Always,
@@ -535,13 +545,14 @@ pub enum MatchArmLeadingPipe {
     /// Preserve any existing leading pipes
     Preserve,
 }
+}
 
+config_type! {
 /// Defines the default values for each config according to the edition of the
 /// [Style Guide] as per [RFC 3338]. Rustfmt output may differ between Style editions.
 ///
 /// [Style Guide]: https://doc.rust-lang.org/nightly/style-guide/
 /// [RFC 3338]: https://rust-lang.github.io/rfcs/3338-style-evolution.html
-#[config_type]
 pub enum StyleEdition {
     #[value = "2015"]
     #[doc_hint = "2015"]
@@ -565,8 +576,9 @@ pub enum StyleEdition {
     /// [Edition 2027]().
     Edition2027,
 }
+}
 
-impl From<StyleEdition> for rustc_span::edition::Edition {
+impl From<StyleEdition> for crate::span::edition::Edition {
     fn from(edition: StyleEdition) -> Self {
         match edition {
             StyleEdition::Edition2015 => Self::Edition2015,
@@ -582,13 +594,13 @@ impl From<StyleEdition> for rustc_span::edition::Edition {
 impl PartialOrd for StyleEdition {
     fn partial_cmp(&self, other: &StyleEdition) -> Option<std::cmp::Ordering> {
         // FIXME(ytmimi): Update `StyleEdition::Edition2027` logic when
-        // `rustc_span::edition::Edition::Edition2027` becomes available in the compiler
+        // `crate::span::edition::Edition::Edition2027` becomes available in the compiler
         match (self, other) {
             (Self::Edition2027, Self::Edition2027) => Some(std::cmp::Ordering::Equal),
             (_, Self::Edition2027) => Some(std::cmp::Ordering::Less),
             (Self::Edition2027, _) => Some(std::cmp::Ordering::Greater),
             (Self::Edition2015 | Self::Edition2018 | Self::Edition2021 | Self::Edition2024, _) => {
-                rustc_span::edition::Edition::partial_cmp(&(*self).into(), &(*other).into())
+                crate::span::edition::Edition::partial_cmp(&(*self).into(), &(*other).into())
             }
         }
     }
@@ -725,7 +737,7 @@ config_option_with_style_edition_default!(
 
     // Control options (changes the operation of rustfmt, rather than the formatting)
     ColorConfig, Color, _ => Color::Auto;
-    RequiredVersion, String, _ => env!("CARGO_PKG_VERSION").to_owned();
+    RequiredVersion, String, _ => crate::RUSTFMT_VERSION.to_owned();
     UnstableFeatures, bool, _ => false;
     DisableAllFormatting, bool, _ => false;
     SkipChildren, bool, _ => false;

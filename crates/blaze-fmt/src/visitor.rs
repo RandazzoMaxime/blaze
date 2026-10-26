@@ -2,8 +2,8 @@ use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 use std::sync::Arc;
 
-use rustc_ast::{ast, token::Delimiter, visit};
-use rustc_span::{BytePos, Ident, Pos, Span, symbol};
+use crate::ast::{self, token::Delimiter, visit};
+use crate::span::{BytePos, Ident, Pos, Span, symbol};
 use tracing::debug;
 
 use crate::attr::*;
@@ -401,7 +401,7 @@ impl<'b, 'a: 'b> FmtVisitor<'a> {
                 _,
                 _,
                 ast::Fn {
-                    body: Some(ref b), ..
+                    body: Some(b), ..
                 },
             ) => {
                 block = b;
@@ -680,7 +680,7 @@ impl<'b, 'a: 'b> FmtVisitor<'a> {
             (ast::AssocItemKind::Const(c), visit::AssocCtxt::Impl { .. }) => {
                 self.visit_static(&StaticParts::from_impl_item(ai, c.ident))
             }
-            (ast::AssocItemKind::Fn(ref fn_kind), _) => {
+            (ast::AssocItemKind::Fn(fn_kind), _) => {
                 let ast::Fn {
                     defaultness,
                     ref sig,
@@ -716,10 +716,10 @@ impl<'b, 'a: 'b> FmtVisitor<'a> {
                     self.push_rewrite(ai.span, rewrite);
                 }
             }
-            (ast::AssocItemKind::Type(ref ty_alias), _) => {
+            (ast::AssocItemKind::Type(ty_alias), _) => {
                 self.visit_ty_alias_kind(ty_alias, &ai.vis, visitor_kind, ai.span);
             }
-            (ast::AssocItemKind::MacCall(ref mac), _) => {
+            (ast::AssocItemKind::MacCall(mac), _) => {
                 self.visit_mac(mac, MacroPosition::Item);
             }
             (ast::AssocItemKind::Delegation(_) | ast::AssocItemKind::DelegationMac(_), _) => {
@@ -881,7 +881,7 @@ impl<'b, 'a: 'b> FmtVisitor<'a> {
                 );
             } else {
                 match &attr.kind {
-                    ast::AttrKind::Normal(ref normal)
+                    ast::AttrKind::Normal(normal)
                         if self.is_unknown_rustfmt_attr(&normal.item.path.segments) =>
                     {
                         let file_name = self.psess.span_to_filename(attr.span);
@@ -993,7 +993,7 @@ impl<'b, 'a: 'b> FmtVisitor<'a> {
         let ident_str = rewrite_ident(&self.get_context(), ident).to_owned();
         self.push_str(&ident_str);
 
-        if let ast::ModKind::Loaded(ref items, ast::Inline::Yes, ref spans) = mod_kind {
+        if let ast::ModKind::Loaded(items, ast::Inline::Yes, spans) = mod_kind {
             let ast::ModSpans {
                 inner_span,
                 inject_use_span: _,

@@ -3,7 +3,7 @@ use crate::pairs::{PairParts, rewrite_pair};
 use crate::rewrite::{RewriteContext, RewriteResult};
 use crate::shape::Shape;
 
-use rustc_ast::ast;
+use crate::ast;
 
 fn needs_space_before_range(context: &RewriteContext<'_>, lhs: &ast::Expr) -> bool {
     match lhs.kind {

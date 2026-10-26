@@ -1,7 +1,9 @@
-// Inspired by Paul Woolcock's cargo-fmt (https://github.com/pwoolcoc/cargo-fmt/).
+//! `cargo blaze fmt`: rustfmt's `src/cargo-fmt/main.rs` at rust-lang/rust 12433c307 (MIT or
+//! Apache-2.0). The workspace comes from `blaze-manifest` instead of `cargo metadata`, the
+//! arguments are read by hand instead of by clap, and rustfmt runs in this process through
+//! [`crate::cli::main`] instead of as a child.
 
-#![deny(warnings)]
-#![allow(clippy::match_like_matches_macro)]
+// Inspired by Paul Woolcock's cargo-fmt (https://github.com/pwoolcoc/cargo-fmt/).
 
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet};
@@ -10,15 +12,11 @@ use std::fs;
 use std::hash::{Hash, Hasher};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
-use std::process::Command;
-use std::str;
 
-use cargo_metadata::Edition;
-use clap::{CommandFactory, Parser};
-
-#[path = "test/mod.rs"]
-#[cfg(test)]
-mod cargo_fmt_tests;
+use blaze_manifest::features::Edition;
+use blaze_manifest::metadata::root_manifest;
+use blaze_manifest::targets::TargetKind;
+use blaze_manifest::{Config, Context, Workspace};
 
 const fn is_nightly() -> bool {
     match option_env!("CFG_RELEASE_CHANNEL") {
@@ -33,83 +31,151 @@ const MESSAGE_FORMATS: &str = if is_nightly() {
     "short|human"
 };
 
-#[derive(Parser)]
-#[command(
-    disable_version_flag = true,
-    bin_name = "cargo fmt",
-    about = "This utility formats all bin and lib files of \
-             the current crate using rustfmt."
-)]
-#[command(styles = clap_cargo::style::CLAP_STYLING)]
+#[derive(Default)]
 pub struct Opts {
     /// No output printed to stdout
-    #[arg(short = 'q', long = "quiet")]
     quiet: bool,
 
     /// Use verbose output
-    #[arg(short = 'v', long = "verbose")]
     verbose: bool,
 
     /// Print rustfmt version and exit
-    #[arg(long = "version")]
     version: bool,
 
     /// Specify package to format
-    #[arg(
-        short = 'p',
-        long = "package",
-        value_name = "package",
-        num_args = 1..
-    )]
     packages: Vec<String>,
 
     /// Specify path to Cargo.toml
-    #[arg(long = "manifest-path", value_name = "manifest-path")]
     manifest_path: Option<String>,
 
-    #[arg(
-        long = "message-format",
-        value_name = "message-format",
-        help = format!("Specify message-format: {MESSAGE_FORMATS}")
-    )]
     message_format: Option<String>,
 
     /// Options passed to rustfmt
-    // 'raw = true' to make `--` explicit.
-    #[arg(id = "rustfmt_options", raw = true)]
     rustfmt_options: Vec<String>,
 
     /// Format all packages, and also their local path-based dependencies
-    #[arg(long = "all")]
     format_all: bool,
 
     /// Run rustfmt in check mode
-    #[arg(long = "check")]
     check: bool,
 }
 
-fn main() {
-    let exit_status = execute();
-    std::io::stdout().flush().unwrap();
-    std::process::exit(exit_status);
+fn help() -> String {
+    format!(
+        "This utility formats all bin and lib files of the current crate using rustfmt.
+
+Usage: cargo fmt [OPTIONS] [-- <rustfmt_options>...]
+
+Arguments:
+  [rustfmt_options]...  Options passed to rustfmt
+
+Options:
+  -q, --quiet
+          No output printed to stdout
+  -v, --verbose
+          Use verbose output
+      --version
+          Print rustfmt version and exit
+  -p, --package <package>...
+          Specify package to format
+      --manifest-path <manifest-path>
+          Specify path to Cargo.toml
+      --message-format <message-format>
+          Specify message-format: {MESSAGE_FORMATS}
+      --all
+          Format all packages, and also their local path-based dependencies
+      --check
+          Run rustfmt in check mode
+  -h, --help
+          Print help"
+    )
+}
+
+/// What clap makes of cargo-fmt's arguments: the options, help asked for, or a usage error.
+enum Parsed {
+    Opts(Opts),
+    Help,
+    Error(String),
+}
+
+fn parse_opts(args: Vec<String>) -> Parsed {
+    let mut opts = Opts::default();
+    let mut args = args.into_iter().peekable();
+    let is_flag = |a: &str| a.starts_with('-') && a.len() > 1;
+    while let Some(arg) = args.next() {
+        let (name, attached) = match arg.split_once('=') {
+            Some((n, v)) if n.starts_with("--") => (n.to_owned(), Some(v.to_owned())),
+            _ => (arg.clone(), None),
+        };
+        let mut value = |what: &str| match attached.clone().or_else(|| args.next()) {
+            Some(v) => Ok(v),
+            None => Err(format!(
+                "a value is required for '{what}' but none was supplied"
+            )),
+        };
+        match name.as_str() {
+            "--" => {
+                opts.rustfmt_options.extend(args.by_ref());
+                break;
+            }
+            "-q" | "--quiet" => opts.quiet = true,
+            "-v" | "--verbose" => opts.verbose = true,
+            "--version" => opts.version = true,
+            "--all" => opts.format_all = true,
+            "--check" => opts.check = true,
+            "-h" | "--help" => return Parsed::Help,
+            "-p" | "--package" => {
+                match value("--package <package>...") {
+                    Ok(v) => opts.packages.push(v),
+                    Err(e) => return Parsed::Error(e),
+                }
+                if attached.is_none() {
+                    while let Some(more) = args.next_if(|a| !is_flag(a)) {
+                        opts.packages.push(more);
+                    }
+                }
+            }
+            "--manifest-path" => match value("--manifest-path <manifest-path>") {
+                Ok(v) => opts.manifest_path = Some(v),
+                Err(e) => return Parsed::Error(e),
+            },
+            "--message-format" => match value("--message-format <message-format>") {
+                Ok(v) => opts.message_format = Some(v),
+                Err(e) => return Parsed::Error(e),
+            },
+            _ => return Parsed::Error(format!("unexpected argument '{arg}' found")),
+        }
+    }
+    Parsed::Opts(opts)
+}
+
+/// Runs `cargo fmt` with `args`, the arguments after `fmt`, and returns its exit code.
+pub fn main(args: Vec<String>) -> i32 {
+    let exit_status = execute(args);
+    let _ = std::io::stdout().flush();
+    exit_status
 }
 
 const SUCCESS: i32 = 0;
 const FAILURE: i32 = 1;
+/// clap's exit code for arguments it cannot read.
+const USAGE: i32 = 2;
 
-fn execute() -> i32 {
-    // Drop extra `fmt` argument provided by `cargo`.
-    let mut found_fmt = false;
-    let args = env::args().filter(|x| {
-        if found_fmt {
-            true
-        } else {
-            found_fmt = x == "fmt";
-            x != "fmt"
+fn execute(args: Vec<String>) -> i32 {
+    let opts = match parse_opts(args) {
+        Parsed::Opts(opts) => opts,
+        Parsed::Help => {
+            println!("{}", help());
+            return SUCCESS;
         }
-    });
-
-    let opts = Opts::parse_from(args);
+        Parsed::Error(msg) => {
+            eprintln!(
+                "error: {msg}\n\nUsage: cargo fmt [OPTIONS] [-- <rustfmt_options>...]\n\n\
+                 For more information, try '--help'."
+            );
+            return USAGE;
+        }
+    };
 
     let verbosity = match (opts.verbose, opts.quiet) {
         (false, false) => Verbosity::Normal,
@@ -163,17 +229,6 @@ fn execute() -> i32 {
     } else {
         handle_command_status(format_crate(verbosity, &strategy, rustfmt_args, None))
     }
-}
-
-fn rustfmt_command() -> Command {
-    let rustfmt = match env::var_os("RUSTFMT") {
-        Some(rustfmt) => PathBuf::from(rustfmt),
-        None => env::current_exe()
-            .expect("current executable path invalid")
-            .with_file_name("rustfmt"),
-    };
-
-    Command::new(rustfmt)
 }
 
 fn convert_message_format_to_rustfmt_args(
@@ -231,9 +286,7 @@ fn convert_message_format_to_rustfmt_args(
 
 fn print_usage_to_stderr(reason: &str) {
     eprintln!("{reason}");
-    let app = Opts::command();
-    let help = app.after_help("").render_help();
-    eprintln!("{help}");
+    eprintln!("{}", help());
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -254,23 +307,7 @@ fn handle_command_status(status: Result<i32, io::Error>) -> i32 {
 }
 
 fn get_rustfmt_info(args: &[String]) -> Result<i32, io::Error> {
-    let mut command = rustfmt_command()
-        .stdout(std::process::Stdio::inherit())
-        .args(args)
-        .spawn()
-        .map_err(|e| match e.kind() {
-            io::ErrorKind::NotFound => io::Error::new(
-                io::ErrorKind::Other,
-                "Could not run rustfmt, please make sure it is in your PATH.",
-            ),
-            _ => e,
-        })?;
-    let result = command.wait()?;
-    if result.success() {
-        Ok(SUCCESS)
-    } else {
-        Ok(result.code().unwrap_or(SUCCESS))
-    }
+    Ok(crate::cli::main(args.to_vec()))
 }
 
 fn format_crate(
@@ -297,15 +334,28 @@ pub struct Target {
 }
 
 impl Target {
-    pub fn from_target(target: &cargo_metadata::Target) -> Self {
-        let path = PathBuf::from(&target.src_path);
+    /// `None` for a metabuild script, which has no source file.
+    pub fn from_target(target: &blaze_manifest::targets::Target) -> Option<Self> {
+        let path = target.src_path.clone()?;
         let canonicalized = fs::canonicalize(&path).unwrap_or(path);
 
-        Target {
+        Some(Target {
             path: canonicalized,
-            kind: target.kind[0].to_string(),
+            kind: kind_name(&target.kind).to_owned(),
             edition: target.edition,
-        }
+        })
+    }
+}
+
+/// The first of the target's kinds as `cargo metadata` lists them.
+fn kind_name(kind: &TargetKind) -> &str {
+    match kind {
+        TargetKind::Lib(kinds) => kinds.first().map_or("lib", |k| k.as_str()),
+        TargetKind::Bin => "bin",
+        TargetKind::ExampleBin | TargetKind::ExampleLib(_) => "example",
+        TargetKind::Test => "test",
+        TargetKind::CustomBuild => "custom-build",
+        TargetKind::Bench => "bench",
     }
 }
 
@@ -373,22 +423,52 @@ fn get_targets(
     }
 
     if targets.is_empty() {
-        Err(io::Error::new(
-            io::ErrorKind::Other,
-            "Failed to find targets".to_owned(),
-        ))
+        Err(io::Error::other("Failed to find targets".to_owned()))
     } else {
         Ok(targets)
     }
+}
+
+/// A package of the workspace as `cargo metadata --no-deps` lists it.
+struct Package {
+    name: String,
+    manifest_path: PathBuf,
+    targets: Vec<Target>,
+    /// The directories of its path dependencies, with their names.
+    path_dependencies: Vec<(String, PathBuf)>,
+}
+
+/// The workspace root and member packages of the workspace `manifest_path` (or the working
+/// directory) is in: what rustfmt reads from `cargo metadata --no-deps`.
+fn get_cargo_metadata(manifest_path: Option<&Path>) -> Result<(PathBuf, Vec<Package>), io::Error> {
+    let load = || -> anyhow::Result<(PathBuf, Vec<Package>)> {
+        let ctx = Context::new(Config::from_process()?);
+        let ws = Workspace::new(&root_manifest(manifest_path, &ctx)?, &ctx)?;
+        let packages = ws
+            .members()
+            .map(|(path, m)| Package {
+                name: m.package_id.name.clone(),
+                manifest_path: path.to_owned(),
+                targets: m.targets.iter().filter_map(Target::from_target).collect(),
+                path_dependencies: m
+                    .dependencies
+                    .iter()
+                    .filter_map(|d| Some((d.name.clone(), d.source_id.local_path()?)))
+                    .collect(),
+            })
+            .collect();
+        Ok((ws.root().to_owned(), packages))
+    };
+    load().map_err(|e| io::Error::other(format!("{e:#}")))
 }
 
 fn get_targets_root_only(
     manifest_path: Option<&Path>,
     targets: &mut BTreeSet<Target>,
 ) -> Result<(), io::Error> {
-    let metadata = get_cargo_metadata(manifest_path)?;
+    let (workspace_root, packages) = get_cargo_metadata(manifest_path)?;
     // `workspace_root_path` is the path to the workspace's root directory
-    let workspace_root_path = PathBuf::from(&metadata.workspace_root).canonicalize()?;
+    let workspace_root_path = workspace_root.canonicalize()?;
     let (in_workspace_root, current_dir_manifest) = if let Some(target_manifest) = manifest_path {
         // `target_manifest` is the canonicalized path to a `Cargo.toml` file
         let target_manifest = target_manifest.canonicalize()?;
@@ -406,24 +486,20 @@ fn get_targets_root_only(
         )
     };
 
-    let package_targets = match metadata.packages.len() {
-        1 => metadata.packages.into_iter().next().unwrap().targets,
-        _ => metadata
-            .packages
+    let package_targets: Vec<Target> = match packages.len() {
+        1 => packages.into_iter().flat_map(|p| p.targets).collect(),
+        _ => packages
             .into_iter()
             .filter(|p| {
                 in_workspace_root
-                    || PathBuf::from(&p.manifest_path)
-                        .canonicalize()
-                        .unwrap_or_default()
-                        == current_dir_manifest
+                    || p.manifest_path.canonicalize().unwrap_or_default() == current_dir_manifest
             })
             .flat_map(|p| p.targets)
             .collect(),
     };
 
     for target in package_targets {
-        targets.insert(Target::from_target(&target));
+        targets.insert(target);
     }
 
     Ok(())
@@ -434,9 +510,10 @@ fn get_targets_recursive(
     targets: &mut BTreeSet<Target>,
     visited: &mut BTreeSet<String>,
 ) -> Result<(), io::Error> {
-    let metadata = get_cargo_metadata(manifest_path)?;
-    for package in &metadata.packages {
-        add_targets(&package.targets, targets);
+    let (_, packages) = get_cargo_metadata(manifest_path)?;
+    let manifests: Vec<PathBuf> = packages.iter().map(|p| p.manifest_path.clone()).collect();
+    for package in packages {
+        targets.extend(package.targets);
 
         // Look for local dependencies using information available since cargo v1.51
         // It's theoretically possible someone could use a newer version of rustfmt with
@@ -444,19 +521,14 @@ fn get_targets_recursive(
         // If someone reports an issue with path-based deps not being formatted, be sure to
         // confirm their version of `cargo` (not `cargo-fmt`) is >= v1.51
         // https://github.com/rust-lang/cargo/pull/8994
-        for dependency in &package.dependencies {
-            if dependency.path.is_none() || visited.contains(&dependency.name) {
+        for (name, path) in &package.path_dependencies {
+            if visited.contains(name) {
                 continue;
             }
 
-            let manifest_path = PathBuf::from(dependency.path.as_ref().unwrap()).join("Cargo.toml");
-            if manifest_path.exists()
-                && !metadata
-                    .packages
-                    .iter()
-                    .any(|p| p.manifest_path.eq(&manifest_path))
-            {
-                visited.insert(dependency.name.to_owned());
+            let manifest_path = path.join("Cargo.toml");
+            if manifest_path.exists() && !manifests.iter().any(|p| p.eq(&manifest_path)) {
+                visited.insert(name.to_owned());
                 get_targets_recursive(Some(&manifest_path), targets, visited)?;
             }
         }
@@ -470,32 +542,23 @@ fn get_targets_with_hitlist(
     hitlist: &[String],
     targets: &mut BTreeSet<Target>,
 ) -> Result<(), io::Error> {
-    let metadata = get_cargo_metadata(manifest_path)?;
-    let mut workspace_hitlist: BTreeSet<&str> =
-        BTreeSet::from_iter(hitlist.into_iter().map(|s| s.as_str()));
+    let (_, packages) = get_cargo_metadata(manifest_path)?;
+    let mut workspace_hitlist: BTreeSet<&str> = hitlist.iter().map(|s| s.as_str()).collect();
 
-    for package in metadata.packages {
-        if workspace_hitlist.remove(package.name.as_ref()) {
-            for target in package.targets {
-                targets.insert(Target::from_target(&target));
-            }
+    for package in packages {
+        if workspace_hitlist.remove(package.name.as_str()) {
+            targets.extend(package.targets);
         }
     }
 
     if workspace_hitlist.is_empty() {
         Ok(())
     } else {
-        let package = workspace_hitlist.iter().next().unwrap();
+        let package = workspace_hitlist.iter().next().copied().unwrap_or_default();
         Err(io::Error::new(
             io::ErrorKind::InvalidInput,
             format!("package `{package}` is not a member of the workspace"),
         ))
-    }
-}
-
-fn add_targets(target_paths: &[cargo_metadata::Target], targets: &mut BTreeSet<Target>) {
-    for target in target_paths {
-        targets.insert(Target::from_target(target));
     }
 }
 
@@ -518,12 +581,6 @@ fn run_rustfmt(
 
     let mut status = vec![];
     for (edition, files) in by_edition {
-        let stdout = if verbosity == Verbosity::Quiet {
-            std::process::Stdio::null()
-        } else {
-            std::process::Stdio::inherit()
-        };
-
         if verbosity == Verbosity::Verbose {
             print!("rustfmt");
             print!(" --edition {edition}");
@@ -532,45 +589,62 @@ fn run_rustfmt(
             println!();
         }
 
-        let mut command = rustfmt_command()
-            .stdout(stdout)
-            .args(files)
-            .args(["--edition", edition.as_str()])
-            .args(fmt_args)
-            .spawn()
-            .map_err(|e| match e.kind() {
-                io::ErrorKind::NotFound => io::Error::new(
-                    io::ErrorKind::Other,
-                    "Could not run rustfmt, please make sure it is in your PATH.",
-                ),
-                _ => e,
-            })?;
-
-        status.push(command.wait()?);
+        let mut args: Vec<String> = files.iter().map(|f| f.display().to_string()).collect();
+        args.extend(["--edition".to_owned(), edition.to_string()]);
+        args.extend(fmt_args.iter().cloned());
+        let _quiet = (verbosity == Verbosity::Quiet).then(StdoutToNull::new).flatten();
+        status.push(crate::cli::main(args));
     }
 
     Ok(status
         .iter()
-        .filter_map(|s| if s.success() { None } else { s.code() })
-        .next()
+        .copied()
+        .find(|&s| s != SUCCESS)
         .unwrap_or(SUCCESS))
 }
 
-fn get_cargo_metadata(manifest_path: Option<&Path>) -> Result<cargo_metadata::Metadata, io::Error> {
-    let mut cmd = cargo_metadata::MetadataCommand::new();
-    cmd.no_deps();
-    if let Some(manifest_path) = manifest_path {
-        cmd.manifest_path(manifest_path);
-    }
-    cmd.other_options(vec![String::from("--offline")]);
+/// Standard output sent to `/dev/null` while it lives, as cargo-fmt gives `-q`'s rustfmt child.
+struct StdoutToNull {
+    #[cfg(unix)]
+    saved: std::os::fd::OwnedFd,
+}
 
-    match cmd.exec() {
-        Ok(metadata) => Ok(metadata),
-        Err(_) => {
-            cmd.other_options(vec![]);
-            match cmd.exec() {
-                Ok(metadata) => Ok(metadata),
-                Err(error) => Err(io::Error::new(io::ErrorKind::Other, error.to_string())),
+impl StdoutToNull {
+    #[cfg(unix)]
+    fn new() -> Option<StdoutToNull> {
+        use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+        let null = fs::OpenOptions::new().write(true).open("/dev/null").ok()?;
+        let _ = io::stdout().flush();
+        // SAFETY: `dup` and `dup2` on the process's standard output and a file it owns;
+        // the duplicate is owned by `saved` and restored on drop.
+        unsafe {
+            let saved = libc::dup(libc::STDOUT_FILENO);
+            if saved < 0 {
+                return None;
+            }
+            let saved = OwnedFd::from_raw_fd(saved);
+            if libc::dup2(null.as_raw_fd(), libc::STDOUT_FILENO) < 0 {
+                return None;
+            }
+            Some(StdoutToNull { saved })
+        }
+    }
+
+    #[cfg(not(unix))]
+    fn new() -> Option<StdoutToNull> {
+        None
+    }
+}
+
+impl Drop for StdoutToNull {
+    fn drop(&mut self) {
+        let _ = io::stdout().flush();
+        #[cfg(unix)]
+        {
+            use std::os::fd::AsRawFd;
+            // SAFETY: puts back the standard output `new` saved.
+            unsafe {
+                libc::dup2(self.saved.as_raw_fd(), libc::STDOUT_FILENO);
             }
         }
     }

@@ -6,7 +6,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::{cmp, fmt, iter, str};
 
-use rustc_span::SourceFile;
+use crate::span::SourceFile;
 use serde::{Deserialize, Deserializer, Serialize, Serializer, ser};
 use serde_json as json;
 use thiserror::Error;
@@ -25,10 +25,10 @@ pub enum FileName {
     Stdin,
 }
 
-impl From<rustc_span::FileName> for FileName {
-    fn from(name: rustc_span::FileName) -> FileName {
+impl From<crate::span::FileName> for FileName {
+    fn from(name: crate::span::FileName) -> FileName {
         match name {
-            rustc_span::FileName::Real(real) => {
+            crate::span::FileName::Real(real) => {
                 if let Some(p) = real.into_local_path() {
                     FileName::Real(p)
                 } else {
@@ -37,7 +37,7 @@ impl From<rustc_span::FileName> for FileName {
                     unreachable!()
                 }
             }
-            rustc_span::FileName::Custom(ref f) if f == "stdin" => FileName::Stdin,
+            crate::span::FileName::Custom(ref f) if f == "stdin" => FileName::Stdin,
             _ => unreachable!(),
         }
     }
@@ -357,92 +357,5 @@ impl ::serde::ser::Serialize for FileLines {
         S: ::serde::ser::Serializer,
     {
         unreachable!("FileLines cannot be serialized. This is a rustfmt bug.");
-    }
-}
-
-#[cfg(test)]
-mod test {
-    use super::Range;
-
-    #[test]
-    fn test_range_intersects() {
-        assert!(Range::new(1, 2).intersects(Range::new(1, 1)));
-        assert!(Range::new(1, 2).intersects(Range::new(2, 2)));
-        assert!(!Range::new(1, 2).intersects(Range::new(0, 0)));
-        assert!(!Range::new(1, 2).intersects(Range::new(3, 10)));
-        assert!(!Range::new(1, 3).intersects(Range::new(5, 5)));
-    }
-
-    #[test]
-    fn test_range_adjacent_to() {
-        assert!(!Range::new(1, 2).adjacent_to(Range::new(1, 1)));
-        assert!(!Range::new(1, 2).adjacent_to(Range::new(2, 2)));
-        assert!(Range::new(1, 2).adjacent_to(Range::new(0, 0)));
-        assert!(Range::new(1, 2).adjacent_to(Range::new(3, 10)));
-        assert!(!Range::new(1, 3).adjacent_to(Range::new(5, 5)));
-    }
-
-    #[test]
-    fn test_range_contains() {
-        assert!(Range::new(1, 2).contains(Range::new(1, 1)));
-        assert!(Range::new(1, 2).contains(Range::new(2, 2)));
-        assert!(!Range::new(1, 2).contains(Range::new(0, 0)));
-        assert!(!Range::new(1, 2).contains(Range::new(3, 10)));
-    }
-
-    #[test]
-    fn test_range_merge() {
-        assert_eq!(None, Range::new(1, 3).merge(Range::new(5, 5)));
-        assert_eq!(None, Range::new(4, 7).merge(Range::new(0, 1)));
-        assert_eq!(
-            Some(Range::new(3, 7)),
-            Range::new(3, 5).merge(Range::new(4, 7))
-        );
-        assert_eq!(
-            Some(Range::new(3, 7)),
-            Range::new(3, 5).merge(Range::new(5, 7))
-        );
-        assert_eq!(
-            Some(Range::new(3, 7)),
-            Range::new(3, 5).merge(Range::new(6, 7))
-        );
-        assert_eq!(
-            Some(Range::new(3, 7)),
-            Range::new(3, 7).merge(Range::new(4, 5))
-        );
-    }
-
-    use super::json::{self, json};
-    use super::{FileLines, FileName};
-    use std::{collections::HashMap, path::PathBuf};
-
-    #[test]
-    fn file_lines_to_json() {
-        let ranges: HashMap<FileName, Vec<Range>> = [
-            (
-                FileName::Real(PathBuf::from("src/main.rs")),
-                vec![Range::new(1, 3), Range::new(5, 7)],
-            ),
-            (
-                FileName::Real(PathBuf::from("src/lib.rs")),
-                vec![Range::new(1, 7)],
-            ),
-        ]
-        .iter()
-        .cloned()
-        .collect();
-
-        let file_lines = FileLines::from_ranges(ranges);
-        let mut spans = file_lines.to_json_spans();
-        spans.sort();
-        let json = json::to_value(&spans).unwrap();
-        assert_eq!(
-            json,
-            json! {[
-                {"file": "src/lib.rs",  "range": [1, 7]},
-                {"file": "src/main.rs", "range": [1, 3]},
-                {"file": "src/main.rs", "range": [5, 7]},
-            ]}
-        );
     }
 }

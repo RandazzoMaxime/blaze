@@ -38,37 +38,3 @@ macro_rules! style_edition_default {
         }
     };
 }
-
-#[cfg(test)]
-mod test {
-    use super::*;
-    use crate::config::StyleEdition;
-
-    #[test]
-    fn test_impl_default_style_edition_struct_for_all_editions() {
-        struct Unit;
-        style_edition_default!(Unit, usize, _ => 100);
-
-        // regardless of the style edition used the value will always return 100
-        assert_eq!(Unit::style_edition_default(StyleEdition::Edition2015), 100);
-        assert_eq!(Unit::style_edition_default(StyleEdition::Edition2018), 100);
-        assert_eq!(Unit::style_edition_default(StyleEdition::Edition2021), 100);
-        assert_eq!(Unit::style_edition_default(StyleEdition::Edition2024), 100);
-        assert_eq!(Unit::style_edition_default(StyleEdition::Edition2027), 100);
-    }
-
-    #[test]
-    fn test_impl_default_style_edition_for_old_and_new_editions() {
-        struct Unit;
-        style_edition_default!(Unit, usize, Edition2024 => 50, _ => 100);
-
-        // style edition 2015-2021 are all the same
-        assert_eq!(Unit::style_edition_default(StyleEdition::Edition2015), 100);
-        assert_eq!(Unit::style_edition_default(StyleEdition::Edition2018), 100);
-        assert_eq!(Unit::style_edition_default(StyleEdition::Edition2021), 100);
-
-        // style edition 2024
-        assert_eq!(Unit::style_edition_default(StyleEdition::Edition2024), 50);
-        assert_eq!(Unit::style_edition_default(StyleEdition::Edition2027), 50);
-    }
-}

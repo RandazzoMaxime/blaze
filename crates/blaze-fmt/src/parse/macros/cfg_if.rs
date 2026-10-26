@@ -1,10 +1,9 @@
 use std::panic::{AssertUnwindSafe, catch_unwind};
 
-use rustc_ast::ast;
-use rustc_ast::token::TokenKind;
-use rustc_parse::exp;
-use rustc_parse::parser::{AllowConstBlockItems, ForceCollect};
-use rustc_span::symbol::kw;
+use crate::ast;
+use crate::ast::token::TokenKind;
+use crate::parse::stream::{AllowConstBlockItems, ForceCollect, InnerAttrPolicy, exp};
+use crate::span::symbol::kw;
 
 use crate::parse::macros::build_stream_parser;
 use crate::parse::session::ParseSess;
@@ -25,7 +24,7 @@ fn parse_cfg_if_inner<'a>(
     mac: &'a ast::MacCall,
 ) -> Result<Vec<ast::Item>, &'static str> {
     let ts = mac.args.tokens.clone();
-    let mut parser = build_stream_parser(psess.inner(), ts);
+    let mut parser = build_stream_parser(psess, ts);
 
     let mut items = vec![];
     let mut process_if_cfg = true;
@@ -49,7 +48,7 @@ fn parse_cfg_if_inner<'a>(
             // to the opening brace.
             // See also https://github.com/rust-lang/rust/pull/79433
             parser
-                .parse_attribute(rustc_parse::parser::attr::InnerAttrPolicy::Permitted)
+                .parse_attribute(InnerAttrPolicy::Permitted)
                 .map_err(|e| {
                     e.cancel();
                     "Failed to parse attributes"
@@ -66,7 +65,7 @@ fn parse_cfg_if_inner<'a>(
                 Ok(None) => continue,
                 Err(err) => {
                     err.cancel();
-                    parser.psess.dcx().reset_err_count();
+                    parser.dcx().reset_err_count();
                     return Err(
                         "Expected item inside cfg_if block, but failed to parse it as an item",
                     );

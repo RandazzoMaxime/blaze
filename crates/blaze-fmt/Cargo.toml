@@ -24,6 +24,8 @@ unicode-width = "=0.1.14"
 unicode-properties = { version = "=0.1.4", default-features = false, features = ["general-category"] }
 itertools.workspace = true
 parking_lot = "0.12.5"
+# `required_version` in a rustfmt.toml is a semver requirement.
+semver.workspace = true
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
 thiserror = "2.0.18"
@@ -32,7 +34,13 @@ tracing.workspace = true
 
 blaze-manifest.workspace = true
 parser.workspace = true
+# The lexer rust-analyzer's parser uses, cooked into rustc's tokens by `parse::lexer`.
+ra-ap-rustc_lexer.workspace = true
 syntax.workspace = true
+
+# `cargo fmt -q` sends rustfmt's standard output to /dev/null, as cargo-fmt does its child's.
+[target.'cfg(unix)'.dependencies]
+libc.workspace = true
 
 [lints]
 workspace = true

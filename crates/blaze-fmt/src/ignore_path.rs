@@ -1,73 +1,44 @@
-use ignore::gitignore;
+//! rustfmt's `src/ignore_path.rs` at rust-lang/rust 12433c307 (MIT or Apache-2.0). rustfmt matches
+//! the `ignore` option with the `ignore` crate's gitignore rules; those are not ported, so a
+//! non-empty `ignore` list is an error rather than a silently formatted file.
+
+use std::fmt;
 
 use crate::config::{FileName, IgnoreList};
 
 pub(crate) struct IgnorePathSet {
-    ignore_set: gitignore::Gitignore,
+    _private: (),
 }
 
+#[derive(Debug)]
+pub struct IgnoreUnsupported {
+    first: String,
+}
+
+impl fmt::Display for IgnoreUnsupported {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "the `ignore` option (here `{}`) is not supported by blaze fmt yet; remove it or format \
+             with rustfmt",
+            self.first
+        )
+    }
+}
+
+impl std::error::Error for IgnoreUnsupported {}
+
 impl IgnorePathSet {
-    pub(crate) fn from_ignore_list(ignore_list: &IgnoreList) -> Result<Self, ignore::Error> {
-        let mut ignore_builder = gitignore::GitignoreBuilder::new(ignore_list.rustfmt_toml_path());
-
-        for ignore_path in ignore_list {
-            ignore_builder.add_line(None, ignore_path.to_str().unwrap())?;
+    pub(crate) fn from_ignore_list(ignore_list: &IgnoreList) -> Result<Self, IgnoreUnsupported> {
+        if let Some(first) = ignore_list.into_iter().next() {
+            return Err(IgnoreUnsupported { first: first.display().to_string() });
         }
-
-        Ok(IgnorePathSet {
-            ignore_set: ignore_builder.build()?,
-        })
+        Ok(IgnorePathSet { _private: () })
     }
 
     pub(crate) fn is_match(&self, file_name: &FileName) -> bool {
         match file_name {
-            FileName::Stdin => false,
-            FileName::Real(p) => self
-                .ignore_set
-                .matched_path_or_any_parents(p, false)
-                .is_ignore(),
+            FileName::Stdin | FileName::Real(_) => false,
         }
-    }
-}
-
-#[cfg(test)]
-mod test {
-    use rustfmt_config_proc_macro::nightly_only_test;
-
-    #[nightly_only_test]
-    #[test]
-    fn test_ignore_path_set() {
-        use crate::config::{Config, FileName};
-        use crate::ignore_path::IgnorePathSet;
-        use std::path::{Path, PathBuf};
-
-        let config = Config::from_toml(
-            r#"ignore = ["foo.rs", "bar_dir/*"]"#,
-            Path::new("./rustfmt.toml"),
-        )
-        .unwrap();
-        let ignore_path_set = IgnorePathSet::from_ignore_list(&config.ignore()).unwrap();
-
-        assert!(ignore_path_set.is_match(&FileName::Real(PathBuf::from("src/foo.rs"))));
-        assert!(ignore_path_set.is_match(&FileName::Real(PathBuf::from("bar_dir/baz.rs"))));
-        assert!(!ignore_path_set.is_match(&FileName::Real(PathBuf::from("src/bar.rs"))));
-    }
-
-    #[nightly_only_test]
-    #[test]
-    fn test_negated_ignore_path_set() {
-        use crate::config::{Config, FileName};
-        use crate::ignore_path::IgnorePathSet;
-        use std::path::{Path, PathBuf};
-
-        let config = Config::from_toml(
-            r#"ignore = ["foo.rs", "bar_dir/*", "!bar_dir/*/what.rs"]"#,
-            Path::new("./rustfmt.toml"),
-        )
-        .unwrap();
-        let ignore_path_set = IgnorePathSet::from_ignore_list(&config.ignore()).unwrap();
-        assert!(ignore_path_set.is_match(&FileName::Real(PathBuf::from("bar_dir/what.rs"))));
-        assert!(ignore_path_set.is_match(&FileName::Real(PathBuf::from("bar_dir/baz/a.rs"))));
-        assert!(!ignore_path_set.is_match(&FileName::Real(PathBuf::from("bar_dir/baz/what.rs"))));
     }
 }

@@ -1,9 +1,16 @@
 //! What the syntax tree names but rustfmt never looks inside: the payloads of nodes that only
-//! rustc's expansion or error recovery makes. The lowering never builds them.
+//! rustc's expansion or error recovery makes. The lowering builds only the error markers.
 
 /// rustc's proof that an error was reported.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub struct ErrorGuaranteed(());
+
+impl ErrorGuaranteed {
+    /// An error the parse has reported (or refused the file for), as rustc proves one.
+    pub(crate) fn unchecked_error_guaranteed() -> ErrorGuaranteed {
+        ErrorGuaranteed(())
+    }
+}
 
 /// The bytes of a byte string literal, interned for good like a symbol's text.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]

@@ -13,11 +13,11 @@ use std::borrow::Cow;
 use std::collections::HashMap;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 
-use rustc_ast::ast;
-use rustc_ast::token::{Delimiter, Token, TokenKind};
-use rustc_ast::tokenstream::{TokenStream, TokenStreamIter, TokenTree};
-use rustc_ast_pretty::pprust;
-use rustc_span::{BytePos, DUMMY_SP, Ident, Pos, Span, Symbol};
+use crate::ast;
+use crate::ast::token::{Delimiter, Token, TokenKind};
+use crate::ast::tokenstream::{TokenStream, TokenStreamIter, TokenTree};
+use crate::ast_pretty as pprust;
+use crate::span::{BytePos, DUMMY_SP, Ident, Pos, Span, Symbol};
 use tracing::debug;
 
 use crate::comment::{
@@ -425,7 +425,7 @@ fn rewrite_empty_macro_def_body(
     // Create an empty, dummy `ast::Block` representing an empty macro body
     let block = ast::Block {
         stmts: vec![].into(),
-        id: rustc_ast::node_id::DUMMY_NODE_ID,
+        id: crate::ast::DUMMY_NODE_ID,
         rules: ast::BlockCheckMode::Default,
         span,
     };
@@ -873,7 +873,7 @@ impl MacroArgParser {
                 ) => {
                     break;
                 }
-                TokenTree::Token(ref t, _) => {
+                TokenTree::Token(t, _) => {
                     buffer.push_str(&pprust::token_to_string(t));
                 }
                 _ => return None,

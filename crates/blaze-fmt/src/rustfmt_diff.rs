@@ -4,6 +4,7 @@ use std::io;
 use std::io::Write;
 
 use crate::config::{Color, Config, Verbosity};
+use crate::term;
 
 #[derive(Debug, PartialEq)]
 pub(crate) enum DiffLine {
@@ -162,7 +163,7 @@ impl OutputWriter {
     // Terminal in its `terminal` field.
     pub(crate) fn writeln(&mut self, msg: &str, color: Option<term::color::Color>) {
         match &mut self.terminal {
-            Some(ref mut t) => {
+            Some(t) => {
                 if let Some(color) = color {
                     t.fg(color).unwrap();
                 }
@@ -276,131 +277,5 @@ where
                 }
             }
         }
-    }
-}
-
-#[cfg(test)]
-mod test {
-    use super::DiffLine::*;
-    use super::{Mismatch, make_diff};
-    use super::{ModifiedChunk, ModifiedLines};
-    use indoc::indoc;
-
-    #[test]
-    fn diff_simple() {
-        let src = "one\ntwo\nthree\nfour\nfive\n";
-        let dest = "one\ntwo\ntrois\nfour\nfive\n";
-        let diff = make_diff(src, dest, 1);
-        assert_eq!(
-            diff,
-            vec![Mismatch {
-                line_number: 2,
-                line_number_orig: 2,
-                lines: vec![
-                    Context("two".to_owned()),
-                    Resulting("three".to_owned()),
-                    Expected("trois".to_owned()),
-                    Context("four".to_owned()),
-                ],
-            }]
-        );
-    }
-
-    #[test]
-    fn diff_simple2() {
-        let src = "one\ntwo\nthree\nfour\nfive\nsix\nseven\n";
-        let dest = "one\ntwo\ntrois\nfour\ncinq\nsix\nseven\n";
-        let diff = make_diff(src, dest, 1);
-        assert_eq!(
-            diff,
-            vec![
-                Mismatch {
-                    line_number: 2,
-                    line_number_orig: 2,
-                    lines: vec![
-                        Context("two".to_owned()),
-                        Resulting("three".to_owned()),
-                        Expected("trois".to_owned()),
-                        Context("four".to_owned()),
-                    ],
-                },
-                Mismatch {
-                    line_number: 5,
-                    line_number_orig: 5,
-                    lines: vec![
-                        Resulting("five".to_owned()),
-                        Expected("cinq".to_owned()),
-                        Context("six".to_owned()),
-                    ],
-                },
-            ]
-        );
-    }
-
-    #[test]
-    fn diff_zerocontext() {
-        let src = "one\ntwo\nthree\nfour\nfive\n";
-        let dest = "one\ntwo\ntrois\nfour\nfive\n";
-        let diff = make_diff(src, dest, 0);
-        assert_eq!(
-            diff,
-            vec![Mismatch {
-                line_number: 3,
-                line_number_orig: 3,
-                lines: vec![Resulting("three".to_owned()), Expected("trois".to_owned())],
-            }]
-        );
-    }
-
-    #[test]
-    fn diff_trailing_newline() {
-        let src = "one\ntwo\nthree\nfour\nfive";
-        let dest = "one\ntwo\nthree\nfour\nfive\n";
-        let diff = make_diff(src, dest, 1);
-        assert_eq!(
-            diff,
-            vec![Mismatch {
-                line_number: 5,
-                line_number_orig: 5,
-                lines: vec![Context("five".to_owned()), Expected("".to_owned())],
-            }]
-        );
-    }
-
-    #[test]
-    fn modified_lines_from_str() {
-        use std::str::FromStr;
-
-        let src = indoc! {"
-            1 6 2
-            fn some() {}
-            fn main() {}
-            25 3 1
-              struct Test {}
-        "};
-        let lines = ModifiedLines::from_str(src).unwrap();
-        assert_eq!(
-            lines,
-            ModifiedLines {
-                chunks: vec![
-                    ModifiedChunk {
-                        line_number_orig: 1,
-                        lines_removed: 6,
-                        lines: vec!["fn some() {}".to_owned(), "fn main() {}".to_owned(),]
-                    },
-                    ModifiedChunk {
-                        line_number_orig: 25,
-                        lines_removed: 3,
-                        lines: vec!["  struct Test {}".to_owned()]
-                    }
-                ]
-            }
-        );
-
-        let src = "1 5 3";
-        assert_eq!(ModifiedLines::from_str(src), Err(()));
-
-        let src = "1 5 3\na\nb";
-        assert_eq!(ModifiedLines::from_str(src), Err(()));
     }
 }

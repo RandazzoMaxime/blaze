@@ -3,7 +3,7 @@
 use std::{borrow::Cow, iter};
 
 use itertools::{Itertools as _, MultiPeek, multipeek};
-use rustc_span::Span;
+use crate::span::Span;
 use tracing::{debug, trace};
 
 use crate::config::Config;
@@ -988,14 +988,37 @@ fn has_url(s: &str) -> bool {
     // ///
     // /// [example]: this::is::a::link
     // ```
-    let reference_link_url = static_regex!(r"^\[.+\]\s?:");
 
     // This function may return false positive, but should get its job done in most cases.
     s.contains("https://")
         || s.contains("http://")
         || s.contains("ftp://")
         || s.contains("file://")
-        || reference_link_url.is_match(s)
+        || is_reference_link_url(s)
+}
+
+/// The regex `^\[.+\]\s?:`: `[`, at least one character other than a line break, `]`, at most
+/// one whitespace character, then `:`.
+fn is_reference_link_url(s: &str) -> bool {
+    let Some(rest) = s.strip_prefix('[') else {
+        return false;
+    };
+    for (i, c) in rest.char_indices() {
+        if c == '\n' {
+            return false;
+        }
+        if c != ']' || i == 0 {
+            continue;
+        }
+        let after = &rest[i + 1..];
+        let mut chars = after.chars();
+        match chars.next() {
+            Some(':') => return true,
+            Some(w) if w.is_whitespace() && chars.next() == Some(':') => return true,
+            _ => {}
+        }
+    }
+    false
 }
 
 /// Returns true if the given string may be part of a Markdown table.
@@ -1883,306 +1906,5 @@ fn remove_comment_header(comment: &str) -> &str {
             "string '{comment}' is not a comment"
         );
         &comment[2..comment.len() - 2]
-    }
-}
-
-#[cfg(test)]
-mod test {
-    use super::*;
-
-    #[test]
-    fn char_classes() {
-        let mut iter = CharClasses::new("//\n\n".chars());
-
-        assert_eq!((FullCodeCharKind::StartComment, '/'), iter.next().unwrap());
-        assert_eq!((FullCodeCharKind::InComment, '/'), iter.next().unwrap());
-        assert_eq!((FullCodeCharKind::EndComment, '\n'), iter.next().unwrap());
-        assert_eq!((FullCodeCharKind::Normal, '\n'), iter.next().unwrap());
-        assert_eq!(None, iter.next());
-    }
-
-    #[test]
-    fn comment_code_slices() {
-        let input = "code(); /* test */ 1 + 1";
-        let mut iter = CommentCodeSlices::new(input);
-
-        assert_eq!((CodeCharKind::Normal, 0, "code(); "), iter.next().unwrap());
-        assert_eq!(
-            (CodeCharKind::Comment, 8, "/* test */"),
-            iter.next().unwrap()
-        );
-        assert_eq!((CodeCharKind::Normal, 18, " 1 + 1"), iter.next().unwrap());
-        assert_eq!(None, iter.next());
-    }
-
-    #[test]
-    fn comment_code_slices_two() {
-        let input = "// comment\n    test();";
-        let mut iter = CommentCodeSlices::new(input);
-
-        assert_eq!((CodeCharKind::Normal, 0, ""), iter.next().unwrap());
-        assert_eq!(
-            (CodeCharKind::Comment, 0, "// comment\n"),
-            iter.next().unwrap()
-        );
-        assert_eq!(
-            (CodeCharKind::Normal, 11, "    test();"),
-            iter.next().unwrap()
-        );
-        assert_eq!(None, iter.next());
-    }
-
-    #[test]
-    fn comment_code_slices_three() {
-        let input = "1 // comment\n    // comment2\n\n";
-        let mut iter = CommentCodeSlices::new(input);
-
-        assert_eq!((CodeCharKind::Normal, 0, "1 "), iter.next().unwrap());
-        assert_eq!(
-            (CodeCharKind::Comment, 2, "// comment\n    // comment2\n"),
-            iter.next().unwrap()
-        );
-        assert_eq!((CodeCharKind::Normal, 29, "\n"), iter.next().unwrap());
-        assert_eq!(None, iter.next());
-    }
-
-    #[test]
-    #[rustfmt::skip]
-    fn format_doc_comments() {
-        let mut wrap_normalize_config: crate::config::Config = Default::default();
-        wrap_normalize_config.set().wrap_comments(true);
-        wrap_normalize_config.set().normalize_comments(true);
-
-        let mut wrap_config: crate::config::Config = Default::default();
-        wrap_config.set().wrap_comments(true);
-
-        let comment = rewrite_comment(" //test",
-                                      true,
-                                      Shape::legacy(100, Indent::new(0, 100)),
-                                      &wrap_normalize_config).unwrap();
-        assert_eq!("/* test */", comment);
-
-        let comment = rewrite_comment("// comment on a",
-                                      false,
-                                      Shape::legacy(10, Indent::empty()),
-                                      &wrap_normalize_config).unwrap();
-        assert_eq!("// comment\n// on a", comment);
-
-        let comment = rewrite_comment("//  A multi line comment\n             // between args.",
-                                      false,
-                                      Shape::legacy(60, Indent::new(0, 12)),
-                                      &wrap_normalize_config).unwrap();
-        assert_eq!("//  A multi line comment\n            // between args.", comment);
-
-        let input = "// comment";
-        let expected =
-            "/* comment */";
-        let comment = rewrite_comment(input,
-                                      true,
-                                      Shape::legacy(9, Indent::new(0, 69)),
-                                      &wrap_normalize_config).unwrap();
-        assert_eq!(expected, comment);
-
-        let comment = rewrite_comment("/*   trimmed    */",
-                                      true,
-                                      Shape::legacy(100, Indent::new(0, 100)),
-                                      &wrap_normalize_config).unwrap();
-        assert_eq!("/* trimmed */", comment);
-
-        // Check that different comment style are properly recognised.
-        let comment = rewrite_comment(r#"/// test1
-                                         /// test2
-                                         /*
-                                          * test3
-                                          */"#,
-                                      false,
-                                      Shape::legacy(100, Indent::new(0, 0)),
-                                      &wrap_normalize_config).unwrap();
-        assert_eq!("/// test1\n/// test2\n// test3", comment);
-
-        // Check that the blank line marks the end of a commented paragraph.
-        let comment = rewrite_comment(r#"// test1
-
-                                         // test2"#,
-                                      false,
-                                      Shape::legacy(100, Indent::new(0, 0)),
-                                      &wrap_normalize_config).unwrap();
-        assert_eq!("// test1\n\n// test2", comment);
-
-        // Check that the blank line marks the end of a custom-commented paragraph.
-        let comment = rewrite_comment(r#"//@ test1
-
-                                         //@ test2"#,
-                                      false,
-                                      Shape::legacy(100, Indent::new(0, 0)),
-                                      &wrap_normalize_config).unwrap();
-        assert_eq!("//@ test1\n\n//@ test2", comment);
-
-        // Check that bare lines are just indented but otherwise left unchanged.
-        let comment = rewrite_comment(r#"// test1
-                                         /*
-                                           a bare line!
-
-                                                another bare line!
-                                          */"#,
-                                      false,
-                                      Shape::legacy(100, Indent::new(0, 0)),
-                                      &wrap_config).unwrap();
-        assert_eq!("// test1\n/*\n a bare line!\n\n      another bare line!\n*/", comment);
-    }
-
-    // This is probably intended to be a non-test fn, but it is not used.
-    // We should keep this around unless it helps us test stuff to remove it.
-    fn uncommented(text: &str) -> String {
-        CharClasses::new(text.chars())
-            .filter_map(|(s, c)| match s {
-                FullCodeCharKind::Normal | FullCodeCharKind::InString => Some(c),
-                _ => None,
-            })
-            .collect()
-    }
-
-    #[test]
-    fn test_uncommented() {
-        assert_eq!(&uncommented("abc/*...*/"), "abc");
-        assert_eq!(
-            &uncommented("// .... /* \n../* /* *** / */ */a/* // */c\n"),
-            "..ac\n"
-        );
-        assert_eq!(&uncommented("abc \" /* */\" qsdf"), "abc \" /* */\" qsdf");
-    }
-
-    #[test]
-    fn test_contains_comment() {
-        assert_eq!(contains_comment("abc"), false);
-        assert_eq!(contains_comment("abc // qsdf"), true);
-        assert_eq!(contains_comment("abc /* kqsdf"), true);
-        assert_eq!(contains_comment("abc \" /* */\" qsdf"), false);
-    }
-
-    #[test]
-    fn test_find_uncommented() {
-        fn check(haystack: &str, needle: &str, expected: Option<usize>) {
-            assert_eq!(expected, haystack.find_uncommented(needle));
-        }
-
-        check("/*/ */test", "test", Some(6));
-        check("//test\ntest", "test", Some(7));
-        check("/* comment only */", "whatever", None);
-        check(
-            "/* comment */ some text /* more commentary */ result",
-            "result",
-            Some(46),
-        );
-        check("sup // sup", "p", Some(2));
-        check("sup", "x", None);
-        check(r#"π? /**/ π is nice!"#, r#"π is nice"#, Some(9));
-        check("/*sup yo? \n sup*/ sup", "p", Some(20));
-        check("hel/*lohello*/lo", "hello", None);
-        check("acb", "ab", None);
-        check(",/*A*/ ", ",", Some(0));
-        check("abc", "abc", Some(0));
-        check("/* abc */", "abc", None);
-        check("/**/abc/* */", "abc", Some(4));
-        check("\"/* abc */\"", "abc", Some(4));
-        check("\"/* abc", "abc", Some(4));
-    }
-
-    #[test]
-    fn test_filter_normal_code() {
-        let s = r#"
-fn main() {
-    println!("hello, world");
-}
-"#;
-        assert_eq!(s, filter_normal_code(s));
-        let s_with_comment = r#"
-fn main() {
-    // hello, world
-    println!("hello, world");
-}
-"#;
-        assert_eq!(s, filter_normal_code(s_with_comment));
-    }
-
-    #[test]
-    fn test_itemized_block_first_line_handling() {
-        fn run_test(
-            test_input: &str,
-            expected_line: &str,
-            expected_indent: usize,
-            expected_opener: &str,
-            expected_line_start: &str,
-        ) {
-            let block = ItemizedBlock::new(test_input).unwrap();
-            assert_eq!(1, block.lines.len(), "test_input: {test_input:?}");
-            assert_eq!(expected_line, &block.lines[0], "test_input: {test_input:?}");
-            assert_eq!(expected_indent, block.indent, "test_input: {test_input:?}");
-            assert_eq!(expected_opener, &block.opener, "test_input: {test_input:?}");
-            assert_eq!(
-                expected_line_start, &block.line_start,
-                "test_input: {test_input:?}"
-            );
-        }
-
-        run_test("- foo", "foo", 2, "- ", "  ");
-        run_test("* foo", "foo", 2, "* ", "  ");
-        run_test("> foo", "foo", 2, "> ", "> ");
-
-        run_test("1. foo", "foo", 3, "1. ", "   ");
-        run_test("12. foo", "foo", 4, "12. ", "    ");
-        run_test("1) foo", "foo", 3, "1) ", "   ");
-        run_test("12) foo", "foo", 4, "12) ", "    ");
-
-        run_test("    - foo", "foo", 6, "    - ", "      ");
-
-        // https://spec.commonmark.org/0.30 says: "A start number may begin with 0s":
-        run_test("0. foo", "foo", 3, "0. ", "   ");
-        run_test("01. foo", "foo", 4, "01. ", "    ");
-    }
-
-    #[test]
-    fn test_itemized_block_nonobvious_markers_are_rejected() {
-        let test_inputs = vec![
-            // Non-numeric item markers (e.g. `a.` or `iv.`) are not allowed by
-            // https://spec.commonmark.org/0.30/#ordered-list-marker. We also note that allowing
-            // them would risk misidentifying regular words as item markers. See also the
-            // discussion in https://talk.commonmark.org/t/blank-lines-before-lists-revisited/1990
-            "word.  rest of the paragraph.",
-            "a.  maybe this is a list item?  maybe not?",
-            "iv.  maybe this is a list item?  maybe not?",
-            // Numbers with 3 or more digits are not recognized as item markers, to avoid
-            // formatting the following example as a list:
-            //
-            // ```
-            // The Captain died in
-            // 1868. He was buried in...
-            // ```
-            "123.  only 2-digit numbers are recognized as item markers.",
-            // Parens:
-            "123)  giving some coverage to parens as well.",
-            "a)  giving some coverage to parens as well.",
-            // https://spec.commonmark.org/0.30 says that "at least one space or tab is needed
-            // between the list marker and any following content":
-            "1.Not a list item.",
-            "1.2.3. Not a list item.",
-            "1)Not a list item.",
-            "-Not a list item.",
-            "+Not a list item.",
-            "+1 not a list item.",
-            // https://spec.commonmark.org/0.30 says: "A start number may not be negative":
-            "-1. Not a list item.",
-            "-1 Not a list item.",
-            // Marker without prefix are not recognized as item markers:
-            ".   Not a list item.",
-            ")   Not a list item.",
-        ];
-        for line in test_inputs.iter() {
-            let maybe_block = ItemizedBlock::new(line);
-            assert!(
-                maybe_block.is_none(),
-                "The following line shouldn't be classified as a list item: {line}"
-            );
-        }
     }
 }

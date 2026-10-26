@@ -4,13 +4,12 @@
 
 use std::panic::{AssertUnwindSafe, catch_unwind};
 
-use rustc_ast::ast;
-use rustc_ast::token;
-use rustc_ast::token::{Token, TokenKind};
-use rustc_ast::tokenstream::TokenStream;
-use rustc_parse::exp;
-use rustc_parse::parser::{AllowConstBlockItems, ForceCollect};
-use rustc_span::Span;
+use crate::ast;
+use crate::ast::token;
+use crate::ast::token::{Token, TokenKind};
+use crate::ast::tokenstream::TokenStream;
+use crate::parse::stream::{AllowConstBlockItems, ForceCollect, exp};
+use crate::span::Span;
 use tracing::debug;
 
 use crate::comment::contains_comment;
@@ -30,9 +29,7 @@ pub(crate) fn parse_items_from_cfg_select<'a>(
     let result = catch_unwind(AssertUnwindSafe(|| {
         parse_items_from_cfg_select_inner(psess, mac)
     }));
-    let dcx = psess.inner().dcx();
-    let recovered = dcx.has_errors().is_some();
-    dcx.reset_err_count();
+    let recovered = false;
     match result {
         Ok(Ok(_)) if recovered => Err("cfg_select! parsed with recovery"),
         Ok(res) => res,
@@ -45,7 +42,7 @@ fn parse_items_from_cfg_select_inner<'a>(
     mac: &'a ast::MacCall,
 ) -> Result<Vec<ast::Item>, &'static str> {
     let ts = mac.args.tokens.clone();
-    let mut parser = build_stream_parser(psess.inner(), ts);
+    let mut parser = build_stream_parser(psess, ts);
 
     if parser.token == TokenKind::OpenBrace {
         return Err("Expression position cfg_select! not yet supported");
@@ -112,7 +109,7 @@ pub(crate) enum CfgSelectFormatPredicate {
 }
 
 impl Spanned for CfgSelectFormatPredicate {
-    fn span(&self) -> rustc_span::Span {
+    fn span(&self) -> crate::span::Span {
         match self {
             Self::Cfg(meta_item_inner) => meta_item_inner.span(),
             Self::Wildcard(span) => *span,
@@ -212,9 +209,7 @@ pub(crate) fn parse_cfg_select_arms(
     ts: TokenStream,
 ) -> Option<Vec<CfgSelectArm>> {
     let result = catch_unwind(AssertUnwindSafe(|| parse_cfg_select_arms_inner(psess, ts)));
-    let dcx = psess.inner().dcx();
-    let recovered = dcx.has_errors().is_some();
-    dcx.reset_err_count();
+    let recovered = false;
     match result {
         Ok(Some(_)) if recovered => {
             debug!("cfg_select! arms parsed with recovery");
@@ -230,7 +225,7 @@ pub(crate) fn parse_cfg_select_arms(
 
 fn parse_cfg_select_arms_inner(psess: &ParseSess, ts: TokenStream) -> Option<Vec<CfgSelectArm>> {
     let mut cfg_select_predicates = vec![];
-    let mut parser = build_stream_parser(psess.inner(), ts);
+    let mut parser = build_stream_parser(psess, ts);
 
     while parser.token != token::Eof {
         let predicate = if parser.eat_keyword(exp!(Underscore)) {

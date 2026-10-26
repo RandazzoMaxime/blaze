@@ -1,7 +1,7 @@
 use std::cmp::max;
 
-use rustc_ast::ast;
-use rustc_span::Span;
+use crate::ast;
+use crate::span::Span;
 
 use crate::macros::MacroArg;
 use crate::utils::{mk_sp, outer_attributes};
@@ -17,7 +17,7 @@ impl<T: Spanned> Spanned for Box<T> {
     }
 }
 
-impl<T> Spanned for rustc_span::Spanned<T> {
+impl<T> Spanned for crate::span::Spanned<T> {
     fn span(&self) -> Span {
         self.span
     }

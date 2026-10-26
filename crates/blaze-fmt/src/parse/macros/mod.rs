@@ -1,10 +1,9 @@
-use rustc_ast::ast;
-use rustc_ast::token::{Delimiter, NonterminalKind, NtExprKind::*, NtPatKind::*, TokenKind};
-use rustc_ast::tokenstream::TokenStream;
-use rustc_parse::MACRO_ARGUMENTS;
-use rustc_parse::parser::{AllowConstBlockItems, ForceCollect, Parser, Recovery};
-use rustc_session::parse::ParseSess;
-use rustc_span::symbol;
+use crate::ast;
+use crate::ast::token::{Delimiter, NonterminalKind, NtExprKind::*, NtPatKind::*, TokenKind};
+use crate::ast::tokenstream::TokenStream;
+use crate::parse::session::ParseSess;
+use crate::parse::stream::{AllowConstBlockItems, ForceCollect, Parser};
+use crate::span::symbol;
 
 use crate::macros::MacroArg;
 use crate::rewrite::RewriteContext;
@@ -14,11 +13,11 @@ pub(crate) mod cfg_select;
 pub(crate) mod lazy_static;
 
 fn build_stream_parser<'a>(psess: &'a ParseSess, tokens: TokenStream) -> Parser<'a> {
-    Parser::new(psess, tokens, MACRO_ARGUMENTS).recovery(Recovery::Forbidden)
+    Parser::new(psess, tokens)
 }
 
 fn build_parser<'a>(context: &RewriteContext<'a>, tokens: TokenStream) -> Parser<'a> {
-    build_stream_parser(context.psess.inner(), tokens)
+    build_stream_parser(context.psess, tokens)
 }
 
 fn parse_macro_arg<'a, 'b: 'a>(parser: &'a mut Parser<'b>) -> Option<MacroArg> {
@@ -30,8 +29,8 @@ fn parse_macro_arg<'a, 'b: 'a>(parser: &'a mut Parser<'b>) -> Option<MacroArg> {
             {
                 match $try_parse(&mut cloned_parser) {
                     Ok(x) => {
-                        if parser.psess.dcx().has_errors().is_some() {
-                            parser.psess.dcx().reset_err_count();
+                        if parser.dcx().has_errors().is_some() {
+                            parser.dcx().reset_err_count();
                         } else {
                             // Parsing succeeded.
                             *parser = cloned_parser;
@@ -40,7 +39,7 @@ fn parse_macro_arg<'a, 'b: 'a>(parser: &'a mut Parser<'b>) -> Option<MacroArg> {
                     }
                     Err(e) => {
                         e.cancel();
-                        parser.psess.dcx().reset_err_count();
+                        parser.dcx().reset_err_count();
                     }
                 }
             }

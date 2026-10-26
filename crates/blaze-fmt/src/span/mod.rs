@@ -129,6 +129,7 @@ pub struct SpanData {
     pub lo: BytePos,
     pub hi: BytePos,
     pub ctxt: SyntaxContext,
+    pub parent: Option<LocalDefId>,
 }
 
 impl SpanData {
@@ -152,6 +153,10 @@ impl Span {
         Span { lo, hi }
     }
 
+    pub fn with_root_ctxt(lo: BytePos, hi: BytePos) -> Span {
+        Span::new(lo, hi, SyntaxContext, None)
+    }
+
     pub fn lo(self) -> BytePos {
         self.lo
     }
@@ -161,7 +166,7 @@ impl Span {
     }
 
     pub fn data(self) -> SpanData {
-        SpanData { lo: self.lo, hi: self.hi, ctxt: SyntaxContext }
+        SpanData { lo: self.lo, hi: self.hi, ctxt: SyntaxContext, parent: None }
     }
 
     pub fn ctxt(self) -> SyntaxContext {
@@ -237,7 +242,7 @@ impl Span {
 }
 
 /// Stands for rustc's `LocalDefId` in `Span::new`'s signature; spans here have no parent.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub struct LocalDefId;
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
@@ -296,6 +301,10 @@ impl RealFileName {
 
     pub fn local_path(&self) -> Option<&Path> {
         Some(&self.local_path)
+    }
+
+    pub fn into_local_path(self) -> Option<PathBuf> {
+        Some(self.local_path)
     }
 }
 

@@ -3,9 +3,9 @@
 use std::cmp::min;
 
 use itertools::Itertools;
-use rustc_ast::ast;
-use rustc_ast::token::Delimiter;
-use rustc_span::Span;
+use crate::ast;
+use crate::ast::token::Delimiter;
+use crate::span::Span;
 use tracing::debug;
 
 use crate::closures;
@@ -140,7 +140,7 @@ impl<'a> OverflowableItem<'a> {
             OverflowableItem::MacroArg(MacroArg::Expr(expr)) => is_simple_expr(expr),
             OverflowableItem::MetaItemInner(meta_item_inner) => match meta_item_inner {
                 ast::MetaItemInner::Lit(..) => true,
-                ast::MetaItemInner::MetaItem(ref meta_item) => {
+                ast::MetaItemInner::MetaItem(meta_item) => {
                     matches!(meta_item.kind, ast::MetaItemKind::Word)
                 }
             },
@@ -169,7 +169,7 @@ impl<'a> OverflowableItem<'a> {
     pub(crate) fn to_expr(&self) -> Option<&'a ast::Expr> {
         match self {
             OverflowableItem::Expr(expr) => Some(expr),
-            OverflowableItem::MacroArg(MacroArg::Expr(ref expr)) => Some(expr),
+            OverflowableItem::MacroArg(MacroArg::Expr(expr)) => Some(expr),
             _ => None,
         }
     }
@@ -178,8 +178,8 @@ impl<'a> OverflowableItem<'a> {
         match self {
             OverflowableItem::Expr(expr) => can_be_overflowed_expr(context, expr, len),
             OverflowableItem::MacroArg(macro_arg) => match macro_arg {
-                MacroArg::Expr(ref expr) => can_be_overflowed_expr(context, expr, len),
-                MacroArg::Ty(ref ty) => can_be_overflowed_type(context, ty, len),
+                MacroArg::Expr(expr) => can_be_overflowed_expr(context, expr, len),
+                MacroArg::Ty(ty) => can_be_overflowed_type(context, ty, len),
                 MacroArg::Pat(..) => false,
                 MacroArg::Item(..) => len == 1,
                 MacroArg::Keyword(..) => false,

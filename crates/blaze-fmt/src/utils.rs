@@ -1,13 +1,13 @@
 use std::borrow::Cow;
 
-use rustc_ast::YieldKind;
-use rustc_ast::ast::{
+use crate::ast::YieldKind;
+use crate::ast::{
     self, Attribute, ImplRestriction, MetaItem, MetaItemInner, MetaItemKind, MutRestriction,
     NodeId, Path, RestrictionKind, Visibility, VisibilityKind,
 };
-use rustc_ast_pretty::pprust;
-use rustc_feature::is_builtin_attr_name;
-use rustc_span::{BytePos, LocalExpnId, Span, Symbol, SyntaxContext, sym, symbol};
+use crate::ast_pretty as pprust;
+use crate::feature::is_builtin_attr_name;
+use crate::span::{BytePos, LocalExpnId, Span, Symbol, SyntaxContext, sym, symbol};
 use unicode_width::UnicodeWidthStr;
 
 use crate::comment::{CharClasses, FullCodeCharKind, LineClasses, filter_normal_code};
@@ -97,7 +97,7 @@ fn format_restriction(
     match restriction {
         RestrictionKind::Unrestricted => String::new(),
         RestrictionKind::Restricted {
-            ref path,
+            path,
             id: _,
             shorthand,
         } => {
@@ -318,7 +318,7 @@ fn is_skip(meta_item: &MetaItem) -> bool {
 #[inline]
 fn is_skip_nested(meta_item: &MetaItemInner) -> bool {
     match meta_item {
-        MetaItemInner::MetaItem(ref mi) => is_skip(mi),
+        MetaItemInner::MetaItem(mi) => is_skip(mi),
         MetaItemInner::Lit(_) => false,
     }
 }
@@ -403,7 +403,7 @@ pub(crate) fn count_lf_crlf(input: &str) -> (usize, usize) {
 
 pub(crate) fn count_newlines(input: &str) -> usize {
     // Using bytes to omit UTF-8 decoding
-    bytecount::count(input.as_bytes(), b'\n')
+    input.bytes().filter(|&b| b == b'\n').count()
 }
 
 // For format_missing and last_pos, need to use the source callsite (if applicable).
@@ -773,26 +773,4 @@ impl NodeIdExt for NodeId {
 
 pub(crate) fn unicode_str_width(s: &str) -> usize {
     s.width()
-}
-
-#[cfg(test)]
-mod test {
-    use super::*;
-
-    #[test]
-    fn test_remove_trailing_white_spaces() {
-        let s = "    r#\"\n        test\n    \"#";
-        assert_eq!(remove_trailing_white_spaces(s), s);
-    }
-
-    #[test]
-    fn test_trim_left_preserve_layout() {
-        let s = "aaa\n\tbbb\n    ccc";
-        let config = Config::default();
-        let indent = Indent::new(4, 0);
-        assert_eq!(
-            trim_left_preserve_layout(s, indent, &config),
-            Some("aaa\n    bbb\n    ccc".to_string())
-        );
-    }
 }

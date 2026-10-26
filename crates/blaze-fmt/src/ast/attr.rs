@@ -6,7 +6,7 @@
 
 use std::fmt::Debug;
 
-use crate::ast::token::{self, CommentKind, Delimiter, DocFragmentKind, InvisibleOrigin, Token};
+use crate::ast::token::{self, Delimiter, DocFragmentKind, InvisibleOrigin, Token};
 use crate::ast::tokenstream::{TokenStream, TokenStreamIter, TokenTree};
 use crate::ast::{
     AttrArgs, AttrItem, DelimArgs, AttrKind, AttrStyle, Attribute, ExprKind, LitKind, MetaItem,

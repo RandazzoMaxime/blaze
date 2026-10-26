@@ -1,5 +1,5 @@
-use rustc_ast::{ast, token};
-use rustc_span::Span;
+use crate::ast::{self, token};
+use crate::span::Span;
 
 use crate::config::IndentStyle;
 use crate::config::lists::*;

@@ -1,39 +1,30 @@
-#![feature(rustc_private)]
+//! `blaze fmt <files>`: rustfmt's `src/bin/main.rs` at rust-lang/rust 12433c307 (MIT or
+//! Apache-2.0), run in process with blaze's arguments instead of as a binary.
 
 use anyhow::{Result, format_err};
 
 use io::Error as IoError;
 use thiserror::Error;
 
-use rustfmt_nightly as rustfmt;
-
 use std::collections::HashMap;
-use std::env;
 use std::fs::File;
 use std::io::{self, Read, Write, stdout};
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
-use getopts::{Matches, Options};
+use crate::getopts::{Matches, Options};
 
-use crate::rustfmt::{
+use crate::{
     CliOptions, Color, Config, Edition, EmitMode, FileLines, FileName,
     FormatReportFormatterBuilder, Input, Session, StyleEdition, Verbosity, Version, load_config,
 };
+use crate::term;
 
-const BUG_REPORT_URL: &str = "https://github.com/rust-lang/rustfmt/issues/new?labels=bug";
-
-// N.B. these crates are loaded from the sysroot, so they need extern crate.
-extern crate rustc_driver;
-
-fn main() {
-    rustc_driver::install_ice_hook(BUG_REPORT_URL, |_| ());
-
-    setup_tracing();
-
+/// Runs rustfmt's command line on `args` (without the program name) and returns its exit code.
+pub fn main(args: Vec<String>) -> i32 {
     let opts = make_opts();
 
-    let exit_code = match execute(&opts) {
+    let exit_code = match execute(&opts, args) {
         Ok(code) => code,
         Err(e) => {
             eprintln!("{e:#}");
@@ -41,31 +32,8 @@ fn main() {
         }
     };
     // Make sure standard output is flushed before we exit.
-    std::io::stdout().flush().unwrap();
-
-    // Exit with given exit code.
-    //
-    // NOTE: this immediately terminates the process without doing any cleanup,
-    // so make sure to finish all necessary cleanup before this is called.
-    std::process::exit(exit_code);
-}
-
-fn setup_tracing() {
-    use tracing_subscriber::EnvFilter;
-    use tracing_subscriber::layer::SubscriberExt;
-    use tracing_subscriber::util::SubscriberInitExt;
-    use tracing_tree::HierarchicalLayer;
-
-    let layer = HierarchicalLayer::default()
-        .with_writer(std::io::stderr)
-        .with_targets(true)
-        .with_bracketed_fields(true)
-        .with_indent_amount(2);
-
-    tracing_subscriber::registry()
-        .with(EnvFilter::from_env("RUSTFMT_LOG"))
-        .with(layer)
-        .init();
+    let _ = std::io::stdout().flush();
+    exit_code
 }
 
 /// Rustfmt operations.
@@ -231,8 +199,8 @@ fn is_nightly() -> bool {
 }
 
 // Returned i32 is an exit code
-fn execute(opts: &Options) -> Result<i32> {
-    let matches = opts.parse(env::args().skip(1))?;
+fn execute(opts: &Options, args: Vec<String>) -> Result<i32> {
+    let matches = opts.parse(args)?;
     let options = GetOptsOptions::from_matches(&matches)?;
 
     match determine_operation(&matches)? {
@@ -466,14 +434,7 @@ are included as out of line modules from `src/lib.rs`."
 }
 
 fn print_version() {
-    let version_number = option_env!("CARGO_PKG_VERSION").unwrap_or("unknown");
-    let commit_info = include_str!(concat!(env!("OUT_DIR"), "/commit-info.txt"));
-
-    if commit_info.is_empty() {
-        println!("rustfmt {version_number}");
-    } else {
-        println!("rustfmt {version_number}-{commit_info}");
-    }
+    println!("rustfmt {}-nightly (blaze, rust-lang/rust 12433c307)", crate::RUSTFMT_VERSION);
 }
 
 fn determine_operation(matches: &Matches) -> Result<Operation, OperationError> {
@@ -561,7 +522,7 @@ struct GetOptsOptions {
 }
 
 impl GetOptsOptions {
-    pub fn from_matches(matches: &Matches) -> Result<GetOptsOptions> {
+    pub(crate) fn from_matches(matches: &Matches) -> Result<GetOptsOptions> {
         let mut options = GetOptsOptions::default();
         options.verbose = matches.opt_present("verbose");
         options.quiet = matches.opt_present("quiet");
