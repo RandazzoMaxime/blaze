@@ -103,16 +103,25 @@ fn on_in(env: &[(String, String)]) -> bool {
     sandbox::on_with(|name| env.iter().find(|it| it.0 == name).map(|it| it.1.clone()))
 }
 
-/// The workspace a script's run is part of: the one the shell that ran cargo was in, else the
-/// one around the target directory its `OUT_DIR` is in.
+/// The workspace a script's run is part of: the one around its package, for a package not
+/// below cargo's home; else the one around the target directory its `OUT_DIR` is in; else the
+/// one the shell that ran cargo was in. `PWD` comes last: it is wherever the command was
+/// started, which for a command run by another program (a harness, an editor) is not the
+/// workspace built.
 fn workspace_of(script: &Script<'_>) -> anyhow::Result<Option<PathBuf>> {
-    if let Some(pwd) = script.var("PWD")
-        && let Some(root) = sandboxed::workspace_root(Path::new(pwd))?
+    let home = script.var("CARGO_HOME").map(Path::new);
+    if !home.is_some_and(|it| script.cwd.starts_with(it))
+        && let Some(root) = sandboxed::workspace_root(script.cwd)?
     {
         return Ok(Some(root));
     }
-    match target_of(script.out_dir).and_then(Path::parent) {
-        Some(dir) => sandboxed::workspace_root(dir),
+    if let Some(dir) = target_of(script.out_dir).and_then(Path::parent)
+        && let Some(root) = sandboxed::workspace_root(dir)?
+    {
+        return Ok(Some(root));
+    }
+    match script.var("PWD") {
+        Some(pwd) => sandboxed::workspace_root(Path::new(pwd)),
         None => Ok(None),
     }
 }

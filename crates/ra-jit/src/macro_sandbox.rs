@@ -68,7 +68,12 @@ fn wrapped(server: Command) -> Command {
         Ok(spec) => {
             let Ok(exe) = std::env::current_exe() else { return server };
             let mut command = Command::new(exe);
-            command.arg(sandbox::COMMAND).arg(spec).arg("--").arg(server.get_program());
+            // The server by where it is: the path it was named by may go through a link in a
+            // directory the sandbox has empty (a toolchain linked into `/tmp`), and the
+            // directory it is in is the one the spec lets it read.
+            let program = std::fs::canonicalize(server.get_program())
+                .map_or_else(|_| server.get_program().to_owned(), PathBuf::into_os_string);
+            command.arg(sandbox::COMMAND).arg(spec).arg("--").arg(program);
             command.args(server.get_args());
             if let Some(cwd) = server.get_current_dir() {
                 command.current_dir(cwd);
