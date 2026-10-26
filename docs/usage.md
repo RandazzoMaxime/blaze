@@ -101,8 +101,10 @@ next release. How it works, and how fast from a keystroke to the running program
 
 - **Platforms.** macOS on Apple silicon, Linux x86-64 and Linux ARM64 are measured in
   [benchmarks.md](benchmarks.md). On Windows every build is cargo's. Intel Macs are not supported.
-- **One Rust version.** blaze builds with 1.99.0 whatever toolchain the project pins; code that
-  needs a nightly's features fails (see [install.md](install.md#what-you-need) and
+- **One Rust version, the latest nightly.** blaze builds with the dated nightly it pins
+  (`nightly-2026-10-25`) whatever toolchain the project pins. Stable code and `#![feature(...)]`
+  code both build; code that needs what that nightly lacks, such as a feature it removed, fails
+  with rustc's error (see [install.md](install.md#what-you-need) and
   [support.md](support.md#toolchain)).
 - **Not every build is blaze's.** The changes listed above go to cargo, and so does code blaze
   can't compile yet. `cargo blaze status` counts both; in the benchmark tables, `(c)` marks an

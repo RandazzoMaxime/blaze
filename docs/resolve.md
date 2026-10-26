@@ -1,7 +1,8 @@
 # Reading workspaces as cargo does
 
-blaze reads `Cargo.toml` and `.cargo/config.toml` itself, the way cargo 1.99.0 reads them,
-and never runs cargo to do it. `crates/blaze-manifest` is that reader; cargo is only the oracle
+blaze reads `Cargo.toml` and `.cargo/config.toml` itself, the way cargo reads them (ported
+from cargo 1.99.0, the pin then; `harness/resolve.py` now compares with the pinned nightly's
+cargo), and never runs cargo to do it. `crates/blaze-manifest` is that reader; cargo is only the oracle
 `harness/resolve.py` compares it with. Every manifest cargo accepts reads the same, and one
 cargo rejects is rejected with cargo's message. Part of the self-contained blaze
 ([#298](https://github.com/indexable-inc/blaze/issues/298)).
@@ -172,8 +173,9 @@ blaze-registry. It depends on neither the `cargo` crate nor anything that does: 
 `serde-untagged` and `serde-value`), `toml` 1.x (the one blaze already has), `semver`, `url`,
 `jiff`, `thiserror`, `unicode-ident`. Owning
 copies of the types would mean keeping thousands of lines in step with cargo by hand, and every
-drift would be a manifest read differently. The pin moves with the toolchain blaze pins; if
-blaze ever needs to change one of its types, it is vendored then.
+drift would be a manifest read differently. The pin moves with the toolchain blaze pins (the
+versions here are cargo 1.99.0's and have not been checked against `nightly-2026-10-25`'s cargo
+yet); if blaze ever needs to change one of its types, it is vendored then.
 
 **cargo's renderer, pinned.** `annotate-snippets = "=0.12.16"`, the version cargo 1.99.0 renders
 manifest diagnostics with, so that a manifest error reads character for character as cargo's.

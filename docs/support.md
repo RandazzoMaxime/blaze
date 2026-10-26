@@ -12,20 +12,29 @@ will build without fallbacks.
 
 ## Toolchain
 
-Rust 1.99.0 only. ra-jit links against what rustc built, so it must agree with that rustc on
-symbol mangling, type layout, the unstable Rust ABI, vtable layout and `TypeId` hashes. The
-layout code is rustc's own `rustc_abi` crate from the 1.99.0 tag. Nothing has been run on
-another stable version. Some reports were measured on `nightly-2026-05-10` before the move
-to stable; those are marked where they are used.
+One toolchain: the dated nightly in `harness/toolchain`, `nightly-2026-10-25` today, which
+says `rustc 1.101.0-nightly (12433c307 2026-10-24)` (rust-lang/rust 12433c307b5a, LLVM
+23.1.4). ra-jit links against what rustc built, so it must agree with that rustc on symbol
+mangling (v0), type layout, the unstable Rust ABI, vtable layout and `TypeId` hashes, and
+everything that mirrors rustc is taken from that one commit: `vendor/rustc_abi` is its
+`compiler/rustc_abi`, `vendor/proc-macro-srv` its proc-macro server with ra-jit's changes,
+and the answers to rustc's questions (`crates/ra-jit/src/answers/rustc.json`) are what that
+rustc says on x86-64 Linux, AArch64 Linux and arm64 macOS. Stable Rust is not supported as a
+toolchain of its own: a stable release's code builds because the nightly builds it. The pin
+moves to a newer nightly with `harness/toolchain_bump.py`
+([contributing.md](contributing.md#moving-to-a-newer-nightly)).
 
-`cargo blaze` builds every project with 1.99.0, whatever toolchain the project names
-([cargo.md](cargo.md)), and a project that needs its own fails with rustc's error and a note
-naming both. `RA_JIT_OTHER_TOOLCHAIN=1` builds with the project's toolchain instead, for a
-project pinned to a nightly of the next release, which rustc 1.99.0 can't build even with
-`RUSTC_BOOTSTRAP=1` when the project uses library features 1.99.0 does not have.
-Nothing checks that the other rustc lays out, mangles and passes values as 1.99.0 does: bun's
-pinned `nightly-2026-09-15` does for what the harness runs of bun
-([research/bun.md](research/bun.md)).
+Reports and results dated before 2026-10-25 were measured on stable 1.99.0, and some older
+ones on `nightly-2026-05-10`; they are marked where they are used and are not re-measured
+by the move.
+
+`cargo blaze` builds every project with the pinned nightly, whatever toolchain the project
+names ([cargo.md](cargo.md)). A rustc counts as the pinned one only when its whole
+`rustc -V` line matches, since every nightly of a release says `1.101.0`. A project that
+needs its own toolchain fails with rustc's error and a note naming both.
+`RA_JIT_OTHER_TOOLCHAIN=1` (or `BLAZE_OTHER_TOOLCHAIN=1`) builds with the project's toolchain
+instead, for a project pinned to a nightly near ours. Nothing checks that the other rustc
+lays out, mangles and passes values as the pinned nightly does.
 
 ## Platforms
 
@@ -186,8 +195,6 @@ Known refusals:
 | a body in which rust-analyzer's type inference fails or finds errors rustc does not | no MIR, so no code; examples are range patterns over associated constants and an empty array whose element type comes from a single `PartialEq` impl |
 | 15 functions of the `generic-array` crate | a trait-solver gap on `GenericArray<T, N>` |
 
-Nightly features are out of scope: ra-jit is tested against stable 1.99.0.
-
 Known differences from rustc, where ra-jit does compile the code. These are the cases
 marked open in `harness/breakers.py`:
 
@@ -214,6 +221,23 @@ finds nothing rustc accepts in rustc's tests or in seven real projects, but it m
 third of the errors rustc gives (67% of rustc's borrow-check tests get rustc's verdict), and
 an edit with one it misses builds and runs. Run `cargo blaze check` or `cargo check` to get
 rustc's verdict. `RA_JIT_BORROWCK_REFUSE=0` stops the daemon refusing borrow-check errors.
+
+## Nightly features
+
+Nightly features are in scope. The toolchain is a nightly, so what it accepts is Rust as far
+as ra-jit is concerned, and a nightly feature is added to ra-jit like any other part of the
+language. A crate with `#![feature(...)]` is built like any other, under the same rules: each
+construct is lowered explicitly or its function is refused with a reason. What is checked so
+far:
+
+- `harness/live-alloc`, a program on `allocator_api` (`Vec<T, A>` and `Box<T, A>` in a bump
+  arena) that takes live edits; `live_e2e.py` runs it with `LIVE_PROGRAM=live-alloc`, in the
+  gate.
+- The corpus's `nightly` feature, which `toolchain_bump.py --checks` runs with `--layouts`.
+
+The nightly's own removals apply: `box` patterns are gone upstream in this nightly, replaced
+by `deref_patterns`, and ra-jit's support for deref patterns is being added. `-Z` flags in
+`RUSTFLAGS` are described in their own section ("-Z flags").
 
 ## Cargo's build model
 
