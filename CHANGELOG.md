@@ -13,6 +13,12 @@ All notable changes to ra-jit are written here. The format follows
   same worker, which builds the edits since on what it has loaded and links again, with no
   load and no `cargo build`. A whole build starts no spare worker, and its objects keep each
   function in a section of its own, so the link leaves out what the program never reaches.
+- A whole build's edits are spliced into the executable the daemon linked, as the edits of a
+  build over rustc's are, instead of compiling and linking the whole program again.
+- A whole build plans its programs with blaze's own resolution (blaze-metadata's `programs`)
+  rather than `cargo build --unit-graph`: the members' binaries with their
+  `required-features`, or the `--bin` or `--example` named, held equal to the unit graph's by
+  `harness/own_metadata.py`.
 - The daemon's loads read the workspace with blaze's own resolution (`crates/blaze-metadata`),
   not `cargo locate-project` and `cargo metadata`: every locked package fetched by
   blaze-registry, and the graph of the build the load is for, with the features `cargo build`

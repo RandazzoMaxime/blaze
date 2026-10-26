@@ -171,11 +171,11 @@ pub(crate) fn note_failed() {
 
 /// The release `rustc` says it is, as `1.99.0` or `1.101.0-nightly`.
 fn version_of(rustc: &OsStr) -> Option<String> {
-    rustc_says(rustc, "--version")?.split_whitespace().nth(1).map(str::to_owned)
+    rustc_says(rustc, &["--version"])?.split_whitespace().nth(1).map(str::to_owned)
 }
 
 fn sysroot_of(rustc: &OsStr) -> PathBuf {
-    PathBuf::from(rustc_says(rustc, "--print=sysroot").unwrap_or_default())
+    PathBuf::from(rustc_says(rustc, &["--print=sysroot"]).unwrap_or_default())
 }
 
 /// What chose the project's toolchain, as rustup tells the programs its proxies start.
