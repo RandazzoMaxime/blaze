@@ -395,6 +395,47 @@ type StableName = std::sync::Arc<str>;
 
 pub type ParallelWork<'a> = dyn Fn(&dyn HirDatabase, &dyn SymbolResolver, usize) + Sync + 'a;
 
+/// An x86 operation on two vectors that `FunctionCx::lanewise` does lane by lane.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Lanewise {
+    Average,
+    MulHigh { signed: bool },
+    ShiftLeft,
+    ShiftRight,
+    ShiftRightArithmetic,
+}
+
+/// The lane-by-lane operation and lane type of an LLVM x86 intrinsic `name` (without
+/// `llvm.`): `x86.{sse2,avx2,avx512}.{pavg,pmulh,pmulhu,psllv,psrlv,psrav}.{b,w,d,q}[.width]`.
+fn x86_lanewise(name: &str) -> Option<(Lanewise, Type)> {
+    let mut parts = name.split('.');
+    let (Some("x86"), Some("sse2" | "avx2" | "avx512"), Some(op), Some(lane)) =
+        (parts.next(), parts.next(), parts.next(), parts.next())
+    else {
+        return None;
+    };
+    if !matches!(parts.next(), None | Some("128" | "256" | "512")) || parts.next().is_some() {
+        return None;
+    }
+    let lane = match lane {
+        "b" => types::I8,
+        "w" => types::I16,
+        "d" => types::I32,
+        "q" => types::I64,
+        _ => return None,
+    };
+    let op = match op {
+        "pavg" if lane.bits() <= 16 => Lanewise::Average,
+        "pmulh" if lane == types::I16 => Lanewise::MulHigh { signed: true },
+        "pmulhu" if lane == types::I16 => Lanewise::MulHigh { signed: false },
+        "psllv" if lane.bits() >= 16 => Lanewise::ShiftLeft,
+        "psrlv" if lane.bits() >= 16 => Lanewise::ShiftRight,
+        "psrav" if lane.bits() >= 16 => Lanewise::ShiftRightArithmetic,
+        _ => return None,
+    };
+    Some((op, lane))
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 enum OverflowOp {
     Add,
@@ -14474,6 +14515,69 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
         Ok(())
     }
 
+    /// `dst`'s lanes of type `lane`, each `op` of the lanes of `a` and `b` in its place.
+    fn lanewise(
+        &mut self,
+        a: &Operand,
+        b: &Operand,
+        dst: Value,
+        op: Lanewise,
+        lane: Type,
+    ) -> Result<()> {
+        let (a, ty) = self.operand(a)?;
+        let (b, _) = self.operand(b)?;
+        let bytes = lane.bytes() as i32;
+        let bits = i64::from(lane.bits());
+        for at in (0..self.layout(ty)?.size.bytes() as i32).step_by(bytes as usize) {
+            let l = self.builder.ins().load(lane, MEM, a, at);
+            let r = self.builder.ins().load(lane, MEM, b, at);
+            let value = match op {
+                // `(l + r + 1) >> 1` of the unsigned lanes, in twice their width.
+                Lanewise::Average => {
+                    let wide = lane.double_width().expect("a lane of 8 or 16 bits");
+                    let l = self.builder.ins().uextend(wide, l);
+                    let r = self.builder.ins().uextend(wide, r);
+                    let sum = self.builder.ins().iadd(l, r);
+                    let sum = self.builder.ins().iadd_imm(sum, 1);
+                    let half = self.builder.ins().ushr_imm(sum, 1);
+                    self.builder.ins().ireduce(lane, half)
+                }
+                // The high half of the product, the lanes signed or not.
+                Lanewise::MulHigh { signed } => {
+                    let wide = lane.double_width().expect("a lane of 16 bits");
+                    let (l, r) = if signed {
+                        (self.builder.ins().sextend(wide, l), self.builder.ins().sextend(wide, r))
+                    } else {
+                        (self.builder.ins().uextend(wide, l), self.builder.ins().uextend(wide, r))
+                    };
+                    let product = self.builder.ins().imul(l, r);
+                    let high = self.builder.ins().ushr_imm(product, bits);
+                    self.builder.ins().ireduce(lane, high)
+                }
+                // A count of the lane's width or more shifts every bit out: 0, or for the
+                // arithmetic shift the sign in every bit. Cranelift's shifts take the count
+                // modulo the width, so the count is checked first.
+                Lanewise::ShiftLeft | Lanewise::ShiftRight => {
+                    let shifted = match op {
+                        Lanewise::ShiftLeft => self.builder.ins().ishl(l, r),
+                        _ => self.builder.ins().ushr(l, r),
+                    };
+                    let out =
+                        self.builder.ins().icmp_imm(IntCC::UnsignedGreaterThanOrEqual, r, bits);
+                    let zero = self.builder.ins().iconst(lane, 0);
+                    self.builder.ins().select(out, zero, shifted)
+                }
+                Lanewise::ShiftRightArithmetic => {
+                    let most = self.builder.ins().iconst(lane, bits - 1);
+                    let count = self.builder.ins().umin(r, most);
+                    self.builder.ins().sshr(l, count)
+                }
+            };
+            self.builder.ins().store(MEM, value, dst, at);
+        }
+        Ok(())
+    }
+
     /// Calls a function of one instruction on two vectors, with where it reads a third
     /// operand and writes its result.
     fn vector_assembly(
@@ -14811,6 +14915,12 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
                     let sum = self.builder.ins().ireduce(types::I16, sum);
                     self.builder.ins().store(MEM, sum, dst, lane);
                 }
+            }
+            // Lane by lane: the rounded average, the high half of the product and the shifts
+            // by a count per lane (the toolchain's `core::arch` calls LLVM for these since
+            // nightly-2026-10-25, where 1.99.0's wrote them with `simd_*`).
+            (_, [a, b]) if let Some((op, lane)) = x86_lanewise(name) => {
+                self.lanewise(a, b, dst, op, lane)?
             }
             ("x86.sse2.packsswb.128" | "x86.avx2.packsswb" | "x86.avx512.packsswb.512", [a, b]) => {
                 self.pack_lanes(a, b, dst, types::I16, true)?
