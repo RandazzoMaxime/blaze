@@ -18,7 +18,7 @@ cargo build -p ra-jit --release
 ```
 cargo fmt --all -- --check
 cargo test --release -p ra-jit
-cargo test --release --manifest-path vendor/rust-analyzer/Cargo.toml -p hir-ty -p hir-def -p parser -p syntax
+cd vendor/rust-analyzer && cargo test --release -p hir-ty -p hir-def -p parser -p syntax
 ```
 
 The rust-analyzer fork's crates are tested in `vendor/rust-analyzer`'s own workspace: the root

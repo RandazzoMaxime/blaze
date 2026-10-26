@@ -5,7 +5,8 @@ usage: unittests.py [cargo test argument ...]
 
 Runs `cargo test --release --no-fail-fast` of the crates below, in two cargo runs: ROOT_CRATES
 in the root workspace, and FORK_CRATES (the rust-analyzer fork's) in vendor/rust-analyzer's own
-workspace (`--manifest-path vendor/rust-analyzer/Cargo.toml`), since the root does not claim
+workspace (run in vendor/rust-analyzer, so that its own .cargo/config.toml sets
+CARGO_WORKSPACE_DIR, where expect-test finds the parser's .rast files), since the root does not claim
 them as members (#293: so that `cargo install --git` builds ra-jit), and cargo only tests a
 member's dev-dependencies. Both share one target directory and the arguments given. A failing
 test that is not in OPEN fails the run, and so does a test in OPEN that passes or no longer
@@ -20,7 +21,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 ROOT_CRATES = ["hir-ty-codegen", "ra-jit-store", "blaze-registry", "blaze-resolve", "blaze-build-script", "blaze-manifest", "ra-jit"]
 # Members of vendor/rust-analyzer's workspace (its own Cargo.toml and Cargo.lock).
 FORK_CRATES = ["hir-ty", "hir-ty-borrowck", "hir-ty-wfcheck", "hir-def", "parser", "syntax", "hir-ide"]
-FORK_MANIFEST = os.path.join(ROOT, "vendor", "rust-analyzer", "Cargo.toml")
+FORK = os.path.join(ROOT, "vendor", "rust-analyzer")
 
 # crate::test, as libtest names it under the crate's test binary.
 OPEN = {
@@ -52,11 +53,11 @@ DOCTESTS = re.compile(r"^\s+Doc-tests (\w+)")
 RESULT = re.compile(r"^test (\S+)(?: - .*)? \.\.\. (ok|FAILED|ignored)")
 
 
-def run(command, env, seen, failed):
+def run(command, cwd, env, seen, failed):
     """Runs one `cargo test`, adding its tests to seen and failed; returns its exit status and
     whether any of its tests failed."""
     print(" ".join(command), flush=True)
-    proc = subprocess.Popen(command, cwd=ROOT, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, errors="replace")
+    proc = subprocess.Popen(command, cwd=cwd, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, errors="replace")
     binary, any_failed = "?", False
     for line in proc.stdout:
         sys.stdout.write(line)
@@ -75,15 +76,16 @@ def run(command, env, seen, failed):
 def main():
     test = ["cargo", "test", "--release", "--no-fail-fast"]
     commands = [
-        [*test, *(f"-p{c}" for c in ROOT_CRATES), *sys.argv[1:]],
-        [*test, "--manifest-path", FORK_MANIFEST, *(f"-p{c}" for c in FORK_CRATES), *sys.argv[1:]],
+        (ROOT, [*test, *(f"-p{c}" for c in ROOT_CRATES), *sys.argv[1:]]),
+        # cargo reads .cargo/config.toml from where it runs, not from --manifest-path.
+        (FORK, [*test, *(f"-p{c}" for c in FORK_CRATES), *sys.argv[1:]]),
     ]
     # Under CI rust-analyzer's slow tests run, and mark that they did in the target directory,
     # which they take to be vendor/rust-analyzer/target unless told.
     env = {"CARGO_TARGET_DIR": os.path.join(ROOT, "target"), **os.environ}
     seen, failed, broken = set(), set(), []
-    for command in commands:
-        status, any_failed = run(command, env, seen, failed)
+    for cwd, command in commands:
+        status, any_failed = run(command, cwd, env, seen, failed)
         if status and not any_failed:
             broken.append((command, status))
     sys.stdout.flush()

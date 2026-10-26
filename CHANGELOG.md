@@ -815,7 +815,7 @@ All notable changes to ra-jit are written here. The format follows
   before compiling anything: for a git source cargo checks that every package is a member of
   the workspace above it, and the root claimed `vendor/rust-analyzer`'s crates and rowan, which
   are members of the fork's own workspace. The root now excludes `vendor/rust-analyzer`, so the
-  fork's crates are tested there (`--manifest-path vendor/rust-analyzer/Cargo.toml`, as
+  fork's crates are tested there (in `vendor/rust-analyzer`, as
   `harness/unittests.py` does), and that workspace patches salsa to `vendor/salsa*` as the root
   does.
 
