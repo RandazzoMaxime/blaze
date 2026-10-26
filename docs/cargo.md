@@ -705,3 +705,25 @@ cargo reads them. The table is `SUBCOMMANDS` in `crates/ra-jit/src/cargo/own/mod
 | `publish`, `search`, `info`, `owner`, `yank`, `login`, `logout` | not yet | blaze has no client of a registry's web API yet |
 | `uninstall`, `report`, `config`, `read-manifest` | not yet | not written yet |
 | any other | no | `error: no such command`; blaze runs no cargo plugin |
+
+### Plain `cargo <command>` after `enable`
+
+`enable` changes one key, `build.rustc-workspace-wrapper`, so plain `cargo build` and `cargo
+test` are still cargo's process: cargo plans the build and starts the wrapper for each workspace
+crate, and the wrapper's first build is rustc's ([What a build does](#what-a-build-does)). The
+other commands stay cargo's entirely. Here is what each way of sending them to blaze needs:
+
+- **`fmt` and `clippy`** are not built into cargo (they are rustup's `cargo-fmt` and
+  `cargo-clippy`), so an `[alias]` in the same config file can take them over: `fmt = "blaze
+  fmt"`, `clippy = "blaze clippy"`. cargo still starts, and warns that the alias shadows an
+  external command, then runs `cargo-blaze`. `enable` should write these once blaze's own `fmt`
+  and `clippy` land. Until then such an alias would make `cargo fmt` fail.
+- **Built-in commands** (`build`, `test`, `check`, `doc`, `tree`, `new`, ...) cannot be aliased:
+  cargo ignores an alias that shadows a built-in. Two ways remain. `build.rustc` set to blaze
+  keeps cargo's process but answers every rustc that cargo starts (`-vV`, `--print`, each
+  compile), which is no-rustc.md's step M. Or `rustup toolchain link blaze <dir>`, with
+  `<dir>/bin/cargo` being blaze and the project's toolchain named `blaze`, so that rustup's
+  `cargo` proxy starts blaze and no cargo process at all. The second way changes the
+  toolchain that editors and rust-analyzer see (their `cargo metadata` and `rustc --print
+  sysroot` would be blaze's, which it answers). It is not written; it touches `switch.rs`,
+  which is the build lane's.
