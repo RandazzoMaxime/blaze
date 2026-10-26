@@ -65,6 +65,26 @@ pub fn conditions(x: Option<i32>, r: Result<i32, ()>, a: bool, b: bool) -> Resul
     Ok(false)
 }
 
+fn sum(values: &[u32]) -> u32 {
+    values.iter().sum()
+}
+
+pub fn vectors(n: usize) -> u32 {
+    let mut taken = vec![false; 16];
+    taken[n] = true;
+    let listed = vec![1, 2, 3];
+    let mut total = sum(&vec![4, 5]) + listed.len() as u32;
+    for it in vec![6, 7] {
+        total += it;
+    }
+    let kept = vec![8];
+    total += kept.iter().sum::<u32>();
+    let grown = vec![9];
+    let mut grown = grown;
+    grown.push(10);
+    total + sum(&grown) + u32::from(taken[0]) + sum(&mut vec![11, /* twelve */ 12])
+}
+
 #[deny(clippy::bool_assert_comparison)]
 pub fn denied() {
     assert_eq!(braces().is_empty(), false);

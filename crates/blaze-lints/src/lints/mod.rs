@@ -13,6 +13,7 @@ mod nonstandard_macro_braces;
 mod redundant_static_lifetimes;
 mod unnecessary_map_or;
 mod useless_borrows_in_formatting;
+mod useless_vec;
 mod utils;
 
 use rustc_hash::FxHashSet;
@@ -34,6 +35,9 @@ enum Pass {
     Early,
     /// Over the crate's HIR.
     Late,
+    /// After the late pass, from what it gathered (clippy's `check_crate_post`), in the order of
+    /// where each is.
+    AfterLate,
 }
 
 /// The lints implemented, and the pass clippy runs each in.
@@ -50,6 +54,7 @@ const IMPLEMENTED: &[(&str, Pass)] = &[
     ("redundant_static_lifetimes", Pass::Early),
     ("unnecessary_map_or", Pass::Late),
     ("useless_borrows_in_formatting", Pass::Late),
+    ("useless_vec", Pass::AfterLate),
 ];
 
 pub(crate) fn implemented(lint: &str) -> bool {
@@ -62,6 +67,7 @@ pub(crate) fn phase(lint: &str, in_root_file: bool) -> u8 {
     match IMPLEMENTED.iter().find(|(it, _)| *it == lint).map(|(_, pass)| *pass) {
         Some(Pass::PreExpansion) if in_root_file => 0,
         Some(Pass::PreExpansion | Pass::Early) => 1,
+        Some(Pass::AfterLate) => 3,
         _ => 2,
     }
 }
@@ -119,6 +125,7 @@ pub(crate) fn check_node(cx: &mut Cx<'_, '_, '_>, node: &SyntaxNode) {
         nonstandard_macro_braces::check_call(cx, &it);
         bool_assert_comparison::check(cx, &it);
         useless_borrows_in_formatting::check(cx, &it);
+        useless_vec::check(cx, &it);
     } else if let Some(it) = ast::MacroRules::cast(node.clone()) {
         nonstandard_macro_braces::check_rules(cx, &it);
     } else if let Some(it) = ast::StmtList::cast(node.clone()) {

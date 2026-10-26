@@ -63,10 +63,15 @@ fn visit(cx: &mut Cx<'_, '_, '_>, item: &syntax::SyntaxNode, ty: &ast::Type, rea
                         | ast::Type::TupleType(_)
                 )
             {
+                let (Some(at), Some(whole), Some(borrowed_at)) =
+                    (cx.range(lifetime.syntax()), cx.range(reference.syntax()), cx.range(borrowed.syntax()))
+                else {
+                    return;
+                };
                 let mutability = if reference.mut_token().is_some() { "mut " } else { "" };
-                let sugg = format!("&{mutability}{}", cx.snippet(borrowed.syntax().text_range()));
-                let span = cx.span(lifetime.syntax().text_range());
-                let whole = cx.span(reference.syntax().text_range());
+                let sugg = format!("&{mutability}{}", cx.snippet(borrowed_at));
+                let span = cx.span(at);
+                let whole = cx.span(whole);
                 cx.lint(LINT, item, span, reason).suggestion(
                     whole,
                     "consider removing `'static`",
