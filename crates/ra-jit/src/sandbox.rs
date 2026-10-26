@@ -133,11 +133,13 @@ pub(crate) fn read_record(file: &Path) -> Option<Vec<Line>> {
 pub(crate) struct Recorder {
     lines: BTreeSet<Line>,
     /// The test each thread runs, by the thread's id, as [`MARK`] said.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     threads: HashMap<u64, String>,
     reads: bool,
     not_inputs: BTreeSet<String>,
     /// Where writes are the program's: the overlays, the writable directories and the
     /// sandbox's own.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     written: Vec<String>,
     overlays: Vec<String>,
     /// The sandbox's own directories, whose paths are no inputs: the kernel's views and the
@@ -164,6 +166,52 @@ impl Recorder {
         }
     }
 
+    /// `test` (empty when it is not known) reached `what`, as `reached` says: for a sandbox
+    /// that knows the test of a call itself, not by its thread. A read is kept only when reads
+    /// are recorded and it is an input, as [`Recorder::read`] keeps it.
+    pub(crate) fn reached(&mut self, reached: Reached, test: String, what: &str) {
+        if reached == Reached::Read && !(self.reads && self.input(what)) {
+            return;
+        }
+        // A tab or a line break would end the field: what has one is not recorded, and the
+        // record is not whole.
+        let (reached, what) = match what.contains(['\t', '\n']) {
+            true => (Reached::Incomplete, "a path with a tab or a line break in it"),
+            false => (reached, what),
+        };
+        self.lines.insert(Line { reached, test, what: what.to_owned() });
+    }
+
+    /// Whether `path`, made whole, is an input: not one of `not_inputs`, and not the sandbox's
+    /// own but where an overlay is.
+    fn input(&self, path: &str) -> bool {
+        !self.not_inputs.contains(path)
+            && (self.overlays.iter().any(|it| under(path, it))
+                || !self.own.iter().any(|it| under(path, it)))
+    }
+
+    /// Writes the record to `file`, whole or not at all.
+    pub(crate) fn write(&self, file: &Path) {
+        let mut text = String::new();
+        for line in &self.lines {
+            text.push(line.reached.letter());
+            text.push('\t');
+            text.push_str(&line.test);
+            text.push('\t');
+            text.push_str(&line.what);
+            text.push('\n');
+        }
+        let writing = file.with_extension("writing");
+        if std::fs::write(&writing, text).and_then(|()| std::fs::rename(&writing, file)).is_err() {
+            _ = std::fs::remove_file(file);
+        }
+    }
+}
+
+/// What a sandbox that knows the test of a call by its thread notes: the Linux one, whose
+/// supervisor sees each call's thread and the harness's marker.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+impl Recorder {
     /// Whether the reads are recorded.
     pub(crate) fn reads(&self) -> bool {
         self.reads
@@ -184,25 +232,9 @@ impl Recorder {
         self.threads.get(&thread).cloned().unwrap_or_default()
     }
 
-    fn note(&mut self, reached: Reached, thread: u64, what: &str) {
-        let test = self.test(thread);
-        // A tab or a line break would end the field: what has one is not recorded, and the
-        // record is not whole.
-        let (reached, what) = match what.contains(['\t', '\n']) {
-            true => (Reached::Incomplete, "a path with a tab or a line break in it"),
-            false => (reached, what),
-        };
-        self.lines.insert(Line { reached, test, what: what.to_owned() });
-    }
-
     /// `thread` read `path`, made whole: recorded when reads are and it is an input.
     pub(crate) fn read(&mut self, thread: u64, path: &str) {
-        let input = !self.not_inputs.contains(path)
-            && (self.overlays.iter().any(|it| under(path, it))
-                || !self.own.iter().any(|it| under(path, it)));
-        if self.reads && input {
-            self.note(Reached::Read, thread, path);
-        }
+        self.reached(Reached::Read, self.test(thread), path);
     }
 
     /// Whether a write to `path` is the program's to make.
@@ -212,34 +244,17 @@ impl Recorder {
 
     /// The sandbox refused `thread` a write to `path`.
     pub(crate) fn refused_write(&mut self, thread: u64, path: &str) {
-        self.note(Reached::Write, thread, path);
+        self.reached(Reached::Write, self.test(thread), path);
     }
 
     /// The sandbox refused `thread` the network at `address`.
     pub(crate) fn refused_net(&mut self, thread: u64, address: &str) {
-        self.note(Reached::Net, thread, address);
+        self.reached(Reached::Net, self.test(thread), address);
     }
 
     /// The record is not whole for what `thread` did, and why.
     pub(crate) fn incomplete(&mut self, thread: u64, why: &str) {
-        self.note(Reached::Incomplete, thread, why);
-    }
-
-    /// Writes the record to `file`, whole or not at all.
-    pub(crate) fn write(&self, file: &Path) {
-        let mut text = String::new();
-        for line in &self.lines {
-            text.push(line.reached.letter());
-            text.push('\t');
-            text.push_str(&line.test);
-            text.push('\t');
-            text.push_str(&line.what);
-            text.push('\n');
-        }
-        let writing = file.with_extension("writing");
-        if std::fs::write(&writing, text).and_then(|()| std::fs::rename(&writing, file)).is_err() {
-            _ = std::fs::remove_file(file);
-        }
+        self.reached(Reached::Incomplete, self.test(thread), why);
     }
 }
 

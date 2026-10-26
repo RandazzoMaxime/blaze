@@ -12,7 +12,8 @@
 //! that name a path, run a program or reach the network, keeps the writes under the overlays
 //! in the scratch directory (a changed file is cloned there first, which on APFS copies no
 //! data), answers `/tmp`, `/var/tmp` and the user's temporary directory from empty ones of the
-//! run's own, and appends what it saw to the run's record file.
+//! run's own, and appends what it saw to a file of the run's, from which the record
+//! ([`Recorder`]) is made when the run ends.
 //!
 //! macOS drops `DYLD_*` for the programs it protects (`/bin/sh`, everything in `/usr/bin`) and
 //! for hardened ones; such a program still runs under Seatbelt, so it can't write into an
@@ -21,13 +22,17 @@
 //! it is an `X` line in the record: the record is incomplete.
 
 use std::{
-    collections::{BTreeSet, HashSet},
+    collections::HashSet,
     ffi::{CString, OsString},
     os::unix::ffi::OsStrExt as _,
     path::{Path, PathBuf},
 };
 
-use super::{PASSED, Spec, tidy, under};
+use super::{Reached, Recorder, Spec, tidy};
+
+/// The variables the sandbox gives the program's processes for the library, which takes them
+/// out of what the program sees as it loads.
+const OURS: [&str; 3] = ["DYLD_INSERT_LIBRARIES", "__RA_JIT_SANDBOX", "__RA_JIT_SANDBOX_EXEC"];
 
 /// The library every process of a run loads, built from `macos_interpose.c` by `build.rs`.
 const LIBRARY: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/ra_jit_sandbox.dylib"));
@@ -236,20 +241,13 @@ pub(super) fn run(spec: &Spec, program: Option<&[OsString]>) -> Result<i32, Stri
     let mut argv_ptrs: Vec<*const libc::c_char> = argv.iter().map(|it| it.as_ptr()).collect();
     argv_ptrs.push(std::ptr::null());
     let nonce = format!("{}.top", std::process::id());
-    let ours = ["TMPDIR", "DYLD_INSERT_LIBRARIES", "__RA_JIT_SANDBOX", "__RA_JIT_SANDBOX_EXEC"];
+    // The program's environment is the spec's, its `TMPDIR` the run's empty one.
     let mut env: Vec<CString> = spec
         .env
         .iter()
-        .filter(|(name, _)| !PASSED.contains(&name.as_str()) && !ours.contains(&name.as_str()))
+        .filter(|(name, _)| name != "TMPDIR" && !OURS.contains(&name.as_str()))
         .map(|(name, value)| c(format!("{name}={value}").as_bytes()))
         .collect();
-    for name in PASSED {
-        if let Some(value) = std::env::var_os(name) {
-            let mut it = OsString::from(format!("{name}="));
-            it.push(value);
-            env.push(c(it.as_bytes()));
-        }
-    }
     // The program's own `DYLD_INSERT_LIBRARIES` loads after the library, which takes it away
     // again before the program starts.
     let mut insert = library.as_os_str().to_owned();
@@ -322,66 +320,64 @@ pub(super) fn run(spec: &Spec, program: Option<&[OsString]>) -> Result<i32, Stri
         1
     };
     if let Some(file) = spec.record.as_ref().filter(|_| recording) {
-        let raw = std::fs::read(&raw).unwrap_or_default();
-        let not: HashSet<String> = spec.not_inputs.iter().map(|it| tidy(it)).collect();
-        let overlays: Vec<String> = spec.overlays.iter().flat_map(|it| spellings(it)).collect();
-        let shown = |path: &str| {
-            !not.contains(path)
-                && (overlays.iter().any(|it| under(path, it)) || !under(path, "/dev"))
+        // The paths the library saw are as the program spelled them, so the overlays and what
+        // is no input are known by each of their spellings.
+        let spelled = |dirs: &[PathBuf]| -> Vec<PathBuf> {
+            dirs.iter().flat_map(|it| spellings(it)).map(PathBuf::from).collect()
         };
-        let text = merged(&String::from_utf8_lossy(&raw), shown);
-        let writing = file.with_extension("writing");
-        if std::fs::write(&writing, text).and_then(|()| std::fs::rename(&writing, file)).is_err() {
-            _ = std::fs::remove_file(file);
-        }
+        let mut known = spec.clone();
+        known.overlays = spelled(&spec.overlays);
+        known.not_inputs = spelled(&spec.not_inputs);
+        let own: Vec<String> = ["/dev"]
+            .into_iter()
+            .map(str::to_owned)
+            .chain(temps.iter().flat_map(|(it, _)| spellings(it)))
+            .collect();
+        let own: Vec<&str> = own.iter().map(String::as_str).collect();
+        let mut recorder = Recorder::new(&known, &own);
+        merge(&String::from_utf8_lossy(&std::fs::read(&raw).unwrap_or_default()), &mut recorder);
+        recorder.write(file);
     }
     drop(scratch);
     Ok(code)
 }
 
-/// The record from what the processes of a run appended (`macos_interpose.c` says what each
-/// line is): `R` lines whose path `shown` keeps, `W` and `N` lines, and an `X` line for each
-/// program that ran without the library; sorted, each once.
-fn merged(raw: &str, shown: impl Fn(&str) -> bool) -> String {
-    let mut lines = BTreeSet::new();
+/// Gives `recorder` what the processes of a run appended (`macos_interpose.c` says what each
+/// line is): its `R`, `W`, `N` and `X` lines, and an `X` line for each program that ran
+/// without the library.
+fn merge(raw: &str, recorder: &mut Recorder) {
     let mut ran = Vec::new();
     let mut loaded = HashSet::new();
     for line in raw.lines() {
         let mut fields = line.splitn(4, '\t');
         match (fields.next(), fields.next(), fields.next(), fields.next()) {
-            (Some("R"), Some(test), Some(path), None) if shown(path) => {
-                lines.insert(format!("R\t{test}\t{path}"));
-            }
-            (Some(kind @ ("W" | "N")), Some(test), Some(what), None) => {
-                lines.insert(format!("{kind}\t{test}\t{what}"));
-            }
             (Some("E"), Some(nonce), Some(test), Some(path)) => ran.push((nonce, test, path)),
-            (Some("H" | "F"), Some(nonce), None, None) => {
-                loaded.insert(nonce);
+            (Some("H" | "F"), Some(nonce), None, None) => _ = loaded.insert(nonce),
+            (Some(letter), Some(test), Some(what), None) => {
+                if let Some(reached) = Reached::of(letter) {
+                    recorder.reached(reached, test.to_owned(), what);
+                }
             }
             _ => {}
         }
     }
     for (nonce, test, path) in ran {
         if !loaded.contains(nonce) {
-            lines.insert(format!(
-                "X\t{test}\t{path} ran without the recorder (macOS keeps DYLD_INSERT_LIBRARIES \
-                 from a program it protects), so what it read is not known"
-            ));
+            let why = format!(
+                "{path} ran without the recorder (macOS keeps DYLD_INSERT_LIBRARIES from a \
+                 program it protects), so what it read is not known"
+            );
+            recorder.reached(Reached::Incomplete, test.to_owned(), &why);
         }
     }
-    let mut text = String::new();
-    for line in lines {
-        text.push_str(&line);
-        text.push('\n');
-    }
-    text
 }
 
 #[cfg(test)]
 mod tests {
+    use super::super::{Recorder, Spec};
+
     #[test]
-    fn merged_keeps_each_line_once_and_names_the_programs_not_seen() {
+    fn merge_keeps_each_line_once_and_names_the_programs_not_seen() {
         let raw = "E\t1.top\t\t/w/target/debug/deps/t-1\n\
                    H\t1.top\n\
                    R\ta::b\t/w/data.txt\n\
@@ -395,15 +391,29 @@ mod tests {
                    H\t5.ab.1\n\
                    E\t5.ab.2\ta::c\t/missing\n\
                    F\t5.ab.2\n\
+                   X\ta::d\ta path with a tab or a line break in it\n\
                    R\ta::b\t/w/last";
-        let shown = |path: &str| !path.starts_with("/dev") && path != "/w/target/debug/deps/t-1";
-        let text = super::merged(raw, shown);
+        let spec = Spec {
+            overlays: vec!["/w".into()],
+            not_inputs: vec!["/w/target/debug/deps/t-1".into()],
+            record_reads: true,
+            ..Spec::default()
+        };
+        let mut recorder = Recorder::new(&spec, &["/dev"]);
+        super::merge(raw, &mut recorder);
+        let dir = std::env::temp_dir().join(format!("ra-jit-macos-merge-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("record");
+        recorder.write(&file);
+        let text = std::fs::read_to_string(&file).unwrap();
+        _ = std::fs::remove_dir_all(&dir);
         let lines: Vec<&str> = text.lines().collect();
-        assert_eq!(lines.len(), 5, "{text}");
-        assert_eq!(lines[0], "N\ta::c\t1.1.1.1:443");
-        assert_eq!(lines[1], "R\ta::b\t/w/data.txt");
-        assert_eq!(lines[2], "R\ta::b\t/w/last");
-        assert_eq!(lines[3], "W\ta::b\t/Users/u/.config/x");
+        assert_eq!(lines.len(), 6, "{text}");
+        assert_eq!(lines[0], "R\ta::b\t/w/data.txt");
+        assert_eq!(lines[1], "R\ta::b\t/w/last");
+        assert_eq!(lines[2], "W\ta::b\t/Users/u/.config/x");
+        assert_eq!(lines[3], "N\ta::c\t1.1.1.1:443");
         assert!(lines[4].starts_with("X\ta::c\t/bin/sh ran without the recorder"), "{text}");
+        assert_eq!(lines[5], "X\ta::d\ta path with a tab or a line break in it");
     }
 }

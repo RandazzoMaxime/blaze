@@ -29,6 +29,7 @@
 //     R\t<test>\t<path>      a path named
 //     W\t<test>\t<path>      a write the sandbox refused
 //     N\t<test>\t<address>   an address the sandbox refused
+//     X\t<test>\t<why>       the record is not whole
 //     E\t<nonce>\t<test>\t<path>   a program run, with the nonce its process is given
 //     H\t<nonce>             a process that loaded this library, by the nonce it was given
 //     F\t<nonce>             a program that did not run after all
@@ -203,6 +204,12 @@ static void emit(const char *kind, const char *a, const char *b, const char *c) 
 
 static void note(char kind, const char *path) {
     if (record_fd < 0) return;
+    // A tab or a line break would end the field: the record says it is not whole instead,
+    // as `Recorder` in `sandbox.rs` does.
+    if (strpbrk(path, "\t\n")) {
+        emit("X", test, "a path with a tab or a line break in it", NULL);
+        return;
+    }
     char k[2] = {kind, 0};
     if (kind == 'R' && !first_time(test, path)) return;
     emit(k, test, path, NULL);
