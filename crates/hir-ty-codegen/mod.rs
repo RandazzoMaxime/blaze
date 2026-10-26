@@ -13646,7 +13646,7 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
                 | "assert_mem_uninitialized_valid",
                 _,
             ) => (),
-            ("unreachable" | "abort" | "breakpoint", _) => {
+            ("unreachable" | "abort" | "abort_immediate" | "breakpoint", _) => {
                 self.builder.ins().trap(TrapCode::user(2).expect("non-zero trap code"));
                 return Ok(Intrinsic::Diverges);
             }
