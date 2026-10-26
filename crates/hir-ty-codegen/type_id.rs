@@ -628,13 +628,16 @@ impl<'a, 'db> TypeIdHasher<'a, 'db> {
                 });
                 self.signatures -= 1;
                 hashed?;
-                // `FnSigKind`'s flags: the ABI's index, then safe, then variadic.
+                // `FnSigKind`'s flags: the ABI's index in `ExternAbi::ALL_VARIANTS`, then safe,
+                // then variadic. The index is the vendored rustc_abi's, which is the pinned
+                // nightly's: `rust-call` moved from 21 to 22 when `Unadjusted` became
+                // `LlvmIntrinsic`, after 1.99.0.
                 let abi = match header.abi() {
-                    ExternAbi::C { unwind: false } => 0,
-                    ExternAbi::C { unwind: true } => 1,
-                    ExternAbi::Rust => 2,
-                    // A closure's signature, as its arguments hold it.
-                    ExternAbi::RustCall => 21,
+                    // A closure's signature, as its arguments hold it, is `RustCall`.
+                    abi @ (ExternAbi::C { unwind: false }
+                    | ExternAbi::C { unwind: true }
+                    | ExternAbi::Rust
+                    | ExternAbi::RustCall) => abi.as_packed(),
                     _ => return None,
                 };
                 let safe = u8::from(header.safety().is_safe()) << 6;
