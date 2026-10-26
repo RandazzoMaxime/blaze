@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""sandboxbench.py: what the sandbox every test runs in costs, on Linux.
+"""sandboxbench.py: what the sandbox every test runs in costs, on Linux and macOS.
 
 usage: sandboxbench.py [--cpus 0-15] [--rounds 5] [--runs 600] [--tests 600] [--io 50]
        (RA_JIT_BIN names the ra-jit built; cargo-ra-jit is found next to it)
@@ -19,8 +19,10 @@ lowest and highest of the rounds:
   `cargo ra-jit test --no-run` (the build and the daemon's answer, which every setup has).
   It is `--lib`: the doc tests, which load the workspace whatever runs them, are not measured.
 
-The process and what it runs are kept to `--cpus` (`sched_setaffinity`, which children
-inherit): the tests' harness runs as many tests at once as the CPUs it may use.
+On Linux the process and what it runs are kept to `--cpus` (`sched_setaffinity`, which
+children inherit): the tests' harness runs as many tests at once as the CPUs it may use. macOS
+has no affinity: there the tests' harness is told as many (`RUST_TEST_THREADS`), and the
+programs run on any CPU.
 
 Python 3.13, stdlib only.
 """
@@ -149,16 +151,22 @@ async def main():
     args = parser.parse_args()
     low, _, high = args.cpus.partition("-")
     cpus = set(range(int(low), int(high or low) + 1))
-    os.sched_setaffinity(0, cpus)
     parallel = len(cpus)
+    pinned = hasattr(os, "sched_setaffinity")
+    if pinned:
+        os.sched_setaffinity(0, cpus)
     ra_jit = os.environ["RA_JIT_BIN"]
     bin_dir = os.path.dirname(os.path.abspath(ra_jit))
-    print(f"cpus {args.cpus} ({parallel}); load {os.getloadavg()}", flush=True)
+    where = f"cpus {args.cpus}" if pinned else f"{os.cpu_count()} cpus, not pinned"
+    print(f"{sys.platform}: {where}, {parallel} at a time; load {os.getloadavg()}", flush=True)
 
     root = tempfile.mkdtemp(prefix="ra-jit-sandboxbench-")
     home = tempfile.mkdtemp(prefix="rj-sb-", dir="/tmp")
     env = dict(os.environ, PATH=f"{bin_dir}{os.pathsep}{os.environ['PATH']}", RA_JIT_HOME=home,
                RUST_BACKTRACE="0")
+    if not pinned:
+        # Kept under `affected` too, which passes a test only a few variables.
+        env.update(RUST_TEST_THREADS=str(parallel), RA_JIT_TEST_ENV="RUST_TEST_THREADS")
     for name in ("CARGO_TARGET_DIR", "CARGO_INCREMENTAL", "RUSTFLAGS", "RA_JIT_TESTS", "RA_JIT_SANDBOX"):
         env.pop(name, None)
     pkg = os.path.join(root, "sbxbench")
