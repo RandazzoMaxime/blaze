@@ -402,11 +402,8 @@ impl<'a, 'db> TypeIdHasher<'a, 'db> {
             CoroutineKind::Async => {
                 let interner = hir_ty::next_solver::DbInterner::new_with(db, func.krate(db));
                 let resume_ty = interner.lang_items().ResumeTy?;
-                let resume_ty = Ty::new_adt(
-                    interner,
-                    resume_ty.into(),
-                    GenericArgs::new_from_slice(&[]),
-                );
+                let resume_ty =
+                    Ty::new_adt(interner, resume_ty.into(), GenericArgs::new_from_slice(&[]));
                 // After the parent's: the kind, then the resume type.
                 let at = args.as_coroutine().parent_args().len() + 1;
                 let mut args: Vec<_> = args.iter().collect();
