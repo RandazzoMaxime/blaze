@@ -1529,6 +1529,25 @@ impl Function {
         }
     }
 
+    /// The traits the where clauses of a trait's function bound `Self` by: `DoubleEndedIterator`
+    /// for `Iterator::rev`. Empty for a function outside a trait.
+    pub fn self_trait_bounds(self, db: &dyn HirDatabase) -> Vec<Trait> {
+        let AnyFunctionId::FunctionId(id) = self.id else { return Vec::new() };
+        if !matches!(id.lookup(db).container, ItemContainerId::TraitId(_)) {
+            return Vec::new();
+        }
+        GenericPredicates::query_explicit(db, id.into())
+            .iter_identity()
+            .filter_map(|pred| match &pred.kind().skip_binder() {
+                ClauseKind::Trait(trait_ref) => match trait_ref.self_ty().kind() {
+                    TyKind::Param(param) if param.index == 0 => Some(Trait::from(trait_ref.def_id().0)),
+                    _ => None,
+                },
+                _ => None,
+            })
+            .collect()
+    }
+
     pub fn module(self, db: &dyn HirDatabase) -> Module {
         match self.id {
             AnyFunctionId::FunctionId(id) => id.module(db).into(),
@@ -4590,6 +4609,24 @@ impl<'db> Type<'db> {
         Type { owner, ty: EarlyBinder::bind(self.ty.instantiate(interner, args).skip_norm_wip()) }
     }
 
+    /// The type with its type parameters filled from `args`, in order, and its lifetime and const
+    /// parameters left as its own: `Foo<'a, i32, N>` of `Foo<'a, T, const N: usize>`. Unlike
+    /// [`Type::instantiate`], which fills those with errors that every trait goal takes to hold,
+    /// trait goals on the result are solved as in the type's own crate and environment.
+    pub fn instantiate_type_params(&self, args: impl IntoIterator<Item: Borrow<Type<'db>>>) -> Type<'db> {
+        let TypeOwnerId::GenericDefId(def) = self.owner else { return self.clone() };
+        let interner = DbInterner::conjure();
+        let mut args = args.into_iter();
+        let args = GenericArgs::for_item(interner, def.into(), |index, id, _, _| match id {
+            GenericParamId::TypeParamId(_) => match args.next() {
+                Some(arg) => arg.borrow().ty.skip_binder().into(),
+                None => hir_ide::next_solver::mk_param(interner, index, id),
+            },
+            _ => hir_ide::next_solver::mk_param(interner, index, id),
+        });
+        Type { owner: self.owner, ty: EarlyBinder::bind(self.ty.instantiate(interner, args).skip_norm_wip()) }
+    }
+
     /// Instantiates multiple types with infer vars, keeping the same infer vars for the same owners.
     fn instantiate_many_with_infer(
         tys: impl IntoIterator<Item: Borrow<Type<'db>>>,
@@ -5035,6 +5072,35 @@ impl<'db> Type<'db> {
         let env = ParamEnvAndCrate { param_env: ParamEnv::empty(), krate: self.krate(db) };
         traits::implements_trait_unique_with_infcx(db, env, trait_.id, &mut |infcx| {
             let mut args = Self::instantiate_many_with_infer(iter::once(self).chain(args), infcx);
+            GenericArgs::for_item(infcx.interner, trait_.id.into(), |_, param, _, _| {
+                if let GenericParamId::TypeParamId(_) = param
+                    && let Some(arg) = args.next()
+                {
+                    arg.into()
+                } else {
+                    infcx.var_for_def(param, hir_ide::Span::Dummy)
+                }
+            })
+        })
+    }
+
+    /// Whether the two types unify with each one's generic parameters as inference variables,
+    /// whatever owns them: `[u8]` and an impl's `[T]` do, `[u8]` and `[MaybeUninit<T>]` do not.
+    pub fn unifies_with_any_params(&self, db: &'db dyn HirDatabase, other: &Type<'db>) -> bool {
+        traits::could_unify_with_infcx(db, self.krate(db), &mut |infcx| {
+            let a = Self::instantiate_many_with_infer([self], infcx).next().unwrap();
+            let b = Self::instantiate_many_with_infer([other], infcx).next().unwrap();
+            (a, b)
+        })
+    }
+
+    /// Whether the type may implement the trait for some arguments: its own generic parameters
+    /// and the trait's are inference variables, and an ambiguous answer counts. This is how
+    /// rustdoc decides which blanket impls a type gets.
+    pub fn may_impl_trait(&self, db: &'db dyn HirDatabase, trait_: Trait) -> bool {
+        let env = ParamEnvAndCrate { param_env: ParamEnv::empty(), krate: self.krate(db) };
+        traits::may_implement_trait_with_infcx(db, env, trait_.id, &mut |infcx| {
+            let mut args = Self::instantiate_many_with_infer(iter::once(self), infcx);
             GenericArgs::for_item(infcx.interner, trait_.id.into(), |_, param, _, _| {
                 if let GenericParamId::TypeParamId(_) = param
                     && let Some(arg) = args.next()

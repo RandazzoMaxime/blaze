@@ -162,6 +162,40 @@ pub fn implements_trait_unique_with_infcx<'db>(
     infcx.predicate_must_hold_modulo_regions(&obligation)
 }
 
+/// Whether two types unify once `create_tys` has replaced their generic parameters with
+/// inference variables: `[u8]` and an impl's `[T]` do, `[u8]` and `[MaybeUninit<T>]` do not.
+pub fn could_unify_with_infcx<'db>(
+    db: &'db dyn HirDatabase,
+    krate: Crate,
+    create_tys: &mut dyn FnMut(&InferCtxt<'db>) -> (Ty<'db>, Ty<'db>),
+) -> bool {
+    let interner = DbInterner::new_with(db, krate);
+    let infcx = interner.infer_ctxt().build(TypingMode::non_body_analysis());
+    let (a, b) = create_tys(&infcx);
+    infcx.at(&ObligationCause::dummy(), ParamEnv::empty()).eq(a, b).is_ok()
+}
+
+/// Like [`implements_trait_unique_with_infcx`], but true when the goal may hold: an ambiguous
+/// answer, such as one that depends on inference variables in the arguments, counts.
+pub fn may_implement_trait_with_infcx<'db>(
+    db: &'db dyn HirDatabase,
+    env: ParamEnvAndCrate<'db>,
+    trait_: TraitId,
+    create_args: &mut dyn FnMut(&InferCtxt<'db>) -> GenericArgs<'db>,
+) -> bool {
+    let interner = DbInterner::new_with(db, env.krate);
+    let infcx = interner.infer_ctxt().build(TypingMode::non_body_analysis());
+
+    let args = create_args(&infcx);
+    let trait_ref = rustc_type_ir::TraitRef::new_from_args(interner, trait_.into(), args);
+    if trait_ref.self_ty().is_ty_error() {
+        return false;
+    }
+
+    let obligation = Obligation::new(interner, ObligationCause::dummy(), env.param_env, trait_ref);
+    infcx.predicate_may_hold(&obligation)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WherePredicateEvaluation {
     Holds,

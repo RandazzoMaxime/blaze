@@ -24,6 +24,9 @@ pub(crate) mod switch;
 mod toolchain;
 mod units;
 mod whole;
+// TEMP-DOC-HOOK: until the dispatcher of `cargo/own/` lands.
+#[path = "own/doc.rs"]
+mod own_doc;
 
 use std::{collections::BTreeMap, path::Path, process::Command, time::Instant};
 
@@ -42,6 +45,11 @@ pub(crate) fn command(args: impl Iterator<Item = String>) -> anyhow::Result<()> 
         && word == SETTLE
     {
         return settle(cargo.parse().context("`settle` is told the cargo to wait for")?, rest);
+    }
+    // TEMP-DOC-HOOK
+    if args.first().is_some_and(|it| it == "doc") {
+        crate::end_with_reader();
+        std::process::exit(own_doc::command(&args[1..])?);
     }
     let asked = Asked::parse(args);
     if !matches!(asked, Asked::Build(_) | Asked::Cargo(_)) {
