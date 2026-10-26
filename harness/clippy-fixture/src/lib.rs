@@ -129,8 +129,8 @@ macro_rules! here {
     };
 }
 
-pub fn is_word(b: u8, kind: Option<&Encoding>) -> bool {
-    let latin = if let Some(Encoding::Latin) = kind { true } else { false };
+pub fn is_word(b: u8, kind: Option<Option<u8>>) -> bool {
+    let latin = if let Some(None) = kind { true } else { false };
     latin
         || match b {
             b'a'..=b'z' | b'_' => true,
