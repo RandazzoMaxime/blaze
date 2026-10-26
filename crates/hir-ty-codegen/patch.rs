@@ -2398,16 +2398,18 @@ impl Base {
             if self.rustc {
                 return stale.declined("a static changed, and rustc's copy is the program's");
             }
+            let writable = probe(|| compiled_static(db, id).as_ref().ok().map(|it| it.writable));
             // rustc's copy holds what the program wrote, from the first value it had: one of
-            // ours beside it would split the state, and it can't start again from another.
-            if was.shared {
+            // ours beside it would split the state, and it can't start again from another. A
+            // static the edit took away (or left with no value) has no copy of ours to split
+            // it with: nothing compiled now names it.
+            if was.shared && matches!(writable, Some(Some(_))) {
                 return stale.declined(
                     "the first value changed of a static with state that rustc's code shares",
                 );
             }
             stale.their_walk_changed |= was.theirs;
             // rustc's code has rustc's copy, and a thread's copy is laid out by the linker.
-            let writable = probe(|| compiled_static(db, id).as_ref().ok().map(|it| it.writable));
             if writable == Some(Some(was.writable)) && !was.theirs && !is_thread_local(db, id) {
                 stale.statics.push(id);
             } else {
