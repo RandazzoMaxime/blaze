@@ -140,10 +140,27 @@ impl fmt::Display for Symbol {
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+/// An identifier with where it was written. As rustc's, two are equal when their names are
+/// (and their hygiene contexts, which are all the root here): the span's position is not part of
+/// it, so `use a::b as b` is a rename to the same name.
+#[derive(Clone, Copy)]
 pub struct Ident {
     pub name: Symbol,
     pub span: Span,
+}
+
+impl PartialEq for Ident {
+    fn eq(&self, rhs: &Ident) -> bool {
+        self.name == rhs.name
+    }
+}
+
+impl Eq for Ident {}
+
+impl std::hash::Hash for Ident {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.name.hash(state);
+    }
 }
 
 impl Ident {

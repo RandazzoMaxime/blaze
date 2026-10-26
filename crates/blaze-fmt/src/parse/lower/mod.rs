@@ -405,12 +405,23 @@ impl<'a> Lower<'a> {
             if let Some(anchor) = seg.type_anchor() {
                 // `<T as Trait>::rest`: rustc keeps `Trait`'s segments in the path and counts
                 // them in `QSelf::position`.
-                let Some(ty) = anchor.ty() else {
+                // The self type is the first type child and may be a path type itself, so
+                // `Trait` is the type after `as`, not the anchor's first path type.
+                let mut types = anchor.syntax().children().filter_map(ra::Type::cast);
+                let Some(ty) = types.next() else {
                     self.unsupported(span, "a qualified path without a type");
                     continue;
                 };
                 let ty = self.ty(&ty);
-                let path_span = match anchor.path_type().and_then(|pt| pt.path()) {
+                let trait_path = match types.next() {
+                    Some(ra::Type::PathType(pt)) => pt.path(),
+                    Some(other) => {
+                        self.unsupported(self.nsp(other.syntax()), "a qualified path whose trait is not a path");
+                        None
+                    }
+                    None => None,
+                };
+                let path_span = match trait_path {
                     Some(trait_path) => {
                         let (_, trait_path) = self.path(&trait_path);
                         let path_span = trait_path.span;

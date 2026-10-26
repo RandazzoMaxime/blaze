@@ -381,7 +381,7 @@ impl<'a> Parser<'a> {
         Ok(())
     }
 
-    /// Steps over a `cfg` predicate: a path and its arguments.
+    /// Steps over a `cfg` predicate: a path and its arguments, delimited or `= expr`.
     pub(crate) fn parse_attr_item(&mut self, _: ForceCollect) -> PResult<()> {
         let _ = self.eat(exp!(Unsafe));
         self.parse_mod_path()?;
@@ -390,6 +390,8 @@ impl<'a> Parser<'a> {
             TokenKind::OpenParen | TokenKind::OpenBracket | TokenKind::OpenBrace
         ) {
             self.skip_delimited();
+        } else if self.eat(exp!(Eq)) {
+            self.parse_expr()?;
         }
         Ok(())
     }

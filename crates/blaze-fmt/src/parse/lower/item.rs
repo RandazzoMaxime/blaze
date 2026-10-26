@@ -371,7 +371,10 @@ impl Lower<'_> {
             .unwrap_or(gen_end);
         if t.eq_token().is_some() {
             let generics = self.item_generics(t, ident.span, before_where);
-            let constness = ast::Const::No;
+            let constness = match child_token(t.syntax(), T![const]) {
+                Some(c) => ast::Const::Yes(self.tsp(&c)),
+                None => ast::Const::No,
+            };
             return (
                 ast::ItemKind::TraitAlias(Box::new(ast::TraitAlias { constness, ident, generics, bounds })),
                 ThinVec::new(),
@@ -504,15 +507,16 @@ impl Lower<'_> {
             .map(|tok| self.tsp(&tok))
             .unwrap_or(gen_end);
         let ty = t.ty().map(|ty| self.ty(&ty));
-        // rust-analyzer keeps one `where` clause; which side of `=` it was written on decides
-        // which of rustc's two it is.
-        let wc = t.where_clause();
-        let wc_after_eq = match (&wc, t.eq_token()) {
-            (Some(w), Some(eq)) => w.syntax().text_range().start() > eq.text_range().start(),
-            _ => false,
-        };
+        // Which side of `=` a `where` clause was written on decides which of rustc's two it is.
+        let eq = t.eq_token().map(|eq| eq.text_range().start());
+        let (mut before, mut after) = (None, None);
+        for wc in t.syntax().children().filter_map(ra::WhereClause::cast) {
+            match eq {
+                Some(eq) if wc.syntax().text_range().start() > eq => after = Some(wc),
+                _ => before = Some(wc),
+            }
+        }
         let after_ty = ty.as_ref().map_or(before_where, |ty| ty.span);
-        let (before, after) = if wc_after_eq { (None, wc) } else { (wc, None) };
         let generics = self.generics(t.generic_param_list(), before, ident.span, before_where);
         let after_where_clause = self.where_clause(after, after_ty);
         Box::new(ast::TyAlias {
