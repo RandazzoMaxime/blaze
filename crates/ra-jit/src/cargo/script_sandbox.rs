@@ -96,21 +96,25 @@ pub(crate) enum Plan {
     },
 }
 
-/// Whether sandboxes are on for a script run with `env`: unless `RA_JIT_SANDBOX` (or
-/// `BLAZE_SANDBOX`, which wins) is `off` or `0` there. The variable is read from the run's
-/// environment, which is cargo's, so that the daemon's reruns do as cargo's runs did.
+/// Whether sandboxes are on for a script run with `env`, as [`sandbox::on_with`] says. The
+/// variable is read from the run's environment, which is cargo's, so that the daemon's reruns
+/// do as cargo's runs did.
 fn on_in(env: &[(String, String)]) -> bool {
-    let var = |name: &str| env.iter().find(|it| it.0 == name).map(|it| it.1.as_str());
-    let value = var("BLAZE_SANDBOX").or_else(|| var(sandboxed::VAR));
-    !matches!(value, Some("off" | "0"))
+    sandbox::on_with(|name| env.iter().find(|it| it.0 == name).map(|it| it.1.clone()))
 }
 
 /// The workspace a script's run is part of: the one the shell that ran cargo was in, else the
 /// one around the target directory its `OUT_DIR` is in.
-fn workspace_of(script: &Script<'_>) -> Option<PathBuf> {
-    let pwd = script.var("PWD").map(PathBuf::from);
-    pwd.and_then(|it| sandboxed::workspace_root(&it))
-        .or_else(|| sandboxed::workspace_root(target_of(script.out_dir)?.parent()?))
+fn workspace_of(script: &Script<'_>) -> anyhow::Result<Option<PathBuf>> {
+    if let Some(pwd) = script.var("PWD")
+        && let Some(root) = sandboxed::workspace_root(Path::new(pwd))?
+    {
+        return Ok(Some(root));
+    }
+    match target_of(script.out_dir).and_then(Path::parent) {
+        Some(dir) => sandboxed::workspace_root(dir),
+        None => Ok(None),
+    }
 }
 
 /// The target directory `out_dir` is in: what is above its `build` directory's profile.
@@ -129,7 +133,7 @@ pub(crate) fn plan(script: &Script<'_>) -> anyhow::Result<Plan> {
     if !cfg!(any(target_os = "linux", target_os = "macos")) {
         return Ok(Plan::Outside(format!("there is no sandbox on {} yet", std::env::consts::OS)));
     }
-    let root = workspace_of(script);
+    let root = workspace_of(script)?;
     if let Some(root) = &root {
         let out = sandboxed::workspace_opt_out(root)?;
         if out.build_scripts.contains(package) {
@@ -160,7 +164,11 @@ pub(crate) fn plan(script: &Script<'_>) -> anyhow::Result<Plan> {
     let programs = programs.into_iter().filter_map(|it| script.var(it)).filter(|it| !it.is_empty());
     let programs = programs.filter_map(|it| Path::new(it).parent().map(Path::to_owned));
     let path = script.var("PATH").unwrap_or_default().split(':').map(PathBuf::from);
-    readable.extend(programs.chain(path).filter(|it| emptied(it) && it.is_dir()));
+    // One reached through a link (NixOS's `/run/current-system/sw/bin`) is seen where the link
+    // leads, which is not emptied.
+    readable.extend(programs.chain(path).filter(|it| {
+        it.is_dir() && emptied(it) && std::fs::canonicalize(it).is_ok_and(|real| emptied(&real))
+    }));
     readable.sort();
     readable.dedup();
     // The innermost is enough: a directory is seen with what is below it.
@@ -184,9 +192,13 @@ pub(crate) fn plan(script: &Script<'_>) -> anyhow::Result<Plan> {
 /// Whether `dir` is below a directory a sandbox starts empty: what is there is not seen unless
 /// it is readable.
 fn emptied(dir: &Path) -> bool {
-    let temps = ["/tmp", "/var/tmp", "/dev/shm", "/private/tmp", "/private/var/tmp"];
+    let temps = ["/tmp", "/var/tmp", "/dev/shm", "/run", "/private/tmp", "/private/var/tmp"];
+    let temp = std::env::temp_dir();
+    let real = std::fs::canonicalize(&temp).unwrap_or_else(|_| temp.clone());
     dir.is_absolute()
-        && (temps.iter().any(|it| dir.starts_with(it)) || dir.starts_with(std::env::temp_dir()))
+        && (temps.iter().any(|it| dir.starts_with(it))
+            || dir.starts_with(&temp)
+            || dir.starts_with(&real))
 }
 
 /// The per-user cache directory of macOS, `None` elsewhere.

@@ -38,8 +38,7 @@ pub(crate) fn install() {
             seen.extend(library.parent().map(Path::to_owned));
         }
         let out = sandboxed::workspace_root(workspace)
-            .map(|root| sandboxed::workspace_opt_out(&root))
-            .transpose();
+            .and_then(|root| root.map(|root| sandboxed::workspace_opt_out(&root)).transpose());
         match out {
             Ok(out) => out.is_some_and(|it| it.macro_outside(crate_name)),
             // A root manifest that says it wrongly takes nothing out; the build reads it too,
@@ -49,11 +48,10 @@ pub(crate) fn install() {
     }));
 }
 
-/// Whether servers run in a sandbox: unless `RA_JIT_SANDBOX` (or `BLAZE_SANDBOX`) is `off`.
+/// Whether servers run in a sandbox: unless `RA_JIT_SANDBOX` (or `BLAZE_SANDBOX`) is `off`
+/// ([`sandbox::on`]), on a system that has one.
 fn on() -> bool {
-    let value = std::env::var("BLAZE_SANDBOX").or_else(|_| std::env::var(sandboxed::VAR));
-    !matches!(value.as_deref(), Ok("off" | "0"))
-        && cfg!(any(target_os = "linux", target_os = "macos"))
+    sandbox::on() && cfg!(any(target_os = "linux", target_os = "macos"))
 }
 
 /// `server`, the command a proc-macro server is started with, as `ra-jit sandbox SPEC --

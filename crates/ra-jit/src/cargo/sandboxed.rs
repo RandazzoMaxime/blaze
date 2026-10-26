@@ -34,7 +34,7 @@ use super::{
 };
 use crate::sandbox::{self, Line, Reached, Spec};
 
-pub(crate) const VAR: &str = "RA_JIT_SANDBOX";
+pub(crate) const VAR: &str = sandbox::VAR;
 
 /// Names of more variables of the environment a test keeps under `RA_JIT_TESTS=affected`, by
 /// commas.
@@ -72,9 +72,10 @@ const KEPT: &[&str] = &[
 /// The table of a package's manifest that takes its tests out of the sandbox.
 pub(crate) const TABLE: &str = "[package.metadata.blaze.sandbox]";
 
-/// Whether this command runs its tests sandboxed: unless `RA_JIT_SANDBOX=off`.
+/// Whether this command runs its tests sandboxed: unless `RA_JIT_SANDBOX` (or `BLAZE_SANDBOX`)
+/// is `off`, as [`sandbox::on`] decides for build scripts and proc macros too.
 pub(crate) fn on() -> bool {
-    !matches!(std::env::var(VAR).as_deref(), Ok("off" | "0"))
+    sandbox::on()
 }
 
 /// What a package says of its tests and the sandbox, in [`TABLE`].
@@ -195,15 +196,25 @@ pub(crate) fn workspace_opt_out(root: &Path) -> anyhow::Result<WorkspaceOptOut> 
 }
 
 /// The root of the workspace `dir` is in, as cargo finds it: the nearest directory at or above
-/// it whose manifest has a `[workspace]` table.
-pub(crate) fn workspace_root(dir: &Path) -> Option<PathBuf> {
-    dir.ancestors()
-        .find(|it| {
-            let text = std::fs::read_to_string(it.join("Cargo.toml")).unwrap_or_default();
-            text.contains("workspace")
-                && toml::from_str::<toml::Table>(&text).is_ok_and(|it| it.contains_key("workspace"))
-        })
-        .map(Path::to_owned)
+/// it whose manifest has a `[workspace]` table, `None` when there is none. A manifest on the
+/// way that can't be read or parsed is an error, as cargo makes it one.
+pub(crate) fn workspace_root(dir: &Path) -> anyhow::Result<Option<PathBuf>> {
+    for it in dir.ancestors() {
+        let manifest = it.join("Cargo.toml");
+        let text = match std::fs::read_to_string(&manifest) {
+            Ok(text) => text,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => {
+                return Err(error).with_context(|| format!("reading {}", manifest.display()));
+            }
+        };
+        let value: toml::Table =
+            toml::from_str(&text).with_context(|| format!("reading {}", manifest.display()))?;
+        if value.contains_key("workspace") {
+            return Ok(Some(it.to_owned()));
+        }
+    }
+    Ok(None)
 }
 
 /// The environment the test `command` runs would have, cut down to what a test keeps under
@@ -629,7 +640,10 @@ mod tests {
         let write = |text: &str| std::fs::write(dir.join("Cargo.toml"), text).unwrap();
         std::fs::write(dir.join("member/Cargo.toml"), "[package]\nname = \"m\"\n").unwrap();
         write("[workspace]\nmembers = [\"member\"]\n");
-        assert_eq!(workspace_root(&dir.join("member/src")), Some(dir.clone()));
+        assert_eq!(workspace_root(&dir.join("member/src")).unwrap(), Some(dir.clone()));
+        std::fs::write(dir.join("member/Cargo.toml"), "[package\n").unwrap();
+        assert!(workspace_root(&dir.join("member/src")).is_err());
+        std::fs::write(dir.join("member/Cargo.toml"), "[package]\nname = \"m\"\n").unwrap();
         let out = workspace_opt_out(&dir).unwrap();
         assert!(out.build_scripts.is_empty() && out.proc_macros.is_empty());
         write(
