@@ -2741,12 +2741,26 @@ fn pause_after_load() {
     }
 }
 
+/// Whether [`lower_until`] has begun compiling ahead: what [`pause_before_symbols`] waits for.
+static AHEAD_BEGUN: AtomicBool = AtomicBool::new(false);
+
+/// How long [`pause_before_symbols`] waits for compiling ahead to begin, where it never does
+/// (a load beside cargo's build compiles ahead by what cargo has built, not until the symbols).
+const AHEAD_BEGUN_WAIT: Duration = Duration::from_secs(120);
+
 /// Waits for `RA_JIT_SYMBOLS_PAUSE_MS` before the symbols rustc built are read, and says so:
-/// what `harness/aheadready.py` has functions compiled ahead in.
+/// what `harness/aheadready.py` has functions compiled ahead in. The pause starts once
+/// compiling ahead has begun, not when the symbols' thread does: a fixed pause from then
+/// raced loading and resolving the workspace, which took longer than it on a slow macOS
+/// runner, and nothing was compiled ahead.
 fn pause_before_symbols() {
     let pause = std::env::var("RA_JIT_SYMBOLS_PAUSE_MS").ok().and_then(|it| it.parse().ok());
     if let Some(pause) = pause {
         eprintln!("symbols: paused");
+        let start = Instant::now();
+        while !AHEAD_BEGUN.load(Ordering::SeqCst) && start.elapsed() < AHEAD_BEGUN_WAIT {
+            std::thread::sleep(Duration::from_millis(5));
+        }
         std::thread::sleep(Duration::from_millis(pause));
     }
 }
@@ -7096,6 +7110,7 @@ fn lower_until(
     if done() {
         return Ok(());
     }
+    AHEAD_BEGUN.store(true, Ordering::SeqCst);
     let start = Instant::now();
     let mut functions = Vec::new();
     let mut crates = Vec::new();
