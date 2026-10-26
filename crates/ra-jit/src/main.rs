@@ -2295,6 +2295,7 @@ fn load(
         scripts_said,
     };
     let mut db = RootDatabase::new(None);
+    memo_capacities(&mut db);
     let mut vfs = vfs::Vfs::default();
     checkouts.add(projects, &mut db, &mut vfs)?;
     Ok((db, vfs, checkouts))
@@ -6425,7 +6426,38 @@ fn let_go(db: &mut RootDatabase, builds: &Builds) {
     use ide_db::base_db::salsa::Database;
     if builds.running.is_empty() && TIERING.load(Ordering::Relaxed) == 0 {
         db.trigger_lru_eviction();
+        // An idle worker allocates nothing, and jemalloc returns freed pages only as it
+        // allocates, so what the build and the eviction freed would stay resident.
+        memory::give_back();
     }
+}
+
+/// How many values of the queries that hold the most of a build in full salsa keeps past the
+/// revision of the build: the lowered and the runtime MIR of each body (and their
+/// monomorphized copies), the code of each instance and the bodies to inline. A worker's own
+/// base computes all of them for the whole program; kept, they were about 4.5 GB of reth's
+/// 13 GB live (#261). One let go is computed again if an edit asks for it, which only the
+/// first edit after a build in full does much of. `RA_JIT_LRU` (`mir=N,runtime=N,compiled=N,
+/// inlinable=N`) sets any of them; 0 keeps every value.
+fn memo_capacities(db: &mut RootDatabase) {
+    let (mut mir, mut runtime, mut compiled, mut inlinable) = (2048, 2048, 16384, 8192);
+    let said = std::env::var("RA_JIT_LRU").unwrap_or_default();
+    for it in said.split(',').filter(|it| !it.trim().is_empty()) {
+        let parsed =
+            it.split_once('=').and_then(|(name, n)| Some((name.trim(), n.trim().parse().ok()?)));
+        match parsed {
+            Some(("mir", n)) => mir = n,
+            Some(("runtime", n)) => runtime = n,
+            Some(("compiled", n)) => compiled = n,
+            Some(("inlinable", n)) => inlinable = n,
+            _ => eprintln!(
+                "RA_JIT_LRU: `{it}` is not one of mir, runtime, compiled or inlinable = a number"
+            ),
+        }
+    }
+    hir_ty::mir::set_mir_capacity(db, mir);
+    hir_ty::mir::set_runtime_mir_capacity(db, runtime);
+    hir_ty_codegen::set_code_capacity(db, compiled, inlinable);
 }
 
 impl std::io::Write for &Client {

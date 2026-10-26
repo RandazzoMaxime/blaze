@@ -2885,7 +2885,7 @@ fn compiled_start<'db>(db: &'db dyn HirDatabase, main: FunctionId) -> Result<Com
 /// The code of a function, closure, `async` block or shim with its generic arguments filled in.
 // Nothing in its arguments is collected by salsa (no tracked struct, no interned value with
 // fewer revisions), so they stay interned and are never verified.
-#[salsa::tracked(returns(ref), revisions = usize::MAX)]
+#[salsa::tracked(returns(ref), revisions = usize::MAX, lru = 0)]
 fn compiled_instance<'db>(
     db: &'db dyn HirDatabase,
     instance: Instance,
@@ -4612,8 +4612,15 @@ fn build<'db>(
     Ok(ctx)
 }
 
+/// How many compiled instances and inlinable bodies salsa keeps the value of once a revision
+/// is over; 0 keeps every one.
+pub fn set_code_capacity(db: &mut dyn HirDatabase, compiled: usize, inlinable_bodies: usize) {
+    compiled_instance::set_lru_capacity(db, compiled);
+    inlinable::set_lru_capacity(db, inlinable_bodies);
+}
+
 /// The body of a small function, built to be put where the function is called.
-#[salsa::tracked(returns(ref), no_eq, cycle_result = inlinable_cycle)]
+#[salsa::tracked(returns(ref), no_eq, cycle_result = inlinable_cycle, lru = 0)]
 fn inlinable(
     db: &dyn HirDatabase,
     instance: Instance,
