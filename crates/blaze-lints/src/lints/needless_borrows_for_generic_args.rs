@@ -11,7 +11,7 @@ use hir::{GenericParam, PathResolution};
 use ide_db::famous_defs::FamousDefs;
 use syntax::{
     AstNode, SyntaxNode,
-    ast::{self, HasArgList as _, HasGenericArgs as _},
+    ast::{self, HasGenericArgs as _},
 };
 
 use crate::{check::Cx, diag::Applicability, msrvs};
@@ -116,9 +116,7 @@ fn needless_borrow_count(cx: &Cx<'_, '_, '_>, function: hir::Function, index: us
             let mut args = Vec::new();
             for at in 1.. {
                 let Some(arg) = bound.get_type_argument(at) else { break };
-                if !arg.generic_params(db).is_empty() {
-                    return false;
-                }
+                let Some(arg) = arg.without_params(db) else { return false };
                 args.push(arg);
             }
             ty.impls_trait(db, trait_, &args)

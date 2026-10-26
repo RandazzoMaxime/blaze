@@ -50,7 +50,8 @@ pub type NameOf<'a> = &'a dyn Fn(ide_db::FileId) -> Option<String>;
 /// The diagnostics of the lints of `krate`, in the order rustc would emit them.
 pub fn check(db: &RootDatabase, krate: hir::Crate, setup: &Setup, name_of: NameOf<'_>) -> Vec<Found> {
     hir::attach_db(db, || {
-        let sema = Semantics::new(db);
+        // A file of several crates (a library and its test build) is read as `krate`'s.
+        let sema = Semantics::new_within(db, std::sync::Arc::new(std::iter::once(krate.base()).collect()));
         let cfg = krate.cfg(db).clone();
         let test = CfgAtom::Flag(intern::sym::test);
         let without_test = cfg.check_atom(&test).then(|| {
@@ -97,8 +98,9 @@ struct Pending {
     /// Where its level is asked for.
     at: InFile<SyntaxNode>,
     diagnostic: Diagnostic,
-    /// The order rustc emits it in: early lints first, then by module, then by place.
-    order: (bool, usize, u32),
+    /// The order rustc emits it in: by pass (pre-expansion over the root file, early, late),
+    /// then by module, then by where the node it was found at starts, outer nodes first.
+    order: (u8, usize, u32, u32),
 }
 
 /// An `#[expect]` of a lint, as the walk met it.
@@ -188,6 +190,18 @@ impl<'a, 'db> Cx<'_, 'a, 'db> {
                 (range.file_id == self.file).then_some(range.range)
             }
         }
+    }
+
+    /// Whether the walk is in the file's own tree, not in an expansion of a macro.
+    pub(crate) fn in_file(&self) -> bool {
+        self.expansion.is_none() && self.input.is_none()
+    }
+
+    /// Where `node`, of the file or of an expansion, is written in the file being walked, if
+    /// it is.
+    pub(crate) fn original_range(&self, node: &SyntaxNode) -> Option<TextRange> {
+        let range = self.sema().original_range_opt(node)?;
+        (range.file_id == self.file).then_some(range.range)
     }
 
     /// `range` of the file being walked as a span, with the expansion the walk is in.
@@ -331,7 +345,11 @@ impl<'a, 'db> Cx<'_, 'a, 'db> {
     ) -> &mut Diagnostic {
         let info = registry::lint(lint).unwrap_or_else(|| panic!("`{lint}` is not clippy's"));
         let span: MultiSpan = span.into();
-        let lo = span.primary_span().map_or(0, |it| it.lo);
+        // rustc's passes run a lint as they come to a node, outer nodes before inner ones.
+        let place = match self.original_range(at) {
+            Some(range) => (u32::from(range.start()), u32::MAX - u32::from(range.end())),
+            None => (span.primary_span().map_or(0, |it| it.lo), 0),
+        };
         let file = self.sema().hir_file_for(at);
         self.state.pending.push(Pending {
             lint: info,
@@ -345,7 +363,7 @@ impl<'a, 'db> Cx<'_, 'a, 'db> {
                 suggestions: Vec::new(),
                 suggestions_disabled: false,
             },
-            order: (!lints::is_early(lint), self.order, lo),
+            order: (lints::phase(lint, self.order == 0), self.order, place.0, place.1),
         });
         &mut self.state.pending.last_mut().expect("just pushed").diagnostic
     }

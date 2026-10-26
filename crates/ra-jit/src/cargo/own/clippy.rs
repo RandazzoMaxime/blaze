@@ -372,11 +372,16 @@ fn written(plan: &Plan<'_>, answer: &Answer, format: Format, clippy_args: &[Stri
     let mut failed = false;
     // The packages whose library failed, or was not built for one it depends on that did.
     let mut broken: FxHashSet<&str> = FxHashSet::default();
-    for unit in &plan.units {
+    let skipped = |unit: &Unit<'_>, broken: &FxHashSet<&str>| {
         let name = unit.package.name.as_str();
         let lib = unit.target.is_lib() || unit.target.is_proc_macro();
         let deps = plan.deps.get(name).map(Vec::as_slice).unwrap_or_default();
-        if deps.iter().any(|it| broken.contains(it)) || !lib && broken.contains(name) {
+        deps.iter().any(|it| broken.contains(it)) || !lib && broken.contains(name)
+    };
+    for (at, unit) in plan.units.iter().enumerate() {
+        let name = unit.package.name.as_str();
+        let lib = unit.target.is_lib() || unit.target.is_proc_macro();
+        if skipped(unit, &broken) {
             if lib && !unit.test {
                 broken.insert(name);
             }
@@ -417,14 +422,12 @@ fn written(plan: &Plan<'_>, answer: &Answer, format: Format, clippy_args: &[Stri
         if count.errors > 0 && lib && !unit.test {
             broken.insert(name);
         }
-        if format.is_json() {
-            failed |= count.errors > 0;
-            continue;
-        }
-        if count.total > 0 {
+        if count.total > 0 && !format.is_json() {
             summary(unit, &count, clippy_args);
         }
         if count.errors > 0 {
+            // cargo says so at its first failure while other units are still being built.
+            let waiting = !failed && plan.units[at + 1..].iter().any(|it| !skipped(it, &broken));
             failed = true;
             let errors = match count.errors {
                 1 => " due to 1 previous error".to_owned(),
@@ -436,6 +439,9 @@ fn written(plan: &Plan<'_>, answer: &Answer, format: Format, clippy_args: &[Stri
                 n => format!("; {n} warnings emitted"),
             };
             say::error(&format!("could not compile {}{errors}{warnings}", unit.named()));
+            if waiting {
+                say::warning("build failed, waiting for other jobs to finish...");
+            }
         }
     }
     failed

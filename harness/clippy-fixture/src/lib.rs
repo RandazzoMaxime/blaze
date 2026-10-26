@@ -39,6 +39,32 @@ pub fn maps(x: Option<i32>, r: Result<i32, ()>) -> i32 {
     if c { a + b } else { d.unwrap_or(0) }
 }
 
+pub fn formats(s: &str, n: i32, m: &mut i32) -> String {
+    println!("{} {:?}", &s, &&n);
+    println!("{0:1$}", &n, &5usize);
+    println!("{}", &mut *m);
+    println!("{:p}", &n);
+    println!("{n} {n}", n = &(n));
+    format!("{}", &(n + 1))
+}
+
+pub fn conditions(x: Option<i32>, r: Result<i32, ()>, a: bool, b: bool) -> Result<bool, std::io::Error> {
+    let _error = std::io::Error::new(std::io::ErrorKind::Other, "x");
+    let _ = x.map_or(false, |it| it > 1);
+    let _ = x.map_or(true, |it| it > 1);
+    let _ = r.map_or(false, |it| it > 1);
+    if a {
+        if b || a {
+            println!("both");
+        }
+    }
+    let _ = if a { true } else { false };
+    if b {
+        return Ok(true);
+    }
+    Ok(false)
+}
+
 #[deny(clippy::bool_assert_comparison)]
 pub fn denied() {
     assert_eq!(braces().is_empty(), false);

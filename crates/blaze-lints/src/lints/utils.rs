@@ -105,3 +105,85 @@ pub(crate) fn between_ends(cx: &Cx<'_, '_, '_>, a: &SyntaxNode, b: &SyntaxNode) 
     let (a, b) = (cx.range(a)?, cx.range(b)?);
     (a.end() <= b.end()).then(|| TextRange::new(a.end(), b.end()))
 }
+
+/// `expr`, or what initialised the binding it names when that binding is not `mut`, as
+/// clippy's `expr_or_init` follows it.
+pub(crate) fn expr_or_init(cx: &Cx<'_, '_, '_>, expr: &ast::Expr) -> ast::Expr {
+    let mut expr = expr.clone();
+    for _ in 0..16 {
+        let ast::Expr::PathExpr(path) = &expr else { break };
+        let Some(local) = local_of(cx, path) else { break };
+        let Some(init) = binding_init(cx, local) else { break };
+        expr = init;
+    }
+    expr
+}
+
+/// What `let` initialised `local` with, if it is bound by a plain `let` and not `mut`.
+fn binding_init(cx: &Cx<'_, '_, '_>, local: hir::Local<'_>) -> Option<ast::Expr> {
+    let source = local.primary_source(cx.db());
+    let file = source.source.file_id.file_id()?;
+    let range = source.as_ident_pat()?.syntax().text_range();
+    // The tree semantics knows, so that what is found in it can be asked of.
+    let root = cx.sema().parse(file);
+    let pat = root.syntax().covering_element(range).ancestors().find_map(ast::IdentPat::cast)?;
+    if pat.mut_token().is_some() || pat.ref_token().is_some() {
+        return None;
+    }
+    let let_stmt = ast::LetStmt::cast(pat.syntax().parent()?)?;
+    let_stmt.initializer()
+}
+
+/// clippy's `Sugg::hir_with_context` for `expr`, written in the file.
+pub(crate) fn sugg(cx: &Cx<'_, '_, '_>, expr: &ast::Expr) -> crate::sugg::Sugg {
+    let snippet = |node: &SyntaxNode| cx.source_of(node);
+    let same_type = |prefix: &ast::PrefixExpr| {
+        let inner = prefix.expr();
+        let outer = cx.ty(&ast::Expr::PrefixExpr(prefix.clone()));
+        inner.and_then(|it| cx.ty(&it)).zip(outer).is_some_and(|(a, b)| a == b)
+    };
+    crate::sugg::Sugg::of(expr, &snippet, &same_type)
+}
+
+/// clippy's `peel_blocks`: `expr` with the blocks around it that only hold an expression
+/// taken off.
+pub(crate) fn peel_blocks(expr: &ast::Expr) -> ast::Expr {
+    let mut expr = expr.clone();
+    while let ast::Expr::BlockExpr(block) = &expr
+        && block.modifier().is_none()
+        && block.label().is_none()
+        && block.statements().next().is_none()
+        && let Some(tail) = block.tail_expr()
+    {
+        expr = tail;
+    }
+    expr
+}
+
+/// clippy's `peel_blocks_with_stmt`: as [`peel_blocks`], a block holding one expression
+/// statement and nothing else taken off too.
+pub(crate) fn peel_blocks_with_stmt(expr: &ast::Expr) -> ast::Expr {
+    let mut expr = expr.clone();
+    loop {
+        let ast::Expr::BlockExpr(block) = &expr else { return expr };
+        if block.modifier().is_some() || block.label().is_some() {
+            return expr;
+        }
+        let statements: Vec<ast::Stmt> = block.statements().collect();
+        expr = match (&statements[..], block.tail_expr()) {
+            ([], Some(tail)) => tail,
+            ([ast::Stmt::ExprStmt(stmt)], None) => match stmt.expr() {
+                Some(inner) => inner,
+                None => return expr,
+            },
+            _ => return expr,
+        };
+    }
+}
+
+/// clippy's `span_contains_comment`: whether a comment is written in `range` of `node`.
+pub(crate) fn contains_comment(node: &SyntaxNode, range: TextRange) -> bool {
+    node.descendants_with_tokens()
+        .filter_map(|it| it.into_token())
+        .any(|it| it.kind() == syntax::SyntaxKind::COMMENT && range.contains_range(it.text_range()))
+}

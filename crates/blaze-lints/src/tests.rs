@@ -121,7 +121,22 @@ mod tests {{
 }}
 {STD}"#
     );
-    expect_test::expect![[r#""#]].assert_eq(&lint(&fixture, ""));
+    expect_test::expect![[r#"
+        warning: used `assert_eq!` with a literal bool
+         --> src/lib.rs:5:9
+          |
+        5 |         assert_eq!(true, 1 > 0);
+          |         ^^^^^^^^^^^^^^^^^^^^^^^
+          |
+          = help: for further information visit https://rust-lang.github.io/rust-clippy/main/index.html#bool_assert_comparison
+          = note: `#[warn(clippy::bool_assert_comparison)]` on by default
+        help: replace it with `assert!(..)`
+          |
+        5 -         assert_eq!(true, 1 > 0);
+        5 +         assert!(1 > 0);
+          |
+
+    "#]].assert_eq(&lint(&fixture, ""));
 }
 
 #[test]
@@ -136,5 +151,107 @@ fn f() {{
 }}
 {STD}"#
     );
-    expect_test::expect![[r#""#]].assert_eq(&lint(&fixture, ""));
+    expect_test::expect![[r#"
+        warning: used `assert_eq!` with a literal bool
+         --> src/lib.rs:2:5
+          |
+        2 |     assert_eq!(true, 1 > 0);
+          |     ^^^^^^^^^^^^^^^^^^^^^^^
+          |
+          = help: for further information visit https://rust-lang.github.io/rust-clippy/main/index.html#bool_assert_comparison
+          = note: `#[warn(clippy::bool_assert_comparison)]` on by default
+        help: replace it with `assert!(..)`
+          |
+        2 -     assert_eq!(true, 1 > 0);
+        2 +     assert!(1 > 0);
+          |
+
+        warning: used `assert_ne!` with a literal bool
+         --> src/lib.rs:3:5
+          |
+        3 |     assert_ne!(1 > 0, false);
+          |     ^^^^^^^^^^^^^^^^^^^^^^^^
+          |
+          = help: for further information visit https://rust-lang.github.io/rust-clippy/main/index.html#bool_assert_comparison
+          = note: `#[warn(clippy::bool_assert_comparison)]` on by default
+        help: replace it with `assert!(..)`
+          |
+        3 -     assert_ne!(1 > 0, false);
+        3 +     assert!(1 > 0);
+          |
+
+    "#]].assert_eq(&lint(&fixture, ""));
+}
+
+#[test]
+fn useless_borrows_in_formatting() {
+    let fixture = format!(
+        r#"
+//- minicore: fmt, sized, builtin_impls
+//- /src/lib.rs crate:main deps:std
+fn f(s: &str, n: i32, m: &mut i32) {{
+    print!("{{}} {{:?}}", &s, &&n);
+    print!("{{0:1$}}", &n, &5usize);
+    print!("{{}}", &mut *m);
+    print!("{{:p}}", &n);
+    print!("{{n}} {{n}}", n = &(n));
+}}
+{STD}"#
+    );
+    expect_test::expect![[r#"
+        warning: redundant reference in `print!` argument
+         --> src/lib.rs:2:23
+          |
+        2 |     print!("{} {:?}", &s, &&n);
+          |                       ^^ help: remove the redundant `&`: `s`
+          |
+          = help: for further information visit https://rust-lang.github.io/rust-clippy/main/index.html#useless_borrows_in_formatting
+          = note: `#[warn(clippy::useless_borrows_in_formatting)]` on by default
+
+        warning: redundant reference in `print!` argument
+         --> src/lib.rs:2:27
+          |
+        2 |     print!("{} {:?}", &s, &&n);
+          |                           ^^^ help: remove the redundant `&`: `n`
+          |
+          = help: for further information visit https://rust-lang.github.io/rust-clippy/main/index.html#useless_borrows_in_formatting
+          = note: `#[warn(clippy::useless_borrows_in_formatting)]` on by default
+
+        warning: redundant reference in `print!` argument
+         --> src/lib.rs:3:22
+          |
+        3 |     print!("{0:1$}", &n, &5usize);
+          |                      ^^ help: remove the redundant `&`: `n`
+          |
+          = help: for further information visit https://rust-lang.github.io/rust-clippy/main/index.html#useless_borrows_in_formatting
+          = note: `#[warn(clippy::useless_borrows_in_formatting)]` on by default
+
+        warning: redundant reference in `print!` argument
+         --> src/lib.rs:3:26
+          |
+        3 |     print!("{0:1$}", &n, &5usize);
+          |                          ^^^^^^^ help: remove the redundant `&`: `5usize`
+          |
+          = help: for further information visit https://rust-lang.github.io/rust-clippy/main/index.html#useless_borrows_in_formatting
+          = note: `#[warn(clippy::useless_borrows_in_formatting)]` on by default
+
+        warning: redundant reference in `print!` argument
+         --> src/lib.rs:4:18
+          |
+        4 |     print!("{}", &mut *m);
+          |                  ^^^^^^^ help: remove the redundant `&mut`: `*m`
+          |
+          = help: for further information visit https://rust-lang.github.io/rust-clippy/main/index.html#useless_borrows_in_formatting
+          = note: `#[warn(clippy::useless_borrows_in_formatting)]` on by default
+
+        warning: redundant reference in `print!` argument
+         --> src/lib.rs:6:27
+          |
+        6 |     print!("{n} {n}", n = &(n));
+          |                           ^^^^ help: remove the redundant `&`: `(n)`
+          |
+          = help: for further information visit https://rust-lang.github.io/rust-clippy/main/index.html#useless_borrows_in_formatting
+          = note: `#[warn(clippy::useless_borrows_in_formatting)]` on by default
+
+    "#]].assert_eq(&lint(&fixture, ""));
 }

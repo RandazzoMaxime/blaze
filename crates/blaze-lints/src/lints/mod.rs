@@ -1,11 +1,18 @@
 //! The lints, each a port of clippy's (its file says which), and what runs them on a node.
 
 mod bool_assert_comparison;
+mod collapsible_if;
 mod empty_enums;
+mod format;
+mod io_other_error;
 mod map_unwrap_or;
+mod needless_bool;
+mod needless_borrow;
 mod needless_borrows_for_generic_args;
 mod nonstandard_macro_braces;
 mod redundant_static_lifetimes;
+mod unnecessary_map_or;
+mod useless_borrows_in_formatting;
 mod utils;
 
 use rustc_hash::FxHashSet;
@@ -18,23 +25,45 @@ use crate::{
     registry,
 };
 
-/// The lints implemented, and whether each is one of rustc's early lints, which rustc runs
-/// over the crate before the late ones.
-const IMPLEMENTED: &[(&str, bool)] = &[
-    ("bool_assert_comparison", false),
-    ("empty_enums", false),
-    ("map_unwrap_or", false),
-    ("needless_borrows_for_generic_args", false),
-    ("nonstandard_macro_braces", true),
-    ("redundant_static_lifetimes", true),
+/// When rustc runs a lint's pass, which orders what it emits.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Pass {
+    /// Over the crate root's file before macros expand, and again after, as an early pass.
+    PreExpansion,
+    /// Over the expanded crate, before the late passes.
+    Early,
+    /// Over the crate's HIR.
+    Late,
+}
+
+/// The lints implemented, and the pass clippy runs each in.
+const IMPLEMENTED: &[(&str, Pass)] = &[
+    ("bool_assert_comparison", Pass::Late),
+    ("collapsible_if", Pass::Late),
+    ("empty_enums", Pass::Late),
+    ("io_other_error", Pass::Late),
+    ("map_unwrap_or", Pass::Late),
+    ("needless_bool", Pass::Late),
+    ("needless_borrow", Pass::Late),
+    ("needless_borrows_for_generic_args", Pass::Late),
+    ("nonstandard_macro_braces", Pass::PreExpansion),
+    ("redundant_static_lifetimes", Pass::Early),
+    ("unnecessary_map_or", Pass::Late),
+    ("useless_borrows_in_formatting", Pass::Late),
 ];
 
 pub(crate) fn implemented(lint: &str) -> bool {
     IMPLEMENTED.iter().any(|(it, _)| *it == lint)
 }
 
-pub(crate) fn is_early(lint: &str) -> bool {
-    IMPLEMENTED.iter().any(|(it, early)| *it == lint && *early)
+/// Which of rustc's passes over a crate emits `lint`, in their order, for code in the root
+/// file or not.
+pub(crate) fn phase(lint: &str, in_root_file: bool) -> u8 {
+    match IMPLEMENTED.iter().find(|(it, _)| *it == lint).map(|(_, pass)| *pass) {
+        Some(Pass::PreExpansion) if in_root_file => 0,
+        Some(Pass::PreExpansion | Pass::Early) => 1,
+        _ => 2,
+    }
 }
 
 /// Every lint implemented, by name.
@@ -89,11 +118,21 @@ pub(crate) fn check_node(cx: &mut Cx<'_, '_, '_>, node: &SyntaxNode) {
     } else if let Some(it) = ast::MacroCall::cast(node.clone()) {
         nonstandard_macro_braces::check_call(cx, &it);
         bool_assert_comparison::check(cx, &it);
+        useless_borrows_in_formatting::check(cx, &it);
     } else if let Some(it) = ast::MacroRules::cast(node.clone()) {
         nonstandard_macro_braces::check_rules(cx, &it);
+    } else if let Some(it) = ast::StmtList::cast(node.clone()) {
+        needless_bool::check_block(cx, &it);
     }
     if let Some(it) = ast::Expr::cast(node.clone()) {
+        if let ast::Expr::IfExpr(it) = &it {
+            needless_bool::check_if(cx, it);
+            collapsible_if::check(cx, it);
+        }
+        io_other_error::check(cx, &it);
         map_unwrap_or::check(cx, &it);
+        needless_borrow::check(cx, &it);
         needless_borrows_for_generic_args::check(cx, &it);
+        unnecessary_map_or::check(cx, &it);
     }
 }

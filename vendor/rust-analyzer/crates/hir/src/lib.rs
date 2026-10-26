@@ -4546,6 +4546,15 @@ impl<'db> Type<'db> {
         all_crates(db)[0]
     }
 
+    /// The type owned by no item's generics, when it names none of them, so that it can be
+    /// asked of together with the types of any item: for blaze's lints.
+    pub fn without_params(&self, db: &'db dyn HirDatabase) -> Option<Type<'db>> {
+        if self.ty.skip_binder().has_param() {
+            return None;
+        }
+        Some(Type { owner: TypeOwnerId::NoParams(Self::builtin_type_crate(db)), ty: self.ty })
+    }
+
     fn from_def(db: &'db dyn HirDatabase, def: impl Into<TyDefId>) -> Self {
         let def = def.into();
         let ty = db.ty(def);
