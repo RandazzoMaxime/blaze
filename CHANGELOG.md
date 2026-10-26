@@ -830,6 +830,12 @@ All notable changes to ra-jit are written here. The format follows
   daemon another build started the first edits were patches of rustc's executable, and an edit
   that adds a type asked for a restart (`live_types.py` in the gate, after the other live
   tests).
+- A local that no place of its body mentions has no stack slot. rust-analyzer's MIR gives a
+  closure's body a local for each capture and for each binding of the function it is written
+  in, and a closure called by reference never touches them; each had a slot, so a closure
+  over a large value had room for it twice in every frame. rgb's audio callback captures a
+  synthesizer of 120 KB, and cpal's two closures around it each reserved 240 KB, overflowing
+  CoreAudio's 512 KB IO thread; they now reserve what rustc's do. Breaker `captured_frames`.
 - An integration test or benchmark the daemon runs has `CARGO_BIN_EXE_<name>` of each program
   of its package set, as cargo sets it since rust-lang/cargo#16421. With cargo's second layout
   the test is no longer beside the programs, so hyperfine's and bat's tests (assert_cmd's
