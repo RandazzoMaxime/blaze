@@ -7603,7 +7603,7 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
             Primitive::Pointer(_) => AbiScalar { ty: ptr(), signed: false },
             Primitive::Float(rustc_abi::Float::F32) => AbiScalar { ty: types::F32, signed: true },
             Primitive::Float(rustc_abi::Float::F64) => AbiScalar { ty: types::F64, signed: true },
-            Primitive::Float(_) => unsupported!("f16 and f128"),
+            Primitive::Float(_) => unsupported!("f16, f16b, f128 and ppcf128"),
         })
     }
 
@@ -7646,10 +7646,47 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
                     _ => PassMode::Cast(types::I64),
                 }
             }
-            // rustc passes vectors in memory so that callers and callees built with different
-            // target features agree.
-            BackendRepr::SimdVector { .. } => PassMode::Indirect,
+            BackendRepr::SimdVector { count, .. } => {
+                self.rust_simd_pass_mode(layout, count, is_ret)?
+            }
             _ => unsupported!("abi of {:?}", layout.backend_repr),
+        })
+    }
+
+    /// How the Rust ABI passes a SIMD vector. Mirrors rustc's `adjust_for_rust_abi`
+    /// (`can_pass_simd_directly`): on x86-64 and AArch64, whose every target has the vector
+    /// registers, a vector of at most 128 bits is an immediate of LLVM's, in what register LLVM
+    /// gives that vector type; any other goes in memory, so that callers and callees built with
+    /// different target features agree.
+    fn rust_simd_pass_mode(
+        &self,
+        layout: &Layout,
+        count: rustc_abi::BackendLaneCount,
+        is_ret: bool,
+    ) -> Result<PassMode> {
+        let target = &self.cg.target;
+        let size = layout.size.bytes();
+        if !matches!(target.arch, Arch::X86_64 | Arch::Aarch64) || size > 16 {
+            return Ok(PassMode::Indirect);
+        }
+        // LLVM makes a vector of one lane its scalar, in that scalar's register.
+        if count.as_u64() == 1 {
+            unsupported!("a SIMD vector of one lane by value in the Rust ABI");
+        }
+        if target.call_conv == isa::CallConv::WindowsFastcall {
+            // LLVM's Windows convention passes an argument of vector type by reference and
+            // returns it in `xmm0`, widened to 128 bits.
+            return Ok(if is_ret { PassMode::Cast(types::I64X2) } else { PassMode::Indirect });
+        }
+        Ok(match (target.arch, size) {
+            // A whole vector register, whatever its lanes.
+            (_, 16) => PassMode::Cast(types::I64X2),
+            // x86-64 widens a shorter vector to 128 bits, its lanes at the bottom.
+            (Arch::X86_64, _) => PassMode::Cast(types::I64X2),
+            // AArch64 has a 64-bit vector in the low half of a vector register, as an `f64`.
+            (Arch::Aarch64, 8) => PassMode::Cast(types::F64),
+            // AArch64 widens the lanes of a shorter one, which is not a copy of its bytes.
+            _ => unsupported!("a SIMD vector of {size} bytes by value in the Rust ABI"),
         })
     }
 
@@ -8095,8 +8132,10 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
     fn win64_pass_mode(&self, ty: Ty<'db>, is_ret: bool) -> Result<PassMode> {
         let layout = self.layout(ty)?;
         if layout.is_zst() {
-            // MSVC passes an argument of no size by reference.
-            return Ok(if is_ret { PassMode::Ignore } else { PassMode::Indirect });
+            // As clang and gcc on windows-gnu, a `repr(C)` value of no size (or a transparent
+            // wrapper around one) goes by reference, as an argument and as a return value; a
+            // `repr(Rust)` one, such as `()`, takes no place, so that `()` matches C's `void`.
+            return Ok(if layout.is_repr_c() { PassMode::Indirect } else { PassMode::Ignore });
         }
         if !is_ret && self.decays_in_c(ty)? {
             return Ok(PassMode::Indirect);
@@ -8124,6 +8163,10 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
     fn decays_in_c(&self, ty: Ty<'db>) -> Result<bool> {
         let TyKind::Adt(def, subst) = ty.kind() else { return Ok(false) };
         let AdtId::StructId(id) = def.def_id() else { return Ok(false) };
+        // rustc makes the attribute do nothing on a 1-ZST, whose wrappers it cannot peel.
+        if self.layout(ty)?.is_1zst() {
+            return Ok(false);
+        }
         let db = self.cg.db;
         if AttrFlags::query(db, id.into())
             .contains(AttrFlags::RUSTC_PASS_INDIRECTLY_IN_NON_RUSTIC_ABIS)
@@ -8307,7 +8350,7 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
         if u64::from(ty.bytes()) == size.bytes() {
             return self.builder.ins().load(ty, MEM, addr, 0);
         }
-        let tmp = self.scratch();
+        let tmp = if ty.bytes() > 8 { self.scratch_wide() } else { self.scratch() };
         self.copy(tmp, addr, size);
         self.builder.ins().load(ty, MEM, tmp, 0)
     }
@@ -8318,7 +8361,7 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
             self.builder.ins().store(MEM, value, addr, 0);
             return;
         }
-        let tmp = self.scratch();
+        let tmp = if ty.bytes() > 8 { self.scratch_wide() } else { self.scratch() };
         self.builder.ins().store(MEM, value, tmp, 0);
         self.copy(addr, tmp, size);
     }
