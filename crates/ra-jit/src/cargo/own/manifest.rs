@@ -12,23 +12,37 @@ use blaze_manifest::{Config, Context, Workspace};
 use super::args::{Args, Read, switch, valued};
 
 /// The status cargo ends with when it refuses its command line.
-const USAGE: i32 = 1;
+pub(super) const USAGE: i32 = 1;
 
 /// The configuration of a `cargo <command>` run in this process, with its `--config`s.
-fn config(command: &str, read: &Read) -> anyhow::Result<Config> {
+pub(super) fn config(command: &str, read: &Read) -> anyhow::Result<Config> {
     let mut config = Config::from_process()?;
     config.start(command, &read.values("--config"))?;
     Ok(config)
 }
 
 /// The flags read, or the status of the refusal, said as cargo says it.
-fn read_or_refuse(args: &Args<'_>, flags: &[super::args::Flag], usage: &str) -> Result<Read, i32> {
+pub(super) fn read_or_refuse(
+    args: &Args<'_>,
+    flags: &[super::args::Flag],
+    usage: &str,
+) -> Result<Read, i32> {
+    read_or_refuse_taking(args, flags, usage, 0)
+}
+
+/// [`read_or_refuse`] for a command that takes up to `positionals` words that are no flags.
+pub(super) fn read_or_refuse_taking(
+    args: &Args<'_>,
+    flags: &[super::args::Flag],
+    usage: &str,
+    positionals: usize,
+) -> Result<Read, i32> {
     match args.read(flags) {
         Ok(read) if read.has("--help") => {
             println!("{usage}");
             Err(0)
         }
-        Ok(read) => match read.positional.first() {
+        Ok(read) => match read.positional.get(positionals) {
             Some(word) => {
                 super::super::say::error(&format!("unexpected argument '{word}' found"));
                 Err(USAGE)
@@ -44,7 +58,7 @@ fn read_or_refuse(args: &Args<'_>, flags: &[super::args::Flag], usage: &str) -> 
 }
 
 /// Ends a subcommand that failed with `err`, as cargo ends: its message, status 101.
-fn failed(err: &anyhow::Error) -> i32 {
+pub(super) fn failed(err: &anyhow::Error) -> i32 {
     super::super::metadata::refused(err, &std::env::current_dir().unwrap_or_default());
     super::super::FAILED
 }
@@ -135,18 +149,31 @@ fn resolved(read: &Read, manifest_path: Option<&Path>) -> anyhow::Result<String>
     blaze_metadata::metadata(&asked)
 }
 
-/// The `cfg` of `triple`, as blaze answers `rustc --print cfg --target <triple>` itself.
-fn target_cfg(triple: &str) -> anyhow::Result<Vec<cargo_platform::Cfg>> {
+/// What the toolchain's rustc would print for `args`, as blaze answers it itself, or none
+/// when blaze has no answer of its own.
+fn own_rustc(args: &[&str]) -> anyhow::Result<Option<String>> {
     use super::super::toolchain::Chosen;
     let (Chosen::Given(sysroot) | Chosen::Rustup(sysroot) | Chosen::Own(sysroot)) =
         super::super::toolchain::settle().map_err(anyhow::Error::msg)?;
     let rustc = format!("rustc{}", std::env::consts::EXE_SUFFIX);
     let mut asked = Command::new(sysroot.join("bin").join(rustc));
-    asked.args(["--print", "cfg", "--target", triple]);
-    let Some(printed) = crate::answers::own_answer(&asked, &[]) else {
+    asked.args(args);
+    let printed = crate::answers::own_answer(&asked, &[]).map(String::from_utf8).transpose();
+    printed.context("rustc's answer")
+}
+
+/// The host's triple, as blaze answers `rustc -vV` itself.
+pub(super) fn host_triple() -> anyhow::Result<String> {
+    let told = own_rustc(&["-vV"])?.context("blaze does not know the host's triple")?;
+    let host = told.lines().find_map(|it| it.strip_prefix("host: "));
+    Ok(host.context("rustc names no host")?.to_owned())
+}
+
+/// The `cfg` of `triple`, as blaze answers `rustc --print cfg --target <triple>` itself.
+pub(super) fn target_cfg(triple: &str) -> anyhow::Result<Vec<cargo_platform::Cfg>> {
+    let Some(printed) = own_rustc(&["--print", "cfg", "--target", triple])? else {
         anyhow::bail!("blaze does not know the target `{triple}`");
     };
-    let printed = String::from_utf8(printed).context("the target's cfg")?;
     let cfg = printed.lines().filter(|it| !it.is_empty()).map(|it| {
         use std::str::FromStr as _;
         cargo_platform::Cfg::from_str(it).with_context(|| format!("the cfg {it}"))
@@ -219,5 +246,95 @@ pub(super) fn verify_project(args: Args<'_>) -> anyhow::Result<i32> {
             println!("{}", serde_json::json!({ "invalid": err.to_string() }));
             Ok(1)
         }
+    }
+}
+
+/// `cargo pkgid`: the full spec of the package `SPEC` (or `-p`) names in the lock file, or of
+/// the package of the working directory.
+pub(super) fn pkgid(args: Args<'_>) -> anyhow::Result<i32> {
+    let flags = [valued(&["-p", "--package"]), valued(&["--manifest-path"])];
+    let usage = "cargo blaze pkgid [--package <SPEC>] [--manifest-path <PATH>] [SPEC]";
+    let read = match read_or_refuse_taking(&args, &flags, usage, 1) {
+        Ok(read) => read,
+        Err(code) => return Ok(code),
+    };
+    let found = (|| {
+        let cwd = std::env::current_dir().context("couldn't get the current directory")?;
+        let manifest_path = read.value("--manifest-path").map(PathBuf::from);
+        let config = read.values("--config");
+        let asked = blaze_metadata::Asked {
+            cwd: &cwd,
+            env: std::env::vars().collect(),
+            manifest_path: manifest_path.as_deref(),
+            config: &config,
+            features: &[],
+            all_features: false,
+            no_default_features: false,
+            build: None,
+            platform: None,
+            offline: true,
+            store: None,
+        };
+        let locked = blaze_metadata::locked(&asked)?;
+        let locked = locked.context("a Cargo.lock must exist for this command")?;
+        let spec = read.positional.first().cloned().or_else(|| read.value("--package"));
+        let id = match spec {
+            Some(spec) => blaze_resolve::PackageIdSpec::query_str(&spec, &locked.ids)?,
+            None => match locked.current {
+                Some(id) => id,
+                None => {
+                    let ctx = Context::new(self::config("pkgid", &read)?);
+                    let root = root_manifest(manifest_path.as_deref(), &ctx)?;
+                    anyhow::bail!(
+                        "manifest path `{}` is a virtual manifest, but this command requires running against an actual package in this workspace",
+                        root.display()
+                    );
+                }
+            },
+        };
+        anyhow::Ok(id.to_spec())
+    })();
+    match found {
+        Ok(spec) => {
+            println!("{spec}");
+            Ok(0)
+        }
+        Err(err) => Ok(failed(&err)),
+    }
+}
+
+/// `cargo fetch`: every package the lock file names, fetched where cargo keeps them, for every
+/// platform (`--target` fetches no fewer).
+pub(super) fn fetch(args: Args<'_>) -> anyhow::Result<i32> {
+    let flags = [valued(&["--target"]), valued(&["--manifest-path"])];
+    let usage = "cargo blaze fetch [--target <TRIPLE>] [--manifest-path <PATH>]";
+    let read = match read_or_refuse(&args, &flags, usage) {
+        Ok(read) => read,
+        Err(code) => return Ok(code),
+    };
+    let fetched = (|| {
+        let cwd = std::env::current_dir().context("couldn't get the current directory")?;
+        let manifest_path = read.value("--manifest-path").map(PathBuf::from);
+        let config = read.values("--config");
+        let asked = blaze_metadata::Asked {
+            cwd: &cwd,
+            env: std::env::vars().collect(),
+            manifest_path: manifest_path.as_deref(),
+            config: &config,
+            features: &[],
+            all_features: false,
+            no_default_features: false,
+            build: None,
+            platform: None,
+            offline: read.has("--offline") || read.has("--frozen"),
+            store: None,
+        };
+        blaze_metadata::fetch_locked(&asked)?.context(
+            "there is no Cargo.lock, and blaze does not choose the versions to write one yet (#321)",
+        )
+    })();
+    match fetched {
+        Ok(_) => Ok(0),
+        Err(err) => Ok(failed(&err)),
     }
 }

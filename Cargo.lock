@@ -674,6 +674,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "blaze-new"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "cargo-util-schemas",
+ "glob",
+ "pathdiff",
+ "toml_edit",
+]
+
+[[package]]
 name = "blaze-registry"
 version = "0.1.0"
 dependencies = [
@@ -715,6 +726,17 @@ dependencies = [
  "tracing",
  "unicode-ident",
  "url",
+]
+
+[[package]]
+name = "blaze-tree"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "blaze-manifest",
+ "blaze-metadata",
+ "blaze-resolve",
+ "rustc-hash 2.1.2",
 ]
 
 [[package]]
@@ -3332,6 +3354,9 @@ dependencies = [
  "aws-smithy-http-client",
  "blaze-manifest",
  "blaze-metadata",
+ "blaze-new",
+ "blaze-resolve",
+ "blaze-tree",
  "cargo-platform",
  "cargo_metadata",
  "cfg",
@@ -3340,7 +3365,7 @@ dependencies = [
  "find-msvc-tools",
  "futures-util",
  "getrandom 0.3.4",
- "gimli 0.33.0",
+ "gimli",
  "hir",
  "hir-def",
  "hir-ty",
@@ -4465,7 +4490,9 @@ checksum = "d2153edc6955a6c354fad8f5efd38b6a8769bdccf9fe50f8e1329f81b0baa5d7"
 dependencies = [
  "indexmap",
  "toml_datetime",
+ "toml_parser",
  "toml_writer",
+ "winnow 1.0.3",
 ]
 
 [[package]]
@@ -5248,6 +5275,9 @@ name = "winnow"
 version = "1.0.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0592e1c9d151f854e6fd382574c3a0855250e1d9b2f99d9281c6e6391af352f1"
+dependencies = [
+ "memchr",
+]
 
 [[package]]
 name = "wit-bindgen"
