@@ -3,14 +3,15 @@
 use std::fmt::Write as _;
 use std::{ascii, fmt, str};
 
-use rustc_literal_escaper::{
+use syntax::unescape::{
     MixedUnit, unescape_byte, unescape_byte_str, unescape_c_str, unescape_char, unescape_str,
 };
-use rustc_span::{ByteSymbol, Span, Symbol, kw, sym};
+use crate::ast::ByteSymbol;
+use crate::span::{Span, Symbol, kw, sym};
 use tracing::debug;
 
 use crate::ast::{self, LitKind, MetaItemLit, StrStyle};
-use crate::token::{self, Token};
+use crate::ast::token::{self, Token};
 
 // Escapes a string, represented as a symbol. Reuses the original symbol,
 // avoiding interning, if no changes are required.

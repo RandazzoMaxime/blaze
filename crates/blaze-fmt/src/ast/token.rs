@@ -5,16 +5,12 @@ pub use LitKind::*;
 pub use NtExprKind::*;
 pub use NtPatKind::*;
 pub use TokenKind::*;
-use rustc_macros::{Decodable, Encodable, StableHash};
-use rustc_span::edition::Edition;
-use rustc_span::symbol::IdentPrintMode;
-use rustc_span::{self as sp, DUMMY_SP, ErrorGuaranteed, Span, Symbol, kw, sym};
-
-use crate::ast;
-use crate::util::case::Case;
+use crate::ast::{self, ErrorGuaranteed};
+use crate::span::edition::Edition;
+use crate::span::{self as sp, DUMMY_SP, Span, Symbol, kw, sym};
 
 /// Represents the kind of doc comment it is, ie `///` or `#[doc = ""]`.
-#[derive(Clone, Copy, PartialEq, Eq, Encodable, Decodable, Debug, StableHash)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum DocFragmentKind {
     /// A sugared doc comment: `///` or `//!` or `/**` or `/*!`.
     Sugared(CommentKind),
@@ -37,13 +33,13 @@ impl DocFragmentKind {
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Encodable, Decodable, Debug, StableHash)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub enum CommentKind {
     Line,
     Block,
 }
 
-#[derive(Copy, Clone, PartialEq, Eq, Hash, Debug, Encodable, Decodable, StableHash)]
+#[derive(Copy, Clone, PartialEq, Eq, Hash, Debug)]
 pub enum InvisibleOrigin {
     // From the expansion of a metavariable in a declarative macro.
     MetaVar(MetaVarKind),
@@ -66,7 +62,7 @@ impl InvisibleOrigin {
 }
 
 /// Annoyingly similar to `NonterminalKind`, but the slight differences are important.
-#[derive(Debug, Copy, Clone, PartialEq, Eq, Encodable, Decodable, Hash, StableHash)]
+#[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
 pub enum MetaVarKind {
     Item,
     Block,
@@ -122,7 +118,7 @@ impl fmt::Display for MetaVarKind {
 /// Describes how a sequence of token trees is delimited.
 /// Cannot use `proc_macro::Delimiter` directly because this
 /// structure should implement some additional traits.
-#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, Encodable, Decodable, StableHash)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
 pub enum Delimiter {
     /// `( ... )`
     Parenthesis,
@@ -185,7 +181,7 @@ impl Delimiter {
 // type. This means that float literals like `1f32` are classified by this type
 // as `Int`. Only upon conversion to `ast::LitKind` will such a literal be
 // given the `Float` kind.
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Encodable, Decodable, Debug, StableHash)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub enum LitKind {
     Bool, // AST only, must never appear in a `Token`
     Byte,
@@ -202,7 +198,7 @@ pub enum LitKind {
 }
 
 /// A literal token.
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Encodable, Decodable, Debug, StableHash)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub struct Lit {
     pub kind: LitKind,
     pub symbol: Symbol,
@@ -358,32 +354,14 @@ fn ident_can_begin_type(name: Symbol, span: Span, kind: IdentKind) -> bool {
             .contains(&name)
 }
 
-#[derive(PartialEq, Eq, Encodable, Decodable, Hash, Debug, Copy, Clone, StableHash)]
+#[derive(PartialEq, Eq, Hash, Debug, Copy, Clone)]
 pub enum IdentKind {
     Normal,
     Raw,
     ForcedKeyword,
 }
 
-impl IdentKind {
-    pub fn to_print_mode_ident(self) -> IdentPrintMode {
-        match self {
-            IdentKind::Normal => IdentPrintMode::Normal,
-            IdentKind::Raw => IdentPrintMode::RawIdent,
-            IdentKind::ForcedKeyword => IdentPrintMode::ForcedKeywordIdent,
-        }
-    }
-
-    pub fn to_print_mode_lifetime(self) -> IdentPrintMode {
-        match self {
-            IdentKind::Normal => IdentPrintMode::Normal,
-            IdentKind::Raw => IdentPrintMode::RawLifetime,
-            IdentKind::ForcedKeyword => unreachable!(),
-        }
-    }
-}
-
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Encodable, Decodable, Debug, StableHash)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub enum TokenKind {
     /* Expression-operator symbols. */
     /// `=`
@@ -533,7 +511,7 @@ pub enum TokenKind {
     Eof,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Encodable, Decodable, Debug, StableHash)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub struct Token {
     pub kind: TokenKind,
     pub span: Span,
@@ -936,17 +914,6 @@ impl Token {
         self.non_raw_ident().is_some_and(|id| id.name == kw)
     }
 
-    /// Returns `true` if the token is a given keyword, `kw` or if `case` is `Insensitive` and this
-    /// token is an identifier equal to `kw` ignoring the case.
-    pub fn is_keyword_case(&self, kw: Symbol, case: Case) -> bool {
-        self.is_keyword(kw)
-            || (case == Case::Insensitive
-                && self.non_raw_ident().is_some_and(|id| {
-                    // Do an ASCII case-insensitive match, because all keywords are ASCII.
-                    id.name.as_str().eq_ignore_ascii_case(kw.as_str())
-                }))
-    }
-
     pub fn is_path_segment_keyword(&self) -> bool {
         self.non_raw_ident().is_some_and(sp::Ident::is_path_segment_keyword)
     }
@@ -1115,7 +1082,7 @@ pub fn ident_of_kind_is_reserved(id: sp::Ident, kind: IdentKind) -> bool {
     }
 }
 
-#[derive(Debug, Copy, Clone, PartialEq, Eq, Encodable, Decodable, Hash, StableHash)]
+#[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
 pub enum NtPatKind {
     // Matches or-patterns. Was written using `pat` in edition 2021 or later.
     PatWithOr,
@@ -1125,7 +1092,7 @@ pub enum NtPatKind {
     PatParam { inferred: bool },
 }
 
-#[derive(Debug, Copy, Clone, PartialEq, Eq, Encodable, Decodable, Hash, StableHash)]
+#[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
 pub enum NtExprKind {
     // Matches expressions using the post-edition 2024. Was written using
     // `expr` in edition 2024 or later.
@@ -1137,7 +1104,7 @@ pub enum NtExprKind {
 }
 
 /// A macro nonterminal, known in documentation as a fragment specifier.
-#[derive(Debug, Copy, Clone, PartialEq, Eq, Encodable, Decodable, Hash, StableHash)]
+#[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
 pub enum NonterminalKind {
     Item,
     Block,
@@ -1224,15 +1191,3 @@ impl fmt::Display for NonterminalKind {
 }
 
 // Some types are used a lot. Make sure they don't unintentionally get bigger.
-#[cfg(target_pointer_width = "64")]
-mod size_asserts {
-    use rustc_data_structures::static_assert_size;
-
-    use super::*;
-    // tidy-alphabetical-start
-    static_assert_size!(Lit, 12);
-    static_assert_size!(LitKind, 2);
-    static_assert_size!(Token, 24);
-    static_assert_size!(TokenKind, 16);
-    // tidy-alphabetical-end
-}

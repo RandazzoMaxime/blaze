@@ -1,62 +1,19 @@
 //! Functions dealing with attributes and meta items.
 
-pub mod data_structures;
-pub mod version;
+//!
+//! Follows `compiler/rustc_ast/src/attr/mod.rs` at rust-lang/rust 12433c307 (MIT or Apache-2.0):
+//! what an attribute's name, value and meta items are, read from its tokens as rustc reads them.
 
 use std::fmt::Debug;
-use std::sync::atomic::{AtomicU32, Ordering};
 
-use rustc_index::bit_set::GrowableBitSet;
-use rustc_span::{Ident, Span, Symbol, sym};
-use smallvec::{SmallVec, smallvec};
-use thin_vec::{ThinVec, thin_vec};
-
+use crate::ast::token::{self, CommentKind, Delimiter, DocFragmentKind, InvisibleOrigin, Token};
+use crate::ast::tokenstream::{TokenStream, TokenStreamIter, TokenTree};
 use crate::ast::{
-    AttrArgs, AttrId, AttrItem, AttrKind, AttrStyle, AttrVec, Attribute, DUMMY_NODE_ID, DelimArgs,
-    Expr, ExprKind, LitKind, MetaItem, MetaItemInner, MetaItemKind, MetaItemLit, NormalAttr, Path,
-    PathSegment, Safety, SyntheticAttr,
+    AttrArgs, AttrItem, DelimArgs, AttrKind, AttrStyle, Attribute, ExprKind, LitKind, MetaItem,
+    MetaItemInner, MetaItemKind, MetaItemLit, Path, PathSegment, Safety, ThinVec,
 };
-use crate::token::{
-    self, CommentKind, Delimiter, DocFragmentKind, InvisibleOrigin, MetaVarKind, Token,
-};
-use crate::tokenstream::{
-    AttrTokenStream, AttrTokenTree, DelimSpacing, DelimSpan, LazyAttrTokenStream, Spacing,
-    TokenStream, TokenStreamIter, TokenTree,
-};
-use crate::util::comments;
-use crate::util::literal::escape_string_symbol;
+use crate::span::{Ident, Span, Symbol, sym};
 
-pub struct MarkedAttrs(GrowableBitSet<AttrId>);
-
-impl MarkedAttrs {
-    pub fn new() -> Self {
-        // We have no idea how many attributes there will be, so just
-        // initiate the vectors with 0 bits. We'll grow them as necessary.
-        MarkedAttrs(GrowableBitSet::new_empty())
-    }
-
-    pub fn mark(&mut self, attr: &Attribute) {
-        self.0.insert(attr.id);
-    }
-
-    pub fn is_marked(&self, attr: &Attribute) -> bool {
-        self.0.contains(attr.id)
-    }
-}
-
-pub struct AttrIdGenerator(AtomicU32);
-
-impl AttrIdGenerator {
-    pub fn new() -> Self {
-        AttrIdGenerator(AtomicU32::new(0))
-    }
-
-    pub fn mk_attr_id(&self) -> AttrId {
-        let id = self.0.fetch_add(1, Ordering::Relaxed);
-        assert!(id != u32::MAX);
-        AttrId::from_u32(id)
-    }
-}
 
 impl Attribute {
     pub fn get_normal_item(&self) -> &AttrItem {
@@ -66,14 +23,6 @@ impl Attribute {
         }
     }
 
-    pub fn convert_normal_to_synthetic(self, synthetic_attr: SyntheticAttr) -> Attribute {
-        match self.kind {
-            AttrKind::Normal(..) => {
-                Attribute { kind: AttrKind::Synthetic(Box::new(synthetic_attr)), ..self }
-            }
-            AttrKind::Synthetic(..) | AttrKind::DocComment(..) => unreachable!(),
-        }
-    }
 }
 
 impl AttributeExt for Attribute {
@@ -99,21 +48,25 @@ impl AttributeExt for Attribute {
 
     /// For a single-segment attribute, returns its name; otherwise, returns `None`.
     fn name(&self) -> Option<Symbol> {
-        use SyntheticAttr::*;
+        use crate::ast::SyntheticAttr::*;
         match &self.kind {
             AttrKind::Normal(normal) => normal.item.name(),
-            AttrKind::Synthetic(CfgTrace(_) | CfgAttrTrace(_)) => None,
+            AttrKind::Synthetic(synthetic) => match **synthetic {
+                CfgTrace(_) | CfgAttrTrace(_) => None,
+            },
             AttrKind::DocComment(..) => None,
         }
     }
 
-    fn symbol_path(&self) -> Option<SmallVec<[Symbol; 1]>> {
-        use SyntheticAttr::*;
+    fn symbol_path(&self) -> Option<Vec<Symbol>> {
+        use crate::ast::SyntheticAttr::*;
         match &self.kind {
             AttrKind::Normal(normal) => {
                 Some(normal.item.path.segments.iter().map(|i| i.ident.name).collect())
             }
-            AttrKind::Synthetic(CfgTrace(_) | CfgAttrTrace(_)) => None,
+            AttrKind::Synthetic(synthetic) => match **synthetic {
+                CfgTrace(_) | CfgAttrTrace(_) => None,
+            },
             AttrKind::DocComment(_, _) => None,
         }
     }
@@ -274,11 +227,6 @@ impl Attribute {
         self.style
     }
 
-    pub fn may_have_doc_links(&self) -> bool {
-        self.doc_str().is_some_and(|s| comments::may_have_doc_links(s.as_str()))
-            || self.deprecation_note().is_some_and(|s| comments::may_have_doc_links(s.as_str()))
-    }
-
     /// Extracts the MetaItem from inside this Attribute.
     pub fn meta(&self) -> Option<MetaItem> {
         match &self.kind {
@@ -295,50 +243,6 @@ impl Attribute {
         }
     }
 
-    pub fn token_trees(&self) -> Vec<TokenTree> {
-        match self.kind {
-            AttrKind::Normal(ref normal) => normal
-                .tokens
-                .as_ref()
-                .unwrap_or_else(|| panic!("attribute is missing tokens: {self:?}"))
-                .to_attr_token_stream()
-                .to_token_trees(),
-            // Empty tokens here ensures synthetic attributes are invisible to proc macros.
-            AttrKind::Synthetic(..) => vec![],
-            AttrKind::DocComment(comment_kind, data) => vec![TokenTree::token_alone(
-                token::DocComment(comment_kind, self.style, data),
-                self.span,
-            )],
-        }
-    }
-
-    pub fn deprecation_note(&self) -> Option<Ident> {
-        match &self.kind {
-            AttrKind::Normal(normal) if normal.item.path == sym::deprecated => {
-                let meta = &normal.item;
-
-                // #[deprecated = "..."]
-                if let Some(s) = meta.value_str() {
-                    return Some(Ident { name: s, span: meta.span });
-                }
-
-                // #[deprecated(note = "...")]
-                if let Some(list) = meta.meta_item_list() {
-                    for nested in list {
-                        if let Some(mi) = nested.meta_item()
-                            && mi.path == sym::note
-                            && let Some(s) = mi.value_str()
-                        {
-                            return Some(Ident { name: s, span: mi.span });
-                        }
-                    }
-                }
-
-                None
-            }
-            _ => None,
-        }
-    }
 }
 
 impl AttrItem {
@@ -492,12 +396,12 @@ impl MetaItem {
                         iter.peek()
                     {
                         iter.next();
-                        thin_vec![PathSegment::from_ident(Ident::new(name, span))]
+                        vec![PathSegment::from_ident(Ident::new(name, span))]
                     } else {
                         break 'arm Path::from_ident(Ident::new(name, span));
                     }
                 } else {
-                    thin_vec![PathSegment::path_root(span)]
+                    vec![PathSegment::path_root(span)]
                 };
                 loop {
                     let Some(&TokenTree::Token(Token { kind: token::Ident(name, _), span }, _)) =
@@ -519,7 +423,7 @@ impl MetaItem {
                 _span,
                 _spacing,
                 Delimiter::Invisible(InvisibleOrigin::MetaVar(
-                    MetaVarKind::Meta { .. } | MetaVarKind::Path,
+                    token::MetaVarKind::Meta { .. } | token::MetaVarKind::Path,
                 )),
                 _stream,
             )) => {
@@ -725,168 +629,6 @@ impl MetaItemInner {
     }
 }
 
-pub fn mk_doc_comment(
-    g: &AttrIdGenerator,
-    comment_kind: CommentKind,
-    style: AttrStyle,
-    data: Symbol,
-    span: Span,
-) -> Attribute {
-    Attribute { kind: AttrKind::DocComment(comment_kind, data), id: g.mk_attr_id(), style, span }
-}
-
-pub fn mk_attr_from_item(
-    g: &AttrIdGenerator,
-    item: AttrItem,
-    tokens: Option<LazyAttrTokenStream>,
-    style: AttrStyle,
-    span: Span,
-) -> Attribute {
-    Attribute {
-        kind: AttrKind::Normal(Box::new(NormalAttr { item, tokens })),
-        id: g.mk_attr_id(),
-        style,
-        span,
-    }
-}
-
-fn mk_attr_tokens(
-    style: AttrStyle,
-    item_tokens: AttrTokenStream,
-    span: Span,
-) -> LazyAttrTokenStream {
-    let mut tokens = match style {
-        AttrStyle::Outer => {
-            vec![AttrTokenTree::Token(Token::new(token::Pound, span), Spacing::JointHidden)]
-        }
-        AttrStyle::Inner => vec![
-            AttrTokenTree::Token(Token::new(token::Pound, span), Spacing::Joint),
-            AttrTokenTree::Token(Token::new(token::Bang, span), Spacing::JointHidden),
-        ],
-    };
-    tokens.push(AttrTokenTree::Delimited(
-        DelimSpan::from_single(span),
-        DelimSpacing::new(Spacing::JointHidden, Spacing::Alone),
-        Delimiter::Bracket,
-        item_tokens,
-    ));
-
-    LazyAttrTokenStream::new_direct(AttrTokenStream::new(tokens))
-}
-
-// `span` is used for the `Attribute` and everything within it (except for any span within
-// `unsafety`).
-pub fn mk_attr_word(g: &AttrIdGenerator, style: AttrStyle, name: Symbol, span: Span) -> Attribute {
-    let path = Path::from_ident(Ident::new(name, span));
-    let args = AttrArgs::Empty;
-
-    let tokens = Some(mk_attr_tokens(
-        style,
-        AttrTokenStream::new(vec![AttrTokenTree::Token(
-            Token::from_ast_ident(Ident::new(name, span)),
-            Spacing::Alone,
-        )]),
-        span,
-    ));
-
-    mk_attr_from_item(
-        g,
-        AttrItem { unsafety: Safety::Default, path, args, span },
-        tokens,
-        style,
-        span,
-    )
-}
-
-// `span` is used for the `Attribute` and everything within it (except for any span within
-// `unsafety`).
-pub fn mk_attr_nested_word(
-    g: &AttrIdGenerator,
-    style: AttrStyle,
-    outer: Symbol,
-    inner: Symbol,
-    span: Span,
-) -> Attribute {
-    let inner_tokens = TokenStream::new(vec![TokenTree::Token(
-        Token::from_ast_ident(Ident::new(inner, span)),
-        Spacing::Alone,
-    )]);
-    let outer_ident = Ident::new(outer, span);
-    let path = Path::from_ident(outer_ident);
-    let attr_args = AttrArgs::Delimited(DelimArgs {
-        dspan: DelimSpan::from_single(span),
-        delim: Delimiter::Parenthesis,
-        tokens: inner_tokens,
-    });
-
-    let tokens = Some(mk_attr_tokens(
-        style,
-        AttrTokenStream::new(vec![
-            AttrTokenTree::Token(Token::from_ast_ident(Ident::new(outer, span)), Spacing::Alone),
-            AttrTokenTree::Delimited(
-                DelimSpan::from_single(span),
-                DelimSpacing::new(Spacing::JointHidden, Spacing::Alone),
-                Delimiter::Parenthesis,
-                AttrTokenStream::new(vec![AttrTokenTree::Token(
-                    Token::from_ast_ident(Ident::new(inner, span)),
-                    Spacing::Alone,
-                )]),
-            ),
-        ]),
-        span,
-    ));
-
-    mk_attr_from_item(
-        g,
-        AttrItem { unsafety: Safety::Default, path, args: attr_args, span },
-        tokens,
-        style,
-        span,
-    )
-}
-
-// `span` is used for the `Attribute` and everything within it (except for any span within
-// `unsafety`).
-pub fn mk_attr_name_value_str(
-    g: &AttrIdGenerator,
-    style: AttrStyle,
-    name: Symbol,
-    val: Symbol,
-    span: Span,
-) -> Attribute {
-    let lit = token::Lit::new(token::Str, escape_string_symbol(val), None);
-    let expr = Box::new(Expr {
-        id: DUMMY_NODE_ID,
-        kind: ExprKind::Lit(lit),
-        span,
-        attrs: AttrVec::new(),
-        tokens: None,
-    });
-    let path = Path::from_ident(Ident::new(name, span));
-    let args = AttrArgs::Eq { eq_span: span, expr };
-
-    let tokens = Some(mk_attr_tokens(
-        style,
-        AttrTokenStream::new(vec![
-            AttrTokenTree::Token(Token::from_ast_ident(Ident::new(name, span)), Spacing::Alone),
-            AttrTokenTree::Token(Token::new(token::Eq, span), Spacing::Alone),
-            AttrTokenTree::Token(
-                Token::new(token::TokenKind::lit(lit.kind, lit.symbol, lit.suffix), span),
-                Spacing::Alone,
-            ),
-        ]),
-        span,
-    ));
-
-    mk_attr_from_item(
-        g,
-        AttrItem { unsafety: Safety::Default, path, args, span },
-        tokens,
-        style,
-        span,
-    )
-}
-
 pub fn filter_by_name(attrs: &[Attribute], name: Symbol) -> impl Iterator<Item = &Attribute> {
     attrs.iter().filter(move |attr| attr.has_name(name))
 }
@@ -953,14 +695,14 @@ pub trait AttributeExt: Debug + 'static {
     /// Returns whether the attribute is a path, without any arguments.
     fn is_word(&self) -> bool;
 
-    fn path(&self) -> SmallVec<[Symbol; 1]> {
-        self.symbol_path().unwrap_or(smallvec![sym::doc])
+    fn path(&self) -> Vec<Symbol> {
+        self.symbol_path().unwrap_or(vec![sym::doc])
     }
 
     fn path_span(&self) -> Option<Span>;
 
     /// Returns None for doc comments
-    fn symbol_path(&self) -> Option<SmallVec<[Symbol; 1]>>;
+    fn symbol_path(&self) -> Option<Vec<Symbol>>;
 
     /// Returns the documentation if this is a doc comment or a sugared doc comment.
     /// * `///doc` returns `Some("doc")`.
@@ -997,7 +739,7 @@ pub trait AttributeExt: Debug + 'static {
     /// Returns `true` is this attribute contains `doc(keyword)` or `doc(attribute)`.
     fn is_doc_keyword_or_attribute(&self) -> bool;
 
-    /// Returns `true` if this is a `#[rustc_doc_primitive]` attribute.
+    /// Returns `true` if this is a `` attribute.
     fn is_rustc_doc_primitive(&self) -> bool;
 }
 
@@ -1043,7 +785,7 @@ impl Attribute {
         AttributeExt::is_word(self)
     }
 
-    pub fn path(&self) -> SmallVec<[Symbol; 1]> {
+    pub fn path(&self) -> Vec<Symbol> {
         AttributeExt::path(self)
     }
 
