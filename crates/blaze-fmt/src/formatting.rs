@@ -226,7 +226,7 @@ impl<'a, T: FormatHandler + 'a> FormatContext<'a, T> {
             visitor.line_number,
             count_newlines(&visitor.buffer),
             "failed in format_file visitor.buffer:\n {:?}",
-            &visitor.buffer
+            visitor.buffer
         );
 
         // For some reason, the source_map does not include terminating

@@ -7,6 +7,16 @@
 #![allow(clippy::match_like_matches_macro)]
 // rustfmt writes its emitters' output and its messages straight to stdout and stderr.
 #![allow(clippy::print_stdout, clippy::print_stderr)]
+// rustfmt's code is kept as upstream writes it, so that each file reads side by side with its
+// upstream; these are the lints upstream does not follow. std's `HashMap` and `HashSet` stay:
+// rustfmt iterates some, and their order is part of what it prints.
+#![allow(
+    clippy::style,
+    clippy::complexity,
+    clippy::disallowed_types,
+    clippy::str_to_string,
+    clippy::rc_buffer
+)]
 
 extern crate ra_ap_rustc_lexer as rustc_lexer;
 

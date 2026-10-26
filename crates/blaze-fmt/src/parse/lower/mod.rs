@@ -69,6 +69,9 @@ impl DelimIndex {
 pub(crate) struct Unsupported {
     pub(crate) span: Span,
     pub(crate) message: String,
+    /// rustc's parser rejects this too (rust-analyzer's accepts it), so it is a parse error
+    /// rather than something blaze has yet to cover.
+    pub(crate) rustc_rejects: bool,
 }
 
 pub(crate) struct Lower<'a> {
@@ -91,9 +94,18 @@ impl<'a> Lower<'a> {
     }
 
     pub(crate) fn unsupported(&self, span: Span, message: impl Into<String>) {
+        self.fail(span, message.into(), false);
+    }
+
+    /// What rust-analyzer's parser accepts and rustc's does not, with rustc's message.
+    pub(crate) fn rustc_rejects(&self, span: Span, message: &str) {
+        self.fail(span, message.to_owned(), true);
+    }
+
+    fn fail(&self, span: Span, message: String, rustc_rejects: bool) {
         let mut error = self.error.borrow_mut();
         if error.is_none() {
-            *error = Some(Unsupported { span, message: message.into() });
+            *error = Some(Unsupported { span, message, rustc_rejects });
         }
     }
 
@@ -221,13 +233,11 @@ impl<'a> Lower<'a> {
     pub(crate) fn outer_attrs(&self, node: &SyntaxNode) -> ast::AttrVec {
         let mut attrs = ThinVec::new();
         for child in node.children() {
-            if let Some(any) = ra::AnyAttr::cast(child) {
-                if let Some(attr) = self.attr(&any) {
-                    if attr.style == AttrStyle::Outer {
+            if let Some(any) = ra::AnyAttr::cast(child)
+                && let Some(attr) = self.attr(&any)
+                    && attr.style == AttrStyle::Outer {
                         attrs.push(attr);
                     }
-                }
-            }
         }
         attrs
     }
@@ -236,13 +246,11 @@ impl<'a> Lower<'a> {
     pub(crate) fn inner_attrs(&self, node: &SyntaxNode) -> ast::AttrVec {
         let mut attrs = ThinVec::new();
         for child in node.children() {
-            if let Some(any) = ra::AnyAttr::cast(child) {
-                if let Some(attr) = self.attr(&any) {
-                    if attr.style == AttrStyle::Inner {
+            if let Some(any) = ra::AnyAttr::cast(child)
+                && let Some(attr) = self.attr(&any)
+                    && attr.style == AttrStyle::Inner {
                         attrs.push(attr);
                     }
-                }
-            }
         }
         attrs
     }
@@ -258,10 +266,9 @@ impl<'a> Lower<'a> {
                     (token::CommentKind::Line, AttrStyle::Inner, rest)
                 } else if let Some(rest) = text.strip_prefix("/**") {
                     (token::CommentKind::Block, AttrStyle::Outer, rest.strip_suffix("*/")?)
-                } else if let Some(rest) = text.strip_prefix("/*!") {
-                    (token::CommentKind::Block, AttrStyle::Inner, rest.strip_suffix("*/")?)
                 } else {
-                    return None;
+                    let rest = text.strip_prefix("/*!")?;
+                    (token::CommentKind::Block, AttrStyle::Inner, rest.strip_suffix("*/")?)
                 };
                 Some(ast::Attribute {
                     kind: ast::AttrKind::DocComment(kind, Symbol::intern(content)),
@@ -307,12 +314,10 @@ impl<'a> Lower<'a> {
         let mut inner: Vec<&TokenTree> = tts.clone();
         if let Some(TokenTree::Token(t, _)) = tts.first()
             && t.is_keyword(kw::Unsafe)
-        {
-            if let Some(TokenTree::Delimited(_, _, Delimiter::Parenthesis, stream)) = tts.get(1) {
+            && let Some(TokenTree::Delimited(_, _, Delimiter::Parenthesis, stream)) = tts.get(1) {
                 unsafety = ast::Safety::Unsafe(t.span);
                 inner = stream.iter().collect();
             }
-        }
         let path = self.token_path(&inner, &mut i, span)?;
         let args = match inner.get(i) {
             None => ast::AttrArgs::Empty,
@@ -355,16 +360,13 @@ impl<'a> Lower<'a> {
             segments.push(ast::PathSegment::path_root(t.span.shrink_to_lo()));
             *i += 1;
         }
-        loop {
-            match tts.get(*i) {
-                Some(TokenTree::Token(t, _)) => match t.ident() {
-                    Some((ident, _)) => {
-                        segments.push(ast::PathSegment::from_ident(ident));
-                        *i += 1;
-                    }
-                    None => break,
-                },
-                _ => break,
+        while let Some(TokenTree::Token(t, _)) = tts.get(*i) {
+            match t.ident() {
+                Some((ident, _)) => {
+                    segments.push(ast::PathSegment::from_ident(ident));
+                    *i += 1;
+                }
+                None => break,
             }
             match tts.get(*i) {
                 Some(TokenTree::Token(t, _)) if t.kind == token::PathSep => *i += 1,

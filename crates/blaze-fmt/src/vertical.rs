@@ -180,8 +180,8 @@ pub(crate) fn rewrite_with_alignment<T: AlignedItem>(
             "{}{}\n{}{}",
             result,
             spaces,
-            &shape.indent.to_string(context.config),
-            &rest_str
+            shape.indent.to_string(context.config),
+            rest_str
         ))
     }
 }

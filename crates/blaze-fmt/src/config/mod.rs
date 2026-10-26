@@ -503,7 +503,7 @@ fn get_toml_path(dir: &Path) -> Result<Option<PathBuf>, Error> {
             // Otherwise, return the error
             Err(e) => {
                 if !matches!(e.kind(), ErrorKind::NotFound | ErrorKind::NotADirectory) {
-                    let ctx = format!("Failed to get metadata for config file {:?}", &config_file);
+                    let ctx = format!("Failed to get metadata for config file {:?}", config_file);
                     let err = anyhow::Error::new(e).context(ctx);
                     return Err(Error::new(ErrorKind::Other, err));
                 }

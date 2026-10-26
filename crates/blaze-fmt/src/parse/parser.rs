@@ -114,6 +114,10 @@ fn parse_mod(psess: &ParseSess, file: &SourceFile) -> Option<ast::Crate> {
     let krate = lower.krate(&parse.tree());
     match lower.finish() {
         Ok(()) => Some(krate),
+        Err(unsupported) if unsupported.rustc_rejects => {
+            psess.emit_error(unsupported.span, unsupported.message);
+            None
+        }
         Err(unsupported) => {
             psess.emit_error(
                 unsupported.span,

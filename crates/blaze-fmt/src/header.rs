@@ -51,7 +51,7 @@ pub(crate) fn format_header(
                 shape,
                 true,
             )
-            .unwrap_or_else(|_| format!("{} {}", &result, part.snippet))
+            .unwrap_or_else(|_| format!("{} {}", result, part.snippet))
         };
         debug!(?result);
         span = part.span;

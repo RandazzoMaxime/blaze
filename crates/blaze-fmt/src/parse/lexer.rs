@@ -31,12 +31,11 @@ pub(crate) fn lex_token_trees(
     edition: Edition,
     strip_tokens: StripTokens,
 ) -> Result<TokenStream, LexError> {
-    if strip_tokens == StripTokens::ShebangAndFrontmatter {
-        if let Some(shebang_len) = rustc_lexer::strip_shebang(src) {
+    if strip_tokens == StripTokens::ShebangAndFrontmatter
+        && let Some(shebang_len) = rustc_lexer::strip_shebang(src) {
             src = &src[shebang_len..];
-            start_pos = start_pos + BytePos::from_usize(shebang_len);
+            start_pos += BytePos::from_usize(shebang_len);
         }
-    }
     let frontmatter_allowed = match strip_tokens {
         StripTokens::ShebangAndFrontmatter => FrontmatterAllowed::Yes,
         StripTokens::Nothing => FrontmatterAllowed::No,
@@ -104,7 +103,7 @@ impl<'src> Lexer<'src> {
             let str_before = self.cursor.as_str();
             let token = self.cursor.advance_token();
             let start = self.pos;
-            self.pos = self.pos + BytePos(token.len);
+            self.pos += BytePos(token.len);
 
             let kind = match token.kind {
                 rustc_lexer::TokenKind::LineComment { doc_style } => {

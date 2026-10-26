@@ -261,6 +261,7 @@ impl Lower<'_> {
         let (Some(lhs_node), Some(op_tok)) = (lhs_node, op_tok) else {
             return self.expr_err(span);
         };
+        self.check_non_associative(e, span);
         let lhs = self.expr_with(&lhs_node, attrs);
         let lhs_lo = lhs
             .attrs
@@ -298,6 +299,30 @@ impl Lower<'_> {
             _ => return self.expr_err(span),
         };
         self.mk_expr(lhs_lo.to(op_span).to(hi), kind, ThinVec::new())
+    }
+
+    /// Ranges and comparisons do not chain in rustc's grammar: `a..b..c` and `a < b < c` are
+    /// errors there (and make rustfmt try a macro argument as a type or pattern instead), where
+    /// rust-analyzer nests them.
+    fn check_non_associative(&self, e: &ra::Expr, span: Span) {
+        use syntax::ast::RangeItem as _;
+        let is_comparison = |e: &ra::Expr| match e {
+            ra::Expr::BinExpr(b) => matches!(b.op_kind(), Some(ra::BinaryOp::CmpOp(_))),
+            _ => false,
+        };
+        match e {
+            ra::Expr::RangeExpr(r) => {
+                if [r.start(), r.end()].iter().flatten().any(|o| matches!(o, ra::Expr::RangeExpr(_))) {
+                    self.rustc_rejects(span, "ranges cannot be chained");
+                }
+            }
+            ra::Expr::BinExpr(b) if is_comparison(e) => {
+                if [b.lhs(), b.rhs()].iter().flatten().any(is_comparison) {
+                    self.rustc_rejects(span, "comparison operators cannot be chained");
+                }
+            }
+            _ => {}
+        }
     }
 
     fn range_limits(&self, node: &syntax::SyntaxNode) -> ast::RangeLimits {
@@ -614,11 +639,10 @@ impl Lower<'_> {
                         if let Some(s) = self.stmt(&stmt) {
                             stmts.push(s);
                         }
-                    } else if let Some(e) = ra::Expr::cast(n.clone()) {
-                        if tail.as_ref().is_some_and(|t| t.syntax() == &n) {
+                    } else if let Some(e) = ra::Expr::cast(n.clone())
+                        && tail.as_ref().is_some_and(|t| t.syntax() == &n) {
                             stmts.push(self.expr_stmt(&e, None));
                         }
-                    }
                 }
             }
         }

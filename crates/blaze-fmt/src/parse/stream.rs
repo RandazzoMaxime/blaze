@@ -88,7 +88,7 @@ impl Dcx {
 #[derive(Clone)]
 pub(crate) struct Parser<'a> {
     pub(crate) psess: &'a ParseSess,
-    tokens: Rc<Vec<Token>>,
+    tokens: Rc<[Token]>,
     delims: Rc<DelimIndex>,
     /// The index of `token` in `tokens`; `tokens.len()` at the end.
     pos: usize,
@@ -104,7 +104,7 @@ impl<'a> Parser<'a> {
         let dummy = Token::new(TokenKind::Eof, Span::default());
         let mut parser = Parser {
             psess,
-            tokens: Rc::new(tokens),
+            tokens: tokens.into(),
             delims,
             pos: 0,
             token: dummy,
