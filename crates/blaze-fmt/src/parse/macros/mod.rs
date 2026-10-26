@@ -1,3 +1,5 @@
+// Follows `src/tools/rustfmt/src/parse/macros/mod.rs` at rust-lang/rust 12433c307 (MIT or Apache-2.0).
+
 use crate::ast;
 use crate::ast::token::{Delimiter, NonterminalKind, NtExprKind::*, NtPatKind::*, TokenKind};
 use crate::ast::tokenstream::TokenStream;

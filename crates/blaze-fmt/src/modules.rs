@@ -1,12 +1,14 @@
+// Follows `src/tools/rustfmt/src/modules.rs` at rust-lang/rust 12433c307 (MIT or Apache-2.0).
+
 use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use crate::ast;
+use crate::ast::ThinVec;
 use crate::ast::visit::Visitor;
 use crate::span::Span;
 use crate::span::symbol::{self, Symbol, sym};
-use crate::ast::ThinVec;
 use thiserror::Error;
 
 use crate::attr::MetaVisitor;

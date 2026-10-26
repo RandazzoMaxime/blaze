@@ -8,7 +8,7 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use crate::span::edition::Edition;
-use crate::span::{BytePos, Span, SourceMap, symbol};
+use crate::span::{BytePos, SourceMap, Span, symbol};
 
 use crate::config::file_lines::LineRange;
 use crate::ignore_path::IgnorePathSet;
@@ -87,7 +87,9 @@ impl ParseSess {
 
     pub(crate) fn is_file_parsed(&self, path: &Path) -> bool {
         self.source_map
-            .get_source_file(&crate::span::FileName::Real(crate::span::RealFileName::from_path(path)))
+            .get_source_file(&crate::span::FileName::Real(
+                crate::span::RealFileName::from_path(path),
+            ))
             .is_some()
     }
 
@@ -164,12 +166,16 @@ impl ParseSess {
     /// Records a parse error and, unless parse errors are hidden or the file is ignored,
     /// prints it.
     pub(crate) fn emit_error(&self, span: Span, message: impl Into<String>) {
-        let error = ParseError { span, message: message.into() };
+        let error = ParseError {
+            span,
+            message: message.into(),
+        };
         let file = self.source_map.span_to_filename(span);
         let ignored = match &file {
-            crate::span::FileName::Real(real) => real
-                .local_path()
-                .is_some_and(|p| self.ignore_path_set.is_match(&FileName::Real(p.to_path_buf()))),
+            crate::span::FileName::Real(real) => real.local_path().is_some_and(|p| {
+                self.ignore_path_set
+                    .is_match(&FileName::Real(p.to_path_buf()))
+            }),
             crate::span::FileName::Custom(_) => false,
         };
         if ignored {

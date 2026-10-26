@@ -27,13 +27,27 @@ pub(crate) enum Exp {
 
 /// rustc's `exp!`: the expected token or keyword of that name.
 macro_rules! exp {
-    (If) => { $crate::parse::stream::Exp::Kw($crate::span::kw::If) };
-    (Else) => { $crate::parse::stream::Exp::Kw($crate::span::kw::Else) };
-    (Static) => { $crate::parse::stream::Exp::Kw($crate::span::kw::Static) };
-    (Ref) => { $crate::parse::stream::Exp::Kw($crate::span::kw::Ref) };
-    (Unsafe) => { $crate::parse::stream::Exp::Kw($crate::span::kw::Unsafe) };
-    (Underscore) => { $crate::parse::stream::Exp::Kw($crate::span::kw::Underscore) };
-    ($tok:ident) => { $crate::parse::stream::Exp::Tok($crate::ast::token::TokenKind::$tok) };
+    (If) => {
+        $crate::parse::stream::Exp::Kw($crate::span::kw::If)
+    };
+    (Else) => {
+        $crate::parse::stream::Exp::Kw($crate::span::kw::Else)
+    };
+    (Static) => {
+        $crate::parse::stream::Exp::Kw($crate::span::kw::Static)
+    };
+    (Ref) => {
+        $crate::parse::stream::Exp::Kw($crate::span::kw::Ref)
+    };
+    (Unsafe) => {
+        $crate::parse::stream::Exp::Kw($crate::span::kw::Unsafe)
+    };
+    (Underscore) => {
+        $crate::parse::stream::Exp::Kw($crate::span::kw::Underscore)
+    };
+    ($tok:ident) => {
+        $crate::parse::stream::Exp::Tok($crate::ast::token::TokenKind::$tok)
+    };
 }
 pub(crate) use exp;
 
@@ -119,7 +133,10 @@ impl<'a> Parser<'a> {
     fn token_at(&self, i: usize, fallback: Span) -> Token {
         match self.tokens.get(i) {
             Some(t) => *t,
-            None => Token::new(TokenKind::Eof, self.tokens.last().map_or(fallback, |t| t.span)),
+            None => Token::new(
+                TokenKind::Eof,
+                self.tokens.last().map_or(fallback, |t| t.span),
+            ),
         }
     }
 
@@ -159,11 +176,18 @@ impl<'a> Parser<'a> {
     }
 
     pub(crate) fn expect(&mut self, exp: Exp) -> PResult<()> {
-        if self.eat(exp) { Ok(()) } else { Err(self.err("expected a different token")) }
+        if self.eat(exp) {
+            Ok(())
+        } else {
+            Err(self.err("expected a different token"))
+        }
     }
 
     fn err(&self, message: &'static str) -> PErr {
-        PErr { span: self.token.span, message }
+        PErr {
+            span: self.token.span,
+            message,
+        }
     }
 
     pub(crate) fn nonterminal_may_begin_with(kind: NonterminalKind, token: &Token) -> bool {
@@ -188,9 +212,11 @@ impl<'a> Parser<'a> {
     // ---- fragments ----
 
     pub(crate) fn parse_expr(&mut self) -> PResult<Box<ast::Expr>> {
-        self.fragment(PrefixEntryPoint::Expr, TopEntryPoint::Expr, |lower, root| {
-            syntax::ast::Expr::cast(root.clone()).map(|e| lower.expr(&e))
-        })
+        self.fragment(
+            PrefixEntryPoint::Expr,
+            TopEntryPoint::Expr,
+            |lower, root| syntax::ast::Expr::cast(root.clone()).map(|e| lower.expr(&e)),
+        )
     }
 
     pub(crate) fn parse_ty(&mut self) -> PResult<Box<ast::Ty>> {
@@ -199,23 +225,40 @@ impl<'a> Parser<'a> {
         })
     }
 
-    pub(crate) fn parse_pat_no_top_alt(&mut self, _expected: Option<()>, _loc: Option<()>) -> PResult<ast::Pat> {
-        self.fragment(PrefixEntryPoint::Pat, TopEntryPoint::Pattern, |lower, root| {
-            syntax::ast::Pat::cast(root.clone()).map(|p| lower.pat_val(&p))
-        })
+    pub(crate) fn parse_pat_no_top_alt(
+        &mut self,
+        _expected: Option<()>,
+        _loc: Option<()>,
+    ) -> PResult<ast::Pat> {
+        self.fragment(
+            PrefixEntryPoint::Pat,
+            TopEntryPoint::Pattern,
+            |lower, root| syntax::ast::Pat::cast(root.clone()).map(|p| lower.pat_val(&p)),
+        )
     }
 
-    pub(crate) fn parse_item(&mut self, _: ForceCollect, _: AllowConstBlockItems) -> PResult<Option<Box<ast::Item>>> {
+    pub(crate) fn parse_item(
+        &mut self,
+        _: ForceCollect,
+        _: AllowConstBlockItems,
+    ) -> PResult<Option<Box<ast::Item>>> {
         if self.token.kind == TokenKind::Eof {
             return Ok(None);
         }
-        self.fragment(PrefixEntryPoint::Item, TopEntryPoint::MacroItems, |lower, root| {
-            let items: Vec<_> = root.children().filter_map(syntax::ast::Item::cast).collect();
-            match items.as_slice() {
-                [item] => Some(lower.item(item)),
-                _ => None,
-            }
-        })
+        self.fragment(
+            PrefixEntryPoint::Item,
+            TopEntryPoint::MacroItems,
+            |lower, root| {
+                let items: Vec<_> = root
+                    .children()
+                    .filter_map(syntax::ast::Item::cast)
+                    .collect();
+                match items.as_slice() {
+                    [item] => Some(lower.item(item)),
+                    _ => None,
+                }
+            },
+        )
     }
 
     /// Parses the fragment starting at the current token with `prefix`, reparses exactly its
@@ -248,14 +291,19 @@ impl<'a> Parser<'a> {
             match step {
                 Step::Token { n_input_tokens, .. } => consumed += usize::from(n_input_tokens),
                 Step::FloatSplit { .. } => consumed += 1,
-                Step::Error { .. } => return Err(self.err("a fragment rust-analyzer could not parse")),
+                Step::Error { .. } => {
+                    return Err(self.err("a fragment rust-analyzer could not parse"));
+                }
                 Step::Enter { .. } | Step::Exit => {}
             }
         }
         if consumed == 0 {
             return Err(self.err("an empty fragment"));
         }
-        let Some(last) = (0..lexed.len()).filter(|&i| !lexed.kind(i).is_trivia()).nth(consumed - 1) else {
+        let Some(last) = (0..lexed.len())
+            .filter(|&i| !lexed.kind(i).is_trivia())
+            .nth(consumed - 1)
+        else {
             return Err(self.err("a fragment past the end"));
         };
         if lexed.errors().any(|(i, _)| i <= last) {
@@ -263,26 +311,16 @@ impl<'a> Parser<'a> {
         }
         let frag_end = lexed.text_range(last).end;
         let end_pos = lo + BytePos(frag_end as u32);
-        let Some(k) = self.tokens[self.pos..].iter().position(|t| t.span.hi() == end_pos) else {
+        let Some(k) = self.tokens[self.pos..]
+            .iter()
+            .position(|t| t.span.hi() == end_pos)
+        else {
             return Err(self.err("a fragment ending inside a token"));
         };
         let k = self.pos + k;
 
-        let frag = &text[..frag_end];
-        let lexed = LexedStr::new(ra_edition, frag);
-        let output = top.parse(&lexed.to_input(ra_edition));
-        let mut builder = SyntaxTreeBuilder::default();
-        let mut errors = 0usize;
-        lexed.intersperse_trivia(&output, &mut |step| match step {
-            parser::StrStep::Token { kind, text } => builder.token(kind, text),
-            parser::StrStep::Enter { kind } => builder.start_node(kind),
-            parser::StrStep::Exit => builder.finish_node(),
-            parser::StrStep::Error { .. } => errors += 1,
-        });
-        if errors > 0 {
-            return Err(self.err("a fragment rust-analyzer could not reparse"));
-        }
-        let root = builder.finish().syntax_node();
+        let root = parse_ra(&text[..frag_end], ra_edition, top)
+            .map_err(|_| self.err("a fragment rust-analyzer could not reparse"))?;
         if root.kind() == syntax::SyntaxKind::ERROR {
             return Err(self.err("a fragment rust-analyzer could not reparse"));
         }
@@ -326,7 +364,9 @@ impl<'a> Parser<'a> {
             let in_path = self.look_ahead(1, |t| t.is_keyword(kw::In));
             let short = self.look_ahead(2, |t| t.kind == TokenKind::CloseParen)
                 && self.look_ahead(1, |t| {
-                    t.is_keyword(kw::Crate) || t.is_keyword(kw::Super) || t.is_keyword(kw::SelfLower)
+                    t.is_keyword(kw::Crate)
+                        || t.is_keyword(kw::Super)
+                        || t.is_keyword(kw::SelfLower)
                 });
             if in_path || short {
                 self.bump();
@@ -340,10 +380,16 @@ impl<'a> Parser<'a> {
                     id: ast::DUMMY_NODE_ID,
                     shorthand: !in_path,
                 };
-                return Ok(ast::Visibility { kind, span: lo.to(self.prev_token.span) });
+                return Ok(ast::Visibility {
+                    kind,
+                    span: lo.to(self.prev_token.span),
+                });
             }
         }
-        Ok(ast::Visibility { kind: ast::VisibilityKind::Public, span: lo })
+        Ok(ast::Visibility {
+            kind: ast::VisibilityKind::Public,
+            span: lo,
+        })
     }
 
     /// A path of plain segments, as in attributes and `pub(in ..)`.
@@ -365,7 +411,10 @@ impl<'a> Parser<'a> {
                 break;
             }
         }
-        Ok(ast::Path { span: lo.to(self.prev_token.span), segments })
+        Ok(ast::Path {
+            span: lo.to(self.prev_token.span),
+            segments,
+        })
     }
 
     /// Steps over `#[..]` or `#![..]`; rustfmt only needs to get past it.
@@ -472,5 +521,34 @@ fn flatten(stream: &TokenStream, out: &mut Vec<Token>) {
                 out.push(Token::new(delim.as_close_token_kind(), dspan.close));
             }
         }
+    }
+}
+
+/// rust-analyzer's tree of `text` parsed from `entry`, or the first error its lexer or parser
+/// reports, with its offset in `text`. Its validation pass is not run: what that flags (`self`
+/// inside a path, inner attributes on a block in expression position) rustc's parser accepts.
+pub(crate) fn parse_ra(
+    text: &str,
+    edition: syntax::Edition,
+    entry: TopEntryPoint,
+) -> Result<SyntaxNode, (usize, String)> {
+    let lexed = LexedStr::new(edition, text);
+    if let Some((i, msg)) = lexed.errors().next() {
+        return Err((lexed.text_range(i).start, msg.to_owned()));
+    }
+    let output = entry.parse(&lexed.to_input(edition));
+    let mut builder = SyntaxTreeBuilder::default();
+    let mut error = None;
+    lexed.intersperse_trivia(&output, &mut |step| match step {
+        parser::StrStep::Token { kind, text } => builder.token(kind, text),
+        parser::StrStep::Enter { kind } => builder.start_node(kind),
+        parser::StrStep::Exit => builder.finish_node(),
+        parser::StrStep::Error { msg, pos } => {
+            error.get_or_insert_with(|| (pos, msg.to_owned()));
+        }
+    });
+    match error {
+        Some(error) => Err(error),
+        None => Ok(builder.finish().syntax_node()),
     }
 }

@@ -1,3 +1,5 @@
+// Follows `src/tools/rustfmt/src/items.rs` at rust-lang/rust 12433c307 (MIT or Apache-2.0).
+
 // Formatting top-level items - functions, structs, enums, traits, impls.
 
 use std::borrow::Cow;

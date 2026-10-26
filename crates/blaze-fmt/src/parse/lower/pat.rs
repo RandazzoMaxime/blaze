@@ -1,8 +1,8 @@
 //! Patterns, with rustc's `parse_pat_with_range_pat` span: the pattern's first token to its
 //! last; an or-pattern starts at its leading `|` when it has one.
 
-use syntax::ast::{self as ra, AstNode, HasName as _};
 use syntax::T;
+use syntax::ast::{self as ra, AstNode, HasName as _};
 
 use super::{Lower, child_token};
 use crate::ast::{self, DUMMY_NODE_ID, ThinVec};
@@ -20,7 +20,11 @@ impl Lower<'_> {
                 let by_ref = match p.ref_token() {
                     Some(_) => ast::ByRef::Yes(
                         ast::Pinnedness::Not,
-                        if p.mut_token().is_some() { ast::Mutability::Mut } else { ast::Mutability::Not },
+                        if p.mut_token().is_some() {
+                            ast::Mutability::Mut
+                        } else {
+                            ast::Mutability::Not
+                        },
                     ),
                     None => ast::ByRef::No,
                 };
@@ -58,13 +62,18 @@ impl Lower<'_> {
                     .children_with_tokens()
                     .filter_map(|e| e.into_token())
                     .find(|t| matches!(t.kind(), T![..] | T![..=] | T![...]));
-                let Some(op) = op else { return self.pat_err(span) };
+                let Some(op) = op else {
+                    return self.pat_err(span);
+                };
                 let end = match op.kind() {
                     T![..=] => ast::RangeEnd::Included(ast::RangeSyntax::DotDotEq),
                     T![...] => ast::RangeEnd::Included(ast::RangeSyntax::DotDotDot),
                     _ => ast::RangeEnd::Excluded,
                 };
-                let re = Spanned { node: end, span: self.tsp(&op) };
+                let re = Spanned {
+                    node: end,
+                    span: self.tsp(&op),
+                };
                 let start = p.start().map(|s| self.pat_expr(&s));
                 let hi = p.end().map(|e| self.pat_expr(&e));
                 ast::PatKind::Range(start, hi, re)
@@ -91,7 +100,11 @@ impl Lower<'_> {
                     Some(path) => self.path(&path),
                     None => (None, self.err_path(span)),
                 };
-                ast::PatKind::TupleStruct(qself, path, p.fields().map(|f| self.pat_val(&f)).collect())
+                ast::PatKind::TupleStruct(
+                    qself,
+                    path,
+                    p.fields().map(|f| self.pat_val(&f)).collect(),
+                )
             }
             ra::Pat::TuplePat(p) => {
                 let fields: ThinVec<ast::Pat> = p.fields().map(|f| self.pat_val(&f)).collect();
@@ -101,7 +114,12 @@ impl Lower<'_> {
                     && !trailing_comma
                     && !matches!(fields[0].kind, ast::PatKind::Rest)
                 {
-                    ast::PatKind::Paren(Box::new(fields.into_iter().next().unwrap_or_else(|| self.pat_err(span))))
+                    ast::PatKind::Paren(Box::new(
+                        fields
+                            .into_iter()
+                            .next()
+                            .unwrap_or_else(|| self.pat_err(span)),
+                    ))
                 } else {
                     ast::PatKind::Tuple(fields)
                 }
@@ -110,17 +128,21 @@ impl Lower<'_> {
                 Some(inner) => ast::PatKind::Paren(self.pat(&inner)),
                 None => self.pat_kind_err(span),
             },
-            ra::Pat::SlicePat(p) => ast::PatKind::Slice(p.pats().map(|f| self.pat_val(&f)).collect()),
+            ra::Pat::SlicePat(p) => {
+                ast::PatKind::Slice(p.pats().map(|f| self.pat_val(&f)).collect())
+            }
             ra::Pat::RefPat(p) => {
-                let mutbl = if p.mut_token().is_some() { ast::Mutability::Mut } else { ast::Mutability::Not };
+                let mutbl = if p.mut_token().is_some() {
+                    ast::Mutability::Mut
+                } else {
+                    ast::Mutability::Not
+                };
                 match p.pat() {
                     Some(inner) => ast::PatKind::Ref(self.pat(&inner), ast::Pinnedness::Not, mutbl),
                     None => self.pat_kind_err(span),
                 }
             }
-            ra::Pat::OrPat(p) => {
-                ast::PatKind::Or(p.pats().map(|f| self.pat_val(&f)).collect())
-            }
+            ra::Pat::OrPat(p) => ast::PatKind::Or(p.pats().map(|f| self.pat_val(&f)).collect()),
             ra::Pat::MacroPat(p) => match p.macro_call() {
                 Some(mc) => ast::PatKind::MacCall(self.mac_call(&mc)),
                 None => self.pat_kind_err(span),
@@ -134,11 +156,19 @@ impl Lower<'_> {
                 ast::PatKind::Err(ast::ErrorGuaranteed::unchecked_error_guaranteed())
             }
         };
-        ast::Pat { id: DUMMY_NODE_ID, kind, span }
+        ast::Pat {
+            id: DUMMY_NODE_ID,
+            kind,
+            span,
+        }
     }
 
     fn pat_err(&self, span: Span) -> ast::Pat {
-        ast::Pat { id: DUMMY_NODE_ID, kind: self.pat_kind_err(span), span }
+        ast::Pat {
+            id: DUMMY_NODE_ID,
+            kind: self.pat_kind_err(span),
+            span,
+        }
     }
 
     fn pat_kind_err(&self, span: Span) -> ast::PatKind {
@@ -178,11 +208,16 @@ impl Lower<'_> {
                         attrs: ThinVec::new(),
                         tokens: None,
                     });
-                    ast::ExprKind::ConstBlock(ast::AnonConst { id: DUMMY_NODE_ID, value })
+                    ast::ExprKind::ConstBlock(ast::AnonConst {
+                        id: DUMMY_NODE_ID,
+                        value,
+                    })
                 }
                 None => return self.expr_err(span),
             },
-            ra::Pat::IdentPat(p) if p.ref_token().is_none() && p.mut_token().is_none() && p.pat().is_none() => {
+            ra::Pat::IdentPat(p)
+                if p.ref_token().is_none() && p.mut_token().is_none() && p.pat().is_none() =>
+            {
                 // `X..=Y` with plain names: rust-analyzer keeps them as bindings.
                 match p.name() {
                     Some(n) => ast::ExprKind::Path(None, ast::Path::from_ident(self.name(&n))),
@@ -194,7 +229,13 @@ impl Lower<'_> {
                 return self.expr_err(span);
             }
         };
-        Box::new(ast::Expr { id: DUMMY_NODE_ID, kind, span, attrs: ThinVec::new(), tokens: None })
+        Box::new(ast::Expr {
+            id: DUMMY_NODE_ID,
+            kind,
+            span,
+            attrs: ThinVec::new(),
+            tokens: None,
+        })
     }
 
     /// rustc's `parse_pat_field`: from the field name (after attributes) to the end of the
@@ -219,9 +260,21 @@ impl Lower<'_> {
             }
             _ => {
                 self.unsupported(span, "a field pattern rust-analyzer did not parse");
-                (Ident::new(sym::empty, span), Box::new(self.pat_err(span)), false)
+                (
+                    Ident::new(sym::empty, span),
+                    Box::new(self.pat_err(span)),
+                    false,
+                )
             }
         };
-        ast::PatField { ident, pat, is_shorthand, attrs, id: DUMMY_NODE_ID, span, is_placeholder: false }
+        ast::PatField {
+            ident,
+            pat,
+            is_shorthand,
+            attrs,
+            id: DUMMY_NODE_ID,
+            span,
+            is_placeholder: false,
+        }
     }
 }

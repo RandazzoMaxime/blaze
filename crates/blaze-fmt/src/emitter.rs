@@ -1,3 +1,5 @@
+// Follows `src/tools/rustfmt/src/emitter.rs` at rust-lang/rust 12433c307 (MIT or Apache-2.0).
+
 pub(crate) use self::checkstyle::*;
 pub(crate) use self::diff::*;
 pub(crate) use self::files::*;

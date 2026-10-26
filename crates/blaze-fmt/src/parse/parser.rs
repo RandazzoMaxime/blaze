@@ -12,7 +12,9 @@ use crate::ast::ThinVec;
 use crate::ast::{self, attr};
 use crate::parse::lexer::{self, StripTokens};
 use crate::parse::lower::{DelimIndex, Lower};
+use crate::parse::stream::parse_ra;
 use crate::span::{BytePos, SourceFile, Span, sym};
+use syntax::AstNode;
 
 use crate::Input;
 use crate::parse::session::ParseSess;
@@ -67,7 +69,11 @@ impl<'a> ParserBuilder<'a> {
 
 /// rustc's `new_parser_from_file`: a file that cannot be read is an error at `sp`, the `mod`
 /// item that named it.
-fn load_file(psess: &ParseSess, path: &Path, sp: Option<Span>) -> Result<Arc<SourceFile>, ParserError> {
+fn load_file(
+    psess: &ParseSess,
+    path: &Path,
+    sp: Option<Span>,
+) -> Result<Arc<SourceFile>, ParserError> {
     match psess.source_map().load_file(path) {
         Ok(file) => Ok(file),
         Err(e) => {
@@ -92,26 +98,27 @@ fn parse_mod(psess: &ParseSess, file: &SourceFile) -> Option<ast::Crate> {
     let src = file.src.as_ref()?;
     let base = file.start_pos;
     let edition = psess.edition();
-    let stream = match lexer::lex_token_trees(src, base, edition, StripTokens::ShebangAndFrontmatter) {
-        Ok(stream) => stream,
-        Err(err) => {
-            psess.emit_error(err.span, err.message);
+    let stream =
+        match lexer::lex_token_trees(src, base, edition, StripTokens::ShebangAndFrontmatter) {
+            Ok(stream) => stream,
+            Err(err) => {
+                psess.emit_error(err.span, err.message);
+                return None;
+            }
+        };
+    let delims = DelimIndex::new(&stream);
+    let tree = parse_ra(src, edition.to_ra(), parser::TopEntryPoint::SourceFile)
+        .map(|root| syntax::ast::SourceFile::cast(root).expect("a source file parses to one"));
+    let tree = match tree {
+        Ok(tree) => tree,
+        Err((offset, message)) => {
+            let at = base + BytePos(offset as u32);
+            psess.emit_error(Span::with_root_ctxt(at, at), message);
             return None;
         }
     };
-    let delims = DelimIndex::new(&stream);
-    let parse = syntax::SourceFile::parse(src, edition.to_ra());
-    if let Some(err) = parse.errors().first() {
-        let range = err.range();
-        let span = Span::with_root_ctxt(
-            base + BytePos(u32::from(range.start())),
-            base + BytePos(u32::from(range.end())),
-        );
-        psess.emit_error(span, err.to_string());
-        return None;
-    }
     let lower = Lower::new(base, edition, &delims);
-    let krate = lower.krate(&parse.tree());
+    let krate = lower.krate(&tree);
     match lower.finish() {
         Ok(()) => Some(krate),
         Err(unsupported) if unsupported.rustc_rejects => {
@@ -121,7 +128,10 @@ fn parse_mod(psess: &ParseSess, file: &SourceFile) -> Option<ast::Crate> {
         Err(unsupported) => {
             psess.emit_error(
                 unsupported.span,
-                format!("blaze fmt cannot format this file yet: {}", unsupported.message),
+                format!(
+                    "blaze fmt cannot format this file yet: {}",
+                    unsupported.message
+                ),
             );
             None
         }

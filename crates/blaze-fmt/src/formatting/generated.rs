@@ -1,3 +1,5 @@
+// Follows `src/tools/rustfmt/src/formatting/generated.rs` at rust-lang/rust 12433c307 (MIT or Apache-2.0).
+
 use crate::Config;
 
 /// Returns `true` if the given span is a part of generated files.

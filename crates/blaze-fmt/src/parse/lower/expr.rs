@@ -18,11 +18,21 @@ impl Lower<'_> {
 
     pub(crate) fn expr_err(&self, span: Span) -> Box<ast::Expr> {
         self.unsupported(span, "an expression rust-analyzer did not parse");
-        self.mk_expr(span, ast::ExprKind::Err(ast::ErrorGuaranteed::unchecked_error_guaranteed()), ThinVec::new())
+        self.mk_expr(
+            span,
+            ast::ExprKind::Err(ast::ErrorGuaranteed::unchecked_error_guaranteed()),
+            ThinVec::new(),
+        )
     }
 
     fn mk_expr(&self, span: Span, kind: ast::ExprKind, attrs: ast::AttrVec) -> Box<ast::Expr> {
-        Box::new(ast::Expr { id: DUMMY_NODE_ID, kind, span, attrs, tokens: None })
+        Box::new(ast::Expr {
+            id: DUMMY_NODE_ID,
+            kind,
+            span,
+            attrs,
+            tokens: None,
+        })
     }
 
     fn opt_expr(&self, e: Option<ra::Expr>, span: Span) -> Box<ast::Expr> {
@@ -54,11 +64,17 @@ impl Lower<'_> {
         attrs.extend(own);
         let kind = match e {
             ra::Expr::ArrayExpr(a) => match a.kind() {
-                ra::ArrayExprKind::Repeat { initializer, repeat } => {
+                ra::ArrayExprKind::Repeat {
+                    initializer,
+                    repeat,
+                } => {
                     let init = self.opt_expr(initializer, span);
                     let count = match repeat {
                         Some(r) => self.anon_const(&r),
-                        None => ast::AnonConst { id: DUMMY_NODE_ID, value: self.expr_err(span) },
+                        None => ast::AnonConst {
+                            id: DUMMY_NODE_ID,
+                            value: self.expr_err(span),
+                        },
                     };
                     ast::ExprKind::Repeat(init, count)
                 }
@@ -73,7 +89,9 @@ impl Lower<'_> {
             ra::Expr::BecomeExpr(b) => ast::ExprKind::Become(self.opt_expr(b.expr(), span)),
             ra::Expr::BlockExpr(b) => return self.block_expr(b, attrs),
             ra::Expr::BreakExpr(b) => {
-                let label = b.lifetime().map(|lt| ast::Label { ident: self.lifetime(&lt).ident });
+                let label = b.lifetime().map(|lt| ast::Label {
+                    ident: self.lifetime(&lt).ident,
+                });
                 ast::ExprKind::Break(label, b.expr().map(|e| self.expr(&e)))
             }
             ra::Expr::CallExpr(c) => {
@@ -85,7 +103,9 @@ impl Lower<'_> {
             }
             ra::Expr::ClosureExpr(c) => return self.closure(c, attrs, span),
             ra::Expr::ContinueExpr(c) => {
-                let label = c.lifetime().map(|lt| ast::Label { ident: self.lifetime(&lt).ident });
+                let label = c.lifetime().map(|lt| ast::Label {
+                    ident: self.lifetime(&lt).ident,
+                });
                 ast::ExprKind::Continue(label)
             }
             ra::Expr::FieldExpr(f) => {
@@ -123,7 +143,11 @@ impl Lower<'_> {
                     (Some(l), Some(r)) => self.tsp(&l).to(self.tsp(&r)),
                     _ => return self.expr_err(span),
                 };
-                ast::ExprKind::Index(self.opt_expr(i.base(), span), self.opt_expr(i.index(), span), delim)
+                ast::ExprKind::Index(
+                    self.opt_expr(i.base(), span),
+                    self.opt_expr(i.index(), span),
+                    delim,
+                )
             }
             ra::Expr::LetExpr(l) => {
                 let pat = match l.pat() {
@@ -171,11 +195,17 @@ impl Lower<'_> {
                     None => return self.expr_err(span),
                 };
                 let args = m.generic_arg_list().map(|l| Box::new(self.angle_args(&l)));
-                let seg = ast::PathSegment { ident, id: DUMMY_NODE_ID, args };
+                let seg = ast::PathSegment {
+                    ident,
+                    id: DUMMY_NODE_ID,
+                    args,
+                };
                 let receiver = self.opt_expr(m.receiver(), span);
                 let list = m.arg_list();
-                let call_args =
-                    list.as_ref().map(|l| l.args().map(|a| self.expr(&a)).collect()).unwrap_or_default();
+                let call_args = list
+                    .as_ref()
+                    .map(|l| l.args().map(|a| self.expr(&a)).collect())
+                    .unwrap_or_default();
                 let hi = list.map(|l| self.nsp(l.syntax())).unwrap_or(span);
                 ast::ExprKind::MethodCall(Box::new(ast::MethodCall {
                     seg,
@@ -208,13 +238,23 @@ impl Lower<'_> {
             }
             ra::Expr::RecordExpr(r) => self.struct_expr(r, span),
             ra::Expr::RefExpr(r) => {
-                let mutbl = if r.mut_token().is_some() { ast::Mutability::Mut } else { ast::Mutability::Not };
-                let kind = if r.raw_token().is_some() { ast::BorrowKind::Raw } else { ast::BorrowKind::Ref };
+                let mutbl = if r.mut_token().is_some() {
+                    ast::Mutability::Mut
+                } else {
+                    ast::Mutability::Not
+                };
+                let kind = if r.raw_token().is_some() {
+                    ast::BorrowKind::Raw
+                } else {
+                    ast::BorrowKind::Ref
+                };
                 ast::ExprKind::AddrOf(kind, mutbl, self.opt_expr(r.expr(), span))
             }
             ra::Expr::ReturnExpr(r) => ast::ExprKind::Ret(r.expr().map(|e| self.expr(&e))),
             ra::Expr::TryExpr(t) => ast::ExprKind::Try(self.opt_expr(t.expr(), span)),
-            ra::Expr::TupleExpr(t) => ast::ExprKind::Tup(t.fields().map(|f| self.expr(&f)).collect()),
+            ra::Expr::TupleExpr(t) => {
+                ast::ExprKind::Tup(t.fields().map(|f| self.expr(&f)).collect())
+            }
             ra::Expr::UnderscoreExpr(_) => ast::ExprKind::Underscore,
             ra::Expr::WhileExpr(w) => {
                 let label = self.label(w.label());
@@ -276,9 +316,23 @@ impl Lower<'_> {
                 let kind = match op_tok.kind() {
                     T![=] => ast::ExprKind::Assign(lhs, rhs, op_span),
                     k => match assign_op(k) {
-                        Some(op) => ast::ExprKind::AssignOp(Spanned { node: op, span: op_span }, lhs, rhs),
+                        Some(op) => ast::ExprKind::AssignOp(
+                            Spanned {
+                                node: op,
+                                span: op_span,
+                            },
+                            lhs,
+                            rhs,
+                        ),
                         None => match bin_op(k) {
-                            Some(op) => ast::ExprKind::Binary(Spanned { node: op, span: op_span }, lhs, rhs),
+                            Some(op) => ast::ExprKind::Binary(
+                                Spanned {
+                                    node: op,
+                                    span: op_span,
+                                },
+                                lhs,
+                                rhs,
+                            ),
                             None => return self.expr_err(span),
                         },
                     },
@@ -294,7 +348,10 @@ impl Lower<'_> {
                 use syntax::ast::RangeItem as _;
                 let end = r.end().map(|e| self.expr(&e));
                 let hi = end.as_ref().map_or(op_span, |e| e.span);
-                (ast::ExprKind::Range(Some(lhs), end, self.range_limits(r.syntax())), hi)
+                (
+                    ast::ExprKind::Range(Some(lhs), end, self.range_limits(r.syntax())),
+                    hi,
+                )
             }
             _ => return self.expr_err(span),
         };
@@ -311,8 +368,13 @@ impl Lower<'_> {
             _ => false,
         };
         match e {
+            // The right operand may be a range of its own only when it has no start: rustc
+            // reads `a .. ..b` as `a..(..b)`.
             ra::Expr::RangeExpr(r) => {
-                if [r.start(), r.end()].iter().flatten().any(|o| matches!(o, ra::Expr::RangeExpr(_))) {
+                let start_is_range = matches!(r.start(), Some(ra::Expr::RangeExpr(_)));
+                let end_is_range =
+                    matches!(r.end(), Some(ra::Expr::RangeExpr(e)) if e.start().is_some());
+                if start_is_range || end_is_range {
                     self.rustc_rejects(span, "ranges cannot be chained");
                 }
             }
@@ -333,7 +395,9 @@ impl Lower<'_> {
     }
 
     fn label(&self, label: Option<ra::Label>) -> Option<ast::Label> {
-        label.and_then(|l| l.lifetime()).map(|lt| ast::Label { ident: self.lifetime(&lt).ident })
+        label.and_then(|l| l.lifetime()).map(|lt| ast::Label {
+            ident: self.lifetime(&lt).ident,
+        })
     }
 
     // ---- literals ----
@@ -386,7 +450,10 @@ impl Lower<'_> {
         let guard = arm.guard().map(|g| {
             let if_span = g.if_token().map(|t| self.tsp(&t)).unwrap_or(lo);
             let cond = self.opt_expr(g.condition(), lo);
-            Box::new(ast::Guard { span_with_leading_if: if_span.to(cond.span), cond: *cond })
+            Box::new(ast::Guard {
+                span_with_leading_if: if_span.to(cond.span),
+                cond: *cond,
+            })
         });
         let body = arm.expr().map(|e| self.expr(&e));
         let hi = match (&body, &guard) {
@@ -425,7 +492,12 @@ impl Lower<'_> {
                 };
             }
         }
-        ast::ExprKind::Struct(Box::new(ast::StructExpr { qself, path, fields, rest }))
+        ast::ExprKind::Struct(Box::new(ast::StructExpr {
+            qself,
+            path,
+            fields,
+            rest,
+        }))
     }
 
     fn expr_field(&self, f: &ra::RecordExprField) -> ast::ExprField {
@@ -475,10 +547,15 @@ impl Lower<'_> {
             Some(t) => ast::Const::Yes(self.tsp(&t)),
             None => ast::Const::No,
         };
-        let movability =
-            if c.static_token().is_some() { ast::Movability::Static } else { ast::Movability::Movable };
+        let movability = if c.static_token().is_some() {
+            ast::Movability::Static
+        } else {
+            ast::Movability::Movable
+        };
         let coroutine_marker = match (c.async_token(), c.gen_token()) {
-            (Some(a), Some(g)) => Some((ast::CoroutineKind::AsyncGen, self.tsp(&a).to(self.tsp(&g)))),
+            (Some(a), Some(g)) => {
+                Some((ast::CoroutineKind::AsyncGen, self.tsp(&a).to(self.tsp(&g))))
+            }
             (Some(a), None) => Some((ast::CoroutineKind::Async, self.tsp(&a))),
             (None, Some(g)) => Some((ast::CoroutineKind::Gen, self.tsp(&g))),
             (None, None) => None,
@@ -490,13 +567,19 @@ impl Lower<'_> {
             return_impl_trait_id: DUMMY_NODE_ID,
         });
         let capture_clause = match c.move_token() {
-            Some(t) => ast::CaptureBy::Value { move_kw: self.tsp(&t) },
+            Some(t) => ast::CaptureBy::Value {
+                move_kw: self.tsp(&t),
+            },
             None => match child_token(c.syntax(), T![use]) {
-                Some(t) => ast::CaptureBy::Use { use_kw: self.tsp(&t) },
+                Some(t) => ast::CaptureBy::Use {
+                    use_kw: self.tsp(&t),
+                },
                 None => ast::CaptureBy::Ref,
             },
         };
-        let Some(params) = c.param_list() else { return self.expr_err(span) };
+        let Some(params) = c.param_list() else {
+            return self.expr_err(span);
+        };
         let fn_arg_span = self.nsp(params.syntax());
         let inputs = params.params().map(|p| self.closure_param(&p)).collect();
         let output = self.ret_ty(c.ret_type().as_ref(), fn_arg_span);
@@ -517,7 +600,11 @@ impl Lower<'_> {
             fn_decl_span: lo.to(decl_hi),
             fn_arg_span,
         };
-        self.mk_expr(closure_span, ast::ExprKind::Closure(Box::new(closure)), attrs)
+        self.mk_expr(
+            closure_span,
+            ast::ExprKind::Closure(Box::new(closure)),
+            attrs,
+        )
     }
 
     /// rustc's `parse_fn_block_param`: the span starts before attributes; an untyped parameter
@@ -535,7 +622,11 @@ impl Lower<'_> {
         };
         let ty = match p.ty() {
             Some(ty) => self.ty(&ty),
-            None => Box::new(ast::Ty { id: DUMMY_NODE_ID, kind: ast::TyKind::Infer, span: pat.span }),
+            None => Box::new(ast::Ty {
+                id: DUMMY_NODE_ID,
+                kind: ast::TyKind::Infer,
+                span: pat.span,
+            }),
         };
         ast::Param {
             attrs,
@@ -564,24 +655,40 @@ impl Lower<'_> {
                 _ => ast::CoroutineKind::Gen,
             };
             let capture = match b.move_token() {
-                Some(m) => ast::CaptureBy::Value { move_kw: self.tsp(&m) },
+                Some(m) => ast::CaptureBy::Value {
+                    move_kw: self.tsp(&m),
+                },
                 None => ast::CaptureBy::Ref,
             };
-            let decl_span = match (b.async_token().or(b.gen_token()), b.move_token().or(b.gen_token())) {
+            let decl_span = match (
+                b.async_token().or(b.gen_token()),
+                b.move_token().or(b.gen_token()),
+            ) {
                 (Some(first), Some(last)) => self.tsp(&first).to(self.tsp(&last)),
                 (Some(first), None) => self.tsp(&first),
                 _ => span,
             };
-            ast::ExprKind::Gen(capture, self.block_from(b, braces, ast::BlockCheckMode::Default), kind, decl_span)
+            ast::ExprKind::Gen(
+                capture,
+                self.block_from(b, braces, ast::BlockCheckMode::Default),
+                kind,
+                decl_span,
+            )
         } else if b.const_token().is_some() {
             let block = self.block_from(b, braces, ast::BlockCheckMode::Default);
             let value = self.mk_expr(braces, ast::ExprKind::Block(block, None), ThinVec::new());
-            ast::ExprKind::ConstBlock(ast::AnonConst { id: DUMMY_NODE_ID, value })
+            ast::ExprKind::ConstBlock(ast::AnonConst {
+                id: DUMMY_NODE_ID,
+                value,
+            })
         } else if let Some(m) = b.try_block_modifier() {
             if m.bikeshed_token().is_some() {
                 self.unsupported(span, "a typed `try` block");
             }
-            ast::ExprKind::TryBlock(self.block_from(b, braces, ast::BlockCheckMode::Default), None)
+            ast::ExprKind::TryBlock(
+                self.block_from(b, braces, ast::BlockCheckMode::Default),
+                None,
+            )
         } else {
             let rules = if b.unsafe_token().is_some() {
                 ast::BlockCheckMode::Unsafe(ast::UnsafeSource::UserProvided)
@@ -595,14 +702,20 @@ impl Lower<'_> {
 
     /// The block of a function body, loop or `if` branch: its braces.
     pub(crate) fn block_expr_inner(&self, b: &ra::BlockExpr) -> Box<ast::Block> {
-        let span = b.stmt_list().map(|s| self.nsp(s.syntax())).unwrap_or_else(|| self.nsp(b.syntax()));
+        let span = b
+            .stmt_list()
+            .map(|s| self.nsp(s.syntax()))
+            .unwrap_or_else(|| self.nsp(b.syntax()));
         let rules = if b.unsafe_token().is_some() {
             ast::BlockCheckMode::Unsafe(ast::UnsafeSource::UserProvided)
         } else {
             ast::BlockCheckMode::Default
         };
         if b.label().is_some() || b.async_token().is_some() || b.const_token().is_some() {
-            self.unsupported(self.nsp(b.syntax()), "a block where rustc expects a plain one");
+            self.unsupported(
+                self.nsp(b.syntax()),
+                "a block where rustc expects a plain one",
+            );
         }
         self.block_from(b, span, rules)
     }
@@ -614,12 +727,22 @@ impl Lower<'_> {
         }
     }
 
-    fn block_from(&self, b: &ra::BlockExpr, span: Span, rules: ast::BlockCheckMode) -> Box<ast::Block> {
+    fn block_from(
+        &self,
+        b: &ra::BlockExpr,
+        span: Span,
+        rules: ast::BlockCheckMode,
+    ) -> Box<ast::Block> {
         let stmts = match b.stmt_list() {
             Some(list) => self.stmts(&list),
             None => ThinVec::new(),
         };
-        Box::new(ast::Block { stmts, id: DUMMY_NODE_ID, rules, span })
+        Box::new(ast::Block {
+            stmts,
+            id: DUMMY_NODE_ID,
+            rules,
+            span,
+        })
     }
 
     /// rustc's `parse_full_stmt` for each statement, with a stray `;` an empty statement.
@@ -640,9 +763,10 @@ impl Lower<'_> {
                             stmts.push(s);
                         }
                     } else if let Some(e) = ra::Expr::cast(n.clone())
-                        && tail.as_ref().is_some_and(|t| t.syntax() == &n) {
-                            stmts.push(self.expr_stmt(&e, None));
-                        }
+                        && tail.as_ref().is_some_and(|t| t.syntax() == &n)
+                    {
+                        stmts.push(self.expr_stmt(&e, None));
+                    }
                 }
             }
         }
@@ -663,7 +787,11 @@ impl Lower<'_> {
                 }
                 let item = self.item(item)?;
                 let span = item.span;
-                Some(ast::Stmt { id: DUMMY_NODE_ID, kind: ast::StmtKind::Item(item), span })
+                Some(ast::Stmt {
+                    id: DUMMY_NODE_ID,
+                    kind: ast::StmtKind::Item(item),
+                    span,
+                })
             }
         }
     }
@@ -683,15 +811,28 @@ impl Lower<'_> {
         match semi {
             Some(semi) => {
                 let span = lo.to(self.tsp(&semi));
-                ast::Stmt { id: DUMMY_NODE_ID, kind: ast::StmtKind::Semi(expr), span }
+                ast::Stmt {
+                    id: DUMMY_NODE_ID,
+                    kind: ast::StmtKind::Semi(expr),
+                    span,
+                }
             }
-            None => ast::Stmt { id: DUMMY_NODE_ID, kind: ast::StmtKind::Expr(expr), span: lo },
+            None => ast::Stmt {
+                id: DUMMY_NODE_ID,
+                kind: ast::StmtKind::Expr(expr),
+                span: lo,
+            },
         }
     }
 
     /// rustc's `parse_stmt_mac`: a macro call in statement position, `Braces` for `{..}`,
     /// `Semicolon` once a `;` follows.
-    fn mac_stmt(&self, mc: &ra::MacroCall, attrs: ast::AttrVec, semi: Option<syntax::SyntaxToken>) -> ast::Stmt {
+    fn mac_stmt(
+        &self,
+        mc: &ra::MacroCall,
+        attrs: ast::AttrVec,
+        semi: Option<syntax::SyntaxToken>,
+    ) -> ast::Stmt {
         let mac = self.mac_call(mc);
         let lo = self.nsp(mc.syntax());
         let style = match (semi.is_some(), mac.args.delim) {
@@ -705,7 +846,12 @@ impl Lower<'_> {
         };
         ast::Stmt {
             id: DUMMY_NODE_ID,
-            kind: ast::StmtKind::MacCall(Box::new(ast::MacCallStmt { mac, style, attrs, tokens: None })),
+            kind: ast::StmtKind::MacCall(Box::new(ast::MacCallStmt {
+                mac,
+                style,
+                attrs,
+                tokens: None,
+            })),
             span,
         }
     }
@@ -719,7 +865,11 @@ impl Lower<'_> {
             Some(p) => self.pat(&p),
             None => {
                 self.unsupported(span, "a `let` without a pattern");
-                Box::new(ast::Pat { id: DUMMY_NODE_ID, kind: ast::PatKind::Wild, span })
+                Box::new(ast::Pat {
+                    id: DUMMY_NODE_ID,
+                    kind: ast::PatKind::Wild,
+                    span,
+                })
             }
         };
         let colon_sp = l.colon_token().map(|t| self.tsp(&t));
@@ -752,7 +902,11 @@ impl Lower<'_> {
             attrs,
             tokens: None,
         };
-        ast::Stmt { id: DUMMY_NODE_ID, kind: ast::StmtKind::Let(Box::new(local)), span }
+        ast::Stmt {
+            id: DUMMY_NODE_ID,
+            kind: ast::StmtKind::Let(Box::new(local)),
+            span,
+        }
     }
 }
 

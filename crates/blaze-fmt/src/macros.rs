@@ -1,3 +1,5 @@
+// Follows `src/tools/rustfmt/src/macros.rs` at rust-lang/rust 12433c307 (MIT or Apache-2.0).
+
 // Format list-like macro invocations. These are invocations whose token trees
 // can be interpreted as expressions and separated by commas.
 // Note that these token trees do not actually have to be interpreted as

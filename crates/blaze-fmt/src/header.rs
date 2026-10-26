@@ -1,3 +1,5 @@
+// Follows `src/tools/rustfmt/src/header.rs` at rust-lang/rust 12433c307 (MIT or Apache-2.0).
+
 //! headers are sets of consecutive keywords and tokens, such as
 //! `pub const unsafe fn foo` and `pub(crate) unsafe trait Bar`.
 //!

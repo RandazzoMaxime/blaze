@@ -1,10 +1,12 @@
+// Follows `src/tools/rustfmt/src/expr.rs` at rust-lang/rust 12433c307 (MIT or Apache-2.0).
+
 use std::borrow::Cow;
 use std::cmp::min;
 
-use itertools::Itertools;
 use crate::ast::token::{Delimiter, Lit, LitKind};
-use crate::ast::{ForLoopKind, MatchKind, self, token};
+use crate::ast::{self, ForLoopKind, MatchKind, token};
 use crate::span::{BytePos, Span};
+use itertools::Itertools;
 use tracing::debug;
 
 use crate::chains::rewrite_chain;
@@ -2499,7 +2501,11 @@ fn parse_float_symbol(symbol: &str) -> Result<FloatSymbolParts<'_>, &'static str
     // This regex may accept invalid float literals (such as `1`, `_` or `2.e3`). That's ok.
     // We only use it to parse literals whose validity has already been established.
     // The regex `^([0-9_]+)(?:\.([0-9_]+)?)?([eE][+-]?[0-9_]+)?$`, matched by hand.
-    let digits = |s: &str| s.bytes().take_while(|b| b.is_ascii_digit() || *b == b'_').count();
+    let digits = |s: &str| {
+        s.bytes()
+            .take_while(|b| b.is_ascii_digit() || *b == b'_')
+            .count()
+    };
     let integer_len = digits(symbol);
     if integer_len == 0 {
         return Err("invalid float literal");

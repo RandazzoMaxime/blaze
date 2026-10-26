@@ -1,8 +1,10 @@
+// Follows `src/tools/rustfmt/src/matches.rs` at rust-lang/rust 12433c307 (MIT or Apache-2.0).
+
 //! Format match expression.
 
 use std::iter::repeat;
 
-use crate::ast::{MatchKind, self};
+use crate::ast::{self, MatchKind};
 use crate::span::{BytePos, Span};
 use tracing::debug;
 

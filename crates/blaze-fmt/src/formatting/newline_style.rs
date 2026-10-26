@@ -1,3 +1,5 @@
+// Follows `src/tools/rustfmt/src/formatting/newline_style.rs` at rust-lang/rust 12433c307 (MIT or Apache-2.0).
+
 use crate::NewlineStyle;
 
 /// Apply this newline style to the formatted text. When the style is set

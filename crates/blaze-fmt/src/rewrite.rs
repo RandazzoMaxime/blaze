@@ -1,3 +1,5 @@
+// Follows `src/tools/rustfmt/src/rewrite.rs` at rust-lang/rust 12433c307 (MIT or Apache-2.0).
+
 // A generic trait to abstract the rewriting of an element (of the AST).
 
 use std::cell::{Cell, RefCell};

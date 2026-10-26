@@ -68,7 +68,15 @@ impl Options {
         Options::default()
     }
 
-    fn push(&mut self, short: &str, long: &str, desc: &str, hint: &str, hasarg: HasArg, occur: Occur) {
+    fn push(
+        &mut self,
+        short: &str,
+        long: &str,
+        desc: &str,
+        hint: &str,
+        hasarg: HasArg,
+        occur: Occur,
+    ) {
         self.opts.push(Opt {
             short: short.to_owned(),
             long: long.to_owned(),
@@ -84,23 +92,43 @@ impl Options {
         self
     }
 
-    pub(crate) fn optopt(&mut self, short: &str, long: &str, desc: &str, hint: &str) -> &mut Options {
+    pub(crate) fn optopt(
+        &mut self,
+        short: &str,
+        long: &str,
+        desc: &str,
+        hint: &str,
+    ) -> &mut Options {
         self.push(short, long, desc, hint, HasArg::Yes, Occur::Optional);
         self
     }
 
-    pub(crate) fn optmulti(&mut self, short: &str, long: &str, desc: &str, hint: &str) -> &mut Options {
+    pub(crate) fn optmulti(
+        &mut self,
+        short: &str,
+        long: &str,
+        desc: &str,
+        hint: &str,
+    ) -> &mut Options {
         self.push(short, long, desc, hint, HasArg::Yes, Occur::Multi);
         self
     }
 
-    pub(crate) fn optflagopt(&mut self, short: &str, long: &str, desc: &str, hint: &str) -> &mut Options {
+    pub(crate) fn optflagopt(
+        &mut self,
+        short: &str,
+        long: &str,
+        desc: &str,
+        hint: &str,
+    ) -> &mut Options {
         self.push(short, long, desc, hint, HasArg::Maybe, Occur::Optional);
         self
     }
 
     fn find(&self, name: &str) -> Option<usize> {
-        self.opts.iter().position(|o| o.long == name || (name.chars().count() == 1 && o.short == name))
+        self.opts
+            .iter()
+            .position(|o| o.long == name || (name.chars().count() == 1 && o.short == name))
     }
 
     pub(crate) fn parse<I, S>(&self, args: I) -> Result<Matches, Fail>
@@ -143,7 +171,9 @@ impl Options {
                 }
             }
             for (name, attached, was_long) in names {
-                let id = self.find(&name).ok_or_else(|| Fail::UnrecognizedOption(name.clone()))?;
+                let id = self
+                    .find(&name)
+                    .ok_or_else(|| Fail::UnrecognizedOption(name.clone()))?;
                 let opt = &self.opts[id];
                 match opt.hasarg {
                     HasArg::No => {
@@ -174,7 +204,11 @@ impl Options {
             }
         }
         Ok(Matches {
-            names: self.opts.iter().map(|o| (o.short.clone(), o.long.clone())).collect(),
+            names: self
+                .opts
+                .iter()
+                .map(|o| (o.short.clone(), o.long.clone()))
+                .collect(),
             vals,
             free,
         })

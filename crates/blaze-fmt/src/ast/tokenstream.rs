@@ -1,3 +1,5 @@
+// Follows `compiler/rustc_ast/src/tokenstream.rs` at rust-lang/rust 12433c307 (MIT or Apache-2.0).
+
 //! # Token Streams
 //!
 //! `TokenStream`s represent syntactic objects before they are converted into ASTs.
@@ -11,9 +13,6 @@ use std::sync::{Arc, LazyLock};
 
 use crate::ast::token::{self, Delimiter, Token, TokenKind};
 use crate::span::{DUMMY_SP, Span};
-
-#[cfg(test)]
-mod tests;
 
 /// Part of a `TokenStream`.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -148,7 +147,11 @@ pub struct TokenStream(Arc<Vec<TokenTree>>);
 
 impl TokenStream {
     pub fn new(tts: Vec<TokenTree>) -> TokenStream {
-        if tts.is_empty() { TokenStream::default() } else { TokenStream(Arc::new(tts)) }
+        if tts.is_empty() {
+            TokenStream::default()
+        } else {
+            TokenStream(Arc::new(tts))
+        }
     }
 
     pub fn is_empty(&self) -> bool {
@@ -241,7 +244,15 @@ impl TokenStream {
         while let Some((pos, ts)) = iter.next() {
             if let Some((_, next)) = iter.peek() {
                 let sp = match (&ts, &next) {
-                    (_, TokenTree::Token(Token { kind: token::Comma, .. }, _)) => continue,
+                    (
+                        _,
+                        TokenTree::Token(
+                            Token {
+                                kind: token::Comma, ..
+                            },
+                            _,
+                        ),
+                    ) => continue,
                     (
                         TokenTree::Token(token_left, Spacing::Alone),
                         TokenTree::Token(token_right, _),
@@ -320,7 +331,10 @@ struct TokenTreeCursor {
 impl TokenTreeCursor {
     #[inline]
     fn new(stream: TokenStream) -> Self {
-        TokenTreeCursor { stream, next_idx: 0 }
+        TokenTreeCursor {
+            stream,
+            next_idx: 0,
+        }
     }
 
     /// Gets the current token tree within this cursor. In a debug build it panics on a cursor that
@@ -380,7 +394,10 @@ pub struct TokenCursor {
 impl TokenCursor {
     #[inline]
     pub fn new(stream: TokenStream) -> Self {
-        TokenCursor { curr: TokenTreeCursor::new(stream), stack: vec![] }
+        TokenCursor {
+            curr: TokenTreeCursor::new(stream),
+            stack: vec![],
+        }
     }
 
     /// Gets the next token and advances the cursor by one.
@@ -453,7 +470,10 @@ impl TokenCursor {
                         self.curr.bump(); // move past the `Delimited`
                         self.stack.push(mem::replace(&mut self.curr, trees));
                         if !delim.skip() {
-                            return (Token::new(delim.as_open_token_kind(), sp.open), spacing.open);
+                            return (
+                                Token::new(delim.as_open_token_kind(), sp.open),
+                                spacing.open,
+                            );
                         }
                         // No open delimiter to return; continue on to the next iteration.
                     }
@@ -465,7 +485,10 @@ impl TokenCursor {
                 };
                 self.curr = parent;
                 if !delim.skip() {
-                    return (Token::new(delim.as_close_token_kind(), span.close), spacing.close);
+                    return (
+                        Token::new(delim.as_close_token_kind(), span.close),
+                        spacing.close,
+                    );
                 }
                 // No close delimiter to return; continue on to the next iteration.
             } else {
@@ -487,7 +510,10 @@ pub struct DelimSpan {
 
 impl DelimSpan {
     pub fn from_single(sp: Span) -> Self {
-        DelimSpan { open: sp, close: sp }
+        DelimSpan {
+            open: sp,
+            close: sp,
+        }
     }
 
     pub fn from_pair(open: Span, close: Span) -> Self {
@@ -514,4 +540,3 @@ impl DelimSpacing {
         DelimSpacing { open, close }
     }
 }
-

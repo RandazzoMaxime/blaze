@@ -1,3 +1,5 @@
+// Follows `src/tools/rustfmt/src/reorder.rs` at rust-lang/rust 12433c307 (MIT or Apache-2.0).
+
 //! Reorder items.
 //!
 //! `mod`, `extern crate` and `use` declarations are reordered in alphabetical

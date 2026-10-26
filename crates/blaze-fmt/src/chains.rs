@@ -1,3 +1,5 @@
+// Follows `src/tools/rustfmt/src/chains.rs` at rust-lang/rust 12433c307 (MIT or Apache-2.0).
+
 //! Formatting of chained expressions, i.e., expressions that are chained by
 //! dots: struct and enum field access, method calls, and try shorthand (`?`).
 //!

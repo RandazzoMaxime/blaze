@@ -1,3 +1,5 @@
+// Follows `src/tools/rustfmt/src/config/file_lines.rs` at rust-lang/rust 12433c307 (MIT or Apache-2.0).
+
 //! This module contains types and functions to support formatting specific line ranges.
 
 use itertools::Itertools;

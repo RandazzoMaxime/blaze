@@ -1,3 +1,5 @@
+// Follows `src/tools/rustfmt/src/patterns.rs` at rust-lang/rust 12433c307 (MIT or Apache-2.0).
+
 use crate::ast::{self, BindingMode, ByRef, Pat, PatField, PatKind};
 use crate::span::{BytePos, Span};
 

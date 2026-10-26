@@ -1,3 +1,5 @@
+// Follows `src/tools/rustfmt/src/emitter/checkstyle/xml.rs` at rust-lang/rust 12433c307 (MIT or Apache-2.0).
+
 use std::fmt::{self, Display};
 
 /// Convert special characters into XML entities.

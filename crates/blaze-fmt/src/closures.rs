@@ -1,4 +1,6 @@
-use crate::ast::{Label, self};
+// Follows `src/tools/rustfmt/src/closures.rs` at rust-lang/rust 12433c307 (MIT or Apache-2.0).
+
+use crate::ast::{self, Label};
 use crate::span::Span;
 use tracing::debug;
 

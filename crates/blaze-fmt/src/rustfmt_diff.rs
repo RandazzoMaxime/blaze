@@ -1,3 +1,5 @@
+// Follows `src/tools/rustfmt/src/rustfmt_diff.rs` at rust-lang/rust 12433c307 (MIT or Apache-2.0).
+
 use std::collections::VecDeque;
 use std::fmt;
 use std::io;

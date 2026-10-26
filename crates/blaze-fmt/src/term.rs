@@ -67,14 +67,12 @@ fn colour_allowed() -> bool {
 
 pub(crate) fn stdout() -> Option<Box<dyn Terminal<Output = io::Stdout>>> {
     let out = io::stdout();
-    (colour_allowed() && out.is_terminal()).then(|| {
-        Box::new(AnsiTerminal { out }) as Box<dyn Terminal<Output = io::Stdout>>
-    })
+    (colour_allowed() && out.is_terminal())
+        .then(|| Box::new(AnsiTerminal { out }) as Box<dyn Terminal<Output = io::Stdout>>)
 }
 
 pub(crate) fn stderr() -> Option<Box<dyn Terminal<Output = io::Stderr>>> {
     let out = io::stderr();
-    (colour_allowed() && out.is_terminal()).then(|| {
-        Box::new(AnsiTerminal { out }) as Box<dyn Terminal<Output = io::Stderr>>
-    })
+    (colour_allowed() && out.is_terminal())
+        .then(|| Box::new(AnsiTerminal { out }) as Box<dyn Terminal<Output = io::Stderr>>)
 }

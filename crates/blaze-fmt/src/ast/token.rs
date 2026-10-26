@@ -1,13 +1,15 @@
+// Follows `compiler/rustc_ast/src/token.rs` at rust-lang/rust 12433c307 (MIT or Apache-2.0).
+
 use std::borrow::Cow;
 use std::fmt;
 
+use crate::ast::{self, ErrorGuaranteed};
+use crate::span::edition::Edition;
+use crate::span::{self as sp, DUMMY_SP, Span, Symbol, kw, sym};
 pub use LitKind::*;
 pub use NtExprKind::*;
 pub use NtPatKind::*;
 pub use TokenKind::*;
-use crate::ast::{self, ErrorGuaranteed};
-use crate::span::edition::Edition;
-use crate::span::{self as sp, DUMMY_SP, Span, Symbol, kw, sym};
 
 /// Represents the kind of doc comment it is, ie `///` or `#[doc = ""]`.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -99,8 +101,14 @@ impl fmt::Display for MetaVarKind {
             MetaVarKind::Stmt => sym::stmt,
             MetaVarKind::Pat(PatParam { inferred: true } | PatWithOr) => sym::pat,
             MetaVarKind::Pat(PatParam { inferred: false }) => sym::pat_param,
-            MetaVarKind::Expr { kind: Expr2021 { inferred: true } | Expr, .. } => sym::expr,
-            MetaVarKind::Expr { kind: Expr2021 { inferred: false }, .. } => sym::expr_2021,
+            MetaVarKind::Expr {
+                kind: Expr2021 { inferred: true } | Expr,
+                ..
+            } => sym::expr,
+            MetaVarKind::Expr {
+                kind: Expr2021 { inferred: false },
+                ..
+            } => sym::expr_2021,
             MetaVarKind::Ty { .. } => sym::ty,
             MetaVarKind::Ident => sym::ident,
             MetaVarKind::Lifetime => sym::lifetime,
@@ -207,7 +215,11 @@ pub struct Lit {
 
 impl Lit {
     pub fn new(kind: LitKind, symbol: Symbol, suffix: Option<Symbol>) -> Lit {
-        Lit { kind, symbol, suffix }
+        Lit {
+            kind,
+            symbol,
+            suffix,
+        }
     }
 
     /// Returns `true` if this is semantically a float literal. This includes
@@ -244,7 +256,11 @@ impl Lit {
 
 impl fmt::Display for Lit {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let Lit { kind, symbol, suffix } = *self;
+        let Lit {
+            kind,
+            symbol,
+            suffix,
+        } = *self;
         match kind {
             Byte => write!(f, "b'{symbol}'")?,
             Char => write!(f, "'{symbol}'")?,
@@ -263,9 +279,11 @@ impl fmt::Display for Lit {
                 string = symbol
             )?,
             CStr => write!(f, "c\"{symbol}\"")?,
-            CStrRaw(n) => {
-                write!(f, "cr{delim}\"{symbol}\"{delim}", delim = "#".repeat(n as usize))?
-            }
+            CStrRaw(n) => write!(
+                f,
+                "cr{delim}\"{symbol}\"{delim}",
+                delim = "#".repeat(n as usize)
+            )?,
             Integer | Float | Bool | Err(_) => write!(f, "{symbol}")?,
         }
 
@@ -350,8 +368,17 @@ fn ident_can_begin_type(name: Symbol, span: Span, kind: IdentKind) -> bool {
 
     !ident_token.is_reserved_ident()
         || ident_token.is_path_segment_keyword()
-        || [kw::Underscore, kw::For, kw::Impl, kw::Fn, kw::Unsafe, kw::Extern, kw::Typeof, kw::Dyn]
-            .contains(&name)
+        || [
+            kw::Underscore,
+            kw::For,
+            kw::Impl,
+            kw::Fn,
+            kw::Unsafe,
+            kw::Extern,
+            kw::Typeof,
+            kw::Dyn,
+        ]
+        .contains(&name)
 }
 
 #[derive(PartialEq, Eq, Hash, Debug, Copy, Clone)]
@@ -624,7 +651,11 @@ impl Token {
     /// This creates a raw identifier if necessary.
     /// It will never create a forced keyword.
     pub fn from_ast_ident(ident: sp::Ident) -> Self {
-        let kind = if ident.is_raw_guess() { IdentKind::Raw } else { IdentKind::Normal };
+        let kind = if ident.is_raw_guess() {
+            IdentKind::Raw
+        } else {
+            IdentKind::Normal
+        };
         Token::new(Ident(ident.name, kind), ident.span)
     }
 
@@ -800,9 +831,10 @@ impl Token {
             Ident(name, IdentKind::Normal | IdentKind::ForcedKeyword) if name.is_bool_lit() => true,
             OpenInvisible(InvisibleOrigin::MetaVar(mv_kind)) => match mv_kind {
                 MetaVarKind::Literal => true,
-                MetaVarKind::Expr { can_begin_literal_maybe_minus, .. } => {
-                    can_begin_literal_maybe_minus
-                }
+                MetaVarKind::Expr {
+                    can_begin_literal_maybe_minus,
+                    ..
+                } => can_begin_literal_maybe_minus,
                 _ => false,
             },
             _ => false,
@@ -814,7 +846,10 @@ impl Token {
             Literal(..) => true,
             OpenInvisible(InvisibleOrigin::MetaVar(mv_kind)) => match mv_kind {
                 MetaVarKind::Literal => true,
-                MetaVarKind::Expr { can_begin_string_literal, .. } => can_begin_string_literal,
+                MetaVarKind::Expr {
+                    can_begin_string_literal,
+                    ..
+                } => can_begin_string_literal,
                 _ => false,
             },
             _ => false,
@@ -915,7 +950,8 @@ impl Token {
     }
 
     pub fn is_path_segment_keyword(&self) -> bool {
-        self.non_raw_ident().is_some_and(sp::Ident::is_path_segment_keyword)
+        self.non_raw_ident()
+            .is_some_and(sp::Ident::is_path_segment_keyword)
     }
 
     /// Returns true for reserved identifiers used internally for elided lifetimes,
@@ -931,12 +967,14 @@ impl Token {
 
     /// Returns `true` if the token is a keyword reserved for possible future use.
     pub fn is_unused_keyword(&self) -> bool {
-        self.non_raw_ident().is_some_and(sp::Ident::is_unused_keyword)
+        self.non_raw_ident()
+            .is_some_and(sp::Ident::is_unused_keyword)
     }
 
     /// Returns `true` if the token is either a special identifier or a keyword.
     pub fn is_reserved_ident(&self) -> bool {
-        self.ident().is_some_and(|(id, kind)| ident_of_kind_is_reserved(id, kind))
+        self.ident()
+            .is_some_and(|(id, kind)| ident_of_kind_is_reserved(id, kind))
     }
 
     pub fn is_non_reserved_ident(&self) -> bool {
@@ -944,7 +982,9 @@ impl Token {
     }
 
     pub fn non_reserved_ident(&self) -> Option<sp::Ident> {
-        self.ident().filter(|&(id, kind)| !ident_of_kind_is_reserved(id, kind)).map(|(id, _)| id)
+        self.ident()
+            .filter(|&(id, kind)| !ident_of_kind_is_reserved(id, kind))
+            .map(|(id, _)| id)
     }
 
     /// If this token is a non-raw identifier, return the identifier in question.
@@ -963,13 +1003,25 @@ impl Token {
     pub fn is_numeric_lit(&self) -> bool {
         matches!(
             self.kind,
-            Literal(Lit { kind: LitKind::Integer, .. }) | Literal(Lit { kind: LitKind::Float, .. })
+            Literal(Lit {
+                kind: LitKind::Integer,
+                ..
+            }) | Literal(Lit {
+                kind: LitKind::Float,
+                ..
+            })
         )
     }
 
     /// Returns `true` if the token is the integer literal.
     pub fn is_integer_lit(&self) -> bool {
-        matches!(self.kind, Literal(Lit { kind: LitKind::Integer, .. }))
+        matches!(
+            self.kind,
+            Literal(Lit {
+                kind: LitKind::Integer,
+                ..
+            })
+        )
     }
 
     /// Is this an invisible open delimiter at the start of a token sequence

@@ -138,7 +138,10 @@ impl SpanData {
     }
 }
 
-pub const DUMMY_SP: Span = Span { lo: BytePos(0), hi: BytePos(0) };
+pub const DUMMY_SP: Span = Span {
+    lo: BytePos(0),
+    hi: BytePos(0),
+};
 
 impl Span {
     pub fn new(
@@ -166,7 +169,12 @@ impl Span {
     }
 
     pub fn data(self) -> SpanData {
-        SpanData { lo: self.lo, hi: self.hi, ctxt: SyntaxContext, parent: None }
+        SpanData {
+            lo: self.lo,
+            hi: self.hi,
+            ctxt: SyntaxContext,
+            parent: None,
+        }
     }
 
     pub fn ctxt(self) -> SyntaxContext {
@@ -223,7 +231,12 @@ impl Span {
 
     /// From the start of `self` to the end of `end`, whichever order they are in.
     pub fn to(self, end: Span) -> Span {
-        Span::new(cmp::min(self.lo, end.lo), cmp::max(self.hi, end.hi), SyntaxContext, None)
+        Span::new(
+            cmp::min(self.lo, end.lo),
+            cmp::max(self.hi, end.hi),
+            SyntaxContext,
+            None,
+        )
     }
 
     /// From the end of `self` to the start of `end`.
@@ -296,7 +309,9 @@ pub struct RealFileName {
 
 impl RealFileName {
     pub fn from_path(path: impl Into<PathBuf>) -> RealFileName {
-        RealFileName { local_path: path.into() }
+        RealFileName {
+            local_path: path.into(),
+        }
     }
 
     pub fn local_path(&self) -> Option<&Path> {
@@ -310,10 +325,7 @@ impl RealFileName {
 
 /// Runs `f` with the edition the session's spans are written in, as rustc's session globals
 /// hold it; keywords that came with an edition are reserved only from it on.
-pub fn create_session_if_not_set_then<R>(
-    edition: edition::Edition,
-    f: impl FnOnce(&()) -> R,
-) -> R {
+pub fn create_session_if_not_set_then<R>(edition: edition::Edition, f: impl FnOnce(&()) -> R) -> R {
     let old = edition::set_session_edition(edition);
     let result = f(&());
     edition::set_session_edition(old);

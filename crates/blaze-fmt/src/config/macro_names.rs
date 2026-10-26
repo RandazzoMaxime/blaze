@@ -1,3 +1,5 @@
+// Follows `src/tools/rustfmt/src/config/macro_names.rs` at rust-lang/rust 12433c307 (MIT or Apache-2.0).
+
 //! This module contains types and functions to support formatting specific macros.
 
 use itertools::Itertools;

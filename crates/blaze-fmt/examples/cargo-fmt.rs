@@ -2,5 +2,7 @@
 //! run before `cargo blaze fmt` dispatches to it.
 
 fn main() {
-    std::process::exit(blaze_fmt::cargo_fmt::main(std::env::args().skip(1).collect()));
+    std::process::exit(blaze_fmt::cargo_fmt::main(
+        std::env::args().skip(1).collect(),
+    ));
 }

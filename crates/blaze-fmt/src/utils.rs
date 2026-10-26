@@ -1,3 +1,5 @@
+// Follows `src/tools/rustfmt/src/utils.rs` at rust-lang/rust 12433c307 (MIT or Apache-2.0).
+
 use std::borrow::Cow;
 
 use crate::ast::YieldKind;

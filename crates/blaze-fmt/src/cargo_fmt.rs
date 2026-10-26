@@ -592,7 +592,9 @@ fn run_rustfmt(
         let mut args: Vec<String> = files.iter().map(|f| f.display().to_string()).collect();
         args.extend(["--edition".to_owned(), edition.to_string()]);
         args.extend(fmt_args.iter().cloned());
-        let _quiet = (verbosity == Verbosity::Quiet).then(StdoutToNull::new).flatten();
+        let _quiet = (verbosity == Verbosity::Quiet)
+            .then(StdoutToNull::new)
+            .flatten();
         status.push(crate::cli::main(args));
     }
 

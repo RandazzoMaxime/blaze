@@ -1,3 +1,5 @@
+// Follows `src/tools/rustfmt/src/config/options.rs` at rust-lang/rust 12433c307 (MIT or Apache-2.0).
+
 #![allow(unused_imports)]
 
 use std::collections::{HashSet, hash_set};
@@ -5,8 +7,8 @@ use std::fmt;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
-use itertools::Itertools;
 use crate::config::config_type_macro::config_type;
+use itertools::Itertools;
 use serde::de::{SeqAccess, Visitor};
 use serde::ser::SerializeSeq;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};

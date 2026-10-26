@@ -1,3 +1,5 @@
+// Follows `src/tools/rustfmt/src/format_report_formatter.rs` at rust-lang/rust 12433c307 (MIT or Apache-2.0).
+
 use crate::formatting::FormattingError;
 use crate::{ErrorKind, FormatReport};
 use annotate_snippets::{Annotation, AnnotationKind, Group, Level, Padding, Renderer, Snippet};

@@ -1,9 +1,11 @@
+// Follows `src/tools/rustfmt/src/comment.rs` at rust-lang/rust 12433c307 (MIT or Apache-2.0).
+
 // Formatting and tools for comments.
 
 use std::{borrow::Cow, iter};
 
-use itertools::{Itertools as _, MultiPeek, multipeek};
 use crate::span::Span;
+use itertools::{Itertools as _, MultiPeek, multipeek};
 use tracing::{debug, trace};
 
 use crate::config::Config;

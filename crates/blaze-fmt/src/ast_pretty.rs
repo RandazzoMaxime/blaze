@@ -29,12 +29,19 @@ pub(crate) fn path_segment_to_string(p: &ast::PathSegment) -> String {
 fn print_path_segment(out: &mut String, segment: &ast::PathSegment) {
     if segment.ident.name != kw::PathRoot {
         out.push_str(&print_ident(segment.ident));
-        assert!(segment.args.is_none(), "rustfmt prints only module-style paths");
+        assert!(
+            segment.args.is_none(),
+            "rustfmt prints only module-style paths"
+        );
     }
 }
 
 fn print_ident(ident: Ident) -> String {
-    if ident.is_raw_guess() { format!("r#{}", ident.name) } else { ident.name.to_string() }
+    if ident.is_raw_guess() {
+        format!("r#{}", ident.name)
+    } else {
+        ident.name.to_string()
+    }
 }
 
 fn ident_kind_to_string(name: Symbol, kind: IdentKind) -> String {
@@ -156,21 +163,36 @@ fn doc_comment_to_string(
 }
 
 fn literal_to_string(lit: tk::Lit) -> String {
-    let tk::Lit { kind, symbol, suffix } = lit;
+    let tk::Lit {
+        kind,
+        symbol,
+        suffix,
+    } = lit;
     let mut out = match kind {
         tk::Byte => format!("b'{symbol}'"),
         tk::Char => format!("'{symbol}'"),
         tk::Str => format!("\"{symbol}\""),
         tk::StrRaw(n) => {
-            format!("r{delim}\"{string}\"{delim}", delim = "#".repeat(n as usize), string = symbol)
+            format!(
+                "r{delim}\"{string}\"{delim}",
+                delim = "#".repeat(n as usize),
+                string = symbol
+            )
         }
         tk::ByteStr => format!("b\"{symbol}\""),
         tk::ByteStrRaw(n) => {
-            format!("br{delim}\"{string}\"{delim}", delim = "#".repeat(n as usize), string = symbol)
+            format!(
+                "br{delim}\"{string}\"{delim}",
+                delim = "#".repeat(n as usize),
+                string = symbol
+            )
         }
         tk::CStr => format!("c\"{symbol}\""),
         tk::CStrRaw(n) => {
-            format!("cr{delim}\"{symbol}\"{delim}", delim = "#".repeat(n as usize))
+            format!(
+                "cr{delim}\"{symbol}\"{delim}",
+                delim = "#".repeat(n as usize)
+            )
         }
         tk::Integer | tk::Float | tk::Bool | tk::Err(_) => symbol.to_string(),
     };

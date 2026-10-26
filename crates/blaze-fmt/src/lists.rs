@@ -1,3 +1,5 @@
+// Follows `src/tools/rustfmt/src/lists.rs` at rust-lang/rust 12433c307 (MIT or Apache-2.0).
+
 //! Format list-like expressions and items.
 
 use std::cmp;

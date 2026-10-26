@@ -52,7 +52,11 @@ impl DelimIndex {
             if let TokenTree::Delimited(dspan, _, delim, inner) = tt {
                 self.by_open.insert(
                     dspan.open.lo(),
-                    Delimited { dspan: *dspan, delim: *delim, tokens: inner.clone() },
+                    Delimited {
+                        dspan: *dspan,
+                        delim: *delim,
+                        tokens: inner.clone(),
+                    },
                 );
                 self.add(inner);
             }
@@ -83,7 +87,12 @@ pub(crate) struct Lower<'a> {
 
 impl<'a> Lower<'a> {
     pub(crate) fn new(base: BytePos, edition: Edition, delims: &'a DelimIndex) -> Lower<'a> {
-        Lower { base, edition, delims, error: RefCell::new(None) }
+        Lower {
+            base,
+            edition,
+            delims,
+            error: RefCell::new(None),
+        }
     }
 
     pub(crate) fn finish(self) -> Result<(), Unsupported> {
@@ -105,7 +114,11 @@ impl<'a> Lower<'a> {
     fn fail(&self, span: Span, message: String, rustc_rejects: bool) {
         let mut error = self.error.borrow_mut();
         if error.is_none() {
-            *error = Some(Unsupported { span, message, rustc_rejects });
+            *error = Some(Unsupported {
+                span,
+                message,
+                rustc_rejects,
+            });
         }
     }
 
@@ -175,7 +188,10 @@ impl<'a> Lower<'a> {
             }
             None => Ident::new(sym::empty, self.sp(lt.syntax().text_range())),
         };
-        ast::Lifetime { id: DUMMY_NODE_ID, ident }
+        ast::Lifetime {
+            id: DUMMY_NODE_ID,
+            ident,
+        }
     }
 
     /// A literal token as rustc's lexer cooks it.
@@ -189,19 +205,29 @@ impl<'a> Lower<'a> {
         let span = self.tsp(token);
         match lexer::lex_token_trees(text, span.lo(), self.edition, StripTokens::Nothing) {
             Ok(stream) => match stream.iter().next() {
-                Some(TokenTree::Token(Token { kind: TokenKind::Literal(lit), .. }, _))
-                    if stream.len() == 1 =>
-                {
-                    *lit
-                }
+                Some(TokenTree::Token(
+                    Token {
+                        kind: TokenKind::Literal(lit),
+                        ..
+                    },
+                    _,
+                )) if stream.len() == 1 => *lit,
                 _ => {
                     self.unsupported(span, "a literal rustc lexes as several tokens");
-                    token::Lit::new(token::Err(ast::ErrorGuaranteed::unchecked_error_guaranteed()), Symbol::intern(text), None)
+                    token::Lit::new(
+                        token::Err(ast::ErrorGuaranteed::unchecked_error_guaranteed()),
+                        Symbol::intern(text),
+                        None,
+                    )
                 }
             },
             Err(err) => {
                 self.unsupported(err.span, err.message);
-                token::Lit::new(token::Err(ast::ErrorGuaranteed::unchecked_error_guaranteed()), Symbol::intern(text), None)
+                token::Lit::new(
+                    token::Err(ast::ErrorGuaranteed::unchecked_error_guaranteed()),
+                    Symbol::intern(text),
+                    None,
+                )
             }
         }
     }
@@ -218,7 +244,11 @@ impl<'a> Lower<'a> {
     pub(crate) fn delim_args(&self, tt: &ra::TokenTree) -> ast::DelimArgs {
         let open = tt.syntax().first_token();
         match open.and_then(|open| self.delimited(&open)) {
-            Some(d) => ast::DelimArgs { dspan: d.dspan, delim: d.delim, tokens: d.tokens },
+            Some(d) => ast::DelimArgs {
+                dspan: d.dspan,
+                delim: d.delim,
+                tokens: d.tokens,
+            },
             None => ast::DelimArgs {
                 dspan: DelimSpan::from_single(self.sp(tt.syntax().text_range())),
                 delim: Delimiter::Parenthesis,
@@ -235,9 +265,10 @@ impl<'a> Lower<'a> {
         for child in node.children() {
             if let Some(any) = ra::AnyAttr::cast(child)
                 && let Some(attr) = self.attr(&any)
-                    && attr.style == AttrStyle::Outer {
-                        attrs.push(attr);
-                    }
+                && attr.style == AttrStyle::Outer
+            {
+                attrs.push(attr);
+            }
         }
         attrs
     }
@@ -248,9 +279,10 @@ impl<'a> Lower<'a> {
         for child in node.children() {
             if let Some(any) = ra::AnyAttr::cast(child)
                 && let Some(attr) = self.attr(&any)
-                    && attr.style == AttrStyle::Inner {
-                        attrs.push(attr);
-                    }
+                && attr.style == AttrStyle::Inner
+            {
+                attrs.push(attr);
+            }
         }
         attrs
     }
@@ -265,10 +297,18 @@ impl<'a> Lower<'a> {
                 } else if let Some(rest) = text.strip_prefix("//!") {
                     (token::CommentKind::Line, AttrStyle::Inner, rest)
                 } else if let Some(rest) = text.strip_prefix("/**") {
-                    (token::CommentKind::Block, AttrStyle::Outer, rest.strip_suffix("*/")?)
+                    (
+                        token::CommentKind::Block,
+                        AttrStyle::Outer,
+                        rest.strip_suffix("*/")?,
+                    )
                 } else {
                     let rest = text.strip_prefix("/*!")?;
-                    (token::CommentKind::Block, AttrStyle::Inner, rest.strip_suffix("*/")?)
+                    (
+                        token::CommentKind::Block,
+                        AttrStyle::Inner,
+                        rest.strip_suffix("*/")?,
+                    )
                 };
                 Some(ast::Attribute {
                     kind: ast::AttrKind::DocComment(kind, Symbol::intern(content)),
@@ -286,7 +326,11 @@ impl<'a> Lower<'a> {
     /// from rust-analyzer's tree.
     fn normal_attr(&self, attr: &ra::Attr) -> Option<ast::Attribute> {
         let node = attr.syntax();
-        let style = if attr.excl_token().is_some() { AttrStyle::Inner } else { AttrStyle::Outer };
+        let style = if attr.excl_token().is_some() {
+            AttrStyle::Inner
+        } else {
+            AttrStyle::Outer
+        };
         let span = self.sp(node.text_range());
         let open = node
             .children_with_tokens()
@@ -306,7 +350,12 @@ impl<'a> Lower<'a> {
         })
     }
 
-    fn attr_item(&self, tokens: &TokenStream, attr: &ra::Attr, span: Span) -> Option<ast::AttrItem> {
+    fn attr_item(
+        &self,
+        tokens: &TokenStream,
+        attr: &ra::Attr,
+        span: Span,
+    ) -> Option<ast::AttrItem> {
         let tts: Vec<&TokenTree> = tokens.iter().collect();
         let mut i = 0;
         let lo = tts.first().map(|tt| tt.span())?;
@@ -314,10 +363,11 @@ impl<'a> Lower<'a> {
         let mut inner: Vec<&TokenTree> = tts.clone();
         if let Some(TokenTree::Token(t, _)) = tts.first()
             && t.is_keyword(kw::Unsafe)
-            && let Some(TokenTree::Delimited(_, _, Delimiter::Parenthesis, stream)) = tts.get(1) {
-                unsafety = ast::Safety::Unsafe(t.span);
-                inner = stream.iter().collect();
-            }
+            && let Some(TokenTree::Delimited(_, _, Delimiter::Parenthesis, stream)) = tts.get(1)
+        {
+            unsafety = ast::Safety::Unsafe(t.span);
+            inner = stream.iter().collect();
+        }
         let path = self.token_path(&inner, &mut i, span)?;
         let args = match inner.get(i) {
             None => ast::AttrArgs::Empty,
@@ -339,7 +389,10 @@ impl<'a> Lower<'a> {
                     self.unsupported(span, "an attribute value rust-analyzer did not parse");
                     return None;
                 };
-                ast::AttrArgs::Eq { eq_span, expr: self.expr(&expr) }
+                ast::AttrArgs::Eq {
+                    eq_span,
+                    expr: self.expr(&expr),
+                }
             }
             Some(tt) => {
                 self.unsupported(tt.span(), "an attribute rustc would reject");
@@ -347,7 +400,12 @@ impl<'a> Lower<'a> {
             }
         };
         let hi = tts.last().map(|tt| tt.span())?;
-        Some(ast::AttrItem { unsafety, path, args, span: lo.to(hi) })
+        Some(ast::AttrItem {
+            unsafety,
+            path,
+            args,
+            span: lo.to(hi),
+        })
     }
 
     /// A module-style path read from tokens, as attribute and macro paths are.
@@ -379,7 +437,10 @@ impl<'a> Lower<'a> {
         }
         let lo = tts[start].span();
         let hi = tts[*i - 1].span();
-        Some(ast::Path { span: lo.to(hi), segments })
+        Some(ast::Path {
+            span: lo.to(hi),
+            segments,
+        })
     }
 
     // ---- paths ----
@@ -418,7 +479,10 @@ impl<'a> Lower<'a> {
                 let trait_path = match types.next() {
                     Some(ra::Type::PathType(pt)) => pt.path(),
                     Some(other) => {
-                        self.unsupported(self.nsp(other.syntax()), "a qualified path whose trait is not a path");
+                        self.unsupported(
+                            self.nsp(other.syntax()),
+                            "a qualified path whose trait is not a path",
+                        );
                         None
                     }
                     None => None,
@@ -435,7 +499,11 @@ impl<'a> Lower<'a> {
                         None => span,
                     },
                 };
-                qself = Some(Box::new(ast::QSelf { ty, path_span, position: segments.len() }));
+                qself = Some(Box::new(ast::QSelf {
+                    ty,
+                    path_span,
+                    position: segments.len(),
+                }));
                 continue;
             }
             segments.push(self.path_segment(&seg));
@@ -462,7 +530,11 @@ impl<'a> Lower<'a> {
         } else {
             None
         };
-        ast::PathSegment { ident, id: DUMMY_NODE_ID, args }
+        ast::PathSegment {
+            ident,
+            id: DUMMY_NODE_ID,
+            args,
+        }
     }
 
     /// `<..>` with its span from `<` to `>`, leaving out a turbofish's `::`.
@@ -473,7 +545,10 @@ impl<'a> Lower<'a> {
             (Some(lo), Some(hi)) => lo.to(hi),
             _ => self.nsp(list.syntax()),
         };
-        let args = list.generic_args().map(|arg| self.angle_arg(&arg)).collect();
+        let args = list
+            .generic_args()
+            .map(|arg| self.angle_arg(&arg))
+            .collect();
         ast::GenericArgs::AngleBracketed(ast::AngleBracketedArgs { span, args })
     }
 
@@ -484,7 +559,9 @@ impl<'a> Lower<'a> {
                 None => self.missing_arg(t.syntax()),
             },
             ra::GenericArg::LifetimeArg(l) => match l.lifetime() {
-                Some(lt) => ast::AngleBracketedArg::Arg(ast::GenericArg::Lifetime(self.lifetime(&lt))),
+                Some(lt) => {
+                    ast::AngleBracketedArg::Arg(ast::GenericArg::Lifetime(self.lifetime(&lt)))
+                }
                 None => self.missing_arg(l.syntax()),
             },
             ra::GenericArg::ConstArg(c) => match c.expr() {
@@ -519,18 +596,37 @@ impl<'a> Lower<'a> {
                 .map(|rts| ast::GenericArgs::ParenthesizedElided(self.nsp(rts.syntax())))
         };
         let kind = if let Some(bounds) = a.type_bound_list() {
-            ast::AssocItemConstraintKind::Bound { bounds: self.bounds(&bounds) }
+            ast::AssocItemConstraintKind::Bound {
+                bounds: self.bounds(&bounds),
+            }
         } else if let Some(ty) = a.ty() {
-            ast::AssocItemConstraintKind::Equality { term: ast::Term::Ty(self.ty(&ty)) }
+            ast::AssocItemConstraintKind::Equality {
+                term: ast::Term::Ty(self.ty(&ty)),
+            }
         } else if let Some(c) = a.const_arg().and_then(|c| c.expr()) {
-            ast::AssocItemConstraintKind::Equality { term: ast::Term::Const(self.anon_const(&c)) }
+            ast::AssocItemConstraintKind::Equality {
+                term: ast::Term::Const(self.anon_const(&c)),
+            }
         } else if a.colon_token().is_some() {
-            ast::AssocItemConstraintKind::Bound { bounds: ThinVec::new() }
+            ast::AssocItemConstraintKind::Bound {
+                bounds: ThinVec::new(),
+            }
         } else {
-            self.unsupported(span, "an associated item constraint rust-analyzer did not parse");
-            ast::AssocItemConstraintKind::Bound { bounds: ThinVec::new() }
+            self.unsupported(
+                span,
+                "an associated item constraint rust-analyzer did not parse",
+            );
+            ast::AssocItemConstraintKind::Bound {
+                bounds: ThinVec::new(),
+            }
         };
-        ast::AssocItemConstraint { id: DUMMY_NODE_ID, ident, gen_args, kind, span }
+        ast::AssocItemConstraint {
+            id: DUMMY_NODE_ID,
+            ident,
+            gen_args,
+            kind,
+            span,
+        }
     }
 
     /// `Fn(A, B) -> C`: `span` from the name to the end of the output, `inputs_span` the
@@ -550,7 +646,11 @@ impl<'a> Lower<'a> {
             .filter_map(|arg| arg.ty())
             .map(|ty| {
                 let ty = self.ty(&ty);
-                let pat = Box::new(ast::Pat { id: DUMMY_NODE_ID, kind: ast::PatKind::Missing, span: ty.span });
+                let pat = Box::new(ast::Pat {
+                    id: DUMMY_NODE_ID,
+                    kind: ast::PatKind::Missing,
+                    span: ty.span,
+                });
                 ast::Param {
                     attrs: ThinVec::new(),
                     span: ty.span,
@@ -606,7 +706,10 @@ impl<'a> Lower<'a> {
             Some(ty) => ast::FnRetTy::Ty(self.ty(&ty)),
             None => {
                 if let Some(ret) = ret {
-                    self.unsupported(self.nsp(ret.syntax()), "a return type rust-analyzer did not parse");
+                    self.unsupported(
+                        self.nsp(ret.syntax()),
+                        "a return type rust-analyzer did not parse",
+                    );
                 }
                 ast::FnRetTy::Default(params_span.shrink_to_hi())
             }
@@ -614,19 +717,29 @@ impl<'a> Lower<'a> {
     }
 
     pub(crate) fn anon_const(&self, expr: &ra::Expr) -> ast::AnonConst {
-        ast::AnonConst { id: DUMMY_NODE_ID, value: self.expr(expr) }
+        ast::AnonConst {
+            id: DUMMY_NODE_ID,
+            value: self.expr(expr),
+        }
     }
 
     // ---- visibility ----
 
     /// rustc's `parse_visibility`: `pub` alone, `pub(..)` through the parenthesis, or an empty
     /// span at the item's first token when there is none.
-    pub(crate) fn visibility(&self, vis: Option<ra::Visibility>, owner: &SyntaxNode) -> ast::Visibility {
+    pub(crate) fn visibility(
+        &self,
+        vis: Option<ra::Visibility>,
+        owner: &SyntaxNode,
+    ) -> ast::Visibility {
         let Some(vis) = vis else {
             let at = first_token_after_attrs(owner)
                 .map(|t| self.tsp(&t).shrink_to_lo())
                 .unwrap_or_else(|| self.sp(TextRange::empty(owner.text_range().start())));
-            return ast::Visibility { kind: ast::VisibilityKind::Inherited, span: at };
+            return ast::Visibility {
+                kind: ast::VisibilityKind::Inherited,
+                span: at,
+            };
         };
         let span = self.nsp(vis.syntax());
         let kind = match vis.visibility_inner() {
@@ -662,17 +775,28 @@ impl<'a> Lower<'a> {
     ) -> ast::Generics {
         let (params, span) = match list {
             Some(list) => {
-                let params = list.generic_params().map(|p| self.generic_param(&p)).collect();
+                let params = list
+                    .generic_params()
+                    .map(|p| self.generic_param(&p))
+                    .collect();
                 (params, self.nsp(list.syntax()))
             }
             None => (ThinVec::new(), after.shrink_to_hi()),
         };
-        ast::Generics { params, where_clause: self.where_clause(where_clause, where_after), span }
+        ast::Generics {
+            params,
+            where_clause: self.where_clause(where_clause, where_after),
+            span,
+        }
     }
 
     /// rustc's `parse_where_clause`: `where` through the last predicate (or its trailing comma),
     /// or empty right after what precedes it.
-    pub(crate) fn where_clause(&self, wc: Option<ra::WhereClause>, after: Span) -> ast::WhereClause {
+    pub(crate) fn where_clause(
+        &self,
+        wc: Option<ra::WhereClause>,
+        after: Span,
+    ) -> ast::WhereClause {
         match wc {
             None => ast::WhereClause {
                 has_where_token: false,
@@ -690,7 +814,10 @@ impl<'a> Lower<'a> {
     fn where_pred(&self, p: &ra::WherePred) -> ast::WherePredicate {
         let span = self.nsp(p.syntax());
         let attrs = self.outer_attrs(p.syntax());
-        let bounds = p.type_bound_list().map(|b| self.bounds(&b)).unwrap_or_default();
+        let bounds = p
+            .type_bound_list()
+            .map(|b| self.bounds(&b))
+            .unwrap_or_default();
         let kind = if let Some(lt) = p.lifetime() {
             ast::WherePredicateKind::RegionPredicate(ast::WhereRegionPredicate {
                 lifetime: self.lifetime(&lt),
@@ -715,7 +842,13 @@ impl<'a> Lower<'a> {
                 bounds,
             })
         };
-        ast::WherePredicate { attrs, kind, id: DUMMY_NODE_ID, span, is_placeholder: false }
+        ast::WherePredicate {
+            attrs,
+            kind,
+            id: DUMMY_NODE_ID,
+            span,
+            is_placeholder: false,
+        }
     }
 
     pub(crate) fn generic_param(&self, p: &ra::GenericParam) -> ast::GenericParam {
@@ -727,11 +860,17 @@ impl<'a> Lower<'a> {
                     None => {
                         let span = self.nsp(lp.syntax());
                         self.unsupported(span, "a lifetime parameter without a name");
-                        ast::Lifetime { id: DUMMY_NODE_ID, ident: Ident::new(sym::empty, span) }
+                        ast::Lifetime {
+                            id: DUMMY_NODE_ID,
+                            ident: Ident::new(sym::empty, span),
+                        }
                     }
                 };
                 let colon_span = lp.colon_token().map(|t| self.tsp(&t));
-                let bounds = lp.type_bound_list().map(|b| self.bounds(&b)).unwrap_or_default();
+                let bounds = lp
+                    .type_bound_list()
+                    .map(|b| self.bounds(&b))
+                    .unwrap_or_default();
                 ast::GenericParam {
                     id: DUMMY_NODE_ID,
                     ident: lifetime.ident,
@@ -744,9 +883,15 @@ impl<'a> Lower<'a> {
             }
             ra::GenericParam::TypeParam(tp) => {
                 let span = self.nsp(tp.syntax());
-                let ident = tp.name().map(|n| self.name(&n)).unwrap_or(Ident::new(sym::empty, span));
+                let ident = tp
+                    .name()
+                    .map(|n| self.name(&n))
+                    .unwrap_or(Ident::new(sym::empty, span));
                 let colon_span = tp.colon_token().map(|t| self.tsp(&t));
-                let bounds = tp.type_bound_list().map(|b| self.bounds(&b)).unwrap_or_default();
+                let bounds = tp
+                    .type_bound_list()
+                    .map(|b| self.bounds(&b))
+                    .unwrap_or_default();
                 let default = tp.default_type().map(|t| self.ty(&t));
                 ast::GenericParam {
                     id: DUMMY_NODE_ID,
@@ -760,8 +905,10 @@ impl<'a> Lower<'a> {
             }
             ra::GenericParam::ConstParam(cp) => {
                 let span_all = self.nsp(cp.syntax());
-                let ident =
-                    cp.name().map(|n| self.name(&n)).unwrap_or(Ident::new(sym::empty, span_all));
+                let ident = cp
+                    .name()
+                    .map(|n| self.name(&n))
+                    .unwrap_or(Ident::new(sym::empty, span_all));
                 let ty = match cp.ty() {
                     Some(t) => self.ty(&t),
                     None => {
@@ -769,7 +916,10 @@ impl<'a> Lower<'a> {
                         self.ty_err(span_all)
                     }
                 };
-                let default = cp.default_val().and_then(|c| c.expr()).map(|e| self.anon_const(&e));
+                let default = cp
+                    .default_val()
+                    .and_then(|c| c.expr())
+                    .map(|e| self.anon_const(&e));
                 // rustc's `parse_const_param`: `const` through the type, or the default.
                 let span = span_all;
                 ast::GenericParam {
@@ -787,10 +937,21 @@ impl<'a> Lower<'a> {
 
     // ---- function parameters ----
 
-    pub(crate) fn fn_decl(&self, params: Option<ra::ParamList>, ret: Option<ra::RetType>, owner: Span) -> ast::FnDecl {
+    pub(crate) fn fn_decl(
+        &self,
+        params: Option<ra::ParamList>,
+        ret: Option<ra::RetType>,
+        owner: Span,
+    ) -> ast::FnDecl {
         let Some(params) = params else {
-            self.unsupported(owner, "a function without parameters rust-analyzer could parse");
-            return ast::FnDecl { inputs: ThinVec::new(), output: ast::FnRetTy::Default(owner) };
+            self.unsupported(
+                owner,
+                "a function without parameters rust-analyzer could parse",
+            );
+            return ast::FnDecl {
+                inputs: ThinVec::new(),
+                output: ast::FnRetTy::Default(owner),
+            };
         };
         let mut inputs = ThinVec::new();
         if let Some(sp) = params.self_param() {
@@ -813,11 +974,19 @@ impl<'a> Lower<'a> {
             let (pat, ty_span) = match p.pat() {
                 Some(pat) => (self.pat(&pat), dots),
                 None => (
-                    Box::new(ast::Pat { id: DUMMY_NODE_ID, kind: ast::PatKind::Missing, span: dots }),
+                    Box::new(ast::Pat {
+                        id: DUMMY_NODE_ID,
+                        kind: ast::PatKind::Missing,
+                        span: dots,
+                    }),
                     dots,
                 ),
             };
-            let ty = Box::new(ast::Ty { id: DUMMY_NODE_ID, kind: ast::TyKind::CVarArgs, span: ty_span });
+            let ty = Box::new(ast::Ty {
+                id: DUMMY_NODE_ID,
+                kind: ast::TyKind::CVarArgs,
+                span: ty_span,
+            });
             return ast::Param {
                 attrs,
                 ty,
@@ -837,13 +1006,25 @@ impl<'a> Lower<'a> {
         };
         let pat = match p.pat() {
             Some(pat) => self.pat(&pat),
-            None => Box::new(ast::Pat { id: DUMMY_NODE_ID, kind: ast::PatKind::Missing, span: ty.span }),
+            None => Box::new(ast::Pat {
+                id: DUMMY_NODE_ID,
+                kind: ast::PatKind::Missing,
+                span: ty.span,
+            }),
         };
         let has_const_keyword = p
             .syntax()
             .children_with_tokens()
             .any(|e| e.kind() == T![const]);
-        ast::Param { attrs, ty, pat, id: DUMMY_NODE_ID, span, is_placeholder: false, has_const_keyword }
+        ast::Param {
+            attrs,
+            ty,
+            pat,
+            id: DUMMY_NODE_ID,
+            span,
+            is_placeholder: false,
+            has_const_keyword,
+        }
     }
 
     /// rustc's `parse_self_param` and `Param::from_self`: the span runs from the first token
@@ -859,7 +1040,11 @@ impl<'a> Lower<'a> {
                 Ident::new(kw::SelfLower, all)
             }
         };
-        let mutbl = if sp.mut_token().is_some() { ast::Mutability::Mut } else { ast::Mutability::Not };
+        let mutbl = if sp.mut_token().is_some() {
+            ast::Mutability::Mut
+        } else {
+            ast::Mutability::Not
+        };
         let kind = if sp.amp_token().is_some() {
             let lt = sp.lifetime().map(|l| self.lifetime(&l));
             ast::SelfKind::Region(lt, mutbl)
@@ -868,8 +1053,13 @@ impl<'a> Lower<'a> {
         } else {
             ast::SelfKind::Value(mutbl)
         };
-        let lo = first_token_after_attrs(sp.syntax()).map(|t| self.tsp(&t)).unwrap_or(all);
-        let eself = ast::ExplicitSelf { node: kind, span: lo.to(eself_ident.span) };
+        let lo = first_token_after_attrs(sp.syntax())
+            .map(|t| self.tsp(&t))
+            .unwrap_or(all);
+        let eself = ast::ExplicitSelf {
+            node: kind,
+            span: lo.to(eself_ident.span),
+        };
         ast::Param::from_self(attrs, eself, eself_ident)
     }
 
@@ -899,17 +1089,27 @@ impl<'a> Lower<'a> {
                 .collect();
             return ast::GenericBound::Use(args, span);
         }
-        let parens = if child_token(b.syntax(), T!['(']).is_some() { ast::Parens::Yes } else { ast::Parens::No };
+        let parens = if child_token(b.syntax(), T!['(']).is_some() {
+            ast::Parens::Yes
+        } else {
+            ast::Parens::No
+        };
         let bound_generic_params = b
             .for_binder()
             .and_then(|f| f.generic_param_list())
             .map(|l| l.generic_params().map(|g| self.generic_param(&g)).collect())
             .unwrap_or_default();
         let constness = if let Some(t) = b.tilde_token() {
-            let c = b.const_token().map(|c| self.tsp(&c)).unwrap_or(self.tsp(&t));
+            let c = b
+                .const_token()
+                .map(|c| self.tsp(&c))
+                .unwrap_or(self.tsp(&t));
             ast::BoundConstness::Maybe(self.tsp(&t).to(c))
         } else if let Some(l) = b.l_brack_token() {
-            let r = b.r_brack_token().map(|r| self.tsp(&r)).unwrap_or(self.tsp(&l));
+            let r = b
+                .r_brack_token()
+                .map(|r| self.tsp(&r))
+                .unwrap_or(self.tsp(&l));
             ast::BoundConstness::Maybe(self.tsp(&l).to(r))
         } else if let Some(c) = b.const_token() {
             ast::BoundConstness::Always(self.tsp(&c))
@@ -938,8 +1138,15 @@ impl<'a> Lower<'a> {
         };
         ast::GenericBound::Trait(ast::PolyTraitRef {
             bound_generic_params,
-            modifiers: ast::TraitBoundModifiers { constness, asyncness, polarity },
-            trait_ref: ast::TraitRef { path, ref_id: DUMMY_NODE_ID },
+            modifiers: ast::TraitBoundModifiers {
+                constness,
+                asyncness,
+                polarity,
+            },
+            trait_ref: ast::TraitRef {
+                path,
+                ref_id: DUMMY_NODE_ID,
+            },
             span,
             parens,
         })
@@ -947,11 +1154,18 @@ impl<'a> Lower<'a> {
 
     pub(crate) fn err_path(&self, span: Span) -> ast::Path {
         self.unsupported(span, "a path rust-analyzer did not parse");
-        ast::Path { span, segments: ThinVec::new() }
+        ast::Path {
+            span,
+            segments: ThinVec::new(),
+        }
     }
 
     pub(crate) fn ty_err(&self, span: Span) -> Box<ast::Ty> {
-        Box::new(ast::Ty { id: DUMMY_NODE_ID, kind: ast::TyKind::Err(ast::ErrorGuaranteed::unchecked_error_guaranteed()), span })
+        Box::new(ast::Ty {
+            id: DUMMY_NODE_ID,
+            kind: ast::TyKind::Err(ast::ErrorGuaranteed::unchecked_error_guaranteed()),
+            span,
+        })
     }
 
     // ---- macro calls ----
@@ -1042,5 +1256,7 @@ pub(crate) fn prev_real_token(token: &SyntaxToken) -> Option<SyntaxToken> {
 
 /// The direct child token of `node` of the given kind.
 pub(crate) fn child_token(node: &SyntaxNode, kind: SyntaxKind) -> Option<SyntaxToken> {
-    node.children_with_tokens().filter_map(SyntaxElement::into_token).find(|t| t.kind() == kind)
+    node.children_with_tokens()
+        .filter_map(SyntaxElement::into_token)
+        .find(|t| t.kind() == kind)
 }

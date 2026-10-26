@@ -1,3 +1,5 @@
+// Follows `src/tools/rustfmt/src/source_file.rs` at rust-lang/rust 12433c307 (MIT or Apache-2.0).
+
 use std::fs;
 use std::io::{self, Write};
 use std::path::Path;
@@ -8,43 +10,9 @@ use crate::config::FileName;
 use crate::emitter::{self, Emitter};
 use crate::parse::session::ParseSess;
 
-#[cfg(test)]
-use crate::config::Config;
-#[cfg(test)]
-use crate::create_emitter;
-#[cfg(test)]
-use crate::formatting::FileRecord;
-
 // Append a newline to the end of each file.
 pub(crate) fn append_newline(s: &mut String) {
     s.push('\n');
-}
-
-#[cfg(test)]
-pub(crate) fn write_all_files<T>(
-    source_file: &[FileRecord],
-    out: &mut T,
-    config: &Config,
-) -> Result<(), io::Error>
-where
-    T: Write,
-{
-    let mut emitter = create_emitter(config);
-
-    emitter.emit_header(out)?;
-    for (filename, text) in source_file {
-        write_file(
-            None,
-            filename,
-            text,
-            out,
-            &mut *emitter,
-            config.newline_style(),
-        )?;
-    }
-    emitter.emit_footer(out)?;
-
-    Ok(())
 }
 
 pub(crate) fn write_file<T>(

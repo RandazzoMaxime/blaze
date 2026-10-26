@@ -1,11 +1,13 @@
+// Follows `src/tools/rustfmt/src/overflow.rs` at rust-lang/rust 12433c307 (MIT or Apache-2.0).
+
 //! Rewrite a list some items with overflow.
 
 use std::cmp::min;
 
-use itertools::Itertools;
 use crate::ast;
 use crate::ast::token::Delimiter;
 use crate::span::Span;
+use itertools::Itertools;
 use tracing::debug;
 
 use crate::closures;

@@ -1,3 +1,5 @@
+// Follows `src/tools/rustfmt/src/config/config_type.rs` at rust-lang/rust 12433c307 (MIT or Apache-2.0).
+
 use crate::config::file_lines::FileLines;
 use crate::config::macro_names::MacroSelectors;
 use crate::config::options::{IgnoreList, WidthHeuristics};
@@ -73,8 +75,6 @@ macro_rules! create_config {
     // - $stb: true if the option is stable
     // - $dstring: description of the option
     ($($i:ident: $ty:ty, $stb:expr, $( $dstring:expr ),+ );+ $(;)*) => (
-        #[cfg(test)]
-        use std::collections::HashSet;
         use std::io::Write;
 
         use serde::{Deserialize, Serialize};
@@ -275,16 +275,6 @@ macro_rules! create_config {
                 self.set_hide_parse_errors();
                 self.set_version();
                 self
-            }
-
-            /// Returns a hash set initialized with every user-facing config option name.
-            #[cfg(test)]
-            pub(crate) fn hash_set() -> HashSet<String> {
-                let mut hash_set = HashSet::new();
-                $(
-                    hash_set.insert(stringify!($i).to_owned());
-                )+
-                hash_set
             }
 
             pub(crate) fn is_valid_name(name: &str) -> bool {

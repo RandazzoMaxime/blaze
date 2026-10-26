@@ -1,3 +1,5 @@
+// Follows `compiler/rustc_ast/src/ast.rs` at rust-lang/rust 12433c307 (MIT or Apache-2.0).
+
 //! The Rust abstract syntax tree module.
 //!
 //! This module contains common structures forming the language AST.
@@ -127,11 +129,16 @@ impl Path {
     /// Convert a span and an identifier to the corresponding
     /// one-segment path.
     pub fn from_ident(ident: Ident) -> Path {
-        Path { segments: vec![PathSegment::from_ident(ident)], span: ident.span }
+        Path {
+            segments: vec![PathSegment::from_ident(ident)],
+            span: ident.span,
+        }
     }
 
     pub fn is_global(&self) -> bool {
-        self.segments.first().is_some_and(|segment| segment.ident.name == kw::PathRoot)
+        self.segments
+            .first()
+            .is_some_and(|segment| segment.ident.name == kw::PathRoot)
     }
 
     /// Checks if this path is just a simple one-word `PATH` - i.e. the inverse of
@@ -142,7 +149,8 @@ impl Path {
 
     /// The inverse of [`Path::from_ident`] - if this path is just a simple one-word `PATH`
     pub fn as_single_argless_ident(&self) -> Option<Ident> {
-        self.is_single_argless_ident().then(|| self.segments[0].ident)
+        self.is_single_argless_ident()
+            .then(|| self.segments[0].ident)
     }
 }
 
@@ -228,7 +236,11 @@ impl PartialEq<Symbol> for PathSegment {
 
 impl PathSegment {
     pub fn from_ident(ident: Ident) -> Self {
-        PathSegment { ident, id: DUMMY_NODE_ID, args: None }
+        PathSegment {
+            ident,
+            id: DUMMY_NODE_ID,
+            args: None,
+        }
     }
 
     pub fn path_root(span: Span) -> Self {
@@ -274,7 +286,7 @@ impl GenericArgs {
 #[derive(Clone, Debug)]
 pub enum GenericArg {
     /// `'a` in `Foo<'a>`.
-    Lifetime( Lifetime),
+    Lifetime(Lifetime),
     /// `Bar` in `Foo<Bar>`.
     Type(Box<Ty>),
     /// `1` in `Foo<1>`.
@@ -368,7 +380,10 @@ impl ParenthesizedArgs {
             .cloned()
             .map(|input| AngleBracketedArg::Arg(GenericArg::Type(input.ty)))
             .collect();
-        AngleBracketedArgs { span: self.inputs_span, args }
+        AngleBracketedArgs {
+            span: self.inputs_span,
+            args,
+        }
     }
 }
 
@@ -393,7 +408,7 @@ impl TraitBoundModifiers {
 #[derive(Clone, Debug)]
 pub enum GenericBound {
     Trait(PolyTraitRef),
-    Outlives( Lifetime),
+    Outlives(Lifetime),
     /// Precise capturing syntax: `impl Sized + use<'a>`
     Use(ThinVec<PreciseCapturingArg>, Span),
 }
@@ -653,13 +668,20 @@ impl Pat {
             // A tuple pattern `(P0, .., Pn)` can be reparsed as `(T0, .., Tn)`
             // assuming `T0` to `Tn` are all syntactically valid as types.
             PatKind::Tuple(pats) => {
-                let tys = pats.iter().map(|pat| pat.to_ty()).collect::<Option<ThinVec<_>>>()?;
+                let tys = pats
+                    .iter()
+                    .map(|pat| pat.to_ty())
+                    .collect::<Option<ThinVec<_>>>()?;
                 TyKind::Tup(tys)
             }
             _ => return None,
         };
 
-        Some(Box::new(Ty { kind, id: self.id, span: self.span }))
+        Some(Box::new(Ty {
+            kind,
+            id: self.id,
+            span: self.span,
+        }))
     }
 
     /// Walk top-down and call `it` in each place where a pattern occurs
@@ -747,7 +769,6 @@ impl Pat {
         });
         contains_never_pattern
     }
-
 }
 
 impl From<Box<Pat>> for Pat {
@@ -803,20 +824,39 @@ pub struct BindingMode(pub ByRef, pub Mutability);
 
 impl BindingMode {
     pub const NONE: Self = Self(ByRef::No, Mutability::Not);
-    pub const REF: Self = Self(ByRef::Yes(Pinnedness::Not, Mutability::Not), Mutability::Not);
-    pub const REF_PIN: Self =
-        Self(ByRef::Yes(Pinnedness::Pinned, Mutability::Not), Mutability::Not);
+    pub const REF: Self = Self(
+        ByRef::Yes(Pinnedness::Not, Mutability::Not),
+        Mutability::Not,
+    );
+    pub const REF_PIN: Self = Self(
+        ByRef::Yes(Pinnedness::Pinned, Mutability::Not),
+        Mutability::Not,
+    );
     pub const MUT: Self = Self(ByRef::No, Mutability::Mut);
-    pub const REF_MUT: Self = Self(ByRef::Yes(Pinnedness::Not, Mutability::Mut), Mutability::Not);
-    pub const REF_PIN_MUT: Self =
-        Self(ByRef::Yes(Pinnedness::Pinned, Mutability::Mut), Mutability::Not);
-    pub const MUT_REF: Self = Self(ByRef::Yes(Pinnedness::Not, Mutability::Not), Mutability::Mut);
-    pub const MUT_REF_PIN: Self =
-        Self(ByRef::Yes(Pinnedness::Pinned, Mutability::Not), Mutability::Mut);
-    pub const MUT_REF_MUT: Self =
-        Self(ByRef::Yes(Pinnedness::Not, Mutability::Mut), Mutability::Mut);
-    pub const MUT_REF_PIN_MUT: Self =
-        Self(ByRef::Yes(Pinnedness::Pinned, Mutability::Mut), Mutability::Mut);
+    pub const REF_MUT: Self = Self(
+        ByRef::Yes(Pinnedness::Not, Mutability::Mut),
+        Mutability::Not,
+    );
+    pub const REF_PIN_MUT: Self = Self(
+        ByRef::Yes(Pinnedness::Pinned, Mutability::Mut),
+        Mutability::Not,
+    );
+    pub const MUT_REF: Self = Self(
+        ByRef::Yes(Pinnedness::Not, Mutability::Not),
+        Mutability::Mut,
+    );
+    pub const MUT_REF_PIN: Self = Self(
+        ByRef::Yes(Pinnedness::Pinned, Mutability::Not),
+        Mutability::Mut,
+    );
+    pub const MUT_REF_MUT: Self = Self(
+        ByRef::Yes(Pinnedness::Not, Mutability::Mut),
+        Mutability::Mut,
+    );
+    pub const MUT_REF_PIN_MUT: Self = Self(
+        ByRef::Yes(Pinnedness::Pinned, Mutability::Mut),
+        Mutability::Mut,
+    );
 
     pub fn prefix_str(self) -> &'static str {
         match self {
@@ -1473,7 +1513,10 @@ impl Expr {
             }
 
             ExprKind::Tup(exprs) => {
-                let tys = exprs.iter().map(|expr| expr.to_ty()).collect::<Option<ThinVec<_>>>()?;
+                let tys = exprs
+                    .iter()
+                    .map(|expr| expr.to_ty())
+                    .collect::<Option<ThinVec<_>>>()?;
                 TyKind::Tup(tys)
             }
 
@@ -1493,7 +1536,11 @@ impl Expr {
             _ => return None,
         };
 
-        Some(Box::new(Ty { kind, id: self.id, span: self.span }))
+        Some(Box::new(Ty {
+            kind,
+            id: self.id,
+            span: self.span,
+        }))
     }
 
     /// To a first-order approximation, is this a pattern?
@@ -1954,7 +2001,6 @@ impl AttrArgs {
             AttrArgs::Eq { eq_span, expr } => Some(eq_span.to(expr.span)),
         }
     }
-
 }
 
 /// Delimited arguments, as used in `#[attr()/[]/{}]` or `mac!()/[]/{}`.
@@ -1969,7 +2015,13 @@ impl DelimArgs {
     /// Whether a macro with these arguments needs a semicolon
     /// when used as a standalone item or statement.
     pub fn need_semicolon(&self) -> bool {
-        !matches!(self, DelimArgs { delim: Delimiter::Brace, .. })
+        !matches!(
+            self,
+            DelimArgs {
+                delim: Delimiter::Brace,
+                ..
+            }
+        )
     }
 }
 
@@ -2227,11 +2279,18 @@ impl FnSig {
 
     /// The span of the header's extern, or where to insert it if empty.
     pub fn extern_span(&self) -> Span {
-        self.header.ext.span().unwrap_or(self.safety_span().shrink_to_hi())
+        self.header
+            .ext
+            .span()
+            .unwrap_or(self.safety_span().shrink_to_hi())
     }
 
     pub fn as_borrowed(&self) -> BorrowedFnSig<'_> {
-        BorrowedFnSig { header: self.header, decl: &self.decl, span: self.span }
+        BorrowedFnSig {
+            header: self.header,
+            decl: &self.decl,
+            span: self.span,
+        }
     }
 }
 
@@ -2292,9 +2351,7 @@ pub enum AssocItemConstraintKind {
     /// bindings*. Similarly with associated const equality constraints and *associated const bindings*.
     Equality { term: Term },
     /// A bound on an associated type (e.g., `AssocTy: Bound` in `Trait<AssocTy: Bound>`).
-    Bound {
-        bounds: GenericBounds,
-    },
+    Bound { bounds: GenericBounds },
 }
 
 #[derive(Debug)]
@@ -2306,7 +2363,11 @@ pub struct Ty {
 
 impl Clone for Ty {
     fn clone(&self) -> Self {
-        Self { id: self.id, kind: self.kind.clone(), span: self.span }
+        Self {
+            id: self.id,
+            kind: self.kind.clone(),
+            span: self.span,
+        }
     }
 }
 
@@ -2356,7 +2417,11 @@ impl FnPtrTy {
     }
 
     pub fn as_borrowed_fn_sig<'a>(&'a self) -> BorrowedFnSig<'a> {
-        BorrowedFnSig { header: self.header(), decl: &self.decl, span: self.decl_span }
+        BorrowedFnSig {
+            header: self.header(),
+            decl: &self.decl,
+            span: self.decl_span,
+        }
     }
 }
 
@@ -2378,11 +2443,11 @@ pub enum TyKind {
     /// A raw pointer (`*const T` or `*mut T`).
     Ptr(Box<Ty>, Mutability),
     /// A reference (`&'a T` or `&'a mut T`).
-    Ref( Option<Lifetime>, Box<Ty>, Mutability),
+    Ref(Option<Lifetime>, Box<Ty>, Mutability),
     /// A pinned reference (`&'a pin const T` or `&'a pin mut T`).
     ///
     /// Desugars into `Pin<&'a T>` or `Pin<&'a mut T>`.
-    PinnedRef( Option<Lifetime>, Box<Ty>, Mutability),
+    PinnedRef(Option<Lifetime>, Box<Ty>, Mutability),
     /// A function pointer type (e.g., `fn(usize) -> bool`).
     FnPtr(Box<FnPtrTy>),
     /// An unsafe existential lifetime binder (e.g., `unsafe<'a> &'a ()`).
@@ -2398,7 +2463,7 @@ pub enum TyKind {
     Path(Option<Box<QSelf>>, Path),
     /// A trait object type `Bound1 + Bound2 + Bound3`
     /// where `Bound` is a trait or a lifetime.
-    TraitObject( GenericBounds, TraitObjectSyntax),
+    TraitObject(GenericBounds, TraitObjectSyntax),
     /// An `impl Bound1 + Bound2 + Bound3` type
     /// where `Bound` is a trait or a lifetime.
     ///
@@ -2503,7 +2568,11 @@ pub struct TyPat {
 #[derive(Clone, Debug)]
 pub enum TyPatKind {
     /// A range pattern (e.g., `1...2`, `1..2`, `1..`, `..2`, `1..=2`, `..=2`).
-    Range(Option<Box<AnonConst>>, Option<Box<AnonConst>>, Spanned<RangeEnd>),
+    Range(
+        Option<Box<AnonConst>>,
+        Option<Box<AnonConst>>,
+        Spanned<RangeEnd>,
+    ),
 
     /// A `!null` pattern for raw pointers.
     NotNull,
@@ -2525,7 +2594,7 @@ pub enum TraitObjectSyntax {
 #[derive(Clone, Debug)]
 pub enum PreciseCapturingArg {
     /// Lifetime parameter.
-    Lifetime( Lifetime),
+    Lifetime(Lifetime),
     /// Type or const parameter.
     Arg(Path, NodeId),
 }
@@ -2546,7 +2615,11 @@ pub struct InlineAsmOptions(u16);
 #[derive(Clone, PartialEq, Debug, Hash)]
 pub enum InlineAsmTemplatePiece {
     String(Cow<'static, str>),
-    Placeholder { operand_idx: usize, modifier: Option<char>, span: Span },
+    Placeholder {
+        operand_idx: usize,
+        modifier: Option<char>,
+        span: Span,
+    },
 }
 
 impl fmt::Display for InlineAsmTemplatePiece {
@@ -2562,10 +2635,18 @@ impl fmt::Display for InlineAsmTemplatePiece {
                 }
                 Ok(())
             }
-            Self::Placeholder { operand_idx, modifier: Some(modifier), .. } => {
+            Self::Placeholder {
+                operand_idx,
+                modifier: Some(modifier),
+                ..
+            } => {
                 write!(f, "{{{operand_idx}:{modifier}}}")
             }
-            Self::Placeholder { operand_idx, modifier: None, .. } => {
+            Self::Placeholder {
+                operand_idx,
+                modifier: None,
+                ..
+            } => {
                 write!(f, "{{{operand_idx}}}")
             }
         }
@@ -2711,8 +2792,7 @@ pub enum SelfKind {
     Explicit(Box<Ty>, Mutability),
 }
 
-impl SelfKind {
-}
+impl SelfKind {}
 
 pub type ExplicitSelf = Spanned<SelfKind>;
 
@@ -2751,14 +2831,21 @@ impl Param {
     /// Builds a `Param` object from `ExplicitSelf`.
     pub fn from_self(attrs: AttrVec, eself: ExplicitSelf, eself_ident: Ident) -> Param {
         let span = eself.span.to(eself_ident.span);
-        let infer_ty =
-            Box::new(Ty { id: DUMMY_NODE_ID, kind: TyKind::ImplicitSelf, span: eself_ident.span });
+        let infer_ty = Box::new(Ty {
+            id: DUMMY_NODE_ID,
+            kind: TyKind::ImplicitSelf,
+            span: eself_ident.span,
+        });
         let (mutbl, ty) = match eself.node {
             SelfKind::Explicit(ty, mutbl) => (mutbl, ty),
             SelfKind::Value(mutbl) => (mutbl, infer_ty),
             SelfKind::Region(lt, mutbl) => (
                 Mutability::Not,
-                Box::new(Ty { id: DUMMY_NODE_ID, kind: TyKind::Ref(lt, infer_ty, mutbl), span }),
+                Box::new(Ty {
+                    id: DUMMY_NODE_ID,
+                    kind: TyKind::Ref(lt, infer_ty, mutbl),
+                    span,
+                }),
             ),
             SelfKind::Pinned(lt, mutbl) => (
                 Mutability::Not,
@@ -2822,7 +2909,9 @@ impl FnDecl {
     }
 
     pub fn c_variadic(&self) -> bool {
-        self.inputs.last().is_some_and(|arg| matches!(arg.ty.kind, TyKind::CVarArgs))
+        self.inputs
+            .last()
+            .is_some_and(|arg| matches!(arg.ty.kind, TyKind::CVarArgs))
     }
 
     /// The marker index for "no splatted arguments".
@@ -2887,7 +2976,12 @@ pub struct CoroutineMarker {
 
 impl CoroutineMarker {
     pub fn new(kind: CoroutineKind, span: Span) -> Self {
-        Self { kind, span, closure_id: DUMMY_NODE_ID, return_impl_trait_id: DUMMY_NODE_ID }
+        Self {
+            kind,
+            span,
+            closure_id: DUMMY_NODE_ID,
+            return_impl_trait_id: DUMMY_NODE_ID,
+        }
     }
 }
 
@@ -3017,7 +3111,9 @@ impl FnRetTy {
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub enum Inline {
     Yes,
-    No { had_parse_error: Result<(), ErrorGuaranteed> },
+    No {
+        had_parse_error: Result<(), ErrorGuaranteed>,
+    },
 }
 
 /// Module item kind.
@@ -3094,7 +3190,10 @@ pub enum UseTreeKind {
     /// use foo::{bar, baz};
     ///          ^^^^^^^^^^
     /// ```
-    Nested { items: ThinVec<UseTreeAndId>, span: Span },
+    Nested {
+        items: ThinVec<UseTreeAndId>,
+        span: Span,
+    },
     /// `use prefix::*`
     Glob(Span),
 }
@@ -3113,7 +3212,11 @@ impl UseTree {
         match self.kind {
             UseTreeKind::Simple(Some(rename)) => rename,
             UseTreeKind::Simple(None) => {
-                self.prefix.segments.last().expect("empty prefix in a simple import").ident
+                self.prefix
+                    .segments
+                    .last()
+                    .expect("empty prefix in a simple import")
+                    .ident
             }
             _ => panic!("`UseTree::ident` can only be used on a simple import"),
         }
@@ -3344,7 +3447,10 @@ impl PolyTraitRef {
         PolyTraitRef {
             bound_generic_params: generic_params,
             modifiers,
-            trait_ref: TraitRef { path, ref_id: DUMMY_NODE_ID },
+            trait_ref: TraitRef {
+                path,
+                ref_id: DUMMY_NODE_ID,
+            },
             span,
             parens,
         }
@@ -3360,7 +3466,11 @@ pub struct Visibility {
 #[derive(Clone, Debug)]
 pub enum VisibilityKind {
     Public,
-    Restricted { path: Box<Path>, id: NodeId, shorthand: bool },
+    Restricted {
+        path: Box<Path>,
+        id: NodeId,
+        shorthand: bool,
+    },
     Inherited,
 }
 
@@ -3390,7 +3500,11 @@ pub struct MutRestriction {
 #[derive(Clone, Debug)]
 pub enum RestrictionKind {
     Unrestricted,
-    Restricted { path: Box<Path>, id: NodeId, shorthand: bool },
+    Restricted {
+        path: Box<Path>,
+        id: NodeId,
+        shorthand: bool,
+    },
 }
 
 /// Field definition in a struct, variant or union.
@@ -3421,10 +3535,14 @@ pub struct FieldDefExtras {
 
 impl FieldDef {
     pub fn mut_restriction(&self) -> &MutRestriction {
-        static DEFAULT: MutRestriction =
-            MutRestriction { kind: RestrictionKind::Unrestricted, span: DUMMY_SP };
+        static DEFAULT: MutRestriction = MutRestriction {
+            kind: RestrictionKind::Unrestricted,
+            span: DUMMY_SP,
+        };
 
-        self.extras.as_ref().map_or(&DEFAULT, |extras| &extras.mut_restriction)
+        self.extras
+            .as_ref()
+            .map_or(&DEFAULT, |extras| &extras.mut_restriction)
     }
 
     pub fn default_value(&self) -> Option<&AnonConst> {
@@ -3432,7 +3550,9 @@ impl FieldDef {
     }
 
     pub fn safety(&self) -> Safety {
-        self.extras.as_ref().map_or(Safety::Default, |extras| extras.safety)
+        self.extras
+            .as_ref()
+            .map_or(Safety::Default, |extras| extras.safety)
     }
 }
 /// Was parsing recovery performed?
@@ -3448,7 +3568,10 @@ pub enum VariantData {
     /// Struct variant.
     ///
     /// E.g., `Bar { .. }` as in `enum Foo { Bar { .. } }`.
-    Struct { fields: ThinVec<FieldDef>, recovered: Recovered },
+    Struct {
+        fields: ThinVec<FieldDef>,
+        recovered: Recovered,
+    },
     /// Tuple variant.
     ///
     /// E.g., `Bar(..)` as in `enum Foo { Bar(..) }`.
@@ -3500,13 +3623,13 @@ pub struct Item<K = ItemKind> {
 impl Item {
     /// Return the span that encompasses the attributes.
     pub fn span_with_attributes(&self) -> Span {
-        self.attrs.iter().fold(self.span, |acc, attr| acc.to(attr.span))
+        self.attrs
+            .iter()
+            .fold(self.span, |acc, attr| acc.to(attr.span))
     }
-
 }
 
-impl Item<AssocItemKind> {
-}
+impl Item<AssocItemKind> {}
 
 /// `extern` qualifier on a function item or function type.
 #[derive(Clone, Copy, Debug)]
@@ -3562,7 +3685,12 @@ pub struct FnHeader {
 impl FnHeader {
     /// Does this function header have any qualifiers or is it empty?
     pub fn has_qualifiers(&self) -> bool {
-        let Self { safety, coroutine_marker, constness, ext } = self;
+        let Self {
+            safety,
+            coroutine_marker,
+            constness,
+            ext,
+        } = self;
         matches!(safety, Safety::Unsafe(_))
             || coroutine_marker.is_some()
             || matches!(constness, Const::Yes(_))
@@ -3800,7 +3928,10 @@ pub struct ConstBlockItem {
 }
 
 impl ConstBlockItem {
-    pub const IDENT: Ident = Ident { name: kw::Underscore, span: DUMMY_SP };
+    pub const IDENT: Ident = Ident {
+        name: kw::Underscore,
+        span: DUMMY_SP,
+    };
 }
 
 #[derive(Clone, Debug)]

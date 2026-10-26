@@ -1,3 +1,5 @@
+// Follows `src/tools/rustfmt/src/release_channel.rs` at rust-lang/rust 12433c307 (MIT or Apache-2.0).
+
 /// Checks if we're in a nightly build.
 ///
 /// The environment variable `CFG_RELEASE_CHANNEL` is set during the rustc bootstrap

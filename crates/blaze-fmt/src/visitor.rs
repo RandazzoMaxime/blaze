@@ -1,3 +1,5 @@
+// Follows `src/tools/rustfmt/src/visitor.rs` at rust-lang/rust 12433c307 (MIT or Apache-2.0).
+
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 use std::sync::Arc;
@@ -397,13 +399,7 @@ impl<'b, 'a: 'b> FmtVisitor<'a> {
         let indent = self.block_indent;
         let block;
         let rewrite = match fk {
-            visit::FnKind::Fn(
-                _,
-                _,
-                ast::Fn {
-                    body: Some(b), ..
-                },
-            ) => {
+            visit::FnKind::Fn(_, _, ast::Fn { body: Some(b), .. }) => {
                 block = b;
                 self.rewrite_fn_before_block(
                     indent,

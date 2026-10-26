@@ -31,7 +31,9 @@ impl std::error::Error for IgnoreUnsupported {}
 impl IgnorePathSet {
     pub(crate) fn from_ignore_list(ignore_list: &IgnoreList) -> Result<Self, IgnoreUnsupported> {
         if let Some(first) = ignore_list.into_iter().next() {
-            return Err(IgnoreUnsupported { first: first.display().to_string() });
+            return Err(IgnoreUnsupported {
+                first: first.display().to_string(),
+            });
         }
         Ok(IgnorePathSet { _private: () })
     }

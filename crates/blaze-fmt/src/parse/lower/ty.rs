@@ -18,7 +18,10 @@ impl Lower<'_> {
             }
             ra::Type::SliceType(t) => ast::TyKind::Slice(self.opt_ty(t.ty(), span)),
             ra::Type::DynTraitType(t) => {
-                let bounds = t.type_bound_list().map(|b| self.bounds(&b)).unwrap_or_default();
+                let bounds = t
+                    .type_bound_list()
+                    .map(|b| self.bounds(&b))
+                    .unwrap_or_default();
                 let syntax = if t.dyn_token().is_some() {
                     ast::TraitObjectSyntax::Dyn
                 } else {
@@ -27,7 +30,10 @@ impl Lower<'_> {
                 ast::TyKind::TraitObject(bounds, syntax)
             }
             ra::Type::ImplTraitType(t) => {
-                let bounds = t.type_bound_list().map(|b| self.bounds(&b)).unwrap_or_default();
+                let bounds = t
+                    .type_bound_list()
+                    .map(|b| self.bounds(&b))
+                    .unwrap_or_default();
                 ast::TyKind::ImplTrait(DUMMY_NODE_ID, bounds)
             }
             ra::Type::FnPtrType(t) => ast::TyKind::FnPtr(self.fn_ptr(t, ThinVec::new())),
@@ -60,23 +66,33 @@ impl Lower<'_> {
                 None => self.ty_kind_err(span),
             },
             ra::Type::PtrType(t) => {
-                let mutbl = if t.mut_token().is_some() { ast::Mutability::Mut } else { ast::Mutability::Not };
+                let mutbl = if t.mut_token().is_some() {
+                    ast::Mutability::Mut
+                } else {
+                    ast::Mutability::Not
+                };
                 ast::TyKind::Ptr(self.opt_ty(t.ty(), span), mutbl)
             }
             ra::Type::RefType(t) => {
-                let mutbl = if t.mut_token().is_some() { ast::Mutability::Mut } else { ast::Mutability::Not };
+                let mutbl = if t.mut_token().is_some() {
+                    ast::Mutability::Mut
+                } else {
+                    ast::Mutability::Not
+                };
                 let lt = t.lifetime().map(|l| self.lifetime(&l));
                 ast::TyKind::Ref(lt, self.opt_ty(t.ty(), span), mutbl)
             }
-            ra::Type::TupleType(t) => {
-                ast::TyKind::Tup(t.fields().map(|f| self.ty(&f)).collect())
-            }
+            ra::Type::TupleType(t) => ast::TyKind::Tup(t.fields().map(|f| self.ty(&f)).collect()),
             ra::Type::PatternType(_) => {
                 self.unsupported(span, "a pattern type");
                 ast::TyKind::Err(ast::ErrorGuaranteed::unchecked_error_guaranteed())
             }
         };
-        Box::new(ast::Ty { id: DUMMY_NODE_ID, kind, span })
+        Box::new(ast::Ty {
+            id: DUMMY_NODE_ID,
+            kind,
+            span,
+        })
     }
 
     pub(crate) fn opt_ty(&self, ty: Option<ra::Type>, span: crate::span::Span) -> Box<ast::Ty> {
@@ -96,7 +112,11 @@ impl Lower<'_> {
 
     /// rustc's `parse_ty_fn_ptr`: `decl_span` runs from the qualifiers (after any `for<..>`)
     /// through the return type.
-    fn fn_ptr(&self, t: &ra::FnPtrType, generic_params: ThinVec<ast::GenericParam>) -> Box<ast::FnPtrTy> {
+    fn fn_ptr(
+        &self,
+        t: &ra::FnPtrType,
+        generic_params: ThinVec<ast::GenericParam>,
+    ) -> Box<ast::FnPtrTy> {
         let decl_span = self.nsp(t.syntax());
         let safety = match t.unsafe_token() {
             Some(u) => ast::Safety::Unsafe(self.tsp(&u)),
@@ -107,13 +127,23 @@ impl Lower<'_> {
         if let Some(c) = t.const_token().or(t.async_token()) {
             self.unsupported(self.tsp(&c), "a `const` or `async` function pointer");
         }
-        Box::new(ast::FnPtrTy { safety, ext, generic_params, decl, decl_span })
+        Box::new(ast::FnPtrTy {
+            safety,
+            ext,
+            generic_params,
+            decl,
+            decl_span,
+        })
     }
 
     /// `extern` or `extern "abi"` (rustc's `parse_extern`).
     pub(crate) fn abi(&self, abi: Option<ra::Abi>) -> ast::Extern {
-        let Some(abi) = abi else { return ast::Extern::None };
-        let Some(kw) = abi.extern_token() else { return ast::Extern::None };
+        let Some(abi) = abi else {
+            return ast::Extern::None;
+        };
+        let Some(kw) = abi.extern_token() else {
+            return ast::Extern::None;
+        };
         let kw_span = self.tsp(&kw);
         match abi.string_token() {
             None => ast::Extern::Implicit(kw_span),
@@ -150,10 +180,17 @@ impl Lower<'_> {
         after: crate::span::Span,
         where_after: crate::span::Span,
     ) -> ast::Generics {
-        self.generics(node.generic_param_list(), node.where_clause(), after, where_after)
+        self.generics(
+            node.generic_param_list(),
+            node.where_clause(),
+            after,
+            where_after,
+        )
     }
 
     pub(crate) fn opt_bounds(&self, node: &impl syntax::ast::HasTypeBounds) -> ast::GenericBounds {
-        node.type_bound_list().map(|b| self.bounds(&b)).unwrap_or_default()
+        node.type_bound_list()
+            .map(|b| self.bounds(&b))
+            .unwrap_or_default()
     }
 }

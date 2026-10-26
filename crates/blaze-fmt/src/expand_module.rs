@@ -47,8 +47,12 @@ pub(crate) fn default_submod_path(
     };
 
     let default_path_str = format!("{}{}.rs", relative_prefix, ident.name);
-    let secondary_path_str =
-        format!("{}{}{}mod.rs", relative_prefix, ident.name, path::MAIN_SEPARATOR);
+    let secondary_path_str = format!(
+        "{}{}{}mod.rs",
+        relative_prefix,
+        ident.name,
+        path::MAIN_SEPARATOR
+    );
     let default_path = dir_path.join(&default_path_str);
     let secondary_path = dir_path.join(&secondary_path_str);
     let default_exists = default_path.exists();
@@ -57,7 +61,9 @@ pub(crate) fn default_submod_path(
     match (default_exists, secondary_exists) {
         (true, false) => Ok(ModulePathSuccess {
             file_path: default_path,
-            dir_ownership: DirOwnership::Owned { relative: Some(ident) },
+            dir_ownership: DirOwnership::Owned {
+                relative: Some(ident),
+            },
         }),
         (false, true) => Ok(ModulePathSuccess {
             file_path: secondary_path,

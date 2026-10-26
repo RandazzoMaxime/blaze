@@ -1,3 +1,5 @@
+// Follows `src/tools/rustfmt/src/formatting.rs` at rust-lang/rust 12433c307 (MIT or Apache-2.0).
+
 // High level formatting functions.
 
 use std::collections::HashMap;

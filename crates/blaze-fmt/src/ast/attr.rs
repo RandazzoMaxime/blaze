@@ -9,11 +9,10 @@ use std::fmt::Debug;
 use crate::ast::token::{self, Delimiter, DocFragmentKind, InvisibleOrigin, Token};
 use crate::ast::tokenstream::{TokenStream, TokenStreamIter, TokenTree};
 use crate::ast::{
-    AttrArgs, AttrItem, DelimArgs, AttrKind, AttrStyle, Attribute, ExprKind, LitKind, MetaItem,
+    AttrArgs, AttrItem, AttrKind, AttrStyle, Attribute, DelimArgs, ExprKind, LitKind, MetaItem,
     MetaItemInner, MetaItemKind, MetaItemLit, Path, PathSegment, Safety, ThinVec,
 };
 use crate::span::{Ident, Span, Symbol, sym};
-
 
 impl Attribute {
     pub fn get_normal_item(&self) -> &AttrItem {
@@ -22,7 +21,6 @@ impl Attribute {
             AttrKind::Synthetic(..) | AttrKind::DocComment(..) => unreachable!(),
         }
     }
-
 }
 
 impl AttributeExt for Attribute {
@@ -61,9 +59,15 @@ impl AttributeExt for Attribute {
     fn symbol_path(&self) -> Option<Vec<Symbol>> {
         use crate::ast::SyntheticAttr::*;
         match &self.kind {
-            AttrKind::Normal(normal) => {
-                Some(normal.item.path.segments.iter().map(|i| i.ident.name).collect())
-            }
+            AttrKind::Normal(normal) => Some(
+                normal
+                    .item
+                    .path
+                    .segments
+                    .iter()
+                    .map(|i| i.ident.name)
+                    .collect(),
+            ),
             AttrKind::Synthetic(synthetic) => match **synthetic {
                 CfgTrace(_) | CfgAttrTrace(_) => None,
             },
@@ -193,7 +197,9 @@ impl AttributeExt for Attribute {
 
     fn is_doc_hidden(&self) -> bool {
         self.has_name(sym::doc)
-            && self.meta_item_list().is_some_and(|l| list_contains_name(&l, sym::hidden))
+            && self
+                .meta_item_list()
+                .is_some_and(|l| list_contains_name(&l, sym::hidden))
     }
 
     fn is_doc_keyword_or_attribute(&self) -> bool {
@@ -216,9 +222,13 @@ impl AttributeExt for Attribute {
     /// Returns whether this attribute is any of the proc macro attributes.
     /// i.e. `proc_macro`, `proc_macro_attribute` or `proc_macro_derive`.
     fn is_proc_macro_attr(&self) -> bool {
-        [sym::proc_macro, sym::proc_macro_attribute, sym::proc_macro_derive]
-            .iter()
-            .any(|kind| self.has_name(*kind))
+        [
+            sym::proc_macro,
+            sym::proc_macro_attribute,
+            sym::proc_macro_derive,
+        ]
+        .iter()
+        .any(|kind| self.has_name(*kind))
     }
 }
 
@@ -242,12 +252,15 @@ impl Attribute {
             AttrKind::DocComment(..) => None,
         }
     }
-
 }
 
 impl AttrItem {
     pub fn name(&self) -> Option<Symbol> {
-        if let [seg] = &*self.path.segments { Some(seg.ident.name) } else { None }
+        if let [seg] = &*self.path.segments {
+            Some(seg.ident.name)
+        } else {
+            None
+        }
     }
 
     pub fn meta_item_list(&self) -> Option<ThinVec<MetaItemInner>> {
@@ -274,9 +287,9 @@ impl AttrItem {
     fn value_str(&self) -> Option<Symbol> {
         match &self.args {
             AttrArgs::Eq { expr, .. } => match expr.kind {
-                ExprKind::Lit(token_lit) => {
-                    LitKind::from_token_lit(token_lit).ok().and_then(|lit| lit.str())
-                }
+                ExprKind::Lit(token_lit) => LitKind::from_token_lit(token_lit)
+                    .ok()
+                    .and_then(|lit| lit.str()),
                 _ => None,
             },
             AttrArgs::Delimited(_) | AttrArgs::Empty => None,
@@ -319,7 +332,11 @@ impl AttrItem {
 impl MetaItem {
     /// For a single-segment meta item, returns its name; otherwise, returns `None`.
     pub fn ident(&self) -> Option<Ident> {
-        if let [PathSegment { ident, .. }] = self.path.segments[..] { Some(ident) } else { None }
+        if let [PathSegment { ident, .. }] = self.path.segments[..] {
+            Some(ident)
+        } else {
+            None
+        }
     }
 
     pub fn name(&self) -> Option<Symbol> {
@@ -388,12 +405,20 @@ impl MetaItem {
         let tt = iter.next().map(|tt| TokenTree::uninterpolate(tt));
         let path = match tt.as_deref() {
             Some(&TokenTree::Token(
-                Token { kind: ref kind @ (token::Ident(..) | token::PathSep), span },
+                Token {
+                    kind: ref kind @ (token::Ident(..) | token::PathSep),
+                    span,
+                },
                 _,
             )) => 'arm: {
                 let mut segments = if let &token::Ident(name, _) = kind {
-                    if let Some(TokenTree::Token(Token { kind: token::PathSep, .. }, _)) =
-                        iter.peek()
+                    if let Some(TokenTree::Token(
+                        Token {
+                            kind: token::PathSep,
+                            ..
+                        },
+                        _,
+                    )) = iter.peek()
                     {
                         iter.next();
                         vec![PathSegment::from_ident(Ident::new(name, span))]
@@ -404,13 +429,27 @@ impl MetaItem {
                     vec![PathSegment::path_root(span)]
                 };
                 loop {
-                    let Some(&TokenTree::Token(Token { kind: token::Ident(name, _), span }, _)) =
-                        iter.next().map(|tt| TokenTree::uninterpolate(tt)).as_deref()
+                    let Some(&TokenTree::Token(
+                        Token {
+                            kind: token::Ident(name, _),
+                            span,
+                        },
+                        _,
+                    )) = iter
+                        .next()
+                        .map(|tt| TokenTree::uninterpolate(tt))
+                        .as_deref()
                     else {
                         return None;
                     };
                     segments.push(PathSegment::from_ident(Ident::new(name, span)));
-                    let Some(TokenTree::Token(Token { kind: token::PathSep, .. }, _)) = iter.peek()
+                    let Some(TokenTree::Token(
+                        Token {
+                            kind: token::PathSep,
+                            ..
+                        },
+                        _,
+                    )) = iter.peek()
                     else {
                         break;
                     };
@@ -431,7 +470,10 @@ impl MetaItem {
                 unreachable!()
             }
             Some(TokenTree::Token(Token { kind, .. }, _)) if kind.is_delim() => {
-                panic!("Should be `AttrTokenTree::Delimited`, not delim tokens: {:?}", tt);
+                panic!(
+                    "Should be `AttrTokenTree::Delimited`, not delim tokens: {:?}",
+                    tt
+                );
             }
             _ => return None,
         };
@@ -446,7 +488,12 @@ impl MetaItem {
         // FIXME: This parses `unsafe()` not as unsafe attribute syntax in `MetaItem`,
         // but as a parenthesized list. This (and likely `MetaItem`) should be changed in
         // such a way that builtin macros don't accept extraneous `unsafe()`.
-        Some(MetaItem { unsafety: Safety::Default, path, kind, span })
+        Some(MetaItem {
+            unsafety: Safety::Default,
+            path,
+            kind,
+            span,
+        })
     }
 }
 
@@ -459,7 +506,13 @@ impl MetaItemKind {
             let item = MetaItemInner::from_tokens(&mut iter)?;
             result.push(item);
             match iter.next() {
-                None | Some(TokenTree::Token(Token { kind: token::Comma, .. }, _)) => {}
+                None
+                | Some(TokenTree::Token(
+                    Token {
+                        kind: token::Comma, ..
+                    },
+                    _,
+                )) => {}
                 _ => return None,
             }
         }
@@ -486,7 +539,12 @@ impl MetaItemKind {
                 MetaItemKind::list_from_tokens(inner_tokens).map(MetaItemKind::List)
             }
             Some(TokenTree::Delimited(..)) => None,
-            Some(TokenTree::Token(Token { kind: token::Eq, .. }, _)) => {
+            Some(TokenTree::Token(
+                Token {
+                    kind: token::Eq, ..
+                },
+                _,
+            )) => {
                 iter.next();
                 MetaItemKind::name_value_from_tokens(iter)
             }
@@ -497,9 +555,11 @@ impl MetaItemKind {
     fn from_attr_args(args: &AttrArgs) -> Option<MetaItemKind> {
         match args {
             AttrArgs::Empty => Some(MetaItemKind::Word),
-            AttrArgs::Delimited(DelimArgs { dspan: _, delim: Delimiter::Parenthesis, tokens }) => {
-                MetaItemKind::list_from_tokens(tokens.clone()).map(MetaItemKind::List)
-            }
+            AttrArgs::Delimited(DelimArgs {
+                dspan: _,
+                delim: Delimiter::Parenthesis,
+                tokens,
+            }) => MetaItemKind::list_from_tokens(tokens.clone()).map(MetaItemKind::List),
             AttrArgs::Delimited(..) => None,
             AttrArgs::Eq { expr, .. } => match expr.kind {
                 ExprKind::Lit(token_lit) => {
@@ -534,17 +594,20 @@ impl MetaItemInner {
 
     /// Returns `true` if this list item is a MetaItem with a name of `name`.
     pub fn has_name(&self, name: Symbol) -> bool {
-        self.meta_item().is_some_and(|meta_item| meta_item.has_name(name))
+        self.meta_item()
+            .is_some_and(|meta_item| meta_item.has_name(name))
     }
 
     /// Returns `true` if `self` is a `MetaItem` and the meta item is a word.
     pub fn is_word(&self) -> bool {
-        self.meta_item().is_some_and(|meta_item| meta_item.is_word())
+        self.meta_item()
+            .is_some_and(|meta_item| meta_item.is_word())
     }
 
     /// Gets a list of inner meta items from a list `MetaItem` type.
     pub fn meta_item_list(&self) -> Option<&[MetaItemInner]> {
-        self.meta_item().and_then(|meta_item| meta_item.meta_item_list())
+        self.meta_item()
+            .and_then(|meta_item| meta_item.meta_item_list())
     }
 
     /// If it's a singleton list of the form `foo(lit)`, returns the `foo` and
@@ -585,7 +648,10 @@ impl MetaItemInner {
     /// Returns the bool if `self` is a boolean `MetaItemInner::Literal`.
     pub fn boolean_literal(&self) -> Option<bool> {
         match self {
-            MetaItemInner::Lit(MetaItemLit { kind: LitKind::Bool(b), .. }) => Some(*b),
+            MetaItemInner::Lit(MetaItemLit {
+                kind: LitKind::Bool(b),
+                ..
+            }) => Some(*b),
             _ => None,
         }
     }
@@ -595,7 +661,10 @@ impl MetaItemInner {
     pub fn meta_item_or_bool(&self) -> Option<&MetaItemInner> {
         match self {
             MetaItemInner::MetaItem(_item) => Some(self),
-            MetaItemInner::Lit(MetaItemLit { kind: LitKind::Bool(_), .. }) => Some(self),
+            MetaItemInner::Lit(MetaItemLit {
+                kind: LitKind::Bool(_),
+                ..
+            }) => Some(self),
             _ => None,
         }
     }
@@ -651,7 +720,9 @@ pub fn list_contains_name(items: &[MetaItemInner], name: Symbol) -> bool {
 
 impl MetaItemLit {
     pub fn value_as_str(&self) -> Option<Symbol> {
-        LitKind::from_token_lit(self.as_token_lit()).ok().and_then(|lit| lit.str())
+        LitKind::from_token_lit(self.as_token_lit())
+            .ok()
+            .and_then(|lit| lit.str())
     }
 }
 

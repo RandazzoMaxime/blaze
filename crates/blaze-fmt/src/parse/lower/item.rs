@@ -20,7 +20,13 @@ impl Lower<'_> {
         let attrs = self.inner_attrs(node);
         let items = file.items().filter_map(|i| self.item(&i)).collect();
         let spans = self.mod_spans(node, None);
-        ast::Crate { id: DUMMY_NODE_ID, attrs, items, spans, is_placeholder: false }
+        ast::Crate {
+            id: DUMMY_NODE_ID,
+            attrs,
+            items,
+            spans,
+            is_placeholder: false,
+        }
     }
 
     /// `inner_span` from the first token after `{` (or of the file) to `}` (or the last token);
@@ -43,7 +49,10 @@ impl Lower<'_> {
                 continue;
             }
             if let syntax::NodeOrToken::Node(n) = &child
-                && ra::AnyAttr::cast(n.clone()).is_some_and(|a| self.attr(&a).is_some_and(|a| a.style == ast::AttrStyle::Inner))
+                && ra::AnyAttr::cast(n.clone()).is_some_and(|a| {
+                    self.attr(&a)
+                        .is_some_and(|a| a.style == ast::AttrStyle::Inner)
+                })
             {
                 continue;
             }
@@ -54,10 +63,19 @@ impl Lower<'_> {
             break;
         }
         let post_attr = post_attr.unwrap_or(hi.shrink_to_hi());
-        ast::ModSpans { inner_span, inject_use_span: post_attr.shrink_to_lo() }
+        ast::ModSpans {
+            inner_span,
+            inject_use_span: post_attr.shrink_to_lo(),
+        }
     }
 
-    fn mk_item<K>(&self, node: &SyntaxNode, vis: Option<ra::Visibility>, mut attrs: ast::AttrVec, kind: K) -> Box<ast::Item<K>> {
+    fn mk_item<K>(
+        &self,
+        node: &SyntaxNode,
+        vis: Option<ra::Visibility>,
+        mut attrs: ast::AttrVec,
+        kind: K,
+    ) -> Box<ast::Item<K>> {
         let mut all = self.outer_attrs(node);
         all.append(&mut attrs);
         Box::new(ast::Item {
@@ -110,7 +128,9 @@ impl Lower<'_> {
                     .and_then(|a| a.extern_token())
                     .map(|t| self.tsp(&t))
                     .unwrap_or(span);
-                let abi = abi_node.and_then(|a| a.string_token()).and_then(|s| self.str_lit(&s));
+                let abi = abi_node
+                    .and_then(|a| a.string_token())
+                    .and_then(|s| self.str_lit(&s));
                 let mut items = ThinVec::new();
                 if let Some(list) = b.extern_item_list() {
                     inner = self.inner_attrs(list.syntax());
@@ -120,7 +140,12 @@ impl Lower<'_> {
                         }
                     }
                 }
-                ast::ItemKind::ForeignMod(ast::ForeignMod { extern_span, safety, abi, items })
+                ast::ItemKind::ForeignMod(ast::ForeignMod {
+                    extern_span,
+                    safety,
+                    abi,
+                    items,
+                })
             }
             ra::Item::ExternCrate(e) => {
                 let name = match e.name_ref() {
@@ -156,7 +181,14 @@ impl Lower<'_> {
                     Some(tt) => Box::new(self.delim_args(&tt)),
                     None => return self.item_err(span),
                 };
-                ast::ItemKind::MacroDef(ident, ast::MacroDef { body, macro_rules: true, eii_declaration: None })
+                ast::ItemKind::MacroDef(
+                    ident,
+                    ast::MacroDef {
+                        body,
+                        macro_rules: true,
+                        eii_declaration: None,
+                    },
+                )
             }
             ra::Item::MacroDef(m) => {
                 let ident = self.item_name(m.name(), span);
@@ -167,7 +199,14 @@ impl Lower<'_> {
                     Some(tt) => Box::new(self.delim_args(&tt)),
                     None => return self.item_err(span),
                 };
-                ast::ItemKind::MacroDef(ident, ast::MacroDef { body, macro_rules: false, eii_declaration: None })
+                ast::ItemKind::MacroDef(
+                    ident,
+                    ast::MacroDef {
+                        body,
+                        macro_rules: false,
+                        eii_declaration: None,
+                    },
+                )
             }
             ra::Item::Module(m) => {
                 let ident = self.item_name(m.name(), span);
@@ -198,7 +237,8 @@ impl Lower<'_> {
             ra::Item::TypeAlias(t) => ast::ItemKind::TyAlias(self.ty_alias(t, span)),
             ra::Item::Union(u) => {
                 let ident = self.item_name(u.name(), span);
-                let (data, _) = self.variant_data(u.record_field_list().map(ra::FieldList::RecordFieldList));
+                let (data, _) =
+                    self.variant_data(u.record_field_list().map(ra::FieldList::RecordFieldList));
                 let generics = self.adt_generics(u, ident.span, None);
                 ast::ItemKind::Union(ident, generics, data)
             }
@@ -229,7 +269,11 @@ impl Lower<'_> {
         }
     }
 
-    fn safety(&self, unsafe_: Option<syntax::SyntaxToken>, safe: Option<syntax::SyntaxToken>) -> ast::Safety {
+    fn safety(
+        &self,
+        unsafe_: Option<syntax::SyntaxToken>,
+        safe: Option<syntax::SyntaxToken>,
+    ) -> ast::Safety {
         match (unsafe_, safe) {
             (Some(u), _) => ast::Safety::Unsafe(self.tsp(&u)),
             (None, Some(s)) => ast::Safety::Safe(self.tsp(&s)),
@@ -246,8 +290,16 @@ impl Lower<'_> {
 
     /// Generics of a struct, enum or union: without a `where`, rustc's clause is empty right
     /// after the generics (or, for a tuple struct, after its fields).
-    fn adt_generics(&self, node: &impl HasGenericParams, ident: Span, tuple_end: Option<Span>) -> ast::Generics {
-        let after = node.generic_param_list().map(|g| self.nsp(g.syntax())).unwrap_or(ident);
+    fn adt_generics(
+        &self,
+        node: &impl HasGenericParams,
+        ident: Span,
+        tuple_end: Option<Span>,
+    ) -> ast::Generics {
+        let after = node
+            .generic_param_list()
+            .map(|g| self.nsp(g.syntax()))
+            .unwrap_or(ident);
         self.item_generics(node, ident, tuple_end.unwrap_or(after))
     }
 
@@ -260,7 +312,10 @@ impl Lower<'_> {
         let span = self.nsp(node);
         let ident = self.item_name(f.name(), span);
         let params = f.param_list();
-        let params_span = params.as_ref().map(|p| self.nsp(p.syntax())).unwrap_or(ident.span);
+        let params_span = params
+            .as_ref()
+            .map(|p| self.nsp(p.syntax()))
+            .unwrap_or(ident.span);
         let decl = self.fn_decl(params, f.ret_type(), span);
         let decl_end = match &decl.output {
             ast::FnRetTy::Ty(ty) => ty.span,
@@ -273,7 +328,9 @@ impl Lower<'_> {
                 None => ast::Const::No,
             },
             coroutine_marker: match (f.async_token(), f.gen_token()) {
-                (Some(a), Some(g)) => Some((ast::CoroutineKind::AsyncGen, self.tsp(&a).to(self.tsp(&g)))),
+                (Some(a), Some(g)) => {
+                    Some((ast::CoroutineKind::AsyncGen, self.tsp(&a).to(self.tsp(&g))))
+                }
                 (Some(a), None) => Some((ast::CoroutineKind::Async, self.tsp(&a))),
                 (None, Some(g)) => Some((ast::CoroutineKind::Gen, self.tsp(&g))),
                 (None, None) => None,
@@ -287,7 +344,9 @@ impl Lower<'_> {
             safety: self.safety(f.unsafe_token(), f.safe_token()),
             ext: self.abi(f.abi()),
         };
-        let lo = super::first_token_after_attrs(node).map(|t| self.tsp(&t)).unwrap_or(span);
+        let lo = super::first_token_after_attrs(node)
+            .map(|t| self.tsp(&t))
+            .unwrap_or(span);
         let (body, inner, sig_hi) = match f.body() {
             Some(b) => {
                 let first = b.syntax().first_token();
@@ -295,14 +354,22 @@ impl Lower<'_> {
                     .and_then(|t| prev_real_token(&t))
                     .map(|t| self.tsp(&t))
                     .unwrap_or(span);
-                (Some(self.block_expr_inner(&b)), self.block_inner_attrs(&b), hi)
+                (
+                    Some(self.block_expr_inner(&b)),
+                    self.block_inner_attrs(&b),
+                    hi,
+                )
             }
             None => {
                 let hi = f.semicolon_token().map(|t| self.tsp(&t)).unwrap_or(span);
                 (None, ThinVec::new(), hi)
             }
         };
-        let sig = ast::FnSig { header, decl: Box::new(decl), span: lo.to(sig_hi) };
+        let sig = ast::FnSig {
+            header,
+            decl: Box::new(decl),
+            span: lo.to(sig_hi),
+        };
         let func = ast::Fn {
             defaultness: self.defaultness(f.default_token()),
             ident,
@@ -343,7 +410,10 @@ impl Lower<'_> {
                 defaultness: self.defaultness(i.default_token()),
                 safety: self.safety(i.unsafe_token(), None),
                 polarity,
-                trait_ref: ast::TraitRef { path, ref_id: DUMMY_NODE_ID },
+                trait_ref: ast::TraitRef {
+                    path,
+                    ref_id: DUMMY_NODE_ID,
+                },
             })
         });
         if of_trait.is_none() && (i.unsafe_token().is_some() || i.default_token().is_some()) {
@@ -351,18 +421,32 @@ impl Lower<'_> {
         }
         let (items, attrs) = match i.assoc_item_list() {
             Some(list) => (
-                list.assoc_items().filter_map(|a| self.assoc_item(&a)).collect(),
+                list.assoc_items()
+                    .filter_map(|a| self.assoc_item(&a))
+                    .collect(),
                 self.inner_attrs(list.syntax()),
             ),
             None => (ThinVec::new(), ThinVec::new()),
         };
-        (ast::Impl { generics, constness, of_trait, self_ty, items }, attrs)
+        (
+            ast::Impl {
+                generics,
+                constness,
+                of_trait,
+                self_ty,
+                items,
+            },
+            attrs,
+        )
     }
 
     fn trait_item(&self, t: &ra::Trait, span: Span) -> (ast::ItemKind, ast::AttrVec) {
         let ident = self.item_name(t.name(), span);
         let bounds = self.opt_bounds(t);
-        let gen_end = t.generic_param_list().map(|g| self.nsp(g.syntax())).unwrap_or(ident.span);
+        let gen_end = t
+            .generic_param_list()
+            .map(|g| self.nsp(g.syntax()))
+            .unwrap_or(ident.span);
         let before_where = t
             .type_bound_list()
             .and_then(|b| last_token(b.syntax()))
@@ -376,14 +460,21 @@ impl Lower<'_> {
                 None => ast::Const::No,
             };
             return (
-                ast::ItemKind::TraitAlias(Box::new(ast::TraitAlias { constness, ident, generics, bounds })),
+                ast::ItemKind::TraitAlias(Box::new(ast::TraitAlias {
+                    constness,
+                    ident,
+                    generics,
+                    bounds,
+                })),
                 ThinVec::new(),
             );
         }
         let generics = self.item_generics(t, ident.span, before_where);
         let (items, attrs) = match t.assoc_item_list() {
             Some(list) => (
-                list.assoc_items().filter_map(|a| self.assoc_item(&a)).collect(),
+                list.assoc_items()
+                    .filter_map(|a| self.assoc_item(&a))
+                    .collect(),
                 self.inner_attrs(list.syntax()),
             ),
             None => (ThinVec::new(), ThinVec::new()),
@@ -391,7 +482,10 @@ impl Lower<'_> {
         let impl_restriction = match t.impl_restriction() {
             Some(r) => {
                 self.unsupported(self.nsp(r.syntax()), "an `impl` restriction");
-                ast::ImplRestriction { kind: ast::RestrictionKind::Unrestricted, span }
+                ast::ImplRestriction {
+                    kind: ast::RestrictionKind::Unrestricted,
+                    span,
+                }
             }
             None => ast::ImplRestriction {
                 kind: ast::RestrictionKind::Unrestricted,
@@ -414,7 +508,11 @@ impl Lower<'_> {
                 None => ast::Const::No,
             },
             safety: self.safety(t.unsafe_token(), None),
-            is_auto: if t.auto_token().is_some() { ast::IsAuto::Yes } else { ast::IsAuto::No },
+            is_auto: if t.auto_token().is_some() {
+                ast::IsAuto::Yes
+            } else {
+                ast::IsAuto::No
+            },
             ident,
             generics,
             bounds,
@@ -427,13 +525,25 @@ impl Lower<'_> {
         let node = a.syntax();
         let span = self.nsp(node);
         let (vis, inner, kind) = match a {
-            ra::AssocItem::Const(c) => (c.visibility(), ThinVec::new(), ast::AssocItemKind::Const(self.const_item(c))),
+            ra::AssocItem::Const(c) => (
+                c.visibility(),
+                ThinVec::new(),
+                ast::AssocItemKind::Const(self.const_item(c)),
+            ),
             ra::AssocItem::Fn(f) => {
                 let (func, inner) = self.func(f);
                 (f.visibility(), inner, ast::AssocItemKind::Fn(func))
             }
-            ra::AssocItem::MacroCall(m) => (None, ThinVec::new(), ast::AssocItemKind::MacCall(self.mac_call(m))),
-            ra::AssocItem::TypeAlias(t) => (t.visibility(), ThinVec::new(), ast::AssocItemKind::Type(self.ty_alias(t, span))),
+            ra::AssocItem::MacroCall(m) => (
+                None,
+                ThinVec::new(),
+                ast::AssocItemKind::MacCall(self.mac_call(m)),
+            ),
+            ra::AssocItem::TypeAlias(t) => (
+                t.visibility(),
+                ThinVec::new(),
+                ast::AssocItemKind::Type(self.ty_alias(t, span)),
+            ),
         };
         Some(self.mk_item(node, vis, inner, kind))
     }
@@ -446,11 +556,21 @@ impl Lower<'_> {
                 let (func, inner) = self.func(f);
                 (f.visibility(), inner, ast::ForeignItemKind::Fn(func))
             }
-            ra::ExternItem::MacroCall(m) => (None, ThinVec::new(), ast::ForeignItemKind::MacCall(self.mac_call(m))),
-            ra::ExternItem::Static(s) => (s.visibility(), ThinVec::new(), ast::ForeignItemKind::Static(self.static_item(s, span))),
-            ra::ExternItem::TypeAlias(t) => {
-                (t.visibility(), ThinVec::new(), ast::ForeignItemKind::TyAlias(self.ty_alias(t, span)))
-            }
+            ra::ExternItem::MacroCall(m) => (
+                None,
+                ThinVec::new(),
+                ast::ForeignItemKind::MacCall(self.mac_call(m)),
+            ),
+            ra::ExternItem::Static(s) => (
+                s.visibility(),
+                ThinVec::new(),
+                ast::ForeignItemKind::Static(self.static_item(s, span)),
+            ),
+            ra::ExternItem::TypeAlias(t) => (
+                t.visibility(),
+                ThinVec::new(),
+                ast::ForeignItemKind::TyAlias(self.ty_alias(t, span)),
+            ),
         };
         Some(self.mk_item(node, vis, inner, kind))
     }
@@ -488,7 +608,11 @@ impl Lower<'_> {
             ident,
             ty,
             safety: self.safety(s.unsafe_token(), s.safe_token()),
-            mutability: if s.mut_token().is_some() { ast::Mutability::Mut } else { ast::Mutability::Not },
+            mutability: if s.mut_token().is_some() {
+                ast::Mutability::Mut
+            } else {
+                ast::Mutability::Not
+            },
             expr: s.body().map(|e| self.expr(&e)),
             define_opaque: None,
             eii_impl: None,
@@ -499,7 +623,10 @@ impl Lower<'_> {
     fn ty_alias(&self, t: &ra::TypeAlias, span: Span) -> Box<ast::TyAlias> {
         let ident = self.item_name(t.name(), span);
         let bounds = self.opt_bounds(t);
-        let gen_end = t.generic_param_list().map(|g| self.nsp(g.syntax())).unwrap_or(ident.span);
+        let gen_end = t
+            .generic_param_list()
+            .map(|g| self.nsp(g.syntax()))
+            .unwrap_or(ident.span);
         let before_where = t
             .type_bound_list()
             .and_then(|b| last_token(b.syntax()))
@@ -543,7 +670,10 @@ impl Lower<'_> {
                 None,
             ),
             Some(ra::FieldList::TupleFieldList(list)) => (
-                ast::VariantData::Tuple(list.fields().map(|f| self.tuple_field(&f)).collect(), DUMMY_NODE_ID),
+                ast::VariantData::Tuple(
+                    list.fields().map(|f| self.tuple_field(&f)).collect(),
+                    DUMMY_NODE_ID,
+                ),
                 Some(self.nsp(list.syntax())),
             ),
             None => (ast::VariantData::Unit(DUMMY_NODE_ID), None),
@@ -556,7 +686,10 @@ impl Lower<'_> {
         let span = self.nsp(f.syntax());
         let ident = self.item_name(f.name(), span);
         let ty = self.opt_ty(f.ty(), span);
-        let default = f.default_val().and_then(|c| c.expr()).map(|e| self.anon_const(&e));
+        let default = f
+            .default_val()
+            .and_then(|c| c.expr())
+            .map(|e| self.anon_const(&e));
         let safety = self.safety(f.unsafe_token(), None);
         if f.mut_restriction().is_some() {
             self.unsupported(span, "a `mut` restriction");
@@ -592,7 +725,12 @@ impl Lower<'_> {
         }
     }
 
-    fn field_extras(&self, safety: ast::Safety, default: Option<ast::AnonConst>, node: &SyntaxNode) -> Option<Box<ast::FieldDefExtras>> {
+    fn field_extras(
+        &self,
+        safety: ast::Safety,
+        default: Option<ast::AnonConst>,
+        node: &SyntaxNode,
+    ) -> Option<Box<ast::FieldDefExtras>> {
         if matches!(safety, ast::Safety::Default) && default.is_none() {
             return None;
         }
@@ -624,7 +762,10 @@ impl Lower<'_> {
             vis: self.visibility(v.visibility(), v.syntax()),
             ident,
             data,
-            disr_expr: v.const_arg().and_then(|c| c.expr()).map(|e| self.anon_const(&e)),
+            disr_expr: v
+                .const_arg()
+                .and_then(|c| c.expr())
+                .map(|e| self.anon_const(&e)),
             is_placeholder: false,
         }
     }
@@ -637,12 +778,17 @@ impl Lower<'_> {
         let span = self.nsp(tree.syntax());
         let mut prefix = match tree.path() {
             Some(p) => self.path(&p).1,
-            None => ast::Path { span: span.shrink_to_lo(), segments: ThinVec::new() },
+            None => ast::Path {
+                span: span.shrink_to_lo(),
+                segments: ThinVec::new(),
+            },
         };
         if tree.path().is_none()
             && let Some(cc) = tree.coloncolon_token()
         {
-            prefix.segments.push(ast::PathSegment::path_root(self.tsp(&cc).shrink_to_lo()));
+            prefix
+                .segments
+                .push(ast::PathSegment::path_root(self.tsp(&cc).shrink_to_lo()));
         }
         let kind = if let Some(star) = tree.star_token() {
             ast::UseTreeKind::Glob(self.tsp(&star))
@@ -650,16 +796,21 @@ impl Lower<'_> {
             ast::UseTreeKind::Nested {
                 items: list
                     .use_trees()
-                    .map(|t| ast::UseTreeAndId { inner: self.use_tree(&t), id: DUMMY_NODE_ID })
+                    .map(|t| ast::UseTreeAndId {
+                        inner: self.use_tree(&t),
+                        id: DUMMY_NODE_ID,
+                    })
                     .collect(),
                 span: self.nsp(list.syntax()),
             }
         } else {
-            let rename = tree.rename().and_then(|r| match (r.name(), r.underscore_token()) {
-                (Some(n), _) => Some(self.name(&n)),
-                (None, Some(u)) => Some(Ident::new(kw::Underscore, self.tsp(&u))),
-                _ => None,
-            });
+            let rename = tree
+                .rename()
+                .and_then(|r| match (r.name(), r.underscore_token()) {
+                    (Some(n), _) => Some(self.name(&n)),
+                    (None, Some(u)) => Some(Ident::new(kw::Underscore, self.tsp(&u))),
+                    _ => None,
+                });
             ast::UseTreeKind::Simple(rename)
         };
         ast::UseTree { prefix, kind }

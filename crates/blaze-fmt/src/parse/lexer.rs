@@ -32,10 +32,11 @@ pub(crate) fn lex_token_trees(
     strip_tokens: StripTokens,
 ) -> Result<TokenStream, LexError> {
     if strip_tokens == StripTokens::ShebangAndFrontmatter
-        && let Some(shebang_len) = rustc_lexer::strip_shebang(src) {
-            src = &src[shebang_len..];
-            start_pos += BytePos::from_usize(shebang_len);
-        }
+        && let Some(shebang_len) = rustc_lexer::strip_shebang(src)
+    {
+        src = &src[shebang_len..];
+        start_pos += BytePos::from_usize(shebang_len);
+    }
     let frontmatter_allowed = match strip_tokens {
         StripTokens::ShebangAndFrontmatter => FrontmatterAllowed::Yes,
         StripTokens::Nothing => FrontmatterAllowed::No,
@@ -77,7 +78,10 @@ impl<'src> Lexer<'src> {
 
     fn err(&mut self, span: Span, message: impl Into<String>) {
         if self.error.is_none() {
-            self.error = Some(LexError { span, message: message.into() });
+            self.error = Some(LexError {
+                span,
+                message: message.into(),
+            });
         }
     }
 
@@ -115,7 +119,10 @@ impl<'src> Lexer<'src> {
                     let content = self.str_from(content_start);
                     self.cook_doc_comment(content_start, content, CommentKind::Line, doc_style)
                 }
-                rustc_lexer::TokenKind::BlockComment { doc_style, terminated } => {
+                rustc_lexer::TokenKind::BlockComment {
+                    doc_style,
+                    terminated,
+                } => {
                     if !terminated {
                         let msg = match doc_style {
                             Some(_) => "unterminated block doc-comment",
@@ -132,7 +139,10 @@ impl<'src> Lexer<'src> {
                     let content = self.str_from_to(content_start, content_end);
                     self.cook_doc_comment(content_start, content, CommentKind::Block, doc_style)
                 }
-                rustc_lexer::TokenKind::Frontmatter { has_invalid_preceding_whitespace, .. } => {
+                rustc_lexer::TokenKind::Frontmatter {
+                    has_invalid_preceding_whitespace,
+                    ..
+                } => {
                     if has_invalid_preceding_whitespace {
                         self.err(
                             self.mk_sp(start, self.pos),
@@ -160,20 +170,29 @@ impl<'src> Lexer<'src> {
                 rustc_lexer::TokenKind::UnknownPrefix => {
                     let prefix = self.str_from(start);
                     if self.edition.at_least_rust_2021() {
-                        self.err(self.mk_sp(start, self.pos), format!("prefix `{prefix}` is unknown"));
+                        self.err(
+                            self.mk_sp(start, self.pos),
+                            format!("prefix `{prefix}` is unknown"),
+                        );
                     }
                     self.ident(start)
                 }
                 rustc_lexer::TokenKind::UnknownPrefixLifetime => {
                     let prefix = self.str_from(start);
                     if self.edition.at_least_rust_2021() {
-                        self.err(self.mk_sp(start, self.pos), format!("prefix `{prefix}` is unknown"));
+                        self.err(
+                            self.mk_sp(start, self.pos),
+                            format!("prefix `{prefix}` is unknown"),
+                        );
                     }
                     token::Lifetime(Symbol::intern(self.str_from(start)), IdentKind::Normal)
                 }
                 rustc_lexer::TokenKind::InvalidIdent => {
                     let sym = self.str_from(start);
-                    self.err(self.mk_sp(start, self.pos), format!("identifiers cannot contain `{sym}`"));
+                    self.err(
+                        self.mk_sp(start, self.pos),
+                        format!("identifiers cannot contain `{sym}`"),
+                    );
                     token::Ident(Symbol::intern(sym), IdentKind::Normal)
                 }
                 rustc_lexer::TokenKind::Literal {
@@ -221,11 +240,18 @@ impl<'src> Lexer<'src> {
                     } else {
                         None
                     };
-                    token::Literal(token::Lit { kind, symbol, suffix })
+                    token::Literal(token::Lit {
+                        kind,
+                        symbol,
+                        suffix,
+                    })
                 }
                 rustc_lexer::TokenKind::Lifetime { starts_with_number } => {
                     if starts_with_number {
-                        self.err(self.mk_sp(start, self.pos), "lifetimes cannot start with a number");
+                        self.err(
+                            self.mk_sp(start, self.pos),
+                            "lifetimes cannot start with a number",
+                        );
                     }
                     token::Lifetime(Symbol::intern(self.str_from(start)), IdentKind::Normal)
                 }
@@ -392,16 +418,25 @@ impl<'src> Lexer<'src> {
                     let radix = base as u32;
                     let s = self.str_from_to(start + BytePos(2), end);
                     if s.chars().any(|c| c != '_' && c.to_digit(radix).is_none()) {
-                        self.err(self.mk_sp(start, end), format!("invalid digit for a base {radix} literal"));
+                        self.err(
+                            self.mk_sp(start, end),
+                            format!("invalid digit for a base {radix} literal"),
+                        );
                         kind = token::Err(ErrorGuaranteed::unchecked_error_guaranteed());
                     }
                 }
                 (kind, self.symbol_from_to(start, end))
             }
-            LiteralKind::Float { base, empty_exponent } => {
+            LiteralKind::Float {
+                base,
+                empty_exponent,
+            } => {
                 let mut kind = token::Float;
                 if empty_exponent {
-                    self.err(self.mk_sp(start, self.pos), "expected at least one digit in exponent");
+                    self.err(
+                        self.mk_sp(start, self.pos),
+                        "expected at least one digit in exponent",
+                    );
                     kind = token::Err(ErrorGuaranteed::unchecked_error_guaranteed());
                 }
                 let base = match base {
@@ -424,7 +459,10 @@ impl<'src> Lexer<'src> {
 
     fn raw_str_error(&mut self, start: BytePos, end: BytePos) -> (token::LitKind, Symbol) {
         self.err(self.mk_sp(start, end), "invalid raw string literal");
-        (token::Err(ErrorGuaranteed::unchecked_error_guaranteed()), self.symbol_from_to(start, end))
+        (
+            token::Err(ErrorGuaranteed::unchecked_error_guaranteed()),
+            self.symbol_from_to(start, end),
+        )
     }
 
     fn cook_quoted(
@@ -438,12 +476,18 @@ impl<'src> Lexer<'src> {
         let content_start = start + BytePos(prefix_len);
         let content_end = end - BytePos(postfix_len);
         if content_end < content_start {
-            return (token::Err(ErrorGuaranteed::unchecked_error_guaranteed()), self.symbol_from_to(start, end));
+            return (
+                token::Err(ErrorGuaranteed::unchecked_error_guaranteed()),
+                self.symbol_from_to(start, end),
+            );
         }
         let lit_content = self.str_from_to(content_start, content_end);
         if let Some(message) = escape_error(kind, lit_content) {
             self.err(self.mk_sp(start, end), message);
-            return (token::Err(ErrorGuaranteed::unchecked_error_guaranteed()), self.symbol_from_to(start, end));
+            return (
+                token::Err(ErrorGuaranteed::unchecked_error_guaranteed()),
+                self.symbol_from_to(start, end),
+            );
         }
         (kind, Symbol::intern(lit_content))
     }

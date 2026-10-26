@@ -1,3 +1,5 @@
+// Follows `src/tools/rustfmt/src/attr/doc_comment.rs` at rust-lang/rust 12433c307 (MIT or Apache-2.0).
+
 use crate::comment::CommentStyle;
 use std::fmt::{self, Display};
 

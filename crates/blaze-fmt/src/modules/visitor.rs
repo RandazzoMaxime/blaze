@@ -1,3 +1,5 @@
+// Follows `src/tools/rustfmt/src/modules/visitor.rs` at rust-lang/rust 12433c307 (MIT or Apache-2.0).
+
 use crate::ast;
 use crate::ast::visit::Visitor;
 use crate::span::{Symbol, sym};

@@ -1,3 +1,5 @@
+// Follows `src/tools/rustfmt/src/types.rs` at rust-lang/rust 12433c307 (MIT or Apache-2.0).
+
 use std::ops::Deref;
 
 use crate::ast::{self, FnRetTy, Mutability, Term};
@@ -672,12 +674,7 @@ impl Rewrite for ast::GenericParam {
 
         let mut param = String::with_capacity(128);
 
-        let param_start = if let ast::GenericParamKind::Const {
-            ty,
-            span,
-            default,
-        } = &self.kind
-        {
+        let param_start = if let ast::GenericParamKind::Const { ty, span, default } = &self.kind {
             param.push_str("const ");
             param.push_str(rewrite_ident(context, self.ident));
             param.push_str(": ");

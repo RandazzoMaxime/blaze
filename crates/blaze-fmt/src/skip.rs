@@ -1,3 +1,5 @@
+// Follows `src/tools/rustfmt/src/skip.rs` at rust-lang/rust 12433c307 (MIT or Apache-2.0).
+
 //! Module that contains skip related stuffs.
 
 use crate::ast;

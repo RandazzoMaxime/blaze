@@ -1,3 +1,5 @@
+// Follows `src/tools/rustfmt/src/parse/macros/cfg_if.rs` at rust-lang/rust 12433c307 (MIT or Apache-2.0).
+
 use std::panic::{AssertUnwindSafe, catch_unwind};
 
 use crate::ast;

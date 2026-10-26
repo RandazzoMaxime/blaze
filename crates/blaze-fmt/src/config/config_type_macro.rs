@@ -192,6 +192,5 @@ macro_rules! config_type_unstable {
 }
 
 pub(crate) use {
-    config_type, config_type_doc_hint, config_type_if_unit, config_type_unstable,
-    config_type_value,
+    config_type, config_type_doc_hint, config_type_if_unit, config_type_unstable, config_type_value,
 };

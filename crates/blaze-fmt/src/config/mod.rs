@@ -1,3 +1,5 @@
+// Follows `src/tools/rustfmt/src/config/mod.rs` at rust-lang/rust 12433c307 (MIT or Apache-2.0).
+
 use std::cell::Cell;
 use std::fs::File;
 use std::io::{Error, ErrorKind, Read};
@@ -435,12 +437,9 @@ fn resolve_project_file(dir: &Path) -> Result<Option<PathBuf>, Error> {
 /// Returns the path of the first configuration file found in that order, or `None` if none was
 /// found.
 fn config_from_user_dirs() -> Result<Option<PathBuf>, Error> {
-    for dir in [
-        home_dir(),
-        config_dir().map(|d| d.join("rustfmt")),
-    ]
-    .iter()
-    .flatten()
+    for dir in [home_dir(), config_dir().map(|d| d.join("rustfmt"))]
+        .iter()
+        .flatten()
     {
         if let Some(path) = get_toml_path(&dir)? {
             return Ok(Some(path));
@@ -540,7 +539,9 @@ fn config_path(options: &dyn CliOptions) -> Result<Option<PathBuf>, Error> {
 
 /// `dirs::home_dir`: `$HOME` when set and not empty.
 fn home_dir() -> Option<PathBuf> {
-    env::var_os("HOME").filter(|h| !h.is_empty()).map(PathBuf::from)
+    env::var_os("HOME")
+        .filter(|h| !h.is_empty())
+        .map(PathBuf::from)
 }
 
 /// `dirs::config_dir`: `~/Library/Application Support` on macOS, `$XDG_CONFIG_HOME` (if absolute)

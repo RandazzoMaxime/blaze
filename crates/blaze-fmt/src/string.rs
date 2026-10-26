@@ -1,3 +1,5 @@
+// Follows `src/tools/rustfmt/src/string.rs` at rust-lang/rust 12433c307 (MIT or Apache-2.0).
+
 // Format string literals.
 
 use unicode_properties::{GeneralCategory, UnicodeGeneralCategory};

@@ -1,3 +1,5 @@
+// Follows `src/tools/rustfmt/src/imports.rs` at rust-lang/rust 12433c307 (MIT or Apache-2.0).
+
 use std::borrow::Cow;
 use std::cmp::Ordering;
 use std::fmt;
@@ -927,9 +929,7 @@ impl Ord for UseSegment {
         }
 
         match (&self.kind, &other.kind) {
-            (Slf(a), Slf(b))
-            | (Super(a), Super(b))
-            | (Crate(a), Crate(b)) => match (a, b) {
+            (Slf(a), Slf(b)) | (Super(a), Super(b)) | (Crate(a), Crate(b)) => match (a, b) {
                 (Some(sa), Some(sb)) => {
                     if self.style_edition >= StyleEdition::Edition2024 {
                         version_sort(sa.trim_start_matches("r#"), sb.trim_start_matches("r#"))

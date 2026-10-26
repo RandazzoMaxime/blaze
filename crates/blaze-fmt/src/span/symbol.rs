@@ -116,7 +116,10 @@ impl Symbol {
     }
 
     pub fn is_path_segment_keyword(self) -> bool {
-        matches!(self.0, "super" | "self" | "Self" | "crate" | "{{root}}" | "$crate")
+        matches!(
+            self.0,
+            "super" | "self" | "Self" | "crate" | "{{root}}" | "$crate"
+        )
     }
 
     pub fn is_bool_lit(self) -> bool {
@@ -207,7 +210,10 @@ impl Ident {
     }
 
     pub fn without_first_quote(self) -> Ident {
-        Ident::new(Symbol::intern(self.as_str().trim_start_matches('\'')), self.span)
+        Ident::new(
+            Symbol::intern(self.as_str().trim_start_matches('\'')),
+            self.span,
+        )
     }
 }
 

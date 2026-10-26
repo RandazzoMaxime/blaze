@@ -1,17 +1,19 @@
+// Follows `compiler/rustc_ast/src/util/literal.rs` at rust-lang/rust 12433c307 (MIT or Apache-2.0).
+
 //! Code related to parsing literals.
 
 use std::fmt::Write as _;
 use std::{ascii, fmt, str};
 
+use crate::ast::ByteSymbol;
+use crate::span::{Span, Symbol, kw, sym};
 use syntax::unescape::{
     MixedUnit, unescape_byte, unescape_byte_str, unescape_c_str, unescape_char, unescape_str,
 };
-use crate::ast::ByteSymbol;
-use crate::span::{Span, Symbol, kw, sym};
 use tracing::debug;
 
-use crate::ast::{self, LitKind, MetaItemLit, StrStyle};
 use crate::ast::token::{self, Token};
+use crate::ast::{self, LitKind, MetaItemLit, StrStyle};
 
 // Escapes a string, represented as a symbol. Reuses the original symbol,
 // avoiding interning, if no changes are required.
@@ -79,7 +81,11 @@ pub enum LitError {
 impl LitKind {
     /// Converts literal token into a semantic literal.
     pub fn from_token_lit(lit: token::Lit) -> Result<LitKind, LitError> {
-        let token::Lit { kind, symbol, suffix } = lit;
+        let token::Lit {
+            kind,
+            symbol,
+            suffix,
+        } = lit;
         if let Some(suffix) = suffix
             && !kind.may_have_suffix()
         {
@@ -221,7 +227,11 @@ impl fmt::Display for LitKind {
             LitKind::CStr(ref bytes, StrStyle::Raw(n)) => {
                 // This can only be valid UTF-8.
                 let symbol = str::from_utf8(bytes.as_byte_str()).unwrap();
-                write!(f, "cr{delim}\"{symbol}\"{delim}", delim = "#".repeat(n as usize),)?;
+                write!(
+                    f,
+                    "cr{delim}\"{symbol}\"{delim}",
+                    delim = "#".repeat(n as usize),
+                )?;
             }
             LitKind::Int(n, ty) => {
                 write!(f, "{n}")?;

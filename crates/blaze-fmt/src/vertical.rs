@@ -1,10 +1,12 @@
+// Follows `src/tools/rustfmt/src/vertical.rs` at rust-lang/rust 12433c307 (MIT or Apache-2.0).
+
 // Format with vertical alignment.
 
 use std::cmp;
 
-use itertools::Itertools;
 use crate::ast;
 use crate::span::{BytePos, Span};
+use itertools::Itertools;
 
 use crate::comment::combine_strs_with_missing_comments;
 use crate::config::lists::*;

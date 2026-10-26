@@ -1,3 +1,5 @@
+// Follows `src/tools/rustfmt/src/parse/macros/cfg_select.rs` at rust-lang/rust 12433c307 (MIT or Apache-2.0).
+
 //! See [`cfg_select!` reference](
 //! https://doc.rust-lang.org/nightly/reference/conditional-compilation.html#the-cfg_select-macro
 //! ) for grammar.

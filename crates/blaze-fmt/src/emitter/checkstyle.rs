@@ -1,3 +1,5 @@
+// Follows `src/tools/rustfmt/src/emitter/checkstyle.rs` at rust-lang/rust 12433c307 (MIT or Apache-2.0).
+
 use self::xml::XmlEscaped;
 use super::*;
 use crate::rustfmt_diff::{DiffLine, Mismatch, make_diff};

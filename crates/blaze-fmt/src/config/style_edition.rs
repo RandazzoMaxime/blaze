@@ -1,3 +1,5 @@
+// Follows `src/tools/rustfmt/src/config/style_edition.rs` at rust-lang/rust 12433c307 (MIT or Apache-2.0).
+
 use crate::config::StyleEdition;
 
 /// Defines the default value for the given style edition

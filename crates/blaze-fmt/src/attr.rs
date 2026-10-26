@@ -1,7 +1,9 @@
+// Follows `src/tools/rustfmt/src/attr.rs` at rust-lang/rust 12433c307 (MIT or Apache-2.0).
+
 //! Format attributes and meta items.
 
-use crate::ast::HasAttrs;
 use crate::ast;
+use crate::ast::HasAttrs;
 use crate::span::{Span, symbol::sym};
 use tracing::debug;
 
@@ -250,9 +252,7 @@ impl Rewrite for ast::MetaItemInner {
     fn rewrite_result(&self, context: &RewriteContext<'_>, shape: Shape) -> RewriteResult {
         match self {
             ast::MetaItemInner::MetaItem(meta_item) => meta_item.rewrite_result(context, shape),
-            ast::MetaItemInner::Lit(l) => {
-                rewrite_literal(context, l.as_token_lit(), l.span, shape)
-            }
+            ast::MetaItemInner::Lit(l) => rewrite_literal(context, l.as_token_lit(), l.span, shape),
         }
     }
 }

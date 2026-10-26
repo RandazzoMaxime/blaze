@@ -1,3 +1,5 @@
+// Follows `src/tools/rustfmt/src/source_map.rs` at rust-lang/rust 12433c307 (MIT or Apache-2.0).
+
 //! This module contains utilities that work with the `SourceMap` from `libsyntax`/`syntex_syntax`.
 //! This includes extension traits and methods for looking up spans and line ranges for AST nodes.
 

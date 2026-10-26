@@ -1,3 +1,5 @@
+// Follows `src/tools/rustfmt/src/spanned.rs` at rust-lang/rust 12433c307 (MIT or Apache-2.0).
+
 use std::cmp::max;
 
 use crate::ast;

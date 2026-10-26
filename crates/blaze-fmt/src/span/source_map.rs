@@ -31,7 +31,10 @@ impl SourceFile {
         normalize_src(&mut src);
         let mut lines = vec![0];
         lines.extend(
-            src.bytes().enumerate().filter(|&(_, b)| b == b'\n').map(|(i, _)| i as u32 + 1),
+            src.bytes()
+                .enumerate()
+                .filter(|&(_, b)| b == b'\n')
+                .map(|(i, _)| i as u32 + 1),
         );
         SourceFile {
             name,
@@ -62,7 +65,11 @@ impl SourceFile {
 
     pub fn line_bounds(&self, line_index: usize) -> std::ops::Range<BytePos> {
         let start = self.lines[line_index];
-        let end = self.lines.get(line_index + 1).copied().unwrap_or(self.source_len);
+        let end = self
+            .lines
+            .get(line_index + 1)
+            .copied()
+            .unwrap_or(self.source_len);
         (self.start_pos + BytePos(start))..(self.start_pos + BytePos(end))
     }
 
@@ -164,12 +171,18 @@ impl SourceMap {
     }
 
     pub fn get_source_file(&self, name: &FileName) -> Option<Arc<SourceFile>> {
-        self.files.borrow().iter().find(|f| f.name == *name).cloned()
+        self.files
+            .borrow()
+            .iter()
+            .find(|f| f.name == *name)
+            .cloned()
     }
 
     pub fn lookup_source_file(&self, pos: BytePos) -> Arc<SourceFile> {
         let files = self.files.borrow();
-        let i = files.partition_point(|f| f.start_pos <= pos).saturating_sub(1);
+        let i = files
+            .partition_point(|f| f.start_pos <= pos)
+            .saturating_sub(1);
         files[i].clone()
     }
 
@@ -177,7 +190,11 @@ impl SourceMap {
         let file = self.lookup_source_file(pos);
         let line = file.lookup_line(pos).unwrap_or(0);
         let col = file.char_col(pos, line);
-        Loc { file, line: line + 1, col }
+        Loc {
+            file,
+            line: line + 1,
+            col,
+        }
     }
 
     pub fn lookup_line(&self, pos: BytePos) -> Result<SourceFileAndLine, Arc<SourceFile>> {
@@ -197,10 +214,15 @@ impl SourceMap {
         if !file.contains(span.hi()) {
             return Err(SpanSnippetError::DistinctSources);
         }
-        let src = file.src.as_ref().ok_or(SpanSnippetError::SourceNotAvailable)?;
+        let src = file
+            .src
+            .as_ref()
+            .ok_or(SpanSnippetError::SourceNotAvailable)?;
         let lo = (span.lo().0 - file.start_pos.0) as usize;
         let hi = (span.hi().0 - file.start_pos.0) as usize;
-        src.get(lo..hi).map(str::to_owned).ok_or(SpanSnippetError::MalformedForSourcemap)
+        src.get(lo..hi)
+            .map(str::to_owned)
+            .ok_or(SpanSnippetError::MalformedForSourcemap)
     }
 
     pub fn span_to_lines(&self, span: Span) -> Result<FileLines, SpanSnippetError> {
@@ -212,12 +234,26 @@ impl SourceMap {
         let mut lines = Vec::new();
         let mut start_col = lo.col;
         for line_index in lo.line - 1..hi.line - 1 {
-            let line_len = lo.file.get_line(line_index).map_or(0, |s| s.chars().count());
-            lines.push(LineInfo { line_index, start_col, end_col: CharPos::from_usize(line_len) });
+            let line_len = lo
+                .file
+                .get_line(line_index)
+                .map_or(0, |s| s.chars().count());
+            lines.push(LineInfo {
+                line_index,
+                start_col,
+                end_col: CharPos::from_usize(line_len),
+            });
             start_col = CharPos(0);
         }
-        lines.push(LineInfo { line_index: hi.line - 1, start_col, end_col: hi.col });
-        Ok(FileLines { file: lo.file, lines })
+        lines.push(LineInfo {
+            line_index: hi.line - 1,
+            start_col,
+            end_col: hi.col,
+        });
+        Ok(FileLines {
+            file: lo.file,
+            lines,
+        })
     }
 
     /// `file:line:col: line:col`, as rustc writes a span in a diagnostic's text.

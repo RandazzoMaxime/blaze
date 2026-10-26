@@ -38,7 +38,12 @@ pub enum FnKind<'a> {
     Fn(FnCtxt, &'a Visibility, &'a Fn),
 
     /// E.g., `|x, y| body`.
-    Closure(&'a ClosureBinder, &'a Option<CoroutineMarker>, &'a Box<FnDecl>, &'a Box<Expr>),
+    Closure(
+        &'a ClosureBinder,
+        &'a Option<CoroutineMarker>,
+        &'a Box<FnDecl>,
+        &'a Box<Expr>,
+    ),
 }
 
 impl<'a> FnKind<'a> {

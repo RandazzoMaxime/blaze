@@ -1,3 +1,5 @@
+// Follows `src/tools/rustfmt/src/missed_spans.rs` at rust-lang/rust 12433c307 (MIT or Apache-2.0).
+
 use crate::span::{BytePos, Pos, Span};
 use tracing::debug;
 

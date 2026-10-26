@@ -1,3 +1,5 @@
+// Follows `src/tools/rustfmt/src/emitter/diff.rs` at rust-lang/rust 12433c307 (MIT or Apache-2.0).
+
 use super::*;
 use crate::config::Config;
 use crate::rustfmt_diff::{make_diff, print_diff};

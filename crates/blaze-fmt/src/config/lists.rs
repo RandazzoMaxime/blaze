@@ -1,3 +1,5 @@
+// Follows `src/tools/rustfmt/src/config/lists.rs` at rust-lang/rust 12433c307 (MIT or Apache-2.0).
+
 //! Configuration options related to rewriting a list.
 
 use crate::config::config_type_macro::config_type;

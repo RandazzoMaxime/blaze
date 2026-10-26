@@ -1,3 +1,5 @@
+// Follows `src/tools/rustfmt/src/range.rs` at rust-lang/rust 12433c307 (MIT or Apache-2.0).
+
 use crate::expr::{lit_ends_in_dot, rewrite_unary_prefix, rewrite_unary_suffix};
 use crate::pairs::{PairParts, rewrite_pair};
 use crate::rewrite::{RewriteContext, RewriteResult};
