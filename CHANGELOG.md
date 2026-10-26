@@ -810,16 +810,42 @@ All notable changes to ra-jit are written here. The format follows
 
 ### Fixed
 
+- `cargo install --git https://github.com/indexable-inc/blaze ra-jit` builds ra-jit
+  ([#242](https://github.com/indexable-inc/blaze/issues/242), #293, by @gakonst). It failed
+  before compiling anything: for a git source cargo checks that every package is a member of
+  the workspace above it, and the root claimed `vendor/rust-analyzer`'s crates and rowan, which
+  are members of the fork's own workspace. The root now excludes `vendor/rust-analyzer`, so the
+  fork's crates are tested there (in `vendor/rust-analyzer`, as
+  `harness/unittests.py` does), and that workspace patches salsa to `vendor/salsa*` as the root
+  does.
+
 - A local that no place of its body mentions has no stack slot. rust-analyzer's MIR gives a
   closure's body a local for each capture and for each binding of the function it is written
   in, and a closure called by reference never touches them; each had a slot, so a closure
   over a large value had room for it twice in every frame. rgb's audio callback captures a
   synthesizer of 120 KB, and cpal's two closures around it each reserved 240 KB, overflowing
   CoreAudio's 512 KB IO thread; they now reserve what rustc's do. Breaker `captured_frames`.
+
 - An integration test or benchmark the daemon runs has `CARGO_BIN_EXE_<name>` of each program
   of its package set, as cargo sets it since rust-lang/cargo#16421. With cargo's second layout
   the test is no longer beside the programs, so hyperfine's and bat's tests (assert_cmd's
   `cargo_bin`) found none and every one failed under ra-jit.
+
+- The `TypeId` of a type that holds a closure, `async` block or `async fn` future of a crate
+  rustc compiled is rustc's: its `DefPath` (`{closure#n}` under the function, as its symbols
+  are named) with all of its arguments, the kind, signature or resume type and captures
+  included. It was refused, as was every function that asks for one: tonic's
+  `Streaming::new` builds its body from `body.map_frame(|frame| ..)`, and axum-core's
+  `try_downcast` asks for its `TypeId`. An `async` closure's future and an `async gen` one
+  are still refused.
+
+- The `TypeId` of a type that holds a constructor used as a function (`stream.map(Ok)`,
+  `iter.map(Some)`, a tuple struct's name) is hashed as rustc hashes it, as the `Ctor` child
+  of the variant or struct with the ADT's parameters
+  ([#369](https://github.com/indexable-inc/blaze/issues/369)). It was refused, and with it
+  every edit that rebuilt a function giving `axum::body::Body::from_stream` such a stream,
+  and tonic's clients, which map requests through `Ok`.
+
 - On x86-64, an edit that replaces a function shorter than a jump (5 bytes) is spliced
   instead of built in full ([#242](https://github.com/indexable-inc/blaze/issues/242)).
   The jump goes over the `int3`s and `nop`s the linker padded the function with. When there

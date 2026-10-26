@@ -338,7 +338,9 @@ detection; the edits that make it build come in the commits after.
 
 The gate named below is, unless a step says otherwise:
 `cargo test --release -p hir-ty -p hir-ty-codegen -p hir-ty-borrowck -p hir-def -p parser -p syntax -p ra-jit`
-(the crates that exist at that step), `cargo test --release -p hir-ide` failing exactly the 18
+(the crates that exist at that step; since #293 the fork's crates are tested with
+in `vendor/rust-analyzer`, as `harness/unittests.py` does),
+`cargo test --release -p hir-ide` failing exactly the 18
 known tests, the corpus under Cranelift and LLVM (with `--layouts`), `mixfutures`, `growth.py`,
 `movedlines.py`, `borrowck_ui.py` at its floor, and `cargo fmt --all -- --check`
 ([harness.md](harness.md)).

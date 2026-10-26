@@ -211,6 +211,47 @@ fn around(dir: &Path) -> Option<String> {
     Some(format!("`{outer}` stays cargo's `{OUTER_KEY}`: it runs ra-jit's wrapper as it ran rustc"))
 }
 
+/// The variable `cargo ra-jit` names the workspace's own `rustc-workspace-wrapper` in, for
+/// ra-jit's wrapper to run rustc through: the one it puts in that wrapper's place.
+pub(crate) const CHAINED: &str = "RA_JIT_CHAINED_WRAPPER";
+
+/// The variables cargo reads the workspace's wrapper from, ahead of every configuration
+/// file: its own, then the one that stands for the key of its configuration.
+const WRAPPER_VARIABLES: [&str; 2] = [VARIABLE, "CARGO_BUILD_RUSTC_WORKSPACE_WRAPPER"];
+
+/// The `rustc-workspace-wrapper` cargo would run in `dir`, which `cargo ra-jit` overrides
+/// with its own. An empty one is the project saying rustc runs through no wrapper, as cargo
+/// reads it; `None` is that it names none, or names ra-jit's, and leaves it to `ra-jit enable`.
+pub(crate) fn project_wrapper(dir: &Path) -> Option<std::ffi::OsString> {
+    let set = WRAPPER_VARIABLES.iter().find_map(|it| std::env::var(it).ok());
+    wrapper_for(dir, set, &home_configs())
+}
+
+/// The wrapper cargo would run in `dir`, in cargo's order: the variable `set` ahead of every
+/// file, a file nearer `dir` ahead of one further up, and the files of cargo's home, `home`,
+/// last. A path with a separator is relative to `dir` when a variable names it and to the
+/// directory that holds `.cargo` when a file does; a bare name is looked up in `PATH`.
+fn wrapper_for(dir: &Path, set: Option<String>, home: &[PathBuf]) -> Option<std::ffi::OsString> {
+    let (root, named) = match set {
+        Some(set) => (dir.to_owned(), set),
+        None => {
+            let nearer = dir.ancestors().flat_map(|it| CONFIGS.map(|name| it.join(name)));
+            let mut configs = nearer.filter(|it| !home.contains(it)).chain(home.iter().cloned());
+            configs.find_map(|config| {
+                let named = wrapper_in(&config)?;
+                Some((config.parent()?.parent()?.to_owned(), named))
+            })?
+        }
+    };
+    if is_wrapper(Path::new(&named)) {
+        return None;
+    }
+    if !named.contains('/') && !named.contains(std::path::MAIN_SEPARATOR) {
+        return Some(named.into());
+    }
+    Some(root.join(named).into_os_string())
+}
+
 /// Whether the user has cargo run every rustc through a wrapper of their own in `dir`.
 pub(crate) fn user_wraps(dir: &Path) -> bool {
     let set = std::env::var_os("CARGO_BUILD_RUSTC_WRAPPER").is_some_and(|it| !it.is_empty());
@@ -414,5 +455,54 @@ mod tests {
                 .unwrap()
                 .ends_with("[build]\nrustc-workspace-wrapper = \"/opt/ra-jit/ra-jit-rustc\"\n")
         );
+    }
+
+    #[test]
+    fn the_project_wrapper_is_relative_to_the_directory_above_its_config() {
+        let root = std::env::temp_dir().join(format!("ra-jit-wrapper-{}", std::process::id()));
+        let inner = root.join("crates").join("a");
+        std::fs::create_dir_all(root.join(".cargo")).unwrap();
+        std::fs::create_dir_all(&inner).unwrap();
+        let config = root.join(".cargo").join("config.toml");
+        let write = |text: &str| std::fs::write(&config, text).unwrap();
+        let found = |set: Option<&str>, home: &[std::path::PathBuf]| {
+            super::wrapper_for(&inner, set.map(str::to_owned), home)
+        };
+        write("[build]\nrustc-workspace-wrapper = \"scripts/frontend\"\n");
+        let relative = Some(root.join("scripts/frontend").into_os_string());
+        assert_eq!(found(None, &[]), relative);
+        write("[build]\nrustc-workspace-wrapper = \"frontend\"\n");
+        assert_eq!(found(None, &[]), Some("frontend".into()));
+        write("[build]\njobs = 4\n");
+        assert_eq!(found(None, &[]), None);
+        // An empty wrapper is none, which is not the same as naming none.
+        write("[build]\nrustc-workspace-wrapper = \"\"\n");
+        assert_eq!(found(None, &[]), Some("".into()));
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn the_variable_comes_first_and_cargo_home_last() {
+        let root = std::env::temp_dir().join(format!("ra-jit-order-{}", std::process::id()));
+        let inner = root.join("project").join("crates").join("a");
+        let home = root.join("cargo-home");
+        std::fs::create_dir_all(root.join("project").join(".cargo")).unwrap();
+        std::fs::create_dir_all(&inner).unwrap();
+        std::fs::create_dir_all(&home).unwrap();
+        let project = root.join("project").join(".cargo").join("config.toml");
+        let homes = [home.join("config.toml"), home.join("config")];
+        let wrapper = |named: &str| format!("[build]\nrustc-workspace-wrapper = \"{named}\"\n");
+        let found = |set: Option<&str>| super::wrapper_for(&inner, set.map(str::to_owned), &homes);
+        std::fs::write(&homes[0], wrapper("home-wrapper")).unwrap();
+        assert_eq!(found(None), Some("home-wrapper".into()));
+        std::fs::write(&project, wrapper("project-wrapper")).unwrap();
+        assert_eq!(found(None), Some("project-wrapper".into()));
+        assert_eq!(found(Some("bin/set")), Some(inner.join("bin/set").into_os_string()));
+        assert_eq!(found(Some("")), Some("".into()));
+        assert_eq!(found(Some("/opt/ra-jit/ra-jit-rustc")), None);
+        std::fs::remove_file(&project).unwrap();
+        std::fs::write(&homes[0], wrapper("/opt/ra-jit/ra-jit-rustc")).unwrap();
+        assert_eq!(found(None), None);
+        std::fs::remove_dir_all(&root).unwrap();
     }
 }

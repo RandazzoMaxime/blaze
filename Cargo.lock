@@ -3,15 +3,6 @@
 version = 4
 
 [[package]]
-name = "addr2line"
-version = "0.25.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1b5d307320b3181d6d7954e663bd7c774a838b8220fe0593c86d9fb09f498b4b"
-dependencies = [
- "gimli 0.32.3",
-]
-
-[[package]]
 name = "adler2"
 version = "2.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -104,9 +95,6 @@ name = "arbitrary"
 version = "1.4.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c3d036a3c4ab069c7b410a2ce876bd74808d2d0888a82667669f8e783a898bf1"
-dependencies = [
- "derive_arbitrary",
-]
 
 [[package]]
 name = "arc-swap"
@@ -574,21 +562,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "backtrace"
-version = "0.3.76"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bb531853791a215d7c62a30daf0dde835f381ab5de4589cfe7c649d2cbe92bd6"
-dependencies = [
- "addr2line",
- "cfg-if",
- "libc",
- "miniz_oxide",
- "object 0.37.3",
- "rustc-demangle",
- "windows-link",
-]
-
-[[package]]
 name = "base-db"
 version = "0.0.0"
 dependencies = [
@@ -869,14 +842,9 @@ dependencies = [
 name = "cfg"
 version = "0.0.0"
 dependencies = [
- "arbitrary",
- "cfg",
- "expect-test",
  "intern",
- "oorandom",
  "rustc-hash 2.1.2",
  "syntax",
- "syntax-bridge",
  "tracing",
  "tt",
 ]
@@ -1076,7 +1044,7 @@ dependencies = [
  "cranelift-control",
  "cranelift-entity",
  "cranelift-isle",
- "gimli 0.33.0",
+ "gimli",
  "hashbrown 0.17.1",
  "libm",
  "log",
@@ -1173,7 +1141,7 @@ dependencies = [
  "cranelift-codegen",
  "cranelift-control",
  "cranelift-module",
- "gimli 0.33.0",
+ "gimli",
  "log",
  "object 0.40.0",
  "target-lexicon",
@@ -1378,17 +1346,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "derive_arbitrary"
-version = "1.4.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1e567bd82dcff979e4b03460c307b3cdc9e96fde3d73bed1496d2bc75d9dd62a"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn 2.0.117",
-]
-
-[[package]]
 name = "digest"
 version = "0.10.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1519,16 +1476,6 @@ checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
  "windows-sys 0.61.2",
-]
-
-[[package]]
-name = "expect-test"
-version = "1.5.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "63af43ff4431e848fb47472a920f14fa71c24de13255a5692e93d4e90302acb0"
-dependencies = [
- "dissimilar",
- "once_cell",
 ]
 
 [[package]]
@@ -1710,12 +1657,6 @@ dependencies = [
 
 [[package]]
 name = "gimli"
-version = "0.32.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e629b9b98ef3dd8afe6ca2bd0f89306cec16d43d907889945bc5d6687f2f13c7"
-
-[[package]]
-name = "gimli"
 version = "0.33.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0bf7f043f89559805f8c7cacc432749b2fa0d0a0a9ee46ce47164ed5ba7f126c"
@@ -1825,7 +1766,6 @@ dependencies = [
  "base-db",
  "cfg",
  "either",
- "expect-test",
  "hir-def",
  "hir-expand",
  "hir-ide",
@@ -1842,12 +1782,7 @@ dependencies = [
  "span",
  "stdx",
  "syntax",
- "syntax-bridge",
- "test-fixture",
- "test-utils",
  "tracing",
- "tracing-subscriber",
- "tracing-tree",
  "triomphe",
  "tt",
 ]
@@ -1863,7 +1798,6 @@ dependencies = [
  "cov-mark",
  "drop_bomb",
  "either",
- "expect-test",
  "fst",
  "hir-expand",
  "indexmap",
@@ -1880,8 +1814,6 @@ dependencies = [
  "stdx",
  "syntax",
  "syntax-bridge",
- "test-fixture",
- "test-utils",
  "thin-vec",
  "tracing",
  "triomphe",
@@ -1897,7 +1829,6 @@ dependencies = [
  "cfg",
  "cov-mark",
  "either",
- "expect-test",
  "intern",
  "itertools",
  "mbe",
@@ -1922,7 +1853,6 @@ dependencies = [
  "base-db",
  "cov-mark",
  "either",
- "expect-test",
  "hir-def",
  "hir-expand",
  "hir-ty",
@@ -1930,7 +1860,6 @@ dependencies = [
  "itertools",
  "la-arena",
  "macros",
- "project-model",
  "ra-ap-rustc_abi",
  "ra-ap-rustc_ast_ir",
  "ra-ap-rustc_pattern_analysis",
@@ -1942,8 +1871,6 @@ dependencies = [
  "span",
  "stdx",
  "syntax",
- "test-fixture",
- "test-utils",
  "tracing",
  "triomphe",
  "typed-arena",
@@ -2279,7 +2206,6 @@ dependencies = [
  "cov-mark",
  "crossbeam-channel",
  "either",
- "expect-test",
  "fst",
  "hir",
  "itertools",
@@ -2310,7 +2236,6 @@ dependencies = [
  "cfg",
  "cov-mark",
  "either",
- "expect-test",
  "hir",
  "ide-db",
  "itertools",
@@ -2319,8 +2244,6 @@ dependencies = [
  "smallvec",
  "stdx",
  "syntax",
- "test-fixture",
- "test-utils",
  "tracing",
 ]
 
@@ -2712,7 +2635,6 @@ dependencies = [
  "arrayvec",
  "bitflags 2.12.1",
  "cov-mark",
- "expect-test",
  "intern",
  "parser",
  "ra-ap-rustc_lexer",
@@ -2721,9 +2643,7 @@ dependencies = [
  "smallvec",
  "span",
  "stdx",
- "syntax",
  "syntax-bridge",
- "test-utils",
  "tt",
 ]
 
@@ -3014,10 +2934,8 @@ version = "0.0.0"
 dependencies = [
  "drop_bomb",
  "edition",
- "expect-test",
  "ra-ap-rustc_lexer",
  "rustc-literal-escaper",
- "stdx",
  "tracing",
  "winnow 0.7.15",
 ]
@@ -3185,7 +3103,6 @@ dependencies = [
  "intern",
  "paths",
  "postcard",
- "proc-macro-srv",
  "rayon",
  "rustc-hash 2.1.2",
  "semver",
@@ -3196,27 +3113,6 @@ dependencies = [
  "stdx",
  "tracing",
  "tt",
-]
-
-[[package]]
-name = "proc-macro-srv"
-version = "0.0.0"
-dependencies = [
- "expect-test",
- "intern",
- "line-index",
- "paths",
- "proc-macro-test",
- "rustc-hash 2.1.2",
- "span",
- "stdx",
-]
-
-[[package]]
-name = "proc-macro-test"
-version = "0.0.0"
-dependencies = [
- "cargo_metadata",
 ]
 
 [[package]]
@@ -3234,7 +3130,6 @@ version = "0.0.0"
 dependencies = [
  "libc",
  "perf-event",
- "tikv-jemalloc-ctl",
  "windows-sys 0.61.2",
 ]
 
@@ -3246,7 +3141,6 @@ dependencies = [
  "base-db",
  "cargo_metadata",
  "cfg",
- "expect-test",
  "intern",
  "itertools",
  "la-arena",
@@ -3676,7 +3570,6 @@ dependencies = [
  "hashbrown 0.14.5",
  "memoffset 0.9.1",
  "rustc-hash 1.1.0",
- "serde",
  "text-size",
 ]
 
@@ -4185,7 +4078,6 @@ dependencies = [
 name = "stdx"
 version = "0.0.0"
 dependencies = [
- "backtrace",
  "crossbeam-channel",
  "crossbeam-utils",
  "itertools",
@@ -4247,19 +4139,15 @@ name = "syntax"
 version = "0.0.0"
 dependencies = [
  "either",
- "expect-test",
  "itertools",
  "parser",
  "ra-ap-rustc_lexer",
- "rayon",
  "rowan",
  "rustc-hash 2.1.2",
  "rustc-literal-escaper",
- "rustc_apfloat",
  "smallvec",
  "smol_str",
  "stdx",
- "test-utils",
  "tracing",
  "triomphe",
 ]
@@ -4268,14 +4156,12 @@ dependencies = [
 name = "syntax-bridge"
 version = "0.0.0"
 dependencies = [
- "expect-test",
  "intern",
  "parser",
  "rustc-hash 2.1.2",
  "span",
  "stdx",
  "syntax",
- "test-utils",
  "tt",
 ]
 
@@ -4364,9 +4250,6 @@ name = "text-size"
 version = "1.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f18aa187839b2bdb1ad2fa35ead8c4c2976b64e4363c386d45ac0f7ee85c9233"
-dependencies = [
- "serde",
-]
 
 [[package]]
 name = "thin-vec"
@@ -4420,7 +4303,7 @@ version = "0.10.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6ce6b46108e50803d2c10216929e49fa3eda07ee3dc246310c18c4a1e3b1fa58"
 dependencies = [
- "gimli 0.33.0",
+ "gimli",
  "hashbrown 0.16.1",
  "object 0.38.1",
  "tracing",
