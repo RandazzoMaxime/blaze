@@ -810,6 +810,10 @@ All notable changes to ra-jit are written here. The format follows
 
 ### Fixed
 
+- An integration test or benchmark the daemon runs has `CARGO_BIN_EXE_<name>` of each program
+  of its package set, as cargo sets it since rust-lang/cargo#16421. With cargo's second layout
+  the test is no longer beside the programs, so hyperfine's and bat's tests (assert_cmd's
+  `cargo_bin`) found none and every one failed under ra-jit.
 - On x86-64, an edit that replaces a function shorter than a jump (5 bytes) is spliced
   instead of built in full ([#242](https://github.com/indexable-inc/blaze/issues/242)).
   The jump goes over the `int3`s and `nop`s the linker padded the function with. When there
