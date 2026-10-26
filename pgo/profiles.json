@@ -3,25 +3,25 @@
   "release": "https://github.com/indexable-inc/blaze/releases/download/pgo-profiles",
   "targets": {
     "aarch64-apple-darwin": {
-      "name": "ra-jit-nightly-2026-10-25-aarch64-apple-darwin-b340cc126c7ba331.profdata",
-      "sha256": "b340cc126c7ba331c084fb93fe14423b508fc736d27c9ac6ca09adcdbf51f4d4",
-      "commit": "32ef110ce983e55cae3a9ed5ebe76f557feffde1",
-      "count": 300922782651,
-      "crate": "ihgnqXTwNXO"
+      "name": "ra-jit-nightly-2026-10-25-aarch64-apple-darwin-c19f276a64184a43.profdata",
+      "sha256": "c19f276a64184a431aff29214b5ceb75c11936638ac7a2384071fb747d23e6b5",
+      "commit": "1f893a83d46ceaeef2fa1509919a9768ed444d66",
+      "count": 300915329541,
+      "crate": "jjSQx4hlXGA"
     },
     "aarch64-unknown-linux-gnu": {
-      "name": "ra-jit-nightly-2026-10-25-aarch64-unknown-linux-gnu-9d5a4787e5061913.profdata",
-      "sha256": "9d5a4787e5061913371cc4f97f06d39ddd1c5a8e69bde1eabe2478e13556cc95",
-      "commit": "32ef110ce983e55cae3a9ed5ebe76f557feffde1",
-      "count": 193833452561,
-      "crate": "fC5PjNRfh45"
+      "name": "ra-jit-nightly-2026-10-25-aarch64-unknown-linux-gnu-4e45511650618665.profdata",
+      "sha256": "4e45511650618665a039feb7c8fa66bf8f927fc16a466379649d0b7adab0d599",
+      "commit": "1f893a83d46ceaeef2fa1509919a9768ed444d66",
+      "count": 194615829725,
+      "crate": "le7GbNCXqap"
     },
     "x86_64-unknown-linux-gnu": {
-      "name": "ra-jit-nightly-2026-10-25-x86_64-unknown-linux-gnu-43ca01a3603ef576.profdata",
-      "sha256": "43ca01a3603ef576b5e081593a66daeb9817cb9016f77299d0f4811bef0d81aa",
-      "commit": "32ef110ce983e55cae3a9ed5ebe76f557feffde1",
-      "count": 191449663505,
-      "crate": "azS8TxNTQCG"
+      "name": "ra-jit-nightly-2026-10-25-x86_64-unknown-linux-gnu-58ac9b22bc27c2b1.profdata",
+      "sha256": "58ac9b22bc27c2b144f53ec21e56cb3fb6a1c633014ec13e0b9e79223276a24b",
+      "commit": "1f893a83d46ceaeef2fa1509919a9768ed444d66",
+      "count": 192132540819,
+      "crate": "iAuAveRby1c"
     }
   }
 }
