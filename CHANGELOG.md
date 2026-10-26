@@ -8,6 +8,14 @@ All notable changes to ra-jit are written here. The format follows
 
 ### Added
 
+- `cargo blaze tree`, `pkgid`, `fetch`, `clean`, `new` and `init` are blaze's own, with no
+  cargo: `tree` from the new `crates/blaze-tree` (cargo 1.101's, on blaze-resolve), `new` and
+  `init` from the new `crates/blaze-new`. `harness/own_tree.py` (130 of 130 equal over
+  ripgrep, fd, helix, nushell and biome), `harness/own_commands.py` (120 of 120, with
+  `metadata`, `locate-project` and `verify-project`) and `harness/own_new.py` (50 of 50) hold
+  them equal to cargo's. `cargo blaze metadata` has cargo 1.101's `min-opt-level` in a
+  package's `hints`, so nushell's and biome's full metadata are equal too.
+
 - `RA_JIT_WHOLE_BUILD=1`: the whole build runs in the daemon. Its worker loads the workspace,
   builds and links each program, and answers once they are linked; the next build asks the
   same worker, which builds the edits since on what it has loaded and links again, with no
