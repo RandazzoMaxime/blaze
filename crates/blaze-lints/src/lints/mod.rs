@@ -1,18 +1,27 @@
 //! The lints, each a port of clippy's (its file says which), and what runs them on a node.
 
 mod bool_assert_comparison;
+mod byte_char_slices;
+mod clone_on_copy;
 mod collapsible_if;
+mod crate_in_macro_def;
 mod empty_enums;
 mod format;
+mod get_first;
 mod io_other_error;
 mod map_unwrap_or;
 mod needless_bool;
 mod needless_borrow;
 mod needless_borrows_for_generic_args;
+mod needless_return;
+mod new_without_default;
 mod nonstandard_macro_braces;
 mod redundant_static_lifetimes;
+mod single_char_add_str;
 mod unnecessary_map_or;
+mod upper_case_acronyms;
 mod useless_borrows_in_formatting;
+mod useless_format;
 mod useless_vec;
 mod utils;
 
@@ -43,17 +52,26 @@ enum Pass {
 /// The lints implemented, and the pass clippy runs each in.
 const IMPLEMENTED: &[(&str, Pass)] = &[
     ("bool_assert_comparison", Pass::Late),
+    ("byte_char_slices", Pass::Late),
+    ("clone_on_copy", Pass::Late),
     ("collapsible_if", Pass::Late),
+    ("crate_in_macro_def", Pass::Early),
     ("empty_enums", Pass::Late),
+    ("get_first", Pass::Late),
     ("io_other_error", Pass::Late),
     ("map_unwrap_or", Pass::Late),
     ("needless_bool", Pass::Late),
     ("needless_borrow", Pass::Late),
     ("needless_borrows_for_generic_args", Pass::Late),
+    ("needless_return", Pass::Late),
+    ("new_without_default", Pass::Late),
     ("nonstandard_macro_braces", Pass::PreExpansion),
     ("redundant_static_lifetimes", Pass::Early),
+    ("single_char_add_str", Pass::Late),
     ("unnecessary_map_or", Pass::Late),
+    ("upper_case_acronyms", Pass::Late),
     ("useless_borrows_in_formatting", Pass::Late),
+    ("useless_format", Pass::Late),
     ("useless_vec", Pass::AfterLate),
 ];
 
@@ -115,8 +133,15 @@ pub(crate) fn check_node(cx: &mut Cx<'_, '_, '_>, node: &SyntaxNode) {
         }
         return;
     }
+    if let Some(it) = ast::Item::cast(node.clone()) {
+        upper_case_acronyms::check(cx, &it);
+    }
     if let Some(it) = ast::Enum::cast(node.clone()) {
         empty_enums::check(cx, &it);
+    } else if let Some(it) = ast::Impl::cast(node.clone()) {
+        new_without_default::check(cx, &it);
+    } else if let Some(it) = ast::Fn::cast(node.clone()) {
+        needless_return::check_fn(cx, &it);
     } else if let Some(it) = ast::Const::cast(node.clone()) {
         redundant_static_lifetimes::check_const(cx, &it);
     } else if let Some(it) = ast::Static::cast(node.clone()) {
@@ -125,11 +150,15 @@ pub(crate) fn check_node(cx: &mut Cx<'_, '_, '_>, node: &SyntaxNode) {
         nonstandard_macro_braces::check_call(cx, &it);
         bool_assert_comparison::check(cx, &it);
         useless_borrows_in_formatting::check(cx, &it);
+        useless_format::check(cx, &it);
         useless_vec::check(cx, &it);
     } else if let Some(it) = ast::MacroRules::cast(node.clone()) {
         nonstandard_macro_braces::check_rules(cx, &it);
+        crate_in_macro_def::check(cx, &it);
     } else if let Some(it) = ast::StmtList::cast(node.clone()) {
         needless_bool::check_block(cx, &it);
+    } else if let Some(it) = ast::IdentPat::cast(node.clone()) {
+        needless_borrow::check_ref_pat(cx, &it);
     }
     if let Some(it) = ast::Expr::cast(node.clone()) {
         if let ast::Expr::IfExpr(it) = &it {
@@ -141,5 +170,12 @@ pub(crate) fn check_node(cx: &mut Cx<'_, '_, '_>, node: &SyntaxNode) {
         needless_borrow::check(cx, &it);
         needless_borrows_for_generic_args::check(cx, &it);
         unnecessary_map_or::check(cx, &it);
+        byte_char_slices::check(cx, &it);
+        clone_on_copy::check(cx, &it);
+        get_first::check(cx, &it);
+        single_char_add_str::check(cx, &it);
+        if let ast::Expr::ClosureExpr(it) = &it {
+            needless_return::check_closure(cx, it);
+        }
     }
 }

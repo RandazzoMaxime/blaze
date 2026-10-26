@@ -6,11 +6,13 @@
 //! used as a call's or method's argument, a field's value, a `let`'s initializer or what a
 //! `return` gives. Not ported: borrows that are a receiver, a callee or have a field read
 //! (where clippy asks whether auto-borrow would pick the same method), chains of `&` and `*`,
-//! mutable reborrows, and `ref` patterns.
+//! and mutable reborrows. A `ref` binding to a reference whose every use the compiler
+//! dereferences is linted too, as clippy's `check_pat` does.
 
 use hir::{Adjust, AutoBorrow, Mutability};
-use syntax::{AstNode, ast};
+use syntax::{AstNode, SyntaxNode, TextRange, ast};
 
+use super::utils;
 use crate::{check::Cx, diag::Applicability, sugg::has_enclosing_paren};
 
 const LINT: &str = "needless_borrow";
@@ -109,4 +111,124 @@ fn strip_parens(expr: &ast::Expr) -> ast::Expr {
         expr = inner;
     }
     expr
+}
+
+/// clippy's `check_pat` and `check_local_usage`: `ref x` where `x` is bound to a `&&T`, used
+/// only where the compiler dereferences it twice, as a field's base or dereferenced.
+pub(super) fn check_ref_pat(cx: &mut Cx<'_, '_, '_>, pat: &ast::IdentPat) {
+    if !cx.on(LINT) || pat.ref_token().is_none() || pat.mut_token().is_some() {
+        return;
+    }
+    let db = cx.db();
+    let Some(local) = cx.sema().to_def(pat) else { return };
+    let ty = local.ty(db);
+    let Some((inner, _)) = ty.as_reference() else { return };
+    if !matches!(inner.as_reference(), Some((_, Mutability::Shared))) {
+        return;
+    }
+    let Some(body) = utils::enclosing_body(pat.syntax()) else { return };
+    // The bindings of `local`, more than one in alternatives of an or-pattern.
+    let bindings: Vec<ast::IdentPat> = body_and_params(&body)
+        .flat_map(|it| it.descendants().filter_map(ast::IdentPat::cast).collect::<Vec<_>>())
+        .filter(|it| cx.sema().to_def(it) == Some(local))
+        .collect();
+    if bindings.first().is_some_and(|it| it.syntax() != pat.syntax()) {
+        return;
+    }
+    let mut replacements: Vec<(TextRange, String)> = Vec::new();
+    let mut spans = Vec::new();
+    for binding in &bindings {
+        let (Some(range), Some(name)) = (cx.range(binding.syntax()), binding.name()) else { return };
+        let Some(name) = cx.range(name.syntax()) else { return };
+        spans.push(range);
+        replacements.push((range, cx.snippet(name)));
+    }
+    let mut cancelled = false;
+    let mut always_deref = true;
+    utils::each_path(cx, &body, None, &mut |path| {
+        if cancelled || utils::local_of(cx, path) != Some(local) {
+            return;
+        }
+        let expr = ast::Expr::PathExpr(path.clone());
+        let adjustments = cx.sema().expr_adjustments(&expr).unwrap_or_default();
+        if matches!(&adjustments[..], [first, second, ..] if matches!(first.kind, Adjust::Deref(_)) && matches!(second.kind, Adjust::Deref(_))) {
+            return;
+        }
+        let used = past_parens(path.syntax());
+        match used.parent().and_then(parent_expr) {
+            Some(ast::Expr::FieldExpr(_)) => {}
+            Some(ast::Expr::PrefixExpr(prefix)) if prefix.op_kind() == Some(ast::UnaryOp::Deref) => {
+                match (cx.range(prefix.syntax()), cx.range(path.syntax())) {
+                    (Some(at), Some(name)) => replacements.push((at, cx.snippet(name))),
+                    _ => cancelled = true,
+                }
+            }
+            Some(parent) if cx.range(parent.syntax()).is_some() => {
+                if unambiguous(&parent) {
+                    cancelled = true;
+                } else {
+                    always_deref = false;
+                }
+            }
+            _ if cx.range(path.syntax()).is_some() => always_deref = false,
+            _ => cancelled = true,
+        }
+    });
+    // A binding some use needs as a double reference is `ref_binding_to_reference`'s.
+    if cancelled || !always_deref {
+        return;
+    }
+    let mut span = crate::diag::MultiSpan::default();
+    span.primary = spans.iter().map(|it| cx.span(*it)).collect();
+    let parts = replacements.into_iter().map(|(at, text)| (cx.span(at), text)).collect();
+    cx.lint_after(LINT, pat.syntax(), &body, span, "this pattern creates a reference to a reference").multipart_suggestion(
+        "try",
+        parts,
+        Applicability::MachineApplicable,
+    );
+}
+
+/// The body and, for a closure or a function, its parameters: where its bindings are.
+fn body_and_params(body: &SyntaxNode) -> impl Iterator<Item = SyntaxNode> {
+    let params = body.parent().and_then(|owner| {
+        ast::ClosureExpr::cast(owner.clone())
+            .and_then(|it| it.param_list())
+            .or_else(|| ast::Fn::cast(owner).and_then(|it| it.param_list()))
+    });
+    params.map(|it| it.syntax().clone()).into_iter().chain([body.clone()])
+}
+
+/// The expression rustc's HIR has as `node`'s parent, past what is not an expression there.
+fn parent_expr(node: SyntaxNode) -> Option<ast::Expr> {
+    let node = if ast::ArgList::can_cast(node.kind()) { node.parent()? } else { node };
+    ast::Expr::cast(node)
+}
+
+/// Whether rustc's `ExprPrecedence` of `expr` is `Unambiguous`: an operand needs no
+/// parentheses around it.
+fn unambiguous(expr: &ast::Expr) -> bool {
+    !matches!(
+        expr,
+        ast::Expr::BinExpr(_)
+            | ast::Expr::CastExpr(_)
+            | ast::Expr::PrefixExpr(_)
+            | ast::Expr::RefExpr(_)
+            | ast::Expr::ReturnExpr(_)
+            | ast::Expr::BreakExpr(_)
+            | ast::Expr::ContinueExpr(_)
+            | ast::Expr::YieldExpr(_)
+            | ast::Expr::BecomeExpr(_)
+            | ast::Expr::ClosureExpr(_)
+            | ast::Expr::LetExpr(_)
+    )
+}
+
+fn past_parens(node: &SyntaxNode) -> SyntaxNode {
+    let mut node = node.clone();
+    while let Some(parent) = node.parent()
+        && ast::ParenExpr::can_cast(parent.kind())
+    {
+        node = parent;
+    }
+    node
 }

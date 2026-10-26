@@ -308,14 +308,15 @@ impl Diagnostic {
         )
     }
 
-    /// rustc's `multipart_suggestion`: the parts are one change.
+    /// rustc's `multipart_suggestion`: the parts are one change, shown as a patch even when
+    /// there is one.
     pub fn multipart_suggestion(
         &mut self,
         message: impl Into<String>,
         parts: Vec<(Span, String)>,
         applicability: Applicability,
     ) -> &mut Diagnostic {
-        self.suggestion_with_style(parts, message, applicability, SuggestionStyle::ShowCode)
+        self.suggestion_with_style(parts, message, applicability, SuggestionStyle::ShowAlways)
     }
 
     pub fn suggestion_with_style(

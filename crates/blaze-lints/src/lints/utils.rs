@@ -3,7 +3,7 @@
 use hir::PathResolution;
 use ide_db::famous_defs::FamousDefs;
 use syntax::{
-    AstNode, SyntaxNode, TextRange,
+    AstNode, SyntaxNode, TextRange, TextSize,
     ast::{self, HasArgList as _},
 };
 
@@ -185,5 +185,44 @@ pub(crate) fn peel_blocks_with_stmt(expr: &ast::Expr) -> ast::Expr {
 pub(crate) fn contains_comment(node: &SyntaxNode, range: TextRange) -> bool {
     node.descendants_with_tokens()
         .filter_map(|it| it.into_token())
-        .any(|it| it.kind() == syntax::SyntaxKind::COMMENT && range.contains_range(it.text_range()))
+        .any(|it| {
+            matches!(
+                it.kind(),
+                syntax::SyntaxKind::COMMENT | syntax::SyntaxKind::INNER_DOC_COMMENT | syntax::SyntaxKind::OUTER_DOC_COMMENT
+            ) && range.contains_range(it.text_range())
+        })
+}
+
+/// Calls `f` on each path expression of `root` that starts at or after `after`, and of what
+/// the macro calls there expand to.
+pub(crate) fn each_path(
+    cx: &Cx<'_, '_, '_>,
+    root: &SyntaxNode,
+    after: Option<TextSize>,
+    f: &mut dyn FnMut(&ast::PathExpr),
+) {
+    each_path_at(cx, root, after, 0, f);
+}
+
+fn each_path_at(
+    cx: &Cx<'_, '_, '_>,
+    root: &SyntaxNode,
+    after: Option<TextSize>,
+    depth: u32,
+    f: &mut dyn FnMut(&ast::PathExpr),
+) {
+    const DEEPEST: u32 = 8;
+    for node in root.descendants() {
+        if after.is_some_and(|it| node.text_range().start() < it) {
+            continue;
+        }
+        if let Some(path) = ast::PathExpr::cast(node.clone()) {
+            f(&path);
+        } else if let Some(call) = ast::MacroCall::cast(node)
+            && depth < DEEPEST
+            && let Some(expansion) = cx.sema().expand_macro_call(&call)
+        {
+            each_path_at(cx, &expansion.value, None, depth + 1, f);
+        }
+    }
 }

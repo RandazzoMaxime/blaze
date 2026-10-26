@@ -7,7 +7,7 @@
 //! judged alone.
 
 use syntax::{
-    AstNode, NodeOrToken, SyntaxKind, SyntaxNode, TextSize,
+    AstNode, NodeOrToken, SyntaxKind, SyntaxNode,
     ast::{self, HasArgList as _, HasAttrs as _},
 };
 
@@ -132,7 +132,7 @@ fn only_slice_uses(cx: &Cx<'_, '_, '_>, local: hir::Local<'_>, stmt: &ast::LetSt
     let Some(block) = stmt.syntax().parent() else { return false };
     let after = stmt.syntax().text_range().end();
     let mut ok = true;
-    each_path(cx, &block, Some(after), 0, &mut |path| {
+    utils::each_path(cx, &block, Some(after), &mut |path| {
         if !ok || utils::local_of(cx, path) != Some(local) {
             return;
         }
@@ -157,31 +157,6 @@ fn slice_use(cx: &Cx<'_, '_, '_>, path: &ast::PathExpr) -> bool {
     no_args
         && call.receiver().is_some_and(|it| it.syntax() == &used)
         && name.is_some_and(|it| SLICE_METHODS.contains(&it.as_str()))
-}
-
-/// Calls `f` on each path expression of `root` that starts at or after `after`, and of what
-/// the macro calls there expand to.
-fn each_path(
-    cx: &Cx<'_, '_, '_>,
-    root: &SyntaxNode,
-    after: Option<TextSize>,
-    depth: u32,
-    f: &mut dyn FnMut(&ast::PathExpr),
-) {
-    const DEEPEST: u32 = 8;
-    for node in root.descendants() {
-        if after.is_some_and(|it| node.text_range().start() < it) {
-            continue;
-        }
-        if let Some(path) = ast::PathExpr::cast(node.clone()) {
-            f(&path);
-        } else if let Some(call) = ast::MacroCall::cast(node)
-            && depth < DEEPEST
-            && let Some(expansion) = cx.sema().expand_macro_call(&call)
-        {
-            each_path(cx, &expansion.value, None, depth + 1, f);
-        }
-    }
 }
 
 /// clippy's `adjusts_to_slice`: whether `expr`, as the compiler adjusts it, is a borrowed slice.

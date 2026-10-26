@@ -63,6 +63,10 @@ pub(crate) struct FormatCall {
     pub(crate) name: String,
     pub(crate) placeholders: Vec<Placeholder>,
     pub(crate) args: Vec<ast::Expr>,
+    /// The template, its escapes read.
+    pub(crate) template: String,
+    /// Where the template's literal is written.
+    pub(crate) template_range: TextRange,
 }
 
 /// `call` as a format macro call, if it is one of std's and its template is a string literal
@@ -74,8 +78,9 @@ pub(crate) fn of(cx: &Cx<'_, '_, '_>, call: &ast::MacroCall) -> Option<FormatCal
     }
     let input = cx.range(call.token_tree()?.syntax())?;
     let format_args = format_args_in(cx, call, input)?;
-    let ast::Expr::Literal(template) = format_args.template()? else { return None };
-    let ast::LiteralKind::String(template) = template.kind() else { return None };
+    let ast::Expr::Literal(literal) = format_args.template()? else { return None };
+    let template_range = cx.original_range(literal.syntax())?;
+    let ast::LiteralKind::String(template) = literal.kind() else { return None };
     let template = template.value().ok()?;
     let mut args = Vec::new();
     let mut names = Vec::new();
@@ -87,7 +92,7 @@ pub(crate) fn of(cx: &Cx<'_, '_, '_>, call: &ast::MacroCall) -> Option<FormatCal
         args.push(expr);
     }
     let placeholders = parse(&template, &names)?;
-    Some(FormatCall { name, placeholders, args })
+    Some(FormatCall { name, placeholders, args, template: template.into_owned(), template_range })
 }
 
 /// The `format_args!` call `call` expands to, at some depth, whose template is written in

@@ -85,6 +85,50 @@ pub fn vectors(n: usize) -> u32 {
     total + sum(&grown) + u32::from(taken[0]) + sum(&mut vec![11, /* twelve */ 12])
 }
 
+#[derive(Clone, Copy)]
+pub struct Point(pub u8);
+
+pub struct Builder {
+    name: String,
+}
+
+impl Builder {
+    pub fn new() -> Builder {
+        Builder { name: String::new() }
+    }
+
+    pub fn build(&mut self, point: &Point, items: &[u8]) -> Option<u8> {
+        self.name.push_str("a");
+        self.name.insert_str(0, "'");
+        let _ = format!("{}", self.name);
+        let _ = format!("plain");
+        let copied = point.clone();
+        let _ = items.get(0);
+        let _ = &[b'a', b'b'];
+        return Some(copied.0);
+    }
+}
+
+enum Encoding {
+    UTF8,
+    Latin,
+}
+
+pub fn encoding(utf8: bool) -> u8 {
+    let pick = |it: Encoding| match it {
+        Encoding::UTF8 => return 1,
+        Encoding::Latin => 2,
+    };
+    pick(if utf8 { Encoding::UTF8 } else { Encoding::Latin })
+}
+
+#[macro_export]
+macro_rules! here {
+    () => {
+        crate::encoding(true)
+    };
+}
+
 #[deny(clippy::bool_assert_comparison)]
 pub fn denied() {
     assert_eq!(braces().is_empty(), false);

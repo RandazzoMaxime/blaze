@@ -60,12 +60,22 @@ pub fn check(db: &RootDatabase, krate: hir::Crate, setup: &Setup, name_of: NameO
             it
         });
         let mut files: Vec<EditionedFileId> = Vec::new();
-        let mut seen = FxHashSet::default();
+        // Where rustc's walks over the crate come to each file: at the `mod` item declaring it,
+        // in the file that has that, and so on up to the root.
+        let mut nesting: FxHashMap<EditionedFileId, Vec<(u32, u32)>> = FxHashMap::default();
         for module in krate.modules(db) {
             let Some(file) = module.definition_source_file_id(db).file_id() else { continue };
-            if seen.insert(file) {
-                files.push(file);
+            if nesting.contains_key(&file) {
+                continue;
             }
+            let mut place = Vec::new();
+            if let Some(declared) = module.declaration_source_range(db) {
+                let declared = declared.original_node_file_range_rooted(db);
+                place = nesting.get(&declared.file_id).cloned().unwrap_or_default();
+                place.push((u32::from(declared.range.start()), u32::MAX - u32::from(declared.range.end())));
+            }
+            nesting.insert(file, place);
+            files.push(file);
         }
         let levels = Levels::new(&setup.command_line);
         let texts: Vec<&str> = files.iter().map(|it| &**db.file_text(it.file_id(db)).text(db)).collect();
@@ -85,7 +95,9 @@ pub fn check(db: &RootDatabase, krate: hir::Crate, setup: &Setup, name_of: NameO
         for (order, file) in files.iter().enumerate() {
             let Some(name) = name_of(file.file_id(db)) else { continue };
             let source = sema.parse(*file);
-            let mut cx = Cx { state: &mut state, file: *file, name, order, expansion: None, input: None, depth: 0 };
+            let nesting = nesting.remove(file).unwrap_or_default();
+            let mut cx =
+                Cx { state: &mut state, file: *file, name, order, nesting, expansion: None, input: None, depth: 0 };
             cx.walk(source.syntax());
         }
         state.finish(&levels)
@@ -98,9 +110,10 @@ struct Pending {
     /// Where its level is asked for.
     at: InFile<SyntaxNode>,
     diagnostic: Diagnostic,
-    /// The order rustc emits it in: by pass (pre-expansion over the root file, early, late),
-    /// then by module, then by where the node it was found at starts, outer nodes first.
-    order: (u8, usize, u32, u32),
+    /// The order rustc emits it in: by pass (pre-expansion over the root file, early, late,
+    /// after late), then by where the node it was found at is in the walk over the crate,
+    /// outer nodes first.
+    order: (u8, Vec<(u32, u32)>),
 }
 
 /// An `#[expect]` of a lint, as the walk met it.
@@ -133,6 +146,8 @@ pub(crate) struct Cx<'s, 'a, 'db> {
     /// The file's name, as diagnostics name it.
     pub(crate) name: String,
     order: usize,
+    /// Where the walk over the crate comes to the file, as [`Pending::order`] has it.
+    nesting: Vec<(u32, u32)>,
     /// The macro the walk is in the expansion of, if it is in one.
     pub(crate) expansion: Option<Expansion>,
     /// When the walk is in what a macro call of the file expands to, the arguments of the
@@ -304,7 +319,13 @@ impl<'a, 'db> Cx<'_, 'a, 'db> {
     pub(crate) fn std_def(&self, path: &[&str]) -> Option<hir::ModuleDef> {
         let db = self.db();
         let (krate, rest) = path.split_first()?;
-        let krate = self.krate().dependencies(db).into_iter().find(|it| it.name.as_str() == *krate)?.krate;
+        let famous = ide_db::famous_defs::FamousDefs(self.sema(), self.krate());
+        let krate = match *krate {
+            "core" => famous.core()?,
+            "alloc" => famous.alloc()?,
+            "std" => famous.std()?,
+            _ => return None,
+        };
         let mut module = krate.root_module(db);
         let (last, modules) = rest.split_last()?;
         for name in modules {
@@ -343,12 +364,61 @@ impl<'a, 'db> Cx<'_, 'a, 'db> {
         span: impl Into<MultiSpan>,
         message: impl Into<String>,
     ) -> &mut Diagnostic {
-        let info = registry::lint(lint).unwrap_or_else(|| panic!("`{lint}` is not clippy's"));
+        self.lint_when(lint, at, at, span, message)
+    }
+
+    /// Reports `lint` at `span`, its level asked for at `at`, in the order rustc would come to
+    /// `when` in its walk: for a lint run on a node that it reports of a node inside it.
+    pub(crate) fn lint_when(
+        &mut self,
+        lint: &'static str,
+        at: &SyntaxNode,
+        when: &SyntaxNode,
+        span: impl Into<MultiSpan>,
+        message: impl Into<String>,
+    ) -> &mut Diagnostic {
         let span: MultiSpan = span.into();
         // rustc's passes run a lint as they come to a node, outer nodes before inner ones.
-        let place = match self.original_range(at) {
+        let place = match self.original_range(when) {
             Some(range) => (u32::from(range.start()), u32::MAX - u32::from(range.end())),
             None => (span.primary_span().map_or(0, |it| it.lo), 0),
+        };
+        self.lint_placed(lint, at, place, span, message)
+    }
+
+    /// Reports `lint` at `span`, its level asked for at `at`, as rustc would once its walk has
+    /// left `after`: for what clippy says when a body has been walked.
+    pub(crate) fn lint_after(
+        &mut self,
+        lint: &'static str,
+        at: &SyntaxNode,
+        after: &SyntaxNode,
+        span: impl Into<MultiSpan>,
+        message: impl Into<String>,
+    ) -> &mut Diagnostic {
+        let span: MultiSpan = span.into();
+        let place = match self.original_range(after) {
+            Some(range) => (u32::from(range.end()).saturating_sub(1), u32::MAX),
+            None => (span.primary_span().map_or(0, |it| it.hi), u32::MAX),
+        };
+        self.lint_placed(lint, at, place, span, message)
+    }
+
+    fn lint_placed(
+        &mut self,
+        lint: &'static str,
+        at: &SyntaxNode,
+        place: (u32, u32),
+        span: MultiSpan,
+        message: impl Into<String>,
+    ) -> &mut Diagnostic {
+        let info = registry::lint(lint).unwrap_or_else(|| panic!("`{lint}` is not clippy's"));
+        let phase = lints::phase(lint, self.order == 0);
+        // What clippy gathers to say after the late pass it says in the order of the source map,
+        // which has the crate's files in the order rustc read them.
+        let at_place = match phase {
+            3 => vec![(u32::try_from(self.order).unwrap_or(u32::MAX), 0), place],
+            _ => self.nesting.iter().copied().chain([place]).collect(),
         };
         let file = self.sema().hir_file_for(at);
         self.state.pending.push(Pending {
@@ -363,7 +433,7 @@ impl<'a, 'db> Cx<'_, 'a, 'db> {
                 suggestions: Vec::new(),
                 suggestions_disabled: false,
             },
-            order: (lints::phase(lint, self.order == 0), self.order, place.0, place.1),
+            order: (phase, at_place),
         });
         &mut self.state.pending.last_mut().expect("just pushed").diagnostic
     }
@@ -633,7 +703,7 @@ impl State<'_, '_> {
     /// and not found.
     fn finish(mut self, levels: &Levels) -> Vec<Found> {
         let mut pending = std::mem::take(&mut self.pending);
-        pending.sort_by_key(|it| it.order);
+        pending.sort_by(|a, b| a.order.cmp(&b.order));
         let mut found = Vec::new();
         let mut fulfilled: FxHashSet<Span> = FxHashSet::default();
         let mut sets_of: FxHashMap<InFile<SyntaxNode>, (Vec<Set>, bool)> = FxHashMap::default();
@@ -775,7 +845,7 @@ pub(crate) fn item_range(node: &SyntaxNode) -> TextRange {
     let start = node
         .children_with_tokens()
         .find(|it| match it {
-            NodeOrToken::Node(node) => node.kind() != SyntaxKind::ATTR,
+            NodeOrToken::Node(node) => !matches!(node.kind(), SyntaxKind::ATTR | SyntaxKind::DOC_COMMENT),
             NodeOrToken::Token(token) => !token.kind().is_trivia(),
         })
         .map_or(node.text_range().start(), |it| it.text_range().start());
