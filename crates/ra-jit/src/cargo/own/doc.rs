@@ -16,36 +16,65 @@ use hir::Crate;
 use ide_db::RootDatabase;
 use rustc_hash::FxHashMap;
 
+use super::args::{Args, Flag, switch, valued};
 use crate::{
-    Args,
     cargo::{metadata, say},
     plan::Selection,
 };
 
-/// The flags of `cargo doc` that take their value as the next argument.
-const VALUED: &[&str] = &[
-    "-p",
-    "--package",
-    "--exclude",
-    "-F",
-    "--features",
-    "--target",
-    "--manifest-path",
-    "--bin",
-    "--profile",
-    "--config",
-    "-Z",
-    "-j",
-    "--jobs",
-    "--color",
-    "--message-format",
-    "--target-dir",
-    "--lockfile-path",
+/// The flags of `cargo doc`, besides those of every cargo command.
+const FLAGS: &[Flag] = &[
+    valued(&["-p", "--package"]),
+    switch(&["--workspace", "--all"]),
+    valued(&["--exclude"]),
+    switch(&["--no-deps"]),
+    switch(&["--document-private-items"]),
+    switch(&["--open"]),
+    valued(&["-F", "--features"]),
+    switch(&["--all-features"]),
+    switch(&["--no-default-features"]),
+    valued(&["--target"]),
+    valued(&["--target-dir"]),
+    valued(&["--manifest-path"]),
+    switch(&["--lib"]),
+    switch(&["--bins"]),
+    valued(&["--bin"]),
+    switch(&["-r", "--release"]),
+    valued(&["--profile"]),
+    valued(&["--message-format"]),
+    valued(&["--lockfile-path"]),
+    // What changes nothing blaze writes.
+    valued(&["-j", "--jobs"]),
+    switch(&["--keep-going"]),
+    switch(&["--ignore-rust-version"]),
 ];
 
-/// Flags `cargo doc` takes that change nothing blaze writes.
-const IGNORED: &[&str] =
-    &["-j", "--jobs", "--color", "--locked", "--frozen", "--offline", "--keep-going", "--ignore-rust-version"];
+const HELP: &str = "\
+Write the documentation of the packages and of what they depend on, from blaze's own reading
+of the source: no rustdoc runs.
+
+Usage: cargo blaze doc [OPTIONS]
+
+Options:
+      --open                    Open the documentation in a browser after writing it
+      --no-deps                 Leave out the documentation of dependencies
+      --document-private-items  Document private items too
+  -p, --package <SPEC>          Package to document
+      --workspace               Document every package of the workspace
+      --exclude <SPEC>          Package to leave out with --workspace
+      --lib                     Document only the library
+      --bins                    Document every binary
+      --bin <NAME>              Document only the binary named
+  -F, --features <FEATURES>     Features to turn on, separated by commas or spaces
+      --all-features            Turn on every feature
+      --no-default-features     Leave the default features off
+      --target <TRIPLE>         Document for the target triple
+      --target-dir <DIR>        Directory to write in, `target` by default
+      --manifest-path <PATH>    Path to Cargo.toml
+  -r, --release                 Read the source as the release profile does
+      --profile <NAME>          Read the source as the profile named does
+  -q, --quiet                   Say nothing but errors and warnings
+  -v, --verbose                 Say how long each step took";
 
 #[derive(Default, Debug)]
 struct Flags {
@@ -59,6 +88,7 @@ struct Flags {
     all_features: bool,
     no_default_features: bool,
     target: Option<String>,
+    target_dir: Option<PathBuf>,
     manifest_path: Option<PathBuf>,
     lib: bool,
     bins: bool,
@@ -68,58 +98,43 @@ struct Flags {
     unstable: Vec<String>,
     quiet: bool,
     verbose: bool,
+    help: bool,
 }
 
 impl Flags {
-    fn parse(args: &[String]) -> Result<Flags, String> {
-        let mut flags = Flags::default();
-        let mut words = args.iter();
-        while let Some(word) = words.next() {
-            let (flag, joined) = match word.split_once('=') {
-                Some((flag, value)) if flag.starts_with("--") => (flag, Some(value.to_owned())),
-                _ if !word.starts_with("--") && word.len() > 2 && VALUED.contains(&&word[..2]) => {
-                    (&word[..2], Some(word[2..].to_owned()))
-                }
-                _ => (word.as_str(), None),
-            };
-            let value = match joined {
-                None if VALUED.contains(&flag) => {
-                    Some(words.next().cloned().ok_or(format!("`{flag}` needs a value"))?)
-                }
-                joined => joined,
-            };
-            let value = || value.clone().unwrap_or_default();
-            match flag {
-                "-p" | "--package" => flags.packages.push(value()),
-                "--workspace" | "--all" => flags.workspace = true,
-                "--exclude" => flags.excludes.push(value()),
-                "--no-deps" => flags.no_deps = true,
-                "--document-private-items" => flags.private = true,
-                "--open" => flags.open = true,
-                "-F" | "--features" => flags
-                    .features
-                    .extend(value().split([',', ' ']).filter(|it| !it.is_empty()).map(str::to_owned)),
-                "--all-features" => flags.all_features = true,
-                "--no-default-features" => flags.no_default_features = true,
-                "--target" => flags.target = Some(value()),
-                "--manifest-path" => flags.manifest_path = Some(PathBuf::from(value())),
-                "--lib" => flags.lib = true,
-                "--bins" => flags.bins = true,
-                "--bin" => flags.bin.push(value()),
-                "-r" | "--release" => flags.profile = Some("release".to_owned()),
-                "--profile" => flags.profile = Some(value()),
-                "--config" => flags.config.push(value()),
-                "-Z" => flags.unstable.push(value()),
-                "-q" | "--quiet" => flags.quiet = true,
-                "-v" | "-vv" | "--verbose" => flags.verbose = true,
-                "--target-dir" | "--message-format" | "--lockfile-path" => {
-                    return Err(format!("`cargo blaze doc` does not take `{flag}` yet"));
-                }
-                _ if IGNORED.contains(&flag) => {}
-                _ => return Err(format!("unexpected argument `{word}` for `cargo blaze doc`")),
+    fn parse(typed: &[String]) -> Result<Flags, String> {
+        let read = Args::new(typed).read(FLAGS)?;
+        if let Some(word) = read.positional.first() {
+            return Err(format!("unexpected argument '{word}' found"));
+        }
+        for refused in ["--message-format", "--lockfile-path"] {
+            if read.has(refused) {
+                return Err(format!("`cargo blaze doc` does not take `{refused}` yet"));
             }
         }
-        Ok(flags)
+        Ok(Flags {
+            packages: read.values("--package"),
+            workspace: read.has("--workspace"),
+            excludes: read.values("--exclude"),
+            no_deps: read.has("--no-deps"),
+            private: read.has("--document-private-items"),
+            open: read.has("--open"),
+            features: read.features(),
+            all_features: read.has("--all-features"),
+            no_default_features: read.has("--no-default-features"),
+            target: read.value("--target"),
+            target_dir: read.value("--target-dir").map(PathBuf::from),
+            manifest_path: read.value("--manifest-path").map(PathBuf::from),
+            lib: read.has("--lib"),
+            bins: read.has("--bins"),
+            bin: read.values("--bin"),
+            profile: if read.has("--release") { Some("release".to_owned()) } else { read.value("--profile") },
+            config: read.values("--config"),
+            unstable: read.values("-Z"),
+            quiet: read.has("--quiet"),
+            verbose: read.has("--verbose"),
+            help: read.has("--help"),
+        })
     }
 
     fn selection(&self, asked_in: Option<PathBuf>) -> Selection {
@@ -152,6 +167,10 @@ pub(crate) fn command(args: &[String]) -> anyhow::Result<i32> {
             return Ok(1);
         }
     };
+    if flags.help {
+        println!("{HELP}");
+        return Ok(0);
+    }
     let cwd = std::env::current_dir()?;
     let metadata = metadata::no_deps(flags.manifest_path.as_deref(), &flags.config);
     let packages = match selected(&flags, &metadata, &cwd) {
@@ -174,7 +193,7 @@ pub(crate) fn command(args: &[String]) -> anyhow::Result<i32> {
         args.extend(["--asked-in".to_owned(), asked_in.display().to_string()]);
     }
     args.extend(["--crate", "doc", "--out", "none"].map(str::to_owned));
-    let args = Args::parse(args.into_iter())?;
+    let args = crate::Args::parse(args.into_iter())?;
     crate::process_wide();
     let cargo_config = crate::cargo_config(&args);
     let (mut db, vfs, _checkouts) = crate::load(
@@ -203,7 +222,10 @@ pub(crate) fn command(args: &[String]) -> anyhow::Result<i32> {
         crates.iter().filter(|it| it.warn).map(|it| it.name.clone()).collect();
     let model = hir::attach_db(&db, || blaze_doc::model(&db, crates));
     let modelled = started.elapsed();
-    let target_dir = metadata.target_directory.as_std_path().to_owned();
+    let target_dir = match &flags.target_dir {
+        Some(dir) => cwd.join(dir),
+        None => metadata.target_directory.as_std_path().to_owned(),
+    };
     let out = match &selection.target {
         Some(triple) => target_dir.join(triple).join("doc"),
         None => target_dir.join("doc"),
@@ -389,5 +411,33 @@ fn open(page: &Path) {
     };
     if let Err(why) = std::process::Command::new(&opener).arg(page).status() {
         say::error(&format!("could not open {} with {}: {why}", page.display(), opener.to_string_lossy()));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Flags;
+
+    fn parse(text: &str) -> Result<Flags, String> {
+        let typed: Vec<String> = text.split_whitespace().map(str::to_owned).collect();
+        Flags::parse(&typed)
+    }
+
+    #[test]
+    fn reads_cargo_docs_flags() {
+        let flags = parse("-p a --package=b --no-deps --open -Ffoo,bar --target wasm32-wasip1 -r -q").unwrap();
+        assert_eq!(flags.packages, ["a", "b"]);
+        assert!(flags.no_deps && flags.open && flags.quiet);
+        assert_eq!(flags.features, ["foo", "bar"]);
+        assert_eq!(flags.target.as_deref(), Some("wasm32-wasip1"));
+        assert_eq!(flags.profile.as_deref(), Some("release"));
+        assert!(parse("--lib --bin x --document-private-items -j 8 --target-dir t").is_ok());
+    }
+
+    #[test]
+    fn refuses_what_it_does_not_take() {
+        assert!(parse("--message-format json").unwrap_err().contains("--message-format"));
+        assert!(parse("stray").unwrap_err().contains("stray"));
+        assert!(parse("--frobnicate").is_err());
     }
 }

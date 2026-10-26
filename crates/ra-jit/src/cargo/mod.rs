@@ -11,22 +11,21 @@ mod client;
 pub(crate) mod layout;
 mod messages;
 pub(crate) mod metadata;
+mod own;
 pub(crate) mod own_macro;
 pub(crate) mod own_script;
 mod package;
 pub(crate) mod plan;
 pub(crate) mod run;
-mod sandboxed;
+pub(crate) mod sandboxed;
 pub(crate) mod say;
 pub(crate) mod script;
+pub(crate) mod script_sandbox;
 mod state;
 pub(crate) mod switch;
 mod toolchain;
 mod units;
 mod whole;
-// TEMP-DOC-HOOK: until the dispatcher of `cargo/own/` lands.
-#[path = "own/doc.rs"]
-mod own_doc;
 
 use std::{collections::BTreeMap, path::Path, process::Command, time::Instant};
 
@@ -46,13 +45,8 @@ pub(crate) fn command(args: impl Iterator<Item = String>) -> anyhow::Result<()> 
     {
         return settle(cargo.parse().context("`settle` is told the cargo to wait for")?, rest);
     }
-    // TEMP-DOC-HOOK
-    if args.first().is_some_and(|it| it == "doc") {
-        crate::end_with_reader();
-        std::process::exit(own_doc::command(&args[1..])?);
-    }
-    let asked = Asked::parse(args);
-    if !matches!(asked, Asked::Build(_) | Asked::Cargo(_)) {
+    let asked = Asked::parse(own::subcommand_first(args));
+    if !matches!(asked, Asked::Build(_)) {
         crate::end_with_reader();
     }
     if let Asked::Build(_) = asked
@@ -73,7 +67,7 @@ pub(crate) fn command(args: impl Iterator<Item = String>) -> anyhow::Result<()> 
             None if asked.subcommand == Subcommand::Check => check(&asked)?,
             None => build(&asked)?,
         },
-        Asked::Cargo(args) => plain_cargo(args)?,
+        Asked::Own(args) => own::command(args)?,
         Asked::Cache(args) => cache(args)?,
         Asked::Status => status()?,
         Asked::Stop => stop()?,
@@ -116,8 +110,9 @@ usage: blaze <command> [cargo's flags]    (or cargo blaze <command>)
   cache              what the `#[ra_jit::cache]` functions kept, by function
   cache clear        forgets it; `--stale`, all but what each function's code computed
 
-The daemon starts on the first build and stops after 30 minutes without one. Any other
-command is cargo's own. The guide: https://github.com/indexable-inc/blaze/blob/main/docs/cargo.md";
+The daemon starts on the first build and stops after 30 minutes without one. Every other
+command of cargo's is blaze's own, or fails saying blaze has none yet: none is handed to cargo
+(`blaze --list`). The guide: https://github.com/indexable-inc/blaze/blob/main/docs/cargo.md";
 
 /// What a wrapper runs ra-jit with once rustc has linked a program under plain cargo.
 pub(super) const SETTLE: &str = "settle";

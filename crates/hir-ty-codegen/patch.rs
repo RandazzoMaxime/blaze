@@ -2398,16 +2398,18 @@ impl Base {
             if self.rustc {
                 return stale.declined("a static changed, and rustc's copy is the program's");
             }
+            let writable = probe(|| compiled_static(db, id).as_ref().ok().map(|it| it.writable));
             // rustc's copy holds what the program wrote, from the first value it had: one of
-            // ours beside it would split the state, and it can't start again from another.
-            if was.shared {
+            // ours beside it would split the state, and it can't start again from another. A
+            // static the edit took away (or left with no value) has no copy of ours to split
+            // it with: nothing compiled now names it.
+            if was.shared && matches!(writable, Some(Some(_))) {
                 return stale.declined(
                     "the first value changed of a static with state that rustc's code shares",
                 );
             }
             stale.their_walk_changed |= was.theirs;
             // rustc's code has rustc's copy, and a thread's copy is laid out by the linker.
-            let writable = probe(|| compiled_static(db, id).as_ref().ok().map(|it| it.writable));
             if writable == Some(Some(was.writable)) && !was.theirs && !is_thread_local(db, id) {
                 stale.statics.push(id);
             } else {
@@ -2689,8 +2691,10 @@ impl Base {
             cg.pending.push((instance, env, id));
         }
         for &id in &changed_statics {
-            if cg.static_data(id).is_err() {
-                return Ok(Err("a static of the base no longer has a value"));
+            match cg.static_data(id) {
+                Ok(_) => {}
+                Err(e @ CodegenError::Refused(_)) => return Err(e),
+                Err(_) => return Ok(Err("a static of the base no longer has a value")),
             }
         }
         // rustc's callers of one that hands out a value of a type only its body names go on
@@ -2715,11 +2719,16 @@ impl Base {
                     // rustc's has none to be put in the object under: what calls it has a
                     // copy of its own.
                     Err(e) if e.no_symbol() && added.contains(&root) => {}
+                    Err(e @ CodegenError::Refused(_)) => return Err(e),
                     Err(_) => return Ok(Err("a root can't be compiled")),
                 }
                 queue.extend(cg.wanted.drain(..).filter(|&func| queued.insert(func)));
             }
-            if !cg.define_instances().is_empty() {
+            let failed = cg.define_instances();
+            if let Some(refused) = cg.refused.take() {
+                return Err(refused);
+            }
+            if !failed.is_empty() {
                 return Ok(Err("an instance can't be compiled"));
             }
             queue.extend(cg.wanted.drain(..).filter(|&func| queued.insert(func)));

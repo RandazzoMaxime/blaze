@@ -44,20 +44,22 @@ said plainly when it happens:
 
 ## What blaze takes from a Rust toolchain today
 
-Measured on main at 012f0e91e3 (2026-10-25). Each piece, what uses it, and the step that ends
-the need for it ([no-rustc.md](no-rustc.md#the-plan)).
+Measured on main at 012f0e91e3 (2026-10-25); the sizes are those of `nightly-2026-10-25`'s
+components, as `crates/ra-jit/src/cargo/toolchain/pins.txt` lists them. Each piece, what uses
+it, and the step that ends the need for it ([no-rustc.md](no-rustc.md#the-plan)).
 
 | Piece | Size (xz, Linux x86-64) | What uses it | Removed by |
 |---|---|---|---|
-| `cargo` | 11.0 MB | the first build (`cargo/state.rs` `Built::by`); `cargo metadata` for every load (rust-analyzer's project model; the client's `--no-deps` reading is blaze-manifest's since 2026-10-25, `cargo/metadata.rs`); `cargo build --unit-graph` (`plan.rs`); rust-analyzer's `cargo check --compile-time-deps`; fetching crates into `~/.cargo/registry` | blaze's resolver and fetcher ([below](#resolution-and-fetching)), then K and M |
-| `rustc` (with `librustc_driver`, LLVM) | 84.0 MB, with the next two | the first build of every workspace, proc macros, the build scripts blaze does not compile yet, the functions left to rustc, the rustc base of the first edits | K, J, E, M |
+| `cargo` | 10.9 MB | the first build (`cargo/state.rs` `Built::by`); `cargo metadata` for every load (rust-analyzer's project model; the client's `--no-deps` reading is blaze-manifest's since 2026-10-25, `cargo/metadata.rs`); `cargo build --unit-graph` (`plan.rs`); rust-analyzer's `cargo check --compile-time-deps`; fetching crates into `~/.cargo/registry` | blaze's resolver and fetcher ([below](#resolution-and-fetching)), then K and M |
+| `rustc` (with `librustc_driver`, LLVM) | 84.9 MB, with the next two | the first build of every workspace, proc macros, the build scripts blaze does not compile yet, the functions left to rustc, the rustc base of the first edits | K, J, E, M |
 | `rust-lld` (`lib/rustlib/<host>/bin/gcc-ld`) | in `rustc` | blaze's own link on ELF targets (`link.rs`), as rustc links | blaze shipping its own lld, or the system linker |
 | `rust-analyzer-proc-macro-srv` (`libexec`) | in `rustc` | expanding proc macros with the libraries rustc built | J1 and J2 |
-| `rust-std-<host>` (the sysroot's rlibs) | 31.6 MB | linking what cargo and rustc built; `libstd`'s dynamic library for a proc macro's tests | F and G as the only build |
-| `rust-src` | 5.9 MB | the standard library's source, which blaze compiles (and which the shipped std unit is keyed by) | stays: it is source. Later shipped with blaze |
+| `rust-std-<host>` (the sysroot's rlibs) | 31.7 MB | linking what cargo and rustc built; `libstd`'s dynamic library for a proc macro's tests | F and G as the only build |
+| `rust-src` | 6.0 MB | the standard library's source, which blaze compiles (and which the shipped std unit is keyed by) | stays: it is source. Later shipped with blaze |
 | rustup | | finding the pinned nightly and its `rust-src` (`cargo/toolchain.rs`, #296), `multirust-channel-manifest.toml` for the release and commit (`answers/own.rs`, `main.rs`) | blaze's own toolchain ([below](#blazes-own-toolchain-the-stopgap)) |
 
-On macOS the same pieces are 50.3, 9.0, 30.7 and 5.9 MB (95.8 MB); on Linux AArch64 117.3 MB.
+On macOS the same pieces are 51.6, 8.9, 30.9 and 6.0 MB (97.4 MB); on Linux AArch64 118.2 MB.
+Unpacked they are 710 MB on Linux x86-64 and 548 MB on macOS.
 blaze's own archive is 18 to 21 MB.
 
 ## blaze's own toolchain, the stopgap
@@ -69,7 +71,7 @@ to it, that no project's pin or `PATH` changes:
 - **What:** the pinned nightly's `rustc`, `cargo`, `rust-std-<host>` and `rust-src` components, as
   the Rust project publishes them on static.rust-lang.org, unchanged. Not `rustfmt`, `clippy`,
   `rust-docs` or `rust-analyzer`.
-- **Size:** 132.5 MB to download on Linux x86-64, 117.3 MB on Linux AArch64, 95.8 MB on
+- **Size:** 133.6 MB to download on Linux x86-64, 118.2 MB on Linux AArch64, 97.4 MB on
   macOS, the same bytes rustup's `minimal` profile and `rust-src` download today.
 - **Where:** `~/.blaze/toolchains/nightly-2026-10-25-<host>/` (`BLAZE_HOME` moves it), laid out as rustup
   lays out a toolchain, with its channel manifest, so that blaze's sysroot rules read it
@@ -141,7 +143,7 @@ locks (#339).
 `harness/resolve_graph.py` compares the `resolve` blaze-resolve makes of the packages cargo
 lists with cargo's, over the corpus of `harness/resolve` (dev-aws-8, at 6e4bbe91): with the
 lock file each project ships, 322 of 324 equal; with none, 381 of 385. The rest are those
-cargo 1.99.0 does not resolve there (bun, swc, rust-clippy, embassy). Its registry holds the
+cargo 1.99.0, the oracle before blaze moved to the nightly (#372), does not resolve there (bun, swc, rust-clippy, embassy). Its registry holds the
 versions cargo chose; choosing among all of the index's waits on #321, cargo's SAT-checked
 resolver tests on #337, `cargo update` and path overrides on #338.
 
@@ -152,7 +154,7 @@ every locked package fetched by blaze-registry, and the graph of the build the l
 lock file it ships, blaze fetching into a `CARGO_HOME` of its own: `cargo metadata
 --filter-platform` 321 of 321 equal as JSON, and the packages, features and edges of `cargo
 build --unit-graph` 321 of 321 equal. yew's lock file is one cargo rewrites, which blaze
-leaves to cargo (#321); bun, swc and agave cargo 1.99.0 does not resolve there. With it axum's
+leaves to cargo (#321); bun, swc and agave cargo 1.99.0 (the oracle then) does not resolve there. With it axum's
 whole build builds (5.9 and 6.5 s in two runs, cargo's 6.2 and 6.1 s, on a shared host): its example no longer reaches `mime_guess`, whose
 build script its build never ran. Left: the unit graph (#335), choosing versions (#321).
 
@@ -243,8 +245,9 @@ blaze over the shipped standard library and linked by blaze) run on bench.py's p
 empty store, then again on the store it filled, against cargo's own cold build into a target
 directory of its own, on dev-aws-8 (Cranelift, main at 3e03d4298a, the host shared at a load
 of 20-56, nothing pinned: the times are rough). rustc and cargo were stand-ins that log each
-run, in a copy of 1.99.0. Each claim: **read** (measured or read in the code), **reported**,
-**unverified**.
+run, in a copy of 1.99.0, which blaze built with until #372 moved it to `nightly-2026-10-25`.
+Each claim: **read** (measured or read in the code), **reported**, **unverified**. These are
+the times before #330 and the cold build's later work; the current ones are below the list.
 
 | Project | Whole? | Same output | blaze, empty store | blaze, warm store | cargo cold |
 |---|---|---|---|---|---|
@@ -289,6 +292,25 @@ All **read**. What stands between this and replacing `cargo build`:
 - `harness/allrajit.py`'s set (five programs, a shared library, a proc-macro crate, built whole,
   over the unit and stored) passes on the same host: each built and linked in 1.6-17.5 s and
   ran as cargo's build does. **read**
+
+2026-10-26, the same comparison (`harness/coldbuild.py bench`, blaze from an empty store on
+its nightly, cargo cold into a target directory of its own) on dev-aws-14 while it was quiet:
+
+| Project | blaze, empty store | cargo cold |
+|---|---|---|
+| ripgrep | 4.8 s | 4.0 s |
+| fd | 22.1 s | 16.8 s |
+| hyperfine | 7.0 s | 3.8 s |
+| just | 11.0 s | 5.5 s |
+| bat | 12.6 s | 7.0 s |
+| axum (`example-hello-world`) | 6.1 s | 6.1 s |
+| nushell | 49.3 s | 23.8 s |
+
+All **read**. axum builds whole now (its build scripts' variables are set); biome does not
+yet: 17 functions the frontend turns down, and its proc macros take 149 s to expand. fd's load
+waits 16.7 s on jemalloc's build script. What is left of nushell's is in
+[no-rustc.md](no-rustc.md) (K). These were taken on a host shared at other times; a table on a
+host of its own replaces them.
 
 ## Order
 
