@@ -76,6 +76,12 @@ The program is told to start again (`Outcome::Restart`) when:
   watches its own executable for another `LC_UUID`, which covers a daemon started since and a
   plain `cargo build`.
 
+A build of several programs where cargo builds one (`blaze build -p server -p client`, and an
+edit only rustc's copy of the client's code sees) links none of the others again: the wrapper
+gives cargo the daemon's executable of each program the daemon did build, which is the one
+running with its edits, and the daemon's worker loads what rustc built in place rather than
+start again and link every program anew. `harness/live_fallback.py` checks it.
+
 A patch that can't be applied (`Outcome::Declined`) leaves the program as it was.
 
 ## Types

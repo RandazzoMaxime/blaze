@@ -642,14 +642,21 @@ impl Worker {
         // every function and static of the workspace from what it reads. The program the
         // worker was started on is built already, and is asked for too: what the worker then
         // compiles again by itself, for the first edit to be a patch, is part of warming up.
+        // A program the worker does not build is cargo's, and the others are still its own:
+        // the checkout failed to load only when it builds none.
+        let mut not_built = None;
+        let mut built = false;
         for plan in &checkout.programs {
             match self.ask(checkout, plan)? {
-                Ok(_) => {}
+                Ok(_) => built = true,
                 Err(NotBuilt::Error(said)) => return Ok(Some(said)),
-                Err(why) => anyhow::bail!(why.why()),
+                Err(why) => _ = not_built.get_or_insert(why),
             }
         }
-        Ok(None)
+        match not_built {
+            Some(why) if !built => anyhow::bail!(why.why()),
+            _ => Ok(None),
+        }
     }
 
     /// A connection to the process, once it has loaded the workspace and listens.
@@ -1285,9 +1292,13 @@ impl Daemon {
             let mut checkouts = lock(&worker.checkouts);
             match checkouts.get(&checkout.key) {
                 Some(loaded) if loaded.generation == checkout.generation => return Ok(()),
-                // What it linked against is not what cargo has now.
-                Some(_) => {}
-                None => {
+                // One it could not load is started again.
+                Some(Loaded { warmth: Warmth::Failed(..), .. }) => {}
+                // rustc built some of the checkout since: the worker loads it again in place
+                // and keeps what it built of each program, the executable a running program
+                // takes edits into among it. A new worker would link each program again, and
+                // every program running would be told to restart, its edits applied or not.
+                _ => {
                     let loading = Loaded {
                         generation: checkout.generation,
                         root: checkout.root.clone(),

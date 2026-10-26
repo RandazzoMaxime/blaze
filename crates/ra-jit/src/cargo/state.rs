@@ -461,17 +461,32 @@ pub(crate) fn checked(asked: &Invocation) -> anyhow::Result<daemon::Ahead> {
     Ok(daemon::Ahead { config, crates, root })
 }
 
+/// A program the daemon built for the source as it is, while cargo builds another: the
+/// executable rustc would link of it is the daemon's, which may be running with edits
+/// applied, and one rustc linked again would have it start again for nothing.
+pub(crate) struct Daemons {
+    /// The directory of the record of the unit cargo links it from.
+    pub(crate) unit: PathBuf,
+    /// The daemon's executable.
+    pub(crate) binary: PathBuf,
+    /// Where cargo has the executable, which a program may be running from.
+    pub(crate) places: Vec<PathBuf>,
+}
+
 impl Built {
     /// Runs cargo on what `asked` builds, with ra-jit as the wrapper of the workspace's
     /// crates. Progress and diagnostics are cargo's own. `Err` is cargo's exit status when
     /// it failed.
     /// `ahead` is what the daemon was told of the build before cargo started, for the
     /// worker that loads it meanwhile to hear what the scripts said.
+    /// `daemons` are the programs the daemon built for the source as it is, which cargo
+    /// is given rather than have rustc link them again.
     pub(crate) fn by_cargo(
         asked: &Invocation,
         ahead: Option<&daemon::Ahead>,
+        daemons: &[Daemons],
     ) -> anyhow::Result<Result<Built, i32>> {
-        Built::by(asked, None, ahead)
+        Built::by(asked, None, ahead, daemons)
     }
 
     /// The same, with rustc building of the crates rooted at `staged` only what stands in
@@ -480,13 +495,14 @@ impl Built {
         asked: &Invocation,
         staged: &Staged,
     ) -> anyhow::Result<Result<Built, i32>> {
-        Built::by(asked, Some(staged), staged.ahead.as_ref())
+        Built::by(asked, Some(staged), staged.ahead.as_ref(), &[])
     }
 
     fn by(
         asked: &Invocation,
         staged: Option<&Staged>,
         ahead: Option<&daemon::Ahead>,
+        daemons: &[Daemons],
     ) -> anyhow::Result<Result<Built, i32>> {
         let started = stamp_now();
         let mut cargo = Command::new(cargo_path());
@@ -499,6 +515,10 @@ impl Built {
         if let Some(staged) = staged {
             cargo.env(switch::VARIABLE, switch::first_wrapper_path()?);
             cargo.env(wrapper::STAGED, std::env::join_paths(&staged.roots)?);
+        }
+        if !daemons.is_empty() {
+            let paths = daemons.iter().flat_map(|it| [&it.unit, &it.binary]);
+            cargo.env(wrapper::DAEMONS, std::env::join_paths(paths)?);
         }
         cargo.stdout(Stdio::piped());
         let mut cargo = cargo.spawn().context("running cargo")?;
@@ -711,13 +731,15 @@ impl State {
     }
 
     /// Puts the executables rustc linked back where cargo has them, for cargo to find what
-    /// it built. One whose link is gone is deleted, and cargo links it again.
-    pub(crate) fn give_back(key: &str) {
+    /// it built. One whose link is gone is deleted, and cargo links it again. Those of
+    /// `daemons` stay the daemon's: cargo is given the daemon's again if it links them.
+    pub(crate) fn give_back(key: &str, daemons: &[Daemons]) {
         let kept = State::kept_path(key).ok().and_then(|it| std::fs::read(it).ok());
         let kept: Vec<(PathBuf, PathBuf)> =
             kept.and_then(|it| serde_json::from_slice(&it).ok()).unwrap_or_default();
         let _held = build_locks(kept.iter().map(|(executable, _)| &**executable));
-        for (executable, cargos) in kept {
+        let daemons = |it: &PathBuf| daemons.iter().any(|daemon| daemon.places.contains(it));
+        for (executable, cargos) in kept.into_iter().filter(|(it, _)| !daemons(it)) {
             // Whatever goes wrong here, cargo finds a file that is not its own or none,
             // and builds the program again.
             let _ = if is_placed(&cargos, &executable) {
@@ -780,6 +802,18 @@ impl State {
             }
         }
         Ok(cargos)
+    }
+
+    /// The programs the daemon built, by `answers`, for the source as it is now.
+    pub(crate) fn daemons(&self, answers: &[Vec<Result<(), String>>]) -> Vec<Daemons> {
+        let built = |program: &Program| {
+            let (checkout, at) = program.asked_as?;
+            answers.get(checkout)?.get(at)?.as_ref().ok()?;
+            let binary = self.checkouts[checkout].programs[at].binary.clone();
+            let places = program.places().map(Path::to_owned).collect();
+            Some(Daemons { unit: program.unit.clone()?, binary, places })
+        };
+        self.programs.iter().filter_map(built).collect()
     }
 
     /// Has each program be, where cargo's own is kept, a copy of the one the daemon
