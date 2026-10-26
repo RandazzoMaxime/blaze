@@ -175,25 +175,31 @@ pub fn could_unify_with_infcx<'db>(
     infcx.at(&ObligationCause::dummy(), ParamEnv::empty()).eq(a, b).is_ok()
 }
 
-/// Like [`implements_trait_unique_with_infcx`], but true when the goal may hold: an ambiguous
-/// answer, such as one that depends on inference variables in the arguments, counts.
-pub fn may_implement_trait_with_infcx<'db>(
+/// Whether the trait impl `impl_` may apply to the type `create_ty` makes, as rustdoc's
+/// `synthesize_blanket_impls` asks: the impl's parameters are inference variables, its self
+/// type is equated with the type, and its where-clauses and trait ref may each hold.
+pub fn impl_may_apply<'db>(
     db: &'db dyn HirDatabase,
-    env: ParamEnvAndCrate<'db>,
-    trait_: TraitId,
-    create_args: &mut dyn FnMut(&InferCtxt<'db>) -> GenericArgs<'db>,
+    krate: Crate,
+    impl_: ImplId,
+    create_ty: &mut dyn FnMut(&InferCtxt<'db>) -> Ty<'db>,
 ) -> bool {
-    let interner = DbInterner::new_with(db, env.krate);
+    let interner = DbInterner::new_with(db, krate);
     let infcx = interner.infer_ctxt().build(TypingMode::non_body_analysis());
-
-    let args = create_args(&infcx);
-    let trait_ref = rustc_type_ir::TraitRef::new_from_args(interner, trait_.into(), args);
-    if trait_ref.self_ty().is_ty_error() {
+    let ty = create_ty(&infcx);
+    let Some(trait_ref) = db.impl_trait(impl_) else { return false };
+    let args = infcx.fresh_args_for_item(Span::Dummy, impl_.into());
+    let trait_ref = trait_ref.instantiate(interner, args).skip_norm_wip();
+    if infcx.at(&ObligationCause::dummy(), ParamEnv::empty()).eq(trait_ref.self_ty(), ty).is_err() {
         return false;
     }
-
-    let obligation = Obligation::new(interner, ObligationCause::dummy(), env.param_env, trait_ref);
-    infcx.predicate_may_hold(&obligation)
+    let may_hold = |obligation| infcx.predicate_may_hold(&obligation);
+    let clauses = crate::lower::GenericPredicates::query_all(db, impl_.into())
+        .iter_instantiated(interner, args.as_slice())
+        .map(crate::next_solver::Unnormalized::skip_norm_wip);
+    crate::next_solver::util::clauses_as_obligations(clauses, ObligationCause::dummy(), ParamEnv::empty())
+        .all(may_hold)
+        && may_hold(Obligation::new(interner, ObligationCause::dummy(), ParamEnv::empty(), trait_ref))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -5094,22 +5094,13 @@ impl<'db> Type<'db> {
         })
     }
 
-    /// Whether the type may implement the trait for some arguments: its own generic parameters
-    /// and the trait's are inference variables, and an ambiguous answer counts. This is how
-    /// rustdoc decides which blanket impls a type gets.
-    pub fn may_impl_trait(&self, db: &'db dyn HirDatabase, trait_: Trait) -> bool {
-        let env = ParamEnvAndCrate { param_env: ParamEnv::empty(), krate: self.krate(db) };
-        traits::may_implement_trait_with_infcx(db, env, trait_.id, &mut |infcx| {
-            let mut args = Self::instantiate_many_with_infer(iter::once(self), infcx);
-            GenericArgs::for_item(infcx.interner, trait_.id.into(), |_, param, _, _| {
-                if let GenericParamId::TypeParamId(_) = param
-                    && let Some(arg) = args.next()
-                {
-                    arg.into()
-                } else {
-                    infcx.var_for_def(param, hir_ide::Span::Dummy)
-                }
-            })
+    /// Whether the trait impl may apply to the type, the type's generic parameters and the
+    /// impl's as inference variables and an ambiguous answer counting: rustdoc's test of the
+    /// blanket impls a type gets.
+    pub fn may_have_impl(&self, db: &'db dyn HirDatabase, impl_: Impl) -> bool {
+        let Ok(id) = ImplId::try_from(impl_) else { return false };
+        traits::impl_may_apply(db, self.krate(db), id, &mut |infcx| {
+            Self::instantiate_many_with_infer([self], infcx).next().unwrap()
         })
     }
 

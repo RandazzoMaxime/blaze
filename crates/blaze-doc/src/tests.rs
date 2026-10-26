@@ -36,11 +36,12 @@ mod private {
     pub struct Inner;
 }
 pub use private::Inner as Shown;
+pub use shapes::Corner;
 
 #[doc(hidden)]
 pub struct Secret;
 
-/// A thing. Make one with [Self::new]; see [`Kind::A`], [`free()`], [dep::Helper],
+/// A thing. Make one with [Self::new]; see [`Kind::A`], [`free()`], [dep::Helper], [dep::Deep],
 /// [`Option`] and [the shape trait](Shape).
 #[derive(Clone)]
 pub struct Thing<T: Clone, const N: usize> {
@@ -111,6 +112,9 @@ pub unsafe extern "C" fn ffi(ptr: *const u8, len: usize) -> Option<&'static [u8]
 /// An alias.
 pub type Alias<T> = Option<T>;
 
+/// An alias with its argument.
+pub type Maybe = Option<shapes::Square>;
+
 /// The most.
 pub const MAX: u32 = 10;
 
@@ -178,6 +182,12 @@ impl Square {
     pub const SIDE: u32 = 1;
 }
 
+mod corner {
+    /// Documented in `shapes`, which re-exports it publicly.
+    pub struct Corner;
+}
+pub use corner::Corner;
+
 //- /dep.rs crate:dep@1.2.0,https://example.com/dep.git
 /// Helps.
 pub struct Helper;
@@ -188,6 +198,12 @@ pub mod nested {
     /// Found through a glob.
     pub fn glob_fn() {}
 }
+
+mod deep {
+    /// Declared in a private module, documented at the root.
+    pub struct Deep;
+}
+pub use deep::Deep;
 "#;
 
 fn load() -> (RootDatabase, Model) {
@@ -283,6 +299,26 @@ fn reexports_inline_as_rustdoc_does() {
     let lines: Vec<String> = root.reexports.iter().map(|it| it.decl.plain()).collect();
     assert!(lines.iter().any(|it| it == "pub use dep::Outside;"), "{lines:?}");
     assert!(item(fixture, "fixture::Helper").docs.markdown.contains("Helps."));
+    // `shapes` re-exports it publicly, so the root's `use` of that re-export stays a line.
+    assert_eq!(item(fixture, "fixture::shapes::Corner").kind, Kind::Struct);
+    assert!(fixture.find("Corner").is_none(), "re-exported through a public re-export: {lines:?}");
+    assert!(lines.iter().any(|it| it == "pub use fixture::shapes::Corner;"), "{lines:?}");
+}
+
+#[test]
+fn aliases_show_the_type_they_stand_for() {
+    let (_db, model) = load();
+    let fixture = krate(&model, "fixture");
+    let alias = item(fixture, "fixture::Alias");
+    let aliased = alias.aliased.as_ref().expect("an alias of an enum shows it").plain();
+    assert!(aliased.starts_with("pub enum Alias<T> {"), "{aliased}");
+    let variants: Vec<String> = alias.variants.iter().map(|it| it.decl.plain()).collect();
+    assert_eq!(variants, ["None", "Some(T)"]);
+    let maybe = item(fixture, "fixture::Maybe");
+    let aliased = maybe.aliased.as_ref().expect("an alias of an enum shows it").plain();
+    assert!(aliased.contains("Some(Square)"), "the alias's argument for the parameter: {aliased}");
+    let variants: Vec<String> = maybe.variants.iter().map(|it| it.decl.plain()).collect();
+    assert_eq!(variants, ["None", "Some(Square)"]);
 }
 
 #[test]
@@ -394,7 +430,9 @@ fn intra_doc_links_resolve() {
     assert_eq!(page(link(thing, "Self::new")), "fixture/struct.Thing.html#method.new");
     assert_eq!(page(link(thing, "`Kind::A`")), "fixture/enum.Kind.html#variant.A");
     assert_eq!(page(link(thing, "`free()`")), "fixture/fn.free.html");
-    assert_eq!(page(link(thing, "dep::Helper")), "dep/struct.Helper.html");
+    // An item the crate inlined links to its page there, another crate's to its own.
+    assert_eq!(page(link(thing, "dep::Helper")), "fixture/struct.Helper.html");
+    assert_eq!(page(link(thing, "dep::Deep")), "dep/struct.Deep.html");
     assert_eq!(page(link(thing, "`Option`")), "core/option/enum.Option.html");
     assert_eq!(page(link(thing, "Shape")), "fixture/trait.Shape.html");
 }
@@ -434,7 +472,14 @@ fn writes_pages_sources_and_search() {
     }
     let thing = std::fs::read_to_string(out.join("fixture/struct.Thing.html")).unwrap();
     assert!(thing.contains("id=\"method.new\""), "a member anchor");
-    assert!(thing.contains("href=\"../dep/struct.Helper.html\""), "a link to a dependency's page");
+    assert!(
+        thing.contains("href=\"../fixture/struct.Helper.html\" title=\"struct fixture::Helper\""),
+        "an inlined item's page"
+    );
+    assert!(
+        thing.contains("href=\"../dep/struct.Deep.html\" title=\"struct dep::deep::Deep\""),
+        "a dependency's page, titled where the item is declared"
+    );
     assert!(thing.contains("https://doc.rust-lang.org/nightly/core/option/enum.Option.html"));
     let index = text(&std::fs::read_to_string(out.join("fixture/index.html")).unwrap());
     assert!(index.contains("let thing = fixture::Thing::new(1);"), "the example is there: {index}");

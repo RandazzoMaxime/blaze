@@ -19,7 +19,7 @@ use crate::{
         Code, CrateDoc, DerefMethods, Doc, ImplDoc, Impls, Item, ItemRef, Kind, Member, Model, Notes, Piece,
         Reexport, Span, Target, Warning,
     },
-    places::{self, Line, Placed, Places, kind_of, primitive},
+    places::{self, Line, Linking, Placed, Places, kind_of, primitive},
     sig::{self, FnContext},
     source::Files,
 };
@@ -38,7 +38,7 @@ pub(crate) fn build(db: &RootDatabase, places: &Places) -> Model {
                 let upstream = places::upstream(db, places.crates[krate].krate);
                 let builder = Builder {
                     db,
-                    places,
+                    places: places.linking(krate),
                     files: &files,
                     std: &std,
                     by_trait_arg: &by_trait_arg,
@@ -112,6 +112,8 @@ struct StdItems {
     deref: Option<hir::Trait>,
     deref_mut: Option<hir::Trait>,
     copy: Option<hir::Trait>,
+    partial_eq: Option<hir::Trait>,
+    structural_partial_eq: Option<hir::Trait>,
 }
 
 struct AutoTrait {
@@ -169,7 +171,9 @@ impl StdItems {
                 }
             }
         }
-        StdItems { auto, blankets, deref, deref_mut, copy }
+        let (partial_eq, structural_partial_eq) =
+            (trait_at(&["cmp", "PartialEq"]), trait_at(&["marker", "StructuralPartialEq"]));
+        StdItems { auto, blankets, deref, deref_mut, copy, partial_eq, structural_partial_eq }
     }
 }
 
@@ -188,7 +192,7 @@ fn lookup(db: &RootDatabase, krate: Crate, path: &[&str]) -> Option<ModuleDef> {
 
 struct Builder<'a> {
     db: &'a RootDatabase,
-    places: &'a Places,
+    places: Linking<'a>,
     files: &'a Files,
     std: &'a StdItems,
     by_trait_arg: &'a FxHashMap<hir::Adt, Vec<Impl>>,
@@ -237,6 +241,7 @@ impl Builder<'_> {
             reexports: vec![],
             fields: vec![],
             variants: vec![],
+            aliased: None,
             trait_items: vec![],
             impls: Impls::default(),
             hidden_fields: false,
@@ -278,26 +283,26 @@ impl Builder<'_> {
                 item.notes.is_unsafe = it.is_unsafe_to_call(db, None, span::Edition::CURRENT);
             }
             ModuleDef::Adt(hir::Adt::Struct(it)) => {
-                let (decl, hidden) = sig::struct_decl(db, self.places, it, private);
+                let (decl, hidden) = sig::struct_decl(db, self.places, it, private, None);
                 item.decl = renamed(decl);
                 item.hidden_fields = hidden;
-                item.fields = self.fields(it.fields(db));
+                item.fields = self.fields(it.fields(db), self.places);
                 item.impls = self.adt_impls(hir::Adt::Struct(it));
             }
             ModuleDef::Adt(hir::Adt::Union(it)) => {
-                let (decl, hidden) = sig::union_decl(db, self.places, it, private);
+                let (decl, hidden) = sig::union_decl(db, self.places, it, private, None);
                 item.decl = renamed(decl);
                 item.hidden_fields = hidden;
-                item.fields = self.fields(it.fields(db));
+                item.fields = self.fields(it.fields(db), self.places);
                 item.impls = self.adt_impls(hir::Adt::Union(it));
             }
             ModuleDef::Adt(hir::Adt::Enum(it)) => {
-                item.decl = renamed(sig::enum_decl(db, self.places, it));
+                item.decl = renamed(sig::enum_decl(db, self.places, it, None));
                 item.variants = it
                     .variants(db)
                     .into_iter()
                     .filter(|v| !v.attrs(db).is_doc_hidden())
-                    .map(|v| self.variant(v))
+                    .map(|v| self.variant(v, self.places))
                     .collect();
                 item.impls = self.adt_impls(hir::Adt::Enum(it));
             }
@@ -314,6 +319,34 @@ impl Builder<'_> {
             }
             ModuleDef::TypeAlias(it) => {
                 item.decl = renamed(sig::type_alias(db, self.places, it, FnContext::Free, Kind::TypeAlias));
+                if let Some(alias) = sig::aliased(db, self.places, it) {
+                    let places = self.places.substituting(&alias.subst);
+                    // Another crate's private fields stay private, whatever this crate shows.
+                    let private = private && alias.adt.krate(db) == self.documented().krate;
+                    match alias.adt {
+                        hir::Adt::Struct(adt) => {
+                            let (decl, hidden) = sig::struct_decl(db, self.places, adt, private, Some(&alias));
+                            item.aliased = Some(renamed(decl));
+                            item.hidden_fields = hidden;
+                            item.fields = self.fields(adt.fields(db), places);
+                        }
+                        hir::Adt::Union(adt) => {
+                            let (decl, hidden) = sig::union_decl(db, self.places, adt, private, Some(&alias));
+                            item.aliased = Some(renamed(decl));
+                            item.hidden_fields = hidden;
+                            item.fields = self.fields(adt.fields(db), places);
+                        }
+                        hir::Adt::Enum(adt) => {
+                            item.aliased = Some(renamed(sig::enum_decl(db, self.places, adt, Some(&alias))));
+                            item.variants = adt
+                                .variants(db)
+                                .into_iter()
+                                .filter(|v| !v.attrs(db).is_doc_hidden())
+                                .map(|v| self.variant(v, places))
+                                .collect();
+                        }
+                    }
+                }
             }
             ModuleDef::Const(it) => {
                 item.decl = renamed(sig::constant(db, self.places, it, FnContext::Free, Kind::Constant));
@@ -570,7 +603,7 @@ impl Builder<'_> {
         (span, notes)
     }
 
-    fn fields(&self, fields: Vec<hir::Field>) -> Vec<Member> {
+    fn fields(&self, fields: Vec<hir::Field>, places: Linking<'_>) -> Vec<Member> {
         let db = self.db;
         let private = self.documented().private;
         fields
@@ -579,16 +612,16 @@ impl Builder<'_> {
                 (private || field.visibility(db) == Visibility::Public)
                     && !field.attrs(db).is_doc_hidden()
             })
-            .map(|field| self.field(field))
+            .map(|field| self.field(field, places))
             .collect()
     }
 
-    fn field(&self, field: hir::Field) -> Member {
+    fn field(&self, field: hir::Field, places: Linking<'_>) -> Member {
         let db = self.db;
         let name = field.name(db).as_str().to_owned();
         let mut decl = Code::default();
         decl.push(Piece::Name(name.clone(), Kind::StructField)).text(": ");
-        decl.extend(sig::field_type(db, self.places, field));
+        decl.extend(sig::field_type(db, places, field));
         let node = field.source(db).map(|src| {
             src.map(|it| match it {
                 hir::FieldSource::Named(it) => ast::AnyHasAttrs::new(it),
@@ -638,7 +671,7 @@ impl Builder<'_> {
         out
     }
 
-    fn variant(&self, variant: hir::EnumVariant) -> Member {
+    fn variant(&self, variant: hir::EnumVariant, places: Linking<'_>) -> Member {
         let db = self.db;
         let node = variant.source(db).map(|s| s.map(ast::AnyHasAttrs::new));
         let (source, notes) = self.member_notes(node, variant.attrs(db).is_deprecated());
@@ -647,13 +680,13 @@ impl Builder<'_> {
         let fields: Vec<Member> = fields
             .into_iter()
             .filter(|f| !f.attrs(db).is_doc_hidden())
-            .map(|f| self.field(f))
+            .map(|f| self.field(f, places))
             .filter(|f| named || !f.docs.is_empty())
             .collect();
         Member {
             kind: Kind::Variant,
             name: variant.name(db).as_str().to_owned(),
-            decl: sig::variant(db, self.places, variant),
+            decl: sig::variant(db, places, variant),
             docs: self.doc(variant, None),
             notes,
             source,
@@ -914,6 +947,9 @@ impl Builder<'_> {
                     out.inherent.push(doc);
                 }
             } else {
+                if let Some(doc) = self.structural_partial_eq(imp, adt) {
+                    out.traits.push(doc);
+                }
                 out.traits.push(self.impl_doc(imp, Members::WithProvided));
             }
         }
@@ -922,6 +958,27 @@ impl Builder<'_> {
         out.blanket = self.blanket_impls(adt);
         out.deref = self.deref_methods(adt);
         out
+    }
+
+    /// The `impl StructuralPartialEq` rustc's `#[derive(PartialEq)]` writes beside `imp`, which
+    /// rust-analyzer's expansion leaves out.
+    fn structural_partial_eq(&self, imp: Impl, adt: hir::Adt) -> Option<ImplDoc> {
+        let db = self.db;
+        let (partial_eq, structural) = (self.std.partial_eq?, self.std.structural_partial_eq?);
+        if imp.trait_(db) != Some(partial_eq) || !sig::is_builtin_derive(db, imp) {
+            return None;
+        }
+        let header = sig::derive_header(db, self.places, structural, partial_eq, adt);
+        Some(ImplDoc {
+            anchor: impl_anchor(&header),
+            header,
+            trait_name: Some("StructuralPartialEq".to_owned()),
+            items: vec![],
+            docs: Doc::default(),
+            source: None,
+            negative: false,
+            synthetic: false,
+        })
     }
 
     /// rustdoc's "Methods from Deref<Target = ..>": for a type that derefs, the methods of the
@@ -1377,11 +1434,10 @@ fn small_url_encode(text: &str) -> String {
     out
 }
 
-/// Whether a blanket impl applies to `ty`, as rustdoc decides: each trait bound the impl puts
-/// on its self parameter may hold for some arguments of the type's parameters.
+/// Whether a blanket impl applies to `ty`, as rustdoc decides: with the impl's parameters and
+/// the type's as inference variables, each of the impl's where-clauses may hold.
 fn blanket_applies(db: &RootDatabase, imp: Impl, ty: &hir::Type<'_>) -> bool {
-    let Some(param) = imp.self_ty(db).as_type_param(db) else { return false };
-    param.trait_bounds(db).into_iter().all(|trait_| ty.may_impl_trait(db, trait_))
+    imp.self_ty(db).as_type_param(db).is_some() && ty.may_have_impl(db, imp)
 }
 
 /// The patterns of a `macro_rules!`'s rules, each as written on one line.

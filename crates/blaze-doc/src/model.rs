@@ -238,6 +238,9 @@ pub struct ItemRef {
     pub anchor: Option<String>,
     /// A member: what rustdoc's link titles call it, `method` or `associated function`.
     pub descr: Option<&'static str>,
+    /// The path a link's title names when it is not the page's: where an item of another crate
+    /// is declared, as rustdoc names what the crate linking did not inline.
+    pub declared: Option<String>,
 }
 
 impl ItemRef {
@@ -265,8 +268,11 @@ impl ItemRef {
         path
     }
 
-    /// The path code writes: `serde::de::Deserialize`.
+    /// The path a link's title names: `serde::de::Deserialize`.
     pub fn display_path(&self) -> String {
+        if let Some(declared) = &self.declared {
+            return declared.clone();
+        }
         let mut parts = vec![self.krate.as_str()];
         parts.extend(self.modules.iter().map(String::as_str));
         if !self.name.is_empty() {
@@ -429,8 +435,12 @@ pub struct Item {
     pub children: Vec<usize>,
     /// A module's `pub use` lines that rustdoc does not inline.
     pub reexports: Vec<Reexport>,
+    /// A struct or union's fields, or those of the one a type alias stands for.
     pub fields: Vec<Member>,
+    /// An enum's variants, or those of the one a type alias stands for.
     pub variants: Vec<Member>,
+    /// A type alias of a struct, union or enum: that type's declaration under the alias's name.
+    pub aliased: Option<Code>,
     /// A trait's own items, in declaration order.
     pub trait_items: Vec<Member>,
     pub impls: Impls,

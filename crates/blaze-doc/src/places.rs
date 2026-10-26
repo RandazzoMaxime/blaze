@@ -21,7 +21,7 @@ use hir_def::{
 use ide_db::{RootDatabase, base_db::LangCrateOrigin};
 use rustc_hash::{FxHashMap, FxHashSet};
 
-use crate::model::{ItemRef, Kind, Target};
+use crate::model::{Code, ItemRef, Kind, Target};
 
 /// A crate whose documentation is written.
 #[derive(Debug, Clone)]
@@ -64,6 +64,8 @@ pub(crate) struct Places {
     /// Each crate's placements; `[0]` is its root module.
     pub(crate) placed: Vec<Vec<Placed>>,
     canonical: FxHashMap<ModuleDef, (usize, usize)>,
+    /// Each crate's own page of the items it places, inlined ones of other crates included.
+    own: Vec<FxHashMap<ModuleDef, usize>>,
     /// The path of an item of `std`, `core` or `alloc` on doc.rust-lang.org, found once.
     sysroot: Mutex<FxHashMap<ModuleDef, Option<ItemRef>>>,
 }
@@ -79,7 +81,41 @@ impl Places {
             name: placed.name.clone(),
             anchor: None,
             descr: None,
+            declared: None,
         }
+    }
+
+    /// The places as the pages of crate `krate` link them.
+    pub(crate) fn linking(&self, krate: usize) -> Linking<'_> {
+        Linking { places: self, krate, subst: &[] }
+    }
+}
+
+/// The places as one documented crate's pages link them, as rustdoc's cache of paths does: an
+/// item the crate placed, inlined from another crate or not, on the crate's own page; another
+/// documented crate's item on its page there, titled with the path it is declared at.
+#[derive(Clone, Copy)]
+pub(crate) struct Linking<'a> {
+    places: &'a Places,
+    krate: usize,
+    /// Type parameters code shows as other code: an aliased type's as the alias's arguments.
+    pub(crate) subst: &'a [(hir_def::TypeParamId, Code)],
+}
+
+impl std::ops::Deref for Linking<'_> {
+    type Target = Places;
+    fn deref(&self) -> &Places {
+        self.places
+    }
+}
+
+impl<'a> Linking<'a> {
+    /// The same, with `subst`'s type parameters shown as its code.
+    pub(crate) fn substituting<'b>(&self, subst: &'b [(hir_def::TypeParamId, Code)]) -> Linking<'b>
+    where
+        'a: 'b,
+    {
+        Linking { places: self.places, krate: self.krate, subst }
     }
 
     /// Where the documentation of `def` is, for a link to it: the page in the docs written, or
@@ -164,8 +200,13 @@ impl Places {
     }
 
     pub(crate) fn item_ref(&self, db: &RootDatabase, def: ModuleDef) -> Option<ItemRef> {
+        if let Some(&at) = self.own[self.krate].get(&def) {
+            return Some(self.placed_ref(self.krate, at));
+        }
         if let Some(&(krate, at)) = self.canonical.get(&def) {
-            return Some(self.placed_ref(krate, at));
+            let mut found = self.placed_ref(krate, at);
+            found.declared = declared_path(db, def);
+            return Some(found);
         }
         let krate = krate_of(db, def)?;
         let name = lang_crate_name(db, krate)?;
@@ -186,7 +227,32 @@ pub(crate) fn primitive(name: &str) -> ItemRef {
         name: name.to_owned(),
         anchor: None,
         descr: None,
+        declared: None,
     }
+}
+
+/// `clap_builder::builder::command::Command`: the crate, the modules down to the one declaring
+/// `def` and its name.
+fn declared_path(db: &RootDatabase, def: ModuleDef) -> Option<String> {
+    let mut parts = vec![def.name(db)?.as_str().to_owned()];
+    let mut at = match def {
+        ModuleDef::Macro(it) if is_macro_export(db, it) => Some(it.module(db).krate(db).root_module(db)),
+        _ => def.module(db),
+    };
+    while let Some(module) = at {
+        match module.parent(db) {
+            Some(parent) => {
+                parts.push(module.name(db)?.as_str().to_owned());
+                at = Some(parent);
+            }
+            None => {
+                parts.push(crate::crate_name(db, module.krate(db)));
+                at = None;
+            }
+        }
+    }
+    parts.reverse();
+    Some(parts.join("::"))
 }
 
 /// The name of a crate doc.rust-lang.org documents, as its URLs have it.
@@ -213,7 +279,7 @@ fn sysroot_ref(db: &RootDatabase, def: ModuleDef, krate_name: &str) -> Option<It
         && it.is_crate_root(db)
     {
         let krate = krate_name.to_owned();
-        return Some(ItemRef { krate, modules: vec![], kind, name: String::new(), anchor: None, descr: None });
+        return Some(ItemRef { krate, modules: vec![], kind, name: String::new(), anchor: None, descr: None, declared: None });
     }
     let name = def.name(db)?.as_str().to_owned();
     // The module whose scope declares it; a module's parent for a module.
@@ -261,7 +327,7 @@ fn sysroot_ref(db: &RootDatabase, def: ModuleDef, krate_name: &str) -> Option<It
             at = next;
         }
     }
-    Some(ItemRef { krate: krate_name.to_owned(), modules, kind, name, anchor: None, descr: None })
+    Some(ItemRef { krate: krate_name.to_owned(), modules, kind, name, anchor: None, descr: None, declared: None })
 }
 
 /// The kind of page rustdoc gives an item, or none for an item that has no page of its own.
@@ -316,7 +382,9 @@ pub(crate) fn place(db: &RootDatabase, crates: Vec<Documented>) -> Places {
         })
         .collect();
     let mut canonical: FxHashMap<ModuleDef, ((u8, usize), (usize, usize))> = FxHashMap::default();
+    let mut own: Vec<FxHashMap<ModuleDef, usize>> = vec![];
     for (krate, list) in placed.iter().enumerate() {
+        let mut here: FxHashMap<ModuleDef, ((u8, usize), usize)> = FxHashMap::default();
         for (at, placed) in list.iter().enumerate() {
             let own = krate_of(db, placed.def) == Some(crates[krate].krate);
             let rank = match (own, placed.via.is_none()) {
@@ -333,12 +401,21 @@ pub(crate) fn place(db: &RootDatabase, crates: Vec<Documented>) -> Places {
                     }
                 })
                 .or_insert((key, (krate, at)));
+            here.entry(placed.def)
+                .and_modify(|best| {
+                    if key < best.0 {
+                        *best = (key, at);
+                    }
+                })
+                .or_insert((key, at));
         }
+        own.push(here.into_iter().map(|(def, (_, at))| (def, at)).collect());
     }
     Places {
         crates,
         placed,
         canonical: canonical.into_iter().map(|(def, (_, at))| (def, at)).collect(),
+        own,
         sysroot: Mutex::default(),
     }
 }
@@ -535,7 +612,7 @@ impl<'a> Walker<'a> {
                 } else if foreign {
                     !matches!(def, ModuleDef::Module(m) if m.is_crate_root(db))
                 } else {
-                    !self.reachable_as_declared(def)
+                    !self.reachable_as_declared(def) && !self.through_public_reexport(import)
                 };
                 if inline {
                     if foreign && !local_or_public(db, def) {
@@ -577,6 +654,54 @@ impl<'a> Walker<'a> {
                 }
             }
         }
+    }
+
+    /// Whether a `use` of this crate's item names it through another module's `pub use`, in a
+    /// module documented where it is declared: rustdoc lists such a `use` rather than inline the
+    /// item a second time (`maybe_inline_local`, its `reexport_chain` check).
+    fn through_public_reexport(&self, import: hir_def::item_scope::ImportId) -> bool {
+        use hir_def::Lookup;
+        use syntax::{AstNode, ast};
+        let db = self.db;
+        let loc = import.use_.lookup(db);
+        let tree = hir_def::src::use_tree_to_ast(db, loc.id, import.idx);
+        // `use a::{b::C}`: the leaf's path after those of the trees around it.
+        let mut segments: Vec<String> = vec![];
+        for tree in tree.syntax().ancestors().filter_map(ast::UseTree::cast) {
+            if let Some(path) = tree.path() {
+                let mut outer: Vec<String> = path.segments().map(|it| it.syntax().text().to_string()).collect();
+                outer.append(&mut segments);
+                segments = outer;
+            }
+        }
+        let Some((last, prefix)) = segments.split_last() else { return false };
+        let here: Module = loc.container.into();
+        let mut at = here;
+        for (i, segment) in prefix.iter().enumerate() {
+            let next = match segment.as_str() {
+                "crate" if i == 0 => Some(here.krate(db).root_module(db)),
+                "self" if i == 0 => Some(here),
+                "super" => at.parent(db),
+                name => at.scope(db, None).into_iter().find_map(|(it, def)| match def {
+                    hir::ScopeDef::ModuleDef(ModuleDef::Module(m)) if it.as_str() == name => Some(m),
+                    _ => None,
+                }),
+            };
+            let Some(next) = next else { return false };
+            at = next;
+        }
+        if at == here || at.krate(db) != self.krate || !self.reachable_as_declared(ModuleDef::Module(at)) {
+            return false;
+        }
+        let id: hir_def::ModuleId = at.into();
+        let scope = id.def_map(db).module(db, id).scope(db);
+        let public = hir_def::visibility::Visibility::Public;
+        scope.entries().any(|(name, per_ns)| {
+            name.as_str() == last
+                && (per_ns.types.is_some_and(|it| it.import.is_some() && it.vis == public)
+                    || per_ns.values.is_some_and(|it| it.import.is_some() && it.vis == public)
+                    || per_ns.macros.is_some_and(|it| it.import.is_some() && it.vis == public))
+        })
     }
 
     #[allow(clippy::too_many_arguments)]

@@ -292,7 +292,8 @@ impl<'a> Writer<'a> {
         for reserved in [
             "main-content", "search", "settings", "help", "sidebar", "implementations",
             "trait-implementations", "synthetic-implementations", "blanket-implementations",
-            "fields", "variants", "implementors", "foreign-impls", "required-methods", "provided-methods",
+            "fields", "variants", "aliased-type", "implementors", "foreign-impls", "required-methods",
+            "provided-methods",
             "reexports", "modules", "structs", "enums", "traits", "functions", "macros",
             "constants", "statics", "types", "unions", "derives", "attributes",
         ] {
@@ -468,6 +469,13 @@ impl<'a> Writer<'a> {
             if links.is_empty() {
                 continue;
             }
+            // One link without text: the heading is the link, to a section that lists nothing.
+            if let [(href, text)] = &links[..]
+                && text.is_empty()
+            {
+                let _ = write!(out, "<h3><a href=\"{}\">{}</a></h3>", escape(href), escape(title));
+                continue;
+            }
             let _ = write!(out, "<h3>{}</h3><ul class=\"block\">", escape(title));
             for (href, text) in links {
                 let _ = write!(out, "<li><a href=\"{}\">{}</a></li>", escape(href), escape(text));
@@ -630,6 +638,14 @@ impl<'a> Writer<'a> {
                 out.push_str(&self.impls_sections(item));
             }
             Kind::Trait => out.push_str(&self.trait_body(item)),
+            Kind::TypeAlias => {
+                if let Some(aliased) = &item.aliased {
+                    out.push_str(&self.section_header("aliased-type", "Aliased Type"));
+                    let _ = write!(out, "<pre class=\"rust item-decl\"><code>{}</code></pre>", self.code(aliased, None));
+                    out.push_str(&self.fields_section(item));
+                    out.push_str(&self.variants_section(item));
+                }
+            }
             _ => {}
         }
         out.push_str("</section><section id=\"search\" class=\"content hidden\"></section></div></main></body></html>");
@@ -660,6 +676,11 @@ impl<'a> Writer<'a> {
                 out.push(("Fields".to_owned(), anchors(&item.fields)));
             }
             Kind::Enum => {
+                out.push(("Variants".to_owned(), anchors(&item.variants)));
+            }
+            Kind::TypeAlias if item.aliased.is_some() => {
+                out.push(("Aliased Type".to_owned(), vec![("#aliased-type".to_owned(), String::new())]));
+                out.push(("Fields".to_owned(), anchors(&item.fields)));
                 out.push(("Variants".to_owned(), anchors(&item.variants)));
             }
             Kind::Trait => {

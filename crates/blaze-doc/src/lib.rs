@@ -51,6 +51,9 @@ pub fn crates_to_document(db: &RootDatabase, asked: &[Asked], no_deps: bool) -> 
     if no_deps {
         return out;
     }
+    // Two dependencies sharing a name share a directory too: cargo documents the newest
+    // (`remove_duplicate_doc`), and none that shares a name with a crate asked for.
+    let mut deps: Vec<(String, Crate)> = vec![];
     let mut stack: Vec<Crate> = asked.iter().map(|it| it.krate).collect();
     while let Some(krate) = stack.pop() {
         for dep in krate.dependencies(db) {
@@ -59,13 +62,28 @@ pub fn crates_to_document(db: &RootDatabase, asked: &[Asked], no_deps: bool) -> 
                 continue;
             }
             let name = crate_name(db, dep);
-            if names.insert(name.clone()) {
-                out.push(Documented { krate: dep, name, private: false, warn: false });
+            if !names.contains(&name) {
+                match deps.iter_mut().find(|(it, _)| *it == name) {
+                    Some(kept) if version_key(db, dep) > version_key(db, kept.1) => kept.1 = dep,
+                    Some(_) => {}
+                    None => deps.push((name, dep)),
+                }
             }
             stack.push(dep);
         }
     }
+    out.extend(deps.into_iter().map(|(name, krate)| Documented { krate, name, private: false, warn: false }));
     out
+}
+
+/// A crate's version as semver orders it, near enough: the numbers, then a release above
+/// any of its pre-releases.
+fn version_key(db: &RootDatabase, krate: Crate) -> (Vec<u64>, bool, String) {
+    let version = krate.version(db).unwrap_or_default();
+    let version = version.split('+').next().unwrap_or_default();
+    let (release, pre) = version.split_once('-').unwrap_or((version, ""));
+    let numbers = release.split('.').map(|it| it.parse().unwrap_or(0)).collect();
+    (numbers, pre.is_empty(), pre.to_owned())
 }
 
 /// The name code uses for a crate: its library name, `-` as `_`.
