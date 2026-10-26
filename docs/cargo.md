@@ -308,8 +308,8 @@ stdin closed, the median of 20):
 |---|---|---|
 | a proc-macro server's start, outside | 6.7 ms | 30 ms |
 | the same, in the sandbox | 14.9 ms | 54 ms |
-| a 4-package workspace with `ring`, `cc` and `serde`, cold, outside | 27.3 s | 15.3 s |
-| the same, in the sandbox | 23.4 s | 15.0 s |
+| a 4-package workspace with `ring`, `cc` and `serde`, cold, outside | 27.3 s | 15.4 s |
+| the same, in the sandbox | 23.4 s | 15.7 s |
 | the game's `space-server` (72 build scripts, 6 of them C or toolchain ones), cold, outside | | 441 s |
 | the same, in the sandbox | | 415 s |
 
