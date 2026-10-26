@@ -604,6 +604,10 @@ fn asking(checkout: &Checkout) -> Checkout {
     // edit of every `env!`.
     let wraps = |name: &str| {
         name == wrapper::DRIVEN
+            || name == wrapper::DAEMONS
+            || name == wrapper::DAEMONS_KEY
+            || name == wrapper::STAGED
+            || name == wrapper::EVERY_CRATE
             || name == switch::VARIABLE
             || name == "RA_JIT_STATS"
             || name == "RA_JIT_TRACE"

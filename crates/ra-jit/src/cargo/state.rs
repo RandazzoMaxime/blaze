@@ -471,6 +471,8 @@ pub(crate) struct Daemons {
     pub(crate) plan: Plan,
     /// Where cargo has the executable, which a program may be running from.
     pub(crate) places: Vec<PathBuf>,
+    /// The key of the build the daemon built it for.
+    pub(crate) key: String,
 }
 
 impl Built {
@@ -516,9 +518,15 @@ impl Built {
             cargo.env(switch::VARIABLE, switch::first_wrapper_path()?);
             cargo.env(wrapper::STAGED, std::env::join_paths(&staged.roots)?);
         }
-        if !daemons.is_empty() {
-            let units = daemons.iter().map(|it| &it.unit);
-            cargo.env(wrapper::DAEMONS, std::env::join_paths(units)?);
+        // A unit the wrapper did not say it placed this time is rustc's ([`State::keep`]).
+        for daemon in daemons {
+            let _ = std::fs::remove_file(daemon.unit.join(wrapper::PLACED));
+        }
+        // Units no list can hold are linked by rustc, as they would be without the daemon.
+        if let Some(first) = daemons.first()
+            && let Ok(units) = std::env::join_paths(daemons.iter().map(|it| &it.unit))
+        {
+            cargo.env(wrapper::DAEMONS, units).env(wrapper::DAEMONS_KEY, &first.key);
         }
         cargo.stdout(Stdio::piped());
         let mut cargo = cargo.spawn().context("running cargo")?;
@@ -811,7 +819,7 @@ impl State {
             answers.get(checkout)?.get(at)?.as_ref().ok()?;
             let plan = self.checkouts[checkout].programs[at].clone();
             let places = program.places().map(Path::to_owned).collect();
-            Some(Daemons { unit: program.unit.clone()?, plan, places })
+            Some(Daemons { unit: program.unit.clone()?, plan, places, key: self.key.clone() })
         };
         self.programs.iter().filter_map(built).collect()
     }
@@ -824,6 +832,14 @@ impl State {
             let Some((checkout, at)) = program.asked_as else { continue };
             let kept = daemons.iter().find(|it| program.unit.as_ref() == Some(&it.unit));
             let Some(kept) = kept else { continue };
+            // Only a program the wrapper gave cargo the daemon's executable of is the daemon's:
+            // one rustc linked has the plan cargo's build made of it.
+            let placed = kept.unit.join(wrapper::PLACED);
+            let by_this = std::fs::read_to_string(&placed).is_ok_and(|it| it == self.key);
+            let _ = std::fs::remove_file(&placed);
+            if !by_this {
+                continue;
+            }
             let checkout = &mut self.checkouts[checkout];
             checkout.programs[at] = kept.plan.clone();
             checkout.kept = true;

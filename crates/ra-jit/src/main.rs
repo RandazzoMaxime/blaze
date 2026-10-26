@@ -8378,7 +8378,13 @@ fn run_holding(
                             && lock(&as_built)
                                 .get(&target.out)
                                 .is_some_and(|it| it.still(&files, &db, view, target, request));
-                        if unchanged && !reach_owed(&target.out) {
+                        // Nor is it unchanged when rustc linked the program again since.
+                        let relinked = programs.iter().any(|it| {
+                            target.is(&it.args)
+                                && !target.symbol_files.is_empty()
+                                && target.symbol_files != it.args.symbol_files
+                        });
+                        if unchanged && !relinked && !reach_owed(&target.out) {
                             let _ = writeln!(&stream, "ok unchanged");
                             continue;
                         }
@@ -9470,6 +9476,8 @@ impl Program {
                 self.distrust_rustc(db, files, None);
                 self.unbuilt.named_anew = true;
                 self.args.widened.clear();
+                // The tests listed were of the program rustc linked before.
+                (self.tests, self.tests_now) = (None, None);
             }
             None => {
                 self.known.start_again();

@@ -45,6 +45,14 @@ pub(crate) const STAGED: &str = "RA_JIT_STAGED_CRATES";
 /// build them ([`super::state::Daemons`]).
 pub(crate) const DAEMONS: &str = "RA_JIT_DAEMONS_BUILT";
 
+/// The key of the build whose daemon built the programs of [`DAEMONS`]: the wrapper asks that
+/// build's daemon only, never another build that shares the unit.
+pub(crate) const DAEMONS_KEY: &str = "RA_JIT_DAEMONS_KEY";
+
+/// The file in a unit's record directory that says the wrapper gave cargo the daemon's
+/// executable of it, by the key of the build it did that for ([`DAEMONS_KEY`]).
+pub(crate) const PLACED: &str = "daemons.placed";
+
 /// The variable that says cargo runs every crate's rustc through this wrapper, and the
 /// workspace's through it twice.
 pub(crate) const EVERY_CRATE: &str = "RA_JIT_EVERY_CRATE";
@@ -129,10 +137,14 @@ pub(crate) fn command(mut args: impl Iterator<Item = OsString>) -> anyhow::Resul
     }
     // A program the daemon built while cargo builds another is the daemon's as under plain
     // cargo: asked for now, it is the source as rustc reads it.
-    let daemons = unit.linked && daemons_built(&dir);
-    let known = if plain || daemons { State::of_unit(&dir) } else { Vec::new() };
+    let daemons = if unit.linked { daemons_built(&dir) } else { None };
+    let known = match &daemons {
+        Some(key) => vec![key.clone()],
+        None if plain => State::of_unit(&dir),
+        None => Vec::new(),
+    };
     if !known.is_empty() {
-        match unit.by_daemon(&dir, &known, &rustc) {
+        match unit.by_daemon(&dir, &known, &rustc, daemons.is_some()) {
             Ok(()) => {
                 if plain {
                     tally("daemon", &unit.crate_name);
@@ -389,7 +401,15 @@ impl Unit {
     /// Has the daemon build the program and puts it where rustc would have, with the
     /// dep-info rustc would have written. `known` are the builds that have the program, and
     /// `dir` is where the unit is recorded. `Err` is why the program is rustc's to link.
-    fn by_daemon(&self, dir: &Path, known: &[String], rustc: &OsString) -> Result<(), String> {
+    /// `only` is that `known` is the one build of a `cargo ra-jit` that has cargo build
+    /// another program ([`DAEMONS`]): what the other builds kept is theirs to keep.
+    fn by_daemon(
+        &self,
+        dir: &Path,
+        known: &[String],
+        rustc: &OsString,
+        only: bool,
+    ) -> Result<(), String> {
         let mut read = known.iter().map(|key| State::read(key).map_err(|why| (key, why)));
         let mut state = match read.find_map(Result::ok) {
             Some(state) => state,
@@ -423,8 +443,14 @@ impl Unit {
         let binary = &checkout.programs[at].binary;
         self.put(binary, read)?;
         state.cargo_has(dir, binary).map_err(|it| format!("keeping {}: {it}", binary.display()))?;
-        // Every other build with the program kept the one cargo had before.
-        State::forget(known.iter().filter(|it| **it != state.key));
+        if only {
+            // The build that ran cargo keeps the daemon's plan of the program on this alone.
+            std::fs::write(dir.join(PLACED), &state.key)
+                .map_err(|it| format!("saying {} was placed: {it}", binary.display()))?;
+        } else {
+            // Every other build with the program kept the one cargo had before.
+            State::forget(known.iter().filter(|it| **it != state.key));
+        }
         Ok(())
     }
 
@@ -690,9 +716,10 @@ impl Unit {
     }
 }
 
-/// Whether the program whose unit is recorded in `dir` is one the daemon built, which the
-/// cargo running this is to be given rather than have rustc link it ([`DAEMONS`]).
-fn daemons_built(dir: &Path) -> bool {
-    let listed = std::env::var_os(DAEMONS).unwrap_or_default();
-    std::env::split_paths(&listed).any(|unit| unit == dir)
+/// The key of the build whose daemon built the program whose unit is recorded in `dir`, when
+/// the cargo running this is to be given that rather than have rustc link it ([`DAEMONS`]).
+fn daemons_built(dir: &Path) -> Option<String> {
+    let listed = std::env::var_os(DAEMONS)?;
+    let key = std::env::var(DAEMONS_KEY).ok()?;
+    std::env::split_paths(&listed).any(|unit| unit == dir).then_some(key)
 }
