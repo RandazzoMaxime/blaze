@@ -211,6 +211,29 @@ fn around(dir: &Path) -> Option<String> {
     Some(format!("`{outer}` stays cargo's `{OUTER_KEY}`: it runs ra-jit's wrapper as it ran rustc"))
 }
 
+/// The variable `cargo ra-jit` names the workspace's own `rustc-workspace-wrapper` in, for
+/// ra-jit's wrapper to run rustc through: the one it puts in that wrapper's place.
+pub(crate) const CHAINED: &str = "RA_JIT_CHAINED_WRAPPER";
+
+/// The `rustc-workspace-wrapper` a configuration file of the project in `dir` names, which
+/// `cargo ra-jit` overrides with its own, as cargo would run it: a path with a separator is
+/// relative to the directory that holds `.cargo`, a bare name is looked up in `PATH`.
+pub(crate) fn project_wrapper(dir: &Path) -> Option<std::ffi::OsString> {
+    let home = home_configs();
+    let configs = dir.ancestors().flat_map(|it| CONFIGS.map(|name| it.join(name)));
+    let (config, named) = configs
+        .filter(|it| !home.contains(it))
+        .find_map(|it| wrapper_in(&it).map(|named| (it, named)))?;
+    if is_wrapper(Path::new(&named)) {
+        return None;
+    }
+    if !named.contains('/') && !named.contains(std::path::MAIN_SEPARATOR) {
+        return Some(named.into());
+    }
+    let root = config.parent()?.parent()?;
+    Some(root.join(named).into_os_string())
+}
+
 /// Whether the user has cargo run every rustc through a wrapper of their own in `dir`.
 pub(crate) fn user_wraps(dir: &Path) -> bool {
     let set = std::env::var_os("CARGO_BUILD_RUSTC_WRAPPER").is_some_and(|it| !it.is_empty());
@@ -414,5 +437,23 @@ mod tests {
                 .unwrap()
                 .ends_with("[build]\nrustc-workspace-wrapper = \"/opt/ra-jit/ra-jit-rustc\"\n")
         );
+    }
+
+    #[test]
+    fn the_project_wrapper_is_relative_to_the_directory_above_its_config() {
+        let root = std::env::temp_dir().join(format!("ra-jit-wrapper-{}", std::process::id()));
+        let inner = root.join("crates").join("a");
+        std::fs::create_dir_all(root.join(".cargo")).unwrap();
+        std::fs::create_dir_all(&inner).unwrap();
+        let config = root.join(".cargo").join("config.toml");
+        let write = |text: &str| std::fs::write(&config, text).unwrap();
+        write("[build]\nrustc-workspace-wrapper = \"scripts/frontend\"\n");
+        let relative = Some(root.join("scripts/frontend").into_os_string());
+        assert_eq!(super::project_wrapper(&inner), relative);
+        write("[build]\nrustc-workspace-wrapper = \"frontend\"\n");
+        assert_eq!(super::project_wrapper(&inner), Some("frontend".into()));
+        write("[build]\njobs = 4\n");
+        assert_eq!(super::project_wrapper(&inner), None);
+        std::fs::remove_dir_all(&root).unwrap();
     }
 }
