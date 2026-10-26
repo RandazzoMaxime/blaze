@@ -9,6 +9,16 @@ How to build, test and change ra-jit, including the vendored rust-analyzer, is
   rustc, rustdoc or a cargo that runs them, and there is no "fall back to cargo" path. Each place
   that still does is a bug with a `no-rustc` issue, to be removed, never extended or added to:
   [docs/no-rustc.md](docs/no-rustc.md).
+- **No fallback, ever. Fail fast with a clear error.** "No fallback EVER, no rustc, prefer
+  quick error so bug can be fixed" (Andrew, 2026-10-26). When ra-jit can't do something
+  (an unsupported construct, a refused patch, a missing TypeId, a static it can't place), it
+  stops with an error that names what and where, at the point it is first seen. It never
+  quietly takes another path: not cargo or rustc, not rustc's copy of a function or static, not
+  a whole build instead of a patch to hide a refusal, not a slower backend or an older cached
+  result. A silent fallback hides the bug and turns it into wrong output (#386, #392); an error
+  gets it fixed. New code adds no fallback. A change that touches an existing one turns it into
+  an error in the same change, and where that would break a harness, it fixes the bug behind it
+  instead.
 - **Own the whole stack, and stay a superset of Rust.** ra-jit moves step by step toward
   owning every layer from source to running code (front end, std, codegen, linking, loading),
   because owning it is what makes it fast. It never gets there by narrowing what it accepts:
@@ -16,18 +26,23 @@ How to build, test and change ra-jit, including the vendored rust-analyzer, is
   build and behave the same under ra-jit, with the real std, C dependencies, build scripts and
   proc macros. What ra-jit adds, such as live edits and
   tiers, comes on top. The one allowed difference is sandboxing: build scripts and proc macros
-  run sandboxed ([#147](https://github.com/indexable-inc/blaze/issues/147)). One that needs
+  run sandboxed ([#147](https://github.com/indexable-inc/blaze/issues/147), done by default
+  since 2026-10-26). One that needs
   more than the sandbox allows is the only exception, and is made to work rather than refused
   where possible: [docs/no-rustc.md](docs/no-rustc.md).
-- **Every test runs in a sandbox, by default, on every platform.** "Everything should by
-  default be in sandbox and yea it should have sandbox support macos" (Andrew, 2026-10-26).
-  `cargo ra-jit test` runs each test executable in one sandbox (Linux namespaces and seccomp,
-  macOS Seatbelt and the interposer) under `all` and `affected` alike. Where none can be made
-  it stops, rather than run outside; the only ways out are a package's
-  `[package.metadata.blaze.sandbox]` (`tests = false`, `unsandboxed-tests`) and
-  `RA_JIT_SANDBOX=off`, never a silent fallback. Nothing new that runs user code (tests, build
-  scripts, proc macros) runs outside it by default:
-  [docs/cargo.md](docs/cargo.md#every-test-runs-in-a-sandbox).
+- **Every test, build script and proc macro runs in a sandbox, by default, on every
+  platform.** "Everything should by default be in sandbox and yea it should have sandbox
+  support macos" (Andrew, 2026-10-26). `cargo ra-jit test` runs each test executable in one
+  sandbox (Linux namespaces and seccomp, macOS Seatbelt and the interposer) under `all` and
+  `affected` alike; every build script, cargo's runs and the daemon's, runs in the same one
+  through `cargo/script_sandbox.rs` (writing only its `OUT_DIR`), and every proc-macro server
+  is started in it (`macro_sandbox.rs`). Where none can be made it stops, rather than run
+  outside; the only ways out are a package's `[package.metadata.blaze.sandbox]` (`tests =
+  false`, `unsandboxed-tests`, `build-script = false`), the root manifest's
+  `[workspace.metadata.blaze.sandbox]` (`unsandboxed-build-scripts`,
+  `unsandboxed-proc-macros`) and `RA_JIT_SANDBOX=off`, never a silent fallback. Nothing new
+  that runs user code runs outside it by default:
+  [docs/cargo.md](docs/cargo.md#build-scripts-and-proc-macros-run-in-a-sandbox).
 - **Pick the best long-term design, not the least work.** Agents write most of ra-jit, so the
   amount of code a design takes is not what limits it: own the layer, rewrite it or port
   rustc's rule properly, rather than do the least work or what a small team could maintain.

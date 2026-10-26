@@ -158,6 +158,9 @@ pub enum CodegenError {
     /// rustc built the function under a symbol private to its object, so its copy stays the
     /// one that code of that object calls, and goes on using rustc's statics.
     Private,
+    /// What ra-jit can't do and no other path may stand in for: the build stops with this
+    /// error, naming what and where. Never left to rustc, never a build in full instead.
+    Refused(String),
 }
 
 impl CodegenError {
@@ -176,6 +179,7 @@ impl fmt::Display for CodegenError {
             CodegenError::NoSymbol | CodegenError::Private => {
                 write!(f, "unsupported: no rustc symbol for function")
             }
+            CodegenError::Refused(it) => write!(f, "{it}"),
         }
     }
 }
@@ -185,6 +189,13 @@ type Result<T> = std::result::Result<T, CodegenError>;
 macro_rules! unsupported {
     ($($arg:tt)*) => {
         return Err(CodegenError::Unsupported(format!($($arg)*)))
+    };
+}
+
+/// Stops the build with an error ([`CodegenError::Refused`]).
+macro_rules! refused {
+    ($($arg:tt)*) => {
+        return Err(CodegenError::Refused(format!($($arg)*)))
     };
 }
 
@@ -768,6 +779,7 @@ impl CodegenUnit {
                 let why = match patch {
                     Ok(Ok(patch)) => break Some(patch),
                     Ok(Err(why)) => Some(why),
+                    Err(e @ CodegenError::Refused(_)) => return Err(e),
                     Err(_) => None,
                 };
                 // Code compiled at a higher level that a patch can't hold goes, not the
@@ -975,6 +987,10 @@ impl CodegenUnit {
                         };
                         match result {
                             Ok(symbol) => compiled.push((root, symbol)),
+                            Err(e @ CodegenError::Refused(_)) => {
+                                cg.refused.get_or_insert(e);
+                                break;
+                            }
                             Err(e) => {
                                 // rustc's copy calls what ours would have, when it has one.
                                 if !on_demand.is_empty()
@@ -982,8 +998,7 @@ impl CodegenUnit {
                                     && !cg.own_statics.unbuilt.contains(&root.krate(db))
                                 {
                                     let unseen = cg.want_reachable_from(root);
-                                    let rest = roots.on_demand.iter();
-                                    cg.wanted.extend(rest.filter(|it| unseen.calls(it.krate(db))));
+                                    cg.want_all_called(&unseen);
                                 }
                                 skipped.push((root, e));
                             }
@@ -1000,11 +1015,14 @@ impl CodegenUnit {
                     failed.extend(cg.define_waves(ahead));
                 });
                 queue.extend(cg.wanted.drain(..).filter(|&func| queued.insert(func)));
-                if next == queue.len() {
+                if next == queue.len() || cg.refused.is_some() {
                     break;
                 }
             }
             cg.make_later();
+            if let Some(refused) = cg.refused.take() {
+                return Err(refused);
+            }
             if cg.misfit {
                 start_over("an entry of the store did not fit");
                 rejected.extend(failed);
@@ -2151,6 +2169,11 @@ struct ObjectCodegen<'a, 'db> {
     on_demand: &'a FxHashSet<FunctionId>,
     wanted: Vec<FunctionId>,
     on_demand_crates: FxHashSet<Crate>,
+    /// [`Self::on_demand`] by crate, made when first asked for, and the crates all of whose
+    /// functions are wanted already: once queued, a function is not queued again, so a crate
+    /// is gone through once, not once per static or root that may call into it.
+    on_demand_by_crate: Option<FxHashMap<Crate, Vec<FunctionId>>>,
+    crates_wanted: FxHashSet<Crate>,
     /// Instances that failed in an earlier round, with the reason.
     rejected: &'a FxHashMap<Instance, Rejected>,
     /// Size and alignment of every type laid out, collected when `RA_JIT_LAYOUTS` names a file
@@ -2208,6 +2231,8 @@ struct ObjectCodegen<'a, 'db> {
     type_ids: FxHashMap<FuncId, u128>,
     /// An entry did not fit the object, which now lacks a function it declares.
     misfit: bool,
+    /// What stops the build ([`CodegenError::Refused`]), found by a thread that can't return it.
+    refused: Option<CodegenError>,
     /// The functions of a patch that are at a level above 1, whose code it has at that level.
     tiers: Option<&'a tier::Tiers>,
     /// What each function built from an entry of the store is an instance of.
@@ -5018,6 +5043,8 @@ impl<'a, 'db> ObjectCodegen<'a, 'db> {
             on_demand,
             wanted: Vec::new(),
             on_demand_crates: on_demand.iter().map(|func| func.krate(db)).collect(),
+            on_demand_by_crate: None,
+            crates_wanted: FxHashSet::default(),
             rejected,
             layouts: FxHashMap::default(),
             phases: Phases::default(),
@@ -5066,6 +5093,7 @@ impl<'a, 'db> ObjectCodegen<'a, 'db> {
             type_id_shims: FxHashMap::default(),
             type_ids: FxHashMap::default(),
             misfit: false,
+            refused: None,
             own_statics,
             mixed,
             elf_relocs: Vec::new(),
@@ -5142,6 +5170,27 @@ impl<'a, 'db> ObjectCodegen<'a, 'db> {
     fn want(&mut self, func: FunctionId) {
         if self.on_demand.contains(&func) {
             self.wanted.push(func);
+        }
+    }
+
+    /// Wants every function compiled on demand of the crates that code nothing walked may
+    /// call. Each crate's are wanted once: this was a walk of all of them for every static
+    /// rustc's code has, which made the build in full of a large program wait on one thread
+    /// (#259).
+    fn want_all_called(&mut self, unseen: &Unseen) {
+        let db = self.db;
+        let on_demand = self.on_demand;
+        let by_crate = self.on_demand_by_crate.get_or_insert_with(|| {
+            let mut by_crate: FxHashMap<Crate, Vec<FunctionId>> = FxHashMap::default();
+            for &func in on_demand {
+                by_crate.entry(func.krate(db)).or_default().push(func);
+            }
+            by_crate
+        });
+        for (&krate, funcs) in by_crate.iter() {
+            if unseen.calls(krate) && self.crates_wanted.insert(krate) {
+                self.wanted.extend_from_slice(funcs);
+            }
         }
     }
 
@@ -5520,7 +5569,9 @@ impl<'a, 'db> ObjectCodegen<'a, 'db> {
             for (instance, env, id) in wave {
                 let defined = self.define_instance(&instance, &env, id);
                 if let Err(e) = defined {
-                    if self.forward_to_rustc(&instance, id).is_some() {
+                    if let CodegenError::Refused(_) = e {
+                        self.refused.get_or_insert(e);
+                    } else if self.forward_to_rustc(&instance, id).is_some() {
                         self.forwarded.insert(instance);
                     } else {
                         failed.push((instance, Rejected { env, why: e.to_string() }));
@@ -6200,10 +6251,11 @@ impl<'a, 'db> ObjectCodegen<'a, 'db> {
         let code = entry.code.code();
         let relocs: Vec<_> = code.relocs.iter().map(|it| ids.reloc(it, id)).collect();
         self.define_code(id, &code, &relocs)?;
-        if let (Some(debug), Some(of)) = (&self.debug, &entry.debug) {
+        if let (Some(debug), Some(of), Some(entries)) = (&self.debug, &entry.debug, &self.entries) {
             let len = code.bytes.len() as u32;
+            let entries = entries.clone();
             backend::Tally::global()
-                .step(Step::Describe, || debug.add_function(id, len, of.clone()));
+                .step(Step::Describe, || debug.add_stored(id, len, of.clone(), entries));
         }
         self.bodies += 1;
         self.kept.found += 1;
@@ -6540,9 +6592,10 @@ impl<'a, 'db> ObjectCodegen<'a, 'db> {
             if let Some(why) = why {
                 if stateful() && self.symbols.linked(found) {
                     let name = StaticSignature::of(db, id).name.as_str();
-                    unsupported!(
-                        "static `{name}` with state, whose copy in rustc's code (`{found}`) {why}: \
-                         a copy of ours would split the state"
+                    let krate = fncache::crate_name(db, id.krate(db));
+                    refused!(
+                        "static `{name}` of crate `{krate}` with state, whose copy in rustc's code (`{found}`) \
+                         {why}: a copy of ours would split the state"
                     );
                 }
                 symbol = None;
@@ -6585,8 +6638,7 @@ impl<'a, 'db> ObjectCodegen<'a, 'db> {
                 && let Ok(compiled) = compiled_static(db, id).as_ref()
             {
                 let unseen = self.want_requested(&compiled.requests);
-                let rest = self.on_demand.iter().filter(|it| unseen.calls(it.krate(db)));
-                self.wanted.extend(rest);
+                self.want_all_called(&unseen);
             }
             return Ok(data);
         }

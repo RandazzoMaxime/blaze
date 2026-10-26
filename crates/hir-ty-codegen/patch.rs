@@ -2691,8 +2691,10 @@ impl Base {
             cg.pending.push((instance, env, id));
         }
         for &id in &changed_statics {
-            if cg.static_data(id).is_err() {
-                return Ok(Err("a static of the base no longer has a value"));
+            match cg.static_data(id) {
+                Ok(_) => {}
+                Err(e @ CodegenError::Refused(_)) => return Err(e),
+                Err(_) => return Ok(Err("a static of the base no longer has a value")),
             }
         }
         // rustc's callers of one that hands out a value of a type only its body names go on
@@ -2717,11 +2719,16 @@ impl Base {
                     // rustc's has none to be put in the object under: what calls it has a
                     // copy of its own.
                     Err(e) if e.no_symbol() && added.contains(&root) => {}
+                    Err(e @ CodegenError::Refused(_)) => return Err(e),
                     Err(_) => return Ok(Err("a root can't be compiled")),
                 }
                 queue.extend(cg.wanted.drain(..).filter(|&func| queued.insert(func)));
             }
-            if !cg.define_instances().is_empty() {
+            let failed = cg.define_instances();
+            if let Some(refused) = cg.refused.take() {
+                return Err(refused);
+            }
+            if !failed.is_empty() {
                 return Ok(Err("an instance can't be compiled"));
             }
             queue.extend(cg.wanted.drain(..).filter(|&func| queued.insert(func)));
