@@ -161,7 +161,7 @@ fn is_call(cx: &Cx<'_, '_, '_>, expr: &ast::Expr) -> bool {
             let Some(call) = mac.macro_call() else { return false };
             let Some(expanded) = cx.sema().expand_macro_call(&call) else { return false };
             let root = expanded.value;
-            let expr = root.children().find_map(ast::Expr::cast).or_else(|| ast::Expr::cast(root.clone()));
+            let expr = ast::Expr::cast(root.clone()).or_else(|| root.children().find_map(ast::Expr::cast));
             expr.is_some_and(|it| is_call(cx, &peel_parens(&it)))
         }
         _ => false,

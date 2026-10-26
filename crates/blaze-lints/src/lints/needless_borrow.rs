@@ -5,8 +5,8 @@
 //! rust-lang/rust 12433c307b5a497388ffe2f4e49dbf1ab8c71fa0 (MIT or Apache-2.0), for a borrow
 //! used as a call's or method's argument, a field's value, a `let`'s initializer or what a
 //! `return` gives. Not ported: borrows that are a receiver, a callee or have a field read
-//! (where clippy asks whether auto-borrow would pick the same method), chains of `&` and `*`,
-//! and mutable reborrows. A `ref` binding to a reference whose every use the compiler
+//! (where clippy asks whether auto-borrow would pick the same method) and chains of `&` and
+//! `*`. A `ref` binding to a reference whose every use the compiler
 //! dereferences is linted too, as clippy's `check_pat` does.
 
 use hir::{Adjust, AutoBorrow, Mutability};
@@ -64,10 +64,11 @@ pub(super) fn check(cx: &mut Cx<'_, '_, '_>, expr: &ast::Expr) {
             None => break None,
         }
     };
-    if next.is_some_and(|it| matches!(it.kind, Adjust::Borrow(AutoBorrow::Ref(Mutability::Mut)))) {
-        return;
-    }
-    if deref_count < 2 {
+    // A mutable reborrow the compiler does not insert by itself keeps one more reference, so
+    // that the borrow is not moved.
+    let reborrows_mut = next.is_some_and(|it| matches!(it.kind, Adjust::Borrow(AutoBorrow::Ref(Mutability::Mut))));
+    let required = if reborrows_mut && !reborrow_stable(cx, &used, &parent) { 3 } else { 2 };
+    if deref_count < required {
         return;
     }
     // `&*p` of a raw pointer stays, as rustc's `dangerous_implicit_autorefs` wants it.
@@ -95,6 +96,42 @@ pub(super) fn check(cx: &mut Cx<'_, '_, '_>, expr: &ast::Expr) {
         "this expression creates a reference which is immediately dereferenced by the compiler",
     )
     .suggestion(span, "change this to", sugg, Applicability::MachineApplicable);
+}
+
+/// clippy's `TyCoercionStability::is_reborrow_stable` for where the borrow is used: whether
+/// the type declared there is a reference, which the compiler reborrows into by itself.
+fn reborrow_stable(cx: &Cx<'_, '_, '_>, used: &SyntaxNode, parent: &SyntaxNode) -> bool {
+    let db = cx.db();
+    if let Some(args) = ast::ArgList::cast(parent.clone()) {
+        let Some(index) = args.args().position(|it| it.syntax() == used) else { return false };
+        let declared = match args.syntax().parent().and_then(ast::Expr::cast) {
+            Some(ast::Expr::MethodCallExpr(call)) => {
+                cx.sema().resolve_method_call(&call).and_then(|it| it.params_without_self(db).into_iter().nth(index)).map(|it| it.ty().clone())
+            }
+            Some(ast::Expr::CallExpr(call)) => {
+                let Some(callable) = call.expr().and_then(|it| cx.sema().resolve_expr_as_callable(&it)) else { return false };
+                match callable.kind() {
+                    hir::CallableKind::Function(function) => {
+                        function.params_without_self(db).into_iter().nth(index).map(|it| it.ty().clone())
+                    }
+                    _ => callable.params().into_iter().nth(index).map(|it| it.ty().clone()),
+                }
+            }
+            _ => None,
+        };
+        return declared.is_some_and(|it| it.is_reference());
+    }
+    if let Some(field) = ast::RecordExprField::cast(parent.clone()) {
+        return cx.sema().resolve_record_field(&field).is_some_and(|(field, ..)| field.ty(db).is_reference());
+    }
+    if let Some(stmt) = ast::LetStmt::cast(parent.clone()) {
+        return matches!(stmt.ty(), Some(ast::Type::RefType(_)));
+    }
+    if ast::ReturnExpr::can_cast(parent.kind()) {
+        let function = parent.ancestors().find_map(ast::Fn::cast);
+        return function.and_then(|it| cx.sema().to_def(&it)).is_some_and(|it| it.ret_type(db).is_reference());
+    }
+    false
 }
 
 /// clippy's `try_parse_ref_op`: a borrow or a dereference.

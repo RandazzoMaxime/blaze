@@ -255,3 +255,108 @@ fn f(s: &str, n: i32, m: &mut i32) {{
 
     "#]].assert_eq(&lint(&fixture, ""));
 }
+
+#[test]
+fn map_clone() {
+    let fixture = format!(
+        r#"
+//- minicore: iterators, clone, copy, builtin_impls
+//- /src/lib.rs crate:main deps:std
+struct I<'a>(&'a u8);
+impl<'a> Iterator for I<'a> {{
+    type Item = &'a u8;
+    fn next(&mut self) -> Option<&'a u8> {{
+        None
+    }}
+}}
+fn f(a: I<'_>, b: I<'_>, c: I<'_>) {{
+    let _ = a.map(|x| *x);
+    let _ = b.map(|&x| x);
+    let _ = c.map(|x| x.clone());
+}}
+{STD}"#
+    );
+    expect_test::expect![[r#""#]].assert_eq(&lint(&fixture, ""));
+}
+
+#[test]
+fn match_like_matches_macro() {
+    let fixture = format!(
+        r#"
+//- minicore: option, copy, builtin_impls
+//- /src/lib.rs crate:main deps:std
+fn f(x: Option<u8>) -> (bool, bool, bool) {{
+    let a = match x {{
+        Some(0) => true,
+        _ => false,
+    }};
+    let b = if let Some(1) = x {{ false }} else {{ true }};
+    let c = match x {{
+        Some(_) => true,
+        _ => false,
+    }};
+    (a, b, c)
+}}
+{STD}"#
+    );
+    expect_test::expect![[r#""#]].assert_eq(&lint(&fixture, ""));
+}
+
+#[test]
+fn needless_borrow_of_a_ref_pattern() {
+    let fixture = format!(
+        r#"
+//- minicore: option, copy, builtin_impls, deref
+//- /src/lib.rs crate:main deps:std
+fn f(x: Option<&u8>) -> u8 {{
+    match x {{
+        Some(ref y) => **y,
+        None => 0,
+    }}
+}}
+fn g(x: Option<&u8>) -> Option<&&u8> {{
+    match x {{
+        Some(ref y) => Some(y),
+        None => None,
+    }}
+}}
+{STD}"#
+    );
+    expect_test::expect![[r#""#]].assert_eq(&lint(&fixture, ""));
+}
+
+#[test]
+fn new_without_default() {
+    let fixture = format!(
+        r#"
+//- minicore: default
+//- /src/lib.rs crate:main deps:std
+pub struct Foo;
+impl Foo {{
+    /// Makes one.
+    pub fn new() -> Self {{
+        Foo
+    }}
+}}
+{STD}"#
+    );
+    expect_test::expect![[r#""#]].assert_eq(&lint(&fixture, ""));
+}
+
+#[test]
+fn needless_return() {
+    let fixture = format!(
+        r#"
+//- minicore: copy, builtin_impls
+//- /src/lib.rs crate:main deps:std
+fn f(x: bool) -> u8 {{
+    if x {{
+        return 1;
+    }} else {{
+        return 2;
+    }}
+}}
+{STD}"#
+    );
+    expect_test::expect![[r#""#]].assert_eq(&lint(&fixture, ""));
+}
