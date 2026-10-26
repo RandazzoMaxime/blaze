@@ -24,7 +24,7 @@ import concurrent.futures, json, os, shutil, subprocess, sys, tempfile, tomllib
 import resolve_graph as rg
 
 CLASSES = rg.CLASSES
-RUSTC = os.environ.get("RUSTC_ORACLE", "rustc +1.99.0").split()
+RUSTC = os.environ.get("RUSTC_ORACLE", f"rustc +{rg.PIN}").split()
 
 
 def build_blaze():

@@ -22,7 +22,8 @@ import concurrent.futures, glob, json, os, shutil, subprocess, sys, tarfile, tem
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
-CARGO = os.environ.get("CARGO_ORACLE", "cargo +1.99.0").split()
+PIN = open(os.path.join(HERE, "toolchain")).read().strip()
+CARGO = os.environ.get("CARGO_ORACLE", f"cargo +{PIN}").split()
 USER_AGENT = "blaze resolve_graph.py (https://github.com/indexable-inc/blaze)"
 PARTS = ["bench", "crates", "workspaces"]
 CLASSES = ["equal", "different", "blaze-failed", "cargo-failed"]
