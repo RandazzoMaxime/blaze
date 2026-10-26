@@ -1,27 +1,27 @@
 {
-  "toolchain": "1.99.0",
+  "toolchain": "nightly-2026-10-25",
   "release": "https://github.com/indexable-inc/blaze/releases/download/pgo-profiles",
   "targets": {
     "aarch64-apple-darwin": {
-      "name": "ra-jit-1.99.0-aarch64-apple-darwin-352f36c9a68ad383.profdata",
-      "sha256": "352f36c9a68ad3838cd83e5e141329fe8c9caa0f5c432321fee996f2efe42604",
-      "commit": "3c5d114e92522947e9b0af6a92f519ec3e797d0a",
-      "count": 288267286377,
-      "crate": "75gNKfKzUWi"
+      "name": "ra-jit-nightly-2026-10-25-aarch64-apple-darwin-2d827d7e4b7a0bfe.profdata",
+      "sha256": "2d827d7e4b7a0bfeff6a3bc58253721648a691fdd95a43405c3047dd79d8d590",
+      "commit": "838fd9817de926e46be0da5d5123838c0bc892a5",
+      "count": 300905189283,
+      "crate": "ihgnqXTwNXO"
     },
     "aarch64-unknown-linux-gnu": {
-      "name": "ra-jit-1.99.0-aarch64-unknown-linux-gnu-67c65d8a59d3b1c2.profdata",
-      "sha256": "67c65d8a59d3b1c24e17455c58a7645791808dcb56cdb8e6f0fcba6c86526734",
-      "commit": "3c5d114e92522947e9b0af6a92f519ec3e797d0a",
-      "count": 187041696539,
-      "crate": "43G5dx78h2Z"
+      "name": "ra-jit-nightly-2026-10-25-aarch64-unknown-linux-gnu-3ffc37f2e94c273c.profdata",
+      "sha256": "3ffc37f2e94c273c6c18fd7fb7cae975b15c0543952afd7e4d1322c70f8bf3b6",
+      "commit": "838fd9817de926e46be0da5d5123838c0bc892a5",
+      "count": 192799413217,
+      "crate": "fC5PjNRfh45"
     },
     "x86_64-unknown-linux-gnu": {
-      "name": "ra-jit-1.99.0-x86_64-unknown-linux-gnu-a6cbe32d3ecdc5bf.profdata",
-      "sha256": "a6cbe32d3ecdc5bff2edf1d623fd110222a376e47d187d3f79cc557742293ddd",
-      "commit": "3c5d114e92522947e9b0af6a92f519ec3e797d0a",
-      "count": 187087244836,
-      "crate": "ddCAOrA9IHT"
+      "name": "ra-jit-nightly-2026-10-25-x86_64-unknown-linux-gnu-0aa4573be85157c5.profdata",
+      "sha256": "0aa4573be85157c5583d3f4177b7f9cee75ea1e3f7f8f9eaac3be8e62ab743c3",
+      "commit": "838fd9817de926e46be0da5d5123838c0bc892a5",
+      "count": 191080791125,
+      "crate": "azS8TxNTQCG"
     }
   }
 }
