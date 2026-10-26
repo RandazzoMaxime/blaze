@@ -822,6 +822,18 @@ All notable changes to ra-jit are written here. The format follows
   `mul`) are compiled, which `vaddv_u8` and AVX-512's `_mm512_reduce_add_epi32` are, and
   `simd_masked_load` and `simd_masked_store` (AVX-512's `_mm512_mask_loadu_epi8`, in fff_search
   under nushell): a lane the mask leaves out is not read or written (corpus `crypto_lanes`).
+- A daemon started on a filled store finds the functions it has stored faster: looking an
+  entry up takes a lock of its own shard rather than one for all of them, and the types of an
+  entry's variables are read when the function is described for a debugger, on the threads
+  that describe, rather than when the entry is looked up. nushell's restart on dev-aws-14
+  (64 cores, shared), five rounds each, interleaved with main's: 15.6 s (15.5 to 15.7) on main, 14.7 s (14.5 to 14.7)
+  with this; the stored roots take 1.3 s, from 3.5 s, and the object 1.8 s, from 1.0 s.
+- The def maps and impls of crates that use procedural macros, and those of the crates of
+  procedural macros, are frozen in the store like any other dependency's, so a build reads
+  them rather than resolving their names again. A macro whose library is not loaded, or is
+  turned off, is so only in that process, and its crate is not frozen. nushell's restart
+  resolves all 434 of its dependencies' def maps from the store, in 1.8 s rather than 3.1 s,
+  and takes 12.6 s (12.5 to 12.7) with the entry above, against main's 15.6 s.
 
 ### Fixed
 
