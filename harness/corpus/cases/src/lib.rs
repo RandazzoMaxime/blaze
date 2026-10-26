@@ -3973,6 +3973,62 @@ pub mod type_id_hashes {
         (&value as &dyn Any).type_id()
     }
 
+    /// Closures of a crate rustc compiled, instantiated here (blaze #369's tonic
+    /// `map_frame(|frame| ..)`): rustc's `DefPath` of the closure and all of its arguments.
+    pub fn upstream_closures() -> Vec<TypeId> {
+        use std::iter::once;
+        let (expanded, seven) = upstream::expanded(once(1u8));
+        vec![
+            of_value(&upstream::doubled(once(1u8))),
+            of_value(&upstream::doubled(vec![1u8].into_iter())),
+            of_value(&upstream::offset(once(1u8), 2)),
+            of_value(&upstream::counted(once(1u8))),
+            of_value(&upstream::once_text(String::new())),
+            of_value(&upstream::adder(1)),
+            of_value(&expanded),
+            of_value(&seven),
+            of_value(&upstream::Wrap(String::from("w")).repeat()),
+            of_value(&upstream::Wrap(3u64).repeat()),
+            of_value(&upstream::Source::source(&1u8)),
+            any_of(upstream::doubled(once(1u8))),
+            any_of(upstream::offset(once(1u8), 2)),
+            of_value(&upstream::kept(once(1u8))),
+        ]
+    }
+
+    /// `async` blocks and `async fn` bodies of a crate rustc compiled, and a closure written
+    /// in one: rustc's `DefPath` and the coroutine's arguments.
+    pub fn upstream_coroutines() -> Vec<TypeId> {
+        let made = std::pin::pin!(upstream::maker(2));
+        let mut context = std::task::Context::from_waker(std::task::Waker::noop());
+        let std::task::Poll::Ready(times) = std::future::Future::poll(made, &mut context) else {
+            unreachable!()
+        };
+        vec![
+            of_value(&upstream::later(1)),
+            of_value(&upstream::sum(1, 2)),
+            of_value(&upstream::maker(2)),
+            of_value(&times),
+            of_value(&upstream::nested(1)),
+            any_of(upstream::sum(1, 2)),
+            any_of(Box::pin(upstream::later(3))),
+        ]
+    }
+
+    /// What rustc's code boxed downcasts in ours, and the reverse, through a type that holds
+    /// a closure of its crate.
+    pub fn upstream_downcasts() -> Vec<bool> {
+        let (value, boxed) = upstream::boxed_doubled();
+        let mapped = upstream::doubled(std::iter::once(5u8));
+        vec![
+            is(&value, &*boxed),
+            is(&mapped, &*boxed),
+            upstream::try_downcast::<u8, _>(upstream::doubled(std::iter::once(1u8))).is_ok(),
+            upstream::try_downcast::<Option<u8>, _>(mapped).is_ok(),
+            upstream::try_downcast::<Unit, _>(value).is_ok(),
+        ]
+    }
+
     /// Constructors of a crate rustc compiled and of std, and of an enum written in a body.
     pub fn more_constructors() -> Vec<TypeId> {
         enum InBody {

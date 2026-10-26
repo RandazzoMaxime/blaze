@@ -791,6 +791,14 @@ All notable changes to ra-jit are written here. The format follows
 
 ### Fixed
 
+- The `TypeId` of a type that holds a closure, `async` block or `async fn` future of a crate
+  rustc compiled is rustc's: its `DefPath` (`{closure#n}` under the function, as its symbols
+  are named) with all of its arguments, the kind, signature or resume type and captures
+  included. It was refused, as was every function that asks for one: tonic's
+  `Streaming::new` builds its body from `body.map_frame(|frame| ..)`, and axum-core's
+  `try_downcast` asks for its `TypeId`. An `async` closure's future and an `async gen` one
+  are still refused.
+
 - The `TypeId` of a type that holds a constructor used as a function (`stream.map(Ok)`,
   `iter.map(Some)`, a tuple struct's name) is hashed as rustc hashes it, as the `Ctor` child
   of the variant or struct with the ADT's parameters
