@@ -158,6 +158,9 @@ pub enum CodegenError {
     /// rustc built the function under a symbol private to its object, so its copy stays the
     /// one that code of that object calls, and goes on using rustc's statics.
     Private,
+    /// What ra-jit can't do and no other path may stand in for: the build stops with this
+    /// error, naming what and where. Never left to rustc, never a build in full instead.
+    Refused(String),
 }
 
 impl CodegenError {
@@ -176,6 +179,7 @@ impl fmt::Display for CodegenError {
             CodegenError::NoSymbol | CodegenError::Private => {
                 write!(f, "unsupported: no rustc symbol for function")
             }
+            CodegenError::Refused(it) => write!(f, "{it}"),
         }
     }
 }
@@ -185,6 +189,13 @@ type Result<T> = std::result::Result<T, CodegenError>;
 macro_rules! unsupported {
     ($($arg:tt)*) => {
         return Err(CodegenError::Unsupported(format!($($arg)*)))
+    };
+}
+
+/// Stops the build with an error ([`CodegenError::Refused`]).
+macro_rules! refused {
+    ($($arg:tt)*) => {
+        return Err(CodegenError::Refused(format!($($arg)*)))
     };
 }
 
@@ -768,6 +779,7 @@ impl CodegenUnit {
                 let why = match patch {
                     Ok(Ok(patch)) => break Some(patch),
                     Ok(Err(why)) => Some(why),
+                    Err(e @ CodegenError::Refused(_)) => return Err(e),
                     Err(_) => None,
                 };
                 // Code compiled at a higher level that a patch can't hold goes, not the
@@ -975,6 +987,10 @@ impl CodegenUnit {
                         };
                         match result {
                             Ok(symbol) => compiled.push((root, symbol)),
+                            Err(e @ CodegenError::Refused(_)) => {
+                                cg.refused.get_or_insert(e);
+                                break;
+                            }
                             Err(e) => {
                                 // rustc's copy calls what ours would have, when it has one.
                                 if !on_demand.is_empty()
@@ -1000,11 +1016,14 @@ impl CodegenUnit {
                     failed.extend(cg.define_waves(ahead));
                 });
                 queue.extend(cg.wanted.drain(..).filter(|&func| queued.insert(func)));
-                if next == queue.len() {
+                if next == queue.len() || cg.refused.is_some() {
                     break;
                 }
             }
             cg.make_later();
+            if let Some(refused) = cg.refused.take() {
+                return Err(refused);
+            }
             if cg.misfit {
                 start_over("an entry of the store did not fit");
                 rejected.extend(failed);
@@ -2208,6 +2227,8 @@ struct ObjectCodegen<'a, 'db> {
     type_ids: FxHashMap<FuncId, u128>,
     /// An entry did not fit the object, which now lacks a function it declares.
     misfit: bool,
+    /// What stops the build ([`CodegenError::Refused`]), found by a thread that can't return it.
+    refused: Option<CodegenError>,
     /// The functions of a patch that are at a level above 1, whose code it has at that level.
     tiers: Option<&'a tier::Tiers>,
     /// What each function built from an entry of the store is an instance of.
@@ -5066,6 +5087,7 @@ impl<'a, 'db> ObjectCodegen<'a, 'db> {
             type_id_shims: FxHashMap::default(),
             type_ids: FxHashMap::default(),
             misfit: false,
+            refused: None,
             own_statics,
             mixed,
             elf_relocs: Vec::new(),
@@ -5520,7 +5542,9 @@ impl<'a, 'db> ObjectCodegen<'a, 'db> {
             for (instance, env, id) in wave {
                 let defined = self.define_instance(&instance, &env, id);
                 if let Err(e) = defined {
-                    if self.forward_to_rustc(&instance, id).is_some() {
+                    if let CodegenError::Refused(_) = e {
+                        self.refused.get_or_insert(e);
+                    } else if self.forward_to_rustc(&instance, id).is_some() {
                         self.forwarded.insert(instance);
                     } else {
                         failed.push((instance, Rejected { env, why: e.to_string() }));
@@ -6540,9 +6564,10 @@ impl<'a, 'db> ObjectCodegen<'a, 'db> {
             if let Some(why) = why {
                 if stateful() && self.symbols.linked(found) {
                     let name = StaticSignature::of(db, id).name.as_str();
-                    unsupported!(
-                        "static `{name}` with state, whose copy in rustc's code (`{found}`) {why}: \
-                         a copy of ours would split the state"
+                    let krate = fncache::crate_name(db, id.krate(db));
+                    refused!(
+                        "static `{name}` of crate `{krate}` with state, whose copy in rustc's code (`{found}`) \
+                         {why}: a copy of ours would split the state"
                     );
                 }
                 symbol = None;
