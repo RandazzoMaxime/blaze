@@ -825,11 +825,6 @@ All notable changes to ra-jit are written here. The format follows
 
 ### Fixed
 
-- `RA_JIT_RUSTC_BASE=0` reaches the worker of the build that sets it, which is a worker of its
-  own: it reached one only when the build that set it had started the daemon, so behind a
-  daemon another build started the first edits were patches of rustc's executable, and an edit
-  that adds a type asked for a restart (`live_types.py` in the gate, after the other live
-  tests).
 - A local that no place of its body mentions has no stack slot. rust-analyzer's MIR gives a
   closure's body a local for each capture and for each binding of the function it is written
   in, and a closure called by reference never touches them; each had a slot, so a closure
@@ -1446,6 +1441,11 @@ All notable changes to ra-jit are written here. The format follows
 - The thread that compiles at a higher level has a stack of 64 MiB, and the bodies a body
   built in shows are ten deep at most: a deep chain of them overflowed the 2 MiB default and
   took the worker down.
+- `RA_JIT_RUSTC_BASE=0` reaches the worker of the build that sets it, which is a worker of its
+  own: it reached one only when the build that set it had started the daemon, so behind a
+  daemon another build started the first edits were patches of rustc's executable, and an edit
+  that adds a type asked for a restart (`live_types.py` in the gate, after the other live
+  tests).
 
 ## [0.1.0] - 2026-10-20
 
