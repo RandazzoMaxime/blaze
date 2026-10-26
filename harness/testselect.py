@@ -144,6 +144,9 @@ FILES = {
                   '[dependencies]\ntbase = { path = "tbase" }\n\n[workspace]\nmembers = ["tbase"]\n',
     "src/lib.rs": LIB,
     "data.txt": "tsel\n",
+    # What the test that writes into the package overwrites: not `data.txt`, which the test
+    # that reads a file reads in the same run of the tests, on another thread.
+    "notes.txt": "notes\n",
     # A library of the workspace the unit tests are linked with as rustc built it, without
     # `cfg(test)`, as ripgrep's crates are each other's.
     "tbase/Cargo.toml": '[package]\nname = "tbase"\nversion = "0.1.0"\nedition = "2021"\n',
@@ -231,9 +234,9 @@ if SANDBOXED:
         ("a test that writes into the package", [
             ("src/lib.rs", "    #[test]\n    fn added()",
              "    #[test]\n    fn writes_a_file() {\n"
-             "        std::fs::write(\"data.txt\", \"written\").unwrap();\n"
+             "        std::fs::write(\"notes.txt\", \"written\").unwrap();\n"
              "        std::fs::write(\"written.txt\", \"written\").unwrap();\n"
-             "        assert_eq!(std::fs::read_to_string(\"data.txt\").unwrap(), \"written\");\n"
+             "        assert_eq!(std::fs::read_to_string(\"notes.txt\").unwrap(), \"written\");\n"
              "    }\n\n    #[test]\n    fn added()")], "affected", {WRITES}, True),
         ("nothing edited after it wrote", [], "affected", set(), True),
         ("a test that writes outside", [
@@ -273,7 +276,7 @@ if SANDBOXED:
 # What has to be so of the package after a step, beside what it says.
 AFTER = {
     "a test that writes into the package": lambda ws: (
-        open(os.path.join(ws, "data.txt")).read() == "tsel tsel\n"
+        open(os.path.join(ws, "notes.txt")).read() == "notes\n"
         and not os.path.exists(os.path.join(ws, "written.txt"))) or "IT WROTE INTO THE PACKAGE",
     "a test that writes outside": lambda ws: (
         not os.path.exists(os.path.join(OUTSIDE, "written.txt"))) or "IT WROTE OUTSIDE THE SANDBOX",
