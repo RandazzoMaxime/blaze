@@ -452,6 +452,14 @@ All notable changes to ra-jit are written here. The format follows
 
 ### Changed
 
+- No `cargo blaze` command is passed to cargo any more (Andrew, 2026-10-26: commands that are
+  no builds "should go to us and not cargo"). `metadata`, `locate-project`, `verify-project`,
+  `version` and `help` are blaze's own, from blaze-manifest, blaze-registry and blaze-resolve
+  with no cargo or rustc started; every other command of cargo's (`fmt`, `clippy`, `doc`,
+  `tree`, `publish` ...) fails with status 101, saying blaze has none yet and that nothing was
+  done, and a command cargo does not have is `no such command` rather than a cargo plugin run.
+  `cargo blaze --list` and the table in docs/cargo.md ("Every subcommand") say which is which;
+  flags typed before the command are read after it.
 - A whole build's cold compile no longer waits on itself where a hundred threads meet. What
   the store is given of a function names each function and static it reaches by a name its
   crate is listed to find again: each crate is listed once, by the first thread to ask and
