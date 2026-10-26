@@ -42,7 +42,8 @@ pub(super) fn check(cx: &mut Cx<'_, '_, '_>, call: &ast::MacroCall) {
     }
     let Some(path) = call.path() else { return };
     let Some(tt) = call.token_tree() else { return };
-    let whole = TextRange::new(path.syntax().text_range().start(), tt.syntax().text_range().end());
+    let (Some(start), Some(end)) = (cx.range(path.syntax()), cx.range(tt.syntax())) else { return };
+    let whole = TextRange::new(start.start(), end.end());
     let text = cx.snippet(whole);
     let bang = text.find('!').unwrap_or(text.len());
     let name_len = text[..bang].trim_end().len();

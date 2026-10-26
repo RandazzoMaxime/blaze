@@ -4,6 +4,7 @@
 //! is the table of what each one is.
 
 mod args;
+mod clippy;
 mod manifest;
 
 use args::Args;
@@ -60,7 +61,7 @@ pub(crate) const SUBCOMMANDS: &[Subcommand] = &[
     aka("run", &["r"], Status::Build, "build and run a program"),
     aka("test", &["t"], Status::Build, "build and run the tests"),
     sub("fmt", Status::Not("blaze's formatter is being written"), "format the source"),
-    sub("clippy", Status::Not("blaze's lints are being written"), "lint the source"),
+    sub("clippy", Status::Own, "lint the source with clippy's lints, blaze's own"),
     aka(
         "doc",
         &["d"],
@@ -123,6 +124,7 @@ pub(crate) fn command(args: Vec<String>) -> anyhow::Result<i32> {
         return Ok(super::FAILED);
     };
     match subcommand.name {
+        "clippy" => clippy::command(rest),
         "metadata" => manifest::metadata(Args::new(rest)),
         "locate-project" => manifest::locate_project(Args::new(rest)),
         "verify-project" => manifest::verify_project(Args::new(rest)),

@@ -67,8 +67,7 @@ pub fn check(db: &RootDatabase, krate: hir::Crate, setup: &Setup, name_of: NameO
             }
         }
         let levels = Levels::new(&setup.command_line);
-        let texts: Vec<std::sync::Arc<str>> =
-            files.iter().map(|it| db.file_text(it.file_id(db)).text(db).clone()).collect();
+        let texts: Vec<&str> = files.iter().map(|it| &**db.file_text(it.file_id(db)).text(db)).collect();
         let on = lints::on(&levels, &texts);
         let mut state = State {
             sema: &sema,
@@ -85,7 +84,7 @@ pub fn check(db: &RootDatabase, krate: hir::Crate, setup: &Setup, name_of: NameO
         for (order, file) in files.iter().enumerate() {
             let Some(name) = name_of(file.file_id(db)) else { continue };
             let source = sema.parse(*file);
-            let mut cx = Cx { state: &mut state, file: *file, name, order, expansion: None };
+            let mut cx = Cx { state: &mut state, file: *file, name, order, expansion: None, input: None, depth: 0 };
             cx.walk(source.syntax());
         }
         state.finish(&levels)
@@ -134,6 +133,12 @@ pub(crate) struct Cx<'s, 'a, 'db> {
     order: usize,
     /// The macro the walk is in the expansion of, if it is in one.
     pub(crate) expansion: Option<Expansion>,
+    /// When the walk is in what a macro call of the file expands to, the arguments of the
+    /// call: what of the expansion is written there is linted as code of the file, as rustc
+    /// lints what a macro is handed.
+    input: Option<TextRange>,
+    /// How many macro calls deep the walk is.
+    depth: u32,
 }
 
 impl<'a, 'db> Cx<'_, 'a, 'db> {
@@ -164,9 +169,9 @@ impl<'a, 'db> Cx<'_, 'a, 'db> {
     }
 
     /// The text of the file being walked.
-    pub(crate) fn text(&self) -> std::sync::Arc<str> {
+    pub(crate) fn text(&self) -> &'db str {
         let db = self.db();
-        db.file_text(self.file.file_id(db)).text(db).clone()
+        db.file_text(self.file.file_id(db)).text(db)
     }
 
     /// The source text at `range` of the file being walked.
@@ -176,9 +181,9 @@ impl<'a, 'db> Cx<'_, 'a, 'db> {
 
     /// Where `node` is in the file being walked, if it is written there.
     pub(crate) fn range(&self, node: &SyntaxNode) -> Option<TextRange> {
-        match self.expansion {
-            None => Some(node.text_range()),
-            Some(_) => {
+        match (&self.expansion, self.input) {
+            (None, None) => Some(node.text_range()),
+            _ => {
                 let range = self.sema().original_range_opt(node)?;
                 (range.file_id == self.file).then_some(range.range)
             }
@@ -211,7 +216,7 @@ impl<'a, 'db> Cx<'_, 'a, 'db> {
     pub(crate) fn std_macro(&self, call: &ast::MacroCall) -> Option<String> {
         let db = self.db();
         let mac = self.sema().resolve_macro_call(call)?;
-        if !mac.krate(db).origin(db).is_lang() {
+        if !mac.module(db).krate(db).origin(db).is_lang() {
             return None;
         }
         Some(mac.name(db).as_str().to_owned())
@@ -221,7 +226,7 @@ impl<'a, 'db> Cx<'_, 'a, 'db> {
     /// each the outermost there whose source is in the arguments.
     pub(crate) fn macro_args(&self, call: &ast::MacroCall) -> Vec<(TextRange, ast::Expr)> {
         let Some(tt) = call.token_tree() else { return Vec::new() };
-        let range = tt.syntax().text_range();
+        let Some(range) = self.range(tt.syntax()) else { return Vec::new() };
         if range.len() < TextSize::from(2) {
             return Vec::new();
         }
@@ -355,15 +360,72 @@ impl<'a, 'db> Cx<'_, 'a, 'db> {
                     events.skip_subtree();
                     continue;
                 }
-                if self.expansion.is_none() {
+                if self.expansion.is_none() && self.input.is_none() {
                     self.expectations_of(&owner);
                 }
             }
-            lints::check_node(self, &node);
+            // What an attribute macro such as `#[test]` makes of an item is what rustc lints,
+            // the code written in it keeping its place.
+            if let Some(item) = ast::Item::cast(node.clone())
+                && self.walk_attr_expansion(&item)
+            {
+                events.skip_subtree();
+                continue;
+            }
+            if self.is_written(&node) {
+                lints::check_node(self, &node);
+            }
             if let Some(adt) = ast::Adt::cast(node.clone()) {
                 self.walk_derives(&adt);
             }
+            if let Some(call) = ast::MacroCall::cast(node.clone()) {
+                self.walk_call(&call);
+                events.skip_subtree();
+            }
         }
+    }
+
+    /// Whether `node` is code of the file: outside macro calls, or handed to the call the walk
+    /// is in the expansion of, all of it.
+    pub(crate) fn is_written(&self, node: &SyntaxNode) -> bool {
+        match self.input {
+            None => true,
+            Some(input) => self.range(node).is_some_and(|it| input.contains_range(it)),
+        }
+    }
+
+    /// Walks what an attribute macro on `item` expands it to, if one does; says whether one
+    /// did.
+    fn walk_attr_expansion(&mut self, item: &ast::Item) -> bool {
+        const DEEPEST: u32 = 8;
+        if self.depth >= DEEPEST || self.expansion.is_some() || item.attrs().next().is_none() {
+            return false;
+        }
+        let Some(expanded) = self.sema().expand_attr_macro(item) else { return false };
+        let Some(input) = self.range(item.syntax()).or(self.input) else { return true };
+        let outer = self.input.replace(input);
+        self.depth += 1;
+        self.walk(&expanded.value.value);
+        self.depth -= 1;
+        self.input = outer;
+        true
+    }
+
+    /// Walks what the macro call `call` expands to, for the code handed to it.
+    fn walk_call(&mut self, call: &ast::MacroCall) {
+        const DEEPEST: u32 = 8;
+        if self.depth >= DEEPEST || self.expansion.is_some() || !lints::in_calls(self) {
+            return;
+        }
+        let Some(tt) = call.token_tree() else { return };
+        // A call the expansion makes of its own hands on what it was handed.
+        let Some(input) = self.range(tt.syntax()).or(self.input) else { return };
+        let Some(expanded) = self.sema().expand_macro_call(call) else { return };
+        let outer = self.input.replace(input);
+        self.depth += 1;
+        self.walk(&expanded.value);
+        self.depth -= 1;
+        self.input = outer;
     }
 
     /// Walks what the derives of `adt` expand to.
@@ -376,11 +438,10 @@ impl<'a, 'db> Cx<'_, 'a, 'db> {
             if attr.simple_name().as_deref() != Some("derive") {
                 continue;
             }
-            let Some(calls) = self.sema().derive_macro_calls(&meta) else { continue };
-            for call in calls.into_iter().flatten() {
-                let Some(call) = call.left() else { continue };
-                let file: HirFileId = call.into();
-                let root = self.sema().parse_or_expand(file);
+            let Some(expanded) = self.sema().expand_derive_macro(&meta) else { continue };
+            for root in expanded.into_iter().flatten() {
+                let root = root.value;
+                let Some(call) = self.sema().hir_file_for(&root).macro_file() else { continue };
                 let Some(expansion) = self.expansion_of(call) else { continue };
                 let outer = self.expansion.replace(expansion);
                 self.walk(&root);
@@ -496,7 +557,7 @@ impl State<'_, '_> {
                 let Some(level) = meta
                     .path()
                     .and_then(|it| it.as_single_name_ref())
-                    .and_then(|it| Level::of_attr(it.text().as_str()))
+                    .and_then(|it| Level::of_attr(&it.text()))
                 else {
                     return ControlFlow::Continue(());
                 };

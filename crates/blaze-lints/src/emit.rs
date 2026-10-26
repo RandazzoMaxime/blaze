@@ -20,7 +20,7 @@ use crate::{
 const MAX_SUGGESTIONS: usize = 4;
 
 /// The width rustc lays diagnostics out for when it is not told one, as under cargo.
-const WIDTH: usize = annotate_snippets::renderer::DEFAULT_TERM_WIDTH;
+pub const WIDTH: usize = annotate_snippets::renderer::DEFAULT_TERM_WIDTH;
 
 /// The text of the files diagnostics point into, by the path they name them by.
 pub struct Sources {
@@ -641,6 +641,7 @@ pub fn json(diagnostic: &Diagnostic, sources: &mut Sources, rendered: String) ->
         rendered: None,
         spans: json_spans(&child.span, sources),
     });
+    let children: Vec<JsonChild> = children.collect();
     let suggested = suggestions.iter().map(|suggestion| {
         let spans = suggestion.substitutions.iter().flatten().filter_map(|(span, replacement)| {
             let mut it = json_span(span, true, None, sources)?;
@@ -660,7 +661,7 @@ pub fn json(diagnostic: &Diagnostic, sources: &mut Sources, rendered: String) ->
     Json {
         rendered,
         message_type: "diagnostic",
-        children: children.chain(suggested).collect(),
+        children: children.into_iter().chain(suggested).collect(),
         level: if diagnostic.is_error() { "error" } else { "warning" },
         message: diagnostic.message.clone(),
         spans: json_spans(&diagnostic.span, sources),

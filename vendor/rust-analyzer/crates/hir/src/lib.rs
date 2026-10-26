@@ -3673,6 +3673,20 @@ impl TypeParam {
             .collect()
     }
 
+    /// [`TypeParam::trait_bounds`] with the bounds' generic arguments, for blaze's lints.
+    pub fn trait_refs(self, db: &dyn HirDatabase) -> Vec<TraitRef<'_>> {
+        let self_ty = self.ty(db).ty.instantiate_identity().skip_norm_wip();
+        GenericPredicates::query_explicit(db, self.id.parent())
+            .iter_identity()
+            .filter_map(|pred| match &pred.kind().skip_binder() {
+                ClauseKind::Trait(trait_ref) if trait_ref.self_ty() == self_ty => {
+                    Some(TraitRef::new(self.id.parent(), trait_ref.trait_ref))
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
     pub fn default(self, db: &dyn HirDatabase) -> Option<Type<'_>> {
         let ty = generic_arg_from_param(db, self.id.into())?;
         match ty.kind() {

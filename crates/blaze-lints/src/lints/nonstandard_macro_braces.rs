@@ -64,7 +64,8 @@ pub(super) fn check_call(cx: &mut Cx<'_, '_, '_>, call: &ast::MacroCall) {
     if open == braces.0 {
         return;
     }
-    let span = TextRange::new(path.syntax().text_range().start(), tt.syntax().text_range().end());
+    let (Some(start), Some(end)) = (cx.range(path.syntax()), cx.range(tt.syntax())) else { return };
+    let span = TextRange::new(start.start(), end.end());
     // A statement written with braces and no semicolon needs one once it has other brackets.
     let statement = call.syntax().parent().and_then(ast::MacroExpr::cast).and_then(|it| {
         let parent = it.syntax().parent()?;

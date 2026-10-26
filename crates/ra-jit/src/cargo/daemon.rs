@@ -167,6 +167,9 @@ pub(crate) enum Request {
     /// `cargo ra-jit check` of a build the daemon has no programs of: what a checker that
     /// loaded the workspace as it would finds in its crates, with no rustc.
     Check(Ahead),
+    /// `cargo blaze clippy`: what blaze's lints find in the crates the checker of the build
+    /// loads, asked with a [`blaze_lints::serve::Ask`] in JSON.
+    Lint(Ahead, String),
     Status,
     Stop,
 }
@@ -193,6 +196,11 @@ pub(crate) enum Reply {
     /// What the checker of a [`Request::Check`] found: no error, or the errors.
     Checked {
         errors: Option<crate::errors::Said>,
+    },
+    /// What the checker of a [`Request::Lint`] found: a [`blaze_lints::serve::Answer`] in
+    /// JSON.
+    Linted {
+        answer: String,
     },
     Status(Status),
     Stopping,
@@ -909,7 +917,7 @@ impl Checker {
 
     /// Its answer: `ok`, the errors, or [`crate::check::RELOAD`]. Waits for it to have loaded
     /// the workspace and to listen.
-    fn ask(&mut self) -> anyhow::Result<String> {
+    fn ask(&mut self, request: &str) -> anyhow::Result<String> {
         let mut stream = loop {
             match socket::connect(&self.socket) {
                 Ok(stream) => break stream,
@@ -926,7 +934,7 @@ impl Checker {
                 }
             }
         };
-        stream.write_all(b"check\n")?;
+        stream.write_all(format!("{request}\n").as_bytes())?;
         let mut reply = String::new();
         BufReader::new(stream).read_line(&mut reply)?;
         match reply.trim_end() {
@@ -1203,7 +1211,8 @@ impl Daemon {
                 Ok(()) => self.built(&checkout),
                 Err(why) => Reply::Cold { reason: format!("{why:#}") },
             },
-            Request::Check(ahead) => self.check(&ahead),
+            Request::Check(ahead) => self.check(&ahead, "check"),
+            Request::Lint(ahead, ask) => self.check(&ahead, &format!("{}{ask}", crate::check::LINT)),
             Request::Status => Reply::Status(Status {
                 pid: std::process::id(),
                 version: self.version.clone(),
@@ -1429,8 +1438,8 @@ impl Daemon {
     /// Has the checker of `ahead` say what it finds in the source, started when there is
     /// none of its build or it ended, and started again when it can only take the source in
     /// by loading it again. The one asked longest ago makes way for it when there are
-    /// [`CHECKERS`].
-    fn check(&self, ahead: &Ahead) -> Reply {
+    /// [`CHECKERS`]. `request` is the line the checker is asked with.
+    fn check(&self, ahead: &Ahead, request: &str) -> Reply {
         let id = ahead.config.id();
         let mut held = lock(&self.checkers);
         held.retain_mut(|it| {
@@ -1459,8 +1468,11 @@ impl Daemon {
             };
             let checker = &mut held[at];
             checker.asked = Instant::now();
-            match checker.ask() {
+            match checker.ask(request) {
                 Ok(reply) if reply == "ok" => return Reply::Checked { errors: None },
+                Ok(reply) if reply.starts_with(crate::check::LINT) => {
+                    return Reply::Linted { answer: reply[crate::check::LINT.len()..].to_owned() };
+                }
                 Ok(reply) if reply == crate::check::RELOAD => held.remove(at).stop(),
                 Ok(reply) => match NotBuilt::of(&reply) {
                     NotBuilt::Error(said) => return Reply::Checked { errors: Some(said) },

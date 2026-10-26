@@ -13,8 +13,12 @@ pub mod emit;
 pub mod level;
 mod lints;
 pub mod manifest;
+mod msrvs;
 pub mod registry;
+pub mod serve;
 mod sugg;
+#[cfg(test)]
+mod tests;
 
 pub use check::{Found, Setup, check};
 pub use level::Level;

@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use crate::Level;
 
 /// A lint of clippy's.
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Eq)]
 pub struct Info {
     /// Lowercase, without `clippy::`.
     pub name: &'static str,

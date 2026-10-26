@@ -8,7 +8,10 @@
 
 use std::fmt;
 
-use syntax::{AstNode, ast};
+use syntax::{
+    AstNode,
+    ast::{self, RangeItem as _},
+};
 
 /// clippy's `AssocOp`: the operator of a binary expression.
 #[derive(Clone, Debug, PartialEq, Eq)]

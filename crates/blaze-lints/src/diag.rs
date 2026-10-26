@@ -320,11 +320,13 @@ impl Diagnostic {
 
     pub fn suggestion_with_style(
         &mut self,
-        parts: Vec<(Span, String)>,
+        mut parts: Vec<(Span, String)>,
         message: impl Into<String>,
         applicability: Applicability,
         style: SuggestionStyle,
     ) -> &mut Diagnostic {
+        let mut seen = rustc_hash::FxHashSet::default();
+        parts.retain(|(span, code)| seen.insert((span.lo, span.hi, code.clone())));
         self.suggestions.push(Suggestion {
             message: message.into(),
             substitutions: vec![parts],

@@ -21,6 +21,13 @@ pub fn lints(manifest: &Path, workspace: &Path) -> Result<Vec<ManifestLint>, Str
     Ok(of_table(lints))
 }
 
+/// The flags cargo gives rustc for `lints`, in its order: `--warn=clippy::all`.
+pub fn flags(lints: &[ManifestLint]) -> Vec<String> {
+    let command_line = crate::level::of_manifest(lints);
+    let flags = command_line.opts.into_iter();
+    flags.map(|(name, level)| format!("{}={name}", crate::level::flag_of(level))).collect()
+}
+
 fn read(path: &Path) -> Result<toml::Table, String> {
     let text =
         std::fs::read_to_string(path).map_err(|error| format!("reading {}: {error}", path.display()))?;

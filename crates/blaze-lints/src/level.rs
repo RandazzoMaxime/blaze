@@ -256,7 +256,7 @@ pub fn of_manifest(lints: &[(String, String, Level, i8)]) -> CommandLine {
 }
 
 /// cargo's flag for a level, which it sorts flags of one name by.
-fn flag_of(level: Level) -> String {
+pub(crate) fn flag_of(level: Level) -> String {
     let flag = match level {
         Level::Forbid => "--forbid",
         Level::Deny => "--deny",
@@ -426,7 +426,7 @@ mod tests {
     #[test]
     fn an_attribute_overrides_the_command_line() {
         let levels = Levels::new(&CommandLine::parse(&args("-D clippy::needless_bool")).unwrap());
-        let span = Span { file: "src/lib.rs".to_owned(), lo: 0, hi: 1 };
+        let span = Span { file: "src/lib.rs".to_owned(), lo: 0, hi: 1, expansion: None };
         let set = Set {
             target: Target::Group(Group::Complexity),
             spec: Spec {
