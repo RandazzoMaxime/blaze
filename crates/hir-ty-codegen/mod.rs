@@ -982,8 +982,7 @@ impl CodegenUnit {
                                     && !cg.own_statics.unbuilt.contains(&root.krate(db))
                                 {
                                     let unseen = cg.want_reachable_from(root);
-                                    let rest = roots.on_demand.iter();
-                                    cg.wanted.extend(rest.filter(|it| unseen.calls(it.krate(db))));
+                                    cg.want_all_called(&unseen);
                                 }
                                 skipped.push((root, e));
                             }
@@ -2151,6 +2150,11 @@ struct ObjectCodegen<'a, 'db> {
     on_demand: &'a FxHashSet<FunctionId>,
     wanted: Vec<FunctionId>,
     on_demand_crates: FxHashSet<Crate>,
+    /// [`Self::on_demand`] by crate, made when first asked for, and the crates all of whose
+    /// functions are wanted already: once queued, a function is not queued again, so a crate
+    /// is gone through once, not once per static or root that may call into it.
+    on_demand_by_crate: Option<FxHashMap<Crate, Vec<FunctionId>>>,
+    crates_wanted: FxHashSet<Crate>,
     /// Instances that failed in an earlier round, with the reason.
     rejected: &'a FxHashMap<Instance, Rejected>,
     /// Size and alignment of every type laid out, collected when `RA_JIT_LAYOUTS` names a file
@@ -5018,6 +5022,8 @@ impl<'a, 'db> ObjectCodegen<'a, 'db> {
             on_demand,
             wanted: Vec::new(),
             on_demand_crates: on_demand.iter().map(|func| func.krate(db)).collect(),
+            on_demand_by_crate: None,
+            crates_wanted: FxHashSet::default(),
             rejected,
             layouts: FxHashMap::default(),
             phases: Phases::default(),
@@ -5142,6 +5148,27 @@ impl<'a, 'db> ObjectCodegen<'a, 'db> {
     fn want(&mut self, func: FunctionId) {
         if self.on_demand.contains(&func) {
             self.wanted.push(func);
+        }
+    }
+
+    /// Wants every function compiled on demand of the crates that code nothing walked may
+    /// call. Each crate's are wanted once: this was a walk of all of them for every static
+    /// rustc's code has, which made the build in full of a large program wait on one thread
+    /// (#259).
+    fn want_all_called(&mut self, unseen: &Unseen) {
+        let db = self.db;
+        let on_demand = self.on_demand;
+        let by_crate = self.on_demand_by_crate.get_or_insert_with(|| {
+            let mut by_crate: FxHashMap<Crate, Vec<FunctionId>> = FxHashMap::default();
+            for &func in on_demand {
+                by_crate.entry(func.krate(db)).or_default().push(func);
+            }
+            by_crate
+        });
+        for (&krate, funcs) in by_crate.iter() {
+            if unseen.calls(krate) && self.crates_wanted.insert(krate) {
+                self.wanted.extend_from_slice(funcs);
+            }
         }
     }
 
@@ -6585,8 +6612,7 @@ impl<'a, 'db> ObjectCodegen<'a, 'db> {
                 && let Ok(compiled) = compiled_static(db, id).as_ref()
             {
                 let unseen = self.want_requested(&compiled.requests);
-                let rest = self.on_demand.iter().filter(|it| unseen.calls(it.krate(db)));
-                self.wanted.extend(rest);
+                self.want_all_called(&unseen);
             }
             return Ok(data);
         }

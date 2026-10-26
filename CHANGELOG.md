@@ -1472,6 +1472,15 @@ All notable changes to ra-jit are written here. The format follows
   daemon another build started the first edits were patches of rustc's executable, and an edit
   that adds a type asked for a restart (`live_types.py` in the gate, after the other live
   tests).
+- The first edit after the daemon is ready, while it is still rustc's executable that edits
+  patch, is faster when it is a build in full, as one that moves an `async` body is (reth's
+  `fn main`, [#259](https://github.com/indexable-inc/blaze/issues/259), by @gakonst): the
+  pass that puts the code in the object, which runs on one thread, wanted every function
+  compiled on demand again for each static rustc's code has, and walked a whole definition with
+  its macros for each closure and each static in a body (tracing's `META` and `__CALLSITE` in
+  every event). Each crate's on-demand functions are wanted once, and each definition is
+  walked once for all its closures or all its statics of a name. reth's first edit on 48 cores:
+  64.4 s and 64.3 s before, 58.0 s and 57.5 s after.
 
 ## [0.1.0] - 2026-10-20
 
