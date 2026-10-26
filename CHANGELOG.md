@@ -814,6 +814,22 @@ All notable changes to ra-jit are written here. The format follows
   of its package set, as cargo sets it since rust-lang/cargo#16421. With cargo's second layout
   the test is no longer beside the programs, so hyperfine's and bat's tests (assert_cmd's
   `cargo_bin`) found none and every one failed under ra-jit.
+
+- The `TypeId` of a type that holds a closure, `async` block or `async fn` future of a crate
+  rustc compiled is rustc's: its `DefPath` (`{closure#n}` under the function, as its symbols
+  are named) with all of its arguments, the kind, signature or resume type and captures
+  included. It was refused, as was every function that asks for one: tonic's
+  `Streaming::new` builds its body from `body.map_frame(|frame| ..)`, and axum-core's
+  `try_downcast` asks for its `TypeId`. An `async` closure's future and an `async gen` one
+  are still refused.
+
+- The `TypeId` of a type that holds a constructor used as a function (`stream.map(Ok)`,
+  `iter.map(Some)`, a tuple struct's name) is hashed as rustc hashes it, as the `Ctor` child
+  of the variant or struct with the ADT's parameters
+  ([#369](https://github.com/indexable-inc/blaze/issues/369)). It was refused, and with it
+  every edit that rebuilt a function giving `axum::body::Body::from_stream` such a stream,
+  and tonic's clients, which map requests through `Ok`.
+
 - On x86-64, an edit that replaces a function shorter than a jump (5 bytes) is spliced
   instead of built in full ([#242](https://github.com/indexable-inc/blaze/issues/242)).
   The jump goes over the `int3`s and `nop`s the linker padded the function with. When there

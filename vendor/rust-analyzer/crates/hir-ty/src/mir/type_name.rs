@@ -75,6 +75,17 @@ pub fn rustc_closure_suffix(
     Some(out.text)
 }
 
+/// The places rustc numbers a closure by, `n` of each `{closure#n}` from the one outermost in
+/// the body to the closure itself: what its `DefPath` adds to the function's.
+pub fn rustc_closure_places(
+    db: &dyn HirDatabase,
+    owner: DefWithBodyId,
+    expr: ExprId,
+) -> Option<Vec<usize>> {
+    let around = closures_around(db, owner, expr)?;
+    (!around.is_empty()).then(|| around.iter().map(|&(place, _)| place).collect())
+}
+
 /// The path rustc tells a debugger the code of that closure or `async` block by.
 pub fn rustc_debug_closure<'db>(
     db: &'db dyn HirDatabase,
