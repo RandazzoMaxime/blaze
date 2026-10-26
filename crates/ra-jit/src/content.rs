@@ -230,10 +230,14 @@ impl Contents {
         process_reads: &dyn Fn(Crate) -> Vec<(String, String)>,
     ) -> ContentId {
         let hash = || self.hash_library(db, krate, root, known, process_reads);
-        match *self.of(krate).get_or_init(|| Some(hash())) {
-            Some(id) => id,
-            None => hash(),
+        if let Some(id) = *self.of(krate).get_or_init(|| Some(hash())) {
+            return id;
         }
+        // A crate of no checkout hashed as one of a checkout is this from now on.
+        let id = hash();
+        let known = std::sync::Arc::new(OnceLock::from(Some(id)));
+        self.crates.lock().unwrap_or_else(|e| e.into_inner()).insert(krate, known);
+        id
     }
 
     fn hash_library(
