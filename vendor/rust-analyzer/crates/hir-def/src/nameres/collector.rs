@@ -99,6 +99,7 @@ pub(super) fn collect_defs(
         indeterminate_imports: Vec::new(),
         unresolved_macros: Vec::new(),
         expand_eager_with_unresolved_args: false,
+        deferred_eager_call: false,
         mod_dirs: FxHashMap::default(),
         cfg_options,
         proc_macros,
@@ -246,6 +247,8 @@ struct DefCollector<'db> {
     /// with that error. Until the other macros are expanded it is left for later instead, since
     /// one of them may define that macro: a `macro_rules!` an `include!` brings in.
     expand_eager_with_unresolved_args: bool,
+    /// Whether the last round of `resolve_macros` left an eager call for later that way.
+    deferred_eager_call: bool,
     // We'd like to avoid emitting a diagnostics avalanche when some `extern crate` doesn't
     // resolve. When we emit diagnostics for unresolved imports, we only do so if the import
     // doesn't start with an unresolved crate's name.
@@ -445,12 +448,9 @@ impl<'db> DefCollector<'db> {
                 if self.resolve_macros() == ReachedFixedPoint::Yes {
                     // What is left may be eager calls waiting for a macro of their arguments: now
                     // nothing else can define it, they are expanded with the error.
-                    let fn_like = |it: &MacroDirective<'_>| {
-                        matches!(it.kind, MacroDirectiveKind::FnLike { .. })
-                    };
-                    if self.expand_eager_with_unresolved_args
-                        || !self.unresolved_macros.iter().any(fn_like)
-                    {
+                    // Only when this round left one for later, so that a crate with a macro that
+                    // is missing for good does not pay a round more.
+                    if self.expand_eager_with_unresolved_args || !self.deferred_eager_call {
                         break 'resolve_macros;
                     }
                     self.expand_eager_with_unresolved_args = true;
@@ -468,6 +468,9 @@ impl<'db> DefCollector<'db> {
             if self.reseed_with_unresolved_attribute() == ReachedFixedPoint::Yes {
                 break 'resolve_attr;
             }
+            // The reseed brought in directives (an eager call, an `include!` that defines the
+            // macro its arguments name): they get the same wait as those of the first round.
+            self.expand_eager_with_unresolved_args = false;
         }
     }
 
@@ -1376,6 +1379,7 @@ impl<'db> DefCollector<'db> {
         let mut eager_callback_buffer = vec![];
         let mut res = ReachedFixedPoint::Yes;
         let expand_eager_with_unresolved_args = self.expand_eager_with_unresolved_args;
+        let deferred_eager_call = std::cell::Cell::new(false);
         // Retain unresolved macros after this round of resolution.
         let mut retain = |directive: &MacroDirective<'db>| {
             let subns = match &directive.kind {
@@ -1436,6 +1440,7 @@ impl<'db> DefCollector<'db> {
                     if call_id.is_ok() && unresolved.get() && !expand_eager_with_unresolved_args {
                         // A macro its arguments name may be defined by one not expanded yet.
                         eager_callback_buffer.truncate(buffered);
+                        deferred_eager_call.set(true);
                         return Resolved::No;
                     }
                     if let Ok(call_id) = call_id {
@@ -1769,6 +1774,7 @@ impl<'db> DefCollector<'db> {
             Resolved::No
         };
         macros.retain(|it| retain(it) == Resolved::No);
+        self.deferred_eager_call = deferred_eager_call.get();
         // Attribute resolution can add unresolved macro invocations, so concatenate the lists.
         macros.extend(mem::take(&mut self.unresolved_macros));
         self.unresolved_macros = macros;
