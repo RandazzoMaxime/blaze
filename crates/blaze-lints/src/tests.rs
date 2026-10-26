@@ -276,7 +276,44 @@ fn f(a: I<'_>, b: I<'_>, c: I<'_>) {{
 }}
 {STD}"#
     );
-    expect_test::expect![[r#""#]].assert_eq(&lint(&fixture, ""));
+    expect_test::expect![[r#"
+        warning: you are using an explicit closure for copying elements
+         --> src/lib.rs:9:13
+          |
+        9 |     let _ = a.map(|x| *x);
+          |             ^^^^^^^^^^^^^ help: consider calling the dedicated `copied` method: `a.copied()`
+          |
+          = help: for further information visit https://rust-lang.github.io/rust-clippy/main/index.html#map_clone
+          = note: `#[warn(clippy::map_clone)]` on by default
+
+        warning: you are using an explicit closure for copying elements
+          --> src/lib.rs:10:13
+           |
+        10 |     let _ = b.map(|&x| x);
+           |             ^^^^^^^^^^^^^ help: consider calling the dedicated `copied` method: `b.copied()`
+           |
+           = help: for further information visit https://rust-lang.github.io/rust-clippy/main/index.html#map_clone
+           = note: `#[warn(clippy::map_clone)]` on by default
+
+        warning: you are using an explicit closure for copying elements
+          --> src/lib.rs:11:13
+           |
+        11 |     let _ = c.map(|x| x.clone());
+           |             ^^^^^^^^^^^^^^^^^^^^ help: consider calling the dedicated `copied` method: `c.copied()`
+           |
+           = help: for further information visit https://rust-lang.github.io/rust-clippy/main/index.html#map_clone
+           = note: `#[warn(clippy::map_clone)]` on by default
+
+        warning: using `clone` on type `u8` which implements the `Copy` trait
+          --> src/lib.rs:11:23
+           |
+        11 |     let _ = c.map(|x| x.clone());
+           |                       ^^^^^^^^^ help: try dereferencing it: `*x`
+           |
+           = help: for further information visit https://rust-lang.github.io/rust-clippy/main/index.html#clone_on_copy
+           = note: `#[warn(clippy::clone_on_copy)]` on by default
+
+    "#]].assert_eq(&lint(&fixture, ""));
 }
 
 #[test]
@@ -299,7 +336,43 @@ fn f(x: Option<u8>) -> (bool, bool, bool) {{
 }}
 {STD}"#
     );
-    expect_test::expect![[r#""#]].assert_eq(&lint(&fixture, ""));
+    expect_test::expect![[r#"
+        warning: match expression looks like `matches!` macro
+         --> src/lib.rs:2:13
+          |
+        2 |       let a = match x {
+          |  _____________^
+        3 | |         Some(0) => true,
+        4 | |         _ => false,
+        5 | |     };
+          | |_____^
+          |
+          = help: for further information visit https://rust-lang.github.io/rust-clippy/main/index.html#match_like_matches_macro
+          = note: `#[warn(clippy::match_like_matches_macro)]` on by default
+        help: use `matches!` directly
+          |
+        2 -     let a = match x {
+        3 -         Some(0) => true,
+        4 -         _ => false,
+        5 -     };
+        2 +     let a = matches!(x, Some(0));
+          |
+
+        warning: `if let .. else` expression looks like `matches!` macro
+         --> src/lib.rs:6:13
+          |
+        6 |     let b = if let Some(1) = x { false } else { true };
+          |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+          |
+          = help: for further information visit https://rust-lang.github.io/rust-clippy/main/index.html#match_like_matches_macro
+          = note: `#[warn(clippy::match_like_matches_macro)]` on by default
+        help: use `matches!` directly
+          |
+        6 -     let b = if let Some(1) = x { false } else { true };
+        6 +     let b = !matches!(x, Some(1));
+          |
+
+    "#]].assert_eq(&lint(&fixture, ""));
 }
 
 #[test]
@@ -322,7 +395,22 @@ fn g(x: Option<&u8>) -> Option<&&u8> {{
 }}
 {STD}"#
     );
-    expect_test::expect![[r#""#]].assert_eq(&lint(&fixture, ""));
+    expect_test::expect![[r#"
+        warning: this pattern creates a reference to a reference
+         --> src/lib.rs:3:14
+          |
+        3 |         Some(ref y) => **y,
+          |              ^^^^^
+          |
+          = help: for further information visit https://rust-lang.github.io/rust-clippy/main/index.html#needless_borrow
+          = note: `#[warn(clippy::needless_borrow)]` on by default
+        help: try
+          |
+        3 -         Some(ref y) => **y,
+        3 +         Some(y) => *y,
+          |
+
+    "#]].assert_eq(&lint(&fixture, ""));
 }
 
 #[test]
@@ -340,7 +428,29 @@ impl Foo {{
 }}
 {STD}"#
     );
-    expect_test::expect![[r#""#]].assert_eq(&lint(&fixture, ""));
+    expect_test::expect![[r#"
+        warning: you should consider adding a `Default` implementation for `Foo`
+          --> src/lib.rs:4:5
+           |
+         4 | /     pub fn new() -> Self {
+         5 | |         Foo
+         6 | |     }
+           | |_____^
+           |
+           = help: for further information visit https://rust-lang.github.io/rust-clippy/main/index.html#new_without_default
+           = note: `#[warn(clippy::new_without_default)]` on by default
+        help: try adding this
+           |
+         7 ~ }
+         8 + 
+         9 + impl Default for Foo {
+        10 +     fn default() -> Self {
+        11 +         Self::new()
+        12 +     }
+        13 + }
+           |
+
+    "#]].assert_eq(&lint(&fixture, ""));
 }
 
 #[test]
@@ -358,5 +468,34 @@ fn f(x: bool) -> u8 {{
 }}
 {STD}"#
     );
-    expect_test::expect![[r#""#]].assert_eq(&lint(&fixture, ""));
+    expect_test::expect![[r#"
+        warning: unneeded `return` statement
+         --> src/lib.rs:3:9
+          |
+        3 |         return 1;
+          |         ^^^^^^^^
+          |
+          = help: for further information visit https://rust-lang.github.io/rust-clippy/main/index.html#needless_return
+          = note: `#[warn(clippy::needless_return)]` on by default
+        help: remove `return`
+          |
+        3 -         return 1;
+        3 +         1
+          |
+
+        warning: unneeded `return` statement
+         --> src/lib.rs:5:9
+          |
+        5 |         return 2;
+          |         ^^^^^^^^
+          |
+          = help: for further information visit https://rust-lang.github.io/rust-clippy/main/index.html#needless_return
+          = note: `#[warn(clippy::needless_return)]` on by default
+        help: remove `return`
+          |
+        5 -         return 2;
+        5 +         2
+          |
+
+    "#]].assert_eq(&lint(&fixture, ""));
 }
