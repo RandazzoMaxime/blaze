@@ -4083,6 +4083,7 @@ pub mod type_id_hashes {
             any_of(upstream::doubled(once(1u8))),
             any_of(upstream::offset(once(1u8), 2)),
             of_value(&upstream::kept(once(1u8))),
+            of_value(&upstream::after_consts()),
         ]
     }
 

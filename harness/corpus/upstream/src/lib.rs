@@ -70,6 +70,19 @@ pub fn kept<I: Iterator<Item = u8>>(it: I) -> impl Iterator<Item = u8> {
     it.filter(|x: &u8| *x > 1)
 }
 
+/// A closure in an inline `const` block and one in an array's length are numbered under that
+/// anonymous constant, not the function: the returned closure is the function's `{closure#0}`.
+pub fn after_consts() -> impl Fn() -> u8 {
+    const {
+        let _ = || ();
+    };
+    let _ = [0u8; {
+        let _ = || ();
+        1
+    }];
+    || 11
+}
+
 /// An `async` block, after a closure of the same function.
 pub fn later(x: u8) -> impl std::future::Future<Output = u8> {
     let add = move |y: u8| x + y;
