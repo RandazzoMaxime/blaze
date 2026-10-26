@@ -45,6 +45,8 @@ HARNESSES = [
     ("core", ["coldbuild.py"], {}, on("linux"), 2),
     ("core", ["splices.py"], {}, EVERYWHERE, 2),
     ("core", ["live_e2e.py"], {}, on("linux-x86_64"), 1),
+    # Cargo builds one program of two: the other runs on, taking edits, with no restart.
+    ("core", ["live_fallback.py"], {}, on("linux-x86_64"), 1),
     # A type added beside another, the code moved to it and the old one deleted, each a patch.
     ("core", ["live_types.py"], {}, on("linux-x86_64"), 1),
     # A program on a nightly feature (allocator_api) builds and takes live edits the same way.

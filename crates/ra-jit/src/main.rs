@@ -8379,7 +8379,13 @@ fn run_holding(
                             && lock(&as_built)
                                 .get(&target.out)
                                 .is_some_and(|it| it.still(&files, &db, view, target, request));
-                        if unchanged && !reach_owed(&target.out) {
+                        // Nor is it unchanged when rustc linked the program again since.
+                        let relinked = programs.iter().any(|it| {
+                            target.is(&it.args)
+                                && !target.symbol_files.is_empty()
+                                && target.symbol_files != it.args.symbol_files
+                        });
+                        if unchanged && !relinked && !reach_owed(&target.out) {
                             let _ = writeln!(&stream, "ok unchanged");
                             continue;
                         }
@@ -8434,6 +8440,25 @@ fn run_holding(
                             interrupt |= builds.running.get(&at).is_some_and(|it| it.own_base);
                             later.push((request, asked, stream));
                             continue;
+                        }
+                        // rustc linked the program again since it was built here, as cargo
+                        // does of one the daemon did not build while it builds the others,
+                        // which the daemon keeps (`Checkout::kept`): what was built of it is
+                        // of rustc's copies from before.
+                        if let Some(target) = &target
+                            && target.is(&programs[at].args)
+                            && !target.symbol_files.is_empty()
+                            && target.symbol_files != programs[at].args.symbol_files
+                        {
+                            let again =
+                                checkouts.parts(&programs[at].args.project).and_then(|parts| {
+                                    programs[at].start_over(&db, parts, Some(target), &[], &files)
+                                });
+                            if let Err(error) = again {
+                                let _ = writeln!(&stream, "failed: {error:#}");
+                                continue;
+                            }
+                            eprintln!("rustc linked {} again: built over", programs[at].args.krate);
                         }
                         outputs.insert(at, wanted);
                         if let Some(view) = view {
@@ -9452,6 +9477,8 @@ impl Program {
                 self.distrust_rustc(db, files, None);
                 self.unbuilt.named_anew = true;
                 self.args.widened.clear();
+                // The tests listed were of the program rustc linked before.
+                (self.tests, self.tests_now) = (None, None);
             }
             None => {
                 self.known.start_again();

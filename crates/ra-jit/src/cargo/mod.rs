@@ -130,7 +130,7 @@ fn settle(cargo: u32, typed: &[String]) -> anyhow::Result<()> {
         let cwd = std::env::current_dir()?;
         let key = asked.key(&cwd);
         eprintln!("settling {key}: cargo {} in {}", typed.join(" "), cwd.display());
-        if let Ok(state) = by_cargo(&asked, &cwd, &key, Counts::default(), None)? {
+        if let Ok(state) = by_cargo(&asked, &cwd, &key, Counts::default(), None, &[])? {
             state.write()?;
         }
         anyhow::Ok(())
@@ -254,11 +254,11 @@ fn build(asked: &Invocation) -> anyhow::Result<i32> {
             eprintln!("{written}");
             return Ok(FAILED);
         }
-        Ok(Err(NotServed::Cargo(ToCargo(state, reason)))) => {
+        Ok(Err(NotServed::Cargo(ToCargo(state, reason, daemons)))) => {
             say::cargo_builds(&reason, "building with cargo", say::EDIT);
             let mut counts = state.counts;
             *counts.cargo.entry(reason).or_default() += 1;
-            match by_cargo(asked, &cwd, &key, counts, None)? {
+            match by_cargo(asked, &cwd, &key, counts, None, &daemons)? {
                 Ok(state) => state,
                 Err(code) => return Ok(code),
             }
@@ -283,7 +283,7 @@ fn build(asked: &Invocation) -> anyhow::Result<i32> {
                     if let Some(why) = why {
                         say::cargo_builds(&why, "building with cargo", say::COLD);
                     }
-                    let state = match by_cargo(asked, &cwd, &key, Counts::default(), ahead)? {
+                    let state = match by_cargo(asked, &cwd, &key, Counts::default(), ahead, &[])? {
                         Ok(state) => state,
                         Err(code) => return Ok(code),
                     };
@@ -298,7 +298,7 @@ fn build(asked: &Invocation) -> anyhow::Result<i32> {
                             eprintln!("{written}");
                             return Ok(FAILED);
                         }
-                        Err(NotServed::Cargo(ToCargo(state, reason))) => {
+                        Err(NotServed::Cargo(ToCargo(state, reason, _))) => {
                             say::cargo_builds(&reason, "this build is cargo's", say::COLD);
                             let mut state = *state;
                             state.count_cargo(&reason);
@@ -423,7 +423,7 @@ fn staged(
     if !on {
         return Ok(Err(NotStaged::Cargos(None, crates.ahead)));
     }
-    State::give_back(key);
+    State::give_back(key, &[]);
     let ahead = crates.ahead.as_ref().map(|ahead| {
         // Without an answer the daemon loads the workspace once cargo is done.
         let _ = client::ask(Request::Ahead(ahead.clone()), Start::IfMissing);
@@ -499,8 +499,9 @@ const STAGED: &str = "RA_JIT_FIRST_BUILD";
 
 /// The build is cargo's, with the state so far and the reason: something cargo acts on
 /// changed, the build is one the daemon is never asked for, or the daemon did not build a
-/// program whose source changed.
-struct ToCargo(Box<State>, String);
+/// program whose source changed. With the programs the daemon did build, which cargo is not
+/// to link again ([`wrapper::DAEMONS`]).
+struct ToCargo(Box<State>, String, Vec<state::Daemons>);
 
 /// Why the daemon's programs are not the build.
 enum NotServed {
@@ -514,7 +515,7 @@ enum NotServed {
 /// on the source is the build's.
 fn by_daemon(mut state: State) -> Result<(State, Held), NotServed> {
     use crate::trace::{CLIENT, note};
-    let to_cargo = |state, why| NotServed::Cargo(ToCargo(Box::new(state), why));
+    let to_cargo = |state, why| NotServed::Cargo(ToCargo(Box::new(state), why, Vec::new()));
     let checking = Instant::now();
     let cargos = state.refusal.clone().or_else(|| state.broken_guard());
     if let Some(reason) = cargos.or_else(|| state.stale_cargos()) {
@@ -532,11 +533,28 @@ fn by_daemon(mut state: State) -> Result<(State, Held), NotServed> {
         }
         Err(why) => return Err(to_cargo(state, why.why())),
     };
+    // A program the daemon was asked for and did not build is cargo's, whatever its source:
+    // what the daemon did build is given to cargo as it is.
+    let refused = state.programs.iter().find_map(|program| {
+        let (checkout, at) = program.asked_as?;
+        let why = answers.get(checkout)?.get(at)?.as_ref().err()?;
+        Some(format!("`{}`: {why}", program.name))
+    });
+    if let Some(why) = refused {
+        let daemons = state.daemons(&answers);
+        return Err(NotServed::Cargo(ToCargo(Box::new(state), why, daemons)));
+    }
     let settling = Instant::now();
     let held = state.hold();
     let cargos = match state.settle(&answers, &held) {
         Ok(cargos) => cargos.len(),
-        Err(why) => return Err(to_cargo(state, why)),
+        Err(why) => {
+            // A program the daemon built is up to date and may be running with its edits
+            // applied: cargo, building another, puts the daemon's in its place rather than
+            // have rustc link it again, which would have it start again for nothing.
+            let daemons = state.daemons(&answers);
+            return Err(NotServed::Cargo(ToCargo(Box::new(state), why, daemons)));
+        }
     };
     note("client settle", CLIENT, settling);
     let served = cargos < state.programs.len() || state.programs.is_empty();
@@ -544,8 +562,9 @@ fn by_daemon(mut state: State) -> Result<(State, Held), NotServed> {
     Ok((state, held))
 }
 
-/// Has the daemon build the programs of `checkout`, loading it first when it has not.
-/// `Err` is why a program is not built.
+/// Has the daemon build the programs of `checkout`, loading it first when it has not: of
+/// each, `Ok` or why the daemon did not build it. `Err` is why none is built: the daemon
+/// failed, or the source has an error.
 pub(super) fn built(checkout: &Checkout) -> Result<Vec<Result<(), String>>, NotBuilt> {
     if checkout.programs.is_empty() {
         return Ok(Vec::new());
@@ -569,11 +588,11 @@ pub(super) fn built(checkout: &Checkout) -> Result<Vec<Result<(), String>>, NotB
     std::iter::zip(&checkout.programs, programs)
         .map(|(program, built)| match built {
             Ok(_) => Ok(Ok(())),
-            Err(NotBuilt::Failed(why)) => Err(NotBuilt::Failed(format!(
-                "ra-jit did not build {}: {why}",
-                program.binary.display()
-            ))),
-            Err(cargos) => Err(cargos),
+            Err(NotBuilt::Error(said)) => Err(NotBuilt::Error(said)),
+            Err(NotBuilt::Failed(why)) => {
+                Ok(Err(format!("ra-jit did not build {}: {why}", program.binary.display())))
+            }
+            Err(NotBuilt::Cargos(why)) => Ok(Err(why)),
         })
         .collect()
 }
@@ -585,6 +604,10 @@ fn asking(checkout: &Checkout) -> Checkout {
     // edit of every `env!`.
     let wraps = |name: &str| {
         name == wrapper::DRIVEN
+            || name == wrapper::DAEMONS
+            || name == wrapper::DAEMONS_KEY
+            || name == wrapper::STAGED
+            || name == wrapper::EVERY_CRATE
             || name == switch::VARIABLE
             || name == "RA_JIT_STATS"
             || name == "RA_JIT_TRACE"
@@ -614,13 +637,14 @@ fn by_cargo(
     key: &str,
     counts: Counts,
     ahead: Option<daemon::Ahead>,
+    daemons: &[state::Daemons],
 ) -> anyhow::Result<Result<State, i32>> {
-    State::give_back(key);
+    State::give_back(key, daemons);
     if let Some(ahead) = &ahead {
         // Without an answer the daemon loads the workspace once cargo is done.
         let _ = client::ask(Request::Ahead(ahead.clone()), Start::IfMissing);
     }
-    let built = loaded_by_cargo(asked, cwd, key, counts, ahead.as_ref());
+    let built = loaded_by_cargo(asked, cwd, key, counts, ahead.as_ref(), daemons);
     // The worker that loaded ahead is the one the build was given to, unless there is none.
     if let Some(ahead) = ahead {
         let _ = client::ask(Request::Forget(ahead.config.id()), Start::Never);
@@ -634,12 +658,14 @@ fn loaded_by_cargo(
     key: &str,
     counts: Counts,
     ahead: Option<&daemon::Ahead>,
+    daemons: &[state::Daemons],
 ) -> anyhow::Result<Result<State, i32>> {
-    let built = match Built::by_cargo(asked, ahead)? {
+    let built = match Built::by_cargo(asked, ahead, daemons)? {
         Ok(built) => built,
         Err(code) => return Ok(Err(code)),
     };
     let mut state = State::after(asked, cwd, key, built, counts)?;
+    state.keep(daemons);
     if state.refusal.is_none() {
         let asked = state.checkouts.iter().filter(|it| !it.programs.is_empty());
         let cold: Vec<String> = asked.filter_map(|it| warmed(it).err()).collect();
