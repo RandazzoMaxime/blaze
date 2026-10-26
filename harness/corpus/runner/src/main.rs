@@ -568,6 +568,8 @@ fn main() {
     println!("type_ids elided {:?}", cases::type_id_hashes::elided());
     println!("type_ids function_items {:?}", cases::type_id_hashes::function_items());
     println!("type_ids constructors {:?}", cases::type_id_hashes::constructors());
+    println!("type_ids more_constructors {:?}", cases::type_id_hashes::more_constructors());
+    println!("type_ids constructor_downcasts {:?}", cases::type_id_hashes::constructor_downcasts());
     println!("type_ids closures {:?}", cases::type_id_hashes::closures());
     println!("type_ids futures {:?}", cases::type_id_hashes::futures());
     println!("type_names {:?}", cases::type_id_hashes::type_names());

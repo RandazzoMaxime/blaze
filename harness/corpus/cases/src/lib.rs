@@ -3973,6 +3973,35 @@ pub mod type_id_hashes {
         (&value as &dyn Any).type_id()
     }
 
+    /// Constructors of a crate rustc compiled and of std, and of an enum written in a body.
+    pub fn more_constructors() -> Vec<TypeId> {
+        enum InBody {
+            One(u8),
+        }
+        let _ = InBody::One(0);
+        let _ = upstream::Shape::<u8>::Dot;
+        vec![
+            of_value(&upstream::Shape::<u8>::Line),
+            of_value(&upstream::Shape::<String>::Pair),
+            of_value(&upstream::Meters),
+            of_value(&upstream::Wrap::<u8>),
+            of_value(&std::num::Wrapping::<u8>),
+            of_value(&std::cmp::Reverse::<u8>),
+            of_value(&std::ops::ControlFlow::<u8, ()>::Break),
+            of_value(&InBody::One),
+            any_of(Some(3u8).map(Some)),
+            any_of(vec![1u8].into_iter().map(std::num::Wrapping)),
+            any_of(std::iter::once(1u8).map(upstream::Shape::Line)),
+        ]
+    }
+
+    /// A value rustc's code boxed, of a type with `Ok` used as a function, downcast in ours.
+    pub fn constructor_downcasts() -> Vec<bool> {
+        let (value, boxed) = upstream::boxed_ok();
+        let ours = std::iter::once(3u8).map(Ok::<u8, ()>);
+        vec![is(&value, &*boxed), is(&ours, &*boxed), is(&Some::<u8>, &*boxed)]
+    }
+
     struct Holder<F>(F, u8);
 
     fn two_closures<T: 'static>(seed: T) -> (impl Fn() -> u8 + 'static, impl Fn(&str) -> usize) {
