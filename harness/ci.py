@@ -45,6 +45,8 @@ HARNESSES = [
     ("core", ["coldbuild.py"], {}, on("linux"), 2),
     ("core", ["splices.py"], {}, EVERYWHERE, 2),
     ("core", ["live_e2e.py"], {}, on("linux-x86_64"), 1),
+    # A program on a nightly feature (allocator_api) builds and takes live edits the same way.
+    ("core", ["live_e2e.py"], {"LIVE_PROGRAM": "live-alloc"}, on("linux-x86_64"), 1),
     # Apple's linker leaves no more room than it is told, and gives a newer macOS chained fixups.
     ("core", ["headerpad.py"], {}, on("macos"), 1),
     # bun links with `-no_compact_unwind`, which leaves `__eh_frame` alone to the unwinder.
