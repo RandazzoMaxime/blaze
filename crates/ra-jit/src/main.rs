@@ -8665,8 +8665,9 @@ fn run_holding(
                 let within = listed.programs(&db);
                 let lints = !args.lints_capped;
                 let broken = broken_in(&db, &all, &sources, &args.checkout, within, lints);
-                let why =
-                    hir::attach_db(&db, || refusal(&db, &all, &sources, &args.checkout, broken, None));
+                let why = hir::attach_db(&db, || {
+                    refusal(&db, &all, &sources, &args.checkout, broken, None)
+                });
                 eprintln!("check: {} files in {:.1?}", all.len(), checking.elapsed());
                 if let Some(why) = why {
                     if let Refused::Error(said) = &why {

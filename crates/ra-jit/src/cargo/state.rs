@@ -1686,7 +1686,9 @@ pub(crate) fn turned_down(said: &crate::errors::Said, package: &str, target: &st
     }
     let toolchain =
         super::toolchain::failed_note().map_or(String::new(), |it| format!("\nnote: {it}"));
-    format!("{said}\n\n{notes}error: could not compile `{package}` ({target}) due to {errors}{toolchain}")
+    format!(
+        "{said}\n\n{notes}error: could not compile `{package}` ({target}) due to {errors}{toolchain}"
+    )
 }
 
 #[cfg(test)]
