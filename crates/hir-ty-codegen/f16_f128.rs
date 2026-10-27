@@ -98,12 +98,29 @@ impl<'db> FunctionCx<'_, 'db> {
         self.cg.target.arch == Arch::X86_64
     }
 
+    /// Refuses an `f16` converted in a function with F16C (which AVX-512 implies): x86-64's
+    /// LLVM converts it there by `vcvtph2ps` and `vcvtps2ph`, and works on it by AVX512-FP16's
+    /// instructions where it has those, not by compiler-builtins.
+    fn x86_soft_half(&self) -> Result<()> {
+        let converts = self
+            .body
+            .and_then(|it| it.owner.as_function())
+            .is_some_and(|func| hir_ty::TargetFeatures::from_fn(self.cg.db, func).enables("f16c"));
+        if converts {
+            return Err(CodegenError::Unsupported(
+                "f16 in a function with F16C, which LLVM converts by its instructions".into(),
+            ));
+        }
+        Ok(())
+    }
+
     /// An `f16` as the `f32` or `f64` of the same value, which is exact. x86-64's LLVM goes
     /// to `f64` through `f32`.
     fn widen_half(&mut self, value: Value, to: Type) -> Result<Value> {
         if !self.x86() {
             return Ok(self.fcvt(value, types::F16, to));
         }
+        self.x86_soft_half()?;
         let single = self.builtin("__extendhfsf2", &[types::F16], types::F32, &[value])?;
         Ok(match to {
             types::F32 => single,
@@ -117,6 +134,7 @@ impl<'db> FunctionCx<'_, 'db> {
         if !self.x86() {
             return Ok(self.fcvt(value, from, types::F16));
         }
+        self.x86_soft_half()?;
         let name = if from == types::F32 { "__truncsfhf2" } else { "__truncdfhf2" };
         self.builtin(name, &[from], types::F16, &[value])
     }
@@ -255,6 +273,9 @@ impl<'db> FunctionCx<'_, 'db> {
         let single = AbiScalar { ty: types::F32, signed: true };
         if from.ty == to.ty {
             return Ok(value);
+        }
+        if self.x86() && (from.ty == types::F16 || to.ty == types::F16) {
+            self.x86_soft_half()?;
         }
         Ok(match (from.ty, to.ty) {
             (types::F16, types::F32 | types::F64) => self.widen_half(value, to.ty)?,
