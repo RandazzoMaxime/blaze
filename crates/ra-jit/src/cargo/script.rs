@@ -21,7 +21,7 @@ use anyhow::Context as _;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 
-use super::{keyed, own_script, sandboxed, script_sandbox};
+use super::{directives, keyed, own_script, sandboxed, script_sandbox};
 
 /// The variable that names the script itself to `ra-jit build-script`.
 const REAL: &str = "RA_JIT_BUILD_SCRIPT";
@@ -141,8 +141,10 @@ pub(crate) fn run_as_cargo_does(
     };
     let plan = script_sandbox::plan(&running)?;
     let package = ran.env.iter().find(|it| it.0 == "CARGO_PKG_NAME").map_or("?", |it| &it.1);
-    let root_manifest = match &plan {
-        script_sandbox::Plan::Sandboxed { root_manifest, .. } => root_manifest.clone(),
+    let (root_manifest, link_dirs) = match &plan {
+        script_sandbox::Plan::Sandboxed { root_manifest, link_dirs, .. } => {
+            (root_manifest.clone(), link_dirs.clone())
+        }
         script_sandbox::Plan::Outside(..) => {
             script_sandbox::keep_reads(&out_dir, None);
             script.env_clear().envs(plan.env().iter().map(|(k, v)| (k, v)));
@@ -191,6 +193,13 @@ pub(crate) fn run_as_cargo_does(
     if output.status.success() && !not_given.is_empty() {
         let error = script_sandbox::not_given_error(package, &not_given, root_manifest.as_deref());
         eprintln!("error: {error}");
+        std::process::exit(1);
+    }
+    let directives =
+        directives::Ran { package_dir: &cwd, out_dir: &out_dir, link_dirs: &link_dirs };
+    let refused = directives::refused(&output.stdout, &directives);
+    if output.status.success() && !refused.is_empty() {
+        eprintln!("error: {}", directives::refused_error(package, &refused));
         std::process::exit(1);
     }
     let undeclared =
@@ -259,8 +268,9 @@ fn watched(stdout: &[u8], cwd: &Path) -> Vec<String> {
 
 /// What the store's runs of build scripts are kept under in place of a toolchain: what a run
 /// prints and writes is told by the script, which its key has. 4 since a run is kept by what
-/// the sandbox saw it read ([`keyed`]).
-const RUNS: &str = "build script runs 4";
+/// the sandbox saw it read ([`keyed`]), 5 since what one printed is checked before it is kept
+/// ([`directives`]).
+const RUNS: &str = "build script runs 5";
 
 /// The variables of a run that change nothing it prints or writes: the jobs it may start, and
 /// the directories the shell that ran cargo was in, which cargo leaves as they were (it runs
