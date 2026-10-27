@@ -27,6 +27,7 @@ cases![
     clmul,
     crc_ternlog,
     ifma,
+    fma_feature_nans,
     asm_const,
     cast_then_shift,
     xgetbv,

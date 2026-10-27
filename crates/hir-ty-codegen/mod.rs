@@ -15170,16 +15170,23 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
                 if !lane.ty.is_float() {
                     unsupported!("`{name}` of integers");
                 }
+                self.refuse_x86_fma(name)?;
                 // AArch64's LLVM makes a vector of more lanes than one `fmla z, y, x`, the
                 // factors the other way round, which decides which of two NaNs comes out; a
                 // vector of one lane is the scalar's `fmadd`, in order.
                 let swapped = self.cg.target.arch == Arch::Aarch64 && count > 1;
+                // x86-64's LLVM makes `simd_relaxed_fma` (`llvm.fmuladd`) of a CPU without FMA
+                // a multiply and then an add (`mulps`, `addps`), rounded twice.
+                let unfused = name == "simd_relaxed_fma" && self.cg.target.arch == Arch::X86_64;
                 let lanes: Vec<Value> = (0..count)
                     .map(|i| {
                         let offset = (i * lane.ty.bytes() as u64) as i32;
                         let [x, y, z] =
                             [a, b, c].map(|v| self.builder.ins().load(lane.ty, MEM, v, offset));
-                        if swapped {
+                        if unfused {
+                            let product = self.builder.ins().fmul(x, y);
+                            self.builder.ins().fadd(product, z)
+                        } else if swapped {
                             self.builder.ins().fma(y, x, z)
                         } else {
                             self.builder.ins().fma(x, y, z)
@@ -15687,6 +15694,9 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
                 let (a, scalar) = self.load_scalar(a)?;
                 let (b, _) = self.load_scalar(b)?;
                 let (c, _) = self.load_scalar(c)?;
+                if scalar.ty != types::F128 {
+                    self.refuse_x86_fma(name)?;
+                }
                 if f16_f128::soft(scalar.ty) {
                     let value = self.soft_fma(a, b, c)?;
                     self.builder.ins().store(MEM, value, dst, 0);
@@ -17108,6 +17118,35 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
             unsupported!("an atomic of 128 bits on AArch64 without outline atomics");
         }
         Ok(true)
+    }
+
+    /// Refuses the fused multiply-add `name` in an x86-64 function with FMA or FMA4 (by its
+    /// crate, or by its own `#[target_feature]` and what that implies, as AVX-512 does FMA).
+    /// LLVM makes it `vfmadd213` there, the factors the other way round from libm's `fma`,
+    /// which decides which of two NaNs comes out, and at `-O0` still folds the negations,
+    /// masks and shuffles around it into other forms (`vfnmadd213ss`, `vfmaddsub213ps`, a
+    /// masked `vfmadd132ps`), which keep another NaN or its sign: that depends on the code
+    /// around the call, not on the call.
+    fn refuse_x86_fma(&self, name: &str) -> Result<()> {
+        if self.cg.target.arch != Arch::X86_64 {
+            return Ok(());
+        }
+        let func = self.body.and_then(|it| it.owner.as_function());
+        let features = func.map(|func| hir_ty::TargetFeatures::from_fn(self.cg.db, func));
+        let fused = ["fma", "fma4"].into_iter().any(|feature| {
+            let atom = cfg::CfgAtom::KeyValue {
+                key: intern::sym::target_feature,
+                value: intern::Symbol::intern(feature),
+            };
+            self.env.krate.cfg_options(self.cg.db).check_atom(&atom)
+                || features.as_ref().is_some_and(|it| it.enables(feature))
+        });
+        if fused {
+            unsupported!(
+                "`{name}` in an x86-64 function with FMA, which LLVM fuses by its context"
+            );
+        }
+        Ok(())
     }
 
     /// What `ptr` held, swapped for `new` when it was `expected`: compiler_builtins'
