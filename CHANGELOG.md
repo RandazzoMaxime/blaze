@@ -1174,7 +1174,7 @@ each one's section: what `[Unreleased]` had, and the title of each change merged
   `[ra-jit]` instead of handing every build to cargo. The daemon takes COFF programs (also with
   `--target x86_64-pc-windows-msvc`), links them with the `rust-lld` the repository's cargo
   configuration names, and closes an existing directory of its own that others can enter, as
-  on Unix. Live edits of a running program are still macOS and Linux only.
+  on Unix.
 - A profile with `debug = "line-tables-only"` (or `1`, or `"limited"`) no longer has the type
   of every variable worked out. Only the lines were written, but the types were described for
   each function compiled and then thrown away. On Biome (`biome_cli`, 518 crates, whose dev

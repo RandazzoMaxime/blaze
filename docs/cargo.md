@@ -671,9 +671,10 @@ before changing it.
   what such a build would, when the daemon has it loaded, and what it finds in the whole
   workspace otherwise.
 - Linux x86-64 and macOS arm64 have been run; on macOS only ripgrep, fd and hyperfine and
-  the generated workspace of the harness. The code compiles for Windows, but every build
-  there would go to cargo (the link step knows ELF and Mach-O), and the command has not
-  been built or run there. The socket's permission and peer checks do nothing on Windows.
+  the generated workspace of the harness. On Windows x86-64 (MSVC) builds go through the
+  daemon and link with `rust-lld`; that was run by hand on a toy crate and `demo/life`, and
+  this harness has not run there ([platforms.md](platforms.md#windows-x86-64-msvc)). The
+  socket's permission and peer checks do nothing on Windows.
 - On Linux `cargo ra-jit` was measured with the Cranelift backend only; LLVM has been run
   through the harness gate, not through `harness/cargo_ra_jit.py`. On macOS the harness was
   run under both.
@@ -764,8 +765,7 @@ match cargo on every step. `harness/cargo_ra_jit.py` runs all of this.
 
 Not checked: a proc macro defined in the workspace, `--target` for another triple,
 `cargo install` from the registry, a real rust-analyzer session next to it, real sccache (a
-stand-in wrapper was used). On Windows every build is cargo's in this mode and nothing was
-run. macOS arm64 is below.
+stand-in wrapper was used). None of it was run on Windows. macOS arm64 is below.
 
 ### Known problems
 
