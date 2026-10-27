@@ -1,0 +1,8 @@
+{
+  "version": "23.1.4",
+  "repo": "https://github.com/indexable-inc/llvm",
+  "branch": "ix/23.x",
+  "commit": "e152d9fa2bc259b3f831769ba1e1b17cf71d45da",
+  "release": "https://github.com/indexable-inc/blaze/releases/download/llvm-23.1.4-e152d9fa2bc2",
+  "targets": {}
+}
