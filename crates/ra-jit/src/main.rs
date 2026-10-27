@@ -6038,9 +6038,8 @@ fn errors_of(
     let asked_of = std::cell::Cell::new((0usize, 0usize));
     let asked = |body: hir::DefWithBody| {
         let hir::DefWithBody::Function(func) = body else { return was.is_none() };
-        let written = hir::HasSource::source(func, db).map(|it| {
-            rustc_hash::FxBuildHasher.hash_one(it.value.syntax().text().to_string())
-        });
+        let written = hir::HasSource::source(func, db)
+            .map(|it| rustc_hash::FxBuildHasher.hash_one(it.value.syntax().text().to_string()));
         let Some(written) = written else { return true };
         functions.borrow_mut().insert(func, written);
         let asked = was.as_ref().is_none_or(|was| was.functions.get(&func) != Some(&written));
