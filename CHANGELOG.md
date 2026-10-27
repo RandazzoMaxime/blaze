@@ -17,6 +17,10 @@ All notable changes to ra-jit are written here. The format follows
   and biome with their own rustfmt.toml (6068 of 6068 files, `--check` exit codes and diffs
   too), the same with `max_width = 60` (6068 of 6068), and rustfmt's `tests/source` (773 of
   793; the rest are those refusals).
+- `cargo blaze remove` is blaze's own: the dependencies out of the manifest, layout and
+  comments kept, what named them cleaned up, and the lock file resolved again with every
+  version it keeps (`harness/own_remove.py`, 43 of 43 cases, manifests and lock files byte
+  for byte).
 - `cargo blaze config get` is blaze's own: the configuration cargo reads, in TOML or JSON,
   merged or file by file, with where each value is from (`harness/own_config.py`, 41 of 41
   cases).

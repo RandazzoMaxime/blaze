@@ -8,6 +8,7 @@ mod clean;
 mod config;
 mod manifest;
 mod new;
+mod remove;
 mod report;
 mod tree;
 mod uninstall;
@@ -85,7 +86,7 @@ pub(crate) const SUBCOMMANDS: &[Subcommand] = &[
     sub("init", Status::Own, "make a package in this directory"),
     sub("pkgid", Status::Own, "the full id of a package"),
     sub("vendor", Status::Not("not written yet"), "copy every dependency into the workspace"),
-    aka("remove", &["rm"], Status::Not("not written yet"), "remove dependencies from the manifest"),
+    aka("remove", &["rm"], Status::Own, "remove dependencies from the manifest"),
     sub("add", CHOOSES_VERSIONS, "add dependencies to the manifest"),
     sub("update", CHOOSES_VERSIONS, "update the lock file"),
     sub("generate-lockfile", CHOOSES_VERSIONS, "write the lock file"),
@@ -139,6 +140,7 @@ pub(crate) fn command(args: Vec<String>) -> anyhow::Result<i32> {
         "uninstall" => uninstall::command(Args::new(rest)),
         "report" => report::command(Args::new(rest)),
         "config" => config::command(rest),
+        "remove" => remove::command(rest),
         "fetch" => manifest::fetch(Args::new(rest)),
         "clean" => clean::command(Args::new(rest)),
         "new" | "init" => new::command(subcommand.name, Args::new(rest)),

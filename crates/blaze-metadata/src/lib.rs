@@ -280,13 +280,38 @@ fn made(asked: &Asked<'_>) -> Result<(String, Vec<String>)> {
     resolving(asked, None, |resolved, serialized, ids| described(asked, &resolved, serialized, ids))
 }
 
+/// Resolves the workspace of `asked` again after its manifests changed, as `cargo remove`
+/// does, every version it can keep being the one the lock file locks; writes the lock file
+/// if the resolve changed it, unless `locked` (`--locked` or `--frozen`) forbids it. Returns
+/// the packages `[patch]` names that the resolve did not use.
+pub fn relock(asked: &Asked<'_>, command: &str, locked: Option<&str>) -> Result<Vec<PackageId>> {
+    let relock = Relock { command, locked };
+    resolving_with(asked, None, Some(relock), |_, _, _, unused| Ok(unused.to_vec()))
+}
+
+/// What a resolve that may change the lock file was asked by.
+#[derive(Clone, Copy)]
+struct Relock<'a> {
+    command: &'a str,
+    locked: Option<&'a str>,
+}
+
 fn resolving<R>(
     asked: &Asked<'_>,
     pick: Option<Pick<'_>>,
     then: impl FnOnce(Resolved<'_>, Vec<SerializedPackage<'_>>, &[PackageId]) -> Result<R>,
 ) -> Result<R> {
+    resolving_with(asked, pick, None, |it, serialized, ids, _| then(it, serialized, ids))
+}
+
+fn resolving_with<R>(
+    asked: &Asked<'_>,
+    pick: Option<Pick<'_>>,
+    relock: Option<Relock<'_>>,
+    then: impl FnOnce(Resolved<'_>, Vec<SerializedPackage<'_>>, &[PackageId], &[PackageId]) -> Result<R>,
+) -> Result<R> {
     let mut config = Config::load(asked.cwd, asked.env.clone(), &[])?;
-    config.start("metadata", asked.config)?;
+    config.start(relock.map_or("metadata", |it| it.command), asked.config)?;
     let offline = asked.offline || config.net_config()?.offline.unwrap_or(false);
     let ctx = Context::new(config);
     let ws = Workspace::new(&root_manifest(asked.manifest_path, &ctx)?, &ctx)?;
@@ -384,9 +409,35 @@ fn resolving<R>(
         &specs,
         has_dev_units,
     )?;
-    if lockfile::lockfile_to_write(&mut whole, Some(&lock_text), None, None)?.is_some() {
-        bail!("{} would change: the manifests no longer agree with it", lock_path.display());
+    match relock {
+        None => {
+            if lockfile::lockfile_to_write(&mut whole, Some(&lock_text), None, None)?.is_some() {
+                bail!(
+                    "{} would change: the manifests no longer agree with it",
+                    lock_path.display()
+                );
+            }
+        }
+        Some(relock) => {
+            let lowest = ws
+                .members()
+                .filter_map(|(_, m)| m.metadata.rust_version.as_ref())
+                .filter_map(|it| it.to_string().parse::<blaze_resolve::RustVersion>().ok())
+                .min();
+            let locked = relock.locked.map(|flag| lockfile::Locked {
+                flag,
+                path: &lock_path,
+                path_deps: &path_deps,
+            });
+            if let Some(text) =
+                lockfile::lockfile_to_write(&mut whole, Some(&lock_text), lowest.as_ref(), locked)?
+            {
+                std::fs::write(&lock_path, text)
+                    .with_context(|| format!("failed to write {}", lock_path.display()))?;
+            }
+        }
     }
+    let unused_patches = whole.unused_patches().to_vec();
     let resolved = Resolved {
         ws: &ws,
         resolve: &targeted,
@@ -398,7 +449,7 @@ fn resolving<R>(
         has_dev_units,
         packages: &reads,
     };
-    then(resolved, serialized, &ids)
+    then(resolved, serialized, &ids, &unused_patches)
 }
 
 /// The JSON `cargo metadata` prints of `resolved`, and the ids of the members its build
