@@ -349,7 +349,7 @@ pub(crate) mod tests {
         let (_, nar) = real();
         let refused = |nar: &[u8]| {
             let work = tempfile::tempdir().unwrap();
-            read(nar, &mut Unpack(work.path().join("out"))).unwrap_err().to_string()
+            format!("{:#}", read(nar, &mut Unpack(work.path().join("out"))).unwrap_err())
         };
         assert!(refused(&nar[..nar.len() - 8]).contains("ends early"));
         assert!(refused(&nar[8..]).contains("not a NAR") || refused(&nar[8..]).contains("string"));

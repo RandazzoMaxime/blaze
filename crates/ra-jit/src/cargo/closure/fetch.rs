@@ -141,11 +141,11 @@ impl Read for Reading<'_> {
     }
 }
 
-/// A store path of the closure: what it is, what it refers to, and the narinfo to download it
-/// by when the store does not have it.
+/// A store path of the closure: what it is, what it refers to (with what their NARs are, where
+/// the store's manifest says), and the narinfo to download it by when the store lacks it.
 struct Resolved {
     path: StorePath,
-    references: Vec<String>,
+    references: Vec<(String, Option<StorePath>)>,
     info: Option<NarInfo>,
 }
 
@@ -163,24 +163,25 @@ pub(crate) fn fetch(
         roots.iter().map(|it| (it.path.clone(), Some(it.clone()))).collect();
     while !level.is_empty() {
         let resolved = runtime.block_on(
-            stream::iter(level.iter().map(|(path, pinned)| resolve(store, source, keys, path, pinned)))
-                .buffer_unordered(ASKED)
-                .collect::<Vec<_>>(),
+            stream::iter(level.iter().map(|(path, expected)| {
+                resolve(store, source, keys, path, expected.as_ref())
+            }))
+            .buffer_unordered(ASKED)
+            .collect::<Vec<_>>(),
         );
-        let mut next = Vec::new();
+        let mut next: BTreeMap<String, Option<StorePath>> = BTreeMap::new();
         for resolved in resolved {
             let resolved = resolved?;
-            for reference in &resolved.references {
-                if !known.contains_key(reference) && resolved.path.path != *reference {
-                    next.push((reference.clone(), None));
+            for (reference, expected) in &resolved.references {
+                let wanted = next.entry(reference.clone()).or_default();
+                if wanted.is_none() {
+                    wanted.clone_from(expected);
                 }
             }
             known.insert(resolved.path.path.clone(), resolved);
         }
-        next.sort();
-        next.dedup();
-        next.retain(|(path, _)| !known.contains_key(path));
-        level = next;
+        next.retain(|path, _| !known.contains_key(path));
+        level = next.into_iter().collect();
     }
     let mut fetched = Fetched { paths: known.len(), ..Fetched::default() };
     let todo: Vec<&Resolved> = known.values().filter(|it| it.info.is_some()).collect();
@@ -236,20 +237,22 @@ pub(crate) fn fetch(
 }
 
 /// What `path` is and refers to: from the store's manifest of it when the store has one, else
-/// from its narinfo, which must be signed and, for a root, say the NarHash pins.txt has.
+/// from its narinfo, which must be signed and say the NAR `expected` names, where pins.txt or
+/// the manifest of what refers to it does.
 async fn resolve(
     store: &Store,
     source: &Source,
     keys: &[&str],
     path: &str,
-    pinned: &Option<StorePath>,
+    expected: Option<&StorePath>,
 ) -> anyhow::Result<Resolved> {
     let had = |path: &StorePath| {
         let manifest = kept::manifest(store, path).ok()?;
-        let references = manifest.references.into_iter().map(|it| it.path).collect();
+        let references =
+            manifest.references.into_iter().map(|it| (it.path.clone(), Some(it))).collect();
         Some(Resolved { path: path.clone(), references, info: None })
     };
-    if let Some(had) = pinned.as_ref().and_then(had) {
+    if let Some(had) = expected.and_then(had) {
         return Ok(had);
     }
     let info = source.narinfo(path).await?;
@@ -262,22 +265,22 @@ async fn resolve(
         bail!("{}'s narinfo of {path} is of {}", source.name(), info.store_path);
     }
     let of = StorePath { path: path.to_owned(), nar_hash: info.nar_hash, nar_size: info.nar_size };
-    if let Some(pinned) = pinned
-        && *pinned != of
+    if let Some(expected) = expected
+        && *expected != of
     {
         bail!(
-            "{}'s narinfo of {path} says its NAR is {} bytes of {}, and pins.txt {} of {}",
+            "{}'s narinfo of {path} says its NAR is {} bytes of {}, where {} of {} was expected",
             source.name(),
             of.nar_size,
             of.nar_hash,
-            pinned.nar_size,
-            pinned.nar_hash
+            expected.nar_size,
+            expected.nar_hash
         );
     }
     if let Some(had) = had(&of) {
         return Ok(had);
     }
-    let references = info.references.clone();
+    let references = info.references.iter().map(|it| (it.clone(), None)).collect();
     Ok(Resolved { path: of, references, info: Some(info) })
 }
 
