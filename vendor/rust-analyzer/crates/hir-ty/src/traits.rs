@@ -204,9 +204,16 @@ pub fn impl_may_apply<'db>(
 
 /// Whether the trait's item `item` cannot be used through `impl_`: one of its own where-clauses
 /// that names only the trait's parameters (`Self::Item: Ord` of `Iterator::cmp`) cannot hold
-/// there. rustc's `is_impossible_associated_item`, which rustdoc asks before it lists an item
-/// the impl leaves as the trait provides it.
-pub fn is_impossible_associated_item(db: &dyn HirDatabase, impl_: ImplId, item: GenericDefId) -> bool {
+/// there. rustc's `is_impossible_associated_item` (`compiler/rustc_trait_selection/src/traits/mod.rs`
+/// at rust 12433c307b5a497388ffe2f4e49dbf1ab8c71fa0), which rustdoc asks before it lists an item
+/// the impl leaves as the trait provides it. `krate` is the crate asking, rustc's local crate:
+/// a clause it could not know the answer to holds as far as it can tell.
+pub fn is_impossible_associated_item(
+    db: &dyn HirDatabase,
+    krate: Crate,
+    impl_: ImplId,
+    item: GenericDefId,
+) -> bool {
     use std::ops::ControlFlow;
 
     use rustc_type_ir::{TypeSuperVisitable, TypeVisitable, TypeVisitor};
@@ -239,18 +246,63 @@ pub fn is_impossible_associated_item(db: &dyn HirDatabase, impl_: ImplId, item: 
 
     let Some(trait_ref) = db.impl_trait(impl_) else { return false };
     let interner = DbInterner::new_with(db, impl_.krate(db));
-    let args = trait_ref.instantiate_identity().skip_norm_wip().args;
-    let param_env = db.trait_environment(impl_.into());
+    // As coherence asks: the impl's parameters are inference variables, so a clause that holds
+    // for some of their values (`T: Ord` of an `IntoIter<T>`) is ambiguous, not an error.
+    let infcx = interner.infer_ctxt().build(TypingMode::Coherence);
+    let fresh = infcx.fresh_args_for_item(Span::Dummy, impl_.into());
+    let args = trait_ref.instantiate(interner, fresh).skip_norm_wip().args;
     let parent = crate::generics::generics(db, item).len_parent() as u32;
-    let infcx = interner.infer_ctxt().build(TypingMode::non_body_analysis());
-    crate::lower::GenericPredicates::query_own_explicit(db, item)
+    let mut ocx = ObligationCtxt::new(&infcx);
+    for clause in crate::lower::GenericPredicates::query_own_explicit(db, item)
         .skip_binder()
         .filter(|clause| clause.visit_with(&mut OwnParam(parent)).is_continue())
-        .any(|clause| {
-            let clause = EarlyBinder::bind(clause).instantiate(interner, args).skip_norm_wip();
-            let obligation = Obligation::new(interner, ObligationCause::dummy(), param_env, clause);
-            !infcx.predicate_may_hold(&obligation)
-        })
+    {
+        let clause = EarlyBinder::bind(clause).instantiate(interner, args).skip_norm_wip();
+        // Coherence answers a trait goal only a crate upstream of `krate` could implement
+        // (`io::Error: Ord`) as ambiguous, since that crate may add the impl; rust-analyzer's
+        // solver takes every crate as local, so the goal is left out here instead.
+        if let rustc_type_ir::ClauseKind::Trait(pred) = clause.kind().skip_binder() {
+            let trait_ref = ocx
+                .deeply_normalize(&ObligationCause::dummy(), ParamEnv::empty(), pred.trait_ref)
+                .unwrap_or(pred.trait_ref);
+            if !knowable(db, krate, trait_ref) {
+                continue;
+            }
+        }
+        ocx.register_obligation(Obligation::new(interner, ObligationCause::dummy(), ParamEnv::empty(), clause));
+    }
+    !ocx.try_evaluate_obligations().is_empty()
+}
+
+/// Whether `krate` can know every impl of `trait_ref`: the trait is its own or `#[fundamental]`,
+/// or one of the types is its own, under references and `#[fundamental]` types. rustc's
+/// `trait_ref_is_knowable` and `orphan_check_trait_ref`, leaving out where parameters may appear.
+fn knowable<'db>(db: &'db dyn HirDatabase, krate: Crate, trait_ref: crate::next_solver::TraitRef<'db>) -> bool {
+    let trait_id = trait_ref.def_id.0;
+    if trait_id.module(db).krate(db) == krate
+        || TraitSignature::of(db, trait_id).flags.contains(TraitFlags::FUNDAMENTAL)
+    {
+        return true;
+    }
+    trait_ref.args.types().any(|mut ty| loop {
+        match ty.kind() {
+            TyKind::Ref(_, inner, _) => ty = inner,
+            TyKind::Adt(adt_def, args) => {
+                let fundamental = match adt_def.def_id() {
+                    AdtId::StructId(id) => StructSignature::of(db, id).flags.contains(StructFlags::FUNDAMENTAL),
+                    _ => false,
+                };
+                match args.types().next() {
+                    Some(inner) if fundamental => ty = inner,
+                    _ => break adt_def.def_id().module(db).krate(db) == krate,
+                }
+            }
+            TyKind::Dynamic(bounds, _) => {
+                break bounds.principal_def_id().is_some_and(|it| it.0.module(db).krate(db) == krate);
+            }
+            _ => break false,
+        }
+    })
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

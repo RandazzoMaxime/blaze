@@ -173,6 +173,28 @@ pub fn important() -> u32 {
     0
 }
 
+/// Yields what it holds.
+pub trait Each {
+    type Item;
+    /// Only where the items are `Copy`.
+    fn copied(self)
+    where
+        Self::Item: Copy,
+        Self: Sized,
+    {
+    }
+}
+/// Yields squares, which are not `Copy`.
+pub struct Squares;
+impl Each for Squares {
+    type Item = shapes::Square;
+}
+/// Yields helpers, not `Copy` either, though their crate could make them so.
+pub struct Helpers;
+impl Each for Helpers {
+    type Item = dep::Helper;
+}
+
 //- /shapes.rs
 /// A square.
 pub struct Square;
@@ -406,6 +428,18 @@ fn members_and_impls() {
 
     let square = item(fixture, "fixture::shapes::Square");
     assert_eq!(square.impls.inherent[0].items[0].name, "SIDE");
+}
+
+#[test]
+fn provided_methods_that_cannot_apply_are_left_out() {
+    let (_db, model) = load();
+    let fixture = krate(&model, "fixture");
+    let members = |path: &str| -> Vec<String> {
+        let each = item(fixture, path).impls.traits.iter().find(|it| it.trait_name.as_deref() == Some("Each"));
+        each.expect("impl Each").items.iter().map(|it| it.name.clone()).collect()
+    };
+    assert_eq!(members("fixture::Squares"), ["Item"], "a square of this crate is not Copy");
+    assert_eq!(members("fixture::Helpers"), ["Item", "copied"], "dep may make a helper Copy");
 }
 
 #[test]

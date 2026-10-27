@@ -1531,15 +1531,15 @@ impl Function {
 
     /// Whether this function of a trait cannot be used through `impl_`: one of its where-clauses
     /// that names only the trait's parameters cannot hold there, as `Self: DoubleEndedIterator`
-    /// of `Iterator::rev` for an iterator that is not.
-    pub fn is_impossible_in(self, db: &dyn HirDatabase, impl_: Impl) -> bool {
+    /// of `Iterator::rev` for an iterator that is not, as far as `krate` can know.
+    pub fn is_impossible_in(self, db: &dyn HirDatabase, impl_: Impl, krate: Crate) -> bool {
         let (AnyFunctionId::FunctionId(id), Ok(impl_id)) = (self.id, ImplId::try_from(impl_)) else {
             return false;
         };
         if !matches!(id.lookup(db).container, ItemContainerId::TraitId(_)) {
             return false;
         }
-        traits::is_impossible_associated_item(db, impl_id, id.into())
+        traits::is_impossible_associated_item(db, krate.id, impl_id, id.into())
     }
 
     pub fn module(self, db: &dyn HirDatabase) -> Module {

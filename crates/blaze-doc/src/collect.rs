@@ -29,13 +29,11 @@ pub(crate) fn build(db: &RootDatabase, places: &Places) -> Model {
     use rayon::prelude::*;
     let files = Files::new(db, places);
     let std = StdItems::find(db, places);
-    let documented: FxHashSet<Crate> = places.crates.iter().map(|it| it.krate).collect();
     let by_trait_arg = impls_by_trait_arg(db, places);
     let built: Vec<(CrateDoc, Vec<Warning>)> = (0..places.crates.len())
         .into_par_iter()
         .map_with(db.clone(), |db, krate| {
             hir::attach_db(db, || {
-                let upstream = places::upstream(db, places.crates[krate].krate);
                 let builder = Builder {
                     db,
                     places: places.linking(krate),
@@ -43,7 +41,7 @@ pub(crate) fn build(db: &RootDatabase, places: &Places) -> Model {
                     std: &std,
                     by_trait_arg: &by_trait_arg,
                     krate,
-                    allowed: upstream.union(&documented).copied().collect(),
+                    allowed: places::upstream(db, places.crates[krate].krate),
                     linked: places::linked(db, places.crates[krate].krate),
                     warnings: RefCell::default(),
                 };
@@ -81,7 +79,8 @@ fn reservation(db: &RootDatabase, imp: Impl) -> bool {
 
 /// The trait impls of the crates documented that rustdoc shows on the page of a type other
 /// than the one they are for: of each documented type the impl names as an argument of the
-/// trait (`impl From<Local> for Foreign`), or as the self type behind a reference.
+/// trait (`impl From<Local> for Foreign`), as the self type behind a reference, or inside a
+/// `#[fundamental]` type (`impl Clone for Box<Local>`).
 fn impls_by_trait_arg(db: &RootDatabase, places: &Places) -> FxHashMap<hir::Adt, Vec<Impl>> {
     let mut out: FxHashMap<hir::Adt, Vec<Impl>> = FxHashMap::default();
     for documented in &places.crates {
@@ -90,9 +89,17 @@ fn impls_by_trait_arg(db: &RootDatabase, places: &Places) -> FxHashMap<hir::Adt,
             let self_ty = imp.self_ty(db);
             let behind_ref = self_ty.as_reference_inner().and_then(|it| it.as_adt());
             let own = self_ty.as_adt();
+            // A `#[fundamental]` type's arguments (`Box<Local>`, `Pin<&mut Local>`) are what the
+            // impl is for, as far as a page is concerned.
+            let inside: Vec<hir::Adt> = match own {
+                Some(adt) if fundamental(db, adt) => {
+                    self_ty.type_arguments().filter_map(|it| it.strip_references().as_adt()).collect()
+                }
+                _ => vec![],
+            };
             // A trait's arguments: the self type is the first, lifetimes and consts are none.
             let args = (1..16).filter_map(|at| trait_ref.get_type_argument(at));
-            for adt in args.filter_map(|it| it.strip_references().as_adt()).chain(behind_ref) {
+            for adt in args.filter_map(|it| it.strip_references().as_adt()).chain(behind_ref).chain(inside) {
                 if Some(adt) != own && places.crates.iter().any(|it| Some(it.krate) == places::krate_of(db, ModuleDef::Adt(adt))) {
                     let list = out.entry(adt).or_default();
                     if !list.contains(&imp) {
@@ -103,6 +110,10 @@ fn impls_by_trait_arg(db: &RootDatabase, places: &Places) -> FxHashMap<hir::Adt,
         }
     }
     out
+}
+
+fn fundamental(db: &RootDatabase, adt: hir::Adt) -> bool {
+    hir_def::attrs::AttrFlags::query(db, hir_def::AdtId::from(adt).into()).contains(hir_def::attrs::AttrFlags::FUNDAMENTAL)
 }
 
 /// What every crate's impls need from `core`: the auto traits, a type that is not each, and
@@ -198,8 +209,8 @@ struct Builder<'a> {
     std: &'a StdItems,
     by_trait_arg: &'a FxHashMap<hir::Adt, Vec<Impl>>,
     krate: usize,
-    /// Crates whose impls the docs list: the crate's own, its dependencies' and those
-    /// documented.
+    /// Crates whose impls a type's page lists: the crate's own and its dependencies'. A crate
+    /// downstream adds its impls to the pages of its traits, not of the types they are for.
     allowed: FxHashSet<Crate>,
     /// The crates linked into the crate, whose blanket impls apply to its types.
     linked: FxHashSet<Crate>,
@@ -1200,9 +1211,10 @@ impl Builder<'_> {
 
     /// Whether the impl can meet the where-clauses a provided method `f` puts on the trait's
     /// parameters; rustdoc leaves out a method it cannot, such as `rev` in the `Iterator` impl
-    /// of a type that is not a `DoubleEndedIterator`, or `cmp` of one whose items are not `Ord`.
+    /// of a type that is not a `DoubleEndedIterator`, or `cmp` of one whose items are a type of
+    /// the documented crate that is not `Ord`.
     fn possible(&self, imp: Impl, f: hir::Function) -> bool {
-        !f.is_impossible_in(self.db, imp)
+        !f.is_impossible_in(self.db, imp, self.documented().krate)
     }
 
     /// Whether the impl is for a type of a documented crate that the docs leave out, or a type
