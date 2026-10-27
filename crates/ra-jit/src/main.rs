@@ -8992,17 +8992,38 @@ fn run_holding(
             // No rustc checked the source of a build with nothing of rustc's: the worker
             // does, all of it the build compiles and the code nothing reaches too, as rustc
             // would. An error fails every build of the checkout until a source is written
-            // (docs/no-rustc.md, D). Only a module of a crate is Rust: the workspace's
-            // `rustfmt.toml` and READMEs are loaded too.
+            // (docs/no-rustc.md, D). Only the modules of those crates: the workspace's
+            // `rustfmt.toml` and READMEs are loaded too, and so are its integration tests,
+            // whose dev-dependencies a build has none of. A program from the store listed
+            // no crate.
             if nothing_of_rustc && written.is_empty() {
                 let checking = Instant::now();
+                let within = match listed.programs(&db) {
+                    Some(within) => within,
+                    None => {
+                        let mut within = FxHashSet::default();
+                        for krate in args.crates() {
+                            for krate in crates_to_build(&db, &table, krate, &args)? {
+                                let krate: ide_db::base_db::Crate = krate.into();
+                                within.extend(krate.transitive_deps(&db));
+                            }
+                        }
+                        Arc::new(within)
+                    }
+                };
+                let module_of = |id: vfs::FileId| {
+                    let relevant = ide_db::base_db::relevant_crates(&db, id);
+                    relevant.iter().filter(|it| within.contains(*it)).any(|&krate| {
+                        hir_def::nameres::crate_def_map(&db, krate)
+                            .modules_for_file(&db, id)
+                            .next()
+                            .is_some()
+                    })
+                };
                 let paths: FxHashMap<vfs::FileId, PathBuf> = files
                     .iter()
                     .filter_map(|it| match it.file {
-                        Watched::Source(id)
-                            if args.owns(&db, id, &it.path)
-                                && !listed.crates_of(&db, id).is_empty() =>
-                        {
+                        Watched::Source(id) if args.owns(&db, id, &it.path) && module_of(id) => {
                             Some((id, it.path.clone()))
                         }
                         _ => None,
@@ -9011,8 +9032,8 @@ fn run_holding(
                 let mut all: Vec<_> = paths.keys().copied().collect();
                 all.sort_unstable();
                 let sources = Sources { paths };
-                let within = listed.programs(&db);
                 let lints = !args.lints_capped;
+                let within = Some(within);
                 let broken = broken_in(&db, &all, &sources, &args.checkout, within, lints);
                 let why = hir::attach_db(&db, || {
                     refusal(&db, &all, &sources, &args.checkout, broken, None)
