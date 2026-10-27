@@ -30,11 +30,12 @@ pub(crate) const VAR: &str = "RA_JIT_SCRIPT_VIEW";
 pub(crate) const SYSTEM_DEPS: &str = "[workspace.metadata.blaze.system-deps]";
 
 /// What every build script is given of the closure, whatever its crate: the C and C++
-/// compilers and their linker, the target's libc and kernel headers, pkg-config, and the
+/// compilers, their linker and archiver, the target's libc and kernel headers, pkg-config, and the
 /// tools a `configure` or a `Makefile` runs. By the root `closure/pins.txt` pins.
-pub(crate) const TOOLCHAIN: [&str; 14] = [
+pub(crate) const TOOLCHAIN: [&str; 15] = [
     "clang",
     "lld",
+    "llvmPackages.bintools",
     "glibc.out",
     "glibc.dev",
     "linuxHeaders",
@@ -225,8 +226,11 @@ pub(crate) fn env_in(
         }
     }
     for (name, program_name) in [("AR", "ar"), ("RANLIB", "ranlib"), ("NM", "nm")] {
-        let found = closure.paths.iter().find_map(|(path, dir)| {
-            dir.join("bin").join(program_name).exists().then(|| format!("{}/bin/{program_name}", path.path))
+        let found = program(closure, program_name).or_else(|| {
+            closure.paths.iter().find_map(|(path, dir)| {
+                let bin = dir.join("bin").join(program_name);
+                bin.exists().then(|| format!("{}/bin/{program_name}", path.path))
+            })
         });
         if let Some(it) = found {
             set(name, it);
