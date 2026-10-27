@@ -60,6 +60,13 @@ In the splice and in a live patch, a call or an address taken of a function the 
 already has goes to its original entry, never to a copy a previous splice appended. The entry
 is where the jump is written, so a later edit of that function reaches every caller.
 
+rustc's allocator entries (`__rustc::__rust_alloc` and the rest) are the one place rustc's
+code calls the `#[global_allocator]`'s methods, which it has inlined into them from opt-level 1
+up, so no copy of those methods is left for a patch to replace. A build over rustc's code
+(a patch of rustc's executable, or a build in full linked with rustc's objects) defines those
+entries itself, as calls of the functions rust-analyzer's expansion of the attribute exports
+(`__ra_jit_global_alloc` and the rest), so an edit of the allocator reaches them (#386).
+
 ## Statics
 
 A program the daemon links mixes its code with rustc's: functions it left to rustc, rustc's
