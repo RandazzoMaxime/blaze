@@ -341,10 +341,13 @@ and fails below a floor a few units under the count there, on any error in a uni
 accepts, and on any unit the checker panics on, as a panic hides every error in its file.
 
 The other check is that it finds nothing in code rustc accepts.
-`ra-jit borrowck --project DIR` checks a cargo workspace; on ripgrep, fd, bat, hyperfine,
-just, axum, nushell, helix, biome, delta, eza, tokei, starship and cargo it finds nothing, nor on the
-harness's `corpus` and `mixfutures` crates, which CI checks too. Its last line counts the
-files, errors and files it panicked on; a panic makes it fail.
+`ra-jit borrowck --project DIR` checks a cargo workspace; its last line counts the files,
+errors and files it panicked on; a panic makes it fail. `harness/borrowck_apps.py` runs it
+over every application of `apps/apps.json` at its pinned rev, plus the harness's `corpus` and
+`mixfutures` crates (which CI checks too), and lists each app's errors and panics. At
+47793534, 20 of the 23 check clean; nushell (53, E0716 in its tests), ruff (19, E0716 and
+"lifetime may not live long enough") and rust-analyzer (1, E0515) get errors rustc does not
+give.
 
 ## What is left
 
