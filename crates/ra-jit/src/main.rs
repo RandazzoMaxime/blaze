@@ -3167,6 +3167,9 @@ fn workspace_at(
     // Without the standard library's source every call into it is unresolved, and each
     // function making one would be refused for a reason that says nothing of the toolchain.
     if workspace.sysroot.is_rust_lib_src_empty() {
+        if let Some(error) = workspace.sysroot.error() {
+            anyhow::bail!("{}", error.trim_end());
+        }
         let toolchain =
             workspace.sysroot.root().map_or("the toolchain".to_owned(), |it| it.to_string());
         anyhow::bail!(
