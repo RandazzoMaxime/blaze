@@ -543,15 +543,18 @@ changes to rust-analyzer were needed, each made as rustc does it:
 - Type inference takes an inline `asm!` output as a place written, as rustc's
   `check_expr_asm_operand` does, so `out(reg) v[0]` indexes with `IndexMut` and needs `v`
   mutable (E0596).
+- A temporary may be unsized, as rustc's `as_temp` makes one of what is moved out of an
+  unsized place: a place expression as a statement (`S[0];`, `*s;`) is moved into one, sized
+  or not, as rustc's `stmt_expr` does, and so is an operand (`[a[..]]`), so moving out of a
+  borrowed `str`, slice or `dyn` is E0507 or E0508 (`dst/dst-index-fail.rs`,
+  `unsized/issue-115203.rs`). rust-analyzer refused to lower a body with one, and only
+  fake-read an unsized statement. rustc reports E0161 there too, which ra-jit does not.
 
 These are differences still open, each the cause of some failures, all of them errors
 missed rather than errors made up:
 
 - Temporaries of a block's tail expression in edition 2021 are dropped at a different point.
 - Comparisons against constant patterns take their operands by value.
-- A place expression as a statement (`S[0];`, `*s;`) is moved into a temporary in rustc, so
-  an unsized or borrowed one is E0161 or E0507 (`dst/dst-index-fail.rs`); rust-analyzer
-  does not read it.
 - An arm with a guard binds its by-reference bindings before the guard and the rest after,
   in rustc, so what it binds by value is dropped first; rust-analyzer binds them in the
   pattern's order (`dropck/eager-by-ref-binding-for-guards.rs`, where it reports two errors
