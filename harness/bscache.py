@@ -490,9 +490,12 @@ def in_closure(name, repo, rev, work, ra_jit, jobs, store):
     scripts = []
     for dir in run_dirs(target):
         var = dict(json.load(open(os.path.join(dir, RAN)))["env"])
-        said = open(os.path.join(dir, "stderr"), errors="replace").read() if os.path.exists(os.path.join(dir, "stderr")) else ""
+        # Cargo keeps a run's output beside its OUT_DIR, or in `run/` there (build-dir layout v2).
+        run = os.path.join(dir, "run") if os.path.isdir(os.path.join(dir, "run")) else dir
+        stdout = os.path.join(run, "stdout" if run != dir else "output")
+        said = open(os.path.join(run, "stderr"), errors="replace").read() if os.path.exists(os.path.join(run, "stderr")) else ""
         package = f"{var.get('CARGO_PKG_NAME')} v{var.get('CARGO_PKG_VERSION')}"
-        ok = os.path.exists(os.path.join(dir, "output")) and package not in failed
+        ok = os.path.exists(stdout) and package not in failed
         notes = [line for line in said.splitlines() if line.startswith(("note: the build script", "error:"))]
         scripts.append(dict(package=var.get("CARGO_PKG_NAME"), version=var.get("CARGO_PKG_VERSION"), ok=ok,
                             kept=KEPT_LINE in said, notes=notes[-3:], tail=[] if ok else said.splitlines()[-12:]))

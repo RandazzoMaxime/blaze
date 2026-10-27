@@ -408,8 +408,10 @@ pub(crate) fn given(name: &str) -> bool {
 
 /// The variables a run that printed `stdout` said it reads (`rerun-if-env-changed`) which
 /// cargo had in `env` but the run in the sandbox was not given (`plan`): it saw them unset.
+/// A run in its closure is given the closure's C toolchain and pkg-config in place of the
+/// machine's, so those of [`given`] it was not given are not missing.
 pub(crate) fn not_given(stdout: &[u8], env: &[(String, String)], plan: &Plan) -> Vec<String> {
-    let Plan::Sandboxed { spec, .. } = plan else { return Vec::new() };
+    let Plan::Sandboxed { spec, in_view, .. } = plan else { return Vec::new() };
     let had = |name: &str, env: &[(String, String)]| env.iter().any(|it| it.0 == name);
     let mut names: Vec<String> = String::from_utf8_lossy(stdout)
         .lines()
@@ -419,6 +421,7 @@ pub(crate) fn not_given(stdout: &[u8], env: &[(String, String)], plan: &Plan) ->
             line.strip_prefix("rerun-if-env-changed=").map(str::to_owned)
         })
         .filter(|name| had(name, env) && !had(name, &spec.env))
+        .filter(|name| in_view.is_none() || !given(name))
         .collect();
     names.sort();
     names.dedup();
