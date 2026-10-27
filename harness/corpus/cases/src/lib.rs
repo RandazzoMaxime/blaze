@@ -2504,17 +2504,19 @@ pub mod packed_drop {
     }
 }
 
-/// `offset_of!` of a field of a packed struct takes no reference to it.
+/// `offset_of!` of a field of a packed struct takes no reference to it. The struct is never laid
+/// out by ra-jit, and --layouts compares types by their names without paths: named `Header`, it
+/// was compared with std's Windows allocator `Header(*mut u8)`, which ra-jit lays out.
 pub mod packed_offset_of {
     #[repr(C, packed)]
-    pub struct Header {
+    pub struct PackedHeader {
         pub magic: u16,
         pub version: u8,
         pub checksum: u32,
     }
 
     pub fn run(base: usize) -> usize {
-        base + core::mem::offset_of!(Header, checksum)
+        base + core::mem::offset_of!(PackedHeader, checksum)
     }
 }
 
