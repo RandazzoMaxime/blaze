@@ -2,6 +2,7 @@
 //! changed since cargo last built. `docs/cargo.md` is the design.
 
 pub(crate) mod daemon;
+pub(crate) mod keyed;
 pub(crate) mod wrapper;
 
 mod affected;
@@ -10,6 +11,7 @@ pub(crate) mod cli;
 mod client;
 #[cfg(unix)]
 pub(crate) mod closure;
+mod directives;
 pub(crate) mod layout;
 mod messages;
 pub(crate) mod metadata;
