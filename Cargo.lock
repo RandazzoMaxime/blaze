@@ -3384,6 +3384,7 @@ dependencies = [
  "aws-config",
  "aws-sdk-s3",
  "aws-smithy-http-client",
+ "blaze-fmt",
  "blaze-manifest",
  "blaze-metadata",
  "blaze-new",
