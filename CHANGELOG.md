@@ -1776,6 +1776,8 @@ each one's section: what `[Unreleased]` had, and the title of each change merged
   every event). Each crate's on-demand functions are wanted once, and each definition is
   walked once for all its closures or all its statics of a name. reth's first edit on 48 cores:
   64.4 s and 64.3 s before, 58.0 s and 57.5 s after.
+- `blaze disable` removes the `bin` directory of cargo's home that `enable` made for the links
+  of `cargo fmt` and `cargo clippy`, when nothing else is in it: the home is as it was.
 
 ## [0.1.0] - 2026-10-20
 
