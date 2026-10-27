@@ -90,14 +90,15 @@ agents/rules.ts --write` for AGENTS.md).
 11. **worktree-per-lane**: One worktree per lane, never `git stash`: a uniquely named worktree with its
     own `CARGO_TARGET_DIR`. Harnesses run with `RUST_BACKTRACE=0`.
     Why: The stash is shared by every worktree.
-12. **land-through-queue**: Land small and often, through the merge queue only. After the local gate,
-    run `python3 .github/scripts/land.py "what the branch does"` in the lane's worktree: it opens
-    the pull request, waits for its run (the merge gate: the build and the unit tests, about 5
-    minutes), queues it and waits until the gate has passed on it merged onto main and it is merged,
-    or says why not. Every harness runs after the merge, in the release train (train.yaml), whose
-    issue "Release train is red" names the commits since it was last green. Its waiting survives a
-    tool that kills it; `land.py --wait` picks it up again. Never push to main or merge into it by
-    hand. See [docs/contributing.md#landing-a-change](docs/contributing.md#landing-a-change).
+12. **land-through-pr**: Land small and often, through a pull request only (no merge queue; the branch
+    need not be up to date with main). After the local gate, run `python3 .github/scripts/land.py
+    "what the branch does"` in the lane's worktree: it opens the pull request, turns on auto-merge,
+    waits for its run (the merge gate: the build and the unit tests, about 5 minutes) and for GitHub
+    to merge it, or says why not. Every harness runs after the merge, in the release train
+    (train.yaml), whose issue "Release train is red" names the commits since it was last green. Its
+    waiting survives a tool that kills it; `land.py --wait` picks it up again. Never push to main or
+    merge into it by hand. See
+    [docs/contributing.md#landing-a-change](docs/contributing.md#landing-a-change).
 13. **clean-up-lane**: Delete what a lane made when it is done: its worktree, target directory and ix
     VM, and its merged branch.
 14. **credit-people**: Credit people. A commit or pull request built on someone's suggestion, diagnosis,
