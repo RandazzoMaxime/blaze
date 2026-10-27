@@ -374,12 +374,16 @@ impl Checkout {
             true => (String::new(), plan.binary.display().to_string()),
             false => (plan.binary.display().to_string(), String::new()),
         };
+        // A shared library is linked again for each build, not patched: see [`Plan::shared`].
+        let (shared, patch) = match plan.shared {
+            true => ("shared", String::new()),
+            false => ("", plan.patch.display().to_string()),
+        };
         let mut line = format!(
-            "sync\t{}\t{}\t{}\t{}\t{}\t{splice}\t{exe}",
+            "sync\t{}\t{}\t{}\t{patch}\t{}\t{splice}\t{exe}\t{shared}",
             self.project().display(),
             crates,
             plan.object.display(),
-            plan.patch.display(),
             plan.link_cmd,
         );
         for file in &plan.symbol_files {
@@ -481,9 +485,14 @@ impl Worker {
             ("--socket", &socket),
         ];
         let named: &[(&str, &Path)] = if first.whole { &whole } else { &rustcs };
-        for &(flag, path) in named {
+        // A shared library is linked again for each build, not patched: see [`Plan::shared`].
+        let patched = |flag: &str| !(first.shared && flag == "--patch");
+        for &(flag, path) in named.iter().filter(|(flag, _)| patched(flag)) {
             args.push(flag.into());
             args.push(path.into());
+        }
+        if first.shared {
+            args.push("--shared".into());
         }
         if let Some(rustcs) = &first.rustc_binary {
             args.push("--rustc-binary".into());
@@ -530,6 +539,7 @@ impl Worker {
                 let output =
                     private_file(OpenOptions::new().write(true).create(true).truncate(true), &log)?;
                 command.envs(&config.env).env(ENDS_WITH_INPUT, "1");
+                exact_env(&mut command, &config.env);
                 command.current_dir(&checkout.root);
                 command.stdin(Stdio::piped()).stdout(output.try_clone()?).stderr(output);
                 own_group(&mut command);
@@ -801,6 +811,16 @@ struct Spare {
     log: PathBuf,
 }
 
+/// Takes away from a worker's `command` each variable [`super::cli::WORKER_ENV_EXACT`] names
+/// that its build, `env`, does not set, which it would otherwise have from the daemon.
+fn exact_env(command: &mut Command, env: &BTreeMap<String, String>) {
+    for name in super::cli::WORKER_ENV_EXACT {
+        if !env.contains_key(*name) {
+            command.env_remove(name);
+        }
+    }
+}
+
 impl Spare {
     /// Starts one with its files in `dir`.
     fn start(dir: &Path) -> anyhow::Result<Spare> {
@@ -897,6 +917,7 @@ impl Checker {
         let output =
             private_file(OpenOptions::new().write(true).create(true).truncate(true), &log)?;
         command.envs(&ahead.config.env).env(ENDS_WITH_INPUT, "1");
+        exact_env(&mut command, &ahead.config.env);
         command.current_dir(&ahead.root);
         command.stdin(Stdio::piped()).stdout(output.try_clone()?).stderr(output);
         own_group(&mut command);

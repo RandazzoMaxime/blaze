@@ -76,8 +76,18 @@ cargo's `cargo metadata` with the reason printed: a registry version the lock fi
 (#321), `[replace]`, a registry with a git index.
 `RA_JIT_OWN_RESOLVE=0` sends every load to cargo.
 
-Not yet: the unit graph itself (the `profiles` example walks cargo's),
-the unstable profile keys (`trim-paths`, `rustflags`, `codegen-backend`, which need nightly
+The unit graph is blaze's own (`crates/blaze-units`, 2026-10-27): a port of cargo's unit
+generator (`ops/cargo_compile/unit_generator.rs`), `compiler/unit_dependencies.rs` and the
+sharing pass of `rebuild_unit_graph_shared`, made from blaze-metadata's resolve, its feature
+resolution and blaze-manifest's profiles, and printed in cargo's `--unit-graph` schema
+(version 1). It reads no file and runs no process, and builds for wasm32-wasip1 (issue #458;
+wasm32-unknown-unknown waits on blaze-resolve's `url` file paths). `blaze_metadata::units`
+does the reading and the resolve around it, and ra-jit's `plan.rs` plans every load from it:
+no `cargo build --unit-graph` is run. A build it does not port (cargo's `-Z` flags,
+`-Zbuild-std`, artifact dependencies, multiple build scripts, per-package targets) is an error
+naming it, not a cargo run.
+
+Not yet: the unstable profile keys (`trim-paths`, `rustflags`, `codegen-backend`, which need nightly
 `cargo-features`), `links` overrides in `[target.<triple>]`, a source defined twice under two names
 (blaze-registry's, which has the `SourceId` display it names), and the warnings cargo prints for
 unused manifest keys and lints. `{workspace-path-hash}` in `build.build-dir` is refused until
@@ -156,7 +166,7 @@ refuses the workspace too, its `build.rustflags` passing `-Z`). The other parts 
 above again.
 
 What each unit is built for comes from the graph's edges, so the part checks the profiles, not
-the unit graph: blaze's own unit graph is its own work. The walk reproduces cargo's order where
+the unit graph: the `units` part below checks blaze's own graph. The walk reproduces cargo's order where
 it decides a profile: the roots are interned before their dependencies and all of a unit's
 dependencies before any is walked, a unit equal to one interned earlier is that one (profiles
 compare without whether their debuginfo is deferred), and the first way a unit is reached in
@@ -191,6 +201,26 @@ which cargo hands the rustc it asks, so the stable channel's cfgs print), the co
 
 On the ix VM nc-toolq (Linux AArch64), 2026-10-27: 35 of 35 equal, 575 questions, 219 of them
 refused by both (the config fixtures have no package, and some have broken files).
+
+The `units` part runs `cargo <run> --unit-graph -Zunstable-options` (with `RUSTC_BOOTSTRAP=1`)
+and blaze-metadata's `units` example (blaze-units' graph) for `build`, `build --all-targets`,
+`build --release`, `build --profile test --all-targets`, `build --profile bench --all-targets`
+(what ra-jit's `plan.rs` asks for its builds, tests and benchmarks) and `test --no-run`, on
+harness/norustc/fixture and the bench projects, and compares the whole JSON: every unit in
+order, with its package, target, profile, platform, mode, features and dependencies, and the
+roots. A build both refuse must be refused with cargo's error text. One order is not compared:
+cargo sorts units that differ only in what they depend on by `dep_hash`, a hash of the
+addresses of its interned dependencies (`std::ptr::hash` in `compiler/unit.rs`), so on bat
+two runs of the same cargo print its two `regex` units in either order. The harness matches
+such units by a key of everything each one reaches and puts blaze's in cargo's order before
+comparing; blaze-units orders them by their dependencies.
+
+On an arm64 ix VM, 2026-10-27: 13 of 14 equal, 78 runs and 34,124 units, none different
+(zed 10,155, biome 6,016, bevy 4,625, nushell 3,649, cargo 2,322, helix 2,043, bat 1,586,
+axum 1,215, just 837, hyperfine 800, fd 499, ripgrep 332, the fixture 45). bun is refused by
+both, its vendored sources being made by its own build (`harness/bunprep.py`): cargo names the
+missing `vendor/lolhtml` first, blaze-metadata the missing `vendor/rust-argon2`, as it reads
+path packages in another order than cargo's resolver asks for them.
 
 ## Decisions
 

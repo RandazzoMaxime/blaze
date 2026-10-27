@@ -123,11 +123,19 @@ build, which says which and why; nothing is handed to cargo or rustc:
 What blaze does not build yet fails the same way, saying what: the targets `--bins`,
 `--examples`, `--tests`, `--benches` and `--all-targets` pick, several `--target`s,
 `--target-dir`, `--message-format`, `-Z`, and `--build-plan` and `--unit-graph`, and a
-library whose crate types include `cdylib` or `staticlib` when the build would write that file
-(a plain `build`, or `--lib`): blaze does not link one yet, and says which
-([#262](https://github.com/indexable-inc/blaze/issues/262)). A build of other libraries alone
-(`--lib`, or a workspace with no program) is the daemon's check of them: blaze writes no
-`rlib` for cargo, and says what it finds.
+library whose crate types include `staticlib` when the build would write it (a plain `build`,
+or `--lib`): blaze does not link one yet, and says which
+([#262](https://github.com/indexable-inc/blaze/issues/262)). A library's `cdylib` (a native
+Node addon, a Python extension, a plugin) is a program of the build: a plain `build` or
+`--lib` links it as a shared library at cargo's path (`target/debug/lib<name>.so`, `.dylib`
+on macOS), exporting the functions and statics its crate
+names with `#[no_mangle]` or `#[export_name]` and nothing else, with the package's
+`cargo:rustc-link-arg` and `cargo:rustc-cdylib-link-arg`. Each build after an edit compiles
+what changed on what the worker loaded and links the library again; it is not spliced, so an
+exported function an edit adds is exported. A host that loaded the library (node, python)
+loads it again to see the edit. A build of other libraries alone (`--lib`, or a workspace with
+no program) is the daemon's check of them: blaze writes no `rlib` for cargo, and says what it
+finds.
 
 The build is the daemon's: its worker loads the workspace, builds and links the programs, and
 answers once they are linked. The next build asks the same worker, which compiles the

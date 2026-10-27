@@ -21,7 +21,9 @@ use std::{
 use anyhow::Context as _;
 use ide_db::{ChangeWithProcMacros, RootDatabase, base_db::SourceDatabase as _};
 use load_cargo::{LoadCargoConfig, ProcMacroServerChoice};
-use project_model::{CargoConfig, RustLibSource};
+use project_model::{
+    CargoConfig, ProjectManifest, ProjectWorkspace, ProjectWorkspaceKind, RustLibSource,
+};
 use vfs::{AbsPathBuf, VfsPath};
 
 pub(crate) fn command(mut args: impl Iterator<Item = String>) -> anyhow::Result<()> {
@@ -160,6 +162,29 @@ const BORROWCK_CODES: &[&str] = &[
     "E0621", "E0713", "E0716", "E0793", "E0309", "E0310", "E0311", "borrowck",
 ];
 
+/// The cargo workspace at `root`, loaded as `load_cargo::load_workspace_at` loads it, but
+/// refused when `cargo metadata` fails: rust-analyzer then reads the workspace with
+/// `--no-deps`, whose crates have no dependencies, so every type of another crate is an error
+/// in the signatures that name it, which the bodies using them do not show, and the checker
+/// reports what follows from those types.
+fn load_project(
+    root: &AbsPathBuf,
+    cargo_config: &CargoConfig,
+    load_config: &LoadCargoConfig,
+) -> anyhow::Result<(RootDatabase, vfs::Vfs)> {
+    let manifest = ProjectManifest::discover_single(root)?;
+    let mut workspace = ProjectWorkspace::load(manifest, cargo_config, &|_| ())?;
+    if let ProjectWorkspaceKind::Cargo { error: Some(error), .. } = &workspace.kind {
+        anyhow::bail!("`cargo metadata` failed in {root}: {error:#}");
+    }
+    if load_config.load_out_dirs_from_check {
+        let build_scripts = workspace.run_build_scripts(cargo_config, &|_| ())?;
+        workspace.set_build_scripts(build_scripts);
+    }
+    let (db, vfs, _) = load_cargo::load_workspace(workspace, &cargo_config.extra_env, load_config)?;
+    Ok((db, vfs))
+}
+
 /// `ra-jit borrowck --project DIR`: the borrow checker's errors in the crates of the cargo
 /// workspace at `DIR`, one JSON object per line, and a last line counting files, errors,
 /// `unused_mut` warnings and files the checker panicked on, which fail it.
@@ -178,8 +203,7 @@ fn check_project(project: &str) -> anyhow::Result<()> {
         proc_macro_processes: 1,
     };
     let started = Instant::now();
-    let (db, vfs, _) =
-        load_cargo::load_workspace_at(root.as_ref(), &cargo_config, &load_config, &|_| ())?;
+    let (db, vfs) = load_project(&root, &cargo_config, &load_config)?;
     let config = ide_diagnostics::DiagnosticsConfig::test_sample();
     let files: Vec<vfs::FileId> = hir::attach_db(&db, || {
         let mut files = Vec::new();
@@ -276,8 +300,7 @@ fn time_project(project: &str, out: &str) -> anyhow::Result<()> {
         num_worker_threads: 1,
         proc_macro_processes: 1,
     };
-    let (db, vfs, _) =
-        load_cargo::load_workspace_at(root.as_ref(), &cargo_config, &load_config, &|_| ())?;
+    let (db, vfs) = load_project(&root, &cargo_config, &load_config)?;
     let mut file = std::io::BufWriter::new(std::fs::File::create(out)?);
     // By mode, as `Mode as usize`: Nll, Polonius.
     let mut totals = [[std::time::Duration::ZERO; Phase::ALL.len()]; 2];

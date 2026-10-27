@@ -77,6 +77,8 @@ All of these are rustc's, written from `compiler/rustc_borrowck` at the pinned n
 - Unaligned references (E0793): a `&` or `&mut` of a field a `#[repr(packed)]` struct may
   leave less aligned than its type needs, as rustc's `check_packed_ref` (not `&raw`, nor
   behind a pointer; a field of a type parameter or of a `dyn` tail may be unaligned).
+  `offset_of!`, which lowering computes as the address of a field of a value at address 0,
+  is rustc's `NullOp::OffsetOf` and takes no reference.
 - Builtin derives are checked as rustc expands them (`rustc_builtin_macros/src/deriving`;
   `ra-jit borrowck` expands them, as `ra-jit check` and builds do). The methods derived for
   a `#[repr(packed)]` struct copy each field out of it, `{ self.x }` at the field, rather
@@ -126,10 +128,17 @@ All of these are rustc's, written from `compiler/rustc_borrowck` at the pinned n
   signature with no `for<'a>` has it, so its parameters' types are the `Fn` bound's arguments
   (`|z: &[i32]|` passed as `F: FnOnce(S)` takes the `S` it is called with). A variable with a
   written type is related to it as rustc's user type annotation, so an error through it is
-  blamed on the annotation. A parameter that elides one lifetime has
+  blamed on the annotation. The lifetime a return type elides is the one lifetime the
+  parameters' types write or elide, as rustc's name resolution finds them in the written
+  signature: a `'static` in a type alias's expansion (`id: Id` of `type Id = IdLt<'static>`)
+  is not counted, nor the lifetime `&dyn Trait` leaves out of its object, only what its
+  bounds write (`dyn Trait<'_> + 'a`). A parameter that elides one lifetime has
   it once however often its type does (`s: S2` with `type S2<'a> = S<'a, 'a>`); one that
   writes `Self` gives elision none of the impl's lifetimes (`self` of `impl Id<'_>`), and
-  `Self::Target` in an impl for `S<'_, '_>` has the impl's lifetimes.
+  `Self::Target` in an impl for `S<'_, '_>` has the impl's lifetimes. `Self` written in a
+  trait object's or `impl Trait`'s bounds or a function pointer's signature is the impl's self
+  type too, its anonymous lifetimes the impl's own (`f: &mut dyn FnMut(&mut Self)` in
+  `impl Builder<'_>`), as rustc makes each `'_` of an impl header one parameter of the impl.
 - Raw pointers: a reference coerced to one relates what it points to, raw and function
   pointers compare when they have a common supertype, an array's pointer cast to its
   element's relates the element, and a cast between pointers to trait objects keeps the
@@ -259,7 +268,8 @@ All of these are rustc's, written from `compiler/rustc_borrowck` at the pinned n
 - Errors on universal regions: "lifetime may not live long enough", E0521, E0309, E0310,
   E0311, with rustc's object lifetime defaults (`&'a dyn Trait` is `dyn Trait + 'a`, a
   closure's parameter `|x: &dyn Trait|` too, a trait
-  bounded by `'static` makes its objects `'static`, elsewhere in a body the lifetime is
+  bounded by `'static` makes its objects `'static`, in a closure's parameter as well (salsa's
+  `cycle_fn = |db: &'db dyn Db, ..|`), elsewhere in a body the lifetime is
   inferred). Of universal regions made to outlive each other, as rustc only the first made
   (a closure's creator's before its own) is checked against all it outlives, the others only
   against it, so the error is the one rustc reports.
@@ -427,9 +437,13 @@ accepts, and on any unit the checker panics on, as a panic hides every error in 
 
 The other check is that it finds nothing in code rustc accepts.
 `ra-jit borrowck --project DIR` checks a cargo workspace; its last line counts the files,
-errors and files it panicked on; a panic makes it fail. `harness/borrowck_apps.py` runs it
-over every application of `apps/apps.json` at its pinned rev, plus the harness's `corpus` and
-`mixfutures` crates (which CI checks too), and lists each app's errors and panics. At
+errors and files it panicked on; a panic makes it fail. It refuses a workspace `cargo metadata`
+fails on: rust-analyzer would read it with `--no-deps`, whose crates have no dependencies, and
+every type of another crate would be an error the bodies using it do not show.
+`harness/borrowck_apps.py` runs it over every application of `apps/apps.json` at its pinned rev,
+with what `cargo metadata` needs that a clone lacks (bun's vendored crates, which its own build
+fetches), plus the harness's `corpus` and `mixfutures` crates (which CI checks too), and lists
+each app's errors and panics. At
 47793534, 20 of the 23 check clean; nushell (53, E0716 in its tests), ruff (19, E0716 and
 "lifetime may not live long enough") and rust-analyzer (1, E0515) get errors rustc does not
 give.
@@ -533,7 +547,14 @@ changes to rust-analyzer were needed, each made as rustc does it:
   is `dyn Trait + 'x`, not `'static`. In an impl header, a trait object behind a reference
   whose lifetime is elided has that lifetime too (`hir-ty/src/lower.rs`, `impl_header`), as
   rustc makes both one fresh parameter of the impl: rusqlite's `impl Params for
-  &[&dyn ToSql]` holds for `params![id, name]` of locals.
+  &[&dyn ToSql]` holds for `params![id, name]` of locals. In a type written in a body (a
+  `let`'s type, a cast's), a lifetime left to inference names nothing, so a trait object it
+  would default has a lifetime inferred on its own (`hir-ty/src/lower.rs`, `object_default`),
+  as rustc's `resolve_object_lifetime_default` stops at `ObjectLifetimeDefault { lifetime:
+  None }` or the body and lowering gives a fresh region: `err as &dyn Error` is
+  `&'1 (dyn Error + '2)`, so cargo's `source` returns it as `dyn Error + 'static`.
+  `Box<dyn Trait>` there is the same, not `'static`; a trait bounded by `'static` still
+  makes its objects `'static`.
 - A return-position `impl Trait` has a lifetime parameter for each lifetime elided in its
   function's parameters, after the function's own (`hir-ty/src/lower.rs`, `elided_lifetimes`),
   as rustc duplicates them as parameters of the opaque type. In its bounds, `'_` or an elided

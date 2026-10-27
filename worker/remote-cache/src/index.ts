@@ -4,6 +4,7 @@
 // see an object ends in the same `notFound` as an absent one.
 
 import { identify, lookupTenant, type TenantRecord } from "./auth";
+import * as cas from "./cas";
 import { contentAddressed, HEX64, multipartAllowed, parseName, validTenant, type Name } from "./names";
 
 export interface Env {
@@ -12,6 +13,8 @@ export interface Env {
   RL_TENANT: RateLimit;
   RL_ANON: RateLimit;
   METER: AnalyticsEngineDataset;
+  DB: D1Database;
+  [secret: `GATEWAY_SECRET_${number}`]: string | undefined;
 }
 
 export const MAX_BODY = 90 * 1024 * 1024;
@@ -19,7 +22,22 @@ const MAX_COMPLETE_BODY = 1024 * 1024;
 /** The period of both rate limits in wrangler.jsonc. */
 const RETRY_AFTER_SECONDS = 10;
 
-export type Op = "get" | "head" | "put" | "mp_start" | "mp_part" | "mp_complete" | "mp_abort" | "other";
+export type Op =
+  | "get"
+  | "head"
+  | "put"
+  | "mp_start"
+  | "mp_part"
+  | "mp_complete"
+  | "mp_abort"
+  | "has"
+  | "get_blobs"
+  | "blob"
+  | "blob_head"
+  | "put_blobs"
+  | "other";
+
+const READS: ReadonlySet<Op> = new Set(["get", "head", "has", "get_blobs", "blob", "blob_head"]);
 
 interface Route {
   op: Op;
@@ -31,21 +49,24 @@ interface Outcome {
   response: Response;
   bytesIn: number;
   bytesOut: number;
+  /** Work still writing a streamed answer. */
+  pump?: Promise<void>;
 }
 
 export default {
-  fetch(request: Request, env: Env): Promise<Response> {
-    return handle(request, env);
+  fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
+    return handle(request, env, ctx);
   },
 } satisfies ExportedHandler<Env>;
 
-export async function handle(request: Request, env: Env): Promise<Response> {
+export async function handle(request: Request, env: Env, ctx?: ExecutionContext): Promise<Response> {
   const url = new URL(request.url);
   const route = classify(request.method, url);
   const meter = { tenant: "-" };
   let out: Outcome;
   try {
     out = await serve(request, env, url, route, meter);
+    if (out.pump) ctx?.waitUntil(out.pump);
   } catch (e) {
     out = done(text(500, `internal error: ${firstLine(e)}`));
   }
@@ -58,6 +79,11 @@ export async function handle(request: Request, env: Env): Promise<Response> {
 }
 
 function classify(method: string, url: URL): Route {
+  const blob = /^\/blob\/(.*)$/.exec(url.pathname);
+  if (blob) return { op: method === "GET" ? "blob" : method === "HEAD" ? "blob_head" : "other", tenant: null, name: blob[1] };
+  for (const [path, op] of [["/has", "has"], ["/get", "get_blobs"], ["/put", "put_blobs"]] as const) {
+    if (url.pathname === path) return { op: method === "POST" ? op : "other", tenant: null, name: null };
+  }
   const m = /^\/t\/([^/]+)\/v3\/(.*)$/.exec(url.pathname);
   const q = url.searchParams;
   let op: Op = "other";
@@ -86,8 +112,19 @@ async function serve(request: Request, env: Env, url: URL, route: Route, meter: 
     return done(text(429, "rate limited", { "retry-after": String(RETRY_AFTER_SECONDS) }));
   }
   if (caller.kind === "rejected") return done(text(401, caller.reason));
-  const writing = op !== "get" && op !== "head";
+  const writing = !READS.has(op);
   if (writing && caller.kind === "anonymous") return done(text(401, "a write needs a token"));
+
+  if (op === "has" || op === "get_blobs" || op === "blob" || op === "blob_head" || op === "put_blobs") {
+    if (caller.kind === "token") meter.tenant = caller.tenant;
+    const acc = await cas.access(env, caller);
+    if (acc instanceof Response) return done(acc);
+    if (op === "has") return cas.has(env, request, acc);
+    if (op === "get_blobs") return cas.get(env, request, acc);
+    if (op === "put_blobs") return cas.put(env, request, acc);
+    if (!/^[0-9a-f]{64}$/.test(route.name ?? "")) return done(notFound(op));
+    return cas.blob(env, request, acc, route.name!, op === "blob_head", () => notFound(op));
+  }
 
   // Everything below is decided from KV only; R2 is not touched until access is granted.
   const tenant = route.tenant !== null && validTenant(route.tenant) ? await lookupTenant(env.TOKENS, route.tenant) : null;
@@ -419,7 +456,7 @@ function done(response: Response): Outcome {
 
 /** The gateway's one 404: the same status, body and headers for every reason. */
 function notFound(op: Op): Response {
-  return text(404, "not found", {}, op === "head");
+  return text(404, "not found", {}, op === "head" || op === "blob_head");
 }
 
 function text(status: number, reason: string, extra: Record<string, string> = {}, noBody = false): Response {

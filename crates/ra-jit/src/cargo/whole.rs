@@ -98,7 +98,7 @@ pub(super) fn build(asked: &Invocation) -> anyhow::Result<i32> {
     if asked.subcommand == Subcommand::Run {
         programs.retain(|it| !it.kind.linked_library());
     }
-    if let Some(it) = programs.iter().find(|it| it.kind.linked_library()) {
+    if let Some(it) = programs.iter().find(|it| it.kind == Kind::Staticlib) {
         let kind = format!("{:?}", it.kind).to_lowercase();
         say::error(&format!(
             "blaze does not link the `{kind}` of `{}` (target `{}`) yet, so it would write no `{}` (#262)",
@@ -122,6 +122,9 @@ pub(super) fn build(asked: &Invocation) -> anyhow::Result<i32> {
         return Ok(FAILED);
     }
     finished(asked, asked.profile(), started);
+    if let Some(failed) = super::remote_failed_it() {
+        return Ok(failed);
+    }
     if asked.subcommand != Subcommand::Run {
         return Ok(0);
     }
@@ -241,6 +244,9 @@ pub(super) fn test(asked: &Invocation) -> anyhow::Result<i32> {
         }
     }
     finished(asked, profile, started);
+    if let Some(failed) = super::remote_failed_it() {
+        return Ok(failed);
+    }
     if asked.flags.no_run {
         return Ok(0);
     }
@@ -353,7 +359,7 @@ fn compiling(asked: &Invocation, programs: &[Program]) {
 /// Says the build of `profile` is done.
 fn finished(asked: &Invocation, profile: &str, started: Instant) {
     let took = started.elapsed().as_secs_f64();
-    let finished = format!("`{profile}` profile [ra-jit] target(s) in {took:.2}s");
+    let finished = format!("`{profile}` profile [{}] target(s) in {took:.2}s", super::ra_jit_tag());
     say::status(asked.flags.quiet, "Finished", &finished);
 }
 
@@ -424,20 +430,30 @@ fn checkout(
         env: worker_env(),
         whole: true,
     };
-    let plans = programs.iter().map(|program| Linked {
-        crates: vec![program.root.clone()],
-        object: program.dir.join(format!("{}.o", program.name)),
-        patch: program.dir.join(format!("{}.patch.o", program.name)),
-        binary: program.dir.join(&program.name),
-        rustc_binary: None,
-        link_cmd: String::new(),
-        symbol_files: Vec::new(),
-        unit_test: unit_tests,
-        linked_as_built: Vec::new(),
-        copies: Vec::new(),
-        package: None,
-        stamp: 0,
-        whole: true,
+    let plans = programs.iter().map(|program| {
+        // A `cdylib` is linked under the name of its file, which a binary of the same name
+        // beside it does not have.
+        let shared = program.kind == Kind::Cdylib;
+        let name = match shared {
+            true => program.executable.file_name().unwrap_or_default().to_string_lossy().into(),
+            false => program.name.clone(),
+        };
+        Linked {
+            crates: vec![program.root.clone()],
+            object: program.dir.join(format!("{name}.o")),
+            patch: program.dir.join(format!("{name}.patch.o")),
+            binary: program.dir.join(&name),
+            rustc_binary: None,
+            link_cmd: String::new(),
+            symbol_files: Vec::new(),
+            unit_test: unit_tests,
+            linked_as_built: Vec::new(),
+            copies: Vec::new(),
+            package: None,
+            stamp: 0,
+            whole: true,
+            shared,
+        }
     });
     for program in programs {
         _ = std::fs::create_dir_all(&program.dir);

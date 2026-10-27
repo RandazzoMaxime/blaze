@@ -122,6 +122,8 @@ pub(crate) struct Built {
 pub(crate) struct Asked<'a> {
     /// The triple built for.
     pub(crate) triple: &'a str,
+    /// What `rustc --print cfg` says of the triple.
+    pub(crate) cfg: &'a [CfgAtom],
     /// The variables of the process that asks, where they are not those of this one.
     pub(crate) env: &'a FxHashMap<String, Option<String>>,
 }
@@ -129,7 +131,7 @@ pub(crate) struct Asked<'a> {
 /// cargo, run in `dir` with `env` for the variables of whoever asks.
 fn cargo_in(dir: &Path, env: &FxHashMap<String, Option<String>>) -> std::process::Command {
     let mut command = toolchain::command("cargo", dir, env);
-    // The unit graph and `cargo config get` are not stable yet.
+    // `cargo config get` is not stable yet.
     command.env("RUSTC_BOOTSTRAP", "1").stdin(Stdio::null());
     crate::answers::ready_cargo(&mut command);
     command
@@ -350,6 +352,9 @@ struct Flags {
     strip: Option<String>,
     frame_pointers: bool,
     lints_capped: bool,
+    /// What `-C link-arg` and `-C link-args` give the linker, in order: rustc passes them
+    /// after the native libraries, and so does ra-jit's own link.
+    link_args: Vec<String>,
 }
 
 impl Flags {
@@ -409,6 +414,8 @@ impl Flags {
                     });
                 }
                 "split-debuginfo" => flags.split_debuginfo = Some(value.to_owned()),
+                "link-arg" => flags.link_args.push(value.to_owned()),
+                "link-args" => flags.link_args.extend(value.split_whitespace().map(str::to_owned)),
                 "strip" => flags.strip = Some(value.to_owned()),
                 // `always` and `non-leaf` keep them too, `non-leaf` in more functions than asked.
                 "force-frame-pointers" => {
@@ -427,10 +434,11 @@ pub(crate) struct Plan {
     lto: bool,
     frame_pointers: bool,
     lints_capped: bool,
+    link_args: Vec<String>,
 }
 
 /// What a plan says of a program as a whole.
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 pub(crate) struct Whole {
     /// What the build has a debugger told of the code.
     pub(crate) debug: Described,
@@ -439,17 +447,19 @@ pub(crate) struct Whole {
     /// Whether `--cap-lints` or `--force-warn` is among the flags, so that a lint the source
     /// denies may not fail rustc's build.
     pub(crate) lints_capped: bool,
+    /// What the flags give the linker (`-C link-arg`, `-C link-args`), which the daemon's own
+    /// link passes as rustc's does.
+    pub(crate) link_args: Vec<String>,
 }
 
 impl Plan {
-    /// Asks cargo for the units of the build `selection` names of the package of `manifest`.
+    /// The units of the build `selection` names of the package of `manifest`.
     pub(crate) fn of(
         manifest: &Path,
         selection: &Selection,
         asked: &Asked<'_>,
     ) -> anyhow::Result<Plan> {
-        // The unit graph is the only place cargo says which features and which profile each
-        // package of one build has.
+        // The unit graph says which features and which profile each package of one build has.
         let (dir, manifest) = match &selection.asked_in {
             Some(asked_in) if asked_in.is_dir() => (asked_in.as_path(), None),
             Some(asked_in) => {
@@ -457,7 +467,7 @@ impl Plan {
             }
             None => (manifest.parent().unwrap_or(Path::new(".")), Some(manifest)),
         };
-        let graph = UnitGraph::of(dir, manifest, selection, asked.env)?;
+        let graph = UnitGraph::of(dir, manifest, selection, asked)?;
         graph.plan(&Flags::of(dir, asked)?)
     }
 
@@ -474,7 +484,8 @@ impl Plan {
     /// What the plan says of the programs cargo was asked to build.
     pub(crate) fn whole(&self) -> anyhow::Result<Whole> {
         let debug = Described { frame_pointers: self.frame_pointers, ..self.described()? };
-        Ok(Whole { debug, lto: self.lto, lints_capped: self.lints_capped })
+        let link_args = self.link_args.clone();
+        Ok(Whole { debug, lto: self.lto, lints_capped: self.lints_capped, link_args })
     }
 
     /// How the package cargo calls `id` is built, when the build has it.
@@ -550,31 +561,18 @@ impl Unit {
 }
 
 impl UnitGraph {
-    /// What `cargo build --unit-graph` says of the build `selection` names, asked in `dir` of
-    /// the package of `manifest` when there is one, with `env` for the variables of whoever
-    /// asks.
+    /// The unit graph of the build `selection` names, asked in `dir` of the package of
+    /// `manifest` when there is one: what `cargo build --unit-graph` says of it, made by
+    /// blaze-units with no cargo run (harness/resolve.py `units` holds the two equal).
     fn of(
         dir: &Path,
         manifest: Option<&Path>,
         selection: &Selection,
-        env: &FxHashMap<String, Option<String>>,
+        asked: &Asked<'_>,
     ) -> anyhow::Result<UnitGraph> {
-        let mut command = cargo_in(dir, env);
-        command.args(["build", "--unit-graph", "-Z", "unstable-options"]);
-        if let Some(manifest) = manifest {
-            command.arg("--manifest-path").arg(manifest);
-        }
-        command.args(selection.flags());
-        if selection.dev_deps {
-            command.arg("--all-targets");
-        }
-        let output = command.output().context("running `cargo build`")?;
-        anyhow::ensure!(
-            output.status.success(),
-            "`cargo build --unit-graph` failed: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
-        );
-        serde_json::from_slice(&output.stdout).context("reading cargo's unit graph")
+        let graph = crate::cargo::metadata::units(selection, dir, manifest, asked)?;
+        let json = serde_json::to_value(&graph).context("writing blaze's unit graph")?;
+        serde_json::from_value(json).context("blaze's unit graph is not cargo's form")
     }
 
     /// The units that end up in the program: those the roots reach without going through one
@@ -641,6 +639,7 @@ impl UnitGraph {
             lto,
             frame_pointers: flags.frame_pointers,
             lints_capped: flags.lints_capped,
+            link_args: flags.link_args.clone(),
         })
     }
 }
@@ -668,6 +667,14 @@ mod tests {
         assert!(capped("--force-warn non_snake_case"));
         assert!(!capped("-D warnings -A dead_code"));
         assert!(!capped("--cap-lintsx"));
+    }
+
+    #[test]
+    fn link_args_are_read_in_order_in_each_spelling() {
+        let words =
+            ["-C", "link-arg=-Wl,-no_compact_unwind", "-Clink-args=-a -b", "-C", "link_arg=-c"];
+        let args = Flags::parse(words.into_iter());
+        assert_eq!(args.unwrap().link_args, ["-Wl,-no_compact_unwind", "-a", "-b", "-c"]);
     }
 
     #[test]

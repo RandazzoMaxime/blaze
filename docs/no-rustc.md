@@ -151,19 +151,28 @@ project exactly as cargo does. Until K, J and M land, blaze keeps a toolchain of
 private to it: the pinned nightly's `rustc`, `cargo`, `rust-std` and `rust-src` as the Rust project
 publishes them (96 to 133 MB), each piece removed as the step that ends its use lands. A
 project's own pin does not change which Rust blaze builds with
-([#269](https://github.com/indexable-inc/blaze/issues/269)). blaze's manifest reader, registry
-and resolver (`crates/blaze-manifest`, `blaze-registry`, `blaze-resolve`) replace `cargo
-metadata`, `cargo build --unit-graph` and cargo's fetching, held equal to cargo's by
-`harness/resolve.py`; with them K needs no cargo to plan a build. Since 2026-10-27 the standard library's
-workspace is read by them too (`OwnMetadata.library`, `harness/resolve.py sysroot`), and a
-workspace load's questions of the toolchain and configuration (`cargo --version`, `cargo config
-get` in TOML for rust-analyzer and the rustflags `plan.rs` reads, `cargo rustc --print cfg` and
-`target-spec-json`) are blaze's (`crates/ra-jit/src/answers/cargo.rs` over blaze-manifest,
-`resolve.py toolchain`); one it cannot answer is an error naming it, never a cargo run. The cargo
+([#269](https://github.com/indexable-inc/blaze/issues/269)). blaze's manifest reader, registry,
+resolver and unit graph (`crates/blaze-manifest`, `blaze-registry`, `blaze-resolve`,
+`blaze-units`) replace `cargo metadata`, `cargo build --unit-graph` and cargo's fetching, held
+equal to cargo's by `harness/resolve.py`; with them K needs no cargo to plan a build. Since
+2026-10-27 the standard library's workspace is read by them too (`OwnMetadata.library`,
+`harness/resolve.py sysroot`), a workspace load's questions of the toolchain and configuration
+(`cargo --version`, `cargo config get` in TOML for rust-analyzer and the rustflags `plan.rs`
+reads, `cargo rustc --print cfg` and `target-spec-json`) are blaze's
+(`crates/ra-jit/src/answers/cargo.rs` over blaze-manifest, `resolve.py toolchain`), and
+`plan.rs` plans each load from blaze-units' graph with no `cargo build --unit-graph`
+(`resolve.py units`); a question blaze cannot answer is an error naming it, never a cargo run. The cargo
 processes of a cold `cargo blaze build` and `test` from a clean `target/` (strace, Linux arm64,
-the typed `cargo blaze` included) went from 14 to 8 and 12 to 8 on `harness/norustc/fixture`, 26
-to 8 and 43 to 15 on ripgrep with the sysroot's, and then to 3, 3, 3 and 5 with the toolchain's; left per
-workspace load: `cargo build --unit-graph` and `cargo check --compile-time-deps`.
+the typed `cargo blaze` included):
+
+| run | before | sysroot read by blaze | and the toolchain's answers | and blaze-units' graph |
+|---|---|---|---|---|
+| harness/norustc/fixture `build` | 14 | 8 | 3 | 2 |
+| harness/norustc/fixture `test` | 12 | 8 | 3 | 2 |
+| ripgrep 15.1.0 `build` | 26 | 8 | 3 | 2 |
+| ripgrep 15.1.0 `test` | 43 | 15 | 5 | 3 |
+
+Left per workspace load: rust-analyzer's `cargo check --compile-time-deps`.
 
 ## While the paths remain
 
@@ -260,7 +269,7 @@ Paths are under `crates/`; line numbers are of 41e7906192.
 |---|---|---|
 | `ra-jit/src/main.rs:2261` `ProjectWorkspace::load` | `cargo metadata`, plus rustc's `-vV`, `--print sysroot`, `--print cfg`, `--print target-spec-json` through `cargo rustc --print` (`vendor/rust-analyzer/crates/project-model/src/toolchain_info/`) | every load: the daemon's workers and spares, and each doctest process; since B, ra-jit answers them (`answers/own.rs`); the `cargo metadata` of the sysroot's `library/` (rust-analyzer's `Sysroot::load_workspace`, two per load and per unit load of a build script or proc macro) is blaze-metadata's since 2026-10-27 (`cargo/metadata.rs` `library`); since 2026-10-27 too no cargo runs for `cargo --version`, `cargo config get --format toml --show-origin` (`cargo_config_file.rs`) or `cargo rustc --print cfg` / `target-spec-json`: `answers/cargo.rs` answers them with blaze-manifest's configuration (`config/print.rs` for the flags cargo hands rustc), held equal to cargo's by `resolve.py toolchain` |
 | `ra-jit/src/main.rs:2272` | asks rustc for the target triple | every load |
-| `ra-jit/src/plan.rs:475` | `cargo build --unit-graph`, which asks rustc about the target; the rustflags of each target (`Flags::of`) are blaze-manifest's since 2026-10-27 (`answers::cargo_rustflags`), no `cargo config get --format json` | every load, and every doctest run per library |
+| `ra-jit/src/plan.rs` `UnitGraph::of` | until 2026-10-27, `cargo build --unit-graph`, which asks rustc about the target; now blaze-units' graph (`blaze_metadata::units`), no cargo and no rustc; the rustflags of each target (`Flags::of`) are blaze-manifest's since 2026-10-27 (`answers::cargo_rustflags`), no `cargo config get --format json` | every load, and every doctest run per library |
 | `ra-jit/src/main.rs:2314`, `ra-jit/src/inputs.rs:282` `run_build_scripts` | rust-analyzer's `cargo check --compile-time-deps`: into ra-jit's own target directory (every load of `cargo ra-jit` and the daemon) nothing is rustc's since 2026-10-27 (J, below): ra-jit links the scripts and proc macros and only describes their libraries; into cargo's (a load without `--own-target`) rustc compiles them all; the scripts run | a load that is neither beside nor after a cargo build of the workspace (a worker after one reads what cargo said, `cargo/state.rs` `kept_said`), whose target directory does not have them yet; after an edit to a proc macro or build script |
 | `ra-jit/src/main.rs:5287`, `ra-jit/src/borrowck.rs:113` `ProcMacroServerChoice::Sysroot` | expands with the toolchain's `rust-analyzer-proc-macro-srv` loading rustc's proc-macro libraries | every load that has a proc macro |
 | `ra-jit/src/cargo/state.rs` `other_toolchain` | `rustc --version`, `--print=sysroot` | every client command; its `cargo metadata --no-deps` is blaze-manifest's reading since 2026-10-25 ([resolve.md](resolve.md)) |
@@ -1091,7 +1100,10 @@ Where J stands (2026-10-24):
   macro is compiled again by rustc. A script or proc macro ra-jit cannot build, or a proc
   macro with no server beside ra-jit, fails the load with why. A crate cargo built before the
   directory was seeded from it is described from cargo's records. `RA_JIT_PROC_MACRO_SERVER=0`
-  is kept for `macroserver.py`'s reference build alone, which rustc builds whole. On blaze's
+  is kept for `macroserver.py`'s reference build alone, which rustc builds whole, into a
+  directory of its own (`target/rust-analyzer-rustc`): cargo does not fingerprint the
+  variable, and in one directory rustc read the empty files (#460). The variable is part of
+  which build and worker it is, so the daemon never keeps the mode it was started with. On blaze's
   own release build this took the load from about 100 compiles by rustc (54 scripts, 28
   libraries, 18 proc macros compiled again) to none.
 - Shipped (2026-10-25): on Linux the release workflow's ra-jit builds the server
