@@ -12538,7 +12538,13 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
             }
         }
         let locals: Vec<LocalId> = members.iter().map(|it| it.0).collect();
-        let storage = body.frame_storage_conflicts(&locals);
+        // A debugger reads a named local's slot all through its scope (`note_variables`), so it
+        // keeps the slot to itself there, not only until its last read.
+        let named: FxHashSet<LocalId> = match Self::names_are_written(body) {
+            true => body.binding_locals.iter().map(|it| *it.1).collect(),
+            false => FxHashSet::default(),
+        };
+        let storage = body.frame_storage_conflicts(&locals, |local| named.contains(&local));
         let mut conflicts = rustc_index::bit_set::BitMatrix::new(count, count);
         for (a, &(_, slot_a)) in members.iter().enumerate() {
             for (b, &(_, slot_b)) in members.iter().enumerate().skip(a + 1) {
