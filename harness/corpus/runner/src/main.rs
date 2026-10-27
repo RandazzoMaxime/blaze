@@ -611,6 +611,8 @@ fn main() {
     println!("lifetime_impl_consts {}", cases::lifetime_impl_consts::run());
     #[cfg(feature = "nightly")]
     println!("simd_lanes {}", cases::simd_lanes::run());
+    #[cfg(feature = "nightly")]
+    println!("unsized_params {}", cases::unsized_params::run());
     #[cfg(all(feature = "nightly", target_arch = "aarch64", target_os = "linux"))]
     println!("soft_floats {}", cases::soft_floats::run());
     #[cfg(target_arch = "x86_64")]
@@ -619,6 +621,8 @@ fn main() {
     println!("simd_aarch64 {}", cases::simd_aarch64::run());
     #[cfg(all(target_arch = "aarch64", feature = "nightly"))]
     println!("neon_intrinsics {}", cases::neon_intrinsics::run());
+    #[cfg(all(target_arch = "aarch64", target_os = "linux", feature = "nightly"))]
+    println!("half_intrinsics {}", cases::half_intrinsics::run());
     #[cfg(feature = "nightly")]
     {
         use std::simd::Simd;
@@ -635,6 +639,8 @@ fn main() {
     }
     #[cfg(all(feature = "nightly", target_arch = "aarch64"))]
     println!("sve {}", cases::sve::run());
+    #[cfg(all(feature = "nightly", target_arch = "aarch64"))]
+    println!("sve_ops {}", cases::sve_ops::run());
     // Threads.
     #[cfg(not(target_family = "wasm"))]
     println!("boxed_fn_once {:?}", cases::boxed_fn_once::run());

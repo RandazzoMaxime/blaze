@@ -6,7 +6,7 @@
 // toolchain only.
 #![cfg_attr(
     feature = "nightly",
-    feature(deref_patterns, c_variadic_int128, portable_simd, core_intrinsics, f16, f128, f16b)
+    feature(deref_patterns, c_variadic_int128, portable_simd, core_intrinsics, f16, f128, f16b, unsized_fn_params)
 )]
 #![cfg_attr(all(feature = "nightly", target_arch = "aarch64"), feature(stdarch_aarch64_sve))]
 #![cfg_attr(feature = "nightly", allow(incomplete_features, internal_features))]
@@ -19,7 +19,8 @@
         stdarch_neon_fcma,
         stdarch_arm_barrier,
         stdarch_arm_hints,
-        stdarch_aarch64_rand
+        stdarch_aarch64_rand,
+        stdarch_neon_f16
     )
 )]
 
@@ -1221,6 +1222,142 @@ pub mod simd_lanes {
     }
 }
 
+/// Unsized values taken by value (`unsized_fn_params`), which rustc passes as the address of
+/// the value and its metadata: slices, `str`, `dyn Trait` and a struct with an unsized tail,
+/// of several lengths, moved out of a `Box`, passed on, through a trait and a vtable, and
+/// dropped by the callee.
+#[cfg(feature = "nightly")]
+pub mod unsized_params {
+    use std::cell::Cell;
+    use std::fmt::Display;
+
+    thread_local! {
+        static DROPS: Cell<u32> = const { Cell::new(0) };
+    }
+
+    pub struct Noisy(pub u32);
+    impl Drop for Noisy {
+        fn drop(&mut self) {
+            DROPS.with(|it| it.set(it.get() * 10 + self.0));
+        }
+    }
+
+    pub struct Tail<T: ?Sized> {
+        pub n: u8,
+        pub rest: T,
+    }
+
+    #[inline(never)]
+    pub fn sum(x: [u64]) -> u64 {
+        let mut total = x.len() as u64 * 1000;
+        for v in &x {
+            total = total.wrapping_mul(31).wrapping_add(*v);
+        }
+        total
+    }
+    #[inline(never)]
+    pub fn passed_on(x: [u64], bias: u64) -> u64 {
+        sum(x) ^ bias
+    }
+    #[inline(never)]
+    pub fn bumped(mut x: [u32]) -> Vec<u32> {
+        if let Some(first) = x.first_mut() {
+            *first += 1;
+        }
+        x.to_vec()
+    }
+    #[inline(never)]
+    pub fn shout(s: str) -> String {
+        format!("{}:{}", s.len(), s.to_uppercase())
+    }
+    #[inline(never)]
+    pub fn show(x: dyn Display, width: usize) -> String {
+        format!("[{:>width$}]", &x)
+    }
+    #[inline(never)]
+    pub fn joined(x: [String]) -> String {
+        x.join("+")
+    }
+    #[inline(never)]
+    pub fn counted(x: [Noisy]) -> usize {
+        x.len()
+    }
+    #[inline(never)]
+    pub fn tail(x: Tail<[u16]>) -> (u8, usize, u32) {
+        (x.n, x.rest.len(), x.rest.iter().map(|&it| u32::from(it)).sum())
+    }
+
+    pub trait Total {
+        fn total(self) -> u64;
+    }
+    impl Total for [u64] {
+        fn total(self) -> u64 {
+            passed_on(self, 7)
+        }
+    }
+
+    pub trait Consume {
+        fn consume(self) -> String;
+    }
+    impl Consume for String {
+        fn consume(self) -> String {
+            self + "!"
+        }
+    }
+    impl Consume for (u8, u64, [u16; 3]) {
+        fn consume(self) -> String {
+            format!("{:?}", self)
+        }
+    }
+    impl Consume for Noisy {
+        fn consume(self) -> String {
+            format!("noisy {}", self.0)
+        }
+    }
+
+    pub fn run() -> String {
+        let mut out = Vec::new();
+        for len in [0usize, 1, 3, 17] {
+            let values: Vec<u64> = (0..len as u64).map(|it| it * it + 5).collect();
+            out.push(sum(*values.clone().into_boxed_slice()).to_string());
+            out.push(values.clone().into_boxed_slice().total().to_string());
+            let small: Vec<u32> = (0..len as u32).collect();
+            out.push(format!("{:?}", bumped(*small.into_boxed_slice())));
+            let strings: Vec<String> = (0..len).map(|it| "ab".repeat(it)).collect();
+            out.push(joined(*strings.into_boxed_slice()));
+        }
+        for s in ["", "a", "héllo wörld", "ß"] {
+            let boxed: Box<str> = s.into();
+            out.push(shout(*boxed));
+        }
+        let shown: [Box<dyn Display>; 3] = [Box::new(42u8), Box::new("text"), Box::new(-1.5f64)];
+        for (width, it) in shown.into_iter().enumerate() {
+            out.push(show(*it, width * 3));
+        }
+        DROPS.with(|it| it.set(0));
+        let noisy: Box<[Noisy]> = vec![Noisy(1), Noisy(2), Noisy(3)].into_boxed_slice();
+        out.push(format!("{} {}", counted(*noisy), DROPS.with(Cell::get)));
+        let empty: Box<[Noisy]> = Vec::new().into_boxed_slice();
+        out.push(format!("{} {}", counted(*empty), DROPS.with(Cell::get)));
+        let tails: [Box<Tail<[u16]>>; 3] = [
+            Box::new(Tail { n: 1, rest: [0u16; 0] }),
+            Box::new(Tail { n: 2, rest: [7] }),
+            Box::new(Tail { n: 3, rest: [1, 2, 65535, 9] }),
+        ];
+        for it in tails {
+            out.push(format!("{:?}", tail(*it)));
+        }
+        DROPS.with(|it| it.set(0));
+        let consumed: [Box<dyn Consume>; 3] =
+            [Box::new(String::from("owned")), Box::new((9, u64::MAX, [1, 2, 3])), Box::new(Noisy(4))];
+        for it in consumed {
+            out.push(it.consume());
+        }
+        out.push(DROPS.with(Cell::get).to_string());
+        out.join(" | ")
+    }
+}
+
 /// `f16` and `f128`, which AArch64 has no arithmetic for without its half-precision extension:
 /// an `f16` is worked on as an `f32` and rounded back, an `f128` by compiler-builtins and C's
 /// `long double` functions. The values are at the edges of each format: signed zeros, the
@@ -2200,6 +2337,20 @@ pub mod packed_drop {
         drop(w);
         drop(m.1.1.a);
         ODD.with(|it| it.get())
+    }
+}
+
+/// `offset_of!` of a field of a packed struct takes no reference to it.
+pub mod packed_offset_of {
+    #[repr(C, packed)]
+    pub struct Header {
+        pub magic: u16,
+        pub version: u8,
+        pub checksum: u32,
+    }
+
+    pub fn run(base: usize) -> usize {
+        base + core::mem::offset_of!(Header, checksum)
     }
 }
 
@@ -5849,6 +6000,190 @@ pub mod neon_intrinsics {
     }
 }
 
+/// `core::arch::aarch64` functions of halves, which are AArch64's half-precision instructions
+/// in a function with them (`fp16`): arithmetic, `fma`, comparisons, conversions, rounding and
+/// lane moves, of vectors and of single halves, and `f16` arithmetic of such a function, with
+/// the edges of `f16` (signed zeros, subnormals, ties, the greatest finite values,
+/// infinities, quiet and signalling NaNs with payloads, a signalling NaN beside a quiet one).
+/// They run only where the processor has the extension, and the output says whether it did.
+#[cfg(all(target_arch = "aarch64", target_os = "linux", feature = "nightly"))]
+pub mod half_intrinsics {
+    use core::arch::aarch64::*;
+    use core::mem::transmute;
+
+    const HALVES: [u16; 24] = [
+        0x0000, 0x8000, 0x3c00, 0xbc00, 0x3800, 0x0001, 0x8001, 0x03ff, 0x0400, 0x7bff, 0xfbff,
+        0x7c00, 0xfc00, 0x7e00, 0x7c01, 0x7fff, 0xfe01, 0x3555, 0x4248, 0x6800, 0x6801, 0x5bfe,
+        0x3c01, 0xd7ff,
+    ];
+    const SINGLES: [u32; 8] = [
+        0x3f80_1000, 0x477f_f000, 0x3380_0000, 0x7fa0_0001, 0xffc1_2345, 0x8000_0000,
+        0x4f80_0000, 0x387f_e000,
+    ];
+
+    fn eight(v: float16x8_t) -> [u16; 8] {
+        unsafe { transmute(v) }
+    }
+    fn four(v: float16x4_t) -> [u16; 4] {
+        unsafe { transmute(v) }
+    }
+
+    #[target_feature(enable = "fp16")]
+    unsafe fn vectors(a: float16x8_t, b: float16x8_t, c: float16x8_t, s: float32x4_t) -> Vec<u16> {
+        let (x, y, z) = (vget_low_f16(a), vget_high_f16(b), vget_low_f16(c));
+        let mut out = Vec::new();
+        for v in [
+            vaddq_f16(a, b),
+            vsubq_f16(a, b),
+            vmulq_f16(a, b),
+            vdivq_f16(a, b),
+            vfmaq_f16(c, a, b),
+            vfmsq_f16(c, a, b),
+            vnegq_f16(a),
+            vabsq_f16(b),
+            vsqrtq_f16(a),
+            vrndmq_f16(a),
+            vrndpq_f16(b),
+            vrndaq_f16(a),
+            vpaddq_f16(a, b),
+            vabdq_f16(a, b),
+            vbslq_f16(vcgtq_f16(a, b), a, b),
+            vcvtq_f16_s16(vreinterpretq_s16_f16(a)),
+            vcvtq_f16_u16(vreinterpretq_u16_f16(b)),
+            vcvt_high_f16_f32(x, s),
+            vsetq_lane_f16::<3>(vgetq_lane_f16::<6>(b), a),
+            vzip1q_f16(a, b),
+            vuzp2q_f16(a, b),
+            vextq_f16::<3>(a, b),
+            vrev64q_f16(a),
+            vcombine_f16(vtrn1_f16(x, y), vdup_lane_f16::<2>(z)),
+            vdupq_n_f16(vget_lane_f16::<1>(y)),
+        ] {
+            out.extend(eight(v));
+        }
+        for v in [
+            vadd_f16(x, y),
+            vsub_f16(x, y),
+            vmul_f16(x, y),
+            vdiv_f16(y, x),
+            vfma_f16(z, x, y),
+            vfms_f16(z, y, x),
+            vneg_f16(y),
+            vabs_f16(x),
+            vsqrt_f16(y),
+            vrndm_f16(y),
+            vrndp_f16(x),
+            vrnd_f16(x),
+            vrndx_f16(y),
+            vcvt_f16_f32(s),
+            vcvt_f16_u16(vreinterpret_u16_f16(x)),
+            vdup_n_f16(vgetq_lane_f16::<7>(a)),
+        ] {
+            out.extend(four(v));
+        }
+        for mask in [
+            vceqq_f16(a, b),
+            vcgeq_f16(a, b),
+            vcgtq_f16(a, b),
+            vcleq_f16(a, b),
+            vcltq_f16(a, b),
+            vceqzq_f16(a),
+            vcgezq_f16(b),
+            vcgtzq_f16(a),
+            vclezq_f16(b),
+            vcltzq_f16(a),
+            vreinterpretq_u16_s16(vcvtq_s16_f16(a)),
+            vcvtq_u16_f16(b),
+        ] {
+            out.extend(transmute::<_, [u16; 8]>(mask));
+        }
+        for mask in [vceq_f16(x, y), vcle_f16(x, y), vcltz_f16(y), vcge_f16(y, z), vcgt_f16(z, x)] {
+            out.extend(transmute::<_, [u16; 4]>(mask));
+        }
+        for wide in [vcvt_f32_f16(x), vcvt_high_f32_f16(b)] {
+            let wide: [u32; 4] = transmute(wide);
+            out.extend(wide.iter().flat_map(|it| [(it >> 16) as u16, *it as u16]));
+        }
+        out
+    }
+
+    #[target_feature(enable = "fp16")]
+    unsafe fn halves(a: f16, b: f16, c: f16) -> ([u16; 22], [i64; 18]) {
+        let rounded = [
+            vaddh_f16(a, b),
+            vsubh_f16(a, b),
+            vmulh_f16(a, b),
+            vdivh_f16(a, b),
+            vfmah_f16(c, a, b),
+            vfmsh_f16(c, a, b),
+            vabdh_f16(a, b),
+            vsqrth_f16(a),
+            vrndmh_f16(a),
+            vrndph_f16(a),
+            vrndh_f16(a),
+            vrndah_f16(a),
+            vrndnh_f16(a),
+            vrndxh_f16(a),
+            vnegh_f16(a),
+            vabsh_f16(a),
+            a + b,
+            a * b - c,
+            a / b,
+            unsafe { core::intrinsics::fma(a, b, c) },
+            unsafe { core::intrinsics::sqrt(b) },
+            core::intrinsics::round_ties_even(b),
+        ];
+        let ints = [
+            vcageh_f16(a, b) as i64,
+            vcagth_f16(a, b) as i64,
+            vcaleh_f16(a, b) as i64,
+            vcvtph_s32_f16(a) as i64,
+            vcvtph_u32_f16(a) as i64,
+            vcvtph_s64_f16(a),
+            vcvtah_s64_f16(a),
+            vcvtah_u32_f16(a) as i64,
+            vcvtah_u64_f16(a) as i64,
+            vcvtmh_s32_f16(a) as i64,
+            vcvtmh_u64_f16(a) as i64,
+            vcvtnh_s32_f16(a) as i64,
+            vcvtnh_u64_f16(a) as i64,
+            vcvtah_s32_f16(b) as i64,
+            vcvtmh_s64_f16(b),
+            vcvtnh_s64_f16(b),
+            vcvtph_u64_f16(b) as i64,
+            vcvtmh_u32_f16(b) as i64,
+        ];
+        (rounded.map(f16::to_bits), ints)
+    }
+
+    pub fn run() -> String {
+        if !std::arch::is_aarch64_feature_detected!("fp16") {
+            return "no fp16".to_owned();
+        }
+        let halves_at = |at: usize| HALVES[at % HALVES.len()];
+        let mut out = String::new();
+        unsafe {
+            for k in 0..HALVES.len() {
+                let lanes = |step: usize, start: usize| -> float16x8_t {
+                    transmute(core::array::from_fn::<u16, 8, _>(|i| halves_at(start + i * step)))
+                };
+                let (a, b, c) = (lanes(1, k), lanes(5, k + 3), lanes(7, 2 * k));
+                let s = vld1q_f32(transmute::<_, [f32; 8]>(SINGLES)[k % 5..].as_ptr());
+                out += &format!("{:x?}\n", vectors(a, b, c, s));
+            }
+            for (i, &a) in HALVES.iter().enumerate() {
+                for (j, &b) in HALVES.iter().enumerate() {
+                    let c = halves_at(i * 3 + j * 7);
+                    let (a, b, c) = (f16::from_bits(a), f16::from_bits(b), f16::from_bits(c));
+                    out += &format!("{:x?}", halves(a, b, c));
+                }
+                out += "\n";
+            }
+        }
+        out + "fp16"
+    }
+}
+
 /// Portable vectors of fewer than 64 bits by value, which AArch64's LLVM passes in a vector
 /// register with their lanes widened (`<4 x u8>` as `<4 x u16>`), or after their one lane: the
 /// runner, which rustc builds, calls these and hands them back.
@@ -5949,6 +6284,55 @@ pub mod sve {
         }
         write!(out, " {stored:?} {narrow:?}").unwrap();
         out
+    }
+}
+
+/// Each function of `core::arch`'s SVE and SVE2 of an LLVM intrinsic ra-jit has a stub of,
+/// generated (`sve_ops.rs`).
+#[cfg(all(feature = "nightly", target_arch = "aarch64"))]
+pub mod sve_ops;
+
+/// rust-analyzer's `ExprCollector::new(db: &dyn SourceDatabase, module: ModuleId, ..) ->
+/// ExprCollector<'_>`: lifetime elision counts the lifetimes the parameters' types write or
+/// elide, not the `'static` of `type ModuleId = ModuleIdLt<'static>`'s expansion, nor the
+/// default of a trait object of a `'static` trait.
+pub mod elision_through_alias {
+    use std::cell::Cell;
+
+    pub trait Db: 'static {
+        fn n(&self) -> u8;
+    }
+
+    impl Db for u8 {
+        fn n(&self) -> u8 {
+            *self
+        }
+    }
+
+    #[derive(Clone, Copy)]
+    pub struct IdLt<'db>(pub &'db u8);
+
+    pub type Id = IdLt<'static>;
+
+    pub struct Collector<'db> {
+        pub db: &'db dyn Db,
+        pub cell: Cell<&'db u8>,
+    }
+
+    impl<'db> Collector<'db> {
+        pub fn new(db: &dyn Db, id: Id) -> Collector<'_> {
+            Collector { db, cell: Cell::new(id.0) }
+        }
+    }
+
+    pub fn first(x: &u8, id: Id) -> &u8 {
+        if *id.0 > *x { x } else { x }
+    }
+
+    pub fn run() -> u8 {
+        let (n, x) = (4u8, 2u8);
+        let collector = Collector::new(&n, IdLt(&7));
+        collector.db.n() + collector.cell.get() + first(&x, IdLt(&1))
     }
 }
 
@@ -7142,6 +7526,42 @@ pub mod object_lifetime_default {
         let mut c = Container { t: Ref { r: &first }, u: Ref2 { r: &first } };
         put(Ref { r: &a }, Ref2 { r: &b }, &mut c);
         format!("{}{}", c.t.r.show(), c.u.r.show())
+    }
+}
+
+/// salsa's `cycle_fn` closures, as ruff's `ty_python_semantic` writes them: a closure's
+/// parameter `db: &'db dyn Db` of a trait bounded by `'static` (salsa's `Database` is) is
+/// `&'db (dyn Db + 'static)`, rustc's object lifetime default, as it is in a signature.
+pub mod closure_static_trait_object {
+    pub trait Db: 'static {
+        fn n(&self) -> u32;
+    }
+
+    impl Db for u32 {
+        fn n(&self) -> u32 {
+            *self
+        }
+    }
+
+    #[derive(Clone, Copy)]
+    pub struct Ty<'db>(pub &'db u32);
+
+    impl<'db> Ty<'db> {
+        fn normalized(self, db: &'db dyn Db, previous: Ty<'db>) -> Ty<'db> {
+            if db.n() > *previous.0 { self } else { previous }
+        }
+    }
+
+    pub fn recover<'db>(db: &'db dyn Db, last: &Ty<'db>, value: Ty<'db>) -> Ty<'db> {
+        (|db: &'db dyn Db, cycle, previous: &Ty<'db>, result: Ty<'db>| {
+            let _: u32 = cycle;
+            result.normalized(db, *previous)
+        })(db, 0, last, value)
+    }
+
+    pub fn run() -> u32 {
+        let (a, b) = (1, 2);
+        *recover(&5u32, &Ty(&a), Ty(&b)).0
     }
 }
 
@@ -8919,6 +9339,41 @@ pub mod byte_compares {
     }
 }
 
+/// A trait object written in a body under a lifetime left to inference, as cargo's
+/// credential error's `source` casts: `&dyn Error` is `&'_ (dyn Error + '_)`, two lifetimes
+/// inferred apart, so it coerces to `dyn Error + 'static` behind a shorter reference.
+pub mod body_object_lifetimes {
+    use std::error::Error;
+    use std::fmt;
+
+    #[derive(Debug)]
+    pub struct Chained {
+        source: Option<Box<Chained>>,
+    }
+
+    impl fmt::Display for Chained {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            f.write_str("chained")
+        }
+    }
+
+    impl Error for Chained {
+        fn source(&self) -> Option<&(dyn Error + 'static)> {
+            self.source.as_ref().map(|err| err as &dyn Error)
+        }
+    }
+
+    pub fn annotated(e: &Chained) -> &(dyn Error + 'static) {
+        let object: &dyn Error = e;
+        object
+    }
+
+    pub fn boxed(e: Box<Chained>) -> Box<dyn Error> {
+        let object: Box<dyn Error> = e;
+        object
+    }
+}
+
 /// Statics of `&dyn` of other statics, read by value in another static's, as rustls's cipher
 /// suites are: each was evaluated with vtables of its own.
 pub mod dyn_static_suites {
@@ -9769,5 +10224,56 @@ pub mod async_fn_item_of_trait {
 
     pub fn run(n: u32) -> (u32, u32, u32, (u32, u32)) {
         (loaded(Doubled(n)), loaded(Ready(n)), served(&Doubled(n)), routed(n))
+    }
+}
+
+/// ruff's `ty_python_semantic` inference builder, `impl<'db> TypeInferenceBuilder<'db, '_>`:
+/// `Self` written in a trait object's bounds (`&mut dyn FnMut(&mut Self, Ty<'db>) -> Ty<'db>`)
+/// or a function pointer's signature is the impl's self type, its anonymous lifetime the
+/// impl's own, as everywhere else `Self` is written.
+pub mod self_in_object_bounds {
+    #[derive(Clone, Copy)]
+    pub struct Ty<'db>(pub &'db u32);
+
+    pub struct Builder<'db, 'ast> {
+        pub db: &'db u32,
+        pub ast: &'ast u32,
+    }
+
+    struct Guard<'db, 'ast, 'infer> {
+        f: &'infer mut dyn FnMut(&mut Builder<'db, 'ast>, Ty<'db>) -> Ty<'db>,
+    }
+
+    impl<'db, 'ast, 'infer> Guard<'db, 'ast, 'infer> {
+        fn new(f: &'infer mut dyn FnMut(&mut Builder<'db, 'ast>, Ty<'db>) -> Ty<'db>) -> Self {
+            Guard { f }
+        }
+    }
+
+    impl<'db> Builder<'db, '_> {
+        pub fn infer(&mut self, t: Ty<'db>, f: &mut dyn FnMut(&mut Self, Ty<'db>) -> Ty<'db>) -> Ty<'db> {
+            f(self, t)
+        }
+
+        pub fn guarded(&mut self, t: Ty<'db>, f: &mut dyn FnMut(&mut Self, Ty<'db>) -> Ty<'db>) -> Ty<'db> {
+            let guard = Guard::new(f);
+            (guard.f)(self, t)
+        }
+
+        pub fn pointer(&mut self, f: fn(&mut Self)) {
+            f(self)
+        }
+
+        pub fn produce(&mut self, f: &mut dyn FnMut() -> Self) {
+            *self = f()
+        }
+    }
+
+    pub fn run() -> u32 {
+        let (db, ast) = (3, 4);
+        let mut builder = Builder { db: &db, ast: &ast };
+        let t = builder.guarded(Ty(&db), &mut |b, t| Ty(if *b.ast > 0 { t.0 } else { b.db }));
+        builder.pointer(|b| b.ast = b.db);
+        *builder.infer(t, &mut |_, t| t).0 + *builder.ast
     }
 }

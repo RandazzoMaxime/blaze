@@ -19,35 +19,6 @@ use super::{
 /// The exit status of cargo when a test fails or a program can't be run.
 const FAILED: i32 = 101;
 
-/// Runs the program `asked` names, and ends as it ended. `None` when cargo has to say
-/// which program that is: there are several, or none.
-pub(crate) fn program(
-    asked: &Invocation,
-    state: &State,
-    cwd: &Path,
-    held: Option<Held>,
-) -> anyhow::Result<Option<i32>> {
-    let runnable = |it: &&Program| !it.test && matches!(it.kind, Kind::Bin | Kind::Example);
-    let mut programs: Vec<&Program> = state.programs.iter().filter(runnable).collect();
-    if let Some(name) = asked.flags.bin.as_ref().or(asked.flags.example.as_ref()) {
-        programs.retain(|it| it.name == *name);
-    } else if let [default] = programs.iter().filter(|it| it.default_run).collect::<Vec<_>>()[..] {
-        // Cargo runs a `default-run` when one package it builds has one.
-        programs = vec![*default];
-    }
-    let &[program] = programs.as_slice() else { return Ok(None) };
-    let shown = shown_path(&program.executable, cwd);
-    let args = asked.program_args().map(|it| format!(" {it}")).collect::<String>();
-    say::status(asked.flags.quiet, "Running", &format!("`{shown}{args}`"));
-    let mut command = Command::new(&program.executable);
-    configured(&mut command, state);
-    command.args(asked.program_args()).envs(program.env.iter().cloned());
-    as_built(&mut command)?;
-    let status =
-        ended(&mut command, held, state).with_context(|| format!("could not execute {shown}"))?;
-    Ok(Some(exit_code(status)))
-}
-
 /// Sets for `command` what the `[env]` of cargo's configuration sets, as cargo does: what
 /// cargo sets for the program itself goes over it.
 fn configured(command: &mut Command, state: &State) {
