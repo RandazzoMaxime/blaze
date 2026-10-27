@@ -134,15 +134,6 @@ impl Subcommand {
             _ => None,
         }
     }
-
-    pub(crate) fn name(self) -> &'static str {
-        match self {
-            Subcommand::Build => "build",
-            Subcommand::Run => "run",
-            Subcommand::Test => "test",
-            Subcommand::Check => "check",
-        }
-    }
 }
 
 /// What the user asked for.
