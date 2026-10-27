@@ -809,9 +809,12 @@ impl Builder<'_> {
             out.text("\n");
             for member in group {
                 out.text("    ");
-                for piece in &member.decl.0 {
+                let last = member.decl.0.len().saturating_sub(1);
+                for (at, piece) in member.decl.0.iter().enumerate() {
                     match piece {
                         Piece::Text(text) => {
+                            // A where clause's last comma gives way to the `;` or `{ ... }`.
+                            let text = if at == last { text.strip_suffix(',').unwrap_or(text) } else { text };
                             out.text(text.replace('\n', "\n    "));
                         }
                         other => {

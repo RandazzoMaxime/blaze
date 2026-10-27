@@ -162,7 +162,7 @@
     } else {
       html += `<div class="search-results">`;
       for (const [, e] of shown) {
-        html += `<a class="result" href="${root}${e.href}"><span class="path"><span class="parent">${escapeHtml(e.parent)}::</span><span class="kind-${e.kind}">${escapeHtml(e.name)}</span></span><span class="desc">${escapeHtml(e.desc)}</span></a>`;
+        html += `<a class="result" href="${root}${e.href}"><span class="path"><span class="parent">${escapeHtml(e.parent).replaceAll("::", "::<wbr>")}::<wbr></span><span class="kind-${e.kind}">${escapeHtml(e.name)}</span></span><span class="desc">${escapeHtml(e.desc)}</span></a>`;
       }
       html += `</div>`;
     }

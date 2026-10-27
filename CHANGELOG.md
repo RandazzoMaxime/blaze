@@ -8,6 +8,19 @@ All notable changes to ra-jit are written here. The format follows
 
 ### Added
 
+- `cargo blaze doc` (and `blaze doc`) writes the HTML documentation of the packages and their
+  dependencies from rust-analyzer's HIR (`crates/blaze-doc`), with no rustdoc: a page for
+  every item with linked signatures, fields, variants, inherent, trait, blanket and auto
+  impls, implementors and the members an impl leaves as the trait provides them; docs as
+  rustdoc's Markdown with intra-doc links resolved (an unresolved one warns as rustdoc's
+  does); source pages, an "All items" page, a search box (`s` or `/`) over every crate
+  documented, light and dark themes. cargo's flags (`-p`, `--workspace`, `--no-deps`,
+  `--document-private-items`, `--open`, features, `--target`, `--lib`, `--bin`, ...); the
+  workspace loads once and the pages are written in parallel. `harness/docdiff.py` compares
+  it with the pinned nightly's `cargo doc`: on fd and its dependencies blaze writes 100% of
+  rustdoc's pages, 99.9% of the members and impls on them and 99.4% of the resolved links
+  ([docs/doc.md](docs/doc.md)).
+
 - `RA_JIT_WHOLE_BUILD=1`: the whole build runs in the daemon. Its worker loads the workspace,
   builds and links each program, and answers once they are linked; the next build asks the
   same worker, which builds the edits since on what it has loaded and links again, with no

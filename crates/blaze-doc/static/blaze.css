@@ -400,7 +400,7 @@ pre.item-decl .comment, .code-header .comment { font-style: italic; }
   padding: 7px 10px; border-radius: 6px; color: var(--main-color); text-decoration: none;
 }
 #search .result:hover, #search .result.selected { background: var(--search-result-hover); }
-#search .result .path { font-family: var(--font-code); font-size: 14.5px; overflow-wrap: anywhere; }
+#search .result .path { font-family: var(--font-code); font-size: 14.5px; overflow-wrap: break-word; }
 #search .result .path .parent { color: var(--muted-color); }
 #search .result .desc { font-size: 14px; color: var(--muted-color); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 #search .kind-struct, #search .kind-enum, #search .kind-union, #search .kind-type, #search .kind-primitive, #search .kind-associatedtype { color: var(--type-link-color); }

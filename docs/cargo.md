@@ -824,7 +824,7 @@ cargo reads them. The table is `SUBCOMMANDS` in `crates/ra-jit/src/cargo/own/mod
 | `version`, `help` | yes | blaze's version and help |
 | `fmt` | not yet | blaze's formatter, rustfmt's rules ported onto rust-analyzer's syntax trees, is being written |
 | `clippy` | not yet | blaze's lints, run by the daemon from its analysis, are being written |
-| `doc` (`d`) | not yet | HTML documentation from rust-analyzer's HIR is being written; doctests are blaze's already (`cargo blaze test --doc`) |
+| `doc` (`d`) | yes | `crates/blaze-doc`: every page from rust-analyzer's HIR, no rustdoc; cargo's flags, `target/doc/<crate>/index.html`, search, source pages, themes. Against the pinned nightly's `cargo doc` (`harness/docdiff.py`), fd and its dependencies get 100% of rustdoc's pages, 99.9% of their members and impls and 99.4% of the resolved links ([doc.md](doc.md)). The load still runs cargo for build scripts and proc macros, as every load does; doctests are `cargo blaze test --doc`'s |
 | `tree`, `fetch`, `clean`, `new`, `init`, `pkgid`, `vendor`, `remove` (`rm`) | not yet | not written yet: each needs only blaze's manifest reader, registry and resolve |
 | `add`, `update`, `generate-lockfile` | not yet | they choose versions, which blaze-resolve does not do yet ([#321](https://github.com/indexable-inc/blaze/issues/321)) |
 | `bench`, `rustc`, `rustdoc`, `fix`, `install`, `package` | not yet | builds blaze does not do yet ([no-rustc.md](no-rustc.md)) |
