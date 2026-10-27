@@ -45,6 +45,7 @@ function call(method: string, path: string, opts: Opts = {}): Promise<Response> 
 }
 
 const enc = (s: string) => new TextEncoder().encode(s);
+const str = async (r: Response) => new TextDecoder().decode(await r.arrayBuffer());
 
 async function hexOf(bytes: Uint8Array): Promise<string> {
   return sha256Hex(bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer);
@@ -103,7 +104,7 @@ describe("the one 404", () => {
     const h = await putKey("priv", "privWrite", "mine");
     const r = await call("GET", `/t/priv/v3/keys/${h}`, { token: "privRead" });
     expect(r.status).toBe(200);
-    expect(await r.text()).toBe("mine");
+    expect(await str(r)).toBe("mine");
     expect(r.headers.get("cache-control")).toBe("private, no-cache");
   });
 });
@@ -150,7 +151,7 @@ describe("PUT", () => {
 
     const get = await call("GET", `/t/pub/v3/packs/${h}.pack`);
     expect(get.status).toBe(200);
-    expect(await get.text()).toBe("pack bytes");
+    expect(await str(get)).toBe("pack bytes");
     expect(get.headers.get("etag")).toBe(`"${etag}"`);
     expect(get.headers.get("content-length")).toBe(String(bytes.length));
     expect(get.headers.get("cache-control")).toBe("public, max-age=31536000, immutable");
@@ -162,7 +163,7 @@ describe("PUT", () => {
     expect(head.status).toBe(200);
     expect(head.headers.get("content-length")).toBe(String(bytes.length));
     expect(head.headers.get("etag")).toBe(`"${etag}"`);
-    expect(await head.text()).toBe("");
+    expect(await str(head)).toBe("");
   });
 
   for (const prefix of ["packs/", "keys/", "units/"]) {
@@ -171,7 +172,7 @@ describe("PUT", () => {
       const name = prefix === "packs/" ? `packs/${h}.pack` : `${prefix}${h}`;
       const r = await call("PUT", `/t/pub/v3/${name}`, { token: "pubWrite", body: "poison" });
       expect(r.status).toBe(422);
-      expect(await r.text()).toBe("hash mismatch\n");
+      expect(await str(r)).toBe("hash mismatch\n");
       expect((await call("GET", `/t/pub/v3/${name}`)).status).toBe(404);
       expect(await testEnv.BUCKET.head(`v3/101/${name}`)).toBeNull();
     });
@@ -190,7 +191,7 @@ describe("PUT", () => {
     expect(ok.status).toBe(200);
     const get = await call("GET", path);
     expect(get.headers.get("x-blaze-sha256")).toBe(sha);
-    expect(await get.text()).toBe("compressed bytes");
+    expect(await str(get)).toBe("compressed bytes");
     expect((await call("HEAD", path)).headers.get("x-blaze-sha256")).toBe(sha);
   });
 
@@ -214,7 +215,7 @@ describe("conditional writes", () => {
     expect(first.status).toBe(200);
     const second = await call("PUT", path, { token: "pubWrite", body: "v2", headers: { "if-none-match": "*" } });
     expect(second.status).toBe(412);
-    expect(await (await call("GET", path)).text()).toBe("v1");
+    expect(await str(await call("GET", path))).toBe("v1");
   });
 
   it("If-Match takes the bare or the quoted ETag, and a stale one is 412", async () => {
@@ -225,7 +226,7 @@ describe("conditional writes", () => {
     expect(stale.status).toBe(412);
     const quoted = await call("PUT", path, { token: "pubWrite", body: "v3", headers: { "if-match": v2.headers.get("etag")! } });
     expect(quoted.status).toBe(200);
-    expect(await (await call("GET", path)).text()).toBe("v3");
+    expect(await str(await call("GET", path))).toBe("v3");
   });
 
   it("lets exactly one of two racing writers on the same ETag win", async () => {
@@ -235,7 +236,7 @@ describe("conditional writes", () => {
     );
     expect([a.status, b.status].sort()).toEqual([200, 412]);
     const winner = a.status === 200 ? "a" : "b";
-    expect(await (await call("GET", path)).text()).toBe(winner);
+    expect(await str(await call("GET", path))).toBe(winner);
   });
 
   it("If-Match on an absent object is 412", async () => {
@@ -258,11 +259,11 @@ describe("ranges", () => {
     expect(r.status).toBe(206);
     expect(r.headers.get("content-range")).toBe("bytes 2-5/10");
     expect(r.headers.get("content-length")).toBe("4");
-    expect(await r.text()).toBe("2345");
+    expect(await str(r)).toBe("2345");
     const open = await call("GET", path, { headers: { range: "bytes=7-" } });
     expect(open.status).toBe(206);
     expect(open.headers.get("content-range")).toBe("bytes 7-9/10");
-    expect(await open.text()).toBe("789");
+    expect(await str(open)).toBe("789");
   });
 
   it("clamps an end past the size", async () => {
@@ -270,7 +271,7 @@ describe("ranges", () => {
     const r = await call("GET", path, { headers: { range: "bytes=8-100" } });
     expect(r.status).toBe(206);
     expect(r.headers.get("content-range")).toBe("bytes 8-9/10");
-    expect(await r.text()).toBe("89");
+    expect(await str(r)).toBe("89");
   });
 
   for (const range of ["bytes=10-", "bytes=11-20", "bytes=5-2", "bytes=-3", "items=0-1", "bytes=0-1,3-4"]) {
@@ -427,7 +428,7 @@ describe("rate limit and meter", () => {
     const put = new Request(`${BASE}/t/pub/v3/keys/${h}`, {
       method: "PUT",
       body,
-      headers: { authorization: `Bearer ${TOKENS.pubWrite.token}` },
+      headers: { authorization: `Bearer ${TOKENS.pubWrite.token}`, "content-length": String(body.length) },
     });
     expect((await handle(put, e)).status).toBe(200);
     const get = await handle(new Request(`${BASE}/t/pub/v3/keys/${h}`), e);
