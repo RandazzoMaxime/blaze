@@ -655,7 +655,13 @@ impl DefMap {
                 .filter_visibility(|vis| vis.is_visible_from_def_map(db, self, original_module));
             // A name can be a private module and a public function at once: the harness keeps
             // the module.
-            curr_per_ns = match visible != curr_per_ns && self.is_test_harness(db, original_module)
+            // The standard library is code rustc accepted. A macro 2.0 of it (`utf16!`,
+            // `wide_str!`) names a private module of its crate by an absolute path from where
+            // it is used, which rustc checks from where the macro is defined: this resolver
+            // checks from the use site only, so std's own paths see its private modules.
+            let in_std = self.krate.data(db).origin.is_lang();
+            curr_per_ns = match visible != curr_per_ns
+                && (in_std || self.is_test_harness(db, original_module))
             {
                 true => curr_per_ns,
                 false => visible,

@@ -7541,6 +7541,12 @@ fn main() -> anyhow::Result<()> {
     if let Some(replayed) = doctest::replay() {
         return replayed;
     }
+    // A build script's name, linked to this executable, comes before the commands: cargo runs
+    // it with no arguments, which are the help.
+    #[cfg(windows)]
+    if let Some(script) = cargo::script::stood_in_front_of() {
+        return cargo::script::run_as_cargo_does(script, std::env::args_os().skip(1));
+    }
     match std::env::args().nth(1).as_deref() {
         _ if stands_in_for_rustc => {}
         None | Some("--help" | "-h" | "help") => {
@@ -7558,10 +7564,6 @@ fn main() -> anyhow::Result<()> {
         }
         Some("std") => return shipped::command(std::env::args().skip(2)),
         _ => {}
-    }
-    #[cfg(windows)]
-    if let Some(script) = cargo::script::stood_in_front_of() {
-        return cargo::script::run_as_cargo_does(script, std::env::args_os().skip(1));
     }
     // A build script runs with the variables of the cargo that runs it, the wrapper's too.
     if std::env::args().nth(1).as_deref() == Some("build-script") {
