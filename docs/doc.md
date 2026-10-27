@@ -31,7 +31,13 @@ and beside them:
 - docs as rustdoc renders Markdown: pulldown-cmark with rustdoc's options, headings with
   anchors, the first paragraph as the summary in lists and search, Rust examples highlighted
   with their `# ` lines hidden, and intra-doc links resolved by rust-analyzer; a link that
-  resolves to nothing prints `warning: unresolved link to `...`` as rustdoc does;
+  resolves to nothing prints `warning: unresolved link to `...`` as rustdoc does, for the
+  packages asked for and those from a path (cargo caps the lints of registry and git ones),
+  unless an `allow` or `expect` of `rustdoc::broken_intra_doc_links` (or `rustdoc::all`,
+  `warnings`) is on the item or around it, `cfg_attr` read with the crate's cfg;
+- links to an item of a crate not documented here go where its `#![doc(html_root_url)]` says,
+  at the path the item is declared at, as rustdoc's do; with no `html_root_url` the name is
+  not a link;
 - a source page for every file, linked from each item's `Source` link;
 - an "All items" page per crate, the module list in the sidebar, a search box (`s` or `/`)
   over every crate documented, light and dark themes following the system's.
@@ -43,8 +49,10 @@ The flags are cargo's: `-p`, `--workspace`, `--exclude`, `--no-deps`,
 `--document-private-items`, `--open`, `--features`, `--all-features`, `--no-default-features`,
 `--target`, `--target-dir`, `--manifest-path`, `--lib`, `--bins`, `--bin`, `--release`,
 `--profile`, `-q`, `-v`. A binary is documented with its private items, as cargo does. Two
-dependencies of one name share a directory; as cargo's `remove_duplicate_doc` does, the newest
-version is documented, and none that shares a name with a package asked for.
+dependencies of one name share a directory, so one is documented, as cargo's
+`remove_duplicate_doc` picks it: none that shares a name with a package asked for; of several,
+none built only for the host (a proc macro and what it depends on), so two versions of `syn`
+leave `syn` undocumented; then the newest version.
 
 ## How
 
@@ -59,8 +67,10 @@ Three passes over one loaded database, each parallel over the crates:
 Which provided methods an impl shows follows rustc: a method whose where-clauses on the
 trait's parameters cannot hold for the impl (`rev` of an iterator that is not a
 `DoubleEndedIterator`) is left out, by a port of rustc's `is_impossible_associated_item` into
-rust-analyzer's solver (`hir_ty::traits::is_impossible_associated_item`). Blanket impls apply
-as rustdoc's `synthesize_blanket_impls` asks (`hir_ty::traits::impl_may_apply`).
+rust-analyzer's solver (`hir_ty::traits::is_impossible_associated_item`). Blanket impls come
+from every crate linked into the documented one, documented or not (not a proc macro's
+dependencies, which rustc loads as the compiler's own), and apply as rustdoc's
+`synthesize_blanket_impls` asks (`hir_ty::traits::impl_may_apply`).
 
 ### The load is one-shot, in the command's process
 
@@ -87,9 +97,16 @@ Both go when the load stops needing them ([no-rustc.md](no-rustc.md)).
 
 - Smart punctuation is on, as in rustdoc's `main_body_opts` (`--` becomes an en dash, quotes
   curl); the brief asked for it off.
-- A link to an item another crate places points straight at that crate's page. rustdoc points
-  at the path the item is defined at and writes a redirect page there; blaze writes no
-  redirect pages, and names the defined path in the link's title as rustdoc does.
+- A link to an item another documented crate places points straight at that crate's page.
+  rustdoc points at the path the item is defined at and writes a redirect page there; blaze
+  writes no redirect pages, and names the defined path in the link's title as rustdoc does.
+  (Links to a crate not documented here, which blaze writes no page for, go to the defined
+  path under its `html_root_url`, as rustdoc's do, since that crate's own docs redirect.)
+- With `--target`, cargo writes the crates built only for the host (proc macros and what they
+  depend on) to `target/doc`, apart from the rest in `target/<triple>/doc`; blaze writes one
+  directory and drops a host crate whose name another crate has, as cargo does with no
+  `--target`.
+- Lint levels given on the command line (`RUSTDOCFLAGS="-A rustdoc::..."`) are not read.
 - Implementors from crates downstream of a trait's crate are written into the trait's page,
   where rustdoc adds them with a script (`implementors/*.js`); a reader sees the same list.
 - The stylesheet and script are blaze's own (`crates/blaze-doc/static`), with rustdoc's class
@@ -134,4 +151,4 @@ What blaze still misses or adds, and why:
 - `--message-format` is refused; `--examples`, `--tests` and `--benches` are not read.
 - No settings page and no `help.html`; the theme follows the system's. Links into the
   standard library point at doc.rust-lang.org's nightly docs, as rustdoc's do with no local
-  copy; there is no `--extern-html-root-url`.
+  copy; a crate's `html_root_url` is read, but there is no `--extern-html-root-url`.
