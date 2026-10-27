@@ -4352,6 +4352,11 @@ fn is_thread_local(db: &dyn HirDatabase, id: StaticId) -> bool {
     AttrFlags::query(db, id.into()).contains(AttrFlags::THREAD_LOCAL)
 }
 
+/// Whether a value of `ty` is an integer in a register: a `bool`, a `char` or an integer.
+fn is_integer(ty: Ty<'_>) -> bool {
+    matches!(ty.kind(), TyKind::Bool | TyKind::Char | TyKind::Int(_) | TyKind::Uint(_))
+}
+
 /// The symbol a function is exported under when an attribute names it: the runtime or the
 /// program loading the library looks it up by that name, so it is compiled whether or not
 /// anything calls it.
@@ -10311,18 +10316,10 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
                 }
                 let blob = match konst.as_ref().kind() {
                     ConstKind::Value(value) => {
-                        let is_int = matches!(
-                            ty.kind(),
-                            TyKind::Bool | TyKind::Char | TyKind::Int(_) | TyKind::Uint(_)
-                        );
-                        if is_int {
+                        if is_integer(ty) {
                             let layout = self.layout(ty)?;
-                            let scalar = self.scalar_of(ty)?;
                             let bits = value.value.inner().to_leaf().to_bits(layout.size);
-                            let addr = self.stack_slot(&layout);
-                            let value = self.iconst(scalar.ty, bits);
-                            self.builder.ins().store(MEM, value, addr, 0);
-                            return Ok((addr, ty));
+                            return Ok((self.integer_slot(ty, bits)?, ty));
                         }
                         self.valtree_blob(ty, value.value)?
                     }
@@ -10332,7 +10329,7 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
                     }
                     kind => unsupported!("constant {kind:?}"),
                 };
-                Ok((self.blob_addr(blob)?, ty))
+                Ok((self.blob_or_immediate(ty, blob)?, ty))
             }
             OperandKind::Allocation { allocation } => {
                 let allocation = allocation.as_ref();
@@ -10343,7 +10340,7 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
                     return Ok((addr, ty));
                 }
                 let blob = self.allocation_blob(allocation, false)?;
-                Ok((self.blob_addr(blob)?, ty))
+                Ok((self.blob_or_immediate(ty, blob)?, ty))
             }
             OperandKind::Static(id) => {
                 let data = self.cg.static_data(*id);
@@ -10523,6 +10520,28 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
                 db.anon_const_eval(id, args, Some(self.env)).map_err(frontend)
             }
         }
+    }
+
+    /// The address of a stack slot holding the integer `bits` of type `ty`.
+    fn integer_slot(&mut self, ty: Ty<'db>, bits: u128) -> Result<Value> {
+        let layout = self.layout(ty)?;
+        let scalar = self.scalar_of(ty)?;
+        let addr = self.stack_slot(&layout);
+        let value = self.iconst(scalar.ty, bits);
+        self.builder.ins().store(MEM, value, addr, 0);
+        Ok(addr)
+    }
+
+    /// The address of a constant's value: an integer is an immediate, however the MIR gives
+    /// it (a value, a literal's allocation or a named constant), so that what runs the code
+    /// without its data (wasm-bindgen's interpreter of its descriptors) sees it.
+    fn blob_or_immediate(&mut self, ty: Ty<'db>, blob: ConstBlob) -> Result<Value> {
+        if is_integer(ty) && blob.relocs.is_empty() && blob.bytes.len() <= 16 {
+            let mut bytes = [0; 16];
+            bytes[..blob.bytes.len()].copy_from_slice(&blob.bytes);
+            return self.integer_slot(ty, u128::from_le_bytes(bytes));
+        }
+        self.blob_addr(blob)
     }
 
     fn blob_addr(&mut self, blob: ConstBlob) -> Result<Value> {
