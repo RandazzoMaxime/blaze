@@ -1,8 +1,7 @@
 # Installing blaze
 
-<!-- Once https://ix.dev/blaze/install.sh serves install.sh, it is the line to show here. -->
 ```sh
-curl -fsSL https://raw.githubusercontent.com/indexable-inc/blaze/main/install.sh | sh
+curl -fsSL https://ix.dev/blaze/install.sh | sh
 ```
 
 Then, in a project of yours:
