@@ -7286,6 +7286,42 @@ pub mod object_lifetime_default {
     }
 }
 
+/// salsa's `cycle_fn` closures, as ruff's `ty_python_semantic` writes them: a closure's
+/// parameter `db: &'db dyn Db` of a trait bounded by `'static` (salsa's `Database` is) is
+/// `&'db (dyn Db + 'static)`, rustc's object lifetime default, as it is in a signature.
+pub mod closure_static_trait_object {
+    pub trait Db: 'static {
+        fn n(&self) -> u32;
+    }
+
+    impl Db for u32 {
+        fn n(&self) -> u32 {
+            *self
+        }
+    }
+
+    #[derive(Clone, Copy)]
+    pub struct Ty<'db>(pub &'db u32);
+
+    impl<'db> Ty<'db> {
+        fn normalized(self, db: &'db dyn Db, previous: Ty<'db>) -> Ty<'db> {
+            if db.n() > *previous.0 { self } else { previous }
+        }
+    }
+
+    pub fn recover<'db>(db: &'db dyn Db, last: &Ty<'db>, value: Ty<'db>) -> Ty<'db> {
+        (|db: &'db dyn Db, cycle, previous: &Ty<'db>, result: Ty<'db>| {
+            let _: u32 = cycle;
+            result.normalized(db, *previous)
+        })(db, 0, last, value)
+    }
+
+    pub fn run() -> u32 {
+        let (a, b) = (1, 2);
+        *recover(&5u32, &Ty(&a), Ty(&b)).0
+    }
+}
+
 /// What cargo 0.99 borrows as rustc accepts: rusqlite's `impl Params for &[&dyn ToSql]`,
 /// whose elided lifetimes leave the trait object any lifetime; `&|_| true`, promoted as it
 /// captures nothing; callbacks that borrow a value without drop glue declared after them and

@@ -259,7 +259,8 @@ All of these are rustc's, written from `compiler/rustc_borrowck` at the pinned n
 - Errors on universal regions: "lifetime may not live long enough", E0521, E0309, E0310,
   E0311, with rustc's object lifetime defaults (`&'a dyn Trait` is `dyn Trait + 'a`, a
   closure's parameter `|x: &dyn Trait|` too, a trait
-  bounded by `'static` makes its objects `'static`, elsewhere in a body the lifetime is
+  bounded by `'static` makes its objects `'static`, in a closure's parameter as well (salsa's
+  `cycle_fn = |db: &'db dyn Db, ..|`), elsewhere in a body the lifetime is
   inferred). Of universal regions made to outlive each other, as rustc only the first made
   (a closure's creator's before its own) is checked against all it outlives, the others only
   against it, so the error is the one rustc reports.
