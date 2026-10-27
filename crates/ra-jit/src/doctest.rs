@@ -669,7 +669,19 @@ impl Ours {
             Ours::Checked | Ours::FailsToCompile => anyhow::bail!("nothing to link"),
         };
         let binary = dir.join("rust_out");
-        let linked = line.link(&[&objects[0], &objects[1]], &binary).and_then(|_| {
+        // A name the standard library's unit refused, which nothing defines then.
+        let refused = |failed: anyhow::Error| {
+            let refused = crate::refused_undefined(&format!("{failed:#}"), &objects[1]);
+            match refused.first() {
+                Some(first) => anyhow::anyhow!(
+                    "it calls {} functions ra-jit could not compile: {first}",
+                    refused.len()
+                ),
+                None => failed,
+            }
+        };
+        let linked = line.link(&[&objects[0], &objects[1]], &binary).map_err(refused);
+        let linked = linked.and_then(|_| {
             let stand_ins = crate::link::stand_ins(&binary)?;
             match stand_ins.first() {
                 Some(first) => anyhow::bail!(

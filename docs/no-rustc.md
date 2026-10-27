@@ -698,7 +698,11 @@ crates ra-jit refused (its `main`, or one only code of the object calls, its own
 the link keeps, the library unit's included, fails it after; either way the error names each
 function and why it was refused (`` `p` reaches 1 function ra-jit could not compile, and a build
 with nothing of rustc's has nothing else to compile it, so it is not built:``), and no
-executable is left. The unit is what the program takes of the library and everything that depends on, but
+executable is left. A function the library exports by name that nothing in it calls has no
+stand-in, as one exported under the name could take the place of a definition the program
+links from elsewhere (libgcc's soft float is named as the library's is): the unit keeps a list
+of those it refused beside it and in the store, and a link that fails on one of their names
+is the same error, naming the function and why. The unit is what the program takes of the library and everything that depends on, but
 `test`, `proc_macro` and the panic runtime the program does not link, which rust-analyzer's
 graph has every crate depend on: 21 crates, `rand` and `foldhash` among them, which std's own
 workspace adds to its graph and which nothing compiled uses. The library's build names only the
