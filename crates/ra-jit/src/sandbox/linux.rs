@@ -1087,6 +1087,12 @@ fn install(program: &[libc::sock_filter]) -> Result<libc::c_int, String> {
         )
     };
     if listener < 0 {
+        if std::io::Error::last_os_error().raw_os_error() == Some(libc::EBUSY) {
+            return Err("a seccomp filter: this process is in a sandbox already, whose seccomp \
+                        listener the kernel takes as the only one a process has; run this \
+                        outside it (a test with `unsandboxed-tests`)"
+                .to_owned());
+        }
         return Err(os("a seccomp filter"));
     }
     Ok(listener as libc::c_int)
