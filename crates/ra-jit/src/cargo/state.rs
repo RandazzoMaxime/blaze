@@ -1188,16 +1188,20 @@ pub(super) fn sysroot_libraries() -> Option<PathBuf> {
 pub(super) fn library_path(executable: &Path, sysroot: Option<&Path>) -> Option<(String, String)> {
     let inside = |it: &&Path| it.file_name().is_some_and(|it| it == "deps" || it == "examples");
     let dir = executable.parent()?;
-    let profile = match super::layout::unit_dir(dir) {
+    let unit = super::layout::unit_dir(dir);
+    let profile = match &unit {
         Some(unit) => unit.profile()?,
         None if inside(&dir) => dir.parent()?,
         None => dir,
     };
     let already = std::env::var_os(LIBRARY_PATH);
     let already = already.iter().flat_map(std::env::split_paths);
-    let deps = match profile.join("deps").is_dir() || !profile.join("build").is_dir() {
-        true => vec![profile.join("deps")],
-        false => super::layout::dylib_dirs(profile),
+    // The layout is the executable's, not what is in the target directory yet: before the
+    // first build of a fresh one there is neither `deps` nor `build`, and a test's environment
+    // would differ from the next build's (a test's cached pass is keyed by it).
+    let deps = match unit.is_some() && !profile.join("deps").is_dir() {
+        true => super::layout::dylib_dirs(profile),
+        false => vec![profile.join("deps")],
     };
     let dirs = deps.into_iter().chain([profile.to_owned()]).chain(sysroot.map(Path::to_owned));
     let joined = std::env::join_paths(dirs.chain(already)).ok()?;
@@ -1490,6 +1494,8 @@ mod tests {
         };
         assert_eq!(dirs(&test), [second.join("debug"), sysroot.to_owned()]);
         let _ = std::fs::remove_dir_all(&second);
+        // Before the first build of a fresh target directory, the same.
+        assert_eq!(dirs(&test), [second.join("debug"), sysroot.to_owned()]);
     }
 
     #[test]

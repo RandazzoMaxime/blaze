@@ -319,8 +319,7 @@ pub fn fetch_missing_with(fetch: FetchMissing) {
 /// sent to other machines now. Between builds a small pack is otherwise left open.
 pub fn seal_open() {
     if let Some(store) = Store::global() {
-        store.settled();
-        store.settle(1);
+        store.seal();
     }
 }
 
@@ -1579,6 +1578,13 @@ impl Store {
     /// again by the next.
     pub fn flush(&self) {
         self.settle(self.tuning.seal_at);
+    }
+
+    /// Writes out what has been added and seals it, however little it is: what a process
+    /// that adds a few values at its end keeps, for the next to read.
+    pub fn seal(&self) {
+        self.settled();
+        self.settle(1);
     }
 
     /// As [`Self::flush`], sealing the open pack if it has `seal_at` bytes.

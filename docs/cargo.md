@@ -184,10 +184,29 @@ controlling terminal, so it can't push input into the terminal it was started fr
 process.
 
 The sandbox records what each test reached, by name: the harness tells it, before and after
-each test, which test the thread is running. Of a test executable that fails, the note under
-it names each failed test the sandbox refused something, and how to run it outside:
+each test, which test the thread is running.
 
-    note: tests::writes_home failed in the sandbox, which refused it writing `/home/me/.cache/x` (the machine is read-only in a sandbox); if it needs that, run it outside: `unsandboxed-tests = ["tests::writes_home"]` under `[package.metadata.blaze.sandbox]` in /home/me/tsel/Cargo.toml (`tests = false` for every test of the package), or `RA_JIT_SANDBOX=off` for every test of the command
+Tests are hermetic: "tests should be just like builds" (Andrew, 2026-10-27), their end a
+function of their code and what they read, so that a pass can be kept and stand for a run
+([below](#running-only-the-tests-that-have-not-passed)). So what would make a test's end
+depend on something else is denied, and a test the sandbox denied something fails, whatever
+it ended with, with what was denied and the way out:
+
+    error: tests::writes_home fails: the sandbox denied it writing `/home/me/.cache/x` (the machine is read-only in a sandbox); tests are hermetic, so if it needs that, take it out of the sandbox, where it runs every time and is never cached: `unsandboxed-tests = ["tests::writes_home"]` under `[package.metadata.blaze.sandbox]` in /home/me/tsel/Cargo.toml (`tests = false` for every test of the package), or `RA_JIT_SANDBOX=off` for every test of the command
+
+| a test | in the sandbox |
+|---|---|
+| writes the workspace or the target directory | allowed, kept to its run (an overlay) |
+| writes `/tmp`, `/var/tmp`, `/dev/shm` | allowed, empty at its start |
+| writes anywhere else | denied (`EROFS`), and the test fails |
+| reads a file, lists a directory, looks a path up | allowed, and recorded: part of its key |
+| connects to, binds or sends to loopback | allowed: a network namespace of its own |
+| connects to any other address, or a Unix socket of the machine's | denied (`ENETUNREACH`, `EACCES`), and the test fails; so no name is resolved: a DNS server outside is denied, and one on the machine's loopback is not in the sandbox's |
+| starts a program | allowed on Linux: what the program reads, its executable and libraries too, is recorded with the test's reads, so it is a recorded input; on macOS a program macOS protects (`/bin/sh`) is started without the interposer, what it reads is not known, and the test is never kept |
+| reads the clock, draws randomness, starts threads | allowed: a test whose end they decide passes and fails under one key, and is marked flaky and never kept |
+
+What a thread no test marked or a process a test started was denied fails every test of the
+run, since which test it was for is not known.
 
 A package takes its tests out of the sandbox in its manifest:
 
@@ -200,7 +219,9 @@ unsandboxed-tests = ["tests::writes_home"]    # or these, by libtest's names
 Any other key there is an error. The tests named run in a second run of the executable,
 outside, after the sandboxed one (libtest's `--exact` and `--skip` split them); `-v` says
 which and why. `RA_JIT_SANDBOX=off` runs every test of the command outside, as cargo does
-(`BLAZE_SANDBOX`, when set, wins over it, for tests, build scripts and proc macros alike).
+(`BLAZE_SANDBOX`, when set, wins over it, for tests, build scripts and proc macros alike). A
+test outside the sandbox is not hermetic: it runs every time and its pass is never kept, and
+the summary of the command names it.
 
 Where no sandbox can be made, `cargo ra-jit test` stops before any test runs, says why and how
 to fix it, and exits 101. It does not go on outside with a warning: a run that did would break,
@@ -457,57 +478,93 @@ sees the directories of the libraries of the loads before it started, so a works
 `/tmp` loaded later by the same daemon is not seen by it on Linux; doctests and the
 `blaze-build-script` crate's own runner (`harness/scripts.py` only) are not sandboxed.
 
-### Running only the tests an edit reached
+### Running only the tests that have not passed
 
 With `RA_JIT_TESTS=affected`, `cargo ra-jit test` runs, of each test executable the daemon
-built, the tests an edit could have changed the end of since they last passed:
+built, the tests that have not passed with what they are a function of as it is now. A pass is
+kept in blaze's store, as a compiled function is, so it travels with the store through a remote
+(`ra-jit cache push|pull`, `RA_JIT_REMOTE`): a pass on main's CI stands on every branch whose
+test and inputs are the same.
 
     Running unittests src/lib.rs (target/debug/deps/tsel-1f2e): 2 of 5 tests
-    Skipping tests/it.rs (target/debug/deps/it-9a8b): 2 tests, unchanged since the last pass
-    Skipped 5 tests, unchanged since the last pass; 1 test run every time (`-v` says why); `RA_JIT_TESTS=all` runs every test
+    Cached tests/it.rs (target/debug/deps/it-9a8b): 2 tests, passed before as they are now
+    Cached 5 tests from commit 2bfa62d8ce (run 18834512), 2 from an earlier run on this machine; 1 test run every time (`-v` says why); `RA_JIT_TESTS=all` runs every test
 
 At each build the daemon hashes every test's code with the code of every function it calls,
 directly or through others, in any crate of the workspace or its dependencies, and its
 attributes (`#[ignore]`, `#[should_panic]`). The standard library is named by the toolchain.
-A test runs again when that hash is not the one it last passed with, when it has not passed
-since it was added or failed, and every time when it reaches what its code does not decide:
-a file, the environment, another process, the network, or a function ra-jit can't compile.
-Of a test executable that fails, the tests libtest's summary lists as failed run again, and
-the others that ran are remembered as passed; one that ends with no summary (a crash, or a
-test that exits the process) has every test it ran run again. Its output is passed on through
-a pipe as it comes, colored as libtest would color it on the terminal.
-An integration test also runs again when a program of its package that cargo hands it as
-`CARGO_BIN_EXE_<name>` was built again. `cargo ra-jit test -v` says, under each test
-executable, why each test it runs every time does, by the fewest calls from the test to it:
+A test's pass is kept under a key of that hash and of what else it is a function of:
 
-    Always tests::reads_a_file: it reaches `statx`, which reads or writes files, by tsel::tests::reads_a_file -> std::fs::read_to_string::<…> -> std::fs::read_to_string::inner -> <std::fs::File>::metadata -> … -> statx
+- the ra-jit that ran it (every key of the store has it);
+- the content of each program cargo hands an integration test as `CARGO_BIN_EXE_<name>`;
+- the environment the sandbox gives it (below);
+- what the command builds it with: features, `--profile`, `--target`, `--config` and `-Z`
+  flags, and the machine's architecture and system;
+- the harness's flags that change how it runs (`--nocapture`, `--test-threads`; not `-q`,
+  `--color` or `--show-output`, which change only what is shown);
+- for a test that reaches what its code does not decide (a file, the environment, another
+  process, the network), what it read: every path the sandbox saw it open, look up, list or
+  run, and what is there now (a file's bytes, whether it can be run, a link's text, a
+  directory's names, or that nothing is). Of a path it only looked at (`stat`, `access`,
+  `chdir`, `readlink`) the key has what that could tell: what is there, whether it can be run,
+  a link's text and a file's size. A test run looks at `target/debug`, whose names change
+  as the daemon writes there after a build; keyed by them, a pass missed once after each fresh
+  target. What a stat says of times (`mtime`) is not in the key: a test
+  that decides by a file's time is as one that decides by the clock.
 
-Under `affected` a test that reaches outside its code is not run every time: the sandbox
-records every path it opens, looks at, lists or runs, with the environment it was given (the
-variables cargo sets for a test, `PATH`, `HOME`, `USER`, `LOGNAME`, `LANG`, `LANGUAGE`,
-`LC_*`, `TZ`, `CARGO`, `CARGO_HOME`, `RUSTUP_HOME`, `RUSTUP_TOOLCHAIN`, `LD_LIBRARY_PATH`,
-`NIX_LD`, `NIX_LD_LIBRARY_PATH`, `RUST_BACKTRACE`, `RUST_LIB_BACKTRACE`, `RUST_MIN_STACK`, and
-those `RA_JIT_TEST_ENV` names, by commas; under `all` a test gets the whole environment). Once
-it passes, what was at each path (a file's contents, a directory's names, nothing) is kept
-beside its program, and the test runs again when its code, its environment or one of those
-changed; otherwise it is skipped like any other. `-v` says why one runs:
+That last part is found in two steps, as a build cache finds what a step read: the store keeps,
+under the rest of the key, the paths a run that passed read (up to four sets, for a test that
+reads other paths as what it reads differs), and the pass under those paths with what was at
+each. A test is skipped when one of the sets, with what is at its paths now, has a pass. Only a
+pass is kept; a test that failed runs until it passes, and once it does, a return to code that
+passed before is skipped again, as a build is. `-v` says why each test that reaches outside its
+code runs:
 
     Sandboxed tests::reads_a_file: it read `/home/me/tsel/data.txt`, which changed
 
-A test whose reads are not all known (a program macOS starts without the interposer), one its
-package takes out of the sandbox, and every one under `RA_JIT_SANDBOX=off` runs every time.
-The time a test reads, the randomness it draws and the threads it starts are its own still.
+A test the sandbox can't make hermetic runs every time and is never kept: one that reaches a
+function ra-jit can't compile, a benchmark, one its package takes out of the sandbox, every one
+under `RA_JIT_SANDBOX=off`, and one whose reads are not all known (a program macOS starts
+without the interposer). The summary says how many there are and names those outside the
+sandbox. `cargo ra-jit test -v` says, under each test executable, why each test it runs every
+time does (`Always`), by the fewest calls from the test to it.
+
+Of a test executable that fails, the tests libtest's summary lists as failed, and those the
+sandbox denied something, are not kept; the others that ran are. One that ends with no summary
+(a crash, or a test that exits the process), or whose summary counts other tests than it was
+asked to run, has nothing kept. Its output is passed on through a pipe as it comes, colored as
+libtest would color it on the terminal.
+
+The environment of a sandboxed test under `affected` is cut down to the variables cargo sets for
+a test, `PATH`, `HOME`, `USER`, `LOGNAME`, `LANG`, `LANGUAGE`, `LC_*`, `TZ`, `CARGO`,
+`CARGO_HOME`, `RUSTUP_HOME`, `RUSTUP_TOOLCHAIN`, `LD_LIBRARY_PATH`, `NIX_LD`,
+`NIX_LD_LIBRARY_PATH`, `RUST_BACKTRACE`, `RUST_LIB_BACKTRACE`, `RUST_MIN_STACK`, and those
+`RA_JIT_TEST_ENV` names, by commas (under `all` a test gets the whole environment). Paths are
+kept as they are, so a pass stands where the checkout, the target directory and the home are
+at the same paths: every run of a CI job is, and two checkouts of one machine are not.
+
+What is not in a key, and so is caught only as a flake: the time, randomness (a `HashMap`'s
+seed too) and threads; the kernel's views (`/proc`, `/sys`, which say what the machine and the
+process are, as the number of cores does); a file's times and owner. A test that passed and
+failed under one key is flaky: the store marks it, it runs every time after, and the command
+warns with where it passed. `RA_JIT_TESTS=verify` picks the tests as `affected` does, runs them
+all, and says whether each kept as passed passed again:
+
+    Verified the passes kept: 245 of 245 tests passed again
+
+One that failed is flaky or its key misses something it is a function of, which is a bug in
+blaze; it is named, marked flaky, and the command fails. The release train runs it.
 
 `-v`, `-q` and `--color` only change what cargo prints, and are the same build to the daemon.
 
 A test executable cargo built, a command that names tests or passes the harness other flags
 than `-q`, `--nocapture`, `--show-output`, `--test-threads` and `--color`, and one that runs
-the ignored tests run as asked: every test. Time, randomness (a `HashMap`'s seed too) and
-threads are not counted as outside the code, so a test that depends on them by chance is as
-flaky as it was; nor is a backtrace, whose capture reads `RUST_BACKTRACE` and whose text the
-working directory, for what a failure prints. Unset, or `all`, runs every test, as cargo does;
-the daemon then hashes nothing. What is left (a hash that never compiles on a warm store, a
-watch mode) is [#227](https://github.com/indexable-inc/ra-jit/issues/227).
+the ignored tests run as asked: every test, and nothing is kept. Unset, or `all`, runs every
+test, as cargo does; the daemon then hashes nothing. With no store (`RA_JIT_CACHE=off`)
+`affected` keeps nothing and runs every test. `RA_JIT_TESTS_FROM` names where the passes a
+command keeps came from, for its summary; on GitHub Actions it is the commit and run
+(`GITHUB_SHA`, `GITHUB_RUN_ID`). What is left is
+[#227](https://github.com/indexable-inc/blaze/issues/227).
 
 While cargo builds, a spare worker already loads the workspace, resolves it and compiles the
 functions of each crate cargo is done with on a quarter of the cores, and reads the symbols of
@@ -696,8 +753,10 @@ build a command line is, so changing one starts from a cargo build again.
 | `RA_JIT_OTHER_TOOLCHAIN` | `1` builds with the project's toolchain when it is not the pinned nightly, rather than with the pinned nightly, for a project pinned to a nightly near it; nothing checks that it agrees ([support.md](support.md#toolchain)) | not set |
 
 `RA_JIT_TESTS` is read by each `cargo ra-jit test` alone and is not part of which build it
-is: `affected` runs the tests an edit reached
-([above](#running-only-the-tests-an-edit-reached)), `all` every test. The default is `all`.
+is: `affected` runs the tests that have not passed as they are now, by the passes the store
+keeps ([above](#running-only-the-tests-that-have-not-passed)), `verify` runs those too and
+checks that they pass again, `all` every test. The default is `all`. `RA_JIT_TESTS_FROM` names
+where the passes a command keeps came from, for the summary of a command that finds them.
 `RA_JIT_SANDBOX=off` runs every test outside the sandbox
 ([above](#every-test-runs-in-a-sandbox)), and `RA_JIT_TEST_ENV` names more variables a test
 is given under `affected`, by commas; both are read the same way.
