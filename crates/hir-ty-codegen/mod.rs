@@ -511,6 +511,11 @@ enum PassMode {
         skipped: u8,
     },
     Indirect,
+    /// An unsized value (`unsized_fn_params`): rustc's `PassMode::Indirect` with
+    /// `meta_attrs`, the address of the value and then its metadata (length or vtable), the
+    /// value staying where the caller has it. In the codegen the place of such a value is a
+    /// pair of those two words in memory, as an unsized local's slot is.
+    IndirectUnsized,
     /// A vector of AArch64's shorter than 64 bits, whose lanes LLVM widens to make a 64-bit
     /// vector of the same count (`<4 x i8>` as `<4 x i16>`): in the low 64 bits of a vector
     /// register, each lane of `lane` at the bottom of `stride` bytes, the bits above it
@@ -8017,6 +8022,13 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
     }
 
     fn pass_mode(&self, layout: &Layout, is_ret: bool) -> Result<PassMode> {
+        if let BackendRepr::Memory { sized: false } = layout.backend_repr {
+            // rustc's `make_indirect` of an unsized argument; nothing returns one.
+            if is_ret {
+                unsupported!("an unsized value returned");
+            }
+            return Ok(PassMode::IndirectUnsized);
+        }
         if layout.is_zst() {
             return Ok(PassMode::Ignore);
         }
@@ -8156,6 +8168,10 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
             self.wide_ints_on_stack(&mut abi)?;
             self.wide_ints_after_registers(&mut abi)?;
             return Ok(abi);
+        }
+        let args: Vec<_> = args.into_iter().collect();
+        if args.iter().any(|&ty| self.is_unsized(ty)) {
+            unsupported!("an unsized value passed in calling convention {abi:?}");
         }
         if self.cg.target.call_conv == isa::CallConv::WindowsFastcall {
             if matches!(abi, ExternAbi::SysV64 { .. }) {
@@ -8310,6 +8326,9 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
                 PassMode::Spread { .. } => unreachable!("only the Rust ABI spreads lanes"),
                 PassMode::SpilledPair { .. } => unreachable!("only the stack spills a pair"),
                 PassMode::SkippingPair { .. } => unreachable!("only AAPCS64 skips registers"),
+                PassMode::IndirectUnsized => {
+                    unreachable!("only the Rust ABI passes unsized values")
+                }
             };
             let aggregate = matches!(mode, PassMode::Cast(_) | PassMode::CastPair(..));
             let in_registers = match (int_regs.checked_sub(ints), sse_regs.checked_sub(sses)) {
@@ -8759,6 +8778,9 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
                 params.extend((0..count).map(|_| AbiParam::new(unit)));
             }
             PassMode::Indirect => params.push(AbiParam::new(ptr())),
+            PassMode::IndirectUnsized => {
+                params.extend([AbiParam::new(ptr()), AbiParam::new(ptr())])
+            }
             PassMode::Spread { .. } => params.push(AbiParam::new(types::F64)),
             PassMode::OnStack { size, padded } => {
                 params.extend(padded.then(|| copied(8)));
@@ -8863,6 +8885,12 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
                 self.copy(copy, addr, layout.size);
                 values.push(copy);
             }
+            // The callee is handed the value where it is, as rustc does: the operand is a
+            // place moved out of, whose memory nothing reads again.
+            PassMode::IndirectUnsized => {
+                values.push(self.builder.ins().load(ptr(), MEM, addr, 0));
+                values.push(self.builder.ins().load(ptr(), MEM, addr, meta_at()));
+            }
             PassMode::OnStack { padded, .. } => {
                 if padded {
                     values.push(self.scratch());
@@ -8904,6 +8932,11 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
         let mut next = || values.next().expect("a value for every abi parameter");
         match mode {
             PassMode::Ignore | PassMode::Indirect | PassMode::OnStack { .. } => (),
+            PassMode::IndirectUnsized => {
+                let (data, meta) = (next(), next());
+                self.builder.ins().store(MEM, data, addr, 0);
+                self.builder.ins().store(MEM, meta, addr, meta_at());
+            }
             PassMode::Direct(_) => {
                 let value = next();
                 self.builder.ins().store(MEM, value, addr, 0);
@@ -9270,10 +9303,14 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
                 PassMode::Indirect | PassMode::OnStack { .. } => {
                     incoming.next().expect("indirect param")
                 }
+                PassMode::IndirectUnsized => self.scratch_pair(),
                 _ => self.stack_slot(layout),
             };
             self.receive(mode, &mut incoming, addr, layout);
-            self.locals.insert(local, LocalSlot { addr, borrowed: false });
+            // An unsized parameter's slot is where the value is and its metadata, as
+            // rustc's `LocalRef::UnsizedPlace`.
+            let borrowed = matches!(mode, PassMode::IndirectUnsized);
+            self.locals.insert(local, LocalSlot { addr, borrowed });
             if matches!(mode, PassMode::Indirect | PassMode::OnStack { .. }) {
                 self.note_passed_in_memory(body, local, addr);
             }
@@ -12357,7 +12394,29 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
     }
 
     fn operands(&mut self, operands: &[Operand]) -> Result<Vec<(Value, Ty<'db>)>> {
-        operands.iter().map(|it| self.operand(it)).collect()
+        operands.iter().map(|it| self.argument(it)).collect()
+    }
+
+    /// An argument of a call. An unsized one (`unsized_fn_params`) is a place moved out of,
+    /// and is where a pair of its address and metadata is, which `PassMode::IndirectUnsized`
+    /// passes.
+    fn argument(&mut self, operand: &Operand) -> Result<(Value, Ty<'db>)> {
+        let (OperandKind::Copy(place) | OperandKind::Move(place)) = &operand.kind else {
+            return self.operand(operand);
+        };
+        let ty = self.operand_ty(operand)?;
+        if !self.is_unsized(ty) {
+            return self.operand(operand);
+        }
+        let PlaceRef { addr, meta: Some(meta), .. } = self.place_ref(place)? else {
+            unsupported!("unsized argument {ty:?} without metadata");
+        };
+        // What the operand reads, for `given_away`.
+        self.operand(operand)?;
+        let pair = self.scratch_pair();
+        self.builder.ins().store(MEM, addr, pair, 0);
+        self.builder.ins().store(MEM, meta, pair, meta_at());
+        Ok((pair, ty))
     }
 
     /// `Fn::call`, `FnMut::call_mut` or `FnOnce::call_once`. For a call expression MIR passes
@@ -12629,8 +12688,13 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
         dst_ty: Ty<'db>,
     ) -> Result<()> {
         let receiver_layout = self.layout(receiver_ty)?;
-        if !matches!(receiver_layout.backend_repr, BackendRepr::ScalarPair { .. })
-            || receiver_layout.size.bytes_usize() != 2 * word()
+        // A `dyn Trait` taken by value is where the pair of its data pointer and vtable is
+        // (`argument`), as a fat pointer to it would be; rustc hands the method the data
+        // pointer as well.
+        let by_value = matches!(receiver_ty.kind(), TyKind::Dynamic(..));
+        if !by_value
+            && (!matches!(receiver_layout.backend_repr, BackendRepr::ScalarPair { .. })
+                || receiver_layout.size.bytes_usize() != 2 * word())
         {
             unsupported!("vtable call with receiver {receiver_ty:?}");
         }
@@ -13071,6 +13135,7 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
                 PassMode::Indirect | PassMode::OnStack { .. } => {
                     incoming.next().expect("indirect param")
                 }
+                PassMode::IndirectUnsized => self.scratch_pair(),
                 _ => self.stack_slot(&layout),
             };
             self.receive(mode, &mut incoming, addr, &layout);
@@ -13256,6 +13321,7 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
                     PassMode::Indirect | PassMode::OnStack { .. } => {
                         incoming.next().expect("indirect param")
                     }
+                    PassMode::IndirectUnsized => self.scratch_pair(),
                     _ => self.stack_slot(&layout),
                 };
                 self.receive(mode, &mut incoming, addr, &layout);
@@ -13451,7 +13517,7 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
         let sret = sig.params.first().is_some_and(|it| it.purpose == ArgumentPurpose::StructReturn);
         let count = match mode {
             PassMode::Ignore => 0,
-            PassMode::Pair(..) => 2,
+            PassMode::Pair(..) | PassMode::IndirectUnsized => 2,
             PassMode::SpilledPair { spilled, .. } => {
                 spilled.iter().map(|it| it.map_or(1, |padded| 1 + usize::from(padded))).sum()
             }
