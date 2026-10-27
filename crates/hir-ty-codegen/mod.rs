@@ -193,6 +193,9 @@ macro_rules! unsupported {
     };
 }
 
+// After `unsupported!`, which it uses.
+mod sve;
+
 /// Stops the build with an error ([`CodegenError::Refused`]).
 macro_rules! refused {
     ($($arg:tt)*) => {
@@ -5356,6 +5359,19 @@ impl<'a, 'db> ObjectCodegen<'a, 'db> {
             let private = self.on_demand_crates.is_empty() && self.symbols.private(func);
             return Err(if private { CodegenError::Private } else { CodegenError::NoSymbol });
         };
+        // rustc's callers of the symbol pass scalable vectors in SVE registers, ra-jit's by
+        // reference: only where nothing of rustc's is linked are all the callers ra-jit's.
+        if !self.symbols.nothing_of_rustc() {
+            let env = ParamEnvAndCrate {
+                param_env: hir_ty::next_solver::ParamEnv::empty(),
+                krate: func.krate(db),
+            };
+            if sve::passes_scalable(db, func, None, &env.store()) {
+                unsupported!(
+                    "`{symbol}`, which rustc's callers pass scalable vectors in SVE registers"
+                );
+            }
+        }
         let start = stdx::time::Instant::now();
         let tiers = self.tiers;
         let tiered = tiers.and_then(|it| it.code(db, &tier::Node(tier::Kind::Root(func))));
@@ -6905,6 +6921,11 @@ impl<'a, 'db> ObjectCodegen<'a, 'db> {
             && (self.own_statics.crates.contains(&func.krate(self.db))
                 || !futures_kept_apart()
                 || !returns_async_block(self.db, func))
+            // rustc's copy takes and gives scalable vectors in SVE registers, ra-jit's code by
+            // reference: it calls a copy of its own. With nothing of rustc's linked the copy is
+            // ra-jit's.
+            && (self.symbols.nothing_of_rustc()
+                || !sve::passes_scalable(self.db, func, Some(args), env))
         {
             self.want(func);
             return self.import(&symbol, sig);
@@ -7947,8 +7968,15 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
                 self.cg.coroutine_layouts.borrow_mut().push((line, size, align));
             }
         }
+        // What is laid out at the least vector length is stored for the largest.
+        let layout = sve::storage(layout);
         self.layouts.borrow_mut().insert(ty, layout.clone());
         Ok(layout)
+    }
+
+    /// The shape of a scalable vector type, `None` for any other.
+    fn scalable(&self, ty: Ty<'db>) -> Result<Option<sve::Shape>> {
+        Ok(sve::Shape::of(&*self.layout(ty)?))
     }
 
     fn scalar(&self, scalar: Scalar) -> Result<AbiScalar> {
@@ -7980,6 +8008,12 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
     fn pass_mode(&self, layout: &Layout, is_ret: bool) -> Result<PassMode> {
         if layout.is_zst() {
             return Ok(PassMode::Ignore);
+        }
+        // rustc passes a scalable vector in Z and P registers, which Cranelift has no type
+        // for: between ra-jit's own functions it goes by reference. Where foreign code would
+        // pass it, `fn_abi` and `callee` refuse.
+        if let BackendRepr::SimdScalableVector { .. } = layout.backend_repr {
+            return Ok(PassMode::Indirect);
         }
         // rustc returns in memory what is more than two registers hold.
         let wide = is_ret && layout.size.bytes() > 2 * word() as u64;
@@ -8091,6 +8125,16 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
         ret: Ty<'db>,
         args: impl IntoIterator<Item = Ty<'db>>,
     ) -> Result<FnAbi> {
+        let args: Vec<Ty<'db>> = args.into_iter().collect();
+        if !abi.is_rustic_abi() {
+            for &ty in args.iter().chain([&ret]) {
+                if self.scalable(ty)?.is_some() {
+                    unsupported!(
+                        "a scalable vector in the {abi:?} ABI, which rustc passes in SVE registers"
+                    );
+                }
+            }
+        }
         if abi.is_rustic_abi() {
             let ret = self.pass_mode(&*self.layout(ret)?, true)?;
             let args = args
@@ -9783,6 +9827,17 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
             ty = ty.projection_ty(&self.infcx, proj, self.env.param_env);
             // The pointee or field can be `Self::Buffer`, which has to be an array to index.
             ty.ty = self.normalize(ty.ty);
+            if self.scalable(prev.ty)?.is_some() && !matches!(proj, ProjectionElem::Deref) {
+                unsupported!("a projection into the scalable vector {:?}", prev.ty);
+            }
+            // A scalable value is only ever in ra-jit's storage, sized for the largest vector
+            // length; through a raw pointer it is anywhere, and rustc reads exactly one vector
+            // length of it there.
+            if let (ProjectionElem::Deref, TyKind::RawPtr(..)) = (proj, prev.ty.kind())
+                && self.scalable(ty.ty)?.is_some()
+            {
+                unsupported!("a scalable vector read or written through a raw pointer");
+            }
             match proj {
                 ProjectionElem::Deref => match self.layout(prev.ty)?.backend_repr {
                     BackendRepr::Scalar(_) if pointer.take().is_some() => (),
@@ -13821,6 +13876,9 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
         dst_ty: Ty<'db>,
     ) -> Result<Intrinsic> {
         let name = FunctionSignature::of(self.cg.db, func).name.as_str();
+        if self.scalable_intrinsic(name, generic_args, args, dst, dst_ty)? {
+            return Ok(Intrinsic::Inline);
+        }
         match (name, args) {
             (
                 "wrapping_add" | "unchecked_add" | "wrapping_sub" | "unchecked_sub"
@@ -13904,7 +13962,14 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
                 self.builder.ins().store(MEM, value, dst, 0);
             }
             ("size_of" | "align_of" | "min_align_of" | "pref_align_of", []) => {
-                let layout = self.layout(generic_args.type_at(0))?;
+                let ty = generic_args.type_at(0);
+                // rustc's size of a scalable vector is that at the least vector length, not of
+                // the storage codegen gives it.
+                let layout = self
+                    .cg
+                    .db
+                    .layout_of_ty(ty.store(), self.env.store())
+                    .map_err(|e| CodegenError::Frontend(format!("layout of {ty:?}: {e:?}")))?;
                 let bytes =
                     if name == "size_of" { layout.size.bytes() } else { layout.align.abi.bytes() };
                 let value = self.builder.ins().iconst(ptr(), bytes as i64);
@@ -14082,6 +14147,20 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
             ("transmute" | "transmute_unchecked" | "black_box" | "likely" | "unlikely", [arg]) => {
                 self.cg.opaque |= name == "black_box";
                 let (src, ty) = self.operand(arg)?;
+                match (self.scalable(ty)?, self.scalable(dst_ty)?) {
+                    (Some(from), Some(to)) if from.same_image(to) => (),
+                    (None, None) => (),
+                    (Some(_), Some(_)) => {
+                        unsupported!("transmute between scalable vectors of other register images")
+                    }
+                    _ => unsupported!("transmute between a scalable vector and another type"),
+                }
+                if let TyKind::Ref(_, pointee, _) = dst_ty.kind()
+                    && self.scalable(pointee)?.is_some()
+                    && !matches!(ty.kind(), TyKind::Ref(..))
+                {
+                    unsupported!("a reference to a scalable vector made of another type");
+                }
                 let size = self.layout(ty)?.size;
                 if size != self.layout(dst_ty)?.size {
                     unsupported!("transmute between differently sized types");
@@ -15447,6 +15526,9 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
             && self.neon_lanes(neon, args, dst)?
         {
             return Ok(());
+        }
+        if name.starts_with("aarch64.sve.") {
+            return self.sve_intrinsic(name, args, dst, dst_ty);
         }
         match (name, args) {
             (

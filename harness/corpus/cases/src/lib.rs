@@ -8,6 +8,7 @@
     feature = "nightly",
     feature(deref_patterns, c_variadic_int128, portable_simd, core_intrinsics)
 )]
+#![cfg_attr(all(feature = "nightly", target_arch = "aarch64"), feature(stdarch_aarch64_sve))]
 #![cfg_attr(feature = "nightly", allow(incomplete_features, internal_features))]
 // The `core::arch::aarch64` functions `neon_intrinsics` calls that are not stable yet.
 #![cfg_attr(
@@ -5688,6 +5689,81 @@ pub mod small_vectors {
     /// Through a function pointer, which no inlining sees through.
     pub fn called(f: fn(Simd<u8, 4>, Simd<u8, 4>) -> Simd<u8, 4>) -> [u8; 4] {
         f(Simd::from_array([250, 1, 2, 3]), Simd::from_array([10, 20, 30, 40])).to_array()
+    }
+}
+
+/// `core::arch`'s scalable vectors of AArch64 (SVE, SVE2): counts of a vector's lanes and of a
+/// pattern's, predicates, loads and stores of whole and unpacked vectors with partial predicates,
+/// selection, tuples and reinterpretation. Every result depends on the vector length, so it is
+/// checked at each one qemu runs it at; a machine without SVE2 prints that alone.
+#[cfg(all(feature = "nightly", target_arch = "aarch64"))]
+pub mod sve {
+    use core::arch::aarch64::*;
+    use std::fmt::Write;
+
+    pub fn run() -> String {
+        if !std::arch::is_aarch64_feature_detected!("sve2") {
+            return "no sve2".to_owned();
+        }
+        // SAFETY: the machine has SVE2.
+        unsafe { checked() }
+    }
+
+    #[target_feature(enable = "sve,sve2")]
+    unsafe fn checked() -> String {
+        let mut out = String::new();
+        let counts = [svcntb(), svcnth(), svcntw(), svcntd()];
+        let patterns = [
+            svcntb_pat::<{ svpattern::SV_VL7 }>(),
+            svcnth_pat::<{ svpattern::SV_POW2 }>(),
+            svcntw_pat::<{ svpattern::SV_MUL3 }>(),
+            svcntd_pat::<{ svpattern::SV_VL256 }>(),
+            svcntb_pat::<{ svpattern::SV_MUL4 }>(),
+            svcntw_pat::<{ svpattern::SV_VL1 }>(),
+        ];
+        write!(out, "{counts:?} {patterns:?}").unwrap();
+        let three = svptrue_pat_b32::<{ svpattern::SV_VL3 }>();
+        let active = [
+            svcntp_b8(svptrue_b8(), svptrue_b16()),
+            svcntp_b32(svptrue_b8(), three),
+            svcntp_b16(svptrue_pat_b16::<{ svpattern::SV_VL5 }>(), svptrue_b16()),
+            svcntp_b64(svptrue_b64(), svptrue_pat_b8::<{ svpattern::SV_ALL }>()),
+            svcntp_b8(svptrue_b8(), three),
+        ];
+        write!(out, " {active:?}").unwrap();
+        let words: Vec<i32> = (0..64).map(|it| (it - 9) * 0x0102_0305).collect();
+        let bytes: Vec<i8> = (0..64).map(|it| (it * 37 - 100) as i8).collect();
+        let mut stored = vec![-1i32; 64];
+        let mut narrow = vec![7i8; 64];
+        // SAFETY: each load and store is of at most 64 lanes, and the buffers have as many.
+        unsafe {
+            let five = svptrue_pat_b32::<{ svpattern::SV_VL5 }>();
+            let loaded = svld1_s32(five, words.as_ptr());
+            svst1_s32(svptrue_b32(), stored.as_mut_ptr(), loaded);
+            let signed = svld1sb_s32(svptrue_b32(), bytes.as_ptr());
+            let unsigned = svld1ub_u32(svptrue_b32(), bytes.as_ptr().cast());
+            let chosen = svsel_s32(three, signed, svreinterpret_s32_u32(unsigned));
+            svst1_s32(svptrue_pat_b32::<{ svpattern::SV_VL8 }>(), stored.as_mut_ptr().add(16), chosen);
+            svst1b_s32(svptrue_b32(), narrow.as_mut_ptr(), svld1_s32(svptrue_b32(), words.as_ptr()));
+            let pair = svcreate2_s32(loaded, chosen);
+            let pair = svset2_s32::<0>(pair, signed);
+            svst1_s32(svptrue_pat_b32::<{ svpattern::SV_VL4 }>(), stored.as_mut_ptr().add(32), svget2_s32::<0>(pair));
+            svst1_s32(svptrue_pat_b32::<{ svpattern::SV_VL4 }>(), stored.as_mut_ptr().add(40), svget2_s32::<1>(pair));
+            let doubles = svreinterpret_f64_s32(loaded);
+            let mut float_bits = [0f64; 32];
+            svst1_f64(svptrue_b64(), float_bits.as_mut_ptr(), doubles);
+            write!(out, " {:?}", float_bits.map(f64::to_bits)).unwrap();
+            let base = words.as_ptr();
+            let overlaps = [
+                svcntp_b32(svptrue_b32(), svwhilerw_s32(base, base.add(3))),
+                svcntp_b32(svptrue_b32(), svwhilewr_s32(base.add(3), base)),
+                svcntp_b8(svptrue_b8(), svwhilewr_s8(bytes.as_ptr(), bytes.as_ptr().wrapping_add(1000))),
+                svcntp_b64(svptrue_b64(), svwhilerw_s64(base.cast(), base.cast())),
+            ];
+            write!(out, " {overlaps:?}").unwrap();
+        }
+        write!(out, " {stored:?} {narrow:?}").unwrap();
+        out
     }
 }
 
