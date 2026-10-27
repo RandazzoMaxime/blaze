@@ -69,6 +69,11 @@ All of these are rustc's, written from `compiler/rustc_borrowck` at the pinned n
   Indexing (E0510) too: in `x[1][{ x = y; 2 }]` with `x: &[&[i32]]`, the slice `x[1]`
   indexes was bounds-checked before the second index, so what it is behind may not change
   there.
+  A slice's bounds check reads its length where it is indexed, before the place is used:
+  `&mut list[i]` with `list: &mut [T]` shallow-reads `*list` (rustc's `&raw const (fake)
+  *list`), E0503 while `list.iter_mut()` is still live; a slice behind a `Copy` reference
+  reads the reference. An array's length is its constant, read for nothing but its
+  initialization.
 - Unaligned references (E0793): a `&` or `&mut` of a field a `#[repr(packed)]` struct may
   leave less aligned than its type needs, as rustc's `check_packed_ref` (not `&raw`, nor
   behind a pointer; a field of a type parameter or of a `dyn` tail may be unaligned).
