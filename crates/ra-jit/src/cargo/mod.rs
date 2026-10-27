@@ -23,7 +23,7 @@ pub(crate) mod script;
 pub(crate) mod script_sandbox;
 mod state;
 pub(crate) mod switch;
-mod toolchain;
+pub(crate) mod toolchain;
 mod units;
 pub(crate) mod whole;
 

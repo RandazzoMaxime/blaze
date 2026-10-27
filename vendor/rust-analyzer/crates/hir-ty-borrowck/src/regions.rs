@@ -179,6 +179,9 @@ pub(super) struct Regions<'db> {
     /// The universal regions of the placeholders of relating two types' `for<'a>`, whose
     /// errors are rustc's `UniverseInfo::RelateTys`: E0308, one type more general than the other.
     pub(super) related_placeholders: FxHashSet<usize>,
+    /// Of those, the ones what normalizing a projection needs of constrains: rustc's
+    /// `UniverseInfo::TypeOp`, "not general enough", which its type check cannot see.
+    pub(super) normalized_placeholders: FxHashSet<usize>,
     /// The body is a method of a trait impl, whose signature the trait fixes: rustc's
     /// `is_bound_region_in_impl_item`, which keeps E0621 from suggesting a change to it.
     pub(super) is_impl_item: bool,
@@ -502,6 +505,41 @@ fn has_opaque(ty: Ty<'_>) -> bool {
     rustc_type_ir::TypeVisitable::visit_with(&ty, &mut Find).is_break()
 }
 
+/// The parts of `actual` where `declared`, the same type but for its `impl Trait`s, has an
+/// `impl Trait`: the types those hide.
+fn hidden_types<'db>(declared: Ty<'db>, actual: Ty<'db>, out: &mut Vec<Ty<'db>>) {
+    use rustc_type_ir::inherent::GenericArg as _;
+    let args = |declared: hir_ty::next_solver::GenericArgs<'db>,
+                actual: hir_ty::next_solver::GenericArgs<'db>,
+                out: &mut Vec<Ty<'db>>| {
+        if declared.len() == actual.len() {
+            for (declared, actual) in declared.iter().zip(actual.iter()) {
+                if let (Some(declared), Some(actual)) = (declared.as_type(), actual.as_type()) {
+                    hidden_types(declared, actual, out);
+                }
+            }
+        }
+    };
+    match (declared.kind(), actual.kind()) {
+        (TyKind::Alias(alias), _) if let rustc_type_ir::AliasTyKind::Opaque { .. } = alias.kind => {
+            out.push(actual)
+        }
+        (TyKind::Adt(a, declared), TyKind::Adt(b, actual)) if a == b => args(declared, actual, out),
+        (TyKind::Tuple(declared), TyKind::Tuple(actual)) if declared.len() == actual.len() => {
+            for (declared, actual) in declared.iter().zip(actual.iter()) {
+                hidden_types(declared, actual, out);
+            }
+        }
+        (TyKind::Ref(_, declared, _), TyKind::Ref(_, actual, _))
+        | (TyKind::RawPtr(declared, _), TyKind::RawPtr(actual, _))
+        | (TyKind::Slice(declared), TyKind::Slice(actual))
+        | (TyKind::Array(declared, _), TyKind::Array(actual, _)) => {
+            hidden_types(declared, actual, out)
+        }
+        _ => (),
+    }
+}
+
 /// Whether `ty` has a closure or a coroutine in it, whose signature RA does not keep
 /// higher-ranked: `|line: &String|` is `fn(&'1 String)` for one `'1`, not `for<'a>`.
 fn names_closure(ty: Ty<'_>) -> bool {
@@ -662,6 +700,7 @@ pub(super) fn build<'db>(
             type_tests: Vec::new(),
             check_universals: ctx.closure_local.is_none(),
             related_placeholders: FxHashSet::default(),
+            normalized_placeholders: FxHashSet::default(),
             is_impl_item: false,
             unsuggested: FxHashSet::default(),
             closure_env: None,
@@ -2488,6 +2527,34 @@ impl<'db> Builder<'_, '_, 'db> {
         for trait_ref in trait_refs {
             self.prove(trait_ref, At { category: Category::Signature, span: MirSpan::Unknown });
         }
+        // Computing the implied bounds of a returned `impl Trait` reveals, in its defining
+        // body, the type it hides, whose well-formedness the solver then proves, at the
+        // signature: `-> impl Sized` hiding `Outlives<'static, <T as Trait>::Assoc>` needs
+        // `<T as Trait>::Assoc: 'static`. What the type around it asks (`&'t impl Trait` that
+        // it outlives `'t`) is an implied bound, assumed.
+        if self.returns_opaque
+            && let InferBodyId::DefWithBodyId(DefWithBodyId::FunctionId(function)) = self.ctx.owner
+        {
+            let slot = self.regions.local_tys[super::return_slot().into_raw().into_u32() as usize];
+            let declared = self
+                .ctx
+                .db
+                .callable_item_signature(CallableDefId::FunctionId(function))
+                .instantiate_identity()
+                .skip_norm_wip()
+                .skip_binder()
+                .output();
+            let mut hidden = Vec::new();
+            hidden_types(declared, slot, &mut hidden);
+            for ty in hidden {
+                use rustc_type_ir::TypeVisitableExt as _;
+                if ty.references_error() || ty.has_non_region_infer() {
+                    continue;
+                }
+                let at = At { category: Category::Signature, span: MirSpan::Unknown };
+                self.well_formed(ty, at, 0);
+            }
+        }
     }
 
     /// What the signature says of which universal regions outlive which: its where clauses
@@ -2900,6 +2967,15 @@ impl<'db> Builder<'_, '_, 'db> {
             RegionKind::ReStatic => Some(this.regions.static_rv),
             RegionKind::ReEarlyParam(_) | RegionKind::ReLateParam(_) => {
                 this.signature_region(region, rustc_type_ir::INNERMOST).and_then(rv_of)
+            }
+            // Of a `for<'a>` instantiated to relate types: `<&'a () as Trait>::Ty` with only
+            // `impl Trait for &'static ()` needs the placeholder to be `'static`, an error of
+            // rustc's type op normalizing it, "not general enough", not of the relating.
+            RegionKind::RePlaceholder(_) => {
+                let rv = rv_of(this.placeholder(region))?;
+                let universal = this.regions.universal(rv)?;
+                this.regions.normalized_placeholders.insert(universal);
+                Some(rv)
             }
             _ => None,
         };
@@ -4320,11 +4396,38 @@ impl<'db> Builder<'_, '_, 'db> {
                 }
                 Ty::new(interner, TyKind::Adt(def, GenericArgs::new_from_iter(args)))
             }
+            (TyKind::FnPtr(a, header), TyKind::FnPtr(b, inferred_header))
+                if header == inferred_header
+                    && a.skip_binder().inputs_and_output.len()
+                        == b.skip_binder().inputs_and_output.len() =>
+            {
+                let tys: Option<Vec<_>> = a
+                    .skip_binder()
+                    .inputs_and_output
+                    .iter()
+                    .zip(b.skip_binder().inputs_and_output.iter())
+                    .map(|(a, b)| zip(a, b))
+                    .collect();
+                let tys = hir_ty::next_solver::Tys::new_from_iter(tys?);
+                Ty::new(
+                    interner,
+                    TyKind::FnPtr(
+                        a.rebind(rustc_type_ir::FnSigTys { inputs_and_output: tys }),
+                        header,
+                    ),
+                )
+            }
             _ => {
                 let erase = |ty: Ty<'db>| {
                     rustc_type_ir::fold_regions(interner, ty, |_, _| Region::new_static(interner))
                 };
-                if erase(lowered) != erase(inferred) {
+                // A projection rust-analyzer normalized where rustc keeps it as written, as
+                // under a `for<'a>`: `<&'a () as Trait>::Ty` inferred as `()`.
+                let normalizes = || {
+                    matches!(lowered.kind(), TyKind::Alias(..))
+                        && normalize(self.ctx, erase(lowered)).map(erase) == Some(erase(inferred))
+                };
+                if erase(lowered) != erase(inferred) && !normalizes() {
                     return None;
                 }
                 lowered
@@ -4469,6 +4572,22 @@ impl<'db> Builder<'_, '_, 'db> {
                                 Ty::new_fn_ptr(self.interner(), rustc_type_ir::Binder::dummy(sig));
                             self.relate(source, target, Variance::Covariant, at);
                         }
+                    }
+                    // rustc's: the closure's signature as a `fn` pointer's, a subtype of the
+                    // target, higher-ranked as both are: `for<'a> fn(<&'a () as Trait>::Ty)`
+                    // of `|_| {}` normalizes the projection for a placeholder.
+                    CastKind::PointerCoercion(hir_ty::PointerCast::ClosureFnPointer(_))
+                        if let TyKind::Closure(_, args) = source.kind()
+                            && let TyKind::FnPtr(to, _) = target.kind()
+                            && !to.bound_vars().is_empty()
+                            && let sig = args.as_closure().sig()
+                            && let &[tupled] = sig.skip_binder().inputs().as_slice()
+                            && let TyKind::Tuple(_) = tupled.kind() =>
+                    {
+                        let interner = self.interner();
+                        let sig = interner
+                            .signature_unclosure(sig, hir_ty::next_solver::abi::Safety::Safe);
+                        self.relate(Ty::new_fn_ptr(interner, sig), target, Variance::Covariant, at);
                     }
                     CastKind::PointerCoercion(hir_ty::PointerCast::ClosureFnPointer(_)) => {
                         if let TyKind::Closure(_, args) = source.kind()
