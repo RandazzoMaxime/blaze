@@ -238,18 +238,11 @@ fi
 
 rust_note=""
 if [ -x "$unpacked/blaze" ]; then
-    # blaze is its own toolchain: it downloads it once, unless rustup has the same Rust.
+    # blaze downloads its own copy, once, unless rustup has the one it builds with.
     if [ -n "$NO_TOOLCHAIN" ]; then
         step "Rust $TOOLCHAIN is downloaded at the first build"
     elif "$bin/blaze" toolchain >"$tmp/toolchain"; then
         step "$(cat "$tmp/toolchain")"
-        # rustup knows it as `blaze` (`cargo +blaze`, `rustc +blaze`), relinked on each install.
-        if command -v rustup >/dev/null 2>&1 && dir="$("$bin/blaze" toolchain --path)"; then
-            rustup toolchain uninstall blaze >/dev/null 2>&1 || true
-            if rustup toolchain link blaze "$dir" >/dev/null 2>&1; then
-                step "rustup has it as the toolchain \`blaze\`"
-            fi
-        fi
     else
         fail "blaze is installed, but the Rust it builds with could not be downloaded; the first build tries again."
     fi

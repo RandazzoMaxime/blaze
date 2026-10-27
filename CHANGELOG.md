@@ -10,7 +10,7 @@ All notable changes to ra-jit are written here. The format follows
 
 - blaze is its own toolchain, named `blaze-<date>` (`blaze-2026-10-25`, today the Rust nightly
   of that date): `blaze toolchain` names it and `blaze toolchain --path` prints its directory,
-  the installer links it into rustup as `blaze`, and a project that pins another toolchain is
+  and a project that pins another toolchain is
   told so once, as a note, while blaze builds with its own (docs/toolchain.md; #402, #403 and
   #404 for building, hosting and bumping it ourselves).
 

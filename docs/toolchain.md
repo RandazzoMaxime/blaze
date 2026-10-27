@@ -30,9 +30,8 @@ the standard library is part of a compiler.
   (`crates/ra-jit/src/cargo/toolchain/pins.txt`, `harness/toolchain_pins.py`). So `rustc -V`
   still says `1.101.0-nightly (12433c307 2026-10-24)`.
 - **Where:** `~/.blaze/toolchains/nightly-2026-10-25-<host>`, or rustup's `nightly-2026-10-25`
-  when rustup already has it with `rust-src` (the same bytes). The installer downloads it once
-  and, when rustup is there, links it as the rustup toolchain `blaze`, so `cargo +blaze` and
-  `rustc +blaze` are the toolchain blaze builds with.
+  when rustup already has it with `rust-src` (the same bytes). The installer downloads it once;
+  `blaze toolchain --path` prints its directory.
 - **Who uses it:** cargo, rustc and the daemon that blaze starts (`CARGO`, `RUSTC`, `RUSTDOC`,
   `PATH` for its own processes). The user's `cargo`, `rustc` and pins are untouched.
 - **Bumps:** on blaze's schedule, deliberately, with `harness/toolchain_bump.py`: it moves the
