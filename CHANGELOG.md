@@ -151,7 +151,6 @@ each one's section: what `[Unreleased]` had, and the title of each change merged
   ([live.md](docs/live.md#latency-under-typing)). A static with another value still asks for a
   restart.
 
-
 - `crates/blaze-build-script`: the environment cargo 1.99.0 gives a build script, computed
   from a plain description of the run with no cargo, ported from cargo's own rules and tests
   (no-rustc step I, #89; #298). Nothing uses it yet; blaze's own runs of scripts come next.
