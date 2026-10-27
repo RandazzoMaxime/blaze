@@ -7205,14 +7205,21 @@ impl<'a, 'db> ObjectCodegen<'a, 'db> {
 
     /// The base's instance compiled into the patch under the base's symbol, which the splice
     /// sends what called the base's copy on to.
-    fn compile_again(&mut self, instance: &Instance, known: &patch::BaseInstance) -> Result<FuncId> {
+    fn compile_again(
+        &mut self,
+        instance: &Instance,
+        known: &patch::BaseInstance,
+    ) -> Result<FuncId> {
         if let Some(&id) = self.instances.get(instance) {
             return Ok(id);
         }
         let compiled = compiled_instance(self.db, instance.clone(), known.env.clone());
         let compiled = compiled.as_ref().map_err(Clone::clone)?;
-        let id =
-            self.module.declare_function(&known.symbol, Linkage::Hidden, &compiled.code.signature)?;
+        let id = self.module.declare_function(
+            &known.symbol,
+            Linkage::Hidden,
+            &compiled.code.signature,
+        )?;
         self.instances.insert(instance.clone(), id);
         self.pending.push((instance.clone(), known.env.clone(), id));
         Ok(id)
