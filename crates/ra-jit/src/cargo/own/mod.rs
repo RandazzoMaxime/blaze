@@ -5,10 +5,17 @@
 
 mod args;
 mod clean;
+mod clippy;
+mod config;
 mod fmt;
 mod manifest;
 mod new;
+mod registry;
+mod remove;
+mod report;
 mod tree;
+mod uninstall;
+mod vendor;
 
 use args::Args;
 
@@ -54,7 +61,8 @@ const A_BUILD: Status = Status::Not("a build blaze does not do yet");
 const CHOOSES_VERSIONS: Status =
     Status::Not("it chooses versions, which blaze's resolver does not yet (#321)");
 /// What talks to a registry's web API, which blaze has no client of yet.
-const REGISTRY_API: Status = Status::Not("blaze has no client of a registry's web API yet");
+const PUBLISH: Status = Status::Not("it packages the crate first, a build blaze does not do yet");
+const INFO: Status = Status::Not("blaze's `cargo info` is not written yet");
 
 /// Every subcommand of the pinned nightly's cargo, and `fmt` and `clippy`, which rustup ships
 /// beside it.
@@ -64,7 +72,7 @@ pub(crate) const SUBCOMMANDS: &[Subcommand] = &[
     aka("run", &["r"], Status::Build, "build and run a program"),
     aka("test", &["t"], Status::Build, "build and run the tests"),
     sub("fmt", Status::Own, "format the source"),
-    sub("clippy", Status::Not("blaze's lints are being written"), "lint the source"),
+    sub("clippy", Status::Own, "lint the source with clippy's lints, blaze's own"),
     aka(
         "doc",
         &["d"],
@@ -82,8 +90,8 @@ pub(crate) const SUBCOMMANDS: &[Subcommand] = &[
     sub("new", Status::Own, "make a package in a new directory"),
     sub("init", Status::Own, "make a package in this directory"),
     sub("pkgid", Status::Own, "the full id of a package"),
-    sub("vendor", Status::Not("not written yet"), "copy every dependency into the workspace"),
-    aka("remove", &["rm"], Status::Not("not written yet"), "remove dependencies from the manifest"),
+    sub("vendor", Status::Own, "copy every dependency into the workspace"),
+    aka("remove", &["rm"], Status::Own, "remove dependencies from the manifest"),
     sub("add", CHOOSES_VERSIONS, "add dependencies to the manifest"),
     sub("update", CHOOSES_VERSIONS, "update the lock file"),
     sub("generate-lockfile", CHOOSES_VERSIONS, "write the lock file"),
@@ -92,18 +100,18 @@ pub(crate) const SUBCOMMANDS: &[Subcommand] = &[
     sub("rustdoc", A_BUILD, "document a package with extra rustdoc flags"),
     sub("fix", A_BUILD, "apply the compiler's suggestions"),
     sub("install", A_BUILD, "build and install a program"),
-    sub("uninstall", Status::Not("not written yet"), "remove an installed program"),
+    sub("uninstall", Status::Own, "remove an installed program"),
     sub("package", A_BUILD, "make the `.crate` of a package"),
-    sub("publish", REGISTRY_API, "upload a package to a registry"),
-    sub("search", REGISTRY_API, "search a registry"),
-    sub("info", REGISTRY_API, "what a registry says of a package"),
-    sub("owner", REGISTRY_API, "the owners of a package on a registry"),
-    sub("yank", REGISTRY_API, "yank a version from a registry"),
-    sub("login", REGISTRY_API, "keep a registry's token"),
-    sub("logout", REGISTRY_API, "forget a registry's token"),
-    sub("report", Status::Not("not written yet"), "reports cargo keeps of builds"),
-    sub("config", Status::Not("not written yet"), "the configuration cargo reads"),
-    sub("read-manifest", Status::Not("not written yet"), "the manifest as JSON (deprecated)"),
+    sub("publish", PUBLISH, "upload a package to a registry"),
+    sub("search", Status::Own, "search a registry"),
+    sub("info", INFO, "what a registry says of a package"),
+    sub("owner", Status::Own, "the owners of a package on a registry"),
+    sub("yank", Status::Own, "yank a version from a registry"),
+    sub("login", Status::Own, "keep a registry's token"),
+    sub("logout", Status::Own, "forget a registry's token"),
+    sub("report", Status::Own, "reports cargo keeps of builds"),
+    sub("config", Status::Own, "the configuration cargo reads"),
+    sub("read-manifest", Status::Own, "the manifest as JSON (deprecated)"),
 ];
 
 /// The subcommand `name` is, by its name or an alias.
@@ -115,6 +123,7 @@ pub(crate) fn named(name: &str) -> Option<&'static Subcommand> {
 /// the status to exit with.
 pub(crate) fn command(args: Vec<String>) -> anyhow::Result<i32> {
     let Some((name, rest)) = args.split_first() else { return Ok(0) };
+    super::say::color(color_of(rest).as_deref());
     if name == "--list" {
         list();
         return Ok(0);
@@ -128,11 +137,23 @@ pub(crate) fn command(args: Vec<String>) -> anyhow::Result<i32> {
     };
     match subcommand.name {
         "fmt" => Ok(fmt::command(rest)),
+        "clippy" => clippy::command(rest),
         "metadata" => manifest::metadata(Args::new(rest)),
         "locate-project" => manifest::locate_project(Args::new(rest)),
         "verify-project" => manifest::verify_project(Args::new(rest)),
         "tree" => tree::command(Args::new(rest)),
         "pkgid" => manifest::pkgid(Args::new(rest)),
+        "read-manifest" => manifest::read_manifest(Args::new(rest)),
+        "uninstall" => uninstall::command(Args::new(rest)),
+        "report" => report::command(Args::new(rest)),
+        "config" => config::command(rest),
+        "remove" => remove::command(rest),
+        "search" => registry::search(rest),
+        "owner" => registry::owner(rest),
+        "yank" => registry::yank(rest),
+        "login" => registry::login(rest),
+        "logout" => registry::logout(rest),
+        "vendor" => vendor::command(Args::new(rest)),
         "fetch" => manifest::fetch(Args::new(rest)),
         "clean" => clean::command(Args::new(rest)),
         "new" | "init" => new::command(subcommand.name, Args::new(rest)),
@@ -146,6 +167,20 @@ pub(crate) fn command(args: Vec<String>) -> anyhow::Result<i32> {
         }
         _ => Ok(not_yet(subcommand)),
     }
+}
+
+/// What `--color` the words of a subcommand give, the last one.
+fn color_of(words: &[String]) -> Option<String> {
+    let mut found = None;
+    let mut words = words.iter().take_while(|it| *it != "--");
+    while let Some(word) = words.next() {
+        match word.strip_prefix("--color") {
+            Some("") => found = words.next().cloned(),
+            Some(rest) => found = rest.strip_prefix('=').map(str::to_owned).or(found),
+            None => {}
+        }
+    }
+    found
 }
 
 /// Says that blaze has no `subcommand` yet and that nothing was done, as a failure.
@@ -238,6 +273,14 @@ mod tests {
         assert_eq!(subcommand_first(words("--version")), words("--version"));
         assert_eq!(subcommand_first(words("-q")), words("-q"));
         assert_eq!(subcommand_first(Vec::new()), Vec::<String>::new());
+    }
+
+    #[test]
+    fn the_last_color_given_counts() {
+        assert_eq!(color_of(&words("-q --color always x")).as_deref(), Some("always"));
+        assert_eq!(color_of(&words("--color=never --color always")).as_deref(), Some("always"));
+        assert_eq!(color_of(&words("-- --color always")), None);
+        assert_eq!(color_of(&words("--colorful")), None);
     }
 
     #[test]

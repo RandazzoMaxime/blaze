@@ -84,6 +84,7 @@ hir-ty-codegen = { path = "crates/hir-ty-codegen" }
 ra-jit-expand = { path = "crates/ra-jit-expand" }
 ra-jit-store = { path = "crates/ra-jit-store" }
 blaze-fmt = { path = "crates/blaze-fmt" }
+blaze-lints = { path = "crates/blaze-lints" }
 blaze-manifest = { path = "crates/blaze-manifest" }
 blaze-metadata = { path = "crates/blaze-metadata" }
 blaze-new = { path = "crates/blaze-new" }

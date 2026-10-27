@@ -10,6 +10,19 @@ each one's section: what `[Unreleased]` had, and the title of each change merged
 
 ### Added
 
+- `nonstandard_macro_braces` no longer lints a call inside another macro's arguments
+  (`vec!(..)` in `assert!(..)`), which stock clippy leaves alone; `new_without_default`
+  takes a type to be exported only when another crate can name it; the format lints read
+  macros marked `#[clippy::format_args]`, as `log`'s are. helix's 20 diagnostics of the
+  ported lints are now all written as stock clippy writes them, with none extra.
+- `cargo blaze clippy` (and `blaze clippy`) lints with blaze's own lints, `crates/blaze-lints`:
+  24 of clippy's ported onto rust-analyzer's analysis and run by the daemon, with no cargo,
+  rustc or clippy-driver started. They are written as `cargo clippy` writes them (rustc's
+  rendering, cargo's summary line and `--fix` hint, `--message-format=json`, status 101 for an
+  error), at the levels `#[allow]`, `#[expect]`, `[lints.clippy]`, `clippy.toml` and `-- -D`
+  give. On ripgrep and fd every diagnostic stock clippy writes of those lints, 567, is written
+  the same, held so by `harness/clippydiff.py`; helix and biome lint nothing yet, as
+  `cargo blaze check` of them fails. docs/cargo.md has the numbers.
 - `cargo blaze fmt` (and `blaze fmt`) is blaze's own: blaze-fmt run in process, with
   cargo-fmt's options over the workspace's targets, or rustfmt's over the `.rs` files named
   (`blaze fmt src/main.rs`). No rustfmt or cargo-fmt is started.
@@ -22,6 +35,35 @@ each one's section: what `[Unreleased]` had, and the title of each change merged
   and biome with their own rustfmt.toml (6068 of 6068 files, `--check` exit codes and diffs
   too), the same with `max_width = 60` (6068 of 6068), and rustfmt's `tests/source` (773 of
   793; the rest are those refusals).
+- `cargo blaze search`, `owner`, `yank`, `login` and `logout` are blaze's own: blaze-registry
+  has a client of a registry's web API (crates-io 0.41's), with cargo's choice of registry, its
+  token and `credentials.toml` as cargo writes it, and its errors (`harness/own_registry.py`,
+  73 of 73 cases against a mock registry, requests and credentials files too). Credential
+  providers other than `cargo:token` are refused.
+- `cargo blaze vendor` is blaze's own for registry packages: each unpacked from its `.crate`
+  with its `.cargo-checksum.json`, and the `[source]` configuration printed
+  (`harness/own_vendor.py`, 18 of 18 cases, every file by its sha256). A git package is
+  refused with the reason.
+- `cargo blaze remove` is blaze's own: the dependencies out of the manifest, layout and
+  comments kept, what named them cleaned up, and the lock file resolved again with every
+  version it keeps (`harness/own_remove.py`, 43 of 43 cases, manifests and lock files byte
+  for byte).
+- `cargo blaze config get` is blaze's own: the configuration cargo reads, in TOML or JSON,
+  merged or file by file, with where each value is from (`harness/own_config.py`, 41 of 41
+  cases).
+- `cargo blaze report future-incompatibilities` is blaze's own: the report a build left, as
+  cargo prints it (`harness/own_report.py`, 23 of 23 cases). Every own command colors its
+  lines as `--color` or `CARGO_TERM_COLOR` says.
+- `cargo blaze uninstall` and `cargo blaze read-manifest` are blaze's own. `uninstall` is cargo
+  1.99's, with its install tracker: `.crates.toml` and `.crates2.json` are written byte for
+  byte as cargo writes them (`harness/own_uninstall.py`, 18 of 18 cases equal to cargo's).
+  `read-manifest` is the package's entry of `metadata --no-deps` (`harness/own_commands.py`,
+  now 130 of 130 over ripgrep, fd, helix, nushell and biome).
+- `enable` makes plain `cargo fmt` and `cargo clippy` blaze's, for each of the two that is
+  blaze's own: links named `cargo-fmt` and `cargo-clippy` in `~/.cargo/bin`, which cargo looks
+  in before `PATH`, to `cargo-blaze`. What they replace, rustup's proxies, is kept and
+  `disable` puts it back; `status` says whose each command is. Not an `[alias]`, which cargo
+  warns of on every run (rust-lang/cargo#10049).
 - `cargo blaze tree`, `pkgid`, `fetch`, `clean`, `new` and `init` are blaze's own, with no
   cargo: `tree` from the new `crates/blaze-tree` (cargo 1.101's, on blaze-resolve), `new` and
   `init` from the new `crates/blaze-new`. `harness/own_tree.py` (130 of 130 equal over
