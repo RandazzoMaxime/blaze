@@ -1,6 +1,6 @@
 /**
  * Where the site is served: `Served` on `site` in content/site.flecs, written by gen/build.ts to .gen/site.json.
- * https://ix.dev/blaze/ today: the worker runs on the zone routes `ix.dev/blaze` and `ix.dev/blaze/*` (wrangler.jsonc).
+ * https://ix.dev/blaze/ today: the worker runs on the zone route `ix.dev/blaze*` (wrangler.jsonc).
  *
  * Inside the worker every path is a site path, without the base (`/rfcs/x`, `/updates`), as the renderer lists pages
  * and as dist/ is laid out; `index.ts` strips the base on the way in. Anything going back to the browser as a path
