@@ -49,6 +49,8 @@ const BINDING_WEAK: u32 = 1;
 const BINDING_LOCAL: u32 = 2;
 const VISIBILITY_HIDDEN: u32 = 4;
 const UNDEFINED: u32 = 0x10;
+/// The symbol's name is not the name it is imported as.
+const EXPLICIT_NAME: u32 = 0x40;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
@@ -103,6 +105,23 @@ struct Writer {
     data_relocs: Vec<Reloc>,
     segments: Vec<u8>,
     segment_count: u32,
+}
+
+const IMPORT: &str = "ra-jit.import.";
+
+/// The symbol of the function `field` that the module imports from `module`
+/// (`wasm_import_module`), rather than from an `env` that some other object defines: the
+/// module and the field are read back from it ([`import_of`]), so what is reused from the store
+/// refers to the import as what is compiled anew does. Named for its module too, as rustc
+/// mangles the name of one: two modules may have imports of the same name.
+pub(super) fn import_symbol(module: &str, field: &str) -> String {
+    format!("{IMPORT}{}.{module}{field}", module.len())
+}
+
+fn import_of(symbol: &str) -> Option<(&str, &str)> {
+    let (len, rest) = symbol.strip_prefix(IMPORT)?.split_once('.')?;
+    let len = len.parse().ok()?;
+    Some((rest.get(..len)?, rest.get(len..)?))
 }
 
 /// Writes as a wasm object what the ELF object `elf` holds. `signatures` has the signature
@@ -173,10 +192,16 @@ pub(super) fn from_elf(
             (_, None) => match signatures.get(name) {
                 Some(signature) => {
                     let ty = writer.ty(signature);
-                    imports.import(ENV, name, EntityType::Function(ty));
+                    let explicit = import_of(name);
+                    let (module, field) = explicit.unwrap_or((ENV, name));
+                    imports.import(module, field, EntityType::Function(ty));
                     let flags = flags(&symbol) | UNDEFINED;
+                    let flags = if explicit.is_some() { flags | EXPLICIT_NAME } else { flags };
                     let index = writer.symbol(SymbolType::Function, flags, |entry| {
                         imported.encode(entry);
+                        if explicit.is_some() {
+                            name.encode(entry);
+                        }
                     });
                     imported += 1;
                     symbol_of.insert(symbol.index(), (index, true));
@@ -293,12 +318,16 @@ pub(super) fn from_elf(
         writer.data.extend(&*bytes);
         address += size as u32;
 
-        let prefix = match section.kind() {
-            _ if zeroed => ".bss.",
-            SectionKind::ReadOnlyData | SectionKind::ReadOnlyString => ".rodata.",
-            _ => ".data.",
+        // The messages of the stand-ins keep their section's name, which the linker merges
+        // them by into one segment of its own that the module names.
+        let (_, stand_ins) = super::stand_in_section(::object::BinaryFormat::Wasm);
+        let segment_name = match section.kind() {
+            _ if section.name() == Ok(stand_ins) => stand_ins.to_owned(),
+            _ if zeroed => format!(".bss.{name}"),
+            SectionKind::ReadOnlyData | SectionKind::ReadOnlyString => format!(".rodata.{name}"),
+            _ => format!(".data.{name}"),
         };
-        format!("{prefix}{name}").encode(&mut writer.segments);
+        segment_name.encode(&mut writer.segments);
         align.trailing_zeros().encode(&mut writer.segments);
         0u32.encode(&mut writer.segments);
         let segment = writer.segment_count;

@@ -553,6 +553,7 @@ fn main() {
     #[cfg(panic = "unwind")]
     println!("async_drops {:?}", cases::async_drops::run());
     println!("promoted_assoc_const {:?}", cases::promoted_assoc_const::run());
+    println!("promoted_value_qualifs {:?}", cases::promoted_value_qualifs::run());
     println!("offsets {:?}", cases::offsets::run());
     println!("backtraces {:?}", cases::backtraces::run());
     println!("inline_const_bindings {:?}", cases::inline_const_bindings::run());
@@ -617,6 +618,8 @@ fn main() {
     println!("soft_floats {}", cases::soft_floats::run());
     #[cfg(target_arch = "x86_64")]
     println!("simd_x86 {}", cases::simd_x86::run());
+    #[cfg(all(feature = "nightly", target_arch = "x86_64"))]
+    print!("avx512\n{}", cases::avx512::run());
     #[cfg(target_arch = "aarch64")]
     println!("simd_aarch64 {}", cases::simd_aarch64::run());
     #[cfg(all(target_arch = "aarch64", feature = "nightly"))]
@@ -641,6 +644,13 @@ fn main() {
     println!("sve {}", cases::sve::run());
     #[cfg(all(feature = "nightly", target_arch = "aarch64"))]
     println!("sve_ops {}", cases::sve_ops::run());
+    println!("wide_bits {:x?}", cases::wide_bits::run(0x0123_4567_89ab_cdef_fedc_ba98_7654_3210, u128::MAX - 5));
+    #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+    println!("simd_wasm {:x?}", cases::simd_wasm::run());
+    #[cfg(all(target_arch = "wasm32", target_feature = "relaxed-simd"))]
+    println!("relaxed_wasm {:x?}", cases::relaxed_wasm::run());
+    #[cfg(all(target_arch = "wasm32", target_feature = "simd128", feature = "nightly"))]
+    println!("simd_wasm_lowered {:x?}", cases::simd_wasm_lowered::run());
     // Threads.
     #[cfg(not(target_family = "wasm"))]
     println!("boxed_fn_once {:?}", cases::boxed_fn_once::run());

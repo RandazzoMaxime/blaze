@@ -1016,6 +1016,12 @@ each one's section: what `[Unreleased]` had, and the title of each change merged
 
 ### Fixed
 
+- `cargo blaze test --doc` runs an edited library's examples again: it took an example's
+  program from the run before while the example's own text was unchanged, since blaze's run
+  names no library with `--extern` for the key to stamp, so after an edit that broke them the
+  doc tests passed where cargo's failed. The key now has the cfgs of every crate the library is
+  built from and the files of those of the workspace. `cargo blaze test --doc -q` shows the
+  results tersely, as cargo's `-q` has libtest do (`harness/cargo_ra_jit.py`, flags group).
 - The daemon's own link passes the linker what `-C link-arg` and `-C link-args` say in
   `RUSTFLAGS`, `CARGO_ENCODED_RUSTFLAGS` or the configuration's `rustflags`, after the native
   libraries as rustc does; it left them out. A program linked with
@@ -1025,6 +1031,10 @@ each one's section: what `[Unreleased]` had, and the title of each change merged
 - A red train opens or comments on the "Release train is red" issue again: train_issue.py read
   each harness job's log with `gh api`, which the runner's gh refuses without
   `--allow-escape-sequences`, so the `train issue` job failed and no issue was opened.
+- A build that compiles the standard library's crates itself no longer takes from the store
+  code that a build over ra-jit's prebuilt unit of the library kept: such an entry's calls
+  into the unit (`ra-jit.<hash>.…` symbols) are now checked when it is taken, where its link
+  failed on them as undefined (#328). Entries written before are not read (entry format 12).
 
 - A load's proc macros with and without `RA_JIT_PROC_MACRO_SERVER=0` (#460): each mode has
   its own target directory, `target/rust-analyzer` with ra-jit's proc macros and
@@ -1174,7 +1184,7 @@ each one's section: what `[Unreleased]` had, and the title of each change merged
   `[ra-jit]` instead of handing every build to cargo. The daemon takes COFF programs (also with
   `--target x86_64-pc-windows-msvc`), links them with the `rust-lld` the repository's cargo
   configuration names, and closes an existing directory of its own that others can enter, as
-  on Unix. Live edits of a running program are still macOS and Linux only.
+  on Unix.
 - A profile with `debug = "line-tables-only"` (or `1`, or `"limited"`) no longer has the type
   of every variable worked out. Only the lines were written, but the types were described for
   each function compiled and then thrown away. On Biome (`biome_cli`, 518 crates, whose dev
@@ -1398,6 +1408,14 @@ each one's section: what `[Unreleased]` had, and the title of each change merged
   ready at 116.2 s instead of 142.3 s (Linux x86-64, 16 cores, medians of three). Nothing is
   left to rustc for it, and `harness/norustc` counts the same functions left to rustc on
   ripgrep (53) and nushell (534) (#37, no-rustc step E).
+- A whole build (`cargo blaze build`, `run`, `test`) that the source's errors fail writes them
+  as rustc and cargo do: each error, then `error: could not compile `app` (bin "app") due to 1
+  previous error`, and the note naming blaze's toolchain when the project pins another, where
+  it said `error: could not build `app`: ` before the first error.
+- An error in code nothing reaches, written while no daemon ran, fails the first whole build:
+  with no rustc to check the source, the worker checks every file of the crates the build
+  compiles once it has loaded them (`check: N files in ...` in its log), and every build of the
+  checkout fails with the error until a source is written. It built the program before.
 - A `#[global_allocator]` in an inline `#[cfg(test)] mod test { .. }` of a library (ureq's)
   gave the library's stand-in an allocator outside the test build, whose functions nothing
   defined: every allocation of the program reached the stand-in's trap, so nushell, which links
@@ -1776,6 +1794,8 @@ each one's section: what `[Unreleased]` had, and the title of each change merged
   every event). Each crate's on-demand functions are wanted once, and each definition is
   walked once for all its closures or all its statics of a name. reth's first edit on 48 cores:
   64.4 s and 64.3 s before, 58.0 s and 57.5 s after.
+- `blaze disable` removes the `bin` directory of cargo's home that `enable` made for the links
+  of `cargo fmt` and `cargo clippy`, when nothing else is in it: the home is as it was.
 
 ## [0.1.0] - 2026-10-20
 

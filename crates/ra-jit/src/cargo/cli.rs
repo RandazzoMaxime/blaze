@@ -477,7 +477,7 @@ fn unsupported_target(triple: &str) -> Option<String> {
         Ok(target)
             if matches!(
                 target.object_format,
-                ObjectFormat::Elf | ObjectFormat::MachO | ObjectFormat::Coff
+                ObjectFormat::Elf | ObjectFormat::MachO | ObjectFormat::Coff | ObjectFormat::Wasm
             ) =>
         {
             None
