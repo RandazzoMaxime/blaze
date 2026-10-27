@@ -165,6 +165,18 @@ macro_rules! make {
     () => {};
 }
 
+dep::declare! {
+    /// Declared by a macro of another crate, where rustc reports no lint: [Foreign].
+    Declared
+}
+macro_rules! declare_here {
+    ($(#[doc = $doc:literal])* $name:ident) => { $(#[doc = $doc])* pub struct $name; };
+}
+declare_here! {
+    /// Declared by a macro of this crate: [Homegrown].
+    DeclaredHere
+}
+
 #[deprecated(since = "1.0", note = "use `free`")]
 pub fn old() {}
 
@@ -253,6 +265,12 @@ mod deep {
     pub struct Deep;
 }
 pub use deep::Deep;
+
+/// Declares a unit struct with the docs given.
+#[macro_export]
+macro_rules! declare {
+    ($(#[doc = $doc:literal])* $name:ident) => { $(#[doc = $doc])* pub struct $name; };
+}
 "#;
 
 fn load() -> (RootDatabase, Model) {
@@ -559,6 +577,8 @@ fn unresolved_links_warn() {
     assert!(messages.iter().any(|it| it.contains("unresolved link to `Nope`")), "{messages:?}");
     assert!(messages.iter().any(|it| it.contains("unresolved link to `Loud`")), "{messages:?}");
     assert!(!messages.iter().any(|it| it.contains("`Quiet`")), "allowed: {messages:?}");
+    assert!(messages.iter().any(|it| it.contains("`Homegrown`")), "{messages:?}");
+    assert!(!messages.iter().any(|it| it.contains("`Foreign`")), "another's macro: {messages:?}");
     assert!(model.warnings.iter().all(|it| it.krate == "fixture"), "dependencies do not warn");
 }
 

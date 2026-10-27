@@ -1,7 +1,8 @@
 //! Whether rustdoc reports a broken intra-doc link at a place: the nearest `allow`, `expect`,
 //! `warn`, `deny` or `forbid` naming `rustdoc::broken_intra_doc_links`, `rustdoc::all` or
 //! `warnings`, on the items around the link, then on the modules it is in, each `cfg_attr` as
-//! the crate's cfg says. Levels given on the command line (`RUSTDOCFLAGS`) are not read.
+//! the crate's cfg says. Levels given on the command line (`RUSTDOCFLAGS`) are not read. A link
+//! in docs a macro of another crate wrote is not reported at all, as rustc reports no lint there.
 
 use hir::{CfgExpr, CfgOptions, HirFileId, InFile, Semantics};
 use ide_db::RootDatabase;
@@ -16,7 +17,41 @@ pub(crate) fn broken_links_reported(
     krate: hir::Crate,
     at: InFile<TextRange>,
 ) -> bool {
-    level(db, krate, at).unwrap_or(true)
+    !in_external_macro(db, krate, at) && level(db, krate, at).unwrap_or(true)
+}
+
+/// Whether rustc drops the lint as one in a macro the crate did not write: the doc attribute
+/// over `at` has a `#` an attribute or derive macro made, or a function-like macro of another
+/// crate (`Span::in_external_macro` in `compiler/rustc_span/src/lib.rs`, rust
+/// 12433c307b5a497388ffe2f4e49dbf1ab8c71fa0; `broken_intra_doc_links` does not ask to be
+/// reported there). A doc comment a macro passes on as it was given keeps the caller's `#`,
+/// and the text of an included file is the file's.
+fn in_external_macro(db: &RootDatabase, krate: hir::Crate, at: InFile<TextRange>) -> bool {
+    let HirFileId::MacroFile(file) = at.file_id else { return false };
+    let root = at.file_id.parse_or_expand(db);
+    if !root.text_range().contains_range(at.value) {
+        return false;
+    }
+    let start = match root.covering_element(at.value) {
+        NodeOrToken::Node(it) => it,
+        NodeOrToken::Token(it) => match it.parent() {
+            Some(it) => it,
+            None => return false,
+        },
+    };
+    let Some(pound) = start.ancestors().find_map(ast::Attr::cast).and_then(|it| it.pound_token())
+    else {
+        return false;
+    };
+    let span = file.expansion_span_map(db).span_at(pound.text_range().start());
+    let Some(expn) = span.ctx.outer_expn(db) else { return false };
+    let loc = hir_expand::MacroCallId::from(expn).loc(db);
+    match loc.kind {
+        hir_expand::MacroCallKind::FnLike { .. } => {
+            !loc.def.is_include() && loc.def.krate != ide_db::base_db::Crate::from(krate)
+        }
+        hir_expand::MacroCallKind::Derive { .. } | hir_expand::MacroCallKind::Attr { .. } => true,
+    }
 }
 
 fn level(db: &RootDatabase, krate: hir::Crate, at: InFile<TextRange>) -> Option<bool> {
