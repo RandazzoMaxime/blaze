@@ -9244,7 +9244,7 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
                     return;
                 }
                 let copy = self.argument_slot(layout);
-                self.copy(copy, addr, layout.size);
+                self.copy_value(copy, addr, layout);
                 values.push(copy);
             }
             // The callee is handed the value where it is, as rustc does: the operand is a
@@ -11497,9 +11497,65 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
             self.builder.call_memcpy(config, dst, src, bytes);
             return;
         }
+        self.copy_in(dst, src, size, &[types::I64, types::I32, types::I16, types::I8]);
+    }
+
+    /// Copies a value of `layout`. A SIMD vector, or an array (the lanes of one), goes in whole
+    /// vectors of 16 bytes: it is written and read by single loads and stores of 16 bytes,
+    /// and a load the processor can't forward from one earlier store waits for the stores to
+    /// reach the cache (sha2's SHA-NI rounds ran at a ninth of rustc's unoptimized build's
+    /// speed). Anything else goes in words, as its fields are written.
+    fn copy_value(&mut self, dst: Value, src: Value, layout: &Layout) {
+        let vector = matches!(
+            (&layout.backend_repr, &layout.fields),
+            (BackendRepr::SimdVector { .. }, _) | (_, rustc_abi::FieldsShape::Array { .. })
+        ) && layout.size.bytes() % 16 == 0
+            && self.makes_vectors();
+        if !vector || dst == src || layout.size.bytes() > 128 {
+            return self.copy(dst, src, layout.size);
+        }
+        self.copy_in(dst, src, layout.size, &[types::I8X16]);
+    }
+
+    /// Stores `lanes` of `lane` to `dst` as one vector of 16 bytes, when they are 16 bytes and
+    /// the target has vectors, so that a read of the whole vector is forwarded from the store
+    /// (see `copy_value`). Says whether it did.
+    fn store_whole(&mut self, lanes: &[Value], lane: Type, dst: Value) -> bool {
+        let bits = lane.bits() as usize;
+        if lanes.len() * bits != 128 || bits > 64 || !self.makes_vectors() {
+            return false;
+        }
+        let int = Type::int(bits as u16).expect("a lane of 8 to 64 bits");
+        let mut words = Vec::new();
+        for word in lanes.chunks(64 / bits) {
+            let mut out = self.builder.ins().iconst(types::I64, 0);
+            for (i, &value) in word.iter().enumerate() {
+                let mut value = value;
+                if lane.is_float() {
+                    value = self.builder.ins().bitcast(int, MemFlagsData::new(), value);
+                }
+                if bits < 64 {
+                    value = self.builder.ins().uextend(types::I64, value);
+                }
+                if i > 0 {
+                    value = self.builder.ins().ishl_imm(value, (i * bits) as i64);
+                }
+                out = self.builder.ins().bor(out, value);
+            }
+            words.push(out);
+        }
+        let whole = self.builder.ins().iconcat(words[0], words[1]);
+        let flags = MemFlagsData::new().with_endianness(ir::Endianness::Little);
+        let vector = self.builder.ins().bitcast(types::I8X16, flags, whole);
+        self.builder.ins().store(MEM, vector, dst, 0);
+        true
+    }
+
+    /// Copies `size` bytes in loads and stores of `types`, each as many times as fits.
+    fn copy_in(&mut self, dst: Value, src: Value, size: Size, types: &[Type]) {
         let mut offset = 0i32;
         let mut left = size.bytes() as i32;
-        for ty in [types::I64, types::I32, types::I16, types::I8] {
+        for &ty in types {
             while left >= ty.bytes() as i32 {
                 let value = self.builder.ins().load(ty, MEM, src, offset);
                 self.builder.ins().store(MEM, value, dst, offset);
@@ -11582,13 +11638,13 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
         match rvalue {
             Rvalue::Use(operand) => {
                 let (src, ty) = self.operand(operand)?;
-                let size = self.layout(ty)?.size;
-                self.copy(dst, src, size);
+                let layout = self.layout(ty)?;
+                self.copy_value(dst, src, &layout);
             }
             Rvalue::CopyForDeref(place) => {
                 let (src, ty) = self.place(place)?;
-                let size = self.layout(ty.ty)?.size;
-                self.copy(dst, src, size);
+                let layout = self.layout(ty.ty)?;
+                self.copy_value(dst, src, &layout);
             }
             Rvalue::Ref(_, place) => {
                 let place = self.place_ref(place)?;
@@ -11704,6 +11760,20 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
                 }
                 AggregateKind::Array(elem) => {
                     let size = self.layout(elem.as_ref())?.size;
+                    let scalar = self.scalar_of(elem.as_ref()).ok().filter(|it| {
+                        u64::from(it.ty.bytes()) == size.bytes()
+                            && size.bytes() * operands.len() as u64 == 16
+                    });
+                    if let Some(scalar) = scalar {
+                        let mut lanes = Vec::new();
+                        for operand in operands.iter() {
+                            let (src, _) = self.operand(operand)?;
+                            lanes.push(self.builder.ins().load(scalar.ty, MEM, src, 0));
+                        }
+                        if self.store_whole(&lanes, scalar.ty, dst) {
+                            return Ok(());
+                        }
+                    }
                     for (i, operand) in operands.iter().enumerate() {
                         let (src, _) = self.operand(operand)?;
                         let element =
@@ -11972,9 +12042,9 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
         }
         for (i, operand) in operands.iter().enumerate() {
             let (src, ty) = self.operand(operand)?;
-            let size = self.layout(ty)?.size;
+            let field_layout = self.layout(ty)?;
             let field = self.builder.ins().iadd_imm(dst, layout.fields.offset(i).bytes() as i64);
-            self.copy(field, src, size);
+            self.copy_value(field, src, &field_layout);
         }
         Ok(())
     }
@@ -14831,11 +14901,12 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
                 {
                     unsupported!("a reference to a scalable vector made of another type");
                 }
-                let size = self.layout(ty)?.size;
-                if size != self.layout(dst_ty)?.size {
+                let (from, to) = (self.layout(ty)?, self.layout(dst_ty)?);
+                if from.size != to.size {
                     unsupported!("transmute between differently sized types");
                 }
-                self.copy(dst, src, size);
+                let vector = matches!(from.backend_repr, BackendRepr::SimdVector { .. });
+                self.copy_value(dst, src, if vector { &from } else { &to });
             }
             // Cranelift's atomics are always sequentially consistent, the strongest ordering.
             ("atomic_load", [ptr]) => {
@@ -15245,8 +15316,10 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
                     let addr = self.builder.ins().iadd(both, offset);
                     lanes.push(self.builder.ins().load(lane.ty, MEM, addr, 0));
                 }
-                for (i, value) in lanes.into_iter().enumerate() {
-                    self.builder.ins().store(MEM, value, dst, (i as u64 * lane_size) as i32);
+                if !self.store_whole(&lanes, lane.ty, dst) {
+                    for (i, value) in lanes.into_iter().enumerate() {
+                        self.builder.ins().store(MEM, value, dst, (i as u64 * lane_size) as i32);
+                    }
                 }
             }
             ("simd_splat", [arg]) => {
@@ -16619,8 +16692,8 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
             }
             ("x86.sha256rnds2", [a, b, k]) => {
                 let (k, ty) = self.operand(k)?;
-                let size = self.layout(ty)?.size;
-                self.copy(dst, k, size);
+                let layout = self.layout(ty)?;
+                self.copy_value(dst, k, &layout);
                 // The instruction takes its third vector in `xmm0`.
                 let rounds = "movdqa xmm3, xmm0\nmovdqa xmm0, xmm2\nsha256rnds2 xmm3, xmm1";
                 self.vector_assembly(asm::vector_instruction(rounds, "xmm3"), a, b, dst)?;
