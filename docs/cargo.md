@@ -328,10 +328,11 @@ one place a script is run. A script is given, of what cargo gave it, what cargo 
 scripts (`CARGO_*`, `DEP_*`, `OUT_DIR`, `TARGET`, `PROFILE`, ...), the C compiler's and
 pkg-config's variables (`CC`, `CFLAGS_<target>`, `PKG_CONFIG_PATH`, `NIX_CFLAGS_COMPILE`,
 `CPATH`, `SOURCE_DATE_EPOCH`, ...), `PATH`, `HOME`, `LANG` and the rest tests are given, and
-what the root manifest's `build-script-env` names; what else the shell had is not there. A
-script that says it reads one it was not given (`cargo:rerun-if-env-changed=OPENSSL_DIR`)
-while it is set where cargo ran fails, naming it and `build-script-env`, rather than build as
-if it were unset. The machine is read-only; it writes
+what the root manifest's `build-script-env` names, and what it says it reads
+(`cargo:rerun-if-env-changed=OPENSSL_DIR`) as cargo has it; what else the shell had is not
+there. A run that said it reads a variable it was not given saw it unset, so the script runs
+again given it, and the store keeps that run under the variable's value. The machine is
+read-only; it writes
 its `OUT_DIR` for real, which is the one directory the Cargo book lets a script write ("Scripts
 should not modify any files outside of that directory"); the temporary directories start empty;
 there is no network but the sandbox's own loopback. Its package's directory, the workspace and
@@ -564,7 +565,17 @@ all, and says whether each kept as passed passed again:
     Verified the passes kept: 245 of 245 tests passed again
 
 One that failed is flaky or its key misses something it is a function of, which is a bug in
-blaze; it is named, marked flaky, and the command fails. The release train runs it.
+blaze; it is named, marked flaky, and the command fails. It is for the release train, which
+does not run it yet.
+
+On a CI runner's shape (a fresh target directory and daemon, with the store main's run filled),
+every test that passed on main is skipped. After a one-function edit, only the tests that reach
+the function run: just ran 344 of its 515 passing tests and took 171 from main, nushell 42 of 67,
+cargo none of 8, and `verify` found every pass kept to pass again on seven projects. On these
+projects it is not yet faster than running every test: the daemon's walk for each test's hash
+on a fresh daemon (8.5 s and 3.6 s for axum's two test programs) costs more than the short tests
+it skips (axum 20.6 s against 13.1 s for every test, nushell 21.3 s against 17.2 s;
+[the numbers](../bench/results/2026-10-27-testcache/README.md)).
 
 `-v`, `-q` and `--color` only change what cargo prints, and are the same build to the daemon.
 

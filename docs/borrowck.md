@@ -468,8 +468,23 @@ harness mistake shows.
 A unit passes when ra-jit's set of borrow-check errors, as (error code, line), is rustc's
 set. Errors rustc gives no code are named by their message. A unit is out of scope, with a
 counted reason, when it cannot say anything about the borrow checker: it needs a nightly
-feature, an auxiliary crate or another file, a `-Z` flag other than Polonius, or rustc
-stops before borrow checking.
+feature, an auxiliary crate or another file, a `-Z` flag other than Polonius, rustc
+stops before borrow checking, or rust-analyzer reports an error in it that rustc does not.
+For those, rust-analyzer's type checking follows rustc's in what it reports:
+
+- No "type annotations needed" (E0282) in a body that already has an error, as rustc's
+  `InferCtxt::tainted_by_errors` suppresses it at writeback and where a type must be known
+  (`hir-ty/src/infer.rs`, `InferenceDiagnostic::taints_body`).
+- A binary operator applied to types with no impl of its trait is an error (E0369, E0368
+  for `op=`) that taints the body, as rustc's `check_overloaded_binop` reports it
+  (`hir-ty/src/infer/op.rs`).
+- A closure required to implement a `Fn*` or `AsyncFn*` trait its closure kind does not
+  allow is E0525, not an unsatisfied bound, as in rustc's
+  `emit_specialized_closure_kind_error` (`hir-ty/src/solver_errors.rs`).
+- A name a pattern binds twice in one product context (`(a, a)`, `a @ b @ a`) is two
+  bindings and an error, and a later use means the last one; the alternatives of an
+  or-pattern bind the same one. This is rustc's resolver `fresh_binding` with its product
+  and or contexts (`hir-def/src/expr_store/lower.rs`, `BindingList`).
 
 With no borrow checker, the 246 units rustc accepts would pass. Now:
 
@@ -534,6 +549,11 @@ changes to rust-analyzer were needed, each made as rustc does it:
   on each operand as `if` does, so what its `let` binds is initialized where it holds. Its
   temporaries stay the arm's in every edition, as rustc keeps them (dropped when the arm ends
   or before the next arm is tried), where an `if let` before 2024 keeps them to its statement.
+  Where the guard fails, the storage of what the pattern bound ends before the next arm, or
+  the next way an or-pattern of the arm can match, is tried, as rustc leaves the arm's scope
+  there (`in_if_then_scope`). So each way binds a fresh variable, and assigning a binding
+  twice is E0384 like any other variable: in `Ok(a @ b @ a) | Err(a @ b @ a)` the alternatives
+  bind the same `a` and `Err(..)` assigns it twice.
 - Slice pattern indices carry the pattern's minimum length (`ConstantIndex::min_length`).
 - Promotion: a division by a constant other than 0 (and -1 for a signed dividend that may be
   the minimum), and `&mut []`.
@@ -699,6 +719,29 @@ Generating constraints is still most of it (nushell: 10.6 s of 18.2 s), and the 
 the trait solver proving one body's well-formedness and outlives bounds: nushell's
 `custom_value_op` (828 ms) and `serve_plugin_io` (356 ms). rustc's own `mir_borrowck` is 44%
 of its `typeck` on ripgrep, 31% on axum and 149% on just.
+
+With a trait reference proven by a query, as rustc's canonical `type_op_prove_predicate`: its
+region variables numbered in order, so a goal is proven once for all the bodies of one
+environment, and an edit proves again only the goals of what it changed. Same measure:
+
+| App | Inference | Polonius | max | NLL | max |
+|---|---|---|---|---|---|
+| ripgrep | 630 | 409 (65%) | 8 | 359 (57%) | 8 |
+| fd | 200 | 111 (56%) | 18 | 101 (51%) | 17 |
+| bat | 288 | 234 (81%) | 64 | 214 (74%) | 64 |
+| hyperfine | 223 | 125 (56%) | 15 | 113 (51%) | 14 |
+| just | 1069 | 715 (67%) | 21 | 659 (62%) | 19 |
+| axum | 3920 | 2595 (66%) | 52 | 2519 (64%) | 51 |
+| helix | 3178 | 1899 (60%) | 124 | 1709 (54%) | 118 |
+| nushell | 15539 | 11981 (77%) | 240 | 10953 (70%) | 224 |
+
+nushell's constraints went from 10.7 s to 4.4 s, `custom_value_op` from 811 ms to 3 ms and
+`serve_plugin_io` from 368 ms to 12 ms. A body's first check pays for the goals no body proved
+before it, each in a solver cache of its own: less in all on nushell (31.7 s to 28.9 s) and
+helix, more on axum (5.2 s to 6.7 s), whose 16-tuple impls each prove goals no other body
+does. The slowest bodies now are nushell's `theme_list::list` (240 ms, liveness over 48k
+points with no loans), `stream_parallel_values` (186 ms, constraints) and `run_http_server`
+(133 ms, moves).
 
 ## Debugging
 

@@ -220,7 +220,8 @@ impl Backend {
         let pairs = super::float_pair::lower(recorder, &mut context.func);
         let mut code = super::emit(context)?;
         if let Some(frame) = context.compiled_code().and_then(|it| it.buffer.frame_layout()) {
-            code.slots = SlotPlaces::of_frame(recorder.isa, frame, recorder.named_slots());
+            code.slots =
+                SlotPlaces::of_frame(recorder.isa, frame, &context.func, recorder.named_slots());
         }
         if let Some(pairs) = pairs {
             pairs.hold(context, &mut code)?;

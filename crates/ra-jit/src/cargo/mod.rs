@@ -11,6 +11,7 @@ pub(crate) mod cli;
 mod client;
 #[cfg(unix)]
 pub(crate) mod closure;
+pub(crate) mod compile_time;
 mod directives;
 pub(crate) mod fetches;
 pub(crate) mod layout;

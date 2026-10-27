@@ -488,10 +488,13 @@ impl<'db> Keeper<'_, 'db> {
                 let Some(name) = self.stable_name(callee) else {
                     return self.kept.unkept("unnamed callee");
                 };
-                // A function the program is built from has no entry: it is compiled anew.
+                // A function the program is built from has no entry: it is compiled anew. One
+                // that is never a root calls the copy it called, the store's (#242).
                 if stable::StableNames::of_checkout(&name)
                     && as_its_crate_compiles(db, self.symbols, callee)
                     && self.root_named(&name).is_some()
+                    && !matches!(callee.def, InstanceDef::Fn(func)
+                        if rustcs_callers_pass_scalable(db, self.symbols, func))
                 {
                     CachedTarget::Root(name.as_ref().to_owned())
                 } else {

@@ -830,8 +830,14 @@ fn wrapper_x86_64(
     }
     for piece in template {
         let (index, modifier) = match piece {
-            AsmPiece::Lit(lit) => {
+            // rustc hands LLVM each `$` as `$$`, which LLVM prints as `$` in AT&T syntax and as
+            // nothing in Intel's: Windows' `abort_internal` is `int $$0x29`, assembled `int 41`.
+            AsmPiece::Lit(lit) if att => {
                 text.push_str(lit);
+                continue;
+            }
+            AsmPiece::Lit(lit) => {
+                text.extend(lit.chars().filter(|&it| it != '$'));
                 continue;
             }
             AsmPiece::Operand { index, modifier } => (*index, *modifier),
@@ -1555,5 +1561,20 @@ mod tests {
         assert_eq!(extensions(Arch::Aarch64, ["v9a", "dit"]), ".arch armv9-a\n");
         assert_eq!(extensions(Arch::Aarch64, ["neon"]), ".arch_extension simd\n");
         assert_eq!(extensions(Arch::X86_64, ["dit"]), "");
+    }
+
+    /// What rustc 1.99's LLVM assembled of these: `int 41` and `mov eax, 5`, and in AT&T
+    /// syntax the template as it is written.
+    #[test]
+    fn a_dollar_is_nothing_in_intel_syntax() {
+        use super::{AsmOptions, AsmPiece, ObjectFormat, wrapper_x86_64};
+        let text = |template: &str, options| {
+            let template = [AsmPiece::Lit(template.into())];
+            wrapper_x86_64(ObjectFormat::Coff, &template, options, &[]).unwrap().text
+        };
+        let intel = text("int $$0x29\nmov eax, $$$$5", AsmOptions::NORETURN);
+        assert!(intel.contains("int 0x29\nmov eax, 5\n"), "{intel}");
+        let att = text("movl $$7, %eax", AsmOptions::NORETURN | AsmOptions::ATT_SYNTAX);
+        assert!(att.contains("movl $$7, %eax\n"), "{att}");
     }
 }

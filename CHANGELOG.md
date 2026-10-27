@@ -722,7 +722,6 @@ each one's section: what `[Unreleased]` had, and the title of each change merged
   them from there (#90). `RA_JIT_PROC_MACRO_SERVER=0` goes back to rustc's libraries and the
   toolchain's server. `macroserver.py all` builds each app again over the first store: no
   library linked again, the same 3,465 calls.
-||||||| 0858e8535d
 - The first `cargo blaze build` of a workspace is blaze's, not cargo's: once cargo's build
   succeeds it waits for the daemon to load the workspace ("Waiting for blaze to load the
   workspace") and build the programs, where it handed back cargo's and the next build was the
@@ -1041,6 +1040,20 @@ each one's section: what `[Unreleased]` had, and the title of each change merged
   before it answers, as the loaded checkout's is, so a patch its executable does not take is
   built in full; linked after, it failed the build (`ra_jit::static::21 is not in the
   executable`) and split the worktree off (`harness/cargo_ra_jit.py`, daemon group).
+- A daemon that patches what rustc linked no longer stops at the first build that reaches a
+  thread-local, or a static written at run time, of a crate edited before any build reached
+  it (``static `__RUST_STD_INTERNAL_VAL` of crate `smid` with state, whose first value is not
+  the one rustc built it with``, `harness/programs.py` on every platform since #527). The first
+  values of a crate's statics with state are noted just before the first edit reaches it, so
+  rustc's copy is still known to start from them, and a change to a file an `include_str!` or
+  `include_bytes!` reads leaves the first values of crates that do not include it known (it
+  had made `alloc`'s `STATIC_INNER_SLICE` unknown after a checkout switch,
+  `worktrees.py --join --together` on macOS).
+- A build that code generation refuses (a static whose first value is not known to be rustc's,
+  a function rustc's copy of is from before the edit) is that build's refusal, with the reason,
+  not the daemon's end: every checkout's daemon had died with it
+  (`worktrees.py --join --together`, "another edited while it is broken"). Nothing is built in
+  its place, and the next build of that program is a whole one.
 - A spliced edit no longer runs a closure's old code (#582). A closure is named by its place
   among the closures of its body, so after an edit that moves the call of a generic function
   such as `caught(|| ...)` from one closure into the body, the patch called the base's
