@@ -1016,6 +1016,14 @@ each one's section: what `[Unreleased]` had, and the title of each change merged
 
 ### Fixed
 
+- A spliced edit no longer runs a closure's old code (#582). A closure is named by its place
+  among the closures of its body, so after an edit that moves the call of a generic function
+  such as `caught(|| ...)` from one closure into the body, the patch called the base's
+  unchanged copy of `caught::<{closure#N}>`, and through it the base's code of the closure
+  there before: nothing the patch compiled had reached that closure's new code. A patch now
+  compiles what such an unchanged copy reaches that the edit changed, and refuses when that is
+  code which gained or lost a body of its own (`harness/fuzz/found/edits/closure-called-again.rs`;
+  `fuzz/edits.py` seed `push1`, round 27, had 7 wrong checksums and has none).
 - The daemon's own link passes the linker what `-C link-arg` and `-C link-args` say in
   `RUSTFLAGS`, `CARGO_ENCODED_RUSTFLAGS` or the configuration's `rustflags`, after the native
   libraries as rustc does; it left them out. A program linked with
