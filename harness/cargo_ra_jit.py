@@ -222,6 +222,19 @@ def alive(pid):
     return f'"{pid}"' in listed.stdout
 
 
+def another_build(other):
+    """Another build of ra-jit in `other`: the same files in another place have another
+    version. It has what a release ships beside ra-jit, as `RA_JIT`'s directory does (the Pack
+    step of ra-jit-platform.yaml): a load of a workspace with a proc macro fails without the
+    proc-macro server (`own_macro::find`)."""
+    os.makedirs(other, exist_ok=True)
+    shipped = [it + EXE for it in ("ra-jit", "cargo-ra-jit", "cargo-blaze", "blaze", "ra-jit-rustc", "ra-jit-rustc-first", "blaze-proc-macro-srv")]
+    for name in shipped:
+        if os.path.exists(os.path.join(os.path.dirname(RA_JIT), name)):
+            shutil.copy(os.path.join(os.path.dirname(RA_JIT), name), os.path.join(other, name))
+    return other
+
+
 def timed(argv, cwd, env, timeout=7200):
     began = time.time()
     ran = subprocess.run(argv, cwd=cwd, env=env, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=timeout, stdin=subprocess.DEVNULL)
@@ -777,10 +790,7 @@ def daemon(work):
     _, after_kill = here.cargo("run")
     check("the daemon outlives a client that is killed", status()[0] == pid and after_kill.returncode == 0 and "hello world" in after_kill.stdout, how_built(after_kill.stderr))
 
-    other = os.path.join(work, "other-build")
-    os.makedirs(other, exist_ok=True)
-    for name in ("ra-jit" + EXE, "cargo-ra-jit" + EXE, "ra-jit-rustc" + EXE):
-        shutil.copy(os.path.join(os.path.dirname(RA_JIT), name), os.path.join(other, name))
+    other = another_build(os.path.join(work, "other-build"))
     newer = Side(ws, dict(env, PATH=other + os.pathsep + env["PATH"]), True)
     edit(ws, "five")
     _, by_newer = newer.cargo("run")
@@ -1651,11 +1661,7 @@ def plain(work):
     mine, how, wrong = same("run", "after")
     check("the build after that is a new daemon's", mine.returncode == 0 and not wrong and how == "daemon" and status()[0] not in (None, pid), how[:90])
 
-    # Another build of ra-jit: the same files in another place have another version.
-    other = os.path.join(work, "plain-other-build")
-    os.makedirs(other)
-    for name in ("ra-jit", "cargo-ra-jit", "ra-jit-rustc"):
-        shutil.copy(os.path.join(os.path.dirname(RA_JIT), name), os.path.join(other, name))
+    other = another_build(os.path.join(work, "plain-other-build"))
     pid = status()[0]
     subprocess.run([RA_JIT, "disable"], env=env, capture_output=True)
     subprocess.run([os.path.join(other, "ra-jit"), "enable"], env=env, capture_output=True)
