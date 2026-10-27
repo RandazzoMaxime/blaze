@@ -73,7 +73,8 @@ pub(crate) struct Spec {
 
 impl Spec {
     pub(crate) fn parse(spec: &str) -> anyhow::Result<Spec> {
-        let plain = spec.strip_prefix("blaze+").context("a gateway's address starts with blaze+")?;
+        let plain =
+            spec.strip_prefix("blaze+").context("a gateway's address starts with blaze+")?;
         let url = Url::parse(plain).context("the address of the gateway is not a URL")?;
         if !matches!(url.scheme(), "https" | "http") {
             bail!("a gateway is reached over blaze+https:// or blaze+http://, not `{spec}`");
@@ -154,7 +155,9 @@ impl Ask {
 
     fn sha256_if_packed(self, digest: impl FnOnce() -> Digest) -> Ask {
         match self.name.ends_with(".pack.zst") {
-            true => self.header(header::HeaderName::from_static("x-blaze-sha256"), digest().to_string()),
+            true => {
+                self.header(header::HeaderName::from_static("x-blaze-sha256"), digest().to_string())
+            }
             false => self,
         }
     }
@@ -229,8 +232,13 @@ pub(crate) fn judge(
         StatusCode::RANGE_NOT_SATISFIABLE => Judged::PastTheEnd,
         StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN => {
             let token = match had_token {
-                true => format!("the token in {} is not one the gateway takes for it", spec.token_var),
-                false => format!("{} is not set, and the tenant is not read without a token", spec.token_var),
+                true => {
+                    format!("the token in {} is not one the gateway takes for it", spec.token_var)
+                }
+                false => format!(
+                    "{} is not set, and the tenant is not read without a token",
+                    spec.token_var
+                ),
             };
             Judged::Refused(format!("the gateway refused {what} ({status}{because}): {token}"))
         }
@@ -239,7 +247,9 @@ pub(crate) fn judge(
             let after = after.and_then(|it| it.trim().parse::<u64>().ok()).unwrap_or(1);
             Judged::Wait(Duration::from_secs(after).min(LONGEST_WAIT))
         }
-        it if it.is_server_error() => Judged::Failed(format!("the gateway failed {what}: {it}{because}")),
+        it if it.is_server_error() => {
+            Judged::Failed(format!("the gateway failed {what}: {it}{because}"))
+        }
         it => Judged::Refused(format!("the gateway refused {what}: {it}{because}")),
     }
 }
@@ -423,7 +433,8 @@ impl Gateway {
             return Ok(None);
         }
         let number = |name| {
-            let value = answer.headers.get(name).and_then(|it: &header::HeaderValue| it.to_str().ok());
+            let value =
+                answer.headers.get(name).and_then(|it: &header::HeaderValue| it.to_str().ok());
             value.and_then(|it| it.trim().parse::<u64>().ok())
         };
         let len = number(header::CONTENT_LENGTH).unwrap_or(0);

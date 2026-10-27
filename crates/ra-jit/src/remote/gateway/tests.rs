@@ -80,7 +80,9 @@ fn kind(name: &str) -> Option<Kind> {
     match dir {
         "packs" => match rest.strip_suffix(".pack.zst") {
             Some(hash) if is_hex(hash) => Some(Kind::Packed),
-            _ => rest.strip_suffix(".pack").filter(|it| is_hex(it)).map(|it| Kind::Hashed(it.into())),
+            _ => {
+                rest.strip_suffix(".pack").filter(|it| is_hex(it)).map(|it| Kind::Hashed(it.into()))
+            }
         },
         "keys" | "units" => is_hex(rest).then(|| Kind::Hashed(rest.into())),
         "manifests" | "deps" => {
@@ -146,11 +148,10 @@ async fn answer(state: &Mutex<State>, request: Request<Incoming>) -> Response<Fu
     else {
         return not_found();
     };
-    let query: HashMap<String, String> = url::form_urlencoded::parse(
-        parts.uri.query().unwrap_or_default().as_bytes(),
-    )
-    .into_owned()
-    .collect();
+    let query: HashMap<String, String> =
+        url::form_urlencoded::parse(parts.uri.query().unwrap_or_default().as_bytes())
+            .into_owned()
+            .collect();
     let public = state.tenants.get(&tenant).copied();
     let theirs = caller.as_ref().is_some_and(|it| it.0 == tenant);
     let method = parts.method.clone();
@@ -575,9 +576,16 @@ fn a_pack_the_gateway_changed_is_rejected_and_not_kept() {
             std::fs::create_dir_all(&dir).unwrap();
             std::fs::write(&file, &pack).unwrap();
             writer.send_file(&pack_object(&named), &file, len as u64).await.unwrap();
-            writer.send_named_by_hash(&keys_object(&Digest::of(&keys)), keys.clone()).await.unwrap();
-            let listed =
-                Listed { size: len as u64, keys: Digest::of(&keys), format: STORE_FORMAT, packed: None };
+            writer
+                .send_named_by_hash(&keys_object(&Digest::of(&keys)), keys.clone())
+                .await
+                .unwrap();
+            let listed = Listed {
+                size: len as u64,
+                keys: Digest::of(&keys),
+                format: STORE_FORMAT,
+                packed: None,
+            };
             let line = Manifest([(named, listed)].into()).lines();
             writer.extend_list("manifests/default", |_| line.clone()).await.unwrap();
             fake.with(|it| {

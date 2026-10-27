@@ -51,8 +51,8 @@ use rustc_hash::FxHashMap;
 use tokio::{io::AsyncSeekExt, runtime::Runtime};
 use url::Url;
 
-pub(crate) use https::{Https, next as https_next};
 use gateway::Gateway;
+pub(crate) use https::{Https, next as https_next};
 use s3::{S3, Written};
 use signed::{NotRewritten, Trust, Turns, Unremembered};
 use transfer::{Body, Object, TooLong, Version};
@@ -318,7 +318,8 @@ impl Remote {
         self.may_write()?;
         let _permit = self.traffic.permit().await?;
         let bytes = Arc::new(bytes);
-        let written = self.patiently(|| self.write_small_once(name, bytes.clone(), read_at)).await?;
+        let written =
+            self.patiently(|| self.write_small_once(name, bytes.clone(), read_at)).await?;
         if let Written::Done = written {
             self.traffic.moved.fetch_add(1, Ordering::Relaxed);
         }
@@ -1437,7 +1438,8 @@ impl Remote {
         trust: Trust,
     ) -> Remote {
         let (traffic, patience) = (Arc::new(Traffic::new(8)), Duration::from_secs(5));
-        let gateway = Gateway::with_token(spec, token.map(str::to_owned), patience, traffic.clone());
+        let gateway =
+            Gateway::with_token(spec, token.map(str::to_owned), patience, traffic.clone());
         let place = Place::Gateway(Box::new(gateway.unwrap()));
         Remote::in_place(place, traffic, kept_in, trust, OBJECT_MAX)
     }
