@@ -277,7 +277,9 @@ All of these are rustc's, written from `compiler/rustc_borrowck` at the pinned n
   "one type is more general than the other". So a closure parameter `x: fn(&u32)` whose
   expected type is `fn(&'1 u32)` needs `'1: 'static`. A function item cast to a `for<'a> fn`
   keeps its own `for<'a>`, as rustc's reify, rather than its late-bound lifetimes as variables,
-  and a closure cast to one is its signature's `fn` pointer, related the same way. A projection
+  and a closure cast to one is its signature's `fn` pointer, related the same way. The item's
+  elided `&mut dyn Trait` is `&'a mut (dyn Trait + 'a)` there, rustc's object lifetime default,
+  so `fn f(_: &mut dyn Trait)` is a `fn(&mut dyn Trait)` (ruff's `record: T::record`). A projection
   rust-analyzer normalized under a `for<'a>` stays as written in a `let`'s type: rustc
   normalizes it for the placeholder, so `let _: for<'a> fn(<&'a () as Trait>::Ty) = |_| {}`
   with only `impl Trait for &'static ()` needs the placeholder to be `'static`, rustc's
