@@ -293,8 +293,14 @@ in the same sandbox, below.
 Every build script blaze's cargo runs, the workspace's and its dependencies', whoever compiled
 it (ra-jit or rustc), and the daemon's own reruns of one, runs in the sandbox tests run in
 ([#147](https://github.com/indexable-inc/blaze/issues/147)): `cargo/script_sandbox.rs` is the
-one place a script is run. A script's environment is the whole of what cargo gave it (`PATH`,
-`CC`, `TARGET`, the jobserver's descriptors and the rest); the machine is read-only; it writes
+one place a script is run. A script is given, of what cargo gave it, what cargo sets for
+scripts (`CARGO_*`, `DEP_*`, `OUT_DIR`, `TARGET`, `PROFILE`, ...), the C compiler's and
+pkg-config's variables (`CC`, `CFLAGS_<target>`, `PKG_CONFIG_PATH`, `NIX_CFLAGS_COMPILE`,
+`CPATH`, `SOURCE_DATE_EPOCH`, ...), `PATH`, `HOME`, `LANG` and the rest tests are given, and
+what the root manifest's `build-script-env` names; what else the shell had is not there. A
+script that says it reads one it was not given (`cargo:rerun-if-env-changed=OPENSSL_DIR`)
+while it is set where cargo ran fails, naming it and `build-script-env`, rather than build as
+if it were unset. The machine is read-only; it writes
 its `OUT_DIR` for real, which is the one directory the Cargo book lets a script write ("Scripts
 should not modify any files outside of that directory"); the temporary directories start empty;
 there is no network but the sandbox's own loopback. Its package's directory, the workspace and
@@ -315,6 +321,7 @@ registry can be named in:
 [workspace.metadata.blaze.sandbox]
 unsandboxed-build-scripts = ["hegeltest", "flecs_ecs_sys"]   # by package name
 unsandboxed-proc-macros = ["sqlx-macros"]                    # by package name
+build-script-env = ["OPENSSL_DIR", "LIBGIT2_NO_VENDOR"]       # given to every build script
 ```
 
 and, for a package of the workspace, in its own manifest:
@@ -345,15 +352,39 @@ Unconfined`), which keeps the sandbox, or set `BLAZE_SANDBOX=off`, which runs bu
 proc macros and tests outside it, as cargo does. blaze does not make a weaker sandbox there on
 its own.
 
-What a script read is recorded, and decides one thing only. Cargo runs a script again when a
-file of its `rerun-if-changed` changed, when a variable of `rerun-if-env-changed` did, and,
-when it named neither, when any file of its package did. In that last case a run whose record
-is whole (macOS records nothing of a program it protects, such as `/bin/sh` or `/usr/bin/cc`,
-and the record then says it is not whole) and whose every read path is as it was stands for a
-run now: the store keeps it with what it read, and cargo's rerun is answered from the store
-without running it; the daemon's check of the script (`ra-jit-reads` beside its `OUT_DIR`)
-needs no run either. A script that named what it reads runs again exactly when cargo says, and
-one whose record is not whole whenever cargo would run it.
+Compiling a build script, running it and building a proc macro are each an entry of the
+store, so they travel with `ra-jit cache push` and `pull` and through the gateway like any
+compiled function ([remote-cache.md](remote-cache.md)). Each is kept under two keys
+(`cargo/keyed.rs`): the first of what it is declared to be made of, and a second of what it
+was seen reading and what each of those has, so `rerun-if-*` is a hint and the record is what
+counts. A first key holds up to 16 sets of reads.
+
+- A build ra-jit makes of a script or a proc macro (`own_script.rs`) is first keyed by the
+  rust-project description of it and its dependencies (sources' crates, cfgs, features,
+  edition, target) and the toolchain (its channel manifest and the names in its `lib`); then
+  by every file the build read (modules, `include!`, `include_str!`), each variable `env!`
+  read, its dependencies' proc-macro libraries and the files their dep-info names. Beside the
+  executable, `<exe>.made-of` says which build it is.
+- A run (`script.rs`) is first keyed by that build (or the executable's bytes, for one rustc
+  linked), the toolchain of its `RUSTC`, its arguments and what it was given, with the
+  checkout's and the target directory's paths taken out, so another checkout or machine finds
+  it; then by every file the sandbox saw it read and every file of its `rerun-if-changed`,
+  but those of the toolchain, ra-jit and its own build. A directory outside its package
+  counts as being one, not by its names (git and the loader walk through those). What is
+  kept is what it printed and what it left in `OUT_DIR`.
+
+A run whose record is not whole (macOS records nothing of a program it protects, such as
+`/bin/sh` or `/usr/bin/cc`) is not kept, and runs whenever cargo would run it. A run outside
+the sandbox (`unsandboxed-build-scripts`, `RA_JIT_SANDBOX=off`) is never kept, so it is never
+pushed either. The daemon's check of a script (`ra-jit-reads` beside its `OUT_DIR`) needs no
+run when what it read is as it was.
+
+`RA_JIT_BSCACHE=check` builds and runs everything the store has anyway and compares: a run
+that printed or wrote something else, or a build that read files the store's build of it did
+not, fails the build. Two builds of one script by ra-jit are not the same bytes (the order of
+functions in the executable is not), so a build is compared by what it read, not by bytes.
+With `RA_JIT_STATS` each hit says so (`ra-jit: a run the store kept`, `ra-jit: a build the
+store kept: ...`), where cargo shows what a script printed.
 
 Every proc-macro server a load starts, the toolchain's and ra-jit's own, runs in the sandbox
 too, writing nothing: no `OUT_DIR`, only the empty temporary directories. A server is started

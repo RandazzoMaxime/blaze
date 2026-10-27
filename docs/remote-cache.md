@@ -217,6 +217,14 @@ linked into one program. So the version is checked, not trusted.
   pull request's. The seed is a hash of the key, so a rerun sees the same randomness.
 - **Proc-macro expansions and build-script runs**, as cache.md keys them, under `EXPAND` and
   `SCRIPT`.
+- **Build scripts and proc macros, built and run.** Two steps too, as tests are: a first key
+  of what the build or run is declared to be made of (its rust-project description and the
+  toolchain; for a run, the build of its script, its arguments and the environment it was
+  given, without the checkout's paths), whose slots hold the sets of files it was seen
+  reading, and a second key of those files' digests, which holds the executable or library,
+  or what the run printed and left in `OUT_DIR` ([cargo.md](cargo.md#build-scripts-and-proc-macros-run-in-a-sandbox)).
+  They are ordinary store entries, so push, pull and the gateway carry them unchanged. A run
+  outside the sandbox is never kept, so never pushed.
 
 ## The gateway
 

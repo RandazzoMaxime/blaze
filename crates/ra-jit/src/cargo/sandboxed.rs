@@ -49,7 +49,7 @@ const INPUTS: &str = "tests-inputs";
 /// The variables of the environment a test keeps under `RA_JIT_TESTS=affected` besides those
 /// cargo and ra-jit set for it: what finds programs and the toolchain, who and where the user
 /// is, the locale, and what decides how a failure is shown.
-const KEPT: &[&str] = &[
+pub(crate) const KEPT: &[&str] = &[
     "PATH",
     "HOME",
     "USER",
@@ -148,6 +148,9 @@ pub(crate) struct WorkspaceOptOut {
     /// `unsandboxed-proc-macros`: the packages, by name, whose proc macros are expanded by a
     /// server outside.
     pub(crate) proc_macros: BTreeSet<String>,
+    /// `build-script-env`: variables of the environment given to every build script in the
+    /// sandbox besides those it is always given (`script_sandbox.rs`).
+    pub(crate) build_script_env: BTreeSet<String>,
 }
 
 impl WorkspaceOptOut {
@@ -177,18 +180,18 @@ pub(crate) fn workspace_opt_out(root: &Path) -> anyhow::Result<WorkspaceOptOut> 
         let into = match key.as_str() {
             "unsandboxed-build-scripts" => &mut out.build_scripts,
             "unsandboxed-proc-macros" => &mut out.proc_macros,
+            "build-script-env" => &mut out.build_script_env,
             other => {
                 return Err(wrong(&format!(
-                    "`{other}` is not known (`unsandboxed-build-scripts` and \
-                     `unsandboxed-proc-macros` are)"
+                    "`{other}` is not known (`unsandboxed-build-scripts`, \
+                     `unsandboxed-proc-macros` and `build-script-env` are)"
                 )));
             }
         };
         let names = value.as_array().ok_or_else(|| wrong(&format!("`{key}` is a list")))?;
         for name in names {
-            let name = name
-                .as_str()
-                .ok_or_else(|| wrong(&format!("`{key}` lists packages by their names")))?;
+            let name =
+                name.as_str().ok_or_else(|| wrong(&format!("`{key}` lists names, as strings")))?;
             into.insert(name.to_owned());
         }
     }
