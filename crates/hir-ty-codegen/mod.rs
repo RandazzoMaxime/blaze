@@ -6841,8 +6841,13 @@ impl<'a, 'db> ObjectCodegen<'a, 'db> {
             return Ok(data);
         }
         if let Some(symbol) = static_link_name(db, id).or_else(theirs) {
-            let data =
-                self.declare_named_data(&symbol, Linkage::Import, false, is_thread_local(db, id), false)?;
+            let data = self.declare_named_data(
+                &symbol,
+                Linkage::Import,
+                false,
+                is_thread_local(db, id),
+                false,
+            )?;
             self.imported_statics.insert(id, data);
             if stateful_linked {
                 self.shared_statics.insert(id, data);
@@ -6858,8 +6863,13 @@ impl<'a, 'db> ObjectCodegen<'a, 'db> {
         }
         if let Some(symbol) = self.linked_static(id)? {
             let thread_local = is_thread_local(db, id);
-            let data =
-                self.declare_named_data(symbol.as_str(), Linkage::Import, false, thread_local, false)?;
+            let data = self.declare_named_data(
+                symbol.as_str(),
+                Linkage::Import,
+                false,
+                thread_local,
+                false,
+            )?;
             self.imported_statics.insert(id, data);
             return Ok(data);
         }
@@ -6897,7 +6907,13 @@ impl<'a, 'db> ObjectCodegen<'a, 'db> {
         let own = (!self.patching).then(|| self.symbols.own_static(id)).flatten();
         let exported = exported_static(db, id).filter(|_| !self.patching);
         let data = if let Some(known) = again {
-            self.declare_named_data(&known.symbol, Linkage::Hidden, compiled.writable, false, false)?
+            self.declare_named_data(
+                &known.symbol,
+                Linkage::Hidden,
+                compiled.writable,
+                false,
+                false,
+            )?
         } else if let Some(name) = (self.base.is_some() && !thread_local && exported.is_none())
             .then(|| self.lasting_static_name(id, &compiled.blob.bytes, compiled.writable))
             .flatten()
