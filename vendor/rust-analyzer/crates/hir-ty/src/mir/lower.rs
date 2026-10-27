@@ -236,7 +236,6 @@ pub enum MirLowerError<'db> {
     RecordLiteralWithoutPath,
     UnresolvedMethod(String),
     UnresolvedField,
-    UnsizedTemporary(StoredTy),
     MissingFunctionDefinition(InferBodyId<'db>, ExprId),
     HasErrors,
     /// This should never happen. Type mismatch should catch everything.
@@ -412,10 +411,10 @@ impl<'a, 'db> MirLowerCtx<'a, 'db> {
         self.infcx.interner.lang_items()
     }
 
+    /// A temporary of type `ty`. It may be unsized, as rustc's `as_temp` makes one of a value
+    /// that is moved out of an unsized place (`*s;`, `[a[..]]`): borrow checking reports the
+    /// move (E0507, E0508), and nothing that compiles has one.
     fn temp(&mut self, ty: Ty<'db>, current: BasicBlockId, span: MirSpan) -> Result<'db, LocalId> {
-        if matches!(ty.kind(), TyKind::Slice(_) | TyKind::Dynamic(..)) {
-            return Err(MirLowerError::UnsizedTemporary(ty.store()));
-        }
         let l = self.result.locals.alloc(Local { ty: ty.store() });
         self.push_storage_live_for_local(l, current, span)?;
         Ok(l)
@@ -2560,7 +2559,7 @@ impl<'a, 'db> MirLowerCtx<'a, 'db> {
         let declared = self.declared_locals();
         let Some(args) = args
             .map(|arg| {
-                if let Some((temp, c)) = self.lower_expr_to_some_operand(arg, current)? {
+                if let Some((temp, c)) = self.lower_call_operand(arg, current)? {
                     current = c;
                     // What unwinds from the next argument drops this one first.
                     self.declare_operands_last(call, declared, std::iter::once(&temp));
@@ -2591,6 +2590,61 @@ impl<'a, 'db> MirLowerCtx<'a, 'db> {
             self.end_arguments(declared, &temps, after, call.into());
         }
         Ok(after)
+    }
+
+    /// An argument of a call, as rustc's `as_call_operand`. An unsized one (`unsized_fn_params`)
+    /// has no temporary: the call takes it where it is, out of the box a builtin deref of it
+    /// reads, which is moved into a temporary first, or else out of the place it is.
+    fn lower_call_operand(
+        &mut self,
+        arg: ExprId,
+        current: BasicBlockId,
+    ) -> Result<'db, Option<(Operand, BasicBlockId)>> {
+        let ty = self.expr_ty_after_adjustments(arg);
+        if self.infcx.type_is_sized_modulo_regions(self.env, ty) {
+            return self.lower_expr_to_some_operand(arg, current);
+        }
+        let adjustments = self.infer.expr_adjustments.get(&arg).map_or(&[][..], |it| &it[..]);
+        let boxed = match adjustments.split_last() {
+            Some((Adjustment { kind: Adjust::Deref(None), .. }, rest)) => {
+                self.lower_expr_to_some_place_with_adjust(arg, current, rest)?
+            }
+            None => match &self.store[arg] {
+                &Expr::UnaryOp { expr, op: hir_def::hir::UnaryOp::Deref }
+                    if match self.expr_ty_without_adjust(expr).kind() {
+                        TyKind::Ref(..) | TyKind::RawPtr(..) => true,
+                        TyKind::Adt(id, _) => id.is_box(),
+                        _ => false,
+                    } =>
+                {
+                    self.lower_expr_to_fresh_place(expr, current)?
+                }
+                _ => return self.lower_unsized_place_operand(arg, current),
+            },
+            Some(_) => return self.lower_unsized_place_operand(arg, current),
+        };
+        let Some((temp, current)) = boxed else {
+            return Ok(None);
+        };
+        let place = temp.project(ProjectionElem::Deref);
+        Ok(Some((
+            Operand { kind: OperandKind::Copy(place.store()), span: Some(arg.into()) },
+            current,
+        )))
+    }
+
+    fn lower_unsized_place_operand(
+        &mut self,
+        arg: ExprId,
+        current: BasicBlockId,
+    ) -> Result<'db, Option<(Operand, BasicBlockId)>> {
+        let Some((place, current)) = self.lower_expr_as_place(current, arg, true)? else {
+            return Ok(None);
+        };
+        Ok(Some((
+            Operand { kind: OperandKind::Copy(place.store()), span: Some(arg.into()) },
+            current,
+        )))
     }
 
     /// Ends the storage of the temporaries a call that returned took as arguments, as rustc
@@ -3525,18 +3579,10 @@ impl<'a, 'db> MirLowerCtx<'a, 'db> {
                 }
                 &hir_def::hir::Statement::Expr { expr, has_semi: _ } => {
                     let scope2 = self.push_drop_scope();
-                    // A place used as a statement (`*x;`) is moved out of, and the value
-                    // dropped at the end of the statement.
-                    let unsized_place = matches!(
-                        self.expr_ty_after_adjustments(expr).kind(),
-                        TyKind::Slice(_) | TyKind::Str | TyKind::Dynamic(..)
-                    );
-                    let lowered = if unsized_place {
-                        self.lower_expr_as_place(current, expr, true)?
-                    } else {
-                        self.lower_expr_to_fresh_place(expr, current)?
-                    };
-                    let Some((p, c)) = lowered else {
+                    // A place used as a statement (`*x;`, `S[0];`) is moved out of into a
+                    // temporary, as rustc's `stmt_expr` does with `as_temp`, sized or not, and
+                    // the value dropped at the end of the statement.
+                    let Some((p, c)) = self.lower_expr_to_fresh_place(expr, current)? else {
                         scope2.pop_assume_dropped(self);
                         scope.pop_assume_dropped(self);
                         return Ok(None);

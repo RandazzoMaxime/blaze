@@ -101,6 +101,7 @@ pub use backend::{Backend, builds_edits, links_own, sections_of_their_own};
 mod cached;
 mod debuginfo;
 pub use debuginfo::Sidecar;
+mod f16_f128;
 mod float_pair;
 mod fncache;
 pub use fncache::{AlwaysRun, Reach, tests_reach};
@@ -192,6 +193,9 @@ macro_rules! unsupported {
         return Err(CodegenError::Unsupported(format!($($arg)*)))
     };
 }
+
+// After `unsupported!`, which it uses.
+mod sve;
 
 /// Stops the build with an error ([`CodegenError::Refused`]).
 macro_rules! refused {
@@ -507,6 +511,11 @@ enum PassMode {
         skipped: u8,
     },
     Indirect,
+    /// An unsized value (`unsized_fn_params`): rustc's `PassMode::Indirect` with
+    /// `meta_attrs`, the address of the value and then its metadata (length or vtable), the
+    /// value staying where the caller has it. In the codegen the place of such a value is a
+    /// pair of those two words in memory, as an unsized local's slot is.
+    IndirectUnsized,
     /// A vector of AArch64's shorter than 64 bits, whose lanes LLVM widens to make a 64-bit
     /// vector of the same count (`<4 x i8>` as `<4 x i16>`): in the low 64 bits of a vector
     /// register, each lane of `lane` at the bottom of `stride` bytes, the bits above it
@@ -880,10 +889,11 @@ impl CodegenUnit {
         if (roots.start.is_some() || roots.whole) && !backend::edits_follow() {
             backend::set_whole_program();
         }
+        let root_crates: FxHashSet<Crate> = all().map(|root| root.krate(db)).collect();
         let mut own_statics = OwnStatics::new(
             db,
             symbols,
-            all().map(|root| root.krate(db)).collect(),
+            root_crates.iter().copied().collect(),
             std::mem::take(theirs),
             std::mem::take(unknown),
             !roots.on_demand.is_empty(),
@@ -933,6 +943,7 @@ impl CodegenUnit {
             {
                 cg.define_allocator_shim(first.krate(db))?;
             }
+            cg.define_rustc_allocator_entries(&root_crates)?;
             for &id in roots.kept {
                 cg.static_data(id)?;
             }
@@ -3130,7 +3141,7 @@ impl VariadicRegisters {
                     self.floats += 1;
                     continue;
                 }
-                ty if ty.is_int() || ty.is_float() && ty.bytes() <= 8 => 8,
+                ty if ty.is_int() || ty == types::F32 || ty == types::F64 => 8,
                 ty => unsupported!("a variadic function with a named {ty}"),
             };
             self.stack = self.stack.next_multiple_of(on_stack) + on_stack;
@@ -4469,16 +4480,35 @@ fn place_stand_ins(
 /// is asked for the name rather than for the attributes of all its functions.
 #[salsa::tracked(returns(copy))]
 fn declares_global_allocator(db: &dyn HirDatabase, krate: Crate) -> bool {
-    const EXPORTED: &str = "__ra_jit_global_alloc";
+    global_allocator_export(db, krate, "__ra_jit_global_alloc").is_some()
+}
+
+/// The entries of the global allocator that `alloc` calls by name, with the function the
+/// `#[global_allocator]`'s expansion exports for each: what rustc's shim calls, and what ours
+/// goes to instead. The number of pointer-sized arguments, and whether one is returned.
+const ALLOCATOR_ENTRIES: [(&str, &str, usize, bool); 4] = [
+    ("__rust_alloc", "__ra_jit_global_alloc", 2, true),
+    ("__rust_dealloc", "__ra_jit_global_dealloc", 3, false),
+    ("__rust_realloc", "__ra_jit_global_realloc", 4, true),
+    ("__rust_alloc_zeroed", "__ra_jit_global_alloc_zeroed", 2, true),
+];
+
+/// The function of `krate` the `#[global_allocator]`'s expansion exports as `exported`.
+fn global_allocator_export(
+    db: &dyn HirDatabase,
+    krate: Crate,
+    exported: &str,
+) -> Option<FunctionId> {
     let def_map = hir_def::nameres::crate_def_map(db, krate);
-    let name = hir_expand::name::Name::new_root(EXPORTED);
-    def_map.modules(db).any(|(module_id, module)| {
+    let name = hir_expand::name::Name::new_root(exported);
+    def_map.modules(db).find_map(|(module_id, module)| {
         let Some(hir_def::ModuleDefId::FunctionId(id)) = module.scope(db).get(&name).take_values()
         else {
-            return false;
+            return None;
         };
-        id.lookup(db).container == ItemContainerId::ModuleId(module_id)
-            && AttrFlags::export_name(db, id.into()).is_some_and(|it| it.as_str() == EXPORTED)
+        let exports =
+            AttrFlags::export_name(db, id.into()).is_some_and(|it| it.as_str() == exported);
+        (id.lookup(db).container == ItemContainerId::ModuleId(module_id) && exports).then_some(id)
     })
 }
 
@@ -5054,7 +5084,10 @@ impl<'a, 'db> ObjectCodegen<'a, 'db> {
         let sections = backend::sections_of_their_own()
             && isa.triple().binary_format == target_lexicon::BinaryFormat::Elf;
         let mut builder = ObjectBuilder::new(isa, "ra-jit", default_libcall_names())?;
-        builder.per_function_section(sections).per_data_object_section(sections);
+        // A wasm object is written from this one, a segment per piece of data aligned as its
+        // section is: a section shared by several has the largest alignment of them.
+        let data_sections = sections || Target::current().writes_wasm_objects();
+        builder.per_function_section(sections).per_data_object_section(data_sections);
         let mut module = ObjectModule::new(builder);
         let unwind = UnwindContext::new(&mut module).map_err(CodegenError::Backend)?;
         let built = start.elapsed();
@@ -5356,6 +5389,19 @@ impl<'a, 'db> ObjectCodegen<'a, 'db> {
             let private = self.on_demand_crates.is_empty() && self.symbols.private(func);
             return Err(if private { CodegenError::Private } else { CodegenError::NoSymbol });
         };
+        // rustc's callers of the symbol pass scalable vectors in SVE registers, ra-jit's by
+        // reference: only where nothing of rustc's is linked are all the callers ra-jit's.
+        if !self.symbols.nothing_of_rustc() {
+            let env = ParamEnvAndCrate {
+                param_env: hir_ty::next_solver::ParamEnv::empty(),
+                krate: func.krate(db),
+            };
+            if sve::passes_scalable(db, func, None, &env.store()) {
+                unsupported!(
+                    "`{symbol}`, which rustc's callers pass scalable vectors in SVE registers"
+                );
+            }
+        }
         let start = stdx::time::Instant::now();
         let tiers = self.tiers;
         let tiered = tiers.and_then(|it| it.code(db, &tier::Node(tier::Kind::Root(func))));
@@ -5524,52 +5570,99 @@ impl<'a, 'db> ObjectCodegen<'a, 'db> {
             return Ok(());
         }
         let declared = program.into_iter().any(|it| declares_global_allocator(db, it));
-        let to = |default, declared_one| if declared { declared_one } else { default };
-        let entries = [
-            ("__rust_alloc", to("__rdl_alloc", "__ra_jit_global_alloc"), 2, true),
-            ("__rust_dealloc", to("__rdl_dealloc", "__ra_jit_global_dealloc"), 3, false),
-            ("__rust_realloc", to("__rdl_realloc", "__ra_jit_global_realloc"), 4, true),
-            (
-                "__rust_alloc_zeroed",
-                to("__rdl_alloc_zeroed", "__ra_jit_global_alloc_zeroed"),
-                2,
-                true,
-            ),
-            ("__rust_alloc_error_handler", "__rdl_alloc_error_handler", 2, false),
-            ("__rust_no_alloc_shim_is_unstable_v2", "", 0, false),
-        ];
-        for (name, default, params, returns) in entries {
-            let mut sig = self.module.make_signature();
-            sig.params.extend((0..params).map(|_| AbiParam::new(ptr())));
-            sig.returns.extend(returns.then(|| AbiParam::new(ptr())));
-            let id = self
-                .module
-                .declare_function(name, Linkage::Export, &sig)
-                .map_err(|e| CodegenError::Backend(e.to_string()))?;
-            let target = (!default.is_empty()).then(|| self.import(default, &sig)).transpose()?;
-            let mut ctx = self.module.make_context();
-            ctx.func.signature = sig;
-            let mut builder_ctx = std::mem::take(&mut self.builder_ctx);
-            let mut builder = FunctionBuilder::new(&mut ctx.func, &mut builder_ctx);
-            let block = builder.create_block();
-            builder.append_block_params_for_function_params(block);
-            builder.switch_to_block(block);
-            let args = builder.block_params(block).to_vec();
-            let results = match target {
-                Some(target) => {
-                    let callee = self.module.declare_func_in_func(target, builder.func);
-                    let call = builder.ins().call(callee, &args);
-                    builder.inst_results(call).to_vec()
-                }
-                None => Vec::new(),
-            };
-            builder.ins().return_(&results);
-            builder.seal_all_blocks();
-            builder.finalize(self.module.isa().frontend_config());
-            self.builder_ctx = builder_ctx;
-            self.define_shim(id, &mut ctx)?;
+        for (name, ours, params, returns) in ALLOCATOR_ENTRIES {
+            let default = format!("__rdl_{}", name.trim_start_matches("__rust_"));
+            let target = if declared { ours } else { &default };
+            self.define_forwarding(name, Linkage::Export, Some(target), params, returns)?;
+        }
+        self.define_forwarding(
+            "__rust_alloc_error_handler",
+            Linkage::Export,
+            Some("__rdl_alloc_error_handler"),
+            2,
+            false,
+        )?;
+        self.define_forwarding(
+            "__rust_no_alloc_shim_is_unstable_v2",
+            Linkage::Export,
+            None,
+            0,
+            false,
+        )
+    }
+
+    /// rustc's entries of the global allocator in a program linked with rustc's code whose
+    /// `#[global_allocator]` is in one of `crates`, going to the functions rust-analyzer's
+    /// expansion exports, which are compiled with the rest. rustc's expansion has the
+    /// allocator's methods inlined into them at opt-level 1 and up, so they run the source as
+    /// rustc compiled it, and nothing else calls those methods. A program whose shim already
+    /// goes to ours (a stand-in's forwarding allocator, `stub.rs`) defines that function.
+    fn define_rustc_allocator_entries(&mut self, crates: &FxHashSet<Crate>) -> Result<()> {
+        let db = self.db;
+        if self.symbols.nothing_of_rustc() || self.symbols.defines(ALLOCATOR_ENTRIES[0].1) {
+            return Ok(());
+        }
+        for &krate in crates {
+            if !declares_global_allocator(db, krate) {
+                continue;
+            }
+            for (name, ours, params, returns) in ALLOCATOR_ENTRIES {
+                let Some(rustcs) = self.symbols.path(&format!("__rustc::{name}")) else {
+                    continue;
+                };
+                let Some(func) = global_allocator_export(db, krate, ours) else {
+                    let krate = fncache::crate_name(db, krate);
+                    refused!(
+                        "`#[global_allocator]` of crate `{krate}` exports no `{ours}`: rustc's \
+                         `{name}` would run its allocator as rustc compiled it"
+                    );
+                };
+                self.wanted.push(func);
+                self.define_forwarding(&rustcs, Linkage::Hidden, Some(ours), params, returns)?;
+            }
         }
         Ok(())
+    }
+
+    /// Defines `name`, of `params` pointer-sized arguments and a pointer returned if `returns`,
+    /// as a call of `target` with them, or as nothing.
+    fn define_forwarding(
+        &mut self,
+        name: &str,
+        linkage: Linkage,
+        target: Option<&str>,
+        params: usize,
+        returns: bool,
+    ) -> Result<()> {
+        let mut sig = self.module.make_signature();
+        sig.params.extend((0..params).map(|_| AbiParam::new(ptr())));
+        sig.returns.extend(returns.then(|| AbiParam::new(ptr())));
+        let id = self
+            .module
+            .declare_function(name, linkage, &sig)
+            .map_err(|e| CodegenError::Backend(e.to_string()))?;
+        let target = target.map(|it| self.import(it, &sig)).transpose()?;
+        let mut ctx = self.module.make_context();
+        ctx.func.signature = sig;
+        let mut builder_ctx = std::mem::take(&mut self.builder_ctx);
+        let mut builder = FunctionBuilder::new(&mut ctx.func, &mut builder_ctx);
+        let block = builder.create_block();
+        builder.append_block_params_for_function_params(block);
+        builder.switch_to_block(block);
+        let args = builder.block_params(block).to_vec();
+        let results = match target {
+            Some(target) => {
+                let callee = self.module.declare_func_in_func(target, builder.func);
+                let call = builder.ins().call(callee, &args);
+                builder.inst_results(call).to_vec()
+            }
+            None => Vec::new(),
+        };
+        builder.ins().return_(&results);
+        builder.seal_all_blocks();
+        builder.finalize(self.module.isa().frontend_config());
+        self.builder_ctx = builder_ctx;
+        self.define_shim(id, &mut ctx)
     }
 
     /// A function of ours that could not be compiled and that something in the object calls,
@@ -6717,6 +6810,17 @@ impl<'a, 'db> ObjectCodegen<'a, 'db> {
         let ours = !shared
             && (base_owns || self.own_statics.replaces(db, id))
             && compiled_static(db, id).is_ok();
+        // rustc's copy started from the old first value, and ours can't stand in for it.
+        if stateful_linked && !shared && !ours && compiled_static(db, id).is_ok() {
+            let name = StaticSignature::of(db, id).name.as_str();
+            let krate = fncache::crate_name(db, id.krate(db));
+            refused!(
+                "static `{name}` of crate `{krate}` with state, whose first value is not the one \
+                 rustc built it with (or an edit reached it before that was known): rustc's copy \
+                 has the old value, and rustc's code, or its `#[no_mangle]` or `#[export_name]` \
+                 symbol, keeps a copy of ours from standing in for it"
+            );
+        }
         let rustcs = symbol.filter(|_| !ours);
         // One the linker left out of what rustc linked is used by none of rustc's code there.
         let unlinked = rustcs.as_ref().is_some_and(|it| !self.symbols.linked(it));
@@ -6905,6 +7009,11 @@ impl<'a, 'db> ObjectCodegen<'a, 'db> {
             && (self.own_statics.crates.contains(&func.krate(self.db))
                 || !futures_kept_apart()
                 || !returns_async_block(self.db, func))
+            // rustc's copy takes and gives scalable vectors in SVE registers, ra-jit's code by
+            // reference: it calls a copy of its own. With nothing of rustc's linked the copy is
+            // ra-jit's.
+            && (self.symbols.nothing_of_rustc()
+                || !sve::passes_scalable(self.db, func, Some(args), env))
         {
             self.want(func);
             return self.import(&symbol, sig);
@@ -7947,8 +8056,15 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
                 self.cg.coroutine_layouts.borrow_mut().push((line, size, align));
             }
         }
+        // What is laid out at the least vector length is stored for the largest.
+        let layout = sve::storage(layout);
         self.layouts.borrow_mut().insert(ty, layout.clone());
         Ok(layout)
+    }
+
+    /// The shape of a scalable vector type, `None` for any other.
+    fn scalable(&self, ty: Ty<'db>) -> Result<Option<sve::Shape>> {
+        Ok(sve::Shape::of(&*self.layout(ty)?))
     }
 
     fn scalar(&self, scalar: Scalar) -> Result<AbiScalar> {
@@ -7966,6 +8082,16 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
             Primitive::Pointer(_) => AbiScalar { ty: ptr(), signed: false },
             Primitive::Float(rustc_abi::Float::F32) => AbiScalar { ty: types::F32, signed: true },
             Primitive::Float(rustc_abi::Float::F64) => AbiScalar { ty: types::F64, signed: true },
+            // `f16b` has no arithmetic in Rust, only its bits moved, and LLVM passes it where
+            // it passes an `f16`: in Cranelift's `F16` it is a 16-bit value of a float register.
+            Primitive::Float(rustc_abi::Float::F16 | rustc_abi::Float::F16B)
+                if f16_f128::soft_floats(self.cg.target) =>
+            {
+                AbiScalar { ty: types::F16, signed: true }
+            }
+            Primitive::Float(rustc_abi::Float::F128) if f16_f128::soft_floats(self.cg.target) => {
+                AbiScalar { ty: types::F128, signed: true }
+            }
             Primitive::Float(_) => unsupported!("f16, f16b, f128 and ppcf128"),
         })
     }
@@ -7978,8 +8104,21 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
     }
 
     fn pass_mode(&self, layout: &Layout, is_ret: bool) -> Result<PassMode> {
+        if let BackendRepr::Memory { sized: false } = layout.backend_repr {
+            // rustc's `make_indirect` of an unsized argument; nothing returns one.
+            if is_ret {
+                unsupported!("an unsized value returned");
+            }
+            return Ok(PassMode::IndirectUnsized);
+        }
         if layout.is_zst() {
             return Ok(PassMode::Ignore);
+        }
+        // rustc passes a scalable vector in Z and P registers, which Cranelift has no type
+        // for: between ra-jit's own functions it goes by reference. Where foreign code would
+        // pass it, `fn_abi` and `callee` refuse.
+        if let BackendRepr::SimdScalableVector { .. } = layout.backend_repr {
+            return Ok(PassMode::Indirect);
         }
         // rustc returns in memory what is more than two registers hold.
         let wide = is_ret && layout.size.bytes() > 2 * word() as u64;
@@ -8091,6 +8230,16 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
         ret: Ty<'db>,
         args: impl IntoIterator<Item = Ty<'db>>,
     ) -> Result<FnAbi> {
+        let args: Vec<Ty<'db>> = args.into_iter().collect();
+        if !abi.is_rustic_abi() {
+            for &ty in args.iter().chain([&ret]) {
+                if self.scalable(ty)?.is_some() {
+                    unsupported!(
+                        "a scalable vector in the {abi:?} ABI, which rustc passes in SVE registers"
+                    );
+                }
+            }
+        }
         if abi.is_rustic_abi() {
             let ret = self.pass_mode(&*self.layout(ret)?, true)?;
             let args = args
@@ -8101,6 +8250,10 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
             self.wide_ints_on_stack(&mut abi)?;
             self.wide_ints_after_registers(&mut abi)?;
             return Ok(abi);
+        }
+        let args: Vec<_> = args.into_iter().collect();
+        if args.iter().any(|&ty| self.is_unsized(ty)) {
+            unsupported!("an unsized value passed in calling convention {abi:?}");
         }
         if self.cg.target.call_conv == isa::CallConv::WindowsFastcall {
             if matches!(abi, ExternAbi::SysV64 { .. }) {
@@ -8255,6 +8408,9 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
                 PassMode::Spread { .. } => unreachable!("only the Rust ABI spreads lanes"),
                 PassMode::SpilledPair { .. } => unreachable!("only the stack spills a pair"),
                 PassMode::SkippingPair { .. } => unreachable!("only AAPCS64 skips registers"),
+                PassMode::IndirectUnsized => {
+                    unreachable!("only the Rust ABI passes unsized values")
+                }
             };
             let aggregate = matches!(mode, PassMode::Cast(_) | PassMode::CastPair(..));
             let in_registers = match (int_regs.checked_sub(ints), sse_regs.checked_sub(sses)) {
@@ -8425,6 +8581,9 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
             && leaves.len() <= 4
         {
             let unit = self.scalar(first)?.ty;
+            if f16_f128::soft(unit) {
+                unsupported!("a homogeneous aggregate of {unit} in the C ABI");
+            }
             let step = u64::from(unit.bytes());
             let packed = leaves.iter().zip(0..).all(|(&(offset, scalar), index)| {
                 offset == index * step && scalar.primitive() == first.primitive()
@@ -8701,6 +8860,9 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
                 params.extend((0..count).map(|_| AbiParam::new(unit)));
             }
             PassMode::Indirect => params.push(AbiParam::new(ptr())),
+            PassMode::IndirectUnsized => {
+                params.extend([AbiParam::new(ptr()), AbiParam::new(ptr())])
+            }
             PassMode::Spread { .. } => params.push(AbiParam::new(types::F64)),
             PassMode::OnStack { size, padded } => {
                 params.extend(padded.then(|| copied(8)));
@@ -8805,6 +8967,12 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
                 self.copy(copy, addr, layout.size);
                 values.push(copy);
             }
+            // The callee is handed the value where it is, as rustc does: the operand is a
+            // place moved out of, whose memory nothing reads again.
+            PassMode::IndirectUnsized => {
+                values.push(self.builder.ins().load(ptr(), MEM, addr, 0));
+                values.push(self.builder.ins().load(ptr(), MEM, addr, meta_at()));
+            }
             PassMode::OnStack { padded, .. } => {
                 if padded {
                     values.push(self.scratch());
@@ -8846,6 +9014,11 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
         let mut next = || values.next().expect("a value for every abi parameter");
         match mode {
             PassMode::Ignore | PassMode::Indirect | PassMode::OnStack { .. } => (),
+            PassMode::IndirectUnsized => {
+                let (data, meta) = (next(), next());
+                self.builder.ins().store(MEM, data, addr, 0);
+                self.builder.ins().store(MEM, meta, addr, meta_at());
+            }
             PassMode::Direct(_) => {
                 let value = next();
                 self.builder.ins().store(MEM, value, addr, 0);
@@ -8918,6 +9091,7 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
         match ty {
             types::F32 => self.builder.ins().f32const(0.0),
             types::F64 => self.builder.ins().f64const(0.0),
+            ty if f16_f128::soft(ty) => self.soft_zero(ty),
             _ => self.builder.ins().iconst(ty, 0),
         }
     }
@@ -9211,10 +9385,14 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
                 PassMode::Indirect | PassMode::OnStack { .. } => {
                     incoming.next().expect("indirect param")
                 }
+                PassMode::IndirectUnsized => self.scratch_pair(),
                 _ => self.stack_slot(layout),
             };
             self.receive(mode, &mut incoming, addr, layout);
-            self.locals.insert(local, LocalSlot { addr, borrowed: false });
+            // An unsized parameter's slot is where the value is and its metadata, as
+            // rustc's `LocalRef::UnsizedPlace`.
+            let borrowed = matches!(mode, PassMode::IndirectUnsized);
+            self.locals.insert(local, LocalSlot { addr, borrowed });
             if matches!(mode, PassMode::Indirect | PassMode::OnStack { .. }) {
                 self.note_passed_in_memory(body, local, addr);
             }
@@ -9783,6 +9961,17 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
             ty = ty.projection_ty(&self.infcx, proj, self.env.param_env);
             // The pointee or field can be `Self::Buffer`, which has to be an array to index.
             ty.ty = self.normalize(ty.ty);
+            if self.scalable(prev.ty)?.is_some() && !matches!(proj, ProjectionElem::Deref) {
+                unsupported!("a projection into the scalable vector {:?}", prev.ty);
+            }
+            // A scalable value is only ever in ra-jit's storage, sized for the largest vector
+            // length; through a raw pointer it is anywhere, and rustc reads exactly one vector
+            // length of it there.
+            if let (ProjectionElem::Deref, TyKind::RawPtr(..)) = (proj, prev.ty.kind())
+                && self.scalable(ty.ty)?.is_some()
+            {
+                unsupported!("a scalable vector read or written through a raw pointer");
+            }
             match proj {
                 ProjectionElem::Deref => match self.layout(prev.ty)?.backend_repr {
                     BackendRepr::Scalar(_) if pointer.take().is_some() => (),
@@ -11134,6 +11323,9 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
                 let value = match op {
                     UnOp::Not if is_bool => self.builder.ins().bxor_imm(value, 1),
                     UnOp::Not => self.builder.ins().bnot(value),
+                    UnOp::Neg if f16_f128::soft(self.builder.func.dfg.value_type(value)) => {
+                        self.soft_neg(value)
+                    }
                     UnOp::Neg if self.builder.func.dfg.value_type(value).is_float() => {
                         self.builder.ins().fneg(value)
                     }
@@ -11543,6 +11735,9 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
             None => self.builder.ins().load(r_scalar.ty, MEM, r_addr, 0),
         };
         let signed = scalar.signed;
+        if f16_f128::soft(scalar.ty) {
+            return Ok((self.soft_binary_op(op, l, r)?, None));
+        }
         if scalar.ty.is_float() {
             return Ok((self.float_binary_op(op, l, r)?, None));
         }
@@ -11651,8 +11846,12 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
 
     /// `as` between a float and an integer or another float.
     fn float_cast(&mut self, value: Value, from: AbiScalar, to: AbiScalar) -> Result<Value> {
+        if f16_f128::soft(from.ty) || f16_f128::soft(to.ty) {
+            return self.soft_cast(value, from, to);
+        }
         if from.ty == types::I128 || to.ty == types::I128 {
-            // compiler-builtins' conversions, which saturate and turn NaN into zero as `as` does.
+            // compiler-builtins' conversions. What one of a float does out of range differs
+            // between it and libgcc's, so the bounds are checked around it, as LLVM does.
             let name = match (from.ty, from.signed, to.ty, to.signed) {
                 (types::F32, _, _, true) => "__fixsfti",
                 (types::F32, _, _, false) => "__fixunssfti",
@@ -11664,7 +11863,11 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
                 (_, false, types::F64, _) => "__floatuntidf",
                 _ => unsupported!("cast from {} to {}", from.ty, to.ty),
             };
-            return self.builtin(name, &[from.ty], to.ty, &[value]);
+            let converted = self.builtin(name, &[from.ty], to.ty, &[value])?;
+            if !from.ty.is_float() {
+                return Ok(converted);
+            }
+            return Ok(self.saturate_wide(value, from.ty, converted, to.signed));
         }
         let ins = self.builder.ins();
         Ok(match (from.ty.is_float(), to.ty.is_float()) {
@@ -11712,6 +11915,40 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
             }
             (false, false) => unreachable!("float cast between integers"),
         })
+    }
+
+    /// What `as` makes of the `f32` or `f64` `value` as a 128-bit integer, given what a
+    /// conversion that is right in range made of it: the least or greatest integer below or
+    /// above the range, and zero for NaN.
+    fn saturate_wide(&mut self, value: Value, ty: Type, converted: Value, signed: bool) -> Value {
+        let single = ty == types::F32;
+        // The least value in range, and the greatest float that is in range.
+        let (low, high): (u64, u64) = match (single, signed) {
+            (true, true) => (0xff00_0000, 0x7eff_ffff),
+            (true, false) => (0, 0x7f7f_ffff),
+            (false, true) => (0xc7e0_0000_0000_0000, 0x47df_ffff_ffff_ffff),
+            (false, false) => (0, 0x47ef_ffff_ffff_ffff),
+        };
+        let [low, high] = [low, high].map(|bits| match single {
+            true => self.builder.ins().f32const(f32::from_bits(bits as u32)),
+            false => self.builder.ins().f64const(f64::from_bits(bits)),
+        });
+        let (min, max) = match signed {
+            true => (1u128 << 127, (1u128 << 127) - 1),
+            false => (0, u128::MAX),
+        };
+        let (min, max) = (self.iconst(types::I128, min), self.iconst(types::I128, max));
+        // NaN is not in range either, and is below it for an unsigned integer.
+        let in_low = self.builder.ins().fcmp(FloatCC::GreaterThanOrEqual, value, low);
+        let converted = self.builder.ins().select(in_low, converted, min);
+        let above = self.builder.ins().fcmp(FloatCC::GreaterThan, value, high);
+        let converted = self.builder.ins().select(above, max, converted);
+        if !signed {
+            return converted;
+        }
+        let ordered = self.builder.ins().fcmp(FloatCC::Ordered, value, value);
+        let zero = self.iconst(types::I128, 0);
+        self.builder.ins().select(ordered, converted, zero)
     }
 
     /// Whether arithmetic of the body being compiled panics when it overflows.
@@ -12239,7 +12476,29 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
     }
 
     fn operands(&mut self, operands: &[Operand]) -> Result<Vec<(Value, Ty<'db>)>> {
-        operands.iter().map(|it| self.operand(it)).collect()
+        operands.iter().map(|it| self.argument(it)).collect()
+    }
+
+    /// An argument of a call. An unsized one (`unsized_fn_params`) is a place moved out of,
+    /// and is where a pair of its address and metadata is, which `PassMode::IndirectUnsized`
+    /// passes.
+    fn argument(&mut self, operand: &Operand) -> Result<(Value, Ty<'db>)> {
+        let (OperandKind::Copy(place) | OperandKind::Move(place)) = &operand.kind else {
+            return self.operand(operand);
+        };
+        let ty = self.operand_ty(operand)?;
+        if !self.is_unsized(ty) {
+            return self.operand(operand);
+        }
+        let PlaceRef { addr, meta: Some(meta), .. } = self.place_ref(place)? else {
+            unsupported!("unsized argument {ty:?} without metadata");
+        };
+        // What the operand reads, for `given_away`.
+        self.operand(operand)?;
+        let pair = self.scratch_pair();
+        self.builder.ins().store(MEM, addr, pair, 0);
+        self.builder.ins().store(MEM, meta, pair, meta_at());
+        Ok((pair, ty))
     }
 
     /// `Fn::call`, `FnMut::call_mut` or `FnOnce::call_once`. For a call expression MIR passes
@@ -12511,8 +12770,13 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
         dst_ty: Ty<'db>,
     ) -> Result<()> {
         let receiver_layout = self.layout(receiver_ty)?;
-        if !matches!(receiver_layout.backend_repr, BackendRepr::ScalarPair { .. })
-            || receiver_layout.size.bytes_usize() != 2 * word()
+        // A `dyn Trait` taken by value is where the pair of its data pointer and vtable is
+        // (`argument`), as a fat pointer to it would be; rustc hands the method the data
+        // pointer as well.
+        let by_value = matches!(receiver_ty.kind(), TyKind::Dynamic(..));
+        if !by_value
+            && (!matches!(receiver_layout.backend_repr, BackendRepr::ScalarPair { .. })
+                || receiver_layout.size.bytes_usize() != 2 * word())
         {
             unsupported!("vtable call with receiver {receiver_ty:?}");
         }
@@ -12953,6 +13217,7 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
                 PassMode::Indirect | PassMode::OnStack { .. } => {
                     incoming.next().expect("indirect param")
                 }
+                PassMode::IndirectUnsized => self.scratch_pair(),
                 _ => self.stack_slot(&layout),
             };
             self.receive(mode, &mut incoming, addr, &layout);
@@ -13138,6 +13403,7 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
                     PassMode::Indirect | PassMode::OnStack { .. } => {
                         incoming.next().expect("indirect param")
                     }
+                    PassMode::IndirectUnsized => self.scratch_pair(),
                     _ => self.stack_slot(&layout),
                 };
                 self.receive(mode, &mut incoming, addr, &layout);
@@ -13333,7 +13599,7 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
         let sret = sig.params.first().is_some_and(|it| it.purpose == ArgumentPurpose::StructReturn);
         let count = match mode {
             PassMode::Ignore => 0,
-            PassMode::Pair(..) => 2,
+            PassMode::Pair(..) | PassMode::IndirectUnsized => 2,
             PassMode::SpilledPair { spilled, .. } => {
                 spilled.iter().map(|it| it.map_or(1, |padded| 1 + usize::from(padded))).sum()
             }
@@ -13821,6 +14087,9 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
         dst_ty: Ty<'db>,
     ) -> Result<Intrinsic> {
         let name = FunctionSignature::of(self.cg.db, func).name.as_str();
+        if self.scalable_intrinsic(name, generic_args, args, dst, dst_ty)? {
+            return Ok(Intrinsic::Inline);
+        }
         match (name, args) {
             (
                 "wrapping_add" | "unchecked_add" | "wrapping_sub" | "unchecked_sub"
@@ -13904,7 +14173,14 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
                 self.builder.ins().store(MEM, value, dst, 0);
             }
             ("size_of" | "align_of" | "min_align_of" | "pref_align_of", []) => {
-                let layout = self.layout(generic_args.type_at(0))?;
+                let ty = generic_args.type_at(0);
+                // rustc's size of a scalable vector is that at the least vector length, not of
+                // the storage codegen gives it.
+                let layout = self
+                    .cg
+                    .db
+                    .layout_of_ty(ty.store(), self.env.store())
+                    .map_err(|e| CodegenError::Frontend(format!("layout of {ty:?}: {e:?}")))?;
                 let bytes =
                     if name == "size_of" { layout.size.bytes() } else { layout.align.abi.bytes() };
                 let value = self.builder.ins().iconst(ptr(), bytes as i64);
@@ -13985,6 +14261,9 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
                 // A 128-bit integer is in two registers that start at an even one, or in
                 // sixteen bytes of the stack at a multiple of sixteen.
                 let wide = scalar.ty == types::I128 && arch == Arch::Aarch64;
+                if f16_f128::soft(scalar.ty) {
+                    unsupported!("`va_arg` of {dst_ty:?}");
+                }
                 if scalar.ty.bytes() > 8 && !wide {
                     unsupported!("`va_arg` of {dst_ty:?}");
                 }
@@ -14082,6 +14361,20 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
             ("transmute" | "transmute_unchecked" | "black_box" | "likely" | "unlikely", [arg]) => {
                 self.cg.opaque |= name == "black_box";
                 let (src, ty) = self.operand(arg)?;
+                match (self.scalable(ty)?, self.scalable(dst_ty)?) {
+                    (Some(from), Some(to)) if from.same_image(to) => (),
+                    (None, None) => (),
+                    (Some(_), Some(_)) => {
+                        unsupported!("transmute between scalable vectors of other register images")
+                    }
+                    _ => unsupported!("transmute between a scalable vector and another type"),
+                }
+                if let TyKind::Ref(_, pointee, _) = dst_ty.kind()
+                    && self.scalable(pointee)?.is_some()
+                    && !matches!(ty.kind(), TyKind::Ref(..))
+                {
+                    unsupported!("a reference to a scalable vector made of another type");
+                }
                 let size = self.layout(ty)?.size;
                 if size != self.layout(dst_ty)?.size {
                     unsupported!("transmute between differently sized types");
@@ -14092,13 +14385,23 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
             ("atomic_load", [ptr]) => {
                 let scalar = self.scalar_of(dst_ty)?;
                 let (ptr, _) = self.load_scalar(ptr)?;
-                let value = self.builder.ins().atomic_load(scalar.ty, MEM, ptr);
+                let value = match self.wide_atomics(scalar.ty)? {
+                    true => {
+                        let zero = self.builder.ins().iconst(types::I64, 0);
+                        let zero = self.builder.ins().uextend(types::I128, zero);
+                        self.cas16(ptr, zero, zero)?
+                    }
+                    false => self.builder.ins().atomic_load(scalar.ty, MEM, ptr),
+                };
                 self.builder.ins().store(MEM, value, dst, 0);
             }
             ("atomic_store", [ptr, value]) => {
                 let (ptr, _) = self.load_scalar(ptr)?;
-                let (value, _) = self.load_scalar(value)?;
-                self.builder.ins().atomic_store(MEM, value, ptr);
+                let (value, ty) = self.load_scalar(value)?;
+                match self.wide_atomics(ty.ty)? {
+                    true => _ = self.rmw16(AtomicRmwOp::Xchg, ptr, value)?,
+                    false => _ = self.builder.ins().atomic_store(MEM, value, ptr),
+                }
             }
             (
                 "atomic_xchg" | "atomic_xadd" | "atomic_xsub" | "atomic_and" | "atomic_nand"
@@ -14122,14 +14425,20 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
                 let scalar = self.scalar_of(dst_ty)?;
                 let (ptr, _) = self.load_scalar(ptr)?;
                 let (value, _) = self.load_scalar(value)?;
-                let old = self.builder.ins().atomic_rmw(scalar.ty, MEM, op, ptr, value);
+                let old = match self.wide_atomics(scalar.ty)? {
+                    true => self.rmw16(op, ptr, value)?,
+                    false => self.builder.ins().atomic_rmw(scalar.ty, MEM, op, ptr, value),
+                };
                 self.builder.ins().store(MEM, old, dst, 0);
             }
             ("atomic_cxchg" | "atomic_cxchgweak", [ptr, expected, new]) => {
                 let (ptr, _) = self.load_scalar(ptr)?;
-                let (expected, _) = self.load_scalar(expected)?;
+                let (expected, ty) = self.load_scalar(expected)?;
                 let (new, _) = self.load_scalar(new)?;
-                let old = self.builder.ins().atomic_cas(MEM, ptr, expected, new);
+                let old = match self.wide_atomics(ty.ty)? {
+                    true => self.cas16(ptr, expected, new)?,
+                    false => self.builder.ins().atomic_cas(MEM, ptr, expected, new),
+                };
                 let swapped = self.builder.ins().icmp(IntCC::Equal, old, expected);
                 let layout = self.layout(dst_ty)?;
                 self.builder.ins().store(MEM, old, dst, layout.fields.offset(0).bytes() as i32);
@@ -14233,6 +14542,12 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
                 }
                 self.builder.ins().store(MEM, value, dst, 0);
             }
+            (
+                "simd_add" | "simd_sub" | "simd_mul" | "simd_div" | "simd_eq" | "simd_ge"
+                | "simd_gt" | "simd_le" | "simd_lt" | "simd_neg" | "simd_fabs" | "simd_fsqrt"
+                | "simd_floor" | "simd_ceil" | "simd_fma" | "simd_cast",
+                _,
+            ) if self.half_lanes(args, dst_ty)? => self.half_vector(name, args, dst, dst_ty)?,
             (
                 "simd_and"
                 | "simd_or"
@@ -14355,7 +14670,7 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
                 let (on_true, _) = self.operand(on_true)?;
                 let (on_false, _) = self.operand(on_false)?;
                 let (mask_lane, count) = self.simd_lanes(mask_ty)?;
-                let (lane, _) = self.simd_lanes(dst_ty)?;
+                let (lane, _) = self.simd_moved_lanes(dst_ty)?;
                 for i in 0..count {
                     let offset = (i * lane.ty.bytes() as u64) as i32;
                     let mask_offset = (i * mask_lane.ty.bytes() as u64) as i32;
@@ -14372,7 +14687,7 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
                 let (mask, _) = self.operand(mask)?;
                 let (on_true, _) = self.operand(on_true)?;
                 let (on_false, _) = self.operand(on_false)?;
-                let (lane, count) = self.simd_lanes(dst_ty)?;
+                let (lane, count) = self.simd_moved_lanes(dst_ty)?;
                 // Lane i by bit i of the mask, an integer or bytes: its bytes in memory in order.
                 let lanes: Vec<Value> = (0..count)
                     .map(|i| {
@@ -14412,7 +14727,7 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
             ("simd_extract", [vector, index]) => {
                 let (vector, ty) = self.operand(vector)?;
                 let (index, _) = self.load_scalar(index)?;
-                let (lane, _) = self.simd_lanes(ty)?;
+                let (lane, _) = self.simd_moved_lanes(ty)?;
                 let index = self.builder.ins().uextend(ptr(), index);
                 let offset = self.builder.ins().imul_imm(index, lane.ty.bytes() as i64);
                 let addr = self.builder.ins().iadd(vector, offset);
@@ -14423,7 +14738,7 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
                 let (vector, ty) = self.operand(vector)?;
                 let (index, _) = self.load_scalar(index)?;
                 let (value, _) = self.load_scalar(value)?;
-                let (lane, _) = self.simd_lanes(ty)?;
+                let (lane, _) = self.simd_moved_lanes(ty)?;
                 let size = self.layout(ty)?.size;
                 self.copy(dst, vector, size);
                 let index = self.builder.ins().uextend(ptr(), index);
@@ -14437,8 +14752,8 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
                 // `[u32; N]`, or a wrapper of one. Lanes of `second` come after `first`'s.
                 let (indices, _) = self.operand(indices)?;
                 let layout = self.layout(ty)?;
-                let (lane, _) = self.simd_lanes(ty)?;
-                let (_, count) = self.simd_lanes(dst_ty)?;
+                let (lane, _) = self.simd_moved_lanes(ty)?;
+                let (_, count) = self.simd_moved_lanes(dst_ty)?;
                 let lane_size = lane.ty.bytes() as u64;
                 let both = self.builder.create_sized_stack_slot(StackSlotData::new(
                     StackSlotKind::ExplicitSlot,
@@ -14463,7 +14778,7 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
             }
             ("simd_splat", [arg]) => {
                 let (src, _) = self.operand(arg)?;
-                let (lane, count) = self.simd_lanes(dst_ty)?;
+                let (lane, count) = self.simd_moved_lanes(dst_ty)?;
                 let value = self.builder.ins().load(lane.ty, MEM, src, 0);
                 for i in 0..count {
                     let offset = (i * lane.ty.bytes() as u64) as i32;
@@ -14786,7 +15101,13 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
                 | "round_ties_even_f32"
                 | "round_ties_even_f64"
                 | "roundf32"
-                | "roundf64",
+                | "roundf64"
+                | "sqrt"
+                | "floor"
+                | "ceil"
+                | "trunc"
+                | "round_ties_even"
+                | "round",
                 [arg],
             ) => {
                 let (value, scalar) = self.load_scalar(arg)?;
@@ -14794,6 +15115,11 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
                     unsupported!("intrinsic `{name}` on {:?}", scalar.ty);
                 }
                 let op = name.trim_end_matches("f32").trim_end_matches("f64").trim_end_matches('_');
+                if f16_f128::soft(scalar.ty) {
+                    let value = self.soft_unary(op, value)?;
+                    self.builder.ins().store(MEM, value, dst, 0);
+                    return Ok(Intrinsic::Inline);
+                }
                 let value = match op {
                     "fabs" => self.builder.ins().fabs(value),
                     "sqrt" => self.builder.ins().sqrt(value),
@@ -14808,25 +15134,47 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
                 };
                 self.builder.ins().store(MEM, value, dst, 0);
             }
-            ("powif32" | "powif64", [base, power]) => {
+            ("powif32" | "powif64" | "powi", [base, power]) => {
                 let (base, scalar) = self.load_scalar(base)?;
                 let (power, _) = self.load_scalar(power)?;
+                if f16_f128::soft(scalar.ty) {
+                    let value = self.soft_powi(base, power)?;
+                    self.builder.ins().store(MEM, value, dst, 0);
+                    return Ok(Intrinsic::Inline);
+                }
                 let builtin = if scalar.ty == types::F32 { "__powisf2" } else { "__powidf2" };
                 let value =
                     self.builtin(builtin, &[scalar.ty, types::I32], scalar.ty, &[base, power])?;
                 self.builder.ins().store(MEM, value, dst, 0);
             }
             (
-                "copysignf32" | "copysignf64" | "minnumf32" | "minnumf64" | "maxnumf32"
-                | "maxnumf64" | "powf32" | "powf64" | "fadd_fast" | "fsub_fast" | "fmul_fast"
-                | "fdiv_fast" | "frem_fast" | "fadd_algebraic" | "fsub_algebraic"
-                | "fmul_algebraic" | "fdiv_algebraic" | "frem_algebraic",
+                "copysignf32" | "copysignf64" | "copysignf16" | "copysignf128" | "minnumf32"
+                | "minnumf64" | "maxnumf32" | "maxnumf64" | "powf32" | "powf64" | "fadd_fast"
+                | "fsub_fast" | "fmul_fast" | "fdiv_fast" | "frem_fast" | "fadd_algebraic"
+                | "fsub_algebraic" | "fmul_algebraic" | "fdiv_algebraic" | "frem_algebraic",
                 [a, b],
             ) => {
                 let (l, scalar) = self.load_scalar(a)?;
                 let (r, _) = self.load_scalar(b)?;
                 if !scalar.ty.is_float() {
                     unsupported!("intrinsic `{name}` on {:?}", scalar.ty);
+                }
+                if f16_f128::soft(scalar.ty) {
+                    let op = match name {
+                        "copysignf16" | "copysignf128" => None,
+                        "fadd_fast" | "fadd_algebraic" => Some(BinOp::Add),
+                        "fsub_fast" | "fsub_algebraic" => Some(BinOp::Sub),
+                        "fmul_fast" | "fmul_algebraic" => Some(BinOp::Mul),
+                        "fdiv_fast" | "fdiv_algebraic" => Some(BinOp::Div),
+                        "frem_fast" | "frem_algebraic" => Some(BinOp::Rem),
+                        _ => unsupported!("intrinsic `{name}` on {:?}", scalar.ty),
+                    };
+                    let value = match op {
+                        Some(op) => self.soft_binary_op(&op, l, r)?,
+                        None => self.soft_copysign(l, r),
+                    };
+                    self.builder.ins().store(MEM, value, dst, 0);
+                    return Ok(Intrinsic::Inline);
                 }
                 let single = scalar.ty == types::F32;
                 let value = match name {
@@ -14867,10 +15215,15 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
                     self.builtin(name, &[float.ty, types::I32], float.ty, &[base, power])?;
                 self.builder.ins().store(MEM, value, dst, 0);
             }
-            ("fmaf32" | "fmaf64" | "fmuladdf32" | "fmuladdf64", [a, b, c]) => {
+            ("fmaf32" | "fmaf64" | "fmuladdf32" | "fmuladdf64" | "fma", [a, b, c]) => {
                 let (a, scalar) = self.load_scalar(a)?;
                 let (b, _) = self.load_scalar(b)?;
                 let (c, _) = self.load_scalar(c)?;
+                if f16_f128::soft(scalar.ty) {
+                    let value = self.soft_fma(a, b, c)?;
+                    self.builder.ins().store(MEM, value, dst, 0);
+                    return Ok(Intrinsic::Inline);
+                }
                 let value = if name.starts_with("fmuladd") {
                     let product = self.builder.ins().fmul(a, b);
                     self.builder.ins().fadd(product, c)
@@ -15448,6 +15801,9 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
         {
             return Ok(());
         }
+        if name.starts_with("aarch64.sve.") || name.starts_with("vector.reverse.nxv") {
+            return self.sve_intrinsic(name, args, dst, dst_ty);
+        }
         match (name, args) {
             (
                 "x86.sse.cmp.ps" | "x86.sse2.cmp.pd" | "x86.avx.cmp.ps.256" | "x86.avx.cmp.pd.256"
@@ -15936,11 +16292,89 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
         Ok(())
     }
 
+    /// The lanes of a vector type for an operation that only moves them, which moves the bits
+    /// of a lane of `f16` as an integer of 16 bits.
+    fn simd_moved_lanes(&self, ty: Ty<'db>) -> Result<(AbiScalar, u64)> {
+        if let BackendRepr::SimdVector { element, count } = self.layout(ty)?.backend_repr
+            && let Primitive::Float(rustc_abi::Float::F16) = element.primitive()
+        {
+            return Ok((AbiScalar { ty: types::I16, signed: false }, count.as_u64()));
+        }
+        self.simd_lanes(ty)
+    }
+
+    /// Whether the first of `args` or the result is a vector of `f16`.
+    fn half_lanes(&mut self, args: &[Operand], dst_ty: Ty<'db>) -> Result<bool> {
+        let first = match args.first() {
+            Some(arg) => Some(self.operand_ty(arg)?),
+            None => None,
+        };
+        for ty in first.into_iter().chain([dst_ty]) {
+            if let BackendRepr::SimdVector { element, .. } = self.layout(ty)?.backend_repr
+                && let Primitive::Float(rustc_abi::Float::F16) = element.primitive()
+            {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
+    /// The lanes of a vector type as `neon` names them, and whether its integers are signed.
+    fn neon_lanes_of(&self, ty: Ty<'db>) -> Result<(neon::Lanes, bool)> {
+        let BackendRepr::SimdVector { element, count } = self.layout(ty)?.backend_repr else {
+            unsupported!("vector operation on {ty:?}");
+        };
+        let count = count.as_u64() as u32;
+        Ok(match element.primitive() {
+            Primitive::Float(float) => {
+                (neon::Lanes::floats(float.size().bits() as u32, count), true)
+            }
+            Primitive::Int(int, signed) => {
+                (neon::Lanes { count, bits: int.size().bits() as u32, float: false }, signed)
+            }
+            _ => unsupported!("vector operation on {ty:?}"),
+        })
+    }
+
+    /// A generic intrinsic on vectors of `f16`, as [`neon::half_vector`] has it, in a function
+    /// with the half-precision instructions; elsewhere LLVM works on the lanes as `f32`s, but
+    /// for the conversions between the two, which are the same instructions there.
+    fn half_vector(
+        &mut self,
+        name: &str,
+        args: &[Operand],
+        dst: Value,
+        dst_ty: Ty<'db>,
+    ) -> Result<()> {
+        let Some(first) = args.first() else {
+            unsupported!("`{name}` without operands");
+        };
+        let ty = self.operand_ty(first)?;
+        let (a, a_signed) = self.neon_lanes_of(ty)?;
+        let (r, r_signed) = self.neon_lanes_of(dst_ty)?;
+        let widths = (r.float && a.float).then_some((r.bits, a.bits));
+        let single_and_half = name == "simd_cast" && matches!(widths, Some((16, 32) | (32, 16)));
+        if self.cg.target.arch != Arch::Aarch64 || !(single_and_half || self.half_precision()) {
+            unsupported!(
+                "vector operation on lanes of f16 without the half-precision instructions"
+            );
+        }
+        let signed = if a.float { r_signed } else { a_signed };
+        let Some(lowered) = neon::half_vector(name, r, a, signed) else {
+            unsupported!("`{name}` of lanes of f16 into {dst_ty:?}");
+        };
+        self.neon_assembly(name, &lowered, args, dst, dst_ty)
+    }
+
     /// The lane type and lane count of a vector type. Lanes sit in memory in order.
     fn simd_lanes(&self, ty: Ty<'db>) -> Result<(AbiScalar, u64)> {
         match self.layout(ty)?.backend_repr {
             BackendRepr::SimdVector { element, count } => {
-                Ok((self.scalar(element)?, count.as_u64()))
+                let lane = self.scalar(element)?;
+                if f16_f128::soft(lane.ty) {
+                    unsupported!("vector operation on lanes of {}", lane.ty);
+                }
+                Ok((lane, count.as_u64()))
             }
             _ => unsupported!("vector operation on {ty:?}"),
         }
@@ -15975,6 +16409,74 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
         let slot = self.scratch_wide();
         self.builder.ins().store(MEM, value, slot, 0);
         Ok(self.builder.ins().load(types::I128, MEM, slot, 0))
+    }
+
+    /// Whether an atomic access of `ty` is made of compare-and-swaps of compiler_builtins:
+    /// Cranelift has no atomics of 128 bits on AArch64. That is how LLVM makes them at `-O0`
+    /// on a target with outline atomics (`aarch64-unknown-linux-gnu`): it expands a load, a
+    /// store and a read-modify-write to compare-and-swaps (`AtomicExpansionKind::CmpXChg`),
+    /// and a compare-and-swap is a call of `__aarch64_cas16_acq_rel` for one sequentially
+    /// consistent, which takes CASP when the CPU has LSE and LDXP/STXP when not. Without
+    /// outline atomics there is no such function to call, and the access is refused.
+    fn wide_atomics(&self, ty: Type) -> Result<bool> {
+        if ty != types::I128 || self.cg.target.arch != Arch::Aarch64 {
+            return Ok(false);
+        }
+        let outline = cfg::CfgAtom::KeyValue {
+            key: intern::sym::target_feature,
+            value: intern::Symbol::intern("outline-atomics"),
+        };
+        if !self.env.krate.cfg_options(self.cg.db).check_atom(&outline) {
+            unsupported!("an atomic of 128 bits on AArch64 without outline atomics");
+        }
+        Ok(true)
+    }
+
+    /// What `ptr` held, swapped for `new` when it was `expected`: compiler_builtins'
+    /// compare-and-swap of 128 bits ([`Self::wide_atomics`]).
+    fn cas16(&mut self, ptr: Value, expected: Value, new: Value) -> Result<Value> {
+        let params = [types::I128, types::I128, self::ptr()];
+        self.builtin("__aarch64_cas16_acq_rel", &params, types::I128, &[expected, new, ptr])
+    }
+
+    /// `op` of 128 bits at `ptr` with `value`, and what was there before: LLVM's expansion
+    /// of an `atomicrmw` to a loop of compare-and-swaps, from a plain load of what is there.
+    fn rmw16(&mut self, op: AtomicRmwOp, ptr: Value, value: Value) -> Result<Value> {
+        let first = self.builder.ins().load(types::I128, MEM, ptr, 0);
+        let again = self.builder.create_block();
+        let done = self.builder.create_block();
+        let seen = self.builder.append_block_param(again, types::I128);
+        let old = self.builder.append_block_param(done, types::I128);
+        self.builder.ins().jump(again, &[first.into()]);
+        self.builder.switch_to_block(again);
+        let ins = self.builder.ins();
+        let new = match op {
+            AtomicRmwOp::Xchg => value,
+            AtomicRmwOp::Add => ins.iadd(seen, value),
+            AtomicRmwOp::Sub => ins.isub(seen, value),
+            AtomicRmwOp::And => ins.band(seen, value),
+            AtomicRmwOp::Nand => {
+                let and = ins.band(seen, value);
+                self.builder.ins().bnot(and)
+            }
+            AtomicRmwOp::Or => ins.bor(seen, value),
+            AtomicRmwOp::Xor => ins.bxor(seen, value),
+            AtomicRmwOp::Smax | AtomicRmwOp::Smin | AtomicRmwOp::Umax | AtomicRmwOp::Umin => {
+                let cc = match op {
+                    AtomicRmwOp::Smax => IntCC::SignedGreaterThan,
+                    AtomicRmwOp::Smin => IntCC::SignedLessThanOrEqual,
+                    AtomicRmwOp::Umax => IntCC::UnsignedGreaterThan,
+                    _ => IntCC::UnsignedLessThanOrEqual,
+                };
+                let keep = ins.icmp(cc, seen, value);
+                self.builder.ins().select(keep, seen, value)
+            }
+        };
+        let was = self.cas16(ptr, seen, new)?;
+        let swapped = self.builder.ins().icmp(IntCC::Equal, was, seen);
+        self.builder.ins().brif(swapped, done, &[was.into()], again, &[was.into()]);
+        self.builder.switch_to_block(done);
+        Ok(old)
     }
 
     /// The quotient of two integers, or the remainder. Cranelift has neither for 128 bits, so
@@ -16649,7 +17151,9 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
                 let scalar = self.scalar_of(ty)?;
                 let l = self.builder.ins().load(scalar.ty, MEM, l, 0);
                 let r = self.builder.ins().load(scalar.ty, MEM, r, 0);
-                let same = if scalar.ty.is_float() {
+                let same = if f16_f128::soft(scalar.ty) {
+                    self.soft_binary_op(&BinOp::Eq, l, r)?
+                } else if scalar.ty.is_float() {
                     self.builder.ins().fcmp(FloatCC::Equal, l, r)
                 } else {
                     self.builder.ins().icmp(IntCC::Equal, l, r)

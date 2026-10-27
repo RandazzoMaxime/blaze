@@ -2702,6 +2702,10 @@ impl Base {
         if self.rustc && changed_roots.iter().any(|&root| super::hands_out_opaque(db, root)) {
             return Ok(Err("a function that hands rustc's code an `impl Trait` changed or moved"));
         }
+        if self.rustc {
+            let crates = changed_roots.iter().map(|it| it.krate(db)).collect();
+            cg.define_rustc_allocator_entries(&crates)?;
+        }
         let mut queued: FxHashSet<FunctionId> = known_roots().collect();
         let mut queue = changed_roots;
         queue.extend(added.iter().copied().filter(|&func| queued.insert(func)));

@@ -94,7 +94,7 @@ fn main() {
         consts::name(1),
         consts::config(3)
     );
-    case!(consts::local_array(4), consts::repeat(9));
+    case!(consts::local_array(4), consts::repeat(9), consts::from_end(2));
 
     case!(generics::picks(5, 6), generics::swaps(1, 2), generics::inline(5), generics::methods(10));
     case!(generics::statics(3, 4), generics::option_map(Some(4)), generics::option_map(None));
@@ -611,12 +611,18 @@ fn main() {
     println!("lifetime_impl_consts {}", cases::lifetime_impl_consts::run());
     #[cfg(feature = "nightly")]
     println!("simd_lanes {}", cases::simd_lanes::run());
+    #[cfg(feature = "nightly")]
+    println!("unsized_params {}", cases::unsized_params::run());
+    #[cfg(all(feature = "nightly", target_arch = "aarch64", target_os = "linux"))]
+    println!("soft_floats {}", cases::soft_floats::run());
     #[cfg(target_arch = "x86_64")]
     println!("simd_x86 {}", cases::simd_x86::run());
     #[cfg(target_arch = "aarch64")]
     println!("simd_aarch64 {}", cases::simd_aarch64::run());
     #[cfg(all(target_arch = "aarch64", feature = "nightly"))]
     println!("neon_intrinsics {}", cases::neon_intrinsics::run());
+    #[cfg(all(target_arch = "aarch64", target_os = "linux", feature = "nightly"))]
+    println!("half_intrinsics {}", cases::half_intrinsics::run());
     #[cfg(feature = "nightly")]
     {
         use std::simd::Simd;
@@ -631,6 +637,10 @@ fn main() {
             called(bytes),
         );
     }
+    #[cfg(all(feature = "nightly", target_arch = "aarch64"))]
+    println!("sve {}", cases::sve::run());
+    #[cfg(all(feature = "nightly", target_arch = "aarch64"))]
+    println!("sve_ops {}", cases::sve_ops::run());
     // Threads.
     #[cfg(not(target_family = "wasm"))]
     println!("boxed_fn_once {:?}", cases::boxed_fn_once::run());

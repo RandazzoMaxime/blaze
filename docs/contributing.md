@@ -187,6 +187,10 @@ one file; everything else reads it or is written from it:
 
 ### Moving to a newer nightly
 
+The daily workflow does this every day and opens the pull request
+([toolchain.md, "The daily bump"](toolchain.md#the-daily-bump)); by hand it is for fixing what
+a nightly breaks, on the bump's branch `toolchain/bump`, or for trying a nightly:
+
     python3 harness/toolchain_bump.py                    # the newest nightly blaze can use
     python3 harness/toolchain_bump.py --date 2026-11-02  # or a given one
 

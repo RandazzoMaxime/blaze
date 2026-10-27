@@ -20,7 +20,7 @@ pub(crate) mod split;
 /// Links `objects` into the executable `exe`, with the native libraries of the crates `program`
 /// links. A shared library instead when `exports` names what it exports: the rest of it is
 /// its own, and the link leaves out what that does not reach, as rustc's of a `cdylib` does.
-/// How long `cc` took.
+/// `user` is what the flags pass the linker (`-C link-arg`). How long `cc` took.
 pub(crate) fn executable(
     db: &RootDatabase,
     program: &[Crate],
@@ -28,8 +28,9 @@ pub(crate) fn executable(
     sysroot: Option<&Path>,
     exe: &Path,
     exports: Option<&[String]>,
+    user: &[String],
 ) -> anyhow::Result<Duration> {
-    let mut line = Line::of(db, program, sysroot, exports.is_some())?;
+    let mut line = Line::of(db, program, sysroot, exports.is_some(), user)?;
     let Some(exports) = exports else { return line.link(objects, exe) };
     let mut listed = exe.as_os_str().to_owned();
     listed.push(".exports");
@@ -59,8 +60,9 @@ pub(crate) fn command(
     objects: &[&Path],
     sysroot: Option<&Path>,
     exe: &Path,
+    user: &[String],
 ) -> anyhow::Result<String> {
-    let line = Line::of(db, program, sysroot, false)?;
+    let line = Line::of(db, program, sysroot, false, user)?;
     let mut args = vec!["cc".to_owned()];
     args.extend(line.before.iter().cloned());
     for &object in objects {
@@ -80,8 +82,9 @@ pub(crate) fn command(
     args.extend(["-o".to_owned(), exe.display().to_string()]);
     if line.apple {
         // Last, as on rustc's line: the room the splice wants, which a link made short of it
-        // tells the file, and the link again reads.
-        args.push(crate::cargo::plan::headerpad_read(exe, None)?);
+        // tells the file, and the link again reads. It is no less than the flags ask for.
+        let asked = user.iter().filter_map(|it| crate::cargo::plan::headerpad_in(it)).last();
+        args.push(crate::cargo::plan::headerpad_read(exe, asked)?);
     }
     shlex::try_join(args.iter().map(String::as_str)).context("a link argument has a NUL in it")
 }
@@ -94,11 +97,14 @@ pub(crate) struct Line {
 }
 
 impl Line {
+    /// The line of `program`, with `user`, what the flags pass the linker (`-C link-arg`),
+    /// after the native libraries as rustc has them.
     pub(crate) fn of(
         db: &RootDatabase,
         program: &[Crate],
         sysroot: Option<&Path>,
         shared: bool,
+        user: &[String],
     ) -> anyhow::Result<Line> {
         let Some(&first) = program.first() else { bail!("nothing to link") };
         let target = Target { shared, ..Target::of(db, first.into()) };
@@ -115,6 +121,7 @@ impl Line {
             after.extend(target.lib(lib));
         }
         after.extend(native.args);
+        after.extend(user.iter().cloned());
         after.extend(target.trailing());
         Ok(Line { before, after, apple: target.apple })
     }
@@ -226,7 +233,10 @@ fn native(db: &RootDatabase, program: &[Crate], target: &Target) -> Native {
             .flat_map(|(_, module)| module.scope(db).extern_blocks())
             .flat_map(|block| AttrFlags::native_libs(db, block).iter().cloned());
         native.libs.extend(attributes.collect::<Vec<_>>());
-        let asked = asked_by_script(db, krate, target);
+        // A `cdylib` takes `rustc-cdylib-link-arg`; a proc macro is linked shared too, but
+        // is not one.
+        let cdylib = target.shared && !krate.data(db).target_kind.is_proc_macro();
+        let asked = asked_by_script(db, krate, target, cdylib);
         native.libs.extend(asked.libs);
         native.search.extend(asked.search);
         // As cargo has it: a script's arguments are for its own package's targets.
@@ -244,8 +254,14 @@ fn native(db: &RootDatabase, program: &[Crate], target: &Target) -> Native {
 }
 
 /// What the build script of `krate`'s package printed for the link, as cargo passes it to
-/// rustc: `rustc-link-lib`, `rustc-link-search`, `rustc-flags` and `rustc-link-arg`.
-fn asked_by_script(db: &RootDatabase, krate: base_db::Crate, target: &Target) -> Native {
+/// rustc: `rustc-link-lib`, `rustc-link-search`, `rustc-flags`, `rustc-link-arg`, and
+/// `rustc-link-arg-bins` for a binary or `rustc-cdylib-link-arg` for a `cdylib`.
+fn asked_by_script(
+    db: &RootDatabase,
+    krate: base_db::Crate,
+    target: &Target,
+    cdylib: bool,
+) -> Native {
     let mut asked = Native::default();
     let Some(out_dir) = krate.env(db).get("OUT_DIR") else { return asked };
     let printed = crate::cargo::script::printed(Path::new(&out_dir));
@@ -257,7 +273,11 @@ fn asked_by_script(db: &RootDatabase, krate: base_db::Crate, target: &Target) ->
         match key {
             "rustc-link-lib" => asked.libs.extend(lib_of(value)),
             "rustc-link-search" => asked.search.extend(target.search(value)),
-            "rustc-link-arg" | "rustc-link-arg-bins" => asked.args.push(value.to_owned()),
+            "rustc-link-arg" => asked.args.push(value.to_owned()),
+            "rustc-link-arg-bins" if !cdylib => asked.args.push(value.to_owned()),
+            "rustc-cdylib-link-arg" | "rustc-link-arg-cdylib" if cdylib => {
+                asked.args.push(value.to_owned())
+            }
             "rustc-flags" => {
                 let mut flags = value.split_whitespace();
                 while let Some(flag) = flags.next() {
