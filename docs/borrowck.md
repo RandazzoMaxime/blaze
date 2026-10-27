@@ -256,7 +256,9 @@ All of these are rustc's, written from `compiler/rustc_borrowck` at the pinned n
   rustc picks the captured lifetime a
   region becomes and checks the body with that choice; ra-jit only tests that one exists, so
   it reports E0700 where rustc does and leaves the errors that choice causes unreported.
-- Closures: captures, E0373, `FnMut` escapes, E0596 and E0594 through captures. A closure's
+- Closures: captures, E0373, `FnMut` escapes, E0596 and E0594 through captures. A capture's
+  borrow is reported at the first use of the place in the closure (rustc's `path_expr_id`,
+  which `compute_min_captures` keeps from the capture recorded first). A closure's
   body has two kinds of universal region, as rustc's: its own (the late-bound lifetimes of
   its signature, `for<'a> FnOnce(&'a T)`, and the borrow of its environment) and its
   creator's (every other region of its type, and the enclosing item's lifetime parameters,
