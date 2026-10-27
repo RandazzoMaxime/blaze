@@ -20,7 +20,7 @@ type ManifestLine = { id: string; block: string; src: string; duration: number; 
 type Manifest = { doc: string; duration: number; lines: ManifestLine[]; voice?: { id: string; attribution: string } };
 
 const SPEEDS = [0.75, 1, 1.25, 1.5, 1.75, 2];
-const SPEED_KEY = 'ra-jit:listen-speed';
+const SPEED_KEY = 'blaze:listen-speed';
 const INTRO = '_intro';
 /** Hover controls and the like inside a block: never part of its words. */
 const NOT_TEXT = '.c-btn, .c-thread, .c-form, .say-btn, sup.cite, button, form, script, style';
@@ -377,7 +377,7 @@ function start(root: HTMLElement, m: Manifest, base: URL) {
 	});
 
 	if ('mediaSession' in navigator) {
-		navigator.mediaSession.metadata = new MediaMetadata({ title: document.querySelector('h1')?.textContent ?? document.title, artist: 'ra-jit' });
+		navigator.mediaSession.metadata = new MediaMetadata({ title: document.querySelector('h1')?.textContent ?? document.title, artist: 'blaze' });
 		navigator.mediaSession.setActionHandler('play', resume);
 		navigator.mediaSession.setActionHandler('pause', pause);
 		navigator.mediaSession.setActionHandler('previoustrack', () => go(cur - 1));

@@ -10,7 +10,7 @@ export function seconds(v: number | null | undefined) {
 	return v < 1 ? `${Math.round(v * 1000)} ms` : `${v.toFixed(2)} s`;
 }
 
-/** cargo's time over ra-jit's: "5.0x", "14x", or "2.0x slower" when ra-jit took longer. */
+/** cargo's time over blaze's: "5.0x", "14x", or "2.0x slower" when blaze took longer. */
 export function speedup(cargo: number | undefined, ours: number | undefined) {
 	if (!cargo || !ours) return '';
 	const ratio = cargo / ours;
@@ -83,7 +83,7 @@ export const MODES: Record<string, string> = {
 	socket: 'One edit, sent to the daemon',
 	burst: 'Typing, keystroke to running',
 	replay: 'Replayed edits',
-	cargo: 'Save, then cargo ra-jit build',
+	cargo: 'Save, then cargo blaze build',
 };
 
 export const projectName = (project: string, tag: string | undefined) =>

@@ -10,7 +10,7 @@ export type Phase = {
 	cargo_max_s?: number;
 	warm_store_s?: number;
 	rss_mb?: number;
-	/** The most every process doing the work held at once (harness/memory.py): ra-jit's, and cargo's. */
+	/** The most every process doing the work held at once (harness/memory.py): blaze's, and cargo's. */
 	mem_mb?: number;
 	cargo_mem_mb?: number;
 	/** What the daemon held once the phase was over. */
@@ -61,7 +61,7 @@ export type ProjectHistory = {
 	/** The daemon once ready, and after the run's edits. */
 	residentReady: Column;
 	residentEnd: Column;
-	/** On disk: ra-jit's target directory, store and home; cargo's target directory. */
+	/** On disk: blaze's target directory, store and home; cargo's target directory. */
 	disk: Column;
 	cargoDisk: Column;
 	phases: Record<string, PhaseHistory>;
@@ -133,7 +133,7 @@ function run(line: Json): Run {
 	return {
 		date: str(line.date) ?? '',
 		commit: str(line.commit),
-		runUrl: str(line.run_url),
+		runUrl: runUrl(line.run_url),
 		platform: platformOf(line),
 		machine: str(line.machine),
 		cpu: str(line.cpu),
@@ -176,7 +176,9 @@ function column(values: (number | undefined)[]): Column {
 	return values.some((v) => v !== undefined) ? values.map((v) => v ?? null) : [];
 }
 
-const point = (line: Json): Point => ({ date: str(line.date) ?? '', commit: str(line.commit), runUrl: str(line.run_url) });
+/** A run's CI link; runs from before the rename name the repo indexable-inc/ra-jit, which GitHub redirects to blaze. */
+const runUrl = (v: unknown): string | undefined => str(v)?.replace('github.com/indexable-inc/ra-jit/', 'github.com/indexable-inc/blaze/');
+const point = (line: Json): Point => ({ date: str(line.date) ?? '', commit: str(line.commit), runUrl: runUrl(line.run_url) });
 
 /** The lines of every file, in file order, that are an object with a known suite and results. */
 function lines(files: string[]): Json[] {
