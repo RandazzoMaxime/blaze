@@ -50,7 +50,11 @@ fn braces(cx: &Cx<'_, '_, '_>) -> FxHashMap<String, (char, char)> {
 }
 
 pub(super) fn check_call(cx: &mut Cx<'_, '_, '_>, call: &ast::MacroCall) {
-    if !cx.on(LINT) {
+    // clippy's `unnested_or_local` is meant to let a call inside a local macro through, but
+    // stock clippy lints no call inside another's arguments, local or not (`vec!(..)` in
+    // `assert!(..)`, `println!(..)` or a `macro_rules!` of the crate); what an attribute
+    // macro such as `#[test]` hands back is linted.
+    if !cx.on(LINT) || cx.in_bang_call() {
         return;
     }
     let (Some(path), Some(tt)) = (call.path(), call.token_tree()) else { return };

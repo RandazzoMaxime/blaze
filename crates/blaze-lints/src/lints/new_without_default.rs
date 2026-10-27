@@ -2,11 +2,13 @@
 //! `Default`.
 //!
 //! Follows clippy's `clippy_lints/src/new_without_default.rs` at rust-lang/rust
-//! 12433c307b5a497388ffe2f4e49dbf1ab8c71fa0 (MIT or Apache-2.0). A `new` is taken to be
-//! exported when it and its type are `pub`, rustc's effective visibilities not being computed;
-//! an impl or a `new` with a `where` clause is not linted, its suggestion not being ported.
+//! 12433c307b5a497388ffe2f4e49dbf1ab8c71fa0 (MIT or Apache-2.0). Where clippy asks whether the
+//! `new` is reachable from outside the crate (rustc's effective visibilities), a `pub` `new` of
+//! a type another crate can name, by its path or a `pub use`, is taken to be: a type reachable
+//! only through a public signature is not, so its `new` is missed rather than linted wrongly.
+//! An impl or a `new` with a `where` clause is not linted, its suggestion not being ported.
 
-use hir::{HasVisibility as _, HirDisplay as _};
+use hir::HirDisplay as _;
 use ide_db::famous_defs::FamousDefs;
 use syntax::{
     AstNode, TextRange,
@@ -32,6 +34,14 @@ pub(super) fn check(cx: &mut Cx<'_, '_, '_>, imp: &ast::Impl) {
     }
 }
 
+/// Whether another crate can name `adt`: rust-analyzer's import map of the crate has it.
+fn exported(cx: &Cx<'_, '_, '_>, adt: hir::Adt) -> bool {
+    let db = cx.db();
+    let map = hir::import_map::ImportMap::of(db, cx.krate().into());
+    let item = hir::ItemInNs::from(hir::ModuleDef::Adt(adt));
+    item.try_into().ok().and_then(|item| map.import_info_for(item)).is_some()
+}
+
 fn check_new(cx: &mut Cx<'_, '_, '_>, imp: &ast::Impl, impl_range: TextRange, function: &ast::Fn) {
     let db = cx.db();
     let Some(params) = function.param_list() else { return };
@@ -50,7 +60,7 @@ fn check_new(cx: &mut Cx<'_, '_, '_>, imp: &ast::Impl, impl_range: TextRange, fu
     };
     let self_ty = impl_def.self_ty(db);
     let Some(adt) = self_ty.as_adt() else { return };
-    if adt.visibility(db) != hir::Visibility::Public {
+    if !exported(cx, adt) {
         return;
     }
     let target = cx.krate().to_display_target(db);

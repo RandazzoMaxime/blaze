@@ -870,16 +870,23 @@ nushell, biome) so that they cover 90% of what it reported there:
 
 `harness/clippydiff.py` holds them to stock clippy: it runs both with `--message-format=json`
 and compares each diagnostic by lint, file, line and column, then its rendered text, and the
-exit status. `harness/clippy-fixture` is a crate that exercises every lint. Run on dev-aws-14 at
-efb342ddd7, 2026-10-27, with `cargo blaze clippy --workspace --all-targets` against the pinned
-nightly's `cargo clippy --workspace --all-targets --message-format=json`:
+exit status. `harness/clippy-fixture` is a crate that exercises every lint. Run on dev-aws-14 on
+2026-10-27, with `cargo blaze clippy --workspace --all-targets` against the pinned nightly's
+`cargo clippy --workspace --all-targets --message-format=json`; biome with its `*_analyze`
+packages under `unsandboxed-build-scripts` (they write their lists of rules into their own
+`src`, which blaze's sandbox refuses):
 
 | App | Stock diagnostics | Of the lints ported | Matched | Missed | Extra | Rendered the same | Exit status, stock and blaze |
 |---|---|---|---|---|---|---|---|
 | ripgrep | 676 | 553 | 553 | 0 | 0 | 553 | 0 and 0 |
 | fd | 14 | 14 | 14 | 0 | 0 | 14 | 0 and 0 |
-| helix | 57 | 20 | 0 | 20 | 0 | 0 | 0 and 101 |
+| helix | 57 | 20 | 20 | 0 | 0 | 20 | 0 and 0 |
 | biome | 971 | 969 | 0 | 969 | 0 | 0 | 0 and 101 |
+| `harness/clippy-fixture` | 53 | 53 | 53 | 0 | 0 | 53 | 101 and 101 |
+
+On ripgrep, fd and helix, 587 of stock's 747 diagnostics (78.6%) are written the same; the 160
+missed are all of lints not ported, most of them `doc_lazy_continuation` (40),
+`explicit_auto_deref` (11) and `derivable_impls` (11).
 
 Over the five apps stock clippy wrote 1718 diagnostics (each counted once, by lint and place),
 1556 of them (90.6%) of the lints ported. Its most frequent: `empty_enums` 540,
@@ -892,9 +899,10 @@ order the crates finish in, with the `(N duplicates)` count that follows from it
 
 What is not done:
 
-- helix and biome lint nothing: `cargo blaze check` of them fails with lifetime and borrow
-  errors stock rustc does not give (helix: E0521 and E0716 in four crates; biome: E0309,
-  E0311 and others in 29), and a crate that does not check is not linted.
+- biome lints nothing: `cargo blaze check` of it fails in `biome_analyze` and `biome_wasm`
+  with errors stock rustc does not give ([#423](https://github.com/indexable-inc/blaze/issues/423):
+  the trait of an impl a proc-macro derive writes is not in scope in its body), and the crates
+  that depend on one that does not check are not linted, as cargo does not build them.
 - nushell's stock run fails under `--workspace` (a compile error in `ethnum`), so it has no
   oracle.
 - The deny-by-default (correctness) lints: none fired on the bench apps, and none is ported.

@@ -4,9 +4,10 @@
 //! Follows `rustc_parse_format` and `rustc_builtin_macros/src/format.rs` at rust-lang/rust
 //! 12433c307b5a497388ffe2f4e49dbf1ab8c71fa0 (MIT or Apache-2.0), for what the lints read.
 
+use hir::HasSource as _;
 use syntax::{
     AstNode, SyntaxNode, TextRange,
-    ast::{self, HasName as _},
+    ast::{self, HasAttrs as _, HasName as _},
 };
 
 use crate::check::Cx;
@@ -61,6 +62,8 @@ pub(crate) struct Placeholder {
 /// was handed, as its expansion has them.
 pub(crate) struct FormatCall {
     pub(crate) name: String,
+    /// Whether it is one of std's macros, not one marked `#[clippy::format_args]`.
+    pub(crate) std: bool,
     pub(crate) placeholders: Vec<Placeholder>,
     pub(crate) args: Vec<ast::Expr>,
     /// The template, its escapes read.
@@ -69,13 +72,14 @@ pub(crate) struct FormatCall {
     pub(crate) template_range: TextRange,
 }
 
-/// `call` as a format macro call, if it is one of std's and its template is a string literal
-/// written in it.
+/// `call` as a format macro call, if it is one of std's or one its definition marks
+/// `#[clippy::format_args]` (as `log`'s are), as clippy's `is_format_macro` has it, and its
+/// template is a string literal written in it.
 pub(crate) fn of(cx: &Cx<'_, '_, '_>, call: &ast::MacroCall) -> Option<FormatCall> {
-    let name = cx.std_macro(call)?;
-    if !MACROS.contains(&name.as_str()) {
-        return None;
-    }
+    let (name, std) = match cx.std_macro(call) {
+        Some(name) => (MACROS.contains(&name.as_str()).then_some(name)?, true),
+        None => (marked_format_args(cx, call)?, false),
+    };
     let input = cx.range(call.token_tree()?.syntax())?;
     let format_args = format_args_in(cx, call, input)?;
     let ast::Expr::Literal(literal) = format_args.template()? else { return None };
@@ -92,7 +96,25 @@ pub(crate) fn of(cx: &Cx<'_, '_, '_>, call: &ast::MacroCall) -> Option<FormatCal
         args.push(expr);
     }
     let placeholders = parse(&template, &names)?;
-    Some(FormatCall { name, placeholders, args, template: template.into_owned(), template_range })
+    Some(FormatCall {
+        name,
+        std,
+        placeholders,
+        args,
+        template: template.into_owned(),
+        template_range,
+    })
+}
+
+/// The name of the macro `call` calls, if its definition has `#[clippy::format_args]`.
+fn marked_format_args(cx: &Cx<'_, '_, '_>, call: &ast::MacroCall) -> Option<String> {
+    let db = cx.db();
+    let mac = cx.sema().resolve_macro_call(call)?;
+    let source = mac.source(db)?.value;
+    let marked = source.attrs().any(|attr| {
+        attr.path().is_some_and(|path| path.syntax().text() == "clippy::format_args")
+    });
+    marked.then(|| mac.name(db).as_str().to_owned())
 }
 
 /// The `format_args!` call `call` expands to, at some depth, whose template is written in

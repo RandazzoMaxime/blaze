@@ -115,6 +115,7 @@ pub fn check(
                 expansion: None,
                 input: None,
                 depth: 0,
+                in_bang: false,
             };
             cx.walk(source.syntax());
         }
@@ -174,6 +175,9 @@ pub(crate) struct Cx<'s, 'a, 'db> {
     input: Option<TextRange>,
     /// How many macro calls deep the walk is.
     depth: u32,
+    /// Whether the walk is in what a function-like macro call expands to, not only in what an
+    /// attribute macro makes of an item.
+    in_bang: bool,
 }
 
 impl<'a, 'db> Cx<'_, 'a, 'db> {
@@ -228,6 +232,12 @@ impl<'a, 'db> Cx<'_, 'a, 'db> {
     /// Whether the walk is in the file's own tree, not in an expansion of a macro.
     pub(crate) fn in_file(&self) -> bool {
         self.expansion.is_none() && self.input.is_none()
+    }
+
+    /// Whether the walk is in the arguments of a function-like macro call, as `vec!` is in
+    /// `assert!(f(vec![]))`.
+    pub(crate) fn in_bang_call(&self) -> bool {
+        self.in_bang
     }
 
     /// Where `node`, of the file or of an expansion, is written in the file being walked, if
@@ -537,9 +547,11 @@ impl<'a, 'db> Cx<'_, 'a, 'db> {
         let Some(input) = self.range(tt.syntax()).or(self.input) else { return };
         let Some(expanded) = self.sema().expand_macro_call(call) else { return };
         let outer = self.input.replace(input);
+        let outer_bang = std::mem::replace(&mut self.in_bang, true);
         self.depth += 1;
         self.walk(&expanded.value);
         self.depth -= 1;
+        self.in_bang = outer_bang;
         self.input = outer;
     }
 

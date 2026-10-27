@@ -8,6 +8,11 @@ All notable changes to ra-jit are written here. The format follows
 
 ### Added
 
+- `nonstandard_macro_braces` no longer lints a call inside another macro's arguments
+  (`vec!(..)` in `assert!(..)`), which stock clippy leaves alone; `new_without_default`
+  takes a type to be exported only when another crate can name it; the format lints read
+  macros marked `#[clippy::format_args]`, as `log`'s are. helix's 20 diagnostics of the
+  ported lints are now all written as stock clippy writes them, with none extra.
 - `cargo blaze clippy` (and `blaze clippy`) lints with blaze's own lints, `crates/blaze-lints`:
   24 of clippy's ported onto rust-analyzer's analysis and run by the daemon, with no cargo,
   rustc or clippy-driver started. They are written as `cargo clippy` writes them (rustc's

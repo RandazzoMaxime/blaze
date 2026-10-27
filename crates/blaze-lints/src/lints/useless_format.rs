@@ -24,7 +24,7 @@ pub(super) fn check(cx: &mut Cx<'_, '_, '_>, call: &ast::MacroCall) {
         return;
     };
     let Some(call_site) = cx.range(call.syntax()) else { return };
-    if format.name != "format" {
+    if !format.std || format.name != "format" {
         return;
     }
     // `&format!(..)`, which the argument or the literal itself would serve.
