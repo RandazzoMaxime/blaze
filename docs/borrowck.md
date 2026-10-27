@@ -791,6 +791,13 @@ slowest bodies now are `tool_router` (108 ms, constraints), helix's `keymap::def
 liveness over 37k points) and nushell's `ParseError::labels` and `ShellError::labels` (53 ms
 each, constraints).
 
+A goal whose answer names a placeholder of a `for<'a>`, or a variable of a universe past the
+root, is proven by the query too: its universes are the query's own, which the body makes anew
+in the same order and instantiates, as rustc's canonical query response. It was proven again in
+the body on every check, and one such goal of rmcp's `#[tool_router]`,
+`(Tool, fn): IntoToolRoute<_, AsyncMethodAdapter<..>>`, took nushell's `tool_router` 107 ms; it
+is 0.3 ms now. Nothing else moves (bench/results/2026-10-27-borrowck-speed-placeholders).
+
 ## Debugging
 
 - `echo file.rs | ra-jit borrowck --edition 2021` prints a file's diagnostics as JSON.
