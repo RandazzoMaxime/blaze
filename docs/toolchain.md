@@ -97,7 +97,7 @@ Measured 2026-10-27, on the first bump the workflow made.
   newest usable nightly is that day's. How far behind main is comes from the gates alone: the
   run at 05:40 UTC takes a nightly about 4 to 6 hours old, which lands hours later, so main's pin
   is under a day old on a green day and one day older for each red day.
-- **The first bump** (nightly-2026-10-27, #543): dispatched 11:40:01Z, merged 16:53:36Z, 5 h 14
+- **The first bump** (to the nightly of 2026-10-27, #543): dispatched 11:40:01Z, merged 16:53:36Z, 5 h 14
   min. The bump and the answers of three hosts took 80 s. The train took 2 h 11 min (most of it
   the `projects (nushell)` jobs, red on main too, running into their 120-minute timeout), the
   verdict 32 min waiting for `toolchain/base`'s train, the rerun of one job red only on the bump
