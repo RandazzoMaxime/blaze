@@ -8,6 +8,11 @@ difference is a failure. So is a function ra-jit refused, in the harnesses that 
 There are also Rust unit tests in `crates/ra-jit` and in the code generator; the harnesses
 are what carries the weight.
 
+`checktargets.py` compares plain and explicit-test checks with cargo, using workspace and
+registry dev-dependencies (#634). Errors in unselected tests, examples and benches must not
+fail a plain check; errors in libraries and binaries must, and an all-targets check must
+report the dev targets' errors.
+
 ## Running them
 
 You need Python 3, the pinned nightly (`harness/toolchain`, `nightly-2026-10-25`) with
