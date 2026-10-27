@@ -353,7 +353,9 @@ Outside the shell, fetch the same archive and point the build at it:
 
 `build.rs` checks the prefix's `blaze-llvm.json` against the pin and stops otherwise: neither
 Homebrew's LLVM nor a distribution's is a source. LLVM is linked in statically, and on Linux so
-is libstdc++, so a binary built with the feature needs no LLVM where it runs. CI and Windows
+is libstdc++, so a binary built with the feature needs no LLVM where it runs. inkwell's llvm-sys
+does the linking (vendored in `vendor/llvm-sys` for the static libstdc++; its SOURCE.md says why
+the libraries must come from a crate below inkwell for GNU ld). CI and Windows
 fetch the archive the same way (`.github/actions/toolchain`).
 
 The archives are built by the `llvm` workflow (`.github/workflows/llvm.yaml`, recipe

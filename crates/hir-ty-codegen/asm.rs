@@ -711,8 +711,7 @@ pub(super) fn inline(
             AsmPiece::Lit(lit) => lit
                 .split(|it: char| !it.is_ascii_alphanumeric())
                 .any(|word| ["ah", "bh", "ch", "dh"].contains(&word.to_ascii_lowercase().as_str())),
-        })
-        || operands.iter().any(|operand| {
+        }) || operands.iter().any(|operand| {
             matches!(operand, Operand::Reg { reg: InlineAsmRegOrRegClass::Reg(name), .. }
                 if HIGH.contains(&name.as_str().trim_matches('"')))
         }));

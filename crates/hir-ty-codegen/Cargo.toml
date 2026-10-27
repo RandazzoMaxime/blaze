@@ -54,20 +54,16 @@ target-lexicon = "0.13"
 object = { version = "0.37", default-features = false, features = ["read", "std", "elf", "macho", "coff"] }
 wasm-encoder = { version = "0.244", default-features = false, features = ["std"] }
 sha2 = "0.10"
-# The LLVM backend, against the LLVM 23 blaze pins (llvm.json beside build.rs), linked in statically
-# (build.rs). Nothing of LLVM's calls into libffi, so inkwell need not link it.
+# The LLVM backend, against the LLVM 23 blaze pins (llvm.json beside build.rs, checked there).
+# inkwell's llvm-sys (vendor/llvm-sys) links it statically, with libstdc++ on Linux. Nothing of
+# LLVM's calls into libffi, so inkwell need not link it.
 inkwell = { version = "0.11.0", default-features = false, features = ["llvm23-1-prefer-static", "target-x86", "target-aarch64", "no-libffi-linking"], optional = true }
-
-# inkwell's llvm-sys, built without linking LLVM itself: build.rs links the pinned one. On Windows
-# llvm-sys links it, from the same release (LLVM_SYS_231_PREFIX).
-[target.'cfg(not(windows))'.dependencies]
-llvm-sys = { version = "231.0.1", features = ["no-llvm-linking"], optional = true }
 
 [dev-dependencies]
 ra-jit-fuzz.workspace = true
 
 [features]
-llvm = ["dep:inkwell", "dep:llvm-sys"]
+llvm = ["dep:inkwell"]
 # The compiler as a WebAssembly module itself: see `crates/ra-jit-wasm`.
 wasm = []
 

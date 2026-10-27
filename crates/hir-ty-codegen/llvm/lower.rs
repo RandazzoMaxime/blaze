@@ -938,9 +938,8 @@ impl<'ctx, 'f> Lowering<'ctx, 'f> {
         pointees: &[(u32, Pointee)],
         mut add: impl FnMut(AttributeLoc, Attribute),
     ) {
-        let attribute = |name, value| {
-            context.create_enum_attribute(super::attribute_kind(name), value)
-        };
+        let attribute =
+            |name, value| context.create_enum_attribute(super::attribute_kind(name), value);
         for &(at, pointee) in pointees {
             let loc = AttributeLoc::Param(at);
             add(loc, attribute("noundef", 0));

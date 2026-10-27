@@ -1,15 +1,16 @@
-//! The `llvm` feature links the one LLVM blaze pins (`llvm.json` beside this script: LLVM
-//! 23.1.4, built by .github/scripts/llvm.py and fetched by its sha256) and no other,
-//! statically: a binary built with the feature needs no libLLVM where it runs.
+//! The `llvm` feature builds against the one LLVM blaze pins (`llvm.json` beside this script:
+//! LLVM 23.1.4, built by .github/scripts/llvm.py and fetched by its sha256) and no other.
 //!
 //! `LLVM_SYS_231_PREFIX` names the prefix. Its `blaze-llvm.json`, written by the build, must name
 //! the pinned commit and version, and its `llvm-config` must say that version: neither a
 //! distribution's LLVM nor Homebrew's is a source, and a prefix that is not the pinned one stops
-//! the build with one message. llvm-sys is built with `no-llvm-linking`, so this script does the
-//! linking; on Windows llvm-sys links the same prefix itself (`llvm-sys`'s static mode).
+//! the build with one message.
 //!
-//! On Linux the C++ runtime LLVM is written against, libstdc++, is linked in statically too:
-//! a release binary then asks a system for nothing of C++. On macOS it is the system's libc++.
+//! inkwell's llvm-sys (vendor/llvm-sys) links that prefix statically, and on Linux the C++
+//! runtime LLVM is written against, libstdc++, too: a binary built with the feature needs no
+//! libLLVM and no C++ runtime where it runs. On macOS the C++ runtime is the system's libc++.
+//! The linking is llvm-sys's and not this script's because a crate's native libraries come right
+//! after its rlib on the link line, and inkwell, which calls LLVM, comes after this crate.
 
 use std::{
     env,
@@ -48,7 +49,10 @@ fn main() {
     let marker = prefix.join(MARKER);
     println!("cargo::rerun-if-changed={}", marker.display());
     if !marker.exists() {
-        return refuse(format!("`{}` has no {MARKER}, so it is not a build of it", prefix.display()));
+        return refuse(format!(
+            "`{}` has no {MARKER}, so it is not a build of it",
+            prefix.display()
+        ));
     }
     let built = read_json(&marker);
     if field(&built, "commit") != commit || field(&built, "version") != version {
@@ -65,51 +69,6 @@ fn main() {
     if said.trim() != version {
         return refuse(format!("`{}` says {}", config.display(), said.trim()));
     }
-    // llvm-sys links it on Windows.
-    if env::var_os("CARGO_CFG_WINDOWS").is_some() {
-        return;
-    }
-
-    println!("cargo::rustc-link-search=native={}", ask(&config, &["--libdir"]).trim());
-    // Every library, in the order llvm-config gives (each before what it needs); the linker takes
-    // from each only what something calls. `-bundle`: the archives are named to the final link,
-    // not copied into this crate's rlib.
-    for file in ask(&config, &["--libnames", "--link-static"]).split_whitespace() {
-        let name = file
-            .strip_prefix("lib")
-            .and_then(|n| n.strip_suffix(".a"))
-            .unwrap_or_else(|| panic!("{file} is not a static library"));
-        println!("cargo::rustc-link-lib=static:-bundle={name}");
-    }
-    for flag in ask(&config, &["--system-libs", "--link-static"]).split_whitespace() {
-        let name =
-            flag.strip_prefix("-l").unwrap_or_else(|| panic!("{flag} is not a library flag"));
-        println!("cargo::rustc-link-lib=dylib={name}");
-    }
-    if env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("macos") {
-        println!("cargo::rustc-link-lib=dylib=c++");
-    } else {
-        let archive = cxx_archive();
-        let dir = archive.parent().expect("libstdc++.a is in a directory");
-        println!("cargo::rustc-link-search=native={}", dir.display());
-        println!("cargo::rustc-link-lib=static:-bundle=stdc++");
-    }
-}
-
-/// libstdc++.a of the C++ compiler cargo's `cc` would use (`CXX`, else `c++`).
-fn cxx_archive() -> PathBuf {
-    println!("cargo::rerun-if-env-changed=CXX");
-    let cxx = env::var("CXX").unwrap_or_else(|_| "c++".to_owned());
-    let found = ask(Path::new(&cxx), &["-print-file-name=libstdc++.a"]);
-    let path = PathBuf::from(found.trim());
-    assert!(
-        path.is_absolute() && path.exists(),
-        "`{cxx} -print-file-name=libstdc++.a` found no libstdc++.a ({}): the `llvm` feature links \
-         libstdc++ statically, so install the C++ compiler's static library (Debian and Ubuntu: \
-         libstdc++-<version>-dev)",
-        path.display()
-    );
-    path
 }
 
 fn ask(program: &Path, args: &[&str]) -> String {
@@ -135,9 +94,7 @@ fn read_json(path: &Path) -> String {
 /// The string value of the top-level `"key": "value"` in `json` (none of the values it is asked
 /// for holds a quote or a backslash).
 fn field(json: &str, key: &str) -> String {
-    let at = json
-        .find(&format!("\"{key}\""))
-        .unwrap_or_else(|| panic!("no \"{key}\" in {json}"));
+    let at = json.find(&format!("\"{key}\"")).unwrap_or_else(|| panic!("no \"{key}\" in {json}"));
     let rest = &json[at + key.len() + 2..];
     let rest = rest.trim_start().strip_prefix(':').expect("a `:` after the key").trim_start();
     let rest = rest.strip_prefix('"').unwrap_or_else(|| panic!("\"{key}\" is not a string"));

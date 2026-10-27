@@ -521,7 +521,8 @@ each one's section: what `[Unreleased]` had, and the title of each change merged
   builds that LLVM itself for each target (`.github/workflows/llvm.yaml`) and pins the
   archives by sha256 in `crates/hir-ty-codegen/llvm.json`; the flake, CI and Windows fetch
   them. It is linked in statically, with libstdc++ on Linux, so a binary built with
-  `--features llvm` loads no libLLVM. LLVM 21 removed `nocapture`: an `sret` parameter is
+  `--features llvm` loads no libLLVM. llvm-sys links it (`vendor/llvm-sys`), so GNU ld sees the
+  archives after inkwell, which calls them. LLVM 21 removed `nocapture`: an `sret` parameter is
   `captures(none)`, and an attribute name the linked LLVM does not know now panics naming it
   rather than crashing LLVM's verifier.
 - The site moved to [ix.dev/blaze](https://ix.dev/blaze/). https://ra-jit.ix.dev and
