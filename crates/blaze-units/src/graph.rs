@@ -706,8 +706,11 @@ impl<'a> State<'_, 'a> {
                 .filter(|(_, t)| t.is_bin())
                 .filter(|(_, t)| match &t.required_features {
                     Some(required) => {
-                        let features =
-                            self.resolve_all_features(unit.pkg, false, std::slice::from_ref(&unit.kind));
+                        let features = self.resolve_all_features(
+                            unit.pkg,
+                            false,
+                            std::slice::from_ref(&unit.kind),
+                        );
                         required.iter().all(|f| features.contains(f))
                     }
                     None => true,

@@ -4,11 +4,7 @@
 //! directory. `harness/resolve.py units` compares the two. Each cfg file is what
 //! `rustc --print cfg --target TRIPLE` prints, which the harness asks.
 
-#![allow(
-    clippy::print_stderr,
-    clippy::print_stdout,
-    reason = "a command line program"
-)]
+#![allow(clippy::print_stderr, clippy::print_stdout, reason = "a command line program")]
 
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
