@@ -167,10 +167,10 @@ the typed `cargo blaze` included):
 
 | run | before | sysroot read by blaze | and the toolchain's answers | and blaze-units' graph |
 |---|---|---|---|---|
-| harness/norustc/fixture `build` | 14 | 8 | 3 | @FB@ |
-| harness/norustc/fixture `test` | 12 | 8 | 3 | @FT@ |
-| ripgrep 15.1.0 `build` | 26 | 8 | 3 | @RB@ |
-| ripgrep 15.1.0 `test` | 43 | 15 | 5 | @RT@ |
+| harness/norustc/fixture `build` | 14 | 8 | 3 | 2 |
+| harness/norustc/fixture `test` | 12 | 8 | 3 | 2 |
+| ripgrep 15.1.0 `build` | 26 | 8 | 3 | 2 |
+| ripgrep 15.1.0 `test` | 43 | 15 | 5 | 3 |
 
 Left per workspace load: rust-analyzer's `cargo check --compile-time-deps`.
 
