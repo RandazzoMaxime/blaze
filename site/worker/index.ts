@@ -1,5 +1,5 @@
 /**
- * The ra-jit site worker, at https://ix.dev/blaze/ (worker/base.ts). Every request comes here first
+ * The blaze site worker, at https://ix.dev/blaze/ (worker/base.ts). Every request comes here first
  * (wrangler.jsonc `run_worker_first: true`): an old host or the bare base is redirected, the base is taken off the
  * path, and then, by site path:
  *

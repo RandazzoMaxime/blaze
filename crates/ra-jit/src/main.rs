@@ -573,7 +573,15 @@ fn defined_symbols(path: &Path) -> anyhow::Result<FxHashSet<String>> {
         // compiles itself to be told why. A thread-local is not a "definition" to `object`.
         let defined =
             file.symbols().filter(|it| !it.is_undefined() && it.scope() == SymbolScope::Dynamic);
-        names.extend(defined.filter_map(|it| it.name().ok().map(str::to_owned)));
+        // Mach-O spells every name with an underscore in front, which the names looked up
+        // ([`Resolver::in_prebuilt`]) don't have: with it kept, no function or static of the
+        // prebuilt std was found on macOS, a build script compiled std's itself and stopped
+        // at its first writable static (`GLOBAL_PANIC_COUNT`).
+        let macho = file.format() == object::BinaryFormat::MachO;
+        names.extend(defined.filter_map(|it| {
+            let name = it.name().ok()?;
+            Some(if macho { name.strip_prefix('_').unwrap_or(name) } else { name }.to_owned())
+        }));
     }
     Ok(names)
 }

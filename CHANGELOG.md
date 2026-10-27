@@ -10,6 +10,19 @@ each one's section: what `[Unreleased]` had, and the title of each change merged
 
 ### Added
 
+- `cargo blaze doc` (and `blaze doc`) writes the HTML documentation of the packages and their
+  dependencies from rust-analyzer's HIR (`crates/blaze-doc`), with no rustdoc: a page for
+  every item with linked signatures, fields, variants, inherent, trait, blanket and auto
+  impls, implementors and the members an impl leaves as the trait provides them; docs as
+  rustdoc's Markdown with intra-doc links resolved (an unresolved one warns as rustdoc's
+  does); source pages, an "All items" page, a search box (`s` or `/`) over every crate
+  documented, light and dark themes. cargo's flags (`-p`, `--workspace`, `--no-deps`,
+  `--document-private-items`, `--open`, features, `--target`, `--lib`, `--bin`, ...); the
+  workspace loads once and the pages are written in parallel. `harness/docdiff.py` compares
+  it with the pinned nightly's `cargo doc`: on fd and its dependencies blaze writes 100% of
+  rustdoc's pages, 99.9% of the members and impls on them and 99.4% of the resolved links
+  ([docs/doc.md](docs/doc.md)).
+
 - `nonstandard_macro_braces` no longer lints a call inside another macro's arguments
   (`vec!(..)` in `assert!(..)`), which stock clippy leaves alone; `new_without_default`
   takes a type to be exported only when another crate can name it; the format lints read
@@ -531,6 +544,11 @@ each one's section: what `[Unreleased]` had, and the title of each change merged
   working. Every page, script, stylesheet, image, narration file and form sits under `/blaze`
   (`Served` on `site` in `site/content/site.flecs`); pages carry a canonical URL and Open Graph
   tags, `/blaze/sitemap.xml` lists them, and `/blaze/install.sh` serves `install.sh`.
+- The site says blaze, not ra-jit: page titles, the top bar, `og:site_name`, the home page, the
+  charter, the RFCs, `/bench` and `/updates`, and their narration, voiced again. ra-jit is left
+  only where it is still the literal name: the `ra-jit-live` crate and `#[ra_jit::cache]`, and
+  the line that blaze was called ra-jit until 2026-10-24 and `cargo ra-jit` still works.
+  Comments keep their pages and blocks (ids unchanged).
 - No `cargo blaze` command is passed to cargo any more (Andrew, 2026-10-26: commands that are
   no builds "should go to us and not cargo"). `metadata`, `locate-project`, `verify-project`,
   `version` and `help` are blaze's own, from blaze-manifest, blaze-registry and blaze-resolve
@@ -932,6 +950,15 @@ each one's section: what `[Unreleased]` had, and the title of each change merged
 - The LLVM backend's store: a function's key has the `asm!` blocks LLVM puts in place of its
   calls of their wrappers. Two functions that each pass a `u64` through a block of their own
   were one key, and the second got the first's code.
+- `cargo blaze doc` documents the crates cargo does: of two of one name the one cargo keeps
+  (none of a proc macro's two `syn`s), nothing only a left-out one or a test needs. It links
+  a crate not documented at its `html_root_url`, finds blanket impls of every crate linked and
+  applies them as solved in the documented crate, leaves out more provided methods that
+  cannot apply, warns of a broken link where rustdoc does (lint levels, `cfg_attr`, no
+  warning in another crate's macro), and documents what a macro expands to past
+  rust-analyzer's token limit (biome_wasm's 2271 types). Against `cargo doc`, biome goes from
+  93.5% to 99.0% of the pages, helix from 98.2% to 99.0% of the members and impls; docs/doc.md
+  has all five bench apps.
 - The borrow checker reports nothing on helix (14 false errors before) or biome (534), as
   rustc does; ripgrep, fd and nushell stay at none, and the UI scores are unchanged (Polonius
   1545 of 1585, NLL 1542 of 1583). It follows rustc where it did not: the outlives

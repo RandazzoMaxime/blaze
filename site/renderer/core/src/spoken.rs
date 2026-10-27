@@ -283,8 +283,8 @@ mod tests {
     #[test]
     fn sayable_lines() {
         assert_eq!(
-            sayable("cargo 1.76 s, ra-jit 0.42 s"),
-            "cargo 1.76 seconds, ra-jit 0.42 seconds."
+            sayable("cargo 1.76 s, blaze 0.42 s"),
+            "cargo 1.76 seconds, blaze 0.42 seconds."
         );
         assert_eq!(sayable("see RFC 0001 [warm] <b>"), "see RFC 1 warm b.");
         assert_eq!(sayable("Open question: Syntax"), "Open question: Syntax.");

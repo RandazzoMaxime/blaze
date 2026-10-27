@@ -7,6 +7,7 @@ mod args;
 mod clean;
 mod clippy;
 mod config;
+mod doc;
 mod fmt;
 mod manifest;
 mod new;
@@ -73,12 +74,7 @@ pub(crate) const SUBCOMMANDS: &[Subcommand] = &[
     aka("test", &["t"], Status::Build, "build and run the tests"),
     sub("fmt", Status::Own, "format the source"),
     sub("clippy", Status::Own, "lint the source with clippy's lints, blaze's own"),
-    aka(
-        "doc",
-        &["d"],
-        Status::Not("blaze's documentation is being written"),
-        "write the documentation",
-    ),
+    aka("doc", &["d"], Status::Own, "write the documentation"),
     sub("metadata", Status::Own, "the workspace and its resolved dependencies, as JSON"),
     sub("locate-project", Status::Own, "the manifest of the package or workspace"),
     sub("verify-project", Status::Own, "whether the manifest reads"),
@@ -141,6 +137,7 @@ pub(crate) fn command(args: Vec<String>) -> anyhow::Result<i32> {
         "metadata" => manifest::metadata(Args::new(rest)),
         "locate-project" => manifest::locate_project(Args::new(rest)),
         "verify-project" => manifest::verify_project(Args::new(rest)),
+        "doc" => doc::command(rest),
         "tree" => tree::command(Args::new(rest)),
         "pkgid" => manifest::pkgid(Args::new(rest)),
         "read-manifest" => manifest::read_manifest(Args::new(rest)),

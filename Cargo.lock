@@ -636,6 +636,29 @@ dependencies = [
 ]
 
 [[package]]
+name = "blaze-doc"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "base-db",
+ "either",
+ "hir",
+ "hir-def",
+ "hir-expand",
+ "ide-db",
+ "intern",
+ "parser",
+ "pulldown-cmark",
+ "rayon",
+ "rustc-hash 2.1.2",
+ "serde_json",
+ "span",
+ "syntax",
+ "test-fixture",
+ "vfs",
+]
+
+[[package]]
 name = "blaze-fmt"
 version = "0.1.0"
 dependencies = [
@@ -3411,6 +3434,7 @@ dependencies = [
  "aws-config",
  "aws-sdk-s3",
  "aws-smithy-http-client",
+ "blaze-doc",
  "blaze-fmt",
  "blaze-lints",
  "blaze-manifest",

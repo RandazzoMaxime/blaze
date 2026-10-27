@@ -138,7 +138,7 @@ pub fn plain(text: &str, refs: &Refs, wher: &str) -> Result<String, String> {
 }
 
 /// A reference's label as said in a sentence: an identifier before a colon is dropped (`rust-lang/rust#24292: JoinGuard
-/// is unsound ...` is "JoinGuard is unsound ...", `ra-jit: the function cache` is "the function cache").
+/// is unsound ...` is "JoinGuard is unsound ...", `blaze: the function cache` is "the function cache").
 fn said_label(label: &str) -> String {
     match label.split_once(": ") {
         Some((head, rest)) if !head.contains(' ') && !rest.is_empty() => rest.to_string(),
