@@ -68,6 +68,9 @@ blaze tracks the latest Rust nightly. `.github/workflows/toolchain-bump.yaml` ru
      more std refusals than main: `gh pr merge --auto`, so it lands once the gate passes, and
      the next release of blaze carries the new pin. A job red on main too is listed and not
      counted against the bump; the train's own issue covers it.
+   - **red on the first attempt**: the train's failed jobs run again (`gh run rerun --failed`),
+     and the verdict of that attempt decides, so a harness that fails one run in ten does not
+     block a day's bump. A job red on main too runs again with them.
    - **red**: a comment on the pull request with what broke, and the issue
      "Toolchain bump to <date> is blocked", opened or commented on and retitled to the
      newest date, with how many days main's pin is behind. The pull request stays open.

@@ -291,7 +291,7 @@ pub(super) fn run(spec: &Spec, program: Option<&[OsString]>) -> Result<i32, Stri
         let code = match sandbox(spec, uid, gid, &made, program.is_none()) {
             Ok(code) => code,
             Err(error) => {
-                eprintln!("ra-jit: the sandbox could not be made: {error}");
+                eprintln!("blaze: the sandbox could not be made: {error}");
                 super::COULD_NOT
             }
         };
@@ -399,7 +399,7 @@ fn sandbox(
         let code = match first_process(&cwd, made, probe) {
             Ok(code) => code,
             Err(error) => {
-                eprintln!("ra-jit: the sandbox could not be made: {error}");
+                eprintln!("blaze: the sandbox could not be made: {error}");
                 super::COULD_NOT
             }
         };
@@ -954,7 +954,7 @@ fn first_process(cwd: &CString, made: &Made<'_>, probe: bool) -> Result<i32, Str
     }
     if program == 0 {
         let error = exec(made);
-        eprintln!("ra-jit: could not run {}: {error}", made.argv[0].to_string_lossy());
+        eprintln!("blaze: could not run {}: {error}", made.argv[0].to_string_lossy());
         unsafe { libc::_exit(127) };
     }
     unsafe { libc::close(made.socket) };

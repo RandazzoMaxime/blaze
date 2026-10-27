@@ -1636,12 +1636,6 @@
     "version": "0.1.11"
    },
    {
-    "checksum": "1d674e81391d1e1ab681a28d99df07927c6d4aa5b027d7da16ba32d1d21ecd99",
-    "name": "fixedbitset",
-    "source": "registry+https://github.com/rust-lang/crates.io-index",
-    "version": "0.5.7"
-   },
-   {
     "checksum": "843fba2746e448b37e26a819579957415c8cef339bf08564fe8b7ddbd959573c",
     "dependencies": [
      "crc32fast",
@@ -2016,7 +2010,6 @@
      "la-arena",
      "macros",
      "oorandom",
-     "petgraph",
      "ra-ap-rustc_abi",
      "ra-ap-rustc_ast_ir",
      "ra-ap-rustc_index",
@@ -3123,17 +3116,6 @@
     "version": "4.0.0"
    },
    {
-    "checksum": "8701b58ea97060d5e5b155d383a69952a60943f0e6dfe30b04c287beb0b27455",
-    "dependencies": [
-     "fixedbitset",
-     "hashbrown 0.15.5",
-     "indexmap"
-    ],
-    "name": "petgraph",
-    "source": "registry+https://github.com/rust-lang/crates.io-index",
-    "version": "0.8.3"
-   },
-   {
     "checksum": "a89322df9ebe1c1578d689c92318e070967d1042b512afbe49518723f4e6d5cd",
     "name": "pin-project-lite",
     "source": "registry+https://github.com/rust-lang/crates.io-index",
@@ -3455,6 +3437,7 @@
      "aws-config",
      "aws-sdk-s3",
      "aws-smithy-http-client",
+     "base64",
      "blaze-doc",
      "blaze-fmt",
      "blaze-lints",
@@ -5896,10 +5879,6 @@
     "paths": {
      "path": "vendor/rust-analyzer/crates/paths",
      "version": "0.0.0"
-    },
-    "petgraph": {
-     "default-features": false,
-     "version": "0.8.2"
     },
     "postcard": {
      "default-features": false,
@@ -8616,23 +8595,6 @@
    },
    "version": "0.1.11"
   },
-  "fixedbitset@0.5.7": {
-   "authors": "bluss",
-   "description": "FixedBitSet is a simple bitset collection",
-   "homepage": "",
-   "license": "MIT OR Apache-2.0",
-   "license_file": "",
-   "links": null,
-   "name": "fixedbitset",
-   "readme": "README.md",
-   "repository": "https://github.com/petgraph/fixedbitset",
-   "rust_version": "1.56",
-   "source": {
-    "checksum": "1d674e81391d1e1ab681a28d99df07927c6d4aa5b027d7da16ba32d1d21ecd99",
-    "kind": "registry"
-   },
-   "version": "0.5.7"
-  },
   "flate2@1.1.9": {
    "authors": "Alex Crichton <alex@alexcrichton.com>:Josh Triplett <josh@joshtriplett.org>",
    "description": "DEFLATE compression and decompression exposed as Read/BufRead/Write streams.\nSupports miniz_oxide and multiple zlib implementations. Supports zlib, gzip,\nand raw deflate streams.\n",
@@ -10859,23 +10821,6 @@
     "kind": "registry"
    },
    "version": "0.4.8"
-  },
-  "petgraph@0.8.3": {
-   "authors": "bluss:mitchmindtree",
-   "description": "Graph data structure library. Provides graph types and graph algorithms.",
-   "homepage": "",
-   "license": "MIT OR Apache-2.0",
-   "license_file": "",
-   "links": null,
-   "name": "petgraph",
-   "readme": "README.md",
-   "repository": "https://github.com/petgraph/petgraph",
-   "rust_version": "1.64",
-   "source": {
-    "checksum": "8701b58ea97060d5e5b155d383a69952a60943f0e6dfe30b04c287beb0b27455",
-    "kind": "registry"
-   },
-   "version": "0.8.3"
   },
   "pin-project-lite@0.2.17": {
    "authors": "",
@@ -20664,26 +20609,6 @@
      "src": "src/lib.rs",
      "target": "find_msvc_tools"
     },
-    "fixedbitset@0.5.7 lib fixedbitset build": {
-     "crate_type": "lib",
-     "deps": [],
-     "edition": "2021",
-     "features": [],
-     "kind": "lib",
-     "mode": "build",
-     "pkg": "fixedbitset@0.5.7",
-     "profile": {
-      "codegen_units": null,
-      "debug_assertions": false,
-      "debuginfo": 0,
-      "name": "release",
-      "opt_level": "3",
-      "overflow_checks": false,
-      "panic": "unwind"
-     },
-     "src": "src/lib.rs",
-     "target": "fixedbitset"
-    },
     "flate2@1.1.9 lib flate2 build": {
      "crate_type": "lib",
      "deps": [
@@ -21400,8 +21325,7 @@
      ],
      "edition": "2021",
      "features": [
-      "default-hasher",
-      "inline-more"
+      "default-hasher"
      ],
      "kind": "lib",
      "mode": "build",
@@ -22297,10 +22221,6 @@
       {
        "name": "oorandom",
        "unit": "oorandom@11.1.5 lib oorandom build"
-      },
-      {
-       "name": "petgraph",
-       "unit": "petgraph@0.8.3 lib petgraph build"
       },
       {
        "name": "ra_ap_rustc_abi",
@@ -26084,39 +26004,6 @@
      "src": "src/lib.rs",
      "target": "percent_encoding"
     },
-    "petgraph@0.8.3 lib petgraph build": {
-     "crate_type": "lib",
-     "deps": [
-      {
-       "name": "fixedbitset",
-       "unit": "fixedbitset@0.5.7 lib fixedbitset build"
-      },
-      {
-       "name": "hashbrown",
-       "unit": "hashbrown@0.15.5 lib hashbrown build"
-      },
-      {
-       "name": "indexmap",
-       "unit": "indexmap@2.14.0 lib indexmap build"
-      }
-     ],
-     "edition": "2021",
-     "features": [],
-     "kind": "lib",
-     "mode": "build",
-     "pkg": "petgraph@0.8.3",
-     "profile": {
-      "codegen_units": null,
-      "debug_assertions": false,
-      "debuginfo": 0,
-      "name": "release",
-      "opt_level": "3",
-      "overflow_checks": false,
-      "panic": "unwind"
-     },
-     "src": "src/lib.rs",
-     "target": "petgraph"
-    },
     "pin-project-lite@0.2.17 lib pin_project_lite build": {
      "crate_type": "lib",
      "deps": [],
@@ -27460,6 +27347,10 @@
        "unit": "aws-smithy-http-client@1.5.0 lib aws_smithy_http_client build"
       },
       {
+       "name": "base64",
+       "unit": "base64@0.23.1 lib base64 build"
+      },
+      {
        "name": "blaze_doc",
        "unit": "blaze-doc@0.1.0 lib blaze_doc build"
       },
@@ -27803,6 +27694,10 @@
       {
        "name": "aws_smithy_http_client",
        "unit": "aws-smithy-http-client@1.5.0 lib aws_smithy_http_client build"
+      },
+      {
+       "name": "base64",
+       "unit": "base64@0.23.1 lib base64 build"
       },
       {
        "name": "blaze_doc",
@@ -28150,6 +28045,10 @@
        "unit": "aws-smithy-http-client@1.5.0 lib aws_smithy_http_client build"
       },
       {
+       "name": "base64",
+       "unit": "base64@0.23.1 lib base64 build"
+      },
+      {
        "name": "blaze_doc",
        "unit": "blaze-doc@0.1.0 lib blaze_doc build"
       },
@@ -28493,6 +28392,10 @@
       {
        "name": "aws_smithy_http_client",
        "unit": "aws-smithy-http-client@1.5.0 lib aws_smithy_http_client build"
+      },
+      {
+       "name": "base64",
+       "unit": "base64@0.23.1 lib base64 build"
       },
       {
        "name": "blaze_doc",
@@ -28840,6 +28743,10 @@
        "unit": "aws-smithy-http-client@1.5.0 lib aws_smithy_http_client build"
       },
       {
+       "name": "base64",
+       "unit": "base64@0.23.1 lib base64 build"
+      },
+      {
        "name": "blaze_doc",
        "unit": "blaze-doc@0.1.0 lib blaze_doc build"
       },
@@ -29183,6 +29090,10 @@
       {
        "name": "aws_smithy_http_client",
        "unit": "aws-smithy-http-client@1.5.0 lib aws_smithy_http_client build"
+      },
+      {
+       "name": "base64",
+       "unit": "base64@0.23.1 lib base64 build"
       },
       {
        "name": "blaze_doc",
@@ -40553,26 +40464,6 @@
      "src": "src/lib.rs",
      "target": "find_msvc_tools"
     },
-    "fixedbitset@0.5.7 lib fixedbitset build": {
-     "crate_type": "lib",
-     "deps": [],
-     "edition": "2021",
-     "features": [],
-     "kind": "lib",
-     "mode": "build",
-     "pkg": "fixedbitset@0.5.7",
-     "profile": {
-      "codegen_units": null,
-      "debug_assertions": false,
-      "debuginfo": 0,
-      "name": "release",
-      "opt_level": "3",
-      "overflow_checks": false,
-      "panic": "unwind"
-     },
-     "src": "src/lib.rs",
-     "target": "fixedbitset"
-    },
     "flate2@1.1.9 lib flate2 build": {
      "crate_type": "lib",
      "deps": [
@@ -41264,8 +41155,7 @@
      ],
      "edition": "2021",
      "features": [
-      "default-hasher",
-      "inline-more"
+      "default-hasher"
      ],
      "kind": "lib",
      "mode": "build",
@@ -42161,10 +42051,6 @@
       {
        "name": "oorandom",
        "unit": "oorandom@11.1.5 lib oorandom build"
-      },
-      {
-       "name": "petgraph",
-       "unit": "petgraph@0.8.3 lib petgraph build"
       },
       {
        "name": "ra_ap_rustc_abi",
@@ -46111,39 +45997,6 @@
      "src": "src/lib.rs",
      "target": "perf_event"
     },
-    "petgraph@0.8.3 lib petgraph build": {
-     "crate_type": "lib",
-     "deps": [
-      {
-       "name": "fixedbitset",
-       "unit": "fixedbitset@0.5.7 lib fixedbitset build"
-      },
-      {
-       "name": "hashbrown",
-       "unit": "hashbrown@0.15.5 lib hashbrown build"
-      },
-      {
-       "name": "indexmap",
-       "unit": "indexmap@2.14.0 lib indexmap build"
-      }
-     ],
-     "edition": "2021",
-     "features": [],
-     "kind": "lib",
-     "mode": "build",
-     "pkg": "petgraph@0.8.3",
-     "profile": {
-      "codegen_units": null,
-      "debug_assertions": false,
-      "debuginfo": 0,
-      "name": "release",
-      "opt_level": "3",
-      "overflow_checks": false,
-      "panic": "unwind"
-     },
-     "src": "src/lib.rs",
-     "target": "petgraph"
-    },
     "pin-project-lite@0.2.17 lib pin_project_lite build": {
      "crate_type": "lib",
      "deps": [],
@@ -47496,6 +47349,10 @@
        "unit": "aws-smithy-http-client@1.5.0 lib aws_smithy_http_client build"
       },
       {
+       "name": "base64",
+       "unit": "base64@0.23.1 lib base64 build"
+      },
+      {
        "name": "blaze_doc",
        "unit": "blaze-doc@0.1.0 lib blaze_doc build"
       },
@@ -47839,6 +47696,10 @@
       {
        "name": "aws_smithy_http_client",
        "unit": "aws-smithy-http-client@1.5.0 lib aws_smithy_http_client build"
+      },
+      {
+       "name": "base64",
+       "unit": "base64@0.23.1 lib base64 build"
       },
       {
        "name": "blaze_doc",
@@ -48186,6 +48047,10 @@
        "unit": "aws-smithy-http-client@1.5.0 lib aws_smithy_http_client build"
       },
       {
+       "name": "base64",
+       "unit": "base64@0.23.1 lib base64 build"
+      },
+      {
        "name": "blaze_doc",
        "unit": "blaze-doc@0.1.0 lib blaze_doc build"
       },
@@ -48529,6 +48394,10 @@
       {
        "name": "aws_smithy_http_client",
        "unit": "aws-smithy-http-client@1.5.0 lib aws_smithy_http_client build"
+      },
+      {
+       "name": "base64",
+       "unit": "base64@0.23.1 lib base64 build"
       },
       {
        "name": "blaze_doc",
@@ -48876,6 +48745,10 @@
        "unit": "aws-smithy-http-client@1.5.0 lib aws_smithy_http_client build"
       },
       {
+       "name": "base64",
+       "unit": "base64@0.23.1 lib base64 build"
+      },
+      {
        "name": "blaze_doc",
        "unit": "blaze-doc@0.1.0 lib blaze_doc build"
       },
@@ -49219,6 +49092,10 @@
       {
        "name": "aws_smithy_http_client",
        "unit": "aws-smithy-http-client@1.5.0 lib aws_smithy_http_client build"
+      },
+      {
+       "name": "base64",
+       "unit": "base64@0.23.1 lib base64 build"
       },
       {
        "name": "blaze_doc",
@@ -60596,26 +60473,6 @@
      "src": "src/lib.rs",
      "target": "find_msvc_tools"
     },
-    "fixedbitset@0.5.7 lib fixedbitset build": {
-     "crate_type": "lib",
-     "deps": [],
-     "edition": "2021",
-     "features": [],
-     "kind": "lib",
-     "mode": "build",
-     "pkg": "fixedbitset@0.5.7",
-     "profile": {
-      "codegen_units": null,
-      "debug_assertions": false,
-      "debuginfo": 0,
-      "name": "release",
-      "opt_level": "3",
-      "overflow_checks": false,
-      "panic": "unwind"
-     },
-     "src": "src/lib.rs",
-     "target": "fixedbitset"
-    },
     "flate2@1.1.9 lib flate2 build": {
      "crate_type": "lib",
      "deps": [
@@ -61332,8 +61189,7 @@
      ],
      "edition": "2021",
      "features": [
-      "default-hasher",
-      "inline-more"
+      "default-hasher"
      ],
      "kind": "lib",
      "mode": "build",
@@ -62229,10 +62085,6 @@
       {
        "name": "oorandom",
        "unit": "oorandom@11.1.5 lib oorandom build"
-      },
-      {
-       "name": "petgraph",
-       "unit": "petgraph@0.8.3 lib petgraph build"
       },
       {
        "name": "ra_ap_rustc_abi",
@@ -66016,39 +65868,6 @@
      "src": "src/lib.rs",
      "target": "percent_encoding"
     },
-    "petgraph@0.8.3 lib petgraph build": {
-     "crate_type": "lib",
-     "deps": [
-      {
-       "name": "fixedbitset",
-       "unit": "fixedbitset@0.5.7 lib fixedbitset build"
-      },
-      {
-       "name": "hashbrown",
-       "unit": "hashbrown@0.15.5 lib hashbrown build"
-      },
-      {
-       "name": "indexmap",
-       "unit": "indexmap@2.14.0 lib indexmap build"
-      }
-     ],
-     "edition": "2021",
-     "features": [],
-     "kind": "lib",
-     "mode": "build",
-     "pkg": "petgraph@0.8.3",
-     "profile": {
-      "codegen_units": null,
-      "debug_assertions": false,
-      "debuginfo": 0,
-      "name": "release",
-      "opt_level": "3",
-      "overflow_checks": false,
-      "panic": "unwind"
-     },
-     "src": "src/lib.rs",
-     "target": "petgraph"
-    },
     "pin-project-lite@0.2.17 lib pin_project_lite build": {
      "crate_type": "lib",
      "deps": [],
@@ -67392,6 +67211,10 @@
        "unit": "aws-smithy-http-client@1.5.0 lib aws_smithy_http_client build"
       },
       {
+       "name": "base64",
+       "unit": "base64@0.23.1 lib base64 build"
+      },
+      {
        "name": "blaze_doc",
        "unit": "blaze-doc@0.1.0 lib blaze_doc build"
       },
@@ -67735,6 +67558,10 @@
       {
        "name": "aws_smithy_http_client",
        "unit": "aws-smithy-http-client@1.5.0 lib aws_smithy_http_client build"
+      },
+      {
+       "name": "base64",
+       "unit": "base64@0.23.1 lib base64 build"
       },
       {
        "name": "blaze_doc",
@@ -68082,6 +67909,10 @@
        "unit": "aws-smithy-http-client@1.5.0 lib aws_smithy_http_client build"
       },
       {
+       "name": "base64",
+       "unit": "base64@0.23.1 lib base64 build"
+      },
+      {
        "name": "blaze_doc",
        "unit": "blaze-doc@0.1.0 lib blaze_doc build"
       },
@@ -68425,6 +68256,10 @@
       {
        "name": "aws_smithy_http_client",
        "unit": "aws-smithy-http-client@1.5.0 lib aws_smithy_http_client build"
+      },
+      {
+       "name": "base64",
+       "unit": "base64@0.23.1 lib base64 build"
       },
       {
        "name": "blaze_doc",
@@ -68772,6 +68607,10 @@
        "unit": "aws-smithy-http-client@1.5.0 lib aws_smithy_http_client build"
       },
       {
+       "name": "base64",
+       "unit": "base64@0.23.1 lib base64 build"
+      },
+      {
        "name": "blaze_doc",
        "unit": "blaze-doc@0.1.0 lib blaze_doc build"
       },
@@ -69115,6 +68954,10 @@
       {
        "name": "aws_smithy_http_client",
        "unit": "aws-smithy-http-client@1.5.0 lib aws_smithy_http_client build"
+      },
+      {
+       "name": "base64",
+       "unit": "base64@0.23.1 lib base64 build"
       },
       {
        "name": "blaze_doc",
@@ -80512,26 +80355,6 @@
      "src": "src/lib.rs",
      "target": "find_msvc_tools"
     },
-    "fixedbitset@0.5.7 lib fixedbitset build": {
-     "crate_type": "lib",
-     "deps": [],
-     "edition": "2021",
-     "features": [],
-     "kind": "lib",
-     "mode": "build",
-     "pkg": "fixedbitset@0.5.7",
-     "profile": {
-      "codegen_units": null,
-      "debug_assertions": false,
-      "debuginfo": 0,
-      "name": "release",
-      "opt_level": "3",
-      "overflow_checks": false,
-      "panic": "unwind"
-     },
-     "src": "src/lib.rs",
-     "target": "fixedbitset"
-    },
     "flate2@1.1.9 lib flate2 build": {
      "crate_type": "lib",
      "deps": [
@@ -81223,8 +81046,7 @@
      ],
      "edition": "2021",
      "features": [
-      "default-hasher",
-      "inline-more"
+      "default-hasher"
      ],
      "kind": "lib",
      "mode": "build",
@@ -82120,10 +81942,6 @@
       {
        "name": "oorandom",
        "unit": "oorandom@11.1.5 lib oorandom build"
-      },
-      {
-       "name": "petgraph",
-       "unit": "petgraph@0.8.3 lib petgraph build"
       },
       {
        "name": "ra_ap_rustc_abi",
@@ -86070,39 +85888,6 @@
      "src": "src/lib.rs",
      "target": "perf_event"
     },
-    "petgraph@0.8.3 lib petgraph build": {
-     "crate_type": "lib",
-     "deps": [
-      {
-       "name": "fixedbitset",
-       "unit": "fixedbitset@0.5.7 lib fixedbitset build"
-      },
-      {
-       "name": "hashbrown",
-       "unit": "hashbrown@0.15.5 lib hashbrown build"
-      },
-      {
-       "name": "indexmap",
-       "unit": "indexmap@2.14.0 lib indexmap build"
-      }
-     ],
-     "edition": "2021",
-     "features": [],
-     "kind": "lib",
-     "mode": "build",
-     "pkg": "petgraph@0.8.3",
-     "profile": {
-      "codegen_units": null,
-      "debug_assertions": false,
-      "debuginfo": 0,
-      "name": "release",
-      "opt_level": "3",
-      "overflow_checks": false,
-      "panic": "unwind"
-     },
-     "src": "src/lib.rs",
-     "target": "petgraph"
-    },
     "pin-project-lite@0.2.17 lib pin_project_lite build": {
      "crate_type": "lib",
      "deps": [],
@@ -87455,6 +87240,10 @@
        "unit": "aws-smithy-http-client@1.5.0 lib aws_smithy_http_client build"
       },
       {
+       "name": "base64",
+       "unit": "base64@0.23.1 lib base64 build"
+      },
+      {
        "name": "blaze_doc",
        "unit": "blaze-doc@0.1.0 lib blaze_doc build"
       },
@@ -87798,6 +87587,10 @@
       {
        "name": "aws_smithy_http_client",
        "unit": "aws-smithy-http-client@1.5.0 lib aws_smithy_http_client build"
+      },
+      {
+       "name": "base64",
+       "unit": "base64@0.23.1 lib base64 build"
       },
       {
        "name": "blaze_doc",
@@ -88145,6 +87938,10 @@
        "unit": "aws-smithy-http-client@1.5.0 lib aws_smithy_http_client build"
       },
       {
+       "name": "base64",
+       "unit": "base64@0.23.1 lib base64 build"
+      },
+      {
        "name": "blaze_doc",
        "unit": "blaze-doc@0.1.0 lib blaze_doc build"
       },
@@ -88488,6 +88285,10 @@
       {
        "name": "aws_smithy_http_client",
        "unit": "aws-smithy-http-client@1.5.0 lib aws_smithy_http_client build"
+      },
+      {
+       "name": "base64",
+       "unit": "base64@0.23.1 lib base64 build"
       },
       {
        "name": "blaze_doc",
@@ -88835,6 +88636,10 @@
        "unit": "aws-smithy-http-client@1.5.0 lib aws_smithy_http_client build"
       },
       {
+       "name": "base64",
+       "unit": "base64@0.23.1 lib base64 build"
+      },
+      {
        "name": "blaze_doc",
        "unit": "blaze-doc@0.1.0 lib blaze_doc build"
       },
@@ -89178,6 +88983,10 @@
       {
        "name": "aws_smithy_http_client",
        "unit": "aws-smithy-http-client@1.5.0 lib aws_smithy_http_client build"
+      },
+      {
+       "name": "base64",
+       "unit": "base64@0.23.1 lib base64 build"
       },
       {
        "name": "blaze_doc",

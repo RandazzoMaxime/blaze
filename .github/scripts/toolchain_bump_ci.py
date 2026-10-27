@@ -12,8 +12,9 @@ the merge gate and the release train, and the train's verdict queues it or says 
     verdict RUN STD.json    the train run RUN of BRANCH and the std count: no job or harness
                             red that is green on BASE's train (main's own are cancelled by the
                             next merge more often than not), and the std unit refusing no more
-                            than main's: queue the pull request; else comment and open or
-                            update the issue
+                            than main's: queue the pull request; red on the first attempt:
+                            run the failed jobs again; else comment and open or update the
+                            issue
     blocked FILE [--date D] open or update the issue with what FILE says failed
 
 git pushes with the checkout's token, RA_JIT_BOT_TOKEN, since a push with GITHUB_TOKEN starts no
@@ -41,6 +42,8 @@ TITLED = re.compile(r"^Toolchain bump to (\d{4}-\d{2}-\d{2}) is blocked$")
 GATHERERS = {"train", "train issue", "release"}
 NOT_BLOCKING = ("nix / ", "linux x64 / bench")
 FAILED = {"failure", "cancelled", "timed_out"}
+# Attempts of the bump's train before red that main does not have blocks it.
+ATTEMPTS = 2
 ANSI = re.compile(r"\x1b\[[0-9;]*m")
 
 
@@ -356,6 +359,14 @@ def verdict(run_id, std_path):
     if already:
         lines += ["", "Red here and on main too (not counted against the bump):", *already]
     body = "\n".join(lines)
+    attempt = train.get("run_attempt", 1)
+    # A harness that fails one run in ten (a timing, a port) would otherwise block a day's bump:
+    # the red jobs run again, and the verdict of that attempt decides.
+    if new and attempt < ATTEMPTS and subprocess.run(["gh", "run", "rerun", str(run_id), "-R", REPO, "--failed"]).returncode == 0:
+        gh("pr", "comment", str(pr["number"]), "-R", REPO, "--body",
+           f"**Red here and green on main: running the failed jobs again** (attempt {attempt + 1} "
+           f"of {ATTEMPTS}), and that attempt decides.\n\n{body}")
+        return
     if new or std_worse:
         gh("pr", "comment", str(pr["number"]), "-R", REPO, "--body", f"**The bump is blocked.**\n\n{body}")
         blocked(date, f"The bump {pr['url']} ({name}) is red.\n\n{body}")

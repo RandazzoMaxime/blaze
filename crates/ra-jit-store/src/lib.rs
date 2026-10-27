@@ -71,8 +71,9 @@ const BLOCK_HEADER: usize = 3 * 4;
 /// them, so the next value it asks for is mostly in the block it just unpacked.
 const BLOCK: usize = 128 << 10;
 /// The most a compressed block holds once it is unpacked. A value larger than this is a
-/// block of its own, kept as it is.
-const BLOCK_MAX: usize = 1 << 20;
+/// block of its own, kept as it is, so what splits a large file into values splits it into
+/// pieces of at most this many bytes.
+pub const BLOCK_MAX: usize = 1 << 20;
 /// How hard a block is compressed: zstd's default, which makes a pack of compiled code
 /// about a fifth of its size at some 700 MB a second.
 #[cfg(not(target_family = "wasm"))]
@@ -178,6 +179,12 @@ impl Identity {
             hasher.update(field);
         }
         Identity(hasher.finalize().into())
+    }
+
+    /// Of values whose key names everything they are made from, as a hash of their own bytes
+    /// does: the format alone, so that every build of ra-jit finds them, for any toolchain.
+    fn lasting() -> Identity {
+        Identity::new(b"lasting", "")
     }
 
     /// Of this process: what it was built from and the toolchain it was told of.
@@ -818,7 +825,7 @@ impl StoreDir {
             Some(FORMAT) => return Ok(()),
             Some(newer) if newer > FORMAT => {
                 return Err(io::Error::other(format!(
-                    "the store is of format {newer}, and this ra-jit reads format {FORMAT}"
+                    "the store is of format {newer}, and this blaze reads format {FORMAT}"
                 )));
             }
             _ => {}
@@ -1202,6 +1209,8 @@ pub fn write_file_whole(to: &Path, bytes: &[u8]) -> io::Result<()> {
 pub struct Store {
     dir: StoreDir,
     identity: Identity,
+    /// What the `_lasting` calls key by in its place: [`Identity::lasting`].
+    lasting: Identity,
     tuning: Tuning,
     sealed: RwLock<Sealed>,
     unpacked: Mutex<Unpacked>,
@@ -1387,10 +1396,18 @@ impl Store {
             .as_ref()
     }
 
-    /// The store in `dir`, keyed as this process keys its values: for a process that keeps a
-    /// store of its own beside the global one.
+    /// A store of its own in `dir`, beside the one of this process, for what moves values
+    /// from one store to another. It asks for the keys it lacks as the process's store does.
     pub fn open_at(dir: &Path) -> io::Result<Store> {
         Store::open(dir, Identity::current()?, Tuning::from_env()?)
+    }
+
+    /// The store in `dir` for values whose key says all of what they are, as a file's sha256
+    /// does: keyed the same by every build of ra-jit and for every toolchain, so what one
+    /// kept, or a remote brought, any other finds. It shares the directory with the store
+    /// of [`Store::global_or`]: the packs are the same files.
+    pub fn open_by_content(dir: &Path) -> io::Result<Store> {
+        Store::open(dir, Identity::new(b"by content", ""), Tuning::from_env()?)
     }
 
     fn open(dir: &Path, identity: Identity, tuning: Tuning) -> io::Result<Store> {
@@ -1399,6 +1416,7 @@ impl Store {
         let store = Store {
             dir,
             identity,
+            lasting: Identity::lasting(),
             tuning,
             sealed: RwLock::default(),
             unpacked: Mutex::default(),
@@ -1580,8 +1598,8 @@ impl Store {
         self.settle(self.tuning.seal_at);
     }
 
-    /// Writes out what has been added and seals it, however little it is: what a process
-    /// that adds a few values at its end keeps, for the next to read.
+    /// As [`Self::flush`], sealing what is open however little it is, so that what was
+    /// added is in a sealed pack, to be found and sent, once it returns.
     pub fn seal(&self) {
         self.settled();
         self.settle(1);
@@ -1636,6 +1654,11 @@ impl Store {
         self.place(&self.identity.key(key)).is_some()
     }
 
+    /// As [`Self::has`], of a key [`Self::insert_lasting`] adds under.
+    pub fn has_lasting(&self, key: &[u8; KEY]) -> bool {
+        self.place(&self.lasting.key(key)).is_some()
+    }
+
     /// Whether a sealed pack has a value for the key, which is kept as if it were read: one
     /// that what is read needs, and that is itself read only later or not at all.
     pub fn has_used(&self, key: &[u8; KEY]) -> bool {
@@ -1646,7 +1669,15 @@ impl Store {
 
     /// The value of a key, if a sealed pack has it as it was written.
     pub fn get(&self, key: &[u8; KEY]) -> Option<Vec<u8>> {
-        let key = self.identity.key(key);
+        self.get_on_disk(self.identity.key(key))
+    }
+
+    /// As [`Self::get`], of a key [`Self::insert_lasting`] adds under.
+    pub fn get_lasting(&self, key: &[u8; KEY]) -> Option<Vec<u8>> {
+        self.get_on_disk(self.lasting.key(key))
+    }
+
+    fn get_on_disk(&self, key: [u8; KEY]) -> Option<Vec<u8>> {
         let place = self.place(&key)?;
         let value = self.value(&place).filter(|it| checksum(&key, it) == place.checksum);
         if value.is_none() {
@@ -1663,10 +1694,24 @@ impl Store {
     /// that asks for every function of a program does: the blocks unpacked lately hold a few
     /// hundred of the thousands they are in, and a value is a hundredth of its block.
     pub fn get_many(&self, keys: &[[u8; KEY]], threads: usize) -> Vec<Option<Vec<u8>>> {
+        self.get_many_as(&self.identity, keys, threads)
+    }
+
+    /// As [`Self::get_many`], of keys [`Self::insert_lasting`] adds under.
+    pub fn get_many_lasting(&self, keys: &[[u8; KEY]], threads: usize) -> Vec<Option<Vec<u8>>> {
+        self.get_many_as(&self.lasting, keys, threads)
+    }
+
+    fn get_many_as(
+        &self,
+        identity: &Identity,
+        keys: &[[u8; KEY]],
+        threads: usize,
+    ) -> Vec<Option<Vec<u8>>> {
         let places: Vec<Option<([u8; KEY], Place)>> = keys
             .iter()
             .map(|key| {
-                let key = self.identity.key(key);
+                let key = identity.key(key);
                 Some((key, self.place(&key)?))
             })
             .collect();
@@ -1792,7 +1837,17 @@ impl Store {
     /// Adds a value, unless the key has one. A value that cannot be written is not an error
     /// to the build: it is counted, and compiled again by the next.
     pub fn insert(&self, key: &[u8; KEY], value: &[u8]) {
-        let key = self.identity.key(key);
+        self.insert_on_disk(self.identity.key(key), value)
+    }
+
+    /// As [`Self::insert`], for a value whose key names everything it is made from, the
+    /// format of its bytes included: one that is found by every build of ra-jit and for any
+    /// toolchain, such as one keyed by the hash of its own bytes.
+    pub fn insert_lasting(&self, key: &[u8; KEY], value: &[u8]) {
+        self.insert_on_disk(self.lasting.key(key), value)
+    }
+
+    fn insert_on_disk(&self, key: [u8; KEY], value: &[u8]) {
         if self.sealed().index.contains_key(&key) {
             return;
         }

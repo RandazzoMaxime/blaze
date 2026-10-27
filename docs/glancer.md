@@ -449,8 +449,10 @@ which 4.9 s is the build scripts and proc macros (`cargo check --compile-time-de
 the units it loads; the `load-us:` lines under `RA_JIT_STATS`), the nocargo lane's driver.
 An edit low in the graph still misses the store for every crate that depends on it, since an
 edit renames those crates (`content.rs`): that is item 2's second half and #344's code keys
-on `blaze-next`, not this manifest. After a start from a manifest the daemon holds no patch
-base, so its first edit is a full build.
+on `blaze-next`, not this manifest. A daemon that starts from a manifest answers with its files,
+then, while nobody asks, makes the build a start without one would (the checkout's code from
+the store), which holds the patch base: its first edit is a patch, as `storetracked.py`'s
+restart on the same checkout and store checks.
 
 ### Item 4: a flat syntax tree for files nobody edits
 

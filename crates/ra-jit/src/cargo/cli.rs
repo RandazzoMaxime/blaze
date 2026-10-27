@@ -155,6 +155,8 @@ pub(crate) enum Asked {
     Toolchain {
         path: bool,
     },
+    /// `lock` and its arguments: what build scripts download, pinned (`fetches.rs`).
+    Lock(Vec<String>),
     Help,
     Version,
 }
@@ -225,6 +227,7 @@ impl Asked {
             ("enable", _) => Asked::Enable,
             ("disable", _) => Asked::Disable,
             ("toolchain", _) => Asked::Toolchain { path: rest.iter().any(|it| it == "--path") },
+            ("lock", _) => Asked::Lock(rest.to_vec()),
             _ => Asked::Own(args),
         }
     }
@@ -482,7 +485,7 @@ fn unsupported_target(triple: &str) -> Option<String> {
         {
             None
         }
-        Ok(_) => Some(format!("programs for {triple} are not linked through `cargo ra-jit` yet")),
+        Ok(_) => Some(format!("programs for {triple} are not linked through `cargo blaze` yet")),
         Err(why) => Some(why),
     }
 }

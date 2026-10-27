@@ -280,11 +280,14 @@ fn built(
         kept.write(made).map_err(|it| format!("writing what the store kept of it: {it}"))?;
         write_made_of(made, &second_of(&first, reads))?;
         if std::env::var_os("RA_JIT_STATS").is_some() {
-            eprintln!("ra-jit: a build the store kept: {}", made.exe.display());
+            eprintln!("blaze: a build the store kept: {}", made.exe.display());
         }
         return Ok(());
     }
     let inputs = dir.join("ra-jit-inputs");
+    if let Some(store) = super::daemon::store() {
+        standard_library_once(sysroot, &store, &dir.join("standard-library"))?;
+    }
     // A script that reaches a function ra-jit could not compile is not built
     // ([`crate::refused_error`]).
     build(described, dir, made, super::daemon::store(), true, Some(&inputs))?;
@@ -322,7 +325,7 @@ fn built(
         ));
     }
     if found.is_some() && std::env::var_os("RA_JIT_STATS").is_some() {
-        eprintln!("ra-jit: a build the store kept read what this one did: {}", made.exe.display());
+        eprintln!("blaze: a build the store kept read what this one did: {}", made.exe.display());
     }
     if let Some(store) = store {
         store.settled();
@@ -456,7 +459,7 @@ fn build(
         ra_jit.env("RA_JIT_STD_FROM", "off");
     }
     ra_jit.current_dir(dir).stdin(Stdio::null()).stdout(Stdio::null());
-    let built = ra_jit.output().map_err(|it| format!("ra-jit did not run: {it}"))?;
+    let built = ra_jit.output().map_err(|it| format!("blaze did not run: {it}"))?;
     let said = String::from_utf8_lossy(&built.stderr).into_owned();
     std::fs::write(dir.join("ra-jit.log"), &said).map_err(|it| it.to_string())?;
     if !built.status.success() {
@@ -464,15 +467,53 @@ fn build(
         let error = said.rfind("\nError: ").map(|at| said[at + 1..].trim_end());
         let last = said.lines().rev().find(|it| !it.trim().is_empty()).unwrap_or("");
         let last = error.unwrap_or(last);
-        return Err(format!("ra-jit did not build it ({}): {last}", built.status));
+        return Err(format!("blaze did not build it ({}): {last}", built.status));
     }
     Ok(said)
+}
+
+/// Has the store `store` hold what every build of a script or proc macro takes from it before
+/// its own crates ([`build_nothing`]), once a store, build of ra-jit and toolchain of
+/// `sysroot`, building in `dir`. The builds cargo starts together in a cold build wait for the
+/// first to make it, where each made it itself, a gigabyte and seconds of every core apiece.
+fn standard_library_once(sysroot: &Path, store: &Path, dir: &Path) -> Result<(), String> {
+    let mut key = keyed::Key::new("standard library of the scripts' builds");
+    key.field(ra_jit_store::build_name().unwrap_or_default().as_bytes());
+    key.field(keyed::toolchain(sysroot).as_bytes());
+    let key: String = key.done()[..8].iter().map(|it| format!("{it:02x}")).collect();
+    once(&store.join(format!("scripts-std-{key}")), || {
+        build_nothing(sysroot, dir, store, true).map(drop)
+    })
+}
+
+/// Runs `make` unless a run of it left `done`, one process at a time: the others wait for the
+/// one that runs it.
+fn once(done: &Path, make: impl FnOnce() -> Result<(), String>) -> Result<(), String> {
+    let at = |it: std::io::Error| format!("{}: {it}", done.display());
+    if let Some(dir) = done.parent() {
+        std::fs::create_dir_all(dir).map_err(at)?;
+    }
+    let mut options = std::fs::OpenOptions::new();
+    let lock = options.create(true).truncate(false).write(true);
+    let lock = lock.open(done.with_extension("lock")).map_err(at)?;
+    lock.lock().map_err(at)?;
+    if done.exists() {
+        return Ok(());
+    }
+    make()?;
+    std::fs::write(done, "").map_err(at)
 }
 
 /// Builds a script that does nothing over the standard library of `sysroot` in `dir`, into
 /// the store `store`: what the store then has is what any build script's build takes from
 /// it before its own crates, the standard library's unit and the frozen maps of its crates.
-pub(crate) fn build_nothing(sysroot: &Path, dir: &Path, store: &Path) -> Result<String, String> {
+/// With `shipped` it fetches the standard library as builds do.
+pub(crate) fn build_nothing(
+    sysroot: &Path,
+    dir: &Path,
+    store: &Path,
+    shipped: bool,
+) -> Result<String, String> {
     let source = dir.join("build.rs");
     std::fs::create_dir_all(dir).map_err(|it| it.to_string())?;
     std::fs::write(&source, "fn main() {}\n").map_err(|it| it.to_string())?;
@@ -490,7 +531,7 @@ pub(crate) fn build_nothing(sysroot: &Path, dir: &Path, store: &Path) -> Result<
     let exe = dir.join("build-script-build");
     let made = Made { name: SCRIPT, proc_macro: false, dep_info: exe.with_extension("d"), exe };
     let described = description(sysroot, &[script]);
-    build(&described, dir, &made, Some(store.to_owned()), false, None)
+    build(&described, dir, &made, Some(store.to_owned()), shipped, None)
 }
 
 /// Why rustc is to compile the script when it read a variable as another than rustc would,
@@ -501,7 +542,7 @@ fn read_otherwise(
     rustc_has: impl Fn(&str) -> Option<String>,
 ) -> Result<(), String> {
     match info.env.iter().find(|(name, value)| rustc_has(name) != *value) {
-        Some((name, _)) => Err(format!("it reads `{name}`, which ra-jit's build is not given")),
+        Some((name, _)) => Err(format!("it reads `{name}`, which blaze's build is not given")),
         None => Ok(()),
     }
 }
@@ -528,12 +569,12 @@ fn add(
     let (prefix, suffix) = (std::env::consts::DLL_PREFIX, std::env::consts::DLL_SUFFIX);
     let proc_macro = name.strip_prefix(prefix).and_then(|it| it.strip_suffix(suffix));
     let Some(stem) = library.or(proc_macro) else {
-        return Err(format!("it links {name}, which is not a library ra-jit knows"));
+        return Err(format!("it links {name}, which is not a library blaze knows"));
     };
     let parent = path.parent().ok_or("a library without a directory")?;
     let unit = &super::layout::unit_of_file(stem, parent);
     let (record, _) = Record::described_or_seeded(parent, unit).ok_or_else(|| {
-        format!("`{unit}`, which it links, was compiled before ra-jit described it")
+        format!("`{unit}`, which it links, was compiled before blaze described it")
     })?;
     let asked = Asked { args: &record.args, cwd: &record.cwd };
     let at = crates.len();
@@ -591,6 +632,29 @@ mod tests {
         assert_eq!(read_otherwise(&info, rustc_has(Some("1"))), Ok(()));
         assert!(read_otherwise(&info, rustc_has(Some("2"))).is_err());
         assert!(read_otherwise(&info, rustc_has(None)).is_err());
+    }
+
+    #[test]
+    fn builds_that_start_together_make_it_once() {
+        let dir = std::env::temp_dir().join(format!("ra-jit-once-{}", std::process::id()));
+        let done = dir.join("made");
+        let made = std::sync::atomic::AtomicUsize::new(0);
+        let failed = once(&done, || Err("no".to_owned()));
+        assert_eq!(failed, Err("no".to_owned()));
+        std::thread::scope(|scope| {
+            for _ in 0..8 {
+                scope.spawn(|| {
+                    once(&done, || {
+                        std::thread::sleep(std::time::Duration::from_millis(50));
+                        made.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        Ok(())
+                    })
+                    .unwrap();
+                });
+            }
+        });
+        assert_eq!(made.into_inner(), 1);
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
