@@ -289,8 +289,7 @@ fn time_project(project: &str, out: &str) -> anyhow::Result<()> {
             if !krate.origin(&db).is_local() {
                 continue;
             }
-            let crate_name =
-                krate.display_name(&db).map_or_else(String::new, |it| it.to_string());
+            let crate_name = krate.display_name(&db).map_or_else(String::new, |it| it.to_string());
             for module in krate.modules(&db) {
                 let path = module
                     .path_to_root(&db)
@@ -314,7 +313,11 @@ fn time_project(project: &str, out: &str) -> anyhow::Result<()> {
                             for variant in it.variants(&db) {
                                 push(
                                     variant.into(),
-                                    format!("{}::{}", it.name(&db).as_str(), variant.name(&db).as_str()),
+                                    format!(
+                                        "{}::{}",
+                                        it.name(&db).as_str(),
+                                        variant.name(&db).as_str()
+                                    ),
                                 );
                             }
                         }
@@ -336,7 +339,12 @@ fn time_project(project: &str, out: &str) -> anyhow::Result<()> {
                     }
                 }
                 for imp in module.impl_defs(&db) {
-                    let self_ty = hir::HirDisplay::display(&imp.self_ty(&db), &db, krate.to_display_target(&db)).to_string();
+                    let self_ty = hir::HirDisplay::display(
+                        &imp.self_ty(&db),
+                        &db,
+                        krate.to_display_target(&db),
+                    )
+                    .to_string();
                     for item in imp.items(&db) {
                         let name = format!(
                             "<{self_ty}>::{}",
@@ -358,11 +366,8 @@ fn time_project(project: &str, out: &str) -> anyhow::Result<()> {
                 continue;
             }
             let Ok(id) = hir_def::DefWithBodyId::try_from(def) else { continue };
-            let path = def
-                .module(&db)
-                .definition_source_file_id(&db)
-                .original_file(&db)
-                .file_id(&db);
+            let path =
+                def.module(&db).definition_source_file_id(&db).original_file(&db).file_id(&db);
             let path = vfs.file_path(path).to_string();
             let started = Instant::now();
             let infer = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -374,7 +379,11 @@ fn time_project(project: &str, out: &str) -> anyhow::Result<()> {
             }
             // Both modes, each body checked by one first and then the other, in turn, so the
             // queries the first pays for cold are paid by each mode as often.
-            let modes = if bodies % 2 == 0 { [Mode::Polonius, Mode::Nll] } else { [Mode::Nll, Mode::Polonius] };
+            let modes = if bodies % 2 == 0 {
+                [Mode::Polonius, Mode::Nll]
+            } else {
+                [Mode::Nll, Mode::Polonius]
+            };
             let mut by_mode = serde_json::Map::new();
             let mut panicked = false;
             for mode in modes {
@@ -392,7 +401,10 @@ fn time_project(project: &str, out: &str) -> anyhow::Result<()> {
                 let mut phases = serde_json::Map::new();
                 for phase in Phase::ALL {
                     totals[at][phase as usize] += timings.get(phase);
-                    phases.insert(phase.name().into(), (timings.get(phase).as_micros() as u64).into());
+                    phases.insert(
+                        phase.name().into(),
+                        (timings.get(phase).as_micros() as u64).into(),
+                    );
                 }
                 let counts = timings.counts;
                 by_mode.insert(
