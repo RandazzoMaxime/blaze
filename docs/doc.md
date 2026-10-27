@@ -103,11 +103,30 @@ impls anchored on pages both have (`method.new`, `impl-Debug-for-Foo`), the intr
 rustdoc resolved (by their titles), and the `unresolved link` warnings. On the bench apps (each
 with its dependencies; 2026-10-26, dev-aws-8):
 
-RESULTS
+| App | Pages | Members and impls | Resolved links | Warnings | `cargo doc` | `cargo blaze doc` |
+|---|---|---|---|---|---|---|
+| fd | 12785 of 12787 (100.0%) | 91952 of 92078 (99.9%) | 13339 of 13420 (99.4%) | 1 of 1 | 27.4 s | 7.6 s |
+| ripgrep | 8037 of 8042 (99.9%) | 58476 of 58705 (99.6%) | 6527 of 6588 (99.1%) | 0 of 0 | 5.6 s | 5.8 s |
+| nushell | 60756 of 61083 (99.5%) | 587662 of 594585 (98.8%) | 77282 of 78793 (98.1%) | 0 of 3 | 497.1 s | 66.8 s |
+
+`cargo doc` starts from an empty target directory; `cargo blaze doc` with its build scripts
+already run (the first load also runs them through cargo: fd's first run took 56.6 s, nearly
+all of it that). fd's 7.6 s is 0.75 s of load, 6.3 s of model and 0.06 s of writing.
 
 What blaze still misses or adds, and why:
 
-GAPS
+- Impls a `macro_rules!` writes for a type alias (`impl Deserialize for AtomicBool` in serde,
+  `impl AsRef<AbsolutePath> for ...` in nu-path) are named by the alias in blaze and by the
+  type it stands for in rustdoc (`Atomic<bool>`), so their anchors differ.
+- Implementors from crates downstream of the trait's are on the trait's page in blaze and
+  added by rustdoc's script, which the comparison does not run: most of the "extra" anchors.
+- A crate that re-exports whole modules of the standard library (`is_debug`, `shadow_rs`
+  re-export `core::fmt` and the preludes) gets pages and auto-trait impls rustdoc leaves to
+  redirects.
+- Macros a `macro_rules!` defines inside another macro's expansion (icu's baked data
+  `impl_*_v1!`) have no page.
+- rustdoc warns of three unresolved links in nushell (`std::io::Error::other`, `.get`, `tls`)
+  that blaze says nothing of; why is not looked into yet.
 
 ## Not done
 
