@@ -902,7 +902,18 @@ impl Resolver<'_> {
     /// The name ra-jit gives a non-generic function of the crate `id` names: where it is, and
     /// for one in a body where in the source that is.
     fn function_named_in(&self, func: FunctionId, id: u64) -> Option<String> {
-        let path = self.path(func)?;
+        let Some(path) = self.path(func) else {
+            // No path to write (the `impl` is for `!`, `dyn Trait`, a type taking a constant, or
+            // the function sits where `item_path` cannot reach): its name and where it is
+            // written say which function it is just as well.
+            let name = hir::Function::from(func).name(self.db);
+            let place = hir_ty_codegen::function_place(self.db, self, func)?;
+            return Some(format!(
+                "ra-jit.{id:x}.{}.{:x}",
+                name.as_str(),
+                short_hash(&place)
+            ));
+        };
         if hir_def::HasModule::module(&func, self.db).block(self.db).is_none() {
             return Some(format!("ra-jit.{id:x}.{path}"));
         }
