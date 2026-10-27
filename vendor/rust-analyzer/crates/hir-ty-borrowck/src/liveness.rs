@@ -3,7 +3,8 @@
 //! be initialized, for the regions dropping it uses.
 
 use hir_def::{AdtId, attrs::AttrFlags};
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
+use salsa::SalsaValue;
 use rustc_type_ir::{
     ClauseKind, OutlivesPredicate, RegionKind,
     inherent::{
@@ -17,7 +18,11 @@ use hir_ty::{
         BasicBlockId, LocalId, MirBody, Operand, OperandKind, PlaceElem, Rvalue, StatementKind,
         TerminatorKind,
     },
-    next_solver::{Clause, DbInterner, GenericArgKind, Region, Ty, TyKind},
+    db::HirDatabase,
+    next_solver::{
+        Clause, DbInterner, GenericArgKind, GenericArgs, Region, StoredRegion, StoredTy, Ty,
+        TyKind,
+    },
 };
 
 use super::{
@@ -564,36 +569,25 @@ impl<'c, 'a, 'db> DropComponents<'c, 'a, 'db> {
                     }
                     return;
                 }
-                if let Some(drop_impl) = hir_ty::drop::destructor(ctx.db, adt) {
-                    let dangling = may_dangle(ctx, *drop_impl, args.len());
-                    for (index, arg) in args.iter().enumerate() {
-                        let dangles = dangling.get(index).copied().unwrap_or(false);
-                        match arg.kind() {
-                            GenericArgKind::Type(arg) if dangles => children.push(arg),
-                            GenericArgKind::Type(arg) => regions_of(arg, found),
-                            GenericArgKind::Lifetime(region) if !dangles => {
-                                found.extend(super::regions::rv_of(region))
-                            }
-                            _ => (),
-                        }
-                    }
+                let interner = ctx.infcx.interner;
+                let constraint = drop_constraint(ctx.db, adt);
+                for region in &constraint.regions {
+                    let region = rustc_type_ir::EarlyBinder::bind(region.as_ref())
+                        .instantiate(interner, args)
+                        .skip_norm_wip();
+                    found.extend(super::regions::rv_of(region));
                 }
-                let variants: Vec<hir_def::VariantId> = match adt {
-                    AdtId::StructId(it) => vec![it.into()],
-                    AdtId::UnionId(_) => Vec::new(),
-                    AdtId::EnumId(it) => it
-                        .enum_variants(ctx.db)
-                        .variants
-                        .values()
-                        .map(|&(it, _)| it.into())
-                        .collect(),
-                };
-                for variant in variants {
-                    for (_, field) in ctx.db.field_types(variant).iter() {
-                        children
-                            .push(field.ty().instantiate(ctx.infcx.interner, args).skip_norm_wip());
-                    }
+                for whole in &constraint.whole {
+                    let whole = rustc_type_ir::EarlyBinder::bind(whole.as_ref())
+                        .instantiate(interner, args)
+                        .skip_norm_wip();
+                    regions_of(whole, found);
                 }
+                children.extend(constraint.tys.iter().map(|it| {
+                    rustc_type_ir::EarlyBinder::bind(it.as_ref())
+                        .instantiate(interner, args)
+                        .skip_norm_wip()
+                }));
             }
             TyKind::Array(inner, _) | TyKind::Slice(inner) => children.push(inner),
             TyKind::Tuple(tys) => children.extend(tys.iter()),
@@ -625,11 +619,121 @@ impl<'c, 'a, 'db> DropComponents<'c, 'a, 'db> {
     }
 }
 
+/// What dropping a value of an ADT other than `Box`, `PhantomData` and `ManuallyDrop` uses, in
+/// its own generic parameters: rustc's `adt_dtorck_constraint`. Its fields are taken apart as
+/// far as their types tell without an instantiation, an ADT in them by its own constraint;
+/// what is left, parameters, aliases and the types an ADT in them leaves, is taken apart where
+/// the ADT is dropped, which is also what keeps two ADTs that hold each other from asking each
+/// other. Once per ADT, so a body that drops a `Value` instantiates what that leaves rather
+/// than every field of every variant.
+#[derive(Debug, Clone, PartialEq, Eq, Default, SalsaValue)]
+struct DropConstraint {
+    /// The lifetimes its `Drop` impl uses.
+    regions: Vec<StoredRegion>,
+    /// Types all of whose regions dropping it uses: those its `Drop` impl uses, trait objects.
+    whole: Vec<StoredTy>,
+    /// The types dropping it drops, taken apart where it is dropped.
+    tys: Vec<StoredTy>,
+}
+
+#[salsa::tracked(returns(ref), cycle_result = drop_constraint_cycle)]
+fn drop_constraint(db: &dyn HirDatabase, adt: AdtId) -> DropConstraint {
+    let interner = DbInterner::new_no_crate(db);
+    let mut regions = Vec::new();
+    let mut whole = Vec::new();
+    let mut tys = Vec::new();
+    if let Some(drop_impl) = hir_ty::drop::destructor(db, adt) {
+        let args = GenericArgs::identity_for_item(interner, adt.into());
+        let dangling = may_dangle(db, *drop_impl, args.len());
+        for (index, arg) in args.iter().enumerate() {
+            let dangles = dangling.get(index).copied().unwrap_or(false);
+            match arg.kind() {
+                GenericArgKind::Type(arg) if dangles => tys.push(arg),
+                GenericArgKind::Type(arg) => whole.push(arg),
+                GenericArgKind::Lifetime(region) if !dangles => regions.push(region),
+                _ => (),
+            }
+        }
+    }
+    let variants: Vec<hir_def::VariantId> = match adt {
+        AdtId::StructId(it) => vec![it.into()],
+        AdtId::UnionId(_) => Vec::new(),
+        AdtId::EnumId(it) => {
+            it.enum_variants(db).variants.values().map(|&(it, _)| it.into()).collect()
+        }
+    };
+    for variant in variants {
+        for (_, field) in db.field_types(variant).iter() {
+            let field = field.ty().instantiate_identity().skip_norm_wip();
+            take_apart(db, interner, field, &mut regions, &mut whole, &mut tys);
+        }
+    }
+    let mut seen = FxHashSet::default();
+    tys.retain(|it| seen.insert(*it));
+    DropConstraint {
+        regions: regions.into_iter().map(|it| it.store()).collect(),
+        whole: whole.into_iter().map(|it| it.store()).collect(),
+        tys: tys.into_iter().map(|it| it.store()).collect(),
+    }
+}
+
+/// An ADT that holds itself by value has no size and no answer.
+fn drop_constraint_cycle(_db: &dyn HirDatabase, _: salsa::Id, _adt: AdtId) -> DropConstraint {
+    DropConstraint::default()
+}
+
+/// Takes `ty`, a field's type or part of one, apart for [`drop_constraint`].
+fn take_apart<'db>(
+    db: &'db dyn HirDatabase,
+    interner: DbInterner<'db>,
+    ty: Ty<'db>,
+    regions: &mut Vec<Region<'db>>,
+    whole: &mut Vec<Ty<'db>>,
+    tys: &mut Vec<Ty<'db>>,
+) {
+    match ty.kind() {
+        TyKind::Adt(def, _) if def.is_manually_drop() => (),
+        TyKind::Adt(def, args) if def.is_box() || def.is_phantom_data() => {
+            if let Some(GenericArgKind::Type(inner)) = args.iter().next().map(|it| it.kind()) {
+                tys.push(inner);
+            }
+        }
+        TyKind::Adt(def, args) => {
+            let constraint = drop_constraint(db, def.def_id());
+            let instantiate = |ty: &StoredTy| {
+                rustc_type_ir::EarlyBinder::bind(ty.as_ref()).instantiate(interner, args).skip_norm_wip()
+            };
+            regions.extend(constraint.regions.iter().map(|it| {
+                rustc_type_ir::EarlyBinder::bind(it.as_ref())
+                    .instantiate(interner, args)
+                    .skip_norm_wip()
+            }));
+            whole.extend(constraint.whole.iter().map(instantiate));
+            tys.extend(constraint.tys.iter().map(instantiate));
+        }
+        TyKind::Array(inner, _) | TyKind::Slice(inner) => {
+            take_apart(db, interner, inner, regions, whole, tys)
+        }
+        TyKind::Tuple(parts) => {
+            for it in parts.iter() {
+                take_apart(db, interner, it, regions, whole, tys);
+            }
+        }
+        TyKind::Dynamic(..) => whole.push(ty),
+        TyKind::Param(_)
+        | TyKind::Alias(_)
+        | TyKind::Closure(..)
+        | TyKind::CoroutineClosure(..)
+        | TyKind::Coroutine(..) => tys.push(ty),
+        _ => (),
+    }
+}
+
 /// Per generic argument of the type a `Drop` impl is for, whether the impl says
 /// `#[may_dangle]` of it: that dropping does not use it.
-fn may_dangle(ctx: &Ctx<'_, '_>, drop_impl: hir_def::ImplId, count: usize) -> Vec<bool> {
-    let (lifetimes, types) = AttrFlags::query_generic_params(ctx.db, drop_impl.into());
-    let self_ty = ctx.db.impl_self_ty(drop_impl).skip_binder();
+fn may_dangle(db: &dyn HirDatabase, drop_impl: hir_def::ImplId, count: usize) -> Vec<bool> {
+    let (lifetimes, types) = AttrFlags::query_generic_params(db, drop_impl.into());
+    let self_ty = db.impl_self_ty(drop_impl).skip_binder();
     let TyKind::Adt(_, args) = self_ty.kind() else { return vec![false; count] };
     args.iter()
         .map(|arg| match arg.kind() {
