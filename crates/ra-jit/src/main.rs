@@ -600,7 +600,11 @@ fn defined_symbols(path: &Path) -> anyhow::Result<FxHashSet<String>> {
         // compiles itself to be told why. A thread-local is not a "definition" to `object`.
         let defined =
             file.symbols().filter(|it| !it.is_undefined() && it.scope() == SymbolScope::Dynamic);
-        names.extend(defined.filter_map(|it| it.name().ok().map(str::to_owned)));
+        let named = defined.filter_map(|it| it.name().ok());
+        names.extend(named.map(|name| match file.format() {
+            object::BinaryFormat::MachO => name.strip_prefix('_').unwrap_or(name).to_owned(),
+            _ => name.to_owned(),
+        }));
     }
     Ok(names)
 }
