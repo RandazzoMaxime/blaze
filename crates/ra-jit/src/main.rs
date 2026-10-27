@@ -511,7 +511,7 @@ impl<'a> ResolverParts<'a> {
 /// The standard library ra-jit built before the program ([`std_unit`]).
 struct Prebuilt {
     /// What its object defines for others to link to.
-    defined: FxHashSet<String>,
+    defined: Arc<FxHashSet<String>>,
     /// Its crates, as [`library_unit`] has them.
     crates: FxHashSet<ide_db::base_db::Crate>,
 }
@@ -582,6 +582,28 @@ pub(crate) fn unlinked_panic_runtime(db: &RootDatabase, program: &[Crate]) -> &'
         cfg.get_cfg_values("panic").any(|it| it.as_str() == "abort")
     });
     if abort { "panic_unwind" } else { "panic_abort" }
+}
+
+/// [`defined_symbols`] of the object at `path`, read again only when the file is not the one it
+/// was read from: every build of the program asks for the standard library's unit, which is
+/// tens of megabytes of object.
+fn defined_symbols_kept(path: &Path) -> anyhow::Result<Arc<FxHashSet<String>>> {
+    type Kept = FxHashMap<PathBuf, ((std::time::SystemTime, u64), Arc<FxHashSet<String>>)>;
+    static KEPT: std::sync::LazyLock<std::sync::Mutex<Kept>> =
+        std::sync::LazyLock::new(Default::default);
+    let file = std::fs::metadata(path).ok();
+    let key = file.and_then(|it| Some((it.modified().ok()?, it.len())));
+    if let Some(key) = key
+        && let Some((was, names)) = lock(&KEPT).get(path)
+        && *was == key
+    {
+        return Ok(names.clone());
+    }
+    let names = Arc::new(defined_symbols(path)?);
+    if let Some(key) = key {
+        lock(&KEPT).insert(path.to_owned(), (key, names.clone()));
+    }
+    Ok(names)
 }
 
 /// The names an object defines for others to link to.
@@ -721,9 +743,8 @@ impl<'a> Resolver<'a> {
             source_path(db, &named.0, named.1.as_deref(), file)
         });
         let prebuilt = args.prebuilt.as_deref().filter(|_| table.is_empty()).map(|path| {
-            let defined = defined_symbols(path);
-            let defined =
-                defined.unwrap_or_else(|e| panic!("the standard library ra-jit built: {e:#}"));
+            let defined = defined_symbols_kept(path)
+                .unwrap_or_else(|e| panic!("the standard library ra-jit built: {e:#}"));
             let program: Vec<Crate> =
                 args.crates().filter_map(|it| crates_named(db, it, args).ok()).flatten().collect();
             let crates = library_unit(db, &program);
@@ -958,15 +979,7 @@ impl Resolver<'_> {
     /// Whether the function, or the `impl` it is in, takes types or constants. A method a
     /// trait provides takes `Self`.
     fn is_generic(&self, func: FunctionId) -> bool {
-        let generic = |def: hir::GenericDef| !def.type_or_const_params(self.db).is_empty();
-        if generic(hir::Function::from(func).into()) {
-            return true;
-        }
-        match func.lookup(self.db).container {
-            ItemContainerId::ImplId(imp) => generic(hir::Impl::from(imp).into()),
-            ItemContainerId::TraitId(_) => true,
-            _ => false,
-        }
+        is_generic_function(self.db, func)
     }
 
     /// Whether another function written in a body of the crate has this one's path. rustc
@@ -3588,7 +3601,28 @@ struct ListedCrate {
     in_provided: Vec<FunctionId>,
     /// For each, whether a runtime looks it up by name.
     exported: Vec<bool>,
+    /// What a build takes of `functions` for its roots, each with whether a runtime looks it up
+    /// by name and whether it is generic: those only the const evaluator runs are left out.
+    /// Kept with the crate, as a query of the attributes of every function of every crate is
+    /// most of what an edit would otherwise wait for.
+    rooted: Vec<(FunctionId, bool, bool)>,
+    /// The same of `in_provided`: each with whether it is generic.
+    provided: Vec<(FunctionId, bool)>,
     main: Option<FunctionId>,
+}
+
+/// Whether the function, or the `impl` it is in, takes types or constants. A method a trait
+/// provides takes `Self`.
+fn is_generic_function(db: &RootDatabase, func: FunctionId) -> bool {
+    let generic = |def: hir::GenericDef| !def.type_or_const_params(db).is_empty();
+    if generic(hir::Function::from(func).into()) {
+        return true;
+    }
+    match func.lookup(db).container {
+        ItemContainerId::ImplId(imp) => generic(hir::Impl::from(imp).into()),
+        ItemContainerId::TraitId(_) => true,
+        _ => false,
+    }
 }
 
 fn is_bodiless_intrinsic(db: &RootDatabase, id: FunctionId) -> bool {
@@ -3796,7 +3830,28 @@ impl ListedCrate {
             .filter(|_| !has_no_main(db, krate));
         let exported = exported(db, &functions);
         let shared_paths = Default::default();
-        ListedCrate { functions, shared_paths, kept, statics, in_provided, exported, main }
+        let rooted = functions
+            .iter()
+            .zip(&exported)
+            .filter(|&(&it, _)| !hir_ty_codegen::compile_time_only(db, it))
+            .map(|(&it, &exported)| (it, exported, is_generic_function(db, it)))
+            .collect();
+        let provided = in_provided
+            .iter()
+            .filter(|&&it| !hir_ty_codegen::compile_time_only(db, it))
+            .map(|&it| (it, is_generic_function(db, it)))
+            .collect();
+        ListedCrate {
+            functions,
+            shared_paths,
+            kept,
+            statics,
+            in_provided,
+            exported,
+            rooted,
+            provided,
+            main,
+        }
     }
 }
 
@@ -4702,6 +4757,10 @@ fn build(
     let start = Instant::now();
     let contents = &content::Contents::default();
     let resolver = Resolver::of(db, table, args, known, contents, listed);
+    let stats = std::env::var_os("RA_JIT_STATS").is_some();
+    if stats {
+        eprintln!("roots.resolver: {:.1?}", start.elapsed());
+    }
     let hir_db: &dyn HirDatabase = db;
     let mut functions = Vec::new();
     let mut kept = Vec::new();
@@ -4715,6 +4774,9 @@ fn build(
     // On every core: an edit to a crate others depend on has each of them listed again, and
     // the build waits for all of it.
     listed.of_all(db, &asked.iter().flatten().copied().collect::<Vec<_>>());
+    if stats {
+        eprintln!("roots.asked: {:.1?}", start.elapsed());
+    }
     for (at, crates) in asked.into_iter().enumerate() {
         for krate in crates {
             local.push(krate);
@@ -4727,11 +4789,18 @@ fn build(
             } else if at == 0 {
                 main = main.or_else(|| harness_main(db, &listed.functions));
             }
-            functions.extend(listed.functions.iter().copied().zip(listed.exported.iter().copied()));
+            // With nothing of rustc's there is no copy of a generic function to name: each
+            // instance is compiled with the caller that asks for it.
+            let kept_rooted = |it: &&(FunctionId, bool, bool)| !(table.is_empty() && it.2);
+            functions.extend(
+                listed.rooted.iter().filter(kept_rooted).map(|&(it, exported, _)| (it, exported)),
+            );
             // rustc's copy of the crate has them when rustc built it.
             let own = resolver.own_crate_id(krate.into()).is_some();
             if table.is_empty() || own {
-                functions.extend(listed.in_provided.iter().map(|&it| (it, false)));
+                let kept_provided = |it: &&(FunctionId, bool)| !(table.is_empty() && it.1);
+                functions
+                    .extend(listed.provided.iter().filter(kept_provided).map(|&(it, _)| (it, false)));
             }
             if own {
                 kept.extend(&listed.kept);
@@ -4752,15 +4821,26 @@ fn build(
             .map(Crate::from)
             .filter(|it| !asked.contains(it))
             .collect();
+        if stats {
+            eprintln!("roots.linked-set: {:.1?} ({} crates)", start.elapsed(), linked.len());
+        }
         listed.of_all(db, &linked.iter().copied().collect::<Vec<_>>());
+        if stats {
+            eprintln!("roots.linked-listed: {:.1?}", start.elapsed());
+        }
         for krate in linked {
             local.push(krate);
             let listed = listed.of(db, krate);
-            functions.extend(listed.functions.iter().copied().zip(listed.exported.iter().copied()));
-            functions.extend(listed.in_provided.iter().map(|&it| (it, false)));
+            functions.extend(
+                listed.rooted.iter().filter(|it| !it.2).map(|&(it, exported, _)| (it, exported)),
+            );
+            functions.extend(listed.provided.iter().filter(|it| !it.1).map(|&(it, _)| (it, false)));
             kept.extend(&listed.kept);
             every_static.extend(&listed.statics);
         }
+    }
+    if stats {
+        eprintln!("roots.gathered: {:.1?} ({} functions)", start.elapsed(), functions.len());
     }
     // A library built before the programs that use it has every static a generic function
     // of it uses, for the instances they compile.
@@ -4775,12 +4855,16 @@ fn build(
     // rustc's there is no copy of it to name: each instance a caller asks for is compiled with
     // the caller. As a root it would only be counted as left out ("no rustc symbol"), which is
     // not something blaze could not compile.
-    if table.is_empty() {
-        functions.retain(|&(func, _)| !resolver.is_generic(func));
+    if stats {
+        eprintln!("roots.offered: {:.1?}", start.elapsed());
     }
-    // A function only the const evaluator runs has no code, in rustc's build or ours.
-    functions.retain(|&(func, _)| !hir_ty_codegen::compile_time_only(db, func));
+    if stats {
+        eprintln!("roots.generic: {:.1?}", start.elapsed());
+    }
     let list = start.elapsed();
+    if stats {
+        eprintln!("roots.list: {list:.1?}");
+    }
     // With a program to start from, only what it reaches is compiled, and what a runtime
     // looks up by name. Without one any function may be the one called.
     let (entries, on_demand): (Vec<_>, Vec<_>) = functions
