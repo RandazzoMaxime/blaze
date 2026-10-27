@@ -78,6 +78,11 @@ pub(crate) fn command(
     }
     args.extend(line.after.iter().cloned());
     args.extend(["-o".to_owned(), exe.display().to_string()]);
+    if line.apple {
+        // Last, as on rustc's line: the room the splice wants, which a link made short of it
+        // tells the file, and the link again reads.
+        args.push(crate::cargo::plan::headerpad_read(exe, None)?);
+    }
     shlex::try_join(args.iter().map(String::as_str)).context("a link argument has a NUL in it")
 }
 
@@ -351,7 +356,8 @@ impl Target {
     fn leading(&self) -> Vec<String> {
         if self.apple {
             let arch = if self.arch == "aarch64" { "arm64" } else { &self.arch };
-            ["-arch", arch].map(str::to_owned).to_vec()
+            // Edits are spliced into what this links, and the splice reads fixups in tables.
+            ["-arch", arch, crate::cargo::plan::NO_FIXUP_CHAINS].map(str::to_owned).to_vec()
         } else {
             let width = match &*self.arch {
                 "x86_64" => Some("-m64"),
@@ -471,5 +477,13 @@ mod tests {
         assert_eq!(linux.search("native=/a/out").as_deref(), Some("-L/a/out"));
         assert_eq!(linux.search("/b").as_deref(), Some("-L/b"));
         assert_eq!(linux.search("dependency=/c"), None);
+    }
+
+    #[test]
+    fn an_apple_link_has_fixups_in_tables_for_the_splice() {
+        for shared in [false, true] {
+            let mac = Target { apple: true, arch: "aarch64".to_owned(), shared };
+            assert_eq!(mac.leading(), ["-arch", "arm64", "-Wl,-no_fixup_chains"]);
+        }
     }
 }

@@ -15,8 +15,10 @@ const FIRST_DEFINITION_STAYS: &str = "-Wl,--allow-multiple-definition";
 
 /// What Apple's linker is told so that the loader finds what it fixes up in tables, as the
 /// splice reads and writes them, and not in chains through the pointers themselves. The
-/// linker makes chains for a deployment target of macOS 12 or later, as nix's shell sets.
-const NO_FIXUP_CHAINS: &str = "-Wl,-no_fixup_chains";
+/// linker makes chains for a deployment target of macOS 12 or later, as nix's shell sets, and
+/// `cc` gives a line that names none the version of the Mac it runs on. The links of
+/// [`crate::link`] ask for it too.
+pub(crate) const NO_FIXUP_CHAINS: &str = "-Wl,-no_fixup_chains";
 
 /// The room Apple's linker is told to leave after the load commands when nothing says more,
 /// so that a splice has room there for its two segments and for the unwind table, which
@@ -501,13 +503,7 @@ impl LinkLine {
         if self.flavor == Flavor::Apple {
             // Last, so that it is what the linker takes: it is at least what the line asks.
             let asked = self.args.iter().filter_map(|it| headerpad_in(it)).last();
-            let kept = headerpad_of(binary);
-            let pad = asked.unwrap_or(HEADERPAD).max(kept.unwrap_or(0));
-            if kept != Some(pad) {
-                write_headerpad(binary, pad)?;
-            }
-            let file = headerpad_file(binary);
-            command.push(shlex::try_quote(&format!("@{}", file.display()))?.into_owned());
+            command.push(shlex::try_quote(&headerpad_read(binary, asked)?)?.into_owned());
         }
         Ok(command.join(" "))
     }
@@ -629,6 +625,18 @@ pub(crate) fn headerpad_file(binary: &Path) -> PathBuf {
 /// The room the link of the executable at `binary` asks for, when it reads it from a file.
 pub(crate) fn headerpad_of(binary: &Path) -> Option<u64> {
     headerpad_in(std::fs::read_to_string(headerpad_file(binary)).ok()?.trim())
+}
+
+/// The last argument of a link of the Apple executable at `binary`, which has it read the room
+/// from [`headerpad_file`]: what the line `asked` for, or [`HEADERPAD`], and no less than the
+/// file says already.
+pub(crate) fn headerpad_read(binary: &Path, asked: Option<u64>) -> std::io::Result<String> {
+    let kept = headerpad_of(binary);
+    let pad = asked.unwrap_or(HEADERPAD).max(kept.unwrap_or(0));
+    if kept != Some(pad) {
+        write_headerpad(binary, pad)?;
+    }
+    Ok(format!("@{}", headerpad_file(binary).display()))
 }
 
 /// What rustc's link of a program for Apple is told besides what cargo asked, for the
