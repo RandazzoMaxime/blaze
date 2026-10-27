@@ -1221,12 +1221,17 @@ pub mod simd_lanes {
     }
 }
 
-/// `f16` and `f128`, which AArch64 has no arithmetic for without its half-precision extension:
-/// an `f16` is worked on as an `f32` and rounded back, an `f128` by compiler-builtins and C's
-/// `long double` functions. The values are at the edges of each format: signed zeros, the
-/// least and greatest subnormals, ties of the rounding back, the greatest finite values and
-/// what rounds past them, infinities, quiet and signalling NaNs with payloads.
-#[cfg(all(feature = "nightly", target_arch = "aarch64", target_os = "linux"))]
+/// `f16` and `f128`, which AArch64 and x86-64 have no arithmetic for without their
+/// half-precision extensions: an `f16` is worked on as an `f32` and rounded back, an `f128` by
+/// compiler-builtins and C's functions of it (`long double`'s on AArch64, `_Float128`'s on
+/// x86-64). The values are at the edges of each format: signed zeros, the least and greatest
+/// subnormals, ties of the rounding back, the greatest finite values and what rounds past
+/// them, infinities, quiet and signalling NaNs with payloads.
+#[cfg(all(
+    feature = "nightly",
+    any(target_arch = "aarch64", target_arch = "x86_64"),
+    target_os = "linux"
+))]
 pub mod soft_floats {
     use core::intrinsics as i;
 
@@ -1262,12 +1267,18 @@ pub mod soft_floats {
     pub fn half_widened(a: f16) -> (u32, u64, u128) {
         ((a as f32).to_bits(), (a as f64).to_bits(), (a as f128).to_bits())
     }
-    // Not to 128-bit integers: rustc at `opt-level=0` (LLVM's GlobalISel) converts an `f16` to
-    // one as to a 64-bit integer and leaves the upper half zero, so `-1.0 as i128` is 2^64 - 1
-    // there, and saturates as `as` should only optimized.
+    // To 128-bit integers only on x86-64: AArch64's rustc at `opt-level=0` (LLVM's GlobalISel)
+    // converts an `f16` to one as to a 64-bit integer and leaves the upper half zero, so
+    // `-1.0 as i128` is 2^64 - 1 there, and saturates as `as` should only optimized.
     pub fn half_to_ints(a: f16) -> (i8, u8, i16, u16, i32, u32, i64, u64) {
         (a as i8, a as u8, a as i16, a as u16, a as i32, a as u32, a as i64, a as u64)
     }
+    #[cfg(target_arch = "x86_64")]
+    pub fn half_to_wide_ints(a: f16) -> (i128, u128) {
+        (a as i128, a as u128)
+    }
+    #[cfg(not(target_arch = "x86_64"))]
+    pub fn half_to_wide_ints(_: f16) {}
     pub fn halves_of(a: f32, b: f64) -> (u16, u16) {
         ((a as f16).to_bits(), (b as f16).to_bits())
     }
@@ -1275,7 +1286,9 @@ pub mod soft_floats {
         [a as f16, b as f16, c as f16, d as f16, e as f16, f as f16].map(f16::to_bits)
     }
     /// `f16b` moves as an `f16` does, and is compared and widened as the `f32` it is the top
-    /// half of.
+    /// half of. Not on x86-64, whose LLVM narrows it from `f32` wherever it moves, which
+    /// quiets a signalling NaN.
+    #[cfg(target_arch = "aarch64")]
     pub fn brain(a: u16, b: u16) -> (u16, bool, Option<core::cmp::Ordering>, u32, String) {
         let (a, b) = (core::num::f16b::from_bits(a), core::num::f16b::from_bits(b));
         (b.to_bits(), a == b, a.partial_cmp(&b), f32::from(a).to_bits(), format!("{a:?}"))
@@ -1343,13 +1356,15 @@ pub mod soft_floats {
                 out += &format!("{:x?}{:?}", half_ops(a, b), half_compares(a, b));
             }
             out += &format!(
-                "\n{:x?} {:x?} {:?} {:?}\n",
+                "\n{:x?} {:x?} {:?} {:?} {:?}\n",
                 half_rounding(a),
                 half_widened(a),
                 half_to_ints(a),
+                half_to_wide_ints(a),
                 pair(a, a as f128)
             );
         }
+        #[cfg(target_arch = "aarch64")]
         for (&a, &b) in HALVES.iter().zip(HALVES.iter().rev()) {
             out += &format!("{:?} ", brain(a, b));
         }

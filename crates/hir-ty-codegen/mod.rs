@@ -649,6 +649,8 @@ enum Aapcs64 {
 enum RegClass {
     Int,
     Sse,
+    /// The upper half of the register of the `Sse` eightbyte before it: an `f128`'s.
+    SseUp,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -8006,8 +8008,15 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
             Primitive::Pointer(_) => AbiScalar { ty: ptr(), signed: false },
             Primitive::Float(rustc_abi::Float::F32) => AbiScalar { ty: types::F32, signed: true },
             Primitive::Float(rustc_abi::Float::F64) => AbiScalar { ty: types::F64, signed: true },
-            // `f16b` has no arithmetic in Rust, only its bits moved, and LLVM passes it where
-            // it passes an `f16`: in Cranelift's `F16` it is a 16-bit value of a float register.
+            // x86-64's LLVM keeps a `bfloat` without AVX-512's as the `f32` it widens to, and
+            // narrows it back by `__truncsfbf2` where it is returned, passed or stored, which
+            // quiets a signalling NaN at points of rustc's IR that this one does not have.
+            Primitive::Float(rustc_abi::Float::F16B) if self.cg.target.arch == Arch::X86_64 => {
+                unsupported!("f16b on x86-64, which LLVM narrows from f32 wherever it moves")
+            }
+            // `f16b` has no arithmetic in Rust, only its bits moved, and AArch64's LLVM passes
+            // it where it passes an `f16`: in Cranelift's `F16` it is a 16-bit value of a float
+            // register.
             Primitive::Float(rustc_abi::Float::F16 | rustc_abi::Float::F16B)
                 if f16_f128::soft_floats(self.cg.target) =>
             {
@@ -8348,8 +8357,8 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
                     PassMode::OnStack { size, padded }
                 }
                 // Cranelift moves anything else to the stack by itself: eight bytes for
-                // each value, and a 128-bit integer whole at a multiple of sixteen.
-                PassMode::Direct(AbiScalar { ty: types::I128, .. }) => {
+                // each value, and a 128-bit integer or float whole at a multiple of sixteen.
+                PassMode::Direct(AbiScalar { ty: types::I128 | types::F128, .. }) => {
                     stack = stack.next_multiple_of(16) + 16;
                     mode
                 }
@@ -8585,8 +8594,9 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
     }
 
     fn count_regs(&self, types: &[Type]) -> (usize, usize) {
-        let floats = types.iter().filter(|ty| ty.is_float()).count();
-        let ints = types.iter().filter(|ty| !ty.is_float()).map(|ty| ty.bytes().div_ceil(8));
+        let sse = |ty: &&Type| ty.is_float() || ty.is_vector();
+        let floats = types.iter().filter(sse).count();
+        let ints = types.iter().filter(|ty| !sse(ty)).map(|ty| ty.bytes().div_ceil(8));
         (ints.sum::<u32>() as usize, floats)
     }
 
@@ -8670,6 +8680,18 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
         if !self.classify(ty, 0, &mut classes)? {
             return Ok(on_stack);
         }
+        // An upper half whose lower half is not an `Sse` eightbyte's is an `Sse` one itself;
+        // an `f128` alone is a vector register's 16 bytes.
+        match classes {
+            [Some(RegClass::Sse), Some(RegClass::SseUp)] => return Ok(PassMode::Cast(types::I64X2)),
+            _ => {
+                for class in &mut classes {
+                    if *class == Some(RegClass::SseUp) {
+                        *class = Some(RegClass::Sse);
+                    }
+                }
+            }
+        }
         let reg = |class: Option<RegClass>, bytes: u64| match (class, bytes) {
             (Some(RegClass::Sse), 4) => types::F32,
             (Some(RegClass::Sse), _) => types::F64,
@@ -8701,13 +8723,16 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
             return Ok(false);
         }
         let mut scalar = |scalar: Scalar, offset: u64| {
-            let class = match scalar.primitive() {
+            let mut class = match scalar.primitive() {
                 Primitive::Float(_) => RegClass::Sse,
                 Primitive::Int(..) | Primitive::Pointer(_) => RegClass::Int,
             };
             let last = (offset + scalar.size(self.dl()).bytes() - 1) / 8;
             for slot in &mut classes[(offset / 8) as usize..=last as usize] {
                 *slot = Some(slot.map_or(class, |old: RegClass| old.min(class)));
+                if class == RegClass::Sse {
+                    class = RegClass::SseUp;
+                }
             }
         };
         match layout.backend_repr {
