@@ -193,7 +193,12 @@ All of these are rustc's, written from `compiler/rustc_borrowck` at the pinned n
   "higher-ranked lifetime error": `&'static str` is `Deserialize<'de>` only for
   `'de: 'static`, and a forwarding impl that needs `T: for<'a> Bar<&'a isize>` of a `T` that
   is only `Bar<&'b isize>` needs `'a: 'b`. A region that must outlive a placeholder outlives
-  `'static`, as a region of a lower universe does in rustc. rust-analyzer gives a trait object
+  `'static`, as a region of a lower universe does in rustc, and so does a type, whether the
+  placeholder is the predicate's own or one of a `for<'a>` in the where clauses that prove it:
+  `Eat<&'1 mut I, F>: Iterator` needs `for<'a> F: FnMut(<&'1 mut I as LendingIterator>::Item<'a>)`,
+  whose normalization needs `&'1 mut I: 'a`, so `'1: 'static` (rustc's "due to a current
+  limitation of the type system"), and a type parameter that must outlive one is rustc's
+  codeless "does not live long enough". rust-analyzer gives a trait object
   behind an elided reference in a signature `'static`, not the reference's lifetime, so a
   placeholder the solver equates with an elided lifetime is left out
   (`fn(&mut dyn Write)` for `impl FnMut(&mut dyn Write)` holds).
@@ -360,8 +365,7 @@ then one each of five more. The causes, grouped:
 - **Higher-ranked regions and placeholders**: trait bounds are proven for placeholders, but a
   function pointer or closure related to a `for<'a> fn` type is not (rustc's higher-ranked
   subtyping, with a projection normalized for the placeholder in
-  `nll/closure-malformed-projection-input-issue-102800.rs`), a type a placeholder must outlive
-  is left out, and auto traits of a coroutine's witness (`T: Send` of an `async` block holding
+  `nll/closure-malformed-projection-input-issue-102800.rs`), and auto traits of a coroutine's witness (`T: Send` of an `async` block holding
   a `for<'a>` future) are not proven with them.
 - **Well-formedness of items** (most of what is left of E0309 and E0310): items whose
   signature or impl header has an associated type (what normalizing it implies) are not
