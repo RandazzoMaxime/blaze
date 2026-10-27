@@ -41,7 +41,13 @@ fn check(fixture: &Path, scratch: &Path) -> Vec<String> {
         }
     };
     let root_text = root.display().to_string();
-    let mut env = vec![("CARGO_HOME".to_owned(), home.display().to_string())];
+    // Stop the walk up for `.cargo/config.toml` at the scratch dir, as cargo's own tests do, so
+    // config files above it (an ix VM's `/.cargo/config.toml`) don't reach what cargo recorded.
+    let test_root = scratch.canonicalize().unwrap();
+    let mut env = vec![
+        ("CARGO_HOME".to_owned(), home.display().to_string()),
+        ("__CARGO_TEST_ROOT".to_owned(), test_root.display().to_string()),
+    ];
     for (k, v) in case["env"].as_object().into_iter().flatten() {
         env.push((k.clone(), v.as_str().unwrap().replace("$ROOT", &root_text)));
     }
