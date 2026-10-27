@@ -64,7 +64,7 @@ pub(crate) fn status(quiet: bool, word: &str, rest: &str) {
 /// Why cargo does what the daemon would have. Never quiet: a build that went another way
 /// than asked says so.
 pub(crate) fn fallback(reason: &str, then: &str) {
-    eprintln!("{} {reason}; {then}", painted(YELLOW, "ra-jit:"));
+    eprintln!("{} {reason}; {then}", painted(YELLOW, "blaze:"));
 }
 
 pub(crate) fn error(text: &str) {

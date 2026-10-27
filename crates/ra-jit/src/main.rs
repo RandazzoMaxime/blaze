@@ -808,7 +808,7 @@ impl<'a> Resolver<'a> {
         let prebuilt = args.prebuilt.as_deref().filter(|_| table.is_empty()).map(|path| {
             let defined = defined_symbols(path);
             let defined =
-                defined.unwrap_or_else(|e| panic!("the standard library ra-jit built: {e:#}"));
+                defined.unwrap_or_else(|e| panic!("the standard library blaze built: {e:#}"));
             let program: Vec<Crate> =
                 args.crates().filter_map(|it| crates_named(db, it, args).ok()).flatten().collect();
             let crates = library_unit(db, &program);
@@ -2491,7 +2491,7 @@ fn checks_differ(db: &RootDatabase, built: &[Crate]) -> bool {
 fn linked_from_libraries(db: &RootDatabase, args: &Args) -> anyhow::Result<()> {
     anyhow::ensure!(
         args.link_cmd.as_deref().is_none_or(links_core),
-        "the link command has no library of `core`, as rustc's has not with `lto`: ra-jit \
+        "the link command has no library of `core`, as rustc's has not with `lto`: blaze \
          links against a build with `lto = \"off\"`"
     );
     if args.symbol_files.is_empty() {
@@ -2517,7 +2517,7 @@ fn linked_from_libraries(db: &RootDatabase, args: &Args) -> anyhow::Result<()> {
     };
     anyhow::ensure!(
         libraries.is_empty() || libraries.iter().any(linked),
-        "rustc linked the program without a library of `{}`, as it does with `lto`: ra-jit \
+        "rustc linked the program without a library of `{}`, as it does with `lto`: blaze \
          links against a build with `lto = \"off\"`",
         libraries[0].trim_start_matches("lib")
     );
@@ -3288,7 +3288,7 @@ fn workspace_at(
         let toolchain =
             workspace.sysroot.root().map_or("the toolchain".to_owned(), |it| it.to_string());
         anyhow::bail!(
-            "{toolchain} has no source of the standard library, which ra-jit compiles from: \
+            "{toolchain} has no source of the standard library, which blaze compiles from: \
              `rustup component add rust-src` installs it"
         );
     }
@@ -3783,7 +3783,7 @@ fn write_reach(db: &RootDatabase, listed: &Listed, args: &Args, built: bool) {
         Err(panic) if panic.is::<ide_db::base_db::salsa::Cancelled>() => {
             std::panic::resume_unwind(panic)
         }
-        Err(panic) => format!("*\tra-jit panicked: {}\n", panic_message(&*panic)),
+        Err(panic) => format!("*\tblaze panicked: {}\n", panic_message(&*panic)),
     };
     let writing = dir.join(format!("{}.writing", cargo::plan::REACH));
     if std::fs::write(&writing, text).and_then(|()| std::fs::rename(&writing, &file)).is_err() {
@@ -4764,7 +4764,7 @@ fn link_executable(
     .map_err(|it| refused_linked(it, args))?;
     let stand_ins = link::stand_ins(exe)?;
     eprintln!(
-        "linked {} in {took:.1?}, {} functions in it ra-jit could not compile",
+        "linked {} in {took:.1?}, {} functions in it blaze could not compile",
         exe.display(),
         stand_ins.len()
     );
@@ -5193,7 +5193,7 @@ fn build(
 /// How many of the functions ra-jit could not compile an error names.
 const REFUSED_SHOWN: usize = 16;
 /// What the first line of [`refused_error`] says, which the daemon's client finds it by.
-pub(crate) const REFUSED_SAYS: &str = "ra-jit could not compile";
+pub(crate) const REFUSED_SAYS: &str = "blaze could not compile";
 
 /// Why a program with nothing of rustc's is not built: the functions it reaches that ra-jit
 /// could not compile, `reached` of them, each `name: why`, the first [`REFUSED_SHOWN`] named.
@@ -5355,7 +5355,7 @@ fn report(build: &Build) {
         let all: String =
             build.skipped.iter().map(|(name, error)| format!("{name}: {error}\n")).collect();
         if let Err(error) = std::fs::write(&path, all) {
-            eprintln!("ra-jit: cannot write {path:?}: {error}");
+            eprintln!("blaze: cannot write {path:?}: {error}");
         }
     }
     if build.skipped.len() <= 8 {
@@ -6149,7 +6149,7 @@ fn refusal(
             None => "may call code of rustc's that is".to_owned(),
         };
         return Some(Refused::Cargos(format!(
-            "{name} is not compiled by ra-jit, and rustc's copy of it {calls} from before the \
+            "{name} is not compiled by blaze, and rustc's copy of it {calls} from before the \
              edit: {why} (no-rustc E, #85)"
         )));
     }
@@ -6157,12 +6157,12 @@ fn refusal(
     // the frontend turned the function down when rustc compiled it. Code rustc compiles
     // that ra-jit takes for wrong is ra-jit's to fix, and not for rustc to build.
     if does_not_compile(&why) && !left_from_the_start {
-        let message = format!("{name} has an error ra-jit cannot say more of: {why}");
+        let message = format!("{name} has an error blaze cannot say more of: {why}");
         let said = errors::Said::one(written_at(db, func, watched, root, &message));
         return Some(Refused::Error(said));
     }
     Some(Refused::Cargos(format!(
-        "{name} is not compiled by ra-jit and rustc's copy is from before the edit: {why} \
+        "{name} is not compiled by blaze and rustc's copy is from before the edit: {why} \
          (no-rustc E, #85)"
     )))
 }
@@ -7011,7 +7011,7 @@ impl Tests {
         let which = differs(now, self).or_else(|| differs(self, now)).unwrap_or_default();
         Some(format!(
             "the test `{which}` was added, removed or given other attributes, and the list of \
-             tests is rustc's to write: ra-jit wrote no test harness for the program (no-rustc H, \
+             tests is rustc's to write: blaze wrote no test harness for the program (no-rustc H, \
              #88)"
         ))
     }
@@ -7055,7 +7055,7 @@ fn compile_tiered(
     let mut asked = Vec::new();
     for want in wants {
         let Some(node) = known.tier_node(&want.symbol) else {
-            tier::theirs(&binary, &want.symbol, "rustc's code, which ra-jit does not tier");
+            tier::theirs(&binary, &want.symbol, "rustc's code, which blaze does not tier");
             continue;
         };
         let asked_for = codegen_tier::Asked {
@@ -7840,7 +7840,7 @@ fn main() -> anyhow::Result<()> {
             }
             asked.args(std::env::args_os().skip(3));
             let output = answers::cargo_answer(&asked)
-                .context("ra-jit does not answer this question of cargo")??;
+                .context("blaze does not answer this question of cargo")??;
             use std::io::Write as _;
             std::io::stdout().write_all(&output.stdout)?;
             std::io::stderr().write_all(&output.stderr)?;
@@ -9096,7 +9096,7 @@ fn run_holding(
         tier::watch(move |ask| _ = sender.send(Event::Tier(ask)));
     } else if serving {
         eprintln!(
-            "tier: off (RA_JIT_TIER=off, ra-jit built without `--features llvm`, or not macOS \
+            "tier: off (RA_JIT_TIER=off, blaze built without `--features llvm`, or not macOS \
              on AArch64)"
         );
     }
@@ -10741,7 +10741,7 @@ impl Program {
         if let Some(why) = harness_alone(args)
             && !harnessed
         {
-            let why = format!("{why}, and ra-jit wrote no test harness for it (no-rustc H, #88)");
+            let why = format!("{why}, and blaze wrote no test harness for it (no-rustc H, #88)");
             failed = failed.or(Some(Refused::Cargos(why)));
         }
         match tests {

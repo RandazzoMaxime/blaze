@@ -64,7 +64,7 @@ pub(crate) fn missing_server() -> String {
         })
         .map_or_else(|| SHIPPED.to_owned(), |it| it.display().to_string());
     format!(
-        "no proc-macro server is beside ra-jit (looked for {beside}), and ra-jit links proc \
+        "no proc-macro server is beside blaze (looked for {beside}), and blaze links proc \
          macros only for its own. Build it there from a blaze checkout with `ra-jit \
          vendor/proc-macro-srv --crate rust_analyzer_proc_macro_srv --crate proc_macro --out \
          <scratch>/server.o --exe {beside}` (what `.github/scripts/build_release.py --server` \
@@ -143,7 +143,7 @@ pub(crate) fn libraries_of(sysroot: Option<&Path>, libraries: &[PathBuf]) -> Vec
                     match found {
                         Ok(it) => made.lock().unwrap()[at] = it,
                         Err(why) => say::fallback(
-                            &format!("ra-jit did not make the proc macro {name}: {why}"),
+                            &format!("blaze did not make the proc macro {name}: {why}"),
                             "rustc's library of it is expanded by the toolchain's server",
                         ),
                     }

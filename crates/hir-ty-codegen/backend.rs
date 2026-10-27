@@ -166,7 +166,7 @@ impl Backend {
             Ok("cranelift") | Err(_) => Ok(Backend::Cranelift),
             Ok("llvm") if cfg!(feature = "llvm") => Ok(Backend::Llvm(optimization)),
             Ok("llvm") => {
-                Err(format!("{BACKEND}=llvm: ra-jit was built without `--features llvm`"))
+                Err(format!("{BACKEND}=llvm: blaze was built without `--features llvm`"))
             }
             Ok(other) => Err(format!("{BACKEND}={other}: expected `cranelift` or `llvm`")),
         }

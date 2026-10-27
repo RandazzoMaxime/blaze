@@ -826,7 +826,7 @@ impl StoreDir {
             Some(FORMAT) => return Ok(()),
             Some(newer) if newer > FORMAT => {
                 return Err(io::Error::other(format!(
-                    "the store is of format {newer}, and this ra-jit reads format {FORMAT}"
+                    "the store is of format {newer}, and this blaze reads format {FORMAT}"
                 )));
             }
             _ => {}
