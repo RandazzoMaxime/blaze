@@ -249,7 +249,7 @@ impl StoredCode {
         let isa = super::target().ok()?;
         let ir = cranelift_codegen::incremental_cache::compute_cache_key(&**isa, func);
         let mut hasher = Sha256::new();
-        hasher.update(b"ra-jit llvm 8");
+        hasher.update(b"ra-jit llvm 9");
         // Nor what the types of the parameters say of the memory they point to.
         for (at, pointee) in pointees {
             let super::fragment::Pointee { unique, frozen, size, align } = *pointee;
@@ -260,12 +260,8 @@ impl StoredCode {
         }
         hasher.update(u32::MAX.to_le_bytes());
         hasher.update(super::Backend::Llvm(optimization).to_string());
-        // Nor the inliner's threshold, when one is set (nothing is hashed for the default, so
-        // its keys stay what they were).
-        if let Some(threshold) = super::llvm::inline_threshold() {
-            hasher.update(b"inline-threshold");
-            hasher.update(threshold.to_le_bytes());
-        }
+        // Nor LLVM's inliner threshold.
+        hasher.update(super::llvm::inline_threshold().to_le_bytes());
         hasher.update(ir.to_string());
         // Nor does it tell which statement an instruction is of, which the code's lines do.
         for block in func.layout.blocks() {
