@@ -99,7 +99,11 @@ All of these are rustc's, written from `compiler/rustc_borrowck` at the pinned n
   value, E0373 ("may outlive the current block") for a closure a `let` binds as a block's
   value, and E0597 rather than E0515 for what a function returns as an `impl Trait` that
   captures no lifetime (rustc's `OpaqueType` constraint), even when a `move` closure in it
-  borrows a variable it took by value. The mutable borrows of a variable
+  borrows a variable it took by value; but E0515 where liveness keeps no region of the
+  hidden type live (an alias whose bounds say it outlives `'static`), as rustc then blames
+  the return. A borrow an `async` closure captures is blamed as any borrow of a local
+  (E0515 when it is returned, not E0373), as rustc's `borrow_spans` knows captures only of
+  closures and coroutines. The mutable borrows of a variable
   declared without `mut` are one E0596, at the declaration once there are two.
 - `'static` in what a type or signature spells (`x: &'static u32` in a struct, a parameter
   `&'static T`) is related as any other region; a copied value proves its type `Copy`
@@ -165,8 +169,17 @@ All of these are rustc's, written from `compiler/rustc_borrowck` at the pinned n
   hold for them, in code that is never reached too. A constant or function named through a
   type that spells out lifetimes, `A::<'a>::C` or `<A<'a>>::new`, has its impl's self type (or
   for a trait's item, `Self`) equal to `A<'a>`, in a range pattern's bounds too.
-- Promotion: a borrowed function item, and a named `const` whose type has no interior
-  mutability whatever its drop (rustc asks whether the value needs dropping, not the type).
+- Promotion: a borrowed function item, and a value whose qualifs are empty, asked of the value
+  rather than its type as rustc's `check_consts::qualifs` (`NeedsDrop`, `HasMutInterior`;
+  `hir-ty-borrowck/src/qualifs.rs`): an aggregate has its parts' qualifs unless it is a union or
+  its type has a `Drop` impl or is `UnsafeCell`, a named inherent or free `const` what its own
+  value has (`mir_const_qualif`), a borrow what the place it borrows has (`&STATIC` none; an
+  autoref too, so `Droppy.get_ref()` does not promote a `Droppy` with a `Drop` impl), and
+  anything else (a call, a literal) what any value of its type has. So `&[OPEN_PAREN, INDENT]`
+  is promoted though another variant of their enum holds a `Cell` or a `Box` (ruff's printer),
+  and `&Signals::EMPTY` though `Signals` holds an `Arc`. In a `static`'s value a static that is
+  neither `extern` nor thread-local may be borrowed in a promoted constant
+  (`static M: Meta = Meta::new(&[(&OPT, true)])`, nushell's `#[exp(..)]` tests).
   In a `const` or `static` item's value, a call of a `const fn` is promotable too
   (`Migrations::new(&[Migration::new("a")])`), as it is in rustc's const contexts, a method
   call and a block of items and a tail included: tracing's `fieldset!` names a field
@@ -290,6 +303,9 @@ All of these are rustc's, written from `compiler/rustc_borrowck` at the pinned n
   before it the one lifetime elision gives the output when the bounds write `'_` or elide it
   (`impl Iterator<Item = &i32> + '_`), and `use<'_>` lists that one. So mutating `self` while
   an iterator `fn evens(&self) -> impl Iterator<Item = &i32> + '_` returned is live is E0502.
+  In a trait or its impls the trait's or impl's own parameters are always captured, whatever
+  `use<..>` says, as rustc relates the `impl Trait` there (a GAT of the trait) invariantly
+  in all of them.
 - `impl Trait`'s hidden type: each of its regions must be `'static` or one of the lifetimes
   the `impl Trait` captures (rustc's member constraints), else E0700 at the signature; and it
   must outlive what the bounds say (`impl Copy + 'a`). The same holds of an `impl Trait` an
@@ -302,9 +318,14 @@ All of these are rustc's, written from `compiler/rustc_borrowck` at the pinned n
   rustc picks the captured lifetime a
   region becomes and checks the body with that choice; ra-jit only tests that one exists, so
   it reports E0700 where rustc does and leaves the errors that choice causes unreported.
+- A return type with `_` in it is rustc's E0121, which takes the type the body infers: the
+  return slot is checked as any other local, its regions inferred, not tied to a signature.
 - Closures: captures, E0373, `FnMut` escapes, E0596 and E0594 through captures. A capture's
   borrow is reported at the first use of the place in the closure (rustc's `path_expr_id`,
-  which `compute_min_captures` keeps from the capture recorded first). A closure's
+  which `compute_min_captures` keeps from the capture recorded first). An `async`
+  closure's captures flow into its upvars as a closure's do, and its body knows its upvars
+  outlive the borrow of its environment (rustc's `compute_components` of a
+  `CoroutineClosure`), so an `AsyncFnMut` future may reborrow a `&mut` capture. A closure's
   body has two kinds of universal region, as rustc's: its own (the late-bound lifetimes of
   its signature, `for<'a> FnOnce(&'a T)`, and the borrow of its environment) and its
   creator's (every other region of its type, and the enclosing item's lifetime parameters,
@@ -369,8 +390,9 @@ All of these are rustc's, written from `compiler/rustc_borrowck` at the pinned n
   it does not (E0491) gets only that error, which ra-jit does not report yet. The type a
   returned `impl Trait` hides must be well-formed and outlive what its bounds say, given what
   the function knows (rustc's `check_opaque_meets_bounds`): `-> impl Sized + 'static` hiding
-  a `T` is E0310 at the `impl Trait`. In its defining body the type it hides is also
-  well-formed at the signature, as rustc's implied bounds normalize the returned `impl Trait`
+  a `T` is E0310 at the `impl Trait`; and well-formed where the body defines it, as rustc's
+  `add_item_bounds_for_hidden_type` requires (#114728). In its defining body the type it hides is
+  also well-formed at the signature, as rustc's implied bounds normalize the returned `impl Trait`
   to it there and prove what that asks: `-> (Box<dyn Any>, impl Sized)` hiding
   `Outlives<'static, <T as Trait>::Assoc>` needs `<T as Trait>::Assoc: 'static` (E0310 at
   the function), the type around it (`&'t impl Trait`) still assumed. Its trait and
@@ -466,12 +488,6 @@ then one each of five more. The causes, grouped:
 - **Member constraints of `impl Trait`**: the choice rustc makes is not applied, and a
   projection bound that names a lifetime (`impl Iterator<Item = Box<dyn Foo>>`) leaves them
   out.
-- **Blame through a callee's `impl Trait`**: a local borrowed into a call whose `impl Trait`
-  is returned through one that captures no lifetime is E0597 or E0716 in rustc 1.99 (the
-  call's argument blamed) and in the pinned nightly too, except under a `for<'a>` outlives
-  bound (`borrowck/alias-liveness/higher-ranked-outlives-for-capture.rs`), where the nightly
-  blames the return (E0515). ra-jit gives E0515 for both, so
-  `impl-trait/precise-capturing/migration-note.rs` has 12 of its 13 errors right.
 - **Captures of an empty `match`**: rustc's capture analysis has a closure that matches
   on `x` with no arms read `x`; rust-analyzer's captures nothing there, so the E0381 of an
   uninitialized `x` is missed.
@@ -609,12 +625,16 @@ small: an edit re-checks only the bodies it changed (the query reads each body's
 relative to its item, which moving the body does not change), and each check should cost a
 small fraction of type inference, which it needs anyway.
 
-`ra-jit borrowck --project DIR --timings OUT.jsonl` checks every body of a project's own crates
-in both modes, cold, on one thread, and writes per body type inference's time, the checker's
-time in each phase and the sizes it worked on; `RA_JIT_BORROWCK_ONLY=part` limits it to the
-bodies whose name contains `part`. `harness/borrowck_speed.py` runs it over the bench apps and
-reports totals, p50/p99/max and the slowest bodies; `--rustc TOOLCHAIN` measures rustc's own
-`mir_borrowck` and `typeck` with `-Zself-profile` as the baseline.
+`ra-jit borrowck --project DIR --timings OUT.jsonl` goes through every body of a project's own
+crates on one thread. It infers and checks each body once cold, paying for the queries the body
+is the first to need (`infer_us`, `first_us`), then infers it and checks it in each mode as an
+edit of it costs in the daemon: the rest of the workspace answered and the trait solver's cache
+empty, as it is in a new revision (`infer_warm_us`, each mode's phases and sizes).
+`RA_JIT_BORROWCK_ONLY=part` limits it to the bodies whose name contains `part`. Run it inside
+`nix develop`: without the toolchain's sysroot most bodies have inference errors and are not
+checked. `harness/borrowck_speed.py` runs it over the bench apps and reports totals, p50/p99/max
+and the slowest bodies; `--rustc TOOLCHAIN` measures rustc's own `mir_borrowck` and `typeck`
+with `-Zself-profile` as the baseline.
 
 Before any speed work, on main 31b3345f (arm64 ix VM, 16 vCPUs): the checker's total
 without MIR lowering, beside type inference's, in ms, and its slowest body:
@@ -633,6 +653,28 @@ without MIR lowering, beside type inference's, in ms, and its slowest body:
 
 Generating constraints, which asks the trait solver about every statement's types, is more
 than half of it everywhere (nushell: 13.4 s of 23.6 s), then liveness, the walk and moves.
+Those inference times are cold; the checker's ran after them with the trait solver's answers
+still cached, which flattered it.
+
+Measured as an edit pays both, with interval sets, SCC region inference and per-block loan
+scopes in, and an ADT's inferred outlives a query and `is_copy` asked once per type: the
+checker without MIR lowering beside an edit's inference, in ms, and its slowest body.
+
+| App | Inference | Polonius | max | NLL | max |
+|---|---|---|---|---|---|
+| ripgrep | 658 | 480 (73%) | 9 | 423 (64%) | 8 |
+| fd | 204 | 126 (62%) | 19 | 115 (57%) | 18 |
+| bat | 306 | 267 (87%) | 67 | 245 (80%) | 66 |
+| hyperfine | 220 | 146 (66%) | 17 | 134 (61%) | 15 |
+| just | 1173 | 849 (72%) | 24 | 784 (67%) | 24 |
+| axum | 4163 | 3604 (87%) | 76 | 3531 (85%) | 75 |
+| helix | 3201 | 2157 (67%) | 118 | 1971 (62%) | 112 |
+| nushell | 15758 | 18225 (116%) | 828 | 17249 (109%) | 829 |
+
+Generating constraints is still most of it (nushell: 10.6 s of 18.2 s), and the outliers are
+the trait solver proving one body's well-formedness and outlives bounds: nushell's
+`custom_value_op` (828 ms) and `serve_plugin_io` (356 ms). rustc's own `mir_borrowck` is 44%
+of its `typeck` on ripgrep, 31% on axum and 149% on just.
 
 ## Debugging
 

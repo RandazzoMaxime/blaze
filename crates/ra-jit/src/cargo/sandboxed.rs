@@ -49,7 +49,7 @@ const INPUTS: &str = "tests-inputs";
 /// The variables of the environment a test keeps under `RA_JIT_TESTS=affected` besides those
 /// cargo and ra-jit set for it: what finds programs and the toolchain, who and where the user
 /// is, the locale, and what decides how a failure is shown.
-const KEPT: &[&str] = &[
+pub(crate) const KEPT: &[&str] = &[
     "PATH",
     "HOME",
     "USER",
@@ -148,6 +148,12 @@ pub(crate) struct WorkspaceOptOut {
     /// `unsandboxed-proc-macros`: the packages, by name, whose proc macros are expanded by a
     /// server outside.
     pub(crate) proc_macros: BTreeSet<String>,
+    /// `build-script-env`: variables of the environment given to every build script in the
+    /// sandbox besides those it is always given (`script_sandbox.rs`).
+    pub(crate) build_script_env: BTreeSet<String>,
+    /// `build-script-link-dirs`: directories of the system a build script in the sandbox may
+    /// name in `rustc-link-search` besides those it always may (`directives.rs`).
+    pub(crate) build_script_link_dirs: BTreeSet<String>,
 }
 
 impl WorkspaceOptOut {
@@ -177,18 +183,20 @@ pub(crate) fn workspace_opt_out(root: &Path) -> anyhow::Result<WorkspaceOptOut> 
         let into = match key.as_str() {
             "unsandboxed-build-scripts" => &mut out.build_scripts,
             "unsandboxed-proc-macros" => &mut out.proc_macros,
+            "build-script-env" => &mut out.build_script_env,
+            "build-script-link-dirs" => &mut out.build_script_link_dirs,
             other => {
                 return Err(wrong(&format!(
-                    "`{other}` is not known (`unsandboxed-build-scripts` and \
-                     `unsandboxed-proc-macros` are)"
+                    "`{other}` is not known (`unsandboxed-build-scripts`, \
+                     `unsandboxed-proc-macros`, `build-script-env` and \
+                     `build-script-link-dirs` are)"
                 )));
             }
         };
         let names = value.as_array().ok_or_else(|| wrong(&format!("`{key}` is a list")))?;
         for name in names {
-            let name = name
-                .as_str()
-                .ok_or_else(|| wrong(&format!("`{key}` lists packages by their names")))?;
+            let name =
+                name.as_str().ok_or_else(|| wrong(&format!("`{key}` lists names, as strings")))?;
             into.insert(name.to_owned());
         }
     }
@@ -269,6 +277,14 @@ fn target_of(executable: &Path) -> Option<&Path> {
     executable.ancestors().skip(1).find(|it| it.join("CACHEDIR.TAG").is_file())
 }
 
+/// Cargo's home in the environment `env`, as cargo finds it: `CARGO_HOME`, else `.cargo` in
+/// the home directory.
+fn cargo_home(env: &[(String, String)]) -> Option<PathBuf> {
+    let var = |name: &str| env.iter().find(|it| it.0 == name).map(|it| PathBuf::from(&it.1));
+    let home = var("CARGO_HOME").or_else(|| Some(var("HOME")?.join(".cargo")))?;
+    Some(std::fs::canonicalize(&home).unwrap_or(home))
+}
+
 /// Where this command keeps the specs and records of its sandboxes, removed when it is done.
 pub(crate) struct Scratch {
     dir: PathBuf,
@@ -299,6 +315,13 @@ impl Scratch {
         if let Some(target) = target_of(&test.executable).filter(|it| !it.starts_with(&state.root))
         {
             overlays.push(target.to_owned());
+        }
+        // Every cargo takes its locks in its home and records there what it used, so a test
+        // that runs cargo (trybuild's, a cargo plugin's) writes it, for itself alone.
+        if let Some(home) = cargo_home(&env).filter(|it| it.is_dir())
+            && !overlays.iter().any(|it| home.starts_with(it))
+        {
+            overlays.push(home);
         }
         let mut not_inputs = vec![test.executable.clone()];
         not_inputs.extend(std::fs::canonicalize(&test.executable).ok());

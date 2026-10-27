@@ -648,8 +648,10 @@ impl Worker {
         let warmth = match self.warmed(checkout) {
             Ok(None) => Warmth::Ready,
             Ok(Some(said)) => Warmth::Broken(said, SystemTime::now()),
+            // The worker leaves the errors before it ends, which under load can be after the
+            // daemon has stopped waiting for it to; `start` took away those of any before it.
             Err(why) => match std::fs::read(errors_beside(&self.socket)) {
-                Ok(said) if self.ended().is_some() => match serde_json::from_slice(&said) {
+                Ok(said) => match serde_json::from_slice(&said) {
                     Ok(said) => Warmth::Broken(said, SystemTime::now()),
                     Err(_) => Warmth::Failed(format!("{why:#}"), SystemTime::now()),
                 },

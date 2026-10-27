@@ -1388,6 +1388,12 @@ impl Store {
             .as_ref()
     }
 
+    /// The store in `dir`, keyed as this process keys its values: for a process that keeps a
+    /// store of its own beside the global one.
+    pub fn open_at(dir: &Path) -> io::Result<Store> {
+        Store::open(dir, Identity::current()?, Tuning::from_env()?)
+    }
+
     fn open(dir: &Path, identity: Identity, tuning: Tuning) -> io::Result<Store> {
         let dir = StoreDir::at(dir);
         dir.claim()?;

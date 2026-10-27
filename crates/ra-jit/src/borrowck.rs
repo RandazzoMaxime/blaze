@@ -279,8 +279,10 @@ fn check_project(project: &str) -> anyhow::Result<()> {
 /// `ra-jit borrowck --project DIR --timings OUT`: for each body of the workspace's crates, the
 /// time type inference takes on it and the time the borrow checker takes in each mode, by
 /// phase, with the sizes it worked on, one JSON object per line in `OUT`; the totals on
-/// standard output. Each body is inferred and then checked, one at a time on one thread, so a
-/// body's time includes the queries it is the first to need.
+/// standard output. Each body is inferred and then checked, one at a time on one thread:
+/// `infer_us` and `first_us` include the queries the body is the first to need, while
+/// `infer_warm_us` and each mode's time are what an edit of the body costs in the daemon, the
+/// rest answered and the trait solver's cache empty.
 fn time_project(project: &str, out: &str) -> anyhow::Result<()> {
     use hir::{AssocItem, DefWithBody, ModuleDef};
     use hir_ty_borrowck::{
@@ -306,6 +308,8 @@ fn time_project(project: &str, out: &str) -> anyhow::Result<()> {
     let mut totals = [[std::time::Duration::ZERO; Phase::ALL.len()]; 2];
     let mut check_totals = [std::time::Duration::ZERO; 2];
     let (mut infer_total, mut bodies) = (std::time::Duration::ZERO, 0usize);
+    let (mut infer_warm_total, mut first_total) =
+        (std::time::Duration::ZERO, std::time::Duration::ZERO);
     hir::attach_db(&db, || -> anyhow::Result<()> {
         let mut found: Vec<(DefWithBody, String)> = Vec::new();
         for krate in hir::Crate::all(&db) {
@@ -400,16 +404,27 @@ fn time_project(project: &str, out: &str) -> anyhow::Result<()> {
             if infer.is_err() {
                 continue;
             }
-            // Both modes, each body checked by one first and then the other, in turn, so the
-            // queries the first pays for cold are paid by each mode as often.
-            let modes = if bodies % 2 == 0 {
-                [Mode::Polonius, Mode::Nll]
-            } else {
-                [Mode::Nll, Mode::Polonius]
-            };
+            // What an edit in the daemon pays: the queries of the rest of the workspace answered,
+            // the trait solver's cache empty, as it is in a new revision.
+            hir::clear_tls_solver_cache();
+            let started = Instant::now();
+            let _ = hir_ty::infer_query_with_inspect(&db, id, None, hir_ty::LoweringMode::Analysis);
+            let infer_warm = started.elapsed();
+            // The first check pays for the queries the body is the first to need, as the first
+            // inference did; then each mode is timed as an edit.
+            let started = Instant::now();
+            let first = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                hir_ty_borrowck::borrowck_in_mode(&db, id, Mode::Polonius)
+            }));
+            let first_time = started.elapsed();
+            if first.is_err() {
+                continue;
+            }
+            let modes = [Mode::Polonius, Mode::Nll];
             let mut by_mode = serde_json::Map::new();
             let mut panicked = false;
             for mode in modes {
+                hir::clear_tls_solver_cache();
                 let started = Instant::now();
                 let checked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     measure(|| hir_ty_borrowck::borrowck_in_mode(&db, id, mode).skipped.is_some())
@@ -455,6 +470,8 @@ fn time_project(project: &str, out: &str) -> anyhow::Result<()> {
             }
             bodies += 1;
             infer_total += infer_time;
+            infer_warm_total += infer_warm;
+            first_total += first_time;
             writeln!(
                 file,
                 "{}",
@@ -462,7 +479,8 @@ fn time_project(project: &str, out: &str) -> anyhow::Result<()> {
                     "name": name,
                     "path": path,
                     "infer_us": infer_time.as_micros() as u64,
-                    "first": mode_name(modes[0]),
+                    "infer_warm_us": infer_warm.as_micros() as u64,
+                    "first_us": first_time.as_micros() as u64,
                     "modes": by_mode,
                 })
             )?;
@@ -490,6 +508,8 @@ fn time_project(project: &str, out: &str) -> anyhow::Result<()> {
         serde_json::json!({
             "bodies": bodies,
             "infer_secs": infer_total.as_secs_f64(),
+            "infer_warm_secs": infer_warm_total.as_secs_f64(),
+            "first_check_secs": first_total.as_secs_f64(),
             "modes": summary,
         })
     )?;
@@ -573,4 +593,38 @@ fn diagnostics(
             })
             .collect()
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A package depending on a path that is not there: `cargo metadata` fails, and
+    /// `--no-deps`, which rust-analyzer falls back to, does not.
+    #[test]
+    fn refuses_a_workspace_whose_metadata_failed() {
+        let work = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(work.path().join("src")).unwrap();
+        std::fs::write(
+            work.path().join("Cargo.toml"),
+            "[package]\nname = \"a\"\nversion = \"0.0.0\"\nedition = \"2021\"\n\n\
+             [dependencies]\nmissing = { path = \"vendor/missing\" }\n",
+        )
+        .unwrap();
+        std::fs::write(work.path().join("src/lib.rs"), "").unwrap();
+        let load_config = LoadCargoConfig {
+            load_out_dirs_from_check: false,
+            with_proc_macro_server: ProcMacroServerChoice::None,
+            prefill_caches: false,
+            num_worker_threads: 1,
+            proc_macro_processes: 1,
+        };
+        let root = AbsPathBuf::assert_utf8(dunce::canonicalize(work.path()).unwrap());
+        let error = load_project(&root, &CargoConfig::default(), &load_config)
+            .err()
+            .expect("a workspace whose metadata failed was loaded");
+        let error = format!("{error:#}");
+        assert!(error.contains("`cargo metadata` failed"), "{error}");
+        assert!(error.contains("vendor/missing"), "{error}");
+    }
 }

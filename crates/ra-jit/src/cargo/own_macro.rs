@@ -9,14 +9,12 @@
 //! only described, and a proc macro without a server fails the load.
 
 use std::{
-    collections::BTreeMap,
     ffi::OsStr,
     path::{Path, PathBuf},
     sync::OnceLock,
 };
 
 use anyhow::Context as _;
-use sha2::{Digest as _, Sha256};
 
 use super::{
     own_script::{self, Made},
@@ -196,149 +194,6 @@ fn library_of(sysroot: &Path, library: &Path) -> Result<Option<PathBuf>, String>
     std::fs::create_dir_all(&dir).map_err(|it| it.to_string())?;
     own_script::compile_record(sysroot, &record, &made, &dir)?;
     Ok(Some(made.exe))
-}
-
-/// What the store keeps ra-jit's proc-macro libraries under in place of a toolchain: a
-/// library is told by its description, which its key has.
-const LIBRARIES: &str = "proc-macro libraries 1";
-
-/// The most a library and the files it was linked from may have for the store to keep it.
-const MOST_KEPT: usize = 256 << 20;
-
-/// The key of the library ra-jit links of the first crate of `described`, the text of its
-/// `rust-project.json`.
-pub(crate) fn library_key(described: &str) -> [u8; 32] {
-    let mut hash = Sha256::new();
-    for field in [LIBRARIES.as_bytes(), described.as_bytes()] {
-        hash.update((field.len() as u64).to_le_bytes());
-        hash.update(field);
-    }
-    hash.finalize().into()
-}
-
-fn store() -> Option<&'static ra_jit_store::Store> {
-    ra_jit_store::compiles_against(LIBRARIES);
-    ra_jit_store::Store::global_or(super::daemon::store().as_deref())
-}
-
-/// Writes the library the store keeps under `key`, and its dep-info, where `made` says, when
-/// every file it was linked from has what it had. Whether it did.
-pub(crate) fn restored(key: &[u8; 32], made: &Made<'_>) -> bool {
-    let Some(kept) = store().and_then(|it| it.get(key)).and_then(|it| Kept::read(&it)) else {
-        return false;
-    };
-    if !kept.still() {
-        return false;
-    }
-    let write = |path: &Path, bytes: &[u8], executable: bool| {
-        let new = path.with_extension(format!("{}.new", std::process::id()));
-        std::fs::write(&new, bytes)
-            .and_then(|()| if executable { super::script::make_executable(&new) } else { Ok(()) })
-            .and_then(|()| std::fs::rename(&new, path))
-    };
-    write(&made.exe, &kept.library, true)
-        .and_then(|()| write(&made.dep_info, &kept.dep_info, false))
-        .is_ok()
-}
-
-/// Keeps the library ra-jit linked as `made` says under `key`, with what each file it was
-/// linked from has: the files of its dep-info, and each of `inputs`, the dep-info of a crate
-/// it links with the directory its paths are from, and their files. Nothing is kept when one
-/// of them is not there.
-pub(crate) fn keep<'a>(
-    key: &[u8; 32],
-    made: &Made<'_>,
-    inputs: impl Iterator<Item = (&'a Path, &'a Path)>,
-) {
-    let Some(store) = store() else { return };
-    let (Ok(library), Ok(dep_info)) = (std::fs::read(&made.exe), std::fs::read(&made.dep_info))
-    else {
-        return;
-    };
-    let mut files = BTreeMap::new();
-    let read = |files: &mut BTreeMap<PathBuf, Option<Vec<u8>>>, info: &[u8], from: &Path| {
-        let info = crate::dep_info::DepInfo::parse(&String::from_utf8_lossy(info));
-        for file in info.files {
-            let path = from.join(&file);
-            let digest = std::fs::read(&path).ok().map(|it| Sha256::digest(it).to_vec());
-            files.insert(path, digest);
-        }
-    };
-    let parent = made.dep_info.parent().unwrap_or(Path::new(""));
-    read(&mut files, &dep_info, parent);
-    for (info, from) in inputs {
-        let Ok(bytes) = std::fs::read(info) else { return };
-        files.insert(info.to_owned(), Some(Sha256::digest(&bytes).to_vec()));
-        read(&mut files, &bytes, from);
-    }
-    let Some(files) = files.into_iter().map(|(path, it)| Some((path, it?))).collect() else {
-        return;
-    };
-    let kept = Kept { library, dep_info, files };
-    if kept.size() <= MOST_KEPT {
-        store.settled();
-        store.insert(key, &kept.bytes());
-        store.flush();
-    }
-}
-
-/// A library ra-jit linked, its dep-info, and each file it was linked from with the digest of
-/// what it had: the library stands for another of the same key while they still have it.
-struct Kept {
-    library: Vec<u8>,
-    dep_info: Vec<u8>,
-    files: Vec<(PathBuf, Vec<u8>)>,
-}
-
-impl Kept {
-    fn still(&self) -> bool {
-        let digest = |path: &Path| std::fs::read(path).ok().map(|it| Sha256::digest(it).to_vec());
-        self.files.iter().all(|(path, was)| digest(path).as_ref() == Some(was))
-    }
-
-    fn size(&self) -> usize {
-        self.library.len() + self.dep_info.len()
-    }
-
-    fn bytes(&self) -> Vec<u8> {
-        let mut out = Vec::new();
-        let mut put = |bytes: &[u8]| {
-            out.extend((bytes.len() as u64).to_le_bytes());
-            out.extend(bytes);
-        };
-        put(LIBRARIES.as_bytes());
-        put(&self.library);
-        put(&self.dep_info);
-        put(&(self.files.len() as u64).to_le_bytes());
-        for (path, digest) in &self.files {
-            put(path.as_os_str().as_encoded_bytes());
-            put(digest);
-        }
-        out
-    }
-
-    fn read(bytes: &[u8]) -> Option<Kept> {
-        let rest = &mut &*bytes;
-        if take(rest)? != LIBRARIES.as_bytes() {
-            return None;
-        }
-        let (library, dep_info) = (take(rest)?.to_vec(), take(rest)?.to_vec());
-        let count = u64::from_le_bytes(take(rest)?.try_into().ok()?);
-        let mut files = Vec::new();
-        for _ in 0..count {
-            let path = PathBuf::from(std::str::from_utf8(take(rest)?).ok()?);
-            files.push((path, take(rest)?.to_vec()));
-        }
-        Some(Kept { library, dep_info, files })
-    }
-}
-
-/// The next field of `rest`, which is its length and then its bytes.
-fn take<'a>(rest: &mut &'a [u8]) -> Option<&'a [u8]> {
-    let len = usize::try_from(u64::from_le_bytes(rest.get(..8)?.try_into().ok()?)).ok()?;
-    let field = rest.get(8..8usize.checked_add(len)?)?;
-    *rest = &rest[8 + len..];
-    Some(field)
 }
 
 /// What ra-jit makes of the proc macro `record` is of: its library, where rustc would have
