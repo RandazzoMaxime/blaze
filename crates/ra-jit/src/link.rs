@@ -437,9 +437,10 @@ fn raw_dylibs(db: &RootDatabase, krate: base_db::Crate) -> Vec<(String, Vec<(Str
                     _ => {}
                 }
             }
-            match found.iter_mut().find(|(dll, _)| *dll == lib.name.as_str()) {
+            let stem = lib.name.as_str().strip_suffix(".dll").unwrap_or(lib.name.as_str());
+            match found.iter_mut().find(|(dll, _)| dll == stem) {
                 Some((_, known)) => known.extend(names),
-                None => found.push((lib.name.as_str().to_owned(), names)),
+                None => found.push((stem.to_owned(), names)),
             }
         }
     }
@@ -584,7 +585,14 @@ impl Target {
     fn lib(&self, lib: &NativeLib) -> Vec<String> {
         let name = lib.name.as_str();
         if self.windows {
-            let file = if lib.verbatim { name.to_owned() } else { format!("{name}.lib") };
+            // A `raw-dylib` is linked by the import library made of it, whatever it is named:
+            // `windows-link` names the DLLs of the API sets with `+verbatim` and the extension.
+            let stem = name.strip_suffix(".dll").unwrap_or(name);
+            let file = match (lib.kind, lib.verbatim) {
+                (NativeLibKind::RawDylib, _) => format!("{stem}.lib"),
+                (_, true) => name.to_owned(),
+                _ => format!("{name}.lib"),
+            };
             return match lib.kind {
                 NativeLibKind::Static if lib.whole_archive => vec![format!("/WHOLEARCHIVE:{file}")],
                 _ => vec![file],
