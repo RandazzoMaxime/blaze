@@ -375,6 +375,25 @@ Unconfined`), which keeps the sandbox, or set `BLAZE_SANDBOX=off`, which runs bu
 proc macros and tests outside it, as cargo does. blaze does not make a weaker sandbox there on
 its own.
 
+A sandbox can be given a view (`sandbox::View`, the spec's `view`) in place of the machine,
+which is what a build script is to see under the Nix model (Andrew, 2026-10-27): its declared
+closure and nothing else. On Linux the view is a root of the sandbox's own, a tmpfs that
+becomes `/` (`pivot_root`) with the machine's tree detached from it, holding what the view
+binds, each where it says (the package's source and the toolchain read-only, a store path
+unpacked in blaze's cache at its `/nix/store/<hash>-<name>` so that nixpkgs' interpreters,
+RPATHs and scripts resolve, `OUT_DIR` written for real), and besides them only a `/proc` of
+the sandbox's processes, a `/dev` of `null`, `zero`, `full`, `random`, `urandom` and `tty`
+with an empty `shm`, an empty `/tmp`, and an `/etc` of `passwd` and `group` (one line for the
+user, one for `nobody`) and `hosts` (`localhost`), as Nix's sandbox has. `/usr`, `$HOME`, the
+machine's `/etc` and every store path not bound are not there, for the script and every
+program it runs, so a read of something undeclared fails with `ENOENT`; the root and what is
+bound read-only refuse writes, and the network is the loopback alone, as in every sandbox.
+A view whose bind is not there fails before anything runs, naming it. It is made by an
+unprivileged user namespace alone, and costs a mount per bind, about 20 µs each: `true` takes
+6.1 ms in a view of 40 binds and 10.7 ms in one of 300, against 4.9 ms in the sandbox without
+a view and 0.33 ms bare (median of 50, an arm64 ix VM of 16 cores, 2026-10-27). On macOS
+a view is not made (decided): the spec's other fields apply and the binds are not read.
+
 Compiling a build script, running it and building a proc macro are each an entry of the
 store, so they travel with `ra-jit cache push` and `pull` and through the gateway like any
 compiled function ([remote-cache.md](remote-cache.md)). Each is kept under two keys

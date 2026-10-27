@@ -265,6 +265,7 @@ pub(crate) fn plan(script: &Script<'_>) -> anyhow::Result<Plan> {
         record: Some(script.scratch.join("ra-jit-record")),
         record_reads: true,
         not_inputs,
+        view: None,
     };
     Ok(Plan::Sandboxed { spec, root_manifest: root.map(|it| it.join("Cargo.toml")), link_dirs })
 }
