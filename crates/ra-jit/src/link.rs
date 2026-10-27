@@ -112,6 +112,7 @@ pub(crate) struct Line {
     wasm: bool,
     /// Linked by `link.exe`: the arguments are its own.
     windows: bool,
+    raw_dylibs: Vec<(String, Vec<(String, bool)>)>,
 }
 
 impl Line {
@@ -170,6 +171,7 @@ impl Line {
             apple: target.apple,
             wasm: target.wasm,
             windows: target.windows,
+            raw_dylibs: native.raw_dylibs,
         })
     }
 
@@ -228,6 +230,9 @@ impl Line {
             }
         }
         args.extend(libs.iter().map(|it| format!("/LIBPATH:{}", it.display())));
+        if let Some(dir) = self.import_libraries(&libs, exe)? {
+            args.push(format!("/LIBPATH:{}", dir.display()));
+        }
         args.extend(self.after.iter().cloned());
         args.push(format!("/OUT:{}", exe.display()));
         let mut response = exe.as_os_str().to_owned();
@@ -237,6 +242,50 @@ impl Line {
         std::fs::write(&response, text.join("\n"))
             .with_context(|| format!("writing {}", response.display()))?;
         Ok((linker, response))
+    }
+
+    /// The import libraries of the DLLs the program imports with `raw-dylib` and the system's
+    /// libraries lack, as rustc writes them: made from the names imported, in a directory
+    /// beside `exe`. `None` when there is none to make.
+    fn import_libraries(&self, system: &[PathBuf], exe: &Path) -> anyhow::Result<Option<PathBuf>> {
+        let missing: Vec<_> = self
+            .raw_dylibs
+            .iter()
+            .filter(|(dll, _)| !system.iter().any(|dir| dir.join(format!("{dll}.lib")).is_file()))
+            .collect();
+        if missing.is_empty() {
+            return Ok(None);
+        }
+        let mut dir = exe.as_os_str().to_owned();
+        dir.push(".implib");
+        let dir = PathBuf::from(dir);
+        std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
+        let Some(tool) = find_msvc_tool("lib.exe") else { bail!("no lib.exe beside link.exe") };
+        for (dll, names) in missing {
+            let mut names = names.clone();
+            names.sort();
+            names.dedup();
+            let mut def = format!("LIBRARY {dll}.dll\nEXPORTS\n");
+            for (name, data) in &names {
+                def.push_str(&format!("  {name}{}\n", if *data { " DATA" } else { "" }));
+            }
+            let file = dir.join(format!("{dll}.def"));
+            std::fs::write(&file, def).with_context(|| format!("writing {}", file.display()))?;
+            let ran = Command::new(&tool)
+                .arg("/NOLOGO")
+                .arg(format!("/DEF:{}", file.display()))
+                .arg(format!("/OUT:{}", dir.join(format!("{dll}.lib")).display()))
+                .arg("/MACHINE:X64")
+                .output()
+                .with_context(|| format!("running {}", tool.display()))?;
+            if !ran.status.success() {
+                bail!(
+                    "the import library of {dll}.dll failed: {}",
+                    String::from_utf8_lossy(&ran.stdout)
+                );
+            }
+        }
+        Ok(Some(dir))
     }
 
     fn msvc_command(&self, objects: &[&Path], exe: &Path) -> anyhow::Result<String> {
@@ -279,6 +328,17 @@ fn msvc_tool() -> anyhow::Result<(PathBuf, Vec<PathBuf>)> {
         })
         .unwrap_or_default();
     Ok((tool.path().to_path_buf(), libs))
+}
+
+/// A program of the MSVC tools next to `link.exe`.
+#[cfg(windows)]
+fn find_msvc_tool(name: &str) -> Option<PathBuf> {
+    find_msvc_tools::find_tool(std::env::consts::ARCH, name).map(|it| it.path().to_path_buf())
+}
+
+#[cfg(not(windows))]
+fn find_msvc_tool(_: &str) -> Option<PathBuf> {
+    None
 }
 
 #[cfg(not(windows))]
@@ -404,6 +464,9 @@ struct Native {
     /// Where the libraries are looked for: `-L` and `-F`.
     search: Vec<String>,
     libs: Vec<NativeLib>,
+    /// The DLLs the program imports with `kind = "raw-dylib"` and the names it imports from
+    /// each: rustc writes their import libraries, and so must the link on Windows.
+    raw_dylibs: Vec<(String, Vec<(String, bool)>)>,
     /// What the build scripts of the program's packages give the linker as it is.
     args: Vec<String>,
 }
@@ -430,6 +493,9 @@ fn native(db: &RootDatabase, program: &[Crate], target: &Target) -> Native {
         // is not one.
         let cdylib = target.shared && !krate.data(db).target_kind.is_proc_macro();
         let asked = asked_by_script(db, krate, target, cdylib);
+        if target.windows {
+            native.raw_dylibs.extend(raw_dylibs(db, krate));
+        }
         native.libs.extend(asked.libs);
         native.search.extend(asked.search);
         // As cargo has it: a script's arguments are for its own package's targets.
@@ -444,6 +510,49 @@ fn native(db: &RootDatabase, program: &[Crate], target: &Target) -> Native {
     let mut searched = FxHashSet::default();
     native.search.retain(|it| searched.insert(it.clone()));
     native
+}
+
+/// The DLLs the extern blocks of `krate` import with `kind = "raw-dylib"`, each with the names
+/// imported from it and whether the name is a static (data).
+fn raw_dylibs(db: &RootDatabase, krate: base_db::Crate) -> Vec<(String, Vec<(String, bool)>)> {
+    use hir_def::{ItemContainerId, Lookup as _, ModuleDefId, signatures::FunctionSignature};
+    let mut found: Vec<(String, Vec<(String, bool)>)> = Vec::new();
+    for (_, module) in hir_def::nameres::crate_def_map(db, krate).modules(db) {
+        let scope = module.scope(db);
+        for block in scope.extern_blocks() {
+            let libs = AttrFlags::native_libs(db, block);
+            let Some(lib) = libs.iter().find(|it| it.kind == NativeLibKind::RawDylib) else {
+                continue;
+            };
+            let mut names = Vec::new();
+            for def in scope.declarations() {
+                match def {
+                    ModuleDefId::FunctionId(id)
+                        if id.lookup(db).container == ItemContainerId::ExternBlockId(block) =>
+                    {
+                        let name = AttrFlags::link_name(db, id.into())
+                            .unwrap_or_else(|| FunctionSignature::of(db, id).name.symbol().clone());
+                        names.push((name.as_str().to_owned(), false));
+                    }
+                    ModuleDefId::StaticId(id)
+                        if id.lookup(db).container == ItemContainerId::ExternBlockId(block) =>
+                    {
+                        let name = AttrFlags::link_name(db, id.into()).unwrap_or_else(|| {
+                            hir_def::signatures::StaticSignature::of(db, id).name.symbol().clone()
+                        });
+                        names.push((name.as_str().to_owned(), true));
+                    }
+                    _ => {}
+                }
+            }
+            let stem = lib.name.as_str().strip_suffix(".dll").unwrap_or(lib.name.as_str());
+            match found.iter_mut().find(|(dll, _)| dll == stem) {
+                Some((_, known)) => known.extend(names),
+                None => found.push((stem.to_owned(), names)),
+            }
+        }
+    }
+    found
 }
 
 /// What the build script of `krate`'s package printed for the link, as cargo passes it to
@@ -649,7 +758,14 @@ impl Target {
             };
         }
         if self.windows {
-            let file = if lib.verbatim { name.to_owned() } else { format!("{name}.lib") };
+            // A `raw-dylib` is linked by the import library made of it, whatever it is named:
+            // `windows-link` names the DLLs of the API sets with `+verbatim` and the extension.
+            let stem = name.strip_suffix(".dll").unwrap_or(name);
+            let file = match (lib.kind, lib.verbatim) {
+                (NativeLibKind::RawDylib, _) => format!("{stem}.lib"),
+                (_, true) => name.to_owned(),
+                _ => format!("{name}.lib"),
+            };
             return match lib.kind {
                 NativeLibKind::Static if lib.whole_archive => vec![format!("/WHOLEARCHIVE:{file}")],
                 _ => vec![file],
@@ -772,6 +888,48 @@ mod tests {
         assert_eq!(target.search("framework=F"), Some("-LF".to_owned()));
         assert_eq!(target.leading()[0], "/NOLOGO");
         assert_eq!(target.trailing(), ["msvcrt.lib", "vcruntime.lib", "ucrt.lib", "oldnames.lib"]);
+    }
+
+    /// The import library of a `raw-dylib` is made from the names imported, unless the system
+    /// has one; a `raw-dylib` is named by its `.lib` whatever extension the attribute gives.
+    #[cfg(windows)]
+    #[test]
+    fn the_import_library_of_a_raw_dylib_is_made_of_the_names_imported() {
+        let dir = std::env::temp_dir().join(format!("ra-jit-implib-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let line = Line {
+            program: PathBuf::from("link.exe"),
+            before: Vec::new(),
+            after: Vec::new(),
+            apple: false,
+            wasm: false,
+            windows: true,
+            raw_dylibs: vec![(
+                "api-ms-win-core-test-l1-1-0".to_owned(),
+                vec![("Function".to_owned(), false), ("Data".to_owned(), true)],
+            )],
+        };
+        let exe = dir.join("program.exe");
+        let made = line.import_libraries(&[], &exe).unwrap().unwrap();
+        let lib = made.join("api-ms-win-core-test-l1-1-0.lib");
+        assert!(lib.is_file());
+        let def = std::fs::read_to_string(made.join("api-ms-win-core-test-l1-1-0.def")).unwrap();
+        assert!(def.contains("LIBRARY api-ms-win-core-test-l1-1-0.dll"));
+        assert!(def.contains("  Function\n") && def.contains("  Data DATA\n"));
+        // One the system's directories have is not made again.
+        assert!(line.import_libraries(&[made], &exe).unwrap().is_none());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_raw_dylib_is_linked_by_its_import_library_whatever_its_extension() {
+        let dll = NativeLib {
+            name: intern::Symbol::intern("api-ms-win-core-test-l1-1-0.dll"),
+            kind: NativeLibKind::RawDylib,
+            verbatim: true,
+            whole_archive: false,
+        };
+        assert_eq!(windows_target().lib(&dll), ["api-ms-win-core-test-l1-1-0.lib"]);
     }
 
     #[test]
