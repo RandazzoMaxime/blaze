@@ -6,7 +6,10 @@ use std::{
     fs::TryLockError,
     io::SeekFrom,
     path::{Path, PathBuf},
-    sync::atomic::{AtomicBool, AtomicU64, Ordering},
+    sync::{
+        Mutex,
+        atomic::{AtomicBool, AtomicU64, Ordering},
+    },
     time::{Duration, SystemTime},
 };
 
@@ -71,8 +74,9 @@ pub(crate) struct Traffic {
     gate: Semaphore,
     jobs: usize,
     /// Set when the remote stopped answering, so that what is still waiting does not each
-    /// find that out for itself.
+    /// find that out for itself, with how it stopped.
     down: AtomicBool,
+    why_down: Mutex<String>,
     /// Calls of the service, and the attempts they took.
     pub(super) operations: AtomicU64,
     pub(super) requests: AtomicU64,
@@ -93,6 +97,7 @@ impl Traffic {
             gate: Semaphore::new(jobs),
             jobs,
             down: AtomicBool::new(false),
+            why_down: Mutex::default(),
             operations: AtomicU64::new(0),
             requests: AtomicU64::new(0),
             resumed: AtomicU64::new(0),
@@ -127,9 +132,18 @@ impl Traffic {
     pub(super) async fn permit(&self) -> anyhow::Result<SemaphorePermit<'_>> {
         let permit = self.gate.acquire().await?;
         if self.down.load(Ordering::Relaxed) {
-            bail!("the remote stopped answering");
+            let why = self.why_down.lock().map(|it| it.clone()).unwrap_or_default();
+            bail!("the remote stopped answering: {why}");
         }
         Ok(permit)
+    }
+
+    /// Takes the remote to be down, for the reason `error` gives.
+    fn went_down(&self, error: &anyhow::Error) {
+        if let Ok(mut why) = self.why_down.lock() {
+            *why = format!("{error:#}").lines().next().unwrap_or_default().to_owned();
+        }
+        self.down.store(true, Ordering::Relaxed);
     }
 
     /// Has the remote tried again after it was taken to be down.
@@ -252,7 +266,7 @@ impl super::Remote {
                 Ok(answer) => return Ok(answer),
                 Err(e) if is_final(&e) => return Err(e),
                 Err(e) if again == RESUMES => {
-                    self.traffic.down.store(true, Ordering::Relaxed);
+                    self.traffic.went_down(&e);
                     return Err(e.context(format!("after asking {again} times more")));
                 }
                 Err(_) => {
@@ -506,7 +520,7 @@ impl super::Remote {
                     return Err(e.context(format!("fetching {name}")));
                 }
                 Err(e) if resumes == RESUMES => {
-                    self.traffic.down.store(true, Ordering::Relaxed);
+                    self.traffic.went_down(&e);
                     return Err(e.context(format!("fetching {name}, after {resumes} resumes")));
                 }
                 Err(_) => {

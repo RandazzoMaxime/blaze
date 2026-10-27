@@ -331,11 +331,8 @@ fn build(asked: &Invocation) -> anyhow::Result<i32> {
         note("client write state", CLIENT, writing);
         crate::trace::finish();
     }
-    if crate::remote::required()
-        && let Some(down) = crate::remote::noted_down()
-    {
-        eprintln!("error: the remote failed and RA_JIT_REMOTE_REQUIRED is set: {down}");
-        return Ok(FAILED);
+    if let Some(failed) = remote_failed_it() {
+        return Ok(failed);
     }
     after_build(asked, &state, &cwd, held)
 }
@@ -350,6 +347,14 @@ fn ra_jit_tag() -> String {
         Some(down) => format!("ra-jit, remote down: {down}"),
         None => "ra-jit".to_owned(),
     }
+}
+
+/// The status a build that is over ends with when the daemon's remote failed and
+/// `RA_JIT_REMOTE_REQUIRED` makes that a failure of the build.
+fn remote_failed_it() -> Option<i32> {
+    let down = crate::remote::noted_down().filter(|_| crate::remote::required())?;
+    say::error(&format!("the remote failed and RA_JIT_REMOTE_REQUIRED is set: {down}"));
+    Some(FAILED)
 }
 
 /// `cargo ra-jit check`: what the daemon says of the source as it builds the programs of
