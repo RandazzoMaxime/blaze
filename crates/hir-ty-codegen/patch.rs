@@ -1160,6 +1160,11 @@ pub(super) struct Unchanged {
     pub(super) broken: FxHashSet<Node>,
     /// The roots the edit took away, which refer to nothing any more.
     pub(super) gone: FxHashSet<FunctionId>,
+    /// What changed (or is broken) that nothing the edit left reaches any more, by each
+    /// unchanged instance or static of the base whose code still refers to it: the patch
+    /// compiles none of it, and code that refers to one of those again would reach the base's
+    /// copy, which is of the source before.
+    pub(super) behind: FxHashMap<Node, Vec<Node>>,
 }
 
 pub(super) struct Patch {
@@ -2539,6 +2544,35 @@ impl Base {
         false
     }
 
+    /// Each of `dropped` by the instances and statics of the base above it that the edit left
+    /// as they were, up to what it changed: what refers to one of those reaches the base's
+    /// copy of the dropped one through it.
+    fn behind(&self, dropped: &[Node], unchanged: &Unchanged) -> FxHashMap<Node, Vec<Node>> {
+        let mut behind: FxHashMap<Node, Vec<Node>> = FxHashMap::default();
+        for node in dropped {
+            let mut seen = FxHashSet::default();
+            let mut stack = vec![node];
+            while let Some(below) = stack.pop() {
+                let parents = match below {
+                    Node::Root(_) => None,
+                    Node::Instance(instance) => self.instances.get(instance).map(|it| &it.parents),
+                    Node::Static(id) => self.statics.get(id).map(|it| &it.parents),
+                };
+                for parent in parents.into_iter().flatten() {
+                    if matches!(parent, Node::Root(_))
+                        || unchanged.changed.contains(parent)
+                        || !seen.insert(parent)
+                    {
+                        continue;
+                    }
+                    behind.entry(parent.clone()).or_default().push(node.clone());
+                    stack.push(parent);
+                }
+            }
+        }
+        behind
+    }
+
     /// Whether what referred to the node in the base does so after the edit.
     fn still_asks_for(
         &self,
@@ -2674,6 +2708,7 @@ impl Base {
                 .collect(),
             broken: broken.iter().map(|it| it.0.clone()).collect(),
             gone,
+            behind: FxHashMap::default(),
         };
         // Nothing tells what in rustc's code refers to what.
         if let Some((_, why)) =
@@ -2681,12 +2716,26 @@ impl Base {
         {
             return Ok(Err(why));
         }
+        let mut dropped: Vec<Node> = broken.iter().map(|it| it.0.clone()).collect();
         // rustc's code may call any of them still.
         if !self.rustc {
-            changed_instances
-                .retain(|it| self.reaches(db, &Node::Instance(it.clone()), &unchanged));
-            changed_statics.retain(|&it| self.reaches(db, &Node::Static(it), &unchanged));
+            changed_instances.retain(|it| {
+                let node = Node::Instance(it.clone());
+                let reached = self.reaches(db, &node, &unchanged);
+                if !reached {
+                    dropped.push(node);
+                }
+                reached
+            });
+            changed_statics.retain(|&it| {
+                let reached = self.reaches(db, &Node::Static(it), &unchanged);
+                if !reached {
+                    dropped.push(Node::Static(it));
+                }
+                reached
+            });
         }
+        let behind = self.behind(&dropped, &unchanged);
         let verify = start.elapsed();
 
         let mut cg = ObjectCodegen::new(
@@ -2704,7 +2753,7 @@ impl Base {
         cg.rustc_values = known.frozen.rustc_values();
         cg.tiers = Some(&known.tiers);
         // What nothing reached any more can be reached again by the code compiled now.
-        cg.replaced = unchanged;
+        cg.replaced = Unchanged { behind, ..unchanged };
         // rustc's copies are the ones the base was built against: what they call is in it.
         for instance in &changed_instances {
             let was = &self.instances[instance];

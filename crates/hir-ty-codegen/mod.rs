@@ -148,6 +148,7 @@ mod unwind;
 mod vtable;
 pub mod wasm;
 mod wasm_object;
+mod x86;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CodegenError {
@@ -6945,6 +6946,7 @@ impl<'a, 'db> ObjectCodegen<'a, 'db> {
             if known.symbol.is_empty() {
                 unsupported!("a static that rustc's symbols name no copy of");
             }
+            self.bring_behind(&node)?;
             // A thread-local of the base is one still: the patch's code reaches it as one.
             let thread_local = is_thread_local(db, id);
             let data = self.declare_named_data(
@@ -7157,17 +7159,9 @@ impl<'a, 'db> ObjectCodegen<'a, 'db> {
             }
             // The base's copy is of the source before the edit, or the link left it out.
             if self.replaced.changed.contains(&node) || !self.symbols.linked(&known.symbol) {
-                let compiled = compiled_instance(self.db, instance.clone(), known.env.clone());
-                let compiled = compiled.as_ref().map_err(Clone::clone)?;
-                let id = self.module.declare_function(
-                    &known.symbol,
-                    Linkage::Hidden,
-                    &compiled.code.signature,
-                )?;
-                self.instances.insert(instance.clone(), id);
-                self.pending.push((instance.clone(), known.env.clone(), id));
-                return Ok(id);
+                return self.compile_again(instance, known);
             }
+            self.bring_behind(&node)?;
             return self.import(&known.symbol, sig);
         }
         if let InstanceDef::Fn(func) = def
@@ -7291,6 +7285,51 @@ impl<'a, 'db> ObjectCodegen<'a, 'db> {
             self.named.insert(name, id);
         }
         Ok(id)
+    }
+
+    /// The base's instance compiled into the patch under the base's symbol, which the splice
+    /// sends what called the base's copy on to.
+    fn compile_again(
+        &mut self,
+        instance: &Instance,
+        known: &patch::BaseInstance,
+    ) -> Result<FuncId> {
+        if let Some(&id) = self.instances.get(instance) {
+            return Ok(id);
+        }
+        let compiled = compiled_instance(self.db, instance.clone(), known.env.clone());
+        let compiled = compiled.as_ref().map_err(Clone::clone)?;
+        let id = self.module.declare_function(
+            &known.symbol,
+            Linkage::Hidden,
+            &compiled.code.signature,
+        )?;
+        self.instances.insert(instance.clone(), id);
+        self.pending.push((instance.clone(), known.env.clone(), id));
+        Ok(id)
+    }
+
+    /// Compiles what the base's copy of `node` reaches that the edit changed and nothing the
+    /// patch compiled reached before ([`patch::Unchanged::behind`]): the patch refers to that
+    /// copy now, and through it to code of the source before.
+    fn bring_behind(&mut self, node: &patch::Node) -> Result<()> {
+        let Some(behind) = self.replaced.behind.remove(node) else { return Ok(()) };
+        let base = self.base.expect("only a patch has what it left behind");
+        for below in behind {
+            if self.replaced.broken.contains(&below) {
+                unsupported!("what the patch reaches again reaches code of the base that changed");
+            }
+            match &below {
+                patch::Node::Instance(instance) => {
+                    self.compile_again(instance, &base.instances[instance])?;
+                }
+                patch::Node::Static(id) => {
+                    self.static_data(*id)?;
+                }
+                patch::Node::Root(_) => {}
+            }
+        }
+        Ok(())
     }
 
     fn callee_name(&self, def: InstanceDef) -> &'db str {
@@ -8245,15 +8284,10 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
             Primitive::Pointer(_) => AbiScalar { ty: ptr(), signed: false },
             Primitive::Float(rustc_abi::Float::F32) => AbiScalar { ty: types::F32, signed: true },
             Primitive::Float(rustc_abi::Float::F64) => AbiScalar { ty: types::F64, signed: true },
-            // x86-64's LLVM keeps a `bfloat` without AVX-512's as the `f32` it widens to, and
-            // narrows it back by `__truncsfbf2` where it is returned, passed or stored, which
-            // quiets a signalling NaN at points of rustc's IR that this one does not have.
-            Primitive::Float(rustc_abi::Float::F16B) if self.cg.target.arch == Arch::X86_64 => {
-                unsupported!("f16b on x86-64, which LLVM narrows from f32 wherever it moves")
-            }
-            // `f16b` has no arithmetic in Rust, only its bits moved, and AArch64's LLVM passes
-            // it where it passes an `f16`: in Cranelift's `F16` it is a 16-bit value of a float
-            // register.
+            // `f16b` has no arithmetic in Rust, only its bits moved, and LLVM passes it where it
+            // passes an `f16`: in Cranelift's `F16` it is a 16-bit value of a float register.
+            // x86-64's LLVM rounds it on entry and between blocks, which `receive_bfloat` and
+            // `check_bfloat_blocks` follow.
             Primitive::Float(rustc_abi::Float::F16 | rustc_abi::Float::F16B)
                 if f16_f128::soft_floats(self.cg.target) =>
             {
@@ -8424,6 +8458,15 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
         let args: Vec<_> = args.into_iter().collect();
         if args.iter().any(|&ty| self.is_unsized(ty)) {
             unsupported!("an unsized value passed in calling convention {abi:?}");
+        }
+        // rustc takes `extern "custom"` only for a naked function of no arguments and no
+        // result, which nothing calls from Rust: its body is the whole of it, and no value
+        // crosses the boundary.
+        if abi == ExternAbi::Custom {
+            if !args.is_empty() || !ret.is_unit() {
+                unsupported!("calling convention {abi:?} with arguments or a result");
+            }
+            return Ok(FnAbi { ret: PassMode::Ignore, args: Vec::new() });
         }
         if self.cg.target.call_conv == isa::CallConv::WindowsFastcall {
             if matches!(abi, ExternAbi::SysV64 { .. }) {
@@ -9563,6 +9606,7 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
 
     fn codegen(&mut self) -> Result<()> {
         let body = self.body.expect("MIR body");
+        self.check_bfloat_blocks(body)?;
         let FnAbi { ret, args: mut param_modes } = self.body_abi(body, self.abi)?;
         self.ret_mode = ret;
         if self.variadic {
@@ -9628,6 +9672,12 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
                 _ => self.stack_slot(layout),
             };
             self.receive(mode, &mut incoming, addr, layout);
+            if self.cg.target.arch == Arch::X86_64
+                && let BackendRepr::Scalar(scalar) = layout.backend_repr
+                && scalar.primitive() == Primitive::Float(rustc_abi::Float::F16B)
+            {
+                self.receive_bfloat(addr)?;
+            }
             // An unsized parameter's slot is where the value is and its metadata, as
             // rustc's `LocalRef::UnsizedPlace`.
             let borrowed = matches!(mode, PassMode::IndirectUnsized);
@@ -16237,6 +16287,18 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
         {
             unsupported!("`llvm.{name}` returning {dst_ty:?}");
         }
+        self.call_lowered(&lowered, args, dst)?;
+        Ok(true)
+    }
+
+    /// Calls the function of `lowered`'s instructions on `args`, which it loads as it says,
+    /// and writes what it leaves where `dst` is.
+    fn call_lowered(
+        &mut self,
+        lowered: &avx512::Lowered,
+        args: &[Operand],
+        dst: Value,
+    ) -> Result<()> {
         let slot = self.builder.create_sized_stack_slot(StackSlotData::new(
             StackSlotKind::ExplicitSlot,
             8 * (1 + args.len() as u32),
@@ -16256,7 +16318,95 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
         let callee = self.cg.assembly(text, &sig);
         let callee = self.cg.declare_func_in_func(callee, self.builder.func);
         self.builder.ins().call(callee, &[slot]);
-        Ok(true)
+        Ok(())
+    }
+
+    /// Calls the instructions `x86::lower` made of the intrinsic `name`: the arguments are
+    /// copied to a slot the function reads its registers from, and it writes each result
+    /// where `dst` is, a result of several registers field by field as its layout places them.
+    fn x86_assembly(
+        &mut self,
+        name: &str,
+        lowered: &x86::Lowered,
+        args: &[Operand],
+        dst: Value,
+        dst_ty: Ty<'db>,
+    ) -> Result<()> {
+        if args.len() != lowered.args.len() {
+            unsupported!("`{name}` with {} arguments", args.len());
+        }
+        let mut text = lowered.text.clone();
+        let mut reads = Vec::new();
+        let mut copies = Vec::new();
+        let mut size = 0;
+        for (arg, register) in args.iter().zip(&lowered.args) {
+            let Some(register) = register else {
+                let Some(immediate) = self.immediate(arg)?.filter(|it| *it <= 0xff) else {
+                    unsupported!("`{name}` with an immediate that is not a constant byte");
+                };
+                text = text.replace("{imm}", &immediate.to_string());
+                continue;
+            };
+            let bytes = asm::x86_register_bytes(register).expect("a register of x86");
+            let ty = self.operand_ty(arg)?;
+            if self.layout(ty)?.size.bytes() != u64::from(bytes) {
+                unsupported!("`{name}` of {ty:?}, which is not what its name says");
+            }
+            copies.push((self.operand(arg)?.0, size, bytes));
+            reads.push((*register, size));
+            size += bytes;
+        }
+        let layout = self.layout(dst_ty)?;
+        let register_bytes = |it: &str| u64::from(asm::x86_register_bytes(it).expect("x86's"));
+        let writes: Vec<(&str, u32)> = match lowered.results.as_slice() {
+            [] if layout.is_zst() => Vec::new(),
+            &[register] if layout.size.bytes() == register_bytes(register) => vec![(register, 0)],
+            many => {
+                let fields: Vec<Ty<'db>> = match dst_ty.kind() {
+                    TyKind::Tuple(tys) => tys.iter().collect(),
+                    TyKind::Adt(adt_def, subst) if let AdtId::StructId(id) = adt_def.def_id() => {
+                        let field_types = self.cg.db.field_types(id.into());
+                        field_types
+                            .iter()
+                            .map(|(_, it)| {
+                                let ty = it.ty().instantiate(self.interner, subst).skip_norm_wip();
+                                self.normalize(ty)
+                            })
+                            .collect()
+                    }
+                    _ => Vec::new(),
+                };
+                let mut writes = Vec::new();
+                for (i, (&register, &field)) in many.iter().zip(&fields).enumerate() {
+                    if self.layout(field)?.size.bytes() != register_bytes(register) {
+                        break;
+                    }
+                    writes.push((register, layout.fields.offset(i).bytes() as u32));
+                }
+                if fields.len() != many.len() || writes.len() != many.len() {
+                    unsupported!("`{name}` returning {dst_ty:?}, which is not what its name says");
+                }
+                writes
+            }
+        };
+        let slot = self.builder.create_sized_stack_slot(StackSlotData::new(
+            StackSlotKind::ExplicitSlot,
+            size.max(1),
+            4,
+        ));
+        let slot = self.builder.ins().stack_addr(ptr(), slot, 0);
+        for (from, at, bytes) in copies {
+            let to = self.builder.ins().iadd_imm(slot, i64::from(at));
+            self.copy(to, from, Size::from_bytes(bytes));
+        }
+        let text = asm::x86_function(&text, &reads, &writes, &lowered.clobbers)
+            .map_err(CodegenError::Unsupported)?;
+        let mut sig = self.cg.make_signature();
+        sig.params.extend([AbiParam::new(ptr()); 2]);
+        let callee = self.cg.assembly(text, &sig);
+        let callee = self.cg.declare_func_in_func(callee, self.builder.func);
+        self.builder.ins().call(callee, &[slot, dst]);
+        Ok(())
     }
 
     /// A function `core::arch` declares as `llvm.{name}`: something LLVM implements, with no
@@ -16766,8 +16916,22 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
                 self.neon_assembly(&format!("llvm.{name}"), &lowered, args, dst, dst_ty)?
             }
             _ if self.cg.target.arch == Arch::X86_64
-                && (name.starts_with("x86.avx512.") || name.starts_with("x86.avx2.vpdp"))
+                && [
+                    "x86.avx512.",
+                    "x86.avx512fp16.",
+                    "x86.avx512bf16.",
+                    "x86.avx2.vpdp",
+                    "x86.vcvtne",
+                    "x86.vbcstne",
+                ]
+                .iter()
+                .any(|it| name.starts_with(it))
                 && self.avx512_assembly(name, args, dst, dst_ty)? => {}
+            _ if self.cg.target.arch == Arch::X86_64
+                && let Some(lowered) = x86::lower(name) =>
+            {
+                self.x86_assembly(&format!("llvm.{name}"), &lowered, args, dst, dst_ty)?
+            }
             _ => unsupported!("LLVM intrinsic `{name}`"),
         }
         Ok(())
@@ -16834,6 +16998,9 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
         let (a, a_signed) = self.neon_lanes_of(ty)?;
         let (r, r_signed) = self.neon_lanes_of(dst_ty)?;
         let widths = (r.float && a.float).then_some((r.bits, a.bits));
+        if self.cg.target.arch == Arch::X86_64 {
+            return self.x86_half_vector(name, args, dst, (a, r));
+        }
         let single_and_half = name == "simd_cast" && matches!(widths, Some((16, 32) | (32, 16)));
         if self.cg.target.arch != Arch::Aarch64 || !(single_and_half || self.half_precision()) {
             unsupported!(
@@ -16845,6 +17012,36 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
             unsupported!("`{name}` of lanes of f16 into {dst_ty:?}");
         };
         self.neon_assembly(name, &lowered, args, dst, dst_ty)
+    }
+
+    /// A generic intrinsic on a vector of `f16` on x86-64 (`a` its operand's lanes, `r` its
+    /// result's), as LLVM selects it in the function: by AVX512-FP16's instructions where the
+    /// function has those, `simd_cast` to single floats by F16C's where it has only those.
+    /// Each instruction is `avx512::half_vector`'s.
+    fn x86_half_vector(
+        &mut self,
+        name: &str,
+        args: &[Operand],
+        dst: Value,
+        (a, r): (neon::Lanes, neon::Lanes),
+    ) -> Result<()> {
+        if self.function_enables("avx512fp16") {
+            match name {
+                "simd_fma" => return Err(f16_f128::half_fma_refused()),
+                "simd_neg" => unsupported!(
+                    "`simd_neg` of lanes of f16 with AVX512-FP16, which LLVM folds into the \
+                     fma it feeds in some functions and not others"
+                ),
+                _ => (),
+            }
+        }
+        let lowered = avx512::half_vector(name, a.count * a.bits / 8, r.count * r.bits / 8, |it| {
+            self.function_enables(it)
+        });
+        let Some(lowered) = lowered.filter(|it| it.loads.len() == args.len()) else {
+            unsupported!("`{name}` of lanes of f16 on x86-64 without an instruction for it here");
+        };
+        self.call_lowered(&lowered, args, dst)
     }
 
     /// The lane type and lane count of a vector type. Lanes sit in memory in order.
