@@ -101,16 +101,21 @@ fn sandbox_library() {
     if std::env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("macos") {
         return;
     }
-    let arch = match std::env::var("CARGO_CFG_TARGET_ARCH").as_deref() {
-        Ok("aarch64") => "arm64",
-        Ok("x86_64") => "x86_64",
+    // Apple's own programs on Apple silicon (`cc`, `clang`, `ld`) are arm64e, and where macOS
+    // does not drop `DYLD_*` for them (SIP off, as on GitHub's macOS runners) dyld aborts one
+    // whose inserted library has no arm64e slice: every C build of a build script under the
+    // sandbox (#147). The arm64 slice is for every other program.
+    let arches: &[&str] = match std::env::var("CARGO_CFG_TARGET_ARCH").as_deref() {
+        Ok("aarch64") => &["-arch", "arm64", "-arch", "arm64e"],
+        Ok("x86_64") => &["-arch", "x86_64"],
         other => panic!("no sandbox library for the architecture {other:?}"),
     };
     let out = PathBuf::from(std::env::var_os("OUT_DIR").unwrap()).join("ra_jit_sandbox.dylib");
     let cc = std::env::var("CC").unwrap_or_else(|_| "cc".to_owned());
     let target = std::env::var("MACOSX_DEPLOYMENT_TARGET").unwrap_or_else(|_| "11.0".to_owned());
     let status = std::process::Command::new(&cc)
-        .args(["-dynamiclib", "-O2", "-Wall", "-arch", arch])
+        .args(["-dynamiclib", "-O2", "-Wall"])
+        .args(arches)
         .arg(format!("-mmacosx-version-min={target}"))
         .arg("-o")
         .arg(&out)
