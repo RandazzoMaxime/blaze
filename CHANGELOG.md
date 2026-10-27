@@ -1016,6 +1016,11 @@ each one's section: what `[Unreleased]` had, and the title of each change merged
 
 ### Fixed
 
+- A whole build of other features or flags no longer leaks into the next: every worker linked
+  its programs into one `target/ra-jit/whole/<name>`, so after `cargo blaze run --features
+  loud` a plain `cargo blaze run`, whose worker had nothing edited to build again, installed
+  the loud program (`HELLO WORLD`). Each worker now links in a directory of its own, named by
+  what it is loaded with (`harness/cargo_ra_jit.py`, flags group).
 - `cargo blaze test --doc` runs an edited library's examples again: it took an example's
   program from the run before while the example's own text was unchanged, since blaze's run
   names no library with `--extern` for the key to stamp, so after an edit that broke them the
