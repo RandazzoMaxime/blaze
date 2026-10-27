@@ -332,7 +332,20 @@ registry can be named in:
 unsandboxed-build-scripts = ["hegeltest", "flecs_ecs_sys"]   # by package name
 unsandboxed-proc-macros = ["sqlx-macros"]                    # by package name
 build-script-env = ["OPENSSL_DIR", "LIBGIT2_NO_VENDOR"]       # given to every build script
+build-script-link-dirs = ["/opt/vendor/lib"]                 # rustc-link-search may name
 ```
+
+What a sandboxed script prints is checked before cargo reads it (`cargo/directives.rs`), since
+it goes into every rustc and linker run of its package and of what links it. A
+`rustc-link-search` (or `rustc-flags`' `-L`) names a directory in its `OUT_DIR`, its package,
+the target directory's build directory (its dependencies' `OUT_DIR`s), a system directory
+(`/usr/lib`, `/lib64`, `/usr/local/lib`, the Nix store, Homebrew's, Apple's SDKs) or one of
+`build-script-link-dirs`; a `rustc-link-arg` is one of a short list (`-pthread`, `-rdynamic`,
+`-Wl,--as-needed`, `-Wl,-z,now`, `-Wl,-soname,NAME`, `-lNAME`, ...) or an rpath to `$ORIGIN`
+or a directory a search may name; a `rustc-env` sets no variable cargo or rustc gives the crate
+itself (`CARGO_PKG_*`, `CARGO_MANIFEST_DIR`, `CARGO_CFG_*`, `OUT_DIR`, `RUSTC*`, ...). Anything
+else fails the build, naming the script and each line. Over the bench corpus's 587 runs the
+rules refuse none (`bench/results/2026-10-27-bscache/directives.md`).
 
 and, for a package of the workspace, in its own manifest:
 
