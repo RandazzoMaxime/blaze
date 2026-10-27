@@ -523,7 +523,12 @@ impl Worker {
             args.push("--scripts-from".into());
             args.push(scripts.into());
         }
-        let mut env = crate::process::own();
+        // Sent with each request, so the daemon's flags would reload the workspace with them.
+        let not_ours = super::cli::not_the_builds(&config.env);
+        let mut env: ide_db::base_db::Env = Vec::from(crate::process::own())
+            .into_iter()
+            .filter(|(name, _)| !not_ours.contains(name))
+            .collect();
         for (name, value) in &config.env {
             env.set(name, value);
         }
@@ -828,13 +833,11 @@ struct Spare {
     log: PathBuf,
 }
 
-/// Takes away from a worker's `command` each variable [`super::cli::WORKER_ENV_EXACT`] names
+/// Takes away from a worker's `command` each variable a worker has only as its build has it
 /// that its build, `env`, does not set, which it would otherwise have from the daemon.
 fn exact_env(command: &mut Command, env: &BTreeMap<String, String>) {
-    for name in super::cli::WORKER_ENV_EXACT {
-        if !env.contains_key(*name) {
-            command.env_remove(name);
-        }
+    for name in super::cli::not_the_builds(env) {
+        command.env_remove(name);
     }
 }
 
