@@ -280,6 +280,109 @@ pub(super) fn neon_function(
     out
 }
 
+/// The register x86 names `name` and its bytes: `rax` to `al`, `xmm`, `ymm` and `zmm`.
+fn x86_register(name: &str) -> Option<(Reg, u32)> {
+    if let Some(row) = GPR.iter().position(|row| row.contains(&name)) {
+        let column = GPR[row].iter().position(|&it| it == name)?;
+        return Some((Reg::Gpr(row), 8 >> column));
+    }
+    [("xmm", 16), ("ymm", 32), ("zmm", 64)].into_iter().find_map(|(prefix, bytes)| {
+        let number = name.strip_prefix(prefix)?.parse().ok()?;
+        Some((Reg::Vector(number), bytes))
+    })
+}
+
+/// The bytes of the x86 register `name`.
+pub(super) fn x86_register_bytes(name: &str) -> Option<u32> {
+    x86_register(name).map(|(_, bytes)| bytes)
+}
+
+/// The instruction that moves the register `name` to or from `memory`.
+fn x86_move(name: &str, memory: &str, load: bool) -> String {
+    let (mnemonic, width) = match x86_register(name).expect("a register") {
+        (Reg::Gpr(_), 1) => ("mov", "byte"),
+        (Reg::Gpr(_), 2) => ("mov", "word"),
+        (Reg::Gpr(_), 4) => ("mov", "dword"),
+        (Reg::Gpr(_), _) => ("mov", "qword"),
+        (_, 16) => ("movups", "xmmword"),
+        (_, 32) => ("vmovups", "ymmword"),
+        (_, _) => ("vmovups", "zmmword"),
+    };
+    match load {
+        true => format!("{mnemonic} {name}, {width} ptr [{memory}]\n"),
+        false => format!("{mnemonic} {width} ptr [{memory}], {name}\n"),
+    }
+}
+
+/// A function of x86 instructions on registers, an intrinsic of LLVM's as `x86::lower` has
+/// it. The first argument points at the arguments and the second at where the results go:
+/// `args` names the register each argument is read into and where it is, `results` the
+/// register each result is written from and where. `clobbers` are the other registers `text`
+/// writes. Each of these registers that the calling convention keeps is kept on the stack,
+/// and the upper halves of the vector registers are zeroed once a 256- or 512-bit one is
+/// used, as LLVM does before a function returns.
+pub(super) fn x86_function(
+    text: &str,
+    args: &[(&str, u32)],
+    results: &[(&str, u32)],
+    clobbers: &[&str],
+) -> Result<String, String> {
+    let convention = Convention::of_target();
+    let [from, to, _] = convention.arguments.map(|row| GPR[row][0]);
+    let mut out = format!(".globl {SYMBOL}\n{SYMBOL}:\nmov r10, {from}\nmov r11, {to}\n");
+    let names = args.iter().chain(results).map(|(name, _)| *name).chain(clobbers.iter().copied());
+    let mut kept = Vec::new();
+    let mut vectors = Vec::new();
+    let mut wide = text.contains("ymm") || text.contains("zmm");
+    for name in names {
+        let Some((reg, bytes)) = x86_register(name) else {
+            return Err(format!("the register `{name}`"));
+        };
+        wide |= bytes > 16;
+        match reg {
+            Reg::Gpr(row) if convention.kept.contains(&row) && !kept.contains(&row) => {
+                kept.push(row)
+            }
+            Reg::Vector(number)
+                if convention.kept_vectors.contains(&number) && !vectors.contains(&number) =>
+            {
+                vectors.push(number)
+            }
+            _ => {}
+        }
+    }
+    for &row in &kept {
+        _ = writeln!(out, "push {}", GPR[row][0]);
+    }
+    if !vectors.is_empty() {
+        _ = writeln!(out, "sub rsp, {}", vectors.len() * 16);
+    }
+    for (i, number) in vectors.iter().enumerate() {
+        _ = writeln!(out, "movups xmmword ptr [rsp + {}], xmm{number}", i * 16);
+    }
+    for (name, offset) in args {
+        out.push_str(&x86_move(name, &format!("r10 + {offset}"), true));
+    }
+    _ = writeln!(out, "{text}");
+    for (name, offset) in results {
+        out.push_str(&x86_move(name, &format!("r11 + {offset}"), false));
+    }
+    for (i, number) in vectors.iter().enumerate() {
+        _ = writeln!(out, "movups xmm{number}, xmmword ptr [rsp + {}]", i * 16);
+    }
+    if !vectors.is_empty() {
+        _ = writeln!(out, "add rsp, {}", vectors.len() * 16);
+    }
+    for &row in kept.iter().rev() {
+        _ = writeln!(out, "pop {}", GPR[row][0]);
+    }
+    if wide {
+        out.push_str("vzeroupper\n");
+    }
+    out.push_str("ret\n");
+    Ok(out)
+}
+
 /// A function of x86 instructions on vector and mask registers, an intrinsic of LLVM's as
 /// `avx512::lower` has it. Its argument points at the address of the result and after it the
 /// address of each operand: `loads[i]` says what of operand `i` is read, and into which

@@ -625,6 +625,8 @@ fn main() {
     println!("soft_floats {}", cases::soft_floats::run());
     #[cfg(target_arch = "x86_64")]
     println!("simd_x86 {}", cases::simd_x86::run());
+    #[cfg(target_arch = "x86_64")]
+    println!("x86_instructions {}", cases::x86_instructions::run());
     #[cfg(all(feature = "nightly", target_arch = "x86_64"))]
     print!("avx512\n{}", cases::avx512::run());
     #[cfg(target_arch = "aarch64")]

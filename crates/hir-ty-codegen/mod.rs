@@ -148,6 +148,7 @@ mod unwind;
 mod vtable;
 pub mod wasm;
 mod wasm_object;
+mod x86;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CodegenError {
@@ -16238,6 +16239,94 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
         Ok(true)
     }
 
+    /// Calls the instructions `x86::lower` made of the intrinsic `name`: the arguments are
+    /// copied to a slot the function reads its registers from, and it writes each result
+    /// where `dst` is, a result of several registers field by field as its layout places them.
+    fn x86_assembly(
+        &mut self,
+        name: &str,
+        lowered: &x86::Lowered,
+        args: &[Operand],
+        dst: Value,
+        dst_ty: Ty<'db>,
+    ) -> Result<()> {
+        if args.len() != lowered.args.len() {
+            unsupported!("`{name}` with {} arguments", args.len());
+        }
+        let mut text = lowered.text.clone();
+        let mut reads = Vec::new();
+        let mut copies = Vec::new();
+        let mut size = 0;
+        for (arg, register) in args.iter().zip(&lowered.args) {
+            let Some(register) = register else {
+                let Some(immediate) = self.immediate(arg)?.filter(|it| *it <= 0xff) else {
+                    unsupported!("`{name}` with an immediate that is not a constant byte");
+                };
+                text = text.replace("{imm}", &immediate.to_string());
+                continue;
+            };
+            let bytes = asm::x86_register_bytes(register).expect("a register of x86");
+            let ty = self.operand_ty(arg)?;
+            if self.layout(ty)?.size.bytes() != u64::from(bytes) {
+                unsupported!("`{name}` of {ty:?}, which is not what its name says");
+            }
+            copies.push((self.operand(arg)?.0, size, bytes));
+            reads.push((*register, size));
+            size += bytes;
+        }
+        let layout = self.layout(dst_ty)?;
+        let register_bytes = |it: &str| u64::from(asm::x86_register_bytes(it).expect("x86's"));
+        let writes: Vec<(&str, u32)> = match lowered.results.as_slice() {
+            [] if layout.is_zst() => Vec::new(),
+            &[register] if layout.size.bytes() == register_bytes(register) => vec![(register, 0)],
+            many => {
+                let fields: Vec<Ty<'db>> = match dst_ty.kind() {
+                    TyKind::Tuple(tys) => tys.iter().collect(),
+                    TyKind::Adt(adt_def, subst) if let AdtId::StructId(id) = adt_def.def_id() => {
+                        let field_types = self.cg.db.field_types(id.into());
+                        field_types
+                            .iter()
+                            .map(|(_, it)| {
+                                let ty = it.ty().instantiate(self.interner, subst).skip_norm_wip();
+                                self.normalize(ty)
+                            })
+                            .collect()
+                    }
+                    _ => Vec::new(),
+                };
+                let mut writes = Vec::new();
+                for (i, (&register, &field)) in many.iter().zip(&fields).enumerate() {
+                    if self.layout(field)?.size.bytes() != register_bytes(register) {
+                        break;
+                    }
+                    writes.push((register, layout.fields.offset(i).bytes() as u32));
+                }
+                if fields.len() != many.len() || writes.len() != many.len() {
+                    unsupported!("`{name}` returning {dst_ty:?}, which is not what its name says");
+                }
+                writes
+            }
+        };
+        let slot = self.builder.create_sized_stack_slot(StackSlotData::new(
+            StackSlotKind::ExplicitSlot,
+            size.max(1),
+            4,
+        ));
+        let slot = self.builder.ins().stack_addr(ptr(), slot, 0);
+        for (from, at, bytes) in copies {
+            let to = self.builder.ins().iadd_imm(slot, i64::from(at));
+            self.copy(to, from, Size::from_bytes(bytes));
+        }
+        let text = asm::x86_function(&text, &reads, &writes, &lowered.clobbers)
+            .map_err(CodegenError::Unsupported)?;
+        let mut sig = self.cg.make_signature();
+        sig.params.extend([AbiParam::new(ptr()); 2]);
+        let callee = self.cg.assembly(text, &sig);
+        let callee = self.cg.declare_func_in_func(callee, self.builder.func);
+        self.builder.ins().call(callee, &[slot, dst]);
+        Ok(())
+    }
+
     /// A function `core::arch` declares as `llvm.{name}`: something LLVM implements, with no
     /// body anywhere.
     fn llvm_intrinsic(
@@ -16747,6 +16836,11 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
             _ if self.cg.target.arch == Arch::X86_64
                 && (name.starts_with("x86.avx512.") || name.starts_with("x86.avx2.vpdp"))
                 && self.avx512_assembly(name, args, dst, dst_ty)? => {}
+            _ if self.cg.target.arch == Arch::X86_64
+                && let Some(lowered) = x86::lower(name) =>
+            {
+                self.x86_assembly(&format!("llvm.{name}"), &lowered, args, dst, dst_ty)?
+            }
             _ => unsupported!("LLVM intrinsic `{name}`"),
         }
         Ok(())
