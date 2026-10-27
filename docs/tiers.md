@@ -4,7 +4,8 @@ A program that takes edits with `ra-jit-live` is also made faster while it runs.
 samples where its threads are, compiles the functions it spends its time in again with LLVM,
 and swaps them in as patches, the way HotSpot or V8 tier up, without a restart
 ([#6](https://github.com/indexable-inc/ra-jit/issues/6)). macOS on Apple silicon only, as
-live edits are; it needs a ra-jit built with `--features llvm`.
+live edits are. Released binaries have LLVM in them (23.1.4, linked statically); a ra-jit
+built from source needs `--features llvm` ([contributing.md](contributing.md#llvm-for---features-llvm)).
 
 ![The Tiers island of the Game of Life window](tiers.png)
 

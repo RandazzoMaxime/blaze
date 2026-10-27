@@ -59,6 +59,8 @@ ra-ap-rustc_next_trait_solver = { path = "vendor/rustc_next_trait_solver" }
 salsa = { path = "vendor/salsa" }
 salsa-macros = { path = "vendor/salsa-macros" }
 salsa-macro-rules = { path = "vendor/salsa-macro-rules" }
+# Links the pinned LLVM statically, with a static libstdc++ on Linux (vendor/llvm-sys/SOURCE.md).
+llvm-sys = { path = "vendor/llvm-sys" }
 
 # line-index = { path = "lib/line-index" }
 # la-arena = { path = "lib/la-arena" }

@@ -13240,7 +13240,7 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
         {
             return Some(self.cg.declare_inlined(&body, self.builder.func));
         }
-        if track_caller(db, func) {
+        if track_caller(db, func) || tier::builds_in_nothing() {
             return None;
         }
         if !func.krate(db).data(db).origin.is_lang() {

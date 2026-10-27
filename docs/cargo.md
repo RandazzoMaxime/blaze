@@ -32,10 +32,11 @@ profile and fails with it. From a checkout, the release's own recipe builds all 
     python3 .github/scripts/build_release.py --target $(rustc +"$(cat harness/toolchain)" -vV | sed -n 's/^host: //p') --out shipped
     cp shipped/* ~/.cargo/bin/
 
-That build has the Cranelift backend only. The LLVM one (`BLAZE_BACKEND=llvm`) is
-`--features llvm` on either command, run inside `nix develop`, which has the LLVM 20 the flake
-pins ([which LLVM](contributing.md#llvm-for---features-llvm)); with it the crates are not the ones the profile was trained on, and the script says
-so. `cargo build -p ra-jit --release` is the quicker build the harnesses and CI use while
+That build has the LLVM backend (`BLAZE_BACKEND=llvm`) and the LLVM tiers, as the
+installer's binaries do: the script fetches the LLVM 23 blaze pins and links it in statically
+([which LLVM](contributing.md#llvm-for---features-llvm)). `cargo install` from crates.io has
+the Cranelift backend only; `--features llvm` there needs `LLVM_SYS_231_PREFIX` set to that
+same LLVM. `cargo build -p ra-jit --release` is the quicker build the harnesses and CI use while
 working on blaze; it is not what ships.
 
 `cargo blaze` builds with the one toolchain blaze compiles, the dated nightly in

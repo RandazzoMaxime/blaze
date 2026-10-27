@@ -6742,6 +6742,22 @@ pub mod inline_asm {
         out
     }
 
+    /// `ah` named in the text: a byte register beside it cannot be one that needs a REX
+    /// prefix (`sil`), which LLVM's assembler refuses to encode.
+    fn high_of(pair: &[u8; 2]) -> u16 {
+        let out: u16;
+        unsafe {
+            asm!(
+                "mov al, {low}",
+                "mov ah, {high}",
+                low = in(reg_byte) pair[0],
+                high = in(reg_byte) pair[1],
+                out("ax") out,
+            )
+        };
+        out
+    }
+
     fn floats(a: f64, b: f64) -> (f64, f32) {
         let sum: f64;
         let mut single = a as f32;
@@ -6811,6 +6827,7 @@ pub mod inline_asm {
             divide(47, 5),
             vendor().iter().all(u8::is_ascii_graphic),
             bytes(0x34, 0x12),
+            high_of(std::hint::black_box(&[0x78, 0x56])),
             floats(1.5, 2.25),
             att(35),
             kept([1, 2, 3, 4, 5, 6]),

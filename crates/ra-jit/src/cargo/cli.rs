@@ -80,6 +80,8 @@ const BUILD_ENV: &[&str] = &[
     "RA_JIT_MIR_OPT",
     "RA_JIT_EMIT",
     "RA_JIT_SPLICE",
+    "RA_JIT_BUILT_IN",
+    "RA_JIT_LLVM_INLINE_THRESHOLD",
     "RA_JIT_OTHER_TOOLCHAIN",
 ];
 
@@ -100,6 +102,8 @@ const WORKER_ENV: &[&str] = &[
     "RA_JIT_MIR_OPT",
     "RA_JIT_EMIT",
     "RA_JIT_SPLICE",
+    "RA_JIT_BUILT_IN",
+    "RA_JIT_LLVM_INLINE_THRESHOLD",
     "RA_JIT_RUSTC_BASE",
 ];
 

@@ -542,6 +542,15 @@ each one's section: what `[Unreleased]` had, and the title of each change merged
 
 ### Changed
 
+- The LLVM backend is on LLVM 23.1.4 (was 20.1.8), our fork's `ix/23.x` at the commit
+  wasm-host's ix-aot pins, so both run one LLVM: inkwell 0.11 and llvm-sys 231. Blaze
+  builds that LLVM itself for each target (`.github/workflows/llvm.yaml`) and pins the
+  archives by sha256 in `crates/hir-ty-codegen/llvm.json`; the flake, CI and Windows fetch
+  them. It is linked in statically, with libstdc++ on Linux, so a binary built with
+  `--features llvm` loads no libLLVM. llvm-sys links it (`vendor/llvm-sys`), so GNU ld sees the
+  archives after inkwell, which calls them. LLVM 21 removed `nocapture`: an `sret` parameter is
+  `captures(none)`, and an attribute name the linked LLVM does not know now panics naming it
+  rather than crashing LLVM's verifier.
 - The site moved to [ix.dev/blaze](https://ix.dev/blaze/). https://ra-jit.ix.dev and
   https://blaze.ix.dev answer every path with a 301 to the same path and query under
   https://ix.dev/blaze, so old links (the README's updates button, `/bench`, RFCs) keep
@@ -982,6 +991,14 @@ each one's section: what `[Unreleased]` had, and the title of each change merged
 
 ### Fixed
 
+- The LLVM backend: an error LLVM diagnoses while it writes an object is an error naming
+  what LLVM said, not an object with an instruction left out. LLVM 23's assembler printed
+  "can't encode 'ah'" for `mov ah, sil` in an `asm!` block and wrote the object without it
+  (LLVM 20 ended the process). A `reg_byte` in a block that names a high byte register is one
+  of a, b, c and d, which always encodes (corpus case `inline_asm::high_of`).
+- The LLVM backend's store: a function's key has the `asm!` blocks LLVM puts in place of its
+  calls of their wrappers. Two functions that each pass a `u64` through a block of their own
+  were one key, and the second got the first's code.
 - A guarded match nested inside another match arm's guard preserves the enclosing guard's
   binding references, including with or-patterns. Later reads in the outer guard no longer
   use uninitialized by-value bindings, which could produce wrong results or a crash.
