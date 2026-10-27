@@ -710,7 +710,7 @@ fn lock(
                     version: package.locked.version.clone(),
                     locked: package.locked.pin(),
                     target: target.clone(),
-                    features: on,
+                    features: on.clone(),
                     var: (*var).to_owned(),
                     url: found.url,
                     sha256: String::new(),
