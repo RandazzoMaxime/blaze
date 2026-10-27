@@ -1016,6 +1016,11 @@ each one's section: what `[Unreleased]` had, and the title of each change merged
 
 ### Fixed
 
+- A whole build of other features or flags no longer leaks into the next: every worker linked
+  its programs into one `target/ra-jit/whole/<name>`, so after `cargo blaze run --features
+  loud` a plain `cargo blaze run`, whose worker had nothing edited to build again, installed
+  the loud program (`HELLO WORLD`). Each worker now links in a directory of its own, named by
+  what it is loaded with (`harness/cargo_ra_jit.py`, flags group).
 - The daemon's own link passes the linker what `-C link-arg` and `-C link-args` say in
   `RUSTFLAGS`, `CARGO_ENCODED_RUSTFLAGS` or the configuration's `rustflags`, after the native
   libraries as rustc does; it left them out. A program linked with
