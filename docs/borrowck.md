@@ -549,6 +549,11 @@ changes to rust-analyzer were needed, each made as rustc does it:
   on each operand as `if` does, so what its `let` binds is initialized where it holds. Its
   temporaries stay the arm's in every edition, as rustc keeps them (dropped when the arm ends
   or before the next arm is tried), where an `if let` before 2024 keeps them to its statement.
+  Where the guard fails, the storage of what the pattern bound ends before the next arm, or
+  the next way an or-pattern of the arm can match, is tried, as rustc leaves the arm's scope
+  there (`in_if_then_scope`). So each way binds a fresh variable, and assigning a binding
+  twice is E0384 like any other variable: in `Ok(a @ b @ a) | Err(a @ b @ a)` the alternatives
+  bind the same `a` and `Err(..)` assigns it twice.
 - Slice pattern indices carry the pattern's minimum length (`ConstantIndex::min_length`).
 - Promotion: a division by a constant other than 0 (and -1 for a signed dividend that may be
   the minimum), and `&mut []`.
