@@ -679,7 +679,7 @@ pub(crate) fn write_headerpad(binary: &Path, pad: u64) -> std::io::Result<()> {
 }
 
 /// The room an argument of the driver asks Apple's linker for, which reads it in hexadecimal.
-fn headerpad_in(arg: &str) -> Option<u64> {
+pub(crate) fn headerpad_in(arg: &str) -> Option<u64> {
     let digits = arg.strip_prefix(HEADERPAD_FLAG)?;
     let digits = digits.strip_prefix("0x").or_else(|| digits.strip_prefix("0X")).unwrap_or(digits);
     u64::from_str_radix(digits, 16).ok()

@@ -20,7 +20,7 @@ pub(crate) mod split;
 /// Links `objects` into the executable `exe`, with the native libraries of the crates `program`
 /// links. A shared library instead when `exports` names what it exports: the rest of it is
 /// its own, and the link leaves out what that does not reach, as rustc's of a `cdylib` does.
-/// How long `cc` took.
+/// `user` is what the flags pass the linker (`-C link-arg`). How long `cc` took.
 pub(crate) fn executable(
     db: &RootDatabase,
     program: &[Crate],
@@ -28,8 +28,9 @@ pub(crate) fn executable(
     sysroot: Option<&Path>,
     exe: &Path,
     exports: Option<&[String]>,
+    user: &[String],
 ) -> anyhow::Result<Duration> {
-    let mut line = Line::of(db, program, sysroot, exports.is_some())?;
+    let mut line = Line::of(db, program, sysroot, exports.is_some(), user)?;
     let Some(exports) = exports else { return line.link(objects, exe) };
     let mut listed = exe.as_os_str().to_owned();
     listed.push(".exports");
@@ -59,8 +60,9 @@ pub(crate) fn command(
     objects: &[&Path],
     sysroot: Option<&Path>,
     exe: &Path,
+    user: &[String],
 ) -> anyhow::Result<String> {
-    let line = Line::of(db, program, sysroot, false)?;
+    let line = Line::of(db, program, sysroot, false, user)?;
     let mut args = vec!["cc".to_owned()];
     args.extend(line.before.iter().cloned());
     for &object in objects {
@@ -80,8 +82,9 @@ pub(crate) fn command(
     args.extend(["-o".to_owned(), exe.display().to_string()]);
     if line.apple {
         // Last, as on rustc's line: the room the splice wants, which a link made short of it
-        // tells the file, and the link again reads.
-        args.push(crate::cargo::plan::headerpad_read(exe, None)?);
+        // tells the file, and the link again reads. It is no less than the flags ask for.
+        let asked = user.iter().filter_map(|it| crate::cargo::plan::headerpad_in(it)).last();
+        args.push(crate::cargo::plan::headerpad_read(exe, asked)?);
     }
     shlex::try_join(args.iter().map(String::as_str)).context("a link argument has a NUL in it")
 }
@@ -94,11 +97,14 @@ pub(crate) struct Line {
 }
 
 impl Line {
+    /// The line of `program`, with `user`, what the flags pass the linker (`-C link-arg`),
+    /// after the native libraries as rustc has them.
     pub(crate) fn of(
         db: &RootDatabase,
         program: &[Crate],
         sysroot: Option<&Path>,
         shared: bool,
+        user: &[String],
     ) -> anyhow::Result<Line> {
         let Some(&first) = program.first() else { bail!("nothing to link") };
         let target = Target { shared, ..Target::of(db, first.into()) };
@@ -115,6 +121,7 @@ impl Line {
             after.extend(target.lib(lib));
         }
         after.extend(native.args);
+        after.extend(user.iter().cloned());
         after.extend(target.trailing());
         Ok(Line { before, after, apple: target.apple })
     }

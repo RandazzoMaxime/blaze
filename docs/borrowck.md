@@ -246,7 +246,12 @@ All of these are rustc's, written from `compiler/rustc_borrowck` at the pinned n
   a placeholder outlives `'static`, and a placeholder made to outlive anything is rustc's E0308
   "one type is more general than the other". So a closure parameter `x: fn(&u32)` whose
   expected type is `fn(&'1 u32)` needs `'1: 'static`. A function item cast to a `for<'a> fn`
-  keeps its own `for<'a>`, as rustc's reify, rather than its late-bound lifetimes as variables.
+  keeps its own `for<'a>`, as rustc's reify, rather than its late-bound lifetimes as variables,
+  and a closure cast to one is its signature's `fn` pointer, related the same way. A projection
+  rust-analyzer normalized under a `for<'a>` stays as written in a `let`'s type: rustc
+  normalizes it for the placeholder, so `let _: for<'a> fn(<&'a () as Trait>::Ty) = |_| {}`
+  with only `impl Trait for &'static ()` needs the placeholder to be `'static`, rustc's
+  "not general enough" (its type op's error, which its type check cannot see) rather than E0308.
   rust-analyzer gives a trait object
   behind an elided reference in a signature `'static`, not the reference's lifetime, so a
   placeholder the solver equates with an elided lifetime is left out
@@ -354,7 +359,12 @@ All of these are rustc's, written from `compiler/rustc_borrowck` at the pinned n
   it does not (E0491) gets only that error, which ra-jit does not report yet. The type a
   returned `impl Trait` hides must be well-formed and outlive what its bounds say, given what
   the function knows (rustc's `check_opaque_meets_bounds`): `-> impl Sized + 'static` hiding
-  a `T` is E0310 at the `impl Trait`. Its trait and associated type bounds hold of the type
+  a `T` is E0310 at the `impl Trait`. In its defining body the type it hides is also
+  well-formed at the signature, as rustc's implied bounds normalize the returned `impl Trait`
+  to it there and prove what that asks: `-> (Box<dyn Any>, impl Sized)` hiding
+  `Outlives<'static, <T as Trait>::Assoc>` needs `<T as Trait>::Assoc: 'static` (E0310 at
+  the function), the type around it (`&'t impl Trait`) still assumed. Its trait and
+  associated type bounds hold of the type
   it hides where the body returns it, as rustc proves them there: `impl Iterator<Item =
   Box<dyn Foo>>` hiding `Iter<'a, T>` needs the where clauses of that `Iterator` impl with
   `'a` `'static`. A closure or coroutine outlives as its captures do, and
@@ -432,10 +442,8 @@ with another code, then, of the errors not reported, 5 "lifetime may not live lo
 3 each of E0507, E0309, E0310, E0311 and higher-ranked errors, 2 each of E0716 and E0597,
 then one each of five more. The causes, grouped:
 
-- **Higher-ranked regions and placeholders**: function pointer types are related with
-  placeholders, but a projection in them is not normalized for the placeholder
-  (`nll/closure-malformed-projection-input-issue-102800.rs`), and auto traits of a coroutine's
-  witness (`T: Send` of an `async` block holding a `for<'a>` future) are not proven with them.
+- **Higher-ranked regions and placeholders**: auto traits of a coroutine's witness (`T: Send`
+  of an `async` block holding a `for<'a>` future) are not proven with placeholders.
 - **Well-formedness of items** (most of what is left of E0309 and E0310): items whose
   signature or impl header has an associated type (what normalizing it implies) are not
   checked yet (`fn as_ref2<'a>(&'a self) -> Self::Output<'a>` normalized to `FooRef<'a, U>`
@@ -543,15 +551,18 @@ changes to rust-analyzer were needed, each made as rustc does it:
 - Type inference takes an inline `asm!` output as a place written, as rustc's
   `check_expr_asm_operand` does, so `out(reg) v[0]` indexes with `IndexMut` and needs `v`
   mutable (E0596).
+- A temporary may be unsized, as rustc's `as_temp` makes one of what is moved out of an
+  unsized place: a place expression as a statement (`S[0];`, `*s;`) is moved into one, sized
+  or not, as rustc's `stmt_expr` does, and so is an operand (`[a[..]]`), so moving out of a
+  borrowed `str`, slice or `dyn` is E0507 or E0508 (`dst/dst-index-fail.rs`,
+  `unsized/issue-115203.rs`). rust-analyzer refused to lower a body with one, and only
+  fake-read an unsized statement. rustc reports E0161 there too, which ra-jit does not.
 
 These are differences still open, each the cause of some failures, all of them errors
 missed rather than errors made up:
 
 - Temporaries of a block's tail expression in edition 2021 are dropped at a different point.
 - Comparisons against constant patterns take their operands by value.
-- A place expression as a statement (`S[0];`, `*s;`) is moved into a temporary in rustc, so
-  an unsized or borrowed one is E0161 or E0507 (`dst/dst-index-fail.rs`); rust-analyzer
-  does not read it.
 - An arm with a guard binds its by-reference bindings before the guard and the rest after,
   in rustc, so what it binds by value is dropped first; rust-analyzer binds them in the
   pattern's order (`dropck/eager-by-ref-binding-for-guards.rs`, where it reports two errors

@@ -884,10 +884,11 @@ impl CodegenUnit {
         if (roots.start.is_some() || roots.whole) && !backend::edits_follow() {
             backend::set_whole_program();
         }
+        let root_crates: FxHashSet<Crate> = all().map(|root| root.krate(db)).collect();
         let mut own_statics = OwnStatics::new(
             db,
             symbols,
-            all().map(|root| root.krate(db)).collect(),
+            root_crates.iter().copied().collect(),
             std::mem::take(theirs),
             std::mem::take(unknown),
             !roots.on_demand.is_empty(),
@@ -937,6 +938,7 @@ impl CodegenUnit {
             {
                 cg.define_allocator_shim(first.krate(db))?;
             }
+            cg.define_rustc_allocator_entries(&root_crates)?;
             for &id in roots.kept {
                 cg.static_data(id)?;
             }
@@ -4473,16 +4475,35 @@ fn place_stand_ins(
 /// is asked for the name rather than for the attributes of all its functions.
 #[salsa::tracked(returns(copy))]
 fn declares_global_allocator(db: &dyn HirDatabase, krate: Crate) -> bool {
-    const EXPORTED: &str = "__ra_jit_global_alloc";
+    global_allocator_export(db, krate, "__ra_jit_global_alloc").is_some()
+}
+
+/// The entries of the global allocator that `alloc` calls by name, with the function the
+/// `#[global_allocator]`'s expansion exports for each: what rustc's shim calls, and what ours
+/// goes to instead. The number of pointer-sized arguments, and whether one is returned.
+const ALLOCATOR_ENTRIES: [(&str, &str, usize, bool); 4] = [
+    ("__rust_alloc", "__ra_jit_global_alloc", 2, true),
+    ("__rust_dealloc", "__ra_jit_global_dealloc", 3, false),
+    ("__rust_realloc", "__ra_jit_global_realloc", 4, true),
+    ("__rust_alloc_zeroed", "__ra_jit_global_alloc_zeroed", 2, true),
+];
+
+/// The function of `krate` the `#[global_allocator]`'s expansion exports as `exported`.
+fn global_allocator_export(
+    db: &dyn HirDatabase,
+    krate: Crate,
+    exported: &str,
+) -> Option<FunctionId> {
     let def_map = hir_def::nameres::crate_def_map(db, krate);
-    let name = hir_expand::name::Name::new_root(EXPORTED);
-    def_map.modules(db).any(|(module_id, module)| {
+    let name = hir_expand::name::Name::new_root(exported);
+    def_map.modules(db).find_map(|(module_id, module)| {
         let Some(hir_def::ModuleDefId::FunctionId(id)) = module.scope(db).get(&name).take_values()
         else {
-            return false;
+            return None;
         };
-        id.lookup(db).container == ItemContainerId::ModuleId(module_id)
-            && AttrFlags::export_name(db, id.into()).is_some_and(|it| it.as_str() == EXPORTED)
+        let exports =
+            AttrFlags::export_name(db, id.into()).is_some_and(|it| it.as_str() == exported);
+        (id.lookup(db).container == ItemContainerId::ModuleId(module_id) && exports).then_some(id)
     })
 }
 
@@ -5058,7 +5079,10 @@ impl<'a, 'db> ObjectCodegen<'a, 'db> {
         let sections = backend::sections_of_their_own()
             && isa.triple().binary_format == target_lexicon::BinaryFormat::Elf;
         let mut builder = ObjectBuilder::new(isa, "ra-jit", default_libcall_names())?;
-        builder.per_function_section(sections).per_data_object_section(sections);
+        // A wasm object is written from this one, a segment per piece of data aligned as its
+        // section is: a section shared by several has the largest alignment of them.
+        let data_sections = sections || Target::current().writes_wasm_objects();
+        builder.per_function_section(sections).per_data_object_section(data_sections);
         let mut module = ObjectModule::new(builder);
         let unwind = UnwindContext::new(&mut module).map_err(CodegenError::Backend)?;
         let built = start.elapsed();
@@ -5541,52 +5565,99 @@ impl<'a, 'db> ObjectCodegen<'a, 'db> {
             return Ok(());
         }
         let declared = program.into_iter().any(|it| declares_global_allocator(db, it));
-        let to = |default, declared_one| if declared { declared_one } else { default };
-        let entries = [
-            ("__rust_alloc", to("__rdl_alloc", "__ra_jit_global_alloc"), 2, true),
-            ("__rust_dealloc", to("__rdl_dealloc", "__ra_jit_global_dealloc"), 3, false),
-            ("__rust_realloc", to("__rdl_realloc", "__ra_jit_global_realloc"), 4, true),
-            (
-                "__rust_alloc_zeroed",
-                to("__rdl_alloc_zeroed", "__ra_jit_global_alloc_zeroed"),
-                2,
-                true,
-            ),
-            ("__rust_alloc_error_handler", "__rdl_alloc_error_handler", 2, false),
-            ("__rust_no_alloc_shim_is_unstable_v2", "", 0, false),
-        ];
-        for (name, default, params, returns) in entries {
-            let mut sig = self.module.make_signature();
-            sig.params.extend((0..params).map(|_| AbiParam::new(ptr())));
-            sig.returns.extend(returns.then(|| AbiParam::new(ptr())));
-            let id = self
-                .module
-                .declare_function(name, Linkage::Export, &sig)
-                .map_err(|e| CodegenError::Backend(e.to_string()))?;
-            let target = (!default.is_empty()).then(|| self.import(default, &sig)).transpose()?;
-            let mut ctx = self.module.make_context();
-            ctx.func.signature = sig;
-            let mut builder_ctx = std::mem::take(&mut self.builder_ctx);
-            let mut builder = FunctionBuilder::new(&mut ctx.func, &mut builder_ctx);
-            let block = builder.create_block();
-            builder.append_block_params_for_function_params(block);
-            builder.switch_to_block(block);
-            let args = builder.block_params(block).to_vec();
-            let results = match target {
-                Some(target) => {
-                    let callee = self.module.declare_func_in_func(target, builder.func);
-                    let call = builder.ins().call(callee, &args);
-                    builder.inst_results(call).to_vec()
-                }
-                None => Vec::new(),
-            };
-            builder.ins().return_(&results);
-            builder.seal_all_blocks();
-            builder.finalize(self.module.isa().frontend_config());
-            self.builder_ctx = builder_ctx;
-            self.define_shim(id, &mut ctx)?;
+        for (name, ours, params, returns) in ALLOCATOR_ENTRIES {
+            let default = format!("__rdl_{}", name.trim_start_matches("__rust_"));
+            let target = if declared { ours } else { &default };
+            self.define_forwarding(name, Linkage::Export, Some(target), params, returns)?;
+        }
+        self.define_forwarding(
+            "__rust_alloc_error_handler",
+            Linkage::Export,
+            Some("__rdl_alloc_error_handler"),
+            2,
+            false,
+        )?;
+        self.define_forwarding(
+            "__rust_no_alloc_shim_is_unstable_v2",
+            Linkage::Export,
+            None,
+            0,
+            false,
+        )
+    }
+
+    /// rustc's entries of the global allocator in a program linked with rustc's code whose
+    /// `#[global_allocator]` is in one of `crates`, going to the functions rust-analyzer's
+    /// expansion exports, which are compiled with the rest. rustc's expansion has the
+    /// allocator's methods inlined into them at opt-level 1 and up, so they run the source as
+    /// rustc compiled it, and nothing else calls those methods. A program whose shim already
+    /// goes to ours (a stand-in's forwarding allocator, `stub.rs`) defines that function.
+    fn define_rustc_allocator_entries(&mut self, crates: &FxHashSet<Crate>) -> Result<()> {
+        let db = self.db;
+        if self.symbols.nothing_of_rustc() || self.symbols.defines(ALLOCATOR_ENTRIES[0].1) {
+            return Ok(());
+        }
+        for &krate in crates {
+            if !declares_global_allocator(db, krate) {
+                continue;
+            }
+            for (name, ours, params, returns) in ALLOCATOR_ENTRIES {
+                let Some(rustcs) = self.symbols.path(&format!("__rustc::{name}")) else {
+                    continue;
+                };
+                let Some(func) = global_allocator_export(db, krate, ours) else {
+                    let krate = fncache::crate_name(db, krate);
+                    refused!(
+                        "`#[global_allocator]` of crate `{krate}` exports no `{ours}`: rustc's \
+                         `{name}` would run its allocator as rustc compiled it"
+                    );
+                };
+                self.wanted.push(func);
+                self.define_forwarding(&rustcs, Linkage::Hidden, Some(ours), params, returns)?;
+            }
         }
         Ok(())
+    }
+
+    /// Defines `name`, of `params` pointer-sized arguments and a pointer returned if `returns`,
+    /// as a call of `target` with them, or as nothing.
+    fn define_forwarding(
+        &mut self,
+        name: &str,
+        linkage: Linkage,
+        target: Option<&str>,
+        params: usize,
+        returns: bool,
+    ) -> Result<()> {
+        let mut sig = self.module.make_signature();
+        sig.params.extend((0..params).map(|_| AbiParam::new(ptr())));
+        sig.returns.extend(returns.then(|| AbiParam::new(ptr())));
+        let id = self
+            .module
+            .declare_function(name, linkage, &sig)
+            .map_err(|e| CodegenError::Backend(e.to_string()))?;
+        let target = target.map(|it| self.import(it, &sig)).transpose()?;
+        let mut ctx = self.module.make_context();
+        ctx.func.signature = sig;
+        let mut builder_ctx = std::mem::take(&mut self.builder_ctx);
+        let mut builder = FunctionBuilder::new(&mut ctx.func, &mut builder_ctx);
+        let block = builder.create_block();
+        builder.append_block_params_for_function_params(block);
+        builder.switch_to_block(block);
+        let args = builder.block_params(block).to_vec();
+        let results = match target {
+            Some(target) => {
+                let callee = self.module.declare_func_in_func(target, builder.func);
+                let call = builder.ins().call(callee, &args);
+                builder.inst_results(call).to_vec()
+            }
+            None => Vec::new(),
+        };
+        builder.ins().return_(&results);
+        builder.seal_all_blocks();
+        builder.finalize(self.module.isa().frontend_config());
+        self.builder_ctx = builder_ctx;
+        self.define_shim(id, &mut ctx)
     }
 
     /// A function of ours that could not be compiled and that something in the object calls,
@@ -6734,6 +6805,17 @@ impl<'a, 'db> ObjectCodegen<'a, 'db> {
         let ours = !shared
             && (base_owns || self.own_statics.replaces(db, id))
             && compiled_static(db, id).is_ok();
+        // rustc's copy started from the old first value, and ours can't stand in for it.
+        if stateful_linked && !shared && !ours && compiled_static(db, id).is_ok() {
+            let name = StaticSignature::of(db, id).name.as_str();
+            let krate = fncache::crate_name(db, id.krate(db));
+            refused!(
+                "static `{name}` of crate `{krate}` with state, whose first value is not the one \
+                 rustc built it with (or an edit reached it before that was known): rustc's copy \
+                 has the old value, and rustc's code, or its `#[no_mangle]` or `#[export_name]` \
+                 symbol, keeps a copy of ours from standing in for it"
+            );
+        }
         let rustcs = symbol.filter(|_| !ours);
         // One the linker left out of what rustc linked is used by none of rustc's code there.
         let unlinked = rustcs.as_ref().is_some_and(|it| !self.symbols.linked(it));
@@ -14237,13 +14319,23 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
             ("atomic_load", [ptr]) => {
                 let scalar = self.scalar_of(dst_ty)?;
                 let (ptr, _) = self.load_scalar(ptr)?;
-                let value = self.builder.ins().atomic_load(scalar.ty, MEM, ptr);
+                let value = match self.wide_atomics(scalar.ty)? {
+                    true => {
+                        let zero = self.builder.ins().iconst(types::I64, 0);
+                        let zero = self.builder.ins().uextend(types::I128, zero);
+                        self.cas16(ptr, zero, zero)?
+                    }
+                    false => self.builder.ins().atomic_load(scalar.ty, MEM, ptr),
+                };
                 self.builder.ins().store(MEM, value, dst, 0);
             }
             ("atomic_store", [ptr, value]) => {
                 let (ptr, _) = self.load_scalar(ptr)?;
-                let (value, _) = self.load_scalar(value)?;
-                self.builder.ins().atomic_store(MEM, value, ptr);
+                let (value, ty) = self.load_scalar(value)?;
+                match self.wide_atomics(ty.ty)? {
+                    true => _ = self.rmw16(AtomicRmwOp::Xchg, ptr, value)?,
+                    false => _ = self.builder.ins().atomic_store(MEM, value, ptr),
+                }
             }
             (
                 "atomic_xchg" | "atomic_xadd" | "atomic_xsub" | "atomic_and" | "atomic_nand"
@@ -14267,14 +14359,20 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
                 let scalar = self.scalar_of(dst_ty)?;
                 let (ptr, _) = self.load_scalar(ptr)?;
                 let (value, _) = self.load_scalar(value)?;
-                let old = self.builder.ins().atomic_rmw(scalar.ty, MEM, op, ptr, value);
+                let old = match self.wide_atomics(scalar.ty)? {
+                    true => self.rmw16(op, ptr, value)?,
+                    false => self.builder.ins().atomic_rmw(scalar.ty, MEM, op, ptr, value),
+                };
                 self.builder.ins().store(MEM, old, dst, 0);
             }
             ("atomic_cxchg" | "atomic_cxchgweak", [ptr, expected, new]) => {
                 let (ptr, _) = self.load_scalar(ptr)?;
-                let (expected, _) = self.load_scalar(expected)?;
+                let (expected, ty) = self.load_scalar(expected)?;
                 let (new, _) = self.load_scalar(new)?;
-                let old = self.builder.ins().atomic_cas(MEM, ptr, expected, new);
+                let old = match self.wide_atomics(ty.ty)? {
+                    true => self.cas16(ptr, expected, new)?,
+                    false => self.builder.ins().atomic_cas(MEM, ptr, expected, new),
+                };
                 let swapped = self.builder.ins().icmp(IntCC::Equal, old, expected);
                 let layout = self.layout(dst_ty)?;
                 self.builder.ins().store(MEM, old, dst, layout.fields.offset(0).bytes() as i32);
@@ -16165,6 +16263,74 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
         let slot = self.scratch_wide();
         self.builder.ins().store(MEM, value, slot, 0);
         Ok(self.builder.ins().load(types::I128, MEM, slot, 0))
+    }
+
+    /// Whether an atomic access of `ty` is made of compare-and-swaps of compiler_builtins:
+    /// Cranelift has no atomics of 128 bits on AArch64. That is how LLVM makes them at `-O0`
+    /// on a target with outline atomics (`aarch64-unknown-linux-gnu`): it expands a load, a
+    /// store and a read-modify-write to compare-and-swaps (`AtomicExpansionKind::CmpXChg`),
+    /// and a compare-and-swap is a call of `__aarch64_cas16_acq_rel` for one sequentially
+    /// consistent, which takes CASP when the CPU has LSE and LDXP/STXP when not. Without
+    /// outline atomics there is no such function to call, and the access is refused.
+    fn wide_atomics(&self, ty: Type) -> Result<bool> {
+        if ty != types::I128 || self.cg.target.arch != Arch::Aarch64 {
+            return Ok(false);
+        }
+        let outline = cfg::CfgAtom::KeyValue {
+            key: intern::sym::target_feature,
+            value: intern::Symbol::intern("outline-atomics"),
+        };
+        if !self.env.krate.cfg_options(self.cg.db).check_atom(&outline) {
+            unsupported!("an atomic of 128 bits on AArch64 without outline atomics");
+        }
+        Ok(true)
+    }
+
+    /// What `ptr` held, swapped for `new` when it was `expected`: compiler_builtins'
+    /// compare-and-swap of 128 bits ([`Self::wide_atomics`]).
+    fn cas16(&mut self, ptr: Value, expected: Value, new: Value) -> Result<Value> {
+        let params = [types::I128, types::I128, self::ptr()];
+        self.builtin("__aarch64_cas16_acq_rel", &params, types::I128, &[expected, new, ptr])
+    }
+
+    /// `op` of 128 bits at `ptr` with `value`, and what was there before: LLVM's expansion
+    /// of an `atomicrmw` to a loop of compare-and-swaps, from a plain load of what is there.
+    fn rmw16(&mut self, op: AtomicRmwOp, ptr: Value, value: Value) -> Result<Value> {
+        let first = self.builder.ins().load(types::I128, MEM, ptr, 0);
+        let again = self.builder.create_block();
+        let done = self.builder.create_block();
+        let seen = self.builder.append_block_param(again, types::I128);
+        let old = self.builder.append_block_param(done, types::I128);
+        self.builder.ins().jump(again, &[first.into()]);
+        self.builder.switch_to_block(again);
+        let ins = self.builder.ins();
+        let new = match op {
+            AtomicRmwOp::Xchg => value,
+            AtomicRmwOp::Add => ins.iadd(seen, value),
+            AtomicRmwOp::Sub => ins.isub(seen, value),
+            AtomicRmwOp::And => ins.band(seen, value),
+            AtomicRmwOp::Nand => {
+                let and = ins.band(seen, value);
+                self.builder.ins().bnot(and)
+            }
+            AtomicRmwOp::Or => ins.bor(seen, value),
+            AtomicRmwOp::Xor => ins.bxor(seen, value),
+            AtomicRmwOp::Smax | AtomicRmwOp::Smin | AtomicRmwOp::Umax | AtomicRmwOp::Umin => {
+                let cc = match op {
+                    AtomicRmwOp::Smax => IntCC::SignedGreaterThan,
+                    AtomicRmwOp::Smin => IntCC::SignedLessThanOrEqual,
+                    AtomicRmwOp::Umax => IntCC::UnsignedGreaterThan,
+                    _ => IntCC::UnsignedLessThanOrEqual,
+                };
+                let keep = ins.icmp(cc, seen, value);
+                self.builder.ins().select(keep, seen, value)
+            }
+        };
+        let was = self.cas16(ptr, seen, new)?;
+        let swapped = self.builder.ins().icmp(IntCC::Equal, was, seen);
+        self.builder.ins().brif(swapped, done, &[was.into()], again, &[was.into()]);
+        self.builder.switch_to_block(done);
+        Ok(old)
     }
 
     /// The quotient of two integers, or the remainder. Cranelift has neither for 128 bits, so

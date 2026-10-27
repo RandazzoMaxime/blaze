@@ -94,7 +94,7 @@ fn main() {
         consts::name(1),
         consts::config(3)
     );
-    case!(consts::local_array(4), consts::repeat(9));
+    case!(consts::local_array(4), consts::repeat(9), consts::from_end(2));
 
     case!(generics::picks(5, 6), generics::swaps(1, 2), generics::inline(5), generics::methods(10));
     case!(generics::statics(3, 4), generics::option_map(Some(4)), generics::option_map(None));
@@ -635,6 +635,8 @@ fn main() {
     }
     #[cfg(all(feature = "nightly", target_arch = "aarch64"))]
     println!("sve {}", cases::sve::run());
+    #[cfg(all(feature = "nightly", target_arch = "aarch64"))]
+    println!("sve_ops {}", cases::sve_ops::run());
     // Threads.
     #[cfg(not(target_family = "wasm"))]
     println!("boxed_fn_once {:?}", cases::boxed_fn_once::run());

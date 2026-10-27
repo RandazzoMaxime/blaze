@@ -19,7 +19,10 @@ use std::{
 
 use sha2::{Digest as _, Sha256};
 
+mod cargo;
 mod own;
+
+pub(crate) use cargo::{answer as cargo_answer, rustflags as cargo_rustflags};
 
 /// What rustc can be asked to print without compiling, whatever the input is.
 const ABOUT_RUSTC: [&str; 20] = [
@@ -200,6 +203,10 @@ pub(crate) fn ask(command: &mut Command) -> Option<io::Result<Output>> {
     let program = Path::new(command.get_program()).file_stem()?.to_str()?.to_owned();
     match program.as_str() {
         "cargo" => {
+            // What it asks of the toolchain and the configuration, ra-jit answers.
+            if let Some(answered) = cargo::answer(command) {
+                return Some(answered);
+            }
             ready_cargo(command);
             None
         }
