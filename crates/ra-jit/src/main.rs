@@ -4716,6 +4716,13 @@ fn build(
             .collect(),
         false => Vec::new(),
     };
+    // A generic function is not a function until its types are given, and with nothing of
+    // rustc's there is no copy of it to name: each instance a caller asks for is compiled with
+    // the caller. As a root it would only be counted as left out ("no rustc symbol"), which is
+    // not something blaze could not compile.
+    if table.is_empty() {
+        functions.retain(|&(func, _)| !resolver.is_generic(func));
+    }
     let list = start.elapsed();
     // With a program to start from, only what it reaches is compiled, and what a runtime
     // looks up by name. Without one any function may be the one called.
