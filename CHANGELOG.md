@@ -549,6 +549,11 @@ each one's section: what `[Unreleased]` had, and the title of each change merged
 
 ### Changed
 
+- The programs print `blaze`, not `ra-jit` (#270, "What the programs print"): the `blaze:`
+  prefix of their notes, `Finished ... profile [blaze]`, `blaze is enabled`, `plain cargo:
+  through blaze`, `blaze could not compile`, `blaze cache gc` and the other errors and notes.
+  The harnesses that read these lines read the new ones. The binaries, crates, directories,
+  `RA_JIT_*` variables and symbol names keep their names for now.
 - A build script's `RUSTC` is blaze, so its probes run no rustc: `rustc -vV` and `--print`
   are blaze's answers, and a probe compile (`autocfg`, `anyhow`, `thiserror`, `rustix`,
   `proc-macro2`) gets `cargo blaze check`'s verdict, or an error naming the command where blaze

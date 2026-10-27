@@ -758,7 +758,7 @@ impl State {
         let scripts = match kept_said(&dir, &built.said) {
             Ok(file) => Some(file),
             Err(why) => {
-                eprintln!("ra-jit: what the build scripts said is not kept: {why}");
+                eprintln!("blaze: what the build scripts said is not kept: {why}");
                 None
             }
         };
@@ -798,7 +798,7 @@ impl State {
             let plan = match unit {
                 Some(unit) => Plan::of(unit, &used, &files, unit_test)?,
                 None => Err(format!(
-                    "cargo built `{name}` before ra-jit recorded what it is linked from; \
+                    "cargo built `{name}` before blaze recorded what it is linked from; \
                      `cargo clean -p {}` has it built again",
                     package.name
                 )),

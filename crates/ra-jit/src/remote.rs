@@ -978,14 +978,14 @@ pub(crate) async fn pull(store: &Path, remote: &Remote, project: &str) -> anyhow
     tally.settle(said, &remote.traffic)
 }
 
-const USAGE: &str = "usage: ra-jit cache push|pull REMOTE [PROJECT]\n       \
-                     ra-jit cache stats\n       \
-                     ra-jit cache gc [--max SIZE]\n       \
-                     ra-jit cache gc --remote REMOTE [--unlisted-after AGE] [--older-than AGE] \
+const USAGE: &str = "usage: blaze cache push|pull REMOTE [PROJECT]\n       \
+                     blaze cache stats\n       \
+                     blaze cache gc [--max SIZE]\n       \
+                     blaze cache gc --remote REMOTE [--unlisted-after AGE] [--older-than AGE] \
                      [--dry-run]\n       \
-                     ra-jit cache verify\n       \
-                     ra-jit cache keygen FILE\n       \
-                     ra-jit cache forget REMOTE";
+                     blaze cache verify\n       \
+                     blaze cache keygen FILE\n       \
+                     blaze cache forget REMOTE";
 
 /// `ra-jit cache VERB`, on the store of the user's builds.
 pub(crate) fn command(mut args: impl Iterator<Item = String>) -> anyhow::Result<()> {
@@ -1122,7 +1122,7 @@ fn format_line(format: Option<u32>) -> String {
     match format {
         None => "format: none (the directory has no store in it)".to_owned(),
         Some(STORE_FORMAT) => format!("format: {STORE_FORMAT}"),
-        Some(other) => format!("format: {other} (this ra-jit reads {STORE_FORMAT})"),
+        Some(other) => format!("format: {other} (this blaze reads {STORE_FORMAT})"),
     }
 }
 
@@ -1191,7 +1191,7 @@ fn verify(store: &Path) -> anyhow::Result<()> {
         println!("corrupt: {name} {why}");
     }
     if verified.format.is_some_and(|it| it != STORE_FORMAT) {
-        bail!("the store is not of the format this ra-jit reads");
+        bail!("the store is not of the format this blaze reads");
     }
     if !verified.corrupt.is_empty() {
         bail!("{} packs are not what was written", verified.corrupt.len());

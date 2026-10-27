@@ -1272,9 +1272,9 @@ fn no_assembler(triple: &str) -> String {
         && matches!(std::env::consts::OS, "macos" | "linux");
     let or_cc = if host { " or a C compiler (`cc`)" } else { "" };
     format!(
-        "inline assembly: nothing here assembles it for {triple}. This ra-jit was built without \
+        "inline assembly: nothing here assembles it for {triple}. This blaze was built without \
          LLVM, so it assembles `asm!` with clang{or_cc}, and there is none on PATH: install \
-         clang, or use a build of ra-jit with LLVM (`--features llvm`)"
+         clang, or use a build of blaze with LLVM (`--features llvm`)"
     )
 }
 

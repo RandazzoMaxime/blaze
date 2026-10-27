@@ -280,7 +280,7 @@ fn built(
         kept.write(made).map_err(|it| format!("writing what the store kept of it: {it}"))?;
         write_made_of(made, &second_of(&first, reads))?;
         if std::env::var_os("RA_JIT_STATS").is_some() {
-            eprintln!("ra-jit: a build the store kept: {}", made.exe.display());
+            eprintln!("blaze: a build the store kept: {}", made.exe.display());
         }
         return Ok(());
     }
@@ -322,7 +322,7 @@ fn built(
         ));
     }
     if found.is_some() && std::env::var_os("RA_JIT_STATS").is_some() {
-        eprintln!("ra-jit: a build the store kept read what this one did: {}", made.exe.display());
+        eprintln!("blaze: a build the store kept read what this one did: {}", made.exe.display());
     }
     if let Some(store) = store {
         store.settled();
@@ -456,7 +456,7 @@ fn build(
         ra_jit.env("RA_JIT_STD_FROM", "off");
     }
     ra_jit.current_dir(dir).stdin(Stdio::null()).stdout(Stdio::null());
-    let built = ra_jit.output().map_err(|it| format!("ra-jit did not run: {it}"))?;
+    let built = ra_jit.output().map_err(|it| format!("blaze did not run: {it}"))?;
     let said = String::from_utf8_lossy(&built.stderr).into_owned();
     std::fs::write(dir.join("ra-jit.log"), &said).map_err(|it| it.to_string())?;
     if !built.status.success() {
@@ -464,7 +464,7 @@ fn build(
         let error = said.rfind("\nError: ").map(|at| said[at + 1..].trim_end());
         let last = said.lines().rev().find(|it| !it.trim().is_empty()).unwrap_or("");
         let last = error.unwrap_or(last);
-        return Err(format!("ra-jit did not build it ({}): {last}", built.status));
+        return Err(format!("blaze did not build it ({}): {last}", built.status));
     }
     Ok(said)
 }
@@ -501,7 +501,7 @@ fn read_otherwise(
     rustc_has: impl Fn(&str) -> Option<String>,
 ) -> Result<(), String> {
     match info.env.iter().find(|(name, value)| rustc_has(name) != *value) {
-        Some((name, _)) => Err(format!("it reads `{name}`, which ra-jit's build is not given")),
+        Some((name, _)) => Err(format!("it reads `{name}`, which blaze's build is not given")),
         None => Ok(()),
     }
 }
@@ -528,12 +528,12 @@ fn add(
     let (prefix, suffix) = (std::env::consts::DLL_PREFIX, std::env::consts::DLL_SUFFIX);
     let proc_macro = name.strip_prefix(prefix).and_then(|it| it.strip_suffix(suffix));
     let Some(stem) = library.or(proc_macro) else {
-        return Err(format!("it links {name}, which is not a library ra-jit knows"));
+        return Err(format!("it links {name}, which is not a library blaze knows"));
     };
     let parent = path.parent().ok_or("a library without a directory")?;
     let unit = &super::layout::unit_of_file(stem, parent);
     let (record, _) = Record::described_or_seeded(parent, unit).ok_or_else(|| {
-        format!("`{unit}`, which it links, was compiled before ra-jit described it")
+        format!("`{unit}`, which it links, was compiled before blaze described it")
     })?;
     let asked = Asked { args: &record.args, cwd: &record.cwd };
     let at = crates.len();

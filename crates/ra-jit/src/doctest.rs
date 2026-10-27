@@ -674,7 +674,7 @@ impl Ours {
             let refused = crate::refused_undefined(&format!("{failed:#}"), &objects[1]);
             match refused.first() {
                 Some(first) => anyhow::anyhow!(
-                    "it calls {} functions ra-jit could not compile: {first}",
+                    "it calls {} functions blaze could not compile: {first}",
                     refused.len()
                 ),
                 None => failed,
@@ -685,7 +685,7 @@ impl Ours {
             let stand_ins = crate::link::stand_ins(&binary)?;
             match stand_ins.first() {
                 Some(first) => anyhow::bail!(
-                    "it calls {} functions ra-jit could not compile: {first}",
+                    "it calls {} functions blaze could not compile: {first}",
                     stand_ins.len()
                 ),
                 None => Ok(()),
@@ -1366,7 +1366,7 @@ fn run(
         n => format!(" ({n} unchanged since the last run)"),
     };
     eprintln!(
-        "doctests: {} built by ra-jit, {} not built; compiling took {compiling:.1?}{remembered}",
+        "doctests: {} built by blaze, {} not built; compiling took {compiling:.1?}{remembered}",
         counted.ra_jit.load(Ordering::Relaxed),
         counted.refused.load(Ordering::Relaxed),
     );
@@ -1379,7 +1379,7 @@ fn run(
             Ok(Ended::Ignored) => ignored += 1,
             // libtest lists a failure by the name alone, without how it is tested.
             Ok(Ended::Failed(shown)) => failed.push((tests[at].name.clone(), shown)),
-            Err(error) => failed.push((tests[at].name.clone(), format!("ra-jit: {error:#}"))),
+            Err(error) => failed.push((tests[at].name.clone(), format!("blaze: {error:#}"))),
         }
     }
     if !failed.is_empty() {

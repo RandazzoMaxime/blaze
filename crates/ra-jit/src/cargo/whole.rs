@@ -365,7 +365,7 @@ fn compiling(asked: &Invocation, programs: &[Program]) {
 /// Says the build of `profile` is done.
 fn finished(asked: &Invocation, profile: &str, started: Instant) {
     let took = started.elapsed().as_secs_f64();
-    let finished = format!("`{profile}` profile [{}] target(s) in {took:.2}s", super::ra_jit_tag());
+    let finished = format!("`{profile}` profile [{}] target(s) in {took:.2}s", super::blaze_tag());
     say::status(asked.flags.quiet, "Finished", &finished);
 }
 
