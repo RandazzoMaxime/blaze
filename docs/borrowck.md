@@ -609,12 +609,16 @@ small: an edit re-checks only the bodies it changed (the query reads each body's
 relative to its item, which moving the body does not change), and each check should cost a
 small fraction of type inference, which it needs anyway.
 
-`ra-jit borrowck --project DIR --timings OUT.jsonl` checks every body of a project's own crates
-in both modes, cold, on one thread, and writes per body type inference's time, the checker's
-time in each phase and the sizes it worked on; `RA_JIT_BORROWCK_ONLY=part` limits it to the
-bodies whose name contains `part`. `harness/borrowck_speed.py` runs it over the bench apps and
-reports totals, p50/p99/max and the slowest bodies; `--rustc TOOLCHAIN` measures rustc's own
-`mir_borrowck` and `typeck` with `-Zself-profile` as the baseline.
+`ra-jit borrowck --project DIR --timings OUT.jsonl` goes through every body of a project's own
+crates on one thread. It infers and checks each body once cold, paying for the queries the body
+is the first to need (`infer_us`, `first_us`), then infers it and checks it in each mode as an
+edit of it costs in the daemon: the rest of the workspace answered and the trait solver's cache
+empty, as it is in a new revision (`infer_warm_us`, each mode's phases and sizes).
+`RA_JIT_BORROWCK_ONLY=part` limits it to the bodies whose name contains `part`. Run it inside
+`nix develop`: without the toolchain's sysroot most bodies have inference errors and are not
+checked. `harness/borrowck_speed.py` runs it over the bench apps and reports totals, p50/p99/max
+and the slowest bodies; `--rustc TOOLCHAIN` measures rustc's own `mir_borrowck` and `typeck`
+with `-Zself-profile` as the baseline.
 
 Before any speed work, on main 31b3345f (arm64 ix VM, 16 vCPUs): the checker's total
 without MIR lowering, beside type inference's, in ms, and its slowest body:
@@ -633,6 +637,28 @@ without MIR lowering, beside type inference's, in ms, and its slowest body:
 
 Generating constraints, which asks the trait solver about every statement's types, is more
 than half of it everywhere (nushell: 13.4 s of 23.6 s), then liveness, the walk and moves.
+Those inference times are cold; the checker's ran after them with the trait solver's answers
+still cached, which flattered it.
+
+Measured as an edit pays both, with interval sets, SCC region inference and per-block loan
+scopes in, and an ADT's inferred outlives a query and `is_copy` asked once per type: the
+checker without MIR lowering beside an edit's inference, in ms, and its slowest body.
+
+| App | Inference | Polonius | max | NLL | max |
+|---|---|---|---|---|---|
+| ripgrep | 658 | 480 (73%) | 9 | 423 (64%) | 8 |
+| fd | 204 | 126 (62%) | 19 | 115 (57%) | 18 |
+| bat | 306 | 267 (87%) | 67 | 245 (80%) | 66 |
+| hyperfine | 220 | 146 (66%) | 17 | 134 (61%) | 15 |
+| just | 1173 | 849 (72%) | 24 | 784 (67%) | 24 |
+| axum | 4163 | 3604 (87%) | 76 | 3531 (85%) | 75 |
+| helix | 3201 | 2157 (67%) | 118 | 1971 (62%) | 112 |
+| nushell | 15758 | 18225 (116%) | 828 | 17249 (109%) | 829 |
+
+Generating constraints is still most of it (nushell: 10.6 s of 18.2 s), and the outliers are
+the trait solver proving one body's well-formedness and outlives bounds: nushell's
+`custom_value_op` (828 ms) and `serve_plugin_io` (356 ms). rustc's own `mir_borrowck` is 44%
+of its `typeck` on ripgrep, 31% on axum and 149% on just.
 
 ## Debugging
 
