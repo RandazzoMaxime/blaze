@@ -3194,7 +3194,7 @@ fn workspace_at(
             &cargo_config.extra_env,
         )?;
         let triple = triple.first().context("no target to build for")?;
-        let asked = plan::Asked { triple, cfg: &workspace.rustc_cfg, env: &cargo_config.extra_env };
+        let asked = plan::Asked { triple, env: &cargo_config.extra_env };
         let plan = plan::Plan::of(manifest.manifest_path().as_ref(), selection, &asked)?;
         debug = plan.whole()?;
         let packages: Vec<_> = cargo.packages().collect();
@@ -7560,6 +7560,27 @@ fn main() -> anyhow::Result<()> {
     }
     match std::env::args().nth(1).as_deref() {
         Some("rustc-wrapper") => return cargo::wrapper::command(std::env::args_os().skip(2)),
+        // `cargo-answer <program> <args>`: what ra-jit answers for the cargo `<program>` run
+        // with `<args>`, of the toolchain or the configuration, for `harness/resolve.py
+        // toolchain`: printed as cargo prints it, ending as cargo ends. Nothing runs it.
+        Some("cargo-answer") => {
+            let program = std::env::args_os().nth(2).context("cargo-answer needs a cargo")?;
+            let mut asked = std::process::Command::new(program);
+            // `--rustflags <triple>`: the flags the plan reads (`plan.rs`, `Flags::of`), as JSON.
+            if std::env::args().nth(3).as_deref() == Some("--rustflags") {
+                let triple = std::env::args().nth(4).context("--rustflags needs a target")?;
+                let flags = answers::cargo_rustflags(&asked, &triple)?;
+                println!("{}", serde_json::to_string(&flags)?);
+                return Ok(());
+            }
+            asked.args(std::env::args_os().skip(3));
+            let output = answers::cargo_answer(&asked)
+                .context("ra-jit does not answer this question of cargo")??;
+            use std::io::Write as _;
+            std::io::stdout().write_all(&output.stdout)?;
+            std::io::stderr().write_all(&output.stderr)?;
+            std::process::exit(output.status.code().unwrap_or(101));
+        }
         Some(cargo::own_macro::COMMAND) => {
             return cargo::own_macro::command(std::env::args_os().skip(2));
         }

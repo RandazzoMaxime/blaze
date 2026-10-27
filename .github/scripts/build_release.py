@@ -51,7 +51,7 @@ proc-macro libraries ra-jit links, found beside ra-jit (`RA_JIT_PROC_MACRO_SERVE
 built whole by ra-jit (`--exe`), over the standard library ra-jit compiles, so it speaks the
 bridge of the libraries that ra-jit compiles; its own serde derives are expanded by the
 toolchain's server with rustc's libraries, as blaze's own executable may be built with rustc.
-Linux only, where ra-jit links proc-macro libraries so far.
+Not on Windows, whose release blaze does not build yet.
 
 On Linux every binary in DIR, the server's included, is refused when it asks for a glibc newer
 than `GLIBC` (RHEL 9's; Debian 12 and Ubuntu 22.04 have newer): the release builds on the

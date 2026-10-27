@@ -87,13 +87,27 @@ pub(super) fn build(asked: &Invocation) -> anyhow::Result<i32> {
     let started = Instant::now();
     let cwd = std::env::current_dir()?;
     let metadata = super::state::metadata(asked);
-    let programs = match planned(asked, &cwd, &metadata, None) {
+    let mut programs = match planned(asked, &cwd, &metadata, None) {
         Ok(programs) => programs,
         Err(why) => {
             say::error(&format!("blaze could not plan the build: {why:#}"));
             return Ok(FAILED);
         }
     };
+    // `cargo run` builds the binary it runs, not a library's `cdylib` or `staticlib`.
+    if asked.subcommand == Subcommand::Run {
+        programs.retain(|it| !it.kind.linked_library());
+    }
+    if let Some(it) = programs.iter().find(|it| it.kind.linked_library()) {
+        let kind = format!("{:?}", it.kind).to_lowercase();
+        say::error(&format!(
+            "blaze does not link the `{kind}` of `{}` (target `{}`) yet, so it would write no `{}` (#262)",
+            it.package.name,
+            it.name,
+            it.executable.file_name().unwrap_or_default().to_string_lossy()
+        ));
+        return Ok(FAILED);
+    }
     if programs.is_empty() && asked.subcommand == Subcommand::Run {
         say::error("a bin target must be available for `cargo run`");
         return Ok(FAILED);
@@ -320,6 +334,7 @@ fn state_kind(kind: Kind) -> super::state::Kind {
         Kind::Bin => super::state::Kind::Bin,
         Kind::Example => super::state::Kind::Example,
         Kind::Test => super::state::Kind::Test,
+        Kind::Cdylib | Kind::Staticlib => super::state::Kind::Lib,
     }
 }
 
@@ -608,6 +623,7 @@ fn planned(
     let named = blaze_metadata::Targets {
         bin: asked.flags.bin.as_deref(),
         example: asked.flags.example.as_deref(),
+        lib: tests.is_none() && asked.typed("--lib"),
         test: tests,
     };
     let planned = super::metadata::programs(&selection, dir, manifest.as_deref(), named)?;
@@ -633,8 +649,19 @@ fn planned(
         };
         let exe = |name: &str| format!("{name}{}", std::env::consts::EXE_SUFFIX);
         let kind = format!("{:?}", program.kind).to_lowercase();
+        // A library's file is named for its crate, as rustc names it.
+        let library = |prefix: &str, suffix: &str| {
+            format!("{prefix}{}{suffix}", program.name.replace('-', "_"))
+        };
         let executable = match (program.kind, program.test) {
             (Kind::Example, _) => out.join("examples").join(exe(&program.name)),
+            (Kind::Cdylib, _) => {
+                out.join(library(std::env::consts::DLL_PREFIX, std::env::consts::DLL_SUFFIX))
+            }
+            (Kind::Staticlib, _) => out.join(match cfg!(windows) {
+                true => library("", ".lib"),
+                false => library("lib", ".a"),
+            }),
             (_, false) => out.join(exe(&program.name)),
             // Cargo names a test by its target and a hash of the unit; blaze by the kind.
             (_, true) => out.join("deps").join(exe(&format!("{}-{kind}", program.name))),

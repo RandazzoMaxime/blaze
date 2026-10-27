@@ -82,7 +82,9 @@ def write():
     for target in TARGETS:
         t = ["--target", target]
         off = ["-C", "debug-assertions=off", "-C", "overflow-checks=off"]
-        stable = said(rust, ["--print", "cfg", *t, *off]).splitlines()
+        # The pinned toolchain is a nightly: `RUSTC_BOOTSTRAP=-1` makes it print a stable
+        # release's cfgs, without those of unstable features.
+        stable = said(rust, ["--print", "cfg", *t, *off], {"RUSTC_BOOTSTRAP": "-1"}).splitlines()
         more = said(rust, ["--print", "cfg", *t, *off], nightly).splitlines()
         panic = next(line for line in stable if line.startswith("panic="))
         files = {}
@@ -137,7 +139,7 @@ def about_rustc():
         yield ["--print", "split-debuginfo", *t], {}, ""
         yield [*PROBE[:4], *t, *PROBE[4:]], {}, ""
         yield ["-Z", "unstable-options", *t, "--print", "target-spec-json"], nightly, ""
-        for variables in ({}, nightly):
+        for variables in ({}, nightly, {"RUSTC_BOOTSTRAP": "-1"}):
             yield ["--print", "cfg", *t], variables, ""
             yield ["-O", *t, "--print", "cfg"], variables, ""
             yield ["--print", "cfg", "-C", "opt-level=3", "-C", "panic=abort", *t], variables, ""

@@ -70,6 +70,7 @@ hir.workspace = true
 hir-def.workspace = true
 hir-ty.workspace = true
 hir-ty-codegen.workspace = true
+hir-ty-borrowck.workspace = true
 ra-jit-expand.workspace = true
 ra-jit-store.workspace = true
 blaze-doc.workspace = true

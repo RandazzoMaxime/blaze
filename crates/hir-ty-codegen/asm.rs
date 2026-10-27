@@ -49,6 +49,13 @@ pub(super) fn isb() -> String {
     format!(".globl {SYMBOL}\n{SYMBOL}:\nisb\nret\n")
 }
 
+/// AArch64's `fcvt` from the float in the first vector register to one of another width,
+/// both named by their registers' letters (`h`, `s`, `d`): what LLVM converts an `f16` with
+/// on a target without the half-precision instructions.
+pub(super) fn fcvt(to: char, from: char) -> String {
+    format!(".globl {SYMBOL}\n{SYMBOL}:\nfcvt {to}0, {from}0\nret\n")
+}
+
 /// A function of the one AArch64 instruction whose word is `word`.
 pub(super) fn instruction_word(word: u32) -> String {
     format!(".globl {SYMBOL}\n{SYMBOL}:\n.inst {word:#010x}\nret\n")

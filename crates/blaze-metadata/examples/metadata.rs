@@ -85,7 +85,8 @@ fn main() -> Result<()> {
         store: None,
     };
     if listed {
-        let targets = Targets { bin: bin.as_deref(), example: example.as_deref(), test: None };
+        let targets =
+            Targets { bin: bin.as_deref(), example: example.as_deref(), lib: false, test: None };
         println!("{}", serde_json::to_string(&programs(&asked, targets)?.1)?);
     } else if no_deps {
         println!("{}", metadata_no_deps(&asked)?);

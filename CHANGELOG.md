@@ -1009,6 +1009,9 @@ each one's section: what `[Unreleased]` had, and the title of each change merged
 
 ### Fixed
 
+- A red train opens or comments on the "Release train is red" issue again: train_issue.py read
+  each harness job's log with `gh api`, which the runner's gh refuses without
+  `--allow-escape-sequences`, so the `train issue` job failed and no issue was opened.
 - The borrow checker: lifetime elision counts none of the impl's lifetimes in a parameter
   that writes `Self`, as rustc counts only what a parameter's type writes or elides, so
   `fn store(self, db: &dyn Db) -> &Store` in `impl Id<'_>` returns a borrow of `db`. It

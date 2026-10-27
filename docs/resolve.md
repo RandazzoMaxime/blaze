@@ -177,6 +177,21 @@ against a copy of the lock file (`CARGO_RESOLVER_LOCKFILE_PATH`); blaze-metadata
 On VM nc-sysroot (Linux arm64), 2026-10-27, with the pinned nightly: 26 of 26 equal (no platform and
 the 12 targets, each `--no-deps` and full; 15 packages without dependencies, 30 to 50 with).
 
+The `toolchain` part asks what a workspace load asked cargo of the toolchain and the
+configuration, of cargo and of `ra-jit cargo-answer`, which answers it with no cargo run
+(`crates/ra-jit/src/answers/cargo.rs` over blaze-manifest): `cargo --version`, `cargo config
+get` as TOML with `--show-origin` and as JSON, `cargo rustc --print cfg -- -O` and `--print
+target-spec-json` for the host and five other targets (and for `build.target`), comparing exit
+code and stdout as text, and, in a tree with a package, the flags cargo hands rustc for each
+target (seen by a `RUSTC_WRAPPER` that prints them) against those `plan.rs` reads
+(`cargo-answer --rustflags`). The trees: `harness/resolve/toolchain-fixtures` (`build.target`,
+`[target.'cfg(..)']` tables, `RUSTFLAGS` per target and a forced `[env] RUSTC_BOOTSTRAP=-1`,
+which cargo hands the rustc it asks, so the stable channel's cfgs print), the config fixtures,
+`harness/norustc/fixture` and the bench projects.
+
+On the ix VM nc-toolq (Linux AArch64), 2026-10-27: 35 of 35 equal, 575 questions, 219 of them
+refused by both (the config fixtures have no package, and some have broken files).
+
 ## Decisions
 
 **cargo's schema crate, pinned.** `cargo-util-schemas = "=0.14.3"` is the version cargo 1.99.0

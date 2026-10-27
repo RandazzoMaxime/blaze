@@ -611,6 +611,8 @@ fn main() {
     println!("lifetime_impl_consts {}", cases::lifetime_impl_consts::run());
     #[cfg(feature = "nightly")]
     println!("simd_lanes {}", cases::simd_lanes::run());
+    #[cfg(all(feature = "nightly", target_arch = "aarch64", target_os = "linux"))]
+    println!("soft_floats {}", cases::soft_floats::run());
     #[cfg(target_arch = "x86_64")]
     println!("simd_x86 {}", cases::simd_x86::run());
     #[cfg(target_arch = "aarch64")]
@@ -631,6 +633,8 @@ fn main() {
             called(bytes),
         );
     }
+    #[cfg(all(feature = "nightly", target_arch = "aarch64"))]
+    println!("sve {}", cases::sve::run());
     // Threads.
     #[cfg(not(target_family = "wasm"))]
     println!("boxed_fn_once {:?}", cases::boxed_fn_once::run());
