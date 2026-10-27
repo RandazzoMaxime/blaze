@@ -45,7 +45,7 @@ lays out, mangles and passes values as the pinned nightly does.
 | Full link | yes (1) | yes (1) | yes (1) | yes (1) | yes, ahead of rustc's rlibs (2) |
 | Splice | yes (3) | yes (3) | yes (4) | yes, with a limit (5) | yes (2) |
 | Debug info | yes (6) | yes (6) | lines only (7) | unverified (7) | no |
-| `cargo blaze` | yes (8) | unverified (9) | no: goes to cargo (9) | yes, by hand (9) | no |
+| `cargo blaze` | yes (8) | unverified (9) | yes, by hand (9) | yes, by hand (9) | no |
 | Disk store | yes (10) | yes (10) | yes (10) | yes (10) | unverified |
 | Remote store | yes, not real AWS (11) | unverified | unverified | unverified | unverified |
 | Fuzzed | yes (12) | no | no | no | no |
@@ -85,9 +85,10 @@ lays out, mangles and passes values as the pinned nightly does.
    cargo, 66 of 66 flag steps, 11 of 11 lifecycle checks
    ([reports/CARGO.md](reports/CARGO.md)). Not in CI. Run by hand for these docs on a new
    project and on ripgrep 15.1.0.
-9. `cargo blaze` links ELF and Mach-O executables and hands any other target (Windows'
-   PE) to cargo (`unsupported_target` in `cargo/cli.rs`). On macOS arm64 it was run by hand
-   on bun 1.4.3's dev loop ([research/bun.md](research/bun.md)).
+9. `cargo blaze` links ELF, Mach-O and COFF executables (`unsupported_target` in
+   `cargo/cli.rs`). On Windows x86-64 MSVC it links with `rust-lld` and was run by hand on a
+   toy crate and `demo/life` ([platforms.md](platforms.md#windows-x86-64-msvc)). On macOS
+   arm64 it was run by hand on bun 1.4.3's dev loop ([research/bun.md](research/bun.md)).
    Nobody recorded running it on Linux AArch64.
 10. CI: `storekills.py`, `storecorrupts.py` and `storeshared.py` on all four platforms.
     `storefull.py` on Linux only. The earlier
