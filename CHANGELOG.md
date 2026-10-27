@@ -946,6 +946,16 @@ each one's section: what `[Unreleased]` had, and the title of each change merged
 
 ### Fixed
 
+- On macOS the doctests are ra-jit's, as on Linux
+  ([#255](https://github.com/indexable-inc/blaze/issues/255)). Every example was left to rustc
+  for a writable static of std (`CLEANUP`, `GLOBAL_PANIC_COUNT`) "without a rustc symbol": the
+  standard library's unit was weakened like every object ra-jit writes, which makes each name
+  of Rust's a private external that `defined_symbols` does not count as defined, so the example
+  found nothing of the unit, compiled std's startup itself and stopped at its first writable
+  static. The unit is linked with nothing of rustc's and gives way to nothing, so it is written
+  as it is; one an older ra-jit kept in the store is not taken. `harness/doctestonce.py` no
+  longer accepts that reason on macOS.
+
 - A guarded match nested inside another match arm's guard preserves the enclosing guard's
   binding references, including with or-patterns. Later reads in the outer guard no longer
   use uninitialized by-value bindings, which could produce wrong results or a crash.

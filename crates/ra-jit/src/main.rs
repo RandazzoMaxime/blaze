@@ -4353,7 +4353,7 @@ fn std_unit(
         hasher.update((bytes.len() as u64).to_le_bytes());
         hasher.update(bytes);
     };
-    field(b"ra-jit standard library 2");
+    field(b"ra-jit standard library 3");
     field(format!("{:?} {debug:?}", args.selection.target).as_bytes());
     // An object of one section is linked whole, with what the program never reaches.
     if !hir_ty_codegen::sections_of_their_own() {
@@ -4771,8 +4771,13 @@ fn build(
     let mut unwritten = Vec::new();
     if let Some(mut object) = unit.object.take() {
         // A patch defines again what the object does, and the linker of Mach-O takes two
-        // definitions of a name only when one of them gives way.
-        weaken::ours(&mut object);
+        // definitions of a name only when one of them gives way. The standard library's unit
+        // gives way to nothing: it is linked with nothing of rustc's, and a program over it
+        // takes its definitions by name ([`Prebuilt`]), which a private external, what
+        // weakening makes of a name of Rust's, is not to `defined_symbols` (#255).
+        if !args.library {
+            weaken::ours(&mut object);
+        }
         // The files a debugger is sent to are there before the object that sends it.
         for file in std::mem::take(&mut unit.apart) {
             unwritten.push((PathBuf::from(file.name), file.bytes));
