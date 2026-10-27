@@ -155,16 +155,33 @@ fn leading_bytes(path: &Path) -> anyhow::Result<[u8; 8]> {
 }
 
 /// What the stand-ins left in the executable say: the functions ra-jit could not compile that
-/// the program can reach, as the link leaves out every one it can't.
+/// the program can reach, as the link leaves out every one it can't. They are the lines of the
+/// section that holds them alone ([`hir_ty_codegen::stand_in_section`]), so what else the
+/// program has in its data (blaze has the words of the message) is never taken for one.
 pub(crate) fn stand_ins(exe: &Path) -> anyhow::Result<Vec<String>> {
+    use object::{Object, ObjectSection};
     let bytes = std::fs::read(exe).with_context(|| format!("reading {}", exe.display()))?;
-    let said =
-        memchr::memmem::find_iter(&bytes, hir_ty_codegen::STAND_IN_SAYS.as_bytes()).map(|at| {
-            let rest = &bytes[at..];
-            let end = memchr::memchr(b'\n', rest).unwrap_or(rest.len());
-            String::from_utf8_lossy(&rest[..end]).into_owned()
-        });
-    Ok(said.collect())
+    let file =
+        object::File::parse(&*bytes).with_context(|| format!("reading {}", exe.display()))?;
+    let (_, name) = hir_ty_codegen::stand_in_section(file.format());
+    let mut said = Vec::new();
+    for section in file.sections().filter(|it| it.name() == Ok(name)) {
+        let data =
+            section.data().with_context(|| format!("reading {name} of {}", exe.display()))?;
+        for line in data.split(|&it| it == b'\n') {
+            // What a linker pads the section with between messages is not a message.
+            let line = String::from_utf8_lossy(line);
+            let line = line.trim_matches(|it: char| it == '\0' || it.is_ascii_whitespace());
+            if line.is_empty() {
+                continue;
+            }
+            if !line.starts_with(hir_ty_codegen::STAND_IN_SAYS) {
+                bail!("{name} of {} has what is not a stand-in's message: {line:?}", exe.display());
+            }
+            said.push(line.to_owned());
+        }
+    }
+    Ok(said)
 }
 
 /// The toolchain's directory with lld as `ld.lld`, for `cc -B`: the `gcc-ld` of the host's
