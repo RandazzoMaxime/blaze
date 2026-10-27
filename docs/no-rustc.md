@@ -688,8 +688,13 @@ builds, links and runs with nothing rustc built, and 19 of its commands (searche
 ra-jit cannot compile (1,786 of the library's: 534 for f16 and f128, most of the rest
 `core::arch`'s SIMD; the 222 intrinsics declared with no body are not functions to compile,
 every call to one being the compiler's own code) is, where something calls it, a hidden stand-in
-that says so when it runs; a program that calls one compiles its own copy and is told at its
-build. The unit is what the program takes of the library and everything that depends on, but
+that says so when it runs. A program that reaches one is not built: a function of its own
+crates ra-jit refused (its `main`, or one only code of the object calls, its own copy of an
+`#[inline]` function of the library's among them) stops the build before the link, and a stand-in
+the link keeps, the library unit's included, fails it after; either way the error names each
+function and why it was refused (`` `p` reaches 1 function ra-jit could not compile, and a build
+with nothing of rustc's has nothing else to compile it, so it is not built:``), and no
+executable is left. The unit is what the program takes of the library and everything that depends on, but
 `test`, `proc_macro` and the panic runtime the program does not link, which rust-analyzer's
 graph has every crate depend on: 21 crates, `rand` and `foldhash` among them, which std's own
 workspace adds to its graph and which nothing compiled uses. The library's build names only the
@@ -703,7 +708,7 @@ over ripgrep: 2.5 s against 0.25 s), and the native libraries the crates linked 
 `#[link(name, kind, modifiers, cfg)]`, read from their `extern` blocks, a crate's before those
 of the crates it depends on; no list of libraries is fixed. What the link leaves out it proves
 unreachable, so a stand-in left in the executable is a function the program can reach that
-ra-jit could not compile: ra-jit says how many after the link, and `allrajit.py` fails on any.
+ra-jit could not compile: ra-jit says how many after the link and fails on any.
 None is left in hello, the four `allrajit.py` programs or ripgrep. The rest of what rustc
 does around the link: the allocator shim calls the `#[global_allocator]`'s methods (through the
 four functions the attribute's expansion exports) or else std's defaults; the panic runtime is

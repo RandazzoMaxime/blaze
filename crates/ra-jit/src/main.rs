@@ -4317,6 +4317,12 @@ fn lower(db: &RootDatabase, bodies: Vec<DefWithBodyId>) -> Vec<DefWithBodyId> {
 struct Build {
     compiled: usize,
     skipped: Vec<(String, CodegenError)>,
+    /// Of [`Build::skipped`], by where each is in it, those the program reaches: with nothing
+    /// of rustc's nothing else compiles them, and the build stops before its link
+    /// ([`Build::refused_reached`]).
+    reached: Vec<usize>,
+    /// The build has nothing of rustc's, which would compile what ra-jit refuses.
+    nothing_of_rustc: bool,
     instances: usize,
     codegen: Duration,
     emit: Duration,
@@ -4544,8 +4550,14 @@ fn link_executable(
         exe.display(),
         stand_ins.len()
     );
-    for said in stand_ins.iter().take(8) {
-        eprintln!("  {said}");
+    // What the link kept of the stand-ins is what the program can reach, the standard
+    // library's unit's among them, each saying why its unit refused it.
+    if !stand_ins.is_empty() {
+        let said = stand_ins.iter().map(|it| {
+            let it = it.trim().trim_start_matches(hir_ty_codegen::STAND_IN_SAYS);
+            cargo::whole::without_hashes(it)
+        });
+        bail!("{}", refused_error(&args.krate, stand_ins.len(), said));
     }
     Ok(())
 }
@@ -4849,6 +4861,18 @@ fn build(
     if let (Some(path), Some(patch)) = (&args.patch, unit.patch.take()) {
         unwritten.push((path.clone(), patch));
     }
+    // What a program with nothing of rustc's reaches of what was refused: its start, and what
+    // only code of the object calls, which is compiled only once it is called. An entry the
+    // program does not start from is there whether or not anything calls it, and its stand-in
+    // says, once linked, whether the program can reach it ([`link_executable`]).
+    let reaches = |func: FunctionId| {
+        table.is_empty()
+            && !args.library
+            && main.is_some()
+            && (main == Some(func) || !entries.contains(&func))
+    };
+    let reached = unit.skipped.iter().enumerate().filter(|(_, (func, _))| reaches(*func));
+    let reached = reached.map(|(at, _)| at).collect();
     let mut build = Build {
         compiled: unit.compiled.len(),
         skipped: unit
@@ -4856,6 +4880,8 @@ fn build(
             .into_iter()
             .map(|(func, e)| (name(func), explained(func, e)))
             .collect(),
+        reached,
+        nothing_of_rustc: table.is_empty(),
         instances: unit.instances,
         codegen,
         emit: start.elapsed(),
@@ -4897,7 +4923,46 @@ fn build(
     Ok(Some(build))
 }
 
+/// How many of the functions ra-jit could not compile an error names.
+const REFUSED_SHOWN: usize = 16;
+/// What the first line of [`refused_error`] says, which the daemon's client finds it by.
+pub(crate) const REFUSED_SAYS: &str = "ra-jit could not compile";
+
+/// Why a program with nothing of rustc's is not built: the functions it reaches that ra-jit
+/// could not compile, `reached` of them, each `name: why`, the first [`REFUSED_SHOWN`] named.
+/// Nothing else compiles them (AGENTS.md, no fallback), and a link without them would fail on
+/// what they leave undefined or keep a stand-in that aborts.
+fn refused_error(program: &str, reached: usize, said: impl Iterator<Item = String>) -> String {
+    let mut text = format!(
+        "`{program}` reaches {reached} function{} {REFUSED_SAYS}, and a build with nothing of \
+         rustc's has nothing else to compile {}, so it is not built:",
+        if reached == 1 { "" } else { "s" },
+        if reached == 1 { "it" } else { "them" },
+    );
+    for line in said.take(REFUSED_SHOWN) {
+        text += &format!("\n  {line}");
+    }
+    if reached > REFUSED_SHOWN {
+        text += &format!("\n  and {} more", reached - REFUSED_SHOWN);
+    }
+    text
+}
+
 impl Build {
+    /// Why the program of `args` is not linked, when it reaches a function this build refused
+    /// ([`Build::reached`]).
+    fn refused_reached(&self, args: &Args) -> Option<String> {
+        if self.reached.is_empty() {
+            return None;
+        }
+        let said = self.reached.iter().map(|&at| {
+            let (name, error) = &self.skipped[at];
+            let error = error.to_string().replace('\n', " ");
+            format!("{}: {error}", cargo::whole::without_hashes(name))
+        });
+        Some(refused_error(&args.krate, self.reached.len(), said))
+    }
+
     fn write_report(&self, path: &Path, compiled: &[String]) -> anyhow::Result<()> {
         use std::fmt::Write;
         let mut out = String::new();
@@ -4973,8 +5038,10 @@ fn report(build: &Build) {
         }
     }
     if build.skipped.len() <= 8 {
+        // With nothing of rustc's, nothing compiles what ra-jit refuses.
+        let left = if build.nothing_of_rustc { "refused" } else { "left to rustc" };
         for (name, error) in &build.skipped {
-            eprintln!("  left to rustc: {name}: {error}");
+            eprintln!("  {left}: {name}: {error}");
         }
         return;
     }
@@ -8393,6 +8460,9 @@ fn run_holding(
             if let Some(said) = ra_jit_expand::report() {
                 eprintln!("{said}");
             }
+            if let Some(why) = cold.refused_reached(&args) {
+                bail!("{why}");
+            }
             memory::report(&mut db, "build")?;
             report_stats(&known.stats);
             link(
@@ -8411,7 +8481,9 @@ fn run_holding(
                 // A daemon's link line linked it already.
                 if args.splice.is_none() {
                     let sysroot = SYSROOT.get().and_then(Option::as_deref);
-                    link_executable(&db, &table, &listed, &args, sysroot, exe)?;
+                    // An executable that reaches a stand-in is not the program.
+                    link_executable(&db, &table, &listed, &args, sysroot, exe)
+                        .inspect_err(|_| _ = std::fs::remove_file(exe))?;
                 }
                 if let Some(path) = &args.dep_info {
                     write_dep_info(&db, &args, tree.vfs(), exe, path)?;
@@ -10121,7 +10193,8 @@ impl Program {
             .or_else(|| {
                 let unset = warm.unset.as_deref()?;
                 Some(Refused::Error(errors::Said::one(errors::of_none(unset))))
-            });
+            })
+            .or_else(|| warm.refused_reached(args).map(Refused::Cargos));
         let refused = start.elapsed();
         failed = failed.or_else(|| stale_copies(db, table, args).map(Refused::Cargos));
         let copies = start.elapsed();
