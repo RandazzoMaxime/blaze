@@ -636,6 +636,29 @@ dependencies = [
 ]
 
 [[package]]
+name = "blaze-doc"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "base-db",
+ "either",
+ "hir",
+ "hir-def",
+ "hir-expand",
+ "ide-db",
+ "intern",
+ "parser",
+ "pulldown-cmark",
+ "rayon",
+ "rustc-hash 2.1.2",
+ "serde_json",
+ "span",
+ "syntax",
+ "test-fixture",
+ "vfs",
+]
+
+[[package]]
 name = "blaze-fmt"
 version = "0.1.0"
 dependencies = [
@@ -658,6 +681,26 @@ dependencies = [
  "unicode-properties",
  "unicode-segmentation",
  "unicode-width 0.1.14",
+]
+
+[[package]]
+name = "blaze-lints"
+version = "0.1.0"
+dependencies = [
+ "annotate-snippets",
+ "cfg",
+ "expect-test",
+ "hir",
+ "hir-expand",
+ "ide-db",
+ "intern",
+ "rustc-hash 2.1.2",
+ "serde",
+ "serde_json",
+ "span",
+ "syntax",
+ "test-fixture",
+ "toml",
 ]
 
 [[package]]
@@ -722,6 +765,7 @@ dependencies = [
  "hyper-rustls",
  "hyper-util",
  "libc",
+ "percent-encoding",
  "ra-jit-store",
  "rustc-hash 2.1.2",
  "rustc-stable-hash",
@@ -1529,6 +1573,16 @@ checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
  "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "expect-test"
+version = "1.5.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "63af43ff4431e848fb47472a920f14fa71c24de13255a5692e93d4e90302acb0"
+dependencies = [
+ "dissimilar",
+ "once_cell",
 ]
 
 [[package]]
@@ -3383,12 +3437,17 @@ dependencies = [
  "aws-config",
  "aws-sdk-s3",
  "aws-smithy-http-client",
+ "blaze-doc",
+ "blaze-fmt",
+ "blaze-lints",
  "blaze-manifest",
  "blaze-metadata",
  "blaze-new",
+ "blaze-registry",
  "blaze-resolve",
  "blaze-tree",
  "cargo-platform",
+ "cargo-util-schemas",
  "cargo_metadata",
  "cfg",
  "dunce",
@@ -3429,6 +3488,7 @@ dependencies = [
  "rustls",
  "salsa",
  "same-file",
+ "semver",
  "serde",
  "serde_derive",
  "serde_json",
@@ -3444,6 +3504,7 @@ dependencies = [
  "tikv-jemallocator",
  "tokio",
  "toml",
+ "toml_edit",
  "toolchain",
  "tracing",
  "triomphe",

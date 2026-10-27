@@ -95,8 +95,8 @@ changed, usually in under a millisecond, and prints
 holding, such as a struct's fields, can't be applied to data that already exists, so `poll` asks
 for a restart instead.
 
-Live edits work on macOS on Apple silicon. Linux x86-64 support is on `main` and comes with the
-next release. How it works, and how fast from a keystroke to the running program:
+Live edits work on macOS on Apple silicon. Linux x86-64 and Windows x86-64 support is on `main`
+and comes with the next release. How it works, and how fast from a keystroke to the running program:
 [live.md](live.md).
 
 ## What works and what doesn't yet

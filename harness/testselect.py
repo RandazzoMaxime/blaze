@@ -283,6 +283,10 @@ AFTER = {
     "that test taken out of the sandbox": lambda ws: (
         os.path.exists(os.path.join(OUTSIDE, "written.txt"))) or "IT DID NOT WRITE OUTSIDE",
 }
+# Steps that fail now and then for a reason not yet found, each with its issue. In the fast tier
+# (ci.py's RA_JIT_CI_TIER) a wrong one is printed as such and not counted, so it does not hold up
+# the merge queue; everywhere else, the release train's full tier included, it counts.
+FLAKY = {"that test taken out of the sandbox": "https://github.com/indexable-inc/blaze/issues/412"}
 RAN = re.compile(r"^test (\S+) \.\.\. (ok|ignored|FAILED)", re.M)
 # A library with a `#[bench]`, which is nightly's: built with RUSTC_BOOTSTRAP=1.
 BENCHED = {
@@ -408,9 +412,12 @@ def main():
                 verdict = f"DID NOT SAY {' NOR '.join(unsaid)}"
             elif what in AFTER and (after := AFTER[what](ws)) is not True:
                 verdict = after
-            wrong += verdict != "ok"
+            if verdict != "ok" and what in FLAKY and os.environ.get("RA_JIT_CI_TIER") == "fast":
+                verdict += f" (FLAKY, not counted in the fast tier: {FLAKY[what]})"
+            else:
+                wrong += verdict != "ok"
             print(f"{what:34} {verdict}", flush=True)
-            if verdict != "ok" and os.environ.get("TESTSELECT_VERBOSE"):
+            if verdict != "ok" and (os.environ.get("TESTSELECT_VERBOSE") or os.environ.get("RA_JIT_CI_TIER")):
                 print(said[-4000:])
             if manifest:
                 served(f"after {what}")

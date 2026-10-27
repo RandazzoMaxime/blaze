@@ -106,7 +106,7 @@ from source the first time.
 ## Updates
 
 <p align="center">
-  <a href="https://ra-jit.ix.dev/updates?src=readme">
+  <a href="https://ix.dev/blaze/updates?src=readme">
     <picture>
       <source media="(prefers-color-scheme: dark)" srcset="docs/brand/signup-on-dark.svg">
       <img alt="Tell us you use blaze" src="docs/brand/signup-on-light.svg" height="36">
@@ -115,6 +115,12 @@ from source the first time.
 </p>
 
 <p align="center">For release news: Watch → Custom → Releases on GitHub.</p>
+
+## Using blaze at work?
+
+We're working with a few teams on fast Rust CI and remote builds, built on blaze. If your team
+waits on Rust builds, tell us what slows you down: [andrew@ix.dev](mailto:andrew@ix.dev). Teams
+we work with get early access and a direct say in what we build next.
 
 ## Contributing
 

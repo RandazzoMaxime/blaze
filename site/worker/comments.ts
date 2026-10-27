@@ -20,6 +20,7 @@
  */
 import discussableJson from '../.gen/discussable.json';
 import { currentUser, isAdmin, type User } from './auth';
+import { outer } from './base';
 import type { Env } from './env';
 import { boundedBody, json, mediaType, methodNotAllowed, plain, redirect, safeNext, sameOrigin } from './http';
 import { docUrl, forgetVersion, type FormError } from './pages';
@@ -89,9 +90,9 @@ export async function handleComments(request: Request, env: Env, url: URL): Prom
 /** Back to the page after a form post: to `hash`, or to the block's form with the error shown. */
 function back(doc: string, block: string, outcome: { hash: string } | { error: FormError }): Response {
 	const path = docUrl(doc) ?? '/';
-	if ('hash' in outcome) return redirect(safeNext(`${path}${outcome.hash}`));
+	if ('hash' in outcome) return redirect(outer(safeNext(`${path}${outcome.hash}`)));
 	const q = new URLSearchParams({ 'c-error': outcome.error, 'c-block': block });
-	return redirect(safeNext(`${path}?${q}#block-${encodeURIComponent(block)}`));
+	return redirect(outer(safeNext(`${path}?${q}#block-${encodeURIComponent(block)}`)));
 }
 
 async function list(request: Request, env: Env, url: URL): Promise<Response> {

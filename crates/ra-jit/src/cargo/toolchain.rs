@@ -240,6 +240,14 @@ fn sysroot_of(rustc: &OsStr) -> PathBuf {
     PathBuf::from(rustc_says(rustc, &["--print=sysroot"]).unwrap_or_default())
 }
 
+/// The `rust-lld` that rustc links MSVC programs with when a target says so, as the
+/// repository's `.cargo/config.toml` does: rustc finds it in the toolchain, not on the PATH.
+pub(crate) fn rust_lld() -> PathBuf {
+    let host = hir_ty_codegen::Target::host();
+    let lld = format!("rust-lld{}", std::env::consts::EXE_SUFFIX);
+    sysroot_of(&super::state::rustc_path()).join("lib/rustlib").join(host).join("bin").join(lld)
+}
+
 /// What chose the project's toolchain, as rustup tells the programs its proxies start.
 fn named_by() -> &'static str {
     match std::env::var("RUSTUP_TOOLCHAIN_SOURCE").as_deref() {

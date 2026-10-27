@@ -435,7 +435,12 @@ fn wrapper_installed() -> bool {
 fn unsupported_target(triple: &str) -> Option<String> {
     use hir_ty_codegen::{ObjectFormat, Target};
     match Target::select(triple) {
-        Ok(target) if matches!(target.object_format, ObjectFormat::Elf | ObjectFormat::MachO) => {
+        Ok(target)
+            if matches!(
+                target.object_format,
+                ObjectFormat::Elf | ObjectFormat::MachO | ObjectFormat::Coff
+            ) =>
+        {
             None
         }
         Ok(_) => Some(format!("programs for {triple} are not linked through `cargo ra-jit` yet")),
@@ -529,6 +534,14 @@ mod tests {
         }
         assert_eq!(build("test", "--release").profile(), "release");
         assert_eq!(build("test", "").profile(), "test");
+    }
+
+    /// `Target::select` keeps the one target of the process, so this is the host's only.
+    #[cfg(windows)]
+    #[test]
+    fn msvc_programs_are_linked_through_cargo_ra_jit() {
+        assert_eq!(unsupported_target("x86_64-pc-windows-msvc"), None);
+        assert!(unsupported_target("x86_64-pc-windows-gnu").is_some());
     }
 
     #[test]

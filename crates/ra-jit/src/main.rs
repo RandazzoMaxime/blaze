@@ -573,7 +573,15 @@ fn defined_symbols(path: &Path) -> anyhow::Result<FxHashSet<String>> {
         // compiles itself to be told why. A thread-local is not a "definition" to `object`.
         let defined =
             file.symbols().filter(|it| !it.is_undefined() && it.scope() == SymbolScope::Dynamic);
-        names.extend(defined.filter_map(|it| it.name().ok().map(str::to_owned)));
+        // Mach-O spells every name with an underscore in front, which the names looked up
+        // ([`Resolver::in_prebuilt`]) don't have: with it kept, no function or static of the
+        // prebuilt std was found on macOS, a build script compiled std's itself and stopped
+        // at its first writable static (`GLOBAL_PANIC_COUNT`).
+        let macho = file.format() == object::BinaryFormat::MachO;
+        names.extend(defined.filter_map(|it| {
+            let name = it.name().ok()?;
+            Some(if macho { name.strip_prefix('_').unwrap_or(name) } else { name }.to_owned())
+        }));
     }
     Ok(names)
 }
@@ -5102,12 +5110,10 @@ fn link(
     }
     let start = Instant::now();
     let mut declined = String::new();
-    let running = splice.map_or(Ok(false), set_aside)?;
     let into_rustcs = into_rustcs.filter(|_| patch.is_some());
     let tried = into_rustcs.is_some();
     if let (Some(binary), Some(patch), Some(old)) = (splice, patch, into_rustcs) {
         let spliced = match old {
-            _ if running => Err(anyhow::anyhow!("the executable is running")),
             Ok(old) if old.is_of(binary) => {
                 let _reading = whole::read(object)?;
                 old.spliced_whole(object, patch)
@@ -5144,7 +5150,6 @@ fn link(
         }
         let spliced = match known {
             _ if rewritten => Err(anyhow::anyhow!("the whole object was written again")),
-            _ if running => Err(anyhow::anyhow!("the executable is running")),
             Some(Ok(mut baseline)) if baseline.is_of(binary) => match std::fs::read(patch) {
                 // The program has the edit: the executable on disk is for its next start,
                 // and is spliced once the edits stop (see `splicer`).
@@ -5204,6 +5209,7 @@ fn link(
     }
     let reading = whole::read(object)?;
     if let Some(binary) = splice {
+        set_aside(binary)?;
         headerpad_ahead(binary)?;
     }
     let reached = cargo::plan::reached_only(cmd);
@@ -5340,40 +5346,23 @@ fn headerpad_short(binary: &Path) -> Option<u64> {
     (pad > kept).then_some(pad)
 }
 
-/// Whether the executable at `binary` runs, in which case Windows lets nothing write it, and
-/// it is moved aside: it runs on there, and the link writes a new one. It is deleted once it
-/// has exited, by the first link to come after.
+/// Moves the executable at `binary` aside when a program runs it, which Windows lets nothing
+/// write: it runs on there, and the link writes a new one ([`splice::move_aside`]).
 #[cfg(windows)]
-fn set_aside(binary: &Path) -> anyhow::Result<bool> {
+fn set_aside(binary: &Path) -> anyhow::Result<()> {
     const SHARING_VIOLATION: i32 = 32;
-    let name = binary.file_name().context("an executable without a name")?.to_owned();
-    let siblings = binary.parent().map(std::fs::read_dir).transpose()?.into_iter().flatten();
-    for sibling in siblings {
-        let sibling = sibling?;
-        let is_aside = sibling.path().extension() == Some("running".as_ref())
-            && sibling.file_name().as_encoded_bytes().starts_with(name.as_encoded_bytes());
-        if is_aside {
-            // The one that still runs stays.
-            let _ = std::fs::remove_file(sibling.path());
-        }
-    }
     match std::fs::OpenOptions::new().write(true).open(binary) {
-        Err(e) if e.raw_os_error() == Some(SHARING_VIOLATION) => {}
-        _ => return Ok(false),
+        Err(e) if e.raw_os_error() == Some(SHARING_VIOLATION) => {
+            splice::move_aside(binary).context("moving the running executable aside")
+        }
+        _ => Ok(()),
     }
-    static ASIDE: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
-    let aside = ASIDE.fetch_add(1, Ordering::Relaxed);
-    let mut moved = binary.as_os_str().to_owned();
-    moved.push(format!(".{}-{aside}.running", std::process::id()));
-    std::fs::rename(binary, &moved).context("moving the running executable aside")?;
-    Ok(true)
 }
 
-/// Whether the executable at `binary` runs, which is nothing to a link on Unix: the linker
-/// writes a new file in its place.
+/// Nothing on Unix: the linker writes a new file in place of one a program runs.
 #[cfg(unix)]
-fn set_aside(_: &Path) -> anyhow::Result<bool> {
-    Ok(false)
+fn set_aside(_: &Path) -> anyhow::Result<()> {
+    Ok(())
 }
 
 /// The last `count` lines of `text` that say something, on one line: what a linker that
@@ -7207,8 +7196,9 @@ fn take_blaze_names() {
     }
 }
 
-/// `blaze 0.1.0 (abc123def456)`: the crate's version, and the commit when the build was
-/// told it in `RA_JIT_GIT_SHA` (the release workflow and the flake set it).
+/// `blaze 0.20261026.0 (fb82b09)`: the crate's version (`0.YYYYMMDD.N`, the release train's,
+/// docs/harness.md "CI"), and the commit, which build.rs takes from `RA_JIT_GIT_SHA` (the
+/// release workflow and the flake set it) or the checkout's HEAD.
 pub(crate) fn version() -> String {
     let version = env!("CARGO_PKG_VERSION");
     match option_env!("RA_JIT_GIT_SHA") {

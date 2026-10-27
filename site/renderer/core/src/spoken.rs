@@ -115,7 +115,7 @@ impl Ctx<'_, '_> {
     }
 
     fn plain(&self, t: &str, n: Id) -> Result<String, String> {
-        let refs = Refs { world: self.s.world, parent: self.s.refs };
+        let refs = Refs { world: self.s.world, parent: self.s.refs, served: self.s.served };
         plain(&CITATION.replace_all(t, ""), &refs, &self.e(n).path)
     }
 
@@ -283,8 +283,8 @@ mod tests {
     #[test]
     fn sayable_lines() {
         assert_eq!(
-            sayable("cargo 1.76 s, ra-jit 0.42 s"),
-            "cargo 1.76 seconds, ra-jit 0.42 seconds."
+            sayable("cargo 1.76 s, blaze 0.42 s"),
+            "cargo 1.76 seconds, blaze 0.42 seconds."
         );
         assert_eq!(sayable("see RFC 0001 [warm] <b>"), "see RFC 1 warm b.");
         assert_eq!(sayable("Open question: Syntax"), "Open question: Syntax.");
@@ -352,7 +352,8 @@ mod tests {
 
         let pages =
             [Page { node: page, url: "/doc".into(), file: "doc.html".into(), doc: "doc".into() }];
-        let s = Site { world: &w, site, pages: &pages, nav: &[], refs: None };
+        let served = crate::render::Served::default();
+        let s = Site { world: &w, site, pages: &pages, nav: &[], refs: None, served: &served };
         let got: Vec<(String, String)> =
             lines(&s, &pages[0]).unwrap().into_iter().map(|l| (l.block, l.text)).collect();
         let want = [
