@@ -14,8 +14,9 @@
 #       merging main into the bump): the same issue, with what failed
 #
 # Fixes for what a nightly breaks are pushed to toolchain/bump by hand; the next day's run merges
-# main into the branch and moves it on from there, so they are kept. The pushes and the pull
-# request use RA_JIT_BOT_TOKEN: a pull request GITHUB_TOKEN opens starts no workflow.
+# main into the branch and moves it on from there, so they are kept. git pushes with
+# RA_JIT_BOT_TOKEN, since a push with GITHUB_TOKEN starts no workflow; gh is GITHUB_TOKEN, which
+# may open pull requests and issues where the bot's token may not.
 name: toolchain bump
 on:
   schedule:
@@ -58,7 +59,7 @@ jobs:
       - uses: DeterminateSystems/nix-installer-action@v23
       - id: prepare
         env:
-          GH_TOKEN: ${{ secrets.RA_JIT_BOT_TOKEN || github.token }}
+          GH_TOKEN: ${{ github.token }}
           DATE: ${{ inputs.date }}
         run: |
           git config user.name "github-actions[bot]"
@@ -103,6 +104,7 @@ jobs:
     permissions:
       contents: write
       issues: write
+      pull-requests: write
       actions: write
     steps:
       - uses: actions/checkout@v7
@@ -116,8 +118,7 @@ jobs:
           path: ${{ runner.temp }}/answers
           merge-multiple: true
       - env:
-          GH_TOKEN: ${{ secrets.RA_JIT_BOT_TOKEN || github.token }}
-          TRAIN_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ github.token }}
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
@@ -204,6 +205,6 @@ jobs:
           name: std-refusals
           path: ${{ runner.temp }}/std
       - env:
-          GH_TOKEN: ${{ secrets.RA_JIT_BOT_TOKEN || github.token }}
+          GH_TOKEN: ${{ github.token }}
           RUN: ${{ github.event.workflow_run.id }}
         run: python3 .github/scripts/toolchain_bump_ci.py verdict "$RUN" "$RUNNER_TEMP/std/std.json"
