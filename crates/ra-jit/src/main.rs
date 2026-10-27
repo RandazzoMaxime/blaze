@@ -4644,9 +4644,17 @@ fn link_executable(
         Ok(exports)
     });
     let exports = exports.transpose()?;
-    let took =
-        link::executable(db, &program, &objects, sysroot, exe, exports.as_deref(), &args.link_args)
-            .map_err(|it| refused_linked(it, args))?;
+    let took = link::executable(
+        db,
+        &program,
+        &objects,
+        sysroot,
+        exe,
+        exports.as_deref(),
+        &args.link_args,
+        args.debug.level,
+    )
+    .map_err(|it| refused_linked(it, args))?;
     let stand_ins = link::stand_ins(exe)?;
     eprintln!(
         "linked {} in {took:.1?}, {} functions in it ra-jit could not compile",
@@ -4679,7 +4687,8 @@ fn own_link_line(db: &RootDatabase, args: &Args) -> anyhow::Result<Option<(Strin
     let objects: Vec<&Path> =
         std::iter::once(args.out.as_path()).chain(args.prebuilt.as_deref()).collect();
     let sysroot = SYSROOT.get().and_then(Option::as_deref);
-    let cmd = link::command(db, &program, &objects, sysroot, exe, &args.link_args)?;
+    let cmd =
+        link::command(db, &program, &objects, sysroot, exe, &args.link_args, args.debug.level)?;
     Ok(Some((cmd, exe.clone())))
 }
 

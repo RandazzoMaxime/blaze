@@ -213,6 +213,25 @@ impl Target {
         &self.triple
     }
 
+    /// The symbol of the `main` the C runtime calls, and whether it takes the count and the
+    /// arguments: rustc's `entry-name` and `main-needs-argc-argv` of the target. WASI's
+    /// `_start` calls `__main_void`, and std reads the arguments from WASI itself; elsewhere
+    /// on wasm a C `main(argc, argv)` is `__main_argc_argv`, as LLVM names the `main` rustc
+    /// gives it.
+    pub fn entry(&self) -> (&'static str, bool) {
+        match self.arch {
+            Arch::Wasm32 if self.triple.contains("-wasi") => ("__main_void", false),
+            Arch::Wasm32 => ("__main_argc_argv", true),
+            Arch::X86_64 | Arch::Aarch64 => ("main", true),
+        }
+    }
+
+    /// Whether the program is linked with a C library, for `write` and `abort`: not on a wasm
+    /// that is not WASI's, as wasm32-unknown-unknown has nothing to link but the program.
+    pub fn has_libc(&self) -> bool {
+        self.arch != Arch::Wasm32 || self.triple.contains("-wasi")
+    }
+
     /// Whether a call can name its landing pad and the pad is entered with the exception in a
     /// register, as Cranelift has it for the calling conventions it knows the register of.
     pub fn exception_in_register(&self) -> bool {
