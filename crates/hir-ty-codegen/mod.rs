@@ -8796,12 +8796,12 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
         Ok(())
     }
 
-    /// The C ABI of wasm, as rustc's `callconv/wasm.rs`: a scalar is a value, and anything
-    /// else is in memory, an argument as the address of a copy.
-    // FIXME: an aggregate that is one scalar and is not laid out as one, `[f32; 1]`, is
-    // passed as that scalar.
+    /// The C ABI of wasm, as rustc's `callconv/wasm.rs`: a scalar is a value, an aggregate
+    /// that is one scalar and nothing else (`[f32; 1]`, a `repr(C)` struct of a `u32` and
+    /// fields of no size) is that scalar, and anything else is in memory, an argument as the
+    /// address of a copy.
     fn wasm_c_abi(&self, ret: Ty<'db>, args: impl IntoIterator<Item = Ty<'db>>) -> Result<FnAbi> {
-        let mode = |ty: Ty<'db>| -> Result<PassMode> {
+        let mode = |ty: Ty<'db>, is_ret: bool| -> Result<PassMode> {
             let layout = self.layout(ty)?;
             Ok(match layout.backend_repr {
                 _ if layout.is_zst() => PassMode::Ignore,
@@ -8813,12 +8813,58 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
                 BackendRepr::SimdVector { .. } => {
                     unsupported!("a SIMD vector in the wasm C ABI without `simd128`")
                 }
-                _ => PassMode::Indirect,
+                // One of 128 bits is two `i64`s as an argument, and returned in memory.
+                _ => match self.lone_scalar(ty)? {
+                    Some(scalar) if !is_ret || scalar.size(self.dl()).bits() <= 64 => {
+                        PassMode::Cast(self.scalar(scalar)?.ty)
+                    }
+                    _ => PassMode::Indirect,
+                },
             })
         };
-        let ret = mode(ret)?;
-        let args = args.into_iter().map(mode).collect::<Result<_>>()?;
+        let ret = mode(ret, true)?;
+        let args = args.into_iter().map(|ty| mode(ty, false)).collect::<Result<_>>()?;
         Ok(FnAbi { ret, args })
+    }
+
+    /// The one scalar a value of `ty` is made of, if it has one and nothing else besides
+    /// values of no size, and fills its size: rustc's homogeneous aggregate of one unit. A
+    /// union is none, as rustc has it.
+    fn lone_scalar(&self, ty: Ty<'db>) -> Result<Option<Scalar>> {
+        let layout = self.layout(ty)?;
+        let size = layout.size;
+        let fits = |scalar: Option<Scalar>| scalar.filter(|it| it.size(self.dl()) == size);
+        let fields: Vec<Ty<'db>> = match layout.backend_repr {
+            BackendRepr::Scalar(scalar) => return Ok(fits(Some(scalar))),
+            BackendRepr::Memory { sized: true } => match ty.kind() {
+                TyKind::Tuple(tys) => tys.iter().collect(),
+                TyKind::Array(element, _) if layout.fields.count() == 1 => vec![element],
+                TyKind::Adt(def, subst) => {
+                    let AdtId::StructId(id) = def.def_id() else { return Ok(None) };
+                    let fields = self.cg.db.field_types(id.into());
+                    fields
+                        .iter()
+                        .map(|(_, ty)| ty.ty().instantiate(self.interner, subst).skip_norm_wip())
+                        .collect()
+                }
+                _ => return Ok(None),
+            },
+            _ => return Ok(None),
+        };
+        let mut lone = None;
+        for field in fields {
+            if self.layout(field)?.is_zst() {
+                continue;
+            }
+            if lone.is_some() {
+                return Ok(None);
+            }
+            lone = fits(self.lone_scalar(field)?);
+            if lone.is_none() {
+                return Ok(None);
+            }
+        }
+        Ok(lone)
     }
 
     fn count_regs(&self, types: &[Type]) -> (usize, usize) {
