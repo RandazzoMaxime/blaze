@@ -3,6 +3,10 @@
 //! `harness/resolve.py --fixtures` with the runs of the case's `case.json` after its
 //! `CONFIG_RUNS`).
 
+// `expected.json` is what cargo printed on Linux: `/` in the paths of the files it read and
+// POSIX shell quoting. On Windows cargo prints `\` there, which these were not recorded with.
+#![cfg(unix)]
+
 use std::path::{Path, PathBuf};
 
 use blaze_manifest::config::get::main as config_main;

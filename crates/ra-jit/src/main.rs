@@ -2451,7 +2451,9 @@ fn crates_called(db: &RootDatabase, krate: &str, args: &Args) -> Vec<Crate> {
     let mut found: Vec<Crate> = named_crates(db)
         .iter()
         .filter(|it| match (is_file, &it.root) {
-            (true, Some(root)) if plain && !root.ends_with(krate) => false,
+            // By its parts: on Windows the root's are apart by `\` and the asked `examples/a.rs`'s
+            // may be by `/`.
+            (true, Some(root)) if plain && !Path::new(&**root).ends_with(krate) => false,
             // Named from the checkout, or in full.
             (true, Some(root)) => {
                 let root = Path::new(&**root);
