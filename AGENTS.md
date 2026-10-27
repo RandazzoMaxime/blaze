@@ -80,10 +80,12 @@ agents/rules.ts --write` for AGENTS.md).
     Why: The stash is shared by every worktree.
 11. **land-through-queue**: Land small and often, through the merge queue only. After the local gate,
     run `python3 .github/scripts/land.py "what the branch does"` in the lane's worktree: it opens
-    the pull request, queues it and waits until the fast tier (about 10 minutes) has passed on it
-    merged onto main and it is merged, or says why not. Its waiting survives a tool that kills it;
-    `land.py --wait` picks it up again. Never push to main or merge into it by hand. See
-    [docs/contributing.md#landing-a-change](docs/contributing.md#landing-a-change).
+    the pull request, waits for its run (the merge gate: the build and the unit tests, about 5
+    minutes), queues it and waits until the gate has passed on it merged onto main and it is merged,
+    or says why not. Every harness runs after the merge, in the release train (train.yaml), whose
+    issue "Release train is red" names the commits since it was last green. Its waiting survives a
+    tool that kills it; `land.py --wait` picks it up again. Never push to main or merge into it by
+    hand. See [docs/contributing.md#landing-a-change](docs/contributing.md#landing-a-change).
 12. **clean-up-lane**: Delete what a lane made when it is done: its worktree, target directory and
     dev-host directories, and its merged branch.
 13. **credit-people**: Credit people. A commit or pull request built on someone's suggestion, diagnosis,

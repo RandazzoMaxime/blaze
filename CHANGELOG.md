@@ -1,13 +1,18 @@
 # Changelog
 
 All notable changes to ra-jit are written here. The format follows
-[Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow
-[Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+[Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versions after 0.1.0 are dated,
+`0.YYYYMMDD.N` with N counting the releases of that day from 0, and the release train writes
+each one's section: what `[Unreleased]` had, and the title of each change merged since
+(docs/harness.md, "CI").
 
 ## [Unreleased]
 
 ### Added
 
+- `cargo blaze fmt` (and `blaze fmt`) is blaze's own: blaze-fmt run in process, with
+  cargo-fmt's options over the workspace's targets, or rustfmt's over the `.rs` files named
+  (`blaze fmt src/main.rs`). No rustfmt or cargo-fmt is started.
 - `crates/blaze-fmt`: blaze's own formatter, rustfmt and cargo-fmt at rust-lang/rust 12433c307
   ported onto a syntax tree of blaze's own, which rust-analyzer's parser fills with the spans
   rustc would give each node. It runs in process and starts no rustfmt; what it cannot
@@ -378,7 +383,7 @@ All notable changes to ra-jit are written here. The format follows
   every run, starts the site's deploy, and on a regression past the noise band opens (or
   comments on) an issue labelled `bench-regression` and fails. The live-edit latency workflow
   runs every night on main on a macOS arm64 runner and does the same with its history.
-- [ra-jit.ix.dev/bench](https://ra-jit.ix.dev/bench): the benchmark history over commits, from
+- [ix.dev/blaze/bench](https://ix.dev/blaze/bench): the benchmark history over commits, from
   `docs/benchmarks/history`: the latest run's table per project, and charts of each edit,
   the cold build, the daemon's peak memory, the store size and live edit-to-running latency
   ([#10](https://github.com/indexable-inc/ra-jit/issues/10)).
@@ -469,6 +474,12 @@ All notable changes to ra-jit are written here. The format follows
 
 ### Changed
 
+- The site moved to [ix.dev/blaze](https://ix.dev/blaze/). https://ra-jit.ix.dev and
+  https://blaze.ix.dev answer every path with a 301 to the same path and query under
+  https://ix.dev/blaze, so old links (the README's updates button, `/bench`, RFCs) keep
+  working. Every page, script, stylesheet, image, narration file and form sits under `/blaze`
+  (`Served` on `site` in `site/content/site.flecs`); pages carry a canonical URL and Open Graph
+  tags, `/blaze/sitemap.xml` lists them, and `/blaze/install.sh` serves `install.sh`.
 - No `cargo blaze` command is passed to cargo any more (Andrew, 2026-10-26: commands that are
   no builds "should go to us and not cargo"). `metadata`, `locate-project`, `verify-project`,
   `version` and `help` are blaze's own, from blaze-manifest, blaze-registry and blaze-resolve

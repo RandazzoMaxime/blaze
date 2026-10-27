@@ -16,6 +16,7 @@ use std::path::{Path, PathBuf};
 
 fn main() {
     println!("cargo:rerun-if-changed=build.rs");
+    git_sha();
     sandbox_library();
     println!("cargo:rerun-if-env-changed=CARGO_WORKSPACE_DIR");
     let Some(root) = std::env::var_os("CARGO_WORKSPACE_DIR").map(PathBuf::from) else { return };
@@ -61,6 +62,37 @@ fn main() {
 /// built with the C compiler of the system (`CC` when set), which `src/sandbox/macos.rs`
 /// carries in the executable. A C file and no build dependency: dyld loads only a dynamic
 /// library, which cargo builds from Rust only as a crate of its own.
+/// `RA_JIT_GIT_SHA`, the commit `blaze --version` names (`blaze 0.20261026.0 (fb82b09)`): what
+/// the build was told (the release workflow and the flake set it, where there is no `.git`),
+/// else the checkout's HEAD in seven characters, else none, as a published crate builds. The
+/// build runs again when HEAD moves (its reflog grows with each commit and checkout).
+fn git_sha() {
+    println!("cargo:rerun-if-env-changed=RA_JIT_GIT_SHA");
+    let given = std::env::var("RA_JIT_GIT_SHA").unwrap_or_default();
+    let sha = if given.is_empty() {
+        let git = |args: &[&str]| {
+            let out = std::process::Command::new("git")
+                .args(args)
+                .current_dir(env!("CARGO_MANIFEST_DIR"))
+                .output()
+                .ok()
+                .filter(|out| out.status.success())?;
+            String::from_utf8(out.stdout).ok().map(|it| it.trim().to_owned())
+        };
+        for path in ["HEAD", "logs/HEAD"] {
+            if let Some(file) = git(&["rev-parse", "--path-format=absolute", "--git-path", path]) {
+                println!("cargo:rerun-if-changed={file}");
+            }
+        }
+        git(&["rev-parse", "--short=7", "HEAD"]).unwrap_or_default()
+    } else {
+        given
+    };
+    if !sha.is_empty() {
+        println!("cargo:rustc-env=RA_JIT_GIT_SHA={sha}");
+    }
+}
+
 fn sandbox_library() {
     let source = "src/sandbox/macos_interpose.c";
     println!("cargo:rerun-if-changed={source}");
