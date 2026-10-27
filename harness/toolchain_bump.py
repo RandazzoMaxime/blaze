@@ -344,7 +344,7 @@ async def checks():
         ["toolchain_pins.py"],
         ["answers.py"],
         ["macroserver.py"],
-        ["difftest.py", "corpus", "--bin", "runner", "--crate", "cases", "--features", "cases/nightly", "--layouts"],
+        ["difftest.py", "corpus", "--bin", "runner", "--crate", "cases", "--layouts"],
         *(["ci.py", part] for part in ci.fast_parts(env.get("RA_JIT_BACKEND") or "cranelift")),
     ]
     failed = []

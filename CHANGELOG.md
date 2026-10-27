@@ -10,6 +10,13 @@ each one's section: what `[Unreleased]` had, and the title of each change merged
 
 ### Added
 
+- `cargo blaze build` links a library's `cdylib` (#262): a package whose crate types include
+  `cdylib`, such as a napi-rs Node addon or a pyo3 extension, gets its shared library at
+  cargo's path (`target/debug/lib<name>.so`, `.dylib` on macOS), exporting its
+  `#[no_mangle]` and `#[export_name]` functions and statics, with `cargo:rustc-cdylib-link-arg`
+  honoured. Before, the build printed `Finished` and wrote no library. A build that would write
+  a `staticlib` stops with an error saying blaze does not link one yet. Reported by @bompus.
+
 - blaze is its own toolchain, named `blaze-<date>` (`blaze-2026-10-25`, today the Rust nightly
   of that date): `blaze toolchain` names it and `blaze toolchain --path` prints its directory,
   and a project that pins another toolchain is told so once, as a note, while blaze builds
@@ -1009,6 +1016,12 @@ each one's section: what `[Unreleased]` had, and the title of each change merged
 
 ### Fixed
 
+- The daemon's own link passes the linker what `-C link-arg` and `-C link-args` say in
+  `RUSTFLAGS`, `CARGO_ENCODED_RUSTFLAGS` or the configuration's `rustflags`, after the native
+  libraries as rustc does; it left them out. A program linked with
+  `-Wl,-no_compact_unwind` had `__unwind_info` all the same, and a `-Wl,-headerpad` was not
+  the least room the splice's header file asks for (`harness/nocompact.py`,
+  `harness/headerpad.py` on macOS).
 - A red train opens or comments on the "Release train is red" issue again: train_issue.py read
   each harness job's log with `gh api`, which the runner's gh refuses without
   `--allow-escape-sequences`, so the `train issue` job failed and no issue was opened.
@@ -1161,7 +1174,7 @@ each one's section: what `[Unreleased]` had, and the title of each change merged
   `[ra-jit]` instead of handing every build to cargo. The daemon takes COFF programs (also with
   `--target x86_64-pc-windows-msvc`), links them with the `rust-lld` the repository's cargo
   configuration names, and closes an existing directory of its own that others can enter, as
-  on Unix. Live edits of a running program are still macOS and Linux only.
+  on Unix.
 - A profile with `debug = "line-tables-only"` (or `1`, or `"limited"`) no longer has the type
   of every variable worked out. Only the lines were written, but the types were described for
   each function compiled and then thrown away. On Biome (`biome_cli`, 518 crates, whose dev
@@ -1385,6 +1398,14 @@ each one's section: what `[Unreleased]` had, and the title of each change merged
   ready at 116.2 s instead of 142.3 s (Linux x86-64, 16 cores, medians of three). Nothing is
   left to rustc for it, and `harness/norustc` counts the same functions left to rustc on
   ripgrep (53) and nushell (534) (#37, no-rustc step E).
+- A whole build (`cargo blaze build`, `run`, `test`) that the source's errors fail writes them
+  as rustc and cargo do: each error, then `error: could not compile `app` (bin "app") due to 1
+  previous error`, and the note naming blaze's toolchain when the project pins another, where
+  it said `error: could not build `app`: ` before the first error.
+- An error in code nothing reaches, written while no daemon ran, fails the first whole build:
+  with no rustc to check the source, the worker checks every file of the crates the build
+  compiles once it has loaded them (`check: N files in ...` in its log), and every build of the
+  checkout fails with the error until a source is written. It built the program before.
 - A `#[global_allocator]` in an inline `#[cfg(test)] mod test { .. }` of a library (ureq's)
   gave the library's stand-in an allocator outside the test build, whose functions nothing
   defined: every allocation of the program reached the stand-in's trap, so nushell, which links
@@ -1763,6 +1784,8 @@ each one's section: what `[Unreleased]` had, and the title of each change merged
   every event). Each crate's on-demand functions are wanted once, and each definition is
   walked once for all its closures or all its statics of a name. reth's first edit on 48 cores:
   64.4 s and 64.3 s before, 58.0 s and 57.5 s after.
+- `blaze disable` removes the `bin` directory of cargo's home that `enable` made for the links
+  of `cargo fmt` and `cargo clippy`, when nothing else is in it: the home is as it was.
 
 ## [0.1.0] - 2026-10-20
 

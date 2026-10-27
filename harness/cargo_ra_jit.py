@@ -29,8 +29,8 @@ through, cold and after an edit, and compared with cargo the same way.
 Daemon. Started on demand, reused, shared by a git worktree, alive after its client is
 killed, replaced when the client is another build of ra-jit, gone when idle, and its workers
 gone with it. A project whose rust-toolchain file names an older stable or a nightly is built
-and edited by the daemon, under the toolchain ra-jit compiles, and a `#![feature]` of the
-nightly fails with rustc's error and a note naming both releases. With no rustup and no Rust on
+and edited by the daemon, under the toolchain ra-jit compiles; a `#![feature]` of the nightly
+builds, and an error in it fails with a note naming both toolchains. With no rustup and no Rust on
 the path, `blaze run` builds with blaze's own copy of its release and the edit is the daemon's.
 
 Plain cargo. `ra-jit enable` and `ra-jit disable` over a cargo configuration that is there,
@@ -299,8 +299,11 @@ class Side:
 
 
 def by_rustc(stderr):
-    """Whether cargo built any of it: ra-jit said it fell back, or cargo compiled a crate."""
-    return bool(re.search(r"; building with cargo(, which .*)?$|^\s*Compiling ", stderr, re.M))
+    """Whether cargo built any of it: ra-jit said it fell back, or cargo finished a build.
+    `cargo ra-jit build`, `run` and `test` say `Compiling` of each package themselves (the
+    whole build, docs/no-rustc.md step K), so that line is no sign of cargo; cargo's own
+    `Finished` line names its profile's settings, where ra-jit's says `[ra-jit]`."""
+    return bool(re.search(r"; (building with cargo|this build is cargo's)(, which .*)?$|^\s*Finished `\w+` profile \[(?!ra-jit)", stderr, re.M))
 
 
 def how_built(stderr):
@@ -735,8 +738,9 @@ def daemon(work):
     _, first = here.cargo("build")
     pid, workers, _ = status()
     check("the first build starts one", first.returncode == 0 and pid is not None, f"pid {pid}")
-    waited = first.stderr.count("Waiting for blaze to load the workspace")
-    check("and waits for it: the first build's program is the daemon's", how_built(first.stderr) == "daemon" and waited == 1, f"{how_built(first.stderr)}, {waited} waiting lines")
+    # No cargo builds first: the build is the daemon's from the start, with nothing to wait
+    # for after cargo.
+    check("and the first build's program is the daemon's, with no cargo", how_built(first.stderr) == "daemon" and not by_rustc(first.stderr), how_built(first.stderr))
     wait_warm(here, ws)
     # A program that runs plain `cargo build` on its own checkout, as a test suite may, after
     # the daemon built it: cargo's own artifacts are behind the sources, so cargo builds
@@ -908,8 +912,8 @@ def fake_toolchain(dir, version):
 def pinned(work, check):
     """Projects whose rust-toolchain file names another toolchain than blaze's release (#269):
     an older stable and a nightly. `cargo ra-jit` builds them with its own release, and their
-    edits are the daemon's; a nightly's `#![feature]` fails with rustc's error and a note
-    naming both releases, and no build is cargo's."""
+    edits are the daemon's; a nightly's `#![feature]` builds, an error in it fails with a note
+    naming both toolchains, and no build is cargo's."""
     if WINDOWS or not shutil.which("rustup"):
         return
     env = base_env(os.path.join(work, "home-pinned"))
@@ -935,10 +939,16 @@ def pinned(work, check):
         _, edited = side.cargo("run")
         how = how_built(edited.stderr)
         check("and its edit is the daemon's", edited.returncode == 0 and how == "daemon" and "pinned 48" in edited.stdout, f"{how[:90]}; {edited.stderr.strip()[-300:]!r}")
+    # blaze's toolchain is a nightly (docs/toolchain.md): a nightly's `#![feature]` builds,
+    # and what fails says which toolchain built it in place of the project's.
     side = project("featured", "1.101.0-nightly", "#![feature(never_type)]\nfn main() {\n    let _: Option<!> = None;\n}\n")
     _, featured = side.cargo("build")
-    said = "E0554" in featured.stderr and "in place of 1.101.0-nightly, which the project's rust-toolchain file names" in featured.stderr
-    check("a nightly's `#![feature]` fails with rustc's error and a note naming both releases, and no cargo", featured.returncode == 101 and said and "building with cargo" not in featured.stderr, f"exit {featured.returncode}, {featured.stderr.strip()[-400:]!r}")
+    said = "not rustc 1.101.0-nightly (0000000 2026-01-01), which the project's rust-toolchain file names" in featured.stderr
+    check("a nightly's `#![feature]` builds, with a note naming both toolchains, and no cargo", featured.returncode == 0 and said and not by_rustc(featured.stderr), f"exit {featured.returncode}, {featured.stderr.strip()[-400:]!r}")
+    open(os.path.join(side.ws, "src/main.rs"), "a").write("\nfn broken() -> u32 { \"text\" }\n")
+    _, failed = side.cargo("build")
+    said = "error[E0308]" in failed.stderr and "blaze built this with its own toolchain" in failed.stderr and "not 1.101.0-nightly (0000000 2026-01-01), which the project's rust-toolchain file names" in failed.stderr
+    check("and an error in it fails with the error and a note naming both toolchains, and no cargo", failed.returncode == 101 and said and not by_rustc(failed.stderr), f"exit {failed.returncode}, {failed.stderr.strip()[-400:]!r}")
     side.cargo("stop")
 
 
@@ -998,7 +1008,7 @@ def own_toolchain(work, check):
     side = Bare(ws, env, True)
     _, said = side.cargo("toolchain")
     check("with no rustup and no Rust on the path, blaze builds with its own copy of its release",
-          said.returncode == 0 and f"blaze's own copy at {own}" in said.stdout and "Downloading" not in said.stderr,
+          said.returncode == 0 and said.stdout.strip().endswith(f", at {own}") and "rustup's copy" not in said.stdout and "Downloading" not in said.stderr,
           f"exit {said.returncode}, {said.stdout.strip()!r} {said.stderr.strip()[-300:]!r}")
     _, cold = side.cargo("run")
     check("and `blaze run` builds and runs the program with it", cold.returncode == 0 and "own 42" in cold.stdout,
@@ -1280,14 +1290,17 @@ def abuse(work, ws, tree, env, check, status, alive):
     pid = status()[0]
     seen = next((line for line in older.cargo("status")[1].stdout.splitlines() if line.startswith("daemon:")), "")
     check("status by another build says the daemon is another build, and leaves it", "another build of ra-jit" in seen and status()[0] == pid, seen)
+    # With no cargo to build in its place (docs/no-rustc.md), the build replaces the daemon
+    # and is the new one's.
     edit("skew")
     _, skewed = older.cargo("run", "skew")
-    said = how_built(skewed.stderr)
-    check("a build by another build of ra-jit is cargo's, says why, and replaces the daemon", skewed.returncode == 0 and greets(skewed.stdout, "tree0 skew") and "another build of ra-jit" in said and status(older)[0] not in (None, pid) and not alive(pid), said)
+    said, newer = how_built(skewed.stderr), status(older)[0]
+    check("a build by another build of ra-jit replaces the daemon and is the new one's", skewed.returncode == 0 and greets(skewed.stdout, "tree0 skew") and said == "daemon" and not by_rustc(skewed.stderr) and newer not in (None, pid) and not alive(pid), f"{said}, pid {pid} then {newer}")
     wait_warm(older, ws)
     edit("back")
     _, back = here.cargo("run", "back")
-    check("and the first build of ra-jit replaces that one the same way", back.returncode == 0 and greets(back.stdout, "tree0 back") and "another build of ra-jit" in how_built(back.stderr) and status()[0] is not None, how_built(back.stderr))
+    said, again = how_built(back.stderr), status()[0]
+    check("and the first build of ra-jit replaces that one the same way", back.returncode == 0 and greets(back.stdout, "tree0 back") and said == "daemon" and not by_rustc(back.stderr) and again not in (None, newer) and not alive(newer), f"{said}, pid {newer} then {again}")
     wait_warm(here, ws)
 
     stranger(env["RA_JIT_HOME"], check)
@@ -1637,6 +1650,76 @@ def plain(work):
     return checks
 
 
+# What a build said when it handed itself, or a program of it, to cargo or rustc, or warned that
+# the project's toolchain was not ra-jit's (the 10-20 nightly's lines, by either name).
+FELL_BACK = re.compile(r"^(ra-jit|blaze): .*|; building with cargo|another build of ra-jit|this (ra-jit|blaze) compiles for|^warning: ", re.M)
+
+
+def blazes(stderr):
+    """Whether blaze built it whole: its own `Finished` line, which a build cargo ran has not.
+    Its `Compiling` lines are its own too, so `by_rustc` can't tell."""
+    return bool(re.search(r"^\s*Finished .*\[(ra-jit|blaze)\]", stderr, re.M)) and "; building with cargo" not in stderr
+
+
+def upgraded(work):
+    """Andrew's two lines of the 10-20 nightly (#270, the fallback lane): a build after an upgrade,
+    whose states an older ra-jit wrote, and a project whose rust-toolchain file names another
+    release. Neither is said, and neither build is cargo's: an older state is read as none and
+    forgotten, and blaze builds with its own release whatever the project names."""
+    checks = []
+
+    def check(name, held, detail=""):
+        checks.append((name, bool(held), detail))
+        print(f"  {'ok ' if held else 'NOT'} {name}  {detail}", flush=True)
+
+    said = lambda ran: "; ".join(m[0] for m in FELL_BACK.finditer(ran.stderr))[:300]
+    env = base_env(os.path.join(work, "home-upgraded"))
+    ws = os.path.join(work, "upgraded")
+    os.makedirs(os.path.join(ws, "src"))
+    open(os.path.join(ws, "Cargo.toml"), "w").write('[package]\nname = "upgraded"\nversion = "0.1.0"\nedition = "2021"\n')
+    open(os.path.join(ws, "src/main.rs"), "w").write('fn main() {\n    println!("upgraded {}", 6 * 7);\n}\n')
+    plain_env = enabled_home(work, env)
+    here, ours = Side(ws, plain_env, "plain"), Side(ws, env, True)
+    _, first = here.cargo("build", "--release")
+    wait_warm(here, ws)
+    states = os.path.join(env["RA_JIT_HOME"], "states")
+    listed = [os.path.join(states, it) for it in os.listdir(states) if it.endswith(".json")] if os.path.isdir(states) else []
+    # Beside each build's state are files of other shapes (lists); a state is an object.
+    written = [it for it in listed if isinstance(json.load(open(it)), dict)]
+    for path in written:
+        state = json.load(open(path))
+        state["version"] = "0.1.0-older"
+        json.dump(state, open(path, "w"))
+    check("plain cargo wrote a state, now an older ra-jit's", first.returncode == 0 and written, f"exit {first.returncode}, {len(written)} states")
+    for args in (["run", "--release"], ["check", "--release"]):
+        _, ran = ours.cargo(*args)
+        right = ran.returncode == 0 and ("upgraded 42" in ran.stdout or args[0] == "check")
+        check(f"`cargo ra-jit {' '.join(args)}` after the upgrade says nothing of it and is no cargo's", right and not said(ran) and blazes(ran.stderr), f"exit {ran.returncode}, {said(ran) or ran.stderr.strip()[-200:]!r}")
+    open(os.path.join(ws, "src/main.rs"), "a").write("\n// edited\n")
+    _, ran = here.cargo("run", "--release")
+    left = [it for it in written if os.path.exists(it) and "0.1.0-older" in open(it).read()]
+    check("plain cargo after the upgrade says nothing of it and forgets the older state", ran.returncode == 0 and "upgraded 42" in ran.stdout and not said(ran) and not left, f"exit {ran.returncode}, {said(ran)!r}, {len(left)} older states left")
+    subprocess.run([RA_JIT, "stop"], env=env, capture_output=True)
+
+    if WINDOWS or not shutil.which("rustup"):
+        return checks
+    pinned_env = base_env(os.path.join(work, "home-upgraded-pinned"))
+    pinned_env.pop("RUSTUP_TOOLCHAIN")
+    ws = os.path.join(work, "upgraded-pinned")
+    fake_toolchain(os.path.join(ws, "toolchain"), "1.98.1")
+    os.makedirs(os.path.join(ws, "src"))
+    open(os.path.join(ws, "Cargo.toml"), "w").write('[package]\nname = "anim"\nversion = "0.1.0"\nedition = "2021"\n')
+    open(os.path.join(ws, "rust-toolchain.toml"), "w").write(f'[toolchain]\npath = "{os.path.join(ws, "toolchain")}"\n')
+    open(os.path.join(ws, "src/main.rs"), "w").write('fn main() {\n    println!("anim {}", 6 * 7);\n}\n')
+    side = Side(ws, pinned_env, True)
+    for round in ("first", "second"):
+        _, ran = side.cargo("run", "--release")
+        notes = ran.stderr.count("note: blaze builds with its own toolchain")
+        check(f"a project pinned to rustc 1.98.1, {round} `cargo ra-jit run --release`: blaze's release, no cargo, no warning", ran.returncode == 0 and "anim 42" in ran.stdout and not said(ran) and blazes(ran.stderr) and notes == (round == "first"), f"exit {ran.returncode}, {notes} notes, {said(ran) or ran.stderr.strip()[-200:]!r}")
+    side.cargo("stop")
+    return checks
+
+
 def worktree(ours, row, build, run, edits, work):
     """A second checkout of the project's repository, at the commit the first started from:
     built from nothing, which is cargo's, then edited as the first was and built again. What
@@ -1709,7 +1792,8 @@ def main():
     work = os.path.realpath(tempfile.mkdtemp(prefix="ra-jit-cargo-", dir="/tmp" if sys.platform == "darwin" else None))
     print(f"work {work}; ra-jit {RA_JIT}", flush=True)
     result = dict(ra_jit=RA_JIT, toolchain=TOOLCHAIN, projects=[], flags=[], daemon=[], wrong=[])
-    if "--only-checks" not in argv:
+    alone = "--only-upgraded" in argv
+    if "--only-checks" not in argv and not alone:
         for name in names:
             for mode in modes:
                 print(f"{name}, {MODES[mode]}:", flush=True)
@@ -1718,7 +1802,7 @@ def main():
                 result["wrong"] += [f"{name}, {mode}: {w}" for w in row["wrong"]]
                 if "--keep" not in argv:
                     shutil.rmtree(os.path.join(work, name), ignore_errors=True)
-    if "--only-projects" not in argv:
+    if "--only-projects" not in argv and not alone:
         print("flags:", flush=True)
         rows, wrong, counted = flags(work)
         result["flags"], result["flags_status"] = rows, counted
@@ -1729,14 +1813,19 @@ def main():
         print("plain cargo:", flush=True)
         result["plain"] = plain(work)
         result["wrong"] += [f"plain cargo: {name} {detail}" for name, held, detail in result["plain"] if not held]
+    if "--only-projects" not in argv:
+        print("upgraded:", flush=True)
+        result["upgraded"] = upgraded(work)
+        result["wrong"] += [f"upgraded: {name} {detail}" for name, held, detail in result["upgraded"] if not held]
     # A run of some of it leaves the rows of the rest as the run before wrote them.
     llvm = os.environ.get("RA_JIT_BACKEND") == "llvm"
     stored = os.path.join(HERE, "cargo_ra_jit_llvm.json" if llvm else "cargo_ra_jit.json")
     before = json.load(open(stored)) if os.path.exists(stored) else {}
     rows = {(row["project"], row.get("mode", "ra-jit")): row for row in before.get("projects", []) + result["projects"]}
     result["projects"] = [rows[name, mode] for name in PROJECTS for mode in MODES if (name, mode) in rows]
-    if "--only-projects" in argv:
-        result.update({part: before.get(part, []) for part in ("flags", "flags_status", "daemon", "plain")})
+    if "--only-projects" in argv or alone:
+        kept = ("flags", "flags_status", "daemon", "plain") + (() if alone else ("upgraded",))
+        result.update({part: before.get(part, []) for part in kept})
     json.dump(result, open(stored, "w"), indent=1)
     with open(os.path.join(HERE, "CARGO-RA_JIT-LLVM.md" if llvm else "CARGO-RA_JIT.md"), "w") as md:
         md.write(f"# cargo ra-jit against cargo, {'LLVM at -O2' if llvm else 'Cranelift'}\n\nGenerated by `harness/cargo_ra_jit.py`. Seconds, ra-jit / cargo alone for the same step; the steps in the second checkout (`tree`) are ra-jit's only. "
@@ -1755,6 +1844,8 @@ def main():
             md.write("\n## Daemon\n\n" + "".join(f"- {'ok' if held else 'NOT'}: {name} {detail}\n" for name, held, detail in result["daemon"]))
         if result.get("plain"):
             md.write("\n## Plain cargo after `ra-jit enable`\n\n" + "".join(f"- {'ok' if held else 'NOT'}: {name} {detail}\n" for name, held, detail in result["plain"]))
+        if result.get("upgraded"):
+            md.write("\n## After an upgrade, and a project pinned to another release\n\n" + "".join(f"- {'ok' if held else 'NOT'}: {name} {detail}\n" for name, held, detail in result["upgraded"]))
     if "--keep" not in argv:
         shutil.rmtree(work, ignore_errors=True)
     print("PASS" if not result["wrong"] else "FAIL:\n" + "\n".join(result["wrong"]))

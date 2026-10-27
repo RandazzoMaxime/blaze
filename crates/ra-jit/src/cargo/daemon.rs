@@ -374,12 +374,16 @@ impl Checkout {
             true => (String::new(), plan.binary.display().to_string()),
             false => (plan.binary.display().to_string(), String::new()),
         };
+        // A shared library is linked again for each build, not patched: see [`Plan::shared`].
+        let (shared, patch) = match plan.shared {
+            true => ("shared", String::new()),
+            false => ("", plan.patch.display().to_string()),
+        };
         let mut line = format!(
-            "sync\t{}\t{}\t{}\t{}\t{}\t{splice}\t{exe}",
+            "sync\t{}\t{}\t{}\t{patch}\t{}\t{splice}\t{exe}\t{shared}",
             self.project().display(),
             crates,
             plan.object.display(),
-            plan.patch.display(),
             plan.link_cmd,
         );
         for file in &plan.symbol_files {
@@ -481,9 +485,14 @@ impl Worker {
             ("--socket", &socket),
         ];
         let named: &[(&str, &Path)] = if first.whole { &whole } else { &rustcs };
-        for &(flag, path) in named {
+        // A shared library is linked again for each build, not patched: see [`Plan::shared`].
+        let patched = |flag: &str| !(first.shared && flag == "--patch");
+        for &(flag, path) in named.iter().filter(|(flag, _)| patched(flag)) {
             args.push(flag.into());
             args.push(path.into());
+        }
+        if first.shared {
+            args.push("--shared".into());
         }
         if let Some(rustcs) = &first.rustc_binary {
             args.push("--rustc-binary".into());
@@ -634,8 +643,10 @@ impl Worker {
         let warmth = match self.warmed(checkout) {
             Ok(None) => Warmth::Ready,
             Ok(Some(said)) => Warmth::Broken(said, SystemTime::now()),
+            // The worker leaves the errors before it ends, which under load can be after the
+            // daemon has stopped waiting for it to; `start` took away those of any before it.
             Err(why) => match std::fs::read(errors_beside(&self.socket)) {
-                Ok(said) if self.ended().is_some() => match serde_json::from_slice(&said) {
+                Ok(said) => match serde_json::from_slice(&said) {
                     Ok(said) => Warmth::Broken(said, SystemTime::now()),
                     Err(_) => Warmth::Failed(format!("{why:#}"), SystemTime::now()),
                 },

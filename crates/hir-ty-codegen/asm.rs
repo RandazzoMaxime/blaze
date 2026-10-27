@@ -19,7 +19,11 @@ use object::{
 use rustc_hash::FxHashMap;
 use sha2::{Digest, Sha256};
 
-use super::{Arch, ObjectFormat, Target, store::Store};
+use super::{
+    Arch, ObjectFormat, Target,
+    avx512::{Load, Out},
+    store::Store,
+};
 
 mod aarch64;
 
@@ -54,6 +58,12 @@ pub(super) fn isb() -> String {
 /// on a target without the half-precision instructions.
 pub(super) fn fcvt(to: char, from: char) -> String {
     format!(".globl {SYMBOL}\n{SYMBOL}:\nfcvt {to}0, {from}0\nret\n")
+}
+
+/// An AArch64 instruction of the half-precision extension on the halves passed in `h0` up,
+/// which leaves its result in `h0`: what LLVM does an `f16` with where the extension is enabled.
+pub(super) fn half(instruction: &str) -> String {
+    format!(".arch_extension fp16\n.globl {SYMBOL}\n{SYMBOL}:\n{instruction}\nret\n")
 }
 
 /// A function of the one AArch64 instruction whose word is `word`.
@@ -270,6 +280,77 @@ pub(super) fn neon_function(
     out
 }
 
+/// A function of x86 instructions on vector and mask registers, an intrinsic of LLVM's as
+/// `avx512::lower` has it. Its argument points at the address of the result and after it the
+/// address of each operand: `loads[i]` says what of operand `i` is read, and into which
+/// register. `text` runs after the reads and leaves the result where `out` says, which is
+/// written to the first address. A mask of 8 bits is read with AVX512F's `kmovw`, as LLVM
+/// moves one without AVX512DQ.
+pub(super) fn avx512_function(loads: &[Load], text: &str, out: Out) -> String {
+    let slot = GPR[Convention::of_target().arguments[0]][0];
+    let mut s = format!(".globl {SYMBOL}\n{SYMBOL}:\nmov r10, {slot}\n");
+    for (i, load) in loads.iter().enumerate() {
+        let (k, at) = (i + 1, 8 * (i + 1));
+        match *load {
+            Load::Immediate => {}
+            Load::Pointer => {
+                _ = writeln!(s, "mov r11, qword ptr [r10 + {at}]\nmov r11, qword ptr [r11]")
+            }
+            Load::Vector(bytes) => {
+                let name = vector_name(k, bytes);
+                let width = vector_width(bytes);
+                _ = writeln!(
+                    s,
+                    "mov rax, qword ptr [r10 + {at}]\nvmovups {name}, {width} ptr [rax]"
+                );
+            }
+            Load::Mask(bytes) => {
+                _ = writeln!(s, "mov rax, qword ptr [r10 + {at}]");
+                _ = match bytes {
+                    1 => writeln!(s, "movzx eax, byte ptr [rax]\nkmovw k{k}, eax"),
+                    2 => writeln!(s, "kmovw k{k}, word ptr [rax]"),
+                    4 => writeln!(s, "kmovd k{k}, dword ptr [rax]"),
+                    _ => writeln!(s, "kmovq k{k}, qword ptr [rax]"),
+                };
+            }
+        }
+    }
+    _ = writeln!(s, "{text}\nmov r10, qword ptr [r10]");
+    let mask = |s: &mut String, k: u32, bytes: u32, at: u32| {
+        _ = match bytes {
+            1 => writeln!(s, "kmovw eax, k{k}\nmov byte ptr [r10 + {at}], al"),
+            2 => writeln!(s, "kmovw word ptr [r10 + {at}], k{k}"),
+            4 => writeln!(s, "kmovd dword ptr [r10 + {at}], k{k}"),
+            _ => writeln!(s, "kmovq qword ptr [r10 + {at}], k{k}"),
+        };
+    };
+    match out {
+        Out::Nothing => {}
+        Out::Vector(bytes) => {
+            let (name, width) = (vector_name(0, bytes), vector_width(bytes));
+            _ = writeln!(s, "vmovups {width} ptr [r10], {name}");
+        }
+        Out::Mask(bytes) => mask(&mut s, 0, bytes, 0),
+        Out::Int(8) => _ = writeln!(s, "mov qword ptr [r10], rax"),
+        Out::Int(_) => _ = writeln!(s, "mov dword ptr [r10], eax"),
+        Out::Masks(bytes, at) => {
+            mask(&mut s, 0, bytes, 0);
+            mask(&mut s, 1, bytes, at);
+        }
+    }
+    s.push_str("vzeroupper\nret\n");
+    s
+}
+
+/// What Intel's syntax calls a memory operand of a vector of `bytes`.
+fn vector_width(bytes: u32) -> &'static str {
+    match bytes {
+        ..=16 => "xmmword",
+        32 => "ymmword",
+        _ => "zmmword",
+    }
+}
+
 /// `sha1rnds4` does four rounds of SHA-1 on the vectors at its first two arguments. Which
 /// function the rounds use is part of the instruction, so there is one for each of the four:
 /// the byte at the third argument says which runs, and the result is written over it.
@@ -387,6 +468,8 @@ enum Reg {
     Gpr(usize),
     /// `xmm`, `ymm` and `zmm` of one number are one register.
     Vector(usize),
+    /// `k1` to `k7`, AVX-512's masks.
+    Mask(usize),
     /// One a call does not keep and that holds no value here: nothing to do.
     Scratch,
 }
@@ -453,6 +536,9 @@ fn named(name: &str) -> Result<Reg, String> {
             return Ok(Reg::Vector(number));
         }
     }
+    if let Some(number @ 1..8) = name.strip_prefix('k').and_then(|it| it.parse().ok()) {
+        return Ok(Reg::Mask(number));
+    }
     let scratch = ["k", "mm", "st", "tmm"].iter().any(|prefix| {
         name.strip_prefix(prefix)
             .is_some_and(|rest| rest.trim_matches(['(', ')']).chars().all(|it| it.is_ascii_digit()))
@@ -500,6 +586,24 @@ fn transfer(reg: Reg, size: u32, offset: u32) -> Result<(&'static str, String, S
     }
 }
 
+/// The instructions that move a mask of `size` bytes between `k{number}` and the slot (`load`)
+/// or back. AVX512F moves 16 bits; a byte goes through `eax`, as LLVM moves one without
+/// AVX512DQ, and 32 and 64 bits need AVX512BW, which LLVM needs for a mask of them too.
+fn mask_transfer(load: bool, number: usize, size: u32, offset: u32) -> Result<String, String> {
+    let memory = |width: &str| format!("{width} ptr [rbx + {offset}]");
+    Ok(match (load, size) {
+        (true, 1) => format!("movzx eax, {}\nkmovw k{number}, eax", memory("byte")),
+        (false, 1) => format!("kmovw eax, k{number}\nmov {}, al", memory("byte")),
+        (true, 2) => format!("kmovw k{number}, {}", memory("word")),
+        (true, 4) => format!("kmovd k{number}, {}", memory("dword")),
+        (true, 8) => format!("kmovq k{number}, {}", memory("qword")),
+        (false, 2) => format!("kmovw {}, k{number}", memory("word")),
+        (false, 4) => format!("kmovd {}, k{number}", memory("dword")),
+        (false, 8) => format!("kmovq {}, k{number}", memory("qword")),
+        _ => return Err(format!("an inline assembly operand of {size} bytes in a mask register")),
+    })
+}
+
 /// The function for a block, in the assembly of the architecture.
 pub(super) fn wrapper(
     target: &Target,
@@ -544,6 +648,7 @@ fn wrapper_x86_64(
             "reg" | "reg_byte" => (0..OPERANDS).map(Reg::Gpr).find(|&it| free(it)),
             "reg_abcd" => (0..3).map(Reg::Gpr).find(|&it| free(it)),
             "xmm_reg" | "ymm_reg" | "zmm_reg" => (0..16).map(Reg::Vector).find(|&it| free(it)),
+            "kreg" => (1..8).map(Reg::Mask).find(|&it| free(it)),
             _ => return Err(format!("the register class `{class}`")),
         };
         let Some(found) = found else {
@@ -590,8 +695,14 @@ fn wrapper_x86_64(
     for (at, &number) in kept_vectors.iter().enumerate() {
         _ = writeln!(text, "movups xmmword ptr [rbx + {}], xmm{number}", at * 16);
     }
+    // A mask of one byte goes through `eax`, before any operand is there.
     for (reg, size, offset, input, _) in values() {
-        if input {
+        if let (Reg::Mask(number), true) = (reg, input) {
+            _ = writeln!(text, "{}", mask_transfer(true, number, size, offset)?);
+        }
+    }
+    for (reg, size, offset, input, _) in values() {
+        if input && !matches!(reg, Reg::Mask(_)) {
             let (instruction, reg, memory) = transfer(reg, size, offset)?;
             _ = writeln!(text, "{instruction} {reg}, {memory}");
         }
@@ -629,6 +740,7 @@ fn wrapper_x86_64(
                 }
                 .to_owned()
             }
+            (_, Some(Reg::Mask(number))) if modifier.is_none() => format!("k{number}"),
             (_, Some(Reg::Vector(number))) => {
                 let size = match (modifier, classes[index]) {
                     (Some('x'), _) | (None, "xmm_reg") => 16,
@@ -652,9 +764,15 @@ fn wrapper_x86_64(
     let returns = !options.contains(AsmOptions::NORETURN);
     if returns {
         for (reg, size, offset, _, output) in values() {
-            if output {
+            if output && !matches!(reg, Reg::Mask(_)) {
                 let (instruction, reg, memory) = transfer(reg, size, offset)?;
                 _ = writeln!(text, "{instruction} {memory}, {reg}");
+            }
+        }
+        // After every other output is written, as one of a byte goes through `eax`.
+        for (reg, size, offset, _, output) in values() {
+            if let (Reg::Mask(number), true) = (reg, output) {
+                _ = writeln!(text, "{}", mask_transfer(false, number, size, offset)?);
             }
         }
         if labels(operands).next().is_some() {
