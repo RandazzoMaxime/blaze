@@ -5,11 +5,9 @@ use std::{
     collections::BTreeSet,
     path::{Path, PathBuf},
     process::Stdio,
-    str::FromStr,
 };
 
 use anyhow::Context;
-use cargo_platform::{Cfg, Platform};
 use cfg::{CfgAtom, CfgDiff};
 use intern::{Symbol, sym};
 use rustc_hash::{FxHashMap, FxHashSet};
@@ -133,42 +131,16 @@ pub(crate) struct Asked<'a> {
 /// cargo, run in `dir` with `env` for the variables of whoever asks.
 fn cargo_in(dir: &Path, env: &FxHashMap<String, Option<String>>) -> std::process::Command {
     let mut command = toolchain::command("cargo", dir, env);
-    // The unit graph and `cargo config get` are not stable yet.
+    // `cargo config get` is not stable yet.
     command.env("RUSTC_BOOTSTRAP", "1").stdin(Stdio::null());
     crate::answers::ready_cargo(&mut command);
     command
 }
 
 impl Asked<'_> {
-    fn var(&self, name: &str) -> Option<String> {
-        match self.env.get(name) {
-            Some(value) => value.clone(),
-            None => std::env::var(name).ok(),
-        }
-    }
-
     /// cargo, run in `dir` as whoever asks would run it.
     fn cargo(&self, dir: &Path) -> std::process::Command {
         cargo_in(dir, self.env)
-    }
-
-    /// Whether the key of a `[target]` table of cargo's configuration names what is built for.
-    fn is(&self, key: &str) -> bool {
-        if key == self.triple {
-            return true;
-        }
-        let cfg: Vec<Cfg> = self
-            .cfg
-            .iter()
-            .filter_map(|atom| match atom {
-                CfgAtom::Flag(name) => Cfg::from_str(name.as_str()).ok(),
-                CfgAtom::KeyValue { key, value } => {
-                    Cfg::from_str(&format!("{key}={:?}", value.as_str())).ok()
-                }
-            })
-            .collect();
-        key.starts_with("cfg(")
-            && Platform::from_str(key).is_ok_and(|it| it.matches(self.triple, &cfg))
     }
 }
 
@@ -388,38 +360,12 @@ struct Flags {
 impl Flags {
     /// The flags cargo passes in `dir` for what is `asked`: the first of
     /// `CARGO_ENCODED_RUSTFLAGS`, `RUSTFLAGS`, the `[target]` tables that name what is built
-    /// for and `[build]` of the configuration that has any.
+    /// for and `[build]` of the configuration that has any, as blaze-manifest reads them and
+    /// cargo's `TargetInfo` picks them, with no cargo run.
     fn of(dir: &Path, asked: &Asked<'_>) -> anyhow::Result<Flags> {
-        if let Some(encoded) = asked.var("CARGO_ENCODED_RUSTFLAGS") {
-            return Flags::parse(encoded.split('\u{1f}'));
-        }
-        if let Some(flags) = asked.var("RUSTFLAGS") {
-            return Flags::parse(flags.split_whitespace());
-        }
-        let mut command = asked.cargo(dir);
-        // `cargo config get` is how cargo says what its configuration files and variables
-        // come to.
-        command.args(["-Z", "unstable-options", "config", "get", "--format", "json"]);
-        let output = command.output().context("running `cargo config`")?;
-        anyhow::ensure!(
-            output.status.success(),
-            "`cargo config get` failed: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
-        );
-        let config: Config =
-            serde_json::from_slice(&output.stdout).context("reading cargo's configuration")?;
-        // The table of the triple, then those of a cfg in the order of their keys.
-        let mut tables: Vec<_> = config.target.iter().filter(|(key, _)| asked.is(key)).collect();
-        tables.sort_by_key(|(key, _)| (key.starts_with("cfg("), key.as_str()));
-        let of_target: Vec<&str> = tables
-            .iter()
-            .filter_map(|(_, table)| table.rustflags.as_ref())
-            .flat_map(Words::words)
-            .collect();
-        if !of_target.is_empty() {
-            return Flags::parse(of_target.into_iter());
-        }
-        Flags::parse(config.build.rustflags.iter().flat_map(Words::words))
+        let flags = crate::answers::cargo_rustflags(&asked.cargo(dir), asked.triple)
+            .context("the flags cargo's configuration gives rustc")?;
+        Flags::parse(flags.iter().map(String::as_str))
     }
 
     /// The flags of `words`. `Err` names a `-Z` flag ra-jit does not build code with
@@ -482,37 +428,6 @@ impl Flags {
     }
 }
 
-/// The part of cargo's configuration that has flags for rustc.
-#[derive(Deserialize, Default)]
-struct Config {
-    #[serde(default)]
-    build: ConfigFlags,
-    #[serde(default)]
-    target: FxHashMap<String, ConfigFlags>,
-}
-
-#[derive(Deserialize, Default)]
-struct ConfigFlags {
-    rustflags: Option<Words>,
-}
-
-/// Flags as a configuration has them: in one string, or one by one.
-#[derive(Deserialize)]
-#[serde(untagged)]
-enum Words {
-    Joined(String),
-    Each(Vec<String>),
-}
-
-impl Words {
-    fn words(&self) -> Box<dyn Iterator<Item = &str> + '_> {
-        match self {
-            Words::Joined(joined) => Box::new(joined.split_whitespace()),
-            Words::Each(each) => Box::new(each.iter().map(String::as_str)),
-        }
-    }
-}
-
 /// The packages of a build by their id, each as it is built for the target.
 pub(crate) struct Plan {
     packages: FxHashMap<String, Built>,
@@ -538,14 +453,13 @@ pub(crate) struct Whole {
 }
 
 impl Plan {
-    /// Asks cargo for the units of the build `selection` names of the package of `manifest`.
+    /// The units of the build `selection` names of the package of `manifest`.
     pub(crate) fn of(
         manifest: &Path,
         selection: &Selection,
         asked: &Asked<'_>,
     ) -> anyhow::Result<Plan> {
-        // The unit graph is the only place cargo says which features and which profile each
-        // package of one build has.
+        // The unit graph says which features and which profile each package of one build has.
         let (dir, manifest) = match &selection.asked_in {
             Some(asked_in) if asked_in.is_dir() => (asked_in.as_path(), None),
             Some(asked_in) => {
@@ -553,7 +467,7 @@ impl Plan {
             }
             None => (manifest.parent().unwrap_or(Path::new(".")), Some(manifest)),
         };
-        let graph = UnitGraph::of(dir, manifest, selection, asked.env)?;
+        let graph = UnitGraph::of(dir, manifest, selection, asked)?;
         graph.plan(&Flags::of(dir, asked)?)
     }
 
@@ -647,31 +561,18 @@ impl Unit {
 }
 
 impl UnitGraph {
-    /// What `cargo build --unit-graph` says of the build `selection` names, asked in `dir` of
-    /// the package of `manifest` when there is one, with `env` for the variables of whoever
-    /// asks.
+    /// The unit graph of the build `selection` names, asked in `dir` of the package of
+    /// `manifest` when there is one: what `cargo build --unit-graph` says of it, made by
+    /// blaze-units with no cargo run (harness/resolve.py `units` holds the two equal).
     fn of(
         dir: &Path,
         manifest: Option<&Path>,
         selection: &Selection,
-        env: &FxHashMap<String, Option<String>>,
+        asked: &Asked<'_>,
     ) -> anyhow::Result<UnitGraph> {
-        let mut command = cargo_in(dir, env);
-        command.args(["build", "--unit-graph", "-Z", "unstable-options"]);
-        if let Some(manifest) = manifest {
-            command.arg("--manifest-path").arg(manifest);
-        }
-        command.args(selection.flags());
-        if selection.dev_deps {
-            command.arg("--all-targets");
-        }
-        let output = command.output().context("running `cargo build`")?;
-        anyhow::ensure!(
-            output.status.success(),
-            "`cargo build --unit-graph` failed: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
-        );
-        serde_json::from_slice(&output.stdout).context("reading cargo's unit graph")
+        let graph = crate::cargo::metadata::units(selection, dir, manifest, asked)?;
+        let json = serde_json::to_value(&graph).context("writing blaze's unit graph")?;
+        serde_json::from_value(json).context("blaze's unit graph is not cargo's form")
     }
 
     /// The units that end up in the program: those the roots reach without going through one

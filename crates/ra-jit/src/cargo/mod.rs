@@ -6,7 +6,7 @@ pub(crate) mod wrapper;
 
 mod affected;
 mod ancestor;
-mod cli;
+pub(crate) mod cli;
 mod client;
 pub(crate) mod layout;
 mod messages;
@@ -23,7 +23,7 @@ pub(crate) mod script;
 pub(crate) mod script_sandbox;
 mod state;
 pub(crate) mod switch;
-mod toolchain;
+pub(crate) mod toolchain;
 mod units;
 pub(crate) mod whole;
 

@@ -113,7 +113,7 @@ with reasons. The daemon's log says `backend: llvm -O2 fast emit` when LLVM is i
 | `cratesweep.sh`, `vendor.sh`, `sweepreport.py` | `cratetest.py` over a list of crates.io releases, and a summary |
 | `bintest.py <name>` | A real program from `breakers/bins.json`: the same command lines given to cargo's binary and ra-jit's |
 | `alone.py` | A program whose workspace crates rustc compiles nothing of, so no refused function can hide behind rustc's copy |
-| `allrajit.py [whole] [unit] [stored]` | Programs with nothing rustc built in them, the standard library compiled by ra-jit ([no-rustc.md](no-rustc.md), steps F and G): a hello, one of collections, panics, threads and channels, and one of the paths of `split_paths_ref` and the XDG directories, each built with the library in the same build, over the library built alone (`--prebuilt`), and on a store and a remote that start empty, where the first build compiles and keeps the library and the later ones, one on a second store, take it. Each has to print and exit as cargo's build does. Linux |
+| `allrajit.py [whole] [unit] [stored]` | Programs with nothing rustc built in them, the standard library compiled by ra-jit ([no-rustc.md](no-rustc.md), steps F and G): a hello, one of collections, panics, threads and channels, one of 128-bit atomics raced by threads, and one of the paths of `split_paths_ref` and the XDG directories, each built with the library in the same build, over the library built alone (`--prebuilt`), and on a store and a remote that start empty, where the first build compiles and keeps the library and the later ones, one on a second store, take it. Each has to print and exit as cargo's build does. Linux |
 | `macroserver.py` | The release's proc-macro server (`vendor/proc-macro-srv`) built by ra-jit, and the libraries ra-jit links of serde_derive, thiserror-impl, tokio-macros and clap_derive ([no-rustc.md](no-rustc.md), step J1): every call of a package's derives (with helper attributes), attributes and function-like macros is expanded by the toolchain's server with rustc's library and by ra-jit's with ra-jit's, and the outputs have to be equal, spans included; the package is then built whole with its proc macros by rustc and by ra-jit. `macroserver.py <app>` (or `all`) builds a bench app (fd, bat, hyperfine, just, nushell, helix) whole with `RA_JIT_PROC_MACRO_SERVER`, so ra-jit links every proc macro, again into an empty target directory over that build's store (no library may be linked again), and again without, expanding every call by both servers; the counts, the calls not compared and why each proc macro was rustc's are printed, and both programs have to print the same. Needs crates.io. Linux |
 | `frozenwarm.py` | Frozen def maps (#40, #161) of a dependency whose items, and a `macro_rules!` it exports, are in files `include!` reads and the VFS does not load at first, as the icu `*_data` crates': built on one store cold, warm twice, warm with `RA_JIT_FROZEN=check` and `=verify`, and warm after an included file changed at the same path, which has its def map refused. Each has to print what cargo's build does. Linux |
 | `wholeprogram.py` | Programs ra-jit builds whole, with its own `main` (as `runbench.py` builds them): one on the default allocator, one with a `#[global_allocator]` of its own, one with a library's, one whose allocator is under a `#[cfg]` that is false. Each has to print and exit as cargo's build does, and a second build of it by ra-jit has to give the same object byte for byte ([#200](https://github.com/indexable-inc/blaze/issues/200)); `--release` builds both in the release profile |
@@ -395,16 +395,19 @@ with the `llvm` feature, hands the binary to its other jobs, and runs:
 - `fork alone`: `vendor/rust-analyzer` built and tested outside this repository (the tests of
   `hir-ty`, `hir-ty-borrowck`, `hir-ty-wfcheck` and `ide-diagnostics`, whose diagnostics are the
   daemon's errors);
-- the ripgrep bench (not blocking);
-- `nix-live.yaml`: the unit graphs, the flake's builds, the demo and live edits on macOS (not
-  blocking: `soft`, until they have been green a while).
+- the ripgrep bench (not blocking).
+
+`nix-live.yaml` (the unit graphs, the flake's builds, the demo and live edits on macOS) runs on
+the same pushes to main in a workflow of its own, one run at a time: a cold nix build takes up to
+two hours, and while it was in the train's run main's next train waited for it. Nothing waits on
+it.
 
 Versions are dated and chosen by nobody: `0.YYYYMMDD.N`, N counting the releases of that day
 (UTC) from 0 (0.20261026.0, then 0.20261026.1), which is semver, as cargo and crates.io need.
 `blaze --version` says the commit too, `blaze 0.20261026.0 (fb82b09)`: crates/ra-jit's build.rs
 takes it from `RA_JIT_GIT_SHA` (release.yaml and the flake set it) or the checkout's HEAD.
 
-The job `train` is the train's verdict: every job but the bench and nix. When it is green and
+The job `train` is the train's verdict: every job but the bench. When it is green and
 main has changes since the last release, the job `release` (`.github/scripts/train_release.py
 prepare`) makes one commit on main, `release: v0.YYYYMMDD.N [skip ci]`: the workspace version
 of today's next release, a CHANGELOG.md section with what `[Unreleased]` had and the title of each change merged

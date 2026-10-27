@@ -3175,7 +3175,13 @@ fn workspace_at(
     // Without the standard library's source every call into it is unresolved, and each
     // function making one would be refused for a reason that says nothing of the toolchain.
     if workspace.sysroot.is_rust_lib_src_empty() {
-        if let Some(error) = workspace.sysroot.error() {
+        // A library with its `Cargo.toml` is there and could not be read; without one it is
+        // not installed, whatever the stitched library's error says of it.
+        let read = workspace
+            .sysroot
+            .rust_lib_src_root()
+            .is_some_and(|it| std::fs::metadata(it.join("Cargo.toml")).is_ok());
+        if let Some(error) = workspace.sysroot.error().filter(|_| read) {
             anyhow::bail!("{}", error.trim_end());
         }
         let toolchain =
@@ -3244,12 +3250,24 @@ fn workspace_at(
                 WorkspaceBuildScripts::of_messages(cargo, said.iter().map(String::as_str))
             }
             (kind, _) => {
+                // ra-jit's own target directory is one per mode of its proc macros
+                // (`own_macro::own_dir`): with them, cargo is given empty files for the
+                // libraries, which rustc would read when they are turned off.
+                let own_config;
+                let mut config = cargo_config;
                 if let ProjectWorkspaceKind::Cargo { cargo, .. } = kind
                     && cargo_config.target_dir_config == TargetDirectoryConfig::UseSubdirectory
                 {
-                    seed_own_target(cargo.target_directory().as_ref());
+                    let target = cargo.target_directory();
+                    let own = target.join(cargo::own_macro::own_dir());
+                    seed_own_target(target.as_ref(), own.as_ref());
+                    own_config = CargoConfig {
+                        target_dir_config: TargetDirectoryConfig::Directory(own.into()),
+                        ..cargo_config.clone()
+                    };
+                    config = &own_config;
                 }
-                workspace.run_build_scripts(cargo_config, &|_| {})?
+                workspace.run_build_scripts(config, &|_| {})?
             }
         };
         // A crate whose script did not run is read without what it writes: thiserror's
@@ -3266,12 +3284,13 @@ fn workspace_at(
 /// Starts ra-jit's own target directory from what cargo built in `target`, so that the build
 /// scripts and proc macros cargo has are not built again. Without it the first load is a
 /// second build of those.
-fn seed_own_target(target: &Path) {
-    let own = target.join("rust-analyzer");
+fn seed_own_target(target: &Path, own: &Path) {
     if own.exists() {
         return;
     }
-    let seeding = target.join(format!("rust-analyzer.{}", std::process::id()));
+    let mut seeding = own.as_os_str().to_owned();
+    seeding.push(format!(".{}", std::process::id()));
+    let seeding = PathBuf::from(seeding);
     // cargo's first layout has `.fingerprint`, `build` and `deps` in a profile's directory;
     // its second has every unit in `build/<package>/<hash>`, with `fingerprint`, `out` and a
     // build script's `run` in it.
@@ -3282,6 +3301,11 @@ fn seed_own_target(target: &Path) {
     };
     let mut found = profiles(target);
     for triple in std::fs::read_dir(target).into_iter().flatten().flatten() {
+        // ra-jit's own directories, of either mode, and one being seeded, are not cargo's.
+        let name = triple.file_name();
+        if name.to_str().is_some_and(|it| it.starts_with(cargo::own_macro::OWN_DIR)) {
+            continue;
+        }
         found.extend(profiles(&triple.path()));
     }
     let entries = |dir: &Path| -> Vec<std::fs::DirEntry> {
@@ -7574,6 +7598,27 @@ fn main() -> anyhow::Result<()> {
     }
     match std::env::args().nth(1).as_deref() {
         Some("rustc-wrapper") => return cargo::wrapper::command(std::env::args_os().skip(2)),
+        // `cargo-answer <program> <args>`: what ra-jit answers for the cargo `<program>` run
+        // with `<args>`, of the toolchain or the configuration, for `harness/resolve.py
+        // toolchain`: printed as cargo prints it, ending as cargo ends. Nothing runs it.
+        Some("cargo-answer") => {
+            let program = std::env::args_os().nth(2).context("cargo-answer needs a cargo")?;
+            let mut asked = std::process::Command::new(program);
+            // `--rustflags <triple>`: the flags the plan reads (`plan.rs`, `Flags::of`), as JSON.
+            if std::env::args().nth(3).as_deref() == Some("--rustflags") {
+                let triple = std::env::args().nth(4).context("--rustflags needs a target")?;
+                let flags = answers::cargo_rustflags(&asked, &triple)?;
+                println!("{}", serde_json::to_string(&flags)?);
+                return Ok(());
+            }
+            asked.args(std::env::args_os().skip(3));
+            let output = answers::cargo_answer(&asked)
+                .context("ra-jit does not answer this question of cargo")??;
+            use std::io::Write as _;
+            std::io::stdout().write_all(&output.stdout)?;
+            std::io::stderr().write_all(&output.stderr)?;
+            std::process::exit(output.status.code().unwrap_or(101));
+        }
         Some(cargo::own_macro::COMMAND) => {
             return cargo::own_macro::command(std::env::args_os().skip(2));
         }
@@ -7815,7 +7860,7 @@ impl Held {
         let asked = ["--crate", "ra_jit_spare", "--out", "none"].map(str::to_owned);
         let asked = std::iter::once(dir.display().to_string()).chain(asked);
         let args = Args::parse(asked)?;
-        process_wide();
+        held_wide();
         // An empty package has no build script, and asking cargo for one waits for the lock
         // of the target directory, which a build that started beside this holds until it ends.
         let scriptless = LoadCargoConfig { load_out_dirs_from_check: false, ..load_config() };
@@ -8216,6 +8261,11 @@ fn spare(dir: &Path) -> anyhow::Result<()> {
         // wait for files to change or for a proc macro to expand: none reads a variable.
         unsafe { std::env::set_var(name, value) };
     }
+    // The spare was started with the daemon's variables: one the build leaves unset is unset.
+    for name in cargo::cli::WORKER_ENV_EXACT.iter().filter(|it| !told.env.contains_key(**it)) {
+        // SAFETY: as above.
+        unsafe { std::env::remove_var(name) };
+    }
     std::env::set_current_dir(&told.cwd)?;
     if !told.ahead {
         std::thread::spawn(end_with_input);
@@ -8225,11 +8275,9 @@ fn spare(dir: &Path) -> anyhow::Result<()> {
 
 /// What is said once for the process about how every workspace is read.
 fn process_wide() {
-    hir_def::nameres::EXPAND_BUILTIN_DERIVES.store(true, std::sync::atomic::Ordering::Relaxed);
-    project_model::SYSROOT_AS_BUILT.store(true, std::sync::atomic::Ordering::Relaxed);
-    ra_jit_expand::install();
-    // Every proc-macro server is started in the sandbox.
-    macro_sandbox::install();
+    held_wide();
+    // Which proc-macro server expands is read from the build's variables, which a spare is
+    // told after it loaded the library ([`held_wide`]), and is kept from then on.
     let server = cargo::own_macro::server();
     if let Some(Ok(server)) = server.and_then(Path::to_str).map(AbsPathBuf::try_from) {
         load_cargo::serve_listed_with(server);
@@ -8242,6 +8290,16 @@ fn process_wide() {
             made.collect()
         }));
     }
+}
+
+/// What of [`process_wide`] a spare says before it is told its build: nothing that depends
+/// on the build's variables.
+fn held_wide() {
+    hir_def::nameres::EXPAND_BUILTIN_DERIVES.store(true, std::sync::atomic::Ordering::Relaxed);
+    project_model::SYSROOT_AS_BUILT.store(true, std::sync::atomic::Ordering::Relaxed);
+    ra_jit_expand::install();
+    // Every proc-macro server is started in the sandbox.
+    macro_sandbox::install();
 }
 
 /// Loads the workspace `args` names and builds what they ask for, then serves it when they
