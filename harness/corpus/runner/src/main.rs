@@ -608,6 +608,8 @@ fn main() {
     println!("const_floats {}", cases::const_floats::run());
     println!("static_identity {}", cases::static_identity::run());
     println!("lifetime_impl_consts {}", cases::lifetime_impl_consts::run());
+    #[cfg(feature = "nightly")]
+    println!("simd_lanes {}", cases::simd_lanes::run());
     #[cfg(target_arch = "x86_64")]
     println!("simd_x86 {}", cases::simd_x86::run());
     #[cfg(target_arch = "aarch64")]
