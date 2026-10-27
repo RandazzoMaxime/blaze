@@ -99,7 +99,29 @@ pub(crate) fn once(project: &Path, krate: &str) -> anyhow::Result<Option<crate::
     ide_db::base_db::set_process_env(&mut db, crate::process::own());
     let Parts { root, members, lints_capped, .. } = checkouts.parts(&args.project)?;
     let checker = Checker::new(&db, &vfs, &checkouts, &members, &[], read_from, root, lints_capped);
-    Ok(checker.refused(&db))
+    if let Some(refused) = checker.refused(&db) {
+        return Ok(Some(refused));
+    }
+    Ok(checker.checked.iter().find_map(|&file| unresolved(&db, file)).map(|path| {
+        crate::Refused::Error(crate::errors::Said::one(crate::errors::Diagnostic {
+            code: Some("E0433".to_owned()),
+            message: format!("failed to resolve `{path}`"),
+            span: None,
+        }))
+    }))
+}
+
+/// A path of the file, outside its attributes, that names nothing: rustc's E0433, which
+/// rust-analyzer does not say of a type's path, and on which a probe of a library item
+/// turns (autocfg's `probe_trait("alloc::alloc::Allocator")` with no `extern crate alloc`).
+fn unresolved(db: &RootDatabase, file: vfs::FileId) -> Option<String> {
+    use syntax::{AstNode as _, ast};
+    let sema = hir::Semantics::new(db);
+    let tree = sema.parse_guess_edition(file);
+    tree.syntax().descendants().filter_map(ast::Path::cast).find_map(|path| {
+        let in_attr = path.syntax().ancestors().any(|it| ast::Attr::can_cast(it.kind()));
+        (!in_attr && sema.resolve_path(&path).is_none()).then(|| path.to_string())
+    })
 }
 
 struct Checker {
