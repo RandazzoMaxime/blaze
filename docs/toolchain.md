@@ -1,7 +1,7 @@
 # blaze's own toolchain
 
 blaze is its own Rust toolchain. It builds every project with one toolchain that blaze
-controls, names and ships, whatever the project pins: `blaze-2026-10-25` today. It is not the
+controls, names and ships, whatever the project pins: `blaze-2026-10-27` today. It is not the
 project's toolchain and it does not try to be. The project's own toolchain, and its CI, stay
 the final word on whether the code builds.
 
@@ -22,14 +22,14 @@ the standard library is part of a compiler.
 
 ## What it is today
 
-- **Name:** `blaze-<date>` (`blaze-2026-10-25`), after the date of the Rust nightly it is built
-  from (`harness/toolchain`, `nightly-2026-10-25`). `blaze toolchain` prints it and where it
+- **Name:** `blaze-<date>` (`blaze-2026-10-27`), after the date of the Rust nightly it is built
+  from (`harness/toolchain`, `nightly-2026-10-27`). `blaze toolchain` prints it and where it
   is; `blaze toolchain --path` prints the directory alone.
 - **Bytes:** the upstream nightly's `rustc`, `cargo`, `rust-std` and `rust-src`, unchanged, from
   static.rust-lang.org, each checked against the sha256 compiled into blaze
   (`crates/ra-jit/src/cargo/toolchain/pins.txt`, `harness/toolchain_pins.py`). So `rustc -V`
-  still says `1.101.0-nightly (12433c307 2026-10-24)`.
-- **Where:** `~/.blaze/toolchains/nightly-2026-10-25-<host>`, or rustup's `nightly-2026-10-25`
+  still says `1.101.0-nightly (16d1ffac1 2026-10-26)`.
+- **Where:** `~/.blaze/toolchains/nightly-2026-10-27-<host>`, or rustup's `nightly-2026-10-27`
   when rustup already has it with `rust-src` (the same bytes). The installer downloads it once;
   `blaze toolchain --path` prints its directory.
 - **Who uses it:** cargo, rustc and the daemon that blaze starts (`CARGO`, `RUSTC`, `RUSTDOC`,
@@ -90,12 +90,36 @@ Fixes for what a nightly breaks (layouts, the ABI, std's source, intrinsics, bor
 verdicts) are pushed to `toolchain/bump`. The next day's run merges main into it and moves it to
 that day's nightly from there, so they are kept, and the train runs again.
 
+## How far behind it gets, and how long a bump takes
+
+Measured 2026-10-27, on the first bump the workflow made.
+
+- **Before the daily bump** the pin moved by hand: Rust 1.99.0 until 2026-10-25 (ce555b5f2d),
+  then that day's nightly, two days old when the first automatic bump started.
+- **Which nightly:** every one of the 120 nightlies up to 2026-10-27 had every component blaze
+  needs on all four hosts (a scan of their manifests with `toolchain_bump.missing`), so the
+  newest usable nightly is that day's. How far behind main is comes from the gates alone: the
+  run at 05:40 UTC takes a nightly about 4 to 6 hours old, which lands hours later, so main's pin
+  is under a day old on a green day and one day older for each red day.
+- **The first bump** (to the nightly of 2026-10-27, #543): dispatched 11:40:01Z, merged 16:53:36Z, 5 h 14
+  min. The bump and the answers of three hosts took 80 s. The train took 2 h 11 min (most of it
+  the `projects (nushell)` jobs, red on main too, running into their 120-minute timeout), the
+  verdict 32 min waiting for `toolchain/base`'s train, the rerun of one job red only on the bump
+  (`remote.py`, a remote-cache flake) 2 h 1 min, and the verdict on it 3 min. blaze built on the
+  new nightly with no change to its code: the standard library refused 1940 of 25960 functions
+  against main's 1940 of 25942 (+0), borrow-check UI was green, and no harness was red that is
+  green on main's train.
+  The changes it needed were to the bump itself (#540, #578, #615, #657, #691, #699).
+- **A typical day,** then: about 2 h 45 min from the run to the merge when the train has no new
+  red, about 5 h with one rerun. The nushell jobs' timeout is most of each train while they are
+  red on main.
+
 ## What it means for a project
 
 - A project that pins another toolchain (a stable release, an older nightly) builds with
   blaze's. blaze says so once per project and pin, as a note, not an error, and switches
   nothing:
-  `note: blaze builds with its own toolchain, blaze-2026-10-25, not rustc 1.99.0 (...), which
+  `note: blaze builds with its own toolchain, blaze-2026-10-27, not rustc 1.99.0 (...), which
   the project's rust-toolchain file names. ...`
 - Rust keeps building old code, so stable code builds; `#![feature(...)]` code builds too.
 - Code blaze's toolchain cannot build (a nightly feature it removed, a library item newer than
