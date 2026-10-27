@@ -80,7 +80,7 @@ impl Linked {
 
     /// As [`Linked::read`], of what rustc linked, which `binary` is another name of: it is
     /// made a copy of its own first, for a splice to write. One the daemon linked is refused:
-    /// cargo's place for the program has the daemon's once it served one.
+    /// cargo's place for the program has a copy of the daemon's once it served one.
     pub(crate) fn read_rustcs(binary: PathBuf, patch: &Path, object: &Path) -> Linked {
         let (patch, object) = (std::fs::read(patch), object.to_owned());
         Linked(std::thread::spawn(move || {
@@ -928,7 +928,7 @@ fn write_runs(file: &File, writes: &[(u64, Vec<u8>)]) -> std::io::Result<()> {
 /// Copies the file at `from` to `to` as [`std::fs::copy`] does, but for the runs of it the
 /// filesystem keeps no blocks of, which stay so in the copy: a spliced executable has many,
 /// and a filesystem that shares no blocks writes the rest in full.
-fn copy_file(from: &Path, to: &Path) -> std::io::Result<()> {
+pub(crate) fn copy_file(from: &Path, to: &Path) -> std::io::Result<()> {
     #[cfg(target_os = "linux")]
     if copy_holes(from, to).is_ok() {
         return Ok(());
