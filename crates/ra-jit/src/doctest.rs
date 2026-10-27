@@ -711,14 +711,7 @@ impl Test {
         let edition = edition.parse().unwrap_or(Edition::CURRENT);
         let program = Program::of(&example.code, frame, &id, edition);
         let in_one = edition.at_least_2024();
-        Test {
-            name,
-            marks: example.marks,
-            program,
-            shown_path,
-            edition,
-            in_one,
-        }
+        Test { name, marks: example.marks, program, shown_path, edition, in_one }
     }
 
     /// The name with what the harness adds for how the example is tested.
