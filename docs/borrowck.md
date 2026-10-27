@@ -475,6 +475,10 @@ For those, rust-analyzer's type checking follows rustc's in what it reports:
 - A closure required to implement a `Fn*` or `AsyncFn*` trait its closure kind does not
   allow is E0525, not an unsatisfied bound, as in rustc's
   `emit_specialized_closure_kind_error` (`hir-ty/src/solver_errors.rs`).
+- A name a pattern binds twice in one product context (`(a, a)`, `a @ b @ a`) is two
+  bindings and an error, and a later use means the last one; the alternatives of an
+  or-pattern bind the same one. This is rustc's resolver `fresh_binding` with its product
+  and or contexts (`hir-def/src/expr_store/lower.rs`, `BindingList`).
 
 With no borrow checker, the 246 units rustc accepts would pass. Now:
 
