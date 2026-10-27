@@ -98,6 +98,7 @@ with reasons. The daemon's log says `backend: llvm -O2 fast emit` when LLVM is i
 |---|---|
 | `difftest.py <workspace> --bin <pkg> --crate <name>` | The base comparison. Builds the binary with cargo, compiles the named crates with ra-jit, links ra-jit's object ahead of rustc's rlibs, runs both. `--layouts` also compares the size and alignment of every type ra-jit laid out with rustc's `-Zprint-type-sizes`. `--bisect` links each ra-jit function in on its own to name the ones that change behaviour. `--mixed N` runs N builds with a random half of the functions left to rustc. `--memcheck` runs under valgrind |
 | `harness/corpus/` | The workspace `difftest.py corpus` runs: a library with one module per area of the code generator and a runner that calls every function and prints the result |
+| `wasm32.py [check...]` | The train's wasm32 job: harnesses run with `RA_JIT_TARGET=wasm32-wasip1` (the corpus, `stress.py`) under wasmtime, each in a process of its own. `RA_JIT_TARGET` takes any harness that builds a program there; see [reports/WASM32.md](reports/WASM32.md). Run in `nix develop .#wasm` |
 | `breakers.py` | Every reduction under `harness/breakers/`, each run on its own so a crash in one does not hide the others. These are minimal cases of bugs found in real crates, rustc's tests and the fuzzer |
 | `unwinds.py` | Edits to functions a panic unwinds through |
 | `growth.py` | That the code of one function grows in a straight line with its source: the `serialize` `#[derive(Serialize)]` gives an internally tagged enum, a `?` in every arm, at 160 and 320 arms (issue #5); and a `load` filling a struct of 200 and 400 fields, each a call's `?` while a value with a destructor is live, as x11-dl opens Xlib's 781 functions (the way out of each `?` once dropped every field before it on its own: 2,986,013 blocks, and 364 GB for bevy) |
@@ -393,6 +394,8 @@ with the `llvm` feature, hands the binary to its other jobs, and runs:
   runs; a miss fetches it from GitHub with retries, since the plain fetch was refused with HTTP
   429 in 26 jobs in two days);
 - the Bun fixtures (Linux x86-64);
+- `harness/wasm32.py` (Linux x86-64, in the flake's `wasm` shell): the corpus and `stress.py`
+  built for `wasm32-wasip1` and run under wasmtime against cargo's build;
 - `cargo_ra_jit.py`: its checks, ripgrep and hyperfine, and fd (Linux x86-64 and macOS), and
   ripgrep, fd, bat, hyperfine, just, axum and nushell with each project's tests (Linux AArch64);
 - `fork alone`: `vendor/rust-analyzer` built and tested outside this repository (the tests of
