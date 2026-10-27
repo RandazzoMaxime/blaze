@@ -184,7 +184,7 @@ pub(crate) fn run_as_cargo_does(
             if let Some(kept) = &found
                 && !checking
             {
-                let unset = script_sandbox::not_given(&kept.stdout, &ran.env, &plan);
+                let unset = unset_now(&kept.stdout, &ran.env, &plan, &declared);
                 if !unset.is_empty() {
                     declared.extend(unset);
                     continue;
@@ -201,7 +201,7 @@ pub(crate) fn run_as_cargo_does(
             let script_sandbox::Ran { output, .. } =
                 script_sandbox::run(&running, &plan, Stdio::inherit())?;
             let unset = match output.status.success() {
-                true => script_sandbox::not_given(&output.stdout, &ran.env, &plan),
+                true => unset_now(&output.stdout, &ran.env, &plan, &declared),
                 false => Vec::new(),
             };
             let refused = directives::refused(&output.stdout, &directives);
@@ -256,7 +256,7 @@ pub(crate) fn run_as_cargo_does(
         if let Some((kept, reads)) = &found
             && !checking
         {
-            let unset = script_sandbox::not_given(&kept.stdout, &ran.env, &plan);
+            let unset = unset_now(&kept.stdout, &ran.env, &plan, &declared);
             if !unset.is_empty() {
                 declared.extend(unset);
                 continue;
@@ -276,7 +276,7 @@ pub(crate) fn run_as_cargo_does(
         let script_sandbox::Ran { output, reads } =
             script_sandbox::run(&running, &plan, Stdio::inherit())?;
         let unset = match output.status.success() {
-            true => script_sandbox::not_given(&output.stdout, &ran.env, &plan),
+            true => unset_now(&output.stdout, &ran.env, &plan, &declared),
             false => Vec::new(),
         };
         let refused = directives::refused(&output.stdout, &directives);
@@ -326,6 +326,20 @@ pub(crate) fn run_as_cargo_does(
         }
         std::process::exit(output.status.code().unwrap_or(1))
     }
+}
+
+/// What a run that printed `stdout` said it reads and was not given
+/// ([`script_sandbox::not_given`]), but for what it was `declared` already: a variable it is
+/// given and still lacks can't be given, and a run again would be the same.
+fn unset_now(
+    stdout: &[u8],
+    env: &[(String, String)],
+    plan: &script_sandbox::Plan,
+    declared: &[String],
+) -> Vec<String> {
+    let mut unset = script_sandbox::not_given(stdout, env, plan);
+    unset.retain(|it| !declared.contains(it));
+    unset
 }
 
 /// With [`keyed::CHECK`]: ends the process, failed, when `made`, what a run of `package`'s

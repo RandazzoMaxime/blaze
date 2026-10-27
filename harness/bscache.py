@@ -457,6 +457,18 @@ def directives(work, out_dir):
 KEPT_LINE = "blaze: a run the store kept, of its closure"
 
 
+def said_by_cargo(stderr, package):
+    """What cargo printed of the failed run of `package`'s build script (`name vX`): its stderr,
+    which the run's directory does not keep when it failed."""
+    start = stderr.find(f"failed to run custom build command for `{package}")
+    if start < 0:
+        return ""
+    block = stderr[start:].split("\n--- stderr\n", 1)
+    rest = block[1] if len(block) == 2 else block[0]
+    ends = [at for at in (rest.find("\nwarning: build failed"), rest.find("\nerror: ")) if at >= 0]
+    return rest[: min(ends)] if ends else rest
+
+
 def in_closure(name, repo, rev, work, ra_jit, jobs, store):
     """Runs `name`'s compile-time step with every build script in its closure alone
     (RA_JIT_SCRIPT_VIEW=on), keeping going past a failed script, with `store` as the store: what
@@ -486,7 +498,9 @@ def in_closure(name, repo, rev, work, ra_jit, jobs, store):
     start = time.monotonic()
     proc = subprocess.run(command, cwd=source, env=env, capture_output=True, text=True, errors="replace")
     seconds = time.monotonic() - start
-    failed = sorted(set(re.findall(r"failed to run custom build command for `([^`]+)`", proc.stderr)))
+    # Cargo names a package of the workspace with its path after it.
+    named = re.findall(r"failed to run custom build command for `([^`]+)`", proc.stderr)
+    failed = sorted({re.sub(r" \(.*\)$", "", it) for it in named})
     scripts = []
     for dir in run_dirs(target):
         var = dict(json.load(open(os.path.join(dir, RAN)))["env"])
@@ -497,6 +511,9 @@ def in_closure(name, repo, rev, work, ra_jit, jobs, store):
         package = f"{var.get('CARGO_PKG_NAME')} v{var.get('CARGO_PKG_VERSION')}"
         ok = os.path.exists(stdout) and package not in failed
         notes = [line for line in said.splitlines() if line.startswith(("note: the build script", "error:"))]
+        if not ok:
+            said = said or said_by_cargo(proc.stderr, package)
+            notes = [line for line in said.splitlines() if line.startswith(("note: the build script", "error:"))]
         scripts.append(dict(package=var.get("CARGO_PKG_NAME"), version=var.get("CARGO_PKG_VERSION"), ok=ok,
                             kept=KEPT_LINE in said, notes=notes[-3:], tail=[] if ok else said.splitlines()[-12:]))
     # A script cargo said failed whose run left no directory of ours failed before it ran.
@@ -504,7 +521,10 @@ def in_closure(name, repo, rev, work, ra_jit, jobs, store):
     for package in failed:
         if package not in ran:
             name_, _, version = package.rpartition(" v")
-            scripts.append(dict(package=name_, version=version, ok=False, kept=False, notes=[], tail=[]))
+            said = said_by_cargo(proc.stderr, package)
+            notes = [line for line in said.splitlines() if line.startswith(("note: the build script", "error:"))]
+            scripts.append(dict(package=name_, version=version, ok=False, kept=False, notes=notes[-3:],
+                                tail=said.splitlines()[-12:]))
     return dict(project=name, rev=rev, status=proc.returncode, seconds=round(seconds, 2), failed=failed,
                 stderr_tail=proc.stderr[-6000:] if proc.returncode else "",
                 scripts=sorted(scripts, key=lambda it: (it["package"] or "", it["version"] or "")))

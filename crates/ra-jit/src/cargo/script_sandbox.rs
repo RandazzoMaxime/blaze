@@ -126,6 +126,11 @@ impl Plan {
 /// The directory of a run's `scratch` that has ra-jit linked as `rustc`.
 const OWN_RUSTC: &str = "ra-jit-rustc";
 
+/// What cargo set that ra-jit's own rustc stands for ([`with_own_rustc`]): a script is not
+/// given them, and is not missing them.
+const OWN_RUSTC_FOR: [&str; 4] =
+    ["RUSTC", "RUSTC_WRAPPER", "RUSTC_WORKSPACE_WRAPPER", crate::as_rustc::TOOLCHAIN];
+
 /// `env`, cargo's for a script, with `RUSTC` naming ra-jit as rustc ([`crate::as_rustc`]),
 /// linked in `scratch`, and the toolchain's rustc in [`crate::as_rustc::TOOLCHAIN`]: what
 /// the script asks rustc, its version, the cfgs, whether a probe compiles, is ra-jit's to
@@ -152,9 +157,8 @@ fn with_own_rustc(
         std::fs::hard_link(&exe, &link).with_context(|| format!("linking {}", link.display()))?;
     }
     let link = link.to_str().context("a directory whose name is not text")?.to_owned();
-    let dropped = ["RUSTC", "RUSTC_WRAPPER", "RUSTC_WORKSPACE_WRAPPER", crate::as_rustc::TOOLCHAIN];
     let mut env: Vec<(String, String)> =
-        env.iter().filter(|it| !dropped.contains(&it.0.as_str())).cloned().collect();
+        env.iter().filter(|it| !OWN_RUSTC_FOR.contains(&it.0.as_str())).cloned().collect();
     env.push(("RUSTC".to_owned(), link));
     env.push((crate::as_rustc::TOOLCHAIN.to_owned(), rustc));
     Ok(env)
@@ -425,7 +429,8 @@ pub(crate) fn given(name: &str) -> bool {
 
 /// The variables a run that printed `stdout` said it reads (`rerun-if-env-changed`) which
 /// cargo had in `env` but the run in the sandbox was not given (`plan`): it saw them unset,
-/// and a run given them ([`Script::declared`]) is the one that stands for cargo's. A run in
+/// and a run given them ([`Script::declared`]) is the one that stands for cargo's; what ra-jit's
+/// own rustc stands for ([`OWN_RUSTC_FOR`]) it is not missing. A run in
 /// its closure is given the closure's C toolchain and pkg-config in place of the machine's,
 /// so those of [`given`] it was not given are not missing.
 pub(crate) fn not_given(stdout: &[u8], env: &[(String, String)], plan: &Plan) -> Vec<String> {
@@ -439,6 +444,7 @@ pub(crate) fn not_given(stdout: &[u8], env: &[(String, String)], plan: &Plan) ->
             line.strip_prefix("rerun-if-env-changed=").map(str::to_owned)
         })
         .filter(|name| had(name, env) && !had(name, &spec.env))
+        .filter(|name| !OWN_RUSTC_FOR.contains(&name.as_str()))
         .filter(|name| in_view.is_none() || !given(name))
         .collect();
     names.sort();
@@ -784,6 +790,33 @@ mod tests {
         let unset = plan(&Script { declared: &[], ..script }).unwrap();
         assert_eq!(names(&unset), ["CARGO_PKG_NAME"]);
         assert_eq!(not_given(stdout, &env, &unset), ["BM_LEVEL"]);
+        _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn what_ra_jit_s_rustc_stands_for_is_not_missing() {
+        let dir = std::env::temp_dir().join(format!("ra-jit-own-rustc-{}", std::process::id()));
+        let out_dir = dir.join("target/debug/build/pkg-1/out");
+        std::fs::create_dir_all(&out_dir).unwrap();
+        let pair = |name: &str, value: &str| (name.to_owned(), value.to_owned());
+        let env = [
+            pair("CARGO_PKG_NAME", "pkg"),
+            pair("RUSTC", "rustc"),
+            pair("RUSTC_WRAPPER", "/w/ra-jit-rustc"),
+        ];
+        let script = Script {
+            real: Path::new("/nonexistent/build_script_build"),
+            args: &[],
+            cwd: &dir,
+            env: &env,
+            out_dir: &out_dir,
+            scratch: out_dir.parent().unwrap(),
+            declared: &[],
+        };
+        let plan = plan(&script).unwrap();
+        assert!(!plan.env().iter().any(|it| it.0 == "RUSTC_WRAPPER"));
+        let stdout = b"cargo::rerun-if-env-changed=RUSTC_WRAPPER\ncargo::rerun-if-env-changed=RUSTC\n";
+        assert!(not_given(stdout, &env, &plan).is_empty());
         _ = std::fs::remove_dir_all(&dir);
     }
 
