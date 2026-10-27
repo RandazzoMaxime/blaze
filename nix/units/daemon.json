@@ -1,7 +1,7 @@
 {
  "dir": ".",
  "inputs": {
-  "Cargo.lock": "cf708611416d547573be0d2280fa0e3a7f632585e85f14ea8d61e411853c5fd7",
+  "Cargo.lock": "56552e2988f02e5b578673fd6b7f57ef9230b37e6684de749f38f2f42739192e",
   "Cargo.toml": "892f2467cc89d62becf993fd437d5cd4e1855d34b20c7e7478f3635f0e0f46f9"
  },
  "packages": {
@@ -3115,6 +3115,23 @@
     "kind": "registry"
    },
    "version": "1.10.1"
+  },
+  "httpdate@1.0.3": {
+   "authors": "Pyfisch <pyfisch@posteo.org>",
+   "description": "HTTP date parsing and formatting",
+   "homepage": "",
+   "license": "MIT OR Apache-2.0",
+   "license_file": "",
+   "links": null,
+   "name": "httpdate",
+   "readme": "README.md",
+   "repository": "https://github.com/pyfisch/httpdate",
+   "rust_version": "1.56",
+   "source": {
+    "checksum": "df3b46402a9d5adb4c86a0cf463f42e19994e3ee891101b1841f30a545cb49a9",
+    "kind": "registry"
+   },
+   "version": "1.0.3"
   },
   "hybrid-array@0.4.15": {
    "authors": "RustCrypto Developers",
