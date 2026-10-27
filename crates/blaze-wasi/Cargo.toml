@@ -1,0 +1,17 @@
+[package]
+name = "blaze-wasi"
+description = "Build scripts compiled for wasm32-wasip1: blaze's std::process for them and the run-tool import they call"
+publish = false
+
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+
+[lib]
+doctest = false
+
+[lints]
+workspace = true
