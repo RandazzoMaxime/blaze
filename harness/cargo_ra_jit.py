@@ -29,8 +29,8 @@ through, cold and after an edit, and compared with cargo the same way.
 Daemon. Started on demand, reused, shared by a git worktree, alive after its client is
 killed, replaced when the client is another build of ra-jit, gone when idle, and its workers
 gone with it. A project whose rust-toolchain file names an older stable or a nightly is built
-and edited by the daemon, under the toolchain ra-jit compiles, and a `#![feature]` of the
-nightly fails with rustc's error and a note naming both releases. With no rustup and no Rust on
+and edited by the daemon, under the toolchain ra-jit compiles; a `#![feature]` of the nightly
+builds, and an error in it fails with a note naming both toolchains. With no rustup and no Rust on
 the path, `blaze run` builds with blaze's own copy of its release and the edit is the daemon's.
 
 Plain cargo. `ra-jit enable` and `ra-jit disable` over a cargo configuration that is there,
@@ -299,8 +299,11 @@ class Side:
 
 
 def by_rustc(stderr):
-    """Whether cargo built any of it: ra-jit said it fell back, or cargo compiled a crate."""
-    return bool(re.search(r"; building with cargo(, which .*)?$|^\s*Compiling ", stderr, re.M))
+    """Whether cargo built any of it: ra-jit said it fell back, or cargo finished a build.
+    `cargo ra-jit build`, `run` and `test` say `Compiling` of each package themselves (the
+    whole build, docs/no-rustc.md step K), so that line is no sign of cargo; cargo's own
+    `Finished` line names its profile's settings, where ra-jit's says `[ra-jit]`."""
+    return bool(re.search(r"; (building with cargo|this build is cargo's)(, which .*)?$|^\s*Finished `\w+` profile \[(?!ra-jit)", stderr, re.M))
 
 
 def how_built(stderr):
@@ -735,8 +738,9 @@ def daemon(work):
     _, first = here.cargo("build")
     pid, workers, _ = status()
     check("the first build starts one", first.returncode == 0 and pid is not None, f"pid {pid}")
-    waited = first.stderr.count("Waiting for blaze to load the workspace")
-    check("and waits for it: the first build's program is the daemon's", how_built(first.stderr) == "daemon" and waited == 1, f"{how_built(first.stderr)}, {waited} waiting lines")
+    # No cargo builds first: the build is the daemon's from the start, with nothing to wait
+    # for after cargo.
+    check("and the first build's program is the daemon's, with no cargo", how_built(first.stderr) == "daemon" and not by_rustc(first.stderr), how_built(first.stderr))
     wait_warm(here, ws)
     # A program that runs plain `cargo build` on its own checkout, as a test suite may, after
     # the daemon built it: cargo's own artifacts are behind the sources, so cargo builds
@@ -908,8 +912,8 @@ def fake_toolchain(dir, version):
 def pinned(work, check):
     """Projects whose rust-toolchain file names another toolchain than blaze's release (#269):
     an older stable and a nightly. `cargo ra-jit` builds them with its own release, and their
-    edits are the daemon's; a nightly's `#![feature]` fails with rustc's error and a note
-    naming both releases, and no build is cargo's."""
+    edits are the daemon's; a nightly's `#![feature]` builds, an error in it fails with a note
+    naming both toolchains, and no build is cargo's."""
     if WINDOWS or not shutil.which("rustup"):
         return
     env = base_env(os.path.join(work, "home-pinned"))
@@ -935,10 +939,16 @@ def pinned(work, check):
         _, edited = side.cargo("run")
         how = how_built(edited.stderr)
         check("and its edit is the daemon's", edited.returncode == 0 and how == "daemon" and "pinned 48" in edited.stdout, f"{how[:90]}; {edited.stderr.strip()[-300:]!r}")
+    # blaze's toolchain is a nightly (docs/toolchain.md): a nightly's `#![feature]` builds,
+    # and what fails says which toolchain built it in place of the project's.
     side = project("featured", "1.101.0-nightly", "#![feature(never_type)]\nfn main() {\n    let _: Option<!> = None;\n}\n")
     _, featured = side.cargo("build")
-    said = "E0554" in featured.stderr and "in place of 1.101.0-nightly, which the project's rust-toolchain file names" in featured.stderr
-    check("a nightly's `#![feature]` fails with rustc's error and a note naming both releases, and no cargo", featured.returncode == 101 and said and "building with cargo" not in featured.stderr, f"exit {featured.returncode}, {featured.stderr.strip()[-400:]!r}")
+    said = "not rustc 1.101.0-nightly (0000000 2026-01-01), which the project's rust-toolchain file names" in featured.stderr
+    check("a nightly's `#![feature]` builds, with a note naming both toolchains, and no cargo", featured.returncode == 0 and said and not by_rustc(featured.stderr), f"exit {featured.returncode}, {featured.stderr.strip()[-400:]!r}")
+    open(os.path.join(side.ws, "src/main.rs"), "a").write("\nfn broken() -> u32 { \"text\" }\n")
+    _, failed = side.cargo("build")
+    said = "error[E0308]" in failed.stderr and "blaze built this with its own toolchain" in failed.stderr and "not 1.101.0-nightly (0000000 2026-01-01), which the project's rust-toolchain file names" in failed.stderr
+    check("and an error in it fails with the error and a note naming both toolchains, and no cargo", failed.returncode == 101 and said and not by_rustc(failed.stderr), f"exit {failed.returncode}, {failed.stderr.strip()[-400:]!r}")
     side.cargo("stop")
 
 
@@ -998,7 +1008,7 @@ def own_toolchain(work, check):
     side = Bare(ws, env, True)
     _, said = side.cargo("toolchain")
     check("with no rustup and no Rust on the path, blaze builds with its own copy of its release",
-          said.returncode == 0 and f"blaze's own copy at {own}" in said.stdout and "Downloading" not in said.stderr,
+          said.returncode == 0 and said.stdout.strip().endswith(f", at {own}") and "rustup's copy" not in said.stdout and "Downloading" not in said.stderr,
           f"exit {said.returncode}, {said.stdout.strip()!r} {said.stderr.strip()[-300:]!r}")
     _, cold = side.cargo("run")
     check("and `blaze run` builds and runs the program with it", cold.returncode == 0 and "own 42" in cold.stdout,
@@ -1280,14 +1290,17 @@ def abuse(work, ws, tree, env, check, status, alive):
     pid = status()[0]
     seen = next((line for line in older.cargo("status")[1].stdout.splitlines() if line.startswith("daemon:")), "")
     check("status by another build says the daemon is another build, and leaves it", "another build of ra-jit" in seen and status()[0] == pid, seen)
+    # With no cargo to build in its place (docs/no-rustc.md), the build replaces the daemon
+    # and is the new one's.
     edit("skew")
     _, skewed = older.cargo("run", "skew")
-    said = how_built(skewed.stderr)
-    check("a build by another build of ra-jit is cargo's, says why, and replaces the daemon", skewed.returncode == 0 and greets(skewed.stdout, "tree0 skew") and "another build of ra-jit" in said and status(older)[0] not in (None, pid) and not alive(pid), said)
+    said, newer = how_built(skewed.stderr), status(older)[0]
+    check("a build by another build of ra-jit replaces the daemon and is the new one's", skewed.returncode == 0 and greets(skewed.stdout, "tree0 skew") and said == "daemon" and not by_rustc(skewed.stderr) and newer not in (None, pid) and not alive(pid), f"{said}, pid {pid} then {newer}")
     wait_warm(older, ws)
     edit("back")
     _, back = here.cargo("run", "back")
-    check("and the first build of ra-jit replaces that one the same way", back.returncode == 0 and greets(back.stdout, "tree0 back") and "another build of ra-jit" in how_built(back.stderr) and status()[0] is not None, how_built(back.stderr))
+    said, again = how_built(back.stderr), status()[0]
+    check("and the first build of ra-jit replaces that one the same way", back.returncode == 0 and greets(back.stdout, "tree0 back") and said == "daemon" and not by_rustc(back.stderr) and again not in (None, newer) and not alive(newer), f"{said}, pid {newer} then {again}")
     wait_warm(here, ws)
 
     stranger(env["RA_JIT_HOME"], check)
