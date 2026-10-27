@@ -1016,9 +1016,6 @@ each one's section: what `[Unreleased]` had, and the title of each change merged
 
 ### Fixed
 
-- A load refused for configuration is retried on the next build, so editing or deleting
-  `.cargo/config.toml` no longer leaves `cargo blaze run` reporting an old refusal until
-  `cargo blaze stop` (#597). Reported by @enricoschaaf.
 - A whole build of other features or flags no longer leaks into the next: every worker linked
   its programs into one `target/ra-jit/whole/<name>`, so after `cargo blaze run --features
   loud` a plain `cargo blaze run`, whose worker had nothing edited to build again, installed
@@ -1809,6 +1806,9 @@ each one's section: what `[Unreleased]` had, and the title of each change merged
   64.4 s and 64.3 s before, 58.0 s and 57.5 s after.
 - `blaze disable` removes the `bin` directory of cargo's home that `enable` made for the links
   of `cargo fmt` and `cargo clippy`, when nothing else is in it: the home is as it was.
+- A load refused for configuration is retried on the next build, so editing or deleting
+  `.cargo/config.toml` no longer leaves `cargo blaze run` reporting an old refusal until
+  `cargo blaze stop` (#597). Reported by @enricoschaaf.
 
 ## [0.1.0] - 2026-10-20
 
