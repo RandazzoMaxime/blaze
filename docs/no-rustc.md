@@ -477,7 +477,7 @@ small workspace (`harness/norustc/fixture`: a program with an `asm!` block, a li
 tests, doctests and features the root package uses through another library, a proc macro, and a
 path dependency outside the workspace with a build script) through a copy of the toolchain whose
 rustc, rustdoc and cargo log every run, in five scenarios: a cold build, edits, tests, doctests
-and check. A count above `harness/norustc/baseline.json` fails the queue; a lower one says to
+and check. A count above `harness/norustc/baseline.json` fails the release train; a lower one says to
 lower it (`norustc.py --record`). The baselines are CI's: a 96-core dev host counts more, its
 spares asking more. `harness/rustcsites.py`, in the fmt job, counts the places in `crates/` that
 start rustc, rustdoc or cargo, or read which to start, per file against
