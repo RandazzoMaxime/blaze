@@ -233,7 +233,10 @@ fn native(db: &RootDatabase, program: &[Crate], target: &Target) -> Native {
             .flat_map(|(_, module)| module.scope(db).extern_blocks())
             .flat_map(|block| AttrFlags::native_libs(db, block).iter().cloned());
         native.libs.extend(attributes.collect::<Vec<_>>());
-        let asked = asked_by_script(db, krate, target);
+        // A `cdylib` takes `rustc-cdylib-link-arg`; a proc macro is linked shared too, but
+        // is not one.
+        let cdylib = target.shared && !krate.data(db).target_kind.is_proc_macro();
+        let asked = asked_by_script(db, krate, target, cdylib);
         native.libs.extend(asked.libs);
         native.search.extend(asked.search);
         // As cargo has it: a script's arguments are for its own package's targets.
@@ -251,8 +254,14 @@ fn native(db: &RootDatabase, program: &[Crate], target: &Target) -> Native {
 }
 
 /// What the build script of `krate`'s package printed for the link, as cargo passes it to
-/// rustc: `rustc-link-lib`, `rustc-link-search`, `rustc-flags` and `rustc-link-arg`.
-fn asked_by_script(db: &RootDatabase, krate: base_db::Crate, target: &Target) -> Native {
+/// rustc: `rustc-link-lib`, `rustc-link-search`, `rustc-flags`, `rustc-link-arg`, and
+/// `rustc-link-arg-bins` for a binary or `rustc-cdylib-link-arg` for a `cdylib`.
+fn asked_by_script(
+    db: &RootDatabase,
+    krate: base_db::Crate,
+    target: &Target,
+    cdylib: bool,
+) -> Native {
     let mut asked = Native::default();
     let Some(out_dir) = krate.env(db).get("OUT_DIR") else { return asked };
     let printed = crate::cargo::script::printed(Path::new(&out_dir));
@@ -264,7 +273,11 @@ fn asked_by_script(db: &RootDatabase, krate: base_db::Crate, target: &Target) ->
         match key {
             "rustc-link-lib" => asked.libs.extend(lib_of(value)),
             "rustc-link-search" => asked.search.extend(target.search(value)),
-            "rustc-link-arg" | "rustc-link-arg-bins" => asked.args.push(value.to_owned()),
+            "rustc-link-arg" => asked.args.push(value.to_owned()),
+            "rustc-link-arg-bins" if !cdylib => asked.args.push(value.to_owned()),
+            "rustc-cdylib-link-arg" | "rustc-link-arg-cdylib" if cdylib => {
+                asked.args.push(value.to_owned())
+            }
             "rustc-flags" => {
                 let mut flags = value.split_whitespace();
                 while let Some(flag) = flags.next() {

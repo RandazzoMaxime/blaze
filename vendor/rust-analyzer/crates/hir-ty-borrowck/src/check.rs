@@ -5,6 +5,7 @@
 
 use hir_def::hir::{BindingAnnotation, BindingId, ExprId, Pat, Statement};
 use rustc_hash::{FxHashMap, FxHashSet};
+use smallvec::SmallVec;
 use rustc_type_ir::{
     ClauseKind, OutlivesPredicate, RegionKind,
     inherent::{GenericArgs as _, IntoKind, Region as _},
@@ -132,7 +133,7 @@ pub(super) fn check<'db>(
         }
         for loan in &loans.loans {
             let points: Vec<usize> =
-                values.values[loan.region].iter().filter(|&it| it < cfg.points).collect();
+                values.points_of(loan.region).iter().filter(|&it| it < cfg.points).collect();
             eprintln!(
                 "loan {:?} {:?} at {:?} region {} points {points:?}",
                 loan.local, loan.projection, loan.location, loan.region
@@ -1126,6 +1127,11 @@ impl<'a, 'db> Checker<'a, '_, 'db> {
     fn consume_rvalue(&mut self, location: Location, rvalue: &Rvalue, span: MirSpan) {
         match rvalue {
             Rvalue::Ref(..) if self.loans.promoted.contains(&location) => (),
+            // Lowering computes `offset_of!` as the address of the field of a value at address
+            // 0, where rustc has `NullOp::OffsetOf`, which accesses no place.
+            Rvalue::Ref(..)
+                if matches!(span, MirSpan::ExprId(expr)
+                    if matches!(self.ctx.store[expr], hir_def::hir::Expr::OffsetOf(_))) => {}
             Rvalue::Ref(kind, place) => {
                 let place = PlaceRef::of(place);
                 let (access, depth, action) = match kind {
@@ -1311,7 +1317,11 @@ impl<'a, 'db> Checker<'a, '_, 'db> {
         access: Access,
         depth: Depth,
     ) -> bool {
-        let in_scope: Vec<usize> = self.in_scope.iter().collect();
+        // Only a loan of the place's local can conflict with it; `of_local` lists them in the
+        // order they were made, the order of `in_scope`.
+        let Some(of_local) = self.loans.of_local.get(&place.local) else { return false };
+        let in_scope: SmallVec<[usize; 4]> =
+            of_local.iter().copied().filter(|&id| self.in_scope.contains(id)).collect();
         for id in in_scope {
             let loan = &self.loans.loans[id];
             if !places_conflict(
