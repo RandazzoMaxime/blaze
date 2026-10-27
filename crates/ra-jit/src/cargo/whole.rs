@@ -147,12 +147,18 @@ pub(super) fn test(asked: &Invocation) -> anyhow::Result<i32> {
         return Ok(FAILED);
     }
     compiling(asked, &programs);
-    // What an integration test's `env!` reads to run a binary of its package.
-    let places: BTreeMap<String, String> = programs
+    // What an integration test's `env!` reads to run a binary of its package, and the scratch
+    // directory cargo makes for the integration tests and benchmarks, `target/tmp`. The whole
+    // build gives one environment to all its crates, so a program sees it too, where cargo's
+    // `env!` of it would not compile.
+    let mut places: BTreeMap<String, String> = programs
         .iter()
         .filter(|it| it.kind == Kind::Bin && !it.test)
         .map(|it| (format!("CARGO_BIN_EXE_{}", it.name), it.executable.display().to_string()))
         .collect();
+    let scratch = metadata.target_directory.as_std_path().join("tmp");
+    _ = std::fs::create_dir_all(&scratch);
+    places.insert("CARGO_TARGET_TMPDIR".to_owned(), scratch.display().to_string());
     let (units, others): (Vec<Program>, Vec<Program>) = programs.into_iter().partition(unit);
     let checkouts = [
         checkout(asked, &cwd, &metadata, &others, false, places),
