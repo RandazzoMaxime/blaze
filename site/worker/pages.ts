@@ -12,6 +12,7 @@
 import buildJson from '../.gen/build.json';
 import pagesJson from '../.gen/pages.json';
 import { currentUser, hasSessionCookie, isAdmin } from './auth';
+import { outer } from './base';
 import type { Env } from './env';
 import { csp, methodNotAllowed, plain } from './http';
 import { renderPage, type CommentRow, type Discussion } from './renderer';
@@ -138,7 +139,8 @@ async function anonymous(request: Request, env: Env, ctx: ExecutionContext, url:
 	// missing, where the build hash still moves the key. `s`: sign-in changes the markup (the thread's sign-in link).
 	const worker = env.CF_VERSION?.id || 'dev';
 	const q = new URLSearchParams({ v: String(version), b: BUILD, w: worker, s: signIn ? '1' : '0' });
-	const key = new Request(`${url.origin}${page.url}?${q}`, { method: 'GET' });
+	// Keyed by the page's real URL (under the base), so no other ix.dev worker's cache entry can share it.
+	const key = new Request(`${url.origin}${outer(page.url)}?${q}`, { method: 'GET' });
 	const cache = caches.default;
 	const hit = await cache.match(key);
 	// The browser revalidates every time (no-cache, varying on the cookie): once the reader signs in, they must get

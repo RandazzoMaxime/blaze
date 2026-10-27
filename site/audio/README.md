@@ -107,7 +107,7 @@ localStorage). With focus in the player, Space or k plays and pauses, Left and R
 is highlighted and, from the word timings and the CSS Custom Highlight API, the word being said; with
 `prefers-reduced-motion` the word highlight is off and scrolling is instant. Each block has a "play from here" button
 beside its comment button. Nothing plays until the reader presses something. The page CSP allows `media-src 'self'`
-(worker/http.ts and static/_headers).
+(worker/http.ts `csp`, for worker pages and static files alike).
 
 Format: Opus in WebM, mono, 32 kb/s. Chrome, Firefox and Safari 17.4+ (macOS and iOS) play it; Opus in Ogg needs
 Safari 18.4.
