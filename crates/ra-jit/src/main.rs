@@ -10857,11 +10857,7 @@ impl Program {
     /// Where a build for `wanted` goes, the program's own place without it. A whole build is
     /// linked by the worker's own line, which no client names: the one of the executable
     /// asked for, from the object asked for, which a checkout read as another has its own of.
-    fn outputs(
-        &mut self,
-        db: &RootDatabase,
-        wanted: Option<&Outputs>,
-    ) -> anyhow::Result<Outputs> {
+    fn outputs(&mut self, db: &RootDatabase, wanted: Option<&Outputs>) -> anyhow::Result<Outputs> {
         let mut wanted = wanted.cloned().unwrap_or_else(|| Outputs::of(&self.args));
         let Some(exe) = wanted.exe.clone() else { return Ok(wanted) };
         if let Some(cmd) = &wanted.link_cmd {
