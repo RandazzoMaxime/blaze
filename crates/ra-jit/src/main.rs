@@ -6487,8 +6487,12 @@ fn build_batch(db: &RootDatabase, args: Args) -> anyhow::Result<()> {
 /// Leaves `said`, the errors in the source a worker found as it loaded the workspace, for
 /// the daemon to fail each build with.
 fn errors_for_the_daemon(args: &Args, said: &errors::Said) -> anyhow::Result<()> {
+    // Whole or not at all: the daemon reads the file as soon as it is there.
     if let Some(socket) = &args.socket {
-        std::fs::write(cargo::daemon::errors_beside(socket), serde_json::to_string(said)?)?;
+        let errors = cargo::daemon::errors_beside(socket);
+        let writing = errors.with_extension("writing");
+        std::fs::write(&writing, serde_json::to_string(said)?)?;
+        std::fs::rename(&writing, &errors)?;
     }
     Ok(())
 }
