@@ -4,8 +4,11 @@
 //! One module per backend feature area, so a bisected culprit names the area.
 // Deref patterns and 128-bit variable arguments are unstable: the cases are for a nightly
 // toolchain only.
-#![cfg_attr(feature = "nightly", feature(deref_patterns, c_variadic_int128))]
-#![cfg_attr(feature = "nightly", allow(incomplete_features))]
+#![cfg_attr(
+    feature = "nightly",
+    feature(deref_patterns, c_variadic_int128, portable_simd, core_intrinsics)
+)]
+#![cfg_attr(feature = "nightly", allow(incomplete_features, internal_features))]
 
 pub mod stabilized;
 
@@ -1104,6 +1107,93 @@ pub mod simd {
             vst1q_u8(out.as_mut_ptr(), vsubq_u8(z, greater));
             out
         }
+    }
+}
+
+/// The portable SIMD intrinsics that are lane by lane, called as `core::simd` does, with the
+/// lanes at their edges: the least integer, zero, shifts of zero and of one less than the
+/// width, NaN and negative zero.
+#[cfg(feature = "nightly")]
+pub mod simd_lanes {
+    use core::intrinsics::simd::*;
+    use std::simd::{Simd, ToBytes};
+
+    pub fn negated(a: Simd<i32, 4>, b: Simd<f64, 2>) -> ([i32; 4], [f64; 2]) {
+        unsafe { (simd_neg(a).to_array(), simd_neg(b).to_array()) }
+    }
+    pub fn rounded(a: Simd<f32, 8>) -> [[f32; 8]; 4] {
+        unsafe {
+            [simd_fsqrt(a), simd_floor(a), simd_ceil(a), simd_fabs(a)].map(|it| it.to_array())
+        }
+    }
+    pub fn rounded_wide(a: Simd<f64, 4>) -> [[f64; 4]; 4] {
+        unsafe {
+            [simd_fsqrt(a), simd_floor(a), simd_ceil(a), simd_fabs(a)].map(|it| it.to_array())
+        }
+    }
+    pub fn leading(a: Simd<u8, 8>, b: Simd<i64, 2>) -> ([u8; 8], [i64; 2]) {
+        unsafe { (simd_ctlz(a).to_array(), simd_ctlz(b).to_array()) }
+    }
+    pub fn funnel(
+        high: Simd<u32, 4>,
+        low: Simd<u32, 4>,
+        shift: Simd<u32, 4>,
+    ) -> [[u32; 4]; 2] {
+        unsafe {
+            [simd_funnel_shl(high, low, shift), simd_funnel_shr(high, low, shift)]
+                .map(|it| it.to_array())
+        }
+    }
+    pub fn funnel_bytes(high: Simd<u8, 4>, low: Simd<u8, 4>, shift: Simd<u8, 4>) -> [[u8; 4]; 2] {
+        unsafe {
+            [simd_funnel_shl(high, low, shift), simd_funnel_shr(high, low, shift)]
+                .map(|it| it.to_array())
+        }
+    }
+    pub fn bytes(a: Simd<u32, 4>, b: Simd<u16, 2>, c: Simd<u8, 4>) -> ([[u32; 4]; 3], [u16; 2], [u8; 4]) {
+        unsafe {
+            (
+                [simd_bswap(a), simd_bitreverse(a), simd_cttz(a)].map(|it| it.to_array()),
+                simd_bswap(b).to_array(),
+                simd_bswap(c).to_array(),
+            )
+        }
+    }
+    pub fn remainder(a: f32, b: f32, c: f64, d: f64) -> (f32, f64) {
+        (core::intrinsics::frem_algebraic(a, b), core::intrinsics::frem_algebraic(c, d))
+    }
+
+    pub fn run() -> String {
+        let floats = Simd::from_array([4.0, -2.5, 2.5, -0.0, f32::NAN, 1e-3, 7.75, -7.5]);
+        let doubles = Simd::from_array([2.0, -1.5, 0.5, f64::INFINITY]);
+        format!(
+            "{:?} {:?} {:?} {:?} {:?} {:?} {:?} {:?} {:?}",
+            negated(Simd::from_array([i32::MIN, -3, 0, 7]), Simd::from_array([-0.0, 1.5])),
+            rounded(floats).map(|it| it.map(f32::to_bits)),
+            rounded_wide(doubles).map(|it| it.map(f64::to_bits)),
+            leading(Simd::from_array([0, 1, 2, 3, 0x40, 0x7f, 0x80, 0xff]), Simd::from_array([0, -1])),
+            funnel(
+                Simd::from_array([0x8000_0001, 0xdead_beef, 0x1234_5678, u32::MAX]),
+                Simd::from_array([0x0000_0003, 0x0bad_f00d, 0x9abc_def0, 0]),
+                Simd::from_array([0, 31, 4, 17]),
+            ),
+            funnel_bytes(
+                Simd::from_array([0x81, 0xf0, 0x0f, 0xff]),
+                Simd::from_array([0x03, 0x0f, 0xa5, 0x00]),
+                Simd::from_array([0, 7, 3, 1]),
+            ),
+            remainder(7.5, 2.0, -9.25, 4.0),
+            bytes(
+                Simd::from_array([0x1234_5678, 0, 0x8000_0000, 0x00ff_0001]),
+                Simd::from_array([0xabcd, 0x0100]),
+                Simd::from_array([1, 2, 3, 0xff]),
+            ),
+            // A vector of one lane by value: `to_be_bytes` takes `self`.
+            (
+                Simd::from_array([0x0102_0304u32]).to_be_bytes(),
+                Simd::<u16, 2>::from_le_bytes(Simd::from_array([1, 2, 3, 4])),
+            ),
+        )
     }
 }
 

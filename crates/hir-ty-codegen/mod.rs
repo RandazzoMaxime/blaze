@@ -7964,8 +7964,8 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
                     _ => PassMode::Cast(types::I64),
                 }
             }
-            BackendRepr::SimdVector { count, .. } => {
-                self.rust_simd_pass_mode(layout, count, is_ret)?
+            BackendRepr::SimdVector { element, count } => {
+                self.rust_simd_pass_mode(layout, element, count, is_ret)?
             }
             _ => unsupported!("abi of {:?}", layout.backend_repr),
         })
@@ -7979,6 +7979,7 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
     fn rust_simd_pass_mode(
         &self,
         layout: &Layout,
+        element: Scalar,
         count: rustc_abi::BackendLaneCount,
         is_ret: bool,
     ) -> Result<PassMode> {
@@ -7987,11 +7988,21 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
         if !matches!(target.arch, Arch::X86_64 | Arch::Aarch64) || size > 16 {
             return Ok(PassMode::Indirect);
         }
-        // LLVM makes a vector of one lane its scalar, in that scalar's register, except where
-        // the one-lane type is legal: AArch64's `v1i64` and `v1f64` (NEON's `*x1_t` of 64-bit
-        // lanes) are in a D register, as the 64-bit vectors below are.
-        if count.as_u64() == 1 && !(target.arch == Arch::Aarch64 && size == 8) {
-            unsupported!("a SIMD vector of one lane by value in the Rust ABI");
+        if count.as_u64() == 1 {
+            let lane = self.scalar(element)?.ty;
+            match target.arch {
+                // x86-64's LLVM makes a vector of one lane its scalar, in that scalar's
+                // register under either convention: an integer's or pointer's in a general
+                // register, a float's in an XMM register, as the lane alone would be.
+                Arch::X86_64 if lane != types::I128 => return Ok(PassMode::Cast(lane)),
+                // AArch64's LLVM has `v1i64` and `v1f64` (NEON's `*x1_t` of 64-bit lanes) in
+                // a D register, as the 64-bit vectors below are, and widens a narrower lane
+                // to a 64-bit vector whose first lane it is: of a 32-bit lane that is the low
+                // 32 bits of the register, as an `f32` is in its S register.
+                Arch::Aarch64 if size == 4 => return Ok(PassMode::Cast(types::F32)),
+                Arch::Aarch64 if size == 8 => (),
+                _ => unsupported!("a SIMD vector of one {lane:?} lane by value in the Rust ABI"),
+            }
         }
         if target.call_conv == isa::CallConv::WindowsFastcall {
             // LLVM's Windows convention passes an argument of vector type by reference and
@@ -14407,14 +14418,54 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
                 }
                 self.builder.ins().store(MEM, acc, dst, 0);
             }
-            ("simd_ctpop", [arg]) => {
+            (
+                "simd_ctpop" | "simd_ctlz" | "simd_cttz" | "simd_bswap" | "simd_bitreverse"
+                | "simd_neg" | "simd_fabs" | "simd_fsqrt" | "simd_floor" | "simd_ceil",
+                [arg],
+            ) => {
                 let (src, ty) = self.operand(arg)?;
                 let (lane, count) = self.simd_lanes(ty)?;
+                let float = lane.ty.is_float();
+                match name {
+                    "simd_ctpop" | "simd_ctlz" | "simd_cttz" | "simd_bswap" | "simd_bitreverse"
+                        if float =>
+                    {
+                        unsupported!("`{name}` of floats")
+                    }
+                    "simd_fabs" | "simd_fsqrt" | "simd_floor" | "simd_ceil" if !float => {
+                        unsupported!("`{name}` of integers")
+                    }
+                    // Cranelift rounds and takes square roots of 32- and 64-bit floats only.
+                    "simd_fsqrt" | "simd_floor" | "simd_ceil"
+                        if lane.ty != types::F32 && lane.ty != types::F64 =>
+                    {
+                        unsupported!("`{name}` of {:?} lanes", lane.ty)
+                    }
+                    _ => (),
+                }
                 let values: Vec<Value> = (0..count)
                     .map(|i| {
                         let offset = (i * lane.ty.bytes() as u64) as i32;
                         let value = self.builder.ins().load(lane.ty, MEM, src, offset);
-                        self.builder.ins().popcnt(value)
+                        let ins = self.builder.ins();
+                        match name {
+                            "simd_ctpop" => ins.popcnt(value),
+                            // A lane of zero has as many leading zeros as it has bits, as
+                            // LLVM's `ctlz` with `is_zero_poison` false, which rustc emits.
+                            "simd_ctlz" => ins.clz(value),
+                            "simd_cttz" => ins.ctz(value),
+                            // A byte is its own byte swap; Cranelift swaps 16 bits and more.
+                            "simd_bswap" if lane.ty.bits() == 8 => value,
+                            "simd_bswap" => ins.bswap(value),
+                            "simd_bitreverse" => ins.bitrev(value),
+                            // Integer lanes wrap, as rustc's `sub 0, x`.
+                            "simd_neg" if float => ins.fneg(value),
+                            "simd_neg" => ins.ineg(value),
+                            "simd_fabs" => ins.fabs(value),
+                            "simd_fsqrt" => ins.sqrt(value),
+                            "simd_floor" => ins.floor(value),
+                            _ => ins.ceil(value),
+                        }
                     })
                     .collect();
                 for (i, value) in values.into_iter().enumerate() {
@@ -14424,6 +14475,44 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
                         dst,
                         (i as u64 * lane.ty.bytes() as u64) as i32,
                     );
+                }
+            }
+            ("simd_funnel_shl" | "simd_funnel_shr", [high, low, shift]) => {
+                let (high, ty) = self.operand(high)?;
+                let (low, _) = self.operand(low)?;
+                let (shift, _) = self.operand(shift)?;
+                let (lane, count) = self.simd_lanes(ty)?;
+                if lane.ty.is_float() {
+                    unsupported!("`{name}` of floats");
+                }
+                let bits = lane.ty.bits() as i64;
+                let left = name == "simd_funnel_shl";
+                // Each lane is `high:low` shifted by the shift's lane modulo the lane's width,
+                // as LLVM's `fshl`/`fshr` that rustc emits (a shift at or past the width is
+                // UB in Rust). Cranelift shifts by the count modulo the width too, so the
+                // half shifted the other way goes one bit first and then by `width - 1 - s`,
+                // which is `s ^ (width - 1)`: a shift of zero leaves the other half out.
+                let values: Vec<Value> = (0..count)
+                    .map(|i| {
+                        let offset = (i * lane.ty.bytes() as u64) as i32;
+                        let h = self.builder.ins().load(lane.ty, MEM, high, offset);
+                        let l = self.builder.ins().load(lane.ty, MEM, low, offset);
+                        let s = self.builder.ins().load(lane.ty, MEM, shift, offset);
+                        let b = &mut self.builder;
+                        let s = b.ins().band_imm(s, bits - 1);
+                        let rest = b.ins().bxor_imm(s, bits - 1);
+                        let (h, l) = if left {
+                            let l = b.ins().ushr_imm(l, 1);
+                            (b.ins().ishl(h, s), b.ins().ushr(l, rest))
+                        } else {
+                            let h = b.ins().ishl_imm(h, 1);
+                            (b.ins().ishl(h, rest), b.ins().ushr(l, s))
+                        };
+                        b.ins().bor(h, l)
+                    })
+                    .collect();
+                for (i, value) in values.into_iter().enumerate() {
+                    self.builder.ins().store(MEM, value, dst, i as i32 * lane.ty.bytes() as i32);
                 }
             }
             ("simd_reduce_all" | "simd_reduce_any", [arg]) => {
@@ -14557,8 +14646,8 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
             (
                 "copysignf32" | "copysignf64" | "minnumf32" | "minnumf64" | "maxnumf32"
                 | "maxnumf64" | "powf32" | "powf64" | "fadd_fast" | "fsub_fast" | "fmul_fast"
-                | "fdiv_fast" | "fadd_algebraic" | "fsub_algebraic" | "fmul_algebraic"
-                | "fdiv_algebraic",
+                | "fdiv_fast" | "frem_fast" | "fadd_algebraic" | "fsub_algebraic"
+                | "fmul_algebraic" | "fdiv_algebraic" | "frem_algebraic",
                 [a, b],
             ) => {
                 let (l, scalar) = self.load_scalar(a)?;
@@ -14585,6 +14674,13 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
                     "fadd_fast" | "fadd_algebraic" => self.builder.ins().fadd(l, r),
                     "fsub_fast" | "fsub_algebraic" => self.builder.ins().fsub(l, r),
                     "fmul_fast" | "fmul_algebraic" => self.builder.ins().fmul(l, r),
+                    // rustc emits `frem`, which LLVM lowers to C's `fmod`, as `%` is.
+                    "frem_fast" | "frem_algebraic" => {
+                        if !single && scalar.ty != types::F64 {
+                            unsupported!("intrinsic `{name}` on {:?}", scalar.ty);
+                        }
+                        self.float_binary_op(&BinOp::Rem, l, r)?
+                    }
                     _ => self.builder.ins().fdiv(l, r),
                 };
                 self.builder.ins().store(MEM, value, dst, 0);
