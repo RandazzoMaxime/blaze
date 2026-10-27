@@ -226,11 +226,6 @@ impl<'a, 'db> Cx<'_, 'a, 'db> {
         span
     }
 
-    /// The span of `node`, if it is written in the file.
-    pub(crate) fn span_of(&self, node: &SyntaxNode) -> Option<Span> {
-        Some(self.span(self.range(node)?))
-    }
-
     /// The span rustc gives an item: from after its attributes and doc comments.
     pub(crate) fn item_span(&self, node: &SyntaxNode) -> Option<Span> {
         let range = self.range(node)?;
@@ -550,7 +545,7 @@ impl<'a, 'db> Cx<'_, 'a, 'db> {
         let (kind, name, call_site) = match &loc.kind {
             MacroCallKind::FnLike { .. } => {
                 let call = ast::MacroCall::cast(node.value.clone())?;
-                let name = call.path()?.segment()?.name_ref()?.text().to_string();
+                let name = call.path()?.segment()?.name_ref()?.text().to_owned();
                 (MacroKind::Bang, name, node.value.text_range())
             }
             MacroCallKind::Derive { derive_index, .. } => {
@@ -645,7 +640,7 @@ impl State<'_, '_> {
                 let Some(level) = meta
                     .path()
                     .and_then(|it| it.as_single_name_ref())
-                    .and_then(|it| Level::of_attr(&it.text()))
+                    .and_then(|it| Level::of_attr(it.text()))
                 else {
                     return ControlFlow::Continue(());
                 };

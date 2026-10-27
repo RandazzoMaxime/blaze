@@ -211,10 +211,6 @@ impl Sugg {
         Sugg::NonParen(format!("{{ {self} }}"))
     }
 
-    pub(crate) fn addr(self) -> Sugg {
-        make_unop("&", self)
-    }
-
     pub(crate) fn deref(self) -> Sugg {
         make_unop("*", self)
     }

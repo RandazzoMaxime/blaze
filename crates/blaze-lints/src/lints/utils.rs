@@ -28,7 +28,7 @@ pub(crate) fn method_call(cx: &Cx<'_, '_, '_>, expr: &ast::Expr) -> Option<Metho
         return None;
     }
     let name_ref = call.name_ref()?;
-    Some(MethodCall { name: name_ref.text().to_string(), name_ref, receiver, args })
+    Some(MethodCall { name: name_ref.text().to_owned(), name_ref, receiver, args })
 }
 
 /// `Option` or `Result`, when `ty`, its references peeled, is one of them.
@@ -98,12 +98,6 @@ pub(crate) fn enclosing_body(node: &SyntaxNode) -> Option<SyntaxNode> {
         }
         ast::Static::cast(it).and_then(|it| it.body()).map(|it| it.syntax().clone())
     })
-}
-
-/// The range from the end of `a` to the end of `b`, as the file has them.
-pub(crate) fn between_ends(cx: &Cx<'_, '_, '_>, a: &SyntaxNode, b: &SyntaxNode) -> Option<TextRange> {
-    let (a, b) = (cx.range(a)?, cx.range(b)?);
-    (a.end() <= b.end()).then(|| TextRange::new(a.end(), b.end()))
 }
 
 /// `expr`, or what initialised the binding it names when that binding is not `mut`, as

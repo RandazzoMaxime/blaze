@@ -87,7 +87,7 @@ pub(crate) fn of(cx: &Cx<'_, '_, '_>, call: &ast::MacroCall) -> Option<FormatCal
     for arg in format_args.args() {
         let expr = arg.expr()?;
         if let Some(name) = arg.name() {
-            names.push((name.text().to_string(), args.len()));
+            names.push((name.text().to_owned(), args.len()));
         }
         args.push(expr);
     }

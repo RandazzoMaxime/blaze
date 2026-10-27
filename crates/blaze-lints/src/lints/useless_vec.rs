@@ -153,7 +153,7 @@ fn slice_use(cx: &Cx<'_, '_, '_>, path: &ast::PathExpr) -> bool {
     }
     let Some(call) = ast::MethodCallExpr::cast(parent) else { return false };
     let no_args = call.arg_list().is_some_and(|it| it.args().next().is_none());
-    let name = call.name_ref().map(|it| it.text().to_string());
+    let name = call.name_ref().map(|it| it.text().to_owned());
     no_args
         && call.receiver().is_some_and(|it| it.syntax() == &used)
         && name.is_some_and(|it| SLICE_METHODS.contains(&it.as_str()))

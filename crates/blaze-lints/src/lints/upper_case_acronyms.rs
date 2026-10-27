@@ -52,7 +52,7 @@ fn exported(item: &ast::Item) -> bool {
 fn check_name(cx: &mut Cx<'_, '_, '_>, at: &syntax::SyntaxNode, name: Option<ast::Name>, aggressive: bool) {
     let Some(name) = name else { return };
     let Some(range) = cx.range(name.syntax()) else { return };
-    let ident = name.text().to_string();
+    let ident = name.text().to_owned();
     let Some(replacement) = replacement(&ident, aggressive) else { return };
     let span = cx.span(range);
     cx.lint(LINT, at, span.clone(), format!("name `{ident}` contains a capitalized acronym")).suggestion(
