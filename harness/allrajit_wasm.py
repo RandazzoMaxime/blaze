@@ -7,7 +7,8 @@ threads and its caught panics, as wasm's panics abort, and the one built with
 standard library included, and linked by ra-jit (`--exe`) with the toolchain's `rust-lld`
 and the wasi-libc the toolchain ships (C, as glibc is on Linux). A wasm32-unknown-unknown
 `cdylib` is linked too (`--shared`), and a `#![no_std]` guest of a host with its own panic
-handler and simd128/relaxed-simd code, each export called with `wasmtime run --invoke`. Nothing
+handler and simd128/relaxed-simd code, each export called with `wasmtime run --invoke`; both
+are built again by `cargo blaze build`, with the `cargo-blaze` beside ra-jit. Nothing
 ra-jit could not compile may be left in a module. What each prints and how it exits, under
 `wasmtime run`, has to be what cargo's build of the same source does; the sizes of both are
 printed.
@@ -254,6 +255,22 @@ def ra_jit(root, crate, out, exe, target, store, *extra):
                 *extra], root, f"ra-jit {crate} ({target})", env)
 
 
+def cargo_blaze(root, what, store, runtime, target):
+    """`cargo blaze build` as a user runs it, the `cargo-blaze` beside ra-jit first on the path
+    and a daemon of its own, into a target directory apart from cargo's."""
+    env = {"PATH": os.path.dirname(os.path.abspath(RA_JIT)) + os.pathsep + os.environ["PATH"],
+           "RA_JIT_CACHE": store, "XDG_RUNTIME_DIR": runtime}
+    try:
+        ran, took = run(["cargo", "blaze", "build", "--target", target, "--target-dir", "blaze"],
+                        root, f"cargo blaze build of {what}", env)
+    finally:
+        subprocess.run(["cargo", "blaze", "stop"], cwd=root, capture_output=True,
+                       env={**os.environ, **env})
+    if not re.search(r"^\s*Finished .*\[blaze\]", ran.stderr, re.M):
+        raise SystemExit(f"FAIL: cargo blaze did not build {what} itself:\n{ran.stderr}")
+    return took
+
+
 def linked(ran, what):
     """How long ra-jit's link took, failing when it left something it could not compile."""
     said = re.search(r"^linked .* in (\S+), (\d+) functions in it blaze could not compile$",
@@ -283,6 +300,8 @@ def main():
         raise SystemExit(f"FAIL: no {WASMTIME} to run the modules with")
     work = scratch("ra-jit-allrajit-wasm-")
     store = os.path.join(work, "store")
+    runtime = os.path.join(work, "run")
+    os.makedirs(runtime, mode=0o700)
     passed = False
     lines = []
     try:
@@ -326,9 +345,17 @@ def main():
             lines.append(f"{what} ({UNKNOWN}): built and linked in {took:.2f} s, the standard "
                          f"library {std}, the link {link_took}, {len(calls)} calls as cargo's; "
                          f"{kib(ours)}, cargo's {kib(theirs)}")
+            took = cargo_blaze(root, what, store, runtime, UNKNOWN)
+            served = os.path.join(root, "blaze", UNKNOWN, "debug", f"{name}.wasm")
+            got = invoked(served, root, calls)
+            if got != expected:
+                raise SystemExit(f"FAIL: cargo blaze's {what} differs from cargo's:\n"
+                                 f"cargo:  {expected}\ncargo blaze: {got}")
+            lines.append(f"{what} by `cargo blaze build`: {took:.2f} s, {len(calls)} calls as "
+                         f"cargo's; {kib(served)}")
         print("\n".join(lines))
         print(f"PASS: {len(PROGRAMS)} {WASI} programs, a {UNKNOWN} cdylib and a no_std SIMD guest "
-              "with nothing of rustc's")
+              "with nothing of rustc's, the last two by `cargo blaze build` too")
         passed = True
     finally:
         if passed:
