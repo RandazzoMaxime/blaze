@@ -628,7 +628,7 @@ Every run of the workflow appends one line per platform to
 `docs/benchmarks/history/<platform>.jsonl` (`harness/benchhistory.py build`), whether or not the
 tables changed: the medians, spreads, who built each step, memory and store size of each project
 and phase, the platform, the machine and the run's link. The site's
-[/bench](https://ra-jit.ix.dev/bench) page charts those files, a platform and machine at a time,
+[/bench](https://ix.dev/blaze/bench) page charts those files, a platform and machine at a time,
 and the workflow starts the site's deploy after it commits.
 
 `benchhistory.py check` then compares the new line with the median of the last seven from the

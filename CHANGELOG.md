@@ -380,7 +380,7 @@ each one's section: what `[Unreleased]` had, and the title of each change merged
   every run, starts the site's deploy, and on a regression past the noise band opens (or
   comments on) an issue labelled `bench-regression` and fails. The live-edit latency workflow
   runs every night on main on a macOS arm64 runner and does the same with its history.
-- [ra-jit.ix.dev/bench](https://ra-jit.ix.dev/bench): the benchmark history over commits, from
+- [ix.dev/blaze/bench](https://ix.dev/blaze/bench): the benchmark history over commits, from
   `docs/benchmarks/history`: the latest run's table per project, and charts of each edit,
   the cold build, the daemon's peak memory, the store size and live edit-to-running latency
   ([#10](https://github.com/indexable-inc/ra-jit/issues/10)).
@@ -471,6 +471,12 @@ each one's section: what `[Unreleased]` had, and the title of each change merged
 
 ### Changed
 
+- The site moved to [ix.dev/blaze](https://ix.dev/blaze/). https://ra-jit.ix.dev and
+  https://blaze.ix.dev answer every path with a 301 to the same path and query under
+  https://ix.dev/blaze, so old links (the README's updates button, `/bench`, RFCs) keep
+  working. Every page, script, stylesheet, image, narration file and form sits under `/blaze`
+  (`Served` on `site` in `site/content/site.flecs`); pages carry a canonical URL and Open Graph
+  tags, `/blaze/sitemap.xml` lists them, and `/blaze/install.sh` serves `install.sh`.
 - No `cargo blaze` command is passed to cargo any more (Andrew, 2026-10-26: commands that are
   no builds "should go to us and not cargo"). `metadata`, `locate-project`, `verify-project`,
   `version` and `help` are blaze's own, from blaze-manifest, blaze-registry and blaze-resolve

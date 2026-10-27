@@ -105,7 +105,7 @@ from source the first time.
 ## Updates
 
 <p align="center">
-  <a href="https://ra-jit.ix.dev/updates?src=readme">
+  <a href="https://ix.dev/blaze/updates?src=readme">
     <picture>
       <source media="(prefers-color-scheme: dark)" srcset="docs/brand/signup-on-dark.svg">
       <img alt="Tell us you use blaze" src="docs/brand/signup-on-light.svg" height="36">

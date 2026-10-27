@@ -19,6 +19,9 @@ struct Description(text: string)        // <meta name="description">
 struct Number(value: i32)               // an RFC's number
 struct Nav(label: string, order: i32)   // a page linked from the top bar, left to right by order
 struct Link(label: string, href: string, order: i32) // an outside link in the top bar (children of nav)
+// Where the site is served, set on `site`: the origin and the path every page sits under (no trailing slash, or
+// empty for the root). A link written /rfcs/x becomes <base>/rfcs/x; canonical and og:url are origin + base + path.
+struct Served(origin: string, base: string)
 
 // Blocks. In a Doc, every block has a name: its path under the page is the anchor comments use.
 struct Lede(text: string)               // the opening paragraph, larger
