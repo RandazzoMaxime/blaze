@@ -5058,7 +5058,10 @@ impl<'a, 'db> ObjectCodegen<'a, 'db> {
         let sections = backend::sections_of_their_own()
             && isa.triple().binary_format == target_lexicon::BinaryFormat::Elf;
         let mut builder = ObjectBuilder::new(isa, "ra-jit", default_libcall_names())?;
-        builder.per_function_section(sections).per_data_object_section(sections);
+        // A wasm object is written from this one, a segment per piece of data aligned as its
+        // section is: a section shared by several has the largest alignment of them.
+        let data_sections = sections || Target::current().writes_wasm_objects();
+        builder.per_function_section(sections).per_data_object_section(data_sections);
         let mut module = ObjectModule::new(builder);
         let unwind = UnwindContext::new(&mut module).map_err(CodegenError::Backend)?;
         let built = start.elapsed();
