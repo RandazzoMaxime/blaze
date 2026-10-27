@@ -1189,8 +1189,8 @@ build`, no rustc base. See [the cold start](#the-cold-start-without-rustc).
   project-model's `OwnBuildScripts` hook, as `OwnMetadata` does for `cargo metadata`; what it
   cannot build or run fails the load, naming the package. `harness/resolve.py ctdeps`
   ([resolve.md](resolve.md)) holds what the load reads (cfgs, variables, `OUT_DIR`'s files,
-  the proc macros) to cargo's: equal on 9 of the 14, and on fd and helix too with the
-  build-script sandbox off, whose environment is not cargo's ([resolve.md](resolve.md)); biome
+  the proc macros) to cargo's: equal on 10 of the 14, and on fd too with the build-script
+  sandbox off, whose environment is not cargo's ([resolve.md](resolve.md)); biome
   stops at a syn-1 proc macro ra-jit cannot compile (#327), and zed and bun fail for both, at a
   program or path package the machine lacks. A cold `cargo blaze build` or `test` of the fixture or
   ripgrep now starts no cargo but the typed one ([the counts](#self-contained-no-rustup-no-cargo)).
