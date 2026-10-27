@@ -2305,6 +2305,45 @@ pub mod const_pointers {
     }
 }
 
+/// Constants whose raw pointer, of a type that says nothing of the pointee, points at
+/// pointers: std's `io::Error` of a message is a `NonNull<()>` to a `&str` and a kind.
+pub mod const_behind_raw {
+    use std::ptr::NonNull;
+
+    struct Message {
+        text: &'static str,
+        kind: u8,
+    }
+    struct Erased(NonNull<()>);
+    unsafe impl Sync for Erased {}
+
+    const fn erase(message: &'static Message) -> Erased {
+        Erased(NonNull::from_ref(message).cast())
+    }
+    const PROMOTED: Erased =
+        erase(const { &Message { text: "failed to fill whole buffer", kind: 3 } });
+    const NAMED: &Message = &Message { text: "a named one", kind: 4 };
+    const OF_NAMED: Erased = erase(NAMED);
+    static WORDS: [&str; 2] = ["two", "words"];
+    struct Raw<T>(*const T);
+    unsafe impl<T> Sync for Raw<T> {}
+    static OF_STATIC: Raw<[&'static str; 2]> = Raw(&raw const WORDS);
+    static TWICE: Raw<Raw<[&'static str; 2]>> = Raw(&raw const OF_STATIC);
+
+    fn shown(erased: &Erased) -> String {
+        let message = unsafe { erased.0.cast::<Message>().as_ref() };
+        format!("{}/{}", message.text, message.kind)
+    }
+
+    pub fn run() -> String {
+        use std::io::Read;
+        let eof = (&b""[..]).read_exact(&mut [0; 1]).unwrap_err();
+        let words = unsafe { &*(*TWICE.0).0 };
+        let (promoted, named) = (shown(&PROMOTED), shown(&OF_NAMED));
+        format!("{promoted} {named} {} {eof} {:?}", words.join(" "), eof.kind())
+    }
+}
+
 pub mod const_unsized_struct {
     #[repr(transparent)]
     pub struct Bytes {
