@@ -53,7 +53,15 @@ All of these are rustc's, written from `compiler/rustc_borrowck` at the pinned n
   `MovesFromPlace`: `(D(s), &t)` is an E0509 and an E0507. A move of a subslice of an array
   moves each of its elements, so `let [_y @ .., _, _] = a` after `let [_x, _, _] = a` uses a
   moved element, and so does assigning `a[2]` after moving it out, as rustc reads the array
-  to index it.
+  to index it. rustc buffers the E0382s of a function and the closures in it in one map,
+  keyed by the indices of the moves each is about, though each body numbers its moves from 0
+  (`BorrowckDiagnosticsBuffer::buffered_move_errors`). A closure is checked first, so a use
+  in the function whose moves have the numbers of an error the closure gave, of a place that
+  is a prefix of the closure's (the variable `_1` and the capture `_1.0`), is not reported,
+  and one of another place replaces the closure's: `drop(x); spawn(move || { drop(x);
+  drop(x); })` is one error, in the closure. ra-jit numbers each move as rustc's MIR would,
+  leaving out the moves its lowering adds (a capture copied into a local of the closure, an
+  operand moved into a temporary first, a drop), and names a capture as the closure's field.
 - Match guards (E0510): rustc fake-borrows, through every guard of a `match`, what its arms
   test and the references that and what they bind are behind, so a guard that assigns or
   mutably borrows one of them, closures included, could change which arm matches; assigning
