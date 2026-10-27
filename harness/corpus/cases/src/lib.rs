@@ -5075,6 +5075,22 @@ pub mod promoted_slices {
     }
 }
 
+/// `&mut [][..]` borrows an empty array mutably to index it, and rustc promotes a mutable
+/// borrow of an empty array, so the slice outlives the function (bun's `copies!`).
+pub mod promoted_empty_mut {
+    fn pick(v: &mut [u32], all: bool) -> &mut [u32] {
+        match all {
+            true => v,
+            false => &mut [][..],
+        }
+    }
+
+    pub fn run() -> (usize, usize) {
+        let mut v = [1, 2, 3];
+        (pick(&mut v, true).len(), pick(&mut v, false).len())
+    }
+}
+
 pub mod reified {
     #[derive(Debug)]
     pub struct W(u8, String);

@@ -598,6 +598,7 @@ fn main() {
     println!("repeated statics in_async {:?}", cases::repeated_statics::in_async());
     println!("type_ids downcasts {:?}", cases::type_id_hashes::downcasts());
     println!("promoted_slices {:?}", cases::promoted_slices::run());
+    println!("promoted_empty_mut {:?}", cases::promoted_empty_mut::run());
     println!("reified {:?}", cases::reified::run());
     println!("overloaded_unary {}", cases::overloaded_unary::run());
     println!("closure_layout {}", cases::closure_layout::run());

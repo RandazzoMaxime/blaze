@@ -180,6 +180,8 @@ All of these are rustc's, written from `compiler/rustc_borrowck` at the pinned n
   and `&Signals::EMPTY` though `Signals` holds an `Arc`. In a `static`'s value a static that is
   neither `extern` nor thread-local may be borrowed in a promoted constant
   (`static M: Meta = Meta::new(&[(&OPT, true)])`, nushell's `#[exp(..)]` tests).
+  A mutable borrow is promoted only of an empty array, the one an index or method call makes
+  of its receiver too (`&mut [][..]`, `[].iter_mut()`), as rustc's `validate_ref`.
   In a `const` or `static` item's value, a call of a `const fn` is promotable too
   (`Migrations::new(&[Migration::new("a")])`), as it is in rustc's const contexts, a method
   call and a block of items and a tail included: tracing's `fieldset!` names a field
