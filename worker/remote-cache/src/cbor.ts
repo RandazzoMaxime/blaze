@@ -104,7 +104,7 @@ function read(r: { bytes: Uint8Array; pos: number }, depth: number): Cbor {
     case 3: {
       const n = readArg(r, info);
       need(r, n);
-      const v = new TextDecoder("utf-8", { fatal: true }).decode(r.bytes.subarray(r.pos, r.pos + n));
+      const v = new TextDecoder("utf-8", { fatal: true, ignoreBOM: false }).decode(r.bytes.subarray(r.pos, r.pos + n));
       r.pos += n;
       return v;
     }

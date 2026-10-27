@@ -45,7 +45,7 @@ function put(token: TokenName | undefined, body: Uint8Array): Promise<Response> 
 
 async function putOk(token: TokenName, blobs: Blob[]): Promise<{ pack: string; blobs: number }> {
   const r = await put(token, await stream(blobs));
-  expect(r.status, await r.clone().text()).toBe(200);
+  expect(r.status, r.status === 200 ? "" : await r.clone().text()).toBe(200);
   return decode(new Uint8Array(await r.arrayBuffer())) as { pack: string; blobs: number };
 }
 
@@ -246,7 +246,7 @@ describe("/put refusals store nothing", () => {
     it(`refuses ${what} with ${status}`, async () => {
       const before = await stored();
       const r = await put("pubWrite", await stream(await blobs()));
-      expect(r.status, await r.clone().text()).toBe(status);
+      expect(r.status, r.status === 200 ? "" : await r.clone().text()).toBe(status);
       expect(await stored()).toBe(before);
     });
   }
