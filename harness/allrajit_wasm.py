@@ -6,7 +6,8 @@ threads and its caught panics, as wasm's panics abort, and the one built with
 `panic = "abort"`) are built by ra-jit for wasm32-wasip1 with every crate its own, the
 standard library included, and linked by ra-jit (`--exe`) with the toolchain's `rust-lld`
 and the wasi-libc the toolchain ships (C, as glibc is on Linux). A wasm32-unknown-unknown
-`cdylib` is linked too (`--shared`), each export called with `wasmtime run --invoke`. Nothing
+`cdylib` is linked too (`--shared`), and a `#![no_std]` guest of a host with its own panic
+handler and simd128/relaxed-simd code, each export called with `wasmtime run --invoke`. Nothing
 ra-jit could not compile may be left in a module. What each prints and how it exits, under
 `wasmtime run`, has to be what cargo's build of the same source does; the sizes of both are
 printed.
@@ -116,6 +117,88 @@ pub extern "C" fn allrajit_mix(a: u32, b: u32) -> u32 {
 }
 """
 CALLS = [("allrajit_count", ["1"]), ("allrajit_count", ["10"]), ("allrajit_mix", ["7", "35"])]
+# A host's guest as indexable-inc/wasm-host's are: `#![no_std]` with a panic handler of its own,
+# so that its standard library is core, compiler_builtins and alloc and not std, and SIMD
+# (simd128, relaxed-simd) through `core::arch::wasm32`.
+GUEST = r"""#![no_std]
+extern crate alloc;
+use alloc::vec::Vec;
+use core::alloc::{GlobalAlloc, Layout};
+use core::arch::wasm32::*;
+use core::cell::UnsafeCell;
+
+#[panic_handler]
+fn panic(_: &core::panic::PanicInfo) -> ! { unreachable() }
+
+struct Bump { heap: UnsafeCell<[u8; 1 << 16]>, used: UnsafeCell<usize> }
+unsafe impl Sync for Bump {}
+unsafe impl GlobalAlloc for Bump {
+    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+        let used = unsafe { &mut *self.used.get() };
+        let start = (*used + layout.align() - 1) & !(layout.align() - 1);
+        if start + layout.size() > 1 << 16 { return core::ptr::null_mut(); }
+        *used = start + layout.size();
+        unsafe { self.heap.get().cast::<u8>().add(start) }
+    }
+    unsafe fn dealloc(&self, _: *mut u8, _: Layout) {}
+}
+#[global_allocator]
+static HEAP: Bump = Bump { heap: UnsafeCell::new([0; 1 << 16]), used: UnsafeCell::new(0) };
+
+static TABLE: [u32; 16] = [3, 1, 4, 1, 5, 9, 2, 6, 5, 3, 5, 8, 9, 7, 9, 3];
+
+#[unsafe(no_mangle)]
+pub extern "C" fn guest_dot(a: i32, b: i32) -> i32 {
+    let x = i32x4(a, a.wrapping_add(1), a.wrapping_mul(3), a.wrapping_neg());
+    let p = i32x4_mul(x, i32x4_splat(b));
+    let s = i32x4_add(p, i32x4_shuffle::<3, 2, 1, 0>(p, p));
+    i32x4_extract_lane::<0>(s) ^ i32x4_extract_lane::<1>(s).rotate_left(7)
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn guest_sum(k: u32) -> u32 {
+    let mut acc = u32x4_splat(0);
+    for i in 0..4 {
+        let v = unsafe { v128_load(TABLE.as_ptr().add(i * 4).cast::<v128>()) };
+        acc = i32x4_add(acc, i32x4_mul(v, u32x4_splat(k)));
+    }
+    let lanes: Vec<u32> = (0..4).map(|i| match i {
+        0 => u32x4_extract_lane::<0>(acc), 1 => u32x4_extract_lane::<1>(acc),
+        2 => u32x4_extract_lane::<2>(acc), _ => u32x4_extract_lane::<3>(acc),
+    }).collect();
+    lanes.iter().fold(0u32, |h, &it| h.wrapping_mul(31).wrapping_add(it))
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn guest_bytes(n: u32) -> u32 {
+    let v = u8x16_splat(n as u8);
+    let w = u8x16_add_sat(v, u8x16(0, 16, 32, 48, 64, 80, 96, 112, 128, 144, 160, 176, 192, 208, 224, 240));
+    let s = i8x16_swizzle(w, u8x16(15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0));
+    let m = u8x16_bitmask(i8x16_gt(s, i8x16_splat(0))) as u32;
+    m | (u8x16_all_true(s) as u32) << 16 | (u8x16_extract_lane::<0>(s) as u32) << 24
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn guest_floats(a: f32, b: f32) -> u32 {
+    let x = f32x4(a, b, a * b, a - b);
+    let y = f32x4_sqrt(f32x4_abs(x));
+    let r = f32x4_relaxed_madd(x, y, f32x4_pmax(x, y));
+    let t = i32x4_relaxed_trunc_f32x4(f32x4_mul(r, f32x4_splat(64.0)));
+    (f32x4_extract_lane::<0>(r) + f32x4_extract_lane::<3>(r)).to_bits()
+        ^ i32x4_extract_lane::<2>(t) as u32
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn guest_wide(a: i64, b: i64) -> i64 {
+    let v = i64x2_mul(i64x2(a, b), i64x2(b, a.wrapping_add(3)));
+    let high = ((a as u128).wrapping_mul(b as u128) >> 64) as i64;
+    i64x2_extract_lane::<0>(v) ^ i64x2_extract_lane::<1>(i64x2_shr(v, 5)) ^ high
+}
+"""
+GUEST_CONFIG = '[target.wasm32-unknown-unknown]\nrustflags = ["-C", "target-feature=+simd128,+relaxed-simd"]\n'
+GUEST_CALLS = [("guest_dot", ["7", "-3"]), ("guest_dot", ["2147483647", "2"]), ("guest_sum", ["5"]),
+               ("guest_bytes", ["9"]), ("guest_bytes", ["200"]), ("guest_floats", ["1.5", "-2.25"]),
+               ("guest_wide", ["-81985529216486895", "1311768467463790320"])]
 
 
 def run(cmd, cwd, what, env=None):
@@ -140,19 +223,23 @@ def outcome(module, args, cwd):
     return ran.returncode, ran.stdout, said
 
 
-def invoked(module, cwd):
-    """What each of CALLS answers, each in a process of its own."""
+def invoked(module, cwd, calls):
+    """What each of the calls answers, each in a process of its own."""
     answers = []
-    for name, args in CALLS:
+    for name, args in calls:
         ran = subprocess.run([WASMTIME, "run", "--invoke", name, module, *args], cwd=cwd,
                              capture_output=True, text=True)
         answers.append((ran.returncode, ran.stdout.strip()))
     return answers
 
 
-def package(work, name, manifest, path, source):
+def package(work, name, manifest, path, source, config=None):
     root = os.path.join(work, name)
     os.makedirs(os.path.join(root, "src"))
+    if config:
+        os.makedirs(os.path.join(root, ".cargo"))
+        with open(os.path.join(root, ".cargo", "config.toml"), "w") as f:
+            f.write(config)
     with open(os.path.join(root, "Cargo.toml"), "w") as f:
         f.write(f'[package]\nname = "{name}"\nversion = "0.1.0"\nedition = "2021"\n{manifest}[workspace]\n')
     with open(os.path.join(root, "src", path), "w") as f:
@@ -217,25 +304,31 @@ def main():
             lines.append(f"{name} ({WASI}): built and linked in {took:.2f} s, the standard library "
                          f"{std}, the link {link_took}, {len(runs)} runs as cargo's; "
                          f"{kib(ours)}, cargo's {kib(theirs)}")
-        root = package(work, "shared", '[lib]\ncrate-type = ["cdylib"]\n', "lib.rs", LIBRARY)
-        run(["cargo", "build", "-q", "--target", UNKNOWN], root, "cargo build of the cdylib")
-        theirs = os.path.join(root, "target", UNKNOWN, "debug", "shared.wasm")
-        expected = invoked(theirs, root)
-        if any(code != 0 for code, _ in expected):
-            raise SystemExit(f"FAIL: cargo's cdylib did not answer: {expected}")
-        ours = os.path.join(work, "shared.wasm")
-        ran, took = ra_jit(root, "shared", os.path.join(work, "shared.o"), ours, UNKNOWN, store,
-                           "--shared")
-        std = nothing_of_rustc(ran, "the cdylib")
-        link_took = linked(ran, "the cdylib")
-        got = invoked(ours, root)
-        if got != expected:
-            raise SystemExit(f"FAIL: the cdylib differs from cargo's:\ncargo:  {expected}\nra-jit: {got}")
-        lines.append(f"the cdylib ({UNKNOWN}): built and linked in {took:.2f} s, the standard "
-                     f"library {std}, the link {link_took}, {len(CALLS)} calls as cargo's; "
-                     f"{kib(ours)}, cargo's {kib(theirs)}")
+        cdylib = '[lib]\ncrate-type = ["cdylib"]\n'
+        for name, what, source, config, calls in [
+            ("shared", "the cdylib", LIBRARY, None, CALLS),
+            ("guest", "the no_std SIMD guest", GUEST, GUEST_CONFIG, GUEST_CALLS),
+        ]:
+            root = package(work, name, cdylib, "lib.rs", source, config)
+            run(["cargo", "build", "-q", "--target", UNKNOWN], root, f"cargo build of {what}")
+            theirs = os.path.join(root, "target", UNKNOWN, "debug", f"{name}.wasm")
+            expected = invoked(theirs, root, calls)
+            if any(code != 0 for code, _ in expected):
+                raise SystemExit(f"FAIL: cargo's build of {what} did not answer: {expected}")
+            ours = os.path.join(work, f"{name}.wasm")
+            ran, took = ra_jit(root, name, os.path.join(work, f"{name}.o"), ours, UNKNOWN, store,
+                               "--shared")
+            std = nothing_of_rustc(ran, what)
+            link_took = linked(ran, what)
+            got = invoked(ours, root, calls)
+            if got != expected:
+                raise SystemExit(f"FAIL: {what} differs from cargo's:\ncargo:  {expected}\nra-jit: {got}")
+            lines.append(f"{what} ({UNKNOWN}): built and linked in {took:.2f} s, the standard "
+                         f"library {std}, the link {link_took}, {len(calls)} calls as cargo's; "
+                         f"{kib(ours)}, cargo's {kib(theirs)}")
         print("\n".join(lines))
-        print(f"PASS: {len(PROGRAMS)} {WASI} programs and a {UNKNOWN} cdylib with nothing of rustc's")
+        print(f"PASS: {len(PROGRAMS)} {WASI} programs, a {UNKNOWN} cdylib and a no_std SIMD guest "
+              "with nothing of rustc's")
         passed = True
     finally:
         if passed:

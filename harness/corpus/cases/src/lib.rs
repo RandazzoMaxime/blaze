@@ -2504,17 +2504,19 @@ pub mod packed_drop {
     }
 }
 
-/// `offset_of!` of a field of a packed struct takes no reference to it.
+/// `offset_of!` of a field of a packed struct takes no reference to it. The struct is never laid
+/// out by ra-jit, and --layouts compares types by their names without paths: named `Header`, it
+/// was compared with std's Windows allocator `Header(*mut u8)`, which ra-jit lays out.
 pub mod packed_offset_of {
     #[repr(C, packed)]
-    pub struct Header {
+    pub struct PackedHeader {
         pub magic: u16,
         pub version: u8,
         pub checksum: u32,
     }
 
     pub fn run(base: usize) -> usize {
-        base + core::mem::offset_of!(Header, checksum)
+        base + core::mem::offset_of!(PackedHeader, checksum)
     }
 }
 
@@ -5072,6 +5074,22 @@ pub mod promoted_slices {
         let d = &[5u64, 6, 7, 8][1..3];
         let e = &[[5u64, 6], [7, 8]][1];
         (a.len(), b.to_vec(), c.len(), d.to_vec(), *e)
+    }
+}
+
+/// `&mut [][..]` borrows an empty array mutably to index it, and rustc promotes a mutable
+/// borrow of an empty array, so the slice outlives the function (bun's `copies!`).
+pub mod promoted_empty_mut {
+    fn pick(v: &mut [u32], all: bool) -> &mut [u32] {
+        match all {
+            true => v,
+            false => &mut [][..],
+        }
+    }
+
+    pub fn run() -> (usize, usize) {
+        let mut v = [1, 2, 3];
+        (pick(&mut v, true).len(), pick(&mut v, false).len())
     }
 }
 

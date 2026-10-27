@@ -3293,7 +3293,7 @@ pub fn mir_opt_level() -> MirOptLevel {
         let level =
             asked.to_str().and_then(|it| it.parse().ok()).and_then(MirOptLevel::from_number);
         level.unwrap_or_else(|| {
-            eprintln!("ra-jit: {MIR_OPT}={}: expected 0, 1 or 2; using 0", asked.display());
+            eprintln!("blaze: {MIR_OPT}={}: expected 0, 1 or 2; using 0", asked.display());
             MirOptLevel::Off
         })
     });

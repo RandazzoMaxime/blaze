@@ -284,10 +284,10 @@ impl Profile {
                 "none" => Level::Nothing,
                 "line-directives-only" | "line-tables-only" | "limited" => Level::Lines,
                 "full" => Level::Full,
-                _ => anyhow::bail!("`debug = \"{name}\"`: ra-jit does not know the level"),
+                _ => anyhow::bail!("`debug = \"{name}\"`: blaze does not know the level"),
             },
             DebugLevel::Number(level) => {
-                anyhow::bail!("`debug = {level}`: ra-jit does not know the level")
+                anyhow::bail!("`debug = {level}`: blaze does not know the level")
             }
         };
         // Stripping the symbols is the linker's to do; of what ra-jit writes, what a debugger
@@ -296,7 +296,7 @@ impl Profile {
             Strip::Resolved(Stripped::Named(what)) => match what.as_str() {
                 "none" => false,
                 "debuginfo" | "symbols" => true,
-                _ => anyhow::bail!("`strip = \"{what}\"`: ra-jit does not know the setting"),
+                _ => anyhow::bail!("`strip = \"{what}\"`: blaze does not know the setting"),
             },
             Strip::Resolved(Stripped::None) | Strip::Deferred(_) => false,
         };
@@ -308,7 +308,7 @@ impl Profile {
             Some("unpacked") => Kept::Objects,
             Some("packed") => Kept::Package,
             Some(split) => {
-                anyhow::bail!("`split-debuginfo = \"{split}\"`: ra-jit does not know the setting")
+                anyhow::bail!("`split-debuginfo = \"{split}\"`: blaze does not know the setting")
             }
         };
         Ok(Described { level, kept, frame_pointers: false })
@@ -373,7 +373,7 @@ impl Flags {
     fn parse<'a>(words: impl Iterator<Item = &'a str>) -> anyhow::Result<Flags> {
         let words: Vec<&str> = words.collect();
         if let Some(why) = crate::unstable::refusal(&words) {
-            anyhow::bail!("the flags for rustc have {why}; ra-jit does not build with it");
+            anyhow::bail!("the flags for rustc have {why}; blaze does not build with it");
         }
         let mut words = words.into_iter();
         let mut flags = Flags::default();
@@ -600,12 +600,12 @@ impl UnitGraph {
         anyhow::ensure!(
             !flags.lto,
             "`-C lto` is among the flags: rustc compiles the whole program again as it links \
-             it and leaves no library on the link line for ra-jit's functions to be linked against"
+             it and leaves no library on the link line for blaze's functions to be linked against"
         );
         for unit in &self.units {
             if let Some(why) = crate::unstable::refusal(&unit.profile.rustflags) {
                 anyhow::bail!(
-                    "the profile's rustflags for `{}` have {why}; ra-jit does not build with it",
+                    "the profile's rustflags for `{}` have {why}; blaze does not build with it",
                     unit.target.name
                 );
             }
