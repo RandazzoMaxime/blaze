@@ -125,7 +125,11 @@ All of these are rustc's, written from `compiler/rustc_borrowck` at the pinned n
 - The signature's associated types are normalized as rustc's universal regions normalize
   them: what the impl of one needs of the regions must hold, reported at the signature
   (`-> <&'a () as Visitor<'d>>::Value` with `impl<'a, 'd: 'a> Visitor<'d> for &'a ()` and
-  `'a: 'd` makes `'a` and `'d` one, which the signature does not say).
+  `'a: 'd` makes `'a` and `'d` one, which the signature does not say). So are those of the
+  where clauses of a struct or enum the signature names, as rustc's
+  `compute_implied_outlives_bounds_inner` normalizes what each type's well-formedness asks:
+  `foo: Foo<(&'a str,)>` of `struct Foo<T: Trait> where T::Assoc: Clone` with only
+  `impl<X: 'static> Trait for (X,)` needs `'a: 'static`.
 - Well-formedness in bodies: a called function's signature as written, before its associated
   types are normalized, and its generic arguments are well-formed at the call (`&'a &'b ()`
   that `'b: 'a`); so is a function item's signature where it becomes a function pointer, with
@@ -309,7 +313,17 @@ All of these are rustc's, written from `compiler/rustc_borrowck` at the pinned n
   `trait Foo: 'static` (E0310); a generic associated type is checked with its own where
   clauses, not the trait's. The where clauses of an ADT, impl, trait or function must be
   well-formed given its bounds and what its signature's and impl header's types imply
-  (`fn foo<'a, L: X<&'a Nested<K>>>()` needs `K: 'a`). As rustc, an item that also needs a lifetime to outlive one
+  (`fn foo<'a, L: X<&'a Nested<K>>>()` needs `K: 'a`). A function's signature and an impl's
+  header are well-formed too: the trait bounds of each struct or enum they name, and the trait
+  of each associated type, hold, so what the impls that prove them need of what outlives what
+  must hold: `-> ServiceChainBuilder<ServiceChain<P, S>, NS>` with `struct
+  ServiceChainBuilder<P: Service, ..>` and only `impl<P: Service, ..> Service for
+  ServiceChain<P, S> where P::Error: 'static` needs `P::Error: 'static` (E0310, of an
+  associated type, which outlives a region where a where clause or its trait's bound says so,
+  or where its arguments do), and `impl<X> TestTrait for [Foo<(X,)>; 1]` with `struct Foo<T:
+  Trait>` and `impl<X: 'static> Trait for (X,)` needs `X: 'static`. A type that outlives a
+  region only if a lifetime in it does is E0477 ("does not fulfill the required lifetime"):
+  `foo: Foo<(&str,)>` there. As rustc, an item that also needs a lifetime to outlive one
   it does not (E0491) gets only that error, which ra-jit does not report yet. The type a
   returned `impl Trait` hides must be well-formed and outlive what its bounds say, given what
   the function knows (rustc's `check_opaque_meets_bounds`): `-> impl Sized + 'static` hiding
@@ -396,7 +410,9 @@ then one each of five more. The causes, grouped:
   a `for<'a>` future) are not proven with them.
 - **Well-formedness of items** (most of what is left of E0309 and E0310): items whose
   signature or impl header has an associated type (what normalizing it implies) are not
-  checked yet, nor what an impl's or function's where clauses need of a projection in them.
+  checked yet (`fn as_ref2<'a>(&'a self) -> Self::Output<'a>` normalized to `FooRef<'a, U>`
+  needs `U: 'a`), nor a `for<'a>` bound's projection under its binder (a supertrait
+  `for<'a> GatTrait<Gat<'a> = T>` needs the GAT's `Self: 'a` for every `'a`, E0311).
 - **Member constraints of `impl Trait`**: the choice rustc makes is not applied, and a
   projection bound that names a lifetime (`impl Iterator<Item = Box<dyn Foo>>`) leaves them
   out.
