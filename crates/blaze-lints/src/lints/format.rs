@@ -97,7 +97,11 @@ pub(crate) fn of(cx: &Cx<'_, '_, '_>, call: &ast::MacroCall) -> Option<FormatCal
 
 /// The `format_args!` call `call` expands to, at some depth, whose template is written in
 /// `input`.
-fn format_args_in(cx: &Cx<'_, '_, '_>, call: &ast::MacroCall, input: TextRange) -> Option<ast::FormatArgsExpr> {
+fn format_args_in(
+    cx: &Cx<'_, '_, '_>,
+    call: &ast::MacroCall,
+    input: TextRange,
+) -> Option<ast::FormatArgsExpr> {
     const MOST: usize = 16;
     let mut pending: Vec<SyntaxNode> = vec![cx.sema().expand_macro_call(call)?.value];
     let mut expanded = 0;
@@ -179,7 +183,8 @@ impl Parser<'_> {
         while self.peek().is_some_and(|it| it.is_ascii_digit()) {
             self.at += 1;
         }
-        (self.at > start).then(|| self.chars[start..self.at].iter().collect::<String>().parse().ok())?
+        (self.at > start)
+            .then(|| self.chars[start..self.at].iter().collect::<String>().parse().ok())?
     }
 
     fn word(&mut self) -> Option<String> {
@@ -293,22 +298,31 @@ mod tests {
 
     #[test]
     fn placeholders_as_rustc_reads_them() {
-        assert_eq!(parse("{{}} {} {:?} {x}", &[]), Some(vec![
-            at(0, Trait::Display),
-            at(1, Trait::Debug),
-            Placeholder { arg: Arg::Captured("x".into()), ..at(0, Trait::Display) },
-        ]));
-        assert_eq!(parse("{0:1$.2$} {:016x?} {:.*} {n:>w$}", &[("n".into(), 5)]), Some(vec![
-            Placeholder { width: Some(Arg::Index(1)), precision: Some(Arg::Index(2)), ..at(0, Trait::Display) },
-            at(0, Trait::Debug),
-            Placeholder { precision: Some(Arg::Index(1)), ..at(2, Trait::Display) },
-            Placeholder { width: Some(Arg::Captured("w".into())), ..at(5, Trait::Display) },
-        ]));
-        assert_eq!(parse("{:p} {:#x} {:08.3e}", &[]), Some(vec![
-            at(0, Trait::Other),
-            at(1, Trait::Other),
-            at(2, Trait::Other),
-        ]));
+        assert_eq!(
+            parse("{{}} {} {:?} {x}", &[]),
+            Some(vec![
+                at(0, Trait::Display),
+                at(1, Trait::Debug),
+                Placeholder { arg: Arg::Captured("x".into()), ..at(0, Trait::Display) },
+            ])
+        );
+        assert_eq!(
+            parse("{0:1$.2$} {:016x?} {:.*} {n:>w$}", &[("n".into(), 5)]),
+            Some(vec![
+                Placeholder {
+                    width: Some(Arg::Index(1)),
+                    precision: Some(Arg::Index(2)),
+                    ..at(0, Trait::Display)
+                },
+                at(0, Trait::Debug),
+                Placeholder { precision: Some(Arg::Index(1)), ..at(2, Trait::Display) },
+                Placeholder { width: Some(Arg::Captured("w".into())), ..at(5, Trait::Display) },
+            ])
+        );
+        assert_eq!(
+            parse("{:p} {:#x} {:08.3e}", &[]),
+            Some(vec![at(0, Trait::Other), at(1, Trait::Other), at(2, Trait::Other),])
+        );
         assert_eq!(parse("}", &[]), None);
     }
 }

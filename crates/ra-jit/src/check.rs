@@ -205,8 +205,10 @@ impl Checker {
             .collect();
         let loaded =
             vfs.iter().filter_map(|(_, path)| Some(path.as_path()?.to_path_buf().into())).collect();
-        let located =
-            vfs.iter().filter_map(|(id, path)| Some((id, path.as_path()?.to_path_buf().into()))).collect();
+        let located = vfs
+            .iter()
+            .filter_map(|(id, path)| Some((id, path.as_path()?.to_path_buf().into())))
+            .collect();
         Checker {
             files,
             checked,

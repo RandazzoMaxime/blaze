@@ -134,9 +134,11 @@ impl Sugg {
                 Sugg::BinOp(Op::Range(limits.to_owned()), of(range.start()), of(range.end()))
             }
             ast::Expr::ParenExpr(paren) => match paren.expr() {
-                Some(inner @ (ast::Expr::BinExpr(_) | ast::Expr::CastExpr(_) | ast::Expr::RangeExpr(_))) => {
-                    Sugg::from_snippet(&inner, snippet)
-                }
+                Some(
+                    inner @ (ast::Expr::BinExpr(_)
+                    | ast::Expr::CastExpr(_)
+                    | ast::Expr::RangeExpr(_)),
+                ) => Sugg::from_snippet(&inner, snippet),
                 Some(
                     ast::Expr::RefExpr(_)
                     | ast::Expr::IfExpr(_)
@@ -249,7 +251,9 @@ mod tests {
     use super::*;
 
     fn expr(text: &str) -> ast::Expr {
-        let file = syntax::SourceFile::parse(&format!("fn f() {{ {text}; }}"), span::Edition::CURRENT).tree();
+        let file =
+            syntax::SourceFile::parse(&format!("fn f() {{ {text}; }}"), span::Edition::CURRENT)
+                .tree();
         file.syntax().descendants().find_map(ast::ExprStmt::cast).and_then(|it| it.expr()).unwrap()
     }
 

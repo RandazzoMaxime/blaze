@@ -12,10 +12,13 @@ pub type ManifestLint = (String, String, Level, i8);
 /// manifest is `workspace`.
 pub fn lints(manifest: &Path, workspace: &Path) -> Result<Vec<ManifestLint>, String> {
     let table = read(manifest)?;
-    let Some(lints) = table.get("lints").and_then(|it| it.as_table()) else { return Ok(Vec::new()) };
+    let Some(lints) = table.get("lints").and_then(|it| it.as_table()) else {
+        return Ok(Vec::new());
+    };
     if lints.get("workspace").and_then(|it| it.as_bool()) == Some(true) {
         let root = read(workspace)?;
-        let inherited = root.get("workspace").and_then(|it| it.get("lints")).and_then(|it| it.as_table());
+        let inherited =
+            root.get("workspace").and_then(|it| it.get("lints")).and_then(|it| it.as_table());
         return Ok(inherited.map(of_table).unwrap_or_default());
     }
     Ok(of_table(lints))
@@ -29,9 +32,10 @@ pub fn flags(lints: &[ManifestLint]) -> Vec<String> {
 }
 
 fn read(path: &Path) -> Result<toml::Table, String> {
-    let text =
-        std::fs::read_to_string(path).map_err(|error| format!("reading {}: {error}", path.display()))?;
-    text.parse::<toml::Table>().map_err(|error| format!("reading {}: {}", path.display(), error.message()))
+    let text = std::fs::read_to_string(path)
+        .map_err(|error| format!("reading {}: {error}", path.display()))?;
+    text.parse::<toml::Table>()
+        .map_err(|error| format!("reading {}: {}", path.display(), error.message()))
 }
 
 fn of_table(lints: &toml::Table) -> Vec<ManifestLint> {

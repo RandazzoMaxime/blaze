@@ -189,7 +189,12 @@ impl CommandLine {
                 ("--deny", Level::Deny),
                 ("--forbid", Level::Forbid),
             ];
-            let short = [("-A", Level::Allow), ("-W", Level::Warn), ("-D", Level::Deny), ("-F", Level::Forbid)];
+            let short = [
+                ("-A", Level::Allow),
+                ("-W", Level::Warn),
+                ("-D", Level::Deny),
+                ("-F", Level::Forbid),
+            ];
             let mut value = |arg: &str, flag: &str| -> Result<Option<String>, String> {
                 if arg == flag {
                     let next = args.next().ok_or_else(|| format!("`{flag}` needs a lint"))?;
@@ -203,9 +208,9 @@ impl CommandLine {
                 Ok(rest.map(str::to_owned))
             };
             if let Some(cap) = value(arg, "--cap-lints")? {
-                flags.cap = Some(Level::of_cap(&cap).ok_or_else(|| {
-                    format!("unknown lint level: `{cap}`")
-                })?);
+                flags.cap = Some(
+                    Level::of_cap(&cap).ok_or_else(|| format!("unknown lint level: `{cap}`"))?,
+                );
                 continue;
             }
             let mut found = None;
@@ -248,9 +253,7 @@ pub fn of_manifest(lints: &[(String, String, Level, i8)]) -> CommandLine {
             (*priority, std::cmp::Reverse(name.as_str()), named, *level)
         })
         .collect();
-    flags.sort_by(|a, b| {
-        (a.0, a.1, flag_of(a.3), &a.2).cmp(&(b.0, b.1, flag_of(b.3), &b.2))
-    });
+    flags.sort_by(|a, b| (a.0, a.1, flag_of(a.3), &a.2).cmp(&(b.0, b.1, flag_of(b.3), &b.2)));
     let opts = flags.into_iter().map(|(_, _, name, level)| (name.replace('-', "_"), level));
     CommandLine { opts: opts.collect(), cap: None }
 }
@@ -293,10 +296,9 @@ impl Levels {
     /// The level of `lint` where the attributes `sets` are, outermost first and each node's in
     /// their order: rustc's `reveal_actual_level_spec`.
     pub fn of(&self, lint: Lint<'_>, sets: &[Set]) -> Spec {
-        let mut spec = self.probe(lint, sets).unwrap_or_else(|| Spec {
-            level: lint.default_level(),
-            source: Source::Default,
-        });
+        let mut spec = self
+            .probe(lint, sets)
+            .unwrap_or_else(|| Spec { level: lint.default_level(), source: Source::Default });
         if spec.level == Level::Warn
             && let Some(warnings) = self.probe(Lint::Warnings, sets)
             && matches!(warnings.level, Level::Deny | Level::Forbid | Level::Allow | Level::Expect)
@@ -391,9 +393,10 @@ mod tests {
 
     #[test]
     fn flags_as_rustc_reads_them() {
-        let flags =
-            CommandLine::parse(&args("-W clippy::all -Dwarnings --allow=clippy::needless-bool --cap-lints warn -O"))
-                .unwrap();
+        let flags = CommandLine::parse(&args(
+            "-W clippy::all -Dwarnings --allow=clippy::needless-bool --cap-lints warn -O",
+        ))
+        .unwrap();
         assert_eq!(
             flags.opts,
             vec![
@@ -407,9 +410,13 @@ mod tests {
 
     #[test]
     fn the_last_flag_wins_but_forbid_stays() {
-        let levels = Levels::new(&CommandLine::parse(&args("-F clippy::needless_bool -A clippy::all")).unwrap());
+        let levels = Levels::new(
+            &CommandLine::parse(&args("-F clippy::needless_bool -A clippy::all")).unwrap(),
+        );
         assert_eq!(levels.of(Lint::Clippy(info("needless_bool")), &[]).level, Level::Forbid);
-        let levels = Levels::new(&CommandLine::parse(&args("-D clippy::all -A clippy::needless_bool")).unwrap());
+        let levels = Levels::new(
+            &CommandLine::parse(&args("-D clippy::all -A clippy::needless_bool")).unwrap(),
+        );
         assert_eq!(levels.of(Lint::Clippy(info("needless_bool")), &[]).level, Level::Allow);
         assert_eq!(levels.of(Lint::Clippy(info("collapsible_if")), &[]).level, Level::Deny);
     }
@@ -419,7 +426,10 @@ mod tests {
         let levels = Levels::new(&CommandLine::parse(&args("-D warnings")).unwrap());
         let spec = levels.of(Lint::Clippy(info("collapsible_if")), &[]);
         assert_eq!(spec.level, Level::Deny);
-        assert_eq!(spec.source, Source::CommandLine { flag: "warnings".to_owned(), level: Level::Deny });
+        assert_eq!(
+            spec.source,
+            Source::CommandLine { flag: "warnings".to_owned(), level: Level::Deny }
+        );
         assert_eq!(levels.of(Lint::Clippy(info("map_unwrap_or")), &[]).level, Level::Allow);
     }
 
@@ -447,7 +457,10 @@ mod tests {
             ("cargo".to_owned(), "x".to_owned(), Level::Warn, 0),
         ];
         let names: Vec<_> = of_manifest(&lints).opts.into_iter().map(|it| it.0).collect();
-        assert_eq!(names, ["clippy::all", "unsafe_code", "clippy::needless_bool", "clippy::empty_enums"]);
+        assert_eq!(
+            names,
+            ["clippy::all", "unsafe_code", "clippy::needless_bool", "clippy::empty_enums"]
+        );
     }
 
     #[test]
@@ -482,7 +495,10 @@ mod tests {
         assert_eq!(
             notes(Spec {
                 level: Level::Warn,
-                source: Source::CommandLine { flag: "clippy::needless_bool".to_owned(), level: Level::Warn }
+                source: Source::CommandLine {
+                    flag: "clippy::needless_bool".to_owned(),
+                    level: Level::Warn
+                }
             }),
             ["requested on the command line with `-W clippy::needless-bool`"]
         );

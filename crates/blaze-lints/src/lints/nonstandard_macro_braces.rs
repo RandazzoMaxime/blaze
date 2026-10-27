@@ -69,7 +69,8 @@ pub(super) fn check_call(cx: &mut Cx<'_, '_, '_>, call: &ast::MacroCall) {
     // A statement written with braces and no semicolon needs one once it has other brackets.
     let statement = call.syntax().parent().and_then(ast::MacroExpr::cast).and_then(|it| {
         let parent = it.syntax().parent()?;
-        let bare = ast::ExprStmt::cast(parent.clone()).is_some_and(|it| it.semicolon_token().is_none())
+        let bare = ast::ExprStmt::cast(parent.clone())
+            .is_some_and(|it| it.semicolon_token().is_none())
             || ast::StmtList::cast(parent).is_some();
         Some(bare)
     });
@@ -96,7 +97,8 @@ fn in_tokens(
     braces: &FxHashMap<String, (char, char)>,
     found: &mut Vec<(TextRange, (char, char))>,
 ) {
-    let children: Vec<_> = tree.children_with_tokens().filter(|it| !it.kind().is_trivia()).collect();
+    let children: Vec<_> =
+        tree.children_with_tokens().filter(|it| !it.kind().is_trivia()).collect();
     let inner = children.get(1..children.len().saturating_sub(1)).unwrap_or_default();
     for (at, child) in inner.iter().enumerate() {
         match child {
@@ -121,7 +123,13 @@ fn in_tokens(
     }
 }
 
-fn emit(cx: &mut Cx<'_, '_, '_>, at: &SyntaxNode, span: TextRange, (open, close): (char, char), add_semi: bool) {
+fn emit(
+    cx: &mut Cx<'_, '_, '_>,
+    at: &SyntaxNode,
+    span: TextRange,
+    (open, close): (char, char),
+    add_semi: bool,
+) {
     let snippet = cx.snippet(span);
     let Some((name, args)) = snippet.split_once('!') else { return };
     let mut args = args.trim().to_owned();

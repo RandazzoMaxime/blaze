@@ -13,7 +13,9 @@ use serde::Serialize;
 
 use crate::{
     Level,
-    diag::{Diagnostic, Expansion, MacroKind, MultiSpan, Span, Sublevel, Suggestion, SuggestionStyle},
+    diag::{
+        Diagnostic, Expansion, MacroKind, MultiSpan, Span, Sublevel, Suggestion, SuggestionStyle,
+    },
 };
 
 /// rustc's `MAX_SUGGESTIONS`: the most ways to substitute that one suggestion shows.
@@ -200,7 +202,8 @@ pub fn rendered(diagnostic: &Diagnostic, sources: &mut Sources, style: Style) ->
                 for parts in substitutions.into_iter().take(MAX_SUGGESTIONS) {
                     let mut confusion = Confusion::None;
                     for (span, snippet) in &parts {
-                        confusion = confusion.combine(detect_confusion_type(sources, snippet, span));
+                        confusion =
+                            confusion.combine(detect_confusion_type(sources, snippet, span));
                     }
                     if confusion != Confusion::None {
                         message.push_str(confusion.label_text());
@@ -377,8 +380,10 @@ fn macro_backtrace(span: &mut MultiSpan) {
     let mut labels: Vec<(Span, String)> = Vec::new();
     for primary in &span.primary {
         let backtrace: Vec<&Expansion> =
-            std::iter::successors(primary.expansion.as_deref(), |it| it.call_site.expansion.as_deref())
-                .collect();
+            std::iter::successors(primary.expansion.as_deref(), |it| {
+                it.call_site.expansion.as_deref()
+            })
+            .collect();
         let Some(outermost) = backtrace.last() else { continue };
         let call = &outermost.call_site;
         let contains = call.file == primary.file && call.lo <= primary.lo && primary.hi <= call.hi;
@@ -472,7 +477,8 @@ fn detect_confusion_type(sources: &mut Sources, suggested: &str, span: &Span) ->
     if found.len() != suggested.len() {
         return Confusion::None;
     }
-    const ASCII_CONFUSABLES: &[char] = &['c', 'f', 'i', 'k', 'o', 's', 'u', 'v', 'w', 'x', 'y', 'z'];
+    const ASCII_CONFUSABLES: &[char] =
+        &['c', 'f', 'i', 'k', 'o', 's', 'u', 'v', 'w', 'x', 'y', 'z'];
     const DIGIT_LETTER: [(char, char); 5] =
         [('0', 'O'), ('1', 'l'), ('5', 'S'), ('8', 'B'), ('9', 'g')];
     let (mut case, mut digit_letter, mut other) = (false, false, false);
@@ -695,7 +701,10 @@ fn json_span(
     let text = text.collect();
     let expansion = span.expansion.as_deref().and_then(|it| {
         Some(Box::new(JsonExpansion {
-            def_site_span: it.def_site.as_ref().and_then(|def| json_span(def, false, None, sources)),
+            def_site_span: it
+                .def_site
+                .as_ref()
+                .and_then(|def| json_span(def, false, None, sources)),
             macro_decl_name: it.decl_name(),
             span: json_span(&it.call_site, false, None, sources)?,
         }))

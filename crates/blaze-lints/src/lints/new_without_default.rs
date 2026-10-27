@@ -45,7 +45,9 @@ fn check_new(cx: &mut Cx<'_, '_, '_>, imp: &ast::Impl, impl_range: TextRange, fu
     {
         return;
     }
-    let (Some(def), Some(impl_def)) = (cx.sema().to_def(function), cx.sema().to_def(imp)) else { return };
+    let (Some(def), Some(impl_def)) = (cx.sema().to_def(function), cx.sema().to_def(imp)) else {
+        return;
+    };
     let self_ty = impl_def.self_ty(db);
     let Some(adt) = self_ty.as_adt() else { return };
     if adt.visibility(db) != hir::Visibility::Public {
@@ -56,7 +58,9 @@ fn check_new(cx: &mut Cx<'_, '_, '_>, imp: &ast::Impl, impl_range: TextRange, fu
         return;
     }
     let Some(default) = FamousDefs(cx.sema(), cx.krate()).core_default_Default() else { return };
-    if hir::Impl::all_for_type(db, self_ty.clone()).into_iter().any(|it| it.trait_(db) == Some(default))
+    if hir::Impl::all_for_type(db, self_ty.clone())
+        .into_iter()
+        .any(|it| it.trait_(db) == Some(default))
         || derives_default(cx, adt)
     {
         return;
@@ -73,11 +77,13 @@ fn check_new(cx: &mut Cx<'_, '_, '_>, imp: &ast::Impl, impl_range: TextRange, fu
         }
     }
     // Doc comments are attributes to rustc too.
-    let doc_comment = function.syntax().children().any(|it| it.kind() == syntax::SyntaxKind::DOC_COMMENT);
+    let doc_comment =
+        function.syntax().children().any(|it| it.kind() == syntax::SyntaxKind::DOC_COMMENT);
     if doc_comment {
         applicability = Applicability::MaybeIncorrect;
     }
-    let generics = imp.generic_param_list().and_then(|it| cx.range(it.syntax())).map(|it| cx.snippet(it));
+    let generics =
+        imp.generic_param_list().and_then(|it| cx.range(it.syntax())).map(|it| cx.snippet(it));
     let Some(self_type) = imp.self_ty().and_then(|it| cx.range(it.syntax())) else { return };
     let self_type = cx.snippet(self_type);
     let generics = generics.unwrap_or_default();
@@ -85,7 +91,9 @@ fn check_new(cx: &mut Cx<'_, '_, '_>, imp: &ast::Impl, impl_range: TextRange, fu
         "{attrs}impl{generics} Default for {self_type} {{\n    fn default() -> Self {{\n        Self::new()\n    }}\n}}"
     );
     let Some(span) = cx.item_span(function.syntax()) else { return };
-    let item_span = cx.item_span(imp.syntax()).map_or(impl_range, |it| TextRange::new(it.lo.into(), it.hi.into()));
+    let item_span = cx
+        .item_span(imp.syntax())
+        .map_or(impl_range, |it| TextRange::new(it.lo.into(), it.hi.into()));
     let indent = indentation(cx.text(), item_span);
     let mut code: Vec<String> = Vec::new();
     for line in new_item.lines() {
@@ -104,7 +112,8 @@ fn check_new(cx: &mut Cx<'_, '_, '_>, imp: &ast::Impl, impl_range: TextRange, fu
 
 fn doc_hidden(function: &ast::Fn) -> bool {
     function.attrs().any(|attr| {
-        let text: String = attr.syntax().text().to_string().chars().filter(|it| !it.is_whitespace()).collect();
+        let text: String =
+            attr.syntax().text().to_string().chars().filter(|it| !it.is_whitespace()).collect();
         text == "#[doc(hidden)]"
     })
 }
@@ -120,7 +129,11 @@ fn derives_default(cx: &Cx<'_, '_, '_>, adt: hir::Adt) -> bool {
     .unwrap_or_default();
     attrs.iter().any(|attr| {
         attr.path().is_some_and(|it| it.syntax().text() == "derive")
-            && attr.syntax().descendants_with_tokens().filter_map(|it| it.into_token()).any(|it| it.text() == "Default")
+            && attr
+                .syntax()
+                .descendants_with_tokens()
+                .filter_map(|it| it.into_token())
+                .any(|it| it.text() == "Default")
     })
 }
 

@@ -1212,7 +1212,9 @@ impl Daemon {
                 Err(why) => Reply::Cold { reason: format!("{why:#}") },
             },
             Request::Check(ahead) => self.check(&ahead, "check"),
-            Request::Lint(ahead, ask) => self.check(&ahead, &format!("{}{ask}", crate::check::LINT)),
+            Request::Lint(ahead, ask) => {
+                self.check(&ahead, &format!("{}{ask}", crate::check::LINT))
+            }
             Request::Status => Reply::Status(Status {
                 pid: std::process::id(),
                 version: self.version.clone(),

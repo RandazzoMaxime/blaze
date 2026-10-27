@@ -15,7 +15,9 @@ pub(super) fn check(cx: &mut Cx<'_, '_, '_>, rules: &ast::MacroRules) {
         return;
     }
     let exported = rules.attrs().any(|attr| {
-        attr.path().is_some_and(|path| path.qualifier().is_none() && path.syntax().text() == "macro_export")
+        attr.path().is_some_and(|path| {
+            path.qualifier().is_none() && path.syntax().text() == "macro_export"
+        })
     });
     let Some(body) = rules.token_tree() else { return };
     if !exported {
@@ -23,12 +25,13 @@ pub(super) fn check(cx: &mut Cx<'_, '_, '_>, rules: &ast::MacroRules) {
     }
     let Some(range) = unhygienic_crate(body.syntax()) else { return };
     let span = cx.span(range);
-    cx.lint(LINT, rules.syntax(), span.clone(), "`crate` references the macro call's crate").suggestion(
-        span,
-        "to reference the macro definition's crate, use",
-        "$crate".to_owned(),
-        Applicability::MachineApplicable,
-    );
+    cx.lint(LINT, rules.syntax(), span.clone(), "`crate` references the macro call's crate")
+        .suggestion(
+            span,
+            "to reference the macro definition's crate, use",
+            "$crate".to_owned(),
+            Applicability::MachineApplicable,
+        );
 }
 
 /// clippy's `contains_unhygienic_crate_reference`: the first `crate` followed by `::` and not
@@ -38,10 +41,7 @@ fn unhygienic_crate(tt: &SyntaxNode) -> Option<TextRange> {
     let inner = trees.get(1..trees.len().saturating_sub(1)).unwrap_or_default();
     let mut prev_is_dollar = false;
     for (at, tree) in inner.iter().enumerate() {
-        if !prev_is_dollar
-            && tree.kind() == SyntaxKind::CRATE_KW
-            && path_sep_at(inner, at + 1)
-        {
+        if !prev_is_dollar && tree.kind() == SyntaxKind::CRATE_KW && path_sep_at(inner, at + 1) {
             return Some(tree.text_range());
         }
         if let NodeOrToken::Node(node) = tree

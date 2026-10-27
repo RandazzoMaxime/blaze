@@ -54,11 +54,8 @@ pub(super) fn check(cx: &mut Cx<'_, '_, '_>, expr: &ast::IfExpr) {
     parts.extend(parens_around(cx, &check));
     parts.extend(parens_around(cx, &check_inner));
     let span = cx.span(expr.syntax().text_range());
-    cx.lint(LINT, inner_if.syntax(), span, "this `if` statement can be collapsed").multipart_suggestion(
-        "collapse nested if block",
-        parts,
-        Applicability::MachineApplicable,
-    );
+    cx.lint(LINT, inner_if.syntax(), span, "this `if` statement can be collapsed")
+        .multipart_suggestion("collapse nested if block", parts, Applicability::MachineApplicable);
 }
 
 /// clippy's `eligible_condition`: not a `let`, unless `let` chains can be written.

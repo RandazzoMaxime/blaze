@@ -48,7 +48,8 @@ pub(crate) fn option_or_result(cx: &Cx<'_, '_, '_>, ty: &hir::Type<'_>) -> Optio
 pub(crate) fn is_none(cx: &Cx<'_, '_, '_>, expr: &ast::Expr) -> bool {
     let ast::Expr::PathExpr(path) = expr else { return false };
     let Some(path) = path.path() else { return false };
-    let Some(PathResolution::Def(hir::ModuleDef::EnumVariant(variant))) = cx.sema().resolve_path(&path)
+    let Some(PathResolution::Def(hir::ModuleDef::EnumVariant(variant))) =
+        cx.sema().resolve_path(&path)
     else {
         return false;
     };
@@ -177,14 +178,14 @@ pub(crate) fn peel_blocks_with_stmt(expr: &ast::Expr) -> ast::Expr {
 
 /// clippy's `span_contains_comment`: whether a comment is written in `range` of `node`.
 pub(crate) fn contains_comment(node: &SyntaxNode, range: TextRange) -> bool {
-    node.descendants_with_tokens()
-        .filter_map(|it| it.into_token())
-        .any(|it| {
-            matches!(
-                it.kind(),
-                syntax::SyntaxKind::COMMENT | syntax::SyntaxKind::INNER_DOC_COMMENT | syntax::SyntaxKind::OUTER_DOC_COMMENT
-            ) && range.contains_range(it.text_range())
-        })
+    node.descendants_with_tokens().filter_map(|it| it.into_token()).any(|it| {
+        matches!(
+            it.kind(),
+            syntax::SyntaxKind::COMMENT
+                | syntax::SyntaxKind::INNER_DOC_COMMENT
+                | syntax::SyntaxKind::OUTER_DOC_COMMENT
+        ) && range.contains_range(it.text_range())
+    })
 }
 
 /// Calls `f` on each path expression of `root` that starts at or after `after`, and of what

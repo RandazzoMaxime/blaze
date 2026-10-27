@@ -48,10 +48,16 @@ pub struct Found {
 pub type NameOf<'a> = &'a dyn Fn(ide_db::FileId) -> Option<String>;
 
 /// The diagnostics of the lints of `krate`, in the order rustc would emit them.
-pub fn check(db: &RootDatabase, krate: hir::Crate, setup: &Setup, name_of: NameOf<'_>) -> Vec<Found> {
+pub fn check(
+    db: &RootDatabase,
+    krate: hir::Crate,
+    setup: &Setup,
+    name_of: NameOf<'_>,
+) -> Vec<Found> {
     hir::attach_db(db, || {
         // A file of several crates (a library and its test build) is read as `krate`'s.
-        let sema = Semantics::new_within(db, std::sync::Arc::new(std::iter::once(krate.base()).collect()));
+        let sema =
+            Semantics::new_within(db, std::sync::Arc::new(std::iter::once(krate.base()).collect()));
         let cfg = krate.cfg(db).clone();
         let test = CfgAtom::Flag(intern::sym::test);
         let without_test = cfg.check_atom(&test).then(|| {
@@ -72,13 +78,17 @@ pub fn check(db: &RootDatabase, krate: hir::Crate, setup: &Setup, name_of: NameO
             if let Some(declared) = module.declaration_source_range(db) {
                 let declared = declared.original_node_file_range_rooted(db);
                 place = nesting.get(&declared.file_id).cloned().unwrap_or_default();
-                place.push((u32::from(declared.range.start()), u32::MAX - u32::from(declared.range.end())));
+                place.push((
+                    u32::from(declared.range.start()),
+                    u32::MAX - u32::from(declared.range.end()),
+                ));
             }
             nesting.insert(file, place);
             files.push(file);
         }
         let levels = Levels::new(&setup.command_line);
-        let texts: Vec<&str> = files.iter().map(|it| &**db.file_text(it.file_id(db)).text(db)).collect();
+        let texts: Vec<&str> =
+            files.iter().map(|it| &**db.file_text(it.file_id(db)).text(db)).collect();
         let on = lints::on(&levels, &texts);
         let mut state = State {
             sema: &sema,
@@ -96,8 +106,16 @@ pub fn check(db: &RootDatabase, krate: hir::Crate, setup: &Setup, name_of: NameO
             let Some(name) = name_of(file.file_id(db)) else { continue };
             let source = sema.parse(*file);
             let nesting = nesting.remove(file).unwrap_or_default();
-            let mut cx =
-                Cx { state: &mut state, file: *file, name, order, nesting, expansion: None, input: None, depth: 0 };
+            let mut cx = Cx {
+                state: &mut state,
+                file: *file,
+                name,
+                order,
+                nesting,
+                expansion: None,
+                input: None,
+                depth: 0,
+            };
             cx.walk(source.syntax());
         }
         state.finish(&levels)
@@ -254,7 +272,8 @@ impl<'a, 'db> Cx<'_, 'a, 'db> {
         if range.len() < TextSize::from(2) {
             return Vec::new();
         }
-        let inner = TextRange::new(range.start() + TextSize::from(1), range.end() - TextSize::from(1));
+        let inner =
+            TextRange::new(range.start() + TextSize::from(1), range.end() - TextSize::from(1));
         let Some(expansion) = self.sema().expand_macro_call(call) else { return Vec::new() };
         let mut found = Vec::new();
         self.args_in(&expansion.value, inner, &mut found, 0);
@@ -263,7 +282,13 @@ impl<'a, 'db> Cx<'_, 'a, 'db> {
         found
     }
 
-    fn args_in(&self, root: &SyntaxNode, inner: TextRange, found: &mut Vec<(TextRange, ast::Expr)>, depth: u32) {
+    fn args_in(
+        &self,
+        root: &SyntaxNode,
+        inner: TextRange,
+        found: &mut Vec<(TextRange, ast::Expr)>,
+        depth: u32,
+    ) {
         let mut events = root.preorder();
         while let Some(event) = events.next() {
             let WalkEvent::Enter(node) = event else { continue };
@@ -324,7 +349,9 @@ impl<'a, 'db> Cx<'_, 'a, 'db> {
         let mut module = krate.root_module(db);
         let (last, modules) = rest.split_last()?;
         for name in modules {
-            module = module.children(db).find(|it| it.name(db).is_some_and(|it| it.as_str() == *name))?;
+            module = module
+                .children(db)
+                .find(|it| it.name(db).is_some_and(|it| it.as_str() == *name))?;
         }
         module.scope(db, None).into_iter().find_map(|(name, def)| match def {
             hir::ScopeDef::ModuleDef(def) if name.as_str() == *last => Some(def),
@@ -333,7 +360,12 @@ impl<'a, 'db> Cx<'_, 'a, 'db> {
     }
 
     /// The type `trait_`'s associated type `name` is for `ty`.
-    pub(crate) fn assoc_ty(&self, ty: &hir::Type<'db>, trait_: hir::Trait, name: &str) -> Option<hir::Type<'db>> {
+    pub(crate) fn assoc_ty(
+        &self,
+        ty: &hir::Type<'db>,
+        trait_: hir::Trait,
+        name: &str,
+    ) -> Option<hir::Type<'db>> {
         let db = self.db();
         let alias = trait_.items(db).into_iter().find_map(|it| match it {
             hir::AssocItem::TypeAlias(alias) if alias.name(db).as_str() == name => Some(alias),
@@ -576,9 +608,9 @@ impl<'a, 'db> Cx<'_, 'a, 'db> {
 
     /// Records the `#[expect]`s of lints of clippy's on `owner`.
     fn expectations_of(&mut self, owner: &ast::AnyHasAttrs) {
-        let has_expect = owner.attrs().any(|it| {
-            it.syntax().text().contains_char('e') && it.to_string().contains("expect")
-        });
+        let has_expect = owner
+            .attrs()
+            .any(|it| it.syntax().text().contains_char('e') && it.to_string().contains("expect"));
         if !has_expect {
             return;
         }
@@ -687,7 +719,8 @@ impl State<'_, '_> {
             };
             for LintAttr { level, target, name: attr_name, range, reason } in self.lint_attrs(owner)
             {
-                let source = Source::Node { name: attr_name, span: Span::new(&name, range), reason };
+                let source =
+                    Source::Node { name: attr_name, span: Span::new(&name, range), reason };
                 sets.push(Set { target, spec: Spec { level, source } });
             }
         }
@@ -703,8 +736,10 @@ impl State<'_, '_> {
         let mut fulfilled: FxHashSet<Span> = FxHashSet::default();
         let mut sets_of: FxHashMap<InFile<SyntaxNode>, (Vec<Set>, bool)> = FxHashMap::default();
         for Pending { lint, at, mut diagnostic, .. } in pending {
-            let (sets, test_only) =
-                sets_of.entry(at.clone()).or_insert_with(|| self.sets_at(&at, self.name_of)).clone();
+            let (sets, test_only) = sets_of
+                .entry(at.clone())
+                .or_insert_with(|| self.sets_at(&at, self.name_of))
+                .clone();
             let spec = levels.of(Lint::Clippy(lint), &sets);
             match spec.level {
                 Level::Allow => continue,
@@ -720,7 +755,12 @@ impl State<'_, '_> {
             diagnostic.help(format!("for further information visit {}", lint.docs_url()));
             crate::level::explain(&mut diagnostic, Lint::Clippy(lint), &spec);
             originates_in(&mut diagnostic);
-            if diagnostic.span.primary.iter().any(|it| it.expansion.as_ref().is_some_and(|it| it.def_site.is_some())) {
+            if diagnostic
+                .span
+                .primary
+                .iter()
+                .any(|it| it.expansion.as_ref().is_some_and(|it| it.def_site.is_some()))
+            {
                 diagnostic.suggestions_disabled = true;
             }
             found.push(Found { diagnostic, test_only });
@@ -757,12 +797,21 @@ impl State<'_, '_> {
 /// rustc's note on a diagnostic in a macro's expansion: which macro it came from.
 fn originates_in(diagnostic: &mut Diagnostic) {
     let level = if diagnostic.is_error() { "error" } else { "warning" };
-    let spans = diagnostic.span.primary.iter().chain(diagnostic.children.iter().flat_map(|it| &it.span.primary));
-    let backtrace: Vec<&Expansion> =
-        spans.flat_map(|span| std::iter::successors(span.expansion.as_deref(), |it| it.call_site.expansion.as_deref())).collect();
+    let spans = diagnostic
+        .span
+        .primary
+        .iter()
+        .chain(diagnostic.children.iter().flat_map(|it| &it.span.primary));
+    let backtrace: Vec<&Expansion> = spans
+        .flat_map(|span| {
+            std::iter::successors(span.expansion.as_deref(), |it| it.call_site.expansion.as_deref())
+        })
+        .collect();
     let (Some(first), Some(last)) = (backtrace.first(), backtrace.last()) else { return };
     let and_then = match last.name != first.name {
-        true => format!(" which comes from the expansion of the {} `{}`", last.kind.descr(), last.name),
+        true => {
+            format!(" which comes from the expansion of the {} `{}`", last.kind.descr(), last.name)
+        }
         false => String::new(),
     };
     let note = format!(
@@ -840,7 +889,9 @@ pub(crate) fn item_range(node: &SyntaxNode) -> TextRange {
     let start = node
         .children_with_tokens()
         .find(|it| match it {
-            NodeOrToken::Node(node) => !matches!(node.kind(), SyntaxKind::ATTR | SyntaxKind::DOC_COMMENT),
+            NodeOrToken::Node(node) => {
+                !matches!(node.kind(), SyntaxKind::ATTR | SyntaxKind::DOC_COMMENT)
+            }
             NodeOrToken::Token(token) => !token.kind().is_trivia(),
         })
         .map_or(node.text_range().start(), |it| it.text_range().start());

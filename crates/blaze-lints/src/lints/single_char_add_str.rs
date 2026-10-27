@@ -29,7 +29,10 @@ pub(super) fn check(cx: &mut Cx<'_, '_, '_>, expr: &ast::Expr) {
     if !is_string_method(cx, expr) {
         return;
     }
-    let (Some(range), Some(receiver)) = (cx.range(expr.syntax()), cx.range(call.receiver.syntax())) else { return };
+    let (Some(range), Some(receiver)) = (cx.range(expr.syntax()), cx.range(call.receiver.syntax()))
+    else {
+        return;
+    };
     let base = cx.snippet(receiver);
     let index = match index {
         Some(index) => match cx.range(index.syntax()) {

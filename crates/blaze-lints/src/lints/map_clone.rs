@@ -27,11 +27,16 @@ pub(super) fn check(cx: &mut Cx<'_, '_, '_>, expr: &ast::Expr) {
         return;
     }
     let ast::Expr::ClosureExpr(closure) = &call.args[0] else { return };
-    let (Some(param), Some(body)) = (closure.param_list().and_then(|it| it.params().next()), closure.body()) else {
+    let (Some(param), Some(body)) =
+        (closure.param_list().and_then(|it| it.params().next()), closure.body())
+    else {
         return;
     };
     let body = utils::peel_blocks(&body);
-    let (Some(range), Some(receiver)) = (cx.range(expr.syntax()), cx.range(call.receiver.syntax())) else { return };
+    let (Some(range), Some(receiver)) = (cx.range(expr.syntax()), cx.range(call.receiver.syntax()))
+    else {
+        return;
+    };
     match param.pat() {
         Some(ast::Pat::RefPat(pat)) if pat.mut_token().is_none() => {
             if let Some(ast::Pat::IdentPat(inner)) = pat.pat()
@@ -45,7 +50,10 @@ pub(super) fn check(cx: &mut Cx<'_, '_, '_>, expr: &ast::Expr) {
             ast::Expr::PrefixExpr(deref) if deref.op_kind() == Some(ast::UnaryOp::Deref) => {
                 if let Some(inner) = deref.expr()
                     && names(&inner, &binding)
-                    && cx.ty(&inner).and_then(|it| it.as_reference()).is_some_and(|(_, m)| m == Mutability::Shared)
+                    && cx
+                        .ty(&inner)
+                        .and_then(|it| it.as_reference())
+                        .is_some_and(|(_, m)| m == Mutability::Shared)
                 {
                     lint_explicit_closure(cx, expr, range, receiver, true);
                 }
@@ -62,7 +70,10 @@ pub(super) fn check(cx: &mut Cx<'_, '_, '_>, expr: &ast::Expr) {
                 let clone_trait = cx.lang_trait(hir::LangItem::Clone);
                 let Some(function) = cx.sema().resolve_method_call(clone) else { return };
                 if clone_trait.is_none()
-                    || function.as_assoc_item(db).and_then(|it| it.container_or_implemented_trait(db)) != clone_trait
+                    || function
+                        .as_assoc_item(db)
+                        .and_then(|it| it.container_or_implemented_trait(db))
+                        != clone_trait
                 {
                     return;
                 }
@@ -79,8 +90,18 @@ pub(super) fn check(cx: &mut Cx<'_, '_, '_>, expr: &ast::Expr) {
                     Some(_) => {}
                     None => {
                         let span = cx.span(syntax::TextRange::new(receiver.end(), range.end()));
-                        cx.lint(LINT, expr.syntax(), span.clone(), "you are needlessly cloning iterator elements")
-                            .suggestion(span, "remove the `map` call", "", Applicability::MachineApplicable);
+                        cx.lint(
+                            LINT,
+                            expr.syntax(),
+                            span.clone(),
+                            "you are needlessly cloning iterator elements",
+                        )
+                        .suggestion(
+                            span,
+                            "remove the `map` call",
+                            "",
+                            Applicability::MachineApplicable,
+                        );
                     }
                 }
             }
@@ -92,7 +113,11 @@ pub(super) fn check(cx: &mut Cx<'_, '_, '_>, expr: &ast::Expr) {
 
 /// clippy's `should_run_lint`: `map` of `Iterator`, or of `Option` or `Result` not called on
 /// what `as_ref` gives, which `useless_asref` says better.
-fn should_run_lint(cx: &Cx<'_, '_, '_>, method: &ast::MethodCallExpr, receiver: &ast::Expr) -> bool {
+fn should_run_lint(
+    cx: &Cx<'_, '_, '_>,
+    method: &ast::MethodCallExpr,
+    receiver: &ast::Expr,
+) -> bool {
     let db = cx.db();
     let Some(function) = cx.sema().resolve_method_call(method) else { return false };
     let Some(item) = function.as_assoc_item(db) else { return false };
@@ -108,7 +133,9 @@ fn should_run_lint(cx: &Cx<'_, '_, '_>, method: &ast::MethodCallExpr, receiver: 
         return false;
     }
     match receiver {
-        ast::Expr::MethodCallExpr(previous) => previous.name_ref().is_none_or(|it| it.text() != "as_ref"),
+        ast::Expr::MethodCallExpr(previous) => {
+            previous.name_ref().is_none_or(|it| it.text() != "as_ref")
+        }
         _ => true,
     }
 }

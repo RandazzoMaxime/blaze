@@ -15,7 +15,8 @@ const STATIC_IN_CONST: Version = Version(1, 17, 0);
 
 pub(super) fn check_const(cx: &mut Cx<'_, '_, '_>, item: &ast::Const) {
     // An associated constant cannot leave `'static` out.
-    let associated = item.syntax().parent().is_some_and(|it| it.kind() == SyntaxKind::ASSOC_ITEM_LIST);
+    let associated =
+        item.syntax().parent().is_some_and(|it| it.kind() == SyntaxKind::ASSOC_ITEM_LIST);
     if associated || !cx.on(LINT) || !cx.conf().meets(STATIC_IN_CONST) {
         return;
     }
@@ -25,7 +26,8 @@ pub(super) fn check_const(cx: &mut Cx<'_, '_, '_>, item: &ast::Const) {
 }
 
 pub(super) fn check_static(cx: &mut Cx<'_, '_, '_>, item: &ast::Static) {
-    let foreign = item.syntax().parent().is_some_and(|it| it.kind() == SyntaxKind::EXTERN_ITEM_LIST);
+    let foreign =
+        item.syntax().parent().is_some_and(|it| it.kind() == SyntaxKind::EXTERN_ITEM_LIST);
     if foreign || !cx.on(LINT) || !cx.conf().meets(STATIC_IN_CONST) {
         return;
     }
@@ -63,9 +65,11 @@ fn visit(cx: &mut Cx<'_, '_, '_>, item: &syntax::SyntaxNode, ty: &ast::Type, rea
                         | ast::Type::TupleType(_)
                 )
             {
-                let (Some(at), Some(whole), Some(borrowed_at)) =
-                    (cx.range(lifetime.syntax()), cx.range(reference.syntax()), cx.range(borrowed.syntax()))
-                else {
+                let (Some(at), Some(whole), Some(borrowed_at)) = (
+                    cx.range(lifetime.syntax()),
+                    cx.range(reference.syntax()),
+                    cx.range(borrowed.syntax()),
+                ) else {
                     return;
                 };
                 let mutability = if reference.mut_token().is_some() { "mut " } else { "" };

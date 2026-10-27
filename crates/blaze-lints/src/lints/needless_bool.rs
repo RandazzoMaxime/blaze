@@ -32,7 +32,9 @@ pub(super) fn check_if(cx: &mut Cx<'_, '_, '_>, expr: &ast::IfExpr) {
     else {
         return;
     };
-    if matches!(cond, ast::Expr::LetExpr(_)) || cond.syntax().descendants().any(|it| ast::LetExpr::can_cast(it.kind())) {
+    if matches!(cond, ast::Expr::LetExpr(_))
+        || cond.syntax().descendants().any(|it| ast::LetExpr::can_cast(it.kind()))
+    {
         return;
     }
     let range = expr.syntax().text_range();
@@ -47,13 +49,24 @@ pub(super) fn check_if(cx: &mut Cx<'_, '_, '_>, expr: &ast::IfExpr) {
     };
     let span = cx.span(range);
     let (ret, not) = match (a, b) {
-        (Expression::RetBool(true), Expression::RetBool(true)) | (Expression::Bool(true), Expression::Bool(true)) => {
-            cx.lint(LINT, expr.syntax(), span, "this if-then-else expression will always return true");
+        (Expression::RetBool(true), Expression::RetBool(true))
+        | (Expression::Bool(true), Expression::Bool(true)) => {
+            cx.lint(
+                LINT,
+                expr.syntax(),
+                span,
+                "this if-then-else expression will always return true",
+            );
             return;
         }
         (Expression::RetBool(false), Expression::RetBool(false))
         | (Expression::Bool(false), Expression::Bool(false)) => {
-            cx.lint(LINT, expr.syntax(), span, "this if-then-else expression will always return false");
+            cx.lint(
+                LINT,
+                expr.syntax(),
+                span,
+                "this if-then-else expression will always return false",
+            );
             return;
         }
         (Expression::RetBool(true), Expression::RetBool(false)) => (true, false),
@@ -79,14 +92,22 @@ pub(super) fn check_if(cx: &mut Cx<'_, '_, '_>, expr: &ast::IfExpr) {
     let is_receiver = matches!(&parent_expr, Some(ast::Expr::MethodCallExpr(call)) if call.receiver().is_some_and(|it| it.syntax() == expr.syntax()));
     let is_operand = match &parent_expr {
         Some(ast::Expr::CastExpr(_) | ast::Expr::PrefixExpr(_)) => true,
-        Some(ast::Expr::BinExpr(bin)) => !matches!(bin.op_kind(), Some(ast::BinaryOp::Assignment { .. })),
+        Some(ast::Expr::BinExpr(bin)) => {
+            !matches!(bin.op_kind(), Some(ast::BinaryOp::Assignment { .. }))
+        }
         _ => false,
     };
     let is_stmt = parent.as_ref().is_some_and(|it| ast::ExprStmt::can_cast(it.kind()));
     if (condition_needs_parentheses(&cond) && is_stmt) || is_receiver || is_operand {
         snip = snip.maybe_paren();
     }
-    cx.lint(LINT, expr.syntax(), span.clone(), "this if-then-else expression returns a bool literal").suggestion(
+    cx.lint(
+        LINT,
+        expr.syntax(),
+        span.clone(),
+        "this if-then-else expression returns a bool literal",
+    )
+    .suggestion(
         span,
         "you can reduce it to",
         snip.to_string(),
@@ -121,7 +142,8 @@ pub(super) fn check_block(cx: &mut Cx<'_, '_, '_>, block: &ast::StmtList) {
     {
         return;
     }
-    let range = TextRange::new(if_expr.syntax().text_range().start(), tail.syntax().text_range().end());
+    let range =
+        TextRange::new(if_expr.syntax().text_range().start(), tail.syntax().text_range().end());
     if utils::contains_comment(block.syntax(), range) {
         return;
     }
@@ -134,8 +156,13 @@ pub(super) fn check_block(cx: &mut Cx<'_, '_, '_>, block: &ast::StmtList) {
         None => snip.to_string(),
     };
     let span = cx.span(range);
-    cx.lint(LINT, block.syntax(), span.clone(), "this `if` guard returns a bool literal and is followed by another")
-        .suggestion(span, "you can reduce it to", sugg, Applicability::MachineApplicable);
+    cx.lint(
+        LINT,
+        block.syntax(),
+        span.clone(),
+        "this `if` guard returns a bool literal and is followed by another",
+    )
+    .suggestion(span, "you can reduce it to", sugg, Applicability::MachineApplicable);
 }
 
 /// What `if_expr`, an `if` without `else` whose block only returns, returns.
@@ -144,7 +171,8 @@ fn guard_return(if_expr: &ast::IfExpr) -> Option<ast::Expr> {
         return None;
     }
     let then = if_expr.then_branch()?;
-    let ast::Expr::ReturnExpr(ret) = utils::peel_blocks_with_stmt(&ast::Expr::BlockExpr(then)) else {
+    let ast::Expr::ReturnExpr(ret) = utils::peel_blocks_with_stmt(&ast::Expr::BlockExpr(then))
+    else {
         return None;
     };
     ret.expr()

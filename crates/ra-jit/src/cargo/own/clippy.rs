@@ -29,7 +29,8 @@ use super::super::{
 };
 
 /// The flags `cargo clippy` takes that `cargo check` does not.
-const CLIPPYS: &[&str] = &["--no-deps", "--fix", "--allow-dirty", "--allow-staged", "--allow-no-vcs", "--broken-code"];
+const CLIPPYS: &[&str] =
+    &["--no-deps", "--fix", "--allow-dirty", "--allow-staged", "--allow-no-vcs", "--broken-code"];
 
 /// `cargo blaze clippy <rest>`; returns the status to exit with.
 pub(crate) fn command(rest: &[String]) -> anyhow::Result<i32> {
@@ -38,14 +39,18 @@ pub(crate) fn command(rest: &[String]) -> anyhow::Result<i32> {
         None => (rest, &[][..]),
     };
     if let Some(fix) = ours.iter().find(|it| it.as_str() == "--fix") {
-        say::error(&format!("blaze's clippy does not apply its suggestions yet (`{fix}`); nothing was changed"));
+        say::error(&format!(
+            "blaze's clippy does not apply its suggestions yet (`{fix}`); nothing was changed"
+        ));
         return Ok(FAILED);
     }
     let no_deps = ours.iter().any(|it| it == "--no-deps");
     let mut typed = vec!["check".to_owned()];
     typed.extend(ours.iter().filter(|it| !CLIPPYS.contains(&it.as_str())).cloned());
     let Asked::Build(asked) = Asked::parse(typed) else {
-        anyhow::bail!("`cargo blaze clippy` reads its flags as `cargo check`'s, and they did not read");
+        anyhow::bail!(
+            "`cargo blaze clippy` reads its flags as `cargo check`'s, and they did not read"
+        );
     };
     let format = match Format::of(&asked.flags.message_format) {
         Ok(format) => format,
@@ -59,18 +64,19 @@ pub(crate) fn command(rest: &[String]) -> anyhow::Result<i32> {
     let plan = units(&asked, &metadata, no_deps)?;
     let ask = ask(&asked, &metadata, &plan.units, clippy_args, format)?;
     let ahead = state::checked(&asked)?;
-    let answer = match client::ask(Request::Lint(ahead, serde_json::to_string(&ask)?), Start::IfMissing)? {
-        Some(Reply::Linted { answer }) => serde_json::from_str::<Answer>(&answer)?,
-        Some(Reply::Checked { errors: Some(errors) }) => {
-            messages::turned_down(format, &[errors], &metadata);
-            return Ok(FAILED);
-        }
-        Some(Reply::Cold { reason }) => {
-            say::error(&format!("blaze could not lint the workspace: {reason}"));
-            return Ok(FAILED);
-        }
-        reply => anyhow::bail!("the daemon answered a lint request with {reply:?}"),
-    };
+    let answer =
+        match client::ask(Request::Lint(ahead, serde_json::to_string(&ask)?), Start::IfMissing)? {
+            Some(Reply::Linted { answer }) => serde_json::from_str::<Answer>(&answer)?,
+            Some(Reply::Checked { errors: Some(errors) }) => {
+                messages::turned_down(format, &[errors], &metadata);
+                return Ok(FAILED);
+            }
+            Some(Reply::Cold { reason }) => {
+                say::error(&format!("blaze could not lint the workspace: {reason}"));
+                return Ok(FAILED);
+            }
+            reply => anyhow::bail!("the daemon answered a lint request with {reply:?}"),
+        };
     if !answer.failed.is_empty() {
         for (_, why) in &answer.failed {
             say::error(why);
@@ -133,7 +139,11 @@ struct Plan<'a> {
 
 /// The units `asked` builds: every target selected of each package selected, and the library
 /// of each other package of the workspace they depend on, which `cargo clippy` lints too.
-fn units<'a>(asked: &Invocation, metadata: &'a Metadata, no_deps: bool) -> anyhow::Result<Plan<'a>> {
+fn units<'a>(
+    asked: &Invocation,
+    metadata: &'a Metadata,
+    no_deps: bool,
+) -> anyhow::Result<Plan<'a>> {
     let members = metadata.workspace_packages();
     let selected = selected(asked, metadata)?;
     let flags = &asked.flags;
@@ -245,17 +255,26 @@ fn selected<'a>(asked: &Invocation, metadata: &'a Metadata) -> anyhow::Result<Ve
         for named in &flags.packages {
             let name = named.split('@').next().unwrap_or(named);
             let package = members.iter().find(|it| it.name.as_str() == name);
-            found.push(*package.ok_or_else(|| anyhow::anyhow!("package `{named}` is not a member of the workspace"))?);
+            found.push(*package.ok_or_else(|| {
+                anyhow::anyhow!("package `{named}` is not a member of the workspace")
+            })?);
         }
         return Ok(found);
     }
     if flags.workspace {
-        return Ok(members.into_iter().filter(|it| !flags.excludes.contains(&it.name.to_string())).collect());
+        return Ok(members
+            .into_iter()
+            .filter(|it| !flags.excludes.contains(&it.name.to_string()))
+            .collect());
     }
     let cwd = std::env::current_dir()?;
     let manifest = match &flags.manifest_path {
         Some(it) => cwd.join(it),
-        None => cwd.ancestors().map(|it| it.join("Cargo.toml")).find(|it| it.exists()).unwrap_or_default(),
+        None => cwd
+            .ancestors()
+            .map(|it| it.join("Cargo.toml"))
+            .find(|it| it.exists())
+            .unwrap_or_default(),
     };
     if let Some(package) = members.iter().find(|it| it.manifest_path.as_std_path() == manifest) {
         return Ok(vec![*package]);
@@ -264,7 +283,11 @@ fn selected<'a>(asked: &Invocation, metadata: &'a Metadata) -> anyhow::Result<Ve
     let defaults = default_members(&root.join("Cargo.toml"));
     let chosen: Vec<&Package> = members
         .iter()
-        .filter(|it| defaults.iter().any(|dir| it.manifest_path.as_std_path() == root.join(dir).join("Cargo.toml")))
+        .filter(|it| {
+            defaults
+                .iter()
+                .any(|dir| it.manifest_path.as_std_path() == root.join(dir).join("Cargo.toml"))
+        })
         .copied()
         .collect();
     Ok(if chosen.is_empty() { members } else { chosen })
@@ -274,15 +297,25 @@ fn selected<'a>(asked: &Invocation, metadata: &'a Metadata) -> anyhow::Result<Ve
 fn default_members(path: &Path) -> Vec<String> {
     let Ok(text) = std::fs::read_to_string(path) else { return Vec::new() };
     let Ok(table) = text.parse::<toml::Table>() else { return Vec::new() };
-    let members = table.get("workspace").and_then(|it| it.get("default-members")).and_then(|it| it.as_array());
+    let members = table
+        .get("workspace")
+        .and_then(|it| it.get("default-members"))
+        .and_then(|it| it.as_array());
     members.into_iter().flatten().filter_map(|it| it.as_str().map(str::to_owned)).collect()
 }
 
 /// The lint request of the packages the units are of.
-fn ask(asked: &Invocation, metadata: &Metadata, units: &[Unit<'_>], clippy_args: &[String], format: Format) -> anyhow::Result<Ask> {
+fn ask(
+    asked: &Invocation,
+    metadata: &Metadata,
+    units: &[Unit<'_>],
+    clippy_args: &[String],
+    format: Format,
+) -> anyhow::Result<Ask> {
     let root_manifest = metadata.workspace_root.as_std_path().join("Cargo.toml");
     let rustflags = rustflags();
-    let conf_dir = std::env::var_os("CLIPPY_CONF_DIR").filter(|it| !it.is_empty()).map(PathBuf::from);
+    let conf_dir =
+        std::env::var_os("CLIPPY_CONF_DIR").filter(|it| !it.is_empty()).map(PathBuf::from);
     let mut packages: Vec<blaze_lints::serve::Package> = Vec::new();
     for unit in units {
         let package = unit.package;
@@ -290,7 +323,8 @@ fn ask(asked: &Invocation, metadata: &Metadata, units: &[Unit<'_>], clippy_args:
             continue;
         }
         let manifest = package.manifest_path.as_std_path();
-        let lints = blaze_lints::manifest::lints(manifest, &root_manifest).map_err(anyhow::Error::msg)?;
+        let lints =
+            blaze_lints::manifest::lints(manifest, &root_manifest).map_err(anyhow::Error::msg)?;
         let mut flags = blaze_lints::manifest::flags(&lints);
         flags.extend(rustflags.iter().cloned());
         flags.extend(clippy_args.iter().cloned());
@@ -308,9 +342,7 @@ fn ask(asked: &Invocation, metadata: &Metadata, units: &[Unit<'_>], clippy_args:
         Format::Short => (true, color),
         Format::Json { short, ansi, render } => (short, ansi || render && color),
     };
-    let width = (format == Format::Human || format == Format::Short)
-        .then(terminal_width)
-        .flatten();
+    let width = (format == Format::Human || format == Format::Short).then(terminal_width).flatten();
     Ok(Ask { packages, short, ansi, width })
 }
 
@@ -480,7 +512,9 @@ fn summary(unit: &Unit<'_>, count: &Count, clippy_args: &[String]) {
         // cargo writes them back with that last one as a space.
         let mut lints: String = clippy_args.iter().map(|it| format!("{it} ")).collect();
         lints.truncate(lints.trim_ascii_end().len());
-        message.push_str(&format!(" (run `cargo clippy --fix --{args} -- {lints}` to apply {suggestions})"));
+        message.push_str(&format!(
+            " (run `cargo clippy --fix --{args} -- {lints}` to apply {suggestions})"
+        ));
     }
     say::warning(&message);
 }

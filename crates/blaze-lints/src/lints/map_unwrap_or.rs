@@ -16,7 +16,9 @@ pub(super) fn check(cx: &mut Cx<'_, '_, '_>, expr: &ast::Expr) {
     if !cx.on(LINT) || cx.expansion.is_some() {
         return;
     }
-    let Some(MethodCall { name, receiver: recv, args, .. }) = utils::method_call(cx, expr) else { return };
+    let Some(MethodCall { name, receiver: recv, args, .. }) = utils::method_call(cx, expr) else {
+        return;
+    };
     let Some(map) = utils::method_call(cx, &recv) else { return };
     let [map_arg] = &map.args[..] else { return };
     if map.name != "map" {
@@ -65,7 +67,9 @@ fn unwrap_or(
     let Some(recv_range) = cx.range(unwrap_recv.syntax()) else { return };
     let suggested = match () {
         _ if kind == "Option" && utils::is_none(cx, unwrap_arg) => Suggested::AndThen,
-        _ if utils::is_bool_literal(unwrap_arg, false) && cx.conf().meets(msrvs::OPTION_RESULT_IS_VARIANT_AND) => {
+        _ if utils::is_bool_literal(unwrap_arg, false)
+            && cx.conf().meets(msrvs::OPTION_RESULT_IS_VARIANT_AND) =>
+        {
             Suggested::IsVariantAnd
         }
         _ => Suggested::Other,
@@ -104,7 +108,11 @@ fn unwrap_or(
     }
     let diagnostic = cx.lint(LINT, expr.syntax(), span, message);
     if !method.is_empty() {
-        diagnostic.multipart_suggestion(format!("use `{suggest}` instead"), parts, Applicability::MachineApplicable);
+        diagnostic.multipart_suggestion(
+            format!("use `{suggest}` instead"),
+            parts,
+            Applicability::MachineApplicable,
+        );
     }
 }
 
@@ -124,12 +132,19 @@ fn moved_is_used_before(cx: &Cx<'_, '_, '_>, expr: &ast::Expr, unwrap_arg: &ast:
     let Some(body) = utils::enclosing_body(expr.syntax()) else { return false };
     let Some(unwrap_at) = cx.range(unwrap_arg.syntax()) else { return true };
     body.descendants().filter_map(ast::PathExpr::cast).any(|path| {
-        let before = cx.range(path.syntax()).is_some_and(|it| (it.start(), it.end()) < (unwrap_at.start(), unwrap_at.end()));
+        let before = cx
+            .range(path.syntax())
+            .is_some_and(|it| (it.start(), it.end()) < (unwrap_at.start(), unwrap_at.end()));
         before && utils::local_of(cx, &path).is_some_and(|it| locals.contains(&it))
     })
 }
 
-fn unwrap_or_default(cx: &mut Cx<'_, '_, '_>, expr: &ast::Expr, recv: &ast::Expr, map: &MethodCall) {
+fn unwrap_or_default(
+    cx: &mut Cx<'_, '_, '_>,
+    expr: &ast::Expr,
+    recv: &ast::Expr,
+    map: &MethodCall,
+) {
     if !cx.conf().meets(msrvs::MAP_OR_DEFAULT) {
         return;
     }
@@ -150,6 +165,11 @@ fn unwrap_or_default(cx: &mut Cx<'_, '_, '_>, expr: &ast::Expr, recv: &ast::Expr
         (cx.span(map_range), "map_or_default".to_owned()),
     ];
     let span = cx.span(expr_range);
-    cx.lint(LINT, expr.syntax(), span, format!("called `map(_).unwrap_or_default()` on {ty} value"))
-        .multipart_suggestion("use instead", parts, Applicability::MachineApplicable);
+    cx.lint(
+        LINT,
+        expr.syntax(),
+        span,
+        format!("called `map(_).unwrap_or_default()` on {ty} value"),
+    )
+    .multipart_suggestion("use instead", parts, Applicability::MachineApplicable);
 }

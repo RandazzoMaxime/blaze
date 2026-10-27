@@ -35,17 +35,18 @@ pub(super) fn check(cx: &mut Cx<'_, '_, '_>, call: &ast::MacroCall) {
     let Some(call_expr) = call.syntax().parent().and_then(ast::MacroExpr::cast) else { return };
     let call_expr = ast::Expr::MacroExpr(call_expr);
     // clippy looks at `&vec![..]` whole: the `vec![..]` in it is a `Vec` where it is.
-    let (expr, suggested) = match past_parens(call_expr.syntax()).parent().and_then(ast::RefExpr::cast) {
-        Some(borrow) if borrow.raw_token().is_none() => {
-            if !cx.is_written(borrow.syntax()) {
-                return;
+    let (expr, suggested) =
+        match past_parens(call_expr.syntax()).parent().and_then(ast::RefExpr::cast) {
+            Some(borrow) if borrow.raw_token().is_none() => {
+                if !cx.is_written(borrow.syntax()) {
+                    return;
+                }
+                let mutable = borrow.mut_token().is_some();
+                (ast::Expr::RefExpr(borrow), Suggested::Slice { mutable })
             }
-            let mutable = borrow.mut_token().is_some();
-            (ast::Expr::RefExpr(borrow), Suggested::Slice { mutable })
-        }
-        Some(_) => return,
-        None => (call_expr, Suggested::Array),
-    };
+            Some(_) => return,
+            None => (call_expr, Suggested::Array),
+        };
     if cx.conf().bool("allow-useless-vec-in-tests", false) && in_test(expr.syntax()) {
         return;
     }
@@ -181,7 +182,9 @@ fn elements(tt: &SyntaxNode) -> usize {
     if inner.is_empty() {
         return 0;
     }
-    let commas = inner.iter().filter(|it| matches!(it, NodeOrToken::Token(it) if it.kind() == SyntaxKind::COMMA));
+    let commas = inner
+        .iter()
+        .filter(|it| matches!(it, NodeOrToken::Token(it) if it.kind() == SyntaxKind::COMMA));
     let trailing = inner.last().is_some_and(|it| it.kind() == SyntaxKind::COMMA);
     commas.count() + 1 - usize::from(trailing)
 }

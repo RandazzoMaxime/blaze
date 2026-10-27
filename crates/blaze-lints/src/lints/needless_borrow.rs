@@ -48,7 +48,9 @@ pub(super) fn check(cx: &mut Cx<'_, '_, '_>, expr: &ast::Expr) {
     if !is_use {
         return;
     }
-    let Some(adjustments) = ast::Expr::cast(used.clone()).and_then(|it| cx.sema().expr_adjustments(&it)) else {
+    let Some(adjustments) =
+        ast::Expr::cast(used.clone()).and_then(|it| cx.sema().expr_adjustments(&it))
+    else {
         return;
     };
     let mut iter = adjustments.iter();
@@ -66,7 +68,8 @@ pub(super) fn check(cx: &mut Cx<'_, '_, '_>, expr: &ast::Expr) {
     };
     // A mutable reborrow the compiler does not insert by itself keeps one more reference, so
     // that the borrow is not moved.
-    let reborrows_mut = next.is_some_and(|it| matches!(it.kind, Adjust::Borrow(AutoBorrow::Ref(Mutability::Mut))));
+    let reborrows_mut =
+        next.is_some_and(|it| matches!(it.kind, Adjust::Borrow(AutoBorrow::Ref(Mutability::Mut))));
     let required = if reborrows_mut && !reborrow_stable(cx, &used, &parent) { 3 } else { 2 };
     if deref_count < required {
         return;
@@ -78,14 +81,20 @@ pub(super) fn check(cx: &mut Cx<'_, '_, '_>, expr: &ast::Expr) {
     {
         return;
     }
-    let (Some(range), Some(sub_range)) = (cx.range(expr.syntax()), cx.range(sub.syntax())) else { return };
+    let (Some(range), Some(sub_range)) = (cx.range(expr.syntax()), cx.range(sub.syntax())) else {
+        return;
+    };
     let snip = cx.snippet(sub_range);
     // A method call binds tighter than an operator: a call's arguments are each whole.
-    let in_method_call = in_call && parent.parent().is_some_and(|it| ast::MethodCallExpr::can_cast(it.kind()));
+    let in_method_call =
+        in_call && parent.parent().is_some_and(|it| ast::MethodCallExpr::can_cast(it.kind()));
     let needs_paren = in_method_call
         && matches!(
             sub,
-            ast::Expr::PrefixExpr(_) | ast::Expr::BinExpr(_) | ast::Expr::CastExpr(_) | ast::Expr::RangeExpr(_)
+            ast::Expr::PrefixExpr(_)
+                | ast::Expr::BinExpr(_)
+                | ast::Expr::CastExpr(_)
+                | ast::Expr::RangeExpr(_)
         );
     let sugg = if needs_paren && !has_enclosing_paren(&snip) { format!("({snip})") } else { snip };
     let span = cx.span(range);
@@ -105,15 +114,23 @@ fn reborrow_stable(cx: &Cx<'_, '_, '_>, used: &SyntaxNode, parent: &SyntaxNode) 
     if let Some(args) = ast::ArgList::cast(parent.clone()) {
         let Some(index) = args.args().position(|it| it.syntax() == used) else { return false };
         let declared = match args.syntax().parent().and_then(ast::Expr::cast) {
-            Some(ast::Expr::MethodCallExpr(call)) => {
-                cx.sema().resolve_method_call(&call).and_then(|it| it.params_without_self(db).into_iter().nth(index)).map(|it| it.ty().clone())
-            }
+            Some(ast::Expr::MethodCallExpr(call)) => cx
+                .sema()
+                .resolve_method_call(&call)
+                .and_then(|it| it.params_without_self(db).into_iter().nth(index))
+                .map(|it| it.ty().clone()),
             Some(ast::Expr::CallExpr(call)) => {
-                let Some(callable) = call.expr().and_then(|it| cx.sema().resolve_expr_as_callable(&it)) else { return false };
+                let Some(callable) =
+                    call.expr().and_then(|it| cx.sema().resolve_expr_as_callable(&it))
+                else {
+                    return false;
+                };
                 match callable.kind() {
-                    hir::CallableKind::Function(function) => {
-                        function.params_without_self(db).into_iter().nth(index).map(|it| it.ty().clone())
-                    }
+                    hir::CallableKind::Function(function) => function
+                        .params_without_self(db)
+                        .into_iter()
+                        .nth(index)
+                        .map(|it| it.ty().clone()),
                     _ => callable.params().into_iter().nth(index).map(|it| it.ty().clone()),
                 }
             }
@@ -122,14 +139,19 @@ fn reborrow_stable(cx: &Cx<'_, '_, '_>, used: &SyntaxNode, parent: &SyntaxNode) 
         return declared.is_some_and(|it| it.is_reference());
     }
     if let Some(field) = ast::RecordExprField::cast(parent.clone()) {
-        return cx.sema().resolve_record_field(&field).is_some_and(|(field, ..)| field.ty(db).is_reference());
+        return cx
+            .sema()
+            .resolve_record_field(&field)
+            .is_some_and(|(field, ..)| field.ty(db).is_reference());
     }
     if let Some(stmt) = ast::LetStmt::cast(parent.clone()) {
         return matches!(stmt.ty(), Some(ast::Type::RefType(_)));
     }
     if ast::ReturnExpr::can_cast(parent.kind()) {
         let function = parent.ancestors().find_map(ast::Fn::cast);
-        return function.and_then(|it| cx.sema().to_def(&it)).is_some_and(|it| it.ret_type(db).is_reference());
+        return function
+            .and_then(|it| cx.sema().to_def(&it))
+            .is_some_and(|it| it.ret_type(db).is_reference());
     }
     false
 }
@@ -178,7 +200,9 @@ pub(super) fn check_ref_pat(cx: &mut Cx<'_, '_, '_>, pat: &ast::IdentPat) {
     let mut replacements: Vec<(TextRange, String)> = Vec::new();
     let mut spans = Vec::new();
     for binding in &bindings {
-        let (Some(range), Some(name)) = (cx.range(binding.syntax()), binding.name()) else { return };
+        let (Some(range), Some(name)) = (cx.range(binding.syntax()), binding.name()) else {
+            return;
+        };
         let Some(name) = cx.range(name.syntax()) else { return };
         spans.push(range);
         replacements.push((range, cx.snippet(name)));
@@ -191,13 +215,16 @@ pub(super) fn check_ref_pat(cx: &mut Cx<'_, '_, '_>, pat: &ast::IdentPat) {
         }
         let expr = ast::Expr::PathExpr(path.clone());
         let adjustments = cx.sema().expr_adjustments(&expr).unwrap_or_default();
-        if matches!(&adjustments[..], [first, second, ..] if matches!(first.kind, Adjust::Deref(_)) && matches!(second.kind, Adjust::Deref(_))) {
+        if matches!(&adjustments[..], [first, second, ..] if matches!(first.kind, Adjust::Deref(_)) && matches!(second.kind, Adjust::Deref(_)))
+        {
             return;
         }
         let used = past_parens(path.syntax());
         match used.parent().and_then(parent_expr) {
             Some(ast::Expr::FieldExpr(_)) => {}
-            Some(ast::Expr::PrefixExpr(prefix)) if prefix.op_kind() == Some(ast::UnaryOp::Deref) => {
+            Some(ast::Expr::PrefixExpr(prefix))
+                if prefix.op_kind() == Some(ast::UnaryOp::Deref) =>
+            {
                 match (cx.range(prefix.syntax()), cx.range(path.syntax())) {
                     (Some(at), Some(name)) => replacements.push((at, cx.snippet(name))),
                     _ => cancelled = true,
@@ -221,11 +248,14 @@ pub(super) fn check_ref_pat(cx: &mut Cx<'_, '_, '_>, pat: &ast::IdentPat) {
     let mut span = crate::diag::MultiSpan::default();
     span.primary = spans.iter().map(|it| cx.span(*it)).collect();
     let parts = replacements.into_iter().map(|(at, text)| (cx.span(at), text)).collect();
-    cx.lint_after(LINT, pat.syntax(), &body, span, "this pattern creates a reference to a reference").multipart_suggestion(
-        "try",
-        parts,
-        Applicability::MachineApplicable,
-    );
+    cx.lint_after(
+        LINT,
+        pat.syntax(),
+        &body,
+        span,
+        "this pattern creates a reference to a reference",
+    )
+    .multipart_suggestion("try", parts, Applicability::MachineApplicable);
 }
 
 /// The body and, for a closure or a function, its parameters: where its bindings are.

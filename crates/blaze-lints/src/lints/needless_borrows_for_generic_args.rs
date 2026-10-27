@@ -34,11 +34,18 @@ pub(super) fn check(cx: &mut Cx<'_, '_, '_>, expr: &ast::Expr) {
         let Some(inner) = reference.expr() else { return };
         peeled = inner;
     }
-    let (Some(range), Some(inner)) = (cx.range(expr.syntax()), cx.range(peeled.syntax())) else { return };
+    let (Some(range), Some(inner)) = (cx.range(expr.syntax()), cx.range(peeled.syntax())) else {
+        return;
+    };
     let snippet = cx.snippet(inner);
     let span = cx.span(range);
-    cx.lint(LINT, expr.syntax(), span.clone(), "the borrowed expression implements the required traits")
-        .suggestion(span, "change this to", snippet, Applicability::MachineApplicable);
+    cx.lint(
+        LINT,
+        expr.syntax(),
+        span.clone(),
+        "the borrowed expression implements the required traits",
+    )
+    .suggestion(span, "change this to", snippet, Applicability::MachineApplicable);
 }
 
 /// The function `node` is an argument of, and which of its parameters it is: clippy's
@@ -71,14 +78,24 @@ fn callee(cx: &Cx<'_, '_, '_>, node: &SyntaxNode) -> Option<(hir::Function, usiz
     }
 }
 
-fn needless_borrow_count(cx: &Cx<'_, '_, '_>, function: hir::Function, index: usize, expr: &ast::Expr) -> usize {
+fn needless_borrow_count(
+    cx: &Cx<'_, '_, '_>,
+    function: hir::Function,
+    index: usize,
+    expr: &ast::Expr,
+) -> usize {
     let db = cx.db();
     let params = function.assoc_fn_params(db);
     let Some(param) = params.get(index) else { return 0 };
     let Some(type_param) = param.ty().as_type_param(db) else { return 0 };
     let krate = cx.krate();
     let lang = |item| hir::Trait::lang(db, krate, item);
-    let trivial = [lang(hir::LangItem::Destruct), lang(hir::LangItem::Sized), lang(hir::LangItem::MetaSized), cx.std_trait(&["core", "any", "Any"])];
+    let trivial = [
+        lang(hir::LangItem::Destruct),
+        lang(hir::LangItem::Sized),
+        lang(hir::LangItem::MetaSized),
+        cx.std_trait(&["core", "any", "Any"]),
+    ];
     let bounds = type_param.trait_refs(db);
     if bounds.iter().all(|it| trivial.contains(&Some(it.trait_()))) {
         return 0;
@@ -86,7 +103,10 @@ fn needless_borrow_count(cx: &Cx<'_, '_, '_>, function: hir::Function, index: us
     let ref_mut_self = bounds.iter().any(|it| has_ref_mut_self_method(db, it.trait_()));
     // `replace_types`: the parameter is in the signature only where the argument is.
     let generic = GenericParam::TypeParam(type_param);
-    let elsewhere = params.iter().enumerate().any(|(at, it)| at != index && it.ty().generic_params(db).contains(&generic))
+    let elsewhere = params
+        .iter()
+        .enumerate()
+        .any(|(at, it)| at != index && it.ty().generic_params(db).contains(&generic))
         || function.ret_type(db).generic_params(db).contains(&generic);
     if elsewhere {
         return 0;
@@ -110,7 +130,10 @@ fn needless_borrow_count(cx: &Cx<'_, '_, '_>, function: hir::Function, index: us
         }
         bounds.iter().all(|bound| {
             let trait_ = bound.trait_();
-            if Some(trait_) == into_iter && ty.is_array() && !cx.conf().meets(msrvs::ARRAY_INTO_ITERATOR) {
+            if Some(trait_) == into_iter
+                && ty.is_array()
+                && !cx.conf().meets(msrvs::ARRAY_INTO_ITERATOR)
+            {
                 return false;
             }
             let mut args = Vec::new();
@@ -137,9 +160,9 @@ fn needless_borrow_count(cx: &Cx<'_, '_, '_>, function: hir::Function, index: us
 
 fn has_ref_mut_self_method(db: &dyn hir::db::HirDatabase, trait_: hir::Trait) -> bool {
     trait_.items(db).into_iter().any(|it| match it {
-        hir::AssocItem::Function(function) => function
-            .self_param(db)
-            .is_some_and(|it| it.access(db) == hir::Access::Exclusive),
+        hir::AssocItem::Function(function) => {
+            function.self_param(db).is_some_and(|it| it.access(db) == hir::Access::Exclusive)
+        }
         _ => false,
     })
 }
@@ -161,7 +184,8 @@ fn is_call(cx: &Cx<'_, '_, '_>, expr: &ast::Expr) -> bool {
             let Some(call) = mac.macro_call() else { return false };
             let Some(expanded) = cx.sema().expand_macro_call(&call) else { return false };
             let root = expanded.value;
-            let expr = ast::Expr::cast(root.clone()).or_else(|| root.children().find_map(ast::Expr::cast));
+            let expr =
+                ast::Expr::cast(root.clone()).or_else(|| root.children().find_map(ast::Expr::cast));
             expr.is_some_and(|it| is_call(cx, &peel_parens(&it)))
         }
         _ => false,

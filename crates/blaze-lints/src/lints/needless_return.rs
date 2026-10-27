@@ -85,18 +85,23 @@ fn report(cx: &mut Cx<'_, '_, '_>, when: &SyntaxNode, found: Vec<Found>) {
         let mut parts = vec![(cx.span(ret_span), replacement.text())];
         parts.extend(semis.into_iter().map(|it| (cx.span(it), String::new())));
         let span = cx.span(range);
-        cx.lint_when(LINT, ret.syntax(), when, span, "unneeded `return` statement").multipart_suggestion(
-            replacement.help(),
-            parts,
-            Applicability::MachineApplicable,
-        );
+        cx.lint_when(LINT, ret.syntax(), when, span, "unneeded `return` statement")
+            .multipart_suggestion(replacement.help(), parts, Applicability::MachineApplicable);
     }
 }
 
 /// clippy's `check_block_return`: the last expression of `expr`, if it is a block.
-fn check_block(cx: &Cx<'_, '_, '_>, expr: &ast::Expr, mut semis: Vec<TextRange>, found: &mut Vec<Found>) {
+fn check_block(
+    cx: &Cx<'_, '_, '_>,
+    expr: &ast::Expr,
+    mut semis: Vec<TextRange>,
+    found: &mut Vec<Found>,
+) {
     let ast::Expr::BlockExpr(block) = expr else { return };
-    if !matches!(block.modifier(), None | Some(ast::BlockModifier::Unsafe(_) | ast::BlockModifier::Label(_))) {
+    if !matches!(
+        block.modifier(),
+        None | Some(ast::BlockModifier::Unsafe(_) | ast::BlockModifier::Label(_))
+    ) {
         return;
     }
     let Some(list) = block.stmt_list() else { return };
@@ -105,7 +110,10 @@ fn check_block(cx: &Cx<'_, '_, '_>, expr: &ast::Expr, mut semis: Vec<TextRange>,
         return;
     }
     let Some(ast::Stmt::ExprStmt(stmt)) = list.statements().last() else { return };
-    let (Some(stmt_range), Some(list_range)) = (cx.range(stmt.syntax()), cx.range(list.syntax())) else { return };
+    let (Some(stmt_range), Some(list_range)) = (cx.range(stmt.syntax()), cx.range(list.syntax()))
+    else {
+        return;
+    };
     if contains_cfg(cx, stmt_range.end(), list_range.end()) {
         return;
     }
@@ -117,7 +125,8 @@ fn check_block(cx: &Cx<'_, '_, '_>, expr: &ast::Expr, mut semis: Vec<TextRange>,
         // value a statement.
         let start = inner_range.end();
         let text = cx.snippet(TextRange::new(start, list_range.end()));
-        let len: usize = text.chars().take_while(|it| *it == ' ' || *it == ';').map(char::len_utf8).sum();
+        let len: usize =
+            text.chars().take_while(|it| *it == ' ' || *it == ';').map(char::len_utf8).sum();
         semis.push(TextRange::at(start, TextSize::try_from(len).unwrap_or_default()));
     }
     check_final(cx, &inner, semis, Replacement::Empty, None, found);
@@ -169,10 +178,24 @@ fn check_final(
             }
             match if_expr.else_branch() {
                 Some(ast::ElseBranch::Block(block)) => {
-                    check_final(cx, &ast::Expr::BlockExpr(block), semis, Replacement::Empty, match_ty, found);
+                    check_final(
+                        cx,
+                        &ast::Expr::BlockExpr(block),
+                        semis,
+                        Replacement::Empty,
+                        match_ty,
+                        found,
+                    );
                 }
                 Some(ast::ElseBranch::IfExpr(inner)) => {
-                    check_final(cx, &ast::Expr::IfExpr(inner), semis, Replacement::Empty, match_ty, found);
+                    check_final(
+                        cx,
+                        &ast::Expr::IfExpr(inner),
+                        semis,
+                        Replacement::Empty,
+                        match_ty,
+                        found,
+                    );
                 }
                 None => {}
             }

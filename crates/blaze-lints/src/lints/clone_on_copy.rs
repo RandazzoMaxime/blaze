@@ -34,11 +34,15 @@ pub(super) fn check(cx: &mut Cx<'_, '_, '_>, expr: &ast::Expr) {
     let db = cx.db();
     let clone = cx.lang_trait(hir::LangItem::Clone);
     let Some(function) = cx.sema().resolve_method_call(method) else { return };
-    if clone.is_none() || function.as_assoc_item(db).and_then(|it| it.container_or_implemented_trait(db)) != clone {
+    if clone.is_none()
+        || function.as_assoc_item(db).and_then(|it| it.container_or_implemented_trait(db)) != clone
+    {
         return;
     }
     let adjustments = cx.sema().expr_adjustments(&call.receiver).unwrap_or_default();
-    let Some(arg_ty) = adjustments.last().map(|it| it.target.clone()).or_else(|| cx.ty(&call.receiver)) else {
+    let Some(arg_ty) =
+        adjustments.last().map(|it| it.target.clone()).or_else(|| cx.ty(&call.receiver))
+    else {
         return;
     };
     if arg_ty.as_reference().is_some_and(|(inner, _)| inner.is_reference()) {
@@ -52,7 +56,10 @@ pub(super) fn check(cx: &mut Cx<'_, '_, '_>, expr: &ast::Expr) {
     if parent == Parent::Keep {
         return;
     }
-    let (Some(range), Some(receiver)) = (cx.range(expr.syntax()), cx.range(call.receiver.syntax())) else { return };
+    let (Some(range), Some(receiver)) = (cx.range(expr.syntax()), cx.range(call.receiver.syntax()))
+    else {
+        return;
+    };
     let snippet = cx.snippet(receiver);
     let derefs = adjustments.iter().take_while(|it| matches!(it.kind, Adjust::Deref(_))).count();
     let stars = "*".repeat(derefs);
@@ -63,8 +70,13 @@ pub(super) fn check(cx: &mut Cx<'_, '_, '_>, expr: &ast::Expr) {
     };
     let shown = ty.display(db, cx.krate().to_display_target(db)).to_string();
     let span = cx.span(range);
-    cx.lint(LINT, expr.syntax(), span.clone(), format!("using `clone` on type `{shown}` which implements the `Copy` trait"))
-        .suggestion(span, help, sugg, Applicability::MachineApplicable);
+    cx.lint(
+        LINT,
+        expr.syntax(),
+        span.clone(),
+        format!("using `clone` on type `{shown}` which implements the `Copy` trait"),
+    )
+    .suggestion(span, help, sugg, Applicability::MachineApplicable);
 }
 
 /// clippy's `check_parent_is_suffix_expr`.
@@ -77,18 +89,24 @@ fn parent_of(cx: &Cx<'_, '_, '_>, expr: &ast::Expr) -> Parent {
     }
     let Some(parent) = used.parent() else { return Parent::Other };
     if let Some(stmt) = ast::LetStmt::cast(parent.clone()) {
-        let by_ref = matches!(stmt.pat(), Some(ast::Pat::IdentPat(pat)) if pat.ref_token().is_some());
+        let by_ref =
+            matches!(stmt.pat(), Some(ast::Pat::IdentPat(pat)) if pat.ref_token().is_some());
         return if by_ref { Parent::Keep } else { Parent::Other };
     }
     match ast::Expr::cast(parent) {
         Some(ast::Expr::RefExpr(_)) => Parent::Keep,
-        Some(ast::Expr::MethodCallExpr(call)) if call.receiver().is_some_and(|it| it.syntax() == &used) => {
+        Some(ast::Expr::MethodCallExpr(call))
+            if call.receiver().is_some_and(|it| it.syntax() == &used) =>
+        {
             let changed = cx.ty(expr).zip(cx.adjusted_ty(expr)).is_some_and(|(a, b)| a != b);
             if changed { Parent::Keep } else { Parent::Suffix }
         }
-        Some(ast::Expr::TryExpr(_) | ast::Expr::AwaitExpr(_) | ast::Expr::FieldExpr(_) | ast::Expr::IndexExpr(_)) => {
-            Parent::Suffix
-        }
+        Some(
+            ast::Expr::TryExpr(_)
+            | ast::Expr::AwaitExpr(_)
+            | ast::Expr::FieldExpr(_)
+            | ast::Expr::IndexExpr(_),
+        ) => Parent::Suffix,
         _ => Parent::Other,
     }
 }

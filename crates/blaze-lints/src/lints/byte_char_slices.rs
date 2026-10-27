@@ -15,15 +15,19 @@ pub(super) fn check(cx: &mut Cx<'_, '_, '_>, expr: &ast::Expr) {
         return;
     }
     let (has_ref, inner) = match expr {
-        ast::Expr::RefExpr(borrow) if borrow.raw_token().is_none() && borrow.mut_token().is_none() => {
+        ast::Expr::RefExpr(borrow)
+            if borrow.raw_token().is_none() && borrow.mut_token().is_none() =>
+        {
             let Some(inner) = borrow.expr() else { return };
             (true, inner)
         }
         _ => {
             // A borrowed array is linted with its borrow.
-            if past_parens(expr).parent().and_then(ast::RefExpr::cast).is_some_and(|it| {
-                it.raw_token().is_none() && it.mut_token().is_none()
-            }) {
+            if past_parens(expr)
+                .parent()
+                .and_then(ast::RefExpr::cast)
+                .is_some_and(|it| it.raw_token().is_none() && it.mut_token().is_none())
+            {
                 return;
             }
             (false, expr.clone())
@@ -36,7 +40,10 @@ pub(super) fn check(cx: &mut Cx<'_, '_, '_>, expr: &ast::Expr) {
     let Some(range) = cx.range(expr.syntax()) else { return };
     let members: Vec<ast::Expr> = array.exprs().collect();
     let source = cx.sema().parse(cx.file);
-    if members.is_empty() || utils::contains_comment(source.syntax(), range) || cx.snippet(range).contains("#[cfg") {
+    if members.is_empty()
+        || utils::contains_comment(source.syntax(), range)
+        || cx.snippet(range).contains("#[cfg")
+    {
         return;
     }
     let mut bytes = String::from("b\"");
@@ -60,12 +67,8 @@ pub(super) fn check(cx: &mut Cx<'_, '_, '_>, expr: &ast::Expr) {
         sugg = sugg.deref();
     }
     let span = cx.span(range);
-    cx.lint(LINT, expr.syntax(), span.clone(), "can be more succinctly written as a byte str").suggestion(
-        span,
-        "try",
-        sugg.to_string(),
-        Applicability::MachineApplicable,
-    );
+    cx.lint(LINT, expr.syntax(), span.clone(), "can be more succinctly written as a byte str")
+        .suggestion(span, "try", sugg.to_string(), Applicability::MachineApplicable);
 }
 
 /// rustc's `Ty::is_array_slice`: a slice, or a reference or pointer to one.

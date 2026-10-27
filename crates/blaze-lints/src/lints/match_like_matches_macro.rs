@@ -25,22 +25,30 @@ pub(super) fn check_match(cx: &mut Cx<'_, '_, '_>, expr: &ast::MatchExpr) {
     if !cx.on(LINT) || !cx.conf().meets(msrvs::MATCHES_MACRO) {
         return;
     }
-    let (Some(range), Some(scrutinee), Some(list)) = (cx.range(expr.syntax()), expr.expr(), expr.match_arm_list())
+    let (Some(range), Some(scrutinee), Some(list)) =
+        (cx.range(expr.syntax()), expr.expr(), expr.match_arm_list())
     else {
         return;
     };
     let arms: Vec<ast::MatchArm> = list.arms().collect();
     // clippy's `walk_intra_arm_text` turns away a match with an arm under `#[cfg]`.
-    if arms.iter().any(|arm| arm.attrs().any(|it| it.path().is_some_and(|it| it.syntax().text() == "cfg"))) {
+    if arms
+        .iter()
+        .any(|arm| arm.attrs().any(|it| it.path().is_some_and(|it| it.syntax().text() == "cfg")))
+    {
         return;
     }
     let Some((last, without_last)) = arms.split_last() else { return };
     let Some((first, middle)) = without_last.split_first() else { return };
-    if utils::contains_comment(expr.syntax(), expr.syntax().text_range()) || !is_bool(cx, &ast::Expr::MatchExpr(expr.clone())) {
+    if utils::contains_comment(expr.syntax(), expr.syntax().text_range())
+        || !is_bool(cx, &ast::Expr::MatchExpr(expr.clone()))
+    {
         return;
     }
-    let (Some(b0), Some(b1)) = (first.expr().and_then(|it| find_bool_lit(&it)), last.expr().and_then(|it| find_bool_lit(&it)))
-    else {
+    let (Some(b0), Some(b1)) = (
+        first.expr().and_then(|it| find_bool_lit(&it)),
+        last.expr().and_then(|it| find_bool_lit(&it)),
+    ) else {
         return;
     };
     if b0 == b1 {
@@ -68,7 +76,9 @@ pub(super) fn check_match(cx: &mut Cx<'_, '_, '_>, expr: &ast::MatchExpr) {
     }
     let mut pat_and_guard = pats.join(" | ");
     if let Some(guard) = first.guard() {
-        let Some(condition) = guard.condition().and_then(|it| cx.range(it.syntax())) else { return };
+        let Some(condition) = guard.condition().and_then(|it| cx.range(it.syntax())) else {
+            return;
+        };
         pat_and_guard = format!("{pat_and_guard} if {}", cx.snippet(condition));
     }
     let Some(snippet) = scrutinee_snippet(cx, &scrutinee) else { return };
@@ -77,25 +87,37 @@ pub(super) fn check_match(cx: &mut Cx<'_, '_, '_>, expr: &ast::MatchExpr) {
     let span = cx.span(range);
     let code = format!("{}matches!({snippet}, {pat_and_guard})", if b0 { "" } else { "!" });
     cx.lint(LINT, expr.syntax(), span.clone(), "match expression looks like `matches!` macro")
-        .suggestion_with_style(vec![(span, code)], "use `matches!` directly", applicability, SuggestionStyle::ShowAlways);
+        .suggestion_with_style(
+            vec![(span, code)],
+            "use `matches!` directly",
+            applicability,
+            SuggestionStyle::ShowAlways,
+        );
 }
 
 pub(super) fn check_if_let(cx: &mut Cx<'_, '_, '_>, expr: &ast::IfExpr) {
     if !cx.on(LINT) || !cx.conf().meets(msrvs::MATCHES_MACRO) {
         return;
     }
-    let (Some(range), Some(ast::Expr::LetExpr(let_expr)), Some(then), Some(ast::ElseBranch::Block(otherwise))) =
-        (cx.range(expr.syntax()), expr.condition(), expr.then_branch(), expr.else_branch())
+    let (
+        Some(range),
+        Some(ast::Expr::LetExpr(let_expr)),
+        Some(then),
+        Some(ast::ElseBranch::Block(otherwise)),
+    ) = (cx.range(expr.syntax()), expr.condition(), expr.then_branch(), expr.else_branch())
     else {
         return;
     };
     let (Some(pat), Some(scrutinee)) = (let_expr.pat(), let_expr.expr()) else { return };
-    if utils::contains_comment(expr.syntax(), expr.syntax().text_range()) || !is_bool(cx, &ast::Expr::IfExpr(expr.clone())) {
+    if utils::contains_comment(expr.syntax(), expr.syntax().text_range())
+        || !is_bool(cx, &ast::Expr::IfExpr(expr.clone()))
+    {
         return;
     }
-    let (Some(b0), Some(b1)) =
-        (find_bool_lit(&ast::Expr::BlockExpr(then)), find_bool_lit(&ast::Expr::BlockExpr(otherwise)))
-    else {
+    let (Some(b0), Some(b1)) = (
+        find_bool_lit(&ast::Expr::BlockExpr(then)),
+        find_bool_lit(&ast::Expr::BlockExpr(otherwise)),
+    ) else {
         return;
     };
     if b0 == b1 || is_some_wild(&pat) {
@@ -107,8 +129,18 @@ pub(super) fn check_if_let(cx: &mut Cx<'_, '_, '_>, expr: &ast::IfExpr) {
     let Some(snippet) = scrutinee_snippet(cx, &scrutinee) else { return };
     let span = cx.span(range);
     let code = format!("{}matches!({snippet}, {pat})", if b0 { "" } else { "!" });
-    cx.lint(LINT, expr.syntax(), span.clone(), "`if let .. else` expression looks like `matches!` macro")
-        .suggestion_with_style(vec![(span, code)], "use `matches!` directly", applicability, SuggestionStyle::ShowAlways);
+    cx.lint(
+        LINT,
+        expr.syntax(),
+        span.clone(),
+        "`if let .. else` expression looks like `matches!` macro",
+    )
+    .suggestion_with_style(
+        vec![(span, code)],
+        "use `matches!` directly",
+        applicability,
+        SuggestionStyle::ShowAlways,
+    );
 }
 
 fn is_bool(cx: &Cx<'_, '_, '_>, expr: &ast::Expr) -> bool {

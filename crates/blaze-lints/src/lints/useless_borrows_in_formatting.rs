@@ -32,7 +32,9 @@ pub(super) fn check(cx: &mut Cx<'_, '_, '_>, call: &ast::MacroCall) {
             Trait::Debug => debug,
             Trait::Other => continue,
         };
-        for arg in [Some(&placeholder.arg), placeholder.width.as_ref(), placeholder.precision.as_ref()] {
+        for arg in
+            [Some(&placeholder.arg), placeholder.width.as_ref(), placeholder.precision.as_ref()]
+        {
             let Some(Arg::Index(index)) = arg else { continue };
             let Some(expr) = format.args.get(*index) else { continue };
             let Some((range, peeled, message)) = peel(cx, expr, fmt_trait, sized) else { continue };
@@ -40,8 +42,13 @@ pub(super) fn check(cx: &mut Cx<'_, '_, '_>, call: &ast::MacroCall) {
                 continue;
             }
             let span = cx.span(range);
-            cx.lint(LINT, call.syntax(), span.clone(), format!("redundant reference in `{}!` argument", format.name))
-                .suggestion(span, message, peeled, Applicability::MachineApplicable);
+            cx.lint(
+                LINT,
+                call.syntax(),
+                span.clone(),
+                format!("redundant reference in `{}!` argument", format.name),
+            )
+            .suggestion(span, message, peeled, Applicability::MachineApplicable);
         }
     }
 }

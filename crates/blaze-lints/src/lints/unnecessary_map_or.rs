@@ -22,7 +22,8 @@ pub(super) fn check(cx: &mut Cx<'_, '_, '_>, expr: &ast::Expr) {
     if !cx.on(LINT) || cx.expansion.is_some() {
         return;
     }
-    let Some(MethodCall { name, name_ref, receiver: recv, args }) = utils::method_call(cx, expr) else {
+    let Some(MethodCall { name, name_ref, receiver: recv, args }) = utils::method_call(cx, expr)
+    else {
         return;
     };
     let [def, map] = &args[..] else { return };
@@ -48,13 +49,14 @@ pub(super) fn check(cx: &mut Cx<'_, '_, '_>, expr: &ast::Expr) {
     ) else {
         return;
     };
-    let suggested = match (def_bool, kind) {
-        (false, _) if cx.conf().meets(msrvs::OPTION_RESULT_IS_VARIANT_AND) => {
-            if kind == "Option" { "is_some_and" } else { "is_ok_and" }
-        }
-        (true, "Option") if cx.conf().meets(msrvs::IS_NONE_OR) => "is_none_or",
-        _ => return,
-    };
+    let suggested =
+        match (def_bool, kind) {
+            (false, _) if cx.conf().meets(msrvs::OPTION_RESULT_IS_VARIANT_AND) => {
+                if kind == "Option" { "is_some_and" } else { "is_ok_and" }
+            }
+            (true, "Option") if cx.conf().meets(msrvs::IS_NONE_OR) => "is_none_or",
+            _ => return,
+        };
     let parts = vec![
         (cx.span(method), suggested.to_owned()),
         (cx.span(TextRange::new(def_range.start(), map_range.start())), String::new()),
@@ -87,16 +89,25 @@ fn result_variant_query(
         return true;
     }
     let ast::Expr::MethodCallExpr(call) = expr else { return false };
-    let (Some(method), Some(end)) = (
-        cx.range(name_ref.syntax()),
-        call.arg_list().and_then(|it| cx.range(it.syntax())),
-    ) else {
+    let (Some(method), Some(end)) =
+        (cx.range(name_ref.syntax()), call.arg_list().and_then(|it| cx.range(it.syntax())))
+    else {
         return false;
     };
     let suggested = if map_bool { "is_ok" } else { "is_err" };
     let call_span = cx.span(TextRange::new(method.start(), end.end()));
-    cx.lint(LINT, expr.syntax(), cx.span(method), format!("this `{}` can be simplified", name_ref.text()))
-        .suggestion(call_span, format!("use `{suggested}` instead"), format!("{suggested}()"), Applicability::MachineApplicable);
+    cx.lint(
+        LINT,
+        expr.syntax(),
+        cx.span(method),
+        format!("this `{}` can be simplified", name_ref.text()),
+    )
+    .suggestion(
+        call_span,
+        format!("use `{suggested}` instead"),
+        format!("{suggested}()"),
+        Applicability::MachineApplicable,
+    );
     true
 }
 
@@ -107,7 +118,9 @@ fn bool_constant(expr: &ast::Expr) -> Option<bool> {
             _ => None,
         },
         ast::Expr::ParenExpr(paren) => bool_constant(&paren.expr()?),
-        ast::Expr::BlockExpr(block) if block.statements().next().is_none() && block.modifier().is_none() => {
+        ast::Expr::BlockExpr(block)
+            if block.statements().next().is_none() && block.modifier().is_none() =>
+        {
             bool_constant(&block.tail_expr()?)
         }
         _ => None,
@@ -149,9 +162,7 @@ fn is_comparison(cx: &Cx<'_, '_, '_>, recv: &ast::Expr, map: &ast::Expr, def_boo
         return false;
     }
     let (Some(lhs), Some(rhs)) = (bin.lhs(), bin.rhs()) else { return false };
-    let is_binding = |side: &ast::Expr| {
-        matches!(side, ast::Expr::PathExpr(path) if path.path().is_some_and(|it| it.as_single_name_ref().is_some_and(|it| it.text() == name.text())))
-    };
+    let is_binding = |side: &ast::Expr| matches!(side, ast::Expr::PathExpr(path) if path.path().is_some_and(|it| it.as_single_name_ref().is_some_and(|it| it.text() == name.text())));
     if is_binding(&lhs) == is_binding(&rhs) {
         return false;
     }
@@ -165,11 +176,14 @@ fn is_comparison(cx: &Cx<'_, '_, '_>, recv: &ast::Expr, map: &ast::Expr, def_boo
         return false;
     }
     let db = cx.db();
-    let (Some(l_ty), Some(r_ty), Some(recv_ty)) = (cx.ty(&lhs), cx.ty(&rhs), cx.adjusted_ty(recv)) else {
+    let (Some(l_ty), Some(r_ty), Some(recv_ty)) = (cx.ty(&lhs), cx.ty(&rhs), cx.adjusted_ty(recv))
+    else {
         return false;
     };
     let Some(partial_eq) = cx.lang_trait(hir::LangItem::PartialEq) else { return false };
-    l_ty == r_ty && recv_ty.impls_trait(db, partial_eq, std::slice::from_ref(&recv_ty)) && l_ty.is_copy(db)
+    l_ty == r_ty
+        && recv_ty.impls_trait(db, partial_eq, std::slice::from_ref(&recv_ty))
+        && l_ty.is_copy(db)
 }
 
 /// An approximation of clippy's `switch_to_eager_eval`: what is as cheap evaluated early as

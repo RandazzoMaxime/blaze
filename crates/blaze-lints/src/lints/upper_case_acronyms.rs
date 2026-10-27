@@ -49,18 +49,24 @@ fn exported(item: &ast::Item) -> bool {
     visibility.is_some_and(|it| it.syntax().text() == "pub")
 }
 
-fn check_name(cx: &mut Cx<'_, '_, '_>, at: &syntax::SyntaxNode, name: Option<ast::Name>, aggressive: bool) {
+fn check_name(
+    cx: &mut Cx<'_, '_, '_>,
+    at: &syntax::SyntaxNode,
+    name: Option<ast::Name>,
+    aggressive: bool,
+) {
     let Some(name) = name else { return };
     let Some(range) = cx.range(name.syntax()) else { return };
     let ident = name.text().to_owned();
     let Some(replacement) = replacement(&ident, aggressive) else { return };
     let span = cx.span(range);
-    cx.lint(LINT, at, span.clone(), format!("name `{ident}` contains a capitalized acronym")).suggestion(
-        span,
-        "consider making the acronym lowercase, except the initial letter",
-        replacement,
-        Applicability::MaybeIncorrect,
-    );
+    cx.lint(LINT, at, span.clone(), format!("name `{ident}` contains a capitalized acronym"))
+        .suggestion(
+            span,
+            "consider making the acronym lowercase, except the initial letter",
+            replacement,
+            Applicability::MaybeIncorrect,
+        );
 }
 
 fn replacement(s: &str, aggressive: bool) -> Option<String> {
@@ -72,7 +78,10 @@ fn replacement(s: &str, aggressive: bool) -> Option<String> {
         return Some(r);
     }
     let unprefixed = s.trim_start_matches('_');
-    if !aggressive || !unprefixed.starts_with(|c: char| c.is_ascii_uppercase()) || !contains_acronym(unprefixed) {
+    if !aggressive
+        || !unprefixed.starts_with(|c: char| c.is_ascii_uppercase())
+        || !contains_acronym(unprefixed)
+    {
         return None;
     }
     let mut r = String::with_capacity(s.len());

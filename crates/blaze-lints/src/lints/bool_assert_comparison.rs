@@ -28,7 +28,9 @@ pub(super) fn check(cx: &mut Cx<'_, '_, '_>, call: &ast::MacroCall) {
         _ => None,
     };
     let (lit_range, value, other, other_range) = match (literal(a_range), literal(b_range)) {
-        (Some(value), None) => (TextRange::new(a_range.start(), b_range.start()), value, b, b_range),
+        (Some(value), None) => {
+            (TextRange::new(a_range.start(), b_range.start()), value, b, b_range)
+        }
         (None, Some(value)) => (TextRange::new(a_range.end(), b_range.end()), value, a, a_range),
         _ => return,
     };
@@ -36,7 +38,8 @@ pub(super) fn check(cx: &mut Cx<'_, '_, '_>, call: &ast::MacroCall) {
     let db = cx.db();
     let Some(not) = cx.lang_trait(hir::LangItem::Not) else { return };
     let not_to_bool = ty.is_bool()
-        || (ty.impls_trait(db, not, &[]) && cx.assoc_ty(&ty, not, "Output").is_some_and(|it| it.is_bool()));
+        || (ty.impls_trait(db, not, &[])
+            && cx.assoc_ty(&ty, not, "Output").is_some_and(|it| it.is_bool()));
     if !not_to_bool || !ty.is_copy(db) {
         return;
     }

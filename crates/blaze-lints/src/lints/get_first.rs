@@ -24,7 +24,10 @@ pub(super) fn check(cx: &mut Cx<'_, '_, '_>, expr: &ast::Expr) {
     let ast::Expr::MethodCallExpr(method) = expr else { return };
     let db = cx.db();
     let Some(function) = cx.sema().resolve_method_call(method) else { return };
-    let Some(implementing) = function.as_assoc_item(db).and_then(|it| it.implementing_ty(db)) else { return };
+    let Some(implementing) = function.as_assoc_item(db).and_then(|it| it.implementing_ty(db))
+    else {
+        return;
+    };
     let replacement = if implementing.is_slice() {
         "first"
     } else if implementing.as_adt().is_some_and(|adt| {
@@ -34,10 +37,19 @@ pub(super) fn check(cx: &mut Cx<'_, '_, '_>, expr: &ast::Expr) {
     } else {
         return;
     };
-    let (Some(range), Some(receiver)) = (cx.range(expr.syntax()), cx.range(call.receiver.syntax())) else { return };
+    let (Some(range), Some(receiver)) = (cx.range(expr.syntax()), cx.range(call.receiver.syntax()))
+    else {
+        return;
+    };
     let receiver = cx.snippet(receiver);
     let span = cx.span(range);
-    cx.lint(LINT, expr.syntax(), span.clone(), format!("accessing first element with `{receiver}.get(0)`")).suggestion(
+    cx.lint(
+        LINT,
+        expr.syntax(),
+        span.clone(),
+        format!("accessing first element with `{receiver}.get(0)`"),
+    )
+    .suggestion(
         span,
         "try",
         format!("{receiver}.{replacement}()"),

@@ -90,11 +90,7 @@ pub fn answer(
             Err(_) => path.to_string_lossy().into_owned(),
         })
     };
-    let style = Style {
-        short: ask.short,
-        ansi: ask.ansi,
-        width: ask.width.unwrap_or(emit::WIDTH),
-    };
+    let style = Style { short: ask.short, ansi: ask.ansi, width: ask.width.unwrap_or(emit::WIDTH) };
     let root_owned = root.to_owned();
     let mut sources = Sources::new(move |name| std::fs::read_to_string(root_owned.join(name)).ok());
     let mut answer = Answer::default();
@@ -115,8 +111,11 @@ pub fn answer(
     };
     // A crate built for its tests as well is linted once, as that build: what it finds outside
     // `cfg(test)` is what the plain build finds.
-    let tested: FxHashSet<ide_db::FileId> =
-        crates.iter().filter(|&&it| has_tests(it)).map(|&it| hir::Crate::from(it).root_file(db)).collect();
+    let tested: FxHashSet<ide_db::FileId> = crates
+        .iter()
+        .filter(|&&it| has_tests(it))
+        .map(|&it| hir::Crate::from(it).root_file(db))
+        .collect();
     for &krate in crates {
         let has_tests = has_tests(krate);
         if !has_tests && tested.contains(&hir::Crate::from(krate).root_file(db)) {
@@ -152,14 +151,23 @@ fn setup(package: &Package) -> Result<Setup, String> {
 
 /// The diagnostics of one build, as rustc writes them: what is said once a build is said with
 /// the first diagnostic that has it, and a diagnostic said again is not.
-fn written<'a>(found: impl Iterator<Item = &'a Found>, sources: &mut Sources, style: Style) -> Vec<Message> {
+fn written<'a>(
+    found: impl Iterator<Item = &'a Found>,
+    sources: &mut Sources,
+    style: Style,
+) -> Vec<Message> {
     let mut once = FxHashSet::default();
     let mut seen = FxHashSet::default();
     let mut messages = Vec::new();
     for Found { diagnostic, .. } in found {
         let mut diagnostic: Diagnostic = diagnostic.clone();
         diagnostic.children.retain(|child| {
-            !child.once || once.insert((child.level.name(), child.message.clone(), format!("{:?}", child.span)))
+            !child.once
+                || once.insert((
+                    child.level.name(),
+                    child.message.clone(),
+                    format!("{:?}", child.span),
+                ))
         });
         let rendered = emit::written(&diagnostic, sources, style);
         if !seen.insert(rendered.clone()) {

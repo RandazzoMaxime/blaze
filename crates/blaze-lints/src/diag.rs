@@ -256,7 +256,10 @@ impl Diagnostic {
     /// takes as it is.
     pub fn is_fixable(&self) -> bool {
         !self.suggestions_disabled
-            && self.suggestions.iter().any(|it| it.applicability == Applicability::MachineApplicable)
+            && self
+                .suggestions
+                .iter()
+                .any(|it| it.applicability == Applicability::MachineApplicable)
     }
 
     pub fn note(&mut self, message: impl Into<String>) -> &mut Diagnostic {

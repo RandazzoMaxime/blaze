@@ -19,7 +19,8 @@ pub(super) fn check(cx: &mut Cx<'_, '_, '_>, call: &ast::MacroCall) {
         return;
     }
     let Some(format) = format::of(cx, call) else { return };
-    let Some(macro_expr) = call.syntax().parent().filter(|it| ast::MacroExpr::can_cast(it.kind())) else {
+    let Some(macro_expr) = call.syntax().parent().filter(|it| ast::MacroExpr::can_cast(it.kind()))
+    else {
         return;
     };
     let Some(call_site) = cx.range(call.syntax()) else { return };
@@ -33,7 +34,9 @@ pub(super) fn check(cx: &mut Cx<'_, '_, '_>, call: &ast::MacroCall) {
         .filter(|it| it.raw_token().is_none() && it.mut_token().is_none())
         .and_then(|it| cx.range(it.syntax()));
     let (span, expl, sugg) = match (&format.placeholders[..], &format.args[..]) {
-        ([], []) if format.template.is_empty() => (call_site, "`String::new()`", "String::new()".to_owned()),
+        ([], []) if format.template.is_empty() => {
+            (call_site, "`String::new()`", "String::new()".to_owned())
+        }
         ([], []) => {
             let snippet = cx.snippet(format.template_range);
             let expanded = snippet.replace("{{", "{").replace("}}", "}");
@@ -66,7 +69,9 @@ pub(super) fn check(cx: &mut Cx<'_, '_, '_>, call: &ast::MacroCall) {
             }
             let is_new_string = match &value {
                 Value::Expr(ast::Expr::BinExpr(_)) => true,
-                Value::Expr(ast::Expr::MethodCallExpr(it)) => it.name_ref().is_some_and(|it| it.text() == "to_string"),
+                Value::Expr(ast::Expr::MethodCallExpr(it)) => {
+                    it.name_ref().is_some_and(|it| it.text() == "to_string")
+                }
                 _ => false,
             };
             let text = |cx: &Cx<'_, '_, '_>| match &value {
@@ -81,7 +86,9 @@ pub(super) fn check(cx: &mut Cx<'_, '_, '_>, call: &ast::MacroCall) {
                     let Value::Expr(expr) = &value else { return };
                     (call_site, "`.to_string()`", cx.source_of(expr.syntax()))
                 }
-                _ => (call_site, "`.to_string()`", format!("{}.to_string()", text(cx).maybe_paren())),
+                _ => {
+                    (call_site, "`.to_string()`", format!("{}.to_string()", text(cx).maybe_paren()))
+                }
             }
         }
         _ => return,
@@ -119,7 +126,9 @@ impl Value {
 
 /// Whether `template` is one placeholder and nothing else, with no format options.
 fn only_placeholder(template: &str) -> bool {
-    let Some(inner) = template.strip_prefix('{').and_then(|it| it.strip_suffix('}')) else { return false };
+    let Some(inner) = template.strip_prefix('{').and_then(|it| it.strip_suffix('}')) else {
+        return false;
+    };
     if inner.contains(['{', '}']) {
         return false;
     }
