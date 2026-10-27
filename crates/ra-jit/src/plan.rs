@@ -122,6 +122,8 @@ pub(crate) struct Built {
 pub(crate) struct Asked<'a> {
     /// The triple built for.
     pub(crate) triple: &'a str,
+    /// What `rustc --print cfg` says of the triple.
+    pub(crate) cfg: &'a [CfgAtom],
     /// The variables of the process that asks, where they are not those of this one.
     pub(crate) env: &'a FxHashMap<String, Option<String>>,
 }
