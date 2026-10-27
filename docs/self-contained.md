@@ -7,7 +7,7 @@ to set a Rust toolchain; it will just work with whatever we have, because it doe
 depend on rustc. Ideally not depend on cargo either! And just match cargo resolution, i.e.
 self-contained."
 
-So: `curl -fsSL https://ix.dev/blaze/install.sh | sh` gives one blaze that builds, tests and
+So: `curl -fsSL https://ix.dev/blaze | sh` gives one blaze that builds, tests and
 runs any Cargo project on a machine with no rustup, no toolchain pin and no cargo, and that
 resolves the project exactly as cargo does. The issue is
 [#298](https://github.com/indexable-inc/blaze/issues/298).

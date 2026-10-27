@@ -8,6 +8,7 @@
  *   /updates   the signup form (updates.ts)
  *   /charter, /rfcs/*   discussable pages, rendered with their comments (pages.ts); other paths there are assets
  *   /audio/*   narration files, from R2 when bound, with Range support (audio.ts)
+ *   /          the home page, or install.sh for a client that doesn't ask for HTML (curl, wget)
  *
  * Anything else is dist/ (built by `bun gen/build.ts`) through the ASSETS binding, with the headers `assetHeaders`
  * adds (Workers does not apply a `_headers` file to what a worker returns).
@@ -29,7 +30,20 @@ async function route(request: Request, env: Env, ctx: ExecutionContext): Promise
 	if (p === '/api/comments' || p.startsWith('/api/comments/')) return handleComments(request, env, url);
 	if (p.startsWith('/api/')) return json({ error: 'Not found.' }, 404);
 	if (p.startsWith('/audio/')) return handleAudio(request, env, url);
-	return (await handlePage(request, env, ctx, url)) ?? assetHeaders(await env.ASSETS.fetch(request));
+	if (p === '/' && !acceptsHtml(request)) return installer(request, env, url);
+	const res = (await handlePage(request, env, ctx, url)) ?? assetHeaders(await env.ASSETS.fetch(request));
+	if (p === '/') res.headers.append('vary', 'Accept');
+	return res;
+}
+
+/** A browser loading a page always asks for HTML; curl and wget ask for anything. */
+const acceptsHtml = (request: Request) => (request.headers.get('accept') ?? '').includes('text/html');
+
+/** The home page for a shell: `curl -fsSL https://ix.dev/blaze | sh` gets install.sh, as browsers get the page. */
+async function installer(request: Request, env: Env, url: URL): Promise<Response> {
+	const res = assetHeaders(await env.ASSETS.fetch(new Request(new URL('/install.sh', url), request)));
+	res.headers.append('vary', 'Accept');
+	return res;
 }
 
 export default {

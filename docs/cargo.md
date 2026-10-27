@@ -21,7 +21,7 @@ engine, so the two have to be installed side by side, with `ra-jit-rustc` and
 `ra-jit-rustc-first` (and `cargo-ra-jit`, the old name of `cargo-blaze`). The
 [installer](../install.sh) and `cargo install` both do that:
 
-    curl -fsSL https://ix.dev/blaze/install.sh | sh
+    curl -fsSL https://ix.dev/blaze | sh
     cargo +nightly-2026-10-25 install --locked cargo-blaze
 
 From the release after 0.1.0, `--profile dist` builds the profile a release is built with, less

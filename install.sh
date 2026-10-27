@@ -2,8 +2,8 @@
 # Installs blaze, so that `blaze build`, `blaze test` and `blaze run` work (and the same with
 # `cargo blaze`), on a machine with or without Rust:
 #
-#   curl -fsSL https://ix.dev/blaze/install.sh | sh
-#   curl -fsSL https://ix.dev/blaze/install.sh | sh -s -- --version 0.2.0
+#   curl -fsSL https://ix.dev/blaze | sh
+#   curl -fsSL https://ix.dev/blaze | sh -s -- --version 0.2.0
 #
 # It downloads the release built for this machine (macOS on Apple silicon, Linux on x86-64 or
 # ARM64), checks it against the checksums published with it, puts `blaze`, `cargo-blaze` and the
