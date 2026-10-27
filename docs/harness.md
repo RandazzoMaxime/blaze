@@ -395,16 +395,19 @@ with the `llvm` feature, hands the binary to its other jobs, and runs:
 - `fork alone`: `vendor/rust-analyzer` built and tested outside this repository (the tests of
   `hir-ty`, `hir-ty-borrowck`, `hir-ty-wfcheck` and `ide-diagnostics`, whose diagnostics are the
   daemon's errors);
-- the ripgrep bench (not blocking);
-- `nix-live.yaml`: the unit graphs, the flake's builds, the demo and live edits on macOS (not
-  blocking: `soft`, until they have been green a while).
+- the ripgrep bench (not blocking).
+
+`nix-live.yaml` (the unit graphs, the flake's builds, the demo and live edits on macOS) runs on
+the same pushes to main in a workflow of its own, one run at a time: a cold nix build takes up to
+two hours, and while it was in the train's run main's next train waited for it. Nothing waits on
+it.
 
 Versions are dated and chosen by nobody: `0.YYYYMMDD.N`, N counting the releases of that day
 (UTC) from 0 (0.20261026.0, then 0.20261026.1), which is semver, as cargo and crates.io need.
 `blaze --version` says the commit too, `blaze 0.20261026.0 (fb82b09)`: crates/ra-jit's build.rs
 takes it from `RA_JIT_GIT_SHA` (release.yaml and the flake set it) or the checkout's HEAD.
 
-The job `train` is the train's verdict: every job but the bench and nix. When it is green and
+The job `train` is the train's verdict: every job but the bench. When it is green and
 main has changes since the last release, the job `release` (`.github/scripts/train_release.py
 prepare`) makes one commit on main, `release: v0.YYYYMMDD.N [skip ci]`: the workspace version
 of today's next release, a CHANGELOG.md section with what `[Unreleased]` had and the title of each change merged
