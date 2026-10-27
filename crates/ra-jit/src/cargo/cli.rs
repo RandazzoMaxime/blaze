@@ -147,9 +147,11 @@ pub(crate) enum Asked {
     Stop,
     Enable,
     Disable,
-    /// Which Rust blaze builds with, downloaded first when it has none.
-    /// `toolchain`, or with `--path` its directory alone, for the installer to link.
-    Toolchain { path: bool },
+    /// blaze's own toolchain, downloaded first when it has none; with `--path`, its directory
+    /// alone, for the installer to link.
+    Toolchain {
+        path: bool,
+    },
     Help,
     Version,
 }
