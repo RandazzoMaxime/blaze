@@ -10,6 +10,7 @@
 //! the daemon's, is [`script_sandbox::run`]'s, in the sandbox tests run in.
 
 use std::{
+    collections::{BTreeMap, BTreeSet},
     ffi::OsString,
     io::Write as _,
     path::{Path, PathBuf},
@@ -991,7 +992,13 @@ fn rerun_into(
         return Err("printed something else".to_owned());
     }
     if digest_of(again_dir) != digest_of(out_dir) {
-        return Err("wrote something else".to_owned());
+        let names = different_files(again_dir, out_dir);
+        let more = names.len().saturating_sub(5);
+        let mut names = names.into_iter().take(5).collect::<Vec<_>>().join(", ");
+        if more > 0 {
+            names = format!("{names} and {more} more");
+        }
+        return Err(format!("wrote something else ({names})"));
     }
     Ok(())
 }
@@ -1014,6 +1021,38 @@ fn digest_of(dir: &Path) -> Vec<u8> {
         }
     }
     hash.finalize().to_vec()
+}
+
+/// The files below `dir` and `other` whose contents differ, or that only one of them has.
+fn different_files(dir: &Path, other: &Path) -> Vec<String> {
+    let files = |root: &Path| {
+        let mut files = BTreeMap::new();
+        let mut pending = vec![root.to_owned()];
+        while let Some(below) = pending.pop() {
+            let entries = std::fs::read_dir(&below).into_iter().flatten().flatten();
+            let mut paths: Vec<PathBuf> = entries.map(|it| it.path()).collect();
+            paths.sort();
+            for path in paths {
+                match path.is_dir() {
+                    true => pending.push(path),
+                    false => {
+                        let name = path.strip_prefix(root).unwrap_or(&path).to_owned();
+                        files.insert(name, std::fs::read(&path).unwrap_or_default());
+                    }
+                }
+            }
+        }
+        files
+    };
+    let ours = files(dir);
+    let theirs = files(other);
+    ours.keys()
+        .chain(theirs.keys())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .filter(|name| ours.get(*name) != theirs.get(*name))
+        .map(|name| name.to_string_lossy().into_owned())
+        .collect()
 }
 
 #[cfg(all(test, unix))]
@@ -1089,7 +1128,10 @@ mod tests {
         std::fs::write(other.join("made.rs"), "fn made() {}").unwrap();
         assert_eq!(rerun_matches(&out_dir, &other), Ok(()));
         std::fs::write(other.join("made.rs"), "fn made_for_the_load() {}").unwrap();
-        assert_eq!(rerun_matches(&out_dir, &other), Err("wrote something else".to_owned()));
+        assert_eq!(
+            rerun_matches(&out_dir, &other),
+            Err("wrote something else (made.rs)".to_owned())
+        );
     }
 
     #[test]
@@ -1281,10 +1323,24 @@ mod tests {
     }
 
     #[test]
+    fn a_rerun_names_each_file_that_differs() {
+        let out_dir = ran("different", "fn made() {}");
+        let other = ran("different-other", "fn made() {}");
+        std::fs::write(out_dir.join("made.rs"), "fn made() {}").unwrap();
+        std::fs::write(other.join("made.rs"), "fn made_other() {}").unwrap();
+        std::fs::write(out_dir.join("also.rs"), "fn also() {}").unwrap();
+        std::fs::write(other.join("also.rs"), "fn also_other() {}").unwrap();
+        assert_eq!(
+            rerun_matches(&out_dir, &other),
+            Err("wrote something else (also.rs, made.rs)".to_owned())
+        );
+    }
+
+    #[test]
     fn a_rerun_that_writes_something_else_is_told() {
         let out_dir = ran("other", "fn made() {}");
         std::fs::write(out_dir.join("made.rs"), "fn made_before() {}").unwrap();
-        assert_eq!(rerun_is_same(&out_dir), Err("wrote something else".to_owned()));
+        assert_eq!(rerun_is_same(&out_dir), Err("wrote something else (made.rs)".to_owned()));
         assert_eq!(std::fs::read(out_dir.join("made.rs")).unwrap(), b"fn made_before() {}");
     }
 }
