@@ -12,7 +12,7 @@ libraries. Today it gets whatever the machine has, so a build that works on one 
 on the next, and a store entry of a script's run can only be shared where machines agree by
 luck. The plan (Andrew, 2026-10-27): a build script runs in a Linux mount namespace that sees
 only a declared closure: the package's source read-only, its `OUT_DIR` writable, a pinned
-toolchain (clang, lld, a libc sysroot, pkg-config), a small shell userland (bash, coreutils,
+toolchain (clang, lld, ar/nm/ranlib, a libc sysroot, pkg-config), a small shell userland (bash, coreutils,
 gnumake, gnused, gawk, gnugrep, diffutils, findutils) and the system libraries the crate
 declares (openssl, zlib, ...). Everything it can see is pinned, so its run is keyed by what it
 saw, and a run CI kept is one every user can take.
@@ -32,11 +32,12 @@ each root's store path, and reads each path's NarHash and closure from cache.nix
 - the nixpkgs commit, `3ec636362e1816bc2f0888fa0fa2c69f1bc9e504` (nixos-unstable on
   2026-10-27; `--rev latest` moves it to the channel's newest);
 - for each of `x86_64-linux` and `aarch64-linux`, each root by its attribute (`clang`, `lld`,
-  `glibc.out`, `glibc.dev`, `linuxHeaders`, `pkg-config`, the userland, `cmake`, `git`, and
+  `llvmPackages.bintools`, `glibc.out`, `glibc.dev`, `linuxHeaders`, `pkg-config`, the userland, `cmake`, `git`, and
   `openssl.out`, `openssl.dev`, `zlib.dev`, `libgit2.lib`, ... `protobuf.out`), with its store
   path, the NarHash and NarSize cache.nixos.org signs for it, and what its closure comes to.
 
-`clang` is the wrapped compiler (`clang-wrapper`), so that `CC=clang` finds its sysroot, and
+`clang` is the wrapped compiler (`clang-wrapper`), so that `CC=clang` finds its sysroot,
+`llvmPackages.bintools` the wrapped LLVM binutils (`ar`, `nm`, `ranlib`, `objcopy`, ...) and
 `pkg-config` the wrapped one. A library is pinned as each output the per-crate table may name:
 `openssl.dev` has the headers and `.pc` files, and refers to `openssl.out`, which has the
 libraries.

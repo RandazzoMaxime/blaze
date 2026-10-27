@@ -27,11 +27,13 @@ PINS = os.path.join(ROOT, "crates/ra-jit/src/cargo/closure/pins.txt")
 CACHE = "https://cache.nixos.org"
 CHANNEL = "https://channels.nixos.org/nixos-unstable/git-revision"
 HOSTS = ["x86_64-linux", "aarch64-linux"]
-# The C toolchain (the wrapped clang, so that `CC` works, lld, a glibc sysroot), pkg-config
-# (wrapped), the userland a build script's shell commands need, and the libraries of the
-# per-crate table, each with its headers and pkg-config files where it has a `dev` output.
+# The C toolchain (the wrapped clang, so that `CC` works, lld, LLVM's wrapped ar, nm and
+# ranlib, a glibc sysroot), pkg-config (wrapped), the userland a build script's shell commands
+# need, and the libraries of the per-crate table, each with its headers and pkg-config files
+# where it has a `dev` output.
 ROOTS = [
-    "clang", "lld", "glibc.out", "glibc.dev", "linuxHeaders", "pkg-config",
+    "clang", "lld", "llvmPackages.bintools", "glibc.out", "glibc.dev", "linuxHeaders",
+    "pkg-config",
     "bash", "coreutils", "gnumake", "gnused", "gawk", "gnugrep", "diffutils", "findutils",
     "cmake", "git",
     "openssl.out", "openssl.dev", "zlib.out", "zlib.dev", "libgit2.lib", "libgit2.dev",
