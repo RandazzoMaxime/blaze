@@ -1645,6 +1645,91 @@ impl Store {
         value
     }
 
+    /// The values of `keys`, each as [`Store::get`] gives it, read a block at a time on up to
+    /// `threads` threads: each block one of them is in is read and unpacked once. Values read
+    /// one by one each unpack their block when many threads read them in no order, as a build
+    /// that asks for every function of a program does: the blocks unpacked lately hold a few
+    /// hundred of the thousands they are in, and a value is a hundredth of its block.
+    pub fn get_many(&self, keys: &[[u8; KEY]], threads: usize) -> Vec<Option<Vec<u8>>> {
+        let places: Vec<Option<([u8; KEY], Place)>> = keys
+            .iter()
+            .map(|key| {
+                let key = self.identity.key(key);
+                Some((key, self.place(&key)?))
+            })
+            .collect();
+        let mut by_block: FxHashMap<(usize, u32), Vec<usize>> = FxHashMap::default();
+        for (at, found) in places.iter().enumerate() {
+            if let Some((_, place)) = found {
+                let block = (Arc::as_ptr(&place.pack) as usize, place.block);
+                by_block.entry(block).or_default().push(at);
+            }
+        }
+        let blocks: Vec<Vec<usize>> = by_block.into_values().collect();
+        let read = |of: &[usize]| -> Vec<(usize, Option<Vec<u8>>)> {
+            let Some(Some((_, first))) = of.first().map(|&at| &places[at]) else {
+                return Vec::new();
+            };
+            let raw = self.block(first);
+            let value = |at: usize| {
+                let (key, place) = places[at].as_ref()?;
+                let value = raw.as_deref()?.get(place.at as usize..)?.get(..place.len as usize)?;
+                (checksum(key, value) == place.checksum).then(|| value.to_vec())
+            };
+            of.iter().map(|&at| (at, value(at))).collect()
+        };
+        let next = AtomicUsize::new(0);
+        let work = || {
+            let mut read_here = Vec::new();
+            while let Some(of) = blocks.get(next.fetch_add(1, Ordering::Relaxed)) {
+                read_here.extend(read(of));
+            }
+            read_here
+        };
+        let threads = threads.clamp(1, blocks.len().max(1));
+        let read: Vec<(usize, Option<Vec<u8>>)> = match threads {
+            1 => work(),
+            _ => std::thread::scope(|scope| {
+                let others: Vec<_> = (1..threads).map(|_| scope.spawn(work)).collect();
+                let mut read = work();
+                for other in others {
+                    match other.join() {
+                        Ok(theirs) => read.extend(theirs),
+                        Err(panic) => std::panic::resume_unwind(panic),
+                    }
+                }
+                read
+            }),
+        };
+        let mut values: Vec<Option<Vec<u8>>> = vec![None; keys.len()];
+        for (at, value) in read {
+            let Some((_, place)) = &places[at] else { continue };
+            match value {
+                Some(value) => {
+                    place.pack.used.store(true, Ordering::Relaxed);
+                    values[at] = Some(value);
+                }
+                None => self.forget(&place.pack),
+            }
+        }
+        values
+    }
+
+    /// The bytes of the block `place` is in, unpacked: from those unpacked lately when it is
+    /// one of them, and otherwise read and unpacked, and not kept there, as the blocks of a
+    /// batch ([`Store::get_many`]) are each read once.
+    fn block(&self, place: &Place) -> Option<Arc<[u8]>> {
+        let block = place.pack.blocks[place.block as usize];
+        if block.packed
+            && let Some(raw) = self.unpacked().get(&place.pack, place.block)
+        {
+            return Some(raw);
+        }
+        let mut stored = vec![0; block.stored as usize];
+        read_at(&place.pack.file, &mut stored, block.at).ok()?;
+        Some(block.unpack(&stored)?.into())
+    }
+
     /// The bytes at `place`, read from its block: from disk where the block is as it is,
     /// unpacked or from those unpacked lately where it is compressed.
     fn value(&self, place: &Place) -> Option<Vec<u8>> {
@@ -2006,6 +2091,31 @@ mod tests {
         assert!(files(&dir, Kind::Open).is_empty());
         assert!(files(&dir, Kind::Temporary).is_empty());
         assert_eq!(open(&dir, EAGER).get(&[1; KEY]).as_deref(), Some(&b"one"[..]));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn values_read_at_once_are_those_read_one_by_one() {
+        let dir = scratch("many");
+        let store = open(&dir, EAGER);
+        let key = |n: u16| {
+            let mut key = [7; KEY];
+            key[..2].copy_from_slice(&n.to_le_bytes());
+            key
+        };
+        // Values of several blocks, some compressed and one larger than a block.
+        for n in 0..3000u16 {
+            store.insert(&key(n), &n.to_le_bytes().repeat(40 + usize::from(n % 97)));
+        }
+        store.insert(&key(5000), &(0..BLOCK_MAX as u32 + 9).map(|it| it as u8).collect::<Vec<_>>());
+        store.flush();
+        let asked: Vec<[u8; KEY]> =
+            (0..3000).rev().step_by(7).chain([5000, 4000, 11, 11]).map(key).collect();
+        let one_by_one: Vec<_> = asked.iter().map(|it| store.get(it)).collect();
+        assert!(one_by_one.iter().filter(|it| it.is_none()).count() == 1);
+        for threads in [1, 4] {
+            assert_eq!(store.get_many(&asked, threads), one_by_one);
+        }
         std::fs::remove_dir_all(dir).unwrap();
     }
 
