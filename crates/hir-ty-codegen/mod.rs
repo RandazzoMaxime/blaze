@@ -198,6 +198,7 @@ macro_rules! unsupported {
 }
 
 // After `unsupported!`, which they use.
+mod fma;
 mod sve;
 mod wasm_simd;
 
@@ -4810,6 +4811,7 @@ fn build<'db>(
         argument_slots: Vec::new(),
         free_argument_slots: Vec::new(),
         given_away: None,
+        block: None,
         in_cleanup: false,
         aborts,
         guarded: false,
@@ -7936,6 +7938,8 @@ struct FunctionCx<'cx, 'db> {
     /// While a call is generated: the local its result goes to, and where the locals moved
     /// whole into it are. Nothing reads those again, so the callee can be handed them.
     given_away: Option<GivenAway>,
+    /// The block of the body being generated.
+    block: Option<BasicBlockId>,
     in_cleanup: bool,
     /// The crate it is compiled for has `panic = "abort"`: no call of it unwinds (rustc's
     /// `fn_can_unwind`), and so none has a landing pad.
@@ -10019,6 +10023,7 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
                 continue;
             }
             self.builder.switch_to_block(self.blocks[id]);
+            self.block = Some(id);
             self.in_cleanup = block.is_cleanup;
             if block.is_cleanup {
                 self.builder.set_cold_block(self.blocks[id]);
@@ -12954,6 +12959,9 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
             self.llvm_intrinsic(name, args, dst, dst_ty.ty)?;
             return self.finish_call(destination, target);
         }
+        if self.x86_inlined_fma(func, args, destination, target, dst, dst_ty.ty)? {
+            return self.finish_call(destination, target);
+        }
         let values = self.operands(args)?;
         self.call_direct(func, generic_args, &values, dst, dst_ty.ty)?;
         self.finish_call(destination, target)
@@ -15089,6 +15097,9 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
                 }
                 self.builder.ins().store(MEM, value, dst, 0);
             }
+            ("simd_fma" | "simd_relaxed_fma", _) if self.x86_fused() => {
+                self.x86_fma(name, args, dst, dst_ty)?
+            }
             (
                 "simd_add" | "simd_sub" | "simd_mul" | "simd_div" | "simd_eq" | "simd_ge"
                 | "simd_gt" | "simd_le" | "simd_lt" | "simd_neg" | "simd_fabs" | "simd_fsqrt"
@@ -15261,7 +15272,6 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
                 if !lane.ty.is_float() {
                     unsupported!("`{name}` of integers");
                 }
-                self.refuse_x86_fma(name)?;
                 // AArch64's LLVM makes a vector of more lanes than one `fmla z, y, x`, the
                 // factors the other way round, which decides which of two NaNs comes out; a
                 // vector of one lane is the scalar's `fmadd`, in order.
@@ -15783,13 +15793,15 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
                     self.builtin(name, &[float.ty, types::I32], float.ty, &[base, power])?;
                 self.builder.ins().store(MEM, value, dst, 0);
             }
+            ("fmaf32" | "fmaf64" | "fmuladdf32" | "fmuladdf64" | "fma", [_, _, _])
+                if self.x86_fused() && self.scalar_of(dst_ty)?.ty != types::F128 =>
+            {
+                self.x86_fma(name, args, dst, dst_ty)?
+            }
             ("fmaf32" | "fmaf64" | "fmuladdf32" | "fmuladdf64" | "fma", [a, b, c]) => {
                 let (a, scalar) = self.load_scalar(a)?;
                 let (b, _) = self.load_scalar(b)?;
                 let (c, _) = self.load_scalar(c)?;
-                if scalar.ty != types::F128 {
-                    self.refuse_x86_fma(name)?;
-                }
                 if f16_f128::soft(scalar.ty) {
                     let value = self.soft_fma(a, b, c)?;
                     self.builder.ins().store(MEM, value, dst, 0);
@@ -16402,16 +16414,38 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
         args: &[Operand],
         dst: Value,
     ) -> Result<()> {
+        let mut addrs = Vec::with_capacity(args.len());
+        for (arg, load) in args.iter().zip(&lowered.loads) {
+            addrs.push(match load {
+                avx512::Load::Immediate => None,
+                _ => Some(self.operand(arg)?.0),
+            });
+        }
+        self.call_assembled_at(lowered, &addrs, dst);
+        Ok(())
+    }
+
+    /// Calls the function of `lowered`'s instructions on the operands at `addrs`.
+    fn call_assembled(&mut self, lowered: &avx512::Lowered, addrs: &[Value], dst: Value) {
+        let addrs: Vec<Option<Value>> = addrs.iter().copied().map(Some).collect();
+        self.call_assembled_at(lowered, &addrs, dst);
+    }
+
+    fn call_assembled_at(
+        &mut self,
+        lowered: &avx512::Lowered,
+        addrs: &[Option<Value>],
+        dst: Value,
+    ) {
         let slot = self.builder.create_sized_stack_slot(StackSlotData::new(
             StackSlotKind::ExplicitSlot,
-            8 * (1 + args.len() as u32),
+            8 * (1 + addrs.len() as u32),
             3,
         ));
         let slot = self.builder.ins().stack_addr(ptr(), slot, 0);
         self.builder.ins().store(MEM, dst, slot, 0);
-        for (i, (arg, load)) in args.iter().zip(&lowered.loads).enumerate() {
-            if *load != avx512::Load::Immediate {
-                let (addr, _) = self.operand(arg)?;
+        for (i, addr) in addrs.iter().enumerate() {
+            if let Some(addr) = *addr {
                 self.builder.ins().store(MEM, addr, slot, 8 * (i as i32 + 1));
             }
         }
@@ -16421,7 +16455,6 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
         let callee = self.cg.assembly(text, &sig);
         let callee = self.cg.declare_func_in_func(callee, self.builder.func);
         self.builder.ins().call(callee, &[slot]);
-        Ok(())
     }
 
     /// Calls the instructions `x86::lower` made of the intrinsic `name`: the arguments are
@@ -17128,15 +17161,17 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
         dst: Value,
         (a, r): (neon::Lanes, neon::Lanes),
     ) -> Result<()> {
-        if self.function_enables("avx512fp16") {
-            match name {
-                "simd_fma" => return Err(f16_f128::half_fma_refused()),
-                "simd_neg" => unsupported!(
-                    "`simd_neg` of lanes of f16 with AVX512-FP16, which LLVM folds into the \
-                     fma it feeds in some functions and not others"
-                ),
-                _ => (),
+        if name == "simd_neg" && self.function_enables("avx512fp16") && a.float && a.bits == 16 {
+            // `vpxor` with the sign of each lane, LLVM's `fneg`; one an fma folds is
+            // `Self::x86_fma`'s.
+            let [arg] = args else { unsupported!("`simd_neg` with {} arguments", args.len()) };
+            let (src, _) = self.operand(arg)?;
+            for i in 0..a.count as i32 {
+                let bits = self.builder.ins().load(types::I16, MEM, src, 2 * i);
+                let flipped = self.builder.ins().bxor_imm(bits, 0x8000);
+                self.builder.ins().store(MEM, flipped, dst, 2 * i);
             }
+            return Ok(());
         }
         let lowered = avx512::half_vector(name, a.count * a.bits / 8, r.count * r.bits / 8, |it| {
             self.function_enables(it)
@@ -17211,35 +17246,6 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
             unsupported!("an atomic of 128 bits on AArch64 without outline atomics");
         }
         Ok(true)
-    }
-
-    /// Refuses the fused multiply-add `name` in an x86-64 function with FMA or FMA4 (by its
-    /// crate, or by its own `#[target_feature]` and what that implies, as AVX-512 does FMA).
-    /// LLVM makes it `vfmadd213` there, the factors the other way round from libm's `fma`,
-    /// which decides which of two NaNs comes out, and at `-O0` still folds the negations,
-    /// masks and shuffles around it into other forms (`vfnmadd213ss`, `vfmaddsub213ps`, a
-    /// masked `vfmadd132ps`), which keep another NaN or its sign: that depends on the code
-    /// around the call, not on the call.
-    fn refuse_x86_fma(&self, name: &str) -> Result<()> {
-        if self.cg.target.arch != Arch::X86_64 {
-            return Ok(());
-        }
-        let func = self.body.and_then(|it| it.owner.as_function());
-        let features = func.map(|func| hir_ty::TargetFeatures::from_fn(self.cg.db, func));
-        let fused = ["fma", "fma4"].into_iter().any(|feature| {
-            let atom = cfg::CfgAtom::KeyValue {
-                key: intern::sym::target_feature,
-                value: intern::Symbol::intern(feature),
-            };
-            self.env.krate.cfg_options(self.cg.db).check_atom(&atom)
-                || features.as_ref().is_some_and(|it| it.enables(feature))
-        });
-        if fused {
-            unsupported!(
-                "`{name}` in an x86-64 function with FMA, which LLVM fuses by its context"
-            );
-        }
-        Ok(())
     }
 
     /// What `ptr` held, swapped for `new` when it was `expected`: compiler_builtins'

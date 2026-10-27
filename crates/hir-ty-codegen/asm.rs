@@ -413,6 +413,17 @@ pub(super) fn avx512_function(loads: &[Load], text: &str, out: Out) -> String {
                 let name = vector_name(k, 16);
                 _ = writeln!(s, "mov rax, qword ptr [r10 + {at}]\nvmovq {name}, qword ptr [rax]");
             }
+            Load::Vector(4) => {
+                let name = vector_name(k, 16);
+                _ = writeln!(s, "mov rax, qword ptr [r10 + {at}]\nvmovd {name}, dword ptr [rax]");
+            }
+            Load::Vector(2) => {
+                let name = vector_name(k, 16);
+                _ = writeln!(
+                    s,
+                    "mov rax, qword ptr [r10 + {at}]\nmovzx eax, word ptr [rax]\nvmovd {name}, eax"
+                );
+            }
             Load::Vector(bytes) => {
                 let name = vector_name(k, bytes);
                 let width = vector_width(bytes);
@@ -443,6 +454,9 @@ pub(super) fn avx512_function(loads: &[Load], text: &str, out: Out) -> String {
     };
     match out {
         Out::Nothing => {}
+        Out::Vector(8) => _ = writeln!(s, "vmovq qword ptr [r10], xmm0"),
+        Out::Vector(4) => _ = writeln!(s, "vmovd dword ptr [r10], xmm0"),
+        Out::Vector(2) => _ = writeln!(s, "vmovd eax, xmm0\nmov word ptr [r10], ax"),
         Out::Vector(bytes) => {
             let (name, width) = (vector_name(0, bytes), vector_width(bytes));
             _ = writeln!(s, "vmovups {width} ptr [r10], {name}");
