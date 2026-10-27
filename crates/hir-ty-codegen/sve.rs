@@ -419,6 +419,46 @@ fn prefetch(imm: i128) -> std::result::Result<String, String> {
     })
 }
 
+/// What a gather or scatter of lanes of memory size `size` (`b` to `d`) does before and the
+/// address it takes, as LLVM selects them, of `how` (the parts of its name after `gather` or
+/// `scatter`), the scalar register `base` and the vector one `offsets`: the base plus each
+/// offset (`sxtw`, `uxtw`: of 32 bits, extended), in elements with `index`, or the scalar plus
+/// each address with `scalar.offset`. Of the non-temporal ones (`non_temporal`), which take
+/// only `[z0.d, x0]`, LLVM shifts the indices before: `lsl z1.d, z1.d, #3`.
+fn gathered(
+    non_temporal: bool,
+    how: &[&str],
+    size: &str,
+    base: &str,
+    offsets: Reg,
+) -> Option<(String, String)> {
+    let Reg::Z(_, shape) = offsets else { return None };
+    let shift = "bhwd".find(size)?;
+    let z = offsets.full();
+    let wide = shape.suffix() == Some("d");
+    let narrow = shape.suffix() == Some("s");
+    Some(match (how, non_temporal) {
+        ([], true) if wide => (String::new(), format!("[{z}, {base}]")),
+        (["scalar", "offset"], true) if wide || narrow => (String::new(), format!("[{z}, {base}]")),
+        ([] | ["scalar", "offset"], false) if wide => (String::new(), format!("[{base}, {z}]")),
+        (["scalar", "offset"], false) if narrow => (String::new(), format!("[{base}, {z}, uxtw]")),
+        (["index"], true) if wide && shift > 0 => {
+            (format!("lsl {z}, {z}, #{shift}\n"), format!("[{z}, {base}]"))
+        }
+        (["index"], false) if wide && shift > 0 => {
+            (String::new(), format!("[{base}, {z}, lsl #{shift}]"))
+        }
+        (["uxtw"], true) if narrow => (String::new(), format!("[{z}, {base}]")),
+        ([extend @ ("sxtw" | "uxtw")], false) if narrow => {
+            (String::new(), format!("[{base}, {z}, {extend}]"))
+        }
+        ([extend @ ("sxtw" | "uxtw"), "index"], false) if narrow && shift > 0 => {
+            (String::new(), format!("[{base}, {z}, {extend} #{shift}]"))
+        }
+        _ => return None,
+    })
+}
+
 /// Whether `pg` is a predicate that governs the lanes of `data`, one vector of each.
 fn lanes_of(pg: Shape, data: Shape) -> bool {
     pg.predicate() && pg.vectors == 1 && data.vectors == 1 && pg.count == data.count
@@ -682,7 +722,11 @@ fn selected(
     ret: Ret,
 ) -> std::result::Result<(Registers, String), String> {
     let unsupported = || Err(format!("LLVM intrinsic `{name}`"));
-    let Some(rest) = name.strip_prefix("aarch64.sve.") else { return unsupported() };
+    // LLVM's own reversal of the lanes of a vector or predicate is SVE's `rev`.
+    let reversal = name.strip_prefix("vector.reverse.").map(|it| format!("rev.{it}"));
+    let Some(rest) = reversal.as_deref().or_else(|| name.strip_prefix("aarch64.sve.")) else {
+        return unsupported();
+    };
     let parts: Vec<&str> = rest.split('.').collect();
     let registers = Registers::new(args, ret)?;
     // Each type the name is overloaded on is of an operand or the result.
@@ -811,6 +855,70 @@ fn selected(
         ("prf", [], "PIC>-") => {
             let Some(size) = shape_of(0).suffix().map(suffix_size) else { return unsupported() };
             format!("prf{size} {}, {}, [{}]\n", prefetch(constant(2))?, bare(0), bare(1))
+        }
+        // Each active lane read from an address of its own, the others zero.
+        ("ld1" | "ldff1" | "ldnt1", ["gather", how @ ..], "PIV>V" | "PVI>V") => {
+            let Ret::Vector(data) = ret else { return unsupported() };
+            let (base, offsets) = if signature == "PIV>V" { (1, 2) } else { (2, 1) };
+            let Some(size) = data.memory_size() else { return unsupported() };
+            let Some((before, address)) =
+                gathered(n == "ldnt1", how, size, &bare(base), o(offsets))
+            else {
+                return unsupported();
+            };
+            if !lanes_of(shape_of(0), data) || data.suffix() != shape_of(offsets).suffix() {
+                return unsupported();
+            }
+            format!("{before}{n}{size} {{ {r} }}, {}/z, {address}\n", bare(0))
+        }
+        // Each active lane written to an address of its own.
+        ("st1" | "stnt1", ["scatter", how @ ..], "VPIV>-" | "VPVI>-") => {
+            let data = shape_of(0);
+            let (base, offsets) = if signature == "VPIV>-" { (2, 3) } else { (3, 2) };
+            let Some(size) = data.memory_size() else { return unsupported() };
+            let Some((before, address)) =
+                gathered(n == "stnt1", how, size, &bare(base), o(offsets))
+            else {
+                return unsupported();
+            };
+            if !lanes_of(shape_of(1), data) || data.suffix() != shape_of(offsets).suffix() {
+                return unsupported();
+            }
+            format!("{before}{n}{size} {}, {}, {address}\n", o(0).list(), bare(1))
+        }
+        // A prefetch of each active lane's address, the base plus each offset in elements.
+        // LLVM writes those of bytes unshifted.
+        ("prfb" | "prfh" | "prfw" | "prfd", ["gather", extend @ .., "index"], "PIVC>-") => {
+            let offsets = shape_of(2);
+            let extend = match (extend, offsets.suffix()) {
+                ([], Some("d")) => "lsl",
+                (["sxtw" | "uxtw"], Some("s")) => extend[0],
+                _ => return unsupported(),
+            };
+            if !lanes_of(shape_of(0), offsets) {
+                return unsupported();
+            }
+            let shift = match ("bhwd".find(&n[3..]).unwrap(), extend) {
+                (0, "lsl") => String::new(),
+                (0, _) => format!(", {extend}"),
+                (k, _) => format!(", {extend} #{k}"),
+            };
+            let operation = prefetch(constant(3))?;
+            format!("{n} {operation}, {}, [{}, {}{shift}]\n", bare(0), bare(1), full(2))
+        }
+        // A prefetch of each active lane's address, a vector of them, at no offset.
+        ("prfb" | "prfh" | "prfw" | "prfd", ["gather", "scalar", "offset"], "PVCC>-")
+            if lanes_of(shape_of(0), shape_of(1)) && constant(2) == 0 =>
+        {
+            format!("{n} {}, {}, [{}]\n", prefetch(constant(3))?, bare(0), full(1))
+        }
+        // The same at the offset of a scalar, which LLVM writes as a prefetch of bytes at
+        // the scalar plus each address of the low 32 bits, of whatever size.
+        ("prfb" | "prfh" | "prfw" | "prfd", ["gather", "scalar", "offset"], "PVIC>-")
+            if lanes_of(shape_of(0), shape_of(1)) =>
+        {
+            let operation = prefetch(constant(3))?;
+            format!("prfb {operation}, {}, [{}, {}, uxtw]\n", bare(0), bare(2), full(1))
         }
         (_, [] | ["wide"], "PVV>V") if MERGING.contains(&n) => {
             format!("{n} {r}, {}/m, {}, {}\n", bare(0), full(1), full(2))
@@ -1496,7 +1604,11 @@ mod tests {
                 Err(('f', bits)) => Ret::Float(bits),
                 Err((_, bits)) => Ret::Int(bits),
             };
-            let full = format!("aarch64.sve.{name}");
+            let full = if name.starts_with("vector.") {
+                name.to_owned()
+            } else {
+                format!("aarch64.sve.{name}")
+            };
             let (registers, body) = match selected(&full, &args, ret) {
                 Ok(it) => it,
                 Err(e) => {

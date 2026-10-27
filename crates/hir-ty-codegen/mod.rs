@@ -15795,7 +15795,7 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
         {
             return Ok(());
         }
-        if name.starts_with("aarch64.sve.") {
+        if name.starts_with("aarch64.sve.") || name.starts_with("vector.reverse.nxv") {
             return self.sve_intrinsic(name, args, dst, dst_ty);
         }
         match (name, args) {
