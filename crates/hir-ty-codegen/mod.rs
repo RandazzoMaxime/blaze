@@ -2825,6 +2825,25 @@ fn as_its_crate_compiles(
     }
 }
 
+/// Whether rustc's callers of the symbol of `func` pass it scalable vectors in SVE registers,
+/// where ra-jit's pass them by reference: ra-jit's code for it is a copy of its own, never
+/// put in the object under the symbol. Only where nothing of rustc's is linked are all the
+/// callers ra-jit's.
+fn rustcs_callers_pass_scalable(
+    db: &dyn HirDatabase,
+    symbols: &dyn SymbolResolver,
+    func: FunctionId,
+) -> bool {
+    if symbols.nothing_of_rustc() {
+        return false;
+    }
+    let env = ParamEnvAndCrate {
+        param_env: hir_ty::next_solver::ParamEnv::empty(),
+        krate: func.krate(db),
+    };
+    sve::passes_scalable(db, func, None, &env.store())
+}
+
 /// The last name of what an instance is of.
 fn callee_name(db: &dyn HirDatabase, def: InstanceDef) -> &str {
     match def {
@@ -5402,6 +5421,14 @@ impl<'a, 'db> ObjectCodegen<'a, 'db> {
     /// Puts a non-generic function in the object, exported under its rustc symbol name.
     fn define_function(&mut self, func: FunctionId) -> Result<String> {
         let db = self.db;
+        // Whether its code is compiled or from the store.
+        if let Some(symbol) = self.symbols.function(func)
+            && rustcs_callers_pass_scalable(db, self.symbols, func)
+        {
+            unsupported!(
+                "`{symbol}`, which rustc's callers pass scalable vectors in SVE registers"
+            );
+        }
         let stored = match self.stored_roots.get(&func) {
             Some(name) => name.clone(),
             None => self.stored_root(func),
@@ -5426,19 +5453,6 @@ impl<'a, 'db> ObjectCodegen<'a, 'db> {
             let private = self.on_demand_crates.is_empty() && self.symbols.private(func);
             return Err(if private { CodegenError::Private } else { CodegenError::NoSymbol });
         };
-        // rustc's callers of the symbol pass scalable vectors in SVE registers, ra-jit's by
-        // reference: only where nothing of rustc's is linked are all the callers ra-jit's.
-        if !self.symbols.nothing_of_rustc() {
-            let env = ParamEnvAndCrate {
-                param_env: hir_ty::next_solver::ParamEnv::empty(),
-                krate: func.krate(db),
-            };
-            if sve::passes_scalable(db, func, None, &env.store()) {
-                unsupported!(
-                    "`{symbol}`, which rustc's callers pass scalable vectors in SVE registers"
-                );
-            }
-        }
         let start = stdx::time::Instant::now();
         let tiers = self.tiers;
         let tiered = tiers.and_then(|it| it.code(db, &tier::Node(tier::Kind::Root(func))));
@@ -18441,5 +18455,61 @@ mod tests {
         let mut ctx = cranelift_codegen::Context::for_function(func);
         let code = super::emit(&mut ctx).unwrap();
         assert!(!code.bytes.is_empty());
+    }
+
+    /// A function Cranelift's incremental cache has the code of tells where its variables
+    /// are as one compiled afresh does. The cache keeps the frame's layout without the slots
+    /// at its end that are at the bottom of the frame, and the variables in them were left
+    /// out of what a build from a store that had the code wrote (#242).
+    #[test]
+    fn a_slot_at_the_bottom_of_the_frame_has_its_place_from_the_cache_too() {
+        use cranelift_codegen::incremental_cache::CacheKvStore;
+        use std::{borrow::Cow, collections::HashMap};
+
+        #[derive(Default)]
+        struct Memory(HashMap<Vec<u8>, Vec<u8>>);
+        impl CacheKvStore for Memory {
+            fn get(&self, key: &[u8]) -> Option<Cow<'_, [u8]>> {
+                self.0.get(key).map(|it| Cow::Borrowed(&it[..]))
+            }
+            fn insert(&mut self, key: &[u8], val: Vec<u8>) {
+                self.0.insert(key.to_vec(), val);
+            }
+        }
+
+        let isa = super::target().unwrap();
+        // A leaf that stores to its one slot, which is at the bottom of its frame.
+        let function = || {
+            let sig = ir::Signature::new(isa.default_call_conv());
+            let mut func = ir::Function::with_name_signature(ir::UserFuncName::default(), sig);
+            let mut builder_ctx = FunctionBuilderContext::new();
+            let mut builder = FunctionBuilder::new(&mut func, &mut builder_ctx);
+            let slot = builder.create_sized_stack_slot(ir::StackSlotData::new(
+                ir::StackSlotKind::ExplicitSlot,
+                8,
+                3,
+            ));
+            let entry = builder.create_block();
+            builder.switch_to_block(entry);
+            builder.seal_block(entry);
+            let value = builder.ins().iconst(types::I64, 7);
+            builder.ins().stack_store(isa.pointer_type(), value, slot, 0);
+            builder.ins().return_(&[]);
+            builder.finalize(isa.frontend_config());
+            (func, slot)
+        };
+        let mut cache = Memory::default();
+        let mut places = |hit: bool| {
+            let (func, slot) = function();
+            let mut ctx = cranelift_codegen::Context::for_function(func);
+            let (compiled, cached) =
+                ctx.compile_with_cache(&**isa, &mut cache, &mut Default::default()).unwrap();
+            assert_eq!(cached, hit);
+            let frame = compiled.buffer.frame_layout().unwrap().clone();
+            super::SlotPlaces::of_frame(&**isa, &frame, &ctx.func, std::iter::once(slot))
+        };
+        let afresh = places(false);
+        assert_eq!(afresh.slots.len(), 1);
+        assert_eq!(places(true), afresh);
     }
 }
