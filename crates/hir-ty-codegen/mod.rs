@@ -195,8 +195,9 @@ macro_rules! unsupported {
     };
 }
 
-// After `unsupported!`, which it uses.
+// After `unsupported!`, which they use.
 mod sve;
+mod wasm_simd;
 
 /// Stops the build with an error ([`CodegenError::Refused`]).
 macro_rules! refused {
@@ -8746,6 +8747,13 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
             Ok(match layout.backend_repr {
                 _ if layout.is_zst() => PassMode::Ignore,
                 BackendRepr::Scalar(scalar) => PassMode::Direct(self.scalar(scalar)?),
+                // A vector is no aggregate to the convention: it goes as a `v128`.
+                BackendRepr::SimdVector { .. } if layout.size.bytes() == 16 && self.simd128() => {
+                    PassMode::Cast(types::I64X2)
+                }
+                BackendRepr::SimdVector { .. } => {
+                    unsupported!("a SIMD vector in the wasm C ABI without `simd128`")
+                }
                 _ => PassMode::Indirect,
             })
         };
@@ -14263,6 +14271,9 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
         if self.scalable_intrinsic(name, generic_args, args, dst, dst_ty)? {
             return Ok(Intrinsic::Inline);
         }
+        if self.wasm_simd_intrinsic(name, args, dst, dst_ty)? {
+            return Ok(Intrinsic::Inline);
+        }
         match (name, args) {
             (
                 "wrapping_add" | "unchecked_add" | "wrapping_sub" | "unchecked_sub"
@@ -14773,8 +14784,10 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
                     unsupported!("`simd_div` of integers");
                 }
                 // What x86's baseline, SSE2, has an instruction for.
+                let vectors = self.makes_vectors();
                 let chunks = simd_chunks(lane.ty, count).filter(|_| {
-                    out.ty == lane.ty
+                    vectors
+                        && out.ty == lane.ty
                         && match (name, signed) {
                             ("simd_and" | "simd_or" | "simd_xor" | "simd_add" | "simd_sub", _) => {
                                 true
@@ -15006,7 +15019,9 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
                 }
                 // Bit `i` of the result is the top bit of lane `i`.
                 let mut bits = self.builder.ins().iconst(types::I64, 0);
-                let chunks = simd_chunks(lane.ty, count).filter(|_| lane.ty.bits() != 16);
+                let vectors = self.makes_vectors();
+                let chunks =
+                    simd_chunks(lane.ty, count).filter(|_| vectors && lane.ty.bits() != 16);
                 for chunk in 0..chunks.map_or(0, |it| it.1) {
                     let vector = chunks.expect("chunks").0;
                     let value = self.builder.ins().load(vector, MEM, src, chunk * 16);
@@ -15995,6 +16010,9 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
         }
         if name.starts_with("aarch64.sve.") || name.starts_with("vector.reverse.nxv") {
             return self.sve_intrinsic(name, args, dst, dst_ty);
+        }
+        if self.wasm_llvm_intrinsic(name, args, dst)? {
+            return Ok(());
         }
         match (name, args) {
             (
