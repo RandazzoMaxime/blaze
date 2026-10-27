@@ -1016,6 +1016,15 @@ each one's section: what `[Unreleased]` had, and the title of each change merged
 
 ### Fixed
 
+- A daemon that patches what rustc linked no longer stops at the first build that reaches a
+  thread-local, or a static written at run time, of a crate edited before any build reached
+  it (`static `__RUST_STD_INTERNAL_VAL` of crate `smid` with state, whose first value is not
+  the one rustc built it with`, `harness/programs.py` on every platform since #527). The first
+  values of a crate's statics with state are noted just before the first edit reaches it, so
+  rustc's copy is still known to start from them, and a change to a file an `include_str!` or
+  `include_bytes!` reads leaves the first values of crates that do not include it known (it
+  had made `alloc`'s `STATIC_INNER_SLICE` unknown after a checkout switch,
+  `worktrees.py --join --together` on macOS).
 - `cargo blaze test --doc` runs an edited library's examples again: it took an example's
   program from the run before while the example's own text was unchanged, since blaze's run
   names no library with `--extern` for the key to stamp, so after an edit that broke them the

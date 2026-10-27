@@ -601,6 +601,10 @@ pub(crate) struct Frozen {
     reached: FxHashMap<(Node, StoredParamEnvAndCrate), Option<Option<Mark>>>,
     /// The crates that have seen an edit since.
     edited: FxHashSet<Crate>,
+    /// Those of `edited` whose first values of statics an edit can have changed: of a change
+    /// to an included file, only the crates that include it and what depends on them
+    /// ([`Frozen::edit_apart`]).
+    edited_values: FxHashSet<Crate>,
     /// The files that have seen an edit to the bodies of functions alone, which can change
     /// no function written elsewhere.
     edited_bodies: FxHashSet<FileId>,
@@ -610,13 +614,16 @@ pub(crate) struct Frozen {
     /// The first value rustc gave each static with state that a build asked about
     /// ([`RustcValues`]).
     statics: Arc<std::sync::Mutex<FxHashMap<StaticId, Option<Mark>>>>,
+    /// The crates whose statics [`Frozen::take_values`] took.
+    taken: FxHashSet<Crate>,
 }
 
 /// The first value rustc gave each static with state (a thread-local, or one written at run
 /// time), as rustc compiled it: such a static stays rustc's copy only while its first value
-/// is still that one (`docs/live.md#statics`). Taken the first time a build asks, when no
-/// edit since the daemon started can have reached the static; `None` when one had, and
-/// rustc's value is not known.
+/// is still that one (`docs/live.md#statics`). Taken the first time a build asks, or before
+/// the first edit of its crate or one it depends on ([`Frozen::take_values`]), when no edit
+/// since the daemon started can have reached the static; `None` when one had, and rustc's
+/// value is not known.
 #[derive(Clone, Default)]
 pub(crate) struct RustcValues {
     known: Arc<std::sync::Mutex<FxHashMap<StaticId, Option<Mark>>>>,
@@ -645,7 +652,7 @@ impl Frozen {
     /// What a build asks of [`RustcValues`]: the values taken so far, shared with it, and the
     /// edits as they are now.
     pub(crate) fn rustc_values(&self) -> RustcValues {
-        let touched = self.edited.iter().chain(&self.distrusted).copied().collect();
+        let touched = self.edited_values.iter().chain(&self.distrusted).copied().collect();
         RustcValues { known: self.statics.clone(), touched: Arc::new(touched) }
     }
 
@@ -658,7 +665,47 @@ impl Frozen {
     }
 
     pub(crate) fn edit(&mut self, crates: impl IntoIterator<Item = Crate>) {
+        let crates: Vec<Crate> = crates.into_iter().collect();
+        self.edited.extend(crates.iter().copied());
+        self.edited_values.extend(crates);
+    }
+
+    /// [`Frozen::edit`] of `crates`, where the first values of statics an edit can have
+    /// changed are only those of `values`.
+    pub(crate) fn edit_apart(
+        &mut self,
+        crates: impl IntoIterator<Item = Crate>,
+        values: impl IntoIterator<Item = Crate>,
+    ) {
         self.edited.extend(crates);
+        self.edited_values.extend(values);
+    }
+
+    /// Takes the first value of each static with state that `crates` declare, of those no
+    /// edit has reached: asked before an edit reaches them, so that a build that first asks
+    /// about one after it, as a build in full of code no build compiled before does, still
+    /// knows rustc's ([`RustcValues`]).
+    pub(crate) fn take_values(&mut self, db: &dyn HirDatabase, crates: FxHashSet<Crate>) {
+        let untouched =
+            |it: &Crate| !self.edited_values.contains(it) && !self.distrusted.contains(it);
+        let fresh: Vec<Crate> =
+            crates.into_iter().filter(|it| untouched(it) && !self.taken.contains(it)).collect();
+        if fresh.is_empty() {
+            return;
+        }
+        self.taken.extend(fresh.iter().copied());
+        let statics = super::stable::declared_statics(db, &fresh);
+        let mut known = self.statics.lock().unwrap_or_else(|e| e.into_inner());
+        for id in statics {
+            if known.contains_key(&id) {
+                continue;
+            }
+            let Ok(compiled) = compiled_static(db, id).as_ref() else { continue };
+            if is_thread_local(db, id) || compiled.writable {
+                let mark = Mark::new(db, static_serial(db, id), &compiled.requests);
+                known.insert(id, Some(mark));
+            }
+        }
     }
 
     /// Whether an edit since the daemon started can have changed what the root is.

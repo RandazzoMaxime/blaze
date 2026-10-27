@@ -4144,6 +4144,41 @@ fn start_from_rustc(
     Ok(())
 }
 
+/// Has each program that links with rustc's code note the first values of the statics with
+/// state of the crates `files` are of, which are about to change, and of those that depend on
+/// them (`Rejections::take_first_values`).
+fn take_first_values(db: &RootDatabase, programs: &mut [Program], files: &[vfs::FileId]) {
+    let crates: Vec<_> = files
+        .iter()
+        .flat_map(|&file| ide_db::base_db::relevant_crates(db, file).iter().copied())
+        .collect();
+    take_first_values_of(db, programs, &crates);
+}
+
+fn take_first_values_of(
+    db: &RootDatabase,
+    programs: &mut [Program],
+    crates: &[ide_db::base_db::Crate],
+) {
+    if crates.is_empty() {
+        return;
+    }
+    hir::attach_db(db, || {
+        for program in programs.iter_mut().filter(|it| !it.table.is_empty()) {
+            program.known.take_first_values(db, crates);
+        }
+    });
+}
+
+/// The crates that include one of `paths` with `include!`, `include_str!` or `include_bytes!`.
+fn includers(db: &RootDatabase, paths: &[AbsPathBuf]) -> Vec<ide_db::base_db::Crate> {
+    let all = ide_db::base_db::all_crates(db);
+    let includes = |krate: ide_db::base_db::Crate| {
+        db.included_by(krate).iter().any(|(path, _)| paths.contains(path))
+    };
+    all.iter().copied().filter(|&krate| includes(krate)).collect()
+}
+
 /// Has each program whose edits are patches of what rustc linked take in what rustc compiled
 /// of `files`, which are about to change: the functions written in them and the statics
 /// their bodies declare. A static declared outside a body is no edit of bodies alone.
@@ -9813,6 +9848,7 @@ fn run_holding(
         homed.extend(&editing);
         homed.sort_unstable();
         homed.dedup();
+        take_first_values(&db, &mut programs, &homed);
         home_in_rustcs(&db, &listed, &mut programs, &homed);
         outlines.before_edit(&db, &listed, &editing);
         for &index in &gone {
@@ -9850,6 +9886,7 @@ fn run_holding(
         if !texts.is_empty() {
             let roots: Vec<_> = texts.iter().map(|it| it.0).collect();
             untouched = roots.iter().copied().filter(|it| !editing.contains(it)).collect();
+            take_first_values(&db, &mut programs, &untouched);
             home_in_rustcs(&db, &listed, &mut programs, &untouched);
             outlines.before_edit(&db, &listed, &untouched);
             for file in write_harnesses(&mut db, texts) {
@@ -9869,7 +9906,9 @@ fn run_holding(
         }
         // Asked after the change: a file can have joined a crate with it.
         if !included.is_empty() {
-            programs.iter_mut().for_each(|it| it.known.touch(&db, None));
+            let includers = includers(&db, &included);
+            take_first_values_of(&db, &mut programs, &includers);
+            programs.iter_mut().for_each(|it| it.known.touch_included(&db, &includers));
             listed.touch(&db, None);
         }
         for path in included {
