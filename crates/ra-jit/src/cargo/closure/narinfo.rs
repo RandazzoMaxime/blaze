@@ -71,6 +71,7 @@ impl Sha256 {
         bytes.map(Sha256).with_context(|| format!("`{text}` is no sha256"))
     }
 
+    #[cfg(test)]
     pub(crate) fn of(bytes: &[u8]) -> Sha256 {
         use sha2::Digest as _;
         Sha256(sha2::Sha256::digest(bytes).into())

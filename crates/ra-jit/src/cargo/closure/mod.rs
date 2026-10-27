@@ -169,14 +169,16 @@ pub(crate) fn command(args: impl Iterator<Item = String>) -> anyhow::Result<()> 
             let names: Vec<&str> = pinned.iter().map(|it| it.attribute).collect();
             format!("pins.txt names no root `{name}` for {host}: it has {}", names.join(", "))
         })?;
-        chosen.push(root.path.clone());
+        chosen.push(root.clone());
     }
     if named.is_empty() {
-        chosen = pinned.iter().map(|it| it.path.clone()).collect();
+        chosen = pinned;
     }
     match verb.as_str() {
         "fetch" => fetch_command(&host, &chosen),
-        "materialize" => materialize_command(&chosen),
+        "materialize" => {
+            materialize_command(&chosen.into_iter().map(|it| it.path).collect::<Vec<_>>())
+        }
         _ => bail!(USAGE),
     }
 }
@@ -185,10 +187,28 @@ fn host_or_none() -> anyhow::Result<&'static str> {
     host().context("pins.txt has closures for Linux hosts only: name one with --host")
 }
 
-fn fetch_command(host: &str, roots: &[StorePath]) -> anyhow::Result<()> {
+/// Fetches the closure of `roots`, and checks that what came is the closure pins.txt says each
+/// root has: a cache that answers for another revision is found here.
+fn fetch_command(host: &str, roots: &[Root]) -> anyhow::Result<()> {
     let start = Instant::now();
     let source = fetch::Source::from_env()?;
-    let fetched = fetch::fetch(store()?, roots, &source, &[narinfo::CACHE_NIXOS_ORG])?;
+    let store = store()?;
+    let paths: Vec<StorePath> = roots.iter().map(|it| it.path.clone()).collect();
+    let fetched = fetch::fetch(store, &paths, &source, &[narinfo::CACHE_NIXOS_ORG])?;
+    for root in roots {
+        let closure = kept::closure_of(store, std::slice::from_ref(&root.path))?;
+        let bytes: u64 = closure.iter().map(|it| it.nar_size).sum();
+        if (bytes, closure.len() as u64) != (root.closure_bytes, root.closure_paths) {
+            bail!(
+                "the closure of {} is {} store paths of {bytes} bytes, and pins.txt says {} of \
+                 {}: harness/closure_pins.py --write writes what the cache has",
+                root.attribute,
+                closure.len(),
+                root.closure_paths,
+                root.closure_bytes
+            );
+        }
+    }
     eprintln!(
         "closure: {} store paths of {host} at nixpkgs {}, {} of them in the store already: {} \
          downloaded, {} unpacked, in {:.1?}",
