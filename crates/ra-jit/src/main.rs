@@ -3295,6 +3295,7 @@ fn workspace_at(
     let mut debug = plan::Whole {
         debug: plan::Described::NOTHING,
         lto: false,
+        links_dead_code: false,
         lints_capped: false,
         link_args: Vec::new(),
     };
@@ -3315,6 +3316,7 @@ fn workspace_at(
         let asked = plan::Asked { triple, cfg: &workspace.rustc_cfg, env: &cargo_config.extra_env };
         let plan = plan::Plan::of(manifest.manifest_path().as_ref(), selection, &asked)?;
         debug = plan.whole()?;
+        hir_ty_codegen::rustc_links_dead_code(debug.links_dead_code);
         let packages: Vec<_> = cargo.packages().collect();
         if let Some(beside) = beside {
             let built = packages.iter().filter(|it| plan.package(&cargo[**it].id.repr).is_some());

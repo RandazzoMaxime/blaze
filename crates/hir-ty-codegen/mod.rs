@@ -3324,6 +3324,13 @@ pub fn mir_opt_level() -> MirOptLevel {
 
 pub const MIR_OPT: &str = "RA_JIT_MIR_OPT";
 
+/// Says whether rustc builds the program with `-C link-dead-code`, before anything of it is
+/// compiled: rustc then keeps every function, `#[inline(always)]` ones too, as one copy in
+/// one codegen unit, which LLVM inlines only into the code of that unit.
+pub fn rustc_links_dead_code(links: bool) {
+    backend::link_dead_code(links);
+}
+
 /// The body the code generator compiles of `def`: the runtime body, optimized at
 /// [`mir_opt_level`].
 fn compiled_mir_body<'db>(
@@ -9938,6 +9945,19 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
         for (temp, to) in forwarded {
             self.locals.insert(temp, self.locals[to]);
         }
+        if frame.is_none()
+            && let Some((name, lowered)) = self.neon_fused()?
+        {
+            let args: Vec<_> = body
+                .param_locals
+                .iter()
+                .map(|&local| (self.locals[local].addr, body.locals[local].ty.as_ref()))
+                .collect();
+            let returned = returned_local(body);
+            let dst = self.locals[returned].addr;
+            self.neon_call(&name, &lowered, &args, dst, body.locals[returned].ty.as_ref())?;
+            return self.return_();
+        }
         for (id, _) in body.basic_blocks.iter() {
             let block = self.builder.create_block();
             self.blocks.insert(id, block);
@@ -16224,12 +16244,59 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
         dst: Value,
         dst_ty: Ty<'db>,
     ) -> Result<()> {
+        let args = args
+            .iter()
+            .map(|arg| Ok((self.operand(arg)?.0, self.operand_ty(arg)?)))
+            .collect::<Result<Vec<_>>>()?;
+        self.neon_call(name, lowered, &args, dst, dst_ty)
+    }
+
+    /// The instruction LLVM selects for this body when it is one of `core::arch`'s NEON fused
+    /// multiply-adds on AArch64 ([`neon::fused`]), and the function's name. Refused where
+    /// rustc's `-C link-dead-code` decides the instruction ([`neon::splats_c`]).
+    fn neon_fused(&self) -> Result<Option<(String, neon::Lowered)>> {
+        let db = self.cg.db;
+        if self.cg.target.arch != Arch::Aarch64 {
+            return Ok(None);
+        }
+        let Some(func) = self.body.and_then(|it| it.owner.as_function()) else { return Ok(None) };
+        let name = FunctionSignature::of(db, func).name.as_str();
+        if !func.krate(db).data(db).origin.is_lang() || !name.starts_with("vfm") {
+            return Ok(None);
+        }
+        let args = self.args.as_ref().map(|it| it.as_ref());
+        let lane = match args.and_then(|it| it.iter().find_map(|it| it.konst())) {
+            Some(konst) => {
+                let ConstKind::Value(lane) = konst.kind() else { return Ok(None) };
+                Some(lane.value.inner().to_leaf().to_bits(Size::from_bytes(4)) as u32)
+            }
+            None => None,
+        };
+        let Some(lowered) = neon::fused(name, lane) else { return Ok(None) };
+        if backend::links_dead_code() && neon::splats_c(name, lane) {
+            unsupported!(
+                "`{name}` where rustc has `-C link-dead-code`: whether LLVM sees the splat of \
+                 `c`, which decides the NaN that comes out, is up to the codegen unit rustc \
+                 keeps `splat` in"
+            );
+        }
+        Ok(Some((name.to_owned(), lowered)))
+    }
+
+    /// [`Self::neon_assembly`] of the operands where `args` are.
+    fn neon_call(
+        &mut self,
+        name: &str,
+        lowered: &neon::Lowered,
+        args: &[(Value, Ty<'db>)],
+        dst: Value,
+        dst_ty: Ty<'db>,
+    ) -> Result<()> {
         if args.len() != lowered.args.len() {
             unsupported!("`{name}` with {} arguments", args.len());
         }
         let mut values = vec![dst];
-        for (arg, expected) in args.iter().zip(&lowered.args) {
-            let ty = self.operand_ty(arg)?;
+        for (&(arg, ty), expected) in args.iter().zip(&lowered.args) {
             let pointer = matches!(ty.kind(), TyKind::RawPtr(..));
             let fits = match expected {
                 None => pointer,
@@ -16238,7 +16305,7 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
             if !fits {
                 unsupported!("`{name}` of {ty:?}, which is not what its name says");
             }
-            values.push(self.operand(arg)?.0);
+            values.push(arg);
         }
         // One result, or a tuple of vectors (`int8x16x2_t`) whose fields are the registers.
         let layout = self.layout(dst_ty)?;
