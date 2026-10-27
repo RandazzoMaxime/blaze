@@ -870,7 +870,8 @@ pub(crate) fn upstream(db: &RootDatabase, krate: Crate) -> FxHashSet<Crate> {
     seen
 }
 
-/// The crates linked into `krate`: its dependencies, transitively. Of the sysroot's crates,
+/// The crates linked into `krate`: its dependencies, transitively, but not those of a crate of
+/// procedural macros it uses, which rustc loads as the compiler's own. Of the sysroot's crates,
 /// which rust-analyzer makes dependencies of every crate, `core` is linked; `std` and `alloc`
 /// unless the crate is `#![no_std]`, `proc_macro` for a crate of procedural macros, and any of
 /// them the crate names with `extern crate`.
@@ -882,6 +883,9 @@ pub(crate) fn linked(db: &RootDatabase, krate: Crate) -> FxHashSet<Crate> {
             continue;
         }
         let def_map = hir_def::nameres::crate_def_map(db, it.into());
+        if it != krate && def_map.is_proc_macro() {
+            continue;
+        }
         let named: Vec<Crate> = it
             .root_module(db)
             .extern_crate_decls(db)

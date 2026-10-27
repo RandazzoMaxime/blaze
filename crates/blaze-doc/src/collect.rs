@@ -189,9 +189,12 @@ impl StdItems {
             for documented in &places.crates {
                 upstream.extend(places::upstream(db, documented.krate));
             }
-            let crates = Crate::all(db).into_iter().filter(|it| {
-                upstream.contains(it)
-                    || matches!(places::lang_crate_name(db, *it), Some("core" | "alloc" | "std"))
+            // Not the crates the sysroot's own depend on (its tests' `rand`).
+            let crates = Crate::all(db).into_iter().filter(|it| match it.origin(db) {
+                ide_db::base_db::CrateOrigin::Lang(_) => {
+                    matches!(places::lang_crate_name(db, *it), Some("core" | "alloc" | "std"))
+                }
+                _ => upstream.contains(it),
             });
             for krate in crates {
                 for imp in Impl::all_in_crate(db, krate) {
