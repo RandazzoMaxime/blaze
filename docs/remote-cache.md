@@ -39,7 +39,9 @@ sandbox and `RA_JIT_TESTS=affected`).
   opaque files: rlibs, dependency units, the toolchain. Compiled functions are not chunked; their
   key already deduplicates them. **Compression** is zstd per blob, a high level on CI's upload,
   with trained dictionaries for the small function blobs.
-- **GC** marks from main's recent heads and deletes what stays unmarked past a grace period.
+- **GC is R2's lifecycle rules, no job**: the index expires 30 days after upload, blobs 90, and
+  CI on main copies onto itself any blob it used that is older than 45 days, so a blob always
+  outlives every entry that names it.
 - **Rollout** in nine slices; the first two (R2 behind today's remote, then the codegen version)
   give most of the speed.
 
@@ -64,7 +66,7 @@ Non-goals:
   nothing to execute remotely. REAPI stays an edge adapter ([#226](https://github.com/indexable-inc/blaze/issues/226)).
 - Writes to the shared tier from anyone but CI on main: no pull request, no fork, no user.
 - A rust-analyzer analysis cache. The analysis is rebuilt at load, as today ([cache.md](cache.md)).
-- Keeping every main commit forever. GC keeps what recent heads name.
+- Keeping every main commit forever. What main has not used for a month or three expires.
 - Sharing between different codegen versions or toolchains. A different version is a different
   key, by design.
 
@@ -96,7 +98,7 @@ identity and an empty cache.
 | System | What it does | What we take, or not |
 |---|---|---|
 | Bazel REAPI ([remote_execution.proto](https://github.com/bazelbuild/remote-apis/blob/main/build/bazel/remote/execution/v2/remote_execution.proto)) | CAS of `Digest{hash, size}` plus an ActionCache from action digest to result. AC entries carry no signature; trust is the server's access control. Recently `GetChunkMapping`/`SpliceBlob` with FastCDC 2020 (avg 512 KiB recommended) | The CAS/AC split. Not its unsigned AC (we serve from a public CDN, so the index must carry its own proof), and not its per-entry unary lookups: 165,752 functions would be 165,752 calls (**read**, [ci-runner.md](ci-runner.md)) |
-| [Attic](https://github.com/zhaofengli/attic) | Nix cache on S3: FastCDC 16/64/256 KiB for NARs of 64 KiB and up, zstd, narinfo signed by the server, GC by retention then orphans | Same chunk sizes as a start; GC that goes index, then blobs. Not server-side signing: our server is a bucket |
+| [Attic](https://github.com/zhaofengli/attic) | Nix cache on S3: FastCDC 16/64/256 KiB for NARs of 64 KiB and up, zstd, narinfo signed by the server, GC by retention then orphans | Same chunk sizes as a start; the index expiring before the blobs it names. Not server-side signing: our server is a bucket |
 | casync / [desync](https://github.com/folbricht/desync) | Chunk stores `<4 hex>/<id>.cacnk`, chunks 16:64:256 KB, zstd, SHA-512/256 or SHA-256, index files listing chunks | A chunk list per large file; over S3, HTTP and OCI alike |
 | Nix binary cache ([narinfo](https://nix.dev/manual/nix/2.35/protocols/binary-cache/narinfo.html)) | Ed25519 over a fingerprint, `trusted-public-keys = name:key`, keys named `cache.example.org-1` and incremented to revoke; rotation signs with both keys ([nix#12976](https://github.com/NixOS/nix/pull/12976)) | Named, numbered keys and an overlap when rotating |
 | sccache 0.19 ([S3.md](https://github.com/mozilla/sccache/blob/main/docs/S3.md)) | S3 and R2 (`SCCACHE_ENDPOINT`, `SCCACHE_REGION=auto`), `SCCACHE_S3_NO_CREDENTIALS` for public read-only PR builds. Keys by BLAKE3 over the sysroot's shared libraries, arguments, sources and env ([Caching.md](https://github.com/mozilla/sccache/blob/main/docs/Caching.md)) | Read-only anonymous access for PRs. Not the tool (AGENTS.md forbids it), and not keying by the compiler's bytes, which is the problem this design removes. Whether it hashes the rustc binary itself we did not confirm (**reported**) |
@@ -179,17 +181,22 @@ linked into one program. So the version is checked, not trusted.
 
 ## Object layout in the bucket
 
-One bucket, `blaze-cache`, one tier. Everything except heads and the trust list is immutable and
-named by a SHA-256.
+The bucket exists: `blaze-cache`, in Indexable's Cloudflare account, one tier. The repository
+has the secrets `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY` and `R2_ENDPOINT`, from an object
+read and write token scoped to that bucket alone, checked with `aws s3 ls` (**reported**, by the
+coordinator, 2026-10-27). Its one lifecycle rule so far aborts multipart uploads left incomplete
+after a day. Everything except heads and the trust list is immutable and named by a SHA-256.
 
-    trust/keys                      the signing keys, signed by the root key
-    heads/p/<project>/<commit>      a signed head: one main commit of one project
-    heads/p/<project>/latest        a signed head: the newest of the above
-    heads/u/<unit-key>              a signed head: what any project reuses of one dependency unit
-    ix/<sha256>                     an index segment (sorted entries, deterministic CBOR)
-    packs/<sha256>.bpk              a pack of blobs: frames, then its index
-    dict/<sha256>                   a zstd dictionary
-    gc/mark-<rfc3339>               what one GC mark found live
+    trust/keys                            the signing keys, signed by the root key; never expires
+    index/heads/p/<project>/<commit>      a signed head: one main commit of one project
+    index/heads/p/<project>/latest        a signed head: the newest of the above
+    index/heads/u/<unit-key>              a signed head: what any project reuses of one dependency unit
+    index/seg/<sha256>                    an index segment (sorted entries, deterministic CBOR)
+    cas/packs/<sha256>.bpk                a pack of blobs: frames, then its index
+    cas/dict/<sha256>                     a zstd dictionary
+
+The two top prefixes are the two lifetimes of [GC](#gc): `index/` lives about 30 days from its
+upload, `cas/` about 90.
 
 A `<project>` is a name CI picks (`blaze`, `ripgrep`, the bench apps). A `<commit>` is a main
 commit's id. A `<unit-key>` is the hex of a dependency unit's key.
@@ -236,7 +243,7 @@ A head says what one main commit of one project used:
     }
 
 A project head names every segment that main's build at that commit read or wrote: it is the
-prefetch list. A unit head (`heads/u/<unit-key>`) names the segments holding what any build has
+prefetch list. A unit head (`index/heads/u/<unit-key>`) names the segments holding what any build has
 of that dependency unit: its rlib chunks, its functions, its non-generic code. A user's project
 that depends on `serde 1.0.228` with the same features finds those by the unit key, computed from
 its own `Cargo.lock` before any request. That is how people other than us benefit: every
@@ -297,12 +304,12 @@ tool. The Rust crate is `sha2` 0.11, which picks SHA-NI or the ARMv8 extensions 
   per (codegen version, target, blob kind) from a sample of main's blobs, and compresses each
   small blob with it.
 - **How dictionaries are named and versioned.** A dictionary is a blob like any other: stored at
-  `dict/<sha256 of its bytes>`, immutable, and named in each pack's index by that hash. The zstd
+  `cas/dict/<sha256 of its bytes>`, immutable, and named in each pack's index by that hash. The zstd
   frame also carries a 32-bit dictionary id, which is a hint only: we set it from the hash's first
   bytes, mapped into the range zstd leaves for private use (over 32,767 and under 2^31,
   [format](https://github.com/facebook/zstd/blob/dev/doc/zstd_compression_format.md)). A new
-  dictionary is a new hash; packs written with the old one keep naming it, and GC keeps a
-  dictionary while a live pack names it. Retraining happens on a `CODEGEN` bump and when slice 6's
+  dictionary is a new hash; packs written with the old one keep naming it, and a pack's refresh
+  refreshes the dictionaries it names. Retraining happens on a `CODEGEN` bump and when slice 6's
   measurement says the ratio has drifted.
 - **Large chunks** are compressed without a dictionary, and kept as they are when compression
   saves less than an eighth.
@@ -331,7 +338,9 @@ verifications for nushell, several seconds of one core at tens of microseconds e
   minute at the edge) and remember its highest turn.
 - **CI signing key** `blaze-ci-N`: an Ed25519 secret in a GitHub environment, `cache-writer`,
   that only workflows on `refs/heads/main` can enter. The R2 write token sits in the same
-  environment. The job that signs and uploads is a separate job from the build: it receives the
+  environment. Today `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY` and `R2_ENDPOINT` are repository
+  secrets, which every workflow run on a branch of this repository can read (not a fork's); slice 1
+  moves them into `cache-writer` before any workflow uses them. The job that signs and uploads is a separate job from the build: it receives the
   build's new blobs and entries as an artifact, so build scripts, proc macros and tests (which run
   sandboxed in the build job, [cargo.md](cargo.md#every-test-runs-in-a-sandbox)) never run in a
   process that can read the key.
@@ -394,7 +403,7 @@ every tier off.
 
 1. **Before the workspace loads**: fetch `trust/keys` and the project head. The project is the
    checkout's `RA_JIT_PROJECT`, else a name derived from its git remote; the head is that of the
-   merge base of `HEAD` with main (`heads/p/<project>/<merge-base>`), else the newest head of the
+   merge base of `HEAD` with main (`index/heads/p/<project>/<merge-base>`), else the newest head of the
    first 50 first-parent ancestors, else `latest`. Two requests at a CDN round trip each (tens of
    milliseconds, **unverified**).
 2. **Segments**, all at once: tens of objects of up to 4 MB, from the edge.
@@ -461,8 +470,10 @@ turning store records back into the daemon's values ([research/warm-start.md](re
 
 ### Edge caching
 
-The custom domain needs a Cache Rule ("cache everything") for `packs/`, `ix/` and `dict/` with an
-edge TTL of a month: objects there never change. `heads/` and `trust/` are cached for 60 s.
+The custom domain needs a Cache Rule ("cache everything") for `cas/` and `index/seg/` with an
+edge TTL of a week: objects there never change while they exist (a week, not longer, so the edge
+does not keep serving an object long after its expiry). `index/heads/` and `trust/` are cached
+for 60 s.
 Cloudflare serves range requests from cached files and fills them with 1 MiB-aligned origin
 ranges ([range requests](https://developers.cloudflare.com/cache/reference/range-requests/),
 **reported**). The bucket's `r2.dev` address is rate-limited to hundreds of requests a second and
@@ -473,23 +484,29 @@ is never used ([limits](https://developers.cloudflare.com/r2/reference/limits/),
 Only the `cache-writer` job on main. After the build and test job of a main commit passes the
 golden check and finishes:
 
-1. **Collect** what the build wrote to its store that the shared tier lacks: the build job lists
+1. **Refresh** what the head will name that is old: every segment it reuses that was uploaded
+   before today, and every pack (and the dictionaries its frames name) holding a blob the build
+   used that was uploaded more than 45 days ago, is copied onto itself (a server-side
+   `CopyObject` to the same name), which sets its upload date to now (**reported**, coordinator).
+   A copy moves no bytes through the runner and costs one write.
+2. **Collect** what the build wrote to its store that the shared tier lacks: the build job lists
    the keys it wrote, and the latest head's segments say what the tier already has.
-2. **Pack**: compress each new blob at the upload level, with the dictionary for its kind, into
+3. **Pack**: compress each new blob at the upload level, with the dictionary for its kind, into
    packs of up to 64 MB, ordered by crate and walk order. Large files are chunked first.
-3. **Upload packs and dictionaries** with `If-None-Match: *`. R2 evaluates it atomically
+4. **Upload packs and dictionaries** with `If-None-Match: *`. R2 evaluates it atomically
    ([consistency](https://developers.cloudflare.com/r2/reference/consistency/), **reported**); a
    412 means another writer put the same bytes there, which is success.
-4. **Upload segments** the same way: entries for the new blobs, and for the project head a full
+5. **Upload segments** the same way: entries for the new blobs, and for the project head a full
    list of segments its build used (old segments reused by hash).
-5. **Sign and upload heads**: `heads/p/<project>/<commit>` with `If-None-Match: *`, every touched
-   `heads/u/<unit-key>`, then `heads/p/<project>/latest` with `If-Match` on the ETag read before,
+6. **Sign and upload heads**: `index/heads/p/<project>/<commit>` with `If-None-Match: *`, every
+   touched `index/heads/u/<unit-key>`, then `index/heads/p/<project>/latest` with `If-Match` on the
+   ETag read before,
    retried a few times when another writer moved it, as `extend_list` does today.
-6. **Test passes and flakes** of the commit's test run go into a segment of the same head.
+7. **Test passes and flakes** of the commit's test run go into a segment of the same head.
 
 Readers never see a head naming an object not yet written, because objects go up before the
-heads that name them. A job killed midway leaves unnamed objects, which GC removes after the
-grace period. A push of a main commit that fails fails main's train run: a broken writer is seen
+heads that name them, and anything old a head names is refreshed before the head goes up. A
+job killed midway leaves unnamed objects, which expire with their prefix. A push of a main commit that fails fails main's train run: a broken writer is seen
 the same day.
 
 Writes cost little: R2 bills $4.50 per million writes and $0.015 per GB-month, egress free
@@ -508,7 +525,7 @@ is a different matter: that is a bug or an attack, and must be seen and fixed.
 | a tier cannot be reached (DNS, connect, timeout, 5xx after retries) | locally: the build goes on without that tier, and **every** build's `Finished` line says so (`[ra-jit, remote down: cache.<domain>: timed out]`), not one line in a log. With `RA_JIT_REMOTE_REQUIRED=1`, which blaze's own CI sets, it is an error and the job fails |
 | a blob that does not hash to its name | error, naming the object, the tier and the head; after one retry that bypasses the edge cache. Today the build compiles those functions instead; that changes to an error |
 | a head or key list with a bad signature, an unknown or revoked key, or an older turn | error, naming the head and the key |
-| a head names an object the tier does not have (404) | error: GC never deletes what a live head names, so this is a bug |
+| a head names an object the tier does not have (404) | error: by the invariant of [GC](#gc) a blob outlives every entry that names it, so this is a bug |
 | no head for this project, or none for this codegen version | not an error: the tier has nothing for this build yet. The `Finished` line says `remote: nothing for codegen 41` |
 | the local disk fills while fetching | as today: `store: nothing more is kept of this build`, and the build goes on |
 | the write job fails | main's train run fails, with the step and the request |
@@ -523,23 +540,42 @@ treats it as an error. This is the one choice here Andrew may want the other way
 
 ## GC
 
-Only on the shared tier, and only by a scheduled `cache-gc` job on main with the write token.
+There is no GC job. R2's lifecycle rules expire an object by its age since upload, not since its
+last read, so the design makes upload age mean "last used by main":
 
-- **Mark**: every project head of the last 30 days and the last 200 main commits per project,
-  every `latest`, every unit head named by a marked project head or written in the last 30 days,
-  and the heads of released blaze versions' std. From them, every segment, every blob, every pack
-  holding a live blob, every dictionary a live pack names. The mark is written to
-  `gc/mark-<time>`.
-- **Sweep**: delete an object that is in neither of the last two marks, the two at least 7 days
-  apart, and whose `LastModified` (the server's clock, not ours) is older than 7 days. The grace
-  covers a write job between its first pack and its last head, by a wide margin.
-- **Repack**: a pack under half live is rewritten with its live blobs; the segments that pointed
-  into it are rewritten and the heads that name those are re-signed. Done in the GC job, which
-  holds the key, and only for heads still live.
-- Unit heads are mutable lists, so they shrink too: entries whose blobs are no longer live are
-  dropped and the head re-signed.
+| prefix | expires after | what keeps it |
+|---|---|---|
+| `index/` (heads and segments) | about 30 days | CI on main writes a new head for each commit, and refreshes the segments it reuses |
+| `cas/` (packs and dictionaries) | about 90 days | CI on main copies onto itself any pack it used that is older than about 45 days |
+| `trust/` | never | written by hand with the root key |
 
-Private tiers run the same job with their own keys, or today's `ra-jit cache gc --remote`.
+**The invariant: a blob always outlives every index entry that points to it.** An index object
+written at time `t` expires at about `t + 30 days`. Every pack it names was refreshed if it was
+older than 45 days at `t`, so it expires no earlier than `t + 45 days`. Every segment a head names
+is new or was refreshed on the day the head was written, so it expires with the head or after it.
+The margins (45 against 30 days, a day for segments) absorb the lifecycle's day granularity and a
+write job that runs for hours. Readers check nothing of it: a 404 for a named object is a bug and
+an error ([Failure modes](#failure-modes)).
+
+What follows from it:
+
+- A head nobody writes again (a project not built on main for a month, an old commit) disappears
+  after 30 days, and then a branch based on that commit misses. The merge-base lookup goes back 50
+  commits, so this matters only for branches over a month old.
+- A pack main stopped using expires 90 days after its last refresh. A pack with one used blob and
+  many dead ones is refreshed whole; the write job writes a new pack of the used blobs instead when
+  under half of a pack's blobs are used, and names that one.
+- Unit heads are rewritten when CI touches the unit; one untouched for 30 days expires, and a
+  user's next build of that dependency misses until CI builds it again.
+- Released blaze versions' std projects are heads like any other: kept while the release train
+  writes them, expired 30 days after the last write.
+- Cost of the refreshes: a copy per old pack and per reused segment per main commit, tens of
+  writes at $4.50 a million.
+
+The rules are added with `wrangler r2 bucket lifecycle add blaze-cache ...` (one per prefix, by
+age) once the layout is final, which is the last step of slice 4; until then nothing expires but the
+incomplete multipart uploads. A private tier on R2 uses the same rules; one on S3 the same with S3
+lifecycle rules; a directory remote keeps today's `ra-jit cache gc --remote`.
 
 ## Crate layout
 
@@ -554,7 +590,7 @@ simulated with a fake transport that drops, reorders, truncates and corrupts.
 | `blaze-cdc` | VectorCDC AE: scalar reference, AVX-512, AVX2, NEON; a streaming chunker that is fed bytes and yields cut points | none. Ported from ix's `crates/storage/cdc` (below) |
 | `blaze-pack` | the `.bpk` format: writer and reader over byte slices, the frame index, dictionary references, the range planner (wanted blobs to coalesced byte ranges) | `blaze-cas`, `zstd` |
 | `blaze-index` | entry kinds, segments (deterministic CBOR), heads, `trust/keys`, Ed25519 signing and checking, turns | `blaze-cas`, `ed25519-dalek`, a CBOR crate |
-| `blaze-remote-proto` | the protocol as state machines: `Fetch` (trust, head, segments, plan, parts), `Push` (collect, pack, conditional uploads in order), `Gc` (mark, sweep, repack). Each emits `Request { op: Get{range} \| Put{if_none_match \| if_match} \| List \| Delete, name }` and consumes `Response` events. SigV4 signing of S3 requests is sans-IO too (`rusty-s3`) | the four above, `rusty-s3` |
+| `blaze-remote-proto` | the protocol as state machines: `Fetch` (trust, head, segments, plan, parts), `Push` (collect, pack, conditional uploads in order), `Refresh` (which old packs and segments a head needs copied onto themselves). Each emits `Request { op: Get{range} \| Put{if_none_match \| if_match} \| Copy{onto_itself} \| List, name }` and consumes `Response` events. SigV4 signing of S3 requests is sans-IO too (`rusty-s3`) | the four above, `rusty-s3` |
 | `blaze-remote-io` | `trait Transport { fn send(&self, Request) -> impl Future<Output = Response> }` with body streaming, plus the backends below | `blaze-remote-proto` |
 | `ra-jit` (`remote.rs`, `keeper.rs`) | drives a `Fetch` at daemon start and a `Push` when told; owns policy (tiers, env vars, status lines) | `blaze-remote-io` |
 | `ra-jit-store` | reads and writes format 4 packs through `blaze-pack` | `blaze-pack` |
@@ -592,20 +628,23 @@ Crates to reuse, and not:
 
 Ranked by what each gives. Each slice lands on its own and is measured.
 
-1. **R2 behind today's remote.** A bucket, a custom domain with the cache rules above, CI on main
-   pushing with today's `ra-jit cache push` (the AWS SDK with R2's endpoint and `region=auto`,
+1. **R2 behind today's remote.** The bucket (made), a custom domain with the cache rules above,
+   the secrets moved into the `cache-writer` environment, CI on main pushing to
+   `s3://blaze-cache/v3` (today's layout, under a prefix of its own) with today's `ra-jit cache push` (the AWS SDK with R2's endpoint and `region=auto`,
    which sccache documents) and every CI run reading over `https://`. The `https` place learns
    real paths beside its release-asset names. First run of a real object store; measures the
-   single and 16-stream rates on our own runners. No format change.
+   single and 16-stream rates on our own runners. No format change, and no expiry: `v3/` is
+   removed by hand once slice 4 has replaced it.
 2. **The codegen version.** `blaze-semver`, `Identity` without `build`, the golden check and the
    determinism check in the merge gate. Removes the per-release miss. Measures the corpus's keys
    against nushell's.
 3. **Sans-IO crates and the new packs.** `blaze-cas`, `blaze-pack`, `blaze-remote-proto`,
    `blaze-remote-io` with the tokio backend; store format 4; ranged parallel reads; the prefetch
    at daemon start. Measures fetch time against slice 1.
-4. **The signed index.** Segments, project and unit heads, `trust/keys`, the root and CI keys,
-   the `cache-writer` environment; manifests and key lists retired. Unit heads let other projects
-   use what blaze's CI built.
+4. **The signed index.** Segments, project and unit heads, `trust/keys`, the root and CI keys;
+   manifests and key lists retired. Unit heads let other projects use what blaze's CI built. The
+   write job's refresh step, then the lifecycle rules for `index/` and `cas/` with `wrangler r2
+   bucket lifecycle add`.
 5. **Large files.** `blaze-cdc` from ix; dependency units and the toolchain as chunk lists;
    measures dedup across consecutive main commits.
 6. **Compression.** The upload level and the dictionaries, measured against level 3 in 128 KB
@@ -613,10 +652,10 @@ Ranked by what each gives. Each slice lands on its own and is measured.
 7. **Test passes.** Slice R2 of [ci-runner.md](ci-runner.md) writes its records into this index;
    flake entries; `RA_JIT_TESTS=affected` reads them, so a branch skips what main passed.
 8. **Backends.** io_uring and HTTP/3, each kept only if it measures faster where it is meant to.
-9. **Private tiers and GC.** The tier list, per-tier trust, and the `cache-gc` job.
+9. **Private tiers.** The tier list and per-tier trust.
 
-GC (part of slice 9) must be in place before the shared tier holds more than a few weeks of
-main; until then the bucket only grows, at a few dollars a month.
+The refresh (slice 4) must ship before the lifecycle rules are added (its last step), or the
+first rule would expire what a head names.
 
 ## Open questions
 
