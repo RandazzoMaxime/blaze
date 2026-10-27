@@ -1097,12 +1097,15 @@ def poisoned(top, remote, a, crates, target, workspace, address, bucket, expecte
         m.cargo(target)
         return m
 
-    # 1. The pack A sent, changed in place: its name no longer fits.
-    pack = "packs/" + listed[0][0] + ".pack"
+    # 1. The pack A sent, changed in place: its name no longer fits. A pack that compresses to a
+    #    quarter less is sent as `.pack.zst` and listed with what was sent (six fields), so
+    #    which object holds it depends on the code the backend made.
+    sent_compressed = len(listed[0]) == 6
+    pack = "packs/" + listed[0][0] + ".pack" + (".zst" if sent_compressed else "")
     data = bucket.get(pack)
-    records = records_of(data)
+    records = records_of(unpacked(data) if sent_compressed else data)
     changed = pack_of([(key, value[:-1] + bytes([value[-1] ^ 0x55]) if value else value) for key, value in records])
-    bucket.put(pack, changed)
+    bucket.put(pack, packed(changed) if sent_compressed else changed)
     b = machine("changed")
     log, _ = b.build(crates, env={"RA_JIT_REMOTE": address})
     check("code changed under A's name: rejected, B compiles its own and prints the same",
