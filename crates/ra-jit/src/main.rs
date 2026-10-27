@@ -5963,32 +5963,12 @@ fn broken_in(
                                         .collect(),
                                 };
                                 let db = &db;
+                                let rules = (lints, refuse_borrowck);
                                 let each = each.into_iter().flat_map(move |within| {
-                                    ide_diagnostics::semantic_diagnostics_within(
-                                        db,
-                                        config,
-                                        &ide_db::assists::AssistResolveStrategy::None,
-                                        file,
-                                        within,
-                                    )
+                                    errors_of(db, config, file, within, rules)
                                 });
                                 each.collect::<Vec<_>>()
                             })
-                            .filter(|it| {
-                                let code = it.code.as_str();
-                                // rustc says nothing of most lints in what another crate's
-                                // macro expands to.
-                                let expanded = it.main_node.is_some_and(|it| it.file_id.is_macro());
-                                it.severity == ide_db::Severity::Error
-                                    && (SURE.contains(&code)
-                                        || refuse_borrowck && BORROWCK.contains(&code)
-                                        || lints
-                                            && !expanded
-                                            && (DENIED.contains(&code)
-                                                || refuse_borrowck
-                                                    && DENIED_BORROWCK.contains(&code)))
-                            })
-                            .map(|it| (it.range, it.code.as_str(), it.message))
                             .collect::<Vec<_>>()
                     })
                 })
@@ -6023,6 +6003,88 @@ fn broken_in(
         })
         .collect();
     Some(errors::Said(said))
+}
+
+/// What the last check of a file found nothing wrong in: the file's [`outline::skeleton`] then,
+/// and a hash of how each of its functions was written. An edit that leaves the skeleton as it
+/// was changed no more than bodies nothing else sees into, and a body's errors are its own:
+/// the next check asks only for the bodies whose functions are written otherwise.
+struct Clean {
+    skeleton: u64,
+    functions: FxHashMap<hir::Function, u64>,
+}
+
+/// The [`Clean`] checks, by the file, the crates it was read as a module of (`within`, by a
+/// hash of the set), and the rules of what is an error.
+type CleanKey = (vfs::FileId, Option<(usize, u64)>, (bool, bool));
+
+static CLEAN: std::sync::LazyLock<std::sync::Mutex<FxHashMap<CleanKey, Clean>>> =
+    std::sync::LazyLock::new(Default::default);
+
+/// The errors the check of `file` as a module of the crates `within` finds, by the rules
+/// (lints denied, borrowck refused) of [`broken_in`]. After a check that found none, the next
+/// asks rust-analyzer only for the bodies an edit can have changed ([`Clean`]); every body is
+/// asked for when the file is more than bodies apart from that check, or it was not clean.
+fn errors_of(
+    db: &RootDatabase,
+    config: &ide_diagnostics::DiagnosticsConfig,
+    file: vfs::FileId,
+    within: Option<Arc<FxHashSet<ide_db::base_db::Crate>>>,
+    (lints, refuse_borrowck): (bool, bool),
+) -> Vec<(ide_db::FileRange, &'static str, String)> {
+    use std::hash::BuildHasher as _;
+    let crates = within.as_ref().map(|set| {
+        let hashes = set.iter().map(|it| rustc_hash::FxBuildHasher.hash_one(it));
+        (set.len(), hashes.fold(0, |all, it| all ^ it))
+    });
+    let key = (file, crates, (lints, refuse_borrowck));
+    let skeleton = outline::skeleton(db, file);
+    let was = skeleton.and_then(|now| lock(&CLEAN).remove(&key).filter(|it| it.skeleton == now));
+    let functions = std::cell::RefCell::new(FxHashMap::default());
+    let asked_of = std::cell::Cell::new((0usize, 0usize));
+    let asked = |body: hir::DefWithBody| {
+        let hir::DefWithBody::Function(func) = body else { return was.is_none() };
+        let written = hir::HasSource::source(func, db).map(|it| {
+            rustc_hash::FxBuildHasher.hash_one(it.value.syntax().text().to_string())
+        });
+        let Some(written) = written else { return true };
+        functions.borrow_mut().insert(func, written);
+        let asked = was.as_ref().is_none_or(|was| was.functions.get(&func) != Some(&written));
+        let (n, of) = asked_of.get();
+        asked_of.set((n + usize::from(asked), of + 1));
+        asked
+    };
+    let found: Vec<_> = ide_diagnostics::semantic_diagnostics_of_bodies(
+        db,
+        config,
+        &ide_db::assists::AssistResolveStrategy::None,
+        file,
+        within,
+        &asked,
+    )
+    .into_iter()
+    .filter(|it| {
+        let code = it.code.as_str();
+        // rustc says nothing of most lints in what another crate's macro expands to.
+        let expanded = it.main_node.is_some_and(|it| it.file_id.is_macro());
+        it.severity == ide_db::Severity::Error
+            && (SURE.contains(&code)
+                || refuse_borrowck && BORROWCK.contains(&code)
+                || lints
+                    && !expanded
+                    && (DENIED.contains(&code)
+                        || refuse_borrowck && DENIED_BORROWCK.contains(&code)))
+    })
+    .map(|it| (it.range, it.code.as_str(), it.message))
+    .collect();
+    if std::env::var_os("RA_JIT_STATS").is_some() {
+        let (n, of) = asked_of.get();
+        eprintln!("check: {file:?}: the bodies of {n} of {of} functions asked");
+    }
+    if let Some(skeleton) = skeleton.filter(|_| found.is_empty()) {
+        lock(&CLEAN).insert(key, Clean { skeleton, functions: functions.into_inner() });
+    }
+    found
 }
 
 /// The text of the source file at `path` as the database has it.
