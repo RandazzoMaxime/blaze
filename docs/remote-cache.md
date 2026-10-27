@@ -1,6 +1,7 @@
 # A shared remote cache: one store for CI and everyone
 
-2026-10-27. Status: design, nothing built. Written against blaze main `e4bbb88`. Each claim is
+2026-10-27. Status: design, nothing built. Written against blaze main `e4bbb88` and
+`blaze-next` `5c5299f` ([#283](https://github.com/indexable-inc/blaze/pull/283)). Each claim is
 marked **read** (in a source we read, or measured by us), **reported** (a document or someone
 says so, not checked again here) or **unverified** (our inference or an estimate). "Slice R2"
 below is [ci-runner.md](ci-runner.md)'s second slice; "R2" alone is Cloudflare's object store.
@@ -43,11 +44,17 @@ sandbox and `RA_JIT_TESTS=affected`).
   against about 8 s on one stream (**unverified** arithmetic on **reported** rates, measured to
   R2 directly; the rate through the Worker is measured in slice 1). The fetch starts when the
   daemon starts and overlaps the workspace load.
-- **Sans-IO.** Hashing, chunking, packing, the index, signatures, the gateway's API and both
-  sides of it are pure state machines in their own crates. The client's requests cross one
-  trait, with tokio over HTTP/1.1 and HTTP/2 as the default backend, and io_uring and HTTP/3 as
-  backends behind measurements. The gateway's logic is one crate run by the Worker (workers-rs)
-  and by a native server for tests and self-hosting.
+- **Sans-IO, on blaze-core.** Hashing, chunking, packing, the index, signatures, the gateway's
+  API and both sides of it are pure state machines in their own crates. The client does no IO
+  of its own: it pushes `blaze-core` effects and is given completions, as the VFS's journal does
+  on `blaze-next` ([#283](https://github.com/indexable-inc/blaze/pull/283)). `blaze-core` gains
+  socket effects, so the same client runs under the seeded simulation, the threads driver and
+  the io_uring driver, with TLS and HTTP/1.1 in sans-IO code above them. The gateway's logic is
+  one crate run by the Worker (workers-rs) and by a native server for tests and self-hosting.
+- **One hash, SHA-256**, for the CAS, because the Worker checks every upload with the runtime's
+  native SHA-256 and every neighbour (the store, Cargo.lock, OCI, Nix) already names bytes by it.
+  #283's VFS hashes with BLAKE3; the doc proposes it move to SHA-256 while nothing persists its
+  hashes, so a VFS file node's name is its CAS name ([Hash](#hash-sha-256)).
 - **Chunking** with VectorCDC (the SIMD form of AE, a hashless content-defined chunker) for large
   opaque files: rlibs, dependency units, the toolchain. Compiled functions are not chunked; their
   key already deduplicates them. **Compression** is zstd per blob, a high level on CI's upload,
@@ -77,7 +84,8 @@ Goals:
   tenant stored it itself.
 - A new blaze release that does not change what blaze compiles keeps every entry.
 - Every part that decides what to fetch, how to check it and how to write it can be tested
-  without a network, and the transport can be replaced.
+  without a network, under `blaze-core`'s seeded simulation, and the driver that does the IO
+  can be replaced.
 
 Non-goals:
 
@@ -488,8 +496,49 @@ change is lost, nothing else.
 
 ## Hash: SHA-256
 
-SHA-256 matches the store, the existing remote, OCI and Nix, so nothing is converted at a
-boundary. On the machines that matter it runs in hardware:
+Two hashes are in play. The store and today's remote name everything by SHA-256
+([cache.md](cache.md)). The VFS of [#283](https://github.com/indexable-inc/blaze/pull/283)
+(`crates/blaze-vfs` on `blaze-next` `5c5299f`) names a file node by `blake3::hash` of its bytes and
+a directory node by BLAKE3 keyed with `derive_key("blaze vfs directory v1")` (**read**,
+`blaze-vfs/src/lib.rs`). The CAS needs one name per blob. **It is SHA-256**, for two reasons, the
+second of which decides it:
+
+1. **The Worker checks every upload, and SHA-256 is native there.** The Workers runtime has
+   WebCrypto's SHA-256 and a non-standard streaming form, `crypto.DigestStream("SHA-256")`, a
+   `WritableStream` a request body is piped into without being kept, which workers-rs wraps as
+   `worker::crypto::DigestStream` (**read**,
+   [web-crypto](https://developers.cloudflare.com/workers/runtime-apis/web-crypto/#constructors),
+   `workers-rs/worker/src/crypto.rs`). The R2 binding's `put` also takes a `sha256` and rejects a
+   body that does not match it (**read**,
+   [R2 Workers API](https://developers.cloudflare.com/r2/api/workers/workers-api-reference/)), so the check is made twice by
+   Cloudflare's own code and costs the Worker almost no CPU-ms. BLAKE3 has neither: the Worker would
+   hash with the `blake3` crate compiled to WebAssembly (portable code, or the `wasm32_simd` feature
+   where the runtime supports SIMD, **read**, BLAKE3's `Cargo.toml`), at a speed nobody has measured
+   in a Worker (**unverified**), billed by the CPU-millisecond, and inside the Worker's CPU limit on
+   a 100 MB `/put`. That works, but it is our code doing a native function's job on the one path
+   that must never be wrong.
+2. **Identity across systems.** SHA-256 is the name everything blaze touches already uses for the
+   same bytes: the store and today's remote, Cargo.lock's `checksum` of every crates.io `.crate`
+   (so a public dependency blob can be asked for by the checksum in the lock file, with nothing
+   hashed first), OCI, Nix and REAPI's default digest. The only BLAKE3 name is the VFS's, and it is
+   not persisted yet: the journal "carries what the node is made of, never its hash", and loading
+   interns every node again (**read**, `blaze-vfs/src/journal.rs`). So changing it now costs one
+   constant; changing the CAS later would rename every blob.
+
+**Recommendation for #283: hash VFS nodes with SHA-256 too**, files as SHA-256 of their bytes (so
+a file node's hash is its CAS name, and a root shipped to another machine is fetched by the hashes
+it already holds) and directories as SHA-256 over a domain prefix (`"blaze vfs directory v1\0"`)
+and the same entry encoding. The cost measured so far is a tie on one thread: BLAKE3 1.9 to
+2.1 GiB/s (2.0 to 2.3 GB/s) on one M5 Max core in the roadmap (**read**, `docs/roadmap.md` on
+`blaze-next`), SHA-256 2.22 GB/s with SHA-NI on dev-aws-14 and 2.38 GB/s with the ARMv8 extensions on
+an M2 Max (table below). What BLAKE3 gives that SHA-256 does not is its tree mode: one large file
+hashed on many threads, and a range verified alone (Bao). The CAS needs neither: no blob is
+larger than a 256 KiB chunk once [Large files](#large-files) has cut it, and each is verified
+whole. If #283 keeps BLAKE3, the bridge is one alias per file node in the local store (BLAKE3
+node to SHA-256 blob, written when the node's bytes first enter the store, one extra hash of
+bytes already in cache) and a VFS root shipped remotely becomes a blob listing both names per
+file. That is the fallback, not the proposal; it is an [open question](#open-questions) for
+#283's authors.
 
 | machine | SHA-256, one core | source |
 |---|---|---|
@@ -500,10 +549,10 @@ boundary. On the machines that matter it runs in hardware:
 Against the network: 16 streams from R2 deliver about 225 MB/s of compressed bytes, which
 decompress to about five times that, 1.1 GB/s (compiled code compresses to about a fifth,
 [cache.md](cache.md)). Hashing 1.1 GB/s takes half a core with SHA-NI. A GitHub runner has four.
-BLAKE3 would save part of that half core (it roughly ties SHA-256 on one Apple core and is far
-faster with AVX-512 and many threads, **reported**), and cost a second hash in every format and
-tool. The Rust crate is `sha2` 0.11, which picks SHA-NI or the ARMv8 extensions at run time
-(**reported**, [README](https://github.com/RustCrypto/hashes/blob/master/sha2/README.md)).
+BLAKE3 with AVX-512 and many threads would save part of that half core (**reported**), not
+enough to pay for the two points above. The Rust crate is `sha2` 0.11, which picks SHA-NI or the
+ARMv8 extensions at run time (**reported**,
+[README](https://github.com/RustCrypto/hashes/blob/master/sha2/README.md)).
 
 ## Compression
 
@@ -702,7 +751,7 @@ turning store records back into the daemon's values ([research/warm-start.md](re
   [community](https://community.cloudflare.com/t/cloudflare-r2-http-2-error/441326)), matters only
   for the gateway's server-side copies.
 - The 16-stream figure was measured with parallel connections. Sixteen streams on one HTTP/2
-  connection share one TCP congestion window and may not reach it; the default backend opens
+  connection share one TCP congestion window and may not reach it; the client opens
   several connections and slice 1 measures how many.
 
 ### Edge caching
@@ -835,40 +884,99 @@ expires by the same ages itself.
 
 ## Crate layout
 
-Sans-IO throughout: every crate below the IO crates takes bytes and events and returns bytes and
-requests, with no sockets, files or clocks of its own. Each can be tested, fuzzed and simulated
-with a fake transport that drops, reorders, truncates and corrupts. The gateway's logic is the
-same kind of crate, so the client's tests run against the real gateway in one process.
+Sans-IO throughout, on the core that [#283](https://github.com/indexable-inc/blaze/pull/283)
+adds. On `blaze-next`, `crates/blaze-core` defines the contract: a state machine pushes
+`Effect`s, each with a `Tag` it chose, and is handed a `Completion` with the same tag; a
+`Driver` (`submit`, `poll`, `in_flight`, `now`) runs them. Three drivers exist: `sim::Sim`, one
+thread under a seeded scheduler that delays, reorders and fails completions and whose `crash()`
+keeps what was synced plus a random prefix of the rest; `threads::Threads`, blocking calls on a
+few threads (the macOS default); and `uring::Uring`, one io_uring set up with the raw system
+calls, no thread of its own (**read**, `blaze-core/src/{lib,sim,threads,uring}.rs`). The VFS's
+journal is the first state machine on it. The cache is the next: it adds no IO layer and no
+async runtime of its own.
+
+### What blaze-core gains
+
+Today's effects are files and timers only: `ReadAll`, `Read`, `Append`, `Sync`, `Truncate`,
+`Timer` (**read**). The client needs the network, so `blaze-core` gains socket effects, each
+implemented by all three drivers:
+
+| effect | completes with | `Threads` | `Uring` | `Sim` |
+|---|---|---|---|---|
+| `Resolve { host }` | `Resolved(Vec<SocketAddr>)` | `getaddrinfo` on an IO thread | a blocking call where it is submitted, as `Truncate` is today (once per daemon start) | a table |
+| `Connect { addr }` | `Connected(Conn)` | `TcpStream::connect` | `socket` then `IORING_OP_CONNECT` | a link to an in-process peer |
+| `Send { conn, bytes }` | `Sent` (all of it) or `Failed` | `write_all` | `IORING_OP_SEND` | delivered after a seeded delay, or the link is cut |
+| `Recv { conn, max }` | `Read(bytes)`, empty when the peer closed | `read` | `IORING_OP_RECV` | any prefix of what is there, so frames split anywhere |
+| `Close { conn }` | `Closed` | drop | `IORING_OP_CLOSE` | |
+
+`Conn` is a small id the driver hands out, as a `FileName` names a file. `Sim`'s far end is a
+`Peer` trait object in the same process; the tests plug in `blaze-gateway-core` over `Sim`'s own
+files, so one seed drives client, network, gateway and disk, and a failing run (a reset in the
+middle of a pack, a `/put` whose response is lost, a crash after a pack is appended and before
+its sync) replays exactly. The alternative, a `Driver` generic over its effect type so sockets
+live outside `blaze-core`, is an [open question](#open-questions) for #283's authors; the
+proposal is the variants above, since the ring and its reaping loop are already there.
+
+TLS and HTTP are not effects. They are sans-IO code between the client's state machines and the
+socket effects: `rustls`'s unbuffered client (`UnbufferedClientConnection`, which takes and
+returns byte buffers and does no IO, **reported**) and an HTTP/1.1 codec over `httparse`. Several
+HTTP/1.1 connections give the parallel streams [HTTP versions](#http-versions) asks for. HTTP/2
+is left out: the `h2` crate is written against tokio's IO traits (**reported**), and the measured
+16-stream rate came from parallel connections anyway. HTTP/3 would be `quiche`'s own sans-IO
+connection (datagrams in, datagrams out, **reported**) over two more effects, `SendTo` and
+`RecvFrom`, not tokio-quiche.
+
+Writing what was fetched is the store's existing kind of effect: a pack is `Append`ed and
+`Sync`ed, and the local index names it only after its `Sync` completed, so a crash leaves at
+worst an unnamed tail that the next start cuts, as the VFS journal's recovery does.
+
+### The crates
+
+Every crate below the client state machines takes bytes and returns bytes, with no sockets,
+files, clocks or `blaze-core` dependency. The client state machines speak `blaze-core` effects.
+The gateway's logic is the same kind of crate, with effects of its own (R2, D1, the Cache API,
+none of which a Linux or Mac driver has), so the client's tests run against the real gateway
+under `Sim`.
 
 | crate | what it is | depends on |
 |---|---|---|
+| `blaze-core` (exists, #283) | effects, drivers, the simulation; gains the socket effects above | `libc` |
+| `blaze-vfs` (exists, #283) | the Merkle VFS; with the [hash recommendation](#hash-sha-256), its `Hash` is `blaze-cas`'s `Digest` | `blaze-core`, `blaze-cas` |
 | `blaze-semver` | the version constants, nothing else | none |
 | `blaze-cas` | `Digest` (SHA-256), streaming verification (`Verifier::push(&[u8])`, `finish() -> Result`), chunk lists | `sha2` |
 | `blaze-cdc` | VectorCDC AE: scalar reference, AVX-512, AVX2, NEON; a streaming chunker that is fed bytes and yields cut points | none. Ported from ix's `crates/storage/cdc` (below) |
 | `blaze-pack` | the `.bpk` format and the pack stream: writer and reader over byte slices, the frame index, dictionary references | `blaze-cas`, `ruzstd` to read, `zstd` (feature) to write |
 | `blaze-index` | entry kinds, segments (deterministic CBOR), heads with their tenant, key lists, Ed25519 signing and checking, turns | `blaze-cas`, `ed25519-dalek`, a CBOR crate |
 | `blaze-gateway-api` | the wire API: request and response types, their CBOR, status codes. The one contract between client and gateway | `blaze-index`, `blaze-pack` |
-| `blaze-remote-proto` | the client as state machines: `Fetch` (trust, heads, segments, plan, `/get` batches) and `Push` (collect, `/has`, pack, `/put`, segments, heads). Each emits `blaze-gateway-api` requests and consumes responses | the above |
-| `blaze-remote-io` | `trait Transport { fn send(&self, Request) -> impl Future<Output = Response> }` with body streaming, plus the backends below | `blaze-remote-proto` |
-| `blaze-gateway-core` | the gateway as state machines: token to tenant and namespaces, the access rule, `/put` checking, index-write checks, refresh planning, cache keys, meter events. Emits `Store` operations (`get` with range, `head`, `put` with conditions, `copy_onto_itself`), `Locations` queries and `Meter` events, and consumes their results | `blaze-gateway-api`, `blaze-index`, `blaze-pack`, `hmac`, `hkdf` |
-| `blaze-gateway` | the Worker: runs `blaze-gateway-core` with the R2 binding, D1, KV, the Cache API, the Rate Limiting binding and Analytics Engine, and the S3 `CopyObject` signed by `rusty-s3`. Built for `wasm32-unknown-unknown` with workers-rs | `blaze-gateway-core`, `worker` |
-| `blaze-gateway-server` | the same core natively (hyper, tokio) over a disk or S3 `Store` and SQLite locations: for tests, CI's own end-to-end check and self-hosting | `blaze-gateway-core`, `rusty-s3` |
-| `ra-jit` (`remote.rs`, `keeper.rs`) | drives a `Fetch` at daemon start and a `Push` when told; owns policy (tenants, env vars, status lines) | `blaze-remote-io` |
+| `blaze-http` | sans-IO HTTP/1.1 client and server codec, and TLS through `rustls`'s unbuffered API: connection bytes in and out, requests and responses with streamed bodies | `httparse`, `rustls` |
+| `blaze-remote-proto` | the client as state machines: `Fetch` (trust, heads, segments, plan, `/get` batches, packs appended and synced into the store) and `Push` (collect, `/has`, pack, `/put`, segments, heads). Each pushes `blaze-core` effects and consumes completions | `blaze-core`, `blaze-http`, `blaze-gateway-api`, `blaze-pack`, `blaze-index` |
+| `blaze-gateway-core` | the gateway as state machines: token to tenant and namespaces, the access rule, `/put` checking, index-write checks, refresh planning, cache keys, meter events. Pushes its own tagged effects (`Store`: `get` with range, `head`, `put` with conditions, `copy_onto_itself`; `Locations` queries; `Meter` events) and consumes their completions, in `blaze-core`'s tag-and-completion shape and with `blaze-core::sim::Rng` in its tests | `blaze-gateway-api`, `blaze-index`, `blaze-pack`, `hmac`, `hkdf` |
+| `blaze-gateway` | the Worker: the driver of `blaze-gateway-core`'s effects, over the R2 binding, D1, KV, the Cache API, the Rate Limiting binding and Analytics Engine, and the S3 `CopyObject` signed by `rusty-s3`. Built for `wasm32-unknown-unknown` with workers-rs | `blaze-gateway-core`, `worker` |
+| `blaze-gateway-server` | the same core natively, on a `blaze-core` driver: its `Store` is files through `Append`, `Sync` and `Read`, its locations an append-only table, its listener `Listen` and `Accept` effects (`IORING_OP_ACCEPT` on the ring) and `blaze-http`'s server side. For CI's end-to-end check and self-hosting behind a TLS terminator | `blaze-gateway-core`, `blaze-core`, `blaze-http` |
+| `ra-jit` (`remote.rs`, `keeper.rs`) | runs a `Fetch` at daemon start and a `Push` when told, on the daemon's driver (until the daemon runs one, a `Threads` driver of its own); owns policy (tenants, env vars, status lines) | `blaze-remote-proto`, `blaze-core` |
 | `ra-jit-store` | reads and writes format 4 packs through `blaze-pack` | `blaze-pack` |
 
-Backends of `blaze-remote-io`:
+Once #283 lands the order is: `blaze-core` gets the socket effects in its own change (with
+`Sim`'s `Peer` and tests in the shape of its existing ones), `blaze-vfs` switches its hash to
+`blaze-cas::Digest` if the recommendation is taken, and the cache crates land on top. Nothing in
+the cache depends on `blaze-vfs`; the VFS meets the cache only through the store, where a file
+node's bytes are a CAS blob named by the node's hash, so a root published as an index entry
+(kind `vfs-root`, a later slice) is fetched by the hashes the tree already holds.
 
-- **tokio, HTTP/1.1 and HTTP/2** (hyper 1 and rustls): the default everywhere.
-- **in-process**: `blaze-gateway-core` over a directory, for tests and for today's `Dir` remote.
-- **io_uring on Linux**, with compio (active; monoio's and tokio-uring's last releases are from
-  2024, **reported**). Only for the bulk `/get` reads into the store, behind a measurement in slice
-  8 showing it beats tokio on a GitHub runner. The daemon is not inside the test sandbox, whose
-  seccomp filter refuses `io_uring_setup` ([cargo.md](cargo.md#every-test-runs-in-a-sandbox)), so
-  nothing stops it there.
-- **HTTP/3** to the gateway's domain, with tokio-quiche (open-sourced 2025-11, now 0.20, over
-  quiche 0.30, **reported**). Its `ClientH3Driver` is a building block, not an HTTP client, so
-  this is real work; worth it only if slice 8 shows it helps on lossy or long links (users far
-  from a Cloudflare location), since a datacenter runner is unlikely to gain.
+Drivers, and what each is for:
+
+- **`Threads`**: the default on macOS and the first one used on Linux. Blocking sockets on its
+  IO threads; enough for 16 connections.
+- **`Sim`**: every test of `blaze-remote-proto`, `blaze-http` and the gateway's logic, under fault
+  rates and crashes; the test that a seed replays is the existing one's shape.
+- **`Uring`**: the bulk `/get` reads and the pack appends on one ring, behind a measurement in
+  slice 8 showing it beats `Threads` on a GitHub runner. The daemon is not inside the test
+  sandbox, whose seccomp filter refuses `io_uring_setup`
+  ([cargo.md](cargo.md#every-test-runs-in-a-sandbox)), so nothing stops it there.
+- **HTTP/3** to the gateway's domain, as `quiche` over `SendTo`/`RecvFrom` on any of the three.
+  Real work (connection migration, pacing timers through `Timer`); worth it only if slice 8 shows
+  it helps on lossy or long links (users far from a Cloudflare location), since a datacenter
+  runner is unlikely to gain.
 
 Crates to reuse, and not:
 
@@ -877,13 +985,15 @@ Crates to reuse, and not:
   frame `zstd` writes with a dictionary is checked by a property test, **unverified**);
   `ed25519-dalek` 3 (already used by `signed.rs`); `hmac` and `hkdf`; workers-rs (`worker`) for
   the Worker; `rusty-s3` 0.10 (sans-IO S3 request signing) for the copies and the self-hosted S3
-  store; hyper and rustls; compio and tokio-quiche behind their slices.
+  store; `rustls` (unbuffered API) and `httparse`; `quiche` behind its slice.
 - **VectorCDC**: no crate on crates.io (**reported**). ix has one, `crates/storage/cdc` in
   indexable-inc/ix: AE with VectorCDC's SIMD, AVX-512, AVX2, NEON and a scalar reference that the
   tests compare against, defaults 16/64/256 KiB, no dependencies beyond `bytes` and `parking_lot`
   (**read**). Port it as `blaze-cdc` rather than depend on the ix workspace.
 - **Not `fastcdc`**: a good crate (5.0, used by Attic and REAPI's reference), but the decision is
   VectorCDC, and AE needs no table. **Not `gearhash`**: VectorCDC is not a gear hash.
+- **Not tokio, hyper, compio or tokio-quiche** in the new crates: each brings an IO layer or
+  runtime beside `blaze-core`'s drivers, which is what the sans-IO core exists to avoid.
 - **Not `aws-sdk-s3`** in the new crates: it does its own IO, and no client talks S3 any more.
   Today's `s3.rs` keeps it until slice 3 replaces it.
 - **Not `object_store`**: it does its own IO as well.
@@ -904,9 +1014,9 @@ Ranked by what each gives. Each slice lands on its own and is measured.
 2. **The codegen version.** `blaze-semver`, `Identity` without `build`, the golden check and the
    determinism check in the merge gate. Removes the per-release miss. Measures the corpus's keys
    against nushell's.
-3. **Sans-IO crates, the new packs and the API.** `blaze-cas`, `blaze-pack`, `blaze-gateway-api`,
-   `blaze-remote-proto`, `blaze-remote-io` with the tokio backend, `blaze-gateway-core` with the
-   Worker and the native server; `/has`, `/get`, `/put`, the location table, public and private
+3. **Sans-IO crates, the new packs and the API.** Needs #283 merged. The socket effects in
+   `blaze-core` (`Threads` and `Sim` first), `blaze-cas`, `blaze-pack`, `blaze-gateway-api`,
+   `blaze-http`, `blaze-remote-proto`, `blaze-gateway-core` with the Worker and the native server; `/has`, `/get`, `/put`, the location table, public and private
    namespaces; store format 4; the prefetch at daemon start. Measures fetch time and D1 cost
    against slice 1.
 4. **The signed index.** Segments, project and unit heads, key lists, the root and CI keys, the
@@ -919,7 +1029,8 @@ Ranked by what each gives. Each slice lands on its own and is measured.
    blocks, on blaze's workspace and nushell.
 7. **Test passes.** Slice R2 of [ci-runner.md](ci-runner.md) writes its records into this index;
    flake entries; `RA_JIT_TESTS=affected` reads them, so a branch skips what main passed.
-8. **Backends.** io_uring and HTTP/3, each kept only if it measures faster where it is meant to.
+8. **Drivers.** The socket effects on `Uring`, and HTTP/3 over `quiche`, each kept only if it
+   measures faster where it is meant to.
 9. **Private tenants.** Registration (tenant id, root key), tokens, per-tenant limits, the
    tenant list in `RA_JIT_REMOTE`, and the threat model's examples as end-to-end tests: a second
    tenant probing the first's planted secret, fixture and unit head gets only 404s, with timing
@@ -930,6 +1041,11 @@ first rule would expire what a head names.
 
 ## Open questions
 
+- **The VFS's hash** (for #283's authors): move `blaze-vfs` from BLAKE3 to SHA-256 now, while
+  the journal persists no hashes, so a file node's hash is its CAS name? Proposed: yes
+  ([Hash](#hash-sha-256)). If not, the store keeps a BLAKE3-to-SHA-256 alias per file node.
+- **Sockets in `blaze-core`**: new `Effect` variants (proposed), or a `Driver` generic over its
+  effect type so the network lives outside `blaze-core`?
 - **Is reading the shared tier on by default** for released blaze builds? On by default is what
   makes everyone benefit; it also tells Cloudflare and us which dependency units a machine
   builds (the unit keys it asks for, and the address it asks from). Proposed: on, with `RA_JIT_REMOTE=off`, and said in the
