@@ -345,18 +345,19 @@ for each platform, each on a machine of its own kind.
 
 | Workflow | Event | What runs | Wall time |
 |---|---|---|---|
-| `ra-jit.yaml` (`gate`) | pull request, merge queue | on Linux x86-64: the build and the unit tests; `harness/imports.py`, `harness/rustcsites.py` | about 5 min |
+| `ra-jit.yaml` (`gate`) | pull request | on Linux x86-64: the build and the unit tests; `harness/imports.py`, `harness/rustcsites.py` | about 5 min |
 | `ra-jit.yaml` (`warm`) | push to main | the build and the unit tests on Linux x86-64, AArch64 and macOS, and the rust tests checkout: they write the caches the other runs read | about 8 min |
 | `fmt.yaml` | push to main | `cargo fmt --all`, and a commit `fmt` when it changed a file | 2 min |
 | `train.yaml` | push to main, by hand | everything below, then a release or the train's issue | about 45 min |
 | `ra-jit.yaml` | docs or site only | the two scripts | 1 min |
 
-A change reaches main through the **merge queue** alone
-([contributing.md](contributing.md#landing-a-change)). `ci` must pass on the pull request before
-it can join the queue; the queue merges each pull request onto main and the entries ahead of it,
-runs the gate on that, and moves main to it once it passes. The gate is the build and the unit
-tests: a change that does not build, or breaks a unit test, never reaches main, and the queue
-moves every few minutes. What the harnesses find, they find on main, in the train, which says
+A change reaches main through a **pull request** alone
+([contributing.md](contributing.md#landing-a-change)), merged directly once `ci` passes on it;
+there is no merge queue, and the branch need not be up to date with main (removed 2026-10-27:
+the queue's wait and its reruns on entries that later landed unchanged cost more than the rare
+pair of changes that pass alone and break together, which the train catches on main). The gate
+is the build and the unit tests: a change that does not build, or breaks a unit test, does not
+merge. What the harnesses find, they find on main, in the train, which says
 which commits since the last green train it came in with. Before the gate was this small, a
 merge-queue run took 35 to 45 minutes, nearly all of it harnesses (harness/ci.py's `quick-2`
 on every platform), and 51 of 140 queue runs on 2026-10-25 and 26 failed, most of them on
@@ -437,20 +438,18 @@ runs by hand in its ix VM: every harness of `FAST`, in parts of about four minut
 
 ### Concurrency, the check and the ruleset
 
-On a pull request a newer push cancels the gate's run before it. Every push to main and every
-merge-queue entry runs the gate to the end in a concurrency group of its own: with one group for
+On a pull request a newer push cancels the gate's run before it. Every push to main runs the gate to the end in a concurrency group of its own: with one group for
 main, a merge every few minutes replaced each waiting run with the next, and 7 of 10 runs on
 main were cancelled.
 
 `ci` is the gate's job that says whether everything that ran passed, and it is the one check
-branch rules and the merge queue require. A job that is renamed or split does not change it.
+the branch rules require. A job that is renamed or split does not change it.
 
-The repository ruleset `main` (Settings, Rules) is active and holds the default branch to four
-rules: a change comes through the merge queue, a push needs `ci` to have passed on the commit
-pushed, the branch can't be deleted, and it can't be force-pushed. The queue merges with a
-merge commit, builds up to five entries at once, merges up to five together, needs every entry
-green, and counts an entry failed after 60 minutes without `ci`. Repository admins bypass the
-rules (`bypass_actors`), for repairs; work lands through the queue. A ruleset can't exempt the
+The repository ruleset `main` (Settings, Rules) is active and holds the default branch to three
+rules: a change needs `ci` to have passed on its commit (not strict: the branch need not be up to
+date with main), the branch can't be deleted, and it can't be force-pushed. There is no merge
+queue (removed 2026-10-27). Repository admins bypass the
+rules (`bypass_actors`), for repairs; work lands through pull requests. A ruleset can't exempt the
 token a workflow runs with, so the workflows that commit to main (`fmt.yaml`, the train's
 `release`, `pgo.yaml`'s pin, `bench-readme.yaml`, `bench-bun.yaml`, `live-latency.yaml`) check
 out with the secret `RA_JIT_BOT_TOKEN`, a fine-grained token of a repository admin (Contents
