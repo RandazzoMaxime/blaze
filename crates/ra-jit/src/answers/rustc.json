@@ -819,6 +819,6 @@
    }
   }
  },
- "verbose": "rustc 1.101.0-nightly (12433c307 2026-10-24)\nbinary: rustc\ncommit-hash: 12433c307b5a497388ffe2f4e49dbf1ab8c71fa0\ncommit-date: 2026-10-24\nhost: {host}\nrelease: 1.101.0-nightly\nLLVM version: 23.1.4\n",
- "version": "1.101.0-nightly (12433c307 2026-10-24)"
+ "verbose": "rustc 1.101.0-nightly (16d1ffac1 2026-10-26)\nbinary: rustc\ncommit-hash: 16d1ffac17ad8b739e32483ac2e65fe7e1804977\ncommit-date: 2026-10-26\nhost: {host}\nrelease: 1.101.0-nightly\nLLVM version: 23.1.4\n",
+ "version": "1.101.0-nightly (16d1ffac1 2026-10-26)"
 }
