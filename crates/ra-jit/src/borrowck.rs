@@ -308,7 +308,8 @@ fn time_project(project: &str, out: &str) -> anyhow::Result<()> {
     let mut totals = [[std::time::Duration::ZERO; Phase::ALL.len()]; 2];
     let mut check_totals = [std::time::Duration::ZERO; 2];
     let (mut infer_total, mut bodies) = (std::time::Duration::ZERO, 0usize);
-    let (mut infer_warm_total, mut first_total) = (std::time::Duration::ZERO, std::time::Duration::ZERO);
+    let (mut infer_warm_total, mut first_total) =
+        (std::time::Duration::ZERO, std::time::Duration::ZERO);
     hir::attach_db(&db, || -> anyhow::Result<()> {
         let mut found: Vec<(DefWithBody, String)> = Vec::new();
         for krate in hir::Crate::all(&db) {
@@ -592,4 +593,38 @@ fn diagnostics(
             })
             .collect()
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A package depending on a path that is not there: `cargo metadata` fails, and
+    /// `--no-deps`, which rust-analyzer falls back to, does not.
+    #[test]
+    fn refuses_a_workspace_whose_metadata_failed() {
+        let work = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(work.path().join("src")).unwrap();
+        std::fs::write(
+            work.path().join("Cargo.toml"),
+            "[package]\nname = \"a\"\nversion = \"0.0.0\"\nedition = \"2021\"\n\n\
+             [dependencies]\nmissing = { path = \"vendor/missing\" }\n",
+        )
+        .unwrap();
+        std::fs::write(work.path().join("src/lib.rs"), "").unwrap();
+        let load_config = LoadCargoConfig {
+            load_out_dirs_from_check: false,
+            with_proc_macro_server: ProcMacroServerChoice::None,
+            prefill_caches: false,
+            num_worker_threads: 1,
+            proc_macro_processes: 1,
+        };
+        let root = AbsPathBuf::assert_utf8(dunce::canonicalize(work.path()).unwrap());
+        let error = load_project(&root, &CargoConfig::default(), &load_config)
+            .err()
+            .expect("a workspace whose metadata failed was loaded");
+        let error = format!("{error:#}");
+        assert!(error.contains("`cargo metadata` failed"), "{error}");
+        assert!(error.contains("vendor/missing"), "{error}");
+    }
 }

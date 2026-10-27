@@ -584,7 +584,7 @@ FLAG_WORKSPACE = {
     "app/src/main.rs": '#![allow(unexpected_cfgs)]\n\nfn main() {\n    let name = std::env::args().nth(1).unwrap_or("world".to_string());\n    println!("{}", util::greeting(&name));\n    println!("{} {} {}", cfg!(debug_assertions), cfg!(extra), cfg!(target_feature = "avx2"));\n    let sum = std::panic::catch_unwind(|| name.len() as u8 + 251);\n    println!("{:?}", sum.ok());\n    if name == "fail" {\n        std::process::exit(3);\n    }\n}\n\n#[cfg(test)]\nmod tests {\n    #[test]\n    fn in_the_program() {\n        assert_eq!(util::greeting("x").len(), 7);\n    }\n}\n',
     "app/src/bin/other.rs": 'fn main() {\n    println!("other: {}", util::greeting("other"));\n}\n',
     "app/examples/demo.rs": 'fn main() {\n    println!("demo: {} {}", util::greeting("demo"), shout::shout("demo"));\n}\n',
-    "app/tests/it.rs": '#[test]\nfn greets_it() {\n    assert_eq!(util::greeting("it").to_lowercase(), "hello it");\n}\n\n#[test]\nfn fails_when_asked() {\n    assert!(std::env::var("FLAGS_FAIL").is_err());\n}\n\n// A cargo inside writes the programs again, and on macOS it removes each and copies it back: a\n// test starting one meanwhile finds none.\nstatic BUILDING: std::sync::Mutex<()> = std::sync::Mutex::new(());\n\n// A cargo run by a test has the units of the build: the program stays the file it was.\n#[test]\nfn a_cargo_inside_leaves_the_program() {\n    use std::os::unix::fs::MetadataExt;\n    let _building = BUILDING.lock().unwrap_or_else(|it| it.into_inner());\n    let program = env!("CARGO_BIN_EXE_app");\n    let before = std::fs::metadata(program).unwrap().ino();\n    let cargo = std::env::var("CARGO").unwrap_or("cargo".to_string());\n    let built = std::process::Command::new(cargo).args(["build", "-q", "-p", "app"]).status().unwrap();\n    assert!(built.success());\n    assert_eq!(before, std::fs::metadata(program).unwrap().ino());\n}\n\n// What cargo tells a test of the places of the build is what the daemon tells it.\n#[test]\nfn the_places_of_the_build_are_cargos() {\n    assert!(std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).is_dir());\n    let _building = BUILDING.lock().unwrap_or_else(|it| it.into_inner());\n    let ran = std::process::Command::new(env!("CARGO_BIN_EXE_other")).output().unwrap();\n    assert_eq!(String::from_utf8_lossy(&ran.stdout).lines().count(), 1);\n}\n',
+    "app/tests/it.rs": '#[test]\nfn greets_it() {\n    assert_eq!(util::greeting("it").to_lowercase(), "hello it");\n}\n\n#[test]\nfn fails_when_asked() {\n    assert!(std::env::var("FLAGS_FAIL").is_err());\n}\n\n// A cargo inside writes the programs again, and on macOS it removes each and copies it back: a\n// test starting one meanwhile finds none.\nstatic BUILDING: std::sync::Mutex<()> = std::sync::Mutex::new(());\n\n// A cargo run by a test builds, and leaves a program that runs: after a build by cargo it has\n// nothing to do, after a whole build, which leaves cargo no units, it builds the program again in\n// its place (as the check of the daemon of a program that runs cargo has it).\n#[test]\nfn a_cargo_inside_leaves_the_program() {\n    let _building = BUILDING.lock().unwrap_or_else(|it| it.into_inner());\n    let cargo = std::env::var("CARGO").unwrap_or("cargo".to_string());\n    let built = std::process::Command::new(cargo).args(["build", "-q", "-p", "app"]).status().unwrap();\n    assert!(built.success());\n    let ran = std::process::Command::new(env!("CARGO_BIN_EXE_app")).arg("it").output().unwrap();\n    assert!(String::from_utf8_lossy(&ran.stdout).starts_with("hello it"));\n}\n\n// What cargo tells a test of the places of the build is what the daemon tells it.\n#[test]\nfn the_places_of_the_build_are_cargos() {\n    assert!(std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).is_dir());\n    let _building = BUILDING.lock().unwrap_or_else(|it| it.into_inner());\n    let ran = std::process::Command::new(env!("CARGO_BIN_EXE_other")).output().unwrap();\n    assert_eq!(String::from_utf8_lossy(&ran.stdout).lines().count(), 1);\n}\n',
 }
 
 # What the edit round adds to the program: library code that rustc's build before the edit has
@@ -890,6 +890,7 @@ def daemon(work):
     abuse(work, ws, tree, env, check, status, alive)
     in_place(work, check)
     through_link(work, check)
+    script_links_proc_macro(work, check)
     pinned(work, check)
     own_toolchain(work, check)
     return checks
@@ -1058,6 +1059,36 @@ def through_link(work, check):
     check("an edit of a workspace named through a link, with a path dependency outside it, is the daemon's and right",
           mine.returncode == 0 and how == "daemon" and not wrong, f"{how[:90]}; {wrong or 'same as cargo'}; {mine.stderr.strip()[-300:]!r}")
     ours.cargo("stop", *manifest)
+
+
+# A build script whose build dependency is a library that links the compiler's `proc_macro`,
+# as proc-macro2 is in bat's: the script links `proc_macro` too, whose functions then say no
+# macro is running.
+SCRIPT_PROC_MACRO = {
+    "Cargo.toml": '[workspace]\nmembers = ["app", "tokens"]\nresolver = "2"\n',
+    "app/Cargo.toml": '[package]\nname = "app"\nversion = "0.1.0"\nedition = "2021"\n\n[build-dependencies]\ntokens = { path = "../tokens" }\n',
+    "app/build.rs": 'fn main() {\n    println!("cargo:rustc-env=TOKENS={}", tokens::described());\n}\n',
+    "app/src/main.rs": 'fn main() {\n    println!("{}", env!("TOKENS"));\n}\n',
+    "tokens/Cargo.toml": '[package]\nname = "tokens"\nversion = "0.1.0"\nedition = "2021"\n',
+    "tokens/src/lib.rs": 'extern crate proc_macro;\n\npub fn described() -> String {\n    format!("proc_macro available: {}", proc_macro::is_available())\n}\n',
+}
+
+
+def script_links_proc_macro(work, check):
+    """A build script that links `proc_macro` through a library ([`SCRIPT_PROC_MACRO`]) is
+    built by ra-jit, and the program runs as cargo's."""
+    ws = os.path.realpath(os.path.join(work, "script-proc-macro"))
+    for file, text in SCRIPT_PROC_MACRO.items():
+        os.makedirs(os.path.dirname(os.path.join(ws, file)), exist_ok=True)
+        open(os.path.join(ws, file), "w").write(text)
+    env = base_env(os.path.join(work, "home-script-proc-macro"))
+    ours, theirs = Side(ws, env, True), Side(ws, env, False)
+    (_, mine), (_, other) = ours.cargo("run"), theirs.cargo("run")
+    wrong = difference(program_output(mine), program_output(other))
+    how = how_built(mine.stderr)
+    check("a build script whose build dependency links `proc_macro` is the daemon's, and the program is right",
+          mine.returncode == 0 and how == "daemon" and not wrong, f"{how[:90]}; {wrong or 'same as cargo'}; {mine.stderr.strip()[-300:]!r}")
+    ours.cargo("stop")
 
 
 def in_place(work, check):

@@ -1016,6 +1016,12 @@ each one's section: what `[Unreleased]` had, and the title of each change merged
 
 ### Fixed
 
+- `cargo blaze test --doc` runs an edited library's examples again: it took an example's
+  program from the run before while the example's own text was unchanged, since blaze's run
+  names no library with `--extern` for the key to stamp, so after an edit that broke them the
+  doc tests passed where cargo's failed. The key now has the cfgs of every crate the library is
+  built from and the files of those of the workspace. `cargo blaze test --doc -q` shows the
+  results tersely, as cargo's `-q` has libtest do (`harness/cargo_ra_jit.py`, flags group).
 - The daemon's own link passes the linker what `-C link-arg` and `-C link-args` say in
   `RUSTFLAGS`, `CARGO_ENCODED_RUSTFLAGS` or the configuration's `rustflags`, after the native
   libraries as rustc does; it left them out. A program linked with
@@ -1025,6 +1031,10 @@ each one's section: what `[Unreleased]` had, and the title of each change merged
 - A red train opens or comments on the "Release train is red" issue again: train_issue.py read
   each harness job's log with `gh api`, which the runner's gh refuses without
   `--allow-escape-sequences`, so the `train issue` job failed and no issue was opened.
+- A build that compiles the standard library's crates itself no longer takes from the store
+  code that a build over ra-jit's prebuilt unit of the library kept: such an entry's calls
+  into the unit (`ra-jit.<hash>.…` symbols) are now checked when it is taken, where its link
+  failed on them as undefined (#328). Entries written before are not read (entry format 12).
 
 - A load's proc macros with and without `RA_JIT_PROC_MACRO_SERVER=0` (#460): each mode has
   its own target directory, `target/rust-analyzer` with ra-jit's proc macros and
@@ -1034,6 +1044,11 @@ each one's section: what `[Unreleased]` had, and the title of each change merged
   the command that asks, so it takes effect without `blaze stop`; a spare worker no longer
   keeps the daemon's. A load whose proc macro has no `blaze-proc-macro-srv` beside ra-jit
   says where it looked, the command that builds it there, and `RA_JIT_PROC_MACRO_SERVER=0`.
+- A test that runs cargo runs in the sandbox: every cargo takes its locks in its home and
+  records there what it used (`.package-cache`, `.global-cache`), which the read-only machine
+  refused, so trybuild's tests and a cargo plugin's own failed. Cargo's home (`CARGO_HOME`, else
+  `~/.cargo`) is now an overlay, as the workspace and target directory are: the test writes it
+  for itself alone, and nothing of it is kept (docs/cargo.md, "Every test runs in a sandbox").
 
 - The borrow checker: lifetime elision counts none of the impl's lifetimes in a parameter
   that writes `Self`, as rustc counts only what a parameter's type writes or elides, so
@@ -1174,7 +1189,7 @@ each one's section: what `[Unreleased]` had, and the title of each change merged
   `[ra-jit]` instead of handing every build to cargo. The daemon takes COFF programs (also with
   `--target x86_64-pc-windows-msvc`), links them with the `rust-lld` the repository's cargo
   configuration names, and closes an existing directory of its own that others can enter, as
-  on Unix. Live edits of a running program are still macOS and Linux only.
+  on Unix.
 - A profile with `debug = "line-tables-only"` (or `1`, or `"limited"`) no longer has the type
   of every variable worked out. Only the lines were written, but the types were described for
   each function compiled and then thrown away. On Biome (`biome_cli`, 518 crates, whose dev

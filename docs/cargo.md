@@ -171,8 +171,10 @@ in a sandbox.
 "Everything should by default be in sandbox and yea it should have sandbox support macos"
 (Andrew, 2026-10-26). Every test executable `cargo ra-jit test` runs, under `all` and
 `affected` alike, runs in a sandbox of its own, with libtest's threads inside it as cargo would
-run them. In it the machine's files are read-only; the workspace and the target directory are
-as they are, but what a test writes there is kept to the run and gone when it ends; `/tmp`,
+run them. In it the machine's files are read-only; the workspace, the target directory and
+cargo's home (`CARGO_HOME`, `~/.cargo`) are as they are, but what a test writes there is kept
+to the run and gone when it ends (every cargo takes its locks in its home and records there
+what it used, so a test that runs cargo, as trybuild's do, writes it); `/tmp`,
 `/var/tmp` and `/dev/shm` (on macOS the temporary directory) start empty; there is no network
 but the sandbox's own loopback, and no Unix socket but those the run makes itself; and the
 environment is fixed. A write outside gets the error a read-only file system gives, and a
@@ -372,6 +374,25 @@ profile that allows user namespaces; on Kubernetes `securityContext.seccompProfi
 Unconfined`), which keeps the sandbox, or set `BLAZE_SANDBOX=off`, which runs build scripts,
 proc macros and tests outside it, as cargo does. blaze does not make a weaker sandbox there on
 its own.
+
+A sandbox can be given a view (`sandbox::View`, the spec's `view`) in place of the machine,
+which is what a build script is to see under the Nix model (Andrew, 2026-10-27): its declared
+closure and nothing else. On Linux the view is a root of the sandbox's own, a tmpfs that
+becomes `/` (`pivot_root`) with the machine's tree detached from it, holding what the view
+binds, each where it says (the package's source and the toolchain read-only, a store path
+unpacked in blaze's cache at its `/nix/store/<hash>-<name>` so that nixpkgs' interpreters,
+RPATHs and scripts resolve, `OUT_DIR` written for real), and besides them only a `/proc` of
+the sandbox's processes, a `/dev` of `null`, `zero`, `full`, `random`, `urandom` and `tty`
+with an empty `shm`, an empty `/tmp`, and an `/etc` of `passwd` and `group` (one line for the
+user, one for `nobody`) and `hosts` (`localhost`), as Nix's sandbox has. `/usr`, `$HOME`, the
+machine's `/etc` and every store path not bound are not there, for the script and every
+program it runs, so a read of something undeclared fails with `ENOENT`; the root and what is
+bound read-only refuse writes, and the network is the loopback alone, as in every sandbox.
+A view whose bind is not there fails before anything runs, naming it. It is made by an
+unprivileged user namespace alone, and costs a mount per bind, about 20 µs each: `true` takes
+6.1 ms in a view of 40 binds and 10.7 ms in one of 300, against 4.9 ms in the sandbox without
+a view and 0.33 ms bare (median of 50, an arm64 ix VM of 16 cores, 2026-10-27). On macOS
+a view is not made (decided): the spec's other fields apply and the binds are not read.
 
 Compiling a build script, running it and building a proc macro are each an entry of the
 store, so they travel with `ra-jit cache push` and `pull` and through the gateway like any
@@ -715,9 +736,10 @@ before changing it.
   what such a build would, when the daemon has it loaded, and what it finds in the whole
   workspace otherwise.
 - Linux x86-64 and macOS arm64 have been run; on macOS only ripgrep, fd and hyperfine and
-  the generated workspace of the harness. The code compiles for Windows, but every build
-  there would go to cargo (the link step knows ELF and Mach-O), and the command has not
-  been built or run there. The socket's permission and peer checks do nothing on Windows.
+  the generated workspace of the harness. On Windows x86-64 (MSVC) builds go through the
+  daemon and link with `rust-lld`; that was run by hand on a toy crate and `demo/life`, and
+  this harness has not run there ([platforms.md](platforms.md#windows-x86-64-msvc)). The
+  socket's permission and peer checks do nothing on Windows.
 - On Linux `cargo ra-jit` was measured with the Cranelift backend only; LLVM has been run
   through the harness gate, not through `harness/cargo_ra_jit.py`. On macOS the harness was
   run under both.
@@ -808,8 +830,7 @@ match cargo on every step. `harness/cargo_ra_jit.py` runs all of this.
 
 Not checked: a proc macro defined in the workspace, `--target` for another triple,
 `cargo install` from the registry, a real rust-analyzer session next to it, real sccache (a
-stand-in wrapper was used). On Windows every build is cargo's in this mode and nothing was
-run. macOS arm64 is below.
+stand-in wrapper was used). None of it was run on Windows. macOS arm64 is below.
 
 ### Known problems
 

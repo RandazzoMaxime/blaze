@@ -567,23 +567,59 @@ fn tests_linked(
     tests: bool,
 ) -> FxHashSet<ide_db::base_db::Crate> {
     use ide_db::base_db::LangCrateOrigin::Test;
-    let library = library_unit(db, program);
-    let unlinked = unlinked_panic_runtime(db, program);
     let deps = |it: ide_db::base_db::Crate| it.data(db).dependencies.iter().map(|dep| dep.crate_id);
     let mut next: Vec<ide_db::base_db::Crate> = match tests {
         true => program.iter().flat_map(|&it| deps(it.into())).collect(),
         false => Vec::new(),
     };
     next.retain(|it| matches!(it.data(db).origin, CrateOrigin::Lang(Test)));
-    let mut tested = FxHashSet::default();
+    beside_library(db, program, next)
+}
+
+/// What a program compiles of the standard library's crates for `proc_macro` beside its own:
+/// `proc_macro`, and what only it links, when a crate of `linked` that is not a proc macro
+/// names it with `extern crate`, as `proc-macro2` does in a build script or a program (rustc
+/// links `libproc_macro` there, whose functions then say no macro is running). None for
+/// another: rust-analyzer's graph has every crate depend on it ([`library_unit`]).
+fn macros_linked(
+    db: &RootDatabase,
+    program: &[Crate],
+    linked: &FxHashSet<ide_db::base_db::Crate>,
+) -> FxHashSet<ide_db::base_db::Crate> {
+    use ide_db::base_db::LangCrateOrigin::ProcMacro;
+    let named = linked
+        .iter()
+        .filter(|it| !it.data(db).target_kind.is_proc_macro())
+        .flat_map(|&it| Crate::from(it).modules(db))
+        .flat_map(|module| module.extern_crate_decls(db))
+        .filter_map(|it| it.resolved_crate(db))
+        .map(ide_db::base_db::Crate::from)
+        .filter(|it| matches!(it.data(db).origin, CrateOrigin::Lang(ProcMacro)));
+    beside_library(db, program, named.collect())
+}
+
+/// `next` and everything they depend on that the program's standard library unit
+/// ([`library_unit`]) does not have, but the panic runtime it does not link.
+fn beside_library(
+    db: &RootDatabase,
+    program: &[Crate],
+    mut next: Vec<ide_db::base_db::Crate>,
+) -> FxHashSet<ide_db::base_db::Crate> {
+    if next.is_empty() {
+        return FxHashSet::default();
+    }
+    let library = library_unit(db, program);
+    let unlinked = unlinked_panic_runtime(db, program);
+    let deps = |it: ide_db::base_db::Crate| it.data(db).dependencies.iter().map(|dep| dep.crate_id);
+    let mut beside = FxHashSet::default();
     while let Some(krate) = next.pop() {
         let name = Crate::from(krate).display_name(db);
         let unlinked = name.is_some_and(|it| it.crate_name().as_str() == unlinked);
-        if !library.contains(&krate) && !unlinked && tested.insert(krate) {
+        if !library.contains(&krate) && !unlinked && beside.insert(krate) {
             next.extend(deps(krate));
         }
     }
-    tested
+    beside
 }
 
 /// The panic runtime a program does not link: `panic_unwind` when its crate is built with
@@ -4637,11 +4673,30 @@ fn link_executable(
     }
     let objects: Vec<&Path> =
         std::iter::once(args.out.as_path()).chain(args.prebuilt.as_deref()).collect();
-    // A shared library exports what the crate asked for names with `#[no_mangle]` or
-    // `#[export_name]`.
+    // A shared library exports what the crates it links ask for names with `#[no_mangle]`
+    // or `#[export_name]`, as rustc's `cdylib` does; a proc macro's only what its own crate
+    // names. The standard library's crates name none a program may call.
     let exports = args.shared.then(|| -> anyhow::Result<Vec<String>> {
         let mut exports = Vec::new();
+        let mut crates = FxHashSet::default();
         for krate in crates_named(db, &args.krate, args)? {
+            crates.insert(krate);
+            let data = ide_db::base_db::Crate::from(krate).data(db);
+            if data.target_kind.is_proc_macro() {
+                continue;
+            }
+            crates.extend(
+                ide_db::base_db::Crate::from(krate)
+                    .transitive_deps(db)
+                    .into_iter()
+                    .filter(|it| {
+                        let data = it.data(db);
+                        !data.origin.is_lang() && !data.target_kind.is_proc_macro()
+                    })
+                    .map(Crate::from),
+            );
+        }
+        for krate in crates {
             let of = listed.of(db, krate);
             let functions = of.functions.iter().filter_map(|&it| exported_symbol(db, it));
             let statics = of.statics.iter().filter_map(|&it| exported_static(db, it));
@@ -4652,9 +4707,17 @@ fn link_executable(
         Ok(exports)
     });
     let exports = exports.transpose()?;
-    let took =
-        link::executable(db, &program, &objects, sysroot, exe, exports.as_deref(), &args.link_args)
-            .map_err(|it| refused_linked(it, args))?;
+    let took = link::executable(
+        db,
+        &program,
+        &objects,
+        sysroot,
+        exe,
+        exports.as_deref(),
+        &args.link_args,
+        args.debug.level,
+    )
+    .map_err(|it| refused_linked(it, args))?;
     let stand_ins = link::stand_ins(exe)?;
     eprintln!(
         "linked {} in {took:.1?}, {} functions in it ra-jit could not compile",
@@ -4687,7 +4750,8 @@ fn own_link_line(db: &RootDatabase, args: &Args) -> anyhow::Result<Option<(Strin
     let objects: Vec<&Path> =
         std::iter::once(args.out.as_path()).chain(args.prebuilt.as_deref()).collect();
     let sysroot = SYSROOT.get().and_then(Option::as_deref);
-    let cmd = link::command(db, &program, &objects, sysroot, exe, &args.link_args)?;
+    let cmd =
+        link::command(db, &program, &objects, sysroot, exe, &args.link_args, args.debug.level)?;
     Ok(Some((cmd, exe.clone())))
 }
 
@@ -4853,11 +4917,17 @@ fn build(
     if table.is_empty() {
         let asked: FxHashSet<Crate> = local.iter().copied().collect();
         let tested = tests_linked(db, &local, of_tests(args));
-        let linked: FxHashSet<Crate> = local
+        let own: FxHashSet<ide_db::base_db::Crate> = local
             .iter()
             .flat_map(|&it| ide_db::base_db::Crate::from(it).transitive_deps(db))
-            .filter(|it| !it.data(db).origin.is_lang() && !resolver.prebuilt(*it))
+            .filter(|it| !it.data(db).origin.is_lang())
+            .collect();
+        let macros = macros_linked(db, &local, &own);
+        let linked: FxHashSet<Crate> = own
+            .into_iter()
+            .filter(|it| !resolver.prebuilt(*it))
             .chain(tested)
+            .chain(macros)
             .map(Crate::from)
             .filter(|it| !asked.contains(it))
             .collect();
