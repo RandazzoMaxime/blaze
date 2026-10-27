@@ -70,6 +70,10 @@ struct Annotation {
 pub(super) enum Category {
     Return,
     TypeAnnotation,
+    /// A path's written generic arguments, `foo::<&'a T>`, rustc's
+    /// `TypeAnnotation(AnnotationSource::GenericArg)`: unlikely to be what relates the regions
+    /// an error is about, so blamed after the other interesting constraints.
+    GenericArg,
     Cast,
     CallArgument,
     Assignment,
@@ -3327,9 +3331,25 @@ impl<'db> Builder<'_, '_, 'db> {
             }
             (TyKind::Closure(_, aa), TyKind::Closure(_, ab))
             | (TyKind::Coroutine(_, aa), TyKind::Coroutine(_, ab))
-            | (TyKind::CoroutineClosure(_, aa), TyKind::CoroutineClosure(_, ab))
-            | (TyKind::FnDef(_, aa), TyKind::FnDef(_, ab)) => {
+            | (TyKind::CoroutineClosure(_, aa), TyKind::CoroutineClosure(_, ab)) => {
                 self.relate_args(aa, ab, None, Variance::Invariant, at)
+            }
+            // rustc relates a function item's arguments with the item's variances
+            // (`relate_item_args`), which its signature gives: `foo<'a>() -> PhantomData<&'a ()>`
+            // is covariant in `'a`, and a constructor `fn(T) -> S<T>` is invariant in `T`.
+            (TyKind::FnDef(def, aa), TyKind::FnDef(_, ab)) => {
+                let variances = match def.0 {
+                    hir_def::CallableDefId::FunctionId(it) => {
+                        self.ctx.db.variances_of(GenericDefId::FunctionId(it))
+                    }
+                    hir_def::CallableDefId::StructId(it) => {
+                        hir_ty::ctor_variances(self.ctx.db, it.into())
+                    }
+                    hir_def::CallableDefId::EnumVariantId(it) => {
+                        hir_ty::ctor_variances(self.ctx.db, it.into())
+                    }
+                };
+                self.relate_args(aa, ab, Some(variances.as_slice()), variance, at)
             }
             _ => (),
         }
@@ -3541,7 +3561,18 @@ impl<'db> Builder<'_, '_, 'db> {
 
     /// The type of a callee whose path spells out generic arguments, `f::<&'a T>`, with the
     /// lifetimes written there: rustc's user type annotation on the path.
+    ///
+    /// As rustc, the callee's type has regions of its own, equal to the written ones by a
+    /// `GenericArg` constraint at the path, so an error blames a use of the callee over it.
     fn written_callee(&mut self, func: &Operand, call: MirSpan) -> Option<Ty<'db>> {
+        let written = self.written_callee_ty(func, call)?;
+        let ty = self.renumber(written);
+        let span = self.callee_expr(func, call).map_or(call, MirSpan::ExprId);
+        self.relate(ty, written, Variance::Invariant, At { category: Category::GenericArg, span });
+        Some(ty)
+    }
+
+    fn written_callee_ty(&mut self, func: &Operand, call: MirSpan) -> Option<Ty<'db>> {
         let ty = match &func.kind {
             OperandKind::Constant { ty, .. } => ty.as_ref(),
             OperandKind::Allocation { allocation } => allocation.as_ref().ty,
@@ -4400,6 +4431,24 @@ impl<'db> Builder<'_, '_, 'db> {
                         })
                         .collect::<Vec<_>>()
                 };
+                // rustc's `prove_aggregate_predicates`: a closure's where clauses are its
+                // creator's, which hold where it is made, with its parent args: so
+                // `for<'a> &'a S: 'a` is proven for a placeholder `'a`, needing `S: 'static`.
+                let parent_args = match ty.kind() {
+                    TyKind::Closure(_, args) => Some(args.as_closure().parent_args()),
+                    TyKind::Coroutine(_, args) => Some(args.as_coroutine().parent_args()),
+                    _ => None,
+                };
+                if let Some(parent_args) = parent_args {
+                    let def = self.ctx.owner.generic_def(self.ctx.db);
+                    let at = At { category: Category::Boring, span };
+                    self.predicates(
+                        def,
+                        GenericArgs::new_from_iter(parent_args.iter().copied().collect::<Vec<_>>()),
+                        at,
+                        true,
+                    );
+                }
                 let made = match ty.kind() {
                     TyKind::Closure(def, args) => Some((
                         def.0.loc(self.ctx.db).expr,
@@ -4631,8 +4680,23 @@ impl<'db> Builder<'_, '_, 'db> {
                 if let (Some(local), Some(location)) = (local, self.location) {
                     self.regions.callee_reads.push((local, location));
                 }
-                let Some(func_ty) = local
-                    .map(|it| peel(self.regions.local_tys[it.into_raw().into_u32() as usize]))
+                // rustc's MIR copies the variable into a temporary it calls, `_6 = copy _4;
+                // move _6(..)`, whose type has regions of its own the variable's flow into.
+                let local_callee = local.map(|it| {
+                    let ty = peel(self.regions.local_tys[it.into_raw().into_u32() as usize]);
+                    let copy = self.renumber(ty);
+                    let callee = match span {
+                        MirSpan::ExprId(call) => match self.ctx.store[call] {
+                            hir_def::hir::Expr::Call { callee, .. } => MirSpan::ExprId(callee),
+                            _ => span,
+                        },
+                        _ => span,
+                    };
+                    let at = At { category: Category::Boring, span: callee };
+                    self.relate(ty, copy, Variance::Covariant, at);
+                    copy
+                });
+                let Some(func_ty) = local_callee
                     .or_else(|| self.written_callee(func, span))
                     .or_else(|| self.constant_ty(func, span))
                     .or_else(|| self.operand_ty(func))
@@ -5051,10 +5115,22 @@ impl<'db> Builder<'_, '_, 'db> {
                         self.outlives(longer, shorter, at);
                     }
                 }
-                ClauseKind::TypeOutlives(OutlivesPredicate(ty, region))
-                    if type_outlives
-                        && !rustc_type_ir::TypeVisitableExt::has_escaping_bound_vars(&ty) =>
-                {
+                ClauseKind::TypeOutlives(OutlivesPredicate(ty, region)) if type_outlives => {
+                    // A region of the type bound by the clause's `for<'a>` is a placeholder,
+                    // taken as `'static` as a placeholder in a type is where it is proven:
+                    // `for<'a> &'a S: 'a` needs `S: 'static`.
+                    let interner = self.interner();
+                    let ty =
+                        rustc_type_ir::fold_regions(interner, ty, |it, depth| match it.kind() {
+                            RegionKind::ReBound(
+                                rustc_type_ir::BoundVarIndexKind::Bound(binder),
+                                _,
+                            ) if binder == depth => Region::new_static(interner),
+                            _ => it,
+                        });
+                    if rustc_type_ir::TypeVisitableExt::has_escaping_bound_vars(&ty) {
+                        continue;
+                    }
                     let original = region;
                     let region = match region.kind() {
                         RegionKind::ReStatic => self.static_region(),
@@ -5135,7 +5211,6 @@ impl<'db> Builder<'_, '_, 'db> {
                     // Of a call written as one: `map[i] = v` calls `IndexMut::index_mut`, which
                     // is E0594 where only `Index` is implemented.
                     if self.prove(trait_ref, at)
-                        && !forall
                         && !forall
                         && at.category == Category::Predicate
                         && let MirSpan::ExprId(expr) = at.span
@@ -6161,6 +6236,7 @@ pub(super) fn blame_with(path: &[Outlives], opaque: bool) -> Option<Outlives> {
         | Category::CallArgument
         | Category::Assignment
         | Category::Usage => 2,
+        Category::GenericArg => 3,
         Category::Predicate => 4,
         Category::Boring | Category::Signature | Category::Opaque => 5,
         Category::Internal => 7,

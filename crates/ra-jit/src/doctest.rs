@@ -638,9 +638,8 @@ struct Test {
     name: String,
     marks: Marks,
     program: Program,
-    /// The path and line rustc is to show for the first line of the example.
+    /// The path rustc is to show for the example.
     shown_path: String,
-    line: usize,
     edition: Edition,
     /// Whether rustdoc builds the example in one program with the others, as it does from
     /// edition 2024: the test harness of that program names it.
@@ -712,21 +711,7 @@ impl Test {
         let edition = edition.parse().unwrap_or(Edition::CURRENT);
         let program = Program::of(&example.code, frame, &id, edition);
         let in_one = edition.at_least_2024();
-        Test {
-            name,
-            marks: example.marks,
-            program,
-            shown_path,
-            line: example.line,
-            edition,
-            in_one,
-        }
-    }
-
-    /// The lines before the program's first in a file of it whose lines are numbered as
-    /// rustdoc has rustc show them: from the line of the example in its documentation.
-    fn padding(&self) -> usize {
-        self.line.saturating_sub(self.program.lines_before)
+        Test { name, marks: example.marks, program, shown_path, edition, in_one }
     }
 
     /// The name with what the harness adds for how the example is tested.
@@ -1072,8 +1057,7 @@ fn add_crates(
         };
         let file = vfs::FileId::from_raw(FIRST_FILE - n as u32);
         let root = SourceRootId(FIRST_SOURCE_ROOT - n as u32);
-        let text = format!("{}{}", "\n".repeat(test.padding()), test.program.source);
-        db.set_file_text_with_durability(file, &text, Durability::LOW);
+        db.set_file_text_with_durability(file, &test.program.source, Durability::LOW);
         db.set_file_source_root_with_durability(file, root, Durability::LOW);
         let mut files = FileSet::default();
         files.insert(file, VfsPath::from(vfs_path));

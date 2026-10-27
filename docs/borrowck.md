@@ -189,7 +189,13 @@ All of these are rustc's, written from `compiler/rustc_borrowck` at the pinned n
   associated item through a type (`Foo::f`, `<()>::f`, `T::f`, not `Default::default`) has its
   generic arguments and its impl's self type and trait arguments well-formed, as rustc's user
   type annotation on it. A function item, closure or safe function pointer cast to a
-  function pointer is a subtype of it by signature. A where clause `for<'a> T: 'a` is
+  function pointer is a subtype of it by signature. Two function item types are related with
+  the item's variances, as rustc's `variances_of` infers them from its signature (`fn foo<'a>()
+  -> PhantomData<&'a ()>` is covariant in `'a`; a constructor `fn(T) -> S<T>` is invariant in
+  `T`, not as `S`); a variable holding one is copied into a temporary of its own type to be
+  called, as rustc's MIR does, and the type a path's written arguments give a callee
+  (`f::<&'a T>`) is related to the callee's own at the path, blamed after the other
+  interesting constraints (rustc's `AnnotationSource::GenericArg`). A where clause `for<'a> T: 'a` is
   `T: 'static`, and a type parameter that fails it is rustc's codeless "does not live long
   enough". A trait object cast to one of its supertraits' (`dyn Foo<'static>` to
   `dyn Bar<'static, 'a>` with `trait Foo<'a>: Bar<'a, 'a>`) has the supertrait as the
@@ -206,7 +212,10 @@ All of these are rustc's, written from `compiler/rustc_borrowck` at the pinned n
   `Eat<&'1 mut I, F>: Iterator` needs `for<'a> F: FnMut(<&'1 mut I as LendingIterator>::Item<'a>)`,
   whose normalization needs `&'1 mut I: 'a`, so `'1: 'static` (rustc's "due to a current
   limitation of the type system"), and a type parameter that must outlive one is rustc's
-  codeless "does not live long enough". rust-analyzer gives a trait object
+  codeless "does not live long enough". A closure or coroutine is made where its creator's where
+  clauses hold, so they are proven again at its creation with its parent's arguments (rustc's
+  `prove_aggregate_predicates`): `for<'a> &'a S: 'a` needs `S: 'static` there, and a closure
+  of `negotiate<S>` is "`S` does not live long enough". rust-analyzer gives a trait object
   behind an elided reference in a signature `'static`, not the reference's lifetime, so a
   placeholder the solver equates with an elided lifetime is left out
   (`fn(&mut dyn Write)` for `impl FnMut(&mut dyn Write)` holds).

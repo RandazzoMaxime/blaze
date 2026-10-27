@@ -113,6 +113,7 @@ pub use home::body_file;
 mod imports;
 #[cfg(feature = "llvm")]
 mod llvm;
+mod neon;
 mod patch;
 mod places;
 #[cfg(feature = "llvm")]
@@ -505,6 +506,14 @@ enum PassMode {
         skipped: u8,
     },
     Indirect,
+    /// A vector of AArch64's shorter than 64 bits, whose lanes LLVM widens to make a 64-bit
+    /// vector of the same count (`<4 x i8>` as `<4 x i16>`): in the low 64 bits of a vector
+    /// register, each lane of `lane` at the bottom of `stride` bytes, the bits above it
+    /// undefined.
+    Spread {
+        lane: Type,
+        stride: u8,
+    },
     /// The C ABI's by-value aggregate in memory: the caller copies `size` bytes into its
     /// outgoing arguments, which Cranelift does given a pointer. Cranelift has such a copy
     /// at the next multiple of eight bytes, so one that is aligned to sixteen has eight
@@ -8022,18 +8031,36 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
         if !matches!(target.arch, Arch::X86_64 | Arch::Aarch64) || size > 16 {
             return Ok(PassMode::Indirect);
         }
-        if count.as_u64() == 1 {
+        let lanes = count.as_u64();
+        if target.arch == Arch::Aarch64 && size < 8 {
+            // AArch64's LLVM makes a vector of fewer than 64 bits one of 64 (`v1i64` and
+            // `v1f64`, NEON's `*x1_t` of 64-bit lanes, are in a D register already, as the
+            // 64-bit vectors below are). One lane, or floats, it widens with more lanes
+            // after them (`<1 x i8>` as `<8 x i8>`, `<2 x half>` as `<4 x half>`): their
+            // bytes are the low ones of the register, as an `f32` is in its S register. The
+            // lanes of a vector of integers it promotes to as many lanes of 64 bits in all
+            // (`<4 x i8>` as `<4 x i16>`, `<2 x i8>` as `<2 x i32>`).
+            let float = matches!(element.primitive(), Primitive::Float(_));
+            return Ok(match lanes {
+                1 if size == 4 => PassMode::Cast(types::F32),
+                1 => PassMode::Cast(types::F64),
+                _ if !lanes.is_power_of_two() => {
+                    unsupported!("a SIMD vector of {lanes} lanes by value in the Rust ABI")
+                }
+                _ if float => PassMode::Cast(types::F64),
+                _ => PassMode::Spread {
+                    lane: Type::int((size / lanes * 8) as u16).expect("a lane of 8 or 16 bits"),
+                    stride: (8 / lanes) as u8,
+                },
+            });
+        }
+        if lanes == 1 {
             let lane = self.scalar(element)?.ty;
             match target.arch {
                 // x86-64's LLVM makes a vector of one lane its scalar, in that scalar's
                 // register under either convention: an integer's or pointer's in a general
                 // register, a float's in an XMM register, as the lane alone would be.
                 Arch::X86_64 if lane != types::I128 => return Ok(PassMode::Cast(lane)),
-                // AArch64's LLVM has `v1i64` and `v1f64` (NEON's `*x1_t` of 64-bit lanes) in
-                // a D register, as the 64-bit vectors below are, and widens a narrower lane
-                // to a 64-bit vector whose first lane it is: of a 32-bit lane that is the low
-                // 32 bits of the register, as an `f32` is in its S register.
-                Arch::Aarch64 if size == 4 => return Ok(PassMode::Cast(types::F32)),
                 Arch::Aarch64 if size == 8 => (),
                 _ => unsupported!("a SIMD vector of one {lane:?} lane by value in the Rust ABI"),
             }
@@ -8050,7 +8077,6 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
             (Arch::X86_64, _) => PassMode::Cast(types::I64X2),
             // AArch64 has a 64-bit vector in the low half of a vector register, as an `f64`.
             (Arch::Aarch64, 8) => PassMode::Cast(types::F64),
-            // AArch64 widens the lanes of a shorter one, which is not a copy of its bytes.
             _ => unsupported!("a SIMD vector of {size} bytes by value in the Rust ABI"),
         })
     }
@@ -8224,6 +8250,7 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
                 PassMode::Cast(ty) => self.count_regs(&[ty]),
                 PassMode::CastPair(a, b) => self.count_regs(&[a, b]),
                 PassMode::Uniform { .. } => unreachable!("x86-64 has no uniform aggregate"),
+                PassMode::Spread { .. } => unreachable!("only the Rust ABI spreads lanes"),
                 PassMode::SpilledPair { .. } => unreachable!("only the stack spills a pair"),
                 PassMode::SkippingPair { .. } => unreachable!("only AAPCS64 skips registers"),
             };
@@ -8675,6 +8702,7 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
                 params.extend((0..count).map(|_| AbiParam::new(unit)));
             }
             PassMode::Indirect => params.push(AbiParam::new(ptr())),
+            PassMode::Spread { .. } => params.push(AbiParam::new(types::F64)),
             PassMode::OnStack { size, padded } => {
                 params.extend(padded.then(|| copied(8)));
                 params.push(copied(size));
@@ -8744,6 +8772,14 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
                 values.push(self.builder.ins().load(b.ty, MEM, addr, offset.bytes() as i32));
             }
             PassMode::Cast(ty) => values.push(self.load_cast(ty, addr, layout.size)),
+            PassMode::Spread { lane, stride } => {
+                let spread = self.scratch();
+                for i in 0..(layout.size.bytes() / u64::from(lane.bytes())) as i32 {
+                    let value = self.builder.ins().load(lane, MEM, addr, i * lane.bytes() as i32);
+                    self.builder.ins().store(MEM, value, spread, i * i32::from(stride));
+                }
+                values.push(self.builder.ins().load(types::F64, MEM, spread, 0));
+            }
             PassMode::CastPair(a, b) => {
                 values.push(self.builder.ins().load(a, MEM, addr, 0));
                 let rest = self.builder.ins().iadd_imm(addr, 8);
@@ -8823,6 +8859,15 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
             PassMode::Cast(_) => {
                 let value = next();
                 self.store_cast(value, addr, layout.size);
+            }
+            PassMode::Spread { lane, stride } => {
+                let spread = self.scratch();
+                let value = next();
+                self.builder.ins().store(MEM, value, spread, 0);
+                for i in 0..(layout.size.bytes() / u64::from(lane.bytes())) as i32 {
+                    let value = self.builder.ins().load(lane, MEM, spread, i * i32::from(stride));
+                    self.builder.ins().store(MEM, value, addr, i * lane.bytes() as i32);
+                }
             }
             PassMode::CastPair(..) => {
                 let (a, b) = (next(), next());
@@ -14507,6 +14552,33 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
                 }
                 self.builder.ins().store(MEM, acc, dst, 0);
             }
+            // Each float lane to an integral float, as rustc's LLVM `trunc`, `round` (ties
+            // away from zero) and `rint` (in the current mode, which is to even) select on
+            // AArch64, of lanes of any float's width.
+            ("simd_trunc" | "simd_round" | "simd_round_ties_even", [arg])
+                if self.cg.target.arch == Arch::Aarch64 =>
+            {
+                let ty = self.operand_ty(arg)?;
+                let layout = self.layout(ty)?;
+                let lanes = match layout.backend_repr {
+                    BackendRepr::SimdVector { element, count } => match element.primitive() {
+                        Primitive::Float(float) => {
+                            neon::Lanes::floats(float.size().bits() as u32, count.as_u64() as u32)
+                        }
+                        _ => unsupported!("`{name}` of integers"),
+                    },
+                    _ => unsupported!("vector operation on {ty:?}"),
+                };
+                let instruction = match name {
+                    "simd_trunc" => "frintz",
+                    "simd_round" => "frinta",
+                    _ => "frintx",
+                };
+                let Some(lowered) = neon::rounding(instruction, lanes) else {
+                    unsupported!("`{name}` of {ty:?}");
+                };
+                self.neon_assembly(name, &lowered, args, dst, dst_ty)?;
+            }
             (
                 "simd_ctpop" | "simd_ctlz" | "simd_cttz" | "simd_bswap" | "simd_bitreverse"
                 | "simd_neg" | "simd_fabs" | "simd_fsqrt" | "simd_floor" | "simd_ceil",
@@ -15336,6 +15408,58 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
         Ok(true)
     }
 
+    /// Calls the instructions `neon::lower` made of the intrinsic `name` on its
+    /// operands and writes what they leave where `dst` is, once each operand and the result
+    /// is of the size the name says.
+    fn neon_assembly(
+        &mut self,
+        name: &str,
+        lowered: &neon::Lowered,
+        args: &[Operand],
+        dst: Value,
+        dst_ty: Ty<'db>,
+    ) -> Result<()> {
+        if args.len() != lowered.args.len() {
+            unsupported!("`{name}` with {} arguments", args.len());
+        }
+        let mut values = vec![dst];
+        for (arg, expected) in args.iter().zip(&lowered.args) {
+            let ty = self.operand_ty(arg)?;
+            let pointer = matches!(ty.kind(), TyKind::RawPtr(..));
+            let fits = match expected {
+                None => pointer,
+                Some(bytes) => !pointer && self.layout(ty)?.size.bytes() == u64::from(*bytes),
+            };
+            if !fits {
+                unsupported!("`{name}` of {ty:?}, which is not what its name says");
+            }
+            values.push(self.operand(arg)?.0);
+        }
+        // One result, or a tuple of vectors (`int8x16x2_t`) whose fields are the registers.
+        let layout = self.layout(dst_ty)?;
+        let size: u64 = lowered.results.iter().map(|&it| u64::from(it)).sum();
+        let results: Vec<(u32, u32)> = match lowered.results.as_slice() {
+            [] if layout.is_zst() => Vec::new(),
+            &[bytes] if layout.size.bytes() == u64::from(bytes) => vec![(0, bytes)],
+            many if layout.size.bytes() == size
+                && layout.fields.count() == many.len()
+                && (0..many.len())
+                    .all(|i| layout.fields.offset(i).bytes() == i as u64 * u64::from(many[0])) =>
+            {
+                many.iter().enumerate().map(|(i, &bytes)| (i as u32 * bytes, bytes)).collect()
+            }
+            _ => unsupported!("`{name}` returning {dst_ty:?}, which is not what its name says"),
+        };
+        let directives = asm::extensions(Arch::Aarch64, lowered.features.iter().copied());
+        let text = asm::neon_function(&directives, &lowered.args, &lowered.text, &results);
+        let mut sig = self.cg.make_signature();
+        sig.params.extend(values.iter().map(|_| AbiParam::new(ptr())));
+        let callee = self.cg.assembly(text, &sig);
+        let callee = self.cg.declare_func_in_func(callee, self.builder.func);
+        self.builder.ins().call(callee, &values);
+        Ok(())
+    }
+
     /// A function `core::arch` declares as `llvm.{name}`: something LLVM implements, with no
     /// body anywhere.
     fn llvm_intrinsic(
@@ -15675,6 +15799,40 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
                     self.builder.ins().store(MEM, value, dst, at);
                 }
             }
+            // A barrier of the kind its option names, or the hint its number names, as the
+            // instruction's word: `dsb` of option 0 and 4 are the barriers `ssbb` and
+            // `pssbb`, which an assembler may take only by those names.
+            ("aarch64.dmb" | "aarch64.dsb" | "aarch64.hint", [option]) => {
+                let Some(option) = self.immediate(option)? else {
+                    unsupported!("`llvm.{name}` of an option that is not a constant");
+                };
+                let (word, most, at) = match name {
+                    "aarch64.dmb" => (0xd503_30bf_u32, 15, 8),
+                    "aarch64.dsb" => (0xd503_309f, 15, 8),
+                    _ => (0xd503_201f, 127, 5),
+                };
+                if option > most {
+                    unsupported!("`llvm.{name}` of option {option}");
+                }
+                let word = word | (option as u32) << at;
+                let sig = self.cg.make_signature();
+                let callee = self.cg.assembly(asm::instruction_word(word), &sig);
+                let callee = self.cg.declare_func_in_func(callee, self.builder.func);
+                self.builder.ins().call(callee, &[]);
+            }
+            // A random number, and whether there was none (`rndrrs` reseeds first): the
+            // register reads as 0 with the Z flag set then. The result is `(u64, bool)`.
+            ("aarch64.rndr" | "aarch64.rndrrs", []) => {
+                let layout = self.layout(dst_ty)?;
+                if layout.size.bytes() != 16 || layout.fields.offset(1).bytes() != 8 {
+                    unsupported!("`llvm.{name}` returning {dst_ty:?}");
+                }
+                let mut sig = self.cg.make_signature();
+                sig.params.push(AbiParam::new(ptr()));
+                let callee = self.cg.assembly(asm::random(name == "aarch64.rndrrs"), &sig);
+                let callee = self.cg.declare_func_in_func(callee, self.builder.func);
+                self.builder.ins().call(callee, &[dst]);
+            }
             ("x86.sse2.pause", []) | ("aarch64.isb", [_]) => {
                 let text = if name == "aarch64.isb" { asm::isb() } else { asm::pause() };
                 let sig = self.cg.make_signature();
@@ -15794,6 +15952,11 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
             ("x86.avx.vzeroupper", []) => {}
             // A hint to the cache, which the program behaves the same without.
             ("prefetch.p0", [_address, _write, _locality, _cache]) => {}
+            _ if self.cg.target.arch == Arch::Aarch64
+                && let Some(lowered) = neon::lower(name) =>
+            {
+                self.neon_assembly(&format!("llvm.{name}"), &lowered, args, dst, dst_ty)?
+            }
             _ => unsupported!("LLVM intrinsic `{name}`"),
         }
         Ok(())
