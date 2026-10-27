@@ -80,7 +80,10 @@ fn print(global: &[String], rest: &[&String]) -> Result<Question, String> {
             _ => (word, None),
         };
         let mut value = || {
-            joined.or_else(|| words.next()).map(str::to_owned).ok_or(format!("`{flag}` has no value"))
+            joined
+                .or_else(|| words.next())
+                .map(str::to_owned)
+                .ok_or(format!("`{flag}` has no value"))
         };
         match flag {
             "--" => {
@@ -113,17 +116,14 @@ pub(crate) fn answer(command: &Command) -> Option<io::Result<Output>> {
     let said = match asked {
         Question::Version => asker.version(),
         Question::ConfigGet(args) => {
-            let (code, output) =
-                blaze_manifest::config::get::main(&asker.cwd, asker.vars(), &args);
+            let (code, output) = blaze_manifest::config::get::main(&asker.cwd, asker.vars(), &args);
             return Some(Ok(Output {
                 status: status(i32::from(code)),
                 stdout: output.stdout.into_bytes(),
                 stderr: output.stderr.into_bytes(),
             }));
         }
-        Question::Print { what, targets, rustc_args } => {
-            asker.print(&what, &targets, &rustc_args)
-        }
+        Question::Print { what, targets, rustc_args } => asker.print(&what, &targets, &rustc_args),
     };
     Some(Ok(match said {
         Ok(stdout) => Output { status: status(0), stdout: stdout.into_bytes(), stderr: Vec::new() },
@@ -233,7 +233,9 @@ impl Asker {
     ) -> anyhow::Result<impl FnMut(&[String]) -> anyhow::Result<String> + use<>> {
         let program = match config.rustc_program()? {
             Some(program) => program,
-            None => self.sysroot()?.join("bin").join(format!("rustc{}", std::env::consts::EXE_SUFFIX)),
+            None => {
+                self.sysroot()?.join("bin").join(format!("rustc{}", std::env::consts::EXE_SUFFIX))
+            }
         };
         let mut base = Command::new(&program);
         base.current_dir(&self.cwd);
@@ -273,7 +275,12 @@ impl Asker {
     }
 
     /// `cargo rustc --print`: the workspace read first, as cargo reads it for the command.
-    fn print(&self, what: &str, targets: &[String], rustc_args: &[String]) -> anyhow::Result<String> {
+    fn print(
+        &self,
+        what: &str,
+        targets: &[String],
+        rustc_args: &[String],
+    ) -> anyhow::Result<String> {
         let mut config = self.config()?;
         config.start("rustc", &[])?;
         let ctx = Context::new(config);

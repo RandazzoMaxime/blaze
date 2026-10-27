@@ -102,7 +102,9 @@ impl Config {
         let host = verbose
             .lines()
             .find_map(|it| it.strip_prefix("host: "))
-            .with_context(|| format!("`rustc -vV` didn't have a line for `host:`, got:\n{verbose}"))?
+            .with_context(|| {
+                format!("`rustc -vV` didn't have a line for `host:`, got:\n{verbose}")
+            })?
             .to_owned();
         let requested = self.requested_kinds(targets)?;
         let mut out = String::new();
@@ -140,9 +142,10 @@ pub fn cfg_args(rustflags: &[String], kind: &CompileKind) -> Vec<String> {
 /// The `cfg` of rustc's `--print cfg`, as cargo keeps it: without `proc_macro`, which a probe
 /// that names the proc-macro crate type has.
 pub fn parse_cfg(output: &str) -> anyhow::Result<Vec<Cfg>> {
-    let cfg = output.lines().map(Cfg::from_str).filter(|it| {
-        !matches!(it, Ok(Cfg::Name(name)) if name.as_str() == "proc_macro")
-    });
+    let cfg = output
+        .lines()
+        .map(Cfg::from_str)
+        .filter(|it| !matches!(it, Ok(Cfg::Name(name)) if name.as_str() == "proc_macro"));
     cfg.collect::<Result<Vec<_>, _>>().with_context(|| {
         format!("failed to parse the cfg from `rustc --print=cfg`, got:\n{output}")
     })
