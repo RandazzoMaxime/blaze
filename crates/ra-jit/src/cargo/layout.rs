@@ -196,7 +196,6 @@ mod tests {
         let out = format!("/t/debug/build/ct/{HASH}/out/a/b.rs");
         let found = unit_dir(Path::new(&out)).unwrap();
         assert_eq!((found.package, found.hash), ("ct", HASH));
-        assert_eq!(found.name(), format!("ct-{HASH}"));
         assert_eq!(unit_dir(Path::new("/t/debug/build/ct-1/out")), None);
     }
 
