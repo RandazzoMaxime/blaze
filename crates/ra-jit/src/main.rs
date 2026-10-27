@@ -389,6 +389,8 @@ struct Resolver<'a> {
     places: Places,
     /// The symbols of what rustc linked, when the patch goes into it.
     linked: Option<Arc<symbols::Linked>>,
+    /// What the executable a whole build's patch goes into has kept of its link.
+    own_linked: Option<Arc<FxHashSet<String>>>,
     /// Set once the build turns out to be one in full, which `linked` is not for.
     in_full: Arc<std::sync::atomic::AtomicBool>,
     /// A build in full is spliced into what rustc linked too ([`onto_rustcs`]), and is for
@@ -422,6 +424,7 @@ struct ResolverParts<'a> {
     named: Arc<std::sync::Mutex<FxHashMap<FunctionId, Option<String>>>>,
     places: Places,
     linked: Option<Arc<symbols::Linked>>,
+    own_linked: Option<Arc<FxHashSet<String>>>,
     in_full: Arc<std::sync::atomic::AtomicBool>,
     onto: bool,
     prebuilt: Option<Arc<Prebuilt>>,
@@ -444,6 +447,7 @@ impl<'a> Resolver<'a> {
             named: self.named.clone(),
             places: self.places.clone(),
             linked: self.linked.clone(),
+            own_linked: self.own_linked.clone(),
             in_full: self.in_full.clone(),
             onto: self.onto,
             prebuilt: self.prebuilt.clone(),
@@ -471,6 +475,7 @@ impl<'a> ResolverParts<'a> {
             named,
             places,
             linked,
+            own_linked,
             in_full,
             onto,
             prebuilt,
@@ -491,6 +496,7 @@ impl<'a> ResolverParts<'a> {
             named,
             places,
             linked,
+            own_linked,
             in_full,
             onto,
             prebuilt,
@@ -537,6 +543,33 @@ fn library_unit(db: &RootDatabase, program: &[Crate]) -> FxHashSet<ide_db::base_
         }
     }
     unit
+}
+
+/// What a program of tests compiles of the standard library's crates beside its own:
+/// `test`, and what only it links, which [`library_unit`] leaves out. None for another.
+fn tests_linked(
+    db: &RootDatabase,
+    program: &[Crate],
+    tests: bool,
+) -> FxHashSet<ide_db::base_db::Crate> {
+    use ide_db::base_db::LangCrateOrigin::Test;
+    let library = library_unit(db, program);
+    let unlinked = unlinked_panic_runtime(db, program);
+    let deps = |it: ide_db::base_db::Crate| it.data(db).dependencies.iter().map(|dep| dep.crate_id);
+    let mut next: Vec<ide_db::base_db::Crate> = match tests {
+        true => program.iter().flat_map(|&it| deps(it.into())).collect(),
+        false => Vec::new(),
+    };
+    next.retain(|it| matches!(it.data(db).origin, CrateOrigin::Lang(Test)));
+    let mut tested = FxHashSet::default();
+    while let Some(krate) = next.pop() {
+        let name = Crate::from(krate).display_name(db);
+        let unlinked = name.is_some_and(|it| it.crate_name().as_str() == unlinked);
+        if !library.contains(&krate) && !unlinked && tested.insert(krate) {
+            next.extend(deps(krate));
+        }
+    }
+    tested
 }
 
 /// The panic runtime a program does not link: `panic_unwind` when its crate is built with
@@ -586,6 +619,42 @@ fn defined_symbols(path: &Path) -> anyhow::Result<FxHashSet<String>> {
     Ok(names)
 }
 
+/// The names the executable at `path` defines, read once for each file a link writes: a
+/// splice adds to the file in place, where a link writes a new one.
+fn kept_names(path: &Path) -> Option<Arc<FxHashSet<String>>> {
+    #[cfg(unix)]
+    {
+        use object::{Object as _, ObjectSymbol as _};
+        use std::os::unix::fs::MetadataExt as _;
+        type Kept = FxHashMap<PathBuf, ((u64, u64), Arc<FxHashSet<String>>)>;
+        static KEPT: std::sync::LazyLock<std::sync::Mutex<Kept>> =
+            std::sync::LazyLock::new(Default::default);
+        let file = std::fs::metadata(path).ok()?;
+        let key = (file.dev(), file.ino());
+        let mut kept = KEPT.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some((at, names)) = kept.get(path)
+            && *at == key
+        {
+            return Some(names.clone());
+        }
+        let bytes = std::fs::read(path).ok()?;
+        let file = object::File::parse(&*bytes).ok()?;
+        let macho = file.format() == object::BinaryFormat::MachO;
+        let names = file.symbols().filter(|it| it.is_definition()).filter_map(|it| {
+            let name = it.name().ok()?;
+            Some(if macho { name.strip_prefix('_').unwrap_or(name) } else { name }.to_owned())
+        });
+        let names = Arc::new(names.collect::<FxHashSet<_>>());
+        kept.insert(path.to_owned(), (key, names.clone()));
+        Some(names)
+    }
+    #[cfg(not(unix))]
+    {
+        _ = path;
+        None
+    }
+}
+
 /// The [`SymbolTable::generation`] and the checkout that paths were found with.
 type SharedKey = (u64, PathBuf, Option<PathBuf>);
 
@@ -630,6 +699,11 @@ impl<'a> Resolver<'a> {
                     && !rustc_symbols(binary).is_some_and(|it| it.has_own_thread_locals())
             });
         let linked = args.splice.as_deref().filter(|_| over_rustc || onto).and_then(rustc_symbols);
+        let own_linked = args
+            .splice
+            .as_deref()
+            .filter(|_| linked.is_none() && table.is_empty() && args.patch.is_some())
+            .and_then(kept_names);
         let (root, base) = (args.checkout.clone(), args.base.clone());
         let debug = args.debug;
         let apart = (debug.kept != plan::Kept::Linked).then(|| args.out.clone());
@@ -659,6 +733,7 @@ impl<'a> Resolver<'a> {
             named: Default::default(),
             places: Places::default(),
             linked,
+            own_linked,
             in_full: Arc::default(),
             onto,
             prebuilt,
@@ -1371,7 +1446,11 @@ impl SymbolResolver for Resolver<'_> {
     }
 
     fn linked(&self, symbol: &str) -> bool {
-        self.rustcs().is_none_or(|it| it.has(symbol))
+        if let Some(linked) = self.rustcs() {
+            return linked.has(symbol);
+        }
+        let in_full = self.in_full.load(std::sync::atomic::Ordering::Relaxed);
+        in_full || self.own_linked.as_ref().is_none_or(|it| it.contains(symbol))
     }
 
     fn onto_rustcs(&self) -> bool {
@@ -2920,30 +2999,6 @@ fn pause_after_load() {
     }
 }
 
-/// Whether [`lower_until`] has begun compiling ahead: what [`pause_before_symbols`] waits for.
-static AHEAD_BEGUN: AtomicBool = AtomicBool::new(false);
-
-/// How long [`pause_before_symbols`] waits for compiling ahead to begin, where it never does
-/// (a load beside cargo's build compiles ahead by what cargo has built, not until the symbols).
-const AHEAD_BEGUN_WAIT: Duration = Duration::from_secs(120);
-
-/// Waits for `RA_JIT_SYMBOLS_PAUSE_MS` before the symbols rustc built are read, and says so:
-/// what `harness/aheadready.py` has functions compiled ahead in. The pause starts once
-/// compiling ahead has begun, not when the symbols' thread does: a fixed pause from then
-/// raced loading and resolving the workspace, which took longer than it on a slow macOS
-/// runner, and nothing was compiled ahead.
-fn pause_before_symbols() {
-    let pause = std::env::var("RA_JIT_SYMBOLS_PAUSE_MS").ok().and_then(|it| it.parse().ok());
-    if let Some(pause) = pause {
-        eprintln!("symbols: paused");
-        let start = Instant::now();
-        while !AHEAD_BEGUN.load(Ordering::SeqCst) && start.elapsed() < AHEAD_BEGUN_WAIT {
-            std::thread::sleep(Duration::from_millis(5));
-        }
-        std::thread::sleep(Duration::from_millis(pause));
-    }
-}
-
 /// The directory cargo put the executables of the build in: the profile's directory the
 /// libraries of the build are written below, `deps` in cargo's first layout and
 /// `build/<package>/<hash>/out` in its second (`cargo::layout`). The standard library's,
@@ -4284,21 +4339,6 @@ thread_local! {
     static PROBING: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
-/// Has the thread be one that probes for as long as it lives.
-pub(crate) struct Probing(bool);
-
-impl Probing {
-    pub(crate) fn new() -> Probing {
-        Probing(PROBING.replace(true))
-    }
-}
-
-impl Drop for Probing {
-    fn drop(&mut self) {
-        PROBING.set(self.0);
-    }
-}
-
 /// Whether the edits of the build are patches of an object that has the standard library in
 /// it. A whole build's (`--exe`) are patched over the library it links as a unit of its own.
 fn patches_its_library(args: &Args) -> bool {
@@ -4648,10 +4688,12 @@ fn build(
     // standard library is built apart ([`std_unit`]) or asked for by name.
     if table.is_empty() {
         let asked: FxHashSet<Crate> = local.iter().copied().collect();
+        let tested = tests_linked(db, &local, of_tests(args));
         let linked: FxHashSet<Crate> = local
             .iter()
             .flat_map(|&it| ide_db::base_db::Crate::from(it).transitive_deps(db))
             .filter(|it| !it.data(db).origin.is_lang() && !resolver.prebuilt(*it))
+            .chain(tested)
             .map(Crate::from)
             .filter(|it| !asked.contains(it))
             .collect();
@@ -5015,13 +5057,29 @@ impl std::fmt::Display for RustcLinkedLost {
 
 impl std::error::Error for RustcLinkedLost {}
 
+/// Why a patch was not spliced into the executable whose link line does not have it: the
+/// program is built in full and linked instead.
+#[derive(Debug)]
+struct PatchUnlinked {
+    why: String,
+}
+
+impl std::fmt::Display for PatchUnlinked {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "the patch was not spliced into the program{}", self.why)
+    }
+}
+
+impl std::error::Error for PatchUnlinked {}
+
 /// Brings an executable up to date with its objects. An edit that left the whole object alone
 /// is spliced into the executable at `splice`, which `--binary` names, when that is known from
 /// its last link; anything else, and whatever the splice declines, runs the link command, whose
 /// result is then known. `RA_JIT_SPLICE=0` has every edit linked in full. A patch of what rustc
 /// linked (`over_rustc`) is spliced or fails with [`RustcLinkedLost`], and so is an object
 /// that names what only that executable has (`onto`, [`ONTO_RUSTCS`]). With `packs` the object
-/// is kept packed after the link ([`whole`]).
+/// is kept packed after the link ([`whole`]). A patch the splice declines whose line is the
+/// worker's own (`own_line`, [`own_link_line`]) fails with [`PatchUnlinked`].
 #[expect(clippy::too_many_arguments)]
 fn link(
     cmd: Option<&str>,
@@ -5033,6 +5091,7 @@ fn link(
     onto: bool,
     defer: bool,
     packs: bool,
+    own_line: bool,
 ) -> anyhow::Result<()> {
     let rustcs = splice.is_some_and(|it| lock(&RUSTC_LINKED).contains(it));
     if let Some(binary) = splice.filter(|_| !patched) {
@@ -5206,6 +5265,10 @@ fn link(
     if let Some(binary) = splice.filter(|_| onto) {
         lock(&ONTO_RUSTCS).remove(binary);
         return Err(RustcLinkedLost { why: declined, onto: true }.into());
+    }
+    // The worker's own line has the object and not the patch, which alone has the edit.
+    if own_line && patched && patch.is_some() {
+        return Err(PatchUnlinked { why: declined }.into());
     }
     let reading = whole::read(object)?;
     if let Some(binary) = splice {
@@ -7292,9 +7355,6 @@ fn main() -> anyhow::Result<()> {
     {
         return ask(request, Path::new(&socket), Target::from_flags(std::env::args().skip(3))?);
     }
-    if std::env::var_os(doctest::ENABLED).is_some() {
-        return doctest::command(std::env::args_os().skip(1));
-    }
     trace::install();
     run(Args::parse(std::env::args().skip(1))?, None)
 }
@@ -7314,7 +7374,6 @@ fn lower_until(
     if done() {
         return Ok(());
     }
-    AHEAD_BEGUN.store(true, Ordering::SeqCst);
     let start = Instant::now();
     let mut functions = Vec::new();
     let mut crates = Vec::new();
@@ -7971,7 +8030,6 @@ fn run_holding(
         let whole = whole.map(|it| it.recv()?).transpose()?;
         let symbol_files = whole.as_ref().map_or(&symbol_files, |it| &it.symbol_files);
         let start = Instant::now();
-        pause_before_symbols();
         let table = SymbolTable::load(symbol_files, &root)?;
         eprintln!("symbols: {} in {:.1?}", table.len(), start.elapsed());
         Ok::<_, anyhow::Error>((table, whole))
@@ -8253,6 +8311,7 @@ fn run_holding(
                 known.stats.onto_rustcs,
                 false,
                 packs_whole(&args),
+                args.exe.is_some(),
             )?;
             if let Some(exe) = &args.exe {
                 // A daemon's link line linked it already.
@@ -9445,6 +9504,7 @@ fn run_holding(
             let from = Settled::of(&files, &db, base, over, patch, link_cmd.clone());
             let (as_built, object) = (as_built.clone(), out.clone());
             let packs = packs_whole(&programs[at].args);
+            let own_line = programs[at].args.exe.is_some();
             let read_as = (over != base).then(|| (over.clone(), unlinked.clone()));
             let linked = std::thread::spawn(move || {
                 let failed = link(
@@ -9457,6 +9517,7 @@ fn run_holding(
                     onto,
                     defer,
                     packs,
+                    own_line,
                 )
                 .err();
                 if failed.is_none() {
@@ -9999,8 +10060,11 @@ impl Program {
             let (over_rustc, onto) = (known.stats.over_rustc, known.stats.onto_rustcs);
             begin_link();
             let packs = packs_whole(args);
-            let unlinked =
-                link(cmd, splice, patch, &args.out, patched, over_rustc, onto, defer, packs).err();
+            let own_line = args.exe.is_some();
+            let unlinked = link(
+                cmd, splice, patch, &args.out, patched, over_rustc, onto, defer, packs, own_line,
+            )
+            .err();
             if let Some(lost) =
                 unlinked.as_ref().and_then(|it| it.downcast_ref::<RustcLinkedLost>())
             {
@@ -10009,6 +10073,12 @@ impl Program {
                     true => known.start_again(),
                     false => known.forget_rustc(),
                 }
+                return self.sync(db, listed, paths, edit, wanted, link_it, defer);
+            }
+            if let Some(lost) = unlinked.as_ref().and_then(|it| it.downcast_ref::<PatchUnlinked>())
+            {
+                eprintln!("{lost}: built in full");
+                known.start_again();
                 return self.sync(db, listed, paths, edit, wanted, link_it, defer);
             }
             failed = failed.or(unlinked.map(|it| Refused::Cargos(it.to_string())));

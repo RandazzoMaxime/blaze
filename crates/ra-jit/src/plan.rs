@@ -544,36 +544,8 @@ impl Plan {
             }
             None => (manifest.parent().unwrap_or(Path::new(".")), Some(manifest)),
         };
-        let graph = UnitGraph::of(dir, manifest, selection, &[], asked.env)?;
+        let graph = UnitGraph::of(dir, manifest, selection, asked.env)?;
         graph.plan(&Flags::of(dir, asked)?)
-    }
-
-    /// The programs the build `selection` names, of the targets `targets` picks (`--bin`,
-    /// `--example`), asked for in `dir` (of the package of `manifest`, when there is one): the
-    /// units cargo would link an executable of.
-    pub(crate) fn programs(
-        dir: &Path,
-        manifest: Option<&Path>,
-        selection: &Selection,
-        targets: &[String],
-    ) -> anyhow::Result<Vec<Program>> {
-        let graph = UnitGraph::of(dir, manifest, selection, targets, &FxHashMap::default())?;
-        let roots = graph.roots.iter().filter_map(|&it| graph.units.get(it));
-        let programs = roots.filter(|unit| {
-            let target = &unit.target;
-            let kind = |it: &str| target.kind.iter().any(|kind| kind == it);
-            (kind("bin") || kind("example"))
-                && target.crate_types.iter().all(|it| it == "bin")
-                && unit.mode == "build"
-        });
-        let programs = programs.map(|unit| Program {
-            package: unit.pkg_id.clone(),
-            name: unit.target.name.clone(),
-            root: unit.target.src_path.clone(),
-            example: unit.target.kind.iter().any(|it| it == "example"),
-            platform: unit.platform.clone(),
-        });
-        Ok(programs.collect())
     }
 
     /// What the build has a debugger told of the packages cargo was asked to build: the
@@ -638,36 +610,13 @@ struct Unit {
     profile: Profile,
     features: Vec<String>,
     dependencies: Vec<UnitDependency>,
-    /// The target it is built for, when the build names one.
-    #[serde(default)]
-    platform: Option<String>,
-    /// `build`, `test`, `run-custom-build` and the like.
-    #[serde(default)]
-    mode: String,
 }
 
 #[derive(Deserialize)]
 struct UnitTarget {
     kind: Vec<String>,
     #[serde(default)]
-    crate_types: Vec<String>,
-    #[serde(default)]
     name: String,
-    #[serde(default)]
-    src_path: PathBuf,
-}
-
-/// A program of a build: a unit cargo links an executable of.
-pub(crate) struct Program {
-    /// The package, as cargo names it in `cargo metadata`.
-    pub(crate) package: String,
-    /// The executable's name.
-    pub(crate) name: String,
-    /// The root file of its crate.
-    pub(crate) root: PathBuf,
-    pub(crate) example: bool,
-    /// The target it is built for, when the build names one.
-    pub(crate) platform: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -688,14 +637,13 @@ impl Unit {
 }
 
 impl UnitGraph {
-    /// What `cargo build --unit-graph` says of the build `selection` names, of the targets
-    /// `targets` picks, asked in `dir` of the package of `manifest` when there is one, with
-    /// `env` for the variables of whoever asks.
+    /// What `cargo build --unit-graph` says of the build `selection` names, asked in `dir` of
+    /// the package of `manifest` when there is one, with `env` for the variables of whoever
+    /// asks.
     fn of(
         dir: &Path,
         manifest: Option<&Path>,
         selection: &Selection,
-        targets: &[String],
         env: &FxHashMap<String, Option<String>>,
     ) -> anyhow::Result<UnitGraph> {
         let mut command = cargo_in(dir, env);
@@ -703,7 +651,7 @@ impl UnitGraph {
         if let Some(manifest) = manifest {
             command.arg("--manifest-path").arg(manifest);
         }
-        command.args(selection.flags()).args(targets);
+        command.args(selection.flags());
         if selection.dev_deps {
             command.arg("--all-targets");
         }

@@ -56,8 +56,11 @@ pub(crate) fn command(args: impl Iterator<Item = String>) -> anyhow::Result<()> 
         std::process::exit(FAILED);
     }
     let code = match asked {
+        Asked::Build(asked) if matches!(asked.subcommand, Subcommand::Build | Subcommand::Run) => {
+            whole::build(&asked)?
+        }
+        Asked::Build(asked) if asked.subcommand == Subcommand::Test => whole::test(&asked)?,
         Asked::Build(asked) => match asked.only_cargo() {
-            None if asked.flags.doc => run::only_doc_tests(&asked, &asked.typed)?,
             Some(reason) => {
                 let then = format!("this is `cargo {}`", asked.subcommand.name());
                 say::cargo_builds(&reason, &then, say::EDIT);
@@ -104,7 +107,9 @@ blaze: cargo's build, run, test and check, from a daemon that keeps the workspac
 
 usage: blaze <command> [cargo's flags]    (or cargo blaze <command>)
 
-  build, run, test   by the daemon when it has the workspace loaded, by cargo otherwise
+  build, run         each program built whole by blaze, with no rustc and no cargo build
+  test               each test built whole by blaze and run as cargo runs it, then the doc
+                     tests, each example built by blaze; no rustc, rustdoc or cargo build
   check              what the daemon's build of the same flags says, when it has one loaded;
                      otherwise what the daemon finds loading the workspace as it, with no rustc
   status             whether blaze is enabled, what the daemon has loaded, what fell back
@@ -272,11 +277,6 @@ fn build(asked: &Invocation) -> anyhow::Result<i32> {
             }
         }
         Err(unread) => {
-            if whole::asked_for(asked)
-                && let Some(code) = whole::build(asked)?
-            {
-                return Ok(code);
-            }
             if let Some(why) = unread {
                 say::cargo_builds(why, "building with cargo", say::COLD);
             }
@@ -361,7 +361,8 @@ fn check(asked: &Invocation) -> anyhow::Result<i32> {
         toolchain::note_failed();
         Ok(FAILED)
     };
-    if let Ok(state) = State::read(&asked.key(&cwd))
+    if asked.subcommand == Subcommand::Check
+        && let Ok(state) = State::read(&asked.key(&cwd))
         && !state.programs.is_empty()
     {
         match by_daemon(state) {
@@ -707,16 +708,7 @@ fn after_build(
             }
         },
         Subcommand::Test if asked.flags.no_run => Ok(0),
-        Subcommand::Test => {
-            let code = run::tests(asked, state, cwd, held)?;
-            let stopped = code != 0 && !asked.flags.no_fail_fast;
-            // Cargo 1.99 runs no doc tests when tests are picked by target or by name.
-            let picked = asked.flags.selects_targets || !asked.positional.is_empty();
-            if stopped || picked || !state.doc_tests {
-                return Ok(code);
-            }
-            Ok(code.max(run::doc_tests(asked)?))
-        }
+        Subcommand::Test => run::tests(asked, state, cwd, held),
     }
 }
 

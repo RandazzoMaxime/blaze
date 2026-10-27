@@ -341,7 +341,9 @@ impl Target {
                 "x86" => Some("-m32"),
                 _ => None,
             };
-            width.into_iter().chain(["-Wl,--as-needed"]).map(str::to_owned).collect()
+            // A program that takes edits while it runs is known by its build ID.
+            let args = ["-Wl,--as-needed", "-Wl,--build-id"];
+            width.into_iter().chain(args).map(str::to_owned).collect()
         }
     }
 

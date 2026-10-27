@@ -1,5 +1,0 @@
-# A program that takes edits, and beside it one the daemon leaves to cargo when a library both
-# use is edited; harness/live_fallback.py edits them. Its own workspace and lock, like demo/life.
-[workspace]
-members = ["shared", "probe", "stale"]
-resolver = "2"

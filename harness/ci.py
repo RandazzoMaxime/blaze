@@ -59,12 +59,10 @@ HARNESSES = [
     # 11 to 22 minutes a run, longer than the rest of the fast tier, and it caught nothing there
     # in 2026-10-25 and 26's 270 runs: the full tier's alone.
     ("core", ["wholeprogram.py"], {}, on("linux", "macos"), None),
-    # `cargo blaze build` from nothing with RA_JIT_WHOLE_BUILD=1: G's whole build, no cargo build.
+    # `cargo blaze build` from nothing: G's whole build, no cargo build.
     ("core", ["coldbuild.py"], {}, on("linux"), 2),
     ("core", ["splices.py"], {}, EVERYWHERE, 2),
     ("core", ["live_e2e.py"], {}, on("linux-x86_64"), 1),
-    # Cargo builds one program of two: the other runs on, taking edits, with no restart.
-    ("core", ["live_fallback.py"], {}, on("linux-x86_64"), 1),
     # A type added beside another, the code moved to it and the old one deleted, each a patch.
     ("core", ["live_types.py"], {}, on("linux-x86_64"), 1),
     # A program on a nightly feature (allocator_api) builds and takes live edits the same way.
@@ -83,8 +81,6 @@ HARNESSES = [
     ("core", ["unreached.py"], {}, on("linux", "macos"), 1),
     ("core", ["anonstatics.py"], {}, on("linux", "macos"), 1),
     # A static with state LLVM renamed (`SERVING.0`) at opt-level 1 is rustc's copy for both.
-    ("core", ["renamedstatics.py"], {}, on("linux", "macos"), 1),
-    ("core", ["renamedstatics.py", "--not-incremental"], {}, on("linux", "macos"), 2),
     ("core", ["loadedits.py"], {}, on("linux", "macos"), 2),
     ("core", ["testselect.py"], {}, on("linux", "macos"), 2),
     ("core", ["doctestonce.py"], {}, on("linux", "macos"), 1),
@@ -93,7 +89,6 @@ HARNESSES = [
     ("core", ["asmedits.py"], {"RA_JIT_ASSEMBLER": "cc"}, on("linux", "macos", backend="cranelift"), 1),
     ("core", ["includes.py"], {}, EVERYWHERE, 1),
     ("core", ["latelisted.py"], {}, on("linux", "macos"), 1),
-    ("core", ["aheadready.py"], {}, on("linux", "macos"), 1),
     ("core", ["rustsrc.py"], {}, EVERYWHERE, 1),
     # Each scenario runs rustc and rustdoc no more often than norustc/baseline.json says.
     ("core", ["norustc.py"], {}, on("linux", "macos"), 2),
@@ -151,7 +146,6 @@ FAST = {
     "coldbuild.py": (78, (X64,)),
     "splices.py": (51, ()),
     "live_e2e.py": (16, ()),
-    "live_fallback.py": (23, ()),
     "live_types.py": (9, ()),
     "LIVE_PROGRAM=live-alloc live_e2e.py": (16, ()),
     "headerpad.py": (18, ()),

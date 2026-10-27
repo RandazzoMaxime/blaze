@@ -2662,17 +2662,14 @@ pub fn compile_unnamed(db: &dyn HirDatabase, unnamed: &Unnamed, done: &dyn Fn() 
             std::thread::sleep(std::time::Duration::from_millis(1));
             continue;
         };
-        let compiled = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            pause_ahead(db);
-            match &job {
-                either::Either::Left(root) => {
-                    root_rows(db, *root);
-                    compiled_root(db, *root).as_ref().ok()
-                }
-                either::Either::Right((instance, env)) => {
-                    instance_rows(db, instance.clone(), env.clone());
-                    compiled_instance(db, instance.clone(), env.clone()).as_ref().ok()
-                }
+        let compiled = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| match &job {
+            either::Either::Left(root) => {
+                root_rows(db, *root);
+                compiled_root(db, *root).as_ref().ok()
+            }
+            either::Either::Right((instance, env)) => {
+                instance_rows(db, instance.clone(), env.clone());
+                compiled_instance(db, instance.clone(), env.clone()).as_ref().ok()
             }
         }));
         let given_up = compiled.is_err() && done();
@@ -2697,21 +2694,6 @@ pub fn compile_unnamed(db: &dyn HirDatabase, unnamed: &Unnamed, done: &dyn Fn() 
                 state.queue.push(it);
             }
         }
-    }
-}
-
-/// Holds each job of [`compile_unnamed`] for `RA_JIT_AHEAD_PAUSE_MS`, asking the database
-/// whether it was cancelled as a query does: a function that takes that long to compile, for
-/// `harness/aheadready.py`.
-fn pause_ahead(db: &dyn HirDatabase) {
-    static PAUSE: LazyLock<Option<u64>> = LazyLock::new(|| {
-        std::env::var("RA_JIT_AHEAD_PAUSE_MS").ok().and_then(|it| it.parse().ok())
-    });
-    let Some(pause) = *PAUSE else { return };
-    let start = std::time::Instant::now();
-    while start.elapsed() < std::time::Duration::from_millis(pause) {
-        salsa::Database::unwind_if_revision_cancelled(db);
-        std::thread::sleep(std::time::Duration::from_millis(1));
     }
 }
 
@@ -6809,8 +6791,8 @@ impl<'a, 'db> ObjectCodegen<'a, 'db> {
             if self.replaced.broken.contains(&node) {
                 unsupported!("callee `{name}`: an instance of the base gained or lost code");
             }
-            // The base's copy is of the source before the edit.
-            if self.replaced.changed.contains(&node) {
+            // The base's copy is of the source before the edit, or the link left it out.
+            if self.replaced.changed.contains(&node) || !self.symbols.linked(&known.symbol) {
                 let compiled = compiled_instance(self.db, instance.clone(), known.env.clone());
                 let compiled = compiled.as_ref().map_err(Clone::clone)?;
                 let id = self.module.declare_function(
@@ -6914,7 +6896,8 @@ impl<'a, 'db> ObjectCodegen<'a, 'db> {
         let from_store = self.entries.is_some() || self.base.is_some_and(|it| !it.found.is_empty());
         let stable = if from_store { self.stable_name(instance) } else { None };
         if let Some(name) = &stable {
-            if let Some(symbol) = self.base.and_then(|base| base.found.get(name)) {
+            let found = self.base.and_then(|base| base.found.get(name));
+            if let Some(symbol) = found.filter(|it| self.symbols.linked(it)) {
                 return self.import(symbol, sig);
             }
             let body = signature.is_some().then_some(sig);

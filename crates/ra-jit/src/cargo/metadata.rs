@@ -102,18 +102,14 @@ pub(crate) fn own(selection: &crate::plan::Selection) -> Option<project_model::O
 
 /// The programs a build of `selection` links of `targets`, asked for in `cwd` (of the package
 /// of `manifest`, when there is one), planned with blaze's own resolution for the triple
-/// `target` or the host's: what cargo's unit graph has. `None` when `RA_JIT_OWN_RESOLVE=0`
-/// leaves the plan to cargo.
+/// `target` or the host's: what cargo's unit graph has.
 pub(crate) fn programs(
     selection: &crate::plan::Selection,
     cwd: &Path,
     manifest: Option<&Path>,
     targets: blaze_metadata::Targets<'_>,
-) -> Option<anyhow::Result<Vec<blaze_metadata::Program>>> {
-    if std::env::var_os("RA_JIT_OWN_RESOLVE").is_some_and(|it| it == "0") {
-        return None;
-    }
-    let planned = || {
+) -> anyhow::Result<Vec<blaze_metadata::Program>> {
+    {
         let rustc = super::state::rustc_path();
         let asked = |args: &[&str]| {
             let said = super::state::rustc_says(&rustc, args).filter(|it| !it.is_empty());
@@ -152,8 +148,7 @@ pub(crate) fn programs(
             store: None,
         };
         Ok(blaze_metadata::programs(&asked, targets)?.1)
-    };
-    Some(planned())
+    }
 }
 
 /// A `cfg` as rust-analyzer has it, as cargo's platforms read it.

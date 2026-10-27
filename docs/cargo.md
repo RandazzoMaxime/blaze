@@ -105,40 +105,12 @@ to cargo, and no cargo plugin is run ([Every subcommand](#every-subcommand)).
 
 ## What a build does
 
-The first build of a workspace is cargo's own, run with ra-jit as the
-`RUSTC_WORKSPACE_WRAPPER`. The wrapper runs rustc exactly as cargo asked and records, for
-each crate of the workspace, the arguments, the files rustc wrote and, for a program, the
-line the linker was run with. Diagnostics, progress and the exit status are cargo's.
-
-The daemon is started before cargo, if it is not running, and loads the workspace while cargo
-builds, with what cargo says of the build scripts it runs and the proc macros it builds, kept in
-`target/ra-jit/<build>/scripts`: none of them is built or run again for it, in
-`target/rust-analyzer` or anywhere else. When cargo's build succeeds, the command waits for the
-daemon to have the workspace loaded and to build the programs from it, and those are the build's,
-as they are of every build after it:
-
-         Waiting for blaze to load the workspace
-        Finished `dev` profile [ra-jit] target(s) in 41.20s
-
-A program the daemon does not build then stays cargo's, and the build says why. A build asked
-for while the daemon is still loading, as after it was stopped, waits for it the same way.
-
-Once the daemon is ready, a build after an edit does not start cargo at all. The daemon
-compiles the functions that changed and either splices them into the executable or links
-again, and the result is put where cargo would have put it. The status line shows which path
-a build took:
-
-    Finished `dev` profile [ra-jit] target(s) in 0.24s
-
-`[ra-jit]` means the daemon built it. A cargo build prints cargo's usual line.
-
-With `RA_JIT_WHOLE_BUILD=1` (or `BLAZE_WHOLE_BUILD=1`), `build` and `run` from nothing are
-blaze's own instead of cargo's ([no-rustc.md](no-rustc.md), step K): each program the build
-asks for is built whole, every crate it depends on compiled by blaze over the shipped standard
-library and linked by blaze, and put where cargo puts it (`target/debug/<name>`,
-`target/release/<name>`, `examples/` for an example). No `cargo build` runs. A function the
-program can reach that blaze cannot compile yet fails the build, which says which and why;
-nothing is handed to cargo:
+blaze never runs rustc, and a build has one path ([no-rustc.md](no-rustc.md)). `build` and
+`run` build each program the build asks for whole: every crate it depends on is compiled by
+blaze over the shipped standard library and linked by blaze, and the executable is put where
+cargo puts it (`target/debug/<name>`, `target/release/<name>`, `examples/` for an example).
+No `cargo build` runs. A function the program can reach that blaze cannot compile fails the
+build, which says which and why; nothing is handed to cargo or rustc:
 
        Compiling kapp v0.3.1 (/src/k/app)
         Finished `dev` profile [ra-jit] target(s) in 18.40s
@@ -147,12 +119,35 @@ nothing is handed to cargo:
     error: `kuses` can reach functions blaze could not compile, so it is not built:
       `khalf::halved`: unsupported: f16 and f128
 
-Build scripts and proc macros are still built and run as the daemon's load does
-(`target/rust-analyzer`). A build of libraries alone and `test` are as without the setting.
+What blaze does not build yet fails the same way, saying what: the targets `--bins`,
+`--examples`, `--tests`, `--benches` and `--all-targets` pick, several `--target`s,
+`--target-dir`, `--message-format`, `-Z`, and `--build-plan` and `--unit-graph`. A build of
+libraries alone (`--lib`, or a workspace with no program) is the daemon's check of them:
+blaze writes no library for cargo, and says what it finds.
+
 The build is the daemon's: its worker loads the workspace, builds and links the programs, and
-answers once they are linked. The next build asks the same worker, which builds what was
-edited since on what it loaded and links the programs again; a changed manifest or lock file
-has a new worker load the workspace.
+answers once they are linked. The next build asks the same worker, which compiles the
+functions that changed on what it loaded and splices them into the executable or links again;
+a changed manifest or lock file has a new worker load the workspace. Build scripts and proc
+macros are still built and run as the daemon's load does (`target/rust-analyzer`).
+
+`test` builds whole what cargo would test: each member's library, binaries and integration
+tests with `test = true`, the examples built beside them to see that they compile, and the
+binaries an integration test runs (`CARGO_BIN_EXE_<name>`), or what `--lib`, `--bin`,
+`--example` and one `--test` name. A worker that loads the workspace with `cfg(test)` builds
+the unit tests, one that loads it without builds the rest; a test's executable is
+`target/debug/deps/<name>-<kind>`. A unit test with `harness = false`, several `--test`s and
+the other target flags fail the build and say so. The doc tests are still taken out through
+`cargo test --doc`, which runs no rustc.
+
+`test` builds whole what cargo would test: each member's library, binaries and integration
+tests with `test = true`, the examples built beside them to see that they compile, and the
+binaries an integration test runs (`CARGO_BIN_EXE_<name>`), or what `--lib`, `--bin`,
+`--example` and one `--test` name. A worker that loads the workspace with `cfg(test)` builds
+the unit tests, one that loads it without builds the rest; a test's executable is
+`target/debug/deps/<name>-<kind>`. A unit test with `harness = false`, several `--test`s and
+the other target flags fail the build and say so. The doc tests are still taken out through
+`cargo test --doc`, which runs no rustc.
 
 `run` then runs the program and `test` runs the test executables the way cargo does: the
 same working directory, the variables cargo sets, cargo's `Running` lines and the same exit
@@ -608,7 +603,6 @@ build a command line is, so changing one starts from a cargo build again.
 | `RA_JIT_EMIT` | LLVM instruction selection: `optimized` or `fast` | `optimized`; `fast` at level 0 |
 | `RA_JIT_INLINE` | With LLVM at level 2 or 3, a program built whole (`runbench.py`'s builds) has the functions it calls in any crate built into it or shown to LLVM, as a release build does; the standard library's only when they are generic or `#[inline]`, as rustc does across crates. `crate` keeps that to the function's own crate, `0` builds nothing in, `all` does it in other builds with LLVM at level 2 or 3 too (never the daemon's, whose store keeps each function by its own code alone) | across crates in a whole program, the function's own crate otherwise |
 | `RA_JIT_SPLICE` | `0` links in full after every edit instead of splicing | splice |
-| `RA_JIT_WHOLE_BUILD` | `1` has `build` and `run` from nothing build each program whole with blaze, with no `cargo build` ([above](#what-a-build-does)) | cargo builds first |
 | `RA_JIT_OTHER_TOOLCHAIN` | `1` builds with the project's toolchain when it is not the pinned nightly, rather than with the pinned nightly, for a project pinned to a nightly near it; nothing checks that it agrees ([support.md](support.md#toolchain)) | not set |
 
 `RA_JIT_TESTS` is read by each `cargo ra-jit test` alone and is not part of which build it
