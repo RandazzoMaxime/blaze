@@ -248,6 +248,9 @@ pub(crate) fn plan(script: &Script<'_>) -> anyhow::Result<Plan> {
     readable.extend(programs.chain(path).filter(|it| {
         it.is_dir() && emptied(it) && std::fs::canonicalize(it).is_ok_and(|real| emptied(&real))
     }));
+    // What it would download, handed to it locked, as `cargo/fetches.rs` says.
+    let handed = super::fetches::hand(&env, script.out_dir, root.as_deref(), &also)?;
+    readable.extend(handed.readable);
     readable.sort();
     readable.dedup();
     // The innermost is enough: a directory is seen with what is below it.
@@ -255,7 +258,9 @@ pub(crate) fn plan(script: &Script<'_>) -> anyhow::Result<Plan> {
     readable.retain(|it| !all.iter().any(|other| other != it && it.starts_with(other)));
     let mut not_inputs = vec![script.real.to_owned()];
     not_inputs.extend(std::fs::canonicalize(script.real).ok());
-    let env = env.into_iter().filter(|(name, _)| given(name) || also.contains(name)).collect();
+    let mut env: Vec<(String, String)> =
+        env.into_iter().filter(|(name, _)| given(name) || also.contains(name)).collect();
+    env.extend(handed.env);
     let spec = Spec {
         cwd: script.cwd.to_owned(),
         env,
@@ -480,6 +485,10 @@ pub(crate) fn run(script: &Script<'_>, plan: &Plan, stdin: Stdio) -> anyhow::Res
         && let Some(note) = refused_note(lines, package, root_manifest.as_deref())
     {
         output.stderr.extend(format!("note: {note}\n").into_bytes());
+        let fetches = super::fetches::no_override_note(package, lines, &output.stdout, &output.stderr);
+        if let Some(note) = fetches {
+            output.stderr.extend(format!("note: {note}\n").into_bytes());
+        }
     }
     let reads = lines.filter(|it| it.iter().all(|it| it.reached != Reached::Incomplete));
     let reads = reads.map(|lines| inputs(&lines, script, spec));

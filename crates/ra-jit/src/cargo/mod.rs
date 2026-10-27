@@ -12,6 +12,7 @@ mod client;
 #[cfg(unix)]
 pub(crate) mod closure;
 mod directives;
+pub(crate) mod fetches;
 pub(crate) mod layout;
 mod messages;
 pub(crate) mod metadata;
@@ -86,6 +87,7 @@ pub(crate) fn command(args: impl Iterator<Item = String>) -> anyhow::Result<()> 
                 FAILED
             }
         },
+        Asked::Lock(args) => fetches::command(&args)?,
         Asked::Help => {
             println!("{HELP}");
             0
@@ -113,6 +115,8 @@ usage: blaze <command> [cargo's flags]    (or cargo blaze <command>)
   enable, disable    plain `cargo build|run|test|check` through blaze, and back
   toolchain          blaze's own toolchain, which it builds every project with, downloaded once
                      if it has none (`--path`: its directory)
+  lock --fetches     records what build scripts download, by sha256, in Cargo.fetches.lock
+                     (`--target <triple>`, the host's by default); a build hands it to them
   cache              what the `#[ra_jit::cache]` functions kept, by function
   cache clear        forgets it; `--stale`, all but what each function's code computed
 

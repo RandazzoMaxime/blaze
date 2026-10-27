@@ -10,6 +10,17 @@ each one's section: what `[Unreleased]` had, and the title of each change merged
 
 ### Added
 
+- `blaze lock --fetches [--target <triple>]...` pins what build scripts download, as Nix pins a
+  fixed-output derivation: each download by its sha256 in `Cargo.fetches.lock` beside
+  `Cargo.lock`, kept by the package's name, version and `Cargo.lock` checksum, the bytes in
+  blaze's store (so a remote cache carries them). A build, which has no network, hands each to
+  its build script through the crate's own variable (`RUSTY_V8_ARCHIVE` for `v8`,
+  `ORT_CACHE_DIR` for `ort-sys`, `LK_CUSTOM_WEBRTC` for `webrtc-sys`;
+  `HELIX_DISABLE_AUTO_GRAMMAR_BUILD=1` for `helix-term`, which then downloads nothing), and a
+  missing or stale entry fails naming the command. A script refused the network that blaze has
+  no override for is told which variable an override would set
+  (`bench/results/2026-10-27-bscache/fetches.md`).
+
 - `cargo blaze build` links a library's `cdylib` (#262): a package whose crate types include
   `cdylib`, such as a napi-rs Node addon or a pyo3 extension, gets its shared library at
   cargo's path (`target/debug/lib<name>.so`, `.dylib` on macOS), exporting its
