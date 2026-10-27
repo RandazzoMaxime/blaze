@@ -89,6 +89,43 @@ pub mod unnamed_parameter {
     }
 }
 
+/// lewton 0.10 writes its own `try!` through `$crate::std`, and rodio 0.22 reaches it from
+/// bevy_audio: in a 2015 crate the root holds the `extern crate std;` rustc injects, so
+/// `$crate::std`, `crate::std` and `super::std` name it.
+pub mod std_in_root {
+    macro_rules! attempt {
+        ($expr:expr) => {
+            match $expr {
+                $crate::std::result::Result::Ok(val) => val,
+                $crate::std::result::Result::Err(err) => {
+                    return Err($crate::std::convert::From::from(err));
+                }
+            }
+        };
+    }
+
+    fn digit(c: char) -> Result<u32, char> {
+        c.to_digit(10).ok_or(c)
+    }
+
+    fn sum(text: &str) -> Result<u32, String> {
+        let mut total = 0;
+        for c in text.chars() {
+            total += attempt!(digit(c).map_err(|c| format!("not a digit: {}", c)));
+        }
+        Ok(total)
+    }
+
+    fn named(text: &str) -> crate::std::string::String {
+        let parts: super::std::vec::Vec<&str> = text.split(',').collect();
+        parts.join("+")
+    }
+
+    pub fn run() -> (Result<u32, String>, Result<u32, String>, String) {
+        (sum("1234"), sum("12x4"), named("a,b,c"))
+    }
+}
+
 use std::panic::catch_unwind;
 
 /// What a panic that unwound said, when it said a string.
