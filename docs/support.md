@@ -42,8 +42,8 @@ lays out, mangles and passes values as the pinned nightly does.
 |---|---|---|---|---|---|
 | Cranelift | yes (1) | yes (1) | yes (1) | yes (1) | does not apply (2) |
 | LLVM | yes (1) | yes (1) | yes (1) | yes (1) | no |
-| Full link | yes (1) | yes (1) | yes (1) | yes (1) | yes, older branch (2) |
-| Splice | yes (3) | yes (3) | yes (4) | yes, with a limit (5) | yes, older branch (2) |
+| Full link | yes (1) | yes (1) | yes (1) | yes (1) | yes, ahead of rustc's rlibs (2) |
+| Splice | yes (3) | yes (3) | yes (4) | yes, with a limit (5) | yes (2) |
 | Debug info | yes (6) | yes (6) | lines only (7) | unverified (7) | no |
 | `cargo blaze` | yes (8) | unverified (9) | no: goes to cargo (9) | yes, by hand (9) | no |
 | Disk store | yes (10) | yes (10) | yes (10) | yes (10) | unverified |
@@ -57,18 +57,19 @@ lays out, mangles and passes values as the pinned nightly does.
    `includes`, `worktrees` and `keys` ran on every leg. Under LLVM, `backends.py` reports no
    corpus function left to Cranelift on any of the four. Local: 822 of 822 under both.
 2. wasm32 uses its own lowering from Cranelift IR, not Cranelift's or LLVM's code
-   generation. [reports/WASM32.md](reports/WASM32.md) measured `wasm32-wasip1` under
-   wasmtime on the `ra-jit-wasm32-target` branch with `nightly-2026-05-10`: corpus MATCH with
-   655 of 656 functions from ra-jit, stress 99 of 99, splices 71 of 71 with 62 spliced. wasm
-   is not in CI and nobody has recorded a run since the move to 1.99.0, nor on the pinned nightly. No unwinding is
-   emitted; the wasm targets are `panic=abort`. `wasm32-unknown-unknown` was only exercised
-   through one Dioxus page.
+   generation. `wasm32-wasip1` under wasmtime, 2026-10-27, arm64 ix VM, pinned nightly:
+   corpus MATCH with 913 of 914 functions from ra-jit, stress 100 of 100, splices 71 of 71,
+   breakers 176 of 176 ([platforms.md](platforms.md), wasm32). The train runs the corpus and
+   stress for it on every push to main. That is ahead of rustc's rlibs: with nothing of
+   rustc's, programs and the std unit compile but do not link yet. No unwinding is emitted;
+   the wasm targets are `panic=abort`. `wasm32-unknown-unknown` was only exercised through
+   one Dioxus page, on an earlier branch ([reports/WASM32.md](reports/WASM32.md)).
 3. `splices.py` 71 of 71 in CI on both Linux architectures; `farsplices.py` 6 of 6 on
    AArch64, where a branch reaches only 128 MB. Not every edit can be spliced: about 60 of
    the 71 steps are, and the rest link in full by design (an executable somebody else
    wrote, a static that grew, a running executable, and similar).
-4. [platforms.md](platforms.md), Windows: 71 of 71 with 60 spliced, 10 full links and
-   1 step with nothing edited, and the harness fails on Windows if the count is not 60.
+4. [platforms.md](platforms.md), Windows: 71 of 71 with 57 spliced, 13 full links and
+   1 step with nothing edited, and the harness fails on Windows if the count is not 57.
 5. [platforms.md](platforms.md), macOS: `splices.py` 71 of 71. The daemon links with
    `-no_fixup_chains`, so a deployment target of 12 or later splices as 11.0 does
    (`headerpad.py` builds for 14.0); an executable linked with chained fixups by a line of
@@ -263,7 +264,7 @@ cargo, as [cargo.md](cargo.md) lists.
 | `panic = "abort"` | supported | unverified |
 | `lto = true`, `lto = "thin"` | refused: rustc recompiles the whole program at link time and leaves no library to link ra-jit's functions against | cargo |
 | `lto = "off"` | supported | unverified |
-| crate types `bin`, `lib`, `rlib`, `dylib`, `cdylib`, `staticlib` | supported | programs only; a build that would write a `cdylib` or `staticlib` stops with an error, since blaze does not link one yet ([#262](https://github.com/indexable-inc/blaze/issues/262)) |
+| crate types `bin`, `lib`, `rlib`, `dylib`, `cdylib`, `staticlib` | supported | programs, and a library's `cdylib`, linked as a shared library and linked again after each edit rather than spliced; a build that would write a `staticlib` stops with an error, since blaze does not link one yet ([#262](https://github.com/indexable-inc/blaze/issues/262)) |
 | proc macros (attribute, derive, function-like) | supported: rustc's build of the macro is loaded and its expansion is compiled by ra-jit | served; an edit to the proc-macro crate itself is cargo's |
 | build scripts (`rerun-if-changed`, `rerun-if-env-changed`, `rustc-cfg`, `rustc-env`, `rustc-link-lib`, `OUT_DIR`, `links`) | supported | served; a change to a script or its inputs is cargo's, then the daemon reloads |
 | unit tests, integration tests, examples, benches | supported | served; adding or removing a `#[test]` is cargo's |

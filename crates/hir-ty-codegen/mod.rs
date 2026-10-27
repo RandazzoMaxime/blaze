@@ -511,6 +511,11 @@ enum PassMode {
         skipped: u8,
     },
     Indirect,
+    /// An unsized value (`unsized_fn_params`): rustc's `PassMode::Indirect` with
+    /// `meta_attrs`, the address of the value and then its metadata (length or vtable), the
+    /// value staying where the caller has it. In the codegen the place of such a value is a
+    /// pair of those two words in memory, as an unsized local's slot is.
+    IndirectUnsized,
     /// A vector of AArch64's shorter than 64 bits, whose lanes LLVM widens to make a 64-bit
     /// vector of the same count (`<4 x i8>` as `<4 x i16>`): in the low 64 bits of a vector
     /// register, each lane of `lane` at the bottom of `stride` bytes, the bits above it
@@ -8099,6 +8104,13 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
     }
 
     fn pass_mode(&self, layout: &Layout, is_ret: bool) -> Result<PassMode> {
+        if let BackendRepr::Memory { sized: false } = layout.backend_repr {
+            // rustc's `make_indirect` of an unsized argument; nothing returns one.
+            if is_ret {
+                unsupported!("an unsized value returned");
+            }
+            return Ok(PassMode::IndirectUnsized);
+        }
         if layout.is_zst() {
             return Ok(PassMode::Ignore);
         }
@@ -8238,6 +8250,10 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
             self.wide_ints_on_stack(&mut abi)?;
             self.wide_ints_after_registers(&mut abi)?;
             return Ok(abi);
+        }
+        let args: Vec<_> = args.into_iter().collect();
+        if args.iter().any(|&ty| self.is_unsized(ty)) {
+            unsupported!("an unsized value passed in calling convention {abi:?}");
         }
         if self.cg.target.call_conv == isa::CallConv::WindowsFastcall {
             if matches!(abi, ExternAbi::SysV64 { .. }) {
@@ -8392,6 +8408,9 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
                 PassMode::Spread { .. } => unreachable!("only the Rust ABI spreads lanes"),
                 PassMode::SpilledPair { .. } => unreachable!("only the stack spills a pair"),
                 PassMode::SkippingPair { .. } => unreachable!("only AAPCS64 skips registers"),
+                PassMode::IndirectUnsized => {
+                    unreachable!("only the Rust ABI passes unsized values")
+                }
             };
             let aggregate = matches!(mode, PassMode::Cast(_) | PassMode::CastPair(..));
             let in_registers = match (int_regs.checked_sub(ints), sse_regs.checked_sub(sses)) {
@@ -8841,6 +8860,9 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
                 params.extend((0..count).map(|_| AbiParam::new(unit)));
             }
             PassMode::Indirect => params.push(AbiParam::new(ptr())),
+            PassMode::IndirectUnsized => {
+                params.extend([AbiParam::new(ptr()), AbiParam::new(ptr())])
+            }
             PassMode::Spread { .. } => params.push(AbiParam::new(types::F64)),
             PassMode::OnStack { size, padded } => {
                 params.extend(padded.then(|| copied(8)));
@@ -8945,6 +8967,12 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
                 self.copy(copy, addr, layout.size);
                 values.push(copy);
             }
+            // The callee is handed the value where it is, as rustc does: the operand is a
+            // place moved out of, whose memory nothing reads again.
+            PassMode::IndirectUnsized => {
+                values.push(self.builder.ins().load(ptr(), MEM, addr, 0));
+                values.push(self.builder.ins().load(ptr(), MEM, addr, meta_at()));
+            }
             PassMode::OnStack { padded, .. } => {
                 if padded {
                     values.push(self.scratch());
@@ -8986,6 +9014,11 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
         let mut next = || values.next().expect("a value for every abi parameter");
         match mode {
             PassMode::Ignore | PassMode::Indirect | PassMode::OnStack { .. } => (),
+            PassMode::IndirectUnsized => {
+                let (data, meta) = (next(), next());
+                self.builder.ins().store(MEM, data, addr, 0);
+                self.builder.ins().store(MEM, meta, addr, meta_at());
+            }
             PassMode::Direct(_) => {
                 let value = next();
                 self.builder.ins().store(MEM, value, addr, 0);
@@ -9352,10 +9385,14 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
                 PassMode::Indirect | PassMode::OnStack { .. } => {
                     incoming.next().expect("indirect param")
                 }
+                PassMode::IndirectUnsized => self.scratch_pair(),
                 _ => self.stack_slot(layout),
             };
             self.receive(mode, &mut incoming, addr, layout);
-            self.locals.insert(local, LocalSlot { addr, borrowed: false });
+            // An unsized parameter's slot is where the value is and its metadata, as
+            // rustc's `LocalRef::UnsizedPlace`.
+            let borrowed = matches!(mode, PassMode::IndirectUnsized);
+            self.locals.insert(local, LocalSlot { addr, borrowed });
             if matches!(mode, PassMode::Indirect | PassMode::OnStack { .. }) {
                 self.note_passed_in_memory(body, local, addr);
             }
@@ -12439,7 +12476,29 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
     }
 
     fn operands(&mut self, operands: &[Operand]) -> Result<Vec<(Value, Ty<'db>)>> {
-        operands.iter().map(|it| self.operand(it)).collect()
+        operands.iter().map(|it| self.argument(it)).collect()
+    }
+
+    /// An argument of a call. An unsized one (`unsized_fn_params`) is a place moved out of,
+    /// and is where a pair of its address and metadata is, which `PassMode::IndirectUnsized`
+    /// passes.
+    fn argument(&mut self, operand: &Operand) -> Result<(Value, Ty<'db>)> {
+        let (OperandKind::Copy(place) | OperandKind::Move(place)) = &operand.kind else {
+            return self.operand(operand);
+        };
+        let ty = self.operand_ty(operand)?;
+        if !self.is_unsized(ty) {
+            return self.operand(operand);
+        }
+        let PlaceRef { addr, meta: Some(meta), .. } = self.place_ref(place)? else {
+            unsupported!("unsized argument {ty:?} without metadata");
+        };
+        // What the operand reads, for `given_away`.
+        self.operand(operand)?;
+        let pair = self.scratch_pair();
+        self.builder.ins().store(MEM, addr, pair, 0);
+        self.builder.ins().store(MEM, meta, pair, meta_at());
+        Ok((pair, ty))
     }
 
     /// `Fn::call`, `FnMut::call_mut` or `FnOnce::call_once`. For a call expression MIR passes
@@ -12711,8 +12770,13 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
         dst_ty: Ty<'db>,
     ) -> Result<()> {
         let receiver_layout = self.layout(receiver_ty)?;
-        if !matches!(receiver_layout.backend_repr, BackendRepr::ScalarPair { .. })
-            || receiver_layout.size.bytes_usize() != 2 * word()
+        // A `dyn Trait` taken by value is where the pair of its data pointer and vtable is
+        // (`argument`), as a fat pointer to it would be; rustc hands the method the data
+        // pointer as well.
+        let by_value = matches!(receiver_ty.kind(), TyKind::Dynamic(..));
+        if !by_value
+            && (!matches!(receiver_layout.backend_repr, BackendRepr::ScalarPair { .. })
+                || receiver_layout.size.bytes_usize() != 2 * word())
         {
             unsupported!("vtable call with receiver {receiver_ty:?}");
         }
@@ -13153,6 +13217,7 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
                 PassMode::Indirect | PassMode::OnStack { .. } => {
                     incoming.next().expect("indirect param")
                 }
+                PassMode::IndirectUnsized => self.scratch_pair(),
                 _ => self.stack_slot(&layout),
             };
             self.receive(mode, &mut incoming, addr, &layout);
@@ -13338,6 +13403,7 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
                     PassMode::Indirect | PassMode::OnStack { .. } => {
                         incoming.next().expect("indirect param")
                     }
+                    PassMode::IndirectUnsized => self.scratch_pair(),
                     _ => self.stack_slot(&layout),
                 };
                 self.receive(mode, &mut incoming, addr, &layout);
@@ -13533,7 +13599,7 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
         let sret = sig.params.first().is_some_and(|it| it.purpose == ArgumentPurpose::StructReturn);
         let count = match mode {
             PassMode::Ignore => 0,
-            PassMode::Pair(..) => 2,
+            PassMode::Pair(..) | PassMode::IndirectUnsized => 2,
             PassMode::SpilledPair { spilled, .. } => {
                 spilled.iter().map(|it| it.map_or(1, |padded| 1 + usize::from(padded))).sum()
             }
@@ -14477,6 +14543,12 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
                 self.builder.ins().store(MEM, value, dst, 0);
             }
             (
+                "simd_add" | "simd_sub" | "simd_mul" | "simd_div" | "simd_eq" | "simd_ge"
+                | "simd_gt" | "simd_le" | "simd_lt" | "simd_neg" | "simd_fabs" | "simd_fsqrt"
+                | "simd_floor" | "simd_ceil" | "simd_fma" | "simd_cast",
+                _,
+            ) if self.half_lanes(args, dst_ty)? => self.half_vector(name, args, dst, dst_ty)?,
+            (
                 "simd_and"
                 | "simd_or"
                 | "simd_xor"
@@ -14598,7 +14670,7 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
                 let (on_true, _) = self.operand(on_true)?;
                 let (on_false, _) = self.operand(on_false)?;
                 let (mask_lane, count) = self.simd_lanes(mask_ty)?;
-                let (lane, _) = self.simd_lanes(dst_ty)?;
+                let (lane, _) = self.simd_moved_lanes(dst_ty)?;
                 for i in 0..count {
                     let offset = (i * lane.ty.bytes() as u64) as i32;
                     let mask_offset = (i * mask_lane.ty.bytes() as u64) as i32;
@@ -14615,7 +14687,7 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
                 let (mask, _) = self.operand(mask)?;
                 let (on_true, _) = self.operand(on_true)?;
                 let (on_false, _) = self.operand(on_false)?;
-                let (lane, count) = self.simd_lanes(dst_ty)?;
+                let (lane, count) = self.simd_moved_lanes(dst_ty)?;
                 // Lane i by bit i of the mask, an integer or bytes: its bytes in memory in order.
                 let lanes: Vec<Value> = (0..count)
                     .map(|i| {
@@ -14655,7 +14727,7 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
             ("simd_extract", [vector, index]) => {
                 let (vector, ty) = self.operand(vector)?;
                 let (index, _) = self.load_scalar(index)?;
-                let (lane, _) = self.simd_lanes(ty)?;
+                let (lane, _) = self.simd_moved_lanes(ty)?;
                 let index = self.builder.ins().uextend(ptr(), index);
                 let offset = self.builder.ins().imul_imm(index, lane.ty.bytes() as i64);
                 let addr = self.builder.ins().iadd(vector, offset);
@@ -14666,7 +14738,7 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
                 let (vector, ty) = self.operand(vector)?;
                 let (index, _) = self.load_scalar(index)?;
                 let (value, _) = self.load_scalar(value)?;
-                let (lane, _) = self.simd_lanes(ty)?;
+                let (lane, _) = self.simd_moved_lanes(ty)?;
                 let size = self.layout(ty)?.size;
                 self.copy(dst, vector, size);
                 let index = self.builder.ins().uextend(ptr(), index);
@@ -14680,8 +14752,8 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
                 // `[u32; N]`, or a wrapper of one. Lanes of `second` come after `first`'s.
                 let (indices, _) = self.operand(indices)?;
                 let layout = self.layout(ty)?;
-                let (lane, _) = self.simd_lanes(ty)?;
-                let (_, count) = self.simd_lanes(dst_ty)?;
+                let (lane, _) = self.simd_moved_lanes(ty)?;
+                let (_, count) = self.simd_moved_lanes(dst_ty)?;
                 let lane_size = lane.ty.bytes() as u64;
                 let both = self.builder.create_sized_stack_slot(StackSlotData::new(
                     StackSlotKind::ExplicitSlot,
@@ -14706,7 +14778,7 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
             }
             ("simd_splat", [arg]) => {
                 let (src, _) = self.operand(arg)?;
-                let (lane, count) = self.simd_lanes(dst_ty)?;
+                let (lane, count) = self.simd_moved_lanes(dst_ty)?;
                 let value = self.builder.ins().load(lane.ty, MEM, src, 0);
                 for i in 0..count {
                     let offset = (i * lane.ty.bytes() as u64) as i32;
@@ -15729,7 +15801,7 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
         {
             return Ok(());
         }
-        if name.starts_with("aarch64.sve.") {
+        if name.starts_with("aarch64.sve.") || name.starts_with("vector.reverse.nxv") {
             return self.sve_intrinsic(name, args, dst, dst_ty);
         }
         match (name, args) {
@@ -16218,6 +16290,80 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
             _ => unsupported!("LLVM intrinsic `{name}`"),
         }
         Ok(())
+    }
+
+    /// The lanes of a vector type for an operation that only moves them, which moves the bits
+    /// of a lane of `f16` as an integer of 16 bits.
+    fn simd_moved_lanes(&self, ty: Ty<'db>) -> Result<(AbiScalar, u64)> {
+        if let BackendRepr::SimdVector { element, count } = self.layout(ty)?.backend_repr
+            && let Primitive::Float(rustc_abi::Float::F16) = element.primitive()
+        {
+            return Ok((AbiScalar { ty: types::I16, signed: false }, count.as_u64()));
+        }
+        self.simd_lanes(ty)
+    }
+
+    /// Whether the first of `args` or the result is a vector of `f16`.
+    fn half_lanes(&mut self, args: &[Operand], dst_ty: Ty<'db>) -> Result<bool> {
+        let first = match args.first() {
+            Some(arg) => Some(self.operand_ty(arg)?),
+            None => None,
+        };
+        for ty in first.into_iter().chain([dst_ty]) {
+            if let BackendRepr::SimdVector { element, .. } = self.layout(ty)?.backend_repr
+                && let Primitive::Float(rustc_abi::Float::F16) = element.primitive()
+            {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
+    /// The lanes of a vector type as `neon` names them, and whether its integers are signed.
+    fn neon_lanes_of(&self, ty: Ty<'db>) -> Result<(neon::Lanes, bool)> {
+        let BackendRepr::SimdVector { element, count } = self.layout(ty)?.backend_repr else {
+            unsupported!("vector operation on {ty:?}");
+        };
+        let count = count.as_u64() as u32;
+        Ok(match element.primitive() {
+            Primitive::Float(float) => {
+                (neon::Lanes::floats(float.size().bits() as u32, count), true)
+            }
+            Primitive::Int(int, signed) => {
+                (neon::Lanes { count, bits: int.size().bits() as u32, float: false }, signed)
+            }
+            _ => unsupported!("vector operation on {ty:?}"),
+        })
+    }
+
+    /// A generic intrinsic on vectors of `f16`, as [`neon::half_vector`] has it, in a function
+    /// with the half-precision instructions; elsewhere LLVM works on the lanes as `f32`s, but
+    /// for the conversions between the two, which are the same instructions there.
+    fn half_vector(
+        &mut self,
+        name: &str,
+        args: &[Operand],
+        dst: Value,
+        dst_ty: Ty<'db>,
+    ) -> Result<()> {
+        let Some(first) = args.first() else {
+            unsupported!("`{name}` without operands");
+        };
+        let ty = self.operand_ty(first)?;
+        let (a, a_signed) = self.neon_lanes_of(ty)?;
+        let (r, r_signed) = self.neon_lanes_of(dst_ty)?;
+        let widths = (r.float && a.float).then_some((r.bits, a.bits));
+        let single_and_half = name == "simd_cast" && matches!(widths, Some((16, 32) | (32, 16)));
+        if self.cg.target.arch != Arch::Aarch64 || !(single_and_half || self.half_precision()) {
+            unsupported!(
+                "vector operation on lanes of f16 without the half-precision instructions"
+            );
+        }
+        let signed = if a.float { r_signed } else { a_signed };
+        let Some(lowered) = neon::half_vector(name, r, a, signed) else {
+            unsupported!("`{name}` of lanes of f16 into {dst_ty:?}");
+        };
+        self.neon_assembly(name, &lowered, args, dst, dst_ty)
     }
 
     /// The lane type and lane count of a vector type. Lanes sit in memory in order.

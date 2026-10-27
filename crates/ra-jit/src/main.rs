@@ -19,6 +19,7 @@ mod link;
 mod live;
 mod macro_list;
 mod macro_sandbox;
+mod manifest;
 mod memory;
 mod mirdump;
 mod outline;
@@ -2824,6 +2825,7 @@ impl Checkouts {
         db: &mut RootDatabase,
         vfs: &mut vfs::Vfs,
     ) -> anyhow::Result<()> {
+        let start = Instant::now();
         let mut workspaces = Vec::new();
         let mut roots = Vec::new();
         let (mut splits, mut debug) = (Vec::new(), Vec::new());
@@ -2877,7 +2879,16 @@ impl Checkouts {
             roots.push((dunce::canonicalize(project)?, root));
             workspaces.push(workspace);
         }
+        let workspaces_at = start.elapsed();
         self.loaded.add(workspaces, &self.cargo_config.extra_env, &self.load_config, vfs, db)?;
+        if std::env::var_os("RA_JIT_STATS").is_some() {
+            let files = start.elapsed() - workspaces_at;
+            eprintln!(
+                "load-us: workspaces={} files={}",
+                workspaces_at.as_micros(),
+                files.as_micros()
+            );
+        }
         self.roots.extend(roots);
         self.splits.extend(splits);
         self.debug.extend(debug);
@@ -3169,9 +3180,11 @@ fn workspace_at(
     beside: Option<&mut Beside>,
     said: Option<Vec<String>>,
 ) -> anyhow::Result<(ProjectWorkspace, plan::Whole)> {
+    let start = Instant::now();
     let root = AbsPathBuf::assert_utf8(std::env::current_dir()?.join(project));
     let manifest = ProjectManifest::discover_single(&root)?;
     let mut workspace = ProjectWorkspace::load(manifest.clone(), cargo_config, &|_| {})?;
+    let metadata_at = start.elapsed();
     // Without the standard library's source every call into it is unresolved, and each
     // function making one would be refused for a reason that says nothing of the toolchain.
     if workspace.sysroot.is_rust_lib_src_empty() {
@@ -3240,6 +3253,7 @@ fn workspace_at(
             cargo.set_primary(package, built.primary);
         }
     }
+    let planned_at = start.elapsed();
     if let Some(scripts) = scripts {
         workspace.set_build_scripts(scripts);
     } else if load_config.load_out_dirs_from_check {
@@ -3277,6 +3291,14 @@ fn workspace_at(
             anyhow::bail!("a build script failed: {}", error.trim().replace('\n', " "));
         }
         workspace.set_build_scripts(build_scripts);
+    }
+    if std::env::var_os("RA_JIT_STATS").is_some() {
+        let us = |it: Duration| it.as_micros();
+        let (metadata, plan) = (us(metadata_at), us(planned_at - metadata_at));
+        eprintln!(
+            "load-us: metadata={metadata} plan={plan} scripts={}",
+            us(start.elapsed() - planned_at)
+        );
     }
     Ok((workspace, debug))
 }
@@ -4380,6 +4402,8 @@ struct Build {
     /// for the program once the build is kept ([`Build::keep`]), and one that is undone leaves
     /// those of the build before.
     unwritten: Vec<(PathBuf, Vec<u8>)>,
+    /// Where [`Build::keep`] wrote them.
+    wrote: Vec<PathBuf>,
 }
 
 impl Build {
@@ -4389,8 +4413,28 @@ impl Build {
         for (path, bytes) in std::mem::take(&mut self.unwritten) {
             let _writing = whole::writing(&path);
             replace(&path, &bytes)?;
+            self.wrote.push(path);
         }
         Ok(())
+    }
+
+    /// The build whose files a manifest of the store has ([`manifest`]): nothing compiled.
+    fn of_manifest(unwritten: Vec<(PathBuf, Vec<u8>)>) -> Build {
+        Build {
+            compiled: 0,
+            skipped: Vec::new(),
+            reached: Vec::new(),
+            nothing_of_rustc: true,
+            refused_exports: Vec::new(),
+            instances: 0,
+            codegen: Duration::ZERO,
+            emit: Duration::ZERO,
+            steps: [Duration::ZERO; 3],
+            looked: Default::default(),
+            unset: None,
+            unwritten,
+            wrote: Vec::new(),
+        }
     }
 }
 
@@ -4959,6 +5003,7 @@ fn build(
         looked,
         unset: unset_in(db, &local),
         unwritten,
+        wrote: Vec::new(),
     };
     // A patch is of the last full build and replaces nothing the next edit is built from.
     if !undoable || known.stats.patched.is_some() {
@@ -6544,6 +6589,8 @@ struct Target {
     /// The executable blaze links the program into itself, with nothing of rustc's: a build
     /// from nothing (docs/no-rustc.md, step K).
     exe: Option<PathBuf>,
+    /// `exe` is a shared library, a `cdylib` (#262).
+    shared: bool,
     /// What its link takes that rustc compiled. Code rustc instantiated for one program is in
     /// that program's own objects, so another has to be told where its copies are. Empty for
     /// the files the daemon was started with.
@@ -6562,6 +6609,7 @@ impl Target {
             link_cmd: args.link_cmd.clone(),
             splice: args.splice.clone(),
             exe: args.exe.clone(),
+            shared: args.shared,
             symbol_files: args.symbol_files.clone(),
         }
     }
@@ -6572,8 +6620,18 @@ impl Target {
 
     /// The daemon's arguments, were it started for this program.
     fn args(self, daemon: &Args, checkouts: &Checkouts) -> anyhow::Result<Args> {
-        let Target { project, krate, batch, out, patch, link_cmd, splice, exe, symbol_files } =
-            self;
+        let Target {
+            project,
+            krate,
+            batch,
+            out,
+            patch,
+            link_cmd,
+            splice,
+            exe,
+            shared,
+            symbol_files,
+        } = self;
         let project = project.unwrap_or_else(|| daemon.project.clone());
         let Parts { root: checkout, base, members, debug, lints_capped, link_args } =
             checkouts.parts(&project)?;
@@ -6599,6 +6657,7 @@ impl Target {
             link_cmd,
             splice,
             exe,
+            shared,
             symbol_files,
             rustc_binary: None,
             by_symbol: Vec::new(),
@@ -6637,6 +6696,7 @@ impl Target {
                     link_cmd,
                     splice,
                     exe,
+                    shared: false,
                     symbol_files,
                 }))
             }
@@ -6656,7 +6716,8 @@ impl Target {
 
     /// The fields after the request's name on its line, each after a tab. Empty is absent.
     fn parse(fields: &[&str]) -> Option<Target> {
-        let &[project, krate, out, patch, link_cmd, splice, exe, ref symbol_files @ ..] = fields
+        let &[project, krate, out, patch, link_cmd, splice, exe, shared, ref symbol_files @ ..] =
+            fields
         else {
             return None;
         };
@@ -6671,6 +6732,7 @@ impl Target {
             link_cmd: given(link_cmd),
             splice: given(splice).map(PathBuf::from),
             exe: given(exe).map(PathBuf::from),
+            shared: shared == "shared",
             symbol_files: symbol_files.iter().map(PathBuf::from).collect(),
         })
     }
@@ -6693,14 +6755,15 @@ impl Target {
             None => self.krate.clone(),
         };
         let mut fields = format!(
-            "\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
+            "\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
             self.project.as_ref().map(|it| it.display().to_string()).unwrap_or_default(),
             crates,
             self.out.display(),
             self.patch.as_ref().map(|it| it.display().to_string()).unwrap_or_default(),
             self.link_cmd.as_deref().unwrap_or_default(),
             self.splice.as_ref().map(|it| it.display().to_string()).unwrap_or_default(),
-            self.exe.as_ref().map(|it| it.display().to_string()).unwrap_or_default()
+            self.exe.as_ref().map(|it| it.display().to_string()).unwrap_or_default(),
+            if self.shared { "shared" } else { "" }
         );
         for file in &self.symbol_files {
             fields.push('\t');
@@ -8409,6 +8472,7 @@ fn run_holding(
             load(&projects, &cargo_config, load_config(), selection, beside, scripts_said)?
         }
     };
+    let loaded_at = start.elapsed();
     let listed = Arc::new(Listed::default());
     ide_db::base_db::set_process_env(&mut db, process::own());
     // What is compiled ahead is stored too, so the store is told the toolchain first. A build
@@ -8424,7 +8488,13 @@ fn run_holding(
     let shipped = (nothing_of_rustc && args.prebuilt.is_none() && !patches_its_library(&args))
         .then(|| shipped::fetch_ahead(emits.triple()))
         .flatten();
+    let following_at = start.elapsed();
     let built = follow_cargo(&mut db, &mut vfs, &mut checkouts, &args, &listed)?;
+    if std::env::var_os("RA_JIT_STATS").is_some() {
+        let (loaded, toolchain) = (loaded_at.as_micros(), (following_at - loaded_at).as_micros());
+        let cargo = (start.elapsed() - following_at).as_micros();
+        eprintln!("load-us: loaded={loaded} toolchain={toolchain} cargo={cargo}");
+    }
     let beside = built.is_some();
     let Parts { root, base, members, debug, lints_capped, link_args } =
         checkouts.parts(&args.project)?;
@@ -8623,19 +8693,53 @@ fn run_holding(
             if let Some((cmd, exe)) = own_link_line(&db, &args)? {
                 (args.link_cmd, args.splice) = (Some(cmd), Some(exe));
             }
-            let mut cold = build_unheld(&db, &table, &args, &mut known, &listed)?;
-            // An `include!` in a body is first seen when the body is compiled.
-            if WatchedFile::include_sources(&mut files, &mut tree, &mut db) != Loaded::Nothing {
-                known.touch(&db, None);
-                listed.touch(&db, None);
-                cold = build_unheld(&db, &table, &args, &mut known, &listed)?;
-            }
+            let start = Instant::now();
+            let manifest_mode = manifest::mode();
+            let manifest_key =
+                manifest_mode.and_then(|_| manifest::key(&db, &args, table.is_empty()));
+            let from_manifest = match (manifest_mode, &manifest_key) {
+                (Some(manifest::Mode::Use), Some(key)) => match manifest::lookup(&db, &args, key) {
+                    Ok(files) => Some(files),
+                    Err(why) => {
+                        eprintln!("manifest: none used, {why} ({:.1?})", start.elapsed());
+                        None
+                    }
+                },
+                _ => None,
+            };
+            let served = from_manifest.is_some();
+            let cold = match from_manifest {
+                Some(files) => {
+                    let mut cold = Build::of_manifest(files);
+                    cold.keep(&mut known)?;
+                    eprintln!(
+                        "manifest: {} files of the program from the store in {:.1?}, nothing compiled",
+                        cold.wrote.len(),
+                        start.elapsed()
+                    );
+                    cold
+                }
+                None => {
+                    let mut cold = build_unheld(&db, &table, &args, &mut known, &listed)?;
+                    // An `include!` in a body is first seen when the body is compiled.
+                    if WatchedFile::include_sources(&mut files, &mut tree, &mut db)
+                        != Loaded::Nothing
+                    {
+                        known.touch(&db, None);
+                        listed.touch(&db, None);
+                        cold = build_unheld(&db, &table, &args, &mut known, &listed)?;
+                    }
+                    cold
+                }
+            };
             if let Some(unset) = &cold.unset {
                 errors_for_the_daemon(&args, &errors::Said::one(errors::of_none(unset)))?;
                 bail!("{unset}");
             }
-            eprint!("cold: ");
-            report(&cold);
+            if !served {
+                eprint!("cold: ");
+                report(&cold);
+            }
             if let Some(said) = ra_jit_expand::report() {
                 eprintln!("{said}");
             }
@@ -8701,6 +8805,33 @@ fn run_holding(
                 }
                 if let Some(path) = &args.dep_info {
                     write_dep_info(&db, &args, tree.vfs(), exe, path)?;
+                }
+            }
+            if let (Some(key), false) = (&manifest_key, served) {
+                let start = Instant::now();
+                let checked = match manifest_mode {
+                    Some(manifest::Mode::Check) => manifest::check(&db, &args, key, &cold.wrote)
+                        .map_err(|why| anyhow::anyhow!("manifest: check: {why}"))?,
+                    _ => false,
+                };
+                // What was loaded since the key was made, an `include!` in a body, is not in it.
+                let again = manifest::key(&db, &args, table.is_empty());
+                match () {
+                    _ if checked => eprintln!(
+                        "manifest: check: the build wrote what the store's manifest has ({:.1?})",
+                        start.elapsed()
+                    ),
+                    _ if again.as_ref() != Some(key) => eprintln!(
+                        "manifest: not kept, the build loaded files its key was made without"
+                    ),
+                    _ => match manifest::keep(&db, &args, key, &cold.wrote) {
+                        Ok(bytes) => eprintln!(
+                            "manifest: kept, {} files, {bytes} bytes ({:.1?})",
+                            cold.wrote.len(),
+                            start.elapsed()
+                        ),
+                        Err(why) => eprintln!("manifest: not kept: {why}"),
+                    },
                 }
             }
             Some(cold)
