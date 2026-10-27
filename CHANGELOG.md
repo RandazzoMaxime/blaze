@@ -1001,6 +1001,17 @@ each one's section: what `[Unreleased]` had, and the title of each change merged
 
 ### Fixed
 
+- The borrow checker: lifetime elision counts none of the impl's lifetimes in a parameter
+  that writes `Self`, as rustc counts only what a parameter's type writes or elides, so
+  `fn store(self, db: &dyn Db) -> &Store` in `impl Id<'_>` returns a borrow of `db`. It
+  gave "lifetime may not live long enough" there (`InferBodyId::store_and_root_expr`, which
+  failed blaze's own build of `hir-ty`), and at a call took the result as borrowing nothing.
+  blaze's own tree: 10 false errors to 2.
+- The borrow checker's implied bounds: a trait object's `'r` outlives what a supertrait
+  requires of `Self` (`dyn 'db + SourceDatabase` that `'db: 'static`, through salsa's
+  `ZalsaDatabase: Any`), and the types in its arguments imply what they do
+  (`&dyn Fn() -> &'a G<'db>` that `'db: 'a`), as rustc's well-formedness walks into them.
+  The last 2 false errors in blaze's own tree (`module_for_assoc_item_loc`, `path_to_const`).
 - The LLVM backend: an error LLVM diagnoses while it writes an object is an error naming
   what LLVM said, not an object with an instruction left out. LLVM 23's assembler printed
   "can't encode 'ah'" for `mov ah, sil` in an `asm!` block and wrote the object without it
