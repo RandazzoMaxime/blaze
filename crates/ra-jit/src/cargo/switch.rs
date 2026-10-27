@@ -67,12 +67,6 @@ pub(crate) fn is_wrapper(path: &Path) -> bool {
     stem.is_some_and(|it| it == "ra-jit-rustc" || it == "ra-jit-rustc-first")
 }
 
-/// The same wrapper under the path it has in the first build of a workspace.
-pub(crate) fn first_wrapper_path() -> std::io::Result<PathBuf> {
-    let this = std::env::current_exe()?;
-    Ok(this.with_file_name(format!("ra-jit-rustc-first{}", std::env::consts::EXE_SUFFIX)))
-}
-
 impl Enabled {
     fn path() -> anyhow::Result<PathBuf> {
         Ok(cargo_home().context("no CARGO_HOME or HOME")?.join("ra-jit-enabled.json"))

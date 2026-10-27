@@ -56,15 +56,6 @@ pub(crate) fn ask(state: &State) {
     }
 }
 
-/// Forgets what the daemon wrote of the programs of `state`, which cargo built since.
-pub(crate) fn forget(state: &State) {
-    for program in state.programs.iter().filter(|it| it.test) {
-        if let Some(dir) = state.plan_dir(program) {
-            _ = std::fs::remove_file(dir.join(plan::REACH));
-        }
-    }
-}
-
 /// What of a program of tests this command runs.
 pub(crate) enum Pick {
     /// What the command asks, every test unless it names some: nothing is known of what an
