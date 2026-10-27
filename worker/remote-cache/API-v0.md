@@ -45,6 +45,12 @@ R2 key: `v3/<tenant id>/<name>` (tenant id opaque, from KV, never reused).
 | `DELETE <base>/<name>?upload=<id>` | aborts a multipart upload: 204 |
 | anything else (DELETE of an object, listing) | 405 |
 
+Every `PUT` carries `Content-Length` (411 without it): R2 takes a body of known length, and the
+size is checked before the body is read. The `ETag` header is quoted, the JSON `etag` bare;
+`If-Match` takes either. An `<id>` from `?uploads` is opaque and URL-safe; it binds the upload to
+its tenant and name. A completed multipart upload is read back through the Worker into its name
+(the binding has no copy), so it costs one more read and write than its parts.
+
 Errors carry a one-line plain-text reason. 429 with `Retry-After` from the per-tenant (or per-IP
 for anonymous) rate limit. Every request writes one Analytics Engine data point (tenant, op,
 status, bytes in, bytes out).
