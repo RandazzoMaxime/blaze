@@ -188,6 +188,21 @@ pub(super) fn test(asked: &Invocation) -> anyhow::Result<i32> {
         "dev" => "test",
         other => other,
     };
+    // A cargo since rust-lang/cargo#16421 also sets `CARGO_BIN_EXE_<name>` of each program of
+    // its package when it runs an integration test: assert_cmd's `cargo_bin` reads it at run
+    // time, and finds no program beside the test in cargo's second layout.
+    let programs_named = |test: &Program| -> Vec<(String, String)> {
+        if test.kind != Kind::Test {
+            return Vec::new();
+        }
+        let named =
+            |it: &&Program| it.kind == Kind::Bin && !it.test && it.package.id == test.package.id;
+        others
+            .iter()
+            .filter(named)
+            .map(|it| (format!("CARGO_BIN_EXE_{}", it.name), it.executable.display().to_string()))
+            .collect()
+    };
     let mut ran = Vec::new();
     for (at, programs) in [&others, &units].into_iter().enumerate() {
         for (index, program) in programs.iter().enumerate().filter(|(_, it)| it.test) {
@@ -202,6 +217,7 @@ pub(super) fn test(asked: &Invocation) -> anyhow::Result<i32> {
                 run_env(&program.package, &[])
                     .into_iter()
                     .chain(library_path(&program.executable, None))
+                    .chain(programs_named(program))
                     .collect(),
             ));
         }

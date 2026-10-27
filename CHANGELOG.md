@@ -1016,6 +1016,10 @@ each one's section: what `[Unreleased]` had, and the title of each change merged
 
 ### Fixed
 
+- A whole build's integration test runs with `CARGO_BIN_EXE_<name>` of each program of its
+  package in its environment, as cargo sets it since rust-lang/cargo#16421. assert_cmd's
+  `cargo_bin` reads it at run time and otherwise looks beside the test, where cargo's second
+  layout has no program: hyperfine's tests failed `CargoError { NotFoundError }` since #569.
 - `cargo blaze test --doc` runs an edited library's examples again: it took an example's
   program from the run before while the example's own text was unchanged, since blaze's run
   names no library with `--extern` for the key to stamp, so after an edit that broke them the
