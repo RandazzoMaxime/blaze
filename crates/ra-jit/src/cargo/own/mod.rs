@@ -5,6 +5,7 @@
 
 mod args;
 mod clean;
+mod config;
 mod manifest;
 mod new;
 mod report;
@@ -103,7 +104,7 @@ pub(crate) const SUBCOMMANDS: &[Subcommand] = &[
     sub("login", REGISTRY_API, "keep a registry's token"),
     sub("logout", REGISTRY_API, "forget a registry's token"),
     sub("report", Status::Own, "reports cargo keeps of builds"),
-    sub("config", Status::Not("not written yet"), "the configuration cargo reads"),
+    sub("config", Status::Own, "the configuration cargo reads"),
     sub("read-manifest", Status::Own, "the manifest as JSON (deprecated)"),
 ];
 
@@ -137,6 +138,7 @@ pub(crate) fn command(args: Vec<String>) -> anyhow::Result<i32> {
         "read-manifest" => manifest::read_manifest(Args::new(rest)),
         "uninstall" => uninstall::command(Args::new(rest)),
         "report" => report::command(Args::new(rest)),
+        "config" => config::command(rest),
         "fetch" => manifest::fetch(Args::new(rest)),
         "clean" => clean::command(Args::new(rest)),
         "new" | "init" => new::command(subcommand.name, Args::new(rest)),

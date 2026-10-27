@@ -842,7 +842,7 @@ cargo reads them. The table is `SUBCOMMANDS` in `crates/ra-jit/src/cargo/own/mod
 | `uninstall` | yes | cargo 1.99's `cargo_uninstall.rs` and install tracker: removes the programs from the install root's `bin` (`--root`, `CARGO_INSTALL_ROOT`, `install.root`, cargo's home) and their entries in `.crates.toml` and `.crates2.json`, written byte for byte as cargo writes them; specs, `-p`, `--bin`, the package of the directory, cargo's `Summary` of several. Held equal to cargo's by `harness/own_uninstall.py`: 18 of 18 cases, what each prints and the files it leaves |
 | `read-manifest` | yes | the package's entry of `metadata --no-deps`, as cargo prints it |
 | `report` | yes | `future-incompatibilities` (`future-incompat`): the report a build left in the build directory, with `--id`, `-p` and `--color`, as cargo 1.99's `future_incompat.rs` prints it. `timings`, `sessions` and `rebuilds` are unstable in cargo: refused as cargo refuses them without `-Z build-analysis`, and with it they fail saying blaze's builds do not write the logs they read. Held equal to cargo's by `harness/own_report.py`: 23 of 23 cases |
-| `config` | not yet | not written yet |
+| `config` | yes | `config get`, by blaze-manifest's port of cargo 1.99's `cargo_config.rs`: `--format toml`, `json` and `json-value`, `--show-origin`, `--merged no`. Unstable in cargo, and refused as cargo refuses it unless `-Z unstable-options`, `unstable.unstable-options` or `CARGO_UNSTABLE_UNSTABLE_OPTIONS` allows it. Held equal to cargo's by `harness/own_config.py`, run as `cargo blaze config`: 41 of 41 cases |
 | any other | no | `error: no such command`; blaze runs no cargo plugin |
 
 ### Plain `cargo <command>` after `enable`
