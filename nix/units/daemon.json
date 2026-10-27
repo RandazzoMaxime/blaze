@@ -1,8 +1,8 @@
 {
  "dir": ".",
  "inputs": {
-  "Cargo.lock": "c13b7e40fa893f9a718196217761b65c02cfb20998e69baaa3adde16dbe59f92",
-  "Cargo.toml": "dbd1df4e05f629a302b7daa209badfd99098beaa7c0b1cea18b9ef1c4360f858"
+  "Cargo.lock": "a66929205e010ecc0fb9df3c97ebd3252a35c37c2a5551260bad273769035e51",
+  "Cargo.toml": "892f2467cc89d62becf993fd437d5cd4e1855d34b20c7e7478f3635f0e0f46f9"
  },
  "packages": {
   "adler2@2.0.1": {
