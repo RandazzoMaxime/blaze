@@ -28,9 +28,9 @@ Change a function and run `blaze run` again: the `Finished` line now says `[ra-j
 - **Memory to spare.** blaze's background process holds a few GB for a small project and tens of
   GB for the largest ([numbers](benchmarks.md#how-much-memory-and-disk-it-takes)).
 
-You do not need Rust or rustup. blaze builds with one Rust, a dated nightly, and only that one:
-`nightly-2026-10-25` today (`rustc 1.101.0-nightly (12433c307 2026-10-24)`), moved to a newer
-nightly as they come out. It links its code with code that rustc compiled, so the two have to
+You do not need Rust or rustup. blaze is its own Rust toolchain ([toolchain.md](toolchain.md)):
+`blaze-2026-10-25` today, the nightly of that date (`rustc 1.101.0-nightly (12433c307
+2026-10-24)`), moved to a newer one on blaze's schedule. It links its code with code that rustc compiled, so the two have to
 agree on how types are laid out and functions are called. It downloads its own copy once into
 `~/.blaze` (rustc, cargo, the standard library and its source from the Rust project: 97 MB on
 macOS, 118 to 133 MB on Linux), or uses rustup's `nightly-2026-10-25` when rustup has it. blaze

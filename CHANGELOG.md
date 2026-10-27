@@ -10,6 +10,10 @@ each one's section: what `[Unreleased]` had, and the title of each change merged
 
 ### Added
 
+- blaze is its own toolchain, named `blaze-<date>` (`blaze-2026-10-25`, today the Rust nightly
+  of that date): `blaze toolchain` names it and `blaze toolchain --path` prints its directory,
+  and a project that pins another toolchain is told so once, as a note, while blaze builds
+  with its own (docs/toolchain.md; #402, #403 and #404 for building, hosting and bumping it ourselves).
 - `cargo blaze doc` (and `blaze doc`) writes the HTML documentation of the packages and their
   dependencies from rust-analyzer's HIR (`crates/blaze-doc`), with no rustdoc: a page for
   every item with linked signatures, fields, variants, inherent, trait, blanket and auto
