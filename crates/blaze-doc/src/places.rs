@@ -31,8 +31,8 @@ pub struct Documented {
     pub name: String,
     /// Items not public are documented too.
     pub private: bool,
-    /// Warnings about its docs are shown: one the user asked for rather than a dependency, whose
-    /// lints cargo caps.
+    /// Warnings about its docs are shown: a crate asked for or one from a path, not from a
+    /// registry or git, whose lints cargo caps.
     pub warn: bool,
 }
 

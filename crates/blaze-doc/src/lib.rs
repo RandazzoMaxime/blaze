@@ -76,7 +76,7 @@ pub fn crates_to_document(db: &RootDatabase, asked: &[Asked], no_deps: bool) -> 
         krate,
         name,
         private: false,
-        warn: false,
+        warn: krate.origin(db).is_local(),
     }));
     out
 }
