@@ -902,6 +902,16 @@ All notable changes to ra-jit are written here. The format follows
 
 ### Fixed
 
+- The borrow checker reports nothing on helix (14 false errors before) or biome (534), as
+  rustc does; ripgrep, fd and nushell stay at none, and the UI scores are unchanged (Polonius
+  1545 of 1585, NLL 1542 of 1583). It follows rustc where it did not: the outlives
+  components of a trait object's projections and of fn pointers; an opaque's arguments
+  related by what it captures; `use<>` on an `impl Trait` inside the return type; implied
+  bounds through a projection and from a type's inferred outlives; a trait object's default
+  lifetime not counted by lifetime elision; one lifetime for an alias's elided lifetime
+  wherever the alias uses it; a closure's annotated references and the pointer fn items
+  coerce to as higher-ranked; promotion by the value, not its type, with `Freeze` seen
+  through projections.
 - `cargo install --git https://github.com/indexable-inc/blaze ra-jit` builds ra-jit
   ([#242](https://github.com/indexable-inc/blaze/issues/242), #293, by @gakonst). It failed
   before compiling anything: for a git source cargo checks that every package is a member of
