@@ -17,6 +17,11 @@ All notable changes to ra-jit are written here. The format follows
   and biome with their own rustfmt.toml (6068 of 6068 files, `--check` exit codes and diffs
   too), the same with `max_width = 60` (6068 of 6068), and rustfmt's `tests/source` (773 of
   793; the rest are those refusals).
+- `enable` makes plain `cargo fmt` and `cargo clippy` blaze's, for each of the two that is
+  blaze's own: links named `cargo-fmt` and `cargo-clippy` in `~/.cargo/bin`, which cargo looks
+  in before `PATH`, to `cargo-blaze`. What they replace, rustup's proxies, is kept and
+  `disable` puts it back; `status` says whose each command is. Not an `[alias]`, which cargo
+  warns of on every run (rust-lang/cargo#10049).
 - `cargo blaze tree`, `pkgid`, `fetch`, `clean`, `new` and `init` are blaze's own, with no
   cargo: `tree` from the new `crates/blaze-tree` (cargo 1.101's, on blaze-resolve), `new` and
   `init` from the new `crates/blaze-new`. `harness/own_tree.py` (130 of 130 equal over

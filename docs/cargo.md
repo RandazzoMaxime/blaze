@@ -687,9 +687,14 @@ One key in `$CARGO_HOME/config.toml` (usually `~/.cargo/config.toml`):
     [build]
     rustc-workspace-wrapper = "<dir>/ra-jit-rustc"
 
+And `$CARGO_HOME/bin/cargo-fmt` and `cargo-clippy`, for those of the two that are blaze's own:
+links to `cargo-blaze`, with what was there kept in `$CARGO_HOME/blaze-kept`
+([Plain `cargo <command>` after `enable`](#plain-cargo-command-after-enable)).
+
 No shell profile or environment variable is touched. `enable` keeps a copy of the file as it
 was in `ra-jit-enabled.json` next to it. `disable` restores that copy byte for byte, or, if
-you edited the file in between, removes only its own line.
+you edited the file in between, removes only its own line, and puts back the files the links
+replaced.
 
 ### Wrappers you already have
 
@@ -844,11 +849,16 @@ test` are still cargo's process: cargo plans the build and starts the wrapper fo
 crate, and the wrapper's first build is rustc's ([What a build does](#what-a-build-does)). The
 other commands stay cargo's entirely. Here is what each way of sending them to blaze needs:
 
-- **`fmt` and `clippy`** are not built into cargo (they are rustup's `cargo-fmt` and
-  `cargo-clippy`), so an `[alias]` in the same config file can take them over: `fmt = "blaze
-  fmt"`, `clippy = "blaze clippy"`. cargo still starts, and warns that the alias shadows an
-  external command, then runs `cargo-blaze`. `enable` should write these once blaze's own `fmt`
-  and `clippy` land. Until then such an alias would make `cargo fmt` fail.
+- **`fmt` and `clippy`** are not built into cargo: it runs `cargo-fmt` and `cargo-clippy`,
+  looking in `~/.cargo/bin` before `PATH`. `enable` puts links named so there, to
+  `cargo-blaze`, for each of the two that is blaze's own (`cargo blaze --list`), so plain
+  `cargo fmt` and `cargo clippy` run blaze's, with nothing printed of it. The file a link
+  replaces, rustup's proxy, is kept in `~/.cargo/blaze-kept` and `disable` puts it back;
+  `status` says whose each command is, and notices when `rustup update` put its proxy back
+  (`enable` links it again). macOS and Linux only. An `[alias]` (`fmt = "blaze fmt"`) would
+  route them too, but cargo warns on every run that it shadows an external command and means
+  to make that an error
+  ([rust-lang/cargo#10049](https://github.com/rust-lang/cargo/issues/10049)).
 - **Built-in commands** (`build`, `test`, `check`, `doc`, `tree`, `new`, ...) cannot be aliased:
   cargo ignores an alias that shadows a built-in. Two ways remain. `build.rustc` set to blaze
   keeps cargo's process but answers every rustc that cargo starts (`-vV`, `--print`, each
