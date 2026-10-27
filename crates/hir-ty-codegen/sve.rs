@@ -77,6 +77,21 @@ impl Shape {
         Some(Shape { bits, float, signed, count: count.as_u64(), vectors })
     }
 
+    /// What a vector of 128 bits of NEON's holds (`float32x4_t`, `int8x16_t`), as the shape
+    /// of a scalable vector of as many lanes per 128 bits.
+    pub(super) fn fixed(layout: &Layout) -> Option<Shape> {
+        let BackendRepr::SimdVector { element, count } = layout.backend_repr else {
+            return None;
+        };
+        let (bits, float, signed) = match element.primitive() {
+            rustc_abi::Primitive::Int(int, signed) => (int.size().bits(), false, signed),
+            rustc_abi::Primitive::Float(float) => (float.size().bits(), true, true),
+            rustc_abi::Primitive::Pointer(_) => return None,
+        };
+        (layout.size.bits() == 128 && bits * count == 128)
+            .then_some(Shape { bits, float, signed, count, vectors: 1 })
+    }
+
     pub(super) fn predicate(self) -> bool {
         self.bits == 1
     }
@@ -112,6 +127,12 @@ impl Shape {
     pub(super) fn llvm(self) -> String {
         let kind = if self.float { 'f' } else { 'i' };
         format!("nxv{}{kind}{}", self.count, self.bits)
+    }
+
+    /// LLVM's name of the vector of 128 bits of NEON's with its lanes: `v4i32`, `v2f64`.
+    fn llvm_fixed(self) -> String {
+        let kind = if self.float { 'f' } else { 'i' };
+        format!("v{}{kind}{}", self.count, self.bits)
     }
 
     /// The letter of a load or store of one lane of memory: `ld1b` to `ld1d`.
@@ -158,6 +179,9 @@ pub(super) enum Arg {
     Int(u64, Option<i128>),
     /// A float of so many bits, in the low bits of a vector register.
     Float(u64),
+    /// A vector of 128 bits of NEON's, of the lanes of the shape, handed over as the address
+    /// of its bytes.
+    Fixed(Shape),
 }
 
 /// What a stub gives.
@@ -304,6 +328,13 @@ impl Registers {
                     floats += 1;
                     v += 1;
                     Reg::F(v - 1, bits)
+                }
+                // In the low 128 bits of the next vector register, as rustc passes it.
+                Arg::Fixed(shape) => {
+                    writeln!(loads, "ldr q{v}, [x{}]", x.1).unwrap();
+                    x.1 += 1;
+                    v += 1;
+                    Reg::Z(v - 1, shape)
                 }
                 Arg::Vector(shape) => {
                     if shape.suffix().is_none() {
@@ -486,10 +517,10 @@ fn predicate_suffix(ty: &str) -> Option<&'static str> {
 }
 
 /// Whether a part of an intrinsic's name says a type it is overloaded on (`nxv4i32`, `i64`,
-/// `f32f64`, `p0`) rather than what it does (`wide`, `x`, `z`, `lane`).
+/// `v4f32`, `f32f64`, `p0`) rather than what it does (`wide`, `x`, `z`, `lane`).
 fn is_type(part: &str) -> bool {
-    let rest =
-        part.strip_prefix("nxv").map(|it| it.trim_start_matches(|c: char| c.is_ascii_digit()));
+    let rest = (part.strip_prefix("nxv").or_else(|| part.strip_prefix('v')))
+        .map(|it| it.trim_start_matches(|c: char| c.is_ascii_digit()));
     let scalars = |mut it: &str| {
         let mut any = false;
         while let Some(after) = it.strip_prefix(['i', 'f']) {
@@ -506,7 +537,8 @@ fn is_type(part: &str) -> bool {
 }
 
 /// One letter per operand, and after `>` one for the result: `P` a predicate, `V` a data
-/// vector, `T` a tuple of them, `I` an integer, `C` a constant one, `F` a float, `-` nothing.
+/// vector, `T` a tuple of them, `N` a vector of NEON's, `I` an integer, `C` a constant one, `F`
+/// a float, `-` nothing.
 fn signature(args: &[Arg], ret: Ret) -> String {
     let vector = |shape: Shape| {
         if shape.predicate() {
@@ -524,6 +556,7 @@ fn signature(args: &[Arg], ret: Ret) -> String {
             Arg::Int(_, Some(_)) => 'C',
             Arg::Int(..) => 'I',
             Arg::Float(_) => 'F',
+            Arg::Fixed(_) => 'N',
         })
         .collect();
     signature.push('>');
@@ -724,7 +757,9 @@ fn selected(
     let unsupported = || Err(format!("LLVM intrinsic `{name}`"));
     // LLVM's own reversal of the lanes of a vector or predicate is SVE's `rev`.
     let reversal = name.strip_prefix("vector.reverse.").map(|it| format!("rev.{it}"));
-    let Some(rest) = reversal.as_deref().or_else(|| name.strip_prefix("aarch64.sve.")) else {
+    let insertion = name.strip_prefix("vector.insert.").map(|it| format!("insert.{it}"));
+    let ours = reversal.as_deref().or(insertion.as_deref());
+    let Some(rest) = ours.or_else(|| name.strip_prefix("aarch64.sve.")) else {
         return unsupported();
     };
     let parts: Vec<&str> = rest.split('.').collect();
@@ -1107,6 +1142,26 @@ fn selected(
                 o(0).with("d")
             )
         }
+        // LLVM's insertion of a vector of NEON's at the first lane (`svdupq_n_s32`'s): its lanes
+        // in the first 128 bits, those after them of the scalable operand. At another lane it
+        // is past the end of a vector of 128 bits.
+        ("insert", [], "VNC>V") => {
+            let (Arg::Fixed(fixed), Ret::Vector(data)) = (args[1], ret) else {
+                return unsupported();
+            };
+            let same = |it: Shape| (it.bits, it.float, it.count) == (data.bits, data.float, data.count);
+            let Some(suffix) = data.suffix() else { return unsupported() };
+            if constant(2) != 0
+                || data.vectors != 1
+                || data.predicate()
+                || shape_of(0) != data
+                || !same(fixed)
+                || parts.get(2) != Some(&&*fixed.llvm_fixed())
+            {
+                return unsupported();
+            }
+            format!("ptrue p0.{suffix}, vl{}\nmov {r}, p0/m, {}\n", data.count, full(1))
+        }
         ("index", [], "II>V") => format!("index {r}, {}, {}\n", bare(0), bare(1)),
         ("insr", [], "VI>V" | "VF>V") => format!("insr {r}, {}\n", full(1)),
         // Whether any, the first or the last active lane is set.
@@ -1316,6 +1371,12 @@ impl<'db> FunctionCx<'_, 'db> {
                 continue;
             }
             let layout = self.layout(ty)?;
+            if let Some(shape) = Shape::fixed(&layout) {
+                let (addr, _) = self.operand(arg)?;
+                kinds.push(Arg::Fixed(shape));
+                addresses.push(addr);
+                continue;
+            }
             let BackendRepr::Scalar(_) = layout.backend_repr else {
                 unsupported!("LLVM intrinsic `{name}` with an operand of {ty:?}");
             };
@@ -1499,6 +1560,22 @@ mod tests {
     }
 
     #[test]
+    fn insertion_of_a_neon_vector_loads_its_128_bits() {
+        let args = [Arg::Vector(S32), Arg::Fixed(S32), Arg::Int(64, Some(0))];
+        let name = "vector.insert.nxv4i32.v4i32";
+        let text = stub(name, &args, Ret::Vector(S32)).unwrap();
+        assert!(
+            text.contains("ldr z0, [x1]\nldr q1, [x2]\nptrue p0.s, vl4\nmov z0.s, p0/m, z1.s\n"),
+            "{text}"
+        );
+        let past = [Arg::Vector(S32), Arg::Fixed(S32), Arg::Int(64, Some(4))];
+        assert!(stub(name, &past, Ret::Vector(S32)).is_err());
+        let halves = Shape { bits: 16, count: 8, ..S32 };
+        let other = [Arg::Vector(S32), Arg::Fixed(halves), Arg::Int(64, Some(0))];
+        assert!(stub("vector.insert.nxv4i32.v8i16", &other, Ret::Vector(S32)).is_err());
+    }
+
+    #[test]
     fn select_of_words() {
         let text = select(B4, S32).unwrap();
         assert!(text.contains("ldr z0, [x2]\nldr z1, [x3]\nsel z0.s, p0, z0.s, z1.s\n"), "{text}");
@@ -1575,6 +1652,14 @@ mod tests {
                     Some((ty, value)) => (ty, Some(value.parse::<i128>().unwrap())),
                     None => (operand, None),
                 };
+                // A vector of NEON's, `v4f32`, in the next vector register.
+                let fixed = ty.strip_prefix('v').and_then(|it| fixture_type(&format!("nxv{it}")));
+                if let Some(Ok(shape)) = fixed {
+                    theirs.push(vec![('v', v)]);
+                    v += 1;
+                    args.push(Arg::Fixed(shape));
+                    continue;
+                }
                 match fixture_type(ty).unwrap() {
                     Ok(shape) if shape.predicate() => {
                         theirs.push(vec![('p', p)]);
