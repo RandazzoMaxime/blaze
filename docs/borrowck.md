@@ -97,7 +97,10 @@ All of these are rustc's, written from `compiler/rustc_borrowck` at the pinned n
   and unsizing to `dyn Trait` proves the value's type implements `Trait`, with what its impl
   needs of the regions and what the trait says its types outlive (`T` as `dyn Any + 'a` needs
   `T: 'static`); a field's `dyn Any + 'a` implies nothing of `'a`, as rustc's inferred
-  outlives leave out what mentions `Self`. An associated type in a signature is related as what it normalizes
+  outlives leave out what mentions `Self`. A returned associated type whose impl gives it a
+  lifetime nothing constrains (`impl<'a, T: 'a> Tr for T { type A = <T as Mk<'a>>::R }`) is
+  that lifetime a region of its own, live where the return slot is, as rustc normalizes the
+  return slot's type. An associated type in a signature is related as what it normalizes
   to, so `for x in &mut v` keeps `v` borrowed in the `IterMut<'a, T>` that
   `<&'a mut Vec<T> as IntoIterator>::IntoIter` is; two associated types are too (a GAT's
   `Self::Item<'w, 's>` and `Self::Item<'w, 'static>` are both `&'w T`), with what a where
