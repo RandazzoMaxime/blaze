@@ -10694,14 +10694,105 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
         }
     }
 
+    /// Whether `block` is the `asm!` of `panic_unwind`'s `throw_exception` on Windows: it
+    /// lays out the `_ThrowInfo` of a Rust panic (the C++ runtime's description of the
+    /// exception) in `.rdata` with image-relative offsets, and gives its address. Its operands
+    /// are that address (out), `exception_cleanup`, `TYPE_DESCRIPTOR`, the size of `Exception`
+    /// and `exception_copy`.
+    fn is_seh_throw_info(&self, block: &hir_ty::mir::InlineAsm) -> bool {
+        use hir_ty::mir::AsmOperand::{Const, Reg, Sym};
+        self.cg.target.object_format == ObjectFormat::Coff
+            && !block.naked
+            && matches!(
+                &*block.operands,
+                [Reg { output: Some(_), input: None, .. }, Sym(_), Sym(_), Const(_), Sym(_)]
+            )
+    }
+
+    /// That block, as code. A static `_ThrowInfo` holds image-relative offsets, which an
+    /// assembled block cannot have (Cranelift has no such relocation), so they are written
+    /// when the exception is thrown, to a static of the object: the runtime reads it again
+    /// when the exception is caught or dropped, after this frame is gone.
+    fn seh_throw_info(&mut self, block: &hir_ty::mir::InlineAsm, size: i128) -> Result<()> {
+        use hir_ty::mir::AsmOperand;
+        let [AsmOperand::Reg { output: Some(output), .. }, AsmOperand::Sym(cleanup), AsmOperand::Sym(type_desc), _, AsmOperand::Sym(copy)] =
+            &*block.operands
+        else {
+            unsupported!("the `asm!` of `throw_exception`");
+        };
+        let OperandKind::Static(type_desc) = &type_desc.kind else {
+            unsupported!("the `asm!` of `throw_exception`");
+        };
+        let mut function = |this: &mut Self, operand: &Operand| -> Result<Value> {
+            let ty = this.operand_ty(operand)?;
+            let id = this.fn_item(ty)?;
+            let id = this.cg.declare_func_address_in_func(id, this.builder.func);
+            Ok(this.builder.ins().func_addr(ptr(), id))
+        };
+        let (cleanup, copy) = (function(self, cleanup)?, function(self, copy)?);
+        let type_desc = self.cg.static_data(*type_desc);
+        let type_desc = self.cg.declare_data_in_func(type_desc, self.builder.func);
+        let type_desc = self.builder.ins().symbol_value(ptr(), type_desc);
+        // 14 words: `_ThrowInfo` (4), `_CatchableTypeArray` (2) and `_CatchableType` (7).
+        let info = self.cg.define_data(
+            ConstBlob {
+                bytes: vec![0; 56],
+                relocs: Vec::new(),
+                fn_relocs: Vec::new(),
+                align: 8,
+                type_ids: Vec::new(),
+            },
+            true,
+        )?;
+        let info = self.cg.declare_data_in_func(info, self.builder.func);
+        let info = self.builder.ins().symbol_value(ptr(), info);
+        // The image's base is what `GetModuleHandleW(NULL)` gives.
+        let mut sig = self.cg.make_signature();
+        sig.params.push(AbiParam::new(ptr()));
+        sig.returns.push(AbiParam::new(ptr()));
+        let handle = self.cg.import("GetModuleHandleW", &sig)?;
+        let handle = self.cg.declare_func_in_func(handle, self.builder.func);
+        let null = self.builder.ins().iconst(ptr(), 0);
+        let call = self.builder.ins().call(handle, &[null]);
+        let base = self.builder.inst_results(call)[0];
+        let b = &mut self.builder;
+        let rva = |b: &mut FunctionBuilder, address: Value| {
+            let offset = b.ins().isub(address, base);
+            b.ins().ireduce(types::I32, offset)
+        };
+        let (array, catchable) = (b.ins().iadd_imm(info, 16), b.ins().iadd_imm(info, 24));
+        let words = [
+            (0, b.ins().iconst(types::I32, 0)),
+            (4, rva(b, cleanup)),
+            (8, b.ins().iconst(types::I32, 0)),
+            (12, rva(b, array)),
+            (16, b.ins().iconst(types::I32, 1)),
+            (20, rva(b, catchable)),
+            (24, b.ins().iconst(types::I32, 0)),
+            (28, rva(b, type_desc)),
+            (32, b.ins().iconst(types::I32, 0)),
+            (36, b.ins().iconst(types::I32, -1)),
+            (40, b.ins().iconst(types::I32, 0)),
+            (44, b.ins().iconst(types::I32, size as i64)),
+            (48, rva(b, copy)),
+        ];
+        for (offset, word) in words {
+            b.ins().store(MEM, word, info, offset);
+        }
+        let (addr, _) = self.place(output)?;
+        self.builder.ins().store(MEM, info, addr, 0);
+        Ok(())
+    }
+
     /// Calls the function that an `asm!` block is assembled as: see [`asm`].
     fn inline_asm(&mut self, block: &hir_ty::mir::InlineAsm) -> Result<()> {
         use hir_ty::mir::AsmOperand;
+        let seh = self.is_seh_throw_info(block);
         let mut operands = Vec::with_capacity(block.operands.len());
         let mut syms = Vec::with_capacity(block.operands.len());
         for operand in &block.operands {
             syms.push(match operand {
-                AsmOperand::Sym(_) if !block.naked => unsupported!("`asm!` with a `sym`"),
+                AsmOperand::Sym(_) if !block.naked && !seh => unsupported!("`asm!` with a `sym`"),
                 AsmOperand::Sym(Operand { kind: OperandKind::Static(id), .. }) => {
                     if is_thread_local(self.cg.db, *id) {
                         unsupported!("inline assembly with a `sym` that is thread local");
@@ -10773,6 +10864,12 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
                 }
                 AsmOperand::Label => asm::Operand::Label,
             });
+        }
+        if seh {
+            let Some(asm::Operand::Const(size)) = operands.get(3) else {
+                unsupported!("the `asm!` of `throw_exception`");
+            };
+            return self.seh_throw_info(block, *size);
         }
         let arch = self.cg.target.arch;
         let features = self.body.and_then(|it| it.owner.as_function());
