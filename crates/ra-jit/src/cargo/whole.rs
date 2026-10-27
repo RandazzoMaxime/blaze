@@ -488,17 +488,19 @@ fn not_loaded(cwd: &Path, checkout: &Checkout, reason: &str) -> String {
     };
     let said = std::fs::read_to_string(&log).unwrap_or_default();
     let shown = log.strip_prefix(cwd).unwrap_or(&log).display().to_string();
-    // A function of the program's own crates blaze cannot compile is left out of the object,
-    // and the link then fails on what it would have defined.
-    let unsupported: Vec<String> = said
+    // The functions of the program blaze could not compile, which nothing else compiles: the
+    // lines after the error's first ([`crate::refused_error`]).
+    let refused: Vec<&str> = said
         .lines()
-        .filter_map(|it| it.trim().strip_prefix("left to rustc: "))
-        .map(without_hashes)
+        .skip_while(|it| !(it.starts_with("Error: ") && it.contains(crate::REFUSED_SAYS)))
+        .skip(1)
+        .take_while(|it| it.starts_with("  "))
+        .map(str::trim)
         .collect();
-    if !unsupported.is_empty() {
+    if !refused.is_empty() {
         return format!(
-            "{named} has functions blaze could not compile, so it is not built:\n  {}\n(what blaze said is in {shown})",
-            unsupported.join("\n  ")
+            "{named} reaches functions blaze could not compile, so it is not built:\n  {}\n(what blaze said is in {shown})",
+            refused.join("\n  ")
         );
     }
     let last = said.lines().rev().find(|it| it.starts_with("Error"));
@@ -516,7 +518,7 @@ fn worker_log(project: &Path) -> Option<PathBuf> {
 
 /// `name` with the `[0123456789abcdef]` after each crate's name, and the `ra-jit.<hash>.` of
 /// a symbol, taken out.
-fn without_hashes(name: &str) -> String {
+pub(crate) fn without_hashes(name: &str) -> String {
     let is_hash = |it: &str| it.len() == 16 && it.bytes().all(|it| it.is_ascii_hexdigit());
     let mut name = name.to_owned();
     while let Some(at) = name.find("ra-jit.")

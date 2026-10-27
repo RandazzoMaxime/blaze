@@ -1148,8 +1148,11 @@ fn compile(
     let built = || {
         let mut known = crate::Rejections::default();
         let built = crate::build_unheld(db, building.table, &args, &mut known, building.listed)?;
-        if let Some(unset) = built.unset {
-            anyhow::bail!(unset);
+        if let Some(unset) = &built.unset {
+            anyhow::bail!("{unset}");
+        }
+        if let Some(why) = built.refused_reached(&args) {
+            anyhow::bail!(why);
         }
         let example = crate::crates_named(db, name, &args)?;
         crate::link::Line::of(db, &example, building.sysroot, false)
