@@ -71,6 +71,10 @@ beforeAll(async () => {
 });
 
 beforeEach(async () => {
+  for (const prefix of ["trust/", "index/"]) {
+    const keys = (await testEnv.BUCKET.list({ prefix })).objects.map((o) => o.key);
+    if (keys.length) await testEnv.BUCKET.delete(keys);
+  }
   for (const t of ["pub", "priv", "other"] as const) {
     await testEnv.TOKENS.put(`tenant:${t}`, JSON.stringify({ ...TENANTS[t], root: { name: roots[t].name, key: hex(roots[t].pub) } }));
   }
