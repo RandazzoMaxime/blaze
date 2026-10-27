@@ -5957,6 +5957,50 @@ pub mod sve {
 #[cfg(all(feature = "nightly", target_arch = "aarch64"))]
 pub mod sve_ops;
 
+/// rust-analyzer's `ExprCollector::new(db: &dyn SourceDatabase, module: ModuleId, ..) ->
+/// ExprCollector<'_>`: lifetime elision counts the lifetimes the parameters' types write or
+/// elide, not the `'static` of `type ModuleId = ModuleIdLt<'static>`'s expansion, nor the
+/// default of a trait object of a `'static` trait.
+pub mod elision_through_alias {
+    use std::cell::Cell;
+
+    pub trait Db: 'static {
+        fn n(&self) -> u8;
+    }
+
+    impl Db for u8 {
+        fn n(&self) -> u8 {
+            *self
+        }
+    }
+
+    #[derive(Clone, Copy)]
+    pub struct IdLt<'db>(pub &'db u8);
+
+    pub type Id = IdLt<'static>;
+
+    pub struct Collector<'db> {
+        pub db: &'db dyn Db,
+        pub cell: Cell<&'db u8>,
+    }
+
+    impl<'db> Collector<'db> {
+        pub fn new(db: &dyn Db, id: Id) -> Collector<'_> {
+            Collector { db, cell: Cell::new(id.0) }
+        }
+    }
+
+    pub fn first(x: &u8, id: Id) -> &u8 {
+        if *id.0 > *x { x } else { x }
+    }
+
+    pub fn run() -> u8 {
+        let (n, x) = (4u8, 2u8);
+        let collector = Collector::new(&n, IdLt(&7));
+        collector.db.n() + collector.cell.get() + first(&x, IdLt(&1))
+    }
+}
+
 /// An associated constant of an impl that is generic over a lifetime, named from a method of
 /// that impl.
 pub mod lifetime_impl_consts {
