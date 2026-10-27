@@ -404,9 +404,15 @@ All of these are rustc's, written from `compiler/rustc_borrowck` at the pinned n
   associated type with such a variable in it outlives a region as rustc's
   `alias_ty_must_outlive` says: with no bound from the where clauses or its trait, even
   one of other lifetimes, when its arguments do, a variable being made to; with one, only
-  by a bound of the same type or by its arguments, a variable outliving nothing. The type a
-  returned `impl Trait` hides must be well-formed and outlive what its bounds say, given what
-  the function knows (rustc's `check_opaque_meets_bounds`): `-> impl Sized + 'static` hiding
+  by a bound of the same type or by its arguments, a variable outliving nothing. What
+  normalizing a signature needs of what outlives what is needed too: `fn as_ref2<'a>(&'a
+  self) -> Self::Output<'a>` through an impl whose where clause `T: AsRef2<Output<'b> = ..>`
+  asks the GAT's `Self: 'b` needs `T: 'b` (E0309). As rustc's `assoc_def`, an item that an
+  impl with a type or const parameter it does not constrain (E0207) defines is never
+  projected to: the projection is an error, and a function whose signature normalizes to
+  one is not borrow-checked, as rustc's writeback taints its body.
+  The type a returned `impl Trait` hides must be well-formed and outlive what its bounds
+  say, given what the function knows (rustc's `check_opaque_meets_bounds`): `-> impl Sized + 'static` hiding
   a `T` is E0310 at the `impl Trait`; and well-formed where the body defines it, as rustc's
   `add_item_bounds_for_hidden_type` requires (#114728). In its defining body the type it hides is
   also well-formed at the signature, as rustc's implied bounds normalize the returned `impl Trait`
@@ -498,10 +504,8 @@ then one each of five more. The causes, grouped:
 - **Higher-ranked regions and placeholders**: auto traits of a coroutine's witness (`T: Send`
   of an `async` block holding a `for<'a>` future) are not proven with placeholders.
 - **Well-formedness of items** (most of what is left of E0309 and E0310): an impl whose
-  header has an associated type is not checked itself (its functions are), what normalizing
-  a signature needs of what outlives what is not (`fn as_ref2<'a>(&'a self) ->
-  Self::Output<'a>` through an impl whose where clause `T: AsRef2<Output<'b> = ..>` asks the
-  GAT's `Self: 'b` needs `T: 'b`), nor a `for<'a>` bound's projection under its binder (a supertrait
+  header has an associated type is not checked itself (its functions are), nor a `for<'a>`
+  bound's projection under its binder (a supertrait
   `for<'a> GatTrait<Gat<'a> = T>` needs the GAT's `Self: 'a` for every `'a`, E0311).
 - **Member constraints of `impl Trait`**: the choice rustc makes is not applied, and a
   projection bound that names a lifetime (`impl Iterator<Item = Box<dyn Foo>>`) leaves them
