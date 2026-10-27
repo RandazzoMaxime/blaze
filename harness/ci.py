@@ -104,6 +104,8 @@ HARNESSES = [
     # Generated programs on fixed seeds, and generated edits under a daemon against cold builds.
     # Only x86-64 Linux has been fuzzed so far.
     ("core", ["fuzz/fuzz.py", "smoke", "--backends", BACKEND], {}, on("linux-x86_64"), 2),
+    # #418: the same seeds with an empty and a warm store, and asm! text changed under one IR.
+    ("core", ["fuzz/store.py", "--backends", BACKEND], {}, on("linux-x86_64"), 2),
     ("core", ["fuzz/edits.py", "smoke", "--backends", BACKEND], {}, on("linux-x86_64"), 2),
     # Every reduced program fuzzing found ra-jit building wrong, on both architectures they
     # were found on; a part of its own, as it takes minutes.
@@ -169,6 +171,7 @@ FAST = {
     "worktrees.py --overlay": (34, ()),
     "tiers.py": (87, ()),
     "fuzz/fuzz.py smoke": (60, ()),
+    "fuzz/store.py": (120, ()),
     "fuzz/edits.py smoke": (62, ()),
     "fuzz/fuzz.py check": (259, ()),
     "backends.py corpus": (23, (X64,)),
@@ -202,6 +205,7 @@ CORE = {
     "fuzz/edits.py smoke": 52,
     "testselect.py": 51,
     "fuzz/fuzz.py smoke": 41,
+    "fuzz/store.py": 120,
     "difftest.py corpus": 34,
     "check_json.py": 32,
     "worktrees.py --overlay": 30,
