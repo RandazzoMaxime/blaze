@@ -863,7 +863,16 @@ impl Resolver<'_> {
         if self.rustc_built(krate) && self.shares_path(func) {
             return None;
         }
-        let path = self.path(func)?;
+        let extern_block =
+            matches!(func.lookup(self.db).container, ItemContainerId::ExternBlockId(_));
+        let Some(path) = self.path(func) else {
+            // No path to look up in what rustc built, but one of a crate rustc built nothing of
+            // is ours to name all the same, by where it is written.
+            if extern_block || self.rustc_built(krate) {
+                return None;
+            }
+            return self.own_function_name(func);
+        };
         // A test is the second of its name where it is written: rustc puts the constant
         // that describes it to the harness before it, under the same name.
         let function = hir::Function::from(func);
@@ -881,7 +890,7 @@ impl Resolver<'_> {
             return Some(symbol.to_owned());
         } // rustc has built nothing of the crate: the function is ours to name, unless it is
         // declared in an `extern` block, where what it links to names it.
-        if matches!(func.lookup(self.db).container, ItemContainerId::ExternBlockId(_)) {
+        if extern_block {
             return None;
         }
         if self.rustc_built(krate) {
@@ -902,7 +911,14 @@ impl Resolver<'_> {
     /// The name ra-jit gives a non-generic function of the crate `id` names: where it is, and
     /// for one in a body where in the source that is.
     fn function_named_in(&self, func: FunctionId, id: u64) -> Option<String> {
-        let path = self.path(func)?;
+        let Some(path) = self.path(func) else {
+            // No path to write (the `impl` is for `!`, `dyn Trait`, a type taking a constant, or
+            // the function sits where `item_path` cannot reach): its name and where it is
+            // written say which function it is just as well.
+            let name = hir::Function::from(func).name(self.db);
+            let place = hir_ty_codegen::function_place(self.db, self, func)?;
+            return Some(format!("ra-jit.{id:x}.{}.{:x}", name.as_str(), short_hash(&place)));
+        };
         if hir_def::HasModule::module(&func, self.db).block(self.db).is_none() {
             return Some(format!("ra-jit.{id:x}.{path}"));
         }
@@ -4716,6 +4732,13 @@ fn build(
             .collect(),
         false => Vec::new(),
     };
+    // A generic function is not a function until its types are given, and with nothing of
+    // rustc's there is no copy of it to name: each instance a caller asks for is compiled with
+    // the caller. As a root it would only be counted as left out ("no rustc symbol"), which is
+    // not something blaze could not compile.
+    if table.is_empty() {
+        functions.retain(|&(func, _)| !resolver.is_generic(func));
+    }
     let list = start.elapsed();
     // With a program to start from, only what it reaches is compiled, and what a runtime
     // looks up by name. Without one any function may be the one called.

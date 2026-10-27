@@ -946,6 +946,21 @@ pub fn block_place(
     Some(out)
 }
 
+/// Where any function is written, block or not: for a function whose path ra-jit cannot write
+/// (an `impl` for a type it has no name for, such as `!`, `dyn Trait` or a type taking a
+/// constant), the place names it instead.
+pub fn function_place(
+    db: &dyn HirDatabase,
+    symbols: &dyn SymbolResolver,
+    func: FunctionId,
+) -> Option<String> {
+    let id = func.lookup(db).id;
+    let mut out = String::new();
+    file_name(db, symbols, &mut out, id.file_id, &|path| path)?;
+    write!(out, "#{}", id.value.erase().into_raw()).ok()?;
+    Some(out)
+}
+
 /// Where a static inside a block is written, as [`block_place`] has it of a function.
 pub fn static_place(
     db: &dyn HirDatabase,

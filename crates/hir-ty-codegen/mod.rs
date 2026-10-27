@@ -121,7 +121,7 @@ mod promote;
 mod settled;
 mod stable;
 use ra_jit_store as store;
-pub use stable::{block_place, lower_declared, static_place};
+pub use stable::{block_place, function_place, lower_declared, static_place};
 mod target;
 pub use target::{Arch, Calls, ObjectFormat, Target, UnwindFormat, VariableArguments};
 pub mod tier;
