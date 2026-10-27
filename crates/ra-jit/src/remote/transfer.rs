@@ -12,6 +12,7 @@ use std::{
 
 use anyhow::{Context, bail};
 use aws_sdk_s3::primitives::ByteStream;
+use futures_util::{StreamExt, stream};
 use ra_jit_store::name_file_whole;
 use sha2::{Digest as _, Sha256};
 use tokio::{
@@ -49,6 +50,12 @@ impl Digest {
     }
 }
 
+impl From<[u8; 32]> for Digest {
+    fn from(bytes: [u8; 32]) -> Digest {
+        Digest(bytes)
+    }
+}
+
 impl fmt::Display for Digest {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         self.0.iter().try_for_each(|byte| write!(f, "{byte:02x}"))
@@ -75,6 +82,8 @@ pub(crate) struct Traffic {
     pub(super) sent: AtomicU64,
     /// Objects that were not what their name says.
     pub(super) rejected: AtomicU64,
+    /// Objects that came or went whole.
+    pub(super) moved: AtomicU64,
 }
 
 impl Traffic {
@@ -90,7 +99,24 @@ impl Traffic {
             received: AtomicU64::new(0),
             sent: AtomicU64::new(0),
             rejected: AtomicU64::new(0),
+            moved: AtomicU64::new(0),
         }
+    }
+
+    /// One line of what a push or pull moved and how fast: the objects, the bytes that went
+    /// the way of `verb`, the seconds and MiB/s.
+    pub(crate) fn summary(&self, verb: &str, took: Duration) -> String {
+        let count = |it: &AtomicU64| it.load(Ordering::Relaxed);
+        let bytes = match verb {
+            "push" => count(&self.sent),
+            _ => count(&self.received),
+        };
+        let seconds = took.as_secs_f64();
+        let rate = bytes as f64 / (1 << 20) as f64 / seconds.max(1e-3);
+        format!(
+            "{verb}: {} objects, {bytes} bytes, {seconds:.2} s, {rate:.1} MiB/s",
+            count(&self.moved)
+        )
     }
 
     pub(super) fn jobs(&self) -> usize {
@@ -184,6 +210,8 @@ pub(super) enum Body {
     File(File),
     S3(ByteStream),
     Http(hyper::body::Incoming),
+    /// An object with nothing left from where it was read.
+    Empty,
 }
 
 impl Body {
@@ -197,6 +225,7 @@ impl Body {
             }
             Body::S3(stream) => Ok(stream.try_next().await?.map(|it| it.to_vec())),
             Body::Http(body) => super::https::next(body).await,
+            Body::Empty => Ok(None),
         }
     }
 }
@@ -498,6 +527,7 @@ impl super::Remote {
                     }
                 };
                 if whole.with_context(|| format!("fetching {name}"))? {
+                    self.traffic.moved.fetch_add(1, Ordering::Relaxed);
                     return Ok(Fetched::Whole(received));
                 }
                 self.traffic.rejected.fetch_add(1, Ordering::Relaxed);
@@ -523,6 +553,11 @@ impl super::Remote {
         most: u64,
         received: &mut u64,
     ) -> anyhow::Result<()> {
+        if let super::Place::Gateway(gateway) = &self.place
+            && most.saturating_sub(partial.len) >= RANGED_AT
+        {
+            return self.append_ranges(gateway, name, partial, most, received).await;
+        }
         let Some(mut body) = self.read_from(name, partial.len).await? else {
             return Err(Missing(name.to_owned()).into());
         };
@@ -538,7 +573,48 @@ impl super::Remote {
             partial.append(&chunk).await?;
         }
     }
+
+    /// As [`Self::append_rest`], in ranges of [`RANGE`] bytes asked for `RA_JIT_REMOTE_JOBS`
+    /// at a time and appended in order: one stream through the gateway is slower than the
+    /// line. The first range says how long the object is.
+    async fn append_ranges(
+        &self,
+        gateway: &super::gateway::Gateway,
+        name: &str,
+        partial: &mut Partial,
+        most: u64,
+        received: &mut u64,
+    ) -> anyhow::Result<()> {
+        let from = partial.len;
+        let first = gateway.range(name, from, from + RANGE - 1).await?;
+        let Some((bytes, total)) = first else { return Err(Missing(name.to_owned()).into()) };
+        if total > most {
+            return Err(TooLong { name: name.to_owned(), most }.into());
+        }
+        *received += bytes.len() as u64;
+        partial.append(&bytes).await?;
+        let starts = (partial.len..total).step_by(RANGE as usize);
+        let mut ranges = stream::iter(starts.map(|at| async move {
+            let range = gateway.range(name, at, (at + RANGE).min(total) - 1).await?;
+            range.ok_or_else(|| anyhow::Error::from(Missing(name.to_owned())))
+        }))
+        .buffered(self.traffic.jobs());
+        while let Some(range) = ranges.next().await {
+            let (bytes, now) = range?;
+            if now != total {
+                bail!("{name} changed length from {total} to {now} bytes while it was fetched");
+            }
+            *received += bytes.len() as u64;
+            partial.append(&bytes).await?;
+        }
+        Ok(())
+    }
 }
+
+/// An object at least this many bytes from its end is fetched in ranges from a gateway.
+const RANGED_AT: u64 = 16 << 20;
+/// The size of one of those ranges.
+const RANGE: u64 = 8 << 20;
 
 /// An object that a list names and the remote does not have.
 #[derive(Debug)]

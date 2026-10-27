@@ -8286,11 +8286,11 @@ fn run_holding(
 
     // What other machines compiled is fetched next to the workspace too.
     let shared = std::thread::spawn(|| {
-        let shared = remote::Shared::from_env();
+        let shared = remote::Shared::from_env()?;
         if let Some(shared) = &shared {
-            shared.pull();
+            shared.pull()?;
         }
-        shared
+        anyhow::Ok(shared)
     });
 
     let start = Instant::now();
@@ -8387,7 +8387,7 @@ fn run_holding(
     }
     // The store reads its packs when first opened, which serving does: what is fetched after
     // that is not in it for this build.
-    let shared = shared.join().map_err(|_| anyhow::anyhow!("fetching the store panicked"))?;
+    let shared = shared.join().map_err(|_| anyhow::anyhow!("fetching the store panicked"))??;
     shipped::fetched(shipped);
     let built = built_crates(&db, &args)?;
     let mut served = frozen::serve(&mut db, &built);
@@ -8586,7 +8586,7 @@ fn run_holding(
     match shared {
         Some(shared) if args.socket.is_none() && !args.watch => {
             ra_jit_store::settled();
-            shared.push()
+            shared.push()?
         }
         Some(shared) => shared.keep(),
         None => {}
