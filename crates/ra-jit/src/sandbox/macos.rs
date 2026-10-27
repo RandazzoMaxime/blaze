@@ -23,6 +23,10 @@
 //! overlay or anywhere else outside the run, but what it reads is not seen. Each run of a
 //! program is given a nonce the library says back when it loads, and a program that never said
 //! it is an `X` line in the record: the record is incomplete.
+//!
+//! A view ([`Spec::view`]) is not made on macOS (decided, 2026-10-27): a spec with one is run
+//! as though it had none, its binds unread, and the program sees the machine as Seatbelt
+//! leaves it. Linux is where a build sees its declared closure alone.
 
 use std::{
     collections::HashSet,
