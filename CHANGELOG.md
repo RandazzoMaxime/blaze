@@ -10,6 +10,19 @@ each one's section: what `[Unreleased]` had, and the title of each change merged
 
 ### Added
 
+- `cargo blaze doc` (and `blaze doc`) writes the HTML documentation of the packages and their
+  dependencies from rust-analyzer's HIR (`crates/blaze-doc`), with no rustdoc: a page for
+  every item with linked signatures, fields, variants, inherent, trait, blanket and auto
+  impls, implementors and the members an impl leaves as the trait provides them; docs as
+  rustdoc's Markdown with intra-doc links resolved (an unresolved one warns as rustdoc's
+  does); source pages, an "All items" page, a search box (`s` or `/`) over every crate
+  documented, light and dark themes. cargo's flags (`-p`, `--workspace`, `--no-deps`,
+  `--document-private-items`, `--open`, features, `--target`, `--lib`, `--bin`, ...); the
+  workspace loads once and the pages are written in parallel. `harness/docdiff.py` compares
+  it with the pinned nightly's `cargo doc`: on fd and its dependencies blaze writes 100% of
+  rustdoc's pages, 99.9% of the members and impls on them and 99.4% of the resolved links
+  ([docs/doc.md](docs/doc.md)).
+
 - `nonstandard_macro_braces` no longer lints a call inside another macro's arguments
   (`vec!(..)` in `assert!(..)`), which stock clippy leaves alone; `new_without_default`
   takes a type to be exported only when another crate can name it; the format lints read
