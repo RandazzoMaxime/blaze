@@ -89,8 +89,13 @@ impl Shape {
             rustc_abi::Primitive::Pointer(_) => return None,
         };
         let count = count.as_u64();
-        (layout.size.bits() == 128 && bits * count == 128)
-            .then_some(Shape { bits, float, signed, count, vectors: 1 })
+        (layout.size.bits() == 128 && bits * count == 128).then_some(Shape {
+            bits,
+            float,
+            signed,
+            count,
+            vectors: 1,
+        })
     }
 
     pub(super) fn predicate(self) -> bool {
@@ -1150,7 +1155,8 @@ fn selected(
             let (Arg::Fixed(fixed), Ret::Vector(data)) = (args[1], ret) else {
                 return unsupported();
             };
-            let same = |it: Shape| (it.bits, it.float, it.count) == (data.bits, data.float, data.count);
+            let same =
+                |it: Shape| (it.bits, it.float, it.count) == (data.bits, data.float, data.count);
             let Some(suffix) = data.suffix() else { return unsupported() };
             if constant(2) != 0
                 || data.vectors != 1
