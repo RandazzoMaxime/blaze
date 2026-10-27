@@ -5,11 +5,9 @@ use std::{
     collections::BTreeSet,
     path::{Path, PathBuf},
     process::Stdio,
-    str::FromStr,
 };
 
 use anyhow::Context;
-use cargo_platform::{Cfg, Platform};
 use cfg::{CfgAtom, CfgDiff};
 use intern::{Symbol, sym};
 use rustc_hash::{FxHashMap, FxHashSet};
@@ -124,8 +122,6 @@ pub(crate) struct Built {
 pub(crate) struct Asked<'a> {
     /// The triple built for.
     pub(crate) triple: &'a str,
-    /// What `rustc --print cfg` says of the triple.
-    pub(crate) cfg: &'a [CfgAtom],
     /// The variables of the process that asks, where they are not those of this one.
     pub(crate) env: &'a FxHashMap<String, Option<String>>,
 }
@@ -140,35 +136,9 @@ fn cargo_in(dir: &Path, env: &FxHashMap<String, Option<String>>) -> std::process
 }
 
 impl Asked<'_> {
-    fn var(&self, name: &str) -> Option<String> {
-        match self.env.get(name) {
-            Some(value) => value.clone(),
-            None => std::env::var(name).ok(),
-        }
-    }
-
     /// cargo, run in `dir` as whoever asks would run it.
     fn cargo(&self, dir: &Path) -> std::process::Command {
         cargo_in(dir, self.env)
-    }
-
-    /// Whether the key of a `[target]` table of cargo's configuration names what is built for.
-    fn is(&self, key: &str) -> bool {
-        if key == self.triple {
-            return true;
-        }
-        let cfg: Vec<Cfg> = self
-            .cfg
-            .iter()
-            .filter_map(|atom| match atom {
-                CfgAtom::Flag(name) => Cfg::from_str(name.as_str()).ok(),
-                CfgAtom::KeyValue { key, value } => {
-                    Cfg::from_str(&format!("{key}={:?}", value.as_str())).ok()
-                }
-            })
-            .collect();
-        key.starts_with("cfg(")
-            && Platform::from_str(key).is_ok_and(|it| it.matches(self.triple, &cfg))
     }
 }
 
@@ -385,38 +355,12 @@ struct Flags {
 impl Flags {
     /// The flags cargo passes in `dir` for what is `asked`: the first of
     /// `CARGO_ENCODED_RUSTFLAGS`, `RUSTFLAGS`, the `[target]` tables that name what is built
-    /// for and `[build]` of the configuration that has any.
+    /// for and `[build]` of the configuration that has any, as blaze-manifest reads them and
+    /// cargo's `TargetInfo` picks them, with no cargo run.
     fn of(dir: &Path, asked: &Asked<'_>) -> anyhow::Result<Flags> {
-        if let Some(encoded) = asked.var("CARGO_ENCODED_RUSTFLAGS") {
-            return Flags::parse(encoded.split('\u{1f}'));
-        }
-        if let Some(flags) = asked.var("RUSTFLAGS") {
-            return Flags::parse(flags.split_whitespace());
-        }
-        let mut command = asked.cargo(dir);
-        // `cargo config get` is how cargo says what its configuration files and variables
-        // come to.
-        command.args(["-Z", "unstable-options", "config", "get", "--format", "json"]);
-        let output = command.output().context("running `cargo config`")?;
-        anyhow::ensure!(
-            output.status.success(),
-            "`cargo config get` failed: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
-        );
-        let config: Config =
-            serde_json::from_slice(&output.stdout).context("reading cargo's configuration")?;
-        // The table of the triple, then those of a cfg in the order of their keys.
-        let mut tables: Vec<_> = config.target.iter().filter(|(key, _)| asked.is(key)).collect();
-        tables.sort_by_key(|(key, _)| (key.starts_with("cfg("), key.as_str()));
-        let of_target: Vec<&str> = tables
-            .iter()
-            .filter_map(|(_, table)| table.rustflags.as_ref())
-            .flat_map(Words::words)
-            .collect();
-        if !of_target.is_empty() {
-            return Flags::parse(of_target.into_iter());
-        }
-        Flags::parse(config.build.rustflags.iter().flat_map(Words::words))
+        let flags = crate::answers::cargo_rustflags(&asked.cargo(dir), asked.triple)
+            .context("the flags cargo's configuration gives rustc")?;
+        Flags::parse(flags.iter().map(String::as_str))
     }
 
     /// The flags of `words`. `Err` names a `-Z` flag ra-jit does not build code with
@@ -474,37 +418,6 @@ impl Flags {
             }
         }
         Ok(flags)
-    }
-}
-
-/// The part of cargo's configuration that has flags for rustc.
-#[derive(Deserialize, Default)]
-struct Config {
-    #[serde(default)]
-    build: ConfigFlags,
-    #[serde(default)]
-    target: FxHashMap<String, ConfigFlags>,
-}
-
-#[derive(Deserialize, Default)]
-struct ConfigFlags {
-    rustflags: Option<Words>,
-}
-
-/// Flags as a configuration has them: in one string, or one by one.
-#[derive(Deserialize)]
-#[serde(untagged)]
-enum Words {
-    Joined(String),
-    Each(Vec<String>),
-}
-
-impl Words {
-    fn words(&self) -> Box<dyn Iterator<Item = &str> + '_> {
-        match self {
-            Words::Joined(joined) => Box::new(joined.split_whitespace()),
-            Words::Each(each) => Box::new(each.iter().map(String::as_str)),
-        }
     }
 }
 

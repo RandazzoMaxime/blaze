@@ -265,6 +265,12 @@ fn named_by() -> &'static str {
     }
 }
 
+/// The sysroot of rustup's copy of blaze's release, the one [`settle`] picks when rustup has it,
+/// found without running anything.
+pub(crate) fn rustup_ours() -> Option<PathBuf> {
+    rustup_home().and_then(|home| installed(&home, OURS.trim()))
+}
+
 fn rustup_home() -> Option<PathBuf> {
     if let Some(home) = std::env::var_os("RUSTUP_HOME") {
         return Some(PathBuf::from(home));
