@@ -3170,7 +3170,10 @@ fn workspace_at(
     if workspace.sysroot.is_rust_lib_src_empty() {
         // A library with its `Cargo.toml` is there and could not be read; without one it is
         // not installed, whatever the stitched library's error says of it.
-        let read = workspace.sysroot.rust_lib_src_root().is_some_and(|it| it.join("Cargo.toml").exists());
+        let read = workspace
+            .sysroot
+            .rust_lib_src_root()
+            .is_some_and(|it| std::fs::metadata(it.join("Cargo.toml")).is_ok());
         if let Some(error) = workspace.sysroot.error().filter(|_| read) {
             anyhow::bail!("{}", error.trim_end());
         }
