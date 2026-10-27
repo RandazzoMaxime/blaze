@@ -739,9 +739,30 @@ nushell's constraints went from 10.7 s to 4.4 s, `custom_value_op` from 811 ms t
 `serve_plugin_io` from 368 ms to 12 ms. A body's first check pays for the goals no body proved
 before it, each in a solver cache of its own: less in all on nushell (31.7 s to 28.9 s) and
 helix, more on axum (5.2 s to 6.7 s), whose 16-tuple impls each prove goals no other body
-does. The slowest bodies now are nushell's `theme_list::list` (240 ms, liveness over 48k
-points with no loans), `stream_parallel_values` (186 ms, constraints) and `run_http_server`
-(133 ms, moves).
+does.
+
+With whether a type is `Copy` and normalizing canonical queries too (a type's regions
+`'static` for `Copy`, numbered for normalizing, as rustc's `type_op_normalize`), and dominators
+by semi-NCA with dominance read from the tree's entry and exit numbers, as rustc's. Same
+measure, on main 5b58cc84:
+
+| App | Inference | Polonius | max | NLL | max |
+|---|---|---|---|---|---|
+| ripgrep | 610 | 325 (53%) | 7 | 280 (46%) | 7 |
+| fd | 190 | 89 (47%) | 16 | 81 (43%) | 15 |
+| bat | 278 | 197 (71%) | 63 | 180 (65%) | 63 |
+| hyperfine | 206 | 81 (39%) | 8 | 71 (35%) | 7 |
+| just | 1076 | 602 (56%) | 19 | 546 (51%) | 18 |
+| axum | 3887 | 1699 (44%) | 32 | 1642 (42%) | 32 |
+| helix | 3130 | 1509 (48%) | 111 | 1334 (43%) | 105 |
+| nushell | 14709 | 9686 (66%) | 202 | 8842 (60%) | 203 |
+
+Moves went from 1.7 s to 0.8 s on nushell and from 0.8 s to 0.1 s on axum, and
+`stream_parallel_values` (186 ms, one normalization) left the slowest bodies. The first check
+on axum went from 6.7 s to 8.3 s: each query has a solver cache of its own, so a nested goal
+two of a body's goals share is solved for each. The slowest bodies now are nushell's
+`theme_list::list` (202 ms, liveness over 48k points with no loans), `run_http_server`
+(127 ms, the walk) and `tool_router` (107 ms, constraints of a body of 57 points).
 
 ## Debugging
 

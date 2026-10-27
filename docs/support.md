@@ -221,7 +221,10 @@ reports it. A function with a macro call whose expansion is not what rustc makes
 refused with the reason: one that failed to expand, and a call in parentheses or brackets
 with no `;` after it whose expansion is not the one expression rustc parses it as, such as a
 call of a macro of several statements in the parentheses of another macro's call
-([#154](https://github.com/indexable-inc/blaze/issues/154)). An error
+([#154](https://github.com/indexable-inc/blaze/issues/154)). An expansion of one expression
+and a `;` is that expression, as rustc takes the `;`: `bail!(e)` last in a block, expanding to
+`return Err(e);`, is built when the macro is another crate's (rustc warns), and refused when it
+is the crate's own, where rustc's `semicolon_in_expressions_from_macros` is an error. An error
 rust-analyzer does not find is not refused, and a crate ra-jit compiles without rustc, as it
 does a whole program's, is then built and run.
 Borrow-check errors are the main case: ra-jit's borrow checker ([borrowck.md](borrowck.md)) refuses what it finds, and it

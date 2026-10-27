@@ -65,3 +65,26 @@ store on the second.
 
 The scripts that made these (run in the VM from blaze's checkout, `nix develop -c python3 ...`)
 are `survey.py`, `survey2.py` and `split.py` here.
+
+## The walk by stable names (`ab.json`, `ab.py`)
+
+The same one-function PR, before and after the walk hashes a dependency's function by its stable
+name and keeps what is below it in the store: two builds of one tree, differing in that change
+alone. Each project has a store of its own that main's run fills; every PR run starts from a copy
+of it, with a fresh target, daemon and `RA_JIT_HOME`, `all` and `affected` in turn, twice. The
+walk is `tests-reach-us` from the daemon's log, summed over the test programs.
+
+| project | ran / cached | `all` | `affected` before | after | walk before | after |
+|---|---|---|---|---|---|---|
+| axum | 6 / 0 | 11.5 to 12.2 s | 19.1, 18.9 s | 13.3, 13.7 s | 6.25, 6.14 s | 0.94, 0.94 s |
+| just | 1272 / 171 | 28.2 to 29.5 s | 38.8, 38.9 s | 32.4, 32.1 s | 7.52, 7.70 s | 0.46, 0.44 s |
+| nushell | 42 / 25 | 17.2 to 18.9 s | 17.3, 19.4 s | 18.9, 17.0 s | 0.52, 0.53 s | 0.57, 0.57 s |
+
+Which tests ran and which came from main is the same before and after. Main's run, which walks
+everything once and keeps what is below each name, walks as long as before (axum 2.4 and 2.6 s).
+`affected` still costs a little more than `all` here: just's 3.5 s is not the walk, which is
+0.45 s now. Where it goes is not measured; the sandbox `affected` runs each test in is the first
+thing to time. With a
+store of its own, nushell's `affected` is as fast as `all`: the 4 s it lost in the table above
+came from the shared store that every project's runs kept growing, which every fresh daemon
+checks the packs of as it opens it (#685 makes that cheaper).
