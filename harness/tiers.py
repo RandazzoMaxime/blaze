@@ -68,11 +68,11 @@ async def serve(project: Path, env: dict[str, str]) -> None:
     after a daemon starts writes the whole object again."""
     await build("first build", project, env)
     for _ in range(120):
-        if "[ra-jit]" in await build("wait for the daemon", project, env):
+        if "[blaze]" in await build("wait for the daemon", project, env):
             break
         await asyncio.sleep(0.5)
     else:
-        raise StepError("wait for the daemon: no build said `[ra-jit]` in 120 tries")
+        raise StepError("wait for the daemon: no build said `[blaze]` in 120 tries")
     source = project / "src" / "main.rs"
     source.write_text(source.read_text() + "\n// the daemon's first edit\n")
     await build("first edit", project, env)

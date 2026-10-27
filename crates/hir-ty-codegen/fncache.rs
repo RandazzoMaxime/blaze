@@ -215,7 +215,7 @@ pub fn tests_reach(
                 let seen = &walk.nodes[node as usize].node;
                 if walk.uncompiled.contains(&node) {
                     let why =
-                        format!("it reaches {}, which ra-jit can't compile", describe(db, seen));
+                        format!("it reaches {}, which blaze can't compile", describe(db, seen));
                     return Err(AlwaysRun { why, path: path_to(db, &walk, &order, &from, at) });
                 }
                 if outside_at.is_none()
@@ -715,7 +715,7 @@ impl<'db> Walk<'db> {
     /// Notes that the node did not compile: nothing tells what it does then.
     fn cannot(&mut self, at: u32, hasher: &mut impl Hasher, e: &CodegenError) {
         self.uncompiled.insert(at);
-        self.nodes[at as usize].why = Why::own(format!("can't be compiled by ra-jit ({e})"));
+        self.nodes[at as usize].why = Why::own(format!("can't be compiled by blaze ({e})"));
         e.to_string().hash(hasher);
     }
 
@@ -1422,7 +1422,7 @@ fn library_body<'db>(
     };
     let mir = match mir {
         Ok(it) => it,
-        Err(e) => return Some(format!("has MIR ra-jit can't read ({e:?})")),
+        Err(e) => return Some(format!("has MIR blaze can't read ({e:?})")),
     };
     let env = ParamEnvAndCrate { param_env: ParamEnv::empty(), krate };
     for (_, block) in mir.basic_blocks.iter() {
@@ -1477,7 +1477,7 @@ fn library_operand<'db>(
         }
         return match compiled_static(db, id) {
             Ok(it) => it.writable.then(|| format!("reads the static `{name}`, which can change")),
-            Err(e) => Some(format!("reads the static `{name}`, which ra-jit can't compile ({e})")),
+            Err(e) => Some(format!("reads the static `{name}`, which blaze can't compile ({e})")),
         };
     }
     let (func, args) = fn_item(operand)?;
@@ -1644,7 +1644,7 @@ fn trouble<'db>(
         }
         TyKind::Dynamic(..) => Some("is a trait object".to_owned()),
         TyKind::Alias(..) if in_library => None,
-        _ => Some("is of a type ra-jit can't see into".to_owned()),
+        _ => Some("is of a type blaze can't see into".to_owned()),
     }
 }
 

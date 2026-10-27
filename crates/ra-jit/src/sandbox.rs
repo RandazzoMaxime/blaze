@@ -460,7 +460,7 @@ pub(crate) fn command(mut args: impl Iterator<Item = OsString>) -> ! {
     std::process::exit(match backend(&spec, Some(&program)) {
         Ok(code) => code,
         Err(error) => {
-            eprintln!("ra-jit: the sandbox could not be made: {error}");
+            eprintln!("blaze: the sandbox could not be made: {error}");
             COULD_NOT
         }
     })
