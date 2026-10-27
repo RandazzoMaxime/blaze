@@ -239,10 +239,14 @@ impl<'a> Given<'a> {
     }
 }
 
-/// The variables rustc reads for a question that ra-jit answers only when unset.
-const UNSET: [&str; 8] = [
-    "RUSTC_OVERRIDE_VERSION_STRING",
-    "RUST_TARGET_PATH",
+/// The variables rustc reads for any question, which ra-jit answers only when they are unset.
+const UNSET: [&str; 2] = ["RUSTC_OVERRIDE_VERSION_STRING", "RUST_TARGET_PATH"];
+
+/// The variables of Apple's SDK and deployment targets, which a shell of nixpkgs on macOS
+/// sets. rustc reads them to link and for the target's spec, which says the deployment
+/// target; its version, cfgs, sysroot and file names are the same with them, and are
+/// answered with them set.
+const APPLE: [&str; 6] = [
     "SDKROOT",
     "MACOSX_DEPLOYMENT_TARGET",
     "IPHONEOS_DEPLOYMENT_TARGET",
@@ -400,7 +404,11 @@ pub(super) fn answer(
                 cfgs.dedup();
                 cfgs.iter().for_each(|it| out += &format!("{it}\n"));
             }
-            "target-spec-json" if given.unstable_options && nightly => {
+            "target-spec-json"
+                if given.unstable_options
+                    && nightly
+                    && APPLE.iter().all(|it| var(it).is_none()) =>
+            {
                 out += target.target_spec_json.get(&toolchain.host)?;
             }
             _ => return None,
