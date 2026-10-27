@@ -454,7 +454,7 @@ def directives(work, out_dir):
     print("\n".join(text))
 
 
-KEPT_LINE = "ra-jit: a run the store kept, of its closure"
+KEPT_LINE = "blaze: a run the store kept, of its closure"
 
 
 def in_closure(name, repo, rev, work, ra_jit, jobs, store):

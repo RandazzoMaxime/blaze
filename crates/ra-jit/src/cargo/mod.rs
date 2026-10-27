@@ -226,10 +226,10 @@ const FAILED: i32 = 101;
 
 /// What the `Finished` line says the build was: ra-jit's, and the remote's failure if the
 /// daemon's last exchange with it failed (`RA_JIT_REMOTE=off` stops using it).
-fn ra_jit_tag() -> String {
+fn blaze_tag() -> String {
     match crate::remote::noted_down() {
-        Some(down) => format!("ra-jit, remote down: {down}"),
-        None => "ra-jit".to_owned(),
+        Some(down) => format!("blaze, remote down: {down}"),
+        None => "blaze".to_owned(),
     }
 }
 
@@ -262,7 +262,7 @@ fn check(asked: &Invocation) -> anyhow::Result<i32> {
     let cwd = std::env::current_dir()?;
     let finished = |profile: &str| {
         let took = started.elapsed().as_secs_f64();
-        let finished = format!("`{profile}` profile [{}] target(s) in {took:.2}s", ra_jit_tag());
+        let finished = format!("`{profile}` profile [{}] target(s) in {took:.2}s", blaze_tag());
         say::status(asked.flags.quiet, "Finished", &finished);
         messages::passed(format);
     };
@@ -299,7 +299,7 @@ fn check(asked: &Invocation) -> anyhow::Result<i32> {
             Some(daemon::Reply::Checked { errors: None }) => {}
             Some(daemon::Reply::Checked { errors: Some(errors) }) => said.push(errors),
             Some(daemon::Reply::Cold { reason }) => {
-                eprintln!("error: ra-jit could not check the workspace: {reason}");
+                eprintln!("error: blaze could not check the workspace: {reason}");
                 return Ok(FAILED);
             }
             reply => anyhow::bail!("the daemon answered a check with {reply:?}"),
@@ -387,7 +387,7 @@ pub(super) fn built(checkout: &Checkout) -> Result<Vec<Result<(), String>>, NotB
             Ok(_) => Ok(Ok(())),
             Err(NotBuilt::Error(said)) => Err(NotBuilt::Error(said)),
             Err(NotBuilt::Failed(why)) => {
-                Ok(Err(format!("ra-jit did not build {}: {why}", program.binary.display())))
+                Ok(Err(format!("blaze did not build {}: {why}", program.binary.display())))
             }
             Err(NotBuilt::Cargos(why)) => Ok(Err(why)),
         })
@@ -454,7 +454,7 @@ fn store_status() -> String {
         Ok(None) => "no limit".to_owned(),
         Err(why) => why,
     };
-    format!("store: {} MB, {most} (`ra-jit cache gc` collects it), {}", held >> 20, dir.display())
+    format!("store: {} MB, {most} (`blaze cache gc` collects it), {}", held >> 20, dir.display())
 }
 
 /// `cargo ra-jit status`: the daemon, its workers, the store, and how the builds of each
@@ -495,7 +495,7 @@ fn status() -> anyhow::Result<i32> {
         Some(Reply::Restart { version }) => {
             let _ = writeln!(
                 said,
-                "daemon: another build of ra-jit, version {version}; the next build replaces it"
+                "daemon: another build of blaze, version {version}; the next build replaces it"
             );
         }
         _ => said.push_str("daemon: not running\n"),

@@ -166,7 +166,7 @@ pub(crate) fn run_as_cargo_does(
             kept.restore(&out_dir)?;
             script_sandbox::keep_reads(&out_dir, None);
             if std::env::var_os("RA_JIT_STATS").is_some() {
-                eprintln!("ra-jit: a run the store kept, of its closure");
+                eprintln!("blaze: a run the store kept, of its closure");
             }
             std::io::stdout().write_all(&hermetic::for_cargo(&kept.stdout))?;
             std::io::stderr().write_all(&kept.stderr)?;
@@ -219,7 +219,7 @@ pub(crate) fn run_as_cargo_does(
         script_sandbox::keep_reads(&out_dir, reads);
         // Cargo keeps what a script printed to stderr beside its `OUT_DIR`.
         if std::env::var_os("RA_JIT_STATS").is_some() {
-            eprintln!("ra-jit: a run the store kept");
+            eprintln!("blaze: a run the store kept");
         }
         std::io::stdout().write_all(&kept.stdout)?;
         std::io::stderr().write_all(&kept.stderr)?;
@@ -309,7 +309,7 @@ fn same_as_kept(package: &str, kept: &Kept, made: &Kept, out_dir: &Path) {
         std::process::exit(1);
     }
     if std::env::var_os("RA_JIT_STATS").is_some() {
-        eprintln!("ra-jit: a run the store kept is what this one did");
+        eprintln!("blaze: a run the store kept is what this one did");
     }
 }
 

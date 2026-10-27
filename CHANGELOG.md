@@ -549,6 +549,11 @@ each one's section: what `[Unreleased]` had, and the title of each change merged
 
 ### Changed
 
+- The programs print `blaze`, not `ra-jit` (#270, "What the programs print"): the `blaze:`
+  prefix of their notes, `Finished ... profile [blaze]`, `blaze is enabled`, `plain cargo:
+  through blaze`, `blaze could not compile`, `blaze cache gc` and the other errors and notes.
+  The harnesses that read these lines read the new ones. The binaries, crates, directories,
+  `RA_JIT_*` variables and symbol names keep their names for now.
 - A build script's `RUSTC` is blaze, so its probes run no rustc: `rustc -vV` and `--print`
   are blaze's answers, and a probe compile (`autocfg`, `anyhow`, `thiserror`, `rustix`,
   `proc-macro2`) gets `cargo blaze check`'s verdict, or an error naming the command where blaze
@@ -1016,6 +1021,11 @@ each one's section: what `[Unreleased]` had, and the title of each change merged
 
 ### Fixed
 
+- A whole build of other features or flags no longer leaks into the next: every worker linked
+  its programs into one `target/ra-jit/whole/<name>`, so after `cargo blaze run --features
+  loud` a plain `cargo blaze run`, whose worker had nothing edited to build again, installed
+  the loud program (`HELLO WORLD`). Each worker now links in a directory of its own, named by
+  what it is loaded with (`harness/cargo_ra_jit.py`, flags group).
 - `cargo blaze test --doc` runs an edited library's examples again: it took an example's
   program from the run before while the example's own text was unchanged, since blaze's run
   names no library with `--extern` for the key to stamp, so after an edit that broke them the
