@@ -61,8 +61,9 @@ blaze tracks the latest Rust nightly. `.github/workflows/toolchain-bump.yaml` ru
    nightly's own verdicts (at its commit, `--min-pass` as the floor), `fork alone` and
    `cargo ra-jit` on real projects.
 4. When the train finishes, `harness/stdcount.py` compiles the standard library with the bump's
-   build and with main's, each against its own nightly's `rust-src`, and counts the functions
-   each refuses. The verdict (`.github/scripts/toolchain_bump_ci.py verdict`):
+   build and with `toolchain/base`'s (the same main commit, the old pin), each against its own
+   nightly's `rust-src`, and counts the functions each refuses. Against main's newest build
+   instead, the first bump counted +1463 that were main's std fixes since the bump's commit. The verdict (`.github/scripts/toolchain_bump_ci.py verdict`):
    - **green**: no job or harness red that is green on `toolchain/base`'s train (waited for, or
      started if there is none; main's newest finished train only if it was cancelled), and no
      more std refusals than main: `gh pr merge --auto`, so it lands once the gate passes, and

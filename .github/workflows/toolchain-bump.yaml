@@ -132,16 +132,19 @@ jobs:
           echo "The answers of a host or the pull request failed: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" > "$RUNNER_TEMP/why.txt"
           python3 .github/scripts/toolchain_bump_ci.py blocked "$RUNNER_TEMP/why.txt" --date "$(cat harness/toolchain | sed s/nightly-//)"
 
-  # The standard library's refusals with the bump's build (the train's) and with main's (its
-  # newest build on a push), each with its own nightly's rust-src.
+  # The standard library's refusals with the bump's build (the train's) and with the build of the
+  # main commit the bump is on (toolchain/base's train, which the verdict compares jobs with),
+  # each with its own nightly's rust-src. main's newest build would count main's std fixes
+  # since then against the bump.
   std:
     name: std refusals
     if: github.event_name == 'workflow_run' && github.event.workflow_run.head_branch == 'toolchain/bump' && github.event.workflow_run.event == 'workflow_dispatch' && github.event.workflow_run.head_repository.full_name == github.repository
     runs-on: ubuntu-24.04
-    timeout-minutes: 60
+    # It waits for toolchain/base's train, as the verdict does.
+    timeout-minutes: 180
     permissions:
-      contents: read
-      actions: read
+      contents: write
+      actions: write
     # main's scripts and toolchain; of the bump, only its build (the train's artifact) and its pin.
     steps:
       - uses: actions/checkout@v7
@@ -158,12 +161,12 @@ jobs:
       - id: base
         env:
           GH_TOKEN: ${{ github.token }}
+          RUN: ${{ github.event.workflow_run.id }}
           HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
         run: |
-          id=$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/ra-jit.yaml/runs?branch=main&event=push&status=success&per_page=1" --jq '.workflow_runs[0].id')
-          sha=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$id" --jq .head_sha)
+          python3 .github/scripts/toolchain_bump_ci.py base-run "$RUN"
+          sha=$(sed -n 's/^sha=//p' "$GITHUB_OUTPUT")
           pin() { gh api "repos/$GITHUB_REPOSITORY/contents/harness/toolchain?ref=$1" --jq .content | base64 -d | tr -d '\n'; }
-          echo "run=$id" >> "$GITHUB_OUTPUT"
           echo "toolchain=$(pin "$sha")" >> "$GITHUB_OUTPUT"
           echo "bump=$(pin "$HEAD_SHA")" >> "$GITHUB_OUTPUT"
       - uses: actions/download-artifact@v8

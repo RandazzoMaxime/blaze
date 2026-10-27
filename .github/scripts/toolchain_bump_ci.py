@@ -9,6 +9,8 @@ the merge gate and the release train, and the train's verdict queues it or says 
     answers FILE...         merge answers.py --write's rustc.json of each host into the tree's
     pr                      commit the answers, push, open or update the pull request, start
                             the train on BRANCH and on BASE, the main commit BRANCH is on
+    base-run RUN            outputs run, sha: BASE's train that the train run RUN of BRANCH is
+                            compared with, waited for; the std count's base build is its
     verdict RUN STD.json    the train run RUN of BRANCH and the std count: no job or harness
                             red that is green on BASE's train (main's own are cancelled by the
                             next merge more often than not), and the std unit refusing no more
@@ -318,6 +320,15 @@ def base_train(train, wait=datetime.timedelta(minutes=120)):
     return main_train(train["workflow_id"]), f"main's newest finished train (main's {on[:10]} has none)"
 
 
+def base_run(run_id):
+    """Outputs run and sha of the train the bump's train RUN is compared with (`base_train`)."""
+    base, which = base_train(json.loads(gh("api", f"repos/{REPO}/actions/runs/{run_id}")))
+    if not base:
+        raise Failed("no train of main to compare with")
+    print(f"compared with {which}: {base['html_url']}")
+    output(run=base["id"], sha=base["head_sha"])
+
+
 def verdict(run_id, std_path):
     train = json.loads(gh("api", f"repos/{REPO}/actions/runs/{run_id}"))
     # The verdict runs main's checkout: the bump's pin is read at the train's commit.
@@ -383,6 +394,7 @@ def main():
     sub.add_parser("prepare").add_argument("--date")
     sub.add_parser("answers").add_argument("files", nargs="+")
     sub.add_parser("pr")
+    sub.add_parser("base-run").add_argument("run")
     v = sub.add_parser("verdict")
     v.add_argument("run")
     v.add_argument("std", nargs="?")
@@ -397,6 +409,8 @@ def main():
             answers(args.files)
         elif args.step == "pr":
             pr()
+        elif args.step == "base-run":
+            base_run(args.run)
         elif args.step == "verdict":
             verdict(args.run, args.std)
         else:
