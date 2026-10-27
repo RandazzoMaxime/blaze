@@ -5,6 +5,7 @@
 
 mod args;
 mod clean;
+mod fmt;
 mod manifest;
 mod new;
 mod tree;
@@ -62,7 +63,7 @@ pub(crate) const SUBCOMMANDS: &[Subcommand] = &[
     aka("check", &["c"], Status::Build, "what a build would say of the source, building nothing"),
     aka("run", &["r"], Status::Build, "build and run a program"),
     aka("test", &["t"], Status::Build, "build and run the tests"),
-    sub("fmt", Status::Not("blaze's formatter is being written"), "format the source"),
+    sub("fmt", Status::Own, "format the source"),
     sub("clippy", Status::Not("blaze's lints are being written"), "lint the source"),
     aka(
         "doc",
@@ -126,6 +127,7 @@ pub(crate) fn command(args: Vec<String>) -> anyhow::Result<i32> {
         return Ok(super::FAILED);
     };
     match subcommand.name {
+        "fmt" => Ok(fmt::command(rest)),
         "metadata" => manifest::metadata(Args::new(rest)),
         "locate-project" => manifest::locate_project(Args::new(rest)),
         "verify-project" => manifest::verify_project(Args::new(rest)),

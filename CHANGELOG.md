@@ -10,6 +10,9 @@ each one's section: what `[Unreleased]` had, and the title of each change merged
 
 ### Added
 
+- `cargo blaze fmt` (and `blaze fmt`) is blaze's own: blaze-fmt run in process, with
+  cargo-fmt's options over the workspace's targets, or rustfmt's over the `.rs` files named
+  (`blaze fmt src/main.rs`). No rustfmt or cargo-fmt is started.
 - `crates/blaze-fmt`: blaze's own formatter, rustfmt and cargo-fmt at rust-lang/rust 12433c307
   ported onto a syntax tree of blaze's own, which rust-analyzer's parser fills with the spans
   rustc would give each node. It runs in process and starts no rustfmt; what it cannot
