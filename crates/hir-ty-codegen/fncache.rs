@@ -37,10 +37,7 @@ use cranelift_codegen::ir::{InstBuilder, Value, types};
 use cranelift_module::ModuleRelocTarget;
 use hir_def::{
     AdtId, DefWithBodyId, FunctionId, HasModule, ItemContainerId, Lookup, StaticId, VariantId,
-    attrs::AttrFlags,
-    signatures::{
-        FunctionSignature, StaticFlags, StaticSignature, StructSignature, TraitSignature,
-    },
+    signatures::{FunctionSignature, StaticSignature, StructSignature, TraitSignature},
 };
 use rustc_hash::{FxHashMap, FxHashSet};
 use rustc_type_ir::inherent::{GenericArgs as _, IntoKind};
@@ -1545,11 +1542,7 @@ fn library_name(db: &dyn HirDatabase, body: LibraryBody<'_>) -> String {
 
 /// The symbol a foreign static is linked by, if `id` is one.
 fn foreign_static(db: &dyn HirDatabase, id: StaticId) -> Option<String> {
-    let signature = StaticSignature::of(db, id);
-    signature.flags.contains(StaticFlags::EXTERN).then(|| {
-        AttrFlags::link_name(db, id.into())
-            .map_or_else(|| signature.name.as_str().to_owned(), |it| it.as_str().to_owned())
-    })
+    super::static_link_name(db, id)
 }
 
 /// Why the arguments of the closure can't be what a result is kept by, and whether one holds

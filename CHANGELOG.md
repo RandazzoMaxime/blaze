@@ -1028,6 +1028,11 @@ each one's section: what `[Unreleased]` had, and the title of each change merged
   crate again. It now asks for both as rustc's line does, the room through the same
   `.headerpad` file. A one-function edit of a 13,000-line `main.rs` of no dependencies takes
   0.17 s, from 0.36 s.
+- An `extern` item whose `link_name` starts with `\u{1}`, the symbol as the object has it
+  (bindgen writes `"\u{1}_aws_lc_0_44_0_SHA384"` for macOS), is declared without the target's
+  global prefix, which the object writer puts back: it was prefixed again, so the call named
+  `_\u{1}_aws_lc_0_44_0_SHA384` and a program using aws-lc-rs (rustls, reqwest) failed to link
+  on macOS when blaze linked it ("symbol(s) not found ... __aws_lc_0_44_0_SHA384").
 - The LLVM backend: an error LLVM diagnoses while it writes an object is an error naming
   what LLVM said, not an object with an instruction left out. LLVM 23's assembler printed
   "can't encode 'ah'" for `mov ah, sil` in an `asm!` block and wrote the object without it
