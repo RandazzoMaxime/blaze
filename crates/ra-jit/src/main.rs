@@ -2834,7 +2834,7 @@ impl Checkouts {
                 eprintln!("split {}: its own are {own:?}", over.display());
                 workspaces.push(self.split(base, &over, &own));
                 splits.push(Some(Split { base: self.roots[base].1.clone(), own }));
-                debug.push(self.debug[base]);
+                debug.push(self.debug[base].clone());
                 roots.push((dunce::canonicalize(project)?, over));
                 continue;
             }
@@ -2957,7 +2957,7 @@ impl Checkouts {
             let own = self.differing(base, &over);
             self.loaded.replace(at, self.split(base, &over, &own));
             self.splits[at] = Some(Split { base: self.roots[base].1.clone(), own });
-            self.debug[at] = self.debug[base];
+            self.debug[at] = self.debug[base].clone();
         }
         self.loaded.add(Vec::new(), &self.cargo_config.extra_env, &self.load_config, vfs, db)?;
         failed
