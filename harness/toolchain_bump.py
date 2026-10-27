@@ -33,6 +33,8 @@ the new nightly until it is rebuilt. docs/contributing.md, "Moving to a newer ni
 """
 import argparse, asyncio, datetime, hashlib, os, re, shutil, sys, tempfile, tomllib, urllib.request
 
+import ci
+
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
 PIN = os.path.join(HERE, "toolchain")
@@ -267,7 +269,7 @@ async def checks():
         ["answers.py"],
         ["macroserver.py"],
         ["difftest.py", "corpus", "--bin", "runner", "--crate", "cases", "--features", "cases/nightly", "--layouts"],
-        ["ci.py", "quick-1"], ["ci.py", "quick-2"], ["ci.py", "quick-3"],
+        *(["ci.py", part] for part in ci.fast_parts(env.get("RA_JIT_BACKEND") or "cranelift")),
     ]
     failed = []
 
