@@ -635,6 +635,8 @@ fn main() {
     }
     #[cfg(all(feature = "nightly", target_arch = "aarch64"))]
     println!("sve {}", cases::sve::run());
+    #[cfg(all(feature = "nightly", target_arch = "aarch64"))]
+    println!("sve_ops {}", cases::sve_ops::run());
     // Threads.
     #[cfg(not(target_family = "wasm"))]
     println!("boxed_fn_once {:?}", cases::boxed_fn_once::run());
