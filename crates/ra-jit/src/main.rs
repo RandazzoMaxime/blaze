@@ -10094,7 +10094,9 @@ fn run_holding(
                         // The program is linked unless every client of it loads the patch.
                         let link = !clients.iter().any(|it| it.0 == at)
                             || clients.iter().any(|it| it.0 == at && it.1.0 != Request::Patch);
-                        let link = link && !detached;
+                        // A whole build's patch that its executable does not take is built in
+                        // full, which only its build can do: it is linked there.
+                        let link = link && (!detached || program.args.exe.is_some());
                         let mut theirs = clients.iter().filter(|it| it.0 == at).peekable();
                         let defer =
                             theirs.peek().is_some() && theirs.all(|it| it.1.0 == Request::Edit);
@@ -10173,7 +10175,7 @@ fn run_holding(
         for (at, asked) in clients {
             let mut client = &asked.2;
             let _ = match replies.get(&at) {
-                Some(Ok(_)) if detached => {
+                Some(Ok(_)) if detached && programs[at].args.exe.is_none() => {
                     linking.entry(at).or_default().push(asked);
                     continue;
                 }

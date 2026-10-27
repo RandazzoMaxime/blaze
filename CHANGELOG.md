@@ -1021,7 +1021,10 @@ each one's section: what `[Unreleased]` had, and the title of each change merged
   the workspace in a worker of its own. A worktree read as the loaded checkout now has its
   program linked into its own executable, with the worker's own link line for that place, and
   a full build in one checkout links the others' executables again rather than splice its
-  patches into ones linked with the whole object of before.
+  patches into ones linked with the whole object of before. A worktree's build is linked
+  before it answers, as the loaded checkout's is, so a patch its executable does not take is
+  built in full; linked after, it failed the build (`ra_jit::static::21 is not in the
+  executable`) and split the worktree off (`harness/cargo_ra_jit.py`, daemon group).
 - `cargo blaze test --doc` runs an edited library's examples again: it took an example's
   program from the run before while the example's own text was unchanged, since blaze's run
   names no library with `--extern` for the key to stamp, so after an edit that broke them the
