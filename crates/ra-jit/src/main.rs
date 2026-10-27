@@ -4581,7 +4581,8 @@ fn link_executable(
     );
     // What the link kept of the stand-ins is what the program can reach, the standard
     // library's unit's among them, each saying why its unit refused it.
-    if !stand_ins.is_empty() {
+    // LOCAL, for the essay: COFF keeps every stand-in in one section, so /OPT:REF takes none out.
+    if !stand_ins.is_empty() && std::env::var_os("RA_JIT_ALLOW_STAND_INS").is_none() {
         let said = stand_ins.iter().map(|it| {
             let it = it.trim().trim_start_matches(hir_ty_codegen::STAND_IN_SAYS);
             cargo::whole::without_hashes(it)
