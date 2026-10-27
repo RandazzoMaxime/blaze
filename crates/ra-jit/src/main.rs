@@ -19,6 +19,7 @@ mod link;
 mod live;
 mod macro_list;
 mod macro_sandbox;
+mod manifest;
 mod memory;
 mod mirdump;
 mod outline;
@@ -4390,6 +4391,8 @@ struct Build {
     /// for the program once the build is kept ([`Build::keep`]), and one that is undone leaves
     /// those of the build before.
     unwritten: Vec<(PathBuf, Vec<u8>)>,
+    /// Where [`Build::keep`] wrote them.
+    wrote: Vec<PathBuf>,
 }
 
 impl Build {
@@ -4399,8 +4402,28 @@ impl Build {
         for (path, bytes) in std::mem::take(&mut self.unwritten) {
             let _writing = whole::writing(&path);
             replace(&path, &bytes)?;
+            self.wrote.push(path);
         }
         Ok(())
+    }
+
+    /// The build whose files a manifest of the store has ([`manifest`]): nothing compiled.
+    fn of_manifest(unwritten: Vec<(PathBuf, Vec<u8>)>) -> Build {
+        Build {
+            compiled: 0,
+            skipped: Vec::new(),
+            reached: Vec::new(),
+            nothing_of_rustc: true,
+            refused_exports: Vec::new(),
+            instances: 0,
+            codegen: Duration::ZERO,
+            emit: Duration::ZERO,
+            steps: [Duration::ZERO; 3],
+            looked: Default::default(),
+            unset: None,
+            unwritten,
+            wrote: Vec::new(),
+        }
     }
 }
 
@@ -4968,6 +4991,7 @@ fn build(
         looked,
         unset: unset_in(db, &local),
         unwritten,
+        wrote: Vec::new(),
     };
     // A patch is of the last full build and replaces nothing the next edit is built from.
     if !undoable || known.stats.patched.is_some() {
@@ -8627,19 +8651,53 @@ fn run_holding(
             if let Some((cmd, exe)) = own_link_line(&db, &args)? {
                 (args.link_cmd, args.splice) = (Some(cmd), Some(exe));
             }
-            let mut cold = build_unheld(&db, &table, &args, &mut known, &listed)?;
-            // An `include!` in a body is first seen when the body is compiled.
-            if WatchedFile::include_sources(&mut files, &mut tree, &mut db) != Loaded::Nothing {
-                known.touch(&db, None);
-                listed.touch(&db, None);
-                cold = build_unheld(&db, &table, &args, &mut known, &listed)?;
-            }
+            let start = Instant::now();
+            let manifest_mode = manifest::mode();
+            let manifest_key =
+                manifest_mode.and_then(|_| manifest::key(&db, &args, table.is_empty()));
+            let from_manifest = match (manifest_mode, &manifest_key) {
+                (Some(manifest::Mode::Use), Some(key)) => match manifest::lookup(&db, &args, key) {
+                    Ok(files) => Some(files),
+                    Err(why) => {
+                        eprintln!("manifest: none used, {why} ({:.1?})", start.elapsed());
+                        None
+                    }
+                },
+                _ => None,
+            };
+            let served = from_manifest.is_some();
+            let cold = match from_manifest {
+                Some(files) => {
+                    let mut cold = Build::of_manifest(files);
+                    cold.keep(&mut known)?;
+                    eprintln!(
+                        "manifest: {} files of the program from the store in {:.1?}, nothing compiled",
+                        cold.wrote.len(),
+                        start.elapsed()
+                    );
+                    cold
+                }
+                None => {
+                    let mut cold = build_unheld(&db, &table, &args, &mut known, &listed)?;
+                    // An `include!` in a body is first seen when the body is compiled.
+                    if WatchedFile::include_sources(&mut files, &mut tree, &mut db)
+                        != Loaded::Nothing
+                    {
+                        known.touch(&db, None);
+                        listed.touch(&db, None);
+                        cold = build_unheld(&db, &table, &args, &mut known, &listed)?;
+                    }
+                    cold
+                }
+            };
             if let Some(unset) = &cold.unset {
                 errors_for_the_daemon(&args, &errors::Said::one(errors::of_none(unset)))?;
                 bail!("{unset}");
             }
-            eprint!("cold: ");
-            report(&cold);
+            if !served {
+                eprint!("cold: ");
+                report(&cold);
+            }
             if let Some(said) = ra_jit_expand::report() {
                 eprintln!("{said}");
             }
@@ -8671,6 +8729,33 @@ fn run_holding(
                 }
                 if let Some(path) = &args.dep_info {
                     write_dep_info(&db, &args, tree.vfs(), exe, path)?;
+                }
+            }
+            if let (Some(key), false) = (&manifest_key, served) {
+                let start = Instant::now();
+                let checked = match manifest_mode {
+                    Some(manifest::Mode::Check) => manifest::check(&db, &args, key, &cold.wrote)
+                        .map_err(|why| anyhow::anyhow!("manifest: check: {why}"))?,
+                    _ => false,
+                };
+                // What was loaded since the key was made, an `include!` in a body, is not in it.
+                let again = manifest::key(&db, &args, table.is_empty());
+                match () {
+                    _ if checked => eprintln!(
+                        "manifest: check: the build wrote what the store's manifest has ({:.1?})",
+                        start.elapsed()
+                    ),
+                    _ if again.as_ref() != Some(key) => eprintln!(
+                        "manifest: not kept, the build loaded files its key was made without"
+                    ),
+                    _ => match manifest::keep(&db, &args, key, &cold.wrote) {
+                        Ok(bytes) => eprintln!(
+                            "manifest: kept, {} files, {bytes} bytes ({:.1?})",
+                            cold.wrote.len(),
+                            start.elapsed()
+                        ),
+                        Err(why) => eprintln!("manifest: not kept: {why}"),
+                    },
                 }
             }
             Some(cold)
