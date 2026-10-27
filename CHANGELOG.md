@@ -1012,6 +1012,10 @@ each one's section: what `[Unreleased]` had, and the title of each change merged
 - A red train opens or comments on the "Release train is red" issue again: train_issue.py read
   each harness job's log with `gh api`, which the runner's gh refuses without
   `--allow-escape-sequences`, so the `train issue` job failed and no issue was opened.
+- A build that compiles the standard library's crates itself no longer takes from the store
+  code that a build over ra-jit's prebuilt unit of the library kept: such an entry's calls
+  into the unit (`ra-jit.<hash>.…` symbols) are now checked when it is taken, where its link
+  failed on them as undefined (#328). Entries written before are not read (entry format 12).
 - The borrow checker: lifetime elision counts none of the impl's lifetimes in a parameter
   that writes `Self`, as rustc counts only what a parameter's type writes or elides, so
   `fn store(self, db: &dyn Db) -> &Store` in `impl Id<'_>` returns a borrow of `db`. It
