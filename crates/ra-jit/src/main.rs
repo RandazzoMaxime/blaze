@@ -389,6 +389,8 @@ struct Resolver<'a> {
     places: Places,
     /// The symbols of what rustc linked, when the patch goes into it.
     linked: Option<Arc<symbols::Linked>>,
+    /// What the executable a whole build's patch goes into has kept of its link.
+    own_linked: Option<Arc<FxHashSet<String>>>,
     /// Set once the build turns out to be one in full, which `linked` is not for.
     in_full: Arc<std::sync::atomic::AtomicBool>,
     /// A build in full is spliced into what rustc linked too ([`onto_rustcs`]), and is for
@@ -422,6 +424,7 @@ struct ResolverParts<'a> {
     named: Arc<std::sync::Mutex<FxHashMap<FunctionId, Option<String>>>>,
     places: Places,
     linked: Option<Arc<symbols::Linked>>,
+    own_linked: Option<Arc<FxHashSet<String>>>,
     in_full: Arc<std::sync::atomic::AtomicBool>,
     onto: bool,
     prebuilt: Option<Arc<Prebuilt>>,
@@ -444,6 +447,7 @@ impl<'a> Resolver<'a> {
             named: self.named.clone(),
             places: self.places.clone(),
             linked: self.linked.clone(),
+            own_linked: self.own_linked.clone(),
             in_full: self.in_full.clone(),
             onto: self.onto,
             prebuilt: self.prebuilt.clone(),
@@ -471,6 +475,7 @@ impl<'a> ResolverParts<'a> {
             named,
             places,
             linked,
+            own_linked,
             in_full,
             onto,
             prebuilt,
@@ -491,6 +496,7 @@ impl<'a> ResolverParts<'a> {
             named,
             places,
             linked,
+            own_linked,
             in_full,
             onto,
             prebuilt,
@@ -609,6 +615,42 @@ fn defined_symbols(path: &Path) -> anyhow::Result<FxHashSet<String>> {
     Ok(names)
 }
 
+/// The names the executable at `path` defines, read once for each file a link writes: a
+/// splice adds to the file in place, where a link writes a new one.
+fn kept_names(path: &Path) -> Option<Arc<FxHashSet<String>>> {
+    #[cfg(unix)]
+    {
+        use object::{Object as _, ObjectSymbol as _};
+        use std::os::unix::fs::MetadataExt as _;
+        type Kept = FxHashMap<PathBuf, ((u64, u64), Arc<FxHashSet<String>>)>;
+        static KEPT: std::sync::LazyLock<std::sync::Mutex<Kept>> =
+            std::sync::LazyLock::new(Default::default);
+        let file = std::fs::metadata(path).ok()?;
+        let key = (file.dev(), file.ino());
+        let mut kept = KEPT.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some((at, names)) = kept.get(path)
+            && *at == key
+        {
+            return Some(names.clone());
+        }
+        let bytes = std::fs::read(path).ok()?;
+        let file = object::File::parse(&*bytes).ok()?;
+        let macho = file.format() == object::BinaryFormat::MachO;
+        let names = file.symbols().filter(|it| it.is_definition()).filter_map(|it| {
+            let name = it.name().ok()?;
+            Some(if macho { name.strip_prefix('_').unwrap_or(name) } else { name }.to_owned())
+        });
+        let names = Arc::new(names.collect::<FxHashSet<_>>());
+        kept.insert(path.to_owned(), (key, names.clone()));
+        Some(names)
+    }
+    #[cfg(not(unix))]
+    {
+        _ = path;
+        None
+    }
+}
+
 /// The [`SymbolTable::generation`] and the checkout that paths were found with.
 type SharedKey = (u64, PathBuf, Option<PathBuf>);
 
@@ -653,6 +695,11 @@ impl<'a> Resolver<'a> {
                     && !rustc_symbols(binary).is_some_and(|it| it.has_own_thread_locals())
             });
         let linked = args.splice.as_deref().filter(|_| over_rustc || onto).and_then(rustc_symbols);
+        let own_linked = args
+            .splice
+            .as_deref()
+            .filter(|_| linked.is_none() && table.is_empty() && args.patch.is_some())
+            .and_then(kept_names);
         let (root, base) = (args.checkout.clone(), args.base.clone());
         let debug = args.debug;
         let apart = (debug.kept != plan::Kept::Linked).then(|| args.out.clone());
@@ -682,6 +729,7 @@ impl<'a> Resolver<'a> {
             named: Default::default(),
             places: Places::default(),
             linked,
+            own_linked,
             in_full: Arc::default(),
             onto,
             prebuilt,
@@ -1394,7 +1442,11 @@ impl SymbolResolver for Resolver<'_> {
     }
 
     fn linked(&self, symbol: &str) -> bool {
-        self.rustcs().is_none_or(|it| it.has(symbol))
+        if let Some(linked) = self.rustcs() {
+            return linked.has(symbol);
+        }
+        let in_full = self.in_full.load(std::sync::atomic::Ordering::Relaxed);
+        in_full || self.own_linked.as_ref().is_none_or(|it| it.contains(symbol))
     }
 
     fn onto_rustcs(&self) -> bool {

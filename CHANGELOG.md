@@ -495,7 +495,7 @@ All notable changes to ra-jit are written here. The format follows
   build and says what (the targets `--bins`, `--tests` and their kin pick, several
   `--target`s, `--target-dir`, `--message-format`, `-Z`, `--build-plan`). A build of
   libraries alone is the daemon's check of them. The cold build is slower than cargo's for
-  now (docs/self-contained.md has the figures). blaze's link gives the program a GNU build ID on Linux, by which it takes live edits. On macOS a program finds the statics and functions of the standard library blaze built once by their names without Mach-O's leading underscore, as it asks for them, so std's `GLOBAL_PANIC_COUNT` is no longer refused as having no symbol. A
+  now (docs/self-contained.md has the figures). blaze's link gives the program a GNU build ID on Linux, by which it takes live edits. On macOS a program finds the statics and functions of the standard library blaze built once by their names without Mach-O's leading underscore, as it asks for them, so std's `GLOBAL_PANIC_COUNT` is no longer refused as having no symbol. A patch compiles its own copy of a function of the program the link left out, as LLVM does one it inlined into every caller, instead of asking for it by name and restarting the program. A
   patch the splice declines (one that calls what the link left out as unreached) has the
   program built in full and linked, where the link of the object alone left the edit out. A
   workspace with no lock file, or one its manifests no longer agree with, has it written by

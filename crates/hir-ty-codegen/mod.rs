@@ -6812,8 +6812,8 @@ impl<'a, 'db> ObjectCodegen<'a, 'db> {
             if self.replaced.broken.contains(&node) {
                 unsupported!("callee `{name}`: an instance of the base gained or lost code");
             }
-            // The base's copy is of the source before the edit.
-            if self.replaced.changed.contains(&node) {
+            // The base's copy is of the source before the edit, or the link left it out.
+            if self.replaced.changed.contains(&node) || !self.symbols.linked(&known.symbol) {
                 let compiled = compiled_instance(self.db, instance.clone(), known.env.clone());
                 let compiled = compiled.as_ref().map_err(Clone::clone)?;
                 let id = self.module.declare_function(
@@ -6917,7 +6917,8 @@ impl<'a, 'db> ObjectCodegen<'a, 'db> {
         let from_store = self.entries.is_some() || self.base.is_some_and(|it| !it.found.is_empty());
         let stable = if from_store { self.stable_name(instance) } else { None };
         if let Some(name) = &stable {
-            if let Some(symbol) = self.base.and_then(|base| base.found.get(name)) {
+            let found = self.base.and_then(|base| base.found.get(name));
+            if let Some(symbol) = found.filter(|it| self.symbols.linked(it)) {
                 return self.import(symbol, sig);
             }
             let body = signature.is_some().then_some(sig);
