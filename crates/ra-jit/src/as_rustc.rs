@@ -276,6 +276,11 @@ impl<'a> Probe<'a> {
                 }
                 _ => String::new(),
             };
+            // `-o -` is standard output to rustc (rustix's probes), not a file named `-`.
+            if path == Path::new("-") {
+                std::io::stdout().write_all(text.as_bytes())?;
+                continue;
+            }
             std::fs::write(&path, text).with_context(|| format!("writing {}", path.display()))?;
         }
         Ok(0)

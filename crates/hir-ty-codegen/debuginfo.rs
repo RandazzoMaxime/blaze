@@ -205,10 +205,12 @@ pub(super) struct SlotPlaces {
 }
 
 impl SlotPlaces {
-    /// The places in a frame Cranelift laid out, which it finds by the frame pointer.
+    /// The places in a frame Cranelift laid out for `func`, which it finds by the frame
+    /// pointer.
     pub(super) fn of_frame(
         isa: &dyn TargetIsa,
         frame: &cranelift_codegen::MachBufferFrameLayout,
+        func: &ir::Function,
         slots: impl Iterator<Item = ir::StackSlot>,
     ) -> SlotPlaces {
         // The register a function with locals has its frame's address in, which is what
@@ -219,10 +221,14 @@ impl SlotPlaces {
             _ => return SlotPlaces::default(),
         };
         let to_fp = i64::from(frame.frame_to_fp_offset);
+        // Every slot of the function is in the layout, but one read back from Cranelift's
+        // incremental cache leaves out the slots at its end that are at the bottom of the
+        // frame, as a `SecondaryMap` written out leaves out its default entries (#242).
         let slots = slots
-            .filter_map(|slot| {
-                let offset = i64::from(frame.stackslots.get(slot)?.offset) - to_fp;
-                Some((slot.as_u32(), VariablePlace::Frame(offset)))
+            .filter(|&slot| func.sized_stack_slots.is_valid(slot))
+            .map(|slot| {
+                let offset = i64::from(frame.stackslots[slot].offset) - to_fp;
+                (slot.as_u32(), VariablePlace::Frame(offset))
             })
             .collect();
         SlotPlaces { frame_base: vec![gimli::DW_OP_reg0.0 + register.0 as u8], slots }

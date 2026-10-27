@@ -77,10 +77,14 @@ reads as never set in ours, and a counter the allocator bumps reads zero. So:
 
 - a thread-local, or a static written at run time, stays rustc's wherever rustc linked it
   under a symbol, as long as its first value is the one rustc gave it. The daemon keeps that
-  value (`patch::RustcValues`), taken the first time a build asks, when no edit since the
+  value (`patch::RustcValues`), taken the first time a build asks, or just before the first
+  edit of a file of the static's crate or a crate it depends on, when no edit since the
   daemon started can have reached any crate the static's crate is or depends on (an edit of
   function bodies alone changes no first value), and a patch's base records which copy it
-  has, which its patches keep.
+  has, which its patches keep. Taken before the edit, it is known for a static no build
+  reached until after it, as a build in full after the edit reaches all of a crate
+  (`harness/programs.py`, "the calls braced"). A change to a file that `include_str!` or
+  `include_bytes!` reads reaches the first values of the crates that include it alone.
   An edit to the first value of a shared static is not a patch: rustc's copy holds what the
   program wrote from the old value, and no copy beside it can start from the new one. The
   build is in full, the program is told to restart, and the full build has its own copy with

@@ -9,7 +9,18 @@ index-write check, the refresh inside head writes, the 80-day location expiry, a
 rules (API.md "Index", `bench/remote-cache/index-v1.tsv`). One deviation: the refresh rewrites each
 old object onto its own name through the R2 binding (a streamed get and put, R2 checking the MD5 or
 SHA-256), not S3 `CopyObject`, since no R2 S3 credential is readable to the Worker; measured live, a
-rewrite moves the upload date. The client and the rest of slice 3 are design. The Worker is TypeScript rather than workers-rs: its tests run on real R2 and KV bindings
+rewrite moves the upload date. The client speaks v0: `RA_JIT_REMOTE=blaze+https://<gateway>/t/<tenant>/v3`
+with `RA_JIT_REMOTE_TOKEN` pushes and pulls today's packs through the gateway
+([#525](https://github.com/indexable-inc/blaze/pull/525), `bench/remote-cache/e2e-client.tsv`), and
+`.github/actions/blaze-remote` is CI's step for it (pull on every run, push from main after the
+tests), which goes into the merge gate once the gate builds with blaze and a release contains the
+client. The client's use of `/has`, `/get`, `/put` and the index needs #283. On blaze's own store
+(`bench/remote-cache/selfbuild.tsv`, ix arm64 VM in us-west-2), a pull of 121 packs, 237.8 MB, took
+8.6 s (26.5 MiB/s), against 51 to 55 s for cargo's no-edit build with main's target dir. The build
+from a warm store is not measured yet: a cold `cargo blaze build -p ra-jit` of blaze needs more than
+16 GB (OOM-killed at 14.8 GB on 4 CPUs; 28.3 GB peak where it finished, in 389.6 s), so main's
+store could not be made in the VMs that could be placed that day, and the gate's 16 GB runners hit
+the same limit on a cold store. The Worker is TypeScript rather than workers-rs: its tests run on real R2 and KV bindings
 in workerd, and a Rust part would need rustc to build its wasm while blaze cannot build `wasm32`
 (blaze-builds-blaze). The sans-IO `blaze-gateway-core` below stays the plan for the native server
 and for the Worker once blaze builds wasm. Written against blaze main `e4bbb88` and

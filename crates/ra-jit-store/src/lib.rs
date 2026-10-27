@@ -66,6 +66,9 @@ const HEADER: usize = KEY + 4 + 4;
 const ENTRY: usize = KEY + 4 * 4;
 /// What a block takes on disk, what it takes unpacked, and how it is packed.
 const BLOCK_HEADER: usize = 3 * 4;
+/// What a sealed pack starts with before its index: [`MAGIC`] and the counts of its blocks
+/// and of its values.
+const HEAD: usize = MAGIC.len() + 2 * 4;
 /// A sealed pack keeps its values in blocks of about this many bytes, each compressed on its
 /// own: reading a value unpacks its block. A build reads values in about the order it added
 /// them, so the next value it asks for is mostly in the block it just unpacked.
@@ -508,16 +511,30 @@ impl Index {
     /// The index of a sealed pack, if the pack is laid out as one: blocks that take the rest
     /// of it, and values that are within their blocks.
     fn read(pack: &[u8]) -> Option<Index> {
-        if !pack.starts_with(MAGIC) {
+        Index::read_head(pack, pack.len() as u64)
+    }
+
+    /// The bytes the index of a pack takes at its start, by the counts in `head`, the pack's
+    /// first [`HEAD`] bytes or more.
+    fn length(head: &[u8]) -> Option<usize> {
+        if !head.starts_with(MAGIC) {
             return None;
         }
-        let mut at = MAGIC.len();
-        let (blocks, entries) = (u32_at(pack, at)? as usize, u32_at(pack, at + 4)? as usize);
-        at += 8;
-        let data = (blocks.checked_mul(BLOCK_HEADER)?)
+        let at = MAGIC.len();
+        let (blocks, entries) = (u32_at(head, at)? as usize, u32_at(head, at + 4)? as usize);
+        (blocks.checked_mul(BLOCK_HEADER)?)
             .checked_add(entries.checked_mul(ENTRY)?)?
-            .checked_add(at)?;
-        if data > pack.len() {
+            .checked_add(HEAD)
+    }
+
+    /// As [`Self::read`], of a pack of `len` bytes whose first ones are `head`, its index
+    /// ([`Self::length`]) and maybe more.
+    fn read_head(pack: &[u8], len: u64) -> Option<Index> {
+        let data = Index::length(pack)?;
+        let (blocks, entries) =
+            (u32_at(pack, MAGIC.len())? as usize, u32_at(pack, MAGIC.len() + 4)? as usize);
+        let mut at = HEAD;
+        if data as u64 > len {
             return None;
         }
         let mut index =
@@ -534,7 +551,7 @@ impl Index {
             index.blocks.push(Block { at: start, stored, raw, packed });
             start += u64::from(stored);
         }
-        if start != pack.len() as u64 {
+        if start != len {
             return None;
         }
         for _ in 0..entries {
@@ -1286,6 +1303,49 @@ impl Pack {
         Index::read(bytes).ok_or("has an index that is not what was written")
     }
 
+    /// As [`Self::check`] of the bytes of `file`, read through a buffer: a process holds of a
+    /// pack its index, not the pack. Every process that opens the store reads every pack,
+    /// as each of the build scripts cargo starts at once in a cold build does.
+    fn check_file(name: &str, file: &mut File) -> io::Result<Result<Index, &'static str>> {
+        use io::Read;
+        const UNSEALED: &str = "is not what was sealed under that name";
+        let mut head = vec![0; HEAD];
+        match file.read_exact(&mut head) {
+            Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => return Ok(Err(UNSEALED)),
+            read => read?,
+        }
+        let Some(length) = Index::length(&head) else {
+            return Ok(Err("is not a pack of this format"));
+        };
+        if length as u64 > file.metadata()?.len() {
+            return Ok(Err(UNSEALED));
+        }
+        head.resize(length, 0);
+        match file.read_exact(&mut head[HEAD..]) {
+            Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => return Ok(Err(UNSEALED)),
+            read => read?,
+        }
+        let mut hasher = Sha256::new();
+        hasher.update(&head);
+        let mut len = head.len() as u64;
+        let mut buffer = vec![0; 1 << 20];
+        loop {
+            match file.read(&mut buffer) {
+                Ok(0) => break,
+                Ok(n) => {
+                    hasher.update(&buffer[..n]);
+                    len += n as u64;
+                }
+                Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
+                Err(e) => return Err(e),
+            }
+        }
+        if named(&hasher.finalize()) != name {
+            return Ok(Err(UNSEALED));
+        }
+        Ok(Index::read_head(&head, len).ok_or("has an index that is not what was written"))
+    }
+
     /// As [`Self::check`], with every value read and checked.
     fn verify(name: &str, bytes: &[u8]) -> Result<Index, &'static str> {
         let index = Pack::check(name, bytes)?;
@@ -1540,9 +1600,7 @@ impl Store {
             // Evicted since it was listed.
             Err(_) => return None,
         };
-        let mut bytes = Vec::new();
-        io::Read::read_to_end(&mut file, &mut bytes).ok()?;
-        match Pack::check(name, &bytes) {
+        match Pack::check_file(name, &mut file).ok()? {
             Ok(Index { blocks, entries }) => {
                 let (used, changed) = (AtomicBool::new(false), AtomicBool::new(false));
                 let pack = Pack { name: name.to_owned(), file, blocks, used, changed };
@@ -2878,6 +2936,8 @@ mod tests {
         use ra_jit_fuzz as fuzz;
         let seeds = vec![open_records(), pack(), MAGIC.to_vec(), Vec::new()];
         let (mut whole, mut cut, mut sealed) = (0, 0, 0);
+        let dir = scratch("pack-file");
+        std::fs::create_dir_all(&dir).unwrap();
         for bytes in fuzz::inputs(concat!(env!("CARGO_MANIFEST_DIR"), "/corpus/pack"), seeds) {
             let (largest, (found, end)) = fuzz::largest_allocation(|| records(&bytes));
             assert!(largest <= fuzz::allowed(bytes.len()), "{largest} bytes for {}", bytes.len());
@@ -2900,7 +2960,15 @@ mod tests {
             }
             sealed += usize::from(Pack::check(&name, &bytes).is_ok());
             assert!(Pack::check(&named(&[0; 32]), &bytes).is_err());
+            let file = dir.join("pack");
+            std::fs::write(&file, &bytes).unwrap();
+            let read =
+                |name: &str| Pack::check_file(name, &mut File::open(&file).unwrap()).unwrap();
+            let entries = |it: Result<Index, &str>| it.map(|it| it.entries.len()).ok();
+            assert_eq!(entries(read(&name)), entries(Pack::check(&name, &bytes)));
+            assert!(read(&named(&[0; 32])).is_err());
         }
+        std::fs::remove_dir_all(&dir).unwrap();
         eprintln!("pack: {whole} whole, {cut} not, {sealed} laid out as sealed");
         assert!(whole > 3 && cut > 0 && sealed >= whole);
     }

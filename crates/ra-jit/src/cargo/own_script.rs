@@ -41,20 +41,20 @@ pub(crate) fn cfg_of(args: &[String]) -> Vec<String> {
 }
 
 /// A crate of the description, as rustc was told to compile it.
-struct Described {
-    name: String,
-    root: PathBuf,
-    edition: String,
-    cfg: Vec<String>,
-    env: BTreeMap<String, String>,
+pub(crate) struct Described {
+    pub(crate) name: String,
+    pub(crate) root: PathBuf,
+    pub(crate) edition: String,
+    pub(crate) cfg: Vec<String>,
+    pub(crate) env: BTreeMap<String, String>,
     /// The name each library is linked under and where it is in the description.
-    deps: Vec<(String, usize)>,
+    pub(crate) deps: Vec<(String, usize)>,
     /// The library compiled of a proc macro, which a proc-macro server expands with.
-    proc_macro: Option<PathBuf>,
+    pub(crate) proc_macro: Option<PathBuf>,
     /// Whether the crate is a proc macro the build compiles.
-    compiled_macro: bool,
+    pub(crate) compiled_macro: bool,
     /// The dep-info of the library rustc compiled of it, and the directory its paths are from.
-    inputs: Option<(PathBuf, PathBuf)>,
+    pub(crate) inputs: Option<(PathBuf, PathBuf)>,
 }
 
 /// What a build makes of the first crate of its description.
@@ -216,8 +216,21 @@ fn compile_in(
     let deps =
         deps.iter().map(|(name, path)| Ok((name.clone(), add(&mut crates, &mut linked, path)?)));
     crates[0].deps = deps.collect::<Result<_, String>>()?;
-    let described = description(sysroot, &crates);
-    built(sysroot, &described, &crates, made, dir)?;
+    build_described(sysroot, &crates, made, dir, rustc_had)
+}
+
+/// Builds the first of `crates`, over the standard library of `sysroot`, as `made` says,
+/// describing them in `dir` ([`built`]). `Err` is why it was not built, or a variable its source
+/// read that `rustc_had` says otherwise.
+pub(crate) fn build_described(
+    sysroot: &Path,
+    crates: &[Described],
+    made: &Made<'_>,
+    dir: &Path,
+    rustc_had: &dyn Fn(&str) -> Option<String>,
+) -> Result<(), String> {
+    let described = description(sysroot, crates);
+    built(sysroot, &described, crates, made, dir)?;
     let read = std::fs::read_to_string(&made.dep_info).map_err(|it| it.to_string())?;
     read_otherwise(&crate::dep_info::DepInfo::parse(&read), rustc_had)
 }
@@ -290,7 +303,8 @@ fn built(
     }
     // A script that reaches a function ra-jit could not compile is not built
     // ([`crate::refused_error`]).
-    build(described, dir, made, super::daemon::store(), true, Some(&inputs))?;
+    let proc_macro = links_proc_macro(crates);
+    build(described, dir, made, super::daemon::store(), true, Some(&inputs), proc_macro)?;
     let kept = Built::of(made).map_err(|it| format!("reading what ra-jit built: {it}"))?;
     let mut reads: Vec<String> = std::fs::read_to_string(&inputs)
         .map_err(|it| format!("reading {}: {it}", inputs.display()))?
@@ -405,8 +419,18 @@ impl Built {
     }
 }
 
+/// Whether a crate linked into the first of `crates` uses the standard library's `proc_macro`
+/// (proc-macro2 with its `proc-macro` feature, in a build script), which the standard
+/// library's unit leaves out. rust-analyzer's graph has every crate depend on `proc_macro`, and
+/// a crate that is not a proc macro reaches it only through an `extern crate proc_macro`.
+fn links_proc_macro(crates: &[Described]) -> bool {
+    crates.iter().filter(|it| it.proc_macro.is_none() && !it.compiled_macro).any(|it| {
+        std::fs::read_to_string(&it.root).is_ok_and(|text| text.contains("extern crate proc_macro"))
+    })
+}
+
 /// The `rust-project.json` of `crates` over the standard library of `sysroot`.
-fn description(sysroot: &Path, crates: &[Described]) -> String {
+pub(crate) fn description(sysroot: &Path, crates: &[Described]) -> String {
     json!({
         "sysroot": sysroot,
         "sysroot_src": sysroot.join("lib/rustlib/src/rust/library"),
@@ -417,7 +441,8 @@ fn description(sysroot: &Path, crates: &[Described]) -> String {
 
 /// Builds the first crate of `described`, a [`description`], as `made` says, describing them
 /// in `dir`, with `store` as the store: what the build said, or why it did not build. With
-/// `shipped` it fetches the standard library as builds do (`shipped.rs`).
+/// `shipped` it fetches the standard library as builds do (`shipped.rs`); with `proc_macro`
+/// the standard library's `proc_macro` is compiled with it.
 fn build(
     described: &str,
     dir: &Path,
@@ -425,6 +450,7 @@ fn build(
     store: Option<PathBuf>,
     shipped: bool,
     inputs: Option<&Path>,
+    proc_macro: bool,
 ) -> Result<String, String> {
     std::fs::create_dir_all(dir).map_err(|it| it.to_string())?;
     let project = dir.join("rust-project.json");
@@ -437,6 +463,8 @@ fn build(
     }
     if made.proc_macro {
         ra_jit.args(["--crate", "proc_macro", "--shared"]);
+    } else if proc_macro {
+        ra_jit.args(["--crate", "proc_macro"]);
     }
     // What cargo set for the script's rustc is not the build's: the build ra-jit runs is its
     // own, which asks cargo nothing through a wrapper and is no doctest.
@@ -531,7 +559,7 @@ pub(crate) fn build_nothing(
     let exe = dir.join("build-script-build");
     let made = Made { name: SCRIPT, proc_macro: false, dep_info: exe.with_extension("d"), exe };
     let described = description(sysroot, &[script]);
-    build(&described, dir, &made, Some(store.to_owned()), shipped, None)
+    build(&described, dir, &made, Some(store.to_owned()), shipped, None, false)
 }
 
 /// Why rustc is to compile the script when it read a variable as another than rustc would,

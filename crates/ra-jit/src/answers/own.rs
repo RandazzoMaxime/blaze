@@ -107,6 +107,8 @@ struct Given<'a> {
     debug_assertions: Option<bool>,
     overflow_checks: Option<bool>,
     panic: Option<&'a str>,
+    /// `-C target-feature=±crt-static`, the one target feature that implies no other.
+    crt_static: Option<bool>,
     cfgs: Vec<&'a str>,
     crate_name: Option<&'a str>,
     crate_types: Vec<&'a str>,
@@ -147,8 +149,9 @@ const LINTS: [&str; 10] = [
 ];
 
 /// The codegen options that change no answer. `linker-features` is how
-/// rustc links (cargo's `-Clinker-features=-lld`), not the target it prints.
-const IGNORED_CODEGEN: [&str; 17] = [
+/// rustc links (cargo's `-Clinker-features=-lld`), not the target it prints;
+/// `symbol-mangling-version` how it names symbols (zed's `-C symbol-mangling-version=v0`).
+const IGNORED_CODEGEN: [&str; 18] = [
     "embed-bitcode",
     "debuginfo",
     "metadata",
@@ -166,6 +169,7 @@ const IGNORED_CODEGEN: [&str; 17] = [
     "rpath",
     "force-frame-pointers",
     "force-unwind-tables",
+    "symbol-mangling-version",
 ];
 
 fn yes(value: Option<&str>) -> Option<bool> {
@@ -213,6 +217,15 @@ impl<'a> Given<'a> {
                         "overflow-checks" => given.overflow_checks = Some(yes(value)?),
                         "panic" => given.panic = Some(value?),
                         "extra-filename" => given.extra_filename = true,
+                        "target-feature" => {
+                            for feature in value?.split(',') {
+                                given.crt_static = Some(match feature {
+                                    "+crt-static" => true,
+                                    "-crt-static" => false,
+                                    _ => return None,
+                                });
+                            }
+                        }
                         name if IGNORED_CODEGEN.contains(&name) => {}
                         _ => return None,
                     }
@@ -376,6 +389,12 @@ pub(super) fn answer(
                 if nightly {
                     cfgs.extend(target.nightly_cfg.iter().cloned());
                 }
+                // Whether a target respects `crt-static` is its spec's, so only asking for
+                // what it has already is answered.
+                let static_default = cfgs.iter().any(|it| it == "target_feature=\"crt-static\"");
+                if given.crt_static.is_some_and(|it| it != static_default) {
+                    return None;
+                }
                 let debug_assertions = given.debug_assertions();
                 if debug_assertions {
                     cfgs.push("debug_assertions".to_owned());
@@ -448,10 +467,19 @@ mod tests {
         // What may change the target's features is rustc's to answer.
         assert!(Given::of(&["-C", "target-cpu=native", "--print", "cfg"]).is_none());
         assert!(Given::of(&["-Ctarget-feature=+avx2", "--print", "cfg"]).is_none());
+        assert!(Given::of(&["-Ctarget-feature=-crt-static,+avx2", "--print", "cfg"]).is_none());
+        // helix's `-C target-feature=-crt-static`.
+        let given = Given::of(&["-C", "target-feature=-crt-static", "--print", "cfg"]).unwrap();
+        assert_eq!(given.crt_static, Some(false));
         assert!(Given::of(&["-Z", "ub-checks", "--print", "cfg"]).is_none());
         assert!(Given::of(&["-Zthreads=8", "--print", "cfg"]).is_some());
         // cargo's `-Clinker-features=-lld` is how rustc links (rust-analyzer's `cargo rustc
         // --print cfg`, cargo's question of its targets).
         assert!(Given::of(&["-Clinker-features=-lld", "-O", "--print", "cfg"]).is_some());
+        // zed's rustflags.
+        let zed = ["-C", "link-arg=-fuse-ld=lld", "-C", "symbol-mangling-version=v0"];
+        let zed = [&zed[..], &["--cfg", "tokio_unstable", "--print", "cfg"]].concat();
+        let given = Given::of(&zed).unwrap();
+        assert_eq!(given.cfgs, ["tokio_unstable"]);
     }
 }

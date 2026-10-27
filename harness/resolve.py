@@ -39,7 +39,16 @@ The parts of the corpus (harness/resolve/corpus.json) are
               unit, its target, profile, platform, mode, features and dependencies, the
               roots, and cargo's error when it refuses the build; units that differ only
               in what they depend on, which cargo orders by their address, in either order
-and every part runs when none is named. Each is fetched under `--work` (default
+  ctdeps      what `ra-jit compile-time-deps` (blaze's own build of the build scripts and
+              proc macros of a load, crates/ra-jit/src/cargo/compile_time.rs) says against
+              rust-analyzer's `cargo check --compile-time-deps --message-format=json`, read as
+              rust-analyzer reads it, for a build and a test (CTDEPS_RUNS) of
+              harness/norustc/fixture and the bench projects: per package its script's cfgs,
+              variables and the files of its OUT_DIR (sha256, its own path replaced), and
+              which packages have a proc macro built. `--ra-jit` names the ra-jit (default
+              target/release/ra-jit, with blaze-proc-macro-srv beside it); the part is not in
+              the default set, as it builds what it compares
+and every part but ctdeps runs when none is named. Each is fetched under `--work` (default
 $TMPDIR/blaze-resolve) with a CARGO_HOME of its own there, then `cargo metadata --no-deps
 --format-version 1` and the `metadata` example of blaze-manifest are run on it from its root.
 Both outputs are normalized (the root's absolute path and CARGO_HOME replaced, so that runs on
@@ -57,7 +66,7 @@ the crate's tests compare against those without cargo or the network. The cargo 
 nightly from `harness/toolchain` unless CARGO says otherwise; the blaze-manifest example is built with it unless
 `--blaze` names one.
 """
-import collections, concurrent.futures, hashlib, json, os, re, shutil, subprocess, sys, tarfile, tempfile, threading, urllib.request
+import ast, collections, concurrent.futures, hashlib, json, os, re, shutil, subprocess, sys, tarfile, tempfile, threading, urllib.request
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
@@ -71,6 +80,20 @@ PIN = open(os.path.join(HERE, "toolchain")).read().strip()
 CARGO = os.environ.get("CARGO_ORACLE", f"cargo +{PIN}").split()
 USER_AGENT = "blaze resolve.py (https://github.com/indexable-inc/blaze)"
 PARTS = ["bench", "crates", "workspaces", "config", "profiles", "sysroot", "toolchain", "units"]
+# Parts that run only when named.
+NAMED_PARTS = ["ctdeps"]
+# The loads ctdeps compares: ra-jit's flags, as a build daemon has them, and its project's
+# flags for that command from bench.py (`test=[...]`) when the second is "test".
+CTDEPS_RUNS = [("build", []), ("test", ["--cfg-test"])]
+# cargo's target directory below the copy: `<it>/debug` is as long as ra-jit's
+# `rust-analyzer/compile-time`, so the OUT_DIR a C object or archive embeds is replaced in place
+# and its bytes compare.
+CTDEPS_CARGO_TARGET = "oracle-out-dir-sized"
+# autocfg names its probes with a number of its own each run (`new_uuid`); before 1.2 it
+# named them `probe0`, `probe1`, ... and left their IR.
+AUTOCFG_PROBE = re.compile(r"autocfg_[0-9a-f]{16}_|probe[0-9]+\.ll$")
+# gcc's temporary files (`ccXXXXXX.o`, mkstemp's template).
+GCC_TEMP = re.compile(rb"/cc[0-9A-Za-z]{6}\.")
 # The `config get` arguments every config case runs, before those of its case.json.
 CONFIG_RUNS = [[], ["--show-origin"], ["--merged", "no"], ["--merged", "no", "--show-origin"], ["--format", "json"], ["--format", "json-value"], ["--format", "json", "--show-origin"]]
 # The commands every profiles case runs, before those of its case.json; `--target` names a
@@ -135,6 +158,14 @@ def first_difference(a, b, at="$"):
 def first_line(stderr):
     lines = [l for l in stderr.splitlines() if l.startswith("error")]
     return (lines[0] if lines else stderr.strip().splitlines()[-1] if stderr.strip() else "")[:300]
+
+
+def ra_jit_error(stderr):
+    """What ra-jit said when it failed: its `Error:` and the causes, without a backtrace."""
+    lines = stderr.splitlines()
+    start = next((i for i, l in enumerate(lines) if l.startswith(("Error:", "error"))), 0)
+    end = next((i for i, l in enumerate(lines) if l.strip() == "Stack backtrace:" and i > start), len(lines))
+    return "\n".join(l.rstrip() for l in lines[start:end] if l.strip())[:2000]
 
 
 def error_text(stderr):
@@ -629,6 +660,198 @@ def compare_units(case, units, cargo_home):
     else:
         result.update(cls="equal", runs=len(runs), units=count)
     return result
+def cfg_text(cfg):
+    """A cfg as cargo prints it: rust-analyzer's `key = "value"` is cargo's `key="value"`."""
+    m = re.fullmatch(r'\s*([\w-]+)\s*=\s*(".*")\s*', cfg)
+    return f"{m.group(1)}={m.group(2)}" if m else cfg.strip()
+
+
+def without_debug_info(path):
+    """The bytes of the object or archive at `path` without its debug info, whose string table
+    a C compiler orders by the strings' hashes, so that one OUT_DIR for another reorders it."""
+    with tempfile.NamedTemporaryFile() as stripped:
+        subprocess.run(["objcopy", "--strip-debug", path, stripped.name], check=True, capture_output=True)
+        return open(stripped.name, "rb").read()
+
+
+def out_dir_files(out_dir):
+    """Each file below OUT_DIR, by its path there, as sha256 of its bytes with OUT_DIR's own
+    path replaced: what a crate's `include!` reads of it."""
+    files = {}
+    if not out_dir or not os.path.isdir(out_dir):
+        return files
+    real = os.path.realpath(out_dir)
+    for dirpath, _, names in os.walk(out_dir):
+        for name in names:
+            path = os.path.join(dirpath, name)
+            data = open(path, "rb").read()
+            if data.startswith((b"\x7fELF", b"!<arch>\n")):
+                data = without_debug_info(path)
+            else:
+                # config.status splits its long strings, the OUT_DIR in them too; a configure
+                # log names the C compiler's temporary files, new each run.
+                data = GCC_TEMP.sub(b"/cc$TEMP.", data.replace(b'"\\\n"', b""))
+            for it in {out_dir, real}:
+                data = data.replace(it.encode(), b"$OUT_DIR")
+            relative = os.path.relpath(path, out_dir)
+            if AUTOCFG_PROBE.match(os.path.basename(relative)):
+                # What a probe wrote is only seen to be there: ra-jit, as the script's rustc,
+                # writes it empty (crates/ra-jit/src/as_rustc.rs).
+                files[re.sub(r"autocfg_[0-9a-f]{16}_", "autocfg_$ID_", relative)] = "a probe's output"
+                continue
+            files[relative] = hashlib.sha256(data).hexdigest()
+    return dict(sorted(files.items()))
+
+
+def read_package(cfgs, envs, out_dir, proc_macro, root):
+    """What a load reads of one package, with the machine's paths replaced."""
+    def norm(text):
+        if out_dir:
+            text = text.replace(out_dir, "$OUT_DIR")
+        return text.replace(os.path.realpath(root), "$ROOT").replace(root, "$ROOT")
+    return dict(
+        cfgs=[cfg_text(c) for c in cfgs],
+        envs={k: norm(v) for k, v in sorted(envs.items())},
+        out_dir=out_dir_files(out_dir),
+        proc_macro=proc_macro,
+    )
+
+
+def cargo_compile_time_deps(lines, root):
+    """cargo's messages read as rust-analyzer's `WorkspaceBuildScripts` reads them: a
+    package's variables add up over its scripts' runs, the last run's cfgs and OUT_DIR stand,
+    and its proc macro is the library cargo named."""
+    seen = {}
+    for line in lines:
+        try:
+            message = json.loads(line)
+        except ValueError:
+            continue
+        package = message.get("package_id")
+        if message.get("reason") == "build-script-executed":
+            it = seen.setdefault(package, dict(cfgs=[], envs={}, out_dir=None, proc_macro=False))
+            it["envs"].update(dict(message.get("env", [])))
+            if message.get("out_dir"):
+                it["envs"]["OUT_DIR"] = message["out_dir"]
+                it["out_dir"] = message["out_dir"]
+                it["cfgs"] = message.get("cfgs", [])
+        elif message.get("reason") == "compiler-artifact" and "proc-macro" in message["target"]["kind"]:
+            it = seen.setdefault(package, dict(cfgs=[], envs={}, out_dir=None, proc_macro=False))
+            it["proc_macro"] = any(f.endswith((".so", ".dylib", ".dll")) for f in message.get("filenames", []))
+    return {p: read_package(root=root, **it) for p, it in sorted(seen.items())}
+
+
+def blaze_compile_time_deps(text, root):
+    said = json.loads(text)
+    return {p: read_package(it["cfgs"], dict(it["envs"]), it["out_dir"], it["proc_macro"] is not None, root) for p, it in sorted(said.items())}
+
+
+def ctdeps_cargo_args(flags):
+    """rust-analyzer's `cargo check` of a load with ra-jit's `flags` (main.rs `cargo_config`,
+    build_dependencies.rs `build_command`)."""
+    args, all_targets = [], False
+    for flag in flags:
+        if flag in ("--cfg-test", "--dev-deps"):
+            all_targets = True
+        else:
+            args.append(flag)
+    if "--profile" not in args and "--release" not in args:
+        args = ["--profile", "dev", *args]
+    return args + (["--all-targets"] if all_targets else [])
+
+
+def bench_block(name):
+    """bench.py's entry of the project `name`, as text: read, not imported."""
+    source = open(os.path.join(HERE, "bench.py")).read()
+    start = source.find(f'    "{name}": dict(')
+    end = re.compile(r'^    "[\w.-]+": dict\(', re.M).search(source, start + 1)
+    return source[start : end.start() if end else len(source)]
+
+
+def bench_test_flags(name):
+    """The flags bench.py's project `name` is tested with (`test=[...]`)."""
+    m = re.search(r"^        test=(\[[^\]]*\]),", bench_block(name), re.M)
+    return json.loads(m.group(1).replace("'", '"')) if m else []
+
+
+def bench_env(name):
+    """The variables bench.py builds the project `name` with (`env=dict(...)`)."""
+    m = re.search(r"^        env=(dict\([^)]*\)),", bench_block(name), re.M)
+    if not m:
+        return {}
+    call = ast.parse(m.group(1), mode="eval").body
+    return {it.arg: ast.literal_eval(it.value) for it in call.keywords}
+
+
+# What the machine or the checkout does not have, that a load stopped at: a program a build
+# script spawns, gcc's linker (zed's `-fuse-ld=lld` on aarch64 Linux), a path package not
+# checked out (bun's vendor/, made by bunprep.py).
+MISSING = [
+    (re.compile(r"failed to spawn `([^`]+)`: Os \{ code: 2, kind: NotFound"), "the program `{}`"),
+    (re.compile(r"collect2: fatal error: cannot find '([^']+)'"), "the linker `{}`"),
+    (re.compile(r"no matching package named `[^`]+` found\s+location searched: (\S+)"), "the path package {}"),
+    (re.compile(r"failed to read `([^`]+)/Cargo\.toml`\s+\d+: No such file"), "the path package {}"),
+]
+
+
+def missing(text, root):
+    """What of MISSING `text` says is not there, paths from `root`."""
+    for pattern, said in MISSING:
+        if found := pattern.search(text):
+            return said.format(os.path.relpath(found.group(1), root) if found.group(1).startswith("/") else found.group(1))
+    return None
+
+
+def compare_ctdeps(case, ra_jit, cargo_home, work):
+    """Each load of CTDEPS_RUNS of case["dir"], copied into a directory of its own below `work`:
+    cargo's `--compile-time-deps` against `ra-jit compile-time-deps`, package by package."""
+    result = dict(name=case["name"], part=case["part"])
+    # Not below `TMPDIR`, a directory a build script's sandbox starts empty.
+    os.makedirs(os.path.join(work, "ctdeps"), exist_ok=True)
+    work = os.path.realpath(tempfile.mkdtemp(prefix="blaze-ctdeps-", dir=os.path.join(work, "ctdeps")))
+    root = os.path.join(work, os.path.basename(case["dir"].rstrip("/")))
+    try:
+        shutil.copytree(case["dir"], root, symlinks=True, ignore=shutil.ignore_patterns("target", ".git"))
+        env = {k: v for k, v in clean_env(cargo_home).items() if k != "CARGO_ORACLE"}
+        env["RUSTC_BOOTSTRAP"] = "1"
+        project = case["name"].removeprefix("bench/")
+        if case.get("bench"):
+            env.update(bench_env(project))
+        packages = 0
+        for command, flags in CTDEPS_RUNS:
+            if command == "test" and case.get("bench"):
+                flags = flags + bench_test_flags(project)
+            what = f"{command} {' '.join(flags)}".strip()
+            args = ["check", "--quiet", "--message-format=json", *ctdeps_cargo_args(flags),
+                    "--manifest-path", os.path.join(root, "Cargo.toml"), "--target-dir", os.path.join(root, "target", CTDEPS_CARGO_TARGET),
+                    "--keep-going", "--compile-time-deps", "-Zunstable-options"]
+            c_code, c_out, c_err = run(CARGO + args, root, env)
+            b_code, b_out, b_err = run([ra_jit, "compile-time-deps", root, *flags], root, {**env, "RUST_BACKTRACE": "0"})
+            b_error = ra_jit_error(b_err)
+            if c_code and b_code:
+                # The same failure when blaze names the package whose script or proc macro
+                # cargo could not build or run.
+                named = re.search(r"`([^`]+ v[^`]+)`", first_line(c_err))
+                result.update(cls="both-failed", same_error=bool(named) and named.group(1) in b_error,
+                              cargo=f"{what}: {error_text(c_err)[:2000]}", blaze=f"{what}: {b_error}")
+                # Otherwise why, when each stopped at something the machine or checkout lacks.
+                lacked = {who: missing(text, root) for who, text in (("cargo", c_out + c_err), ("blaze", b_err))}
+                if not result["same_error"] and all(lacked.values()):
+                    result["why"] = "; ".join(f"{who} needs {it}, which is not there" for who, it in lacked.items())
+                return result
+            if c_code or b_code:
+                cls = "cargo-failed" if c_code else "blaze-failed"
+                result.update(cls=cls, difference=f"{what}: " + (error_text(c_err)[:2000] if c_code else b_error))
+                return result
+            cargo, blaze = cargo_compile_time_deps(c_out.splitlines(), root), blaze_compile_time_deps(b_out, root)
+            if cargo != blaze:
+                result.update(cls="different", difference=f"{what}: {first_difference(blaze, cargo)}")
+                return result
+            packages += len(cargo)
+        result.update(cls="equal", runs=len(CTDEPS_RUNS), packages=packages)
+        return result
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
 
 
 def fetch_git(repo, rev, dest):
@@ -683,6 +906,9 @@ def cases_of(part, corpus, work, limit):
     if part == "units":
         cases.append(dict(name="norustc-fixture", part=part, dir=NORUSTC_FIXTURE, fetch=lambda: None, fixture=True))
         return cases + [dict(c, part=part, name=f"bench/{c['name']}") for c in cases_of("bench", corpus, work, limit)]
+    if part == "ctdeps":
+        cases.append(dict(name="norustc-fixture", part=part, dir=NORUSTC_FIXTURE, fetch=lambda: None))
+        return cases + [dict(c, part=part, name=f"bench/{c['name']}", bench=True) for c in cases_of("bench", corpus, work, limit)]
     if part in ("config", "profiles"):
         fixtures = CONFIG_FIXTURES if part == "config" else PROFILE_FIXTURES
         for name in sorted(os.listdir(fixtures)):
@@ -805,8 +1031,8 @@ def main():
     out = option(argv, "--out")
     limit = int(option(argv, "--limit", "1000000"))
     blaze = option(argv, "--blaze")
-    ra_jit = option(argv, "--ra-jit", os.path.join(ROOT, "target", "release", "ra-jit"))
-    needs_examples = bool(set(argv or PARTS) - {"toolchain"})
+    ra_jit = os.path.abspath(option(argv, "--ra-jit", os.path.join(ROOT, "target", "release", "ra-jit")))
+    needs_examples = bool(set(argv or PARTS) - {"toolchain", *NAMED_PARTS})
     built = {name: os.path.join(os.path.dirname(blaze), name) for name in ("config", "profiles", "units")} | dict(metadata=blaze) if blaze else build_blaze() if needs_examples else {}
     blaze_metadata = option(argv, "--blaze-metadata")
     if "sysroot" in (argv or PARTS):
@@ -816,7 +1042,7 @@ def main():
     cargo_home = os.path.join(work, "cargo-home")
     os.makedirs(cargo_home, exist_ok=True)
 
-    dirs = [a for a in argv if a not in PARTS]
+    dirs = [a for a in argv if a not in PARTS + NAMED_PARTS]
     if dirs:
         cases = [dict(name=d, part="dirs", dir=os.path.abspath(d), fetch=lambda: None) for d in dirs]
     else:
@@ -832,6 +1058,8 @@ def main():
             return compare_config(case, built["config"], cargo_home)
         if case["part"] == "sysroot":
             return compare_sysroot(case, built["sysroot"], cargo_home)
+        if case["part"] == "ctdeps":
+            return compare_ctdeps(case, ra_jit, cargo_home, work)
         if case["part"] == "profiles":
             return compare_profiles(case, built["profiles"], cargo_home, host)
         if case["part"] == "toolchain":
@@ -845,7 +1073,7 @@ def main():
         for result in pool.map(one, cases):
             results.append(result)
             if result["cls"] != "equal" and not result.get("same_error"):
-                detail = result.get("difference") or "\n  ".join(f"{k}: {result[k]}".replace("\n", "\n    ") for k in ("blaze", "cargo", "error") if k in result)
+                detail = result.get("difference") or "\n  ".join(f"{k}: {result[k]}".replace("\n", "\n    ") for k in ("why", "blaze", "cargo", "error") if k in result)
                 print(f"{result['part']}/{result['name']}: {result['cls']}: {detail}", flush=True)
 
     print()
@@ -853,14 +1081,15 @@ def main():
         rows = [r for r in results if r["part"] == part]
         counts = {c: sum(r["cls"] == c for r in rows) for c in CLASSES + ["fetch-failed"]}
         same = sum(r.get("same_error", False) for r in rows)
-        others = [f"{v} {k}" + (f" ({same} with cargo's error text)" if k == "both-failed" else "") for k, v in counts.items() if v and k != "equal"]
+        why = sum(bool(r.get("why")) for r in rows)
+        others = [f"{v} {k}" + (f" ({same} with cargo's error text, {why} stopped at something missing)" if k == "both-failed" else "") for k, v in counts.items() if v and k != "equal"]
         print(f"{part}: {counts['equal']}/{len(rows)} equal" + "".join(", " + o for o in others))
     if out:
         with open(out, "w") as f:
             json.dump(results, f, indent=1)
             f.write("\n")
     failed = ("different", "blaze-failed", "cargo-failed")
-    return 1 if any(r["cls"] in failed or r.get("same_error") is False for r in results) else 0
+    return 1 if any(r["cls"] in failed or (r.get("same_error") is False and not r.get("why")) for r in results) else 0
 
 
 if __name__ == "__main__":

@@ -679,7 +679,7 @@ impl Unit {
 
 /// Adds to `files` every Rust file below `dir` but those of a package nested in it (a
 /// directory with a manifest that is not `manifest`), of a hidden directory or of `target`.
-fn rust_files(
+pub(crate) fn rust_files(
     dir: &Path,
     manifest: Option<&Path>,
     files: &mut Vec<PathBuf>,

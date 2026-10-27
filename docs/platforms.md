@@ -217,6 +217,7 @@ wasmtime 49.0.2, at main fdc1c53f15 (#622 for the `no_std` rows):
 | the same with `cargo blaze build --release --target wasm32-wasip1`, a store that starts empty | 64.5 s (9.6 GB at `CARGO_BUILD_JOBS=2`), its build scripts, 157 macro expansions (blaze's proc-macro server) and std unit blaze's; output byte-identical; 0.06 s again with nothing changed |
 | indexable-inc/wasm-host guests (`no_std`, `+simd128,+relaxed-simd,+wide-arithmetic,+tail-call`), nothing of rustc's | request transcripts byte-identical to rustc's; bench_raw 534,750 B vs 10,757 B, 833 to 836 vs 240 to 242 ns a request; bench_worker 984,365 B vs 49,930 B, 4,324 to 4,367 vs 318 to 319 ns |
 | Cloudflare Workers through workers-rs 0.8.7 and wasm-bindgen 0.2.129 (`worker-build --release` with ra-jit as its cargo build), nothing of rustc's | under `wrangler dev` 4.148.0 the hello and a SHA-256/HMAC worker (sha2, hmac) answer as rustc's builds; 1,218,107 vs 145,034 B and 1,304,087 vs 159,091 B; p50 1.44 to 1.47 vs 1.36 to 1.37 ms, and 3.04 to 3.14 vs 1.60 to 1.64 ms hashing 10 KiB |
+| the same workers with `cargo blaze build` as worker-build's cargo build, and the `no_std` simd128 guest of `allrajit_wasm.py` with `cargo blaze build --release --target wasm32-unknown-unknown`, at main 2acba39f76 | std unit blaze's (18 crates for the workers, 3 for the guest); the workers answer as rustc's builds, 983,740 and 1,060,993 B, 88.8 and 81.3 s from a store that starts empty, p50 1.49 to 1.54 vs 1.41 to 1.44 ms and 3.07 to 3.16 vs 1.63 to 1.72 ms; the guest answers 7 of 7 calls as rustc's, 378,591 B vs 4,904 B, 4.4 s |
 
 The train runs the corpus, stress and `allrajit_wasm.py` on every push to main
 (`harness/wasm32.py`, [harness.md](harness.md)).
@@ -229,7 +230,7 @@ long: ra-jit has no LTO or inlining across crates and keeps SIMD values in memor
 workers-rs, five js_sys functions (`MaybeIterator`, `Global`) are refused for type errors,
 and no module reaches them. `cargo blaze build --target wasm32-*` of a package with proc
 macros needs blaze's proc-macro server beside ra-jit (`blaze-proc-macro-srv`, which releases
-ship); the guests and workers above are built by ra-jit directly (`--shared`). With a store
+ship). With a store
 that starts empty, the workspace load compiles every build script at once, a ra-jit process
 each of up to a few GB: on a 16 GB machine `CARGO_BUILD_JOBS=2` kept it at 9.6 GB, where the
 default was killed at 14 GB. wasm-bindgen runs again after every edit, 0.27 to 0.36 s on a hello world

@@ -322,6 +322,9 @@ pub(crate) fn materialize(store: &Store, path: &StorePath, into: &Path) -> anyho
         return Err(e);
     }
     std::fs::rename(&staging, &dir)?;
+    if dir.symlink_metadata()?.is_dir() {
+        seal(&dir)?;
+    }
     _ = std::fs::remove_file(into.join(format!(".{base}.lock")));
     Ok(dir)
 }
@@ -396,12 +399,18 @@ fn lay_out(store: &Store, manifest: &Manifest, root: &Path) -> anyhow::Result<()
         }
     }
     write_batch(&mut batch)?;
-    // From the deepest, as nothing can be made in a directory that is read-only.
-    for directory in directories.iter().rev() {
-        std::fs::File::open(directory)?.set_modified(dated())?;
-        std::fs::set_permissions(directory, std::fs::Permissions::from_mode(0o555))?;
+    // From the deepest, as nothing can be made in a directory that is read-only. The root stays
+    // writable until it is renamed into place: macOS refuses to rename a directory it may not
+    // write (its `..` changes), which Linux allows.
+    for directory in directories.iter().rev().filter(|it| it.as_path() != root) {
+        seal(directory)?;
     }
     Ok(())
+}
+
+fn seal(directory: &Path) -> io::Result<()> {
+    std::fs::File::open(directory)?.set_modified(dated())?;
+    std::fs::set_permissions(directory, std::fs::Permissions::from_mode(0o555))
 }
 
 fn dated() -> SystemTime {
