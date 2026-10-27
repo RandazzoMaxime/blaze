@@ -6,7 +6,7 @@
 // toolchain only.
 #![cfg_attr(
     feature = "nightly",
-    feature(deref_patterns, c_variadic_int128, portable_simd, core_intrinsics)
+    feature(deref_patterns, c_variadic_int128, portable_simd, core_intrinsics, f16, f128, f16b)
 )]
 #![cfg_attr(all(feature = "nightly", target_arch = "aarch64"), feature(stdarch_aarch64_sve))]
 #![cfg_attr(feature = "nightly", allow(incomplete_features, internal_features))]
@@ -1207,6 +1207,180 @@ pub mod simd_lanes {
                 Simd::<u16, 2>::from_le_bytes(Simd::from_array([1, 2, 3, 4])),
             ),
         )
+    }
+}
+
+/// `f16` and `f128`, which AArch64 has no arithmetic for without its half-precision extension:
+/// an `f16` is worked on as an `f32` and rounded back, an `f128` by compiler-builtins and C's
+/// `long double` functions. The values are at the edges of each format: signed zeros, the
+/// least and greatest subnormals, ties of the rounding back, the greatest finite values and
+/// what rounds past them, infinities, quiet and signalling NaNs with payloads.
+#[cfg(all(feature = "nightly", target_arch = "aarch64", target_os = "linux"))]
+pub mod soft_floats {
+    use core::intrinsics as i;
+
+    const HALVES: [u16; 22] = [
+        0x0000, 0x8000, 0x3c00, 0xbc00, 0x3800, 0x0001, 0x8001, 0x03ff, 0x0400, 0x7bff, 0xfbff,
+        0x7c00, 0xfc00, 0x7e00, 0x7c01, 0x7fff, 0xfe01, 0x3555, 0x4248, 0x6800, 0x6801, 0x5bfe,
+    ];
+    const SINGLES: [u32; 16] = [
+        0x3f80_1000, 0x3f80_3000, 0x3f80_1001, 0x477f_f000, 0x477f_efff, 0x3380_0000,
+        0x3300_0000, 0x3300_0001, 0x387f_e000, 0x7fa0_0001, 0x7fc1_2345, 0xffc0_0000,
+        0x7f80_0000, 0x8000_0000, 0x4f80_0000, 0xcf00_0001,
+    ];
+    const DOUBLES: [u64; 10] = [
+        0x3ff0_0200_0000_0000, 0x3ff0_0200_0000_0001, 0x40ef_fe00_0000_0000,
+        0x3e70_0000_0000_0000, 0x7ff4_0000_0000_0001, 0x7ff8_dead_beef_0000,
+        0x8000_0000_0000_0000, 0x7fef_ffff_ffff_ffff, 0x0000_0000_0000_0001,
+        0xc3e0_0000_0000_0001,
+    ];
+
+    pub fn half_ops(a: f16, b: f16) -> [u16; 10] {
+        [a + b, a - b, a * b, a / b, a % b, -a, a.abs(), a.copysign(b), unsafe {
+            i::fma(a, b, a)
+        }, unsafe { i::powi(a, 3) }]
+        .map(f16::to_bits)
+    }
+    pub fn half_compares(a: f16, b: f16) -> [bool; 6] {
+        [a == b, a != b, a < b, a <= b, a > b, a >= b]
+    }
+    pub fn half_rounding(a: f16) -> [u16; 6] {
+        [unsafe { i::sqrt(a) }, i::floor(a), i::ceil(a), i::trunc(a), i::round(a), i::round_ties_even(a)]
+            .map(f16::to_bits)
+    }
+    pub fn half_widened(a: f16) -> (u32, u64, u128) {
+        ((a as f32).to_bits(), (a as f64).to_bits(), (a as f128).to_bits())
+    }
+    // Not to 128-bit integers: rustc at `opt-level=0` (LLVM's GlobalISel) converts an `f16` to
+    // one as to a 64-bit integer and leaves the upper half zero, so `-1.0 as i128` is 2^64 - 1
+    // there, and saturates as `as` should only optimized.
+    pub fn half_to_ints(a: f16) -> (i8, u8, i16, u16, i32, u32, i64, u64) {
+        (a as i8, a as u8, a as i16, a as u16, a as i32, a as u32, a as i64, a as u64)
+    }
+    pub fn halves_of(a: f32, b: f64) -> (u16, u16) {
+        ((a as f16).to_bits(), (b as f16).to_bits())
+    }
+    pub fn ints_to_half(a: i64, b: u64, c: i128, d: u128, e: i8, f: u32) -> [u16; 6] {
+        [a as f16, b as f16, c as f16, d as f16, e as f16, f as f16].map(f16::to_bits)
+    }
+    /// `f16b` moves as an `f16` does, and is compared and widened as the `f32` it is the top
+    /// half of.
+    pub fn brain(a: u16, b: u16) -> (u16, bool, Option<core::cmp::Ordering>, u32, String) {
+        let (a, b) = (core::num::f16b::from_bits(a), core::num::f16b::from_bits(b));
+        (b.to_bits(), a == b, a.partial_cmp(&b), f32::from(a).to_bits(), format!("{a:?}"))
+    }
+    pub fn pair(a: f16, b: f128) -> (f16, f128, Option<f16>) {
+        (b as f16, a as f128, if a > 0.0 { Some(-a) } else { None })
+    }
+
+    pub fn quad_ops(a: f128, b: f128) -> [u128; 11] {
+        [a + b, a - b, a * b, a / b, a % b, -a, a.abs(), a.copysign(b), unsafe {
+            i::fma(a, b, a)
+        }, unsafe { i::powi(a, 3) }, unsafe { i::sqrt(a) }]
+        .map(f128::to_bits)
+    }
+    pub fn quad_compares(a: f128, b: f128) -> [bool; 6] {
+        [a == b, a != b, a < b, a <= b, a > b, a >= b]
+    }
+    pub fn quad_rounding(a: f128) -> [u128; 5] {
+        [i::floor(a), i::ceil(a), i::trunc(a), i::round(a), i::round_ties_even(a)].map(f128::to_bits)
+    }
+    pub fn quad_narrowed(a: f128) -> (u16, u32, u64) {
+        ((a as f16).to_bits(), (a as f32).to_bits(), (a as f64).to_bits())
+    }
+    pub fn quad_to_ints(a: f128) -> (i8, u8, i16, u16, i32, u32, i64, u64, i128, u128) {
+        (a as i8, a as u8, a as i16, a as u16, a as i32, a as u32, a as i64, a as u64, a as i128, a as u128)
+    }
+    pub fn quads_of(a: f32, b: f64, c: i32, d: u64, e: i128, f: u128, g: i8, h: u16) -> [u128; 8] {
+        [a as f128, b as f128, c as f128, d as f128, e as f128, f as f128, g as f128, h as f128]
+            .map(f128::to_bits)
+    }
+
+    fn quads() -> Vec<f128> {
+        let mut quads: Vec<f128> = [
+            0.0, -0.0, 1.0, -1.5, 0.5, 2.5, -2.5, 3.0, 127.5, -128.5, 255.5, 65535.75,
+            2147483647.5, -2147483648.75, -2147483649.0, 4294967295.5, 4294967296.0,
+            9223372036854775807.0, -9223372036854775808.0, 18446744073709551615.0,
+            1e30, -1e30, 1e40, 1e-4000, f128::MAX, f128::MIN_POSITIVE, f128::INFINITY,
+            f128::NEG_INFINITY, f128::NAN,
+        ]
+        .to_vec();
+        quads.extend(
+            [
+                0x7fff_4000_0000_0000_0000_0000_0000_0001u128, // signalling NaN
+                0xffff_8000_0000_0000_dead_beef_0000_0000, // negative quiet NaN with a payload
+                0x0000_0000_0000_0000_0000_0000_0000_0001, // least subnormal
+                0x407d_ffff_ffff_ffff_ffff_ffff_ffff_ffff, // 2^127 - 2^14, the greatest below i128::MAX
+                0x407e_0000_0000_0000_0000_0000_0000_0000, // 2^127
+                0xc07e_0000_0000_0000_0000_0000_0000_0000, // -2^127
+                0xc07e_0000_0000_0000_0000_0000_0000_0001,
+                0x407e_ffff_ffff_ffff_ffff_ffff_ffff_ffff, // 2^128 - 2^15
+                0x407f_0000_0000_0000_0000_0000_0000_0000, // 2^128
+                0x3ff0_0000_0000_0000_1000_0000_0000_0000, // rounds to f64 at a tie
+                0x3fff_0020_0000_0000_0000_0000_0000_0000, // 1 + 2^-11, a tie of f16
+            ]
+            .map(f128::from_bits),
+        );
+        quads
+    }
+
+    pub fn run() -> String {
+        let halves = HALVES.map(f16::from_bits);
+        let mut out = String::new();
+        for &a in &halves {
+            for &b in &halves {
+                out += &format!("{:x?}{:?}", half_ops(a, b), half_compares(a, b));
+            }
+            out += &format!(
+                "\n{:x?} {:x?} {:?} {:?}\n",
+                half_rounding(a),
+                half_widened(a),
+                half_to_ints(a),
+                pair(a, a as f128)
+            );
+        }
+        for (&a, &b) in HALVES.iter().zip(HALVES.iter().rev()) {
+            out += &format!("{:?} ", brain(a, b));
+        }
+        for (single, double) in SINGLES.iter().zip(DOUBLES.iter().cycle()) {
+            out += &format!("{:x?} ", halves_of(f32::from_bits(*single), f64::from_bits(*double)));
+        }
+        for (a, b) in [(1i64 << 40) + (1 << 29) + 1, 2049, -65520, i64::MIN, 0x7ff8_0000_0000_0001]
+            .into_iter()
+            .zip([u64::MAX, 65519, 65520, (1 << 53) + 3, 0])
+        {
+            let ints = ints_to_half(a, b, a as i128 * -3, b as u128 * 5, a as i8, b as u32);
+            out += &format!("{ints:x?} {:x?}\n", ints_to_half(0, 0, i128::MIN, u128::MAX, -128, u32::MAX));
+        }
+        let quads = quads();
+        for &a in &quads {
+            for &b in &quads {
+                out += &format!("{:x?}{:?}", quad_ops(a, b), quad_compares(a, b));
+            }
+            out += &format!(
+                "\n{:x?} {:x?} {:?}\n",
+                quad_rounding(a),
+                quad_narrowed(a),
+                quad_to_ints(a)
+            );
+        }
+        for (k, (single, double)) in SINGLES.iter().zip(DOUBLES.iter().cycle()).enumerate() {
+            let k = k as i128;
+            out += &format!(
+                "{:x?}\n",
+                quads_of(
+                    f32::from_bits(*single),
+                    f64::from_bits(*double),
+                    i32::MIN + k as i32,
+                    u64::MAX - k as u64,
+                    i128::MIN + k * 12345,
+                    u128::MAX - k as u128 * 99999,
+                    k as i8 - 100,
+                    u16::MAX - k as u16,
+                )
+            );
+        }
+        out
     }
 }
 
