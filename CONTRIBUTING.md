@@ -8,7 +8,7 @@ The long version, with the rules for code and how to change the vendored rust-an
 ```
 git clone https://github.com/indexable-inc/blaze
 cd ra-jit
-nix develop            # rustup at the nightly in harness/toolchain, Python, and the LLVM 20 of `--features llvm`
+nix develop            # rustup at the nightly in harness/toolchain, Python, and the LLVM 23 of `--features llvm`
 rustup component add rust-src
 cargo build -p ra-jit --release
 ```

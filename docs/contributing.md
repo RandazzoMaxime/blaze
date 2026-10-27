@@ -334,16 +334,28 @@ few thousand and before a release after large changes to the daemon.
 
 ## LLVM for `--features llvm`
 
-The LLVM backend builds against one LLVM, the 20.1.8 the flake pins (`flake.lock`), on macOS
-and on Linux alike, in the flake's dev shell:
+The LLVM backend builds against one LLVM, 23.1.4, built by blaze for each target it ships on
+and pinned by its sha256 in `crates/hir-ty-codegen/llvm.json`. The flake's dev shell fetches it:
 
     nix develop -c cargo build -p ra-jit --release --features llvm
 
-CI builds it the same way (`.github/actions/toolchain`). Outside the shell the build stops and
-says to enter it: neither Homebrew's LLVM nor a distribution's is a source. A build without the
-feature needs no LLVM, and neither does what ships. A binary built with it loads `libLLVM`
-from the store by its path, so after a garbage collection `nix develop` brings it back. Windows,
-which has no Nix, gets LLVM's release of the same version in CI.
+Outside the shell, fetch the same archive and point the build at it:
+
+    python3 .github/scripts/llvm.py fetch --target <triple> --dir ~/.cache/blaze-llvm
+    LLVM_SYS_231_PREFIX=~/.cache/blaze-llvm cargo build -p ra-jit --release --features llvm
+
+`build.rs` checks the prefix's `blaze-llvm.json` against the pin and stops otherwise: neither
+Homebrew's LLVM nor a distribution's is a source. LLVM is linked in statically, and on Linux so
+is libstdc++, so a binary built with the feature needs no LLVM where it runs. CI and Windows
+fetch the archive the same way (`.github/actions/toolchain`).
+
+The archives are built by the `llvm` workflow (`.github/workflows/llvm.yaml`, recipe
+`.github/scripts/llvm.py build`): LLVM's own `llvmorg-23.1.4`, the X86 and AArch64 targets,
+no zlib, zstd, libxml2 or terminfo, on the release's runners (Ubuntu 22.04 for an old glibc,
+macOS 13 as the deployment target, the static CRT on Windows). To move the pin, change
+`ref`, `commit` and `version` in `llvm.json`, run the workflow, and write the `targets` its
+summary prints (`llvm.py pin`). LLVM's own release archives do not do: the macOS ones hold
+bitcode, and the Linux ones need zlib, zstd and libxml2.
 
 ## Credit
 

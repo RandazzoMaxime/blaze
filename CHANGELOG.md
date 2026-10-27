@@ -469,6 +469,14 @@ All notable changes to ra-jit are written here. The format follows
 
 ### Changed
 
+- The LLVM backend is on LLVM 23.1.4 (was 20.1.8): inkwell 0.11 and llvm-sys 231. Blaze
+  builds that LLVM itself for each target (`.github/workflows/llvm.yaml`) and pins the
+  archives by sha256 in `crates/hir-ty-codegen/llvm.json`; the flake, CI and Windows fetch
+  them. It is linked in statically, with libstdc++ on Linux, so a binary built with
+  `--features llvm` loads no libLLVM. LLVM 21 removed `nocapture`: an `sret` parameter is
+  `captures(none)`, and an attribute name the linked LLVM does not know now panics naming it
+  rather than crashing LLVM's verifier.
+
 - No `cargo blaze` command is passed to cargo any more (Andrew, 2026-10-26: commands that are
   no builds "should go to us and not cargo"). `metadata`, `locate-project`, `verify-project`,
   `version` and `help` are blaze's own, from blaze-manifest, blaze-registry and blaze-resolve
