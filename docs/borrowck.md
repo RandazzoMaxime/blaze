@@ -174,7 +174,8 @@ All of these are rustc's, written from `compiler/rustc_borrowck` at the pinned n
   `let z: &'a &u32 = &&y` needs `y` to outlive `'a`), struct and variant patterns that spell out generic
   arguments (`let Foo::<'static> { .. } = foo`) and constant patterns (`<() as Foo<'a>>::C`,
   whose type is a subtype of what it matches, as rustc ascribes it, so it matches a
-  `&'static u32` only if `'a: 'static`), casts, turbofishes (a method's own, `x.f::<&'a T>()`, too) and struct
+  `&'static u32` only if `'a: 'static`), casts (the type written, its `_`s holes: `ptr as _`
+  relates no lifetime, though inference makes it `'static` from where the value goes), turbofishes (a method's own, `x.f::<&'a T>()`, too) and struct
   literal and variant paths, in closures too; `Self { .. }` and `Self(..)` in an impl have the
   impl's self type, with its anonymous lifetimes (`impl Foo<'_>`) as the impl's own. A function item called through a variable
   (`let f = foo::<&'static u32>; f(&x)`, or through a reference, `let f = &foo::<..>`) has the
