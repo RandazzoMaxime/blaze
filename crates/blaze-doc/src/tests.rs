@@ -183,6 +183,12 @@ pub trait Each {
         Self: Sized,
     {
     }
+    /// A higher-ranked bound, which every item meets.
+    fn borrowed(&self)
+    where
+        for<'a> &'a Self::Item: Copy,
+    {
+    }
 }
 /// Yields squares, which are not `Copy`.
 pub struct Squares;
@@ -472,8 +478,12 @@ fn provided_methods_that_cannot_apply_are_left_out() {
             .find(|it| it.trait_name.as_deref() == Some("Each"));
         each.expect("impl Each").items.iter().map(|it| it.name.clone()).collect()
     };
-    assert_eq!(members("fixture::Squares"), ["Item"], "a square of this crate is not Copy");
-    assert_eq!(members("fixture::Helpers"), ["Item", "copied"], "dep may make a helper Copy");
+    assert_eq!(members("fixture::Squares"), ["Item", "borrowed"], "a square is not Copy");
+    assert_eq!(
+        members("fixture::Helpers"),
+        ["Item", "copied", "borrowed"],
+        "dep may make a helper Copy"
+    );
 }
 
 #[test]

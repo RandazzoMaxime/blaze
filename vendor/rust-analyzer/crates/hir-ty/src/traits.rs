@@ -270,10 +270,15 @@ pub fn is_impossible_associated_item(
         // Coherence answers a trait goal only a crate upstream of `krate` could implement
         // (`io::Error: Ord`) as ambiguous, since that crate may add the impl; rust-analyzer's
         // solver takes every crate as local, so the goal is left out here instead.
+        // A higher-ranked bound (`for<'a> Self::Item: Trait<'a>`) is judged as written: the
+        // normalizer takes no bound vars.
         if let rustc_type_ir::ClauseKind::Trait(pred) = clause.kind().skip_binder() {
-            let trait_ref = ocx
-                .deeply_normalize(&ObligationCause::dummy(), ParamEnv::empty(), pred.trait_ref)
-                .unwrap_or(pred.trait_ref);
+            let trait_ref = match pred.trait_ref.has_escaping_bound_vars() {
+                true => pred.trait_ref,
+                false => ocx
+                    .deeply_normalize(&ObligationCause::dummy(), ParamEnv::empty(), pred.trait_ref)
+                    .unwrap_or(pred.trait_ref),
+            };
             if !knowable(db, krate, trait_ref) {
                 continue;
             }
