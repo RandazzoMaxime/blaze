@@ -121,7 +121,14 @@ What is specific to the port:
   Control Flow Guard, a signature, or no PDB always take the full link (inferred from the
   checks in the code; the harness links none of these).
 - A running `.exe` cannot be written, even by the linker. The daemon renames it aside and
-  links a new file.
+  links a new file, or splices a copy and puts it in its place.
+- Live edits (`ra-jit-live`): the program is named by the GUID of its PDB, reserves room
+  within 2 GB behind its image with `VirtualAlloc`, and registers each patch's `.pdata` with
+  `RtlAddFunctionTable`, so a panic unwinds through patched code. The daemon wakes it through a
+  named event where Unix has a datagram socket. A static with another value asks for a restart
+  (the splice writes it in place). `ra_jit_live::edit`, which the demo's editor sends each
+  keystroke with, talks to the daemon's AF_UNIX socket through Winsock. `harness/live_e2e.py`
+  passes, by hand, not in CI; life's latency is in [live.md](live.md#latency-under-typing).
 - The daemon's socket is an AF_UNIX socket. The check that only the user can reach it is
   not implemented on Windows.
 

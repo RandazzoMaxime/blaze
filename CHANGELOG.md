@@ -142,6 +142,15 @@ each one's section: what `[Unreleased]` had, and the title of each change merged
 - `ra-jit std` ships the standard library's unit for a `dev` program too, not only a build
   script's: a whole build of a dev program from an empty store (step K, #91) fetches it where
   it compiled the library again: ripgrep from nothing 19.4 s to 9.9 s on dev-aws-8.
+- Live edits on Windows x86-64: `ra-jit-live` takes patches in a running PE program, named by
+  the GUID of its PDB, and registers their unwind tables, and the daemon lays a patch of a PE
+  executable out for it. An executable a program runs is spliced through a copy put in its
+  place, as on Unix, instead of being linked again; the daemon wakes the program through a
+  named event; and `ra_jit_live::edit` reaches the daemon, so `demo/life`'s editor builds as you
+  type. life's edit to running is 26.6 ms at p50 (`socket`) on a Windows 11 desktop
+  ([live.md](docs/live.md#latency-under-typing)). A static with another value still asks for a
+  restart.
+
 - `crates/blaze-build-script`: the environment cargo 1.99.0 gives a build script, computed
   from a plain description of the run with no cargo, ported from cargo's own rules and tests
   (no-rustc step I, #89; #298). Nothing uses it yet; blaze's own runs of scripts come next.
