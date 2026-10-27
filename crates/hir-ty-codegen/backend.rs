@@ -277,6 +277,7 @@ impl Backend {
             func,
             named.iter().copied(),
             recorder.constants(),
+            recorder.asm_texts(),
             &recorder.pointees,
         )) else {
             return super::llvm::emit(recorder, &named, func, optimization, None, &[]);

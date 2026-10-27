@@ -450,6 +450,17 @@ impl Wants {
             .collect()
     }
 
+    /// The texts of the `asm!` wrappers it asks for, by their places among the requests:
+    /// what LLVM puts in place of a call of one ([`Self::asm_blocks`]).
+    #[cfg(feature = "llvm")]
+    pub(super) fn asm_texts(&self) -> impl Iterator<Item = (u32, &str)> {
+        let funcs = self.requests.funcs.iter().enumerate();
+        funcs.filter_map(|(at, it)| match &it.target {
+            FuncTarget::Asm(text) => Some((at as u32, text.as_str())),
+            _ => None,
+        })
+    }
+
     #[cfg(feature = "llvm")]
     fn symbol(&self, symbol: &str) -> Option<u32> {
         let mut funcs = self.requests.funcs.iter();

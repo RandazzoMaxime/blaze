@@ -871,6 +871,15 @@ All notable changes to ra-jit are written here. The format follows
 
 ### Fixed
 
+- The LLVM backend: an error LLVM diagnoses while it writes an object is an error naming
+  what LLVM said, not an object with an instruction left out. LLVM 23's assembler printed
+  "can't encode 'ah'" for `mov ah, sil` in an `asm!` block and wrote the object without it
+  (LLVM 20 ended the process). A `reg_byte` in a block that names a high byte register is one
+  of a, b, c and d, which always encodes (corpus case `inline_asm::high_of`).
+- The LLVM backend's store: a function's key has the `asm!` blocks LLVM puts in place of its
+  calls of their wrappers. Two functions that each pass a `u64` through a block of their own
+  were one key, and the second got the first's code.
+
 - `cargo install --git https://github.com/indexable-inc/blaze ra-jit` builds ra-jit
   ([#242](https://github.com/indexable-inc/blaze/issues/242), #293, by @gakonst). It failed
   before compiling anything: for a git source cargo checks that every package is a member of
