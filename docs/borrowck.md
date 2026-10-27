@@ -101,7 +101,8 @@ All of these are rustc's, written from `compiler/rustc_borrowck` at the pinned n
   (`|z: &[i32]|` passed as `F: FnOnce(S)` takes the `S` it is called with). A variable with a
   written type is related to it as rustc's user type annotation, so an error through it is
   blamed on the annotation. A parameter that elides one lifetime has
-  it once however often its type does (`s: S2` with `type S2<'a> = S<'a, 'a>`), and
+  it once however often its type does (`s: S2` with `type S2<'a> = S<'a, 'a>`); one that
+  writes `Self` gives elision none of the impl's lifetimes (`self` of `impl Id<'_>`), and
   `Self::Target` in an impl for `S<'_, '_>` has the impl's lifetimes.
 - Raw pointers: a reference coerced to one relates what it points to, raw and function
   pointers compare when they have a common supertype, an array's pointer cast to its
