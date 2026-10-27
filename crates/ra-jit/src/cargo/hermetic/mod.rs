@@ -106,12 +106,23 @@ pub(crate) fn closure_for(
         }
     }
     let wanted: Vec<StorePath> = roots.iter().map(|it| it.1.clone()).collect();
+    // The scripts of one build take the closure from the remote into one store at once, and a
+    // pack another process is fetching is one this process lacks: one takes it, the others
+    // wait for it and see what it brought.
+    let remote = remote();
+    let _held = match &remote {
+        Some(_) => Some(held_by_one(closure::PROJECT)?),
+        None => None,
+    };
+    if remote.is_some() {
+        closure::refresh()?;
+    }
     let mut all = closure::closure_of(&wanted);
     if all.is_err()
-        && let Some(remote) = remote()
+        && let Some(remote) = &remote
     {
         let dir = super::daemon::store().context("RA_JIT_CACHE turns the store off")?;
-        crate::remote::Shared::lazily(&dir, &remote, closure::PROJECT)?.pull()?;
+        crate::remote::Shared::lazily(&dir, remote, closure::PROJECT)?.pull()?;
         all = closure::closure_of(&wanted);
     }
     let all = all.with_context(|| format!("the closure the build script of `{name}` runs with"))?;
@@ -127,6 +138,17 @@ pub(crate) fn closure_for(
 /// The remote cache `RA_JIT_REMOTE` names, when it names one.
 fn remote() -> Option<String> {
     std::env::var("RA_JIT_REMOTE").ok().filter(|it| !it.is_empty() && it != "off")
+}
+
+/// A lock of blaze's store that one process holds at a time, beside the store's own files,
+/// until it is dropped.
+fn held_by_one(what: &str) -> anyhow::Result<std::fs::File> {
+    let dir = super::daemon::store().context("RA_JIT_CACHE turns the store off")?;
+    std::fs::create_dir_all(&dir)?;
+    let lock = std::fs::File::create(dir.join(format!("taking-{what}")))
+        .with_context(|| format!("the lock of {} beside blaze's store", dir.display()))?;
+    lock.lock()?;
+    Ok(lock)
 }
 
 /// The crates `[workspace.metadata.blaze.system-deps]` of the root manifest at `manifest` gives
