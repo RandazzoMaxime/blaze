@@ -738,17 +738,36 @@ impl Loans {
         let blocks = body.basic_blocks.len();
         let count = self.loans.len();
         let mut entry = vec![BitSet::new(count); blocks];
+        if count == 0 {
+            return entry;
+        }
+        // A block only adds and removes loans, whatever is in scope, so what it does is
+        // `(in & kept) | made`: `made` is what it leaves of nothing in scope, `kept` of all.
+        let mut all = BitSet::new(count);
+        for id in 0..count {
+            all.insert(id);
+        }
+        let mut effect: Vec<Option<(BitSet, BitSet)>> = vec![None; blocks];
+        for &block in &cfg.order {
+            let data = &body.basic_blocks[block];
+            let (mut made, mut kept) = (BitSet::new(count), all.clone());
+            for statement in 0..=data.statements.len() {
+                let location = Location { block, statement };
+                for state in [&mut made, &mut kept] {
+                    self.before(cfg, location, state);
+                    self.after(ctx, body, location, state);
+                }
+            }
+            effect[index(block)] = Some((made, kept));
+        }
         let mut changed = true;
         while changed {
             changed = false;
             for &block in &cfg.order {
+                let Some((made, kept)) = &effect[index(block)] else { continue };
                 let mut state = entry[index(block)].clone();
-                let data = &body.basic_blocks[block];
-                for statement in 0..=data.statements.len() {
-                    let location = Location { block, statement };
-                    self.before(cfg, location, &mut state);
-                    self.after(ctx, body, location, &mut state);
-                }
+                state.intersect(kept);
+                state.union(made);
                 for &successor in &cfg.successors[index(block)] {
                     changed |= entry[index(successor)].union(&state);
                 }
