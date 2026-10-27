@@ -44,7 +44,8 @@ pub(crate) const WASM_TARGET: &str = "wasm32-wasip1";
 
 /// Has the toolchain at `sysroot` the WASI libc a module is linked with (`link.rs`), which
 /// comes with rustup's `wasm32-wasip1` target: rustup adds it when it is not there, once per
-/// process. `Err` says why there is none.
+/// process. Builds that start together add it once: two rustups that download one component
+/// at a time each take the other's file away. `Err` says why there is none.
 pub(crate) fn wasm_target(sysroot: &Path) -> Result<(), String> {
     static ADDED: std::sync::Mutex<Vec<(PathBuf, Result<(), String>)>> =
         std::sync::Mutex::new(Vec::new());
@@ -57,13 +58,22 @@ pub(crate) fn wasm_target(sysroot: &Path) -> Result<(), String> {
         return said.clone();
     }
     let toolchain = sysroot.file_name().and_then(OsStr::to_str).unwrap_or_default();
-    let mut rustup = std::process::Command::new("rustup");
-    rustup.args(["target", "add", WASM_TARGET, "--toolchain", toolchain]);
-    let ran = rustup.stdin(std::process::Stdio::null()).output();
-    let said = match ran {
+    let mut options = std::fs::OpenOptions::new();
+    let lock = options.create(true).truncate(false).write(true);
+    let lock = lock.open(std::env::temp_dir().join(format!("blaze-{toolchain}-{WASM_TARGET}")));
+    let locked = lock.and_then(|it| it.lock().map(|()| it));
+    let said = match locked {
         Ok(_) if libc.join("crt1-reactor.o").is_file() => Ok(()),
-        Ok(ran) => Err(String::from_utf8_lossy(&ran.stderr).trim_end().to_owned()),
-        Err(error) => Err(format!("rustup did not run: {error}")),
+        Ok(_locked) => {
+            let mut rustup = std::process::Command::new("rustup");
+            rustup.args(["target", "add", WASM_TARGET, "--toolchain", toolchain]);
+            match rustup.stdin(std::process::Stdio::null()).output() {
+                Ok(_) if libc.join("crt1-reactor.o").is_file() => Ok(()),
+                Ok(ran) => Err(String::from_utf8_lossy(&ran.stderr).trim_end().to_owned()),
+                Err(error) => Err(format!("rustup did not run: {error}")),
+            }
+        }
+        Err(error) => Err(format!("no lock to add it under: {error}")),
     };
     let said = said.map_err(|why| {
         format!(
