@@ -308,7 +308,8 @@ fn time_project(project: &str, out: &str) -> anyhow::Result<()> {
     let mut totals = [[std::time::Duration::ZERO; Phase::ALL.len()]; 2];
     let mut check_totals = [std::time::Duration::ZERO; 2];
     let (mut infer_total, mut bodies) = (std::time::Duration::ZERO, 0usize);
-    let (mut infer_warm_total, mut first_total) = (std::time::Duration::ZERO, std::time::Duration::ZERO);
+    let (mut infer_warm_total, mut first_total) =
+        (std::time::Duration::ZERO, std::time::Duration::ZERO);
     hir::attach_db(&db, || -> anyhow::Result<()> {
         let mut found: Vec<(DefWithBody, String)> = Vec::new();
         for krate in hir::Crate::all(&db) {
