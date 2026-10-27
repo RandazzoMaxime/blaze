@@ -3218,6 +3218,8 @@ enum Variadic {
     Apple {
         named: u32,
     },
+    /// In memory the caller wrote, whose address follows the named parameters.
+    Buffer,
 }
 
 impl Variadic {
@@ -3232,6 +3234,7 @@ impl Variadic {
             Some(VariableArguments::Stack) => {
                 Some(Variadic::Apple { named: Self::apple_stack(sig)? })
             }
+            Some(VariableArguments::Buffer) => Some(Variadic::Buffer),
             None => None,
         })
     }
@@ -3241,6 +3244,7 @@ impl Variadic {
             Variadic::SystemV(named) => named.rest(sig),
             Variadic::Windows(named) => named.rest(sig),
             Variadic::Apple { .. } => (),
+            Variadic::Buffer => sig.params.push(AbiParam::new(ptr())),
         }
     }
 
@@ -9357,7 +9361,9 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
                     Some(VariableArguments::Homed) => {
                         matches!(self.abi, ExternAbi::C { .. } | ExternAbi::Win64 { .. })
                     }
-                    Some(VariableArguments::Stack) => matches!(self.abi, ExternAbi::C { .. }),
+                    Some(VariableArguments::Stack | VariableArguments::Buffer) => {
+                        matches!(self.abi, ExternAbi::C { .. })
+                    }
                     None => false,
                 };
                 let Some(variadic) = Variadic::of(self.cg.target, &sig)?.filter(|_| native) else {
@@ -9495,6 +9501,17 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
             let frame = self.builder.ins().get_frame_pointer(ptr());
             let stack = self.builder.ins().iadd_imm(frame, 16 + i64::from(named));
             self.builder.ins().store(MEM, stack, addr, 0);
+            self.locals.insert(list, LocalSlot { addr, borrowed: false });
+        }
+        if let Some(Variadic::Buffer) = variadic {
+            let list = *body.param_locals.last().expect("the list of a variadic function");
+            let layout = self.layout(body.locals[list].ty.as_ref())?;
+            if layout.size.bytes() != u64::from(ptr().bytes()) {
+                unsupported!("a `VaList` that is not the one of this target");
+            }
+            let addr = self.stack_slot(&layout);
+            let buffer = incoming.next().expect("where the variable arguments are");
+            self.builder.ins().store(MEM, buffer, addr, 0);
             self.locals.insert(list, LocalSlot { addr, borrowed: false });
         }
         if body.phase != MirPhase::Runtime {
@@ -14302,6 +14319,25 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
             ("overflow_checks", []) => {
                 let value = self.builder.ins().iconst(types::I8, i64::from(self.cg.checked));
                 self.builder.ins().store(MEM, value, dst, 0);
+            }
+            ("va_arg", [list])
+                if self.cg.target.variable_arguments() == Some(VariableArguments::Buffer) =>
+            {
+                let scalar = self.scalar_of(dst_ty)?;
+                // What is wider is in pieces whose places the caller decides with LLVM.
+                if scalar.ty.bytes() > 8 {
+                    unsupported!("`va_arg` of {dst_ty:?}");
+                }
+                // The list is the address after the argument before, and each is as aligned
+                // as it is wide.
+                let bytes = i64::from(scalar.ty.bytes());
+                let (list, _) = self.load_scalar(list)?;
+                let after = self.builder.ins().load(ptr(), MEM, list, 0);
+                let slot = self.builder.ins().iadd_imm(after, bytes - 1);
+                let slot = self.builder.ins().band_imm(slot, -bytes);
+                let next = self.builder.ins().iadd_imm(slot, bytes);
+                self.builder.ins().store(MEM, next, list, 0);
+                self.copy(dst, slot, Size::from_bytes(bytes as u64));
             }
             ("va_arg", [list])
                 if matches!(
