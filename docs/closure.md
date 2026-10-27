@@ -132,6 +132,29 @@ for what it lacks: a process that is to take the closure from a remote opens it 
 
 ## Measured
 
+The `aarch64-linux` closure, every root, on an arm64 ix VM (16 CPUs, 16 GiB), with a release
+build of blaze; the remote is a directory on the same disk, so the pull measures blaze, not a
+network:
+
+| step | time | bytes |
+|---|---|---|
+| `closure fetch`, empty store, from cache.nixos.org | 42.1 s | 607.2 MB downloaded (zstd NARs), 2,556.7 MB of NARs, 200 paths |
+| `closure fetch` again | 0.16 s | nothing downloaded: 200 manifests in the store |
+| what the store keeps | | 638.6 MB in 39 files |
+| `cache push DIR nix-closure` | 0.54 s | 37 packs, 638.6 MB |
+| `closure materialize`, empty store, `RA_JIT_REMOTE=DIR` | 29.7 s | 24,720 keys in 37 packs pulled; 2,550.5 MB laid out |
+| `closure materialize` again, all in place | 0.15 s | |
+| `closure materialize` from the filled store, no remote | 15.5 s | 2,550.5 MB laid out |
+
+The store keeps the 2.5 GB in about what cache.nixos.org sends (zstd blocks of 1 MiB pieces,
+pieces shared across paths kept once). Laying out is most of a materialize: each tree is
+written, then read again and hashed as a NAR before it is renamed into place.
+
+Of the 135 paths the VM's own `/nix/store` also has, 134 dump (`nix-store --dump`) to the same
+bytes as blaze's tree. The other, `ncurses-6.6`, the VM had built itself, unsigned; blaze's
+tree is the one whose NarHash cache.nixos.org signs. With an empty store and no remote,
+`closure materialize openssl.dev` fails with the path and the note that CI fills the remote.
+
 ## What is left
 
 - The mount namespace and the build-script runner (lane `nsroot`), and the per-crate table.
