@@ -625,6 +625,7 @@ mod tests {
             .expect("a workspace whose metadata failed was loaded");
         let error = format!("{error:#}");
         assert!(error.contains("`cargo metadata` failed"), "{error}");
-        assert!(error.contains("vendor/missing"), "{error}");
+        let missing = std::path::Path::new("vendor").join("missing");
+        assert!(error.contains(&*missing.to_string_lossy()), "{error}");
     }
 }

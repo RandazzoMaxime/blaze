@@ -3295,6 +3295,7 @@ fn workspace_at(
     let mut debug = plan::Whole {
         debug: plan::Described::NOTHING,
         lto: false,
+        links_dead_code: false,
         lints_capped: false,
         link_args: Vec::new(),
     };
@@ -3315,6 +3316,7 @@ fn workspace_at(
         let asked = plan::Asked { triple, cfg: &workspace.rustc_cfg, env: &cargo_config.extra_env };
         let plan = plan::Plan::of(manifest.manifest_path().as_ref(), selection, &asked)?;
         debug = plan.whole()?;
+        hir_ty_codegen::rustc_links_dead_code(debug.links_dead_code);
         let packages: Vec<_> = cargo.packages().collect();
         if let Some(beside) = beside {
             let built = packages.iter().filter(|it| plan.package(&cargo[**it].id.repr).is_some());
@@ -3767,7 +3769,14 @@ fn harness_alone(args: &Args) -> Option<String> {
 
 /// Writes [`cargo::plan::REACH`] beside the program of tests of `args` when a client asked for
 /// it, and takes away the one of an older build: `built` is whether this build is the program.
-fn write_reach(db: &RootDatabase, listed: &Listed, args: &Args, built: bool) {
+fn write_reach(
+    db: &RootDatabase,
+    table: &SymbolTable,
+    known: &Rejections,
+    listed: &Listed,
+    args: &Args,
+    built: bool,
+) {
     let Some(dir) = args.out.parent() else { return };
     let file = dir.join(cargo::plan::REACH);
     if !built || !dir.join(cargo::plan::REACH_WANTED).is_file() {
@@ -3776,7 +3785,11 @@ fn write_reach(db: &RootDatabase, listed: &Listed, args: &Args, built: bool) {
     }
     let start = Instant::now();
     let text = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| match of_tests(args) {
-        true => hir::attach_db(db, || reach_of_tests(db, listed, args)),
+        true => hir::attach_db(db, || {
+            let contents = content::Contents::default();
+            let resolver = Resolver::of(db, table, args, known, &contents, listed);
+            reach_of_tests(db, &resolver, listed, args)
+        }),
         // A test target cargo builds without libtest's harness says what it runs itself.
         false => "*\tit is not built with libtest's harness\n".to_owned(),
     }));
@@ -3806,7 +3819,12 @@ fn reach_owed(out: &Path) -> bool {
 
 /// The text of [`cargo::plan::REACH`] for the program of tests of `args`. A test's hash is of
 /// its attributes, which say how it is to end, as well as its code and all it reaches.
-fn reach_of_tests(db: &RootDatabase, listed: &Listed, args: &Args) -> String {
+fn reach_of_tests(
+    db: &RootDatabase,
+    resolver: &Resolver<'_>,
+    listed: &Listed,
+    args: &Args,
+) -> String {
     use hir::HasSource as _;
     use sha2::Digest as _;
     use syntax::ast::HasAttrs as _;
@@ -3822,7 +3840,7 @@ fn reach_of_tests(db: &RootDatabase, listed: &Listed, args: &Args) -> String {
         let Some(name) = test_harness::name(db, krate, bench) else { continue };
         text.push_str(&format!("-\t{name}\tit is a benchmark\n"));
     }
-    for (&id, reach) in tests.iter().zip(hir_ty_codegen::tests_reach(db, &tests)) {
+    for (&id, reach) in tests.iter().zip(hir_ty_codegen::tests_reach(db, resolver, &tests)) {
         let function = hir::Function::from(id);
         let Some(name) = test_harness::name(db, krate, function) else { continue };
         let field = |it: &str| it.replace(['\t', '\n'], " ");
@@ -8992,17 +9010,38 @@ fn run_holding(
             // No rustc checked the source of a build with nothing of rustc's: the worker
             // does, all of it the build compiles and the code nothing reaches too, as rustc
             // would. An error fails every build of the checkout until a source is written
-            // (docs/no-rustc.md, D). Only a module of a crate is Rust: the workspace's
-            // `rustfmt.toml` and READMEs are loaded too.
+            // (docs/no-rustc.md, D). Only the modules of those crates: the workspace's
+            // `rustfmt.toml` and READMEs are loaded too, and so are its integration tests,
+            // whose dev-dependencies a build has none of. A program from the store listed
+            // no crate.
             if nothing_of_rustc && written.is_empty() {
                 let checking = Instant::now();
+                let within = match listed.programs(&db) {
+                    Some(within) => within,
+                    None => {
+                        let mut within = FxHashSet::default();
+                        for krate in args.crates() {
+                            for krate in crates_to_build(&db, &table, krate, &args)? {
+                                let krate: ide_db::base_db::Crate = krate.into();
+                                within.extend(krate.transitive_deps(&db));
+                            }
+                        }
+                        Arc::new(within)
+                    }
+                };
+                let module_of = |id: vfs::FileId| {
+                    let relevant = ide_db::base_db::relevant_crates(&db, id);
+                    relevant.iter().filter(|it| within.contains(*it)).any(|&krate| {
+                        hir_def::nameres::crate_def_map(&db, krate)
+                            .modules_for_file(&db, id)
+                            .next()
+                            .is_some()
+                    })
+                };
                 let paths: FxHashMap<vfs::FileId, PathBuf> = files
                     .iter()
                     .filter_map(|it| match it.file {
-                        Watched::Source(id)
-                            if args.owns(&db, id, &it.path)
-                                && !listed.crates_of(&db, id).is_empty() =>
-                        {
+                        Watched::Source(id) if args.owns(&db, id, &it.path) && module_of(id) => {
                             Some((id, it.path.clone()))
                         }
                         _ => None,
@@ -9011,8 +9050,8 @@ fn run_holding(
                 let mut all: Vec<_> = paths.keys().copied().collect();
                 all.sort_unstable();
                 let sources = Sources { paths };
-                let within = listed.programs(&db);
                 let lints = !args.lints_capped;
+                let within = Some(within);
                 let broken = broken_in(&db, &all, &sources, &args.checkout, within, lints);
                 let why = hir::attach_db(&db, || {
                     refusal(&db, &all, &sources, &args.checkout, broken, None)
@@ -10996,7 +11035,7 @@ impl Program {
             );
         }
         eprintln!("edit-to-binary: {total:.1?}");
-        write_reach(db, listed, args, failed.is_none());
+        write_reach(db, table, known, listed, args, failed.is_none());
         if let Some(why) = failed {
             return Ok(Err(why));
         }

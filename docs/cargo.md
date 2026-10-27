@@ -544,6 +544,11 @@ test and inputs are the same.
 At each build the daemon hashes every test's code with the code of every function it calls,
 directly or through others, in any crate of the workspace or its dependencies, and its
 attributes (`#[ignore]`, `#[should_panic]`). The standard library is named by the toolchain.
+A function of a crate outside the workspace, instantiated with types of such crates, is hashed
+by its stable name, which stands for its code and all it calls as it does for the compiled
+functions the store keeps; what the hash needs of what is below it (whether that reaches code
+ra-jit can't compile, or the world outside) is kept in the store under the name, so a daemon
+that starts with the store compiles none of the dependencies to hash the tests.
 A test's pass is kept under a key of that hash and of what else it is a function of:
 
 - the ra-jit that ran it (every key of the store has it);
@@ -604,7 +609,18 @@ all, and says whether each kept as passed passed again:
     Verified the passes kept: 245 of 245 tests passed again
 
 One that failed is flaky or its key misses something it is a function of, which is a bug in
-blaze; it is named, marked flaky, and the command fails. The release train runs it.
+blaze; it is named, marked flaky, and the command fails. It is for the release train, which
+does not run it yet.
+
+On a CI runner's shape (a fresh target directory and daemon, with the store main's run filled),
+every test that passed on main is skipped. After a one-function edit, only the tests that reach
+the function run: just ran 344 of its 515 passing tests and took 171 from main, nushell 42 of 67,
+cargo none of 8, and `verify` found every pass kept to pass again on seven projects. On these
+projects it is not yet faster than running every test, whose tests are short: the walk for the
+tests' hashes on a fresh daemon takes 0.94 s for axum and 0.45 s for just, down from 6.2 s and
+7.6 s before dependencies were hashed by name, and the run takes 13.5 s against 11.9 s for every
+test (axum) and 32.3 s against 28.8 s (just;
+[the numbers](../bench/results/2026-10-27-testcache/README.md)).
 
 `-v`, `-q` and `--color` only change what cargo prints, and are the same build to the daemon.
 

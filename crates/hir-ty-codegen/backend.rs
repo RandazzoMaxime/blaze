@@ -87,6 +87,18 @@ pub(super) fn frame_pointers() -> bool {
     FRAME_POINTERS.load(Ordering::Relaxed)
 }
 
+/// Whether rustc's build of the program has `-C link-dead-code`
+/// ([`rustc_links_dead_code`](super::rustc_links_dead_code)).
+static LINKS_DEAD_CODE: AtomicBool = AtomicBool::new(false);
+
+pub(super) fn link_dead_code(links: bool) {
+    LINKS_DEAD_CODE.store(links, Ordering::Relaxed);
+}
+
+pub(super) fn links_dead_code() -> bool {
+    LINKS_DEAD_CODE.load(Ordering::Relaxed)
+}
+
 /// Says the build under way is of a whole program.
 pub(super) fn set_whole_program() {
     WHOLE_PROGRAM.store(true, Ordering::Relaxed);
@@ -220,7 +232,8 @@ impl Backend {
         let pairs = super::float_pair::lower(recorder, &mut context.func);
         let mut code = super::emit(context)?;
         if let Some(frame) = context.compiled_code().and_then(|it| it.buffer.frame_layout()) {
-            code.slots = SlotPlaces::of_frame(recorder.isa, frame, recorder.named_slots());
+            code.slots =
+                SlotPlaces::of_frame(recorder.isa, frame, &context.func, recorder.named_slots());
         }
         if let Some(pairs) = pairs {
             pairs.hold(context, &mut code)?;
