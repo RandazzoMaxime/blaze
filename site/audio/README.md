@@ -130,7 +130,7 @@ The plan, none of it done (each step needs approval):
 ## Licences
 
 - Drama 3 is under the Fish Audio Community License v1.0: free for non-commercial use, commercial use only while
-  annual revenue is under USD 500k. Check before ra-jit's site counts as commercial.
+  annual revenue is under USD 500k. Check before blaze's site counts as commercial.
 - The default voice, hifi-92, is from the Hi-Fi Multi-Speaker English TTS Dataset (Bakhturina et al., NVIDIA, 2021,
   https://www.openslr.org/109/), CC BY 4.0, audio from LibriVox. The manifest carries the attribution; credit it on
   the site when narration ships.

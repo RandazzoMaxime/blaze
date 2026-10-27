@@ -28,10 +28,18 @@ const MAGIC: &[u8; 8] = b"RAJITLV1";
 /// The socket in [`dir`] that the daemon wakes the program on once it wrote a patch.
 pub const WAKE: &str = "wake";
 
-/// The directory that holds one for each executable that runs.
+/// The event the daemon sets on Windows once it wrote a patch in `dir`, where it has no socket
+/// to wake the program on: named after the directory, which is named after the executable.
+pub fn wake_event(dir: &Path) -> String {
+    format!("Local\\ra-jit-live-{}", dir.file_name().unwrap_or_default().to_string_lossy())
+}
+
+/// The directory that holds one for each executable that runs: in the daemon's home, which
+/// is in `USERPROFILE` on Windows when nothing says `HOME`.
 pub fn root() -> Option<PathBuf> {
     let set = |name| std::env::var_os(name).filter(|it| !it.is_empty());
-    let home = match (set("RA_JIT_HOME"), set("XDG_RUNTIME_DIR"), set("HOME")) {
+    let home = set("HOME").or_else(|| set("USERPROFILE"));
+    let home = match (set("RA_JIT_HOME"), set("XDG_RUNTIME_DIR"), home) {
         (Some(home), _, _) => PathBuf::from(home),
         (None, Some(runtime), _) => Path::new(&runtime).join("ra-jit"),
         (None, None, Some(home)) => Path::new(&home).join(".cache/ra-jit"),

@@ -17,8 +17,9 @@ Change a function and run `blaze run` again: the `Finished` line now says `[ra-j
 
 ## What you need
 
-- **macOS on Apple silicon, or Linux on x86-64 or ARM64.** On Windows blaze installs and runs,
-  but hands every build to cargo. Intel Macs are not supported.
+- **macOS on Apple silicon, or Linux on x86-64 or ARM64.** On Windows x86-64 (MSVC) blaze
+  installs and builds through its engine, but live edits of a running program are not there
+  yet. Intel Macs are not supported.
 - **On Linux, glibc 2.34 or newer**: RHEL 9, Debian 12, Ubuntu 22.04 and anything newer. Each
   is checked by installing there in a container with no Rust. Alpine and other musl systems are
   not supported; the installer says so.

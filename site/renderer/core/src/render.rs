@@ -318,12 +318,12 @@ const SIGNUP_FORM: &str = r#"<form method="POST" class="signup">
 <input type="hidden" name="ref" value="" />
 <label><span>Email</span><input name="email" type="email" required maxlength="254" autocomplete="email" /></label>
 <label><span>Company <em>Optional</em></span><input name="company" type="text" maxlength="200" autocomplete="organization" /></label>
-<label><span>Why do you want to use ra-jit? <em>Optional</em></span><textarea name="why" rows="3" maxlength="2000"></textarea></label>
+<label><span>Why do you want to use blaze? <em>Optional</em></span><textarea name="why" rows="3" maxlength="2000"></textarea></label>
 <div class="turnstile-slot"></div>
 <p class="error" role="alert" hidden></p>
 <button type="submit">Send</button>
 </form>
-<div class="sent" hidden><p class="lede">Thanks, got it.</p><p class="dim"><a href="{home}">Back to ra-jit</a></p></div>"#;
+<div class="sent" hidden><p class="lede">Thanks, got it.</p><p class="dim"><a href="{home}">Back to blaze</a></p></div>"#;
 
 fn widget(tag: &str, n: Id, ctx: &mut Ctx) -> Result<String, String> {
     match tag {
@@ -572,7 +572,7 @@ fn topbar(page: &Page, items: &[NavItem], served: &Served) -> String {
         })
         .collect();
     format!(
-        "<header class=\"topbar\"><nav><a class=\"home\" href=\"{}\">ra-jit</a><span class=\"links\">{links}</span></nav></header>",
+        "<header class=\"topbar\"><nav><a class=\"home\" href=\"{}\">blaze</a><span class=\"links\">{links}</span></nav></header>",
         esc(&served.href("/"))
     )
 }
@@ -702,7 +702,7 @@ pub fn render(
     let tab = match text(n, "Tab") {
         t if !t.is_empty() => t,
         _ if page.url == "/" => title.clone(),
-        _ => format!("{title} · ra-jit"),
+        _ => format!("{title} · blaze"),
     };
     let description = prose(&text(n, "Description"));
     // Where the page lives, for search engines and link previews: origin + base + path (none without an origin).
@@ -718,7 +718,7 @@ pub fn render(
         format!(
             "<link rel=\"canonical\" href=\"{at}\" />
 <meta property=\"og:type\" content=\"website\" />
-<meta property=\"og:site_name\" content=\"ra-jit\" />
+<meta property=\"og:site_name\" content=\"blaze\" />
 <meta property=\"og:title\" content=\"{}\" />
 <meta property=\"og:url\" content=\"{at}\" />{og_description}",
             esc(&title)

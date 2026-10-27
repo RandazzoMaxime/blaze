@@ -33,6 +33,12 @@ export const rules = [
 		link: "docs/no-rustc.md",
 	},
 	{
+		id: "blaze-builds-blaze",
+		info: "Build and test blaze with blaze, locally and in CI: `cargo blaze build`, `cargo blaze test`, never `cargo build`/`cargo test` with rustc, and never sccache. Blaze's own store (local, and the shared remote CI fills) is the one cache. Where blaze can't yet build or test itself, that is the bug to fix, not a reason to call rustc; rustc stays only in the release build until blaze builds that too.",
+		reason: "\"never use sccache never use rustc\" and \"we should make sure we get blaze to fully build itself! basically blaze sucks until then\" (Andrew, 2026-10-26).",
+		link: "docs/contributing.md",
+	},
+	{
 		id: "no-fallback",
 		info: "No fallback, ever; fail fast with a clear error. When ra-jit can't do something (an unsupported construct, a refused patch, a missing TypeId, a static it can't place), it stops with an error that names what and where, at the point it is first seen. It never quietly takes another path: not cargo or rustc, not rustc's copy of a function or static, not a whole build instead of a patch to hide a refusal, not a slower backend or an older cached result. New code adds no fallback. A change that touches an existing one turns it into an error in the same change, and where that would break a harness, fixes the bug behind it instead.",
 		reason: "\"No fallback EVER, no rustc, prefer quick error so bug can be fixed\" (Andrew, 2026-10-26). A silent fallback hides the bug and turns it into wrong output (#386, #392); an error gets it fixed.",
@@ -79,7 +85,7 @@ export const rules = [
 	},
 	{
 		id: "worktree-per-lane",
-		info: "One worktree per lane, never `git stash`: a uniquely named worktree with its own `CARGO_TARGET_DIR` or a shared sccache. Harnesses run with `RUST_BACKTRACE=0`.",
+		info: "One worktree per lane, never `git stash`: a uniquely named worktree with its own `CARGO_TARGET_DIR`. Harnesses run with `RUST_BACKTRACE=0`.",
 		reason: "The stash is shared by every worktree.",
 	},
 	{

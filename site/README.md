@@ -1,4 +1,4 @@
-# ra-jit site
+# blaze site
 
 https://ix.dev/blaze/ (where it is served and how: [Hosting](#hosting-ixdevblaze)). Every page is a [Flecs](https://github.com/SanderMertens/flecs) script. A Rust renderer
 (`renderer/`, compiled to wasm) turns them into HTML, at build time for the static pages and per request in a

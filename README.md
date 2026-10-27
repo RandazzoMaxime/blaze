@@ -115,6 +115,12 @@ from source the first time.
 
 <p align="center">For release news: Watch → Custom → Releases on GitHub.</p>
 
+## Using blaze at work?
+
+We're working with a few teams on fast Rust CI and remote builds, built on blaze. If your team
+waits on Rust builds, tell us what slows you down: [andrew@ix.dev](mailto:andrew@ix.dev). Teams
+we work with get early access and a direct say in what we build next.
+
 ## Contributing
 
 How to build blaze from a checkout, run its tests and send a change:
