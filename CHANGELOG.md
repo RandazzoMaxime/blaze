@@ -1,8 +1,10 @@
 # Changelog
 
 All notable changes to ra-jit are written here. The format follows
-[Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow
-[Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+[Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versions after 0.1.0 are dated,
+`0.YYYYMMDD.N` with N counting the releases of that day from 0, and the release train writes
+each one's section: what `[Unreleased]` had, and the title of each change merged since
+(docs/harness.md, "CI").
 
 ## [Unreleased]
 

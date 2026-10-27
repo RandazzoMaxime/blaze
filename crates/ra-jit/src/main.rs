@@ -7207,8 +7207,9 @@ fn take_blaze_names() {
     }
 }
 
-/// `blaze 0.1.0 (abc123def456)`: the crate's version, and the commit when the build was
-/// told it in `RA_JIT_GIT_SHA` (the release workflow and the flake set it).
+/// `blaze 0.20261026.0 (fb82b09)`: the crate's version (`0.YYYYMMDD.N`, the release train's,
+/// docs/harness.md "CI"), and the commit, which build.rs takes from `RA_JIT_GIT_SHA` (the
+/// release workflow and the flake set it) or the checkout's HEAD.
 pub(crate) fn version() -> String {
     let version = env!("CARGO_PKG_VERSION");
     match option_env!("RA_JIT_GIT_SHA") {
