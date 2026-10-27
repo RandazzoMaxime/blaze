@@ -28,6 +28,7 @@ export const MAX_HEAD_NAMES = 500;
 const CLOCK_SLACK = 300;
 const COPY_PACK_BYTES = 32 * 1024 * 1024;
 const MAX_READ = 4 * 1024 * 1024;
+const SEGMENT_READS = 4;
 
 export type IndexEnv = cas.CasEnv;
 
@@ -230,33 +231,34 @@ async function headPut(env: IndexEnv, request: Request, tenantName: string, tena
   const now = clock.nowSeconds();
   if (head.created > now + CLOCK_SLACK) return answer(text(422, `created ${head.created} is ahead of the gateway's clock (${now})`));
 
-  const list = await keyList(env, tenant);
-  if (list === null) return answer(text(422, `tenant ${tenantName} has no key list: PUT /t/${tenantName}/trust first`));
+  const hk = await headKey(env, tenant, name);
+  const [list, cur] = await Promise.all([keyList(env, tenant), ifMatch !== null ? env.BUCKET.get(hk) : env.BUCKET.head(hk)]);
+  const refuse = async (r: Response) => {
+    if (cur !== null && "body" in cur) await (cur as R2ObjectBody).body.cancel();
+    return answer(r);
+  };
+  if (list === null) return refuse(text(422, `tenant ${tenantName} has no key list: PUT /t/${tenantName}/trust first`));
   const key = list.keys.find((k) => k.name === head.signer);
   if (key === undefined) {
-    return answer(text(422, `signer ${head.signer} is not in the tenant's key list (turn ${list.turn}): unknown or revoked`));
+    return refuse(text(422, `signer ${head.signer} is not in the tenant's key list (turn ${list.turn}): unknown or revoked`));
   }
-  if (now > key.not_after) return answer(text(422, `key ${key.name} expired at ${key.not_after}`));
-  if (now < key.not_before) return answer(text(422, `key ${key.name} is valid from ${key.not_before}`));
+  if (now > key.not_after) return refuse(text(422, `key ${key.name} expired at ${key.not_after}`));
+  if (now < key.not_before) return refuse(text(422, `key ${key.name} is valid from ${key.not_before}`));
   if (head.created < key.not_before || head.created > key.not_after) {
-    return answer(text(422, `created ${head.created} is outside key ${key.name}'s window ${key.not_before}..${key.not_after}`));
+    return refuse(text(422, `created ${head.created} is outside key ${key.name}'s window ${key.not_before}..${key.not_after}`));
   }
-  if (!(await schema.verify(key.key, schema.HEAD_CONTEXT, envelope))) return answer(text(422, `bad signature: the head does not verify against key ${key.name}`));
+  if (!(await schema.verify(key.key, schema.HEAD_CONTEXT, envelope))) return refuse(text(422, `bad signature: the head does not verify against key ${key.name}`));
 
-  const hk = await headKey(env, tenant, name);
   let onlyIf: Headers;
   if (ifMatch !== null) {
-    const cur = await env.BUCKET.get(hk);
-    const wanted = etagList(ifMatch);
-    if (cur === null || !wanted.includes(cur.etag)) {
-      await cur?.body.cancel();
-      return answer(text(412, "the head is not at the ETag given: read it again, merge, sign and retry"));
+    if (cur === null || !etagList(ifMatch).includes(cur.etag)) {
+      return refuse(text(412, "the head is not at the ETag given: read it again, merge, sign and retry"));
     }
-    const curTurn = schema.parseHead(schema.parseEnvelope(new Uint8Array(await cur.arrayBuffer())).body).turn;
+    const curTurn = schema.parseHead(schema.parseEnvelope(new Uint8Array(await (cur as R2ObjectBody).arrayBuffer())).body).turn;
     if (head.turn <= curTurn) return answer(text(409, `turn ${head.turn} is not above the stored head's turn ${curTurn}`));
     onlyIf = new Headers({ "if-match": cur.httpEtag });
   } else {
-    if ((await env.BUCKET.head(hk)) !== null) return answer(text(412, "the head exists: read it and write with If-Match"));
+    if (cur !== null) return answer(text(412, "the head exists: read it and write with If-Match"));
     onlyIf = new Headers({ "if-none-match": "*" });
   }
 
@@ -304,22 +306,30 @@ async function refresh(env: IndexEnv, tenant: TenantRecord, segments: Uint8Array
   let left = 0;
 
   const named = new Map<string, Uint8Array>();
-  // One segment at a time: at most 4 MiB each in memory.
-  for (const seg of segments) {
-    const key = await segKey(env, tenant, seg);
-    const obj = await env.BUCKET.get(key);
-    if (obj === null) return text(422, `the head names segment ${cas.hex(seg)}, which this tenant does not have`);
-    const raw = new Uint8Array(await obj.arrayBuffer());
-    for (const e of schema.parseSegment(raw)) for (const b of e.blobs) named.set(cas.hex(b.hash), b.hash);
-    if (now - seconds(obj.uploaded) <= SEGMENT_REFRESH_AGE) continue;
-    if (budget === 0) {
-      left++;
-      continue;
+  // A few segments at a time: at most 4 MiB each in memory.
+  for (let i = 0; i < segments.length; i += SEGMENT_READS) {
+    const batch = segments.slice(i, i + SEGMENT_READS);
+    const read = await Promise.all(
+      batch.map(async (seg) => {
+        const key = await segKey(env, tenant, seg);
+        const obj = await env.BUCKET.get(key);
+        return { seg, key, obj, raw: obj === null ? null : new Uint8Array(await obj.arrayBuffer()) };
+      }),
+    );
+    const absent = read.find((r) => r.obj === null);
+    if (absent) return text(422, `the head names segment ${cas.hex(absent.seg)}, which this tenant does not have`);
+    for (const { seg, key, obj, raw } of read) {
+      for (const e of schema.parseSegment(raw!)) for (const b of e.blobs) named.set(cas.hex(b.hash), b.hash);
+      if (now - seconds(obj!.uploaded) <= SEGMENT_REFRESH_AGE) continue;
+      if (budget === 0) {
+        left++;
+        continue;
+      }
+      budget--;
+      await env.BUCKET.put(key, raw!, { sha256: cas.hex(seg) });
+      await movedSince(env, key, obj!);
+      done.segments++;
     }
-    budget--;
-    await env.BUCKET.put(key, raw, { sha256: cas.hex(seg) });
-    await movedSince(env, key, obj);
-    done.segments++;
   }
 
   const hashes = [...named.values()];
