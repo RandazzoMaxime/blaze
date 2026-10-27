@@ -826,6 +826,17 @@ fn set_options(arch: Arch) {
         if arch == Arch::Aarch64 {
             arguments.push(c"-aarch64-enable-global-isel-at-O=-1".as_ptr());
         }
+        // `RA_JIT_LLVM_INLINE_THRESHOLD=N`: LLVM's inliner at threshold N rather than the one
+        // of the level (225 at -O2, 250 at -O3), to measure another.
+        let threshold = std::env::var("RA_JIT_LLVM_INLINE_THRESHOLD").ok().map(|it| {
+            let n: u32 = it
+                .parse()
+                .unwrap_or_else(|_| panic!("RA_JIT_LLVM_INLINE_THRESHOLD={it} is not a number"));
+            std::ffi::CString::new(format!("-inline-threshold={n}")).expect("no NUL")
+        });
+        if let Some(threshold) = &threshold {
+            arguments.push(threshold.as_ptr());
+        }
         // SAFETY: the arguments are C strings that outlive the call, and LLVM is given
         // their number.
         unsafe {
