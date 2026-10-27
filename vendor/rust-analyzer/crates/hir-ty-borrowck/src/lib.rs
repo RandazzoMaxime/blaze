@@ -331,7 +331,8 @@ fn drops_in_const(ctx: &Ctx<'_, '_>, def: Option<DefWithBodyId>, body: &MirBody<
         place.projection.as_slice().is_empty()
             && place.local != return_slot()
             && !moved.contains(&place.local)
-            && ctx.drop_glue(body.locals[place.local].ty.as_ref()) == hir_ty::drop::DropGlue::HasDropGlue
+            && ctx.drop_glue(body.locals[place.local].ty.as_ref())
+                == hir_ty::drop::DropGlue::HasDropGlue
     })
 }
 

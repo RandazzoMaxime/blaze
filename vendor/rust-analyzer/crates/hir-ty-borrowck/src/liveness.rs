@@ -4,24 +4,23 @@
 
 use hir_def::{AdtId, attrs::AttrFlags};
 use rustc_hash::{FxHashMap, FxHashSet};
-use salsa::SalsaValue;
 use rustc_type_ir::{
     ClauseKind, OutlivesPredicate, RegionKind,
     inherent::{
         AdtDef as _, GenericArgs as _, IntoKind, ParamEnv as _, Region as _, SliceLike as _,
     },
 };
+use salsa::SalsaValue;
 use smallvec::SmallVec;
 
 use hir_ty::{
+    db::HirDatabase,
     mir::{
         BasicBlockId, LocalId, MirBody, Operand, OperandKind, PlaceElem, Rvalue, StatementKind,
         TerminatorKind,
     },
-    db::HirDatabase,
     next_solver::{
-        Clause, DbInterner, GenericArgKind, GenericArgs, Region, StoredRegion, StoredTy, Ty,
-        TyKind,
+        Clause, DbInterner, GenericArgKind, GenericArgs, Region, StoredRegion, StoredTy, Ty, TyKind,
     },
 };
 
@@ -467,7 +466,9 @@ impl InitAtExit<'_> {
         let gone: SmallVec<[usize; 8]> = live
             .iter()
             .filter(|&local| {
-                let path = self.moves.local_path(LocalId::from_raw(la_arena::RawIdx::from_u32(local as u32)));
+                let path = self
+                    .moves
+                    .local_path(LocalId::from_raw(la_arena::RawIdx::from_u32(local as u32)));
                 self.moves.find_in_descendants(path, &|it| state.contains(it)).is_none()
             })
             .collect();
@@ -701,7 +702,9 @@ fn take_apart<'db>(
         TyKind::Adt(def, args) => {
             let constraint = drop_constraint(db, def.def_id());
             let instantiate = |ty: &StoredTy| {
-                rustc_type_ir::EarlyBinder::bind(ty.as_ref()).instantiate(interner, args).skip_norm_wip()
+                rustc_type_ir::EarlyBinder::bind(ty.as_ref())
+                    .instantiate(interner, args)
+                    .skip_norm_wip()
             };
             regions.extend(constraint.regions.iter().map(|it| {
                 rustc_type_ir::EarlyBinder::bind(it.as_ref())
