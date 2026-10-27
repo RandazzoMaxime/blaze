@@ -690,6 +690,17 @@ fn sources(
     blaze_registry::Sources::new(&config, Arc::new(context))
 }
 
+/// The sources a registry's web API command finds its registry in: cargo's `SourceConfigMap`
+/// of the configuration (`[source]` replacing others only with `respect_source_config`, as
+/// `ops::registry` reads it both ways), offline as `net.offline` says.
+pub fn registry_sources(
+    ctx: &Context,
+    respect_source_config: bool,
+) -> Result<blaze_registry::Sources> {
+    let offline = ctx.config.net_config()?.offline.unwrap_or(false);
+    sources(ctx, offline, None, respect_source_config)
+}
+
 /// A package of the lock file as `cargo vendor` reads it.
 pub struct Vendored {
     pub id: PackageId,

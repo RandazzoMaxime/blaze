@@ -17,6 +17,11 @@ All notable changes to ra-jit are written here. The format follows
   and biome with their own rustfmt.toml (6068 of 6068 files, `--check` exit codes and diffs
   too), the same with `max_width = 60` (6068 of 6068), and rustfmt's `tests/source` (773 of
   793; the rest are those refusals).
+- `cargo blaze search`, `owner`, `yank`, `login` and `logout` are blaze's own: blaze-registry
+  has a client of a registry's web API (crates-io 0.41's), with cargo's choice of registry, its
+  token and `credentials.toml` as cargo writes it, and its errors (`harness/own_registry.py`,
+  73 of 73 cases against a mock registry, requests and credentials files too). Credential
+  providers other than `cargo:token` are refused.
 - `cargo blaze vendor` is blaze's own for registry packages: each unpacked from its `.crate`
   with its `.cargo-checksum.json`, and the `[source]` configuration printed
   (`harness/own_vendor.py`, 18 of 18 cases, every file by its sha256). A git package is

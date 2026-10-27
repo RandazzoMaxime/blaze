@@ -37,6 +37,16 @@ pub(crate) fn colored() -> bool {
     }
 }
 
+/// Whether what goes to standard output is colored: as [`colored`], with standard output's
+/// terminal for `auto`.
+pub(crate) fn colored_out() -> bool {
+    match COLOR.load(Ordering::Relaxed) {
+        ALWAYS => true,
+        NEVER => false,
+        _ => std::io::stdout().is_terminal() && std::env::var_os("NO_COLOR").is_none(),
+    }
+}
+
 fn painted(color: &str, word: &str) -> String {
     match colored() {
         true => format!("{color}{word}{RESET}"),
@@ -47,11 +57,7 @@ fn painted(color: &str, word: &str) -> String {
 /// `     Running target/debug/app`, unless the build is quiet.
 pub(crate) fn status(quiet: bool, word: &str, rest: &str) {
     if !quiet {
-        eprintln!(
-            "{}{} {rest}",
-            " ".repeat(12usize.saturating_sub(word.len())),
-            painted(GREEN, word)
-        );
+        eprintln!("{} {rest}", painted(GREEN, &format!("{word:>12}")));
     }
 }
 
@@ -81,10 +87,20 @@ pub(crate) fn error(text: &str) {
     eprintln!("{}: {text}", painted(RED, "error"));
 }
 
+/// [`error`] with no newline after it, as cargo ends a few of clap's.
+pub(crate) fn error_unended(text: &str) {
+    eprint!("{}: {text}", painted(RED, "error"));
+}
+
 pub(crate) fn warning(text: &str) {
     eprintln!("{}: {text}", painted(YELLOW, "warning"));
 }
 
 pub(crate) fn note(text: &str) {
     eprintln!("{}: {text}", painted(BOLD, "note"));
+}
+
+/// A note as cargo's shell says one (`Shell::note`), green, which a diagnostic's is not.
+pub(crate) fn shell_note(text: &str) {
+    eprintln!("{}: {text}", painted(GREEN, "note"));
 }

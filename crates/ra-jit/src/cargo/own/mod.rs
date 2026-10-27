@@ -8,6 +8,7 @@ mod clean;
 mod config;
 mod manifest;
 mod new;
+mod registry;
 mod remove;
 mod report;
 mod tree;
@@ -58,7 +59,8 @@ const A_BUILD: Status = Status::Not("a build blaze does not do yet");
 const CHOOSES_VERSIONS: Status =
     Status::Not("it chooses versions, which blaze's resolver does not yet (#321)");
 /// What talks to a registry's web API, which blaze has no client of yet.
-const REGISTRY_API: Status = Status::Not("blaze has no client of a registry's web API yet");
+const PUBLISH: Status = Status::Not("it packages the crate first, a build blaze does not do yet");
+const INFO: Status = Status::Not("blaze's `cargo info` is not written yet");
 
 /// Every subcommand of the pinned nightly's cargo, and `fmt` and `clippy`, which rustup ships
 /// beside it.
@@ -98,13 +100,13 @@ pub(crate) const SUBCOMMANDS: &[Subcommand] = &[
     sub("install", A_BUILD, "build and install a program"),
     sub("uninstall", Status::Own, "remove an installed program"),
     sub("package", A_BUILD, "make the `.crate` of a package"),
-    sub("publish", REGISTRY_API, "upload a package to a registry"),
-    sub("search", REGISTRY_API, "search a registry"),
-    sub("info", REGISTRY_API, "what a registry says of a package"),
-    sub("owner", REGISTRY_API, "the owners of a package on a registry"),
-    sub("yank", REGISTRY_API, "yank a version from a registry"),
-    sub("login", REGISTRY_API, "keep a registry's token"),
-    sub("logout", REGISTRY_API, "forget a registry's token"),
+    sub("publish", PUBLISH, "upload a package to a registry"),
+    sub("search", Status::Own, "search a registry"),
+    sub("info", INFO, "what a registry says of a package"),
+    sub("owner", Status::Own, "the owners of a package on a registry"),
+    sub("yank", Status::Own, "yank a version from a registry"),
+    sub("login", Status::Own, "keep a registry's token"),
+    sub("logout", Status::Own, "forget a registry's token"),
     sub("report", Status::Own, "reports cargo keeps of builds"),
     sub("config", Status::Own, "the configuration cargo reads"),
     sub("read-manifest", Status::Own, "the manifest as JSON (deprecated)"),
@@ -142,6 +144,11 @@ pub(crate) fn command(args: Vec<String>) -> anyhow::Result<i32> {
         "report" => report::command(Args::new(rest)),
         "config" => config::command(rest),
         "remove" => remove::command(rest),
+        "search" => registry::search(rest),
+        "owner" => registry::owner(rest),
+        "yank" => registry::yank(rest),
+        "login" => registry::login(rest),
+        "logout" => registry::logout(rest),
         "vendor" => vendor::command(Args::new(rest)),
         "fetch" => manifest::fetch(Args::new(rest)),
         "clean" => clean::command(Args::new(rest)),
