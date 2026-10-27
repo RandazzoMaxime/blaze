@@ -172,6 +172,9 @@ struct Args {
     /// Whether the flags rustc is given cap the lints, so that a lint the source denies may
     /// not fail its build.
     lints_capped: bool,
+    /// What the flags rustc is given pass to the linker (`-C link-arg`, `-C link-args`):
+    /// the daemon's own link line has them, as rustc's has.
+    link_args: Vec<String>,
     /// The root of the workspace `project` is in. Another checkout has crates of the same
     /// names, and the ones to build are the ones below this.
     checkout: PathBuf,
@@ -358,6 +361,7 @@ impl Args {
             also,
             debug: plan::Described::NOTHING,
             lints_capped: false,
+            link_args: Vec::new(),
             checkout: PathBuf::new(),
             base: None,
             members: Arc::default(),
@@ -2620,7 +2624,9 @@ impl Checkouts {
             None => self.debug[at].debug.level,
         };
         let debug = plan::Described { level, ..self.debug[at].debug };
-        Ok(Parts { root, base, members, debug, lints_capped: self.debug[at].lints_capped })
+        let (lints_capped, link_args) =
+            (self.debug[at].lints_capped, self.debug[at].link_args.clone());
+        Ok(Parts { root, base, members, debug, lints_capped, link_args })
     }
 
     /// Whether the program of the checkout `project` is of is one rustc links from bitcode.
@@ -2829,7 +2835,7 @@ impl Checkouts {
                 eprintln!("split {}: its own are {own:?}", over.display());
                 workspaces.push(self.split(base, &over, &own));
                 splits.push(Some(Split { base: self.roots[base].1.clone(), own }));
-                debug.push(self.debug[base]);
+                debug.push(self.debug[base].clone());
                 roots.push((dunce::canonicalize(project)?, over));
                 continue;
             }
@@ -2952,7 +2958,7 @@ impl Checkouts {
             let own = self.differing(base, &over);
             self.loaded.replace(at, self.split(base, &over, &own));
             self.splits[at] = Some(Split { base: self.roots[base].1.clone(), own });
-            self.debug[at] = self.debug[base];
+            self.debug[at] = self.debug[base].clone();
         }
         self.loaded.add(Vec::new(), &self.cargo_config.extra_env, &self.load_config, vfs, db)?;
         failed
@@ -3035,6 +3041,7 @@ struct Parts {
     /// What the build has a debugger told.
     debug: plan::Described,
     lints_capped: bool,
+    link_args: Vec<String>,
 }
 
 /// Whether the files of a package under `dir`, a directory of the checkout at `base`, are
@@ -3184,8 +3191,12 @@ fn workspace_at(
              `rustup component add rust-src` installs it"
         );
     }
-    let mut debug =
-        plan::Whole { debug: plan::Described::NOTHING, lto: false, lints_capped: false };
+    let mut debug = plan::Whole {
+        debug: plan::Described::NOTHING,
+        lto: false,
+        lints_capped: false,
+        link_args: Vec::new(),
+    };
     let mut scripts = None;
     if let ProjectWorkspaceKind::Cargo { cargo, .. } = &mut workspace.kind {
         if !selection.dev_deps {
@@ -4589,8 +4600,9 @@ fn link_executable(
         Ok(exports)
     });
     let exports = exports.transpose()?;
-    let took = link::executable(db, &program, &objects, sysroot, exe, exports.as_deref())
-        .map_err(|it| refused_linked(it, args))?;
+    let took =
+        link::executable(db, &program, &objects, sysroot, exe, exports.as_deref(), &args.link_args)
+            .map_err(|it| refused_linked(it, args))?;
     let stand_ins = link::stand_ins(exe)?;
     eprintln!(
         "linked {} in {took:.1?}, {} functions in it ra-jit could not compile",
@@ -4623,7 +4635,7 @@ fn own_link_line(db: &RootDatabase, args: &Args) -> anyhow::Result<Option<(Strin
     let objects: Vec<&Path> =
         std::iter::once(args.out.as_path()).chain(args.prebuilt.as_deref()).collect();
     let sysroot = SYSROOT.get().and_then(Option::as_deref);
-    let cmd = link::command(db, &program, &objects, sysroot, exe)?;
+    let cmd = link::command(db, &program, &objects, sysroot, exe, &args.link_args)?;
     Ok(Some((cmd, exe.clone())))
 }
 
@@ -6454,6 +6466,7 @@ fn build_batch(db: &RootDatabase, args: Args) -> anyhow::Result<()> {
             also: Vec::new(),
             debug: args.debug,
             lints_capped: args.lints_capped,
+            link_args: args.link_args.clone(),
             checkout: args.checkout.clone(),
             base: args.base.clone(),
             members: args.members.clone(),
@@ -6558,7 +6571,7 @@ impl Target {
         let Target { project, krate, batch, out, patch, link_cmd, splice, exe, symbol_files } =
             self;
         let project = project.unwrap_or_else(|| daemon.project.clone());
-        let Parts { root: checkout, base, members, debug, lints_capped } =
+        let Parts { root: checkout, base, members, debug, lints_capped, link_args } =
             checkouts.parts(&project)?;
         let symbol_files =
             if symbol_files.is_empty() { daemon.symbol_files.clone() } else { symbol_files };
@@ -6573,6 +6586,7 @@ impl Target {
             members,
             debug,
             lints_capped,
+            link_args,
             krate,
             batch,
             widened: Vec::new(),
@@ -8208,7 +8222,8 @@ fn follow_cargo(
             }
             seen.1
         };
-        let Parts { root, base, members, debug, lints_capped } = checkouts.parts(&args.project)?;
+        let Parts { root, base, members, debug, lints_capped, link_args } =
+            checkouts.parts(&args.project)?;
         let mut names = args.crates().filter(|it| ready.contains(&root.join(it.as_str()))).cloned();
         if let Some(krate) = names.next() {
             let of_ready = Args {
@@ -8220,6 +8235,7 @@ fn follow_cargo(
                 members,
                 debug,
                 lints_capped,
+                link_args,
                 ..args.clone()
             };
             resolve_crates(db, &of_ready, beside_cargo())?;
@@ -8406,9 +8422,10 @@ fn run_holding(
         .flatten();
     let built = follow_cargo(&mut db, &mut vfs, &mut checkouts, &args, &listed)?;
     let beside = built.is_some();
-    let Parts { root, base, members, debug, lints_capped } = checkouts.parts(&args.project)?;
+    let Parts { root, base, members, debug, lints_capped, link_args } =
+        checkouts.parts(&args.project)?;
     (args.checkout, args.base, args.members, args.debug) = (root, base, members, debug);
-    args.lints_capped = lints_capped;
+    (args.lints_capped, args.link_args) = (lints_capped, link_args);
     // The names are resolved before cargo says which program it built: those of the crates
     // it built are, and not of every crate of the workspace.
     if let Some(built) = built {
@@ -8476,8 +8493,10 @@ fn run_holding(
     // What the other checkouts don't share with this one, before a request waits for it.
     for also in &args.also {
         let start = Instant::now();
-        let Parts { root: checkout, base, members, debug, lints_capped } = checkouts.parts(also)?;
-        let of_it = Args { checkout, base, members, debug, lints_capped, ..args.clone() };
+        let Parts { root: checkout, base, members, debug, lints_capped, link_args } =
+            checkouts.parts(also)?;
+        let of_it =
+            Args { checkout, base, members, debug, lints_capped, link_args, ..args.clone() };
         let resolved = resolve_crates(&db, &of_it, cores())?;
         eprintln!("resolve {}: {resolved} crates in {:.1?}", also.display(), start.elapsed());
     }
@@ -8514,6 +8533,7 @@ fn run_holding(
             members: args.members,
             debug: args.debug,
             lints_capped: args.lints_capped,
+            link_args: args.link_args,
             selection: args.selection,
             ..whole
         };
@@ -10103,10 +10123,10 @@ impl Program {
         new: &[ide_db::base_db::Crate],
         files: &[WatchedFile],
     ) -> anyhow::Result<()> {
-        let Parts { root, base, members, debug, lints_capped } = parts;
+        let Parts { root, base, members, debug, lints_capped, link_args } = parts;
         (self.args.checkout, self.args.base) = (root, base);
         (self.args.members, self.args.debug) = (members, debug);
-        self.args.lints_capped = lints_capped;
+        (self.args.lints_capped, self.args.link_args) = (lints_capped, link_args);
         (self.whole, self.moved) = (None, true);
         self.unbuilt.stale = true;
         match linked {
