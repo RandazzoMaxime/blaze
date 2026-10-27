@@ -182,6 +182,27 @@ pub fn metadata(asked: &Asked<'_>) -> Result<String> {
     Ok(made(asked)?.json)
 }
 
+/// The JSON `cargo metadata --format-version 1 --no-deps` prints for `asked`: the members
+/// alone, nothing resolved or fetched.
+pub fn metadata_no_deps(asked: &Asked<'_>) -> Result<String> {
+    let mut config = Config::load(asked.cwd, asked.env.clone(), &[])?;
+    config.start("metadata", asked.config)?;
+    let ctx = Context::new(config);
+    let ws = Workspace::new(&root_manifest(asked.manifest_path, &ctx)?, &ctx)?;
+    Ok(serde_json::to_string(&blaze_manifest::metadata::export_no_deps(&ws))?)
+}
+
+/// [`metadata`] of a workspace whose lock file is never written, as `cargo metadata
+/// --locked` reads one: a lock file the manifests no longer agree with is cargo's
+/// `--locked` error. The standard library's workspace in a toolchain is read so.
+pub fn metadata_locked(asked: &Asked<'_>) -> Result<String> {
+    let relock = Relock { command: "metadata", locked: Some("--locked"), respect_source_config: true };
+    let made = resolving_with(asked, None, Some(relock), |resolved, serialized, ids, _| {
+        described(asked, &resolved, serialized, ids)
+    })?;
+    Ok(made.json)
+}
+
 /// The metadata of `asked`'s build, and the programs it links of `targets`, as cargo's unit
 /// graph has them: of each member the build selects, the binaries whose `required-features`
 /// it is built with, or the one target named; of `cargo test`'s, the targets it tests and

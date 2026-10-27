@@ -154,7 +154,11 @@ project's own pin does not change which Rust blaze builds with
 ([#269](https://github.com/indexable-inc/blaze/issues/269)). blaze's manifest reader, registry
 and resolver (`crates/blaze-manifest`, `blaze-registry`, `blaze-resolve`) replace `cargo
 metadata`, `cargo build --unit-graph` and cargo's fetching, held equal to cargo's by
-`harness/resolve.py`; with them K needs no cargo to plan a build.
+`harness/resolve.py`; with them K needs no cargo to plan a build. Since 2026-10-27 the standard library's
+workspace is read by them too (`OwnMetadata.library`, `harness/resolve.py sysroot`): the cargo
+processes of a cold `cargo blaze build` and `test` from a clean `target/` (strace, Linux arm64,
+the typed `cargo blaze` included) went from 14 to 8 and 12 to 8 on `harness/norustc/fixture`, 26
+to 8 and 43 to 15 on ripgrep, none of them for the sysroot.
 
 ## While the paths remain
 
@@ -249,7 +253,7 @@ Paths are under `crates/`; line numbers are of 41e7906192.
 
 | Where | What it does | When |
 |---|---|---|
-| `ra-jit/src/main.rs:2261` `ProjectWorkspace::load` | `cargo metadata`, plus rustc's `-vV`, `--print sysroot`, `--print cfg`, `--print target-spec-json` through `cargo rustc --print` (`vendor/rust-analyzer/crates/project-model/src/toolchain_info/`) | every load: the daemon's workers and spares, and each doctest process; since B, ra-jit answers them (`answers/own.rs`) |
+| `ra-jit/src/main.rs:2261` `ProjectWorkspace::load` | `cargo metadata`, plus rustc's `-vV`, `--print sysroot`, `--print cfg`, `--print target-spec-json` through `cargo rustc --print` (`vendor/rust-analyzer/crates/project-model/src/toolchain_info/`) | every load: the daemon's workers and spares, and each doctest process; since B, ra-jit answers them (`answers/own.rs`); the `cargo metadata` of the sysroot's `library/` (rust-analyzer's `Sysroot::load_workspace`, two per load and per unit load of a build script or proc macro) is blaze-metadata's since 2026-10-27 (`cargo/metadata.rs` `library`) |
 | `ra-jit/src/main.rs:2272` | asks rustc for the target triple | every load |
 | `ra-jit/src/plan.rs:475` | `cargo build --unit-graph`, which asks rustc about the target | every load, and every doctest run per library |
 | `ra-jit/src/main.rs:2314`, `ra-jit/src/inputs.rs:282` `run_build_scripts` | rust-analyzer's `cargo check --compile-time-deps`: into ra-jit's own target directory (every load of `cargo ra-jit` and the daemon) nothing is rustc's since 2026-10-27 (J, below): ra-jit links the scripts and proc macros and only describes their libraries; into cargo's (a load without `--own-target`) rustc compiles them all; the scripts run | a load that is neither beside nor after a cargo build of the workspace (a worker after one reads what cargo said, `cargo/state.rs` `kept_said`), whose target directory does not have them yet; after an edit to a proc macro or build script |
