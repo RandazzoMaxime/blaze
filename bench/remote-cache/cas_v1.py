@@ -119,9 +119,13 @@ def req(method, path, body=None, auth=True, extra=()):
         args += ["--data-binary", f"@{f}", "-H", "content-type: application/octet-stream"]
     out = os.path.join(tmp, f"out-{time.monotonic_ns()}")
     args[args.index(os.path.join(tmp, "out"))] = out
-    w = json.loads(subprocess.run(args + [gw + path], capture_output=True, check=True).stdout)
+    hdr = out + ".h"
+    w = json.loads(subprocess.run(args + ["-D", hdr, gw + path], capture_output=True, check=True).stdout)
     data = open(out, "rb").read()
+    st = [l.split(":", 1)[1] for l in open(hdr).read().splitlines() if l.lower().startswith("server-timing:")]
+    w["d1_ms"] = float(st[0].split("dur=")[1]) if st else float("nan")
     os.remove(out)
+    os.remove(hdr)
     if f:
         os.remove(f)
     return w["http_code"], data, w
@@ -185,9 +189,10 @@ for _ in range(3):
     s, b, w = req("POST", "/get", cbor_hashes(hashes_4k[:20_000]))
     got, missing = parse_get(b)
     assert not missing and len(got) == min(20_000, len(hashes_4k))
-    times.append((len(b) / MIB / w["time_total"], w["time_starttransfer"], len(b)))
+    times.append((len(b) / MIB / w["time_total"], w["time_starttransfer"], len(b), w["d1_ms"]))
 row("get_1stream", statistics.median(t[0] for t in times), "MiB/s", 3,
-    f"{times[0][2] / MIB:.1f} MiB answer, first byte {statistics.median(t[1] for t in times):.2f} s; runs {', '.join(f'{t[0]:.1f}' for t in times)}")
+    f"{times[0][2] / MIB:.1f} MiB answer of {min(20_000, len(hashes_4k))} blobs, first byte {statistics.median(t[1] for t in times):.2f} s "
+    f"(D1 {statistics.median(t[3] for t in times):.0f} ms); runs {', '.join(f'{t[0]:.1f}' for t in times)}")
 
 batches = [hashes_4k[i::16] for i in range(16)]
 walls = []
@@ -200,12 +205,13 @@ row("get_16parallel", statistics.median(w[0] for w in walls), "MiB/s", 3,
     f"16 /get of {walls[0][1] / 16 / MIB:.1f} MiB; runs {', '.join(f'{w[0]:.1f}' for w in walls)}")
 
 for n in (1, 1000, 20_000):
-    lat = []
+    lat, d1 = [], []
     for _ in range(10 if n > 1 else 30):
         s, b, w = req("POST", "/has", cbor_hashes(hashes_small[:n]))
         assert s == 200 and cbor_decode(b)[0]["state"] == [2] * n
         lat.append((w["time_starttransfer"] - w["time_appconnect"]) * 1000)
-    row(f"has_{n}_p50", statistics.median(lat), "ms", len(lat), "first byte after TLS, new connection")
+        d1.append(w["d1_ms"])
+    row(f"has_{n}_p50", statistics.median(lat), "ms", len(lat), f"first byte after TLS, new connection; D1 {statistics.median(d1):.0f} ms of it")
 
 with open(out_path, "w") as f:
     f.write(f"# blaze-gateway blob store from {os.uname().nodename} ({os.uname().machine}), private tenant (HMAC path), "

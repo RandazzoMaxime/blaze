@@ -32,7 +32,7 @@ export const MAX_HASHES = 20_000;
 /** Rows per D1 statement: a JSON array bound as one parameter stays well under D1's 2 MB per value. */
 const ROWS_PER_STATEMENT = 5_000;
 /** Adjacent frames of one object are read together, up to this much per R2 read. */
-const MAX_READ = 8 * 1024 * 1024;
+const MAX_READ = 4 * 1024 * 1024;
 /** R2 reads in flight per /get; a Worker keeps at most 6 subrequests waiting for headers. */
 const READ_AHEAD = 4;
 
@@ -98,8 +98,12 @@ interface Location {
   codec: number;
 }
 
-/** For each hash, its location in the first namespace of `read` that has it, or null. */
-async function locate(env: CasEnv, read: Namespace[], hashes: Uint8Array[]): Promise<(Location | null)[]> {
+/**
+ * For each hash, its location in the first namespace of `read` that has it, or null. `d1Ms` is
+ * the time spent waiting on D1 (a Worker's clock moves only across IO, so CPU time is not
+ * measurable here).
+ */
+async function locate(env: CasEnv, read: Namespace[], hashes: Uint8Array[]): Promise<{ locations: (Location | null)[]; d1Ms: number }> {
   const keys = await Promise.all(read.map((ns) => Promise.all(hashes.map(async (h) => hex(await keyIn(ns, h))))));
   const statements = read.flatMap((ns, n) =>
     chunks(keys[n], ROWS_PER_STATEMENT).map((part) =>
@@ -108,7 +112,9 @@ async function locate(env: CasEnv, read: Namespace[], hashes: Uint8Array[]): Pro
       ).bind(ns.ns, JSON.stringify(part)),
     ),
   );
+  const t0 = Date.now();
   const results = statements.length ? await env.DB.batch<Omit<Location, "ns"> & { key: string }>(statements) : [];
+  const d1Ms = Date.now() - t0;
   const byNs = read.map(() => new Map<string, Omit<Location, "ns">>());
   let r = 0;
   for (const [n] of read.entries()) {
@@ -116,13 +122,18 @@ async function locate(env: CasEnv, read: Namespace[], hashes: Uint8Array[]): Pro
       for (const row of results[r++].results) byNs[n].set(row.key, row);
     }
   }
-  return hashes.map((_, i) => {
+  const locations = hashes.map((_, i) => {
     for (const [n, ns] of read.entries()) {
       const row = byNs[n].get(keys[n][i]);
       if (row) return { ns: ns.ns, object: row.object, offset: row.offset, length: row.length, ulength: row.ulength, codec: row.codec };
     }
     return null;
   });
+  return { locations, d1Ms };
+}
+
+function timing(d1Ms: number): Record<string, string> {
+  return { "server-timing": `d1;dur=${d1Ms}` };
 }
 
 // ---- /has and /get
@@ -148,15 +159,15 @@ export async function has(env: CasEnv, request: Request, acc: Access): Promise<A
   const hashes = await hashList(request);
   if (hashes instanceof Response) return done(hashes);
   const own = acc.read[0].ns === "pub" ? null : acc.read[0].ns;
-  const locations = await locate(env, acc.read, hashes);
+  const { locations, d1Ms } = await locate(env, acc.read, hashes);
   const state = locations.map((l) => (l === null ? 0 : l.ns === own ? 2 : 1));
-  return { response: cbor({ state }), bytesIn: hashes.length * 32, bytesOut: state.length };
+  return { response: cbor({ state }, timing(d1Ms)), bytesIn: hashes.length * 32, bytesOut: state.length };
 }
 
 export async function get(env: CasEnv, request: Request, acc: Access): Promise<Answer> {
   const hashes = await hashList(request);
   if (hashes instanceof Response) return done(hashes);
-  const locations = await locate(env, acc.read, hashes);
+  const { locations, d1Ms } = await locate(env, acc.read, hashes);
 
   const found = locations
     .map((loc, i) => ({ loc, hash: hashes[i] }))
@@ -193,13 +204,22 @@ export async function get(env: CasEnv, request: Request, acc: Access): Promise<A
       for (let i = 0; i < reads.length; i++) {
         const bytes = await inflight[i];
         if (i + READ_AHEAD < reads.length) inflight.push(fetchRead(reads[i + READ_AHEAD]));
-        for (const { loc, hash } of reads[i].items) {
-          await writer.write(blobRecordHeader(hash, loc.codec, null, loc.ulength, loc.length));
-          await writer.write(bytes.subarray(loc.offset - reads[i].start, loc.offset - reads[i].start + loc.length));
+        // One write per R2 read: thousands of small writes cost more than the bytes.
+        const records = reads[i].items.map(({ loc, hash }) => blobRecordHeader(hash, loc.codec, null, loc.ulength, loc.length));
+        const out = new Uint8Array(records.reduce((n, r) => n + r.length, 0) + (reads[i].end - reads[i].start));
+        let pos = 0;
+        for (const [j, { loc }] of reads[i].items.entries()) {
+          out.set(records[j], pos);
+          pos += records[j].length;
+          out.set(bytes.subarray(loc.offset - reads[i].start, loc.offset - reads[i].start + loc.length), pos);
+          pos += loc.length;
         }
+        await writer.write(out.subarray(0, pos));
       }
-      for (const h of missing) await writer.write(missingRecord(h));
-      await writer.write(new Uint8Array([TAG_END]));
+      const tail = new Uint8Array(missing.length * 33 + 1);
+      missing.forEach((h, i) => tail.set(missingRecord(h), i * 33));
+      tail[tail.length - 1] = TAG_END;
+      await writer.write(tail);
       await writer.close();
     } catch (e) {
       // The stream ends without its end record, which the client reports as a cut-short answer.
@@ -208,7 +228,7 @@ export async function get(env: CasEnv, request: Request, acc: Access): Promise<A
   })();
   const bytesOut = found.reduce((n, f) => n + f.loc.length + 42, 0);
   return {
-    response: new Response(readable, { status: 200, headers: { "content-type": "application/vnd.blaze.pack-stream" } }),
+    response: new Response(readable, { status: 200, headers: { "content-type": "application/vnd.blaze.pack-stream", ...timing(d1Ms) } }),
     bytesIn: hashes.length * 32,
     bytesOut,
     pump,
@@ -222,7 +242,9 @@ function nsRank(acc: Access, ns: string): number {
 // ---- /blob/<sha256>
 
 export async function blob(env: CasEnv, request: Request, acc: Access, hashHex: string, headOnly: boolean, notFound: () => Response): Promise<Answer> {
-  const [loc] = await locate(env, acc.read, [unhex(hashHex)]);
+  const {
+    locations: [loc],
+  } = await locate(env, acc.read, [unhex(hashHex)]);
   if (loc === null) return done(notFound());
   const headers = new Headers({
     "content-type": "application/octet-stream",
@@ -335,8 +357,8 @@ function text(status: number, reason: string): Response {
   return new Response(`${reason}\n`, { status, headers: { "content-type": "text/plain; charset=utf-8" } });
 }
 
-function cbor(value: Cbor): Response {
-  return new Response(encode(value), { status: 200, headers: { "content-type": "application/cbor" } });
+function cbor(value: Cbor, extra: Record<string, string> = {}): Response {
+  return new Response(encode(value), { status: 200, headers: { "content-type": "application/cbor", ...extra } });
 }
 
 function chunks<T>(xs: T[], n: number): T[][] {
