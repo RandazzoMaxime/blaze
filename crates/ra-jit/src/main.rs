@@ -530,11 +530,11 @@ struct Prebuilt {
 }
 
 /// The crates of the standard library a program links, which ra-jit builds apart from it
-/// ([`std_unit`]): what the program's crates take of the library, and everything that
-/// depends on, whoever's it is (rust-analyzer gives the library a crate of the workspace's
-/// where both use one), but `test`, `proc_macro` and the panic runtime the program does not
-/// link ([`unlinked_panic_runtime`]). rust-analyzer's graph has every crate depend on the
-/// first two, which a program links only as a test or a macro.
+/// ([`std_unit`]): what the program's crates take of the library ([`library_linked_by`]), and
+/// everything that depends on, whoever's it is (rust-analyzer gives the library a crate of the
+/// workspace's where both use one), but `test`, `proc_macro` and the panic runtime the program
+/// does not link ([`unlinked_panic_runtime`]). rust-analyzer's graph has every crate depend on
+/// the first two, which a program links only as a test or a macro.
 fn library_unit(db: &RootDatabase, program: &[Crate]) -> FxHashSet<ide_db::base_db::Crate> {
     use ide_db::base_db::LangCrateOrigin::{ProcMacro, Test};
     let unlinked = unlinked_panic_runtime(db, program);
@@ -545,18 +545,62 @@ fn library_unit(db: &RootDatabase, program: &[Crate]) -> FxHashSet<ide_db::base_
             .is_some_and(|name| name.crate_name().as_str() == unlinked),
     };
     let deps = |it: ide_db::base_db::Crate| it.data(db).dependencies.iter().map(|dep| dep.crate_id);
+    // The program's crates: a proc macro it depends on runs in the compiler, not in it.
+    let mut own: FxHashSet<ide_db::base_db::Crate> = program.iter().map(|&it| it.into()).collect();
+    let mut next: Vec<ide_db::base_db::Crate> = own.iter().flat_map(|&it| deps(it)).collect();
+    while let Some(krate) = next.pop() {
+        let data = krate.data(db);
+        if !data.origin.is_lang() && !data.target_kind.is_proc_macro() && own.insert(krate) {
+            next.extend(deps(krate));
+        }
+    }
     let mut unit = FxHashSet::default();
-    let mut next: Vec<ide_db::base_db::Crate> = program
-        .iter()
-        .flat_map(|&it| deps(it.into()))
-        .filter(|it| it.data(db).origin.is_lang())
-        .collect();
+    let mut next: Vec<ide_db::base_db::Crate> =
+        own.iter().flat_map(|&it| library_linked_by(db, it)).collect();
     while let Some(krate) = next.pop() {
         if !left_out(krate) && unit.insert(krate) {
             next.extend(deps(krate));
         }
     }
     unit
+}
+
+/// The standard library's crates `krate` links, as rustc puts them in: `std`, or `core` and
+/// `compiler_builtins` under `#![no_std]`, none under `#![no_core]`, and those it names with
+/// `extern crate`. A `#![no_std]` crate with a `#[panic_handler]` of its own does not get
+/// std's. One of the library's own that a program links, as `proc_macro`, links what it
+/// depends on.
+fn library_linked_by(
+    db: &RootDatabase,
+    krate: ide_db::base_db::Crate,
+) -> Vec<ide_db::base_db::Crate> {
+    if krate.data(db).origin.is_lang() {
+        return (krate.data(db).dependencies.iter())
+            .map(|dep| dep.crate_id)
+            .filter(|it| it.data(db).origin.is_lang())
+            .collect();
+    }
+    let def_map = hir_def::nameres::crate_def_map(db, krate);
+    let injected: &[&str] = if def_map.is_no_core() {
+        &[]
+    } else if def_map.is_no_std() {
+        &["core", "compiler_builtins"]
+    } else {
+        &["std"]
+    };
+    let name = |it: ide_db::base_db::Crate| Crate::from(it).display_name(db);
+    let mut linked: Vec<ide_db::base_db::Crate> = (krate.transitive_deps(db).into_iter())
+        .filter(|&it| it.data(db).origin.is_lang())
+        .filter(|&it| name(it).is_some_and(|it| injected.contains(&it.crate_name().as_str())))
+        .collect();
+    linked.extend(
+        (Crate::from(krate).modules(db).into_iter())
+            .flat_map(|module| module.extern_crate_decls(db))
+            .filter_map(|it| it.resolved_crate(db))
+            .map(ide_db::base_db::Crate::from)
+            .filter(|it| it.data(db).origin.is_lang()),
+    );
+    linked
 }
 
 /// What a program of tests compiles of the standard library's crates beside its own:
