@@ -262,6 +262,18 @@ pub(crate) fn env_in(
         set("PKG_CONFIG_PATH", pc.join(":"));
         set("PKG_CONFIG_PATH_FOR_TARGET", pc.join(":"));
     }
+    // What C compiles names of where it ran (debug info, `__FILE__`) names the package and the
+    // target directory as the same on every machine, so that what it leaves in `OUT_DIR` is.
+    // The last that matches is taken: the target directory, which may be in the package.
+    let var = |name: &str| env.iter().find(|it| it.0 == name).map(|it| it.1.clone());
+    if let Some(package) = var("CARGO_MANIFEST_DIR") {
+        cflags.push(format!("-ffile-prefix-map={package}=/package"));
+    }
+    if let Some(out) = var("OUT_DIR")
+        && let Some(at) = out.rfind("/build/")
+    {
+        cflags.push(format!("-ffile-prefix-map={}=/target", &out[..at]));
+    }
     if !cflags.is_empty() {
         set("NIX_CFLAGS_COMPILE", cflags.join(" "));
     }
@@ -309,6 +321,13 @@ pub(crate) fn view(
     for (path, dir) in &closure.paths {
         binds.push(Bind::read(&path.path, dir));
     }
+    // `/bin/sh` is the closure's bash, as a Nix build has it: what `configure`, `make` and
+    // `system()` run. Nothing else of `/bin` or `/usr` is there.
+    let bash = closure.roots.iter().find(|it| it.0 == "bash");
+    let bash = bash.and_then(|(_, path)| closure.paths.iter().find(|it| it.0.path == *path));
+    if let Some((_, dir)) = bash {
+        binds.push(Bind::read("/bin/sh", dir.join("bin/bash")));
+    }
     Ok((View { binds }, hidden))
 }
 
@@ -350,10 +369,12 @@ pub(crate) fn dep_out_dirs(env: &[(String, String)]) -> Vec<PathBuf> {
         }
         for part in value.split(':') {
             let path = Path::new(part);
+            // `build/<package>-<hash>/out`, or `build/<package>/<hash>/out` (cargo's
+            // build-dir layout 2).
             let out = path.ancestors().find(|it| {
+                let above = |n: usize| it.ancestors().nth(n).and_then(Path::file_name);
                 it.file_name().is_some_and(|it| it == "out")
-                    && it.parent().and_then(Path::parent).and_then(Path::file_name)
-                        == Some("build".as_ref())
+                    && (above(2) == Some("build".as_ref()) || above(3) == Some("build".as_ref()))
             });
             if path.is_absolute()
                 && let Some(out) = out
@@ -653,7 +674,10 @@ mod tests {
         assert_eq!(var("AR"), Some("/nix/store/d-binutils/bin/ar"));
         assert_eq!(var("PKG_CONFIG"), Some("/nix/store/b-pkg-config/bin/pkg-config"));
         assert_eq!(var("PKG_CONFIG_PATH"), Some("/nix/store/c-openssl-dev/lib/pkgconfig"));
-        assert_eq!(var("NIX_CFLAGS_COMPILE"), Some("-isystem /nix/store/c-openssl-dev/include"));
+        assert_eq!(
+            var("NIX_CFLAGS_COMPILE"),
+            Some("-isystem /nix/store/c-openssl-dev/include -ffile-prefix-map=/t/debug=/target")
+        );
         assert_eq!(var("HOME"), Some("/homeless-shelter"));
         assert_eq!(
             var("PATH"),
@@ -703,6 +727,10 @@ mod tests {
             ("CARGO_PKG_NAME".to_owned(), "x".to_owned()),
         ];
         assert_eq!(dep_out_dirs(&env), [out]);
+        let layout2 = root.join("target/debug/build/libz-sys/0123/out");
+        std::fs::create_dir_all(layout2.join("include")).unwrap();
+        let env = [("DEP_Z_INCLUDE".to_owned(), layout2.join("include").display().to_string())];
+        assert_eq!(dep_out_dirs(&env), [layout2]);
         _ = std::fs::remove_dir_all(&root);
     }
 

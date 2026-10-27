@@ -157,9 +157,17 @@ pub(crate) fn run_as_cargo_does(
     let store = ra_jit_store::Store::global_or(super::daemon::store().as_deref());
     if let Some(in_view) = &in_view {
         let key = view_key(&real, &cwd, &args, plan.env(), &places, in_view)?;
+        // What a run left that names where it ran in a file that is no text is kept for this
+        // place alone.
+        let mut here = keyed::Key::new(IN_VIEW);
+        here.field(&key);
+        for (place, _) in &places.0 {
+            here.field(place);
+        }
+        let here = here.done();
         let checking = keyed::check();
-        let found = store.and_then(|it| it.get(&key)).and_then(|it| Kept::read(&it));
-        let found = found.map(|it| it.placed(&places));
+        let get = |key: &[u8; 32]| store.and_then(|it| it.get(key)).and_then(|it| Kept::read(&it));
+        let found = get(&key).map(|it| it.placed(&places)).or_else(|| get(&here));
         if let Some(kept) = &found
             && !checking
         {
@@ -186,9 +194,12 @@ pub(crate) fn run_as_cargo_does(
         if checking && let (Some(kept), Some(made)) = (&found, &made) {
             same_as_kept(package, kept, made, &out_dir);
         }
-        if let (Some(store), Some(made)) = (store, made.and_then(|it| it.unplaced(&places))) {
+        if let (Some(store), Some(made)) = (store, made) {
             store.settled();
-            store.insert(&key, &made.bytes());
+            match made.unplaced(&places) {
+                Some(unplaced) => store.insert(&key, &unplaced.bytes()),
+                None => store.insert(&here, &made.bytes()),
+            }
             store.flush();
         }
         std::process::exit(output.status.code().unwrap_or(1))
