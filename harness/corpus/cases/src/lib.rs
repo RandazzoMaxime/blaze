@@ -9776,3 +9776,54 @@ pub mod async_fn_item_of_trait {
         (loaded(Doubled(n)), loaded(Ready(n)), served(&Doubled(n)), routed(n))
     }
 }
+
+/// ruff's `ty_python_semantic` inference builder, `impl<'db> TypeInferenceBuilder<'db, '_>`:
+/// `Self` written in a trait object's bounds (`&mut dyn FnMut(&mut Self, Ty<'db>) -> Ty<'db>`)
+/// or a function pointer's signature is the impl's self type, its anonymous lifetime the
+/// impl's own, as everywhere else `Self` is written.
+pub mod self_in_object_bounds {
+    #[derive(Clone, Copy)]
+    pub struct Ty<'db>(pub &'db u32);
+
+    pub struct Builder<'db, 'ast> {
+        pub db: &'db u32,
+        pub ast: &'ast u32,
+    }
+
+    struct Guard<'db, 'ast, 'infer> {
+        f: &'infer mut dyn FnMut(&mut Builder<'db, 'ast>, Ty<'db>) -> Ty<'db>,
+    }
+
+    impl<'db, 'ast, 'infer> Guard<'db, 'ast, 'infer> {
+        fn new(f: &'infer mut dyn FnMut(&mut Builder<'db, 'ast>, Ty<'db>) -> Ty<'db>) -> Self {
+            Guard { f }
+        }
+    }
+
+    impl<'db> Builder<'db, '_> {
+        pub fn infer(&mut self, t: Ty<'db>, f: &mut dyn FnMut(&mut Self, Ty<'db>) -> Ty<'db>) -> Ty<'db> {
+            f(self, t)
+        }
+
+        pub fn guarded(&mut self, t: Ty<'db>, f: &mut dyn FnMut(&mut Self, Ty<'db>) -> Ty<'db>) -> Ty<'db> {
+            let guard = Guard::new(f);
+            (guard.f)(self, t)
+        }
+
+        pub fn pointer(&mut self, f: fn(&mut Self)) {
+            f(self)
+        }
+
+        pub fn produce(&mut self, f: &mut dyn FnMut() -> Self) {
+            *self = f()
+        }
+    }
+
+    pub fn run() -> u32 {
+        let (db, ast) = (3, 4);
+        let mut builder = Builder { db: &db, ast: &ast };
+        let t = builder.guarded(Ty(&db), &mut |b, t| Ty(if *b.ast > 0 { t.0 } else { b.db }));
+        builder.pointer(|b| b.ast = b.db);
+        *builder.infer(t, &mut |_, t| t).0 + *builder.ast
+    }
+}
