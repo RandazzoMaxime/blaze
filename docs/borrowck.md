@@ -700,6 +700,29 @@ the trait solver proving one body's well-formedness and outlives bounds: nushell
 `custom_value_op` (828 ms) and `serve_plugin_io` (356 ms). rustc's own `mir_borrowck` is 44%
 of its `typeck` on ripgrep, 31% on axum and 149% on just.
 
+With a trait reference proven by a query, as rustc's canonical `type_op_prove_predicate`: its
+region variables numbered in order, so a goal is proven once for all the bodies of one
+environment, and an edit proves again only the goals of what it changed. Same measure:
+
+| App | Inference | Polonius | max | NLL | max |
+|---|---|---|---|---|---|
+| ripgrep | 630 | 409 (65%) | 8 | 359 (57%) | 8 |
+| fd | 200 | 111 (56%) | 18 | 101 (51%) | 17 |
+| bat | 288 | 234 (81%) | 64 | 214 (74%) | 64 |
+| hyperfine | 223 | 125 (56%) | 15 | 113 (51%) | 14 |
+| just | 1069 | 715 (67%) | 21 | 659 (62%) | 19 |
+| axum | 3920 | 2595 (66%) | 52 | 2519 (64%) | 51 |
+| helix | 3178 | 1899 (60%) | 124 | 1709 (54%) | 118 |
+| nushell | 15539 | 11981 (77%) | 240 | 10953 (70%) | 224 |
+
+nushell's constraints went from 10.7 s to 4.4 s, `custom_value_op` from 811 ms to 3 ms and
+`serve_plugin_io` from 368 ms to 12 ms. A body's first check pays for the goals no body proved
+before it, each in a solver cache of its own: less in all on nushell (31.7 s to 28.9 s) and
+helix, more on axum (5.2 s to 6.7 s), whose 16-tuple impls each prove goals no other body
+does. The slowest bodies now are nushell's `theme_list::list` (240 ms, liveness over 48k
+points with no loans), `stream_parallel_values` (186 ms, constraints) and `run_http_server`
+(133 ms, moves).
+
 ## Debugging
 
 - `echo file.rs | ra-jit borrowck --edition 2021` prints a file's diagnostics as JSON.
