@@ -2696,10 +2696,30 @@ impl<'db> Builder<'_, '_, 'db> {
             TyKind::Array(inner, _) | TyKind::Slice(inner) | TyKind::RawPtr(inner, _) => {
                 self.implied_bounds(inner, pairs, seen, depth + 1, in_field)
             }
-            // `dyn Any + 'r` is well-formed only where `'r` outlives what the trait requires of
-            // `Self`: `trait Any: 'static`. Not in a field, of which rustc's inferred outlives
-            // leave out what mentions `Self`.
-            TyKind::Dynamic(predicates, region) if !in_field => {
+            // `dyn Any + 'r` is well-formed only where `'r` outlives what the trait or one of
+            // its supertraits requires of `Self`: `trait Any: 'static`. Not in a field, of which
+            // rustc's inferred outlives leave out what mentions `Self`.
+            // And what the types in its arguments imply, as rustc's well-formedness walks into
+            // them: `&dyn Fn() -> &'a G<'db>` that `'db: 'a`.
+            TyKind::Dynamic(predicates, region) => {
+                for predicate in predicates.iter() {
+                    let predicate = predicate.skip_binder();
+                    let (args, term) = match predicate {
+                        rustc_type_ir::ExistentialPredicate::Trait(it) => (it.args, None),
+                        rustc_type_ir::ExistentialPredicate::Projection(it) => {
+                            (it.args, it.term.as_type())
+                        }
+                        rustc_type_ir::ExistentialPredicate::AutoTrait(_) => continue,
+                    };
+                    for it in args.types().chain(term) {
+                        if !rustc_type_ir::TypeVisitableExt::has_escaping_bound_vars(&it) {
+                            self.implied_bounds(it, pairs, seen, depth + 1, in_field);
+                        }
+                    }
+                }
+                if in_field {
+                    return;
+                }
                 let Some(shorter) = rv_of(region) else { return };
                 for predicate in predicates.iter() {
                     let trait_ = match predicate.skip_binder() {
@@ -2707,17 +2727,9 @@ impl<'db> Builder<'_, '_, 'db> {
                         rustc_type_ir::ExistentialPredicate::AutoTrait(it) => it.0,
                         rustc_type_ir::ExistentialPredicate::Projection(_) => continue,
                     };
-                    let requires_static = GenericPredicates::query_all(self.ctx.db, trait_.into())
-                        .iter_identity()
-                        .any(|clause| {
-                            matches!(
-                                clause.skip_norm_wip().kind().skip_binder(),
-                                ClauseKind::TypeOutlives(OutlivesPredicate(ty, region))
-                                    if matches!(ty.kind(), TyKind::Param(param) if param.index == 0)
-                                        && matches!(region.kind(), RegionKind::ReStatic)
-                            )
-                        });
-                    if requires_static {
+                    // Its supertraits' too, as rustc elaborates them: salsa's `dyn Database`
+                    // through `ZalsaDatabase: Any`.
+                    if static_trait(self.ctx.db, trait_) {
                         pairs.push((shorter, self.regions.static_rv));
                     }
                 }

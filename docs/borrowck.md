@@ -82,7 +82,9 @@ All of these are rustc's, written from `compiler/rustc_borrowck` at the pinned n
   `&'static T`) is related as any other region; a copied value proves its type `Copy`
   (`impl Copy for Foo<'static>`); a loop's way back may unwind as rustc's `FalseUnwind`, so a
   borrow that must outlive the function is reported in a loop that never ends; and
-  `dyn Any + 'r` in the signature implies `'r: 'static`, which `trait Any: 'static` requires.
+  `dyn Any + 'r` in the signature implies `'r: 'static`, which `trait Any: 'static` requires,
+  of a supertrait too (salsa's `dyn Database` through `ZalsaDatabase: Any`); the types in a
+  trait object's arguments imply what they do (`&dyn Fn() -> &'a G<'db>` that `'db: 'a`).
   The type an object binds an associated type to is invariant (`dyn Trait<Out = &'a u32>`),
   and unsizing to `dyn Trait` proves the value's type implements `Trait`, with what its impl
   needs of the regions and what the trait says its types outlive (`T` as `dyn Any + 'a` needs

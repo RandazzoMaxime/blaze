@@ -503,6 +503,35 @@ fn caller_err(id: Id<'static>) -> &'static u32 {
         );
     }
 
+    // hir-ty's `path_to_const`: what the types in a trait object's arguments imply holds,
+    // `'db: 'a` of `&dyn Fn() -> &'a G<'db>`.
+    #[test]
+    fn implied_bounds_of_a_trait_objects_arguments() {
+        check_diagnostics(
+            r#"
+//- minicore: sized, fn
+struct G<'db>(&'db u32);
+fn need<'a, 'db: 'a>(_: &'a G<'db>) {}
+fn f<'a, 'db>(g: &dyn Fn() -> &'a G<'db>) { need(g()) }
+"#,
+        );
+    }
+
+    // hir-def's `module_for_assoc_item_loc`: `dyn 'db + Database` implies `'db: 'static`
+    // where a supertrait of `Database` is `'static`.
+    #[test]
+    fn a_supertraits_static_bound_is_implied() {
+        check_diagnostics(
+            r#"
+//- minicore: sized
+trait Base: 'static {}
+trait Database: Base {}
+fn take(_: &dyn Database) {}
+fn f<'db>(db: &(dyn 'db + Database)) { take(db) }
+"#,
+        );
+    }
+
     #[test]
     fn unused_mut_self() {
         check_diagnostics(
