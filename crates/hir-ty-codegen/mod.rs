@@ -2237,6 +2237,9 @@ struct ObjectCodegen<'a, 'db> {
     hidden: Vec<FuncId>,
     /// The messages of the stand-ins, which `finish` puts in [`stand_in_section`].
     stand_ins: Vec<(DataId, Box<[u8]>)>,
+    /// The bytes of each `#[link_section]` static of a wasm object, and the custom section
+    /// they go in.
+    custom_sections: Vec<(String, Vec<u8>)>,
     statics: FxHashMap<StaticId, DataId>,
     /// Statics nothing exports and nothing can write to, which we give a copy of the value.
     frozen_statics: FxHashMap<StaticId, DataId>,
@@ -5230,6 +5233,7 @@ impl<'a, 'db> ObjectCodegen<'a, 'db> {
             unstitched: FxHashSet::default(),
             hidden: Vec::new(),
             stand_ins: Vec::new(),
+            custom_sections: Vec::new(),
             tiers: None,
             found_instances: FxHashMap::default(),
             stored_roots: FxHashMap::default(),
@@ -5294,10 +5298,17 @@ impl<'a, 'db> ObjectCodegen<'a, 'db> {
                 wasm::WasmSignature::of(&declared.signature).map_err(CodegenError::Backend)?;
             signatures.insert(name.clone(), signature);
         }
+        let crates: FxHashSet<Crate> = self.envs.iter().map(|(_, env)| env.krate).collect();
+        let features = crates.into_iter().flat_map(|krate| {
+            let values = krate.cfg_options(self.db).get_cfg_values("target_feature");
+            values.map(|it| it.as_str().to_owned()).collect::<Vec<_>>()
+        });
+        let mut custom_sections = self.custom_sections;
+        custom_sections.push(wasm_object::target_features(features));
         let mut product = self.module.finish();
         place_stand_ins(&mut product, self.stand_ins);
         let elf = product.emit().map_err(|e| CodegenError::Backend(e.to_string()))?;
-        wasm_object::from_elf(&elf, &signatures).map_err(CodegenError::Backend)
+        wasm_object::from_elf(&elf, &signatures, &custom_sections).map_err(CodegenError::Backend)
     }
 
     fn want(&mut self, func: FunctionId) {
@@ -6946,16 +6957,35 @@ impl<'a, 'db> ObjectCodegen<'a, 'db> {
         // One the build after this may replace where it is has to say how large it is.
         let named = (again.is_some() || self.patching) && !thread_local;
         let asked = AttrFlags::link_section(db, id.into());
-        let section = asked.as_ref().map(|it| it.as_str()).or_else(|| {
-            named.then(|| Target::current().section_of_static(compiled.writable)).flatten()
-        });
+        // On wasm the section a static asks for is a custom section of the module, which
+        // holds a copy of its bytes; the static itself stays in memory like any other.
+        let custom = asked.as_ref().filter(|_| Target::current().writes_wasm_objects());
+        let section =
+            asked.as_ref().filter(|_| custom.is_none()).map(|it| it.as_str()).or_else(|| {
+                named.then(|| Target::current().section_of_static(compiled.writable)).flatten()
+            });
         let known = if compiled.writable { &mut self.statics } else { &mut self.frozen_statics };
         known.insert(id, data);
         let begun = self.own_static_order.len();
         self.own_static_order.push(id);
-        match self.resolve(&compiled.requests) {
-            Ok(ids) => {
-                self.fill_data(data, ids.blob(&compiled.blob), section)?;
+        let resolved = self.resolve(&compiled.requests).map(|ids| ids.blob(&compiled.blob));
+        // Nothing relocates a custom section: what is in one is bytes alone.
+        let resolved = resolved.and_then(|blob| match custom {
+            Some(custom) if !blob.relocs.is_empty() || !blob.fn_relocs.is_empty() => {
+                let name = StaticSignature::of(db, id).name.as_str();
+                Err(CodegenError::Unsupported(format!(
+                    "static `{name}` in custom section `{}` holds an address",
+                    custom.as_str()
+                )))
+            }
+            _ => Ok(blob),
+        });
+        match resolved {
+            Ok(blob) => {
+                if let Some(custom) = custom {
+                    self.custom_sections.push((custom.as_str().to_owned(), blob.bytes.clone()));
+                }
+                self.fill_data(data, blob, section)?;
                 Ok(data)
             }
             Err(e) => {
