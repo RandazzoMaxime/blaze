@@ -65,9 +65,16 @@ impl Toolchain {
     fn of(rustc: &Path) -> Option<Toolchain> {
         let sysroot = rustc.parent()?.parent()?.to_owned();
         let lib = sysroot.join("lib");
-        let has_driver = std::fs::read_dir(&lib).ok()?.flatten().any(|it| {
-            it.file_name().to_str().is_some_and(|name| name.starts_with("librustc_driver-"))
-        });
+        // The compiler's library is `lib/librustc_driver-*` where rustc loads a shared library
+        // from `lib`, and `bin/rustc_driver-*.dll` on Windows, where a DLL is found beside the
+        // executable.
+        let has_driver = [(&lib, "librustc_driver-"), (&sysroot.join("bin"), "rustc_driver-")]
+            .into_iter()
+            .any(|(dir, prefix)| {
+                std::fs::read_dir(dir).is_ok_and(|mut it| {
+                    it.flatten().any(|it| it.file_name().to_str().is_some_and(|name| name.starts_with(prefix)))
+                })
+            });
         if !has_driver {
             return None;
         }
