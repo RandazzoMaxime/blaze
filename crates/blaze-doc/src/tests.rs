@@ -206,12 +206,14 @@ impl Each for Helpers {
 pub struct Square;
 
 impl Square {
-    /// Its side.
+    /// Its side. Unresolved, and `cfg(doc)` holds: [Loud].
+    #[cfg_attr(not(doc), allow(rustdoc::broken_intra_doc_links))]
     pub const SIDE: u32 = 1;
 }
 
 mod corner {
-    /// Documented in `shapes`, which re-exports it publicly.
+    #![allow(rustdoc::broken_intra_doc_links)]
+    /// Documented in `shapes`, which re-exports it publicly. Unresolved, allowed: [Quiet].
     pub struct Corner;
 }
 pub use corner::Corner;
@@ -524,6 +526,8 @@ fn unresolved_links_warn() {
         "{messages:?}"
     );
     assert!(messages.iter().any(|it| it.contains("unresolved link to `Nope`")), "{messages:?}");
+    assert!(messages.iter().any(|it| it.contains("unresolved link to `Loud`")), "{messages:?}");
+    assert!(!messages.iter().any(|it| it.contains("`Quiet`")), "allowed: {messages:?}");
     assert!(model.warnings.iter().all(|it| it.krate == "fixture"), "dependencies do not warn");
 }
 
@@ -624,4 +628,36 @@ fn deref_methods_follow_the_chain() {
         .collect();
     assert_eq!(sections, [("Chain".to_owned(), vec!["read"]), ("[u8]".to_owned(), vec!["len"])]);
     assert_eq!(bytes.impls.deref[1].anchor, "deref-methods-%5Bu8%5D");
+}
+
+#[test]
+fn one_crate_of_a_name_is_documented_as_cargo_picks_it() {
+    let reached = |crates: &[(&str, u32, &str, bool)]| {
+        crates
+            .iter()
+            .map(|&(name, krate, version, target)| crate::Reached {
+                name: name.to_owned(),
+                krate,
+                version: version.to_owned(),
+                target,
+            })
+            .collect()
+    };
+    let kept: Vec<u32> = crate::one_per_name(reached(&[
+        ("bitflags", 1, "1.3.2", true),
+        ("syn", 2, "2.0.90", false),
+        ("quote", 3, "1.0.40", false),
+        ("bitflags", 4, "2.6.0", true),
+        ("syn", 5, "1.0.109", false),
+        ("memchr", 6, "2.7.4", false),
+        ("memchr", 7, "2.6.0", true),
+        ("rand", 8, "0.9.0-beta.1", true),
+        ("rand", 9, "0.9.0", true),
+    ]))
+    .into_iter()
+    .map(|it| it.krate)
+    .collect();
+    // Both `syn`s are the host's (a proc macro's), so neither; the older `memchr` is the only
+    // one built for the target.
+    assert_eq!(kept, [4, 3, 7, 9]);
 }

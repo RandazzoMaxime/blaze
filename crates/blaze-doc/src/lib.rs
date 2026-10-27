@@ -12,6 +12,7 @@ mod collect;
 mod highlight;
 pub mod html;
 mod links;
+mod lint;
 mod markdown;
 pub mod model;
 mod places;
@@ -36,7 +37,7 @@ pub struct Asked {
 
 /// The crates `cargo doc` documents for `asked`: those, and unless `no_deps` every library
 /// they depend on, directly or not, but none of the sysroot's. Two crates of one name keep the
-/// one asked for, else the newest version.
+/// one asked for, else as `one_per_name` says.
 pub fn crates_to_document(db: &RootDatabase, asked: &[Asked], no_deps: bool) -> Vec<Documented> {
     let mut out: Vec<Documented> = vec![];
     let mut names = FxHashSet::default();
@@ -51,40 +52,83 @@ pub fn crates_to_document(db: &RootDatabase, asked: &[Asked], no_deps: bool) -> 
     if no_deps {
         return out;
     }
-    // Two dependencies sharing a name share a directory too: cargo documents the newest
-    // (`remove_duplicate_doc`), and none that shares a name with a crate asked for.
-    let mut deps: Vec<(String, Crate)> = vec![];
-    let mut stack: Vec<Crate> = asked.iter().map(|it| it.krate).collect();
-    while let Some(krate) = stack.pop() {
+    // Each crate reached, and whether a path to it leads through no proc macro: cargo builds
+    // a proc macro and everything it depends on for the host, the rest for the target.
+    let mut reached: Vec<(Crate, bool)> = vec![];
+    let mut walked = FxHashSet::default();
+    let mut stack: Vec<(Crate, bool)> = asked.iter().map(|it| (it.krate, false)).collect();
+    while let Some((krate, host)) = stack.pop() {
         for dep in krate.dependencies(db) {
             let dep = dep.krate;
-            if !seen.insert(dep) || is_sysroot(db, dep) {
+            let host = host || is_proc_macro(db, dep);
+            if seen.contains(&dep) || is_sysroot(db, dep) || !walked.insert((dep, host)) {
                 continue;
             }
-            let name = crate_name(db, dep);
-            if !names.contains(&name) {
-                match deps.iter_mut().find(|(it, _)| *it == name) {
-                    Some(kept) if version_key(db, dep) > version_key(db, kept.1) => kept.1 = dep,
-                    Some(_) => {}
-                    None => deps.push((name, dep)),
-                }
+            match reached.iter_mut().find(|(it, _)| *it == dep) {
+                Some(it) => it.1 |= !host,
+                None => reached.push((dep, !host)),
             }
-            stack.push(dep);
+            stack.push((dep, host));
         }
     }
-    out.extend(deps.into_iter().map(|(name, krate)| Documented {
-        krate,
-        name,
+    let reached = reached
+        .into_iter()
+        .map(|(krate, target)| Reached {
+            name: crate_name(db, krate),
+            krate,
+            version: krate.version(db).unwrap_or_default(),
+            target,
+        })
+        .filter(|it| !names.contains(&it.name))
+        .collect();
+    out.extend(one_per_name(reached).into_iter().map(|it| Documented {
+        warn: it.krate.origin(db).is_local(),
+        krate: it.krate,
+        name: it.name,
         private: false,
-        warn: krate.origin(db).is_local(),
     }));
     out
 }
 
+fn is_proc_macro(db: &RootDatabase, krate: Crate) -> bool {
+    ide_db::base_db::Crate::from(krate).data(db).target_kind.is_proc_macro()
+}
+
+/// A dependency `cargo doc` reached.
+#[derive(Debug)]
+struct Reached<K> {
+    name: String,
+    krate: K,
+    version: String,
+    /// Reached by a path through no proc macro, so built for the target.
+    target: bool,
+}
+
+/// The dependencies cargo documents of those it reached, in the order reached. Two sharing a
+/// name share a directory too, so cargo keeps at most one (`remove_duplicate_doc`): of several,
+/// none built only for the host, as it does with no `--target`; then the newest version.
+fn one_per_name<K>(reached: Vec<Reached<K>>) -> Vec<Reached<K>> {
+    let mut by_name: Vec<Vec<Reached<K>>> = vec![];
+    for it in reached {
+        match by_name.iter_mut().find(|same| same[0].name == it.name) {
+            Some(same) => same.push(it),
+            None => by_name.push(vec![it]),
+        }
+    }
+    by_name
+        .into_iter()
+        .filter_map(|mut same| {
+            if same.len() > 1 {
+                same.retain(|it| it.target);
+            }
+            same.into_iter().max_by(|a, b| version_key(&a.version).cmp(&version_key(&b.version)))
+        })
+        .collect()
+}
+
 /// A crate's version as semver orders it, near enough: the numbers, then a release above
 /// any of its pre-releases.
-fn version_key(db: &RootDatabase, krate: Crate) -> (Vec<u64>, bool, String) {
-    let version = krate.version(db).unwrap_or_default();
+fn version_key(version: &str) -> (Vec<u64>, bool, String) {
     let version = version.split('+').next().unwrap_or_default();
     let (release, pre) = version.split_once('-').unwrap_or((version, ""));
     let numbers = release.split('.').map(|it| it.parse().unwrap_or(0)).collect();

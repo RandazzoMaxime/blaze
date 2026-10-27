@@ -15,6 +15,7 @@ use syntax::{AstNode, SyntaxKind, T, TextRange, TextSize, ast};
 use crate::{
     attrs,
     links::{self, Resolved},
+    lint,
     model::{
         Code, CrateDoc, DerefMethods, Doc, ImplDoc, Impls, Item, ItemRef, Kind, Member, Model,
         Notes, Piece, Reexport, Span, Target, Warning,
@@ -567,9 +568,13 @@ impl Builder<'_> {
     }
 
     fn warn(&self, message: String, docs: &hir::Docs, range: std::ops::Range<usize>) {
-        let at = docs
-            .find_ast_range(text_range(&range))
-            .and_then(|(at, _)| self.files.location(self.db, at));
+        let found = docs.find_ast_range(text_range(&range)).map(|(at, _)| at);
+        if let Some(found) = found
+            && !lint::broken_links_reported(self.db, self.documented().krate, found)
+        {
+            return;
+        }
+        let at = found.and_then(|at| self.files.location(self.db, at));
         self.warnings.borrow_mut().push(Warning {
             krate: self.documented().name.clone(),
             message,
