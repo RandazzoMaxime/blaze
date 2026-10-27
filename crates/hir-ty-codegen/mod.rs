@@ -8405,6 +8405,15 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
         if args.iter().any(|&ty| self.is_unsized(ty)) {
             unsupported!("an unsized value passed in calling convention {abi:?}");
         }
+        // rustc takes `extern "custom"` only for a naked function of no arguments and no
+        // result, which nothing calls from Rust: its body is the whole of it, and no value
+        // crosses the boundary.
+        if abi == ExternAbi::Custom {
+            if !args.is_empty() || !ret.is_unit() {
+                unsupported!("calling convention {abi:?} with arguments or a result");
+            }
+            return Ok(FnAbi { ret: PassMode::Ignore, args: Vec::new() });
+        }
         if self.cg.target.call_conv == isa::CallConv::WindowsFastcall {
             if matches!(abi, ExternAbi::SysV64 { .. }) {
                 unsupported!("calling convention {abi:?}");

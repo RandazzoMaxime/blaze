@@ -1342,10 +1342,44 @@ impl Assembler {
 /// The text as rustc hands it to the assembler: `asm!` is in Intel's syntax on x86-64.
 fn as_rustc_gives_it(triple: &str, text: &str) -> String {
     if triple.starts_with("x86_64") {
-        format!(".intel_syntax noprefix\n{text}\n.att_syntax\n")
+        let text: Vec<String> = text.lines().map(hash_comment).collect();
+        format!(".intel_syntax noprefix\n{}\n.att_syntax\n", text.join("\n"))
     } else {
         format!("{text}\n")
     }
+}
+
+/// The line with a comment of `//`, which LLVM's assembler takes on every target and GNU's
+/// on x86 only at the start of a line, as the `#` both take. A `//` in a string or a
+/// character (`'c'`, `'\c'`) is not one, as LLVM's lexer reads them; a line with a `'`
+/// before it that is not a character is left as it is.
+fn hash_comment(line: &str) -> String {
+    let mut chars = line.char_indices().peekable();
+    while let Some((at, c)) = chars.next() {
+        match c {
+            '"' => loop {
+                match chars.next() {
+                    Some((_, '\\')) => _ = chars.next(),
+                    Some((_, '"')) => break,
+                    Some(_) => {}
+                    None => return line.to_owned(),
+                }
+            },
+            '\'' => {
+                if let Some((_, '\\')) = chars.next() {
+                    chars.next();
+                }
+                if !matches!(chars.next(), Some((_, '\''))) {
+                    return line.to_owned();
+                }
+            }
+            '/' if matches!(chars.peek(), Some((_, '/'))) => {
+                return format!("{}#{}", &line[..at], &line[at + 2..]);
+            }
+            _ => {}
+        }
+    }
+    line.to_owned()
 }
 
 /// The C compiler that assembles for `triple`, with the arguments that say the target:
@@ -1481,7 +1515,19 @@ fn code(object: &[u8]) -> Result<Assembled, String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Arch, extensions};
+    use super::{Arch, extensions, hash_comment};
+
+    /// compiler_builtins' `__rust_probestack` ends an instruction with `// ...`.
+    #[test]
+    fn a_comment_of_two_slashes_is_one_gnu_as_reads() {
+        assert_eq!(hash_comment("mov r11, rax // dup"), "mov r11, rax # dup");
+        assert_eq!(hash_comment(".ascii \"a//b\\\"//\" // c"), ".ascii \"a//b\\\"//\" # c");
+        assert_eq!(hash_comment("// we're guaranteed"), "# we're guaranteed");
+        assert_eq!(hash_comment("mov al, '/' // c'"), "mov al, '/' # c'");
+        assert_eq!(hash_comment("mov al, '\\'' // c"), "mov al, '\\'' # c");
+        assert_eq!(hash_comment("mov al, 'ab' // c"), "mov al, 'ab' // c");
+        assert_eq!(hash_comment("div rcx"), "div rcx");
+    }
 
     /// constant_time_eq's `#[target_feature(enable = "dit")]` reads DIT, which LLVM's
     /// assembler has no extension of: the architecture that has it comes before the
