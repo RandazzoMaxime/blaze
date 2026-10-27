@@ -492,10 +492,11 @@ With no borrow checker, the 246 units rustc accepts would pass. Now:
 
 | Mode | In scope | Pass | rustc accepts, ra-jit too | rustc rejects, same errors |
 |---|---|---|---|---|
-| Polonius | 1585 | 1545 (97.5%) | 246 of 246 | 1299 of 1339 |
-| NLL | 1583 | 1542 (97.4%) | 227 of 227 | 1315 of 1356 |
+| Polonius | 1590 | 1587 (99.8%) | 246 of 246 | 1341 of 1344 |
+| NLL | 1588 | 1585 (99.8%) | 227 of 227 | 1358 of 1361 |
 
-465 units are out of scope; 344 of them need a nightly feature. CI runs the scoring on Linux
+460 units are out of scope; 346 of them need a nightly feature (at 68be5dec, nightly-2026-10-27,
+rustc's tests at 12433c30). CI runs the scoring on Linux
 and fails below a floor a few units under the count there, on any error in a unit rustc
 accepts, and on any unit the checker panics on, as a panic hides every error in its file.
 
@@ -507,18 +508,17 @@ every type of another crate would be an error the bodies using it do not show.
 `harness/borrowck_apps.py` runs it over every application of `apps/apps.json` at its pinned rev,
 with what `cargo metadata` needs that a clone lacks (bun's vendored crates, which its own build
 fetches), plus the harness's `corpus` and `mixfutures` crates (which CI checks too), and lists
-each app's errors and panics. At
-47793534, 20 of the 23 check clean; nushell (53, E0716 in its tests), ruff (19, E0716 and
-"lifetime may not live long enough") and rust-analyzer (1, E0515) get errors rustc does not
-give.
+each app's errors and panics. At 68be5dec all 22 applications, `corpus` and `mixfutures` check
+clean; at 47793534 nushell (53, E0716 in its tests), ruff (19, E0716 and "lifetime may not live
+long enough") and rust-analyzer (1, E0515) got errors rustc does not give.
 
 ## What is left
 
-Every failing unit is one where rustc gives an error ra-jit does not, or gives it on another
-line or with another code. By what is wrong, most first: 15 with an error on another line or
-with another code, then, of the errors not reported, 5 "lifetime may not live long enough",
-3 each of E0507, E0309, E0310, E0311 and higher-ranked errors, 2 each of E0716 and E0597,
-then one each of five more. The causes, grouped:
+Three units fail in each mode, all an error rustc gives that ra-jit does not:
+`higher-ranked-auto-trait-11#no_assumptions` and `implementation-not-general-enough-ice-133252`
+(the first cause below) and `supertrait-mentions-GAT` (the second; rustc reports it on the dummy
+span of an obligation of its own, where no item's well-formedness check is). The other causes
+are what the rules still leave out where no failing unit shows it now:
 
 - **Higher-ranked regions and placeholders**: auto traits of a coroutine's witness (`T: Send`
   of an `async` block holding a `for<'a>` future) are not proven with placeholders.
