@@ -16,7 +16,9 @@ run, twice: once as before, where the load's `cargo check --compile-time-deps` h
 the proc macros, and once with `RA_JIT_PROC_MACRO_SERVER` naming the server, where ra-jit links
 each of them (crates/ra-jit/src/cargo/own_macro.rs) and that server expands with them. Each
 program has to print what cargo's does, and the proc-macro libraries in the target directory
-have to be all rustc's, then all ra-jit's.
+have to be all rustc's, then all ra-jit's. Every build shares one store: the package whole,
+which names the standard library's crates, has to refuse what the server's and libraries'
+builds over the library's unit kept (#328).
 
 With the names of bench apps (`APPS`, or `all` for each of them) it holds those instead. Each
 is built whole by ra-jit into its own target directory twice, from an empty store each time:
@@ -320,10 +322,7 @@ def wired(work, root, meta, units, server):
     for named in (False, True):
         # A target directory of its own is seeded from cargo's, whose proc macros are rustc's.
         shutil.rmtree(os.path.join(root, "target"), ignore_errors=True)
-        # A store of its own: one the libraries were built into serves code over symbols of
-        # the standard library this build, which names its crates, does not link.
-        env = {"RA_JIT_CACHE": os.path.join(work, f"store-wired-{named}"),
-               "RA_JIT_PROC_MACRO_SERVER": server if named else "0"}
+        env = {"RA_JIT_PROC_MACRO_SERVER": server if named else "0"}
         ran, took = ra_jit(root, crates, os.path.join(work, "wired.o"), "--own-target",
                            "--exe", program, env=env)
         how = "with the server named" if named else "without it"
@@ -481,6 +480,10 @@ def main():
         print("not run: ra-jit links proc-macro libraries and the server on Linux so far")
         return
     work = scratch("ra-jit-macroserver-")
+    # One store for the run: the server and the libraries are built over the standard
+    # library's unit, and the package whole, which names its crates, must not take code from
+    # the store that calls into the unit (#328). An app's builds have stores of their own.
+    os.environ["RA_JIT_CACHE"] = os.path.join(work, "store")
     passed = False
     try:
         server, said = built_server(work)
