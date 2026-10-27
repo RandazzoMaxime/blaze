@@ -15093,6 +15093,37 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
                     self.builder.ins().store(MEM, value, dst, i as i32);
                 }
             }
+            (_, [table, indices]) if name.starts_with("x86.avx512.permvar.") => {
+                let (table, ty) = self.operand(table)?;
+                let (indices, _) = self.operand(indices)?;
+                // `permvar.{qi,hi,si,sf,di,df}.N`: each lane is the lane of `table` its index
+                // names, by as many low bits as name a lane of the whole vector.
+                let width = match name.split('.').nth(3) {
+                    Some("qi") => types::I8,
+                    Some("hi") => types::I16,
+                    Some("si" | "sf") => types::I32,
+                    _ => types::I64,
+                };
+                let bytes = width.bytes() as i64;
+                let lanes = self.layout(ty)?.size.bytes() as i64 / bytes;
+                let values: Vec<Value> = (0..lanes)
+                    .map(|lane| {
+                        let at = (lane * bytes) as i32;
+                        let index = self.builder.ins().load(width, MEM, indices, at);
+                        let slot = self.builder.ins().band_imm(index, lanes - 1);
+                        let slot = match width == ptr() {
+                            true => slot,
+                            false => self.builder.ins().uextend(ptr(), slot),
+                        };
+                        let offset = self.builder.ins().imul_imm(slot, bytes);
+                        let addr = self.builder.ins().iadd(table, offset);
+                        self.builder.ins().load(width, MEM, addr, 0)
+                    })
+                    .collect();
+                for (lane, value) in values.into_iter().enumerate() {
+                    self.builder.ins().store(MEM, value, dst, lane as i32 * bytes as i32);
+                }
+            }
             ("x86.avx2.permd" | "x86.avx2.permps", [table, indices]) => {
                 let (table, _) = self.operand(table)?;
                 let (indices, _) = self.operand(indices)?;

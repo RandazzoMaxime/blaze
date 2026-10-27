@@ -1,6 +1,6 @@
 //! `_mm_crc32_u8` (to `_u64`), `_mm512_ternarylogic_epi64` (and `_epi32`) and
 //! `_mm512_shuffle_epi8` are LLVM's `x86.sse42.crc32.*`, `x86.avx512.pternlog.*` and
-//! `x86.avx512.pshuf.b.512`, with no body in `core::arch`: crc-fast's functions that reach
+//! `x86.avx512.pshuf.b.512` (and `_mm512_permutexvar_*`, `x86.avx512.permvar.*`), with no body in `core::arch`: crc-fast's functions that reach
 //! them (aws-smithy-checksums, so blaze's own build) were left to rustc, and the whole build of
 //! blaze refused. The checksum is assembled, the other two are worked out lane by lane.
 
@@ -27,13 +27,15 @@ fn crcs(bytes: &[u8]) -> [u64; 4] {
 fn wide(a: [u64; 8], b: [u64; 8], c: [u64; 8]) -> Vec<[u64; 8]> {
     unsafe {
         let [a, b, c]: [__m512i; 3] = std::mem::transmute([a, b, c]);
-        let out: [__m512i; 6] = [
+        let out: [__m512i; 8] = [
             _mm512_ternarylogic_epi64::<0x96>(a, b, c),
             _mm512_ternarylogic_epi64::<0xe8>(a, b, c),
             _mm512_ternarylogic_epi64::<0x01>(a, b, c),
             _mm512_ternarylogic_epi32::<0xca>(a, b, c),
             _mm512_ternarylogic_epi32::<0x80>(a, b, c),
             _mm512_shuffle_epi8(a, b),
+            _mm512_permutexvar_epi64(b, a),
+            _mm512_permutexvar_epi32(c, a),
         ];
         out.iter().map(|it| std::mem::transmute(*it)).collect()
     }
