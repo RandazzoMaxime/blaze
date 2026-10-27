@@ -8911,14 +8911,16 @@ fn run_holding(
             // No rustc checked the source of a build with nothing of rustc's: the worker
             // does, all of it the build compiles and the code nothing reaches too, as rustc
             // would. An error fails every build of the checkout until a source is written
-            // (docs/no-rustc.md, D).
+            // (docs/no-rustc.md, D). Only a module of a crate is Rust: the workspace's
+            // `rustfmt.toml` and READMEs are loaded too.
             if nothing_of_rustc && written.is_empty() {
                 let checking = Instant::now();
                 let paths: FxHashMap<vfs::FileId, PathBuf> = files
                     .iter()
                     .filter_map(|it| match it.file {
                         Watched::Source(id)
-                            if args.owns(&db, id, &it.path) && listed.sees(&db, id) =>
+                            if args.owns(&db, id, &it.path)
+                                && !listed.crates_of(&db, id).is_empty() =>
                         {
                             Some((id, it.path.clone()))
                         }
