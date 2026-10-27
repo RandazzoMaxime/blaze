@@ -946,6 +946,9 @@ each one's section: what `[Unreleased]` had, and the title of each change merged
 
 ### Fixed
 
+- A guarded match nested inside another match arm's guard preserves the enclosing guard's
+  binding references, including with or-patterns. Later reads in the outer guard no longer
+  use uninitialized by-value bindings, which could produce wrong results or a crash.
 - A whole-program build gives the same object every time ([#200](https://github.com/indexable-inc/blaze/issues/200)).
   Functions went into the object in the order the compile-ahead threads finished them, so
   their names, the ids of what they call and their places in the program changed from one
