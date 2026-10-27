@@ -592,8 +592,8 @@ The order inside the branch, by what the floor needs and what depends on what:
 | 8 | lints: the per-function hook and result shape (port as its own lane) | 3, 4 | stubbed in the branch |
 
 Every step keeps the differential harnesses green (rustc is the reference, every program rustc
-builds still builds and behaves the same). Numbers are taken on a dev host when one is reachable
-and on the Mac for what fits; the io_uring backend needs a Linux host.
+builds still builds and behaves the same). Numbers are taken in ix VMs, which run Linux, so the
+io_uring backend is measured there too.
 
 ### How it meets the open lanes
 

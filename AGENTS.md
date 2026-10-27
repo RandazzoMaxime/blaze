@@ -78,10 +78,13 @@ agents/rules.ts --write` for AGENTS.md).
    CLI is a client of the same API. See
    [docs/roadmap.md#8-the-agent-api](docs/roadmap.md#8-the-agent-api).
    Why: MCP is cringe and outdated.
-10. **heavy-work-on-dev-host**: Heavy work runs on a dev host, the Mac does quick checks. Release
-    builds, harness sweeps and benchmarks run on an AWS dev host claimed in the host ledger
-    (`fleet-ops` skill), with a lease as long as the run, released after. See
+10. **work-in-ix-vms**: Builds, tests, benchmarks and experiments run in an ix VM, one per lane: `ix new
+    --name <lane>`, `ix shell <lane> -- <command>`, `ix rm <lane>` when done. Never on the Mac,
+    never on an AWS dev host or any other AWS machine. Where an ix VM can't do it, stop and say what
+    is missing. See
     [docs/contributing.md#working-in-parallel](docs/contributing.md#working-in-parallel).
+    Why: Andrew, 2026-10-27. It replaced heavy-work-on-dev-host (AWS dev hosts claimed in the host
+    ledger, the Mac for quick checks).
 11. **worktree-per-lane**: One worktree per lane, never `git stash`: a uniquely named worktree with its
     own `CARGO_TARGET_DIR`. Harnesses run with `RUST_BACKTRACE=0`.
     Why: The stash is shared by every worktree.
@@ -93,8 +96,8 @@ agents/rules.ts --write` for AGENTS.md).
     issue "Release train is red" names the commits since it was last green. Its waiting survives a
     tool that kills it; `land.py --wait` picks it up again. Never push to main or merge into it by
     hand. See [docs/contributing.md#landing-a-change](docs/contributing.md#landing-a-change).
-13. **clean-up-lane**: Delete what a lane made when it is done: its worktree, target directory and
-    dev-host directories, and its merged branch.
+13. **clean-up-lane**: Delete what a lane made when it is done: its worktree, target directory and ix
+    VM, and its merged branch.
 14. **credit-people**: Credit people. A commit or pull request built on someone's suggestion, diagnosis,
     workaround or patch from an issue, review or discussion gets a `Co-authored-by: Name
     <id+login@users.noreply.github.com>` trailer for each of them, and names where it came from. See

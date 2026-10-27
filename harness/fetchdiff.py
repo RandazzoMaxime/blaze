@@ -26,8 +26,8 @@ checked against `.cargo-checksum.json`, downloading nothing.
 Git dependencies are compared by checkout: the names of the directories in git/db and
 git/checkouts, and the tree of every checkout but `.git` and mtimes.
 
-Prints the counts and writes every difference to WORK/fetchdiff.json. Network-heavy: run it on
-a dev host.
+Prints the counts and writes every difference to WORK/fetchdiff.json. Network-heavy: run it in
+an ix VM.
 """
 import argparse, ast, hashlib, http.server, json, os, shutil, stat, subprocess, sys, threading, time
 import urllib.error, urllib.request

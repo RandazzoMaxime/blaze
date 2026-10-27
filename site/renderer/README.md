@@ -31,12 +31,13 @@ uv run --script renderer/fetch.py     # or fetch them: CI's `site-renderer` arti
 cargo run (in one, the features would unify and `site.wasm` would get Flecs), then runs `wasm-opt -Oz` when it is on
 PATH. Flecs's C needs a clang with the wasm32 backend: set `CC_wasm32_unknown_unknown` and `AR_wasm32_unknown_unknown`
 when the default `clang` is a wrapper that adds host flags (nix: `llvmPackages.clang-unwrapped` and
-`llvmPackages.bintools-unwrapped`). Cargo builds run on a dev host or in CI, not on the Mac.
+`llvmPackages.bintools-unwrapped`). Cargo builds run in an ix VM or in CI, not on the Mac.
 
 The modules are platform-independent build outputs, not checked in. CI (`.github/workflows/site.yaml`) builds them on
 every run and uploads them as `site-renderer`; `fetch.py` downloads the latest green run's (this branch, else main), so
 `bun run build` and `wrangler dev` work without a Rust toolchain. An artifact is built from its run's commit: after
-changing `renderer/`, build on a dev host and fetch with `--scp`.
+changing `renderer/`, build in the lane's ix VM and copy `renderer/target/site` out with
+`ix shell <lane> -- tar -C <dir>/renderer/target/site -c . | tar -x -C renderer/target/site`.
 
 Measured 2026-10-25 (Rust 1.99.0, binaryen 133 on dev-aws-14, flecs-opinionated 959ccd4; `bun gen/build.ts` on the
 Mac; the worker bundle row is from the earlier 736e38c build):
