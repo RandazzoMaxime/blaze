@@ -649,10 +649,9 @@ fn planned(
         };
         let executable = match (program.kind, program.test) {
             (Kind::Example, _) => out.join("examples").join(exe(&program.name)),
-            (Kind::Cdylib, _) => out.join(library(
-                std::env::consts::DLL_PREFIX,
-                std::env::consts::DLL_SUFFIX,
-            )),
+            (Kind::Cdylib, _) => {
+                out.join(library(std::env::consts::DLL_PREFIX, std::env::consts::DLL_SUFFIX))
+            }
             (Kind::Staticlib, _) => out.join(match cfg!(windows) {
                 true => library("", ".lib"),
                 false => library("lib", ".a"),
