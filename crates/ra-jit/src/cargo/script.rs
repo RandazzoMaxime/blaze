@@ -24,7 +24,7 @@ use sha2::{Digest as _, Sha256};
 use super::{directives, keyed, own_script, sandboxed, script_sandbox};
 
 /// The variable that names the script itself to `ra-jit build-script`.
-const REAL: &str = "RA_JIT_BUILD_SCRIPT";
+pub(crate) const REAL: &str = "RA_JIT_BUILD_SCRIPT";
 
 /// The file next to a script's `OUT_DIR` that says how cargo ran it.
 const RAN: &str = "ra-jit-ran.json";

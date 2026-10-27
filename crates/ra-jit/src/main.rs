@@ -3354,11 +3354,13 @@ fn workspace_at(
             (kind, _) => {
                 // ra-jit's own target directory is one per mode of its proc macros
                 // (`own_macro::own_dir`): with them, cargo is given empty files for the
-                // libraries, which rustc would read when they are turned off.
+                // libraries, which rustc would read when they are turned off. blaze's own
+                // build of them (`cargo/compile_time.rs`) reads nothing of cargo's.
                 let own_config;
                 let mut config = cargo_config;
                 if let ProjectWorkspaceKind::Cargo { cargo, .. } = kind
                     && cargo_config.target_dir_config == TargetDirectoryConfig::UseSubdirectory
+                    && cargo_config.own_build_scripts.is_none()
                 {
                     let target = cargo.target_directory();
                     let own = target.join(cargo::own_macro::own_dir());
@@ -7876,6 +7878,9 @@ fn main() -> anyhow::Result<()> {
     if std::env::args().nth(1).as_deref() == Some("borrowck") {
         return borrowck::command(std::env::args().skip(2));
     }
+    if std::env::args().nth(1).as_deref() == Some("compile-time-deps") {
+        return compile_time_deps(std::env::args().skip(2));
+    }
     if std::env::args().nth(1).as_deref() == Some("weaken") {
         return weaken::command(std::env::args().skip(2));
     }
@@ -8023,6 +8028,11 @@ fn cargo_config(args: &Args) -> CargoConfig {
         only_manifest_package: true,
         executables: executables_of(&args.symbol_files),
         own_metadata: cargo::metadata::own(&args.selection),
+        // The build scripts and proc macros of a load in ra-jit's own target directory are
+        // built and run by blaze (`cargo/compile_time.rs`), not `cargo check
+        // --compile-time-deps`; a build cargo already ran says what its scripts did.
+        own_build_scripts: (args.own_target && !cargo::own_macro::turned_off())
+            .then(|| cargo::compile_time::own(&args.selection)),
         target_dir_config: match args.own_target {
             true => TargetDirectoryConfig::UseSubdirectory,
             false => TargetDirectoryConfig::None,
@@ -8056,6 +8066,42 @@ fn cargo_config(args: &Args) -> CargoConfig {
 }
 
 /// How a workspace is loaded, whichever it is.
+/// `ra-jit compile-time-deps PROJECT [build flags]`: what a build's load in ra-jit's own target
+/// directory reads of the build scripts and proc macros of PROJECT, as blaze built and ran them
+/// (`cargo/compile_time.rs`): a JSON object of each package that has any, by its id, with its
+/// script's `cfgs` and `envs`, its `out_dir`, and `proc_macro`, its library. The flags are the
+/// build's (`--release`, `--features`, `--cfg-test`, ...). `harness/resolve.py ctdeps` holds it
+/// to rust-analyzer's `cargo check --compile-time-deps`.
+fn compile_time_deps(args: impl Iterator<Item = String>) -> anyhow::Result<()> {
+    let fixed = ["--own-target", "--crate", "-", "--out", "/dev/null"].map(str::to_owned);
+    let args = Args::parse(args.chain(fixed))?;
+    let config = cargo_config(&args);
+    let (workspace, _) =
+        workspace_at(&args.project, &config, &load_config(), &args.selection, None, None)?;
+    let ProjectWorkspaceKind::Cargo { cargo, build_scripts, .. } = &workspace.kind else {
+        bail!("{} is not a cargo workspace", args.project.display());
+    };
+    let mut packages = serde_json::Map::new();
+    for package in cargo.packages() {
+        let Some(read) = build_scripts.read_of(package) else { continue };
+        if read == project_model::OwnBuildOutput::default() {
+            continue;
+        }
+        let path = |it: &Option<AbsPathBuf>| it.as_ref().map(ToString::to_string);
+        packages.insert(
+            cargo[package].id.repr.clone(),
+            serde_json::json!({
+                "cfgs": read.cfgs,
+                "envs": read.envs,
+                "out_dir": path(&read.out_dir),
+                "proc_macro": path(&read.proc_macro_dylib),
+            }),
+        );
+    }
+    println!("{}", serde_json::to_string_pretty(&packages)?);
+    Ok(())
+}
+
 fn load_config() -> LoadCargoConfig {
     LoadCargoConfig {
         load_out_dirs_from_check: true,
