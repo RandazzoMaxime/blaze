@@ -24,6 +24,10 @@
 //! version or checksum, fails, naming it and the command that records it: a build never
 //! downloads.
 //!
+//! [`FILE`] is TOML: `version` (of the whole file, [`VERSION`]), a `[[fetch]]` table for each
+//! download ([`Entry`]), and `[[system]]` tables, which are the system libraries' resolution
+//! and whose fields this module leaves to the code that writes them.
+//!
 //! The bytes are an entry of the store kept by their sha256 alone
 //! ([`ra_jit_store::Store::open_by_content`]), so every build of blaze finds them, and a
 //! remote cache carries them as it carries any entry.
@@ -328,6 +332,10 @@ pub(crate) struct Entry {
 pub(crate) struct Lock {
     /// Sorted.
     pub(crate) fetches: Vec<Entry>,
+    /// The `[[system]]` tables: what the system libraries of build scripts resolve to (a
+    /// crate's nixpkgs attributes and their store paths, by target). Their fields are the
+    /// system resolver's; `blaze lock --fetches` writes them back as it read them.
+    pub(crate) system: Vec<toml::Table>,
 }
 
 #[derive(Deserialize)]
@@ -336,6 +344,8 @@ struct Written {
     version: u32,
     #[serde(default)]
     fetch: Vec<Entry>,
+    #[serde(default)]
+    system: Vec<toml::Table>,
 }
 
 impl Lock {
@@ -350,7 +360,7 @@ impl Lock {
         }
         let mut fetches = written.fetch;
         fetches.sort();
-        Ok(Lock { fetches })
+        Ok(Lock { fetches, system: written.system })
     }
 
     /// The text of [`FILE`]: each entry in order, each field in order.
@@ -381,6 +391,15 @@ impl Lock {
             if !it.names.is_empty() {
                 text += &format!("names = {}\n", quoted(&it.names));
             }
+        }
+        if !self.system.is_empty() {
+            #[derive(Serialize)]
+            struct Systems<'a> {
+                system: &'a [toml::Table],
+            }
+            let system = toml::to_string(&Systems { system: &self.system })
+                .expect("a table read from TOML writes as TOML");
+            text += &format!("\n{system}");
         }
         text
     }
@@ -751,9 +770,11 @@ fn lock(
             }
         }
     }
+    // A target not asked keeps what it had.
+    fetches.extend(old.fetches.iter().filter(|it| !resolved.contains_key(&it.target)).cloned());
     fetches.sort();
     fetches.dedup();
-    Ok(Lock { fetches })
+    Ok(Lock { fetches, system: old.system.clone() })
 }
 
 /// `blaze lock --fetches [--target <triple>]... [--manifest-path <path>]`: writes [`FILE`]
@@ -795,23 +816,27 @@ pub(crate) fn command(args: &[String]) -> anyhow::Result<i32> {
         .with_context(|| format!("{} is in no workspace", start.display()))?;
     let locked = cargo_lock(&root.join("Cargo.lock"))?;
     let path = root.join(FILE);
-    if !locked.iter().any(|it| OVERRIDES.iter().any(|o| o.package == it.name && matches!(o.give, Give::Fetch { .. }))) {
-        super::say::status(false, "Locked", "no build script of the workspace downloads what blaze hands it");
-        match std::fs::remove_file(&path) {
-            Err(e) if e.kind() != std::io::ErrorKind::NotFound => return Err(e.into()),
-            _ => return Ok(0),
-        }
-    }
-    if targets.is_empty() {
-        targets.push(super::own::manifest::host_triple()?);
-    }
-    let mut resolved = BTreeMap::new();
-    for target in &targets {
-        resolved.insert(target.clone(), resolve(&cwd, manifest_path.as_deref(), target, &locked)?);
-    }
     let old = Lock::of_root(&root)?.unwrap_or_default();
-    let store = open_store(super::daemon::store().as_deref())?;
-    let lock = lock(OVERRIDES, &resolved, &old, &store, &download)?;
+    let lock = if !locked.iter().any(|it| OVERRIDES.iter().any(|o| o.package == it.name && matches!(o.give, Give::Fetch { .. }))) {
+        super::say::status(false, "Locked", "no build script of the workspace downloads what blaze hands it");
+        if old.system.is_empty() {
+            return match std::fs::remove_file(&path) {
+                Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e.into()),
+                _ => Ok(0),
+            };
+        }
+        Lock { fetches: Vec::new(), system: old.system }
+    } else {
+        if targets.is_empty() {
+            targets.push(super::own::manifest::host_triple()?);
+        }
+        let mut resolved = BTreeMap::new();
+        for target in &targets {
+            resolved.insert(target.clone(), resolve(&cwd, manifest_path.as_deref(), target, &locked)?);
+        }
+        let store = open_store(super::daemon::store().as_deref())?;
+        lock(OVERRIDES, &resolved, &old, &store, &download)?
+    };
     let writing = path.with_extension("lock.writing");
     std::fs::write(&writing, lock.text()).and_then(|()| std::fs::rename(&writing, &path))
         .with_context(|| format!("writing {}", path.display()))?;
@@ -966,11 +991,16 @@ mod tests {
         quoted.features = vec!["a".to_owned(), "b".to_owned()];
         quoted.names = "linux-x64-release".to_owned();
         let them = [quoted, entry("b", "aarch64-apple-darwin"), entry("b", "aarch64-unknown-linux-gnu"), entry("a", "x")];
-        let text = Lock { fetches: them.to_vec() }.text();
-        let reversed = Lock { fetches: them.iter().rev().cloned().collect() }.text();
+        let text = Lock { fetches: them.to_vec(), system: Vec::new() }.text();
+        let reversed = Lock { fetches: them.iter().rev().cloned().collect(), system: Vec::new() }.text();
         assert_eq!(text, reversed, "the same text whatever the order it was made in");
         let read = Lock::read(&text).unwrap();
         assert_eq!(read.text(), text);
+        // The system section is the system resolver's: read and written back as it is.
+        let system = "\n[[system]]\npackage = \"openssl-sys\"\nnixpkgs = [\"openssl.dev\"]\n";
+        let with_system = Lock::read(&format!("{text}{system}")).unwrap();
+        assert_eq!(with_system.system.len(), 1);
+        assert_eq!(Lock::read(&with_system.text()).unwrap(), with_system);
         let order: Vec<(&str, &str)> = read.fetches.iter().map(|it| (&*it.package, &*it.target)).collect();
         assert_eq!(
             order,

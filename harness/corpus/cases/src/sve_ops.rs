@@ -3159,6 +3159,34 @@ unsafe fn group56(i: &In, o: &mut Out) {
         o.u32(svsm4ekey_u32(i.u32(0), i.u32(1)));
     }
 }
+#[target_feature(enable = "sve")]
+unsafe fn group57(i: &In, o: &mut Out) {
+    unsafe {
+        o.p(svdupq_n_b16(true, false, true, false, true, false, true, false));
+        o.p(svdupq_n_b32(true, false, true, false));
+        o.p(svdupq_n_b64(true, false));
+        o.p(svdupq_n_b8(
+            true, false, true, false, true, false, true, false, true, false, true, false, true,
+            false, true, false,
+        ));
+        o.f32(svdupq_n_f32(1.5f32, -0.0f32, f32::NAN, f32::INFINITY));
+        o.f64(svdupq_n_f64(f64::NAN, f64::NEG_INFINITY));
+        o.s16(svdupq_n_s16(i16::MIN, i16::MAX, 300i16, -77i16, 0i16, -1i16, i16::MIN, i16::MAX));
+        o.s32(svdupq_n_s32(i32::MIN, i32::MAX, 0i32, -70000i32));
+        o.s64(svdupq_n_s64(2i64, -1i64));
+        o.s8(svdupq_n_s8(
+            0i8, 1i8, -1i8, -128i8, 127i8, 37i8, 0i8, 1i8, -1i8, -128i8, 127i8, 37i8, 0i8, 1i8,
+            -1i8, -128i8,
+        ));
+        o.u16(svdupq_n_u16(u16::MAX, 0x8000u16, 1000u16, 13u16, 0u16, 1u16, u16::MAX, 0x8000u16));
+        o.u32(svdupq_n_u32(u32::MAX, 0x8000_0000u32, 0u32, 65537u32));
+        o.u64(svdupq_n_u64(9u64, 1u64));
+        o.u8(svdupq_n_u8(
+            0u8, 1u8, 255u8, 128u8, 7u8, 200u8, 0u8, 1u8, 255u8, 128u8, 7u8, 200u8, 0u8, 1u8,
+            255u8, 128u8,
+        ));
+    }
+}
 
 fn bytes() -> u64 {
     #[target_feature(enable = "sve")]
@@ -3377,6 +3405,9 @@ pub fn run() -> String {
     } else {
         o.text.push_str(" no sve2-sm4 ");
     }
+    o.text.push('\n');
+    // SAFETY: the machine has sve.
+    unsafe { group57(&i, &mut o) }
     o.text.push('\n');
     o.text
 }

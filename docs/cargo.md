@@ -171,8 +171,10 @@ in a sandbox.
 "Everything should by default be in sandbox and yea it should have sandbox support macos"
 (Andrew, 2026-10-26). Every test executable `cargo ra-jit test` runs, under `all` and
 `affected` alike, runs in a sandbox of its own, with libtest's threads inside it as cargo would
-run them. In it the machine's files are read-only; the workspace and the target directory are
-as they are, but what a test writes there is kept to the run and gone when it ends; `/tmp`,
+run them. In it the machine's files are read-only; the workspace, the target directory and
+cargo's home (`CARGO_HOME`, `~/.cargo`) are as they are, but what a test writes there is kept
+to the run and gone when it ends (every cargo takes its locks in its home and records there
+what it used, so a test that runs cargo, as trybuild's do, writes it); `/tmp`,
 `/var/tmp` and `/dev/shm` (on macOS the temporary directory) start empty; there is no network
 but the sandbox's own loopback, and no Unix socket but those the run makes itself; and the
 environment is fixed. A write outside gets the error a read-only file system gives, and a
@@ -330,7 +332,20 @@ registry can be named in:
 unsandboxed-build-scripts = ["hegeltest", "flecs_ecs_sys"]   # by package name
 unsandboxed-proc-macros = ["sqlx-macros"]                    # by package name
 build-script-env = ["OPENSSL_DIR", "LIBGIT2_NO_VENDOR"]       # given to every build script
+build-script-link-dirs = ["/opt/vendor/lib"]                 # rustc-link-search may name
 ```
+
+What a sandboxed script prints is checked before cargo reads it (`cargo/directives.rs`), since
+it goes into every rustc and linker run of its package and of what links it. A
+`rustc-link-search` (or `rustc-flags`' `-L`) names a directory in its `OUT_DIR`, its package,
+the target directory's build directory (its dependencies' `OUT_DIR`s), a system directory
+(`/usr/lib`, `/lib64`, `/usr/local/lib`, the Nix store, Homebrew's, Apple's SDKs) or one of
+`build-script-link-dirs`; a `rustc-link-arg` is one of a short list (`-pthread`, `-rdynamic`,
+`-Wl,--as-needed`, `-Wl,-z,now`, `-Wl,-soname,NAME`, `-lNAME`, ...) or an rpath to `$ORIGIN`
+or a directory a search may name; a `rustc-env` sets no variable cargo or rustc gives the crate
+itself (`CARGO_PKG_*`, `CARGO_MANIFEST_DIR`, `CARGO_CFG_*`, `OUT_DIR`, `RUSTC*`, ...). Anything
+else fails the build, naming the script and each line. Over the bench corpus's 587 runs the
+rules refuse none (`bench/results/2026-10-27-bscache/directives.md`).
 
 and, for a package of the workspace, in its own manifest:
 
@@ -359,6 +374,25 @@ profile that allows user namespaces; on Kubernetes `securityContext.seccompProfi
 Unconfined`), which keeps the sandbox, or set `BLAZE_SANDBOX=off`, which runs build scripts,
 proc macros and tests outside it, as cargo does. blaze does not make a weaker sandbox there on
 its own.
+
+A sandbox can be given a view (`sandbox::View`, the spec's `view`) in place of the machine,
+which is what a build script is to see under the Nix model (Andrew, 2026-10-27): its declared
+closure and nothing else. On Linux the view is a root of the sandbox's own, a tmpfs that
+becomes `/` (`pivot_root`) with the machine's tree detached from it, holding what the view
+binds, each where it says (the package's source and the toolchain read-only, a store path
+unpacked in blaze's cache at its `/nix/store/<hash>-<name>` so that nixpkgs' interpreters,
+RPATHs and scripts resolve, `OUT_DIR` written for real), and besides them only a `/proc` of
+the sandbox's processes, a `/dev` of `null`, `zero`, `full`, `random`, `urandom` and `tty`
+with an empty `shm`, an empty `/tmp`, and an `/etc` of `passwd` and `group` (one line for the
+user, one for `nobody`) and `hosts` (`localhost`), as Nix's sandbox has. `/usr`, `$HOME`, the
+machine's `/etc` and every store path not bound are not there, for the script and every
+program it runs, so a read of something undeclared fails with `ENOENT`; the root and what is
+bound read-only refuse writes, and the network is the loopback alone, as in every sandbox.
+A view whose bind is not there fails before anything runs, naming it. It is made by an
+unprivileged user namespace alone, and costs a mount per bind, about 20 µs each: `true` takes
+6.1 ms in a view of 40 binds and 10.7 ms in one of 300, against 4.9 ms in the sandbox without
+a view and 0.33 ms bare (median of 50, an arm64 ix VM of 16 cores, 2026-10-27). On macOS
+a view is not made (decided): the spec's other fields apply and the binds are not read.
 
 Compiling a build script, running it and building a proc macro are each an entry of the
 store, so they travel with `ra-jit cache push` and `pull` and through the gateway like any

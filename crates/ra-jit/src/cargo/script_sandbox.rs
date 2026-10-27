@@ -100,6 +100,9 @@ pub(crate) enum Plan {
     Sandboxed {
         spec: Spec,
         root_manifest: Option<PathBuf>,
+        /// The system directories its `rustc-link-search` may name besides those it always may
+        /// (`directives.rs`): `build-script-link-dirs` of the root manifest.
+        link_dirs: Vec<PathBuf>,
     },
 }
 
@@ -205,9 +208,11 @@ pub(crate) fn plan(script: &Script<'_>) -> anyhow::Result<Plan> {
     }
     let root = workspace_of(script)?;
     let mut also = std::collections::BTreeSet::new();
+    let mut link_dirs = Vec::new();
     if let Some(root) = &root {
         let out = sandboxed::workspace_opt_out(root)?;
         also = out.build_script_env;
+        link_dirs = out.build_script_link_dirs.iter().map(PathBuf::from).collect();
         if out.build_scripts.contains(package) {
             let why = format!("`{package}` is in `unsandboxed-build-scripts`");
             return Ok(Plan::Outside(format!("{why} in {}", out.manifest.display()), env));
@@ -265,8 +270,9 @@ pub(crate) fn plan(script: &Script<'_>) -> anyhow::Result<Plan> {
         record: Some(script.scratch.join("ra-jit-record")),
         record_reads: true,
         not_inputs,
+        view: None,
     };
-    Ok(Plan::Sandboxed { spec, root_manifest: root.map(|it| it.join("Cargo.toml")) })
+    Ok(Plan::Sandboxed { spec, root_manifest: root.map(|it| it.join("Cargo.toml")), link_dirs })
 }
 
 /// Whether the variable `name` of cargo's environment is given to a build script in the
@@ -446,7 +452,7 @@ pub(crate) fn run(script: &Script<'_>, plan: &Plan, stdin: Stdio) -> anyhow::Res
             let output = command.output().with_context(|| running(script))?;
             return Ok(Ran { output, reads: None });
         }
-        Plan::Sandboxed { spec, root_manifest } => (spec, root_manifest),
+        Plan::Sandboxed { spec, root_manifest, .. } => (spec, root_manifest),
     };
     std::fs::create_dir_all(script.scratch)
         .with_context(|| format!("making {}", script.scratch.display()))?;
@@ -690,7 +696,7 @@ mod tests {
     fn a_script_that_says_it_reads_what_it_was_not_given_is_named() {
         let pair = |name: &str| (name.to_owned(), "x".to_owned());
         let spec = Spec { env: vec![pair("CC")], ..Spec::default() };
-        let plan = Plan::Sandboxed { spec, root_manifest: None };
+        let plan = Plan::Sandboxed { spec, root_manifest: None, link_dirs: Vec::new() };
         let outside = [pair("CC"), pair("OPENSSL_DIR")];
         let stdout = b"cargo:rerun-if-env-changed=CC\ncargo::rerun-if-env-changed=OPENSSL_DIR\n\
             cargo:rerun-if-env-changed=OPENSSL_DIR\ncargo:rerun-if-env-changed=UNSET\n";

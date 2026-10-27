@@ -9,6 +9,7 @@ mod affected;
 mod ancestor;
 pub(crate) mod cli;
 mod client;
+mod directives;
 pub(crate) mod fetches;
 pub(crate) mod layout;
 mod messages;

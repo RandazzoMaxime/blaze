@@ -657,6 +657,8 @@ enum Aapcs64 {
 enum RegClass {
     Int,
     Sse,
+    /// The upper half of the register of the `Sse` eightbyte before it: an `f128`'s.
+    SseUp,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -2238,6 +2240,9 @@ struct ObjectCodegen<'a, 'db> {
     hidden: Vec<FuncId>,
     /// The messages of the stand-ins, which `finish` puts in [`stand_in_section`].
     stand_ins: Vec<(DataId, Box<[u8]>)>,
+    /// The bytes of each `#[link_section]` static of a wasm object, and the custom section
+    /// they go in.
+    custom_sections: Vec<(String, Vec<u8>)>,
     statics: FxHashMap<StaticId, DataId>,
     /// Statics nothing exports and nothing can write to, which we give a copy of the value.
     frozen_statics: FxHashMap<StaticId, DataId>,
@@ -4353,6 +4358,11 @@ fn is_thread_local(db: &dyn HirDatabase, id: StaticId) -> bool {
     AttrFlags::query(db, id.into()).contains(AttrFlags::THREAD_LOCAL)
 }
 
+/// Whether a value of `ty` is an integer in a register: a `bool`, a `char` or an integer.
+fn is_integer(ty: Ty<'_>) -> bool {
+    matches!(ty.kind(), TyKind::Bool | TyKind::Char | TyKind::Int(_) | TyKind::Uint(_))
+}
+
 /// The symbol a function is exported under when an attribute names it: the runtime or the
 /// program loading the library looks it up by that name, so it is compiled whether or not
 /// anything calls it.
@@ -5241,6 +5251,7 @@ impl<'a, 'db> ObjectCodegen<'a, 'db> {
             unstitched: FxHashSet::default(),
             hidden: Vec::new(),
             stand_ins: Vec::new(),
+            custom_sections: Vec::new(),
             tiers: None,
             found_instances: FxHashMap::default(),
             stored_roots: FxHashMap::default(),
@@ -5305,10 +5316,17 @@ impl<'a, 'db> ObjectCodegen<'a, 'db> {
                 wasm::WasmSignature::of(&declared.signature).map_err(CodegenError::Backend)?;
             signatures.insert(name.clone(), signature);
         }
+        let crates: FxHashSet<Crate> = self.envs.iter().map(|(_, env)| env.krate).collect();
+        let features = crates.into_iter().flat_map(|krate| {
+            let values = krate.cfg_options(self.db).get_cfg_values("target_feature");
+            values.map(|it| it.as_str().to_owned()).collect::<Vec<_>>()
+        });
+        let mut custom_sections = self.custom_sections;
+        custom_sections.push(wasm_object::target_features(features));
         let mut product = self.module.finish();
         place_stand_ins(&mut product, self.stand_ins);
         let elf = product.emit().map_err(|e| CodegenError::Backend(e.to_string()))?;
-        wasm_object::from_elf(&elf, &signatures).map_err(CodegenError::Backend)
+        wasm_object::from_elf(&elf, &signatures, &custom_sections).map_err(CodegenError::Backend)
     }
 
     fn want(&mut self, func: FunctionId) {
@@ -6967,16 +6985,35 @@ impl<'a, 'db> ObjectCodegen<'a, 'db> {
         // One the build after this may replace where it is has to say how large it is.
         let named = (again.is_some() || self.patching) && !thread_local;
         let asked = AttrFlags::link_section(db, id.into());
-        let section = asked.as_ref().map(|it| it.as_str()).or_else(|| {
-            named.then(|| Target::current().section_of_static(compiled.writable)).flatten()
-        });
+        // On wasm the section a static asks for is a custom section of the module, which
+        // holds a copy of its bytes; the static itself stays in memory like any other.
+        let custom = asked.as_ref().filter(|_| Target::current().writes_wasm_objects());
+        let section =
+            asked.as_ref().filter(|_| custom.is_none()).map(|it| it.as_str()).or_else(|| {
+                named.then(|| Target::current().section_of_static(compiled.writable)).flatten()
+            });
         let known = if compiled.writable { &mut self.statics } else { &mut self.frozen_statics };
         known.insert(id, data);
         let begun = self.own_static_order.len();
         self.own_static_order.push(id);
-        match self.resolve(&compiled.requests) {
-            Ok(ids) => {
-                self.fill_data(data, ids.blob(&compiled.blob), section)?;
+        let resolved = self.resolve(&compiled.requests).map(|ids| ids.blob(&compiled.blob));
+        // Nothing relocates a custom section: what is in one is bytes alone.
+        let resolved = resolved.and_then(|blob| match custom {
+            Some(custom) if !blob.relocs.is_empty() || !blob.fn_relocs.is_empty() => {
+                let name = StaticSignature::of(db, id).name.as_str();
+                Err(CodegenError::Unsupported(format!(
+                    "static `{name}` in custom section `{}` holds an address",
+                    custom.as_str()
+                )))
+            }
+            _ => Ok(blob),
+        });
+        match resolved {
+            Ok(blob) => {
+                if let Some(custom) = custom {
+                    self.custom_sections.push((custom.as_str().to_owned(), blob.bytes.clone()));
+                }
+                self.fill_data(data, blob, section)?;
                 Ok(data)
             }
             Err(e) => {
@@ -8187,8 +8224,15 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
             Primitive::Pointer(_) => AbiScalar { ty: ptr(), signed: false },
             Primitive::Float(rustc_abi::Float::F32) => AbiScalar { ty: types::F32, signed: true },
             Primitive::Float(rustc_abi::Float::F64) => AbiScalar { ty: types::F64, signed: true },
-            // `f16b` has no arithmetic in Rust, only its bits moved, and LLVM passes it where
-            // it passes an `f16`: in Cranelift's `F16` it is a 16-bit value of a float register.
+            // x86-64's LLVM keeps a `bfloat` without AVX-512's as the `f32` it widens to, and
+            // narrows it back by `__truncsfbf2` where it is returned, passed or stored, which
+            // quiets a signalling NaN at points of rustc's IR that this one does not have.
+            Primitive::Float(rustc_abi::Float::F16B) if self.cg.target.arch == Arch::X86_64 => {
+                unsupported!("f16b on x86-64, which LLVM narrows from f32 wherever it moves")
+            }
+            // `f16b` has no arithmetic in Rust, only its bits moved, and AArch64's LLVM passes
+            // it where it passes an `f16`: in Cranelift's `F16` it is a 16-bit value of a float
+            // register.
             Primitive::Float(rustc_abi::Float::F16 | rustc_abi::Float::F16B)
                 if f16_f128::soft_floats(self.cg.target) =>
             {
@@ -8543,8 +8587,8 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
                     PassMode::OnStack { size, padded }
                 }
                 // Cranelift moves anything else to the stack by itself: eight bytes for
-                // each value, and a 128-bit integer whole at a multiple of sixteen.
-                PassMode::Direct(AbiScalar { ty: types::I128, .. }) => {
+                // each value, and a 128-bit integer or float whole at a multiple of sixteen.
+                PassMode::Direct(AbiScalar { ty: types::I128 | types::F128, .. }) => {
                     stack = stack.next_multiple_of(16) + 16;
                     mode
                 }
@@ -8761,12 +8805,12 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
         Ok(())
     }
 
-    /// The C ABI of wasm, as rustc's `callconv/wasm.rs`: a scalar is a value, and anything
-    /// else is in memory, an argument as the address of a copy.
-    // FIXME: an aggregate that is one scalar and is not laid out as one, `[f32; 1]`, is
-    // passed as that scalar.
+    /// The C ABI of wasm, as rustc's `callconv/wasm.rs`: a scalar is a value, an aggregate
+    /// that is one scalar and nothing else (`[f32; 1]`, a `repr(C)` struct of a `u32` and
+    /// fields of no size) is that scalar, and anything else is in memory, an argument as the
+    /// address of a copy.
     fn wasm_c_abi(&self, ret: Ty<'db>, args: impl IntoIterator<Item = Ty<'db>>) -> Result<FnAbi> {
-        let mode = |ty: Ty<'db>| -> Result<PassMode> {
+        let mode = |ty: Ty<'db>, is_ret: bool| -> Result<PassMode> {
             let layout = self.layout(ty)?;
             Ok(match layout.backend_repr {
                 _ if layout.is_zst() => PassMode::Ignore,
@@ -8778,17 +8822,64 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
                 BackendRepr::SimdVector { .. } => {
                     unsupported!("a SIMD vector in the wasm C ABI without `simd128`")
                 }
-                _ => PassMode::Indirect,
+                // One of 128 bits is two `i64`s as an argument, and returned in memory.
+                _ => match self.lone_scalar(ty)? {
+                    Some(scalar) if !is_ret || scalar.size(self.dl()).bits() <= 64 => {
+                        PassMode::Cast(self.scalar(scalar)?.ty)
+                    }
+                    _ => PassMode::Indirect,
+                },
             })
         };
-        let ret = mode(ret)?;
-        let args = args.into_iter().map(mode).collect::<Result<_>>()?;
+        let ret = mode(ret, true)?;
+        let args = args.into_iter().map(|ty| mode(ty, false)).collect::<Result<_>>()?;
         Ok(FnAbi { ret, args })
     }
 
+    /// The one scalar a value of `ty` is made of, if it has one and nothing else besides
+    /// values of no size, and fills its size: rustc's homogeneous aggregate of one unit. A
+    /// union is none, as rustc has it.
+    fn lone_scalar(&self, ty: Ty<'db>) -> Result<Option<Scalar>> {
+        let layout = self.layout(ty)?;
+        let size = layout.size;
+        let fits = |scalar: Option<Scalar>| scalar.filter(|it| it.size(self.dl()) == size);
+        let fields: Vec<Ty<'db>> = match layout.backend_repr {
+            BackendRepr::Scalar(scalar) => return Ok(fits(Some(scalar))),
+            BackendRepr::Memory { sized: true } => match ty.kind() {
+                TyKind::Tuple(tys) => tys.iter().collect(),
+                TyKind::Array(element, _) if layout.fields.count() == 1 => vec![element],
+                TyKind::Adt(def, subst) => {
+                    let AdtId::StructId(id) = def.def_id() else { return Ok(None) };
+                    let fields = self.cg.db.field_types(id.into());
+                    fields
+                        .iter()
+                        .map(|(_, ty)| ty.ty().instantiate(self.interner, subst).skip_norm_wip())
+                        .collect()
+                }
+                _ => return Ok(None),
+            },
+            _ => return Ok(None),
+        };
+        let mut lone = None;
+        for field in fields {
+            if self.layout(field)?.is_zst() {
+                continue;
+            }
+            if lone.is_some() {
+                return Ok(None);
+            }
+            lone = fits(self.lone_scalar(field)?);
+            if lone.is_none() {
+                return Ok(None);
+            }
+        }
+        Ok(lone)
+    }
+
     fn count_regs(&self, types: &[Type]) -> (usize, usize) {
-        let floats = types.iter().filter(|ty| ty.is_float()).count();
-        let ints = types.iter().filter(|ty| !ty.is_float()).map(|ty| ty.bytes().div_ceil(8));
+        let sse = |ty: &&Type| ty.is_float() || ty.is_vector();
+        let floats = types.iter().filter(sse).count();
+        let ints = types.iter().filter(|ty| !sse(ty)).map(|ty| ty.bytes().div_ceil(8));
         (ints.sum::<u32>() as usize, floats)
     }
 
@@ -8872,6 +8963,16 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
         if !self.classify(ty, 0, &mut classes)? {
             return Ok(on_stack);
         }
+        // An `f128` alone is a vector register's 16 bytes. An upper half whose lower half is
+        // not an `Sse` eightbyte's is an `Sse` one itself.
+        if classes == [Some(RegClass::Sse), Some(RegClass::SseUp)] {
+            return Ok(PassMode::Cast(types::I64X2));
+        }
+        for class in &mut classes {
+            if *class == Some(RegClass::SseUp) {
+                *class = Some(RegClass::Sse);
+            }
+        }
         let reg = |class: Option<RegClass>, bytes: u64| match (class, bytes) {
             (Some(RegClass::Sse), 4) => types::F32,
             (Some(RegClass::Sse), _) => types::F64,
@@ -8903,13 +9004,16 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
             return Ok(false);
         }
         let mut scalar = |scalar: Scalar, offset: u64| {
-            let class = match scalar.primitive() {
+            let mut class = match scalar.primitive() {
                 Primitive::Float(_) => RegClass::Sse,
                 Primitive::Int(..) | Primitive::Pointer(_) => RegClass::Int,
             };
             let last = (offset + scalar.size(self.dl()).bytes() - 1) / 8;
             for slot in &mut classes[(offset / 8) as usize..=last as usize] {
                 *slot = Some(slot.map_or(class, |old: RegClass| old.min(class)));
+                if class == RegClass::Sse {
+                    class = RegClass::SseUp;
+                }
             }
         };
         match layout.backend_repr {
@@ -10342,18 +10446,10 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
                 }
                 let blob = match konst.as_ref().kind() {
                     ConstKind::Value(value) => {
-                        let is_int = matches!(
-                            ty.kind(),
-                            TyKind::Bool | TyKind::Char | TyKind::Int(_) | TyKind::Uint(_)
-                        );
-                        if is_int {
+                        if is_integer(ty) {
                             let layout = self.layout(ty)?;
-                            let scalar = self.scalar_of(ty)?;
                             let bits = value.value.inner().to_leaf().to_bits(layout.size);
-                            let addr = self.stack_slot(&layout);
-                            let value = self.iconst(scalar.ty, bits);
-                            self.builder.ins().store(MEM, value, addr, 0);
-                            return Ok((addr, ty));
+                            return Ok((self.integer_slot(ty, bits)?, ty));
                         }
                         self.valtree_blob(ty, value.value)?
                     }
@@ -10363,7 +10459,7 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
                     }
                     kind => unsupported!("constant {kind:?}"),
                 };
-                Ok((self.blob_addr(blob)?, ty))
+                Ok((self.blob_or_immediate(ty, blob)?, ty))
             }
             OperandKind::Allocation { allocation } => {
                 let allocation = allocation.as_ref();
@@ -10374,7 +10470,7 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
                     return Ok((addr, ty));
                 }
                 let blob = self.allocation_blob(allocation, false)?;
-                Ok((self.blob_addr(blob)?, ty))
+                Ok((self.blob_or_immediate(ty, blob)?, ty))
             }
             OperandKind::Static(id) => {
                 let data = self.cg.static_data(*id);
@@ -10554,6 +10650,28 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
                 db.anon_const_eval(id, args, Some(self.env)).map_err(frontend)
             }
         }
+    }
+
+    /// The address of a stack slot holding the integer `bits` of type `ty`.
+    fn integer_slot(&mut self, ty: Ty<'db>, bits: u128) -> Result<Value> {
+        let layout = self.layout(ty)?;
+        let scalar = self.scalar_of(ty)?;
+        let addr = self.stack_slot(&layout);
+        let value = self.iconst(scalar.ty, bits);
+        self.builder.ins().store(MEM, value, addr, 0);
+        Ok(addr)
+    }
+
+    /// The address of a constant's value: an integer is an immediate, however the MIR gives
+    /// it (a value, a literal's allocation or a named constant), so that what runs the code
+    /// without its data (wasm-bindgen's interpreter of its descriptors) sees it.
+    fn blob_or_immediate(&mut self, ty: Ty<'db>, blob: ConstBlob) -> Result<Value> {
+        if is_integer(ty) && blob.relocs.is_empty() && blob.bytes.len() <= 16 {
+            let mut bytes = [0; 16];
+            bytes[..blob.bytes.len()].copy_from_slice(&blob.bytes);
+            return self.integer_slot(ty, u128::from_le_bytes(bytes));
+        }
+        self.blob_addr(blob)
     }
 
     fn blob_addr(&mut self, blob: ConstBlob) -> Result<Value> {
@@ -13973,7 +14091,13 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
         static ENABLED: LazyLock<bool> =
             LazyLock::new(|| std::env::var_os("RA_JIT_INLINE").is_none_or(|it| it != "0"));
         let db = self.cg.db;
-        if !*ENABLED || !self.cg.target.exception_in_register() || Target::current().is_wasm() {
+        if !*ENABLED {
+            return None;
+        }
+        if Target::current().writes_wasm_objects() {
+            return self.always_inlined(def, args, sig);
+        }
+        if !self.cg.target.exception_in_register() || Target::current().is_wasm() {
             return None;
         }
         let erased = |args| erase_regions(DbInterner::new_with(db, self.env.krate), args);
@@ -14026,6 +14150,34 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
             return None;
         }
         Some(self.cg.declare_inlined(body, self.builder.func))
+    }
+
+    /// The body of an `#[inline(always)]` callee of a crate no edit changes, which rustc
+    /// builds into every caller at every level. What reads a wasm module counts on it:
+    /// wasm-bindgen finds each of its descriptor shims by the call of its marker import,
+    /// which `describe_generic_import` has to put in the shim itself.
+    fn always_inlined(
+        &mut self,
+        def: InstanceDef,
+        args: GenericArgs<'db>,
+        sig: &Signature,
+    ) -> Option<ir::FuncRef> {
+        let db = self.cg.db;
+        let InstanceDef::Fn(func) = def else { return None };
+        let signature = FunctionSignature::of(db, func);
+        if !AttrFlags::query(db, func.into()).contains(AttrFlags::INLINE_ALWAYS)
+            || func.krate(db).data(db).origin.is_local()
+            || signature.abi != ExternAbi::Rust
+            || signature.is_varargs()
+            || FunctionSignature::is_intrinsic(db, func)
+            || track_caller(db, func)
+        {
+            return None;
+        }
+        let args = erase_regions(DbInterner::new_with(db, self.env.krate), args);
+        let instance = Instance { def, args: args.store(), checked: self.cg.checked };
+        let body = inlinable(db, instance, self.env.store()).as_ref()?;
+        (body.func.signature == *sig).then(|| self.cg.declare_inlined(body, self.builder.func))
     }
 
     /// Shows LLVM the body of the callee `id` a compile at a level above 1 calls, where
@@ -16100,7 +16252,10 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
         {
             return Ok(());
         }
-        if name.starts_with("aarch64.sve.") || name.starts_with("vector.reverse.nxv") {
+        if name.starts_with("aarch64.sve.")
+            || name.starts_with("vector.reverse.nxv")
+            || name.starts_with("vector.insert.nxv")
+        {
             return self.sve_intrinsic(name, args, dst, dst_ty);
         }
         if self.wasm_llvm_intrinsic(name, args, dst)? {
