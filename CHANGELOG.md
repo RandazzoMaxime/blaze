@@ -21,6 +21,15 @@ All notable changes to ra-jit are written here. The format follows
   rustdoc's pages, 99.9% of the members and impls on them and 99.4% of the resolved links
   ([docs/doc.md](docs/doc.md)).
 
+- `crates/blaze-fmt`: blaze's own formatter, rustfmt and cargo-fmt at rust-lang/rust 12433c307
+  ported onto a syntax tree of blaze's own, which rust-analyzer's parser fills with the spans
+  rustc would give each node. It runs in process and starts no rustfmt; what it cannot
+  lower yet (nightly syntax rust-analyzer does not parse, a `macro` with parameters, the
+  `ignore` option) is refused with the reason, never formatted differently.
+  `harness/fmtdiff.py` holds it to stock rustfmt byte for byte: ripgrep, nushell, fd, helix
+  and biome with their own rustfmt.toml (6068 of 6068 files, `--check` exit codes and diffs
+  too), the same with `max_width = 60` (6068 of 6068), and rustfmt's `tests/source` (773 of
+  793; the rest are those refusals).
 - `cargo blaze tree`, `pkgid`, `fetch`, `clean`, `new` and `init` are blaze's own, with no
   cargo: `tree` from the new `crates/blaze-tree` (cargo 1.101's, on blaze-resolve), `new` and
   `init` from the new `crates/blaze-new`. `harness/own_tree.py` (130 of 130 equal over
