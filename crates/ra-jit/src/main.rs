@@ -524,7 +524,7 @@ impl<'a> ResolverParts<'a> {
 /// The standard library ra-jit built before the program ([`std_unit`]).
 struct Prebuilt {
     /// What its object defines for others to link to.
-    defined: FxHashSet<String>,
+    defined: Arc<FxHashSet<String>>,
     /// Its crates, as [`library_unit`] has them.
     crates: FxHashSet<ide_db::base_db::Crate>,
 }
@@ -677,6 +677,28 @@ pub(crate) fn unlinked_panic_runtime(db: &RootDatabase, program: &[Crate]) -> &'
     if abort { "panic_unwind" } else { "panic_abort" }
 }
 
+/// [`defined_symbols`] of the object at `path`, read again only when the file is not the one it
+/// was read from: every build of the program asks for the standard library's unit, which is
+/// tens of megabytes of object.
+fn defined_symbols_kept(path: &Path) -> anyhow::Result<Arc<FxHashSet<String>>> {
+    type Kept = FxHashMap<PathBuf, ((std::time::SystemTime, u64), Arc<FxHashSet<String>>)>;
+    static KEPT: std::sync::LazyLock<std::sync::Mutex<Kept>> =
+        std::sync::LazyLock::new(Default::default);
+    let file = std::fs::metadata(path).ok();
+    let key = file.and_then(|it| Some((it.modified().ok()?, it.len())));
+    if let Some(key) = key
+        && let Some((was, names)) = lock(&KEPT).get(path)
+        && *was == key
+    {
+        return Ok(names.clone());
+    }
+    let names = Arc::new(defined_symbols(path)?);
+    if let Some(key) = key {
+        lock(&KEPT).insert(path.to_owned(), (key, names.clone()));
+    }
+    Ok(names)
+}
+
 /// The names an object defines for others to link to.
 fn defined_symbols(path: &Path) -> anyhow::Result<FxHashSet<String>> {
     use object::{Object as _, ObjectSymbol as _, SymbolScope};
@@ -806,9 +828,8 @@ impl<'a> Resolver<'a> {
             source_path(db, &named.0, named.1.as_deref(), file)
         });
         let prebuilt = args.prebuilt.as_deref().filter(|_| table.is_empty()).map(|path| {
-            let defined = defined_symbols(path);
-            let defined =
-                defined.unwrap_or_else(|e| panic!("the standard library blaze built: {e:#}"));
+            let defined = defined_symbols_kept(path)
+                .unwrap_or_else(|e| panic!("the standard library blaze built: {e:#}"));
             let program: Vec<Crate> =
                 args.crates().filter_map(|it| crates_named(db, it, args).ok()).flatten().collect();
             let crates = library_unit(db, &program);
@@ -11318,6 +11339,48 @@ extern "C" fn exported() {}
                 assert!(!hir_ty_codegen::compile_time_only(&db, it));
             }
         });
+    }
+
+    /// The symbols of the standard library's object are read once for as long as the file is the
+    /// one they were read from.
+    #[test]
+    fn the_symbols_of_an_object_are_read_again_only_when_the_file_changed() {
+        use object::write::{Object, Symbol, SymbolSection};
+        let dir = std::env::temp_dir().join(format!("ra-jit-defined-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("std.o");
+        let write = |names: &[&str]| {
+            let mut object = Object::new(
+                object::BinaryFormat::Elf,
+                object::Architecture::X86_64,
+                object::Endianness::Little,
+            );
+            let section = object.section_id(object::write::StandardSection::Text);
+            for name in names {
+                let symbol = Symbol {
+                    name: name.as_bytes().to_vec(),
+                    value: 0,
+                    size: 0,
+                    kind: object::SymbolKind::Text,
+                    scope: object::SymbolScope::Dynamic,
+                    weak: false,
+                    section: SymbolSection::Section(section),
+                    flags: object::SymbolFlags::None,
+                };
+                object.add_symbol(symbol);
+            }
+            object.append_section_data(section, &[0x90], 1);
+            std::fs::write(&path, object.write().unwrap()).unwrap();
+        };
+        write(&["one"]);
+        let first = defined_symbols_kept(&path).unwrap();
+        assert!(first.contains("one"));
+        assert!(Arc::ptr_eq(&first, &defined_symbols_kept(&path).unwrap()));
+        write(&["one", "another_and_longer"]);
+        let second = defined_symbols_kept(&path).unwrap();
+        std::fs::remove_dir_all(&dir).unwrap();
+        assert!(second.contains("another_and_longer"));
+        assert!(!Arc::ptr_eq(&first, &second));
     }
 
     #[test]
