@@ -8868,6 +8868,9 @@ fn run_holding(
                                 program.unbuilt.stale = false;
                                 program.whole = built.whole.clone();
                             }
+                            // Its first build counts what it compiles, not what the
+                            // programs before it did.
+                            program.known.not_counted();
                             let first = program.args.symbol_files == programs[0].args.symbol_files;
                             program.distrust_rustc(&db, &files, first.then_some(&as_compiled));
                             clients.push((programs.len(), (request, asked, stream)));
@@ -9348,6 +9351,25 @@ fn run_holding(
                 asked.entry(at).or_default().push(client);
             }
             for (at, clients) in asked {
+                // A program's first build knows what the others over the same code of rustc's
+                // found can't be compiled: it can't be in this one either. Without it each
+                // program of a whole build after the first compiled a round of every function
+                // only to find the same instance fail and start over.
+                if programs[at].wrote.is_none() {
+                    let (table, cfg_test) =
+                        (programs[at].table.clone(), programs[at].args.cfg_test);
+                    let learnt: Vec<Rejections> = (programs.iter().enumerate())
+                        .filter(|&(other, it)| {
+                            other != at
+                                && Arc::ptr_eq(&it.table, &table)
+                                && it.args.cfg_test == cfg_test
+                        })
+                        .map(|(_, it)| it.known.rejections())
+                        .collect();
+                    for other in &learnt {
+                        programs[at].known.learn_from(other);
+                    }
+                }
                 let program = &mut programs[at];
                 if !program.unbuilt.stale {
                     for (_, _, client) in clients {

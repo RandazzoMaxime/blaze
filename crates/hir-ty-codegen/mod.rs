@@ -880,6 +880,9 @@ impl CodegenUnit {
         let mut rounds = 0;
         let mut discarded = std::time::Duration::ZERO;
         let mut start = roots.start;
+        // The entries read from the store, for every round: one that starts over for an
+        // instance that did not compile would read them all again.
+        let mut entries: Option<std::sync::Arc<cached::Entries>> = None;
         loop {
             rounds += 1;
             let round = stdx::time::Instant::now();
@@ -898,6 +901,10 @@ impl CodegenUnit {
                 None,
                 hydrate,
             )?;
+            match &entries {
+                Some(read) if cg.entries.is_some() => cg.entries = Some(read.clone()),
+                _ => entries = cg.entries.clone(),
+            }
             cg.patching = patching;
             cg.rustc_futures = futures.clone();
             cg.rustc_values = frozen.rustc_values();
@@ -1013,6 +1020,8 @@ impl CodegenUnit {
                 return Err(refused);
             }
             if cg.misfit {
+                // What was read of the entry that did not fit, and of those that call it.
+                entries = None;
                 start_over("an entry of the store did not fit");
                 rejected.extend(failed);
                 continue;
@@ -1164,6 +1173,8 @@ impl CodegenUnit {
                         .and_then(|mut file| std::io::Write::write_all(&mut file, lines.as_bytes()))
                         .map_err(|e| CodegenError::Backend(format!("layout log: {e}")))?;
                 }
+                // The object frees them as it is written, on a thread of its own.
+                drop(entries.take());
                 let start = stdx::time::Instant::now();
                 let (object, apart) = cg.finish()?;
                 stats.phases.object = start.elapsed();
@@ -1397,6 +1408,21 @@ impl Rejections {
         *self = *kept;
         (self.counted, self.stats) = (counted, stats);
         true
+    }
+
+    /// What these found could not be compiled, and nothing else, for
+    /// [`Rejections::learn_from`].
+    pub fn rejections(&self) -> Rejections {
+        Rejections { rejected: self.rejected.clone(), ..Rejections::default() }
+    }
+
+    /// Knows what `other` found could not be compiled, for the first build of another program
+    /// of the same database and the same code of rustc's: an instance fails the same way in
+    /// each.
+    pub fn learn_from(&mut self, other: &Rejections) {
+        for (instance, rejected) in &other.rejected {
+            self.rejected.entry(instance.clone()).or_insert_with(|| rejected.clone());
+        }
     }
 
     /// Leaves what was compiled since the last build out of the next one's count: it was
@@ -5331,22 +5357,36 @@ impl<'a, 'db> ObjectCodegen<'a, 'db> {
         let start = stdx::time::Instant::now();
         let owned = &self.own_statics.crates;
         let next = std::sync::atomic::AtomicUsize::new(0);
-        let found = std::sync::Mutex::new(Vec::new());
+        let named = std::sync::Mutex::new(Vec::new());
         let threads = std::thread::available_parallelism().map_or(1, |it| it.get());
         self.symbols.in_parallel(threads, &|db, symbols, _| {
             let names = stable::StableNames::new(db, symbols, owned.clone(), true);
-            let mut named = Vec::new();
+            let mut here = Vec::new();
             while let Some(&func) =
                 roots.get(next.fetch_add(1, std::sync::atomic::Ordering::Relaxed))
             {
                 let Some(name) = names.instance(&root_instance(db, func)) else { continue };
-                let name = StableName::from(name);
+                here.push((func, StableName::from(name)));
+            }
+            named.lock().unwrap_or_else(|e| e.into_inner()).extend(here);
+        });
+        let named = named.into_inner().unwrap_or_else(|e| e.into_inner());
+        // Every entry the roots need, read at once: one by one, each read unpacked a block.
+        let of_checkout = named.iter().filter(|(_, name)| stable::StableNames::of_checkout(name));
+        entries.prefetch(of_checkout.map(|(_, name)| name.clone()));
+        let next = std::sync::atomic::AtomicUsize::new(0);
+        let found = std::sync::Mutex::new(Vec::new());
+        self.symbols.in_parallel(threads, &|_, symbols, _| {
+            let mut here = Vec::new();
+            while let Some((func, name)) =
+                named.get(next.fetch_add(1, std::sync::atomic::Ordering::Relaxed))
+            {
                 let usable = |symbol: &str| symbols.provides(symbol) && symbols.linked(symbol);
                 let stored =
-                    stable::StableNames::of_checkout(&name) && entries.usable(&name, &usable);
-                named.push((func, name, stored));
+                    stable::StableNames::of_checkout(name) && entries.usable(name, &usable);
+                here.push((*func, name.clone(), stored));
             }
-            found.lock().unwrap_or_else(|e| e.into_inner()).extend(named);
+            found.lock().unwrap_or_else(|e| e.into_inner()).extend(here);
         });
         let found = found.into_inner().unwrap_or_else(|e| e.into_inner());
         let mut stored = 0;

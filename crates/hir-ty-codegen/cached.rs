@@ -826,32 +826,107 @@ impl Entries {
     }
 
     pub(super) fn get(&self, name: &str) -> Option<Arc<Entry>> {
-        let cell = {
-            let mut entries = self.entries.shard(name);
-            match entries.get(name) {
-                Some(cell) => cell.clone(),
-                None => entries.entry(Arc::from(name)).or_default().clone(),
-            }
-        };
+        let cell = self.cell(name);
         let read = || {
             let key = Entry::key(name, self.debug, self.program.as_ref())?;
-            let entry = Entry::decode(&self.store.get(&key)?)?;
-            // The types are read when the function is described (`describe`), which a build
-            // whose object is the one it has already never does.
-            let stored = |key: &[u8; KEY]| self.store.has_used(key) || self.types(key).is_some();
-            let debug = entry.debug.as_ref();
-            if !debug.is_none_or(|it| it.stored_types.iter().all(stored)) {
-                return None;
-            }
-            entry.arrived(self.cargo_home.as_deref(), self.library.as_ref())
+            self.arrived(&self.store.get(&key)?)
         };
         cell.get_or_init(|| {
-            let banned = Self::banned().lock().unwrap_or_else(|e| e.into_inner()).contains(name);
             let tally = super::backend::Tally::global();
-            let entry = (!banned).then(|| tally.step(super::backend::Step::StoreRead, read));
+            let entry =
+                (!Self::is_banned(name)).then(|| tally.step(super::backend::Step::StoreRead, read));
             entry.flatten().map(Arc::new)
         })
         .clone()
+    }
+
+    fn cell(&self, name: &str) -> Arc<OnceLock<Option<Arc<Entry>>>> {
+        let mut entries = self.entries.shard(name);
+        match entries.get(name) {
+            Some(cell) => cell.clone(),
+            None => entries.entry(Arc::from(name)).or_default().clone(),
+        }
+    }
+
+    fn is_banned(name: &str) -> bool {
+        Self::banned().lock().unwrap_or_else(|e| e.into_inner()).contains(name)
+    }
+
+    /// The entry the store keeps as `bytes`, as this build reads it.
+    fn arrived(&self, bytes: &[u8]) -> Option<Entry> {
+        let entry = Entry::decode(bytes)?;
+        // The types are read when the function is described (`describe`), which a build
+        // whose object is the one it has already never does.
+        let stored = |key: &[u8; KEY]| self.store.has_used(key) || self.types(key).is_some();
+        let debug = entry.debug.as_ref();
+        if !debug.is_none_or(|it| it.stored_types.iter().all(stored)) {
+            return None;
+        }
+        entry.arrived(self.cargo_home.as_deref(), self.library.as_ref())
+    }
+
+    /// Reads the entries of `names` and of everything they call, as [`Entries::get`] would
+    /// read each, a wave of callees at a time, each wave from the store at once
+    /// ([`Store::get_many`]) and decoded on every core. A build that asks for the code of every
+    /// function of a program, as each program of a whole build does, read them one by one
+    /// from every core in no order, and each read unpacked a block a hundred times the size
+    /// of the entry: blaze's own build spent some 1000 s of its threads' time on it.
+    pub(super) fn prefetch(&self, names: impl IntoIterator<Item = Arc<str>>) {
+        let threads = std::thread::available_parallelism().map_or(1, |it| it.get());
+        let tally = super::backend::Tally::global();
+        let mut seen: FxHashSet<Arc<str>> = FxHashSet::default();
+        let mut wave: Vec<Arc<str>> =
+            names.into_iter().filter(|it| seen.insert(it.clone())).collect();
+        while !wave.is_empty() {
+            // What another thread read already, or is reading, is not read again.
+            let cells: Vec<_> = (wave.iter())
+                .map(|name| (name, self.cell(name)))
+                .filter(|(_, cell)| cell.get().is_none())
+                .collect();
+            let keyed: Vec<(usize, [u8; KEY])> = (cells.iter().enumerate())
+                .filter(|(_, (name, _))| !Self::is_banned(name))
+                .filter_map(|(at, (name, _))| {
+                    Some((at, Entry::key(name, self.debug, self.program.as_ref())?))
+                })
+                .collect();
+            let keys: Vec<[u8; KEY]> = keyed.iter().map(|it| it.1).collect();
+            let values =
+                tally.step(super::backend::Step::StoreRead, || self.store.get_many(&keys, threads));
+            let mut read: Vec<Option<Vec<u8>>> = vec![None; cells.len()];
+            for ((at, _), value) in keyed.iter().zip(values) {
+                read[*at] = value;
+            }
+            let next = std::sync::atomic::AtomicUsize::new(0);
+            let decode = || {
+                let mut called = Vec::new();
+                loop {
+                    let at = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    let Some((_, cell)) = cells.get(at) else { break };
+                    let entry = read[at].as_deref().and_then(|it| self.arrived(it));
+                    _ = cell.set(entry.map(Arc::new));
+                    if let Some(Some(entry)) = cell.get() {
+                        called.extend(entry.named().map(Arc::<str>::from));
+                    }
+                }
+                called
+            };
+            let threads = threads.clamp(1, cells.len() / 64 + 1);
+            let called: Vec<Arc<str>> = match threads {
+                1 => decode(),
+                _ => std::thread::scope(|scope| {
+                    let others: Vec<_> = (1..threads).map(|_| scope.spawn(decode)).collect();
+                    let mut called = decode();
+                    for other in others {
+                        match other.join() {
+                            Ok(theirs) => called.extend(theirs),
+                            Err(panic) => std::panic::resume_unwind(panic),
+                        }
+                    }
+                    called
+                }),
+            };
+            wave = called.into_iter().filter(|it| seen.insert(it.clone())).collect();
+        }
     }
 
     /// Gives what an entry tells a debugger the types of its variables, which [`Entries::get`]
